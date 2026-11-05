@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Any
 from tilelang.env import env
 
 if TYPE_CHECKING:
-    from tvm.tirx import PrimFunc
+    from tvm_tirx.tirx import Function
 
 
-def maybe_wrap_host_profile(func: Callable[..., Any], prim_func: PrimFunc) -> Callable[..., Any]:
+def maybe_wrap_host_profile(func: Callable[..., Any], prim_func: Function) -> Callable[..., Any]:
     """Optionally wrap an Ascend callable in a Torch host profiling range.
 
     Resolve the switch and range name once when the callable is created or

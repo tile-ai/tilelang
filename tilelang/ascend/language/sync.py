@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 
 def ascend_pipe_barrier(pipe_t: str) -> None:
@@ -22,7 +22,7 @@ def ascend_pipe_barrier(pipe_t: str) -> None:
     """
     if not isinstance(pipe_t, str):
         raise TypeError(f"pipe_t must be a string, got {type(pipe_t)}")
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_pipe_barrier"), pipe_t)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_pipe_barrier"), pipe_t)
 
 
 def ascend_set_flag(hard_event: str, event_id) -> None:
@@ -45,7 +45,7 @@ def ascend_set_flag(hard_event: str, event_id) -> None:
         raise TypeError(f"hard_event must be a string, got {type(hard_event)}")
     if isinstance(event_id, int):
         event_id = tirx.IntImm("int32", event_id)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_flag"), hard_event, event_id)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_set_flag"), hard_event, event_id)
 
 
 def ascend_wait_flag(hard_event: str, event_id) -> None:
@@ -68,7 +68,7 @@ def ascend_wait_flag(hard_event: str, event_id) -> None:
         raise TypeError(f"hard_event must be a string, got {type(hard_event)}")
     if isinstance(event_id, int):
         event_id = tirx.IntImm("int32", event_id)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_wait_flag"), hard_event, event_id)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_wait_flag"), hard_event, event_id)
 
 
 def ascend_sync_inter_arrive(pipe: str, flag_id) -> None:
@@ -118,7 +118,7 @@ def ascend_threadfence() -> None:
     -------
     >>> T.ascend_threadfence()
     """
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_threadfence"))
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_threadfence"))
 
 
 def ascend_cross_core_set_flag(mode_id: int, pipe: str, flag_id) -> None:
@@ -145,7 +145,7 @@ def ascend_cross_core_set_flag(mode_id: int, pipe: str, flag_id) -> None:
         mode_id = tirx.IntImm("int32", mode_id)
     if isinstance(flag_id, int):
         flag_id = tirx.IntImm("int32", flag_id)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_cross_core_set_flag"), mode_id, pipe, flag_id)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_cross_core_set_flag"), mode_id, pipe, flag_id)
 
 
 def ascend_cross_core_wait_flag(mode_id: int, pipe: str, flag_id) -> None:
@@ -172,7 +172,7 @@ def ascend_cross_core_wait_flag(mode_id: int, pipe: str, flag_id) -> None:
         mode_id = tirx.IntImm("int32", mode_id)
     if isinstance(flag_id, int):
         flag_id = tirx.IntImm("int32", flag_id)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_cross_core_wait_flag"), mode_id, pipe, flag_id)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_cross_core_wait_flag"), mode_id, pipe, flag_id)
 
 
 def ascend_get_buf(pipe, buf_id, mode=False):
@@ -196,7 +196,7 @@ def ascend_get_buf(pipe, buf_id, mode=False):
     if isinstance(buf_id, int):
         buf_id = tirx.IntImm("int32", buf_id)
     mode_val = tirx.IntImm("int32", 1 if mode else 0)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_get_buf"), pipe, buf_id, mode_val)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_get_buf"), pipe, buf_id, mode_val)
 
 
 def ascend_rls_buf(pipe, buf_id, mode=False):
@@ -220,7 +220,7 @@ def ascend_rls_buf(pipe, buf_id, mode=False):
     if isinstance(buf_id, int):
         buf_id = tirx.IntImm("int32", buf_id)
     mode_val = tirx.IntImm("int32", 1 if mode else 0)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_rls_buf"), pipe, buf_id, mode_val)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_rls_buf"), pipe, buf_id, mode_val)
 
 
 __all__ = [

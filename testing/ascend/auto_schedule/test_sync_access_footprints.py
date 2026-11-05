@@ -1,14 +1,16 @@
 """Buffer reuse must preserve the original synchronization access contracts."""
 
+from tvm_tirx import ir
+from testing.ascend._ir import tensor
+
 import pytest
 
 import tilelang.ascend.language as T
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import transform
 from tilelang.layout import make_ascend_nz_layout
 from testing.ascend._ir import calls, copy, kernel, schedule, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
-from tvm import tirx
 
 
 def _events(program, disable_reuse=False, auto_schedule=False):
@@ -24,17 +26,18 @@ def _events(program, disable_reuse=False, auto_schedule=False):
 @pytest.mark.parametrize("row", [24, 32], ids=["same-fractal", "next-fractal"])
 @pytest.mark.parametrize("scope", ["shared.l0a", "shared.l0b"])
 def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope):
-    src = tirx.decl_buffer((48, 16), "bfloat16", name="src", scope="shared.l1")
-    dst = tirx.decl_buffer((32, 16), "bfloat16", name="dst", scope=scope)
+    src = tensor((48, 16), "bfloat16", name="src", scope="shared.l1")
+    dst = tensor((32, 16), "bfloat16", name="dst", scope=scope)
     load = unit(copy(src, dst, src_shape=[24, 16], dst_shape=[24, 16]), core=2)
-    padding = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
-    fill = unit(tirx.Evaluate(T.fill(padding, 0)), core=2)
+    padding = ir.TensorRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)], ir.TensorRegionType())
+    fill = unit(ir.Evaluate(T.fill(padding, 0)), core=2)
     # The copy normalizer exposes its two transferred row16 blocks. Fill
     # keeps the explicitly requested eight rows.
     before = kernel(
         seq(fill, load) if fill_first else seq(load, fill),
         buffers=[src, dst],
         annotations={"layout_map": {src: make_ascend_nz_layout(src), dst: make_ascend_nz_layout(dst)}},
+        allocation_stage=0,
     )
     before = transform.NormalizeAscendFractalStorage()(before)
     after = transform.InsertSync()(before)
@@ -68,13 +71,15 @@ def test_l0_load_matches_explicit_transfer_region_conflicts():
 @pytest.mark.parametrize("fill_first", [False, True])
 @pytest.mark.parametrize("row", [16, 24], ids=["overlap", "adjacent"])
 def test_declared_l1_pointer_read_keeps_its_own_footprint(fill_first, row):
-    src = tirx.decl_buffer((32, 16), "bfloat16", name="src", scope="shared.l1")
+    src = tensor((32, 16), "bfloat16", name="src", scope="shared.l1")
     # A pointer consumer declares 24 rows. Unlike the L1->L0 load above,
     # this access contract does not imply a whole-fractal read of 32 rows.
-    read = unit(tirx.Evaluate(tirx.call_extern("int32", "read_l1", T.access_ptr(src[0, 0], "r", 24, 16))), core=2)
-    region = tirx.BufferRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)])
-    fill = unit(tirx.Evaluate(T.fill(region, 0)), core=2)
-    before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[src])
+    read = unit(
+        ir.Evaluate(ir.Call("tirx.call_extern", [ir.StringImm("read_l1"), T.access_ptr(src[0, 0], "r", 24, 16)], ty="int32")), core=2
+    )
+    region = ir.TensorRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)], ir.TensorRegionType())
+    fill = unit(ir.Evaluate(T.fill(region, 0)), core=2)
+    before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[src], allocation_stage=0)
     after = transform.InsertSync()(before)
     pipe = "MTE2_S" if fill_first else "S_MTE2"
     events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
@@ -93,7 +98,7 @@ def test_pointer_store_past_view_keeps_scalar_read_dependency(disable_reuse, str
             if strided:
                 view = T.StridedTensor((80,), (2,), "float32", data=allocation.data, scope="shared.dyn")
             else:
-                view = tvm.tirx.decl_buffer((96,), "float32", data=allocation.data, scope="shared.dyn")
+                view = T.Tensor((96,), "float32", data=allocation.data, scope="shared.dyn")
             with T.Stage(0):
                 with T.SimdVF():
                     T.simd.vsts(view[64], T.simd.vdup(T.float32(1), "float32"))
@@ -208,7 +213,7 @@ def test_physical_pointer_write_orders_control_expression_reads(control, disable
     def main(out: T.Tensor((1,), "int32")):
         with T.Kernel(1):
             allocation = T.alloc_shared((256,), "int32")
-            view = tvm.tirx.decl_buffer((96,), "int32", data=allocation.data, scope="shared.dyn")
+            view = T.Tensor((96,), "int32", data=allocation.data, scope="shared.dyn")
             with T.Stage(0):
                 with T.SimdVF():
                     T.simd.vsts(view[64], T.simd.vdup(T.int32(1), "int32"))

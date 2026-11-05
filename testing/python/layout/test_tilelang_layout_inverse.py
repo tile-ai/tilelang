@@ -14,10 +14,12 @@ def test_inverse_accepts_bijective_split():
     assert [int(dim) for dim in inverse.get_output_shape()] == [128]
 
 
-def test_inverse_rejects_non_round_tripping_cyclic_shift():
+def test_inverse_rejects_unsupported_cyclic_shift():
     layout = Layout([128], lambda i: (i + 1) % 128)
 
-    with pytest.raises(Exception, match="non-round-tripping inverse"):
+    # Native IterMap now rejects the unsupported padding before producing an
+    # inverse. It must still never return a map that changes coordinates.
+    with pytest.raises(Exception, match="Cannot absorb left padding"):
         layout.inverse()
 
 

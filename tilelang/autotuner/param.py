@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import tilelang
-from tilelang import tvm as tvm
-from tvm.tirx import PrimFunc
-from tvm.target import Target
+from tvm_tirx.tirx import Function
+from tvm_tirx.target import Target
 from typing import TYPE_CHECKING, Literal, Any
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -23,7 +22,7 @@ from tilelang import logger
 import json
 import hashlib
 import uuid
-from tvm.runtime import Executable
+from tvm_tirx.codegen import Executable
 
 if TYPE_CHECKING:
     from tilelang.backend.module import BackendContext
@@ -58,13 +57,13 @@ class CompileArgs:
     """
 
     out_idx: list[int] | int | None = None
-    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] = "auto"
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "cutedsl", "torch", "pto"] = "auto"
     target: TargetLike = "auto"
     target_host: TargetLike | None = None
     verbose: bool = False
     pass_configs: dict[str, Any] | None = None
 
-    def compile_program(self, program: PrimFunc):
+    def compile_program(self, program: Function):
         """Compile one candidate program using this compile configuration."""
         return tilelang.compile(
             program,
@@ -196,13 +195,13 @@ class AutotuneResult:
                 os.remove(temp_path)
 
     @staticmethod
-    def _safe_write_executable(executable: Executable, path: str):
+    def _safe_write_executable(executable: Executable, path: str, export_kwargs: dict | None = None):
         """Atomically export one runtime executable to disk."""
         directory, filename = os.path.split(path)
         stem, suffix = os.path.splitext(filename)
         temp_path = os.path.join(directory, f".{stem}.{os.getpid()}_{uuid.uuid4().hex}.tmp{suffix}")
         try:
-            executable.export_library(temp_path)
+            executable.export_library(temp_path, **(export_kwargs or {}))
             # Flush exported data before the rename publishes the file.
             with open(temp_path, "rb+") as temp_file:
                 os.fsync(temp_file.fileno())
@@ -275,32 +274,17 @@ class AutotuneResult:
                 executable = kernel.adapter.get_exportable_executable()
                 if verbose:
                     logger.debug(f"Saving kernel executable to file: {kernel_lib_path}")
-                self._safe_write_executable(executable, kernel_lib_path)
+                from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
+
+                self._safe_write_executable(executable, kernel_lib_path, TVMFFIKernelCache._get_export_kwargs(kernel))
         elif kernel.execution_backend == "cutedsl":
-            # Save the Python source file (CuTeDSL "library" is a .py, not a .so)
-            src_lib_path = kernel.adapter.libpath
+            # The native host retains all entries and their compilation inputs.
+            # Compiled branches are separate typed cubin+manifest artifacts.
+            source = kernel.adapter.get_generated_module_source()
             if verbose:
                 logger.debug(f"Saving CuTeDSL kernel Python source to file: {kernel_lib_path}")
-            self._safe_write_file(kernel_lib_path, "wb", lambda f: f.write(self._load_binary(src_lib_path)))
-
-            # Save launcher .so if present (compiled C++ launcher for TMA etc.)
-            lib_gen = kernel.adapter.lib_generator
-            launcher_src = getattr(lib_gen, "launcher_libpath", None)
-            if launcher_src and os.path.exists(launcher_src):
-                launcher_name = getattr(lib_gen, "launcher_libname", os.path.basename(launcher_src))
-                dst_launcher = os.path.join(cache_path, launcher_name)
-                if verbose:
-                    logger.debug(f"Saving CuTeDSL launcher library to file: {dst_launcher}")
-                self._safe_write_file(dst_launcher, "wb", lambda f: f.write(self._load_binary(launcher_src)))
-
-            # Save cubin if already generated (generated during autotuning benchmark)
-            src_dir = os.path.dirname(src_lib_path)
-            src_cubin = os.path.join(src_dir, "kernel.cubin")
-            if os.path.exists(src_cubin):
-                dst_cubin = os.path.join(cache_path, KERNEL_CUBIN_PATH)
-                if verbose:
-                    logger.debug(f"Saving CuTeDSL cubin to file: {dst_cubin}")
-                self._safe_write_file(dst_cubin, "wb", lambda f: f.write(self._load_binary(src_cubin)))
+            self._safe_write_file(kernel_lib_path, "w", lambda f: f.write(source))
+            kernel.adapter.lib_generator.runtime.export_artifacts(cache_path)
         else:
             src_lib_path = kernel.adapter.libpath
             if verbose:
@@ -385,7 +369,7 @@ class AutotuneResult:
         except Exception as e:
             logger.error(f"Error loading kernel parameters from disk: {e}")
 
-        if host_kernel_source and device_kernel_source and kernel_params:
+        if host_kernel_source and device_kernel_source and kernel_params is not None:
             return JITKernel.from_database(
                 func=func,
                 host_kernel_source=CachedTextSource(text=host_kernel_source),
@@ -413,6 +397,7 @@ class AutotuneResult:
         """
         # Already saved (e.g. another process won the race with a complete entry).
         if self._is_complete_result_dir(path, self.kernel.execution_backend):
+            self._attach_runtime_cache(path)
             return
 
         # Keep autotuner staging under the shared namespace staging root so stale cleanup
@@ -490,9 +475,16 @@ class AutotuneResult:
                     raise
                 # Another process won the race with a complete cache entry.
                 shutil.rmtree(str(staging_path), ignore_errors=True)
+            self._attach_runtime_cache(path)
         except Exception:
             shutil.rmtree(str(staging_path), ignore_errors=True)
             logger.exception("Error during atomic autotune result save")
+
+    def _attach_runtime_cache(self, path: Path):
+        if self.kernel.execution_backend == "cutedsl":
+            # Attach only after the staging directory has been published. A
+            # later first visit to a branch must append to the final cache.
+            self.kernel.adapter._cache_path = str(path)
 
     @classmethod
     def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult:

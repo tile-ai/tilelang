@@ -2,9 +2,9 @@
 
 # pylint: disable=invalid-name, unsupported-binary-operation
 import tvm_ffi
-from tvm.ir import Range
-from tvm.tirx import IterVar, Var, PrimExpr, IndexMap
+from tvm_tirx.ir import Range, Var, Expr
 from tilelang import _ffi_api
+from ._iter_var import LayoutIterVar, ReplicateCoordinate
 from tilelang.layout import Layout
 
 
@@ -30,12 +30,12 @@ class Fragment(Layout):
             A list of integer sizes for each dimension of this fragment.
         forward_fn : callable, optional
             A function that takes the iteration variables, plus optionally a replicate
-            IterVar, and returns a tuple: (forward_thread, forward_index).
+            coordinate, and returns a tuple: (forward_thread, forward_index).
             It is used when you want to compute both thread mapping and index mapping
             from the shape variables.
         forward_thread_fn : callable, optional
             A function that takes iteration variables (plus optionally a replicate Var)
-            and returns an IterVar representing the thread index. This is used if
+            and returns an expression representing the thread index. This is used if
             `forward_fn` is not provided, and only the thread mapping is derived
             here while the index mapping is derived separately via `forward_index_fn`.
         replicate : int, optional
@@ -47,28 +47,28 @@ class Fragment(Layout):
             the index transformation is derived separately.
         """
 
-        # Create a list of IterVar objects based on shape dimensions
+        # Create native coordinate/domain pairs from the shape dimensions
         # Each dimension is assigned a range from 0..size and a Var like i0, i1, etc.
         forward_vars = []
         for idx, size in enumerate(shape):
-            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32"), 0)
+            iv = LayoutIterVar(Range(0, size), Var(f"i{idx}", "int32"))
             forward_vars.append(iv)
 
-        # Collect the underlying variables (i.e., Var objects) from the IterVars
+        # Collect the underlying variables (i.e., Var objects) from the coordinate/domain pairs
         vars = [iv.var for iv in forward_vars]
 
         # Initialize placeholders for optional outputs
-        forward_thread: IterVar = None
+        forward_thread: LayoutIterVar = None
         forward_index: tvm_ffi.Array = None
-        thread_replicate: IterVar = None
+        thread_replicate: LayoutIterVar = None
 
         # If a forward_fn is provided, use it to derive both thread mapping and indices
         if forward_fn is not None:
-            # If replication is greater than 1, create a replicate IterVar
+            # If replication is greater than 1, create a replication coordinate
             # and pass it to forward_fn
             if replicate > 1:
-                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
-                forward_thread, forward_index = forward_fn(*vars, thread_replicate)
+                thread_replicate = LayoutIterVar(Range(0, replicate), Var("rep", "int32"))
+                forward_thread, forward_index = forward_fn(*vars, ReplicateCoordinate(thread_replicate))
             else:
                 thread_replicate = None
                 forward_thread, forward_index = forward_fn(*vars)
@@ -77,7 +77,7 @@ class Fragment(Layout):
             forward_index = forward_index_fn(*vars) if forward_index_fn else None
             # Then compute forward_thread via forward_thread_fn
             if replicate > 1:
-                thread_replicate = IterVar(Range(0, replicate), Var("rep", "int32"), 0)
+                thread_replicate = LayoutIterVar(Range(0, replicate), Var("rep", "int32"))
                 forward_thread = forward_thread_fn(*vars, thread_replicate.var)
             else:
                 thread_replicate = None
@@ -86,7 +86,7 @@ class Fragment(Layout):
         # Ensure forward_index is an array if it isn't None
         if forward_index is None:
             forward_index = []
-        elif not isinstance(forward_index, tvm_ffi.Array):
+        elif not isinstance(forward_index, (list, tuple, tvm_ffi.Array)):
             forward_index = [forward_index]
 
         # Call TVM FFI constructor to set up internal data structures
@@ -101,7 +101,7 @@ class Fragment(Layout):
     @property
     def thread(self):
         """
-        Returns the forward_thread (IterVar) of the Fragment, representing
+        Returns the forward_thread expression of the Fragment, representing
         the thread dimension or mapping.
         """
         return _ffi_api.Fragment_thread(self)
@@ -163,27 +163,21 @@ class Fragment(Layout):
         """
         return _ffi_api.Fragment_condense_rep_var(self)
 
-    def map_forward_thread(self, indices: list[PrimExpr]) -> PrimExpr:
+    def map_forward_thread(self, indices: list[Expr]) -> Expr:
         """
         Get the thread mapping expression for a given set of argument indices.
 
         Parameters
         ----------
-        indices : list of PrimExpr
+        indices : list of Expr
             Indices for which to compute the thread mapping.
 
         Returns
         -------
-        PrimExpr
+        Expr
             The computed thread expression for the provided indices.
         """
-        # Retrieve the forward iteration variables
-        forward_vars = self.get_forward_vars()
-        # The thread dimension (IterVar) is accessed via the `thread` property
-        forward_thread = self.thread
-        # Construct an IndexMap to map the provided args into the final thread index
-        index_map = IndexMap(initial_indices=forward_vars, final_indices=[forward_thread], inverse_index_map=None)
-        return index_map.map_indices(indices)
+        return _ffi_api.Layout_map_indices(self.get_forward_vars(), [self.thread], indices)
 
     def __repr__(self):
         """

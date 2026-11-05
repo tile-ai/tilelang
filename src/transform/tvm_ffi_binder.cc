@@ -1,1048 +1,1432 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 /*!
  * \file tvm_ffi_binder.cc
  * \brief Helper utility to match and bind packed function arguments.
  */
 #include "tvm_ffi_binder.h"
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
 
+#include <tvm/ffi/cast.h>
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/ir/expr_functor.h>
+#include <tvm/ir/prim/expr.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/device_api.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
+#include <tvm/runtime/logging.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/memory.h>
 
-#include <sstream>
-#include <unordered_set>
-
-#include "tir/transforms/ir_utils.h"
-#include "tvm/arith/int_solver.h"
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "ir/dtype.h"
+#include "tensor_descriptor.h"
 
 namespace tvm {
 namespace tl {
-
 using namespace tirx;
-using namespace ffi;
+using namespace tvm::prim;
+using tvm::prim::cast;
 
-std::string ConstraintMessage(const std::string &arg_name) {
-  std::string kernel = arg_name;
-  std::string buf_and_field = arg_name;
-  size_t dot_pos = arg_name.find('.');
-  if (dot_pos != std::string::npos) {
-    kernel = arg_name.substr(0, dot_pos);
-    buf_and_field = arg_name.substr(dot_pos + 1);
+using ffi::reflection::AccessPath;
+using ffi::reflection::AccessStep;
+
+namespace {
+// Scalar representation in a TVMFFIAny value slot. This is part of the
+// TileLang host ABI; the native compiler's packed binder is independent.
+PrimType PackedScalarType(const PrimType &type) {
+  TVM_FFI_ICHECK(!type.IsVoid()) << "Cannot pass void type through packed API.";
+  TVM_FFI_ICHECK_EQ(type.lanes(), 1)
+      << "Cannot pass vector type through packed API.";
+  if (type.MatchesCode(DLDataTypeCode::kDLBool, DLDataTypeCode::kDLUInt,
+                       DLDataTypeCode::kDLInt)) {
+    return PrimType::Int(64);
   }
+  TVM_FFI_ICHECK(
+      type.MatchesCode(DLDataTypeCode::kDLFloat, DLDataTypeCode::kDLBfloat));
+  return PrimType::Float(64);
+}
 
-  std::string buffer = buf_and_field;
-  std::string field;
-  size_t dot2 = buf_and_field.find('.');
-  if (dot2 != std::string::npos) {
-    buffer = buf_and_field.substr(0, dot2);
-    field = buf_and_field.substr(dot2 + 1);
+struct LinearIntBinding {
+  PrimExpr variable;
+  PrimExpr factor;
+  PrimExpr offset;
+};
+
+std::optional<LinearIntBinding>
+MatchLinearIntBinding(const PrimExpr &expression) {
+  PrimExpr variable = expression;
+  PrimExpr factor = IntImm(expression.ty(), 1);
+  PrimExpr offset = IntImm(expression.ty(), 0);
+  if (const auto *add = variable.as<AddObj>()) {
+    if (add->b.as<IntImmObj>()) {
+      variable = add->a;
+      offset = add->b;
+    } else if (add->a.as<IntImmObj>()) {
+      variable = add->b;
+      offset = add->a;
+    } else {
+      return std::nullopt;
+    }
+  } else if (const auto *sub = variable.as<SubObj>()) {
+    if (!sub->b.as<IntImmObj>())
+      return std::nullopt;
+    variable = sub->a;
+    offset = -sub->b;
   }
+  if (const auto *mul = variable.as<MulObj>()) {
+    if (mul->b.as<IntImmObj>()) {
+      variable = mul->a;
+      factor = mul->b;
+    } else if (mul->a.as<IntImmObj>()) {
+      variable = mul->b;
+      factor = mul->a;
+    } else {
+      return std::nullopt;
+    }
+  }
+  if (!variable.as<VarObj>() || IsZero(factor))
+    return std::nullopt;
+  return LinearIntBinding{variable, factor, offset};
+}
+} // namespace
 
+void TVMFFIABIBuilder::SetTensorArgumentErrorKind(ffi::String kind) {
+  TVM_FFI_CHECK(kind == "RuntimeError" || kind == "TypeError" ||
+                    kind == "ValueError",
+                ValueError)
+      << "Unsupported packed tensor argument error kind: " << kind;
+  tensor_error_kind_ = kind;
+}
+
+void TVMFFIABIBuilder::SetTypeIndexErrorKind(ffi::String kind) {
+  TVM_FFI_CHECK(kind == "RuntimeError" || kind == "TypeError" ||
+                    kind == "ValueError",
+                ValueError)
+      << "Unsupported packed type-index error kind: " << kind;
+  type_index_error_kind_ = kind;
+}
+
+void TVMFFIABIBuilder::AllowNullUnusedTensors(const SeqStmt &body) {
+  allow_null_unused_tensors_ = true;
+  // This walk includes local types and layouts, whose dimensions also need
+  // runtime bindings. It never joins variables by their display names.
+  ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+      body, [&](const VarObj *variable) -> ffi::Expected<ffi::WalkResult> {
+        body_vars_.insert(variable);
+        return ffi::WalkResult::Advance();
+      });
+  CollectInputTensorDescriptorUses(body, params_, &body_vars_);
+  for (const Var &parameter : params_) {
+    if (parameter->ty.as<TensorTypeObj>() &&
+        !body_vars_.count(parameter.get())) {
+      nullable_tensors_.insert(parameter.get());
+    }
+  }
+}
+
+Expr TVMFFIABIBuilder::GuardValue(const Expr &value) const {
+  if (IsOne(current_guard_))
+    return value;
+  Expr zero = value->ty.as<PrimType>()
+                  ? Expr(IntImm(value->ty.as_or_throw<PrimType>(), 0))
+                  : Expr(Call(value->ty, tirx::reinterpret_op(),
+                              {tirx::ConstHandle(0)}));
+  return Call(value->ty, prim::if_then_else_op(),
+              {current_guard_, value, zero});
+}
+
+Stmt TVMFFIABIBuilder::GuardStmt(const Stmt &statement) const {
+  return IsOne(current_guard_) ? statement
+                               : Stmt(If(current_guard_, statement));
+}
+
+Expr TVMFFIABIBuilder::ReadTensorField(Type type, const Var &handle,
+                                       int field_kind) const {
+  return GuardValue(
+      Call(type, tirx::abi_field_get_op(),
+           {handle, IntImm::Int32(0), IntImm::Int32(field_kind)}));
+}
+
+PrimExpr TVMFFIABIBuilder::NormalizeIntegerCarrier(const PrimExpr &expression) {
+  ffi::Array<sym::Constraint> defaults;
+  for (const Var &variable : size_var_defaults_) {
+    if (!var_defs_.count(variable.get())) {
+      auto primitive = variable.as_or_throw<PrimExpr>();
+      defaults.push_back(
+          sym::PredicateConstraint(primitive >= IntImm(primitive.ty(), 0)));
+    }
+  }
+  // Do not keep defaults in the analyzer used for actual-value checks. They
+  // are a decoding policy, not assertions about explicit scalar inputs.
+  ScopedAnalyzerConstraints scope(analyzer_, defaults);
+  return analyzer_->Simplify(expression);
+}
+
+void TVMFFIABIBuilder::ResolveTensorFields() {
+  collect_tensor_fields_ = false;
+  current_guard_ = IntImm::Bool(true);
+  // All handles and safe field loads now dominate every implicit binding.
+  // Prefer a present bare variable, even if its carrier appears later in the
+  // signature. Availability must be decided across bare and linear carriers:
+  // binding a missing bare carrier to zero here would hide a present 2*n+1
+  // carrier, and would also bypass the all-carriers-missing diagnostic.
+  std::vector<TensorFieldBinding> binding_sources;
+  for (const auto &field : tensor_fields_) {
+    if (field.arg.as<VarObj>())
+      binding_sources.push_back(field);
+  }
+  for (const auto &field : tensor_fields_) {
+    if (field.arg.as<VarObj>())
+      continue;
+    // Normalize with the existing type/domain facts before decoding a
+    // carrier. Keep original fields for the final equality checks, and keep
+    // bare carriers ahead of normalized expressions in binding_sources.
+    auto linear = MatchLinearIntBinding(NormalizeIntegerCarrier(field.arg));
+    if (!linear || var_defs_.count(linear->variable.as<VarObj>()))
+      continue;
+    PrimExpr delta = field.value - linear->offset;
+    PrimExpr divisibility = IntImm::Bool(true);
+    ffi::String divisor;
+    if (!IsOne(linear->factor)) {
+      divisibility = truncmod(delta, linear->factor) == 0;
+      divisor = std::to_string(
+          linear->factor.as_or_throw<IntImm>()->value.as<int64_t>().value());
+    }
+    binding_sources.push_back({linear->variable,
+                               truncdiv(delta, linear->factor), field.path,
+                               field.guard, divisibility, divisor});
+  }
+  current_guard_ = IntImm::Bool(true);
+  auto bind_groups = [&](const std::vector<TensorFieldBinding> &candidates) {
+    std::unordered_map<const VarObj *, std::vector<const TensorFieldBinding *>>
+        groups;
+    std::vector<PrimExpr> order;
+    for (const auto &candidate : candidates) {
+      const auto *variable = candidate.arg.as<VarObj>();
+      if (!variable || var_defs_.count(variable))
+        continue;
+      if (groups[variable].empty())
+        order.push_back(candidate.arg);
+      groups[variable].push_back(&candidate);
+    }
+    for (const PrimExpr &variable : order) {
+      const auto &sources = groups.at(variable.as<VarObj>());
+      PrimExpr selected = IntImm(variable.ty(), 0);
+      PrimExpr present = IntImm::Bool(false);
+      for (const auto *source : sources) {
+        current_guard_ = source->guard && !present;
+        if (!IsOne(source->divisibility)) {
+          EmitAssert(source->divisibility, TensorErrorKind("ValueError"),
+                     "Invalid ", RenderAccessPath(source->path),
+                     ": shape difference must be divisible by ",
+                     source->divisor);
+        }
+        present = present || source->guard;
+      }
+      current_guard_ = IntImm::Bool(true);
+      for (auto it = sources.rbegin(); it != sources.rend(); ++it) {
+        const auto &source = **it;
+        selected =
+            IsOne(source.guard)
+                ? source.value
+                : tvm::if_then_else(source.guard, source.value, selected);
+      }
+      // Preserve the established single-source zero-extent case. Multiple
+      // carriers of a runtime-required symbol must supply an actual value.
+      if (sources.size() > 1 && body_vars_.count(variable.as<VarObj>())) {
+        EmitAssert(present, "RuntimeError", "Symbolic shape variable ",
+                   variable.as_or_throw<Var>()->name,
+                   " requires at least one non-null buffer", when_calling_imm_,
+                   sig_imm_, "`");
+      }
+      BindScalar(variable, selected, sources.front()->path, true);
+    }
+  };
+  bind_groups(binding_sources);
+  for (const auto &field : tensor_fields_) {
+    current_guard_ = field.guard;
+    BindScalar(field.arg, field.value, field.path, true);
+  }
+  current_guard_ = IntImm::Bool(true);
+  tensor_fields_.clear();
+}
+
+// ============================================================
+// Constructor
+// ============================================================
+
+TVMFFIABIBuilder::TVMFFIABIBuilder(const ffi::String &func_name,
+                                   const ffi::Array<Var> &params,
+                                   const Var &v_packed_args,
+                                   const Var &v_num_packed_args,
+                                   const PrimExpr &device_type,
+                                   const PrimExpr &device_id)
+    : func_name_(func_name), params_(params), v_packed_args_(v_packed_args),
+      device_type_(device_type), device_id_(device_id) {
+  // Build function signature string
   std::ostringstream os;
-  os << "kernel " << kernel << " input " << buffer;
-  if (!field.empty()) {
-    os << " " << field;
+  os << func_name << "(";
+  for (size_t i = 0; i < params.size(); ++i) {
+    if (i > 0)
+      os << ", ";
+    Var param = params[i];
+    if (auto buf = param.as<TensorVar>()) {
+      std::string buf_name = buf.value()->name;
+      os << buf_name << ": Tensor([";
+      for (size_t j = 0; j < buf.value().shape().size(); ++j) {
+        if (j > 0)
+          os << ", ";
+        std::ostringstream shape_os;
+        if (auto var = buf.value().shape()[j].as<PrimVar>()) {
+          shape_os << ((*var)->name.empty() ? "v" : (*var)->name.c_str());
+        } else {
+          shape_os << buf.value().shape()[j];
+        }
+        os << shape_os.str();
+      }
+      os << "], " << buf.value().dtype()->dtype << ")";
+      param_names_[static_cast<int>(i)] = buf_name;
+    } else {
+      os << param->name << ": ";
+      if (const auto *prim_type = param->ty.as<PrimTypeObj>()) {
+        os << prim_type->dtype;
+      } else {
+        os << param->ty;
+      }
+      param_names_[static_cast<int>(i)] = param->name;
+    }
   }
-  os << " violates packed ABI constraint";
+  os << ")";
+  func_signature_ = os.str();
+  sig_imm_ = StringImm(func_signature_);
+
+  // Emit argument count check (early check — must execute before any loads)
+  int num_args = static_cast<int>(params.size());
+  EmitAssert(v_num_packed_args.as_or_throw<PrimExpr>() == num_args,
+             "TypeError", //
+             "Expected ", std::to_string(num_args), " arguments",
+             when_calling_imm_, sig_imm_, "`");
+
+  // Emit null-pointer check for packed args (early check)
+  if (num_args > 0) {
+    EmitAssert(!Call(PrimType::Bool(), tirx::isnullptr_op(),
+                     ffi::Array<Expr>{v_packed_args})
+                    .as_or_throw<PrimExpr>(),
+               "TypeError", //
+               "args pointer is NULL", when_calling_imm_, sig_imm_, "`");
+  }
+}
+
+// ============================================================
+// EmitTypeIndexCheck
+// ============================================================
+
+void TVMFFIABIBuilder::EmitTypeIndexCheck(int param_index, const PrimExpr &cond,
+                                          const std::string &expected_type) {
+  EmitAssert(cond, type_index_error_kind_.c_str(), //
+             "Mismatched type on argument #", std::to_string(param_index),
+             when_calling_imm_, sig_imm_, "`,\n  expected ", expected_type);
+}
+
+// ============================================================
+// RenderAccessPath
+// ============================================================
+
+ffi::String TVMFFIABIBuilder::RenderAccessPath(
+    const ffi::reflection::AccessPath &path) const {
+  ffi::Array<AccessStep> steps = path->ToSteps();
+  std::ostringstream os;
+  bool first_printed = false;
+  bool consumed_root_array_item = false;
+  for (size_t i = 0; i < steps.size(); ++i) {
+    const AccessStep &step = steps[i];
+    if (step->kind == ffi::reflection::AccessKind::kAttr) {
+      std::string field_name = step->key.cast<ffi::String>();
+      if (!first_printed) {
+        os << field_name;
+        first_printed = true;
+      } else {
+        os << "." << field_name;
+      }
+    } else if (step->kind == ffi::reflection::AccessKind::kArrayItem) {
+      int64_t index = step->key.cast<int64_t>();
+      if (!first_printed && !consumed_root_array_item) {
+        consumed_root_array_item = true;
+        if (i + 1 < steps.size() &&
+            steps[i + 1]->kind == ffi::reflection::AccessKind::kAttr) {
+          continue;
+        }
+        auto it = param_names_.find(static_cast<int>(index));
+        if (it != param_names_.end()) {
+          os << it->second;
+          first_printed = true;
+        }
+      } else {
+        os << "[" << index << "]";
+      }
+    } else if (step->kind == ffi::reflection::AccessKind::kMapItem) {
+      os << "[" << step->key << "]";
+    }
+  }
   return os.str();
 }
 
-void BinderAddAssert(arith::Analyzer *ana, PrimExpr cond,
-                     const std::string &arg_name, std::vector<Stmt> *asserts,
-                     PrimExpr nullable_guard = PrimExpr()) {
-  PrimExpr scond = ana->Simplify(cond);
-  if (is_zero(scond)) {
-    LOG(FATAL) << "Bind have an unmet assertion: " << cond << ", "
-               << " on argument " << arg_name;
-  }
+// ============================================================
+// GetParamIndex
+// ============================================================
 
-  if (!is_one(scond)) {
-    PrimExpr assert_cond = scond;
-    if (nullable_guard.defined()) {
-      assert_cond = ana->Simplify(Or(nullable_guard, scond));
-    }
-    if (!is_one(assert_cond)) {
-      asserts->emplace_back(AssertStmt(
-          assert_cond, StringImm("RuntimeError"),
-          Array<StringImm>({StringImm(ConstraintMessage(arg_name))})));
-    }
+int TVMFFIABIBuilder::GetParamIndex(
+    const ffi::reflection::AccessPath &path) const {
+  ffi::Array<AccessStep> steps = path->ToSteps();
+  if (steps.size() >= 1 &&
+      steps[0]->kind == ffi::reflection::AccessKind::kArrayItem) {
+    return static_cast<int>(steps[0]->key.cast<int64_t>());
   }
+  return -1;
 }
 
-std::vector<Var>
-TVMFFIABIBuilder::GetUndefVars(const std::vector<PrimExpr> &args) {
-  std::unordered_set<const VarNode *> visit;
-  std::vector<Var> res;
-  for (const auto &arg : args) {
-    PostOrderVisit(arg, [&](ObjectRef r) {
-      if (auto var = r.as<VarNode>()) {
-        if (!visit.count(var)) {
-          visit.insert(var);
-        }
-        auto it = def_map_->find(var);
-        if (it == def_map_->end()) {
-          // res.push_back(var);
-          res.push_back(GetRef<Var>(var));
-        }
-      }
-    });
-  }
-  return res;
-}
+// ============================================================
+// BindScalar (scalar bind with ffi::reflection::AccessPath)
+// ============================================================
 
-bool TVMFFIABIBuilder::BindNullable(const PrimExpr &arg, const PrimExpr &value,
-                                    const std::string &arg_name, bool with_lets,
-                                    const PrimExpr &nullable_guard) {
-  ICHECK_EQ(arg.dtype(), value.dtype()) << "arg " << arg << " value " << value;
-  auto BindVar = [&](const VarNode *v, PrimExpr value) {
-    auto v_arg = GetRef<Var>(v);
-    defs_.emplace_back(v_arg);
-    if (with_lets) {
-      (*def_map_)[v] = value;
-      init_nest_.emplace_back(SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
-    } else {
-      (*def_map_)[v] = value;
-    }
-  };
-  // 1. simple binding var = value
-  if (const VarNode *v = arg.as<VarNode>()) {
-    auto it = def_map_->find(v);
-    if (it == def_map_->end()) {
-      BindVar(v, value);
-      // First time binding: identical behavior as Bind_
-      return true;
-    } else {
-      // Second or later binding: add is_null short-circuit
-      PrimExpr cond = value == it->second;
-      BinderAddAssert(&analyzer_, cond, arg_name, &asserts_, nullable_guard);
-    }
-  } else {
-    // 2. complex binding expr = value
-    //  get undefined variables
-    auto undefs = Array<Var>(GetUndefVars({arg}));
-    if (!undefs.empty()) {
-      // if value is not integer, such as float, we are unable to solve it
-      if (!value.dtype().is_int() && !value.dtype().is_uint()) {
-        LOG(FATAL) << "Unable to solve non-integer variables " << undefs
-                   << " from equation `" << value << "`";
-      }
-      arith::IntConstraints constraints(undefs, {}, {arg == value});
-      auto sol = arith::SolveLinearEquations(constraints);
-      if (!sol->dst->variables.empty()) {
-        LOG(FATAL) << "TVM is unable to solve variables " << undefs
-                   << " from equation " << constraints;
-      }
-      for (const auto &v : undefs) {
-        auto value_opt = sol->src_to_dst.Get(v);
-        ICHECK(value_opt->defined())
-            << "Unable to solve variable `" << v << "` from expression `"
-            << (value == arg) << "`";
-        auto value = GetRef<PrimExpr>(sol->src_to_dst.Get(v)->get());
-        BindVar(v.as<VarNode>(), value);
-      }
-    }
-    // we must add the assert again
-    //    because the solved expression may contain floordiv (e.g. 3 * m == n
-    //    ==>   m = n // 3) we re-compute the constraint to verify the solution
-    //    is correct
-    PrimExpr cond = value == arg;
-    BinderAddAssert(&analyzer_, cond, arg_name, &asserts_, nullable_guard);
-  }
-  // ICHECK(false);
-  return false;
-}
-
-bool TVMFFIABIBuilder::Bind_(const PrimExpr &arg, const PrimExpr &value,
-                             const std::string &arg_name, bool with_lets) {
-  ICHECK_EQ(arg.dtype(), value.dtype()) << "arg " << arg << " value " << value;
-  if (const VarNode *v = arg.as<VarNode>()) {
-    auto it = def_map_->find(v);
-    if (it == def_map_->end()) {
-      Var v_arg = Downcast<Var>(arg);
-      defs_.emplace_back(v_arg);
-      if (with_lets) {
-        (*def_map_)[v] = arg;
-        init_nest_.emplace_back(
-            SeqStmt({tirx::Bind(v_arg, value), Evaluate(0)}));
-      } else {
-        (*def_map_)[v] = value;
-      }
-      return true;
-    } else {
-      BinderAddAssert(&analyzer_, value == it->second, arg_name, &asserts_);
-    }
-  } else {
-    BinderAddAssert(&analyzer_, value == arg, arg_name, &asserts_);
-  }
-  return false;
-}
-
-void TVMFFIABIBuilder::Bind(const PrimExpr &arg, const PrimExpr &value,
-                            const std::string &arg_name, bool with_let) {
-  Bind_(arg, value, arg_name, with_let);
-}
-
-void TVMFFIABIBuilder::BindArray(const Array<PrimExpr> &arg,
-                                 const Array<PrimExpr> &value,
-                                 const std::string &arg_name) {
-  ICHECK_EQ(arg.size(), value.size())
-      << "Argument " << arg_name << " array size mismatch";
-  for (size_t i = 0; i < arg.size(); ++i) {
-    std::ostringstream os;
-    os << arg_name << "[" << i << "]";
-    this->Bind(arg[i], value[i], os.str());
-  }
-}
-
-void TVMFFIABIBuilder::BindBuffer(const Buffer &arg, const Buffer &value,
-                                  const std::string &arg_name,
-                                  bool fuzzy_match) {
-  ICHECK_EQ(arg.scope(), value.scope())
-      << "Argument " << arg_name << " Buffer bind scope mismatch";
-  // Relax dtype check to allow FP8 E4M3 variants to bind together.
-  auto dtype_compatible = [](DataType expected, DataType provided) -> bool {
-    if (expected == provided)
-      return true;
-    // If expected is float8_e4m3, allow float8_e4m3fn/float8_e4m3fnuz as well.
-    if (expected.is_float8_e4m3()) {
-      return provided.is_float8_e4m3() || provided.is_float8_e4m3fn() ||
-             provided.is_float8_e4m3fnuz();
-    }
-    // If expected is float8_e5m2, allow float8_e5m2fnuz as well.
-    if (expected.is_float8_e5m2()) {
-      return provided.is_float8_e5m2() || provided.is_float8_e5m2fnuz();
-    }
-    // If expected is bool, allow binding from int8/uint8 with same lanes.
-    if (expected.is_bool()) {
-      bool is_i8 = provided.is_int() && provided.bits() == 8;
-      bool is_u8 = provided.is_uint() && provided.bits() == 8;
-      return (is_i8 || is_u8) && expected.lanes() == provided.lanes();
-    }
+bool TVMFFIABIBuilder::BindScalar(const PrimExpr &arg, const PrimExpr &value,
+                                  const ffi::reflection::AccessPath &path,
+                                  bool with_lets) {
+  TVM_FFI_ICHECK(arg.ty() == value.ty());
+  if (collect_tensor_fields_) {
+    tensor_fields_.push_back({arg, value, path, current_guard_});
     return false;
-  };
-  ICHECK(dtype_compatible(arg->dtype, value->dtype))
-      << "Argument " << arg_name << " Buffer bind data type mismatch: expected "
-      << arg->dtype << ", got " << value->dtype;
-  if (value->data_alignment % arg->data_alignment != 0) {
-    LOG(WARNING) << "Trying to bind buffer to another one with lower alignment "
-                    "requirement "
-                 << " required_alignment=" << arg->data_alignment
-                 << ", provided_alignment=" << value->data_alignment;
   }
-
-  if (value->elem_offset.defined()) {
-    // bind pointer and offset.
-    if (is_zero(arg->elem_offset)) {
-      ICHECK(is_zero(value->elem_offset))
-          << "Trying to bind a Buffer with offset into one without offset "
-          << " required elem_offset=" << arg->elem_offset
-          << ", provided elem_offset=" << value->elem_offset;
-    }
-
-    this->Bind(arg->data, value->data, arg_name + ".data");
-    if (Bind_(arg->elem_offset, value->elem_offset, arg_name + ".elem_offset",
-              false)) {
-      if (arg->offset_factor > 1) {
-        PrimExpr offset = value->elem_offset;
-        PrimExpr factor = make_const(offset.dtype(), arg->offset_factor);
-        PrimExpr zero = make_zero(offset.dtype());
-        BinderAddAssert(&analyzer_, zero == truncmod(offset, factor),
-                        arg_name + ".elem_offset", &asserts_);
-      }
-    }
-  }
-
-  if (arg->shape.size() < value->shape.size()) {
-    ICHECK(fuzzy_match) << "Argument " << arg_name << " size mismatch";
-    size_t diff = value->shape.size() - arg->shape.size();
-    for (size_t i = 0; i < diff; ++i) {
-      ICHECK(is_one(analyzer_.Simplify(value->shape[i])))
-          << "Argument " << arg_name << " shape mismatch" << arg->shape
-          << " vs " << value->shape;
-    }
-    for (size_t i = 0; i < arg->shape.size(); ++i) {
-      std::ostringstream os;
-      os << arg_name << ".shape[" << i << "]";
-      this->Bind(arg->shape[i], value->shape[i + diff], os.str());
-    }
-    if (!value->strides.empty()) {
-      ICHECK_EQ(arg->strides.size(), arg->shape.size());
-      ICHECK_EQ(value->strides.size(), value->shape.size());
-      for (size_t i = 0; i < arg->strides.size(); ++i) {
-        std::ostringstream os;
-        os << arg_name << ".strides[" << i << "]";
-        this->Bind(arg->strides[i], value->strides[i + diff], os.str());
-      }
-    }
-  } else {
-    this->BindArray(arg->shape, value->shape, arg_name + ".shape");
-    this->BindArray(arg->strides, value->strides, arg_name + ".strides");
-  }
-}
-
-inline PrimExpr TVMArrayGet(DataType t, Var arr,
-                            builtin::TVMStructFieldKind kind) {
-  return TVMStructGet(t, arr, 0, kind);
-}
-
-void TVMFFIABIBuilder::RelaxedStrideCheck(
-    const int dim_idx, const PrimExpr &stride,
-    const PrimExpr &logical_stride_val, const PrimExpr &dim_shape,
-    const PrimExpr &is_null, const std::string &stride_element_name) {
-  if (const VarNode *v = stride.as<VarNode>()) {
-    auto it = def_map_->find(v);
-    if (it != def_map_->end()) {
-      PrimExpr expected = it->second;
-      if (is_zero(analyzer_.Simplify(expected))) {
-        LOG(WARNING) << "TileLang: Detected zero-dimension in "
-                     << stride_element_name << ". Relaxing stride check.";
-      }
-      // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
-      // forces stride=1 for size-1 dims regardless of logical stride).
-      PrimExpr cond = (expected == logical_stride_val) || (expected == 0) ||
-                      (dim_shape == 1);
-      BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_,
-                      is_null);
-    } else {
-      BindNullable(stride, logical_stride_val, stride_element_name, true,
-                   is_null);
-    }
-  } else {
-    const PrimExpr &expected = stride;
-    if (is_zero(analyzer_.Simplify(expected))) {
-      LOG(WARNING) << "TileLang: Detected zero-dimension in "
-                   << stride_element_name << ". Relaxing stride check.";
-    }
-    // Tolerate any stride value when dim size is 1 (torch 2.1 DLPack bug:
-    // forces stride=1 for size-1 dims regardless of logical stride).
-    PrimExpr cond =
-        (expected == logical_stride_val) || (expected == 0) || (dim_shape == 1);
-    BinderAddAssert(&analyzer_, cond, stride_element_name, &asserts_, is_null);
-  }
-}
-
-void TVMFFIABIBuilder::BindDLTensors(
-    const std::vector<std::pair<Var, Buffer>> &buffer_def,
-    const PrimExpr &device_type, const PrimExpr &device_id,
-    const std::string &func_name,
-    const std::unordered_set<const VarNode *> &used_param_buffers,
-    const std::unordered_set<const VarNode *> &used_shape_vars) {
-  Array<Buffer> buffers;
-  Array<Var> handles;
-
-  // First pass: collect shape var -> list of (buffer_name, dim_idx, handle_ptr)
-  struct ShapeVarSource {
-    std::string buf_name;
-    size_t dim_idx;
-    const VarNode *handle_ptr; // Raw pointer to check used_param_buffers
-  };
-  std::unordered_map<const VarNode *, std::vector<ShapeVarSource>>
-      shape_var_sources;
-
-  for (const auto &[handle, buffer] : buffer_def) {
-    std::string arg_name = func_name + "." + buffer->data->name_hint;
-
-    // Scan buffer shape for symbolic variables
-    for (size_t k = 0; k < buffer->shape.size(); ++k) {
-      if (buffer->dtype.bits() * buffer->dtype.lanes() < 8) {
-        break;
-      }
-
-      if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
-        // This dimension is a symbolic variable
-        shape_var_sources[v].push_back({arg_name, k, handle.get()});
-      }
-    }
-  }
-
-  // Second pass: Create is_null vars and shape buffers for all buffers first
-  std::unordered_map<std::string, Var> is_null_map;
-  std::unordered_map<std::string, Buffer> shape_buffer_map;
-  std::unordered_map<std::string, PrimExpr>
-      is_null_expr_map; // arg_name -> is_null expression (const_false for used
-                        // buffers)
-
-  const DataType tvm_shape_type = DataType::ShapeIndex();
-  const DataType tvm_ndim_type = DataType::Int(32);
-  const Stmt nop = Evaluate(0);
-
-  // Create all is_null vars and shape buffers first
-  for (const auto &[handle, buffer] : buffer_def) {
-    bool is_used = used_param_buffers.count(handle.get());
-    std::string arg_name = func_name + "." + buffer->data->name_hint;
-
-    Var is_null_var(arg_name + "_is_null", DataType::Bool());
-    init_nest_.emplace_back(
-        SeqStmt({tirx::Bind(is_null_var, Call(DataType::Bool(),
-                                              builtin::isnullptr(), {handle})),
-                 nop}));
-    const PrimExpr &is_null = is_used ? const_false() : is_null_var;
-
-    is_null_map[arg_name] = is_null_var;
-    is_null_expr_map[arg_name] = is_null;
-
-    if (is_used) {
-      init_nest_.emplace_back(AssertStmt(
-          !is_null_var, tvm::tirx::StringImm("RuntimeError"),
-          Array<tvm::tirx::StringImm>({tvm::tirx::StringImm(
-              arg_name + " is expected to have non-NULL pointer")})));
-    }
-  }
-
-  // Create all shape buffers before binding any shapes
-  for (const auto &[handle, buffer] : buffer_def) {
-    std::string arg_name = func_name + "." + buffer->data->name_hint;
-    const PrimExpr &is_null = is_null_expr_map[arg_name];
-
-    // Helper functions for shape/stride name formatting
-    auto shape_handle_name = [&]() { return arg_name + ".shape"; };
-
-    // shape field
-    Buffer buf_shape =
-        decl_buffer({IntImm(DataType::Int(32), buffer->shape.size())},
-                    tvm_shape_type, shape_handle_name());
-    def_handle_dtype_.Set(buf_shape->data, make_const(tvm_shape_type, 0));
-    // Use if_then_else for NULL guard on the shape pointer itself, avoiding
-    // dereferencing TVMStructGet(handle, kDLTensorShape) when handle is NULL.
-    init_nest_.emplace_back(SeqStmt(
-        {tirx::Bind(buf_shape->data,
-                    tvm::if_then_else(Not(is_null),
-                                      TVMArrayGet(DataType::Handle(), handle,
-                                                  builtin::kDLTensorShape),
-                                      make_zero(DataType::Handle()))),
-         nop}));
-    init_nest_.emplace_back(DeclBuffer(buf_shape));
-
-    // Save for later use in shape binding
-    shape_buffer_map[arg_name] = buf_shape;
-  }
-
-  // Now process each buffer fully
-  for (const auto &[handle, buffer] : buffer_def) {
-    bool is_used = used_param_buffers.count(handle.get());
-    std::string arg_name = func_name + "." + buffer->data->name_hint;
-    const PrimExpr &is_null = is_null_expr_map[arg_name];
-
-    // dimension checks
-    PrimExpr v_ndim =
-        TVMArrayGet(tvm_ndim_type, handle, builtin::kDLTensorNDim);
-
-    // Helper functions for shape/stride name formatting
-    auto shape_handle_name = [&]() { return arg_name + ".shape"; };
-    auto stride_handle_name = [&]() { return arg_name + ".strides"; };
-    auto array_element_name = [&](const std::string &arr_name, size_t k) {
-      std::stringstream ss;
-      ss << arr_name << '[' << k << ']';
-      return ss.str();
-    };
-    auto shape_element_name = [&](size_t k) {
-      return array_element_name(shape_handle_name(), k);
-    };
-    auto stride_element_name = [&](size_t k) {
-      return array_element_name(stride_handle_name(), k);
-    };
-
-    PrimExpr a_ndim =
-        make_const(tvm_ndim_type, static_cast<int64_t>(buffer->shape.size()));
-    // Build clearer ndim message with kernel/buffer names
-    std::string kernel_nm = arg_name;
-    std::string buf_nm = arg_name;
-    size_t dot_pos = arg_name.find('.');
-    if (dot_pos != std::string::npos) {
-      kernel_nm = arg_name.substr(0, dot_pos);
-      buf_nm = arg_name.substr(dot_pos + 1);
-    }
-    PrimExpr ndim_ok = (a_ndim == v_ndim);
-    std::ostringstream ndim_msg;
-    ndim_msg << "kernel " << kernel_nm << " input " << buf_nm
-             << " ndim mismatch, expected " << buffer->shape.size();
-    init_nest_.emplace_back(
-        AssertStmt(Or(is_null, ndim_ok), StringImm("RuntimeError"),
-                   Array<StringImm>({StringImm(ndim_msg.str())})));
-    // type checks
-    // Guard all dtype field loads by `is_null` using if_then_else
-    PrimExpr v_type_code = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::UInt(8), handle, builtin::kDLTensorTypeCode),
-        IntImm(DataType::UInt(8), buffer->dtype.code()));
-    PrimExpr v_type_bits = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::UInt(8), handle, builtin::kDLTensorTypeBits),
-        IntImm(DataType::UInt(8), buffer->dtype.bits()));
-    PrimExpr v_type_lanes = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::UInt(16), handle, builtin::kDLTensorTypeLanes),
-        IntImm(DataType::UInt(16), buffer->dtype.lanes()));
-    PrimExpr expect_code = IntImm(DataType::UInt(8), buffer->dtype.code());
-    PrimExpr expect_bits = IntImm(DataType::UInt(8), buffer->dtype.bits());
-    PrimExpr expect_lanes = IntImm(DataType::UInt(16), buffer->dtype.lanes());
-
-    PrimExpr cond = (v_type_code == expect_code && v_type_bits == expect_bits &&
-                     v_type_lanes == expect_lanes);
-
-    // Allow float8_e4m3 to match float8_e4m3fn/float8_e4m3fnuz at runtime.
-    if (buffer->dtype.is_float8_e4m3()) {
-      PrimExpr code_e4m3 = IntImm(DataType::UInt(8), DataType::kFloat8_e4m3);
-      PrimExpr code_e4m3fn =
-          IntImm(DataType::UInt(8), DataType::kFloat8_e4m3fn);
-      PrimExpr code_e4m3fnuz =
-          IntImm(DataType::UInt(8), DataType::kFloat8_e4m3fnuz);
-      PrimExpr code_match =
-          (v_type_code == code_e4m3 || v_type_code == code_e4m3fn ||
-           v_type_code == code_e4m3fnuz);
-      cond = cond || (code_match && v_type_bits == expect_bits &&
-                      v_type_lanes == expect_lanes);
-    }
-    // Allow float8_e5m2 to match float8_e5m2fnuz at runtime.
-    if (buffer->dtype.is_float8_e5m2()) {
-      PrimExpr code_e5m2 = IntImm(DataType::UInt(8), DataType::kFloat8_e5m2);
-      PrimExpr code_e5m2fnuz =
-          IntImm(DataType::UInt(8), DataType::kFloat8_e5m2fnuz);
-      PrimExpr code_match =
-          (v_type_code == code_e5m2 || v_type_code == code_e5m2fnuz);
-      cond = cond || (code_match && v_type_bits == expect_bits &&
-                      v_type_lanes == expect_lanes);
-    }
-    // Allow tfloat32 to match float32 at runtime (same storage).
-    if (buffer->dtype.is_tfloat32()) {
-      PrimExpr code_float = IntImm(DataType::UInt(8), DataType::kFloat);
-      PrimExpr bits32 = IntImm(DataType::UInt(8), 32);
-      PrimExpr float32_ok =
-          (v_type_code == code_float && v_type_bits == bits32 &&
-           v_type_lanes == expect_lanes);
-      cond = cond || float32_ok;
-    }
-    // Allow bool to match int8/uint8 at runtime, and also kDLBool(code=6).
-    if (buffer->dtype.is_bool()) {
-      PrimExpr code_int = IntImm(DataType::UInt(8), DataType::kInt);
-      PrimExpr code_uint = IntImm(DataType::UInt(8), DataType::kUInt);
-      PrimExpr code_kdlbool = IntImm(DataType::UInt(8), 6);
-      PrimExpr bits8 = IntImm(DataType::UInt(8), 8);
-      PrimExpr bits1 = IntImm(DataType::UInt(8), 1);
-      PrimExpr lanes_ok = (v_type_lanes == expect_lanes);
-      PrimExpr int8_ok =
-          (v_type_code == code_int && v_type_bits == bits8 && lanes_ok);
-      PrimExpr uint8_ok =
-          (v_type_code == code_uint && v_type_bits == bits8 && lanes_ok);
-      // Some frontends may tag bool tensors as kDLBool(code=6), commonly with
-      // bits=8 or bits=1.
-      PrimExpr kdlbool8_ok =
-          (v_type_code == code_kdlbool && v_type_bits == bits8 && lanes_ok);
-      PrimExpr kdlbool1_ok =
-          (v_type_code == code_kdlbool && v_type_bits == bits1 && lanes_ok);
-      // Also accept any dtype whose bitwidth=1, regardless of code, to be
-      // defensive.
-      PrimExpr bit1_ok = (v_type_bits == bits1 && lanes_ok);
-      cond =
-          cond || int8_ok || uint8_ok || kdlbool8_ok || kdlbool1_ok || bit1_ok;
-    }
-    // Allow sub-byte logical elements to match any type with the same total
-    // bit count at runtime (PyTorch uses int8 or FP4x2 as storage for FP4).
-    const int logical_element_bits =
-        buffer->dtype.bits() * buffer->dtype.lanes();
-    bool data_is_subtype = logical_element_bits < 8;
-    if (data_is_subtype) {
-      // Get the pre-created shape buffer for reading runtime shape
-      Buffer buf_shape = shape_buffer_map[arg_name];
-
-      // Calculate expected total bits using compile-time buffer->shape
-      PrimExpr expect_total_bits =
-          cast(DataType::UInt(64), expect_bits) *
-          cast(DataType::UInt(64), expect_lanes) *
-          cast(DataType::UInt(64),
-               buffer->shape.empty()
-                   ? make_const(DataType::UInt(64), 1)
-                   : foldl([](PrimExpr a, PrimExpr b, Span) { return a * b; },
-                           make_const(DataType::UInt(64), 1), buffer->shape));
-
-      // Calculate actual total bits using runtime shape from DLTensor
-      PrimExpr actual_total_bits = cast(DataType::UInt(64), v_type_bits) *
-                                   cast(DataType::UInt(64), v_type_lanes);
-      for (size_t k = 0; k < buffer->shape.size(); ++k) {
-        PrimExpr dim_val =
-            cast(DataType::UInt(64),
-                 BufferLoad(buf_shape,
-                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
-        actual_total_bits = actual_total_bits * dim_val;
-      }
-
-      PrimExpr bits_match = (actual_total_bits == expect_total_bits);
-      BinderAddAssert(&analyzer_, bits_match,
-                      arg_name + " is a subtype, but total bits mismatch",
-                      &asserts_, is_null);
-    }
-    if (!data_is_subtype) {
-      std::ostringstream dtype_msg;
-      dtype_msg << "kernel " << kernel_nm << " input " << buf_nm
-                << " dtype mismatch, expected " << buffer->dtype;
-      asserts_.emplace_back(
-          AssertStmt(Or(is_null, cond), StringImm("RuntimeError"),
-                     Array<StringImm>({StringImm(dtype_msg.str())})));
-    }
-
-    // Get the pre-created shape buffer
-    Buffer buf_shape = shape_buffer_map[arg_name];
-
-    // Bind symbolic variables from buffer shape
-    // For subtype (total bits < 8), the runtime tensor has packed shape where
-    // the last dimension is divided by k = 8 / logical element bits.
-    // For example, fp4 (4 bits) has k=2, so logical shape [m, 16] becomes
-    // runtime shape [m, 8]. We need to solve for symbolic variables from
-    // this packed shape.
-    if (data_is_subtype) {
-      // For subtype, bind symbolic variables from the packed shape.
-      // Number of logical elements packed into one byte-sized storage unit.
-      int pack_factor = 8 / logical_element_bits;
-
-      // Build a mapping from logical shape dimensions to runtime shape
-      // expressions For all dimensions except the last, runtime_shape[k] ==
-      // logical_shape[k] For the last dimension, logical_shape[-1] ==
-      // runtime_shape[-1] * pack_factor
-      for (size_t k = 0; k < buffer->shape.size(); ++k) {
-        // Read the runtime shape value from DLTensor
-        PrimExpr raw_shape_val =
-            cast(buffer->shape[k].dtype(),
-                 BufferLoad(buf_shape,
-                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
-        PrimExpr runtime_shape_val = tvm::if_then_else(
-            Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
-
-        // For the last dimension, the logical shape = runtime_shape *
-        // pack_factor
-        PrimExpr logical_shape_val;
-        bool is_last_dim = (k == buffer->shape.size() - 1);
-        if (is_last_dim) {
-          logical_shape_val =
-              runtime_shape_val *
-              make_const(runtime_shape_val.dtype(), pack_factor);
-        } else {
-          logical_shape_val = runtime_shape_val;
-        }
-
-        // Now bind the symbolic variable if present
-        if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
-          auto it = def_map_->find(v);
-          if (it == def_map_->end()) {
-            // First time binding: use BindNullable which can solve equations
-            BindNullable(buffer->shape[k], logical_shape_val,
-                         shape_element_name(k), true, is_null);
-          } else {
-            // Variable already bound, add assertion with nullable guard
-            PrimExpr cond = (it->second == logical_shape_val);
-            BinderAddAssert(&analyzer_, cond, shape_element_name(k), &asserts_,
-                            is_null);
-          }
-        } else {
-          // Constant or expression dimension, bind/assert via BindNullable
-          BindNullable(buffer->shape[k], logical_shape_val,
-                       shape_element_name(k), true, is_null);
-        }
-      }
-    } else {
-      // Non-subtype: normal shape binding
-      for (size_t k = 0; k < buffer->shape.size(); ++k) {
-        // The "real" runtime shape value read from DLTensor.
-        // Guard the load with `is_null` to avoid dereferencing NULL handles.
-        PrimExpr raw_shape_val =
-            cast(buffer->shape[k].dtype(),
-                 BufferLoad(buf_shape,
-                            {IntImm(DataType::Int(32), static_cast<int>(k))}));
-        PrimExpr shape_val = tvm::if_then_else(
-            Not(is_null), raw_shape_val, make_const(raw_shape_val.dtype(), 0));
-
-        // Check if this dimension is a symbolic variable
-        if (const VarNode *v = buffer->shape[k].as<VarNode>()) {
-          auto it = def_map_->find(v);
-          if (it == def_map_->end()) {
-            // First time binding this symbolic variable
-            auto sources_it = shape_var_sources.find(v);
-            if (sources_it != shape_var_sources.end() &&
-                sources_it->second.size() > 1) {
-              // This variable appears in multiple buffers
-              // If this shape var is actually used by the PrimFunc body, we
-              // must be able to bind it at runtime, so require at least one
-              // non-null carrier buffer. Otherwise (e.g. the var only exists
-              // in shapes of unused nullable buffers), allow all carriers to be
-              // NULL and bind the var to 0.
-              if (used_shape_vars.count(v)) {
-                PrimExpr any_nonnull = const_false();
-                for (const auto &src : sources_it->second) {
-                  bool buf_is_used = used_param_buffers.count(src.handle_ptr);
-                  if (buf_is_used) {
-                    any_nonnull = const_true();
-                    break;
-                  }
-                  Var src_is_null = is_null_map[src.buf_name];
-                  any_nonnull = Or(any_nonnull, Not(src_is_null));
-                }
-
-                std::ostringstream err_msg;
-                err_msg << "Symbolic shape variable "
-                        << GetRef<Var>(v)->name_hint
-                        << " requires at least one non-null buffer among: ";
-                bool first = true;
-                for (const auto &src : sources_it->second) {
-                  if (!first)
-                    err_msg << ", ";
-                  err_msg << src.buf_name;
-                  first = false;
-                }
-
-                init_nest_.emplace_back(AssertStmt(
-                    any_nonnull, tvm::tirx::StringImm("RuntimeError"),
-                    Array<tvm::tirx::StringImm>(
-                        {tvm::tirx::StringImm(err_msg.str())})));
-              }
-
-              // Build cascaded if_then_else: if !is_null_a then a.shape[k] else
-              // if !is_null_b then b.shape[k] ... We need to construct this in
-              // reverse order
-              PrimExpr cascaded_value;
-              bool is_first_source = true;
-
-              for (auto rit = sources_it->second.rbegin();
-                   rit != sources_it->second.rend(); ++rit) {
-                const auto &src = *rit;
-
-                // Get the shape buffer for this source
-                auto it_buf = shape_buffer_map.find(src.buf_name);
-                if (it_buf == shape_buffer_map.end()) {
-                  LOG(FATAL) << "Shape buffer not found for " << src.buf_name;
-                }
-                Buffer src_shape_buf = it_buf->second;
-
-                // Construct the shape load and guard it if the source may be
-                // NULL
-                PrimExpr src_raw_shape_val =
-                    cast(buffer->shape[k].dtype(),
-                         BufferLoad(src_shape_buf,
-                                    {IntImm(DataType::Int(32),
-                                            static_cast<int>(src.dim_idx))}));
-
-                // Check if this buffer is used (non-nullable)
-                bool src_is_used = used_param_buffers.count(src.handle_ptr);
-
-                if (is_first_source) {
-                  // Base case: use this shape value directly (we know at least
-                  // one is non-null from assert)
-                  if (src_is_used) {
-                    cascaded_value = src_raw_shape_val;
-                  } else {
-                    Var src_is_null = is_null_map[src.buf_name];
-                    cascaded_value = tvm::if_then_else(
-                        Not(src_is_null), src_raw_shape_val,
-                        make_const(src_raw_shape_val.dtype(), 0));
-                  }
-                  is_first_source = false;
-                } else {
-                  // if !is_null then use this shape, else use previous cascaded
-                  // value But if buffer is used (non-nullable), always use its
-                  // shape
-                  if (src_is_used) {
-                    cascaded_value = src_raw_shape_val;
-                  } else {
-                    Var src_is_null = is_null_map[src.buf_name];
-                    cascaded_value = tvm::if_then_else(
-                        Not(src_is_null), src_raw_shape_val, cascaded_value);
-                  }
-                }
-              }
-
-              // Bind the variable to the cascaded expression
-              Var v_arg = GetRef<Var>(v);
-              defs_.emplace_back(v_arg);
-              (*def_map_)[v] = cascaded_value;
-              init_nest_.emplace_back(
-                  SeqStmt({tirx::Bind(v_arg, cascaded_value), Evaluate(0)}));
-            } else {
-              // Single source or no special handling needed, use nullable
-              // binding. When the only source is NULL, bind m to 0 safely.
-              BindNullable(buffer->shape[k], shape_val, shape_element_name(k),
-                           true, is_null);
-            }
-          } else {
-            // Variable already bound, add assertion with nullable guard
-            PrimExpr cond = (it->second == shape_val);
-            BinderAddAssert(&analyzer_, cond, shape_element_name(k), &asserts_,
-                            is_null);
-          }
-        } else {
-          // Constant dimension, just add assertion
-          BindNullable(buffer->shape[k], shape_val, shape_element_name(k), true,
-                       is_null);
-        }
-      }
-    }
-
-    // strides field
-    // For sub-byte logical elements, stride semantics need special handling
-    // due to packed storage. The relationship is:
-    // - Last dimension: logical_stride = runtime_stride (packing is within
-    // elements)
-    // - Other dimensions: logical_stride = runtime_stride * pack_factor
-    if (data_is_subtype) {
-      // For subtype, only process strides if there are explicit strides
-      // with symbolic variables that need binding
-      if (!buffer->strides.empty()) {
-        int pack_factor = 8 / logical_element_bits;
-
-        Buffer buf_strides =
-            decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
-                        tvm_shape_type, arg_name + ".strides");
-        def_handle_dtype_.Set(buf_strides->data,
-                              tirx::TypeAnnotation(tvm_shape_type));
-        init_nest_.emplace_back(
-            SeqStmt({tirx::Bind(buf_strides->data,
-                                tvm::if_then_else(
-                                    Not(is_null),
-                                    TVMArrayGet(DataType::Handle(), handle,
-                                                builtin::kDLTensorStrides),
-                                    make_zero(DataType::Handle()))),
-                     nop}));
-        init_nest_.emplace_back(DeclBuffer(buf_strides));
-        PrimExpr v_strides_is_null =
-            Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
-
-        for (int k = static_cast<int>(buffer->strides.size()) - 1; k >= 0;
-             --k) {
-          DataType stride_dtype = buffer->strides[k].dtype();
-          PrimExpr runtime_stride =
-              cast(stride_dtype,
-                   BufferLoad(buf_strides, {IntImm(DataType::Int(32), k)}));
-          runtime_stride =
-              tvm::if_then_else(Or(is_null, v_strides_is_null),
-                                make_const(stride_dtype, 0), runtime_stride);
-
-          // For the last dimension, logical stride = runtime stride
-          // For other dimensions, logical stride = runtime stride * pack_factor
-          PrimExpr logical_stride_val;
-          bool is_last_dim =
-              (k == static_cast<int>(buffer->strides.size()) - 1);
-          if (is_last_dim) {
-            logical_stride_val = runtime_stride;
-          } else {
-            logical_stride_val =
-                runtime_stride * make_const(stride_dtype, pack_factor);
-          }
-
-          // Relax stride check: if the expected stride is 0, allow any actual
-          // stride. This happens when one of the subsequent dimensions is 0.
-          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
-          RelaxedStrideCheck(k, buffer->strides[k], logical_stride_val,
-                             buffer->shape[k], is_null, stride_element_name(k));
-        }
-      }
-    } else {
-      // Non-subtype: normal stride handling
-      Buffer buf_strides =
-          decl_buffer({IntImm(DataType::Int(32), buffer->strides.size())},
-                      tvm_shape_type, arg_name + ".strides");
-      def_handle_dtype_.Set(buf_strides->data,
-                            tirx::TypeAnnotation(tvm_shape_type));
-      init_nest_.emplace_back(SeqStmt(
-          {tirx::Bind(buf_strides->data,
-                      tvm::if_then_else(Not(is_null),
-                                        TVMArrayGet(DataType::Handle(), handle,
-                                                    builtin::kDLTensorStrides),
-                                        make_zero(DataType::Handle()))),
-           nop}));
-      init_nest_.emplace_back(DeclBuffer(buf_strides));
-      PrimExpr v_strides_is_null =
-          Call(DataType::Bool(1), builtin::isnullptr(), {buf_strides->data});
-
-      if (buffer->strides.empty()) {
-        // Assert the buffer is compact
-        DataType stype = buffer->DefaultIndexType();
-        PrimExpr expect_stride = make_const(stype, 1);
-        Array<PrimExpr> conds;
-        for (size_t i = buffer->shape.size(); i != 0; --i) {
-          size_t k = i - 1;
-          PrimExpr svalue = cast(
-              stype, BufferLoad(buf_strides, {IntImm(DataType::Int(32),
-                                                     static_cast<int>(k))}));
-          if (is_zero(analyzer_.Simplify(expect_stride))) {
-            LOG(WARNING) << "TileLang: Detected zero-dimension in compact "
-                         << "buffer strides calculation. "
-                         << "Relaxing check for " << stride_handle_name();
-          }
-          conds.push_back(buffer->shape[k] == 1 || expect_stride == svalue ||
-                          expect_stride == 0);
-          expect_stride = expect_stride * buffer->shape[k];
-        }
-        std::ostringstream stride_err_msg;
-        stride_err_msg
-            << stride_handle_name()
-            << ": expected to be compact array, but got non-compact strides";
-        if (!conds.empty()) {
-          PrimExpr all_ok =
-              foldl([](PrimExpr a, PrimExpr b,
-                       Span span) { return logical_and(a, b, span); },
-                    const_true(1), conds);
-          // Only check compactness when an explicit strides array is present.
-          asserts_.emplace_back(AssertStmt(
-              Or(v_strides_is_null, all_ok), StringImm("RuntimeError"),
-              Array<StringImm>({StringImm(stride_err_msg.str())})));
-        }
-      } else if (buffer->buffer_type == kAutoBroadcast) {
-        PrimExpr stride_from_shape = 1;
-        for (size_t i = buffer->shape.size(); i != 0; --i) {
-          size_t k = i - 1;
-          DataType stride_dtype = buffer->strides[k].dtype();
-          PrimExpr explicit_stride = cast(
-              stride_dtype,
-              BufferLoad(buf_strides,
-                         {IntImm(DataType::Int(32), static_cast<int>(k))}));
-
-          PrimExpr stride_val = tvm::if_then_else(
-              v_strides_is_null, stride_from_shape, explicit_stride);
-
-          // Relax stride check: if the expected stride is 0, allow any actual
-          // stride. This happens when one of the subsequent dimensions is 0.
-          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
-          RelaxedStrideCheck(k, buffer->strides[k], stride_val,
-                             buffer->shape[k], is_null, stride_element_name(k));
-        }
+  if (arg.as<VarObj>()) {
+    Var v_arg = arg.as_or_throw<Var>();
+    auto it = var_defs_.find(v_arg.get());
+    if (it == var_defs_.end()) {
+      // First bind: define the variable
+      if (with_lets) {
+        var_defs_.emplace(v_arg.get(), VarDefInfo{arg, path});
+        init_nest_.emplace_back(Bind(v_arg, value));
       } else {
-        PrimExpr stride_from_shape = 1;
+        var_defs_.emplace(v_arg.get(), VarDefInfo{value, path});
+      }
+      AppendAnalyzerConstraint(analyzer_.get(),
+                               sym::BindingConstraint(v_arg, value));
+      return true;
+    } else {
+      // Duplicate bind: create rich assertion with both paths
+      PrimExpr prev_value = it->second.value.as_or_throw<PrimExpr>();
+      PrimExpr scond = analyzer_->Simplify(prev_value == value);
+      if (IsZero(scond) && IsOne(current_guard_)) {
+        TVM_FFI_THROW(InternalError)
+            << "Bind have an unmet assertion: " << prev_value << " == " << value
+            << " at " << RenderAccessPath(path);
+      }
+      if (!IsOne(scond)) {
+        ffi::String current_path_str = RenderAccessPath(path);
+        ffi::String first_path_str =
+            RenderAccessPath(it->second.first_def_path);
+        int param_index = GetParamIndex(path);
+        ffi::Array<StringImm> parts;
+        parts.push_back(StringImm("Mismatched "));
+        parts.push_back(StringImm(current_path_str));
+        if (param_index >= 0) {
+          parts.push_back(StringImm(" on argument #"));
+          parts.push_back(StringImm(std::to_string(param_index)));
+        }
+        parts.push_back(when_calling_imm_);
+        parts.push_back(sig_imm_);
+        if (!first_path_str.empty() && first_path_str != current_path_str) {
+          parts.push_back(StringImm("`,\n  expected to match "));
+          parts.push_back(StringImm(first_path_str));
+        } else {
+          parts.push_back(StringImm("`,\n  expected matching value"));
+        }
+        asserts_.emplace_back(GuardStmt(AssertStmt(
+            scond, StringImm(TensorErrorKind("ValueError")), parts)));
+      }
+    }
+  } else {
+    // Non-Var expression (e.g. batch_size + 1): defer assertion to Finalize()
+    // so display-var substitution can render human-readable names.
+    PrimExpr scond = analyzer_->Simplify(arg == value);
+    if (IsZero(scond) && IsOne(current_guard_)) {
+      TVM_FFI_THROW(InternalError)
+          << "Bind have an unmet assertion: " << arg << " == " << value
+          << " at " << RenderAccessPath(path);
+    }
+    if (!IsOne(scond)) {
+      pending_const_asserts_.push_back({scond, path, arg, current_guard_});
+    }
+  }
+  return false;
+}
 
-        for (int k = static_cast<int>(buffer->strides.size()) - 1; k >= 0;
-             --k) {
-          DataType stride_dtype = buffer->strides[k].dtype();
-          PrimExpr explicit_stride =
-              cast(stride_dtype,
-                   BufferLoad(buf_strides, {IntImm(DataType::Int(32), k)}));
-          PrimExpr shape_stride =
-              cast(stride_dtype,
-                   BufferLoad(buf_shape, {IntImm(DataType::Int(32), k)}));
+bool TVMFFIABIBuilder::TryBindLinearIntExpr(
+    const PrimExpr &arg, const PrimExpr &value,
+    const ffi::reflection::AccessPath &path) {
+  // Recognize factor * var + offset, allowing either operand order for Add and
+  // Mul. A domain-normalized shape can be a direct variable (e.g. max(n, 0) for
+  // nonnegative n). This is exact decoding, not a solver-chosen inverse. Retain
+  // the normalized tree while peeling operands: updating var may otherwise
+  // release a newly simplified Add/Sub/Mul before its other operand is read
+  // through the node pointer.
+  const PrimExpr normalized = NormalizeIntegerCarrier(arg);
+  PrimExpr var = normalized;
+  PrimExpr factor = IntImm(arg.ty(), 1);
+  PrimExpr offset = IntImm(arg.ty(), 0);
 
-          PrimExpr stride_val = tvm::if_then_else(
-              v_strides_is_null, stride_from_shape, explicit_stride);
+  // Remove the constant offset, if present.
+  if (const auto *add = var.as<AddObj>()) {
+    if (add->b.as<IntImmObj>()) {
+      var = add->a;
+      offset = add->b;
+    } else if (add->a.as<IntImmObj>()) {
+      var = add->b;
+      offset = add->a;
+    } else {
+      return false;
+    }
+  } else if (const auto *sub = var.as<SubObj>()) {
+    if (!sub->b.as<IntImmObj>())
+      return false;
+    var = sub->a;
+    offset = -sub->b;
+  }
 
-          // Relax stride check: if the expected stride is 0, allow any actual
-          // stride. This happens when one of the subsequent dimensions is 0.
-          // Also tolerate any stride when dim size is 1 (torch 2.1 DLPack bug).
-          RelaxedStrideCheck(k, buffer->strides[k], stride_val,
-                             buffer->shape[k], is_null, stride_element_name(k));
+  // Remove the constant factor; the remainder must be a variable.
+  if (const auto *mul = var.as<MulObj>()) {
+    if (mul->b.as<IntImmObj>()) {
+      var = mul->a;
+      factor = mul->b;
+    } else if (mul->a.as<IntImmObj>()) {
+      var = mul->b;
+      factor = mul->a;
+    } else {
+      return false;
+    }
+  }
+  if (!var.as<VarObj>() || arg.same_as(var) || IsZero(factor) ||
+      var_defs_.count(var.as<VarObj>())) {
+    return false;
+  }
+
+  // Check divisibility before binding the inferred variable to the quotient.
+  PrimExpr delta = value - offset;
+  std::string shape_path = RenderAccessPath(path);
+  std::string decoded_expr = shape_path;
+  if (!IsZero(offset)) {
+    std::ostringstream os;
+    os << "(" << shape_path << " - " << offset.as_or_throw<IntImm>()->value
+       << ")";
+    decoded_expr = os.str();
+  }
+  if (!IsOne(factor)) {
+    std::ostringstream os;
+    os << factor.as_or_throw<IntImm>()->value;
+    std::string factor_text = os.str();
+    EmitAssert(truncmod(delta, factor) == 0, TensorErrorKind("ValueError"),
+               "Invalid ", shape_path, " on argument #",
+               std::to_string(GetParamIndex(path)), when_calling_imm_, sig_imm_,
+               "`,\n  expected ", decoded_expr, " to be divisible by ",
+               factor_text);
+    decoded_expr += " // " + factor_text;
+  }
+  BindScalar(var, truncdiv(delta, factor), path, true);
+  shape_var_exprs_.emplace(var.as<VarObj>(), std::move(decoded_expr));
+  return true;
+}
+
+bool TVMFFIABIBuilder::BindPointer(const Var &arg, const Expr &value,
+                                   const ffi::reflection::AccessPath &path,
+                                   bool with_lets) {
+  TVM_FFI_ICHECK(ffi::StructuralEqual()(arg->ty, value->ty));
+  auto it = var_defs_.find(arg.get());
+  if (it == var_defs_.end()) {
+    var_defs_.emplace(arg.get(), VarDefInfo{value, path});
+    if (with_lets) {
+      init_nest_.emplace_back(Bind(arg, value));
+    }
+    return true;
+  }
+
+  auto pointer_as_uint = [](const Expr &expr) {
+    return Call(PrimType::UInt(64), tirx::reinterpret_op(), {expr})
+        .as_or_throw<PrimExpr>();
+  };
+  PrimExpr prev_value = pointer_as_uint(it->second.value);
+  PrimExpr current_value = pointer_as_uint(value);
+  PrimExpr condition = analyzer_->Simplify(prev_value == current_value);
+  if (IsZero(condition)) {
+    TVM_FFI_THROW(InternalError)
+        << "Bind has an unmet pointer assertion at " << RenderAccessPath(path);
+  }
+  if (!IsOne(condition)) {
+    ffi::String current_path = RenderAccessPath(path);
+    ffi::String first_path = RenderAccessPath(it->second.first_def_path);
+    ffi::Array<StringImm> parts{StringImm("Mismatched "),
+                                StringImm(current_path)};
+    if (!first_path.empty() && first_path != current_path) {
+      parts.push_back(StringImm("`,\n  expected to match "));
+      parts.push_back(StringImm(first_path));
+    }
+    asserts_.emplace_back(
+        AssertStmt(condition, StringImm("ValueError"), parts));
+  }
+  return false;
+}
+
+// ============================================================
+// ExprPathRenderer (generic expr-to-string via ExprFunctor)
+// ============================================================
+
+/*!
+ * \brief Render PrimExpr to string with variable names replaced by
+ * ffi::reflection::AccessPath names.
+ *
+ * Uses ExprFunctor for generic dispatch over all expression types.
+ * The default TIR printer sanitizes Var names (e.g. "B.shape[0]" ->
+ * "B_shape_0_") and adds type annotations (e.g. T.int64(1)). This functor
+ * preserves original path names and uses plain integer formatting for
+ * human-readable error messages.
+ */
+class ExprPathRenderer : public ExprFunctor<std::string(const Expr &)> {
+public:
+  using FVarName = std::function<std::string(const VarObj *)>;
+  explicit ExprPathRenderer(FVarName f_var_name)
+      : f_var_name_(std::move(f_var_name)) {}
+
+protected:
+  std::string Dispatch_(const VarObj *op) final { return f_var_name_(op); }
+  std::string Dispatch_(const IntImmObj *op) final {
+    std::ostringstream os;
+    os << op->value;
+    return os.str();
+  }
+  std::string Dispatch_(const FloatImmObj *op) final {
+    std::ostringstream os;
+    os << op->value;
+    return os.str();
+  }
+  std::string Dispatch_(const prim::CastObj *op) final {
+    return Dispatch(op->value);
+  }
+  std::string Dispatch_(const prim::AddObj *op) final {
+    return BinOp(op->a, " + ", op->b);
+  }
+  std::string Dispatch_(const prim::SubObj *op) final {
+    return BinOp(op->a, " - ", op->b);
+  }
+  std::string Dispatch_(const prim::MulObj *op) final {
+    return BinOp(op->a, " * ", op->b);
+  }
+  std::string Dispatch_(const prim::DivObj *op) final {
+    return BinOp(op->a, " / ", op->b);
+  }
+  std::string Dispatch_(const prim::ModObj *op) final {
+    return BinOp(op->a, " % ", op->b);
+  }
+  std::string Dispatch_(const prim::FloorDivObj *op) final {
+    return FuncOp("floordiv", op->a, op->b);
+  }
+  std::string Dispatch_(const prim::FloorModObj *op) final {
+    return FuncOp("floormod", op->a, op->b);
+  }
+  std::string Dispatch_(const prim::MinObj *op) final {
+    return FuncOp("min", op->a, op->b);
+  }
+  std::string Dispatch_(const prim::MaxObj *op) final {
+    return FuncOp("max", op->a, op->b);
+  }
+  // Fallback: use operator<< for unhandled expression types.
+  std::string DispatchDefault_(const ffi::Object *op) final {
+    std::ostringstream os;
+    os << ffi::GetRef<Expr>(static_cast<const ExprObj *>(op));
+    return os.str();
+  }
+
+private:
+  std::string BinOp(const PrimExpr &a, const char *op, const PrimExpr &b) {
+    return Dispatch(a) + op + Dispatch(b);
+  }
+  std::string FuncOp(const char *name, const PrimExpr &a, const PrimExpr &b) {
+    return std::string(name) + "(" + Dispatch(a) + ", " + Dispatch(b) + ")";
+  }
+  FVarName f_var_name_;
+};
+
+// ============================================================
+// RenderPendingAsserts
+// ============================================================
+
+void TVMFFIABIBuilder::RenderPendingAsserts() {
+  if (pending_const_asserts_.empty())
+    return;
+
+  ExprPathRenderer renderer([this](const VarObj *v) -> std::string {
+    if (auto inferred = shape_var_exprs_.find(v);
+        inferred != shape_var_exprs_.end()) {
+      return "(" + inferred->second + ")";
+    }
+    auto it = var_defs_.find(v);
+    if (it != var_defs_.end()) {
+      ffi::String path = RenderAccessPath(it->second.first_def_path);
+      if (!path.empty())
+        return std::string(path);
+    }
+    return std::string(v->name);
+  });
+
+  for (auto &pending : pending_const_asserts_) {
+    std::string display_str = renderer.Dispatch(pending.expected_expr);
+
+    ffi::String path_str = RenderAccessPath(pending.path);
+    int param_index = GetParamIndex(pending.path);
+    ffi::Array<StringImm> parts;
+    parts.push_back(StringImm("Invalid "));
+    parts.push_back(StringImm(path_str));
+    if (param_index >= 0) {
+      parts.push_back(StringImm(" on argument #"));
+      parts.push_back(StringImm(std::to_string(param_index)));
+    }
+    parts.push_back(when_calling_imm_);
+    parts.push_back(sig_imm_);
+    parts.push_back(StringImm("`,\n  expected "));
+    parts.push_back(StringImm(display_str));
+    Stmt check = AssertStmt(pending.condition,
+                            StringImm(TensorErrorKind("ValueError")), parts);
+    if (!IsOne(pending.guard))
+      check = If(pending.guard, check);
+    asserts_.push_back(check);
+  }
+  pending_const_asserts_.clear();
+}
+
+// ============================================================
+// Finalize
+// ============================================================
+
+TVMFFIABIBuilder::Result TVMFFIABIBuilder::Finalize() {
+  RenderPendingAsserts();
+  // A wrong shape can also change compact strides. Check shape constraints
+  // first, after all scalar and implicit dimension bindings are available.
+  for (auto &check : compact_stride_asserts_) {
+    asserts_.push_back(std::move(check));
+  }
+  Result result;
+  result.var_defs = std::move(var_defs_);
+  result.init_nest = std::move(init_nest_);
+  result.asserts = std::move(asserts_);
+  result.decl_tensors = std::move(decl_tensors_);
+  result.tensor_handles = std::move(tensor_handles_);
+  return result;
+}
+
+// ============================================================
+// Per-dtype type-check + value-load methods
+// ============================================================
+
+/*! \brief Load the i-th packed argument as the given type. */
+Expr TVMFFIABIBuilder::LoadTVMFFIAnyUnionValue(const Var &v_packed_args,
+                                               int param_index, Type arg_type) {
+  ffi::Array<Expr> call_args{v_packed_args, IntImm::Int32(param_index),
+                             IntImm::Int32(tirx::kTVMFFIAnyUnionValue)};
+  if (auto prim_type = arg_type.as<PrimType>()) {
+    PrimType api_type = PackedScalarType(prim_type.value());
+    PrimExpr res = Call(api_type, tirx::abi_field_get_op(), call_args)
+                       .as_or_throw<PrimExpr>();
+    if (api_type != prim_type.value()) {
+      res = prim::Cast(prim_type.value(), res);
+    }
+    return res;
+  }
+  TVM_FFI_CHECK(arg_type.as<PtrTypeObj>(), TypeError)
+      << "Packed union values must have primitive or pointer type, but got "
+      << arg_type;
+  return Call(std::move(arg_type), tirx::abi_field_get_op(), call_args);
+}
+
+Expr TVMFFIABIBuilder::DecodeParamOpaqueHandle(int param_index,
+                                               const PrimExpr &type_index) {
+  // ── Type check: accept handle-like types ───────────────────
+  std::string expected_type =
+      params_[param_index]->ty.as<TensorTypeObj>() ? "Tensor" : "pointer";
+  PrimExpr object_type_allowed =
+      params_[param_index]->ty.as<TensorTypeObj>()
+          ? type_index == ffi::TypeIndex::kTVMFFITensor
+          : type_index >= ffi::TypeIndex::kTVMFFIStaticObjectBegin;
+  EmitTypeIndexCheck(param_index,
+                     type_index == ffi::TypeIndex::kTVMFFINone ||
+                         type_index == ffi::TypeIndex::kTVMFFIOpaquePtr ||
+                         type_index == ffi::TypeIndex::kTVMFFIDLTensorPtr ||
+                         object_type_allowed,
+                     expected_type);
+
+  // ── Load value and apply tensor offset ─────────────────────
+  const int64_t object_cell_offset = sizeof(TVMFFIObject);
+  static_assert(sizeof(TVMFFIObject) == 24);
+  Expr arg_value = LoadTVMFFIAnyUnionValue(v_packed_args_, param_index,
+                                           PtrType::VoidPtrType());
+  Expr handle_from_tensor =
+      Call(PtrType::VoidPtrType(), tirx::handle_add_byte_offset_op(),
+           {arg_value, IntImm::Int32(object_cell_offset)});
+  return Call(PtrType::VoidPtrType(), prim::if_then_else_op(),
+              {type_index == ffi::TypeIndex::kTVMFFITensor, handle_from_tensor,
+               arg_value});
+}
+
+PrimExpr TVMFFIABIBuilder::DecodeParamBool(int param_index,
+                                           const PrimExpr &type_index) {
+  // ── Type check: accept bool or int ─────────────────────────
+  EmitTypeIndexCheck(param_index,
+                     type_index == ffi::TypeIndex::kTVMFFIBool ||
+                         type_index == ffi::TypeIndex::kTVMFFIInt,
+                     "boolean");
+  return prim::Cast(
+      PrimType::Bool(),
+      LoadTVMFFIAnyUnionValue(v_packed_args_, param_index, PrimType::Int(64)));
+}
+
+PrimExpr TVMFFIABIBuilder::DecodeParamInt(int param_index,
+                                          const PrimExpr &type_index,
+                                          PrimType dtype) {
+  // ── Type check: accept int or bool ─────────────────────────
+  EmitTypeIndexCheck(param_index,
+                     type_index == ffi::TypeIndex::kTVMFFIInt ||
+                         type_index == ffi::TypeIndex::kTVMFFIBool,
+                     "int");
+  return LoadTVMFFIAnyUnionValue(v_packed_args_, param_index, dtype);
+}
+
+PrimExpr TVMFFIABIBuilder::DecodeParamFloat(int param_index,
+                                            const PrimExpr &type_index,
+                                            PrimType dtype) {
+  // ── Type check: accept float, int, or bool ─────────────────
+  EmitTypeIndexCheck(param_index,
+                     type_index == ffi::TypeIndex::kTVMFFIFloat ||
+                         type_index == ffi::TypeIndex::kTVMFFIInt ||
+                         type_index == ffi::TypeIndex::kTVMFFIBool,
+                     "float");
+  return prim::Select(
+      type_index == ffi::TypeIndex::kTVMFFIFloat,
+      /* true_value = */
+      LoadTVMFFIAnyUnionValue(v_packed_args_, param_index, dtype),
+      /* false_value = */
+      prim::Cast(dtype, LoadTVMFFIAnyUnionValue(v_packed_args_, param_index,
+                                                PrimType::Int(64))));
+}
+
+// ============================================================
+// DecodeParam (primary public method)
+// ============================================================
+
+void TVMFFIABIBuilder::DecodeParam(int param_index) {
+  Var param = params_[param_index];
+
+  // Extract type_index from packed_args
+  Var type_index(param->name + ".type_index", PrimType::Int(32));
+  init_nest_.push_back(
+      Bind(type_index, Call(PrimType::Int(32), tirx::abi_field_get_op(),
+                            {v_packed_args_, IntImm::Int32(param_index),
+                             IntImm::Int32(tirx::kTVMFFIAnyTypeIndex)})
+                           .as_or_throw<PrimExpr>()));
+
+  ffi::reflection::AccessPath param_path =
+      ffi::reflection::AccessPath::Root()->Extend(
+          AccessStep::ArrayItem(param_index));
+
+  if (param->ty.as<NoneTypeObj>()) {
+    // A None parameter still occupies an ABI slot, even when the body ignores
+    // it.
+    EmitTypeIndexCheck(param_index,
+                       type_index.as_or_throw<PrimExpr>() ==
+                           ffi::TypeIndex::kTVMFFINone,
+                       "None");
+    return;
+  }
+
+  if (param->ty.as<TensorTypeObj>()) {
+    Var handle(param->name + ".handle", PtrType::VoidPtrType());
+    Expr handle_value = DecodeParamOpaqueHandle(
+        param_index, type_index.as_or_throw<PrimExpr>());
+    BindPointer(handle, handle_value, param_path, true);
+    tensor_handles_.emplace(param.get(), handle);
+    return;
+  }
+
+  if (param->ty.as<PtrTypeObj>()) {
+    Expr handle_value = DecodeParamOpaqueHandle(
+        param_index, type_index.as_or_throw<PrimExpr>());
+    Expr pointer_value =
+        Call(param->ty, tirx::reinterpret_op(), {handle_value});
+    BindPointer(param, pointer_value, param_path, true);
+    return;
+  }
+
+  PrimType dtype = param->ty.as_or_throw<PrimType>();
+
+  // Type-check and load value via per-dtype dispatch
+  PrimExpr arg_value{ffi::UnsafeInit{}};
+  if (dtype.MatchesCode(DLDataTypeCode::kDLBool)) {
+    arg_value =
+        DecodeParamBool(param_index, type_index.as_or_throw<PrimExpr>());
+  } else if (dtype.MatchesCode(DLDataTypeCode::kDLInt,
+                               DLDataTypeCode::kDLUInt)) {
+    arg_value =
+        DecodeParamInt(param_index, type_index.as_or_throw<PrimExpr>(), dtype);
+  } else {
+    TVM_FFI_ICHECK(
+        dtype.MatchesCode(DLDataTypeCode::kDLFloat, DLDataTypeCode::kDLBfloat));
+    arg_value = DecodeParamFloat(param_index,
+                                 type_index.as_or_throw<PrimExpr>(), dtype);
+  }
+
+  // Bind scalar param to loaded value (defines vars before tensor binds
+  // reference them)
+  BindScalar(param.as_or_throw<PrimExpr>(), arg_value, param_path, true);
+}
+
+// ============================================================
+// DecodeAllParams (primary public method)
+// ============================================================
+
+void TVMFFIABIBuilder::DecodeAllParams() {
+  int num_args = static_cast<int>(params_.size());
+
+  // Decode scalar parameters before any tensor shape can reference them.
+  for (int i = 0; i < num_args; ++i) {
+    DecodeParam(i);
+  }
+
+  collect_tensor_fields_ = allow_null_unused_tensors_;
+
+  // Shape pass 1: Prefer bare-variable dimensions across all arguments.
+  // Per-tensor safety checks still precede the corresponding field loads.
+  for (int i = 0; i < num_args; ++i) {
+    Var param = params_[i];
+    if (auto tensor = param.as<TensorVar>()) {
+      Var handle = tensor_handles_.at(param.get());
+      current_guard_ = IntImm::Bool(true);
+      if (nullable_tensors_.count(param.get())) {
+        Var present(param->name + ".present", PrimType::Bool());
+        init_nest_.push_back(Bind(
+            present, !Call(PrimType::Bool(), tirx::isnullptr_op(), {handle})
+                          .as_or_throw<PrimExpr>()));
+        current_guard_ = present.as_or_throw<PrimExpr>();
+      }
+      ffi::reflection::AccessPath param_path =
+          ffi::reflection::AccessPath::Root()
+              ->Extend(AccessStep::ArrayItem(i))
+              ->Attr(ffi::String(tensor.value()->name));
+      Expr data =
+          DecodeParamDLTensor(tensor.value(), device_type_, device_id_, handle,
+                              func_name_ + "." + param->name, param_path);
+      decl_tensors_.push_back(
+          Bind(tensor.value(), Call(tensor.value().ty(), tirx::decl_tensor_op(),
+                                    {data}, {}, {tensor.value().ty()})));
+      PrimExpr size = IntImm(tensor.value().ty()->DefaultIndexType(), 1);
+      for (const auto &extent : tensor.value().shape())
+        size *= extent;
+      Stmt alignment =
+          Evaluate(Call(PrimType::Void(), tirx::assume_aligned_op(),
+                        {tensor.value(),
+                         IntImm::Int32(tensor.value().ty()->data_alignment)}));
+      // Empty tensors and opaque device handles carry no data-address alignment
+      // promise. DecodeParamDLTensor has already checked or bound the expected
+      // device type.
+      PrimExpr device_type = device_type_;
+      PrimExpr direct_address = device_type <= IntImm::Int32(kDLCUDAHost) ||
+                                device_type == IntImm::Int32(kDLCUDAManaged) ||
+                                device_type == IntImm::Int32(kDLROCM) ||
+                                device_type == IntImm::Int32(kDLROCMHost);
+      PrimExpr aligned_storage =
+          analyzer_->Simplify(current_guard_ && size != 0 && direct_address);
+      if (IsOne(aligned_storage)) {
+        decl_tensors_.push_back(alignment);
+      } else if (!IsZero(aligned_storage)) {
+        decl_tensors_.push_back(If(aligned_storage, alignment));
+      }
+    }
+  }
+  current_guard_ = IntImm::Bool(true);
+  if (collect_tensor_fields_)
+    ResolveTensorFields();
+  // Integer-expression pass 2: Infer only variables not defined by a bare
+  // dimension.
+  for (auto &shape : pending_int_exprs_) {
+    TryBindLinearIntExpr(shape.arg, shape.value, shape.path);
+  }
+  // Integer-expression pass 3: Check the remaining expressions after all
+  // bindings are known.
+  for (const auto &shape : pending_int_exprs_) {
+    BindScalar(shape.arg, shape.value, shape.path, true);
+  }
+  pending_int_exprs_.clear();
+}
+
+// ============================================================
+// DLTensorGetFieldPtr (helper for shape/strides pointer extraction)
+// ============================================================
+
+Var TVMFFIABIBuilder::DLTensorGetFieldPtr(const Var &handle, int field_kind,
+                                          const std::string &var_name) {
+  Type pointer_type = PtrType(DefaultIndexType());
+  Var ptr(var_name, pointer_type);
+  init_nest_.emplace_back(
+      Bind(ptr, ReadTensorField(pointer_type, handle, field_kind)));
+  return ptr;
+}
+
+// ============================================================
+// LoadInt64ArrayElem (helper for shape/strides element access)
+// ============================================================
+
+PrimExpr TVMFFIABIBuilder::LoadInt64ArrayElem(const Var &ptr, int index) {
+  return GuardValue(Call(DefaultIndexType(), tirx::abi_field_get_op(),
+                         {ptr, IntImm::Int32(index),
+                          IntImm::Int32(tirx::kInt64ArrayElem)}))
+      .as_or_throw<PrimExpr>();
+}
+
+PrimExpr TVMFFIABIBuilder::ScalePackedValue(const PrimExpr &value,
+                                            const PrimExpr &factor,
+                                            PrimType type, bool nonnegative,
+                                            const std::string &field,
+                                            std::vector<Stmt> *checks) {
+  auto i64 = PrimType::Int(64);
+  PrimExpr lower = nonnegative || type.MatchesCode(kDLUInt)
+                       ? IntImm::Int64(0)
+                       : cast(min_value(type), i64);
+  // A DLPack extent/stride is int64 even when the logical index type is uint64.
+  PrimExpr upper =
+      type.bits() >= 64 ? max_value(i64) : cast(max_value(type), i64);
+  PrimExpr scale = cast(factor, i64);
+  auto &destination = checks ? *checks : init_nest_;
+  destination.push_back(GuardStmt(AssertStmt(
+      value >= truncdiv(lower, scale) && value <= truncdiv(upper, scale),
+      StringImm(TensorErrorKind("ValueError")),
+      {StringImm(field), StringImm(" is outside its logical index range")})));
+  return cast(value * scale, type);
+}
+
+// ============================================================
+// Strides validation subfunctions
+// ============================================================
+
+void TVMFFIABIBuilder::BindCompactStrides(
+    const TensorVar &tensor, const Var &strides_ptr,
+    const PrimExpr &v_strides_is_null,
+    const ffi::reflection::AccessPath &param_path,
+    const PrimExpr &packing_factor) {
+  PrimType stype = tensor.ty()->DefaultIndexType();
+  PrimExpr expect_stride = IntImm(stype, 1);
+  PrimExpr is_empty = IntImm::Bool(false);
+  for (const auto &extent : tensor.shape())
+    is_empty = is_empty || extent == 0;
+  ffi::Array<PrimExpr> conds;
+  for (size_t i = tensor.shape().size(); i != 0; --i) {
+    size_t k = i - 1;
+    PrimExpr svalue = cast(LoadInt64ArrayElem(strides_ptr, k), stype);
+    if (!IsOne(packing_factor) && k + 1 < tensor.shape().size()) {
+      // Neither an empty compact tensor nor a unit axis addresses its stride.
+      // Select a safe value before emitting the scaling range check, including
+      // when the physical stride has an otherwise overflowing int64 value.
+      PrimExpr ignored =
+          v_strides_is_null || is_empty || tensor.shape()[k] == 1;
+      PrimExpr physical = tvm::if_then_else(ignored, IntImm::Int64(0),
+                                            LoadInt64ArrayElem(strides_ptr, k));
+      // This predicate depends on implicit dimensions, which may be bound by
+      // later parameters. Keep its range check with the compactness checks,
+      // after all dimensions are defined and before using the scaled stride.
+      svalue =
+          ScalePackedValue(physical, packing_factor, stype, false,
+                           tensor->name + ".strides[" + std::to_string(k) + "]",
+                           &compact_stride_asserts_);
+    }
+    conds.push_back(tensor.shape()[k] == 1 || expect_stride == svalue);
+    expect_stride = expect_stride * tensor.shape()[k];
+  }
+  if (conds.size() != 0) {
+    int param_index = GetParamIndex(param_path);
+    Stmt check = AssertStmt(
+        // No element is addressed when any dimension is zero. DLPack permits
+        // arbitrary strides in that case (NumPy exports zeros), just as it
+        // permits arbitrary strides for individual unit dimensions.
+        is_empty || foldl([](PrimExpr a, PrimExpr b,
+                             Location loc) { return logical_and(a, b, loc); },
+                          IntImm::Bool(true), conds),
+        StringImm(TensorErrorKind("ValueError")),
+        ffi::Array<StringImm>(
+            {StringImm("Mismatched "), StringImm(tensor->name),
+             StringImm(".strides on argument #"),
+             StringImm(std::to_string(param_index)), when_calling_imm_,
+             sig_imm_, StringImm("`,\n  expected to be compact array")}));
+    check = If(prim::Not(v_strides_is_null), check);
+    compact_stride_asserts_.emplace_back(GuardStmt(SeqStmt({check})));
+  }
+}
+
+void TVMFFIABIBuilder::BindRegularStrides(
+    const TensorVar &tensor, const Var &strides_ptr, const Var &shape_ptr,
+    const PrimExpr &v_strides_is_null,
+    const ffi::reflection::AccessPath &param_path,
+    const PrimExpr &packing_factor) {
+  PrimExpr stride_from_shape =
+      IsOne(packing_factor) ? PrimExpr(1) : IntImm::Int64(1);
+  auto strides = MatchShapeStridePattern(tensor.ty()).value().get<1>();
+  for (int k = strides.size() - 1; k >= 0; k--) {
+    PrimType stride_type = strides[k].ty();
+    PrimExpr physical_stride =
+        tvm::if_then_else(v_strides_is_null, stride_from_shape,
+                          LoadInt64ArrayElem(strides_ptr, k));
+    PrimExpr logical_stride = cast(physical_stride, stride_type);
+    if (!IsOne(packing_factor) && k + 1 < static_cast<int>(strides.size())) {
+      logical_stride = ScalePackedValue(
+          physical_stride, packing_factor, stride_type, false,
+          tensor->name + ".strides[" + std::to_string(k) + "]");
+    }
+    ffi::reflection::AccessPath strides_k_path =
+        param_path->Attr(ffi::String("strides"))->ArrayItem(k);
+    BindScalar(strides[k], logical_stride, strides_k_path, true);
+    PrimType physical_type =
+        IsOne(packing_factor) ? tensor.shape()[k].ty() : PrimType::Int(64);
+    stride_from_shape *= cast(LoadInt64ArrayElem(shape_ptr, k), physical_type);
+  }
+}
+
+// ============================================================
+// DecodeParamDLTensor (private)
+// ============================================================
+
+Expr TVMFFIABIBuilder::DecodeParamDLTensor(
+    const TensorVar &tensor, const PrimExpr &device_type,
+    const PrimExpr &device_id, const Var &handle, const std::string &arg_name,
+    ffi::reflection::AccessPath base_path) {
+  auto pattern = MatchShapeStridePattern(tensor.ty());
+  TVM_FFI_CHECK(pattern.has_value(), ValueError)
+      << "Tensor parameters require a shape-aligned strided memory layout";
+  PrimExpr elem_offset = pattern.value().get<2>();
+  const PrimType tvm_ndim_type = PrimType::Int(32);
+
+  std::string buf_name = tensor->name;
+  ffi::reflection::AccessPath param_path = base_path;
+  int param_index = GetParamIndex(base_path);
+  int logical_bits = tensor.dtype().bits() * tensor.dtype().lanes();
+  bool packed_subbyte = allow_packed_subbyte_tensors_ && logical_bits > 0 &&
+                        logical_bits < 8 && 8 % logical_bits == 0 &&
+                        !tensor.dtype().MatchesCode(kDLBool);
+  PrimExpr packing_factor = IntImm::Int64(1);
+
+  // ── Section: Null pointer check ──────────────────────────────
+  EmitTypeIndexCheck(param_index,
+                     !Call(PrimType::Bool(), tirx::isnullptr_op(), {handle})
+                          .as_or_throw<PrimExpr>(),
+                     "Tensor");
+
+  // ── Section: ndim ────────────────────────────────────────────
+  PrimExpr v_ndim = ReadTensorField(tvm_ndim_type, handle, tirx::kDLTensorNDim)
+                        .as_or_throw<PrimExpr>();
+  PrimExpr a_ndim =
+      IntImm(tvm_ndim_type, static_cast<int64_t>(tensor.shape().size()));
+  EmitAssert(a_ndim == v_ndim, TensorErrorKind("ValueError"), //
+             "Mismatched ", buf_name, ".ndim on argument #",
+             std::to_string(param_index), when_calling_imm_, sig_imm_,
+             "`,\n  expected ", std::to_string(tensor.shape().size()));
+
+  // ── Section: dtype ───────────────────────────────────────────
+  {
+    PrimExpr actual_bits =
+        ReadTensorField(PrimType::UInt(8), handle, tirx::kDLTensorTypeBits)
+            .as_or_throw<PrimExpr>();
+    PrimExpr actual_lanes =
+        ReadTensorField(PrimType::UInt(16), handle, tirx::kDLTensorTypeLanes)
+            .as_or_throw<PrimExpr>();
+    PrimExpr actual_code =
+        ReadTensorField(PrimType::UInt(8), handle, tirx::kDLTensorTypeCode)
+            .as_or_throw<PrimExpr>();
+    PrimExpr code_matches =
+        actual_code == IntImm(PrimType::UInt(8), tensor.dtype().code());
+    if (allow_fp8_dtype_aliases_) {
+      if (tensor.dtype().MatchesCode(kDLFloat8_e4m3)) {
+        code_matches =
+            code_matches ||
+            actual_code == IntImm(PrimType::UInt(8), kDLFloat8_e4m3fn) ||
+            actual_code == IntImm(PrimType::UInt(8), kDLFloat8_e4m3fnuz);
+      } else if (tensor.dtype().MatchesCode(kDLFloat8_e5m2)) {
+        code_matches =
+            code_matches ||
+            actual_code == IntImm(PrimType::UInt(8), kDLFloat8_e5m2fnuz);
+      }
+    }
+    // TF32 is a logical computation tag over float32 storage. Preserve the
+    // source binder's directional alias without changing the tensor type used
+    // by GEMM selection or accepting other equal-width custom types.
+    if (allow_tf32_storage_alias_ && IsTensorFloat32(tensor.dtype())) {
+      code_matches =
+          code_matches || actual_code == IntImm(PrimType::UInt(8), kDLFloat);
+    }
+    PrimExpr bits_matches =
+        actual_bits == IntImm(PrimType::UInt(8), tensor.dtype().bits());
+    PrimExpr lanes_matches =
+        actual_lanes == IntImm(PrimType::UInt(16), tensor.dtype().lanes());
+    PrimExpr cond = code_matches && bits_matches && lanes_matches;
+    if (packed_subbyte && !tensor.shape().empty()) {
+      // Byte storage is an explicit bit representation, not a numeric cast.
+      // One physical cell expands only the innermost logical dimension.
+      PrimExpr is_byte_storage =
+          cast(actual_bits, PrimType::Int(32)) *
+                  cast(actual_lanes, PrimType::Int(32)) ==
+              IntImm::Int32(8) &&
+          actual_code != IntImm(PrimType::UInt(8), kDLBool);
+      packing_factor = tvm::if_then_else(cond, IntImm::Int64(1),
+                                         IntImm::Int64(8 / logical_bits));
+      cond = cond || is_byte_storage;
+    }
+    if (packed_subbyte || !(tensor.dtype() == PrimType::Int(1) ||
+                            tensor.dtype() == PrimType::Int(4) ||
+                            tensor.dtype() == PrimType::UInt(4))) {
+      std::ostringstream dtype_os;
+      dtype_os << tensor.dtype()->dtype;
+      EmitAssert(cond, TensorErrorKind("TypeError"), //
+                 "Mismatched ", buf_name, ".dtype on argument #",
+                 std::to_string(param_index), when_calling_imm_, sig_imm_,
+                 "`,\n  expected ", dtype_os.str());
+    }
+  }
+
+  // ── Section: shape ───────────────────────────────────────────
+  Var shape_ptr =
+      DLTensorGetFieldPtr(handle, tirx::kDLTensorShape, arg_name + "_shape");
+  if (!tensor.shape().empty()) {
+    EmitAssert(!Call(PrimType::Bool(), tirx::isnullptr_op(), {shape_ptr})
+                    .as_or_throw<PrimExpr>(),
+               TensorErrorKind("ValueError"), buf_name,
+               " shape pointer is NULL");
+  }
+  for (size_t k = 0; k < tensor.shape().size(); ++k) {
+    if (!packed_subbyte && (tensor.dtype() == PrimType::Int(4) ||
+                            tensor.dtype() == PrimType::UInt(4) ||
+                            tensor.dtype() == PrimType::Int(1))) {
+      break;
+    }
+    ffi::reflection::AccessPath shape_k_path =
+        param_path->Attr(ffi::String("shape"))->ArrayItem(k);
+    PrimExpr shape = tensor.shape()[k];
+    PrimExpr physical = LoadInt64ArrayElem(shape_ptr, k);
+    PrimExpr value = cast(physical, shape.ty());
+    if (packed_subbyte) {
+      PrimExpr scale =
+          k + 1 == tensor.shape().size() ? packing_factor : IntImm::Int64(1);
+      value = ScalePackedValue(physical, scale, shape.ty(), true,
+                               buf_name + ".shape[" + std::to_string(k) + "]");
+    }
+    if (collect_tensor_fields_ || shape.as<VarObj>()) {
+      BindScalar(shape, value, shape_k_path, true);
+    } else {
+      pending_int_exprs_.push_back({shape, value, shape_k_path});
+    }
+  }
+
+  // ── Section: strides ─────────────────────────────────────────
+  Var strides_ptr = DLTensorGetFieldPtr(handle, tirx::kDLTensorStrides,
+                                        arg_name + "_strides");
+  PrimExpr v_strides_is_null =
+      Call(PrimType::Bool(), tirx::isnullptr_op(), {strides_ptr})
+          .as_or_throw<PrimExpr>();
+  if (!IsOne(packing_factor)) {
+    PrimExpr is_empty = IntImm::Bool(false);
+    for (const auto &extent : tensor.shape())
+      is_empty = is_empty || extent == 0;
+    PrimExpr last_stride = tvm::if_then_else(
+        v_strides_is_null, IntImm::Int64(1),
+        LoadInt64ArrayElem(strides_ptr,
+                           static_cast<int>(tensor.shape().size()) - 1));
+    asserts_.emplace_back(GuardStmt(AssertStmt(
+        is_empty || packing_factor == 1 || last_stride == 1,
+        StringImm(TensorErrorKind("ValueError")),
+        {StringImm(
+            buf_name +
+            " requires unit stride in its packed sub-byte dimension")})));
+  }
+  if (!tensor.ty()->layout.has_value()) {
+    BindCompactStrides(tensor, strides_ptr, v_strides_is_null, param_path,
+                       packing_factor);
+  } else {
+    BindRegularStrides(tensor, strides_ptr, shape_ptr, v_strides_is_null,
+                       param_path, packing_factor);
+  }
+
+  // ── Section: byte_offset ─────────────────────────────────────
+  int data_bytes = static_cast<int>(tensor.dtype().StorageBytes());
+  ffi::reflection::AccessPath byte_offset_path =
+      param_path->Attr(ffi::String("byte_offset"));
+  if (packed_subbyte) {
+    // Layout offsets count logical elements; DLPack offsets always count bytes.
+    int factor = 8 / logical_bits;
+    PrimExpr byte_offset =
+        ReadTensorField(PrimType::UInt(64), handle, tirx::kDLTensorByteOffset)
+            .as_or_throw<PrimExpr>();
+    PrimType offset_type = elem_offset.ty();
+    PrimExpr maximum = cast(max_value(offset_type), PrimType::UInt(64));
+    EmitAssert(byte_offset <=
+                   truncdiv(maximum, MakeConst(PrimType::UInt(64), factor)),
+               TensorErrorKind("ValueError"),
+               "Tensor byte offset is outside its logical index range");
+    PrimExpr runtime_origin =
+        cast(byte_offset, offset_type) * MakeConst(offset_type, factor);
+    if (collect_tensor_fields_ || elem_offset.as<VarObj>()) {
+      BindScalar(elem_offset, runtime_origin, byte_offset_path, true);
+    } else {
+      pending_int_exprs_.push_back(
+          {elem_offset, runtime_origin,
+           param_path->Attr(ffi::String("elem_offset"))});
+    }
+  } else if (const auto *const_offset = elem_offset.as<IntImmObj>()) {
+    BindScalar(
+        IntImm(PrimType::UInt(64), const_offset->value * data_bytes),
+        ReadTensorField(PrimType::UInt(64), handle, tirx::kDLTensorByteOffset)
+            .as_or_throw<PrimExpr>(),
+        byte_offset_path, true);
+  } else {
+    PrimExpr byte_offset =
+        ReadTensorField(PrimType::UInt(64), handle, tirx::kDLTensorByteOffset)
+            .as_or_throw<PrimExpr>();
+    EmitAssert(
+        truncmod(byte_offset, MakeConst(PrimType::UInt(64), data_bytes)) ==
+            MakeConst(PrimType::UInt(64), 0),
+        TensorErrorKind("ValueError"),
+        "Tensor byte offset must be divisible by its element size");
+    PrimExpr runtime_origin =
+        cast(byte_offset / MakeConst(PrimType::UInt(64), data_bytes),
+             elem_offset.ty());
+    if (collect_tensor_fields_ || elem_offset.as<VarObj>()) {
+      BindScalar(elem_offset, runtime_origin, byte_offset_path, true);
+    } else {
+      // Linear offsets bind in element units, after byte-offset conversion.
+      pending_int_exprs_.push_back(
+          {elem_offset, runtime_origin,
+           param_path->Attr(ffi::String("elem_offset"))});
+    }
+  }
+
+  // ── Section: device ──────────────────────────────────────────
+  {
+    PrimExpr actual_device_type =
+        ReadTensorField(PrimType::Int(32), handle, tirx::kDLTensorDeviceType)
+            .as_or_throw<PrimExpr>();
+    // Use custom assertion for device_type to show human-readable device name
+    if (const auto *const_dt = device_type_.as<IntImmObj>()) {
+      PrimExpr cond = analyzer_->Simplify(IntImm::Int32(const_dt->value) ==
+                                          actual_device_type);
+      if (!IsOne(cond)) {
+        std::string device_name =
+            runtime::DLDeviceType2Str(const_dt->value.as<int>().value());
+        EmitAssert(cond, TensorErrorKind("ValueError"), //
+                   "Mismatched ", buf_name, ".device_type on argument #",
+                   std::to_string(param_index), when_calling_imm_, sig_imm_,
+                   "`,\n  expected ", device_name);
+      }
+    } else {
+      ffi::reflection::AccessPath device_type_path =
+          param_path->Attr(ffi::String("device_type"));
+      BindScalar(device_type_, actual_device_type, device_type_path, true);
+    }
+    ffi::reflection::AccessPath device_id_path =
+        param_path->Attr(ffi::String("device_id"));
+    BindScalar(
+        device_id_,
+        ReadTensorField(PrimType::Int(32), handle, tirx::kDLTensorDeviceId)
+            .as_or_throw<PrimExpr>(),
+        device_id_path, true);
+  }
+
+  // ── Section: data pointer ────────────────────────────────────
+  {
+    ffi::reflection::AccessPath data_path =
+        param_path->Attr(ffi::String("data"));
+    Expr raw_data =
+        ReadTensorField(PtrType::VoidPtrType(), handle, tirx::kDLTensorData);
+    Expr typed_data =
+        Call(tensor.ty()->DataPtrType(), tirx::reinterpret_op(), {raw_data});
+    {
+      // Descriptor validity only depends on the allocation address. Keep these
+      // host checks untyped: a device tensor may have no C scalar element type
+      // (for example FP4). The tensor declaration below retains typed_data.
+      Expr vptr = raw_data;
+
+      auto alloc_size = [&]() -> PrimExpr {
+        PrimExpr product = IntImm(tensor.ty()->DefaultIndexType(), 1);
+        for (const auto &dim : tensor.shape()) {
+          product *= dim;
+        }
+        return product;
+      }();
+      // Data pointer null and alignment checks go to asserts_ because
+      // alloc_size references tensor->shape which may contain
+      // forward-referenced symbolic vars.
+      PrimExpr empty_alloc = cast(alloc_size == 0, PrimType::Bool());
+      PrimExpr data_non_null =
+          !Call(PrimType::Bool(), tirx::isnullptr_op(), {vptr})
+               .as_or_throw<PrimExpr>();
+      asserts_.emplace_back(GuardStmt(AssertStmt(
+          empty_alloc || data_non_null,
+          StringImm(TensorErrorKind("ValueError")),
+          ffi::Array<StringImm>(
+              {StringImm(buf_name),
+               StringImm(" data pointer is NULL on argument #"),
+               StringImm(std::to_string(param_index)), when_calling_imm_,
+               sig_imm_, StringImm("`,\n  expected non-NULL data pointer")}))));
+
+      {
+        // Only direct-address devices expose the data address in
+        // DLTensor::data. Opaque device handles (such as OpenCL buffer
+        // descriptors) have no such alignment. Reuse the checked device type so
+        // fixed-target guards simplify statically.
+        PrimExpr device_type = device_type_;
+        PrimExpr direct_address =
+            device_type <= IntImm::Int32(kDLCUDAHost) ||
+            device_type == IntImm::Int32(kDLCUDAManaged) ||
+            device_type == IntImm::Int32(kDLROCM) ||
+            device_type == IntImm::Int32(kDLROCMHost);
+        // Keep this predicate consistent with ffi::IsDirectAddressDevice.
+        // Check the allocation base, matching the assume_aligned on tensor
+        // data.
+        if (tensor.ty()->data_alignment > 1) {
+          Expr handle = Call(PtrType::VoidPtrType(), tirx::reinterpret_op(),
+                             ffi::Array<Expr>{vptr});
+          PrimExpr ptr_as_int = Call(PrimType::UInt(64), tirx::reinterpret_op(),
+                                     ffi::Array<Expr>{handle})
+                                    .as_or_throw<PrimExpr>();
+          PrimExpr align_cond =
+              truncmod(ptr_as_int, IntImm(PrimType::UInt(64),
+                                          tensor.ty()->data_alignment)) ==
+              IntImm(PrimType::UInt(64), 0);
+          asserts_.emplace_back(GuardStmt(AssertStmt(
+              empty_alloc || !direct_address || align_cond,
+              StringImm(TensorErrorKind("ValueError")),
+              ffi::Array<StringImm>(
+                  {StringImm("Misaligned Tensor data on argument #"),
+                   StringImm(std::to_string(param_index)), when_calling_imm_,
+                   sig_imm_, StringImm("`,\n  expected data alignment="),
+                   StringImm(std::to_string(tensor.ty()->data_alignment)),
+                   StringImm(" bytes")}))));
         }
       }
     }
-
-    // Byte_offset field.
-    int data_bytes = GetVectorBytes(buffer->dtype);
-
-    if (const auto *const_offset = buffer->elem_offset.as<IntImmNode>()) {
-      // Constant elem_offset: only need consistency check, no need for
-      // additional Var binding.
-      PrimExpr actual_byte_offset = tvm::if_then_else(
-          Not(is_null),
-          TVMArrayGet(DataType::UInt(64), handle, builtin::kDLTensorByteOffset),
-          make_const(DataType::UInt(64), 0));
-      PrimExpr expect_byte_offset =
-          make_const(DataType::UInt(64), const_offset->value * data_bytes);
-      PrimExpr ok = (expect_byte_offset == actual_byte_offset);
-      BinderAddAssert(&analyzer_, ok, arg_name + ".byte_offset", &asserts_,
-                      is_null);
-    } else {
-      PrimExpr actual_byte_offset = tvm::if_then_else(
-          Not(is_null),
-          TVMArrayGet(DataType::UInt(64), handle, builtin::kDLTensorByteOffset),
-          make_const(DataType::UInt(64), 0));
-      PrimExpr expect_elem_off = cast(
-          buffer->elem_offset.dtype(),
-          (actual_byte_offset / make_const(DataType::UInt(64), data_bytes)));
-
-      BindNullable(buffer->elem_offset, expect_elem_off,
-                   arg_name + ".elem_offset", true, is_null);
-
-      if (buffer->offset_factor > 1) {
-        PrimExpr offset = buffer->elem_offset;
-        PrimExpr factor = make_const(offset.dtype(), buffer->offset_factor);
-        PrimExpr zero = make_zero(offset.dtype());
-        BindNullable(offset, truncmod(offset, factor),
-                     arg_name + ".elem_offset", true, is_null);
-      }
-    }
-
-    // device info.
-    // Define device_id from handle when available (so later passes can use it)
-    PrimExpr actual_dev_type = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceType),
-        make_zero(DataType::Int(32)));
-    PrimExpr actual_dev_id = tvm::if_then_else(
-        Not(is_null),
-        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
-        make_zero(DataType::Int(32)));
-
-    // Bind device_id to a safe expression (0 when NULL handle)
-    BindNullable(device_id, actual_dev_id, arg_name + ".device_id", true,
-                 is_null);
-    // Check device_type consistency (device_id equality is implicitly ensured
-    // by binding above)
-    {
-      PrimExpr ok = (device_type == actual_dev_type);
-      std::ostringstream device_msg;
-      device_msg << "kernel " << kernel_nm << " input " << buf_nm
-                 << " device_type mismatch";
-      if (const auto *const_device_type = device_type.as<IntImmNode>()) {
-        device_msg << ", expected "
-                   << runtime::DLDeviceType2Str(
-                          static_cast<int>(const_device_type->value));
-      }
-      asserts_.emplace_back(
-          AssertStmt(Or(is_null, ok), StringImm("RuntimeError"),
-                     Array<StringImm>({StringImm(device_msg.str())})));
-    }
-
-    // Data field.  Because the validation of the data field may depend
-    // on a dynamic size defined by the other DLTensor* parameters, this
-    // field must be generated last.
-    // Bind data pointer using expression-level guard to avoid deref on NULL.
-    {
-      Var vptr(buffer->data);
-      PrimExpr data_ptr = tvm::if_then_else(
-          Not(is_null),
-          TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorData),
-          make_zero(DataType::Handle()));
-      BindNullable(buffer->data, data_ptr, arg_name + ".data", true, is_null);
-
-      // Check if the data pointer is NULL.  This check is skipped for
-      // size-0 arrays and also skipped when handle itself is NULL.
-      PrimExpr alloc_size = IntImm(buffer->DefaultIndexType(), 1);
-      for (const auto &dim : buffer->shape) {
-        alloc_size = alloc_size * dim;
-      }
-      // Improve message: kernel/buffer naming for data pointer null check
-      std::string kernel_nm2 = arg_name;
-      std::string buf_nm2 = arg_name;
-      size_t dot_pos2 = arg_name.find('.');
-      if (dot_pos2 != std::string::npos) {
-        kernel_nm2 = arg_name.substr(0, dot_pos2);
-        buf_nm2 = arg_name.substr(dot_pos2 + 1);
-      }
-      std::ostringstream data_msg;
-      data_msg << "kernel " << kernel_nm2 << " input " << buf_nm2
-               << " data pointer is NULL";
-      PrimExpr data_ptr_ok =
-          Or(is_null, Or(alloc_size == 0, !Call(DataType::Bool(),
-                                                builtin::isnullptr(), {vptr})));
-      asserts_.emplace_back(
-          AssertStmt(data_ptr_ok, StringImm("RuntimeError"),
-                     Array<StringImm>({StringImm(data_msg.str())})));
-
-      // mark alignment of external bufs
-      init_nest_.emplace_back(
-          AttrStmt(vptr, tirx::attr::storage_alignment,
-                   IntImm(DataType::Int(32), buffer->data_alignment), nop));
-
-      def_handle_dtype_.Set(vptr, tirx::TypeAnnotation(buffer->dtype));
-    }
+    return typed_data;
   }
 }
 

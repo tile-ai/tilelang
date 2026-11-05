@@ -1,118 +1,59 @@
 /*!
  * \file cpu/codegen/codegen_c.h
- * \brief Generate C code when target is c (CPU).
+ * \brief TileLang CPU C code generation over native TIRx IR.
  */
 #ifndef TILELANG_CPU_CODEGEN_CODEGEN_C_H_
 #define TILELANG_CPU_CODEGEN_CODEGEN_C_H_
 
-#include "support/check.h"
-#include <string>
-#include <unordered_map>
 #include <unordered_set>
-#include <utility>
-#include <vector>
 
-#include "backend/common/codegen/codegen_c_base.h"
-#include "tvm/target/codegen.h"
-#include <tvm/tirx/expr.h>
+#include "backend/common/codegen/codegen_c_host.h"
 
-namespace tvm {
-namespace codegen {
+namespace tvm::codegen {
 
-class CodeGenTileLangC : public CodeGenTileLangCBase {
+/*!
+ * \brief CPU device emitter sharing TileLang's FFI and scalar C implementation.
+ *
+ * The device-specific behavior is the template preamble, clamp, OpenMP loop
+ * chains, stack storage, and portable non-finite floating-point literals.
+ */
+class CodeGenTileLangC final : public tl::CodeGenCHost {
 public:
-  CodeGenTileLangC();
+  using tl::CodeGenCHost::Dispatch;
+  using tl::CodeGenCHost::Dispatch_;
+  using tl::CodeGenCHost::PrintType;
+
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
             std::string target_str,
             const std::unordered_set<std::string> &devices);
+  void Dispatch_(const CallObj *op, std::ostream &os) override;
+  void InitFuncState(const Function &func) override;
+  void Dispatch_(const FloatImmObj *op, std::ostream &os) override;
+  void Dispatch_(const prim::BroadcastObj *op, std::ostream &os) override;
+  void Dispatch_(const prim::SelectObj *op, std::ostream &os) override;
+  void Dispatch_(const prim::NotObj *op, std::ostream &os) override;
+  void PrintType(const PrimType &type, std::ostream &os) override;
+  void PrintVecBinaryOp(const std::string &op, const PrimType &type,
+                        PrimExpr lhs, PrimExpr rhs, std::ostream &os) override;
+  void Dispatch_(const ForObj *op) override;
+  void PrintStorageScope(const runtime::MemoryScope &scope,
+                         std::ostream &os) override;
 
-  void InitGlobalContext();
-  // Override this as a work around for non tvm runtime code generations
-  void AddFunction(const PrimFunc &f);
-
-  /*!
-   * \brief Add functions from the (unordered) range to the current module in a
-   * deterministic order. This helps with debugging.
-   *
-   * \param functions A vector of unordered range of current module.
-   */
-  void AddFunctionsOrdered(
-      std::vector<std::pair<tvm::GlobalVar, tvm::BaseFunc>> functions);
-  void DefineModuleName();
-
-  using CodeGenC::PrintType;
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintFuncPrefix(std::ostream &os) final;       // NOLINT(*)
-
-  // overload visitor functions
-  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
-  // overload min and max to use the ternary operator, so we don't rely on the
-  // standard library implementations
-  void VisitExpr_(const MinNode *op, std::ostream &os) final;      // NOLINT(*)
-  void VisitExpr_(const MaxNode *op, std::ostream &os) final;      // NOLINT(*)
-  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final; // NOLINT(*)
-
-  void VisitStmt_(const AssertStmtNode *op) final;  // NOLINT(*)
-  void VisitStmt_(const AllocBufferNode *op) final; // NOLINT(*)
-  /*! \brief Emit `#pragma omp parallel for [collapse(n)] [num_threads(m)]`
-   * for kParallel loops (CPU OpenMP lowering); other kinds go to the base
-   * printer, which is kind-agnostic. */
-  void VisitStmt_(const ForNode *op) final; // NOLINT(*)
-
-  void GenerateForwardFunctionDeclarations(ffi::String global_symbol,
-                                           const ffi::Array<Type> &arg_types,
-                                           const Type &ret_type) override;
-  ffi::Array<ffi::String> GetFunctionNames() { return function_names_; }
+protected:
+  void PrintVecElemLoad(const std::string &vec, const PrimType &type, int lane,
+                        std::ostream &os) override;
+  void PrintVecElemStore(const std::string &vec, const PrimType &type, int lane,
+                         const std::string &value) override;
+  void PrintVecElemLoadExpr(const PrimType &type, int lane,
+                            const std::string &value,
+                            std::ostream &os) override;
 
 private:
-  /* \brief Internal structure to store information about function calls */
-  struct FunctionInfo {
-    /* \brief function name */
-    std::string func_name;
-    /* number of arguments required by the function */
-    int64_t num_args;
-    /* \brief name of resource_handle to pass */
-    std::string resource_handle_name;
-  };
-  std::string module_name_;
-  /* \brief mapping global packed func to the unique name */
-  std::unordered_map<std::string, std::string> declared_globals_;
-  /* \brief names of the functions declared in this module */
-  ffi::Array<ffi::String> function_names_;
-  /*! \brief whether to emit asserts in the resulting C code */
-  bool emit_asserts_;
-  /*! \brief whether to emit forward function declarations in the resulting C
-   * code */
-  bool emit_fwd_func_decl_;
-  /*! \brief For-node identities of the kParallel loops that are members of
-   * the `#pragma omp parallel for [collapse(n)]` chain currently being
-   * printed; they must not re-emit the pragma. Identity-based so that a
-   * different kParallel loop reached through wrapper statements inside the
-   * chain body still gets its own pragma. */
-  std::unordered_set<const ForNode *> omp_chain_members_;
-
-  FunctionInfo GetFunctionInfo(const CallNode *op, bool has_resource_handle);
-  std::string GetPackedName(const CallNode *op);
-  void PrintGetFuncFromBackend(const std::string &func_name,
-                               const std::string &packed_func_name);
-  void PrintFuncCall(const std::string &packed_func_name, int num_args);
-  void PrintFuncCallC(const std::string &packed_func_name, int num_args,
-                      const std::string &resource_handle_name);
-
-  /*!
-   * \brief Print ternary conditional operator implementing binary `op`
-   * Forces the operands to be in SSA form.
-   * \param op binary operator being expressed
-   * \param compare string representation of comparison operator
-   * \param os stream reference to print into
-   */
-  template <typename T>
-  inline void PrintTernaryCondExpr(const T *op, const char *compare,
-                                   std::ostream &os); // NOLINT(*)
+  // Identity-based membership keeps a separate parallel loop inside a wrapper
+  // independent of the directly nested OpenMP collapse chain.
+  std::unordered_set<const ForObj *> omp_chain_members_;
 };
 
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::codegen
 
 #endif // TILELANG_CPU_CODEGEN_CODEGEN_C_H_

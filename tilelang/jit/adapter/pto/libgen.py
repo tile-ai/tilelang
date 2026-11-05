@@ -11,8 +11,8 @@ import sys
 import textwrap
 from pathlib import Path
 
-from tvm.contrib import utils
-from tvm.target import Target
+from tvm_tirx.support import utils
+from tvm_tirx.target import Target
 
 from tilelang.env import env
 from tilelang.jit.adapter.libgen import LibraryGenerator
@@ -237,6 +237,24 @@ class PTOLibraryGenerator(LibraryGenerator):
             launch_obj,
             "-Wl,--no-as-needed",
         ]
+
+        # The source host uses the installed provider's FFI error channel and
+        # C runtime declarations, just like the other native source adapters.
+        from tvm_ffi import libinfo as ffi_info
+        from tvm_tirx import libinfo as tirx_info
+
+        compile_cmd += [
+            "-I" + path
+            for path in (
+                tirx_info.find_include_path(),
+                ffi_info.find_include_path(),
+                ffi_info.find_dlpack_include_path(),
+            )
+        ]
+        libraries = [Path(ffi_info.find_libtvm_ffi()).resolve(), Path(tirx_info.find_libtvm_runtime()).resolve()]
+        link_cmd += [str(path) for path in libraries]
+        link_cmd += ["-Wl,-rpath," + str(path) for path in dict.fromkeys(library.parent for library in libraries)]
+        compile_cmd += [flag for item in (self.compile_flags or []) for flag in shlex.split(item)]
 
         for cmd in (compile_cmd, link_cmd):
             if self.verbose:

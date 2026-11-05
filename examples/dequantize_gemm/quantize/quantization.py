@@ -22,12 +22,13 @@
 """TIR computation utilities for quantization."""
 
 from tilelang import language as T
-from tilelang import tvm as tvm
-from tvm import tirx
+from tvm_tirx import ir
+from tvm_tirx.ir import prim
+from tvm_tirx.tirx import reinterpret
 
 
 # fmt: off
-def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr,
+def _tir_u8_to_f4_to_bf16(nbit: int, val: ir.Expr, pos: ir.Expr, scale: ir.Expr,
                           dtype: str):
     """
         Convert a packed 4-bit field stored in a uint8 into a bfloat16 value using an exponent scale.
@@ -36,7 +37,7 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
         a bfloat16 constructed from the unpacked sign, a scaled exponent, and the 1-bit mantissa.
 
         Behavior:
-        - Validates `nbit == 4`, `dtype == T.bfloat16`, and `val.dtype == T.uint8` (AssertionError if violated).
+        - Validates `nbit == 4`, `dtype == T.bfloat16`, and `val.ty.dtype == T.uint8` (AssertionError if violated).
         - Extracts the 4-bit field at position `pos` (fields are packed consecutively in `val`).
         - Interprets the 4-bit field as: sign = bit3, exponent = bits1-2, mantissa = bit0.
         - Converts the 2-bit exponent to bf16 exponent space by adding a bias of 126, adds `scale` to that exponent,
@@ -52,27 +53,26 @@ def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, sca
         - dtype: must be T.bfloat16.
 
         Returns:
-        - A tirx.PrimExpr of dtype "bfloat16" representing the decoded and scaled value.
+        - A ir.Expr of dtype "bfloat16" representing the decoded and scaled value.
         """
     assert nbit == 4
     assert dtype == T.bfloat16
-    assert val.dtype == T.uint8
-    mask = tirx.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-    s = f4 >> tirx.const(3, T.uint16)
-    e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
+    assert val.ty.dtype == T.uint8
+    mask = ir.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * ir.const(nbit, T.uint16))) & mask
+    s = f4 >> ir.const(3, T.uint16)
+    e_f4 = (f4 & ir.const(6, T.uint16)) >> ir.const(1, T.uint16)
     # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-    e_bf16 = e_f4 + tirx.const(126, T.uint16)
+    e_bf16 = e_f4 + ir.const(126, T.uint16)
     # Scale is the exponential part, within the representation of uint8
     # Clamp the scaled exponent to the maximum value representable in 8 bits.
-    e_bf16 = T.min(e_bf16 + T.cast(scale, T.uint16), tirx.const((1 << 8) - 1, T.uint16))
-    m_f4 = f4 & tirx.const(1, T.uint16)
-    val_bf16 = tirx.reinterpret(T.bfloat16,
-                               ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16))
-                                | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16))
+    e_bf16 = T.min(e_bf16 + T.cast(scale, T.uint16), ir.const((1 << 8) - 1, T.uint16))
+    m_f4 = f4 & ir.const(1, T.uint16)
+    val_bf16 = reinterpret(((((s << ir.const(8, T.uint16)) | e_bf16) << ir.const(7, T.uint16))
+                                | (m_f4 << ir.const(6, T.uint16))).astype(T.uint16), ty=ir.PrimType(T.bfloat16))
     return val_bf16
 
-def _tir_f32x2_to_bf16x2_to_u32(v0: tirx.PrimExpr, v1: tirx.PrimExpr, round_to_even: bool = True):
+def _tir_f32x2_to_bf16x2_to_u32(v0: ir.Expr, v1: ir.Expr, round_to_even: bool = True):
     """
     Convert two float32 values to bfloat16 and pack them into a single uint32.
 
@@ -81,50 +81,50 @@ def _tir_f32x2_to_bf16x2_to_u32(v0: tirx.PrimExpr, v1: tirx.PrimExpr, round_to_e
     packed into a uint32 with v0 in the lower 16 bits and v1 in the upper 16 bits.
 
     Parameters:
-        v0 (tirx.PrimExpr): First float32 value to convert and pack.
-        v1 (tirx.PrimExpr): Second float32 value to convert and pack.
+        v0 (ir.Expr): First float32 value to convert and pack.
+        v1 (ir.Expr): Second float32 value to convert and pack.
         round_to_even (bool): If True, apply round-to-nearest-even bias before truncation (default True).
 
     Returns:
-        tirx.PrimExpr: A uint32 PrimExpr containing the packed bfloat16 representations (v0 low 16 bits, v1 high 16 bits).
+        ir.Expr: A uint32 PrimExpr containing the packed bfloat16 representations (v0 low 16 bits, v1 high 16 bits).
     """
-    mask = tirx.const((1 << 16) - 1, T.uint32)
+    mask = ir.const((1 << 16) - 1, T.uint32)
     res = []
     for data in [v0, v1]:
-        u32_val = tirx.reinterpret(T.uint32, data)
+        u32_val = reinterpret(data, ty=ir.PrimType(T.uint32))
         if round_to_even:
-            exp = (u32_val >> tirx.const(23, T.uint32)) & tirx.const(0xFF, T.uint32)
-            rounding_bias = ((u32_val >> tirx.const(16, T.uint32))
-                             & tirx.const(1, T.uint32)) + tirx.const(0x7FFF, T.uint32)
-            u32_val = tirx.Select(exp == tirx.const(0xFF, T.uint32), u32_val, u32_val + rounding_bias)
-        res.append((u32_val >> tirx.const(16, T.uint32)) & mask)
-    return res[0] | (res[1] << tirx.const(16, T.uint32))
+            exp = (u32_val >> ir.const(23, T.uint32)) & ir.const(0xFF, T.uint32)
+            rounding_bias = ((u32_val >> ir.const(16, T.uint32))
+                             & ir.const(1, T.uint32)) + ir.const(0x7FFF, T.uint32)
+            u32_val = prim.Select(exp == ir.const(0xFF, T.uint32), u32_val, u32_val + rounding_bias)
+        res.append((u32_val >> ir.const(16, T.uint32)) & mask)
+    return res[0] | (res[1] << ir.const(16, T.uint32))
 
 
-def _tir_u32_to_bf16x2_to_f32x2(x: tirx.PrimExpr):
-    mask = tirx.const((1 << 16) - 1, T.uint32)
+def _tir_u32_to_bf16x2_to_f32x2(x: ir.Expr):
+    mask = ir.const((1 << 16) - 1, T.uint32)
     x0 = x & mask
     x1 = (x >> 16) & mask
-    return (tirx.reinterpret(T.float32, x << tirx.const(16, T.uint32)) for x in [x0, x1])
+    return (reinterpret(x << ir.const(16, T.uint32), ty=ir.PrimType(T.float32)) for x in [x0, x1])
 
 
-def _tir_u32_to_int_to_float(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-    assert val.dtype == T.uint32
-    mask = tvm.tirx.const((1 << nbit) - 1, T.uint32)
+def _tir_u32_to_int_to_float(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+    assert val.ty.dtype == T.uint32
+    mask = ir.const((1 << nbit) - 1, T.uint32)
     unextended = (val >> (pos * nbit).astype(T.uint32)) & mask
-    shift = tirx.const(32 - nbit, T.int32)
-    extended = (tirx.Cast(T.int32, unextended) << shift) >> shift
-    return tirx.Cast(dtype, extended)
+    shift = ir.const(32 - nbit, T.int32)
+    extended = (prim.Cast(T.int32, unextended) << shift) >> shift
+    return prim.Cast(dtype, extended)
 
 
 def _tir_packed_uint_to_uint_to_float(storage_nbit: int):
     storage_dtype = "uint" + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
         max_int_value = (1 << (nbit - 1)) - 1
-        return ((val >> (pos.astype(T.uint32) * tirx.const(nbit, T.uint32))) & tirx.const(
-            (1 << nbit) - 1, "uint32")).astype(dtype) - tirx.const(max_int_value, dtype)
+        return ((val >> (pos.astype(T.uint32) * ir.const(nbit, T.uint32))) & ir.const(
+            (1 << nbit) - 1, "uint32")).astype(dtype) - ir.const(max_int_value, dtype)
 
     return f_convert
 
@@ -132,177 +132,174 @@ def _tir_packed_uint_to_uint_to_float(storage_nbit: int):
 def _tir_packed_int_to_int_to_float(storage_nbit: int):
     storage_dtype = "int" + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
-        mask = tirx.const((1 << nbit) - 1, T.int32)
-        unextended = (val >> (pos.astype(T.int32) * tirx.const(nbit, T.int32))) & mask
-        return tirx.Cast(
-            dtype, (unextended << tirx.const(32 - nbit, T.int32)) >> tirx.const(32 - nbit, T.int32))
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
+        mask = ir.const((1 << nbit) - 1, T.int32)
+        unextended = (val >> (pos.astype(T.int32) * ir.const(nbit, T.int32))) & mask
+        return prim.Cast(
+            dtype, (unextended << ir.const(32 - nbit, T.int32)) >> ir.const(32 - nbit, T.int32))
 
     return f_convert
 
 
-def _tir_f32_to_uint_to_f4(val: tirx.PrimExpr):
-    assert val.dtype == T.float32
-    val_u32 = tirx.reinterpret(T.uint32, val)
+def _tir_f32_to_uint_to_f4(val: ir.Expr):
+    assert val.ty.dtype == T.float32
+    val_u32 = reinterpret(val, ty=ir.PrimType(T.uint32))
     # e_f32 >  120 -> e_f4 = min(e_f32 - 120 + M_h, 7)
     # e_f32 == 120 -> e_f4 = 1
     # e_f32 < 120 -> e_f4 = 0
-    m_h = (val_u32 >> tirx.const(22, T.uint32)) & tirx.const(1, T.uint32)
-    e_f32 = (val_u32 >> tirx.const(23, T.uint32)) & tirx.const(255, T.uint32)
-    s = (val_u32 >> tirx.const(31, T.uint32))
-    e_f4 = tirx.Select(
-        e_f32 > tirx.const(120, T.uint32),
-        tirx.Min(e_f32 - tirx.const(120, T.uint32) + m_h, tirx.const(7, T.uint32)),
-        tirx.Select(e_f32 == tirx.const(120, T.uint32), tirx.const(1, T.uint32),
-                   tirx.const(0, T.uint32)))
-    return (s << tirx.const(3, T.uint32)) | e_f4
+    m_h = (val_u32 >> ir.const(22, T.uint32)) & ir.const(1, T.uint32)
+    e_f32 = (val_u32 >> ir.const(23, T.uint32)) & ir.const(255, T.uint32)
+    s = (val_u32 >> ir.const(31, T.uint32))
+    e_f4 = prim.Select(
+        e_f32 > ir.const(120, T.uint32),
+        prim.Min(e_f32 - ir.const(120, T.uint32) + m_h, ir.const(7, T.uint32)),
+        prim.Select(e_f32 == ir.const(120, T.uint32), ir.const(1, T.uint32),
+                   ir.const(0, T.uint32)))
+    return (s << ir.const(3, T.uint32)) | e_f4
 
 
-def _tir_f16_to_uint_to_f4(val: tirx.PrimExpr):
-    assert val.dtype == T.float16
-    val_u32 = tirx.Cast(T.uint32, tirx.reinterpret(T.uint16, val))
-    m_h = (val_u32 >> tirx.const(9, T.uint32)) & tirx.const(1, T.uint32)
-    e_f16 = (val_u32 >> tirx.const(10, T.uint32)) & tirx.const(31, T.uint32)
-    s = (val_u32 >> tirx.const(15, T.uint32))
-    e_f4 = tirx.Select(
-        e_f16 > tirx.const(8, T.uint32),
-        tirx.Min(e_f16 - tirx.const(8, T.uint32) + m_h, tirx.const(7, T.uint32)),
-        tirx.Select(e_f16 == tirx.const(8, T.uint32), tirx.const(1, T.uint32), tirx.const(0, T.uint32)))
-    return (s << tirx.const(3, T.uint32)) | e_f4
+def _tir_f16_to_uint_to_f4(val: ir.Expr):
+    assert val.ty.dtype == T.float16
+    val_u32 = prim.Cast(T.uint32, reinterpret(val, ty=ir.PrimType(T.uint16)))
+    m_h = (val_u32 >> ir.const(9, T.uint32)) & ir.const(1, T.uint32)
+    e_f16 = (val_u32 >> ir.const(10, T.uint32)) & ir.const(31, T.uint32)
+    s = (val_u32 >> ir.const(15, T.uint32))
+    e_f4 = prim.Select(
+        e_f16 > ir.const(8, T.uint32),
+        prim.Min(e_f16 - ir.const(8, T.uint32) + m_h, ir.const(7, T.uint32)),
+        prim.Select(e_f16 == ir.const(8, T.uint32), ir.const(1, T.uint32), ir.const(0, T.uint32)))
+    return (s << ir.const(3, T.uint32)) | e_f4
 
 
-def _tir_u32_to_f4_to_f32(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
+def _tir_u32_to_f4_to_f32(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
     assert nbit == 4
     assert dtype == T.float32
-    assert val.dtype == T.uint32
+    assert val.ty.dtype == T.uint32
     # e_f4 == 0 -> e_f32 = 0
     # e_f4 != 0 -> e_f32 = e_f4 + 120 = e_f4 | (1111000)_2
-    mask = tvm.tirx.const((1 << nbit) - 1, T.uint32)
-    f4 = (val >> (pos.astype(T.uint32) * tirx.const(nbit, T.uint32))) & mask
-    s = f4 >> tirx.const(3, T.uint32)
-    e_f4 = f4 & tirx.const(7, T.uint32)
-    e_f32 = e_f4 | tirx.const(120, T.uint32)
-    val_f32 = tirx.reinterpret(T.float32,
-                              (e_f32 | (s << tirx.const(8, T.uint32))) << tirx.const(23, T.uint32))
-    return tirx.Select(e_f4 == tirx.const(0, T.uint32), tirx.const(0, T.float32), val_f32)
+    mask = ir.const((1 << nbit) - 1, T.uint32)
+    f4 = (val >> (pos.astype(T.uint32) * ir.const(nbit, T.uint32))) & mask
+    s = f4 >> ir.const(3, T.uint32)
+    e_f4 = f4 & ir.const(7, T.uint32)
+    e_f32 = e_f4 | ir.const(120, T.uint32)
+    val_f32 = reinterpret((e_f32 | (s << ir.const(8, T.uint32))) << ir.const(23, T.uint32), ty=ir.PrimType(T.float32))
+    return prim.Select(e_f4 == ir.const(0, T.uint32), ir.const(0, T.float32), val_f32)
 
 
-def _tir_packed_to_fp4_to_f16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
+def _tir_packed_to_fp4_to_f16(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
     assert nbit == 4
     assert dtype == T.float16
-    assert val.dtype == T.uint32
+    assert val.ty.dtype == T.uint32
     # e_f4 == 0 -> e_f16 = 0
     # e_f4 != 0 -> e_f16 = e_f4 + 8 = e_f4 | (1000)_2
-    mask = tvm.tirx.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-    s = f4 >> tirx.const(3, T.uint16)
-    e_f4 = f4 & tirx.const(7, T.uint16)
-    e_f16 = e_f4 | tirx.const(8, T.uint16)
-    val_f16 = tirx.reinterpret(T.float16,
-                              ((e_f16 | (s << tirx.const(5, T.uint16))) << tirx.const(10, T.uint16)).astype(T.uint16))
-    return tirx.Select(e_f4 == tirx.const(0, T.uint16), tirx.const(0, T.float16), val_f16)
+    mask = ir.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * ir.const(nbit, T.uint16))) & mask
+    s = f4 >> ir.const(3, T.uint16)
+    e_f4 = f4 & ir.const(7, T.uint16)
+    e_f16 = e_f4 | ir.const(8, T.uint16)
+    val_f16 = reinterpret(((e_f16 | (s << ir.const(5, T.uint16))) << ir.const(10, T.uint16)).astype(T.uint16), ty=ir.PrimType(T.float16))
+    return prim.Select(e_f4 == ir.const(0, T.uint16), ir.const(0, T.float16), val_f16)
 
 def _tir_packed_to_fp4_to_f16(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tvm.tirx.PrimExpr, pos: tvm.tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
-        mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
+        mask = ir.const((1 << nbit) - 1, storage_dtype)
         f4 = ((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(storage_dtype)
-        f4 = (val >> (pos.astype(storage_dtype) * tirx.const(nbit, storage_dtype))) & mask
-        s = f4 >> tirx.const(3, storage_dtype)
-        e_f4 = f4 & tirx.const(7, storage_dtype)
-        e_f16 = e_f4 | tirx.const(8, storage_dtype)
-        val_f16 = tirx.reinterpret(T.float16,
-                                ((e_f16 | (s << tirx.const(5, storage_dtype))) << tirx.const(10, storage_dtype)).astype(T.uint16))
-        return tirx.Select(e_f4 == tirx.const(0, storage_dtype), tirx.const(0, T.float16), val_f16)
+        f4 = (val >> (pos.astype(storage_dtype) * ir.const(nbit, storage_dtype))) & mask
+        s = f4 >> ir.const(3, storage_dtype)
+        e_f4 = f4 & ir.const(7, storage_dtype)
+        e_f16 = e_f4 | ir.const(8, storage_dtype)
+        val_f16 = reinterpret(((e_f16 | (s << ir.const(5, storage_dtype))) << ir.const(10, storage_dtype)).astype(T.uint16), ty=ir.PrimType(T.float16))
+        return prim.Select(e_f4 == ir.const(0, storage_dtype), ir.const(0, T.float16), val_f16)
 
     return f_convert
 
 
-def _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa: tirx.PrimExpr):
+def _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa: ir.Expr):
     # E4M3 subnormals have value mantissa * 2^-9; normalize that value into binary16 bits.
-    return tirx.Select(
-        mantissa >= tirx.const(4, T.uint16),
-        tirx.const(0x2000, T.uint16)
-        | ((mantissa & tirx.const(0x3, T.uint16)) << tirx.const(8, T.uint16)),
-        tirx.Select(
-            mantissa >= tirx.const(2, T.uint16),
-            tirx.const(0x1C00, T.uint16)
-            | ((mantissa & tirx.const(0x1, T.uint16)) << tirx.const(9, T.uint16)),
-            tirx.Select(
-                mantissa == tirx.const(1, T.uint16),
-                tirx.const(0x1800, T.uint16),
-                tirx.const(0, T.uint16),
+    return prim.Select(
+        mantissa >= ir.const(4, T.uint16),
+        ir.const(0x2000, T.uint16)
+        | ((mantissa & ir.const(0x3, T.uint16)) << ir.const(8, T.uint16)),
+        prim.Select(
+            mantissa >= ir.const(2, T.uint16),
+            ir.const(0x1C00, T.uint16)
+            | ((mantissa & ir.const(0x1, T.uint16)) << ir.const(9, T.uint16)),
+            prim.Select(
+                mantissa == ir.const(1, T.uint16),
+                ir.const(0x1800, T.uint16),
+                ir.const(0, T.uint16),
             ),
         ),
     )
 
 
-def _tir_u8_to_f8_e4m3_to_f16_naive(nbit: int, val: tirx.PrimExpr, dtype: str):
+def _tir_u8_to_f8_e4m3_to_f16_naive(nbit: int, val: ir.Expr, dtype: str):
     assert nbit == 8
     assert dtype == T.float16
     val_u16 = val.astype(T.uint16)
-    s_f16 = (val_u16 >> tirx.const(7, T.uint16)) << tirx.const(15, T.uint16)
-    exponent = (val_u16 >> tirx.const(3, T.uint16)) & tirx.const(0xF, T.uint16)
-    mantissa = val_u16 & tirx.const(0x7, T.uint16)
-    normal_f16 = ((exponent + tirx.const(8, T.uint16)) << tirx.const(10, T.uint16)) | (
-        mantissa << tirx.const(7, T.uint16)
+    s_f16 = (val_u16 >> ir.const(7, T.uint16)) << ir.const(15, T.uint16)
+    exponent = (val_u16 >> ir.const(3, T.uint16)) & ir.const(0xF, T.uint16)
+    mantissa = val_u16 & ir.const(0x7, T.uint16)
+    normal_f16 = ((exponent + ir.const(8, T.uint16)) << ir.const(10, T.uint16)) | (
+        mantissa << ir.const(7, T.uint16)
     )
     subnormal_f16 = _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa)
-    magnitude_f16 = tirx.Select(
-        exponent == tirx.const(0, T.uint16),
+    magnitude_f16 = prim.Select(
+        exponent == ir.const(0, T.uint16),
         subnormal_f16,
-        tirx.Select(
-            (exponent == tirx.const(0xF, T.uint16))
-            & (mantissa == tirx.const(0x7, T.uint16)),
-            tirx.const(0x7E00, T.uint16),
+        prim.Select(
+            (exponent == ir.const(0xF, T.uint16))
+            & (mantissa == ir.const(0x7, T.uint16)),
+            ir.const(0x7E00, T.uint16),
             normal_f16,
         ),
     )
-    return tirx.reinterpret(T.float16, s_f16 | magnitude_f16)
+    return reinterpret(s_f16 | magnitude_f16, ty=ir.PrimType(T.float16))
 
 
-def _tir_u8_to_f8_e4m3_to_f16(nbit: int, val: tirx.PrimExpr, dtype: str):
+def _tir_u8_to_f8_e4m3_to_f16(nbit: int, val: ir.Expr, dtype: str):
     assert nbit == 8
     assert dtype == T.float16
     val_u16 = val.astype(T.uint16)
-    s_f16 = (val_u16 >> tirx.const(7, T.uint16)) << tirx.const(15, T.uint16)
-    e4 = val_u16 & tirx.const(0x40, T.uint16)
+    s_f16 = (val_u16 >> ir.const(7, T.uint16)) << ir.const(15, T.uint16)
+    e4 = val_u16 & ir.const(0x40, T.uint16)
     normal_f16 = (
-        ((val_u16 & tirx.const(63, T.uint16)) << tirx.const(7, T.uint16))
-        | (e4 << tirx.const(8, T.uint16))
-        | (e4 << tirx.const(7, T.uint16))
-    ) ^ tirx.const(0x2000, T.uint16)
-    mantissa = val_u16 & tirx.const(0x7, T.uint16)
+        ((val_u16 & ir.const(63, T.uint16)) << ir.const(7, T.uint16))
+        | (e4 << ir.const(8, T.uint16))
+        | (e4 << ir.const(7, T.uint16))
+    ) ^ ir.const(0x2000, T.uint16)
+    mantissa = val_u16 & ir.const(0x7, T.uint16)
     subnormal_f16 = _tir_u8_to_f8_e4m3_subnormal_to_f16_bits(mantissa)
-    magnitude_f16 = tirx.Select(
-        (val_u16 & tirx.const(0x78, T.uint16)) == tirx.const(0, T.uint16),
+    magnitude_f16 = prim.Select(
+        (val_u16 & ir.const(0x78, T.uint16)) == ir.const(0, T.uint16),
         subnormal_f16,
-        tirx.Select(
-            (val_u16 & tirx.const(0x7F, T.uint16)) == tirx.const(0x7F, T.uint16),
-            tirx.const(0x7E00, T.uint16),
+        prim.Select(
+            (val_u16 & ir.const(0x7F, T.uint16)) == ir.const(0x7F, T.uint16),
+            ir.const(0x7E00, T.uint16),
             normal_f16,
         ),
     )
-    return tirx.reinterpret(T.float16, s_f16 | magnitude_f16)
+    return reinterpret(s_f16 | magnitude_f16, ty=ir.PrimType(T.float16))
 
 
-def _tir_u8_to_f8_e5m2_to_f16(nbit: int, val: tirx.PrimExpr, dtype: str):
+def _tir_u8_to_f8_e5m2_to_f16(nbit: int, val: ir.Expr, dtype: str):
     assert nbit == 8
     assert dtype == T.float16
-    return tirx.reinterpret("float8_e5m2", val).astype(T.float16)
+    return reinterpret(val, ty=ir.PrimType("float8_e5m2")).astype(T.float16)
 
 
 def _tir_packed_to_signed_convert(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
         max_int_value = (1 << (nbit - 1))
-        return ((val >> (pos.astype(T.uint32) * tirx.const(nbit, T.uint32))) & tirx.const(
-            (1 << nbit) - 1, "uint32")).astype(dtype) - tirx.const(max_int_value, dtype)
+        return ((val >> (pos.astype(T.uint32) * ir.const(nbit, T.uint32))) & ir.const(
+            (1 << nbit) - 1, "uint32")).astype(dtype) - ir.const(max_int_value, dtype)
 
     return f_convert
 
@@ -310,9 +307,9 @@ def _tir_packed_to_signed_convert(storage_type="uint", storage_nbit=8):
 def _tir_packed_to_unsigned_convert(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tvm.tirx.PrimExpr, pos: tvm.tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
-        mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
+        mask = ir.const((1 << nbit) - 1, storage_dtype)
         return ((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(dtype)
 
     return f_convert
@@ -321,10 +318,10 @@ def _tir_packed_to_unsigned_convert(storage_type="uint", storage_nbit=8):
 def _tir_packed_to_unsigned_convert_with_zeros(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tvm.tirx.PrimExpr, pos: tvm.tirx.PrimExpr, zero: tvm.tirx.PrimExpr,
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, zero: ir.Expr,
                   dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
-        mask = tvm.tirx.const((1 << nbit) - 1, storage_dtype)
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
+        mask = ir.const((1 << nbit) - 1, storage_dtype)
         return (((val >> (pos * nbit).astype(storage_dtype)) & mask).astype(dtype) - zero.astype(dtype))
 
     return f_convert
@@ -333,12 +330,12 @@ def _tir_packed_to_unsigned_convert_with_zeros(storage_type="uint", storage_nbit
 def _tir_packed_int_to_int_convert(storage_type="uint", storage_nbit=8):
     storage_dtype = storage_type + str(storage_nbit)
 
-    def f_convert(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
-        assert val.dtype == storage_dtype, f"{val.dtype} != {storage_dtype}"
-        mask = tirx.const((1 << nbit) - 1, T.int32)
-        unextended = (val >> (pos.astype(T.int32) * tirx.const(nbit, T.int32))) & mask
-        return tirx.Cast(
-            dtype, (unextended << tirx.const(32 - nbit, T.int32)) >> tirx.const(32 - nbit, T.int32))
+    def f_convert(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
+        assert val.ty.dtype == storage_dtype, f"{val.ty.dtype} != {storage_dtype}"
+        mask = ir.const((1 << nbit) - 1, T.int32)
+        unextended = (val >> (pos.astype(T.int32) * ir.const(nbit, T.int32))) & mask
+        return prim.Cast(
+            dtype, (unextended << ir.const(32 - nbit, T.int32)) >> ir.const(32 - nbit, T.int32))
 
     return f_convert
 

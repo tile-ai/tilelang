@@ -1,115 +1,235 @@
 /*!
  * \file annotate_device_bound_tma_copies.cc
- * \brief Mark copies whose TensorMap base pointer is defined in the body.
+ * \brief Preserve native copy base-pointer provenance before let inlining.
  */
 
-#include <tvm/tirx/op.h>
+#include "cuda/op/builtin.h"
+#include "ir/annotations.h"
+
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <unordered_map>
 #include <unordered_set>
-#include <utility>
 
-#include "cuda/op/builtin.h"
-#include "op/copy.h"
-#include "op/operator.h"
-#include "op/utils.h"
-#include "support/check.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+bool IsDeviceRegion(const RegionStmtObj *region) {
+  return region->op.same_as(launch_thread_op()) ||
+         region->op->name == "tl.launch_kernel" ||
+         region->op->name == "tirx.device_scope" ||
+         region->op->name == "tirx.device_entry";
+}
 
-class BodyBoundHandleCollector : public StmtExprVisitor {
+class BodyValues : public StmtExprVisitor {
 public:
-  static VarSet Collect(const Stmt &stmt) {
-    BodyBoundHandleCollector collector;
-    collector(stmt);
-    return std::move(collector.vars_);
+  using StmtExprVisitor::Visit_;
+
+  explicit BodyValues(const tirx::Function &function) {
+    for (const Var &parameter : function->params) {
+      host_values.insert(parameter.get());
+      for (const Var &symbol : UndefinedVars(parameter->ty))
+        host_values.insert(symbol.get());
+    }
+  }
+
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *region) final {
+    bool previous = device_;
+    device_ = device_ || IsDeviceRegion(region);
+    auto result = StmtExprVisitor::Visit_(region);
+    device_ = previous;
+    return result;
+  }
+
+  Optional<VisitInterrupt> Visit_(const BindObj *binding) final {
+    bindings.Set(binding->var, binding->value);
+    return StmtExprVisitor::Visit_(binding);
+  }
+
+  Optional<VisitInterrupt> Visit_(const VarObj *variable) final {
+    if (!device_ && def_region_kind() != kTVMFFIDefRegionKindNone)
+      host_values.insert(variable);
+    return StmtExprVisitor::Visit_(variable);
+  }
+
+  Map<Var, Expr> bindings;
+  std::unordered_set<const VarObj *> host_values;
+
+private:
+  bool device_{false};
+};
+
+// Taking an address does not read the tensor lvalue. Other memory accesses
+// and stateful calls make the base genuinely device-bound.
+class BaseExpressionPurity : public StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit_;
+
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *) final {
+    pure = false;
+    return VisitInterrupt();
+  }
+
+  Optional<VisitInterrupt> Visit_(const CallObj *call) final {
+    static auto effects = Op::GetAttrMap(tvm::op_attr::kCallEffectKind);
+    auto op = call->op.as<Op>();
+    if (!op ||
+        effects.get(*op, CallEffectKind::kOpaque) > CallEffectKind::kPure) {
+      pure = false;
+      return VisitInterrupt();
+    }
+    bool address = call->op.same_as(address_of_op()) ||
+                   op.value()->name == "tl.access_ptr";
+    for (size_t i = 0; i < call->args.size(); ++i) {
+      if (address && i == 0) {
+        if (const auto *load = call->args[i].as<TensorLoadObj>()) {
+          Visit(load->source);
+          Visit(load->indices);
+          if (!pure)
+            return VisitInterrupt();
+          continue;
+        }
+      }
+      Visit(call->args[i]);
+      if (!pure)
+        return VisitInterrupt();
+    }
+    return std::nullopt;
+  }
+
+  bool pure{true};
+};
+
+class HostAvailability {
+public:
+  explicit HostAvailability(const BodyValues &values) : values_(values) {}
+
+  bool Available(const Var &variable) {
+    if (values_.host_values.count(variable.get()))
+      return true;
+    auto known = available_.find(variable.get());
+    if (known != available_.end())
+      return known->second;
+    // Protect the traversal from malformed cyclic definitions.
+    available_[variable.get()] = false;
+    auto binding = values_.bindings.Get(variable);
+    if (!binding)
+      return false;
+    const auto *call = binding.value().as<CallObj>();
+    bool result = false;
+    if (call && call->op.same_as(alloc_tensor_op())) {
+      auto tensor = variable.as<TensorVar>();
+      // Global workspaces are staged by their owning pass. A TensorVar Bind
+      // is not an old-style device-computed handle; type dependencies still
+      // have to be expressible using host values.
+      result = tensor && tensor->scope() == runtime::MemoryScope::Global() &&
+               call->args.empty() && VariablesAvailable(variable->ty);
+    } else {
+      result = ExpressionAvailable(binding.value()) &&
+               VariablesAvailable(variable->ty);
+    }
+    available_[variable.get()] = result;
+    return result;
   }
 
 private:
-  void VisitStmt_(const BindNode *op) final {
-    if (op->var->dtype.is_handle()) {
-      vars_.insert(op->var);
-    }
-    StmtExprVisitor::VisitStmt_(op);
+  bool VariablesAvailable(AnyView object) {
+    for (const Var &variable : UndefinedVars(object))
+      if (!Available(variable))
+        return false;
+    return true;
   }
 
-  VarSet vars_;
+  bool ExpressionAvailable(const Expr &expression) {
+    auto checker = make_object<BaseExpressionPurity>();
+    checker->Visit(expression);
+    return checker->pure && VariablesAvailable(expression);
+  }
+
+  const BodyValues &values_;
+  std::unordered_map<const VarObj *, bool> available_;
 };
 
-class DeviceBoundTmaCopyAnnotator : public StmtExprMutator {
+TensorVar CopyTensor(const Expr &operand) {
+  if (auto tensor = operand.as<TensorVar>())
+    return tensor.value();
+  if (const auto *region = operand.as<TensorRegionObj>())
+    return region->source.as_or_throw<TensorVar>();
+  if (const auto *load = operand.as<TensorLoadObj>())
+    return load->source.as_or_throw<TensorVar>();
+  TVM_FFI_THROW(TypeError) << "A native copy requires TensorVar, TensorRegion "
+                              "or TensorLoad operands";
+}
+
+class DeviceBoundCopyAnnotator : public StmtExprMutator {
 public:
-  static PrimFunc Rewrite(PrimFunc f) {
-    VarSet body_bound_handles = BodyBoundHandleCollector::Collect(f->body);
-    if (body_bound_handles.empty()) {
-      return f;
+  using StmtExprMutator::Mutate_;
+
+  explicit DeviceBoundCopyAnnotator(const BodyValues &values)
+      : availability_(values) {}
+
+  UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
+    Call rewritten = StmtExprMutator::Mutate_(call, mode)
+                         .ValueOrUnchanged(GetRef<Expr>(call))
+                         .as_or_throw<Call>();
+    auto op = rewritten->op.as<Op>();
+    if (!op)
+      return rewritten;
+    const String name = op.value()->name;
+    if (name != "tl.tileop.copy" && name != "tl.tileop.async_copy" &&
+        name != "tl.tileop.tma_copy")
+      return rewritten;
+    auto arguments = DecodeTileOpArguments(rewritten.get());
+    TVM_FFI_CHECK_EQ(arguments.operands.size(), 2U, ValueError);
+    if (arguments.annotations.count(attr::kTmaDescriptorBaseIsDeviceBound))
+      return rewritten;
+    bool device_bound = false;
+    for (const Expr &operand : arguments.operands) {
+      TensorVar tensor = CopyTensor(operand);
+      if (tensor.scope() == runtime::MemoryScope::Global() &&
+          !availability_.Available(tensor))
+        device_bound = true;
     }
-    DeviceBoundTmaCopyAnnotator annotator(body_bound_handles);
-    Stmt body = annotator.VisitStmt(f->body);
-    f.CopyOnWrite()->body = std::move(body);
-    return f;
+    if (!device_bound)
+      return rewritten;
+    arguments.annotations.Set(attr::kTmaDescriptorBaseIsDeviceBound,
+                              IntImm(PrimType::Int(32), 1));
+    return MakeAnnotatedCall(rewritten->ty, op.value(), arguments.operands,
+                             arguments.annotations, rewritten->loc);
   }
 
 private:
-  explicit DeviceBoundTmaCopyAnnotator(const VarSet &body_bound_handles)
-      : body_bound_handles_(body_bound_handles) {}
-
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-    static const Op &copy_op = Op::Get("tl.tileop.copy");
-    static const Op &async_copy_op = Op::Get("tl.tileop.async_copy");
-    static const Op &tma_copy_op = Op::Get("tl.tileop.tma_copy");
-    if (!call->op.same_as(copy_op) && !call->op.same_as(async_copy_op) &&
-        !call->op.same_as(tma_copy_op)) {
-      return call;
-    }
-
-    TileOperator tile_op = ParseOperator(call);
-    const auto *copy = tile_op.as<CopyNode>();
-    ICHECK(copy != nullptr);
-    bool device_bound_global_base =
-        (IsGlobalBuffer(copy->src) &&
-         body_bound_handles_.count(copy->src->data)) ||
-        (IsGlobalBuffer(copy->dst) &&
-         body_bound_handles_.count(copy->dst->data));
-    if (!device_bound_global_base ||
-        call->annotations.count(attr::kTmaDescriptorBaseIsDeviceBound)) {
-      return call;
-    }
-
-    Map<String, ObjectRef> annotations = call->annotations;
-    annotations.Set(attr::kTmaDescriptorBaseIsDeviceBound,
-                    IntImm(DataType::Int(32), 1));
-    return Call(call->dtype, call->op, call->args, annotations, call->span);
-  }
-
-  const VarSet &body_bound_handles_;
+  HostAvailability availability_;
 };
-
 } // namespace
 
 tvm::transform::Pass AnnotateDeviceBoundTmaCopies() {
-  using namespace tirx::transform;
-  auto pass_func = [](PrimFunc f, const IRModule &m, PassContext ctx) {
-    return DeviceBoundTmaCopyAnnotator::Rewrite(std::move(f));
+  auto rewrite = [](tirx::Function function, IRModule,
+                    tvm::transform::PassContext) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto values = ffi::make_object<BodyValues>(function);
+    values->Visit(function->body);
+    auto annotator = ffi::make_object<DeviceBoundCopyAnnotator>(*values);
+    SeqStmt body = function->body;
+    function.CopyOnWrite()->body =
+        annotator->Mutate(body).ValueOrUnchanged(body);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateDeviceBoundTmaCopies",
-                            {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0,
+                                             "tl.AnnotateDeviceBoundTmaCopies");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.AnnotateDeviceBoundTmaCopies",
-                        AnnotateDeviceBoundTmaCopies);
+  ffi::reflection::GlobalDef().def(
+      "tl.cuda.transform.AnnotateDeviceBoundTmaCopies",
+      AnnotateDeviceBoundTmaCopies);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

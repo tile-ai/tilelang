@@ -4,6 +4,8 @@ license: mit
 
 This is a BitBLAS Implementation for the reproduced 1.58bit model from [1bitLLM/bitnet_b1_58-3B](https://huggingface.co/1bitLLM/bitnet_b1_58-3B). We replaced the original simulated Int8x3bit Quantized Inference Kernel with BitBLAS INT8xINT2 Kernel. We also evaluated the model's correctness and performance through `eval_correctness.py` and `benchmark_inference_latency.py`.
 
+This checkpoint/model workflow and the historical results below belong to the external BitBLAS reference environment. Keep it in a separate process from the native TileLang/TIRx compiler. The [TileLang kernel examples](../README.md) use the matching provider and FFI; generating or loading a model checkpoint here does not validate that compiler or the external vLLM integration. Pin external model revisions independently when reproducing these results.
+
 ## Latest News
 
 - 08/09/2024 ✨: We provide a more efficient implementation for bitnet with vLLM, which should use special model checkpoints, to make the ckpt and study how to deploy, please checkout [Make Checkpoints for vLLM](#make-checkpoints-for-vllm).
@@ -34,7 +36,7 @@ cd vllm_workspace
 # inference with the ckpt with fp16 uncompressed metadata
 python3 inference_with_native_format.py
 # inference with the ckpt with BitBLAS compressed metadata
-python3 inference_with_bitblas_format.py
+python3 inference_with_compress_format.py
 ```
 
 ## BitBLAS Results

@@ -33,7 +33,7 @@ Before writing new C++:
 - Public functions and methods: `PascalCase`.
 - Private/protected methods: `PascalCase_`.
 - Inherited TVM visitor, mutator, and codegen hooks keep upstream names such as
-  `VisitExpr_`, `VisitStmt_`, `VisitStmtDefault_`, and `InitFuncState_`.
+  `Visit_`, `Mutate_`, and the backend codegen hooks.
 - Boolean helpers: `Is`/`Has`/`Can` + `PascalCase`.
 - Parameters and local variables: `lower_snake_case`.
 - Private/protected data members: `lower_snake_case_`.
@@ -44,8 +44,8 @@ Prefer new C++ APIs like:
 
 ```cpp
 Layout MakeLinearLayout(Array<PrimExpr> shape);
-bool IsSharedBuffer(const Buffer& buffer);
-Stmt Lower(const LowerArgs& args, arith::Analyzer* analyzer) const;
+bool IsSharedBuffer(const tirx::TensorVar& buffer);
+Stmt Lower(const LowerArgs& args, sym::AnalyzerObj* analyzer) const;
 ```
 
 Avoid adding new lowerCamelCase helpers or ambiguous context names like
@@ -70,13 +70,13 @@ Use TVM `Array`, `Map`, `Optional`, and ObjectRefs at FFI/API boundaries.
 Internal analysis code may use `std::vector`, `std::unordered_map`, and
 `std::unordered_set` when that is simpler, but convert back at the boundary.
 
-Use `TVM_DLL` only for functions and constructors that need cross-translation
+Use `TVM_TIRX_DLL` only for functions and constructors that need cross-translation
 unit or extension visibility, following nearby exported APIs. Keep file-local
 helpers in anonymous namespaces or private methods.
 
 ## TVM Object Conventions
 
-Treat `Stmt`, `PrimExpr`, `Buffer`, `Var`, `SBlock`, `Layout`, and related types
+Treat `Stmt`, `Expr`, `PrimExpr`, `tirx::TensorVar`, `Var`, `RegionStmt`, `Layout`, and related types
 as TVM `ObjectRef` handles. Use handles across function boundaries and for
 stored state.
 
@@ -91,7 +91,7 @@ other.get()` outside narrow adapter code.
 For identity maps/sets keyed by handles, use TVM pointer hash/equality helpers:
 
 ```cpp
-using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferSet = std::unordered_set<tirx::TensorVar, ObjectPtrHash, ObjectPtrEqual>;
 using VarMap = std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 ```
 
@@ -113,16 +113,18 @@ Do not force a `PrimExpr` to a constant integer if symbolic arithmetic can carry
 the logic. Keeping expressions symbolic preserves dynamic shape support.
 
 When a constant is truly required, extract it as `int64_t` (`as_const_int`,
-`IntImmNode::value`, or an equivalent helper), check the failure path, and
-rebuild constants with the intended dtype (`Integer`, `IntImm(expr->dtype, v)`,
+`IntImmNode::value.as<int64_t>()`, or an equivalent checked helper), check the failure path, and
+rebuild constants with the intended dtype (`IntImm::Int32`, `IntImm(expr.ty(), v)`,
 or `make_const(dtype, v)`). Avoid narrowing to `int` unless the target API
 requires it and the range is checked.
 
-Use a populated `arith::Analyzer` for `Simplify`, `CanProve`,
+Use a populated native `sym::Analyzer` for `Simplify`, `CanProve`,
 `CanProveEqual`, bounds, and modular reasoning. Bind loop/shape variable ranges
 before asking the analyzer to prove facts. If a function accepts an optional
 analyzer pointer, create a local fallback only for simple self-contained
-reasoning.
+reasoning. TileLang's `CreateTileLangAnalyzer()` enables its late outer-query
+Z3 fallback while preserving native expression categories and simplification
+rules; it does not silently select `SYMBOLIC_BOUND` for internal queries.
 
 Be careful mixing `int32` and `int64` in analyzer-sensitive expressions. In
 layout/swizzle code, preserve the native dtype of the expression spine when
@@ -131,10 +133,17 @@ casts would prevent simplification.
 When constructing constants, prefer dtype-aware helpers:
 
 ```cpp
-PrimExpr zero = make_const(buffer->dtype, 0);
-PrimExpr one_i32 = IntImm(DataType::Int(32), 1);
-PrimExpr same_dtype = IntImm(expr->dtype, value);
+PrimExpr zero = make_const(buffer.dtype(), 0);
+PrimExpr one_i32 = IntImm(PrimType::Int(32), 1);
+PrimExpr same_dtype = IntImm(expr.ty(), value);
 ```
+
+`tirx::TensorVar` is a checked view of an ordinary `Var` with `TensorType`;
+it does not introduce a `TensorVarNode` or a second identity. Use `shape()`,
+`dtype()`, `scope()` and `data()` for its contract. Generic expressions use
+`Expr`; numeric-only helpers may use `PrimExpr` after checking the type.
+`IntImmNode::value` is `ffi::BigInt`: check `as<int64_t>()` when a machine
+integer is required, instead of assuming every literal fits.
 
 ## ObjectNode Fields
 
@@ -163,12 +172,14 @@ names usually follow existing strings such as `tl.transform.Simplify`,
 
 New tile operators should follow the `TileOperatorNode` pattern:
 
-- Parse `ffi::Array<PrimExpr>` arguments and `Map<String, ObjectRef>`
-  annotations in the ObjectRef constructor.
+- Parse `ffi::Array<Expr>` operands and `Map<String, Any>` annotations in
+  the ObjectRef constructor. `DecodeTileOpArguments` separates the explicit
+  operand list from the final annotation `Tuple` and its static schema; use
+  `MakeAnnotatedCall` when constructing a replacement call.
 - Fill access regions with `SetAccessRegions` so analysis sees reads/writes.
 - Implement `Lower`, `InferLayout`, and `Clone`.
-- Register the TIR op with `TIR_REGISTER_TL_TILE_OP` or a matching
-  `TVM_REGISTER_OP` variant. Set call effects and printer names consistently.
+- Register the TIR op with `TIR_REGISTER_TL_TILE_OP` or
+  `RegisterTileOperator`. Set call effects and printer names consistently.
 
 Target-specific lowering belongs in target directories such as `src/cuda/op`,
 `src/rocm/op`, `src/cpu/op`, or `src/metal/op`. Use small target predicates and
@@ -190,12 +201,12 @@ factory:
 
 ```cpp
 tvm::transform::Pass MyPass() {
-  auto pass_func = [](PrimFunc func, const IRModule& mod,
-                      PassContext ctx) -> PrimFunc {
-    arith::Analyzer analyzer;
-    return MyRewriter::Rewrite(std::move(func), &analyzer);
+  auto pass_func = [](tirx::Function func, IRModule mod,
+                      tvm::transform::PassContext ctx) -> tirx::Function {
+    sym::Analyzer analyzer = CreateTileLangAnalyzer();
+    return MyRewriter::Rewrite(std::move(func), analyzer.get());
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MyPass", {});
+  return tirx::transform::CreateFunctionPass(pass_func, 0, "tl.MyPass");
 }
 ```
 
@@ -205,14 +216,14 @@ Register pass factories in `TVM_FFI_STATIC_INIT_BLOCK()` under
 Visitor rules:
 
 - Use `StmtExprVisitor`, `StmtExprMutator`, `StmtMutator`, or
-  `arith::IRMutatorWithAnalyzer` according to whether the pass needs expression
+  `tirx::StmtExprMutatorWithAnalyzer` according to whether the pass needs expression
   traversal, mutation, or analyzer context.
 - Provide static entry points such as `Collect`, `Rewrite`, `Substitute`, or
   `Apply`; keep mutable traversal state private.
 - In callback overrides, call the base visitor/mutator unless intentionally
   stopping traversal. Convert callback nodes with `GetRef<T>(op)` when passing
   or storing the handle.
-- Preserve annotations, spans, and read/write metadata when rebuilding IR
+- Preserve annotations, native `Location`s, and read/write metadata when rebuilding IR
   unless the pass intentionally changes them.
 
 ## Headers And Includes

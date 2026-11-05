@@ -1,16 +1,19 @@
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
 import tilelang as tl
 import pytest
 import tilelang.testing
 from tilelang.testing.ir import collect_nodes
-from tilelang.backend.target import determine_target
 import tilelang.language as T
-from tvm.tirx.stmt_functor import post_order_visit
+import tilelang.cuda.target  # noqa: F401
+import tilelang.rocm.target  # noqa: F401
+import tilelang.metal.target  # noqa: F401
+import tilelang.ascend.target  # noqa: F401
 
-auto_target = tvm.target.Target(determine_target("auto"))
 sm80_target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
 sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+# These tests transform IR; their architecture should not depend on local hardware.
+auto_target = sm80_target
 
 
 def _supports_software_pipelining(target) -> bool:
@@ -25,29 +28,26 @@ def _supports_software_pipelining(target) -> bool:
 
 
 def _check(original, transformed, target=auto_target):
-    func = original
+    # Exact scheduling oracles assume distinct parameter storage. This is an
+    # explicit IR-harness precondition, not a change to the source kernel.
+    func = original.with_attr("tirx.noalias", True)
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.IfStmtBinding()(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     mod = tl.transform.Simplify()(mod)
-    transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
+    transformed = tvm.IRModule.from_expr(transformed.with_attr({"global_symbol": "main", "tirx.noalias": True}))
     transformed = tvm.tirx.transform.BindTarget(target)(transformed)
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
 def _collect_pipeline_loop_annotations(func):
-    annos = []
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.For) and "software_pipeline_stage" in node.annotations:
-            annos.append(node.annotations)
-
-    post_order_visit(func.body, _visit)
-    return annos
+    return [node.annotations for node in collect_nodes(func, tvm.ir.For) if "software_pipeline_stage" in node.annotations]
 
 
-def _run_pipeline_planning(func, target=auto_target):
+def _run_pipeline_planning(func, target=auto_target, *, allow_parameter_alias=False):
+    if not allow_parameter_alias:
+        func = func.with_attr("tirx.noalias", True)
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.IfStmtBinding()(mod)
@@ -815,7 +815,6 @@ def test_pipeline_planning_keeps_bind_that_reads_pipeline_written_buffer():
     assert replayable_binds == [1, 0, 0, 0]
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_propagates_buffer_producer_through_bind():
     """A copy's scalar index can depend transitively on a shared-buffer store."""
 
@@ -843,7 +842,6 @@ def test_pipeline_planning_propagates_buffer_producer_through_bind():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_does_not_propagate_disjoint_buffer_region():
     """A store to another region of the same buffer is not a copy producer."""
 
@@ -872,7 +870,6 @@ def test_pipeline_planning_does_not_propagate_disjoint_buffer_region():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("threads_x,threads_y", [(32, 1), (8, 4)])
 def test_pipeline_planning_keeps_disjoint_thread_copy_regions(threads_x, threads_y):
     @T.prim_func
@@ -898,7 +895,6 @@ def test_pipeline_planning_keeps_disjoint_thread_copy_regions(threads_x, threads
         tl.lower(before, target=sm80_target)
 
 
-@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("materialize_launch", [False, True])
 def test_pipeline_planning_tracks_cross_thread_index_producers(materialize_launch):
     @T.prim_func
@@ -923,7 +919,6 @@ def test_pipeline_planning_tracks_cross_thread_index_producers(materialize_launc
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_reaches_mixed_dependency_fixed_point():
     """Alternating scalar and buffer edges propagate to arbitrary depth."""
 
@@ -954,7 +949,6 @@ def test_pipeline_planning_reaches_mixed_dependency_fixed_point():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_redirects_copy_anchor_through_copy_producer():
     """A copy feeding another copy's index joins the downstream copy group."""
 
@@ -987,7 +981,6 @@ def test_pipeline_planning_redirects_copy_anchor_through_copy_producer():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_resolves_each_multi_root_anchor_before_minimum():
     """A shared producer uses the earliest resolved sink across copy groups."""
 
@@ -1025,7 +1018,6 @@ def test_pipeline_planning_resolves_each_multi_root_anchor_before_minimum():
     tl.transform.InjectSoftwarePipeline()(mod)
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_skips_transitive_tma_pipeline():
     """Sequential lowering provides the wait before the dependent copy."""
     N, C, H, W, KH = 1, 32, 8, 8, 3
@@ -1058,7 +1050,7 @@ def test_pipeline_planning_skips_transitive_tma_pipeline():
 
     mod = _run_pipeline_planning(before, sm90_target)
     assert not _collect_pipeline_loop_annotations(mod["main"])
-    loops = collect_nodes(mod["main"], tvm.tirx.For)
+    loops = collect_nodes(mod["main"], tvm.ir.For)
     assert all("num_stages" not in loop.annotations for loop in loops)
     tl.transform.InjectSoftwarePipeline()(mod)
 
@@ -1091,7 +1083,6 @@ def test_pipeline_planning_keeps_bind_that_reads_atomic_target():
     assert "software_pipeline_replayable_scalar_binds" not in anno
 
 
-@tilelang.testing.requires_cuda
 def test_pipeline_planning_waits_before_dependent_copy():
     @T.prim_func
     def before(Ids: T.Tensor((2,), T.int32), A: T.Tensor((64,), T.float32), B: T.Tensor((64,), T.float32)):

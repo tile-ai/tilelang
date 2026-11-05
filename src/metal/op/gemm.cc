@@ -127,8 +127,8 @@ struct Gemm {
                     "Metal target "
                  << target->str();
     }
-    if (op.c_.scope() == "local.fragment" ||
-        op.c_.scope() == "metal.simdgroup") {
+    if (op.c_.scope().name() == "local.fragment" ||
+        op.c_.scope().name() == "metal.simdgroup") {
       return kMetalSIMDGroup;
     }
     int num_warps = block_size / TargetMetalGetWarpSize(target);

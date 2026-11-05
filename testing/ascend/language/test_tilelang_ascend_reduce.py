@@ -289,7 +289,7 @@ def test_pto_reducer_v2_rejects_bfloat16_allreduce():
             T.finalize_reducer(partial, result)
             T.copy(result, B)
 
-    with determine_target("pto", return_object=True), pytest.raises(Exception, match="PTO cross-thread allreduce.*got bfloat16"):
+    with determine_target("pto", return_object=True), pytest.raises(Exception, match=r"PTO cross-thread allreduce.*got T\.bfloat16"):
         tilelang.lower(kernel, target="pto")
 
 

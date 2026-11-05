@@ -58,7 +58,7 @@ buffer-version selection, not frontend stage values. Do not combine body
 `T.Stage` scopes with `order=` or `stage=` on `T.Pipelined`.
 
 Wrap complete scheduler tasks: `with T.Stage(1), T.SimtVF(...):` has the correct
-nesting. Never put `T.Stage` inside a Task, SimtVF, SimdVF, SBlock, or parallel
+nesting. Never put `T.Stage` inside a Task, SimtVF, SimdVF, explicit `T.sblock` scope, or parallel
 loop. Preserve the generated schedule when diagnosing an unexpected order.
 
 ### Tune performance with T.Stage

@@ -1,3 +1,4 @@
+import tvm_ffi
 import re
 
 import pytest
@@ -32,7 +33,7 @@ def _round_kernel(dtype, lanes):
 @pytest.mark.parametrize("dtype,intrinsic", [("float32", "nearbyintf"), ("float64", "nearbyint")])
 @pytest.mark.parametrize("lanes", [1, 2])
 def test_round_ties_to_even_codegen(dtype, intrinsic, lanes):
-    if tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True) is None:
+    if tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True) is None:
         pytest.skip("TileLang HIP codegen is not enabled")
 
     target = tvm.target.Target({"kind": "hip", "mcpu": "gfx942"})

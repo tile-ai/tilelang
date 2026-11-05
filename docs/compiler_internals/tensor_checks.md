@@ -1,392 +1,138 @@
 # Tensor Checks (Host-Side Auto-Validation)
 
-This page explains the host-side checks that TileLang automatically inserts into the generated host stub for kernels. When you pass `torch.Tensor` or any DLPack-compatible object to a TileLang kernel, the host stub validates argument count, pointer kinds, dtype, shape, strides, device, and more — so you don’t need to handwrite Python checks. This keeps the ABI stable and significantly reduces Python overhead compared to doing equivalent checks in Python or via pybind.
+TileLang's `tvm_ffi` execution path uses a native packed host entry to validate
+runtime arguments against the compiled tensor and scalar contracts. A Python
+adapter first converts supported framework objects through TVM FFI/DLPack;
+other execution backends own their corresponding source-wrapper/runtime checks.
+Do not assume every adapter produces identical host source or error wording.
 
-## Why Host-Side Checks
-- ABI stability: the entry is based on TVM FFI + DLPack, consistently accepting tensors and scalars.
-- Lower overhead: shifting checks from Python into C reduces interpreter/property-access costs; the call overhead is lower than pybind-based approaches.
-- Focused error reporting: assertions are raised close to the call site with precise “which field failed” messages.
+## Where the Contract Lives
 
-## How To Inspect Host Source
-You can inspect the auto-generated host source (with all checks and the final device-kernel call) for debugging:
+The source `Function` contains ordinary `Var` parameters. Tensor parameters
+carry `TensorType` with shape, element type, scope and layout. There is no
+`PrimFunc.buffer_map`. `src/transform/make_packed_api.cc` attaches TileLang's
+packed-input policies and delegates to the native
+`3rdparty/tvm-tirx/src/tirx/transform/tvm_ffi_binder.cc`.
+
+That binder extracts all argument handles and safe descriptor fields before
+resolving implicit dimensions. A shape variable may therefore be supplied by a
+later parameter. Constraints are checked after the required bindings exist,
+including strided layouts and their element offsets. Callee-allocated outputs
+use TileLang's owning output frame around native allocation/compute workers.
+
+## Inspecting Host Source
+
+`@T.prim_func` constructs an IR `Function`. Compile it before accessing runtime
+methods:
 
 ```python
-print(matmul_relu_kernel.get_host_source())
+import tilelang
+
+kernel = tilelang.compile(program, target="cuda", execution_backend="tvm_ffi")
+print(kernel.get_host_source())
 ```
 
----
+The selected host backend may return C source or LLVM IR. Inspect the actual
+argument names and assertions in that result; names from an older printed
+stub, such as `A_handle`, are not a stable native IR field or diagnostic API.
 
-## What The Host Checks
+## Checks at the Packed Entry
 
-### 1) Argument count and pointer kind
-- `num_args` must match the number of formal parameters; otherwise the kernel returns `-1` with an error message.
-- Each argument’s FFI type must be a pointer kind (for DLTensor/handle) or a valid scalar type; otherwise you’ll see errors like `Expect arg[i] to be pointer` or a scalar type error.
+| Field | Contract |
+| --- | --- |
+| Argument count and kind | Match the selected packed worker's parameter list and its FFI value kinds. Output-allocation wrappers may provide output arguments internally. |
+| Tensor descriptor | A used tensor requires a descriptor. A statically unused tensor may be `None` under TileLang's explicit nullable-input policy; descriptor loads are guarded. |
+| Rank | Match the number of dimensions in the compiled `TensorType`. |
+| Element type | Match code, bits and lanes after adapter normalization, with the explicit FP8 and packed-storage policies described below. |
+| Shape | Bind symbolic dimensions and enforce constants/equalities across present arguments. |
+| Strides | Match the tensor's shape-aligned strided layout. A null DLPack strides pointer means compact strides, derived from shape. |
+| Byte offset | Match the layout's element offset after conversion to bytes. A default zero-origin layout requires zero; an explicit nonzero/symbolic offset is checked against that contract. |
+| Device | Match the selected target's device type and the common device ID for participating tensors. |
+| Data pointer | A present nonempty tensor needs non-null storage. A zero-size tensor may have a null data pointer. Direct-address devices also receive the required alignment checks. |
 
-### 2) Tensor checks (per tensor, after nullability decision)
-- Nullability
-  - If the tensor is “statically reachable/used” by the function body, the handle must be non-NULL; otherwise: `xxx is expected to have non-NULL pointer`.
-  - If an input tensor is not used by the function (statically unreachable), NULL is allowed; other field checks are executed only when `handle != NULL`.
-- Rank (`ndim`)
-  - Runtime `ndim` must equal the compile-time rank.
-- Data type (`dtype`)
-  - Match the triple `(code, bits, lanes)` with tolerance:
-    - `float8_e4m3`: accept `e4m3`, `e4m3fn`, `e4m3fnuz`.
-    - `float8_e5m2`: accept `e5m2`, `e5m2fnuz`.
-    - `bool`: accept `int8/uint8` with `bits=8` (same lanes), `kDLBool(code=6, bits=1 or 8)`, and any `bitwidth=1` (lanes must match).
-  - For packed-bit dtypes (e.g., `Int(1)`, `Int(4)`, `UInt(4)`), strict dtype checking is skipped.
-- Shape
-  - Each runtime dimension is bound to the compile-time shape (constants or symbols) and checked for consistency.
-  - Linear equations among symbolic dims can be solved on the fly (when there’s only one unknown at a given check point), enabling cross-tensor constraints.
-- Strides
-  - If `buffer_type = AutoBroadcast`: allow `strides == NULL` and derive strides from `shape`. If explicit `strides` is present, bind to compile-time constraints and check for equality.
-  - Otherwise: check per-dimension; if `strides == NULL`, derive from `shape` and compare (e.g., contiguous: `strides[-1] == 1`, `strides[-2] == shape[-1]`).
-- `byte_offset`
-  - Must be 0 (non-zero raises an error) to keep addressing simple and aligned.
-- Device info
-  - Assert `device_type == target backend` (CUDA/ROCM/Metal/OneAPI/WebGPU/CPU, etc.). Error messages include a DLPack code legend.
-  - When multiple tensors participate, assert that `device_id` matches across them.
-- Data pointer
-  - Must be non-NULL when the tensor is required to be non-null by the nullability rule.
+Native descriptor checks do not accept an arbitrary runtime layout for a
+compact tensor. Use `T.StridedTensor` or an explicit supported tensor layout
+when non-contiguous inputs are intentional. Calling `.contiguous()` is useful
+only when it matches the intended input contract.
 
-### 3) Scalar checks
-- `T.int*` family: require integer; error: `Expect arg[i] to be int`.
-- `T.bool`: require boolean; error: `Expect arg[i] to be boolean`.
+### FP8 and packed storage
 
----
+TileLang requests the native binder's FP8 alias policy: logical
+`float8_e4m3` also accepts the corresponding `fn`/`fnuz` storage codes, and
+`float8_e5m2` accepts its `fnuz` alias, with matching bits and lanes. These
+aliases do not imply support for every device instruction or numerical format.
 
-## Shapes and Symbolic Equations: Linear Solving
-When shapes are symbolic, the host binds and (when possible) solves linear relations at runtime (only one unknown per check point). Example:
+For supported packed sub-byte inputs, byte storage is an explicit bit
+representation. The binder expands the innermost physical dimension into a
+logical dimension using the packing factor; outer strides and byte offsets
+are converted into logical-element units.
+Unit stride in the packed dimension, shape consistency, divisibility and range
+checks still apply. The packed path does not simply skip all dtype/shape checks.
+Framework bool aliases are normalized by the adapter; the native descriptor is
+checked against the resulting logical tensor contract.
+
+### Scalars
+
+The native FFI binder accepts an integer or boolean FFI value for integral
+parameters and for boolean parameters. Floating parameters accept floating,
+integer or boolean FFI values and apply the declared primitive conversion.
+Passing a floating FFI value to an integer parameter is a type error. The Python
+JIT can additionally use scalar arguments for compile-time specialization;
+those values need not be runtime packed slots.
+
+## Dynamic Shapes and Nullability
+
+Direct symbolic carriers can appear later in the parameter list. Supported
+single-variable affine forms such as `2 * n + 1` can bind `n` after checking
+divisibility. Compound expressions whose variables are already bound become
+equality constraints. This is not a general nonlinear equation solver.
 
 ```python
 @T.prim_func
-def main(
-    A: T.Tensor((m,), dtype),
-    B: T.Tensor((m + n,), dtype),
-    C: T.Tensor((n * k,), dtype),
+def shape_contract(
+    A: T.Tensor((n + 1,), "float32"),
+    B: T.Tensor((n,), "float32"),
 ): ...
 ```
 
-This enables enforcing cross-tensor relationships like `len(B) == m + n` and `len(C) == n * k` at runtime.
-
----
-
-## Nullability Rules and Examples
-Which tensors may be NULL?
-
-- Rule: If an input tensor is not used by the function under static analysis (i.e., the access is statically unreachable), it is considered Nullable; otherwise it must be non-NULL.
-- Examples:
-
-1) Must be non-NULL (used)
-```python
-@T.prim_func
-def main(A: T.Tensor((M, K), dtype)):
-    A[0] = 1
-```
-Passing `None` raises: `main.A_handle is expected to have non-NULL pointer`.
-
-2) Still must be non-NULL (constant-true branch)
-```python
-some_cond: bool = True
-
-
-@T.prim_func
-def main(A: T.Tensor((M, K), dtype)):
-    if some_cond:
-        A[0] = 1
-```
-
-3) Nullable (constant-false branch, statically unreachable)
-```python
-some_cond: bool = False
-
-
-@T.prim_func
-def main(A: T.Tensor((M, K), dtype)):
-    if some_cond:
-        A[0] = 1
-```
-
-4) Must be non-NULL (runtime condition)
-```python
-@T.prim_func
-def main(A: T.Tensor((M, K), dtype), some_cond: T.bool):
-    if some_cond:
-        A[0] = 1
-```
-Since `some_cond` is only known at runtime, static analysis cannot prove `A` is unused; `A` is thus non-nullable.
-
----
-
-## Device Type Codes (DLPack)
-Supported and referenced device codes in error messages: `1=CPU, 2=CUDA, 7=Vulkan, 8=Metal, 10=ROCM, 14=OneAPI, 15=WebGPU`.
-Kernels assert that `device_type` matches the target backend, and require `device_id` consistency across tensors.
-
----
-
-## Common Error Examples (What you’ll see)
-- Argument count mismatch (num_args)
-  - Trigger: missing/extra argument
-  - Error: `<kernel>: num_args should be N; expected: <num_args>, got: N`
-
-- Pointer-typed argument expected
-  - Trigger: scalar passed where a tensor is expected
-  - Error: `<kernel>: Expect arg[i] to be pointer`
-
-- Rank (ndim) mismatch
-  - Trigger: runtime rank differs from compile-time rank
-  - Error: `<kernel>.<name>.ndim is expected to equal R, but got mismatched ndim`
-
-- Dtype mismatch
-  - Trigger: dtype not equal to the compiled dtype and not within the tolerance set
-  - Error: `<kernel>.<name>.dtype is expected to be <dtype>, but got incompatible dtype`
-
-- Shape constraint violation
-  - Trigger: a dimension doesn’t match a constant/symbol binding
-  - Error: `Argument <kernel>.<name>.shape[i] has an unsatisfied constraint: ... == <expected>`
-
-- Strides check failed (e.g., non-contiguous layout)
-  - Trigger: transposed/sliced tensors that violate expected strides
-  - Error: `Argument <kernel>.<name>.strides[j] has an unsatisfied constraint: ... == <expected>`
-
-- Device type mismatch
-  - Trigger: calling a CUDA kernel with CPU tensors, etc.
-  - Error: `<kernel>.<name>.device_type mismatch [expected: <code> (<name>)] ...`
-
-- Device id mismatch
-  - Trigger: mixing tensors from different GPUs
-  - Error: `Argument <kernel>.<name>.device_id has an unsatisfied constraint: ... == ...`
-
-- NULL data pointer
-  - Trigger: tensor required to be non-null has a NULL data pointer
-  - Error: `<kernel>.<name> is expected to have non-NULL data pointer, but got NULL`
-
-- Scalar type mismatch
-  - Trigger: passing float to `T.int32`, or non-boolean to `T.bool`
-  - Error: `<kernel>: Expect arg[i] to be int/boolean`
-
----
-
-## Troubleshooting Tips
-- Print the host source: `print(fn.get_host_source())` to see the exact assertion and expected vs. actual fields.
-- Fix strides: call `.contiguous()` for non-contiguous tensors, or avoid generating transposed/sliced layouts that break assumptions.
-- Align devices: ensure all participating tensors share the same `device_type` and `device_id`.
-- Align dtype: use `.to(<dtype>)` or construct tensors with the correct dtype; pay attention to `float8` and `bool` tolerance.
-- Dynamic shapes: ensure cross-tensor linear relations can be uniquely determined at the check point (only one unknown at a time).
-
----
-
-## FAQ
-- Can I disable the checks?
-  - Not recommended and usually not supported. Checks are done on the host to preserve ABI stability and fail early close to the device call.
-- Is the overhead noticeable?
-  - The checks are lightweight (branches and field reads). Compared to Python-side checks, it’s faster; the dominating cost remains the Python→C boundary. Overall it’s cheaper than equivalent checks in Python.
-
----
-
-## Reference Example (Matmul + ReLU)
-
-```python
-@T.prim_func
-def matmul_relu_kernel(
-    A: T.Tensor((M, K), dtype),
-    B: T.Tensor((K, N), dtype),
-    C: T.Tensor((M, N), dtype),
-):
-    # Initialize Kernel Context
-    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-        A_shared = T.alloc_shared((block_M, block_K), dtype)
-        B_shared = T.alloc_shared((block_K, block_N), dtype)
-        C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
-        T.clear(C_local)
-        for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=0):
-            T.copy(A[by * block_M, ko * block_K], A_shared)
-            T.copy(B[ko * block_K, bx * block_N], B_shared)
-            T.gemm(A_shared, B_shared, C_local)
-        T.copy(C_local, C[by * block_M, bx * block_N])
-
-
-# For debugging, print the host source
-print(matmul_relu_kernel.get_host_source())
-```
-
-The host will insert all checks described above for this example.
-
----
-
-## Quick Error Reference (Short List)
-- Argument count
-  - Trigger: missing/extra args; Error: `num_args should be N; expected: <num_args>, got: N`.
-- Pointer kind
-  - Trigger: scalar passed to tensor arg; Error: `Expect arg[i] to be pointer`.
-- Rank (ndim)
-  - Trigger: runtime rank != compile-time; Error: `ndim ... expected to equal R`.
-- Dtype
-  - Trigger: mismatch and not tolerated; Error: `dtype ... expected to be <dtype>`.
-- Shape
-  - Trigger: constant/symbol binding violated; Error: `shape[i] ... == <expected>`.
-- Strides
-  - Trigger: layout mismatch; Error: `strides[j] ... == <expected>`.
-- Device type
-  - Trigger: wrong backend device; Error: `device_type mismatch [expected: ...]`.
-- Device id
-  - Trigger: tensors on different GPUs; Error: `device_id ... == ...`.
-- Data pointer
-  - Trigger: required non-NULL but NULL; Error: `non-NULL data pointer`.
-- Scalar types
-  - Trigger: wrong scalar type; Error: `Expect arg[i] to be int/boolean`.
-
----
-
-## Host Error Troubleshooting (Minimal Repros)
-
-Below are minimal repro snippets for common host-side errors, assuming a CUDA-targeted kernel like `matmul_relu_kernel` with:
-
-```python
-# Convention:
-# A: float16 [M, K]
-# B: float16 [K, N]
-# C: float16 [M, N]
-# Target: CUDA (device_type=2)
-fn = matmul_relu_kernel  # your compiled function
-M = N = K = 1024
-```
-
-Adjust dtype/device if your kernel differs.
-
-### 0. Tip: print the host source
-```python
-print(fn.get_host_source())
-```
-
-### 1. num_args mismatch
-```python
-import torch
-
-A = torch.empty((M, K), device="cuda", dtype=torch.float16)
-B = torch.empty((K, N), device="cuda", dtype=torch.float16)
-# Missing C
-fn(A, B)
-```
-Expected: `<kernel>: num_args should be 3; expected: <num_args>, got: 3`.
-
-Fix: pass all arguments per the signature.
-
-### 2. Expect pointer (tensor) but got scalar
-```python
-import torch
-
-B = torch.empty((K, N), device="cuda", dtype=torch.float16)
-C = torch.empty((M, N), device="cuda", dtype=torch.float16)
-fn(1, B, C)
-```
-Expected: `<kernel>: Expect arg[0] to be pointer`.
-
-Fix: pass a DLPack-compatible tensor (e.g., torch.Tensor).
-
-### 3. ndim mismatch
-```python
-import torch
-
-A = torch.empty((M, K, 1), device="cuda", dtype=torch.float16)  # rank=3
-B = torch.empty((K, N), device="cuda", dtype=torch.float16)
-C = torch.empty((M, N), device="cuda", dtype=torch.float16)
-fn(A, B, C)
-```
-Expected: `<kernel>.A_handle.ndim is expected to equal 2, but got mismatched ndim`.
-
-Fix: ensure runtime rank equals compiled rank.
-
-### 4. dtype mismatch
-```python
-import torch
-
-A = torch.empty((M, K), device="cuda", dtype=torch.float32)  # should be float16
-B = torch.empty((K, N), device="cuda", dtype=torch.float16)
-C = torch.empty((M, N), device="cuda", dtype=torch.float16)
-fn(A, B, C)
-```
-Expected: `<kernel>.A_handle.dtype is expected to be float16, but got incompatible dtype`.
-
-Fix: `A = A.to(torch.float16)` or create with the correct dtype.
-
-### 5. Shape constant/symbol mismatch
-```python
-import torch
-
-A = torch.empty((M, K + 1), device="cuda", dtype=torch.float16)  # K mismatched
-B = torch.empty((K, N), device="cuda", dtype=torch.float16)
-C = torch.empty((M, N), device="cuda", dtype=torch.float16)
-fn(A, B, C)
-```
-Expected: `Argument <kernel>.A_handle.shape[i] has an unsatisfied constraint: ... == <expected>`.
-
-Fix: satisfy linear constraints and constants across tensors.
-
-### 6. Strides check failure (non-contiguous)
-```python
-import torch
-
-A = torch.empty((M, K), device="cuda", dtype=torch.float16)
-A_nc = A.t()  # transpose -> non-contiguous
-B = torch.empty((K, N), device="cuda", dtype=torch.float16)
-C = torch.empty((M, N), device="cuda", dtype=torch.float16)
-fn(A_nc, B, C)
-```
-Expected: `Argument <kernel>.A_handle.strides[1] has an unsatisfied constraint: ... == 1`.
-
-Fix: pass `A_nc.contiguous()` or align the layout expectation in the kernel.
-
-### 7. device_type mismatch
-```python
-import torch
-
-A = torch.empty((M, K), device="cpu", dtype=torch.float16)
-B = torch.empty((K, N), device="cpu", dtype=torch.float16)
-C = torch.empty((M, N), device="cpu", dtype=torch.float16)
-fn(A, B, C)  # CUDA-targeted kernel
-```
-Expected: `<kernel>.A_handle.device_type mismatch [expected: 2 (cuda)] ...`.
-
-Fix: move tensors to the CUDA device.
-
-### 8. device_id mismatch (multi-GPU)
-```python
-import torch
-
-A = torch.empty((M, K), device="cuda:0", dtype=torch.float16)
-B = torch.empty((K, N), device="cuda:1", dtype=torch.float16)
-C = torch.empty((M, N), device="cuda:0", dtype=torch.float16)
-fn(A, B, C)
-```
-Expected: `Argument <kernel>.B_handle.device_id has an unsatisfied constraint: ... == ...`.
-
-Fix: place all tensors on the same GPU (e.g., `cuda:0`).
-
-### 9. NULL data pointer (advanced)
-This usually comes from hand-constructed DLTensor/NDArray, or external frameworks passing unallocated/freed storage. Regular `torch.Tensor` allocations rarely hit this.
-
-Expected: `<kernel>.<name> is expected to have non-NULL data pointer, but got NULL`.
-
-Fix: ensure valid underlying storage; in PyTorch scenarios, avoid constructing tensors from invalid external handles.
-
-### 10. Scalar type mismatch (int / bool)
-```python
-import tilelang.language as T
-
-
-@T.prim_func
-def scalar_check(x: T.int32, flag: T.bool()):
-    T.evaluate(0)
-
-
-scalar_check(1.0, True)  # x is float -> Expect arg[0] to be int
-scalar_check(1, 2.5)  # flag is float -> Expect arg[1] to be boolean
-```
-
-Fix: pass correct scalar types, e.g., `scalar_check(1, True)`.
-
----
-
-## Closing Notes
-- Cross-check “shape / strides / device / dtype” against the kernel signature to localize issues efficiently.
-- For complex symbolic relations, print the host source to confirm binding/solving order, then adjust runtime shapes/layouts accordingly.
+The ABI can read `n` from `B` before checking `A`, even though `B` is later in
+the signature. This snippet illustrates a signature; a complete kernel supplies
+the computation and its `n` declaration.
+
+Nullable means that the compiled body does not require that tensor identity;
+types, layouts and explicit annotation operands also participate in use
+analysis. A runtime-false branch does not make its tensor statically unused.
+Null descriptors cannot be dereferenced to recover shapes. When multiple
+nullable carriers provide a symbol needed by the body, at least one must be
+present, or the call reports the missing symbolic-shape source.
+
+## Errors and Troubleshooting
+
+Messages include the argument index, tensor name, failed field and function
+signature. Representative native diagnostic fragments are:
+
+- `Expected ... arguments` for arity mismatch;
+- `Mismatched A.ndim on argument #...` for rank;
+- `Mismatched A.dtype on argument #...` for element type;
+- `Mismatched A.device_type on argument #...` for device placement;
+- an access path such as `shape[i]`, `strides[i]` or `byte_offset` for an
+  unsatisfied descriptor constraint;
+- `expected non-NULL data pointer` for a present nonempty tensor without storage.
+
+TileLang requests `RuntimeError` for tensor-contract failures from its native
+packed workers; FFI kind/arity checks and Python adapters may raise other
+appropriate exception types. Check the actual exception and host output instead
+of depending on a complete old error string.
+
+To isolate a failure, compare runtime shapes, strides, dtype, device and offset
+with the compiled signature. Confirm the loaded provider/FFI identity after a
+native rebuild, and use a supported DLPack owner so storage remains alive until
+execution completes. Checks cannot make a dangling external pointer safe.
+
+## Regression Coverage
+
+Keep distinct tests for late dimension carriers, affine divisibility, conflicting
+cross-tensor shapes, non-contiguous strides, nonzero byte offsets, packed-bit
+storage, nullable descriptors, empty storage, output allocation and scalar kind
+errors. Validate each supported execution adapter independently; source
+generation, module loading and numerical execution are separate observations.

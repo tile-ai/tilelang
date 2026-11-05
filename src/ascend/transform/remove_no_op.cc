@@ -19,357 +19,347 @@
 
 /*!
  * \file remove_no_op.cc
- * \brief Ascend-specific no-op removal.
+ * \brief Ascend no-op elimination over native tensor definitions and regions.
  */
 
-#include <tvm/arith/analyzer.h>
-#include <tvm/ffi/cast.h>
-#include <tvm/ffi/function.h>
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <optional>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
-#include "arith/const_fold.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "tir/analysis/control_flow_graph.h"
-#include "tirx/transform/ir_utils.h"
+#include "ascend/transform/auto_schedule/native_task_ir.h"
+#include "ir/analyzer.h"
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
-using namespace tirx::transform;
+using namespace prim;
+using namespace ffi;
+using namespace ascend;
 
-struct AscendRemoveNoOpConfigNode
-    : public AttrsNodeReflAdapter<AscendRemoveNoOpConfigNode> {
+namespace {
+struct AscendRemoveNoOpConfigObj : public ffi::Object {
   bool use_dataflow_analysis;
   int64_t max_simplification_steps;
 
   static void RegisterReflection() {
-    namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<AscendRemoveNoOpConfigNode>()
+    reflection::ObjectDef<AscendRemoveNoOpConfigObj>()
         .def_ro("use_dataflow_analysis",
-                &AscendRemoveNoOpConfigNode::use_dataflow_analysis,
-                "If true, known buffer values are propagated and used to "
-                "statically prove statements as no-ops.",
-                refl::DefaultValue(false))
+                &AscendRemoveNoOpConfigObj::use_dataflow_analysis,
+                "Propagate known stores and remove overwritten writes within "
+                "native lexical sequences.",
+                reflection::DefaultValue(false))
         .def_ro("max_simplification_steps",
-                &AscendRemoveNoOpConfigNode::max_simplification_steps,
-                "If non-zero, RewriteSimplifier throws an error after this "
-                "many steps. Intended for debugging and testing.",
-                refl::DefaultValue(0));
+                &AscendRemoveNoOpConfigObj::max_simplification_steps,
+                "Maximum rewrite steps; zero means unlimited.",
+                reflection::DefaultValue(0));
   }
-
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.AscendRemoveNoOpConfig",
-                                    AscendRemoveNoOpConfigNode, BaseAttrsNode);
+                                    AscendRemoveNoOpConfigObj, ffi::Object);
 };
-
-class AscendRemoveNoOpConfig : public Attrs {
+class AscendRemoveNoOpConfig : public ffi::ObjectRef {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(AscendRemoveNoOpConfig, Attrs,
-                                                AscendRemoveNoOpConfigNode);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(AscendRemoveNoOpConfig,
+                                                ffi::ObjectRef,
+                                                AscendRemoveNoOpConfigObj);
 };
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  AscendRemoveNoOpConfigNode::RegisterReflection();
+  AscendRemoveNoOpConfigObj::RegisterReflection();
+  tvm::transform::PassContext::RegisterConfigOption<AscendRemoveNoOpConfig>(
+      "tl.AscendRemoveNoOp");
 }
 
-TVM_REGISTER_PASS_CONFIG_OPTION("tl.AscendRemoveNoOp", AscendRemoveNoOpConfig);
+using VarSet = std::unordered_set<const VarObj *>;
 
-using VarSet = std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
-
-// Track storage Vars that are allocated and actually used. Allocation and
-// declaration metadata do not by themselves make the storage live.
 class AllocationUsageCollector : public StmtExprVisitor {
 public:
-  static VarSet FindDeadAllocations(const Stmt &stmt) {
-    AllocationUsageCollector collector;
-    collector(stmt);
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  using Result = ffi::Optional<ffi::VisitInterrupt>;
+  VarSet allocated, used;
+  bool has_volatile{false};
 
-    VarSet dead;
-    for (const Var &var : collector.allocated_) {
-      if (!collector.used_.count(var)) {
-        dead.insert(var);
+  Result Visit_(const BindObj *op) final {
+    if (const auto *call = op->value.as<CallObj>()) {
+      if (call->op.same_as(alloc_tensor_op()) ||
+          call->op.same_as(decl_tensor_op()))
+        allocated.insert(op->var.get());
+      if (call->op.same_as(alloc_tensor_op()) && call->attrs) {
+        auto attrs = call->attrs.value().as_or_throw<DictAttrs>()->dict;
+        has_volatile |= attrs.count("tirx.volatile") || attrs.count("volatile");
       }
     }
-    return dead;
+    // Definitions are not reads; shape/type operands of the value still are.
+    return Visit(op->value);
   }
-
-private:
-  void VisitStmt_(const AllocBufferNode *op) final {
-    allocated_.insert(op->buffer->data);
+  Result Visit_(const VarObj *op) final {
+    used.insert(op);
+    return StmtExprVisitor::Visit_(op);
   }
-
-  void VisitStmt_(const DeclBufferNode *) final {}
-
-  void VisitExpr_(const VarNode *op) final {
-    used_.insert(ffi::GetRef<Var>(op));
+  Result Visit_(const ForObj *op) final {
+    // Loop metadata and referenced Var types can keep allocations live too.
+    return StmtExprVisitor::Visit_(op);
   }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    used_.insert(op->buffer->data);
-    StmtExprVisitor::VisitExpr_(op);
+  Result Visit_(const RegionStmtObj *op) final {
+    if (auto attr = ReadTaskAttribute(op))
+      has_volatile |= attr->key == "volatile_scope";
+    return StmtExprVisitor::Visit_(op);
   }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    used_.insert(op->buffer->data);
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() == 5) {
-      if (const auto *var = op->args[1].as<VarNode>()) {
-        used_.insert(ffi::GetRef<Var>(var));
-      }
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  VarSet allocated_;
-  VarSet used_;
 };
 
-class AscendNoOpRemover : public arith::IRMutatorWithAnalyzer {
+bool HasRuntimeEffect(const Expr &expr, bool has_volatile) {
+  auto effect = SideEffect(expr);
+  return effect > CallEffectKind::kReadState ||
+         (has_volatile && effect >= CallEffectKind::kReadState);
+}
+
+class AscendNoOpRemover : public StmtExprMutatorWithAnalyzer {
 public:
-  static Stmt Apply(Stmt stmt, arith::Analyzer *analyzer,
-                    std::optional<ControlFlowGraph> touch_pattern,
-                    const StmtNode *context) {
-    VarSet dead_allocations =
-        AllocationUsageCollector::FindDeadAllocations(stmt);
-    AscendNoOpRemover visitor(analyzer, std::move(touch_pattern), context,
-                              std::move(dead_allocations));
-    return visitor(std::move(stmt));
-  }
+  using Parent = StmtExprMutatorWithAnalyzer;
+  using Parent::Mutate;
+  using Parent::Mutate_;
+  AscendNoOpRemover(const sym::Analyzer &analyzer, bool dataflow,
+                    bool has_volatile)
+      : Parent(analyzer), dataflow_(dataflow), has_volatile_(has_volatile) {}
 
 private:
-  using Parent = IRMutatorWithAnalyzer;
-  using Parent::VisitStmt;
-  using Parent::VisitStmt_;
-
-  AscendNoOpRemover(arith::Analyzer *analyzer,
-                    std::optional<ControlFlowGraph> touch_pattern,
-                    const StmtNode *context, VarSet dead_allocations)
-      : Parent(analyzer), touch_pattern_(std::move(touch_pattern)),
-        context_(context), dead_allocations_(std::move(dead_allocations)) {}
-
-  Stmt VisitStmt_(const BindNode *op) final {
-    // Unused Bind elimination requires a separate two-pass analysis.
-    return Parent::VisitStmt_(op);
+  Stmt MakeEvaluate(const Expr &value) const {
+    return HasRuntimeEffect(value, has_volatile_)
+               ? Stmt(Evaluate(value, value->loc))
+               : Stmt(Evaluate(0));
   }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == "pragma_debug_skip_region") {
-      return MakeEvaluate(0);
-    }
-    if (op->attr_key == s_tir::attr::async_wait_queue_scope) {
-      std::pair<PrimExpr, PrimExpr> wait_attrs = GetAsyncWaitAttributes(op);
-      PrimExpr wait_count = wait_attrs.second;
-      arith::Analyzer analyzer;
-      if (analyzer.CanProve(wait_count < 0)) {
-        // Unrolling can make a loop-dependent wait count negative. Such waits
-        // are no-ops.
-        const auto *inner = op->body.as<AttrStmtNode>();
-        TVM_FFI_ICHECK(inner);
-        return Parent::VisitStmt(inner->body);
-      }
-    }
-
-    Stmt stmt = Parent::VisitStmt_(op);
-    op = stmt.as<AttrStmtNode>();
-    return is_no_op(op->body) ? MakeEvaluate(op->value) : stmt;
-  }
-
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    Stmt stmt = Parent::VisitStmt_(op);
-    op = stmt.as<IfThenElseNode>();
-    if (!op) {
-      return stmt;
-    }
-
-    if (op->else_case.defined()) {
-      bool no_op_else = is_no_op(op->else_case.value());
-      bool no_op_then = is_no_op(op->then_case);
-      if (no_op_else && no_op_then) {
-        return MakeEvaluate(op->condition);
-      }
-      if (no_op_else) {
-        return IfThenElse(op->condition, op->then_case);
-      }
-      if (no_op_then) {
-        return IfThenElse(!op->condition, op->else_case.value());
-      }
-      return stmt;
-    }
-
-    return is_no_op(op->then_case) ? MakeEvaluate(op->condition) : stmt;
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    arith::IntSet extent_range = arith::EvalSet(op->extent, var_range_map_);
-    if (!arith::is_neg_inf(extent_range.max()) &&
-        !arith::is_pos_inf(extent_range.max()) &&
-        analyzer_->CanProve(extent_range.max() <= 0)) {
-      return Evaluate(0);
-    }
-
-    var_range_map_[op->loop_var.get()] =
-        arith::IntSet::FromMinExtent(op->min, op->extent);
-    Stmt stmt = Parent::VisitStmt_(op);
-    var_range_map_.erase(op->loop_var.get());
-    op = stmt.as<ForNode>();
-    if (is_zero(op->extent)) {
-      return Evaluate(0);
-    }
-    return is_no_op(op->body) ? MakeEvaluate({op->min, op->extent}) : stmt;
-  }
-
-  Stmt VisitStmt_(const AllocBufferNode *op) final {
-    if (dead_allocations_.count(op->buffer->data)) {
-      return Evaluate(0);
-    }
-    return StmtMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    return HasSideEffect(op->value) ? ffi::GetRef<Stmt>(op) : Evaluate(0);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = ffi::GetRef<BufferStore>(op);
-
-    auto only_side_effects = [&]() {
-      ffi::Array<Stmt> statements;
-      statements.push_back(MakeEvaluate(store->value));
-      for (const PrimExpr &index : store->indices) {
-        statements.push_back(MakeEvaluate(index));
-      }
-      return VisitStmt(SeqStmt(statements));
-    };
-
-    if (touch_pattern_.has_value()) {
-      Stmt context = context_ ? ffi::GetRef<Stmt>(context_) : store;
-      if (touch_pattern_->IsOverwrittenWithoutEffect(store, context)) {
-        touch_pattern_->RemoveStore(store);
-        return only_side_effects();
-      }
-    }
-
-    PrimExpr stores_existing_value =
-        store->value ==
-        BufferLoad(store->buffer, store->indices, store->predicate);
-    if (touch_pattern_.has_value()) {
-      Stmt context = context_ ? ffi::GetRef<Stmt>(context_) : Stmt(store);
-      stores_existing_value = touch_pattern_->SimplifyInContext(
-          stores_existing_value, context, analyzer_);
-    } else {
-      stores_existing_value = analyzer_->Simplify(stores_existing_value);
-    }
-    if (is_one(stores_existing_value)) {
-      return only_side_effects();
-    }
-
-    if (const auto *load = store->value.as<BufferLoadNode>()) {
-      if (load->buffer->data.same_as(store->buffer->data) &&
-          analyzer_->CanProveEqual(load->buffer->elem_offset,
-                                   store->buffer->elem_offset) &&
-          ArrayValueEqual(load->buffer->shape, store->buffer->shape) &&
-          ArrayValueEqual(load->buffer->strides, store->buffer->strides) &&
-          ArrayValueEqual(load->indices, store->indices)) {
-        return only_side_effects();
-      }
-    }
-
-    return store;
-  }
-
-  Stmt VisitStmt_(const DeclBufferNode *op) final {
-    if (dead_allocations_.count(op->buffer->data)) {
-      return Evaluate(0);
-    }
-    return StmtMutator::VisitStmt_(op);
-  }
-
-  bool ArrayValueEqual(const ffi::Array<PrimExpr> &lhs,
-                       const ffi::Array<PrimExpr> &rhs) {
-    if (lhs.size() != rhs.size()) {
+  bool SameIndices(const Array<PrimExpr> &a, const Array<PrimExpr> &b) const {
+    if (a.size() != b.size())
       return false;
-    }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-      if (!analyzer_->CanProveEqual(lhs[i], rhs[i])) {
+    for (size_t i = 0; i < a.size(); ++i) {
+      if (SideEffect(a[i]) > CallEffectKind::kPure ||
+          SideEffect(b[i]) > CallEffectKind::kPure)
         return false;
-      }
+      if (!ffi::StructuralEqual()(a[i], b[i]) &&
+          !GetSyncedAnalyzer()->CanProveEqual(a[i], b[i]))
+        return false;
     }
     return true;
   }
-
-  bool HasSideEffect(const PrimExpr &value) const {
-    return SideEffect(value) > CallEffectKind::kReadState;
+  bool SameAddress(const TensorStoreObj *a, const TensorStoreObj *b) const {
+    // Distinct native tensor identities may alias with different offset/dtype/
+    // layout. Only an identical view and equal indices establish equality.
+    return a->dest.same_as(b->dest) && SameIndices(a->indices, b->indices);
+  }
+  bool PureStoreValue(const TensorStoreObj *store) const {
+    if (SideEffect(store->value) > CallEffectKind::kPure)
+      return false;
+    return std::all_of(store->indices.begin(), store->indices.end(),
+                       [](const PrimExpr &index) {
+                         return SideEffect(index) <= CallEffectKind::kPure;
+                       });
   }
 
-  Stmt MakeEvaluate(PrimExpr value) {
-    return HasSideEffect(value) ? Evaluate(value) : Evaluate(0);
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode) final {
+    if (const auto *call = op->value.as<CallObj>();
+        call && call->op.as<OpObj>() &&
+        call->op.as<OpObj>()->name == "tl.annotation")
+      return Unchanged();
+    return MakeEvaluate(op->value);
   }
 
-  Stmt MakeEvaluate(const ffi::Array<PrimExpr> &values) {
-    ffi::Array<Stmt> statements;
-    for (const PrimExpr &value : values) {
-      if (HasSideEffect(value)) {
-        statements.push_back(Evaluate(value));
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op, InplaceMode mode) final {
+    TensorStore store = Parent::Mutate_(op, mode)
+                            .ValueOrUnchanged(GetRef<Stmt>(op))
+                            .as_or_throw<TensorStore>();
+    const auto *load = store->value.as<TensorLoadObj>();
+    if (!has_volatile_ && load && load->source.same_as(store->dest) &&
+        SameIndices(load->indices, store->indices))
+      return Evaluate(0);
+    return store;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const IfObj *op, InplaceMode mode) final {
+    Stmt stmt = Parent::Mutate_(op, mode).ValueOrUnchanged(GetRef<Stmt>(op));
+    const auto *branch = stmt.as<IfObj>();
+    if (!branch)
+      return stmt;
+    bool then_empty = tirx::IsNoOp(branch->then_case);
+    bool else_empty = !branch->else_case || tirx::IsNoOp(*branch->else_case);
+    if (then_empty && else_empty)
+      return MakeEvaluate(branch->condition);
+    if (else_empty)
+      return If(branch->condition, branch->then_case, std::nullopt,
+                branch->loc);
+    if (then_empty)
+      return If(Not(branch->condition), *branch->else_case, std::nullopt,
+                branch->loc);
+    return stmt;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    // Native For always tests var < end, independently of the step sign.
+    // Evaluate-on-entry extraction belongs to NormalizeControlFlowForSchedule.
+    bool pure_bounds = SideEffect(op->begin) <= CallEffectKind::kPure &&
+                       SideEffect(op->end) <= CallEffectKind::kPure &&
+                       SideEffect(op->step) <= CallEffectKind::kPure;
+    if (pure_bounds && GetSyncedAnalyzer()->CanProve(op->begin >= op->end))
+      return Evaluate(0);
+    Stmt stmt{ffi::UnsafeInit{}};
+    if (pure_bounds) {
+      stmt = WithTraversalConstraints(
+          this, {sym::PredicateConstraint(op->var < op->end)}, [&] {
+            return Parent::Mutate_(op, mode).ValueOrUnchanged(GetRef<Stmt>(op));
+          });
+    } else {
+      stmt = Parent::Mutate_(op, mode).ValueOrUnchanged(GetRef<Stmt>(op));
+    }
+    const auto *loop = stmt.as<ForObj>();
+    // Do not erase a potentially non-terminating zero/negative-step loop just
+    // because its body is empty, or discard effectful bound evaluations.
+    if (pure_bounds && tirx::IsNoOp(loop->body) &&
+        GetSyncedAnalyzer()->CanProve(loop->step > 0))
+      return Evaluate(0);
+    return stmt;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    auto attribute = ReadTaskAttribute(op);
+    if (attribute && attribute->key == "pragma_debug_skip_region")
+      return Evaluate(0);
+    if (attribute && attribute->key == "async_wait_queue_scope") {
+      auto inner = ReadTaskAttribute(attribute->region->body);
+      TVM_FFI_CHECK(inner && inner->key == "async_wait_inflight_count",
+                    ValueError)
+          << "async wait requires the inflight-count region";
+      PrimExpr count = inner->value.cast<PrimExpr>();
+      if (SideEffect(count) <= CallEffectKind::kPure &&
+          GetSyncedAnalyzer()->CanProve(count < 0))
+        return Mutate(inner->region->body)
+            .ValueOrUnchanged(inner->region->body);
+    }
+    // Unknown regions have their own result/body-parameter semantics. Keep
+    // their carrier even when the body is empty.
+    return Parent::Mutate_(op, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode) final {
+    Array<Stmt> result;
+    Optional<TensorStore> known;
+    std::optional<size_t> pending_write;
+    auto append = [&](const Stmt &stmt) {
+      if (tirx::IsNoOp(stmt))
+        return;
+      const auto *store = stmt.as<TensorStoreObj>();
+      if (dataflow_ && !has_volatile_ && store && PureStoreValue(store)) {
+        if (known && SameAddress(known.value().get(), store)) {
+          bool same_value = ffi::StructuralEqual()(known->value, store->value);
+          if (!same_value && store->value.ty().IsScalar() &&
+              (store->value.ty().MatchesCode(kDLInt) ||
+               store->value.ty().MatchesCode(kDLUInt)))
+            same_value =
+                GetSyncedAnalyzer()->CanProveEqual(known->value, store->value);
+          if (same_value)
+            return;
+          if (pending_write)
+            result.Set(*pending_write, Evaluate(0));
+        }
+        // Any other store may alias this view, even when parameter identities
+        // differ. Forget the old value instead of assuming noalias.
+        known = GetRef<TensorStore>(store);
+        pending_write = result.size();
+      } else if (const auto *bind = stmt.as<BindObj>();
+                 bind && SideEffect(bind->value) <= CallEffectKind::kPure) {
+        // Immutable scalar definitions do not change memory. A pointer/tensor
+        // view definition is safe as well, but its later stores invalidate.
+      } else {
+        known = std::nullopt;
+        pending_write = std::nullopt;
+      }
+      result.push_back(stmt);
+    };
+    for (const Stmt &stmt : op->seq) {
+      Stmt rewritten = Mutate(stmt).ValueOrUnchanged(stmt);
+      if (const auto *seq = rewritten.as<SeqStmtObj>()) {
+        for (const Stmt &child : seq->seq)
+          append(child);
+      } else {
+        append(rewritten);
       }
     }
-
-    if (statements.empty()) {
-      return Evaluate(0);
-    }
-    if (statements.size() == 1) {
-      return statements[0];
-    }
-    return SeqStmt(statements);
+    Array<Stmt> compact;
+    for (const Stmt &stmt : result)
+      if (!tirx::IsNoOp(stmt))
+        compact.push_back(stmt);
+    return SeqStmt(std::move(compact), op->loc);
   }
 
-  std::unordered_map<const VarNode *, arith::IntSet> var_range_map_;
-  std::optional<ControlFlowGraph> touch_pattern_;
-  const StmtNode *context_;
-  VarSet dead_allocations_;
+  bool dataflow_, has_volatile_;
 };
 
+class DeadTensorBindingRemover : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+  explicit DeadTensorBindingRemover(VarSet dead) : dead_(std::move(dead)) {}
+  UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    if (!dead_.count(op->var.get()))
+      return StmtExprMutator::Mutate_(op, mode);
+    const auto *call = op->value.as<CallObj>();
+    Array<Stmt> effects;
+    for (const Expr &arg : call->args)
+      if (SideEffect(arg) > CallEffectKind::kReadState)
+        effects.push_back(Evaluate(arg, arg->loc));
+    if (auto tensor = op->var.as<TensorVar>())
+      for (const PrimExpr &extent : tensor.value().shape())
+        if (SideEffect(extent) > CallEffectKind::kReadState)
+          effects.push_back(Evaluate(extent, extent->loc));
+    return SeqStmt(std::move(effects), op->loc);
+  }
+
+private:
+  VarSet dead_;
+};
+} // namespace
+
 tvm::transform::Pass AscendRemoveNoOp() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const PassContext &ctx) {
-    std::optional<ControlFlowGraph> touch_pattern;
-    AscendRemoveNoOpConfig config =
-        ctx->GetConfig<AscendRemoveNoOpConfig>("tl.AscendRemoveNoOp")
-            .value_or(AttrsWithDefaultValues<AscendRemoveNoOpConfig>());
-
-    if (config->use_dataflow_analysis) {
-      touch_pattern.emplace(func->body, config->max_simplification_steps);
-    }
-
-    arith::Analyzer analyzer;
-    analyzer.rewrite_simplify.SetMaximumRewriteSteps(
+  auto pass = [](tirx::Function f, const IRModule &,
+                 const tvm::transform::PassContext &ctx) {
+    if (f->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return f;
+    auto config =
+        ctx->GetConfigOrDefault<AscendRemoveNoOpConfig>("tl.AscendRemoveNoOp");
+    auto analyzer = CreateTileLangAnalyzer();
+    analyzer->rewrite_simplify.SetMaximumRewriteSteps(
         config->max_simplification_steps);
-    PrimFuncNode *write_ptr = func.CopyOnWrite();
-    write_ptr->body =
-        AscendNoOpRemover::Apply(std::move(write_ptr->body), &analyzer,
-                                 std::move(touch_pattern), nullptr);
-    return func;
+    SeqStmt body = f->body;
+    for (;;) {
+      auto usage = make_object<AllocationUsageCollector>();
+      usage->Visit(body);
+      auto remover = make_object<AscendNoOpRemover>(
+          analyzer, config->use_dataflow_analysis, usage->has_volatile);
+      body = remover->Mutate(body).ValueOrUnchanged(body);
+      usage = make_object<AllocationUsageCollector>();
+      usage->Visit(body);
+      VarSet dead;
+      for (const VarObj *var : usage->allocated)
+        if (!usage->used.count(var))
+          dead.insert(var);
+      if (dead.empty())
+        break;
+      auto dce = make_object<DeadTensorBindingRemover>(std::move(dead));
+      body = dce->Mutate(body).ValueOrUnchanged(body);
+    }
+    f.CopyOnWrite()->body = std::move(body);
+    return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AscendRemoveNoOp", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.AscendRemoveNoOp");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.AscendRemoveNoOp", AscendRemoveNoOp);
+  reflection::GlobalDef().def("tl.transform.AscendRemoveNoOp",
+                              AscendRemoveNoOp);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

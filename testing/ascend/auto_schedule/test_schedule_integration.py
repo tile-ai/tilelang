@@ -4,12 +4,24 @@ Pass-local contracts are tested in the neighboring files with explicit IR.
 Only these tests deliberately exercise multiple compiler stages.
 """
 
+from tvm_tirx import ir
+from testing.ascend._ir import (
+    access_tensor,
+    allocated_tensors,
+    annotations,
+    attribute_fields,
+    attribute_key,
+    loop_annotations,
+    sblock_annotations,
+    sblock_metadata,
+    sblocks,
+)
+
 import pytest
 import tilelang
 import tilelang.testing
 import tilelang.ascend.language as T
-from tilelang import tvm
-from tvm import tirx
+import tvm_tirx as tvm
 from testing.ascend._ir import nodes, calls, allocated_buffer
 
 TILE = 16
@@ -128,7 +140,7 @@ def make_multi_kernel_program():
 def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer"):
@@ -138,13 +150,13 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
         artifact = tilelang.lower(_make_shared_l0_ring_program(k_tiles), target="ascend")
     prepared = snapshots["tl.PrepareMultiBuffer"]
     a, b = allocated_buffer(prepared, "l0a"), allocated_buffer(prepared, "l0b")
-    owners = [loop for loop in nodes(prepared, tirx.For) if a.data in loop.annotations.get("tl.multi_buffer_counter_map", {})]
+    owners = [loop for loop in nodes(prepared, ir.For) if a in loop_annotations(loop).get("tl.multi_buffer_counter_map", {})]
     assert len(owners) == 2
-    counters = [loop.annotations["tl.multi_buffer_counter_map"][a.data] for loop in owners]
+    counters = [loop_annotations(loop)["tl.multi_buffer_counter_map"][a] for loop in owners]
     assert all(clock.same_as(counters[0]) for clock in counters)
-    assert all(loop.annotations["tl.multi_buffer_counter_map"][b.data].same_as(counters[0]) for loop in owners)
+    assert all(loop_annotations(loop)["tl.multi_buffer_counter_map"][b].same_as(counters[0]) for loop in owners)
     materialized = snapshots["tl.MaterializeMultiBuffer"]
-    assert int(allocated_buffer(materialized, "l0a").shape[0]) == 2
+    assert int(allocated_buffer(materialized, "l0a").ty.shape[0]) == 2
     assert artifact.kernel_source and artifact.device_mod
 
 
@@ -215,7 +227,7 @@ def _make_subcore_gemm(pattern, steps, unit_flag=0):
 def test_subcore_roles_survive_complete_lowering(pattern):
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in ("tl.ResolveCore", "tl.MaterializeMultiBuffer"):
@@ -226,20 +238,22 @@ def test_subcore_roles_survive_complete_lowering(pattern):
     assert artifact.kernel_source and artifact.device_mod
     resolved = snapshots["tl.ResolveCore"]
     copies = [
-        task for task in nodes(resolved, tirx.AttrStmt) if task.attr_key == "tl.ascend_task" and calls(task.body, "tl.tileop.ascend_copy")
+        task
+        for task in nodes(resolved, ir.RegionStmt)
+        if attribute_key(task) == "tl.ascend_task" and calls(task.body, "tl.tileop.ascend_copy")
     ]
-    assert {1, 2, 4} <= {int(task.node["core_mask"]) for task in copies}
+    assert {1, 2, 4} <= {int(attribute_fields(task)["node"]["core_mask"]) for task in copies}
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     func = materialized["main"]
-    output = func.buffer_map[func.params[2]]
+    output = func.params[2]
     buffers = [
-        call.args[0].args[0].buffer for call in calls(materialized, "tl.tileop.ascend_copy") if call.args[1].args[0].buffer.same_as(output)
+        access_tensor(call.args[0]) for call in calls(materialized, "tl.tileop.ascend_copy") if access_tensor(call.args[1]).same_as(output)
     ]
     assert len(buffers) == (1 if pattern == "fixed" else 2)
-    assert len({buffer.data for buffer in buffers}) == len(buffers)
-    allocations = [buffer for block in nodes(materialized, tirx.SBlock) for buffer in block.alloc_buffers]
-    assert all(buffer.scope() == "shared.dyn" and any(buffer.same_as(allocated) for allocated in allocations) for buffer in buffers)
-    assert all(tuple(int(dim) for dim in buffer.shape) == (2, 32, 32) for buffer in buffers)
+    assert len({buffer for buffer in buffers}) == len(buffers)
+    allocations = allocated_tensors(materialized, include_scheduled=True)
+    assert all(buffer.ty.scope.name == "shared.dyn" and any(buffer.same_as(allocated) for allocated in allocations) for buffer in buffers)
+    assert all(tuple(int(dim) for dim in buffer.ty.shape) == (2, 32, 32) for buffer in buffers)
 
 
 @tilelang.testing.requires_ascend
@@ -549,13 +563,13 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
                     progress += 1
 
     resolved = schedule(main, through="ResolveCore", auto_schedule=False, infer_layouts=True)
-    progress = [buffer for block in nodes(resolved, tirx.SBlock) for buffer in block.alloc_buffers if buffer.name.startswith("progress")]
-    assert len(progress) == 2 and not progress[0].data.same_as(progress[1].data)
+    progress = [buffer for buffer in allocated_tensors(resolved, include_scheduled=True) if buffer.name.startswith("progress")]
+    assert len(progress) == 2 and not progress[0].same_as(progress[1])
     masks = {
-        int(task.node["core_mask"])
-        for task in nodes(resolved, tirx.AttrStmt)
-        if task.attr_key == "tl.ascend_task"
-        and any(store.buffer.same_as(buffer) for store in nodes(task.body, tirx.BufferStore) for buffer in progress)
+        int(attribute_fields(task)["node"]["core_mask"])
+        for task in nodes(resolved, ir.RegionStmt)
+        if attribute_key(task) == "tl.ascend_task"
+        and any(access_tensor(store).same_as(buffer) for store in nodes(task.body, ir.TensorStore) for buffer in progress)
     }
     # C's shared storage epoch is the union of the two guards. Both scalar
     # states can be recomputed on all three cores, independently of UB data.
@@ -566,7 +580,7 @@ def test_subcore_mutable_scalar_is_replicated_with_its_guard():
 def test_mixed_kernel_uses_requested_vector_count(sids):
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in ("tl.AssignCore", "tl.InsertSync", "tl.LowerScheduledTIR"):
@@ -575,29 +589,29 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
     with tvm.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_make_epilogue_program(sids), target="ascend")
     vector_mask = 1 if sids == 1 else 5
-    assigned = [task for task in nodes(snapshots["tl.AssignCore"], tirx.AttrStmt) if task.attr_key == "tl.ascend_task"]
-    masks = {int(task.node["core_mask"]) for task in assigned}
+    assigned = [task for task in nodes(snapshots["tl.AssignCore"], ir.RegionStmt) if attribute_key(task) == "tl.ascend_task"]
+    masks = {int(attribute_fields(task)["node"]["core_mask"]) for task in assigned}
     assert vector_mask in masks
     assert all(mask & (2 | vector_mask) == mask for mask in masks)
 
     # AIC flags address exactly the participating AIV banks. The uniform AIV
     # body and its synchronization stay shared when both subcores participate.
     cube_banks = set()
-    analyzer = tvm.arith.Analyzer()
-    for task in nodes(snapshots["tl.InsertSync"], tirx.AttrStmt):
-        if task.attr_key != "tl.ascend_task":
+    analyzer = tvm.sym.Analyzer()
+    for task in nodes(snapshots["tl.InsertSync"], ir.RegionStmt):
+        if attribute_key(task) != "tl.ascend_task":
             continue
         for operation in ("set", "wait"):
             for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
-                if int(task.node["core_mask"]) == 2:
+                if int(attribute_fields(task)["node"]["core_mask"]) == 2:
                     bound = analyzer.const_int_bound(call.args[2])
                     assert bound.min_value // 16 == bound.max_value // 16
                     cube_banks.add(bound.min_value // 16)
                 else:
-                    assert int(task.node["core_mask"]) == vector_mask
+                    assert int(attribute_fields(task)["node"]["core_mask"]) == vector_mask
     assert cube_banks == set(range(sids))
-    vectors = [block for block in nodes(snapshots["tl.LowerScheduledTIR"], tirx.SBlock) if block.name_hint == "VECTOR"]
-    assert len(vectors) == 1 and int(vectors[0].annotations["vector_count"]) == sids
+    vectors = [block for block in sblocks(snapshots["tl.LowerScheduledTIR"]) if sblock_metadata(block)["name"] == "VECTOR"]
+    assert len(vectors) == 1 and int(sblock_annotations(vectors[0])["vector_count"]) == sids
     assert "asc_sync_intra_arrive(" in artifact.kernel_source
     assert "asc_sync_intra_wait(" in artifact.kernel_source
     if sids == 1:
@@ -607,7 +621,7 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
 def test_every_kernel_is_scheduled_and_called_in_program_order():
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in ("tl.InsertSync", "tl.LowerScheduledTIR"):
@@ -617,26 +631,59 @@ def test_every_kernel_is_scheduled_and_called_in_program_order():
     with tvm.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(program, target="ascend")
     for name, mod in snapshots.items():
-        roots = [block for block in nodes(mod, tirx.SBlock) if block.name_hint == "tilelang_root"]
+        roots = [block for block in sblocks(mod) if sblock_metadata(block)["name"] == "tilelang_root"]
         assert len(roots) == 2
         if name == "tl.InsertSync":
-            assert len([block for block in nodes(mod, tirx.SBlock) if "tl.buffer_alias_map" in block.annotations]) == 2
+            assert len([block for block in sblocks(mod) if "tl.buffer_alias_map" in sblock_annotations(block)]) == 2
         else:
-            assert len([node for node in nodes(mod, tirx.AttrStmt) if node.attr_key == "tl.buffer_alias_map"]) == 2
+            assert len([fields for fields in annotations(mod) if "tl.buffer_alias_map" in fields]) == 2
     lowered = snapshots["tl.LowerScheduledTIR"]
     assert not any(
-        node.attr_key in ("tl.schedule_unit", "tl.ascend_task", "tl.ascend_per_core_task") for node in nodes(lowered, tirx.AttrStmt)
+        attribute_key(node) in ("tl.schedule_unit", "tl.ascend_task", "tl.ascend_per_core_task") for node in nodes(lowered, ir.RegionStmt)
     )
     symbols = {gvar.name_hint for gvar in artifact.device_mod.functions}
     assert len(symbols) == 2
     (host,) = artifact.host_mod.functions.values()
     host_calls = [
-        call for call in calls(host, "tirx.tvm_call_packed") if isinstance(call.args[0], tirx.StringImm) and call.args[0].value in symbols
+        call for call in calls(host, "tirx.call_ffi_kernel") if isinstance(call.args[0], ir.StringImm) and call.args[0].value in symbols
     ]
     assert len(host_calls) == 2 and {call.args[0].value for call in host_calls} == symbols
-    a, b, c = [program.buffer_map[param].data for param in program.params]
+    assert len(host.params) == 4  # Native FFI: self, packed arguments, count, result.
+    packet = host.params[1]
+    bindings = {binding.var: binding.value for binding in nodes(host, ir.Bind)}
+
+    def argument_index(value, active=frozenset()):
+        if isinstance(value, ir.Var):
+            assert value in bindings and value not in active
+            return argument_index(bindings[value], active | {value})
+        assert isinstance(value, ir.Call) and isinstance(value.op, ir.Op)
+        name = value.op.name
+        if name in ("tirx.tensor_data_ptr", "tirx.decl_tensor", "tirx.reinterpret"):
+            assert len(value.args) == 1
+            return argument_index(value.args[0], active)
+        if name in ("tirx.handle_add_byte_offset", "tirx.ptr_byte_offset"):
+            assert len(value.args) == 2
+            return argument_index(value.args[0], active)
+        if name == "prim.if_then_else":
+            assert len(value.args) == 3
+            left = argument_index(value.args[1], active)
+            right = argument_index(value.args[2], active)
+            assert left == right
+            return left
+        assert name == "tirx.abi_field_get" and len(value.args) == 3
+        index, field = int(value.args[1]), int(value.args[2])
+        if value.args[0].same_as(packet):
+            assert field == 15  # Native FFI Any value payload, not its type index.
+            assert 0 <= index < len(program.params)
+            return index
+        assert index == 0 and field == 1  # DLTensor data field.
+        return argument_index(value.args[0], active)
+
+    a, b, c = program.params
     for call, expected in zip(host_calls, ({a, c}, {b, c})):
-        actual = {arg for arg in call.args if isinstance(arg, tirx.Var)} & {a, b, c}
+        pointers = [arg for arg in call.args[1:] if isinstance(arg.ty, ir.PtrType)]
+        assert len(pointers) == 2
+        actual = {program.params[argument_index(arg)] for arg in pointers}
         assert actual == expected
 
 
@@ -688,7 +735,7 @@ def test_single_version_sibling_protocol_survives_reuse_and_lowering():
 
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in ("tl.InsertSync", "tl.MaterializeMultiBuffer", "tl.LowerScheduledTIR", "tl.MergeUBAllocations"):
@@ -700,22 +747,22 @@ def test_single_version_sibling_protocol_survives_reuse_and_lowering():
         artifact = tilelang.lower(main, target="ascend")
     inserted = snapshots["tl.InsertSync"]
     ub = allocated_buffer(inserted, "ub")
-    owners = [loop for loop in nodes(inserted, tirx.For) if ub.data in loop.annotations.get("tl.multi_buffer_counter_map", {})]
+    owners = [loop for loop in nodes(inserted, ir.For) if ub in loop_annotations(loop).get("tl.multi_buffer_counter_map", {})]
     assert len(owners) == 2
-    counter = owners[0].annotations["tl.multi_buffer_counter_map"][ub.data]
-    assert owners[1].annotations["tl.multi_buffer_counter_map"][ub.data].same_as(counter)
+    counter = loop_annotations(owners[0])["tl.multi_buffer_counter_map"][ub]
+    assert loop_annotations(owners[1])["tl.multi_buffer_counter_map"][ub].same_as(counter)
     for operation in ("set", "wait"):
         flags = [call for call in calls(inserted, "tl.ascend_" + operation + "_flag") if call.args[0].value == "MTE3_MTE2"]
-        assert flags and all(isinstance(call.args[1], tirx.IntImm) for call in flags)
+        assert flags and all(isinstance(call.args[1], ir.IntImm) for call in flags)
     materialized = snapshots["tl.MaterializeMultiBuffer"]
-    assert tuple(int(dim) for dim in allocated_buffer(materialized, "ub").shape) == (64,)
-    assert not any(buffer.data.same_as(counter.data) for block in nodes(materialized, tirx.SBlock) for buffer in block.alloc_buffers)
+    assert tuple(int(dim) for dim in allocated_buffer(materialized, "ub").ty.shape) == (64,)
     assert not any(
-        node.buffer.data.same_as(counter.data) for kind in (tirx.BufferLoad, tirx.BufferStore) for node in nodes(materialized, kind)
+        buffer.same_as(counter) for block in sblocks(materialized) for buffer in allocated_tensors(block, include_scheduled=True)
     )
-    assert any("tl.buffer_alias_map" in block.annotations for block in nodes(materialized, tirx.SBlock))
-    assert any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.LowerScheduledTIR"], tirx.AttrStmt))
-    assert not any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.MergeUBAllocations"], tirx.AttrStmt))
+    assert not any(access_tensor(node).same_as(counter) for kind in (ir.TensorLoad, ir.TensorStore) for node in nodes(materialized, kind))
+    assert any("tl.buffer_alias_map" in sblock_annotations(block) for block in sblocks(materialized))
+    assert any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.LowerScheduledTIR"]))
+    assert not any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.MergeUBAllocations"]))
     assert artifact.kernel_source and artifact.device_mod
 
 
@@ -788,7 +835,7 @@ def test_sf_group_owners_survive_a_plain_gemm_sibling(versions):
 
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name in ("tl.InsertSync", "tl.MaterializeMultiBuffer"):
@@ -801,14 +848,12 @@ def test_sf_group_owners_survive_a_plain_gemm_sibling(versions):
     prepared = snapshots["tl.InsertSync"]
     for data_name, sf_name in [("a0", "sa"), ("b0", "sb")]:
         data, sf = allocated_buffer(prepared, data_name), allocated_buffer(prepared, sf_name)
-        owners = [loop for loop in nodes(prepared, tirx.For) if data.data in loop.annotations.get("multi_buffer_eligible", [])]
+        owners = [loop for loop in nodes(prepared, ir.For) if data in loop_annotations(loop).get("multi_buffer_eligible", [])]
         assert len(owners) == 2
-        counters = [loop.annotations["tl.multi_buffer_counter_map"] for loop in owners]
-        assert all(
-            mapping[data.data].same_as(counters[0][data.data]) and mapping[sf.data].same_as(mapping[data.data]) for mapping in counters
-        )
+        counters = [loop_annotations(loop)["tl.multi_buffer_counter_map"] for loop in owners]
+        assert all(mapping[data].same_as(counters[0][data]) and mapping[sf].same_as(mapping[data]) for mapping in counters)
         for name in (data_name, sf_name):
-            shape = allocated_buffer(snapshots["tl.MaterializeMultiBuffer"], name).shape
+            shape = allocated_buffer(snapshots["tl.MaterializeMultiBuffer"], name).ty.shape
             assert len(shape) == (3 if versions > 1 else 2)
             if versions > 1:
                 assert int(shape[0]) == versions

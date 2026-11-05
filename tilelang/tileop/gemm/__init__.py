@@ -1,21 +1,23 @@
-from tilelang import tvm as tvm
-from tvm import tirx
-from tvm.target import Target
-from tvm.ir.base import Node
-from tvm.ir import Range
-from tvm.runtime import Scriptable
+from tilelang.language import _native as tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Node
+from tvm_tirx.ir import Range
+from tvm_tirx.ir import Scriptable
 import tvm_ffi
 from .registry import resolve_gemm_impl
 from tilelang import _ffi_api
+from tilelang.tileop._lowering import close_lowered_function
+from tilelang.tileop import _register_default_callback
+from tilelang.ir import GemmWarpPolicy
 
 
-@tvm_ffi.register_global_func("tl.gemm.infer_layout")
+@_register_default_callback("tl.gemm.infer_layout")
 def gemm_infer_layout(gemm, target: Target, thread_bounds: Range):
     thread_nums = thread_bounds.extent
     return gemm.infer_layout(target, thread_nums)
 
 
-@tvm_ffi.register_global_func("tl.gemm.lower")
+@_register_default_callback("tl.gemm.lower")
 def gemm_lower(
     gemm,
     layout_map,
@@ -25,12 +27,13 @@ def gemm_lower(
     mbar_phase_expr: tirx.PrimExpr,
 ):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
-    stmt = gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
-    return stmt
+    function = gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
+    return close_lowered_function(function)
 
 
 @tvm_ffi.register_object("tl.Gemm")
 class Gemm(Node, Scriptable):
+    policy: GemmWarpPolicy
     # FFI fields (LLVM/MLIR-style lowerCamel via reflection):
     # a, b, c, aPtr, bPtr, cPtr, m, n, k, transA, transB,
     # clearAccum, kPack, wgWait, policy

@@ -7,7 +7,7 @@ import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 import tilelang.testing
 import torch
-from tvm import tirx
+from tvm_tirx import ir
 from testing.ascend._ir import calls, nodes
 
 
@@ -126,7 +126,7 @@ def test_simdvf_postupdate_load_threads_pointer_and_snapshots(dtype, dist, step)
                     T.copy(dst, B[tile, :])
 
     loads = calls(main, "tl.simd.vld")
-    bindings = [node for node in nodes(main, tirx.Bind) if any(node.value.same_as(load) for load in loads)]
+    bindings = [node for node in nodes(main, ir.Bind) if any(node.value.same_as(load) for load in loads)]
     projections = calls(main, "tl.simd.pair_get")
     assert len(loads) == len(bindings) == 3
     for binding in bindings:

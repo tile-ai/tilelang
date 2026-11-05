@@ -4,11 +4,11 @@
  *
  */
 
+#include "expr_utils.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 
@@ -26,44 +26,45 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
-IterVar MakeIterVar(std::string name, PrimExpr dom) {
-  Var var = Var(name, dom->dtype);
-  return IterVar(Range(0, dom), var, IterVarType::kDataPar);
+LayoutIterVar MakeIterVar(std::string name, PrimExpr dom) {
+  PrimVar var = PrimVar(name, dom.ty());
+  return LayoutIterVar(Range(0, dom), var);
 }
 
 Fragment makeGemmFragment8x4() {
-  IterVar i = MakeIterVar("i", 8);
-  IterVar j = MakeIterVar("j", 4);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 8);
+  LayoutIterVar j = MakeIterVar("j", 4);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 1) + 4 * i;
   PrimExpr index = FloorMod(j->var, 1);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment MakeGemmFragment8x8() {
-  IterVar i = MakeIterVar("i", 8);
-  IterVar j = MakeIterVar("j", 8);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 8);
+  LayoutIterVar j = MakeIterVar("j", 8);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 2) + 4 * i;
   PrimExpr index = FloorMod(j->var, 2);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragment8x16() {
-  IterVar i = MakeIterVar("i", 8);
-  IterVar j = MakeIterVar("j", 16);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 8);
+  LayoutIterVar j = MakeIterVar("j", 16);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(j->var, 4) + 4 * i;
   PrimExpr index = FloorMod(j->var, 4);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment MakeGemmFragment8x8Transposed() {
-  IterVar i = MakeIterVar("i", 8);
-  IterVar j = MakeIterVar("j", 8);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 8);
+  LayoutIterVar j = MakeIterVar("j", 8);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = FloorDiv(i->var, 2) + 4 * j;
   PrimExpr index = FloorMod(i->var, 2);
   return Fragment({i, j}, {index}, forward_thread, rep);
@@ -75,45 +76,45 @@ From https://github.com/RadeonOpenCompute/amd_matrix_instruction_calculator
 --detail-instruction
 */
 Fragment makeGemmFragmentAB16x16CDNA(const int k_pack) {
-  IterVar i = MakeIterVar("i", 16);
-  IterVar j = MakeIterVar("j", 16 * k_pack);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 16);
+  LayoutIterVar j = MakeIterVar("j", 16 * k_pack);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 4 * k_pack) + i;
   PrimExpr index = FloorMod(j->var, 4 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentAB16x16CDNATransposed(const int k_pack) {
-  IterVar i = MakeIterVar("i", 16 * k_pack);
-  IterVar j = MakeIterVar("j", 16);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 16 * k_pack);
+  LayoutIterVar j = MakeIterVar("j", 16);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(i->var, 4 * k_pack) + j;
   PrimExpr index = FloorMod(i->var, 4 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentAB16x32CDNA(const int k_pack) {
-  IterVar i = MakeIterVar("i", 16);
-  IterVar j = MakeIterVar("j", 32 * k_pack);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 16);
+  LayoutIterVar j = MakeIterVar("j", 32 * k_pack);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 8 * k_pack) + i;
   PrimExpr index = FloorMod(j->var, 8 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentAB16x32CDNATransposed(const int k_pack) {
-  IterVar i = MakeIterVar("i", 32 * k_pack);
-  IterVar j = MakeIterVar("j", 16);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 32 * k_pack);
+  LayoutIterVar j = MakeIterVar("j", 16);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(i->var, 8 * k_pack) + j;
   PrimExpr index = FloorMod(i->var, 8 * k_pack);
   return Fragment({i, j}, {index}, forward_thread, rep);
 }
 
 Fragment makeGemmFragmentC16x16CDNA() {
-  IterVar i = MakeIterVar("i", 16);
-  IterVar j = MakeIterVar("j", 16);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 16);
+  LayoutIterVar j = MakeIterVar("j", 16);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   PrimExpr forward_thread = 16 * FloorDiv(j->var, 4) + i;
   PrimExpr index = FloorMod(j->var, 4);
   return Fragment({i, j}, {index}, forward_thread, rep);
@@ -313,9 +314,9 @@ Fragment MakeGemmFragmentACDNA(const int block_m, const int block_n,
 }
 
 Fragment makeGemmFragment32x32(int element_size) {
-  IterVar i = MakeIterVar("i", 32);
-  IterVar j = MakeIterVar("j", 32);
-  IterVar rep = MakeIterVar("rep", 1);
+  LayoutIterVar i = MakeIterVar("i", 32);
+  LayoutIterVar j = MakeIterVar("j", 32);
+  LayoutIterVar rep = MakeIterVar("rep", 1);
   ICHECK(element_size == 16 || element_size == 32);
   if (element_size == 16) {
     PrimExpr thd = FloorMod(i, 4) + FloorDiv(FloorMod(i, 16), 8) * 4 +
@@ -359,9 +360,9 @@ Fragment MakeGemmVoltaFragmentA(const int block_m, const int block_n,
   ICHECK(warp_m % 32 == 0);
   ICHECK(block_k % 4 == 0);
   // this is a special case
-  IterVar i = MakeIterVar("i", 32);
-  IterVar j = MakeIterVar("j", 4);
-  IterVar rep = MakeIterVar("rep", 2);
+  LayoutIterVar i = MakeIterVar("i", 32);
+  LayoutIterVar j = MakeIterVar("j", 4);
+  LayoutIterVar rep = MakeIterVar("rep", 2);
   PrimExpr thd = FloorDiv(FloorMod(i, 16), 8) * 4 + 16 * FloorDiv(i, 16) +
                  FloorMod(i, 4) + 8 * rep;
   PrimExpr idx = j + FloorDiv(FloorMod(i, 8), 4) * 4;
@@ -400,40 +401,39 @@ struct SwizzleShapeInfo {
   int element_size;
 };
 
-SwizzleShapeInfo GetSwizzleShapeInfoChecked(const Buffer &buffer) {
-  ICHECK(buffer.defined()) << "Swizzle layout expects a defined buffer";
-  ICHECK(buffer->shape.size() >= 2)
+SwizzleShapeInfo GetSwizzleShapeInfoChecked(const TensorVar &buffer) {
+  ICHECK(buffer.shape().size() >= 2)
       << "Swizzle layout expects rank >= 2 buffer, got rank="
-      << buffer->shape.size();
-  size_t ndim = buffer->shape.size();
-  auto stride = as_const_int(buffer->shape[ndim - 2]);
-  auto continuous = as_const_int(buffer->shape[ndim - 1]);
+      << buffer.shape().size();
+  size_t ndim = buffer.shape().size();
+  auto stride = TryConstInt(buffer.shape()[ndim - 2]);
+  auto continuous = TryConstInt(buffer.shape()[ndim - 1]);
   ICHECK(stride && continuous)
       << "Swizzle layout requires constant last-2 dims";
-  return SwizzleShapeInfo{*stride, *continuous, buffer->dtype.bits()};
+  return SwizzleShapeInfo{*stride, *continuous, buffer.dtype().bits()};
 }
 
-bool TryGetSwizzleShapeInfo(const Buffer &buffer, SwizzleShapeInfo *info) {
-  if (!buffer.defined() || buffer->shape.size() < 2) {
+bool TryGetSwizzleShapeInfo(const TensorVar &buffer, SwizzleShapeInfo *info) {
+  if (buffer.shape().size() < 2) {
     return false;
   }
-  size_t ndim = buffer->shape.size();
-  auto stride = as_const_int(buffer->shape[ndim - 2]);
-  auto continuous = as_const_int(buffer->shape[ndim - 1]);
+  size_t ndim = buffer.shape().size();
+  auto stride = TryConstInt(buffer.shape()[ndim - 2]);
+  auto continuous = TryConstInt(buffer.shape()[ndim - 1]);
   if (!stride || !continuous) {
     return false;
   }
-  *info = SwizzleShapeInfo{*stride, *continuous, buffer->dtype.bits()};
+  *info = SwizzleShapeInfo{*stride, *continuous, buffer.dtype().bits()};
   return true;
 }
 
 } // namespace
 
-static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
+static Layout ExpandLayout2D(const Layout &base, const TensorVar &buffer) {
   Array<PrimExpr> leading_shape;
-  leading_shape.reserve(buffer->shape.size() - 2);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    leading_shape.push_back(buffer->shape[i]);
+  leading_shape.reserve(buffer.shape().size() - 2);
+  for (size_t i = 0; i + 2 < buffer.shape().size(); ++i) {
+    leading_shape.push_back(buffer.shape()[i]);
   }
   return base->Expand(leading_shape);
 }
@@ -442,8 +442,8 @@ static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
 static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
                                              int element_size) {
   // Swizzle 1 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  PrimVar i = InputPlaceholder(0);
+  PrimVar j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
   // stride==4 is a truncated 4-row period used by tile::gather4/scatter4
   // (s=i%8 ∈ [0,4) is a valid subset of the 8-row XOR pattern, matching
@@ -461,7 +461,7 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout MakeQuarterBankSwizzleLayout(const Buffer &buffer) {
+Layout MakeQuarterBankSwizzleLayout(const TensorVar &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeQuarterBankSwizzleLayout2D(static_cast<int>(info.stride),
                                              static_cast<int>(info.continuous),
@@ -473,8 +473,8 @@ Layout MakeQuarterBankSwizzleLayout(const Buffer &buffer) {
 static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
   // Swizzle 2 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  PrimVar i = InputPlaceholder(0);
+  PrimVar j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
   // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
   ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
@@ -490,7 +490,7 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout MakeHalfBankSwizzleLayout(const Buffer &buffer) {
+Layout MakeHalfBankSwizzleLayout(const TensorVar &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeHalfBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
@@ -502,8 +502,8 @@ Layout MakeHalfBankSwizzleLayout(const Buffer &buffer) {
 static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
   // Swizzle 3 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  PrimVar i = InputPlaceholder(0);
+  PrimVar j = InputPlaceholder(1);
   int vector_size = 128 / element_size;
   // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
   ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
@@ -519,7 +519,7 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
 }
 
-Layout MakeFullBankSwizzleLayout(const Buffer &buffer) {
+Layout MakeFullBankSwizzleLayout(const TensorVar &buffer) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base = MakeFullBankSwizzleLayout2D(static_cast<int>(info.stride),
                                           static_cast<int>(info.continuous),
@@ -542,8 +542,8 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
   const int perPhase = std::max(1, elemsPerOneBanksRow / innerDimLength);
   const int maxPhase = std::min(SIMDWidth / perPhase, innerDimLength / vecSize);
 
-  IterVar row = MakeIterVar("row", stride);
-  IterVar col = MakeIterVar("col", continuous);
+  LayoutIterVar row = MakeIterVar("row", stride);
+  LayoutIterVar col = MakeIterVar("col", continuous);
   PrimExpr phase = FloorMod(FloorDiv(row, perPhase), maxPhase);
   PrimExpr colOffSwizzled = (FloorDiv(col, vecSize) ^ phase) * vecSize;
   PrimExpr colOffOrdered = FloorMod(col, vecSize);
@@ -554,8 +554,8 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
 
 Layout makeGemmABLayoutF64_Kinner(int stride, int continuous) {
   // Swizzle<2, 0, 4>
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  PrimVar i = InputPlaceholder(0);
+  PrimVar j = InputPlaceholder(1);
   PrimExpr tc = FloorDiv(j, 16);
   PrimExpr ts = FloorDiv(i, 4);
   PrimExpr c = FloorMod(j, 16);
@@ -567,8 +567,8 @@ Layout makeGemmABLayoutF64_Kinner(int stride, int continuous) {
 
 Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
   // Swizzle<2, 2, 2>
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  PrimVar i = InputPlaceholder(0);
+  PrimVar j = InputPlaceholder(1);
   PrimExpr tc = FloorDiv(j, 16);
   PrimExpr ts = FloorDiv(i, 4);
   PrimExpr c = FloorMod(j, 16);
@@ -581,7 +581,7 @@ Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
 // The Default Layout for Tensor Access (row-major linear layout)
 Layout MakeLinearLayout(Array<PrimExpr> shape) {
   int ndim = static_cast<int>(shape.size());
-  Array<IterVar> iter_vars;
+  Array<LayoutIterVar> iter_vars;
   for (int i = 0; i < ndim; i++) {
     iter_vars.push_back(MakeIterVar(std::string{char('i' + i)}, shape[i]));
   }
@@ -598,8 +598,8 @@ Layout MakeLinearLayout(Array<PrimExpr> shape) {
 }
 
 Layout MakeGemmABLayoutPadded(int stride, int continuous, int element_size) {
-  IterVar i = MakeIterVar("i", stride);
-  IterVar j = MakeIterVar("j", continuous);
+  LayoutIterVar i = MakeIterVar("i", stride);
+  LayoutIterVar j = MakeIterVar("j", continuous);
   int padded = continuous;
   // Add 128 bits padding when the last dim is a multiple of 256 bits
   if ((element_size * continuous) % 256 == 0)
@@ -609,8 +609,8 @@ Layout MakeGemmABLayoutPadded(int stride, int continuous, int element_size) {
 
 Layout MakeGemmVoltaABLayoutCrosswise(int stride, int continuous) {
   ICHECK(stride % 32 == 0 && continuous % 32 == 0);
-  IterVar i = MakeIterVar("i", stride);
-  IterVar j = MakeIterVar("j", continuous);
+  LayoutIterVar i = MakeIterVar("i", stride);
+  LayoutIterVar j = MakeIterVar("j", continuous);
   PrimExpr vec_contiguous_idx = FloorDiv(j, 4);
   PrimExpr vec_strided_within_tile = FloorMod(vec_contiguous_idx, 8);
 
@@ -630,8 +630,8 @@ Layout MakeGemmVoltaABLayoutCrosswise(int stride, int continuous) {
 
 Layout MakeGemmVoltaALayoutCongruous(int stride, int continuous) {
   ICHECK(stride % 4 == 0 && continuous % 64 == 0);
-  IterVar i = MakeIterVar("i", stride);
-  IterVar j = MakeIterVar("j", continuous);
+  LayoutIterVar i = MakeIterVar("i", stride);
+  LayoutIterVar j = MakeIterVar("j", continuous);
   PrimExpr vec_contiguous_idx = FloorDiv(j, 8);
   PrimExpr vec_strided_idx = i;
   PrimExpr tile_contiguous_idx = FloorDiv(vec_contiguous_idx, 8);
@@ -655,8 +655,8 @@ Layout MakeGemmVoltaALayoutCongruous(int stride, int continuous) {
 
 Layout MakeGemmVoltaBLayoutCongruous(int stride, int continuous) {
   ICHECK(stride % 4 == 0 && continuous % 64 == 0);
-  IterVar i = MakeIterVar("i", stride);
-  IterVar j = MakeIterVar("j", continuous);
+  LayoutIterVar i = MakeIterVar("i", stride);
+  LayoutIterVar j = MakeIterVar("j", continuous);
   PrimExpr vec_contiguous_idx = FloorDiv(j, 8);
   PrimExpr vec_strided_idx = i;
   PrimExpr tile_contiguous_idx = FloorDiv(vec_contiguous_idx, 8);
@@ -728,8 +728,8 @@ Layout MakeTensorOpMultiplicand(int mat_stride, int mat_continuous,
   const int kPartitionShapeStride = 4;
 
   // NOTE: it's always row major for tl
-  IterVar i = MakeIterVar("i", mat_stride);
-  IterVar j = MakeIterVar("j", mat_continuous);
+  LayoutIterVar i = MakeIterVar("i", mat_stride);
+  LayoutIterVar j = MakeIterVar("j", mat_continuous);
 
   PrimExpr vec_contiguous_idx = FloorDiv(j, kElementsPerAccess);
   PrimExpr vec_strided_idx = FloorDiv(i, kFactor);
@@ -855,8 +855,8 @@ Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
       return makeGemmABLayoutF64_Kinner(mat_stride, mat_continuous);
     // fallback for float64 when stride % 8 != 0
     if (mat_stride % 8 != 0)
-      return MakeLinearLayout(
-          Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+      return MakeLinearLayout(Array<PrimExpr>{IntImm::Int32(mat_stride),
+                                              IntImm::Int32(mat_continuous)});
     return MakeQuarterBankSwizzleLayout2D(mat_stride, mat_continuous,
                                           element_size);
   }
@@ -875,8 +875,8 @@ Layout MakeGemmABLayoutHopper(int mat_stride, int mat_continuous,
   }
 
   if (mat_continuous % vector_size == 0)
-    return MakeLinearLayout(
-        Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+    return MakeLinearLayout(Array<PrimExpr>{IntImm::Int32(mat_stride),
+                                            IntImm::Int32(mat_continuous)});
   else
     ICHECK(0) << "Unsupported layout for Hopper with stride=" << mat_stride
               << ", continuous=" << mat_continuous
@@ -904,8 +904,8 @@ Layout MakeGemmABLayoutSm100(int mat_stride, int mat_continuous, int continuity,
   }
 
   if (mat_continuous % vector_size == 0)
-    return MakeLinearLayout(
-        Array<PrimExpr>{Integer(mat_stride), Integer(mat_continuous)});
+    return MakeLinearLayout(Array<PrimExpr>{IntImm::Int32(mat_stride),
+                                            IntImm::Int32(mat_continuous)});
   else
     ICHECK(0) << "Unsupported layout for sm100 with stride=" << mat_stride
               << ", continuous=" << mat_continuous
@@ -918,7 +918,8 @@ Layout MakeGemmABLayoutCDNA(int stride, int continuous, int element_size,
   return makeMatrixCoreSwizzleLayout(stride, continuous, element_size, kPack);
 }
 
-Layout MakeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
+Layout MakeSwizzledLayout(const TensorVar &buffer, bool k_inner,
+                          bool allow_pad) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   Layout base;
   if (allow_pad) {
@@ -933,7 +934,8 @@ Layout MakeSwizzledLayout(const Buffer &buffer, bool k_inner, bool allow_pad) {
   return ExpandLayout2D(base, buffer);
 }
 
-Layout MakeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
+Layout MakeVoltaSwizzledLayout(const TensorVar &buffer, bool is_a,
+                               bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   auto base =
       MakeGemmVoltaABLayout(static_cast<int>(info.stride),
@@ -941,7 +943,7 @@ Layout MakeVoltaSwizzledLayout(const Buffer &buffer, bool is_a, bool k_inner) {
   return ExpandLayout2D(base, buffer);
 }
 
-Layout MakeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
+Layout MakeWgmmaSwizzledLayout(const TensorVar &buffer, int continuity,
                                bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   if (continuity < 0)
@@ -952,7 +954,7 @@ Layout MakeWgmmaSwizzledLayout(const Buffer &buffer, int continuity,
   return ExpandLayout2D(base, buffer);
 }
 
-Layout MakeTcgen05MmaSwizzledLayout(const Buffer &buffer, int continuity,
+Layout MakeTcgen05MmaSwizzledLayout(const TensorVar &buffer, int continuity,
                                     bool k_inner) {
   auto info = GetSwizzleShapeInfoChecked(buffer);
   if (continuity < 0)
@@ -963,7 +965,7 @@ Layout MakeTcgen05MmaSwizzledLayout(const Buffer &buffer, int continuity,
   return ExpandLayout2D(base, buffer);
 }
 
-SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
+SwizzleMode DetectSwizzleMode(const Layout &layout, const TensorVar &buffer) {
   SwizzleShapeInfo info;
   if (!TryGetSwizzleShapeInfo(buffer, &info)) {
     return SwizzleMode::None();
@@ -998,7 +1000,7 @@ SwizzleMode DetectSwizzleMode(const Layout &layout, const Buffer &buffer) {
 
 Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
                                      const Layout &layout2,
-                                     const Buffer &buffer) {
+                                     const TensorVar &buffer) {
   SwizzleShapeInfo info;
   if (!TryGetSwizzleShapeInfo(buffer, &info)) {
     return std::nullopt;

@@ -1,19 +1,46 @@
 """The language interface for tl programs."""
 
-from tvm.tirx.script.builder.frame import TIRFrame
-from tvm.ffi import register_object
-from tilelang import _ffi_api
+from tilelang.language import _native
 from tilelang.language.kernel import get_thread_bindings, get_thread_extents
 
 __all__ = ["WarpSpecialize", "WarpSpecializeFrame", "ws"]
 
 
-@register_object("tl.WarpSpecializeFrame")
-class WarpSpecializeFrame(TIRFrame):
+class WarpSpecializeFrame(_native.LoopFrame):
     """
     WarpSpecializeFrame is a custom TIRFrame that manages warp group indices
     and handles the entry and exit of the kernel launch scope.
     """
+
+    def __init__(self, warp_group_ids, thread_idx, warp_group_size=128):
+        groups = sorted(int(group) for group in warp_group_ids)
+        if not groups:
+            raise ValueError("warp_group_idx must be non-empty")
+        merged = []
+        for group in groups:
+            if merged and group == merged[-1][1]:
+                merged[-1] = (merged[-1][0], group + 1)
+            else:
+                merged.append((group, group + 1))
+        condition = None
+        for start, end in merged:
+            bounded = _native.And(
+                thread_idx >= start * warp_group_size,
+                thread_idx < end * warp_group_size,
+            )
+            condition = bounded if condition is None else _native.Or(condition, bounded)
+        self.frames = [
+            _native.If(condition),
+            _native.Then(),
+            _native.attr(0, "warp_specialize", 1),
+        ]
+        self.vars = []
+        self.annotations = None
+        self._stack = None
+
+    def __enter__(self):
+        super().__enter__()
+        return None
 
 
 def WarpSpecialize(*warp_group_idx) -> WarpSpecializeFrame:
@@ -52,7 +79,7 @@ def WarpSpecialize(*warp_group_idx) -> WarpSpecializeFrame:
 
     assert len(warp_group_ids) > 0, "warp_group_idx must be non-empty"
 
-    return _ffi_api.WarpSpecialize(warp_group_ids, tid, warp_group_size)
+    return WarpSpecializeFrame(warp_group_ids, tid, warp_group_size)
 
 
 # Alias for WarpSpecialize for more concise usage

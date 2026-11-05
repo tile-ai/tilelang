@@ -8,11 +8,12 @@
  * Loads and stores share one shape per width.
  */
 
+#include "expr_utils.h"
+#include "ir/analyzer.h"
 #include "support/check.h"
 #include <algorithm>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/ir/prim/op.h>
 
 #include "layout.h"
 #include "tcgen05_layout.h"
@@ -21,6 +22,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using tvm::ffi::Array;
 
 const cute::Layout kDpOnly = cute::Layout::Parse("(1,1):(1,0)");
@@ -28,9 +30,9 @@ const cute::Layout kColOnly = cute::Layout::Parse("(1,1):(0,1)");
 
 namespace {
 
-IterVar MakeIterVar(std::string name, Range dom) {
-  Var var = Var(name, dom->min->dtype);
-  return IterVar(dom, var, IterVarType::kDataPar);
+LayoutIterVar MakeIterVar(std::string name, Range dom) {
+  PrimVar var = PrimVar(name, dom->begin.ty());
+  return LayoutIterVar(dom, var);
 }
 
 // kSerialize: (datapath, column) -> serialized TMEM, the flat address
@@ -316,14 +318,14 @@ Tcgen05CopyPlan ExpandTcgen05Layout(const Tcgen05Meta &meta,
 
 Fragment FragmentToTileLang(const cute::Layout &layout) {
   int64_t r = cute::Rank(layout);
-  Array<IterVar> ivs;
+  Array<LayoutIterVar> ivs;
   Array<cute::IntTuple> coords;
-  arith::Analyzer analyzer;
+  sym::Analyzer analyzer = CreateTileLangAnalyzer();
   for (int64_t i = 0; i < r; ++i) {
     int64_t size = cute::AsConst(cute::Product(layout->shape[i]));
-    IterVar iv =
+    LayoutIterVar iv =
         MakeIterVar("i" + std::to_string(i), Range(0, static_cast<int>(size)));
-    analyzer.Bind(iv->var, iv->dom);
+    BindAnalyzer(analyzer, iv->var, iv->dom);
     ivs.push_back(iv);
     coords.push_back(iv->var);
   }
@@ -334,10 +336,11 @@ Fragment FragmentToTileLang(const cute::Layout &layout) {
   Array<cute::IntTuple> fields = cute::TupleFields(tv_coord);
   ICHECK_EQ(fields.size(), 2U)
       << "Fragment must map into (thread@0, value@1), got " << tv_coord;
-  DataType dtype = DataType::Int(32);
+  PrimType dtype = PrimType::Int(32);
   PrimExpr thread =
-      analyzer.Simplify(cute::AsConstOrPrimExpr(fields[0], dtype));
-  PrimExpr value = analyzer.Simplify(cute::AsConstOrPrimExpr(fields[1], dtype));
+      analyzer->Simplify(cute::AsConstOrPrimExpr(fields[0], dtype));
+  PrimExpr value =
+      analyzer->Simplify(cute::AsConstOrPrimExpr(fields[1], dtype));
   return Fragment(ivs, {value}, thread, MakeIterVar("rep", Range(0, 1)));
 }
 

@@ -1,121 +1,121 @@
 /*!
  * \file restore_while_loops.cc
- * \brief Restore `while` loops that NormalizeControlFlowForSchedule turned into
- *        bounded serial for loops so AutoSchedule could pipeline their bodies.
+ * \brief Restore native while loops after the Ascend scheduler's finite model.
  *
- * For every For tagged with the `synthetic_while` annotation, rewrite
- *   `for w in range(0, W): BODY`
- * back into
- *   `while(true): BODY[w := counter]`
- * The real termination test is the `if (not cond): loop_break()` guard that
- * NormalizeControlFlowForSchedule placed at the top of BODY; it is preserved.
- *
- * Most synthetic loop variables simplify away from version and flag ring
- * indices because the synthetic for is not itself pipelined. If w occurs,
- * simplify the body before checking for residual uses so those terms do not
- * create unnecessary counters. A frontend buffer-version override can
- * nevertheless make a write-first while-local buffer multi-versioned at this
- * level. When the simplified body still uses w, retain a monotonically
- * increasing local counter so version and flag ring indices survive while
- * restoration.
+ * A residual synthetic iteration variable is captured once on loop entry from
+ * a private counter. Advance that counter before running the body, so native
+ * Continue follows the same ring-index progression as the surrogate For.
+ * Break exits immediately and never needs a synthetic intrinsic marker.
  */
 
-#include <string>
-#include <utility>
-
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-namespace tvm {
-namespace tl {
+#include <utility>
 
+#include "ir/analyzer.h"
+#include "op/native_utils.h"
+
+namespace tvm::tl {
 using namespace tirx;
 using namespace ffi;
+using namespace prim;
 
+namespace {
 class ExpressionSimplifier : public StmtExprMutator {
 public:
-  static Stmt Simplify(Stmt stmt) {
-    ExpressionSimplifier simplifier;
-    return simplifier(std::move(stmt));
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+
+  UnchangedOr<Any> Mutate(AnyView value, InplaceMode mode) final {
+    auto result = StmtExprMutator::Mutate(value, mode);
+    bool unchanged = result.IsUnchanged();
+    Any rewritten = unchanged ? Any(value) : std::move(result).ValueUnchecked();
+    if (auto expr = rewritten.try_cast<PrimExpr>()) {
+      PrimExpr simplified = analyzer_->Simplify(*expr);
+      if (!simplified.same_as(*expr))
+        return Any(simplified);
+    }
+    if (unchanged)
+      return Unchanged();
+    return rewritten;
   }
 
 private:
-  PrimExpr VisitExpr(const PrimExpr &expr) final {
-    PrimExpr visited = StmtExprMutator::VisitExpr(expr);
-    return analyzer_.Simplify(visited);
-  }
-
-  arith::Analyzer analyzer_;
+  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
 };
 
 class WhileLoopRestorer : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f) {
-    auto rewriter = WhileLoopRestorer();
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
-  }
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
 
-private:
-  WhileLoopRestorer() = default;
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Recurse first so nested synthetic-while fors are restored bottom-up.
-    For for_node = Downcast<For>(StmtExprMutator::VisitStmt_(op));
-    auto tag = for_node->annotations.Get("synthetic_while");
-    if (!tag.has_value()) {
-      return for_node;
-    }
-    Var loop_var = for_node->loop_var;
-    auto uses_loop_var = [loop_var](const Stmt &stmt) {
-      return tirx::UsesVar(stmt, [loop_var](const VarNode *var) {
-        return loop_var.same_as(GetRef<Var>(var));
-      });
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    For loop = StmtExprMutator::Mutate_(op, mode)
+                   .ValueOrUnchanged(GetRef<Stmt>(op))
+                   .as_or_throw<For>();
+    if (!loop->annotations.count("synthetic_while"))
+      return loop;
+    TVM_FFI_CHECK(IsOne(loop->step), ValueError)
+        << "Synthetic while restoration requires a unit-step analysis loop";
+    auto uses_index = [&](const Stmt &body) {
+      return UsesAnyVar(
+          body, [&](const VarObj *var) { return var == loop->var.get(); });
     };
-    Stmt body = for_node->body;
-    if (!uses_loop_var(body)) {
-      return While(IntImm(DataType::Bool(), 1), body);
+    SeqStmt body = loop->body;
+    if (uses_index(body)) {
+      auto simplify = make_object<ExpressionSimplifier>();
+      body = simplify->Mutate(body).ValueOrUnchanged(body);
     }
-    body = ExpressionSimplifier::Simplify(std::move(body));
-    if (!uses_loop_var(body)) {
-      return While(IntImm(DataType::Bool(), 1), body);
-    }
+    if (!uses_index(body))
+      return While(IntImm(PrimType::Bool(), 1), body, loop->loc);
 
-    PrimExpr zero_index = IntImm(DataType::Int(32), 0);
-    Buffer counter =
-        decl_buffer({IntImm(DataType::Int(32), 1)}, loop_var.dtype(),
-                    loop_var->name_hint + "_counter", "local.var");
-    PrimExpr counter_value = BufferLoad(counter, {zero_index});
-    body = tirx::Substitute(std::move(body),
-                            Map<Var, PrimExpr>{{loop_var, counter_value}});
-    PrimExpr next_value = counter_value + make_const(loop_var.dtype(), 1);
-    Stmt increment = BufferStore(counter, next_value, {zero_index});
-    Stmt loop = While(IntImm(DataType::Bool(), 1),
-                      SeqStmt({body, std::move(increment)}));
-    Stmt initialize = BufferStore(counter, for_node->min, {zero_index});
+    PrimType index_type = loop->var.ty();
+    TensorType counter_type({IntImm::Int32(1)}, index_type,
+                            runtime::MemoryScope("local.var"));
+    TensorVar counter(loop->var->name + "_counter", counter_type, loop->loc);
+    PrimVar snapshot(loop->var->name + "_iteration", index_type, loop->loc);
+    auto replace = make_object<StmtExprMutator>();
+    replace->VarRemapSet(loop->var, snapshot);
+    body = replace->Mutate(body).ValueOrUnchanged(body);
+    Array<Stmt> iteration{
+        Bind(snapshot, TensorLoad(counter, {IntImm::Int32(0)}, loop->loc),
+             loop->loc),
+        TensorStore(counter, {IntImm::Int32(0)},
+                    snapshot + IntImm(index_type, 1), loop->loc)};
+    for (const Stmt &stmt : body->seq)
+      iteration.push_back(stmt);
     return SeqStmt(
-        {AllocBuffer(counter), std::move(initialize), std::move(loop)});
+        {Bind(counter,
+              Call(counter_type, alloc_tensor_op(), {}, {}, {counter_type},
+                   loop->loc),
+              loop->loc),
+         TensorStore(counter, {IntImm::Int32(0)}, loop->begin, loop->loc),
+         While(IntImm(PrimType::Bool(), 1),
+               SeqStmt(std::move(iteration), body->loc), loop->loc)},
+        loop->loc);
   }
 };
+} // namespace
 
-using namespace tirx::transform;
 tvm::transform::Pass RestoreWhileLoops() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return WhileLoopRestorer::Substitute(f);
+  auto pass = [](tirx::Function f, const IRModule &,
+                 const tvm::transform::PassContext &) {
+    if ((!f->GetAttr(tvm::attr::kDeclaration).value_or(false))) {
+      auto restorer = make_object<WhileLoopRestorer>();
+      f.CopyOnWrite()->body =
+          restorer->Mutate(f->body).ValueOrUnchanged(f->body);
+    }
+    return f;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.RestoreWhileLoops", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.RestoreWhileLoops");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.RestoreWhileLoops", RestoreWhileLoops);
+  reflection::GlobalDef().def("tl.transform.RestoreWhileLoops",
+                              RestoreWhileLoops);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

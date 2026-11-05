@@ -22,14 +22,12 @@
 
 from collections.abc import Callable
 
-from tvm.s_tir import Schedule
-from tvm.s_tir.schedule import SBlockRV
-from .utils import retrieve_func_from_module
+from ._native_analysis import NativeSchedule, StageRef
 from .analysis import BlockInfo
 
 
 def get_block(
-    sch: Schedule,
+    sch: NativeSchedule,
     blocks: list[BlockInfo],
     name: str,
 ):
@@ -37,18 +35,18 @@ def get_block(
 
     Parameters
     ----------
-    sch : tirx.Schedule
+    sch : tirx.NativeSchedule
         The TIR schedule used to get target block.
     name : str
         The name of the target block.
 
     Returns
     -------
-    target_block : SBlockRV
+    target_block : StageRef
         The target block.
     """
 
-    target_block: SBlockRV = None
+    target_block: StageRef = None
     for block_info in blocks:
         block = block_info.block_rv
         if sch.get(block).name_hint == name:
@@ -57,14 +55,14 @@ def get_block(
 
 
 def get_output_blocks(
-    sch: Schedule,
+    sch: NativeSchedule,
     blocks: list[BlockInfo],
 ):
     """Get the output blocks of a schedule.
 
     Parameters
     ----------
-    sch : tirx.Schedule
+    sch : tirx.NativeSchedule
         The TIR schedule used to get output blocks.
     blocks : List[BlockInfo]
         The blocks to be analyzed.
@@ -76,28 +74,27 @@ def get_output_blocks(
     """
 
     # collect arguments buffer
-    func = retrieve_func_from_module(sch.mod)
-    args = list(func.buffer_map.values())
+    args = sch.parameter_tensors
 
     output_blocks = []
     for block_info in blocks:
         block = block_info.block_rv
         for write in sch.get(block).writes:
-            if write.buffer in args:
+            if write.tensor in args:
                 output_blocks.append(block)
 
     return output_blocks
 
 
 def try_inline(
-    sch: Schedule,
+    sch: NativeSchedule,
     blocks: list[BlockInfo],
 ) -> list[BlockInfo]:
     """Try to inline as many blocks as possible, and return the remaining blocks.
 
     Parameters
     ----------
-    sch : tirx.Schedule
+    sch : tirx.NativeSchedule
         The TIR schedule used to inline blocks.
     blocks : List[BlockInfo]
         The blocks to be inlined.
@@ -124,18 +121,22 @@ def try_inline(
         if i is None:
             break
         blocks.pop(i)
+        for info in blocks:
+            info.block_rv = sch.refresh(info.block_rv)
+            for axis in info.iters:
+                axis.loop_rv = sch.refresh(axis.loop_rv)
     return blocks
 
 
 def try_inline_contiguous_spatial(
-    sch: Schedule,
+    sch: NativeSchedule,
     block_infos: list[BlockInfo],
 ) -> list[BlockInfo]:
     """Try to inline contiguous spatial blocks in a schedule
 
     Parameters
     ----------
-    sch : tirx.Schedule
+    sch : tirx.NativeSchedule
         The TIR schedule used to inline blocks.
     block_infos : List[BlockInfo]
         The blocks to be try.
@@ -148,18 +149,22 @@ def try_inline_contiguous_spatial(
 
     if block_infos is None:
         return None
-    results = []
-    spatial_blocks = []
-    block: BlockInfo
-    for block in block_infos:
-        if block.is_injective():
-            spatial_blocks.append(block)
-        elif spatial_blocks:
+    with sch.transaction():
+        results = []
+        spatial_blocks = []
+        for block in block_infos:
+            if block.is_injective():
+                spatial_blocks.append(block)
+            elif spatial_blocks:
+                results.extend(try_inline(sch, spatial_blocks))
+                results.append(block)
+                spatial_blocks = []
+            else:
+                results.append(block)
+        if spatial_blocks:
             results.extend(try_inline(sch, spatial_blocks))
-            results.append(block)
-            spatial_blocks = []
-        else:
-            results.append(block)
-    if spatial_blocks:
-        results.extend(try_inline(sch, spatial_blocks))
+    for info in results:
+        info.block_rv = sch.refresh(info.block_rv)
+        for axis in info.iters:
+            axis.loop_rv = sch.refresh(axis.loop_rv)
     return results

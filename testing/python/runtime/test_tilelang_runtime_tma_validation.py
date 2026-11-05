@@ -1,3 +1,4 @@
+import tvm_ffi
 import ctypes
 import re
 
@@ -6,7 +7,6 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
 
 
 CUDA_SM90_TARGET = {"kind": "cuda", "arch": "sm_90"}
@@ -27,7 +27,7 @@ def _compile_tvm_ffi(func, *, target=CUDA_SM90_TARGET, target_host="c", pass_con
 
 
 def _get_tma_create_tiled():
-    func = tvm.ffi.get_global_func("__tvm_tensormap_create_tiled", allow_missing=True)
+    func = tvm_ffi.get_global_func("__tvm_tensormap_create_tiled", allow_missing=True)
     if func is None:
         pytest.skip("__tvm_tensormap_create_tiled is unavailable in this build.")
     return func
@@ -37,7 +37,7 @@ def _get_tma_create_tiled():
 def test_tma_runtime_validation_surfaces_invalid_argument_constraints():
     create_tiled = _get_tma_create_tiled()
 
-    with pytest.raises(tvm.error.InternalError) as exc_info:
+    with pytest.raises(RuntimeError) as exc_info:
         create_tiled(
             ctypes.c_void_p(0x10),
             7,

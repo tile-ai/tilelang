@@ -1,10 +1,6 @@
 import pytest
 
-import tilelang
-import tilelang.testing
 from tilelang.layout import Layout
-
-tilelang.testing.set_random_seed()
 
 
 def test_layout_expand_linear_scalar_output():
@@ -46,4 +42,4 @@ def test_layout_expand_invalid_args():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    pytest.main([__file__])

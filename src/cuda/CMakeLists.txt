@@ -8,6 +8,7 @@ file(GLOB TILE_LANG_CUDA_ALWAYS_SRCS
   src/cuda/op/builtin.cc
   src/cuda/op/copy_analysis.cc
   src/cuda/target_utils.cc
+  src/cuda/target_options.cc
   src/cuda/transform/lower_ptx_async_copy.cc
   src/cuda/transform/ptx_async_copy_injector.cc
 )
@@ -84,12 +85,12 @@ if(TILELANG_USE_CUDA_STUBS)
     WINDOWS_EXPORT_ALL_SYMBOLS ON
   )
 
-  if(WIN32 AND _tilelang_native_windows_arch STREQUAL "arm64")
-    # TVM's legacy CUDA finder only probes x64 and Win32 library directories.
-    # Use the portable driver stub instead of leaving ARM64 unresolved.
-    set(CUDA_CUDA_LIBRARY cuda_stub CACHE STRING
-      "CUDA Driver library to link against" FORCE)
-  endif()
+  # The TIRx runtime must select this provider before its CUDA finder runs.
+  # Appending cuda_stub after a real driver library lets --as-needed discard
+  # the stub, retaining an unwanted libcuda.so.1 dependency in portable wheels.
+  # Keep this a normal variable so disabling stubs does not leave a stale
+  # provider target in the CMake cache.
+  set(CUDA_CUDA_LIBRARY cuda_stub)
 
   # ============================================================================
   # CUDA Runtime Stub Library (libstub_cudart.so / stub_cudart.dll)

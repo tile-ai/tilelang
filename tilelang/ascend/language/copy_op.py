@@ -1,9 +1,11 @@
 """Ascend dialect of the copy operators: the common ops plus Ascend copy hints."""
 
 from __future__ import annotations
+from tilelang.language import _native
 
 from math import prod
 from typing import Any
+from tvm_tirx import ir
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.copy_op import (
@@ -11,7 +13,8 @@ from tilelang.language.copy_op import (
 )
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region
-from tvm import arith, tirx
+from tilelang._analyzer import create_analyzer
+from tilelang.language import _native as tirx
 
 __all__ = ["copy", "dual_copy"]
 
@@ -19,9 +22,9 @@ __all__ = ["copy", "dual_copy"]
 def _get_shape(buf: BufferLikeType) -> list:
     """Extract shape list from Buffer, BufferLoad, or BufferRegion."""
     if isinstance(buf, tirx.Buffer):
-        return list(buf.shape)
+        return list(buf.ty.shape)
     if isinstance(buf, tirx.BufferLoad):
-        return list(buf.buffer.shape)
+        return list(buf.source.ty.shape)
     if isinstance(buf, tirx.BufferRegion):
         return [r.extent for r in buf.region]
     raise TypeError(f"Cannot get shape from {type(buf)}")
@@ -30,9 +33,9 @@ def _get_shape(buf: BufferLikeType) -> list:
 def _get_allocation_shape(buf: BufferLikeType) -> list:
     """Extract the underlying allocation shape rather than region extents."""
     if isinstance(buf, tirx.Buffer):
-        return list(buf.shape)
+        return list(buf.ty.shape)
     if isinstance(buf, (tirx.BufferLoad, tirx.BufferRegion)):
-        return list(buf.buffer.shape)
+        return list(buf.source.ty.shape)
     raise TypeError(f"Cannot get allocation shape from {type(buf)}")
 
 
@@ -43,7 +46,7 @@ def _is_half(full_dim, half_dim) -> bool:
         half_val = half_dim if isinstance(half_dim, int) else half_dim.value
         return half_val * 2 == full_val
     try:
-        from tvm.ir import structural_equal
+        from tvm_tirx.ir import structural_equal
 
         return structural_equal(half_dim * 2, full_dim)
     except Exception:
@@ -141,9 +144,9 @@ def dual_copy(
     # WARNING: dav-950 does NOT support quant_pre (type conversion) with
     # fixpipe (cc->ub) dual-destination copies. If src and dst dtypes differ, the hardware may
     # silently produce incorrect results.
-    src_dtype = src_region.buffer.dtype
-    dst_dtype = dst_region.buffer.dtype
-    if src_dtype != dst_dtype and src_region.buffer.scope() == "shared.l0c":
+    src_dtype = _native.dtype_of(src_region.source)
+    dst_dtype = _native.dtype_of(dst_region.source)
+    if src_dtype != dst_dtype and str(src_region.source.ty.scope) == "shared.l0c":
         raise ValueError(
             f"dual_copy: src dtype ({src_dtype}) != dst dtype ({dst_dtype}). "
             "Type conversion during cc->ub dual-destination copy is NOT supported on dav-950. "
@@ -310,12 +313,12 @@ def copy(  # noqa: A001
         tirx.PrimExpr | tirx.Stmt: A handle to the copy operation.
     """
     if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
-        src_elems = prod(src.shape)
-        dst_elems = prod(dst.shape)
-        if not arith.Analyzer().can_prove_equal(src_elems, dst_elems):
+        src_elems = prod(src.ty.shape)
+        dst_elems = prod(dst.ty.shape)
+        if not create_analyzer().can_prove_equal(src_elems, dst_elems):
             raise ValueError(
                 f"Ascend T.copy src/dst element count mismatch: "
-                f"{src.name} shape={src.shape} ({src_elems}) vs {dst.name} shape={dst.shape} ({dst_elems}). "
+                f"{src.name} shape={src.ty.shape} ({src_elems}) vs {dst.name} shape={dst.ty.shape} ({dst_elems}). "
                 "Use explicit regions for a partial copy."
             )
         # Ascend validates its whole-buffer contract here. Pass explicit regions
@@ -331,17 +334,18 @@ def copy(  # noqa: A001
         value = ann["l0_pitch"]
         if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
             raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
-        if isinstance(value, tirx.PrimExpr) and not str(value.dtype).startswith(("int", "uint")):
+        if isinstance(value, tirx.PrimExpr) and not str(_native.dtype_of(value)).startswith(("int", "uint")):
             raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
         if isinstance(value, (int, tirx.IntImm)) and int(value) <= 0:
             raise ValueError("Ascend T.copy l0_pitch must be positive")
-        src_buf = src if isinstance(src, tirx.Buffer) else src.buffer
-        dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.buffer
+        src_buf = src if isinstance(src, tirx.Buffer) else src.source
+        dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.source
+        src_scope, dst_scope = str(src_buf.ty.scope), str(dst_buf.ty.scope)
         if not (
-            src_buf.scope() in ("shared.l1", "shared.l1.dyn")
-            and dst_buf.scope() in ("shared.l0a", "shared.l0a.dyn", "shared.l0b", "shared.l0b.dyn")
-            or src_buf.scope() in ("shared.l0c", "shared.l0c.dyn")
-            and dst_buf.scope() in ("shared", "shared.dyn", "global")
+            src_scope in ("shared.l1", "shared.l1.dyn")
+            and dst_scope in ("shared.l0a", "shared.l0a.dyn", "shared.l0b", "shared.l0b.dyn")
+            or src_scope in ("shared.l0c", "shared.l0c.dyn")
+            and dst_scope in ("shared", "shared.dyn", "global")
         ):
             raise ValueError("Ascend T.copy l0_pitch is supported only for L1→L0A/L0B and L0C→UB/GM")
 
@@ -366,7 +370,6 @@ def copy(  # noqa: A001
             "reuse a pad value already set via T.ascend_set_copy_pad_value()."
         )
     if pad_value is not None:
-        import tvm.script.ir_builder.tir as tb_tir
         from tilelang.ascend.language.dma import ascend_set_copy_pad_value
 
         # Emit SetPadValue as a leading TIR statement (not folded into the copy
@@ -376,14 +379,14 @@ def copy(  # noqa: A001
         # (which runs after AutoSchedule) would leave the two unsynchronized and
         # the copy would read a stale pad register. The copy itself then just
         # reuses the register via data_select. dst is a
-        # Buffer/BufferRegion/BufferLoad; all but a raw Buffer expose .buffer.
+        # Buffer/BufferRegion/BufferLoad; all but a raw Buffer expose .source.
         if not isinstance(dst, (tirx.Buffer, tirx.BufferRegion, tirx.BufferLoad)):
             raise TypeError(
                 "T.copy: pad_value requires dst to be a Buffer, BufferRegion, or "
                 f"BufferLoad so the pad fill dtype can be derived, got {type(dst)}."
             )
-        dst_buf = dst.buffer if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
-        tb_tir.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(dst_buf.dtype)))
+        dst_buf = dst.source if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
+        tirx.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(_native.dtype_of(dst_buf))))
         ann["data_select"] = tirx.IntImm("int32", 1)
     if data_select and "data_select" not in ann:
         ann["data_select"] = tirx.IntImm("int32", 1)
@@ -398,11 +401,14 @@ def copy(  # noqa: A001
     # Respell the common tile op as the Ascend dialect op so the C++ side
     # parses it into the typed AscendCopyNode. Scalar copies come back as a
     # plain BufferStore and stay untouched.
-    if isinstance(ret, tirx.Call) and ret.op.same_as(tirx.op.Op.get("tl.tileop.copy")):
-        return tirx.call_intrin(
-            "handle",
-            tirx.op.Op.get("tl.tileop.ascend_copy"),
-            *ret.args,
-            annotations=ret.annotations,
+    if isinstance(ret, tirx.Call) and ret.op.same_as(tirx.Op.get("tl.tileop.copy")):
+        # The common operation already carries its typed annotation payload
+        # as the final argument. Reuse that schema and tuple exactly once.
+        return ir.Call(
+            tirx.Op.get("tl.tileop.ascend_copy"),
+            ret.args,
+            attrs=ret.attrs,
+            ty_args=ret.ty_args,
+            loc=ret.loc,
         )
     return ret

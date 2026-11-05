@@ -8,6 +8,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import collect_calls, collect_nodes
+from tvm_tirx import ir
 
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -25,6 +26,26 @@ def _num_cols_allocated(body):
     return [int(call.args[1]) for call in collect_calls(body, op="tl.ptx_init_tensor_memory")]
 
 
+def _constant_integer(expr):
+    """Evaluate a constant address at its declared width, without a prover."""
+    if isinstance(expr, ir.IntImm):
+        value = int(expr)
+    elif isinstance(expr, ir.prim.Cast):
+        value = _constant_integer(expr.value)
+    else:
+        operations = {
+            ir.prim.Add: lambda a, b: a + b,
+            ir.prim.Mul: lambda a, b: a * b,
+            ir.prim.FloorDiv: lambda a, b: a // b,
+            ir.prim.LShift: lambda a, b: a << b,
+            ir.prim.BitwiseOr: lambda a, b: a | b,
+        }
+        value = operations[type(expr)](_constant_integer(expr.a), _constant_integer(expr.b))
+    dtype = expr.ty.dtype
+    value %= 1 << dtype.bits
+    return value - (1 << dtype.bits) if str(dtype).startswith("int") and value >= 1 << (dtype.bits - 1) else value
+
+
 def _tmem_addresses(body):
     """``(address word name, column offset)`` for every ``T.evaluate(buf[i, j])``.
 
@@ -34,18 +55,18 @@ def _tmem_addresses(body):
     """
     addresses = []
 
-    for node in collect_nodes(body, tvm.tirx.Evaluate):
+    for node in collect_nodes(body, ir.Evaluate):
         value = node.value
-        if isinstance(value, tvm.tirx.BufferLoad):
-            addresses.append((value.buffer.name, 0))
-        elif isinstance(value, tvm.tirx.Add) and isinstance(value.a, tvm.tirx.BufferLoad):
-            addresses.append((value.a.buffer.name, int(value.b)))
+        if isinstance(value, ir.TensorLoad):
+            addresses.append((value.source.name, 0))
+        elif isinstance(value, ir.prim.Add) and isinstance(value.a, ir.TensorLoad):
+            addresses.append((value.a.source.name, _constant_integer(value.b)))
 
     return addresses
 
 
 def _int_imms(expr):
-    return [int(node) for node in collect_nodes(expr, tvm.tirx.IntImm)]
+    return [int(node) for node in collect_nodes(expr, ir.IntImm)]
 
 
 @tilelang.testing.requires_cuda
@@ -214,7 +235,7 @@ def test_dynamic_coordinate_keeps_the_arena_offset():
     assert [int(call.args[1]) for call in addresses] == [512]
     assert len(addresses) == 1
 
-    dynamic_address = [node.value for node in collect_nodes(body, tvm.tirx.Evaluate) if not isinstance(node.value, tvm.tirx.Call)]
+    dynamic_address = [node.value for node in collect_nodes(body, ir.Evaluate) if not isinstance(node.value, ir.Call)]
     assert len(dynamic_address) == 1
     assert 384 in _int_imms(dynamic_address[0])
 
@@ -234,7 +255,7 @@ def test_block_over_the_column_budget_is_reported():
             T.evaluate(second_tmem[0, 0])
 
     with pytest.raises(
-        tvm.error.InternalError,
+        ValueError,
         match=r"allocates 1024 TMEM columns across 2 tcgen05.alloc calls, but a CTA only has 512",
     ):
         _apply(func)

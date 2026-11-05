@@ -7,10 +7,10 @@ choose any legal numbering or reuse strategy.
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import transform as ascend_transform
-from tvm import tirx
-from testing.ascend._ir import calls, schedule, statements
+from tvm_tirx import ir
+from testing.ascend._ir import calls, disjoint_argument_fixture, schedule, statements
 
 
 def _make_cross_iter_reuse_program():
@@ -281,8 +281,10 @@ def _make_serial_protocols(count):
     return main
 
 
-def _insert_sync(program, *, infer_layouts=False):
+def _insert_sync(program, *, infer_layouts=False, disjoint_arguments=()):
     before = schedule(program, through="ResolveCore", auto_schedule=False, infer_layouts=infer_layouts)
+    if disjoint_arguments:
+        before = disjoint_argument_fixture(before, *disjoint_arguments)
     return ascend_transform.InsertSync()(before)
 
 
@@ -291,22 +293,24 @@ def _events(mod, operation, hard_event):
 
 
 def _constant_ids(mod, operation, hard_event):
-    return {int(expr) for expr in _events(mod, operation, hard_event) if isinstance(expr, tirx.IntImm)}
+    return {int(expr) for expr in _events(mod, operation, hard_event) if isinstance(expr, ir.IntImm)}
 
 
 def _event_ranges(mod, operation, hard_event):
     ranges = []
     op_name = "tl.ascend_" + operation + "_flag"
     for stmt, ancestors in statements(mod):
-        if not isinstance(stmt, tirx.Evaluate) or not isinstance(stmt.value, tirx.Call):
+        if not isinstance(stmt, ir.Evaluate) or not isinstance(stmt.value, ir.Call):
             continue
         call = stmt.value
         if not isinstance(call.op, tvm.ir.Op) or call.op.name != op_name or str(call.args[0].value) != hard_event:
             continue
-        analyzer = tvm.arith.Analyzer()
+        analyzer = tvm.sym.Analyzer()
+        constraints = tvm.sym.ConstraintContext()
         for ancestor in ancestors:
-            if isinstance(ancestor, tirx.For):
-                analyzer.bind(ancestor.loop_var, tvm.ir.Range.from_min_extent(ancestor.min, ancestor.extent))
+            if isinstance(ancestor, ir.For):
+                constraints.append(tvm.sym.RangeConstraint(ancestor.var, ir.Range(ancestor.begin, ancestor.end)))
+        analyzer.sync_constraint_context(constraints)
         bound = analyzer.const_int_bound(call.args[1])
         ranges.append((bound.min_value, bound.max_value))
     return sorted(ranges)
@@ -320,14 +324,17 @@ def test_serial_protocols_fit_hardware_flag_budget(count):
         waits = _events(mod, "wait", event)
         assert sets and waits
         assert sorted(str(expr) for expr in sets) == sorted(str(expr) for expr in waits)
-        analyzer = tvm.arith.Analyzer()
+        analyzer = tvm.sym.Analyzer()
         assert all(analyzer.can_prove(expr >= 0) and analyzer.can_prove(expr < 8) for expr in [*sets, *waits])
 
 
 def test_sibling_counter_owners_share_one_release_ring():
-    mod = _insert_sync(_make_cross_iter_reuse_program())
+    # This ring-allocation fixture explicitly requires non-overlapping A/C.
+    # The unchanged allowed-alias program has separate dependency and numeric
+    # coverage in test_native_ascend_consumer_aliases.py.
+    mod = _insert_sync(_make_cross_iter_reuse_program(), disjoint_arguments=[("A", "C")])
     for operation in ("set", "wait"):
-        dynamic = [expr for expr in _events(mod, operation, "MTE3_MTE2") if not isinstance(expr, tirx.IntImm)]
+        dynamic = [expr for expr in _events(mod, operation, "MTE3_MTE2") if not isinstance(expr, ir.IntImm)]
         assert len(dynamic) == 4
         for expr in dynamic[1:]:
             tvm.ir.assert_structural_equal(expr, dynamic[0])
@@ -335,7 +342,7 @@ def test_sibling_counter_owners_share_one_release_ring():
 
 
 def test_distinct_counter_channels_keep_exclusive_rings_and_spill():
-    mod = _insert_sync(_make_multi_owner_counter_channel_program())
+    mod = _insert_sync(_make_multi_owner_counter_channel_program(), disjoint_arguments=[("A", "C")])
     # Two disjoint rows have two exclusive eight-version release rings. These
     # span 16 slots regardless of allocator numbering; one ring must spill.
     for operation in ("set", "wait"):
@@ -389,7 +396,7 @@ def test_cross_core_rings_fit_available_slots(versions, counter, vector_stage, r
     for operation in ("set", "wait"):
         generated = [call.args[2] for call in calls(mod, "tl.ascend_cross_core_" + operation + "_flag") if int(call.args[0]) == 4]
         assert generated
-        constants = {int(expr) % 16 for expr in generated if isinstance(expr, tirx.IntImm)}
+        constants = {int(expr) % 16 for expr in generated if isinstance(expr, ir.IntImm)}
         assert len(constants) == versions
         assert constants <= set(range(15 if reserve_slot else 16))
 
@@ -404,7 +411,7 @@ def test_single_iteration_needs_no_reverse_flag(extent):
 @pytest.mark.parametrize("eligible", [True, False])
 def test_extent_one_child_uses_only_its_owner_versions(eligible):
     program = (_make_single_iteration_nested_loop_program if eligible else _make_noneligible_single_iteration_nested_loop_program)()
-    mod = _insert_sync(program)
+    mod = _insert_sync(program, disjoint_arguments=[("A", "C")])
     # The outer owner has three versions. The extent-one child must neither
     # lose that ring nor create another outer ring for an unclaimed buffer.
     for operation in ("set", "wait"):

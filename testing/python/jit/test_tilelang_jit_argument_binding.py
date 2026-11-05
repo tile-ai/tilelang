@@ -5,6 +5,17 @@ import torch
 
 import tilelang
 import tilelang.language as T
+from tvm_tirx import ir
+
+
+def _single_evaluate_value(function):
+    """Read the specialized constant through the native Function body contract."""
+    assert isinstance(function.body, ir.SeqStmt)
+    assert len(function.body) == 1
+    statement = function.body[0]
+    assert isinstance(statement, ir.Evaluate)
+    assert isinstance(statement.value, ir.IntImm)
+    return statement.value.value
 
 
 @tilelang.jit
@@ -124,10 +135,13 @@ def test_lazy_jit_varargs_are_forwarded_to_factory():
         return kernel
 
     first = make_kernel.get_tir(1, 2)
-    assert first.body.value.value == 3
+    assert _single_evaluate_value(first) == 3
     assert make_kernel.get_tir(1, 2, scale=1) is first
-    assert make_kernel.get_tir(1, 2, scale=3).body.value.value == 9
-    assert make_kernel.get_tir().body.value.value == 0
+    assert _single_evaluate_value(make_kernel.get_tir(1, 2, scale=3)) == 9
+    # Native SeqStmt construction drops the no-op Evaluate(0).
+    empty = make_kernel.get_tir()
+    assert isinstance(empty.body, ir.SeqStmt)
+    assert len(empty.body) == 0
 
 
 def test_lazy_jit_varargs_and_kwargs_preserve_specializations():
@@ -142,9 +156,9 @@ def test_lazy_jit_varargs_and_kwargs_preserve_specializations():
         return kernel
 
     first = make_kernel.get_tir(1, 2, scale=3, offset=4)
-    assert first.body.value.value == 21
+    assert _single_evaluate_value(first) == 21
     second = make_kernel.get_tir(1, 2, 3, scale=2, offset=4)
-    assert second.body.value.value == 20
+    assert _single_evaluate_value(second) == 20
     assert make_kernel.get_tir(1, 2, scale=3, offset=4) is first
 
 
@@ -266,12 +280,12 @@ def test_lazy_jit_hashable_defaults_reuse_specializations(monkeypatch, config_ty
     # Skip backend compilation to keep this test portable.
     monkeypatch.setattr(make_kernel, "compile", make_kernel.get_tir)
     first = make_kernel()
-    assert first.body.value.value == 1
+    assert _single_evaluate_value(first) == 1
     assert make_kernel(first_options) is first
     assert make_kernel(options=first_options) is first
 
     second = make_kernel(second_options)
-    assert second.body.value.value == 2
+    assert _single_evaluate_value(second) == 2
     assert make_kernel(options=second_options) is second
     assert make_kernel() is first
 

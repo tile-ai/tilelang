@@ -2,15 +2,62 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+import pytest
+import tvm_ffi
+from tvm_tirx import ir, sym
+from tvm_tirx.ir import prim
+
+
+def _normalize_index_lanes(function):
+    """Compare addresses without depending on a Ramp/Broadcast/Shuffle spelling.
+
+    Only load/store indices are normalized. The complete native Function,
+    parameter types, value expressions, definitions and order remain compared.
+    """
+    analyzer = sym.Analyzer()
+
+    def lanes(index):
+        if isinstance(index, prim.Ramp):
+            return [analyzer.simplify(index.base + index.stride * lane) for lane in range(int(index.lanes))]
+        if isinstance(index, prim.Broadcast):
+            return [index.value] * int(index.lanes)
+        if isinstance(index, prim.Shuffle):
+            flattened = []
+            for vector in index.vectors:
+                values = lanes(vector)
+                if values is None:
+                    return None
+                flattened.extend(values)
+            return [flattened[int(lane)] for lane in index.indices]
+        if index.ty.is_scalar():
+            return [index]
+        return None
+
+    def normalize(index):
+        if index.ty.is_scalar():
+            return index
+        values = lanes(index)
+        return prim.Shuffle(values, list(range(len(values))), loc=index.loc) if values is not None else index
+
+    def access(node, mutator):
+        node = mutator.default_mutate(node)
+        indices = [normalize(index) for index in node.indices]
+        if isinstance(node, ir.TensorLoad):
+            return ir.TensorLoad(node.source, indices, loc=node.loc)
+        return ir.TensorStore(node.dest, indices, node.value, loc=node.loc)
+
+    return tvm_ffi.structural_mutate(function, [((ir.TensorLoad, ir.TensorStore), access)])
 
 
 def _check(original, expected):
-    """Helper function to verify structural equality after transformations"""
+    """Check well-formedness and the full Function with equivalent index lanes."""
     func = original
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.LegalizeNegativeIndex()(mod)
     expected = tvm.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
-    tvm.ir.assert_structural_equal(mod["main"], expected["main"], True)
+    tvm.tirx.analysis.check_well_formed(mod["main"])
+    tvm.tirx.analysis.check_well_formed(expected["main"])
+    tvm.ir.assert_structural_equal(_normalize_index_lanes(mod["main"]), _normalize_index_lanes(expected["main"]))
 
 
 def test_buffer_load_negative_index_legalized():
@@ -123,15 +170,13 @@ def test_buffer_load_unknown_sign_index_warning():
     """
 
     @T.prim_func
-    def before(A: T.Tensor((1024,), T.float32)):
-        i = T.Var("i", T.int32)
+    def before(A: T.Tensor((1024,), T.float32), i: T.int32):
         value = A[i]
         B = T.alloc_buffer((1,), T.float32)
         B[0] = value
 
     @T.prim_func
-    def after(A: T.Tensor((1024,), T.float32)):
-        i = T.Var("i", T.int32)
+    def after(A: T.Tensor((1024,), T.float32), i: T.int32):
         # Unknown sign indices should remain unchanged
         value = A[i]
         B = T.alloc_buffer((1,), T.float32)
@@ -409,14 +454,14 @@ def test_buffer_store_vector_index_negative_ramp():
     @T.prim_func
     def before(A: T.Tensor((1024,), T.float32)):
         vec = T.Ramp(-4, 1, 4)  # indices: [-4, -3, -2, -1]
-        values = T.Ramp(0.0, 1.0, 4)  # values: [0.0, 1.0, 2.0, 3.0]
+        values = T.Cast("float32x4", T.Ramp(0, 1, 4))  # values: [0.0, 1.0, 2.0, 3.0]
         A[vec] = values
 
     @T.prim_func
     def after(A: T.Tensor((1024,), T.float32)):
         # vec is unused and can be delimed by Simplify.
         vec = T.Ramp(-4, 1, 4)  # noqa: F841
-        values = T.Ramp(0.0, 1.0, 4)
+        values = T.Cast("float32x4", T.Ramp(0, 1, 4))
         A[T.Ramp(1020, 1, 4)] = values
 
     _check(before, after)
@@ -431,13 +476,13 @@ def test_buffer_store_vector_index_mixed_sign_ramp():
     @T.prim_func
     def before(A: T.Tensor((1024,), T.float32)):
         vec = T.Ramp(-2, 1, 4)  # indices: [-2, -1, 0, 1]
-        values = T.Ramp(0.0, 1.0, 4)
+        values = T.Cast("float32x4", T.Ramp(0, 1, 4))
         A[vec] = values
 
     @T.prim_func
     def after(A: T.Tensor((1024,), T.float32)):
         vec = T.Ramp(-2, 1, 4)  # noqa: F841
-        values = T.Ramp(0.0, 1.0, 4)
+        values = T.Cast("float32x4", T.Ramp(0, 1, 4))
         A[T.Shuffle([1022, 1023, 0, 1], [0, 1, 2, 3])] = values
 
     _check(before, after)
@@ -493,6 +538,55 @@ def test_buffer_store_nested_in_condition():
             A[1022] = 24.0
 
     _check(before, after)
+
+
+def test_mixed_ramp_unknown_sign_preserves_int64_extent():
+    @T.prim_func
+    def before(A: T.Tensor((T.int64(3000000000),), T.float32)):
+        # Within this loop every ramp lane fits int32. The test isolates
+        # widening for a large extent, without assuming overflow-free
+        # arithmetic for an unconstrained scalar input.
+        for i in T.serial(-2, 3):
+            A[T.Ramp(i, 1, 4)] = T.Broadcast(T.float32(2.0), 4)
+
+    result = tl.transform.LegalizeNegativeIndex()(tvm.IRModule.from_expr(before))["before"]
+    tvm.tirx.analysis.check_well_formed(result)
+    loop = result.body.seq[0]
+    assert isinstance(loop, ir.For)
+    (store,) = loop.body.seq
+    assert isinstance(store, ir.TensorStore)
+    (index,) = store.indices
+    assert str(index.ty) == "int64x4"
+    assert isinstance(index, prim.Shuffle)
+    analyzer = sym.Analyzer()
+    for value in range(-2, 3):
+
+        def replace_index(variable, _mutator, *, index_value=value):
+            return ir.IntImm("int32", index_value) if variable.same_as(loop.var) else variable
+
+        values = [analyzer.simplify(tvm_ffi.structural_mutate(lane, [(ir.Var, replace_index)])) for lane in index.vectors]
+        assert all(str(lane.ty) == "int64" for lane in values)
+        actual = [int(values[int(lane)]) for lane in index.indices]
+        expected = [3000000000 + lane if lane < 0 else lane for lane in range(value, value + 4)]
+        assert actual == expected
+
+
+def test_index_lane_normalization_keeps_order_and_dtype():
+    @T.prim_func
+    def original(A: T.Tensor((1024,), T.float32)):
+        A[T.Ramp(0, 1, 4)] = T.Broadcast(T.float32(1.0), 4)
+
+    @T.prim_func
+    def permuted(A: T.Tensor((1024,), T.float32)):
+        A[T.Shuffle([0, 1, 2, 3], [0, 2, 1, 3])] = T.Broadcast(T.float32(1.0), 4)
+
+    @T.prim_func
+    def widened(A: T.Tensor((1024,), T.float32)):
+        A[T.Ramp(T.int64(0), T.int64(1), 4)] = T.Broadcast(T.float32(1.0), 4)
+
+    for different in (permuted, widened):
+        with pytest.raises(ValueError, match="StructuralEqual"):
+            _check(original, different)
 
 
 if __name__ == "__main__":

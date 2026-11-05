@@ -7,24 +7,28 @@
 #define TVM_TL_OP_FILL_H_
 
 #include "operator.h"
-#include "parallel.h"
 #include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 /// Node class for fill operations
 class FillNode : public TileOperatorNode {
 public:
-  tirx::Buffer dst;         ///< Destination buffer to fill
+  tirx::TensorVar dst;      ///< Destination buffer to fill
   PrimExpr value;           ///< Value to fill with
   ffi::Array<Range> region; ///< Region to fill within the buffer
+  FillNode(tirx::TensorVar dst, PrimExpr value, ffi::Array<Range> region)
+      : dst(std::move(dst)), value(std::move(value)),
+        region(std::move(region)) {}
+
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.Fill", FillNode, TileOperatorNode);
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
@@ -40,7 +44,7 @@ public:
   TileOperator Clone() const;
 
   /// Create SIMT-style parallel loop for filling
-  For MakeSIMTLoop(arith::Analyzer *analyzer) const;
+  For MakeSIMTLoop(sym::AnalyzerObj *analyzer) const;
 };
 
 using FillTargetPredicate = bool (*)(Target target);
@@ -50,7 +54,7 @@ struct FillImpl {
   FillTargetPredicate match_target;
 
   Stmt (*lower)(const FillNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::AnalyzerObj *analyzer);
 };
 
 void RegisterFillImpl(FillImpl impl);
@@ -59,9 +63,9 @@ void RegisterFillImpl(FillImpl impl);
 class Fill : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fill, TileOperator, FillNode);
-  TVM_DLL Fill(ffi::Array<PrimExpr> args,
-               ffi::Map<ffi::String, ffi::ObjectRef> annotations =
-                   ffi::Map<ffi::String, ffi::ObjectRef>());
+  TVM_TIRX_DLL Fill(ffi::Array<Expr> args,
+                    ffi::Map<ffi::String, ffi::Any> annotations =
+                        ffi::Map<ffi::String, ffi::Any>());
   static const Op &Get();
 };
 

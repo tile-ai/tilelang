@@ -6,7 +6,7 @@ namespace tvm {
 namespace tl {
 
 struct PTXAsyncCopyInjectResult {
-  tvm::tirx::Stmt stmt;
+  tvm::Stmt stmt;
   bool injected_ptx_async_copy{false};
 };
 
@@ -18,7 +18,7 @@ struct PTXAsyncCopyInjectResult {
  * whether a region should use async-copy lowering before invoking this helper.
  */
 PTXAsyncCopyInjectResult
-InjectPTXAsyncCopy(const tvm::tirx::Stmt &body,
+InjectPTXAsyncCopy(const tvm::Stmt &body,
                    bool async_without_async_commit_wait = false);
 
 } // namespace tl

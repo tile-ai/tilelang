@@ -1,291 +1,509 @@
 /*!
  * \file tl/transform/lower_hopper_intrin.cc
- * \brief Lower Hopper intrinsics cuda GPU(sm90+)
+ * \brief Materialize host TMA descriptors and CUDA L2 stream policy calls.
  */
 
-#include "support/check.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <string>
 #include <unordered_map>
-#include <vector>
+#include <unordered_set>
 
 #include "cuda/op/builtin.h"
 #include "cuda/runtime.h"
+#include "ir/analyzer.h"
+#include "ir/tensor_utils.h"
+#include "op/native_intrinsic.h"
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
 using namespace ffi;
+using namespace prim;
 
 #if (CUDA_MAJOR_VERSION >= 12)
-class LowerHopperIntrin : public StmtExprMutator {
+namespace {
+
+bool StartsDeviceRegion(const RegionStmtObj *region) {
+  return region->op.same_as(launch_thread_op()) ||
+         region->op->name == "tirx.device_scope";
+}
+
+// Taking an address does not read the TensorLoad used to spell the lvalue.
+// Ordinary memory reads and stateful calls cannot be evaluated on the host.
+class HostExpressionChecker : public StmtExprVisitor {
 public:
-  static PrimFunc Substitute(PrimFunc &f, bool disable_shuffle_elect) {
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    LowerHopperIntrin substituter(disable_shuffle_elect);
-    fptr->body = substituter.VisitStmt(f->body);
-    // Collect prologue/epilogue statements for host-side setup/teardown
-    Array<Stmt> prologue_stmts;
-    Array<Stmt> epilogue_stmts;
-    for (const auto &desc_init : substituter.desc_inits_) {
-      if (!desc_init.emitted) {
-        prologue_stmts.push_back(desc_init.stmt);
-      }
-    }
-    f = WithAttr(std::move(f), "tma_descriptor_args",
-                 substituter.init_desc_arg_map_);
+  using StmtExprVisitor::Visit_;
 
-    // Additionally, if L2 persistent cache annotations were lowered earlier,
-    // materialize TVM FFI calls to set the stream access policy window.
-    if (f->attrs.defined() && f->attrs->dict.count("l2_persistent_map")) {
-      auto l2_map =
-          f->GetAttr<Map<String, Array<PrimExpr>>>("l2_persistent_map");
-      if (l2_map.defined()) {
-        // Build a lookup from buffer name to Buffer object
-        std::unordered_map<std::string, Buffer> name2buf;
-        for (const auto &kv : f->buffer_map) {
-          name2buf.emplace(kv.second->name, kv.second);
-        }
-        for (const auto &kv : l2_map.value()) {
-          const std::string buf_name = kv.first;
-          const Array<PrimExpr> &args = kv.second;
-          if (name2buf.count(buf_name) == 0) {
-            continue;
-          }
-          const Buffer &buf = name2buf.at(buf_name);
-          // Build base pointer expression.
-          //
-          // We only need the base address for CUDA stream access policy window
-          // configuration. Using `Buffer::access_ptr` would materialize a
-          // typed pointer cast based on `buf->dtype` (e.g. float16 -> `half*`)
-          // in the generated C host stubs, which then requires a `half`
-          // definition during host compilation. Since the runtime API treats
-          // the pointer as opaque, keep it as `void*`/handle and adjust by
-          // `elem_offset` in bytes when needed.
-          PrimExpr base_ptr = buf->data;
-          if (buf->elem_offset.defined() && !is_zero(buf->elem_offset)) {
-            PrimExpr byte_offset =
-                buf->elem_offset *
-                IntImm(buf->elem_offset.dtype(), buf->dtype.bytes());
-            base_ptr =
-                Call(DataType::Handle(), builtin::handle_add_byte_offset(),
-                     {base_ptr, byte_offset});
-          }
-          // Args packed: func_name, base_ptr, num_bytes, hit_ratio
-          Array<PrimExpr> packed_args;
-          packed_args.push_back(
-              StringImm(tvm_cuda_stream_set_access_policy_window));
-          packed_args.push_back(base_ptr);
-          // size_in_bytes (args[1]) then hit_ratio (args[0])
-          ICHECK_GE(args.size(), 2);
-          packed_args.push_back(args[1]);
-          packed_args.push_back(args[0]);
-          prologue_stmts.push_back(Evaluate(Call(
-              DataType::Int(32), builtin::tvm_call_packed(), packed_args)));
-        }
-        // Add a single epilogue call to reset the access policy window and
-        // restore L2 limit
-        Array<PrimExpr> reset_args;
-        reset_args.push_back(
-            StringImm(tvm_cuda_stream_reset_access_policy_window));
-        epilogue_stmts.push_back(Evaluate(
-            Call(DataType::Int(32), builtin::tvm_call_packed(), reset_args)));
-      }
-    }
-
-    // Stitch prologue statements before the original body
-    if (!prologue_stmts.empty()) {
-      // Chain the Let/Evaluate statements sequentially
-      Stmt seq = prologue_stmts.size() == 1 ? prologue_stmts[0]
-                                            : SeqStmt(prologue_stmts);
-      fptr->body = SeqStmt({seq, fptr->body});
-    }
-    if (!epilogue_stmts.empty()) {
-      Stmt seq_end = epilogue_stmts.size() == 1 ? epilogue_stmts[0]
-                                                : SeqStmt(epilogue_stmts);
-      fptr->body = SeqStmt({fptr->body, seq_end});
-    }
-    return f;
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *) final {
+    pure = false;
+    return VisitInterrupt();
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> visited;
-    visited.reserve(op->seq.size());
-    for (const Stmt &stmt : op->seq) {
-      visited.push_back(StmtExprMutator::VisitStmt(stmt));
+  Optional<VisitInterrupt> Visit_(const CallObj *call) final {
+    static auto effects = Op::GetAttrMap(tvm::op_attr::kCallEffectKind);
+    if (effects.get(call->op, CallEffectKind::kOpaque) >
+        CallEffectKind::kPure) {
+      pure = false;
+      return VisitInterrupt();
     }
-
-    Array<Stmt> result;
-    for (const Stmt &stmt : visited) {
-      result.push_back(stmt);
-      AppendDescInitsAfterAlloc(stmt, &result);
-    }
-    return SeqStmt(result);
-  }
-
-  Stmt VisitStmt_(const AllocBufferNode *op) final {
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  void AppendDescInitsAfterAlloc(const Stmt &stmt, Array<Stmt> *result) {
-    const auto *alloc = stmt.as<AllocBufferNode>();
-    if (alloc == nullptr) {
-      return;
-    }
-    for (auto &desc_init : desc_inits_) {
-      if (!desc_init.emitted &&
-          desc_init.base_var == alloc->buffer->data.get()) {
-        result->push_back(desc_init.stmt);
-        desc_init.emitted = true;
-      }
-    }
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        auto body = StmtExprMutator::VisitStmt(op->body);
-        if (prefetch_calls_.empty()) {
-          return AttrStmt(op->node, op->attr_key, op->value, body);
-        } else {
-          Array<Stmt> stmt_seq;
-          PrimExpr condition;
-          if (!disable_shuffle_elect_) {
-            condition = Call(DataType::Bool(), tl_shuffle_elect(), {0});
-          } else {
-            condition = EQ(iv->var, 0);
-          }
-          auto stmts = prefetch_calls_;
-          auto stmt_ = IfThenElse(condition,
-                                  stmts.size() > 1 ? SeqStmt(stmts) : stmts[0]);
-          stmt_seq.push_back(stmt_);
-          stmt_seq.push_back(body);
-          Stmt result = SeqStmt(stmt_seq);
-          prefetch_calls_.clear();
-          return AttrStmt(op->node, op->attr_key, op->value, result);
+    bool address = call->op.same_as(address_of_op()) ||
+                   call->op.same_as(Op::Get("tl.access_ptr"));
+    for (size_t i = 0; i < call->args.size(); ++i) {
+      if (address && i == 0) {
+        if (auto load = call->args[i].as<TensorLoadObj>()) {
+          Visit(load->source);
+          Visit(load->indices);
+          if (!pure)
+            return VisitInterrupt();
+          continue;
         }
       }
+      Visit(call->args[i]);
+      if (!pure)
+        return VisitInterrupt();
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return std::nullopt;
   }
 
-  PrimExpr VisitExpr_(const CallNode *call) final {
-    if (call->op.same_as(create_tma_descriptor()) ||
-        call->op.same_as(create_tma_im2col_descriptor())) {
-      Var var;
-      auto iter = desc_map_.find(GetRef<Call>(call));
-      if (iter != desc_map_.end()) {
-        var = iter->second;
-      } else {
-        String name = call->args[2].as<Var>().value()->name_hint;
-        var = Var(name + "_desc",
-                  PointerType(PrimType(CuTensorMapType()), "grid_constant"));
-        Call call_ref = GetRef<Call>(call);
-        desc_map_[call_ref] = var;
-        Array<PrimExpr> init_desc_args = MakeInitDescArgs(call_ref, var);
-        init_desc_arg_map_.Set(var, init_desc_args);
-        desc_inits_.push_back({call->args[2].as<Var>().value().get(),
-                               MakeInitDescStmt(var, init_desc_args), false});
-        prefetch_calls_.push_back(Evaluate(
-            Call(DataType::Handle(), prefetch_tma_descriptor(), {var})));
+  bool pure{true};
+};
+
+bool IsPureHostExpression(const Expr &expression) {
+  auto checker = make_object<HostExpressionChecker>();
+  checker->Visit(expression);
+  return checker->pure;
+}
+
+Stmt PackedCall(Array<Expr> args, Location loc = UnknownLoc()) {
+  return Evaluate(
+      Call(PrimType::Int(32), call_packed_op(), std::move(args), {}, {}, loc),
+      loc);
+}
+
+class HopperIntrinsicLowerer : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+  HopperIntrinsicLowerer(bool disable_shuffle_elect,
+                         Map<Var, Array<Expr>> descriptor_args)
+      : disable_shuffle_elect_(disable_shuffle_elect),
+        descriptor_args_(std::move(descriptor_args)) {}
+
+  const Map<Var, Array<Expr>> &descriptor_args() const {
+    return descriptor_args_;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *sequence,
+                            InplaceMode mode) final {
+    Array<Stmt> statements;
+    for (const Stmt &statement : sequence->seq) {
+      Array<Stmt> pending;
+      auto *previous = pending_host_;
+      pending_host_ = &pending;
+      Stmt rewritten = Mutate(statement, mode).ValueOrUnchanged(statement);
+      pending_host_ = previous;
+      for (const Stmt &initialization : pending)
+        statements.push_back(initialization);
+      statements.push_back(rewritten);
+    }
+    return SeqStmt(statements, sequence->loc);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
+                            InplaceMode mode) final {
+    if (!launch_ && StartsDeviceRegion(region)) {
+      // A descriptor is initialized immediately before its owning launch, in
+      // the same host lexical scope. Host allocations/shape bindings already
+      // dominate this point; sibling branches and launches cannot reuse an
+      // out-of-scope descriptor.
+      LaunchState state;
+      launch_ = &state;
+      Stmt body = RewriteRegion(region, mode);
+      launch_ = nullptr;
+      state.initializations.push_back(body);
+      return SeqStmt(state.initializations, region->loc);
+    }
+    return RewriteRegion(region, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ForObj *loop, InplaceMode mode) final {
+    if (launch_)
+      launch_->device_definitions.insert(loop->var.get());
+    return StmtExprMutator::Mutate_(loop, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const BindObj *binding, InplaceMode mode) final {
+    Stmt rewritten = StmtExprMutator::Mutate_(binding, mode)
+                         .ValueOrUnchanged(GetRef<Stmt>(binding));
+    auto current = rewritten.as_or_throw<Bind>();
+    if (auto descriptor = current->value.as<Var>();
+        descriptor && descriptor_args_.count(descriptor.value())) {
+      // Keep the descriptor's canonical typed identity through an explicit
+      // user/helper alias, including Bind(old_void_ptr, create_descriptor()).
+      VarRemapSet(binding->var, descriptor.value());
+      VarRemapSet(current->var, descriptor.value());
+      return SeqStmt({}, binding->loc);
+    }
+    if (launch_) {
+      launch_->device_definitions.insert(binding->var.get());
+      launch_->device_definitions.insert(current->var.get());
+      if ((current->var->ty.as<PrimTypeObj>() ||
+           current->var->ty.as<PtrTypeObj>()) &&
+          IsPureHostExpression(current->value)) {
+        Expr expanded = launch_->host_values->Mutate(current->value)
+                            .ValueOrUnchanged(current->value);
+        if (UsesOnlyHostValues(expanded))
+          launch_->host_values->VarRemapSet(current->var, expanded);
       }
-      return var;
+      if (auto tensor = current->var.as<TensorVar>();
+          tensor && tensor.value().scope().name() == "global") {
+        auto call = current->value.as<CallObj>();
+        if (call && call->op.same_as(decl_tensor_op())) {
+          Expr expanded = launch_->host_values->Mutate(current->value)
+                              .ValueOrUnchanged(current->value);
+          if (IsPureHostExpression(expanded) && UsesOnlyHostValues(expanded)) {
+            // Preserve the entire native view type, including layout/offset
+            // and dynamic shape.  The alias remains in the device body; a
+            // separate host alias is emitted lazily only if a descriptor uses
+            // it.  Replacing a TensorVar with an arbitrary pointer expression
+            // would violate tensor_data_ptr's native operand contract.
+            Var host_view(current->var->name + "_tma_host", expanded->ty,
+                          current->var->loc);
+            launch_->host_views.Set(host_view,
+                                    Bind(host_view, expanded, binding->loc));
+            launch_->host_values->VarRemapSet(current->var, host_view);
+          }
+        } else if (current->value.as<TensorVar>()) {
+          Expr expanded = launch_->host_values->Mutate(current->value)
+                              .ValueOrUnchanged(current->value);
+          if (UsesOnlyHostValues(expanded))
+            launch_->host_values->VarRemapSet(current->var, expanded);
+        }
+      }
+    }
+    return rewritten;
+  }
+
+  UnchangedOr<Expr> Mutate_(const VarObj *variable, InplaceMode mode) final {
+    auto result = StmtExprMutator::Mutate_(variable, mode);
+    bool unchanged = result.IsUnchanged();
+    Expr value = std::move(result).ValueOrUnchanged(GetRef<Expr>(variable));
+    if (launch_ && def_region_kind() != kTVMFFIDefRegionKindNone) {
+      launch_->device_definitions.insert(variable);
+      if (auto defined = value.as<Var>())
+        launch_->device_definitions.insert(defined.value().get());
+    }
+    if (def_region_kind() == kTVMFFIDefRegionKindNone) {
+      if (auto descriptor = value.as<Var>();
+          descriptor && descriptor_args_.count(descriptor.value()))
+        RecordPrefetch(descriptor.value());
+    }
+    if (unchanged)
+      return Unchanged();
+    return value;
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
+    if (call->op.same_as(prefetch_tma_descriptor())) {
+      Expr rewritten = StmtExprMutator::Mutate_(call, mode)
+                           .ValueOrUnchanged(GetRef<Expr>(call));
+      if (prefetch_) {
+        if (auto descriptor = rewritten.as_or_throw<Call>()->args[0].as<Var>())
+          prefetch_->issued.insert(descriptor.value().get());
+      }
+      return rewritten;
+    }
+    if (!call->op.same_as(create_tma_descriptor()) &&
+        !call->op.same_as(create_tma_im2col_descriptor()))
+      return StmtExprMutator::Mutate_(call, mode);
+
+    Call rewritten = StmtExprMutator::Mutate_(call, mode)
+                         .ValueOrUnchanged(GetRef<Expr>(call))
+                         .as_or_throw<Call>();
+    Array<Expr> arguments = NativeIntrinsicOperands(rewritten.get());
+    TVM_FFI_CHECK_GE(arguments.size(), 3U, ValueError)
+        << "TMA descriptor needs dtype, rank and a global address";
+    TVM_FFI_CHECK(arguments[2]->ty.as<PtrTypeObj>(), TypeError)
+        << "TMA descriptor global address must have PtrType";
+    if (launch_) {
+      for (size_t i = 0; i < arguments.size(); ++i) {
+        Expr expanded = launch_->host_values->Mutate(arguments[i])
+                            .ValueOrUnchanged(arguments[i]);
+        TVM_FFI_CHECK(IsPureHostExpression(expanded) &&
+                          UsesOnlyHostValues(expanded),
+                      ValueError)
+            << "TMA descriptor argument " << i
+            << " depends on a device-local value and cannot be initialized "
+               "on the host: "
+            << expanded;
+        arguments.Set(i, std::move(expanded));
+      }
+    }
+    Call key(rewritten->ty, rewritten->op, arguments, {}, rewritten->ty_args,
+             rewritten->loc);
+    if (launch_) {
+      auto found = launch_->descriptors.find(key);
+      if (found != launch_->descriptors.end()) {
+        RecordPrefetch(found->second);
+        return found->second;
+      }
+    }
+
+    std::string prefix = "tma";
+    for (const Var &variable : UndefinedVars(arguments[2])) {
+      if (variable->ty.as<TensorTypeObj>() || variable->ty.as<PtrTypeObj>()) {
+        prefix = variable->name;
+        break;
+      }
+    }
+    Var descriptor(prefix + "_desc_" + std::to_string(next_descriptor_++),
+                   PtrType(TensorMapType()), rewritten->loc);
+    Array<Expr> initialization_args{
+        StringImm(rewritten->op.same_as(create_tma_descriptor())
+                      ? tvm_tensormap_create_tiled
+                      : tvm_tensormap_create_im2col),
+        descriptor};
+    for (const Expr &argument : arguments)
+      initialization_args.push_back(argument);
+    descriptor_args_.Set(descriptor, initialization_args);
+
+    Call allocation(descriptor->ty, stack_alloca_op(),
+                    {StringImm("tensormap"), IntImm(PrimType::Int(32), 1)}, {},
+                    {}, rewritten->loc);
+    Stmt initialization =
+        SeqStmt({Bind(descriptor, allocation, rewritten->loc),
+                 PackedCall(initialization_args, rewritten->loc)},
+                rewritten->loc);
+    if (launch_) {
+      for (const Expr &argument : arguments) {
+        for (const Var &variable : UndefinedVars(argument))
+          EmitHostView(variable);
+      }
+      launch_->descriptors.emplace(key, descriptor);
+      launch_->initializations.push_back(initialization);
     } else {
-      return StmtExprMutator::VisitExpr_(call);
+      TVM_FFI_CHECK(pending_host_ != nullptr, ValueError)
+          << "TMA descriptor requires a statement evaluation context";
+      pending_host_->push_back(initialization);
     }
-  }
-
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    Stmt new_stmt = StmtExprMutator::VisitStmt_(op);
-    if (const auto *if_node = new_stmt.as<IfThenElseNode>()) {
-      if (IsNoOp(if_node->then_case) && (!if_node->else_case.defined() ||
-                                         IsNoOp(if_node->else_case.value()))) {
-        return Evaluate(0);
-      }
-    }
-    return new_stmt;
-  }
-
-  bool IsNoOp(const Stmt &stmt) {
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      return is_const_int(eval->value, 0);
-    } else if (const auto *seq = stmt.as<SeqStmtNode>()) {
-      for (const auto &s : seq->seq) {
-        if (!IsNoOp(s))
-          return false;
-      }
-      return true;
-    }
-    return false;
+    RecordPrefetch(descriptor);
+    return descriptor;
   }
 
 private:
-  struct DescInit {
-    const VarNode *base_var;
-    Stmt stmt;
-    bool emitted;
+  struct LaunchState {
+    Array<Stmt> initializations;
+    std::unordered_map<Call, Var, StructuralHash, StructuralEqual> descriptors;
+    std::unordered_set<const VarObj *> device_definitions;
+    ObjectPtr<StmtExprMutator> host_values{make_object<StmtExprMutator>()};
+    Map<Var, Bind> host_views;
+    std::unordered_set<const VarObj *> emitted_views;
   };
 
-  static Array<PrimExpr> MakeInitDescArgs(const Call &call, const Var &var) {
-    Array<PrimExpr> init_desc_args;
-    if (call->op.same_as(create_tma_descriptor())) {
-      init_desc_args.push_back(StringImm(tvm_tensormap_create_tiled));
-    } else if (call->op.same_as(create_tma_im2col_descriptor())) {
-      init_desc_args.push_back(StringImm(tvm_tensormap_create_im2col));
-    } else {
-      ICHECK(0) << call->op;
+  struct PrefetchFrame {
+    Array<Var> descriptors;
+    std::unordered_set<const VarObj *> visited;
+    std::unordered_set<const VarObj *> issued;
+  };
+
+  bool UsesOnlyHostValues(const Expr &expression) const {
+    for (const Var &variable : UndefinedVars(expression)) {
+      if (launch_->device_definitions.count(variable.get()))
+        return false;
     }
-    init_desc_args.push_back(var);
-    init_desc_args.insert(init_desc_args.end(), call->args.begin(),
-                          call->args.end());
-    return init_desc_args;
+    return true;
   }
 
-  static Stmt MakeInitDescStmt(const Var &var,
-                               const Array<PrimExpr> &init_desc_args) {
-    // Should allocate 128 bytes for TensorMap on stack.
-    Call alloc_desc = Call(DataType::Handle(), builtin::tvm_stack_alloca(),
-                           {StringImm("tvm_ffi_any"), 16});
-    Call init_desc =
-        Call(DataType::Handle(), builtin::tvm_call_packed(), init_desc_args);
-    return SeqStmt({tirx::Bind(var, alloc_desc), Evaluate(init_desc)});
+  void RecordPrefetch(const Var &descriptor) {
+    if (prefetch_ && prefetch_->visited.insert(descriptor.get()).second)
+      prefetch_->descriptors.push_back(descriptor);
   }
 
-  Array<Stmt> prefetch_calls_;
-  std::unordered_map<Call, Var, StructuralHash, ExprDeepEqual> desc_map_;
-  std::vector<DescInit> desc_inits_;
-  Map<Var, Array<PrimExpr>> init_desc_arg_map_;
-  LowerHopperIntrin(bool disable_shuffle_elect)
-      : disable_shuffle_elect_(disable_shuffle_elect) {}
+  void EmitHostView(const Var &variable) {
+    auto binding = launch_->host_views.Get(variable);
+    if (!binding || !launch_->emitted_views.insert(variable.get()).second)
+      return;
+    for (const Var &dependency : UndefinedVars(binding.value()->value))
+      EmitHostView(dependency);
+    launch_->initializations.push_back(binding.value());
+  }
+
+  Stmt RewriteRegion(const RegionStmtObj *region, InplaceMode mode) {
+    if (launch_) {
+      for (const Var &parameter : region->body_params)
+        launch_->device_definitions.insert(parameter.get());
+      for (const Var &result : region->result_vars)
+        launch_->device_definitions.insert(result.get());
+    }
+    bool is_thread_x =
+        region->op.same_as(launch_thread_op()) &&
+        region->args[0].as_or_throw<StringImm>()->value == "threadIdx.x";
+    PrefetchFrame frame;
+    auto *previous = prefetch_;
+    if (is_thread_x)
+      prefetch_ = &frame;
+    Stmt rewritten = StmtExprMutator::Mutate_(region, mode)
+                         .ValueOrUnchanged(GetRef<Stmt>(region));
+    prefetch_ = previous;
+    if (!is_thread_x || frame.descriptors.empty())
+      return rewritten;
+
+    auto current = rewritten.as_or_throw<RegionStmt>();
+    PrimVar thread = current->body_params[0].as_or_throw<PrimVar>();
+    PrimExpr condition = disable_shuffle_elect_
+                             ? PrimExpr(EQ(thread, IntImm(thread.ty(), 0)))
+                             : Call(PrimType::Bool(), tl_shuffle_elect(),
+                                    {IntImm(PrimType::Int(32), 0)})
+                                   .as_or_throw<PrimExpr>();
+    Array<Stmt> prefetch_calls;
+    for (const Var &descriptor : frame.descriptors) {
+      if (frame.issued.count(descriptor.get()))
+        continue;
+      prefetch_calls.push_back(Evaluate(
+          Call(PrimType::Void(), prefetch_tma_descriptor(), {descriptor})));
+    }
+    if (prefetch_calls.empty())
+      return rewritten;
+    SeqStmt body(
+        {If(condition, SeqStmt(prefetch_calls), std::nullopt), current->body},
+        current->loc);
+    return RegionStmt(current->op, current->args, current->body_params,
+                      current->attrs, body, current->result_vars, current->loc);
+  }
+
   bool disable_shuffle_elect_;
+  int next_descriptor_{0};
+  LaunchState *launch_{nullptr};
+  PrefetchFrame *prefetch_{nullptr};
+  Array<Stmt> *pending_host_{nullptr};
+  Map<Var, Array<Expr>> descriptor_args_;
 };
 
-using namespace tirx::transform;
+class ResetL2BeforeHostReturn : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+  explicit ResetL2BeforeHostReturn(Stmt reset) : reset_(std::move(reset)) {}
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
+                            InplaceMode mode) final {
+    if (StartsDeviceRegion(region))
+      return Unchanged();
+    return StmtExprMutator::Mutate_(region, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ReturnObj *statement, InplaceMode) final {
+    return SeqStmt({reset_, GetRef<Stmt>(statement)}, statement->loc);
+  }
+
+private:
+  Stmt reset_;
+};
+
+SeqStmt MaterializeL2Policy(const tirx::Function &function, SeqStmt body,
+                            bool *materialized) {
+  // Retain l2_persistent_map for source-wrapper adapters.  This phase marker
+  // belongs to the host IR consumer, and prevents a repeated pass from nesting
+  // the stream state save/reset pair.  A producer replacing the map must clear
+  // this marker before invoking the host lowering again.
+  if (function->GetAttr<bool>("tl.l2_policy_materialized").value_or(false))
+    return body;
+  auto entries =
+      function->GetAttr<Map<String, Array<Expr>>>("l2_persistent_map");
+  if (!entries || entries.value().empty())
+    return body;
+  std::unordered_map<std::string, TensorVar> parameters;
+  for (const Var &parameter : function->params) {
+    if (auto tensor = parameter.as<TensorVar>()) {
+      TVM_FFI_CHECK(parameters.emplace(parameter->name, tensor.value()).second,
+                    ValueError)
+          << "L2 persistent annotations require unambiguous tensor names";
+    }
+  }
+  Array<Stmt> prologue;
+  auto analyzer = CreateTileLangAnalyzer();
+  for (const auto &[name, arguments] : entries.value()) {
+    auto found = parameters.find(name);
+    if (found == parameters.end())
+      continue;
+    TVM_FFI_CHECK_GE(arguments.size(), 2U, ValueError)
+        << "L2 persistent policy needs hit_ratio and size_in_bytes";
+    const TensorVar &tensor = found->second;
+    Array<PrimExpr> zeros;
+    for (const PrimExpr &dimension : tensor.shape())
+      zeros.push_back(IntImm(dimension.ty(), 0));
+    PrimExpr offset = TensorElementOffset(tensor, zeros);
+    if (offset.ty().bits() < 64)
+      offset = cast(offset, PrimType::Int(64));
+    int bits = tensor.dtype().bits() * tensor.dtype().lanes();
+    PrimExpr bit_offset = offset * IntImm(offset.ty(), bits);
+    PrimExpr byte_offset{ffi::UnsafeInit{}};
+    if (bits % 8 == 0) {
+      byte_offset = offset * IntImm(offset.ty(), bits / 8);
+    } else {
+      TVM_FFI_CHECK(
+          analyzer->CanProveEqual(FloorMod(bit_offset, IntImm(offset.ty(), 8)),
+                                  IntImm(offset.ty(), 0)),
+          ValueError)
+          << "L2 persistent pointer must start at a byte boundary";
+      byte_offset = FloorDiv(bit_offset, IntImm(offset.ty(), 8));
+    }
+    Expr pointer = reinterpret(PtrType::VoidPtrType(), tensor.data());
+    if (!IsZero(byte_offset))
+      pointer = Call(PtrType::VoidPtrType(), handle_add_byte_offset_op(),
+                     {pointer, byte_offset});
+    prologue.push_back(
+        PackedCall({StringImm(tvm_cuda_stream_set_access_policy_window),
+                    pointer, arguments[1], arguments[0]}));
+  }
+  if (prologue.empty())
+    return body;
+  *materialized = true;
+  Stmt reset =
+      PackedCall({StringImm(tvm_cuda_stream_reset_access_policy_window)});
+  auto returns = make_object<ResetL2BeforeHostReturn>(reset);
+  body = returns->Mutate(body).ValueOrUnchanged(body);
+  prologue.push_back(body);
+  prologue.push_back(reset);
+  return SeqStmt(prologue, body->loc);
+}
+} // namespace
 
 tvm::transform::Pass LowerHopperIntrin() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
-    bool disable_shuffle_elect =
-        ctx->GetConfig<Bool>(kDisableShuffleElect, Bool(false)).value();
-    return LowerHopperIntrin::Substitute(f, disable_shuffle_elect);
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext context) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto lowerer = make_object<HopperIntrinsicLowerer>(
+        context->GetConfig<bool>(kDisableShuffleElect).value_or(false),
+        function->GetAttr<Map<Var, Array<Expr>>>("tma_descriptor_args")
+            .value_or(Map<Var, Array<Expr>>()));
+    SeqStmt body = lowerer->Mutate(function->body, InplaceMode::kDisallow)
+                       .ValueOrUnchanged(function->body);
+    bool materialized = false;
+    body = MaterializeL2Policy(function, std::move(body), &materialized);
+    function.CopyOnWrite()->body = body;
+    if (materialized)
+      function =
+          WithAttr(std::move(function), "tl.l2_policy_materialized", true);
+    return WithAttr(std::move(function), "tma_descriptor_args",
+                    lowerer->descriptor_args());
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerHopperIntrin", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LowerHopperIntrin");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerHopperIntrin",
-                        LowerHopperIntrin);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.LowerHopperIntrin",
+                                   LowerHopperIntrin);
 }
 #endif // (CUDA_MAJOR_VERSION >= 12)
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

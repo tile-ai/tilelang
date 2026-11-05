@@ -13,8 +13,14 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
 from tilelang.ir import get_stmt_span, span_to_location
-from tvm.ir.instrument import pass_instrument
-from tvm.tirx.stmt_functor import post_order_visit
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir.transform.instrument import pass_instrument
+from tilelang.testing.ir import collect_nodes
+
+
+def _visit_statements(body, callback):
+    for stmt in collect_nodes(body, ir.Stmt):
+        callback(stmt)
 
 
 def _count_spans(mod) -> tuple[int, int]:
@@ -22,17 +28,17 @@ def _count_spans(mod) -> tuple[int, int]:
     with_span = 0
     total = 0
     for _, func in mod.functions.items():
-        if not isinstance(func, tvm.tirx.PrimFunc):
+        if not isinstance(func, tirx.Function):
             continue
 
         def visit(node):
             nonlocal with_span, total
-            if isinstance(node, tvm.tirx.Stmt):
+            if isinstance(node, ir.Stmt):
                 total += 1
                 if get_stmt_span(node) is not None:
                     with_span += 1
 
-        post_order_visit(func.body, visit)
+        _visit_statements(func.body, visit)
     return with_span, total
 
 
@@ -140,7 +146,7 @@ def test_span_survives_lowering_cpu():
 
     def visit(node):
         nonlocal found
-        if isinstance(node, tvm.tirx.BufferStore):
+        if isinstance(node, ir.TensorStore):
             loc = span_to_location(get_stmt_span(node))
             if loc is not None and loc[0] == __file__ and loc[1] == store_line:
                 found = True
@@ -148,8 +154,8 @@ def test_span_survives_lowering_cpu():
     for mod in (artifact.device_mod, artifact.host_mod):
         if mod is not None:
             for _, f in mod.functions.items():
-                if isinstance(f, tvm.tirx.PrimFunc):
-                    post_order_visit(f.body, visit)
+                if isinstance(f, tirx.Function):
+                    _visit_statements(f.body, visit)
     assert found, "lowered IR lost the span of the user's BufferStore line"
 
 
@@ -169,7 +175,7 @@ def test_span_survives_lowering_gemm_metal():
     lines = set()
 
     def visit(node):
-        if isinstance(node, tvm.tirx.Stmt):
+        if isinstance(node, ir.Stmt):
             loc = span_to_location(get_stmt_span(node))
             if loc is not None and loc[0] == __file__:
                 lines.add(loc[1])
@@ -177,8 +183,8 @@ def test_span_survives_lowering_gemm_metal():
     for mod in (artifact.device_mod, artifact.host_mod):
         if mod is not None:
             for _, f in mod.functions.items():
-                if isinstance(f, tvm.tirx.PrimFunc):
-                    post_order_visit(f.body, visit)
+                if isinstance(f, tirx.Function):
+                    _visit_statements(f.body, visit)
 
     # The copy/clear user statements are lowered into loops; their source lines
     # must still be present somewhere in the lowered IR.

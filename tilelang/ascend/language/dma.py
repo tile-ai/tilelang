@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 
 def _to_int32(v):
@@ -47,10 +47,8 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     -------
     >>> T.ascend_set_copy_pad_value(0.0, dtype="float32")
     """
-    if dtype is None:
-        inferred = getattr(value, "dtype", None)
-        if isinstance(inferred, str):
-            dtype = inferred
+    if dtype is None and isinstance(value, tirx.PrimExpr):
+        dtype = str(tirx.dtype_of(value))
     if dtype is None:
         raise ValueError('ascend_set_copy_pad_value requires dtype for Python literals; use dtype="float32" or pass a typed PrimExpr.')
     if dtype not in _PAD_VALUE_SUPPORTED_DTYPES:
@@ -58,7 +56,7 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
             f"ascend_set_copy_pad_value does not support dtype {dtype!r}; supported dtypes are {sorted(_PAD_VALUE_SUPPORTED_DTYPES)}."
         )
     value = tirx.const(value, dtype) if isinstance(value, (int, float)) else tirx.Cast(dtype, value)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_copy_pad_value"), value)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_set_copy_pad_value"), value)
 
 
 def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype: str) -> None:
@@ -69,7 +67,7 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
     Both pointers must include the region origin and be 32-byte aligned.
     This operation does not initialize gaps or convert element types.
     """
-    from tvm.tirx import BufferLoad
+    from tilelang.language._native import BufferLoad
     from tilelang.language.builtin import access_ptr
 
     names = {"float16": "half", "bfloat16": "bfloat16_t", "float32": "float"}
@@ -81,7 +79,7 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
     if isinstance(src, BufferLoad):
         src = access_ptr(src, "r")
     args = [dst, src, _to_int32(rows), _to_int32(cols), _to_int32(src_pitch), _to_int32(dst_pitch), dtype]
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_nd2nz_post_copy"), *args)
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_nd2nz_post_copy"), *args)
 
 
 __all__ = [

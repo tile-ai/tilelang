@@ -7,15 +7,16 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from tvm import arith, tirx
-from tvm.target import Target
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
+from tvm_tirx.target import Target
 from tilelang_pto_wrapper import PTOKernelWrapper
 
-from tilelang import tvm
 from tilelang.backend.target import determine_target
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
-from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
+from tilelang.utils.language import retrieve_func_from_module
+from tilelang.jit.adapter.abi import source_abi_plan
 
 from .libgen import PTOLibraryGenerator
 from .wrapper import TLPTOWrapper
@@ -43,13 +44,6 @@ def _device_providers():
     return current_device, current_stream
 
 
-def is_symbolic_expr(expr) -> bool:
-    """Check if the expression is a symbolic expression.
-    A symbolic expression can be a simple tvm.Var, or an tvm.PrimExpr containing tvm.Var.
-    """
-    return not isinstance(expr, tirx.IntImm) and isinstance(expr, tirx.PrimExpr)
-
-
 def _storage_pack_factor(dtype: tvm.DataType) -> int:
     """Return the number of PTO logical values stored in one Torch element."""
     # Bool uses one byte per value. Only int4/uint4 and FP4 use packed storage.
@@ -66,10 +60,29 @@ def _storage_pack_factor(dtype: tvm.DataType) -> int:
 
 
 def _accepted_storage_dtypes(dtype: tvm.DataType) -> torch.dtype | tuple[torch.dtype, ...]:
-    torch_dtype = dtype.as_torch()
+    from tilelang.language import dtype as language_dtype
+
+    torch_dtype = language_dtype(dtype).as_torch()
     if _storage_pack_factor(dtype) > 1 and torch_dtype != torch.int8:
         return (torch_dtype, torch.int8)
     return torch_dtype
+
+
+def _validate_packed_layout(plan):
+    """PTO stores adjacent sub-byte values in one byte, including outputs."""
+    for tensor in plan.tensors.values():
+        factor = _storage_pack_factor(tensor.dtype)
+        if factor == 1 or not tensor.shape:
+            continue
+        extent = tensor.shape[-1]
+        if isinstance(extent, ir.IntImm) and int(extent) % factor:
+            raise ValueError(f"The innermost dimension of {tensor.dtype} must be divisible by its packing factor ({factor})")
+        stride = tensor.strides[-1]
+        if not isinstance(stride, ir.IntImm) or int(stride) != 1:
+            raise ValueError(f"Packed {tensor.dtype} buffers require a static innermost stride of 1")
+        for stride in tensor.strides[:-1]:
+            if isinstance(stride, ir.IntImm) and int(stride) % factor:
+                raise ValueError(f"The stride of packed {tensor.dtype} must be divisible by its packing factor ({factor})")
 
 
 class PTOKernelAdapter(BaseKernelAdapter):
@@ -80,7 +93,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int] | int | None,
         target: str | dict[str, object] | Target,
-        func_or_mod: tirx.PrimFunc | tvm.IRModule,
+        func_or_mod: tirx.Function | tvm.IRModule,
         host_mod: tvm.IRModule | None = None,
         device_mod: tvm.IRModule | None = None,
         device_kernel_source: str | None = None,
@@ -111,7 +124,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int] | int | None,
         target: str | dict[str, object] | Target,
-        func_or_mod: tirx.PrimFunc | tvm.IRModule,
+        func_or_mod: tirx.Function | tvm.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -132,7 +145,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         """Prepare the same argument metadata for fresh and cached kernels."""
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
-        if isinstance(func_or_mod, tirx.PrimFunc):
+        if isinstance(func_or_mod, tirx.Function):
             self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
@@ -140,19 +153,18 @@ class PTOKernelAdapter(BaseKernelAdapter):
         self.verbose = verbose
         self.pass_configs = pass_configs
 
-        self.dynamic_symbolic_map = self._process_dynamic_symbolic()
-        self.dynamic_symbolic_sources = self._process_dynamic_symbolic_sources()
-        self.scalar_param_vars = self._process_scalar_param_vars()
-        self.buffer_dtype_map = self._process_buffer_dtype()
-        self.param_storage_metadata = self._process_param_storage_metadata()
-        self.ptr_map = self._process_ptr_map()
-        self.buffer_device_map = self._process_buffer_device()
-        (
-            self.static_shape_map,
-            self.static_strides_map,
-            self.static_contiguous_list,
-            self.dynamic_strides_map,
-        ) = self._process_static_buffer_infos()
+        self.source_abi = source_abi_plan(self)
+        self.params = self.source_abi.validate_parameter_metadata(self.params)
+        _validate_packed_layout(self.source_abi)
+        self.buffer_dtype_map = {
+            tensor.variable: (index, _accepted_storage_dtypes(tensor.dtype)) for index, tensor in self.source_abi.tensors.items()
+        }
+        self.buffer_device_map = {tensor.variable: (index, torch.device("npu")) for index, tensor in self.source_abi.tensors.items()}
+        self.ptr_map = {
+            index: parameter.name
+            for index, parameter in enumerate(self.prim_func.params)
+            if isinstance(parameter.ty, (ir.PtrType, tirx.TensorType))
+        }
 
         self.lib_generator = PTOLibraryGenerator(self.target, verbose=verbose)
         self.lib_generator.assign_pass_configs(pass_configs)
@@ -168,229 +180,11 @@ class PTOKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.runtime_wrapper = PTOKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
-        self.runtime_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
-        self.runtime_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
+        self.runtime_wrapper.set_source_abi_plan(self.source_abi)
         self.runtime_wrapper.set_buffer_dtype_map(self.buffer_dtype_map)
-        self.runtime_wrapper.set_param_storage_metadata(self.param_storage_metadata)
-        self.runtime_wrapper.set_static_shape_map(self.static_shape_map)
-        self.runtime_wrapper.set_static_strides_map(self.static_strides_map)
-        self.runtime_wrapper.set_dynamic_strides_map(self.dynamic_strides_map)
-        self.runtime_wrapper.set_scalar_param_vars(self.scalar_param_vars)
-        self.runtime_wrapper.set_static_contiguous_list(self.static_contiguous_list)
         self.runtime_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.runtime_wrapper.set_ptr_map(self.ptr_map)
         self._post_init()
-
-    def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
-        """Extract information about dynamic shapes from the TIR function.
-
-        Maps symbolic variables to their corresponding (id, buffer_index, dimension, storage_scale)
-        for runtime shape resolution.
-        id represents shape or stride, 0 represents shape, 1 represents stride.
-        storage_scale compensates for sub-byte dtypes (e.g. float4_e2m1fn) where torch
-        reports packed storage units but the kernel expects logical element units.
-        """
-
-        def shape_scale(buffer, dim_idx: int) -> int:
-            return _storage_pack_factor(buffer.dtype) if dim_idx == len(buffer.shape) - 1 else 1
-
-        func = self.prim_func
-        params = func.params
-        buffer_map = func.buffer_map
-        dynamic_symbolic_map = {}
-        # Inputs are visited first. An output's shape is resolved from these entries
-        # while that output is being allocated, so a dimension mentioned by both an
-        # input and an output must be owned by the input; owning it on the output
-        # would make the allocation loop read a slot it has not filled yet.
-        ordered = [i for i in range(len(params)) if i not in self.result_idx]
-        ordered += [i for i in range(len(params)) if i in self.result_idx]
-        for i in ordered:
-            param = params[i]
-            if param in buffer_map:
-                buffer = buffer_map[param]
-                for j, shape in enumerate(buffer.shape):
-                    if isinstance(shape, tirx.Var) and (shape not in dynamic_symbolic_map) and (shape not in params):
-                        dynamic_symbolic_map[shape] = (0, i, j, shape_scale(buffer, j))
-        for i in ordered:
-            param = params[i]
-            if param in buffer_map:
-                buffer = buffer_map[param]
-                stride_scale = _storage_pack_factor(buffer.dtype)
-                for j, stride in enumerate(buffer.strides):
-                    if isinstance(stride, tirx.Var) and (stride not in dynamic_symbolic_map) and (stride not in params):
-                        dynamic_symbolic_map[stride] = (1, i, j, stride_scale)
-        return dynamic_symbolic_map
-
-    def _process_dynamic_symbolic_sources(self) -> dict[str, list[tuple[int, int, int]]]:
-        """Build a multi-source map for cascaded None resolution.
-
-        For each dynamic symbol, maps to ALL buffers that carry it as (buffer_idx, dim_idx, storage_scale).
-        This allows the Cython wrapper to find a non-None carrier when some buffers are None.
-        """
-
-        def shape_scale(buffer, dim_idx: int) -> int:
-            return _storage_pack_factor(buffer.dtype) if dim_idx == len(buffer.shape) - 1 else 1
-
-        func = self.prim_func
-        params = func.params
-        buffer_map = func.buffer_map
-        sources: dict[str, list[tuple[int, int, int]]] = {}
-        for i, param in enumerate(params):
-            if param in buffer_map:
-                buffer = buffer_map[param]
-                stride_scale = _storage_pack_factor(buffer.dtype)
-                for j, dim in enumerate(buffer.shape):
-                    if isinstance(dim, tirx.Var) and dim not in params:
-                        key = str(dim)
-                        if key not in sources:
-                            sources[key] = []
-                        sources[key].append((i, j, shape_scale(buffer, j)))
-                for j, stride in enumerate(buffer.strides):
-                    if isinstance(stride, tirx.Var) and stride not in params:
-                        key = str(stride)
-                        if key not in sources:
-                            sources[key] = []
-                        sources[key].append((i, j, stride_scale))
-        return sources
-
-    def _process_scalar_param_vars(self) -> list[tirx.Var | None]:
-        """Map scalar params to their TIR vars, None elsewhere.
-
-        Stride expressions may reference explicit scalar params, which are
-        excluded from dynamic_symbolic_map since the caller passes their
-        values directly at launch.
-        """
-        func = self.prim_func
-        buffer_map = func.buffer_map
-        scalar_param_vars: list[tirx.Var | None] = []
-        for param in func.params:
-            if param not in buffer_map and param.dtype != "handle":
-                scalar_param_vars.append(param)
-            else:
-                scalar_param_vars.append(None)
-        return scalar_param_vars
-
-    def _process_buffer_dtype(self) -> dict[tirx.Var, tuple[int, torch.dtype | tuple[torch.dtype, ...]]]:
-        """Extract information about buffer dtypes from the TIR function.
-
-        Maps buffer variables to their corresponding dtypes.
-        """
-        func = self.prim_func
-        params = func.params
-        buffer_map = func.buffer_map
-        buffer_dtype_map = {}
-        for i, param in enumerate(params):
-            if param in buffer_map:
-                buffer = buffer_map[param]
-                name, dtype = buffer.name, buffer.dtype
-                buffer_dtype_map[name] = (i, _accepted_storage_dtypes(dtype))
-        return buffer_dtype_map
-
-    def _process_param_storage_metadata(self) -> list[tuple[int, int]]:
-        """Return (packed_dim, pack_factor) for each parameter.
-
-        KernelParam shapes remain in logical element units. For sub-byte element
-        types, PyTorch represents the backing tensor with packed storage elements,
-        so wrapper-created outputs must divide the packed dimension before calling
-        torch.empty.
-        """
-        metadata = []
-        for param in self.params:
-            pack_factor = _storage_pack_factor(param.dtype)
-            if pack_factor > 1 and len(param.shape) > 0:
-                metadata.append((len(param.shape) - 1, pack_factor))
-            else:
-                metadata.append((-1, 1))
-        return metadata
-
-    def _process_ptr_map(self) -> dict[int, str]:
-        """Extract information about pointer arguments from the TIR function.
-
-        Maps pointer arguments to their corresponding (buffer_index, shape_dimension)
-        for runtime shape resolution.
-        """
-        func = self.prim_func
-        params = func.params
-        ptr_map = {}
-        for i, param in enumerate(params):
-            if param.dtype == "handle":
-                ptr_map[i] = param.name
-        return ptr_map
-
-    def _process_static_buffer_infos(
-        self,
-    ) -> tuple[
-        dict[str, tuple[int, list[tuple[int, int]]]],
-        dict[str, tuple[int, list[tuple[int, int]]]],
-        list[tuple[int, str]],
-        dict[str, tuple[int, list[tuple[int, tirx.PrimExpr, int]]]],
-    ]:
-        """Extract information about static shapes from the TIR function.
-
-        Maps buffer variables to their corresponding static shapes.
-        """
-        func = self.prim_func
-        params = func.params
-        buffer_map = func.buffer_map
-        static_shape_map = {}
-        static_strides_map = {}
-        dynamic_strides_map = {}
-        static_contiguous_list = list()
-        analyzer = arith.Analyzer()
-        for i, param in enumerate(params):
-            if param in buffer_map:
-                buffer = buffer_map[param]
-                static_shape, static_strides, dynamic_strides = [], [], []
-                packing_factor = _storage_pack_factor(buffer.dtype)
-                innermost_dim = len(buffer.shape) - 1
-                for j, s in enumerate(buffer.shape):
-                    if isinstance(s, tirx.IntImm):
-                        extent = s.value
-                        if j == innermost_dim and packing_factor > 1:
-                            if extent % packing_factor:
-                                raise ValueError(
-                                    f"The innermost dimension of {buffer.dtype} must be divisible by "
-                                    f"its packing factor ({packing_factor}), got {extent}"
-                                )
-                            extent //= packing_factor
-                        static_shape.append((j, extent))
-                    elif is_symbolic_expr(s):
-                        static_shape.append((j, -1))  # -1 for symbolic
-                    else:
-                        raise ValueError(f"Unsupported shape type: {type(s)}")
-                for j, s in enumerate(buffer.strides):
-                    if j != innermost_dim and packing_factor > 1 and is_symbolic_expr(s):
-                        dynamic_strides.append((j, s, packing_factor))
-                    if j == innermost_dim and packing_factor > 1 and (not isinstance(s, tirx.IntImm) or s.value != 1):
-                        raise ValueError(f"Packed {buffer.dtype} buffers require a static innermost stride of 1")
-                    if isinstance(s, tirx.IntImm):
-                        stride = s.value
-                        if j != innermost_dim and packing_factor > 1:
-                            if stride % packing_factor:
-                                raise ValueError(
-                                    f"The stride of packed {buffer.dtype} must be divisible by "
-                                    f"its packing factor ({packing_factor}), got {stride}"
-                                )
-                            stride //= packing_factor
-                        static_strides.append((j, stride))
-                is_contiguous, prod = True, 1
-                for dim, stride in reversed(list(zip(buffer.shape, buffer.strides))):
-                    if not (prim_expr_equal(stride, prod) or analyzer.can_prove_equal(stride, prod)):
-                        is_contiguous = False
-                        break
-                    prod *= dim
-                static_shape_map[buffer.name] = (i, static_shape)
-                static_strides_map[buffer.name] = (i, static_strides)
-                if dynamic_strides:
-                    dynamic_strides_map[buffer.name] = (i, dynamic_strides)
-                if is_contiguous:
-                    static_contiguous_list.append((i, buffer.name))
-        return static_shape_map, static_strides_map, static_contiguous_list, dynamic_strides_map
-
-    def _process_buffer_device(self) -> dict[str, tuple[int, torch.device]]:
-        device = torch.device("npu")
-        func = self.prim_func
-        return {func.buffer_map[param].name: (i, device) for i, param in enumerate(func.params) if param in func.buffer_map}
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
         """Low-level function to call the compiled PTO kernel.
@@ -417,7 +211,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         return lambda_forward
 
     @property
-    def prim_func(self) -> tirx.PrimFunc:
+    def prim_func(self) -> tirx.Function:
         """Returns the primary TIR function from the IR module."""
         return retrieve_func_from_module(self.ir_module)
 
@@ -439,7 +233,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
     @property
     def is_dynamic(self):
         """Indicates whether the kernel handles dynamic shapes."""
-        return self.dynamic_symbolic_map is not None and len(self.dynamic_symbolic_map) > 0
+        return bool(self.source_abi.implicit_symbols)
 
     def get_kernel_source(self, kernel_only: bool = False):
         """Returns the source code of the compiled kernel."""

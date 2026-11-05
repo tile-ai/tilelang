@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 
 def set_mmad_direction(direction: str):
@@ -16,7 +16,7 @@ def set_mmad_direction(direction: str):
         raise ValueError(f"mmad direction must be 'm' or 'n', got {direction!r}")
     return tirx.call_intrin(
         "void",
-        tirx.op.Op.get("tl.ascend_set_mmad_direction"),
+        tirx.Op.get("tl.ascend_set_mmad_direction"),
         tirx.StringImm(direction),
     )
 
@@ -48,7 +48,7 @@ def set_hf32_mode(mode=None):
         raise ValueError(f"hf32 mode must be None, 'nearest_zero', or 'nearest_even', got {mode!r}")
     return tirx.call_intrin(
         "void",
-        tirx.op.Op.get("tl.ascend_set_hf32_mode"),
+        tirx.Op.get("tl.ascend_set_hf32_mode"),
         tirx.IntImm("int32", _HF32_MODE_INT[mode]),
     )
 
@@ -91,7 +91,7 @@ def set_atomic(op="add", dtype="float32"):
     # Pass a typed zero so codegen reads its dtype to instantiate SetAtomic*<T>().
     return tirx.call_intrin(
         "void",
-        tirx.op.Op.get("tl.ascend_set_atomic"),
+        tirx.Op.get("tl.ascend_set_atomic"),
         tirx.StringImm(op),
         tirx.const(0, dtype),
     )
@@ -102,7 +102,7 @@ def set_atomic_none():
 
     Call once to undo :func:`set_atomic`.
     """
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_atomic_none"))
+    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_set_atomic_none"))
 
 
 __all__ = [

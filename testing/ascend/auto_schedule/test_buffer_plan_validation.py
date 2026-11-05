@@ -1,10 +1,9 @@
 """Invalid version plans fail at PrepareMultiBuffer, before synchronization."""
 
 import pytest
-from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from testing.ascend._ir import kernel, nodes, region, seq
+from tvm_tirx import ir, tirx
+from testing.ascend._ir import attribute_fields, attributes, fill, kernel, seq, serial, tensor
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -19,40 +18,34 @@ from testing.ascend.auto_schedule._scheduled_ir import unit
     ],
 )
 def test_invalid_storage_plans(case, message):
-    ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.l1" if case == "l1-fill" else "shared.dyn")
-    out = tirx.decl_buffer((1,), "float32", name="out")
-    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
-    annotations = {"multi_buffer_eligible": [ub.data]}
-    body = unit(tirx.BufferStore(ub, tirx.const(1, "float32"), [0]))
+    ub = tensor((64,), "float32", name="ub", scope="shared.l1" if case == "l1-fill" else "shared.dyn")
+    out = tensor((1,), "float32", name="out")
+    i, j = ir.Var("i", "int32"), ir.Var("j", "int32")
+    annotations = {"multi_buffer_eligible": [ub]}
+    body = unit(ir.TensorStore(ub, [0], ir.const(1, "float32")))
     if case in ("nested-owner", "storage-bound"):
-        child = tirx.For(
+        child = serial(
             j,
             0,
             tirx.Cast("int32", ub[0]) if case == "storage-bound" else 2,
-            tirx.ForKind.SERIAL,
             body,
-            annotations={"multi_buffer_eligible": [ub.data]} if case == "nested-owner" else {},
+            annotations={"multi_buffer_eligible": [ub]} if case == "nested-owner" else {},
         )
         body = unit(child, core=None)
-    loop = unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations=annotations), core=None)
+    loop = unit(serial(i, 0, 4, body, annotations=annotations), core=None)
     if case == "external-read":
-        loop = seq(loop, unit(tirx.BufferStore(out, ub[0], [0])))
+        loop = seq(loop, unit(ir.TensorStore(out, [0], ub[0])))
     if case in ("self-reading-fill", "l1-fill"):
-        fill = tirx.Evaluate(
-            tirx.Call(
-                "handle",
-                tvm.ir.Op.get("tl.tileop.fill"),
-                [region(ub, 2), ub[0] if case == "self-reading-fill" else tirx.const(0, "float32")],
-            )
-        )
-        loop = seq(unit(fill), loop)
+        initialization = fill(ub, ub[0] if case == "self-reading-fill" else ir.const(0, "float32"))
+        loop = seq(unit(initialization), loop)
     before = kernel(
         loop,
         buffers=[ub],
         params=[out],
-        annotations={"tl.buffer_versions_map": {ub.data: 2}, "tl.buffer_version_mode": {ub.data: "counter"}},
+        annotations={"tl.buffer_versions_map": {ub: 2}, "tl.buffer_version_mode": {ub: "counter"}},
+        allocation_stage=0,
     )
-    with pytest.raises(tvm.error.InternalError, match=message):
+    with pytest.raises(RuntimeError, match=message):
         transform.PrepareMultiBuffer()(before)
 
 
@@ -61,47 +54,48 @@ def test_invalid_storage_plans(case, message):
 )
 @pytest.mark.parametrize("versions", [1, 2], ids=["single-version", "ring"])
 def test_external_fill_is_marked_for_broadcast(tail, partial, versions):
-    ub = tirx.decl_buffer((64,), "float32", name="ub", scope="shared.dyn")
-    i = tirx.Var("i", "int32")
-    fill = unit(
-        tirx.Evaluate(
-            tirx.Call("handle", tvm.ir.Op.get("tl.tileop.fill"), [region(ub, 2, shape=[32 if partial else 64]), tirx.const(0, "float32")])
-        )
-    )
+    ub = tensor((64,), "float32", name="ub", scope="shared.dyn")
+    i = ir.Var("i", "int32")
+    initialization = unit(fill(ub, ir.const(0, "float32"), shape=[32 if partial else 64]))
     loop = unit(
-        tirx.For(
+        serial(
             i,
             0,
             4,
-            tirx.ForKind.SERIAL,
-            unit(tirx.BufferStore(ub, tirx.const(1, "float32"), [0])),
-            annotations={"multi_buffer_eligible": [ub.data]},
+            unit(ir.TensorStore(ub, [0], ir.const(1, "float32"))),
+            annotations={"multi_buffer_eligible": [ub]},
         ),
         core=None,
     )
-    before = kernel(seq(loop, fill) if tail else seq(fill, loop), buffers=[ub], annotations={"tl.buffer_versions_map": {ub.data: versions}})
+    before = kernel(
+        seq(loop, initialization) if tail else seq(initialization, loop),
+        buffers=[ub],
+        annotations={"tl.buffer_versions_map": {ub: versions}},
+        allocation_stage=0,
+    )
     after = transform.PrepareMultiBuffer()(before)
     broadcast = [
-        node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_task" and "tl.multi_buffer_broadcast_fill" in node.node
+        attribute_fields(node)["node"]
+        for node in attributes(after, "tl.ascend_task")
+        if "tl.multi_buffer_broadcast_fill" in attribute_fields(node)["node"]
     ]
-    assert len(broadcast) == 1 and ub.data in broadcast[0].node["tl.multi_buffer_broadcast_fill"]
+    assert len(broadcast) == 1 and ub in broadcast[0]["tl.multi_buffer_broadcast_fill"]
 
 
 def test_bound_data_and_sf_cannot_have_different_owners():
-    data = tirx.decl_buffer((1,), "int32", name="data", scope="shared.l0a")
-    sf = tirx.decl_buffer((1,), "int32", name="sf", scope="shared.l0a.sf")
+    data = tensor((1,), "int32", name="data", scope="shared.l0a")
+    sf = tensor((1,), "int32", name="sf", scope="shared.l0a.sf")
     loops = []
     for buf in (data, sf):
-        i = tirx.Var("i", "int32")
+        i = ir.Var("i", "int32")
         loops.append(
             unit(
-                tirx.For(
+                serial(
                     i,
                     0,
                     4,
-                    tirx.ForKind.SERIAL,
-                    unit(tirx.BufferStore(buf, i, [0]), core=2),
-                    annotations={"multi_buffer_eligible": [buf.data]},
+                    unit(ir.TensorStore(buf, [0], i), core=2),
+                    annotations={"multi_buffer_eligible": [buf]},
                 ),
                 core=None,
             )
@@ -110,9 +104,10 @@ def test_bound_data_and_sf_cannot_have_different_owners():
         seq(*loops),
         buffers=[data, sf],
         annotations={
-            "tl.l0_sf_bindings": {sf.data: data.data},
-            "tl.buffer_versions_map": {data.data: 2, sf.data: 2},
+            "tl.l0_sf_bindings": {sf: data},
+            "tl.buffer_versions_map": {data: 2, sf: 2},
         },
+        allocation_stage=0,
     )
-    with pytest.raises(tvm.error.InternalError, match="same owner loops"):
+    with pytest.raises(RuntimeError, match="same owner loops"):
         transform.PrepareMultiBuffer()(before)

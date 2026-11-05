@@ -2,7 +2,7 @@
 
 This page lists the data types supported by TileLang and how to specify them in
 kernels. For full details and the authoritative list, see the API Reference
-(`autoapi/tilelang/index`) and `tilelang.language.v2.dtypes`.
+(`autoapi/tilelang/index`) and `tilelang.language.dtypes`.
 
 How to specify dtypes
 - Use any of the following forms; TileLang normalizes them internally:
@@ -38,4 +38,4 @@ Notes
 - Choose accumulation dtypes explicitly for mixed‑precision compute (e.g.,
   GEMM with `float16` inputs and `float32` accumulators).
 - The complete, up‑to‑date list is exposed in
-  `tilelang.language.v2.dtypes` and rendered in the API Reference.
+  `tilelang.language.dtypes` and rendered in the API Reference.

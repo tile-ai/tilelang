@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tilelang import tvm
+from tvm_ffi import dtype as DataType
 
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
@@ -29,7 +29,7 @@ class _FakeKernel:
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = [KernelParam(tvm.DataType("float32"), [4])]
+        self.params = [KernelParam(DataType("float32"), [4])]
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def _write_complete_kernel_cache_entry(
     (cache_path / cache.device_kernel_path).write_text(device_source)
     (cache_path / cache.host_kernel_path).write_text(host_source)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(DataType("float32"), [4])]))
     cache._write_manifest(str(cache_path))
     return cache_path
 
@@ -101,7 +101,7 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
     assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
-    assert captured["params"] == [KernelParam(tvm.DataType("float32"), [4])]
+    assert captured["params"] == [KernelParam(DataType("float32"), [4])]
     assert captured["backend_context"] is backend_context
 
 
@@ -202,7 +202,7 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
     cache_path = Path(cache._get_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(DataType("float32"), [4])]))
 
     def fail_from_database(cls, **kwargs):
         raise AssertionError("incomplete cache entries should miss before rebuilding from database")

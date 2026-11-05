@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from .base import BaseTemplate
-from tvm import te, tirx
+from tvm_tirx import ir
+from .._workload import WorkloadBuilder
 from ..roller import Hint
 from ..utils import get_roller_hints_from_func
 
@@ -63,7 +64,7 @@ class ConvTemplate(BaseTemplate):
         Defines and initializes the convolution computation.
 
         This method sets up placeholders for input matrices, computes
-        the convolution using TVM's compute API,
+        the convolution using the native workload builder,
         and optionally applies bias and type casting.
 
         Raises:
@@ -98,15 +99,16 @@ class ConvTemplate(BaseTemplate):
         output_shape = (N, OH, OW, F)  # NHWC format output tensor
         bias_shape = (F,)  # Bias vector shape
 
-        # Create TVM placeholders for input tensors
-        A = te.placeholder(input_shape, name="A", dtype=in_dtype)  # Input tensor
-        B = te.placeholder(weight_shape, name="B", dtype=in_dtype)  # Weight tensor
-        Bias = te.placeholder(bias_shape, name="Bias", dtype=accum_dtype)  # Bias vector
+        # Create typed native input tensors
+        workload = WorkloadBuilder()
+        A = workload.input(input_shape, name="A", dtype=in_dtype)  # Input tensor
+        B = workload.input(weight_shape, name="B", dtype=in_dtype)  # Weight tensor
+        Bias = workload.input(bias_shape, name="Bias", dtype=accum_dtype)  # Bias vector
 
         # Define reduction axes for convolution
-        kh = te.reduce_axis((0, KH), name="kh")
-        kw = te.reduce_axis((0, KW), name="kw")
-        c = te.reduce_axis((0, C), name="c")
+        kh = workload.reduce_axis((0, KH), name="kh")
+        kw = workload.reduce_axis((0, KW), name="kw")
+        c = workload.reduce_axis((0, C), name="c")
 
         def _compute_conv(n, h, w, f):
             """
@@ -126,17 +128,17 @@ class ConvTemplate(BaseTemplate):
             w_in = w * S - P + kw * D
 
             # Check if the input position is within bounds (implicit padding with 0)
-            return te.sum(
-                te.if_then_else(
-                    te.all(h_in >= 0, h_in < H, w_in >= 0, w_in < W),
+            return workload.sum(
+                workload.if_then_else(
+                    workload.all(h_in >= 0, h_in < H, w_in >= 0, w_in < W),
                     A[n, h_in, w_in, c].astype(accum_dtype) * B[kh, kw, c, f].astype(accum_dtype),
-                    tirx.const(0, accum_dtype),
+                    ir.const(0, accum_dtype),
                 ),
                 axis=[kh, kw, c],
             )
 
         # Compute convolution result
-        C = te.compute(
+        C = workload.compute(
             output_shape,
             fcompute=_compute_conv,
             name="C",
@@ -144,7 +146,7 @@ class ConvTemplate(BaseTemplate):
 
         # Optionally apply bias addition
         if with_bias:
-            C = te.compute(
+            C = workload.compute(
                 output_shape,
                 lambda n, h, w, f: C[n, h, w, f] + Bias[f],
                 name="Bias",
@@ -152,7 +154,7 @@ class ConvTemplate(BaseTemplate):
 
         # Optionally cast the output to a different type
         if out_dtype != accum_dtype:
-            C = te.compute(
+            C = workload.compute(
                 output_shape,
                 lambda n, h, w, f: C[n, h, w, f].astype(out_dtype),
                 name="D",
@@ -160,7 +162,7 @@ class ConvTemplate(BaseTemplate):
 
         # Set function arguments (including bias if used)
         args = [A, B, Bias, C] if self.with_bias else [A, B, C]
-        self.set_function(te.create_prim_func(args))
+        self.set_function(workload.to_function(args))
 
     def params_as_dict(self):
         """

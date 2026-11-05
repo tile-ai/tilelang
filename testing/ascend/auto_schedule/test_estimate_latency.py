@@ -4,14 +4,34 @@ import pytest
 import tilelang
 import tilelang.ascend.transform as ascend_transform
 import tilelang.ascend.language as T
-from tilelang import tvm
+import tvm_ffi
+from tvm_tirx import ir, tirx
+from testing.ascend._ir import allocate, scheduled_bind, scheduled_fields, tensor
 from testing.ascend.auto_schedule._task_utils import (
     _bind_target,
+    _collect_allocation_tasks,
     _collect_schedule_units,
     _collect_task_metadata,
     _make_program,
     _materialize_schedule_units,
 )
+
+
+def _check_allocation_tasks(mod, expected_count=None):
+    # Native well-formedness checks the allocation's dominance over every
+    # tensor/address use, including operands inside scheduled metadata.
+    assert tirx.analysis.check_well_formed(mod["main"])
+    allocations = _collect_allocation_tasks(mod)
+    assert allocations
+    if expected_count is not None:
+        assert len(allocations) == expected_count
+    for allocation in allocations:
+        fields = scheduled_fields(allocation)["task"]
+        assert (int(fields["latency"]), int(fields["ii"])) == (1, 1)
+    all_tasks = _collect_task_metadata(mod)
+    runtime_tasks = _collect_task_metadata(mod, include_allocations=False)
+    assert len(all_tasks["latency"]) == len(runtime_tasks["latency"]) + len(allocations)
+    return allocations
 
 
 def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False, l0=True, blockscaled=False):
@@ -36,10 +56,17 @@ def _make_gemm_cost_program(m, n, k, dtype="float32", hf32=True, dynamic_k=False
 
 def _estimate_gemm_cost(*args, **kwargs):
     mod = _bind_target(_make_gemm_cost_program(*args, **kwargs))
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(
+        lower_grid_binding=True,
+        lower_thread_binding=False,
+        default_threads=None,
+        unsupported_annotations=["cluster_dims"],
+        launch_dim_tags=["cthread"],
+    )(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = ascend_transform.EstimateLatency()(_materialize_schedule_units(mod))
-    metadata = _collect_task_metadata(mod)
+    _check_allocation_tasks(mod, expected_count=5 if kwargs.get("blockscaled", False) else 3)
+    metadata = _collect_task_metadata(mod, include_allocations=False)
     return metadata["latency"][-1], metadata["ii"][-1]
 
 
@@ -344,7 +371,13 @@ def _make_unit_axis_fixpipe_dual_program():
 
 def _estimate_copy_metadata(program, rewrite_dual_copy=False):
     mod = _bind_target(program)
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch(
+        lower_grid_binding=True,
+        lower_thread_binding=False,
+        default_threads=None,
+        unsupported_annotations=["cluster_dims"],
+        launch_dim_tags=["cthread"],
+    )(mod)
     mod = tilelang.transform.AddWrapperForSingleBufStore()(mod)
     mod = tilelang.transform.LegalizeNegativeIndex()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
@@ -352,19 +385,48 @@ def _estimate_copy_metadata(program, rewrite_dual_copy=False):
         mod = ascend_transform.RewriteDualCopy()(mod)
     mod = _materialize_schedule_units(mod)
     mod = ascend_transform.EstimateLatency()(mod)
-    metadata = _collect_task_metadata(mod)
+    _check_allocation_tasks(mod)
+    metadata = _collect_task_metadata(mod, include_allocations=False)
     return list(zip(metadata["latency"], metadata["ii"]))
 
 
 def test_estimate_latency_annotates_all_materialized_tasks():
     mod = ascend_transform.EstimateLatency()(_materialize_schedule_units(_bind_target(_make_program())))
-    metadata = _collect_task_metadata(mod)
+    _check_allocation_tasks(mod, expected_count=1)
+    metadata = _collect_task_metadata(mod, include_allocations=False)
 
     assert len(metadata["latency"]) == 2
     assert len(metadata["ii"]) == 2
     assert all(latency >= 0 for latency in metadata["latency"])
     assert all(ii > 0 for ii in metadata["ii"])
     assert _collect_schedule_units(mod)
+
+
+def test_runtime_bind_metadata_is_not_allocation_metadata():
+    storage = tensor([4], "int32", name="storage", scope="shared")
+    scalar = ir.Var("scalar", "int32")
+    pointer = ir.Var("pointer", storage.data.ty)
+    alias = tensor([4], "int32", name="alias", scope="shared")
+    allocation = scheduled_bind(allocate(storage), 0, {"latency": 1, "ii": 1, "core_mask": 2})
+    runtime_bindings = [
+        ir.Bind(scalar, ir.const(9, "int32")),
+        ir.Bind(pointer, storage.data),
+        ir.Bind(alias, ir.Call("tirx.decl_tensor", [pointer], ty_args=[alias.ty])),
+    ]
+    body = [
+        allocation,
+        *(scheduled_bind(binding, 0, {"latency": 7, "ii": 2, "core_mask": 2}) for binding in runtime_bindings),
+        ir.TensorStore(alias, [0], scalar),
+    ]
+    mod = ir.IRModule({"main": tirx.Function([], body, ir.NoneType())})
+    (observed,) = _check_allocation_tasks(mod, expected_count=1)
+    assert observed.same_as(allocation)
+    assert _collect_task_metadata(mod)["latency"] == [1, 7, 7, 7]
+    runtime = _collect_task_metadata(mod, include_allocations=False)
+    assert runtime["latency"] == [7, 7, 7]
+    assert runtime["ii"] == [2, 2, 2]
+    assert runtime["core_mask"] == [2, 2, 2]
+    assert len(_collect_schedule_units(mod)) == 4
 
 
 def test_frontend_task_hints_feed_shared_task_metadata():
@@ -476,7 +538,7 @@ def test_updated_non_aiv_copy_costs_match_full_path_remeasurement():
 def test_mx_sf_copy_cost_uses_region_payload(rows, k, sf_dtype, dynamic_rows, measured):
     # CANN 9.2 / npusim: 32, 512 and 1024 B SF loads on either L0 side.
     # Slice a larger allocation so the cost must use the region and SF dtype.
-    sf_columns = k // (32 * (tvm.DataType(sf_dtype).bits // 8))
+    sf_columns = k // (32 * (tvm_ffi.dtype(sf_dtype).bits // 8))
 
     @T.prim_func
     def main(tail_rows: T.int32):
@@ -514,7 +576,7 @@ def test_task_cost_arguments_are_validated():
         _make_program(ii=0)
     with pytest.raises(ValueError, match="greater than or equal to ii"):
         _make_program(latency=1, ii=2)
-    with pytest.raises(tvm.error.InternalError, match="greater than or equal to ii"):
+    with pytest.raises(RuntimeError, match="greater than or equal to ii"):
         ascend_transform.EstimateLatency()(_materialize_schedule_units(_bind_target(_make_program(latency=0))))
 
 

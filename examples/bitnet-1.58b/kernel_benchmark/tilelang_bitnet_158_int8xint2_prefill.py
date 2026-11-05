@@ -6,7 +6,7 @@ import torch.backends
 import tilelang
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     make_mma_swizzle_layout as make_swizzle_layout,
 )

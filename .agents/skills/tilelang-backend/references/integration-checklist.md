@@ -31,7 +31,7 @@ before creating files.
 
 Record these choices in the implementation plan:
 
-- TVM target kind and whether TVM already registers it;
+- TIRx target kind and whether TIRx already registers it;
 - required target attributes and accepted aliases;
 - auto-detection policy and architecture defaults;
 - variant-selection predicate if the target kind is shared;
@@ -122,7 +122,7 @@ BACKEND = register_backend(
 Honor `BackendModule` validation:
 
 - `pipelines` and `device_codegens` contain exactly one entry per owned kind;
-- each pipeline name equals its TVM target kind;
+- each pipeline name equals its TIRx target kind;
 - at least one execution backend is declared;
 - execution names are unique and declaration order defines `auto`;
 - host codegens exist when an execution mode enables host codegen;
@@ -152,7 +152,7 @@ but must document and test it explicitly.
 
 Create `tilelang/<backend>/pipeline.py` with a complete ordered sequence after
 the shared `PreLowerSemanticCheck`. Wrap it in a `PassPipeline` named for the
-TVM target kind.
+TIRx target kind.
 
 Deliberately cover these boundaries where applicable:
 
@@ -307,13 +307,21 @@ toolchain lookup, includes, definitions, stubs, and optional runtime libraries.
   loading, or stubs are practical.
 - Add link libraries, RPATH, install targets, and wheel-repair exclusions
   deliberately.
-- Update `pyproject.toml` for dependencies, resources, or wheel behavior.
+- Update `pyproject.toml` for frontend dependencies/resources and
+  `tilelang_packaging/tirx_companion/` for the provider. The provider owns
+  `tvm_tirx_compiler`, its runtime/device libraries and installed compiler headers;
+  the frontend owns the DSL, adapters and device template headers.
+- Keep one FFI distribution/version and one compiler registry. Include the
+  source in `tilelang_packaging/compiler_manifest.py` when adding a new source
+  root, then rebuild the matching provider/frontend bundle.
 
 Python packages under `tilelang/` are included by the current wheel mapping.
-Native sources are inactive until added through backend-local CMake.
+Native sources are inactive until added through backend-local CMake. The root
+build passes `TILE_LANG_SRCS` and includes to `cmake/TileLangCompiler.cmake`,
+which adds their object files to the existing TIRx compiler target.
 
 Do not edit `3rdparty/` to bypass a missing TileLang integration point. Isolate
-and justify any required upstream TVM target/runtime change.
+and justify any required TIRx target/runtime change with a precise dependency diff.
 
 ## Tests and Documentation
 

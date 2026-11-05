@@ -32,11 +32,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import tvm.error
-from tilelang import tvm
+import tvm_ffi
+from tvm_tirx import ir
 from tilelang.layout import Layout as TLLayout
 from tilelang.layout import cute
-from tvm.tirx.stmt_functor import substitute
 
 from oracle import placeholder_vars
 
@@ -75,7 +74,9 @@ def pack_fragment(frag) -> TLLayout:
         vmap = {inputs[i]: coords[i] for i in range(len(shape))}
         if rep_var is not None:
             vmap[rep_var] = coords[len(shape)]
-        return [substitute(thread_expr, vmap), substitute(slot_expr, vmap)]
+        # The layout expressions have no local definitions. Map the native
+        # coordinate uses, including uses reached through expression types.
+        return [tvm_ffi.structural_map(expr, (ir.Var, lambda var: vmap.get(var, var))) for expr in (thread_expr, slot_expr)]
 
     return TLLayout(shape + [R], forward)
 
@@ -97,7 +98,7 @@ def score_statement_cute(
 
     try:
         flat = cute.Layout.from_tilelang(pack_fragment(frag))
-    except tvm.error.InternalError as exc:
+    except (RuntimeError, ValueError) as exc:
         return Unconvertible(f"conversion crashed: {exc}")
     if flat is None:
         return Unconvertible("from_tilelang returned None (non-affine/swizzle)")
@@ -105,7 +106,7 @@ def score_statement_cute(
 
     try:
         inv = cute.right_inverse(flat)
-    except tvm.error.InternalError as exc:
+    except (RuntimeError, ValueError) as exc:
         return Unconvertible(f"right_inverse crashed: {exc}")
     if int(cute.size(inv)) != int(cute.size(flat)):
         return Unconvertible(f"non-bijective: size(inv)={cute.size(inv)} != {cute.size(flat)}")
@@ -122,7 +123,7 @@ def score_statement_cute(
         G = cute.Layout.parse(g_text)
         A = cute.composition(G, inv)  # cell -> byte address
         A2 = A.with_shape((S, T))  # (slot, thread) split
-    except tvm.error.InternalError as exc:
+    except (RuntimeError, ValueError) as exc:
         return Unconvertible(f"composition failed: {exc}")
     notes.append(f"A2 = {A2}")
 

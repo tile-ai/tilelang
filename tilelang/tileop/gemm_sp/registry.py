@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Callable
 
-from tvm.target import Target
+from tvm_tirx.target import Target
+from tilelang.tileop.gemm.registry import load_gemm_impl_class
 
 
 GemmSPTargetPredicate = Callable[[Target], bool]
@@ -14,7 +15,7 @@ class GemmSPImplEntry:
     name: str
     inst_name: str
     predicate: GemmSPTargetPredicate
-    impl_class: type
+    impl_class: type | str
 
 
 _GEMM_SP_IMPLS: list[GemmSPImplEntry] = []
@@ -24,7 +25,7 @@ def register_gemm_sp_impl(
     name: str,
     inst_name: str,
     predicate: GemmSPTargetPredicate,
-    impl_class: type,
+    impl_class: type | str,
 ) -> None:
     """Register a backend-specific GEMM_SP Python implementation class."""
     entry = GemmSPImplEntry(name, inst_name, predicate, impl_class)
@@ -43,4 +44,4 @@ def resolve_gemm_sp_impl(gemm_inst: str, target: Target) -> type:
     if len(matches) > 1:
         names = ", ".join(entry.name for entry in matches)
         raise ValueError(f"Multiple GEMM_SP implementations matched target {target}: {names}")
-    return matches[0].impl_class
+    return load_gemm_impl_class(matches[0].impl_class)

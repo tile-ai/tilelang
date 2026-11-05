@@ -1,5 +1,8 @@
 import re
 
+import tvm_ffi
+from tvm_tirx import ir, sym, tirx
+
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -20,6 +23,19 @@ def _compile_tvm_ffi(func, pass_configs, **kwargs):
         )
     finally:
         tilelang.enable_cache()
+
+
+def _stage_slots(call, iterations):
+    barrier = call.args[0]
+    assert isinstance(barrier, ir.TensorLoad) and len(barrier.indices) == 1
+    index = barrier.indices[0]
+    variables = tirx.analysis.undefined_vars(index)
+    assert len(variables) == 1
+    result = []
+    for stage in range(iterations):
+        concrete = tvm_ffi.structural_map(index, (ir.Var, lambda var, stage=stage: ir.const(stage, var.ty)), order="pre")
+        result.append(int(sym.Analyzer().simplify(concrete)))
+    return result
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)
@@ -331,7 +347,6 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     kernel = _compile_tvm_ffi(mixed_gemm_shared_barrier, pass_configs, out_idx=[2])
 
     src = kernel.get_kernel_source()
-    flat_src = " ".join(src.split())
 
     assert "tl::tma_load" in src
     assert "cp_async_gs<16>" in src
@@ -344,10 +359,31 @@ def test_mixed_tma_cp_async_shared_stage_barriers():
     # when cp.async is lowered, this may appear either as an explicit
     # noinc-arrive or as a regular arrive on the same forward barrier after the
     # cp.async visibility sync.
-    assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[(ko % 3)])" in flat_src or "mbarrier[(ko % 3)].arrive();" in flat_src
-    assert "tl::mbarrier_cp_async_arrive_noinc(mbarrier[((ko % 3) + 4)])" not in flat_src
-    assert "mbarrier[((ko % 3) + 7)]" not in flat_src
-    assert "mbarrier[((ko % 3) + 10)]" not in flat_src
+    # Compare the complete stage domain in native IR. Lossless casts and
+    # nested modulo operations need not retain one particular C spelling.
+    arrivals = []
+    for function in kernel.artifact.device_mod.functions.values():
+        tvm_ffi.structural_walk(
+            function.body,
+            (
+                ir.Call,
+                lambda call: (
+                    arrivals.append(call)
+                    if getattr(call.op, "name", "") in ("tl.ptx_cp_async_barrier_noinc", "tl.ptx_arrive_barrier")
+                    else None
+                ),
+            ),
+        )
+    expected_slots = [stage % num_stages for stage in range(K // block_k)]
+    backward_slots = [slot + num_stages for slot in expected_slots]
+    assert any(_stage_slots(call, K // block_k) == expected_slots for call in arrivals)
+    for call in arrivals:
+        slots = _stage_slots(call, K // block_k)
+        # Every arrival belongs to the shared forward/backpressure pair.
+        # Checking only the producer would miss an extra consumer barrier set.
+        assert slots in (expected_slots, backward_slots)
+        if call.op.name == "tl.ptx_cp_async_barrier_noinc":
+            assert slots == expected_slots
 
     a = torch.randn((M, K), device="cuda", dtype=torch.float16)
     b = torch.randn((K, N), device="cuda", dtype=torch.float16)
@@ -497,8 +533,8 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
 
     assert src.count(".init(1);") == 1
     assert src.count(".init(128);") == 4
-    assert "tl::tma_load(K_desc, mbarrier[0]" in src
-    assert "tl::tma_load(V_desc, mbarrier[1]" in src
+    assert re.search(r"tl::tma_load\(K_desc(?:_\d+)?, mbarrier\[0\]", src)
+    assert re.search(r"tl::tma_load\(V_desc(?:_\d+)?, mbarrier\[1\]", src)
     assert re.search(r"mbarrier\[2\]\.wait\([^;]+\);", flat_src)
     assert re.search(r"mbarrier\[3\]\.wait\([^;]+\);", flat_src)
     assert re.search(r"mbarrier\[0\]\.wait\([^;]+\);", flat_src)
@@ -510,10 +546,16 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     assert "acc_o" not in producer_src
     assert "logsum" not in producer_src
     assert "scores_max" not in producer_src
-    assert "*(float4*)(acc_o + (i * 4)) = make_float4" not in prelude_src
-    assert "*(float4*)(acc_o + (i * 4)) = make_float4" in consumer_src
-    assert "*(float2*)(logsum + 0) = make_float2" not in prelude_src
-    assert "*(float2*)(logsum + 0) = make_float2" in consumer_src
+    acc_init = (
+        r"tl::store_vector<float4, 16, false>\([^;]*acc_o[^;]*make_float4\(broadcast_var, broadcast_var, broadcast_var, broadcast_var\)"
+    )
+    logsum_init = r"tl::store_vector<float2, 8, false>\([^;]*logsum[^;]*make_float2\(broadcast_var_1, broadcast_var_1\)"
+    assert not re.search(acc_init, prelude_src)
+    assert re.search(acc_init, consumer_src)
+    assert not re.search(logsum_init, prelude_src)
+    assert re.search(logsum_init, consumer_src)
+    assert "float broadcast_var = 0x0p+0f" in consumer_src
+    assert "float broadcast_var_1 = 0x0p+0f" in consumer_src
 
 
 @tilelang.testing.requires_cuda_compute_version(9, 0)

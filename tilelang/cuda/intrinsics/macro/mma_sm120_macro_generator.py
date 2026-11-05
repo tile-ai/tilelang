@@ -1,12 +1,12 @@
 from __future__ import annotations
+from tvm_tirx import ir
 
 from dataclasses import dataclass
 
 import tilelang.language as T
-from tilelang import tvm as tvm
 from tilelang.utils.language import is_fragment
-from tvm.runtime import convert
-from tvm.tirx import Buffer, BufferRegion, PrimExpr, Var
+from tvm_ffi import convert
+from tilelang.language._native import Buffer, BufferRegion, PrimExpr, Var
 
 from ..layout.mma_layout import (
     ldmatrix_32x16_to_shared_8x64_layout_b,
@@ -426,10 +426,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
+        A_buf = A_region.source
+        A_base0 = A_region.region[-2].begin
+        A_base1 = A_region.region[-1].begin
+        A_other = [r.begin for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ld_a_e2m1(A_local_buf, A_shared_buf, ki, thread_binding, rk=0):
@@ -477,10 +477,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
+        B_buf = B_region.source
+        B_base0 = B_region.region[-2].begin
+        B_base1 = B_region.region[-1].begin
+        B_other = [r.begin for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ld_b_e2m1(B_local_buf, B_shared_buf, ki, thread_binding, rk=0):
@@ -525,10 +525,10 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         else:
             raise ValueError(f"Unsupported scale buffer type: {type(scale_buf)}")
         return (
-            scale_region.buffer,
-            [r.min for r in scale_region.region[:-2]],
-            scale_region.region[-2].min,
-            scale_region.region[-1].min,
+            scale_region.source,
+            [r.begin for r in scale_region.region[:-2]],
+            scale_region.region[-2].begin,
+            scale_region.region[-1].begin,
         )
 
     @staticmethod
@@ -550,7 +550,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                 f"{self.kind} expects packed scale words covering {self.sf_vec_size * 4} K elements, "
                 f"got sf_granularity_k={sf_granularity_k}"
             )
-        _k_start = tvm.tirx.const(k_start, "int32") if isinstance(k_start, int) else k_start
+        _k_start = ir.const(k_start, "int32") if isinstance(k_start, int) else k_start
         return (_k_start + self.micro_size_k * ki) // packed_word_k
 
     @staticmethod

@@ -16,6 +16,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 class GemmSPWarpPolicyNode : public Object {
@@ -79,12 +80,14 @@ public:
 
 class GemmSPNode : public TileOperatorNode {
 public:
-  tirx::Buffer A, E, B, C;
+  tirx::TensorVar A{ffi::UnsafeInit{}}, E{ffi::UnsafeInit{}},
+      B{ffi::UnsafeInit{}}, C{ffi::UnsafeInit{}};
   // pointer to the A, E, B, C
-  BufferRegion aRegion_, eRegion_, bRegion_, cRegion_;
+  TensorRegion aRegion_{ffi::UnsafeInit{}}, eRegion_{ffi::UnsafeInit{}},
+      bRegion_{ffi::UnsafeInit{}}, cRegion_{ffi::UnsafeInit{}};
   bool trans_A, trans_B, trans_E;
   int M, N, K;
-  PrimExpr clear_accum = const_false();
+  PrimExpr clear_accum = IntImm(PrimType::Bool(), 0);
   int wg_wait = 0;
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
@@ -117,11 +120,11 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+  ffi::Array<tvm::TensorRegion> GetReadBeforeWriteRegions() const override;
 
   TileOperator Clone() const;
 
@@ -152,8 +155,8 @@ void RegisterGemmSPImpl(GemmSPImpl impl);
 class GemmSP : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmSP, TileOperator, GemmSPNode);
-  TVM_DLL GemmSP(Array<PrimExpr> args,
-                 Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_TIRX_DLL GemmSP(Array<Expr> args,
+                      Map<String, Any> annotations = Map<String, Any>());
   static const Op &Get();
 };
 

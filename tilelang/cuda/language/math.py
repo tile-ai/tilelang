@@ -1,18 +1,21 @@
 """CUDA-specific floating-point arithmetic intrinsics."""
 
 from __future__ import annotations
+from tilelang.language import _native
 
-from tvm import DataType, DataTypeCode, tirx
-from tvm.tirx import PrimExpr
+from tvm_ffi import dtype as DataType
+from tvm_ffi._dtype import DataTypeCode
+from tilelang.language import _native as tirx
+from tilelang.language._native import PrimExpr
 
 
 def _prepare_float_args(intrinsic: str, *args: PrimExpr) -> tuple[PrimExpr, ...]:
     converted = tuple(tirx.convert(arg) for arg in args)
-    dtype = converted[0].dtype
+    dtype = _native.dtype_of(converted[0])
     if DataType(dtype).type_code not in (DataTypeCode.FLOAT, DataTypeCode.BFLOAT):
         raise TypeError(f"T.{intrinsic} only supports floating-point inputs, but got {dtype}")
-    if any(arg.dtype != dtype for arg in converted[1:]):
-        raise ValueError(f"T.{intrinsic} expects all inputs to have the same dtype, but got {[arg.dtype for arg in converted]}")
+    if any(_native.dtype_of(arg) != dtype for arg in converted[1:]):
+        raise ValueError(f"T.{intrinsic} expects all inputs to have the same dtype, but got {[_native.dtype_of(arg) for arg in converted]}")
     return converted
 
 
@@ -24,7 +27,7 @@ def fmul(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     multiply instructions when the target supports them.
     """
     x, y = _prepare_float_args("fmul", x, y)
-    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.fmul"), x, y)
+    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.fmul"), x, y)
 
 
 def fma(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
@@ -34,7 +37,7 @@ def fma(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
     operation to packed FMA instructions when the target supports them.
     """
     x, y, z = _prepare_float_args("fma", x, y, z)
-    return tirx.call_intrin(x.dtype, tirx.op.Op.get("tl.fma"), x, y, z)
+    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.fma"), x, y, z)
 
 
 __all__ = ["fma", "fmul"]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import cuda.bindings.nvrtc as nvrtc
 from typing import Literal
-from tvm.target import Target
+from tvm_tirx.target import Target
 from .nvcc import get_target_compute_version, parse_compute_version
 
 

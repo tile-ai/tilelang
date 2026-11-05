@@ -1,4 +1,4 @@
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 from typing import Literal
 from .mma_layout import (
     ldmatrix_32x4_to_shared_16x8_layout_a,
@@ -16,7 +16,7 @@ from .mma_layout import make_mma_swizzle_layout  # noqa: F401
 
 
 # the original implementation and insight is from the following code snippet
-# 3rdparty/tvm/python/tvm/tir/tensor_intrin/cuda.py#get_ldmatrix_intrin
+# https://github.com/TileLang/tvm/blob/4211874e9e4b8770fd20ad0d98ab80afd1df5028/python/tvm/s_tir/tensor_intrin/cuda.py#L68
 def get_ldmatrix_offset(
     matrix: Literal["A", "B"],
     row_idx,

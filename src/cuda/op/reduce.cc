@@ -6,6 +6,7 @@
 #include "backend/common/op/reduce.h"
 
 #include "backend/common/target_utils.h"
+#include "cuda/op/builtin.h"
 
 #include <tvm/ir/transform.h>
 
@@ -15,6 +16,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace cuda {
 
@@ -26,14 +28,14 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
   static bool IsFAdd2Enabled(const ReduceOpNode &op) {
     auto pass_ctx = tvm::transform::PassContext::Current();
     bool globally_enabled =
-        pass_ctx->GetConfig<Bool>(kEnableFP32x2Reduction, Bool(true)).value();
+        pass_ctx->GetConfig<bool>(kEnableFP32x2Reduction).value_or(true);
     if (!globally_enabled) {
       return false;
     }
 
     constexpr const char *kEnableFAdd2 = "enable_fadd2";
     if (auto value = op.annotations.Get(kEnableFAdd2)) {
-      if (auto enabled = value.value().as<Bool>()) {
+      if (auto enabled = value.value().as<bool>()) {
         return enabled.value();
       }
       if (auto enabled = value.value().as<IntImm>()) {
@@ -54,9 +56,10 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
       return 1;
     }
     bool supports_fp32x2 = TargetHasSMVersionGE(target, 100);
-    int vsize = backend::reduce::GetPreferredVectorizedSize(op.dst->dtype,
+    int vsize = backend::reduce::GetPreferredVectorizedSize(op.dst.dtype(),
                                                             supports_fp32x2);
-    if (vsize == 2 && op.dst->dtype.is_float() && op.dst->dtype.bits() == 32 &&
+    if (vsize == 2 && op.dst.dtype().MatchesCode(kDLFloat) &&
+        op.dst.dtype().bits() == 32 &&
         (op.type->IsSum() || op.type->IsAbsSum()) && !IsFAdd2Enabled(op)) {
       return 1;
     }

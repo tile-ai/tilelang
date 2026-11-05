@@ -1,10 +1,14 @@
 """Buffer lifetimes contracts."""
 
+from tvm_tirx import ir
+from testing.ascend._ir import sblock_annotations, sblock_metadata, sblocks, tensor
+
 import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs
+from testing.ascend.auto_schedule._dma_lifetime import assert_reuse_preserves_dma_readers
 
 
 def _make_distance_ring_program(versions: int, carried: bool, use_dma: bool, shifted_slot: bool = False):
@@ -825,7 +829,7 @@ def test_nested_carried_lifetime_preserves_local_dma_reader():
                     a[0] = x[index]
                     T.copy(a[:1], local[index : index + 1])
 
-    assert ("a", "b") not in _insert_sync_alias_pairs(main)
+    assert_reuse_preserves_dma_readers(main, {"b:S": 8, "a:MTE3": 8, "a:S": 7})
 
 
 def test_multi_trip_nested_scopes_use_hierarchical_summary():
@@ -848,11 +852,12 @@ def test_preloaded_read_only_storage_stays_live_through_loop():
 @pytest.mark.parametrize("use_dma", [False, True])
 def test_loop_carried_lifetime_preserves_local_reader(use_dma):
     program = _make_loop_carried_local_reader_program(use_dma)
-    pairs = _insert_sync_alias_pairs(program)
-    # The scalar reader finishes before the next write to b. The MTE3 reader
-    # has no such ordering, even though the next iteration's scalar read of a
-    # finishes before b is written. Both reader lifetimes must be checked.
-    assert (("a", "b") in pairs) == (not use_dma)
+    if use_dma:
+        # The scalar read alone does not finish the local DMA reader. Any
+        # accepted reuse needs the actual MTE3 completion before b's write.
+        assert_reuse_preserves_dma_readers(program, {"b:S": 8, "a:MTE3": 8, "a:S": 7})
+    else:
+        assert ("a", "b") in _insert_sync_alias_pairs(program)
 
 
 @pytest.mark.parametrize("versions", [2, 3, 5])
@@ -860,11 +865,14 @@ def test_loop_carried_lifetime_preserves_local_reader(use_dma):
 @pytest.mark.parametrize("shifted_slot", [False, True])
 def test_ring_generation_lifetimes(versions, use_dma, shifted_slot):
     # With two slots and a one-slot shift, the scalar read ends the only
-    # remaining live generation before b writes. More slots or asynchronous
-    # readers leave a generation live across that write.
+    # remaining live generation before b writes. An asynchronous reader also
+    # needs a real completion; additional slots keep another generation live.
     program = _make_distance_ring_program(versions, True, use_dma, shifted_slot)
-    may_alias = versions == 2 and shifted_slot and not use_dma
-    assert (("a", "b") in _insert_sync_alias_pairs(program)) == may_alias
+    if versions == 2 and shifted_slot and use_dma:
+        assert_reuse_preserves_dma_readers(program, {"b:S": 12, "a:MTE3": 12, "a:S": 10})
+    else:
+        may_alias = versions == 2 and shifted_slot and not use_dma
+        assert (("a", "b") in _insert_sync_alias_pairs(program)) == may_alias
 
 
 @pytest.mark.parametrize("versions", [2, 3, 5])
@@ -936,35 +944,35 @@ def test_buffer_lifetimes_alias_contract(make_program, may_alias):
 @pytest.mark.parametrize("sticky", [False, True], ids=["completed-groups", "sf-live-across-data-reload"])
 def test_l0_address_reuse_includes_the_bound_sf_lifetime(sticky):
     from tilelang.ascend import transform
-    from tvm import tirx
-    from testing.ascend._ir import kernel, nodes, seq
+    from testing.ascend._ir import kernel, seq
     from testing.ascend.auto_schedule._scheduled_ir import unit
 
-    a, b = [tirx.decl_buffer((1,), "int32", name=name, scope="shared.l0a") for name in ("a", "b")]
-    sa, sb = [tirx.decl_buffer((1,), "int32", name=name, scope="shared.l0a.sf") for name in ("sa", "sb")]
-    out = tirx.decl_buffer((4,), "int32", name="out")
+    a, b = [tensor((1,), "int32", name=name, scope="shared.l0a") for name in ("a", "b")]
+    sa, sb = [tensor((1,), "int32", name=name, scope="shared.l0a.sf") for name in ("sa", "sb")]
+    out = tensor((4,), "int32", name="out")
     tasks = [
-        tirx.BufferStore(sa, 1, [0]),
-        tirx.BufferStore(a, 2, [0]),
-        tirx.BufferStore(out, a[0] + sa[0], [0]),
-        tirx.BufferStore(sb, 3, [0]),
-        tirx.BufferStore(b, 4, [0]),
-        tirx.BufferStore(out, b[0] + sb[0], [1]),
+        ir.TensorStore(sa, [0], 1),
+        ir.TensorStore(a, [0], 2),
+        ir.TensorStore(out, [0], a[0] + sa[0]),
+        ir.TensorStore(sb, [0], 3),
+        ir.TensorStore(b, [0], 4),
+        ir.TensorStore(out, [1], b[0] + sb[0]),
     ]
     if sticky:
-        tasks += [tirx.BufferStore(a, 5, [0]), tirx.BufferStore(out, a[0] + sa[0], [2])]
+        tasks += [ir.TensorStore(a, [0], 5), ir.TensorStore(out, [2], a[0] + sa[0])]
     before = kernel(
         seq(*[unit(task, core=2) for task in tasks]),
         buffers=[a, b, sa, sb],
         params=[out],
-        annotations={"tl.l0_sf_bindings": {sa.data: a.data, sb.data: b.data}},
+        annotations={"tl.l0_sf_bindings": {sa: a, sb: b}},
+        allocation_stage=0,
     )
     after = transform.InsertSync()(before)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    aliases = root.annotations.get("tl.buffer_alias_map", {})
-    compatible = any(other.same_as(b.data) for other in aliases.get(a.data, []))
+    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
+    aliases = sblock_annotations(root).get("tl.buffer_alias_map", {})
+    compatible = any(other.same_as(b) for other in aliases.get(a, []))
     assert compatible == (not sticky)
-    assert sa.data not in aliases and sb.data not in aliases
+    assert sa not in aliases and sb not in aliases
 
 
 @pytest.mark.parametrize("reader_depth", [1, 2])

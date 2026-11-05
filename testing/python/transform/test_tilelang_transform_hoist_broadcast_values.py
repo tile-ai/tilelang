@@ -40,8 +40,18 @@ def qwq(dtype=torch.float8_e4m3fn):
 def test_hoist_broadcast(dtype):
     kernel = qwq(dtype)
     print(kernel.get_kernel_source())
-    matches = re.findall(r"(\w+) broadcast_var(_[0-9]+)? = \1", kernel.get_kernel_source())
+    # Native Cast literals can print as a C cast instead of a constructor.
+    # Both forms must initialize a scalar of the same declared dtype; four
+    # distinct scalar definitions remain required for the four literals.
+    matches = list(
+        re.finditer(
+            r"\b(?P<dtype>\w+)\s+(?P<name>broadcast_var(?:_\d+)?)\s*=\s*"
+            r"(?:\(\(\s*(?P=dtype)\s*\)|(?P=dtype)\s*\()",
+            kernel.get_kernel_source(),
+        )
+    )
     assert len(matches) == 4
+    assert len({match.group("name") for match in matches}) == 4
     a = torch.empty((32,), device="cuda", dtype=dtype)
     b = torch.empty((16,), device="cuda", dtype=dtype)
     c = torch.empty((8,), device="cuda", dtype=dtype)

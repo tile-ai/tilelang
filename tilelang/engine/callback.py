@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections.abc import Callable
 import tvm_ffi
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def register_cuda_postproc(func: Callable[[str, Target], str], override: bool = True):

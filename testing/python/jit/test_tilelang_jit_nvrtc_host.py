@@ -17,9 +17,17 @@ def _make_host_only_adapter(program, result_idx=None):
     adapter.ir_module = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
     adapter.params = extrac_params(program)
     adapter.result_idx = [] if result_idx is None else result_idx
-    adapter.param_dtypes = [param.torch_dtype() for param in adapter.params]
-    adapter.param_shapes = [list(param.shape) for param in adapter.params]
-    adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
+    adapter._initialize_native_arguments()
+
+    def host_only_forward(*inputs, stream=None):
+        # Exercise the production metadata and allocation step on the CPU;
+        # the separate CUDA suite covers device validation and real launches.
+        arguments, implicit = adapter._prepare_native_arguments(inputs, device="cpu")
+        adapter._forward_from_prebuild_lib(*arguments, *implicit, stream=stream)
+        outputs = [arguments[index] for index in adapter.result_idx]
+        return outputs[0] if len(outputs) == 1 else outputs
+
+    adapter._wrap_forward_from_prebuild_lib = host_only_forward
     adapter.target = "cuda"
     return adapter
 

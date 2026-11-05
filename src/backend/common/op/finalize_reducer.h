@@ -10,7 +10,8 @@
 #include "op/reducer.h"
 #include "support/check.h"
 
-#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op/math.h>
+#include <tvm/tirx/op/memory.h>
 
 #include <array>
 #include <cstdint>
@@ -23,21 +24,26 @@ namespace tl {
 namespace backend {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 template <typename Impl> struct FinalizeReducerLowerer {
   static Stmt Lower(const FinalizeReducerOpNode &op,
-                    const LowerArgs &lower_args, arith::Analyzer *) {
+                    const LowerArgs &lower_args, sym::AnalyzerObj *) {
     auto buffer = lower_args.buffer_remap[op.reducer];
     auto opt_layout = lower_args.layout_map.Get(op.reducer);
     ICHECK(opt_layout);
     ICHECK(opt_layout->as<Fragment>());
     auto layout = opt_layout->as<Fragment>().value();
-    Array<PrimExpr> indices_0;
-    indices_0.reserve(layout->OutputDim());
-    for (int i = 0; i < layout->OutputDim(); ++i) {
-      indices_0.push_back(Var("__finred_" + std::to_string(i)));
-    }
+    auto make_indices = [&]() -> Array<PrimExpr> {
+      Array<PrimExpr> indices;
+      indices.reserve(layout->OutputDim());
+      for (int i = 0; i < layout->OutputDim(); ++i) {
+        indices.push_back(PrimVar("__finred_" + std::to_string(i),
+                                  layout->OutputShape()[i].ty()));
+      }
+      return indices;
+    };
 
     // Collective steps: explicit narrow plan when present, otherwise the
     // legacy wide plan (one participant-extent step derived from the
@@ -45,15 +51,15 @@ template <typename Impl> struct FinalizeReducerLowerer {
     std::vector<std::pair<int, int>> steps;
     if (op.explicit_plan) {
       for (size_t i = 0; i + 1 < op.plan_steps.size(); i += 2) {
-        steps.emplace_back(static_cast<int>(op.plan_steps[i]->value),
-                           static_cast<int>(op.plan_steps[i + 1]->value));
+        steps.emplace_back(static_cast<int>(op.plan_steps[i]),
+                           static_cast<int>(op.plan_steps[i + 1]));
       }
     } else {
-      const int64_t *p_extent = as_const_int(layout->ReplicateExtent());
+      const auto p_extent = TryConstInt(layout->ReplicateExtent());
       ICHECK(p_extent);
       int extent = *p_extent;
       ICHECK(extent == 1 ||
-             extent == *as_const_int(lower_args.thread_bounds->extent))
+             extent == *TryConstInt(lower_args.thread_bounds->extent))
           << "Illegal finalize_reducer: extent=" << extent
           << "; T.thread_bounds=" << lower_args.thread_bounds;
 
@@ -65,12 +71,12 @@ template <typename Impl> struct FinalizeReducerLowerer {
     std::array op_names{"tl::SumOp",    "tl::MaxOp",   "tl::MinOp",
                         "tl::BitAndOp", "tl::BitOrOp", "tl::BitXorOp"};
     auto op_str = op_names[static_cast<int>(op.op)];
-    auto thread_offset = lower_args.thread_bounds->min;
+    auto thread_offset = lower_args.thread_bounds->begin;
 
     int64_t layout_batch_size = 1;
     for (int i = 0; i < layout->OutputDim(); ++i) {
-      const int64_t *p = as_const_int(layout->OutputShape()[i]);
-      if (p == nullptr) {
+      const auto p = TryConstInt(layout->OutputShape()[i]);
+      if (p == std::nullopt) {
         layout_batch_size = -1;
         break;
       }
@@ -99,23 +105,27 @@ template <typename Impl> struct FinalizeReducerLowerer {
 
       if (use_batch) {
         int workspace_stride =
-            static_cast<int>(*as_const_int(lower_args.thread_bounds->extent));
+            static_cast<int>(*TryConstInt(lower_args.thread_bounds->extent));
         std::string allreduce = Impl::MakeBatchAllReduce(
             op_str, reducing_threads, scale, thread_offset,
             lower_args.thread_bounds->extent, static_cast<int>(effective_batch),
             workspace_stride, lower_args.target);
         int ws_size = workspace_stride * static_cast<int>(effective_batch);
-        PrimExpr workspace = lower_args.add_workspace(ws_size, buffer->dtype);
+        Expr workspace = lower_args.add_workspace(ws_size, buffer.dtype());
 
-        // The remapped buffer has compact physical storage.
-        Buffer flat_buffer = buffer.GetFlattenedBuffer();
+        // The remapped tensor has the committed per-thread physical shape.
+        // Keep its identity in the address operand instead of constructing
+        // an unbound flattened view with an independent type.
         for (int64_t offset = 0; offset < layout_batch_size;
              offset += effective_batch) {
-          PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                              {BufferLoad(flat_buffer, {Integer(offset)})});
-          Array<PrimExpr> args = {StringImm(allreduce), ptr, workspace};
+          Expr ptr = MakeTensorAccessPtr(
+              TensorLoad(buffer,
+                         ReductionPhysicalIndices(
+                             IntImm(PrimType::Int(32), offset), buffer)),
+              IntImm(PrimType::Int(32), effective_batch), 3);
+          Array<Expr> args = {StringImm(allreduce), ptr, workspace};
           step_stmts.push_back(
-              Evaluate(Call(DataType::Handle(), builtin::call_extern(), args)));
+              Evaluate(Call(PrimType::Void(), call_extern_op(), args)));
         }
         continue;
       }
@@ -123,20 +133,25 @@ template <typename Impl> struct FinalizeReducerLowerer {
       std::string allreduce = Impl::MakeScalarAllReduce(
           op_str, reducing_threads, scale, thread_offset,
           lower_args.thread_bounds->extent, lower_args.target);
-      Array<PrimExpr> thread_reduce_args = {StringImm(allreduce),
-                                            BufferLoad(buffer, indices_0)};
+      // Native definition identities are unique across the whole Function,
+      // including sibling collective phases and the trailing seed loop.
+      const Array<PrimExpr> indices_0 = make_indices();
+      Array<Expr> thread_reduce_args = {StringImm(allreduce),
+                                        TensorLoad(buffer, indices_0)};
       if (reducing_threads > Impl::WarpSize(lower_args.target)) {
-        PrimExpr workspace = lower_args.add_workspace(
-            *as_const_int(lower_args.thread_bounds->extent), buffer->dtype);
+        Expr workspace = lower_args.add_workspace(
+            *TryConstInt(lower_args.thread_bounds->extent), buffer.dtype());
         thread_reduce_args.push_back(workspace);
       }
-      auto call =
-          Call(buffer->dtype, builtin::call_extern(), thread_reduce_args);
-      Stmt body = BufferStore(buffer, call, indices_0);
+      auto call = Call(buffer.dtype(), call_extern_op(), thread_reduce_args);
+      Stmt body = TensorStore(buffer, indices_0, call.as_or_throw<PrimExpr>());
 
       for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-        body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                   ForKind::kParallel, body);
+        body = For(indices_0[i].as<PrimVar>().value(),
+                   IntImm(indices_0[i].as<PrimVar>().value().ty(), 0),
+                   layout->OutputShape()[i],
+                   IntImm(indices_0[i].as<PrimVar>().value().ty(), 1),
+                   ForKind::kParallel, SeqStmt(body));
       }
       step_stmts.push_back(body);
     }
@@ -144,15 +159,18 @@ template <typename Impl> struct FinalizeReducerLowerer {
     // Optional logical seed: after the collective every physical slot holds
     // the final combined value (replicas are equal), so combining the seed
     // uniformly into each slot applies it exactly once per logical output.
-    if (op.seed.defined()) {
+    if (op.seed.has_value()) {
+      const Array<PrimExpr> indices_0 = make_indices();
       Stmt body =
-          BufferStore(buffer,
-                      ReducerV2Combine(op.op, BufferLoad(buffer, indices_0),
-                                       op.seed.value()),
-                      indices_0);
+          TensorStore(buffer, indices_0,
+                      ReducerV2Combine(op.op, TensorLoad(buffer, indices_0),
+                                       op.seed.value()));
       for (int i = layout->OutputDim() - 1; i >= 0; i--) {
-        body = For(indices_0[i].as<Var>().value(), 0, layout->OutputShape()[i],
-                   ForKind::kParallel, body);
+        body = For(indices_0[i].as<PrimVar>().value(),
+                   IntImm(indices_0[i].as<PrimVar>().value().ty(), 0),
+                   layout->OutputShape()[i],
+                   IntImm(indices_0[i].as<PrimVar>().value().ty(), 1),
+                   ForKind::kParallel, SeqStmt(body));
       }
       step_stmts.push_back(body);
     }

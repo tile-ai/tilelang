@@ -2,29 +2,33 @@
 
 from __future__ import annotations
 
-from tilelang.cuda.debug import device_assert
-from tilelang.cuda.intrinsics import (
-    TensorCoreIntrinEmitter,
-    TensorCoreIntrinEmitterSM120,
-    TensorCoreIntrinEmitterWithLadderTransform,
-    get_ldmatrix_offset,
-    get_mma_micro_size,
-    get_swizzle_layout,
-    make_mma_swizzle_layout,
-    mma_store_index_map,
-)
-from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
-from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
-    TCGEN05DescriptorParams,
-    TensorCoreIntrinEmitter as TCGEN05TensorCoreIntrinEmitter,
-    compute_umma_descriptor,
-)
-from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
-    WGMMADescriptorParams,
-    TensorCoreIntrinEmitter as WGMMATensorCoreIntrinEmitter,
-    compute_gmma_descriptor,
-)
-from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tilelang.cuda.debug import device_assert
+    from tilelang.cuda.intrinsics import (
+        TensorCoreIntrinEmitter,
+        TensorCoreIntrinEmitterSM120,
+        TensorCoreIntrinEmitterWithLadderTransform,
+        get_ldmatrix_offset,
+        get_mma_micro_size,
+        get_swizzle_layout,
+        make_mma_swizzle_layout,
+        mma_store_index_map,
+    )
+    from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
+    from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
+        TCGEN05DescriptorParams,
+        TensorCoreIntrinEmitter as TCGEN05TensorCoreIntrinEmitter,
+        compute_umma_descriptor,
+    )
+    from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
+        WGMMADescriptorParams,
+        TensorCoreIntrinEmitter as WGMMATensorCoreIntrinEmitter,
+        compute_gmma_descriptor,
+    )
+    from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTensorCoreIntrinEmitter
+
 from tilelang.language.allocate import (
     alloc_tcgen05_instr_desc,
     alloc_tcgen05_instruction_desc,
@@ -139,3 +143,35 @@ __all__ = [
     "wgmma_gemm_sp",
     "wgmma_mma",
 ]
+
+
+_HELPER_EXPORTS = {
+    "device_assert": ("tilelang.cuda.debug", "device_assert"),
+    "TensorCoreIntrinEmitter": ("tilelang.cuda.intrinsics", "TensorCoreIntrinEmitter"),
+    "TensorCoreIntrinEmitterSM120": ("tilelang.cuda.intrinsics", "TensorCoreIntrinEmitterSM120"),
+    "TensorCoreIntrinEmitterWithLadderTransform": ("tilelang.cuda.intrinsics", "TensorCoreIntrinEmitterWithLadderTransform"),
+    "get_ldmatrix_offset": ("tilelang.cuda.intrinsics", "get_ldmatrix_offset"),
+    "get_mma_micro_size": ("tilelang.cuda.intrinsics", "get_mma_micro_size"),
+    "get_swizzle_layout": ("tilelang.cuda.intrinsics", "get_swizzle_layout"),
+    "make_mma_swizzle_layout": ("tilelang.cuda.intrinsics", "make_mma_swizzle_layout"),
+    "mma_store_index_map": ("tilelang.cuda.intrinsics", "mma_store_index_map"),
+    "SparseTensorCoreIntrinEmitter": ("tilelang.cuda.intrinsics.macro.mma_sp_macro_generator", "SparseTensorCoreIntrinEmitter"),
+    "TCGEN05DescriptorParams": ("tilelang.cuda.intrinsics.macro.tcgen05_macro_generator", "TCGEN05DescriptorParams"),
+    "TCGEN05TensorCoreIntrinEmitter": ("tilelang.cuda.intrinsics.macro.tcgen05_macro_generator", "TensorCoreIntrinEmitter"),
+    "compute_umma_descriptor": ("tilelang.cuda.intrinsics.macro.tcgen05_macro_generator", "compute_umma_descriptor"),
+    "WGMMADescriptorParams": ("tilelang.cuda.intrinsics.macro.wgmma_macro_generator", "WGMMADescriptorParams"),
+    "WGMMATensorCoreIntrinEmitter": ("tilelang.cuda.intrinsics.macro.wgmma_macro_generator", "TensorCoreIntrinEmitter"),
+    "compute_gmma_descriptor": ("tilelang.cuda.intrinsics.macro.wgmma_macro_generator", "compute_gmma_descriptor"),
+    "WGSparseTensorCoreIntrinEmitter": ("tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator", "WGSparseTensorCoreIntrinEmitter"),
+}
+
+
+def __getattr__(name):
+    if name not in _HELPER_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    module, attribute = _HELPER_EXPORTS[name]
+    value = getattr(import_module(module), attribute)
+    globals()[name] = value
+    return value

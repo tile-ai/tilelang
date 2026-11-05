@@ -1,52 +1,49 @@
 import itertools
 
 import pytest
+import tvm_ffi
+from tvm_tirx import ir, sym, tirx
+from tvm_tirx.script.ir_builder import IRBuilder
 
 import tilelang.language as language
 import tilelang.testing
-from tilelang import tvm
-from tvm.script.ir_builder import IRBuilder
+from tilelang.testing.ir import collect_nodes
 
 
 def _make_persistent(domain, wave_size, **options):
-    worker = tvm.tirx.Var("worker", "int32")
+    worker = ir.Var("worker", ir.PrimType("int32"))
     with IRBuilder() as builder, language.Persistent(domain, wave_size, worker, **options) as coordinates:
         if len(domain) == 1:
             coordinates = [coordinates]
         for coordinate in coordinates:
             language.evaluate(coordinate)
 
-    bindings = {}
-    loops = []
-
-    def collect(statement):
-        if isinstance(statement, tvm.tirx.Bind):
-            bindings[statement.var] = statement.value
-        elif isinstance(statement, tvm.tirx.For):
-            loops.append(statement)
-
-    tvm.tirx.stmt_functor.post_order_visit(builder.get(), collect)
+    loops = collect_nodes(builder.get(), ir.For)
     assert len(loops) == 1
     loop = loops[0]
-    return loop, worker, tvm.tirx.stmt_functor.substitute(loop.body, bindings)
+    return loop, worker, loop.body
 
 
 def _trace_persistent(loop, worker, body, wave_size, parameters):
-    analyzer = tvm.arith.Analyzer()
+    analyzer = sym.Analyzer()
 
     def evaluate(expression, values):
-        result = analyzer.simplify(tvm.tirx.stmt_functor.substitute(expression, values))
-        assert isinstance(result, tvm.tirx.IntImm)
+        replaced = tvm_ffi.structural_map(expression, (ir.Var, lambda var: ir.const(values[var], var.ty.dtype) if var in values else var))
+        result = analyzer.simplify(replaced)
+        assert isinstance(result, ir.IntImm)
         return int(result)
 
     def execute(statement, values, coordinates):
-        if isinstance(statement, tvm.tirx.SeqStmt):
+        if isinstance(statement, ir.SeqStmt):
             return any(execute(child, values, coordinates) for child in statement.seq)
-        if isinstance(statement, tvm.tirx.IfThenElse):
+        if isinstance(statement, ir.Bind):
+            values[statement.var] = evaluate(statement.value, values)
+            return False
+        if isinstance(statement, ir.If):
             branch = statement.then_case if evaluate(statement.condition, values) else statement.else_case
             return execute(branch, values, coordinates) if branch is not None else False
-        assert isinstance(statement, tvm.tirx.Evaluate)
-        if isinstance(statement.value, tvm.tirx.Call):
+        assert isinstance(statement, ir.Evaluate)
+        if isinstance(statement.value, ir.Call):
             assert statement.value.op.name == "tl.loop_break"
             return True
         coordinates.append(evaluate(statement.value, values))
@@ -54,8 +51,8 @@ def _trace_persistent(loop, worker, body, wave_size, parameters):
 
     events = []
     for worker_index in range(wave_size):
-        for wave_index in range(evaluate(loop.extent, parameters)):
-            values = {**parameters, worker: worker_index, loop.loop_var: wave_index}
+        for wave_index in range(evaluate(loop.end - loop.begin, parameters)):
+            values = {**parameters, worker: worker_index, loop.var: wave_index}
             coordinates = []
             if execute(body, values, coordinates):
                 assert not coordinates
@@ -73,12 +70,12 @@ def test_persistent_group_order_and_tail_coverage(domain, wave_size, group_size,
     options = {} if group_size is None else {"group_size": group_size}
     parameters = {}
     if symbolic:
-        extents = [tvm.tirx.Var(f"extent_{axis}", "int32") for axis in range(len(domain))]
-        workers = tvm.tirx.Var("workers", "int32")
+        extents = [ir.Var(f"extent_{axis}", ir.PrimType("int32")) for axis in range(len(domain))]
+        workers = ir.Var("workers", ir.PrimType("int32"))
         parameters = dict(zip(extents, domain))
         parameters[workers] = wave_size
         if group_size is not None:
-            group = tvm.tirx.Var("group", "int32")
+            group = ir.Var("group", ir.PrimType("int32"))
             parameters[group] = group_size
             options["group_size"] = group
     else:
@@ -103,16 +100,13 @@ def test_persistent_group_order_and_tail_coverage(domain, wave_size, group_size,
 
 @pytest.mark.parametrize("wave_size", [1, 5, 128, None])
 def test_persistent_guards_body_without_loop_break(wave_size):
-    workers = tvm.tirx.Var("workers", "int32") if wave_size is None else wave_size
+    workers = ir.Var("workers", ir.PrimType("int32")) if wave_size is None else wave_size
     _, _, body = _make_persistent([2, 3, 10], workers, group_size=3, num_stages=2)
 
-    def check_no_loop_break(node):
-        if isinstance(node, tvm.tirx.Call):
-            assert node.op.name != "tl.loop_break"
-
-    tvm.tirx.stmt_functor.post_order_visit(body, check_no_loop_break)
-    assert isinstance(body, tvm.tirx.IfThenElse)
-    assert body.else_case is None
+    assert not collect_nodes(body, ir.Break)
+    assert all(node.op.name != "tl.loop_break" for node in collect_nodes(body, ir.Call))
+    assert isinstance(body.seq[-1], ir.If)
+    assert body.seq[-1].else_case is None
 
 
 @pytest.mark.parametrize("domain", [(2, 4), (3, 10), (2, 3, 10)])
@@ -137,6 +131,37 @@ def test_persistent_preserves_pipeline_annotations(num_stages, annotated_stages)
     else:
         assert int(loop.annotations["num_stages"]) == expected_stages
     assert annotations == original
+
+
+@pytest.mark.parametrize("index_dtype", ["int32", "int64"])
+def test_persistent_coordinates_are_defined_inside_the_wave_loop(index_dtype):
+    extent = ir.Var("extent", ir.PrimType(index_dtype))
+
+    @language.prim_func
+    def kernel(A: language.Tensor((extent, 10), "int32"), worker: language.int32):
+        for row, column in language.Persistent([extent, 10], 3, worker, group_size=3):
+            A[row, column] = row + column
+
+    assert tirx.analysis.check_well_formed(kernel)
+    assert not tirx.analysis.undefined_vars(kernel)
+    loops = collect_nodes(kernel, ir.For)
+    assert len(loops) == 1
+    binds = collect_nodes(loops[0].body, ir.Bind)
+    assert len(binds) >= 2
+    assert str(binds[0].var.ty.dtype) == index_dtype
+    assert str(binds[1].var.ty.dtype) == "int32"
+
+
+@pytest.mark.parametrize("domain", [(0,), (0, 10), (4, 0)])
+def test_persistent_empty_domain_has_no_work(domain):
+    loop, worker, body = _make_persistent(list(domain), 3)
+    assert _trace_persistent(loop, worker, body, 3, {}) == []
+
+
+@pytest.mark.parametrize("domain,wave_size", [([], 1), ([1], 0), ([1], -1), ([-1, 4], 2)])
+def test_persistent_rejects_invalid_static_domains(domain, wave_size):
+    with IRBuilder(), pytest.raises(ValueError):
+        language.Persistent(domain, wave_size, 0)
 
 
 if __name__ == "__main__":

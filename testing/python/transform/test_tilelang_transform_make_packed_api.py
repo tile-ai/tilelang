@@ -19,54 +19,58 @@
 import pytest
 import numpy as np
 import tilelang
-from tilelang import tvm as tvm
-import tvm
+from tvm_tirx.script import tirx as T
 import tilelang.testing
-from tvm import tirx
-from tvm.script import tirx as T, ir as I
+import tvm_tirx as tvm
+import tvm_ffi
+from tvm_tirx import ir, tirx
+from tvm_tirx.script import ir as I
+from tilelang.testing.ir import collect_nodes, collect_calls
+from tilelang.testing.packed import compile_packed_function
 
 
 def _find_assignment(stmt, var_name):
-    result = None
-
-    def _visitor(node):
-        nonlocal result
-        if isinstance(node, tvm.tirx.Bind) and node.var.name == var_name:
-            result = node
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, _visitor)
-    return result
+    return next((node for node in collect_nodes(stmt, ir.Bind) if node.var.name == var_name), None)
 
 
 def _find_compute_scope(func):
-    result = None
-
-    def _visitor(stmt):
-        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "compute_scope":
-            nonlocal result
-            result = stmt
-
-    tirx.stmt_functor.post_order_visit(func.body, _visitor)
-
-    return result
+    return next((node for node in collect_nodes(func, ir.RegionStmt) if node.op.name == "tirx.compute_scope"), None)
 
 
 def _collect_nodes(stmt, node_type):
-    nodes = []
+    return collect_nodes(stmt, node_type)
 
-    def _visitor(node):
-        if isinstance(node, node_type):
-            nodes.append(node)
 
-    tvm.tirx.stmt_functor.post_order_visit(stmt, _visitor)
-    return nodes
+def _marked_assume(condition, message):
+    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")(
+        {
+            "node": condition,
+            "key": "tl.assume_requires_runtime_check",
+            "value": message,
+        }
+    )
+    return ir.RegionStmt(
+        tvm.ir.Op.get("tl.attr"),
+        [payload],
+        [],
+        {"schema_version": 1, "annotation_schema": schema},
+        [ir.Evaluate(ir.Call("prim.assume", [condition], ty="void"))],
+        [],
+    )
+
+
+def _prepare_packed(function):
+    # The native pipeline materializes checked markers at the host/device
+    # boundary, before the packed binder. Keep that explicit pass contract.
+    module = tilelang.transform.SplitHostDevice()(tvm.IRModule.from_expr(function))
+    return tilelang.transform.MakePackedAPI()(module)
 
 
 @pytest.mark.parametrize("use_global_symbol", [False])
 def test_no_op_when_global_symbol_is_absent(use_global_symbol):
     func_attr = {"target": tvm.target.Target("llvm", host="llvm")}
 
-    @T.prim_func(private=True)
+    @T.function(private=True)
     def before():
         T.func_attr(func_attr)
         T.evaluate(0)
@@ -93,8 +97,8 @@ def test_target_host_removed():
 
     @I.ir_module
     class before:
-        @T.prim_func
-        def main(A: T.Buffer(1, "float32")):
+        @T.function
+        def main(A: T.Tensor((1,), "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("cuda", host=host)})
             T.evaluate(0)
 
@@ -114,14 +118,14 @@ def test_internal_subroutine_call():
 
     @I.ir_module
     class before:
-        @T.prim_func
-        def main(A: T.Buffer(1, "float32")):
+        @T.function
+        def main(A: T.Tensor((1,), "float32")):
             T.func_attr({"target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
         # this test fails if it's made public
-        @T.prim_func(private=True)
-        def subroutine(A_data: T.handle("float32")):
+        @T.function(private=True)
+        def subroutine(A_data: T.Ptr("float32")):
             T.func_attr({"target": T.target("llvm")})
             T.evaluate(A_data)
 
@@ -129,72 +133,48 @@ def test_internal_subroutine_call():
     tvm.ir.assert_structural_equal(before["subroutine"], after["subroutine"])
 
     compute_scope = _find_compute_scope(after["main"])
-    subroutine_call_op = compute_scope.body.value.op
+    subroutine_call_op = next(call.op for call in collect_nodes(compute_scope, ir.Call) if isinstance(call.op, tvm.ir.GlobalVar))
     assert isinstance(subroutine_call_op, tvm.ir.GlobalVar), (
-        f"The main function's CallNode should use the subroutine's GLobalVar as the operation, "
+        f"The main function's CallObj should use the subroutine's GLobalVar as the operation, "
         f"but instead has an operation of type {subroutine_call_op}"
     )
 
 
 def test_assume_requires_runtime_check_is_lowered_to_assert():
-    n = tirx.Var("n", "int32")
+    n = ir.Var("n", "int32")
     condition = n % 4 == 0
     message = "n must be divisible by 4"
-    body = tirx.AttrStmt(
-        condition,
-        "tl.assume",
-        tirx.StringImm(message),
-        tirx.Evaluate(0),
-    )
-    body = tirx.AttrStmt(
-        condition,
-        "tl.assume_requires_runtime_check",
-        tirx.StringImm(message),
-        body,
-    )
-    body = tirx.AttrStmt(
-        condition,
-        "tl.assume",
-        tirx.StringImm("compiler-generated assumption"),
-        body,
-    )
-    before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
+    # A checked user fact becomes available after its check. Native assume is
+    # a sequential operation, so a duplicate optimizer-only fact follows it.
+    body = [_marked_assume(condition, message), ir.Evaluate(ir.Call("prim.assume", [condition], ty="void"))]
+    before = tirx.Function([n], body, ir.PrimType("void")).with_attr("global_symbol", "main")
     before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
-
-    after_mod = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))
+    after_mod = _prepare_packed(before)
     after = after_mod["main"]
-    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume_requires_runtime_check"]
-    assert [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
-
-    matching_asserts = [
-        stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
-    ]
-    assert len(matching_asserts) == 1
-    tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
-
-    simplified = tilelang.transform.Simplify()(after_mod)["main"]
-    matching_asserts = [
-        stmt for stmt in _collect_nodes(simplified.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
-    ]
-    assert len(matching_asserts) == 1
-    tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
+    assert not [stmt for stmt in collect_nodes(after, ir.RegionStmt) if stmt.op.name == "tl.attr"]
+    assert collect_calls(after, op="prim.assume")
+    for function in [after, tilelang.transform.Simplify()(after_mod)["main"]]:
+        matching_asserts = [
+            stmt
+            for stmt in collect_nodes(function, ir.AssertStmt)
+            if any(isinstance(part, ir.StringImm) and part.value == message for part in stmt.message_parts)
+        ]
+        assert len(matching_asserts) == 1
+        tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
 
 
 def test_optimizer_only_assume_is_not_lowered_to_assert():
-    n = tirx.Var("n", "int32")
-    message = "compiler-generated shape assumption"
-    body = tirx.AttrStmt(
-        n > 0,
-        "tl.assume",
-        tirx.StringImm(message),
-        tirx.Evaluate(0),
-    )
-    before = tirx.PrimFunc([n], body).with_attr("global_symbol", "main")
-    before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
-
-    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
-    assert [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
-    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)]
+    n = ir.Var("n", "int32")
+    condition = n > 0
+    before = tirx.Function([n], [ir.Evaluate(ir.Call("prim.assume", [condition], ty="void"))], ir.PrimType("void"))
+    before = before.with_attr("global_symbol", "main").with_attr("target", tvm.target.Target("cuda", host="llvm"))
+    after = _prepare_packed(before)["main"]
+    assert collect_calls(after, op="prim.assume")
+    assert not [
+        stmt
+        for stmt in collect_nodes(after, ir.AssertStmt)
+        if any(isinstance(part, ir.StringImm) and part.value.startswith("Assume:") for part in stmt.message_parts)
+    ]
 
 
 def test_subroutine_call_to_externally_visible_subroutine():
@@ -208,13 +188,13 @@ def test_subroutine_call_to_externally_visible_subroutine():
 
     @I.ir_module
     class before:
-        @T.prim_func
-        def main(A: T.Buffer(1, "float32")):
+        @T.function
+        def main(A: T.Tensor((1,), "float32")):
             T.func_attr({"global_symbol": "main", "target": T.target("llvm", host="llvm")})
             before.subroutine(A.data)
 
-        @T.prim_func
-        def subroutine(A_data: T.handle("float32")):
+        @T.function
+        def subroutine(A_data: T.Ptr("float32")):
             T.func_attr({"global_symbol": "subroutine", "target": T.target("llvm", host="llvm")})
             T.evaluate(A_data)
 
@@ -225,79 +205,75 @@ def test_subroutine_call_to_externally_visible_subroutine():
     subroutine_compute_scope = _find_compute_scope(after["subroutine"])
     assert subroutine_compute_scope is not None
 
-    subroutine_call_op = main_compute_scope.body.value.op
-    assert isinstance(subroutine_call_op, tvm.ir.Op) and subroutine_call_op.name == "tirx.tvm_call_cpacked", (
-        f"The main function's CallNode should be lowered to the builtin 'tirx.tvm_call_cpacked', "
+    subroutine_call_op = collect_calls(main_compute_scope, op="tirx.call_cpacked")[0].op
+    assert isinstance(subroutine_call_op, tvm.ir.Op) and subroutine_call_op.name == "tirx.call_cpacked", (
+        f"The main function's CallObj should be lowered to the builtin 'tirx.call_cpacked', "
         f"but instead has an operation of type {subroutine_call_op}"
     )
 
 
-@tilelang.testing.requires_llvm
 def test_function_call_with_wrong_argument_count():
     """Argument counts must be checked before accessing the type codes"""
 
-    @T.prim_func
+    @T.function
     def func(
-        A: T.Buffer([16, 16], "int32"),
-        B: T.Buffer([16, 16], "int32"),
-        C: T.Buffer([16, 16], "int32"),
-        D: T.Buffer([16, 16], "int32"),
+        A: T.Tensor([16, 16], "int32"),
+        B: T.Tensor([16, 16], "int32"),
+        C: T.Tensor([16, 16], "int32"),
+        D: T.Tensor([16, 16], "int32"),
     ):
         pass
 
-    built = tvm.compile(func, target="llvm")
+    built = compile_packed_function(func)
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(TypeError, match="Expected 4 arguments"):
         built()
 
 
-@tilelang.testing.requires_llvm
 def test_function_call_with_wrong_type_code():
     """Type codes must be checked before accessing the arguments"""
 
-    @T.prim_func
-    def func(A: T.Buffer([16, 16], "int32")):
+    @T.function
+    def func(A: T.Tensor([16, 16], "int32")):
         pass
 
-    built = tvm.compile(func, target="llvm")
+    built = compile_packed_function(func)
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError, match="Mismatched type"):
         built(0)
 
 
-@tilelang.testing.requires_llvm
 def test_function_call_with_null_data_pointer():
     """The data pointer must be checked before accessing the array"""
 
-    @T.prim_func
-    def func(A: T.Buffer([16, 16], "int32"), B: T.Buffer([16, 16], "int32")):
+    @T.function
+    def func(A: T.Tensor([16, 16], "int32"), B: T.Tensor([16, 16], "int32")):
         for i, j in T.grid(16, 16):
             B[i, j] = A[i, j]
 
-    built = tvm.compile(func, target="llvm")
+    built = compile_packed_function(func)
 
-    A = tvm.nd.array(np.zeros([16], dtype="int32"))
-    B = tvm.nd.empty([16, 16], "int32", tvm.cpu())
+    A = tvm.runtime.tensor(np.zeros([16], dtype="int32"))
+    B = tvm.runtime.empty([16, 16], "int32", tvm.cpu())
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError, match="ndim"):
         built(A, B)
 
 
-@tilelang.testing.requires_llvm
 def test_function_call_with_wrong_dimensionality():
     """The dimensionality must be checked before validating the shape"""
 
-    @T.prim_func
-    def func(A: T.Buffer([16, 16], "int32"), B: T.Buffer([16, 16], "int32")):
+    @T.function
+    def func(A: T.Tensor([16, 16], "int32"), B: T.Tensor([16, 16], "int32")):
         for i, j in T.grid(16, 16):
             B[i, j] = A[i, j]
 
-    built = tvm.compile(func, target="llvm")
+    built = compile_packed_function(func)
 
-    A = tvm.nd.array(np.zeros([16], dtype="int32"))
-    B = tvm.nd.empty([16], "int32", tvm.cpu())
+    A = tvm.runtime.tensor(np.zeros([16], dtype="int32"))
+    B = tvm.runtime.empty([16], "int32", tvm.cpu())
 
-    with pytest.raises(tvm.TVMError):
+    with pytest.raises(RuntimeError, match="ndim"):
         built(A, B)
 
 

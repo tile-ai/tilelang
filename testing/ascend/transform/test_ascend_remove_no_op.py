@@ -1,22 +1,27 @@
+from tvm_tirx import ir
+from testing.ascend._ir import nodes, tensor
 import tilelang
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from tvm.script import tirx as T
+from tvm_tirx import tirx
+import tilelang.language as T
 
 
 def test_ascend_remove_no_op_preserves_handle_store():
-    pointer_type = tvm.ir.PointerType(tvm.ir.PrimType("handle"), "local.var")
-    data = tirx.Var("pointer", pointer_type)
-    value = tirx.Var("value", "handle")
-    buffer = tirx.decl_buffer((1,), "handle", data=data, scope="local.var")
-    store = tirx.BufferStore(buffer, value, [0])
-    mod = tvm.IRModule.from_expr(tirx.PrimFunc([data, value], store))
+    # Native tensors carry primitive elements. Preserve the externally visible
+    # handle store through its explicit 64-bit pointer representation.
+    pointer_type = ir.PtrType(ir.PrimType("uint64"), "local.var")
+    data = ir.Var("pointer", pointer_type)
+    value = ir.Var("value", ir.PtrType(ir.PrimType("void")))
+    buffer = tensor((1,), "uint64", scope="local.var")
+    declare = ir.Bind(buffer, ir.Call("tirx.decl_tensor", [data], ty_args=[buffer.ty]))
+    store = ir.TensorStore(buffer, [0], tirx.reinterpret(value, ty="uint64"))
+    mod = tvm.IRModule.from_expr(tirx.Function([data, value], [declare, store]))
 
     after = transform.AscendRemoveNoOp()(mod)["main"]
 
-    assert isinstance(after.body, tirx.BufferStore)
-    tvm.ir.assert_structural_equal(after.body, store)
+    (result,) = nodes(after.body, ir.TensorStore)
+    tvm.ir.assert_structural_equal(result, store)
 
 
 def test_ascend_remove_no_op_removes_numeric_self_store():
@@ -27,7 +32,7 @@ def test_ascend_remove_no_op_removes_numeric_self_store():
     mod = tvm.IRModule.from_expr(before)
     after = transform.AscendRemoveNoOp()(mod)["main"]
 
-    assert isinstance(after.body, tirx.Evaluate)
+    assert isinstance(after.body, ir.SeqStmt) and len(after.body) == 0
 
 
 if __name__ == "__main__":

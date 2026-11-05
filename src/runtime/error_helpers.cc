@@ -4,7 +4,8 @@
 #include "error_helpers.h"
 #include "support/check.h"
 
-#include <tvm/runtime/data_type.h>
+#include <tvm/ffi/dtype.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/device_api.h>
 
 #include <sstream>
@@ -21,12 +22,12 @@ static int DTypeMismatch(const String &kernel_name, const String &buffer_name,
                          int64_t actual_code, int64_t actual_bits,
                          int64_t actual_lanes, int64_t expect_code,
                          int64_t expect_bits, int64_t expect_lanes) {
-  tvm::runtime::DataType actual(static_cast<int>(actual_code),
-                                static_cast<int>(actual_bits),
-                                static_cast<int>(actual_lanes));
-  tvm::runtime::DataType expect(static_cast<int>(expect_code),
-                                static_cast<int>(expect_bits),
-                                static_cast<int>(expect_lanes));
+  DLDataType actual{static_cast<uint8_t>(actual_code),
+                    static_cast<uint8_t>(actual_bits),
+                    static_cast<uint16_t>(actual_lanes)};
+  DLDataType expect{static_cast<uint8_t>(expect_code),
+                    static_cast<uint8_t>(expect_bits),
+                    static_cast<uint16_t>(expect_lanes)};
   std::ostringstream os;
   os << "kernel " << std::string(kernel_name) << " input "
      << std::string(buffer_name) << " dtype expected " << expect << ", but got "
@@ -40,18 +41,21 @@ static int DTypeMismatch(const String &kernel_name, const String &buffer_name,
 static int DTypeMismatchNoNames(int64_t actual_code, int64_t actual_bits,
                                 int64_t actual_lanes, int64_t expect_code,
                                 int64_t expect_bits, int64_t expect_lanes) {
-  tvm::runtime::DataType actual(static_cast<int>(actual_code),
-                                static_cast<int>(actual_bits),
-                                static_cast<int>(actual_lanes));
-  tvm::runtime::DataType expect(static_cast<int>(expect_code),
-                                static_cast<int>(expect_bits),
-                                static_cast<int>(expect_lanes));
+  DLDataType actual{static_cast<uint8_t>(actual_code),
+                    static_cast<uint8_t>(actual_bits),
+                    static_cast<uint16_t>(actual_lanes)};
+  DLDataType expect{static_cast<uint8_t>(expect_code),
+                    static_cast<uint8_t>(expect_bits),
+                    static_cast<uint16_t>(expect_lanes)};
   std::ostringstream os;
   os << "dtype mismatch: expected " << expect << ", but got " << actual;
   TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
   return -1;
 }
 
+// Transfer the error raised in the FFI safe-call TLS. EnvErrorAlreadySet
+// is only for an error already set in the Python interpreter, which these
+// native helpers have not touched.
 // Register packed versions, following the design in runtime.cc
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
@@ -79,7 +83,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                         actual_lanes, expect_code, expect_bits, expect_lanes);
     // Provide a return value for completeness, then signal the error
     *ret = -1;
-    throw EnvErrorAlreadySet();
+    TVM_FFI_CHECK_SAFE_CALL(-1);
   });
 
   // kernel, buffer, expect:int64, got:int64
@@ -96,7 +100,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
        << " ndim expected " << expect << ", but got " << got;
     TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
     *ret = -1;
-    throw EnvErrorAlreadySet();
+    TVM_FFI_CHECK_SAFE_CALL(-1);
   });
 
   // kernel, buffer, expect:int64, got:int64
@@ -114,7 +118,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            << ", but got " << got;
         TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
         *ret = -1;
-        throw EnvErrorAlreadySet();
+        TVM_FFI_CHECK_SAFE_CALL(-1);
       });
 
   // kernel, buffer, expect:int64, got:int64
@@ -136,7 +140,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            << ", but got " << got_str;
         TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
         *ret = -1;
-        throw EnvErrorAlreadySet();
+        TVM_FFI_CHECK_SAFE_CALL(-1);
       });
 
   // kernel, buffer, field:String
@@ -151,7 +155,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
        << ' ' << std::string(field) << " expected non-NULL, but got NULL";
     TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
     *ret = -1;
-    throw EnvErrorAlreadySet();
+    TVM_FFI_CHECK_SAFE_CALL(-1);
   });
 
   // kernel, buffer, field:String, expect:int64, got:int64
@@ -170,7 +174,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            << expect << ", but got " << got;
         TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
         *ret = -1;
-        throw EnvErrorAlreadySet();
+        TVM_FFI_CHECK_SAFE_CALL(-1);
       });
 
   // kernel, buffer, field:String [, reason:String]
@@ -195,7 +199,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
         }
         TVMFFIErrorSetRaisedFromCStr("RuntimeError", os.str().c_str());
         *ret = -1;
-        throw EnvErrorAlreadySet();
+        TVM_FFI_CHECK_SAFE_CALL(-1);
       });
 
   // Legacy typed registrations for backward compatibility

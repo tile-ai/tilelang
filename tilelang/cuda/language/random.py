@@ -1,4 +1,4 @@
-from tvm import tirx
+from tilelang.language import _native as tirx
 import tilelang.language.common as T
 
 __all__ = ["rng_init", "rng_rand", "rng_rand_float"]
@@ -36,7 +36,7 @@ def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> t
     else:
         seq = tirx.convert(seq)
     off = tirx.convert(off)
-    return tirx.call_intrin("void", tirx.op.Op.get("tl.rng_init"), seed, seq, off, generator)
+    return tirx.call_intrin("void", tirx.Op.get("tl.rng_init"), seed, seq, off, generator)
 
 
 def rng_rand() -> tirx.PrimExpr:
@@ -47,7 +47,7 @@ def rng_rand() -> tirx.PrimExpr:
     random_value : PrimExpr
         A 32-bit unsigned random integer.
     """
-    return tirx.call_intrin("uint32", tirx.op.Op.get("tl.rng_rand"))
+    return tirx.call_intrin("uint32", tirx.Op.get("tl.rng_rand"))
 
 
 def rng_rand_float(bit=32, dist="uniform") -> tirx.PrimExpr:
@@ -67,4 +67,4 @@ def rng_rand_float(bit=32, dist="uniform") -> tirx.PrimExpr:
     """
     assert bit in [32, 64]
     assert dist in ["uniform", "normal"]
-    return tirx.call_intrin("float" + str(bit), tirx.op.Op.get("tl.rng_rand_float"), dist)
+    return tirx.call_intrin("float" + str(bit), tirx.Op.get("tl.rng_rand_float"), dist)

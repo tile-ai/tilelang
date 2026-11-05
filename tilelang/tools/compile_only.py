@@ -140,16 +140,16 @@ def load_example(path: str) -> ModuleType:
 
 
 def discover_prim_func(module: ModuleType):
-    """Return the first ``@tilelang.jit`` / PrimFunc in module order (D2, 古法: one piece)."""
+    """Return the first JIT kernel or native Function in module definition order."""
     from tilelang.jit import JITImpl
-    from tilelang.language.eager import PrimFunc
+    from tvm_tirx.tirx import Function
 
     for obj in vars(module).values():
         if isinstance(obj, JITImpl):
             return obj.get_tir()
-        if isinstance(obj, PrimFunc):
+        if isinstance(obj, Function):
             return obj
-    raise RuntimeError("no @tilelang.jit kernel or PrimFunc found")
+    raise RuntimeError("no @tilelang.jit kernel or Function found")
 
 
 def _pass_context_config() -> dict:
@@ -171,8 +171,8 @@ def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -
 
     Parameters
     ----------
-    func : PrimFunc or IRModule
-        Kernel from ``JITImpl.get_tir()`` or a PrimFunc. No tensor args.
+    func : Function or IRModule
+        Kernel from ``JITImpl.get_tir()`` or a native Function. No tensor args.
     target : str or dict, optional
         Explicit target. Strings go through :func:`resolve_target`. Default ``c``.
 
@@ -182,7 +182,7 @@ def compile_kernel_source(func, target: str | dict[str, str] = DEFAULT_TARGET) -
         Non-empty ``CompiledArtifact.kernel_source`` from existing ``lower()``.
     """
     import tilelang
-    from tvm.target import Target
+    from tvm_tirx.target import Target
 
     if isinstance(target, str):
         target = resolve_target(target)

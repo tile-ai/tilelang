@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import warnings
 
-from tvm import tirx
+from tilelang.language import _native as tirx
+from tvm_tirx.ir import Op
 
 import tilelang.language as T
 from tilelang.cuda.target import check_cuda_availability
@@ -27,9 +28,9 @@ def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
     if _IS_CUDA_AVAILABLE:
         if no_stack_info:
             if msg == "":
-                T.call_intrin("void", tirx.op.Op.get("tl.device_assert"), condition)
+                T.call_intrin("void", Op.get("tl.device_assert"), condition)
             else:
                 warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
-                T.call_intrin("void", tirx.op.Op.get("tl.device_assert_with_msg"), condition, msg)
+                T.call_intrin("void", Op.get("tl.device_assert_with_msg"), condition, msg)
         else:
-            T.call_intrin("void", tirx.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
+            T.call_intrin("void", Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))

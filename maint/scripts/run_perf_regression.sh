@@ -28,6 +28,7 @@
 #   REGRESSION_THRESHOLD Speedup threshold for FAIL_ON_REGRESSION (default: 1.0)
 #   FAIL_ON_MISSING      Exit non-zero if one side is missing results when set to 1
 #   CMAKE_GENERATOR      CMake generator for package builds (default: Ninja)
+#   CMAKE_BUILD_PARALLEL_LEVEL  Native bundle build parallelism (default: 4)
 #   INHERIT_PYTHONPATH   Keep caller PYTHONPATH when set to 1 (default: 0)
 #   EXTRA_PYTHONPATH     PYTHONPATH to expose to regression/compare processes
 
@@ -241,7 +242,7 @@ wheel_cache_metadata() {
     local repo_dir="$1"
     local python_bin="$2"
 
-    printf 'schema=tilelang-perf-wheel-cache-v1\n'
+    printf 'schema=tilelang-perf-wheel-cache-v2\n'
     printf 'source_key=%s\n' "$(repo_source_key "${repo_dir}")"
     "${python_bin}" - <<'PY'
 import platform
@@ -278,6 +279,20 @@ build_wheel_to_dir() {
     rm -rf "${build_dir}"
     mkdir -p "$(dirname "${build_dir}")" "${wheel_dir}"
 
+    if [[ -f "${repo_dir}/tilelang_packaging/compiler_manifest.py" ]]; then
+        if ! command -v uv >/dev/null 2>&1; then
+            echo "Building the matched FFI/compiler/TileLang bundle requires uv." >&2
+            exit 1
+        fi
+        local stage_dir="${build_dir}/native-stage"
+        "${venv_dir}/bin/python" "${repo_dir}/maint/scripts/build_native_artifacts.py" stage \
+            --source "${repo_dir}" --destination "${stage_dir}"
+        "${venv_dir}/bin/python" "${repo_dir}/maint/scripts/build_native_artifacts.py" build \
+            --stage "${stage_dir}" --output "${wheel_dir}" --python "${venv_dir}/bin/python" \
+            --frontend uv --wheel-only --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+        return
+    fi
+
     if command -v uv >/dev/null 2>&1; then
         uv build -v --wheel --python "${venv_dir}/bin/python" -C "build-dir=${build_dir}" --out-dir "${wheel_dir}" "${repo_dir}"
     else
@@ -295,9 +310,9 @@ install_wheel_file() {
     fi
 
     if command -v uv >/dev/null 2>&1; then
-        uv pip install -v "${wheel_file}"
+        uv pip install --python "${venv_dir}/bin/python" -v --find-links "$(dirname "${wheel_file}")" "${wheel_file}"
     else
-        "${venv_dir}/bin/python" -m pip install -v "${wheel_file}"
+        "${venv_dir}/bin/python" -m pip install -v --find-links "$(dirname "${wheel_file}")" "${wheel_file}"
     fi
 }
 
@@ -313,7 +328,7 @@ install_repo_wheel() {
         rm -rf "${uncached_dir}"
         build_wheel_to_dir "${repo_dir}" "${venv_dir}" "${build_dir}" "${uncached_dir}"
         local uncached_wheel
-        uncached_wheel="$(find "${uncached_dir}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+        uncached_wheel="$(find "${uncached_dir}" -maxdepth 1 -type f -name 'tilelang-*.whl' | sort | tail -n 1)"
         install_wheel_file "${venv_dir}" "${uncached_wheel}"
         return
     fi
@@ -324,7 +339,7 @@ install_repo_wheel() {
         rm -rf "${untracked_dir}"
         build_wheel_to_dir "${repo_dir}" "${venv_dir}" "${build_dir}" "${untracked_dir}"
         local untracked_wheel
-        untracked_wheel="$(find "${untracked_dir}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+        untracked_wheel="$(find "${untracked_dir}" -maxdepth 1 -type f -name 'tilelang-*.whl' | sort | tail -n 1)"
         install_wheel_file "${venv_dir}" "${untracked_wheel}"
         return
     fi
@@ -335,7 +350,7 @@ install_repo_wheel() {
     cache_key="$(printf '%s\n' "${metadata}" | hash_stdin | cut -c 1-24)"
     local cache_entry="${WHEEL_CACHE_DIR%/}/${cache_key}"
     local cached_wheel
-    cached_wheel="$(find "${cache_entry}" -maxdepth 1 -type f -name '*.whl' 2>/dev/null | sort | tail -n 1 || true)"
+    cached_wheel="$(find "${cache_entry}" -maxdepth 1 -type f -name 'tilelang-*.whl' 2>/dev/null | sort | tail -n 1 || true)"
 
     mkdir -p "${WHEEL_CACHE_DIR}"
     echo "Wheel cache key for ${label}: ${cache_key}"
@@ -355,7 +370,7 @@ install_repo_wheel() {
     build_wheel_to_dir "${repo_dir}" "${venv_dir}" "${build_dir}" "${tmp_entry}"
 
     local built_wheel
-    built_wheel="$(find "${tmp_entry}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+    built_wheel="$(find "${tmp_entry}" -maxdepth 1 -type f -name 'tilelang-*.whl' | sort | tail -n 1)"
     if [[ -z "${built_wheel}" || ! -f "${built_wheel}" ]]; then
         echo "No wheel produced for ${label}." >&2
         exit 1
@@ -363,7 +378,7 @@ install_repo_wheel() {
 
     rm -rf "${cache_entry}"
     mv "${tmp_entry}" "${cache_entry}"
-    cached_wheel="$(find "${cache_entry}" -maxdepth 1 -type f -name '*.whl' | sort | tail -n 1)"
+    cached_wheel="$(find "${cache_entry}" -maxdepth 1 -type f -name 'tilelang-*.whl' | sort | tail -n 1)"
     echo "Wheel cached for ${label}: ${cached_wheel}"
     install_wheel_file "${venv_dir}" "${cached_wheel}"
 }
@@ -400,12 +415,21 @@ install_repo() {
         source "${venv_dir}/bin/activate"
         export CMAKE_GENERATOR="${CMAKE_GENERATOR:-Ninja}"
         unset CMAKE_MAKE_PROGRAM
+        # Native requirements pin a locally built FFI revision. Install the
+        # complete matching bundle before asking the resolver for test extras.
+        local native_bundle=0
+        if [[ -f "${repo_dir}/tilelang_packaging/compiler_manifest.py" ]]; then
+            install_repo_wheel "${label}" "${repo_dir}" "${venv_dir}" "${build_dir}"
+            native_bundle=1
+        fi
         if command -v uv >/dev/null 2>&1; then
-            uv pip install -v -r requirements-test.txt
+            uv pip install --python "${venv_dir}/bin/python" -v -r requirements-test.txt
         else
             python -m pip install -v -r requirements-test.txt
         fi
-        install_repo_wheel "${label}" "${repo_dir}" "${venv_dir}" "${build_dir}"
+        if [[ "${native_bundle}" == "0" ]]; then
+            install_repo_wheel "${label}" "${repo_dir}" "${venv_dir}" "${build_dir}"
+        fi
     )
 }
 

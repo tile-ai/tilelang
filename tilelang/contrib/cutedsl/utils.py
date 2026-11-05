@@ -40,12 +40,15 @@ __all__ = [
     "Float4E2M1FN_unpack",
     "type_map",
     "bitcast",
+    "integer_divmod",
     "recast_ptr",
     "cast_tensor",
     "as_tensor_ssa",
     "as_rmem_tensor",
     "make_filled_tensor",
     "make_tensor_at_offset",
+    "load_tensor",
+    "store_tensor",
     "handle_add_byte_offset",
     "shuffle_elect",
     "sync_thread_partial",
@@ -352,6 +355,60 @@ def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
     return cute.make_tensor(ptr + offset, shape)
 
 
+def _needs_byte_memory_copy(tensor):
+    # A typed raw pointer does not imply naturally aligned storage. CuTe 4.7
+    # autovec_copy computes zero elements when its pointer alignment is less
+    # than one element, even when a valid scalar/byte copy is available.
+    return tensor.memspace != AddressSpace.rmem and tensor.iterator.max_alignment * 8 < tensor.element_type.width
+
+
+@dsl_user_op
+def load_tensor(tensor, *, loc=None, ip=None):
+    """Load without strengthening a raw pointer's declared alignment."""
+    if not _needs_byte_memory_copy(tensor):
+        return tensor.load(loc=loc, ip=ip)
+    if cute.is_static(tensor.shape) and cute.size(tensor.shape) == 1:
+        # A unit layout can be normalized to stride zero. Recasting that
+        # layout would expose only one byte, rather than the whole element.
+        byte_layout = cute.make_layout((tensor.element_type.width // 8,))
+        source_bytes = cute.make_tensor(cute.recast_ptr(tensor.iterator, dtype=Uint8), byte_layout)
+        temporary_bytes = cute.make_rmem_tensor(byte_layout, Uint8, loc=loc, ip=ip)
+        cute.basic_copy(source_bytes, temporary_bytes, loc=loc, ip=ip)
+        temporary = cute.recast_tensor(temporary_bytes, tensor.element_type, loc=loc, ip=ip)
+        return temporary.load(loc=loc, ip=ip)
+    temporary = cute.make_rmem_tensor_like(tensor, dtype=tensor.element_type, loc=loc, ip=ip)
+    # Byte views preserve the tensor layout and all payload bits. They also
+    # support physically unaligned addresses, rather than merely scalarizing
+    # a typed access whose natural alignment is still unknown.
+    source_bytes = cute.recast_tensor(tensor, Uint8, loc=loc, ip=ip)
+    target_bytes = cute.recast_tensor(temporary, Uint8, loc=loc, ip=ip)
+    cute.basic_copy(source_bytes, target_bytes, loc=loc, ip=ip)
+    return temporary.load(loc=loc, ip=ip)
+
+
+@dsl_user_op
+def store_tensor(tensor, value, *, loc=None, ip=None):
+    """Store a materialized value with the original pointer alignment."""
+    if not _needs_byte_memory_copy(tensor):
+        tensor.store(value, loc=loc, ip=ip)
+        return
+    if cute.is_static(tensor.shape) and cute.size(tensor.shape) == 1:
+        byte_layout = cute.make_layout((tensor.element_type.width // 8,))
+        target_bytes = cute.make_tensor(cute.recast_ptr(tensor.iterator, dtype=Uint8), byte_layout)
+        temporary_bytes = cute.make_rmem_tensor(byte_layout, Uint8, loc=loc, ip=ip)
+        temporary = cute.recast_tensor(temporary_bytes, tensor.element_type, loc=loc, ip=ip)
+        temporary.store(value, loc=loc, ip=ip)
+        cute.basic_copy(temporary_bytes, target_bytes, loc=loc, ip=ip)
+        return
+    temporary = cute.make_rmem_tensor_like(tensor, dtype=tensor.element_type, loc=loc, ip=ip)
+    # The native rmem store retains TensorSSA size/type validation and normal
+    # destination conversion before any byte is written to external memory.
+    temporary.store(value, loc=loc, ip=ip)
+    source_bytes = cute.recast_tensor(temporary, Uint8, loc=loc, ip=ip)
+    target_bytes = cute.recast_tensor(tensor, Uint8, loc=loc, ip=ip)
+    cute.basic_copy(source_bytes, target_bytes, loc=loc, ip=ip)
+
+
 def handle_add_byte_offset(handle, byte_offset):
     ptr = handle.iterator if hasattr(handle, "iterator") else handle
     byte_ptr = cute.recast_ptr(ptr, dtype=cutlass.Uint8)
@@ -413,3 +470,24 @@ def pack_half2(x, y):
         return Int32(packed_xy)
 
     return pack_half2_impl(x, y)
+
+
+@dsl_user_op
+def integer_divmod(lhs, rhs, dtype, mode, *, loc=None, ip=None):
+    """Preserve native signed/unsigned truncating and floor integer operations.
+
+    CuTe ``//`` floors while ``%`` truncates. Explicit MLIR operations keep
+    both native contracts distinct and preserve the declared integer width.
+    """
+    if mode not in ("truncdiv", "truncmod", "floordiv", "floormod"):
+        raise ValueError(f"Unknown integer operation: {mode}")
+    lhs = cast_tensor(lhs, dtype)
+    rhs = cast_tensor(rhs, dtype)
+    left, right = lhs.ir_value(), rhs.ir_value()
+    if mode == "truncmod":
+        result = (arith.remsi if dtype.signed else arith.remui)(left, right, loc=loc, ip=ip)
+    else:
+        divide = arith.divui if not dtype.signed else (arith.divsi if mode == "truncdiv" else arith.floordivsi)
+        quotient = divide(left, right, loc=loc, ip=ip)
+        result = arith.subi(left, arith.muli(quotient, right, loc=loc, ip=ip), loc=loc, ip=ip) if mode == "floormod" else quotient
+    return TensorSSA(result, lhs.shape, dtype) if isinstance(lhs, TensorSSA) else dtype(result)

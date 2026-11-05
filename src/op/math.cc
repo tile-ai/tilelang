@@ -1,141 +1,127 @@
 /*!
  * \file tl/op/math.cc
- * \brief Math operations.
- *
+ * \brief Native scalar/vector math contracts and backend intrinsic lowering.
  */
-
 #include "builtin.h"
+#include "ir/dtype.h"
+#include "native_intrinsic.h"
 #include "support/check.h"
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
 
-namespace tvm {
-namespace tl {
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/attr.h>
+
+#include <limits>
+
+namespace tvm::tl {
 using namespace tirx;
+using namespace prim;
 
-// Backends without a device helper expand clamp after vectorization using
-// ordinary TIR operations.
-PrimExpr LowerClamp(PrimExpr expr) {
-  Call call = Downcast<Call>(expr);
-  ICHECK_EQ(call->args.size(), 3);
-  DataType dtype = call->dtype;
-  Var x("clamp_x", dtype), lo("clamp_lo", dtype), hi("clamp_hi", dtype);
-  for (const PrimExpr &arg : call->args) {
-    ICHECK_EQ(arg.dtype(), dtype)
+// Bind each operand once before lane expansion, including side-effecting calls.
+PrimExpr LowerClamp(PrimExpr expression) {
+  const Call call = expression.as_or_throw<Call>();
+  const auto arguments = NativeIntrinsicOperands(call.get());
+  ICHECK_EQ(arguments.size(), 3U);
+  const PrimType dtype = expression.ty();
+  PrimVar x("clamp_x", dtype), lo("clamp_lo", dtype), hi("clamp_hi", dtype);
+  for (const Expr &argument : arguments) {
+    TVM_FFI_CHECK(argument.as_or_throw<PrimExpr>().ty() == dtype, TypeError)
         << "tl.clamp operands must have matching types";
   }
   ffi::Array<PrimExpr> results;
   for (int lane = 0; lane < dtype.lanes(); ++lane) {
-    auto extract = [&](const Var &var) -> PrimExpr {
-      return dtype.is_scalar() ? PrimExpr(var)
-                               : Shuffle::ExtractElement(var, lane);
+    auto extract = [&](const PrimVar &var) -> PrimExpr {
+      return dtype.IsScalar() ? PrimExpr(var)
+                              : Shuffle::ExtractElement(var, lane);
     };
     PrimExpr lane_x = extract(x), lane_lo = extract(lo), lane_hi = extract(hi);
     PrimExpr result = min(max(lane_x, lane_lo), lane_hi);
-    // Keep isnan opaque to the arithmetic simplifier. Low-precision formats
-    // need an fp32 predicate; float64 retains its native precision.
-    for (const PrimExpr &value : {lane_hi, lane_lo, lane_x}) {
-      PrimExpr check = dtype.element_of() == DataType::Float(64)
-                           ? value
-                           : cast(DataType::Float(32), value);
-      result = Select(isnan(check), value, result);
+    if (!dtype.MatchesCode(kDLInt, kDLUInt, kDLBool)) {
+      // Preserve the source rule's x, lo, hi NaN priority. Conversion to fp32
+      // only computes a predicate; the selected value keeps its original type.
+      for (const PrimExpr &value : {lane_hi, lane_lo, lane_x}) {
+        PrimExpr check = dtype.WithLanes(1) == PrimType::Float(64)
+                             ? value
+                             : cast(value, PrimType::Float(32));
+        result = Select(isnan(check), value, result);
+      }
     }
     results.push_back(result);
   }
-  PrimExpr result = dtype.is_scalar() ? results[0] : Shuffle::Concat(results);
-  // Binding all three arguments preserves single evaluation of side effects.
-  return Let(x, call->args[0],
-             Let(lo, call->args[1], Let(hi, call->args[2], result)));
+  PrimExpr result = dtype.IsScalar() ? results[0] : Shuffle::Concat(results);
+  return Let(x, arguments[0].as_or_throw<PrimExpr>(),
+             Let(lo, arguments[1].as_or_throw<PrimExpr>(),
+                 Let(hi, arguments[2].as_or_throw<PrimExpr>(), result)),
+             call->loc);
 }
 
-TVM_REGISTER_OP("tl.clamp")
-    .set_attr<FLowerIntrinsic>("ascend.FLowerIntrinsic", LowerClamp)
-    .set_attr<FLowerIntrinsic>("llvm.FLowerIntrinsic", LowerClamp)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", LowerClamp)
-    .set_attr<FLowerIntrinsic>("metal.FLowerIntrinsic", LowerClamp)
-    .set_attr<FLowerIntrinsic>("webgpu.FLowerIntrinsic", LowerClamp);
-
-PrimExpr pow_of_int_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  const ffi::Array<PrimExpr> &arg = call->args;
-  ICHECK_EQ(arg.size(), 2);
-  PrimExpr base = arg[0];
-  PrimExpr exp = arg[1];
-  ffi::String pow_of_int_name =
-      "tl::pow_of_int<" + std::to_string(exp.as<IntImmNode>()->value) + ">";
-  return tirx::Call(base.dtype(), tirx::builtin::call_extern(),
-                    {StringImm(pow_of_int_name), base});
+PrimExpr LowerPowOfInt(PrimExpr expression) {
+  const Call call = expression.as_or_throw<Call>();
+  const auto arguments = NativeIntrinsicOperands(call.get());
+  ICHECK_EQ(arguments.size(), 2U);
+  const auto exponent = arguments[1].as_or_throw<IntImm>()->value.as<int64_t>();
+  TVM_FFI_CHECK(exponent.has_value(), ValueError)
+      << "tl.pow_of_int exponent must be a representable integer constant";
+  PrimExpr base = arguments[0].as_or_throw<PrimExpr>();
+  ffi::String symbol = "tl::pow_of_int<" + std::to_string(*exponent) + ">";
+  return Call(expression.ty(), call_pure_extern_op(), {StringImm(symbol), base},
+              {}, {}, call->loc)
+      .as_or_throw<PrimExpr>();
 }
 
-TVM_REGISTER_OP("tl.pow_of_int")
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "pow_of_int")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", pow_of_int_op)
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", pow_of_int_op);
-
-PrimExpr infinity_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  const DataType &dtype = call->dtype;
-  ICHECK_EQ(dtype.lanes(), 1);
-
-  // NOTE(wt): Codegen for PrintConst:Inf will handle this based on dtype
-  if (dtype.is_float()) {
-    if (dtype.bits() == 64 || dtype.bits() == 32 || dtype.bits() == 16) {
-      return FloatImm(dtype, std::numeric_limits<float>::infinity(),
-                      call->span);
-    }
-  } else if (dtype.is_bfloat16()) {
-    return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
-  } else if (dtype.is_tfloat32()) {
-    return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
-  } else if (dtype.is_float8_e5m2()) {
-    // e5m2 is the only fp8 format with a representable inf; the rest keep
-    // the fatal below.
-    return FloatImm(dtype, std::numeric_limits<float>::infinity(), call->span);
-  }
-  LOG(FATAL) << "Cannot decide infinity for type " << dtype;
-  throw; // Unreachable, keeps compiler happy
+PrimExpr LowerInfinity(PrimExpr expression) {
+  const Call call = expression.as_or_throw<Call>();
+  const PrimType dtype = expression.ty();
+  TVM_FFI_CHECK(dtype.IsScalar(), ValueError)
+      << "tl.infinity requires a scalar result";
+  const bool supported =
+      (dtype.MatchesCode(kDLFloat) &&
+       (dtype.bits() == 16 || dtype.bits() == 32 || dtype.bits() == 64)) ||
+      dtype.MatchesElementType(kDLBfloat, 16) ||
+      dtype.MatchesCode(kDLFloat8_e5m2) || IsTensorFloat32(dtype);
+  TVM_FFI_CHECK(supported, ValueError)
+      << "Cannot decide infinity for type " << dtype;
+  return FloatImm(dtype, std::numeric_limits<double>::infinity(), call->loc);
 }
 
-TVM_REGISTER_OP("tl.infinity")
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<TScriptPrinterName>("TScriptPrinterName", "infinity")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", infinity_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", infinity_op)
-    .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", infinity_op);
-
-PrimExpr round_ties_away_from_zero_op(PrimExpr args) {
-  const CallNode *call = args.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 1);
-  const DataType &dtype = call->dtype;
-  if (dtype.is_int() || dtype.is_uint() || dtype.is_bool()) {
-    return call->args[0];
-  }
-  return tirx::Call(dtype, tirx::builtin::call_pure_extern(),
-                    {StringImm("tl::RoundTiesAwayFromZero"), call->args[0]},
-                    call->annotations);
+PrimExpr LowerRoundTiesAwayFromZero(PrimExpr expression) {
+  const Call call = expression.as_or_throw<Call>();
+  const auto arguments = NativeIntrinsicOperands(call.get());
+  ICHECK_EQ(arguments.size(), 1U);
+  if (expression.ty().MatchesCode(kDLInt, kDLUInt, kDLBool))
+    return arguments[0].as_or_throw<PrimExpr>();
+  return Call(expression.ty(), call_pure_extern_op(),
+              {StringImm("tl::RoundTiesAwayFromZero"), arguments[0]}, {}, {},
+              call->loc)
+      .as_or_throw<PrimExpr>();
 }
 
-TVM_REGISTER_OP("tl.round_ties_away_from_zero")
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<TVectorizable>("TVectorizable", true)
-    .set_attr<TScriptPrinterName>("TScriptPrinterName",
-                                  "round_ties_away_from_zero")
-    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
-                               round_ties_away_from_zero_op)
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               round_ties_away_from_zero_op);
+TVM_FFI_STATIC_INIT_BLOCK() {
+  OpDef clamp("tl.clamp");
+  for (const char *target : {"ascend", "llvm", "hip", "metal", "webgpu"})
+    clamp.set_attr<FLowerIntrinsic>(std::string(target) + ".FLowerIntrinsic",
+                                    LowerClamp);
 
-} // namespace tl
-} // namespace tvm
+  OpDef power("tl.pow_of_int");
+  DefineNativeIntrinsic(power, 2, 2, CallEffectKind::kPure,
+                        NativeIntrinsicResult::kPrimitive);
+  power.set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", LowerPowOfInt)
+      .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerPowOfInt);
+
+  OpDef infinity("tl.infinity");
+  DefineNativeIntrinsic(infinity, 1, 1, CallEffectKind::kPure,
+                        NativeIntrinsicResult::kPrimitive);
+  infinity.set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", LowerInfinity)
+      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic", LowerInfinity)
+      .set_attr<FLowerIntrinsic>("default.FLowerIntrinsic", LowerInfinity);
+
+  OpDef round("tl.round_ties_away_from_zero");
+  DefineNativeIntrinsic(round, 1, 1, CallEffectKind::kPure,
+                        NativeIntrinsicResult::kPrimitive, true);
+  round
+      .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic",
+                                 LowerRoundTiesAwayFromZero)
+      .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                                 LowerRoundTiesAwayFromZero);
+}
+} // namespace tvm::tl

@@ -1,142 +1,96 @@
 /*!
- * \file if_stmt_binding.cc
- * \brief Merge the If Stmt in SeqStmt
+ * \file merge_if_stmt.cc
+ * \brief Merge adjacent native If statements with replayable conditions.
  */
-
 #include "merge_if_stmt.h"
-#include "support/check.h"
 
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../op/builtin.h"
-
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
-using namespace ffi;
 
 class MergeIfStmtRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f) {
-    f.CopyOnWrite()->body = MergeIfStmtRewriter::Apply(f->body);
-    return f;
-  }
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
 
-  static Stmt Apply(Stmt stmt) {
-    auto rewriter = MergeIfStmtRewriter();
-    return rewriter(stmt);
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
+    auto recursive = StmtExprMutator::Mutate_(op, mode);
+    const bool recursive_unchanged = recursive.IsUnchanged();
+    auto sequence = std::move(recursive)
+                        .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                        .as_or_throw<SeqStmt>();
+    ffi::Array<Stmt> flat;
+    Flatten(sequence, &flat);
+    ffi::Array<Stmt> result;
+    bool merged = false;
+    for (const Stmt &statement : flat) {
+      const auto *next = statement.as<IfObj>();
+      const auto *previous =
+          result.empty() ? nullptr : result.back().as<IfObj>();
+      if (previous && next && !previous->else_case && !next->else_case &&
+          SideEffect(previous->condition) <= CallEffectKind::kPure &&
+          prim::ExprDeepEqual()(previous->condition, next->condition)) {
+        // Tensor loads and stateful calls cannot be coalesced: the first body
+        // may change the value observed by the second condition. Scalar SSA
+        // definitions have stable identity and remain safe to evaluate once.
+        ffi::Array<Stmt> bodies = previous->then_case->seq;
+        for (const Stmt &child : next->then_case->seq)
+          bodies.push_back(child);
+        SeqStmt body(bodies, previous->then_case->loc);
+        body = Mutate(body).ValueOrUnchanged(body).as_or_throw<SeqStmt>();
+        result.Set(result.size() - 1, If(previous->condition, std::move(body),
+                                         std::nullopt, previous->loc));
+        merged = true;
+      } else {
+        result.push_back(statement);
+      }
+    }
+    if (!merged && flat.size() == sequence->seq.size()) {
+      if (recursive_unchanged)
+        return ffi::Unchanged();
+      return sequence;
+    }
+    return SeqStmt(result, sequence->loc);
   }
 
 private:
-  MergeIfStmtRewriter() = default;
-
-  void FlattenAppend(const Stmt &s, Array<Stmt> *out) {
-    if (const auto *seq = s.as<SeqStmtNode>()) {
-      for (const Stmt &e : seq->seq) {
-        FlattenAppend(e, out);
-      }
+  static void Flatten(const Stmt &statement, ffi::Array<Stmt> *result) {
+    if (const auto *sequence = statement.as<SeqStmtObj>()) {
+      for (const Stmt &child : sequence->seq)
+        Flatten(child, result);
     } else {
-      out->push_back(s);
+      result->push_back(statement);
     }
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    // First, recursively flatten nested SeqStmt so that
-    //   SeqStmt{ if, SeqStmt{ if, SeqStmt{ if } } }
-    // becomes a single-level sequence of [if, if, if].
-    Array<Stmt> flat_seq;
-    for (const Stmt &stmt : op->seq) {
-      Stmt new_stmt = this->VisitStmt(stmt);
-      FlattenAppend(new_stmt, &flat_seq);
-    }
-
-    // Then, merge consecutive IfThenElse (without else) that share the same
-    // condition.
-    Array<Stmt> new_seq;
-    PrimExpr current_condition;
-    Span current_span;
-    Array<Stmt> current_if_bodies;
-
-    for (const Stmt &stmt : flat_seq) {
-      if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-        if (!if_node->else_case.defined()) {
-          if (current_condition.defined() &&
-              SideEffect(current_condition) <= CallEffectKind::kPure &&
-              ExprDeepEqual()(current_condition, if_node->condition)) {
-            current_if_bodies.push_back(if_node->then_case);
-            continue;
-          } else {
-            if (!current_if_bodies.empty()) {
-              auto if_stmt =
-                  IfThenElse(current_condition,
-                             current_if_bodies.size() == 1
-                                 ? current_if_bodies[0]
-                                 : this->VisitStmt(SeqStmt(current_if_bodies)),
-                             Stmt(), current_span);
-              new_seq.push_back(if_stmt);
-              current_if_bodies.clear();
-            }
-
-            current_condition = if_node->condition;
-            current_span = if_node->span;
-            current_if_bodies.push_back(if_node->then_case);
-            continue;
-          }
-        }
-      }
-
-      if (!current_if_bodies.empty()) {
-        auto if_stmt =
-            IfThenElse(current_condition,
-                       current_if_bodies.size() == 1
-                           ? current_if_bodies[0]
-                           : this->VisitStmt(SeqStmt(current_if_bodies)),
-                       Stmt(), current_span);
-        new_seq.push_back(if_stmt);
-        current_condition = PrimExpr();
-        current_if_bodies.clear();
-      }
-
-      new_seq.push_back(stmt);
-    }
-
-    if (!current_if_bodies.empty()) {
-      auto if_stmt =
-          IfThenElse(current_condition,
-                     current_if_bodies.size() == 1
-                         ? current_if_bodies[0]
-                         : this->VisitStmt(SeqStmt(current_if_bodies)),
-                     Stmt(), current_span);
-      new_seq.push_back(if_stmt);
-    }
-
-    return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq, op->span);
   }
 };
 
-PrimFunc MergeIfStmtSubstitute(PrimFunc &f) {
-  return MergeIfStmtRewriter::Substitute(f);
+Stmt ApplyMergeIfStmt(Stmt statement) {
+  auto rewriter = ffi::make_object<MergeIfStmtRewriter>();
+  return rewriter->Mutate(statement, InplaceMode::kDisallow)
+      .ValueOrUnchanged(statement);
 }
 
-Stmt ApplyMergeIfStmt(Stmt stmt) { return MergeIfStmtRewriter::Apply(stmt); }
+Function MergeIfStmtSubstitute(Function &function) {
+  if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+    function.CopyOnWrite()->body =
+        ApplyMergeIfStmt(function->body).as_or_throw<SeqStmt>();
+  return function;
+}
 
-using namespace tirx::transform;
 tvm::transform::Pass MergeIfStmt() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return MergeIfStmtRewriter::Substitute(f);
+  auto rewrite = [](Function function, IRModule, tvm::transform::PassContext) {
+    return MergeIfStmtSubstitute(function);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MergeIfStmt", {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0, "tl.MergeIfStmt");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.MergeIfStmt", MergeIfStmt);
+  ffi::reflection::GlobalDef().def("tl.transform.MergeIfStmt", MergeIfStmt);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

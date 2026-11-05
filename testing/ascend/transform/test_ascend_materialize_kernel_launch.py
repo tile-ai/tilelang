@@ -16,10 +16,13 @@ codegen reads back off the ``thread_extent`` AttrStmt; it is declared through
 the pass's ``launch_dim_tags`` rather than hard-coded in the pass.
 """
 
+from tvm_tirx import ir
+import tvm_ffi
+
 import pytest
 import tilelang
 import tilelang.ascend.language as TA
-from tilelang import tvm
+import tvm_tirx as tvm
 from testing.ascend._ir import nodes as _collect
 
 
@@ -45,18 +48,16 @@ def _ascend_materialize(func):
 
 def _launch_placeholders(func):
     return [
-        stmt
-        for stmt in _collect(func, tvm.tirx.Bind)
-        if isinstance(stmt.value, tvm.tirx.Call) and str(stmt.value.op.name) == "tl.launch_thread_idx"
+        stmt for stmt in _collect(func, ir.Bind) if isinstance(stmt.value, ir.Call) and str(stmt.value.op.name) == "tl.launch_thread_idx"
     ]
 
 
 def _thread_extents(func):
-    """{thread_tag: extent} of every thread_extent AttrStmt in `func`."""
+    """{thread_tag: extent} of every native launch_thread region in `func`."""
     extents = {}
-    for attr in _collect(func, tvm.tirx.AttrStmt):
-        if attr.attr_key == "thread_extent":
-            extents[str(attr.node.thread_tag)] = int(attr.value)
+    for attr in _collect(func, ir.RegionStmt):
+        if attr.op.name == "tirx.launch_thread":
+            extents[attr.args[0].value] = int(attr.args[1])
     return extents
 
 
@@ -86,7 +87,9 @@ def test_ascend_kernel_accepts_prelude():
         with TA.Kernel(1, prelude="// ascend"):
             A[0] = 0
 
-    assert str(_collect(main, tvm.tirx.SBlock)[0].annotations["pragma_import_c"]) == "// ascend"
+    (launch,) = [region for region in _collect(main, ir.RegionStmt) if region.op.name == "tl.launch_kernel"]
+    hints = tvm_ffi.get_global_func("tl.DecodeAnnotations")(launch.args[4], launch.attrs["hint_schema"])
+    assert str(hints["pragma_import_c"]) == "// ascend"
 
 
 def test_ascend_kernel_rejects_multidimensional_grid():

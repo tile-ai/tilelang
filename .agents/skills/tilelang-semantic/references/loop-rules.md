@@ -40,7 +40,7 @@ pipeline-requested.
 | `T.unroll` | `ForKind::kUnrolled` | Compile-time expansion intent; may contain lower-level loops |
 | `T.vectorized` | `ForKind::kVectorized` | SIMD intent; current planner selects only innermost loops |
 | `T.Parallel` | one or more `ForKind::kParallel` loops | Consecutive loops form one multidimensional parallel region |
-| `T.Pipelined` | serial `For` plus annotations | Detect through annotations, not `ForKind` |
+| `T.Pipelined` | serial `For` plus `tl.loop.annotations` metadata | Decode the enclosing attribute region, not `ForKind` |
 | `T.Persistent` | binds, guards, `loop_break`, and serial `For` | Preserve a marker before enforcing persistent-specific structure |
 | `while` | `While` | Often acts as a dynamic/persistent scheduler in real kernels |
 

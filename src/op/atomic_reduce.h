@@ -14,6 +14,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 /*!
@@ -24,11 +25,12 @@ using namespace ffi;
  */
 class AtomicOpBaseNode : public TileOperatorNode {
 public:
-  PrimExpr src_value; ///< Source values, for cases src is not a buffer
-  Buffer src, dst;    ///< Source and destination buffers
+  Optional<PrimExpr> src_value; ///< Scalar source, mutually exclusive with src.
+  Optional<TensorVar> src;
+  TensorVar dst{ffi::UnsafeInit{}}; ///< Required destination tensor.
   Array<Range> src_range,
-      dst_range; ///< Access ranges for source and destination
-  Map<String, ObjectRef> annotations; ///< Annotations for the atomic operation
+      dst_range;                ///< Access ranges for source and destination
+  Map<String, Any> annotations; ///< Annotations for the atomic operation
   // Supported annotation keys:
   //   - "coalesced_width": IntImm, width for memory coalescing optimization
   //   - "memory_order": IntImm, memory order for atomic operations
@@ -37,7 +39,7 @@ public:
 
   /// Lower through the registered target implementation.
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
 
   /// Infer layout through the registered target implementation.
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
@@ -46,9 +48,11 @@ public:
   /// Get memory order from annotations (default: relaxed = 0)
   int GetMemoryOrder() const {
     if (auto val = annotations.Get("memory_order")) {
-      if (auto int_val = val->as<IntImmNode>()) {
-        return int_val->value;
+      if (auto int_val = val->as<IntImmObj>()) {
+        return static_cast<int>(int_val->value.as<int64_t>().value());
       }
+      if (auto value = val->as<int64_t>())
+        return static_cast<int>(*value);
     }
     return 0;
   }
@@ -68,7 +72,7 @@ struct AtomicReduceImpl {
                             InferLevel level);
 
   Stmt (*lower)(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::AnalyzerObj *analyzer);
 };
 
 void RegisterAtomicReduceImpl(AtomicReduceImpl impl);
@@ -100,9 +104,9 @@ class AtomicMax : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicMax, TileOperator,
                                              AtomicMaxNode);
-  TVM_DLL
-  AtomicMax(Array<PrimExpr> args,
-            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_TIRX_DLL
+  AtomicMax(Array<Expr> args,
+            Map<String, Any> annotations = Map<String, Any>());
   static const Op &Get();
 };
 
@@ -133,9 +137,9 @@ class AtomicMin : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(AtomicMin, TileOperator,
                                              AtomicMinNode);
-  TVM_DLL
-  AtomicMin(Array<PrimExpr> args,
-            Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_TIRX_DLL
+  AtomicMin(Array<Expr> args,
+            Map<String, Any> annotations = Map<String, Any>());
   static const Op &Get();
 };
 

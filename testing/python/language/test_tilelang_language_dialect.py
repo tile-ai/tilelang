@@ -1,6 +1,8 @@
 import importlib
 
 import pytest
+import tvm_ffi
+from tvm_tirx import ir
 
 import tilelang
 import tilelang.language as T_default
@@ -114,8 +116,8 @@ def test_rocm_language_composes_common_and_rocm_symbols():
 @pytest.mark.parametrize(
     ("emitter_name", "method_name", "mcpu", "expected_call"),
     [
-        ("MatrixCoreIntrinEmitter", "mfma", "gfx942", "T.tvm_mfma"),
-        ("WMMAIntrinEmitter", "wmma", "gfx1100", "T.tvm_rdna_wmma"),
+        ("MatrixCoreIntrinEmitter", "mfma", "gfx942", "tl.tvm_mfma"),
+        ("WMMAIntrinEmitter", "wmma", "gfx1100", "tl.tvm_rdna_wmma"),
     ],
 )
 def test_rocm_emitters_resolve_backend_tir_intrinsics(emitter_name, method_name, mcpu, expected_call):
@@ -146,7 +148,9 @@ def test_rocm_emitters_resolve_backend_tir_intrinsics(emitter_name, method_name,
         c_local = T_comm.alloc_local((c_size,), "float32")
         emit(a_local, b_local, c_local)
 
-    assert expected_call in main.script()
+    calls = []
+    tvm_ffi.structural_walk(main, (ir.Call, calls.append))
+    assert any(isinstance(call.op, ir.Op) and call.op.name == expected_call for call in calls)
 
 
 def test_metal_language_owns_simdgroup_tir_exports():
@@ -166,12 +170,24 @@ def test_backend_tir_modules_own_their_vendor_ops():
 
 
 def test_upstream_vendor_tir_exports_are_classified():
-    import tvm.tirx.script.parser as upstream_tir_parser
+    from tvm_tirx.tirx import script as native_tir_script
+    from tilelang.cuda.language import tir as cuda_tir
+    from tilelang.metal.language import tir as metal_tir
+    from tilelang.rocm.language import tir as rocm_tir
 
+    # The native dialect has one shared script namespace. Historical vendor
+    # spellings are maintained by TileLang's owning dialect modules.
+    exports = {}
+    for dialect in (native_tir_script, T_comm, cuda_tir, metal_tir, rocm_tir):
+        exports.update((name, getattr(dialect, name)) for name in dialect.__all__)
     vendor_exports = {
-        name for name in upstream_tir_parser.__all__ if name.startswith("ptx_") or "simdgroup" in name or name in {"mma_fill", "mma_store"}
+        name
+        for name, value in exports.items()
+        if callable(value) and (name.startswith("ptx_") or "simdgroup" in name or name in {"mma_fill", "mma_store"})
     }
+    assert vendor_exports
     assert vendor_exports <= CLASSIFIED_VENDOR_TIR_EXPORTS
+    assert exports.keys() >= CLASSIFIED_VENDOR_TIR_EXPORTS
 
 
 @pytest.mark.parametrize(

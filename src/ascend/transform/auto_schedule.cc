@@ -38,18 +38,16 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -59,6 +57,7 @@
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/multi_buffer.h"
 #include "./auto_schedule/scheduled_tir.h"
+#include "./auto_schedule/storage_footprint.h"
 #include "./auto_schedule/task_analysis.h"
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/op/copy.h"
@@ -66,16 +65,14 @@
 #include "ascend/transform/buffer_version.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
-#include "runtime/thread_storage_scope.h"
 #include "support/check.h"
-#include "tir/transforms/ir_utils.h"
-#include "transform/common/collector.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ascend;
 
 namespace {
@@ -85,25 +82,17 @@ namespace {
 // Check whether a kernel body contains any SIMT_VF blocks. SIMT_VF
 // (asc_vf_call) reserves 32 KB of the physical 248 KB Unified Buffer for
 // thread context, so the usable shared memory depends on its presence.
-class SimtVFDetector : public tirx::StmtVisitor {
-public:
+inline bool HasSimtVF(const Stmt &stmt) {
   bool found = false;
-
-  void VisitStmt_(const tirx::SBlockNode *op) override {
-    if (op->name_hint == "SIMT_VF") {
-      found = true;
-    }
-    tirx::StmtVisitor::VisitStmt_(op);
-  }
-};
-
-inline bool HasSimtVF(const tirx::Stmt &stmt) {
-  SimtVFDetector detector;
-  detector(stmt);
-  return detector.found;
+  VisitNativePostOrder(stmt, [&](const ObjectRef &object) {
+    if (const auto *region = object.as<RegionStmtObj>())
+      if (auto name = NativeBlockName(region))
+        found |= *name == "SIMT_VF";
+  });
+  return found;
 }
 
-inline int64_t GetSharedMemoryLimit(const tirx::Stmt &kernel_body) {
+inline int64_t GetSharedMemoryLimit(const Stmt &kernel_body) {
   constexpr int64_t kPhysicalUnifiedBufferSize = 248 * 1024;
   constexpr int64_t kSimtVFThreadContextSize = 32 * 1024;
   return HasSimtVF(kernel_body)
@@ -157,16 +146,22 @@ CoreMask NodeCoreMask(const IRStructure *node) {
     return mask == kCoreUnassigned ? kCoreAll : mask;
   }
   CoreMask mask = kCoreUnassigned;
-  for (const auto &child : static_cast<const ControlNode *>(node)->children)
-    mask |= NodeCoreMask(child.get());
+  if (const auto *header = node->HeaderTask())
+    mask |= NodeCoreMask(header);
+  for (const auto *list : node->ChildLists())
+    for (const auto &child : *list)
+      mask |= NodeCoreMask(child.get());
   return mask;
 }
 
 int64_t NodeResourceMask(const IRStructure *node) {
-  if (node->IsControl()) {
+  if (!node->IsTask()) {
     int64_t result = 0;
-    for (const auto &child : static_cast<const ControlNode *>(node)->children)
-      result |= NodeResourceMask(child.get());
+    if (const auto *header = node->HeaderTask())
+      result |= NodeResourceMask(header);
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        result |= NodeResourceMask(child.get());
     return result;
   }
   int64_t result = 0;
@@ -192,6 +187,10 @@ private:
   CollectLetDependencyClosure_(const std::vector<IRStructure *> &nodes);
 
 public:
+  ScheduleBuilder(IRStructure::ChildList &tree, ConstrSet outer,
+                  const Stmt &kernel)
+      : tree_(tree), outer_(std::move(outer)), storage_footprints_(kernel) {}
+
   // Recursive scheduling function
   // Directly schedules the entire IRStructure tree recursively in place
   void ScheduleRecursive(std::shared_ptr<IRStructure> &node);
@@ -207,7 +206,8 @@ public:
                    bool manual_schedule);
 
   // Distance-aware Z3 scheduler for a ControlNode loop body.
-  void Z3SchedulePythonLoop(ControlNode *ctrl, bool manual_schedule);
+  void Z3SchedulePythonLoop(ControlNode *ctrl, IRStructure::ChildList &children,
+                            bool manual_schedule);
 
   // Set memory limit for a given buffer scope (e.g. "shared", "shared.l1")
   void SetStorageGroups(L0StorageGroups groups) {
@@ -251,6 +251,8 @@ private:
     bool has_unscheduled = false;
     bool has_requested = false;
     for (const auto &node : children) {
+      if (node->IsScope())
+        continue;
       int stage = node->GetStage();
       ICHECK_GE(stage, kUnscheduledStage)
           << "Schedule-unit stage must be -1 or non-negative, got " << stage;
@@ -291,6 +293,16 @@ private:
   }
 
   L0StorageGroups storage_groups_;
+  IRStructure::ChildList &tree_;
+  ConstrSet outer_;
+  NativeStorageFootprints storage_footprints_;
+  std::unique_ptr<ScopedConflictHintIndex> scoped_hints_;
+
+  const ScopedConflictHintIndex *RefreshScopedHints() {
+    dependency_cache_.clear();
+    scoped_hints_ = std::make_unique<ScopedConflictHintIndex>(tree_, outer_);
+    return scoped_hints_.get();
+  }
   std::map<std::string, int64_t> memory_limits_;
   AivStorageMap aiv_storages_;
   BufferVersionMap buffer_version_overrides_;
@@ -329,9 +341,9 @@ int64_t GetTaskTimestamp(IRStructure *subtree_root, TaskNode *task,
   std::vector<IRStructure *> path = task->PathFrom(subtree_root);
   int64_t timestamp = 0;
   for (size_t i = 0; i + 1 < path.size(); ++i) {
-    ICHECK(path[i]->IsControl());
-    auto *control = static_cast<ControlNode *>(path[i]);
-    if (producer_side) {
+    auto *control =
+        path[i]->IsControl() ? static_cast<ControlNode *>(path[i]) : nullptr;
+    if (producer_side && control) {
       int64_t trip_count = control->GetTripCount();
       int64_t ii_per_iter = GetAutoScheduleExtraInfo(control)->GetIIperIter();
       timestamp += (trip_count > 0 ? trip_count - 1 : 0) * ii_per_iter;
@@ -400,7 +412,7 @@ ScheduleBuilder::CollectLetDependencyClosure_(
       continue;
     const auto *task = static_cast<const TaskNode *>(node);
     if (ffi::Optional<Bind> bind = GetFlatTaskBind(task->stmt);
-        bind.defined()) {
+        bind.has_value()) {
       result.is_declaration[i] = true;
       declaration_by_var[bind.value()->var] = i;
     }
@@ -432,7 +444,7 @@ following properties: 1) Each ordered child list (the root list or a
 ControlNode body) is reordered by the Z3 scheduler and the children carry
 scheduling metadata directly. 2) For each ControlNode, its `children` are the
 Z3-scheduled loop body. Conditional execution is carried by each node's
-`conditions` delta (no dedicated IfNode), so guarded tasks are ordinary
+`conditions` delta (no dedicated IfObj), so guarded tasks are ordinary
 schedule candidates.
 */
 void ScheduleBuilder::ScheduleList(
@@ -461,21 +473,90 @@ void ScheduleBuilder::ScheduleRecursive(std::shared_ptr<IRStructure> &node) {
 
   if (node->IsTask()) {
     return;
+  } else if (node->IsScope()) {
+    int64_t latency = 0;
+    for (auto *list : node->ChildLists()) {
+      bool manual = HasRequestedStage_(*list);
+      for (auto &child : *list)
+        ScheduleRecursive(child);
+      *list = Z3SchedulePython(*list, manual);
+      int64_t branch_latency = 0;
+      for (size_t i = 0; i < list->size(); ++i) {
+        auto &child = (*list)[i];
+        child->SetParent(node.get());
+        child->SetIndex(i);
+        branch_latency =
+            std::max(branch_latency,
+                     GetAutoScheduleExtraInfo(child.get())->GetStartTime() +
+                         child->GetLatency());
+      }
+      latency = std::max(latency, branch_latency);
+    }
+    // The condition/assumption header executes once before its selected body.
+    // Pure metadata has no synthetic header task and no header cost.
+    latency += node->HeaderTask() ? 1 : 0;
+    node->SetLatency(latency);
+    node->SetII(latency);
+    node->SetStage(0);
+    return;
   } else if (node->IsControl()) {
     auto ctrl = static_cast<ControlNode *>(node.get());
-    std::vector<std::shared_ptr<IRStructure>> origin_children = ctrl->children;
+    IRStructure *body_owner = ctrl;
+    auto *body = &ctrl->children;
+    // Native loop annotations are operand-bearing lexical carriers. A sole
+    // wrapper does not create a second execution clock: schedule its actual
+    // children with the enclosing For, without detaching the carrier or
+    // changing any definition/hint domain.
+    while (body->size() == 1 && body->front()->IsScope()) {
+      auto *scope = static_cast<ScopeNode *>(body->front().get());
+      auto attribute = ReadTaskAttribute(scope->shell);
+      if (!attribute || attribute->key != "tl.loop.annotations")
+        break;
+      body_owner = scope;
+      body = &scope->children;
+    }
+    std::vector<std::shared_ptr<IRStructure>> origin_children = *body;
     bool manual_schedule = HasRequestedStage_(origin_children);
     for (size_t i = 0; i < origin_children.size(); ++i) {
       origin_children[i]->SetIndex(i);
-      origin_children[i]->SetParent(ctrl);
+      origin_children[i]->SetParent(body_owner);
     }
-    for (auto &child : origin_children) {
+    for (auto &child : origin_children)
       ScheduleRecursive(child);
+    // Inferred eligibility is carried after the loop-local definitions. This
+    // trailing directive has no execution point or requested stage. Keep it
+    // at the tail while solving only the actual children; treating it as a
+    // zero-cost stage-0 scope constrains every sibling to stage 0 and adds an
+    // artificial completion point inside the modulo issue window.
+    size_t executable_end = body->size();
+    while (executable_end > 0) {
+      IRStructure *last = (*body)[executable_end - 1].get();
+      if (!last->IsScope())
+        break;
+      const Stmt &shell = static_cast<ScopeNode *>(last)->shell;
+      if (!IsTaskMetadataStatement(shell))
+        break;
+      auto fields =
+          ReadNativeAnnotations(shell.as<EvaluateObj>()->value.as<CallObj>());
+      if (fields.size() != 1 || !fields.Get("multi_buffer_eligible"))
+        break;
+      --executable_end;
     }
-    Z3SchedulePythonLoop(ctrl, manual_schedule);
-    for (size_t i = 0; i < ctrl->children.size(); ++i) {
-      ctrl->children[i]->SetIndex(i);
-      ctrl->children[i]->SetParent(ctrl);
+    IRStructure::ChildList trailing_metadata(body->begin() + executable_end,
+                                             body->end());
+    body->resize(executable_end);
+    if (!body->empty())
+      Z3SchedulePythonLoop(ctrl, *body, manual_schedule);
+    else {
+      ctrl->SetLatency(0);
+      ctrl->SetII(0);
+      GetAutoScheduleExtraInfo(ctrl)->SetIIperIter(0);
+    }
+    body->insert(body->end(), trailing_metadata.begin(),
+                 trailing_metadata.end());
+    for (size_t i = 0; i < body->size(); ++i) {
+      (*body)[i]->SetIndex(i);
+      (*body)[i]->SetParent(body_owner);
     }
     return;
   }
@@ -505,7 +586,7 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
 
   try {
     // Get the Python-registered function using ffi::Function::GetGlobal
-    static std::optional<ffi::Function> z3_schedule_func =
+    std::optional<ffi::Function> z3_schedule_func =
         ffi::Function::GetGlobal("tl.transform.z3_schedule_python");
     if (!z3_schedule_func.has_value()) {
       ICHECK(!manual_schedule)
@@ -581,14 +662,19 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
     }
 
     // Buffer-region data dependencies
-    auto deps = AnalyzeDependencies(
-        nodes, /*loop=*/nullptr, manual_buffer_versions_, multi_buffer_owners_,
-        &dependency_cache_, root_conflict_hints_);
+    const auto *hints = RefreshScopedHints();
+    ControlNode *clock =
+        nodes.empty() ? nullptr : nodes.front()->GetParentControl();
+    auto deps = AnalyzeDependencies(nodes, clock, manual_buffer_versions_,
+                                    multi_buffer_owners_, &dependency_cache_,
+                                    root_conflict_hints_, hints);
     std::unordered_map<IRStructure *, size_t> node_idx;
     for (size_t i = 0; i < n; ++i) {
       node_idx[nodes[i]] = i;
     }
     for (const auto &dep : deps) {
+      if (dep.distance != 0)
+        continue; // The enclosing loop schedules its cross-iteration edges.
       size_t i = node_idx[dep.prod_node];
       size_t j = node_idx[dep.cons_node];
       if (dep.kind == DependencyKind::kOwnerExclusion) {
@@ -603,6 +689,17 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
         data_deps.emplace_back(i, j, GetDependencyLatency(dep));
       }
     }
+
+    // Lexical headers and operand-bearing metadata retain their source order.
+    // Reordering only within either side keeps captured values and definitions
+    // in the domain where the dependency index proved them.
+    for (size_t i = 0; i < n; ++i)
+      if (nodes[i]->IsScope()) {
+        for (size_t j = 0; j < i; ++j)
+          data_deps.emplace_back(j, i, latencies[j]);
+        for (size_t j = i + 1; j < n; ++j)
+          data_deps.emplace_back(i, j, latencies[i]);
+      }
 
     // Collect resource dependencies
     for (size_t i = 0; i < n; ++i) {
@@ -714,16 +811,17 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
 // Z3-based scheduler for loops that calls Python implementation via FFI
 // with distance-aware dependencies
 void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
+                                           IRStructure::ChildList &children,
                                            bool manual_schedule) {
-  if (ctrl->children.empty()) {
+  if (children.empty()) {
     LOG(WARNING)
         << "Z3SchedulePythonLoop called on a control node without children";
     return;
   }
 
   std::vector<IRStructure *> nodes;
-  nodes.reserve(ctrl->children.size());
-  for (const auto &child : ctrl->children) {
+  nodes.reserve(children.size());
+  for (const auto &child : children) {
     nodes.push_back(child.get());
   }
 
@@ -739,9 +837,15 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   }
 
   auto num_stages = 1;
-  auto num_stages_val = ctrl->control.get()->annotations.Get("num_stages");
+  auto num_stages_val =
+      ReadLoopAnnotations(ctrl->control.get()).Get("num_stages");
   if (num_stages_val.has_value()) {
-    num_stages = num_stages_val.value().cast<IntImm>()->value;
+    auto requested = TryConstInt(num_stages_val.value().cast<PrimExpr>());
+    TVM_FFI_CHECK(requested && *requested > 0 &&
+                      *requested <= std::numeric_limits<int>::max(),
+                  ValueError)
+        << "AutoSchedule num_stages must be a positive representable integer";
+    num_stages = static_cast<int>(*requested);
   }
 
   // When false, the Z3 loop scheduler keeps each resource's tasks within a
@@ -749,18 +853,20 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // "enable_offset" annotation; defaults to false (constraint applied).
   bool enable_offset = false;
   auto enable_offset_val =
-      ctrl->control.get()->annotations.Get("enable_offset");
+      ReadLoopAnnotations(ctrl->control.get()).Get("enable_offset");
   if (enable_offset_val.has_value()) {
     enable_offset = enable_offset_val.value().cast<bool>();
   }
 
   if (manual_schedule) {
-    ICHECK(
-        !ctrl->control.get()->annotations.Get("tl_pipeline_order").has_value())
+    ICHECK(!ReadLoopAnnotations(ctrl->control.get())
+                .Get("tl_pipeline_order")
+                .has_value())
         << "Ascend manual AutoSchedule derives each pipe's issue order from "
            "source order; remove the T.Pipelined order argument";
-    ICHECK(
-        !ctrl->control.get()->annotations.Get("tl_pipeline_stage").has_value())
+    ICHECK(!ReadLoopAnnotations(ctrl->control.get())
+                .Get("tl_pipeline_stage")
+                .has_value())
         << "Ascend manual AutoSchedule uses T.Stage scopes; remove the "
            "T.Pipelined stage argument";
     if (!enable_offset) {
@@ -769,11 +875,16 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
              "enclosing loop";
     }
     if (!num_stages_val.has_value()) {
+      TVM_FFI_CHECK_LT(max_manual_stage, std::numeric_limits<int>::max(),
+                       ValueError)
+          << "AutoSchedule num_stages overflows the stage count";
       num_stages = max_manual_stage + 1;
     }
   }
+  TVM_FFI_CHECK_GT(num_stages, 0, ValueError)
+      << "AutoSchedule num_stages must be positive";
 
-  static std::optional<ffi::Function> z3_schedule_loop_func =
+  std::optional<ffi::Function> z3_schedule_loop_func =
       ffi::Function::GetGlobal("tl.transform.z3_schedule_loop_python");
   if (!z3_schedule_loop_func.has_value()) {
     LOG(FATAL) << "Python Z3 loop scheduler not registered, falling back "
@@ -803,13 +914,14 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     resource_flags.push_back(NodeResourceMask(node));
   }
 
-  // Keep one representative Buffer per storage for shape/scope accounting.
-  // Version variables and dependency distances are keyed directly by storage.
+  // The allocation root owns the physical footprint. An accessed alias may
+  // expose only a small part of it and cannot serve as the storage size.
   struct StorageResource {
     Var storage;
-    Buffer representative;
+    TensorVar representative;
   };
   std::vector<int64_t> storage_sizes;
+  std::vector<std::vector<int64_t>> storage_version_bytes;
   std::vector<StorageResource> storage_resources;
   std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen_storages;
   std::unordered_map<Var, size_t, ObjectPtrHash, ObjectPtrEqual>
@@ -828,43 +940,38 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       group_indices.push_back({});
     }
   }
+  const auto original_capacities = group_capacities;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>
       annotated_storage_versions;
-  auto get_buffer_size = [](const Buffer &buffer) -> int64_t {
-    // Bits-based: dtype.bits()*lanes()/8 truncates sub-byte dtypes to 0
-    // (fp4 -> 0). Accumulate elements, then ceil(elements*bits/8).
-    int64_t elem_bits = buffer->dtype.bits() * buffer->dtype.lanes();
-    PrimExpr elems = IntImm(DataType::Int(64), 1);
-    for (const auto &dim : buffer->shape) {
-      elems *= dim;
-    }
-    PrimExpr size = FloorDiv(elems * IntImm(DataType::Int(64), elem_bits) +
-                                 IntImm(DataType::Int(64), 7),
-                             IntImm(DataType::Int(64), 8));
-    arith::Analyzer analyzer;
-    auto size_val = analyzer.Simplify(size);
-    if (const auto *int_imm = size_val.as<IntImmNode>()) {
-      return int_imm->value;
-    }
-    return 0;
+  auto validate_single_allocation = [&](int64_t bytes,
+                                        const std::vector<int> &groups) {
+    for (int group : groups)
+      if (bytes > original_capacities[group])
+        LOG(FATAL) << "Z3 loop scheduling failed: scope \""
+                   << group_scopes[group] << "\" capacity "
+                   << original_capacities[group]
+                   << " is insufficient for physical allocation of " << bytes
+                   << " bytes";
   };
   auto enumerate_buffers = [&](auto &&visit) {
     for (const auto &r : ctrl->GetReadRegions())
-      visit(r->buffer);
+      visit(RegionTensor(r));
     for (const auto &r : ctrl->GetWriteRegions())
-      visit(r->buffer);
+      visit(RegionTensor(r));
   };
-  enumerate_buffers([&](const Buffer &buffer) {
+  enumerate_buffers([&](const TensorVar &buffer) {
     if (!IsAscendOnChipBuffer(buffer)) {
       return; // Only consider on-chip buffers for multi-buffer
     }
-    if (seen_storages.insert(buffer->data).second)
-      storage_resources.push_back({buffer->data, buffer});
+    Var storage = ctrl->StorageIdentity(buffer);
+    if (seen_storages.insert(storage).second)
+      storage_resources.push_back(
+          {storage, storage_footprints_.Allocation(storage)});
   });
 
   for (const StorageResource &resource : storage_resources) {
     const Var &storage = resource.storage;
-    const Buffer &buffer = resource.representative;
+    const TensorVar &buffer = resource.representative;
     std::string scope;
     if (IsL1Buffer(buffer)) {
       scope = "shared.l1";
@@ -881,7 +988,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     }
     if (scope == "shared") {
       if (auto sid = aiv_storages_.Get(storage))
-        scope += ".aiv" + std::to_string(sid.value()->value);
+        scope += ".aiv" + std::to_string(sid.value());
     }
     int group_id = scope_to_group.at(scope);
     std::vector<int> groups{group_id};
@@ -893,21 +1000,34 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       // These buffers cannot be multi-buffered, and cannot share memory with
       // other buffers either, so we directly reduce the capacity of the
       // memory group by their size
+      int64_t bytes = storage_footprints_.AllocationBytes(
+          storage, 1, manual_buffer_versions_.Get(storage).value_or(1));
+      validate_single_allocation(bytes, groups);
       for (int group : groups)
-        group_capacities[group] -= get_buffer_size(buffer);
+        group_capacities[group] -= bytes;
     } else {
       auto override_it = buffer_version_overrides_.find(storage);
       if (override_it != buffer_version_overrides_.end()) {
         int override_val = (*override_it).second;
         annotated_storage_versions[storage] = override_val;
+        int64_t bytes =
+            storage_footprints_.AllocationBytes(storage, override_val);
+        validate_single_allocation(bytes, groups);
         for (int group : groups)
-          group_capacities[group] -= get_buffer_size(buffer) * override_val;
+          group_capacities[group] -= bytes;
       } else {
         size_t id = storage_sizes.size();
         storage_version_id.emplace(storage, id);
         for (int group : groups)
           group_indices[group].push_back((int64_t)id);
-        storage_sizes.push_back(get_buffer_size(buffer));
+        std::vector<int64_t> costs;
+        costs.reserve(num_stages);
+        for (int version = 0; version < num_stages; ++version)
+          costs.push_back(
+              storage_footprints_.AllocationBytes(storage, version + 1));
+        validate_single_allocation(costs.front(), groups);
+        storage_sizes.push_back(costs.front());
+        storage_version_bytes.push_back(std::move(costs));
       }
     }
   }
@@ -929,7 +1049,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
             << " the memory limit. Try using T.annotate_unlimit_memory(\""
             << group_scopes[g] << "\") or reduce buffer sizes.";
       }
-      int64_t min_usage = 0;
+      ffi::BigInt min_usage = 0;
       for (int64_t idx : idxs) {
         min_usage += storage_sizes[idx];
       }
@@ -985,9 +1105,10 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   }
 
   // Buffer-region data dependencies
+  const auto *hints = RefreshScopedHints();
   auto deps = AnalyzeDependencies(nodes, ctrl, manual_buffer_versions_,
                                   multi_buffer_owners_, &dependency_cache_,
-                                  root_conflict_hints_);
+                                  root_conflict_hints_, hints);
   std::unordered_map<IRStructure *, size_t> node_idx;
   for (size_t i = 0; i < n; ++i) {
     node_idx[nodes[i]] = i;
@@ -1041,6 +1162,22 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     }
   }
 
+  // A retained lexical scope evaluates its header in the original iteration.
+  // Keep its siblings in that same stage and preserve ordering around the
+  // scope, while the solver can still schedule within each lexical segment.
+  for (size_t i = 0; i < n; ++i)
+    if (nodes[i]->IsScope())
+      for (size_t j = 0; j < n; ++j) {
+        if (i == j)
+          continue;
+        stage_order_deps.emplace_back(i, j);
+        stage_order_deps.emplace_back(j, i);
+        if (j < i)
+          data_deps.emplace_back(j, i, 0, latencies[j]);
+        else
+          data_deps.emplace_back(i, j, 0, latencies[i]);
+      }
+
   // Stage-order constraints for copied Let variables.
   //
   // A Let task `a = buf[...]` only READS buffers (it writes a scalar var).
@@ -1091,6 +1228,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   ffi::Array<ffi::Array<int64_t>> tvm_owner_exclusion_deps;
   ffi::Array<ffi::Array<int64_t>> tvm_pipe_order_deps;
   ffi::Array<int64_t> tvm_storage_sizes;
+  ffi::Array<ffi::Array<int64_t>> tvm_storage_version_bytes;
   ffi::Array<int64_t> tvm_manual_stages;
 
   for (auto val : latencies) {
@@ -1140,6 +1278,9 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   for (int64_t size : storage_sizes) {
     tvm_storage_sizes.push_back(size);
   }
+  for (const auto &costs : storage_version_bytes)
+    tvm_storage_version_bytes.push_back(
+        ffi::Array<int64_t>(costs.begin(), costs.end()));
   for (int64_t stage : manual_stages) {
     tvm_manual_stages.push_back(stage);
   }
@@ -1165,12 +1306,27 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
                    tvm_data_deps, tvm_resource_deps, tvm_owner_exclusion_deps,
                    tvm_pipe_order_deps, tvm_storage_sizes, tvm_memory_groups,
                    tvm_stage_order_deps, enable_offset, tvm_manual_stages,
-                   manual_schedule)
+                   manual_schedule, tvm_storage_version_bytes)
           .cast<ffi::Tuple<ffi::Array<int64_t>, ffi::Array<int>, int64_t>>();
 
   ffi::Array<int64_t> start_times = return_val.get<0>();
   ffi::Array<int> storage_versions = return_val.get<1>();
   int64_t ii = return_val.get<2>();
+  TVM_FFI_CHECK_EQ(storage_versions.size(), storage_version_bytes.size(),
+                   ValueError);
+  for (size_t i = 0; i < storage_versions.size(); ++i)
+    TVM_FFI_CHECK(storage_versions[i] > 0 && storage_versions[i] <= num_stages,
+                  ValueError)
+        << "Z3 returned an invalid physical buffer version count";
+  for (size_t group = 0; group < group_indices.size(); ++group) {
+    ffi::BigInt bytes = 0;
+    for (int64_t index : group_indices[group])
+      bytes += storage_version_bytes[index][storage_versions[index] - 1];
+    if (!group_indices[group].empty() && bytes > group_capacities[group])
+      LOG(FATAL) << "Z3 selected physical storage above scope \""
+                 << group_scopes[group] << "\" capacity "
+                 << group_capacities[group] << ": " << bytes;
+  }
 
   // Derive a per-task stage from (start_time / ii). Z3 schedules
   // `start = k * ii + r` so `start_time / ii` recovers k. Producers (low k,
@@ -1200,7 +1356,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     return GetAutoScheduleExtraInfo(c.get())->GetStartTime() -
            c->GetStage() * ii;
   };
-  std::stable_sort(ctrl->children.begin(), ctrl->children.end(),
+  std::stable_sort(children.begin(), children.end(),
                    [&](const std::shared_ptr<IRStructure> &a,
                        const std::shared_ptr<IRStructure> &b) {
                      // At equal physical times, larger stages select earlier
@@ -1217,7 +1373,7 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   // final sibling list.
   std::vector<IRStructure *> scheduled_nodes;
   scheduled_nodes.reserve(n);
-  for (const auto &child : ctrl->children)
+  for (const auto &child : children)
     scheduled_nodes.push_back(child.get());
   LetDependencyClosure let_closure =
       CollectLetDependencyClosure_(scheduled_nodes);
@@ -1228,13 +1384,12 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
   std::map<int, std::set<size_t>, std::greater<int>> stage_to_decls;
   std::map<int, int64_t> stage_base_start; // stage -> floored start time
   for (size_t u = 0; u < n; ++u) {
-    int s = ctrl->children[u]->GetStage();
+    int s = children[u]->GetStage();
     for (size_t d : let_closure.dependencies[u]) {
-      if (ctrl->children[d]->GetStage() == s)
+      if (children[d]->GetStage() == s)
         continue; // decl already in the consumer's stage: no clone needed
       stage_to_decls[s].insert(d);
-      int64_t st =
-          GetAutoScheduleExtraInfo(ctrl->children[u].get())->GetStartTime();
+      int64_t st = GetAutoScheduleExtraInfo(children[u].get())->GetStartTime();
       auto bit = stage_base_start.find(s);
       if (bit == stage_base_start.end())
         stage_base_start[s] = st;
@@ -1250,14 +1405,15 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
     std::vector<std::shared_ptr<TaskNode>> stage_clones;
     for (size_t d : decls) {
       ICHECK(let_closure.is_declaration[d]);
-      auto *decl_task = static_cast<TaskNode *>(ctrl->children[d].get());
+      auto *decl_task = static_cast<TaskNode *>(children[d].get());
       ffi::Optional<Bind> decl_bind = GetFlatTaskBind(decl_task->stmt);
-      ICHECK(decl_bind.defined());
-      auto new_var = decl_bind.value()->var.copy_with_suffix("");
+      ICHECK(decl_bind.has_value());
+      Var old_var = decl_bind.value()->var;
+      Var new_var(old_var->name, old_var->ty, old_var->loc);
       auto cloned_task = std::static_pointer_cast<TaskNode>(decl_task->Clone());
       cloned_task->stmt = ReplaceFlatTaskBind(
           decl_task->stmt,
-          Bind(new_var, decl_bind.value()->value, decl_bind.value()->span));
+          Bind(new_var, decl_bind.value()->value, decl_bind.value()->loc));
       cloned_task->SetReadVars(decl_task->GetReadVars());
       auto write_vars = decl_task->GetWriteVars();
       for (auto &v : write_vars) {
@@ -1275,10 +1431,10 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       for (auto &[old_var, new_var] : renames)
         clone->SubstituteVar(old_var, new_var);
     for (size_t u = 0; u < n; ++u) {
-      if (ctrl->children[u]->GetStage() != s)
+      if (children[u]->GetStage() != s)
         continue;
       for (auto &[old_var, new_var] : renames)
-        ctrl->children[u]->SubstituteVar(old_var, new_var);
+        children[u]->SubstituteVar(old_var, new_var);
     }
     // Emit the clones defs-before-uses
     std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> clone_writes;
@@ -1320,12 +1476,11 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       }
     }
   }
-  ctrl->children.insert(ctrl->children.begin(), new_clones.begin(),
-                        new_clones.end());
+  children.insert(children.begin(), new_clones.begin(), new_clones.end());
 
   // Estimate overall latency across loop iterations.
   int64_t overall_latency = 0;
-  for (const auto &child : ctrl->children) {
+  for (const auto &child : children) {
     int64_t start_time = GetAutoScheduleExtraInfo(child.get())->GetStartTime();
     overall_latency =
         std::max(overall_latency, start_time + child->GetLatency());
@@ -1358,7 +1513,7 @@ static void WarnOnUnappliedBufferVersionOverrides(
     if (num_versions > 1 && !selected_buffer_versions.count(buffer_var)) {
       LOG(WARNING) << "Ascend AutoSchedule did not enable multi-buffering for "
                       "buffer \""
-                   << buffer_var->name_hint
+                   << buffer_var->name
                    << "\" although T.annotate_buffer_versions requested "
                    << num_versions
                    << " versions. The buffer must be eligible in a scheduled "
@@ -1385,7 +1540,8 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   }
 
   // Schedule IRStructure in place with the Z3 scheduler.
-  ScheduleBuilder unit_builder;
+  ScheduleBuilder unit_builder(ir_structure, metadata.outer_ctx,
+                               metadata.kernel_root);
   L0StorageGroups groups(CollectL0SFBindings(metadata.kernel_root));
   metadata.buffer_versions = ExpandL0StorageGroupValues(
       metadata.buffer_versions, groups, "version counts");
@@ -1394,8 +1550,17 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetStorageGroups(groups);
   int64_t shared_mem_limit = GetSharedMemoryLimit(kernel_body);
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
-  if (auto value = metadata.kernel_root->annotations.Get(kAivStorageMap)) {
-    unit_builder.SetAivStorages(value.value().cast<AivStorageMap>());
+  AivStorageMap aiv_storages;
+  VisitNativePostOrder(metadata.kernel_root, [&](const ObjectRef &object) {
+    const auto *call = object.as<CallObj>();
+    const auto *callee = call ? call->op.as<OpObj>() : nullptr;
+    if (callee && callee->name == "tl.annotation")
+      if (auto value = ReadNativeAnnotations(call).Get(kAivStorageMap))
+        for (const auto &[storage, sid] : value->cast<AivStorageMap>())
+          aiv_storages.Set(storage, sid);
+  });
+  if (!aiv_storages.empty()) {
+    unit_builder.SetAivStorages(aiv_storages);
     unit_builder.SetMemoryLimit("shared.aiv0", shared_mem_limit);
     unit_builder.SetMemoryLimit("shared.aiv1", shared_mem_limit);
   }
@@ -1422,7 +1587,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
     auto requested = metadata.buffer_versions.Get(data);
     ICHECK(!requested.has_value() || requested.value() <= 1 ||
            unit_builder.GetSelectedBufferVersions().count(data))
-        << "Bound L0 data/SF group " << data->name_hint
+        << "Bound L0 data/SF group " << data->name
         << " has no common multi-buffer owner. Load scales and data under a "
            "common owner, or request one version for the group.";
   }
@@ -1435,19 +1600,20 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
 // markers for the downstream scheduled-TIR passes.
 tvm::transform::Pass AutoSchedule() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func = [](tirx::Function func, const IRModule &,
+                      const tvm::transform::PassContext &) -> tirx::Function {
     // Get target from PrimFunc attribute for GemmInst determination
-    auto target_opt = func->GetAttr<Target>(tvm::attr::kTarget);
-    Target target;
-    if (target_opt.defined()) {
+    auto target_opt = func->attrs.GetAttr<Target>(tvm::attr::kTarget);
+    Target target{ffi::UnsafeInit{}};
+    if (target_opt.has_value()) {
       target = target_opt.value();
     }
     return RewriteTilelangKernels(
         std::move(func), "AutoSchedule",
         [&](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
-              context.root, context.outer_ctx, MakeAutoScheduleExtraInfo);
+              context.root, context.outer_ctx, MakeAutoScheduleExtraInfo, {},
+              context.parameter_alias_contract);
           BufferVersionMap buffer_version_overrides =
               scheduled_tir.metadata.buffer_versions;
           ScheduleSingleKernel(context.root->body, target, &scheduled_tir);
@@ -1457,7 +1623,7 @@ tvm::transform::Pass AutoSchedule() {
         });
   };
 
-  return CreatePrimFuncPass(pass_func, 0, "tl.AutoSchedule", {});
+  return CreateFunctionPass(pass_func, 0, "tl.AutoSchedule");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

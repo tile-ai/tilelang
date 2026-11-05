@@ -14,6 +14,11 @@
 Example code can be found at `examples/gemv/example_gemv.py`.
 :::
 
+The generated source and timings below are snapshots from the original Hopper
+benchmark. Recompile and remeasure the kernels with the selected matched
+TileLang/provider/FFI bundle; generated names, code shape and timings are not a
+stable interface or a measurement of this compiler revision.
+
 General matrix-vector multiplication (GEMV) can be viewed as a specialized case of general matrix-matrix multiplication (GEMM). It plays a critical role in deep learning, especially during the inference phase of large language models. In this tutorial, we will optimize GEMV from a thread-level perspective step by step using `TileLang`.
 
 ## Triton Implementation
@@ -257,7 +262,12 @@ With vectorized read, now the kernel finishes in **~0.0084 ms**, which is gettin
 
 ## `tvm_thread_allreduce` Instead of `atomicAdd`
 
-[`tvm_thread_allreduce`](https://tvm.apache.org/docs/reference/api/python/tir/tir.html#tvm.tir.tvm_thread_allreduce) has implemented optimization when making an all-reduce across a number of threads, which should outperfrom out plain smem + `atomidAdd`:
+The retained `T.tvm_thread_allreduce` language helper constructs a native
+`tirx.gpu_thread_allreduce` call with an explicit combiner and identities.
+TileLang's `LowerThreadAllreduce` pass delegates to native `ApplyThreadAllreduce`
+with its shared-scratch and synchronization policies. This can improve on shared-memory
+`atomicAdd`; the timings below are the original Hopper measurements rather
+than measurements of the current compiler revision:
 
 ```python
 def splitk_gemv_vectorized_tvm(

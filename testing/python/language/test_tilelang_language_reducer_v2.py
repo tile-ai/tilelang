@@ -18,7 +18,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 import torch
-import tvm
+import tvm_tirx as tvm
 
 tilelang.testing.set_random_seed()
 
@@ -1422,7 +1422,122 @@ def test_narrow_steering_unsatisfiable_falls_back_wide():
 # fill and the finalize publish copy, which never declare vector loads of it.
 # ---------------------------------------------------------------------------
 
-_VECTOR_RMW_RE = r"float\d+ v\w* = \*\(float\d+\*\)\(acc"
+
+def _accumulator_vector_address(expression, *, load, lanes=4):
+    """Return an exact accumulator address with a matching vector width."""
+    operation = "load" if load else "store"
+    helper = re.fullmatch(rf"tl::{operation}_vector<float{lanes},{4 * lanes},(?:true|false)>\((.+)\)", expression)
+    if helper:
+        pointer = helper.group(1)
+        if re.fullmatch(r"\(\((?:const)?unsignedchar\*\)acc(?:\+.+)?\)", pointer):
+            return "bytes", pointer.replace("(constunsignedchar*)", "(unsignedchar*)")
+    direct = re.fullmatch(rf"\*\(float{lanes}\*\)\((acc(?:\+.+)?)\)", expression)
+    if direct:
+        return "typed", direct.group(1)
+    return None
+
+
+def _has_vector_accumulator_load(source):
+    code = re.sub(r"\s+", "", source)
+    for match in re.finditer(r"\bfloat(\d+)v\w*=([^;]+);", code):
+        lanes = int(match.group(1))
+        if lanes > 1 and _accumulator_vector_address(match.group(2), load=True, lanes=lanes) is not None:
+            return True
+    return False
+
+
+def _assert_vector_accumulator_rmw(source):
+    """Check a float4 accumulator load, both packed adds and matching writeback."""
+    code = re.sub(r"\s+", "", source)
+    stores = []
+    for match in re.finditer(r"tl::store_vector<float4,16,(?:true|false)>\(([^;]+),(\w+)\);", code):
+        call = match.group(0)[:-1]
+        call = call[: -(len(match.group(2)) + 2)] + ")"
+        stores.append((match.start(), _accumulator_vector_address(call, load=False), match.group(2)))
+    for match in re.finditer(r"(\*\(float4\*\)\(acc(?:\+[^;]+)?\))=(\w+);", code):
+        stores.append((match.start(), _accumulator_vector_address(match.group(1), load=False), match.group(2)))
+    definitions = {match.group(1) for match in re.finditer(r"\bfloat4(v\w*)=[^;]+;", code)}
+    for load in re.finditer(r"\bfloat4(v\w*)=([^;]+);", code):
+        address = _accumulator_vector_address(load.group(2), load=True)
+        if address is None:
+            continue
+        for store_position, store_address, result in stores:
+            if store_address != address or store_position <= load.end():
+                continue
+            if f"float4{result};" not in code[: load.start()]:
+                continue
+            components = set()
+            other_values = set()
+            update = (
+                rf"\*\(float2\*\)\(&\({re.escape(result)}\.([xz])\)\)="
+                rf"tl::add2\(\*\(float2\*\)\(&\({re.escape(load.group(1))}\.\1\)\),"
+                r"\*\(float2\*\)\(&\((\w+)\.\1\)\)\);"
+            )
+            for match in re.finditer(update, code[load.end() : store_position]):
+                if match.group(2) in definitions:
+                    components.add(match.group(1))
+                    other_values.add(match.group(2))
+            if components == {"x", "z"} and len(other_values) == 1:
+                return
+    raise AssertionError("expected float4 accumulator load/add/writeback at the same address\n" + source)
+
+
+def _vector_rmw_observer_source(memory):
+    if memory == "helper":
+        load = "tl::load_vector<float4, 16, false>(((const unsigned char*)acc + 16))"
+        store = "tl::store_vector<float4, 16, false>(((unsigned char*)acc + 16), sum_)"
+    else:
+        load = "*(float4*)(acc + 4)"
+        store = "*(float4*)(acc + 4) = sum_"
+    return f"""float4 sum_;
+float4 v_acc = {load};
+float4 v_source = *(float4*)(a_buf + 4);
+*(float2*)(&(sum_.x)) = tl::add2(*(float2*)(&(v_acc.x)), *(float2*)(&(v_source.x)));
+*(float2*)(&(sum_.z)) = tl::add2(*(float2*)(&(v_acc.z)), *(float2*)(&(v_source.z)));
+{store};
+"""
+
+
+@pytest.mark.parametrize("memory", ["helper", "direct"])
+def test_vector_rmw_source_observer_accepts_exact_load_add_store(memory):
+    _assert_vector_accumulator_rmw(_vector_rmw_observer_source(memory))
+
+
+@pytest.mark.parametrize("memory", ["helper", "direct"])
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "scalar_load",
+        "wrong_load_base",
+        "wrong_load_width",
+        "missing_upper_add",
+        "unrelated_add",
+        "wrong_store_base",
+        "wrong_store_width",
+        "wrong_store_address",
+    ],
+)
+def test_vector_rmw_source_observer_rejects_disconnected_or_narrow_access(memory, defect):
+    source = _vector_rmw_observer_source(memory)
+    lines = source.splitlines()
+    if defect == "scalar_load":
+        lines[1] = "float v_acc = acc[4];"
+    elif defect == "wrong_load_base":
+        lines[1] = lines[1].replace("*)acc", "*)other").replace("(acc +", "(other +")
+    elif defect == "wrong_load_width":
+        lines[1] = lines[1].replace("float4", "float2").replace(", 16,", ", 8,")
+    elif defect == "missing_upper_add":
+        lines[4] = ""
+    elif defect == "unrelated_add":
+        lines[3] = lines[3].replace("v_acc.x", "v_source.x")
+    elif defect == "wrong_store_base":
+        lines[5] = lines[5].replace("*)acc", "*)other").replace("(acc +", "(other +")
+    elif defect == "wrong_store_width":
+        lines[5] = lines[5].replace("float4", "float2").replace(", 16,", ", 8,")
+    else:
+        lines[5] = lines[5].replace("+ 16", "+ 32").replace("+ 4", "+ 8")
+    with pytest.raises(AssertionError, match="expected float4 accumulator load/add/writeback"):
+        _assert_vector_accumulator_rmw("\n".join(lines))
 
 
 def _contiguous_update_kernel(M, threads, dtype, run, op="sum"):
@@ -1450,7 +1565,7 @@ def test_update_vectorizes_on_contiguous_layout():
     M, threads = 512, 128
     kern = tl.compile(_contiguous_update_kernel(M, threads, T.float32, run=4), out_idx=-1)
     src = kern.get_kernel_source()
-    assert re.search(_VECTOR_RMW_RE, src), src
+    _assert_vector_accumulator_rmw(src)
     A = torch.randn(M, dtype=torch.float32, device="cuda")
     torch.testing.assert_close(kern(A), A, atol=0, rtol=0)
 
@@ -1466,7 +1581,7 @@ def test_update_vectorizes_wide_plan():
         pass_configs={tilelang.PassConfigKey.TL_REDUCER_FORCE_BASELINE: True},
     )
     src = kern.get_kernel_source()
-    assert re.search(_VECTOR_RMW_RE, src), src
+    _assert_vector_accumulator_rmw(src)
     A = torch.randn(M, dtype=torch.float32, device="cuda")
     torch.testing.assert_close(kern(A), A, atol=0, rtol=0)
 
@@ -1522,7 +1637,7 @@ def test_update_reduction_axis_stays_scalar():
 
     kern = tl.compile(kernel, out_idx=-1)
     src = kern.get_kernel_source()
-    assert re.search(_VECTOR_RMW_RE, src) is None, src
+    assert not _has_vector_accumulator_load(src), src
     A = torch.arange(M * K, dtype=torch.float32, device="cuda").reshape(M, K)
     torch.testing.assert_close(kern(A), A.sum(dim=1), atol=0, rtol=0)
 

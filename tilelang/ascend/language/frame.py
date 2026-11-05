@@ -1,10 +1,15 @@
-"""Execution-region frames for Ascend NPU."""
+"""Ascend execution scopes built from native TIRx regions.
+
+Allocations are lexical Bind statements inside the region that owns them. They
+never need the old SBlock allocation hoisting/stealing protocol.
+"""
 
 from __future__ import annotations
 
-from tilelang import _ffi_api
-from tvm.ffi import register_object
-from tvm.tirx.script.builder.frame import TIRFrame
+from contextvars import ContextVar
+
+from tilelang.language import _native as ir
+from tvm_tirx.tirx.script import ir_builder
 
 __all__ = [
     "Cube",
@@ -19,28 +24,44 @@ __all__ = [
 ]
 
 
-@register_object("tl.CubeFrame")
-class CubeFrame(TIRFrame):
-    """Frame for Cube (AIC) execution region."""
+def _block(name, annotations=None):
+    return ir.attr(
+        None,
+        "tl.sblock",
+        {
+            "name": name,
+            "no_realize": True,
+            "annotations": annotations or {},
+        },
+    )
 
-    pass
+
+class CubeFrame(ir.LoopFrame):
+    """Lexical AIC scope, represented by an ordinary native region."""
+
+    def __init__(self):
+        super().__init__([_block("CUBE")])
+
+    def __enter__(self):
+        super().__enter__()
+        return None
 
 
 def Cube() -> CubeFrame:
     """Construct a Cube (AIC) execution region frame."""
-    return _ffi_api.Cube()  # type: ignore[attr-defined] # pylint: disable=no-member
+    return CubeFrame()
 
 
-@register_object("tl.VectorFrame")
-class VectorFrame(TIRFrame):
-    """Frame for Vector (AIV) execution region.
+class VectorFrame(ir.LoopFrame):
+    """Lexical AIV scope with a native cthread body parameter."""
 
-    In Mix mode, provides a subblock ID variable via ``as`` binding::
-
-        with T.Vector(vector=2) as sid:
-            # sid = asc_get_sub_block_id()
-            ...
-    """
+    def __init__(self, vector_count):
+        if vector_count not in (1, 2):
+            raise ValueError(f"Vector core count must be 1 or 2, got {vector_count}")
+        self.vector_count = int(vector_count)
+        thread = ir_builder.launch_thread("cthread", self.vector_count)
+        self.sid_var = thread.body_params[0]
+        super().__init__([_block("VECTOR", {"vector_count": self.vector_count}), thread])
 
     def __enter__(self):
         super().__enter__()
@@ -48,19 +69,8 @@ class VectorFrame(TIRFrame):
 
 
 def Vector(vector: int = 2) -> VectorFrame:
-    """Construct a Vector (AIV) execution region frame.
-
-    Parameters
-    ----------
-    vector : int
-        Number of AIV cores (1 or 2). Default 2.
-
-    Returns
-    -------
-    res : VectorFrame
-        The VectorFrame used to denote an AIV execution region.
-    """
-    return _ffi_api.Vector(vector)  # type: ignore[attr-defined] # pylint: disable=no-member
+    """Construct an AIV execution scope and expose its sub-core index."""
+    return VectorFrame(vector)
 
 
 def _next_vf_source_index(kind: str) -> int:
@@ -68,139 +78,106 @@ def _next_vf_source_index(kind: str) -> int:
 
     builder = Builder.current()
     if builder is None:
-        # A detached frame can be constructed for inspection without being
-        # attached to IR. Normal lowering always constructs it under a Builder.
         return 0
-
     counter_attr = f"_ascend_{kind}_source_counter"
     source_index = getattr(builder, counter_attr, 0)
     setattr(builder, counter_attr, source_index + 1)
     return source_index
 
 
-@register_object("tl.SimtVFFrame")
-class SimtVFFrame(TIRFrame):
-    """Frame for SimtVF (SIMT Vector Fixed) region.
+def _vf_annotations(kind, latency):
+    annotations = {"tl.vf_source_index": _next_vf_source_index(kind)}
+    if latency > 0:
+        annotations["tl.vf_latency"] = int(latency)
+    return annotations
 
-    The C++ frame generates the ``SIMT_VF`` block and its thread-extent
-    bindings. The Python frame additionally maintains the active SIMT context.
-    """
+
+class SimtVFFrame(ir.LoopFrame):
+    """A SIMT helper region containing three native launch_thread scopes."""
+
+    def __init__(self, thread_extents, latency=0):
+        self.thread_extents = list(thread_extents)
+        threads = [ir_builder.launch_thread("threadIdx." + axis, extent) for axis, extent in zip("xyz", self.thread_extents)]
+        self.thread_vars = [thread.body_params[0] for thread in threads]
+        super().__init__(
+            [
+                _block("SIMT_VF", _vf_annotations("simtvf", latency)),
+                *threads,
+                ir.attr("simtvf", "tl.simtvf_scope", 1),
+            ]
+        )
 
     def __enter__(self):
         super().__enter__()
         from .kernel import SimtVFContext, push_simtvf_context
 
-        ctx = SimtVFContext(
-            thread_vars=list(self.thread_vars),
-            thread_extents=[int(e) for e in self.thread_extents],
-        )
-        push_simtvf_context(ctx)
+        push_simtvf_context(SimtVFContext(self.thread_vars, self.thread_extents))
         return self
 
     def __exit__(self, ptype, value, trace):
         from .kernel import pop_simtvf_context
 
-        pop_simtvf_context()
-        super().__exit__(ptype, value, trace)
+        try:
+            return super().__exit__(ptype, value, trace)
+        finally:
+            pop_simtvf_context()
 
 
 def SimtVF(threads: int | list[int] | tuple = 128, latency: int = 0) -> SimtVFFrame:
-    """Construct a dedicated SIMT vector-fragment region frame.
-
-    Parameters
-    ----------
-    threads : int | list[int] | tuple
-        Thread count for the SimtVF frame. A sequence may contain up to three
-        dimensions; omitted dimensions default to one.
-    latency : int
-        Measured latency in cycles. Zero uses the scheduler's latency model.
-
-    Returns
-    -------
-    res : SimtVFFrame
-        The SimtVFFrame used to denote a SIMT vector-fragment region.
-    """
+    """Construct a SIMT vector-fragment scope with one to three thread axes."""
     if isinstance(threads, int):
         normalized = [threads, 1, 1]
-    elif isinstance(threads, list):
-        if len(threads) > 3:
-            raise ValueError("SimtVF supports at most 3 thread dimensions")
-        normalized = threads + [1] * (3 - len(threads))
-    elif isinstance(threads, tuple):
+    elif isinstance(threads, (list, tuple)):
         if len(threads) > 3:
             raise ValueError("SimtVF supports at most 3 thread dimensions")
         normalized = list(threads) + [1] * (3 - len(threads))
     else:
         raise TypeError(f"threads must be int, list, or tuple, got {type(threads)}")
-
     if any(t <= 0 for t in normalized):
         raise ValueError("SimtVF requires all thread dimensions > 0")
-
-    source_index = _next_vf_source_index("simtvf")
-    return _ffi_api.SimtVF(  # type: ignore[attr-defined] # pylint: disable=no-member
-        normalized, int(latency), source_index
-    )
+    return SimtVFFrame(normalized, int(latency))
 
 
-@register_object("tl.SimdVFFrame")
-class SimdVFFrame(TIRFrame):
-    """Frame for SimdVF (SIMD Vector Fragment) region.
+_inside_simdvf = ContextVar("tilelang_inside_simdvf", default=0)
 
-    This is a register-level SIMD region without thread dimensions. The C++
-    frame generates the ``SIMD_VF`` block and its scope marker.
-    """
+
+class SimdVFFrame(ir.LoopFrame):
+    """Register-level SIMD helper scope, without any synthetic thread axes."""
+
+    def __init__(self, latency=0):
+        super().__init__(
+            [
+                _block("SIMD_VF", _vf_annotations("simdvf", latency)),
+                ir.attr("simdvf", "tl.simdvf_scope", 1),
+            ]
+        )
+        self._token = None
 
     def __enter__(self):
-        if _inside_simdvf[0] == 0:
-            from .simd import _reset_default_mask_cache
+        from .simd import _reset_default_mask_cache
 
+        if not inside_simdvf():
             _reset_default_mask_cache()
-        _inside_simdvf[0] += 1
         super().__enter__()
+        self._token = _inside_simdvf.set(_inside_simdvf.get() + 1)
         return self
 
     def __exit__(self, ptype, value, trace):
-        super().__exit__(ptype, value, trace)
-        _inside_simdvf[0] -= 1
-        if _inside_simdvf[0] == 0:
-            from .simd import _reset_default_mask_cache
+        from .simd import _reset_default_mask_cache
 
-            _reset_default_mask_cache()
-
-
-_inside_simdvf = [0]
+        try:
+            return super().__exit__(ptype, value, trace)
+        finally:
+            _inside_simdvf.reset(self._token)
+            if not inside_simdvf():
+                _reset_default_mask_cache()
 
 
 def inside_simdvf() -> bool:
-    """Return whether the current builder is inside a SimdVF region."""
-    return _inside_simdvf[0] > 0
+    """Whether this builder context is inside a register-level SIMD scope."""
+    return _inside_simdvf.get() > 0
 
 
 def SimdVF(latency: int = 0) -> SimdVFFrame:
-    """Construct a SimdVF region for Ascend NPU MicroAPI operations.
-
-    Parameters
-    ----------
-    latency : int
-        Measured latency in cycles. Zero uses the scheduler's latency model.
-
-    Returns
-    -------
-    res : SimdVFFrame
-        The SimdVFFrame used to denote a register-level SIMD region.
-    """
-    source_index = _next_vf_source_index("simdvf")
-    return _ffi_api.SimdVF(  # type: ignore[attr-defined] # pylint: disable=no-member
-        int(latency), source_index
-    )
-
-
-def _register_eager_var_scope_frames() -> None:
-    from tilelang.language.eager.builder import register_var_scope_frame
-
-    for frame_type in (CubeFrame, VectorFrame, SimtVFFrame, SimdVFFrame):
-        register_var_scope_frame(frame_type)
-
-
-_register_eager_var_scope_frames()
-del _register_eager_var_scope_frames
+    """Construct an Ascend SIMD vector-fragment scope."""
+    return SimdVFFrame(int(latency))

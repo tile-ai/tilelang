@@ -2,53 +2,19 @@
  * \file intrin_rule_hip.cc
  * \brief HIP intrinsic rules.
  */
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/attr.h>
+#include <tvm/tirx/op/gpu.h>
 
-#include "target/intrin_rule.h"
+#include "backend/common/codegen/intrin_rule.h"
 
-namespace tvm {
-namespace codegen {
-namespace intrin {
-// Add float suffix to the intrinsics, HIP fast math.
-using tirx::FLowerIntrinsic;
-
-// HIP has no vectorized fp32 math builtins: exp2f etc. are scalar
-// (float exp2f(float)), with no exp2(float4)/float2 overload (only half2 has
-// packed intrinsics like h2exp2). So HIPMath/FloatSuffix return no name for a
-// vector dtype and DispatchPureExtern leaves the op unlowered, which the HIP
-// source codegen then can't print. Resolve the extern name from the *element*
-// type instead and emit a vector call_pure_extern; CodeGenTileLangHIP::
-// PrintCallExtern lowers it to one scalar call per lane and stores via
-// PrintVecElemStore, which is correct for HIP's packed carrier types
-// (float32x8 -> ulonglong4, float16x4 -> uint2, etc.). Scalars are unchanged.
-template <typename T, bool dtype_from_arg = false>
-inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  DataType dtype = dtype_from_arg ? call->args[0].dtype() : call->dtype;
-  if (!dtype.is_vector()) {
-    return DispatchPureExtern<T, dtype_from_arg>(e);
-  }
-  const OpNode *op = call->op.as<OpNode>();
-  ICHECK(op != nullptr);
-  std::string name = T()(dtype.element_of(), op->name.substr(5));
-  if (name.empty()) {
-    return e;
-  }
-  ffi::Array<PrimExpr> new_args = {StringImm(name)};
-  for (const auto &arg : call->args) {
-    new_args.push_back(arg);
-  }
-  return Call(call->dtype, builtin::call_pure_extern(), new_args,
-              call->annotations);
-}
+namespace tvm::tl {
+namespace {
 
 struct HIPMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float()) {
+  std::string operator()(const PrimType &t, std::string name) const {
+    if (t.MatchesCode(kDLFloat)) {
       // Match TIR's ties-to-even constant folding, not C99 round's ties-away.
       if (name == "round" && (t.bits() == 32 || t.bits() == 64)) {
         name = "nearbyint";
@@ -70,7 +36,7 @@ struct HIPMath {
       default:
         return "";
       }
-    } else if (t.is_bfloat16()) {
+    } else if (t.MatchesElementType(kDLBfloat, 16)) {
       if (name == "fabs") {
         return "__habs";
       } else if (name == "round") {
@@ -78,7 +44,7 @@ struct HIPMath {
       } else {
         return "h" + name;
       }
-    } else if (t.is_int() || t.is_uint()) {
+    } else if (t.MatchesCode(kDLInt, kDLUInt)) {
       switch (t.bits()) {
       case 32:
         return "__" + name;
@@ -93,8 +59,8 @@ struct HIPMath {
 };
 
 struct HIPFastMath : public HIPMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float() && t.bits() == 32) {
+  std::string operator()(const PrimType &t, std::string name) const {
+    if (t.MatchesCode(kDLFloat) && t.bits() == 32) {
       return "__" + name + 'f';
     } else {
       return HIPMath::operator()(t, name);
@@ -104,8 +70,8 @@ struct HIPFastMath : public HIPMath {
 };
 
 struct HIPFastMathTan : public HIPMath {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_float()) {
+  std::string operator()(const PrimType &t, std::string name) const {
+    if (t.MatchesCode(kDLFloat)) {
       switch (t.bits()) {
       case 64:
         return name;
@@ -122,8 +88,8 @@ struct HIPFastMathTan : public HIPMath {
 };
 
 struct HIPPopcount {
-  std::string operator()(DataType t, std::string name) const {
-    if (t.is_uint()) {
+  std::string operator()(const PrimType &t, std::string name) const {
+    if (t.MatchesCode(kDLUInt)) {
       switch (t.bits()) {
       case 32:
         return "__popc";
@@ -137,198 +103,82 @@ struct HIPPopcount {
   }
 };
 
-struct HIPWarpIntrinsic {
-  const Op operator()(DataType t, const Op &orig_op) const {
-    if (orig_op.same_as(builtin::tvm_warp_shuffle())) {
-      return Op::Get("tirx.hip.__shfl_sync");
-    } else if (orig_op.same_as(builtin::tvm_warp_shuffle_up())) {
-      return Op::Get("tirx.hip.__shfl_up_sync");
-    } else {
-      ICHECK(orig_op.same_as(builtin::tvm_warp_shuffle_down()));
-      return Op::Get("tirx.hip.__shfl_down_sync");
-    }
+Type InferShuffleType(const CallObj *call) {
+  return call->args[1].as_or_throw<PrimExpr>().ty();
+}
+
+PrimExpr DispatchHIPShuffle(const PrimExpr &expr) {
+  const auto *call = expr.as<CallObj>();
+  TVM_FFI_ICHECK(call && call->args.size() == 5);
+  const std::string original = call->op.as_or_throw<Op>()->name;
+  const char *name =
+      original == "tirx.gpu_warp_shuffle"        ? "tirx.hip.__shfl_sync"
+      : original == "tirx.gpu_warp_shuffle_up"   ? "tirx.hip.__shfl_up_sync"
+      : original == "tirx.gpu_warp_shuffle_down" ? "tirx.hip.__shfl_down_sync"
+                                                 : "tirx.hip.__shfl_xor_sync";
+  return Call(expr.ty(), Op::Get(name),
+              {call->args[0], call->args[1], call->args[2], call->args[3]},
+              call->attrs, {}, call->loc)
+      .as_or_throw<PrimExpr>();
+}
+
+PrimExpr DispatchHIPActiveMask(const PrimExpr &expr) {
+  const auto *call = expr.as<CallObj>();
+  return Call(expr.ty(), Op::Get("tirx.hip.__activemask"), {}, call->attrs, {},
+              call->loc)
+      .as_or_throw<PrimExpr>();
+}
+
+} // namespace
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  constexpr const char *key = "hip.FLowerIntrinsic";
+  using tirx::FLowerIntrinsic;
+  OpDef("prim.clz")
+      .set_attr<FLowerIntrinsic>(key,
+                                 intrin::DispatchPureExtern<HIPMath, true>);
+  for (const char *name :
+       {"floor", "ceil", "trunc", "fabs", "round", "nearbyint", "exp2", "erf",
+        "cosh", "sinh", "atan", "tanh", "sqrt", "pow", "fmod"}) {
+    OpDef(ffi::String("prim.") + name)
+        .set_attr<FLowerIntrinsic>(
+            key, intrin::DispatchPureExtern<HIPMath, false, true>);
   }
-};
+  for (const char *name :
+       {"exp", "exp10", "log", "log2", "log10", "cos", "sin"}) {
+    OpDef(ffi::String("prim.") + name)
+        .set_attr<FLowerIntrinsic>(
+            key, intrin::DispatchPureExtern<HIPFastMath, false, true>);
+  }
+  OpDef("prim.tan")
+      .set_attr<FLowerIntrinsic>(
+          key, intrin::DispatchPureExtern<HIPFastMathTan, false, true>);
+  OpDef("prim.popcount")
+      .set_attr<FLowerIntrinsic>(key, intrin::DispatchPureExtern<HIPPopcount>);
+  for (const char *name :
+       {"tirx.gpu_warp_shuffle", "tirx.gpu_warp_shuffle_up",
+        "tirx.gpu_warp_shuffle_down", "tirx.gpu_warp_shuffle_xor"}) {
+    OpDef(name).set_attr<FLowerIntrinsic>(key, DispatchHIPShuffle);
+  }
+  OpDef("tirx.gpu_warp_activemask")
+      .set_attr<FLowerIntrinsic>(key, DispatchHIPActiveMask);
 
-static PrimExpr DispatchHIPWarpActiveMask(const PrimExpr &e) {
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  return Call(call->dtype, Op::Get("tirx.hip.__activemask"), {});
+  // Four explicit runtime operands remain after the generic five-slot warp op.
+  for (const char *name : {"__shfl_sync", "__shfl_up_sync", "__shfl_down_sync",
+                           "__shfl_xor_sync"}) {
+    OpDef(ffi::String("tirx.hip.") + name)
+        .signature(sig::arg<IntExpr>("mask"), sig::arg<PrimExpr>("value"),
+                   sig::arg<IntExpr>("lane"), sig::arg<IntExpr>("width"))
+        .set_native_fn_attr<&InferShuffleType>(op_attr::kInferType)
+        .set_attr(tirx::op_attr::kGlobalSymbol, ffi::String(name))
+        .set_attr(op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+        .set_attr<bool>("hip.need_warp_shuffle", true);
+  }
+  OpDef("tirx.hip.__activemask")
+      .set_attr(op_attr::kFixedReturnType, PrimType::UInt(32))
+      .set_attr(tirx::op_attr::kGlobalSymbol, ffi::String("__activemask"))
+      .set_attr(op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr<bool>("hip.need_warp_shuffle", true);
 }
 
-template <typename T> static PrimExpr DispatchHIPShuffle(const PrimExpr &e) {
-  // NOLINTBEGIN(clang-analyzer-cplusplus.InnerPointer)
-  const CallNode *call = e.as<CallNode>();
-  ICHECK(call != nullptr);
-  ICHECK_EQ(call->args.size(), 5); // mask, value, warp_id, width, warp_size
-  ffi::Array<PrimExpr> hip_args{
-      {call->args[0], call->args[1], call->args[2], call->args[3]}};
-  return Call(call->dtype, T()(call->dtype, Downcast<Op>(call->op)), hip_args);
-  // NOLINTEND(clang-analyzer-cplusplus.InnerPointer)
-}
-
-TVM_REGISTER_OP("tirx.clz")
-    .set_attr<FLowerIntrinsic>(
-        "hip.FLowerIntrinsic",
-        DispatchPureExtern<HIPMath, /*dtype_from_arg=*/true>);
-
-TVM_REGISTER_OP("tirx.floor")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.ceil")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.trunc")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.fabs")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.round")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.nearbyint")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.exp")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.exp2")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.exp10")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.erf")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.log")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.log2")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.log10")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.tan")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMathTan>);
-
-TVM_REGISTER_OP("tirx.cos")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.cosh")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.sin")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
-
-TVM_REGISTER_OP("tirx.sinh")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.atan")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.tanh")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.sqrt")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.pow")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-TVM_REGISTER_OP("tirx.popcount")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExtern<HIPPopcount>);
-
-TVM_REGISTER_OP("tirx.tvm_warp_shuffle")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchHIPShuffle<HIPWarpIntrinsic>);
-
-TVM_REGISTER_OP("tirx.tvm_warp_shuffle_up")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchHIPShuffle<HIPWarpIntrinsic>);
-
-TVM_REGISTER_OP("tirx.tvm_warp_shuffle_down")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchHIPShuffle<HIPWarpIntrinsic>);
-
-TVM_REGISTER_OP("tirx.tvm_warp_activemask")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchHIPWarpActiveMask);
-
-TVM_REGISTER_OP("tirx.fmod")
-    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPMath>);
-
-// Register low-level builtin ops.
-TVM_REGISTER_OP("tirx.hip.__shfl_sync")
-    .set_num_inputs(4)
-    .add_argument("mask", "Expr", "The thread mask.")
-    .add_argument("var", "Expr", "The variable to sync.")
-    .add_argument("lane", "Expr", "The source thread id.")
-    .add_argument("width", "Expr",
-                  "The warp thread width, must be a power of 2.")
-    .set_attr<TGlobalSymbol>("TGlobalSymbol", "__shfl_sync")
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque))
-    .set_attr<bool>("hip.need_warp_shuffle", true);
-
-TVM_REGISTER_OP("tirx.hip.__shfl_up_sync")
-    .set_num_inputs(4)
-    .add_argument("mask", "Expr", "The thread mask.")
-    .add_argument("var", "Expr", "The variable to sync.")
-    .add_argument("delta", "Expr", "The source lane id offset to be added.")
-    .add_argument("width", "Expr",
-                  "The warp thread width, must be a power of 2.")
-    .set_attr<TGlobalSymbol>("TGlobalSymbol", "__shfl_up_sync")
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque))
-    .set_attr<bool>("hip.need_warp_shuffle", true);
-
-TVM_REGISTER_OP("tirx.hip.__shfl_down_sync")
-    .set_num_inputs(4)
-    .add_argument("mask", "Expr", "The thread mask.")
-    .add_argument("var", "Expr", "The variable to sync.")
-    .add_argument("delta", "Expr",
-                  "The source lane id offset to be subtracted.")
-    .add_argument("width", "Expr",
-                  "The warp thread width, must be a power of 2.")
-    .set_attr<TGlobalSymbol>("TGlobalSymbol", "__shfl_down_sync")
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque))
-    .set_attr<bool>("hip.need_warp_shuffle", true);
-
-TVM_REGISTER_OP("tirx.hip.__activemask")
-    .set_num_inputs(0)
-    .set_attr<TGlobalSymbol>("TGlobalSymbol", "__activemask")
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure))
-    .set_attr<bool>("hip.need_warp_shuffle", true);
-
-} // namespace intrin
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::tl

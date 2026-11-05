@@ -1,3 +1,4 @@
+import tvm_ffi
 import pytest
 import torch
 import tilelang
@@ -5,20 +6,20 @@ import tilelang.language as T
 import tilelang.testing
 
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir, tirx
 
 
 def _make_vector_not_module(lanes, bitwise=False):
     value = tirx.Var("value", f"boolx{lanes}")
     negated = ~value if bitwise else tirx.Not(value)
-    func = tirx.PrimFunc([value], tirx.Evaluate(negated))
+    func = tirx.Function([value], ir.Evaluate(negated), ret_type=ir.PrimType("void"))
     func = func.with_attr("global_symbol", "vector_not")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     return tvm.IRModule({"vector_not": func})
 
 
 def _build_vector_not_source(lanes):
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the CUDA code generator")
     return build(_make_vector_not_module(lanes), tvm.target.Target("cuda")).inspect_source()
@@ -43,7 +44,10 @@ def test_vector_not_is_scalarized(lanes, carrier_type):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("lanes", [2, 3, 4])
 def test_vector_not_compiles(lanes):
-    build = tvm.get_global_func("target.build.tilelang_cuda")
+    from tilelang.backend.module import get_backend
+
+    get_backend("cuda")  # Direct FFI builds need the owning compiler callback.
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda")
     build(_make_vector_not_module(lanes), tvm.target.Target("cuda"))
 
 
@@ -62,7 +66,10 @@ def test_boolean_bitwise_not_values():
 
 @tilelang.testing.requires_cuda
 def test_vector_boolean_bitwise_not_compiles():
-    build = tvm.get_global_func("target.build.tilelang_cuda")
+    from tilelang.backend.module import get_backend
+
+    get_backend("cuda")
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda")
     build(_make_vector_not_module(2, bitwise=True), tvm.target.Target("cuda"))
 
 

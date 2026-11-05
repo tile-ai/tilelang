@@ -12,8 +12,7 @@
 #include "../layout/utils.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/op/attr.h>
 
 #include <vector>
 
@@ -21,6 +20,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
@@ -52,7 +52,7 @@ const Impl &ResolveScanImpl(Target target, const char *op_name) {
 }
 
 template <typename ScanOpNode>
-void InitScanOpNode(ScanOpNode *node, const Array<PrimExpr> &args,
+void InitScanOpNode(ScanOpNode *node, const Array<Expr> &args,
                     const char *op_name) {
   ICHECK_EQ(args.size(), 4);
   auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
@@ -60,14 +60,15 @@ void InitScanOpNode(ScanOpNode *node, const Array<PrimExpr> &args,
   node->srcRegion_ = src_access.region;
   node->dstRegion_ = dst_access.region;
   node->SetAccessRegions({src_access, dst_access});
-  node->src = node->srcRegion_->buffer;
-  node->dst = node->dstRegion_->buffer;
-  node->dim = args[2].as<IntImm>().value()->value;
-  node->reverse = args[3].as<Bool>().value();
-  ICHECK_LT(node->dim, static_cast<int>(node->src->shape.size()))
+  node->src = RegionTensor(node->srcRegion_);
+  node->dst = RegionTensor(node->dstRegion_);
+  node->dim = GetIntegerArgument(args[2]);
+  node->reverse = (GetIntegerArgument(args[3]) != 0);
+  ICHECK_GE(node->dim, 0);
+  ICHECK_LT(node->dim, static_cast<int>(node->src.shape().size()))
       << "The dim of " << op_name
       << " should be less than the number of dimensions. Got dim=" << node->dim
-      << ", but src has " << node->src->shape.size() << " dims.";
+      << ", but src has " << node->src.shape().size() << " dims.";
 }
 
 template <typename ScanOpNode>
@@ -80,11 +81,11 @@ LayoutMap InferScanLayout(const ScanOpNode &op,
 
   LayoutMap result_map;
 
-  auto make_linear_layout = [](const Buffer &buf) -> Layout {
-    return MakeLinearLayout(buf->shape);
+  auto make_linear_layout = [](const TensorVar &buf) -> Layout {
+    return MakeLinearLayout(buf.shape());
   };
 
-  auto check_or_set_linear_layout = [&](const Buffer &buf) {
+  auto check_or_set_linear_layout = [&](const TensorVar &buf) {
     if (!IsSharedBuffer(buf))
       return;
 
@@ -132,14 +133,14 @@ TileOperator CumMaxOpNode::Clone() const {
   return CumMaxOp(op);
 }
 
-CumSumOp::CumSumOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+CumSumOp::CumSumOp(Array<Expr> args, Map<String, Any> annotations) {
   ObjectPtr<CumSumOpNode> node = make_object<CumSumOpNode>();
   InitScanOpNode(node.get(), args, "cumsum");
   data_ = std::move(node);
 }
 
 Stmt CumSumOpNode::Lower(const LowerArgs &lower_args,
-                         arith::Analyzer *analyzer) const {
+                         sym::AnalyzerObj *analyzer) const {
   return ResolveScanImpl<CumSumImpl>(lower_args.target, "cumsum")
       .lower(*this, lower_args, analyzer);
 }
@@ -150,18 +151,15 @@ LayoutMap CumSumOpNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 TIR_REGISTER_TL_TILE_OP(CumSumOp, cumsum)
-    .set_num_inputs(4)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
-CumMaxOp::CumMaxOp(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+CumMaxOp::CumMaxOp(Array<Expr> args, Map<String, Any> annotations) {
   ObjectPtr<CumMaxOpNode> node = make_object<CumMaxOpNode>();
   InitScanOpNode(node.get(), args, "cummax");
   data_ = std::move(node);
 }
 
 Stmt CumMaxOpNode::Lower(const LowerArgs &lower_args,
-                         arith::Analyzer *analyzer) const {
+                         sym::AnalyzerObj *analyzer) const {
   return ResolveScanImpl<CumMaxImpl>(lower_args.target, "cummax")
       .lower(*this, lower_args, analyzer);
 }
@@ -172,9 +170,6 @@ LayoutMap CumMaxOpNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 TIR_REGISTER_TL_TILE_OP(CumMaxOp, cummax)
-    .set_num_inputs(4)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   CumSumOpNode::RegisterReflection();

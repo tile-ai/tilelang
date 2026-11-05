@@ -1,6 +1,6 @@
 from __future__ import annotations
-from tvm import tirx, IRModule
-from tvm.tirx import PrimFunc
+from tvm_tirx import tirx, IRModule
+from tvm_tirx.tirx import Function
 from .arch import TileDevice
 from .roller.policy import TensorCorePolicy, DefaultPolicy
 from .roller.hint import Hint
@@ -27,10 +27,10 @@ def get_rasterization_code(pannel_width: int = 8) -> str:
 
 
 def get_roller_hints_from_func(
-    func_or_module: tirx.PrimFunc | IRModule, arch: TileDevice, topk: int = 10, tensorcore_only: bool = False, allow_gemv: bool = False
+    func_or_module: tirx.Function | IRModule, arch: TileDevice, topk: int = 10, tensorcore_only: bool = False, allow_gemv: bool = False
 ) -> list[Hint] | None:
     func = None
-    if isinstance(func_or_module, tirx.PrimFunc):
+    if isinstance(func_or_module, tirx.Function):
         func = func_or_module
     elif isinstance(func_or_module, IRModule):
         func = retrieve_func_from_module(func_or_module)
@@ -44,7 +44,7 @@ def get_roller_hints_from_func(
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(func, arch.target, allow_gemv=allow_gemv)
         except Exception as e_msg:
-            logger.debug("Get tensorized func and tags failed: ", e_msg)
+            logger.debug("Get tensorized func and tags failed: %s", e_msg)
             tags = None
         if tags and tensorized_func:
             policy = TensorCorePolicy(func=tensorized_func, arch=arch, tags=tags)
@@ -57,7 +57,7 @@ def get_roller_hints_from_func(
         try:
             tensorized_func, tags = get_tensorized_func_and_tags(func, arch.target, allow_gemv=allow_gemv)
         except Exception as e_msg:
-            logger.debug("Get tensorized func and tags failed: ", e_msg)
+            logger.debug("Get tensorized func and tags failed: %s", e_msg)
             tags = None
         if tags and tensorized_func:
             policy = TensorCorePolicy.from_prim_func(func=tensorized_func, arch=arch, tags=tags)
@@ -75,7 +75,7 @@ def get_roller_hints_from_output_nodes(
         policy = TensorCorePolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
         lints = policy.emit_config(topk)
     except Exception as e_msg:
-        logger.debug(f"Generate hints from output nodes failed: {e_msg}", "fallback to default policy")
+        logger.debug("Generate hints from output nodes failed: %s; fallback to default policy", e_msg)
 
     if len(lints) == 0:
         policy = DefaultPolicy.from_output_nodes(output_nodes, arch=arch, tags=None)
@@ -83,7 +83,7 @@ def get_roller_hints_from_output_nodes(
     return lints
 
 
-def retrieve_func_from_module(ir_module: IRModule) -> PrimFunc:
+def retrieve_func_from_module(ir_module: IRModule) -> Function:
     if not isinstance(ir_module, IRModule):
         raise ValueError("Not supported type: ", type(ir_module))
     assert len(ir_module.get_global_vars()) == 1, "The optimized module should only have one global variable for default schedule."

@@ -6,9 +6,10 @@
 #include <cuda_runtime.h>
 #endif
 
-// TVM's `PrintMMAAssembly` and several `cp.async.*` codegen paths emit
-// GCC-style `__asm__ __volatile__(...)` (see
-// 3rdparty/tvm/src/target/source/ptx.cc and codegen_cuda.cc). NVCC's EDG
+// TileLang's PrintMMAAssembly in src/cuda/codegen/ptx.cc emits GCC-style
+// __asm__ __volatile__(...). The original TVM implementation is recorded at
+// https://github.com/TileLang/tvm/blob/4211874e9e4b8770fd20ad0d98ab80afd1df5028/src/target/cuda/ptx.cc
+// NVCC's EDG
 // frontend on Windows and MSVC do not recognize those keywords, so map them
 // to the portable CUDA spellings on non-GCC/Clang toolchains. TileLang's own
 // template headers already use `asm volatile`, so this only affects

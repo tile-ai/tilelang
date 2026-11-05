@@ -1,10 +1,10 @@
 """CUDA-specific low-level TIR language operators."""
 
 from __future__ import annotations
+from tilelang.language import _native
 
-import tvm
-import tvm.tirx.op as _tvm_op
-from tvm.tirx.expr import IntImm
+from tilelang.language import _native as _tvm_op
+from tilelang.language._native import IntImm
 
 from tilelang.language.tir.exports import CUDA_ONLY_TIR_EXPORTS, SHARED_LEGACY_TIR_EXPORTS
 from tilelang.language.tir.ir import (
@@ -21,11 +21,39 @@ from tilelang.language.tir.ir import (
 from tilelang.language.tir.op import call_intrin as _call_intrin
 
 
-# Unchanged upstream CUDA operators are rebound directly in the CUDA dialect.
-mma_store = _dtype_forward(_tvm_op.mma_store)
-ptx_cp_async_bulk = _dtype_forward(_tvm_op.ptx_cp_async_bulk)
-ptx_mma = _dtype_forward(_tvm_op.ptx_mma)
-ptx_wait_barrier = _op_wrapper(_tvm_op.ptx_wait_barrier)
+# The public CUDA dialect retains dtype-first calls while the provider's
+# primitive constructors accept a native result type through ``ty``.
+@_dtype_forward
+def mma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
+    from tvm_tirx.backend.cuda.op import mma_store as construct
+
+    return construct(m, n, dst_ptr, src_ptr, src_offset, dst_stride, ty=dtype)
+
+
+@_dtype_forward
+def ptx_mma(dtype, *args, **kwargs):
+    from tvm_tirx.backend.cuda.op import ptx_legacy_mma
+
+    return ptx_legacy_mma(*args, **kwargs, ty=dtype)
+
+
+@_dtype_forward
+def ptx_cp_async_bulk(dtype, shared_ptr, shared_offset, global_ptr, global_offset, bytes, barrier_id):
+    return _call_intrin(
+        dtype,
+        "tl.ptx_cp_async_bulk",
+        shared_ptr,
+        shared_offset,
+        global_ptr,
+        global_offset,
+        bytes,
+        barrier_id,
+    )
+
+
+@_op_wrapper
+def ptx_wait_barrier(barrier_id):
+    return _call_intrin("void", "tl.ptx_wait_barrier", barrier_id)
 
 
 @_dtype_forward
@@ -109,8 +137,9 @@ def ptx_mma_sp(
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.ptx_mma_sp(
+    return _call_intrin(
         dtype,
+        "tl.ptx_mma_sp",
         shape,
         A_layout,
         B_layout,
@@ -162,15 +191,15 @@ def ptx_mma_block_scale(
     return _call_intrin(
         accum_dtype,
         _tvm_op.Op.get("tl.ptx_mma_block_scale"),
-        tvm.tirx.StringImm(str(accum_dtype)),
-        tvm.tirx.StringImm(str(shape)),
-        tvm.tirx.StringImm(str(A_layout)),
-        tvm.tirx.StringImm(str(B_layout)),
-        tvm.tirx.StringImm(str(kind)),
+        _native.StringImm(str(accum_dtype)),
+        _native.StringImm(str(shape)),
+        _native.StringImm(str(A_layout)),
+        _native.StringImm(str(B_layout)),
+        _native.StringImm(str(kind)),
         IntImm("int32", scale_vec_size),
-        tvm.tirx.StringImm(str(A_dtype)),
-        tvm.tirx.StringImm(str(B_dtype)),
-        tvm.tirx.StringImm(str(scale_type)),
+        _native.StringImm(str(A_dtype)),
+        _native.StringImm(str(B_dtype)),
+        _native.StringImm(str(scale_type)),
         multiplicand_a,
         a_index,
         multiplicand_b,
@@ -548,7 +577,9 @@ def mma_fill(dtype, local_size, local_ptr, offset):
     call : PrimExpr
         The call expression.
     """
-    return _tvm_op.mma_fill(dtype, local_size, local_ptr, offset)
+    from tvm_tirx.backend.cuda.op import mma_fill as construct
+
+    return construct(local_size, local_ptr, offset, ty=dtype)
 
 
 @_dtype_forward
@@ -579,9 +610,9 @@ def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
     call : PrimExpr
         The call expression (handle-typed).
     """
-    return tvm.tirx.call_intrin(
+    return _native.call_intrin(
         "handle",
-        tvm.tirx.op.Op.get("tl.ptx_ldmatrix"),
+        _native.Op.get("tl.ptx_ldmatrix"),
         trans,
         num,
         src_access_ptr,

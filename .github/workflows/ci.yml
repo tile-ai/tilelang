@@ -299,6 +299,14 @@ jobs:
           set -o pipefail
 
           uv pip install --upgrade pip setuptools wheel
+          python maint/scripts/build_native_artifacts.py stage --destination "${RUNNER_TEMP}/tilelang-native-stage"
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/tilelang-native-stage" --output "${RUNNER_TEMP}/tilelang-native-artifacts" \
+            --frontend uv --role ffi --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+          export UV_FIND_LINKS="${RUNNER_TEMP}/tilelang-native-artifacts"
+          export PIP_FIND_LINKS="${UV_FIND_LINKS}"
+          echo "UV_FIND_LINKS=${UV_FIND_LINKS}" >> "${GITHUB_ENV}"
+          echo "PIP_FIND_LINKS=${PIP_FIND_LINKS}" >> "${GITHUB_ENV}"
           if [[ "${UV_INDEX}" == *"/nightly/"* ]]; then
             uv pip install --prerelease=allow -v torch
           fi
@@ -348,7 +356,15 @@ jobs:
 
       - name: Install project (wheel form)
         run: |
-          uv pip install -v .
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/tilelang-native-stage" --output "${RUNNER_TEMP}/tilelang-native-artifacts" \
+            --frontend uv --role provider --role frontend --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" \
+            --cmake-define TILELANG_BUILD_NATIVE_TESTS=ON
+          cp maint/scripts/verify_native_install.py "${RUNNER_TEMP}/verify_native_install.py"
+          (cd "${RUNNER_TEMP}" && python verify_native_install.py --import-order tilelang-first \
+            --expected-source tilelang-native-stage/manifest.json --output native-install-tilelang-first.json)
+          (cd "${RUNNER_TEMP}" && python verify_native_install.py --import-order tirx-first \
+            --expected-source tilelang-native-stage/manifest.json --output native-install-tirx-first.json)
 
       - name: Show ccache stats
         if: always()
@@ -388,6 +404,13 @@ jobs:
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
             ./python
+
+      - name: Run native IR contract tests
+        if: contains(matrix.runner.toolkit, 'CUDA') || contains(matrix.runner.toolkit, 'ROCm')
+        run: |
+          uv run --no-project python -m pytest -v \
+            testing/ir/test_native_constraint_instances.py \
+            testing/ir/test_native_tileop_access_regions.py
 
       # AMD ROCm tests
       - name: Run ROCm tests with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
@@ -512,8 +535,24 @@ jobs:
           PY
 
           python -m pip install --upgrade pip setuptools wheel
+          python maint/scripts/build_native_artifacts.py stage --destination "${RUNNER_TEMP}/tilelang-native-stage"
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/tilelang-native-stage" --output "${RUNNER_TEMP}/tilelang-native-artifacts" \
+            --frontend uv --role ffi --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+          export UV_FIND_LINKS="${RUNNER_TEMP}/tilelang-native-artifacts"
+          export PIP_FIND_LINKS="${UV_FIND_LINKS}"
+          echo "UV_FIND_LINKS=${UV_FIND_LINKS}" >> "${GITHUB_ENV}"
+          echo "PIP_FIND_LINKS=${PIP_FIND_LINKS}" >> "${GITHUB_ENV}"
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
-          python -m pip install -v .
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/tilelang-native-stage" --output "${RUNNER_TEMP}/tilelang-native-artifacts" \
+            --frontend uv --role provider --role frontend --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" \
+            --cmake-define TILELANG_BUILD_NATIVE_TESTS=ON
+          cp maint/scripts/verify_native_install.py "${RUNNER_TEMP}/verify_native_install.py"
+          (cd "${RUNNER_TEMP}" && python verify_native_install.py --import-order tilelang-first \
+            --expected-source tilelang-native-stage/manifest.json --output native-install-tilelang-first.json)
+          (cd "${RUNNER_TEMP}" && python verify_native_install.py --import-order tirx-first \
+            --expected-source tilelang-native-stage/manifest.json --output native-install-tirx-first.json)
 
       - name: Run AscendC examples
         id: ascendc-examples
@@ -680,6 +719,14 @@ jobs:
           set -o pipefail
 
           uv pip install --upgrade pip setuptools wheel
+          python maint/scripts/build_native_artifacts.py stage --destination "${RUNNER_TEMP}/tilelang-native-stage"
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/tilelang-native-stage" --output "${RUNNER_TEMP}/tilelang-native-artifacts" \
+            --frontend uv --role ffi --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+          export UV_FIND_LINKS="${RUNNER_TEMP}/tilelang-native-artifacts"
+          export PIP_FIND_LINKS="${UV_FIND_LINKS}"
+          echo "UV_FIND_LINKS=${UV_FIND_LINKS}" >> "${GITHUB_ENV}"
+          echo "PIP_FIND_LINKS=${PIP_FIND_LINKS}" >> "${GITHUB_ENV}"
           uv pip install -v -r requirements-test.txt
           echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
           uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
@@ -700,7 +747,15 @@ jobs:
 
       - name: Install project (wheel form)
         run: |
-          uv pip install -v .
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/tilelang-native-stage" --output "${RUNNER_TEMP}/tilelang-native-artifacts" \
+            --frontend uv --role provider --role frontend --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" \
+            --cmake-define TILELANG_BUILD_NATIVE_TESTS=ON
+          cp maint/scripts/verify_native_install.py "${RUNNER_TEMP}/verify_native_install.py"
+          (cd "${RUNNER_TEMP}" && python verify_native_install.py --import-order tilelang-first \
+            --expected-source tilelang-native-stage/manifest.json --output native-install-tilelang-first.json)
+          (cd "${RUNNER_TEMP}" && python verify_native_install.py --import-order tirx-first \
+            --expected-source tilelang-native-stage/manifest.json --output native-install-tirx-first.json)
 
       - name: Show ccache stats
         if: always()

@@ -13,36 +13,56 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
-from tvm.tirx.stmt_functor import post_order_visit
+from tvm_tirx import ir, tirx
+import tvm_ffi
 
 
-def _gemm_calls(func) -> list[tirx.Call]:
+@pytest.fixture(scope="module", autouse=True)
+def _register_native_cuda_dispatch():
+    # Direct native tile-op inspection bypasses BackendContext, which normally
+    # loads the owning implementation registry before its lowering pipeline.
+    tilelang.cuda.register_backend()
+
+
+def _gemm_calls(func) -> list[ir.Call]:
     found = []
 
     def visit(node):
-        if isinstance(node, tirx.Call) and str(getattr(node.op, "name", "")).startswith("tl.tileop.") and "gemm" in str(node.op.name):
+        if isinstance(node, ir.Call) and str(getattr(node.op, "name", "")).startswith("tl.tileop.") and "gemm" in str(node.op.name):
             found.append(node)
 
-    post_order_visit(func.body, visit)
+    tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, visit), order="post")
     return found
 
 
-def _annotations(call: tirx.Call) -> dict:
-    return {str(k): v for k, v in call.annotations.items()}
+def _annotations(call: ir.Call) -> dict:
+    count = int(call.attrs["operand_count"])
+    assert len(call.args) == count + 1
+    decoded = tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[count], call.attrs["annotation_schema"])
+    return {str(k): v for k, v in decoded.items()}
+
+
+def _operands(call):
+    count = int(call.attrs["operand_count"])
+    assert len(call.args) == count + 1
+    return call.args[:count]
+
+
+def _tensor(shape, dtype, *, name, scope):
+    return ir.Var(name, tirx.TensorType(shape, dtype, scope=scope, layout="default"))
 
 
 def _make_blockscaled_op(gemm_api="gemm_blockscaled", *, a_scope="shared", c_scope="shared.tmem", use_2cta=False, **kwargs):
     ab_dtype = "float8_e4m3fn" if c_scope == "shared.tmem" else "float4_e2m1fn"
     sf_scope = "shared.tmem" if c_scope == "shared.tmem" else "shared"
     sf_granularity = 128 if c_scope == "shared.tmem" else 16
-    a = tirx.decl_buffer((128, 128), ab_dtype, name="A", scope=a_scope)
-    b = tirx.decl_buffer((128, 128), ab_dtype, name="B", scope="shared")
-    c = tirx.decl_buffer((128, 256 if use_2cta else 128), "float32", name="C", scope=c_scope)
-    sfa = tirx.decl_buffer((128, 4), "uint32", name="SFA", scope=sf_scope)
-    sfb = tirx.decl_buffer((128, 8 if use_2cta else 4), "uint32", name="SFB", scope=sf_scope)
+    a = _tensor((128, 128), ab_dtype, name="A", scope=a_scope)
+    b = _tensor((128, 128), ab_dtype, name="B", scope="shared")
+    c = _tensor((128, 256 if use_2cta else 128), "float32", name="C", scope=c_scope)
+    sfa = _tensor((128, 4), "uint32", name="SFA", scope=sf_scope)
+    sfb = _tensor((128, 8 if use_2cta else 4), "uint32", name="SFB", scope=sf_scope)
     if gemm_api != "mma_gemm_blockscaled":
-        done = tirx.decl_buffer((1,), "uint64", name="done", scope="shared")
+        done = _tensor((1,), "uint64", name="done", scope="shared")
         kwargs.update(mbar=done[0], use_2cta=use_2cta)
     call = getattr(T, gemm_api)(
         a,
@@ -56,7 +76,7 @@ def _make_blockscaled_op(gemm_api="gemm_blockscaled", *, a_scope="shared", c_sco
         sf_b_granularity_k=sf_granularity,
         **kwargs,
     )
-    return call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    return call.op.get_attr("TLOpBuilder")(_operands(call), _annotations(call))
 
 
 @tilelang.testing.requires_cuda
@@ -83,7 +103,7 @@ def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, ex
     impl_class = op._get_implementation_class(inst, target)
     assert issubclass(impl_class, GemmBlockScaledMixin), impl_class
     impl = impl_class(op)
-    assert impl.SFARegion.buffer.name == "SFA" and impl.SFBRegion.buffer.name == "SFB"
+    assert impl.SFARegion.source.name == "SFA" and impl.SFBRegion.source.name == "SFB"
     assert (impl.sf_a_granularity_k, impl.sf_b_granularity_k) == ((128, 128) if c_scope == "shared.tmem" else (16, 16))
 
 
@@ -151,7 +171,8 @@ def test_gemm_blockscaled_emits_dispatching_call():
     # The unified op has its own op key but does not pin an ISA.
     assert str(call.op.name) == "tl.tileop.gemm_blockscaled"
     # 13 dense slots + SFA + SFB + k_start.
-    assert len(call.args) == 16
+    assert len(_operands(call)) == 16
+    assert len(call.args) == 17  # Native final Tuple carries annotation expression uses.
     assert int(call.args[15]) == 256
     ann = _annotations(call)
     assert int(ann["sf_a_granularity_k"]) == 128
@@ -192,14 +213,14 @@ def test_gemm_blockscaled_parses_to_its_own_tile_op():
             )
 
     (call,) = _gemm_calls(main)
-    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    op = call.op.get_attr("TLOpBuilder")(_operands(call), _annotations(call))
     assert isinstance(op, GemmBlockScaled)
     assert isinstance(op, Gemm)
     assert op.is_blockscaled
     # Inherited dense fields and the block-scaled fields both resolve.
     assert (int(op.m), int(op.n), int(op.k)) == (128, 128, 128)
-    assert op.sfaRegion.buffer.name == "sfa"
-    assert op.sfbRegion.buffer.name == "sfb"
+    assert op.sfaRegion.source.name == "sfa"
+    assert op.sfbRegion.source.name == "sfb"
     assert int(op.sfKStart) == 256
     assert op.transB and not op.transA
 
@@ -207,9 +228,9 @@ def test_gemm_blockscaled_parses_to_its_own_tile_op():
     # and a short call is rejected up front instead of indexing out of range.
     dense_builder = tvm.ir.Op.get("tl.tileop.gemm").get_attr("TLOpBuilder")
     with pytest.raises(Exception, match="exactly 13 positional slots, but got 16"):
-        dense_builder(call.args, call.annotations)
+        dense_builder(_operands(call), _annotations(call))
     with pytest.raises(Exception, match="exactly 13 positional slots, but got 12"):
-        dense_builder(call.args[:12], call.annotations)
+        dense_builder(call.args[:12], _annotations(call))
 
 
 def test_gemm_blockscaled_records_use_2cta_and_sf_layout():
@@ -240,7 +261,7 @@ def test_gemm_blockscaled_records_use_2cta_and_sf_layout():
     (call,) = _gemm_calls(main)
     ann = _annotations(call)
     assert int(ann["use_2cta"]) == 1
-    assert isinstance(ann["sf_layout"], tirx.StringImm)
+    assert isinstance(ann["sf_layout"], ir.StringImm)
     assert ann["sf_layout"].value == "rowmajor"
 
 
@@ -298,18 +319,19 @@ def test_tcgen05_gemm_blockscaled_pins_tcgen05_path():
 
     (call,) = _gemm_calls(main)
     assert str(call.op.name) == "tl.tileop.tcgen05_gemm_blockscaled"
-    assert len(call.args) == 16
+    assert len(_operands(call)) == 16
+    assert len(call.args) == 17  # Native final Tuple carries annotation expression uses.
     # The explicit op's builder enforces TCGEN05 even if call annotations
     # omit the frontend's marker, and still constructs the common scale-aware node.
     from tilelang.tileop import GemmBlockScaled
 
     annotations = _annotations(call)
     annotations.pop("is_tcgen05")
-    op = call.op.get_attr("TLOpBuilder")(call.args, annotations)
+    op = call.op.get_attr("TLOpBuilder")(_operands(call), annotations)
     assert isinstance(op, GemmBlockScaled)
     assert op.isTcgen05
-    assert op.sfaRegion.buffer.name == "sfa"
-    assert op.sfbRegion.buffer.name == "sfb"
+    assert op.sfaRegion.source.name == "sfa"
+    assert op.sfbRegion.source.name == "sfb"
 
 
 @tilelang.testing.requires_cuda
@@ -336,13 +358,13 @@ def test_blockscaled_gemm_without_mbar_requires_explicit_async(gemm_api):
             )
 
     (call,) = _gemm_calls(main)
-    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    op = call.op.get_attr("TLOpBuilder")(_operands(call), _annotations(call))
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
     with target:
         layouts = op.infer_layout(target, 128)
 
         def lower():
-            return op.lower(layouts, target, tvm.ir.Range(0, 128), tirx.Var("tx", "int32"), tirx.const(0, "int32"))
+            return op.lower(layouts, target, tvm.ir.Range(0, 128), ir.Var("tx", "int32"), ir.const(0, "int32"))
 
         if gemm_api == "gemm_blockscaled":
             with pytest.raises(ValueError, match="requires a valid mbarrier"):
@@ -385,12 +407,12 @@ def test_gemm_blockscaled_waits_implicitly_like_gemm(gemm_api):
             )
 
     (call,) = _gemm_calls(main)
-    op = call.op.get_attr("TLOpBuilder")(call.args, call.annotations)
+    op = call.op.get_attr("TLOpBuilder")(_operands(call), _annotations(call))
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
-    loop_phase = tirx.Var("loop_phase", "int32")
+    loop_phase = ir.Var("loop_phase", "int32")
     with target:
         layouts = op.infer_layout(target, 128)
-        lowered = str(op.lower(layouts, target, tvm.ir.Range(0, 128), tirx.Var("tx", "int32"), loop_phase))
+        lowered = str(op.lower(layouts, target, tvm.ir.Range(0, 128), ir.Var("tx", "int32"), loop_phase))
 
     assert "ptx_tcgen05_mma_blockscaled_ss" in lowered
     assert "tcgen05_mma_arrive" in lowered
@@ -426,10 +448,11 @@ def test_mma_gemm_blockscaled_records_sf_layout():
 
     (call,) = _gemm_calls(main)
     assert str(call.op.name) == "tl.tileop.gemm_blockscaled"
-    assert len(call.args) == 16
+    assert len(_operands(call)) == 16
+    assert len(call.args) == 17  # Native final Tuple carries annotation expression uses.
     # No mbarrier for the synchronous warp-level path: the slot holds the
     # integer placeholder the C++ side ignores.
-    assert isinstance(call.args[10], tirx.IntImm)
+    assert isinstance(call.args[10], ir.IntImm)
     ann = _annotations(call)
     assert "is_tcgen05" not in ann
     assert ann["sf_layout"].value == "blockscaled_chunk_kmajor"

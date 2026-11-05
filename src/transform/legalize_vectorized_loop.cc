@@ -18,99 +18,69 @@
  */
 
 /*!
- * \file layout_inference.cc
- * \brief infer the fragment/shared memory layout
+ * \file legalize_vectorized_loop.cc
+ * \brief Plan vector widths on native loop domains before vector IR expansion.
  */
-
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/s_tir/utils.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "../ir/analyzer.h"
+#include "ir/stmt_functor.h"
+#include "loop_vectorize.h"
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
 
-#include <queue>
-
-#include "../op/parallel.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "loop_partition.h"
-#include "loop_vectorize.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using arith::IRMutatorWithAnalyzer;
-
-// Class to legalize vectorized loops by transforming them appropriately
-class LoopVectorizedLegalizer : IRMutatorWithAnalyzer {
+namespace tvm::tl {
+namespace {
+class LoopVectorizedLegalizer : public tl::StmtExprMutatorWithAnalyzer {
 public:
-  // Static method to substitute and transform the given PrimFunc
-  static PrimFunc Substitute(PrimFunc f) {
-    arith::Analyzer analyzer;
-    // Create an instance of the legalizer with the analyzer
-    LoopVectorizedLegalizer substituter(&analyzer);
-    // Get a mutable copy of the function node
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    // Apply the legalizer to the function body
-    fptr->body = substituter.VisitStmt(f->body);
-    return f;
+  LoopVectorizedLegalizer(const sym::Analyzer &analyzer,
+                          ffi::Optional<Target> target)
+      : StmtExprMutatorWithAnalyzer(analyzer), target_(std::move(target)) {}
+  using StmtExprMutatorWithAnalyzer::Mutate;
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+
+  ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    For loop = StmtExprMutatorWithAnalyzer::Mutate_(op, mode)
+                   .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                   .as_or_throw<For>();
+    if (loop->kind != ForKind::kVectorized)
+      return loop;
+    loop.CopyOnWrite()->kind = ForKind::kDefault;
+    int width = GetVectorizeSize(loop, GetSyncedAnalyzer(), {}, target_);
+    if (width <= 1 &&
+        !GetSyncedAnalyzer()->CanProve(loop->end - loop->begin <= 1)) {
+      LOG(WARNING)
+          << "T.vectorized loop over `" << loop->var
+          << "` remains serial because no valid vector access plan was found";
+    }
+    return VectorizeLoop(loop, GetSyncedAnalyzer(), {}, width, target_);
   }
 
 private:
-  // Constructor initializing the base class with the analyzer
-  LoopVectorizedLegalizer(arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer) {}
-
-  bool IsNonTrivialVectorizedLoop(const For &loop) {
-    PrimExpr extent = analyzer_->Simplify(loop->extent);
-    auto extent_as_int = as_const_int(extent);
-    return !extent_as_int || *extent_as_int > 1;
-  }
-
-  // Override the VisitStmt_ method to handle ForNode (loop statements)
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Visit and potentially modify the loop node
-    For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    // If the loop is not vectorized, proceed with the default behavior
-    if (for_node->kind != ForKind::kVectorized) {
-      return for_node;
-    }
-    // Change the loop kind from vectorized to serial
-    for_node.CopyOnWrite()->kind = ForKind::kSerial;
-    int vectorize_size = GetVectorizeSize(for_node, analyzer_);
-    if (vectorize_size <= 1 && IsNonTrivialVectorizedLoop(for_node)) {
-      LOG(WARNING) << "T.vectorized loop over `" << for_node->loop_var
-                   << "` with extent " << for_node->extent
-                   << " is lowered as a serial loop because TileLang could "
-                   << "not find a valid vectorization plan. Scalar accumulator "
-                   << "updates inside the loop are a common cause; move "
-                   << "reductions to T.unroll or T.serial if this is intended.";
-    }
-    // Apply vectorization transformation to the loop
-    return VectorizeLoop(for_node, analyzer_, {}, vectorize_size);
-  }
+  ffi::Optional<Target> target_;
 };
+} // namespace
 
-// Create a pass that legalizes vectorized loops in the IRModule
 tvm::transform::Pass LegalizeVectorizedLoop() {
-  using namespace tirx::transform;
-  // Define the transformation function to be applied
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return LoopVectorizedLegalizer::Substitute(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    VectorizeMemoryScope memory_scope(function);
+    auto analyzer = CreateTileLangAnalyzer();
+    // The Function's bound target is authoritative even when the pass is run
+    // without an ambient context, or inside a context for another target.
+    // Unbound direct callers retain the helper's explicit-context fallback.
+    auto mutator = ffi::make_object<LoopVectorizedLegalizer>(
+        analyzer, function->GetAttr<Target>(tvm::attr::kTarget));
+    auto original = function->body;
+    function.CopyOnWrite()->body =
+        mutator->Mutate(original).ValueOrUnchanged(original);
+    return function;
   };
-  // Create and return a PrimFunc pass with the transformation function
-  return CreatePrimFuncPass(pass_func, 0, "tl.LegalizeVectorizedLoop", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.LegalizeVectorizedLoop");
 }
-
-// Register the pass globally so it can be used in the compilation pipeline
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
-                        LegalizeVectorizedLoop);
+  ffi::reflection::GlobalDef().def("tl.transform.LegalizeVectorizedLoop",
+                                   LegalizeVectorizedLoop);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

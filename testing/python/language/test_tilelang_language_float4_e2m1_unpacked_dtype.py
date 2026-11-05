@@ -5,9 +5,9 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm as tvm
+from tvm_tirx import ir
 from tilelang import _ffi_api
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 
 
 def test_float4_e2m1_unpacked_dtype_properties():
@@ -26,7 +26,9 @@ def test_float4_e2m1_unpacked_tir_dtype_tag():
         # IR-level tag only; runtime numeric conversion is intentionally absent.
         T_lang.evaluate(T_lang.float4_e2m1_unpacked(0.0))
 
-    assert main.body.value.dtype.is_float4_e2m1_unpacked()
+    assert len(main.body.seq) == 1
+    assert isinstance(main.body.seq[0], ir.Evaluate)
+    assert main.body.seq[0].value.ty == ir.PrimType("custom[float4_e2m1_unpacked]8")
 
 
 def test_float4_e2m1_unpacked_distinct_from_packed():
@@ -67,7 +69,7 @@ def test_float4_simt_copy_bans_packed_to_unpacked():
             A_shared = T.alloc_shared((32, 64), T.float4_e2m1_unpacked)
             T.copy(A[by * 32, bx * 64], A_shared)
 
-    with pytest.raises(tvm.TVMError, match="SIMT copy from packed global float4_e2m1fn"):
+    with pytest.raises(RuntimeError, match="SIMT copy from packed global float4_e2m1fn"):
         tilelang.compile(main, target="cuda")
 
 

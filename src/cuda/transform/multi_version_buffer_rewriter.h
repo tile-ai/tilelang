@@ -11,7 +11,7 @@
 namespace tvm {
 namespace tl {
 
-tirx::PrimFunc ApplyMultiVersionBufferRewriter(tirx::PrimFunc f);
+tirx::Function ApplyMultiVersionBufferRewriter(tirx::Function function);
 
 } // namespace tl
 } // namespace tvm

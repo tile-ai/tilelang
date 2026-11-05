@@ -74,6 +74,16 @@ def LowerSharedTmem():
     return _ffi_api.LowerSharedTmem()  # type: ignore
 
 
+def LowerClusterLaunch():
+    """Convert per-kernel cluster requirements to native CUDA launch operands.
+
+    Run after LowerTileOp and LowerSharedTmem and before FinalizeAnnotations.
+    Final grid/block extents, dynamic shared bytes and launch flags are resolved
+    later by LowerDeviceKernelLaunch, after device preparation.
+    """
+    return _ffi_api.LowerClusterLaunch()  # type: ignore
+
+
 def LowerSharedBarrier():
     """LowerSharedBarrier"""
     return _ffi_api.LowerSharedBarrier()  # type: ignore
@@ -184,6 +194,7 @@ __all__ = [
     "InjectFenceProxy",
     "InjectTcgen05Fence",
     "LowerBlackwell2SM",
+    "LowerClusterLaunch",
     "LowerHopperIntrin",
     "LowerLDGSTG",
     "LowerL2Persistent",

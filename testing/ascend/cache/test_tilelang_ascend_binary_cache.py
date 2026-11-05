@@ -17,7 +17,7 @@ import pytest
 import tilelang
 from tilelang.cache.ascend_binary_cache import AscendBinaryCache
 from tilelang.env import env
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 AIBIN = AscendBinaryCache.binary_format
 

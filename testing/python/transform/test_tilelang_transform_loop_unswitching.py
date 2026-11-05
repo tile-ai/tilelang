@@ -1,25 +1,34 @@
 import numpy as np
+import pytest
 
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
 
+def _apply(function, config=None):
+    # The public TileLang pipeline supplies this alias contract. Explicit
+    # alias exceptions and plain native Functions are covered independently.
+    function = function.with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
+    before = ir.save_json(function)
+    with tvm.transform.PassContext(config=config or {}):
+        module = tl.transform.LoopUnswitching()(tvm.IRModule({"main": function}))
+    assert ir.save_json(function) == before
+    assert tirx.analysis.check_well_formed(module)
+    return module
+
+
 def _check(original, transformed):
-    func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tl.transform.LoopUnswitching()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), map_free_vars=True)
+    _check_with_config(original, transformed, {})
 
 
 def _check_with_config(original, transformed, config):
-    func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    with tvm.transform.PassContext(config=config):
-        mod = tl.transform.LoopUnswitching()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), map_free_vars=True)
+    module = _apply(original, config)
+    expected = transformed.with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
+    tvm.ir.assert_structural_equal(module["main"], expected, map_free_vars=True)
 
 
 def test_basic_hoist():
@@ -51,41 +60,21 @@ def test_basic_hoist():
     _check(before, expected)
 
 
-def test_hoist_preserves_non_unit_loop_step():
-    output_buffer = tvm.tirx.decl_buffer((6,), "int32", name="output")
-    cond_buffer = tvm.tirx.decl_buffer((1,), "int32", name="cond")
-    i = tvm.tirx.Var("i", "int32")
-    body = tvm.tirx.IfThenElse(
-        tvm.tirx.BufferLoad(cond_buffer, [0]) > 0,
-        tvm.tirx.BufferStore(output_buffer, 1, [i]),
-        None,
-    )
-    loop = tvm.tirx.For(
-        i,
-        1,
-        5,
-        tvm.tirx.ForKind.SERIAL,
-        body,
-        step=tvm.tirx.IntImm("int32", 2),
-    )
-    before = tvm.tirx.PrimFunc(
-        [output_buffer.data, cond_buffer.data],
-        loop,
-        buffer_map={
-            output_buffer.data: output_buffer,
-            cond_buffer.data: cond_buffer,
-        },
-    ).with_attr("global_symbol", "main")
-
-    mod = tvm.IRModule.from_expr(before)
-    mod = tl.transform.LoopUnswitching()(mod)
-    executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
-
-    output = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
-    cond = tvm.runtime.tensor(np.ones(1, dtype="int32"))
-    executable["main"](output, cond)
-
-    np.testing.assert_array_equal(output.numpy(), np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
+@pytest.mark.parametrize("backend", ["c", "llvm"])
+def test_hoist_preserves_non_unit_loop_step(backend):
+    output = ir.Var("output", tirx.TensorType((6,), "int32"))
+    cond = ir.Var("cond", tirx.TensorType((1,), "int32"))
+    i = ir.Var("i", "int32")
+    body = ir.If(ir.TensorLoad(cond, [0]) > 0, [ir.TensorStore(output, [i], ir.IntImm("int32", 1))], None)
+    loop = ir.For(i, 1, 6, 2, ir.ForKind.DEFAULT, [body])
+    before = tirx.Function([output, cond], [loop])
+    mod = _apply(before)
+    target = "c" if backend == "c" else {"kind": "llvm", "mcpu": "generic"}
+    executable = tirx.compile(mod, target=target)
+    result = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
+    condition = tvm.runtime.tensor(np.ones(1, dtype="int32"))
+    executable(result, condition)
+    np.testing.assert_array_equal(result.numpy(), np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
 
 
 def test_hoist_with_else():
@@ -340,12 +329,12 @@ def test_unswitch_restores_ssa_after_simplify_keeps_bind():
             if condition:
                 out[i] = 1
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.Simplify()(mod)
+    mod = tvm.IRModule({"main": before.with_attr("global_symbol", "main")})
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tl.transform.LoopUnswitching()(mod)
 
-    assert tvm.tirx.analysis.verify_ssa(mod["main"])
-    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+    assert tirx.analysis.check_well_formed(mod)
+    tirx.transform.StmtSimplify()(mod)
 
 
 def test_unswitch_freshens_non_condition_bind_definitions():
@@ -358,11 +347,11 @@ def test_unswitch_freshens_non_condition_bind_definitions():
             if enabled > 0:
                 out[i] = value
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.IRModule({"main": before.with_attr("global_symbol", "main")})
     mod = tl.transform.LoopUnswitching()(mod)
 
-    assert tvm.tirx.analysis.verify_ssa(mod["main"])
-    tvm.s_tir.transform.RenormalizeSplitPattern()(mod)
+    assert tirx.analysis.check_well_formed(mod)
+    tirx.transform.StmtSimplify()(mod)
 
 
 def test_multiple_identical_conditions():

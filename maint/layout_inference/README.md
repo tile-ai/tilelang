@@ -66,7 +66,8 @@ io-aware scorer on the in-tree CuTe layout algebra
   exactly. `CUTE_STATEMENTS` in a case supplies real enclosing-buffer
   shapes where they differ from the fragment shape (offset_region_copy).
 
-Current status: 112/112 statements match with a 100% conversion hit rate.
+The original validation recorded 112/112 matching statements and a 100%
+conversion hit rate. Rerun the harness for the selected compiler revision.
 The production scorer in `layout_cost_model.cc` uses this formulation; its
 mode arithmetic was additionally audited once, in-tree, against a full
 exact-enumeration oracle across the layout-relevant test corpus (~264
@@ -86,7 +87,7 @@ violates a case's documented contract.
 Each `cases/*.py` defines:
 
 - `VARIANTS: dict[name -> callable]` — each callable returns a fresh
-  `PrimFunc` (lazy so construction happens under the driver's target).
+  `Function` produced by `@T.prim_func` (lazy so construction happens under the driver's target).
 - optional `check(variant, model, result)` — assertions that must hold
   regardless of the golden, e.g. "this fragment must be fully replicated
   under the io-aware model".
@@ -103,8 +104,10 @@ where each layout is a STRUCTURED dict (`common.layout_to_dict`):
 Golden diffs therefore point at the exact field that moved
 (`replicate: expected 1, got 128`), and checks assert on fields
 (`frag["replicate"] == 1`) instead of substring-matching a print format.
-The driver snapshots the `layout_map` block annotation plus each parallel
-nest's `parallel_loop_layout` annotation (see `common.py`).
+The driver decodes lexical `tl.annotation` statements carrying `layout_map`
+plus each parallel nest's `parallel_loop_layout` in its
+`tl.loop.annotations` region (see `common.py`). The analysis keys are native
+tensor variables; they are not entries in a `PrimFunc.buffer_map`.
 
 ## Current cases
 

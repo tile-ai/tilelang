@@ -66,6 +66,7 @@ namespace tl {
 namespace cuda {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
@@ -91,15 +92,14 @@ constexpr int kTmemBytesPerSM = 256 * 1024; // 512 b32 columns of 128 rows
 // wrapper, 0 when absent.
 int AnnotatedMinBlocksPerSM(const Stmt &body) {
   int min_blocks = 0;
-  PostOrderVisit(body, [&](const ObjectRef &node) {
-    if (const auto *attr = node.as<AttrStmtNode>()) {
-      if (attr->attr_key == attr::kMinBlocksPerSM) {
-        if (const auto *imm = attr->value.as<IntImmNode>()) {
-          if (imm->value <= 0) {
-            LOG(FATAL) << "min_blocks_per_sm must be positive, got: "
-                       << imm->value;
-          }
-          min_blocks = static_cast<int>(imm->value);
+  VisitNativePostOrder(body, [&](const ObjectRef &node) {
+    if (const auto *region = node.as<RegionStmtObj>()) {
+      if (auto attr = WSAttribute(region)) {
+        if (attr.value().at("key").cast<String>() == attr::kMinBlocksPerSM) {
+          int64_t count = GetIntegerAnnotation(attr.value().at("value"));
+          TVM_FFI_CHECK_GT(count, 0, ValueError)
+              << "min_blocks_per_sm must be positive";
+          min_blocks = static_cast<int>(count);
         }
       }
     }
@@ -146,24 +146,21 @@ const char *RoleName(Role role) {
 }
 
 // Warp-private storage: values there cannot be handed between roles.
-bool IsPrivateBuffer(const Buffer &buffer) {
+bool IsPrivateBuffer(const TensorVar &buffer) {
   return IsLocalBuffer(buffer, true) || IsFragmentBuffer(buffer);
 }
 
 // Storage that may carry a cross-role handoff through a pipeline.
-bool IsPipelineBuffer(const Buffer &buffer) {
+bool IsPipelineBuffer(const TensorVar &buffer) {
   return IsSharedBuffer(buffer) || IsTmemBuffer(buffer);
 }
 
 // The pipeline depth a scope contributes: its loop's num_stages, else 1.
-int ScopeStages(const For &loop) {
-  if (!loop.defined())
+int ScopeStages(const Optional<For> &loop) {
+  if (!loop)
     return 1;
-  if (auto value = loop->annotations.Get("num_stages")) {
-    if (auto integer = value.value().try_cast<Integer>())
-      return std::max<int64_t>(1, integer.value()->value);
-    if (const auto *imm = value.value().as<IntImmNode>())
-      return std::max<int64_t>(1, imm->value);
+  if (auto value = loop.value()->annotations.Get("num_stages")) {
+    return std::max<int64_t>(1, GetIntegerAnnotation(*value));
   }
   return 1;
 }
@@ -191,7 +188,7 @@ struct SchedOp {
   bool guarded{false};  // under an if: a skipped write carries state
   bool roleless{false}; // touches only warp-private state
   RoleMask roles;       // a fixed single role, or the grown set when roleless
-  std::vector<Buffer> reads, writes;      // buffer accesses, guards included
+  std::vector<TensorVar> reads, writes;   // buffer accesses, guards included
   std::vector<Var> read_vars, write_vars; // scalar uses / Bind defs
   // Ownership per resolved storage (nullopt = untouched): leaves seeded
   // by BuildPipelines, scopes written by ResolveOwnership.
@@ -209,8 +206,9 @@ struct SchedOp {
 Role RoleOf(const SchedOp &op) { return op.roles.TheRole(); }
 
 struct SchedScope : SchedOp {
-  For loop;         // a sequential-loop (serial / unrolled) scope
-  While while_loop; // a T.ws_op-wrapped while scope; both undefined = root
+  Optional<For> loop; // a sequential-loop (serial / unrolled) scope
+  Optional<While>
+      while_loop; // a T.ws_op-wrapped while scope; both undefined = root
   std::vector<SchedOp *> entries; // ops and child scopes, in source order
   // T.annotate_ws_pipeline_depth in this scope's body: buffer var -> depth.
   std::unordered_map<Var, int64_t, ObjectPtrHash, ObjectPtrEqual>
@@ -235,7 +233,7 @@ std::string ScopeName(const SchedScope *scope) {
 
 struct Pipeline {
   String name;
-  Buffer allocation;
+  TensorVar allocation{ffi::UnsafeInit{}};
   int depth{1};
   Role producer{Role::kWorker};
   Role consumer{Role::kWorker};
@@ -247,72 +245,74 @@ struct Pipeline {
 };
 
 // Append the detector's results for `stmt` to the given vectors.
-void CollectAccess(const Stmt &stmt, std::vector<Buffer> *reads,
-                   std::vector<Buffer> *writes, std::vector<Var> *read_vars,
-                   std::vector<Var> *write_vars) {
-  MemoryAccessDetector detector;
+bool CollectAccess(const Stmt &stmt, std::vector<TensorVar> *reads,
+                   std::vector<TensorVar> *writes, std::vector<Var> *read_vars,
+                   std::vector<Var> *write_vars,
+                   const PipelineMemoryAnalysis *memory) {
+  MemoryAccessDetector detector(memory);
   detector.Analyze(stmt);
-  for (const BufferRegion &region : detector.GetReadRegions())
-    reads->push_back(region->buffer);
-  if (writes) {
-    for (const BufferRegion &region : detector.GetWriteRegions())
-      writes->push_back(region->buffer);
-  }
+  for (const TensorRegion &region : detector.GetReadRegions())
+    reads->push_back(RegionTensor(region));
+  if (writes)
+    for (const TensorRegion &region : detector.GetWriteRegions())
+      writes->push_back(RegionTensor(region));
   for (const Var &var : detector.GetReadVars())
     read_vars->push_back(var);
-  if (write_vars) {
+  if (write_vars)
     for (const Var &var : detector.GetWriteVars())
       write_vars->push_back(var);
-  }
+  return !detector.HasUnknownAccess();
 }
 
-// Builds the op/scope structure from the normalized body. ConstrVisitor
-// maintains the lexical constraint stack, so an op's guards are the
-// conditions on the stack where it appears. Ops are leaves: recorded,
-// not recursed into.
 class StructureBuilder : public ConstrVisitor {
 public:
-  explicit StructureBuilder(Target target) : target_(std::move(target)) {}
-
+  using ConstrVisitor::Visit;
+  using ConstrVisitor::Visit_;
+  explicit StructureBuilder(Target target, const PipelineMemoryAnalysis *memory)
+      : target_(std::move(target)), memory_(memory) {}
   std::vector<std::unique_ptr<SchedOp>> ops;
-  std::vector<std::unique_ptr<SchedScope>> scopes; // [0] is the root
+  std::vector<std::unique_ptr<SchedScope>> scopes;
 
   bool Build(const Stmt &body) {
     auto root = std::make_unique<SchedScope>();
     root->id = kWSRootScopeId;
     scope_stack_.push_back(root.get());
     scopes.push_back(std::move(root));
-    VisitStmt(body);
+    Visit(body);
+    if (!ok_)
+      LOG(WARNING) << "AutoWarpSpecialization skipped: cannot resolve an "
+                      "access or control-flow contract";
     return ok_;
   }
 
 private:
-  // Conditions evaluated on every control path to the current statement;
-  // assumes are facts, not evaluated code.
-  void ChargeConditions(std::vector<Buffer> *reads,
+  void Collect(const Stmt &stmt, std::vector<TensorVar> *reads,
+               std::vector<TensorVar> *writes, std::vector<Var> *read_vars,
+               std::vector<Var> *write_vars) {
+    ok_ = CollectAccess(stmt, reads, writes, read_vars, write_vars, memory_) &&
+          ok_;
+  }
+
+  void ChargeConditions(std::vector<TensorVar> *reads,
                         std::vector<Var> *read_vars) {
-    for (const Constr &constr : constr_stack_) {
+    for (const Constr &constr : constr_stack_)
       if (constr.kind == Constr::kConstr && !constr.is_assume)
-        CollectAccess(Evaluate(constr.value), reads, nullptr, read_vars,
-                      nullptr);
-    }
+        Collect(Evaluate(constr.value), reads, nullptr, read_vars, nullptr);
   }
 
   void MakeOp(const String &id, const Stmt &stmt) {
-    ICHECK(op_ids_.insert(id).second)
+    TVM_FFI_CHECK(op_ids_.insert(id).second, ValueError)
         << "two statements carry ws op id '" << id << "'";
     auto op = std::make_unique<SchedOp>();
     op->id = id;
     op->parent = scope_stack_.back();
-    op->is_bind = stmt.as<BindNode>() != nullptr;
+    op->is_bind = stmt.as<BindObj>() != nullptr;
     op->guarded = if_depth_ > 0;
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      if (const auto *call = eval->value.as<CallNode>())
+    if (const auto *eval = stmt.as<EvaluateObj>())
+      if (const auto *call = eval->value.as<CallObj>())
         op->tile_op = ParseOperator(GetRef<Call>(call));
-    }
     op->kind = ClassifyStmt(stmt, target_);
-    CollectAccess(stmt, &op->reads, &op->writes, &op->read_vars,
-                  &op->write_vars);
+    Collect(stmt, &op->reads, &op->writes, &op->read_vars, &op->write_vars);
     ChargeConditions(&op->reads, &op->read_vars);
     scope_stack_.back()->entries.push_back(op.get());
     ops.push_back(std::move(op));
@@ -329,112 +329,124 @@ private:
     return child;
   }
 
-  void VisitStmt_(const IfThenElseNode *op) final {
+  Result Visit_(const IfObj *op) final {
     if (!ok_)
-      return;
-    if (op->else_case.defined()) {
+      return std::nullopt;
+    if (op->else_case) {
       LOG(WARNING) << "AutoWarpSpecialization skipped: if-else branches are "
                       "not supported";
       ok_ = false;
-      return;
+      return std::nullopt;
     }
     ++if_depth_;
-    ConstrVisitor::VisitStmt_(op); // guards the branch with its condition
+    ConstrVisitor::Visit_(op);
     --if_depth_;
+    return std::nullopt;
   }
 
-  void VisitStmt_(const ForNode *op) final {
+  Result Visit_(const ForObj *op) final {
     if (!ok_)
-      return;
+      return std::nullopt;
     auto id = op->annotations.Get(kWSOpIdKey);
-    ICHECK(id.has_value())
+    TVM_FFI_CHECK(id.has_value(), ValueError)
         << "AutoWarpSpecialization normalized loop is missing " << kWSOpIdKey;
-    // Sequential loops are scopes; parallel / vectorized loops are one op.
-    if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) {
-      MakeOp(ExtractOpId(id.value()), GetRef<For>(op));
-      return;
+    if (op->kind != ForKind::kDefault && op->kind != ForKind::kUnrolled) {
+      MakeOp(ExtractOpId(*id), GetRef<For>(op));
+      return std::nullopt;
     }
-    SchedScope *child = OpenScope(ExtractOpId(id.value()));
+    SchedScope *child = OpenScope(ExtractOpId(*id));
     child->loop = GetRef<For>(op);
-    CollectAccess(Evaluate(op->min), &child->reads, nullptr, &child->read_vars,
-                  nullptr);
-    CollectAccess(Evaluate(op->extent), &child->reads, nullptr,
-                  &child->read_vars, nullptr);
-    if (op->step.defined())
-      CollectAccess(Evaluate(op->step.value()), &child->reads, nullptr,
-                    &child->read_vars, nullptr);
+    Collect(Evaluate(op->begin), &child->reads, nullptr, &child->read_vars,
+            nullptr);
+    Collect(Evaluate(op->end), &child->reads, nullptr, &child->read_vars,
+            nullptr);
+    Collect(Evaluate(op->step), &child->reads, nullptr, &child->read_vars,
+            nullptr);
     ChargeConditions(&child->reads, &child->read_vars);
-    ConstrVisitor::VisitStmt_(op); // guards the body with the loop range
+    ConstrVisitor::Visit_(op);
     scope_stack_.pop_back();
+    return std::nullopt;
   }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
+  Result Visit_(const RegionStmtObj *op) final {
     if (!ok_)
-      return;
-    if (op->attr_key == kWSOpIdKey) {
-      // A wrapped while loop is a scope; any other wrapped statement is
-      // one opaque op.
-      if (const auto *wl = op->body.as<WhileNode>()) {
-        SchedScope *child = OpenScope(ExtractOpId(Any(op->value)));
-        child->while_loop = GetRef<While>(wl);
-        CollectAccess(Evaluate(wl->condition), &child->reads, nullptr,
-                      &child->read_vars, nullptr);
-        ChargeConditions(&child->reads, &child->read_vars);
-        ConstrVisitor::VisitStmt_(wl); // guards the body with the condition
-        scope_stack_.pop_back();
-        return;
+      return std::nullopt;
+    if (auto attr = WSAttribute(op)) {
+      auto key = attr.value().at("key").cast<String>();
+      if (key == kWSOpIdKey) {
+        String id = ExtractOpId(attr.value().at("value"));
+        if (op->body.size() == 1) {
+          if (const auto *wl = op->body[0].as<WhileObj>()) {
+            SchedScope *child = OpenScope(id);
+            child->while_loop = GetRef<While>(wl);
+            Collect(Evaluate(wl->condition), &child->reads, nullptr,
+                    &child->read_vars, nullptr);
+            ChargeConditions(&child->reads, &child->read_vars);
+            ConstrVisitor::Visit_(wl);
+            scope_stack_.pop_back();
+            return std::nullopt;
+          }
+        }
+        MakeOp(id, op->body.size() == 1 ? op->body[0] : Stmt(op->body));
+        return std::nullopt;
       }
-      MakeOp(ExtractOpId(Any(op->value)), op->body);
-      return;
-    }
-    if (op->attr_key == kWSPipelineDepthKey) {
-      auto gmap = op->node.as<Map<ObjectRef, ObjectRef>>();
-      ICHECK(gmap.has_value())
-          << "T.annotate_ws_pipeline_depth must carry a map";
-      for (const auto &[key, val] : gmap.value()) {
-        auto var = key.as<Var>();
-        const auto *depth = val.as<IntImmNode>();
-        ICHECK(var && depth && depth->value >= 1)
-            << "T.annotate_ws_pipeline_depth entries must map a buffer to a "
-               "positive depth";
-        scope_stack_.back()->pipeline_depth[var.value()] = depth->value;
+      if (key == kWSPipelineDepthKey) {
+        auto entries = attr.value().at("node").cast<Map<Any, Any>>();
+        for (const auto &[tensor, value] : entries) {
+          Var var = tensor.cast<Var>();
+          auto root = memory_ ? memory_->Root(var) : Optional<Var>(var);
+          int64_t depth = GetIntegerAnnotation(value);
+          TVM_FFI_CHECK(root && depth >= 1, ValueError)
+              << "T.annotate_ws_pipeline_depth entries must map a tensor to a "
+                 "positive depth";
+          scope_stack_.back()->pipeline_depth[*root] = depth;
+        }
       }
     }
-    // Assumptions enter the constraint stack; other wrappers (kernel
-    // metadata) are transparent.
-    ConstrVisitor::VisitStmt_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
-  void VisitStmt_(const EvaluateNode *op) final {
+  Result Visit_(const EvaluateObj *op) final {
     if (!ok_)
-      return;
-    if (const auto *call = op->value.as<CallNode>()) {
-      if (auto id = call->annotations.Get(kWSOpIdKey)) {
-        MakeOp(ExtractOpId(Any(id.value())), GetRef<Stmt>(op));
-        return;
+      return std::nullopt;
+    if (auto id = WSNextOpId(GetRef<Stmt>(op))) {
+      TVM_FFI_CHECK(!next_bind_id_, ValueError) << "Repeated WS Bind marker";
+      next_bind_id_ = *id;
+      return std::nullopt;
+    }
+    if (const auto *call = op->value.as<CallObj>()) {
+      if (call->op.same_as(Op::Get("tl.annotation")))
+        return std::nullopt;
+      if (auto id = ReadWSCall(call).annotations.Get(kWSOpIdKey)) {
+        MakeOp(ExtractOpId(*id), GetRef<Stmt>(op));
+        return std::nullopt;
       }
     }
-    LOG(FATAL) << "AutoWarpSpecialization: Evaluate carries no ws op id";
+    TVM_FFI_THROW(ValueError)
+        << "AutoWarpSpecialization: Evaluate carries no ws op id";
   }
 
-  // The normalizer wraps these statement forms with an id; reaching one
-  // bare is its bug.
-  void VisitStmt_(const BufferStoreNode *op) final {
-    LOG(FATAL) << "AutoWarpSpecialization: BufferStore carries no ws op id";
+  Result Visit_(const BindObj *op) final {
+    TVM_FFI_CHECK(next_bind_id_, ValueError)
+        << "AutoWarpSpecialization: Bind carries no ws op id";
+    MakeOp(*next_bind_id_, GetRef<Stmt>(op));
+    next_bind_id_ = std::nullopt;
+    return std::nullopt;
   }
-  void VisitStmt_(const BindNode *op) final {
-    LOG(FATAL) << "AutoWarpSpecialization: Bind carries no ws op id";
+  Result Visit_(const TensorStoreObj *) final {
+    TVM_FFI_THROW(ValueError)
+        << "AutoWarpSpecialization: TensorStore carries no ws op id";
   }
-  void VisitStmt_(const WhileNode *op) final {
-    LOG(FATAL) << "AutoWarpSpecialization: while loop carries no ws op id";
-  }
-  void VisitStmt_(const SBlockNode *op) final {
-    LOG(FATAL) << "AutoWarpSpecialization: block carries no ws op id";
+  Result Visit_(const WhileObj *) final {
+    TVM_FFI_THROW(ValueError)
+        << "AutoWarpSpecialization: while loop carries no ws op id";
   }
 
   Target target_;
-  bool ok_ = true;   // cleared when the kernel shape is unsupported
-  int if_depth_ = 0; // enclosing IfThenElse frames
+  const PipelineMemoryAnalysis *memory_;
+  Optional<String> next_bind_id_;
+  bool ok_ = true;
+  int if_depth_ = 0;
   std::vector<SchedScope *> scope_stack_;
   std::set<String> op_ids_;
 };
@@ -447,7 +459,7 @@ public:
   RoleBasedScheduler(Target target, int worker_threads)
       : target_(std::move(target)), worker_threads_(worker_threads) {}
 
-  Optional<WSSchedule> Run(const SBlock &block, const Stmt &body) {
+  Optional<WSSchedule> Run(const NativeWSKernel &kernel, const Stmt &body) {
     if (!TargetHasBulkCopy(target_)) {
       LOG(WARNING)
           << "AutoWarpSpecialization skipped: target has no bulk-copy (TMA) "
@@ -460,9 +472,10 @@ public:
                       "of 128 so issuer warps start a fresh warpgroup";
       return std::nullopt;
     }
-    CollectAnnotatedLayouts(block, layout_map_);
+    CollectAnnotatedLayouts(RebuildNativeWSKernel(kernel, body), layout_map_);
+    memory_ = kernel.memory;
     annotated_min_blocks_ = AnnotatedMinBlocksPerSM(body);
-    alloc_buffers_ = block->alloc_buffers;
+    alloc_buffers_ = kernel.allocations;
     if (!BuildStructure(body) || !ClassifyOps())
       return std::nullopt;
     IndexBufferUses();
@@ -473,7 +486,7 @@ public:
       for (SchedScope *s = op->parent; s != nullptr; s = s->parent)
         s->roles.Add(op->roles);
     }
-    if (!BuildPipelines(block))
+    if (!BuildPipelines(kernel))
       return std::nullopt;
     if (pipelines_.empty()) {
       LOG(WARNING)
@@ -488,11 +501,11 @@ private:
   // ---- structure ------------------------------------------------------------
 
   bool BuildStructure(const Stmt &body) {
-    StructureBuilder builder(target_);
-    if (!builder.Build(body))
+    auto builder = make_object<StructureBuilder>(target_, memory_);
+    if (!builder->Build(body))
       return false;
-    ops_ = std::move(builder.ops);
-    scopes_ = std::move(builder.scopes);
+    ops_ = std::move(builder->ops);
+    scopes_ = std::move(builder->scopes);
     root_ = scopes_.front().get();
     return true;
   }
@@ -506,8 +519,8 @@ private:
     const auto *copy = op.tile_op.as<CopyNode>();
     if (copy == nullptr)
       return true; // Im2Col carries no annotated shared layout
-    const Buffer &shared = store ? copy->src : copy->dst;
-    auto it = layout_map_.find(shared->data);
+    const TensorVar &shared = store ? copy->src : copy->dst;
+    auto it = layout_map_.find(shared);
     if (it == layout_map_.end())
       return true;
     const auto &[buffer, layout] = it->second;
@@ -524,7 +537,7 @@ private:
         // backpressure cannot be expressed yet.
         if (const auto *copy = op.tile_op.as<CopyNode>()) {
           if (auto mask = copy->annotations.Get("cluster_mask")) {
-            if (const auto *imm = mask.value().as<IntImmNode>();
+            if (const auto *imm = mask.value().as<IntImmObj>();
                 imm == nullptr || imm->value != 0) {
               LOG(WARNING) << "AutoWarpSpecialization skipped: op '" << op.id
                            << "' is a cluster multicast copy";
@@ -584,10 +597,10 @@ private:
       // Compound or plain statement op (PreprocessIR enforced no hosted
       // asynchronous tile op).
       bool private_writes = true;
-      for (const Buffer &buffer : op.writes)
+      for (const TensorVar &buffer : op.writes)
         private_writes = private_writes && IsPrivateBuffer(buffer);
       bool duplicable_reads = true;
-      for (const Buffer &buffer : op.reads) {
+      for (const TensorVar &buffer : op.reads) {
         duplicable_reads =
             duplicable_reads &&
             (IsPrivateBuffer(buffer) || (op.is_bind && IsGlobalBuffer(buffer)));
@@ -633,7 +646,7 @@ private:
         queue.push_back(def);
         return true;
       };
-      auto enqueue_reads = [&](const std::vector<Buffer> &reads,
+      auto enqueue_reads = [&](const std::vector<TensorVar> &reads,
                                const std::vector<Var> &read_vars,
                                const SchedOp *self, const String &user) {
         for (const Var &var : read_vars) {
@@ -642,10 +655,10 @@ private:
               !enqueue(it->second, user))
             return false;
         }
-        for (const Buffer &buffer : reads) {
+        for (const TensorVar &buffer : reads) {
           if (!IsPrivateBuffer(buffer))
             continue;
-          auto it = buffer_uses_.find(buffer->data);
+          auto it = buffer_uses_.find(buffer);
           if (it == buffer_uses_.end())
             continue;
           for (SchedOp *writer : it->second.writers) {
@@ -717,16 +730,16 @@ private:
   };
 
   void IndexBufferUses() {
-    auto touch = [&](const Buffer &buffer, SchedOp *op) -> BufferUses & {
-      BufferUses &uses = buffer_uses_[buffer->data];
+    auto touch = [&](const TensorVar &buffer, SchedOp *op) -> BufferUses & {
+      BufferUses &uses = buffer_uses_[buffer];
       if (uses.touches.empty() || uses.touches.back() != op)
         uses.touches.push_back(op);
       return uses;
     };
     for (const auto &op : ops_) {
-      for (const Buffer &buffer : op->reads)
+      for (const TensorVar &buffer : op->reads)
         touch(buffer, op.get()).readers.push_back(op.get());
-      for (const Buffer &buffer : op->writes)
+      for (const TensorVar &buffer : op->writes)
         touch(buffer, op.get()).writers.push_back(op.get());
     }
   }
@@ -735,7 +748,7 @@ private:
 
   // Resolves one storage into pipelines, collected innermost first.
   struct StorageResolution {
-    Buffer allocation;
+    TensorVar allocation{ffi::UnsafeInit{}};
     std::vector<Pipeline> pipelines;
     bool failed{false};
   };
@@ -911,11 +924,10 @@ private:
     bool loop_carried = false;
     bool guarded_writer = false;
     std::optional<int64_t> annotated;
-    if (auto vit =
-            pipeline->scope->pipeline_depth.find(pipeline->allocation->data);
+    if (auto vit = pipeline->scope->pipeline_depth.find(pipeline->allocation);
         vit != pipeline->scope->pipeline_depth.end())
       annotated = vit->second;
-    const BufferUses &uses = buffer_uses_.at(pipeline->allocation->data);
+    const BufferUses &uses = buffer_uses_.at(pipeline->allocation);
     for (const SchedOp *op : uses.writers) {
       if (!op->parent->IsNestedIn(pipeline->scope)) {
         // A skipped outside write would leave the adjacent slot stale.
@@ -971,15 +983,15 @@ private:
     return true;
   }
 
-  bool BuildPipelines(const SBlock &block) {
+  bool BuildPipelines(const NativeWSKernel &kernel) {
     // A global buffer written by one role must not be touched by another;
     // globals have no cross-role synchronization mechanism.
     for (const auto &writer : ops_) {
-      for (const Buffer &buffer : writer->writes) {
+      for (const TensorVar &buffer : writer->writes) {
         if (!IsGlobalBuffer(buffer))
           continue;
         RoleMask others;
-        for (const SchedOp *op : buffer_uses_[buffer->data].touches)
+        for (const SchedOp *op : buffer_uses_[buffer].touches)
           others.Add(op->roles);
         if (!writer->roles.ContainsAll(others)) {
           LOG(WARNING) << "AutoWarpSpecialization skipped: global buffer '"
@@ -991,10 +1003,10 @@ private:
     }
 
     std::vector<StorageResolution> resolutions;
-    for (const Buffer &allocation : block->alloc_buffers) {
+    for (const TensorVar &allocation : kernel.allocations) {
       if (!IsPipelineBuffer(allocation))
         continue;
-      auto it = buffer_uses_.find(allocation->data);
+      auto it = buffer_uses_.find(allocation);
       if (it == buffer_uses_.end() || it->second.writers.empty())
         continue; // never written by a scheduled op
       RoleMask roles;
@@ -1018,8 +1030,8 @@ private:
     for (const auto &scope : scopes_)
       scope->ownership.assign(resolutions.size(), std::nullopt);
     for (size_t k = 0; k < resolutions.size(); ++k) {
-      const Buffer &allocation = resolutions[k].allocation;
-      for (SchedOp *op : buffer_uses_.at(allocation->data).touches) {
+      const TensorVar &allocation = resolutions[k].allocation;
+      for (SchedOp *op : buffer_uses_.at(allocation).touches) {
         Role role = RoleOf(*op);
         op->ownership[k] = Ownership{role, role};
       }
@@ -1092,15 +1104,15 @@ private:
       return annotated_min_blocks_;
     int64_t smem_bytes = 0;
     int64_t tmem_bytes = 0;
-    for (const Buffer &buf : alloc_buffers_) {
+    for (const TensorVar &buf : alloc_buffers_) {
       if (!IsPipelineBuffer(buf))
         continue;
-      int64_t bytes = (buf->dtype.bits() * buf->dtype.lanes() + 7) / 8;
-      for (const PrimExpr &extent : buf->shape) {
-        const auto *imm = extent.as<IntImmNode>();
+      int64_t bytes = (buf.dtype().bits() * buf.dtype().lanes() + 7) / 8;
+      for (const PrimExpr &extent : buf.shape()) {
+        const auto *imm = extent.as<IntImmObj>();
         if (imm == nullptr)
           return 1;
-        bytes *= imm->value;
+        bytes *= static_cast<int64_t>(imm->value);
       }
       int64_t versions = 1;
       for (const Pipeline &pipeline : pipelines_)
@@ -1165,7 +1177,7 @@ private:
       num_warps = std::max(num_warps, p.warp_hi);
     num_warps = (num_warps + 3) / 4 * 4;
     int max_threads = static_cast<int>(
-        target_->GetAttr<Integer>("max_num_threads").value_or(1024)->value);
+        target_->GetAttr<int64_t>("max_num_threads").value_or(1024));
     if (num_warps * 32 > max_threads) {
       LOG(WARNING) << "AutoWarpSpecialization skipped: " << num_warps
                    << " warps exceed the target's " << max_threads
@@ -1179,8 +1191,9 @@ private:
 
     Array<WSPipeline> ws_pipelines;
     for (const Pipeline &pipeline : pipelines_) {
-      ws_pipelines.push_back(WSPipeline(
-          pipeline.name, Array<Buffer>{pipeline.allocation}, pipeline.depth));
+      ws_pipelines.push_back(WSPipeline(pipeline.name,
+                                        Array<TensorVar>{pipeline.allocation},
+                                        pipeline.depth));
     }
 
     // Scopes, innermost first, root last.
@@ -1244,7 +1257,8 @@ private:
   Target target_;
   int worker_threads_;
   int annotated_min_blocks_ = 0;
-  Array<Buffer> alloc_buffers_;
+  Array<TensorVar> alloc_buffers_;
+  const PipelineMemoryAnalysis *memory_{nullptr};
   BufferLayoutMap layout_map_;
   std::vector<std::unique_ptr<SchedOp>> ops_;
   std::vector<std::unique_ptr<SchedScope>> scopes_; // [0] is the root
@@ -1256,11 +1270,11 @@ private:
 
 } // namespace
 
-ffi::Optional<WSSchedule> RoleBasedSchedule(const SBlock &block,
+ffi::Optional<WSSchedule> RoleBasedSchedule(const NativeWSKernel &kernel,
                                             const Stmt &body,
                                             int worker_threads,
                                             const Target &target) {
-  return RoleBasedScheduler(target, worker_threads).Run(block, body);
+  return RoleBasedScheduler(target, worker_threads).Run(kernel, body);
 }
 
 } // namespace cuda

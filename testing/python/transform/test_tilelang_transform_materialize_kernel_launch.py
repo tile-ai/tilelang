@@ -13,42 +13,46 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang
 import tilelang.testing
-from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
+import tvm_ffi
+import tvm_tirx as tvm
+from tvm_tirx import ir
+from tilelang.testing.ir import collect_nodes
 
 
 def _collect(root, kind):
-    found = []
-
-    def _visit(node):
-        if isinstance(node, kind):
-            found.append(node)
-
-    post_order_visit(root.body if hasattr(root, "body") else root, _visit)
-    return found
+    return collect_nodes(root, kind)
 
 
-def _launch_placeholders(func):
-    return [
-        stmt
-        for stmt in _collect(func, tvm.tirx.Bind)
-        if isinstance(stmt.value, tvm.tirx.Call) and str(stmt.value.op.name) == "tl.launch_thread_idx"
-    ]
+def _kernel_regions(func):
+    return [node for node in _collect(func, ir.RegionStmt) if node.op.name == "tl.launch_kernel"]
+
+
+def _launch_thread_vars(func):
+    # A native Kernel region defines the grid coordinates followed by the
+    # three logical thread identities; it does not emit placeholder Calls.
+    return [variable for region in _kernel_regions(func) for variable in region.body_params[len(region.args[1].fields) :]]
 
 
 def _thread_extents(func):
-    """{thread_tag: extent} of every thread_extent AttrStmt in `func`."""
-    extents = {}
-    for attr in _collect(func, tvm.tirx.AttrStmt):
-        if attr.attr_key == "thread_extent":
-            extents[str(attr.node.thread_tag)] = int(attr.value)
-    return extents
+    return {
+        str(region.args[0].value): int(region.args[1]) for region in _collect(func, ir.RegionStmt) if region.op.name == "tirx.launch_thread"
+    }
 
 
-def _root_block(func):
-    blocks = [b for b in _collect(func, tvm.tirx.SBlock) if b.name_hint == "tilelang_root"]
-    assert len(blocks) == 1
-    return blocks[0]
+def _launch_hints(func):
+    regions = _kernel_regions(func)
+    if regions:
+        assert len(regions) == 1
+        region = regions[0]
+        return tvm_ffi.get_global_func("tl.DecodeAnnotations")(region.args[4], region.attrs.get("hint_schema", ["map"]))
+    metadata = []
+    for region in _collect(func, ir.RegionStmt):
+        if region.op.name == "tl.attr":
+            fields = tvm_ffi.get_global_func("tl.DecodeAnnotations")(region.args[0], region.attrs["annotation_schema"])
+            if fields["key"] == "tl.kernel":
+                metadata.append(fields["value"])
+    assert len(metadata) == 1
+    return metadata[0]
 
 
 def _materialize(func, target: str, **kwargs):
@@ -121,35 +125,50 @@ def test_materialize_launch_preserves_existing_grid_annotations():
             A[bx] = 1
 
     materialized = _materialize(main, "c", lower_thread_binding=False)
-    loop = _collect(materialized, tvm.tirx.For)[0]
-    assert int(loop.annotations["backend.grid_axis"]) == 7
-    assert bool(loop.annotations["backend.parallel_grid"])
+    loop = _collect(materialized, ir.For)[0]
+    # Direct loop metadata is a lexical operand region until finalization.
+    carriers = [region for region in _collect(materialized, ir.RegionStmt) if region.op.name == "tl.attr"]
+    fields = [tvm_ffi.get_global_func("tl.DecodeAnnotations")(region.args[0], region.attrs["annotation_schema"]) for region in carriers]
+    (annotations,) = [entry["value"] for entry in fields if entry["key"] == "tl.loop.annotations"]
+    assert int(annotations["backend.grid_axis"]) == 7
+    assert bool(annotations["backend.parallel_grid"])
+    assert loop.kind == ir.ForKind.DEFAULT and int(loop.end - loop.begin) == 2
 
 
 def test_materialize_launch_does_not_read_cpu_parallel_config():
+    source = _parallel_kernel()
     with tvm.transform.PassContext(config={"tl.cpu_parallel": True}):
-        materialized = _materialize(_parallel_kernel(), "c", lower_thread_binding=False)
-    assert all("tl.cpu_grid_dim" not in loop.annotations for loop in _collect(materialized, tvm.tirx.For))
+        enabled = _materialize(source, "c", lower_thread_binding=False)
+    with tvm.transform.PassContext(config={"tl.cpu_parallel": False}):
+        disabled = _materialize(source, "c", lower_thread_binding=False)
+    # Native grid provenance is independent of the later CPU parallel policy.
+    # Compare the complete results so a config-dependent change cannot hide.
+    tvm.ir.assert_structural_equal(enabled, disabled)
 
 
 def test_traced_launch_records_grid_and_thread_placeholders():
     func = _parallel_kernel()
 
-    grid = [f for f in _collect(func, tvm.tirx.For) if f.kind == tvm.tirx.ForKind.THREAD_BINDING]
-    assert [str(f.thread_binding.thread_tag) for f in grid] == ["blockIdx.x"]
-
-    placeholders = _launch_placeholders(func)
-    assert [p.var.name for p in placeholders] == ["tx", "ty", "tz"]
-    assert [int(p.value.args[0]) for p in placeholders] == [0, 1, 2]
+    (region,) = _kernel_regions(func)
+    assert list(region.attrs["grid_tags"]) == ["blockIdx.x"]
+    assert [int(value) for value in region.args[0].fields] == [0]
+    assert [int(value) for value in region.args[1].fields] == [2]
+    assert [int(value) for value in region.args[2].fields] == [1]
+    assert len(region.body_params) == 4
+    assert region.body_params[0].ty.dtype == "int32"
+    assert [var.name for var in _launch_thread_vars(func)] == ["tx", "ty", "tz"]
 
     # No threads= means no SIMT hint is recorded; the backend picks.
-    assert "tl.launch_threads" not in _root_block(func).annotations
+    assert not region.attrs["threads_was_specified"]
+    assert not region.args[3].fields
     assert _thread_extents(func) == {}
 
 
 def test_traced_launch_records_requested_threads_as_annotation():
     func = _parallel_kernel(threads=(64, 2))
-    threads = _root_block(func).annotations["tl.launch_threads"]
+    (region,) = _kernel_regions(func)
+    assert region.attrs["threads_was_specified"]
+    threads = region.args[3].fields
     assert [int(x) for x in threads] == [64, 2, 1]
     # Still only placeholders: the frontend does not bind threadIdx itself.
     assert _thread_extents(func) == {}
@@ -161,8 +180,8 @@ def test_kernel_launch_annotations_are_recorded_on_the_root_block():
         with T.Kernel(1, threads=64, prelude="// hi", cluster_dims=2):
             A[0] = 0
 
-    annotations = _root_block(main).annotations
-    assert [int(x) for x in annotations["tl.launch_threads"]] == [64, 1, 1]
+    annotations = _launch_hints(main)
+    assert [int(x) for x in _kernel_regions(main)[0].args[3].fields] == [64, 1, 1]
     assert [int(x) for x in annotations["cluster_dims"]] == [2, 1, 1]
     assert str(annotations["pragma_import_c"]) == "// hi"
 
@@ -223,13 +242,13 @@ def test_cpu_dialect_kernel_has_no_threads():
         with Tcpu.Kernel(1, prelude="// cpu"):
             A[0] = 0
 
-    assert str(_root_block(ok).annotations["pragma_import_c"]) == "// cpu"
+    assert str(_launch_hints(ok)["pragma_import_c"]) == "// cpu"
 
 
 def test_simt_binds_requested_threads():
     func = _materialize(_parallel_kernel(threads=64), "cuda")
     assert _thread_extents(func) == {"blockIdx.x": 2, "threadIdx.x": 64, "threadIdx.y": 1, "threadIdx.z": 1}
-    assert _launch_placeholders(func) == []
+    assert _launch_thread_vars(func) == []
 
 
 def test_simt_uses_backend_default_when_threads_omitted():
@@ -241,7 +260,7 @@ def test_simt_uses_backend_default_when_threads_omitted():
 
 
 def test_simt_requires_threads_when_backend_has_no_default():
-    with pytest.raises(Exception, match="did not specify threads="):
+    with pytest.raises(Exception, match="needs threads= or a backend default"):
         _materialize(_parallel_kernel(), "cuda", default_threads=None)
 
 
@@ -249,22 +268,24 @@ def test_simt_preserves_thread_var_identity():
     """The Var handed out by T.get_thread_binding() at trace time must be the
     Var bound by the threadIdx.x thread_extent after materialization."""
     func = _thread_indexed_kernel()
-    (placeholder,) = [p for p in _launch_placeholders(func) if p.var.name == "tx"]
+    (thread_var,) = [p for p in _launch_thread_vars(func) if p.name == "tx"]
 
     lowered = _materialize(func, "cuda")
-    (attr,) = [a for a in _collect(lowered, tvm.tirx.AttrStmt) if str(a.node.thread_tag) == "threadIdx.x"]
-    assert attr.node.var.same_as(placeholder.var)
-    body_vars = [v for v in _collect(lowered, tvm.tirx.Var) if v.name == "tx"]
-    assert body_vars and all(v.same_as(placeholder.var) for v in body_vars)
+    (launch,) = [a for a in _collect(lowered, ir.RegionStmt) if a.op.name == "tirx.launch_thread" and a.args[0].value == "threadIdx.x"]
+    assert launch.body_params[0].same_as(thread_var)
+    body_vars = [v for v in _collect(lowered, ir.Var) if v.name == "tx"]
+    assert body_vars and all(v.same_as(thread_var) for v in body_vars)
 
 
 def test_non_simt_drops_thread_placeholders():
-    func = _materialize(_parallel_kernel(threads=128), "c", lower_thread_binding=False)
+    source = _parallel_kernel(threads=128)
+    grid_var = _kernel_regions(source)[0].body_params[0]
+    func = _materialize(source, "c", lower_thread_binding=False)
     assert _thread_extents(func) == {}
-    assert _launch_placeholders(func) == []
-    grid = [f for f in _collect(func, tvm.tirx.For) if f.loop_var.name == "bx"]
-    assert len(grid) == 1 and grid[0].kind == tvm.tirx.ForKind.SERIAL and int(grid[0].extent) == 2
-    assert not any(v.name in ("tx", "ty", "tz") for v in _collect(func, tvm.tirx.Var))
+    assert _launch_thread_vars(func) == []
+    grid = [f for f in _collect(func, ir.For) if f.var.same_as(grid_var)]
+    assert len(grid) == 1 and grid[0].kind == ir.ForKind.DEFAULT and int(grid[0].end - grid[0].begin) == 2
+    assert not any(v.name in ("tx", "ty", "tz") for v in _collect(func, ir.Var))
 
 
 def test_non_simt_rejects_thread_index_use():
@@ -287,7 +308,7 @@ def test_get_thread_extent_with_threads_at_trace_time():
         with T.Kernel(1, threads=(32, 4)):
             A[0] = T.get_thread_extent(0) * T.get_thread_extent(1)
 
-    (store,) = _collect(main, tvm.tirx.BufferStore)
+    (store,) = _collect(main, ir.TensorStore)
     assert int(store.value) == 128
 
 
@@ -330,7 +351,7 @@ def _cluster_kernel():
 
 
 def test_cluster_dims_is_a_launch_annotation():
-    dims = _root_block(_cluster_kernel()).annotations["cluster_dims"]
+    dims = _launch_hints(_cluster_kernel())["cluster_dims"]
     assert [int(d) for d in dims] == [2, 1, 1]
 
 
@@ -350,14 +371,14 @@ def test_cluster_id_is_program_space_arithmetic():
             A[0] = T.get_cluster_id(0)
 
     cx, cy = captured["ids"]
-    assert isinstance(cx, tvm.tirx.FloorDiv) and cx.a.same_as(captured["bx"]) and int(cx.b) == 2
+    assert isinstance(cx, ir.prim.FloorDiv) and cx.a.same_as(captured["bx"]) and int(cx.b) == 2
     # A unit cluster axis is the program index itself.
     assert cy.same_as(captured["by"])
     assert captured["dims"] == [2, 1, 1]
     assert captured["size"] == 2
     assert captured["extents"] == [4, 4, 1]
-    (store,) = _collect(main, tvm.tirx.BufferStore)
-    assert isinstance(store.value, tvm.tirx.FloorDiv)
+    (store,) = _collect(main, ir.TensorStore)
+    assert isinstance(store.value, ir.prim.FloorDiv)
 
 
 def test_cluster_id_without_clusters_is_the_program_index():
@@ -380,7 +401,7 @@ def test_cluster_id_without_clusters_is_the_program_index():
 
 def test_cluster_dims_accepted_by_default_and_rejected_when_unsupported():
     func = _materialize(_cluster_kernel(), "cuda")
-    assert "cluster_dims" in _root_block(func).annotations
+    assert "cluster_dims" in _launch_hints(func)
 
     with pytest.raises(Exception, match="`cluster_dims` is not supported on target `c`"):
         _materialize(_cluster_kernel(), "c", lower_thread_binding=False, unsupported_annotations=["cluster_dims"])

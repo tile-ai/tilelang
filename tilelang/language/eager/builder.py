@@ -1,26 +1,28 @@
 from __future__ import annotations
+from tilelang.language import _native
 from contextlib import contextmanager, AbstractContextManager
 from dataclasses import dataclass
 import inspect
 import builtins
 from functools import partial
 
+from tilelang._analyzer import create_analyzer
 from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
-from tvm_ffi.container import Map
-from tvm.ir.base import Span
-from tvm.ir.expr import Range
-from tvm.tirx.stmt import BufferRegion
-from tvm.tirx.stmt_functor import substitute
+from tvm_tirx.ir import Location as Span
+from tvm_tirx.ir import Range
+from tilelang.language._native import BufferRegion
 from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
 from tilelang.language.frame import clear_let_values, register_let_value
-from tilelang.utils import side_effect
-import tvm
-from tvm.tirx import Buffer
-from tvm.script.ir_builder import tirx, IRBuilder
+from tilelang.language._native import side_effect
+import tvm_tirx as tvm
+import tvm_ffi
+from tilelang.language._native import Buffer, tensor_strides, dtype_of
+from tilelang.language import _native as tirx
+from tvm_tirx.script.ir_builder import IRBuilder
 
-from tvm.tirx.expr import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
+from tilelang.language._native import BufferLoad, CallEffectKind, EqualOp, FloatImm, IntImm, NotEqualOp, PrimExpr, StringImm, Var
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, ForwardRef, Literal, get_origin, ParamSpec
 from collections.abc import Callable
 from typing_extensions import Self
@@ -34,6 +36,15 @@ import threading
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _is_runtime_parameter_annotation(value):
+    """Recognize source and native parameter annotations before meta values."""
+    if isinstance(value, tvm.ir.Type):
+        if not isinstance(value, (tvm.ir.PrimType, tvm.ir.PtrType, tvm.tirx.TensorType)):
+            raise TypeError(f"A native TileLang runtime parameter requires PrimType, PtrType or TensorType, got {type(value).__name__}")
+        return True
+    return isinstance(value, (Buffer, Var))
 
 
 # Guard iterator/container construction, not reductions (use explicit T.* ops
@@ -75,7 +86,7 @@ def unwrap_expr(expr) -> PrimExpr | int | float:
     elif is_var(expr):
         expr = tirx.BufferLoad(expr, indices=[0])
     elif isinstance(expr, (EqualOp, NotEqualOp)):
-        expr = expr.asobject()
+        expr = expr.__tvm_ffi_object__()
     return expr
 
 
@@ -87,11 +98,11 @@ def _packed_storage_factor(buffer: Buffer, value) -> int:
     if isinstance(value, Buffer):
         return 1
 
-    logical_bits = _dtype_total_bits(buffer.dtype)
+    logical_bits = _dtype_total_bits(dtype_of(buffer))
     if logical_bits >= 8:
         return 1
 
-    storage_dtype = dt.dtype(value.dtype)
+    storage_dtype = dt.dtype(dtype_of(value))
     return _dtype_total_bits(storage_dtype) // logical_bits
 
 
@@ -104,10 +115,10 @@ def _logical_shape_value(value, buffer: Buffer, dim: int):
 
 def _logical_stride_value(value, buffer: Buffer, dim: int):
     if isinstance(value, Buffer):
-        return value.strides[dim]
+        return tensor_strides(value)[dim]
 
     stride = value.stride()[dim]
-    if dim != len(buffer.strides) - 1:
+    if dim != len(tensor_strides(buffer)) - 1:
         stride *= _packed_storage_factor(buffer, value)
     return stride
 
@@ -189,13 +200,66 @@ class Ref:
 
     @property
     def buffer(self):
-        return self.bufload.buffer
+        return self.bufload.source
 
     def store(self, value):
-        tirx.buffer_store(self.bufload.buffer, value, self.bufload.indices)
+        tirx.buffer_store(self.bufload.source, value, self.bufload.indices)
 
     def load(self):
         return self.bufload
+
+
+@dataclass
+class PointerRef(Ref):
+    """A DSL mutable pointer backed by an actual uint64 scalar tensor.
+
+    Native tensors contain primitive values, so a pointer cannot be a tensor
+    element. The existing native reinterpret operation converts a pointer to
+    its 64-bit address for storage and restores its pointee type and address
+    space for each read. This wrapper only participates in source construction;
+    the resulting IR contains TensorLoad/Store and typed reinterpret calls.
+    """
+
+    pointer_type: tvm.ir.PtrType
+    ir_builder: IRBuilder
+
+    @property
+    def dtype(self):
+        return tvm_ffi.dtype("handle")
+
+    def store(self, value):
+        value = unwrap_expr(value)
+        if isinstance(value, int) and not isinstance(value, bool):
+            address = _native.const(value, "uint64")
+        elif isinstance(value, tvm.ir.Expr) and isinstance(value.ty, tvm.ir.PtrType):
+            if value.ty.scope != self.pointer_type.scope:
+                raise TypeError("A mutable handle assignment must preserve its pointer address space")
+            address = tvm.tirx.reinterpret(value, ty=tvm.ir.PrimType("uint64"), loc=_native._loc())
+        else:
+            raise TypeError("A mutable handle requires a pointer expression or an integer address")
+        tirx.buffer_store(self.buffer, address, self.bufload.indices)
+
+    def load(self):
+        value = tvm.tirx.reinterpret(self.bufload, ty=self.pointer_type, loc=_native._loc())
+        # Construction-only provenance. Compiler consumers use the actual
+        # PtrType on value and never rely on this Python attribute.
+        value._tilelang_pointer_ref = self
+        return value
+
+    @staticmethod
+    def _check_index(index):
+        if isinstance(index, IntImm):
+            index = int(index.value)
+        if not isinstance(index, int) or isinstance(index, bool) or index != 0:
+            raise IndexError("A mutable handle has one element, at index 0")
+
+    def __getitem__(self, index):
+        self._check_index(index)
+        return self.load()
+
+    def __setitem__(self, index, value):
+        self._check_index(index)
+        return self.store(value)
 
 
 class UnrollForWithStep(SerialForWithStep): ...
@@ -208,6 +272,7 @@ AnyFrame = tirx.frame.IRBuilderFrame | Frame
 TIR_CONTROL_FRAME = (
     tirx.frame.WhileFrame,
     tirx.frame.ForFrame,
+    tirx.LoopFrame,
     tirx.frame.IfFrame,
     tirx.frame.PrimFuncFrame,
 )
@@ -215,10 +280,13 @@ TIR_CONTROL_FRAME = (
 TIR_VAR_SCOPE_FRAME = (
     tirx.frame.WhileFrame,
     tirx.frame.ForFrame,
+    tirx.LoopFrame,
     tirx.frame.IfFrame,
     tirx.frame.PrimFuncFrame,
     MacroFrame,
     KernelLaunchFrame,
+    tirx.BlockFrame,
+    tirx.InitFrame,
 )
 
 
@@ -230,7 +298,7 @@ def register_var_scope_frame(frame_type: type) -> None:
 
 
 def is_var(v: Any) -> bool:
-    return isinstance(v, Buffer) and v.scope() == "local.var"
+    return isinstance(v, Buffer) and str(v.scope()) == "local.var"
 
 
 # phase1: eager jit obtain function signature
@@ -263,6 +331,15 @@ class Builder(BaseBuilder):
         # that source statement until the next set_fileline / frame exit.
         self._span_pending: tuple[Any, int, str, int] | None = None
         self._span_first_fileline: tuple[str, int] | None = None
+        # Body annotations can appear in a different order than the Python
+        # signature. Register their actual native types when known, then retain
+        # the original argument order when assembling the completed Function.
+        self._parameter_order: dict[str, Var | None] = {}
+        self._deferred_parameters: dict[str, Var] = {}
+        self._matched_parameters: dict[Var, Var] = {}
+        self._matched_parameter_storage: dict[Var, Var] = {}
+        self._matched_parameter_specs: dict[Var, _native.TensorSpec] = {}
+        self._tensor_parameter_specs: dict[Var, dict[str, Any]] = {}
 
     @classmethod
     def current(cls) -> Self:
@@ -270,11 +347,11 @@ class Builder(BaseBuilder):
         return builder
 
     @contextmanager
-    def prim_func(self, name):
+    def prim_func(self, name, *, private=False):
         thread_local_storage.builder = self
         clear_let_values()
         try:
-            with self.ir_builder, self.with_frame(tirx.prim_func()):
+            with self.ir_builder, self.with_frame(tirx.prim_func(is_private=private)):
                 tirx.func_name(name)
                 yield
             if self.eager_jit != "phase1" and len(self.out_idx) != self.out_tensor_cnt:
@@ -313,14 +390,152 @@ class Builder(BaseBuilder):
         self.macro_fileline_stack.pop()
         self.name_inside_frame, self.macro_arg_annot = save
 
+    @property
+    def current_location(self):
+        if not self._spans_enabled or self.current_line <= 0:
+            return tvm.ir.UnknownLoc()
+        loc = tvm.ir.SourceLoc(tvm.ir.SourceName(self.current_file), self.current_line, 0, self.current_line, 0)
+        for file, line, _ in self.macro_fileline_stack:
+            loc = tvm.ir.CallSiteLoc(loc, tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0))
+        return loc
+
     def get(self) -> PrimFunc:
         if self._spans_enabled:
             self._flush_span_pending()
         func = self.ir_builder.get()
+        if self._deferred_parameters or self._matched_parameters:
+            missing = [name for name in self._deferred_parameters if self._parameter_order[name] is None]
+            if missing:
+                raise ValueError(f"Missing tensor/pointer annotation for parameter(s): {', '.join(missing)}")
+            ordered = list(self._parameter_order.values())
+            seen = set(ordered) | set(self._matched_parameters) | set(self._matched_parameter_storage)
+            ordered.extend(param for param in func.params if param not in seen)
+            func = _native.Function(ordered, func.body, func.ret_type, func.attrs, func.loc)
+        if self._matched_parameters:
+            func = self._finalize_matched_parameters(func)
+        func = _native.attach_parameter_tensor_specs(func, self._tensor_parameter_specs)
+        func = _native.attach_size_var_defaults(func)
         if self._spans_enabled and self._span_first_fileline is not None:
-            from tilelang.ir import make_span, set_prim_func_span
+            file, line = self._span_first_fileline
+            self.ir_builder._attach_loc(func, tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0))
+        return func
 
-            set_prim_func_span(func, make_span(*self._span_first_fileline))
+    def match_parameter_buffer(self, value, spec):
+        """Materialize the tensor contract of a source handle parameter.
+
+        Shape symbols introduced in the body belong to the matched parameter
+        type. They are bound from the runtime tensor by the native ABI. The
+        temporary handle is dropped when the final parameter order is rebuilt;
+        no extra public argument or detached shape-variable table is created.
+        """
+        if not isinstance(value, Var) or not isinstance(value.ty, tvm.ir.PtrType):
+            return None
+        if value in self._matched_parameters:
+            previous = self._matched_parameters[value]
+            name = next(name for name, parameter in self._parameter_order.items() if parameter is not None and parameter.same_as(previous))
+            self._tensor_parameter_specs.pop(previous, None)
+        else:
+            name = next(
+                (name for name, parameter in self._parameter_order.items() if parameter is not None and parameter.same_as(value)), None
+            )
+        if name is None:
+            return None
+        parameter = tirx.arg(name, spec)
+        # The last match supplies the input ABI, as in the original builder.
+        # Equal types alone never identify storage. Only explicit data= links
+        # earlier views to the last match's physical pointer.
+        storage = parameter if spec.data is None else _native.tensor_storage_source(spec.data)
+        if not isinstance(storage, Var):
+            raise TypeError("match_buffer data must be a pointer variable or a tensor data projection")
+        storage = self._matched_parameter_storage.get(storage, storage)
+        self._matched_parameter_storage[parameter] = storage
+        self._matched_parameter_specs[parameter] = spec
+        self._parameter_order[name] = parameter
+        self._matched_parameters[value] = parameter
+        return parameter
+
+    def _finalize_matched_parameters(self, func):
+        """Materialize descriptor and explicit data aliases in native IR.
+
+        Temporary construction records do not survive the Function. Its last
+        tensor parameters, entry Bind statements and pointer-equality checks
+        carry the entire runtime contract through serialization and lowering.
+        """
+        ir = tvm.ir
+        native = tvm.tirx
+        used = set()
+        for root in (func.body, func.attrs):
+            if root is not None:
+                tvm_ffi.structural_walk(root, (Var, used.add))
+
+        prefix = []
+        representatives = {}
+        for parameter in self._matched_parameters.values():
+            storage = self._matched_parameter_storage[parameter]
+            if storage in representatives:
+                other = representatives[storage]
+                condition = native.reinterpret(native.tensor_data_ptr(parameter), ty="uint64") == native.reinterpret(
+                    native.tensor_data_ptr(other), ty="uint64"
+                )
+                prefix.append(
+                    ir.AssertStmt(
+                        _native._expr(condition),
+                        ir.StringImm("RuntimeError"),
+                        [ir.StringImm("match_buffer parameters sharing data must have the same physical pointer")],
+                        func.loc,
+                    )
+                )
+            else:
+                representatives[storage] = parameter
+
+        local_specs = {}
+        public_parameters = set(func.params)
+        for tensor, storage in self._matched_parameter_storage.items():
+            if tensor in public_parameters or tensor not in used:
+                continue
+            if storage not in representatives:
+                raise ValueError(
+                    f"Earlier match_buffer tensor `{tensor.name}` has no storage definition after a later match; "
+                    "use explicit data= to share its storage"
+                )
+            source = native.tensor_data_ptr(representatives[storage], loc=tensor.loc)
+            declaration = ir.Call("tirx.decl_tensor", [source], ty_args=[tensor.ty], loc=tensor.loc)
+            prefix.append(ir.Bind(tensor, declaration, tensor.loc))
+            metadata = self._matched_parameter_specs[tensor].contract_metadata()
+            if metadata is not None:
+                local_specs[tensor] = metadata
+
+        for storage, parameter in representatives.items():
+            if storage in self._matched_parameter_storage:
+                continue
+            source = native.tensor_data_ptr(parameter, loc=storage.loc)
+            if not isinstance(storage.ty, ir.PtrType):
+                raise ValueError("match_buffer data must originate in an input or a pointer variable")
+            if storage in public_parameters:
+                condition = native.reinterpret(storage, ty="uint64") == native.reinterpret(source, ty="uint64")
+                prefix.append(
+                    ir.AssertStmt(
+                        _native._expr(condition),
+                        ir.StringImm("RuntimeError"),
+                        [ir.StringImm("match_buffer data must equal its explicit pointer parameter")],
+                        storage.loc,
+                    )
+                )
+            elif storage in used:
+                # An explicit free data Var is defined from the final input;
+                # it is neither an extra argument nor a DLTensor descriptor.
+                prefix.append(ir.Bind(storage, native.reinterpret(source, ty=storage.ty, loc=storage.loc), storage.loc))
+
+        for handle, parameter in self._matched_parameters.items():
+            if handle in used:
+                descriptor = _native.tensor_descriptor_ptr(parameter, loc=handle.loc)
+                if not tvm_ffi.structural_equal(handle.ty, descriptor.ty):
+                    descriptor = native.reinterpret(descriptor, ty=handle.ty, loc=handle.loc)
+                prefix.append(ir.Bind(handle, descriptor, handle.loc))
+        if local_specs:
+            func = _native.attach_parameter_tensor_specs(func, local_specs)
+        if prefix:
+            func = func.with_body(ir.SeqStmt([*prefix, func.body], loc=func.loc), loc=func.loc)
         return func
 
     # ------------------------------------------------------------------
@@ -332,16 +547,14 @@ class Builder(BaseBuilder):
         if not self._spans_enabled or self.current_line <= 0:
             return buffer
 
-        from tilelang.ir import get_buffer_span, make_span, set_buffer_span
-
-        if get_buffer_span(buffer) is None:
-            set_buffer_span(buffer, make_span(self.current_file, self.current_line))
+        if isinstance(buffer.loc, tvm.ir.UnknownLoc):
+            self.ir_builder._attach_loc(buffer, self.current_location)
         return buffer
 
     def _current_stmt_frame(self):
         """The innermost open frame whose `stmts` accumulates emitted stmts."""
         for frame in reversed(self.frames):
-            if isinstance(frame, tirx.frame.TIRFrame):
+            if isinstance(frame, (tirx.frame.TIRFrame, tirx.LoopFrame, tirx.BlockFrame, tirx.InitFrame, KernelLaunchFrame)):
                 f = frame
                 # KernelLaunchFrame nests launch/block frames entered C++-side;
                 # leaf statements accumulate in its innermost sub-frame.
@@ -354,7 +567,6 @@ class Builder(BaseBuilder):
         """Stamp stmts appended since the last recorded source statement."""
         if self._span_pending is None:
             return
-        from tilelang.ir import get_stmt_span, make_span, set_stmt_span
 
         frame, start, file, line = self._span_pending
         self._span_pending = None
@@ -364,10 +576,10 @@ class Builder(BaseBuilder):
             stmts = frame.stmts
         except Exception:
             return
-        span = make_span(file, line)
+        span = tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0)
         for i in range(start, len(stmts)):
-            if get_stmt_span(stmts[i]) is None:
-                set_stmt_span(stmts[i], span)
+            if isinstance(stmts[i].loc, tvm.ir.UnknownLoc):
+                self.ir_builder._attach_loc(stmts[i], span)
 
     def _stamp_new_parent_stmts(self, parent, start: int, file: str, line: int):
         """Stamp stmts produced by an exited frame into its parent frame.
@@ -380,8 +592,6 @@ class Builder(BaseBuilder):
         """
         if parent is None or line <= 0:
             return
-        from tilelang.ir import get_stmt_span, make_span, set_stmt_span
-        from tvm.tirx.stmt_functor import post_order_visit
 
         try:
             stmts = parent.stmts
@@ -389,14 +599,14 @@ class Builder(BaseBuilder):
             return
         if len(stmts) <= start:
             return
-        span = make_span(file, line)
+        span = tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0)
 
         def stamp(node):
-            if isinstance(node, tvm.tirx.Stmt) and get_stmt_span(node) is None:
-                set_stmt_span(node, span)
+            if isinstance(node, tvm.ir.Stmt) and isinstance(node.loc, tvm.ir.UnknownLoc):
+                self.ir_builder._attach_loc(node, span)
 
         for i in range(start, len(stmts)):
-            post_order_visit(stmts[i], stamp)
+            tvm_ffi.structural_walk(stmts[i], (tvm.ir.Stmt, stamp), order="post")
 
     def find_frame_idx(self, frame: type | tuple[type, ...], start=0) -> int | None:
         for idx in reversed(range(start, len(self.frames))):
@@ -475,21 +685,27 @@ class Builder(BaseBuilder):
         val = unwrap_expr(val)
         if val is None:
             pass
-        elif isinstance(val, tirx.frame.IRBuilderFrame):
+        elif isinstance(val, (tirx.frame.IRBuilderFrame, tirx.LoopFrame, KernelLaunchFrame)):
             if isinstance(val, tirx.frame.ForFrame):
                 logger.warning(
                     "A for-loop frame is being evaluated as a standalone expression. Did you mean to use it in a `for` statement?",
                     stacklevel=2,
                 )
             self.enter_frame(val)
-        elif isinstance(val, PrimExpr):
+        elif isinstance(val, tirx.AlreadyEmitted):
+            return val
+        elif isinstance(val, (PrimExpr, tvm.ir.Call, tvm.ir.Return)):
+            # A native Call can carry MissingType until the owning builder
+            # infers its result. In particular, handle-returning barrier calls
+            # must still become statements; a type predicate must not discard
+            # their effects before inference has run.
             tirx.evaluate(val)
         elif isinstance(val, (int, bool)):
-            tirx.evaluate(tvm.tirx.const(val))
+            tirx.evaluate(tirx.const(val))
         elif isinstance(val, str):
             pass
-        elif isinstance(val, tvm.tirx.stmt.BufferStore):
-            tirx.buffer_store(val.buffer, val.value, val.indices, val.predicate)
+        elif isinstance(val, tirx.BufferStore):
+            tirx.buffer_store(val.dest, val.value, val.indices, None)
         elif isinstance(val, (Buffer, Var)):
             pass
         else:
@@ -502,7 +718,7 @@ class Builder(BaseBuilder):
             from tilelang.language import serial
 
             it = serial(it.start, it.stop, it.step)
-        if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame)):
+        if not isinstance(it, (SerialForWithStep, UnrollForWithStep, tirx.frame.ForFrame, tirx.LoopFrame)):
             # Python iterables expand the body at IR construction time. TIR
             # values must be excluded explicitly: Var carries an __iter__ shim
             # for single-binding unpacking and Buffer.__getitem__ never raises
@@ -556,7 +772,7 @@ class Builder(BaseBuilder):
                 IRBuilder.name("_tmp", v)
                 yield it.start + v * it.step
         else:
-            if not isinstance(it, tirx.frame.ForFrame):
+            if not isinstance(it, (tirx.frame.ForFrame, tirx.LoopFrame)):
                 raise TypeError(
                     f"Invalid for loop, got {it}({type(it)}), expect one of the following: "
                     "range, T.serial, T.grid, T.parallel, T.vectorized, T.unroll, T.thread_binding"
@@ -565,7 +781,7 @@ class Builder(BaseBuilder):
                 yield v
 
     def _is_python_loop_control(self):
-        idx = self.find_frame_idx((PythonLoopFrame, tirx.frame.ForFrame, tirx.frame.WhileFrame, MacroFrame))
+        idx = self.find_frame_idx((PythonLoopFrame, tirx.frame.ForFrame, tirx.LoopFrame, tirx.frame.WhileFrame, MacroFrame))
         if idx is None or not isinstance(self.frames[idx], PythonLoopFrame):
             return False
         if self.find_frame_idx(tirx.frame.IfFrame, start=idx + 1) is not None:
@@ -582,7 +798,7 @@ class Builder(BaseBuilder):
             raise self.PythonLoopContinue
         # add a dummy frame for checking code after continue/break
         self.enter_frame(ContinueFrame())
-        tirx.evaluate(tirx.continue_loop())
+        tirx.continue_loop()
 
     def ctx_break(self):
         self.check_continue_break()
@@ -590,7 +806,7 @@ class Builder(BaseBuilder):
             raise self.PythonLoopBreak
         # add a dummy frame for checking code after continue/break
         self.enter_frame(BreakFrame())
-        tirx.evaluate(tirx.break_loop())
+        tirx.break_loop()
 
     def ctx_while(self, cond):
         self.check_continue_break()
@@ -635,17 +851,26 @@ class Builder(BaseBuilder):
         # Handle type annotation
         if value is self.empty:
             orig_value = locals.get(name, value)
-            if isinstance(annot, Buffer) and annot.scope() == "global":
+            pending = self._deferred_parameters.get(name)
+            if pending is not None and isinstance(orig_value, Var) and orig_value.same_as(pending):
+                if not _is_runtime_parameter_annotation(annot):
+                    raise TypeError(f"Parameter `{name}` requires a runtime tensor, pointer or scalar annotation, got {annot}")
+                parameter = tirx.arg(name, annot)
+                self._parameter_order[name] = parameter
+                return self.with_buffer_span(parameter) if isinstance(parameter, Buffer) else parameter
+            if isinstance(annot, Buffer) and str(annot.scope()) == "global":
                 from tilelang.language import match_buffer
 
                 return self.with_buffer_span(
                     IRBuilder.name(
                         name,
-                        match_buffer(
-                            orig_value,
-                            annot.shape,
-                            annot.dtype,
-                            strides=annot.strides,
+                        tirx.bind(
+                            match_buffer(
+                                orig_value,
+                                annot.shape,
+                                _native.dtype_of(annot),
+                                strides=tensor_strides(annot),
+                            )
                         ),
                     )
                 )
@@ -673,7 +898,7 @@ class Builder(BaseBuilder):
         # Convert deferred comparison ops to PrimExpr so that Ref/alloc_var
         # store paths below can recognise them as assignable values.
         if isinstance(value, (EqualOp, NotEqualOp)):
-            value = value.asobject()
+            value = value.__tvm_ffi_object__()
 
         if isinstance(orig_value, Ref) and isinstance(value, (int, float, PrimExpr)):
             orig_value.store(value)
@@ -683,10 +908,10 @@ class Builder(BaseBuilder):
             return orig_value
 
         # 2. Quick return for trivil types
-        if isinstance(value, (tuple, list, tvm.ffi.Array, int, float, str)):
+        if isinstance(value, (tuple, list, tvm_ffi.Array, int, float, str)):
             self.name_inside_frame.pop(name, None)
             return value
-        if isinstance(value, tirx.IntImm) and value.dtype == "int32":
+        if isinstance(value, tirx.IntImm) and dtype_of(value) == "int32":
             return value.value
         if isinstance(value, (Var, Buffer)):
             # Bind TVM Var/Buffer names and also record scope so reusing the same
@@ -694,7 +919,8 @@ class Builder(BaseBuilder):
             # works without triggering out-of-scope errors.
             if isinstance(value, Buffer):
                 self.with_buffer_span(value)
-            IRBuilder.name(name, value)
+            if value not in self._matched_parameters.values():
+                IRBuilder.name(name, value)
             if name != "_":
                 frame = self.find_frame_idx(TIR_VAR_SCOPE_FRAME)
                 assert frame is not None, f"Variable `{name}` is not defined inside any control flow."
@@ -718,13 +944,17 @@ class Builder(BaseBuilder):
         frame = self.name_inside_frame.get(name)
         return frame is not None and frame not in self.frames
 
+    def unpack_value(self, value):
+        value = self.unwrap_value(value)
+        return (value,) if isinstance(value, Var) else value
+
     def unwrap_value(self, value):
         """
         Unwrap some tilelang objects to get their inner value
         """
         value = unwrap_expr(value)
         # handle bx, by = tl.Kernel(128, 128), rval is frame
-        if isinstance(value, tirx.frame.IRBuilderFrame):
+        if isinstance(value, (tirx.frame.IRBuilderFrame, tirx.LoopFrame, KernelLaunchFrame)):
             return self.enter_frame(value)
         else:
             return value
@@ -739,24 +969,31 @@ class Builder(BaseBuilder):
             name = "_tmp"
         if isinstance(value, tirx.meta_var):
             return value.value
-        elif isinstance(value, tirx.frame.IRBuilderFrame):
+        elif isinstance(value, (tirx.frame.IRBuilderFrame, tirx.LoopFrame, KernelLaunchFrame)):
             return self.enter_frame(value)
         elif isinstance(value, OutTensor):
             arg = tirx.arg(
                 name,
                 tirx.buffer(
                     shape=value.shape,
-                    dtype=value.dtype,
+                    dtype=dtype_of(value),
                     strides=value.strides,
                 ),
             )
             arg._out_idx = self.out_tensor_cnt
             self.out_tensor_cnt += 1
             return arg
-        elif isinstance(value, (Buffer, tirx.IterVar, tirx.Var)):
+        elif isinstance(value, (Buffer, tirx.Var)):
             IRBuilder.name(name, value)
             return value
-        elif isinstance(value, (PrimExpr, BufferRegion)):
+        elif isinstance(value, BufferRegion):
+            # Regions are native indexing expressions. They carry the tensor
+            # and slice directly and have no separately nameable definition.
+            return value
+        elif isinstance(value, tvm.ir.Expr):
+            # Native calls may return a tensor, tuple or function. Every such
+            # result needs a typed Bind before consumers use its variable;
+            # primitive-expression membership alone misses tensor views.
             var = tirx.bind(value)
             register_let_value(var, value)
             IRBuilder.name(name, var)
@@ -764,11 +1001,39 @@ class Builder(BaseBuilder):
         else:
             return value
 
+    @staticmethod
+    def _check_buffer_slice_step(value, indices):
+        # This is the public TileLang Buffer slicing contract, independent of
+        # the direct native IR subscript API. Ordinary Python values retain
+        # their own slicing and __getitem__ behavior.
+        if isinstance(value, Buffer):
+            indices = indices if isinstance(indices, (tuple, list)) else (indices,)
+            if any(isinstance(index, slice) and index.step is not None for index in indices):
+                raise RuntimeError("Buffer slicing with step is not supported.")
+
+    def getitem(self, value: Any, sl: slice):
+        self._check_buffer_slice_step(value, sl)
+        return super().getitem(value, sl)
+
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot=BaseBuilder.empty):
         self.check_continue_break()
         if annot is not self.empty:
             logger.warning("Type annotation on slice assignment is not supported and will be ignored.", stacklevel=2)
         if isinstance(lval, Buffer):
+            # Unlike a Buffer read, the original store builder accepted a
+            # slice as a vector index. Preserve its Ramp/element contract.
+            indices = sl if isinstance(sl, (tuple, list)) else (sl,)
+            if any(isinstance(index, slice) for index in indices):
+                normalized = []
+                analyzer = create_analyzer()
+                for index in indices:
+                    if isinstance(index, slice):
+                        step = 1 if index.step is None else index.step
+                        lanes = analyzer.simplify((index.stop - index.start + step - 1) // step)
+                        normalized.append(index.start if int(lanes) == 1 else tirx.Ramp(index.start, step, int(lanes)))
+                    else:
+                        normalized.append(index)
+                sl = normalized
             tirx.buffer_store(lval, value, sl)
         else:
             return super().assign_slice(lval, sl, value)
@@ -813,6 +1078,7 @@ class Builder(BaseBuilder):
 
     def aug_assign_slice(self, op, target, sl, aug_value):
         self.check_continue_break()
+        self._check_buffer_slice_step(target, sl)
         if isinstance(target, Buffer):
             tirx.buffer_store(target, eval_op(op, target[sl], aug_value), sl)
         else:
@@ -888,12 +1154,11 @@ class Builder(BaseBuilder):
                 raise RuntimeError(f"Not all tensor from `T.empty` are returned, only got {value}")
             return NotImplemented
 
-    def ctx_with(self, ctx):
+    def ctx_with(self, ctx, *, unpack=False):
         self.check_continue_break()
-        if isinstance(ctx, tirx.frame.IRBuilderFrame):
-            return self.with_frame(ctx)
-        else:
-            return super().ctx_with(ctx)
+        if isinstance(ctx, (tirx.frame.IRBuilderFrame, tirx.LoopFrame, tirx.BlockFrame, tirx.InitFrame, KernelLaunchFrame)):
+            ctx = self.with_frame(ctx)
+        return super().ctx_with(ctx, unpack=unpack)
 
     def assert_expr(self, cond, msg=None):
         self.check_continue_break()
@@ -901,7 +1166,7 @@ class Builder(BaseBuilder):
         if msg is None:
             msg = "Assertion failed"
         if isinstance(cond, PrimExpr):
-            self.enter_frame(tirx.Assert(cond, msg))
+            tirx.assert_(cond, msg)
         elif not cond:
             raise AssertionError(msg)
 
@@ -919,25 +1184,43 @@ class Builder(BaseBuilder):
             if annot_value is Var:
                 logger.warning("Use `T.Var` as macro annotations is deprecated, please use `T.Ref`")
             if isinstance(value, BufferLoad):
-                if is_var(value.buffer):
-                    return value.buffer
-                idx = [self.bind("_", idx) for idx in value.indices]
+                if is_var(value.source):
+                    return value.source
+                idx = [idx if isinstance(idx, Var) else self.bind("_", idx) for idx in value.indices]
                 # indices = self.bind(f'_', value.indices)
-                return Ref(BufferLoad(value.buffer, indices=idx))
+                return Ref(BufferLoad(value.source, indices=idx))
             if isinstance(value, BufferRegion):
-                region = [Range(self.bind("_", x.begin), end=self.bind("_", x.end) if x.end is not None else None) for x in value.region]
-                return BufferRegion(value.buffer, region=region)
+                region = [
+                    Range.from_min_extent(
+                        x.begin if isinstance(x.begin, Var) else self.bind("_", x.begin),
+                        x.extent if isinstance(x.extent, Var) else self.bind("_", x.extent),
+                    )
+                    for x in value.region
+                ]
+                return BufferRegion(value.source, region=region)
             raise ValueError(
                 f"To pass as reference, argument `{name}` is expected to be a variable or a buffer region, but got {value}({type(value)})"
             )
+        elif isinstance(value, Var):
+            # Macro parameters borrow the caller's definition. Naming them
+            # mutates that existing Var (and its owner Function) in place.
+            # Keep the identity so captures, tensor types and layout references
+            # still refer to the caller's definition after macro expansion.
+            return value
         elif isinstance(value, (PrimExpr, int, float)):
             return self.bind(name, value)
         else:
             return value
 
     def prim_func_arg(self, name, value):
-        if isinstance(value, (Buffer, Var)):
+        if _is_runtime_parameter_annotation(value):
+            if isinstance(value, Var) and getattr(value, "_tilelang_deferred_parameter", False):
+                placeholder = Var(name, value.ty, self.current_location)
+                self._deferred_parameters[name] = placeholder
+                self._parameter_order[name] = None
+                return placeholder
             arg = tirx.arg(name, value)
+            self._parameter_order[name] = arg
             # Stamp parameter buffers with the signature line (SpanAttacher
             # emits set_fileline with the parameter's own line before each
             # `__tb.arg(...)` call), so diagnostics involving only argument
@@ -973,7 +1256,7 @@ class Builder(BaseBuilder):
                 "Use range(n) or T.serial(n) in a for statement to loop over a runtime extent, "
                 "or iterate over a Python container such as [expr] or buffer.shape."
             )
-        if isinstance(value, (SerialForWithStep, tirx.frame.IRBuilderFrame)):
+        if isinstance(value, (SerialForWithStep, tirx.frame.IRBuilderFrame, tirx.LoopFrame)):
             raise TypeError(
                 f"{context}: a TileLang loop or IR builder frame is not a compile-time Python iterable. "
                 "Use TileLang loop constructors directly in a for statement; "
@@ -1031,18 +1314,17 @@ _T = TypeVar("_T")
 
 if TYPE_CHECKING:
 
-    class PrimFunc(Generic[_P, _T], tvm.tirx.PrimFunc):
-        params: list[tvm.tirx.Var | tvm.tirx.Buffer]
-        body: tvm.tirx.Stmt
+    class PrimFunc(Generic[_P, _T], _native.Function):
+        params: list[tvm.ir.Var | Buffer]
+        body: tvm.ir.Stmt
         ret_type: tvm.ir.Type
-        buffer_map: Map[tvm.tirx.Var, tvm.tirx.Buffer]
-        attrs: tvm.Attrs | None
+        attrs: tvm.ir.DictAttrs | None
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
         orig_func: Callable[_P, _T] | None
 
 else:
-    PrimFunc = tvm.tirx.PrimFunc
+    PrimFunc = _native.Function
 
 
 @dataclass
@@ -1147,7 +1429,7 @@ def get_type_hints(func):
     for name, value in annot.items():
         if name == "return":
             continue
-        if isinstance(value, tvm.DataType):
+        if isinstance(value, tvm_ffi.dtype):
             hints[name] = value
             continue
         if value is None:
@@ -1289,27 +1571,37 @@ class TirTemplate(Generic[_P, _T]):
 
     name: str
     prim_func: PrimFunc[_P, _T]
-    matcher: dict[Var, tuple[tvm.tirx.Var, str, int, str]] | None = None
+    matcher: dict[Var, tuple[tvm.ir.Var, str, int, str]] | None = None
     constexprs: set[Var] = None
     is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
     ir_gen: IRGenerator[_P, _T] | None = None
+    private: bool = False
 
     @classmethod
     def create(
-        cls, name: str, prim_func: PrimFunc[_P, _T], constexpr: set[Var], ir_gen: IRGenerator[_P, _T] | None = None
+        cls,
+        name: str,
+        prim_func: PrimFunc[_P, _T],
+        constexpr: set[Var],
+        ir_gen: IRGenerator[_P, _T] | None = None,
+        *,
+        private: bool = False,
     ) -> TirTemplate[_P, _T]:
         matcher = {}
-        for k, v in prim_func.buffer_map.items():
+        for v in prim_func.params:
+            if not tirx.is_tensor(v):
+                continue
+            k = v
             for i, s in enumerate(v.shape):
                 if s in constexpr and s not in matcher:
                     matcher[s] = (k.name, "shape", i, s.name)
-            for i, s in enumerate(v.strides):
+            for i, s in enumerate(tensor_strides(v)):
                 if s in constexpr and s not in matcher:
                     matcher[s] = (k.name, "stride", i, s.name)
         for s in constexpr:
             if s not in matcher:
-                shapes = {k: v.shape for k, v in prim_func.buffer_map.items()}
-                strides = {k: v.strides for k, v in prim_func.buffer_map.items()}
+                shapes = {v.name: v.shape for v in prim_func.params if tirx.is_tensor(v)}
+                strides = {v.name: tensor_strides(v) for v in prim_func.params if tirx.is_tensor(v)}
                 raise RuntimeError(
                     f"Constexpr variable `{s}` is not used in any buffer shape or stride.\n"
                     "At least one **DIRECT** usage is required. Please check:\n"
@@ -1319,7 +1611,15 @@ class TirTemplate(Generic[_P, _T]):
                     f"Buffer strides: {strides}"
                 )
         matcher = {k: matcher[k] for k in constexpr}
-        return cls(name=name, prim_func=prim_func, matcher=matcher, constexprs=constexpr, is_lazy_style=False, ir_gen=ir_gen)
+        return cls(
+            name=name,
+            prim_func=prim_func,
+            matcher=matcher,
+            constexprs=constexpr,
+            is_lazy_style=False,
+            ir_gen=ir_gen,
+            private=private,
+        )
 
     @classmethod
     def from_lazy_style(cls, name: str, prim_func: PrimFunc[_P, _T]) -> TirTemplate[_P, _T]:
@@ -1330,7 +1630,7 @@ class TirTemplate(Generic[_P, _T]):
         if self.matcher is None:
             return ()
         result = []
-        buffers = {param.name: buffer for param, buffer in self.prim_func.buffer_map.items()}
+        buffers = {param.name: param for param in self.prim_func.params if tirx.is_tensor(param)}
         for k, ty, i, name in self.matcher.values():
             if name in kwargs:
                 result.append(kwargs.get(name))
@@ -1357,7 +1657,7 @@ class TirTemplate(Generic[_P, _T]):
         builder = Builder()
         builder.eager_jit = "phase2"
         builder.eager_jit_subs = subs
-        with builder.prim_func(self.name):
+        with builder.prim_func(self.name, private=self.private):
             self.ir_gen.gen(builder)(**tensor_args, **kwargs)
         pf = builder.get()
         pf = _patch_prim_func_attrs(pf, builder)
@@ -1604,10 +1904,11 @@ class JITFunc(Generic[_P, _T]):
     orig_func: Callable[_P, _T]
     signature: inspect.Signature
     arg_names: list[str]
-    tensor_args: dict[str, Buffer | Var]
+    tensor_args: dict[str, Buffer | Var | tvm.ir.Type]
     tensor_args_defaults: dict[str, Any]
     ir_gen: IRGenerator[_P, _T]
     mode: Literal["auto", "lazy", "eager"] = "auto"
+    private: bool = False
 
     def __post_init__(self):
         # we don't want it to show up in the constructor
@@ -1647,6 +1948,8 @@ class JITFunc(Generic[_P, _T]):
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
+                if self.private:
+                    prim_func = prim_func.without_attr("global_symbol")
                 self.p1_cache[bound.p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
                 return True
             return False
@@ -1662,16 +1965,19 @@ class JITFunc(Generic[_P, _T]):
         """Build TIR template based on the execution mode."""
         if self.mode == "lazy":
             # lazy: function returns PrimFunc directly
-            return TirTemplate.from_lazy_style(self.orig_func.__name__, self.orig_func(*args, **kwargs))
+            prim_func = self.orig_func(*args, **kwargs)
+            if self.private:
+                prim_func = prim_func.without_attr("global_symbol")
+            return TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
         elif self.mode == "eager":
             # eager: trace function body through Builder to construct TIR
             builder = Builder()
             builder.eager_jit = "phase1"
-            with builder.prim_func(self.orig_func.__name__):
+            with builder.prim_func(self.orig_func.__name__, private=self.private):
                 self.ir_gen.gen(builder)(**self.tensor_args, **kwargs)
             pf = builder.get()
             pf.orig_func = self.orig_func
-            return TirTemplate.create(self.orig_func.__name__, pf, builder.constexpr_var, self.ir_gen)
+            return TirTemplate.create(self.orig_func.__name__, pf, builder.constexpr_var, self.ir_gen, private=self.private)
         else:
             raise ValueError(f"Invalid jit mode: {self.mode}, expected 'lazy' or 'eager'")
 
@@ -1726,28 +2032,71 @@ class JITFunc(Generic[_P, _T]):
 
 
 def substitute_primfunc(prim_func, vmap):
-    analyzer = tvm.arith.Analyzer()
+    """Substitute typed variables while preserving the function's calling convention.
 
-    def sub(v):
-        return analyzer.simplify(substitute(v, vmap))
+    Shape and layout symbols may become scalar expressions. Explicit parameters
+    and local variable definitions remain Vars, so this helper neither drops
+    arguments nor renumbers output indices. Eager JIT uses AST reconstruction
+    in ``TirTemplate.get_tir`` rather than this directly callable helper.
+    """
+    ir = tvm.ir
+    if not isinstance(prim_func, tvm.tirx.Function):
+        raise TypeError("substitute_primfunc expects a native Function")
+    replacements = {}
+    parameters = set(prim_func.params)
+    for variable, value in vmap.items():
+        if not isinstance(variable, ir.Var):
+            raise TypeError("substitution keys must be native Vars")
+        if not isinstance(value, ir.Expr):
+            value = unwrap_expr(value)
+            if not isinstance(value, ir.Expr):
+                if not isinstance(variable.ty, ir.PrimType):
+                    raise TypeError("non-scalar substitutions require an expression with a matching type")
+                value = ir.const(value, variable.ty.dtype)
+        if variable in parameters and not isinstance(value, ir.Var):
+            raise TypeError("a function parameter must remain a Var after substitution")
+        replacements[variable] = value
 
-    def substitute_buffer(buf):
-        return tvm.tirx.decl_buffer(
-            data=sub(buf.data),
-            shape=[sub(dim) for dim in buf.shape],
-            dtype=buf.dtype,
-            strides=[sub(stride) for stride in buf.strides] if buf.strides else None,
-        )
+    analyzer = create_analyzer()
 
-    return PrimFunc(
-        params=[sub(v) for v in prim_func.params],
-        body=substitute(prim_func.body, vmap),
-        buffer_map={k: substitute_buffer(v) for k, v in prim_func.buffer_map.items()},
-        attrs=prim_func.attrs,
-    )
+    def replace_variable(variable, mutator):
+        cached = mutator.var_remap_get(variable)
+        if isinstance(cached, ir.Expr):
+            return cached
+        value = replacements.get(variable)
+        if value is None:
+            return mutator.default_mutate(variable)
+        if mutator.def_region_kind() == tvm_ffi.DefRegionKind.DEF_SIMPLE and not isinstance(value, ir.Var):
+            raise TypeError("a local definition must remain a Var after substitution")
+        mapped = mutator.default_mutate(variable)
+        if isinstance(value, ir.Var):
+            # Rebuild a replacement tensor's dependent type with the same
+            # substitutions. Never mutate the caller's Var or TensorType.
+            value_type = mutator.mutate(value.ty)
+            if not value_type.same_as(value.ty):
+                source = value
+                value = ir.Var(value.name, value_type, value.loc)
+                if tvm_ffi.get_global_func("tl.HasSizeVarDefault")(source):
+                    tvm_ffi.get_global_func("tl.MarkSizeVarDefault")(value)
+        if not tvm_ffi.structural_equal(mapped.ty, value.ty):
+            raise TypeError(f"substitution for {variable.name!r} changes its type: {mapped.ty} -> {value.ty}")
+        # Custom callbacks return final values. Record the original identity as
+        # well so later uses and default typed-definition hooks share one Var.
+        mutator.var_remap_set(variable, value)
+        return value
+
+    def replace_expression(expression, mutator):
+        mapped = mutator.default_mutate(expression)
+        return analyzer.simplify(mapped) if ir.is_prim_expr(mapped) else mapped
+
+    result = tvm_ffi.structural_mutate(prim_func, [(ir.Var, replace_variable), (ir.Expr, replace_expression)])
+    tvm.tirx.analysis.check_well_formed(result)
+    return result
 
 
-def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
+def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False, private: bool = False) -> PrimFunc[_P, _T] | JITFunc[_P, _T]:
+    """Build a native Function; private helpers do not acquire an export symbol."""
+
     def impl(func: Callable[_P, _T]) -> PrimFunc[_P, _T] | Callable[_P, PrimFunc[_P, _T]]:
         sig = inspect.signature(func)
         ir_gen = mutate(func)
@@ -1761,23 +2110,24 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False) -> Prim
             elif param.name in func_annot:
                 annot[param.name] = func_annot[param.name]
         for k in annot:
-            # Call callable annotations (e.g., factory functions) to get the actual type.
-            # Skip typing generics like Optional[int], Union[...], List[...] which are
-            # callable but cannot be instantiated.
-            if not isinstance(annot[k], type) and callable(annot[k]) and get_origin(annot[k]) is None:
+            # Factories construct annotations. Native expressions are already
+            # annotations: Expr.__call__ builds an IR call, including on pointer
+            # Vars returned by T.handle(...), and must not run as a factory.
+            # Typing generics such as Optional[int] cannot be instantiated either.
+            if not isinstance(annot[k], (type, tvm.ir.Expr, tvm.ir.Type)) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
 
         if eager_jit:
             arg_names = list(sig.parameters.keys())
-            tensor_args = {k: v for k, v in annot.items() if isinstance(v, (Buffer, Var))}
+            tensor_args = {k: v for k, v in annot.items() if _is_runtime_parameter_annotation(v)}
             tensor_args_defaults = {
                 k: sig.parameters[k].default for k in tensor_args if sig.parameters[k].default is not sig.parameters[k].empty
             }
-            return JITFunc(func, sig, arg_names, tensor_args, tensor_args_defaults, ir_gen)
+            return JITFunc(func, sig, arg_names, tensor_args, tensor_args_defaults, ir_gen, private=private)
         else:
             try:
                 builder = Builder()
-                with builder.prim_func(func.__name__):
+                with builder.prim_func(func.__name__, private=private):
                     ir_gen.gen(builder)(**annot)
                 prim_func = builder.get()
                 prim_func = _patch_prim_func_attrs(prim_func, builder)

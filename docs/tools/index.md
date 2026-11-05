@@ -21,7 +21,7 @@ or invoke only the tool needed for the current workflow.
   generates for an example file, on any machine and without launching
   anything. It is the entry point behind the Compiler Explorer integration.
 - Use **Analyzer** before benchmarking when you need a rough roofline-style
-  estimate from a `PrimFunc` or `IRModule`.
+  estimate from a `Function` or `IRModule`.
 - Use **Layout Visualization** to inspect how logical indices map to threads and
   local indices.
 - Use **AutoDD** after obtaining a stable failure signature and before filing a

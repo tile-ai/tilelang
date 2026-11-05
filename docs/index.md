@@ -4,7 +4,7 @@
 
 Tile Language (tile-lang) is a concise domain-specific language designed to streamline
 the development of high-performance GPU/CPU kernels (e.g., GEMM, Dequant GEMM, FlashAttention, LinearAttention).
-By employing a Pythonic syntax with an underlying compiler infrastructure on top of TVM,
+By employing a Pythonic syntax with an underlying compiler infrastructure on top of TIRx,
 tile-lang allows developers to focus on productivity without sacrificing the
 low-level optimizations necessary for state-of-the-art performance.
 
@@ -52,6 +52,7 @@ programming_guides/software_pipeline
 programming_guides/python_compatibility
 programming_guides/autotuning
 programming_guides/type_system
+programming_guides/native_ir
 :::
 
 :::{toctree}

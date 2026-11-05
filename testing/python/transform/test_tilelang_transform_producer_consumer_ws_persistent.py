@@ -1,7 +1,7 @@
 """Repro/regression tests for ProducerConsumerWS on persistent pipelines.
 
 The ``ProducerConsumerWarpSpecialized`` pass historically failed on any
-persistent kernel whose top-level structure interposes a ``ForNode`` between
+persistent kernel whose top-level structure interposes a ``ForObj`` between
 the block body and the inner ``T.Pipelined`` K-loop.
 
 Two idiomatic TileLang patterns trigger this:
@@ -27,7 +27,8 @@ Two idiomatic TileLang patterns trigger this:
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
+from tvm_tirx import tirx
 from tilelang.backend.target import determine_target
 
 
@@ -395,7 +396,11 @@ def _apply_ws_pass(func):
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
-    return tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    assert tirx.analysis.check_well_formed(mod["main"])
+    result = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    assert tirx.analysis.check_well_formed(result["main"])
+    assert not tirx.analysis.undefined_vars(result["main"])
+    return result
 
 
 @tilelang.testing.requires_cuda

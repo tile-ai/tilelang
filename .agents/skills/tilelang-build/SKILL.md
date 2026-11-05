@@ -5,95 +5,102 @@ description: Repository-specific build, rebuild, install, and test instructions 
 
 # Build & Install
 
-## Installing / Rebuilding tilelang
+TileLang uses three matched distributions: the `tilelang` frontend, an
+`apache-tvm-tirx` provider containing the combined compiler and device runtimes,
+and the fixed `apache-tvm-ffi`. Follow `docs/get_started/Installation.md` for
+toolchain and platform details. An ordinary upstream TIRx wheel does not include
+TileLang registrations, and installing the frontend alone does not build them.
 
-The standard way to build and install:
+## Initial Source Build
 
-```bash
-pip install .
-```
-
-Or with verbose output for debugging build issues:
-
-```bash
-pip install . -v
-```
-
-`uv pip install .` also works if `uv` is available but is not required.
-
-Build dependencies are declared in `pyproject.toml` and resolved automatically during `pip install .`.
-
-If `ccache` is available, repeated builds only recompile changed C++ files.
-
-## Alternative: Development Build with `--no-build-isolation`
-
-If you need faster iteration (e.g. calling `cmake` directly to recompile C++ without re-running the full pip install), install build dependencies first:
+Use Python 3.10+, `uv`, CMake 3.26+, Ninja and a C++20 compiler. Start in the
+selected checkout and an activated dedicated environment:
 
 ```bash
-pip install -r requirements-dev.txt
-pip install --no-build-isolation .
+git submodule update --init --recursive
+uv venv
+source .venv/bin/activate
+python maint/scripts/build_native_artifacts.py stage --destination .native-dev-stage
+python maint/scripts/build_native_artifacts.py build \
+  --stage .native-dev-stage --output native-dev-dist --frontend uv \
+  --role ffi --wheel-only --install --jobs 4
+uv pip install --find-links native-dev-dist -r requirements-dev.txt
+python maint/scripts/build_native_artifacts.py build \
+  --stage .native-dev-stage --output native-dev-dist --frontend uv \
+  --role provider --role frontend --wheel-only --install --jobs 4
 ```
 
-After this, you can invoke `cmake --build build` directly to recompile only changed C++ files. This is useful when iterating on C++ code.
+The FFI bootstrap precedes requirements installation because its source-specific
+version may not be available on a package index. `--python` selects the target
+environment. A build without `--wheel-only` creates sdists and rebuilds wheels
+from them. Build logs and artifact hashes stay in the output directory.
 
-## Alternative: cmake + PYTHONPATH (recommended for C++ development)
+Backend switches apply to the provider build:
 
-For the fastest C++ iteration, bypass pip entirely and drive cmake directly:
+| Setting | Purpose |
+| --- | --- |
+| `USE_CUDA=ON/OFF` | Enable/disable CUDA; ON needs a supported toolkit. |
+| `USE_ROCM=ON/OFF` | Select ROCm/HIP emitters and runtime. |
+| `USE_ASCEND=ON/OFF` | Select Ascend emitters and runtime. |
+| `USE_METAL=ON/OFF` | Select Metal; normally enabled on macOS. |
+| `--cmake-define USE_LLVM=/path/to/llvm-config` | Enable the selected LLVM toolchain. |
+| `SKBUILD_CMAKE_BUILD_TYPE=Debug` | Select a Debug PEP 517 native build. |
+
+Linux defaults include ROCm and Ascend stubs. Their presence permits imports
+without those devices; executing kernels still needs the corresponding SDK,
+runtime and hardware. Debug logging additionally needs the `TVM_LOG_DEBUG=1`
+C++ preprocessor definition; see `docs/tutorials/logging.md`.
+
+## Editable Frontend and Native Rebuilds
+
+After installing the matched bundle, enable editable Python imports:
 
 ```bash
-# Configure (auto-detects CUDA; git submodules are initialised automatically)
-cmake -S . -B build
-
-# Build
-cmake --build build -j$(nproc)
-
-# Make the local tilelang package importable
-export PYTHONPATH=$(pwd):$PYTHONPATH
+uv pip install --no-deps -e .
 ```
 
-After the initial configure, recompiling is just `cmake --build build -j$(nproc)`. The runtime automatically discovers native libraries from `build/lib/` when it detects a dev checkout (see `tilelang/env.py`).
+Python-only edits are reflected immediately. Importing the local checkout via
+`PYTHONPATH` still requires the matching installed provider. The loader no
+longer searches old `build/tvm/` or `libtilelang` compiler artifacts.
 
-Useful cmake options:
-
-| Flag | Purpose |
-|------|---------|
-| `-DUSE_CUDA=ON/OFF` | Enable/disable CUDA backend (ON by default) |
-| `-DUSE_ROCM=ON` | Enable ROCm/HIP backend |
-| `-DUSE_METAL=ON` | Enable Metal backend (default on macOS) |
-| `-DCMAKE_BUILD_TYPE=Debug` | Debug build with `TVM_LOG_DEBUG` enabled |
-
-## Editable Installs
-
-`pip install -e .` is a supported development install, and is what `README.md`, `CONTRIBUTING.md`, and `docs/get_started/Installation.md` recommend for development:
+A native source edit changes the provider identity. Use a fresh immutable stage
+and output directory, reuse the already installed fixed FFI, and rebuild both
+provider and frontend:
 
 ```bash
-pip install -r requirements-dev.txt
-pip install -e . -v --no-build-isolation
+python maint/scripts/build_native_artifacts.py stage --destination .native-rebuild-stage
+python maint/scripts/build_native_artifacts.py build \
+  --stage .native-rebuild-stage --output native-rebuild-dist --frontend uv \
+  --role provider --role frontend --wheel-only --install --jobs 4
+uv pip install --no-deps -e .
 ```
 
-Notes specific to this repo's layout:
+Use a new stage/output name for each later native revision. `ccache` can reuse
+unchanged compilation inputs. Direct CMake builds and partial-source overrides
+are useful for isolated compiler work, but do not install or validate a matched
+bundle automatically. `TILELANG_NATIVE_SOURCE_OVERRIDE` builds cannot be installed.
 
-- When Python is run from the repo root, the local `./tilelang` directory is imported instead of any copy installed into `site-packages` (because the repo root is on `sys.path` ahead of `site-packages`). This is by design: `tilelang/env.py` detects a dev checkout (when `3rdparty/` is not inside the package dir) and loads native libraries from `build/lib/` and `build/tvm/`, logging `Loading tilelang libs from dev root: <repo>/build`.
-- Because of the above, both approaches resolve imports to the local `./tilelang` when run from the repo root. Use `pip install -e .` when you want pip to manage package metadata/dependencies; use `PYTHONPATH=$(pwd)` only for the lighter-weight import-only workflow.
-- For pure C++ iteration (no Python metadata needed), the `cmake + PYTHONPATH` flow above is faster and avoids re-running pip entirely.
+From outside the checkout, verify installed ownership and library identity:
+
+```bash
+python /path/to/tilelang/maint/scripts/verify_native_install.py \
+  --import-order tilelang-first --output install-tilelang-first.json
+python /path/to/tilelang/maint/scripts/verify_native_install.py \
+  --import-order tirx-first --output install-tirx-first.json
+```
 
 ## Running Tests
 
-Most tests require a GPU.
-
-```bash
-python -m pytest testing/python/ -x
-```
-
-Run a specific test file or test case:
+Choose tests for the changed subsystem and available backend. Many device tests
+need a GPU; construction and source-generation results have a narrower scope.
 
 ```bash
 python -m pytest testing/python/language/test_tilelang_language_copy.py -x
-python -m pytest testing/python/language/test_tilelang_language_copy.py -x -k "test_name"
-```
-
-For Metal-specific tests (requires macOS with Apple Silicon):
-
-```bash
 python -m pytest testing/python/metal/ -x
 ```
+
+Some native regression tests need test-only C++ bridges. Build their matching
+provider with `--cmake-define TILELANG_BUILD_NATIVE_TESTS=ON` and run ordinary
+pytest. `testing/conftest.py` makes the shared native Python fixtures available;
+tests using a C++ bridge require its registrations in that provider. Production
+providers leave this option OFF and do not ship test registry entries.

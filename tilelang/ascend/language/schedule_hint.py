@@ -1,9 +1,9 @@
 """Auto-schedule semantic hints, including buffer conflict declarations."""
 
 from tilelang.utils.language import to_tile_region
-from tvm import tirx
-from tvm.tirx import Buffer, IntImm, StringImm, call_intrin, op
-from tvm.tirx.script.builder.ir import attr
+from tilelang.language import _native as tirx
+from tilelang.language._native import Buffer, IntImm, StringImm, call_intrin
+from tilelang.language._native import attr
 
 __all__ = ["assume_conflict", "assume_no_conflict", "PerCoreTask", "Stage", "Task"]
 
@@ -183,7 +183,7 @@ def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
     b_op = operand(b) if b is not None else a_op
     return call_intrin(
         "handle",
-        op.Op.get("tl.conflict_hint"),
+        "tl.conflict_hint",
         a_op,
         b_op,
         IntImm("int32", level if level is not None else _ALL_ENCLOSING_SCOPES),

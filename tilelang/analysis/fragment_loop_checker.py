@@ -1,115 +1,61 @@
-from __future__ import annotations
-from tvm import tirx
-from tvm.tirx import PyStmtExprVisitor, BufferStore, For, Var, PrimFunc, BufferLoad, IntImm, ForKind
-from tvm.tirx.transform import prim_func_pass
-from tvm.tirx.stmt_functor import post_order_visit
+"""Check fragment access dependencies in native loops with symbolic domains."""
 
-from tilelang.utils.language import is_fragment
+import tvm_ffi
+from tvm_tirx import ir, tirx
 
-
-@tirx.functor.visitor
-class _LoopVarUseAnalyzer(PyStmtExprVisitor):
-    """Analyze whether a loop variable is used in the given expr."""
-
-    def __init__(self, var: Var) -> None:
-        super().__init__()
-        self.var = var
-        self.used = False
-
-    def visit_var_(self, op: Var) -> None:
-        if op == self.var:
-            self.used = True
-        # Don't recursively visit children to avoid infinite recursion
+from ._visitor import NativeStmtVisitor, tensor_scope
 
 
-def collect_fragment_accesses(statement) -> list[BufferLoad | BufferStore]:
-    """
-    Collect fragment accesses in the loop body.
+def collect_fragment_accesses(statement):
+    """Collect actual TensorLoad/Store accesses whose source type is a fragment."""
+    accesses = []
 
-    Args:
-        statement: The TIR statement to analyze
+    def collect(node):
+        tensor = node.source if isinstance(node, ir.TensorLoad) else node.dest
+        scope = tensor_scope(tensor)
+        if scope is not None and scope.startswith("local.fragment"):
+            accesses.append(node)
 
-    Returns:
-        Tuple of buffer accesses in the loop body.
-    """
-
-    buffer_accesses = []
-
-    def visit_buffer_access(node):
-        if isinstance(node, (BufferLoad, BufferStore)) and is_fragment(node.buffer):
-            buffer_accesses.append(node)
-
-    post_order_visit(statement, visit_buffer_access)
-
-    return buffer_accesses
+    tvm_ffi.structural_walk(statement, ((ir.TensorLoad, ir.TensorStore), collect), order="post")
+    return accesses
 
 
-@tirx.functor.visitor
-class _FragmentLoopCheckVisitor(PyStmtExprVisitor):
-    """
-    Check whether the fragment accesses are valid.
+class _FragmentLoopCheckVisitor(NativeStmtVisitor):
+    def _check_indices(self, tensor, indices):
+        scope = tensor_scope(tensor)
+        if scope is None or not scope.startswith("local.fragment"):
+            return
+        for loop in self.loop_stack:
+            if loop.kind != ir.ForKind.PARALLEL:
+                continue
+            if all(isinstance(value, ir.IntImm) for value in (loop.begin, loop.end, loop.step)):
+                continue
+            if any(self.uses_var(index, loop.var) for index in indices):
+                raise ValueError(
+                    "[Tilelang Semantic Check] "
+                    f"Loop variable {loop.var} in a T.Parallel loop with symbolic range "
+                    f"(begin={loop.begin}, end={loop.end}, step={loop.step}) is used to index "
+                    "a fragment buffer, which is not allowed in Tilelang."
+                )
 
-    This checker will recursively visit all the for loops until it reaches certain "inner most loop".
-    Then it will start to check the validity of fragment access in the loop body. We need to maintain a stack of
-    loops during the traversal since this is the context/scope of the fragment access.
-    """
+    def visit_tensor_load(self, op, visitor):
+        self._check_indices(op.source, op.indices)
+        super().visit_tensor_load(op, visitor)
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.loop_stack = []
-
-    def visit_for_(self, op: For) -> None:
-        self.loop_stack.append(op)
-        child = op.body
-
-        # Reach the innermost loop -- This may cause repeated checks for cases like:
-        #   For1{
-        #       Stmt1;
-        #       For2{};
-        #       For3{};
-        #   };
-        # But it's OK since the check is idempotent.
-        if not isinstance(child, For):
-            buffer_accesses = collect_fragment_accesses(child)
-
-            loops_with_symbolic_ranges = []
-
-            for loop in self.loop_stack:
-                # symbolic
-                if loop.kind == ForKind.PARALLEL and not (isinstance(loop.min, IntImm) and isinstance(loop.extent, IntImm)):
-                    loops_with_symbolic_ranges.append(loop)
-
-            for buffer_access in buffer_accesses:
-                indices = buffer_access.indices
-                # Check 1
-                for loop in loops_with_symbolic_ranges:
-                    analyzer = _LoopVarUseAnalyzer(loop.loop_var)
-                    for index in indices:
-                        analyzer.visit_expr(index)
-                    if analyzer.used:
-                        raise ValueError(
-                            "[Tilelang Semantic Check] "
-                            f"Loop variable {loop.loop_var} in a T.Parallel loop with symbolic range (min={loop.min}, extent={loop.extent}) is used to index "
-                            "a fragment buffer, which is not allowed in Tilelang."
-                        )
-
-        self.visit_stmt(op.body)
-        self.loop_stack.pop()
+    def visit_tensor_store(self, op, visitor):
+        self._check_indices(op.dest, op.indices)
+        super().visit_tensor_store(op, visitor)
 
 
 def FragmentLoopChecker():
-    """
-    When using T.Parallel over a local/fragment buffer, there are several restrictions:
-    to ensure that the parallelization is valid.
+    """Reject a fragment index depending on a symbolic parallel-loop domain.
 
-    1. The range of loop can not be symbolic.
-
-    Returns:
-        A prim_func_pass that applies the transformation
+    Symbolic parallel loops that do not index fragments through their iterator,
+    ordinary serial loops and shared/global tensor accesses remain valid.
     """
 
-    def pass_fn(func: PrimFunc, mod, ctx):
+    def pass_fn(func, _mod, _ctx):
         _FragmentLoopCheckVisitor().visit_stmt(func.body)
         return func
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return tirx.transform.function_pass(pass_fn, opt_level=0, name="tl.FragmentLoopChecker")

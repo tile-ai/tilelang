@@ -6,66 +6,79 @@
 #include <string>
 
 #include "backend/common/codegen/codegen_c_base.h"
-#include "target/source/codegen_c.h"
-#include <tvm/arith/analyzer.h>
+#include "codegen/c/codegen_c.h"
+#include "native_ascend_ir.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm {
 namespace codegen {
 
 class CodeGenTileLangAscend final : public CodeGenTileLangCBase {
 public:
-  using CodeGenC::PrintType;
+  using CodeGenTileLangCBase::Dispatch_;
+  using CodeGenTileLangCBase::PrintType;
+  void InitFuncState(const tirx::Function &f) override {
+    CodeGenTileLangCBase::InitFuncState(f);
+    analyzer_ = tl::CreateTileLangAnalyzer();
+    name_supply_->ReserveName("block_idx");
+    for (const auto &param : f->params) {
+      if (const auto *pointer = param->ty.as<PtrTypeObj>())
+        alloc_storage_scope_[param.get()] = pointer->scope;
+    }
+  }
 
   void Init(bool output_ssa);
-  void AddFunction(const PrimFunc &f);
+  void AddFunction(const GlobalVar &gvar, const tirx::Function &f);
   void PrintFuncPrefix(std::ostream &os) final;
-  void PrintType(DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintCCEVectorSuffix(DataType t, std::ostream &os);
-  void VisitStmt_(const SBlockNode *op) final;
-  void VisitStmt_(const ForNode *op) final;
-  void VisitStmt_(const WhileNode *op) final;
-  void VisitStmt_(const AttrStmtNode *op) final;
-  void VisitStmt_(const AllocBufferNode *op) final;
-  void VisitStmt_(const BindNode *op) final;
-  void PrintStorageSync(const CallNode *op) final;
-  void VisitExpr_(const CallNode *op, std::ostream &os) final;
-  void PrintStorageScope(const std::string &scope, std::ostream &os) final;
+  void PrintType(const PrimType &t, std::ostream &os) final; // NOLINT(*)
+  void PrintCCEVectorSuffix(const PrimType &t, std::ostream &os);
+  void EmitBlockRegion_(const RegionStmtObj *op);
+  void Dispatch_(const ForObj *op) final;
+  void Dispatch_(const WhileObj *op) final;
+  void Dispatch_(const RegionStmtObj *op) final;
+  void EmitTensorAllocation_(const BindObj *op);
+  void Dispatch_(const BindObj *op) final;
+  void PrintStorageSync(const CallObj *op) final;
+  void Dispatch_(const CallObj *op, std::ostream &os) final;
+  void PrintStorageScope(const runtime::MemoryScope &memory_scope,
+                         std::ostream &os) final;
   bool IsScopePartOfType() const final;
 
-  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const RampNode *op, std::ostream &os) final;
-  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
-  void VisitExpr_(const CastNode *op, std::ostream &os) final;
-  void VisitExpr_(const VarNode *op, std::ostream &os) final;
-  void VisitExpr_(const NotNode *op, std::ostream &os) final;
-  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
-  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
-  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
-  void VisitStmt_(const BufferStoreNode *op) final;
+  void Dispatch_(const prim::BroadcastObj *op,
+                 std::ostream &os) final; // NOLINT(*)
+  void Dispatch_(const prim::RampObj *op, std::ostream &os) final;
+  void Dispatch_(const FloatImmObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::CastObj *op, std::ostream &os) final;
+  void Dispatch_(const VarObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::NotObj *op, std::ostream &os) final;
+  void Dispatch_(const TensorLoadObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::SelectObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::ShuffleObj *op, std::ostream &os) final;
+  void Dispatch_(const TensorStoreObj *op) final;
 
-  std::string GetBufferRef(DataType t, const BufferNode *buffer,
+  std::string GetBufferRef(const PrimType &t, const VarObj *buffer,
                            PrimExpr index) final;
 
   // Vector element access (use .x/.y/.z/.w like CUDA, not .s0/.s1 from base)
-  void PrintVecElemLoad(const std::string &vec, DataType t, int i,
+  void PrintVecElemLoad(const std::string &vec, const PrimType &t, int i,
                         std::ostream &os) final;
-  void PrintVecElemStore(const std::string &vec, DataType t, int i,
+  void PrintVecElemStore(const std::string &vec, const PrimType &t, int i,
                          const std::string &value) final;
-  void PreFunctionBody(const PrimFunc &f) final;
+  void PreFunctionBody(const tirx::Function &f) final;
 
 protected:
   // Scalarize vector math calls (like CUDA)
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
-                       const ffi::Array<PrimExpr> &args, bool skip_first_arg,
+                       const ffi::Array<Expr> &args, bool skip_first_arg,
                        std::ostream &os) final;
 
   // Scalarize vector operations without Ascend SIMT vector support.
-  void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
+  void PrintVecBinaryOp(const std::string &op, const PrimType &t, PrimExpr lhs,
                         PrimExpr rhs, std::ostream &os) final;
 
 private:
   struct CApiArgument {
-    PrimExpr value;
+    Expr value;
     std::string prefix{};
     std::string suffix{};
   };
@@ -125,39 +138,39 @@ private:
   std::unordered_map<Var, IntImm, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       unroll_factor_;
 
-  ffi::Array<Var> CollectVFCaptures(const SBlockNode *op) const;
-  void EmitVFFunction(const SBlockNode *op, const ffi::Array<Var> &captures,
+  ffi::Array<Var> CollectVFCaptures(const RegionStmtObj *op) const;
+  void EmitVFFunction(const RegionStmtObj *op, const ffi::Array<Var> &captures,
                       const std::string &helper_name,
                       const std::string &func_attrs, VFMode vf_mode);
   void EmitPhiloxVectorFloat(std::ostream &os, const std::string &distribution,
                              int lanes);
-  bool EmitSimdMergingCall(const CallNode *op, std::ostream &os);
+  bool EmitSimdMergingCall(const CallObj *op, std::ostream &os);
   std::string ResolveSimdIntrinsicName_(const Call &call,
-                                        DataType result_dtype) const;
+                                        PrimType result_dtype) const;
   void PrintSimdCall_(const Call &call, size_t num_expr_args, std::ostream &os);
   void EmitCApiCall_(const std::string &function_name,
                      std::initializer_list<CApiArgument> arguments);
-  bool EmitAscendMemoryCall_(const CallNode *op);
-  void EmitPipeBarrier_(const CallNode *op);
-  void EmitHardEventSync_(const CallNode *op, bool notify);
-  void EmitCrossCoreSync_(const CallNode *op, bool arrive);
-  void EmitSetCopyPadValue_(const CallNode *op);
-  void EmitGmToUbufCopy_(const CallNode *op);
-  void EmitUbufToGmCopy_(const CallNode *op);
-  void EmitGmToL1Copy_(const CallNode *op);
-  void EmitFillL1_(const CallNode *op);
-  void EmitL1ToL0Copy_(const CallNode *op, bool is_l0a);
-  void EmitMxSfLoad_(const CallNode *op, bool is_l0a);
-  void EmitL0cToUbufCopy_(const CallNode *op);
-  void EmitL0cToGmCopy_(const CallNode *op);
-  void EmitUbufToL1Copy_(const CallNode *op);
-  void EmitNd2NzScatter_(const CallNode *op);
-  void EmitNd2NzPostCopy_(const CallNode *op);
-  void EmitMad_(const CallNode *op, bool is_mx);
-  void EmitGemmL1_(const CallNode *op);
-  void EmitBlockscaledGemmL1_(const CallNode *op);
-  bool IsGlobalGmBuffer(const BufferNode *buffer) const;
-  std::string GetGmBypassPtr(DataType dtype, const BufferNode *buffer,
+  bool EmitAscendMemoryCall_(const CallObj *op);
+  void EmitPipeBarrier_(const CallObj *op);
+  void EmitHardEventSync_(const CallObj *op, bool notify);
+  void EmitCrossCoreSync_(const CallObj *op, bool arrive);
+  void EmitSetCopyPadValue_(const CallObj *op);
+  void EmitGmToUbufCopy_(const CallObj *op);
+  void EmitUbufToGmCopy_(const CallObj *op);
+  void EmitGmToL1Copy_(const CallObj *op);
+  void EmitFillL1_(const CallObj *op);
+  void EmitL1ToL0Copy_(const CallObj *op, bool is_l0a);
+  void EmitMxSfLoad_(const CallObj *op, bool is_l0a);
+  void EmitL0cToUbufCopy_(const CallObj *op);
+  void EmitL0cToGmCopy_(const CallObj *op);
+  void EmitUbufToL1Copy_(const CallObj *op);
+  void EmitNd2NzScatter_(const CallObj *op);
+  void EmitNd2NzPostCopy_(const CallObj *op);
+  void EmitMad_(const CallObj *op, bool is_mx);
+  void EmitGemmL1_(const CallObj *op);
+  void EmitBlockscaledGemmL1_(const CallObj *op);
+  bool IsGlobalGmBuffer(const VarObj *buffer) const;
+  std::string GetGmBypassPtr(PrimType dtype, const VarObj *buffer,
                              PrimExpr index);
 
   enum class AscendKernelMode { kVector, kCube, kMix };
@@ -166,23 +179,23 @@ private:
   bool enable_fast_math_{false};
 
   // Accumulates constraints along the traversal
-  arith::Analyzer analyzer_;
+  sym::Analyzer analyzer_{tl::CreateTileLangAnalyzer()};
 
   const char *VFModeName(VFMode mode) const;
   bool IsInsideSimtVF() const { return vf_mode_ == VFMode::kSimt; }
   bool IsInsideSimdVF() const { return vf_mode_ == VFMode::kSimd; }
   bool IsOutsideVF() const { return vf_mode_ == VFMode::kNone; }
-  void ValidateSimdVectorType(DataType dtype, const std::string &context) const;
-  void RejectGenericVectorInSimd(const char *op_name, DataType dtype) const;
-  void ValidateGenericVectorType(const char *op_name, DataType dtype);
+  void ValidateSimdVectorType(PrimType dtype, const std::string &context) const;
+  void RejectGenericVectorInSimd(const char *op_name, PrimType dtype) const;
+  void ValidateGenericVectorType(const char *op_name, PrimType dtype);
 
   bool VectorAccessIsAligned(const PrimExpr &index, int lanes);
 
-  void EmitSimtVectorPredicateNot(const PrimExpr &value, DataType dtype,
+  void EmitSimtVectorPredicateNot(const PrimExpr &value, PrimType dtype,
                                   std::ostream &os);
-  void EmitScalarizedLoad(const BufferLoadNode *op, std::ostream &os);
-  bool EmitScalarizedStore(const BufferStoreNode *op);
-  bool EmitOutOfVFBroadcastStore(const BufferStoreNode *op);
+  void EmitScalarizedLoad(const TensorLoadObj *op, std::ostream &os);
+  bool EmitScalarizedStore(const TensorStoreObj *op);
+  bool EmitOutOfVFBroadcastStore(const TensorStoreObj *op);
 };
 
 } // namespace codegen

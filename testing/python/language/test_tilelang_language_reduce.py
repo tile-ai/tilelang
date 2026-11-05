@@ -6,8 +6,10 @@ import tilelang.language as T
 import tilelang.testing
 import pytest
 import torch
+import tvm_ffi
+from tvm_tirx import ir
 from tilelang import tvm
-from tilelang.utils.language import to_tile_region
+from tilelang.utils.language import to_buffer_region
 
 tilelang.testing.set_random_seed()
 
@@ -714,6 +716,15 @@ def test_reduce_keepdim(op, dtype, shape, dim, clear):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("out_shape", [(32, 1), (32, 2), (4, 4, 4)])
 def test_reduce_rejects_invalid_destination_shape(out_shape):
+    def native_reduce(src, dst):
+        return tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
+            ir.PrimType("void"),
+            ir.Op.get("tl.tileop.reduce"),
+            [to_buffer_region(src), to_buffer_region(dst), ir.StringImm("sum"), ir.IntImm("int32", 1), ir.IntImm("bool", True)],
+            {},
+            ir.UnknownLoc(),
+        )
+
     @T.prim_func
     def kernel(A: T.Tensor((64, 64), T.float32), B: T.Tensor(out_shape, T.float32)):
         with T.Kernel(1, threads=128):
@@ -722,15 +733,11 @@ def test_reduce_rejects_invalid_destination_shape(out_shape):
             T.copy(A, src)
             # Bypass the frontend's shape check to exercise the native contract
             # before layout reshape could accept an unrelated equal-size shape.
-            T.evaluate(
-                T.call_intrin(
-                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
-                )
-            )
+            T.evaluate(native_reduce(src, dst))
             T.copy(dst, B)
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    with target, pytest.raises(tvm.error.InternalError, match="ReduceOp: invalid destination shape"):
+    with target, pytest.raises(RuntimeError, match="ReduceOp: invalid destination shape"):
         tilelang.lower(kernel, target=target)
 
 

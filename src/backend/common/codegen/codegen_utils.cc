@@ -10,6 +10,39 @@
 namespace tvm {
 namespace codegen {
 
+std::string EscapeCString(const std::string &value) {
+  std::string escaped;
+  for (unsigned char ch : value) {
+    switch (ch) {
+    case '\\':
+      escaped += "\\\\";
+      break;
+    case '"':
+      escaped += "\\\"";
+      break;
+    case '\n':
+      escaped += "\\n";
+      break;
+    case '\r':
+      escaped += "\\r";
+      break;
+    case '\t':
+      escaped += "\\t";
+      break;
+    default:
+      if (ch < 0x20 || ch >= 0x7f) {
+        escaped += '\\';
+        escaped += static_cast<char>('0' + ((ch >> 6) & 7));
+        escaped += static_cast<char>('0' + ((ch >> 3) & 7));
+        escaped += static_cast<char>('0' + (ch & 7));
+      } else {
+        escaped += static_cast<char>(ch);
+      }
+    }
+  }
+  return escaped;
+}
+
 bool CheckOutermostParenthesesMatch(const std::string &s) {
   if (!s.empty() && s.front() == '(' && s.back() == ')') {
     size_t len = s.size();

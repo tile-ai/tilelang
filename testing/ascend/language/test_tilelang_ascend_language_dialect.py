@@ -3,8 +3,7 @@
 import pytest
 import tilelang.language.common as common_language
 from tilelang.ascend import language as T
-from tvm import tirx
-from testing.ascend._ir import allocated_buffer, nodes
+from testing.ascend._ir import allocated_buffer, annotations
 
 ASCEND_ONLY_NAMES = {
     "AscendTileScheduler",
@@ -66,6 +65,6 @@ def test_allocation_records_binding_without_a_consumer(leading):
             T.evaluate(0)
 
     a, sf = allocated_buffer(main, "a"), allocated_buffer(main, "_sf")
-    assert tuple(int(x) for x in sf.shape) == (*leading, 32, 2)
-    bindings = [block.annotations["tl.l0_sf_bindings"] for block in nodes(main, tirx.SBlock) if "tl.l0_sf_bindings" in block.annotations]
-    assert len(bindings) == 1 and bindings[0][sf.data].same_as(a.data)
+    assert tuple(int(x) for x in sf.ty.shape) == (*leading, 32, 2)
+    bindings = [fields["tl.l0_sf_bindings"] for fields in annotations(main) if "tl.l0_sf_bindings" in fields]
+    assert len(bindings) == 1 and bindings[0][sf].same_as(a)

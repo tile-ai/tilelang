@@ -8,11 +8,11 @@ backend toolchains.
 import re
 
 import pytest
+import tvm_ffi
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
 
 import tilelang.testing
-from tilelang import tvm
-
-tirx = tvm.tirx
 
 CODEGENS = [
     pytest.param("c", "c", 'extern "C"', id="cpu-c"),
@@ -53,14 +53,28 @@ SECOND_HELPER = "int call_helper(int x) { return my_helper(x); }"
 
 
 def _generate_source(codegen, target, imports):
-    build = tvm.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
+    build = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
     if build is None:
         pytest.skip(f"{codegen} codegen is not built")
     target = tvm.target.Target(target)
-    body = tirx.Evaluate(tirx.call_extern("int32", "call_helper", 1))
+    body = ir.SeqStmt([ir.Evaluate(tirx.call_extern("call_helper", ir.IntImm("int32", 1), ty="int32"))])
     for source in reversed(imports):
-        body = tirx.AttrStmt(tirx.IntImm("int32", 0), "pragma_import_c", source, body)
-    func = tirx.PrimFunc([], body).with_attr("global_symbol", "import_kernel")
+        schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": None, "key": "pragma_import_c", "value": source})
+        body = ir.SeqStmt(
+            [
+                ir.RegionStmt(
+                    "tl.attr",
+                    [payload],
+                    [],
+                    {
+                        "schema_version": 1,
+                        "annotation_schema": schema,
+                    },
+                    body,
+                )
+            ]
+        )
+    func = tirx.Function([], body, ir.PrimType("void")).with_attr("global_symbol", "import_kernel")
     if target.kind.name != "c":
         func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
         func = func.with_attr("tirx.kernel_launch_params", [])
@@ -96,8 +110,8 @@ def test_empty_raw_import(codegen, target, qualifier):
 
 
 def test_raw_import_requires_string():
-    with pytest.raises(tvm.error.InternalError, match="pragma_import_c expects a string-valued source"):
-        _generate_source("c_host", "c", [tirx.IntImm("int32", 1)])
+    with pytest.raises(RuntimeError, match="pragma_import_c expects a string-valued source"):
+        _generate_source("c_host", "c", [ir.IntImm("int32", 1)])
 
 
 if __name__ == "__main__":

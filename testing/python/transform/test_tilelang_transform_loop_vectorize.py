@@ -4,12 +4,22 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
+from tilelang.language import _native
+from tilelang.testing.ir import collect_nodes
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import prim
 
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
 _SM89_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
 _SM90_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+
+
+def _tensor(shape, dtype, name, *, scope="global", strides=None, elem_offset=0):
+    # These native IR observers retain the 64-byte data guarantee of the
+    # original Buffer fixtures. Unknown external alignment is tested separately.
+    spec = _native.buffer(shape, dtype, scope=scope or "global", strides=strides, elem_offset=elem_offset, align=64)
+    return ir.Var(name, spec.as_type())
 
 
 def _run_layout_inference(func):
@@ -23,10 +33,14 @@ def _run_layout_inference(func):
 def _run_vectorized_loop_legalizer(func):
     mod = tvm.IRModule({"main": func})
     with _TARGET:
+        mod = tirx.transform.BindTarget(_TARGET)(mod)
         return tl.transform.LegalizeVectorizedLoop()(mod)
 
 
 def _run_vectorize_loop(func, target=_SM90_TARGET):
+    # Match the public kernel ABI's disjoint-parameter contract. A raw native
+    # Function without it intentionally keeps the scalar atomic loop.
+    func = func.with_attr("tirx.noalias", True)
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
         mod = tvm.tirx.transform.BindTarget(target)(mod)
@@ -37,17 +51,15 @@ def _run_vectorize_loop(func, target=_SM90_TARGET):
 
 @tilelang.testing.requires_cuda
 def test_nested_vectorized_loop_uses_inner_min():
-    tir = tvm.tirx
-    a = tir.decl_buffer((16,), "int32", name="A")
-    b = tir.decl_buffer((16,), "int32", name="B")
-    outer, inner = tir.Var("j", "int32"), tir.Var("i", "int32")
+    a = _tensor((16,), "int32", name="A")
+    b = _tensor((16,), "int32", name="B")
+    outer, inner = ir.Var("j", "int32"), ir.Var("i", "int32")
     index = outer * 8 + inner
-    body = tir.BufferStore(b, tir.BufferLoad(a, [index]) + 1, [index])
-    inner_loop = tir.For(inner, 2, 4, tir.ForKind.SERIAL, body)
-    main = tir.PrimFunc(
-        [a.data, b.data],
-        tir.For(outer, 0, 2, tir.ForKind.VECTORIZED, inner_loop),
-        buffer_map={a.data: a, b.data: b},
+    body = ir.TensorStore(b, [index], ir.TensorLoad(a, [index]) + 1)
+    inner_loop = ir.For(inner, 2, 6, 1, ir.ForKind.DEFAULT, body)
+    main = tirx.Function(
+        [a, b],
+        ir.For(outer, 0, 2, 1, ir.ForKind.VECTORIZED, inner_loop),
     )
 
     transformed = _run_vectorized_loop_legalizer(main)
@@ -56,30 +68,15 @@ def test_nested_vectorized_loop_uses_inner_min():
 
 
 def _atomic_op_names(func):
-    names = []
-
-    def collect(node):
-        if isinstance(node, tvm.tirx.Call) and hasattr(node.op, "name") and node.op.name.startswith("tl.atomic_add"):
-            names.append(node.op.name)
-
-    post_order_visit(func.body, collect)
-    return names
+    return [node.op.name for node in collect_nodes(func, ir.Call) if hasattr(node.op, "name") and node.op.name.startswith("tl.atomic_add")]
 
 
 def _loop_kinds(func):
-    kinds = []
-
-    def collect(node):
-        if isinstance(node, tvm.tirx.For):
-            kinds.append(node.kind)
-
-    post_order_visit(func.body, collect)
-    return kinds
+    return [node.kind for node in collect_nodes(func, ir.For)]
 
 
 def _undefined_local_vars(func):
-    defined_vars = [*func.params, *(buffer.data for buffer in func.buffer_map.values())]
-    return tvm.tirx.analysis.undefined_vars(func.body, defined_vars)
+    return tirx.analysis.undefined_vars(func)
 
 
 def test_fp32_shared_atomic_stays_scalar_on_sm90():
@@ -92,7 +89,7 @@ def test_fp32_shared_atomic_stays_scalar_on_sm90():
     transformed = _run_vectorize_loop(main)
 
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
-    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.SERIAL]
+    assert _loop_kinds(transformed["main"]) == [ir.ForKind.DEFAULT]
     assert not _undefined_local_vars(transformed["main"])
 
 
@@ -105,11 +102,16 @@ def test_fp32_atomic_stays_scalar_on_sm89():
     transformed = _run_vectorize_loop(main, _SM89_TARGET)
 
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_add_elem_op"]
-    assert _loop_kinds(transformed["main"]) == [tvm.tirx.ForKind.SERIAL]
+    assert _loop_kinds(transformed["main"]) == [ir.ForKind.DEFAULT]
     assert not _undefined_local_vars(transformed["main"])
 
 
-def test_fp32_global_atomic_keeps_x4_vectorization_on_sm90():
+def test_fp32_global_atomic_keeps_x4_vectorization_on_sm90(monkeypatch):
+    # State the original alignment premise in the harness, preserving both
+    # this user kernel and its vector-width assertion. This is not evidence
+    # that unknown-alignment default annotations acquire the same guarantee.
+    monkeypatch.setattr(T.Tensor, "default_align", 64)
+
     @T.prim_func
     def main(A: T.Tensor((4,), T.float32), output: T.Tensor((4,), T.float32)):
         for i in T.vectorized(4):
@@ -120,7 +122,9 @@ def test_fp32_global_atomic_keeps_x4_vectorization_on_sm90():
     assert _atomic_op_names(transformed["main"]) == ["tl.atomic_addx4_elem_op"]
 
 
-def test_fp16_shared_atomic_keeps_x2_vectorization_on_sm90():
+def test_fp16_shared_atomic_keeps_x2_vectorization_on_sm90(monkeypatch):
+    monkeypatch.setattr(T.Tensor, "default_align", 64)
+
     @T.prim_func
     def main(A: T.Tensor((2,), T.float16)):
         shared = T.alloc_buffer((2,), "float16", scope="shared")
@@ -133,39 +137,33 @@ def test_fp16_shared_atomic_keeps_x2_vectorization_on_sm90():
 
 
 def _vectorized_extents(func):
-    extents = []
-
-    def collect(node):
-        if isinstance(node, tvm.tirx.For) and node.kind == tvm.tirx.ForKind.VECTORIZED:
-            extents.append(int(node.extent))
-
-    post_order_visit(func.body, collect)
-    return extents
+    return [int((node.end - node.begin) // node.step) for node in collect_nodes(func, ir.For) if node.kind == ir.ForKind.VECTORIZED]
 
 
 def _plan_atomic_loop(
     index, pointer_form="access_ptr", dtype="float32", scope="global", shape=(64,), strides=None, elem_offset=0, loop_min=0
 ):
     """Check the planner before the execution vectorizer can scalarize anything."""
-    tir = tvm.tirx
-    i = tir.Var("i", "int32")
-    offset = tir.Var("offset", "int64")
-    source = tir.decl_buffer((8,), dtype, name="source")
-    output = tir.decl_buffer(shape, dtype, name="output", scope=scope, strides=strides, elem_offset=elem_offset)
+    i = ir.Var("i", "int32")
+    offset = ir.Var("offset", "int64")
+    source = _tensor((8,), dtype, name="source")
+    output = _tensor(shape, dtype, name="output", scope=scope, strides=strides, elem_offset=elem_offset)
     indices = index(i, offset)
     if not isinstance(indices, list):
         indices = [indices]
-    load = tir.BufferLoad(output, indices)
+    load = ir.TensorLoad(output, indices)
     if pointer_form == "access_ptr":
-        ptr = tir.call_intrin("handle", tvm.ir.Op.get("tl.access_ptr"), load, 1, 3)
+        ptr = ir.Call("tl.access_ptr", [load, ir.IntImm("int32", 1), ir.IntImm("int32", 3)])
     elif pointer_form == "address_of":
-        ptr = tir.call_intrin("handle", tvm.ir.Op.get("tirx.address_of"), load)
+        ptr = tirx.address_of(load)
     else:
         assert len(indices) == 1
-        ptr = tir.tvm_access_ptr(tir.type_annotation(dtype), output.data, indices[0], 1, 3)
-    atomic = tir.call_intrin("handle", tvm.ir.Op.get("tl.atomic_add_elem_op"), ptr, source[i - loop_min], 0)
-    body = tir.For(i, loop_min, 8, tir.ForKind.VECTORIZED, tir.Evaluate(atomic))
-    func = tir.PrimFunc([source, output, offset], body).with_attr("global_symbol", "main")
+        ptr = T.tvm_access_ptr(T.type_annotation(dtype), output.data, indices[0], 1, 3)
+    atomic = ir.Call("tl.atomic_add_elem_op", [ptr, source[i - loop_min], ir.IntImm("int32", 0)])
+    body = ir.For(i, loop_min, loop_min + 8, 1, ir.ForKind.VECTORIZED, ir.Evaluate(atomic))
+    # These source/output fixtures model separate kernel arguments. State the
+    # engine's default noalias contract before invoking individual native passes.
+    func = tirx.Function([source, output, offset], body).with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
     return tvm.IRModule({"main": func})
 
 
@@ -178,6 +176,7 @@ def _plan_atomic_loop(
 def test_atomic_plan_uses_loop_min(loop_min, index, width, pointer_form):
     mod = _plan_atomic_loop(index, pointer_form, loop_min=loop_min)
     with _SM90_TARGET:
+        mod = tirx.transform.BindTarget(_SM90_TARGET)(mod)
         planned = tl.transform.LegalizeVectorizedLoop()(mod)
         assert _vectorized_extents(planned["main"]) == [width]
         lowered = tl.transform.FlattenBuffer()(tl.transform.LowerAccessPtr()(planned))
@@ -188,15 +187,14 @@ def test_atomic_plan_uses_loop_min(loop_min, index, width, pointer_form):
 
 @pytest.mark.parametrize("access", ["broadcast", "condition"])
 def test_vector_group_boundary_is_relative_to_min(access):
-    tir = tvm.tirx
-    a = tir.decl_buffer((2,), "int32", name="A")
-    b = tir.decl_buffer((4,), "int32", name="B")
-    i = tir.Var("i", "int32")
+    a = _tensor((2,), "int32", name="A")
+    b = _tensor((4,), "int32", name="B")
+    i = ir.Var("i", "int32")
     if access == "broadcast":
-        body = tir.BufferStore(b, a[i // 4], [i - 2])
+        body = ir.TensorStore(b, [i - 2], a[i // 4])
     else:
-        body = tir.IfThenElse(i // 4 == 0, tir.BufferStore(b, i, [i - 2]), None)
-    func = tir.PrimFunc([a, b], tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body))
+        body = ir.If(i // 4 == 0, ir.TensorStore(b, [i - 2], i), None)
+    func = tirx.Function([a, b], ir.For(i, 2, 6, 1, ir.ForKind.VECTORIZED, body))
     with tvm.target.Target("c"):
         planned = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
     # At width 4 the lane values of i // 4 are [0, 0, 1, 1], not uniform.
@@ -225,6 +223,7 @@ def test_vector_group_boundary_is_relative_to_min(access):
 def test_atomic_destination_width_is_planned(index, width, pointer_form):
     mod = _plan_atomic_loop(index, pointer_form)
     with _SM90_TARGET:
+        mod = tirx.transform.BindTarget(_SM90_TARGET)(mod)
         planned = tl.transform.LegalizeVectorizedLoop()(mod)
         assert _vectorized_extents(planned["main"]) == ([width] if width > 1 else [])
         lowered = tl.transform.LowerAccessPtr()(planned)
@@ -252,6 +251,7 @@ def test_atomic_destination_width_is_planned(index, width, pointer_form):
 def test_atomic_capability_limits_the_plan(dtype, scope, target, width, pointer_form):
     mod = _plan_atomic_loop(lambda i, _: i, pointer_form=pointer_form, dtype=dtype, scope=scope)
     with target:
+        mod = tirx.transform.BindTarget(target)(mod)
         planned = tl.transform.LegalizeVectorizedLoop()(mod)
         assert _vectorized_extents(planned["main"]) == ([width] if width > 1 else [])
         lowered = tl.transform.LowerAccessPtr()(planned)
@@ -266,6 +266,7 @@ def test_atomic_capability_limits_the_plan(dtype, scope, target, width, pointer_
 def test_atomic_plan_uses_physical_offset(strides, elem_offset, width):
     mod = _plan_atomic_loop(lambda i, _: [i // 2, i % 2], shape=(4, 2), strides=strides, elem_offset=elem_offset)
     with _SM90_TARGET:
+        mod = tirx.transform.BindTarget(_SM90_TARGET)(mod)
         planned = tl.transform.LegalizeVectorizedLoop()(mod)
     assert _vectorized_extents(planned["main"]) == ([width] if width > 1 else [])
 
@@ -362,7 +363,7 @@ def test_large_int32_bounded_residual_access_ptr_does_not_abort():
                 T.evaluate(
                     T.call_intrin(
                         "float32",
-                        tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
+                        tvm.ir.Op.get("tl.atomic_add_elem_op"),
                         T.tvm_access_ptr(
                             T.type_annotation("float32"),
                             A.data,
@@ -382,31 +383,28 @@ def test_overflow_promotion_preserves_let_var_binding():
     """Promoted Let bodies must reference the rewritten binder."""
     extent = 4
     stride = 600_000_000
-    loop_var = tvm.tirx.Var("i", "int32")
-    let_var = tvm.tirx.Var("offset", "int32")
-    input_buffer = tvm.tirx.decl_buffer((2_000_000_000,), "float32", name="A")
-    output_buffer = tvm.tirx.decl_buffer((extent,), "float32", name="output")
+    loop_var = ir.Var("i", "int32")
+    let_var = ir.Var("offset", "int32")
+    input_buffer = _tensor((2_000_000_000,), "float32", name="A")
+    output_buffer = _tensor((extent,), "float32", name="output")
     scaled_offset = loop_var * stride
-    index = tvm.tirx.Let(let_var, scaled_offset, let_var - scaled_offset)
-    body = tvm.tirx.BufferStore(
+    index = let_var - scaled_offset
+    body = ir.TensorStore(
         output_buffer,
-        tvm.tirx.BufferLoad(input_buffer, [index]),
         [loop_var],
+        ir.TensorLoad(input_buffer, [index]),
     )
-    loop = tvm.tirx.For(
+    loop = ir.For(
         loop_var,
         0,
         extent,
-        tvm.tirx.ForKind.VECTORIZED,
-        body,
+        1,
+        ir.ForKind.VECTORIZED,
+        [ir.Bind(let_var, scaled_offset), body],
     )
-    func = tvm.tirx.PrimFunc(
-        [input_buffer.data, output_buffer.data],
+    func = tirx.Function(
+        [input_buffer, output_buffer],
         loop,
-        buffer_map={
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
     )
 
     transformed = _run_vectorized_loop_legalizer(func)
@@ -437,19 +435,20 @@ def test_large_int32_affine_index_under_int64_cast_does_not_abort():
     bindings = []
 
     def collect(node):
-        if isinstance(node, tvm.tirx.BufferLoad) and node.buffer.name == "A":
+        if isinstance(node, ir.TensorLoad) and node.source.name == "A":
             load_indices.append(node.indices[0])
-        elif isinstance(node, tvm.tirx.Bind):
+        elif isinstance(node, ir.Bind):
             bindings.append((node.var, node.value))
 
-    post_order_visit(main.body, collect)
+    for node in collect_nodes(main, ir.Expr) + collect_nodes(main, ir.Stmt):
+        collect(node)
     assert len(load_indices) == 1
-    assert isinstance(load_indices[0], tvm.tirx.Var)
+    assert isinstance(load_indices[0], ir.Var)
     cast_values = [value for var, value in bindings if var.same_as(load_indices[0])]
     assert len(cast_values) == 1
-    assert isinstance(cast_values[0], tvm.tirx.Cast)
-    assert str(cast_values[0].dtype) == "int64"
-    assert str(cast_values[0].value.dtype) == "int32"
+    assert isinstance(cast_values[0], prim.Cast)
+    assert str(cast_values[0].ty.dtype) == "int64"
+    assert str(cast_values[0].value.ty.dtype) == "int32"
 
     _run_layout_inference(main)
 
@@ -510,3 +509,15 @@ def test_overflow_promotion_preserves_atomic_vector_lanes():
                 T.atomic_addx4(A[indices[i], i * lanes], values[i, 0])
 
     _run_layout_inference(main)
+
+
+@pytest.mark.parametrize("noalias", [False, True])
+def test_atomic_vectorizer_requires_disjoint_argument_contract(noalias):
+    mod = _plan_atomic_loop(lambda i, _: i)
+    mod["main"] = mod["main"].with_attr("tirx.noalias", noalias)
+    with _SM90_TARGET:
+        planned = tl.transform.LegalizeVectorizedLoop()(tirx.transform.BindTarget(_SM90_TARGET)(mod))
+        assert _vectorized_extents(planned["main"]) == [4]
+        emitted = tl.transform.VectorizeLoop()(tl.transform.FlattenBuffer()(tl.transform.LowerAccessPtr()(planned)))
+    assert _atomic_op_names(emitted["main"]) == ["tl.atomic_addx4_elem_op" if noalias else "tl.atomic_add_elem_op"]
+    assert not _undefined_local_vars(emitted["main"])

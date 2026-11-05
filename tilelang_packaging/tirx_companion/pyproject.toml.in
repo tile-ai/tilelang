@@ -1,0 +1,46 @@
+# Materialized with the source digest by build_native_artifacts.py.
+[project]
+name = "apache-tvm-tirx"
+version = "@PROVIDER_VERSION@"
+description = "TIRx compiler provider with native TileLang compiler extensions"
+requires-python = ">=3.10"
+license = "Apache-2.0 AND MIT"
+license-files = ["tilelang-source/LICENSE", "tilelang-source/3rdparty/tvm-tirx/LICENSE"]
+dependencies = [
+  "apache-tvm-ffi==@FFI_VERSION@",
+  "apache-tvm-ffi-orcjit>=0.1.2",
+  "ml-dtypes", "numpy", "packaging",
+  "z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'",
+  "z3-solver>=4.15.8,<4.16; platform_system == 'Windows' and platform_machine == 'ARM64'",
+]
+
+[project.scripts]
+tvm-tirx-config = "tvm_tirx.config:__main__"
+
+[build-system]
+requires = [
+  "scikit-build-core>=0.11",
+  "z3-solver>=4.13.0,<4.15.5; platform_system != 'Windows' or platform_machine != 'ARM64'",
+  "z3-solver>=4.15.8,<4.16; platform_system == 'Windows' and platform_machine == 'ARM64'",
+  "patchelf>=0.17.2; platform_system == 'Linux'",
+  "ninja>=1.11; platform_system == 'Windows'",
+  "nvidia-cuda-nvcc>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
+  "nvidia-cuda-cccl>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
+  "nvidia-cuda-nvrtc>=13; platform_system == 'Windows' and platform_machine != 'ARM64'",
+]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+cmake.version = ">=3.26"
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+wheel.py-api = "py3"
+wheel.install-dir = "tvm_tirx"
+install.components = ["tvm_tirx", "tilelang_compiler_extra"]
+wheel.packages = { tvm_tirx = "tilelang-source/3rdparty/tvm-tirx/python/tvm_tirx" }
+sdist.include = ["CMakeLists.txt", "pyproject.toml", "native-source.json", "tilelang-source/**"]
+sdist.exclude = ["**/.git", "**/.git/**", "**/build/**", "**/__pycache__/**", "**/*.pyc"]
+
+[[tool.scikit-build.overrides]]
+if.platform-system = "win32"
+cmake.args = ["-G", "Ninja"]

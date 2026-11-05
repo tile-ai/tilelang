@@ -1,4 +1,4 @@
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 from typing import Literal
 
 from tilelang.cuda.intrinsics.layout.mma_layout import (

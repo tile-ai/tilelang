@@ -44,6 +44,7 @@ def test_cpu_windows_serial_fallback(monkeypatch, backend, expected):
 
 def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
     from tilelang.jit.adapter import tvm_ffi
+    from tilelang.env import TILELANG_TEMPLATE_PATH
 
     seen = {}
 
@@ -64,8 +65,16 @@ def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
     adapter.rt_mod = object()
     adapter.target = tvm.target.Target("c")
     adapter.pass_configs = {"tl.cpu_parallel": True}
-    monkeypatch.setattr(tvm_ffi.runtime, "Executable", Executable)
+    adapter.compile_flags = ["-DTEST_CPU_FLAG=1"]
+    monkeypatch.setattr(tvm_ffi, "Executable", Executable)
     monkeypatch.setattr(tvm_ffi, "COMPILE_ARGS", {"options": ["-existing"]})
     monkeypatch.setattr(toolchain, "get_compile_flags", flags)
     adapter._make_executable()
-    assert seen["options"] == ["-existing", "-O2", "-fopenmp"]
+    assert seen["options"] == [
+        "-existing",
+        "-O2",
+        "-fopenmp",
+        "-DTEST_CPU_FLAG=1",
+        "-std=c++17",
+        "-I" + TILELANG_TEMPLATE_PATH,
+    ]

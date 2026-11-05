@@ -157,6 +157,7 @@ template <typename T> T GetSymbol(void *handle, const char *name) {
 
 struct CUDARuntimeAPI {
   decltype(&::cudaGetErrorString) cudaGetErrorString_{nullptr};
+  decltype(&::cudaGetErrorName) cudaGetErrorName_{nullptr};
   decltype(&::cudaGetLastError) cudaGetLastError_{nullptr};
   decltype(&::cudaPeekAtLastError) cudaPeekAtLastError_{nullptr};
 
@@ -241,6 +242,8 @@ CUDARuntimeAPI CreateCUDARuntimeAPI() {
   // fallback string, but when libcudart is present it should always exist.
   api.cudaGetErrorString_ = GetSymbol<decltype(api.cudaGetErrorString_)>(
       handle, "cudaGetErrorString");
+  api.cudaGetErrorName_ =
+      GetSymbol<decltype(api.cudaGetErrorName_)>(handle, "cudaGetErrorName");
 
   LOOKUP_REQUIRED(cudaGetLastError)
   LOOKUP_REQUIRED(cudaPeekAtLastError)
@@ -327,6 +330,14 @@ TILELANG_CUDART_STUB_API const char *cudaGetErrorString(cudaError_t error) {
     return api->cudaGetErrorString_(error);
   }
   return FallbackCudaErrorString(error);
+}
+
+TILELANG_CUDART_STUB_API const char *cudaGetErrorName(cudaError_t error) {
+  auto *api = GetCUDARuntimeAPI();
+  if (api->cudaGetErrorName_ != nullptr) {
+    return api->cudaGetErrorName_(error);
+  }
+  return error == cudaSuccess ? "cudaSuccess" : "cudaErrorUnknown";
 }
 
 TILELANG_CUDART_STUB_API cudaError_t cudaGetLastError(void) {

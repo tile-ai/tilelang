@@ -1,6 +1,6 @@
 """CPU codegen float literal regression tests.
 
-Covers two paths through CodeGenTileLangC::VisitExpr_(FloatImmNode*) that have
+Covers two paths through CodeGenTileLangC::VisitExpr_(FloatImmObj*) that have
 broken before:
 
 1. Finite fp16 constants must lower to the cast form `(half)1.5e+00f`

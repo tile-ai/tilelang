@@ -1,11 +1,66 @@
 import numpy as np
 import pytest
-
 import tilelang
 import tilelang.language as T
 import tilelang.testing
+import tvm_ffi
 from tilelang import tvm as tvm
+from tilelang.language._native import encode_annotations
+from tilelang.testing.ir import collect_nodes
+from tilelang.testing.packed import compile_packed_function
 from tilelang.transform import DecoupleTypeCast
+
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import prim
+from tvm_tirx.tirx.layout import Iter
+
+
+def _canonicalize_for_comparison(mod):
+    def allocation_attrs(node, mutator):
+        node = mutator.default_mutate(node)
+        if isinstance(node.op, ir.Op) and node.op.name == "tirx.alloc_tensor" and node.attrs is None:
+            # The operator accepts either None or an empty DictAttrs for no
+            # allocation annotations. Nonempty attributes remain exact.
+            return ir.Call(node.op, node.args, attrs={}, ty_args=node.ty_args, ty=node.ty, loc=node.loc)
+        return node
+
+    def redundant_scope(node, mutator):
+        node = mutator.default_mutate(node)
+        if (
+            node.op.name == "tl.lexical_scope"
+            and not node.args
+            and not node.body_params
+            and not node.result_vars
+            and not node.attrs.dict
+            and len(node.body) == 1
+            and isinstance(node.body[0], ir.RegionStmt)
+            and node.body[0].op.name == "tl.lexical_scope"
+        ):
+            # There are no sibling definitions in this outer scope, and the
+            # inner scope keeps every allocation's lifetime and provenance.
+            return node.body[0]
+        return node
+
+    # These comparisons retain CUDA's lexical allocation placement. Supply
+    # the matching target only while consuming source-origin metadata, then
+    # restore previously unbound functions for the exact comparison below.
+    mod = mod.clone()
+    unbound = []
+    for symbol, function in list(mod.functions.items()):
+        if "target" not in function.attrs:
+            unbound.append(symbol)
+            mod[symbol] = function.with_attr("target", tvm.target.Target("cuda"))
+    mod = tilelang.transform.FinalizeAnnotations("cuda")(mod)
+    for symbol in unbound:
+        mod[symbol] = mod[symbol].without_attr("target")
+    # DecoupleTypeCast creates an explicit row-major scratch layout. Materialize
+    # implicit row-major layouts on both sides with the production pass; retain
+    # every explicit stride, offset, replica and non-memory ownership axis.
+    mod = tilelang.transform.PrepareTensorLayouts()(mod)
+    mod = tvm_ffi.structural_map(mod, (tirx.TileLayout, lambda layout: layout.canonicalize()))
+    mod = tvm_ffi.structural_mutate(mod, [(ir.RegionStmt, redundant_scope), (ir.Call, allocation_attrs)])
+    assert tirx.analysis.check_well_formed(mod)
+    return mod
 
 
 def _check(original, transformed):
@@ -15,7 +70,79 @@ def _check(original, transformed):
 
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
 
+    # The facade's named sblock and the pass's allocation marker describe the
+    # same lexical scope. Compare their real native lowering, including the
+    # allocation-scope provenance, rather than the temporary annotation codec.
+    # Buffer annotations carry an explicit zero memory offset; native scratch
+    # TensorTypes omit it. Use the target's layout canonicalizer on both sides
+    # so this representation detail does not hide the remaining exact check.
+    mod = _canonicalize_for_comparison(mod)
+    transformed = _canonicalize_for_comparison(transformed)
+
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+
+
+@pytest.mark.parametrize("offset", [0, 3])
+def test_comparison_layout_canonicalization_keeps_addresses(offset):
+    layout = tirx.TileLayout.from_iters([Iter(4, 4, "m"), Iter(4, 1, "m")], [], {"m": offset})
+    tensor = ir.Var("a", tirx.TensorType((4, 4), "float32", layout=layout, align=4))
+    function = tirx.Function([tensor], ir.Evaluate(ir.const(0)), ret_type=ir.PrimType("void"))
+    normalized = _canonicalize_for_comparison(tvm.IRModule.from_expr(function))["main"]
+    analyzer = tvm.sym.Analyzer()
+    for index in range(16):
+        before = analyzer.simplify(layout.apply(index)["m"])
+        after = analyzer.simplify(normalized.params[0].ty.layout.apply(index)["m"])
+        assert isinstance(before, ir.IntImm) and before.value == index + offset
+        assert isinstance(after, ir.IntImm) and after.value == index + offset
+
+
+@pytest.mark.parametrize("boundary", ["empty", "binding", "following_store", "explicit_marker"])
+def test_comparison_keeps_scope_bindings_and_provenance(boundary):
+    tensor = ir.Var("a", tirx.TensorType((4,), "float32", layout="default"))
+    scalar = ir.Var("value", ir.PrimType("float32"))
+    inner_value = scalar if boundary == "binding" else ir.const(1, "float32")
+    inner = ir.RegionStmt(
+        "tl.lexical_scope",
+        [],
+        [],
+        {"explicit_alloc_scope": True},
+        [ir.TensorStore(tensor, [0], inner_value)],
+    )
+    body = [inner]
+    if boundary == "binding":
+        body.insert(0, ir.Bind(scalar, tensor[1]))
+    elif boundary == "following_store":
+        body.append(ir.TensorStore(tensor, [2], ir.const(2, "float32")))
+    outer_attrs = {"explicit_alloc_scope": True} if boundary == "explicit_marker" else {}
+    outer = ir.RegionStmt("tl.lexical_scope", [], [], outer_attrs, body)
+    function = tirx.Function([tensor], outer, ret_type=ir.PrimType("void"))
+    normalized = _canonicalize_for_comparison(tvm.IRModule.from_expr(function))["main"]
+    scopes = collect_nodes(normalized, ir.RegionStmt)
+    assert len(scopes) == (1 if boundary == "empty" else 2)
+    assert sum(bool(scope.attrs.dict.get("explicit_alloc_scope", False)) for scope in scopes) == (2 if boundary == "explicit_marker" else 1)
+    if boundary != "empty":
+        tvm.ir.assert_structural_equal(normalized, function, True)
+
+
+@pytest.mark.parametrize("difference", ["memory_offset", "store_index", "allocation_annotation"])
+def test_comparison_still_rejects_memory_and_annotation_changes(difference):
+    def function(changed):
+        offset = 3 if changed and difference == "memory_offset" else 0
+        layout = tirx.TileLayout.from_iters([Iter(4, 1, "m")], [], {"m": offset})
+        tensor = ir.Var("a", tirx.TensorType((4,), "float32", layout=layout, align=4))
+        local = ir.Var("scratch", tirx.TensorType((4,), "float32", scope="local", layout="default"))
+        attrs = {"alignment": 128} if changed and difference == "allocation_annotation" else {}
+        allocation = ir.Bind(local, ir.Call("tirx.alloc_tensor", [], attrs=attrs, ty_args=[local.ty]))
+        index = 1 if changed and difference == "store_index" else 0
+        return tirx.Function(
+            [tensor],
+            [allocation, ir.TensorStore(tensor, [index], ir.const(1, "float32"))],
+            ret_type=ir.PrimType("void"),
+        )
+
+    before = _canonicalize_for_comparison(tvm.IRModule.from_expr(function(False)))
+    after = _canonicalize_for_comparison(tvm.IRModule.from_expr(function(True)))
+    assert not tvm_ffi.structural_equal(before, after, map_free_vars=True)
 
 
 def test_local_to_memory():
@@ -121,53 +248,77 @@ def test_memory_to_local_nonzero_min():
 @pytest.mark.parametrize("loop_min", [2, "symbolic"])
 def test_decouple_preserves_logical_loop_domain(loop_min):
     """RMW staging uses ordinals while all three loops retain their domain."""
-    tir = tvm.tirx
     extent = 4
     if loop_min == "symbolic":
-        loop_min = tir.Var("start", "int32")
+        loop_min = ir.Var("start", ir.PrimType("int32"))
         scalar_params = [loop_min]
     else:
+        loop_min = ir.const(loop_min, "int32")
         scalar_params = []
-    a = tir.decl_buffer((16,), "float16", name="a")
-    i = tir.Var("i", "int32")
-    value = tir.Cast("float16", tir.Cast("float32", a[i]) + tir.const(1, "float32"))
-    before = tir.PrimFunc(
-        [a.data, *scalar_params],
-        tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [i])),
-        buffer_map={a.data: a},
+    a = ir.Var("a", tirx.TensorType((16,), "float16", layout="default"))
+    i = ir.Var("i", ir.PrimType("int32"))
+    value = prim.Cast(ir.PrimType("float16"), prim.Cast(ir.PrimType("float32"), a[i]) + ir.const(1, "float32"))
+    before = tirx.Function(
+        [a, *scalar_params],
+        ir.For(
+            i,
+            loop_min,
+            loop_min + extent,
+            ir.const(1, "int32"),
+            ir.ForKind.VECTORIZED,
+            ir.TensorStore(a, [i], value),
+        ),
+        ret_type=ir.PrimType("void"),
     ).with_attr("global_symbol", "main")
 
-    # Keep logical memory indices and use ordinals only for the scratch buffer.
-    # The RMW load and store must share the same four-element staging buffer.
-    cast_buf = tir.decl_buffer((4,), "float16", name="a_local_cast", scope="local")
-    copy_from_var = tir.Var("copy_from", "int32")
-    copy_to_var = tir.Var("copy_to", "int32")
-    copy_from = tir.For(
+    # Keep logical memory indices and use ordinals only for the scratch tensor.
+    # The RMW load and store must share the same four-element staging tensor.
+    cast_buf = ir.Var("a_local_cast", tirx.TensorType((4,), "float16", scope="local", layout="default"))
+    copy_from_var = ir.Var("copy_from", ir.PrimType("int32"))
+    copy_to_var = ir.Var("copy_to", ir.PrimType("int32"))
+    copy_from = ir.For(
         copy_from_var,
         loop_min,
-        extent,
-        tir.ForKind.VECTORIZED,
-        tir.BufferStore(cast_buf, a[copy_from_var], [copy_from_var - loop_min]),
+        loop_min + extent,
+        ir.const(1, "int32"),
+        ir.ForKind.VECTORIZED,
+        ir.TensorStore(cast_buf, [copy_from_var - loop_min], a[copy_from_var]),
     )
     ordinal = i - loop_min
-    compute_value = tir.Cast("float16", tir.Cast("float32", cast_buf[ordinal]) + tir.const(1, "float32"))
-    compute = tir.For(i, loop_min, extent, tir.ForKind.VECTORIZED, tir.BufferStore(cast_buf, compute_value, [ordinal]))
-    copy_to = tir.For(
+    compute_value = prim.Cast(
+        ir.PrimType("float16"),
+        prim.Cast(ir.PrimType("float32"), cast_buf[ordinal]) + ir.const(1, "float32"),
+    )
+    compute = ir.For(
+        i,
+        loop_min,
+        loop_min + extent,
+        ir.const(1, "int32"),
+        ir.ForKind.VECTORIZED,
+        ir.TensorStore(cast_buf, [ordinal], compute_value),
+    )
+    copy_to = ir.For(
         copy_to_var,
         loop_min,
-        extent,
-        tir.ForKind.VECTORIZED,
-        tir.BufferStore(a, cast_buf[copy_to_var - loop_min], [copy_to_var]),
+        loop_min + extent,
+        ir.const(1, "int32"),
+        ir.ForKind.VECTORIZED,
+        ir.TensorStore(a, [copy_to_var], cast_buf[copy_to_var - loop_min]),
     )
-    block = tir.SBlock(
+    schema, payload = encode_annotations({"node": None, "key": "lexical_alloc_scope", "value": 1})
+    scope = ir.RegionStmt(
+        "tl.attr",
+        [payload],
         [],
-        [],
-        [],
-        "decoupled_cast",
-        tir.SeqStmt([tir.AllocBuffer(cast_buf), copy_from, compute, copy_to]),
-        annotations={"lexical_alloc_scope": 1},
+        {"schema_version": 1, "annotation_schema": schema},
+        [
+            ir.Bind(cast_buf, ir.Call("tirx.alloc_tensor", [], ty_args=[cast_buf.ty])),
+            copy_from,
+            compute,
+            copy_to,
+        ],
     )
-    expected = before.with_body(tir.SBlockRealize([], True, block))
+    expected = before.with_body(scope)
 
     actual_mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
     tvm.ir.assert_structural_equal(actual_mod["main"], expected, True)
@@ -181,13 +332,22 @@ def test_decouple_preserves_logical_loop_domain(loop_min):
 )
 def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values):
     """Legalization preserves the number of iterations and their logical values."""
-    tir = tvm.tirx
-    a = tir.decl_buffer((8,), "float32", name="a")
-    i = tir.Var("i", index_dtype)
+    a = ir.Var("a", tirx.TensorType((8,), "float32", layout="default"))
+    i = ir.Var("i", ir.PrimType(index_dtype))
     index = i - start
-    value = tir.Cast("float32", tir.Cast("float64", a[index]) + tir.Cast("float64", i))
-    loop = tir.For(i, start, extent, tir.ForKind.VECTORIZED, tir.BufferStore(a, value, [index]))
-    func = tir.PrimFunc([a.data], loop, buffer_map={a.data: a}).with_attr("global_symbol", "main")
+    value = prim.Cast(
+        ir.PrimType("float32"),
+        prim.Cast(ir.PrimType("float64"), a[index]) + prim.Cast(ir.PrimType("float64"), i),
+    )
+    loop = ir.For(
+        i,
+        ir.const(start, index_dtype),
+        ir.const(start + extent, index_dtype),
+        ir.const(1, index_dtype),
+        ir.ForKind.VECTORIZED,
+        ir.TensorStore(a, [index], value),
+    )
+    func = tirx.Function([a], loop, ret_type=ir.PrimType("void")).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
     with tvm.target.Target("c"):
         if decouple:
@@ -195,8 +355,8 @@ def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values
         mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
     # Execute the legalized domains with scalar C codegen.
-    with tvm.transform.PassContext(config={"tirx.disable_vectorize": True}):
-        executable = tvm.compile(mod["main"], target="c").jit(options=["-std=c++17"])
+    with tvm.ir.transform.PassContext(config={"tirx.disable_vectorize": True}):
+        executable = compile_packed_function(mod["main"])
     output = tvm.runtime.tensor(np.full(8, -1, dtype="float32"))
     executable["main"](output)
     expected = np.full(8, -1, dtype="float32")
@@ -207,17 +367,23 @@ def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values
 @pytest.mark.parametrize("step", [2, None], ids=["nonunit", "dynamic"])
 def test_nonunit_step_remains_scalar(step):
     """The unit-step transformations leave other loop steps unchanged."""
-    tir = tvm.tirx
-    a = tir.decl_buffer((8,), "float32", name="a")
-    i = tir.Var("i", "int32")
-    params = [a.data]
+    a = ir.Var("a", tirx.TensorType((8,), "float32", layout="default"))
+    i = ir.Var("i", ir.PrimType("int32"))
+    params = [a]
     if step is None:
-        step = tir.Var("step", "int32")
+        step = ir.Var("step", ir.PrimType("int32"))
         params.append(step)
-    value = tir.Cast("float32", tir.Cast("float64", a[i]) + tir.const(1, "float64"))
-    body = tir.BufferStore(a, value, [i])
-    before = tir.PrimFunc(params, tir.For(i, 2, 4, tir.ForKind.VECTORIZED, body, step=step), buffer_map={a.data: a})
-    expected = before.with_body(tir.For(i, 2, 4, tir.ForKind.SERIAL, body, step=step))
+    else:
+        step = ir.const(step, "int32")
+    value = prim.Cast(ir.PrimType("float32"), prim.Cast(ir.PrimType("float64"), a[i]) + ir.const(1, "float64"))
+    body = ir.TensorStore(a, [i], value)
+    begin, end = ir.const(2, "int32"), ir.const(6, "int32")
+    before = tirx.Function(
+        params,
+        ir.For(i, begin, end, step, ir.ForKind.VECTORIZED, body),
+        ret_type=ir.PrimType("void"),
+    )
+    expected = before.with_body(ir.For(i, begin, end, step, ir.ForKind.DEFAULT, body))
     with tvm.target.Target("c"):
         mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
         mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
@@ -481,7 +647,6 @@ def test_if_else_control_flow_skips_decoupling():
 def test_cast_buffers_wrapped_in_lexical_alloc_scope():
     """The pass must wrap cast buffers in a block annotated with
     lexical_alloc_scope, so StorageRewrite keeps them scoped to the use site."""
-    from tvm.tirx.stmt_functor import post_order_visit
 
     @T.prim_func
     def before(b: T.Tensor[(16,), T.float4_e2m1fn]):
@@ -496,16 +661,17 @@ def test_cast_buffers_wrapped_in_lexical_alloc_scope():
     allocs_inside = [0]
 
     def _visit(node):
-        if isinstance(node, tvm.tirx.SBlock) and "lexical_alloc_scope" in node.annotations:
+        if isinstance(node, ir.RegionStmt) and node.op.name == "tl.attr":
+            fields = tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
+            if fields["key"] != "lexical_alloc_scope":
+                return
             annotated_blocks[0] += 1
+            allocs_inside[0] += sum(
+                isinstance(bind.value, ir.Call) and bind.value.op.name == "tirx.alloc_tensor" for bind in collect_nodes(node.body, ir.Bind)
+            )
 
-            def _count(inner):
-                if isinstance(inner, tvm.tirx.AllocBuffer):
-                    allocs_inside[0] += 1
-
-            post_order_visit(node.body, _count)
-
-    post_order_visit(mod["main"].body, _visit)
+    for node in collect_nodes(mod["main"], ir.RegionStmt):
+        _visit(node)
     assert annotated_blocks[0] == 1, f"Expected 1 lexical_alloc_scope block, got {annotated_blocks[0]}"
     assert allocs_inside[0] == 1, f"Expected the cast buffer alloc inside the scope, got {allocs_inside[0]}"
 
@@ -612,7 +778,8 @@ def test_e2e_bf16_global_to_frag():
     """bf16 global -> float32 frag -> bf16 global: roundtrip should be lossless.
 
     With 1024 bf16 elements and 64 threads, each thread handles 16 bf16 = 256 bits,
-    so the kernel should use 256-bit load/store (load_global_256 / store_global_256).
+    so aligned inputs should retain the 256-bit global load/store fast path.
+    The same kernel must also preserve values for misaligned input views.
     """
     import torch
 
@@ -632,15 +799,27 @@ def test_e2e_bf16_global_to_frag():
 
     kernel = kernel_fn()
 
-    # Check vectorization: 256-bit load/store
+    # The global 32-byte helper keeps the 256-bit aligned fast path and a safe
+    # fallback for offsets. The local temporaries use Global256=false and must
+    # not satisfy this global-memory width check.
     source = kernel.get_kernel_source()
-    assert "load_global_256" in source, "Expected 256-bit global load"
-    assert "store_global_256" in source, "Expected 256-bit global store"
+    assert "load_global_256" in source or "tl::load_vector<ulonglong4, 32, true>" in source, "Expected 256-bit global load"
+    assert "store_global_256" in source or "tl::store_vector<ulonglong4, 32, true>" in source, "Expected 256-bit global store"
 
     # Correctness
     a = torch.randn(1024, device="cuda", dtype=torch.bfloat16)
     b = kernel(a)
     torch.testing.assert_close(b, a, rtol=0, atol=0)
+
+    # Keep the same kernel and exact numerical oracle for misaligned views.
+    # BF16 offsets of 1, 15, and 17 elements exercise the byte fallback, not an
+    # unproved alignment increase on the public Tensor parameters.
+    storage = torch.randn(1024 + 31, device="cuda", dtype=torch.bfloat16)
+    assert storage.data_ptr() % 32 == 0
+    for offset in (1, 15, 17):
+        view = storage[offset : offset + 1024]
+        assert view.data_ptr() % 32 != 0
+        torch.testing.assert_close(kernel(view), view, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
@@ -930,14 +1109,20 @@ def test_nested_guard_preserves_conditional_evaluation():
     copy_conditions = []
 
     def collect(node):
-        if isinstance(node, tvm.tirx.IfThenElse) and isinstance(node.then_case, tvm.tirx.BufferStore) and node.then_case.buffer.name == "b":
+        if (
+            isinstance(node, ir.If)
+            and len(node.then_case) == 1
+            and isinstance(node.then_case[0], ir.TensorStore)
+            and node.then_case[0].dest.name == "b"
+        ):
             copy_conditions.append(node.condition)
 
-    tvm.tirx.stmt_functor.post_order_visit(mod["before"].body, collect)
+    for node in collect_nodes(mod["before"], ir.If):
+        collect(node)
     assert len(copy_conditions) == 1
     condition = copy_conditions[0]
-    assert isinstance(condition, tvm.tirx.Call)
-    assert condition.op.same_as(tvm.ir.Op.get("tirx.if_then_else"))
+    assert isinstance(condition, ir.Call)
+    assert condition.op.same_as(tvm.ir.Op.get("prim.if_then_else"))
     assert int(condition.args[2]) == 0
 
 

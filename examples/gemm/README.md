@@ -28,19 +28,19 @@ TileLang is a domain-specific language designed to simplify the process of writi
 
 ### Prerequisites
 
-- **Python 3.8+**
+- **Python 3.10+**
 - **NVIDIA GPU** with a recent CUDA toolkit installed
 - **PyTorch** (optional, for easy correctness verification)
 - **tilelang**
-- **bitblas** (optional; used for swizzle layout utilities in the advanced examples)
+- **bitblas** (optional, for historical benchmark comparisons in a separate environment)
 
 ### Installation
 
-```bash
-pip install tilelang bitblas
-```
-
-*(Adjust accordingly if you are installing from source or using a different environment.)*
+Install the matched frontend/provider/FFI bundle for this revision using the
+[source installation guide](../../docs/get_started/Installation.md). The build
+helper there installs the exact generated wheels in dependency order. Optional
+BitBLAS benchmark comparisons have their own compiler dependencies; run them in
+a separate environment when they require the legacy TVM stack.
 
 ---
 
@@ -426,7 +426,7 @@ def tl_matmul(
    ```python
    mma_emitter.mma(A_local, B_local, C_local)
    ```
-   Under the hood, this translates into Tensor Core instructions (e.g., `wmma.mma.sync` in PTX), which process multiple data elements per warp in parallel.
+   Under the hood, this translates into Tensor Core instructions (e.g., `mma.sync` for the illustrated MMA path), which process multiple data elements per warp in parallel.
 
 5. **Store Results via `stmatrix`**
    Finally, you write the results from the warp-level fragments back to shared memory or global memory. This step might happen multiple times in a loop or just once at the end. The code snippet:

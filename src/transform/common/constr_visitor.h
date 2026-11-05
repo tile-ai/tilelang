@@ -1,101 +1,105 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 #define TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_
 
+#include "ir/analyzer.h"
+#include "ir/annotations.h"
+#include "ir/loop_math.h"
 #include "support/check.h"
-#include "tvm/arith/analyzer.h"
-#include "tvm/ir/expr.h"
 #include <cstdint>
 #include <functional>
 #include <ostream>
 #include <string>
 #include <tvm/ffi/extra/structural_hash.h>
-#include <tvm/ir/cast.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
-#include <tvm/tirx/transform.h>
-#include <tvm/tirx/var.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace tvm::tl {
+using namespace prim;
 
-/*!
- * \brief Replace mutable reads with unknown variables.
- *
- * `Analyzer::Bind` installs a rewrite `var -> value`, so a definition reading
- * mutable state would outlive a store this does not track, and would make two
- * instances agree where two threads read two different registers.
- *
- * By default, every occurrence gets an independent variable. Snapshot mode
- * reuses variables for structurally equal reads within this mutator instance.
- * Use it only when repeated expressions describe the same captured value, such
- * as the bounds of one access region, and use separate instances for distinct
- * access points. This models a snapshot; it does not capture values at runtime.
+/*! \brief Rewrite primitive uses without changing their native type contract.
  */
-class FreshenMutableReads : public tirx::ExprMutator {
+inline PrimExpr SubstituteConstraintExpr(const PrimExpr &value,
+                                         const ffi::Map<Var, PrimExpr> &subs) {
+  auto mutator = ffi::make_object<tvm::ExprMutator>();
+  for (const auto &[var, replacement] : subs)
+    mutator->VarRemapSet(var, replacement);
+  return mutator->Mutate(value).ValueOrUnchanged(value);
+}
+
+/*! \brief Own the native lexical contexts used by one proof.
+ * Keep the returned object alive through all queries. Contexts are popped in
+ * reverse order. Bindings still belong to the receiving analyzer, so callers
+ * populate a fresh analyzer rather than sharing one with unrelated proofs.
+ */
+class ConstrAnalyzerContext {
 public:
-  using tirx::ExprMutator::operator();
+  void Enter(const sym::Analyzer &analyzer, const PrimExpr &condition,
+             bool is_assume) {
+    contexts_.push_back(std::make_unique<ScopedAnalyzerConstraints>(
+        analyzer, condition, is_assume));
+  }
+  ~ConstrAnalyzerContext() {
+    while (!contexts_.empty())
+      contexts_.pop_back();
+  }
 
-  /*! \brief Whether repeated reads denote separate evaluations or one snapshot.
-   */
-  enum class Mode {
-    kPerOccurrence,
-    kSnapshot,
-  };
+private:
+  std::vector<std::unique_ptr<ScopedAnalyzerConstraints>> contexts_;
+};
 
+/*! \brief Replace each evaluation of mutable state with a fresh primitive.
+ * Analyzer bindings outlive stores, so binding a variable to a TensorLoad
+ * must capture an unknown value, never install a rewrite to a live memory
+ * read. Snapshot mode shares structurally equal reads only within this
+ * explicit mutator instance; different access points use different instances.
+ */
+class FreshenMutableReads : public tvm::ExprMutator {
+public:
+  using ExprMutator::Mutate;
+  using ExprMutator::Mutate_;
+  enum class Mode { kPerOccurrence, kSnapshot };
   explicit FreshenMutableReads(Mode mode = Mode::kPerOccurrence)
       : mode_(mode) {}
 
+  PrimExpr operator()(const PrimExpr &value) {
+    return Mutate(value).ValueOrUnchanged(value);
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                     InplaceMode) override {
+    return Fresh(ffi::GetRef<PrimExpr>(op));
+  }
+
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) override {
+    auto expression = ffi::GetRef<Expr>(op);
+    if (auto primitive = expression.as<PrimExpr>();
+        primitive.has_value() && SideEffect(expression) > CallEffectKind::kPure)
+      return Fresh(primitive.value());
+    return ExprMutator::Mutate_(op, mode);
+  }
+
 private:
-  /*!
-   * \brief Replace \p e according to the caller's evaluation model.
-   *
-   * An opaque call need not return the same value twice (`f() - f()` is not
-   * zero), and two reads of one location may be separated by a store. Sharing
-   * would assert an equality that need not hold, so reuse requires explicit
-   * snapshot mode.
-   */
-  PrimExpr Fresh(const PrimExpr &e) {
+  PrimExpr Fresh(const PrimExpr &expr) {
     if (mode_ == Mode::kSnapshot) {
-      auto it = memo_.find(e);
+      auto it = memo_.find(expr);
       if (it != memo_.end())
         return it->second;
     }
-    tirx::Var fresh("free" + std::to_string(count_++), e.dtype());
+    PrimExpr fresh = PrimVar("free" + std::to_string(count_++), expr.ty());
     if (mode_ == Mode::kSnapshot)
-      memo_.emplace(e, fresh);
+      memo_.emplace(expr, fresh);
     return fresh;
   }
-
-  PrimExpr VisitExpr_(const tirx::BufferLoadNode *op) override {
-    return Fresh(ffi::GetRef<PrimExpr>(op));
-  }
-  PrimExpr VisitExpr_(const tirx::ProducerLoadNode *op) override {
-    return Fresh(ffi::GetRef<PrimExpr>(op));
-  }
-  PrimExpr VisitExpr_(const tirx::ReduceNode *op) override {
-    return Fresh(ffi::GetRef<PrimExpr>(op));
-  }
-  PrimExpr VisitExpr_(const tirx::CallNode *op) override {
-    // `SideEffect` covers the arguments as well, so a call reading state
-    // anywhere below it becomes a single unknown; only a wholly pure one
-    // recurses.
-    if (tirx::SideEffect(ffi::GetRef<PrimExpr>(op)) >
-        tirx::CallEffectKind::kPure)
-      return Fresh(ffi::GetRef<PrimExpr>(op));
-    return tirx::ExprMutator::VisitExpr_(op);
-  }
-
   Mode mode_;
   int count_{0};
   std::unordered_map<PrimExpr, PrimExpr, ffi::StructuralHash,
-                     tirx::ExprDeepEqual>
+                     prim::ExprDeepEqual>
       memo_;
 };
 
@@ -107,16 +111,14 @@ struct Constr {
     kBindRange,
   } kind;
   bool is_assume = false;
-  tirx::Var var;
-  PrimExpr value;
-  Range range;
+  Var var{ffi::UnsafeInit{}};
+  PrimExpr value{ffi::UnsafeInit{}};
+  Range range{ffi::UnsafeInit{}};
 
   Constr(PrimExpr constr, bool is_assume = false)
       : kind(kConstr), value(constr), is_assume(is_assume) {};
-  Constr(tirx::Var var, PrimExpr val)
-      : kind(kBindValue), var(var), value(val) {};
-  Constr(tirx::Var var, Range range)
-      : kind(kBindRange), var(var), range(range) {};
+  Constr(Var var, PrimExpr val) : kind(kBindValue), var(var), value(val) {};
+  Constr(Var var, Range range) : kind(kBindRange), var(var), range(range) {};
 
   Constr() = default;
   Constr(const Constr &other) = default;
@@ -133,13 +135,13 @@ struct Constr {
       break;
     case kBindValue:
       os << "kBindValue";
-      os << ", var=" << var->name_hint;
+      os << ", var=" << var->name;
       os << ", value=" << value;
       break;
     case kBindRange:
       os << "kBindRange";
-      os << ", var=" << var->name_hint;
-      os << ", range=Range(min=" << range->min;
+      os << ", var=" << var->name;
+      os << ", range=Range(min=" << range->begin;
       os << ", extent=" << range->extent << ")";
       break;
     default:
@@ -154,38 +156,41 @@ struct Constr {
       return value;
     case kBindValue:
       // A vector-typed bind cannot be stated as an equality.
-      if (var.dtype().is_vector())
-        return Bool(true);
-      return var == value;
+      if (!var->ty.as_or_throw<PrimType>().IsScalar())
+        return IntImm(PrimType::Bool(), 1);
+      return var.as_or_throw<PrimExpr>() == value;
     case kBindRange:
-      return tirx::And(var >= range->min, var < (range->min + range->extent));
+      return prim::And(var.as_or_throw<PrimExpr>() >= range->begin,
+                       var.as_or_throw<PrimExpr>() <
+                           (range->begin + range->extent));
     }
     LOG(FATAL) << "Unreachable";
-    return PrimExpr();
+    return IntImm(PrimType::Bool(), 1);
   }
   /*!
    * \brief Rewrite through \p subs, keeping the kind whenever possible, so that
    *        renaming one side of a two-instance comparison keeps its binds.
    */
-  Constr Substitute(ffi::Map<tirx::Var, PrimExpr> subs) const {
+  Constr Substitute(ffi::Map<Var, PrimExpr> subs) const {
     switch (kind) {
     case kConstr:
-      return Constr(tirx::Substitute(value, subs), is_assume);
+      return Constr(SubstituteConstraintExpr(value, subs), is_assume);
     case kBindValue:
     case kBindRange: {
       auto it = subs.find(var);
       const auto *new_var =
-          it == subs.end() ? var.get() : (*it).second.as<tirx::VarNode>();
+          it == subs.end() ? var.get() : (*it).second.as<VarObj>();
       // A bind remapped onto a non-variable is only expressible as a predicate.
       if (new_var == nullptr)
-        return Constr(tirx::Substitute(ToGenericConstr(), subs), is_assume);
+        return Constr(SubstituteConstraintExpr(ToGenericConstr(), subs),
+                      is_assume);
       if (kind == kBindValue)
-        return Constr(ffi::GetRef<tirx::Var>(new_var),
-                      tirx::Substitute(value, subs));
+        return Constr(ffi::GetRef<Var>(new_var),
+                      SubstituteConstraintExpr(value, subs));
       return Constr(
-          ffi::GetRef<tirx::Var>(new_var),
-          Range::FromMinExtent(tirx::Substitute(range->min, subs),
-                               tirx::Substitute(range->extent, subs)));
+          ffi::GetRef<Var>(new_var),
+          Range::FromMinExtent(SubstituteConstraintExpr(range->begin, subs),
+                               SubstituteConstraintExpr(range->extent, subs)));
     }
     }
     LOG(FATAL) << "Unreachable";
@@ -202,20 +207,21 @@ struct Constr {
    * Every consumer goes through here, so no path can miss the substitution.
    */
   Constr FreshenReads() const {
-    FreshenMutableReads freshen;
+    auto freshen = ffi::make_object<FreshenMutableReads>();
     switch (kind) {
     case kConstr:
       return *this;
     case kBindValue:
-      return Constr(var, freshen(value));
+      return Constr(var, (*freshen)(value));
     case kBindRange:
-      return Constr(var, Range::FromMinExtent(freshen(range->min),
-                                              freshen(range->extent)));
+      return Constr(var, Range::FromMinExtent((*freshen)(range->begin),
+                                              (*freshen)(range->extent)));
     }
     LOG(FATAL) << "Unreachable";
     return Constr();
   }
-  void Populate(arith::Analyzer &analyzer) const {
+  void Populate(const sym::Analyzer &analyzer,
+                ConstrAnalyzerContext *context) const {
     Constr c = FreshenReads();
     switch (c.kind) {
     case kConstr:
@@ -224,13 +230,16 @@ struct Constr {
       // expands into the condition it represents before the analyzer
       // digests it. EnterConstraint evaluates eagerly, exactly like Bind:
       // an opaque boolean entered as-is contributes nothing.
-      analyzer.EnterConstraint(analyzer.Simplify(c.value), c.is_assume);
+      context->Enter(analyzer, analyzer->Simplify(c.value), c.is_assume);
       break;
     case kBindValue:
-      analyzer.Bind(c.var, c.value);
+      // A self bind records a definition for RenameFrom without installing a
+      // cyclic rewrite or sharing an auxiliary unknown across loop instances.
+      if (!c.var.same_as(c.value))
+        BindAnalyzer(analyzer, c.var, c.value);
       break;
     case kBindRange:
-      analyzer.Bind(c.var, c.range);
+      BindAnalyzer(analyzer, c.var, c.range);
       break;
     default:
       LOG(FATAL) << "Unreachable";
@@ -239,7 +248,7 @@ struct Constr {
 };
 
 struct ConstrSet {
-  ConstrSet Substitute(ffi::Map<tirx::Var, PrimExpr> subs) const {
+  ConstrSet Substitute(ffi::Map<Var, PrimExpr> subs) const {
     ConstrSet new_set;
     for (const auto &c : constrs_) {
       new_set.constrs_.push_back(c.Substitute(subs));
@@ -258,12 +267,12 @@ struct ConstrSet {
    *
    * \p subs accumulates the renames, so the caller can apply the same map to
    * expressions held outside the set. \p from has to be an `Optional`, as
-   * `tirx::Var()` builds a real variable named "v". Pass \p rename_ranges false
-   * to keep iteration variables shared, as ThreadSync's loop-carry model needs.
+   * a missing marker is distinct from a real variable. Pass \p rename_ranges
+   * false to keep iteration variables shared, as ThreadSync's loop-carry model
+   * needs.
    */
-  ConstrSet RenameFrom(const std::string &suffix,
-                       ffi::Map<tirx::Var, PrimExpr> &subs,
-                       const ffi::Optional<tirx::Var> &from = std::nullopt,
+  ConstrSet RenameFrom(const std::string &suffix, ffi::Map<Var, PrimExpr> &subs,
+                       const ffi::Optional<Var> &from = std::nullopt,
                        bool rename_ranges = true) const {
     bool active = !from.has_value();
     for (const Constr &c : constrs_) {
@@ -274,7 +283,7 @@ struct ConstrSet {
       if (!rename_ranges && c.kind == Constr::kBindRange)
         continue;
       if (active && !subs.count(c.var))
-        subs.Set(c.var, tirx::Var(c.var->name_hint + suffix, c.var.dtype()));
+        subs.Set(c.var, PrimVar(c.var->name + suffix, c.var->ty));
     }
     return Substitute(subs);
   }
@@ -289,8 +298,8 @@ struct ConstrSet {
    */
   ConstrSet Merge(const ConstrSet &other) const {
     ConstrSet out = *this;
-    std::unordered_map<const tirx::VarNode *, Constr> bound;
-    std::unordered_set<PrimExpr, ffi::StructuralHash, tirx::ExprDeepEqual>
+    std::unordered_map<const VarObj *, Constr> bound;
+    std::unordered_set<PrimExpr, ffi::StructuralHash, prim::ExprDeepEqual>
         preds;
     for (const Constr &c : out.constrs_) {
       if (c.kind == Constr::kConstr)
@@ -309,9 +318,9 @@ struct ConstrSet {
         bound.emplace(c.var.get(), c);
         out.constrs_.push_back(c);
       } else if (it->second.kind != c.kind ||
-                 !tirx::ExprDeepEqual()(it->second.ToGenericConstr(),
+                 !prim::ExprDeepEqual()(it->second.ToGenericConstr(),
                                         c.ToGenericConstr())) {
-        LOG(WARNING) << "ConstrSet::Merge: var '" << c.var->name_hint
+        LOG(WARNING) << "ConstrSet::Merge: var '" << c.var->name
                      << "' bound to conflicting values across merged sets; "
                         "caller should rename per-side-varying vars. Dropping "
                         "the incoming bind. existing="
@@ -346,7 +355,7 @@ struct ConstrSet {
    * only a lazily-evaluated bind (issue #3220, option 3) removes it.
    */
   ConstrSet Normalized() const {
-    std::unordered_map<const tirx::VarNode *, size_t> bind_at;
+    std::unordered_map<const VarObj *, size_t> bind_at;
     for (size_t i = 0; i < constrs_.size(); ++i) {
       const Constr &c = constrs_[i];
       if ((c.kind == Constr::kBindValue || c.kind == Constr::kBindRange) &&
@@ -371,7 +380,7 @@ struct ConstrSet {
         return;
       }
       state[index] = kVisiting;
-      for (const tirx::Var &var : ReadVars(constrs_[index])) {
+      for (const Var &var : ReadVars(constrs_[index])) {
         auto it = bind_at.find(var.get());
         if (it != bind_at.end() && it->second != index) {
           emit(it->second);
@@ -402,27 +411,25 @@ struct ConstrSet {
     return out;
   }
 
-  void Populate(arith::Analyzer &analyzer) const {
-    // Keep program order: `Analyzer::Bind` evaluates the bounds and modular set
-    // of the value at bind time, so entering the binds first would widen them
-    // -- a `v = tx` inside `if tx < 64` would lose its upper bound. Merged
-    // sets are additionally normalized (see `Normalized`) so a bind always
-    // precedes the entries that read its var.
-    for (const auto &c : constrs_) {
-      c.Populate(analyzer);
-    }
+  [[nodiscard]] std::unique_ptr<ConstrAnalyzerContext>
+  Populate(const sym::Analyzer &analyzer) const {
+    auto context = std::make_unique<ConstrAnalyzerContext>();
+    // Preserve source order and bind-before-use after Merge normalization.
+    for (const auto &entry : constrs_)
+      entry.Populate(analyzer, context.get());
+    return context;
   }
 
   /*! \brief Free vars an entry's definition or predicate reads (the bind's
    *  own var excluded by construction: it does not occur in its value). */
-  static ffi::Array<tirx::Var> ReadVars(const Constr &c) {
+  static ffi::Array<Var> ReadVars(const Constr &c) {
     switch (c.kind) {
     case Constr::kConstr:
     case Constr::kBindValue:
-      return tirx::UndefinedVars(c.value);
+      return tvm::UndefinedVars(c.value);
     case Constr::kBindRange: {
-      ffi::Array<tirx::Var> vars = tirx::UndefinedVars(c.range->min);
-      for (const tirx::Var &var : tirx::UndefinedVars(c.range->extent)) {
+      ffi::Array<Var> vars = tvm::UndefinedVars(c.range->begin);
+      for (const Var &var : tvm::UndefinedVars(c.range->extent)) {
         vars.push_back(var);
       }
       return vars;
@@ -432,9 +439,9 @@ struct ConstrSet {
     return {};
   }
   bool CanProve(const PrimExpr &expr) const {
-    arith::Analyzer analyzer;
-    Populate(analyzer);
-    return analyzer.CanProve(expr);
+    auto analyzer = CreateTileLangAnalyzer();
+    auto context = Populate(analyzer);
+    return analyzer->CanProve(expr);
   }
   template <typename... Args> void AddConstr(Args... args) {
     constrs_.push_back(Constr(args...));
@@ -444,10 +451,10 @@ struct ConstrSet {
    * constraints */
   PrimExpr ToConjunction() const {
     if (constrs_.empty())
-      return Bool(true);
+      return IntImm(PrimType::Bool(), 1);
     PrimExpr result = constrs_[0].ToGenericConstr();
     for (size_t i = 1; i < constrs_.size(); ++i) {
-      result = tirx::And(result, constrs_[i].ToGenericConstr());
+      result = prim::And(result, constrs_[i].ToGenericConstr());
     }
     return result;
   }
@@ -465,115 +472,165 @@ struct ConstrSet {
   std::vector<Constr> constrs_;
 };
 
+/*! \brief Collect premises in source order using native IR definition sites.
+ * Bind results are available to subsequent statements of the same SeqStmt.
+ * Arguments of regions/loops are evaluated outside their new definitions;
+ * guards and body definitions never leak into siblings after the scope ends.
+ */
 struct ConstrVisitor : public tirx::StmtExprVisitor {
 private:
   using Base = tirx::StmtExprVisitor;
-
   struct Guard {
     std::vector<Constr> &constrs;
-    ~Guard() { constrs.pop_back(); }
+    size_t old_size;
+    ~Guard() { constrs.resize(old_size); }
   };
 
 protected:
-  template <typename... Args> Guard MakeGuard(const Args... args) {
-    constr_stack_.push_back(Constr(args...));
-    return Guard{constr_stack_};
+  template <typename... Args> Guard MakeGuard(const Args &...args) {
+    size_t old_size = constr_stack_.size();
+    constr_stack_.emplace_back(args...);
+    return Guard{constr_stack_, old_size};
   }
+  Guard Scope() { return Guard{constr_stack_, constr_stack_.size()}; }
 
 public:
-  using StmtExprVisitor::VisitExpr_;
-  using StmtExprVisitor::VisitStmt_;
-  void VisitIfThenElseExpr(const PrimExpr cond, const PrimExpr true_value,
-                           const PrimExpr false_value) {
-    // Visit the condition first without any guard, as it is always evaluated
-    // This ensures any buffer accesses in the condition are recorded
-    Base::VisitExpr(cond);
+  using Base::Visit;
+  using Base::Visit_;
+  using Result = ffi::Optional<ffi::VisitInterrupt>;
+
+  Result VisitIfThenElseExpr(const PrimExpr &cond, const PrimExpr &true_value,
+                             const PrimExpr &false_value) {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(cond));
     {
       auto guard = MakeGuard(cond);
-      Base::VisitExpr(true_value);
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(true_value));
     }
     {
-      auto guard = MakeGuard(tirx::Not(cond));
-      Base::VisitExpr(false_value);
+      auto guard = MakeGuard(prim::Not(cond));
+      return Visit(false_value);
     }
   }
-  void VisitStmt_(const tirx::BindNode *op) override { Base::VisitStmt_(op); }
-  void VisitStmt_(const tirx::SeqStmtNode *op) override {
-    size_t old_size = constr_stack_.size();
-    for (const tirx::Stmt &stmt : op->seq) {
-      Base::VisitStmt(stmt);
-      if (const auto *bind = stmt.as<tirx::BindNode>()) {
-        // A flat Bind defines its variable for following statements in this
-        // sequence, but not while its own value is being evaluated.
-        constr_stack_.emplace_back(bind->var, bind->value);
-      } else if (const auto *assert_stmt = stmt.as<tirx::AssertStmtNode>()) {
-        // A tirx AssertStmt carries no body, so it sits next to the statements
-        // it guards; control reaches them only once it has passed. Pure
-        // conditions only: unlike an assume it states what held at that point,
-        // so one reading mutable state may be falsified by a later store,
-        // untracked here.
-        if (tirx::SideEffect(assert_stmt->condition) <=
-            tirx::CallEffectKind::kPure) {
-          constr_stack_.emplace_back(assert_stmt->condition);
-        }
+
+  Result Visit_(const SeqStmtObj *op) override {
+    auto scope = Scope();
+    for (const Stmt &stmt : op->seq) {
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(stmt));
+      if (const auto *bind = stmt.as<BindObj>()) {
+        if (auto value = bind->value.as<PrimExpr>())
+          constr_stack_.emplace_back(bind->var, value.value());
+      } else if (const auto *assertion = stmt.as<AssertStmtObj>()) {
+        if (SideEffect(assertion->condition) <= CallEffectKind::kPure)
+          constr_stack_.emplace_back(assertion->condition);
+      } else if (const auto *evaluate = stmt.as<EvaluateObj>()) {
+        const auto *call = evaluate->value.as<CallObj>();
+        if (call && call->op.same_as(prim::assume_op()))
+          constr_stack_.emplace_back(call->args[0].as_or_throw<PrimExpr>(),
+                                     true);
       }
     }
-    constr_stack_.resize(old_size);
+    return std::nullopt;
   }
-  void VisitStmt_(const tirx::AttrStmtNode *op) override {
-    if (op->attr_key == tirx::attr::tilelang_assume) {
-      auto expr = Downcast<PrimExpr>(op->node);
-      auto guard = MakeGuard(expr, true);
-      Base::VisitStmt_(op);
-    } else if (op->attr_key == tirx::attr::thread_extent ||
-               op->attr_key == s_tir::attr::virtual_thread) {
-      tirx::IterVar iv = Downcast<tirx::IterVar>(op->node);
-      Range dom =
-          Range::FromMinExtent(tirx::make_zero(op->value.dtype()), op->value);
-      auto guard = MakeGuard(iv->var, dom);
-      Base::VisitStmt_(op);
-    } else {
-      Base::VisitStmt_(op);
+
+  Result Visit_(const RegionStmtObj *op) override {
+    // Dynamic metadata and launch bounds are evaluated before body_params.
+    for (const Expr &arg : op->args)
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(arg));
+    auto scope = Scope();
+    if (op->op.same_as(tirx::launch_thread_op())) {
+      PrimExpr extent = op->args[1].as_or_throw<PrimExpr>();
+      constr_stack_.emplace_back(
+          op->body_params[0],
+          Range::FromMinExtent(IntImm(extent.ty(), 0), extent));
+    } else if (op->op->name == "tl.launch_kernel") {
+      const auto begins = op->args[0].as_or_throw<tvm::Tuple>()->fields;
+      const auto ends = op->args[1].as_or_throw<tvm::Tuple>()->fields;
+      const auto threads = op->args[3].as_or_throw<tvm::Tuple>()->fields;
+      for (size_t i = 0; i < ends.size(); ++i)
+        constr_stack_.emplace_back(op->body_params[i],
+                                   Range(begins[i].as_or_throw<PrimExpr>(),
+                                         ends[i].as_or_throw<PrimExpr>()));
+      for (size_t i = 0; i < threads.size(); ++i) {
+        PrimExpr extent = threads[i].as_or_throw<PrimExpr>();
+        constr_stack_.emplace_back(
+            op->body_params[ends.size() + i],
+            Range::FromMinExtent(IntImm(extent.ty(), 0), extent));
+      }
+    } else if (op->op->name == "tl.attr") {
+      auto values =
+          DecodeAnnotations(
+              op->args[0].as_or_throw<tvm::Tuple>(),
+              op->attrs.GetAttr<ffi::Array<ffi::Any>>("annotation_schema")
+                  .value())
+              .cast<ffi::Map<ffi::Any, ffi::Any>>();
+      if (values.at("key").cast<ffi::String>() == "tl.assume")
+        constr_stack_.emplace_back(values.at("node").cast<PrimExpr>(), true);
     }
+    return Visit(op->body);
   }
-  void VisitStmt_(const tirx::IfThenElseNode *op) override {
+
+  Result Visit_(const IfObj *op) override {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->condition));
     {
       auto guard = MakeGuard(op->condition);
-      Base::VisitStmt(op->then_case);
+      TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->then_case));
     }
     if (op->else_case) {
-      auto guard = MakeGuard(tirx::Not(op->condition));
-      Base::VisitStmt(op->else_case.value());
+      auto guard = MakeGuard(prim::Not(op->condition));
+      return Visit(op->else_case.value());
     }
+    return std::nullopt;
   }
-  void VisitExpr_(const tirx::SelectNode *op) override {
-    VisitIfThenElseExpr(op->condition, op->true_value, op->false_value);
+
+  Result Visit_(const prim::SelectObj *op) override {
+    return VisitIfThenElseExpr(op->condition, op->true_value, op->false_value);
   }
-  void VisitExpr_(const tirx::CallNode *op) override {
-    static auto op_if_then_else = Op::Get("tirx.if_then_else");
-    if (op->op.same_as(op_if_then_else)) {
-      VisitIfThenElseExpr(op->args[0], op->args[1], op->args[2]);
+
+  Result Visit_(const CallObj *op) override {
+    if (op->op.same_as(prim::if_then_else_op()))
+      return VisitIfThenElseExpr(op->args[0].as_or_throw<PrimExpr>(),
+                                 op->args[1].as_or_throw<PrimExpr>(),
+                                 op->args[2].as_or_throw<PrimExpr>());
+    if (auto callee = op->op.as<Op>();
+        callee.has_value() && callee.value()->name == "tl.annotation")
+      return std::nullopt;
+    return Base::Visit_(op);
+  }
+
+  Result Visit_(const ForObj *op) override {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->begin));
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->end));
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->step));
+    auto scope = Scope();
+    auto analyzer = CreateTileLangAnalyzer();
+    auto context = GetConstrSet().Populate(analyzer);
+    if (CanUseLoopBounds(op->begin, op->end, op->step, analyzer.get())) {
+      constr_stack_.emplace_back(op->var, Range(op->begin, op->end));
+      constr_stack_.emplace_back(op->end > op->begin);
     } else {
-      Base::VisitExpr_(op);
+      // Retain a definition for per-iteration renaming without asserting an
+      // incorrect lower bound for negative, zero or dynamically signed steps.
+      // Native For always tests var < end; it is not Python's range.
+      constr_stack_.emplace_back(op->var, op->var.as_or_throw<PrimExpr>());
+      if (SideEffect(op->end) <= CallEffectKind::kPure)
+        constr_stack_.emplace_back(op->var < op->end);
+      if (SideEffect(op->begin) <= CallEffectKind::kPure &&
+          SideEffect(op->end) <= CallEffectKind::kPure)
+        constr_stack_.emplace_back(op->begin < op->end);
     }
+    return Visit(op->body);
   }
-  void VisitStmt_(const tirx::ForNode *op) override {
-    auto guard_1 =
-        MakeGuard(op->loop_var, Range::FromMinExtent(op->min, op->extent));
-    auto guard_2 = MakeGuard(op->extent > 0);
-    Base::VisitStmt_(op);
+
+  Result Visit_(const WhileObj *op) override {
+    TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->condition));
+    auto guard = MakeGuard(op->condition);
+    return Visit(op->body);
   }
-  void VisitStmt_(const tirx::WhileNode *op) override {
-    {
-      auto guard = MakeGuard(op->condition);
-      Base::VisitStmt(op->body);
-    }
-  }
+
   ConstrSet GetConstrSet() const {
     return ConstrSet{.constrs_ = constr_stack_};
   }
   std::vector<Constr> constr_stack_;
 };
 } // namespace tvm::tl
-
 #endif // TVM_TL_TRANSFORM_COMMON_CONSTR_VISITOR_H_

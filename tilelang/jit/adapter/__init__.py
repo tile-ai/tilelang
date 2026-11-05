@@ -1,6 +1,26 @@
-from .base import BaseKernelAdapter, CachedTextSource  # noqa: F401
-from .tvm_ffi import TVMFFIKernelAdapter  # noqa: F401
-from .cython import CythonKernelAdapter  # noqa: F401
-from .nvrtc import NVRTCKernelAdapter  # noqa: F401
-from .torch import MetalKernelAdapter  # noqa: F401
-from .cutedsl import CuTeDSLKernelAdapter  # noqa: F401
+"""Execution adapters loaded only for the selected runtime backend."""
+
+from importlib import import_module
+
+from .base import BaseKernelAdapter, CachedTextSource
+
+_ADAPTERS = {
+    "TVMFFIKernelAdapter": "tvm_ffi",
+    "CythonKernelAdapter": "cython",
+    "NVRTCKernelAdapter": "nvrtc",
+    "MetalKernelAdapter": "torch",
+    "CuTeDSLKernelAdapter": "cutedsl",
+}
+__all__ = ["BaseKernelAdapter", "CachedTextSource", *_ADAPTERS]
+
+
+def __getattr__(name):
+    if name not in _ADAPTERS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(f".{_ADAPTERS[name]}", __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | _ADAPTERS.keys())

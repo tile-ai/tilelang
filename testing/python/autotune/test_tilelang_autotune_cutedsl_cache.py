@@ -14,12 +14,18 @@ def test_cutedsl_save_creates_kernel_py(tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     (src_dir / "kernel.py").write_text("# cutedsl kernel\n")
-    (src_dir / "kernel.cubin").write_bytes(b"fake_cubin")
+
+    class FakeRuntime:
+        def export_artifacts(self, path):
+            artifact = path / "kernel.cutedsl" / "fingerprint"
+            artifact.mkdir(parents=True)
+            (artifact / "kernel.cubin").write_bytes(b"fake_cubin")
+            (artifact / "manifest.json").write_text('{"schema": 1}')
 
     class FakeLibGen:
         """Minimal CuTeDSL library generator stub for cache-save tests."""
 
-        launcher_libpath = None
+        runtime = FakeRuntime()
 
     class FakeAdapter:
         """Minimal CuTeDSL adapter stub exposing source accessors."""
@@ -35,6 +41,9 @@ def test_cutedsl_save_creates_kernel_py(tmp_path):
             """Return a fake host wrapper source."""
             return "# host src"
 
+        def get_generated_module_source(self):
+            return "# cutedsl kernel\n"
+
     class FakeKernel:
         """Minimal JITKernel stub for CuTeDSL autotune cache saving."""
 
@@ -49,7 +58,8 @@ def test_cutedsl_save_creates_kernel_py(tmp_path):
 
     assert (cache / "kernel.py").exists()
     assert not (cache / "kernel_lib.so").exists()
-    assert (cache / "kernel.cubin").exists()
+    assert (cache / "kernel.cutedsl" / "fingerprint" / "kernel.cubin").exists()
+    assert (cache / "kernel.cutedsl" / "fingerprint" / "manifest.json").exists()
 
 
 def _is_cutedsl_available():

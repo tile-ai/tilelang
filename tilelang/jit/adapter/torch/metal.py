@@ -3,12 +3,12 @@ from functools import wraps
 from collections.abc import Callable
 
 import torch
-from tvm import tirx
-
-from tilelang import tvm as tvm
+from tvm_tirx import ir, tirx
 
 from ..base import BaseKernelAdapter
 from tilelang.engine.param import KernelParam
+from tilelang.utils.language import retrieve_func_from_module
+from .metal_launch import MetalLaunchPlan
 
 
 class MetalKernelAdapter(BaseKernelAdapter):
@@ -16,42 +16,21 @@ class MetalKernelAdapter(BaseKernelAdapter):
         self,
         params: list[KernelParam],
         result_idx: list[int],
-        #  target: Union[str, Target],
-        func_or_mod: tirx.PrimFunc | tvm.IRModule,
-        #  host_mod: Optional[tvm.IRModule] = None,
-        device_mod: tvm.IRModule | None = None,
+        func_or_mod: tirx.Function | ir.IRModule,
+        device_mod: ir.IRModule | None = None,
         kernel_global_source: str | None = None,
         verbose: bool = False,
-        #  pass_configs: Optional[Dict[str, Any]] = None,
-        #  compile_flags: Optional[List[str]] = None
+        host_mod: ir.IRModule | None = None,
     ):
         self.kernel_global_source = kernel_global_source
-        if isinstance(func_or_mod, tirx.PrimFunc):
-            func_name = func_or_mod.attrs["global_symbol"]
-        else:
-            func_name = func_or_mod.__name__
-        self.kernel_name = func_name + "_kernel"
+        self.prim_func = func_or_mod if isinstance(func_or_mod, tirx.Function) else retrieve_func_from_module(func_or_mod)
+        self.launch_plan = MetalLaunchPlan(self.prim_func, device_mod, host_mod)
+        self.kernel_name = self.launch_plan.kernel_name
         self.verbose = verbose
-
-        self.block_info = [1, 1, 1]
-        self.grid_info = [1, 1, 1]
-
-        for var, func in device_mod.functions.items():
-            assert var.name_hint == self.kernel_name
-            thread_extent = func.attrs["thread_extent"]
-            for tag, extent in thread_extent.items():
-                if "threadIdx" in tag:
-                    self.block_info["xyz".index(tag[-1])] = extent
-                elif "blockIdx" in tag:
-                    self.grid_info["xyz".index(tag[-1])] = extent
-            break
-        else:
-            raise AssertionError(f"no kernel with name {func_name}")
-
-        # print(self.block_info, self.grid_info)
+        self.block_info = self.launch_plan.block_info
+        self.grid_info = self.launch_plan.grid_info
+        self._kernel = None
         super().__init__(func_or_mod, result_idx=result_idx, params=params)
-
-    _kernel = None
 
     def get_kernel_source(self, kernel_only: bool = True) -> str:
         if kernel_only:
@@ -64,17 +43,21 @@ class MetalKernelAdapter(BaseKernelAdapter):
 
     def _convert_torch_func(self) -> Callable:
         if self._kernel is None:
-            _kernel = getattr(torch.mps.compile_shader(self.kernel_global_source), self.kernel_name)
-            _threads = [x * y for (x, y) in zip(self.block_info, self.grid_info)]
+            shader = torch.mps.compile_shader(self.kernel_global_source)
+            _kernel = getattr(shader, self.kernel_name)
+            plan = self.launch_plan
 
             @wraps(_kernel)
             def launcher(*args: torch.Tensor):
+                if len(args) != len(self.params):
+                    raise ValueError(f"Expected {len(self.params)} preallocated arguments, got {len(args)}")
                 return _kernel(
-                    *args,
-                    threads=_threads,
-                    group_size=self.block_info,
+                    *(args[index] for index in plan.argument_order),
+                    threads=plan.threads,
+                    group_size=plan.block_info,
                 )
 
+            self._shader = shader
             self._kernel = launcher
 
         return self._kernel

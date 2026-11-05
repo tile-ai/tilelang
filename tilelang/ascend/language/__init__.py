@@ -74,7 +74,6 @@ from .math import rsqrt  # noqa: F401
 # assert() macro, print gates by the NPU execution model (no CUDA-style
 # single-thread condition), and rng_init derives its default sequence id from
 # the SimtVF thread scope.
-from ..debug import device_assert  # noqa: F401
 from .print import print  # noqa: F401,A001
 from .random import rng_init, rng_rand, rng_rand_float  # noqa: F401
 
@@ -133,3 +132,16 @@ __tilelang_dialect__ = "ascend"
 __all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_ASCEND_API_ALL, *_DMA_ALL, *_MODE_ALL, *_SYNC_ALL)))
 
 del _ASCEND_API_ALL, _COMMON_ALL, _DMA_ALL, _MODE_ALL, _SYNC_ALL
+
+
+def __getattr__(name):
+    if name == "device_assert":
+        from ..debug import device_assert
+
+        globals()[name] = device_assert
+        return device_assert
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

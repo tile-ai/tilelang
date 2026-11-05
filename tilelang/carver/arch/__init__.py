@@ -6,7 +6,7 @@ from .cpu import *
 from .cdna import *
 from .rdna import *
 from .metal import *
-from tvm.target import Target
+from tvm_tirx.target import Target
 import torch
 from tilelang.backend.target import determine_target
 from tilelang.rocm.target import target_get_rdna_generation, target_is_rdna

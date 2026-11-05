@@ -1,6 +1,31 @@
-from . import intrinsics  # noqa: F401
-from . import op  # noqa: F401
-from .utils import is_metal_cooperative_tensor, is_metal_simdgroup  # noqa: F401
-from . import target  # noqa: F401
-from . import transform  # noqa: F401
-from . import backend as backend  # noqa: F401
+"""METAL namespace; compiler registration is loaded by the backend pipeline."""
+
+from __future__ import annotations
+
+import importlib
+
+_MODULES = ("intrinsics", "op", "target", "transform", "backend", "language")
+_ATTRIBUTES = {"is_metal_cooperative_tensor": "utils", "is_metal_simdgroup": "utils"}
+__all__ = (*_MODULES, *_ATTRIBUTES)
+
+
+def __getattr__(name):
+    if name in _MODULES:
+        value = importlib.import_module(f".{name}", __name__)
+    elif name in _ATTRIBUTES:
+        value = getattr(importlib.import_module(f".{_ATTRIBUTES[name]}", __name__), name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))
+
+
+def register_backend():
+    """Load the implementation registries before target lowering or dispatch."""
+    for name in _MODULES:
+        if name != "language":
+            __getattr__(name)

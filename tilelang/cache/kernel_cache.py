@@ -17,9 +17,10 @@ from hashlib import sha256
 from typing import Literal
 from collections.abc import Callable
 
-from tvm.target import Target
-from tvm.tirx import PrimFunc
-from tvm.runtime import Executable
+from tvm_tirx.target import Target
+from tvm_tirx import ir
+from tvm_tirx.tirx import Function
+from tvm_tirx.codegen import Executable
 from tilelang.backend.module import BackendContext, create_backend_context
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
 from tilelang.utils.language import get_prim_func_name
@@ -94,51 +95,36 @@ class KernelCache:
 
         We use a SHA-256 content hash of the library file instead of mtime so that
         the cache key is stable across machines and fresh installs — two identical
-        builds of libtilelang.so will produce the same stamp regardless of when or
+        builds of the combined compiler produce the same stamp regardless of when or
         where they were installed.
         """
-        import importlib
+        from pathlib import Path
+        from tvm_tirx import base
+        import tvm_ffi
 
-        lib_dirs: list[str] = []
-        try:
-            env_mod = importlib.import_module("tilelang.env")
-            lib_dirs.extend(getattr(env_mod, "TL_LIBS", []) or [])
-        except Exception:
-            pass
-
-        if sys.platform == "win32":
-            lib_names = ["tvm_runtime.dll", "tvm_compiler.dll", "tvm_ffi.dll"]
-        elif sys.platform == "darwin":
-            lib_names = [
-                "libtilelang.dylib",
-                "libtilelang.so",
-                "libtvm_runtime.dylib",
-                "libtvm_compiler.dylib",
-            ]
-        else:
-            lib_names = ["libtilelang.so", "libtvm_runtime.so", "libtvm_compiler.so"]
-
-        stamps: list[str] = []
-        seen_names: set[str] = set()
-        for lib_dir in lib_dirs:
-            for name in lib_names:
-                if name in seen_names:
-                    continue
-                path = os.path.join(lib_dir, name)
-                if os.path.exists(path):
-                    file_hash = sha256()
-                    with open(path, "rb") as f:
-                        for chunk in iter(lambda: f.read(1 << 20), b""):
-                            file_hash.update(chunk)
-                    stamps.append(f"{name}:{file_hash.hexdigest()}")
-                    seen_names.add(name)
-        if stamps:
-            return "|".join(stamps)
-        return None
+        libraries = dict(base._LOADED_LIBS)
+        libraries["tvm_ffi"] = tvm_ffi.LIB
+        stamps = []
+        for name, library in sorted(libraries.items()):
+            path = Path(library._name).resolve()
+            digest = sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1 << 20), b""):
+                    digest.update(chunk)
+            stamps.append(f"{name}:{digest.hexdigest()}")
+        return "|".join(stamps)
 
     @staticmethod
     def _get_base_key() -> dict:
-        base = {"version": __version__, "platform": platform.machine()}
+        from tilelang._provider import FFI_REF, FFI_VERSION
+
+        base = {
+            "version": __version__,
+            "platform": platform.machine(),
+            "ir_abi": "tilelang.tirx.native.v1",
+            "ffi_ref": FFI_REF,
+            "ffi_version": FFI_VERSION,
+        }
         if env.should_use_kernel_cache_lib_stamp():
             lib_stamp = KernelCache._get_tilelang_lib_stamp()
             if lib_stamp:
@@ -180,9 +166,11 @@ class KernelCache:
         Returns:
             KernelCache: The singleton instance of KernelCache.
         """
-        if cls._instance is None:
+        # Each concrete backend owns its singleton. Attribute lookup through
+        # the MRO can otherwise reuse an already-created base-class instance.
+        if cls.__dict__.get("_instance") is None:
             with cls._lock:
-                if cls._instance is None:  # Double-checked locking
+                if cls.__dict__.get("_instance") is None:  # Double-checked locking
                     instance = super().__new__(cls)
                     KernelCache._create_dirs()
                     instance.logger = logging.getLogger(__name__)
@@ -266,11 +254,13 @@ class KernelCache:
             str: SHA256 hash key for the kernel configuration.
         """
         self.execution_backend = execution_backend
-        func_binary = func.script(show_meta=True).encode()
+        # Native JSON contains the full typed graph, including layout and alias
+        # identities. The printer is a diagnostic interface, not a cache ABI.
+        func_binary = ir.save_json(func).encode()
         key_data = {
             "func": sha256(func_binary).hexdigest(),  # Use SHA256 to generate hash key
             "out_idx": (tuple(out_idx) if isinstance(out_idx, (list, tuple)) else [out_idx]),
-            "args_repr": tuple(repr(arg) for arg in args),  # Use repr to serialize arguments, may need more robust serialization
+            "args_repr": tuple(repr(arg) for arg in (args or ())),  # Use repr to serialize arguments, may need more robust serialization
             "target": str(target),
             "target_host": str(target_host) if target_host else None,
             "execution_backend": execution_backend,
@@ -285,7 +275,7 @@ class KernelCache:
 
     def cached(
         self,
-        func: PrimFunc = None,
+        func: Function = None,
         out_idx: list[int] = None,
         *args,
         target: str | Target | None = None,
@@ -303,7 +293,7 @@ class KernelCache:
         and execution backend resolution should happen. All compilation paths go through here.
 
         Args:
-            func: Function to be compiled or a prepared PrimFunc
+            func: Function to be compiled or a prepared Function
             out_idx: Indices specifying which outputs to return
             target: Compilation target platform (None = read from TILELANG_DEFAULT_TARGET env var).
                 Use a dict for target attributes, for example {"kind": "cuda", "arch": "sm_90"}.
@@ -373,14 +363,15 @@ class KernelCache:
             self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")
         with self._lock:
             # First check in-memory cache
-            if key in self._memory_cache:
+            existing = self._get_memory_cached_kernel(key)
+            if existing is not None:
                 # Include kernel name for easier debugging when hitting memory cache
                 kernel_name = get_prim_func_name(func, "<unknown>")
                 self.logger.warning(
                     "Found kernel '%s' in memory cache. For better performance, consider using `@tilelang.jit` instead of direct kernel caching.",
                     kernel_name,
                 )
-                return self._memory_cache[key]
+                return existing
 
         if verbose:
             self.logger.debug(f"Checking disk cache for kernel {get_prim_func_name(func, '<unknown>')}")
@@ -405,7 +396,7 @@ class KernelCache:
             if verbose:
                 self.logger.debug(f"Found kernel in disk cache for {get_prim_func_name(func, '<unknown>')}")
             with self._lock:
-                existing = self._memory_cache.get(key)
+                existing = self._get_memory_cached_kernel(key)
                 if existing is not None:
                     return existing
                 self._memory_cache[key] = kernel
@@ -446,11 +437,15 @@ class KernelCache:
         # Store in memory cache after compilation
         self._tag_kernel_cache_entry(kernel, key, self._get_cache_path(key))
         with self._lock:
-            existing = self._memory_cache.get(key)
+            existing = self._get_memory_cached_kernel(key)
             if existing is not None:
                 return existing
             self._memory_cache[key] = kernel
         return kernel
+
+    def _get_memory_cached_kernel(self, key: str) -> JITKernel | None:
+        """Look up an entry with the cache lock held; backends may discard closed adapters."""
+        return self._memory_cache.get(key)
 
     def clear_cache(self):
         """

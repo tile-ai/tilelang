@@ -2,9 +2,9 @@
 
 # pylint: disable=invalid-name, unsupported-binary-operation
 import tvm_ffi
-from tvm.ir import Node, Range
-from tvm.tirx import IterVar, Var, PrimExpr, IndexMap
+from tvm_tirx.ir import Node, Range, Var, Expr, is_prim_expr
 from tilelang import _ffi_api
+from ._iter_var import LayoutIterVar
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"
@@ -23,10 +23,10 @@ class Layout(Node):
         """
         forward_vars = []  # List to store IterVars corresponding to each shape dimension
 
-        # Create an IterVar for each dimension in the shape
+        # Create a native coordinate domain for each dimension in the shape
         for idx, size in enumerate(shape):
-            # Define an IterVar over the range [0, size) with an associated variable name
-            iv = IterVar(Range(0, size), Var(f"i{idx}", "int32"), 0)
+            # Pair the native scalar Var with its [0, size) domain
+            iv = LayoutIterVar(Range(0, size), Var(f"i{idx}", "int32"))
             forward_vars.append(iv)
 
         # Extract the variable references from the IterVars
@@ -36,7 +36,7 @@ class Layout(Node):
         forward_index = forward_fn(*vars)
 
         # Ensure forward_index is a list (to handle cases where a single expression is returned)
-        if isinstance(forward_index, PrimExpr):
+        if is_prim_expr(forward_index) or isinstance(forward_index, (int, float)):
             forward_index = [forward_index]
 
         # Call the FFI constructor to create the Layout object in C++ backend
@@ -49,7 +49,7 @@ class Layout(Node):
 
         Returns
         -------
-        PrimExpr or List[PrimExpr]
+        Expr or List[Expr]
             The computed forward index expression(s).
         """
         return _ffi_api.Layout_index(self)
@@ -82,7 +82,7 @@ class Layout(Node):
 
         Returns
         -------
-        List[IterVar]
+        List[Var]
             A list of iteration variables that define the layout transformation.
         """
         return _ffi_api.Layout_forward_vars(self)
@@ -90,39 +90,25 @@ class Layout(Node):
     def get_forward_index(self):
         return self.index
 
-    def get_linearized_forward_index(self) -> PrimExpr:
+    def get_linearized_forward_index(self) -> Expr:
         """Return the row-major linear offset of the physical output index."""
         return _ffi_api.Layout_linearized_index(self)
 
-    def map_forward_index(self, indices: list[PrimExpr]) -> PrimExpr:
+    def map_forward_index(self, indices: list[Expr]) -> Expr:
         """
         Compute the forward index mapping for a given set of input indices.
 
         Parameters
         ----------
-        indices : list of PrimExpr
+        indices : list of Expr
             The input indices to be mapped to their corresponding output indices.
 
         Returns
         -------
-        PrimExpr
+        Expr
             The mapped index expression for the provided input indices.
         """
-        # Retrieve the iteration variables used in the layout transformation
-        forward_vars = self.get_forward_vars()
-
-        # Retrieve the computed forward index expressions
-        forward_indexes = self.index
-
-        # Construct an IndexMap to map the input indices to the computed output indices
-        index_map = IndexMap(
-            initial_indices=forward_vars,  # The original iteration variables
-            final_indices=forward_indexes,  # The computed forward indices
-            inverse_index_map=None,  # No inverse mapping provided at this stage
-        )
-
-        # Map the provided indices using the constructed index mapping
-        return index_map.map_indices(indices)
+        return _ffi_api.Layout_map_indices(self.get_forward_vars(), self.index, indices)
 
     def repeat(self, dim: int, factor: int) -> "Layout":
         """
@@ -186,7 +172,7 @@ class Layout(Node):
 
         Parameters
         ----------
-        leading_shape : int or Sequence[int or PrimExpr]
+        leading_shape : int or Sequence[int or Expr]
             The shape of the new leading dimensions to prepend. Use an empty
             list/tuple for a no-op.
 
@@ -209,8 +195,8 @@ class Layout(Node):
             if isinstance(extent, int):
                 if extent <= 0:
                     raise ValueError(f"leading_shape[{idx}] must be > 0, got {extent}")
-            elif not isinstance(extent, PrimExpr):
-                raise TypeError(f"leading_shape elements must be int or PrimExpr, got {type(extent)!r} at index {idx}")
+            elif not is_prim_expr(extent):
+                raise TypeError(f"leading_shape elements must be int or Expr, got {type(extent)!r} at index {idx}")
 
         return _ffi_api.Layout_expand(self, leading_shape)
 
@@ -231,7 +217,7 @@ class Layout(Node):
 
         Parameters
         ----------
-        shape : list[PrimExpr] or list[int]
+        shape : list[Expr] or list[int]
             The new input shape.
         rescale_num : int
             Rescale numerator for element size changes.
@@ -275,7 +261,7 @@ class Layout(Node):
         """
         return _ffi_api.Layout_map_region_bounds(self, region)
 
-    def __call__(self, *args: list[PrimExpr]) -> PrimExpr:
+    def __call__(self, *args: list[Expr]) -> Expr:
         return self.map_forward_index(args)
 
     def __repr__(self):

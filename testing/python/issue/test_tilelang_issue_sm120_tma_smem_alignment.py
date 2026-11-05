@@ -22,7 +22,7 @@ The test has two parts:
 
 1. **Generated TIR check** (host-independent). Lowers the buggy-arena
    kernel for explicit `{"kind": "cuda", "arch": "sm_{90,100,120}"}` targets and asserts
-   every `tl.tma_load` destination `tirx.tvm_access_ptr` byte offset is
+   every `tl.tma_load` destination's native pointer and arena byte offset is
    provably 128-byte aligned. Runs on any host.
 
 2. **Runtime check** on the host GPU. Compiles + executes the same kernel
@@ -33,11 +33,12 @@ The test has two parts:
 """
 
 import torch
+import tvm_ffi
+import tvm_tirx as tvm
 
 import tilelang
 import tilelang.testing
 from tilelang import language as T
-from tilelang import tvm
 from tilelang.engine.lower import lower as tilelang_lower
 
 
@@ -124,7 +125,7 @@ def _lower_for(arch: str):
 
 
 def _is_op_call(node, op_name: str) -> bool:
-    return isinstance(node, tvm.tirx.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
+    return isinstance(node, tvm.ir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
 
 
 def _collect_tma_loads(mod):
@@ -135,28 +136,53 @@ def _collect_tma_loads(mod):
             loads.append(node)
 
     for _, func in mod.functions.items():
-        if isinstance(func, tvm.tirx.PrimFunc):
-            tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
+        if isinstance(func, tvm.tirx.Function):
+            tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, _visit), order="post")
     return loads
 
 
-def _byte_offset(access_ptr):
-    dtype = access_ptr.args[0].dtype
-    return access_ptr.args[2] * dtype.bytes * dtype.lanes
+def _tensor_definitions(mod):
+    definitions = {}
+
+    def visit(node):
+        if isinstance(node, tvm.ir.Bind) and isinstance(node.var.ty, tvm.tirx.TensorType):
+            definitions[node.var] = node.value
+
+    tvm_ffi.structural_walk(mod, (tvm_ffi.Object, visit), order="post")
+    return definitions
+
+
+def _byte_offset(pointer, definitions, depth=0):
+    assert depth < 32, "cyclic shared tensor declaration"
+    if _is_op_call(pointer, "tirx.ptr_byte_offset"):
+        base, offset = _byte_offset(pointer.args[0], definitions, depth + 1)
+        return base, offset + tvm.ir.prim.Cast("int64", pointer.args[1])
+    if _is_op_call(pointer, "tirx.tensor_data_ptr"):
+        (tensor,) = pointer.args
+        assert tensor in definitions, f"no visible allocation for TMA tensor {tensor}"
+        definition = definitions[tensor]
+        if _is_op_call(definition, "tirx.alloc_tensor"):
+            return tensor, tvm.ir.const(0, "int64")
+        assert _is_op_call(definition, "tirx.decl_tensor"), definition
+        return _byte_offset(definition.args[0], definitions, depth + 1)
+    if _is_op_call(pointer, "tirx.reinterpret"):
+        return _byte_offset(pointer.args[0], definitions, depth + 1)
+    raise AssertionError(f"unrecognized native TMA pointer: {pointer}")
 
 
 def _assert_tma_destinations_128_aligned(arch: str, mod):
     loads = _collect_tma_loads(mod)
     assert loads, f"[{arch}] expected at least one tl.tma_load in generated TIR — the kernel layout should produce TMA loads"
 
-    analyzer = tvm.arith.Analyzer()
+    analyzer = tvm.sym.Analyzer()
+    definitions = _tensor_definitions(mod)
     for load in loads:
         assert len(load.args) >= 3, f"[{arch}] malformed tl.tma_load call: {load}"
         access_ptr = load.args[2]
-        assert _is_op_call(access_ptr, "tirx.tvm_access_ptr"), (
-            f"[{arch}] expected tl.tma_load destination argument to be tirx.tvm_access_ptr, got: {access_ptr}"
-        )
-        byte_offset = analyzer.simplify(_byte_offset(access_ptr))
+        base, byte_offset = _byte_offset(access_ptr, definitions)
+        assert str(base.ty.scope).startswith("shared")
+        assert base.ty.data_alignment % 128 == 0, f"[{arch}] TMA arena base lacks 128-byte alignment"
+        byte_offset = analyzer.simplify(byte_offset)
         assert analyzer.can_prove(byte_offset % 128 == 0), (
             f"[{arch}] TMA load destination byte offset is not provably 128-byte aligned: {byte_offset}. access_ptr={access_ptr}"
         )

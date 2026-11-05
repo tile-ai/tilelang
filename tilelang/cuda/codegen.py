@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.backend.device_codegen import global_func_device_codegen
 

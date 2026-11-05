@@ -25,9 +25,9 @@ import platform
 # pylint: disable=invalid-name
 import sys
 
-from tvm.base import py_str
-from tvm.contrib import tar as _tar
-from tvm.contrib import utils as _utils
+from tvm_tirx.support import tar as _tar
+from tvm_tirx.support import utils as _utils
+from ._utils import py_str
 
 
 def _is_linux_like():
@@ -329,14 +329,14 @@ def cross_compiler(compile_func, options=None, output_format=None, get_target_tr
     --------
     .. code-block:: python
 
-       from tvm.contrib import cc, ndk
+       from tilelang.contrib import cc
        # export using arm gcc
        mod = build_runtime_module()
        mod.export_library(path_dso,
                           fcompile=cc.cross_compiler("arm-linux-gnueabihf-gcc"))
-       # specialize ndk compilation options.
+       # specialize an NDK toolchain compiler.
        specialized_ndk = cc.cross_compiler(
-           ndk.create_shared,
+           "/path/to/ndk/toolchains/llvm/prebuilt/host/bin/aarch64-linux-android21-clang++",
            ["--sysroot=/path/to/sysroot", "-shared", "-fPIC", "-lm"])
        mod.export_library(path_dso, fcompile=specialized_ndk)
     """

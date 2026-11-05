@@ -1,5 +1,6 @@
 #include "ascend/codegen/codegen_pto.h"
 
+#include "codegen/c/codegen_source_base.h"
 #include "support/check.h"
 
 #include <tvm/ffi/extra/module.h>
@@ -10,14 +11,15 @@ namespace codegen {
 
 namespace {
 
-std::string PTOCodeGen(IRModule mod) {
+std::string PTOCodeGen(IRModule mod, const Target &target) {
+  With<Target> target_scope(target);
   CodeGenTileLangPTO cg;
 
   for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
-        << "CodeGenTileLangPTO: Can only take PrimFunc";
-    auto gvar = Downcast<GlobalVar>(kv.first);
-    auto f = Downcast<PrimFunc>(kv.second);
+    ICHECK(kv.second->IsInstance<tirx::FunctionObj>())
+        << "CodeGenTileLangPTO: Can only take tirx::Function";
+    auto gvar = kv.first;
+    auto f = kv.second.as_or_throw<tirx::Function>();
     cg.AddFunction(gvar, f);
   }
 
@@ -35,12 +37,12 @@ std::string ApplyPostproc(std::string code, const Target &target) {
 } // namespace
 
 ffi::Module BuildTileLangPTO(IRModule mod, Target target) {
-  std::string code = ApplyPostproc(PTOCodeGen(mod), target);
+  std::string code = ApplyPostproc(PTOCodeGen(mod, target), target);
   return CSourceModuleCreate(code, "py", ffi::Array<ffi::String>());
 }
 
 ffi::Module BuildTileLangPTOWithoutCompile(IRModule mod, Target target) {
-  std::string code = ApplyPostproc(PTOCodeGen(mod), target);
+  std::string code = ApplyPostproc(PTOCodeGen(mod, target), target);
   return CSourceModuleCreate(code, "py", ffi::Array<ffi::String>());
 }
 

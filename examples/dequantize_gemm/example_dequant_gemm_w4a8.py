@@ -1,23 +1,24 @@
 import tilelang
 import tilelang.language as T
 from tilelang.autotuner import *
-from tvm import tirx
+from tvm_tirx import ir
+from tvm_tirx.tirx import reinterpret
 import itertools
 import torch
 import argparse
 
 
-def _tir_u8_to_i4_to_i8(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, dtype: str):
+def _tir_u8_to_i4_to_i8(nbit: int, val: ir.Expr, pos: ir.Expr, dtype: str):
     assert nbit == 4
     assert dtype == T.int8
-    assert val.dtype == T.uint8
+    assert val.ty.dtype == T.uint8
 
-    mask = tirx.const((1 << nbit) - 1, T.uint8)
+    mask = ir.const((1 << nbit) - 1, T.uint8)
 
-    i4 = (val >> (pos.astype(T.uint8) * tirx.const(nbit, T.uint8))) & mask
+    i4 = (val >> (pos.astype(T.uint8) * ir.const(nbit, T.uint8))) & mask
 
-    i8_shifted = tirx.reinterpret(T.int8, i4 << tirx.const(4, T.uint8))
-    i8 = i8_shifted >> tirx.const(4, T.int8)
+    i8_shifted = reinterpret(i4 << ir.const(4, T.uint8), ty=ir.PrimType(T.int8))
+    i8 = i8_shifted >> ir.const(4, T.int8)
     return i8
 
 

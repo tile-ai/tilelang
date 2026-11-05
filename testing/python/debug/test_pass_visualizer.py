@@ -15,7 +15,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx as tvm
 
 from tilelang.tools.pass_visualizer import (
     build_module,
@@ -95,7 +95,7 @@ def test_structure_tree_instrument_records_real_passes():
     records = instrument.ordered_records()
     assert [record.name for record in records] == ["tirx.BindTarget", "tl.MaterializeKernelLaunch"]
     assert instrument.input_lines
-    assert any("PrimFunc" in line for line in instrument.input_lines)
+    assert any("Function" in line for line in instrument.input_lines)
 
 
 def test_structure_tree_instrument_ignores_nested_passes():
@@ -105,7 +105,7 @@ def test_structure_tree_instrument_ignores_nested_passes():
 
     @tvm.transform.module_pass(opt_level=0, name="test.Outer")
     def outer_pass(mod, _ctx):
-        return tvm.tirx.transform.Simplify()(mod)
+        return tvm.tirx.transform.StmtSimplify()(mod)
 
     with tvm.transform.PassContext(instruments=[instrument]):
         outer_pass(mod)
@@ -119,14 +119,14 @@ def test_pass_structure_record_changed_uses_structure_snapshot():
     unchanged = PassStructureRecord(
         name="test.Unchanged",
         sequence=0,
-        before_lines=["PrimFunc", "  body"],
-        after_lines=["PrimFunc", "  body"],
+        before_lines=["Function", "  body"],
+        after_lines=["Function", "  body"],
     )
     changed = PassStructureRecord(
         name="test.Changed",
         sequence=1,
-        before_lines=["PrimFunc", "  body"],
-        after_lines=["PrimFunc", "  changed body"],
+        before_lines=["Function", "  body"],
+        after_lines=["Function", "  changed body"],
     )
 
     assert not unchanged.changed
@@ -150,8 +150,8 @@ def test_structure_tree_instrument_cleans_up_after_failure():
 
     # Entering a new context resets the incomplete frame and records normally.
     with tvm.transform.PassContext(instruments=[instrument]):
-        tvm.tirx.transform.Simplify()(mod)
-    assert [record.name for record in instrument.ordered_records()] == ["tirx.Simplify"]
+        tvm.tirx.transform.StmtSimplify()(mod)
+    assert [record.name for record in instrument.ordered_records()] == ["tirx.StmtSimplify"]
     assert instrument.incomplete_passes == []
 
 
@@ -162,8 +162,8 @@ def test_inspect_structure_renders_tree(capsys):
     inspect_structure(mod)
     out = capsys.readouterr().out
 
-    assert "PrimFunc" in out
-    assert "SBlock" in out
+    assert "Function" in out
+    assert "RegionStmt" in out
     # gemm is expanded by field name, not printed as one positional line.
     assert "T.gemm" in out
     assert "a_region" in out
@@ -177,7 +177,7 @@ def test_capture_structure_returns_lines():
 
     assert isinstance(lines, list)
     assert len(lines) > 0
-    assert any("PrimFunc" in ln for ln in lines)
+    assert any("Function" in ln for ln in lines)
 
 
 # ---------------------------------------------------------------------------

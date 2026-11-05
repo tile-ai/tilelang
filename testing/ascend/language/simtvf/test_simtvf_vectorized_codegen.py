@@ -5,12 +5,13 @@ import re
 import pytest
 
 import tilelang
+from tvm_tirx.target import Target
 import tilelang.testing
 import tilelang.ascend.language as T
 
 
 def _source(func, *, target, pass_configs=None):
-    with tilelang.tvm.target.Target(target), tilelang.transform.PassContext(config=pass_configs or {}):
+    with Target(target), tilelang.transform.PassContext(config=pass_configs or {}):
         return tilelang.lower(func, target=target).kernel_source
 
 
@@ -312,7 +313,7 @@ def test_pto_vector_local_cross_slot_mutation_preserves_neighbors():
 @pytest.mark.parametrize("access_kind", ["load", "store"])
 def test_pto_vector_local_cross_slot_rejects_noncontiguous_ramp(access_kind):
     func = _vector_local_cross_slot_kernel(**{f"{access_kind}_stride": 2})
-    with pytest.raises(tilelang.tvm.error.InternalError, match=rf"vector {access_kind}.*Ramp stride must be 1"):
+    with pytest.raises(RuntimeError, match=rf"vector {access_kind}.*Ramp stride must be 1"):
         tilelang.lower(func, target="pto", enable_device_compile=False)
 
 

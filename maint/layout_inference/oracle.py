@@ -16,7 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from tilelang import tvm
+from tvm_tirx import ir
+from tvm_tirx.ir import prim
 
 
 @dataclass
@@ -32,39 +33,69 @@ class Unenumerable(Exception):
     conservative fallback conditions)."""
 
 
+def _dtype(expr):
+    if not isinstance(expr.ty, ir.PrimType):
+        raise Unenumerable("layout coordinates must have a primitive integer type")
+    try:
+        dtype = np.dtype(str(expr.ty.dtype))
+    except TypeError as exc:
+        raise Unenumerable(f"unsupported layout coordinate dtype: {expr.ty}") from exc
+    if dtype.kind not in "iub":
+        raise Unenumerable(f"layout coordinates must be integers, got {dtype}")
+    return dtype
+
+
+def _arithmetic(expr, a, b, operation):
+    """Evaluate integer coordinates; do not silently wrap signed arithmetic."""
+    dtype = _dtype(expr)
+    if dtype.kind == "i":
+        # Up to int32, int64 holds every product. Use Python integers for the
+        # int64 case so an overflowing intermediate cannot masquerade as valid.
+        promoted = np.int64 if dtype.itemsize <= 4 else object
+        a, b = np.asarray(a, dtype=promoted), np.asarray(b, dtype=promoted)
+    else:
+        a, b = np.asarray(a, dtype=dtype), np.asarray(b, dtype=dtype)
+    if operation in (np.floor_divide, np.mod) and np.any(b == 0):
+        raise Unenumerable("division by zero in layout coordinate")
+    result = operation(a, b)
+    if dtype.kind == "i":
+        bounds = np.iinfo(dtype)
+        if np.any(result < bounds.min) or np.any(result > bounds.max):
+            raise Unenumerable(f"signed {dtype} overflow in layout coordinate")
+    return np.asarray(result).astype(dtype)
+
+
 def eval_expr_grid(expr, env: dict) -> np.ndarray:
     """Evaluate a quasi-affine PrimExpr over numpy coordinate grids.
 
-    `env` maps VarNode -> ndarray. Vars outside env evaluate to 0 (foreign
+    `env` maps VarObj -> ndarray. Vars outside env evaluate to 0 (foreign
     additive offsets, same convention as the C++ model). Supported node
     family mirrors the model's; anything else raises Unenumerable.
     """
-    tirx = tvm.tirx
-    if isinstance(expr, tirx.IntImm):
-        return np.int64(expr.value)
-    if isinstance(expr, tirx.Var):
+    if isinstance(expr, ir.IntImm):
+        return np.asarray(expr.value, dtype=_dtype(expr))
+    if isinstance(expr, ir.Var):
         for var, arr in env.items():
             if expr.same_as(var):
-                return arr
-        return np.int64(0)  # foreign additive offset
-    if isinstance(expr, tirx.Cast):
-        return eval_expr_grid(expr.value, env)
+                return np.asarray(arr).astype(_dtype(expr))
+        return np.asarray(0, dtype=_dtype(expr))  # foreign additive offset
+    if isinstance(expr, prim.Cast):
+        # Integer conversion preserves truncation, signed interpretation and
+        # bool conversion. In particular uint32(uint8(256)) evaluates to zero.
+        return np.asarray(eval_expr_grid(expr.value, env)).astype(_dtype(expr))
     a = lambda: eval_expr_grid(expr.a, env)  # noqa: E731
     b = lambda: eval_expr_grid(expr.b, env)  # noqa: E731
-    if isinstance(expr, tirx.Add):
-        return a() + b()
-    if isinstance(expr, tirx.Sub):
-        return a() - b()
-    if isinstance(expr, tirx.Mul):
-        return a() * b()
-    if isinstance(expr, tirx.FloorDiv):
-        return np.floor_divide(a(), b())  # numpy floor semantics match TIR
-    if isinstance(expr, tirx.FloorMod):
-        return np.mod(a(), b())
-    if isinstance(expr, tirx.Min):
-        return np.minimum(a(), b())
-    if isinstance(expr, tirx.Max):
-        return np.maximum(a(), b())
+    for kind, operation in (
+        (prim.Add, np.add),
+        (prim.Sub, np.subtract),
+        (prim.Mul, np.multiply),
+        (prim.FloorDiv, np.floor_divide),
+        (prim.FloorMod, np.mod),
+        (prim.Min, np.minimum),
+        (prim.Max, np.maximum),
+    ):
+        if isinstance(expr, kind):
+            return _arithmetic(expr, a(), b(), operation)
     raise Unenumerable(f"unsupported node {type(expr).__name__}: {expr}")
 
 

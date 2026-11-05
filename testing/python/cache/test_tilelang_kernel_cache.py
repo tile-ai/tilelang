@@ -15,7 +15,7 @@
 # - os.replace() requires source and dest on same filesystem (atomic rename)
 #
 # Technical Details:
-# - Cache key is based on func.script(show_meta=True) hash
+# - Cache key includes the native typed graph and compiler/provider identities
 # - Python comments do NOT affect cache key (not in TIR)
 # - Must use .with_attr("global_symbol", ...) to create unique cache keys
 
@@ -28,7 +28,7 @@ import torch
 import uuid
 from pathlib import Path
 from tilelang.env import env
-from tilelang.cache import _dispatch_map
+from tilelang.cache import _load_cache
 
 BACKENDS = [
     "tvm_ffi",
@@ -115,7 +115,7 @@ def clean_cache_env(tmp_path, request):
     env.TILELANG_CACHE_DIR = str(cache_dir)
 
     # Clear memory caches to force disk I/O
-    _dispatch_map[backend]._memory_cache.clear()
+    _load_cache(backend, ascend=False)._memory_cache.clear()
 
     return cache_dir
 
@@ -171,7 +171,7 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
     assert len(cache_files) > 0, "Cache files should be created, found none"
 
     # === Pass 2: Cache hit (clear memory cache to force disk read) ===
-    _dispatch_map[backend]._memory_cache.clear()
+    _load_cache(backend, ascend=False)._memory_cache.clear()
 
     kernel2 = tilelang.compile(
         kernel_func,
@@ -206,7 +206,7 @@ def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
     cache_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
 
-    cache = _dispatch_map["tvm_ffi"]
+    cache = _load_cache("tvm_ffi", ascend=False)
     cache._memory_cache.clear()
 
     @T.prim_func

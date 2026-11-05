@@ -1,5 +1,6 @@
 from .plot_layout import plot_layout  # noqa: F401
-from .Analyzer import *
+
+__all__ = ("plot_layout", "Analyzer", "AnalysisResult", "ARCH_CONFIGS")
 
 
 def __getattr__(name):
@@ -13,6 +14,13 @@ def __getattr__(name):
     the latter re-enters this ``__getattr__`` while resolving the fromlist and
     recurses infinitely.
     """
+    if name in {"Analyzer", "AnalysisResult", "ARCH_CONFIGS"}:
+        import importlib
+
+        module = importlib.import_module(".Analyzer", __name__)
+        for exported in ("Analyzer", "AnalysisResult", "ARCH_CONFIGS"):
+            globals()[exported] = getattr(module, exported)
+        return globals()[name]
     if name == "lower_trace":
         import importlib
 

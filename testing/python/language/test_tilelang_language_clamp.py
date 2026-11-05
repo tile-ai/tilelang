@@ -166,15 +166,15 @@ def test_clamp_propagates_nan(dtype):
 
 @pytest.mark.parametrize("dtype", [T.float16, T.bfloat16, T.float32, T.float64, T.float8_e4m3])
 def test_clamp_scalar_and_vector_type_promotion(dtype):
-    from tvm import tirx
+    from tvm_tirx import ir
 
     for lanes in [1, 4]:
         x = T.Var("x", dtype.with_lanes(lanes))
         result = T.clamp(x, -1.0, T.float64(1.0))
-        assert result.dtype == T.float64.with_lanes(lanes)
-        assert isinstance(result, tirx.Call)
-        assert result.op.same_as(tirx.op.Op.get("tl.clamp"))
-        assert all(arg.dtype == result.dtype for arg in result.args)
+        assert result.ty == ir.PrimType(str(T.float64.with_lanes(lanes)))
+        assert isinstance(result, ir.Call)
+        assert result.op.same_as(ir.Op.get("tl.clamp"))
+        assert all(arg.ty == result.ty for arg in result.args)
 
 
 @tilelang.testing.requires_cuda
@@ -214,7 +214,10 @@ def test_clamp_vectorized_operands(dtype):
     else:
         assert "tl::clamp(" in source
     if dtype == T.float32:
-        assert "*(float4*)" in source
+        # The native emitter uses alignment-aware helpers for the same
+        # four-lane accesses. Require all three input vectors and the store.
+        assert source.count("tl::load_vector<float4, 16, false>") == 3
+        assert source.count("tl::store_vector<float4, 16, false>") == 1
 
     a = torch.linspace(-2.0, 2.0, N, dtype=torch.float64, device="cuda")
     lo = torch.full_like(a, -1.0)

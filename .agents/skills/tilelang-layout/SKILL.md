@@ -28,12 +28,12 @@ axis.
 **Gotchas (verified, easy to trip on):**
 
 - `FragmentNode::GetForwardVars()` PREPENDS `ReplicationPlaceholder()`
-  when `replicate_size > 1` (`src/layout/layout.cc:1103`). The input
+  when `replicate_size > 1` (`src/layout/layout.cc`). The input
   placeholders are always the TRAILING `InputDim()` entries. Python code
   that zips `get_forward_vars()` against the shape positionally is wrong
   for replicated fragments.
 - The canonical (thread, slot, rep) packing lives in
-  `FragmentNode::InverseWithLevel` (`src/layout/layout.cc:1133`): rep
+  `FragmentNode::InverseWithLevel` (`src/layout/layout.cc`): rep
   becomes a trailing ORDINARY input dim of extent `ReplicateExtent()`
   (substituting the placeholder), thread a trailing output. The inverse
   then maps `(slot..., thread) -> (coords..., rep)` with rep last;
@@ -90,10 +90,15 @@ var — if it leaks into the probe, conversion gracefully returns None).
 parallel loop nest. Three levels: **strict** (annotations, MMA-imposed) →
 **common** (BFS propagation through shared buffers) → **free** (per
 connected component, try every member as inference root, keep the
-cheapest attempt). Results are stored as IR annotations: `layout_map`
-(Buffer -> Layout, on the SBlock) and `parallel_loop_layout` (Fragment,
-on the outermost parallel For); `ParallelLoopLayoutValidator` enforces the
-annotation contract.
+cheapest attempt). The analysis map is `Map<TensorVar, Layout>`. Serialized results use explicit
+annotation operands: `layout_map` is emitted by `MakeNativeAnnotation` after
+local tensor `Bind`s (and at the function entry for parameters), while
+`parallel_loop_layout` is carried by the `tl.loop.annotations` attribute region
+around the outermost parallel `For`. `EncodeAnnotations` and the layout payload
+codec expose every expression use in a native `Tuple`/`Lambda`; static schemas
+remain metadata. Use `tilelang.analysis._visitor.tilelang_metadata` or the
+C++ decoding helpers to inspect them. `ParallelLoopLayoutValidator` checks
+this contract. These are native statements, not SBlock-owned Buffer maps.
 
 "Cheapest" is a pluggable policy (`layout_cost_model.{h,cc}`):
 

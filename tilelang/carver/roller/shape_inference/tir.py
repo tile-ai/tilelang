@@ -1,11 +1,15 @@
 from collections.abc import Mapping
-from tvm.s_tir.schedule import SBlockRV
-from tvm.ir import structural_equal
-from tvm import arith, tirx
+from ..._native_analysis import StageRef, TensorView, post_order_visit
+from ..._workload import substitute
+from ..._constraints import const_bound_context
+from tilelang._analyzer import create_analyzer
+from tvm_ffi import structural_equal
+from tvm_tirx import sym, ir
+from tvm_tirx.ir import prim
 
 
 class Statement:
-    def __init__(self, block_analyzer, block: SBlockRV):
+    def __init__(self, block_analyzer, block: StageRef):
         self.block_analyzer = block_analyzer
         self.block = block
         # assume one tir block only has one output buffer
@@ -14,34 +18,34 @@ class Statement:
 
         self.reverse_bound_inference = {}
 
-    def make_reverse(self, input_name: str, input_iter: list[tirx.PrimExpr]):
+    def make_reverse(self, input_name: str, input_iter: list[ir.Expr]):
         if len(self.block_analyzer.get_reduce_axis(self.block)) > 0:
             return None
         if len(self.dependent_region[input_name]) != 1:
             return None
         indices = self.dependent_region[input_name][0]
         iter_map_range = {_iter.var: _iter.dom for _iter in self.block_analyzer.get_spatial_axis(self.block)}
-        iter_map_result = arith.detect_iter_map(
+        iter_map_result = sym.detect_iter_map(
             indices,
             iter_map_range,
-            check_level=arith.iter_affine_map.IterMapLevel.Surjective,
+            check_level=sym.iter_affine_map.IterMapLevel.Surjective,
             simplify_trivial_iterators=False,
         )
         if len(iter_map_result.errors) > 0:
             return None
-        results = arith.iter_affine_map.inverse_affine_iter_map(iter_map_result.indices, input_iter)
+        results = sym.iter_affine_map.inverse_affine_iter_map(iter_map_result.indices, input_iter)
         output_indices = []
         for _iter in self.block_analyzer.get_spatial_axis(self.block):
             if _iter.var in results:
                 output_indices.append(results[_iter.var])
             else:
                 # not Bijective mapping case
-                output_indices.append(tirx.Var("undefined", dtype="int32") % int(_iter.dom.extent))
+                output_indices.append(ir.Var("undefined", ir.PrimType("int64")) % int(_iter.dom.extent))
         return output_indices
 
 
-def _merge_two_bounds(x: arith.ConstIntBound, y: arith.ConstIntBound):
-    return arith.ConstIntBound(min(x.min_value, y.min_value), max(x.max_value, y.max_value))
+def _merge_two_bounds(x: sym.ConstIntBound, y: sym.ConstIntBound):
+    return sym.ConstIntBound(min(x.min_value, y.min_value), max(x.max_value, y.max_value))
 
 
 class TensorDepNode:
@@ -115,7 +119,7 @@ class DependencyAnalysis:
                 input_node = self.traverse_dependencies(input_buffer)
                 input_node.add_next(node)
                 node.add_prev(input_node)
-        elif isinstance(compute, tirx.Buffer):
+        elif isinstance(compute, TensorView):
             node = self.get_or_create_node(compute.name)
         return node
 
@@ -184,7 +188,7 @@ class InputShapeInference:
             vars = [iter.var for iter in name2dep[target].block_analyzer.get_spatial_axis(name2dep[target].block)]
             input_vars.append(vars)
             mapping[target] = [vars]
-        ana = arith.Analyzer()
+        ana = create_analyzer()
 
         for dep in self.deps:
             for name in dep.dependent_region:
@@ -210,8 +214,8 @@ class InputShapeInference:
                     mapping[input_name] = []
                 for indices in indices_list:
                     for region in regions:
-                        vmap = {k: (tirx.Cast(k.dtype, v) if v.dtype != k.dtype else v) for k, v in zip(ax_vars, indices)}
-                        region = [ana.simplify(tirx.stmt_functor.substitute(ax, vmap)) for ax in region]
+                        vmap = {k: (prim.cast(k.ty.dtype, v) if v.ty.dtype != k.ty.dtype else v) for k, v in zip(ax_vars, indices)}
+                        region = [ana.simplify(substitute(ax, vmap)) for ax in region]
                         if not region_exist_in_list(region, mapping[input_name]):
                             mapping[input_name].append(region)
         buffers = []
@@ -225,24 +229,29 @@ class InputShapeInference:
         self.target_mapping[targets] = input_vars, mapping
         return input_vars, mapping
 
-    def infer(self, shape: dict[str, list[arith.ConstIntBound]], rstep: dict[str, int] = None, targets=None):
+    def infer(self, shape: dict[str, list[sym.ConstIntBound]], rstep: dict[str, int] = None, targets=None):
         if rstep is None:
             rstep = {}
         compute_targets = tuple(shape.keys())
         input_vars, mapping = self.construct_dependency_target(compute_targets)
-        ana = arith.Analyzer()
+        ana = create_analyzer()
         results = {}
         intermediate_bind = {}
+        # The old update(..., override=True) chose the last bound for each
+        # identity. Select those bounds before creating immutable premises;
+        # appending old and new constraints would intersect them instead.
+        bounds_by_var = {}
         for vars, bounds in zip(input_vars, shape.values()):
             for var, bound in zip(vars, bounds):
-                ana.update(var, bound, True)
+                bounds_by_var[var] = bound
         for ax in self.reduce_axes:
-            # assume the dom.min is always 0, maybe we can extend the IterInfo to include the min value.
+            # Reduction bounds retain the native domain's explicit begin.
             if ax.var.name in rstep:
-                bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + min(ax.dom.extent, rstep[ax.var.name]) - 1))
+                bound = sym.ConstIntBound(int(ax.dom.begin), int(ax.dom.begin + min(ax.dom.extent, rstep[ax.var.name]) - 1))
             else:
-                bound = arith.ConstIntBound(int(ax.dom.min), int(ax.dom.min + ax.dom.extent - 1))
-            ana.update(ax.var, bound, True)
+                bound = sym.ConstIntBound(int(ax.dom.begin), int(ax.dom.begin + ax.dom.extent - 1))
+            bounds_by_var[ax.var] = bound
+        ana.sync_constraint_context(const_bound_context(bounds_by_var))
 
         for name, regions in mapping.items():
             if targets is not None and name not in targets:
@@ -279,73 +288,60 @@ class InputShapeInference:
 
     def get_input_exprs(self, output_exprs):
         input_vars, mapping = self.construct_dependency_target(tuple(output_exprs.keys()))
-        ana = arith.Analyzer()
-        for ax in self.reduce_axes:
-            ana.bind(ax.var, 0)
+        ana = create_analyzer()
+        context = sym.ConstraintContext()
+        for variable in dict.fromkeys(ax.var for ax in self.reduce_axes):
+            context.append(sym.BindingConstraint(variable, ir.const(0, variable.ty.dtype)))
+        ana.sync_constraint_context(context)
         vmap = {}
         for vars, exprs in zip(input_vars, output_exprs.values()):
             for var, expr in zip(vars, exprs):
-                if expr.dtype != var.dtype:
-                    expr = tirx.Cast(var.dtype, expr)
+                if expr.ty.dtype != var.ty.dtype:
+                    expr = prim.cast(var.ty.dtype, expr)
                 vmap[var] = expr
         result = {}
 
         for name, regions in mapping.items():
             region = regions[0]
-            result[name] = [ana.simplify(tirx.stmt_functor.substitute(index, vmap)) for index in region]
+            result[name] = [ana.simplify(substitute(index, vmap)) for index in region]
         return result
 
 
 def region_exist_in_list(a, list) -> bool:
     def expr_is_same(a, b) -> bool:
-        if isinstance(a, tirx.IntImm) and isinstance(b, tirx.IntImm):
+        if isinstance(a, ir.IntImm) and isinstance(b, ir.IntImm):
             return a.value == b.value
         return structural_equal(a, b)
 
     def region_is_same(a, b) -> bool:
-        return all(expr_is_same(indice_a, indice_b) for indice_a, indice_b in zip(a, b))
+        return len(a) == len(b) and all(expr_is_same(indice_a, indice_b) for indice_a, indice_b in zip(a, b))
 
     return any([region_is_same(a, x) for x in list])
 
 
 def walk_indice(expr):
-    if isinstance(expr, tirx.expr.BinaryOpExpr):
-        a = walk_indice(expr.a)
-        b = walk_indice(expr.b)
-        if a is not None and b is not None:
-            return expr
-        else:
-            return None
-    elif isinstance(expr, (tirx.Var, tirx.expr.ConstExpr)):
-        return expr
-    elif isinstance(expr, tirx.ProducerLoad):
+    if not ir.is_prim_expr(expr):
         return None
-    elif isinstance(expr, tirx.Cast):
-        a = walk_indice(expr.value)
-        if a is not None:
-            return expr
-        return None
-    elif isinstance(expr, tirx.Call):
-        return None
-    else:
-        raise Exception(f"Unhandled node type in walk_indice(): {expr}")
+    opaque = []
+    post_order_visit(expr, lambda node: opaque.append(node) if isinstance(node, (ir.TensorLoad, ir.Call)) else None)
+    return None if opaque else expr
 
 
-def _extract_dependent_region(block_analyzer, block: SBlockRV) -> dict[str, list[tirx.PrimExpr]]:
+def _extract_dependent_region(block_analyzer, block: StageRef) -> dict[str, list[ir.Expr]]:
     input_buffers = block_analyzer.get_input_buffers(block)
     dependent_region = {buffer.name: [] for buffer in input_buffers}
 
     def fvisit(x):
-        if not isinstance(x, tirx.BufferLoad):
+        if not isinstance(x, ir.TensorLoad):
             return
-        if x.buffer.name not in dependent_region:
+        if block_analyzer.sch.tensor_view(x.source).name not in dependent_region:
             return
         index = []
-        for indice, shape_limit in zip(x.indices, x.buffer.shape):
+        for indice, shape_limit in zip(x.indices, x.source.ty.shape):
             expr = walk_indice(indice)
             if expr is None:
-                expr = tirx.Var("undefined", dtype="int8") % shape_limit
-            if isinstance(expr, tirx.IntImm) and expr.value == 0:
+                expr = ir.Var("undefined", ir.PrimType("int64")) % shape_limit
+            if isinstance(expr, ir.IntImm) and expr.value == 0 and isinstance(shape_limit, ir.IntImm) and int(shape_limit) == 1:
                 """for tensor ir zero dim smplification case.
                 for ax0, ax1, ax2 in T.grid(T.int64(1024), T.int64(1024), T.int64(1024)):
                     with T.block("T_dense"):
@@ -359,11 +355,11 @@ def _extract_dependent_region(block_analyzer, block: SBlockRV) -> dict[str, list
                 """
                 continue
             index.append(expr)
-        if not region_exist_in_list(index, dependent_region[x.buffer.name]):
-            dependent_region[x.buffer.name].append(index)
+        if not region_exist_in_list(index, dependent_region[block_analyzer.sch.tensor_view(x.source).name]):
+            dependent_region[block_analyzer.sch.tensor_view(x.source).name].append(index)
 
     stmt = block_analyzer.sch.get(block)
-    tirx.stmt_functor.post_order_visit(stmt, fvisit=fvisit)
+    post_order_visit(stmt.spec.body, fvisit=fvisit)
     return dependent_region
 
 

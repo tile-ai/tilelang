@@ -11,7 +11,7 @@
 #include <optional>
 
 #include "support/check.h"
-#include <tvm/arith/iter_affine_map.h>
+#include <tvm/sym/iter_affine_map.h>
 
 #include "layout.h"
 
@@ -19,6 +19,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 class NormalizeIterException : public std::exception {
@@ -34,11 +35,22 @@ private:
  * \brief Fully evaluate a constant integer expression used by a layout.
  *
  * In addition to ordinary arithmetic, this handles the bitwise and shift
- * builtins that arith::Analyzer does not currently fold for constant operands.
+ * builtins that sym::Analyzer does not currently fold for constant operands.
  *
  * \return The integer value, or std::nullopt for an unsupported expression.
  */
 std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr);
+
+/*!
+ * \brief Expose aligned mixed-radix digits in a native normalized IterSum.
+ *
+ * Native normalization may retain a fused IterMark under division/modulo.
+ * TileLang's ownership consumers need the surviving digits, rather than every
+ * digit inside that mark. Nonconstant or unaligned groups remain fused.
+ */
+sym::IterSumExpr NormalizeLayoutIterSum(const PrimExpr &expr,
+                                        const Map<PrimVar, Range> &input_iters,
+                                        sym::AnalyzerObj *analyzer);
 
 /*!
  * \brief Collect the IterSplit that is not used in expr.
@@ -46,40 +58,40 @@ std::optional<int64_t> EvaluateConstantInteger(const PrimExpr &expr);
  *  If the expr is (x // 2) and x is in Range(4),
  *  than the result should be (x % 2)
  */
-Array<arith::IterSplitExpr>
+Array<sym::IterSplitExpr>
 DivideUnusedIterators(const Array<PrimExpr> &exprs,
-                      const Array<IterVar> input_iters,
-                      arith::Analyzer *analyzer);
+                      const Array<LayoutIterVar> input_iters,
+                      sym::AnalyzerObj *analyzer);
 
 /*!
  * \brief Compress the iterator var, remove the unused part of the var not
  * present in the expr
  *
- *  Returns the compressed IterVar as well as the Updated iter sum expression.
+ *  Returns the compressed LayoutIterVar as well as the Updated iter sum
+ * expression.
  */
-std::pair<PrimExpr, IterVar> CompressIterator(const PrimExpr &expr,
-                                              const Array<IterVar> input_iters,
-                                              const Var &var,
-                                              arith::Analyzer *analyzer);
+std::pair<PrimExpr, LayoutIterVar>
+CompressIterator(const PrimExpr &expr, const Array<LayoutIterVar> input_iters,
+                 const PrimVar &var, sym::AnalyzerObj *analyzer);
 
 /*!
  * \brief Convert the iter splits returned by DivideUnusedIterators into
  * flattened expression
  *
  */
-PrimExpr MakeFlattenedExpression(const Array<arith::IterSplitExpr> &splits);
+PrimExpr MakeFlattenedExpression(const Array<sym::IterSplitExpr> &splits);
 
 /*!
- * \brief Convert an Array of IterVar to a Map object
+ * \brief Convert an Array of LayoutIterVar to a Map object
  *
  */
-Map<Var, Range> ToVMap(const Array<IterVar> &ivs);
+Map<PrimVar, Range> ToVMap(const Array<LayoutIterVar> &ivs);
 
 /*!
- * \brief Convert a Map object to an Array of IterVar
+ * \brief Convert a Map object to an Array of LayoutIterVar
  *
  */
-Array<IterVar> ToIterVars(const Map<Var, Range> &vmap);
+Array<LayoutIterVar> ToIterVars(const Map<PrimVar, Range> &vmap);
 
 /*!
  * \brief Compute the fragment layout of a reduction with its axis removed.
@@ -108,7 +120,7 @@ Fragment ComputeReducerLayout(const Fragment &src_layout, int dim);
 bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                            Array<PrimExpr> small_frag_indices,
                            Array<PrimExpr> large_frag_indices,
-                           arith::Analyzer &analyzer,
+                           const sym::Analyzer &analyzer,
                            bool check_forward_index = false);
 
 } // namespace tl

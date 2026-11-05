@@ -4,19 +4,17 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
-from tvm import tirx
-from tvm.ir import Range
-from tvm.tirx import IterVar, PrimExpr, Var, BufferRegion, IndexMap
-from tvm.tirx.analysis import undefined_vars
-from tvm.s_tir import Schedule
-from tvm.s_tir.schedule import SBlockRV
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import Range, Expr, Var
+from tvm_tirx.tirx import IndexMap
+from ._native_analysis import NativeSchedule, StageRef, StageView, TensorView, TensorAccess, pre_order_visit
+from tvm_tirx.tirx.analysis import undefined_vars
 from .analysis import (
     collect_block_iter_vars_used_in_access_region,
     get_root_block,
     get_reduction_blocks,
 )
-from tvm.target.target import Target
-from tvm.tirx.stmt_functor import pre_order_visit
+from tvm_tirx.target import Target
 from .arch import get_arch, is_tensorcore_supported_precision
 from .arch.cuda import check_sm_version
 from .arch.rdna import _get_rdna_tuning_config
@@ -39,107 +37,108 @@ def collect_vars_from_expr(prim_expr):
     return vars
 
 
-def _is_one(x: PrimExpr) -> bool:
-    return isinstance(x, tirx.IntImm) and x.value == 1
+def _is_one(x: Expr) -> bool:
+    return isinstance(x, ir.IntImm) and x.value == 1
 
 
-def _collect_producers(sch: Schedule, block: SBlockRV):
+def _collect_producers(sch: NativeSchedule, block: StageRef, visited=None):
+    visited = {block.uid} if visited is None else visited
     result = []
     for producer in sch.get_producers(block):
+        if producer.uid in visited:
+            continue
+        visited.add(producer.uid)
         result.append(producer)
-        result.extend(_collect_producers(sch, producer))
+        result.extend(_collect_producers(sch, producer, visited))
     return result
 
 
-def _collect_consumers(sch: Schedule, block: SBlockRV):
+def _collect_consumers(sch: NativeSchedule, block: StageRef, visited=None):
+    visited = {block.uid} if visited is None else visited
     result = []
     for consumer in sch.get_consumers(block):
+        if consumer.uid in visited:
+            continue
+        visited.add(consumer.uid)
         result.append(consumer)
-        result.extend(_collect_consumers(sch, consumer))
+        result.extend(_collect_consumers(sch, consumer, visited))
     return result
 
 
 def auto_inline_producers(
-    sch: Schedule,
-    block: SBlockRV,
-    skip_blocks: list[SBlockRV] | None = None,
+    sch: NativeSchedule,
+    block: StageRef,
+    skip_blocks: list[StageRef] | None = None,
 ):
-    skip_blocks = skip_blocks or []
-    while True:
-        inlined_cnt = 0
-        producers = _collect_producers(sch, block)
-        for producer in producers:
-            if any(sch.get(producer) == sch.get(skip_block) for skip_block in skip_blocks):
-                continue
-            try:
-                sch.compute_inline(producer)
-                inlined_cnt += 1
-            except Exception:  # pylint: disable=bare-except
-                continue
-        if inlined_cnt == 0:
-            return
+    skip_ids = {item.uid for item in (skip_blocks or [])}
+    with sch.transaction():
+        while True:
+            for producer in _collect_producers(sch, block):
+                if producer.uid in skip_ids:
+                    continue
+                try:
+                    sch.compute_inline(producer)
+                except Exception:
+                    continue
+                break
+            else:
+                return
 
 
 def auto_inline_consumers(
-    sch: Schedule,
-    block: SBlockRV,
+    sch: NativeSchedule,
+    block: StageRef,
 ):
-    while True:
-        inlined_cnt = 0
-        consumers = _collect_consumers(sch, block)
-        for consumer in consumers:
-            try:
-                sch.compute_inline(consumer)
-                inlined_cnt += 1
-            except Exception:  # pylint: disable=bare-except
-                continue
-        for consumer in consumers:
-            try:
-                sch.reverse_compute_inline(consumer)
-                inlined_cnt += 1
-            except Exception:  # pylint: disable=bare-except
-                continue
-        if inlined_cnt == 0:
-            return
+    with sch.transaction():
+        while True:
+            changed = False
+            for operation in (sch.compute_inline, sch.reverse_compute_inline):
+                for consumer in _collect_consumers(sch, block):
+                    try:
+                        operation(consumer)
+                    except Exception:
+                        continue
+                    changed = True
+                    break
+                if changed:
+                    break
+            if not changed:
+                return
 
 
 def auto_inline_consumer_chain(
-    sch: Schedule,
-    block: SBlockRV,
+    sch: NativeSchedule,
+    block: StageRef,
 ):
-    auto_inline_consumers(sch, block)
-    remaining_consumers = sch.get_consumers(block)
-
-    if len(remaining_consumers) != 0:
-        # Some blocks have failed to be inlined to the producer cache-write stage.
-        # This could be due to another producer block that has not been scheduled.
-        for c in remaining_consumers:
-            for p in sch.get_producers(c):
-                if sch.get(p) != sch.get(block):
-                    sch.compute_inline(p)
-
-        # Try inlining into the cache-write stage again, this time it should succeed.
+    with sch.transaction():
         auto_inline_consumers(sch, block)
+        remaining_consumers = sch.get_consumers(block)
+        if remaining_consumers:
+            for consumer in remaining_consumers:
+                for producer in sch.get_producers(consumer):
+                    if producer.uid != block.uid:
+                        sch.compute_inline(producer)
+            auto_inline_consumers(sch, block)
 
 
 # used to match the similar region with dequantize op.
-def find_first_similar_region(regions: list[BufferRegion], buffer: tirx.Buffer):
+def find_first_similar_region(regions: list[TensorAccess], buffer: TensorView):
     for region in regions:
-        if len(region.buffer.shape) == len(buffer.shape):
+        if len(region.tensor.shape) == len(buffer.shape):
             return region
     return None
 
 
 # used to match the similar buffer with dequantize op.
-def find_first_similar_buffer(regions: list[BufferRegion], buffer: tirx.Buffer):
+def find_first_similar_buffer(regions: list[TensorAccess], buffer: TensorView):
     for region in regions:
-        if len(region.buffer.shape) == len(buffer.shape):
-            return region.buffer
+        if len(region.tensor.shape) == len(buffer.shape):
+            return region.tensor
     return None
 
 
 # find the block that required to be reindex and scope.
-def find_last_producer_from_buffer(sch, main_block, buffer: tirx.Buffer) -> SBlockRV | None:
+def find_last_producer_from_buffer(sch, main_block, buffer: TensorView) -> StageRef | None:
     # block that most near to the arguments
     block = main_block
     buffer = buffer
@@ -154,7 +153,7 @@ def find_last_producer_from_buffer(sch, main_block, buffer: tirx.Buffer) -> SBlo
 
         for producer in producers:
             for write in sch.get(producer).writes:
-                if write.buffer == buffer:
+                if write.tensor == buffer:
                     block = producer
                     buffer = find_first_similar_buffer(sch.get(producer).reads, last_buffer)
         if buffer == last_buffer:
@@ -162,14 +161,14 @@ def find_last_producer_from_buffer(sch, main_block, buffer: tirx.Buffer) -> SBlo
     return block
 
 
-def find_arg_idx_from_buffer_chain(sch: Schedule, main_block: SBlockRV, buffer: tirx.Buffer) -> int:
+def find_arg_idx_from_buffer_chain(sch: NativeSchedule, main_block: StageRef, buffer: TensorView) -> int:
     """traverse to find the arg index from the buffer"""
     producers = sch.get_producers(main_block)
 
     # a head buffer has no producer blocks
-    def find_args_index(sch: Schedule, buffer: tirx.Buffer):
+    def find_args_index(sch: NativeSchedule, buffer: TensorView):
         for i, param in enumerate(sch.mod["main"].params):
-            if sch.mod["main"].buffer_map[param] == buffer:
+            if param.same_as(buffer.tensor):
                 return i
         return None
 
@@ -180,8 +179,8 @@ def find_arg_idx_from_buffer_chain(sch: Schedule, main_block: SBlockRV, buffer: 
         if len(sch.get(block).reads) != 1 or len(sch.get(block).writes) != 1:
             continue
         for write in sch.get(block).writes:
-            if write.buffer == buffer:
-                return find_arg_idx_from_buffer_chain(sch, block, buffer)
+            if write.tensor == buffer:
+                return find_arg_idx_from_buffer_chain(sch, block, sch.get(block).reads[0].tensor)
 
     # if no buffer producer block found, it means the buffer is an input buffer
     return find_args_index(sch, buffer)
@@ -209,17 +208,17 @@ class IterKind(Enum):
 @dataclass
 class IterTrait:
     kind: IterKind
-    extent: PrimExpr
+    extent: Expr
 
 
 def make_iter_fusion_index_map(
     traits: list[IterTrait],
     kind_order: list[IterKind],
 ) -> tirx.IndexMap:
-    fused_iters: dict[IterKind, PrimExpr] = {}
-    input_iters: list[tirx.Var] = []
+    fused_iters: dict[IterKind, Expr] = {}
+    input_iters: list[ir.Var] = []
     for i, trait in enumerate(traits):
-        v_i = tirx.Var(f"i{i}", trait.extent.dtype)
+        v_i = ir.Var(f"i{i}", ir.PrimType(trait.extent.ty.dtype))
         input_iters.append(v_i)
         if trait.kind == IterKind.kIter_T:
             continue
@@ -230,17 +229,17 @@ def make_iter_fusion_index_map(
         else:
             fused_iters[trait.kind] = v_i
 
-    final_indices: list[tirx.PrimExpr] = [fused_iters.get(kind, tirx.IntImm(traits[0].extent.dtype, 0)) for kind in kind_order]
+    final_indices: list[ir.Expr] = [fused_iters.get(kind, ir.IntImm(traits[0].extent.ty.dtype, 0)) for kind in kind_order]
 
     return tirx.IndexMap(input_iters, final_indices, None)
 
 
-def detect_iter_traits(block: tirx.SBlock) -> tuple[list[IterTrait]] | None:
+def detect_iter_traits(block: StageView) -> tuple[list[IterTrait]] | None:
     """Detect iter traits based on the pattern C[S, I, J] += A[S, I, K] * B[S, J, K]
 
     Parameters
     ----------
-    block : tirx.SBlock
+    block : StageView
         The block to be analyzed
 
     Returns
@@ -259,7 +258,7 @@ def detect_iter_traits(block: tirx.SBlock) -> tuple[list[IterTrait]] | None:
         for r in region:
             if not _is_one(r.extent):
                 raise ValueError("Expect elemwise block access")
-            axes = axes.union(set(undefined_vars(r.min)))
+            axes = axes.union(set(undefined_vars(r.begin)))
         return axes
 
     try:
@@ -270,16 +269,16 @@ def detect_iter_traits(block: tirx.SBlock) -> tuple[list[IterTrait]] | None:
         return None
 
     traits: dict[Var, IterTrait] = {}
-    for iter_var in block.iter_vars:
+    for iter_var in block.axes:
         var = iter_var.var
         kind: IterKind
-        if _is_one(iter_var.dom.extent):
-            if iter_var.iter_type == tirx.IterVar.CommReduce:
+        if _is_one(iter_var.domain.extent):
+            if iter_var.kind == "R":
                 # for simplified case (e.g. 1x1 conv kernel)
                 kind = IterKind.kIter_K
             else:
                 kind = IterKind.kIter_T
-        elif iter_var.iter_type == iter_var.DataPar:
+        elif iter_var.kind == "S":
             if var in A_axes and var in B_axes and var in C_axes:
                 kind = IterKind.kIter_S
             elif var in A_axes and var in C_axes:
@@ -288,33 +287,33 @@ def detect_iter_traits(block: tirx.SBlock) -> tuple[list[IterTrait]] | None:
                 kind = IterKind.kIter_J
             else:
                 return None
-        elif iter_var.iter_type == tirx.IterVar.CommReduce:
+        elif iter_var.kind == "R":
             if var in A_axes and var in B_axes and var not in C_axes:
                 kind = IterKind.kIter_K
             else:
                 return None
         else:
             return None
-        traits[var] = IterTrait(kind, iter_var.dom.extent)
+        traits[var] = IterTrait(kind, iter_var.domain.extent)
 
     # A Gemm-kernel requires have I, J and K axes
     gemm_traits = {IterKind.kIter_I, IterKind.kIter_J, IterKind.kIter_K}
     if {x.kind for x in traits.values()}.intersection(gemm_traits) != gemm_traits:
         return None
 
-    A_traits = [traits[iter_var.var] for iter_var in block.iter_vars if iter_var.var in A_axes]
-    B_traits = [traits[iter_var.var] for iter_var in block.iter_vars if iter_var.var in B_axes]
-    C_traits = [traits[iter_var.var] for iter_var in block.iter_vars if iter_var.var in C_axes]
-    block_traits = [traits[i.var] for i in block.iter_vars]
+    A_traits = [traits[iter_var.var] for iter_var in block.axes if iter_var.var in A_axes]
+    B_traits = [traits[iter_var.var] for iter_var in block.axes if iter_var.var in B_axes]
+    C_traits = [traits[iter_var.var] for iter_var in block.axes if iter_var.var in C_axes]
+    block_traits = [traits[i.var] for i in block.axes]
     return A_traits, B_traits, C_traits, block_traits
 
 
-def get_index_map(block: tirx.SBlock, layout: list[str] | None = None) -> tuple[tirx.IndexMap, ...] | None:
+def get_index_map(block: StageView, layout: list[str] | None = None) -> tuple[tirx.IndexMap, ...] | None:
     """Get index maps for the block
 
     Parameters
     ----------
-    block : tirx.SBlock
+    block : StageView
         The block to be analyzed
 
     layout : List[str]
@@ -340,11 +339,11 @@ def get_index_map(block: tirx.SBlock, layout: list[str] | None = None) -> tuple[
         for r in region:
             if not _is_one(r.extent):
                 raise ValueError("Expect elemwise block access")
-            axes.append(r.min)
+            axes.append(r.begin)
         return axes
 
     def is_common_reduce(var: Var) -> bool:
-        return any(iter_var.var == var and iter_var.iter_type == IterVar.CommReduce for iter_var in block.iter_vars)
+        return any(iter_var.var == var and iter_var.kind == "R" for iter_var in block.axes)
 
     def has_common_reduce(var: Var) -> bool:
         vars = collect_vars_from_expr(var)
@@ -407,39 +406,39 @@ def get_index_map(block: tirx.SBlock, layout: list[str] | None = None) -> tuple[
     )
 
 
-def get_in_out_dtypes(block: tirx.SBlock) -> tuple[str]:
+def get_in_out_dtypes(block: StageView) -> tuple[str]:
     """
     Detect In/Out data types for the given block based on the analysis if read/write buffers.
     """
     assert len(block.reads) > 0 and len(block.writes) > 0
-    in_dtype = block.reads[0].buffer.dtype
-    out_dtype = block.writes[0].buffer.dtype
+    in_dtype = block.reads[0].tensor.dtype
+    out_dtype = block.writes[0].tensor.dtype
     return (in_dtype, out_dtype)
 
 
-def get_dequantize_block(sch, blocks) -> SBlockRV | None:
+def get_dequantize_block(sch, blocks) -> StageRef | None:
     # check at least two input and one output
     # at lease one input has uint dtype, and the output dtype is float
-    def is_dequantize(block: SBlockRV) -> bool:
+    def is_dequantize(block: StageRef) -> bool:
         block_stmt = sch.get(block)
         if len(block_stmt.reads) < 2:
             return False
-        has_uint_input = any("uint" in str(region.buffer.dtype) for region in block_stmt.reads)
+        has_uint_input = any("uint" in str(region.tensor.dtype) for region in block_stmt.reads)
         if not has_uint_input:
             return False
-        return not (len(block_stmt.writes) != 1 or "float" not in str(block_stmt.writes[0].buffer.dtype))
+        return not (len(block_stmt.writes) != 1 or "float" not in str(block_stmt.writes[0].tensor.dtype))
 
     dequantize_blocks = [block for block in blocks if is_dequantize(block)]
     return dequantize_blocks[0] if len(dequantize_blocks) == 1 else None
 
 
-def is_identity_or_transpose_block(block_stmt: tirx.SBlock) -> bool:
-    iter_types = {iter_var.iter_type for iter_var in block_stmt.iter_vars}
-    if iter_types != {IterVar.DataPar}:
+def is_identity_or_transpose_block(block_stmt: StageView) -> bool:
+    iter_types = {iter_var.kind for iter_var in block_stmt.axes}
+    if iter_types != {"S"}:
         return False, False
-    if not isinstance(block_stmt.body, tirx.BufferStore):
+    if not isinstance(block_stmt.body, ir.TensorStore):
         return False, False
-    if not isinstance(block_stmt.body.value, tirx.BufferLoad):
+    if not isinstance(block_stmt.body.value, ir.TensorLoad):
         return False, False
 
     def get_access_vars(region: list[Range]) -> list[Var]:
@@ -447,9 +446,9 @@ def is_identity_or_transpose_block(block_stmt: tirx.SBlock) -> bool:
         for r in region:
             if not _is_one(r.extent):
                 return None
-            axes.extend(undefined_vars(r.min))
+            axes.extend(undefined_vars(r.begin))
         # remove trivial axis
-        trivial_vars = set(iter_var.var for iter_var in block_stmt.iter_vars if _is_one(iter_var.dom.extent))
+        trivial_vars = set(iter_var.var for iter_var in block_stmt.axes if _is_one(iter_var.domain.extent))
         axes = [axis for axis in axes if axis not in trivial_vars]
         # remove duplicate axis
         axes = [var for i, var in enumerate(axes) if i == 0 or var != axes[i - 1]]
@@ -462,31 +461,32 @@ def is_identity_or_transpose_block(block_stmt: tirx.SBlock) -> bool:
     return is_identity, is_transpose
 
 
-def is_identity_block(block_stmt: tirx.SBlock) -> bool:
+def is_identity_block(block_stmt: StageView) -> bool:
     return is_identity_or_transpose_block(block_stmt)[0]
 
 
-def is_transpose_block(block_stmt: tirx.SBlock) -> bool:
+def is_transpose_block(block_stmt: StageView) -> bool:
     return is_identity_or_transpose_block(block_stmt)[1]
 
 
-def inline_transpose_block(sch: Schedule, blocks: list[SBlockRV]):
+def inline_transpose_block(sch: NativeSchedule, blocks: list[StageRef]):
     result_blocks = []
-    for block in blocks:
-        if not is_transpose_block(sch.get(block)):
-            result_blocks.append(block)
-            continue
-        try:
-            sch.compute_inline(block)
-        except Exception:
-            try:
-                sch.reverse_compute_inline(block)
-            except Exception:
+    with sch.transaction():
+        for block in blocks:
+            if not is_transpose_block(sch.get(block)):
                 result_blocks.append(block)
-    return result_blocks
+                continue
+            try:
+                sch.compute_inline(block)
+            except Exception:
+                try:
+                    sch.reverse_compute_inline(block)
+                except Exception:
+                    result_blocks.append(block)
+    return [sch.refresh(block) for block in result_blocks]
 
 
-def normalize_to_matmul(sch: Schedule, main_block: SBlockRV, layout: list[str] | None = None) -> Schedule | None:
+def normalize_to_matmul(sch: NativeSchedule, main_block: StageRef, layout: list[str] | None = None) -> NativeSchedule | None:
     if layout is None:
         layout = ["n", "t", "n"]
     block_stmt = sch.get(main_block)
@@ -499,39 +499,41 @@ def normalize_to_matmul(sch: Schedule, main_block: SBlockRV, layout: list[str] |
 
     matmul_index_map, a_index_map, b_index_map, c_index_map = index_maps
 
-    # `skip_simplify` to  avoid the bug in the 1x1 conv
-    block = sch.reindex(main_block, ("read", 0), skip_simplify=True)
-    sch.transform_layout(block, ("write", 0), a_index_map)
-    block = sch.reindex(main_block, ("read", 1), skip_simplify=True)
-    sch.transform_layout(block, ("write", 0), b_index_map)
-    block = sch.reindex(main_block, ("write", 0), skip_simplify=True)
-    sch.transform_layout(block, ("read", 0), c_index_map)
-    sch.transform_block_layout(main_block, matmul_index_map)
-    sch.mod["main"] = sch.mod["main"].with_attr("dlight.tensorcore_prenormlized", True)
+    # The three cache rewrites and loop rebind form one transaction: an
+    # unsupported map must leave the original Function and handles intact.
+    with sch.transaction():
+        block = sch.reindex(main_block, ("read", 0), skip_simplify=True)
+        sch.transform_layout(block, ("write", 0), a_index_map)
+        block = sch.reindex(main_block, ("read", 1), skip_simplify=True)
+        sch.transform_layout(block, ("write", 0), b_index_map)
+        block = sch.reindex(main_block, ("write", 0), skip_simplify=True)
+        sch.transform_layout(block, ("read", 0), c_index_map)
+        sch.transform_block_layout(main_block, matmul_index_map)
+        sch.function = sch.function.with_attr("dlight.tensorcore_prenormlized", True)
     return sch
 
 
 def get_tensorized_func_and_tags(
-    func: tirx.PrimFunc,
+    func: tirx.Function,
     target: Target,
     layout: list[str] | None = None,
     skip_normalize: bool = False,
     allow_gemv: bool = False,
-) -> tuple[tirx.PrimFunc, dict[str, list[int] | int]]:
+) -> tuple[tirx.Function, dict[str, list[int] | int]]:
     """
     transform function to matmul if necessary (e.g. transform conv2d with im2col)
     """
     if layout is None:
         layout = ["a", "a", "a"]
     # step1. detect whether the function can utilize tensorcore
-    sch = Schedule(func)
+    sch = NativeSchedule(func)
     root_block = get_root_block(sch)
     blocks = sch.get_child_blocks(root_block)
     reduction_blocks = get_reduction_blocks(sch, blocks)
     if not reduction_blocks or len(reduction_blocks) != 1:
         return func, None
 
-    def _can_be_tensorized(sch: Schedule, block: SBlockRV) -> bool:
+    def _can_be_tensorized(sch: NativeSchedule, block: StageRef) -> bool:
         block_stmt = sch.get(block)
         conditions = []
         conditions.append(len(block_stmt.reads) == 2)
@@ -546,7 +548,7 @@ def get_tensorized_func_and_tags(
     def is_rdna_wmma_target(target: Target) -> bool:
         return target.kind.name == "hip" and target_is_rdna(target)
 
-    def analysis_tensorcore_tags(sch: Schedule, block: SBlockRV, target: Target) -> bool | dict:
+    def analysis_tensorcore_tags(sch: NativeSchedule, block: StageRef, target: Target) -> bool | dict:
         tags: dict[str, list[int] | int] = {}
         block_stmt = sch.get(block)
 
@@ -558,7 +560,7 @@ def get_tensorized_func_and_tags(
         # analysis tensorcore axis
         # todo(lei): maybe we can remove this in the future
         (write_buffer_region,) = block_stmt.writes
-        out_axis = len(write_buffer_region.buffer.shape)
+        out_axis = len(write_buffer_region.tensor.shape)
         tags["tensorcore_config"] = [out_axis - 2, out_axis - 1]
 
         # analysis pipeline stage
@@ -583,11 +585,11 @@ def get_tensorized_func_and_tags(
             for r in region:
                 if not _is_one(r.extent):
                     raise ValueError("Expect elemwise block access")
-                axes.append(r.min)
+                axes.append(r.begin)
             return axes
 
         def is_common_reduce(var: Var) -> bool:
-            return any(iter_var.var == var and iter_var.iter_type == IterVar.CommReduce for iter_var in block_stmt.iter_vars)
+            return any(iter_var.var == var and iter_var.kind == "R" for iter_var in block_stmt.axes)
 
         def has_common_reduce(var: Var) -> bool:
             vars = collect_vars_from_expr(var)
@@ -620,9 +622,11 @@ def get_tensorized_func_and_tags(
         # And we only support float16 for now
         if hasattr(func.attrs, "dequantize_info") and in_dtype in ["bfloat16", "float16"]:
             for arg in func.params:
-                inp_shape = func.buffer_map[arg].shape
+                if not tirx.is_tensor_var(arg):
+                    continue
+                inp_shape = arg.ty.shape
                 M = inp_shape[0]
-                if isinstance(M, tirx.IntImm) and M <= 128:
+                if isinstance(M, ir.IntImm) and M <= 128:
                     require_block_reduce = True
                 break
         if target.kind.name == "cuda" and require_block_reduce and check_sm_version(target.attrs.get("arch", "")) == 80:
@@ -630,7 +634,7 @@ def get_tensorized_func_and_tags(
         return tags
 
     (main_block,) = reduction_blocks
-    if _can_be_tensorized(sch, main_block) is None:
+    if not _can_be_tensorized(sch, main_block):
         return func, None
 
     block_stmt = sch.get(main_block)
@@ -653,24 +657,25 @@ def get_tensorized_func_and_tags(
             if sch is None:
                 return func, None
 
+        main_block = sch.refresh(main_block)
         block_stmt = sch.get(main_block)
 
         # 16 for 16 bits tensor core while 32 for 8bits tensorcore.
         minimal_tensorize_spatial_threshold = 16
         minimal_tensorize_reduce_threshold = 16 if in_dtype in ["bfloat16", "float16"] else 32
         # the batch dimension is not taken into consideration.
-        for item_var in block_stmt.iter_vars[1:]:
-            extent = item_var.dom.extent
-            iter_type = item_var.iter_type
+        for item_var in block_stmt.axes[1:]:
+            extent = item_var.domain.extent
+            iter_type = item_var.kind
 
-            if iter_type is IterVar.DataPar:
+            if iter_type == "S":
                 minimal_tensorize_threshold = minimal_tensorize_spatial_threshold
-            elif iter_type is IterVar.CommReduce:
+            elif iter_type == "R":
                 minimal_tensorize_threshold = minimal_tensorize_reduce_threshold
             else:
                 raise ValueError(f"Unknown IterVar type {iter_type}")
 
-            if isinstance(extent, tirx.expr.IntImm) and extent.value < minimal_tensorize_threshold:
+            if isinstance(extent, ir.IntImm) and extent.value < minimal_tensorize_threshold:
                 return func, None
         tags = analysis_tensorcore_tags(sch, main_block, target)
         return sch.mod["main"], tags
@@ -679,7 +684,7 @@ def get_tensorized_func_and_tags(
 
 
 def get_propagate_map(trans: bool = True, dtype="float16", matrix_name="A", index_dtype="int32"):
-    from bitblas.tl.mma_layout import (  # pylint: disable=import-outside-toplevel
+    from tilelang.cuda.intrinsics.layout.mma_layout import (  # pylint: disable=import-outside-toplevel
         ldmatrix_32x8_to_shared_16x16_layout,
         ldmatrix_trans_32x8_to_shared_16x16_layout,
         ldmatrix_32x16_to_shared_16x32_layout_a,
@@ -792,10 +797,10 @@ def get_ladder_stage3_map(dtype="float16", index_dtype="int32"):
 
 
 def layout_propagate_chain(
-    sch: Schedule,
-    start_block: SBlockRV,
-    start_buffer: tirx.Buffer,
-    end_block: SBlockRV,
+    sch: NativeSchedule,
+    start_block: StageRef,
+    start_buffer: TensorView,
+    end_block: StageRef,
     index_map: IndexMap,
 ):
     # some layout transformation may only apply to the last n dimensions
@@ -811,24 +816,24 @@ def layout_propagate_chain(
         for producer in producers:
             if len(sch.get(producer).writes) != 1:
                 return index_map
-            if sch.get(producer) == sch.get(end_block):
+            if producer.uid == end_block.uid:
                 return index_map
             (write,) = sch.get(producer).writes
 
             read = find_first_similar_region(sch.get(producer).reads, last_buffer)
-            if write.buffer == buffer:
+            if write.tensor == buffer:
                 block = producer
-                buffer = read.buffer
-                write_indices = [r.min for r in write.region]
-                read_indices = [r.min for r in read.region]
+                buffer = read.tensor
+                write_indices = [r.begin for r in write.region]
+                read_indices = [r.begin for r in read.region]
                 # reverse index map from [vi // x] -> [vi * x] to match the inconsistent layout
                 tmp_index_map = IndexMap(write_indices, read_indices, None)
-                tmp_index_map = tmp_index_map.non_surjective_inverse(write.buffer.shape)[0]
+                tmp_index_map = tmp_index_map.non_surjective_inverse(write.tensor.shape)[0]
 
                 # if dequantize like ops are used, the scaling factor should be considered
                 # to be applied to the final indices
                 scaling_factor = 1
-                for i, j in zip(write.buffer.shape, read.buffer.shape):
+                for i, j in zip(write.tensor.shape, read.tensor.shape):
                     scaling_factor *= i // j
                 final_indices = list(index_map.map_indices(tmp_index_map.map_indices(write_indices)))
                 final_indices[-1] = final_indices[-1] // scaling_factor

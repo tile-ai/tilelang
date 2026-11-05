@@ -17,18 +17,19 @@
 
 #include "operator.h"
 #include "support/check.h"
-#include <tvm/arith/iter_affine_map.h>
+#include <tvm/sym/iter_affine_map.h>
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace attr {
-/*! \brief SBlock annotation: Map<Var, Map<String, Any>> with the key
+/*! \brief Decoded tl.attr payload: Map<Var, Map<String, Any>> with the key
  *  "op" (String: sum/max/min/bitand/bitor/bitxor). */
 constexpr const char *kReducerInfoV2 = "reducer_info_v2";
-/*! \brief Legacy (v1) SBlock annotation emitted by
+/*! \brief Legacy reducer syntax (v1) payload emitted by
  *  `alloc_reducer(replication=...)`: Map<Var, Map<String, String>> with keys
  *  "op" and "rep". Consumed (and erased) by CanonicalizeLegacyReducer; the
  *  data-race verifier also reads it to exempt legacy reducer stores. Removed
@@ -58,15 +59,15 @@ enum class ReducerV2OpType : int {
 ReducerV2OpType ParseReducerV2OpType(const ffi::String &op_str);
 
 /*! \brief Identity element of a combine op for the given dtype. */
-PrimExpr ReducerV2Identity(ReducerV2OpType op, DataType dtype);
+PrimExpr ReducerV2Identity(ReducerV2OpType op, PrimType dtype);
 
 /*! \brief combine(lhs, rhs) expression for a combine op. */
 PrimExpr ReducerV2Combine(ReducerV2OpType op, const PrimExpr &lhs,
                           const PrimExpr &rhs);
 
 /*! \brief True if `buffer` lives in the virtual `local.reducer` scope. */
-inline bool IsReducerV2Buffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "local.reducer";
+inline bool IsReducerV2Buffer(const TensorVar &buffer) {
+  return buffer.defined() && buffer.scope().name() == "local.reducer";
 }
 
 /*! \brief A contribution is replica-safe when every physical execution of
@@ -102,7 +103,7 @@ struct ReducerSiteAnalysis {
   std::vector<bool> is_output_dim;
   /*! \brief The loop's forward-thread expression in iter-sum form (reused
    *  by the packed-accumulation lane analysis). */
-  arith::IterSumExpr iter_sum;
+  ffi::Optional<sym::IterSumExpr> iter_sum;
 };
 
 /*! \brief Analyze one reducer_update site: derive the induced partial
@@ -113,7 +114,7 @@ ReducerSiteAnalysis
 AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
                          const ffi::Array<PrimExpr> &reducer_shape,
                          int64_t thread_extent, int64_t thread_min,
-                         arith::Analyzer *analyzer);
+                         sym::AnalyzerObj *analyzer);
 
 /// T.reducer_init(acc, init=None): open the epoch. The physical partials
 /// always start from the combine identity; the optional `init` value is a
@@ -124,13 +125,13 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
 /// args[0] = tl.region(acc, "w"), optional args[1] = init value.
 class ReducerInitOpNode : public TileOperatorNode {
 public:
-  Buffer reducer;
+  TensorVar reducer{ffi::UnsafeInit{}};
   ffi::Optional<PrimExpr> seed; ///< logical starting value (args[1])
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.ReducerInitOp", ReducerInitOpNode,
                                     TileOperatorNode);
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   TileOperator Clone() const override;
@@ -148,9 +149,9 @@ class ReducerInitOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ReducerInitOp, TileOperator,
                                              ReducerInitOpNode);
-  TVM_DLL ReducerInitOp(ffi::Array<PrimExpr> args,
-                        ffi::Map<ffi::String, ffi::ObjectRef> annotations =
-                            ffi::Map<ffi::String, ffi::ObjectRef>());
+  TVM_TIRX_DLL ReducerInitOp(ffi::Array<Expr> args,
+                             ffi::Map<ffi::String, ffi::Any> annotations =
+                                 ffi::Map<ffi::String, ffi::Any>());
   static const Op &Get();
 };
 
@@ -161,22 +162,22 @@ public:
 /// op: it executes once per iteration inside T.Parallel,
 /// owns no layout (the enclosing loop and the planner decide physics), and
 /// never lowers on its own (ReducerPlanAndMaterialize rewrites it; leftovers
-/// are caught by VerifyReducerConsumed). args[0] is a plain BufferLoad
+/// are caught by VerifyReducerConsumed). args[0] is a plain TensorLoad
 /// `acc[indices]` — an update-target descriptor whose multi-dim indices the
 /// planner reads directly, not a read of the reducer (analyses may treat it
 /// as a read; updates commute, and VerifyReducerEpoch pins init/finalize to
 /// straight-line code, so no cross-statement write ordering is lost).
-TVM_DLL const Op &reducer_update();
+TVM_TIRX_DLL const Op &reducer_update();
 
 /*! \brief Parsed form of a tl.reducer_update call. */
 struct ReducerUpdateArgs {
-  Buffer reducer;
-  ffi::Array<PrimExpr> indices; ///< logical output indices
-  PrimExpr value;               ///< contribution expression
+  TensorVar reducer{ffi::UnsafeInit{}};
+  ffi::Array<PrimExpr> indices;      ///< logical output indices
+  PrimExpr value{ffi::UnsafeInit{}}; ///< contribution expression
 };
 
 /*! \brief Parse and validate a tl.reducer_update call. */
-ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call);
+ReducerUpdateArgs ParseReducerUpdate(const tvm::CallObj *call);
 
 /// T.finalize_reducer(acc, dst): complete the epoch's cross-participant
 /// communication and write the logical result into the independent
@@ -184,13 +185,13 @@ ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call);
 /// args[1] = tl.region(dst, "w").
 class FinalizeReducerV2OpNode : public TileOperatorNode {
 public:
-  Buffer reducer;
-  Buffer dst;
+  TensorVar reducer{ffi::UnsafeInit{}};
+  TensorVar dst{ffi::UnsafeInit{}};
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.FinalizeReducerV2Op",
                                     FinalizeReducerV2OpNode, TileOperatorNode);
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   TileOperator Clone() const override;
@@ -200,7 +201,7 @@ public:
    *  participant holds every element, so any already-frozen consumer loop can
    *  read it. Shared by the kFree steering proposal and the inference
    *  engine's last-resort fallback attempt so the two can never diverge. */
-  static Fragment FallbackDstLayout(const Buffer &dst,
+  static Fragment FallbackDstLayout(const TensorVar &dst,
                                     const Range &thread_bounds);
 
   /*! \brief Structural gates of the dst-steering proposal: `dst` is a
@@ -209,9 +210,9 @@ public:
    *  silence checks and the inference engine's reservation registration so
    *  the two can never drift ("reserved" must mean "has a capable
    *  proposer"). */
-  static bool CanSteerDst(const Buffer &reducer, const Buffer &dst,
+  static bool CanSteerDst(const TensorVar &reducer, const TensorVar &dst,
                           const Range &thread_bounds,
-                          arith::Analyzer *analyzer);
+                          sym::AnalyzerObj *analyzer);
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
@@ -225,10 +226,10 @@ class FinalizeReducerV2Op : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerV2Op, TileOperator,
                                              FinalizeReducerV2OpNode);
-  TVM_DLL
-  FinalizeReducerV2Op(ffi::Array<PrimExpr> args,
-                      ffi::Map<ffi::String, ffi::ObjectRef> annotations =
-                          ffi::Map<ffi::String, ffi::ObjectRef>());
+  TVM_TIRX_DLL
+  FinalizeReducerV2Op(ffi::Array<Expr> args,
+                      ffi::Map<ffi::String, ffi::Any> annotations =
+                          ffi::Map<ffi::String, ffi::Any>());
   static const Op &Get();
 };
 
@@ -242,7 +243,7 @@ public:
 /// RegisterFinalizeReducerImpl (CUDA/ROCm share the plan contract).
 class FinalizeReducerOpNode : public TileOperatorNode {
 public:
-  tirx::Buffer reducer;
+  tirx::TensorVar reducer{ffi::UnsafeInit{}};
   ReducerV2OpType op;
   // Batch size for batched AllReduce (1 = scalar path, same as T.reduce
   // default).
@@ -254,7 +255,7 @@ public:
   // communication) from the legacy wide plan (width derived from the
   // storage layout's ReplicateExtent).
   bool explicit_plan{false};
-  ffi::Array<Integer> plan_steps;
+  ffi::Array<int64_t> plan_steps;
   // Optional logical seed, combined into every physical slot exactly once
   // after the collective (all replicas hold the final value by then, so a
   // uniform per-slot combine applies the seed once per logical output).
@@ -275,7 +276,7 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   static const Op &Get();
@@ -289,7 +290,7 @@ struct FinalizeReducerImpl {
   FinalizeReducerTargetPredicate match_target;
 
   Stmt (*lower)(const FinalizeReducerOpNode &op, const LowerArgs &lower_args,
-                arith::Analyzer *analyzer);
+                sym::AnalyzerObj *analyzer);
 };
 
 void RegisterFinalizeReducerImpl(FinalizeReducerImpl impl);
@@ -298,9 +299,9 @@ class FinalizeReducerOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(FinalizeReducerOp, TileOperator,
                                              FinalizeReducerOpNode);
-  TVM_DLL FinalizeReducerOp(ffi::Array<PrimExpr> args,
-                            ffi::Map<ffi::String, ffi::ObjectRef> annotations =
-                                ffi::Map<ffi::String, ffi::ObjectRef>());
+  TVM_TIRX_DLL FinalizeReducerOp(ffi::Array<Expr> args,
+                                 ffi::Map<ffi::String, ffi::Any> annotations =
+                                     ffi::Map<ffi::String, ffi::Any>());
   static const Op &Get();
 };
 

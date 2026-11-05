@@ -1,8 +1,25 @@
-BitBLAS uses third-party material as listed below. The attached notices are
+TileLang uses third-party material as listed below. The attached notices are
 provided for informational purposes only.
 
-Notice for apache/tvm
+Notice for apache/tvm, apache/tvm-tirx and apache/tvm-ffi
 -------------------------------
+The Apache TVM notice and license are retained for TVM-derived source.
+The compiler dependency is now Apache TVM TIRx, with Apache TVM FFI as a
+separate dependency. Their distributions also retain their own LICENSE,
+NOTICE and third-party license files.
+
+Apache TVM TIRx
+Copyright 2026-present The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
+Apache TVM FFI
+Copyright 2024-present The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/

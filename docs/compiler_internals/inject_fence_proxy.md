@@ -28,19 +28,19 @@ The proxy tracker effectively scans the program in execution order. The moment i
 
 ## Coverage of Intrinsics
 
-The tracker understands the TileLang intrinsics for TMA load/store, shared-memory MMA (`wgmma`), and TVM/PTX SM90 async copy intrinsics (`cp.async.bulk` family). Generic operations currently include `ldmatrix`, `stmatrix`, `cp.async`, and **shared-memory** `BufferStore` statements. Structured control flow (loops, blocks, branches) is handled by propagating and conservatively merging proxy state.
+The tracker understands the TileLang intrinsics for TMA load/store, shared-memory MMA (`wgmma`), and TVM/PTX SM90 async copy intrinsics (`cp.async.bulk` family). Generic operations currently include `ldmatrix`, `stmatrix`, `cp.async`, and **shared-memory** `TensorStore` statements. Structured control flow (loops, blocks, branches) is handled by propagating and conservatively merging proxy state.
 
 ## Usage
 
 The pass is part of the default TileLang lowering pipeline. To apply it manually:
 
 ```python
-from tilelang import tl
-from tvm import IRModule
+from tilelang import tvm
+from tilelang.cuda import transform
 
-mod = IRModule({"main": prim_func})
+mod = tvm.IRModule({"main": prim_func})
 with tvm.transform.PassContext():
-    mod = tl.cuda.transform.InjectFenceProxy()(mod)
+    mod = transform.InjectFenceProxy()(mod)
 ```
 
 ## End-to-End Example

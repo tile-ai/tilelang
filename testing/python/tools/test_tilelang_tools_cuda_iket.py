@@ -7,8 +7,8 @@ import tvm_ffi
 
 import tilelang
 import tilelang.language as T
-from tilelang import tvm
-from tilelang.cache import _dispatch_map
+import tvm_tirx as tvm
+from tilelang.cache import _load_cache
 from tilelang.env import CacheState
 from tilelang.tools.cuda import iket
 import tilelang.testing
@@ -81,6 +81,30 @@ def _make_float_payload_kernel():
     return kernel
 
 
+@pytest.mark.parametrize("dtype, identifier", [("int32", 5), ("uint32", 6), ("float32", 13)])
+@pytest.mark.parametrize("tensor_load", [False, True])
+def test_payload_infers_native_expression_type(dtype, identifier, tensor_load):
+    value = tvm.ir.Var("value", dtype)
+    if tensor_load:
+        tensor = tvm.ir.Var("tensor", tvm.tirx.TensorType([1], dtype))
+        value = tensor[0]
+    specification = iket.payload(value)
+    assert specification.dtype == dtype and specification.iket_id == identifier
+    assert specification.expr.same_as(value)
+    call = iket.mark("native_inferred", payload=value)
+    assert call.args[2].same_as(value)
+
+
+def test_payload_rejects_nonprimitive_native_objects_and_unsupported_types():
+    tensor = tvm.ir.Var("tensor", tvm.tirx.TensorType([1], "float32"))
+    for value in (tensor, tensor.data):
+        with pytest.raises(TypeError, match="scalar primitive"):
+            iket.payload(value)
+    with pytest.raises(ValueError, match="Unsupported IKET payload dtype"):
+        iket.payload(tvm.ir.Var("wide", "float64"))
+    assert iket.payload(True).dtype == "uint32"
+
+
 def _lower_cuda_source(func, target=_SM90_TARGET) -> str:
     with tvm.transform.PassContext(), tvm.target.Target(target):
         artifact = tilelang.lower(func, target=target)
@@ -89,7 +113,7 @@ def _lower_cuda_source(func, target=_SM90_TARGET) -> str:
 
 
 def _cache_key(func) -> str:
-    return _dispatch_map["tvm_ffi"]._generate_key(
+    return _load_cache("tvm_ffi", ascend=False)._generate_key(
         func=func,
         out_idx=[0],
         execution_backend="tvm_ffi",
@@ -98,17 +122,17 @@ def _cache_key(func) -> str:
     )
 
 
-def _iket_calls(func) -> list[tvm.tirx.Call]:
+def _iket_calls(func) -> list[tvm.ir.Call]:
     calls = []
 
     def collect(node):
-        if not isinstance(node, tvm.tirx.Call) or not node.args:
+        if not isinstance(node, tvm.ir.Call) or not node.args:
             return
         extern_name = node.args[0]
-        if isinstance(extern_name, tvm.tirx.StringImm) and extern_name.value.startswith("TL_IKET_EVENT"):
+        if isinstance(extern_name, tvm.ir.StringImm) and extern_name.value.startswith("TL_IKET_EVENT"):
             calls.append(node)
 
-    tvm.tirx.stmt_functor.post_order_visit(func.body, collect)
+    tvm_ffi.structural_walk(func.body, (tvm.ir.Call, collect), order="post")
     return calls
 
 
@@ -134,7 +158,7 @@ def test_event_metadata_is_preserved_in_tir_and_injected_source():
 
     calls = _iket_calls(kernel)
     assert len(calls) == 3
-    assert sum(isinstance(arg, tvm.tirx.StringImm) for call in calls for arg in call.args[1:]) >= 2
+    assert sum(isinstance(arg, tvm.ir.StringImm) for call in calls for arg in call.args[1:]) >= 2
     assert _IKET_SOURCE_MARKER in source
     assert "__iket_meta_info" in source
     assert "__iket_evt_decl_compute_phase" in source
@@ -171,7 +195,7 @@ def test_prebuilt_payload_primfunc_enables_runtime_payloads_during_lowering():
     calls = _iket_calls(kernel)
     assert len(calls) == 1
     assert calls[0].args[0].value == "TL_IKET_EVENT_PAYLOAD_F32"
-    assert isinstance(calls[0].args[-1], tvm.tirx.StringImm)
+    assert isinstance(calls[0].args[-1], tvm.ir.StringImm)
 
     with iket.session(runtime_payloads=True):
         source = _lower_cuda_source(kernel)
@@ -203,7 +227,7 @@ def test_prebuilt_primfunc_keeps_metadata_when_session_resets_registry():
     kernel = _make_mark_kernel("parsed_before_session")
     calls = _iket_calls(kernel)
     assert len(calls) == 1
-    assert isinstance(calls[0].args[-1], tvm.tirx.StringImm)
+    assert isinstance(calls[0].args[-1], tvm.ir.StringImm)
 
     # session() resets process-local state by default. The generated source must
     # therefore recover its metadata from the already parsed PrimFunc.

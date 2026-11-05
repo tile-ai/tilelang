@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import warnings
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 import tilelang.language as T
 from tilelang.cuda.debug import get_stack_str
@@ -39,9 +39,9 @@ def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
     if _IS_ASCEND_AVAILABLE:
         if no_stack_info:
             if msg == "":
-                T.call_intrin("void", tirx.op.Op.get("tl.device_assert"), condition)
+                T.call_intrin("void", tirx.Op.get("tl.device_assert"), condition)
             else:
                 warnings.warn("Non-empty msg may slightly slow down the kernel", stacklevel=2)
-                T.call_intrin("void", tirx.op.Op.get("tl.device_assert_with_msg"), condition, msg)
+                T.call_intrin("void", tirx.Op.get("tl.device_assert_with_msg"), condition, msg)
         else:
-            T.call_intrin("void", tirx.op.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))
+            T.call_intrin("void", tirx.Op.get("tl.device_assert_with_msg"), condition, get_stack_str(msg, stacklevel=2))

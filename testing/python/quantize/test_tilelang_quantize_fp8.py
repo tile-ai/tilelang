@@ -34,7 +34,7 @@ def test_u8_to_f8_e4m3_to_f16_all_codes():
             naive[i] = T.reinterpret(_tir_u8_to_f8_e4m3_to_f16_naive(8, values[i], T.float16), T.uint16)
             optimized[i] = T.reinterpret(_tir_u8_to_f8_e4m3_to_f16(8, values[i], T.float16), T.uint16)
 
-    built = tvm.compile(decode, target="llvm")
+    built = tvm.tirx.compile(decode, target="llvm")
     values = tvm.runtime.tensor(np.arange(256, dtype=np.uint8))
     naive = tvm.runtime.empty((256,), "uint16", tvm.cpu())
     optimized = tvm.runtime.empty((256,), "uint16", tvm.cpu())

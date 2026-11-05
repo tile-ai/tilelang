@@ -16,7 +16,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter import BaseKernelAdapter
 from tilelang.profiler.bench import do_bench
 from tilelang.utils.device import device_synchronize
-from tvm import tirx
+from tvm_tirx import ir
 
 
 def _synchronize_tensor_devices(*values: Any) -> None:
@@ -104,7 +104,7 @@ class Profiler:
         """
         new_shape = []
         for dim in param.shape:
-            if isinstance(dim, tirx.Var):
+            if isinstance(dim, ir.Var):
                 var_name = dim.name
                 if var_name in constraints:
                     new_shape.append(constraints[var_name])

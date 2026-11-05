@@ -32,11 +32,10 @@
  * MergeUBAllocations.
  */
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -48,6 +47,7 @@
 #include <vector>
 
 #include "ascend/op/builtin.h"
+#include "op/native_intrinsic.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {
@@ -55,6 +55,7 @@ namespace tl {
 
 using namespace tirx;
 using namespace ffi;
+using namespace prim;
 
 namespace {
 
@@ -81,15 +82,15 @@ std::pair<std::string, std::string> SplitHardEvent(const std::string &he) {
   return {"PIPE_" + he.substr(0, pos), "PIPE_" + he.substr(pos + 1)};
 }
 
-std::optional<std::string> GetFlagHardEvent(const CallNode *call) {
+std::optional<std::string> GetFlagHardEvent(const CallObj *call) {
   if (call == nullptr)
     return std::nullopt;
   if (!call->op.same_as(ascend_set_flag()) &&
       !call->op.same_as(ascend_wait_flag()))
     return std::nullopt;
-  ICHECK_EQ(call->args.size(), 2u)
+  ICHECK_EQ(NativeIntrinsicOperands(call).size(), 2u)
       << "RewriteFlagToBuf: set_flag/wait_flag expects 2 args";
-  const auto *he = call->args[0].as<StringImmNode>();
+  const auto *he = call->args[0].as<StringImmObj>();
   ICHECK(he) << "RewriteFlagToBuf: hard_event arg must be a StringImm";
   return std::string(he->value);
 }
@@ -113,18 +114,19 @@ struct BlockAssign {
 
 using EventIdBounds = std::pair<int64_t, int64_t>;
 using FlagCallRanges =
-    std::unordered_map<const CallNode *, std::vector<EventIdBounds>>;
+    std::unordered_map<const CallObj *, std::vector<EventIdBounds>>;
 
 // Populate the complete lexical context so const_int_bound resolves dynamic
 // event_ids through enclosing loops, flat Bind declarations, branch guards,
 // and assumptions.
 EventIdBounds EventIdRange(const ConstrSet &constraints, const std::string &he,
                            const PrimExpr &event_id) {
-  arith::Analyzer analyzer;
-  constraints.Populate(analyzer);
-  arith::ConstIntBound bound = analyzer.const_int_bound(event_id);
-  ICHECK(bound->min_value != arith::ConstIntBound::kNegInf &&
-         bound->max_value != arith::ConstIntBound::kPosInf)
+  auto analyzer = CreateTileLangAnalyzer();
+  auto context = constraints.Populate(analyzer);
+  sym::ConstIntBound bound =
+      analyzer->const_int_bound(analyzer->Simplify(event_id));
+  ICHECK(bound->min_value != sym::ConstIntBound::kNegInf &&
+         bound->max_value != sym::ConstIntBound::kPosInf)
       << "RewriteFlagToBuf: cannot bound event_id for hard_event '" << he
       << "'";
   ICHECK_GE(bound->min_value, 0)
@@ -145,9 +147,10 @@ public:
   // Highest buf_id reserved by gemm_l1 + 1 (0 if no gemm_l1 present).
   int64_t reserved_hwm = 0;
 
-  void VisitExpr_(const CallNode *op) final {
+  Result Visit_(const CallObj *op) final {
     if (std::optional<std::string> he = GetFlagHardEvent(op)) {
-      EventIdBounds range = EventIdRange(GetConstrSet(), *he, op->args[1]);
+      EventIdBounds range = EventIdRange(GetConstrSet(), *he,
+                                         op->args[1].as_or_throw<PrimExpr>());
       call_ranges[op].push_back(range);
       auto it = ranges.find(*he);
       if (it == ranges.end()) {
@@ -159,12 +162,12 @@ public:
     } else {
       ReserveGemmL1Bufs(op);
     }
-    ConstrVisitor::VisitExpr_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
 private:
   // gemm_l1 templates internally occupy buf_ids [buf_offset, buf_offset+1].
-  void ReserveGemmL1Bufs(const CallNode *op) {
+  void ReserveGemmL1Bufs(const CallObj *op) {
     int arg_idx;
     if (op->op.same_as(ascend_gemm_l1())) {
       arg_idx = kGemmL1BufOffsetArg;
@@ -175,9 +178,13 @@ private:
     }
     ICHECK_LT(static_cast<size_t>(arg_idx), op->args.size())
         << "RewriteFlagToBuf: gemm_l1 call missing buf_offset arg";
-    const auto *off = op->args[arg_idx].as<IntImmNode>();
+    const auto *off = op->args[arg_idx].as<IntImmObj>();
     ICHECK(off) << "RewriteFlagToBuf: gemm_l1 buf_offset must be a constant";
-    reserved_hwm = std::max(reserved_hwm, off->value + kGemmL1BufSlots);
+    ICHECK_GE(off->value, 0) << "gemm_l1 buf_offset must be non-negative";
+    ICHECK_LE(off->value, kMaxBufId - kGemmL1BufSlots)
+        << "gemm_l1 mutex reservation exceeds shared pool";
+    reserved_hwm = std::max(reserved_hwm,
+                            off->value.as<int64_t>().value() + kGemmL1BufSlots);
   }
 };
 
@@ -209,6 +216,8 @@ std::vector<bool> KnapsackKeep(const std::vector<Block> &blocks) {
   std::vector<int> prev_sum(cap + 1, -1);
   parent[0] = -1;
   for (int i = 0; i < n; ++i) {
+    if (blocks[i].size() > cap)
+      continue;
     int wi = static_cast<int>(blocks[i].size());
     if (wi > cap)
       continue; // a block larger than the flag budget can never be kept.
@@ -238,27 +247,29 @@ std::vector<bool> KnapsackKeep(const std::vector<Block> &blocks) {
 // Phase B: rewrite each flag call per its block assignment.
 class FlagToBufRewriter : public StmtExprMutator {
 public:
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
   explicit FlagToBufRewriter(
       std::unordered_map<std::string, std::vector<BlockAssign>> assign,
       FlagCallRanges call_ranges)
       : assign_(std::move(assign)), call_ranges_(std::move(call_ranges)) {}
 
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    const auto *call = op->value.as<CallNode>();
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
     if (call == nullptr)
-      return StmtExprMutator::VisitStmt_(op);
+      return StmtExprMutator::Mutate_(op, mode);
     bool is_set = call->op.same_as(ascend_set_flag());
     bool is_wait = call->op.same_as(ascend_wait_flag());
     if (!is_set && !is_wait)
-      return StmtExprMutator::VisitStmt_(op);
+      return StmtExprMutator::Mutate_(op, mode);
 
-    const std::string &he = Downcast<StringImm>(call->args[0])->value;
+    std::string he = call->args[0].as_or_throw<StringImm>()->value;
     auto it = assign_.find(he);
     // hard_events that fit within 8 flag slots are untouched.
     if (it == assign_.end())
-      return StmtExprMutator::VisitStmt_(op);
+      return StmtExprMutator::Mutate_(op, mode);
 
-    PrimExpr event_id = call->args[1];
+    PrimExpr event_id = call->args[1].as_or_throw<PrimExpr>();
     auto range_it = call_ranges_.find(call);
     ICHECK(range_it != call_ranges_.end())
         << "RewriteFlagToBuf: missing collected range for flag call";
@@ -277,49 +288,77 @@ public:
                          << "," << range.second
                          << "] not covered by any block for '" << he << "'";
 
-    PrimExpr new_id = b->delta == 0
-                          ? event_id
-                          : event_id + IntImm(event_id.dtype(), b->delta);
+    PrimExpr new_id = event_id;
+    if (b->delta > 0)
+      new_id = event_id + IntImm(event_id.ty(), b->delta);
+    else if (b->delta < 0)
+      new_id = event_id - IntImm(event_id.ty(), -b->delta);
 
     if (b->kept) {
       // Stay as a flag, only renumbered into [0,8).
-      Op op_id = is_set ? ascend_set_flag() : ascend_wait_flag();
-      return Evaluate(Call(DataType::Handle(), op_id, {StringImm(he), new_id}));
+      auto args = call->args;
+      args.Set(1, new_id);
+      return Evaluate(Call(call->ty, call->op, std::move(args), call->attrs,
+                           call->ty_args, call->loc),
+                      op->loc);
     }
     // Spill to the mutex pool as a back-to-back asc_lock/asc_unlock pair.
     auto pipes = SplitHardEvent(he);
     std::string pipe = is_set ? pipes.first : pipes.second;
-    int mode = is_set ? 1 : 0;
-    return SeqStmt({MakeBufOp(ascend_get_buf(), pipe, new_id, mode),
-                    MakeBufOp(ascend_rls_buf(), pipe, new_id, mode)});
+    int flag_mode = is_set ? 1 : 0;
+    Array<Stmt> prefix;
+    if (SideEffect(new_id) > CallEffectKind::kPure) {
+      PrimVar snapshot("__flag_id", new_id.ty(), new_id->loc);
+      prefix.push_back(Bind(snapshot, new_id, new_id->loc));
+      new_id = snapshot;
+    }
+    prefix.push_back(
+        MakeBufOp(ascend_get_buf(), pipe, new_id, flag_mode, call));
+    prefix.push_back(
+        MakeBufOp(ascend_rls_buf(), pipe, new_id, flag_mode, call));
+    return SeqStmt(std::move(prefix), op->loc);
   }
 
 private:
   static Stmt MakeBufOp(const Op &op, const std::string &pipe,
-                        const PrimExpr &buf_id, int mode) {
+                        const PrimExpr &buf_id, int mode,
+                        const CallObj *original) {
+    Array<Expr> args{StringImm(pipe), buf_id, IntImm::Int32(mode)};
+    auto attrs = original->attrs;
+    if (attrs && attrs.value().as<DictAttrsObj>()) {
+      auto dict = attrs.value().as_or_throw<DictAttrs>();
+      if (dict.GetAttr<int64_t>("operand_count")) {
+        auto fields = dict->dict;
+        fields.Set("operand_count", 3);
+        attrs = DictAttrs(fields);
+        args.push_back(original->args.back());
+      }
+    }
     return Evaluate(
-        Call(DataType::Handle(), op,
-             {StringImm(pipe), buf_id, IntImm(DataType::Int(32), mode)}));
+        Call(PrimType::Void(), op, std::move(args), attrs, {}, original->loc),
+        original->loc);
   }
 
   std::unordered_map<std::string, std::vector<BlockAssign>> assign_;
   FlagCallRanges call_ranges_;
-  std::unordered_map<const CallNode *, size_t> call_range_indices_;
+  std::unordered_map<const CallObj *, size_t> call_range_indices_;
 };
 
-PrimFunc RewriteFlagToBufFn(PrimFunc f) {
-  FlagUsageCollector collector;
-  collector(f->body);
-  if (collector.order.empty())
+tirx::Function RewriteFlagToBufFn(tirx::Function f) {
+  if (f->GetAttr(tvm::attr::kDeclaration).value_or(false))
+    return f;
+  auto collector = make_object<FlagUsageCollector>();
+  collector->Visit(f->body);
+  if (collector->order.empty())
     return f;
 
   std::unordered_map<std::string, std::vector<BlockAssign>> assign;
   // Start spilled buf_id allocation past the slots gemm_l1 already reserves.
-  int mutex_running = static_cast<int>(collector.reserved_hwm);
+  int64_t mutex_running = collector->reserved_hwm;
   bool has_spill = false;
   std::ostringstream layout;
-  for (const std::string &he : collector.order) {
-    std::vector<Block> blocks = CoalesceBlocks(collector.ranges[he]);
+  for (const std::string &he : collector->order) {
+    std::vector<Block> blocks = CoalesceBlocks(collector->ranges[he]);
     int64_t total = 0;
     bool already_legal = true;
     for (const auto &b : blocks) {
@@ -352,7 +391,11 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
         layout << "\n  " << he << ": event_id[" << b.lo << ".." << b.hi
                << "] -> buf_id[" << mutex_running << ".."
                << (mutex_running + b.size() - 1) << "]";
-        mutex_running += static_cast<int>(b.size());
+        ICHECK_LE(b.size(), kMaxBufId - mutex_running)
+            << "RewriteFlagToBuf: spilled mutex slots exceed the shared pool "
+               "of "
+            << kMaxBufId;
+        mutex_running += b.size();
       }
     }
     assign[he] = std::move(he_assign);
@@ -366,9 +409,10 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
         << ") exceed the shared pool of " << kMaxBufId << "." << layout.str();
   }
 
-  FlagToBufRewriter rewriter(std::move(assign),
-                             std::move(collector.call_ranges));
-  f.CopyOnWrite()->body = rewriter(f->body);
+  auto rewriter = make_object<FlagToBufRewriter>(
+      std::move(assign), std::move(collector->call_ranges));
+  auto body = f->body;
+  f.CopyOnWrite()->body = rewriter->Mutate(body).ValueOrUnchanged(body);
   return f;
 }
 
@@ -377,10 +421,11 @@ PrimFunc RewriteFlagToBufFn(PrimFunc f) {
 using namespace tirx::transform;
 
 tvm::transform::Pass RewriteFlagToBuf() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
+  auto pass_func = [=](tirx::Function f, const IRModule &m,
+                       const PassContext &ctx) {
     return RewriteFlagToBufFn(f);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.RewriteFlagToBuf", {});
+  return CreateFunctionPass(pass_func, 0, "tl.RewriteFlagToBuf");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

@@ -19,88 +19,119 @@
 
 /*!
  * \file tl/ascend/transform/normalize_buffer_version.cc
- * \brief Lower staged buffer-version metadata to a scoped internal AttrStmt.
+ * \brief Normalize staged version metadata at its native definition site.
  */
-
 #include "buffer_version.h"
 
+#include "auto_schedule/native_task_ir.h"
+#include <limits>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/attrs.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "support/check.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace tirx::transform;
-
+namespace tvm::tl {
 namespace {
+using namespace tirx;
+using namespace ffi;
+using namespace ascend;
+using Fields = Map<String, Any>;
+constexpr const char *kPhysicalBufferVersion = "tl.buffer_version";
 
-class BufferVersionNormalizer : public StmtMutator {
+class BufferVersionNormalizer : public StmtExprMutator {
 public:
-  static PrimFunc Rewrite(PrimFunc func) {
-    ICHECK(!func->attrs.defined() ||
-           !func->attrs->dict.count(tl::attr::kBufferVersion))
-        << "'" << tl::attr::kBufferVersion
-        << "' is compiler-internal and must not be provided by the frontend";
+  using StmtExprMutator::Mutate_;
 
-    BufferVersionNormalizer normalizer;
-    PrimFuncNode *writer = func.CopyOnWrite();
-    writer->body = normalizer(std::move(writer->body));
-    return func;
+  static Fields Normalize(Fields fields) {
+    TVM_FFI_CHECK(!fields.count(kPhysicalBufferVersion), ValueError)
+        << "'" << kPhysicalBufferVersion
+        << "' is compiler-internal and must not be provided by the frontend";
+    if (auto staged = fields.Get(kManualMultiBuffer)) {
+      BufferVersionMap versions;
+      for (const auto &[key, value] : staged->cast<Map<Any, Any>>()) {
+        Var storage = key.cast<Var>();
+        TVM_FFI_CHECK(storage->ty.as<TensorTypeObj>() ||
+                          storage->ty.as<PtrTypeObj>(),
+                      ValueError)
+            << "Manual versions require a tensor or pointer storage";
+        auto count = value.try_cast<int64_t>();
+        if (!count) {
+          PrimExpr expression = value.cast<PrimExpr>();
+          count = TryConstInt(expression);
+          TVM_FFI_CHECK(expression.ty().IsScalar() &&
+                            !expression.ty().MatchesCode(kDLBool),
+                        ValueError)
+              << "Manual version count must be a constant scalar integer";
+        }
+        TVM_FFI_CHECK(count && *count > 0 &&
+                          *count <= std::numeric_limits<int>::max(),
+                      ValueError)
+            << "Manual version count must be a positive int32 value";
+        versions.Set(storage, static_cast<int>(*count));
+      }
+      fields.erase(kManualMultiBuffer);
+      if (!versions.empty())
+        fields.Set(kPhysicalBufferVersion, versions);
+    }
+    return fields;
   }
 
-private:
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
-    ICHECK(!block->annotations.count(tl::attr::kBufferVersion))
-        << "'" << tl::attr::kBufferVersion
-        << "' is compiler-internal and must not be provided by the frontend";
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (!loop_annotation_detail::IsAnnotation(call))
+      return StmtExprMutator::Mutate_(op, mode);
+    // Keep the native carrier in place. Wrapping the suffix in a zero-result
+    // RegionStmt would hide definitions which can be used after this sequence.
+    auto fields = ReadNativeAnnotations(call);
+    auto result = Normalize(fields);
+    if (StructuralEqual()(fields, result))
+      return Unchanged();
+    return MakeNativeAnnotation(result, op->loc);
+  }
 
-    auto staged = block->annotations.Get(kManualMultiBuffer);
-    if (!staged.has_value()) {
-      return block;
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    RegionStmt region = StmtExprMutator::Mutate_(op, mode)
+                            .ValueOrUnchanged(GetRef<RegionStmt>(op))
+                            .as_or_throw<RegionStmt>();
+    auto attribute = ReadTaskAttribute(region.get());
+    if (!attribute)
+      return region;
+    TVM_FFI_CHECK(attribute->key != kPhysicalBufferVersion, ValueError)
+        << "'" << kPhysicalBufferVersion << "' is compiler-internal";
+    if (attribute->key != "tl.sblock" &&
+        attribute->key != "tl.loop.annotations")
+      return region;
+    auto fields = attribute->value.cast<Fields>();
+    auto result = Normalize(fields);
+    if (attribute->key == "tl.sblock") {
+      if (auto annotations = result.Get("annotations"))
+        result.Set("annotations", Normalize(annotations->cast<Fields>()));
     }
-
-    ffi::Map<ffi::String, ffi::Any> annotations = block->annotations;
-    annotations.erase(kManualMultiBuffer);
-
-    BufferVersionMap staged_versions = staged.value().cast<BufferVersionMap>();
-    for (const auto &[_, version] : staged_versions) {
-      ICHECK_GT(version, 0) << "'" << kManualMultiBuffer
-                            << "' values must be positive version counts";
-    }
-
-    SBlockNode *writer = block.CopyOnWrite();
-    writer->annotations = std::move(annotations);
-    if (!staged_versions.empty()) {
-      writer->body =
-          AttrStmt(std::move(staged_versions), tl::attr::kBufferVersion,
-                   Integer(1), std::move(writer->body));
-    }
-    return block;
+    if (StructuralEqual()(fields, result))
+      return region;
+    return MakeNativeAttribute(attribute->node, attribute->key, result,
+                               region->body, region->loc);
   }
 };
-
 } // namespace
 
 tvm::transform::Pass NormalizeBufferVersion() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) {
-    return BufferVersionNormalizer::Rewrite(std::move(func));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    TVM_FFI_CHECK(!function->attrs->dict.count(kPhysicalBufferVersion),
+                  ValueError)
+        << "'" << kPhysicalBufferVersion << "' is compiler-internal";
+    if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) {
+      auto rewriter = ffi::make_object<BufferVersionNormalizer>();
+      auto body = function->body;
+      function.CopyOnWrite()->body =
+          rewriter->Mutate(body, InplaceMode::kDisallow).ValueOrUnchanged(body);
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.NormalizeBufferVersion", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.NormalizeBufferVersion");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.NormalizeBufferVersion",
-                        NormalizeBufferVersion);
+  ffi::reflection::GlobalDef().def("tl.transform.NormalizeBufferVersion",
+                                   NormalizeBufferVersion);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

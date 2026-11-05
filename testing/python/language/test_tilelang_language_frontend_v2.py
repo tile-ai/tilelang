@@ -2,11 +2,13 @@ import tilelang
 import tilelang.language as T
 import torch
 import tilelang.testing
-import tvm
+from tvm_ffi import dtype as DataType
 import pytest
-from tvm.script.ir_builder.base import IRBuilderFrame
-from tvm.tirx.expr import IntImm, Var, Not, Or
-from tvm import tirx
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx.script.ir_builder.base import IRBuilderFrame
+from tvm_tirx.ir import IntImm
+from tvm_tirx.tirx.expr import Var, Not, Or
+from tvm_tirx import tirx
 from tilelang.language.dtypes import _all_dtypes
 
 ALL_DTYPE_NAMES = tuple(_all_dtypes)
@@ -46,7 +48,7 @@ def test_argument():
 @pytest.mark.parametrize("name", ALL_DTYPE_NAMES, ids=ALL_DTYPE_NAMES)
 def test_expr(name):
     dtype = getattr(T, name)
-    assert isinstance(dtype, tvm.DataType), f"{dtype} is not tvm.DataType"
+    assert isinstance(dtype, DataType), f"{dtype} is not a TVM FFI dtype"
     try:
         dtype(1.0)
         dtype()
@@ -284,10 +286,12 @@ def test_serial_for_with_step():
     ref = torch.tensor([10, 9, 8, 7, 6, 5, 4, 3, 2, 1], dtype=torch.int32, device="cuda")
     assert torch.all(res == ref), f"Expected {ref}, but got {res}"
 
-    assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
-    assert isinstance(T.serial(1, 10, IntImm(T.int32, 1)), IRBuilderFrame)
-    assert not isinstance(T.serial(1, 10, Var("tmp", T.int32)), IRBuilderFrame)
-    assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
+    # Native loop frame construction needs an explicit builder scope.
+    with IRBuilder():
+        assert isinstance(T.serial(1, 10, 1), IRBuilderFrame)
+        assert isinstance(T.serial(1, 10, IntImm(T.int32, 1)), IRBuilderFrame)
+        assert not isinstance(T.serial(1, 10, Var("tmp", T.int32)), IRBuilderFrame)
+        assert not isinstance(T.serial(10, -1, -1), IRBuilderFrame)
 
 
 def test_swap_logic():

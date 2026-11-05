@@ -30,12 +30,14 @@
 
 #include "../core_mask.h"
 #include "support/check.h"
+#include "transform/common/native_layout_utils.h"
 
 namespace tvm {
 namespace tl {
 namespace ascend {
 
 using namespace tirx;
+using namespace prim;
 
 struct TaskCost {
   int64_t latency{0};
@@ -65,27 +67,51 @@ CopyTaskMetadata(const ffi::Any &existing) {
   return result;
 }
 
-inline const IntImmNode *
+inline const IntImmObj *
 RequireConstantTaskMetadataInt(const ffi::Any &value_any,
                                const ffi::String &key) {
   PrimExpr value_expr = value_any.cast<PrimExpr>();
-  const auto *value = value_expr.as<IntImmNode>();
+  const auto *value = value_expr.as<IntImmObj>();
   ICHECK(value != nullptr) << "T.Task " << key
                            << " must be a constant integer, got " << value_expr;
+  TVM_FFI_CHECK(value->value.as<int64_t>().has_value() &&
+                    value_expr.ty().IsScalar() &&
+                    !value_expr.ty().MatchesCode(kDLBool),
+                ValueError)
+      << "T.Task " << key << " must be a scalar constant integer";
   return value;
 }
 
 } // namespace task_metadata_detail
 
 inline std::optional<int> GetTaskSubcore(const Stmt &stmt) {
-  const auto *marker = stmt.as<AttrStmtNode>();
-  if (!marker)
-    return std::nullopt;
-  auto metadata = task_metadata_detail::CopyTaskMetadata(marker->node);
+  Stmt single = SingleStatement(stmt);
+  ffi::Map<ffi::String, ffi::Any> metadata;
+  if (const auto *bind = single.as<BindObj>()) {
+    const auto *call = bind->value.as<CallObj>();
+    if (!call || !call->op.as<OpObj>() ||
+        call->op.as<OpObj>()->name != "tl.ascend.scheduled_bind")
+      return std::nullopt;
+    metadata = task_metadata_detail::CopyTaskMetadata(
+        DecodeTileOpArguments(call).annotations.at("task"));
+  } else {
+    const auto *marker = single.as<RegionStmtObj>();
+    if (!marker || marker->op->name != "tl.attr")
+      return std::nullopt;
+    auto fields = ReadNativeAnnotations(marker);
+    auto key = fields.at("key").cast<ffi::String>();
+    if (key != "tl.ascend_task" && key != "tl.ascend_per_core_task")
+      return std::nullopt;
+    metadata = task_metadata_detail::CopyTaskMetadata(fields.at("node"));
+  }
   if (auto value = metadata.Get("subcore")) {
-    int sid = static_cast<int>(value.value().cast<Integer>()->value);
-    ICHECK(sid == 0 || sid == 1);
-    return sid;
+    int64_t sid =
+        task_metadata_detail::RequireConstantTaskMetadataInt(*value, "subcore")
+            ->value.as<int64_t>()
+            .value();
+    TVM_FFI_CHECK(sid == 0 || sid == 1, ValueError)
+        << "T.Task subcore must be 0 or 1";
+    return static_cast<int>(sid);
   }
   return std::nullopt;
 }
@@ -105,16 +131,17 @@ inline TaskMetadata ParseTaskMetadata(const ffi::Any &node) {
         task_metadata_detail::RequireConstantTaskMetadataInt(value_any, key);
     if (key == "latency") {
       ICHECK_GE(value->value, 0) << "T.Task latency must be non-negative";
-      result.latency = value->value;
+      result.latency = value->value.as<int64_t>().value();
     } else if (key == "ii") {
       ICHECK_GT(value->value, 0) << "T.Task ii must be positive";
-      result.ii = value->value;
+      result.ii = value->value.as<int64_t>().value();
     } else {
       ICHECK_GT(value->value, 0)
           << "T.Task core_mask must select at least one Ascend core";
       ICHECK_LE(value->value, static_cast<int64_t>(kCoreAll))
           << "T.Task core_mask exceeds the supported AIV/AIC mask";
-      CoreMask core_mask = static_cast<CoreMask>(value->value);
+      CoreMask core_mask =
+          static_cast<CoreMask>(value->value.as<int64_t>().value());
       ICHECK(IsValidCoreMask(core_mask))
           << "T.Task has invalid core_mask " << value->value;
       result.core_mask = core_mask;
@@ -131,17 +158,17 @@ inline ffi::Any MergeTaskMetadata(const TaskMetadata &metadata,
       task_metadata_detail::CopyTaskMetadata(existing);
   if (metadata.latency.has_value()) {
     ICHECK_GE(metadata.latency.value(), 0);
-    result.Set("latency", IntImm(DataType::Int(64), metadata.latency.value()));
+    result.Set("latency", IntImm(PrimType::Int(64), metadata.latency.value()));
   }
   if (metadata.ii.has_value()) {
     ICHECK_GT(metadata.ii.value(), 0);
-    result.Set("ii", IntImm(DataType::Int(64), metadata.ii.value()));
+    result.Set("ii", IntImm(PrimType::Int(64), metadata.ii.value()));
   }
   if (metadata.core_mask.has_value()) {
     ICHECK_NE(metadata.core_mask.value(), kCoreUnassigned);
     ICHECK(IsValidCoreMask(metadata.core_mask.value()));
     result.Set("core_mask",
-               IntImm(DataType::Int(64), metadata.core_mask.value()));
+               IntImm(PrimType::Int(64), metadata.core_mask.value()));
   }
   return result;
 }

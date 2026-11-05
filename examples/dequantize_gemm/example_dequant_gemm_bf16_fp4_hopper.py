@@ -1,8 +1,8 @@
 import tilelang
 import tilelang.language as T
-from tilelang import tvm as tvm
-from tvm import DataType
-from tvm import tirx
+from tvm_ffi import dtype as DataType
+from tvm_tirx import ir
+from tvm_tirx.tirx import reinterpret
 import torch
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
@@ -214,7 +214,7 @@ def matmul(
         assert in_dtype in ["fp4"]
         assert out_dtype in [T.bfloat16]
 
-        def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr, dtype: str):
+        def _tir_u8_to_f4_to_bf16(nbit: int, val: ir.Expr, pos: ir.Expr, scale: ir.Expr, dtype: str):
             """
             Convert a 4-bit FP4 value packed in a uint8 byte into a bfloat16 value.
 
@@ -225,37 +225,35 @@ def matmul(
 
             Parameters:
                 nbit (int): Number of bits in the packed element; must be 4.
-                val (tirx.PrimExpr): A uint8 value containing packed FP4 elements.
-                pos (tirx.PrimExpr): Index (0-based) of which FP4 nibble inside `val` to extract.
-                scale (tirx.PrimExpr): Exponent offset applied when converting FP4 exponent to bfloat16.
+                val (ir.Expr): A uint8 value containing packed FP4 elements.
+                pos (ir.Expr): Index (0-based) of which FP4 nibble inside `val` to extract.
+                scale (ir.Expr): Exponent offset applied when converting FP4 exponent to bfloat16.
                 dtype (str): Target dtype string; must be T.bfloat16.
 
             Returns:
-                tirx.PrimExpr: A bfloat16-typed PrimExpr containing the converted value.
+                ir.Expr: A bfloat16-typed PrimExpr containing the converted value.
 
             Notes:
-                - The function asserts `nbit == 4`, `dtype == T.bfloat16`, and that `val.dtype` is T.uint8.
+                - The function asserts `nbit == 4`, `dtype == T.bfloat16`, and that `val.ty.dtype` is T.uint8.
                 - The conversion uses a fixed mapping from FP4 exponent/mantissa layout into bfloat16
                 bit fields and clamps the computed exponent to fit into 8 bits.
             """
             assert nbit == 4
             assert dtype == T.bfloat16
-            assert val.dtype == T.uint8
-            mask = tirx.const((1 << nbit) - 1, T.uint16)
-            f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-            s = f4 >> tirx.const(3, T.uint16)
-            e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
+            assert val.ty.dtype == T.uint8
+            mask = ir.const((1 << nbit) - 1, T.uint16)
+            f4 = (val >> (pos.astype(T.uint16) * ir.const(nbit, T.uint16))) & mask
+            s = f4 >> ir.const(3, T.uint16)
+            e_f4 = (f4 & ir.const(6, T.uint16)) >> ir.const(1, T.uint16)
             # Exponential bias between f4 and bf16 is 2^(8-1) - 2^(2-1) = 126
-            e_bf16 = e_f4 + tirx.const(126, T.uint16)
+            e_bf16 = e_f4 + ir.const(126, T.uint16)
             # Scale is the exponential part, within the representation of uint8
             # To handle the overflow, we use the max function to limit the exponential part to 8 bits
-            e_bf16 = T.min(e_bf16 + scale, tirx.const((1 << 8) - 1, T.uint16))
-            m_f4 = f4 & tirx.const(1, T.uint16)
-            val_bf16 = tirx.reinterpret(
-                T.bfloat16,
-                ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(
-                    T.uint16
-                ),
+            e_bf16 = T.min(e_bf16 + scale, ir.const((1 << 8) - 1, T.uint16))
+            m_f4 = f4 & ir.const(1, T.uint16)
+            val_bf16 = reinterpret(
+                ((((s << ir.const(8, T.uint16)) | e_bf16) << ir.const(7, T.uint16)) | (m_f4 << ir.const(6, T.uint16))).astype(T.uint16),
+                ty=ir.PrimType(T.bfloat16),
             )
             return val_bf16
 

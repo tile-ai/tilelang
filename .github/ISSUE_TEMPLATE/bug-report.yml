@@ -43,12 +43,15 @@ body:
 
         - Describe how the library was installed (pip, conda, source, ...)
         - Python version
-        - Versions of any other relevant libraries
+        - Versions and install paths of TileLang, its TIRx provider, FFI, and other relevant libraries
 
         ```python
-        import sys, tilelang, torch
+        import sys, importlib.metadata
+        import tilelang, tvm_tirx, tvm_ffi, torch
         print(sys.version, sys.platform)
-        print(tilelang.__version__)
+        for name, module in (("tilelang", tilelang), ("apache-tvm-tirx", tvm_tirx),
+                             ("apache-tvm-ffi", tvm_ffi)):
+            print(name, importlib.metadata.version(name), module.__file__)
         print(torch.__version__)
         ```
 

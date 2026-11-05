@@ -1,7 +1,7 @@
 """Small, exact queries for compiler tests, without running any passes.
 
 Counts describe unique static IR nodes within each visited function, following
-TVM's post-order visitor. They do not describe dynamic execution counts or order.
+the native structural visitor. They do not describe dynamic execution counts or order.
 Call queries automatically reuse an index of the most recently queried body.
 """
 
@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from tilelang import tvm
-from tvm import tirx
+import tvm_ffi
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
 
 
 def _bodies(root, function, *, with_names=True):
@@ -22,30 +23,51 @@ def _bodies(root, function, *, with_names=True):
             if function not in functions:
                 raise ValueError(f"No function {function!r} in the IRModule")
             func = functions[function]
-            if not isinstance(func, tirx.PrimFunc):
-                raise TypeError(f"Function {function!r} is not a PrimFunc")
-            return [(function, func.body)]
-        return [(name, func.body) for name, func in sorted(functions.items()) if isinstance(func, tirx.PrimFunc)]
+            if not isinstance(func, tirx.Function):
+                raise TypeError(f"Function {function!r} is not a Function")
+            return [] if func.attrs.get("declaration", False) else [(function, func.body)]
+        return [
+            (name, func.body)
+            for name, func in sorted(functions.items())
+            if isinstance(func, tirx.Function) and not func.attrs.get("declaration", False)
+        ]
     if function is not None:
         raise ValueError("function can only be selected on an IRModule")
-    if isinstance(root, tirx.PrimFunc):
-        name = "<PrimFunc>"
+    if isinstance(root, tirx.Function):
+        name = "<Function>"
         if with_names and root.attrs and "global_symbol" in root.attrs:
             name = str(root.attrs["global_symbol"])
-        return [(name, root.body)]
-    if isinstance(root, (tirx.Stmt, tvm.ir.PrimExpr)):
+        return [] if root.attrs.get("declaration", False) else [(name, root.body)]
+    if isinstance(root, (ir.Stmt, ir.Expr)):
         return [("<root>", root)]
-    raise TypeError(f"Expected IRModule, PrimFunc, Stmt or PrimExpr, got {type(root).__name__}")
+    raise TypeError(f"Expected IRModule, Function, Stmt or Expr, got {type(root).__name__}")
 
 
 def _collect(body, node_type):
     nodes = []
+    seen = set()
 
-    def visit(node):
+    def visit(node, visitor):
+        # Structural traversal follows expression types, layouts and shapes as
+        # well as statement operands. Deduplicate by object identity before
+        # descending, preserving the old query's unique-node counting rule.
+        handle = getattr(node, "__chandle__", None)
+        if handle is None:
+            # FFI String and small scalar wrappers have no Python object
+            # handle. Their structural payload may still contain children.
+            visitor.default_visit(node)
+            if isinstance(node, node_type):
+                nodes.append(node)
+            return
+        identity = handle()
+        if identity in seen:
+            return
+        seen.add(identity)
+        visitor.default_visit(node)
         if isinstance(node, node_type):
             nodes.append(node)
 
-    tirx.stmt_functor.post_order_visit(body, visit)
+    tvm_ffi.structural_visit(body, (tvm_ffi.Object, visit))
     return nodes
 
 
@@ -61,8 +83,8 @@ def _resolve_op(op):
 @lru_cache(maxsize=1)
 def _call_index(body):
     """Index one immutable body; keep function ownership outside the cache."""
-    calls = _collect(body, tirx.Call)
-    by_op: dict[tvm.ir.Op, list[tirx.Call]] = {}
+    calls = _collect(body, ir.Call)
+    by_op: dict[tvm.ir.Op, list[ir.Call]] = {}
     for call in calls:
         op = call.op
         if isinstance(op, tvm.ir.Op):
@@ -74,16 +96,16 @@ def _call_index(body):
 def collect_nodes(root, node_type, *, function: str | None = None) -> list:
     """Collect nodes of a TVM object type from bodies or an expression.
 
-    A module query visits all PrimFunc bodies unless ``function`` selects one
+    A module query visits all Function bodies unless ``function`` selects one
     by global name. Other module functions are skipped. Function signatures and
     module metadata are not traversed. Shared nodes are visited once per body.
     """
-    if not isinstance(node_type, type) or not issubclass(node_type, tvm.runtime.Object):
+    if not isinstance(node_type, type) or not issubclass(node_type, tvm_ffi.Object):
         raise TypeError("node_type must be a TVM object type")
     return [node for _, body in _bodies(root, function) for node in _collect(body, node_type)]
 
 
-def collect_calls(root, *, op: str | tvm.ir.Op, function: str | None = None) -> list[tirx.Call]:
+def collect_calls(root, *, op: str | tvm.ir.Op, function: str | None = None) -> list[ir.Call]:
     """Collect calls to one exact registered Op; never match name fragments.
 
     GlobalVar and other non-Op callees do not match. An unregistered name raises
@@ -114,7 +136,7 @@ def assert_call_count(root, *, op: str | tvm.ir.Op, count: int, function: str | 
     if len(matches) == count:
         return
     names = [name for name, _ in _bodies(root, function)]
-    scope = ", ".join(names) or "<no PrimFuncs>"
+    scope = ", ".join(names) or "<no Functions>"
     # Include other callees when the expected call is absent, but keep failures
     # bounded even for large generated functions.
     nearby = matches or [(index, call) for index, calls in enumerate(calls_by_function) for call in calls]
@@ -126,7 +148,7 @@ def assert_call_count(root, *, op: str | tvm.ir.Op, count: int, function: str | 
     raise AssertionError(f"Expected {count} call(s) to {target.name} in {scope}, found {len(matches)}\n" + "\n".join(details))
 
 
-def collect_extern_calls(root, *, symbol: str, function: str | None = None) -> list[tirx.Call]:
+def collect_extern_calls(root, *, symbol: str, function: str | None = None) -> list[ir.Call]:
     """Collect tirx.call_extern calls with an exact StringImm symbol argument.
 
     Other call operators, missing arguments and non-string symbols do not match.
@@ -138,5 +160,5 @@ def collect_extern_calls(root, *, symbol: str, function: str | None = None) -> l
     return [
         call
         for call in collect_calls(root, op="tirx.call_extern", function=function)
-        if call.args and isinstance(call.args[0], tirx.StringImm) and call.args[0].value == symbol
+        if call.args and isinstance(call.args[0], ir.StringImm) and call.args[0].value == symbol
     ]

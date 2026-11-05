@@ -1,36 +1,26 @@
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
+from tvm_tirx import ir
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
+from tilelang.testing.ir import collect_calls, collect_nodes
 
 
 def _collect_set_max_nreg(stmt):
-    calls = []
-
-    def _visit(node):
-        if not isinstance(node, tvm.tirx.Call):
-            return
-        op = getattr(node, "op", None)
-        if getattr(op, "name", None) != "tl.set_max_nreg":
-            return
-        calls.append(tuple(int(arg.value) for arg in node.args))
-
-    tvm.tirx.stmt_functor.post_order_visit(stmt, _visit)
-    return calls
+    return [tuple(int(arg.value) for arg in call.args) for call in collect_calls(stmt, op="tl.set_max_nreg")]
 
 
 def _find_if_with_set_max_nreg(func, then_call, else_call):
     matches = []
 
-    def _visit(node):
-        if not isinstance(node, tvm.tirx.IfThenElse) or node.else_case is None:
-            return
+    for node in collect_nodes(func, ir.If):
+        if node.else_case is None:
+            continue
         then_calls = _collect_set_max_nreg(node.then_case)
         else_calls = _collect_set_max_nreg(node.else_case)
         if then_call in then_calls and else_call in else_calls:
             matches.append(node)
 
-    tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
     assert matches, f"Expected branch with then {then_call} and else {else_call}"
     return matches[0]
 
@@ -90,7 +80,7 @@ def test_inject_set_max_nreg():
     func = before
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerFrontendScopes()(mod)
 
     _find_if_with_set_max_nreg(mod["main"], (24, 0), (240, 1))
 
@@ -120,7 +110,7 @@ def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerFrontendScopes()(mod)
 
     calls = _collect_set_max_nreg(mod["main"].body)
     assert calls.count((80, 0)) == 1
@@ -158,7 +148,7 @@ def test_inject_set_max_nreg_no_set_max_nreg():
     func = before_no_set_max_nreg
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerFrontendScopes()(mod)
 
     assert not _collect_set_max_nreg(mod["main"].body)
 

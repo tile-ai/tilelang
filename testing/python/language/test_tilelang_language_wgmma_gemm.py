@@ -3,8 +3,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir, tirx
 from tilelang.layout import SwizzleMode
 from tilelang.layout.swizzle import (
     make_full_bank_swizzled_layout,
@@ -24,7 +23,7 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import compute_gmma_de
 )
 @pytest.mark.parametrize("n_dim,k_dim", [(64, 64), (64, 256), (128, 64), (64, 512)])
 def test_compute_gmma_descriptor_k_major(maker, mode, wgmma_field, sbo, n_dim, k_dim):
-    buf = tirx.decl_buffer((n_dim, k_dim), "float16", name="B", scope="shared")
+    buf = ir.Var("B", tirx.TensorType((n_dim, k_dim), "float16", scope="shared"))
     p = compute_gmma_descriptor(maker(buf), buf, transposed=False)
     assert p.swizzle_mode == mode
     assert p.swizzle_mode.wgmma_layout_type() == wgmma_field
@@ -34,7 +33,7 @@ def test_compute_gmma_descriptor_k_major(maker, mode, wgmma_field, sbo, n_dim, k
 
 @pytest.mark.parametrize("k_dim,n_dim", [(64, 128), (64, 256), (64, 64)])
 def test_compute_gmma_descriptor_mn_major_128b(k_dim, n_dim):
-    buf = tirx.decl_buffer((k_dim, n_dim), "float16", name="B", scope="shared")
+    buf = ir.Var("B", tirx.TensorType((k_dim, n_dim), "float16", scope="shared"))
     p = compute_gmma_descriptor(make_full_bank_swizzled_layout(buf), buf, transposed=True)
     assert p.swizzle_mode == SwizzleMode.SWIZZLE_128B
     assert p.stride_byte_offset == 64
@@ -45,7 +44,7 @@ def test_compute_gmma_descriptor_mn_major_128b(k_dim, n_dim):
 def test_compute_gmma_descriptor_same_layout_both_majors():
     # FlashMLA KV_shared [block_N, h_dim] (128B swizzle) must analyze as BOTH a
     # K-major operand (QK) and an MN-major operand (PV) -- the same physical bytes.
-    buf = tirx.decl_buffer((64, 256), "float16", name="KV", scope="shared")
+    buf = ir.Var("KV", tirx.TensorType((64, 256), "float16", scope="shared"))
     lay = make_full_bank_swizzled_layout(buf)
     pk = compute_gmma_descriptor(lay, buf, transposed=False)
     pmn = compute_gmma_descriptor(lay, buf, transposed=True)
@@ -119,10 +118,11 @@ def test_wgmma_gemm_rejects_mma_fallback():
             T.copy(C_local, D[0:32, 0:64])
 
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=r"T\.wgmma_gemm\(\) requires Hopper WGMMA lowering",
-    ):
+    ) as error:
         tilelang.compile(main, target="cuda")
+    assert error.value.__tvm_ffi_error__.kind == "InternalError"
 
 
 def _make_sliced_wgmma_kernel(M, N, K, num_k_tiles):

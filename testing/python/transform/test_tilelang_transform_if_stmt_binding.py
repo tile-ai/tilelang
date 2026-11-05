@@ -1,10 +1,13 @@
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
 import tilelang
 import tilelang.testing
-from tvm.script import tirx as T
+import tilelang.language as T
 
 
 def _run_if_stmt_binding(func, config=None):
+    # Match the public compile path: the legacy device ABI defaults to
+    # noalias, with explicit exceptions handled in separate native tests.
+    func = func.with_attr("tirx.noalias", True)
     mod = tvm.IRModule({"main": func})
     with tvm.transform.PassContext(config=config or {}):
         return tilelang.transform.IfStmtBinding()(mod)["main"]
@@ -112,18 +115,18 @@ def test_if_stmt_binding_inlines_replayable_bind_by_default():
 
 
 def test_if_stmt_binding_does_not_inline_pointer_bind():
-    @T.prim_func(check_well_formed=False)
+    @T.prim_func
     def before(A: T.Buffer((4,), "float32"), C: T.Buffer((4,), "float32")):
         if A[0] >= T.float32(0):
             idx = T.bind(T.int32(1))
-            ptr = T.bind(A.data, type_annotation=A.data)
+            ptr = T.bind(T.tensor_data_ptr(A), type_annotation=tvm.ir.PtrType(tvm.ir.PrimType("float32")))
             B = T.Buffer((4,), "float32", data=ptr)
             C[0] = B[idx]
 
-    @T.prim_func(check_well_formed=False)
+    @T.prim_func
     def expected(A: T.Buffer((4,), "float32"), C: T.Buffer((4,), "float32")):
         if A[0] >= T.float32(0):
-            ptr = T.bind(A.data, type_annotation=A.data)
+            ptr = T.bind(T.tensor_data_ptr(A), type_annotation=tvm.ir.PtrType(tvm.ir.PrimType("float32")))
             B = T.Buffer((4,), "float32", data=ptr)
             C[0] = B[T.int32(1)]
 
@@ -167,7 +170,7 @@ def test_if_stmt_binding_keeps_side_effecting_bind():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter.access_ptr("rw"),
+                    T.access_ptr(counter, "rw"),
                     1,
                 )
             )
@@ -181,7 +184,7 @@ def test_if_stmt_binding_keeps_side_effecting_bind():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter.access_ptr("rw"),
+                    T.access_ptr(counter, "rw"),
                     1,
                 )
             )
@@ -206,7 +209,7 @@ def test_if_stmt_binding_keeps_bind_that_reads_atomic_target():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter_tvm.access_ptr("rw"),
+                    T.access_ptr(counter_tvm, "rw"),
                     1,
                 )
             )
@@ -244,7 +247,7 @@ def test_if_stmt_binding_keeps_bind_that_reads_atomic_target():
                 T.call_intrin(
                     "int32",
                     tvm.ir.Op.get("tl.atomic_add_ret_elem_op"),
-                    counter_tvm.access_ptr("rw"),
+                    T.access_ptr(counter_tvm, "rw"),
                     1,
                 )
             )

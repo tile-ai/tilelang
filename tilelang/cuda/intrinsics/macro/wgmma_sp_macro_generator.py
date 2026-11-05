@@ -6,8 +6,9 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
 )
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.cuda.language as T
-from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferRegion, IndexMap, handle_add_byte_offset
+from tvm_ffi import dtype as DataType
+from tilelang.language._native import PrimExpr, Buffer, Var, BufferRegion
+from tvm_tirx.tirx import IndexMap, handle_add_byte_offset
 from tilelang.utils import is_fragment, is_shared, is_full_region
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
@@ -112,7 +113,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         assert self.a_shared_layout is not None, "WGMMA sparse A operand has no shared layout to decode"
         return compute_gmma_descriptor(
             self.a_shared_layout,
-            A_region.buffer if isinstance(A_region, BufferRegion) else A_region,
+            A_region.source if isinstance(A_region, BufferRegion) else A_region,
             transposed=self.a_transposed,
             micro_size_k=self.micro_size_k // self.SPARSE_FACTOR,
             region=list(A_region.region) if isinstance(A_region, BufferRegion) else None,
@@ -127,7 +128,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         assert self.b_shared_layout is not None, "WGMMA sparse B operand has no shared layout to decode"
         return compute_gmma_descriptor(
             self.b_shared_layout,
-            B_region.buffer if isinstance(B_region, BufferRegion) else B_region,
+            B_region.source if isinstance(B_region, BufferRegion) else B_region,
             transposed=not self.b_transposed,
             micro_size_k=self.micro_size_k,
             region=list(B_region.region) if isinstance(B_region, BufferRegion) else None,
@@ -192,9 +193,9 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
         thread_binding = self.get_thread_binding()
 
-        A_buf = A_region.buffer if isinstance(A_region, BufferRegion) else A_region
-        B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
-        A_base_ptr = A_buf.access_ptr("r")
+        A_buf = A_region.source if isinstance(A_region, BufferRegion) else A_region
+        B_buf = B_region.source if isinstance(B_region, BufferRegion) else B_region
+        A_base_ptr = T.access_ptr(A_buf, "r")
         if not isinstance(a_slice_byte_offset, int):
             a_is_sliced = True
         elif a_slice_byte_offset != 0:
@@ -202,7 +203,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
             A_base_ptr = handle_add_byte_offset(A_base_ptr, a_slice_byte_offset)
         else:
             a_is_sliced = False
-        B_base_ptr = B_buf.access_ptr("r")
+        B_base_ptr = T.access_ptr(B_buf, "r")
         if not isinstance(b_slice_byte_offset, int):
             b_is_sliced = True
         elif b_slice_byte_offset != 0:
@@ -211,7 +212,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         else:
             b_is_sliced = False
         assert is_full_region(C_region), "Fragment output C must be a full region"
-        C_buf = C_region.buffer
+        C_buf = C_region.source
 
         @T.macro
         def _warp_mma(A_base_ptr, B_base_ptr, C_buf):
@@ -350,9 +351,9 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
 
         assert is_full_region(A_region), "Fragment input A must be a full region"
         assert is_full_region(C_region), "Fragment output C must be a full region"
-        A_buf = A_region.buffer
-        B_buf = B_region.buffer if isinstance(B_region, BufferRegion) else B_region
-        B_base_ptr = B_buf.access_ptr("r")
+        A_buf = A_region.source
+        B_buf = B_region.source if isinstance(B_region, BufferRegion) else B_region
+        B_base_ptr = T.access_ptr(B_buf, "r")
         if not isinstance(b_slice_byte_offset, int):
             # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
             b_is_sliced = True
@@ -363,7 +364,7 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         else:
             # Non-sliced.
             b_is_sliced = False
-        C_buf = C_region.buffer
+        C_buf = C_region.source
 
         k_blocks = k_dim // micro_size_k
         e_stage_elems = self.warp_rows * self.local_size_e
@@ -482,10 +483,10 @@ class WGSparseTensorCoreIntrinEmitter(SparseTensorCoreIntrinEmitter):
         thread_binding = self.get_thread_binding()
 
         E_region = self._legalize_to_buffer_region(E_shared_buf)
-        E_buf = E_region.buffer
-        E_base0 = E_region.region[-2].min
-        E_base1 = E_region.region[-1].min
-        E_other = [r.min for r in E_region.region[:-2]]
+        E_buf = E_region.source
+        E_base0 = E_region.region[-2].begin
+        E_base1 = E_region.region[-1].begin
+        E_other = [r.begin for r in E_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_e(

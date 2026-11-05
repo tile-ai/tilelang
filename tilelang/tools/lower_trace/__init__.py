@@ -58,7 +58,7 @@ def lower_trace(
 
     Parameters
     ----------
-    func_or_mod : PrimFunc or IRModule
+    func_or_mod : Function or IRModule
         The starting IR.
     passes : Pass or list[Pass] or list[tuple[str, Pass]]
         A single pass, a list of passes, or a list of (name, pass) pairs.
@@ -76,7 +76,8 @@ def lower_trace(
         ``name``, ``before_script``, ``after_script``, ``diff_lines``,
         ``insertions``, ``deletions``, ``changed``.
     """
-    from tilelang import tvm
+    import tvm_tirx as tvm
+    from tilelang.utils.pass_diff import _get_script
     from .diff import unified_diff
 
     mode = str(mode).strip().lower()
@@ -106,7 +107,7 @@ def lower_trace(
     active_exc = None
     try:
         for step_idx, (name, p) in enumerate(named_passes, 1):
-            before_script = mod.script()
+            before_script = _get_script(mod)
             try:
                 mod = p(mod)
             except Exception as e:
@@ -133,7 +134,7 @@ def lower_trace(
                     print(before_script)
                 raise
 
-            after_script = mod.script()
+            after_script = _get_script(mod)
 
             diff_text = unified_diff(
                 before_script,

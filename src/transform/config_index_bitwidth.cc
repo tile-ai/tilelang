@@ -1,159 +1,140 @@
-#include "../../3rdparty/tvm/src/tirx/ir/data_type_rewriter.h"
+/*!
+ * \file config_index_bitwidth.cc
+ * \brief Preserve public types while legalizing native address arithmetic.
+ */
+#include "config_index_bitwidth.h"
+#include "../ir/analyzer.h"
 #include "../op/builtin.h"
-#include "arith/ir_mutator_with_analyzer.h"
 #include "common/int64_promoter.h"
-#include "support/check.h"
-#include "tir/transforms/ir_utils.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/transform.h>
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
+namespace {
 
-using namespace tirx;
-using namespace ffi;
-using namespace arith;
-class ConfigIndexBitwidthRewriter : public IndexDataTypeRewriter {
+class IndexLegalizer : public tl::StmtExprMutatorWithAnalyzer {
 public:
-  using Parent = IndexDataTypeRewriter;
-  ConfigIndexBitwidthRewriter(int index_bitwidth)
-      : _index_bitwidth_(index_bitwidth) {}
+  using StmtExprMutatorWithAnalyzer::Mutate;
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+  explicit IndexLegalizer(bool force_wide,
+                          sym::Analyzer analyzer = CreateTileLangAnalyzer())
+      : StmtExprMutatorWithAnalyzer(analyzer),
+        analyzer_owner_(std::move(analyzer)), force_wide_(force_wide) {}
 
-  Stmt operator()(const Stmt &s) { return VisitStmt(s); }
+  tirx::Function Rewrite(tirx::Function function) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    MarkTensorParamShapes(function);
+    const auto body = function->body;
+    auto result = Mutate(body).ValueOrUnchanged(body);
+    if (!result.same_as(body))
+      function.CopyOnWrite()->body = std::move(result);
+    return function;
+  }
 
-protected:
-  using Parent::VisitExpr_;
-  using Parent::VisitStmt_;
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                     InplaceMode mode) final {
+    const auto load = StmtExprMutatorWithAnalyzer::Mutate_(op, mode)
+                          .ValueOrUnchanged(ffi::GetRef<TensorLoad>(op))
+                          .as_or_throw<TensorLoad>();
+    return TensorLoad(load->source, RewriteIndices(load->indices), load->loc);
+  }
 
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    if (op->dtype.is_int() && op->dtype.bits() < 64) {
-      DataType new_dtype = DataType::Int(64);
-      if (!var_remap_.count(op)) {
-        var_remap_[op] = Var(op->name_hint, new_dtype);
-      }
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
+                                 InplaceMode mode) final {
+    const auto store = StmtExprMutatorWithAnalyzer::Mutate_(op, mode)
+                           .ValueOrUnchanged(ffi::GetRef<TensorStore>(op))
+                           .as_or_throw<TensorStore>();
+    return TensorStore(store->dest, RewriteIndices(store->indices),
+                       store->value, store->loc);
+  }
+
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+    auto call = StmtExprMutatorWithAnalyzer::Mutate_(op, mode)
+                    .ValueOrUnchanged(ffi::GetRef<Call>(op))
+                    .as_or_throw<Call>();
+    // tl.ptr_access still counts logical elements. Its offset must be wide
+    // before LowerAccessPtr scales it to bytes, just like a native byte offset.
+    if (call->op.same_as(tirx::ptr_byte_offset_op()) ||
+        call->op.same_as(Op::Get("tl.ptr_access"))) {
+      auto args = call->args;
+      args.Set(1, RewriteIndex(args[1].as_or_throw<PrimExpr>()));
+      return Call(call->ty, call->op, args, call->attrs, call->ty_args,
+                  call->loc);
     }
-    return Parent::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const IntImmNode *op) final {
-    if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
-      return IntImm(DataType::Int(_index_bitwidth_), op->value);
-    }
-    return GetRef<PrimExpr>(op);
-  }
-
-  PrimExpr VisitExpr_(const CastNode *op) final {
-    if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
-      PrimExpr value = VisitExpr(op->value);
-      return Cast(DataType::Int(_index_bitwidth_), value);
-    }
-    return Parent::VisitExpr_(op);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    // Force indices to be int64
-    bool is_enabled = is_enabled_;
-    is_enabled_ = true;
-    auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
-    is_enabled_ = is_enabled;
-    return std::move(node);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    // Force indices to be int64
-    bool is_enabled = is_enabled_;
-    is_enabled_ = true;
-    auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
-    is_enabled_ = is_enabled;
-    return std::move(node);
-  }
-
-  int _index_bitwidth_;
-};
-
-class IndexLegalizer : public IRMutatorWithAnalyzer {
-
-public:
-  static Stmt Rewrite(const Stmt &stmt) {
-    Analyzer ana;
-    auto pass = IndexLegalizer(&ana);
-    return pass.VisitStmt(stmt);
+    return call;
   }
 
 private:
-  explicit IndexLegalizer(arith::Analyzer *ana) : IRMutatorWithAnalyzer(ana) {}
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto buffer_store =
-        Downcast<BufferStore>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    auto indices = buffer_store->indices;
-    Array<PrimExpr> new_indices;
-    for (auto index : indices) {
-      if (index->dtype.is_int() && index->dtype.bits() < 64) {
-        auto int_bound = analyzer_->const_int_bound(index);
-        if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
-            int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          Int64Promoter promoter;
-          index = promoter(index);
-          new_indices.push_back(index);
-          continue;
-        }
+  PrimExpr RewriteIndex(const PrimExpr &index) {
+    const PrimType type = index.ty();
+    if (!type.MatchesCode(kDLInt) || type.bits() >= 64)
+      return index;
+    PrimExpr wide = Int64Promoter()(index);
+    if (force_wide_)
+      return wide;
+    // Inspect the mathematical address before narrowing would hide overflow.
+    // A bound on the original int32 expression alone can only describe its
+    // truncated result and therefore cannot justify a narrow address.
+    if (type.IsScalar()) {
+      try {
+        auto bound = GetSyncedAnalyzer()->const_int_bound(wide);
+        const int64_t limit = int64_t{1} << (type.bits() - 1);
+        if (bound->min_value >= -limit && bound->max_value < limit)
+          return index;
+      } catch (const std::exception &) {
+        // An unproved signed address needs the wider representation.
       }
-      new_indices.push_back(index);
     }
-    buffer_store.CopyOnWrite()->indices = new_indices;
-    return std::move(buffer_store);
+    return wide;
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto buffer_load =
-        Downcast<BufferLoad>(IRMutatorWithAnalyzer::VisitExpr_(op));
-    auto indices = buffer_load->indices;
-    Array<PrimExpr> new_indices;
-    for (auto index : indices) {
-      if (index->dtype.is_int() && index->dtype.bits() < 64) {
-        auto int_bound = analyzer_->const_int_bound(index);
-        if (int_bound->max_value >= (1LL << (index->dtype.bits() - 1)) - 1 ||
-            int_bound->min_value < -(1LL << (index->dtype.bits() - 1))) {
-          Int64Promoter promoter;
-          index = promoter(index);
-          new_indices.push_back(index);
-          continue;
-        }
-      }
-      new_indices.push_back(index);
-    }
-    buffer_load.CopyOnWrite()->indices = new_indices;
-    return std::move(buffer_load);
+  ffi::Array<PrimExpr> RewriteIndices(const ffi::Array<PrimExpr> &indices) {
+    return indices.Map(
+        [&](const PrimExpr &value) { return RewriteIndex(value); });
   }
+  // The native base borrows the analyzer pointer. Keep its owner alive for
+  // every scoped bound and proof made during this traversal.
+  sym::Analyzer analyzer_owner_;
+  bool force_wide_;
 };
 
-tvm::transform::Pass ConfigIndexBitwidth() {
-  using namespace tirx::transform;
-  auto pass_func = [](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    auto *n = f.CopyOnWrite();
-    // Get pass config `tl.config_index_bitwidth`
-    tvm::transform::PassContext ctxt = tvm::transform::PassContext::Current();
-    Optional<Integer> opt_config_index_bitwidth =
-        ctxt->GetConfig(kConfigIndexBitwidth, Optional<Integer>());
-    if (opt_config_index_bitwidth.defined()) {
-      int config_index_bitwidth = opt_config_index_bitwidth.value()->value;
-      n->body = ConfigIndexBitwidthRewriter(config_index_bitwidth)(n->body);
-    }
-    // Legalize out-of-bound indices to be int64
-    n->body = IndexLegalizer::Rewrite(n->body);
-    return f;
+} // namespace
+namespace transform {
+
+tvm::transform::Pass LegalizeIndexArithmetic(bool force_wide) {
+  auto rewrite = [force_wide](tirx::Function function, IRModule,
+                              tvm::transform::PassContext) {
+    return ffi::make_object<IndexLegalizer>(force_wide)
+        ->Rewrite(std::move(function));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ConfigIndexBitwidth", {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0,
+                                             "tl.LegalizeIndexArithmetic");
 }
 
+tvm::transform::Pass ConfigIndexBitwidth() {
+  auto pass = [](IRModule module, tvm::transform::PassContext context) {
+    auto requested = context->GetConfig<int64_t>(kConfigIndexBitwidth);
+    TVM_FFI_CHECK(!requested || requested.value() == 32 ||
+                      requested.value() == 64,
+                  ValueError)
+        << "tl.config_index_bitwidth must be 32 or 64";
+    module = LegalizeIndexArithmetic(requested.value_or(32) == 64)(module);
+    // A requested 32-bit index width is used only when native range analysis
+    // proves it safe. It never changes tensor element dtypes or the public ABI.
+    if (requested && requested.value() == 32)
+      module = tirx::transform::NarrowDataType(32)(module);
+    return module;
+  };
+  return tvm::transform::CreateModulePass(pass, 0, "tl.ConfigIndexBitwidth");
+}
+
+} // namespace transform
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.ConfigIndexBitwidth",
-                        ConfigIndexBitwidth);
+  ffi::reflection::GlobalDef().def("tl.transform.ConfigIndexBitwidth",
+                                   transform::ConfigIndexBitwidth);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

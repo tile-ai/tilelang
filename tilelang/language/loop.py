@@ -1,13 +1,13 @@
 """Loop related language interfaces in TileLang."""
 
 from __future__ import annotations
+from tilelang.language import _native
 from typing import Any
-from tvm import tirx
-from tvm.tirx import IntImm
-import tvm.tirx.script.builder as tb_tir
+from tilelang.language import _native as tirx
+from tilelang.language._native import IntImm
+from tilelang.language import _native as tb_tir
 from .eager.builder import SerialForWithStep, UnrollForWithStep
-from tilelang import _ffi_api
-from tvm.tirx.script.builder import frame
+from tilelang.language._native import frame
 
 
 def Parallel(
@@ -76,7 +76,7 @@ def Parallel(
         # Pass through to C++ as the standard parallel loop layout key.
         # The builder will attach it only on the outermost parallel loop.
         merged_annotations["parallel_loop_layout"] = loop_layout
-    return _ffi_api.Parallel(extents, merged_annotations)  # type: ignore[attr-defined] # pylint: disable=no-member
+    return tirx.parallel_nest(*extents, annotations=merged_annotations)
 
 
 def Persistent(
@@ -104,9 +104,7 @@ def Persistent(
         The number of pipeline stages for double buffering.
         If 0, pipeline is disabled.
     """
-    if annotations is None:
-        annotations: dict[str, Any] = {}
-    return _ffi_api.Persistent(domain, wave_size, index, group_size, num_stages, annotations)
+    return tirx.PersistentLoopFrame(domain, wave_size, index, group_size, num_stages, annotations)
 
 
 def Pipelined(
@@ -175,15 +173,21 @@ def Pipelined(
     """
     if stop is None:
         stop = start
-        start = IntImm(start.dtype, 0) if hasattr(start, "dtype") else 0
+        start = IntImm(_native.dtype_of(start), 0) if hasattr(start, "dtype") else 0
     if order is None:
         order = []
     if stage is None:
         stage = []
     if annotations is None:
         annotations: dict[str, Any] = {}
-    # type: ignore[attr-defined] # pylint: disable=no-member
-    return _ffi_api.Pipelined(start, stop, num_stages, order, stage, annotations)
+    annotations = dict(annotations)
+    if num_stages > 0:
+        annotations["num_stages"] = num_stages
+    if order:
+        annotations["tl_pipeline_order"] = list(order)
+    if stage:
+        annotations["tl_pipeline_stage"] = list(stage)
+    return tirx.serial(start, stop, annotations=annotations)
 
 
 def serial(
@@ -223,7 +227,7 @@ def serial(
     else:
         if stop is None:
             stop = start
-            start = IntImm(start.dtype, 0) if hasattr(start, "dtype") else 0
+            start = IntImm(_native.dtype_of(start), 0) if hasattr(start, "dtype") else 0
         return SerialForWithStep(start, stop, step, annotations=annotations)
 
 
@@ -266,7 +270,7 @@ def unroll(
     if stop is None:
         stop = start
         if hasattr(start, "dtype"):
-            start = IntImm(start.dtype, 0)
+            start = IntImm(_native.dtype_of(start), 0)
         else:
             start = 0
 

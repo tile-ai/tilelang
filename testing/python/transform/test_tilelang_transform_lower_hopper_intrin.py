@@ -5,49 +5,66 @@ from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_extern_calls, collect_nodes
-from tvm import tirx
+from tvm_tirx import ir, tirx
+import tvm_ffi
 
+# Direct pass tests must register the backend that engine.lower normally owns.
+tl.cuda.register_backend()
 auto_target = tvm.target.Target(determine_target("auto"))
+
+
+def _allocations(body):
+    return [
+        binding
+        for binding in collect_nodes(body, ir.Bind)
+        if isinstance(binding.var.ty, tirx.TensorType)
+        and isinstance(binding.value, ir.Call)
+        and binding.value.op.name == "tirx.alloc_tensor"
+    ]
 
 
 def _assert_shared_barrier_init(func):
     body = func.body
-    assert_call_count(body, op="tirx.ptx_init_barrier_thread_count", count=4)
+    assert not tirx.analysis.undefined_vars(body, func.params)
+    assert_call_count(body, op="tl.ptx_init_barrier_thread_count", count=4)
     assert_call_count(body, op="tl.ptx_fence_barrier_init", count=1)
-    assert_call_count(body, op="tirx.tvm_storage_sync", count=1)
+    assert_call_count(body, op="tirx.gpu_storage_sync", count=1)
     assert_call_count(body, op="tl.tl_shuffle_elect", count=1)
 
-    (alloc,) = collect_nodes(body, tirx.AllocBuffer)
-    (decl,) = collect_nodes(body, tirx.DeclBuffer)
-    assert alloc.buffer.scope() == decl.buffer.scope() == "shared.barrier"
-    assert alloc.buffer.dtype == decl.buffer.dtype == "uint64"
-    tvm.ir.assert_structural_equal(alloc.buffer.shape, tvm.runtime.convert([tirx.IntImm("int32", 4)]))
-    tvm.ir.assert_structural_equal(decl.buffer.shape, alloc.buffer.shape)
-    assert decl.buffer.data.same_as(alloc.buffer.data)
+    (alloc,) = _allocations(body)
+    barrier = alloc.var
+    assert barrier.ty.scope.name == "shared.barrier"
+    assert str(barrier.ty.dtype) == "uint64"
+    tvm.ir.assert_structural_equal(barrier.ty.shape, tvm_ffi.convert([ir.IntImm("int32", 4)]))
+    assert alloc.value.attrs["tl.barrier_initialized"]
 
-    (guard,) = collect_nodes(body, tirx.IfThenElse)
+    (guard,) = collect_nodes(body, ir.If)
+    # Native alloc_tensor binds the TensorVar directly; its loads must refer to
+    # that exact definition. There is no separate Buffer/data-pointer decl.
     # Direct siblings establish execution order; traversal order does not.
-    (seq,) = [seq for seq in collect_nodes(body, tirx.SeqStmt) if any(stmt.same_as(alloc) for stmt in seq.seq)]
+    (seq,) = [seq for seq in collect_nodes(body, ir.SeqStmt) if any(stmt.same_as(alloc) for stmt in seq.seq)]
     assert seq.seq[0].same_as(alloc)
-    assert seq.seq[1].same_as(decl)
-    assert seq.seq[2].same_as(guard)
-    expected = tirx.SeqStmt(
+    assert seq.seq[1].same_as(guard)
+    for call in collect_calls(guard, op="tl.ptx_init_barrier_thread_count"):
+        assert isinstance(call.args[0], ir.TensorLoad)
+        assert call.args[0].source.same_as(barrier)
+    expected = ir.SeqStmt(
         [
-            tirx.IfThenElse(
-                tirx.Call("bool", tvm.ir.Op.get("tl.tl_shuffle_elect"), [0]),
-                tirx.SeqStmt(
+            ir.If(
+                ir.Call("tl.tl_shuffle_elect", [0], ty="bool"),
+                ir.SeqStmt(
                     [
-                        tirx.Evaluate(tirx.Call("handle", "tirx.ptx_init_barrier_thread_count", [tirx.BufferLoad(decl.buffer, [i]), 128]))
+                        ir.Evaluate(ir.Call("tl.ptx_init_barrier_thread_count", [ir.TensorLoad(barrier, [i]), 128], ty="void"))
                         for i in range(4)
                     ]
                 ),
                 None,
             ),
-            tirx.Evaluate(tirx.Call("handle", tvm.ir.Op.get("tl.ptx_fence_barrier_init"), [])),
-            tirx.Evaluate(tirx.Call("handle", "tirx.tvm_storage_sync", [tirx.StringImm("shared")])),
+            ir.Evaluate(ir.Call("tl.ptx_fence_barrier_init", [], ty="void")),
+            ir.Evaluate(ir.Call("tirx.gpu_storage_sync", [ir.StringImm("shared")], ty="void")),
         ]
     )
-    tvm.ir.assert_structural_equal(tirx.SeqStmt(seq.seq[2:5]), expected)
+    tvm.ir.assert_structural_equal(ir.SeqStmt(seq.seq[1:4]), expected)
 
 
 def _assert_tma_descriptor_init_after_alloc(func, original_call):
@@ -55,44 +72,53 @@ def _assert_tma_descriptor_init_after_alloc(func, original_call):
     assert not tirx.analysis.undefined_vars(body, func.params)
     assert_call_count(body, op="tl.create_tma_descriptor", count=0)
     assert_call_count(body, op="tl.prefetch_tma_descriptor", count=1)
-    assert_call_count(body, op="tirx.tvm_call_packed", count=1)
+    assert_call_count(body, op="tirx.call_packed", count=1)
     assert not collect_extern_calls(body, symbol="tl::prefetch_tma_descriptor")
 
-    (alloc,) = collect_nodes(body, tirx.AllocBuffer)
-    assert alloc.buffer.scope() == "global" and alloc.buffer.dtype == "float16"
-    tvm.ir.assert_structural_equal(alloc.buffer.shape, tvm.runtime.convert([tirx.IntImm("int32", 32)]))
-    assert alloc.buffer.data.same_as(original_call.args[2])
-    (bind,) = collect_nodes(body, tirx.Bind)
+    (alloc,) = _allocations(body)
+    assert alloc.var.ty.scope.name == "global" and str(alloc.var.ty.dtype) == "float16"
+    tvm.ir.assert_structural_equal(alloc.var.ty.shape, tvm_ffi.convert([ir.IntImm("int32", 32)]))
+    original_pointer = original_call.args[2]
+    assert isinstance(original_pointer, ir.Call) and original_pointer.op.name == "tirx.tensor_data_ptr"
+    assert original_pointer.args[0].same_as(alloc.var)
+    (bind,) = [
+        binding
+        for binding in collect_nodes(body, ir.Bind)
+        if isinstance(binding.var.ty, ir.PtrType) and isinstance(binding.var.ty.element_type, tirx.TensorMapType)
+    ]
     descriptor = bind.var
-    assert descriptor.type_annotation.storage_scope == "grid_constant"
-    init_args = tvm.runtime.convert([tirx.StringImm("__tvm_tensormap_create_tiled"), descriptor, *original_call.args])
-    (init_call,) = collect_calls(body, op="tirx.tvm_call_packed")
+    # TensorMapType now carries the descriptor-storage contract used for
+    # by-value grid-constant kernel arguments; it replaces the old scope tag.
+    init_args = tvm_ffi.convert([ir.StringImm("__tvm_tensormap_create_tiled"), descriptor, *original_call.args])
+    (init_call,) = collect_calls(body, op="tirx.call_packed")
     tvm.ir.assert_structural_equal(init_call.args, init_args)
-    assert init_call.args[4].same_as(alloc.buffer.data)
-    assert_call_count(body, op="tirx.tvm_stack_alloca", count=1)
+    assert init_call.args[1].same_as(descriptor)
+    assert init_call.args[4].same_as(original_pointer)
+    assert_call_count(body, op="tirx.stack_alloca", count=1)
 
-    (seq,) = [seq for seq in collect_nodes(body, tirx.SeqStmt) if any(stmt.same_as(alloc) for stmt in seq.seq)]
+    (seq,) = [seq for seq in collect_nodes(body, ir.SeqStmt) if any(stmt.same_as(alloc) for stmt in seq.seq)]
     assert seq.seq[0].same_as(alloc)
-    expected_init = tirx.SeqStmt(
+    expected_init = ir.SeqStmt(
         [
-            tirx.Bind(descriptor, tirx.Call("handle", "tirx.tvm_stack_alloca", [tirx.StringImm("tvm_ffi_any"), 16])),
-            tirx.Evaluate(tirx.Call("handle", "tirx.tvm_call_packed", init_args)),
+            ir.Bind(descriptor, ir.Call("tirx.stack_alloca", [ir.StringImm("tensormap"), 1], ty=descriptor.ty)),
+            ir.Evaluate(ir.Call("tirx.call_packed", init_args, ty="int32")),
         ]
     )
-    tvm.ir.assert_structural_equal(tirx.SeqStmt(seq.seq[1:3]), expected_init)
+    tvm.ir.assert_structural_equal(ir.SeqStmt(seq.seq[1:3]), expected_init)
     # The launch follows initialization in the same scope; the prefetch is
     # guarded inside that launch and uses the very same descriptor Var.
     launch = seq.seq[3]
-    assert isinstance(launch, tirx.AttrStmt) and launch.attr_key == "thread_extent"
-    assert isinstance(launch.node, tirx.IterVar) and launch.node.thread_tag == "threadIdx.x"
-    expected_body = tirx.SeqStmt(
+    assert isinstance(launch, ir.RegionStmt) and launch.op.name == "tirx.launch_thread"
+    assert launch.args[0].value == "threadIdx.x"
+    assert len(launch.body_params) == 1 and len(launch.result_vars) == 0
+    expected_body = ir.SeqStmt(
         [
-            tirx.IfThenElse(
-                tirx.Call("bool", tvm.ir.Op.get("tl.tl_shuffle_elect"), [0]),
-                tirx.Evaluate(tirx.Call("handle", tvm.ir.Op.get("tl.prefetch_tma_descriptor"), [descriptor])),
+            ir.If(
+                ir.Call("tl.tl_shuffle_elect", [0], ty="bool"),
+                ir.Evaluate(ir.Call("tl.prefetch_tma_descriptor", [descriptor], ty="void")),
                 None,
             ),
-            tirx.Evaluate(descriptor),
+            ir.Evaluate(descriptor),
         ]
     )
     tvm.ir.assert_structural_equal(launch.body, expected_body)

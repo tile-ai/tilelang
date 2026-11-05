@@ -1,5 +1,5 @@
 import pytest
-import tvm
+import tvm_tirx as tvm
 
 import tilelang
 import tilelang.language as T

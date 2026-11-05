@@ -5,18 +5,42 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
-from tvm import te, tirx
+import tvm_ffi
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import prim
+from tvm_tirx.tirx.layout import Iter
+from tilelang.language import _native
+from tilelang.language._native import encode_annotations
+from tilelang.testing.ir import collect_nodes
 import pytest
 
 
 def bind_then(var, value, body):
-    return tvm.tirx.SeqStmt([tvm.tirx.Bind(var, value), body])
+    return ir.SeqStmt([ir.Bind(var, _native._expr(value)), body])
+
+
+def tensor(name, shape, dtype="float32", scope="global", **kwargs):
+    return ir.Var(name, tirx.TensorType(shape, dtype, scope=scope, layout="default", **kwargs))
+
+
+def thread_scope(variable, tag, extent, body):
+    return ir.RegionStmt("tirx.launch_thread", [ir.StringImm(tag), _native._expr(extent)], [variable], None, body)
+
+
+def attribute(node, key, value, body):
+    schema, payload = encode_annotations({"node": node, "key": key, "value": value})
+    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+
+
+def annotation(values):
+    schema, payload = encode_annotations(values)
+    return ir.Evaluate(ir.Call("tl.annotation", [payload], attrs={"schema_version": 1, "annotation_schema": schema}))
 
 
 def buffer_pair(shape=(16,)):
     return (
-        tvm.tirx.decl_buffer(shape, "float32", name="A"),
-        tvm.tirx.decl_buffer(shape, "float32", name="C"),
+        tensor("A", shape),
+        tensor("C", shape),
     )
 
 
@@ -40,44 +64,49 @@ def simplify_and_compare(before, expected, config=None):
 
 def test_stmt_simplify():
     A, C = buffer_pair()
-    n = te.size_var("n")
-    i = tvm.tirx.Var("i", "int32")
+    n = ir.Var("n", "int32")
+    i = ir.Var("i", "int32")
 
-    store = tvm.tirx.BufferStore(A, tvm.tirx.BufferLoad(C, [i]), [i])
-    loop = tvm.tirx.For(i, 0, n, tvm.tirx.ForKind.SERIAL, tvm.tirx.IfThenElse(i < 12, store, None))
-    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], bind_then(n, 10, loop)))
+    store = ir.TensorStore(A, [i], C[i])
+    loop = ir.For(i, 0, n, 1, ir.ForKind.DEFAULT, ir.If(i < 12, store, None))
+    mod = tvm.IRModule.from_expr(tirx.Function([A, C], bind_then(n, 10, loop)))
     body = tl.transform.Simplify()(mod)["main"].body
-    assert isinstance(body.body, tvm.tirx.BufferStore)
+    assert len(collect_nodes(body, ir.If)) == 0
+    assert len(collect_nodes(body, ir.For)) == 1
+    assert len(collect_nodes(body, ir.TensorStore)) == 1
 
 
 def test_thread_extent_simplify():
     A, C = buffer_pair()
-    n = te.size_var("n")
-    tx = te.thread_axis("threadIdx.x")
-    ty = te.thread_axis("threadIdx.y")
+    n = ir.Var("n", "int32")
+    tx_outer = ir.Var("tx_outer", "int32")
+    tx = ir.Var("tx", "int32")
+    ty = ir.Var("ty", "int32")
 
-    store = tvm.tirx.BufferStore(A, tvm.tirx.BufferLoad(C, [tx.var + ty.var]), [tx.var])
-    stmt = tvm.tirx.IfThenElse(tx.var + ty.var < 12, store, None)
-    stmt = tvm.tirx.AttrStmt(ty, "thread_extent", 1, stmt)
-    stmt = tvm.tirx.AttrStmt(tx, "thread_extent", n, stmt)
-    stmt = tvm.tirx.AttrStmt(tx, "thread_extent", n, stmt)
-    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], bind_then(n, 10, stmt)))
+    store = ir.TensorStore(A, [tx], C[tx + ty])
+    stmt = ir.If(tx + ty < 12, store, None)
+    stmt = thread_scope(ty, "threadIdx.y", 1, stmt)
+    stmt = thread_scope(tx, "threadIdx.x", n, stmt)
+    stmt = thread_scope(tx_outer, "threadIdx.x", n, stmt)
+    mod = tvm.IRModule.from_expr(tirx.Function([A, C], bind_then(n, 10, stmt)))
     body = tl.transform.Simplify()(mod)["main"].body
-    assert isinstance(body.body.body.body, tvm.tirx.BufferStore)
+    assert len(collect_nodes(body, ir.If)) == 0
+    assert len(collect_nodes(body, ir.RegionStmt)) == 3
+    assert len(collect_nodes(body, ir.TensorStore)) == 1
 
 
 def test_dynamic_reduction_tail_guard():
-    batch = tvm.tirx.Var("batch", "int32")
-    i = tvm.tirx.Var("i", "int32")
-    tx = te.thread_axis("threadIdx.x")
-    source = tvm.tirx.decl_buffer((batch, 192), "float32", name="A")
-    output = tvm.tirx.decl_buffer((128,), "float32", name="C")
-    offset = i * 128 + tx.var
-    store = tvm.tirx.BufferStore(output, tvm.tirx.BufferLoad(source, [offset // 192, offset % 192]), [tx.var])
-    guard = tvm.tirx.IfThenElse(offset < batch * 192, store, None)
-    loop = tvm.tirx.For(i, 0, (batch * 192 - 1) // 128 + 1, tvm.tirx.ForKind.SERIAL, guard)
-    body = tvm.tirx.AttrStmt(tx, "thread_extent", 128, loop)
-    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([source, output], body))
+    batch = ir.Var("batch", "int32")
+    i = ir.Var("i", "int32")
+    tx = ir.Var("tx", "int32")
+    source = tensor("A", (batch, 192))
+    output = tensor("C", (128,))
+    offset = i * 128 + tx
+    store = ir.TensorStore(output, [tx], source[offset // 192, offset % 192])
+    guard = ir.If(offset < batch * 192, store, None)
+    loop = ir.For(i, 0, (batch * 192 - 1) // 128 + 1, 1, ir.ForKind.DEFAULT, guard)
+    body = thread_scope(tx, "threadIdx.x", 128, loop)
+    mod = tvm.IRModule.from_expr(tirx.Function([source, output], body))
 
     # For batch=1, i=1 and tx=64, the offset is 192 and the guard is false.
     # Incorrect modular bounds used to prove it true without a batch > 0 assume.
@@ -86,79 +115,83 @@ def test_dynamic_reduction_tail_guard():
 
 def test_context_singleton_floordiv_index():
     A, C = buffer_pair((128,))
-    tx = te.thread_axis("threadIdx.x")
-    i = tvm.tirx.Var("i", "int32")
-    vec = tvm.tirx.Var("vec", "int32")
+    tx = ir.Var("tx", "int32")
+    i = ir.Var("i", "int32")
+    vec = ir.Var("vec", "int32")
 
-    before_index = tx.var // 128 * 64 + i * 4 + vec - 64
+    before_index = tx // 128 * 64 + i * 4 + vec - 64
     expected_index = i * 4 + vec
-    before_accum_index = (tx.var - 128) // 128 * 64 + i
+    before_accum_index = (tx - 128) // 128 * 64 + i
     expected_accum_index = i
-    before_store = tvm.tirx.BufferStore(A, tvm.tirx.const(0, "float32"), [before_index])
-    expected_store = tvm.tirx.BufferStore(A, tvm.tirx.const(0, "float32"), [expected_index])
-    before_accum_store = tvm.tirx.BufferStore(C, tvm.tirx.const(0, "float32"), [before_accum_index])
-    expected_accum_store = tvm.tirx.BufferStore(C, tvm.tirx.const(0, "float32"), [expected_accum_index])
+    before_store = ir.TensorStore(A, [before_index], ir.const(0, "float32"))
+    expected_store = ir.TensorStore(A, [expected_index], ir.const(0, "float32"))
+    before_accum_store = ir.TensorStore(C, [before_accum_index], ir.const(0, "float32"))
+    expected_accum_store = ir.TensorStore(C, [expected_accum_index], ir.const(0, "float32"))
 
-    before_body = tvm.tirx.For(
+    before_body = ir.For(
         i,
         0,
         32,
-        tvm.tirx.ForKind.SERIAL,
-        tvm.tirx.For(
+        1,
+        ir.ForKind.DEFAULT,
+        ir.For(
             vec,
             0,
             4,
-            tvm.tirx.ForKind.SERIAL,
-            tvm.tirx.SeqStmt([before_store, before_accum_store]),
+            1,
+            ir.ForKind.DEFAULT,
+            ir.SeqStmt([before_store, before_accum_store]),
         ),
     )
-    expected_body = tvm.tirx.For(
+    expected_body = ir.For(
         i,
         0,
         32,
-        tvm.tirx.ForKind.SERIAL,
-        tvm.tirx.For(
+        1,
+        ir.ForKind.DEFAULT,
+        ir.For(
             vec,
             0,
             4,
-            tvm.tirx.ForKind.SERIAL,
-            tvm.tirx.SeqStmt([expected_store, expected_accum_store]),
+            1,
+            ir.ForKind.DEFAULT,
+            ir.SeqStmt([expected_store, expected_accum_store]),
         ),
     )
-    before_stmt = tvm.tirx.AttrStmt(
+    before_stmt = thread_scope(
         tx,
-        "thread_extent",
+        "threadIdx.x",
         256,
-        tvm.tirx.IfThenElse(tx.var < 128, tvm.tirx.Evaluate(0), before_body),
+        ir.If(tx < 128, ir.Evaluate(0), before_body),
     )
-    expected_stmt = tvm.tirx.AttrStmt(
+    expected_stmt = thread_scope(
         tx,
-        "thread_extent",
+        "threadIdx.x",
         256,
-        tvm.tirx.IfThenElse(tx.var < 128, tvm.tirx.Evaluate(0), expected_body),
+        ir.If(tx < 128, ir.Evaluate(0), expected_body),
     )
 
-    mod_before = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], before_stmt))
-    mod_expected = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C], expected_stmt))
+    mod_before = tvm.IRModule.from_expr(tirx.Function([A, C], before_stmt))
+    mod_expected = tvm.IRModule.from_expr(tirx.Function([A, C], expected_stmt))
     simplify_and_compare(mod_before, mod_expected)
 
 
 def test_if_likely():
     A, C = buffer_pair((1024,))
-    n = te.size_var("n")
-    tx = te.thread_axis("threadIdx.x")
-    ty = te.thread_axis("threadIdx.y")
+    n = ir.Var("n", "int32")
+    tx = ir.Var("tx", "int32")
+    ty = ir.Var("ty", "int32")
 
-    idx = tx.var * 32 + ty.var
-    store = tvm.tirx.BufferStore(A, tvm.tirx.BufferLoad(C, [idx]), [tx.var])
-    cond = tvm.tirx.likely(idx < n)
-    stmt = tvm.tirx.IfThenElse(cond, tvm.tirx.IfThenElse(cond, store, None), None)
-    stmt = tvm.tirx.AttrStmt(ty, "thread_extent", 32, stmt)
-    stmt = tvm.tirx.AttrStmt(tx, "thread_extent", 32, stmt)
-    mod = tvm.IRModule.from_expr(tvm.tirx.PrimFunc([A, C, n], stmt))
+    idx = tx * 32 + ty
+    store = ir.TensorStore(A, [tx], C[idx])
+    cond = prim.likely(idx < n)
+    stmt = ir.If(cond, ir.If(cond, store, None), None)
+    stmt = thread_scope(ty, "threadIdx.y", 32, stmt)
+    stmt = thread_scope(tx, "threadIdx.x", 32, stmt)
+    mod = tvm.IRModule.from_expr(tirx.Function([A, C, n], stmt))
     body = tl.transform.Simplify()(mod)["main"].body
-    assert isinstance(body.body.body, tvm.tirx.IfThenElse)
-    assert not isinstance(body.body.body.then_case, tvm.tirx.IfThenElse)
+    assert len(collect_nodes(body, ir.If)) == 1
+    assert len(collect_nodes(body, ir.TensorStore)) == 1
 
 
 def test_load_store_noop():
@@ -755,7 +788,11 @@ def test_simplify_keeps_used_macro_argument(capfd):
             B[0] = increment(x)
 
     mod_before = tvm.IRModule({"main": before})
-    after = simplify_and_compare(mod_before, mod_before)
+    after = tl.transform.Simplify()(mod_before)
+    # Native Bind simplification can inline the final pure arithmetic use,
+    # but the argument's actual uninitialized load must remain observable.
+    reads = collect_nodes(after["main"].body, ir.TensorLoad)
+    assert len(reads) == 1 and reads[0].source.name == "x"
     tl.transform.VerifyBufferInit()(after)
     assert "Buffer read before initialization" in capfd.readouterr().err
 
@@ -776,11 +813,11 @@ def test_simplify_keeps_bind_read_before_write():
 @pytest.mark.parametrize(
     "make_value",
     [
-        pytest.param(lambda A: tirx.call_extern("float32", "update_state", A.data), id="extern_call"),
+        pytest.param(lambda A: tirx.call_extern("update_state", A.data, ty="float32"), id="extern_call"),
         pytest.param(lambda A: T.atomic_add(A[0], 1.0, return_prev=True), id="atomic_add"),
         pytest.param(lambda A: T.tvm_storage_sync("shared"), id="storage_sync"),
         pytest.param(
-            lambda A: tirx.BufferLoad(A, [0], predicate=tirx.call_extern("bool", "predicate_effect")),
+            lambda A: tirx.op.masked_load(A, ir.const(0), tirx.call_extern("predicate_effect", ty="bool")),
             id="buffer_load_predicate",
         ),
     ],
@@ -789,118 +826,134 @@ def test_simplify_keeps_bind_with_side_effects(make_value):
     """Delete the unused consumer, but keep the operation with side effects."""
     A, _ = buffer_pair()
     value = make_value(A)
-    result = tirx.Var("result", value.dtype)
-    effectful_bind = tirx.Bind(result, value)
-    unused_consumer = tirx.Bind(tirx.Var("unused", value.dtype), result + 1)
+    if value.ty == ir.PrimType("void"):
+        # Native synchronization returns void; its effect is a statement,
+        # while an independent unused scalar result is still dead.
+        effectful_bind = ir.Evaluate(value)
+        unused_consumer = ir.Bind(ir.Var("unused", "int32"), ir.const(1))
+    else:
+        result = ir.Var("result", value.ty)
+        effectful_bind = ir.Bind(result, value)
+        unused_consumer = ir.Bind(ir.Var("unused", value.ty), result + 1)
 
-    before_body = tirx.SeqStmt([effectful_bind, unused_consumer])
-    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([A], before_body))
-    mod_expected = tvm.IRModule.from_expr(tirx.PrimFunc([A], effectful_bind))
+    before_body = ir.SeqStmt([effectful_bind, unused_consumer])
+    mod_before = tvm.IRModule.from_expr(tirx.Function([A], before_body))
+    mod_expected = tvm.IRModule.from_expr(tirx.Function([A], effectful_bind))
     simplify_and_compare(mod_before, mod_expected)
 
 
 @pytest.mark.parametrize("annotation", ["volatile_scope", "tirx.volatile"])
 def test_simplify_keeps_bind_reading_volatile_buffer(annotation):
     """A read through an alias still observes the original buffer's volatility."""
-    A = tirx.decl_buffer((1,), "float32", scope="local")
-    alias = tirx.decl_buffer((1,), "float32", data=A.data, scope="local")
-    value = tirx.Var("value", "float32")
+    A = tensor("A", (1,), scope="local")
+    alias_type = tirx.TensorType((1,), "float32", scope="local", layout="default", data=A.data)
+    alias = ir.Var("alias", alias_type)
+    value = ir.Var("value", "float32")
 
     def wrap_volatile(body):
+        allocation = ir.Call(
+            "tirx.alloc_tensor", [], ty_args=[A.ty], attrs={"tirx.volatile": True} if annotation == "tirx.volatile" else None
+        )
+        alias_binding = ir.Bind(alias, ir.Call("tirx.decl_tensor", [A.data], ty_args=[alias.ty]))
+        body = ir.SeqStmt([alias_binding, body])
         if annotation == "volatile_scope":
-            body = tirx.AttrStmt(A.data, "volatile_scope", 1, body)
-        else:
-            body = tirx.SeqStmt([tirx.AllocBuffer(A, annotations={"tirx.volatile": True}), body])
-        return tvm.IRModule.from_expr(tirx.PrimFunc([], body))
+            body = attribute(A.data, "volatile_scope", 1, body)
+        body = ir.SeqStmt([ir.Bind(A, allocation), body])
+        return tvm.IRModule.from_expr(tirx.Function([], body))
 
-    volatile_read = tirx.Bind(value, alias[0])
-    unused_consumer = tirx.Bind(tirx.Var("unused", "float32"), value + 1.0)
-    mod_before = wrap_volatile(tirx.SeqStmt([volatile_read, unused_consumer]))
+    volatile_read = ir.Bind(value, alias[0])
+    unused_consumer = ir.Bind(ir.Var("unused", "float32"), value + 1.0)
+    mod_before = wrap_volatile(ir.SeqStmt([volatile_read, unused_consumer]))
     mod_expected = wrap_volatile(volatile_read)
     simplify_and_compare(mod_before, mod_expected)
 
 
 def test_simplify_keeps_binds_used_in_buffer_metadata():
     """Buffer shape, strides, offset and data pointer all count as variable uses."""
-    source = tirx.decl_buffer((3,), "int32")
-    size = tirx.Var("size", "int32")
-    stride = tirx.Var("stride", "int32")
-    offset = tirx.Var("offset", "int32")
-    data = tirx.Var("data", tvm.ir.PointerType(tvm.ir.PrimType("float32")))
-    view = tirx.decl_buffer((size,), "float32", data=data, strides=[stride], elem_offset=offset)
+    source = tensor("source", (3,), "int32")
+    size = ir.Var("size", "int32")
+    stride = ir.Var("stride", "int32")
+    offset = ir.Var("offset", "int32")
+    data = ir.Var("data", ir.PtrType(ir.PrimType("float32")))
+    layout = tirx.TileLayout.from_iters([Iter(size, stride, "m")], offset={"m": offset})
+    view = ir.Var("view", tirx.TensorType((size,), "float32", data=data, layout=layout))
 
-    body = tirx.SeqStmt(
+    body = ir.SeqStmt(
         [
-            tirx.Bind(size, source[0]),
-            tirx.Bind(stride, source[1]),
-            tirx.Bind(offset, source[2]),
-            tirx.Bind(data, tirx.call_pure_extern("handle", "get_pointer")),
-            tirx.BufferStore(view, 1.0, [0]),
+            ir.Bind(size, source[0]),
+            ir.Bind(stride, source[1]),
+            ir.Bind(offset, source[2]),
+            ir.Bind(data, tirx.call_pure_extern("get_pointer", ty=data.ty)),
+            ir.Bind(view, ir.Call("tirx.decl_tensor", [data], ty_args=[view.ty])),
+            ir.TensorStore(view, [0], 1.0),
         ]
     )
-    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([source], body))
+    mod_before = tvm.IRModule.from_expr(tirx.Function([source], body))
     simplify_and_compare(mod_before, mod_before)
 
 
 def test_simplify_keeps_bind_used_in_nested_annotation():
     """A variable referenced only through annotation maps/arrays is still live."""
-    source = tirx.decl_buffer((1,), "int32")
-    output = tirx.decl_buffer((2,), "float32")
-    tag = tirx.Var("tag", "int32")
-    i = tirx.Var("i", "int32")
-    loop = tirx.For(
+    source = tensor("source", (1,), "int32")
+    output = tensor("output", (2,), "float32")
+    tag = ir.Var("tag", "int32")
+    i = ir.Var("i", "int32")
+    loop = ir.For(
         i,
         0,
         2,
-        tirx.ForKind.SERIAL,
-        tirx.BufferStore(output, 1.0, [i]),
+        1,
+        ir.ForKind.DEFAULT,
+        ir.TensorStore(output, [i], 1.0),
         annotations={"test.metadata": {"nested": [tag]}},
     )
     body = bind_then(tag, source[0], loop)
-    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([source, output], body))
+    mod_before = tvm.IRModule.from_expr(tirx.Function([source, output], body))
     simplify_and_compare(mod_before, mod_before)
 
 
 def test_simplify_inlines_constant_but_keeps_annotation_binding():
     """Inline ordinary uses, but keep the definition still used by an annotation."""
-    output = tirx.decl_buffer((2,), "int32")
-    tag = tirx.Var("tag", "int32")
-    i = tirx.Var("i", "int32")
+    output = tensor("output", (2,), "int32")
+    tag = ir.Var("tag", "int32")
+    i = ir.Var("i", "int32")
     annotations = {"test.metadata": {"nested": [tag]}}
 
     # tag = 4; for (..., annotation=[tag]): output[i] = tag + 1
-    before_loop = tirx.For(i, 0, 2, tirx.ForKind.SERIAL, tirx.BufferStore(output, tag + 1, [i]), annotations=annotations)
+    before_loop = ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, ir.TensorStore(output, [i], tag + 1), annotations=annotations)
     # The store simplifies to 5, while the annotation still requires tag = 4.
-    expected_loop = tirx.For(i, 0, 2, tirx.ForKind.SERIAL, tirx.BufferStore(output, 5, [i]), annotations=annotations)
-    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([output], bind_then(tag, 4, before_loop)))
-    mod_expected = tvm.IRModule.from_expr(tirx.PrimFunc([output], bind_then(tag, 4, expected_loop)))
+    expected_loop = ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, ir.TensorStore(output, [i], 5), annotations=annotations)
+    mod_before = tvm.IRModule.from_expr(tirx.Function([output], bind_then(tag, 4, before_loop)))
+    mod_expected = tvm.IRModule.from_expr(tirx.Function([output], bind_then(tag, 4, expected_loop)))
     simplify_and_compare(mod_before, mod_expected)
 
 
 @pytest.mark.parametrize("site", ["function", "block", "allocation", "call", "cast"])
 def test_simplify_keeps_bind_used_in_metadata_objects(site):
     """References outside ordinary expression children must keep bindings live."""
-    source = tirx.decl_buffer((2,), "int32")
-    output = tirx.decl_buffer((1,), "float32")
-    tag = tirx.Var("tag", "int32")
+    source = tensor("source", (2,), "int32")
+    output = tensor("output", (1,), "float32")
+    tag = ir.Var("tag", "int32")
     metadata = {"test.metadata": {"nested": [tag]}}
-    body = tirx.BufferStore(output, 1.0, [0])
+    body = ir.TensorStore(output, [0], 1.0)
 
     if site == "block":
-        block = tirx.SBlock([], [], [], "metadata", body, annotations=metadata)
-        body = tirx.SBlockRealize([], True, block)
+        body = attribute(None, "tl.sblock", {"name": "metadata", "no_realize": False, "annotations": metadata}, body)
     elif site == "allocation":
-        scratch = tirx.decl_buffer((1,), "float32", scope="local")
-        body = tirx.SeqStmt([tirx.AllocBuffer(scratch, annotations=metadata), body])
+        scratch = tensor("scratch", (1,), "float32", scope="local")
+        body = ir.SeqStmt([ir.Bind(scratch, ir.Call("tirx.alloc_tensor", [], ty_args=[scratch.ty], attrs=metadata)), body])
     elif site == "call":
-        call = tirx.call_extern("float32", "observe")
-        call = tirx.Call(call.dtype, call.op, call.args, annotations=metadata)
-        body = tirx.BufferStore(output, call, [0])
+        call = tirx.call_extern("observe", ty="float32")
+        call = ir.Call(call.op, call.args, attrs=metadata, ty=call.ty)
+        body = ir.TensorStore(output, [0], call)
     elif site == "cast":
-        value = tirx.Cast("float32", source[1], annotations=metadata)
-        body = tirx.BufferStore(output, value, [0])
+        # Primitive Cast has no annotation field. Metadata at this source
+        # position lives in the explicit native annotation statement; all
+        # referenced Vars remain ordinary operands of that statement.
+        value = prim.Cast("float32", source[1])
+        body = ir.SeqStmt([annotation(metadata), ir.TensorStore(output, [0], value)])
 
-    func = tirx.PrimFunc([source, output], bind_then(tag, source[0], body))
+    func = tirx.Function([source, output], bind_then(tag, source[0], body))
     if site == "function":
         func = func.with_attr("test.metadata", metadata["test.metadata"])
     mod_before = tvm.IRModule.from_expr(func)
@@ -910,15 +963,16 @@ def test_simplify_keeps_bind_used_in_metadata_objects(site):
 @pytest.mark.parametrize("access", ["load", "store"])
 def test_simplify_keeps_bind_used_only_in_buffer_predicate(access):
     """Both load and store predicates are uses even when the index is constant."""
-    source = tirx.decl_buffer((1,), "int32")
+    source = tensor("source", (1,), "int32")
     A, C = buffer_pair()
-    predicate = tirx.Var("predicate", "bool")
+    predicate = ir.Var("predicate", "bool")
     if access == "load":
-        body = tirx.BufferStore(C, tirx.BufferLoad(A, [0], predicate=predicate), [0])
+        load = tirx.op.masked_load(A, ir.const(0), predicate)
+        body = ir.TensorStore(C, [0], load)
     else:
-        body = tirx.BufferStore(C, 1.0, [0], predicate=predicate)
-    body = bind_then(predicate, tirx.LT(0, source[0]), body)
-    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([source, A, C], body))
+        body = ir.If(predicate, ir.TensorStore(C, [0], 1.0), None)
+    body = bind_then(predicate, prim.LT(0, source[0]), body)
+    mod_before = tvm.IRModule.from_expr(tirx.Function([source, A, C], body))
     simplify_and_compare(mod_before, mod_before)
 
 
@@ -929,21 +983,21 @@ def test_simplify_keeps_bind_used_only_in_buffer_predicate(access):
 def test_simplify_dead_bind_with_shared_nodes(store_uses_shared_value):
     """Shared nodes must neither keep dead producers alive nor hide live uses."""
     A, C = buffer_pair()
-    cond = tirx.Var("cond", "bool")
-    value = tirx.Var("value", "float32")
+    cond = ir.Var("cond", "bool")
+    value = ir.Var("value", "float32")
     shared = value + 1.0
-    dead = tirx.Bind(tirx.Var("dead", "float32"), shared)
-    store = tirx.BufferStore(C, shared if store_uses_shared_value else 0.0, [0])
+    dead = ir.Bind(ir.Var("dead", "float32"), shared)
+    store = ir.TensorStore(C, [0], shared if store_uses_shared_value else 0.0)
 
     # Reuse the exact same Bind in both branches, and the same expression in the live store.
-    before_body = bind_then(value, A[0], tirx.SeqStmt([tirx.IfThenElse(cond, dead, dead), store]))
+    before_body = bind_then(value, A[0], ir.SeqStmt([ir.If(cond, dead, dead), store]))
     # Bind cleanup currently leaves the empty branches in place.
-    expected_body = tirx.SeqStmt([tirx.IfThenElse(cond, tirx.Evaluate(0), tirx.Evaluate(0)), store])
+    expected_body = ir.SeqStmt([ir.If(cond, ir.Evaluate(0), ir.Evaluate(0)), store])
     if store_uses_shared_value:
         expected_body = bind_then(value, A[0], expected_body)
 
-    mod_before = tvm.IRModule.from_expr(tirx.PrimFunc([A, C, cond], before_body))
-    mod_expected = tvm.IRModule.from_expr(tirx.PrimFunc([A, C, cond], expected_body))
+    mod_before = tvm.IRModule.from_expr(tirx.Function([A, C, cond], before_body))
+    mod_expected = tvm.IRModule.from_expr(tirx.Function([A, C, cond], expected_body))
     simplify_and_compare(mod_before, mod_expected)
 
 

@@ -2,7 +2,7 @@ import torch
 import torch.backends
 import tilelang.testing
 from tilelang import tvm as tvm
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 import tilelang.language as T
 from tilelang import JITKernel
 from tilelang.transform.simplify import apply_simplify

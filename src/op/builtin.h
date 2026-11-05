@@ -8,7 +8,6 @@
 
 #include "operator.h"
 
-#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
 namespace tvm {
@@ -41,11 +40,11 @@ static constexpr const char *kLaunchThreads = "tl.launch_threads";
 
 } // namespace attr
 
-inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
-    const ffi::Map<ffi::String, ffi::ObjectRef> &annotations) {
+inline ffi::Optional<PrimExpr>
+GetAnnotatedMbarPhaseExpr(const ffi::Map<ffi::String, ffi::Any> &annotations) {
   if (auto val = annotations.Get(attr::kPipelineMbarPhaseExpr)) {
-    if (val.value()->IsInstance<PrimExprNode>()) {
-      return Downcast<PrimExpr>(val.value());
+    if (auto value = val.value().as<PrimExpr>()) {
+      return value.value();
     }
     LOG(FATAL) << "Annotation `" << attr::kPipelineMbarPhaseExpr
                << "` expects a PrimExpr value, but got "
@@ -144,59 +143,52 @@ static constexpr const char *kPassProfileThresholdMs =
  * assemble multiple environment-allocated tensors into an ffi.Array without
  * routing their shapes or handles back through Python.
  */
-TVM_DLL const Op &tvm_ffi_call_with_result();
+TVM_TIRX_DLL const Op &tvm_ffi_call_with_result();
 
 /*! \brief Elementwise clamp with NaN propagation and single-evaluation
  * operands. */
-TVM_DLL const Op &clamp();
+TVM_TIRX_DLL const Op &clamp();
 
 /*! \brief Shared clamp expansion for backends without a device helper. */
-TVM_DLL PrimExpr LowerClamp(PrimExpr expr);
+TVM_TIRX_DLL PrimExpr LowerClamp(PrimExpr expr);
 
 /*!
  * \brief TileLang intrinsic for carrying pointer access metadata in frontend.
  *
- * Unlike `tir.builtin.tvm_access_ptr`, this op keeps a `BufferLoad` argument so
- * downstream analysis can recover the referenced `Buffer` (and its strides /
+ * This native pointer operation keeps a `TensorLoad` argument so
+ * downstream analysis can recover the referenced `TensorVar` (and its strides /
  * scope), while also carrying the access mask required by synchronization and
  * safety checks.
  *
- * The frontend is expected to lower this op to `tir.builtin.tvm_access_ptr`
- * once the additional metadata is no longer needed.
+ * The access-pointer lowering emits native address_of/typed pointer operations
+ * after tensor layouts and aliases have been materialized.
  *
  * access_ptr(base_load, extent, rw_mask)
  *
- * - base_load: BufferLoad whose indices denote the base element address.
+ * - base_load: TensorLoad whose indices denote the base element address.
  * - extent: 1D extent in elements (same meaning as tvm_access_ptr arg3).
  * - rw_mask: 1=read, 2=write, 3=read-write.
  */
-TVM_DLL const Op &access_ptr();
+TVM_TIRX_DLL const Op &access_ptr();
 
 /*!
- * \brief Tile memory region descriptor: a transport-only bridge that carries
- * a BufferRegion (plus an access mask) through Call args.
- *
- * Why tl.region instead of passing BufferRegion directly?
- * - When a BufferRegion is passed as a call argument through call_intrin/FFI,
- *   the Python->C++ conversion lowers it to a BufferLoad(indices), encoding a
- *   contiguous interval as Ramp(base, stride, lanes).
- * - Ramp lanes may only be a constant or vscale*k, so a dynamic extent
- *   (e.g. H1 - H0) cannot be encoded as lanes, and BufferLoad carries no
- *   per-axis extents, so downstream tile operators (tl.copy, tl.reduce, ...)
- *   cannot losslessly recover dynamic extents from a BufferLoad alone.
- * - tl.region packs buffer + mins (BufferLoad indices) + explicit extents
- *   into Call args; the backend reconstructs a BufferRegion faithfully via
- *   NormalizeToBufferRegion / NormalizeToAccessRegion (op/utils.h).
- *
- * region(BufferLoad(buffer, [min_0, ..., min_{n-1}]), access_mask,
- *        extent_0, ..., extent_{n-1})
- *
- * - args[0]: BufferLoad whose indices are the per-axis minima.
- * - args[1]: constant int access mask (1=read, 2=write, 3=read-write).
- *   Transport metadata only; it does not affect lowering.
- * - args[2 + i]: extent of axis i (may be a dynamic PrimExpr).
+ * \brief Typed raw pointer interval: ptr_access(pointer, element_offset,
+ * extent, rw_mask). The result preserves pointer->ty, and the offset/extent
+ * count pointee elements. Interval metadata remains explicit until access
+ * analysis and alias/layout lowering have consumed it; the address itself is
+ * pure.
  */
-TVM_DLL const Op &region();
+TVM_TIRX_DLL const Op &ptr_access();
+
+/*!
+ * \brief Lookup the historical tl.region operation name.
+ *
+ * Native tile-op operands carry TensorRegion directly, including dynamic
+ * per-axis minima and extents. The frontend does not turn TensorRegion into a
+ * TensorLoad or this legacy Call. NormalizeToTensorRegion accepts TensorVar,
+ * TensorRegion and TensorLoad; it does not decode tl.region bridge calls.
+ */
+TVM_TIRX_DLL const Op &region();
 
 /*!
  * \brief Placeholder for the thread index along one launch axis.
@@ -209,16 +201,16 @@ TVM_DLL const Op &region();
  *
  * int32 launch_thread_idx(axis)
  */
-TVM_DLL const Op &launch_thread_idx();
+TVM_TIRX_DLL const Op &launch_thread_idx();
 
 // Packed x2 element-wise math (float32x2, bfloat16x2, float16x2)
-TVM_DLL const Op &add2();
-TVM_DLL const Op &sub2();
-TVM_DLL const Op &mul2();
-TVM_DLL const Op &fma2();
-TVM_DLL const Op &max2();
-TVM_DLL const Op &min2();
-TVM_DLL const Op &abs2();
+TVM_TIRX_DLL const Op &add2();
+TVM_TIRX_DLL const Op &sub2();
+TVM_TIRX_DLL const Op &mul2();
+TVM_TIRX_DLL const Op &fma2();
+TVM_TIRX_DLL const Op &max2();
+TVM_TIRX_DLL const Op &min2();
+TVM_TIRX_DLL const Op &abs2();
 
 // These historical PTX-named IR markers are shared by CUDA and ROCm
 // lowerings. Keep their registered names stable for frontend compatibility.
@@ -229,7 +221,7 @@ TVM_DLL const Op &abs2();
  * mbarrier_wait_parity(mbarrier, parity)
  *
  */
-TVM_DLL const Op &mbarrier_wait_parity();
+TVM_TIRX_DLL const Op &mbarrier_wait_parity();
 
 /*!
  * \brief tvm intrinsics for mbarrier expect tx
@@ -237,7 +229,7 @@ TVM_DLL const Op &mbarrier_wait_parity();
  * mbarrier_expect_tx(mbarrier, transaction_bytes)
  *
  */
-TVM_DLL const Op &mbarrier_expect_tx();
+TVM_TIRX_DLL const Op &mbarrier_expect_tx();
 
 /*!
  * \brief tvm intrinsics for stmatrix
@@ -245,7 +237,7 @@ TVM_DLL const Op &mbarrier_expect_tx();
  * ptx_ldmatrix(transposed, num, shared_addr, int32_values...)
  *
  */
-TVM_DLL const Op &ptx_stmatrix();
+TVM_TIRX_DLL const Op &ptx_stmatrix();
 
 /*!
  * \brief TileLang intrinsic for PTX async copy from global to shared memory
@@ -254,7 +246,7 @@ TVM_DLL const Op &ptx_stmatrix();
  * ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate)
  *
  */
-TVM_DLL const Op &ptx_cp_async();
+TVM_TIRX_DLL const Op &ptx_cp_async();
 
 /*!
  * \brief Pack two b16 value into a b32 value
@@ -262,7 +254,7 @@ TVM_DLL const Op &ptx_cp_async();
  * int32 pack_b16(b16_value, b16_value)
  *
  */
-TVM_DLL const Op &pack_b16();
+TVM_TIRX_DLL const Op &pack_b16();
 
 /*!
  * \brief Annotation-only producer reg dealloc hint for warp specialization
@@ -270,7 +262,7 @@ TVM_DLL const Op &pack_b16();
  * annotate_producer_reg_dealloc(num_reg)
  *
  */
-TVM_DLL const Op &annotate_producer_reg_dealloc();
+TVM_TIRX_DLL const Op &annotate_producer_reg_dealloc();
 
 /*!
  * \brief Annotation-only consumer reg alloc hint for warp specialization
@@ -278,7 +270,7 @@ TVM_DLL const Op &annotate_producer_reg_dealloc();
  * annotate_consumer_reg_alloc(num_reg)
  *
  */
-TVM_DLL const Op &annotate_consumer_reg_alloc();
+TVM_TIRX_DLL const Op &annotate_consumer_reg_alloc();
 
 /*!
  * \brief No set reg hint for warp-specialized branched
@@ -286,7 +278,7 @@ TVM_DLL const Op &annotate_consumer_reg_alloc();
  * no_set_max_nreg()
  *
  */
-TVM_DLL const Op &no_set_max_nreg();
+TVM_TIRX_DLL const Op &no_set_max_nreg();
 
 /*!
  * \brief Wait the previous wgmma to finish
@@ -294,7 +286,7 @@ TVM_DLL const Op &no_set_max_nreg();
  * wait_wgmma(num_mma)
  *
  */
-TVM_DLL const Op &wait_wgmma();
+TVM_TIRX_DLL const Op &wait_wgmma();
 
 /*!
  * \brief Synchronize all threads in a grid
@@ -302,7 +294,7 @@ TVM_DLL const Op &wait_wgmma();
  * sync_grid()
  *
  */
-TVM_DLL const Op &sync_grid();
+TVM_TIRX_DLL const Op &sync_grid();
 
 /*!
  * \brief Synchronize all threads in a warp
@@ -310,20 +302,20 @@ TVM_DLL const Op &sync_grid();
  * sync_warp()
  *
  */
-TVM_DLL const Op &sync_warp();
+TVM_TIRX_DLL const Op &sync_warp();
 
 // RNG ops. #2855 registers these under the CUDA dialect, but this fork also
 // consumes them from backend-neutral code (loop_vectorize) and the Ascend
 // codegen/SIMT RNG path, so declare them here too (registration stays in
 // cuda/op/builtin.cc; a redeclaration is harmless).
-TVM_DLL const Op &rng_init();
-TVM_DLL const Op &rng_rand();
-TVM_DLL const Op &rng_rand_float();
+TVM_TIRX_DLL const Op &rng_init();
+TVM_TIRX_DLL const Op &rng_rand();
+TVM_TIRX_DLL const Op &rng_rand_float();
 
 // device_assert lowers through the Ascend codegen (toolkit assert()) as well as
 // CUDA; #2855 files it under the CUDA dialect, so redeclare for asc codegen.
-TVM_DLL const Op &device_assert();
-TVM_DLL const Op &device_assert_with_msg();
+TVM_TIRX_DLL const Op &device_assert();
+TVM_TIRX_DLL const Op &device_assert_with_msg();
 
 /*!
  * \brief Warp-vote: non-zero if ANY active lane in the mask has a non-zero
@@ -332,7 +324,7 @@ TVM_DLL const Op &device_assert_with_msg();
  *
  * int32 any_sync(mask, predicate)
  */
-TVM_DLL const Op &any_sync();
+TVM_TIRX_DLL const Op &any_sync();
 
 /*!
  * \brief Warp-vote: non-zero only if ALL active lanes in the mask have a
@@ -341,7 +333,7 @@ TVM_DLL const Op &any_sync();
  *
  * int32 all_sync(mask, predicate)
  */
-TVM_DLL const Op &all_sync();
+TVM_TIRX_DLL const Op &all_sync();
 
 /*!
  * \brief Warp-ballot: bitmask of lanes in the mask with non-zero predicate.
@@ -353,7 +345,7 @@ TVM_DLL const Op &all_sync();
  *
  * uint64 ballot_sync(mask, predicate)
  */
-TVM_DLL const Op &ballot_sync();
+TVM_TIRX_DLL const Op &ballot_sync();
 
 /*!
  * \brief Full-warp / full-wavefront ballot. Equivalent to
@@ -361,7 +353,7 @@ TVM_DLL const Op &ballot_sync();
  *
  * uint64 ballot(predicate)
  */
-TVM_DLL const Op &ballot();
+TVM_TIRX_DLL const Op &ballot();
 
 /*!
  * \brief Bitmask of currently active (non-exited) lanes. Lowers to
@@ -370,7 +362,7 @@ TVM_DLL const Op &ballot();
  *
  * uint64 activemask()
  */
-TVM_DLL const Op &activemask();
+TVM_TIRX_DLL const Op &activemask();
 
 /*!
  * \brief Block barrier that returns the number of threads whose predicate
@@ -379,7 +371,7 @@ TVM_DLL const Op &activemask();
  *
  * int32 syncthreads_count(predicate)
  */
-TVM_DLL const Op &syncthreads_count();
+TVM_TIRX_DLL const Op &syncthreads_count();
 
 /*!
  * \brief Block barrier that returns non-zero only if ALL threads have a
@@ -388,7 +380,7 @@ TVM_DLL const Op &syncthreads_count();
  *
  * int32 syncthreads_and(predicate)
  */
-TVM_DLL const Op &syncthreads_and();
+TVM_TIRX_DLL const Op &syncthreads_and();
 
 /*!
  * \brief Block barrier that returns non-zero if ANY thread has a non-zero
@@ -396,7 +388,7 @@ TVM_DLL const Op &syncthreads_and();
  *
  * int32 syncthreads_or(predicate)
  */
-TVM_DLL const Op &syncthreads_or();
+TVM_TIRX_DLL const Op &syncthreads_or();
 
 /*!
  * \brief Warp shuffle: broadcast `value` from `src_lane` within each subgroup
@@ -406,7 +398,7 @@ TVM_DLL const Op &syncthreads_or();
  *
  * T shfl_sync(mask, value, src_lane, width)
  */
-TVM_DLL const Op &shfl_sync();
+TVM_TIRX_DLL const Op &shfl_sync();
 
 /*!
  * \brief Warp shuffle (XOR-swap variant). Lowers to `__shfl_xor_sync` on CUDA
@@ -414,7 +406,7 @@ TVM_DLL const Op &shfl_sync();
  *
  * T shfl_xor_sync(mask, value, lane_mask, width)
  */
-TVM_DLL const Op &shfl_xor_sync();
+TVM_TIRX_DLL const Op &shfl_xor_sync();
 
 /*!
  * \brief Warp shuffle (shift-down variant). Lowers to `__shfl_down_sync` on
@@ -422,7 +414,7 @@ TVM_DLL const Op &shfl_xor_sync();
  *
  * T shfl_down_sync(mask, value, delta, width)
  */
-TVM_DLL const Op &shfl_down_sync();
+TVM_TIRX_DLL const Op &shfl_down_sync();
 
 /*!
  * \brief Warp shuffle (shift-up variant). Lowers to `__shfl_up_sync` on CUDA
@@ -430,7 +422,7 @@ TVM_DLL const Op &shfl_down_sync();
  *
  * T shfl_up_sync(mask, value, delta, width)
  */
-TVM_DLL const Op &shfl_up_sync();
+TVM_TIRX_DLL const Op &shfl_up_sync();
 
 /*!
  * \brief Warp match-any: returns a mask of lanes in `mask` whose `value`
@@ -439,7 +431,7 @@ TVM_DLL const Op &shfl_up_sync();
  *
  * uint32 match_any_sync(mask, value)
  */
-TVM_DLL const Op &match_any_sync();
+TVM_TIRX_DLL const Op &match_any_sync();
 
 /*!
  * \brief Warp match-all: returns `mask` if all lanes in `mask` agree on
@@ -449,7 +441,7 @@ TVM_DLL const Op &match_any_sync();
  *
  * uint32 match_all_sync(mask, value)
  */
-TVM_DLL const Op &match_all_sync();
+TVM_TIRX_DLL const Op &match_all_sync();
 
 /*!
  * \brief tvm intrinsic for loop continue
@@ -457,7 +449,7 @@ TVM_DLL const Op &match_all_sync();
  * loop_break()
  *
  */
-TVM_DLL const Op &loop_break();
+TVM_TIRX_DLL const Op &loop_break();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic addition.
@@ -465,7 +457,7 @@ TVM_DLL const Op &loop_break();
  *  This op is used to represent an element-wise atomic add operation in
  * tilelang.
  */
-TVM_DLL const Op &atomic_add_elem_op();
+TVM_TIRX_DLL const Op &atomic_add_elem_op();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic addition with return value.
@@ -473,7 +465,7 @@ TVM_DLL const Op &atomic_add_elem_op();
  *  This op is used to represent an element-wise atomic add operation in
  * tilelang that returns the previous value.
  */
-TVM_DLL const Op &atomic_add_ret_elem_op();
+TVM_TIRX_DLL const Op &atomic_add_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for vectorized (x2) atomic addition.
@@ -481,7 +473,7 @@ TVM_DLL const Op &atomic_add_ret_elem_op();
  *  This op is used to represent a vectorized atomic add operation (2 elements)
  * in tilelang.
  */
-TVM_DLL const Op &atomic_addx2_elem_op();
+TVM_TIRX_DLL const Op &atomic_addx2_elem_op();
 
 /*!
  * \brief tilelang intrinsic for vectorized (x2) atomic addition with return
@@ -490,7 +482,7 @@ TVM_DLL const Op &atomic_addx2_elem_op();
  *  This op is used to represent a vectorized atomic add operation (2 elements)
  * in tilelang that returns the previous packed value.
  */
-TVM_DLL const Op &atomic_addx2_ret_elem_op();
+TVM_TIRX_DLL const Op &atomic_addx2_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for vectorized (x4) atomic addition.
@@ -498,7 +490,7 @@ TVM_DLL const Op &atomic_addx2_ret_elem_op();
  *  This op is used to represent a vectorized atomic add operation (4 elements)
  * in tilelang.
  */
-TVM_DLL const Op &atomic_addx4_elem_op();
+TVM_TIRX_DLL const Op &atomic_addx4_elem_op();
 
 /*!
  * \brief tilelang intrinsic for vectorized (x4) atomic addition with return
@@ -507,21 +499,21 @@ TVM_DLL const Op &atomic_addx4_elem_op();
  *  This op is used to represent a vectorized atomic add operation (4 elements)
  * in tilelang that returns the previous packed value.
  */
-TVM_DLL const Op &atomic_addx4_ret_elem_op();
+TVM_TIRX_DLL const Op &atomic_addx4_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for atomic load.
  *
  *  This op is used to represent an atomic load operation in tilelang.
  */
-TVM_DLL const Op &atomic_load_elem_op();
+TVM_TIRX_DLL const Op &atomic_load_elem_op();
 
 /*!
  * \brief tilelang intrinsic for atomic store.
  *
  *  This op is used to represent an atomic store operation in tilelang.
  */
-TVM_DLL const Op &atomic_store_elem_op();
+TVM_TIRX_DLL const Op &atomic_store_elem_op();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic bitwise-or.
@@ -529,7 +521,7 @@ TVM_DLL const Op &atomic_store_elem_op();
  *  This op is used to represent an element-wise atomic or operation in
  * tilelang.
  */
-TVM_DLL const Op &atomic_or_elem_op();
+TVM_TIRX_DLL const Op &atomic_or_elem_op();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic maximum.
@@ -537,7 +529,7 @@ TVM_DLL const Op &atomic_or_elem_op();
  *  This op is used to represent an element-wise atomic max operation in
  * tilelang.
  */
-TVM_DLL const Op &atomic_max_elem_op();
+TVM_TIRX_DLL const Op &atomic_max_elem_op();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic maximum with return value.
@@ -545,7 +537,7 @@ TVM_DLL const Op &atomic_max_elem_op();
  *  This op is used to represent an element-wise atomic max operation in
  * tilelang that returns the previous value.
  */
-TVM_DLL const Op &atomic_max_ret_elem_op();
+TVM_TIRX_DLL const Op &atomic_max_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic minimum.
@@ -553,7 +545,7 @@ TVM_DLL const Op &atomic_max_ret_elem_op();
  *  This op is used to represent an element-wise atomic min operation in
  * tilelang.
  */
-TVM_DLL const Op &atomic_min_elem_op();
+TVM_TIRX_DLL const Op &atomic_min_elem_op();
 
 /*!
  * \brief tilelang intrinsic for element-wise atomic minimum with return value.
@@ -561,32 +553,32 @@ TVM_DLL const Op &atomic_min_elem_op();
  *  This op is used to represent an element-wise atomic min operation in
  * tilelang that returns the previous value.
  */
-TVM_DLL const Op &atomic_min_ret_elem_op();
+TVM_TIRX_DLL const Op &atomic_min_ret_elem_op();
 
 /*!
  * \brief tilelang intrinsic for warp reduction sum.
  */
-TVM_DLL const Op &warp_reduce_sum();
+TVM_TIRX_DLL const Op &warp_reduce_sum();
 
 /*!
  * \brief tilelang intrinsic for warp reduction max.
  */
-TVM_DLL const Op &warp_reduce_max();
+TVM_TIRX_DLL const Op &warp_reduce_max();
 
 /*!
  * \brief tilelang intrinsic for warp reduction min.
  */
-TVM_DLL const Op &warp_reduce_min();
+TVM_TIRX_DLL const Op &warp_reduce_min();
 
 /*!
  * \brief tilelang intrinsic for warp reduction bitand.
  */
-TVM_DLL const Op &warp_reduce_bitand();
+TVM_TIRX_DLL const Op &warp_reduce_bitand();
 
 /*!
  * \brief tilelang intrinsic for warp reduction bitor.
  */
-TVM_DLL const Op &warp_reduce_bitor();
+TVM_TIRX_DLL const Op &warp_reduce_bitor();
 
 /*!
  * \brief tilelang intrinsic for CUDA/HIP read-only cache load (__ldg).
@@ -599,11 +591,11 @@ TVM_DLL const Op &warp_reduce_bitor();
  *  Usage from TVMScript:
  *    y[i] = T.__ldg(x[i])
  *
- *  The op takes one argument preferred as a BufferLoad identifying the
- *  source element; alternatively, backends may support passing a Buffer and
+ *  The op takes one argument preferred as a TensorLoad identifying the
+ *  source element; alternatively, backends may support passing a TensorVar and
  *  index expression.
  */
-TVM_DLL const Op &__ldg();
+TVM_TIRX_DLL const Op &__ldg();
 
 } // namespace tl
 } // namespace tvm

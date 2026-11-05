@@ -6,17 +6,17 @@
 #ifndef TVM_TL_METAL_OP_BUILTIN_H_
 #define TVM_TL_METAL_OP_BUILTIN_H_
 
-#include "op/builtin.h"
+#include <tvm/ir/op.h>
 
 namespace tvm {
 namespace tl {
 
 // Metal cooperative tensor operations.
 
-TVM_DLL const Op &cooperative_tensor_fill();
-TVM_DLL const Op &cooperative_tensor_load();
-TVM_DLL const Op &cooperative_tensor_store();
-TVM_DLL const Op &cooperative_tensor_multiply_accumulate();
+TVM_TIRX_DLL const Op &cooperative_tensor_fill();
+TVM_TIRX_DLL const Op &cooperative_tensor_load();
+TVM_TIRX_DLL const Op &cooperative_tensor_store();
+TVM_TIRX_DLL const Op &cooperative_tensor_multiply_accumulate();
 
 } // namespace tl
 } // namespace tvm

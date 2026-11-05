@@ -4,7 +4,7 @@ from tilelang import language as T
 
 
 @tilelang.testing.requires_cuda
-def test_issue_1810_l2_persistent_float16_host_stub_no_half(monkeypatch):
+def test_issue_1810_l2_persistent_float16_host_stub_no_half(monkeypatch, tmp_path):
     """Regression for issue #1810.
 
     `annotate_l2_hit_ratio` lowers to CUDA stream access policy window calls.
@@ -24,8 +24,11 @@ def test_issue_1810_l2_persistent_float16_host_stub_no_half(monkeypatch):
     source = kernel.get_host_source()
     assert "__tvm_cuda_stream_set_access_policy_window_packed" in source
     assert "__tvm_cuda_stream_reset_access_policy_window_packed" in source
-    assert "half*" not in source
-    assert "((half*)" not in source
+    # TileLang's native C host can declare half storage itself. Check the
+    # original failure boundary: the actual host source must compile and link.
+    library = tmp_path / "l2_policy.so"
+    kernel.export_library(str(library))
+    assert library.is_file()
 
 
 if __name__ == "__main__":

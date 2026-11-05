@@ -1,7 +1,7 @@
 """Tests for the lexical_alloc_scope feature.
 
 Verifies that:
-1. LowerOpaqueBlock inserts AttrStmt("lexical_alloc_scope") for blocks
+1. LowerOpaqueBlock creates native tl.lexical_scope with explicit_alloc_scope for blocks
    explicitly marked for lexical allocation scoping.
 2. Unmarked blocks do NOT receive the marker by heuristic inference.
 3. gemm_py-produced blocks are explicitly marked and survive as scopes.
@@ -13,38 +13,34 @@ import tilelang as tl
 import tilelang.language as T
 from tilelang import tvm
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
-from tvm.tirx.stmt_functor import post_order_visit
+from tvm_tirx import ir
+from tilelang.testing.ir import collect_nodes
 import tilelang.testing
 
 
+def _explicit_scopes(func):
+    return [
+        node
+        for node in collect_nodes(func, ir.RegionStmt)
+        if node.op.name == "tl.lexical_scope" and node.attrs.get("explicit_alloc_scope", False)
+    ]
+
+
 def _count_attrs(func, attr_key):
-    """Count occurrences of a specific AttrStmt key in the function body."""
-    count = [0]
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == attr_key:
-            count[0] += 1
-
-    post_order_visit(func.body, _visit)
-    return count[0]
+    """Count the native scope carrying the old explicit-allocation intent."""
+    assert attr_key == "lexical_alloc_scope"
+    return len(_explicit_scopes(func))
 
 
 def _count_allocate_inside_attr(func, attr_key):
-    """Count flat AllocBuffer nodes nested inside the given AttrStmt."""
-    count = [0]
-    inside = [False]
-
-    def _visit(node):
-        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == attr_key:
-            old = inside[0]
-            inside[0] = True
-            post_order_visit(node.body, _visit)
-            inside[0] = old
-        elif isinstance(node, tvm.tirx.AllocBuffer) and inside[0]:
-            count[0] += 1
-
-    post_order_visit(func.body, _visit)
-    return count[0]
+    """Count distinct native tensor allocation definitions inside explicit scopes."""
+    assert attr_key == "lexical_alloc_scope"
+    allocations = set()
+    for scope in _explicit_scopes(func):
+        for bind in collect_nodes(scope.body, ir.Bind):
+            if isinstance(bind.value, ir.Call) and bind.value.op.name == "tirx.alloc_tensor":
+                allocations.add(bind.var)
+    return len(allocations)
 
 
 def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
@@ -300,12 +296,16 @@ def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
 
     mod = _apply_lower_opaque_pipeline(func, target, pass_configs=pass_configs)
     lowered = mod["main"]
-    lowered_script = lowered.script(show_meta=False)
-
-    assert 'T.attr(0, "lexical_alloc_scope", 1)\n    C_local = T.decl_buffer' not in lowered_script, (
-        "Unexpected top-level lexical_alloc_scope around fragment-backed C_local"
-    )
-    assert lowered_script.count("lexical_alloc_scope") >= 2, "Expected inner GEMM lexical scopes to remain in the disable-ws pipeline"
+    scopes = _explicit_scopes(lowered)
+    # Compare scope membership, independent of printer variable spellings.
+    for scope in scopes:
+        direct_allocations = [
+            stmt.var.name
+            for stmt in scope.body.seq
+            if isinstance(stmt, ir.Bind) and isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tirx.alloc_tensor"
+        ]
+        assert "C_local" not in direct_allocations, "Unexpected explicit scope around fragment-backed C_local"
+    assert len(scopes) >= 2, "Expected inner GEMM lexical scopes to remain in the disable-ws pipeline"
 
 
 # ---------------------------------------------------------------------------

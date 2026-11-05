@@ -253,8 +253,8 @@ TL_DEVICE float2 abs2(float2 a) {
 // A packed bfloat16x2 word layout:
 //   bits [15: 0] = first  bfloat16 (sign at bit 15)
 //   bits [31:16] = second bfloat16 (sign at bit 31)
-// These overloads are required by the HIP codegen's ShuffleNode packing path
-// (VisitExpr_ ShuffleNode emits uint1{__pack_bfloat162(a, b)}).
+// These overloads are required by the HIP codegen's ShuffleObj packing path
+// (VisitExpr_ ShuffleObj emits uint1{__pack_bfloat162(a, b)}).
 TL_DEVICE uint1 abs2(uint1 val) {
   // Clear both sign bits simultaneously.
   return uint1{val.x & 0x7FFF7FFFu};

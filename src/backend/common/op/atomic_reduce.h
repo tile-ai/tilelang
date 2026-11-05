@@ -6,13 +6,14 @@
 #ifndef TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
 #define TVM_TL_BACKEND_COMMON_OP_ATOMIC_REDUCE_H_
 
+#include "ir/analyzer.h"
 #include "op/atomic_reduce.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/ir/cast.h>
 
 #include "layout/layout.h"
 #include "op/builtin.h"
+#include "op/parallel.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
@@ -27,41 +28,43 @@ namespace tl {
 namespace backend {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace atomic_reduce {
 
-inline Array<IterVar> MakeIterVars(const AtomicOpBaseNode &op) {
-  Array<IterVar> loop_vars;
+inline Array<LayoutIterVar> MakeIterVars(const AtomicOpBaseNode &op) {
+  Array<LayoutIterVar> loop_vars;
   size_t idx = 0;
   for (size_t i = 0; i < op.dst_range.size(); i++) {
-    if (is_one(op.dst_range[i]->extent)) {
+    if (IsOne(op.dst_range[i]->extent)) {
       continue;
     }
-    Var var = Var(std::string{char('i' + idx)}, op.dst_range[i]->extent->dtype);
+    PrimVar var =
+        PrimVar(std::string{char('i' + idx)}, op.dst_range[i]->extent.ty());
     idx++;
-    loop_vars.push_back(
-        {Range(0, op.dst_range[i]->extent), var, IterVarType::kDataPar});
+    loop_vars.push_back({Range(0, op.dst_range[i]->extent), var});
   }
 
   if (loop_vars.empty()) {
-    Var var = Var("i");
-    loop_vars.push_back({Range(0, 1), var, IterVarType::kDataPar});
+    PrimVar var = PrimVar("i", PrimType::Int(32));
+    loop_vars.push_back({Range(0, 1), var});
   }
 
   return loop_vars;
 }
 
 inline Array<PrimExpr> MakeIndices(const AtomicOpBaseNode &op,
-                                   const Array<IterVar> &ivs, int src_dst) {
+                                   const Array<LayoutIterVar> &ivs,
+                                   int src_dst) {
   Array<PrimExpr> indices;
   Array<Range> ranges = src_dst == 0 ? op.src_range : op.dst_range;
   size_t idx = 0;
   for (size_t i = 0; i < ranges.size(); i++) {
-    if (is_one(ranges[i]->extent)) {
-      indices.push_back(ranges[i]->min);
+    if (IsOne(ranges[i]->extent)) {
+      indices.push_back(ranges[i]->begin);
     } else {
-      indices.push_back(ranges[i]->min + ivs[idx]->var);
+      indices.push_back(ranges[i]->begin + ivs[idx]->var);
       idx++;
     }
   }
@@ -72,13 +75,14 @@ inline Array<PrimExpr> MakeIndices(const AtomicOpBaseNode &op,
   return indices;
 }
 
-inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
-  Array<IterVar> loop_vars = MakeIterVars(op);
+inline For MakeSIMTLoop(const AtomicOpBaseNode &op,
+                        sym::AnalyzerObj *analyzer) {
+  Array<LayoutIterVar> loop_vars = MakeIterVars(op);
   ICHECK(!loop_vars.empty()) << "MakeIterVars in AtomicOp should not return "
                                 "empty vars (at least 1 var)";
 
   for (const auto &iv : loop_vars) {
-    analyzer->Bind(iv->var, iv->dom);
+    BindAnalyzer(analyzer, iv->var, iv->dom);
   }
 
   ICHECK(loop_vars.size() <= op.dst_range.size())
@@ -87,44 +91,42 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
       << ", dst = " << op.dst->name;
 
   Array<PrimExpr> dst_indices = MakeIndices(op, loop_vars, 1);
-  Array<PrimExpr> new_args;
+  Array<Expr> new_args;
 
-  PrimExpr src_value_arg;
+  PrimExpr src_value_arg{ffi::UnsafeInit{}};
 
-  if (!op.src_value.defined()) {
+  if (!op.src_value.has_value()) {
     ICHECK(loop_vars.size() <= op.src_range.size())
         << "loop_vars.size() = " << loop_vars.size()
         << ", src_range.size() = " << op.src_range.size()
-        << ", src = " << op.src->name << ", dst = " << op.dst->name;
+        << ", src = " << op.src.value()->name << ", dst = " << op.dst->name;
 
     Array<PrimExpr> src_indices = MakeIndices(op, loop_vars, 0);
-    src_value_arg = BufferLoad(op.src, src_indices);
+    src_value_arg = TensorLoad(op.src.value(), src_indices);
   } else {
-    src_value_arg = op.src_value;
+    src_value_arg = op.src_value.value();
   }
 
-  if (src_value_arg->dtype != op.dst->dtype) {
-    src_value_arg = Cast(op.dst->dtype, src_value_arg);
+  if (src_value_arg.ty() != op.dst.dtype()) {
+    src_value_arg = cast(src_value_arg, op.dst.dtype());
   }
 
-  DataType idx_dtype =
-      dst_indices.empty() ? DataType::Int(32) : dst_indices[0].dtype();
-  PrimExpr dst_ptr =
-      Call(DataType::Handle(), tl::access_ptr(),
-           {BufferLoad(op.dst, dst_indices), make_const(idx_dtype, 1),
-            make_const(DataType::Int(32), 3)});
+  PrimType idx_dtype =
+      dst_indices.empty() ? PrimType::Int(32) : dst_indices[0].ty();
+  Expr dst_ptr = MakeTensorAccessPtr(TensorLoad(op.dst, dst_indices),
+                                     MakeConst(idx_dtype, 1), 3);
 
   new_args.push_back(dst_ptr);
   new_args.push_back(src_value_arg);
-  new_args.push_back(op.GetMemoryOrder());
+  new_args.push_back(IntImm(PrimType::Int(32), op.GetMemoryOrder()));
 
-  Call atomic_call =
-      tvm::tirx::Call(op.dst->dtype, op.GetElemOp(), new_args, op.annotations);
+  Call atomic_call = MakeAnnotatedCall(PrimType::Void(), op.GetElemOp(),
+                                       new_args, op.annotations);
 
-  Stmt body = tvm::tirx::Evaluate(atomic_call);
+  Stmt body = Evaluate(atomic_call);
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
-    Map<String, ObjectRef> loop_annotations;
+    Map<String, Any> loop_annotations;
     if (i == 0) {
       if (op.annotations.count(attr::kCoalescedWidth)) {
         loop_annotations.Set(attr::kCoalescedWidth,
@@ -132,25 +134,27 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
       }
     }
 
-    body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body, std::nullopt, loop_annotations);
+    body = For(loop_vars[i]->var, IntImm(loop_vars[i]->var.ty(), 0),
+               loop_vars[i]->dom->extent, IntImm(loop_vars[i]->var.ty(), 1),
+               ForKind::kParallel, SeqStmt(body), loop_annotations);
   }
-  return Downcast<For>(body);
+  return (body).template as_or_throw<For>();
 }
 
 inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
                                  const LayoutInferArgs &layout_args,
                                  InferLevel) {
-  if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
-    if (layout_args.layout_map.count(op.src) &&
+  if (op.src.has_value() && IsFragmentBuffer(op.src.value()) &&
+      IsFragmentBuffer(op.dst)) {
+    if (layout_args.layout_map.count(op.src.value()) &&
         layout_args.layout_map.count(op.dst)) {
-      Layout src_layout = layout_args.layout_map.at(op.src);
+      Layout src_layout = layout_args.layout_map.at(op.src.value());
       Layout dst_layout = layout_args.layout_map.at(op.dst);
       ICHECK(StructuralEqual()(src_layout, dst_layout))
           << "Atomic reduce requires src and dst to have the same layout, but "
              "got "
           << "src layout: " << src_layout << ", dst layout: " << dst_layout
-          << " for src buffer: " << op.src->name
+          << " for src buffer: " << op.src.value()->name
           << ", dst buffer: " << op.dst->name;
     }
   }
@@ -167,9 +171,10 @@ struct AtomicReduce {
   }
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     auto simt_loop = atomic_reduce::MakeSIMTLoop(op, analyzer);
-    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+    auto fused_loop =
+        (ParallelLoopFuser::Fuse(simt_loop)).template as_or_throw<For>();
     auto par_op = ParallelOp(fused_loop);
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
                                       InferLevel::kFree};
@@ -186,7 +191,8 @@ struct AtomicReduce {
     return LowerParallelLoop(
         fused_loop, loop_layout, lower_args.thread_index, analyzer,
         lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard(),
+        lower_args.target);
   }
 };
 

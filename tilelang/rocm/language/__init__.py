@@ -5,7 +5,7 @@ from __future__ import annotations
 from tilelang.language.common import *  # noqa: F401,F403
 from tilelang.language.common import __all__ as _COMMON_ALL
 
-from .intrinsics import *  # noqa: F401,F403
+from . import intrinsics as _intrinsics
 from .intrinsics import __all__ as _ROCM_ALL
 from .kernel import *  # noqa: F401,F403
 from .kernel import __all__ as _KERNEL_ALL
@@ -19,3 +19,13 @@ __tilelang_dialect__ = "rocm"
 __all__ = tuple(dict.fromkeys((*_COMMON_ALL, *_ROCM_ALL, *_KERNEL_ALL, *_GEMM_ALL)))
 
 del _COMMON_ALL, _ROCM_ALL, _KERNEL_ALL, _GEMM_ALL
+
+
+def __getattr__(name):
+    if name in _intrinsics.__all__:
+        return getattr(_intrinsics, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(set(globals()) | set(__all__))

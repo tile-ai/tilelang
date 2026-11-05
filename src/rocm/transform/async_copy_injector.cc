@@ -5,9 +5,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -17,21 +15,28 @@
 #include <optional>
 #include <vector>
 
+#include "ir/tensor_utils.h"
+#include "op/builtin.h"
+#include "op/native_intrinsic.h"
+#include "op/native_utils.h"
 #include "op/utils.h"
 #include "rocm/op/builtin.h"
 #include "rocm/transform/async_copy_injector.h"
-#include "tir/ir/buffer_common.h"
+#include <tvm/ir/prim/op.h>
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
-class ROCmAsyncCopyInjector : public StmtMutator {
+class ROCmAsyncCopyInjector : public StmtExprMutator {
 public:
   explicit ROCmAsyncCopyInjector(bool async_without_async_commit_wait)
       : async_without_async_commit_wait_(async_without_async_commit_wait) {}
+
+  using StmtExprMutator::Mutate_;
 
   bool InjectedROCmAsyncCopy() const { return injected_rocm_async_copy_; }
 
@@ -51,48 +56,69 @@ public:
     return SeqStmt(seq);
   }
 
-  Stmt VisitStmt_(const ForNode *op) final {
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
     // Track nested vectorized loop extents so we can decide whether an
     // element-wise copy has a legal final cp.async width after later loop
     // vectorization:
     //   for v in T.vectorized(k): tl.ptx_cp_async(dst, src, elem_count)
     // => tl.ptx_cp_async(dst_base, src_base, elem_count * k)
     //
-    // TileLang currently uses tl.ptx_cp_async as the async-copy IR marker.
-    // HIP codegen maps it to ROCm async-copy intrinsics. The final byte width
-    // is derived later from the access_ptr dtype, so subbyte dtypes such as
-    // int4/fp4/int2/int1 remain representable here.
+    // TileLang records logical element counts in tl.ptx_cp_async. HIP codegen
+    // derives the final ROCm byte width is derived later from the access_ptr
+    // dtype, so subbyte dtypes such as int4/fp4/int2/int1 remain representable
+    // here.
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
     if (op->kind == ForKind::kVectorized) {
-      const auto *extent_imm = op->extent.as<IntImmNode>();
+      PrimExpr extent = analyzer_->Simplify(LoopExtent(op));
+      const auto *extent_imm = extent.as<IntImmObj>();
       ICHECK(extent_imm)
           << "Vectorized loops must have constant extent, but got "
-          << op->extent;
-      int lanes = static_cast<int>(extent_imm->value);
+          << LoopExtent(op);
+      auto constant = extent_imm->value.as<int64_t>();
+      TVM_FFI_CHECK(constant && *constant >= 0 &&
+                        *constant <= std::numeric_limits<int>::max(),
+                    ValueError);
+      int lanes = static_cast<int>(*constant);
       if (lanes > 1 && current_vectorized_lanes_ <=
                            std::numeric_limits<int>::max() / lanes) {
         current_vectorized_lanes_ *= lanes;
-        active_vectorized_loops_.push_back({op->loop_var, lanes});
+        active_vectorized_loops_.push_back({op->var, lanes});
         pushed_vectorized_loop = true;
       }
     }
-    Stmt stmt = StmtMutator::VisitStmt_(op);
+    Stmt stmt =
+        StmtExprMutator::Mutate_(op, mode).ValueOrUnchanged(GetRef<Stmt>(op));
     if (pushed_vectorized_loop) {
       active_vectorized_loops_.pop_back();
     }
     current_vectorized_lanes_ = previous_vectorized_lanes;
+
+    // A later iteration can consume copies left pending by an earlier one.
+    // Flush the backedge of a mixed loop; a pure copy loop has no consumers
+    // and retains its single hoisted synchronization after the loop.
+    if (!UseExplicitAsyncSemantics() && pending_sync_copies_) {
+      For loop = stmt.as_or_throw<For>();
+      if (!AnalyzeCopyRegion(loop->body).is_pure_copy_region) {
+        Array<Stmt> body = loop->body->seq;
+        AppendSyncVisibility(&body, uncommitted_sync_copies_);
+        loop.CopyOnWrite()->body = SeqStmt(body);
+        pending_sync_copies_ = false;
+        uncommitted_sync_copies_ = false;
+        stmt = loop;
+      }
+    }
     return stmt;
   }
 
-  Optional<Stmt>
-  TryInjectROCmAsyncCopy(const BufferLoadNode *load,
-                         const BufferStoreNode *store, bool predicated = false,
-                         const PrimExpr &predicate_value = PrimExpr()) {
+  Optional<Stmt> TryInjectROCmAsyncCopy(
+      const TensorLoadObj *load, const TensorStoreObj *store,
+      bool predicated = false,
+      const PrimExpr &predicate_value = PrimExpr(ffi::UnsafeInit{})) {
     // Pipeline:
     // 1) Analyze source/destination indices and transfer width eligibility.
-    // 2) Build the async-copy IR marker with scalar/vectorized base offsets
-    //    when the eventual transfer byte width is representable.
+    // 2) Build tl.ptx_cp_async with scalar/vectorized base offsets when the
+    //    eventual ROCm byte width is representable.
     std::optional<CopyIndexInfo> index_info = PrepareCopyIndexInfo(load, store);
     if (!index_info.has_value()) {
       return Optional<Stmt>();
@@ -106,8 +132,10 @@ public:
       }
       return MakeCPAsyncStmtFromLoads(
           store,
-          /*dst_base_load=*/BufferLoad(store->buffer, store->indices),
-          /*src_base_load=*/BufferLoad(load->buffer, load->indices),
+          /*dst_base_load=*/
+          TensorLoad(store->dest.as_or_throw<TensorVar>(), store->indices),
+          /*src_base_load=*/
+          TensorLoad(load->source.as_or_throw<TensorVar>(), load->indices),
           /*num_elems=*/index_info->per_access_num_elems, predicated,
           predicate_value);
     }
@@ -116,7 +144,7 @@ public:
         ExtractVectorBaseIndices(load->indices);
     Optional<Array<PrimExpr>> dst_base_indices =
         ExtractVectorBaseIndices(store->indices);
-    if (!src_base_indices.defined() || !dst_base_indices.defined()) {
+    if (!src_base_indices.has_value() || !dst_base_indices.has_value()) {
       // If we can't extract base indices from vectorized accesses, fall back.
       if (predicated) {
         LOG(WARNING)
@@ -127,19 +155,24 @@ public:
     }
     return MakeCPAsyncStmtFromLoads(
         store,
-        /*dst_base_load=*/BufferLoad(store->buffer, dst_base_indices.value()),
-        /*src_base_load=*/BufferLoad(load->buffer, src_base_indices.value()),
+        /*dst_base_load=*/
+        TensorLoad(store->dest.as_or_throw<TensorVar>(),
+                   dst_base_indices.value()),
+        /*src_base_load=*/
+        TensorLoad(load->source.as_or_throw<TensorVar>(),
+                   src_base_indices.value()),
         /*num_elems=*/index_info->per_access_num_elems, predicated,
         predicate_value);
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
     if (UseExplicitAsyncSemantics()) {
-      return StmtMutator::VisitStmt_(op);
+      return StmtExprMutator::Mutate_(op, mode).ValueOrUnchanged(
+          GetRef<Stmt>(op));
     }
 
     // Insert commit+wait at statement boundaries to preserve synchronous
-    // semantics for normal global->shared BufferStore copies.
+    // semantics for normal global->shared TensorStore copies.
     //
     // Important: avoid flushing inside inner loop bodies just because there
     // are trailing no-op statements (e.g., Evaluate(0)) after the injected
@@ -167,31 +200,29 @@ public:
       // If we are carrying uncommitted injected cp.async into an explicit wait,
       // ensure they are committed so the wait actually covers them.
       if (sync_state.open_copy_region && sync_state.uncommitted_transfers &&
-          visited_info.analysis.wait > 0) {
+          visited_info.analysis.may_wait) {
         out.push_back(MakeCommitGroupStmt());
         sync_state.uncommitted_transfers = false;
       }
 
       out.push_back(visited_info.visited);
 
+      // These guarantees apply to copies entering the statement. Copies
+      // injected inside it have already been analyzed in execution order and
+      // may occur after its last commit or wait, so merge their exit state
+      // last.
+      if (visited_info.analysis.guarantees_commit) {
+        sync_state.uncommitted_transfers = false;
+      }
+      if (visited_info.analysis.guarantees_wait_all) {
+        sync_state.open_copy_region = false;
+        sync_state.uncommitted_transfers = false;
+      }
       if (visited_info.opens_copy_region) {
         sync_state.open_copy_region = true;
         sync_state.uncommitted_transfers =
             sync_state.uncommitted_transfers ||
             visited_info.has_uncommitted_transfers;
-      }
-
-      if (visited_info.analysis.commit > 0) {
-        // A commit closes the currently open group, so there are no longer any
-        // uncommitted injected cp.async transfers.
-        sync_state.uncommitted_transfers = false;
-      }
-
-      if (visited_info.analysis.wait > 0) {
-        // Any explicit wait serves as a synchronization boundary for injected
-        // synchronous copies.
-        sync_state.open_copy_region = false;
-        sync_state.uncommitted_transfers = false;
       }
     }
 
@@ -207,9 +238,10 @@ public:
     return SeqStmt(out);
   }
 
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
+  UnchangedOr<Stmt> Mutate_(const IfObj *op, InplaceMode mode) final {
     if (UseExplicitAsyncSemantics()) {
-      return StmtMutator::VisitStmt_(op);
+      return StmtExprMutator::Mutate_(op, mode).ValueOrUnchanged(
+          GetRef<Stmt>(op));
     }
 
     // Treat branches as separate control flow paths. We propagate pending
@@ -220,17 +252,19 @@ public:
 
     pending_sync_copies_ = pending_before;
     uncommitted_sync_copies_ = uncommitted_before;
-    Stmt then_case = this->VisitStmt(op->then_case);
+    SeqStmt then_case =
+        Mutate(op->then_case, mode).ValueOrUnchanged(op->then_case);
     bool pending_then = pending_sync_copies_;
     bool uncommitted_then = uncommitted_sync_copies_;
 
     bool pending_else = pending_before;
     bool uncommitted_else = uncommitted_before;
-    Optional<Stmt> else_case;
-    if (op->else_case.defined()) {
+    Optional<SeqStmt> else_case;
+    if (op->else_case.has_value()) {
       pending_sync_copies_ = pending_before;
       uncommitted_sync_copies_ = uncommitted_before;
-      else_case = this->VisitStmt(op->else_case.value());
+      else_case = Mutate(op->else_case.value(), mode)
+                      .ValueOrUnchanged(op->else_case.value());
       pending_else = pending_sync_copies_;
       uncommitted_else = uncommitted_sync_copies_;
     }
@@ -239,25 +273,29 @@ public:
     uncommitted_sync_copies_ = uncommitted_then || uncommitted_else;
 
     if (then_case.same_as(op->then_case) &&
-        (!else_case.defined() || else_case.same_as(op->else_case))) {
+        (!else_case.has_value() ||
+         else_case.value().same_as(op->else_case.value()))) {
       return GetRef<Stmt>(op);
     }
-    return IfThenElse(op->condition, then_case, else_case);
+    return If(op->condition, then_case, else_case);
   }
 
-  Stmt VisitStmt_(const BufferStoreNode *store) final {
-    if (!IsSharedBuffer(store->buffer)) {
-      return StmtMutator::VisitStmt_(store);
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *store,
+                            InplaceMode mode) final {
+    if (!IsSharedBuffer(store->dest.as_or_throw<TensorVar>())) {
+      return StmtExprMutator::Mutate_(store, mode)
+          .ValueOrUnchanged(GetRef<Stmt>(store));
     }
 
     Optional<PrimExpr> predicate = std::nullopt;
-    const BufferLoadNode *load =
+    const TensorLoadObj *load =
         MatchZeroFillBufferLoad(store->value, &predicate);
     if (load) {
       Optional<Stmt> injected = TryInjectROCmAsyncCopy(
-          load, store, predicate.defined(),
-          predicate.defined() ? predicate.value() : PrimExpr());
-      if (injected.defined()) {
+          load, store, predicate.has_value(),
+          predicate.has_value() ? predicate.value()
+                                : PrimExpr(ffi::UnsafeInit{}));
+      if (injected.has_value()) {
         injected_rocm_async_copy_ = true;
         if (!UseExplicitAsyncSemantics()) {
           pending_sync_copies_ = true;
@@ -267,7 +305,8 @@ public:
       }
     }
 
-    return StmtMutator::VisitStmt_(store);
+    return StmtExprMutator::Mutate_(store, mode)
+        .ValueOrUnchanged(GetRef<Stmt>(store));
   }
 
 private:
@@ -277,8 +316,8 @@ private:
 
   // A copy candidate represented after flattening source/destination indexing.
   struct CopyIndexInfo {
-    PrimExpr src_index;
-    PrimExpr dst_index;
+    PrimExpr src_index{ffi::UnsafeInit{}};
+    PrimExpr dst_index{ffi::UnsafeInit{}};
     int index_lanes{1};
     int per_access_num_elems{0};
   };
@@ -290,91 +329,83 @@ private:
   };
 
   struct ActiveVectorizedLoop {
-    Var loop_var;
+    PrimVar loop_var;
     int extent;
   };
 
   // ---- Copy candidate analysis helpers ----
-  static const BufferLoadNode *
+  static const TensorLoadObj *
   MatchZeroFillBufferLoad(const PrimExpr &value,
                           Optional<PrimExpr> *predicate) {
-    if (const auto *load = value.as<BufferLoadNode>()) {
+    if (const auto *load = value.as<TensorLoadObj>()) {
       return load;
     }
 
-    const auto *call = value.as<CallNode>();
-    if (!call || !call->op.same_as(builtin::if_then_else()) ||
-        !IsZeroBitPattern(call->args[2])) {
+    const auto *call = value.as<CallObj>();
+    if (!call || !call->op.same_as(Op::Get("prim.if_then_else")) ||
+        !IsZeroBitPattern(call->args[2].as_or_throw<PrimExpr>())) {
       return nullptr;
     }
 
-    const BufferLoadNode *load =
-        MatchZeroFillBufferLoad(call->args[1], predicate);
+    const TensorLoadObj *load = MatchZeroFillBufferLoad(
+        call->args[1].as_or_throw<PrimExpr>(), predicate);
     if (load == nullptr) {
       return nullptr;
     }
 
     *predicate =
-        predicate->defined()
-            ? Optional<PrimExpr>(And(call->args[0], predicate->value()))
-            : Optional<PrimExpr>(call->args[0]);
+        predicate->has_value()
+            ? Optional<PrimExpr>(And(call->args[0].as_or_throw<PrimExpr>(),
+                                     predicate->value()))
+            : Optional<PrimExpr>(call->args[0].as_or_throw<PrimExpr>());
     return load;
   }
 
   static Optional<PrimExpr>
-  FlattenToLinearOffset(const Buffer &buf, const Array<PrimExpr> &indices) {
-    // Convert N-D indices (potentially with axis_separators) into a single
-    // row-major linear element offset.
-    Array<PrimExpr> physical = buf.OffsetOf(indices);
-    Buffer flattened_buf = buf.GetFlattenedBuffer();
-    if (physical.size() != flattened_buf->shape.size() || physical.empty()) {
-      return Optional<PrimExpr>();
-    }
-
-    PrimExpr linear = physical[0];
-    for (size_t i = 1; i < physical.size(); ++i) {
-      linear = linear * flattened_buf->shape[i] + physical[i];
-    }
-    return linear;
+  FlattenToLinearOffset(const TensorVar &buf, const Array<PrimExpr> &indices) {
+    auto physical = buf.ty()->ElemOffset(indices);
+    if (physical.size() != 1)
+      return std::nullopt;
+    return physical[0];
   }
 
   std::optional<CopyIndexInfo>
-  PrepareCopyIndexInfo(const BufferLoadNode *load,
-                       const BufferStoreNode *store) {
-    if (!IsGlobalBuffer(load->buffer)) {
+  PrepareCopyIndexInfo(const TensorLoadObj *load, const TensorStoreObj *store) {
+    if (!IsGlobalBuffer(load->source.as_or_throw<TensorVar>())) {
       return std::nullopt;
     }
 
-    Optional<PrimExpr> src_index_opt =
-        FlattenToLinearOffset(load->buffer, load->indices);
-    Optional<PrimExpr> dst_index_opt =
-        FlattenToLinearOffset(store->buffer, store->indices);
-    if (!src_index_opt.defined() || !dst_index_opt.defined()) {
+    Optional<PrimExpr> src_index_opt = FlattenToLinearOffset(
+        load->source.as_or_throw<TensorVar>(), load->indices);
+    Optional<PrimExpr> dst_index_opt = FlattenToLinearOffset(
+        store->dest.as_or_throw<TensorVar>(), store->indices);
+    if (!src_index_opt.has_value() || !dst_index_opt.has_value()) {
       return std::nullopt;
     }
 
     PrimExpr src_index = src_index_opt.value();
     PrimExpr dst_index = dst_index_opt.value();
-    if (src_index->dtype.lanes() != dst_index->dtype.lanes()) {
+    if (src_index.ty().lanes() != dst_index.ty().lanes()) {
       // Not a straightforward vectorized copy; skip.
       return std::nullopt;
     }
 
-    const int index_lanes = src_index->dtype.lanes();
-    const int value_lanes = load->dtype.lanes();
+    const int index_lanes = src_index.ty().lanes();
+    const int value_lanes = load->ty.as_or_throw<PrimType>().lanes();
     if (value_lanes > 1 && index_lanes > 1 && value_lanes != index_lanes) {
       // Mismatched vector lane representations; be conservative.
       return std::nullopt;
     }
 
     const int effective_lanes = std::max(value_lanes, index_lanes);
-    const int per_access_bits = effective_lanes * load->dtype.bits();
+    const int per_access_bits =
+        effective_lanes * load->ty.as_or_throw<PrimType>().bits();
     const int total_bits = static_cast<int>(per_access_bits) *
                            static_cast<int>(current_vectorized_lanes_);
-    // The async-copy marker is byte-granular. `tl.ptx_cp_async` stores logical
-    // element counts, but we still need to know that the eventual vectorized
-    // transfer can map to a legal byte width without over-copying packed
-    // subbyte data.
+    // The ROCm async-copy marker is byte-granular. `tl.ptx_cp_async` stores
+    // logical element counts, but we still need to know that the eventual
+    // vectorized transfer can map to a legal byte width without over-copying
+    // packed subbyte data.
     if (total_bits % 8 != 0) {
       return std::nullopt;
     }
@@ -392,22 +423,22 @@ private:
   }
 
   static PrimExpr ExtractVectorBase(const PrimExpr &index) {
-    if (index.dtype().lanes() == 1) {
+    if (index.ty().lanes() == 1) {
       return index;
     }
-    if (const auto *broadcast = index.as<BroadcastNode>()) {
+    if (const auto *broadcast = index.as<BroadcastObj>()) {
       return broadcast->value;
     }
-    if (const auto *ramp = index.as<RampNode>()) {
-      if (!is_one(ramp->stride)) {
-        return PrimExpr();
+    if (const auto *ramp = index.as<RampObj>()) {
+      if (!IsOne(ramp->stride)) {
+        return PrimExpr(ffi::UnsafeInit{});
       }
       return ramp->base;
     }
 
-    const auto *add = index.as<AddNode>();
+    const auto *add = index.as<AddObj>();
     if (!add) {
-      return PrimExpr();
+      return PrimExpr(ffi::UnsafeInit{});
     }
 
     // Common pattern after flattening a vectorized N-D buffer access:
@@ -416,23 +447,23 @@ private:
     //   (ramp(vec_base, 1, lanes) + broadcast(base_offset))
     const PrimExpr &lhs = add->a;
     const PrimExpr &rhs = add->b;
-    if (const auto *lhs_ramp = lhs.as<RampNode>()) {
-      if (!is_one(lhs_ramp->stride)) {
-        return PrimExpr();
+    if (const auto *lhs_ramp = lhs.as<RampObj>()) {
+      if (!IsOne(lhs_ramp->stride)) {
+        return PrimExpr(ffi::UnsafeInit{});
       }
-      if (const auto *rhs_broadcast = rhs.as<BroadcastNode>()) {
-        return tirx::Add(lhs_ramp->base, rhs_broadcast->value);
-      }
-    }
-    if (const auto *rhs_ramp = rhs.as<RampNode>()) {
-      if (!is_one(rhs_ramp->stride)) {
-        return PrimExpr();
-      }
-      if (const auto *lhs_broadcast = lhs.as<BroadcastNode>()) {
-        return tirx::Add(rhs_ramp->base, lhs_broadcast->value);
+      if (const auto *rhs_broadcast = rhs.as<BroadcastObj>()) {
+        return prim::Add(lhs_ramp->base, rhs_broadcast->value);
       }
     }
-    return PrimExpr();
+    if (const auto *rhs_ramp = rhs.as<RampObj>()) {
+      if (!IsOne(rhs_ramp->stride)) {
+        return PrimExpr(ffi::UnsafeInit{});
+      }
+      if (const auto *lhs_broadcast = lhs.as<BroadcastObj>()) {
+        return prim::Add(rhs_ramp->base, lhs_broadcast->value);
+      }
+    }
+    return PrimExpr(ffi::UnsafeInit{});
   }
 
   static Optional<Array<PrimExpr>>
@@ -449,62 +480,62 @@ private:
     return base_indices;
   }
 
-  static PrimExpr MakeAccessPtrFromLoad(const BufferLoad &base_load, int extent,
-                                        int rw_mask) {
-    return Call(DataType::Handle(), tvm::tl::access_ptr(),
-                {base_load, IntImm(DataType::Int(32), extent),
-                 IntImm(DataType::Int(32), rw_mask)});
+  static Expr MakeAccessPtrFromLoad(const TensorLoad &base_load, int extent,
+                                    int rw_mask) {
+    return MakeTensorAccessPtr(base_load, IntImm::Int32(extent), rw_mask);
   }
 
   static Optional<Stmt>
-  MakeCPAsyncStmtFromLoads(const BufferStoreNode *store,
-                           const BufferLoad &dst_base_load,
-                           const BufferLoad &src_base_load, int num_elems,
+  MakeCPAsyncStmtFromLoads(const TensorStoreObj *store,
+                           const TensorLoad &dst_base_load,
+                           const TensorLoad &src_base_load, int num_elems,
                            bool predicated, const PrimExpr &predicate_value) {
-    PrimExpr dst_access_ptr =
+    Expr dst_access_ptr =
         MakeAccessPtrFromLoad(dst_base_load, num_elems, /*rw_mask=*/2);
-    PrimExpr src_access_ptr =
+    Expr src_access_ptr =
         MakeAccessPtrFromLoad(src_base_load, num_elems, /*rw_mask=*/1);
 
-    Array<PrimExpr> cp_async_args;
+    Array<Expr> cp_async_args;
     if (predicated) {
       cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems),
                        predicate_value};
     } else {
       cp_async_args = {dst_access_ptr, src_access_ptr, PrimExpr(num_elems)};
     }
-    return Evaluate(
-        Call(store->buffer->dtype, tvm::tl::ptx_cp_async(), cp_async_args));
+    return Evaluate(Call(PrimType::Void(), tvm::tl::ptx_cp_async(),
+                         cp_async_args, {}, {}, store->loc));
   }
 
   static Stmt MakeCommitGroupStmt() {
-    return Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+    return Evaluate(Call(PrimType::Void(), Op::Get("tl.ptx_commit_group"), {}));
   }
 
   static Stmt MakeWaitGroupStmt(int n) {
-    return Evaluate(Call(DataType::Handle(), builtin::ptx_wait_group(),
-                         {IntImm(DataType::Int(32), n)}));
+    return Evaluate(Call(PrimType::Void(), Op::Get("tl.ptx_wait_group"),
+                         {IntImm(PrimType::Int(32), n)}));
   }
 
   // ---- Vectorized-offset contiguity helpers ----
   static bool TryGetConstInt64(const PrimExpr &expr, int64_t *value) {
-    if (const auto *imm = expr.as<IntImmNode>()) {
-      *value = imm->value;
-      return true;
+    if (const auto *imm = expr.as<IntImmObj>()) {
+      if (auto constant = imm->value.as<int64_t>()) {
+        *value = *constant;
+        return true;
+      }
     }
     return false;
   }
 
   bool HasUnitStrideForVectorizedLoop(const PrimExpr &expr,
                                       const ActiveVectorizedLoop &loop) {
-    PrimExpr prev = analyzer_.Simplify(
-        Substitute(expr, {{loop.loop_var, IntImm(loop.loop_var->dtype, 0)}}));
+    PrimExpr prev = analyzer_->Simplify(SubstituteLoopVars(
+        expr, {{loop.loop_var, IntImm(loop.loop_var.ty(), 0)}}));
 
     int64_t stride = 0;
     for (int value = 1; value < loop.extent; ++value) {
-      PrimExpr curr = analyzer_.Simplify(Substitute(
-          expr, {{loop.loop_var, IntImm(loop.loop_var->dtype, value)}}));
-      PrimExpr delta = analyzer_.Simplify(curr - prev);
+      PrimExpr curr = analyzer_->Simplify(SubstituteLoopVars(
+          expr, {{loop.loop_var, IntImm(loop.loop_var.ty(), value)}}));
+      PrimExpr delta = analyzer_->Simplify(curr - prev);
       int64_t delta_value = 0;
       if (!TryGetConstInt64(delta, &delta_value)) {
         return false;
@@ -534,12 +565,13 @@ private:
   // ---- Copy-region synchronization analysis helpers ----
   struct CopyRegionAnalysis {
     bool is_pure_copy_region = true;
-    int commit = 0;
-    int wait = 0;
+    bool may_wait = false;
+    bool guarantees_commit = false;
+    bool guarantees_wait_all = false;
   };
 
   struct VisitedStmtInfo {
-    Stmt visited;
+    Stmt visited{ffi::UnsafeInit{}};
     CopyRegionAnalysis analysis;
     bool opens_copy_region{false};
     bool has_uncommitted_transfers{false};
@@ -548,85 +580,100 @@ private:
   static CopyRegionAnalysis
   MergeCopyRegionAnalysis(CopyRegionAnalysis a, const CopyRegionAnalysis &b) {
     a.is_pure_copy_region = a.is_pure_copy_region && b.is_pure_copy_region;
-    a.commit += b.commit;
-    a.wait += b.wait;
+    a.may_wait = a.may_wait || b.may_wait;
+    a.guarantees_commit = a.guarantees_commit || b.guarantees_commit;
+    a.guarantees_wait_all = a.guarantees_wait_all || b.guarantees_wait_all;
     return a;
   }
 
-  static CopyRegionAnalysis AnalyzeCopyRegion(const Stmt &stmt) {
+  CopyRegionAnalysis AnalyzeCopyRegion(const Stmt &stmt) {
     CopyRegionAnalysis out;
     if (!stmt.defined()) {
       return out;
     }
-    if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    if (const auto *seq = stmt.as<SeqStmtObj>()) {
       for (const Stmt &s : seq->seq) {
         out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(s));
       }
       return out;
     }
-    if (const auto *ite = stmt.as<IfThenElseNode>()) {
-      // Ignore the condition: treat it as pure control flow, and only care
-      // whether the branches are pure copy regions so we can hoist sync out.
-      out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(ite->then_case));
-      if (ite->else_case.defined()) {
-        out = MergeCopyRegionAnalysis(
-            out, AnalyzeCopyRegion(ite->else_case.value()));
+    if (const auto *ite = stmt.as<IfObj>()) {
+      CopyRegionAnalysis then_info = AnalyzeCopyRegion(ite->then_case);
+      CopyRegionAnalysis else_info;
+      if (ite->else_case.has_value()) {
+        else_info = AnalyzeCopyRegion(ite->else_case.value());
       }
+      out.is_pure_copy_region =
+          SideEffect(ite->condition) <= CallEffectKind::kPure &&
+          then_info.is_pure_copy_region && else_info.is_pure_copy_region;
+      out.may_wait = then_info.may_wait || else_info.may_wait;
+      // A missing else is an executable path with no synchronization.
+      out.guarantees_commit =
+          then_info.guarantees_commit && else_info.guarantees_commit;
+      out.guarantees_wait_all =
+          then_info.guarantees_wait_all && else_info.guarantees_wait_all;
       return out;
     }
-    if (const auto *eval = stmt.as<EvaluateNode>()) {
-      if (is_const_int(eval->value)) {
+    if (const auto *eval = stmt.as<EvaluateObj>()) {
+      if (eval->value.as<IntImmObj>() != nullptr) {
         return out;
       }
-      const auto *call = eval->value.as<CallNode>();
+      const auto *call = eval->value.as<CallObj>();
       if (!call) {
         out.is_pure_copy_region = false;
         return out;
       }
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
+      if (call->op.same_as(Op::Get("tl.ptx_cp_async_bytes")) ||
           call->op.same_as(tl::ptx_cp_async())) {
         return out;
       }
-      if (call->op.same_as(builtin::ptx_commit_group())) {
-        out.commit += 1;
+      if (call->op.same_as(Op::Get("tl.ptx_commit_group"))) {
+        out.guarantees_commit = true;
         return out;
       }
-      if (call->op.same_as(builtin::ptx_wait_group())) {
-        out.wait += 1;
+      if (call->op.same_as(Op::Get("tl.ptx_wait_group"))) {
+        out.may_wait = true;
+        // wait_group(n > 0) may leave the newest injected copies pending.
+        out.guarantees_wait_all =
+            IsZero(analyzer_->Simplify(call->args[0].as_or_throw<PrimExpr>()));
         return out;
       }
       out.is_pure_copy_region = false;
       return out;
     }
-    if (stmt.as<BindNode>()) {
+    if (stmt.as<BindObj>()) {
       CopyRegionAnalysis out;
       out.is_pure_copy_region = false;
       return out;
     }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      return AnalyzeCopyRegion(attr->body);
-    }
-    if (const auto *loop = stmt.as<ForNode>()) {
-      return AnalyzeCopyRegion(loop->body);
-    }
-    if (const auto *block = stmt.as<SBlockNode>()) {
-      if (block->init.defined()) {
-        out = MergeCopyRegionAnalysis(out,
-                                      AnalyzeCopyRegion(block->init.value()));
+    if (const auto *region = stmt.as<RegionStmtObj>()) {
+      // Scope wrappers are transparent only when their explicit operands are
+      // pure. An operator region can read memory itself before its body.
+      if (region->op->name != "tl.attr" &&
+          region->op->name != "tl.lexical_scope" &&
+          region->op->name != "tirx.launch_thread") {
+        out.is_pure_copy_region = false;
+        return out;
       }
-      out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(block->body));
-      return out;
-    }
-    if (const auto *realize = stmt.as<SBlockRealizeNode>()) {
-      // Treat the predicate as pure control flow (no side effects). We only
-      // care whether the realized body is a pure copy region so we can hoist
-      // the final commit+wait out of sequential loop nests.
-      const SBlockNode *block = realize->block.get();
-      if (block->init.defined()) {
-        out = MergeCopyRegionAnalysis(out,
-                                      AnalyzeCopyRegion(block->init.value()));
+      for (const Expr &arg : region->args) {
+        if (auto primitive = arg.as<PrimExpr>();
+            primitive && SideEffect(*primitive) > CallEffectKind::kPure)
+          out.is_pure_copy_region = false;
       }
-      out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(block->body));
+      return MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(region->body));
+    }
+    if (const auto *loop = stmt.as<ForObj>()) {
+      out.is_pure_copy_region =
+          SideEffect(loop->begin) <= CallEffectKind::kPure &&
+          SideEffect(loop->end) <= CallEffectKind::kPure &&
+          SideEffect(loop->step) <= CallEffectKind::kPure;
+      out = MergeCopyRegionAnalysis(out, AnalyzeCopyRegion(loop->body));
+      // Merely containing a wait or commit does not establish a boundary if
+      // this loop can execute zero times. Keep may_wait for pre-commit safety.
+      bool nonempty = analyzer_->CanProve(loop->begin < loop->end) &&
+                      analyzer_->CanProve(loop->step > 0);
+      out.guarantees_commit = out.guarantees_commit && nonempty;
+      out.guarantees_wait_all = out.guarantees_wait_all && nonempty;
       return out;
     }
     out.is_pure_copy_region = false;
@@ -637,7 +684,7 @@ private:
     pending_sync_copies_ = false;
     uncommitted_sync_copies_ = false;
 
-    Stmt visited = this->VisitStmt(stmt);
+    Stmt visited = Mutate(stmt).ValueOrUnchanged(stmt);
     VisitedStmtInfo out;
     out.visited = visited;
     out.analysis = AnalyzeCopyRegion(visited);
@@ -660,7 +707,7 @@ private:
   bool async_without_async_commit_wait_{false};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
-  arith::Analyzer analyzer_;
+  sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
   bool injected_rocm_async_copy_{false};
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};
@@ -668,9 +715,10 @@ private:
 
 ROCmAsyncCopyInjectResult
 InjectROCmAsyncCopy(const Stmt &body, bool async_without_async_commit_wait) {
-  ROCmAsyncCopyInjector injector(async_without_async_commit_wait);
-  Stmt injected = injector(body);
-  return {injector.Finalize(injected), injector.InjectedROCmAsyncCopy()};
+  auto injector =
+      make_object<ROCmAsyncCopyInjector>(async_without_async_commit_wait);
+  Stmt injected = injector->Mutate(body).ValueOrUnchanged(body);
+  return {injector->Finalize(injected), injector->InjectedROCmAsyncCopy()};
 }
 
 } // namespace tl

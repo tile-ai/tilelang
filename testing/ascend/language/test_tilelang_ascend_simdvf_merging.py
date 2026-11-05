@@ -5,7 +5,7 @@ import torch
 
 import tilelang
 import tilelang.ascend.language as T
-from tilelang import tvm
+from tvm_ffi import dtype as DataType
 from tilelang.engine.lower import lower
 
 
@@ -21,10 +21,10 @@ CASES += [("vxor", "float16"), ("vxor", "float32"), ("vcadd", "int16"), ("vcadd"
 
 
 def merging_kernel(op_name, dtype, mode="MODE_MERGING", precision=None, pos="POS_LOWEST", scalar_dtype=None):
-    bits = tvm.DataType(dtype).bits
+    bits = DataType(dtype).bits
     lanes = 2048 // bits
     out_dtype = {"int16": "int32", "uint16": "uint32"}.get(dtype, dtype) if op_name == "vcadd" else dtype
-    out_bits = tvm.DataType(out_dtype).bits
+    out_bits = DataType(out_dtype).bits
     out_lanes = 2048 // out_bits
     pred_dtype = f"uint{bits}"
     scalar_dtype = scalar_dtype or dtype
@@ -160,20 +160,20 @@ def test_merging_runtime(op_name, dtype):
     pytest.importorskip("torch_npu")
     if not torch.npu.is_available():
         pytest.skip("Ascend NPU required")
-    lanes = 2048 // tvm.DataType(dtype).bits
+    lanes = 2048 // DataType(dtype).bits
     td = getattr(torch, dtype)
     out_dtype = {"int16": "int32", "uint16": "uint32"}.get(dtype, dtype) if op_name == "vcadd" else dtype
     out_td = getattr(torch, out_dtype)
     a = (torch.arange(lanes) + 1 if op_name == "vdupv" else torch.arange(lanes) % 8 + 1).to(td)
     b = (torch.arange(lanes) % 3 + 1).to(td)
-    old = (torch.arange(2048 // tvm.DataType(out_dtype).bits) % 17 + 7).to(out_td)
+    old = (torch.arange(2048 // DataType(out_dtype).bits) % 17 + 7).to(out_td)
     pos = "POS_HIGHEST" if op_name == "vdupv" else "POS_LOWEST"
     kernel = tilelang.compile(merging_kernel(op_name, dtype, precision="ftz_true" if op_name == "vdiv" else None, pos=pos), target="ascend")
     device_a, device_b, device_old = a.to("npu"), b.to("npu"), old.to("npu")
     for mask in (torch.zeros(lanes, dtype=torch.bool), torch.ones(lanes, dtype=torch.bool), torch.arange(lanes) % 3 == 1):
         expected = reference(op_name, a, b, old, mask, pos)
         actual = torch.empty_like(device_old)
-        pred_dtype = getattr(torch, f"uint{tvm.DataType(dtype).bits}")
+        pred_dtype = getattr(torch, f"uint{DataType(dtype).bits}")
         kernel(device_a, device_b, device_old, mask.to(pred_dtype).to("npu"), actual)
         actual = actual.cpu()
         if op_name in SFU_OPS or op_name == "vdiv":

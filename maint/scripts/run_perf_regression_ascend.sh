@@ -1,31 +1,37 @@
 #!/bin/bash
-# Ascend performance regression test: compare current checkout vs tile-ai/tilelang main
+# Ascend performance regression: compare isolated baseline/current installations.
 #
-# Usage:
-#   ./maint/scripts/run_perf_regression_ascend.sh
+# The current examples and driver are frozen once and run with each environment.
+# The source checkouts, compiler libraries and object registries are never mixed.
+#
+# Usage: ./maint/scripts/run_perf_regression_ascend.sh
 #
 # Environment variables:
-#   BASELINE_URL    - remote URL to fetch the baseline from
-#                     (default: https://github.com/tile-ai/tilelang.git)
-#   BASELINE_BRANCH - branch on BASELINE_URL to compare against (default: main)
-#   BASELINE_SHA    - Already-fetched baseline commit; skips fetching the branch when set
-#   CURRENT_LABEL   - Current ref label in the report (default: current branch or SHA)
-#   WORK_DIR        - Directory outside the checkout for snapshots and results
-#                     (default: unique directory under RUNNER_TEMP, TMPDIR or /tmp)
-#   SKIP_BUILD      - Set to 1 to skip the ninja rebuild between checkouts
-#   NINJA_JOBS      - Parallelism for ninja (default: 64)
+#   BASELINE_URL     Baseline remote (default: https://github.com/tile-ai/tilelang.git)
+#   BASELINE_BRANCH  Baseline branch (default: main)
+#   BASELINE_SHA     Already-fetched commit; avoids fetching a moving branch
+#   CURRENT_LABEL    Label for the current checkout
+#   WORK_DIR         Dedicated directory outside the checkout for sources/results
+#   SKIP_BUILD       Reuse both installed environments when set to 1
+#   NINJA_JOBS       Native build parallelism (default: 4)
+#   ASCEND_PYTHON    Python with the matching Torch/torch_npu (default: python)
+#   ASCEND_SDK_PYTHONPATH  Optional CANN Python paths, excluding compiler checkouts
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
-
 BASELINE_URL="${BASELINE_URL:-https://github.com/tile-ai/tilelang.git}"
 BASELINE_BRANCH="${BASELINE_BRANCH:-main}"
-NINJA_JOBS="${NINJA_JOBS:-64}"
+NINJA_JOBS="${NINJA_JOBS:-4}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
+ASCEND_PYTHON="${ASCEND_PYTHON:-python}"
 
+if ! command -v uv >/dev/null 2>&1; then
+    echo "The isolated performance environments require uv." >&2
+    exit 1
+fi
 cd "${REPO_ROOT}"
-# Keep snapshots outside the checkout so stash and ref switches cannot remove them.
 if [[ -z "${WORK_DIR:-}" ]]; then
     WORK_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/tilelang-perf-regression-ascend.XXXXXX")"
 fi
@@ -44,119 +50,99 @@ RESULT_MD="${WORK_DIR}/regression_result.md"
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "result_md=${RESULT_MD}" >> "${GITHUB_OUTPUT}"
 fi
-
 MARKER="__TILELANG_PERF_RESULTS_JSON__="
-
-# The Ascend examples plus their maintenance driver form the regression harness. Keep
-# both constant from the current branch across refs while testing each ref's compiler
-# and runtime. The baseline ref may not contain the driver or all examples, so overlay them
-# onto each checkout.
-HARNESS_DIR="examples/ascend"
-DRIVER_PATH="maint/scripts/ascend_perf_regression.py"
-
-echo "============================================"
-echo "Ascend Performance Regression Test"
-echo "============================================"
-echo "Repo root:    ${REPO_ROOT}"
-echo "Work dir:     ${WORK_DIR}"
-echo "Baseline:     ${BASELINE_URL}@${BASELINE_BRANCH}"
-echo ""
-
-# Snapshot the harness dir from the current working tree FIRST (before any stash),
-# so the overlay reflects the in-flight edits. We overlay it onto each checkout.
-HARNESS_SNAP="${WORK_DIR}/harness_snapshot"
-DRIVER_SNAP="${WORK_DIR}/ascend_perf_regression.py"
-rm -rf "${HARNESS_SNAP}"
-mkdir -p "${HARNESS_SNAP}"
-cp -a "${REPO_ROOT}/${HARNESS_DIR}/." "${HARNESS_SNAP}/"
-cp -a "${REPO_ROOT}/${DRIVER_PATH}" "${DRIVER_SNAP}"
-
-restore_harness() {
-    cp -a "${HARNESS_SNAP}/." "${REPO_ROOT}/${HARNESS_DIR}/"
-    cp -a "${DRIVER_SNAP}" "${REPO_ROOT}/${DRIVER_PATH}"
-}
-
-# ---- Save current state ----
-if [[ -n "$(git status --porcelain)" ]]; then
-    echo "Uncommitted changes detected; stashing them:"
-    git status --porcelain
-    STASHED=1
-    git stash push -u -m "perf_regression_ascend_temp_stash"
-else
-    STASHED=0
-fi
-
-CURRENT_REF="$(git rev-parse --abbrev-ref HEAD)"
 CURRENT_SHA="$(git rev-parse HEAD)"
-[[ "${CURRENT_REF}" == "HEAD" ]] && CURRENT_REF="${CURRENT_SHA}"
-CURRENT_LABEL="${CURRENT_LABEL:-${CURRENT_REF}}"
-echo "Current ref: ${CURRENT_LABEL} -> ${CURRENT_SHA}"
+CURRENT_LABEL="${CURRENT_LABEL:-$(git symbolic-ref --short -q HEAD || git rev-parse --short HEAD)}"
 
-cleanup() {
-    echo ""
-    echo "Cleaning up: restoring ${CURRENT_REF}..."
-    cd "${REPO_ROOT}"
-    git checkout -f "${CURRENT_REF}" 2>/dev/null || true
-    # An in-flight change may add the maintenance driver on top of a ref that does not
-    # track it yet. Remove the overlay before restoring that change from the stash.
-    if ! git cat-file -e "${CURRENT_REF}:${DRIVER_PATH}" 2>/dev/null; then
-        rm -f "${REPO_ROOT}/${DRIVER_PATH}"
-    fi
-    git submodule update --init --recursive 2>/dev/null || true
-    if [[ "${STASHED}" == "1" ]]; then
-        echo "Restoring stashed changes..."
-        git stash pop || true
-    fi
-}
-trap cleanup EXIT
+# Freeze the exact current driver and examples without changing either checkout.
+# Its relative examples/ascend path is preserved, so all child workers use it too.
+HARNESS_ROOT="${WORK_DIR}/harness"
+rm -rf "${HARNESS_ROOT}"
+mkdir -p "${HARNESS_ROOT}/examples/ascend" "${HARNESS_ROOT}/maint/scripts"
+cp -a "${REPO_ROOT}/examples/ascend/." "${HARNESS_ROOT}/examples/ascend/"
+cp -a "${REPO_ROOT}/maint/scripts/ascend_perf_regression.py" "${HARNESS_ROOT}/maint/scripts/"
 
-# CI pins the base commit used by the checked-out PR merge. Local runs fetch the
-# requested branch unless an already-fetched baseline commit was supplied.
 if [[ -n "${BASELINE_SHA:-}" ]]; then
     BASELINE="$(git rev-parse --verify "${BASELINE_SHA}^{commit}")"
 else
-    echo "Fetching baseline ${BASELINE_BRANCH} from ${BASELINE_URL} ..."
     git fetch --no-tags "${BASELINE_URL}" "${BASELINE_BRANCH}"
     BASELINE="$(git rev-parse --verify 'FETCH_HEAD^{commit}')"
 fi
-echo "Baseline: ${BASELINE_URL}@${BASELINE_BRANCH} -> ${BASELINE}"
+BASE_WORKTREE="${WORK_DIR}/baseline-${BASELINE}"
+if [[ -e "${BASE_WORKTREE}" ]]; then
+    [[ "$(git -C "${BASE_WORKTREE}" rev-parse HEAD)" == "${BASELINE}" ]]
+    if [[ -n "$(git -C "${BASE_WORKTREE}" status --porcelain)" ]]; then
+        echo "Baseline worktree changed; choose a new WORK_DIR: ${BASE_WORKTREE}" >&2
+        exit 1
+    fi
+else
+    git worktree add --detach "${BASE_WORKTREE}" "${BASELINE}"
+    git -C "${BASE_WORKTREE}" submodule update --init --recursive
+fi
 
-build() {
+# Only reuse the SDK's tensor packages. Each venv gets its own TileLang and
+# compiler/FFI wheels; pin Torch versions so installation cannot replace the
+# torch_npu combination prepared by the runner. The base environment is read-only.
+RUNTIME_CONSTRAINTS="${WORK_DIR}/ascend-torch-constraints.txt"
+if [[ "${SKIP_BUILD}" != "1" ]]; then
+"${ASCEND_PYTHON}" - "${RUNTIME_CONSTRAINTS}" <<'PYTHON'
+from importlib.metadata import version
+from pathlib import Path
+import sys
+Path(sys.argv[1]).write_text("".join(f"{name}=={version(name)}\n" for name in ("torch", "torch_npu")))
+PYTHON
+fi
+
+install_checkout() {
+    local role="$1" repo="$2" venv="${WORK_DIR}/venvs/$1"
     if [[ "${SKIP_BUILD}" == "1" ]]; then
-        echo "Skipping build (SKIP_BUILD=1)"
+        if [[ ! -x "${venv}/bin/python" ]]; then
+            echo "SKIP_BUILD requires the existing ${role} environment: ${venv}" >&2
+            exit 1
+        fi
         return
     fi
-    echo "Building libtvm.so (ninja -j${NINJA_JOBS})..."
-    USE_CUDA=OFF USE_ASCEND=ON cmake -B build -S . -GNinja >/dev/null
-    ninja -j"${NINJA_JOBS}" -C build
+    uv venv --clear --system-site-packages --python "${ASCEND_PYTHON}" "${venv}"
+    (
+        export USE_CUDA=OFF USE_ASCEND=ON
+        export CMAKE_BUILD_PARALLEL_LEVEL="${NINJA_JOBS}"
+        export UV_CONSTRAINT="${RUNTIME_CONSTRAINTS}" PIP_CONSTRAINT="${RUNTIME_CONSTRAINTS}"
+        unset PYTHONPATH TVM_LIBRARY_PATH TVM_TIRX_LIBRARY_PATH TVM_FFI_LIBRARY_PATH
+        if [[ -f "${repo}/tilelang_packaging/compiler_manifest.py" ]]; then
+            local staged="${WORK_DIR}/${role}-stage" artifacts="${WORK_DIR}/${role}-artifacts"
+            rm -rf "${staged}" "${artifacts}"
+            "${venv}/bin/python" "${repo}/maint/scripts/build_native_artifacts.py" stage \
+                --source "${repo}" --destination "${staged}"
+            "${venv}/bin/python" "${repo}/maint/scripts/build_native_artifacts.py" build \
+                --stage "${staged}" --output "${artifacts}" --python "${venv}/bin/python" \
+                --frontend uv --wheel-only --install --jobs "${NINJA_JOBS}"
+            uv pip install --python "${venv}/bin/python" --find-links "${artifacts}" -r "${repo}/requirements-test.txt"
+            (cd "${WORK_DIR}" && "${venv}/bin/python" "${repo}/maint/scripts/verify_native_install.py" \
+                --expected-source "${staged}/manifest.json" --output "${role}-install.json")
+        else
+            uv pip install --python "${venv}/bin/python" -r "${repo}/requirements-test.txt"
+            uv pip install --python "${venv}/bin/python" --reinstall-package tilelang "${repo}"
+        fi
+    )
 }
 
-# Run the Ascend regression suite and capture its {name: latency} JSON marker.
 run_driver() {
-    local out_json="$1"
-    PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/examples/ascend:$PYTHONPATH" \
-        ASCEND_NPU_ARCH=dav-3510 TILELANG_DISABLE_CACHE=1 TL_PERF_REGRESSION_FORMAT=json \
-        python "${REPO_ROOT}/${DRIVER_PATH}" \
-        | tee /dev/stderr | grep "^${MARKER}" | tail -1 | sed "s/^${MARKER}//" > "${out_json}"
+    local role="$1" out_json="$2"
+    (
+        cd "${HARNESS_ROOT}"
+        env -u TVM_LIBRARY_PATH -u TVM_TIRX_LIBRARY_PATH -u TVM_FFI_LIBRARY_PATH \
+            -u TL_TEMPLATE_PATH -u TL_CUTLASS_PATH \
+            PYTHONPATH="${HARNESS_ROOT}/examples/ascend${ASCEND_SDK_PYTHONPATH:+:${ASCEND_SDK_PYTHONPATH}}" \
+            PYTHONNOUSERSITE=1 ASCEND_NPU_ARCH="${ASCEND_NPU_ARCH:-dav-3510}" \
+            TILELANG_DISABLE_CACHE=1 TL_PERF_REGRESSION_FORMAT=json \
+            "${WORK_DIR}/venvs/${role}/bin/python" "${HARNESS_ROOT}/maint/scripts/ascend_perf_regression.py"
+    ) | tee "${WORK_DIR}/${role}.log" /dev/stderr | grep "^${MARKER}" | tail -1 | sed "s/^${MARKER}//" > "${out_json}"
 }
 
-# ---- Baseline ----
-echo ""
-echo "===== Baseline (${BASELINE}) ====="
-git checkout -f "${BASELINE}"
-git submodule update --init --recursive
-build
-restore_harness   # overlay current-branch harness onto baseline tree
-run_driver "${OLD_JSON}"
-
-# ---- Current ----
-echo ""
-echo "===== Current (${CURRENT_SHA}) ====="
-git checkout -f "${CURRENT_SHA}"
-git submodule update --init --recursive
-build
-restore_harness
-run_driver "${NEW_JSON}"
+install_checkout old "${BASE_WORKTREE}"
+install_checkout new "${REPO_ROOT}"
+run_driver old "${OLD_JSON}"
+run_driver new "${NEW_JSON}"
 
 # ---- Compare ----
 echo ""

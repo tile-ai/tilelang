@@ -4,7 +4,7 @@ import pytest
 
 import tilelang
 from tilelang.backend import get_backend
-from tvm.target import Target
+from tvm_tirx.target import Target
 import tilelang.backend.target as target_registry
 from tilelang.backend.target import (
     auto_detect_target,

@@ -8,12 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import tilelang
-from tilelang import tvm as tvm
 from tilelang import env
 from tilelang.jit import JITImpl
 from tilelang.jit.kernel import JITKernel
-from tvm.tirx import PrimFunc, Var
-from tvm.target import Target
+from tvm_tirx.ir import Var
+from tvm_tirx.tirx import Function, TensorType
+from tvm_tirx.target import Target
 import inspect
 from functools import partial
 from typing import Generic, Literal, Any, ParamSpec, TypeVar
@@ -38,7 +38,6 @@ from tilelang.utils.language import get_prim_func_name
 from tilelang.utils.device import get_available_cpu_count
 from tilelang.autotuner.capture import get_autotune_inputs
 from tilelang.engine.param import KernelParam
-from tilelang import __version__
 
 TargetLike = str | dict[str, object] | Target
 
@@ -106,7 +105,7 @@ def _can_reuse_inputs(params: list[KernelParam], cached_params: list[KernelParam
         if not isinstance(value, torch.Tensor):
             # Python scalars do not retain their kernel dtype. Compare the
             # signatures instead of duplicating backend scalar conversion rules.
-            if param.dtype != cached_param.dtype or len(param.shape) != len(cached_param.shape):
+            if param.kind != cached_param.kind or param.dtype != cached_param.dtype or len(param.shape) != len(cached_param.shape):
                 return False
             continue
 
@@ -184,7 +183,7 @@ class AutoTuner:
         self,
         out_idx: list[int] | int | None = None,
         target: TargetLike | None = None,
-        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "pto"] | None = None,
+        execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "cutedsl", "torch", "pto"] | None = None,
         target_host: TargetLike | None = None,
         verbose: bool | None = None,
         pass_configs: dict[str, Any] | None = None,
@@ -323,7 +322,7 @@ class AutoTuner:
         self._kernel_parameters = k_parameters
         self._function_parameters = f_parameters
 
-    def _validate_input_supply_requirements(self, prim_func: PrimFunc, out_idx: list[int] | int | None):
+    def _validate_input_supply_requirements(self, prim_func: Function, out_idx: list[int] | int | None):
         if self.profile_args.supply_prog is not None:
             return
 
@@ -337,7 +336,7 @@ class AutoTuner:
         for i, param in enumerate(prim_func.params):
             if i in result_idx:
                 continue
-            if param not in prim_func.buffer_map:
+            if not isinstance(param.ty, TensorType):
                 kernel_name = get_prim_func_name(prim_func, "<unknown>")
                 raise ValueError(
                     f"Auto-tuning kernel '{kernel_name}' does not support auto-generated scalar inputs. "
@@ -372,8 +371,10 @@ class AutoTuner:
             op_parameters += _normalize_value(self._kernel_parameters)
 
         func_source = inspect.getsource(self.fn)
+        from tilelang.cache.kernel_cache import KernelCache
+
         key_data = {
-            "version": __version__,
+            "compiler": KernelCache._get_base_key(),
             "op_parameters": tuple(op_parameters),
             "extra_parameters": extra_parameters,
             "func_source": func_source,
@@ -419,13 +420,13 @@ class AutoTuner:
         compile_args = self._merge_pass_configs_into_compile_args(per_config_pass_configs)
         return compile_args.compile_program(self.fn(**config_arg))
 
-    def _default_elaborate(self, **config_arg) -> PrimFunc:
+    def _default_elaborate(self, **config_arg) -> Function:
         config_arg.pop(_PASS_CONFIGS_KEY, None)
         return self.fn(**config_arg)
 
     def _ensure_jit_functions(
         self,
-    ) -> tuple[Callable[..., tilelang.JITKernel], Callable[..., PrimFunc]]:
+    ) -> tuple[Callable[..., tilelang.JITKernel], Callable[..., Function]]:
         compile_func = self.jit_compile
         elaborate_func = self.jit_elaborate
         if compile_func is None:
@@ -479,7 +480,7 @@ class AutoTuner:
         grouped_compile_active: bool,
         group_compile_size: int,
         compile_func: Callable[..., tilelang.JITKernel],
-        elaborate_func: Callable[..., PrimFunc],
+        elaborate_func: Callable[..., Function],
     ) -> tuple[
         concurrent.futures.ThreadPoolExecutor,
         list[concurrent.futures.Future],
@@ -1348,7 +1349,7 @@ class AutoTuneImpl(Generic[_P, _T]):
 
 
 def autotune(  # This is the new public interface
-    func: Callable[_P, _T] | PrimFunc | None = None,
+    func: Callable[_P, _T] | Function | None = None,
     *,  # Indicates subsequent arguments are keyword-only
     configs: dict | Callable,
     # profile arguments
@@ -1422,7 +1423,7 @@ def autotune(  # This is the new public interface
         # Case 1: Used as @autotune (func_or_out_idx is the function, others are defaults)
         # This is a placeholder for a real auto tuner implementation
         raise ValueError("Use tilelang.autotune to decorate func without arguments is not supported yet.")
-    elif isinstance(func, PrimFunc):
+    elif isinstance(func, Function):
         raise ValueError("Use tilelang.jit to decorate prim_func is not supported yet.")
     else:
 

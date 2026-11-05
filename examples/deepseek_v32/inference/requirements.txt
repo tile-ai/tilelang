@@ -2,4 +2,4 @@ torch
 transformers
 safetensors
 fast_hadamard_transform
-tilelang==0.1.6
+# Install the matching TileLang/provider/FFI bundle before these demo dependencies.

@@ -2,7 +2,6 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import pytest
-from tilelang import tvm
 
 
 @tilelang.testing.requires_cuda
@@ -129,10 +128,11 @@ def test_async_copy_tileop_rejects_invalid_cp_async_scope():
             T.copy(S1, B[0:4])
 
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match="T\\.async_copy only supports global->shared/shared\\.dyn copies",
-    ):
+    ) as error:
         tilelang.compile(main, out_idx=[1], target="cuda")
+    assert error.value.__tvm_ffi_error__.kind == "InternalError"
 
 
 @tilelang.testing.requires_cuda

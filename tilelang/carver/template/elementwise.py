@@ -1,7 +1,7 @@
 # Import necessary modules
 from dataclasses import dataclass  # Used for defining data classes
 from .base import BaseTemplate  # Importing the base class for templates
-from tvm import te  # Importing TVM's tensor expression module
+from .._workload import WorkloadBuilder
 from ..arch import TileDevice  # Importing TileDevice for hardware-specific configurations
 from ..roller import Hint  # Importing Hint for optimization hints
 from ..utils import get_roller_hints_from_func  # Function to obtain optimization hints
@@ -45,14 +45,15 @@ class ElementwiseTemplate(BaseTemplate):
         shape, dtype = self.shape, self.dtype  # Extract shape and dtype
 
         # Define a placeholder tensor A
-        A = te.placeholder(shape, name="A", dtype=dtype)
+        workload = WorkloadBuilder()
+        A = workload.input(shape, name="A", dtype=dtype)
 
         # Define the element-wise computation (adding 1 to each element)
         def _compute_elementwise(*indices):
             return A[indices] + 1
 
         # Define the computation for B based on A
-        B = te.compute(
+        B = workload.compute(
             shape,
             fcompute=_compute_elementwise,  # Function that defines element-wise computation
             name="B",
@@ -62,7 +63,7 @@ class ElementwiseTemplate(BaseTemplate):
         args = [A, B]
 
         # Create and set the computation function
-        self.set_function(te.create_prim_func(args))
+        self.set_function(workload.to_function(args))
 
     def params_as_dict(self):
         """

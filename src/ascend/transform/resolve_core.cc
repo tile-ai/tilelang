@@ -30,8 +30,10 @@
 #include <vector>
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
 #include <tvm/ir/function.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/transform.h>
 
 #include "./auto_schedule/ir_structure.h"
@@ -45,6 +47,7 @@ namespace tl {
 
 using namespace tirx;
 using namespace ascend;
+using namespace prim;
 
 namespace {
 
@@ -75,7 +78,7 @@ public:
   static void Resolve(const std::vector<std::shared_ptr<IRStructure>> &root,
                       const std::vector<TaskNode *> &all_tasks,
                       const MultiBufferPlan &plan,
-                      const ffi::Optional<Var> &outer_sid,
+                      const ffi::Optional<PrimVar> &outer_sid,
                       int num_aiv_subcores) {
     CoreMaskResolver resolver(root, all_tasks, plan, outer_sid,
                               num_aiv_subcores);
@@ -128,12 +131,24 @@ private:
   CoreMaskResolver(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
                    const MultiBufferPlan &plan,
-                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores)
+                   const ffi::Optional<PrimVar> &outer_sid,
+                   int num_aiv_subcores)
       : root_(root), all_tasks_(all_tasks), plan_(plan),
         epoch_domains_(root, plan), availability_(all_tasks),
         active_core_mask_(kCoreCube | VectorCoreMask(num_aiv_subcores)) {
     if (outer_sid.has_value())
       availability_.SetExternalVarCoreMask(outer_sid.value(), kCoreVector);
+    std::function<void(IRStructure *)> collect = [&](IRStructure *node) {
+      if (node->IsTask())
+        input_tasks_.push_back(static_cast<TaskNode *>(node));
+      if (auto *header = node->HeaderTask())
+        input_tasks_.push_back(header);
+      for (const auto *list : node->ChildLists())
+        for (const auto &child : *list)
+          collect(child.get());
+    };
+    for (const auto &node : root)
+      collect(node.get());
     RegisterStorageEpochGuards();
     RefineCandidateCoreMasks();
     for (TaskNode *task : all_tasks_) {
@@ -170,11 +185,15 @@ private:
     // consumers' domains. In particular, an unused binding placed on Cube as
     // a fallback and a break's own condition must not seed shared Cube work.
     bool external_effect = false;
-    PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
-      if (const auto *store = node.as<BufferStoreNode>())
-        external_effect |=
-            !IsRegisterRegion(BufferRegion::FullRegion(store->buffer));
-      if (const auto *call = node.as<CallNode>()) {
+    VisitNativePostOrder(task->stmt, [&](const ObjectRef &node) {
+      if (const auto *store = node.as<TensorStoreObj>())
+        external_effect |= !IsRegisterRegion(
+            FullTensorRegion(store->dest.as_or_throw<TensorVar>()));
+      if (const auto *call = node.as<CallObj>()) {
+        if (IsScheduledBind(call) || call->op.same_as(alloc_tensor_op()) ||
+            call->op.same_as(decl_tensor_op()) ||
+            call->op.same_as(Op::Get("tl.annotation")))
+          return;
         Call expression = ffi::GetRef<Call>(call);
         Stmt statement = Evaluate(expression);
         external_effect |=
@@ -190,18 +209,8 @@ private:
     return demand;
   }
 
-  CoreMask GetRefinedCandidateCoreMask(TaskNode *task) const {
-    CoreMask candidate = task->GetCoreMask();
-    ICHECK_NE(candidate, kCoreUnassigned)
-        << "ResolveCore requires AssignCore to run first";
-    candidate &= active_core_mask_ & availability_.GetTaskInputCoreMask(task);
-    if (candidate == kCoreUnassigned) {
-      LOG(FATAL) << "Cannot resolve core placement because a task's scalar "
-                    "or control expression is unavailable on every legal "
-                    "execution core: "
-                 << task->stmt;
-    }
-
+  CoreMask RefineForEpochGuards(const TaskNode *task,
+                                CoreMask candidate) const {
     auto epoch_guards = task_epoch_guards_.find(task);
     if (epoch_guards != task_epoch_guards_.end()) {
       for (size_t guard_index : epoch_guards->second) {
@@ -218,21 +227,42 @@ private:
         candidate &= available;
       }
     }
+    return candidate;
+  }
+
+  CoreMask GetRefinedCandidateCoreMask(TaskNode *task) const {
+    CoreMask candidate = task->GetCoreMask();
+    ICHECK_NE(candidate, kCoreUnassigned)
+        << "ResolveCore requires AssignCore to run first";
+    candidate &= active_core_mask_ & availability_.GetTaskInputCoreMask(task);
+    auto require_definitions = [&](const std::vector<TensorRegion> &regions) {
+      for (const auto &region : regions)
+        candidate &= availability_.GetValueCoreMask(RegionTensor(region), task);
+    };
+    require_definitions(task->GetReadRegions());
+    require_definitions(task->GetWriteRegions());
+    if (candidate == kCoreUnassigned) {
+      LOG(FATAL) << "Cannot resolve core placement because a task's scalar "
+                    "or control expression is unavailable on every legal "
+                    "execution core: "
+                 << task->stmt;
+    }
+    candidate = RefineForEpochGuards(task, candidate);
 
     for (const IRStructure *parent = task->GetParent(); parent != nullptr;
          parent = parent->GetParent()) {
-      ICHECK(parent->IsControl());
-      const auto *control = static_cast<const ControlNode *>(parent);
-      CoreMask control_available =
-          availability_.GetTaskReadCoreMask(control->task.get());
+      const auto *header = parent->HeaderTask();
+      if (!header)
+        continue;
+      CoreMask control_available = availability_.GetTaskReadCoreMask(header);
       if ((candidate & control_available) == kCoreUnassigned) {
         LOG(FATAL) << "Cannot evaluate a loop bound or control guard on any "
                       "legal execution core for task: "
                    << task->stmt << ". The enclosing control is available on "
-                   << CoreMaskName(control_available) << ": "
-                   << control->task->stmt;
+                   << CoreMaskName(control_available) << ": " << header->stmt;
       }
       candidate &= control_available;
+      candidate = RefineForEpochGuards(header, candidate);
     }
     return candidate;
   }
@@ -260,16 +290,31 @@ private:
     return (*demands)[value].Merge(demand);
   }
 
+  bool AddRegisterDemand(const TensorVar &tensor,
+                         const NativeStorageContext &storage,
+                         CoreDemand demand) {
+    Var identity = storage.Identity(tensor);
+    register_tensors_.emplace(identity, tensor);
+    return AddDemand(&register_demand_, identity, demand);
+  }
+
   bool AddReadDemand(const TaskNode *task, CoreDemand demand) {
     if (demand.cores == kCoreUnassigned)
       return false;
     bool changed = false;
     for (const Var &var : task->GetReadVars())
       changed |= AddDemand(&var_demand_, var, demand);
-    for (const BufferRegion &region : task->GetReadRegions()) {
+    for (const TensorRegion &region : task->GetReadRegions()) {
+      changed |= AddDemand(&var_demand_, RegionTensor(region), demand);
       if (IsRegisterRegion(region))
-        changed |= AddDemand(&register_demand_, region->buffer->data, demand);
+        changed |= AddRegisterDemand(RegionTensor(region),
+                                     task->StorageContext(), demand);
     }
+    // Native allocations and views are flat Bind definitions. A store also
+    // needs its tensor definition on the executing core, even though it does
+    // not read the stored value. This demand was implicit in old alloc_buffers.
+    for (const TensorRegion &region : task->GetWriteRegions())
+      changed |= AddDemand(&var_demand_, RegionTensor(region), demand);
     return changed;
   }
 
@@ -279,9 +324,11 @@ private:
     bool changed = false;
     for (const Var &var : accesses.read_vars)
       changed |= AddDemand(&var_demand_, var, demand);
-    for (const BufferRegion &region : accesses.read_regions) {
+    for (const TensorRegion &region : accesses.read_regions) {
+      changed |= AddDemand(&var_demand_, RegionTensor(region), demand);
       if (IsRegisterRegion(region))
-        changed |= AddDemand(&register_demand_, region->buffer->data, demand);
+        changed |=
+            AddRegisterDemand(RegionTensor(region), accesses.storage, demand);
     }
     return changed;
   }
@@ -314,12 +361,14 @@ private:
       if (it != var_demand_.end())
         demand.Merge(it->second);
     }
-    for (const BufferRegion &region : task->GetWriteRegions()) {
+    for (const TensorRegion &region : task->GetWriteRegions()) {
       if (!IsRegisterRegion(region))
         continue;
-      auto it = register_demand_.find(region->buffer->data);
-      if (it != register_demand_.end())
-        demand.Merge(it->second);
+      for (const auto &[storage, readers] : register_demand_) {
+        if (!task->StorageContext().ProvenDisjoint(
+                RegionTensor(region), register_tensors_.at(storage)))
+          demand.Merge(readers);
+      }
     }
     return demand;
   }
@@ -351,9 +400,9 @@ private:
     if (node->IsTask())
       return GetExecutionDemand(static_cast<const TaskNode *>(node));
     CoreDemand result;
-    const auto *control = static_cast<const ControlNode *>(node);
-    for (const auto &child : control->children)
-      result.Merge(GetSubtreeExecutionDemand(child.get()));
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        result.Merge(GetSubtreeExecutionDemand(child.get()));
     return result;
   }
 
@@ -389,13 +438,21 @@ private:
       changed |= AddCounterDemand(task, demand);
       return changed;
     }
-    auto *control = static_cast<ControlNode *>(node);
     CoreDemand demand = GetSubtreeExecutionDemand(node);
-    bool changed = AddReadDemand(control->task.get(), demand);
-    changed |= AddCounterDemand(control->task.get(), demand);
-    CheckExpressionAvailability(control->task.get(), demand.cores);
-    for (const auto &child : control->children)
-      changed |= SeedTreeReadDemand(child.get(), demand);
+    bool changed = false;
+    if (auto *header = node->HeaderTask()) {
+      changed |= AddReadDemand(header, demand);
+      changed |= AddStorageEpochGuardDemand(header, demand);
+      changed |= AddCounterDemand(header, demand);
+      CheckExpressionAvailability(header, demand.cores);
+    }
+    // An If or assumption does not own loop_break. Exits nested under a
+    // lexical wrapper must still terminate every stream of the enclosing
+    // loop, including siblings outside that wrapper.
+    CoreDemand loop_demand = node->IsControl() ? demand : enclosing_demand;
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        changed |= SeedTreeReadDemand(child.get(), loop_demand);
     return changed;
   }
 
@@ -408,19 +465,21 @@ private:
     SpecialRegisterScopeDemand scope;
 
     for (const auto &node : nodes) {
-      if (node->IsControl()) {
-        const auto *control = static_cast<const ControlNode *>(node.get());
-        SpecialRegisterScopeDemand child_scope =
-            CollectSpecialRegisterDemand(control->children);
-        for (int bit_index = 0; bit_index < kSpecialRegisterBits; ++bit_index) {
-          uint16_t bit = static_cast<uint16_t>(1U << bit_index);
-          if (bit == static_cast<uint16_t>(SpecialRegister::kLoopControl))
-            continue;
-          scope.readers[bit_index].Merge(child_scope.readers[bit_index]);
-          scope.writers[bit_index].insert(
-              scope.writers[bit_index].end(),
-              child_scope.writers[bit_index].begin(),
-              child_scope.writers[bit_index].end());
+      if (!node->IsTask()) {
+        for (const auto *list : node->ChildLists()) {
+          SpecialRegisterScopeDemand child_scope =
+              CollectSpecialRegisterDemand(*list);
+          for (int bit_index = 0; bit_index < kSpecialRegisterBits;
+               ++bit_index) {
+            uint16_t bit = static_cast<uint16_t>(1U << bit_index);
+            if (bit == static_cast<uint16_t>(SpecialRegister::kLoopControl))
+              continue;
+            scope.readers[bit_index].Merge(child_scope.readers[bit_index]);
+            scope.writers[bit_index].insert(
+                scope.writers[bit_index].end(),
+                child_scope.writers[bit_index].begin(),
+                child_scope.writers[bit_index].end());
+          }
         }
       } else {
         const auto *task = static_cast<const TaskNode *>(node.get());
@@ -466,8 +525,11 @@ private:
     bool changed = false;
     // MaterializeMultiBuffer will add one counter load for each returned
     // group, so its writers must exist on every core that executes this task.
-    for (const MultiBufferInfo *info : it->second)
-      changed |= AddDemand(&register_demand_, info->counter->data, demand);
+    for (const MultiBufferInfo *info : it->second) {
+      changed |=
+          AddRegisterDemand(info->counter, task->StorageContext(), demand);
+      changed |= AddDemand(&var_demand_, info->counter, demand);
+    }
     return changed;
   }
 
@@ -488,17 +550,20 @@ private:
     std::unordered_map<PrimExpr, size_t, ObjectPtrHash, ObjectPtrEqual>
         guard_indices;
 
-    auto intern_guard = [&](const PrimExpr &guard) {
+    auto intern_guard = [&](const PrimExpr &guard, const TaskNode *task) {
       auto [it, inserted] = guard_indices.emplace(guard, epoch_guards_.size());
       if (inserted) {
-        epoch_guards_.push_back({guard, AnalyzeTaskAccesses(Evaluate(guard))});
+        epoch_guards_.push_back(
+            {guard,
+             AnalyzeTaskAccesses(Evaluate(guard), {}, task->StorageContext(),
+                                 task->outer_ctx)});
       }
       return it->second;
     };
     auto add_task_guard = [&](TaskNode *task, const PrimExpr &guard) {
-      if (is_one(guard))
+      if (IsOne(guard))
         return;
-      size_t guard_index = intern_guard(guard);
+      size_t guard_index = intern_guard(guard, task);
       std::vector<size_t> &task_guards = task_epoch_guards_[task];
       if (std::find(task_guards.begin(), task_guards.end(), guard_index) ==
           task_guards.end()) {
@@ -506,17 +571,26 @@ private:
       }
     };
 
-    for (TaskNode *task : all_tasks_) {
-      auto add_scope_guards = [&](ControlNode *scope) {
+    for (TaskNode *task : input_tasks_) {
+      auto add_scope_guards = [&](const IRStructure *scope, size_t index = 0) {
         for (int domain_id :
-             epoch_domains_.DomainsForTaskAtScope(task, scope)) {
+             epoch_domains_.DomainsForTaskAtScope(task, scope, index)) {
           add_task_guard(task, epoch_domains_.Domain(domain_id).active_guard);
         }
       };
       add_scope_guards(nullptr);
-      for (IRStructure *node : task->PathFrom()) {
-        if (node->IsControl())
-          add_scope_guards(static_cast<ControlNode *>(node));
+      const IRStructure *child = task;
+      for (const IRStructure *parent = task->GetParent(); parent;
+           child = parent, parent = parent->GetParent()) {
+        if (child == parent->HeaderTask())
+          continue;
+        auto lists = parent->ChildLists();
+        for (size_t i = 0; i < lists.size(); ++i) {
+          if (std::any_of(
+                  lists[i]->begin(), lists[i]->end(),
+                  [&](const auto &entry) { return entry.get() == child; }))
+            add_scope_guards(parent, i);
+        }
       }
     }
 
@@ -529,12 +603,13 @@ private:
       if (info.UsesCounter())
         group_representatives.emplace(info.counter_group_id, &info);
     }
-    for (TaskNode *task : all_tasks_) {
+    for (TaskNode *task : input_tasks_) {
       std::vector<const MultiBufferInfo *> groups;
       std::unordered_set<int> seen_groups;
-      auto append = [&](const std::vector<BufferRegion> &regions) {
-        for (const BufferRegion &region : regions) {
-          const MultiBufferInfo *info = plan_.Find(region->buffer);
+      auto append = [&](const std::vector<TensorRegion> &regions) {
+        for (const TensorRegion &region : regions) {
+          const MultiBufferInfo *info =
+              plan_.Find(RegionTensor(region), task->StorageContext());
           if (info == nullptr || !info->UsesCounter() ||
               IsMultiBufferBroadcastFill(task, info->storage) ||
               !seen_groups.insert(info->counter_group_id).second) {
@@ -542,7 +617,7 @@ private:
           }
           ICHECK(info->FindOwner(task) != nullptr)
               << "Counter-versioned task is outside every owner for storage "
-              << info->storage->name_hint;
+              << info->storage->name;
           groups.push_back(info);
         }
       };
@@ -601,6 +676,7 @@ private:
 
   const std::vector<std::shared_ptr<IRStructure>> &root_;
   const std::vector<TaskNode *> &all_tasks_;
+  std::vector<TaskNode *> input_tasks_;
   const MultiBufferPlan &plan_;
   EpochDomainRegistry epoch_domains_;
   CoreMaskAvailability availability_;
@@ -613,12 +689,14 @@ private:
       task_counter_groups_;
   DemandMap var_demand_;
   DemandMap register_demand_;
+  std::unordered_map<Var, TensorVar, ObjectPtrHash, ObjectPtrEqual>
+      register_tensors_;
   SpecialRegisterDemandMap special_writer_demand_;
 };
 
 void ResolveCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
                       const BufferVersionMap &buffer_versions,
-                      const ffi::Optional<Var> &outer_sid,
+                      const ffi::Optional<PrimVar> &outer_sid,
                       const L0StorageGroups &groups, int num_aiv_subcores) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
@@ -632,13 +710,15 @@ void ResolveCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
 
 tvm::transform::Pass ResolveCore() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
-    return RewriteTilelangKernels(
+  auto pass_func = [](tirx::Function func, const IRModule &,
+                      const tvm::transform::PassContext &) -> tirx::Function {
+    CheckWellFormed(func);
+    auto result = RewriteTilelangKernels(
         std::move(func), "ResolveCore",
         [](const TilelangKernelContext &context) {
-          ScheduledTIR scheduled_tir =
-              DecodeScheduledTIR(context.root, context.outer_ctx);
+          ScheduledTIR scheduled_tir = DecodeScheduledTIR(
+              context.root, context.outer_ctx, nullptr,
+              context.kernel_annotations, context.parameter_alias_contract);
           ResolveCoreMasks(scheduled_tir.tree,
                            scheduled_tir.metadata.buffer_versions,
                            context.outer_sid,
@@ -646,8 +726,10 @@ tvm::transform::Pass ResolveCore() {
                            scheduled_tir.metadata.num_aiv_subcores.value_or(2));
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
+    CheckWellFormed(result);
+    return result;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ResolveCore", {});
+  return CreateFunctionPass(pass_func, 0, "tl.ResolveCore");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

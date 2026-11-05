@@ -7,9 +7,9 @@ import tilelang.language as T
 from tilelang import tvm
 from tilelang.language.tir.ir import _VALID_CAST_ROUNDING_MODES
 
-# T.cast is provided by tilelang.language.tir.ir (and re-exported by
-# `from .tir.ir import *` in tilelang.language.__init__, overriding the
-# upstream T.cast brought in by `from tvm.script.parser.tir import *`).
+# T.cast is provided by tilelang.language.tir.ir and exported by the native
+# language facade. Ordinary casts construct prim.Cast; rounding modifiers
+# use the typed tl.cast Call with an explicit rbits operand when required.
 cast = T.cast
 
 
@@ -152,7 +152,6 @@ def _make_rs_kernel(M: int, num_threads: int, target_dtype: str):
 
 
 def _make_rs_prim_func(target_dtype: str, M: int = 128, threads: int = 128):
-
     @T.prim_func
     def main(
         A: T.Tensor[(M,), "float32"],  # noqa: F821

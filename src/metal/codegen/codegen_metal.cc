@@ -2,56 +2,91 @@
  * \file metal/codegen/codegen_metal.cc
  */
 #include "codegen_metal.h"
-#include "config.h"
+#include "backend/common/codegen/codegen_ir_utils.h"
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "metal/op/builtin.h"
-#include "runtime/thread_storage_scope.h"
-#include "target/build_common.h"
-#include "target/metal/metal_fallback_module.h"
+#include "backend/metal/codegen/metal_fallback_module.h"
+#include "codegen/build_common.h"
+#include <tvm/ir/expr_functor.h>
+#include <tvm/runtime/memory_scope.h>
+#include <tvm/support/gpu_thread_tag.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/attr.h>
+#include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm {
 namespace codegen {
 
 namespace {
 
-class CooperativeTensorUseCollector : public StmtExprVisitor {
+ffi::Optional<Var> TryMetalMatrixStorageVar(const Expr &expr) {
+  if (auto var = expr.as<Var>())
+    return var;
+  if (const auto *call = expr.as<CallObj>();
+      call && call->op.same_as(tirx::tensor_data_ptr_op()) &&
+      call->args.size() == 1) {
+    return call->args[0].as<Var>();
+  }
+  return std::nullopt;
+}
+
+Var MetalMatrixStorageVar(const Expr &expr) {
+  auto var = TryMetalMatrixStorageVar(expr);
+  TVM_FFI_CHECK(var.has_value(), TypeError)
+      << "Metal matrix operand must name storage or its tensor_data_ptr";
+  return var.value();
+}
+
+class CooperativeTensorUseCollector : public tirx::StmtExprVisitor {
 public:
-  void VisitStmt_(const AllocBufferNode *op) final {
-    if (op->buffer.scope() == "metal.cooperative_tensor") {
+  ffi::Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+    if (const auto *tensor = op->var->ty.as<tirx::TensorTypeObj>();
+        tensor && tensor->scope.name() == "metal.cooperative_tensor") {
       uses_cooperative_tensor = true;
     }
-    StmtExprVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
-
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::cooperative_tensor_load()) ||
-        op->op.same_as(tl::cooperative_tensor_store())) {
+  ffi::Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (IsCodegenOp(op, "tl.cooperative_tensor_load") ||
+        IsCodegenOp(op, "tl.cooperative_tensor_store")) {
       uses_cooperative_tensor = true;
       needs_fragment_lane_vars = true;
-    } else if (op->op.same_as(tl::cooperative_tensor_fill()) ||
-               op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
+    } else if (IsCodegenOp(op, "tl.cooperative_tensor_fill") ||
+               IsCodegenOp(op, "tl.cooperative_tensor_multiply_accumulate")) {
       uses_cooperative_tensor = true;
     }
-    StmtExprVisitor::VisitExpr_(op);
+    return StmtExprVisitor::Visit_(op);
   }
-
+  ffi::Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (op->op.same_as(tirx::launch_thread_op())) {
+      auto tag = op->args[0].as_or_throw<StringImm>()->value;
+      auto extent = op->args[1].as_or_throw<PrimExpr>();
+      auto [it, inserted] = extents.emplace(tag, extent);
+      TVM_FFI_CHECK(inserted || analyzer->CanProveEqual(it->second, extent),
+                    ValueError)
+          << "Conflicting Metal launch extents for " << tag;
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
   bool uses_cooperative_tensor{false};
   bool needs_fragment_lane_vars{false};
+  std::unordered_map<ffi::String, PrimExpr> extents;
+  sym::Analyzer analyzer;
 };
 
 std::string MetalAddressSpaceForStorageScope(const std::string &scope) {
@@ -65,19 +100,20 @@ std::string MetalAddressSpaceForStorageScope(const std::string &scope) {
       scope == "metal.cooperative_tensor") {
     return "thread";
   }
-  LOG(FATAL) << "Unknown Metal storage scope `" << scope << "`";
+  TVM_FFI_THROW(InternalError)
+      << "Unknown Metal storage scope `" << scope << "`";
   return "";
 }
 
 } // namespace
 
-void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
-  CodeGenC::InitFuncState(f);
+void CodeGenTileLangMetal::InitFuncState(const tirx::Function &f) {
+  CodeGenTileLangCBase::InitFuncState(f);
   emitted_frag_lane_vars_ = false;
   emitted_metal_simdgroup_id_ = false;
-  thread_idx_x_var_ = Var();
-  block_idx_x_var_ = Var();
-  block_idx_y_var_ = Var();
+  thread_idx_x_var_ = std::nullopt;
+  block_idx_x_var_ = std::nullopt;
+  block_idx_y_var_ = std::nullopt;
   active_mlx_swizzle_panel_ = 0;
   active_mlx_swizzle_log_ = 0;
   ct_c_inlined_.clear();
@@ -85,13 +121,13 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
   cooperative_tensor_dtype_.clear();
   simdgroup_dtype_.clear();
   CooperativeTensorUseCollector ct_collector;
-  ct_collector(f->body);
+  ct_collector.Visit(f->body);
   uses_cooperative_tensor_ = ct_collector.uses_cooperative_tensor;
   needs_fragment_lane_vars_ = ct_collector.needs_fragment_lane_vars;
   // analyze the data;
   for (Var arg : f->params) {
-    if (arg.dtype().is_handle()) {
-      alloc_storage_scope_[arg.get()] = "global";
+    if (auto pointer = arg->ty.as<PtrType>()) {
+      alloc_storage_scope_[arg.get()] = pointer.value()->scope;
     }
   }
 }
@@ -116,237 +152,201 @@ void CodeGenTileLangMetal::EmitPreamble_(std::ostream &os) const {
 }
 
 void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
-                                       const PrimFunc &func) {
-  // NOTE: There is no inter-function calls among Metal kernels.
-  // For now we keep the metal codegen without inter-function call
-  // process.
-  // We can switch to follow the flow with inter-function call process
-  // after the Metal function declaration is properly printed.
-  // In Metal, for PrimFuncs with signature
-  //    def func(A: Buffer, B: Buffer, x: int, y: float) -> None
-  // where there are trailing pod parameters, the codegen emits a struct
-  //    struct func_params{ x: int; y: float; }
-  // for the function. In the flow of inter-function call process,
-  // the struct will be emitted for every time a function is declared.
-  // So consequently there are duplicate appearances of a same struct,
-  // which makes the Metal compiler unable to recognize.
-
-  // clear previous generated state.
-  this->InitFuncState(func);
-  // skip the first underscore, so SSA variable starts from _1
+                                       const tirx::Function &func) {
+  // The Metal runtime binds leading pointers followed by one 8-byte-per-scalar
+  // constant buffer. This is the runtime ABI, independent of tensor views.
+  InitFuncState(func);
   name_supply_->FreshName("v_");
-
-  // add to alloc buffer type.
-  auto global_symbol = func->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
-  TVM_FFI_ICHECK(global_symbol.has_value())
-      << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
-
-  // Function header.
-  int64_t max_total_threads_per_threadgroup = 0;
-  if (auto opt_thread_extent =
-          func->GetAttr<ffi::Map<ffi::String, PrimExpr>>("thread_extent")) {
-    int64_t total_threads = 1;
-    bool has_thread_extent = false;
-    bool is_static_thread_extent = true;
-    for (ffi::String tag :
-         {ffi::String("threadIdx.x"), ffi::String("threadIdx.y"),
-          ffi::String("threadIdx.z")}) {
-      auto extent = opt_thread_extent.value().Get(tag);
-      if (!extent.has_value()) {
-        continue;
-      }
-      auto *extent_imm = extent.value().as<IntImmNode>();
-      if (!extent_imm) {
-        is_static_thread_extent = false;
-        break;
-      }
-      total_threads *= extent_imm->value;
+  auto global_symbol = func->GetAttr(tvm::attr::kGlobalSymbol).value();
+  CooperativeTensorUseCollector collector;
+  collector.Visit(func->body);
+  int work_dim = 0;
+  int64_t total_threads = 1;
+  bool has_thread_extent = false;
+  bool static_thread_extent = true;
+  for (const auto &[tag, extent] : collector.extents) {
+    auto scope = support::GPUThreadTag::Parse(tag);
+    TVM_FFI_CHECK(scope.rank == 0 || scope.rank == 1, ValueError)
+        << "Unsupported Metal launch tag " << tag;
+    work_dim = std::max(work_dim, scope.dim_index + 1);
+    if (scope.rank == 1) {
       has_thread_extent = true;
-    }
-    if (has_thread_extent && is_static_thread_extent && total_threads > 0) {
-      max_total_threads_per_threadgroup = total_threads;
-    }
-  }
-  if (max_total_threads_per_threadgroup > 0) {
-    this->stream << "[[kernel, max_total_threads_per_threadgroup("
-                 << max_total_threads_per_threadgroup << ")]] void ";
-  } else {
-    this->stream << "kernel void ";
-  }
-  this->stream << static_cast<std::string>(global_symbol.value()) << "(";
-
-  // Buffer arguments
-  size_t num_buffer = 0;
-  size_t limit =
-      target_->GetAttr<Integer>("max_function_args").value().IntValue();
-  if (func->params.size() > limit) {
-    LOG(WARNING) << "Probably you won't be able to execute your kernel due to "
-                    "high number of "
-                    "buffers in the kernel";
-  }
-  bool no_alias = func->HasNonzeroAttr(tirx::attr::kNoAlias);
-  std::unordered_set<const VarNode *> non_restrict;
-  if (auto opt =
-          func->GetAttr<ffi::Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tirx::Var &v : opt.value()) {
-      non_restrict.insert(v.get());
-    }
-  }
-  std::unordered_set<int> readonly_param_indices;
-  if (auto opt =
-          func->GetAttr<ffi::Array<Integer>>("tl.readonly_param_indices")) {
-    for (const auto &idx : opt.value()) {
-      readonly_param_indices.insert(static_cast<int>(idx->value));
-    }
-  }
-  for (size_t i = 0; i < func->params.size(); ++i, ++num_buffer) {
-    Var v = func->params[i];
-    if (!v.dtype().is_handle())
-      break;
-    this->stream << "  ";
-    std::string vid = AllocVarID(v.get());
-    if (readonly_param_indices.count(static_cast<int>(i))) {
-      this->stream << "const ";
-    }
-    auto it = alloc_storage_scope_.find(v.get());
-    if (it != alloc_storage_scope_.end()) {
-      PrintStorageScope(it->second, this->stream);
-    }
-    PrintType(GetType(v), this->stream);
-    // Register handle data type
-    // TODO(tvm-team): consider simply keep type info in the
-    // type annotation(via a normalizing rewriting).
-    if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
-      if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
-        RegisterHandleType(v.get(), prim->dtype);
-      }
-    }
-    if (no_alias && !non_restrict.count(v.get())) {
-      PrintRestrict(v, this->stream);
-    }
-    this->stream << ' ' << vid << " [[ buffer(" << i << ") ]],\n";
-  }
-  // Setup normal arguments.
-  size_t nargs = func->params.size() - num_buffer;
-  std::string varg = name_supply_->FreshName("arg");
-  if (nargs != 0) {
-    std::string arg_buf_type =
-        static_cast<std::string>(global_symbol.value()) + "_args_t";
-    this->stream << "  constant " << arg_buf_type << "& " << varg
-                 << " [[ buffer(" << num_buffer << ") ]],\n";
-    // declare the struct
-    decl_stream << "struct " << arg_buf_type << " {\n";
-    for (size_t i = num_buffer; i < func->params.size(); ++i) {
-      Var v = func->params[i];
-      TVM_FFI_ICHECK(!v.dtype().is_handle());
-      std::string vid = AllocVarID(v.get());
-      std::ostringstream vref;
-      if (v.dtype().bits() == 32) {
-        decl_stream << "  ";
-        PrintType(v.dtype(), decl_stream);
-        decl_stream << " " << vid << "[2];\n";
-        vref << varg << "." << vid << "[0]";
-      } else if (v.dtype().bits() == 64) {
-        decl_stream << "  ";
-        PrintType(v.dtype(), decl_stream);
-        decl_stream << " " << vid << ";\n";
-        vref << varg << "." << vid;
+      if (const auto *constant = extent.as<IntImmObj>()) {
+        const int64_t n = CodegenInt(constant);
+        TVM_FFI_CHECK_GT(n, 0, ValueError);
+        TVM_FFI_CHECK_LE(n, std::numeric_limits<int64_t>::max() / total_threads,
+                         ValueError);
+        total_threads *= n;
       } else {
-        // For non 32bit type, ref through arg union.
-        decl_stream << "  __TVMArgUnion " << vid << ";\n";
-        vref << varg << "." << vid << ".v_";
-        PrintType(v.dtype(), vref);
+        static_thread_extent = false;
       }
-      var_idmap_[v.get()] = vref.str();
+    }
+  }
+  for (const auto &tag : func->GetAttr(tirx::attr::kKernelLaunchParams)
+                             .value_or(ffi::Array<ffi::String>{})) {
+    if (tag == runtime::launch_param::kUseDynamicSharedMemoryTag)
+      continue;
+    auto scope = support::GPUThreadTag::Parse(tag);
+    TVM_FFI_CHECK(scope.rank == 0 || scope.rank == 1, ValueError);
+    work_dim = std::max(work_dim, scope.dim_index + 1);
+  }
+  if (has_thread_extent && static_thread_extent) {
+    stream << "[[kernel, max_total_threads_per_threadgroup(" << total_threads
+           << ")]] void ";
+  } else {
+    stream << "kernel void ";
+  }
+  stream << global_symbol << "(";
+  bool first_arg = true;
+  auto next_arg = [&]() {
+    if (!first_arg)
+      stream << ",\n";
+    first_arg = false;
+    stream << "  ";
+  };
+  const size_t limit =
+      target_->GetAttr<int64_t>("max_function_args").value_or(31);
+  if (func->params.size() > limit)
+    LOG(WARNING) << "Metal function exceeds max_function_args=" << limit;
+  bool no_alias = func->HasNonzeroAttr(tirx::attr::kNoAlias.name);
+  std::unordered_set<int64_t> readonly;
+  if (auto values =
+          func->GetAttr<ffi::Array<ffi::Any>>("tl.readonly_param_indices")) {
+    for (const auto &value : values.value())
+      readonly.insert(value.as<IntImmObj>() ? CodegenInt(value.as<IntImmObj>())
+                                            : value.cast<int64_t>());
+  }
+  size_t num_buffer = 0;
+  for (; num_buffer < func->params.size(); ++num_buffer) {
+    Var var = func->params[num_buffer];
+    auto pointer = var->ty.as<PtrType>();
+    if (!pointer)
+      break;
+    TVM_FFI_CHECK_EQ(pointer.value()->scope.name(), "global", ValueError)
+        << "Metal kernel buffer arguments require global pointer scope";
+    next_arg();
+    if (readonly.count(num_buffer))
+      stream << "const ";
+    PrintStorageScope(pointer.value()->scope, stream);
+    PrintType(var->ty, stream);
+    RegisterHandleType(var.get(),
+                       pointer.value()->element_type.as_or_throw<PrimType>());
+    if (no_alias)
+      PrintRestrict(var, stream);
+    stream << ' ' << AllocVarID(var.get()) << " [[ buffer(" << num_buffer
+           << ") ]]";
+  }
+  if (num_buffer != func->params.size()) {
+    std::string arg_name = name_supply_->FreshName("arg");
+    std::string arg_type = std::string(global_symbol) + "_args_t";
+    next_arg();
+    stream << "constant " << arg_type << "& " << arg_name << " [[ buffer("
+           << num_buffer << ") ]]";
+    decl_stream << "struct " << arg_type << " {\n";
+    for (size_t i = num_buffer; i < func->params.size(); ++i) {
+      Var var = func->params[i];
+      TVM_FFI_CHECK(!var->ty.as<PtrTypeObj>(), TypeError)
+          << "Metal kernel arguments require all pointers before scalar "
+             "parameters; run host/device ABI lowering before code generation";
+      auto dtype = var->ty.as_or_throw<PrimType>();
+      TVM_FFI_CHECK(dtype.IsScalar() && !dtype.IsVoid(), TypeError)
+          << "Metal scalar parameter must have scalar primitive type";
+      const std::string id = AllocVarID(var.get());
+      PrimType storage_type =
+          dtype.MatchesCode(kDLBool) ? PrimType::Int(32) : dtype;
+      TVM_FFI_CHECK(storage_type == PrimType::Int(32) ||
+                        storage_type == PrimType::UInt(32) ||
+                        storage_type == PrimType::Float(32) ||
+                        storage_type == PrimType::Int(64),
+                    TypeError)
+          << "Unsupported Metal runtime scalar argument type " << dtype;
+      decl_stream << "  ";
+      PrintType(storage_type, decl_stream);
+      decl_stream << ' ' << id;
+      std::string ref = arg_name + "." + id;
+      if (storage_type.bits() == 32) {
+        decl_stream << "[2]";
+        ref += "[0]";
+      }
+      decl_stream << ";\n";
+      var_idmap_[var.get()] =
+          dtype.MatchesCode(kDLBool) ? "bool(" + ref + ")" : ref;
     }
     decl_stream << "};\n\n";
   }
-  // Setup the thread group info.
   TVM_FFI_ICHECK_EQ(name_supply_->FreshName("threadIdx"), "threadIdx");
   TVM_FFI_ICHECK_EQ(name_supply_->FreshName("blockIdx"), "blockIdx");
-  int work_dim = 0;
-  auto launch_params =
-      func->GetAttr<ffi::Array<ffi::String>>(tirx::attr::kKernelLaunchParams)
-          .value();
-  for (const auto &tag : launch_params) {
-    if (tag != runtime::launch_param::kUseDynamicSharedMemoryTag) {
-      runtime::ThreadScope scope = runtime::ThreadScope::Create(tag);
-      work_dim = std::max(work_dim, scope.dim_index + 1);
-    }
-  }
-
   if (work_dim != 0) {
-    // use ushort by default for now
-    stream << "  ";
-    PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
-    stream << " blockIdx [[threadgroup_position_in_grid]],\n";
-    stream << "  ";
-    PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
-    stream << " __gridDim [[threadgroups_per_grid]],\n";
-    stream << "  ";
-    PrintType(DataType::UInt(thread_index_bits_, work_dim), stream);
-    stream << " threadIdx [[thread_position_in_threadgroup]],\n";
-    stream << "  uint __simd_group_id [[simdgroup_index_in_threadgroup]]\n";
+    for (const auto &[name, attribute] :
+         std::vector<std::pair<const char *, const char *>>{
+             {"blockIdx", "threadgroup_position_in_grid"},
+             {"__gridDim", "threadgroups_per_grid"},
+             {"threadIdx", "thread_position_in_threadgroup"}}) {
+      next_arg();
+      PrintType(PrimType::UInt(thread_index_bits_, work_dim), stream);
+      stream << ' ' << name << " [[" << attribute << "]]";
+    }
+    next_arg();
+    stream << "uint __simd_group_id [[simdgroup_index_in_threadgroup]]";
     emitted_metal_simdgroup_id_ = true;
   }
   thread_work_dim_ = work_dim;
-
-  // the function scope.
   stream << ") {\n";
-  int func_scope = this->BeginScope();
-  if (needs_fragment_lane_vars_) {
+  int scope = BeginScope();
+  if (needs_fragment_lane_vars_)
     EnsureFragmentLaneVars();
-  }
-  this->PreFunctionBody(func);
-  this->PrintStmt(func->body);
-  this->EndScope(func_scope);
-  this->PrintIndent();
-  this->stream << "}\n\n";
+  PreFunctionBody(func);
+  PrintStmt(func->body);
+  EndScope(scope);
+  PrintIndent();
+  stream << "}\n\n";
 }
 
-void CodeGenTileLangMetal::BindThreadIndex(const IterVar &iv) {
-  TVM_FFI_ICHECK(!var_idmap_.count(iv->var.get()));
+void CodeGenTileLangMetal::BindThreadIndex(const PrimVar &var,
+                                           const ffi::String &thread_tag) {
+  TVM_FFI_ICHECK(!var_idmap_.count(var.get()));
   // if we only have threadIdx.x
   // metal will directly print as threadIdx
-  std::string vname = iv->thread_tag;
+  std::string vname = thread_tag;
   if (thread_work_dim_ <= 1) {
-    vname = vname.substr(0, iv->thread_tag.length() - 2);
+    vname = vname.substr(0, thread_tag.length() - 2);
   }
-  var_idmap_[iv->var.get()] =
-      CastFromTo(vname, DataType::UInt(thread_index_bits_), iv->var.dtype());
-  if (iv->thread_tag == "threadIdx.x") {
-    thread_idx_x_var_ = iv->var;
-  } else if (iv->thread_tag == "blockIdx.x") {
-    block_idx_x_var_ = iv->var;
-  } else if (iv->thread_tag == "blockIdx.y") {
-    block_idx_y_var_ = iv->var;
+  var_idmap_[var.get()] =
+      CastFromTo(vname, PrimType::UInt(thread_index_bits_), var.ty());
+  if (thread_tag == "threadIdx.x") {
+    thread_idx_x_var_ = var;
+  } else if (thread_tag == "blockIdx.x") {
+    block_idx_x_var_ = var;
+  } else if (thread_tag == "blockIdx.y") {
+    block_idx_y_var_ = var;
   }
 }
 
-void CodeGenTileLangMetal::PrintType(DataType t,
+void CodeGenTileLangMetal::PrintType(const PrimType &t,
                                      std::ostream &os) { // NOLINT(*)
   int lanes = t.lanes();
-  if (t.is_handle()) {
+  if (t.IsVoid()) {
+    os << "void";
+    return;
+  }
+  if (t.MatchesCode(kDLOpaqueHandle)) {
     TVM_FFI_ICHECK_EQ(lanes, 1) << "do not yet support vector types";
     os << "void*";
     return;
   }
 
-  if (t.is_void()) {
-    os << "void";
-    return;
-  }
-  if (t == DataType::Bool()) {
+  if (t == PrimType::Bool()) {
     os << "bool";
     return;
   }
-  if ((t.is_float16() || t.is_bfloat16()) && lanes > 4 && lanes <= 8 &&
-      lanes % 2 == 0) {
+  if ((t.MatchesElementType(kDLFloat, 16) ||
+       t.MatchesElementType(kDLBfloat, 16)) &&
+      lanes > 4 && lanes <= 8 && lanes % 2 == 0) {
     os << "uint" << lanes / 2;
     return;
   }
   bool fail = false;
-  if (t.is_float()) {
+  if (t.MatchesCode(kDLFloat)) {
     if (lanes == 3) {
       os << "packed_";
     }
@@ -367,8 +367,8 @@ void CodeGenTileLangMetal::PrintType(DataType t,
       os << lanes;
       return;
     }
-  } else if (t.is_uint() || t.is_int()) {
-    if (t.is_uint()) {
+  } else if (t.MatchesCode(kDLUInt) || t.MatchesCode(kDLInt)) {
+    if (t.MatchesCode(kDLUInt)) {
       os << 'u';
     }
     switch (t.bits()) {
@@ -397,15 +397,18 @@ void CodeGenTileLangMetal::PrintType(DataType t,
       os << lanes;
       return;
     }
-  } else if (t.is_bfloat16()) {
+  } else if (t.MatchesElementType(kDLBfloat, 16)) {
     os << "bfloat";
     return;
   }
-  LOG(FATAL) << "Cannot convert type " << t << " to Metal type";
+  TVM_FFI_THROW(InternalError)
+      << "Cannot convert type " << t << " to Metal type";
 }
 
-void CodeGenTileLangMetal::PrintStorageSync(const CallNode *op) {
-  const std::string &sync = op->args[0].as<StringImmNode>()->value;
+void CodeGenTileLangMetal::PrintStorageSync(const CallObj *op) {
+  TVM_FFI_CHECK_EQ(CodegenOperands(op).size(), 1U, ValueError)
+      << "Metal code generation does not support named/partial barriers";
+  const std::string &sync = op->args[0].as<StringImmObj>()->value;
   if (sync == "warp") {
     // Metal has no per-simdgroup barrier; simdgroup_barrier synchronizes
     // the entire threadgroup (same as threadgroup_barrier).  We emit the
@@ -417,29 +420,30 @@ void CodeGenTileLangMetal::PrintStorageSync(const CallNode *op) {
     this->PrintIndent();
     this->stream << "threadgroup_barrier(mem_flags::mem_threadgroup);\n";
   } else if (sync == "global") {
-    LOG(FATAL) << "global barrier not supported";
+    TVM_FFI_THROW(InternalError) << "global barrier not supported";
   }
 }
 
-void CodeGenTileLangMetal::PrintVecElemLoad(const std::string &vec, DataType t,
-                                            int i,
+void CodeGenTileLangMetal::PrintVecElemLoad(const std::string &vec,
+                                            const PrimType &t, int i,
                                             std::ostream &os) { // NOLINT(*)
-  if (t.is_float16() && t.lanes() > 4) {
+  if (t.MatchesElementType(kDLFloat, 16) && t.lanes() > 4) {
     os << "((thread half*)(&" << vec << "))[" << i << "]";
-  } else if (t.is_bfloat16() && t.lanes() > 4) {
+  } else if (t.MatchesElementType(kDLBfloat, 16) && t.lanes() > 4) {
     os << "((thread bfloat*)(&" << vec << "))[" << i << "]";
   } else {
     os << vec << "[" << i << "]";
   }
 }
 
-void CodeGenTileLangMetal::PrintVecElemStore(const std::string &vec, DataType t,
-                                             int i, const std::string &value) {
+void CodeGenTileLangMetal::PrintVecElemStore(const std::string &vec,
+                                             const PrimType &t, int i,
+                                             const std::string &value) {
   this->PrintIndent();
-  if (t.is_float16() && t.lanes() > 4) {
+  if (t.MatchesElementType(kDLFloat, 16) && t.lanes() > 4) {
     stream << "((thread half*)(&" << vec << "))[" << i << "] = " << value
            << ";\n";
-  } else if (t.is_bfloat16() && t.lanes() > 4) {
+  } else if (t.MatchesElementType(kDLBfloat, 16) && t.lanes() > 4) {
     stream << "((thread bfloat*)(&" << vec << "))[" << i << "] = " << value
            << ";\n";
   } else {
@@ -448,62 +452,61 @@ void CodeGenTileLangMetal::PrintVecElemStore(const std::string &vec, DataType t,
   }
 }
 
-void CodeGenTileLangMetal::PrintStorageScope(const std::string &scope,
+void CodeGenTileLangMetal::PrintStorageScope(const runtime::MemoryScope &scope,
                                              std::ostream &os) { // NOLINT(*)
-  os << MetalAddressSpaceForStorageScope(scope) << " ";
+  os << MetalAddressSpaceForStorageScope(scope.name()) << " ";
 }
 
-void CodeGenTileLangMetal::VisitStmt_(const BindNode *op) {
-  if (!op->var.dtype().is_handle()) {
-    CodeGenC::VisitStmt_(op);
+void CodeGenTileLangMetal::Dispatch_(const BindObj *op) {
+  if (const auto *call = op->value.as<CallObj>();
+      call && call->op.same_as(tirx::alloc_tensor_op())) {
+    PrintTensorAllocation(op);
     return;
   }
-
-  const auto *pointer_type = op->var->type_annotation.as<PointerTypeNode>();
-  TVM_FFI_ICHECK(pointer_type)
-      << "Metal handle binding requires a typed pointer: " << op->var << " = "
-      << op->value;
-  const auto *element_type = pointer_type->element_type.as<PrimTypeNode>();
-  TVM_FFI_ICHECK(element_type)
-      << "Metal handle binding requires a primitive pointee type: " << op->var
-      << " = " << op->value;
-
-  const std::string &storage_scope = pointer_type->storage_scope;
-  TVM_FFI_ICHECK(!storage_scope.empty())
-      << "Metal handle binding requires an explicit storage scope: " << op->var
-      << " = " << op->value;
-
-  alloc_storage_scope_[op->var.get()] = storage_scope;
-  RegisterHandleType(op->var.get(), element_type->dtype);
-  std::string value = PrintExpr(op->value);
-
+  const auto *pointer = op->var->ty.as<PtrTypeObj>();
+  if (!pointer) {
+    CodeGenC::Dispatch_(op);
+    return;
+  }
+  const PrimType element = pointer->element_type.as_or_throw<PrimType>();
+  alloc_storage_scope_[op->var.get()] = pointer->scope;
+  RegisterHandleType(op->var.get(), element);
+  RegisterHandleTypeFromPointer(op->var, &op->value);
+  const std::string value = PrintExpr(op->value);
   if (print_ssa_form_) {
     TVM_FFI_ICHECK(!var_idmap_.count(op->var.get()));
     var_idmap_[op->var.get()] = value;
     return;
   }
-
   PrintIndent();
-  PrintStorageScope(storage_scope, stream);
-  PrintType(element_type->dtype, stream);
+  PrintStorageScope(pointer->scope, stream);
+  PrintType(element, stream);
   stream << "* " << AllocVarID(op->var.get()) << " = (";
-  PrintStorageScope(storage_scope, stream);
-  PrintType(element_type->dtype, stream);
+  PrintStorageScope(pointer->scope, stream);
+  PrintType(element, stream);
   stream << "*)" << value << ";\n";
 }
 
-void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
-  if (op->attr_key == "threadblock_swizzle_pattern") {
+void CodeGenTileLangMetal::Dispatch_(const RegionStmtObj *op) {
+  if (op->op->name != "tl.attr") {
+    CodeGenC::Dispatch_(op);
+    return;
+  }
+  auto attr = DecodeTileLangAttribute(op);
+  if (attr.key == "threadblock_swizzle_pattern") {
     std::string func_name;
     int panel_size = 0;
-    if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(builtin::tvm_tuple()) && call->args.size() >= 2) {
-        const auto *name_node = call->args[0].as<StringImmNode>();
-        const auto *size_node = call->args[1].as<IntImmNode>();
-        TVM_FFI_ICHECK(name_node && size_node);
-        func_name = name_node->value;
-        panel_size = static_cast<int>(size_node->value);
-      }
+    if (auto tuple = attr.value.as<tvm::Tuple>()) {
+      TVM_FFI_CHECK_EQ(tuple.value()->fields.size(), 2, ValueError);
+      func_name = tuple.value()->fields[0].as_or_throw<StringImm>()->value;
+      panel_size = CodegenInt(tuple.value()->fields[1]);
+    } else {
+      auto values = attr.value.cast<ffi::Array<ffi::Any>>();
+      TVM_FFI_CHECK_EQ(values.size(), 2, ValueError);
+      func_name = CodegenAnnotationString(values[0]);
+      panel_size = values[1].as<IntImmObj>()
+                       ? CodegenInt(values[1].as<IntImmObj>())
+                       : values[1].cast<int>();
     }
     TVM_FFI_ICHECK(!func_name.empty() && panel_size > 0);
 
@@ -572,94 +575,79 @@ void CodeGenTileLangMetal::VisitStmt_(const AttrStmtNode *op) {
       int old_log = active_mlx_swizzle_log_;
       active_mlx_swizzle_panel_ = panel_size;
       active_mlx_swizzle_log_ = swizzle_log;
-      this->VisitStmt(op->body);
+      this->Dispatch(op->body);
       active_mlx_swizzle_panel_ = old_panel;
       active_mlx_swizzle_log_ = old_log;
       this->PrintIndent();
       stream << "}\n";
       return;
     } else {
-      LOG(FATAL) << "Unknown Metal threadblock swizzle pattern `" << func_name
-                 << "`";
+      TVM_FFI_THROW(InternalError)
+          << "Unknown Metal threadblock swizzle pattern `" << func_name << "`";
     }
-    this->VisitStmt(op->body);
+    this->Dispatch(op->body);
     this->PrintIndent();
     stream << "}\n";
     return;
   }
-  CodeGenC::VisitStmt_(op);
+  if (attr.key == "volatile_scope")
+    MarkVolatile(attr.node.cast<Var>().get());
+  PrintStmt(op->body);
 }
 
-void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
-  auto *min_imm = op->min.as<IntImmNode>();
-  auto *ext_imm = op->extent.as<IntImmNode>();
-  // Unroll small constant-bound loops at codegen time so loop variables become
-  // IntImm constants. Persistent cooperative_tensor C uses named Metal CT
-  // objects (__pct_c0, __pct_c1, ...), so its tile index must be constant.
+void CodeGenTileLangMetal::Dispatch_(const ForObj *op) {
+  sym::Analyzer analyzer;
+  PrimExpr extent = analyzer->Simplify(op->end - op->begin);
+  const auto *min_imm = op->begin.as<IntImmObj>();
+  const auto *ext_imm = extent.as<IntImmObj>();
   bool body_has_alloc = false;
   bool needs_ct_index_const = false;
-  auto check_ct_index = [&](const PrimExpr &buffer, const PrimExpr &idx) {
-    if (idx.as<IntImmNode>()) {
-      return;
-    }
-    if (auto *var = buffer.as<tirx::VarNode>()) {
-      Var var_ref = ffi::GetRef<Var>(var);
-      needs_ct_index_const = ct_c_inlined_.count(var_ref) != 0 ||
-                             cooperative_tensor_dtype_.count(var_ref) != 0;
-    }
-  };
-  tirx::PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
-    if (node->IsInstance<tirx::AllocBufferNode>()) {
-      body_has_alloc = true;
-    }
-    if (auto *call = node.as<tirx::CallNode>()) {
-      if (call->op.same_as(tl::cooperative_tensor_fill()) ||
-          call->op.same_as(tl::cooperative_tensor_load()) ||
-          call->op.same_as(tl::cooperative_tensor_store()) ||
-          call->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
-        check_ct_index(call->args[0], call->args[1]);
-      }
-    }
-  });
-  if (ext_imm && min_imm && ext_imm->value >= 2 && ext_imm->value <= 4 &&
-      !body_has_alloc && needs_ct_index_const) {
-    int64_t start = min_imm->value;
-    int64_t extent = ext_imm->value;
-    for (int64_t i = 0; i < extent; i++) {
-      ffi::Map<tirx::Var, PrimExpr> vmap;
-      vmap.Set(op->loop_var, IntImm(op->loop_var->dtype, start + i));
-      tirx::Stmt body = tirx::Substitute(op->body, vmap);
-      // Substitute leaves expressions such as (0 * 2 + 1); fold them so
-      // cooperative_tensor indices can become IntImm.
-      arith::Analyzer analyzer;
-      class ConstFolder : public tirx::StmtExprMutator {
-      public:
-        explicit ConstFolder(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
-
-        PrimExpr VisitExpr(const PrimExpr &expr) final {
-          PrimExpr visited = tirx::StmtExprMutator::VisitExpr(expr);
-          if (!visited.as<IntImmNode>() && !visited.as<tirx::VarNode>()) {
-            return analyzer_->Simplify(visited);
+  ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+      op->body,
+      [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *call = bind->value.as<CallObj>();
+            call && call->op.same_as(tirx::alloc_tensor_op()))
+          body_has_alloc = true;
+        return ffi::WalkResult::Advance();
+      },
+      [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (IsCodegenOp(call, "tl.cooperative_tensor_fill") ||
+            IsCodegenOp(call, "tl.cooperative_tensor_load") ||
+            IsCodegenOp(call, "tl.cooperative_tensor_store") ||
+            IsCodegenOp(call, "tl.cooperative_tensor_multiply_accumulate")) {
+          auto args = CodegenOperands(call);
+          if (args.size() >= 2 && !args[1].as<IntImmObj>()) {
+            if (auto var = TryMetalMatrixStorageVar(args[0]))
+              needs_ct_index_const |=
+                  ct_c_inlined_.count(var.value()) ||
+                  cooperative_tensor_dtype_.count(var.value());
           }
-          return visited;
         }
-
-      private:
-        arith::Analyzer *analyzer_;
-      };
-      body = ConstFolder(&analyzer)(std::move(body));
-      std::vector<const tirx::VarNode *> local_vars;
-      tirx::PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
-        if (auto *bind = node.as<tirx::BindNode>()) {
-          local_vars.push_back(bind->var.get());
-        } else if (auto *inner_for = node.as<tirx::ForNode>()) {
-          local_vars.push_back(inner_for->loop_var.get());
-        }
+        return ffi::WalkResult::Advance();
       });
-      this->VisitStmt(body);
-      for (auto *var : local_vars) {
-        var_idmap_.erase(var);
-      }
+  if (ext_imm && min_imm && ext_imm->value >= 2 && ext_imm->value <= 4 &&
+      prim::IsOne(op->step) && !body_has_alloc && needs_ct_index_const) {
+    const int64_t begin = CodegenInt(min_imm);
+    const int64_t count = CodegenInt(ext_imm);
+    for (int64_t i = 0; i < count; ++i) {
+      auto substitute = [&](const Var &var, TVMFFIDefRegionKind kind)
+          -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+        if (kind == kTVMFFIDefRegionKindNone && var.same_as(op->var))
+          return ffi::Any(IntImm(op->var.ty(), begin + i));
+        return ffi::Unchanged();
+      };
+      Stmt body =
+          ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(op->body, substitute)
+              .as_or_throw<Stmt>();
+      body = ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
+                 body,
+                 [&](const PrimExpr &expr) -> PrimExpr {
+                   return analyzer->Simplify(expr);
+                 })
+                 .as_or_throw<Stmt>();
+      auto saved_vars = var_idmap_;
+      PrintStmt(body);
+      var_idmap_ = std::move(saved_vars);
     }
     return;
   }
@@ -667,32 +655,24 @@ void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
     PrintIndent();
     stream << "#pragma clang loop unroll(disable)\n";
   }
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
-void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
-  TVM_FFI_ICHECK(op->buffer.defined());
-  std::string vid = AllocVarID(op->buffer->data.get());
-
-  this->PrintIndent();
-  size_t constant_size = 1;
-  for (const auto &dim : op->buffer->shape) {
-    const IntImmNode *dim_imm = dim.as<IntImmNode>();
-    TVM_FFI_ICHECK(dim_imm)
-        << "Can only handle constant size stack allocation for now";
-    constant_size *= dim_imm->value;
-  }
-  TVM_FFI_ICHECK_GT(constant_size, 0)
-      << "Can only handle constant size stack allocation for now";
-
-  DataType dtype = op->buffer->dtype;
-  auto scope = GetPtrStorageScope(op->buffer->data);
-  alloc_storage_scope_[op->buffer->data.get()] = scope;
+void CodeGenTileLangMetal::PrintTensorAllocation(const BindObj *op) {
+  const auto *allocation = op->value.as<CallObj>();
+  const auto tensor = op->var.as_or_throw<tirx::TensorVar>();
+  const auto annotations = CodegenCallAnnotations(allocation);
+  const std::string vid = AllocVarID(tensor.get());
+  PrintIndent();
+  size_t constant_size = CodegenAllocationElements(tensor);
+  PrimType dtype = tensor.dtype();
+  auto scope = tensor.scope().name();
+  alloc_storage_scope_[tensor.get()] = tensor.scope();
   if (scope == "metal.cooperative_tensor") {
     uses_cooperative_tensor_ = true;
-    TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
-                   dtype == DataType::Float(32) ||
-                   dtype == DataType::BFloat(16))
+    TVM_FFI_ICHECK(dtype == PrimType::Float(16) ||
+                   dtype == PrimType::Float(32) ||
+                   dtype == PrimType::BFloat(16))
         << "Only float16, float32, and bfloat16 are supported for "
            "cooperative_tensor, but got "
         << dtype;
@@ -703,7 +683,7 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     std::ostringstream dtype_os;
     PrintType(dtype, dtype_os);
     std::string dtype_str = dtype_os.str();
-    cooperative_tensor_dtype_[op->buffer->data] = dtype_str;
+    cooperative_tensor_dtype_[tensor] = dtype_str;
     int elems_per_thread = constant_size / 32;
     bool can_inline_c = dtype_str == "float" && elems_per_thread >= 16 &&
                         elems_per_thread % 16 == 0;
@@ -714,9 +694,9 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
              << "];\n";
     }
     if (can_inline_c) {
-      ct_c_inlined_.insert(op->buffer->data);
+      ct_c_inlined_.insert(tensor);
       if (elide_c_storage) {
-        ct_c_storage_elided_.insert(op->buffer->data);
+        ct_c_storage_elided_.insert(tensor);
       }
       this->PrintIndent();
       stream
@@ -738,9 +718,9 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
       }
     }
   } else if (scope == "metal.simdgroup") {
-    TVM_FFI_ICHECK(dtype == DataType::Float(16) ||
-                   dtype == DataType::Float(32) ||
-                   dtype == DataType::BFloat(16))
+    TVM_FFI_ICHECK(dtype == PrimType::Float(16) ||
+                   dtype == PrimType::Float(32) ||
+                   dtype == PrimType::BFloat(16))
         << "Only float16, float32, and bfloat16 are supported, but got "
         << dtype;
     TVM_FFI_ICHECK(constant_size % 64 == 0)
@@ -750,7 +730,7 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     std::ostringstream dtype_os;
     PrintType(dtype, dtype_os);
     std::string dtype_str = dtype_os.str();
-    simdgroup_dtype_[op->buffer->data] = dtype_str;
+    simdgroup_dtype_[tensor] = dtype_str;
     stream << "simdgroup_" << dtype_str << "8x8 " << vid << '['
            << constant_size / 64 << "];\n";
   } else {
@@ -759,20 +739,19 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     // Apple GPU shared memory has banks of 16 bytes; padding prevents
     // the same bank being accessed by multiple threads simultaneously.
     if (scope == "shared" || scope == "threadgroup") {
-      int dtype_bytes = dtype.bytes();
+      int dtype_bytes = dtype.StorageBytes();
       int padding_elems = (dtype_bytes > 0) ? (16 / dtype_bytes) : 0;
       constant_size += padding_elems;
     }
-    PrintStorageScope(scope, stream);
+    PrintStorageScope(tensor.scope(), stream);
     PrintType(dtype, stream);
     if (scope == "local.var") {
-      PrimExpr init = tirx::make_const(op->buffer->dtype, 0);
-      auto init_it = op->annotations.find(tl::attr::kLocalVarInit);
-      if (init_it != op->annotations.end()) {
-        PrimExpr user_init = Downcast<PrimExpr>((*init_it).second);
-        if (!user_init.dtype().is_void() &&
-            user_init.dtype() != op->buffer->dtype) {
-          user_init = tirx::Cast(op->buffer->dtype, user_init);
+      PrimExpr init = prim::MakeConst(tensor.dtype(), 0);
+      auto init_it = annotations.find("tl.local_var_init");
+      if (init_it != annotations.end()) {
+        PrimExpr user_init = (*init_it).second.cast<PrimExpr>();
+        if (!user_init.ty().IsVoid() && user_init.ty() != tensor.dtype()) {
+          user_init = prim::Cast(tensor.dtype(), user_init);
         }
         init = user_init;
       }
@@ -782,32 +761,33 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     }
   }
 
-  RegisterHandleType(op->buffer->data.get(), dtype);
+  RegisterHandleType(tensor.get(), dtype);
+  if (auto flag = annotations.Get(tirx::attr::kVolatile.name);
+      flag && CodegenBool(*flag))
+    MarkVolatile(tensor.get());
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const BufferLoadNode *op,
-                                      std::ostream &os) {
-  if (GetPtrStorageScope(op->buffer->data) == "local.var") {
+void CodeGenTileLangMetal::Dispatch_(const TensorLoadObj *op,
+                                     std::ostream &os) {
+  if (CodegenStorageScope(op->source.as_or_throw<Var>()) == "local.var") {
     TVM_FFI_ICHECK_EQ(op->indices.size(), 1)
         << "Load from non-flat local.var not supported.";
-    os << GetVarID(op->buffer->data.get());
+    os << GetVarID(op->source.as_or_throw<Var>().get());
     return;
   }
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
 }
 
-void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
-  if (GetPtrStorageScope(op->buffer->data) == "local.var") {
+void CodeGenTileLangMetal::Dispatch_(const TensorStoreObj *op) {
+  if (CodegenStorageScope(op->dest.as_or_throw<Var>()) == "local.var") {
     TVM_FFI_ICHECK_EQ(op->indices.size(), 1)
         << "Store to non-flat local.var not supported.";
-    TVM_FFI_ICHECK(!op->predicate.defined())
-        << "Predicated local.var store is not supported.";
     PrintIndent();
-    stream << GetVarID(op->buffer->data.get()) << " = " << PrintExpr(op->value)
-           << ";\n";
+    stream << GetVarID(op->dest.as_or_throw<Var>().get()) << " = "
+           << PrintExpr(op->value) << ";\n";
     return;
   }
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
 void CodeGenTileLangMetal::EnsureCooperativeTensorBuffer(const Var &var) {
@@ -838,31 +818,32 @@ void CodeGenTileLangMetal::EnsureFragmentLaneVars() {
   emitted_frag_lane_vars_ = true;
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const SelectNode *op,
-                                      std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangMetal::Dispatch_(const prim::SelectObj *op,
+                                     std::ostream &os) { // NOLINT(*)
   os << "select(" << PrintExpr(op->false_value) << ", "
      << PrintExpr(op->true_value) << ", " << PrintExpr(op->condition) << ")";
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
-                                      std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangMetal::Dispatch_(const prim::BroadcastObj *op,
+                                     std::ostream &os) { // NOLINT(*)
   std::string v = PrintExpr(op->value);
-  int lanes = op->dtype.lanes();
-  if ((op->dtype.is_float16() || op->dtype.is_bfloat16()) && lanes > 4 &&
-      lanes % 2 == 0) {
+  int lanes = CodegenDType(op).lanes();
+  if ((CodegenDType(op).MatchesElementType(kDLFloat, 16) ||
+       CodegenDType(op).MatchesElementType(kDLBfloat, 16)) &&
+      lanes > 4 && lanes % 2 == 0) {
     os << "uint" << lanes / 2 << "(";
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
         os << ", ";
-      if (op->dtype.is_float16()) {
+      if (CodegenDType(op).MatchesElementType(kDLFloat, 16)) {
         os << "as_type<uint>(half2(" << v << ", " << v << "))";
-      } else if (op->dtype.is_bfloat16()) {
+      } else if (CodegenDType(op).MatchesElementType(kDLBfloat, 16)) {
         os << "as_type<uint>(bfloat2(" << v << ", " << v << "))";
       }
     }
     os << ')';
   } else {
-    PrintType(op->dtype, os);
+    PrintType(CodegenDType(op), os);
     os << "(";
     for (int i = 0; i < lanes; ++i) {
       if (i != 0)
@@ -873,62 +854,52 @@ void CodeGenTileLangMetal::VisitExpr_(const BroadcastNode *op,
   }
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
-                                      std::ostream &os) { // NOLINT(*)
-  if (TryPrintMlxSwizzleExpr(ffi::GetRef<PrimExpr>(op), os)) {
+void CodeGenTileLangMetal::Dispatch_(const prim::AddObj *op,
+                                     std::ostream &os) { // NOLINT(*)
+  if (TryPrintMlxSwizzleExpr(ffi::GetRef<Expr>(op), os)) {
     return;
   }
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
-                                      std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangMetal::Dispatch_(const prim::CastObj *op,
+                                     std::ostream &os) { // NOLINT(*)
   std::ostringstream value;
   if (TryPrintMlxSwizzleExpr(op->value, value)) {
-    os << CastFromTo(value.str(), op->value.dtype(), op->dtype);
+    os << CastFromTo(value.str(), op->value.ty(), CodegenDType(op));
     return;
   }
-  CodeGenC::VisitExpr_(op, os);
+  CodeGenC::Dispatch_(op, os);
+}
+
+void CodeGenTileLangMetal::Dispatch_(const prim::RShiftObj *op,
+                                     std::ostream &os) { // NOLINT(*)
+  if (TryPrintMlxSwizzleExpr(ffi::GetRef<Expr>(op), os)) {
+    return;
+  }
+  CodeGenC::Dispatch_(op, os);
+}
+
+void CodeGenTileLangMetal::Dispatch_(const prim::BitwiseAndObj *op,
+                                     std::ostream &os) { // NOLINT(*)
+  if (TryPrintMlxSwizzleExpr(ffi::GetRef<Expr>(op), os)) {
+    return;
+  }
+  CodeGenC::Dispatch_(op, os);
 }
 
 std::string
-CodeGenTileLangMetal::GetStorageScopeOf(const PrimExpr &ptr_expr) const {
-  if (const auto *cast = ptr_expr.as<CastNode>()) {
-    return GetStorageScopeOf(cast->value);
-  }
-  if (auto *var = ptr_expr.as<VarNode>()) {
-    auto it = alloc_storage_scope_.find(var);
-    if (it != alloc_storage_scope_.end()) {
-      return it->second;
-    }
-    if (const auto *pointer_type = var->type_annotation.as<PointerTypeNode>()) {
-      if (!pointer_type->storage_scope.empty()) {
-        return pointer_type->storage_scope;
-      }
-    }
-  }
-  if (auto *call = ptr_expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::address_of())) {
-      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
-      if (auto *load = call->args[0].as<BufferLoadNode>()) {
-        return GetStorageScopeOf(load->buffer->data);
-      }
-    } else if (call->op.same_as(builtin::handle_add_byte_offset())) {
-      TVM_FFI_ICHECK_EQ(call->args.size(), 2U);
-      return GetStorageScopeOf(call->args[0]);
-    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
-      TVM_FFI_ICHECK_GE(call->args.size(), 2U);
-      return GetStorageScopeOf(call->args[1]);
-    } else if (call->op.same_as(builtin::reinterpret())) {
-      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
-      return GetStorageScopeOf(call->args[0]);
-    }
-  }
-  return "";
+CodeGenTileLangMetal::GetStorageScopeOf(const Expr &ptr_expr) const {
+  if (const auto *pointer = ptr_expr->ty.as<PtrTypeObj>())
+    return pointer->scope.name();
+  if (const auto *tensor = ptr_expr->ty.as<tirx::TensorTypeObj>())
+    return tensor->scope.name();
+  TVM_FFI_THROW(TypeError)
+      << "Expected a typed pointer or tensor for Metal address space, got "
+      << ptr_expr->ty;
 }
 
-std::string
-CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
+std::string CodeGenTileLangMetal::GetAddrSpaceOf(const Expr &ptr_expr) const {
   std::string storage_scope = GetStorageScopeOf(ptr_expr);
   TVM_FFI_ICHECK(!storage_scope.empty())
       << "Cannot determine Metal storage scope for pointer expression "
@@ -937,121 +908,106 @@ CodeGenTileLangMetal::GetAddrSpaceOf(const PrimExpr &ptr_expr) const {
 }
 
 std::string
-CodeGenTileLangMetal::GetPointeeTypeOf(const PrimExpr &ptr_expr,
+CodeGenTileLangMetal::GetPointeeTypeOf(const Expr &ptr_expr,
                                        const std::string &fallback) {
-  if (auto *var = ptr_expr.as<VarNode>()) {
-    auto it = handle_data_type_.find(var);
-    if (it != handle_data_type_.end()) {
-      std::ostringstream os;
-      PrintType(it->second, os);
-      return os.str();
-    }
-    if (const auto *pointer_type = var->type_annotation.as<PointerTypeNode>()) {
-      if (const auto *element_type =
-              pointer_type->element_type.as<PrimTypeNode>()) {
-        std::ostringstream os;
-        PrintType(element_type->dtype, os);
-        return os.str();
-      }
-    }
+  std::ostringstream os;
+  if (const auto *pointer = ptr_expr->ty.as<PtrTypeObj>()) {
+    PrintType(pointer->element_type, os);
+    return os.str();
   }
-  if (auto *call = ptr_expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::address_of())) {
-      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
-      if (auto *load = call->args[0].as<BufferLoadNode>()) {
-        std::ostringstream os;
-        PrintType(load->buffer->dtype, os);
-        return os.str();
-      }
-    } else if (call->op.same_as(builtin::handle_add_byte_offset())) {
-      TVM_FFI_ICHECK_EQ(call->args.size(), 2U);
-      return GetPointeeTypeOf(call->args[0], fallback);
-    } else if (call->op.same_as(builtin::tvm_access_ptr())) {
-      TVM_FFI_ICHECK_GE(call->args.size(), 2U);
-      return GetPointeeTypeOf(call->args[1], fallback);
-    } else if (call->op.same_as(builtin::reinterpret())) {
-      TVM_FFI_ICHECK_EQ(call->args.size(), 1U);
-      return fallback;
-    }
+  if (const auto *tensor = ptr_expr->ty.as<tirx::TensorTypeObj>()) {
+    PrintType(tensor->dtype, os);
+    return os.str();
   }
   return fallback;
 }
 
-bool CodeGenTileLangMetal::IsThreadIdxXExpr(const PrimExpr &expr) const {
-  if (!thread_idx_x_var_.defined()) {
+bool CodeGenTileLangMetal::IsThreadIdxXExpr(const Expr &expr) const {
+  if (!thread_idx_x_var_.has_value()) {
     return false;
   }
-  if (const auto *cast = expr.as<CastNode>()) {
+  if (const auto *cast = expr.as<prim::CastObj>()) {
     return IsThreadIdxXExpr(cast->value);
   }
-  if (const auto *var = expr.as<VarNode>()) {
-    return ffi::GetRef<Var>(var).same_as(thread_idx_x_var_);
+  if (const auto *var = expr.as<VarObj>()) {
+    return ffi::GetRef<Var>(var).same_as(thread_idx_x_var_.value());
   }
   return false;
 }
 
-bool CodeGenTileLangMetal::IsBlockIdxExpr(const PrimExpr &expr, int dim) const {
-  const PrimExpr *current = &expr;
-  while (const auto *cast = current->as<CastNode>()) {
+bool CodeGenTileLangMetal::IsBlockIdxExpr(const Expr &expr, int dim) const {
+  const Expr *current = &expr;
+  while (const auto *cast = current->as<prim::CastObj>()) {
     current = &cast->value;
   }
-  const auto *var = current->as<VarNode>();
+  const auto *var = current->as<VarObj>();
   if (!var) {
     return false;
   }
   Var var_ref = ffi::GetRef<Var>(var);
   if (dim == 0) {
-    return block_idx_x_var_.defined() && var_ref.same_as(block_idx_x_var_);
+    return block_idx_x_var_.has_value() &&
+           var_ref.same_as(block_idx_x_var_.value());
   }
   if (dim == 1) {
-    return block_idx_y_var_.defined() && var_ref.same_as(block_idx_y_var_);
+    return block_idx_y_var_.has_value() &&
+           var_ref.same_as(block_idx_y_var_.value());
   }
   return false;
 }
 
-bool CodeGenTileLangMetal::IsConstIntExpr(const PrimExpr &expr,
+bool CodeGenTileLangMetal::IsConstIntExpr(const Expr &expr,
                                           int64_t value) const {
-  const auto *imm = expr.as<IntImmNode>();
+  const auto *imm = expr.as<IntImmObj>();
   return imm && imm->value == value;
 }
 
-bool CodeGenTileLangMetal::IsMlxPanelRemainderExpr(const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxPanelRemainderExpr(const Expr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
   int64_t mask = active_mlx_swizzle_panel_ - 1;
-  if (const auto *call = expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::bitwise_and()) && call->args.size() == 2) {
+  if (const auto *bitwise = expr.as<prim::BitwiseAndObj>()) {
+    return (IsBlockIdxExpr(bitwise->a, 0) &&
+            IsConstIntExpr(bitwise->b, mask)) ||
+           (IsBlockIdxExpr(bitwise->b, 0) && IsConstIntExpr(bitwise->a, mask));
+  }
+  if (const auto *call = expr.as<CallObj>()) {
+    if (IsCodegenOp(call, "prim.bitwise_and") && call->args.size() == 2) {
       return (IsBlockIdxExpr(call->args[0], 0) &&
               IsConstIntExpr(call->args[1], mask)) ||
              (IsBlockIdxExpr(call->args[1], 0) &&
               IsConstIntExpr(call->args[0], mask));
     }
   }
-  if (const auto *mod = expr.as<ModNode>()) {
+  if (const auto *mod = expr.as<prim::ModObj>()) {
     return IsBlockIdxExpr(mod->a, 0) &&
            IsConstIntExpr(mod->b, active_mlx_swizzle_panel_);
   }
-  if (const auto *mod = expr.as<FloorModNode>()) {
+  if (const auto *mod = expr.as<prim::FloorModObj>()) {
     return IsBlockIdxExpr(mod->a, 0) &&
            IsConstIntExpr(mod->b, active_mlx_swizzle_panel_);
   }
   return false;
 }
 
-bool CodeGenTileLangMetal::IsMlxPanelRowExpr(const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxPanelRowExpr(const Expr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
   if (active_mlx_swizzle_log_ > 0) {
-    if (const auto *call = expr.as<CallNode>()) {
-      if (call->op.same_as(builtin::shift_left()) && call->args.size() == 2) {
+    if (const auto *shift = expr.as<prim::LShiftObj>()) {
+      return IsBlockIdxExpr(shift->a, 1) &&
+             IsConstIntExpr(shift->b, active_mlx_swizzle_log_);
+    }
+    if (const auto *call = expr.as<CallObj>()) {
+      if (IsCodegenOp(call, "prim.shift_left") && call->args.size() == 2) {
         return IsBlockIdxExpr(call->args[0], 1) &&
                IsConstIntExpr(call->args[1], active_mlx_swizzle_log_);
       }
     }
   }
-  if (const auto *mul = expr.as<MulNode>()) {
+  if (const auto *mul = expr.as<prim::MulObj>()) {
     return (IsBlockIdxExpr(mul->a, 1) &&
             IsConstIntExpr(mul->b, active_mlx_swizzle_panel_)) ||
            (IsBlockIdxExpr(mul->b, 1) &&
@@ -1060,57 +1016,60 @@ bool CodeGenTileLangMetal::IsMlxPanelRowExpr(const PrimExpr &expr) const {
   return active_mlx_swizzle_panel_ == 1 && IsBlockIdxExpr(expr, 1);
 }
 
-bool CodeGenTileLangMetal::IsMlxLogicalBlockXExpr(const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxLogicalBlockXExpr(const Expr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
-  if (const auto *call = expr.as<CallNode>()) {
-    if (call->op.same_as(builtin::shift_right()) && call->args.size() == 2) {
+  if (const auto *shift = expr.as<prim::RShiftObj>()) {
+    return IsBlockIdxExpr(shift->a, 0) &&
+           IsConstIntExpr(shift->b, active_mlx_swizzle_log_);
+  }
+  if (const auto *call = expr.as<CallObj>()) {
+    if (IsCodegenOp(call, "prim.shift_right") && call->args.size() == 2) {
       return IsBlockIdxExpr(call->args[0], 0) &&
              IsConstIntExpr(call->args[1], active_mlx_swizzle_log_);
     }
   }
-  if (const auto *div = expr.as<DivNode>()) {
+  if (const auto *div = expr.as<prim::DivObj>()) {
     return IsBlockIdxExpr(div->a, 0) &&
            IsConstIntExpr(div->b, active_mlx_swizzle_panel_);
   }
-  if (const auto *div = expr.as<FloorDivNode>()) {
+  if (const auto *div = expr.as<prim::FloorDivObj>()) {
     return IsBlockIdxExpr(div->a, 0) &&
            IsConstIntExpr(div->b, active_mlx_swizzle_panel_);
   }
   return active_mlx_swizzle_panel_ == 1 && IsBlockIdxExpr(expr, 0);
 }
 
-bool CodeGenTileLangMetal::IsMlxLogicalBlockYExpr(const PrimExpr &expr) const {
+bool CodeGenTileLangMetal::IsMlxLogicalBlockYExpr(const Expr &expr) const {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
   if (IsMlxPanelRemainderExpr(expr)) {
     return true;
   }
-  if (const auto *add = expr.as<AddNode>()) {
+  if (const auto *add = expr.as<prim::AddObj>()) {
     return (IsMlxPanelRowExpr(add->a) && IsMlxPanelRemainderExpr(add->b)) ||
            (IsMlxPanelRowExpr(add->b) && IsMlxPanelRemainderExpr(add->a));
   }
   return false;
 }
 
-bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr,
+bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(const Expr &expr,
                                                          std::ostream &os) {
   if (active_mlx_swizzle_panel_ <= 0) {
     return false;
   }
 
-  std::vector<PrimExpr> terms;
-  std::function<void(const PrimExpr &)> flatten_add =
-      [&](const PrimExpr &current) {
-        if (const auto *add = current.as<AddNode>()) {
-          flatten_add(add->a);
-          flatten_add(add->b);
-        } else {
-          terms.push_back(current);
-        }
-      };
+  std::vector<Expr> terms;
+  std::function<void(const Expr &)> flatten_add = [&](const Expr &current) {
+    if (const auto *add = current.as<prim::AddObj>()) {
+      flatten_add(add->a);
+      flatten_add(add->b);
+    } else {
+      terms.push_back(current);
+    }
+  };
   flatten_add(expr);
   if (terms.size() < 2) {
     return false;
@@ -1120,20 +1079,20 @@ bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr,
   struct Term {
     TermKind kind{TermKind::kOther};
     int64_t coeff{1};
-    PrimExpr expr;
+    Expr expr{IntImm::Int32(0)};
     bool used{false};
   };
 
-  auto strip_cast = [](PrimExpr current) {
-    while (const auto *cast = current.as<CastNode>()) {
+  auto strip_cast = [](Expr current) {
+    while (const auto *cast = current.as<prim::CastObj>()) {
       current = cast->value;
     }
     return current;
   };
 
-  auto parse_const = [](const PrimExpr &current, int64_t *value) {
-    if (const auto *imm = current.as<IntImmNode>()) {
-      *value = imm->value;
+  auto parse_const = [](const Expr &current, int64_t *value) {
+    if (const auto *imm = current.as<IntImmObj>()) {
+      *value = CodegenInt(imm);
       return true;
     }
     return false;
@@ -1142,12 +1101,12 @@ bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr,
   std::vector<Term> classified;
   classified.reserve(terms.size());
   bool saw_panel_row = false;
-  for (const PrimExpr &term_expr : terms) {
+  for (const Expr &term_expr : terms) {
     Term term;
     term.expr = term_expr;
-    PrimExpr base = strip_cast(term_expr);
+    Expr base = strip_cast(term_expr);
     int64_t coeff = 1;
-    if (const auto *mul = base.as<MulNode>()) {
+    if (const auto *mul = base.as<prim::MulObj>()) {
       int64_t lhs_const = 0;
       int64_t rhs_const = 0;
       if (parse_const(mul->a, &lhs_const)) {
@@ -1237,7 +1196,7 @@ bool CodeGenTileLangMetal::TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr,
   return true;
 }
 
-bool CodeGenTileLangMetal::TryPrintMlxSwizzleExpr(const PrimExpr &expr,
+bool CodeGenTileLangMetal::TryPrintMlxSwizzleExpr(const Expr &expr,
                                                   std::ostream &os) {
   if (TryPrintMlxLogicalYAffineExpr(expr, os)) {
     return true;
@@ -1267,39 +1226,39 @@ void CodeGenTileLangMetal::PrintSimdgroupIndexExpr(int64_t group_mask,
   }
 }
 
-bool CodeGenTileLangMetal::TryPrintSimdgroupIndexExpr(const CallNode *op,
+bool CodeGenTileLangMetal::TryPrintSimdgroupIndexExpr(const CallObj *op,
                                                       std::ostream &os) {
-  if (!emitted_metal_simdgroup_id_ || !op->op.same_as(builtin::shift_right()) ||
+  if (!emitted_metal_simdgroup_id_ || !IsCodegenOp(op, "prim.shift_right") ||
       op->args.size() != 2) {
     return false;
   }
-  const auto *shift = op->args[1].as<IntImmNode>();
+  const auto *shift = op->args[1].as<IntImmObj>();
   if (!shift || shift->value < 5) {
     return false;
   }
-  int64_t group_shift = shift->value - 5;
+  int64_t group_shift = CodegenInt(shift) - 5;
   if (IsThreadIdxXExpr(op->args[0])) {
     PrintSimdgroupIndexExpr(-1, group_shift, os);
     return true;
   }
-  const auto *and_call = op->args[0].as<CallNode>();
-  if (!and_call || !and_call->op.same_as(builtin::bitwise_and()) ||
+  const auto *and_call = op->args[0].as<CallObj>();
+  if (!and_call || !IsCodegenOp(and_call, "prim.bitwise_and") ||
       and_call->args.size() != 2) {
     return false;
   }
   int64_t mask = -1;
   if (IsThreadIdxXExpr(and_call->args[0])) {
-    const auto *mask_imm = and_call->args[1].as<IntImmNode>();
+    const auto *mask_imm = and_call->args[1].as<IntImmObj>();
     if (!mask_imm) {
       return false;
     }
-    mask = mask_imm->value;
+    mask = CodegenInt(mask_imm);
   } else if (IsThreadIdxXExpr(and_call->args[1])) {
-    const auto *mask_imm = and_call->args[0].as<IntImmNode>();
+    const auto *mask_imm = and_call->args[0].as<IntImmObj>();
     if (!mask_imm) {
       return false;
     }
-    mask = mask_imm->value;
+    mask = CodegenInt(mask_imm);
   } else {
     return false;
   }
@@ -1310,74 +1269,73 @@ bool CodeGenTileLangMetal::TryPrintSimdgroupIndexExpr(const CallNode *op,
   return true;
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
-                                      std::ostream &os) { // NOLINT(*)
-  TVM_FFI_ICHECK(!op->op.as<GlobalVarNode>())
+void CodeGenTileLangMetal::Dispatch_(const CallObj *op, std::ostream &os) {
+  const auto args = CodegenOperands(op); // NOLINT(*)
+  TVM_FFI_ICHECK(!op->op.as<GlobalVarObj>())
       << "CodegenMetal does not support inter-function calls, "
       << "but expression " << ffi::GetRef<Call>(op) << " calls PrimFunc "
       << op->op;
   if (TryPrintSimdgroupIndexExpr(op, os)) {
     return;
   }
-  if (TryPrintMlxSwizzleExpr(ffi::GetRef<PrimExpr>(op), os)) {
+  if (TryPrintMlxSwizzleExpr(ffi::GetRef<Expr>(op), os)) {
     return;
   }
-  auto f_check_simdgroup_shape = [](PrimExpr col, PrimExpr row) {
-    TVM_FFI_ICHECK(col->IsInstance<IntImmNode>() &&
-                   row->IsInstance<IntImmNode>())
+  auto f_check_simdgroup_shape = [](const Expr &col, const Expr &row) {
+    TVM_FFI_ICHECK(col->IsInstance<IntImmObj>() && row->IsInstance<IntImmObj>())
         << "Only constant shape is supported for simdgroup matrix, but got "
         << col << "x" << row;
-    int col_val = col.as<IntImmNode>()->value;
-    int row_val = row.as<IntImmNode>()->value;
+    int col_val = CodegenInt(col);
+    int row_val = CodegenInt(row);
     TVM_FFI_ICHECK(col_val == 8 && row_val == 8)
         << "Only 8x8 matrix is supported, but got " << col_val << "x"
         << row_val;
   };
-  if (op->op.same_as(builtin::make_filled_simdgroup_matrix())) {
-    TVM_FFI_ICHECK_EQ(op->args.size(), 5);
-    Var var = Downcast<Var>(op->args[0]);
+  if (IsCodegenOp(op, "tirx.metal.make_filled_simdgroup_matrix")) {
+    TVM_FFI_ICHECK_EQ(args.size(), 5);
+    Var var = MetalMatrixStorageVar(args[0]);
     // Get the data type of the simdgroup matrix
     auto it = simdgroup_dtype_.find(var);
     TVM_FFI_ICHECK(it != simdgroup_dtype_.end())
         << "Cannot find variable allocation for simdgroup: " << var;
     const std::string &dtype_str = it->second;
-    f_check_simdgroup_shape(op->args[3], op->args[4]);
-    os << PrintExpr(var) << "[" << PrintExpr(op->args[1])
+    f_check_simdgroup_shape(args[3], args[4]);
+    os << PrintExpr(var) << "[" << PrintExpr(args[1])
        << "] = make_filled_simdgroup_matrix<" << dtype_str << ", "
-       << PrintExpr(op->args[3]) << ", " << PrintExpr(op->args[4]) << ">("
-       << PrintExpr(op->args[2]) << ")";
-  } else if (op->op.same_as(builtin::simdgroup_load())) {
-    TVM_FFI_ICHECK_EQ(op->args.size(), 7);
-    f_check_simdgroup_shape(op->args[4], op->args[5]);
-    os << "simdgroup_load(" << PrintExpr(op->args[0]) << "["
-       << PrintExpr(op->args[1]) << "], " << PrintExpr(op->args[2]) << ", "
-       << PrintExpr(op->args[3]) << ", 0, " << PrintExpr(op->args[6]) << ")";
-  } else if (op->op.same_as(builtin::simdgroup_store())) {
-    TVM_FFI_ICHECK_EQ(op->args.size(), 7);
-    f_check_simdgroup_shape(op->args[4], op->args[5]);
-    os << "simdgroup_store(" << PrintExpr(op->args[0]) << "["
-       << PrintExpr(op->args[1]) << "], " << PrintExpr(op->args[2]) << ", "
-       << PrintExpr(op->args[3]) << ", 0, " << PrintExpr(op->args[6]) << ")";
-  } else if (op->op.same_as(builtin::simdgroup_multiply_accumulate())) {
-    TVM_FFI_ICHECK_EQ(op->args.size(), 8);
-    os << "simdgroup_multiply_accumulate("                                 //
-       << PrintExpr(op->args[0]) << "[" << PrintExpr(op->args[1]) << "], " //
-       << PrintExpr(op->args[2]) << "[" << PrintExpr(op->args[3]) << "], " //
-       << PrintExpr(op->args[4]) << "[" << PrintExpr(op->args[5]) << "], " //
-       << PrintExpr(op->args[6]) << "[" << PrintExpr(op->args[7]) << "])";
-  } else if (op->op.same_as(tl::cooperative_tensor_fill())) {
-    TVM_FFI_ICHECK_EQ(op->args.size(), 5);
-    std::string var = PrintExpr(op->args[0]);
-    std::string idx = PrintExpr(op->args[1]);
-    std::string val = PrintExpr(op->args[2]);
-    int rows = op->args[3].as<IntImmNode>()->value;
-    int cols = op->args[4].as<IntImmNode>()->value;
+       << PrintExpr(args[3]) << ", " << PrintExpr(args[4]) << ">("
+       << PrintExpr(args[2]) << ")";
+  } else if (IsCodegenOp(op, "tirx.metal.simdgroup_load")) {
+    TVM_FFI_ICHECK_EQ(args.size(), 7);
+    f_check_simdgroup_shape(args[4], args[5]);
+    os << "simdgroup_load(" << PrintExpr(args[0]) << "[" << PrintExpr(args[1])
+       << "], " << PrintExpr(args[2]) << ", " << PrintExpr(args[3]) << ", 0, "
+       << PrintExpr(args[6]) << ")";
+  } else if (IsCodegenOp(op, "tirx.metal.simdgroup_store")) {
+    TVM_FFI_ICHECK_EQ(args.size(), 7);
+    f_check_simdgroup_shape(args[4], args[5]);
+    os << "simdgroup_store(" << PrintExpr(args[0]) << "[" << PrintExpr(args[1])
+       << "], " << PrintExpr(args[2]) << ", " << PrintExpr(args[3]) << ", 0, "
+       << PrintExpr(args[6]) << ")";
+  } else if (IsCodegenOp(op, "tirx.metal.simdgroup_multiply_accumulate")) {
+    TVM_FFI_ICHECK_EQ(args.size(), 8);
+    os << "simdgroup_multiply_accumulate("                         //
+       << PrintExpr(args[0]) << "[" << PrintExpr(args[1]) << "], " //
+       << PrintExpr(args[2]) << "[" << PrintExpr(args[3]) << "], " //
+       << PrintExpr(args[4]) << "[" << PrintExpr(args[5]) << "], " //
+       << PrintExpr(args[6]) << "[" << PrintExpr(args[7]) << "])";
+  } else if (IsCodegenOp(op, "tl.cooperative_tensor_fill")) {
+    TVM_FFI_ICHECK_EQ(args.size(), 5);
+    std::string var = PrintExpr(args[0]);
+    std::string idx = PrintExpr(args[1]);
+    std::string val = PrintExpr(args[2]);
+    int rows = CodegenInt(args[3]);
+    int cols = CodegenInt(args[4]);
     int elems_per_tile = rows * cols / 32;
-    Var fill_v = Downcast<Var>(op->args[0]);
+    Var fill_v = MetalMatrixStorageVar(args[0]);
     EnsureCooperativeTensorBuffer(fill_v);
     bool is_inlined = ct_c_inlined_.count(fill_v) > 0;
     bool storage_elided = ct_c_storage_elided_.count(fill_v) > 0;
-    auto *fill_idx_imm = op->args[1].as<IntImmNode>();
+    auto *fill_idx_imm = args[1].as<IntImmObj>();
     if (is_inlined && fill_idx_imm) {
       os << "TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < "
          << elems_per_tile << "; __i++) "
@@ -1389,35 +1347,35 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
          << elems_per_tile << "; __i++) " << var << "[" << idx << " * "
          << elems_per_tile << " + __i] = " << val;
     }
-  } else if (op->op.same_as(tl::cooperative_tensor_load())) {
+  } else if (IsCodegenOp(op, "tl.cooperative_tensor_load")) {
     uses_cooperative_tensor_ = true;
-    TVM_FFI_ICHECK_GE(op->args.size(), 11);
-    std::string var = PrintExpr(op->args[0]);
-    std::string idx = PrintExpr(op->args[1]);
-    std::string src_ptr = PrintExpr(op->args[2]);
-    std::string stride = PrintExpr(op->args[3]);
-    int rows = op->args[4].as<IntImmNode>()->value;
-    int cols = op->args[5].as<IntImmNode>()->value;
-    Var v = Downcast<Var>(op->args[0]);
+    TVM_FFI_ICHECK_GE(args.size(), 11);
+    std::string var = PrintExpr(args[0]);
+    std::string idx = PrintExpr(args[1]);
+    std::string src_ptr = PrintExpr(args[2]);
+    std::string stride = PrintExpr(args[3]);
+    int rows = CodegenInt(args[4]);
+    int cols = CodegenInt(args[5]);
+    Var v = MetalMatrixStorageVar(args[0]);
     EnsureCooperativeTensorBuffer(v);
     auto it = cooperative_tensor_dtype_.find(v);
     TVM_FFI_ICHECK(it != cooperative_tensor_dtype_.end());
     std::string dtype = it->second;
-    std::string addr_space = GetAddrSpaceOf(op->args[2]);
-    std::string src_dtype = GetPointeeTypeOf(op->args[2], dtype);
+    std::string addr_space = GetAddrSpaceOf(args[2]);
+    std::string src_dtype = GetPointeeTypeOf(args[2], dtype);
     int frag_rows = 16, frag_cols = 16;
     int nfrag_r = rows / frag_rows;
     int nfrag_c = cols / frag_cols;
     int total_elems = nfrag_r * nfrag_c * 8;
     bool is_inlined = ct_c_inlined_.count(v) > 0;
     bool storage_elided = ct_c_storage_elided_.count(v) > 0;
-    auto *load_idx_imm = op->args[1].as<IntImmNode>();
+    auto *load_idx_imm = args[1].as<IntImmObj>();
     std::string direct_c_load_name;
     if (storage_elided) {
       TVM_FFI_ICHECK(is_inlined && load_idx_imm)
           << "Elided cooperative tensor C storage requires constant load index";
       direct_c_load_name =
-          std::string("__pct_c") + std::to_string(load_idx_imm->value);
+          std::string("__pct_c") + std::to_string(CodegenInt(load_idx_imm));
     }
     std::string src_addr_space = "const " + addr_space;
     os << "{ " << src_addr_space << " " << src_dtype << "* __src = ("
@@ -1471,7 +1429,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
     os << "}";
     if (is_inlined && load_idx_imm && direct_c_load_name.empty()) {
       int mma_tiles_per_load = total_elems / 16;
-      int base_pct = load_idx_imm->value * mma_tiles_per_load;
+      int base_pct = CodegenInt(load_idx_imm) * mma_tiles_per_load;
       for (int t = 0; t < mma_tiles_per_load; t++) {
         os << "; TILELANG_PRAGMA_UNROLL for (ushort __i = 0; __i < 16; __i++) "
               "__pct_c"
@@ -1479,29 +1437,29 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
            << total_elems << " + " << (t * 16) << " + __i];";
       }
     }
-  } else if (op->op.same_as(tl::cooperative_tensor_store())) {
+  } else if (IsCodegenOp(op, "tl.cooperative_tensor_store")) {
     uses_cooperative_tensor_ = true;
-    TVM_FFI_ICHECK_GE(op->args.size(), 11);
-    std::string var = PrintExpr(op->args[0]);
-    std::string idx = PrintExpr(op->args[1]);
-    std::string dst_ptr = PrintExpr(op->args[2]);
-    std::string stride = PrintExpr(op->args[3]);
-    int rows = op->args[4].as<IntImmNode>()->value;
-    int cols = op->args[5].as<IntImmNode>()->value;
-    Var v = Downcast<Var>(op->args[0]);
+    TVM_FFI_ICHECK_GE(args.size(), 11);
+    std::string var = PrintExpr(args[0]);
+    std::string idx = PrintExpr(args[1]);
+    std::string dst_ptr = PrintExpr(args[2]);
+    std::string stride = PrintExpr(args[3]);
+    int rows = CodegenInt(args[4]);
+    int cols = CodegenInt(args[5]);
+    Var v = MetalMatrixStorageVar(args[0]);
     EnsureCooperativeTensorBuffer(v);
     auto it = cooperative_tensor_dtype_.find(v);
     TVM_FFI_ICHECK(it != cooperative_tensor_dtype_.end());
     std::string dtype = it->second;
-    std::string addr_space = GetAddrSpaceOf(op->args[2]);
-    std::string dst_dtype = GetPointeeTypeOf(op->args[2], dtype);
+    std::string addr_space = GetAddrSpaceOf(args[2]);
+    std::string dst_dtype = GetPointeeTypeOf(args[2], dtype);
     int frag_rows = 16, frag_cols = 16;
     int nfrag_r = rows / frag_rows;
     int nfrag_c = cols / frag_cols;
     int total_elems = nfrag_r * nfrag_c * 8;
     bool is_inlined = ct_c_inlined_.count(v) > 0;
     bool storage_elided = ct_c_storage_elided_.count(v) > 0;
-    auto *store_idx_imm = op->args[1].as<IntImmNode>();
+    auto *store_idx_imm = args[1].as<IntImmObj>();
     TVM_FFI_ICHECK(!(storage_elided && !(is_inlined && store_idx_imm)))
         << "Elided cooperative tensor C storage requires constant store index";
     os << "{ " << addr_space << " " << dst_dtype << "* __dst = (" << addr_space
@@ -1526,7 +1484,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
            << stride << " + __c0]) = ";
         if (is_inlined && store_idx_imm) {
           int pct_idx =
-              store_idx_imm->value * (total_elems / 16) + elem_offset / 16;
+              CodegenInt(store_idx_imm) * (total_elems / 16) + elem_offset / 16;
           int pct_elem = elem_offset % 16;
           std::string value0 = std::string("*(thread ") + dtype +
                                "4*)(&__pct_c" + std::to_string(pct_idx) + "[" +
@@ -1560,25 +1518,25 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
       }
     }
     os << "}";
-  } else if (op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
+  } else if (IsCodegenOp(op, "tl.cooperative_tensor_multiply_accumulate")) {
     uses_cooperative_tensor_ = true;
-    TVM_FFI_ICHECK_GE(op->args.size(), 13);
-    int M = op->args[8].as<IntImmNode>()->value;
-    int N = op->args[9].as<IntImmNode>()->value;
-    int K = op->args[10].as<IntImmNode>()->value;
-    bool trans_a = op->args[11].as<IntImmNode>()->value != 0;
-    bool trans_b = op->args[12].as<IntImmNode>()->value != 0;
+    TVM_FFI_ICHECK_GE(args.size(), 13);
+    int M = CodegenInt(args[8]);
+    int N = CodegenInt(args[9]);
+    int K = CodegenInt(args[10]);
+    bool trans_a = CodegenInt(args[11]) != 0;
+    bool trans_b = CodegenInt(args[12]) != 0;
 
-    std::string a_var = PrintExpr(op->args[2]);
-    std::string a_idx = PrintExpr(op->args[3]);
-    std::string b_var = PrintExpr(op->args[4]);
-    std::string b_idx = PrintExpr(op->args[5]);
-    std::string c_var = PrintExpr(op->args[0]);
-    std::string c_idx = PrintExpr(op->args[1]);
+    std::string a_var = PrintExpr(args[2]);
+    std::string a_idx = PrintExpr(args[3]);
+    std::string b_var = PrintExpr(args[4]);
+    std::string b_idx = PrintExpr(args[5]);
+    std::string c_var = PrintExpr(args[0]);
+    std::string c_idx = PrintExpr(args[1]);
 
-    Var a_v = Downcast<Var>(op->args[2]);
-    Var b_v = Downcast<Var>(op->args[4]);
-    Var c_v = Downcast<Var>(op->args[0]);
+    Var a_v = MetalMatrixStorageVar(args[2]);
+    Var b_v = MetalMatrixStorageVar(args[4]);
+    Var c_v = MetalMatrixStorageVar(args[0]);
     EnsureCooperativeTensorBuffer(a_v);
     EnsureCooperativeTensorBuffer(b_v);
     EnsureCooperativeTensorBuffer(c_v);
@@ -1602,7 +1560,7 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
 
     bool c_inlined = ct_c_inlined_.count(c_v) > 0;
     bool c_storage_elided = ct_c_storage_elided_.count(c_v) > 0;
-    auto *c_idx_imm = op->args[1].as<IntImmNode>();
+    auto *c_idx_imm = args[1].as<IntImmObj>();
     bool c_idx_const = c_inlined && c_idx_imm != nullptr;
     TVM_FFI_ICHECK(!(c_storage_elided && !c_idx_const))
         << "Elided cooperative tensor C storage requires constant MMA index";
@@ -1670,49 +1628,83 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
          << "; __i++) " << c_var << "[" << c_idx << " * " << c_elems
          << " + __i] = __ct_c[__i]; }";
     }
-  } else if (op->op.same_as(tl::atomic_add_elem_op()) ||
-             op->op.same_as(tl::atomic_add_ret_elem_op())) {
-    TVM_FFI_ICHECK_GE(op->args.size(), 2U);
-    DataType value_dtype = op->args[1].dtype();
-    TVM_FFI_ICHECK(value_dtype.is_scalar() && value_dtype.bits() == 32 &&
-                   (value_dtype.is_int() || value_dtype.is_uint()))
+  } else if (IsCodegenOp(op, "tl.atomic_add_elem_op") ||
+             IsCodegenOp(op, "tl.atomic_add_ret_elem_op")) {
+    TVM_FFI_ICHECK_GE(args.size(), 2U);
+    PrimType value_dtype = CodegenDType(args[1]);
+    TVM_FFI_ICHECK(
+        value_dtype.IsScalar() && value_dtype.bits() == 32 &&
+        (value_dtype.MatchesCode(kDLInt) || value_dtype.MatchesCode(kDLUInt)))
         << "Metal scalar atomic add supports int32 and uint32, got "
         << value_dtype;
     const char *atomic_type =
-        value_dtype.is_int() ? "atomic_int" : "atomic_uint";
-    const std::string address_space = GetAddrSpaceOf(op->args[0]);
+        value_dtype.MatchesCode(kDLInt) ? "atomic_int" : "atomic_uint";
+    const std::string address_space = GetAddrSpaceOf(args[0]);
     TVM_FFI_ICHECK(address_space == "device" || address_space == "threadgroup")
         << "Metal scalar atomic add requires device or threadgroup storage, "
            "got "
         << address_space;
     os << "atomic_fetch_add_explicit(reinterpret_cast<" << address_space << " "
        << atomic_type << " *>(";
-    this->PrintExpr(op->args[0], os);
+    this->PrintExpr(args[0], os);
     os << "), ";
-    this->PrintExpr(op->args[1], os);
+    this->PrintExpr(args[1], os);
     os << ", memory_order_relaxed)";
-  } else if (op->op.same_as(builtin::reinterpret())) {
+  } else if (IsCodegenOp(op, "tirx.reinterpret")) {
+    const auto *pointer = op->ty.as<PtrTypeObj>();
+    const auto *source_pointer = args[0]->ty.as<PtrTypeObj>();
+    if (pointer || source_pointer) {
+      if (pointer && source_pointer) {
+        TVM_FFI_CHECK_EQ(source_pointer->scope.name(), pointer->scope.name(),
+                         TypeError)
+            << "Metal pointer reinterpret cannot change address space";
+      } else {
+        const auto integer = (pointer ? args[0]->ty : op->ty).as<PrimType>();
+        TVM_FFI_CHECK(integer && integer.value().IsScalar() &&
+                          integer.value().MatchesCode(kDLInt, kDLUInt) &&
+                          integer.value().bits() == 64,
+                      TypeError)
+            << "Metal pointer reinterpret requires a 64-bit scalar integer";
+      }
+      // MSL as_type explicitly excludes pointers. Use the C++ pointer cast,
+      // taking the address space from the native destination PtrType when the
+      // source is an integer address carrier.
+      os << "reinterpret_cast<";
+      if (pointer) {
+        PrintStorageScope(pointer->scope, os);
+        PrintType(pointer->element_type, os);
+        os << "*";
+      } else {
+        PrintType(op->ty, os);
+      }
+      os << ">(";
+      PrintExpr(args[0], os);
+      os << ")";
+      return;
+    }
     // generate as_type<TYPE>(ARG)
     os << "(as_type<";
-    this->PrintType(op->dtype, os);
+    this->PrintType(CodegenDType(op), os);
     os << ">(";
-    this->PrintExpr(op->args[0], os);
+    this->PrintExpr(args[0], os);
     os << "))";
-  } else if (op->op.same_as(builtin::handle_add_byte_offset())) {
-    TVM_FFI_ICHECK_EQ(op->args.size(), 2U);
-    std::string addr_space = GetAddrSpaceOf(op->args[0]);
-    os << "((" << addr_space << " void*)((" << addr_space << " char*)";
-    this->PrintExpr(op->args[0], os);
+  } else if (op->op.same_as(tirx::handle_add_byte_offset_op())) {
+    TVM_FFI_ICHECK_EQ(args.size(), 2U);
+    std::string addr_space = GetAddrSpaceOf(args[0]);
+    os << "((" << addr_space << ' ';
+    PrintType(op->ty.as_or_throw<PtrType>()->element_type, os);
+    os << "*)((" << addr_space << " char*)";
+    this->PrintExpr(args[0], os);
     os << " + ";
-    this->PrintExpr(op->args[1], os);
+    this->PrintExpr(args[1], os);
     os << "))";
   } else {
-    CodeGenC::VisitExpr_(op, os);
+    CodeGenC::Dispatch_(op, os);
   }
 }
 
-void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
-                                      std::ostream &os) { // NOLINT(*)
+void CodeGenTileLangMetal::Dispatch_(const FloatImmObj *op,
+                                     std::ostream &os) { // NOLINT(*)
   std::ostringstream temp;
   if (std::isinf(op->value)) {
     if (op->value < 0) {
@@ -1723,9 +1715,9 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
     temp << "NAN";
   } else {
     temp << std::scientific << op->value;
-    if (op->dtype.bits() == 32)
+    if (CodegenDType(op).bits() == 32)
       temp << 'f';
-    else if (op->dtype.bits() == 16)
+    else if (CodegenDType(op).bits() == 16)
       temp << 'h';
   }
   MarkConst(temp.str());
@@ -1743,7 +1735,7 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
   std::string fmt = "metal";
 
   for (auto kv : mod->functions) {
-    TVM_FFI_ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
+    TVM_FFI_ICHECK(kv.second->IsInstance<tirx::FunctionObj>())
         << "CodeGenTileLangMetal: Can only take PrimFunc";
     auto global_symbol =
         kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
@@ -1753,9 +1745,10 @@ ffi::Module BuildTileLangMetal(IRModule mod, Target target) {
     source_maker << "// Function: " << func_name << "\n";
     CodeGenTileLangMetal cg(target);
     cg.Init(output_ssa);
-    cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
+    cg.SetEmitLineDirectives(TileLangEmitLineDirectivesEnabled());
+    auto f = kv.second.as_or_throw<tirx::Function>();
+    auto calling_conv =
+        f->GetAttr(tvm::attr::kCallingConv).value_or(CallingConv::kDefault);
     TVM_FFI_ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
         << "CodeGenTileLangMetal: expect calling_conv equals "
            "CallingConv::kDeviceKernelLaunch";
@@ -1785,7 +1778,7 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
   ffi::Map<ffi::String, ffi::Bytes> smap;
 
   for (auto kv : mod->functions) {
-    TVM_FFI_ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
+    TVM_FFI_ICHECK(kv.second->IsInstance<tirx::FunctionObj>())
         << "CodeGenTileLangMetal: Can only take PrimFunc";
     auto global_symbol =
         kv.second->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
@@ -1795,9 +1788,10 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
     source_maker << "// Function: " << func_name << "\n";
     CodeGenTileLangMetal cg(target);
     cg.Init(output_ssa);
-    cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
+    cg.SetEmitLineDirectives(TileLangEmitLineDirectivesEnabled());
+    auto f = kv.second.as_or_throw<tirx::Function>();
+    auto calling_conv =
+        f->GetAttr(tvm::attr::kCallingConv).value_or(CallingConv::kDefault);
     TVM_FFI_ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch)
         << "CodeGenTileLangMetal: expect calling_conv equals "
            "CallingConv::kDeviceKernelLaunch";
@@ -1811,7 +1805,7 @@ ffi::Module BuildTileLangMetalWithoutCompile(IRModule mod, Target target) {
 
   ffi::Map<ffi::String, ffi::String> source;
   source.Set("metal", source_maker.str());
-  return tvm::target::MetalModuleCreateWithFallback(
+  return tvm::target::MetalFallbackModuleCreate(
       std::move(smap), ffi::String("metal"), ExtractFuncInfo(mod),
       std::move(source));
 }

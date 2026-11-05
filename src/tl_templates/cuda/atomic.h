@@ -25,7 +25,9 @@ template <> struct normalize_atomic_type<half_t> {
   using type = half;
 };
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+// Feature gates must describe this device compilation, not all targets in
+// a multi-architecture nvcc invocation.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 template <> struct normalize_atomic_type<bfloat16_t> {
   using type = __nv_bfloat16;
 };
@@ -43,7 +45,7 @@ template <> TL_DEVICE half cuda_cast<half, float>(float val) {
   return __float2half(val);
 }
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 template <> TL_DEVICE __nv_bfloat16 cuda_cast<__nv_bfloat16, float>(float val) {
   return __float2bfloat16(val);
 }
@@ -93,6 +95,22 @@ TL_DEVICE bool IsAcquireLikeMemoryOrder(int memory_order) {
 TL_DEVICE bool IsAcqRelLikeMemoryOrder(int memory_order) {
   return memory_order == int(cuda::memory_order_acq_rel) ||
          memory_order == int(cuda::memory_order_seq_cst);
+}
+
+// A scalar fallback must retain the order of the vector operation it replaces.
+// Device-scope fences also work on targets without ordered scalar BF16 PTX,
+// and do not require a wider address alignment than the scalar atomic itself.
+template <typename T>
+TL_DEVICE T AtomicAddFenced(T *address, T value, int memory_order) {
+  const bool acq_rel = IsAcqRelLikeMemoryOrder(memory_order);
+  if (acq_rel || IsReleaseMemoryOrder(memory_order)) {
+    __threadfence();
+  }
+  T previous = atomicAdd(address, value);
+  if (acq_rel || IsAcquireLikeMemoryOrder(memory_order)) {
+    __threadfence();
+  }
+  return previous;
 }
 
 template <typename T> TL_DEVICE unsigned short PackBits16(const T &val) {
@@ -467,7 +485,7 @@ TL_DEVICE T1 AtomicMinRet(T1 *ref, T2 val,
   }
 }
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 890))
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
@@ -500,7 +518,8 @@ TL_DEVICE void AtomicAdd(T1 *address, T2 val,
       }
     }
   } else {
-    atomicAdd(reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val));
+    tl_atomic_detail::AtomicAddFenced(reinterpret_cast<NT1 *>(address),
+                                      cuda_cast<NT1>(val), memory_order);
   }
 }
 #else
@@ -508,8 +527,8 @@ template <typename T1, typename T2>
 TL_DEVICE void AtomicAdd(T1 *address, T2 val,
                          int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
-  (void)memory_order;
-  atomicAdd(reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val));
+  tl_atomic_detail::AtomicAddFenced(reinterpret_cast<NT1 *>(address),
+                                    cuda_cast<NT1>(val), memory_order);
 }
 #endif
 
@@ -518,11 +537,10 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
                           int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
   if constexpr (std::is_same_v<NT1, bfloat16_t>) {
-    // Pre-SM80 only: cuda::atomic_ref has no fetch_add for bfloat16_t, so use
-    // the atomicAdd overload above. Memory order is dropped, as in AtomicAdd.
-    (void)memory_order;
-    return static_cast<T1>(
-        atomicAdd(reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val)));
+    // Pre-SM80 uses the scalar CAS overload, with the same ordering fences
+    // as the non-returning scalar path.
+    return static_cast<T1>(tl_atomic_detail::AtomicAddFenced(
+        reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val), memory_order));
   } else if constexpr (std::is_same_v<NT1, half> ||
                        std::is_same_v<NT1, __nv_bfloat16>) {
     if (tl_atomic_detail::IsRelaxedMemoryOrder(memory_order)) {
@@ -541,6 +559,7 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
         return static_cast<T1>(
             tl_atomic_detail::UnpackBits16<__half>(ret_val_cast));
       } else if constexpr (std::is_same_v<NT1, __nv_bfloat16>) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
         // bf16
         unsigned short ret_val_cast;
         unsigned long long ref_address =
@@ -551,6 +570,11 @@ TL_DEVICE T1 AtomicAddRet(T1 *address, T2 val,
                                              val_cast, memory_order);
         return static_cast<T1>(
             tl_atomic_detail::UnpackBits16<__nv_bfloat16>(ret_val_cast));
+#else
+        return static_cast<T1>(tl_atomic_detail::AtomicAddFenced(
+            reinterpret_cast<NT1 *>(address), cuda_cast<NT1>(val),
+            memory_order));
+#endif
       }
     }
   } else {
@@ -659,7 +683,7 @@ TL_DEVICE __nv_bfloat162 ToBfloat162(float *val) {
   return ToBfloat162(static_cast<const float *>(val));
 }
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ > 750))
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
 namespace tl_atomic_detail {
 // Below sm_90 there is no ordered bf16 atomic add in any width: `atom` with
 // vector types requires sm_90, and so does `atom.add.bf16` itself, so the
@@ -779,7 +803,7 @@ AtomicAddx4Ret(bfloat16_t *ref, SrcType *val,
   return ret;
 }
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 template <typename SrcType>
 TL_DEVICE void AtomicAddx4(half_t *ref, SrcType *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
@@ -808,7 +832,7 @@ TL_DEVICE void AtomicAddx4(half_t *ref, SrcType *val,
 }
 #endif
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 template <typename SrcType>
 TL_DEVICE void AtomicAddx4(bfloat16_t *ref, SrcType *val,
                            int memory_order = int(cuda::memory_order_relaxed)) {
@@ -849,7 +873,7 @@ template <typename T> TL_DEVICE float4 ToFloat4(T *val) {
 
 TL_DEVICE float4 ToFloat4(float4 val) { return val; }
 
-#if (defined(__CUDA_ARCH_LIST__) && (__CUDA_ARCH_LIST__ >= 900))
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 template <typename ValType>
 TL_DEVICE void AtomicAddx2(float *ref, ValType val,
                            int memory_order = int(cuda::memory_order_relaxed)) {

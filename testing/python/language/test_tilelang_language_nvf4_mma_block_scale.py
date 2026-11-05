@@ -3,11 +3,14 @@ import sys
 from pathlib import Path
 
 import pytest
+import tvm_ffi
+from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tvm_ffi import dtype as DataType
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import SM120BlockScaleTile
 from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitterSM120, get_swizzle_layout
@@ -82,7 +85,7 @@ def _make_swizzle_layout(shared_buf):
     dtype = shared_buf.dtype
     shape = shared_buf.shape
 
-    can_swizzle = shape[-1] * tvm.DataType(dtype).bits % 512 == 0
+    can_swizzle = shape[-1] * DataType(dtype).bits % 512 == 0
     if not can_swizzle:
         return T.Layout(shape, lambda *args: args)
 
@@ -728,7 +731,8 @@ def test_nvf4_mma_block_scale_packed_smem_offsets():
     assert "void* SFB_shared = ((void*)((char*)buf_dyn_shmem + 52224));" in src
 
 
-def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units():
+@pytest.mark.parametrize("target_kind", ["webgpu", "cuda"])
+def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units(target_kind):
     @T.prim_func
     def before(
         A: T.Tensor((16,), T.float4_e2m1fn),
@@ -745,19 +749,63 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units():
     mod = tvm.IRModule.from_expr(
         before.with_attr("global_symbol", "main").with_attr(
             "target",
-            tvm.target.Target("webgpu"),
+            tvm.target.Target(target_kind),
         )
     )
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    before_merge = mod
+    before_json = ir.save_json(mod)
+    bindings = []
+    tvm_ffi.structural_walk(mod, (ir.Bind, bindings.append), order="pre")
+    shared = {
+        binding.var.name: binding.var
+        for binding in bindings
+        if isinstance(binding.value, ir.Call) and binding.value.op.name == "tirx.alloc_tensor"
+    }
+    assert set(shared) == {"a", "b"}
+    assert [int(shared[name].ty.shape[0]) for name in ("a", "b")] == [3, 4]
+    assert all(str(tensor.ty.dtype) == "float4_e2m1fn" for tensor in shared.values())
 
-    src = mod.script()
-    # Three logical FP4 values use two physical bytes. After 16-byte alignment,
-    # the next buffer starts at logical FP4 offset 32, not byte offset 16.
-    assert "b[32]" in src
-    assert "b[16]" not in src
+    mod = tilelang.transform.MergeSharedMemoryAllocations()(mod)
+    assert tirx.analysis.check_well_formed(mod)
+    assert ir.save_json(before_merge) == before_json
+    if target_kind == "webgpu":
+        # WGSL retains named workgroup arrays, so no pointer alias or offset
+        # rewrite is needed. The complete access graph must stay unchanged.
+        assert tvm_ffi.structural_equal(mod, before_merge)
+        return
+
+    bindings = []
+    tvm_ffi.structural_walk(mod, (ir.Bind, bindings.append), order="pre")
+    arenas = [binding for binding in bindings if isinstance(binding.value, ir.Call) and binding.value.op.name == "tirx.alloc_tensor"]
+    assert len(arenas) == 1 and str(arenas[0].var.ty.dtype) == "uint8"
+    offsets = {}
+    for name, tensor in shared.items():
+        binding = next(binding for binding in bindings if binding.var.same_as(tensor))
+        assert binding.var.ty.same_as(tensor.ty)
+        assert binding.value.op.name == "tirx.decl_tensor"
+        pointer = binding.value.args[0]
+        assert pointer.op.name == "tirx.ptr_byte_offset"
+        assert tvm_ffi.structural_equal(pointer.args[0], arenas[0].var.data)
+        offsets[name] = int(pointer.args[1])
+
+    # The original 3/4 logical FP4 elements require 2/2 physical bytes. The
+    # native views keep their logical indices and express placement in bytes.
+    alignment = max(16, *(int(tensor.ty.data_alignment) for tensor in shared.values()))
+    expected_b = ((2 + alignment - 1) // alignment) * alignment
+    assert offsets == {"a": 0, "b": expected_b}
+    assert int(arenas[0].var.ty.shape[0]) == ((expected_b + 2 + alignment - 1) // alignment) * alignment
+    accesses = []
+    tvm_ffi.structural_walk(mod, ((ir.TensorLoad, ir.TensorStore), accesses.append), order="pre")
+    shared_accesses = [
+        access
+        for access in accesses
+        if any((access.source if isinstance(access, ir.TensorLoad) else access.dest).same_as(tensor) for tensor in shared.values())
+    ]
+    assert len(shared_accesses) == 4
+    assert all([int(index) for index in access.indices] == [0] for access in shared_accesses)
 
 
 @tilelang.testing.requires_cuda

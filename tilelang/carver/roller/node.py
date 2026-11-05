@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import tvm
-from tvm import tirx
-from tvm.tirx import IterVar, PrimFunc
+from tvm_tirx import ir, sym
+from tvm_tirx.tirx import Function
+from tvm_ffi import dtype as DataType
 from typing import Any
-from tvm.s_tir import Schedule
-from tvm.s_tir.schedule import SBlockRV
+from .._native_analysis import NativeSchedule, StageRef, IterAxis, TensorView, specialize_shapes
 import numpy as np
 import functools
 from ..analysis import BlockInfo, get_reduction_blocks
 from .. import analysis
-from .. import normalize_prim_func
+from ..analysis import normalize_prim_func
 from .shape_inference import get_analyzer_by_tir
 from dataclasses import dataclass
 
@@ -34,19 +33,21 @@ def pre_order_traverse(block_analyzer, blocks, func):
 
 class BlockAnalyzer:
     def __init__(self, sch) -> None:
-        self.sch: Schedule = sch
+        self.sch: NativeSchedule = sch
         self.block_infos: list[BlockInfo] = normalize_prim_func(self.sch)
+        if self.block_infos is None:
+            raise ValueError("Carver requires independent, directly bound computation stages")
 
-    def get_block_name(self, block: SBlockRV) -> str:
+    def get_block_name(self, block: StageRef) -> str:
         return self.sch.get(block).name_hint
 
-    def get_block_info(self, block: SBlockRV) -> BlockInfo:
+    def get_block_info(self, block: StageRef) -> BlockInfo:
         for block_info in self.block_infos:
-            if self.get_block_name(block) == block_info.name:
+            if block_info.block_rv == block:
                 return block_info
         return None
 
-    def get_spatial_axis(self, block: SBlockRV) -> list[IterVar]:
+    def get_spatial_axis(self, block: StageRef) -> list[IterAxis]:
         block_info = self.get_block_info(block)
         axis = []
         for iter in block_info.iters:
@@ -54,7 +55,7 @@ class BlockAnalyzer:
                 axis.append(iter)
         return axis
 
-    def get_reduce_axis(self, block: SBlockRV) -> list[IterVar]:
+    def get_reduce_axis(self, block: StageRef) -> list[IterAxis]:
         block_info = self.get_block_info(block)
         raxis = []
         for iter in block_info.iters:
@@ -62,25 +63,27 @@ class BlockAnalyzer:
                 raxis.append(iter)
         return raxis
 
-    def get_input_buffers(self, block: SBlockRV) -> list[tirx.Buffer]:
+    def get_input_buffers(self, block: StageRef) -> list[TensorView]:
         buffers = []
         for read in self.sch.get(block).reads:
-            buffers.append(read.buffer)
+            if read.tensor not in buffers:
+                buffers.append(read.tensor)
         return buffers
 
-    def get_output_buffers(self, block: SBlockRV) -> list[tirx.Buffer]:
+    def get_output_buffers(self, block: StageRef) -> list[TensorView]:
         buffers = []
         for write in self.sch.get(block).writes:
-            buffers.append(write.buffer)
+            if write.tensor not in buffers:
+                buffers.append(write.tensor)
         return buffers
 
-    def get_buffers(self, block: SBlockRV) -> list[tirx.Buffer]:
+    def get_buffers(self, block: StageRef) -> list[TensorView]:
         return self.get_input_buffers(block) + self.get_output_buffers(block)
 
-    def get_producer_blocks(self, block: SBlockRV) -> list[SBlockRV]:
+    def get_producer_blocks(self, block: StageRef) -> list[StageRef]:
         return self.sch.get_producers(block)
 
-    def get_consumer_blocks(self, block: SBlockRV) -> list[SBlockRV]:
+    def get_consumer_blocks(self, block: StageRef) -> list[StageRef]:
         return self.sch.get_consumers(block)
 
 
@@ -141,13 +144,13 @@ class Node:
         assert i < len(self._out_edges)
         self._out_edges[i] = edge
 
-    def get_dtype(self, id=0) -> tvm.DataType:
+    def get_dtype(self, id=0) -> DataType:
         return self._dtypes[id]
 
-    def set_dtype(self, dtype: tvm.DataType, id=0) -> None:
-        assert isinstance(dtype, tvm.DataType), type(dtype)
-        if dtype == tvm.DataType("bool"):
-            dtype = tvm.DataType("int8")
+    def set_dtype(self, dtype: DataType, id=0) -> None:
+        assert isinstance(dtype, DataType), type(dtype)
+        if dtype == DataType("bool"):
+            dtype = DataType("int8")
         if len(self._dtypes) <= id:
             self._dtypes.extend([None for _ in range(id - len(self._dtypes) + 1)])
         elif self._dtypes[id] is not None:
@@ -188,15 +191,15 @@ class PlaceHolderNode(Node):
 
 
 class PrimFuncNode(Node):
-    def __init__(self, prim_func: PrimFunc, tags: dict | None = None, name: str = "PrimFuncNode") -> None:
+    def __init__(self, prim_func: Function, tags: dict | None = None, name: str = "PrimFuncNode") -> None:
         super().__init__(tags, name=name)
         self.prim_func = self._specialize_func(prim_func)
-        self.sch: Schedule = Schedule(self.prim_func)
+        self.sch: NativeSchedule = NativeSchedule(self.prim_func)
         self.block_analyzer: BlockAnalyzer = BlockAnalyzer(self.sch)
-        self.schedule_stages: list[SBlockRV] = []
-        self.blocks: list[SBlockRV] = []
-        self.output_blocks: list[SBlockRV] = None
-        self.reduction_block: SBlockRV = None
+        self.schedule_stages: list[StageRef] = []
+        self.blocks: list[StageRef] = []
+        self.output_blocks: list[StageRef] = None
+        self.reduction_block: StageRef = None
         self.raxis = []
         self.input_buffers = []
         self.output_buffers = []
@@ -209,10 +212,10 @@ class PrimFuncNode(Node):
         # set input shapes and dtypes
         for edge, buffer in zip(self.inputs, self.input_buffers):
             edge.src_node.set_shape(buffer.shape, edge.src_id)
-            edge.src_node.set_dtype(tvm.DataType(buffer.dtype), edge.src_id)
+            edge.src_node.set_dtype(DataType(buffer.dtype), edge.src_id)
         for output_id, buffer in enumerate(self.output_buffers):
             self.set_shape(buffer.shape, output_id)
-            self.set_dtype(tvm.DataType(buffer.dtype), output_id)
+            self.set_dtype(DataType(buffer.dtype), output_id)
 
     def _assign_placeholder_node(self):
         inputs: list[Node] = []
@@ -228,7 +231,7 @@ class PrimFuncNode(Node):
             self._in_edges.append(edge)
             src_node._out_edges.append(edge)
 
-    def _specialize_func(self, func: PrimFunc):
+    def _specialize_func(self, func: Function):
         # Specialize the function to make it more friendly for analysis.
         # set attrs
         for k, v in func.attrs.items():
@@ -237,10 +240,13 @@ class PrimFuncNode(Node):
             return func
         opt_shapes = self.get_tag("opt_shapes")
         if opt_shapes:
+            replacements = {}
             for name, shape in opt_shapes.items():
                 var = analysis.find_var_from_func(func, name)
                 if var is not None:
-                    func = func.specialize({var: shape.astype(var.dtype)})
+                    replacements[var] = ir.const(int(shape), var.ty.dtype)
+            if replacements:
+                func = specialize_shapes(func, replacements)
         return func
 
     def _analysis_funcinfo(self):
@@ -252,7 +258,7 @@ class PrimFuncNode(Node):
         reduction_blocks = get_reduction_blocks(self.sch, blocks)
         if reduction_blocks is None:
             self.reduction_block = None
-            self.schedule_stages.append(*self.output_blocks)
+            self.schedule_stages.extend(self.output_blocks)
         else:
             # analysis on the last reduction block
             self.reduction_block = reduction_blocks[-1]
@@ -266,22 +272,18 @@ class PrimFuncNode(Node):
         # collect output buffers
         for output_block in self.output_blocks:
             for write in self.sch.get(output_block).writes:
-                if write not in self.output_buffers:
-                    self.output_buffers.append(write.buffer)
+                if write.tensor not in self.output_buffers:
+                    self.output_buffers.append(write.tensor)
 
-        for param in self.prim_func.params:
-            if param not in self.prim_func.buffer_map:
-                # in case of dynamic symbolic may in params
-                continue
-            buffer = self.prim_func.buffer_map[param]
-            if buffer not in self.output_buffers:
-                self.input_buffers.append(buffer)
-
+        self.buffers = self.sch.parameter_tensors
+        self.input_buffers = [tensor for tensor in self.buffers if tensor not in self.output_buffers]
         self.args = self.input_buffers + self.output_buffers
-        self.buffers = [buffer for buffer in self.prim_func.buffer_map.values()]
+        self.param_ordinals = {parameter: index for index, parameter in enumerate(self.prim_func.params)}
+        self.input_param_ordinals = [self.param_ordinals[tensor.tensor] for tensor in self.input_buffers]
+        self.output_param_ordinals = [self.param_ordinals[tensor.tensor] for tensor in self.output_buffers]
 
         # set dtype
-        self.set_dtype(tvm.DataType(self.output_buffers[0].dtype))
+        self.set_dtype(DataType(self.output_buffers[0].dtype))
 
     def get_opt_shape(self, name) -> int:
         opt_shapes = self.get_tag("opt_shapes")
@@ -290,9 +292,9 @@ class PrimFuncNode(Node):
         return opt_shapes[name]
 
     def extent_wrapper(self, value) -> int:
-        if isinstance(value, tvm.tirx.Var):
+        if isinstance(value, ir.Var):
             return self.get_opt_shape(value.name)
-        elif isinstance(value, tvm.tirx.IntImm):
+        elif isinstance(value, ir.IntImm):
             return int(value)
         else:
             return value
@@ -304,10 +306,10 @@ class PrimFuncNode(Node):
             block_info = self.block_analyzer.get_block_info(self.reduction_block)
             for iter in block_info.iters:
                 if iter.kind == "S":
-                    if isinstance(iter.dom.extent, tvm.tirx.IntImm):
+                    if isinstance(iter.dom.extent, ir.IntImm):
                         dim_size.append(int(iter.dom.extent))
                     else:
-                        assert isinstance(iter.dom.extent, tvm.tirx.Var)
+                        assert isinstance(iter.dom.extent, ir.Var)
                         dim_size.append(self.get_opt_shape(iter.dom.extent.name))
         else:
             # assume outer stage has the same shape
@@ -316,24 +318,24 @@ class PrimFuncNode(Node):
                 dim_size.append(int(self.sch.get(loop).extent))
         return [int(x) for x in dim_size]
 
-    def set_dtype(self, dtype: tvm.DataType, id=0) -> None:
-        assert isinstance(dtype, tvm.DataType), type(dtype)
-        if dtype == tvm.DataType("bool"):
-            dtype = tvm.DataType("int8")
+    def set_dtype(self, dtype: DataType, id=0) -> None:
+        assert isinstance(dtype, DataType), type(dtype)
+        if dtype == DataType("bool"):
+            dtype = DataType("int8")
         if len(self._dtypes) <= id:
             self._dtypes.extend([None for _ in range(id - len(self._dtypes) + 1)])
         elif self._dtypes[id] is not None:
             assert self._dtypes[id] == dtype, (self._dtypes, dtype)
         self._dtypes[id] = dtype
 
-    def get_buffer_dtype(self, buffer: tirx.Buffer) -> tvm.DataType:
-        return tvm.DataType(buffer.dtype)
+    def get_buffer_dtype(self, buffer: TensorView) -> DataType:
+        return DataType(buffer.dtype)
 
     def propagate(self, tile, rstep: dict | None = None, targets=None):
         if rstep is None:
             rstep = {}
         shape = {
-            self.block_analyzer.get_output_buffers(block)[0].name: [tvm.arith.ConstIntBound(0, val - 1) for val in tile]
+            self.block_analyzer.get_output_buffers(block)[0].name: [sym.ConstIntBound(0, val - 1) for val in tile]
             for block in self.schedule_stages
         }
         return self.ana.infer(shape, rstep, targets)
@@ -350,7 +352,7 @@ class PrimFuncNode(Node):
                 results.append(shapes[arg.name])
                 continue
             # should not exceed original shape
-            trimmed_shape = [self.extent_wrapper(i) for i in list(map(min, zip(shapes[arg.name], self.input_buffers[i].shape)))]
+            trimmed_shape = [self.extent_wrapper(i) for i in list(map(min, zip(shapes[arg.name], arg.shape)))]
             results.append(trimmed_shape)
         return results
 
@@ -383,9 +385,9 @@ class PrimFuncNode(Node):
         targets = [t.name for t in self.args[read_idx_offset:]]
         shapes, _ = self.propagate(tile, rstep, targets)
         results = []
-        for i, arg in enumerate(self.args[read_idx_offset:]):
+        for arg in self.args[read_idx_offset:]:
             # should not exceed original shape
-            trimmed_shape = list(map(min, zip(shapes[arg.name], self.input_buffers[i].shape)))
+            trimmed_shape = list(map(min, zip(shapes[arg.name], arg.shape)))
             results.append(trimmed_shape)
         return results
 
@@ -401,7 +403,7 @@ class PrimFuncNode(Node):
     def get_reduce_inputs_dtype(self):
         if self.reduction_block is None:
             return {}
-        return {b.name: tvm.DataType(b.dtype) for b in self.block_analyzer.get_input_buffers(self.reduction_block)}
+        return {b.name: DataType(b.dtype) for b in self.block_analyzer.get_input_buffers(self.reduction_block)}
 
     @functools.lru_cache
     def infer_tensorcore_axis(self) -> tuple[int]:
@@ -411,7 +413,7 @@ class PrimFuncNode(Node):
         C_ax_m, C_ax_n = self.get_tag("tensorcore_config")
         wmma_m, wmma_n, wmma_k = [16, 16, 16]  # just for testing, any number is ok
 
-        output_buffer_shape = self.block_analyzer.sch.get(self.reduction_block).writes[0].buffer.shape
+        output_buffer_shape = self.block_analyzer.sch.get(self.reduction_block).writes[0].tensor.shape
         valid_region = []
         for region in output_buffer_shape:
             if region.value == 1:
@@ -489,13 +491,13 @@ class PrimFuncNode(Node):
                     num_elem = stride_map[buffer.name].compute_elements_from_shape(shapes[buffer.name])
                 else:
                     num_elem = np.prod(shapes[buffer.name])
-                buffer_len = num_elem * int((tvm.DataType(buffer.dtype).bits + 7) // 8)
+                buffer_len = num_elem * int((DataType(buffer.dtype).bits + 7) // 8)
                 buffer_len = (buffer_len + 31) // 32 * 32
                 result += buffer_len
         return result, cached_tensor
 
-    def get_input_buffers(self) -> list[tirx.Buffer]:
-        return self.block_analyzer.input_buffers
+    def get_input_buffers(self) -> list[TensorView]:
+        return self.input_buffers
 
 
 class OutputNode(Node):

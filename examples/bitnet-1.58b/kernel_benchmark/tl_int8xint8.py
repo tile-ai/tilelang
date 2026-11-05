@@ -1,14 +1,13 @@
 import torch
 import torch.backends
-from bitblas import tvm as tvm
-from tvm import DataType
-from tvm import tl as TL
-import tvm.tl.language as T
-from bitblas.tl.utils import get_swizzle_layout
-from bitblas.tl.mma_macro_generator import (
+import tilelang as TL
+from tvm_ffi import dtype as DataType
+import tilelang.language as T
+from tilelang.cuda.intrinsics import get_swizzle_layout
+from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
     TensorCoreIntrinEmitter,
 )
-from bitblas.base import simplify_prim_func
+from tilelang.transform import simplify_prim_func
 
 torch.manual_seed(0)
 
@@ -22,8 +21,7 @@ def make_swizzle_layout(shared_buf):
         return T.Layout(shape, lambda *args: args)
 
     def transform_func(i, j):
-        new_warp_i, new_warp_j = get_swizzle_layout(i, j, shape[-1], dtype)
-        return [new_warp_i, new_warp_j]
+        return get_swizzle_layout(i, j, shape[-1], dtype)
 
     return T.Layout(shape, transform_func)
 
@@ -102,9 +100,9 @@ def tl_matmul(
 
     @T.prim_func
     def main(
-        A: T.Buffer(A_shape, in_dtype),
-        B: T.Buffer(B_shape, in_dtype),
-        C: T.Buffer((M, N), out_dtype),
+        A: T.Tensor(A_shape, in_dtype),
+        B: T.Tensor(B_shape, in_dtype),
+        C: T.Tensor((M, N), out_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=threads) as (bx, by):
             A_shared = T.alloc_shared(A_shared_shape, in_dtype, scope=shared_scope)
@@ -113,8 +111,6 @@ def tl_matmul(
             A_local = T.alloc_local((warp_rows * local_size_a), in_dtype)
             B_local = T.alloc_local((warp_cols * local_size_b), in_dtype)
             C_local = T.alloc_local((warp_rows * warp_cols * local_size_c), accum_dtype)
-
-            thread_bindings = T.thread_binding(0, threads, "threadIdx.x")
 
             T.annotate_layout(
                 {
@@ -143,7 +139,6 @@ def tl_matmul(
                         A_local,
                         A_shared,
                         ki,
-                        thread_bindings=thread_bindings,
                     )
 
                     # Load B into fragment
@@ -151,7 +146,6 @@ def tl_matmul(
                         B_local,
                         B_shared,
                         ki,
-                        thread_bindings=thread_bindings,
                     )
 
                     # Perform Matrix Multiplication
@@ -161,7 +155,6 @@ def tl_matmul(
             mma_emitter.stmatrix(
                 C_local,
                 C_shared,
-                thread_bindings=thread_bindings,
             )
 
             # Store shared into global
@@ -178,8 +171,8 @@ def tl_matmul(
 
 def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
     matmul = tl_matmul(M, N, K, in_dtype, out_dtype, accum_dtype)
-    mod, params = TL.lower(matmul)
-    src_code = mod.imported_modules[0].get_source()
+    kernel = TL.compile(matmul, out_idx=[])
+    src_code = kernel.get_kernel_source()
     # src_code is the generated cuda source
     assert src_code is not None
     print(src_code)
@@ -192,11 +185,11 @@ def assert_tl_matmul_correctness(M, N, K, in_dtype, out_dtype, accum_dtype):
 
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
 
-    mod = TL.Profiler(mod, params, [], TL.TensorSupplyType.Integer)
+    mod = kernel.get_profiler(TL.TensorSupplyType.Integer)
 
     mod(A, B, C)
 
-    latency = mod.do_bench(mod.func, warmup=25)
+    latency = mod.do_bench(warmup=25, input_tensors=[A, B, C])
     print(f"Latency: {latency}")
     # Ensure that the latency is not None
     assert latency is not None
@@ -214,7 +207,6 @@ def test_assert_tl_matmul():
 
 
 if __name__ == "__main__":
-    # bitblas.testing.main()
     # assert_tl_matmul_correctness(128, 128, 128, T.float16, T.float16, T.float16)
     # assert_tl_matmul_correctness(128, 128, 128, T.int8, T.int32, T.int32)
     assert_tl_matmul_correctness(16384, 16384, 16384, T.int8, T.int32, T.int32)

@@ -4,9 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.contrib import bisheng
+from tilelang.jit import adapter as jit_adapter
 from tilelang.jit.adapter import libgen
 from tilelang.jit import kernel as jit_kernel
 from tilelang.transform import PassConfigKey
@@ -85,7 +86,7 @@ def test_cython_compile_preserves_target_and_options(monkeypatch, tmp_path, conf
         kernel.compile_flags = compile_flags
         artifact = SimpleNamespace(params=[], host_mod=None, device_mod=None, kernel_source=source)
         monkeypatch.setattr(kernel, "_compile_artifact", lambda *args: artifact)
-        monkeypatch.setattr(jit_kernel, "CythonKernelAdapter", compile_library)
+        monkeypatch.setattr(jit_adapter, "CythonKernelAdapter", compile_library)
         kernel._compile_and_create_adapter(SimpleNamespace(attrs={"global_symbol": "kernel"}), [])
     else:
         compile_library(target=target, pass_configs=pass_configs, compile_flags=compile_flags, device_kernel_source=source)

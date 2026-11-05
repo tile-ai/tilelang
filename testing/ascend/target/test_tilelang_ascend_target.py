@@ -1,6 +1,6 @@
 import pytest
 
-from tilelang import tvm
+import tvm_ffi
 from tilelang.ascend.codegen import PTO_CODEGEN
 from tilelang.backend import create_backend_context, get_backend
 from tilelang.backend.target import determine_target
@@ -9,7 +9,7 @@ from tilelang.ascend.target import (
     target_is_ascend,
     target_is_pto,
 )
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def test_native_ascend_target_kind():
@@ -59,7 +59,7 @@ def test_ascend_backend_registries_use_native_kind():
     assert get_backend("ascend").get_device_codegen(target).name == "ascend"
     assert set(get_backend("ascend").allowed_execution_backends(target)) == {"cython", "tvm_ffi"}
     assert get_backend("ascend").resolve_execution_backend("auto", target).name == "tvm_ffi"
-    assert tvm.ffi.get_global_func("target.build.ascend", allow_missing=True) is not None
+    assert tvm_ffi.get_global_func("target.build.ascend", allow_missing=True) is not None
 
 
 def test_native_ascend_kind_drives_backend_identity():
@@ -79,7 +79,7 @@ def test_pto_execution_backend_selects_pto_target_variant():
     assert target_is_pto(context.target)
     assert context.execution_backend.name == "pto"
     assert context.module.get_device_codegen(context.target) is PTO_CODEGEN
-    assert tvm.ffi.get_global_func("target.build.tilelang_pto_without_compile", allow_missing=True) is not None
+    assert tvm_ffi.get_global_func("target.build.tilelang_pto_without_compile", allow_missing=True) is not None
 
 
 def test_pto_execution_backend_preserves_ascend_target_options():

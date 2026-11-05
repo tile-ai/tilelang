@@ -9,10 +9,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 
-from tvm.base import py_str
-
-from tilelang.env import TL_LIBS
+from ._utils import py_str
 
 _MSVC_ENV_ERROR: str | None = None
 
@@ -336,27 +335,17 @@ def _find_import_libs() -> tuple[list[str], list[str]]:
         if lib_path not in libs:
             libs.append(lib_path)
 
-    for lib_dir in TL_LIBS:
-        if not os.path.isdir(lib_dir):
-            continue
-        # JIT-generated host libraries call TVM runtime C API symbols such as
-        # TVMBackendGetFuncFromEnv. Split Windows builds export those from
-        # tvm_runtime.dll, while older unified builds exported them from tvm.dll.
-        runtime_lib = os.path.join(lib_dir, "tvm_runtime.lib")
-        if os.path.exists(runtime_lib):
-            add_import_lib(runtime_lib)
-        else:
-            add_import_lib(os.path.join(lib_dir, "tvm.lib"))
-        add_import_lib(os.path.join(lib_dir, "tvm_ffi.lib"))
+    from tvm_tirx.libinfo import find_libtvm_runtime
+    from tvm_ffi import libinfo as tvm_ffi_libinfo
 
-    try:
-        from tvm_ffi import libinfo as tvm_ffi_libinfo
-
-        add_import_lib(tvm_ffi_libinfo.find_windows_implib())
-    except Exception as e:
-        import logging
-
-        logging.getLogger(__name__).warning("Could not locate tvm_ffi import lib: %s", e)
+    # Both import libraries must come from the provider selected by Python.
+    # Scanning legacy TL_LIBS could silently link a different TVM/FFI install.
+    runtime_dll = Path(find_libtvm_runtime())
+    runtime_lib = runtime_dll.with_suffix(".lib")
+    if not runtime_lib.is_file():
+        raise RuntimeError(f"Missing TIRx runtime import library for {runtime_dll}: {runtime_lib}")
+    add_import_lib(str(runtime_lib))
+    add_import_lib(tvm_ffi_libinfo.find_windows_implib())
 
     return lib_paths, libs
 

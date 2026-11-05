@@ -1,427 +1,328 @@
 /*!
- *  Loop unrolling as in Halide pipeline.
  * \file unroll_loop.cc
+ * \brief Expand native loops while retaining TileLang's explicit-unroll policy.
  */
-// Unrolls the loop as in Halide pipeline.
-#include "support/check.h"
-#include <tvm/arith/analyzer.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
+
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/runtime/memory_scope.h>
+#include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
+#include <limits>
 #include <unordered_set>
 
+#include "../ir/analyzer.h"
+#include "../ir/annotations.h"
 #include "../op/builtin.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
+#include "../op/native_utils.h"
+#include "ir/loop_math.h"
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
 
-using namespace tirx;
-using namespace ffi;
-
-struct UnrollLoopConfigNode
-    : public AttrsNodeReflAdapter<UnrollLoopConfigNode> {
+struct UnrollLoopConfigNode : public ffi::Object {
   int auto_max_step;
   int auto_max_depth;
   int auto_max_extent;
-  int explicit_unroll;
-  int unroll_local_access;
+  bool explicit_unroll;
+  bool unroll_local_access;
 
   static void RegisterReflection() {
-    namespace refl = reflection;
+    namespace refl = ffi::reflection;
     refl::ObjectDef<UnrollLoopConfigNode>()
         .def_ro("auto_max_step", &UnrollLoopConfigNode::auto_max_step,
-                "Threshold of number of steps in the loop to be automatically "
-                "unrolled",
                 refl::DefaultValue(0))
         .def_ro("auto_max_depth", &UnrollLoopConfigNode::auto_max_depth,
-                "The maximum nested level of loops that can be automatically "
-                "unrolled.",
                 refl::DefaultValue(8))
         .def_ro("auto_max_extent", &UnrollLoopConfigNode::auto_max_extent,
-                "The maximum extent` of loop that will be unrolled.",
                 refl::DefaultValue(0))
-        .def_ro(
-            "explicit_unroll", &UnrollLoopConfigNode::explicit_unroll,
-            "Whether to explicitly unroll the loop instead of setting a pragma",
-            refl::DefaultValue(false))
-        .def_ro(
-            "unroll_local_access", &UnrollLoopConfigNode::unroll_local_access,
-            "Whether to always unroll local access", refl::DefaultValue(false));
+        .def_ro("explicit_unroll", &UnrollLoopConfigNode::explicit_unroll,
+                refl::DefaultValue(false))
+        .def_ro("unroll_local_access",
+                &UnrollLoopConfigNode::unroll_local_access,
+                refl::DefaultValue(false));
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.transform.UnrollLoopConfig",
-                                    UnrollLoopConfigNode, BaseAttrsNode);
+                                    UnrollLoopConfigNode, ffi::Object);
 };
 
-class UnrollLoopConfig : public Attrs {
+class UnrollLoopConfig : public ffi::ObjectRef {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(UnrollLoopConfig, Attrs,
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(UnrollLoopConfig,
+                                                ffi::ObjectRef,
                                                 UnrollLoopConfigNode);
 };
 
-TVM_FFI_STATIC_INIT_BLOCK() { UnrollLoopConfigNode::RegisterReflection(); }
-
-TVM_REGISTER_PASS_CONFIG_OPTION("tl.UnrollLoop", UnrollLoopConfig);
-
-class VarLocalAccessMarker : public ExprVisitor {
-public:
-  explicit VarLocalAccessMarker(std::unordered_set<Var> *var_touched_local)
-      : var_touched_local_(var_touched_local) {}
-
-  void VisitExpr_(const VarNode *op) final {
-    var_touched_local_->insert(GetRef<Var>(op));
-  }
-
-private:
-  std::unordered_set<Var> *var_touched_local_;
-};
-
 namespace {
+using namespace tirx;
 
-class TargetedLoopBreakDetector : public StmtExprVisitor {
+// Native Break and Continue target the nearest For/While. A control statement
+// in a nested loop must not prevent expansion of its enclosing loop.
+class TargetedLoopControl : public StmtExprVisitor {
 public:
-  static bool Contains(const Stmt &body) {
-    TargetedLoopBreakDetector detector;
-    detector(body);
-    return detector.found_;
+  bool found{false};
+  ffi::Optional<VisitInterrupt> Visit_(const BreakObj *) final {
+    found = true;
+    return std::nullopt;
   }
-
-private:
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::loop_break()) ||
-        op->op.same_as(builtin::break_loop())) {
-      found_ = true;
-      return;
-    }
-    StmtExprVisitor::VisitExpr_(op);
+  ffi::Optional<VisitInterrupt> Visit_(const ContinueObj *) final {
+    found = true;
+    return std::nullopt;
   }
-
-  void VisitStmt_(const ForNode *) final {
-    // A break inside a nested loop targets that loop, not the loop being
-    // considered for full expansion.
+  ffi::Optional<VisitInterrupt> Visit_(const ForObj *) final {
+    return std::nullopt;
   }
-
-  void VisitStmt_(const WhileNode *) final {
-    // As above, do not attribute a nested while-loop's break to its parent.
+  ffi::Optional<VisitInterrupt> Visit_(const WhileObj *) final {
+    return std::nullopt;
   }
-
-  bool found_{false};
+  ffi::Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (op->op.same_as(tl::loop_break()))
+      found = true;
+    return StmtExprVisitor::Visit_(op);
+  }
 };
 
-} // namespace
-
-// The Visitor is used to check whether var is used as write index in a local
-// memory If a loop var is used as indices to a local memory, it must be
-// unrolled so the local memory access can be turned into register access.
-class UnrolledBodyDefFreshener : public StmtExprMutator {
-public:
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
-    auto it = var_remap_.find(var);
-    if (it != var_remap_.end()) {
-      return (*it).second;
-    }
-    return var;
-  }
-
-  Buffer VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
-    Var data;
-    if (alloc_data) {
-      data = FreshVar(buffer->data);
-    } else {
-      PrimExpr remapped_data = VisitExpr(buffer->data);
-      ICHECK(remapped_data.as<VarNode>())
-          << "Buffer data must remain a Var after freshening definitions";
-      data = Downcast<Var>(remapped_data);
-    }
-
-    auto visit_expr = [this](const PrimExpr &expr) {
-      return this->VisitExpr(expr);
-    };
-    Buffer new_buffer = buffer;
-    auto writer = new_buffer.CopyOnWrite();
-    writer->data = std::move(data);
-    writer->shape = buffer->shape.Map(visit_expr);
-    writer->strides = buffer->strides.Map(visit_expr);
-    writer->elem_offset = visit_expr(buffer->elem_offset);
-    buffer_remap_.Set(buffer, new_buffer);
-    return new_buffer;
-  }
-
-private:
-  Var FreshVar(const Var &var) {
-    Var new_var = Var(make_object<VarNode>(*var.get()));
-    var_remap_.Set(var, new_var);
-    return new_var;
-  }
-
-  Map<Var, Var> var_remap_;
-};
+int64_t AnnotationInteger(ffi::AnyView value) {
+  if (const auto *literal = value.as<IntImmObj>())
+    return literal->value.as<int64_t>().value();
+  if (auto boolean = value.as<bool>())
+    return *boolean;
+  return value.cast<int64_t>();
+}
 
 class LoopUnroller : public StmtExprMutator {
 public:
-  explicit LoopUnroller(int auto_max_step, int auto_max_depth,
-                        int auto_max_extent, bool explicit_unroll,
-                        bool unroll_local_access)
-      : auto_max_step_(auto_max_step), auto_max_depth_(auto_max_depth),
-        auto_max_extent_(auto_max_extent), explicit_unroll_(explicit_unroll),
-        unroll_local_access_(unroll_local_access) {}
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == "pragma_auto_unroll_max_step") {
-      int value = static_cast<int>(Downcast<Integer>(op->value)->value);
-      std::swap(value, auto_max_step_);
-      Stmt ret = this->VisitStmt(op->body);
-      std::swap(value, auto_max_step_);
-      return ret;
-    } else if (op->attr_key == "pragma_unroll_explicit") {
-      bool explicit_unroll = Downcast<Integer>(op->value)->value;
-      std::swap(explicit_unroll, explicit_unroll_);
-      Stmt ret = this->VisitStmt(op->body);
-      std::swap(explicit_unroll, explicit_unroll_);
-      return ret;
-    } else {
-      return StmtExprMutator::VisitStmt_(op);
-    }
+  explicit LoopUnroller(UnrollLoopConfig config)
+      : config_(std::move(config)), max_step_(config_->auto_max_step),
+        explicit_(config_->explicit_unroll) {}
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    if (op->op->name != "tl.attr")
+      return StmtExprMutator::Mutate_(op, mode);
+    auto fields = DecodeAttributeRegion(op);
+    auto key = fields.at("key").cast<ffi::String>();
+    if (key != "pragma_auto_unroll_max_step" && key != "pragma_unroll_explicit")
+      return StmtExprMutator::Mutate_(op, mode);
+    int64_t previous_max = max_step_;
+    bool previous_explicit = explicit_;
+    auto value = AnnotationInteger(fields.at("value"));
+    if (key == "pragma_auto_unroll_max_step")
+      max_step_ = value;
+    else
+      explicit_ = value != 0;
+    SeqStmt body = Mutate(op->body).ValueOrUnchanged(op->body);
+    max_step_ = previous_max;
+    explicit_ = previous_explicit;
+    TVM_FFI_CHECK(op->body_params.empty() && op->result_vars.empty(),
+                  ValueError)
+        << "An unroll policy region cannot define values";
+    return body;
   }
 
-  Stmt VisitStmt_(const ForNode *op) {
-    // Post order so we can collect more information
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    op = stmt.as<ForNode>();
-    int value = GetTripCount(op);
-
-    // Whether to explicitly unroll.
-    bool explicit_unroll = explicit_unroll_;
-    if (auto attr = op->annotations.Get(tirx::attr::pragma_unroll_explicit)) {
-      explicit_unroll =
-          static_cast<bool>(Downcast<Integer>(attr.value())->value);
+  ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    // A For annotation controls this loop only. A surrounding pragma region
+    // controls its lexical body. In particular, an explicit outer unroll must
+    // not turn a nested dynamic T.unroll into a forced constant expansion.
+    auto rewritten = StmtExprMutator::Mutate_(op, mode)
+                         .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                         .as_or_throw<For>();
+    op = rewritten.get();
+    int64_t previous_max = max_step_;
+    bool previous_explicit = explicit_;
+    for (const auto &[key, value] : op->annotations) {
+      if (key == "pragma_auto_unroll_max_step" ||
+          key == "tirx.auto_unroll_max_step")
+        max_step_ = AnnotationInteger(value);
+      else if (key == "pragma_unroll_explicit" || key == "tirx.unroll_explicit")
+        explicit_ = AnnotationInteger(value) != 0;
     }
+    auto result = RewriteLoop(std::move(rewritten));
+    max_step_ = previous_max;
+    explicit_ = previous_explicit;
+    return result;
+  }
 
-    // condition for auto unroll
-    bool auto_unroll =
-        (op->kind == ForKind::kSerial && value >= 0 &&
-         normal_loop_depth_ == 0 && unroll_depth_ <= auto_max_depth_);
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                     InplaceMode mode) final {
+    MarkLocal(op->source, op->indices);
+    return StmtExprMutator::Mutate_(op, mode);
+  }
 
-    auto_unroll = auto_unroll && (value * step_count_ <= auto_max_step_ ||
-                                  value <= auto_max_extent_);
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
+                                 InplaceMode mode) final {
+    AddSteps(1);
+    MarkLocal(op->dest, op->indices);
+    return StmtExprMutator::Mutate_(op, mode);
+  }
 
-    if (op->kind == ForKind::kUnrolled) {
-      if (explicit_unroll) {
-        ICHECK_GE(value, 0)
-            << "Cannot unroll non-constant loop " << explicit_unroll;
+  ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
+                                 InplaceMode mode) final {
+    AddSteps(1);
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    AddSteps(1);
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const BreakObj *, InplaceMode) final {
+    AddSteps(1);
+    return ffi::Unchanged();
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const ContinueObj *, InplaceMode) final {
+    AddSteps(1);
+    return ffi::Unchanged();
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode) final {
+    ffi::Array<Stmt> statements;
+    bool changed = false;
+    for (const Stmt &statement : op->seq) {
+      int64_t prior_steps = step_count_;
+      int prior_normal = normal_depth_, prior_unroll = unroll_depth_;
+      step_count_ = normal_depth_ = unroll_depth_ = 0;
+      auto result = Mutate(statement);
+      changed |= !result.UnchangedOrSameAs(statement);
+      Stmt rewritten = std::move(result).ValueOrUnchanged(statement);
+      // SeqStmt groups statements; For/If/Region define scopes. Expose the
+      // expanded scheduling units while keeping their definitions independent.
+      if (auto nested = rewritten.as<SeqStmt>()) {
+        for (const Stmt &child : nested.value()->seq)
+          statements.push_back(child);
+        changed = true;
+      } else {
+        statements.push_back(rewritten);
       }
-      auto_unroll = true;
+      AddSteps(prior_steps);
+      normal_depth_ = std::max(prior_normal, normal_depth_);
+      unroll_depth_ = std::max(prior_unroll, unroll_depth_);
     }
-
-    // If a loop var is used as indices to a local memory, it must be unrolled
-    // so the local memory access can be turned into register access.
-    if (this->var_touched_local_.count(op->loop_var) && value > 0 &&
-        unroll_local_access_) {
-      auto_unroll = true;
-    }
-
-    if (auto_unroll) {
-      step_count_ *= value;
-      unroll_depth_ += 1;
-    } else {
-      normal_loop_depth_ += 1;
-    }
-
-    if ((auto_unroll && explicit_unroll) ||
-        // unroll loops with extent = 1, no matter how many steps in body
-        (0 <= value && value <= auto_max_extent_ && auto_max_extent_ == 1)) {
-      return Unroll(op);
-    } else {
-      if (auto_unroll) {
-        if (op->kind != ForKind::kUnrolled) {
-          auto n = CopyOnWrite(op);
-          n->kind = ForKind::kUnrolled;
-          return For(n);
-        }
-      }
-      return stmt;
-    }
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    if (unroll_local_access_) {
-      auto storage_scope =
-          runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-      if (storage_scope.rank == runtime::StorageRank::kLocal ||
-          storage_scope.rank == runtime::StorageRank::kWarp) {
-        VarLocalAccessMarker marker(&var_touched_local_);
-        for (PrimExpr e : op->indices) {
-          marker(e);
-        }
-      }
-    }
-    return GetRef<PrimExpr>(op);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    ++step_count_;
-    if (unroll_local_access_) {
-      auto storage_scope =
-          runtime::StorageScope::Create(GetPtrStorageScope(op->buffer->data));
-      if (storage_scope.rank == runtime::StorageRank::kLocal ||
-          storage_scope.rank == runtime::StorageRank::kWarp) {
-        VarLocalAccessMarker marker(&var_touched_local_);
-        for (PrimExpr e : op->indices) {
-          marker(e);
-        }
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    ++step_count_;
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    auto fmutate = [this](const Stmt &s) {
-      int step_count = step_count_;
-      int unroll_depth = unroll_depth_;
-      int normal_loop_depth = normal_loop_depth_;
-      step_count_ = 0;
-      unroll_depth_ = 0;
-      normal_loop_depth_ = 0;
-      Stmt ret = this->VisitStmt(s);
-      step_count_ += step_count;
-      normal_loop_depth_ = std::max(normal_loop_depth, normal_loop_depth_);
-      unroll_depth_ = std::max(unroll_depth_, unroll_depth);
-      return ret;
-    };
-    return StmtExprMutator::VisitSeqStmt_(op, false, fmutate);
-  }
-
-  Stmt Unroll(const ForNode *op) {
-    CHECK(!TargetedLoopBreakDetector::Contains(op->body), ValueError)
-        << "[TileLang Semantic Check] A loop containing T.loop_break() that "
-           "targets that loop cannot be fully expanded. Use "
-           "T.unroll(..., explicit=False) or T.serial(...) to preserve the "
-           "loop.";
-    int value = GetTripCount(op);
-    // For loop must have a constant integer extent
-    ICHECK_GE(value, 0) << "loop doesn't have a constant integer extent";
-    if (value <= 0)
-      return Evaluate(0);
-    int step = GetStep(op);
-    Stmt body = op->body;
-    Map<Var, PrimExpr> vmap;
-    Array<Stmt> unrolled;
-    for (int i = 0; i < value; ++i) {
-      vmap.Set(op->loop_var,
-               op->min + make_const(op->loop_var.dtype(), i * step));
-      Stmt step_body = Substitute(body, vmap);
-      step_body = UnrolledBodyDefFreshener()(std::move(step_body));
-      unrolled.push_back(step_body);
-    }
-    return SeqStmt::Flatten(unrolled);
+    return changed ? ffi::UnchangedOr<Stmt>(SeqStmt(statements, op->loc))
+                   : ffi::UnchangedOr<Stmt>(ffi::Unchanged());
   }
 
 private:
-  // returns the extent of the loop if it's a constant integer, otherwise return
-  // -1
-  int GetExtent(const ForNode *op) {
-    // constant folding.
-    PrimExpr extent = analyzer_.Simplify(op->extent);
-    const IntImmNode *v1 = extent.as<IntImmNode>();
-    int value = -1;
-    // integers that do not fit in int32_t are treated as symbolic,
-    // as it's impossible to unroll such large loops
-    if (v1 != nullptr && v1->value <= std::numeric_limits<int>::max()) {
-      value = static_cast<int>(v1->value);
-    }
-    return value;
+  void AddSteps(int64_t amount) {
+    constexpr int64_t limit = std::numeric_limits<int>::max();
+    step_count_ = std::min(limit, step_count_ + amount);
   }
 
-  // returns the step of the loop
-  int GetStep(const ForNode *op) {
-    if (!op->step.defined()) {
-      return 1;
-    }
-    auto *step = as_const_int(op->step.value());
-    ICHECK(step) << "An loop's step must be constant";
-    ICHECK_GT(*step, 0) << "A loop's step must be positive";
-    return *step;
+  void MarkLocal(const Expr &value, const ffi::Array<PrimExpr> &indices) {
+    if (!config_->unroll_local_access)
+      return;
+    auto tensor = value.as<TensorVar>();
+    if (!tensor)
+      return;
+    auto scope = tensor.value().scope();
+    if (scope != runtime::MemoryScope::Get("local") &&
+        scope != runtime::MemoryScope::Get("warp"))
+      return;
+    for (const PrimExpr &index : indices)
+      VisitNativePostOrder(index, [&](const ffi::ObjectRef &node) {
+        if (const auto *var = node.as<VarObj>())
+          local_indices_.insert(var);
+      });
   }
 
-  // returns the trip count of the loop if it's a constant integer, otherwise
-  // return -1
-  int GetTripCount(const ForNode *op) {
-    int extent = GetExtent(op);
-    if (extent < 0) {
-      return -1;
+  Stmt Expand(const ForObj *loop, int count) {
+    auto control = ffi::make_object<TargetedLoopControl>();
+    control->Visit(loop->body);
+    TVM_FFI_CHECK(!control->found, ValueError)
+        << "[TileLang Semantic Check] A loop containing T.loop_break() or "
+           "continue that targets that loop cannot be fully expanded. Use "
+           "T.unroll(..., explicit=False) or T.serial(...) to preserve the "
+           "loop.";
+    ffi::Array<Stmt> statements;
+    for (int index = 0; index < count; ++index) {
+      // Only local definitions are renewed; free parameters keep their
+      // identity. Native hooks rebuild types and uses, including
+      // shape/layout/region vars.
+      auto copy = tirx::RenewDef(tirx::Function({}, loop->body));
+      auto substitution = ffi::make_object<StmtExprMutator>();
+      PrimExpr iteration = UnrolledLoopValue(loop, index, analyzer_);
+      substitution->VarRemapSet(loop->var, analyzer_->Simplify(iteration));
+      SeqStmt body =
+          substitution->Mutate(copy->body).ValueOrUnchanged(copy->body);
+      for (const Stmt &statement : body->seq)
+        statements.push_back(statement);
     }
-    if (extent == 0) {
-      return 0;
-    }
-    int step = GetStep(op);
-    return 1 + (extent - 1) / step;
+    return SeqStmt(statements, loop->loc);
   }
 
-  // maximum number of step to perform auto unroll.
-  int auto_max_step_;
-  int auto_max_depth_;
-  // max extent of loop to auto unroll
-  // this does not count the total steps, only count the number of loops
-  int auto_max_extent_;
-  bool explicit_unroll_;
-  // Whether to unroll loops to local access.
-  bool unroll_local_access_{false};
-  // Number of normal loops in scope
-  int normal_loop_depth_{0};
-  // number of unrolled cases in current scope.
-  int unroll_depth_{0};
-  // Number of total steps unrolled
-  int step_count_{0};
-  // set of indices touched during visit local memory
-  std::unordered_set<Var> var_touched_local_;
-  // analyzer
-  arith::Analyzer analyzer_;
+  ffi::UnchangedOr<Stmt> RewriteLoop(For rewritten) {
+    const auto *op = rewritten.get();
+    int count = ConstantUnrollTripCount(op, analyzer_);
+    bool automatic = op->kind == ForKind::kDefault && count >= 0 &&
+                     normal_depth_ == 0 &&
+                     unroll_depth_ <= config_->auto_max_depth;
+    automatic =
+        automatic && (static_cast<int64_t>(count) * step_count_ <= max_step_ ||
+                      count <= config_->auto_max_extent);
+    bool unroll = automatic || op->kind == ForKind::kUnrolled ||
+                  (count > 0 && config_->unroll_local_access &&
+                   local_indices_.count(op->var.get()));
+    if (op->kind == ForKind::kUnrolled && explicit_)
+      TVM_FFI_CHECK_GE(count, 0, ValueError)
+          << "Cannot unroll non-constant loop or an iteration that overflows "
+             "its index type";
+    if (unroll) {
+      step_count_ = count < 0
+                        ? std::numeric_limits<int>::max()
+                        : std::min<int64_t>(std::numeric_limits<int>::max(),
+                                            count * step_count_);
+      ++unroll_depth_;
+    } else {
+      ++normal_depth_;
+    }
+    if ((unroll && explicit_ && count >= 0) ||
+        (config_->auto_max_extent == 1 && count >= 0 && count <= 1))
+      return Expand(op, count);
+    if (unroll && op->kind != ForKind::kUnrolled)
+      rewritten.CopyOnWrite()->kind = ForKind::kUnrolled;
+    return rewritten;
+  }
+
+  UnrollLoopConfig config_;
+  int64_t max_step_;
+  bool explicit_;
+  int64_t step_count_{0};
+  int normal_depth_{0}, unroll_depth_{0};
+  std::unordered_set<const VarObj *> local_indices_;
+  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
 };
-
-Stmt UnrollLoop(Stmt stmt, UnrollLoopConfig cfg) {
-  Stmt ret = LoopUnroller(cfg->auto_max_step, cfg->auto_max_depth,
-                          cfg->auto_max_extent, cfg->explicit_unroll,
-                          cfg->unroll_local_access)(stmt);
-  if (!ret.same_as(stmt)) {
-    return ConvertSSA(ret);
-  } else {
-    return ret;
-  }
-}
+} // namespace
 
 namespace transform {
-
-using namespace tirx::transform;
-
-Pass UnrollLoop() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    auto *n = f.CopyOnWrite();
-    auto cfg = ctx->GetConfig<UnrollLoopConfig>("tl.UnrollLoop");
-    if (!cfg.defined()) {
-      cfg = AttrsWithDefaultValues<UnrollLoopConfig>();
-    }
-    n->body = tl::UnrollLoop(f->body, cfg.value());
-    return f;
+tvm::transform::Pass UnrollLoop() {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext context) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto unroller = ffi::make_object<LoopUnroller>(
+        context->GetConfigOrDefault<UnrollLoopConfig>("tl.UnrollLoop"));
+    auto body = function->body;
+    function.CopyOnWrite()->body =
+        unroller->Mutate(body).ValueOrUnchanged(body);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.UnrollLoop", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.UnrollLoop");
 }
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.UnrollLoop", UnrollLoop);
-}
-
 } // namespace transform
 
-} // namespace tl
-} // namespace tvm
+TVM_FFI_STATIC_INIT_BLOCK() {
+  UnrollLoopConfigNode::RegisterReflection();
+  tvm::transform::PassContext::RegisterConfigOption<UnrollLoopConfig>(
+      "tl.UnrollLoop");
+  ffi::reflection::GlobalDef().def("tl.transform.UnrollLoop",
+                                   transform::UnrollLoop);
+}
+
+} // namespace tvm::tl

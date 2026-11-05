@@ -11,6 +11,7 @@ import os
 import json
 import time
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 # Global lock to serialize Z3 calls — Z3 is not thread-safe
@@ -283,6 +284,7 @@ def z3_schedule_loop_python(
     manual_schedule: bool = False,
     seed: int | None = 42,
     verbose: bool = False,
+    buffer_version_bytes: list[list[int]] | None = None,
 ) -> tuple[list[int], list[int], int]:
     """Schedule a loop body with modulo, stage, and storage constraints.
 
@@ -339,6 +341,11 @@ def z3_schedule_loop_python(
         Z3 random seed; ``None`` leaves the solver default unchanged.
     verbose : bool
         Print solver inputs, search progress, and the selected schedule.
+    buffer_version_bytes : list[list[int]] | None
+        Optional physical byte costs for each buffer at version counts
+        1 through ``num_stages``. This represents native layout padding that
+        is not proportional to the version count. Omission retains the
+        ``buffer_sizes[i] * versions`` contract.
 
     Returns
     -------
@@ -348,6 +355,45 @@ def z3_schedule_loop_python(
         minimal_II: The minimal initiation interval found
     """
     n = len(latencies)
+
+    def byte_cost(value):
+        return isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= (1 << 63) - 1
+
+    if not isinstance(num_stages, int) or isinstance(num_stages, bool) or num_stages <= 0:
+        raise ValueError("num_stages must be a positive integer")
+    if any(not byte_cost(size) for size in buffer_sizes):
+        raise ValueError("buffer_sizes must contain nonnegative int64 byte costs")
+    if buffer_version_bytes is not None:
+        if not isinstance(buffer_version_bytes, Sequence) or isinstance(buffer_version_bytes, (str, bytes)):
+            raise ValueError("buffer_version_bytes must be a sequence of cost rows")
+        if len(buffer_version_bytes) != len(buffer_sizes):
+            raise ValueError("buffer_version_bytes must have one row per buffer")
+        for index, costs in enumerate(buffer_version_bytes):
+            if not isinstance(costs, Sequence) or isinstance(costs, (str, bytes)) or len(costs) != num_stages:
+                raise ValueError("buffer_version_bytes rows must contain num_stages costs")
+            if any(not byte_cost(cost) for cost in costs):
+                raise ValueError("buffer_version_bytes costs must be nonnegative int64 integers")
+            if costs[0] != buffer_sizes[index]:
+                raise ValueError("buffer_version_bytes first cost must equal the one-version buffer size")
+            if any(left > right for left, right in zip(costs, costs[1:])):
+                raise ValueError("buffer_version_bytes costs must be nondecreasing")
+        buffer_version_bytes = [list(costs) for costs in buffer_version_bytes]
+
+    def physical_bytes(index, versions):
+        if buffer_version_bytes is None:
+            return buffer_sizes[index] * versions
+        return buffer_version_bytes[index][versions - 1]
+
+    for group in memory_groups:
+        if not group or not isinstance(group[0], int) or isinstance(group[0], bool):
+            raise ValueError("memory_groups must begin with an integer capacity")
+        indices = group[1:]
+        if any(not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(buffer_sizes) for index in indices):
+            raise ValueError("memory_groups contains an invalid buffer index")
+        if len(set(indices)) != len(indices):
+            raise ValueError("memory_groups must not repeat buffer indices")
+        if indices and sum(physical_bytes(index, 1) for index in indices) > group[0]:
+            raise RuntimeError("Physical memory capacity is insufficient for one version of every buffer")
 
     # For small number of tasks, return trivial schedule
     if n < 1:
@@ -437,7 +483,17 @@ def z3_schedule_loop_python(
             cap = group[0]
             idxs = group[1:]
             if idxs:
-                solver.add(z3.Sum([buffer_vars[i] * buffer_sizes[i] for i in idxs]) <= cap)
+                if buffer_version_bytes is None:
+                    usage = [buffer_vars[i] * buffer_sizes[i] for i in idxs]
+                else:
+                    usage = []
+                    for i in idxs:
+                        costs = buffer_version_bytes[i]
+                        cost = z3.IntVal(costs[-1], ctx)
+                        for version in range(num_stages - 1, 0, -1):
+                            cost = z3.If(buffer_vars[i] == version, costs[version - 1], cost)
+                        usage.append(cost)
+                solver.add(z3.Sum(usage) <= cap)
 
         # Add data dependency constraints with distance
         for u, v, distance, latency in data_deps:
@@ -578,6 +634,12 @@ def z3_schedule_loop_python(
             for i in range(len(buffer_sizes)):
                 buffer_var = best_model.eval(best_buffer_vars[i]).as_long()
                 buffer_versions.append(buffer_var)
+
+    if any(not 1 <= count <= num_stages for count in buffer_versions):
+        raise RuntimeError("Z3 selected an invalid physical buffer version count")
+    for group in memory_groups:
+        if group[1:] and sum(physical_bytes(index, buffer_versions[index]) for index in group[1:]) > group[0]:
+            raise RuntimeError("Selected physical storage exceeds memory capacity")
 
     # Sort tasks by start time (and by index as tie-breaker)
     task_indices = list(range(n))
@@ -797,6 +859,7 @@ def z3_schedule_loop_ffi(
     enable_offset=False,
     manual_stages=None,
     manual_schedule=False,
+    buffer_version_bytes=None,
 ):
     """FFI wrapper for z3_schedule_loop_python.
 
@@ -806,7 +869,8 @@ def z3_schedule_loop_ffi(
     ``memory_groups`` contains ``[capacity, idx0, idx1, ...]`` entries;
     ``stage_order_deps`` contains ``(u, w)`` constraints requiring ``k_u <=
     k_w``. The remaining arguments carry the loop's offset and manual-stage
-    policy from C++.
+    policy from C++. Optional ``buffer_version_bytes`` rows carry exact native
+    allocation costs for each candidate version count.
     """
     # Convert TVM containers to Python lists
     latencies_list = list(latencies)
@@ -846,6 +910,7 @@ def z3_schedule_loop_ffi(
             enable_offset=bool(enable_offset),
             manual_stages=manual_stages_list,
             manual_schedule=bool(manual_schedule),
+            buffer_version_bytes=buffer_version_bytes,
             seed=42,
         )
 

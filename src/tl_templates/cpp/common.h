@@ -5,13 +5,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <type_traits>
 
 using half_float::half;
 
 // Vector types for CPU codegen.
 // The C codegen emits vector pointer casts like *(float4*)(ptr + offset)
-// and broadcast expressions like ((float4)(v, v, v, v)) where the comma
-// expression evaluates to a single value, requiring a one-arg constructor.
+// and constructs vectors from either one broadcast value or N lane values.
 template <typename T, int N> struct vec_type {
   T data[N];
   vec_type() = default;
@@ -19,6 +19,14 @@ template <typename T, int N> struct vec_type {
     for (int i = 0; i < N; i++)
       data[i] = v;
   }
+  template <typename... Args, typename = std::enable_if_t<sizeof...(Args) == N>>
+  explicit vec_type(Args... values) : data{static_cast<T>(values)...} {}
+  template <typename U> explicit vec_type(const vec_type<U, N> &other) {
+    for (int i = 0; i < N; ++i)
+      data[i] = static_cast<T>(other.data[i]);
+  }
+  T &operator[](int lane) { return data[lane]; }
+  const T &operator[](int lane) const { return data[lane]; }
   vec_type operator+(const vec_type &o) const {
     vec_type r;
     for (int i = 0; i < N; i++)
@@ -68,6 +76,7 @@ template <typename T, int N> struct vec_type {
 
 #define TL_DEFINE_VEC(T)                                                       \
   using T##2 = vec_type<T, 2>;                                                 \
+  using T##3 = vec_type<T, 3>;                                                 \
   using T##4 = vec_type<T, 4>;                                                 \
   using T##8 = vec_type<T, 8>;                                                 \
   using T##16 = vec_type<T, 16>;

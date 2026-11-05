@@ -7,7 +7,6 @@
 #define TVM_TL_TRANSFORM_COMMON_ATTR_H_
 
 #include <string>
-#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -15,14 +14,6 @@ namespace tl {
 constexpr const char *HostMainBlockName = "root";
 
 constexpr const char *DeviceMainBlockName = "tilelang_root";
-
-inline bool IsHostMainBlock(const tirx::SBlockNode *node) {
-  return node->name_hint == HostMainBlockName;
-}
-
-inline bool IsDeviceMainBlock(const tirx::SBlockNode *node) {
-  return node->name_hint == DeviceMainBlockName;
-}
 
 // The kernel-launch frame no longer needs a per-backend marker annotation:
 // KernelLaunchFrame exposes its grid_vars/thread_vars explicitly and each
@@ -33,7 +24,7 @@ namespace attr {
 constexpr const char *kHasTriggerLaunch = "has_cuda_pdl_trigger";
 constexpr const char *kHasGridSync = "has_cuda_pdl_sync";
 
-// TileLang-only AttrStmt keys.
+// TileLang-only scoped attribute keys.
 constexpr const char *volatile_scope = "volatile_scope";
 constexpr const char *coproc_scope = "coproc_scope";
 constexpr const char *pipeline_exec_scope = "pipeline_exec_scope";

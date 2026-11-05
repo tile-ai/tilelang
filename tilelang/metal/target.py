@@ -4,7 +4,7 @@ from platform import mac_ver
 import re
 import subprocess
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang.backend.target import TargetLike, register_target_detector, register_target_normalizer
 

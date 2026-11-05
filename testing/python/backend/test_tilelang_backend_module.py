@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tvm_ffi
+
 from dataclasses import replace
 
 import pytest
@@ -88,8 +90,8 @@ def test_backend_owns_compile_callbacks():
     assert "tilelang_callback_cuda_validate" in get_backend("cuda").callbacks
     assert "tilelang_callback_cuda_compile" in get_backend("cuda").callbacks
     assert "tilelang_callback_hip_compile" in get_backend("rocm").callbacks
-    assert tvm.ffi.get_global_func("tilelang_callback_cuda_compile")
-    assert tvm.ffi.get_global_func("tilelang_callback_hip_compile")
+    assert tvm_ffi.get_global_func("tilelang_callback_cuda_compile")
+    assert tvm_ffi.get_global_func("tilelang_callback_hip_compile")
 
 
 def test_cutedsl_backend_reuses_cuda_pipeline():

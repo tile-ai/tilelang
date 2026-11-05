@@ -12,6 +12,7 @@ namespace tl {
 
 using namespace ffi;
 using namespace tirx;
+using namespace prim;
 
 namespace ascend {
 namespace {

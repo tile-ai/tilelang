@@ -198,7 +198,7 @@ def test_reduce_nan_dtype_contract(reduce_fn, dtype, clear, nan_propagate):
     mod = tilelang.tvm.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if nan_propagate and dtype not in (T.float16, T.bfloat16):
-        with pytest.raises(ValueError, match=f"nan_propagate=True requires float16 or bfloat16 output, got {dtype}"):
+        with pytest.raises(ValueError, match=rf"nan_propagate=True requires float16 or bfloat16 output, got T\.{dtype}\b"):
             tilelang.transform.LayoutInference()(mod)
     else:
         tilelang.transform.LayoutInference()(mod)

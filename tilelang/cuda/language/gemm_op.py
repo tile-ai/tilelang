@@ -7,8 +7,9 @@ variants (``wgmma_gemm``, ``tcgen05_gemm``, ``tcgen05_gemm_blockscaled``,
 """
 
 from __future__ import annotations
+from tilelang.language import _native
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.experimental.gemm_sp_op import _gemm_sp_impl
@@ -475,8 +476,8 @@ def make_blockscaled_gemm_layout(
 
     M, N = int(C_shape[0]), int(C_shape[1])
     K = int(A_shape[-2] if transpose_A else A_shape[-1])
-    a_dtype = str(A_region.buffer.dtype)
-    accum_dtype = str(C_region.buffer.dtype)
+    a_dtype = str(_native.dtype_of(A_region.source))
+    accum_dtype = str(_native.dtype_of(C_region.source))
 
     emitter = TensorCoreIntrinEmitter(
         a_dtype=a_dtype,
@@ -493,5 +494,5 @@ def make_blockscaled_gemm_layout(
     # Block-scaled GEMM is 1CTA dense (no .ws), matching GemmTCGEN5BlockScaled.
     emitter.get_tcgen5_mma_meta(M, N, K, disable_2cta=True, disable_ws=True)
 
-    c_buf = C_region.buffer if isinstance(C_region, tirx.BufferRegion) else C
+    c_buf = C_region.source if isinstance(C_region, tirx.BufferRegion) else C
     return emitter.make_mma_store_layout(c_buf)

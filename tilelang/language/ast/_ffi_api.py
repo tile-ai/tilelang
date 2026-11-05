@@ -16,8 +16,9 @@
 # under the License.
 # This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
-"""FFI APIs"""
+# ruff: noqa
+"""Native shared-builder registry at the historical private import path."""
 
-import tvm.ffi
+import tvm_ffi
 
-tvm.ffi._init_api("script.ir_builder.tirx", __name__)  # pylint: disable=protected-access
+tvm_ffi.init_ffi_api("script.ir_builder", __name__)

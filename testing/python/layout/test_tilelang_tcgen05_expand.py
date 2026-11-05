@@ -14,9 +14,8 @@
 
 import pytest
 
-import tilelang.testing
 from tilelang import _ffi_api
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.layout import cute
 
 
@@ -66,11 +65,12 @@ def test_expand_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs, chu
 
     # Bind one symbolic variable per replication axis and prove the fragment
     # inverts the DstLayout formulas for every assignment simultaneously.
-    ana = tvm.arith.Analyzer()
+    ana = tvm.sym.Analyzer()
+    constraints = tvm.sym.ConstraintContext()
 
     def var(name, extent):
-        v = tvm.tirx.Var(name, "int32")
-        ana.bind(v, tvm.ir.Range(0, extent))
+        v = tvm.ir.Var(name, "int32")
+        constraints.append(tvm.sym.RangeConstraint(v, tvm.ir.Range(0, extent)))
         return v
 
     t = var("t", 32)  # lane within the warp
@@ -79,6 +79,7 @@ def test_expand_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs, chu
     d = var("d", ndup)  # duplicate high-datapath issue
     w = var("w", 4)  # warp within the warpgroup
     g = var("g", num_wgs)  # warpgroup
+    ana.sync_constraint_context(constraints)
 
     dp, col = _dp_col(meta, t, j, n, d, w)
     col = col + g * chunks * width  # each warpgroup owns a column slice
@@ -161,11 +162,12 @@ def test_expand_half_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs
     # One issue per warp, so no duplicate registers: ndup drops out.
     assert plan.vals_per_issue == regs * chunks
 
-    ana = tvm.arith.Analyzer()
+    ana = tvm.sym.Analyzer()
+    constraints = tvm.sym.ConstraintContext()
 
     def var(name, extent):
-        v = tvm.tirx.Var(name, "int32")
-        ana.bind(v, tvm.ir.Range(0, extent))
+        v = tvm.ir.Var(name, "int32")
+        constraints.append(tvm.sym.RangeConstraint(v, tvm.ir.Range(0, extent)))
         return v
 
     t = var("t", 32)
@@ -173,6 +175,7 @@ def test_expand_half_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs
     n = var("n", chunks)
     w = var("w", 4)
     g = var("g", num_wgs)
+    ana.sync_constraint_context(constraints)
 
     # The same DstLayout formulas with the duplicate issue dropped (d = 0);
     # physical datapath t + 32*w is Layout F's logical row t + 16*w.
@@ -240,4 +243,4 @@ def test_expand_issue_count_follows_the_tile():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    pytest.main([__file__])

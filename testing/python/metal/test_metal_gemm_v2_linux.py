@@ -6,11 +6,14 @@ without requiring a Metal runtime or macOS.
 """
 
 import pytest
+import tvm_ffi
 
 import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
+from tvm_tirx import ir, tirx
+from tvm_tirx.tirx.layout import S
 from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
 METAL_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
@@ -274,22 +277,18 @@ def test_metal_gemm_v2_small_blocks():
 
 
 def test_metal_gemm_validates_explicit_buffer_strides():
-    padded_buffer = tvm.tirx.decl_buffer(
-        (16, 16),
-        T.float16,
-        strides=(32, 1),
-        scope="shared",
+    padded_buffer = ir.Var(
+        "padded",
+        tirx.TensorType((16, 16), T.float16, scope="shared", layout=tirx.TileLayout(S[(16, 16) : (32, 1)])),
     )
 
     *_, stride = MPSIntrinEmitter._parse_buffer_nd(padded_buffer)
 
-    assert tvm.ir.structural_equal(stride, tvm.tirx.IntImm("int32", 32))
+    assert tvm_ffi.structural_equal(stride, ir.IntImm("int32", 32))
 
-    noncontiguous_buffer = tvm.tirx.decl_buffer(
-        (16, 16),
-        T.float16,
-        strides=(32, 2),
-        scope="shared",
+    noncontiguous_buffer = ir.Var(
+        "noncontiguous",
+        tirx.TensorType((16, 16), T.float16, scope="shared", layout=tirx.TileLayout(S[(16, 16) : (32, 2)])),
     )
 
     with pytest.raises(ValueError, match="contiguous innermost dimension"):

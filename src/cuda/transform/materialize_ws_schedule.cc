@@ -57,12 +57,13 @@
  */
 
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_mutate.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -95,11 +96,13 @@
 
 #include "./auto_schedule/memory_detector.h"
 #include "./ws_analysis.h"
+#include "./ws_native.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 using namespace cuda;
 
@@ -113,7 +116,7 @@ namespace {
 String ExtractWSOpId(const Any &a) {
   if (auto v = a.try_cast<String>())
     return *std::move(v);
-  if (const auto *s = a.as<StringImmNode>())
+  if (const auto *s = a.as<StringImmObj>())
     return s->value;
   LOG(FATAL) << "ws_schedule: expected string for " << kWSOpIdKey << ", got "
              << a.GetTypeKey();
@@ -164,15 +167,15 @@ struct RoleSpec {
   int NregAction(int avg_nreg) const { return nreg >= avg_nreg ? 1 : 0; }
 };
 
-// Identity-keyed maps on Buffer handles. Iteration order is hash order
+// Identity-keyed maps on TensorVar handles. Iteration order is hash order
 // and never observable: consumers renormalize into ordered containers.
 // BufferDefMap maps each buffer a schedulable op accesses to its defs:
 // the pipelines protecting the buffer, outermost scope first (resolved
 // by BuildUseChains; empty = unprotected).
-using BufferDefMap = std::unordered_map<Buffer, std::vector<PipelineSpec *>,
+using BufferDefMap = std::unordered_map<TensorVar, std::vector<PipelineSpec *>,
                                         ObjectPtrHash, ObjectPtrEqual>;
 using BufferVersionMap =
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
+    std::unordered_map<TensorVar, TensorVar, ObjectPtrHash, ObjectPtrEqual>;
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 // Pipeline ownership is storage-keyed: T.view / T.reshape aliases that share
 // one data var join the same pipelines and physical versioning. The
@@ -213,13 +216,14 @@ struct AccessSet {
 // Collects the statement's accesses with the same MemoryAccessDetector the
 // automatic scheduler uses, so both layers share one oracle. Pipeline
 // protection is whole-buffer.
-void QueryAccess(const Stmt &stmt, AccessSet *acc) {
-  MemoryAccessDetector detector;
+void QueryAccess(const Stmt &stmt, AccessSet *acc,
+                 const PipelineMemoryAnalysis *memory) {
+  MemoryAccessDetector detector(memory);
   detector.Analyze(stmt);
-  for (const BufferRegion &r : detector.GetReadRegions())
-    acc->reads.emplace(r->buffer, std::vector<PipelineSpec *>());
-  for (const BufferRegion &r : detector.GetWriteRegions())
-    acc->writes.emplace(r->buffer, std::vector<PipelineSpec *>());
+  for (const TensorRegion &r : detector.GetReadRegions())
+    acc->reads.emplace(RegionTensor(r), std::vector<PipelineSpec *>());
+  for (const TensorRegion &r : detector.GetWriteRegions())
+    acc->writes.emplace(RegionTensor(r), std::vector<PipelineSpec *>());
   // TODO: Add variable-induced dependencies
 }
 
@@ -243,7 +247,8 @@ struct BodyEntry {
 using BodyEntryPtr = std::shared_ptr<BodyEntry>;
 
 struct Synchronization : BodyEntry {
-  WSSyncKind kind; // set at parse time; never null afterwards
+  WSSyncKind kind{
+      ffi::UnsafeInit{}}; // set at parse time; never null afterwards
   PipelineSpec *pipeline = nullptr;
   int stage = 0;
   Synchronization *AsSync() override { return this; }
@@ -253,10 +258,10 @@ struct Synchronization : BodyEntry {
 // RecordOpStmt with the matched statement, filled in by later phases.
 struct Operation : BodyEntry {
   String id;
-  Stmt stmt;                   // the single matched original statement
-  Optional<PrimExpr> guard;    // original guard, if any
-  AccessSet access;            // buffer accesses and their defs
-  OpAtom atom = OpAtom::kSync; // classified once by BuildOpAtoms
+  Stmt stmt{ffi::UnsafeInit{}}; // the single matched original statement
+  Optional<PrimExpr> guard;     // original guard, if any
+  AccessSet access;             // buffer accesses and their defs
+  OpAtom atom = OpAtom::kSync;  // classified once by BuildOpAtoms
   // The written storage's binding at the op's level: the pipeline whose
   // barrier carries the op's completion signal (a TMA copy's
   // transaction). Always null for a Scope — a scope is never
@@ -279,10 +284,11 @@ struct Operation : BodyEntry {
 };
 
 struct Scope : Operation {
-  For orig_loop; // undefined for the root scope (until matched, for others)
+  For orig_loop{ffi::UnsafeInit{}}; // undefined for the root scope (until
+                                    // matched, for others)
   // Set when the scope is a T.ws_op-wrapped while loop: phases under it
   // use runtime counters, and the condition must be role-uniform.
-  While orig_while;
+  While orig_while{ffi::UnsafeInit{}};
   // Per-role instruction sequence (by RoleSpec::index); empty when the
   // role has no body here. The parent scope is Operation::sched_scope.
   std::vector<std::vector<BodyEntryPtr>> bodies;
@@ -321,20 +327,21 @@ struct Scope : Operation {
     std::vector<const Scope *> chain; // this -> root
     for (const Scope *s = this; s != nullptr; s = s->sched_scope)
       chain.push_back(s);
-    std::unordered_set<const VarNode *> outer;
+    std::unordered_set<const VarObj *> outer;
     for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
       const Scope *s = *it;
-      if (s->orig_while.defined() || s->guard.defined())
+      if (s->orig_while.defined() || s->guard.has_value())
         return false;
       if (!s->orig_loop.defined())
         continue; // the root
       auto uses_outer = [&outer](const PrimExpr &e) {
-        return UsesVar(
-            e, [&outer](const VarNode *v) { return outer.count(v) != 0; });
+        return UsesAnyVar(
+            e, [&outer](const VarObj *v) { return outer.count(v) != 0; });
       };
-      if (uses_outer(s->orig_loop->min) || uses_outer(s->orig_loop->extent))
+      if (uses_outer(s->orig_loop->begin) ||
+          uses_outer(LoopExtent(s->orig_loop.get())))
         return false;
-      outer.insert(s->orig_loop->loop_var.get());
+      outer.insert(s->orig_loop->var.get());
     }
     return true;
   }
@@ -405,8 +412,9 @@ struct PipelineSpec {
   // (resolved by ResolvePipelineScopes; a pipeline synchronizes exactly
   // one scope).
   Scope *sync_scope = nullptr;
-  std::vector<Buffer> buffers; // original buffers
-  Buffer full, empty;          // materialized barrier buffers
+  std::vector<TensorVar> buffers; // original buffers
+  TensorVar full{ffi::UnsafeInit{}},
+      empty{ffi::UnsafeInit{}}; // materialized barrier buffers
   // Uses at THIS pipeline's level: leaf ops it owns (their innermost
   // containing binding) plus the collapsed scopes of deeper bindings.
   // Producers write the storage, consumers read it.
@@ -466,8 +474,8 @@ OpAtom ClassifyTileOp(const TileOperator &tile_op, const Target &target) {
     return OpAtom::kSync;
   }
   if (const auto *gemm = tile_op.as<GemmNode>()) {
-    return IsTmemBuffer(gemm->cRegion_->buffer) ? OpAtom::kTcgen05Gemm
-                                                : OpAtom::kSync;
+    return IsTmemBuffer(RegionTensor(gemm->cRegion_)) ? OpAtom::kTcgen05Gemm
+                                                      : OpAtom::kSync;
   }
   return OpAtom::kSync;
 }
@@ -491,13 +499,14 @@ bool UsesAsyncProxy(const Call &call, const Target &target) {
 // ---------------------------------------------------------------------------
 class WSScheduleMaterializer {
 public:
-  WSScheduleMaterializer(SBlock block, Var thread_var, Target target)
-      : block_(std::move(block)), thread_var_(std::move(thread_var)),
+  WSScheduleMaterializer(NativeWSKernel kernel, PrimVar thread_var,
+                         Target target)
+      : kernel_(std::move(kernel)), thread_var_(std::move(thread_var)),
         target_(std::move(target)) {}
 
   int NumThreads() const { return num_warps_ * 32; }
 
-  SBlock Run() {
+  SeqStmt Run() {
     ParseSchedule();
     ResolvePipelineScopes();
     MatchKernel();
@@ -512,24 +521,23 @@ public:
 private:
   // ---- schedule parsing ---------------------------------------------------
 
-  // Resolve a schedule-referenced buffer to the block's own
-  // allocation: by identity, then data var, then name.
-  Buffer FindBlockBuffer(const Buffer &ref) {
-    for (const Buffer &b : block_->alloc_buffers) {
-      if (b.same_as(ref) || b->data.same_as(ref->data))
-        return b;
-    }
-    for (const Buffer &b : block_->alloc_buffers) {
-      if (b->name == ref->name)
-        return b;
-    }
-    LOG(FATAL) << "ws_schedule: pipeline buffer '" << ref->name
-               << "' is not allocated in this kernel";
-    return Buffer();
+  Var StorageKey(const TensorVar &tensor) const {
+    return kernel_.memory->Root(tensor).value_or(tensor);
+  }
+
+  // Schedule operands name native definitions. A view may name its physical
+  // allocation; printed names never substitute for identity.
+  TensorVar FindBlockBuffer(const TensorVar &ref) {
+    Var root = StorageKey(ref);
+    for (const TensorVar &tensor : kernel_.allocations)
+      if (tensor.same_as(ref) || tensor.same_as(root))
+        return tensor;
+    TVM_FFI_THROW(ValueError) << "ws_schedule: pipeline tensor '" << ref->name
+                              << "' is not allocated in this kernel";
   }
 
   void ParseSchedule() {
-    auto ann = block_->annotations.Get(kWSScheduleKey);
+    auto ann = kernel_.annotations.Get(kWSScheduleKey);
     ICHECK(ann.has_value());
     auto sched_opt = ann.value().try_cast<WSSchedule>();
     ICHECK(sched_opt.has_value())
@@ -621,8 +629,8 @@ private:
       pipeline->depth = static_cast<int>(p->depth);
       pipeline->index = static_cast<int>(pipelines_.size());
       ICHECK_GE(pipeline->depth, 1);
-      for (const tirx::Buffer &b : p->buffers) {
-        Buffer buffer = FindBlockBuffer(b);
+      for (const tirx::TensorVar &b : p->buffers) {
+        TensorVar buffer = FindBlockBuffer(b);
         ICHECK(IsSharedBuffer(buffer) || IsTmemBuffer(buffer))
             << "ws_schedule: pipeline '" << p->name << "' buffer '"
             << buffer->name << "' must live in shared or tensor memory; "
@@ -794,15 +802,15 @@ private:
   // every declared op and scope must match a statement, and (enforced in
   // MatchOp) every kernel statement must carry an id.
   void MatchKernel() {
-    MatchScopeBody(root_scope_, block_->body);
+    MatchScopeBody(root_scope_, kernel_.body);
     for (auto &[id, op] : ops_) {
       ICHECK(op->stmt.defined())
           << "ws_schedule: op '" << id
           << "' is scheduled but no statement in the kernel carries this id";
-      QueryAccess(op->stmt, &op->access);
+      QueryAccess(op->stmt, &op->access, kernel_.memory);
       // Buffers read by the op's guard are accesses too.
-      if (op->guard.defined())
-        QueryAccess(Evaluate(op->guard.value()), &op->access);
+      if (op->guard.has_value())
+        QueryAccess(Evaluate(op->guard.value()), &op->access, kernel_.memory);
     }
     for (const auto &scope : scopes_) {
       ICHECK(!scope->IsRoot() || scope->id == kWSRootScopeId)
@@ -811,19 +819,33 @@ private:
       // The scope's own access set: as its parent's use it is one big op
       // over the loop statement (the hierarchical collapse).
       if (!scope->IsRoot())
-        QueryAccess(scope->stmt, &scope->access);
+        QueryAccess(scope->stmt, &scope->access, kernel_.memory);
     }
   }
 
-  void MatchScopeBody(Scope *scope, const Stmt &body) {
-    for (const Stmt &stmt : BodyStmts(body))
-      MatchOp(scope, stmt, Optional<PrimExpr>());
+  void MatchScopeBody(Scope *scope, const Stmt &body,
+                      Optional<PrimExpr> guard = std::nullopt) {
+    Optional<String> next_id;
+    for (const Stmt &stmt : BodyStmts(body)) {
+      if (auto marker = WSNextOpId(stmt)) {
+        TVM_FFI_CHECK(!next_id, ValueError) << "Consecutive WS Bind markers";
+        next_id = marker;
+      } else if (next_id) {
+        TVM_FFI_CHECK(stmt.as<BindObj>(), ValueError)
+            << "A WS Bind marker must immediately precede a Bind";
+        RecordOpStmt(scope, *next_id, stmt, guard);
+        next_id = std::nullopt;
+      } else {
+        MatchOp(scope, stmt, guard);
+      }
+    }
+    TVM_FFI_CHECK(!next_id, ValueError) << "Dangling WS Bind marker";
   }
 
   // The statements of a body: a SeqStmt's list, or the single statement
   // itself. Not recursive — traced TIR does not nest SeqStmts.
   static Array<Stmt> BodyStmts(const Stmt &s) {
-    if (const auto *seq = s.as<SeqStmtNode>())
+    if (const auto *seq = s.as<SeqStmtObj>())
       return seq->seq;
     return {s};
   }
@@ -843,13 +865,13 @@ private:
     // Any sequential loop can be a scope (T.Pipelined is a serial loop
     // with a num_stages annotation; a T.unroll scope keeps its unroll
     // kind).
-    ICHECK(loop->kind == ForKind::kSerial || loop->kind == ForKind::kUnrolled)
+    ICHECK(loop->kind == ForKind::kDefault || loop->kind == ForKind::kUnrolled)
         << "ws_schedule: scope '" << scope->id
         << "' must be a sequential loop (T.Pipelined, T.serial, or "
            "T.unroll); T.Parallel loops are scheduled as single ops";
     // Phases count iterations as (loop_var - min); a non-unit step
     // would break them. TODO: divide by the step.
-    ICHECK(loop->HasTrivialStep())
+    ICHECK(IsOne(loop->step))
         << "ws_schedule: scope '" << scope->id
         << "' has a non-unit loop step; write the loop with unit step and "
            "scale the indices in the body instead";
@@ -861,20 +883,18 @@ private:
   // Consume the id marker as the statement is recorded, so the emitted
   // clones never leak scheduling metadata downstream.
   static Stmt StripOpId(const Stmt &stmt) {
-    if (const auto *ev = stmt.as<EvaluateNode>()) {
-      const auto *call = ev->value.as<CallNode>();
-      if (call && call->annotations.count(kWSOpIdKey)) {
-        Map<String, ObjectRef> ann =
-            FilterAnnotations(call->annotations, [](const String &key) {
-              return key != kWSOpIdKey;
-            });
-        return Evaluate(Call(call->dtype, call->op, call->args, std::move(ann),
-                             call->span));
+    if (const auto *ev = stmt.as<EvaluateObj>()) {
+      const auto *call = ev->value.as<CallObj>();
+      if (call && ReadWSCall(call).annotations.count(kWSOpIdKey)) {
+        auto ann = FilterAnnotations(
+            ReadWSCall(call).annotations,
+            [](const String &key) { return key != kWSOpIdKey; });
+        return Evaluate(RewriteWSCall(call, ann), ev->loc);
       }
       return stmt;
     }
-    if (stmt.as<ForNode>()) {
-      For loop = Downcast<For>(stmt);
+    if (stmt.as<ForObj>()) {
+      For loop = stmt.as_or_throw<For>();
       if (loop->annotations.count(kWSOpIdKey)) {
         loop.CopyOnWrite()->annotations =
             FilterAnnotations(loop->annotations, [](const String &key) {
@@ -901,7 +921,7 @@ private:
         << "' of the kernel but is scheduled by " << "scope '"
         << op.sched_scope->id << "'";
     op.stmt = StripOpId(stmt);
-    if (guard.defined())
+    if (guard.has_value())
       op.guard = guard;
   }
 
@@ -909,50 +929,47 @@ private:
     // A `with T.ws_op(id):` wrapper. With a scope id it wraps a while
     // loop and opens that scope; otherwise the wrapped statements become
     // ONE opaque op. The wrapper is consumed here.
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      if (attr->attr_key == kWSOpIdKey) {
-        String id = ExtractWSOpId(Any(attr->value));
+    if (const auto *region = stmt.as<RegionStmtObj>()) {
+      auto attr = WSAttribute(region);
+      TVM_FFI_CHECK(attr, ValueError)
+          << "ws_schedule: an unannotated region cannot be scheduled";
+      String key = attr.value().at("key").cast<String>();
+      if (key == kWSOpIdKey) {
+        String id = ExtractWSOpId(attr.value().at("value"));
         if (std::shared_ptr<Scope> child = FindScope(id)) {
-          const auto *wl = attr->body.as<WhileNode>();
-          ICHECK(wl) << "ws_schedule: scope id '" << id << "' on a T.ws_op "
-                     << "wrapper must wrap a while loop; serial loops carry "
-                     << "the id in their own annotations";
+          Stmt single = SingleStatement(region->body);
+          const auto *wl = single.as<WhileObj>();
+          ICHECK(wl) << "ws_schedule: scope id '" << id
+                     << "' on a T.ws_op wrapper must wrap a while loop";
           ICHECK_EQ(child->sched_scope, scope)
-              << "ws_schedule: scope '" << id << "' lives in scope '"
-              << scope->id << "' of the kernel but is referenced from scope '"
-              << child->sched_scope->id << "'";
-          if (guard.defined())
+              << "ws_schedule: scope '" << id
+              << "' belongs to a different scope";
+          if (guard)
             child->guard = guard;
           RecordScopeWhileLoop(child.get(), GetRef<While>(wl));
           return;
         }
-        RecordOpStmt(scope, id, attr->body, guard);
+        RecordOpStmt(scope, id, SingleStatement(region->body), guard);
         return;
       }
-      // A T.annotate_ws_pipeline_depth wrapper: scheduler-only metadata;
-      // consume it and match the statements it wraps.
-      if (attr->attr_key == kWSPipelineDepthKey) {
-        for (const Stmt &sub : BodyStmts(attr->body))
-          MatchOp(scope, sub, guard);
+      if (key == kWSPipelineDepthKey) {
+        MatchScopeBody(scope, region->body, guard);
         return;
       }
-      // Kernel-level metadata (T.use_swizzle,
-      // T.annotate_min_blocks_per_sm, ...) wraps the statements that
-      // follow it. Record the wrapper, keep matching inside it, and
-      // re-wrap the rebuilt kernel body (RebuildBlock).
-      ICHECK(scope->id == kWSRootScopeId && !guard.defined())
-          << "ws_schedule: AttrStmt '" << attr->attr_key
-          << "' must be at the top level of the kernel:\n"
-          << stmt;
-      metadata_attrs_.push_back(GetRef<AttrStmt>(attr));
-      for (const Stmt &sub : BodyStmts(attr->body))
-        MatchOp(scope, sub, guard);
+      ICHECK(scope->id == kWSRootScopeId && !guard)
+          << "ws_schedule: attribute '" << key
+          << "' must be at kernel top level";
+      TVM_FFI_CHECK(region->body_params.empty() && region->result_vars.empty(),
+                    ValueError)
+          << "ws_schedule: a defining region cannot be hoisted as metadata";
+      metadata_attrs_.push_back(GetRef<RegionStmt>(region));
+      MatchScopeBody(scope, region->body, guard);
       return;
     }
 
     // An annotated loop: a serial loop whose id names a scope opens
     // that scope; any other annotated loop is one opaque op.
-    if (const auto *loop = stmt.as<ForNode>()) {
+    if (const auto *loop = stmt.as<ForObj>()) {
       if (auto id_ann = loop->annotations.Get(kWSOpIdKey)) {
         String id = ExtractWSOpId(id_ann.value());
         if (std::shared_ptr<Scope> child = FindScope(id)) {
@@ -960,7 +977,7 @@ private:
               << "ws_schedule: scope '" << id << "' lives in scope '"
               << scope->id << "' of the kernel but is referenced from scope '"
               << child->sched_scope->id << "'";
-          if (guard.defined())
+          if (guard.has_value())
             child->guard = guard;
           RecordScopeForLoop(child.get(), GetRef<For>(loop));
           return;
@@ -971,24 +988,23 @@ private:
     }
 
     // A tile op carrying its id in the call annotations.
-    if (const auto *ev = stmt.as<EvaluateNode>()) {
-      if (const auto *call = ev->value.as<CallNode>()) {
-        if (auto id = call->annotations.Get(kWSOpIdKey)) {
+    if (const auto *ev = stmt.as<EvaluateObj>()) {
+      if (const auto *call = ev->value.as<CallObj>()) {
+        if (auto id = ReadWSCall(call).annotations.Get(kWSOpIdKey)) {
           RecordOpStmt(scope, ExtractWSOpId(id.value()), stmt, guard);
           return;
         }
       }
     }
 
-    // An op inside an IfThenElse records the accumulated condition as
+    // An op inside an If records the accumulated condition as
     // its guard.
-    if (const auto *ite = stmt.as<IfThenElseNode>()) {
-      ICHECK(!ite->else_case.defined())
+    if (const auto *ite = stmt.as<IfObj>()) {
+      ICHECK(!ite->else_case.has_value())
           << "ws_schedule: else branches are not supported yet";
-      PrimExpr cond =
-          guard.defined() ? (guard.value() && ite->condition) : ite->condition;
-      for (const Stmt &sub : BodyStmts(ite->then_case))
-        MatchOp(scope, sub, cond);
+      PrimExpr cond = guard.has_value() ? (guard.value() && ite->condition)
+                                        : ite->condition;
+      MatchScopeBody(scope, ite->then_case, cond);
       return;
     }
 
@@ -1010,27 +1026,24 @@ private:
   // 1 included, so downstream never distinguishes versioned from
   // unversioned. Views cover their whole allocation (T.view / T.reshape
   // enforce equal sizes), so every alias shares the version strides.
-  void EnsureVersionedAlias(const Buffer &buf) {
-    if (versioned_.count(buf))
+  void EnsureVersionedAlias(const TensorVar &tensor) {
+    Var root = StorageKey(tensor);
+    auto allocation = root.as<TensorVar>();
+    TVM_FFI_CHECK(allocation, ValueError)
+        << "ws_schedule: versioned storage must resolve to an allocation";
+    if (versioned_.count(*allocation))
       return;
-    const std::vector<PipelineSpec *> &bindings =
-        buffer_pipeline_.at(buf->data);
-    ObjectPtr<BufferNode> n = make_object<BufferNode>(*buf.get());
-    for (auto it = bindings.rbegin(); it != bindings.rend(); ++it) {
-      if (!n->strides.empty()) {
-        PrimExpr stride0 = n->strides[0] * n->shape[0];
-        n->strides.insert(n->strides.begin(), std::move(stride0));
-      }
-      n->shape.insert(n->shape.begin(),
-                      IntImm(DataType::Int(32), (*it)->depth));
-    }
-    versioned_[buf] = Buffer(std::move(n));
+    const auto &bindings = buffer_pipeline_.at(root);
+    TensorVar expanded = *allocation;
+    for (auto it = bindings.rbegin(); it != bindings.rend(); ++it)
+      expanded = ExpandPipelineTensor(expanded, (*it)->depth);
+    versioned_.insert_or_assign(*allocation, expanded);
   }
 
   void PlanVersionedBuffers() {
     for (const auto &pipeline : pipelines_) {
-      for (const Buffer &buf : pipeline->buffers)
-        buffer_pipeline_[buf->data].push_back(pipeline.get());
+      for (const TensorVar &buf : pipeline->buffers)
+        buffer_pipeline_[StorageKey(buf)].push_back(pipeline.get());
       pipeline->full =
           CreateMBarrierBuffer(pipeline->name + "_full", pipeline->depth);
       pipeline->empty =
@@ -1057,7 +1070,7 @@ private:
       }
     }
     for (const auto &pipeline : pipelines_)
-      for (const Buffer &buf : pipeline->buffers)
+      for (const TensorVar &buf : pipeline->buffers)
         EnsureVersionedAlias(buf);
   }
 
@@ -1067,7 +1080,7 @@ private:
   void ResolveAccessDefs(AccessSet *access) {
     for (auto *side : {&access->writes, &access->reads}) {
       for (auto &[buf, defs] : *side) {
-        auto it = buffer_pipeline_.find(buf->data);
+        auto it = buffer_pipeline_.find(StorageKey(buf));
         if (it != buffer_pipeline_.end()) {
           defs = it->second;
           EnsureVersionedAlias(buf);
@@ -1105,7 +1118,7 @@ private:
   void BuildUseChains() {
     for (auto &[id, op_ptr] : ops_) {
       Operation &op = *op_ptr;
-      Buffer write_buf;
+      TensorVar write_buf{ffi::UnsafeInit{}};
       ResolveAccessDefs(&op.access);
       RegisterUses(&op);
       for (auto &[buf, defs] : op.access.writes) {
@@ -1149,24 +1162,24 @@ private:
     VarSet written;
     for (const auto &[id, op] : ops_)
       for (const auto &[buf, def] : op->access.writes)
-        written.insert(buf->data);
+        written.insert(StorageKey(buf));
     for (const auto &scope : scopes_) {
       auto check_uniform = [&](const PrimExpr &expr, const char *what) {
         AccessSet access;
-        QueryAccess(Evaluate(expr), &access);
+        QueryAccess(Evaluate(expr), &access, kernel_.memory);
         for (const auto &[buf, def] : access.reads) {
-          ICHECK(!buffer_pipeline_.count(buf->data))
+          ICHECK(!buffer_pipeline_.count(StorageKey(buf)))
               << "ws_schedule: the " << what << " of scope '" << scope->id
               << "' touches pipeline buffer " << buf->name << "; it must "
               << "be uniform across roles";
           ICHECK((IsLocalBuffer(buf, true) || IsFragmentBuffer(buf)) ||
-                 !written.count(buf->data))
+                 !written.count(StorageKey(buf)))
               << "ws_schedule: the " << what << " of scope '" << scope->id
               << "' reads buffer '" << buf->name << "' that scheduled ops "
               << "write; its value could diverge between roles";
         }
       };
-      if (scope->guard.defined())
+      if (scope->guard.has_value())
         check_uniform(scope->guard.value(), "guard");
       if (scope->orig_while.defined())
         check_uniform(scope->orig_while->condition, "condition");
@@ -1184,11 +1197,11 @@ private:
       // barrier could not be wired. Either way each call contributes its
       // async-proxy accesses. (Locals because C++17 lambdas cannot
       // capture structured bindings.)
-      const auto *ev = op.stmt.as<EvaluateNode>();
-      const CallNode *direct = ev ? ev->value.as<CallNode>() : nullptr;
+      const auto *ev = op.stmt.as<EvaluateObj>();
+      const CallObj *direct = ev ? ev->value.as<CallObj>() : nullptr;
       const String &op_id = id;
-      PostOrderVisit(op.stmt, [&](const ObjectRef &node) {
-        const auto *call = node.as<CallNode>();
+      VisitNativePostOrder(op.stmt, [&](const ObjectRef &node) {
+        const auto *call = node.as<CallObj>();
         if (!call || call->op.same_as(region()))
           return;
         TileOperator tile_op = ParseOperator(GetRef<Call>(call));
@@ -1256,7 +1269,7 @@ private:
           open = true;
           last = nullptr;
         } else if (sync->kind.IsProducerCommit()) {
-          if (last == nullptr || last->guard.defined())
+          if (last == nullptr || last->guard.has_value())
             return false;
           cycle_copies.push_back(last);
           open = false;
@@ -1505,7 +1518,7 @@ private:
             continue;
           }
           const Operation &op = *entry->AsOperation();
-          auto check_access = [&](const Buffer &buf,
+          auto check_access = [&](const TensorVar &buf,
                                   const std::vector<PipelineSpec *> &defs,
                                   const char *how) {
             if (defs.empty())
@@ -1727,11 +1740,11 @@ private:
         def_op;
     for (const auto &[id, op] : ops_) {
       const Operation *op_ptr = op.get();
-      PostOrderVisit(op->stmt, [&](const ObjectRef &node) {
-        if (const auto *bind = node.as<BindNode>()) {
+      VisitNativePostOrder(op->stmt, [&](const ObjectRef &node) {
+        if (const auto *bind = node.as<BindObj>()) {
           auto [it, inserted] = def_op.emplace(bind->var, op_ptr);
           ICHECK(inserted || it->second == op_ptr)
-              << "ws_schedule: var '" << bind->var->name_hint
+              << "ws_schedule: var '" << bind->var->name
               << "' is bound by ops '" << it->second->id << "' and '"
               << op_ptr->id << "'";
         }
@@ -1743,8 +1756,8 @@ private:
     // The vars an op (or a guard expression) uses that other ops define.
     auto scan_uses = [&](const ObjectRef &root, const Operation *self,
                          std::vector<Var> *uses) {
-      PostOrderVisit(root, [&](const ObjectRef &node) {
-        if (const auto *v = node.as<VarNode>()) {
+      VisitNativePostOrder(root, [&](const ObjectRef &node) {
+        if (const auto *v = node.as<VarObj>()) {
           Var var = GetRef<Var>(v);
           auto it = def_op.find(var);
           if (it == def_op.end() || it->second == self)
@@ -1765,7 +1778,7 @@ private:
         const Operation *def = def_op.at(v);
         ICHECK(defined.count(v))
             << "ws_schedule: " << where << " in role " << role.name
-            << " uses var '" << v->name_hint << "' defined by op '" << def->id
+            << " uses var '" << v->name << "' defined by op '" << def->id
             << "', which does not run earlier in that role";
         // TODO: legalize guarded scalar definitions instead of rejecting
         // them — when every use shares the definition's guard and stays in
@@ -1773,9 +1786,9 @@ private:
         // together; escaping uses need the scalar lowered to a role-local
         // local.var (allocation outside the guard, guarded store, loads at
         // the uses).
-        ICHECK(!def->guard.defined())
-            << "ws_schedule: op '" << def->id << "' defines var '"
-            << v->name_hint << "' used by " << where
+        ICHECK(!def->guard.has_value())
+            << "ws_schedule: op '" << def->id << "' defines var '" << v->name
+            << "' used by " << where
             << " but runs under a source guard; the definition would not be "
                "visible outside its branch";
       };
@@ -1798,7 +1811,7 @@ private:
             continue;
           if (const Scope *child = entries[i]->AsScope()) {
             std::vector<Var> uses;
-            if (child->guard.defined())
+            if (child->guard.has_value())
               scan_uses(child->guard.value(), nullptr, &uses);
             if (child->orig_while.defined())
               scan_uses(child->orig_while->condition, nullptr, &uses);
@@ -1810,22 +1823,22 @@ private:
           const Operation &op = *entries[i]->AsOperation();
           std::vector<Var> uses;
           scan_uses(op.stmt, &op, &uses);
-          if (op.guard.defined())
+          if (op.guard.has_value())
             scan_uses(op.guard.value(), &op, &uses);
           for (const Var &v : uses) {
             check_use("op '" + std::string(op.id) + "'", v, defined);
             auto dit = body_delta.find(def_op.at(v)->id);
             if (plan.shift > 0 && dit != body_delta.end()) {
               ICHECK_EQ(dit->second, plan.delta[i])
-                  << "ws_schedule: op '" << op.id << "' uses var '"
-                  << v->name_hint << "' defined by op '" << def_op.at(v)->id
+                  << "ws_schedule: op '" << op.id << "' uses var '" << v->name
+                  << "' defined by op '" << def_op.at(v)->id
                   << "' at a different stage; the "
                   << "unrolled prologue/epilogue steps would split the "
                   << "definition from this use";
             }
           }
-          PostOrderVisit(op.stmt, [&](const ObjectRef &node) {
-            if (const auto *bind = node.as<BindNode>())
+          VisitNativePostOrder(op.stmt, [&](const ObjectRef &node) {
+            if (const auto *bind = node.as<BindObj>())
               defined.insert(bind->var);
           });
         }
@@ -1938,34 +1951,37 @@ private:
   // ---- emission -----------------------------------------------------------
 
   struct LoopLevel {
-    PrimExpr iter;   // logical iteration of the current entry at this level
-    PrimExpr extent; // ORIGINAL loop extent (cycles per outer iteration)
-    PrimExpr min;    // ORIGINAL loop min (phase counts iterations from it)
+    PrimExpr iter{ffi::UnsafeInit{}}; // logical iteration of the current entry
+                                      // at this level
+    PrimExpr extent{
+        ffi::UnsafeInit{}}; // ORIGINAL loop extent (cycles per outer iteration)
+    PrimExpr min{ffi::UnsafeInit{}}; // ORIGINAL loop min (phase counts
+                                     // iterations from it)
   };
 
   struct RoleCtx {
     const RoleSpec *role = nullptr;
-    Map<Var, PrimExpr> subs;      // orig vars -> per-role expressions
+    Map<Var, Expr> subs;          // orig vars -> per-role expressions
     std::vector<LoopLevel> chain; // enclosing loops, outer->inner
     // Pipeline -> phase at acquire/wait / runtime phase counter.
     // Lookup-only maps: pointer keys never order any emitted output.
     std::map<const PipelineSpec *, PrimExpr> pipeline_phase;
-    std::map<const PipelineSpec *, Buffer> counters;
+    std::map<const PipelineSpec *, TensorVar> counters;
   };
 
   // Linearize the phase over the outermost `levels` loops of the chain
   // (all of them for a sync entry at the current level; a prefix when a
   // deeper access resolves an enclosing pipeline's phase).
   static PrimExpr LinearPhase(const RoleCtx &ctx, size_t levels) {
-    PrimExpr phase;
+    PrimExpr phase{ffi::UnsafeInit{}};
     for (size_t i = 0; i < levels; ++i) {
       const LoopLevel &lvl = ctx.chain[i];
       // The phase counts completed iterations, so a non-zero loop min is
       // subtracted (T.Pipelined(3, 7) starts at phase 0, not 3).
-      PrimExpr iter = is_zero(lvl.min) ? lvl.iter : lvl.iter - lvl.min;
+      PrimExpr iter = IsZero(lvl.min) ? lvl.iter : lvl.iter - lvl.min;
       phase = phase.defined() ? phase * lvl.extent + iter : iter;
     }
-    return phase.defined() ? phase : PrimExpr(IntImm(DataType::Int(32), 0));
+    return phase.defined() ? phase : PrimExpr(IntImm(PrimType::Int(32), 0));
   }
   static PrimExpr LinearPhase(const RoleCtx &ctx) {
     return LinearPhase(ctx, ctx.chain.size());
@@ -1993,21 +2009,21 @@ private:
                          const PipelineSpec *pipeline) const {
     auto cit = ctx.counters.find(pipeline);
     if (cit != ctx.counters.end())
-      return BufferLoad(cit->second, {IntImm(DataType::Int(32), 0)});
+      return TensorLoad(cit->second, {IntImm(PrimType::Int(32), 0)});
     return LinearPhase(ctx);
   }
 
-  static Stmt MakeWait(const Buffer &bar, PrimExpr idx, PrimExpr parity) {
+  static Stmt MakeWait(const TensorVar &bar, PrimExpr idx, PrimExpr parity) {
     return Evaluate(
-        Call(DataType::Handle(), mbarrier_wait_parity(),
-             {BufferLoad(bar, {std::move(idx)}), std::move(parity)}));
+        Call(PrimType::Void(), mbarrier_wait_parity(),
+             {TensorLoad(bar, {std::move(idx)}), std::move(parity)}));
   }
 
   // Arrivals for one commit/release entry — exactly plan.count arrivals
   // per phase.
   void MakeArrive(const PipelineSpec &pipeline, bool full, PrimExpr idx,
                   bool &proxy_fenced, Array<Stmt> *out) const {
-    const Buffer &bar = full ? pipeline.full : pipeline.empty;
+    const TensorVar &bar = full ? pipeline.full : pipeline.empty;
     const BarrierSidePlan &plan =
         full ? pipeline.full_plan : pipeline.empty_plan;
     // fence.proxy.async orders ALL of the thread's prior generic accesses
@@ -2015,47 +2031,47 @@ private:
     // membar.proxy), so one fence covers every arrive until the next
     // emitted op can write again.
     if (plan.needs_proxy_fence && !proxy_fenced) {
-      out->push_back(
-          Evaluate(Call(DataType::Handle(), fence_proxy_async(), {})));
+      out->push_back(Evaluate(Call(PrimType::Void(), fence_proxy_async(), {})));
       proxy_fenced = true;
     }
     if (plan.has_tcgen05_arrival) {
-      PrimExpr ptr = bar.access_ptr(3, DataType::Handle(), 1, idx);
+      Expr ptr =
+          MakeTensorAccessPtr(TensorLoad(bar, {idx}), IntImm(idx.ty(), 1), 3);
       out->push_back(
-          Evaluate(Call(DataType::Void(), tcgen05_mma_arrive(), {ptr})));
+          Evaluate(Call(PrimType::Void(), tcgen05_mma_arrive(), {ptr})));
     }
     if (plan.has_cpasync_arrival) {
       // Group the thread's outstanding cp.asyncs, then arrive deferred:
       // the arrive fires once they complete.
       out->push_back(
-          Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {})));
+          Evaluate(Call(PrimType::Void(), Op::Get("tl.ptx_commit_group"), {})));
       out->push_back(
-          Evaluate(Call(DataType::Handle(), ptx_cp_async_barrier_noinc(),
-                        {BufferLoad(bar, {idx})})));
+          Evaluate(Call(PrimType::Void(), ptx_cp_async_barrier_noinc(),
+                        {TensorLoad(bar, {idx})})));
     }
     if (plan.has_thread_arrive) {
       out->push_back(
-          Evaluate(Call(DataType::Void(), builtin::ptx_arrive_barrier(),
-                        {BufferLoad(bar, {std::move(idx)})})));
+          Evaluate(Call(PrimType::Void(), Op::Get("tl.ptx_arrive_barrier"),
+                        {TensorLoad(bar, {std::move(idx)})})));
     }
   }
 
   void EmitSync(RoleCtx &ctx, const Synchronization &sync, bool &proxy_fenced,
                 Array<Stmt> *out) {
     const PipelineSpec &pipeline = *sync.pipeline;
-    PrimExpr depth = IntImm(DataType::Int(32), pipeline.depth);
+    PrimExpr depth = IntImm(PrimType::Int(32), pipeline.depth);
     PrimExpr phase = PipelinePhase(ctx, &pipeline);
     PrimExpr idx = floormod(phase, depth);
     PrimExpr parity =
-        bitwise_and(floordiv(phase, depth), IntImm(DataType::Int(32), 1));
+        bitwise_and(floordiv(phase, depth), IntImm(PrimType::Int(32), 1));
 
     if (sync.kind.IsProducerAcquire()) {
-      ctx.pipeline_phase[&pipeline] = std::move(phase);
+      ctx.pipeline_phase.insert_or_assign(&pipeline, std::move(phase));
       out->push_back(MakeWait(
           pipeline.empty, std::move(idx),
-          bitwise_xor(std::move(parity), IntImm(DataType::Int(32), 1))));
+          bitwise_xor(std::move(parity), IntImm(PrimType::Int(32), 1))));
     } else if (sync.kind.IsConsumerWait()) {
-      ctx.pipeline_phase[&pipeline] = std::move(phase);
+      ctx.pipeline_phase.insert_or_assign(&pipeline, std::move(phase));
       out->push_back(
           MakeWait(pipeline.full, std::move(idx), std::move(parity)));
     } else if (sync.kind.IsProducerCommit()) {
@@ -2064,14 +2080,14 @@ private:
       MakeArrive(pipeline, /*full=*/false, std::move(idx), proxy_fenced, out);
     }
     if (sync.kind.IsCommit() && ctx.counters.count(&pipeline)) {
-      Buffer cnt = ctx.counters.at(&pipeline);
-      PrimExpr zero = IntImm(DataType::Int(32), 0);
-      out->push_back(BufferStore(cnt, BufferLoad(cnt, {zero}) + 1, {zero}));
+      TensorVar cnt = ctx.counters.at(&pipeline);
+      PrimExpr zero = IntImm(PrimType::Int(32), 0);
+      out->push_back(TensorStore(cnt, {zero}, TensorLoad(cnt, {zero}) + 1));
     }
   }
 
   // Rebind every access of a multi-versioned buffer to the acquired
-  // version. Buffer versioning only; call conversion is EmitOp's job.
+  // version. TensorVar versioning only; call conversion is EmitOp's job.
   struct OpRewriter : public StmtExprMutator {
     const WSScheduleMaterializer &self;
     const RoleCtx &ctx;
@@ -2088,13 +2104,13 @@ private:
     // pipeline's scope (FA's rescale) — the role's own phase names the
     // in-production slot. Sound only before the role's sync entries of
     // the pipeline (VerifySpanCoverage checked).
-    PrimExpr BindingPhase(const PipelineSpec &pipeline, const Buffer &orig) {
+    PrimExpr BindingPhase(const PipelineSpec &pipeline, const TensorVar &orig) {
       auto pit = ctx.pipeline_phase.find(&pipeline);
       if (pit != ctx.pipeline_phase.end())
         return pit->second;
       auto cit = ctx.counters.find(&pipeline);
       if (cit != ctx.counters.end())
-        return BufferLoad(cit->second, {IntImm(DataType::Int(32), 0)});
+        return TensorLoad(cit->second, {IntImm(PrimType::Int(32), 0)});
       ICHECK(pipeline.sync_scope->HasLinearPhase())
           << "ws_schedule: an access to " << orig->name << " needs pipeline '"
           << pipeline.name << "'s phase, which cannot be linearized here, "
@@ -2106,186 +2122,304 @@ private:
     // the role's counter, or (enclosing iteration + 1) x the cycles the
     // scope runs per enclosing iteration (static For extents only —
     // VerifySpanCoverage admitted the access).
-    PrimExpr CompletedCycles(const PipelineSpec &pipeline, const Buffer &orig) {
+    PrimExpr CompletedCycles(const PipelineSpec &pipeline,
+                             const TensorVar &orig) {
       auto cit = ctx.counters.find(&pipeline);
       if (cit != ctx.counters.end())
-        return BufferLoad(cit->second, {IntImm(DataType::Int(32), 0)});
+        return TensorLoad(cit->second, {IntImm(PrimType::Int(32), 0)});
       int64_t below = 1;
       for (const Scope *s = pipeline.sync_scope;
            s != nullptr && s != sched_scope; s = s->sched_scope) {
-        const auto *extent = s->orig_loop.defined()
-                                 ? s->orig_loop->extent.as<IntImmNode>()
-                                 : nullptr;
+        const auto *extent =
+            s->orig_loop.defined()
+                ? LoopExtent(s->orig_loop.get()).as<IntImmObj>()
+                : nullptr;
         ICHECK(extent) << "ws_schedule: an access to " << orig->name
                        << " after pipeline '" << pipeline.name
                        << "'s scope needs its completed cycle count, but "
                        << "the scope's trip count is not static";
-        below *= extent->value;
+        auto count = extent->value.as<int64_t>();
+        TVM_FFI_CHECK(count && count.value() >= 0, ValueError)
+            << "ws_schedule: a static trip count must fit nonnegative int64";
+        TVM_FFI_CHECK(count.value() == 0 ||
+                          below <= std::numeric_limits<int64_t>::max() /
+                                       count.value(),
+                      ValueError)
+            << "ws_schedule: completed cycle count overflows int64";
+        below *= count.value();
       }
-      return (LinearPhase(ctx) + IntImm(DataType::Int(32), 1)) *
-             IntImm(DataType::Int(32), below);
+      return (LinearPhase(ctx) + IntImm(PrimType::Int(32), 1)) *
+             IntImm(PrimType::Int(32), below);
     }
 
     // One index per binding, outermost first. A depth-1 binding's slot
     // is 0 without consulting any phase; an access outside a deeper
     // binding's scope takes its LAST-COMPLETED version (reads only —
     // VerifySpanCoverage rejects the rest).
-    std::vector<PrimExpr> VersionIndices(const Buffer &orig, bool is_read) {
+    std::vector<PrimExpr> VersionIndices(const TensorVar &orig, bool is_read) {
       std::vector<PrimExpr> out;
-      for (const PipelineSpec *p : self.buffer_pipeline_.at(orig->data)) {
+      for (const PipelineSpec *p :
+           self.buffer_pipeline_.at(self.StorageKey(orig))) {
         int depth = p->depth;
         if (depth == 1) {
-          out.push_back(IntImm(DataType::Int(32), 0));
+          out.push_back(IntImm(PrimType::Int(32), 0));
         } else if (sched_scope != nullptr &&
                    sched_scope->IsNestedIn(p->sync_scope)) {
           out.push_back(floormod(BindingPhase(*p, orig),
-                                 IntImm(DataType::Int(32), depth)));
+                                 IntImm(PrimType::Int(32), depth)));
         } else {
           // Outside the binding's scope, the ADJACENT version: a read
           // the last-completed slot, a write the next-produced one.
           PrimExpr cycle = CompletedCycles(*p, orig);
           if (is_read)
-            cycle = cycle - IntImm(DataType::Int(32), 1);
-          out.push_back(floormod(cycle, IntImm(DataType::Int(32), depth)));
+            cycle = cycle - IntImm(PrimType::Int(32), 1);
+          out.push_back(floormod(cycle, IntImm(PrimType::Int(32), depth)));
         }
       }
       return out;
     }
 
-    // The BufferLoad path below prepends the version indices to a
-    // versioned region's root load; insert matching unit extents to keep
-    // the region's indices-per-extent invariant (the op touches exactly
-    // the one acquired version of each binding).
-    PrimExpr VisitExpr_(const CallNode *op) final {
-      bool is_region = op->op.same_as(region()) && op->args.size() >= 2;
-      if (is_region) {
-        // The root BufferLoad stands for the whole region; its version
-        // resolution needs the region's read/write direction.
-        const auto *mask = op->args[1].as<IntImmNode>();
-        region_write_ = mask && (mask->value & kAccessWrite);
-      }
-      Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
-      if (is_region)
-        region_write_ = false;
-      if (call->op.same_as(region()) && call->args.size() >= 2) {
-        if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-          size_t num_extents = call->args.size() - 2;
-          if (load->indices.size() > num_extents) {
-            Array<PrimExpr> args;
-            args.push_back(call->args[0]);
-            args.push_back(call->args[1]);
-            for (size_t i = num_extents; i < load->indices.size(); ++i)
-              args.push_back(IntImm(DataType::Int(32), 1));
-            for (size_t i = 2; i < call->args.size(); ++i)
-              args.push_back(call->args[i]);
-            return Call(call->dtype, call->op, std::move(args),
-                        call->annotations, call->span);
+    using StmtExprMutator::Mutate;
+    using StmtExprMutator::Mutate_;
+
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> local_defs;
+    Array<Stmt> aliases;
+    std::map<std::pair<const VarObj *, bool>, TensorVar> alias_cache;
+
+    Stmt Rewrite(const Stmt &stmt) {
+      VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
+        if (const auto *bind = node.as<BindObj>())
+          local_defs.insert(bind->var);
+      });
+      auto body = Mutate(stmt).ValueOrUnchanged(stmt);
+      if (aliases.empty())
+        return body;
+      aliases.push_back(body);
+      return WSSequence(aliases, stmt->loc);
+    }
+
+    Optional<TensorVar> VersionedRoot(const TensorVar &tensor) const {
+      auto root = self.StorageKey(tensor).as<TensorVar>();
+      if (!root || !self.versioned_.count(*root))
+        return std::nullopt;
+      return root;
+    }
+
+    PrimExpr ByteOffset(const TensorVar &root, bool is_read) {
+      const TensorVar &expanded = self.versioned_.at(root);
+      Array<PrimExpr> zero, selected;
+      for (const auto &dim : expanded.shape())
+        zero.push_back(IntImm(dim.ty(), 0));
+      selected = zero;
+      auto prefix = VersionIndices(root, is_read);
+      for (size_t i = 0; i < prefix.size(); ++i)
+        selected.Set(i, prefix[i]);
+      auto elements = TensorElementOffset(expanded, selected) -
+                      TensorElementOffset(expanded, zero);
+      auto bits =
+          elements * IntImm(elements.ty(),
+                            expanded.dtype().bits() * expanded.dtype().lanes());
+      auto analyzer = CreateTileLangAnalyzer();
+      TVM_FFI_CHECK(analyzer->CanProve(floormod(bits, 8) == 0), ValueError)
+          << "A versioned pointer must begin on a byte boundary";
+      return analyzer->Simplify(floordiv(bits, 8));
+    }
+
+    Expr RootPointer(const TensorVar &root, bool is_read, Location loc) {
+      const TensorVar &expanded = self.versioned_.at(root);
+      Expr pointer = Call(expanded.ty()->DataPtrType(), tensor_data_ptr_op(),
+                          {expanded}, {}, {}, loc);
+      return Call(pointer->ty, ptr_byte_offset_op(),
+                  {pointer, ByteOffset(root, is_read)}, {}, {}, loc);
+    }
+
+    TensorVar AliasView(const TensorVar &tensor, const TensorVar &root,
+                        bool is_read) {
+      auto key = std::make_pair(tensor.get(), is_read);
+      auto cached = alias_cache.find(key);
+      if (cached != alias_cache.end())
+        return cached->second;
+      // Keep the already-evaluated view's offset, strides and dtype. Replaying
+      // its defining expression could read a mutable offset a second time.
+      Expr pointer =
+          Call(tensor.ty()->DataPtrType(), tensor_data_ptr_op(), {tensor});
+      pointer = Call(pointer->ty, ptr_byte_offset_op(),
+                     {pointer, ByteOffset(root, is_read)});
+      TensorVar view(tensor->name + "_ws_view", tensor.ty(), tensor->loc);
+      aliases.push_back(Bind(
+          view, Call(view.ty(), decl_tensor_op(), {pointer}, {}, {view.ty()}),
+          tensor->loc));
+      alias_cache.emplace(key, view);
+      return view;
+    }
+
+    UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+      if (op->op.same_as(tensor_data_ptr_op())) {
+        if (auto tensor = op->args[0].as<TensorVar>()) {
+          if (auto root = VersionedRoot(*tensor)) {
+            if (tensor->same_as(*root))
+              return RootPointer(*root, !region_write_, op->loc);
+            if (!local_defs.count(*tensor)) {
+              auto view = AliasView(*tensor, *root, !region_write_);
+              return Call(view.ty()->DataPtrType(), tensor_data_ptr_op(),
+                          {view}, {}, {}, op->loc);
+            }
           }
         }
       }
-      return call;
-    }
-
-    // versioned_ is identity-keyed: a miss must mean an unpipelined
-    // storage, never an alias object the analysis did not see (that
-    // access would silently stay at version 0).
-    void CheckMissIsUnpipelined(const Buffer &buf) const {
-      ICHECK(!self.buffer_pipeline_.count(buf->data))
-          << "ws_schedule: access to '" << buf->name << "' aliases pipelined "
-          << "storage '" << buf->data->name_hint << "' through a buffer "
-          << "object the access analysis never saw; it cannot be versioned";
-    }
-
-    PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-      BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-      auto vit = self.versioned_.find(load->buffer);
-      if (vit == self.versioned_.end()) {
-        CheckMissIsUnpipelined(load->buffer);
-        return load;
+      auto tile = ParseOperator(GetRef<Call>(op));
+      if (tile.defined()) {
+        auto decoded = ReadWSCall(op);
+        auto access = tile->GetAccessRegions();
+        Array<Expr> operands;
+        for (const auto &operand : decoded.operands) {
+          bool saved = region_write_;
+          if (auto region = operand.as<TensorRegion>()) {
+            for (const auto &write : access.writes)
+              region_write_ |= write.same_as(*region);
+          }
+          operands.push_back(Mutate(operand, mode).ValueOrUnchanged(operand));
+          region_write_ = saved;
+        }
+        auto encoded = EncodeAnnotations(decoded.annotations);
+        auto payload =
+            Mutate(encoded.payload).ValueOrUnchanged(encoded.payload);
+        auto annotations =
+            DecodeAnnotations(payload.as_or_throw<tvm::Tuple>(), encoded.schema)
+                .cast<Map<String, Any>>();
+        return MakeAnnotatedCall(op->ty, op->op.as_or_throw<Op>(), operands,
+                                 annotations, op->loc);
       }
-      Array<PrimExpr> indices;
-      for (PrimExpr &v : VersionIndices(load->buffer, !region_write_))
-        indices.push_back(std::move(v));
-      for (const PrimExpr &i : load->indices)
-        indices.push_back(i);
-      return BufferLoad(vit->second, std::move(indices), load->predicate,
-                        load->span);
+      const auto *name = op->op.as<OpObj>();
+      bool saved = region_write_;
+      if (name && name->name == "tl.access_ptr" && op->args.size() >= 3)
+        region_write_ =
+            GetConservativeAccessMask(op->args[2].as_or_throw<PrimExpr>()) &
+            kAccessWrite;
+      else if (name && name->name == "tl.ptr_access" && op->args.size() >= 4)
+        region_write_ =
+            GetConservativeAccessMask(op->args[3].as_or_throw<PrimExpr>()) &
+            kAccessWrite;
+      auto result = StmtExprMutator::Mutate_(op, mode);
+      region_write_ = saved;
+      return result;
     }
 
-    Stmt VisitStmt_(const BufferStoreNode *op) final {
-      BufferStore store =
-          Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-      auto vit = self.versioned_.find(store->buffer);
-      if (vit == self.versioned_.end()) {
-        CheckMissIsUnpipelined(store->buffer);
-        return store;
-      }
+    UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                  InplaceMode mode) final {
+      auto tensor = op->source.as<TensorVar>();
+      if (!tensor || local_defs.count(*tensor))
+        return StmtExprMutator::Mutate_(op, mode);
+      auto root = VersionedRoot(*tensor);
+      if (!root)
+        return StmtExprMutator::Mutate_(op, mode);
       Array<PrimExpr> indices;
-      for (PrimExpr &v : VersionIndices(store->buffer, false))
-        indices.push_back(std::move(v));
-      for (const PrimExpr &i : store->indices)
-        indices.push_back(i);
-      return BufferStore(vit->second, store->value, std::move(indices),
-                         store->predicate, store->span);
+      TensorVar source = *tensor;
+      if (tensor->same_as(*root)) {
+        source = self.versioned_.at(*root);
+        for (auto &index : VersionIndices(*root, !region_write_))
+          indices.push_back(index);
+      } else
+        source = AliasView(*tensor, *root, !region_write_);
+      for (const auto &index : op->indices)
+        indices.push_back(Mutate(index).ValueOrUnchanged(index));
+      return TensorLoad(source, indices, op->loc);
+    }
+
+    UnchangedOr<Expr> Mutate_(const TensorRegionObj *op,
+                              InplaceMode mode) final {
+      auto tensor = op->source.as<TensorVar>();
+      if (!tensor || local_defs.count(*tensor))
+        return StmtExprMutator::Mutate_(op, mode);
+      auto root = VersionedRoot(*tensor);
+      if (!root)
+        return StmtExprMutator::Mutate_(op, mode);
+      Array<Range> ranges;
+      TensorVar source = *tensor;
+      if (tensor->same_as(*root)) {
+        source = self.versioned_.at(*root);
+        for (auto &index : VersionIndices(*root, !region_write_))
+          ranges.push_back(Range::FromMinExtent(index, IntImm(index.ty(), 1)));
+      } else
+        source = AliasView(*tensor, *root, !region_write_);
+      for (const auto &range : op->region)
+        ranges.push_back(Range::FromMinExtent(
+            Mutate(range->begin).ValueOrUnchanged(range->begin),
+            Mutate(range->extent).ValueOrUnchanged(range->extent), range->loc));
+      return TensorRegion(source, ranges, TensorRegionType(), op->loc);
+    }
+
+    UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
+                              InplaceMode mode) final {
+      auto tensor = op->dest.as<TensorVar>();
+      if (!tensor || local_defs.count(*tensor))
+        return StmtExprMutator::Mutate_(op, mode);
+      auto root = VersionedRoot(*tensor);
+      if (!root)
+        return StmtExprMutator::Mutate_(op, mode);
+      Array<PrimExpr> indices;
+      TensorVar dest = *tensor;
+      if (tensor->same_as(*root)) {
+        dest = self.versioned_.at(*root);
+        for (auto &index : VersionIndices(*root, false))
+          indices.push_back(index);
+      } else
+        dest = AliasView(*tensor, *root, false);
+      for (const auto &index : op->indices)
+        indices.push_back(Mutate(index).ValueOrUnchanged(index));
+      return TensorStore(dest, indices,
+                         Mutate(op->value).ValueOrUnchanged(op->value),
+                         op->loc);
     }
   };
 
   Stmt RewriteOpStmt(const RoleCtx &ctx, Stmt stmt,
                      const Scope *sched_scope) const {
-    OpRewriter rewriter(*this, ctx, sched_scope);
-    return rewriter(std::move(stmt));
+    auto rewriter = make_object<OpRewriter>(*this, ctx, sched_scope);
+    return rewriter->Rewrite(stmt);
   }
 
   PrimExpr RewriteOpExpr(const RoleCtx &ctx, PrimExpr expr,
                          const Scope *sched_scope = nullptr) const {
-    OpRewriter rewriter(*this, ctx, sched_scope);
-    return rewriter(std::move(expr));
+    auto rewriter = make_object<OpRewriter>(*this, ctx, sched_scope);
+    auto result = rewriter->Mutate(expr).ValueOrUnchanged(expr);
+    TVM_FFI_CHECK(rewriter->aliases.empty(), ValueError)
+        << "ws_schedule: a scope condition cannot capture a versioned tensor "
+           "view";
+    return result;
   }
 
   // Wire asynchronous atoms to the schedule's completion protocol.
   Stmt ConvertAtomCall(const RoleCtx &ctx, const Operation &op,
                        Stmt stmt) const {
-    const auto *ev = stmt.as<EvaluateNode>();
+    const auto *ev = stmt.as<EvaluateObj>();
     ICHECK(ev);
-    Call call = Downcast<Call>(ev->value);
-    auto ann = call->annotations;
+    Call call = ev->value.as_or_throw<Call>();
+    auto ann = ReadWSCall(call.get()).annotations;
     if (op.atom == OpAtom::kTmaCopy) {
-      // The transaction completes the full barrier of the pipeline
-      // protecting the destination. A copy into an unprotected buffer
-      // has no barrier to wire and stays a plain copy.
       if (op.write_def == nullptr)
         return stmt;
       const PipelineSpec &pipeline = *op.write_def;
-      // Span coverage verified: the pipeline was acquired.
       PrimExpr idx = floormod(ctx.pipeline_phase.at(&pipeline),
-                              IntImm(DataType::Int(32), pipeline.depth));
-      ann.Set("barrier", BufferLoad(pipeline.full, {std::move(idx)}));
-      ann.Set("is_tma_copy", IntImm(DataType::Int(32), 1));
+                              IntImm(PrimType::Int(32), pipeline.depth));
+      ann.Set("barrier", TensorLoad(pipeline.full, {idx}));
+      ann.Set("is_tma_copy", 1);
       if (op.fused_arrive)
-        ann.Set("emit_arrive", IntImm(DataType::Int(32), 1));
-      return Evaluate(Call(call->dtype, TmaCopyOp(), call->args, std::move(ann),
-                           call->span));
+        ann.Set("emit_arrive", 1);
+      return Evaluate(RewriteWSCall(call.get(), ann, TmaCopyOp()), ev->loc);
     } else if (op.atom == OpAtom::kCpAsyncCopy) {
-      // A copy into an unprotected buffer keeps its own commit/wait.
       if (op.write_def == nullptr)
         return stmt;
-      // Skip the copy's implicit commit_group + wait_group(0):
-      // completion rides the commit entry's deferred arrive instead.
-      ann.Set(attr::kAsyncCopyNoImplicitCommitWait,
-              IntImm(DataType::Int(32), 1));
-      return Evaluate(
-          Call(call->dtype, call->op, call->args, std::move(ann), call->span));
+      ann.Set(attr::kAsyncCopyNoImplicitCommitWait, 1);
+      return Evaluate(RewriteWSCall(call.get(), ann), ev->loc);
     } else if (op.atom == OpAtom::kTcgen05Gemm) {
-      // The schedule publishes completion separately from each MMA issue.
-      Op async_op = Downcast<Op>(call->op);
-      if (async_op.same_as(Gemm::Get())) {
+      Op async_op = call->op.as_or_throw<Op>();
+      if (async_op.same_as(Gemm::Get()))
         async_op = Op::Get("tl.tileop.tcgen05_gemm");
-      } else if (async_op.same_as(GemmBlockScaled::Get())) {
+      else if (async_op.same_as(GemmBlockScaled::Get()))
         async_op = Op::Get("tl.tileop.tcgen05_gemm_blockscaled");
-      }
-      ann.Set("is_tcgen05", IntImm(DataType::Int(32), 1));
-      return Evaluate(
-          Call(call->dtype, async_op, call->args, std::move(ann), call->span));
+      ann.Set("is_tcgen05", 1);
+      return Evaluate(RewriteWSCall(call.get(), ann, async_op), ev->loc);
     }
     LOG(FATAL) << "ws_schedule: unknown async atom "
                << static_cast<int>(op.atom);
@@ -2294,81 +2428,48 @@ private:
   // The op's source guard is NOT applied here: EmitScopeBody folds it
   // into the entry's guard.
   Stmt EmitOp(const RoleCtx &ctx, const Operation &op) const {
-    Stmt body = RewriteOpStmt(
-        ctx, RebindBufferData(Substitute(op.stmt, ctx.subs), ctx.subs),
-        op.sched_scope);
+    Stmt body = WSSubstitute(op.stmt, ctx.subs);
     if (op.atom != OpAtom::kSync)
       body = ConvertAtomCall(ctx, op, std::move(body));
-    return body;
+    // Versioning may need a Bind prelude for a captured alias. Convert the
+    // original call first, then rewrite both its operands and barrier metadata.
+    return RewriteOpStmt(ctx, std::move(body), op.sched_scope);
   }
 
-  // Rebind an emitted statement's scalar defs and their uses within it.
-  struct BindDefRewriter : public StmtExprMutator {
-    const Map<Var, Var> &fresh;
-    explicit BindDefRewriter(const Map<Var, Var> &fresh) : fresh(fresh) {}
-
-    Stmt VisitStmt_(const BindNode *op) final {
-      Bind bind = Downcast<Bind>(StmtExprMutator::VisitStmt_(op));
-      if (auto replacement = fresh.Get(bind->var))
-        return Bind(replacement.value(), bind->value, bind->span);
-      return bind;
-    }
-    PrimExpr VisitExpr_(const VarNode *op) final {
-      if (auto replacement = fresh.Get(GetRef<Var>(op)))
-        return replacement.value();
-      return GetRef<PrimExpr>(op);
-    }
-  };
-
-  // tirx::Substitute rebinds a buffer's data var only where the buffer is
-  // DEFINED (IRSubstitute::VisitBufferDef); ops are emitted one statement
-  // at a time and make_tensor views carry no definition statement, so
-  // buffers on substituted handle vars are rebuilt at their use sites.
-  static Stmt RebindBufferData(Stmt stmt, const Map<Var, PrimExpr> &subs) {
-    BufferRemap remap;
-    PostOrderVisit(stmt, [&](const ffi::ObjectRef &node) {
-      Buffer buffer;
-      if (const auto *load = node.as<BufferLoadNode>())
-        buffer = load->buffer;
-      else if (const auto *store = node.as<BufferStoreNode>())
-        buffer = store->buffer;
-      else
-        return;
-      if (remap.count(buffer))
-        return;
-      auto replacement = subs.Get(buffer->data);
-      if (!replacement.has_value())
-        return;
-      if (const auto *var = replacement->as<VarNode>()) {
-        auto n = make_object<BufferNode>(*buffer.get());
-        n->data = GetRef<Var>(var);
-        remap.emplace(std::move(buffer), Buffer(std::move(n)));
-      }
-    });
-    return RemapBuffers(std::move(stmt), remap);
-  }
-
-  // Every emitted copy of an op re-binds its scalar defs with fresh vars:
-  // role branches and unrolled pipeline steps re-emit the same source
-  // statement, and each TIR var must have a single definition. Later ops
-  // of the same emitted slice see the fresh names through ctx.subs, which
-  // EmitScopeBody scopes per slice.
+  // Renew definitions through registered native scope hooks, including loop
+  // and region parameters and variables inside tensor types. Later scheduled
+  // ops in the same slice see the fresh scalar/pointer/tensor Bind identities.
   Stmt FreshenBindDefs(RoleCtx &ctx, Stmt stmt) {
-    std::vector<Var> bound;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (const auto *bind = node.as<BindNode>())
-        bound.push_back(bind->var);
-    });
-    if (bound.empty())
+    Map<Var, Var> remap;
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const Var &var, TVMFFIDefRegionKind kind) {
+          if (kind != kTVMFFIDefRegionKindNone)
+            remap.Set(var, var);
+          return ffi::WalkResult::Advance();
+        });
+    if (remap.empty())
       return stmt;
-    Map<Var, Var> fresh;
-    for (const Var &var : bound) {
-      Var replacement =
-          var.copy_with_suffix("_ws" + std::to_string(fresh_bind_count_++));
-      fresh.Set(var, replacement);
-      ctx.subs.Set(var, replacement);
-    }
-    return RebindBufferData(BindDefRewriter(fresh)(std::move(stmt)), ctx.subs);
+    Stmt result =
+        ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
+            stmt,
+            [&](const Var &var, TVMFFIDefRegionKind kind) -> Var {
+              auto mapped = remap.Get(var);
+              if (!mapped)
+                return var;
+              if (!mapped->same_as(var))
+                return *mapped;
+              if (kind == kTVMFFIDefRegionKindNone)
+                return var;
+              Var fresh(var->name + "_ws" + std::to_string(fresh_bind_count_++),
+                        var->ty, var->loc);
+              remap.Set(var, fresh);
+              return fresh;
+            })
+            .as_or_throw<Stmt>();
+    for (const auto &[old, fresh] : remap)
+      ctx.subs.Set(old, fresh);
+    kernel_.memory->ObserveDefinitions(result);
+    return result;
   }
 
   // Emit one (role, scope) body, keeping only entries with stage delta
@@ -2380,12 +2481,12 @@ private:
                             const StagePlan &plan,
                             const Optional<PrimExpr> &base,
                             const Var &orig_loop_var, int delta_lo,
-                            int delta_hi) {
+                            int delta_hi, bool bound_entries = true) {
     const std::vector<BodyEntryPtr> &entries = scope.bodies[ctx.role->index];
     if (entries.empty())
       return {};
 
-    Map<Var, PrimExpr> saved_subs = ctx.subs;
+    Map<Var, Expr> saved_subs = ctx.subs;
     Array<Stmt> stmts;
     // Whether a proxy fence was emitted since the last op; only ops can
     // add generic accesses, so subsequent arrives need no second fence.
@@ -2395,37 +2496,36 @@ private:
     // and return its guard (iteration bound + the op's source guard).
     auto focus_entry = [&](size_t i) -> Optional<PrimExpr> {
       Optional<PrimExpr> guard;
-      if (base.defined()) {
+      if (base.has_value()) {
         int delta = plan.delta[i];
         PrimExpr iter = delta == 0
                             ? base.value()
-                            : base.value() - IntImm(DataType::Int(32), delta);
+                            : base.value() - IntImm(PrimType::Int(32), delta);
         ctx.subs.Set(orig_loop_var, iter);
         ctx.chain.back().iter = iter;
         // A prologue step (finite delta window) bounds every entry by
         // the loop extent, covering loops shorter than their shift;
         // static bounds fold to constant guards the simplifier removes.
-        if (delta_hi < plan.shift)
+        if (bound_entries && delta_hi < plan.shift)
           guard = iter < ctx.chain.back().extent;
       }
       const Operation *op =
           entries[i]->AsScope() ? nullptr : entries[i]->AsOperation();
-      if (op != nullptr && op->guard.defined()) {
+      if (op != nullptr && op->guard.has_value()) {
         PrimExpr src = RewriteOpExpr(
-            ctx, Substitute(op->guard.value(), ctx.subs), op->sched_scope);
-        guard = guard.defined() ? guard.value() && src : src;
+            ctx, WSSubstitute(op->guard.value(), ctx.subs), op->sched_scope);
+        guard = guard.has_value() ? guard.value() && src : src;
       }
       return guard;
     };
     // Runs of entries under a structurally identical guard close as one
-    // IfThenElse.
+    // If.
     Optional<PrimExpr> cur_guard;
     Array<Stmt> guarded;
     StructuralEqual structural_equal;
     auto close_guard = [&]() {
-      if (cur_guard.defined() && !guarded.empty()) {
-        stmts.push_back(
-            IfThenElse(cur_guard.value(), SeqOrSingle(std::move(guarded))));
+      if (cur_guard.has_value() && !guarded.empty()) {
+        stmts.push_back(If(cur_guard.value(), SeqOrSingle(std::move(guarded))));
       }
       cur_guard = Optional<PrimExpr>();
       guarded = Array<Stmt>();
@@ -2435,14 +2535,14 @@ private:
       if (plan.delta[i] < delta_lo || plan.delta[i] > delta_hi)
         continue;
       Optional<PrimExpr> guard = focus_entry(i);
-      bool reuse = guard.defined() == cur_guard.defined() &&
-                   (!guard.defined() ||
+      bool reuse = guard.has_value() == cur_guard.has_value() &&
+                   (!guard.has_value() ||
                     structural_equal(guard.value(), cur_guard.value()));
       if (!reuse) {
         close_guard();
         cur_guard = guard;
       }
-      Array<Stmt> *out = cur_guard.defined() ? &guarded : &stmts;
+      Array<Stmt> *out = cur_guard.has_value() ? &guarded : &stmts;
       if (const Scope *child = entries[i]->AsScope()) {
         Stmt emitted = EmitChildScope(ctx, *child);
         if (emitted.defined())
@@ -2460,13 +2560,51 @@ private:
     // Fresh scalar defs are slice-local; restore the caller's substitutions
     // and the steady-state iteration for any parent-level use.
     ctx.subs = saved_subs;
-    if (base.defined())
+    if (base.has_value())
       ctx.chain.back().iter = base.value();
     return stmts;
   }
 
-  static Stmt SeqOrSingle(Array<Stmt> stmts) {
-    return stmts.size() == 1 ? stmts[0] : SeqStmt(std::move(stmts));
+  static SeqStmt SeqOrSingle(Array<Stmt> stmts) { return WSSequence(stmts); }
+
+  // A Bind must stay in scope for later entries, including their source
+  // guards. Independent per-entry iteration guards would hide a prologue
+  // definition in one If and use it in another. For a slice with definitions,
+  // branch on the first active stage and emit its whole ordered body under
+  // that one guard. Every entry in the branch has a valid iteration, so only
+  // source guards remain inside it. No load or side effect is speculated, and
+  // noncontiguous uses at the same stage retain their lexical definition.
+  Array<Stmt> EmitPrologueWithDefs(RoleCtx &ctx, const Scope &scope,
+                                   const StagePlan &plan, int step,
+                                   const Var &orig_loop_var) {
+    std::set<int> deltas;
+    for (int delta : plan.delta)
+      if (delta <= step)
+        deltas.insert(delta);
+    auto analyzer = CreateTileLangAnalyzer();
+    struct Branch {
+      PrimExpr guard;
+      SeqStmt body;
+    };
+    std::vector<Branch> branches;
+    Optional<SeqStmt> fallback;
+    for (int delta : deltas) {
+      PrimExpr guard = analyzer->Simplify(
+          IntImm(PrimType::Int(32), step - delta) < ctx.chain.back().extent);
+      if (IsZero(guard))
+        continue;
+      auto body = SeqOrSingle(EmitScopeBody(ctx, scope, plan,
+                                            IntImm(PrimType::Int(32), step),
+                                            orig_loop_var, delta, step, false));
+      if (IsOne(guard)) {
+        fallback = body;
+        break;
+      }
+      branches.push_back({guard, body});
+    }
+    for (auto it = branches.rbegin(); it != branches.rend(); ++it)
+      fallback = SeqStmt(If(it->guard, it->body, fallback));
+    return fallback ? fallback.value()->seq : Array<Stmt>{};
   }
 
   // Emit one child scope for the current role. A stage shift is
@@ -2477,17 +2615,16 @@ private:
   //   epilogue step t (t = 1 .. shift):   the entries at delta >= t.
   Stmt EmitChildScope(RoleCtx &ctx, const Scope &scope) {
     if (scope.bodies[ctx.role->index].empty())
-      return Stmt(); // role does not participate in this scope
+      return SeqStmt(Array<Stmt>{}); // role does not participate in this scope
     StagePlan plan = PlanStages(*ctx.role, scope.bodies[ctx.role->index]);
     Stmt out = scope.orig_while.defined()
                    ? EmitChildScopeWhileLoop(ctx, scope, plan)
                    : EmitChildScopeForLoop(ctx, scope, plan);
     // The uniform source guard: false skips the scope in all roles
     // together.
-    if (scope.guard.defined()) {
-      out = IfThenElse(
-          RewriteOpExpr(ctx, Substitute(scope.guard.value(), ctx.subs)),
-          std::move(out));
+    if (scope.guard.has_value()) {
+      out = If(RewriteOpExpr(ctx, WSSubstitute(scope.guard.value(), ctx.subs)),
+               SeqStmt(std::move(out)));
     }
     return out;
   }
@@ -2500,24 +2637,35 @@ private:
   Stmt EmitChildScopeForLoop(RoleCtx &ctx, const Scope &scope,
                              const StagePlan &plan) {
     constexpr int kMaxDelta = std::numeric_limits<int>::max();
-    PrimExpr zero = IntImm(DataType::Int(32), 0);
+    PrimExpr zero = IntImm(PrimType::Int(32), 0);
 
     const For &orig = scope.orig_loop;
-    const Var &orig_var = orig->loop_var;
-    Var fresh(orig_var->name_hint, orig_var->dtype);
+    const PrimVar &orig_var = orig->var;
+    PrimVar fresh(orig_var->name, orig_var.ty(), orig_var->loc);
     ctx.subs.Set(orig_var, fresh);
-    PrimExpr extent = Substitute(orig->extent, ctx.subs);
-    PrimExpr min = Substitute(orig->min, ctx.subs);
+    PrimExpr extent = WSSubstitute(LoopExtent(orig.get()), ctx.subs);
+    PrimExpr min = WSSubstitute(orig->begin, ctx.subs);
     if (plan.shift > 0) {
-      ICHECK(is_zero(min))
-          << "ws_schedule: stage offsets require 0-based loops";
+      ICHECK(IsZero(min)) << "ws_schedule: stage offsets require 0-based loops";
     }
     ctx.chain.push_back({fresh, extent, min});
 
+    bool has_definitions = false;
+    for (const auto &entry : scope.bodies[ctx.role->index]) {
+      if (entry->AsScope() || entry->AsSync())
+        continue;
+      VisitNativePostOrder(
+          entry->AsOperation()->stmt, [&](const ObjectRef &node) {
+            has_definitions = has_definitions || node.as<BindObj>() != nullptr;
+          });
+    }
     Array<Stmt> result;
     for (int t = 0; t < plan.shift; ++t) {
-      Array<Stmt> step = EmitScopeBody(
-          ctx, scope, plan, IntImm(DataType::Int(32), t), orig_var, 0, t);
+      Array<Stmt> step =
+          has_definitions
+              ? EmitPrologueWithDefs(ctx, scope, plan, t, orig_var)
+              : EmitScopeBody(ctx, scope, plan, IntImm(PrimType::Int(32), t),
+                              orig_var, 0, t);
       for (const Stmt &stmt : step)
         result.push_back(stmt);
     }
@@ -2532,21 +2680,29 @@ private:
                  k.find("tl_pipeline_") != 0;
         });
     PrimExpr loop_min =
-        plan.shift > 0 ? PrimExpr(IntImm(DataType::Int(32), plan.shift)) : min;
+        plan.shift > 0 ? PrimExpr(IntImm(PrimType::Int(32), plan.shift)) : min;
     PrimExpr loop_extent =
         plan.shift > 0 ? max(extent - plan.shift, zero) : extent;
-    result.push_back(For(fresh, std::move(loop_min), std::move(loop_extent),
-                         scope.orig_loop->kind, SeqOrSingle(std::move(body)),
-                         std::nullopt, std::move(ann)));
+    // Avoid inventing a dead steady-state loop for a short static pipeline.
+    // Effectful bound evaluation must still occur, even when algebra can
+    // prove the iteration count zero.
+    auto analyzer = CreateTileLangAnalyzer();
+    if (!(SideEffect(loop_min) <= CallEffectKind::kPure &&
+          SideEffect(loop_extent) <= CallEffectKind::kPure &&
+          IsZero(analyzer->Simplify(loop_extent)))) {
+      result.push_back(For(fresh, loop_min, loop_min + loop_extent,
+                           IntImm(fresh.ty(), 1), scope.orig_loop->kind,
+                           SeqOrSingle(std::move(body)), std::move(ann),
+                           orig->loc));
+    }
 
     for (int t = 1; t <= plan.shift; ++t) {
       Array<Stmt> step = EmitScopeBody(
-          ctx, scope, plan, extent + IntImm(DataType::Int(32), t - 1), orig_var,
+          ctx, scope, plan, extent + IntImm(PrimType::Int(32), t - 1), orig_var,
           t, kMaxDelta);
       // The step runs iff extent > shift - t.
-      result.push_back(
-          IfThenElse(IntImm(DataType::Int(32), plan.shift - t) < extent,
-                     SeqOrSingle(std::move(step))));
+      result.push_back(If(IntImm(PrimType::Int(32), plan.shift - t) < extent,
+                          SeqOrSingle(std::move(step))));
     }
     ctx.chain.pop_back();
     return SeqOrSingle(std::move(result));
@@ -2559,44 +2715,44 @@ private:
   Stmt EmitChildScopeWhileLoop(RoleCtx &ctx, const Scope &scope,
                                const StagePlan &plan) {
     constexpr int kMaxDelta = std::numeric_limits<int>::max();
-    PrimExpr zero = IntImm(DataType::Int(32), 0);
+    PrimExpr zero = IntImm(PrimType::Int(32), 0);
     // The condition is re-evaluated at every use.
     auto cond = [&]() {
       return RewriteOpExpr(ctx,
-                           Substitute(scope.orig_while->condition, ctx.subs));
+                           WSSubstitute(scope.orig_while->condition, ctx.subs));
     };
 
     Array<Stmt> result;
-    Buffer trips;
+    TensorVar trips{ffi::UnsafeInit{}};
     if (plan.shift > 0) {
-      trips = decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::Int(32),
-                          scope.id + "_trips", "local");
-      result.push_back(AllocBuffer(trips));
-      result.push_back(BufferStore(trips, zero, {zero}));
+      trips = WSLocalTensor({IntImm(PrimType::Int(32), 1)}, PrimType::Int(32),
+                            scope.id + "_trips", "local");
+      result.push_back(WSAllocate(trips));
+      result.push_back(TensorStore(trips, {zero}, zero));
     }
     auto bump_trips = [&]() {
-      return BufferStore(trips, BufferLoad(trips, {zero}) + 1, {zero});
+      return TensorStore(trips, {zero}, TensorLoad(trips, {zero}) + 1);
     };
 
     for (int t = 0; t < plan.shift; ++t) {
-      Array<Stmt> step =
-          EmitScopeBody(ctx, scope, plan, Optional<PrimExpr>(), Var(), 0, t);
+      Array<Stmt> step = EmitScopeBody(ctx, scope, plan, Optional<PrimExpr>(),
+                                       Var(ffi::UnsafeInit{}), 0, t);
       step.push_back(bump_trips());
-      result.push_back(IfThenElse(cond(), SeqOrSingle(std::move(step))));
+      result.push_back(If(cond(), SeqOrSingle(std::move(step))));
     }
 
     Array<Stmt> body = EmitScopeBody(ctx, scope, plan, Optional<PrimExpr>(),
-                                     Var(), 0, kMaxDelta);
+                                     Var(ffi::UnsafeInit{}), 0, kMaxDelta);
     if (plan.shift > 0)
       body.push_back(bump_trips());
     result.push_back(While(cond(), SeqOrSingle(std::move(body))));
 
     for (int t = 1; t <= plan.shift; ++t) {
       Array<Stmt> step = EmitScopeBody(ctx, scope, plan, Optional<PrimExpr>(),
-                                       Var(), t, kMaxDelta);
+                                       Var(ffi::UnsafeInit{}), t, kMaxDelta);
       result.push_back(
-          IfThenElse(IntImm(DataType::Int(32), t) <= BufferLoad(trips, {zero}),
-                     SeqOrSingle(std::move(step))));
+          If(IntImm(PrimType::Int(32), t) <= TensorLoad(trips, {zero}),
+             SeqOrSingle(std::move(step))));
     }
     return SeqOrSingle(std::move(result));
   }
@@ -2608,21 +2764,21 @@ private:
     Array<Stmt> stmts;
     if (role.nreg > 0) {
       stmts.push_back(Evaluate(
-          Call(DataType::Handle(), set_max_nreg(),
-               {IntImm(DataType::Int(32), role.nreg),
-                IntImm(DataType::Int(32), role.NregAction(avg_nreg_))})));
+          Call(PrimType::Void(), set_max_nreg(),
+               {IntImm(PrimType::Int(32), role.nreg),
+                IntImm(PrimType::Int(32), role.NregAction(avg_nreg_))})));
     }
 
     // Runtime phase counters where linearization is unsound.
     for (const auto &pipeline : pipelines_) {
       if (NeedsCounter(role, *pipeline)) {
-        Buffer cnt =
-            decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::Int(32),
-                        pipeline->name + "_phase", "local");
-        ctx.counters[pipeline.get()] = cnt;
-        stmts.push_back(AllocBuffer(cnt));
-        stmts.push_back(BufferStore(cnt, IntImm(DataType::Int(32), 0),
-                                    {IntImm(DataType::Int(32), 0)}));
+        TensorVar cnt =
+            WSLocalTensor({IntImm(PrimType::Int(32), 1)}, PrimType::Int(32),
+                          pipeline->name + "_phase", "local");
+        ctx.counters.insert_or_assign(pipeline.get(), cnt);
+        stmts.push_back(WSAllocate(cnt));
+        stmts.push_back(TensorStore(cnt, {IntImm(PrimType::Int(32), 0)},
+                                    IntImm(PrimType::Int(32), 0)));
       }
     }
 
@@ -2630,9 +2786,9 @@ private:
     ICHECK_EQ(plan.shift, 0)
         << "ws_schedule: stage offsets require a loop scope; role " << role.name
         << " has offset sync stages in its root body";
-    Array<Stmt> body =
-        EmitScopeBody(ctx, *root_scope_, plan, Optional<PrimExpr>(), Var(), 0,
-                      std::numeric_limits<int>::max());
+    Array<Stmt> body = EmitScopeBody(
+        ctx, *root_scope_, plan, Optional<PrimExpr>(), Var(ffi::UnsafeInit{}),
+        0, std::numeric_limits<int>::max());
     ICHECK(!body.empty()) << "ws_schedule: role " << role.name
                           << " has an empty root body";
     for (const Stmt &s : body)
@@ -2644,11 +2800,11 @@ private:
   // when it requests nothing.
   Stmt EmitIdle(int nreg) const {
     if (nreg == 0)
-      return Evaluate(IntImm(DataType::Int(32), 0));
+      return Evaluate(IntImm(PrimType::Int(32), 0));
     return Evaluate(
-        Call(DataType::Handle(), set_max_nreg(),
-             {IntImm(DataType::Int(32), nreg),
-              IntImm(DataType::Int(32), nreg >= avg_nreg_ ? 1 : 0)}));
+        Call(PrimType::Void(), set_max_nreg(),
+             {IntImm(PrimType::Int(32), nreg),
+              IntImm(PrimType::Int(32), nreg >= avg_nreg_ ? 1 : 0)}));
   }
 
   // Emit the `if (tx < ...)` role branches ordered by warp range,
@@ -2663,7 +2819,7 @@ private:
         int seg = w;
         while (seg < hi && warpgroup_nreg_[seg / 4] == nreg)
           ++seg;
-        conds.push_back(thread_var_ < IntImm(DataType::Int(32), seg * 32));
+        conds.push_back(thread_var_ < IntImm(PrimType::Int(32), seg * 32));
         branches.push_back(EmitIdle(nreg));
         w = seg;
       }
@@ -2672,102 +2828,87 @@ private:
     for (const auto &role : roles_) {
       fill_idle(cursor, role->warp_lo);
       conds.push_back(thread_var_ <
-                      IntImm(DataType::Int(32), role->warp_hi * 32));
+                      IntImm(PrimType::Int(32), role->warp_hi * 32));
       branches.push_back(EmitRole(*role));
       cursor = role->warp_hi;
     }
     fill_idle(cursor, num_warps_);
     Stmt body = branches[branches.size() - 1];
     for (int i = static_cast<int>(branches.size()) - 2; i >= 0; --i)
-      body = IfThenElse(conds[i], branches[i], std::move(body));
+      body = If(conds[i], SeqStmt(branches[i]), SeqStmt(std::move(body)));
     return body;
   }
 
   // The roles carry their own setmaxnreg calls: mark the kernel as
   // custom warp specialization so AnnotateWarpGroupRegAlloc stays out.
   Stmt MarkCustomWS(Stmt body) const {
-    return AttrStmt(IntImm(DataType::Int(32), 0),
-                    attr::kCustomWarpSpecialization,
-                    IntImm(DataType::Int(32), 1), std::move(body));
+    return MakeNativeAttribute(IntImm(PrimType::Int(32), 0),
+                               attr::kCustomWarpSpecialization, 1,
+                               SeqStmt(body), body->loc);
   }
 
-  // Rebuild the block: versioned buffers, barrier allocations with
-  // their init counts, the consumed schedule annotation removed.
-  SBlock RebuildBlock(Stmt body) {
-    // Re-wrap the kernel-level metadata attrs consumed during matching.
+  // Rebuild explicit allocation definitions and operands. Type-carrying
+  // layout expansion and every alias use share one immutable replacement map.
+  SeqStmt RebuildBlock(Stmt body) {
     for (auto it = metadata_attrs_.rbegin(); it != metadata_attrs_.rend();
          ++it) {
-      AttrStmt attr = *it;
-      attr.CopyOnWrite()->body = std::move(body);
-      body = attr;
+      const auto &attr = *it;
+      body = RegionStmt(attr->op, attr->args, attr->body_params, attr->attrs,
+                        SeqStmt(body), attr->result_vars, attr->loc);
     }
-    Array<Buffer> allocs;
-    for (const Buffer &buf : block_->alloc_buffers) {
-      auto vit = versioned_.find(buf);
-      allocs.push_back(vit == versioned_.end() ? buf : vit->second);
-    }
+    Map<TensorVar, TensorVar> replacements;
+    for (const auto &[old, tensor] : versioned_)
+      replacements.Set(old, tensor);
+    Array<TensorVar> extra;
     Map<Var, Array<PrimExpr>> barrier_init;
     for (const auto &pipeline : pipelines_) {
-      allocs.push_back(pipeline->full);
-      allocs.push_back(pipeline->empty);
+      extra.push_back(pipeline->full);
+      extra.push_back(pipeline->empty);
       Array<PrimExpr> full_counts, empty_counts;
       for (int i = 0; i < pipeline->depth; ++i) {
         full_counts.push_back(
-            IntImm(DataType::Int(32), pipeline->full_plan.count));
+            IntImm(PrimType::Int(32), pipeline->full_plan.count));
         empty_counts.push_back(
-            IntImm(DataType::Int(32), pipeline->empty_plan.count));
+            IntImm(PrimType::Int(32), pipeline->empty_plan.count));
       }
-      barrier_init.Set(pipeline->full->data, std::move(full_counts));
-      barrier_init.Set(pipeline->empty->data, std::move(empty_counts));
+      barrier_init.Set(pipeline->full, full_counts);
+      barrier_init.Set(pipeline->empty, empty_counts);
     }
-
-    SBlock new_block = block_;
-    auto *n = new_block.CopyOnWrite();
-    n->body = std::move(body);
-    n->alloc_buffers = std::move(allocs);
-    Map<String, Any> ann =
-        FilterAnnotations(n->annotations, [](const String &key) {
-          return key != kWSScheduleKey;
-        });
+    auto ann = FilterAnnotations(kernel_.annotations, [](const String &key) {
+      return key != kWSScheduleKey;
+    });
     if (auto existing = ann.Get("barrier_init")) {
-      auto prev = Downcast<Map<Var, Array<PrimExpr>>>(existing.value());
-      for (const auto &[var, counts] : prev)
+      for (const auto &[var, counts] :
+           existing->cast<Map<Var, Array<PrimExpr>>>())
         barrier_init.Set(var, counts);
     }
-    ann.Set("barrier_init", std::move(barrier_init));
-    // Annotated layouts of versioned buffers gain the version
-    // dimension too.
-    if (auto lm_ref = ann.Get(attr::kLayoutMap)) {
-      if (auto lm_opt = lm_ref.value().as<Map<Var, Layout>>()) {
-        Map<Var, Layout> layout_map = lm_opt.value();
-        bool changed = false;
-        VarSet expanded_storage;
-        for (const auto &[orig, versioned] : versioned_) {
-          if (!expanded_storage.insert(orig->data).second)
-            continue;
-          auto entry = layout_map.Get(orig->data);
-          if (!entry.has_value())
-            continue;
-          // One leading dimension per binding.
+    ann.Set("barrier_init", barrier_init);
+    if (auto raw = ann.Get(attr::kLayoutMap)) {
+      Map<Var, Layout> layouts;
+      for (const auto &[key, value] : raw->cast<Map<Any, Any>>()) {
+        auto tensor = key.cast<TensorVar>();
+        auto layout = value.cast<Layout>();
+        auto found = versioned_.find(tensor);
+        if (found != versioned_.end()) {
           Array<PrimExpr> prefix;
-          size_t n_bindings = buffer_pipeline_.at(orig->data).size();
-          for (size_t i = 0; i < n_bindings; ++i)
-            prefix.push_back(versioned->shape[i]);
-          layout_map.Set(orig->data, entry.value()->Expand(prefix));
-          changed = true;
+          size_t count = found->second.shape().size() - tensor.shape().size();
+          for (size_t i = 0; i < count; ++i)
+            prefix.push_back(found->second.shape()[i]);
+          layout = layout->Expand(prefix);
+          tensor = found->second;
         }
-        if (changed)
-          ann.Set(attr::kLayoutMap, layout_map);
+        layouts.Set(tensor, layout);
       }
+      ann.Set(attr::kLayoutMap, layouts);
     }
-    n->annotations = std::move(ann);
-    return new_block;
+    kernel_.annotations = ann;
+    return RebuildNativeWSKernel(kernel_, body, replacements, extra);
   }
 
   // ---- state ---------------------------------------------------------------
 
-  SBlock block_;
-  Var thread_var_;
+  NativeWSKernel kernel_;
+  PrimVar thread_var_;
   Target target_;
   int num_warps_ = 0;
   int avg_nreg_ = 0;
@@ -2777,7 +2918,7 @@ private:
   Scope *root_scope_ = nullptr;
   std::map<String, std::shared_ptr<Operation>> ops_;
   // Kernel-level metadata AttrStmts, re-wrapped around the rebuilt body.
-  std::vector<AttrStmt> metadata_attrs_;
+  std::vector<RegionStmt> metadata_attrs_;
   // Per-warpgroup register request (index = warp / 4, 0 = none).
   std::vector<int> warpgroup_nreg_;
   // Suffix counter making every emitted Bind definition unique.
@@ -2786,87 +2927,37 @@ private:
   BufferVersionMap versioned_;
 };
 
-// Rewrite every schedule-annotated SBlock in place — a function may
-// hold several kernels, each with its own schedule. The enclosing
-// threadIdx.x binding is widened to each schedule's warp count.
-class WSScheduleRewriter : public StmtMutator {
-public:
-  explicit WSScheduleRewriter(Optional<Target> target)
-      : target_(std::move(target)) {}
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        thread_iv_ = iv;
-        new_extent_ = -1;
-        AttrStmt attr = Downcast<AttrStmt>(StmtMutator::VisitStmt_(op));
-        if (new_extent_ >= 0) {
-          PrimExpr nt = IntImm(DataType::Int(32), new_extent_);
-          thread_iv_.CopyOnWrite()->dom = {0, nt};
-          attr.CopyOnWrite()->node = thread_iv_;
-          attr.CopyOnWrite()->value = nt;
-        }
-        thread_iv_ = {};
-        return attr;
-      }
-      // Warp roles partition threadIdx.x only.
-      if (iv->thread_tag == "threadIdx.y" || iv->thread_tag == "threadIdx.z") {
-        bool saved = multi_dim_threads_;
-        multi_dim_threads_ = multi_dim_threads_ || !is_one(op->value);
-        Stmt stmt = StmtMutator::VisitStmt_(op);
-        multi_dim_threads_ = saved;
-        return stmt;
-      }
-    }
-    return StmtMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    if (!op->annotations.count(kWSScheduleKey))
-      return StmtMutator::VisitStmt_(op);
-    ICHECK(thread_iv_.defined())
-        << "ws_schedule: threadIdx.x binding not found around the scheduled "
-           "block";
-    ICHECK(!multi_dim_threads_)
-        << "ws_schedule: the scheduled kernel must launch threads in one "
-           "dimension (threadIdx.x only); warp roles partition threadIdx.x";
-    ICHECK(target_.defined())
-        << "ws_schedule: PrimFunc has no bound target (BindTarget must run "
-           "before MaterializeWSSchedule)";
-    WSScheduleMaterializer materializer(GetRef<SBlock>(op), thread_iv_->var,
-                                        target_.value());
-    SBlock block = materializer.Run();
-    new_extent_ = materializer.NumThreads();
-    return block;
-  }
-
-private:
-  Optional<Target> target_;
-  IterVar thread_iv_;
-  bool multi_dim_threads_ = false;
-  int new_extent_ = -1;
-};
-
-// A function without a schedule annotation is returned untouched.
-PrimFunc MaterializeWSScheduleImpl(PrimFunc f) {
-  WSScheduleRewriter rewriter(f->GetAttr<Target>(tvm::attr::kTarget));
-  Stmt body = rewriter(f->body);
-  if (body.same_as(f->body))
-    return f;
-  f.CopyOnWrite()->body = std::move(body);
-  return f;
+// Each native x-thread region carries its own closed schedule payload.
+tirx::Function MaterializeWSScheduleImpl(tirx::Function f) {
+  return RewriteNativeWSKernels(
+      f,
+      [](NativeWSKernel kernel, PrimVar thread,
+         Target target) -> Optional<NativeWSResult> {
+        if (!kernel.annotations.count(kWSScheduleKey))
+          return std::nullopt;
+        for (const auto &region : kernel.wrappers)
+          if (region->op.same_as(launch_thread_op()))
+            TVM_FFI_CHECK(IsOne(region->args[1].as_or_throw<PrimExpr>()),
+                          ValueError)
+                << "ws_schedule: the scheduled kernel must launch threads in "
+                   "one "
+                   "dimension (threadIdx.x only); warp roles partition "
+                   "threadIdx.x";
+        WSScheduleMaterializer materializer(std::move(kernel), thread, target);
+        auto body = materializer.Run();
+        return NativeWSResult{body, materializer.NumThreads()};
+      });
 }
 
 } // namespace
 
 tvm::transform::Pass MaterializeWSSchedule() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc f, const IRModule &m,
+  auto pass_func = [](tirx::Function f, const IRModule &m,
                       tvm::transform::PassContext ctx) {
     return MaterializeWSScheduleImpl(std::move(f));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MaterializeWSSchedule", {});
+  return CreateFunctionPass(pass_func, 0, "tl.MaterializeWSSchedule");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

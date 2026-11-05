@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from .base import BaseTemplate
-from tvm import te
+from .._workload import WorkloadBuilder
 from ..arch import TileDevice
 from ..roller import Hint
 from ..utils import get_roller_hints_from_func
@@ -56,7 +56,7 @@ class MatmulTemplate(BaseTemplate):
         Defines and initializes the matrix multiplication computation.
 
         This method sets up placeholders for input matrices, computes
-        the matrix multiplication using TVM's compute API,
+        the matrix multiplication using the native workload builder,
         and optionally applies bias and type casting.
 
         Raises:
@@ -79,13 +79,14 @@ class MatmulTemplate(BaseTemplate):
         output_shape = (M, N)  # Shape of output matrix C
         Bias_shape = (N,)  # Shape of bias vector
 
-        # Create TVM placeholders for input tensors
-        A = te.placeholder(input_shape, name="A", dtype=in_dtype)  # Input matrix A
-        B = te.placeholder(weight_shape, name="B", dtype=in_dtype)  # Weight matrix B
-        Bias = te.placeholder(Bias_shape, name="Bias", dtype=accum_dtype)  # Bias vector
+        # Create typed native input tensors
+        workload = WorkloadBuilder()
+        A = workload.input(input_shape, name="A", dtype=in_dtype)  # Input matrix A
+        B = workload.input(weight_shape, name="B", dtype=in_dtype)  # Weight matrix B
+        Bias = workload.input(Bias_shape, name="Bias", dtype=accum_dtype)  # Bias vector
 
         # Define a reduction axis for matrix multiplication
-        k = te.reduce_axis((0, K), name="k")
+        k = workload.reduce_axis((0, K), name="k")
 
         def _compute_matmul(i, j):
             """
@@ -100,10 +101,10 @@ class MatmulTemplate(BaseTemplate):
             """
             A_indices = [i, k] if not trans_A else [k, i]  # Adjust indexing if A is transposed
             B_indices = [k, j] if not trans_B else [j, k]  # Adjust indexing if B is transposed
-            return te.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
+            return workload.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
 
         # Compute matrix multiplication result
-        C = te.compute(
+        C = workload.compute(
             output_shape,
             fcompute=_compute_matmul,
             name="C",
@@ -111,7 +112,7 @@ class MatmulTemplate(BaseTemplate):
 
         # Optionally apply bias addition
         if with_bias:
-            C = te.compute(
+            C = workload.compute(
                 output_shape,
                 lambda i, j: C[i, j] + Bias[j],
                 name="Bias",
@@ -119,7 +120,7 @@ class MatmulTemplate(BaseTemplate):
 
         # Optionally cast the output to a different type
         if out_dtype != accum_dtype:
-            C = te.compute(
+            C = workload.compute(
                 output_shape,
                 lambda i, j: C[i, j].astype(out_dtype),
                 name="D",
@@ -127,7 +128,7 @@ class MatmulTemplate(BaseTemplate):
 
         # Set function arguments (including bias if used)
         args = [A, B, Bias, C] if self.with_bias else [A, B, C]
-        self.set_function(te.create_prim_func(args))
+        self.set_function(workload.to_function(args))
 
     def params_as_dict(self):
         """

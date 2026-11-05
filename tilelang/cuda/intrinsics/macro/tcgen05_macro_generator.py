@@ -1,4 +1,7 @@
 from __future__ import annotations
+from tilelang._analyzer import create_analyzer
+
+from tvm_tirx import ir
 from dataclasses import dataclass
 import tilelang.cuda.language as T
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
@@ -9,9 +12,8 @@ from ..layout.mma_sm100_layout import (
     make_tmem_frg_c,
     validate_tcgen05_ts_instruction,
 )
-from tvm import DataType
-from tvm.tirx import PrimExpr, Buffer, Var, BufferLoad, BufferRegion, handle_add_byte_offset
-from tilelang import tvm as tvm
+from tilelang.language._native import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tvm_tirx.tirx import handle_add_byte_offset, tensor_data_ptr
 from tilelang import _ffi_api
 from tilelang.language.dtypes import get_tvm_dtype
 from tilelang.utils import is_tensor_memory
@@ -20,7 +22,7 @@ from tilelang.layout import (
     SwizzleMode,
     cute,
 )
-from tvm.runtime import convert
+from tvm_ffi import convert
 
 lift = convert
 
@@ -89,8 +91,8 @@ class TCGEN05TensorMemoryParams:
     raw TMEM address.
     """
 
-    data: Var
-    """The TMEM buffer's data Var, carrying the base address."""
+    data: ir.Expr
+    """Native tensor_data_ptr expression carrying the TMEM base address."""
     origin: tuple[PrimExpr, PrimExpr]
     """Physical ``(datapath, value-column)`` of the Region origin."""
     tile: cute.Layout
@@ -107,13 +109,13 @@ class TCGEN05TensorMemoryParams:
         column)`` plus the sliced sublayout, and each atom origin is then one
         evaluation of that sublayout.
         """
-        buffer, ranges = region.buffer, list(region.region)
+        buffer, ranges = region.source, list(region.region)
         assert cute.rank(fragment) == len(ranges), (
             f"TCGEN5MMA region rank {len(ranges)} does not match its TMEM fragment rank {cute.rank(fragment)}"
         )
         origin, tile = cute.restrict(fragment, ranges)
         value_dtype = get_tvm_dtype(buffer.dtype)
-        return cls(buffer.data, origin, tile, value_dtype.bits * value_dtype.lanes)
+        return cls(tensor_data_ptr(buffer), origin, tile, value_dtype.bits * value_dtype.lanes)
 
     def atom_offset(self, row_offset: PrimExpr, col_offset: PrimExpr) -> PrimExpr:
         """Raw TMEM address of the atom at a Region-local matrix origin.
@@ -163,7 +165,7 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
     i.e. K-major iff ``not transposed``; the contiguity detected from the layout
     is asserted to agree.
 
-    ``region`` is the operand's per-axis ranges (one :class:`tvm.ir.Range` per
+    ``region`` is the operand's per-axis ranges (one :class:`tvm_tirx.ir.Range` per
     logical buffer mode), used to restrict the decoded layout to a sliced
     operand. It may be ``None`` for a full-buffer operand.
     """
@@ -185,7 +187,7 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
         slice_byte_offset = slice_off_elems * elem_bits // 8
         if not isinstance(slice_byte_offset, int):
-            slice_byte_offset = tvm.arith.Analyzer().simplify(slice_byte_offset)
+            slice_byte_offset = create_analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"UMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
     # Present in UMMA (MN, K) order, then recast the swizzled element layout to
     # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
@@ -354,8 +356,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         self.micro_size_k = k_dim
 
     def _initialize_k_dim(self, a_dtype="float16"):
-        if isinstance(a_dtype, str):
-            a_dtype = DataType(a_dtype)
+        a_dtype = get_tvm_dtype(a_dtype)
         if a_dtype.bits == 6 or a_dtype.is_float4():
             if self.chunk % 32 != 0:
                 raise ValueError(f"TCGEN5MMA FP{a_dtype.bits} requires chunk to be a multiple of 32, got {self.chunk}")
@@ -366,7 +367,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
     @staticmethod
     def _as_buffer(buf_or_region):
         if isinstance(buf_or_region, BufferRegion):
-            return buf_or_region.buffer
+            return buf_or_region.source
         return buf_or_region
 
     def validate_tcgen05_operand_regions(
@@ -395,7 +396,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 f"2CTA TCGEN5MMA currently supports a single instruction along N; "
                 f"got N={self.block_col_warps * self.warp_col_tiles} with instruction N={meta.atom_n}"
             )
-        analyzer = tvm.arith.Analyzer()
+        analyzer = create_analyzer()
 
         def check(region, operand, transposed, mn_atom, k_atom, mn_axis_name, k_axis_name):
             ranges = region.region
@@ -407,8 +408,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             row_range, col_range = ranges[-2:]
             mn_range, k_range = (col_range, row_range) if transposed else (row_range, col_range)
             for mode_name, mode_range, atom in ((mn_axis_name, mn_range, mn_atom), (k_axis_name, k_range, k_atom)):
-                assert analyzer.can_prove_equal(mode_range.min % atom, 0), (
-                    f"TCGEN5MMA {operand} {mode_name} origin {mode_range.min} must be aligned to the selected atom {atom}"
+                assert analyzer.can_prove_equal(mode_range.begin % atom, 0), (
+                    f"TCGEN5MMA {operand} {mode_name} origin {mode_range.begin} must be aligned to the selected atom {atom}"
                 )
                 assert analyzer.can_prove_equal(mode_range.extent % atom, 0), (
                     f"TCGEN5MMA {operand} {mode_name} extent {mode_range.extent} must be a multiple of the selected atom {atom}"
@@ -612,8 +613,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         num_inst_n = n_dim // meta.atom_n
         num_k_atoms = self.tcgen05_num_k_atoms
 
-        sfa_data = self._as_buffer(SFA_tmem).data
-        sfb_data = self._as_buffer(SFB_tmem).data
+        sfa_data = tensor_data_ptr(self._as_buffer(SFA_tmem))
+        sfb_data = tensor_data_ptr(self._as_buffer(SFB_tmem))
 
         @T.macro
         def _warp_mma_blockscaled(A_region, B_region, sfa_data, sfb_data, mbar):
@@ -622,7 +623,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
             self.init_tcgen05_a_desc(desc_a, A_region, a_params)
             self.init_tcgen05_b_desc(desc_b, B_region, b_params)
 
-            _sf_k_start = tvm.tirx.const(sf_k_start, "int32") if isinstance(sf_k_start, int) else sf_k_start
+            _sf_k_start = ir.const(sf_k_start, "int32") if isinstance(sf_k_start, int) else sf_k_start
             for j in T.unroll(num_inst_n):
                 for i in T.unroll(num_inst_m):
                     for ki in T.unroll(0, num_k_atoms):
@@ -756,33 +757,15 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
 
     @staticmethod
     def _access_ptr_from(buffer_or_load_or_region, access_type: str = "r"):
-        """Resolve an access pointer from a Buffer, BufferLoad, or BufferRegion."""
-        if isinstance(buffer_or_load_or_region, Buffer):
-            return buffer_or_load_or_region.access_ptr(access_type)
-        elif isinstance(buffer_or_load_or_region, BufferLoad):
-            buffer_load = buffer_or_load_or_region
-            offset, stride = 0, 1
-            buffer = buffer_load.buffer
-            for i, shape in enumerate(reversed(buffer.shape)):
-                indice = buffer_load.indices[len(buffer_load.indices) - i - 1]
-                if isinstance(indice, tvm.tirx.Ramp):
-                    offset += indice.base * stride
-                elif isinstance(indice, (tvm.tirx.IntImm, tvm.tirx.PrimExpr)):
-                    offset += indice * stride
-                else:
-                    raise ValueError(f"Unsupported index type: {type(indice)}")
-                stride *= shape
-            return buffer.access_ptr(access_type, offset=offset)
-        elif isinstance(buffer_or_load_or_region, BufferRegion):
-            buffer_region = buffer_or_load_or_region
-            buffer = buffer_region.buffer
-            offset, stride = 0, 1
-            for i, shape in enumerate(reversed(buffer.shape)):
-                offset += buffer_region.region[len(buffer_region.region) - i - 1].min * stride
-                stride *= shape
-            return buffer.access_ptr(access_type, offset=offset)
-        else:
+        """Keep native tensor coordinates until layout/pointer lowering.
+
+        Descriptor initialization passes a whole tensor. Element and region
+        forms retain their coordinate origin and access interval through the
+        common TileLang access-pointer constructor.
+        """
+        if not isinstance(buffer_or_load_or_region, (Buffer, BufferLoad, BufferRegion)):
             raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
+        return T.access_ptr(buffer_or_load_or_region, access_type)
 
     # -- Descriptor parameter computation (pure Python, no TIR) --
 
@@ -799,7 +782,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert self.b_shared_layout is not None, "TCGEN05 B operand has no shared layout to decode"
         return compute_umma_descriptor(
             self.b_shared_layout,
-            B_buf.buffer if isinstance(B_buf, BufferRegion) else B_buf,
+            B_buf.source if isinstance(B_buf, BufferRegion) else B_buf,
             transposed=not self.b_transposed,
             micro_size_k=self.micro_size_k,
             region=list(B_buf.region) if isinstance(B_buf, BufferRegion) else None,
@@ -817,7 +800,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         assert self.a_shared_layout is not None, "TCGEN05 A operand has no shared layout to decode"
         return compute_umma_descriptor(
             self.a_shared_layout,
-            A_buf.buffer if isinstance(A_buf, BufferRegion) else A_buf,
+            A_buf.source if isinstance(A_buf, BufferRegion) else A_buf,
             transposed=self.a_transposed,
             micro_size_k=self.micro_size_k,
             region=list(A_buf.region) if isinstance(A_buf, BufferRegion) else None,
@@ -841,7 +824,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = b_params.stride_byte_offset
         swizzle_mode = b_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = b_params.slice_byte_offset
-        B_base_ptr = self._as_buffer(B_buf).access_ptr("r")
+        B_base_ptr = T.access_ptr(self._as_buffer(B_buf), "r")
         if not isinstance(slice_byte_offset, int):
             # A dynamic slice. Use `increase_descriptor_offset` to represent the dynamic offset, to share a common base pointer.
             is_sliced = True
@@ -877,7 +860,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         sbo = a_params.stride_byte_offset
         swizzle_mode = a_params.swizzle_mode.tcgen05_layout_type()
         slice_byte_offset = a_params.slice_byte_offset
-        A_base_ptr = self._as_buffer(A_buf).access_ptr("r")
+        A_base_ptr = T.access_ptr(self._as_buffer(A_buf), "r")
         if not isinstance(slice_byte_offset, int):
             is_sliced = True
         elif slice_byte_offset != 0:
@@ -1137,8 +1120,8 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         ----------
         desc_a, desc_b : Buffer
             Initialized A and B descriptors.
-        sfa_data, sfb_data : Var
-            Scale factor data pointers in tensor memory.
+        sfa_data, sfb_data : ir.Expr
+            Native tensor_data_ptr expressions for the scale tensors.
         inst_m_idx, inst_n_idx, ki : int
             Atom indices.
         a_params, b_params : TCGEN05DescriptorParams

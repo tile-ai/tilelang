@@ -19,351 +19,401 @@
 
 /*!
  * \file loop_partition.cc
- * \brief Partition parallel loops onto threads
+ * \brief Native thread partitioning, guarded replicas and loop intent.
  */
-
 #include "loop_partition.h"
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-
-#include <tvm/tirx/analysis.h>
+#include "../op/native_utils.h"
+#include "../op/utils.h"
+#include "ir/analyzer.h"
+#include "loop_vectorize.h"
 #include <tvm/tirx/stmt_functor.h>
 
-#include <utility>
-
-#include "../op/reducer.h"
-#include "../op/utils.h"
-#include "loop_vectorize.h"
-
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 class BufferIndiceSimplify : public StmtExprMutator {
 public:
-  BufferIndiceSimplify(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
+  explicit BufferIndiceSimplify(sym::AnalyzerObj *analyzer)
+      : analyzer_(analyzer) {}
+  using StmtExprMutator::Mutate_;
+  UnchangedOr<Stmt> Mutate_(const BindObj *node, InplaceMode mode) final {
+    auto result = StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(GetRef<Stmt>(node))
+                      .as_or_throw<Bind>();
+    if (auto var = result->var.as<PrimVar>()) {
+      if (auto expr = result->value.as<PrimExpr>();
+          expr && SideEffect(*expr) <= CallEffectKind::kPure)
+        BindAnalyzer(analyzer_, *var, *expr, true);
+    }
+    return result;
+  }
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *node,
+                                InplaceMode mode) final {
+    auto result = StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(PrimExpr(GetRef<TensorLoad>(node)))
+                      .as_or_throw<TensorLoad>();
+    auto indices = result->indices.Map(
+        [&](const PrimExpr &index) { return analyzer_->Simplify(index); });
+    return TensorLoad(result->source, indices, result->loc);
+  }
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *node,
+                            InplaceMode mode) final {
+    auto result = StmtExprMutator::Mutate_(node, mode)
+                      .ValueOrUnchanged(GetRef<Stmt>(node))
+                      .as_or_throw<TensorStore>();
+    auto indices = result->indices.Map(
+        [&](const PrimExpr &index) { return analyzer_->Simplify(index); });
+    return TensorStore(result->dest, indices, result->value, result->loc);
+  }
 
 private:
-  Stmt VisitStmt_(const BindNode *node) final {
-    auto bind = Downcast<Bind>(StmtExprMutator::VisitStmt_(node));
-    if (SideEffect(bind->value) <= CallEffectKind::kPure) {
-      // Refresh let aliases from the substituted IR before simplifying uses.
-      // The analyzer may still bind them to the original loop indices.
-      analyzer_->Bind(bind->var, bind->value, /*allow_override=*/true);
-    }
-    return bind;
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *node) final {
-    auto visited = StmtExprMutator::VisitExpr_(node);
-    auto n = Downcast<BufferLoad>(visited);
-    auto nptr = n.CopyOnWrite();
-    nptr->indices = nptr->indices.Map(
-        [&](const auto &e) { return analyzer_->Simplify(e); });
-    return n;
-  }
-  Stmt VisitStmt_(const BufferStoreNode *node) final {
-    auto visited = StmtExprMutator::VisitStmt_(node);
-    auto n = Downcast<BufferStore>(visited);
-    auto nptr = n.CopyOnWrite();
-    nptr->indices = nptr->indices.Map(
-        [&](const auto &e) { return analyzer_->Simplify(e); });
-    return n;
-  }
-  arith::Analyzer *analyzer_;
+  sym::AnalyzerObj *analyzer_;
 };
 
-// Lower generic `tl.parallel_multiplicity` markers: the marked side effect
-// must execute once per dynamic logical iteration of the partitioned loop,
-// so it is guarded to the canonical replica (REP == 0). When the loop layout
-// has no replication (or REP is provably zero) the marker is stripped. This
-// mutator understands only execution multiplicity — it knows nothing about
-// what the marked statement does.
-// The marker is a statement-level AttrStmt, so a statement-only mutator
-// suffices (expression subtrees cannot carry it).
-class MultiplicityMarkerLowerer : public StmtMutator {
+class MultiplicityMarkerLowerer : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt stmt, const Optional<PrimExpr> &replica_guard) {
-    MultiplicityMarkerLowerer lowerer(replica_guard);
-    return lowerer(std::move(stmt));
-  }
-
-private:
-  explicit MultiplicityMarkerLowerer(Optional<PrimExpr> replica_guard)
-      : replica_guard_(std::move(replica_guard)) {}
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == attr::kParallelMultiplicity) {
-      Stmt body = VisitStmt(op->body);
-      if (!replica_guard_.defined()) {
+  explicit MultiplicityMarkerLowerer(Optional<PrimExpr> guard)
+      : guard_(std::move(guard)) {}
+  using StmtExprMutator::Mutate_;
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    if (op->op->name == "tl.attr") {
+      auto metadata = DecodeAttributeRegion(op);
+      if (auto key = metadata.Get("key");
+          key && key->cast<String>() == "tl.parallel_multiplicity") {
+        ICHECK(op->body_params.empty() && op->result_vars.empty());
+        SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+        if (guard_)
+          return If(*guard_, body, std::nullopt, op->loc);
         return body;
       }
-      return IfThenElse(replica_guard_.value(), body);
     }
-    return StmtMutator::VisitStmt_(op);
+    return StmtExprMutator::Mutate_(op, mode);
   }
-
-  Optional<PrimExpr> replica_guard_;
-};
-
-// Rewrite the parallel loop into a common loop, which is mapped to threads
-For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
-                  const Fragment &loop_layout, bool require_padding_guard) {
-  ICHECK(loop_layout.defined());
-  ICHECK(thread_index.defined());
-  // `op` is moved into `body` below; capture its span up front so reconstructed
-  // statements can still inherit the source location of the original loop.
-  const Span op_span = op->span;
-  int old_loop_depth = loop_layout->InputDim();
-  int new_loop_depth = loop_layout->OutputDim();
-  // Create the new loop iter var
-  Array<Var> vars;
-  for (int i = 0; i < new_loop_depth; i++) {
-    Var var = Var(std::string{char('i' + i)});
-    analyzer->Bind(var, Range::FromMinExtent(make_zero(var->dtype),
-                                             loop_layout->OutputShape()[i]));
-    vars.push_back(var);
-  }
-  // Normalize the thread index against the layout thread range once, then
-  // feed the normalized expression into the inverse layout directly. The
-  // inverse indices, the bounds guard and the replicate index therefore all
-  // use the same normalized expression, without needing a Var-keyed
-  // substitution map.
-  PrimExpr normalized_thread_index = thread_index;
-  if (loop_layout->ThreadRange().defined()) {
-    normalized_thread_index = thread_index - loop_layout->ThreadRange()->min;
-  }
-  Array<PrimExpr> forward_inputs(vars.begin(), vars.end());
-  forward_inputs.push_back(normalized_thread_index);
-  // create the substitute map, and the loop body
-  Map<Var, PrimExpr> vmap;
-  Stmt body = std::move(op);
-  Array<PrimExpr> loop_mins;
-  Array<PrimExpr> loop_extents;
-  // Only the inverse layout is needed here; the accompanying IterMapLevel is
-  // for callers that must distinguish exact from padded inversions.
-  Layout inv_loop = loop_layout->InverseWithLevel(require_padding_guard).first;
-  auto indices = inv_loop->Forward(forward_inputs);
-  for (int i = 0; i < old_loop_depth; i++) {
-    const ForNode *loop = body.as<ForNode>();
-    ICHECK(loop != nullptr)
-        << "No extra statements are allowed between nested parallel loops.";
-    vmap.Set(loop->loop_var, indices[i]);
-    loop_mins.push_back(loop->min);
-    loop_extents.push_back(loop->extent);
-    body = loop->body;
-  }
-  // substitute and re-construct the serial loop
-  body = Substitute(body, vmap);
-  // Guard executes the recovered loop body only if each inverse-mapped iterator
-  // falls back into the original For ranges. We first check every axis from the
-  // old loop nest (old_loop_depth) and then the extra index produced by inverse
-  // layouts that carry a replicate/thread component (`inv_output_shape`). Both
-  // must stay within bounds to ensure correctness. Example: layout([i, j]) =
-  // floor((i * 16 + j) / 32) may generate extra points when the new loop
-  // enumerates 0..31; the guard drops iterations whose inverse-mapped (i, j)
-  // or replicate index fall outside their original extents. This protects
-  // non-surjective loop_layout mappings that otherwise over-cover the parallel
-  // space.
-  // Always build guard and let analyzer decide if it can be proved true.
-  // This handles both non-bijective layouts and cases where loop extent
-  // differs from layout input shape (e.g., loop extent=4 with
-  // Fragment([8]->[1]) produces inverse index `tx % 8` ranging 0-7, requiring
-  // guard `tx % 8 < 4`).
-  PrimExpr guard = const_true();
-  for (int i = 0; i < old_loop_depth; i++) {
-    PrimExpr index = indices[i];
-    PrimExpr lower_bound = analyzer->Simplify(index >= loop_mins[i]);
-    PrimExpr upper_bound =
-        analyzer->Simplify(index < loop_mins[i] + loop_extents[i]);
-    guard = And(guard, And(lower_bound, upper_bound));
-  }
-  auto inv_output_shape = inv_loop->OutputShape();
-  if (inv_output_shape.size() > static_cast<size_t>(old_loop_depth)) {
-    PrimExpr replicate_index = indices[old_loop_depth];
-    PrimExpr replicate_extent = inv_output_shape[old_loop_depth];
-    PrimExpr lower_bound = analyzer->Simplify(
-        replicate_index >= make_zero(replicate_index.dtype()));
-    PrimExpr upper_bound =
-        analyzer->Simplify(replicate_index < replicate_extent);
-    guard = And(guard, And(lower_bound, upper_bound));
-  }
-  {
-    // Lower generic execution-multiplicity markers against this loop's
-    // replicate index. REP exists only when the inverse layout carries a
-    // replicate component; otherwise every physical execution is a distinct
-    // logical iteration and the markers are simply stripped.
-    Optional<PrimExpr> replica_guard;
-    if (indices.size() > static_cast<size_t>(old_loop_depth)) {
-      PrimExpr is_replica_zero = analyzer->Simplify(EQ(
-          indices[old_loop_depth], make_zero(indices[old_loop_depth].dtype())));
-      if (!analyzer->CanProve(is_replica_zero)) {
-        replica_guard = is_replica_zero;
-      }
-    }
-    body = MultiplicityMarkerLowerer::Rewrite(std::move(body), replica_guard);
-  }
-  PrimExpr simplified_guard = analyzer->Simplify(guard);
-  if (!analyzer->CanProve(simplified_guard)) {
-    body = IfThenElse(simplified_guard, body, Stmt(), op_span);
-  }
-
-  for (int i = new_loop_depth - 1; i >= 0; i--) {
-    body = For(vars[i], make_zero(vars[i]->dtype), inv_loop->InputShape()[i],
-               ForKind::kSerial, body, std::nullopt, {}, std::nullopt, op_span);
-    analyzer->Bind(vars[i], Range(0, inv_loop->InputShape()[i]));
-  }
-
-  body = BufferIndiceSimplify(analyzer)(body);
-
-  return Downcast<For>(body);
-}
-
-class LoopPramaUnroller : public StmtExprMutator {
-public:
-  LoopPramaUnroller() = default;
 
 private:
-  Stmt VisitStmt_(const ForNode *node) final {
-    if (node->kind == ForKind::kSerial) {
-      auto analyzer = std::make_shared<arith::Analyzer>();
-      if (as_const_int(analyzer->Simplify(node->extent)) == nullptr) {
-        return StmtExprMutator::VisitStmt_(node);
+  Optional<PrimExpr> guard_;
+};
+
+namespace {
+
+// A loop slice can have a lexical thread origin, e.g. i*32 + k/8 with
+// serial i in [0,4). Only the relative k/8 part belongs to the inverse's
+// rectangular thread domain. Normalize this query locally after proving the
+// origin and domain fit the real participant range; buffer layouts and the
+// caller's absolute-owner guards keep their original coordinates.
+std::pair<Fragment, PrimExpr>
+PartitionInverseView(const Fragment &layout, PrimExpr thread,
+                     const sym::AnalyzerObj *context) {
+  auto range = layout->ThreadRange();
+  if (!range)
+    return {layout, thread};
+  auto proof = context ? context->Clone() : CreateTileLangAnalyzer();
+  Map<PrimVar, PrimExpr> zero;
+  for (int i = 0; i < layout->InputDim(); ++i) {
+    PrimVar input = InputPlaceholder(i);
+    zero.Set(input, IntImm(input.ty(), 0));
+  }
+  PrimVar replica = ReplicationPlaceholder();
+  zero.Set(replica, IntImm(replica.ty(), 0));
+  PrimExpr origin =
+      proof->Simplify(SubstituteLayoutVars(layout->GetForwardThread(), zero));
+  if (IsZero(origin))
+    return {layout, thread};
+  PrimExpr relative = proof->Simplify(layout->GetForwardThread() - origin);
+  Fragment normalized(layout->InputShape(), layout->GetForwardIndex(), relative,
+                      layout->ReplicateExtent(), std::nullopt);
+  auto extent = TryConstInt(normalized->ThreadExtent());
+  if (!extent || *extent <= 0)
+    return {layout, thread};
+  for (int i = 0; i < layout->InputDim(); ++i) {
+    PrimVar input = InputPlaceholder(i);
+    BindAnalyzer(
+        proof, input,
+        Range::FromMinExtent(IntImm(input.ty(), 0), layout->InputShape()[i]));
+  }
+  BindAnalyzer(
+      proof, replica,
+      Range::FromMinExtent(IntImm(replica.ty(), 0), layout->ReplicateExtent()));
+  PrimExpr bound = IntImm(relative.ty(), *extent);
+  if (!proof->CanProve(origin >= IntImm(origin.ty(), 0)) ||
+      !proof->CanProve(range->extent >= bound) ||
+      !proof->CanProve(origin <= range->extent - bound) ||
+      !proof->CanProve(relative >= IntImm(relative.ty(), 0)) ||
+      !proof->CanProve(relative < bound))
+    return {layout, thread};
+  return {normalized, proof->Simplify(thread - origin)};
+}
+
+// NoCheck supplies an inverse candidate for a padded physical domain. Prove
+// that it recovers every logical element and replica before using it; a bounds
+// guard alone cannot repair an inverse that loses valid logical coordinates.
+void ValidateGuardedInverse(const Fragment &layout, const Layout &inverse,
+                            const sym::AnalyzerObj *context) {
+  auto analyzer = context ? context->Clone() : CreateTileLangAnalyzer();
+  Array<PrimExpr> logical;
+  PrimExpr nonempty = IntImm::Bool(true);
+  for (const PrimExpr &extent : layout->InputShape()) {
+    PrimVar index("guarded_logical_" + std::to_string(logical.size()),
+                  extent.ty());
+    BindAnalyzer(analyzer, index,
+                 Range::FromMinExtent(IntImm(index.ty(), 0), extent));
+    logical.push_back(index);
+    nonempty = nonempty && (extent > IntImm(extent.ty(), 0));
+  }
+  PrimExpr replicas = layout->ReplicateExtent();
+  PrimVar replica("guarded_replica", replicas.ty());
+  BindAnalyzer(analyzer, replica,
+               Range::FromMinExtent(IntImm(replica.ty(), 0), replicas));
+  nonempty = nonempty && (replicas > IntImm(replicas.ty(), 0));
+  ScopedAnalyzerConstraints constraint(analyzer, nonempty);
+  auto physical = layout->Forward(logical);
+  physical.push_back(layout->ForwardThread(logical, replica));
+  auto recovered = inverse->Forward(physical);
+  logical.push_back(replica);
+  TVM_FFI_CHECK_EQ(recovered.size(), logical.size(), ValueError)
+      << "Guarded loop inverse must preserve every logical axis and replica";
+  for (size_t i = 0; i < logical.size(); ++i) {
+    TVM_FFI_CHECK(analyzer->CanProveEqual(recovered[i], logical[i]), ValueError)
+        << "Guarded loop inverse does not recover logical coordinate " << i
+        << " for " << layout->DebugOutput();
+  }
+}
+
+} // namespace
+
+For PartitionLoop(For op, PrimExpr thread_index, sym::AnalyzerObj *analyzer,
+                  const Fragment &layout, bool require_padding_guard) {
+  ICHECK(layout.defined());
+  const Location loc = op->loc;
+  const int old_depth = layout->InputDim(), new_depth = layout->OutputDim();
+  Array<PrimVar> vars;
+  for (int i = 0; i < new_depth; ++i) {
+    PrimExpr extent = layout->OutputShape()[i];
+    PrimVar var("p" + std::to_string(i), extent.ty());
+    BindAnalyzer(analyzer, var,
+                 Range::FromMinExtent(IntImm(var.ty(), 0), extent));
+    vars.push_back(var);
+  }
+  PrimExpr thread = thread_index;
+  if (auto range = layout->ThreadRange())
+    thread = thread - range->begin;
+  auto inverse_view = PartitionInverseView(layout, thread, analyzer);
+  Array<PrimExpr> input(vars.begin(), vars.end());
+  input.push_back(inverse_view.second);
+  Layout inverse =
+      inverse_view.first->InverseWithLevel(require_padding_guard).first;
+  if (require_padding_guard)
+    ValidateGuardedInverse(inverse_view.first, inverse, analyzer);
+  auto indices = inverse->Forward(input);
+  ICHECK_GE(indices.size(), static_cast<size_t>(old_depth));
+  Map<Var, PrimExpr> replacements;
+  Stmt body = op;
+  Array<PrimExpr> begins, ends;
+  for (int i = 0; i < old_depth; ++i) {
+    const auto *loop = SingleStatement(body).as<ForObj>();
+    ICHECK(loop) << "No statements are allowed between the parallel loops";
+    (void)LoopExtent(loop); // validates the explicit unit step
+    replacements.Set(loop->var, indices[i]);
+    begins.push_back(loop->begin);
+    ends.push_back(loop->end);
+    body = loop->body;
+  }
+  body = SubstituteLoopVars(body, replacements);
+  PrimExpr guard = IntImm::Bool(true);
+  if (!inverse_view.first.same_as(layout)) {
+    // The normalized inverse has a smaller physical thread domain. Guard it
+    // explicitly: an inverse may use modulo and otherwise wrap a participant
+    // outside this slice back onto a valid logical coordinate.
+    const PrimExpr &relative_thread = inverse_view.second;
+    guard = (relative_thread >= IntImm(relative_thread.ty(), 0)) &&
+            (relative_thread < inverse_view.first->ThreadExtent());
+  }
+  for (int i = 0; i < old_depth; ++i)
+    guard = guard && (indices[i] >= begins[i]) && (indices[i] < ends[i]);
+  if (indices.size() > static_cast<size_t>(old_depth)) {
+    PrimExpr replica = indices[old_depth];
+    guard = guard && (replica >= IntImm(replica.ty(), 0)) &&
+            (replica < layout->ReplicateExtent());
+  }
+  if (require_padding_guard) {
+    // A rectangular physical domain may contain holes as well as a final
+    // tail. Admit only points in the original forward image, so padding never
+    // duplicates a logical store or assigns an element to another thread.
+    Array<PrimExpr> logical(indices.begin(), indices.begin() + old_depth);
+    auto physical = layout->Forward(logical);
+    ICHECK_EQ(physical.size(), vars.size());
+    for (size_t i = 0; i < physical.size(); ++i)
+      guard = guard && (physical[i] == vars[i]);
+    guard =
+        guard && (layout->ForwardThread(logical, indices[old_depth]) == thread);
+  }
+  Optional<PrimExpr> replica_guard;
+  if (indices.size() > static_cast<size_t>(old_depth)) {
+    PrimExpr replica = indices[old_depth];
+    PrimExpr zero_replica =
+        analyzer->Simplify(replica == IntImm(replica.ty(), 0));
+    if (!analyzer->CanProve(zero_replica))
+      replica_guard = zero_replica;
+  }
+  auto multiplicity = make_object<MultiplicityMarkerLowerer>(replica_guard);
+  body = multiplicity->Mutate(body).ValueOrUnchanged(body);
+  guard = analyzer->Simplify(guard);
+  if (!analyzer->CanProve(guard))
+    body = If(guard, SeqStmt(body), std::nullopt, loc);
+  for (int i = new_depth - 1; i >= 0; --i) {
+    PrimExpr extent = inverse->InputShape()[i];
+    body =
+        For(vars[i], IntImm(vars[i].ty(), 0), extent, IntImm(vars[i].ty(), 1),
+            ForKind::kDefault, SeqStmt(body), {}, loc);
+    BindAnalyzer(analyzer, vars[i],
+                 Range::FromMinExtent(IntImm(vars[i].ty(), 0), extent), true);
+  }
+  auto simplify = make_object<BufferIndiceSimplify>(analyzer);
+  body = simplify->Mutate(body).ValueOrUnchanged(body);
+  return body.as_or_throw<For>();
+}
+
+class LoopPragmaUnroller : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+  UnchangedOr<Stmt> Mutate_(const ForObj *node, InplaceMode mode) final {
+    if (node->kind == ForKind::kDefault && IsOne(node->step)) {
+      auto analyzer = CreateTileLangAnalyzer();
+      if (TryConstInt(analyzer->Simplify(LoopExtent(node)))) {
+        auto copy = make_object<ForObj>(*node);
+        copy->kind = ForKind::kUnrolled;
+        // Preserve the original convention: mark the first eligible loop,
+        // without recursively unrolling a serial reduction inside its body.
+        return For(copy);
       }
-      For new_for = GetRef<For>(node);
-      auto for_ptr = new_for.CopyOnWrite();
-      for_ptr->kind = ForKind::kUnrolled;
-      return new_for;
     }
-    return StmtExprMutator::VisitStmt_(node);
+    return StmtExprMutator::Mutate_(node, mode);
   }
 };
 
 class LoopPartitioner : public StmtExprVisitor {
 public:
-  LoopPartitioner() = default;
-
-  Fragment Partition(const For &op, int num_thread, int vectorize_size) {
-    this->VisitStmt(op);
-    DataType dtype = DataType::Int(32);
-    if (!loop_vars_.empty()) {
-      dtype = loop_vars_.back()->var.dtype();
+  using StmtExprVisitor::Visit_;
+  Optional<VisitInterrupt> Visit_(const ForObj *node) final {
+    if (node->kind == ForKind::kParallel) {
+      (void)LoopExtent(node);
+      loop_vars_.push_back({Range(node->begin, node->end), node->var});
     }
-    PrimExpr flattened = make_const(dtype, 0);
-    PrimExpr vector_extent = make_const(dtype, vectorize_size);
-    PrimExpr thread_extent_const = make_const(dtype, num_thread);
-    for (size_t i = 0; i < loop_vars_.size(); i++) {
-      PrimExpr extent = loop_vars_[i]->dom->extent;
-      flattened = flattened * extent + loop_vars_[i]->var;
+    return StmtExprVisitor::Visit_(node);
+  }
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *node) final {
+    if (auto tensor = node->source.as<TensorVar>())
+      has_fragment_ |= IsFragmentBuffer(*tensor);
+    return StmtExprVisitor::Visit_(node);
+  }
+  Optional<VisitInterrupt> Visit_(const TensorStoreObj *node) final {
+    if (auto tensor = node->dest.as<TensorVar>())
+      has_fragment_ |= IsFragmentBuffer(*tensor);
+    return StmtExprVisitor::Visit_(node);
+  }
+  Fragment Partition(const For &loop, size_t num_thread, int vector_size) {
+    ICHECK_GT(num_thread, 0U);
+    ICHECK_GT(vector_size, 0);
+    Visit(loop);
+    bool has_dynamic_wide_extent = false;
+    for (const auto &iv : loop_vars_) {
+      has_dynamic_wide_extent |=
+          iv->var.ty().bits() >= 64 && !TryConstInt(iv->dom->extent);
     }
-    PrimExpr access_idx = FloorDiv(flattened, vector_extent);
-    PrimExpr thd = FloorMod(access_idx, thread_extent_const);
-    PrimExpr idx = FloorDiv(access_idx, thread_extent_const) * vector_extent +
-                   FloorMod(flattened, vector_extent);
-
-    auto fragment = Fragment(loop_vars_, {idx}, {thd}, {});
+    if (num_thread == 1 && !has_fragment_ && has_dynamic_wide_extent) {
+      // Without distributed registers, one thread can traverse these axes
+      // directly. Flattening a symbolic int64 nest would introduce an
+      // extra extent product that need not fit int64 even when every source
+      // axis does. Keep the identity map and all PartitionLoop guards.
+      Array<PrimExpr> indices;
+      for (const auto &iv : loop_vars_)
+        indices.push_back(iv->var);
+      return Fragment(loop_vars_, indices, {IntImm::Int32(0)}, {});
+    }
+    PrimType dtype =
+        loop_vars_.empty() ? PrimType::Int(32) : loop_vars_.back()->var.ty();
+    // This flat coordinate is generated by the partitioner, not supplied by
+    // the user. A dynamic int32 dimension can produce more than INT32_MAX
+    // points when multiplied by another axis, even though each axis fits.
+    // Widen before that multiplication; user-provided layouts keep their
+    // original arithmetic and narrowing semantics.
+    bool widen_dynamic_index = false;
+    if (dtype.bits() < 64) {
+      for (const auto &iv : loop_vars_) {
+        if (!TryConstInt(iv->dom->extent)) {
+          dtype = PrimType::Int(64);
+          widen_dynamic_index = true;
+          break;
+        }
+      }
+    }
+    PrimExpr flat = IntImm(dtype, 0), vec = IntImm(dtype, vector_size),
+             threads = IntImm(dtype, num_thread);
+    for (const auto &iv : loop_vars_) {
+      flat = widen_dynamic_index
+                 ? flat * cast(iv->dom->extent, dtype) + cast(iv->var, dtype)
+                 : flat * iv->dom->extent + iv->var;
+    }
+    PrimExpr access = floordiv(flat, vec);
+    PrimExpr thread = floormod(access, threads);
+    PrimExpr index = floordiv(access, threads) * vec + floormod(flat, vec);
+    Fragment fragment(loop_vars_, {index}, {thread}, {});
     if (has_fragment_) {
-      // for fragment buffer, we don't need to replicate the loop layout
-      auto thread_extent = *as_const_int(fragment->ThreadExtent());
-      auto num_thread_fragment = num_thread / thread_extent;
-      fragment = fragment->Replicate(num_thread_fragment);
+      auto extent = TryConstInt(fragment->ThreadExtent());
+      ICHECK(extent && *extent > 0);
+      // Replication can occupy all threads only when there is an integral
+      // number of complete copies. Otherwise keep the existing owners;
+      // ParallelOp's thread-extent predicate excludes the inactive tail.
+      if (num_thread % *extent == 0)
+        fragment = fragment->Replicate(num_thread / *extent);
     }
     return fragment;
   }
 
 private:
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsFragmentBuffer(op->buffer)) {
-      has_fragment_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsFragmentBuffer(op->buffer)) {
-      has_fragment_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForNode *node) final {
-    if (node->kind == ForKind::kParallel) {
-      body_ = node->body;
-      loop_vars_.push_back(
-          IterVar(Range::FromMinExtent(node->min, node->extent), node->loop_var,
-                  IterVarType::kDataPar));
-    }
-    StmtExprVisitor::VisitStmt_(node);
-  }
-
-  Stmt body_;
-  PrimExpr flattened = 0;
   bool has_fragment_ = false;
-  Array<IterVar> loop_vars_;
+  Array<LayoutIterVar> loop_vars_;
 };
 
-Fragment PlanLoopPartition(const For &op, size_t num_thread,
-                           int vectorize_size) {
-  LoopPartitioner partitioner;
-  return partitioner.Partition(op, num_thread, vectorize_size);
+Fragment PlanLoopPartition(const For &op, size_t threads, int vector_size) {
+  return make_object<LoopPartitioner>()->Partition(op, threads, vector_size);
 }
 
-Fragment PlanLoopPartition(const For &op, int vectorize_size,
-                           const Range &thread_range) {
-  size_t num_thread = *as_const_int(thread_range->extent);
-  LoopPartitioner partitioner;
-  Fragment fragment = partitioner.Partition(op, num_thread, vectorize_size);
-  return fragment->BindThreadRange(thread_range);
+Fragment PlanLoopPartition(const For &op, int vector_size, const Range &range) {
+  auto threads = TryConstInt(range->extent);
+  ICHECK(threads && *threads > 0);
+  return PlanLoopPartition(op, static_cast<size_t>(*threads), vector_size)
+      ->BindThreadRange(range);
 }
 
 For PragmaUnrollLoop(For stmt) {
-  LoopPramaUnroller unroller;
-  For unrolled = Downcast<For>(unroller(std::move(stmt)));
-  return unrolled;
+  return make_object<LoopPragmaUnroller>()
+      ->Mutate(stmt)
+      .ValueOrUnchanged(stmt)
+      .as_or_throw<For>();
 }
 
-Stmt LowerParallelLoop(For loop, const Fragment &loop_layout,
-                       PrimExpr thread_index, const arith::Analyzer *analyzer,
+Stmt LowerParallelLoop(For loop, const Fragment &layout, PrimExpr thread_index,
+                       const sym::AnalyzerObj *analyzer,
                        const LayoutMap &layout_map,
                        Optional<PrimExpr> predicate, bool parallel_loop,
-                       bool require_padding_guard) {
-  For result_loop = loop;
-  // Strip parallel-loop layout/predicate annotations on the original loop.
-  // After partitioning/vectorization, keeping them can confuse later passes.
-  // Also, annotations may contain complex expressions; mutators do not visit
-  // inside annotation payloads, so explicit removal here prevents stale state
-  // from leaking into subsequent transforms.
-  // Note: Map::erase(key) is a no-op if key doesn't exist.
-  result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopLayout);
-  result_loop.CopyOnWrite()->annotations.erase(attr::kParallelLoopPredicate);
-  result_loop.CopyOnWrite()->annotations.erase(
-      attr::kParallelLoopRequiresPaddingGuard);
-
-  // Step 1: Partition the loop based on the layout (if this is a parallel loop)
+                       bool require_padding_guard, Optional<Target> target) {
+  For result = loop;
+  auto writer = result.CopyOnWrite();
+  writer->annotations.erase(attr::kParallelLoopLayout);
+  writer->annotations.erase(attr::kParallelLoopPredicate);
+  writer->annotations.erase(attr::kParallelLoopRequiresPaddingGuard);
   if (parallel_loop) {
-    // Do not carry partitioning's local bindings into vectorization or back to
-    // the caller. Both stages start from the same enclosing analysis context.
-    auto partition_analyzer = analyzer->Clone();
-    result_loop =
-        PartitionLoop(result_loop, thread_index, partition_analyzer.get(),
-                      loop_layout, require_padding_guard);
+    auto fork = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+    result = PartitionLoop(result, thread_index, fork.get(), layout,
+                           require_padding_guard);
   }
-
-  // Step 2: Vectorize the loop; the planner picks the size per loop
-  // (1 = scalar) from its access analysis.
-  result_loop = VectorizeLoop(result_loop, analyzer, layout_map);
-
-  result_loop = PragmaUnrollLoop(result_loop);
-
-  // Step 3: Wrap with predicate if provided and this is a parallel loop
-  if (predicate.defined() && parallel_loop) {
-    return IfThenElse(predicate.value(), result_loop, Stmt(), loop->span);
-  }
-
-  return result_loop;
+  result = VectorizeLoop(result, analyzer, layout_map, -1, std::move(target));
+  result = PragmaUnrollLoop(result);
+  if (predicate && parallel_loop)
+    return If(*predicate, SeqStmt(result), std::nullopt, loop->loc);
+  return result;
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

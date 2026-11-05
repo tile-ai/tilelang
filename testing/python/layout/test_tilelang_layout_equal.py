@@ -1,11 +1,9 @@
 """Tests for Layout and Fragment equality comparison."""
 
-import tilelang
-import tilelang.testing
+import pytest
+
 from tilelang.layout import Layout
 from tilelang.layout.fragment import Fragment
-
-tilelang.testing.set_random_seed()
 
 
 class TestLayoutEqual:
@@ -159,7 +157,7 @@ class TestLayoutFragmentEdgeCases:
 
     def test_constant_layout_equal(self):
         """Layouts mapping to constant should be equal."""
-        from tvm.tirx import const
+        from tvm_tirx.ir import const
 
         layout1 = Layout([32, 4], lambda i, j: const(0, "int32"))
         layout2 = Layout([32, 4], lambda i, j: const(0, "int32"))
@@ -167,7 +165,7 @@ class TestLayoutFragmentEdgeCases:
 
     def test_constant_vs_variable_layout_not_equal(self):
         """Layout mapping to constant vs variable should not be equal."""
-        from tvm.tirx import const
+        from tvm_tirx.ir import const
 
         layout1 = Layout([32, 4], lambda i, j: const(0, "int32"))
         layout2 = Layout([32, 4], lambda i, j: i)
@@ -175,4 +173,4 @@ class TestLayoutFragmentEdgeCases:
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    pytest.main([__file__])

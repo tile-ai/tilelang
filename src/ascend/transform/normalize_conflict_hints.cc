@@ -1,49 +1,22 @@
 /*!
  * \file normalize_conflict_hints.cc
- * \brief Consume conflict schedule hints into loop/root annotations.
+ * \brief Normalize scheduling assertions without escaping native definitions.
  *
- * The frontend emits a statement-form marker
- *   Evaluate(Call(tl.conflict_hint, a, b, level, cross, group,
- *                 is_conflict))
- * where `a`/`b` are each a `tl.region` Call (a concrete region) or a bare
- * buffer's data Var (the whole buffer, matched by storage key), `level` is an
- * IntImm (`-2` = tilelang_root plus every common enclosing loop, `-1` = only
- * tilelang_root's outermost sequence, non-negative = one common enclosing loop
- * counted from outermost),
- * `cross` is an IntImm (-1=any / 1=cross-iter / 0=same-iter), `group` is a
- * StringImm tag ("" = none), and `is_conflict` selects forced conflict rather
- * than forced non-conflict.
- *
- * The statement form (rather than an AttrStmt) is deliberate: its region Call
- * args are simplified/inlined by Simplify in lockstep with the real T.copy
- * accesses (an AttrStmt's `node` array is NOT descended into by Simplify, which
- * froze the region's symbolic vars and broke region matching).
- *
- * This pass runs before AutoSchedule and:
- *   - removes each marker (drops the Evaluate from its SeqStmt),
- *   - attaches each hint to the enclosing For(s) selected by `level` (for a
- *     `group`, `level` indexes the loops enclosing BOTH sites -- the common
- *     ancestor prefix -- where the cross-scope dependency is analyzed),
- *   - pairs the two half-declarations sharing a `group` tag (must appear
- *     exactly twice),
- *   - normalizes each hint into an
- *     `[a, b, IntImm(cross_code), Bool(is_conflict)]` entry appended to those
- *     Fors' `annotations["conflict_hint"]` (operands kept as Var or
- *     BufferRegion),
- *   - attaches `level=-1` hints, plus the root copy of `level=-2` hints, to
- *     tilelang_root under `tl.root_conflict_hints` for root-sequence analysis.
- *
- * AutoSchedule's dependency analysis reads the annotation at exactly the
- * sequence level being analyzed and applies the declared conflict polarity.
+ * A direct hint keeps the B20 four-field contract at its original statement
+ * site. Ancestor/root projections and grouped half-declarations instead keep
+ * their own operands in a scoped metadata record. The scheduling analysis
+ * pairs those records with source contexts; no TensorRegion, loop variable,
+ * view type, or mutable definition is hoisted into an enclosing IR header.
  */
 
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/op.h>
-#include <tvm/tirx/analysis.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -52,263 +25,374 @@
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
+#include "ir/analyzer.h"
+#include "ir/loop_math.h"
+#include "op/native_intrinsic.h"
 #include "op/utils.h"
-#include "support/check.h"
+#include "transform/common/native_layout_utils.h"
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
 using namespace ffi;
 using namespace ascend;
+using namespace prim;
 
-// Op registered in src/op/schedule_hint.cc.
-static constexpr const char *kConflictHintOpName = "tl.conflict_hint";
-static constexpr const char *kConflictHintAnnotKey = "conflict_hint";
-static constexpr int kAllEnclosingScopes = -2;
-static constexpr int kRootSequence = -1;
+namespace {
+constexpr const char *kMarker = "tl.conflict_hint";
+constexpr const char *kDirect = "conflict_hint";
+constexpr const char *kScoped = "tl.scoped_conflict_hints";
+constexpr const char *kScopeId = "tl.conflict_scope_id";
+constexpr int kAllScopes = -2;
+constexpr int kRoot = -1;
+constexpr int kNoDirectScope = -2;
+using Fields = Map<String, Any>;
+
+bool IsCallNamed(const CallObj *call, const char *name) {
+  const auto *op = call ? call->op.as<OpObj>() : nullptr;
+  return op && op->name == name;
+}
+
+struct Marker {
+  Array<Expr> operands;
+  int level;
+  int cross;
+  bool polarity;
+  String group;
+  String hint_id;
+  String role{"pair"};
+  std::vector<const ForObj *> chain;
+  int direct_scope{kNoDirectScope};
+  std::vector<const ForObj *> targets; // nullptr denotes this kernel root.
+};
 
 class ConflictHintNormalizer : public StmtExprMutator {
 public:
-  static SBlock Rewrite(SBlock root) {
-    ConflictHintNormalizer m;
-    root.CopyOnWrite()->body = m(root->body);
-    ICHECK(m.no_conflict_.stack.empty() && m.conflict_.stack.empty())
-        << "unbalanced conflict-hint loop stack";
-    m.CheckGroupsComplete(m.no_conflict_, HintKind::kNoConflict);
-    m.CheckGroupsComplete(m.conflict_, HintKind::kConflict);
-    if (!m.root_hints_.empty()) {
-      root.CopyOnWrite()->annotations.Set(kRootConflictHints,
-                                          std::move(m.root_hints_));
-    }
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+
+  static RegionStmt Rewrite(RegionStmt root) {
+    auto rewriter = make_object<ConflictHintNormalizer>();
+    rewriter->ReserveExistingIds(root->body);
+    rewriter->Scan(root->body, kRoot);
+    rewriter->ResolveGroups();
+    if (rewriter->markers_.empty())
+      return root;
+    root.CopyOnWrite()->body =
+        rewriter->Mutate(root->body).ValueOrUnchanged(root->body);
+    TVM_FFI_ICHECK_EQ(rewriter->cursor_, rewriter->markers_.size());
     return root;
   }
 
 private:
-  enum class HintKind { kNoConflict, kConflict };
+  std::vector<Marker> markers_;
+  std::vector<const ForObj *> chain_;
+  std::unordered_map<const ForObj *, String> scope_ids_;
+  std::unordered_set<std::string> used_scopes_, used_hints_;
+  size_t next_scope_{0}, next_hint_{0}, cursor_{0};
 
-  // First-seen half of each group tag, awaiting its second (and only) partner:
-  // its operand, its `level`, its `cross`, and the chain of loops enclosing it.
-  struct PendingHalf {
-    Any operand;
-    int level;
-    int cross;
-    std::vector<For> chain;
+  String NewId(const char *prefix, size_t *next,
+               std::unordered_set<std::string> *used) {
+    std::string value;
+    do {
+      value = prefix + std::to_string((*next)++);
+    } while (used->count(value));
+    used->insert(value);
+    return value;
+  }
+
+  void ReserveExistingIds(const Stmt &body) {
+    VisitNativePostOrder(body, [&](const ObjectRef &object) {
+      if (const auto *loop = object.as<ForObj>()) {
+        if (auto id = loop->annotations.Get(kScopeId)) {
+          String name = id->cast<String>();
+          scope_ids_.emplace(loop, name);
+          used_scopes_.insert(std::string(name));
+        }
+      }
+      if (const auto *call = object.as<CallObj>();
+          IsCallNamed(call, "tl.annotation")) {
+        if (auto value = ReadNativeAnnotations(call).Get(kScoped))
+          for (const Any &entry : value->cast<Array<Any>>()) {
+            auto fields = entry.cast<Fields>();
+            used_hints_.insert(
+                std::string(fields.at("hint_id").cast<String>()));
+          }
+      }
+    });
+  }
+
+  static int ConstantInteger(const Expr &expr, const char *field) {
+    auto value = expr.as<PrimExpr>();
+    auto integer = value ? TryConstInt(*value) : std::nullopt;
+    TVM_FFI_CHECK(integer && *integer >= std::numeric_limits<int32_t>::min() &&
+                      *integer <= std::numeric_limits<int32_t>::max(),
+                  ValueError)
+        << "conflict-hint marker requires a constant int32 " << field;
+    return static_cast<int>(*integer);
+  }
+
+  static Expr Operand(const Expr &value) {
+    if (value.as<TensorRegionObj>())
+      return value;
+    if (const auto *var = value.as<VarObj>()) {
+      TVM_FFI_CHECK(var->ty.as<TensorTypeObj>() || var->ty.as<PtrTypeObj>(),
+                    ValueError)
+          << "conflict-hint bare operand must be a native tensor or pointer";
+      return value;
+    }
+    if (const auto *call = value.as<CallObj>();
+        IsCallNamed(call, "tirx.tensor_data_ptr"))
+      return call->args[0].as_or_throw<TensorVar>();
+    return NormalizeToTensorRegion(value);
+  }
+
+  enum ScanExit : unsigned {
+    kFallsThrough = 0,
+    kBreaks = 1,
+    kContinues = 2,
+    kReturns = 4,
+    kMayNotFinish = 8,
   };
 
-  struct HintState {
-    // Per enclosing For (outermost first), the entries to attach on exit.
-    std::vector<Array<Any>> stack;
-    std::unordered_map<std::string, PendingHalf> pending_group;
-    // Group tags already paired, to reject a third occurrence in one kernel.
-    std::unordered_set<std::string> completed_group;
-  };
-
-  HintState no_conflict_;
-  HintState conflict_;
-  // The enclosing For identities (outermost first), retained as ObjectRef
-  // handles because grouped declarations may outlive one visitor callback.
-  std::vector<For> loop_chain_;
-  // Hints for tilelang_root's outermost sequence, attached on exit.
-  Array<Any> root_hints_;
-
-  static const char *HintName(HintKind kind) {
-    return kind == HintKind::kConflict ? "assume_conflict"
-                                       : "assume_no_conflict";
+  static unsigned AfterLoop(const ForObj *loop, unsigned body_exit) {
+    auto analyzer = CreateTileLangAnalyzer();
+    bool pure_header = SideEffect(loop->begin) <= CallEffectKind::kPure &&
+                       SideEffect(loop->end) <= CallEffectKind::kPure &&
+                       SideEffect(loop->step) <= CallEffectKind::kPure;
+    // Native For always tests var < end, including when step is negative.
+    // An empty loop does not execute a return in its body. Otherwise only a
+    // positive, non-wrapping update proves that execution reaches the suffix.
+    if (pure_header && analyzer->CanProve(loop->begin >= loop->end))
+      return kFallsThrough;
+    unsigned escaping = body_exit & (kReturns | kMayNotFinish);
+    if (!CanUseLoopBounds(loop->begin, loop->end, loop->step, analyzer.get()))
+      escaping |= kMayNotFinish;
+    // Break and Continue belong to this loop. They restrict declarations in
+    // its body, but do not restrict the next statement of an enclosing loop.
+    return escaping;
   }
 
-  HintState &State(HintKind kind) {
-    return kind == HintKind::kConflict ? conflict_ : no_conflict_;
+  unsigned Scan(const Stmt &stmt, int direct_scope) {
+    if (const auto *seq = stmt.as<SeqStmtObj>()) {
+      unsigned escaping = kFallsThrough;
+      for (const Stmt &child : seq->seq) {
+        // A direct list is unconditional in its target sequence. A jump in
+        // any preceding branch makes a suffix declaration conditional, even
+        // though the declaration itself is not syntactically inside an If.
+        escaping |= Scan(child, escaping ? kNoDirectScope : direct_scope);
+      }
+      return escaping;
+    } else if (const auto *loop = stmt.as<ForObj>()) {
+      chain_.push_back(loop);
+      unsigned escaping = Scan(loop->body, static_cast<int>(chain_.size()) - 1);
+      chain_.pop_back();
+      return AfterLoop(loop, escaping);
+    } else if (const auto *branch = stmt.as<IfObj>()) {
+      unsigned then_exit = Scan(branch->then_case, kNoDirectScope);
+      unsigned else_exit = branch->else_case
+                               ? Scan(*branch->else_case, kNoDirectScope)
+                               : kFallsThrough;
+      if (auto constant = TryConstInt(branch->condition))
+        return *constant ? then_exit : else_exit;
+      return then_exit | else_exit;
+    } else if (const auto *loop = stmt.as<WhileObj>()) {
+      unsigned escaping = Scan(loop->body, kNoDirectScope);
+      if (auto constant = TryConstInt(loop->condition); constant && !*constant)
+        return kFallsThrough;
+      return (escaping & kReturns) | kMayNotFinish;
+    } else if (const auto *scope = stmt.as<RegionStmtObj>()) {
+      // Thread launch regions do not enter the counted loop chain. A dynamic
+      // or atomic region retains its source context for the analysis index.
+      auto attribute = ReadTaskAttribute(scope);
+      bool transparent = attribute && attribute->key == "tl.loop.annotations";
+      return Scan(scope->body, transparent ? direct_scope : kNoDirectScope);
+    } else if (stmt.as<BreakObj>()) {
+      return kBreaks;
+    } else if (stmt.as<ContinueObj>()) {
+      return kContinues;
+    } else if (stmt.as<ReturnObj>()) {
+      return kReturns;
+    } else if (const auto *evaluate = stmt.as<EvaluateObj>()) {
+      const auto *call = evaluate->value.as<CallObj>();
+      if (!IsCallNamed(call, kMarker))
+        return kFallsThrough;
+      auto args = NativeIntrinsicOperands(call);
+      TVM_FFI_CHECK_EQ(args.size(), 6U, ValueError)
+          << "conflict-hint marker expects 6 arguments";
+      const auto polarity_type = args[5]->ty.as<PrimType>();
+      TVM_FFI_CHECK(polarity_type && polarity_type.value() == PrimType::Bool(),
+                    ValueError)
+          << "conflict-hint marker expects a constant boolean polarity";
+      int polarity = ConstantInteger(args[5], "polarity");
+      int level = ConstantInteger(args[2], "level");
+      int cross = ConstantInteger(args[3], "cross");
+      TVM_FFI_CHECK(level >= kAllScopes, ValueError)
+          << "conflict-hint level must be >= -2";
+      TVM_FFI_CHECK(cross >= -1 && cross <= 1, ValueError)
+          << "conflict-hint cross mode must be -1, 0 or 1";
+      const auto *group = args[4].as<StringImmObj>();
+      TVM_FFI_CHECK(group, ValueError)
+          << "conflict-hint group must be a constant string";
+      Marker marker;
+      marker.operands = {Operand(args[0]), Operand(args[1])};
+      marker.level = level;
+      marker.cross = cross;
+      marker.polarity = polarity != 0;
+      marker.group = group->value;
+      marker.chain = chain_;
+      marker.direct_scope = direct_scope;
+      markers_.push_back(std::move(marker));
+    }
+    return kFallsThrough;
   }
 
-  void CheckGroupsComplete(const HintState &state, HintKind kind) const {
-    ICHECK(state.pending_group.empty())
-        << HintName(kind) << " group '" << state.pending_group.begin()->first
-        << "' appears only once; each group must appear exactly twice";
-  }
-
-  // A resolved entry [a, b, IntImm(cross_code), Bool(is_conflict)]; a/b are
-  // Var or BufferRegion, kept verbatim.
-  static Array<Any> HintEntry(HintKind kind, const Any &a, const Any &b,
-                              int cross) {
-    Array<Any> entry;
-    entry.push_back(a);
-    entry.push_back(b);
-    entry.push_back(IntImm(DataType::Int(32), cross));
-    entry.push_back(Bool(kind == HintKind::kConflict));
-    return entry;
-  }
-
-  // Decode a marker operand: a bare buffer arrives as its data Var (a handle)
-  // and is kept as a Var (matched by storage key downstream); a tl.region Call
-  // is reconstructed into its (Simplify'd) BufferRegion.
-  static Any DecodeOperand(const PrimExpr &arg) {
-    if (arg.as<VarNode>())
-      return arg;
-    return NormalizeToBufferRegion(arg);
-  }
-
-  // Length of the longest common (outermost) prefix of two loop chains.
-  static int CommonPrefix(const std::vector<For> &x,
-                          const std::vector<For> &y) {
-    int n = static_cast<int>(std::min(x.size(), y.size()));
-    int i = 0;
-    while (i < n && x[i].same_as(y[i]))
+  static size_t CommonPrefix(const std::vector<const ForObj *> &a,
+                             const std::vector<const ForObj *> &b) {
+    size_t n = std::min(a.size(), b.size()), i = 0;
+    while (i < n && a[i] == b[i])
       ++i;
     return i;
   }
 
-  // Attach an entry at the selected sequence level. `bound` caps the
-  // addressable loop depth (for a group, the common-prefix length shared by
-  // both halves; otherwise the full stack).
-  void Attach(HintKind kind, int level, int bound, const Any &a, const Any &b,
-              int cross) {
-    HintState &state = State(kind);
-    if (level == kAllEnclosingScopes) {
-      for (int i = 0; i < bound; ++i)
-        state.stack[i].push_back(HintEntry(kind, a, b, cross));
-      root_hints_.push_back(HintEntry(kind, a, b, cross));
-      return;
+  static std::vector<const ForObj *> Targets(const Marker &marker,
+                                             size_t bound) {
+    std::vector<const ForObj *> targets;
+    if (marker.level == kRoot || marker.level == kAllScopes)
+      targets.push_back(nullptr);
+    if (marker.level == kAllScopes) {
+      for (size_t i = 0; i < bound; ++i)
+        targets.push_back(marker.chain[i]);
+    } else if (marker.level >= 0) {
+      TVM_FFI_CHECK(static_cast<size_t>(marker.level) < bound, ValueError)
+          << "conflict-hint level " << marker.level << " is out of range (only "
+          << bound << " common enclosing loop(s))";
+      targets.push_back(marker.chain[marker.level]);
     }
-    if (level == kRootSequence) {
-      root_hints_.push_back(HintEntry(kind, a, b, cross));
-      return;
-    }
-    ICHECK_GE(level, 0) << HintName(kind)
-                        << " level must be >= " << kAllEnclosingScopes
-                        << ", got " << level;
-    ICHECK(level < bound) << HintName(kind) << " level " << level
-                          << " is out of range (only " << bound
-                          << " enclosing loop(s))";
-    state.stack[level].push_back(HintEntry(kind, a, b, cross));
+    return targets;
   }
 
-  // Consume one marker Call. Returns nothing; drops the statement.
-  void ConsumeMarker(const CallNode *call) {
-    const auto &args = call->args;
-    ICHECK_EQ(args.size(), 6u) << "conflict-hint marker expects 6 args";
-    const auto *is_conflict = args[5].as<IntImmNode>();
-    ICHECK(is_conflict != nullptr && is_conflict->dtype.is_bool())
-        << "conflict-hint marker expects a constant boolean polarity";
-    HintKind kind =
-        is_conflict->value ? HintKind::kConflict : HintKind::kNoConflict;
-    HintState &state = State(kind);
-    Any a = DecodeOperand(args[0]);
-    Any b = DecodeOperand(args[1]);
-    int level = static_cast<int>(Downcast<IntImm>(args[2])->value);
-    int cross = static_cast<int>(Downcast<IntImm>(args[3])->value);
-    std::string group = Downcast<StringImm>(args[4])->value;
-    int depth = static_cast<int>(state.stack.size());
-
-    if (group.empty()) {
-      Attach(kind, level, depth, a, b, cross);
-      return;
-    }
-    // group pairing: a tag must appear exactly twice, symmetrically (which half
-    // is seen first is irrelevant). Both must carry the same `level` and
-    // `cross`. The first records its region, level, cross and enclosing loop
-    // chain; the second attaches the combined hint, bounding `level` to the LCA
-    // (longest common prefix of the two chains). A third occurrence is an
-    // error.
-    ICHECK(!state.completed_group.count(group))
-        << HintName(kind) << " group '" << group
-        << "' appears more than twice; each group must appear exactly twice";
-    auto it = state.pending_group.find(group);
-    if (it == state.pending_group.end()) {
-      state.pending_group.emplace(group,
-                                  PendingHalf{a, level, cross, loop_chain_});
-    } else {
-      ICHECK(it->second.level == level)
-          << HintName(kind) << " group '" << group
-          << "' has mismatched level between its two half-declarations ("
-          << it->second.level << " vs " << level << ")";
-      ICHECK(it->second.cross == cross)
-          << HintName(kind) << " group '" << group
-          << "' has mismatched cross between its two half-declarations ("
-          << it->second.cross << " vs " << cross << ")";
-      int lca = CommonPrefix(it->second.chain, loop_chain_);
-      Attach(kind, level, lca, it->second.operand, a, cross);
-      state.pending_group.erase(it);
-      state.completed_group.insert(group);
-    }
-  }
-
-  static bool IsZeroEvaluate(const Stmt &s) {
-    if (const auto *eval = s.as<EvaluateNode>())
-      if (auto imm = eval->value.as<IntImmNode>())
-        return imm->value == 0;
-    return false;
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(Op::Get(kConflictHintOpName))) {
-        ConsumeMarker(call);
-        return Evaluate(0); // drop; SeqStmt visitor flattens no-ops away
+  void ResolveGroups() {
+    std::unordered_map<std::string, size_t> pending;
+    std::unordered_set<std::string> completed;
+    for (size_t i = 0; i < markers_.size(); ++i) {
+      Marker &marker = markers_[i];
+      if (marker.group.empty()) {
+        marker.hint_id = NewId("h", &next_hint_, &used_hints_);
+        marker.targets = Targets(marker, marker.chain.size());
+        continue;
+      }
+      const std::string key = (marker.polarity ? "conflict:" : "no-conflict:") +
+                              std::string(marker.group);
+      TVM_FFI_CHECK(!completed.count(key), ValueError)
+          << "conflict-hint group '" << marker.group
+          << "' appears more than twice; each group must appear exactly twice";
+      auto previous = pending.find(key);
+      if (previous == pending.end()) {
+        marker.hint_id = NewId("h", &next_hint_, &used_hints_);
+        marker.role = "lhs";
+        marker.operands = {marker.operands[0]};
+        pending.emplace(key, i);
+      } else {
+        Marker &first = markers_[previous->second];
+        TVM_FFI_CHECK(first.level == marker.level, ValueError)
+            << "conflict-hint group '" << marker.group
+            << "' has mismatched level";
+        TVM_FFI_CHECK(first.cross == marker.cross, ValueError)
+            << "conflict-hint group '" << marker.group
+            << "' has mismatched cross";
+        auto targets = Targets(marker, CommonPrefix(first.chain, marker.chain));
+        first.targets = targets;
+        marker.targets = std::move(targets);
+        marker.hint_id = first.hint_id;
+        marker.role = "rhs";
+        marker.operands = {marker.operands[0]};
+        pending.erase(previous);
+        completed.insert(key);
       }
     }
-    return StmtExprMutator::VisitStmt_(op);
+    if (!pending.empty())
+      TVM_FFI_THROW(ValueError)
+          << "conflict-hint group '" << markers_[pending.begin()->second].group
+          << "' appears only once; each group must appear exactly twice";
   }
 
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> seq;
-    for (const auto &stmt : op->seq) {
-      Stmt s = VisitStmt(stmt);
-      // Drop consumed markers (rewritten to Evaluate(0)).
-      if (IsZeroEvaluate(s))
-        continue;
-      seq.push_back(s);
+  String ScopeId(const ForObj *loop) {
+    if (!loop)
+      return "root";
+    auto it = scope_ids_.find(loop);
+    if (it != scope_ids_.end())
+      return it->second;
+    String id = NewId("l", &next_scope_, &used_scopes_);
+    scope_ids_.emplace(loop, id);
+    return id;
+  }
+
+  Fields RewriteMarker(const Marker &marker) {
+    Fields output;
+    Array<String> scoped_targets;
+    for (const ForObj *target : marker.targets) {
+      bool is_direct = marker.group.empty() &&
+                       marker.direct_scope != kNoDirectScope &&
+                       ((marker.direct_scope == kRoot && target == nullptr) ||
+                        (marker.direct_scope >= 0 &&
+                         target == marker.chain[marker.direct_scope]));
+      if (is_direct) {
+        Array<Any> entry{marker.operands[0], marker.operands[1],
+                         IntImm::Int32(marker.cross),
+                         IntImm(PrimType::Bool(), marker.polarity)};
+        output.Set(target ? kDirect : kRootConflictHints, Array<Any>{entry});
+      } else {
+        scoped_targets.push_back(ScopeId(target));
+      }
     }
-    if (seq.empty())
-      return Evaluate(0);
-    if (seq.size() == 1)
-      return seq[0];
-    return SeqStmt(std::move(seq));
+    if (!scoped_targets.empty()) {
+      Fields record{{"schema_version", 1},
+                    {"hint_id", marker.hint_id},
+                    {"role", marker.role},
+                    {"operands", marker.operands},
+                    {"target_scopes", scoped_targets},
+                    {"cross", IntImm::Int32(marker.cross)},
+                    {"polarity", IntImm(PrimType::Bool(), marker.polarity)}};
+      output.Set(kScoped, Array<Any>{record});
+    }
+    return output;
   }
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Thread-binding loops (blockIdx/threadIdx) are not iteration loops the
-    // hint's `level` counts -- and they are materialized to thread_extent
-    // AttrStmts later anyway, so skip them for a consistent level numbering.
-    if (op->kind == ForKind::kThreadBinding)
-      return StmtExprMutator::VisitStmt_(op);
-    no_conflict_.stack.emplace_back();
-    conflict_.stack.emplace_back();
-    loop_chain_.push_back(GetRef<For>(op));
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    loop_chain_.pop_back();
-    Array<Any> hints = std::move(no_conflict_.stack.back());
-    Array<Any> conflict = std::move(conflict_.stack.back());
-    no_conflict_.stack.pop_back();
-    conflict_.stack.pop_back();
-    if (hints.empty() && conflict.empty())
-      return stmt;
-    for (const Any &entry : conflict)
-      hints.push_back(entry);
-    For for_node = Downcast<For>(stmt);
-    for_node.CopyOnWrite()->annotations.Set(kConflictHintAnnotKey, hints);
-    return for_node;
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    if (!IsCallNamed(op->value.as<CallObj>(), kMarker))
+      return StmtExprMutator::Mutate_(op, mode);
+    TVM_FFI_ICHECK_LT(cursor_, markers_.size());
+    return MakeNativeAnnotation(RewriteMarker(markers_[cursor_++]), op->loc);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    For loop = StmtExprMutator::Mutate_(op, mode)
+                   .ValueOrUnchanged(GetRef<Stmt>(op))
+                   .as_or_throw<For>();
+    if (auto it = scope_ids_.find(op); it != scope_ids_.end()) {
+      loop.CopyOnWrite()->annotations.Set(kScopeId, it->second);
+    }
+    return loop;
   }
 };
+} // namespace
 
-using namespace tirx::transform;
 tvm::transform::Pass NormalizeConflictHints() {
-  auto pass_func = [=](PrimFunc f, const IRModule &, const PassContext &) {
+  auto pass = [](tirx::Function f, const IRModule &,
+                 const tvm::transform::PassContext &) {
     return RewriteTilelangKernels(
         std::move(f), "NormalizeConflictHints",
         [](const TilelangKernelContext &context) {
           return ConflictHintNormalizer::Rewrite(context.root);
         },
-        /*require_kernel=*/false);
+        false);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.NormalizeConflictHints", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.NormalizeConflictHints");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.NormalizeConflictHints",
-                        NormalizeConflictHints);
+  reflection::GlobalDef().def("tl.transform.NormalizeConflictHints",
+                              NormalizeConflictHints);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

@@ -38,6 +38,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -46,6 +47,7 @@ sys.path.insert(0, str(HERE))
 
 from common import (  # noqa: E402
     COST_MODELS,
+    T,
     lower_and_extract_vector_widths,
     run_layout_inference,
     run_layout_inference_objects,
@@ -103,7 +105,13 @@ def run_anchor(modules) -> int:
         for variant, build in module.VARIANTS.items():
             tag = f"{case_name}/{variant}"
             try:
-                widths = lower_and_extract_vector_widths(build())
+                # The reviewed vector anchors assume the old Buffer fixture's
+                # 64-byte parameter alignment. Apply it only while constructing
+                # this maintenance IR; ordinary Tensor annotations remain at
+                # their conservative default and no JIT cache is involved here.
+                with patch.object(T.Tensor, "default_align", 64):
+                    program = build()
+                widths = lower_and_extract_vector_widths(program)
             except Exception as exc:  # noqa: BLE001 - report, keep going
                 print(f"ERROR {tag}: {type(exc).__name__}: {exc}")
                 failures += 1
@@ -128,7 +136,7 @@ def run_cute(modules) -> int:
     in-tree CuTe layout algebra) and by exact enumeration (oracle, numpy),
     and diff (V, issue, bw, segments). This keeps the production C++ model's
     symbolic formulation calibrated against an independent exact oracle."""
-    from tilelang import tvm  # noqa: PLC0415
+    from tvm_ffi import dtype as DataType  # noqa: PLC0415
     from tilelang.layout import Fragment  # noqa: PLC0415
 
     from cute_model import CuteScore, score_statement_cute  # noqa: PLC0415
@@ -144,7 +152,7 @@ def run_cute(modules) -> int:
                 for name, (buffer, layout) in sorted(objs["buffers"].items()):
                     if not isinstance(layout, Fragment):
                         continue
-                    dtype = tvm.DataType(buffer.dtype)
+                    dtype = DataType(buffer.dtype)
                     elem_bytes = (dtype.bits * dtype.lanes) // 8
                     if elem_bytes < 1:
                         continue  # sub-byte: outside both paths, same as C++

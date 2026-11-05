@@ -234,25 +234,49 @@ jobs:
           uv venv --python "${{ matrix.python-version }}" new
 
           source new/bin/activate
-          uv pip install -v -r requirements-test.txt
-          uv pip install -v .
+          python maint/scripts/build_native_artifacts.py stage \
+            --destination "${RUNNER_TEMP}/regression-new-stage"
+          python maint/scripts/build_native_artifacts.py build \
+            --stage "${RUNNER_TEMP}/regression-new-stage" --output "${RUNNER_TEMP}/regression-new-artifacts" \
+            --frontend uv --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+          uv pip install --find-links "${RUNNER_TEMP}/regression-new-artifacts" -v -r requirements-test.txt
+          (cd "${RUNNER_TEMP}" && "${GITHUB_WORKSPACE}/new/bin/python" \
+            "${GITHUB_WORKSPACE}/maint/scripts/verify_native_install.py" \
+            --expected-source regression-new-stage/manifest.json --output regression-new-install.json)
 
       - name: Install Main version (Baseline)
         run: |
           set -e
-          git clean -dxf -e new/ -e .cache/
-          git checkout main
-          git submodule update --init --recursive
+          # The merge ref's first parent fixes the baseline for this run. Keep
+          # both installed stacks and the current benchmark sources available.
+          BASELINE_SHA="$(git rev-parse HEAD^1)"
+          BASELINE_DIR="${RUNNER_TEMP}/tilelang-perf-baseline-${BASELINE_SHA}"
+          git worktree add --detach "${BASELINE_DIR}" "${BASELINE_SHA}"
+          git -C "${BASELINE_DIR}" submodule update --init --recursive
           uv venv --python "${{ matrix.python-version }}" old
           source old/bin/activate
 
-          uv pip install -v -r requirements-test.txt
-          uv pip install -v .
-          rm -rf tilelang build
+          if [[ -f "${BASELINE_DIR}/tilelang_packaging/compiler_manifest.py" ]]; then
+            python "${BASELINE_DIR}/maint/scripts/build_native_artifacts.py" stage \
+              --source "${BASELINE_DIR}" --destination "${RUNNER_TEMP}/regression-old-stage"
+            python "${BASELINE_DIR}/maint/scripts/build_native_artifacts.py" build \
+              --stage "${RUNNER_TEMP}/regression-old-stage" --output "${RUNNER_TEMP}/regression-old-artifacts" \
+              --frontend uv --wheel-only --install --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
+            uv pip install --find-links "${RUNNER_TEMP}/regression-old-artifacts" -v -r "${BASELINE_DIR}/requirements-test.txt"
+          else
+            uv pip install -v -r "${BASELINE_DIR}/requirements-test.txt"
+            uv pip install -v "${BASELINE_DIR}"
+          fi
 
           uv venv --python "${{ matrix.python-version }}" test_regression
           source test_regression/bin/activate
-          uv pip install -v -r requirements-test.txt
+          uv pip install pandas matplotlib tabulate
+
+          # Run one frozen harness outside both package source trees so import
+          # resolution cannot silently select the checkout instead of a wheel.
+          mkdir -p "${RUNNER_TEMP}/regression-harness/maint"
+          cp -a examples "${RUNNER_TEMP}/regression-harness/"
+          cp -a maint/scripts "${RUNNER_TEMP}/regression-harness/maint/"
 
       - name: Show ccache stats
         if: always()
@@ -292,9 +316,12 @@ jobs:
         id: perf
         run: |
           source test_regression/bin/activate
-          OLD_PYTHON=./old/bin/python NEW_PYTHON=./new/bin/python \
-            PERF_REGRESSION_MD=regression_result.md PERF_REGRESSION_PNG=regression_result.png \
-            python ./maint/scripts/test_perf_regression.py
+          cd "${RUNNER_TEMP}/regression-harness"
+          env -u PYTHONPATH -u TVM_LIBRARY_PATH -u TVM_TIRX_LIBRARY_PATH -u TVM_FFI_LIBRARY_PATH \
+            OLD_PYTHON="${GITHUB_WORKSPACE}/old/bin/python" NEW_PYTHON="${GITHUB_WORKSPACE}/new/bin/python" \
+            PERF_REGRESSION_MD="${GITHUB_WORKSPACE}/regression_result.md" \
+            PERF_REGRESSION_PNG="${GITHUB_WORKSPACE}/regression_result.png" \
+            "${GITHUB_WORKSPACE}/test_regression/bin/python" maint/scripts/test_perf_regression.py
 
       # An `if:` without a status-check function is evaluated as `success() && ...`,
       # which is false once the step above exits 1 on a regression. `!cancelled()`

@@ -167,7 +167,11 @@ def test_vector_predicate_not_is_materialized_per_lane():
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
     assert "(~" not in source
-    assert source.count(" = (!") >= 16
+    # Native BitwiseNot complements bool by comparing each lane with false;
+    # logical Not uses !. Neither may invert the packed integer carrier.
+    assert source.count(" = (!") == 8
+    assert source.count("==((ushort2*)") == 8
+    assert "= (bool)0;" in source
 
 
 if __name__ == "__main__":

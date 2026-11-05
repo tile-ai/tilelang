@@ -1,7 +1,7 @@
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 def _get_issue_2307_source() -> str:

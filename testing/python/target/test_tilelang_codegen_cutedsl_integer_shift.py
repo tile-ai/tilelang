@@ -1,3 +1,4 @@
+import tvm_ffi
 import pytest
 
 import tilelang.language as T
@@ -11,7 +12,7 @@ def _lower_cutedsl(program):
     if not tvm.runtime.enabled("cuda"):
         pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
 
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
+    build_cutedsl = tvm_ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
     if build_cutedsl is None:
         pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
 

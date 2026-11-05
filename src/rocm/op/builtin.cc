@@ -5,42 +5,62 @@
 
 #include "builtin.h"
 
-#include "op/builtin_registry.h"
+#include "op/native_intrinsic.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
 
-TIR_DEFINE_TL_BUILTIN(ds_read_tr16_b64)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure));
+const Op &ds_read_tr16_b64() {
+  static const Op op = Op::Get("tl.ds_read_tr16_b64");
+  return op;
+}
 
-TIR_DEFINE_TL_BUILTIN(ds_read_tr8_b64)
-    .set_num_inputs(1)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kPure));
+const Op &ds_read_tr8_b64() {
+  static const Op op = Op::Get("tl.ds_read_tr8_b64");
+  return op;
+}
 
-TIR_DEFINE_TL_BUILTIN(tvm_mfma).set_num_inputs(12).set_attr<TCallEffectKind>(
-    "TCallEffectKind", Integer(CallEffectKind::kOpaque));
+const Op &tvm_mfma() {
+  static const Op op = Op::Get("tl.tvm_mfma");
+  return op;
+}
 
-TIR_DEFINE_TL_BUILTIN(tvm_mfma_store)
-    .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+const Op &tvm_mfma_store() {
+  static const Op op = Op::Get("tl.tvm_mfma_store");
+  return op;
+}
 
-TIR_DEFINE_TL_BUILTIN(tvm_rdna_wmma)
-    .set_num_inputs(12)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+const Op &tvm_rdna_wmma() {
+  static const Op op = Op::Get("tl.tvm_rdna_wmma");
+  return op;
+}
 
-TIR_DEFINE_TL_BUILTIN(tvm_rdna_wmma_store)
-    .set_num_inputs(6)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
+const Op &tvm_rdna_wmma_store() {
+  static const Op op = Op::Get("tl.tvm_rdna_wmma_store");
+  return op;
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  DefineNativeIntrinsic(OpDef("tl.ds_read_tr16_b64"), 1, 1,
+                        CallEffectKind::kPure,
+                        NativeIntrinsicResult::kAnyScalar, false);
+  DefineNativeIntrinsic(OpDef("tl.ds_read_tr8_b64"), 1, 1,
+                        CallEffectKind::kPure,
+                        NativeIntrinsicResult::kAnyScalar, false);
+  DefineNativeIntrinsic(OpDef("tl.tvm_mfma"), 12, 12, CallEffectKind::kOpaque,
+                        NativeIntrinsicResult::kAnyScalar, false);
+  DefineNativeIntrinsic(OpDef("tl.tvm_mfma_store"), 6, 6,
+                        CallEffectKind::kOpaque,
+                        NativeIntrinsicResult::kAnyScalar, false);
+  DefineNativeIntrinsic(OpDef("tl.tvm_rdna_wmma"), 12, 12,
+                        CallEffectKind::kOpaque,
+                        NativeIntrinsicResult::kAnyScalar, false);
+  DefineNativeIntrinsic(OpDef("tl.tvm_rdna_wmma_store"), 6, 6,
+                        CallEffectKind::kOpaque,
+                        NativeIntrinsicResult::kAnyScalar, false);
+}
 
 } // namespace tl
 } // namespace tvm
-
-#undef TIR_DEFINE_TL_BUILTIN

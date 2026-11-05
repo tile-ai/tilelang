@@ -11,19 +11,20 @@ import pytest
 import tilelang
 import tilelang.testing
 from tilelang import tvm
+from tvm_ffi import dtype as DataType
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
 from tilelang.env import env
-from tvm import tirx
+from tvm_tirx import tirx
 
 
 def _params():
     n = tirx.Var("n", "int32")
     return [
-        KernelParam(tvm.DataType("float16"), [n, 64]),
-        KernelParam(tvm.DataType("int8"), [n * 2, 8]),
-        KernelParam(tvm.DataType("float8_e4m3"), [4, 4]),
-        KernelParam(tvm.DataType("int32"), []),
+        KernelParam(DataType("float16"), [n, 64]),
+        KernelParam(DataType("int8"), [n * 2, 8]),
+        KernelParam(DataType("float8_e4m3"), [4, 4]),
+        KernelParam(DataType("int32"), []),
     ]
 
 

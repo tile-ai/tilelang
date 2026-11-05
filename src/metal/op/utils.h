@@ -16,12 +16,23 @@ namespace tvm {
 namespace tl {
 namespace metal {
 
-inline bool IsSIMDGroupBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "metal.simdgroup";
+inline int RequireStaticInt(const PrimExpr &value, const char *description) {
+  auto constant = value.as<IntImmObj>();
+  TVM_FFI_CHECK(constant, ValueError)
+      << description << " requires a constant integer, got " << value;
+  auto result = constant->value.as<int>();
+  TVM_FFI_CHECK(result.has_value(), ValueError)
+      << description << " must fit int32, got " << constant->value;
+  return *result;
 }
 
-inline bool IsCooperativeTensorBuffer(const Buffer &buffer) {
-  return buffer.defined() && buffer.scope() == "metal.cooperative_tensor";
+inline bool IsSIMDGroupBuffer(const TensorVar &buffer) {
+  return buffer.defined() && buffer.scope().name() == "metal.simdgroup";
+}
+
+inline bool IsCooperativeTensorBuffer(const TensorVar &buffer) {
+  return buffer.defined() &&
+         buffer.scope().name() == "metal.cooperative_tensor";
 }
 
 inline std::pair<int, int> ComputeSquareWarpPartition(int num_warps, int M,

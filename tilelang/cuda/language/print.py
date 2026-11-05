@@ -3,12 +3,18 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
-from tvm import tirx
+from tilelang.language import _native
+
+from tilelang.language import _native as tirx
 from typing import Any
-from tilelang.cuda.debug import device_assert as device_assert
 from tilelang.language.kernel import get_thread_bindings
 from tilelang.language.common import alloc_shared, copy, macro, serial
 from tilelang.language.utils import index_to_coordinates
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tilelang.cuda.debug import device_assert
 
 __all__ = ["device_assert", "print"]
 
@@ -51,7 +57,7 @@ def print_global_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Bu
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
-            coords = index_to_coordinates(i, buffer.shape)
+            coords = index_to_coordinates(i, buffer.ty.shape)
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
@@ -71,7 +77,7 @@ def print_shared_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Bu
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
-            coords = index_to_coordinates(i, buffer.shape)
+            coords = index_to_coordinates(i, buffer.ty.shape)
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
@@ -88,12 +94,12 @@ def print_fragment_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.
     Returns:
         tirx.PrimExpr: The TIR expression for the debug print operation.
     """
-    smem = alloc_shared(buffer.shape, buffer.dtype, "shared")
+    smem = alloc_shared(buffer.ty.shape, _native.dtype_of(buffer), "shared")
     copy(buffer, smem)
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
-            coords = index_to_coordinates(i, buffer.shape)
+            coords = index_to_coordinates(i, buffer.ty.shape)
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
 
 
@@ -120,7 +126,7 @@ def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buf
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
-            coords = index_to_coordinates(i, buffer.shape)
+            coords = index_to_coordinates(i, buffer.ty.shape)
             tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
@@ -152,46 +158,46 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
 
         # Flatten the buffer for consistent printing. This assumes a 1D flattened buffer.
         buffer = obj
-        if buffer.scope() == "local":
+        if str(buffer.ty.scope) == "local":
             # Get the number of elements in the buffer.
             elems = 1
-            for dim in buffer.shape:
+            for dim in buffer.ty.shape:
                 elems *= dim
             condition = True
             if not msg:
-                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+                msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
             print_local_buffer_with_condition(condition, buffer, elems, msg)
-        elif buffer.scope() == "local.fragment":
+        elif str(buffer.ty.scope) == "local.fragment":
             # Get the number of elements in the buffer.
             elems = 1
-            for dim in buffer.shape:
+            for dim in buffer.ty.shape:
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = tx == main_lane and ty == 0 and tz == 0
+            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
             if not msg:
-                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+                msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
             print_fragment_buffer_with_condition(condition, buffer, elems, msg)
-        elif buffer.scope() in {"shared", "shared.dyn"}:
+        elif str(buffer.ty.scope) in {"shared", "shared.dyn"}:
             # Get the number of elements in the buffer.
             elems = 1
-            for dim in buffer.shape:
+            for dim in buffer.ty.shape:
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = tx == main_lane and ty == 0 and tz == 0
+            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
             if not msg:
-                msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+                msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
             print_shared_buffer_with_condition(condition, buffer, elems, msg)
-        elif buffer.scope() == "global":
+        elif str(buffer.ty.scope) == "global":
             # Get the number of elements in the buffer.
             elems = 1
-            for dim in buffer.shape:
+            for dim in buffer.ty.shape:
                 elems *= dim
             condition = True
             print_global_buffer_with_condition(condition, buffer, elems, msg)
         else:
-            raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
+            raise ValueError(f"Unsupported buffer scope: {str(buffer.ty.scope)}")
 
     elif isinstance(obj, tirx.PrimExpr):
         if not msg:
@@ -205,3 +211,11 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
     else:
         # Unsupported object type.
         raise ValueError(f"Unexpected type: {type(obj)}. Supported types are tirx.Buffer, tirx.PrimExpr, and None.")
+
+
+def __getattr__(name):
+    if name != "device_assert":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from tilelang.cuda.debug import device_assert
+
+    return device_assert

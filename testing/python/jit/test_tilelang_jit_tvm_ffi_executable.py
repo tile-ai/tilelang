@@ -4,22 +4,20 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tilelang import tvm
+from tvm_tirx import ir, tirx
+from tilelang.engine.param import KernelParam
 from tilelang.jit.kernel import JITKernel
-from tilelang.jit.abi import prepare_tvm_ffi_callee_allocated_outputs
+from tilelang.jit.abi import FunctionABIPlan, prepare_tvm_ffi_callee_allocated_outputs
 from tilelang.jit.adapter import tvm_ffi as tvm_ffi_adapter
 from tilelang.jit.adapter.tvm_ffi import TVMFFIKernelAdapter
 
-tirx = tvm.tirx
+
+def _tensor_parameter(name, dtype="float32"):
+    return ir.Var(name, tirx.TensorType((1,), dtype, layout="default"))
 
 
-class _FakeKernelParam:
-    shape = [1]
-    dtype = SimpleNamespace(bits=32, lanes=1)
-
-    @staticmethod
-    def torch_dtype():
-        return torch.float32
+def _empty_function(params):
+    return tirx.Function(params, ir.Evaluate(ir.const(0)), ret_type=ir.PrimType("void"))
 
 
 class _TestAdapter(TVMFFIKernelAdapter):
@@ -30,13 +28,13 @@ class _TestAdapter(TVMFFIKernelAdapter):
 
 def _make_adapter():
     adapter = _TestAdapter.__new__(_TestAdapter)
-    tir_param = object()
-    adapter.params = [_FakeKernelParam()]
+    tir_param = _tensor_parameter("input")
+    adapter.params = [KernelParam.from_tensor(tir_param)]
     adapter.result_idx = []
-    adapter._test_prim_func = SimpleNamespace(
-        params=[tir_param],
-        buffer_map={tir_param: SimpleNamespace(dtype="float32")},
-    )
+    adapter._test_prim_func = _empty_function([tir_param])
+    # The constructor normally owns this native signature plan. This fixture
+    # bypasses library loading only; argument validation still uses real IR.
+    adapter._abi_plan = FunctionABIPlan(adapter.prim_func, adapter.result_idx)
     adapter._process_dynamic_symbolic = lambda: {}
     adapter.dynamic_symbolic_map = {}
     adapter._ffi_callee_allocated_output_abi = False
@@ -148,7 +146,7 @@ def test_exporting_disk_cached_library_to_its_own_path_succeeds(tmp_path):
 
 def test_callee_allocated_output_dispatch_uses_single_main_entry(monkeypatch):
     adapter, _ = _make_adapter()
-    adapter.params = [_FakeKernelParam(), _FakeKernelParam()]
+    adapter.params = [KernelParam.from_tensor(_tensor_parameter(name)) for name in ("input", "output")]
     adapter.result_idx = [1]
     adapter._ffi_callee_allocated_output_abi = True
     calls = []
@@ -174,8 +172,8 @@ def test_subbyte_output_uses_callee_allocated_abi():
     adapter, _ = _make_adapter()
     adapter.params = [SimpleNamespace(dtype=SimpleNamespace(bits=4))]
     adapter.result_idx = [0]
-    output_param = tirx.Var("output", "handle")
-    source = tirx.PrimFunc([output_param], tirx.Evaluate(0))
+    output_param = _tensor_parameter("output", "int4")
+    source = _empty_function([output_param])
     adapter._test_prim_func, _ = prepare_tvm_ffi_callee_allocated_outputs(source, 0, supports_callee_allocated_outputs=True)
 
     assert adapter._uses_ffi_callee_allocated_output_abi()
@@ -184,17 +182,17 @@ def test_subbyte_output_uses_callee_allocated_abi():
 def test_unsupported_backend_keeps_preallocated_output_abi():
     adapter, _ = _make_adapter()
     adapter.result_idx = [0]
-    output_param = tirx.Var("output", "handle")
-    source = tirx.PrimFunc([output_param], tirx.Evaluate(0))
+    output_param = _tensor_parameter("output")
+    source = _empty_function([output_param])
     adapter._test_prim_func, _ = prepare_tvm_ffi_callee_allocated_outputs(source, 0, supports_callee_allocated_outputs=False)
 
     assert not adapter._uses_ffi_callee_allocated_output_abi()
 
 
 def test_capability_flag_gates_callee_allocated_attr():
-    input_param = tirx.Var("input", "handle")
-    output_param = tirx.Var("output", "handle")
-    source = tirx.PrimFunc([input_param, output_param], tirx.Evaluate(0))
+    input_param = _tensor_parameter("input")
+    output_param = _tensor_parameter("output")
+    source = _empty_function([input_param, output_param])
 
     prepared, _ = prepare_tvm_ffi_callee_allocated_outputs(source, -1)
     assert "tilelang_callee_allocated_outputs" not in prepared.attrs
@@ -212,9 +210,9 @@ def test_capability_flag_gates_callee_allocated_attr():
 
 
 def test_manual_out_idx_is_exposed_to_tvm_ffi_lowering_without_mutating_source():
-    input_param = tirx.Var("input", "handle")
-    output_param = tirx.Var("output", "handle")
-    source = tirx.PrimFunc([input_param, output_param], tirx.Evaluate(0))
+    input_param = _tensor_parameter("input")
+    output_param = _tensor_parameter("output")
+    source = _empty_function([input_param, output_param])
 
     prepared, output_indices = prepare_tvm_ffi_callee_allocated_outputs(source, -1)
 

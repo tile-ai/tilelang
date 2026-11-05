@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tvm import IRModule, s_tir, tirx
-from tvm.target import Target
+from tvm_tirx import IRModule, tirx
+from tvm_tirx.target import Target
 
 import tilelang
 from tilelang.backend.pass_pipeline import PassPipeline
@@ -34,10 +34,12 @@ def allow_autoschedule(pass_ctx=None) -> bool:
 
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+    mod = tilelang.transform.NormalizeAliasAnnotations()(mod)
+    mod = tilelang.transform.LowerTensorSpec()(mod)
     mod = tirx.transform.BindTarget(target)(mod)
     # Materialize the target-neutral kernel-launch nest emitted by T.Kernel.
     # Ascend's NPU launch is a real 1-D blockIdx.x core grid, so the grid loop
-    # becomes a thread_extent AttrStmt; there is no threadIdx at kernel scope,
+    # becomes a native launch_thread region; there is no threadIdx at kernel scope,
     # so the `tx/ty/tz = tl.launch_thread_idx(...)` placeholders are dropped.
     # Thread domains only exist inside T.SimtVF, which emits its own thread
     # scopes below the launch nest. `cthread` is Ascend's sub-block-id launch
@@ -125,18 +127,17 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.DecoupleTypeCast()(mod)
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    mod = tilelang.transform.LowerAccessPtr()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.HoistNonRestrictParams()(mod)
 
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
-    mod = tilelang.transform.LowerOpaqueBlock()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = ascend_transform.RewriteAscendBufferVersionLayout()(mod)
+    mod = tilelang.transform.LowerTensorLayouts()(mod)
     mod = tirx.transform.NarrowDataType(32)(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
 
     # Retype packed 4-bit float (float4_e2m1fn) storage into the 1-byte
@@ -147,23 +148,25 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = ascend_transform.AscendRemoveNoOp()(mod)
-    mod = s_tir.transform.HoistIfThenElse().passes[0](mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tilelang.transform.HoistIf()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = ascend_transform.AscendRemoveNoOp()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
-    mod = s_tir.transform.InferFragment()(mod)
+    mod = tilelang.transform.InferWmmaFragmentMetadata()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     if allow_global_thread_synchronization(pass_ctx=pass_ctx):
         mod = ascend_transform.AscendThreadSync("global")(mod)
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = ascend_transform.MarkScalarDcacheBypass()(mod)
-    mod = tilelang.transform.SplitHostDevice()(mod)
+    # Keep calls as native IR until device storage planning and synchronization
+    # have fixed the parameter list and per-kernel launch resources.
+    mod = tilelang.transform.OutlineDeviceRegions()(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     if not auto_schedule_enabled:
@@ -180,10 +183,23 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = ascend_transform.AscendThreadSync("shared")(mod)
     mod = ascend_transform.AscendThreadSync("shared.dyn")(mod)
+    # Scoped conflict hints and execution regions belong to the scheduler and
+    # synchronization passes above. Finalize them only after their consumers;
+    # outlined host and device functions now have different targets.
+    mod = tilelang.transform.FinalizeAnnotations()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
-    mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.Simplify()(mod)
+    # The scheduler and synchronization analysis need the declared region and
+    # effect mask. Only the final address/launch ABI may erase that information.
+    mod = tilelang.transform.LowerAccessPtr()(mod)
     mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    # Ascend owns native BF16/FP8 registers and memory instructions. Generic
+    # software compute legalization changes their fixed-width operand types.
+    # The host codegen boundary separately legalizes host-only storage after
+    # the packed ABI has recorded the original tensor dtypes.
+    mod = tilelang.transform.MakePackedAPI()(mod)
+    mod = tilelang.transform.HoistNonRestrictParams(finalize=True)(mod)
+    mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
     return mod
 
 

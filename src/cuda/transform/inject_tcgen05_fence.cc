@@ -1,320 +1,173 @@
 /*!
  * \file inject_tcgen05_fence.cc
- * \brief Inject tcgen05.fence::before_thread_sync / after_thread_sync at
- *        conservative TCGEN05/TMEM synchronization boundaries on Blackwell
- *        (SM100+) targets.
+ * \brief Keep TMEM visibility at native thread-synchronization boundaries.
  *
- * On Blackwell, the tcgen05 accumulator (TMEM) lives in its own address
- * space. Regular thread synchronization barriers (__syncthreads, mbarrier)
- * do NOT automatically make TMEM writes visible across threads. Two PTX
- * fence instructions bridge this gap:
- *
- *   tcgen05.fence::before_thread_sync  — flush TMEM state before barrier
- *   tcgen05.fence::after_thread_sync   — pull TMEM state after barrier
- *
- * This pass currently handles three patterns when the function targets SM100+
- * and contains tcgen05/TMEM operations:
- *
- *   1. Wrap every tvm_storage_sync("shared") / ("shared.dyn") with
- *      before+after fences.
- *   2. Insert after_thread_sync after mbarrier_wait_parity when a linear
- *      scan of following statements reaches tcgen05/TMEM use before another
- *      synchronization boundary.
- *   3. Insert before_thread_sync before ptx_arrive_barrier /
- *      ptx_arrive_cluster_barrier when a linear reverse scan reaches
- *      tcgen05/TMEM use before another synchronization boundary.
- *
- * It intentionally does not add an extra before_thread_sync around
- * tcgen05_mma_arrive(), because the underlying tcgen05.commit.*.mbarrier
- * already carries the producer-side ordering.
+ * Ordinary shared-memory barriers do not alone order the TMEM proxy. Wrap
+ * shared syncs with before/after fences and fence linear wait/use or use/arrive
+ * handoffs. tcgen05.commit (tcgen05_mma_arrive) already carries producer-side
+ * ordering and must not receive another before-thread-sync fence.
  */
+#include "cuda/op/builtin.h"
+#include "cuda/target_utils.h"
+#include "op/builtin.h"
+#include "transform/common/native_layout_utils.h"
 
-#include "support/check.h"
-#include <tvm/ir/transform.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/op/gpu.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <utility>
-
-#include "backend/common/target_utils.h"
-#include "cuda/op/builtin.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-using tvm::transform::PassContext;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-/*!
- * \brief Check if a call is tvm_storage_sync("shared") or
- *        tvm_storage_sync("shared.dyn").
- */
-bool IsSharedStorageSync(const CallNode *call) {
-  if (!call || !call->op.same_as(builtin::tvm_storage_sync())) {
-    return false;
-  }
-  if (call->args.empty())
-    return false;
-  const auto *scope = call->args[0].as<StringImmNode>();
-  if (!scope)
-    return false;
-  return scope->value == "shared" || scope->value == "shared.dyn";
+const CallObj *EvaluateCall(const Stmt &statement) {
+  auto *evaluate = statement.as<EvaluateObj>();
+  return evaluate ? evaluate->value.as<CallObj>() : nullptr;
 }
 
-bool IsMbarrierWaitParity(const CallNode *call) {
+bool SharedSync(const CallObj *call) {
+  if (!call || !call->op.same_as(gpu_storage_sync_op()) || call->args.empty())
+    return false;
+  const auto *scope = call->args[0].as<StringImmObj>();
+  return scope && (scope->value == "shared" || scope->value == "shared.dyn");
+}
+
+bool Wait(const CallObj *call) {
   return call && call->op.same_as(mbarrier_wait_parity());
 }
 
-bool IsPlainBarrierArrive(const CallNode *call) {
-  return call && (call->op.same_as(builtin::ptx_arrive_barrier()) ||
+bool Arrive(const CallObj *call) {
+  return call && (call->op.same_as(ptx_arrive_barrier()) ||
                   call->op.same_as(ptx_arrive_cluster_barrier()));
 }
 
-bool IsBeforeFenceCall(const CallNode *call) {
+bool BeforeFence(const CallObj *call) {
   return call && call->op.same_as(tcgen05_before_thread_sync());
 }
 
-bool IsAfterFenceCall(const CallNode *call) {
+bool AfterFence(const CallObj *call) {
   return call && call->op.same_as(tcgen05_after_thread_sync());
 }
 
-const CallNode *GetEvaluateCall(const Stmt &stmt) {
-  if (const auto *eval = stmt.as<EvaluateNode>()) {
-    return eval->value.as<CallNode>();
-  }
-  return nullptr;
-}
-
-bool IsTcgen05OrTmemCall(const CallNode *call) {
-  if (!call || IsBeforeFenceCall(call) || IsAfterFenceCall(call)) {
+bool Tcgen05OrTmem(const CallObj *call) {
+  if (!call || BeforeFence(call) || AfterFence(call))
     return false;
-  }
-
   return call->op.same_as(ptx_tcgen05_mma_ss()) ||
          call->op.same_as(ptx_tcgen05_mma_ts()) ||
          call->op.same_as(ptx_tcgen05_mma_blockscaled_ss()) ||
+         call->op.same_as(ptx_tcgen05_cp_warpx4()) ||
          call->op.same_as(tcgen05_ld()) || call->op.same_as(tcgen05_st()) ||
          call->op.same_as(tcgen05_mma_arrive()) ||
          call->op.same_as(ptx_init_tensor_memory()) ||
          call->op.same_as(ptx_deallocate_tensor_memory());
 }
 
-bool StmtUsesTcgen05OrTmem(const Stmt &stmt) {
+bool UsesTmem(const Stmt &statement) {
   bool found = false;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    if (found) {
-      return;
-    }
-    if (const auto *call = node.as<CallNode>()) {
-      found = IsTcgen05OrTmemCall(call);
-    }
+  VisitNativePostOrder(statement, [&](const ObjectRef &object) {
+    if (const auto *call = object.as<CallObj>())
+      found |= Tcgen05OrTmem(call);
   });
   return found;
 }
 
-bool IsBeforeFenceStmt(const Stmt &stmt) {
-  return IsBeforeFenceCall(GetEvaluateCall(stmt));
-}
-
-bool IsAfterFenceStmt(const Stmt &stmt) {
-  return IsAfterFenceCall(GetEvaluateCall(stmt));
-}
-
-bool IsFenceSyncBoundary(const CallNode *call) {
-  return IsSharedStorageSync(call) || IsMbarrierWaitParity(call) ||
-         IsPlainBarrierArrive(call) ||
+bool SynchronizationBoundary(const CallObj *call) {
+  return SharedSync(call) || Wait(call) || Arrive(call) ||
          (call && call->op.same_as(tcgen05_mma_arrive()));
 }
 
-bool HasUpcomingTcgen05Use(const Array<Stmt> &seq, int start_index) {
-  for (int i = start_index + 1; i < static_cast<int>(seq.size()); ++i) {
-    const Stmt &stmt = seq[i];
-    if (IsAfterFenceStmt(stmt)) {
+bool UpcomingUse(const Array<Stmt> &statements, size_t at) {
+  for (size_t i = at + 1; i < statements.size(); ++i) {
+    auto *call = EvaluateCall(statements[i]);
+    if (AfterFence(call))
       return false;
-    }
-    if (StmtUsesTcgen05OrTmem(stmt)) {
+    if (UsesTmem(statements[i]))
       return true;
-    }
-    if (IsBeforeFenceStmt(stmt) || IsFenceSyncBoundary(GetEvaluateCall(stmt))) {
+    if (BeforeFence(call) || SynchronizationBoundary(call))
       return false;
-    }
   }
   return false;
 }
 
-bool HasPriorTcgen05Use(const Array<Stmt> &seq, int start_index) {
-  for (int i = start_index - 1; i >= 0; --i) {
-    const Stmt &stmt = seq[i];
-    if (IsBeforeFenceStmt(stmt)) {
+bool PriorUse(const Array<Stmt> &statements, size_t at) {
+  for (size_t i = at; i-- > 0;) {
+    auto *call = EvaluateCall(statements[i]);
+    if (BeforeFence(call))
       return false;
-    }
-    if (StmtUsesTcgen05OrTmem(stmt)) {
+    if (UsesTmem(statements[i]))
       return true;
-    }
-    if (IsAfterFenceStmt(stmt) || IsFenceSyncBoundary(GetEvaluateCall(stmt))) {
+    if (AfterFence(call) || SynchronizationBoundary(call))
       return false;
-    }
   }
   return false;
 }
 
-/*!
- * \brief Check whether the function body contains any tcgen05 / TMEM
- *        operations that warrant fence insertion.
- */
-bool HasTcgen05Operations(const Stmt &body) {
-  return StmtUsesTcgen05OrTmem(body);
+Stmt Fence(bool before, Location loc) {
+  auto op = before ? tcgen05_before_thread_sync() : tcgen05_after_thread_sync();
+  return Evaluate(Call(PrimType::Void(), op, {}, {}, {}, loc), loc);
 }
 
-inline Stmt MakeBeforeFenceStmt() {
-  return Evaluate(Call(DataType::Void(), tcgen05_before_thread_sync(), {}));
-}
-
-inline Stmt MakeAfterFenceStmt() {
-  return Evaluate(Call(DataType::Void(), tcgen05_after_thread_sync(), {}));
-}
-
-inline void AppendFlattened(Array<Stmt> *out, const Stmt &stmt) {
-  if (!stmt.defined()) {
-    return;
-  }
-  if (const auto *seq = stmt.as<SeqStmtNode>()) {
-    for (const Stmt &inner : seq->seq) {
-      out->push_back(inner);
-    }
-    return;
-  }
-  out->push_back(stmt);
-}
-
-/*!
- * \brief Rewriter for conservative TCGEN05/TMEM handoff points.
- *
- * Supported rewrites:
- *
- *   tcgen05_before_thread_sync();
- *   __syncthreads();               // tvm_storage_sync("shared")
- *   tcgen05_after_thread_sync();
- *
- *   mbarrier_wait_parity(...);
- *   tcgen05_after_thread_sync();   // when the subsequent linear region uses
- *                                  // tcgen05/TMEM before another sync point
- *
- *   tcgen05_before_thread_sync();  // when the prior linear region used
- *   ptx_arrive_barrier(...);       // tcgen05/TMEM after the previous sync
- */
 class Tcgen05FenceRewriter : public StmtExprMutator {
 public:
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    bool saved_in_seq = in_seq_rewrite_;
-    in_seq_rewrite_ = true;
-
-    Array<Stmt> mutated_children;
-    for (const Stmt &stmt : op->seq) {
-      mutated_children.push_back(VisitStmt(stmt));
-    }
-
-    in_seq_rewrite_ = saved_in_seq;
-
-    Array<Stmt> flat_seq;
-    for (const Stmt &stmt : mutated_children) {
-      AppendFlattened(&flat_seq, stmt);
-    }
-
-    Array<Stmt> rewritten;
-    for (int i = 0; i < static_cast<int>(flat_seq.size()); ++i) {
-      const Stmt &stmt = flat_seq[i];
-      const CallNode *call = GetEvaluateCall(stmt);
-
-      if (IsSharedStorageSync(call)) {
-        if (i == 0 || !IsBeforeFenceStmt(flat_seq[i - 1])) {
-          rewritten.push_back(MakeBeforeFenceStmt());
-        }
-        rewritten.push_back(stmt);
-        if (i + 1 >= static_cast<int>(flat_seq.size()) ||
-            !IsAfterFenceStmt(flat_seq[i + 1])) {
-          rewritten.push_back(MakeAfterFenceStmt());
-        }
-        continue;
+  using StmtExprMutator::Mutate_;
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *sequence,
+                            InplaceMode mode) final {
+    Array<Stmt> children;
+    for (const Stmt &child : sequence->seq)
+      children.push_back(Mutate(child, mode).ValueOrUnchanged(child));
+    auto flat = SeqStmt(children, sequence->loc)->seq;
+    Array<Stmt> output;
+    for (size_t i = 0; i < flat.size(); ++i) {
+      const Stmt &statement = flat[i];
+      const auto *call = EvaluateCall(statement);
+      if (SharedSync(call)) {
+        if (i == 0 || !BeforeFence(EvaluateCall(flat[i - 1])))
+          output.push_back(Fence(true, statement->loc));
+        output.push_back(statement);
+        if (i + 1 == flat.size() || !AfterFence(EvaluateCall(flat[i + 1])))
+          output.push_back(Fence(false, statement->loc));
+      } else if (Wait(call)) {
+        output.push_back(statement);
+        bool manual =
+            i + 1 < flat.size() && AfterFence(EvaluateCall(flat[i + 1]));
+        if (!manual && UpcomingUse(flat, i))
+          output.push_back(Fence(false, statement->loc));
+      } else if (Arrive(call)) {
+        bool manual = i > 0 && BeforeFence(EvaluateCall(flat[i - 1]));
+        if (!manual && PriorUse(flat, i))
+          output.push_back(Fence(true, statement->loc));
+        output.push_back(statement);
+      } else {
+        output.push_back(statement);
       }
-
-      if (IsMbarrierWaitParity(call)) {
-        rewritten.push_back(stmt);
-        bool has_manual_after = i + 1 < static_cast<int>(flat_seq.size()) &&
-                                IsAfterFenceStmt(flat_seq[i + 1]);
-        if (!has_manual_after && HasUpcomingTcgen05Use(flat_seq, i)) {
-          rewritten.push_back(MakeAfterFenceStmt());
-        }
-        continue;
-      }
-
-      if (IsPlainBarrierArrive(call)) {
-        bool has_manual_before = i > 0 && IsBeforeFenceStmt(flat_seq[i - 1]);
-        if (!has_manual_before && HasPriorTcgen05Use(flat_seq, i)) {
-          rewritten.push_back(MakeBeforeFenceStmt());
-        }
-        rewritten.push_back(stmt);
-        continue;
-      }
-
-      rewritten.push_back(stmt);
     }
-
-    if (rewritten.size() == 1) {
-      return rewritten[0];
-    }
-    return SeqStmt(std::move(rewritten));
+    return SeqStmt(output, sequence->loc);
   }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    Stmt stmt = StmtExprMutator::VisitStmt_(op);
-    if (in_seq_rewrite_) {
-      return stmt;
-    }
-    const auto *call = GetEvaluateCall(stmt);
-    if (IsSharedStorageSync(call)) {
-      return SeqStmt(
-          {MakeBeforeFenceStmt(), std::move(stmt), MakeAfterFenceStmt()});
-    }
-    return stmt;
-  }
-
-private:
-  bool in_seq_rewrite_{false};
 };
-
 } // namespace
 
 tvm::transform::Pass InjectTcgen05Fence() {
-  auto pass_func = [](PrimFunc f, const IRModule &, const PassContext &) {
-    // Only apply on SM100+ (Blackwell) targets.
-    Optional<Target> opt_target = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!opt_target.defined() ||
-        !TargetHasSMVersionGE(opt_target.value(), 100)) {
-      return f;
-    }
-    // Only apply if the function actually uses tcgen05 / TMEM operations.
-    if (!HasTcgen05Operations(f->body)) {
-      return f;
-    }
-    Tcgen05FenceRewriter rewriter;
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
+  auto rewrite = [](tirx::Function function, IRModule,
+                    tvm::transform::PassContext) {
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    if (!target || !TargetHasSMVersionGE(*target, 100) ||
+        function->GetAttr(tvm::attr::kDeclaration).value_or(false) ||
+        !UsesTmem(function->body))
+      return function;
+    auto rewriter = make_object<Tcgen05FenceRewriter>();
+    auto body = function->body;
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(body).ValueOrUnchanged(body);
+    return function;
   };
-  return tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                             "tl.InjectTcgen05Fence", {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0,
+                                             "tl.InjectTcgen05Fence");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.InjectTcgen05Fence",
-                        InjectTcgen05Fence);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.InjectTcgen05Fence",
+                                   InjectTcgen05Fence);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

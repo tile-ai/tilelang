@@ -2,7 +2,7 @@
 
 See ``viewer.py`` for the CLI entry point and ``README.md`` for usage. This is a
 debugging complement to ``tilelang.utils.pass_diff``: where pass_diff shows a
-text-level diff of the TVMScript, this tool renders the SBlock structure tree and
+text-level diff of the script, this tool renders the native Function/RegionStmt tree and
 expands tile ops by field name, with per-class operator highlighting.
 """
 

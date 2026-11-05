@@ -4,7 +4,7 @@ import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.engine.lower import lower
-from tvm import tirx
+from tvm_tirx import ir
 
 
 def _predicate_load_store_kernel():
@@ -41,8 +41,8 @@ def test_predicate_load_store_ascend_codegen():
 
 @pytest.mark.parametrize("op_name", ["pld", "pst"])
 def test_predicate_load_store_builtins_are_opaque(op_name):
-    op = tirx.op.Op.get(f"tl.simd.{op_name}")
-    assert op.get_attr("TCallEffectKind") == tirx.CallEffectKind.Opaque
+    op = ir.Op.get(f"tl.simd.{op_name}")
+    assert op.get_attr("TCallEffectKind") == ir.CallEffectKind.Opaque
 
 
 @pytest.mark.parametrize(

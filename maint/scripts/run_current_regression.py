@@ -22,7 +22,7 @@ from regression_all import select_benchmarks
 
 
 DEFAULT_CACHE_DIR = Path.home() / ".tilelang" / "perf-regression"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _now_iso() -> str:
@@ -41,12 +41,68 @@ def _hash_text(text: str, length: int = 16) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:length]
 
 
-def _git_state(repo_root: Path) -> dict[str, object]:
-    commit = _run_git(["rev-parse", "HEAD"], repo_root)
-    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root)
-    status = _run_git(["status", "--porcelain=v1"], repo_root)
+def _git_source_state(repo_root: Path) -> tuple[str, str, bool]:
+    """Fingerprint source bytes, including checked-out Git dependencies.
+
+    Git's parent diff only describes a dirty gitlink, not its contents. Inspect
+    each initialized child even when local Git settings hide submodule changes.
+    Git enumerates untracked nested repositories as directories; recurse into
+    their source files without hashing private .git metadata or ignored files.
+    """
+
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", *args], cwd=repo_root)
+
+    head = subprocess.run(["git", "rev-parse", "--verify", "-q", "HEAD"], cwd=repo_root, capture_output=True)
+    if head.returncode not in (0, 1):
+        head.check_returncode()
+    commit = head.stdout.decode().strip()  # An untracked nested repository may be unborn.
+    status = git("status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
     dirty = bool(status)
-    dirty_hash = _hash_text(status) if dirty else None
+    fingerprint = hashlib.sha256(commit.encode() + b"\0" + status)
+    diff_args = ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all"]
+    fingerprint.update(git(*diff_args, *(["HEAD"] if commit else [])))
+    if not commit:
+        fingerprint.update(git(*diff_args, "--cached"))
+
+    for entry in git("ls-files", "--stage", "-z").split(b"\0"):
+        if not entry:
+            continue
+        metadata, raw_path = entry.split(b"\t", 1)
+        mode, expected_commit, _stage = metadata.split()
+        if mode != b"160000":
+            continue
+        path = repo_root / os.fsdecode(raw_path)
+        fingerprint.update(b"gitlink\0" + entry + b"\0")
+        if path.is_symlink():
+            fingerprint.update(os.fsencode(os.readlink(path)))
+            dirty = True
+        elif (path / ".git").exists():
+            child_commit, child_fingerprint, child_dirty = _git_source_state(path)
+            fingerprint.update(child_fingerprint.encode())
+            dirty |= child_dirty or child_commit.encode() != expected_commit
+        else:
+            fingerprint.update(b"uninitialized")
+
+    for raw_path in git("ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
+        if not raw_path:
+            continue
+        path = repo_root / os.fsdecode(raw_path)
+        fingerprint.update(b"untracked\0" + raw_path + b"\0")
+        if path.is_symlink():
+            fingerprint.update(b"symlink\0" + os.fsencode(os.readlink(path)))
+        elif path.is_dir():
+            _child_commit, child_fingerprint, _child_dirty = _git_source_state(path)
+            fingerprint.update(b"repository\0" + child_fingerprint.encode())
+        else:
+            fingerprint.update(b"file\0" + hashlib.sha256(path.read_bytes()).digest())
+    return commit, fingerprint.hexdigest(), dirty
+
+
+def _git_state(repo_root: Path) -> dict[str, object]:
+    commit, fingerprint, dirty = _git_source_state(repo_root)
+    branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], repo_root)
+    dirty_hash = fingerprint[:16] if dirty else None
     commit_key = f"{commit}-dirty-{dirty_hash}" if dirty_hash else commit
     return {
         "commit": commit,
@@ -69,6 +125,21 @@ def _environment_metadata() -> dict[str, object]:
         import tilelang
 
         meta["tilelang"] = getattr(tilelang, "__version__", "unknown")
+        import tvm_ffi
+
+        build_info = tvm_ffi.get_global_func("tl.CompilerBuildInfo", allow_missing=True)
+        if build_info is not None:
+            from tilelang.cache.kernel_cache import KernelCache
+
+            meta["compiler"] = {
+                "kind": "native-tirx",
+                "build": dict(build_info()),
+                "libraries": KernelCache._get_tilelang_lib_stamp(),
+            }
+        else:
+            # Older checkouts have no paired-provider registry entry. Keep
+            # their results explicitly separate without importing native TIRx.
+            meta["compiler"] = {"kind": "legacy"}
     except Exception as exc:
         meta["tilelang_error"] = repr(exc)
 
@@ -96,6 +167,7 @@ def _environment_key(metadata: dict[str, object]) -> str:
         "machine": metadata.get("machine"),
         "python": metadata.get("python"),
         "tilelang": metadata.get("tilelang"),
+        "compiler": metadata.get("compiler"),
         "torch": metadata.get("torch"),
         "torch_cuda": metadata.get("torch_cuda"),
         "cuda_device_name": metadata.get("cuda_device_name"),

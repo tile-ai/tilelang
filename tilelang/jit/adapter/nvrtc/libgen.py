@@ -1,18 +1,4 @@
-"""NVRTC Library Generator for TileLang.
-
-Compiles CUDA kernels at runtime using NVRTC and manages resulting binaries.
-
-Why NVRTC instead of nvcc:
-- No offline compilation step, enables true JIT workflows
-- Works without CUDA toolkit installed (only requires driver)
-- Allows kernel specialization based on runtime parameters
-
-Key responsibilities:
-- Compile CUDA source to cubin using NVRTC API
-- Generate accompanying Python launcher code
-- Load compiled cubin and extract kernel handles
-- Manage library lifecycle (load/unload)
-"""
+"""Compile NVRTC cubins and load their native host/launch metadata."""
 
 from __future__ import annotations
 import importlib
@@ -21,10 +7,10 @@ import os.path as osp
 import tempfile
 from types import ModuleType
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
-from tilelang import tvm as tvm
 from tilelang.jit.adapter.libgen import LibraryGenerator
+from tilelang.jit.adapter.device_py_host import load_cuda_kernels
 from tilelang.jit.adapter.utils import is_cuda_target
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, NVRTC_UNAVAILABLE_MESSAGE
 from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
@@ -32,34 +18,20 @@ from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
 logger = logging.getLogger(__name__)
 
 if is_nvrtc_available:
-    import cuda.bindings.driver as cuda
     from tilelang.contrib.nvrtc import compile_cuda, get_nvrtc_version
 else:
     raise ImportError(NVRTC_UNAVAILABLE_MESSAGE)
 
 
 class NVRTCLibraryGenerator(LibraryGenerator):
-    """Runtime compiler and loader for NVRTC-compiled CUDA kernels.
+    """Retain source, cubin, and serializable Python host as a matched artifact.
 
-    Lifecycle:
-        1. compile_lib(): CUDA source → cubin + Python launcher
-        2. load_lib(): cubin → loaded library + kernel handles
-        3. pymodule.call(): Execute kernels via Python launcher
-        4. __del__: Cleanup (unload library)
-
-    Why three files (cu, cubin, py):
-        - .cu: Source for debugging, kept in temp directory
-        - .cubin: Compiled binary, loaded by CUDA driver
-        - .py: Launch code, imported as Python module
-
-    Attributes:
-        host_func: Generated Python launch code (from wrapper)
-        culib: CUDA library handle (CUlibrary)
-        pymodule: Imported Python module containing call() function
+    Packed functions own their provider CUDA modules. Device/context setup and
+    launch attributes follow the same runtime path as other native adapters.
     """
 
     host_func: str | None = None
-    culib: cuda.CUlibrary | None = None
+    kernels: dict | None = None
     pymodule: ModuleType | None = None
     pypath: str | None = None
 
@@ -105,21 +77,10 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         self.host_func = host_func
 
     def load_lib(self, lib_path: str | None = None):
-        """Load compiled cubin and Python launcher into memory.
+        """Read the host schema and create provider modules for the cubin.
 
-        Why two loads:
-            1. Import Python module for launch logic
-            2. Load cubin via CUDA Driver API for kernel handles
-
-        Context synchronization: CUDA context must be current before loading.
-        If not, use torch.cuda.synchronize() to establish context.
-
-        Args:
-            lib_path: Path to .cubin file (optional, uses self.libpath if None)
-
-        Side effects:
-            - Sets self.pymodule to imported Python module
-            - Sets self.culib to CUDA library handle
+        The provider loads each device's CUDA module when it is first called;
+        importing a cached artifact does not synchronize the current device.
         """
         if lib_path is None:
             lib_path = self.libpath
@@ -129,16 +90,9 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         self.pypath = lib_path.replace(".cubin", ".py")
         self.pymodule = self.import_from_file("kernel", self.pypath)
 
-        # Ensure the context is valid
-        ctx = cuda.cuCtxGetCurrent()[1]
-        if cuda.cuCtxGetApiVersion(ctx)[0] != cuda.CUresult.CUDA_SUCCESS:
-            import torch
-
-            torch.cuda.synchronize()
-
-        result, self.culib = cuda.cuLibraryLoadFromFile(bytes(lib_path, "utf-8"), [], [], 0, [], [], 0)
-        if result != cuda.CUresult.CUDA_SUCCESS:
-            raise RuntimeError(f"Failed to load library: {lib_path}, error: {result}")
+        if getattr(self.pymodule, "_native_host_schema", None) != 1:
+            raise ValueError("Stale NVRTC host cache; recompile with the native host schema")
+        self.kernels = load_cuda_kernels(lib_path, self.pymodule._kernel_specs)
 
     def compile_lib(self, timeout: float | None = None):
         """Compile CUDA source to cubin using NVRTC and write output files.
@@ -212,12 +166,13 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             if self.compile_flags:
                 options += [item for flag in self.compile_flags for item in flag.split() if item not in options]
 
-            cubin_bytes = compile_cuda(self.lib_code, target_format="cubin", options=options, verbose=verbose)
+            with self.target:
+                cubin_bytes = compile_cuda(self.lib_code, target_format="cubin", options=options, verbose=verbose)
             with open(libpath, "wb") as f:
                 f.write(cubin_bytes)
 
             src.write(self.lib_code)
-            src.flush()
+            src.close()
 
             self.srcpath = src.name
             self.libpath = libpath
@@ -230,16 +185,7 @@ class NVRTCLibraryGenerator(LibraryGenerator):
             raise ValueError(f"Unsupported target: {target}")
 
     def __del__(self):
-        """Cleanup: unload CUDA library when object is destroyed.
-
-        Critical for resource management - CUDA libraries consume GPU memory.
-        Failure to unload is logged but not raised (destructor can't fail).
-
-        Why explicit unload:
-            Python GC doesn't know about GPU resources, must release manually.
-        """
-        if self.culib:
-            result = cuda.cuLibraryUnload(self.culib)[0]
-            if result != cuda.CUresult.CUDA_SUCCESS:
-                logger.warning(f"Failed to unload library: {self.libpath}")
-            self.culib = None
+        """Release this generator's references to provider-owned functions."""
+        # Native packed functions retain their CUDA modules. Releasing the
+        # references uses the provider's module lifetime and unload contract.
+        self.kernels = None

@@ -26,7 +26,7 @@ analysis when validity cannot be established.
 
 ## Buffer rank and bounds
 
-Enforce these contracts for `BufferLoad`, `BufferStore`, buffer regions, and
+Enforce these contracts for `TensorLoad`, `TensorStore`, tensor regions, and
 pointer-style accesses:
 
 - Require the number of indices to match the logical buffer rank unless the

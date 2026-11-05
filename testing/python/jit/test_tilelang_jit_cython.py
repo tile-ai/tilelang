@@ -1,4 +1,6 @@
 from tilelang import tvm as tvm
+from tvm_tirx import ir, tirx
+from tvm_tirx.tirx.layout import Iter
 import tilelang.language as T
 import tilelang.testing
 import tilelang
@@ -12,12 +14,11 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     from tilelang.engine.param import KernelParam
     from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter, CythonKernelWrapper
 
-    size = tvm.tirx.Var("size", "int64")
-    a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
-    b_buffer = tvm.tirx.decl_buffer((size,), "float32", name="B")
-    func = tvm.tirx.PrimFunc(
-        [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
-    )
+    size = ir.Var("size", ir.PrimType("int64"))
+    layout = tirx.TileLayout.from_iters([Iter(2, size, "m"), Iter(3, 1, "m")])
+    a_buffer = ir.Var("A", tirx.TensorType((2, 3), "float32", layout=layout))
+    b_buffer = ir.Var("B", tirx.TensorType((size,), "float32", layout="default"))
+    func = tirx.Function([a_buffer, b_buffer], ir.Evaluate(ir.const(0)), ret_type=ir.PrimType("void"))
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
     adapter.ir_module = tvm.IRModule({"main": func})
     adapter.result_idx = []
@@ -29,7 +30,7 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
             return 0
 
     lib = CaptureLibrary()
-    params = [KernelParam.from_buffer(buffer) for buffer in (a_buffer, b_buffer)]
+    params = [KernelParam.from_tensor(buffer) for buffer in (a_buffer, b_buffer)]
     wrapper = CythonKernelWrapper([], params, lib)
     wrapper.set_dynamic_symbolic_map(adapter._process_dynamic_symbolic())
     wrapper.set_dynamic_symbolic_sources(adapter._process_dynamic_symbolic_sources())

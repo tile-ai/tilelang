@@ -12,11 +12,13 @@ drift). See docs/issue_2913/codegen_final.md for the design.
 import re
 
 import pytest
+import tvm_ffi
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
 
 N = 128
 
@@ -157,14 +159,14 @@ def test_same_line_statements_reemit_directive():
 )
 @pytest.mark.parametrize("emit", [None, False, True], ids=["default", "disabled", "enabled"])
 def test_host_and_metal_line_directives(codegen, target, emit):
-    build = tvm.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
+    build = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
     if build is None:
         pytest.skip(f"{codegen} codegen is not built")
     source_name = tvm.ir.SourceName(__file__)
-    entry_span = tvm.ir.Span(source_name, 10, 10, 0, 1)
-    stmt_span = tvm.ir.Span(source_name, 20, 20, 0, 1)
-    body = tvm.tirx.SeqStmt([tvm.tirx.Evaluate(tvm.tirx.call_extern("int32", "consume", value), span=stmt_span) for value in (1, 2)])
-    func = tvm.tirx.PrimFunc([], body, span=entry_span).with_attr("global_symbol", "line_kernel")
+    entry_span = ir.SourceLoc(source_name, 10, 0, 10, 1)
+    stmt_span = ir.SourceLoc(source_name, 20, 0, 20, 1)
+    body = ir.SeqStmt([ir.Evaluate(tirx.call_extern("consume", ir.IntImm("int32", value), ty="int32"), loc=stmt_span) for value in (1, 2)])
+    func = tirx.Function([], body, ir.PrimType("void"), loc=entry_span).with_attr("global_symbol", "line_kernel")
     if target == "metal":
         func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
         func = func.with_attr("tirx.kernel_launch_params", [])

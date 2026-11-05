@@ -11,6 +11,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace cpu {
 
@@ -25,7 +26,7 @@ struct Copy {
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     return LowerNormalCopy(op, lower_args, analyzer);
   }
 };

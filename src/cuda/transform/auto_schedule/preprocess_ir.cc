@@ -40,13 +40,14 @@ namespace tl {
 namespace cuda {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
 
 // The callee's op name with "." replaced by "_".
-std::string CallKind(const CallNode *call) {
-  if (const auto *op = call->op.as<OpNode>()) {
+std::string CallKind(const CallObj *call) {
+  if (const auto *op = call->op.as<OpObj>()) {
     std::string name = op->name;
     std::replace(name.begin(), name.end(), '.', '_');
     return name;
@@ -58,8 +59,8 @@ std::string CallKind(const CallNode *call) {
 // false on the first violation.
 bool CheckCalls(const Stmt &body) {
   bool ok = true;
-  PostOrderVisit(body, [&ok](const ObjectRef &node) {
-    const auto *call = node.as<CallNode>();
+  VisitNativePostOrder(body, [&ok](const ObjectRef &node) {
+    const auto *call = node.as<CallObj>();
     if (call == nullptr || !ok)
       return;
     if (call->op.same_as(tl::loop_break())) {
@@ -78,7 +79,7 @@ bool CheckCalls(const Stmt &body) {
       ok = false;
       return;
     }
-    if (const auto *op = call->op.as<OpNode>()) {
+    if (const auto *op = call->op.as<OpObj>()) {
       if (std::string(op->name).find("atomic") != std::string::npos) {
         LOG(WARNING)
             << "AutoWarpSpecialization skipped: cannot schedule atomic op '"
@@ -96,8 +97,8 @@ bool CheckCalls(const Stmt &body) {
 // commit-group machinery.
 bool CheckHostsNoAsync(const Stmt &stmt, const Target &target) {
   bool ok = true;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallNode>();
+  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
+    const auto *call = node.as<CallObj>();
     if (call == nullptr || !ok)
       return;
     TileOperator tile_op = ParseOperator(GetRef<Call>(call));
@@ -126,37 +127,42 @@ bool CheckHostsNoAsync(const Stmt &stmt, const Target &target) {
   return ok;
 }
 
-class OpIdNormalizer : public StmtMutator {
+class OpIdNormalizer : public StmtExprMutator {
 public:
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
   static Optional<Stmt> Rewrite(Stmt body, const Target &target) {
-    OpIdNormalizer normalizer(target);
-    normalizer.CollectIds(body);
-    Stmt result = normalizer(std::move(body));
-    if (!normalizer.ok_)
+    auto normalizer = make_object<OpIdNormalizer>(target);
+    normalizer->CollectIds(body);
+    Stmt result = normalizer->Mutate(body).ValueOrUnchanged(body);
+    if (!normalizer->ok_)
       return std::nullopt;
     return result;
   }
-
-private:
   explicit OpIdNormalizer(Target target) : target_(std::move(target)) {}
 
-  // The scheduler and the materializer treat only a bare Evaluate as a
-  // directly scheduled call, so a wrapped asynchronous op must decline.
+private:
   void CheckOpaqueOp(const Stmt &stmt) {
     ok_ = ok_ && CheckHostsNoAsync(stmt, target_);
   }
 
   void CollectIds(const Stmt &stmt) {
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (const auto *attr = node.as<AttrStmtNode>()) {
-        if (attr->attr_key == kWSOpIdKey)
-          used_ids_.insert(ExtractOpId(Any(attr->value)));
-      } else if (const auto *loop = node.as<ForNode>()) {
+    VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
+      if (const auto *region = node.as<RegionStmtObj>()) {
+        if (auto attr = WSAttribute(region))
+          if (attr.value().at("key").cast<String>() == kWSOpIdKey)
+            used_ids_.insert(ExtractOpId(attr.value().at("value")));
+      } else if (const auto *loop = node.as<ForObj>()) {
         if (auto value = loop->annotations.Get(kWSOpIdKey))
-          used_ids_.insert(ExtractOpId(value.value()));
-      } else if (const auto *call = node.as<CallNode>()) {
-        if (auto value = call->annotations.Get(kWSOpIdKey))
-          used_ids_.insert(ExtractOpId(Any(value.value())));
+          used_ids_.insert(ExtractOpId(*value));
+      } else if (const auto *evaluate = node.as<EvaluateObj>()) {
+        if (auto id = WSNextOpId(GetRef<Stmt>(evaluate)))
+          used_ids_.insert(*id);
+      } else if (const auto *call = node.as<CallObj>()) {
+        if (call->op.same_as(Op::Get("tl.annotation")))
+          return;
+        if (auto value = ReadWSCall(call).annotations.Get(kWSOpIdKey))
+          used_ids_.insert(ExtractOpId(*value));
       }
     });
   }
@@ -170,78 +176,108 @@ private:
   }
 
   Stmt WrapWithId(const Stmt &stmt, const std::string &kind) {
-    return AttrStmt(Integer(0), kWSOpIdKey, StringImm(FreshId(kind)), stmt,
-                    stmt->span);
+    return MakeNativeAttribute(nullptr, kWSOpIdKey, FreshId(kind),
+                               SeqStmt(stmt), stmt->loc);
   }
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    // Other wrappers (assumptions, kernel metadata,
-    // T.annotate_ws_pipeline_depth) are transparent.
-    if (op->attr_key != kWSOpIdKey)
-      return StmtMutator::VisitStmt_(op);
-    // A while loop under an existing wrapper is a scope: keep the wrapper,
-    // keep the loop, and normalize only the loop body (re-dispatching the
-    // while would wrap it a second time and turn the scope into an op).
-    // Anything else is one indivisible op.
-    if (const auto *wl = op->body.as<WhileNode>()) {
-      While loop = GetRef<While>(wl);
-      loop.CopyOnWrite()->body = VisitStmt(wl->body);
-      return AttrStmt(op->node, op->attr_key, op->value, std::move(loop),
-                      op->span);
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
+    Array<Stmt> statements;
+    bool pending = false;
+    for (const Stmt &statement : op->seq) {
+      if (WSNextOpId(statement)) {
+        TVM_FFI_CHECK(!pending, ValueError) << "Consecutive WS Bind markers";
+        statements.push_back(statement);
+        pending = true;
+      } else if (pending) {
+        TVM_FFI_CHECK(statement.as<BindObj>(), ValueError)
+            << "A WS Bind marker must immediately precede a Bind";
+        statements.push_back(statement);
+        pending = false;
+      } else if (const auto *bind = statement.as<BindObj>()) {
+        statements.push_back(
+            WSMarkNext(FreshId(std::string(bind->var->name)), bind->loc));
+        statements.push_back(statement);
+      } else {
+        statements.push_back(
+            Mutate(statement, mode).ValueOrUnchanged(statement));
+      }
     }
-    Stmt stmt = GetRef<Stmt>(op);
-    CheckOpaqueOp(stmt);
-    return stmt;
+    TVM_FFI_CHECK(!pending, ValueError) << "Dangling WS Bind marker";
+    return WSSequence(statements, op->loc);
   }
 
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    const auto *call = op->value.as<CallNode>();
-    if (call == nullptr)
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    auto attr = WSAttribute(op);
+    if (!attr) {
+      Stmt stmt = GetRef<Stmt>(op);
+      CheckOpaqueOp(stmt);
+      return WrapWithId(stmt, "block");
+    }
+    if (attr.value().at("key").cast<String>() != kWSOpIdKey)
+      return StmtExprMutator::Mutate_(op, mode);
+    // A single while is a scope; an explicit group remains one opaque op.
+    if (op->body.size() == 1) {
+      if (const auto *wl = op->body[0].as<WhileObj>()) {
+        auto body = Mutate(wl->body, mode).ValueOrUnchanged(wl->body);
+        auto loop = While(wl->condition, body, wl->loc);
+        return RegionStmt(op->op, op->args, op->body_params, op->attrs,
+                          SeqStmt(loop), op->result_vars, op->loc);
+      }
+    }
+    CheckOpaqueOp(op->body);
+    return Unchanged();
+  }
+
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (!call)
       return WrapWithId(GetRef<Stmt>(op), "op");
-    if (call->annotations.count(kWSOpIdKey))
-      return GetRef<Stmt>(op);
-    auto annotations = call->annotations;
-    annotations.Set(kWSOpIdKey, StringImm(FreshId(CallKind(call))));
-    return Evaluate(Call(call->dtype, call->op, call->args,
-                         std::move(annotations), call->span));
+    // Layout/schedule metadata is not a schedulable runtime operation.
+    if (call->op.same_as(Op::Get("tl.annotation")))
+      return Unchanged();
+    auto annotations = ReadWSCall(call).annotations;
+    if (annotations.count(kWSOpIdKey))
+      return Unchanged();
+    annotations.Set(kWSOpIdKey, FreshId(CallKind(call)));
+    return Evaluate(RewriteWSCall(call, annotations), op->loc);
   }
 
-  Stmt VisitStmt_(const WhileNode *op) final {
-    While loop = GetRef<While>(op);
-    loop.CopyOnWrite()->body = VisitStmt(op->body);
-    return WrapWithId(loop, "while");
+  UnchangedOr<Stmt> Mutate_(const WhileObj *op, InplaceMode mode) final {
+    auto body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    return WrapWithId(While(op->condition, body, op->loc), "while");
   }
 
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    return WrapWithId(GetRef<Stmt>(op), std::string(op->buffer->name));
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op, InplaceMode) final {
+    auto tensor = op->dest.as<TensorVar>();
+    return WrapWithId(GetRef<Stmt>(op),
+                      tensor ? std::string(tensor->get()->name) : "store");
   }
 
-  Stmt VisitStmt_(const BindNode *op) final {
-    return WrapWithId(GetRef<Stmt>(op), std::string(op->var->name_hint));
+  UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode) final {
+    // Normally handled by SeqStmt so the definition remains in its scope.
+    return SeqStmt({WSMarkNext(FreshId(std::string(op->var->name)), op->loc),
+                    GetRef<Stmt>(op)},
+                   op->loc);
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    Stmt stmt = GetRef<Stmt>(op);
-    CheckOpaqueOp(stmt);
-    return WrapWithId(stmt, "block");
+  UnchangedOr<Stmt> Mutate_(const AssertStmtObj *op, InplaceMode) final {
+    return WrapWithId(GetRef<Stmt>(op), "assert");
   }
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Sequential loops (serial, unrolled) are scopes; parallel and
-    // vectorized loops are single opaque ops. Both carry the id in the
-    // loop annotations, so recurse only into scope bodies.
-    if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled) {
-      CheckOpaqueOp(GetRef<For>(op));
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    For loop = GetRef<For>(op);
+    if (op->kind != ForKind::kDefault && op->kind != ForKind::kUnrolled) {
+      CheckOpaqueOp(loop);
       if (op->annotations.count(kWSOpIdKey))
-        return GetRef<For>(op);
+        return Unchanged();
       const char *kind = op->kind == ForKind::kParallel     ? "parallel"
                          : op->kind == ForKind::kVectorized ? "vectorize"
                                                             : "loop";
-      For loop = GetRef<For>(op);
       loop.CopyOnWrite()->annotations.Set(kWSOpIdKey, FreshId(kind));
       return loop;
     }
-    For loop = Downcast<For>(StmtMutator::VisitStmt_(op));
+    auto body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    loop.CopyOnWrite()->body = body;
     if (!loop->annotations.count(kWSOpIdKey))
       loop.CopyOnWrite()->annotations.Set(
           kWSOpIdKey,

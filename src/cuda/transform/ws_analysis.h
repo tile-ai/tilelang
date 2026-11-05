@@ -8,8 +8,10 @@
  */
 #pragma once
 
+#include <tvm/ir/stmt.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
 
 #include <optional>
@@ -24,10 +26,12 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
+using namespace ffi;
 
 using BufferRemap =
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>;
-using BufferLayoutMap = std::unordered_map<Var, std::pair<Buffer, Layout>,
+    std::unordered_map<TensorVar, TensorVar, ObjectPtrHash, ObjectPtrEqual>;
+using BufferLayoutMap = std::unordered_map<Var, std::pair<TensorVar, Layout>,
                                            ObjectPtrHash, ObjectPtrEqual>;
 
 enum class TileStmtKind {
@@ -47,7 +51,7 @@ Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt);
 /// Hand-written synchronization or TMA control: barriers, arrives, waits,
 /// raw TMA instructions, and block-wide syncs. A kernel using these
 /// manages a protocol the schedule cannot see.
-bool IsBarrierOrTmaControlCall(const CallNode *call);
+bool IsBarrierOrTmaControlCall(const CallObj *call);
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, TMA
 /// store, or consumer using coarse pre-layout checks.
@@ -57,7 +61,7 @@ TileStmtKind ClassifyCopy(const CopyNode *copy, Target target);
 TileStmtKind ClassifyStmt(const Stmt &stmt, Target target);
 
 struct GemmInfo {
-  Buffer accumulator;
+  TensorVar accumulator{ffi::UnsafeInit{}};
   int wg_wait;
 };
 
@@ -75,16 +79,25 @@ bool HasManualWarpSpecialization(const Stmt &stmt);
 /// TMA. TMA supports identity (linear) layouts and the three standard
 /// swizzle modes (32B / 64B / 128B). Any other layout (e.g. padded,
 /// Volta-style) cannot be used with TMA.
-bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer);
+bool IsTmaCompatibleLayout(const Layout &layout, const TensorVar &buffer);
 
-/// Merge one block's "layout_map" annotation into `layouts`, keyed by the
-/// buffer's data var. Var-keyed entries are resolved against the block's
-/// allocations.
-void CollectAnnotatedLayouts(const SBlock &block, BufferLayoutMap &layouts);
+/// Read explicit native annotation payloads, keyed by the TensorVar identity.
+/// Metadata stays in operands so type/shape/layout substitutions remain
+/// visible.
+void CollectAnnotatedLayouts(const Stmt &body, BufferLayoutMap &layouts);
 
 /// Rewrite every use of a remapped buffer (loads, stores, region roots) to
-/// the replacement, including bare uses of the old data vars.
+/// the replacement, including typed TensorVar uses in addresses and metadata
+/// payloads.
 Stmt RemapBuffers(Stmt stmt, const BufferRemap &remap);
+
+/// Decode an annotated call without treating the metadata Tuple as an operand.
+TileOpArguments ReadWSCall(const CallObj *call);
+
+/// A typed call whose user spelling carries annotations retains explicit
+/// payload uses.
+Call RewriteWSCall(const CallObj *call, const Map<String, Any> &annotations,
+                   Optional<Op> replacement_op = std::nullopt);
 
 } // namespace tl
 } // namespace tvm

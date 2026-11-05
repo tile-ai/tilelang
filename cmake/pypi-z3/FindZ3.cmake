@@ -1,9 +1,14 @@
 if(Z3_FOUND)
     return()
 endif()
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
+if(Python_EXECUTABLE)
+    set(_tilelang_z3_python "${Python_EXECUTABLE}")
+else()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_tilelang_z3_python "${Python3_EXECUTABLE}")
+endif()
 execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -c "import z3; print(z3.__path__[0])"
+    COMMAND "${_tilelang_z3_python}" -c "import z3; print(z3.__path__[0])"
     OUTPUT_VARIABLE Z3_PATH
     OUTPUT_STRIP_TRAILING_WHITESPACE
     RESULT_VARIABLE Z3_PYTHON_RESULT
@@ -12,6 +17,12 @@ if(NOT Z3_PYTHON_RESULT EQUAL 0 OR Z3_PATH STREQUAL "")
     message(FATAL_ERROR "Failed to locate z3 Python package. Ensure z3-solver>=4.13.0 is installed.")
 endif()
 message("-- Find Z3 in path: ${Z3_PATH}")
+# The PyPI mode follows the selected build interpreter. A reconfigure with a
+# different environment must not reuse headers or a library cached by the old
+# interpreter. Explicit external Z3 installations use USE_PYPI_Z3=OFF instead.
+foreach(_tilelang_z3_item Z3_INCLUDE_DIR Z3_LIBRARY Z3_RUNTIME_LIBRARY Z3_IMPORT_LIBRARY)
+    unset(${_tilelang_z3_item} CACHE)
+endforeach()
 find_path(Z3_INCLUDE_DIR NO_DEFAULT_PATH NAMES z3++.h PATHS ${Z3_PATH}/include)
 if(WIN32)
     find_file(Z3_RUNTIME_LIBRARY NO_DEFAULT_PATH NAMES libz3.dll z3.dll PATHS ${Z3_PATH}/bin ${Z3_PATH}/lib ${Z3_PATH}/lib64)

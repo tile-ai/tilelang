@@ -11,9 +11,12 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
-TVM_REGISTER_PASS_CONFIG_OPTION(kCPUParallel, Bool);
-TVM_REGISTER_PASS_CONFIG_OPTION(kCPUParallelMinTrip, Integer);
+TVM_FFI_STATIC_INIT_BLOCK() {
+  transform::PassContext::RegisterConfigOption<bool>(kCPUParallel);
+  transform::PassContext::RegisterConfigOption<int64_t>(kCPUParallelMinTrip);
+}
 
 } // namespace tl
 } // namespace tvm

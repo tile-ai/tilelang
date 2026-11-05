@@ -1,3 +1,4 @@
+#include "ir/loop_math.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -37,17 +38,14 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/function.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -62,18 +60,75 @@
 #include "ascend/transform/attr.h"
 #include "buffer_alias.h"
 #include "buffer_version.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
-#include "transform/common/attr.h"
+#include "op/builtin.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ascend;
 using ffi::GetRef;
 
 namespace {
+
+// A native If owns two distinct sibling lists. Header tasks belong to their
+// physical control statement and never create a fictitious child-list slot.
+size_t ParentListIndex(const IRStructure *node) {
+  const IRStructure *parent = node->GetParent();
+  if (!parent)
+    return 0;
+  auto lists = parent->ChildLists();
+  for (size_t i = 0; i < lists.size(); ++i)
+    for (const auto &child : *lists[i])
+      if (child.get() == node)
+        return i;
+  ICHECK(parent->HeaderTask() == node);
+  return 0;
+}
+
+bool IsTransparentScope(const IRStructure *node) {
+  if (!node || !node->IsScope() || node->HasConditions())
+    return false;
+  auto attribute =
+      ReadTaskAttribute(static_cast<const ScopeNode *>(node)->shell);
+  return attribute && attribute->key == "tl.loop.annotations";
+}
+
+bool ScopeActiveInEpoch(const IRStructure *node, size_t child_list_index,
+                        const EpochDomain &domain) {
+  if (IsTransparentScope(node))
+    return true;
+  if (!node || !node->IsScope())
+    return false;
+  const auto *scope = static_cast<const ScopeNode *>(node);
+  const auto *branch = scope->shell.as<IfObj>();
+  if (!branch || SideEffect(branch->condition) > CallEffectKind::kPure ||
+      !scope->condition_snapshot)
+    return false;
+  PrimExpr condition = scope->condition_snapshot.value();
+  if (child_list_index == 1)
+    condition = Not(condition);
+  return GuardImplies(domain.active_guard, condition, scope->outer_ctx);
+}
+
+struct AnalysisScope {
+  IRStructure *owner{nullptr};
+  size_t child_list_index{0};
+
+  bool IsIteration() const {
+    const IRStructure *node = owner;
+    while (IsTransparentScope(node))
+      node = node->GetParent();
+    return node && node->IsControl();
+  }
+};
+
+std::string StorageScopeName(const Var &storage) {
+  if (auto tensor = storage.as<TensorVar>())
+    return tensor->scope().name();
+  return storage->ty.as_or_throw<PtrType>()->scope.name();
+}
 
 // ============================================================================
 // Synchronization site/edge model, collection, and lookup
@@ -86,7 +141,7 @@ struct SyncInsertionSite {
   CoreMask core;
   std::string pipe;
   int domain_id;
-  PrimExpr guard{Bool(true)};
+  PrimExpr guard{IntImm::Bool(true)};
 
   SyncInsertionSite(IRStructure *path_begin, TaskNode *task, bool at_beginning,
                     CoreMask core, const EpochDomain &domain)
@@ -106,10 +161,10 @@ struct SyncInsertionSite {
           << "Lexical-domain site must be a direct child of its owner";
     }
     PrimExpr active_guard = domain.active_guard;
-    bool active_guard_is_enclosed = is_one(active_guard);
+    bool active_guard_is_enclosed = IsOne(active_guard);
     bool path_begin_guard_matches_active = false;
     auto append = [&](PrimExpr term) {
-      guard = is_one(guard) ? std::move(term) : guard && term;
+      guard = IsOne(guard) ? std::move(term) : guard && term;
     };
     std::vector<IRStructure *> path = task->PathFrom(path_begin);
     for (size_t path_index = 0; path_index < path.size(); ++path_index) {
@@ -117,7 +172,7 @@ struct SyncInsertionSite {
       bool has_conditions = path_end->HasConditions();
       if (has_conditions) {
         // Only a guard scope's direct child may absorb its active guard.
-        if (path_end != path_begin || is_one(active_guard) ||
+        if (path_end != path_begin || IsOne(active_guard) ||
             path_begin->GetParent() != domain.owner)
           break;
         PrimExpr condition_guard = path_end->GetConditionGuard();
@@ -129,27 +184,36 @@ struct SyncInsertionSite {
       }
       if (path_index + 1 == path.size())
         break;
+      // Retained lexical headers execute once at their original position.
+      // Keep enclosing-domain events outside a branch, and place header
+      // endpoints around the actual statement rather than a detached task.
+      if (path_end->HeaderTask() == path[path_index + 1])
+        break;
+      if (path_end->IsScope()) {
+        if (!ScopeActiveInEpoch(path_end, ParentListIndex(path[path_index + 1]),
+                                domain))
+          break;
+        continue;
+      }
       ICHECK(path_end->IsControl());
       auto *control = static_cast<ControlNode *>(path_end);
       if (control->BodyHasLoopBreak())
         break;
-      PrimExpr nonempty = control->control->extent >
-                          make_zero(control->control->extent.dtype());
-      bool can_enter = control->task->outer_ctx.CanProve(nonempty);
-      if (!can_enter)
+      const ForObj *for_node = control->control.get();
+      auto analyzer = CreateTileLangAnalyzer();
+      auto context = control->task->outer_ctx.Populate(analyzer);
+      if (!CanUseLoopBounds(for_node->begin, for_node->end, for_node->step,
+                            analyzer.get()) ||
+          !analyzer->CanProve(for_node->begin < for_node->end))
         break;
       if (path_end == path_begin && has_conditions)
         active_guard_is_enclosed = path_begin_guard_matches_active;
-      const ForNode *for_node = control->control.get();
-      PrimExpr loop_var = for_node->loop_var;
-      PrimExpr min = for_node->min;
-      PrimExpr extent = for_node->extent;
-      PrimExpr step = for_node->step.has_value() ? for_node->step.value()
-                                                 : IntImm(DataType::Int(32), 1);
       if (at_beginning) {
-        append(loop_var == min);
+        append(for_node->var == for_node->begin);
       } else {
-        append(((loop_var - min) / step + 1) * step >= extent);
+        // The native induction proof above also proves this update cannot
+        // wrap, including at machine extrema.
+        append(for_node->var + for_node->step >= for_node->end);
       }
     }
     ICHECK(path_end != nullptr) << "Failed to find a sync insertion node";
@@ -161,6 +225,15 @@ struct SyncInsertionSite {
   }
 
   int EpochDomainId() const { return domain_id; }
+
+  int Stage() const {
+    // Metadata carriers do not execute as a separate pipeline stage. Use
+    // the first real endpoint on the retained physical path.
+    for (IRStructure *node : path_end->PathFrom(path_begin))
+      if (!IsTransparentScope(node))
+        return node->GetStage();
+    return path_begin->GetStage();
+  }
 
   bool operator<(const SyncInsertionSite &other) const {
     int parent_order = CompareIRStructure(path_begin->GetParent(),
@@ -256,7 +329,8 @@ struct SyncPoint {
             ControlNode *flag_loop)
       : edge(std::move(edge)), dependency_kind(dependency_kind),
         num_versions(num_versions),
-        flag_iteration(CalculateIterationCount(flag_loop)),
+        flag_iteration(num_versions == 1 ? PrimExpr(IntImm::Int64(0))
+                                         : CalculateIterationCount(flag_loop)),
         flag_loop(flag_loop), counter_group_id(0) {}
 
   SyncPoint(DepEdge edge, DependencyKind dependency_kind, int num_versions,
@@ -310,7 +384,7 @@ public:
     std::map<SyncInsertionSiteKey, SyncInsertionSite> keyed_sites;
     std::vector<TaskNode *> tasks;
     for (IRStructure *node : nodes)
-      CollectAllTaskNodes(node, tasks);
+      CollectTaskNodesAndHeaders(node, tasks);
 
     for (TaskNode *task : tasks) {
       if (task->GetCoreMask() == kCoreUnassigned)
@@ -318,20 +392,18 @@ public:
       for (IRStructure *path_begin : task->PathFrom()) {
         SyncInsertionSiteList inner_sites;
         IRStructure *parent = path_begin->GetParent();
-        ICHECK(parent == nullptr || parent->IsControl());
-        auto *scope =
-            parent == nullptr ? nullptr : static_cast<ControlNode *>(parent);
-        std::vector<int> domain_ids = SiteDomainsForTaskAtScope(task, scope);
+        if (path_begin == task && parent && parent->HeaderTask() == task)
+          continue;
+        std::vector<int> domain_ids = SiteDomainsForTaskAtScope(
+            task, parent, ParentListIndex(path_begin));
         AddInsertionSites(path_begin, task, domain_ids, inner_sites,
                           keyed_sites);
         sites_.insert(sites_.end(), inner_sites.begin(), inner_sites.end());
 
         if (parent == nullptr)
           continue;
-        auto *parent_scope =
-            static_cast<ControlNode *>(parent)->GetParentControl();
-        std::vector<int> parent_domain_ids =
-            SiteDomainsForTaskAtScope(task, parent_scope);
+        std::vector<int> parent_domain_ids = SiteDomainsForTaskAtScope(
+            task, parent->GetParent(), ParentListIndex(parent));
         for (const SyncInsertionSite &inner_site : inner_sites) {
           for (int parent_domain_id : parent_domain_ids) {
             SyncInsertionSiteKey parent_key{parent, task,
@@ -340,6 +412,13 @@ public:
             auto parent_it = keyed_sites.find(parent_key);
             ICHECK(parent_it != keyed_sites.end())
                 << "Synchronization insertion site is missing its parent site";
+            // A narrower parent epoch can descend past a branch where the
+            // child domain stopped. That is not a projection of this physical
+            // endpoint: different tasks collapsed to the child boundary can
+            // select different parent endpoints. The corresponding precise
+            // child-domain sites provide those projections instead.
+            if (!inner_site.path_end->IsWithin(parent_it->second.path_end))
+              continue;
             // One child endpoint may promote into several parent domains, but
             // each domain must select exactly one physical parent endpoint.
             auto [recorded_it, inserted] = parent_sites[inner_site].emplace(
@@ -515,14 +594,13 @@ public:
     std::vector<size_t> result;
     for (IRStructure *node : nodes) {
       std::vector<TaskNode *> tasks;
-      CollectAllTaskNodes(node, tasks);
+      CollectTaskNodesAndHeaders(node, tasks);
       IRStructure *parent = node->GetParent();
-      ICHECK(parent == nullptr || parent->IsControl());
-      auto *scope =
-          parent == nullptr ? nullptr : static_cast<ControlNode *>(parent);
       for (TaskNode *task : tasks) {
-        AddInsertionSiteIds(node, task, SiteDomainsForTaskAtScope(task, scope),
-                            result);
+        AddInsertionSiteIds(
+            node, task,
+            SiteDomainsForTaskAtScope(task, parent, ParentListIndex(node)),
+            result);
       }
     }
     std::sort(result.begin(), result.end());
@@ -532,9 +610,12 @@ public:
 
 private:
   std::vector<int> SiteDomainsForTaskAtScope(const TaskNode *task,
-                                             ControlNode *scope) const {
-    std::vector<int> result = domains_.DomainsForTaskAtScope(task, scope);
-    int lexical_domain = domains_.UnconditionalLexicalDomain(scope);
+                                             const IRStructure *scope,
+                                             size_t child_list_index) const {
+    std::vector<int> result =
+        domains_.DomainsForTaskAtScope(task, scope, child_list_index);
+    int lexical_domain =
+        domains_.UnconditionalLexicalDomain(scope, child_list_index);
     if (std::find(result.begin(), result.end(), lexical_domain) == result.end())
       result.push_back(lexical_domain);
     return result;
@@ -734,23 +815,26 @@ struct SyncAnalysisResult {
 bool HasUnitFlagCtrl(const Stmt &stmt) {
   class Detector : public StmtExprVisitor {
   public:
+    using Result = ffi::Optional<ffi::VisitInterrupt>;
     bool found{false};
 
   private:
-    void VisitExpr_(const CallNode *op) final {
-      if (auto ann = op->annotations.Get("unit_flag_ctrl")) {
-        if (const auto *imm = ann->as<IntImmNode>()) {
-          found = imm->value != 0;
+    Result Visit_(const CallObj *op) final {
+      if (auto ann = TaskCallAnnotations(op).Get("unit_flag_ctrl")) {
+        if (const auto *imm = ann->as<IntImmObj>()) {
+          found |= TaskImmediateValue(imm) != 0;
         } else {
           found = true;
         }
       }
       if (!found)
-        StmtExprVisitor::VisitExpr_(op);
+        return StmtExprVisitor::Visit_(op);
+      return std::nullopt;
     }
-  } detector;
-  detector(stmt);
-  return detector.found;
+  };
+  auto detector = ffi::make_object<Detector>();
+  detector->Visit(stmt);
+  return detector->found;
 }
 
 std::string GetHardEvent(const std::string &producer_pipe,
@@ -786,11 +870,12 @@ public:
                         std::vector<CoreMask> cores,
                         BufferVersionMap manual = {},
                         ConflictHintList root_conflicts = {},
-                        L0StorageGroups storage_groups = L0StorageGroups())
+                        L0StorageGroups storage_groups = L0StorageGroups(),
+                        const ScopedConflictHintIndex *scoped_hints = nullptr)
       : storage_groups_(std::move(storage_groups)),
         multi_buffer_plan_(multi_buffer_plan), domains_(domains),
         manual_(std::move(manual)), root_conflicts_(std::move(root_conflicts)),
-        site_registry_(domains, std::move(cores)) {
+        scoped_hints_(scoped_hints), site_registry_(domains, std::move(cores)) {
     for (const MultiBufferInfo &info : multi_buffer_plan_.Infos()) {
       ICHECK(!info.owners.empty());
       std::vector<ControlNode *> owners;
@@ -807,10 +892,9 @@ public:
   SyncAnalyzer &operator=(const SyncAnalyzer &) = delete;
 
   void Analyze(const std::vector<std::shared_ptr<IRStructure>> &root) {
-    disable_buffer_reuse_ =
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(kDisableSharedMemoryReuse, Bool(false))
-            .value();
+    disable_buffer_reuse_ = tvm::transform::PassContext::Current()
+                                ->GetConfig<bool>(kDisableSharedMemoryReuse)
+                                .value_or(false);
     std::vector<IRStructure *> nodes;
     nodes.reserve(root.size());
     for (const std::shared_ptr<IRStructure> &child : root)
@@ -895,12 +979,17 @@ private:
   size_t PromoteLifetimeSite(const Var &storage, size_t site_id,
                              ControlNode *control) const final {
     ICHECK_LT(site_id, site_registry_.Size());
-    int parent_domain_id =
-        domains_.DomainForStorage(storage, control->GetParentControl());
-    size_t parent_site =
-        site_registry_.FindParentSiteInDomain(site_id, parent_domain_id);
-    ICHECK_EQ(site_registry_.Sites()[parent_site].path_begin, control);
-    return parent_site;
+    IRStructure *position = control;
+    auto *target = control->GetParentControl();
+    do {
+      int parent_domain_id = domains_.DomainForStorage(
+          storage, position->GetParent(), ParentListIndex(position));
+      site_id =
+          site_registry_.FindParentSiteInDomain(site_id, parent_domain_id);
+      ICHECK_EQ(site_registry_.Sites()[site_id].path_begin, position);
+      position = position->GetParent();
+    } while (position != target);
+    return site_id;
   }
 
   std::optional<StorageIterationPeriod>
@@ -933,8 +1022,8 @@ private:
       return std::nullopt;
     const EpochDomain &domain = site_registry_.Domain(sites[src]);
     if (domain.IsCounter() || domain.owner != scope ||
-        UsesVar(domain.active_guard, [&](const VarNode *var) {
-          return scope->control->loop_var.same_as(GetRef<Var>(var));
+        UsesAnyVar(domain.active_guard, [&](const VarObj *var) {
+          return scope->control->var.same_as(GetRef<Var>(var));
         }))
       return std::nullopt;
     auto order = lifetime_orders_.find(scope);
@@ -1006,25 +1095,28 @@ private:
   }
 
   SyncAnalysisResult AnalyzeNodeList(const std::vector<IRStructure *> &nodes,
-                                     ControlNode *loop) {
+                                     ControlNode *loop,
+                                     AnalysisScope scope = {}) {
+    AnalysisScope previous_scope = active_scope_;
+    active_scope_ = scope;
     SyncAnalysisResult result{DepClosure(site_registry_.Size()), {}};
     std::vector<size_t> task_site_ids = site_registry_.CollectSiteIds(nodes);
 
     std::vector<std::vector<VisibleSyncPoint>> child_sync_points;
     for (IRStructure *node : nodes) {
       SyncAnalysisResult child_result = AnalyzeNode(node);
-      AddPromotedChildClosure(result.closure, node, child_result.closure, loop);
+      AddPromotedChildClosure(result.closure, node, child_result.closure);
       child_sync_points.push_back(std::move(child_result.visible_sync_points));
     }
 
     std::vector<SyncPoint> local_sync_points = CollectSyncPoints(nodes, loop);
-    int max_distance = loop == nullptr ? 0 : 1;
+    int max_distance = scope.IsIteration() ? 1 : 0;
     for (const SyncPoint &sync_point : local_sync_points)
       max_distance = std::max(max_distance, sync_point.edge.distance);
 
-    AddSamePipeEdges(result.closure, task_site_ids, max_distance, loop);
-    OptimizeSyncPoints(local_sync_points, result.closure, max_distance, loop);
-    if (loop != nullptr)
+    AddSamePipeEdges(result.closure, task_site_ids, max_distance);
+    OptimizeSyncPoints(local_sync_points, result.closure, max_distance);
+    if (scope.IsIteration())
       OptimizeFlagVersions(local_sync_points, result.closure, loop);
 
     std::vector<VisibleSyncPoint> local_points;
@@ -1049,16 +1141,32 @@ private:
                                         child_sync_points[i].end());
     }
 
-    // Mixed same/cross-iteration reuse is checked only at the collection level
-    // where both points still have the same ring context.
+    // CanReuse checks the exact ring context, including child points whose
+    // activation was proved before promotion through a retained scope.
     RecordReusablePairs(local_points, local_points, result.closure,
                         /*allow_cross_iter=*/false, /*allow_mixed_iter=*/true);
     result.visible_sync_points.insert(result.visible_sync_points.end(),
                                       local_points.begin(), local_points.end());
-    RecordLifetimeOrder(task_site_ids, loop, result.closure);
-    if (loop != nullptr)
+    if (scope.IsIteration()) {
+      // A carried event may already use the owner scope while its matching
+      // same-epoch event was collected in a retained branch. Compare their
+      // exact ring lifetimes after all child projections reach this owner.
+      std::vector<VisibleSyncPoint> same_epoch, carried;
+      for (const auto &visible : result.visible_sync_points) {
+        (sync_points_[visible.sync_point_id].edge.distance == 0 ? same_epoch
+                                                                : carried)
+            .push_back(visible);
+      }
+      RecordReusablePairs(same_epoch, carried, result.closure,
+                          /*allow_cross_iter=*/false,
+                          /*allow_mixed_iter=*/true);
+    }
+    if (scope.owner == loop) {
+      RecordLifetimeOrder(task_site_ids, loop, result.closure);
       scope_closures_.insert_or_assign(loop, result.closure);
+    }
     result.closure = result.closure.DistanceZero();
+    active_scope_ = previous_scope;
     return result;
   }
 
@@ -1074,7 +1182,7 @@ private:
       std::vector<IRStructure *> nodes;
       for (const std::shared_ptr<IRStructure> &child : control->children)
         nodes.push_back(child.get());
-      SyncAnalysisResult result = AnalyzeNodeList(nodes, control);
+      SyncAnalysisResult result = AnalyzeNodeList(nodes, control, {control, 0});
 
       if (!control->BodyHasLoopBreak()) {
         std::vector<VisibleSyncPoint> promoted_sync_points;
@@ -1086,6 +1194,30 @@ private:
       } else {
         result.visible_sync_points.clear();
       }
+      return result;
+    }
+
+    if (node->IsScope()) {
+      SyncAnalysisResult result{DepClosure(site_registry_.Size()), {}};
+      auto lists = node->ChildLists();
+      for (size_t index = 0; index < lists.size(); ++index) {
+        std::vector<IRStructure *> children;
+        for (const auto &child : *lists[index])
+          children.push_back(child.get());
+        if (children.empty())
+          continue;
+        SyncAnalysisResult child =
+            AnalyzeNodeList(children, node->GetParentControl(), {node, index});
+        for (const DepEdge &edge : child.closure.Edges())
+          if (ScopeActiveInEpoch(
+                  node, index, site_registry_.Domain(site_registry_.Src(edge))))
+            result.closure.Insert(edge);
+        for (VisibleSyncPoint &visible : child.visible_sync_points)
+          if (PromoteReuseSites(visible, node, index))
+            result.visible_sync_points.push_back(std::move(visible));
+      }
+      // Retained branches contribute only to epochs that execute that arm.
+      // Wider lexical domains still keep their own boundary handshakes.
       return result;
     }
 
@@ -1202,12 +1334,13 @@ private:
   }
 
   int FindSharedDependencyDomain(TaskNode *producer, TaskNode *consumer,
-                                 ControlNode *loop) const {
-    std::vector<int> producer_domains =
-        domains_.DomainsForTaskAtScope(producer, loop);
-    std::vector<int> consumer_domains =
-        domains_.DomainsForTaskAtScope(consumer, loop);
-    int lexical_domain = domains_.UnconditionalLexicalDomain(loop);
+                                 AnalysisScope scope) const {
+    std::vector<int> producer_domains = domains_.DomainsForTaskAtScope(
+        producer, scope.owner, scope.child_list_index);
+    std::vector<int> consumer_domains = domains_.DomainsForTaskAtScope(
+        consumer, scope.owner, scope.child_list_index);
+    int lexical_domain = domains_.UnconditionalLexicalDomain(
+        scope.owner, scope.child_list_index);
     std::vector<int> candidates = producer_domains;
     candidates.insert(candidates.end(), consumer_domains.begin(),
                       consumer_domains.end());
@@ -1229,7 +1362,8 @@ private:
         return candidate == lexical_domain;
       return std::any_of(
           task_domains.begin(), task_domains.end(), [&](int target) {
-            return domains_.CanProjectDomain(candidate, target, loop);
+            return domains_.CanProjectDomain(candidate, target, scope.owner,
+                                             scope.child_list_index);
           });
     };
     for (int candidate : candidates) {
@@ -1252,7 +1386,7 @@ private:
                     ControlNode *loop) {
     std::vector<DepInfo> deps =
         AnalyzeDependencies(nodes, loop, manual_, multi_buffer_owners_,
-                            &dependency_cache_, root_conflicts_);
+                            &dependency_cache_, root_conflicts_, scoped_hints_);
     if (loop != nullptr) {
       std::vector<DepInfo> directed_deps;
       directed_deps.reserve(deps.size() * 2);
@@ -1262,8 +1396,8 @@ private:
           continue;
         }
 
-        ICHECK_EQ(dep.prod_node->GetParent(), loop);
-        ICHECK_EQ(dep.cons_node->GetParent(), loop);
+        ICHECK_EQ(dep.prod_node->GetParent(), active_scope_.owner);
+        ICHECK_EQ(dep.cons_node->GetParent(), active_scope_.owner);
         ICHECK_NE(dep.prod_node->GetIndex(), dep.cons_node->GetIndex());
         bool lhs_first = dep.prod_node->GetIndex() < dep.cons_node->GetIndex();
         IRStructure *first = lhs_first ? dep.prod_node : dep.cons_node;
@@ -1277,7 +1411,9 @@ private:
         // A stage-s task executes logical iteration (physical_iteration - s).
         // Therefore two owners ordered in one physical iteration have logical
         // distances stage(first)-stage(second) and its wraparound complement.
-        int forward_distance = first->GetStage() - second->GetStage();
+        int forward_distance = active_scope_.IsIteration()
+                                   ? first->GetStage() - second->GetStage()
+                                   : 0;
         std::vector<DependencyTaskPair> second_to_first;
         second_to_first.reserve(first_to_second.size());
         for (const auto &[producer, consumer] : first_to_second)
@@ -1304,7 +1440,7 @@ private:
     std::vector<SyncPoint> sync_points;
     for (const DepInfo &dep : deps) {
       if (dep.storage.has_value()) {
-        std::string storage_scope = GetPtrStorageScope(dep.storage.value());
+        std::string storage_scope = StorageScopeName(dep.storage.value());
         if (storage_scope == "local" || storage_scope == "local.var" ||
             storage_scope == "local.fragment") {
           continue;
@@ -1358,10 +1494,18 @@ private:
       if (distance < 0 && dep.kind == DependencyKind::kData)
         distance = 1;
       ICHECK_EQ(counter_info != nullptr, counter_owner != nullptr);
+      // Both then/else are retained native scopes. A cross-iteration edge
+      // must signal even when that branch is inactive in one iteration, so
+      // its endpoints use the enclosing loop's direct child and epoch domain.
+      AnalysisScope event_scope =
+          distance != 0 && loop != nullptr && !active_scope_.IsIteration()
+              ? AnalysisScope{loop, 0}
+              : active_scope_;
       std::optional<int> dependency_domain_id;
       if (dep.storage.has_value()) {
         dependency_domain_id =
-            domains_.DomainForStorage(dep.storage.value(), loop);
+            domains_.DomainForStorage(dep.storage.value(), event_scope.owner,
+                                      event_scope.child_list_index);
       }
       if (counter_info != nullptr) {
         ICHECK(dependency_domain_id.has_value());
@@ -1377,7 +1521,7 @@ private:
         int pair_domain_id =
             dependency_domain_id.has_value()
                 ? dependency_domain_id.value()
-                : FindSharedDependencyDomain(producer, consumer, loop);
+                : FindSharedDependencyDomain(producer, consumer, event_scope);
         std::string producer_pipe =
             GetResourcePipeName(producer->GetPipeMask());
         std::string consumer_pipe =
@@ -1395,16 +1539,22 @@ private:
                                            consumer, consumer_core, loop)) {
               continue;
             }
+            IRStructure *producer_node = dep.prod_node;
+            IRStructure *consumer_node = dep.cons_node;
+            if (event_scope.owner != active_scope_.owner) {
+              producer_node = producer->GetChildOnPathFrom(loop);
+              consumer_node = consumer->GetChildOnPathFrom(loop);
+            }
             size_t producer_site = site_registry_.FindSiteId(
-                SyncInsertionSiteKey{dep.prod_node, producer, false,
+                SyncInsertionSiteKey{producer_node, producer, false,
                                      producer_core, pair_domain_id});
             size_t consumer_site = site_registry_.FindSiteId(
-                SyncInsertionSiteKey{dep.cons_node, consumer, true,
+                SyncInsertionSiteKey{consumer_node, consumer, true,
                                      consumer_core, pair_domain_id});
             DepEdge edge(producer_site, consumer_site, distance, true);
             if (counter_info != nullptr) {
-              PrimExpr iteration = BufferLoad(counter_info->counter,
-                                              {IntImm(DataType::Int(32), 0)});
+              PrimExpr iteration =
+                  TensorLoad(counter_info->counter, {IntImm::Int32(0)});
               sync_points.emplace_back(std::move(edge), dep.kind, num_versions,
                                        iteration, counter_owner->loop,
                                        counter_info->counter_group_id);
@@ -1420,8 +1570,7 @@ private:
   }
 
   void AddPromotedChildClosure(DepClosure &out, IRStructure *child,
-                               const DepClosure &child_closure,
-                               ControlNode *projection_scope) const {
+                               const DepClosure &child_closure) const {
     if (child->IsControl() &&
         static_cast<ControlNode *>(child)->BodyHasLoopBreak()) {
       return;
@@ -1441,12 +1590,10 @@ private:
         }
         int source_domain = site_registry_.Src(edge).EpochDomainId();
         int parent_domain = site_registry_.Src(parent).EpochDomainId();
-        if (!domains_.CanProjectDomain(source_domain, parent_domain,
-                                       projection_scope)) {
+        if (!DomainProjects(source_domain, parent_domain, parent)) {
           return;
         }
-        SaturateDependencyEdge(out, parent,
-                               /*max_distance=*/0, projection_scope);
+        SaturateDependencyEdge(out, parent, /*max_distance=*/0);
       });
     }
   }
@@ -1476,8 +1623,8 @@ private:
           if (a.core != b.core || a.pipe != b.pipe ||
               a.EpochDomainId() != b.EpochDomainId())
             continue;
-          int64_t distance = int64_t(a.path_begin->GetStage()) -
-                             b.path_begin->GetStage() + (src < dst ? 0 : 1);
+          int64_t distance =
+              int64_t(a.Stage()) - b.Stage() + (src < dst ? 0 : 1);
           ICHECK(order.AddEdge(src, dst, std::max<int64_t>(distance, 0),
                                HasImplicitSamePipeOrder(a.pipe)));
         }
@@ -1487,8 +1634,8 @@ private:
   }
 
   void AddSamePipeEdges(DepClosure &closure,
-                        const std::vector<size_t> &task_sites, int max_distance,
-                        ControlNode *projection_scope) const {
+                        const std::vector<size_t> &task_sites,
+                        int max_distance) const {
     const SyncInsertionSiteList &sites = site_registry_.Sites();
     using PipeDomainKey = std::tuple<CoreMask, std::string, int>;
     std::map<PipeDomainKey, std::vector<size_t>> by_pipe;
@@ -1497,8 +1644,8 @@ private:
       by_pipe[{site.core, site.pipe, site.EpochDomainId()}].push_back(site_id);
     }
 
-    auto level_stage = [](const SyncInsertionSite &site) {
-      return site.path_begin->GetStage();
+    auto level_stage = [&](const SyncInsertionSite &site) {
+      return active_scope_.IsIteration() ? site.Stage() : 0;
     };
     for (auto &[_, pipe_sites] : by_pipe) {
       // A single pipe issues sites in physical (iteration, position) order.
@@ -1518,16 +1665,24 @@ private:
                ++distance) {
             SaturateDependencyEdge(closure,
                                    DepEdge(lhs_id, rhs_id, distance, false),
-                                   max_distance, projection_scope);
+                                   max_distance);
           }
         }
       }
     }
   }
 
+  bool DomainProjects(int source, int target, const DepEdge &edge) const {
+    const auto &site = site_registry_.Src(edge);
+    // Cross-iteration branch edges may be emitted outside that branch. Use
+    // facts valid at the physical endpoints, never the stronger branch ctx.
+    return domains_.CanProjectDomain(source, target,
+                                     site.path_begin->GetParent(),
+                                     ParentListIndex(site.path_begin));
+  }
+
   void SaturateDependencyEdge(DepClosure &closure, const DepEdge &edge,
-                              int max_distance,
-                              ControlNode *projection_scope) const {
+                              int max_distance) const {
     closure.Saturate(
         edge, max_distance, [&](const DepEdge &candidate, const auto &visit) {
           if (candidate.distance != 0 && candidate.distance != 1) {
@@ -1543,11 +1698,9 @@ private:
                 // guard. Unit-distance ordering additionally requires both
                 // domains to describe the same active-epoch sequence.
                 bool can_project =
-                    domains_.CanProjectDomain(source_domain, target_domain,
-                                              projection_scope) &&
+                    DomainProjects(source_domain, target_domain, candidate) &&
                     (candidate.distance == 0 ||
-                     domains_.CanProjectDomain(target_domain, source_domain,
-                                               projection_scope));
+                     DomainProjects(target_domain, source_domain, candidate));
                 if (can_project) {
                   visit(projected);
                 }
@@ -1556,8 +1709,7 @@ private:
   }
 
   void OptimizeSyncPoints(std::vector<SyncPoint> &sync_points,
-                          DepClosure &closure, int max_distance,
-                          ControlNode *projection_scope) const {
+                          DepClosure &closure, int max_distance) const {
     std::stable_sort(sync_points.begin(), sync_points.end());
     std::vector<SyncPoint> emit;
     for (SyncPoint &sync_point : sync_points) {
@@ -1570,8 +1722,13 @@ private:
                    << sync_point.edge.distance << " (paired distance "
                    << 1 - sync_point.edge.distance << ")";
       }
-      SaturateDependencyEdge(closure, sync_point.edge, max_distance,
-                             projection_scope);
+      // S/V/M dependencies emit no synchronization. Their completion order
+      // comes from the physical pipe order already added above, not from a
+      // requested logical dependency that can be tighter in a staged loop.
+      // For example, stage 4 at k cannot precede stage 0 at k + 1.
+      if (HasImplicitCompletionOrder(sync_point.edge.src, sync_point.edge.dst))
+        continue;
+      SaturateDependencyEdge(closure, sync_point.edge, max_distance);
       emit.push_back(std::move(sync_point));
     }
     sync_points = std::move(emit);
@@ -1593,16 +1750,20 @@ private:
       // If the loop trip count is no larger than the ring, no version is
       // reused.
       if (loop != nullptr) {
-        const ForNode *inner = loop->control.get();
-        PrimExpr step = inner->step.has_value()
-                            ? inner->step.value()
-                            : IntImm(inner->extent.dtype(), 1);
-        // Bound only this loop's trip count; outer context may help prove its
-        // symbolic extent without flattening any enclosing iterations.
-        if (loop->task->outer_ctx.CanProve(
-                inner->extent <=
-                IntImm(inner->extent.dtype(), innermost_num_versions) * step)) {
-          continue;
+        const ForObj *inner = loop->control.get();
+        auto analyzer = CreateTileLangAnalyzer();
+        auto context = loop->task->outer_ctx.Populate(analyzer);
+        if (CanUseLoopBounds(inner->begin, inner->end, inner->step,
+                             analyzer.get())) {
+          auto begin = TryConstInt(analyzer->Simplify(inner->begin));
+          auto end = TryConstInt(analyzer->Simplify(inner->end));
+          auto step = TryConstInt(analyzer->Simplify(inner->step));
+          if (begin && end && step && *step > 0) {
+            ffi::BigInt span = ffi::BigInt(*end) - *begin;
+            if (span <= 0 || (span / *step + (span % *step != 0 ? 1 : 0)) <=
+                                 innermost_num_versions)
+              continue;
+          }
         }
       }
       if (sync_point.edge.distance > 0) {
@@ -1714,12 +1875,32 @@ private:
     return lhs_before.has_value();
   }
 
-  bool PromoteReuseSites(VisibleSyncPoint &visible) const {
+  bool PromoteReuseSites(VisibleSyncPoint &visible,
+                         const IRStructure *guard_scope = nullptr,
+                         size_t child_list_index = 0) const {
     const SyncPoint &sync_point = sync_points_[visible.sync_point_id];
     bool cross_iter = sync_point.edge.distance > 0;
     std::set<DepEdge> promoted;
     for (const DepEdge &edge : visible.projected_edges) {
+      if (guard_scope &&
+          guard_scope->IsWithin(site_registry_.Src(edge).path_begin) &&
+          guard_scope->IsWithin(site_registry_.Dst(edge).path_begin)) {
+        // CollectSyncPoints already anchors carried events at their loop.
+        // Leaving a descendant branch must not promote those physical
+        // endpoints a second time, potentially losing their counter domain.
+        promoted.insert(edge);
+        continue;
+      }
       site_registry_.ForEachParentSitePair(edge, [&](const DepEdge &parent) {
+        if (guard_scope &&
+            (!ScopeActiveInEpoch(
+                 guard_scope, child_list_index,
+                 site_registry_.Domain(site_registry_.Src(parent))) ||
+             site_registry_.Src(parent).path_end !=
+                 site_registry_.Src(edge).path_end ||
+             site_registry_.Dst(parent).path_end !=
+                 site_registry_.Dst(edge).path_end))
+          return;
         size_t src = parent.src;
         size_t dst = parent.dst;
         if (site_registry_.Src(parent).path_end !=
@@ -1762,6 +1943,8 @@ private:
   BufferVersionMap manual_;
   MultiBufferOwnerMap multi_buffer_owners_;
   ConflictHintList root_conflicts_;
+  const ScopedConflictHintIndex *scoped_hints_;
+  AnalysisScope active_scope_;
   SyncSiteRegistry site_registry_;
   std::vector<SyncPoint> sync_points_;
   std::set<std::pair<size_t, size_t>> reusable_pairs_;
@@ -1814,29 +1997,35 @@ struct FlagAllocation {
 class ExplicitCrossCoreFlagCollector : public TaskAwareConstrVisitor {
 public:
   CrossCoreFlagReservation Collect(const Stmt &stmt) {
-    operator()(stmt);
+    Visit(stmt);
     return std::move(reservation_);
   }
 
 private:
-  void VisitExpr_(const CallNode *op) final {
+  Result Visit_(const CallObj *op) final {
     if (op->op.same_as(tl::ascend_cross_core_set_flag()) ||
         op->op.same_as(tl::ascend_cross_core_wait_flag())) {
       ICHECK_EQ(op->args.size(), 3)
           << "ascend_cross_core_set_flag/wait_flag expects exactly 3 "
              "arguments";
 
-      const PrimExpr &flag_id = op->args[2];
-      arith::Analyzer analyzer;
-      GetConstrSet().Populate(analyzer);
-      arith::ConstIntBound bound = analyzer.const_int_bound(flag_id);
-      arith::Analyzer unconstrained_analyzer;
+      PrimExpr flag_id = op->args[2].as_or_throw<PrimExpr>();
+      auto analyzer = CreateTileLangAnalyzer();
+      auto context = GetConstrSet().Populate(analyzer);
+      // Populate may bind an SSA snapshot to a fresh symbolic value. Its
+      // guards constrain that value, while ConstIntBound on the original Var
+      // does not follow the rewrite binding. Normalize only the query; keep
+      // the source flag expression and its single-read semantics in the IR.
+      sym::ConstIntBound bound =
+          analyzer->const_int_bound(analyzer->Simplify(flag_id));
+      auto unconstrained_analyzer = CreateTileLangAnalyzer();
       Var unconstrained_flag_id("unconstrained_cross_core_flag_id",
-                                flag_id.dtype());
-      arith::ConstIntBound unconstrained_bound =
-          unconstrained_analyzer.const_int_bound(unconstrained_flag_id);
-      if (bound->min_value == arith::ConstIntBound::kNegInf ||
-          bound->max_value == arith::ConstIntBound::kPosInf ||
+                                flag_id.ty());
+      sym::ConstIntBound unconstrained_bound =
+          unconstrained_analyzer->const_int_bound(
+              unconstrained_flag_id.as_or_throw<PrimVar>());
+      if (bound->min_value == sym::ConstIntBound::kNegInf ||
+          bound->max_value == sym::ConstIntBound::kPosInf ||
           (bound->min_value == unconstrained_bound->min_value &&
            bound->max_value == unconstrained_bound->max_value)) {
         reservation_.has_unbounded_id = true;
@@ -1849,7 +2038,7 @@ private:
                                                      bound->max_value);
       }
     }
-    ConstrVisitor::VisitExpr_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
   CrossCoreFlagReservation reservation_;
@@ -1857,8 +2046,8 @@ private:
 
 CrossCoreFlagReservation
 CollectExplicitCrossCoreFlags(const Stmt &kernel_body) {
-  ExplicitCrossCoreFlagCollector collector;
-  return collector.Collect(kernel_body);
+  auto collector = ffi::make_object<ExplicitCrossCoreFlagCollector>();
+  return collector->Collect(kernel_body);
 }
 
 class FlagAllocator {
@@ -2141,24 +2330,24 @@ private:
 
     if (!site_registry_.IsCrossCore(sync_point)) {
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{src.core, Integer(base_id + version), hard_event, 0});
+        flag_infos_.push_back(FlagInfo{
+            src.core, IntImm::Int32(base_id + version), hard_event, 0});
       }
       return;
     }
 
     if (src.core != kCoreCube) {
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{src.core, Integer(base_id + version), producer_pipe, 1});
+        flag_infos_.push_back(FlagInfo{
+            src.core, IntImm::Int32(base_id + version), producer_pipe, 1});
       }
       for (int sid = 0; sid < 2; ++sid) {
         if (!HasCore(src.core | dst.core, VectorCore(sid)))
           continue;
         for (int version = 0; version < allocation.num_versions; ++version) {
-          flag_infos_.push_back(FlagInfo{kCoreCube,
-                                         Integer(base_id + sid * 16 + version),
-                                         consumer_pipe, 2});
+          flag_infos_.push_back(
+              FlagInfo{kCoreCube, IntImm::Int32(base_id + sid * 16 + version),
+                       consumer_pipe, 2});
         }
       }
     } else {
@@ -2166,14 +2355,14 @@ private:
         if (!HasCore(src.core | dst.core, VectorCore(sid)))
           continue;
         for (int version = 0; version < allocation.num_versions; ++version) {
-          flag_infos_.push_back(FlagInfo{kCoreCube,
-                                         Integer(base_id + sid * 16 + version),
-                                         producer_pipe, 1});
+          flag_infos_.push_back(
+              FlagInfo{kCoreCube, IntImm::Int32(base_id + sid * 16 + version),
+                       producer_pipe, 1});
         }
       }
       for (int version = 0; version < allocation.num_versions; ++version) {
-        flag_infos_.push_back(
-            FlagInfo{dst.core, Integer(base_id + version), consumer_pipe, 2});
+        flag_infos_.push_back(FlagInfo{
+            dst.core, IntImm::Int32(base_id + version), consumer_pipe, 2});
       }
     }
   }
@@ -2220,8 +2409,8 @@ public:
     for (SyncInsertionMap *insertions : {&before_, &after_})
       for (auto &[_, statements] : *insertions)
         for (SyncInsertion &insertion : statements)
-          insertion.statement =
-              Substitute(insertion.statement, {{old_var, new_var}});
+          insertion.statement = RemapTaskStatement(insertion.statement,
+                                                   {{old_var, Expr(new_var)}});
   }
 
 private:
@@ -2239,10 +2428,7 @@ std::unique_ptr<IRExtraInfo> MakeSyncInsertionExtraInfo() {
 
 Stmt MakeSyncTask(const Stmt &body, CoreMask core_mask) {
   ICHECK(IsCoreLocalMask(core_mask));
-  TaskMetadata metadata;
-  metadata.core_mask = core_mask;
-  return AttrStmt(MergeTaskMetadata(metadata, IntImm(DataType::Int(32), 0)),
-                  attr::kAscendTask, Integer(1), body, body->span);
+  return MakeTask(body, {{"core_mask", IntImm::Int64(core_mask)}});
 }
 
 std::shared_ptr<TaskNode> MakeSyncTaskNode(const Stmt &body, CoreMask core_mask,
@@ -2255,7 +2441,7 @@ std::shared_ptr<TaskNode> MakeSyncTaskNode(const Stmt &body, CoreMask core_mask,
   return task;
 }
 
-class PerCoreTaskSyncMigrator : public StmtMutator {
+class PerCoreTaskSyncMigrator : public StmtExprMutator {
 public:
   PerCoreTaskSyncMigrator(std::vector<Stmt> before, std::vector<Stmt> after,
                           CoreMask core_mask)
@@ -2265,19 +2451,22 @@ public:
   }
 
   Stmt Rewrite(Stmt body) {
-    Stmt result = VisitStmt(std::move(body));
+    Stmt result = Mutate(body).ValueOrUnchanged(body);
     ICHECK_GT(num_candidates_, 0)
         << "Cannot find a T.Task marker in normalized T.PerCoreTask";
     return result;
   }
 
 private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key != attr::kAscendTask)
-      return StmtMutator::VisitStmt_(op);
-    Stmt candidate_body = VisitStmt(op->body);
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    auto attribute = ReadTaskAttribute(op);
+    if (!attribute || attribute->key != attr::kAscendTask)
+      return StmtExprMutator::Mutate_(op, mode);
+    SeqStmt candidate_body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
     Stmt candidate =
-        AttrStmt(op->node, op->attr_key, op->value, candidate_body, op->span);
+        MakeNativeAttribute(attribute->node, attribute->key, attribute->value,
+                            candidate_body, op->loc);
     if (!HasTaskBufferAccess(candidate_body))
       return candidate;
     ++num_candidates_;
@@ -2288,7 +2477,7 @@ private:
     sequence.push_back(std::move(candidate));
     for (const Stmt &stmt : after_)
       sequence.push_back(MakeSyncTask(stmt, core_mask_));
-    return SeqStmt::Flatten(sequence);
+    return SeqStmt(sequence);
   }
 
   std::vector<Stmt> before_;
@@ -2320,46 +2509,47 @@ void AppendSyncTaskNodes(std::vector<std::shared_ptr<IRStructure>> *result,
 
 inline Stmt MakeAscendSetFlag(const std::string &hard_event,
                               PrimExpr event_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_set_flag(),
+  return Evaluate(Call(PrimType::Void(), ascend_set_flag(),
                        {StringImm(hard_event), event_id}));
 }
 
 inline Stmt MakeAscendWaitFlag(const std::string &hard_event,
                                PrimExpr event_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_wait_flag(),
+  return Evaluate(Call(PrimType::Void(), ascend_wait_flag(),
                        {StringImm(hard_event), event_id}));
 }
 
 inline Stmt MakeAscendPipeBarrier(const std::string &pipe) {
   return Evaluate(
-      Call(DataType::Handle(), ascend_pipe_barrier(), {StringImm(pipe)}));
+      Call(PrimType::Void(), ascend_pipe_barrier(), {StringImm(pipe)}));
 }
 
 inline Stmt MakeAscendCrossCoreSetFlag(int mode_id, const std::string &pipe,
                                        PrimExpr flag_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_cross_core_set_flag(),
-                       {Integer(mode_id), StringImm(pipe), flag_id}));
+  return Evaluate(Call(PrimType::Void(), ascend_cross_core_set_flag(),
+                       {IntImm::Int32(mode_id), StringImm(pipe), flag_id}));
 }
 
 inline Stmt MakeAscendCrossCoreWaitFlag(int mode_id, const std::string &pipe,
                                         PrimExpr flag_id) {
-  return Evaluate(Call(DataType::Handle(), ascend_cross_core_wait_flag(),
-                       {Integer(mode_id), StringImm(pipe), flag_id}));
+  return Evaluate(Call(PrimType::Void(), ascend_cross_core_wait_flag(),
+                       {IntImm::Int32(mode_id), StringImm(pipe), flag_id}));
 }
 
 PrimExpr MakeFlagEventId(const PrimExpr &iteration, int num_versions,
                          int base_id) {
-  DataType dtype = iteration.dtype();
+  PrimType dtype = iteration.ty();
   PrimExpr event_id = num_versions == 1
                           ? IntImm(dtype, base_id)
-                          : indexmod(iteration, IntImm(dtype, num_versions)) +
+                          : FloorMod(iteration, IntImm(dtype, num_versions)) +
                                 IntImm(dtype, base_id);
-  return dtype == DataType::Int(32) ? event_id
-                                    : cast(DataType::Int(32), event_id);
+  return dtype == PrimType::Int(32) ? event_id
+                                    : Cast(PrimType::Int(32), event_id);
 }
 
 void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
-                     CoreMask core, const PrimExpr &guard = PrimExpr()) {
+                     CoreMask core,
+                     const PrimExpr &guard = IntImm::Bool(true)) {
   ICHECK(node != nullptr);
   ICHECK(IsCoreLocalMask(core));
   bool at_candidate = false;
@@ -2369,7 +2559,7 @@ void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
     if (task->IsPerCoreTask() && task->GetCoreMask() == core) {
       ConstrSet outer_ctx = task->GetContextBeforeConditionGuards();
       PrimExpr task_guard = task->GetConditionGuard();
-      PrimExpr sync_guard = guard.defined() ? guard : Bool(true);
+      PrimExpr sync_guard = guard.defined() ? guard : IntImm::Bool(true);
       // Projection can make a PerCoreTask optional on a block while its
       // storage protocol remains shared. Keep wider events outside the group
       // so candidate selection cannot suppress a required wait or set.
@@ -2476,14 +2666,12 @@ private:
   }
 
   void MaterializeInsertions(std::vector<std::shared_ptr<IRStructure>> &nodes,
-                             ControlNode *parent) {
+                             IRStructure *parent) {
     std::vector<std::shared_ptr<IRStructure>> materialized;
     materialized.reserve(nodes.size());
     for (const std::shared_ptr<IRStructure> &node : nodes) {
-      if (node->IsControl()) {
-        auto *control = static_cast<ControlNode *>(node.get());
-        MaterializeInsertions(control->children, control);
-      }
+      for (auto *list : node->ChildLists())
+        MaterializeInsertions(*list, node.get());
 
       const SyncInsertionExtraInfo *insertions =
           GetSyncInsertionExtraInfo(node.get());
@@ -2501,9 +2689,9 @@ private:
           std::vector<Stmt> after =
               GetCoreStatements(after_insertions, core_mask);
           if (!before.empty() || !after.empty()) {
-            task->stmt = PerCoreTaskSyncMigrator(std::move(before),
-                                                 std::move(after), core_mask)
-                             .Rewrite(std::move(task->stmt));
+            auto migrator = ffi::make_object<PerCoreTaskSyncMigrator>(
+                std::move(before), std::move(after), core_mask);
+            task->stmt = migrator->Rewrite(std::move(task->stmt));
           }
         }
       }
@@ -2528,7 +2716,41 @@ private:
 // ============================================================================
 // Kernel-level validation and scheduled-TIR rewrite
 // ============================================================================
-SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
+CoreMask InitializeHeaderTasks(IRStructure *node, CoreMask default_core) {
+  if (node->IsTask())
+    return static_cast<TaskNode *>(node)->GetCoreMask();
+  CoreMask cores = kCoreUnassigned;
+  for (auto *list : node->ChildLists())
+    for (const auto &child : *list)
+      cores |= InitializeHeaderTasks(child.get(), default_core);
+  if (node->IsScope()) {
+    std::optional<int> stage;
+    bool uniform = true;
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list) {
+        if (child->IsScope() && !child->HeaderTask())
+          continue;
+        if (!stage)
+          stage = child->GetStage();
+        else
+          uniform &= *stage == child->GetStage();
+      }
+    if (stage && uniform)
+      node->SetStage(*stage);
+  }
+  if (auto *header = node->HeaderTask()) {
+    // Native headers execute on the same core streams as their retained
+    // bodies. Their accesses are real synchronization endpoints, even though
+    // DecodeScheduledTIR deliberately gives them no standalone task marker.
+    header->SetCoreMask(cores == kCoreUnassigned ? default_core : cores);
+    header->SetStage(node->GetStage());
+    ApplyTaskResourceUsage(AnalyzeTaskResourceUsage(header->stmt), header);
+  }
+  return cores;
+}
+
+RegionStmt InsertKernelSync(const Stmt &kernel_body,
+                            ScheduledTIR scheduled_tir) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
   int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
   CoreMask vector_mask = VectorCoreMask(num_aiv_subcores);
@@ -2536,8 +2758,10 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
       CollectL0SFBindings(scheduled_tir.metadata.kernel_root));
   MultiBufferPlan multi_buffer_plan =
       ReadMultiBufferPlan(root, scheduled_tir.metadata.buffer_versions, groups);
+  for (const auto &node : root)
+    InitializeHeaderTasks(node.get(), vector_mask);
   std::vector<TaskNode *> tasks;
-  CollectAllTaskNodes(root, tasks);
+  CollectTaskNodesAndHeaders(root, tasks);
   bool split_subcores = false;
   for (TaskNode *task : tasks) {
     CoreMask mask = task->GetCoreMask();
@@ -2558,11 +2782,12 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   } else {
     cores = {vector_mask, kCoreCube};
   }
+  ScopedConflictHintIndex scoped_hints(root, scheduled_tir.metadata.outer_ctx);
   EpochDomainRegistry domains(root, multi_buffer_plan);
   SyncAnalyzer analyzer(multi_buffer_plan, domains, std::move(cores),
                         scheduled_tir.metadata.manual_buffer_versions,
                         std::move(scheduled_tir.metadata.root_conflict_hints),
-                        groups);
+                        groups, &scoped_hints);
   scheduled_tir.metadata.root_conflict_hints = {};
   analyzer.Analyze(root);
   analyzer.ValidateSyncPoints();
@@ -2615,17 +2840,18 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
 // ============================================================================
 tvm::transform::Pass InsertSync() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func = [](tirx::Function func, const IRModule &,
+                      const tvm::transform::PassContext &) -> tirx::Function {
     return RewriteTilelangKernels(
         std::move(func), "InsertSync",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
-              context.root, context.outer_ctx, MakeSyncInsertionExtraInfo);
+              context.root, context.outer_ctx, MakeSyncInsertionExtraInfo, {},
+              context.parameter_alias_contract);
           return InsertKernelSync(context.root->body, std::move(scheduled_tir));
         });
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.InsertSync", {});
+  return CreateFunctionPass(pass_func, 0, "tl.InsertSync");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

@@ -15,11 +15,22 @@ For TMA stores (shared -> global):
 import re
 
 import pytest
+import tvm_ffi
+from tvm_tirx import ir, tirx
 
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 import tilelang
+
+
+@pytest.fixture(autouse=True)
+def _fresh_native_host_ir(monkeypatch):
+    # Descriptor assertions inspect the compiler's typed host IR. Binary cache
+    # entries do not retain that artifact; cache recovery is tested separately.
+    from tilelang.env import CacheState
+
+    monkeypatch.setattr(CacheState, "_enabled", False)
 
 
 def matmul_tma_copy(
@@ -302,30 +313,51 @@ def _assert_two_box_tma_loop(source, instruction):
     )
 
 
-def _tma_descriptor_init_block(host_source, desc_name):
-    marker = f"[0].v_ptr) = {desc_name};"
-    start = host_source.find(marker)
-    assert start >= 0, f"Missing {desc_name} TensorMap initialization"
-    end = host_source.find("TVMFFIFunctionCall(__tvm_tensormap_create_tiled_packed", start)
-    assert end >= 0, f"Missing {desc_name} TensorMap creation call"
-    return host_source[start:end]
+def _tma_descriptor_args(host_mod, desc_name):
+    # The packed ABI keeps its typed pre-packing worker as module metadata.
+    # Walk function bodies only: tma_descriptor_args metadata also retains the
+    # same values but does not prove a descriptor creation call was emitted.
+    assert host_mod.attrs is not None and "tl.source_host_module" in host_mod.attrs
+    source_mod = host_mod.attrs["tl.source_host_module"]
+    matches = []
+
+    def visit(call):
+        if not (
+            isinstance(call.op, ir.Op)
+            and call.op.name == "tirx.call_packed"
+            and len(call.args) >= 2
+            and isinstance(call.args[0], ir.StringImm)
+            and call.args[0].value == "__tvm_tensormap_create_tiled"
+        ):
+            return
+        descriptor = call.args[1]
+        assert isinstance(descriptor, ir.Var)
+        if re.fullmatch(rf"{re.escape(desc_name)}(?:_\d+)?", descriptor.name):
+            assert isinstance(descriptor.ty, ir.PtrType)
+            assert isinstance(descriptor.ty.element_type, tirx.TensorMapType)
+            matches.append(call.args[1:])
+
+    for function in source_mod.functions.values():
+        tvm_ffi.structural_walk(function.body, (ir.Call, visit))
+    assert len(matches) == 1, f"Expected one {desc_name} TensorMap creation call, got {len(matches)}"
+    return matches[0]
 
 
-def _tma_stack_int(block, index):
-    match = re.search(rf"\[{index}\]\.v_int64\)\s*=\s*\(\(int64_t\)(-?\d+)\);", block)
-    assert match, f"Missing stack[{index}] integer assignment in:\n{block}"
-    return int(match.group(1))
+def _tma_int_arg(args, index):
+    value = args[index]
+    assert isinstance(value, ir.IntImm), f"Expected constant descriptor argument {index}, got {value}"
+    return int(value.value)
 
 
 def _assert_2d_f32_tma_descriptor(kernel, desc_name, rows, global_width):
-    block = _tma_descriptor_init_block(kernel.get_host_source(), desc_name)
-    assert _tma_stack_int(block, 2) == 2
-    assert _tma_stack_int(block, 4) == global_width
-    assert _tma_stack_int(block, 5) == rows
-    assert _tma_stack_int(block, 6) == 4
-    assert _tma_stack_int(block, 7) == global_width * 4
-    assert _tma_stack_int(block, 8) == 256
-    assert _tma_stack_int(block, 9) == rows
+    args = _tma_descriptor_args(kernel.artifact.host_mod, desc_name)
+    assert _tma_int_arg(args, 2) == 2
+    assert _tma_int_arg(args, 4) == global_width
+    assert _tma_int_arg(args, 5) == rows
+    assert _tma_int_arg(args, 6) == 4
+    assert _tma_int_arg(args, 7) == global_width * 4
+    assert _tma_int_arg(args, 8) == 256
+    assert _tma_int_arg(args, 9) == rows
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -430,9 +462,9 @@ def test_tma_load_oob_fill_with_non_aligned_global_extent():
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     assert "tl::tma_load" in kernel.get_kernel_source()
-    block = _tma_descriptor_init_block(kernel.get_host_source(), "A_desc")
-    assert _tma_stack_int(block, 4) == global_width
-    assert _tma_stack_int(block, 7) == row_stride * 4
+    args = _tma_descriptor_args(kernel.artifact.host_mod, "A_desc")
+    assert _tma_int_arg(args, 4) == global_width
+    assert _tma_int_arg(args, 7) == row_stride * 4
 
     import torch
 
@@ -592,7 +624,7 @@ def fp4_tma_copy_unpacked_smem_store(M=128, N=256, block_M=64, block_N=128):
     return main
 
 
-def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
+def _assert_fp4_packed_tma_descriptor(host_mod, desc_name):
     expected_tma_args = {
         1: 13,  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
         2: 2,
@@ -609,17 +641,17 @@ def _assert_fp4_packed_tma_descriptor(host_source, desc_name):
         14: 2,
         15: 0,
     }
-    block = _tma_descriptor_init_block(host_source, desc_name)
+    args = _tma_descriptor_args(host_mod, desc_name)
     for index, expected in expected_tma_args.items():
-        assert _tma_stack_int(block, index) == expected
+        assert _tma_int_arg(args, index) == expected
 
 
-def _assert_fp4_unpacked_tma_descriptor(host_source, desc_name, *, expect_swizzle=None):
-    block = _tma_descriptor_init_block(host_source, desc_name)
-    assert _tma_stack_int(block, 1) == 14  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B
-    assert _tma_stack_int(block, 8) == 128  # 128-element inner box for 8-bit storage
+def _assert_fp4_unpacked_tma_descriptor(host_mod, desc_name, *, expect_swizzle=None):
+    args = _tma_descriptor_args(host_mod, desc_name)
+    assert _tma_int_arg(args, 1) == 14  # CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B
+    assert _tma_int_arg(args, 8) == 128  # 128-element inner box for 8-bit storage
     if expect_swizzle is not None:
-        assert _tma_stack_int(block, 13) == expect_swizzle
+        assert _tma_int_arg(args, 13) == expect_swizzle
 
 
 def run_fp4_tma_copy_roundtrip():
@@ -639,7 +671,7 @@ def run_fp4_tma_copy_roundtrip():
     assert "tl::tma_store" in device_source
     assert host_source.count("__tvm_tensormap_create_tiled") >= 2
     for desc_name in ("A_desc", "B_desc"):
-        _assert_fp4_packed_tma_descriptor(host_source, desc_name)
+        _assert_fp4_packed_tma_descriptor(kernel.artifact.host_mod, desc_name)
 
     a = torch.randint(-128, 128, (M, N // 2), device="cuda", dtype=torch.int8)
     b = kernel(a)
@@ -654,18 +686,33 @@ def test_fp4_unpacksmem_tma_descriptor_uses_align16b():
         target={"kind": "cuda", "arch": "sm_100"},
         enable_device_compile=False,
     )
-    host_ir = str(artifact.host_mod)
-    device_ir = str(artifact.device_mod)
-    assert 'T.handle("float4_e2m1fn", "global")' in host_ir
-    assert 'A_shared = T.alloc_buffer((8192,), "custom[float4_e2m1_unpacked]"' in device_ir
-    assert '["__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
-    assert 'T.call_packed("__tvm_tensormap_create_tiled", A_desc, 14,' in host_ir
+    host_mod = artifact.host_mod.attrs["tl.source_host_module"]
+    (host_function,) = host_mod.functions.values()
+    assert len(host_function.params) == 1
+    source_type = host_function.params[0].ty
+    assert isinstance(source_type, tirx.TensorType)
+    assert str(source_type.dtype) == "float4_e2m1fn"
+    assert str(source_type.scope) == "global"
+
+    allocations = []
+    for function in artifact.device_mod.functions.values():
+        tvm_ffi.structural_walk(function.body, (ir.Bind, allocations.append))
+    (shared,) = [binding for binding in allocations if binding.var.name == "A_shared"]
+    assert shared.value.op.name == "tirx.alloc_tensor"
+    assert [int(extent) for extent in shared.var.ty.shape] == [8192]
+    assert str(shared.var.ty.dtype) == "custom[float4_e2m1_unpacked]8"
+    assert str(shared.var.ty.scope) == "shared.dyn"
+
+    (descriptor_metadata,) = host_function.attrs["tma_descriptor_args"].values()
+    assert _tma_int_arg(descriptor_metadata, 2) == 14
+    _assert_fp4_unpacked_tma_descriptor(artifact.host_mod, "A_desc")
+    assert "expect_transaction(4096)" in artifact.kernel_source
 
 
 @tilelang.testing.requires_cuda
 def test_fp4_unpacksmem_tma_store_is_rejected():
     program = fp4_tma_copy_unpacked_smem_store()
-    with pytest.raises(tvm.TVMError, match="only supports float4_e2m1_unpacked as an FP4 unpack load"):
+    with pytest.raises(RuntimeError, match="only supports float4_e2m1_unpacked as an FP4 unpack load"):
         tilelang.lower(
             program,
             target={"kind": "cuda", "arch": "sm_100"},
@@ -744,7 +791,7 @@ def test_device_bound_descriptor_tma_is_rejected_when_ws_disabled():
         target,
         tvm.transform.PassContext(config=pass_configs),
         pytest.raises(
-            tvm.TVMError,
+            RuntimeError,
             match="bound inside the device function body",
         ),
     ):
@@ -763,9 +810,9 @@ def run_fp4_tma_copy_unpacked_smem_load():
         pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
     )
     device_source = kernel.get_kernel_source()
-    host_source = kernel.get_host_source()
+    _host_source = kernel.get_host_source()
     assert "CUtensorMap" in device_source
-    _assert_fp4_unpacked_tma_descriptor(host_source, "A_desc")
+    _assert_fp4_unpacked_tma_descriptor(kernel.artifact.host_mod, "A_desc")
     # 64 x 128 logical FP4 elems -> 4096 transaction bytes (4b/elem), not 8192.
     assert "expect_transaction(4096)" in device_source
 

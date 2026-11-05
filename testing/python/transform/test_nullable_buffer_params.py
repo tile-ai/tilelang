@@ -1,4 +1,5 @@
 import torch
+import pytest
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -53,20 +54,11 @@ def test_nullable_shared_shape():
     print("✓ PASS: First and last tensors provided")
 
     print("\nTest 6: All tensors are None (should fail)")
-    try:
+    with pytest.raises(RuntimeError, match="at least one non-null buffer"):
         kernel(None, None, None)
-        print("✗ FAIL: Should have raised an error")
-        return False
-    except RuntimeError as e:
-        if "at least one non-null buffer" in str(e):
-            print(f"✓ PASS: Correctly rejected with error: {e}")
-        else:
-            print(f"✗ FAIL: Wrong error message: {e}")
-            return False
 
     print("\n" + "=" * 60)
     print("All tests passed!")
-    return True
 
 
 def test_nullable_single_source_shape():

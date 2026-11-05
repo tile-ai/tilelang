@@ -1,9 +1,24 @@
+import tvm_ffi
 import pytest
 import tilelang
 import tilelang.testing
 
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir, tirx
+
+
+def _make_device_function(parameters, body):
+    # The final HIP emitter consumes pointer parameters. Keep the tensor
+    # access contracts in explicit decl_tensor bindings inside the function.
+    params, declarations = [], []
+    for value in parameters:
+        if isinstance(value.ty, tirx.TensorType):
+            pointer = ir.Var(value.name, ir.PtrType(value.ty.dtype, value.ty.scope))
+            params.append(pointer)
+            declarations.append(ir.Bind(value, ir.Call("tirx.decl_tensor", [pointer], ty_args=[value.ty])))
+        else:
+            params.append(value)
+    return tirx.Function(params, [*declarations, body], ret_type=ir.PrimType("void"))
 
 
 def _build_vector_select_source(
@@ -18,12 +33,12 @@ def _build_vector_select_source(
 ):
     input_dtype = "bfloat16" if wrap_input_in_abs else "float32"
     output_dtype = "int32" if wrap_input_in_reinterpret else input_dtype
-    mask_buffer = tirx.decl_buffer((lanes,), "float32", name="mask")
-    input_buffer = tirx.decl_buffer((lanes,), input_dtype, name="input")
-    output_buffer = tirx.decl_buffer((lanes,), output_dtype, name="output")
-    ramp = tirx.Ramp(0, 1, lanes)
-    mask_vector = tirx.BufferLoad(mask_buffer, [ramp])
-    input_vector = tirx.BufferLoad(input_buffer, [ramp])
+    mask_buffer = ir.Var("mask", tirx.TensorType((lanes,), "float32", layout="default"))
+    input_buffer = ir.Var("input", tirx.TensorType((lanes,), input_dtype, layout="default"))
+    output_buffer = ir.Var("output", tirx.TensorType((lanes,), output_dtype, layout="default"))
+    ramp = ir.prim.Ramp(0, 1, lanes)
+    mask_vector = ir.TensorLoad(mask_buffer, [ramp])
+    input_vector = ir.TensorLoad(input_buffer, [ramp])
     if wrap_input_in_let:
         value = tirx.Var("value", f"float32x{lanes}")
         input_vector = tirx.Let(value, input_vector, value)
@@ -31,37 +46,29 @@ def _build_vector_select_source(
         scalar_lets = []
         for lane in range(lanes):
             value = tirx.Var(f"value_{lane}", "float32")
-            load = tirx.BufferLoad(input_buffer, [lane])
+            load = ir.TensorLoad(input_buffer, [lane])
             scalar_lets.append(tirx.Let(value, load, value))
-        input_vector = tirx.Shuffle(scalar_lets, list(range(lanes)))
+        input_vector = ir.prim.Shuffle(scalar_lets, list(range(lanes)))
     if wrap_input_in_call:
-        input_vector = tirx.call_pure_extern(f"float32x{lanes}", "exp2f", input_vector)
+        input_vector = tirx.call_pure_extern("exp2f", input_vector, ty=f"float32x{lanes}")
     if wrap_input_in_call_extern:
-        input_vector = tirx.call_extern(f"float32x{lanes}", "exp2f", input_vector)
+        input_vector = tirx.call_extern("exp2f", input_vector, ty=f"float32x{lanes}")
     if wrap_input_in_reinterpret:
-        input_vector = tirx.reinterpret(f"int32x{lanes}", input_vector)
+        input_vector = tirx.reinterpret(input_vector, ty=f"int32x{lanes}")
     if wrap_input_in_abs:
-        input_vector = tirx.Call(f"bfloat16x{lanes}", tvm.ir.Op.get("tl.abs2"), [input_vector])
+        input_vector = ir.Call(tvm.ir.Op.get("tl.abs2"), [input_vector], ty=f"bfloat16x{lanes}")
     if wrap_input_in_packed_call:
-        bias = tirx.Broadcast(tirx.const(1, "float32"), lanes)
-        input_vector = tirx.Call(f"float32x{lanes}", tvm.ir.Op.get("tl.add2"), [input_vector, bias])
-    mask_zero = tirx.Broadcast(tirx.const(0, "float32"), lanes)
-    result_zero = tirx.Broadcast(tirx.const(0, output_dtype), lanes)
+        bias = ir.prim.Broadcast(tirx.const(1, "float32"), lanes)
+        input_vector = ir.Call(tvm.ir.Op.get("tl.add2"), [input_vector, bias], ty=f"float32x{lanes}")
+    mask_zero = ir.prim.Broadcast(tirx.const(0, "float32"), lanes)
+    result_zero = ir.prim.Broadcast(tirx.const(0, output_dtype), lanes)
     selected = tirx.Select(mask_vector > mask_zero, input_vector, result_zero)
-    body = tirx.BufferStore(output_buffer, selected, [ramp])
-    func = tirx.PrimFunc(
-        [mask_buffer.data, input_buffer.data, output_buffer.data],
-        body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
-    )
+    body = ir.TensorStore(output_buffer, [ramp], selected)
+    func = _make_device_function([mask_buffer, input_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "vector_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({"vector_select": func})
-    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
     return build(mod, tvm.target.Target("rocm")).inspect_source()
@@ -70,55 +77,40 @@ def _build_vector_select_source(
 def _build_vector_select_with_vector_argument_source():
     lanes = 4
     value = tirx.Var("value", "float32x4")
-    mask_buffer = tirx.decl_buffer((lanes,), "float32", name="mask")
-    output_buffer = tirx.decl_buffer((lanes,), "float32", name="output")
-    scalar_base = tirx.Shuffle([tirx.Ramp(0, 1, lanes)], [0])
-    ramp = tirx.Ramp(scalar_base, 1, lanes)
-    mask_vector = tirx.BufferLoad(mask_buffer, [ramp])
-    zero = tirx.Broadcast(tirx.const(0, "float32"), lanes)
+    mask_buffer = ir.Var("mask", tirx.TensorType((lanes,), "float32", layout="default"))
+    output_buffer = ir.Var("output", tirx.TensorType((lanes,), "float32", layout="default"))
+    scalar_base = ir.prim.Shuffle([ir.prim.Ramp(0, 1, lanes)], [0])
+    ramp = ir.prim.Ramp(scalar_base, 1, lanes)
+    mask_vector = ir.TensorLoad(mask_buffer, [ramp])
+    zero = ir.prim.Broadcast(tirx.const(0, "float32"), lanes)
     selected = tirx.Select(mask_vector > zero, value, zero)
-    body = tirx.BufferStore(output_buffer, selected, [ramp])
-    func = tirx.PrimFunc(
-        [value, mask_buffer.data, output_buffer.data],
-        body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            output_buffer.data: output_buffer,
-        },
-    )
+    body = ir.TensorStore(output_buffer, [ramp], selected)
+    func = _make_device_function([value, mask_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "vector_select_argument")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({"vector_select_argument": func})
-    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
     return build(mod, tvm.target.Target("rocm")).inspect_source()
 
 
 def _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, result_dtype, result_lanes):
-    mask_buffer = tirx.decl_buffer((result_lanes,), "float32", name="mask")
-    input_buffer = tirx.decl_buffer((source_lanes,), source_dtype, name="input")
-    output_buffer = tirx.decl_buffer((result_lanes,), result_dtype, name="output")
-    mask_ramp = tirx.Ramp(0, 1, result_lanes)
-    input_ramp = tirx.Ramp(0, 1, source_lanes)
-    mask_vector = tirx.BufferLoad(mask_buffer, [mask_ramp])
-    input_vector = tirx.BufferLoad(input_buffer, [input_ramp])
+    mask_buffer = ir.Var("mask", tirx.TensorType((result_lanes,), "float32", layout="default"))
+    input_buffer = ir.Var("input", tirx.TensorType((source_lanes,), source_dtype, layout="default"))
+    output_buffer = ir.Var("output", tirx.TensorType((result_lanes,), result_dtype, layout="default"))
+    mask_ramp = ir.prim.Ramp(0, 1, result_lanes)
+    input_ramp = ir.prim.Ramp(0, 1, source_lanes)
+    mask_vector = ir.TensorLoad(mask_buffer, [mask_ramp])
+    input_vector = ir.TensorLoad(input_buffer, [input_ramp])
     if source_lanes < result_lanes:
-        input_vector = tirx.Shuffle([input_vector], list(range(source_lanes)))
-    reinterpreted = tirx.reinterpret(f"{result_dtype}x{result_lanes}", input_vector)
-    mask_zero = tirx.Broadcast(tirx.const(0, "float32"), result_lanes)
-    result_zero = tirx.Broadcast(tirx.const(0, result_dtype), result_lanes)
+        input_vector = ir.prim.Shuffle([input_vector], list(range(source_lanes)))
+    reinterpreted = tirx.reinterpret(input_vector, ty=f"{result_dtype}x{result_lanes}")
+    mask_zero = ir.prim.Broadcast(tirx.const(0, "float32"), result_lanes)
+    result_zero = ir.prim.Broadcast(tirx.const(0, result_dtype), result_lanes)
     selected = tirx.Select(mask_vector > mask_zero, reinterpreted, result_zero)
-    body = tirx.BufferStore(output_buffer, selected, [mask_ramp])
-    func = tirx.PrimFunc(
-        [mask_buffer.data, input_buffer.data, output_buffer.data],
-        body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
-    )
+    body = ir.TensorStore(output_buffer, [mask_ramp], selected)
+    func = _make_device_function([mask_buffer, input_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "lane_changing_reinterpret_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     return tvm.IRModule({"lane_changing_reinterpret_select": func})
@@ -126,7 +118,7 @@ def _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, re
 
 def _build_lane_changing_reinterpret_select_source(source_dtype, source_lanes, result_dtype, result_lanes):
     mod = _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, result_dtype, result_lanes)
-    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
     return build(mod, tvm.target.Target("rocm")).inspect_source()
@@ -135,14 +127,14 @@ def _build_lane_changing_reinterpret_select_source(source_dtype, source_lanes, r
 def _make_narrow_vector_select_module(dtype, lanes):
     on_true = tirx.Var("on_true", f"{dtype}x{lanes}")
     on_false = tirx.Var("on_false", f"{dtype}x{lanes}")
-    ramp = tirx.Ramp(0, 1, lanes)
-    limit = tirx.Broadcast(tirx.const(lanes // 2, "int32"), lanes)
+    ramp = ir.prim.Ramp(0, 1, lanes)
+    limit = ir.prim.Broadcast(tirx.const(lanes // 2, "int32"), lanes)
     selected = tirx.Select(
         ramp < limit,
         on_true,
         on_false,
     )
-    func = tirx.PrimFunc([on_true, on_false], tirx.Evaluate(selected))
+    func = tirx.Function([on_true, on_false], ir.Evaluate(selected), ret_type=ir.PrimType("void"))
     func = func.with_attr("global_symbol", "narrow_vector_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     return tvm.IRModule({"narrow_vector_select": func})
@@ -150,36 +142,28 @@ def _make_narrow_vector_select_module(dtype, lanes):
 
 def _build_narrow_vector_select_source(dtype, lanes):
     mod = _make_narrow_vector_select_module(dtype, lanes)
-    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
     return build(mod, tvm.target.Target("rocm")).inspect_source()
 
 
 def _build_scalar_select_source():
-    mask_buffer = tirx.decl_buffer((1,), "float32", name="mask")
-    input_buffer = tirx.decl_buffer((1,), "float32", name="input")
-    output_buffer = tirx.decl_buffer((1,), "float32", name="output")
+    mask_buffer = ir.Var("mask", tirx.TensorType((1,), "float32", layout="default"))
+    input_buffer = ir.Var("input", tirx.TensorType((1,), "float32", layout="default"))
+    output_buffer = ir.Var("output", tirx.TensorType((1,), "float32", layout="default"))
     zero = tirx.const(0, "float32")
     selected = tirx.Select(
-        tirx.BufferLoad(mask_buffer, [0]) > zero,
-        tirx.BufferLoad(input_buffer, [0]),
+        ir.TensorLoad(mask_buffer, [0]) > zero,
+        ir.TensorLoad(input_buffer, [0]),
         zero,
     )
-    body = tirx.BufferStore(output_buffer, selected, [0])
-    func = tirx.PrimFunc(
-        [mask_buffer.data, input_buffer.data, output_buffer.data],
-        body,
-        buffer_map={
-            mask_buffer.data: mask_buffer,
-            input_buffer.data: input_buffer,
-            output_buffer.data: output_buffer,
-        },
-    )
+    body = ir.TensorStore(output_buffer, [0], selected)
+    func = _make_device_function([mask_buffer, input_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "scalar_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({"scalar_select": func})
-    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
     return build(mod, tvm.target.Target("rocm")).inspect_source()
@@ -424,7 +408,7 @@ def test_wide_bool_vector_results_use_packed_bit_access(lanes, carrier_type):
 )
 def test_narrow_vector_select_compiles_with_packed_hip_carriers(dtype, lanes):
     mod = _make_narrow_vector_select_module(dtype, lanes)
-    build = tvm.get_global_func("target.build.tilelang_hip")
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip")
     build(mod, tvm.target.Target("rocm"))
 
 
@@ -435,7 +419,7 @@ def test_narrow_vector_select_compiles_with_packed_hip_carriers(dtype, lanes):
 )
 def test_lane_changing_reinterpret_select_compiles(source_dtype, source_lanes, result_dtype, result_lanes):
     mod = _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, result_dtype, result_lanes)
-    build = tvm.get_global_func("target.build.tilelang_hip")
+    build = tvm_ffi.get_global_func("target.build.tilelang_hip")
     build(mod, tvm.target.Target("rocm"))
 
 

@@ -7,15 +7,47 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
-from tilelang import tvm
+import tvm_tirx as tvm
+import tvm_ffi
+from tvm_tirx import ir, tirx
 
 
-def _count_calls(func: tvm.tirx.PrimFunc):
-    return Counter(str(call.op.name) for call in collect_nodes(func, tvm.tirx.Call) if isinstance(call.op, tvm.ir.Op))
+def _evaluate_copy_index(expr, values):
+    """Evaluate this test's bounded, nonnegative index grammar in Python."""
+    if isinstance(expr, ir.IntImm):
+        return int(expr.value)
+    if isinstance(expr, ir.Var):
+        return values[expr]
+    left = _evaluate_copy_index(expr.a, values)
+    right = _evaluate_copy_index(expr.b, values)
+    if isinstance(expr, ir.prim.Add):
+        return left + right
+    if isinstance(expr, ir.prim.Mul):
+        return left * right
+    if isinstance(expr, ir.prim.FloorDiv):
+        return left // right
+    if isinstance(expr, ir.prim.FloorMod):
+        return left % right
+    raise TypeError(f"Unexpected copy index expression: {type(expr).__name__}")
 
 
-def _find_loop_with_annotation(func: tvm.tirx.PrimFunc, annotation: str):
-    loops = [loop for loop in collect_nodes(func, tvm.tirx.For) if annotation in loop.annotations]
+def _call_annotations(call):
+    assert call.attrs["schema_version"] == 1
+    assert len(call.args) == call.attrs["operand_count"] + 1
+    return tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[-1], call.attrs["annotation_schema"])
+
+
+def _attribute_fields(region):
+    assert region.op.name == "tl.attr"
+    return tvm_ffi.get_global_func("tl.DecodeAnnotations")(region.args[0], region.attrs["annotation_schema"])
+
+
+def _count_calls(func: tirx.Function):
+    return Counter(str(call.op.name) for call in collect_nodes(func, ir.Call) if isinstance(call.op, tvm.ir.Op))
+
+
+def _find_loop_with_annotation(func: tirx.Function, annotation: str):
+    loops = [loop for loop in collect_nodes(func, ir.For) if annotation in loop.annotations]
     assert len(loops) == 1, f"Expected one loop with {annotation}, got {len(loops)}"
     return loops[0]
 
@@ -46,8 +78,8 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tirx.ptx_commit_group", 0) == 0
-    assert calls.get("tirx.ptx_wait_group", 0) == 0
+    assert calls.get("tl.ptx_commit_group", 0) == 0
+    assert calls.get("tl.ptx_wait_group", 0) == 0
 
 
 @tilelang.testing.requires_cuda
@@ -76,8 +108,8 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tirx.ptx_commit_group", 0) == 0
-    assert calls.get("tirx.ptx_wait_group", 0) == 0
+    assert calls.get("tl.ptx_commit_group", 0) == 0
+    assert calls.get("tl.ptx_wait_group", 0) == 0
 
 
 @tilelang.testing.requires_cuda
@@ -118,13 +150,73 @@ def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dty
     func = mod["main"]
     _assert_no_unexpected_free_vars(func)
     assert_call_count(func, op="tl.ptx_cp_async", count=1)
-    async_vector_loops = [
-        loop
-        for loop in collect_nodes(func, tvm.tirx.For)
-        if loop.kind == tvm.tirx.ForKind.VECTORIZED and collect_calls(loop, op="tl.ptx_cp_async")
+    # The native injector consumes a complete contiguous vector loop and emits
+    # one legal-width transaction. Check its width and full ownership/address
+    # mapping, including the synchronous branch for unaligned input pointers.
+    call = collect_calls(func, op="tl.ptx_cp_async")[0]
+    assert int(call.args[2]) == vector_size
+    source_ptr, dest_ptr = call.args[1], call.args[0]
+    for pointer, access in ((source_ptr, 1), (dest_ptr, 2)):
+        assert pointer.op.name == "tl.access_ptr"
+        assert isinstance(pointer.args[0], ir.TensorLoad)
+        assert int(pointer.args[1]) == vector_size
+        assert int(pointer.args[2]) == access
+    source_load, dest_load = source_ptr.args[0], dest_ptr.args[0]
+    assert source_load.source.same_as(func.params[0])
+    assert str(dest_load.source.ty.scope) == "shared.dyn"
+    assert source_load.ty == dest_load.ty
+    assert vector_size * source_load.ty.dtype.bits // 8 in (4, 8, 16)
+
+    copy_loops = [loop for loop in collect_nodes(func, ir.For) if collect_calls(loop, op="tl.ptx_cp_async")]
+    assert len(copy_loops) == 1
+    copy_loop = copy_loops[0]
+    assert int(copy_loop.begin) == 0 and int(copy_loop.step) == 1
+    assert int(copy_loop.end) == cols // (64 * vector_size)
+    launches = [
+        region
+        for region in collect_nodes(func, ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
     ]
-    assert len(async_vector_loops) == 1
-    assert int(async_vector_loops[0].extent) == vector_size
+    assert len(launches) == 1 and int(launches[0].args[1]) == 256
+    thread = launches[0].body_params[0]
+
+    guards = [
+        branch
+        for branch in collect_nodes(copy_loop, ir.If)
+        if branch.else_case is not None and collect_calls(branch.then_case, op="tl.ptx_cp_async")
+    ]
+    assert len(guards) == 1
+    guard = guards[0]
+    assert not collect_nodes(guard.then_case, ir.For)
+    assert not collect_calls(guard.else_case, op="tl.ptx_cp_async")
+    fallback_loops = collect_nodes(guard.else_case, ir.For)
+    assert len(fallback_loops) == 1
+    fallback = fallback_loops[0]
+    assert fallback.kind == ir.ForKind.VECTORIZED
+    assert int(fallback.begin) == 0 and int(fallback.end) == vector_size and int(fallback.step) == 1
+    stores = collect_nodes(fallback, ir.TensorStore)
+    assert len(stores) == 1 and isinstance(stores[0].value, ir.TensorLoad)
+    assert stores[0].dest.same_as(dest_load.source)
+    assert stores[0].value.source.same_as(source_load.source)
+
+    covered = set()
+    for thread_value in range(256):
+        for iteration in range(int(copy_loop.end)):
+            values = {thread: thread_value, copy_loop.var: iteration}
+            expected_base = (thread_value // 64, iteration * 64 * vector_size + thread_value % 64 * vector_size)
+            assert tuple(_evaluate_copy_index(index, values) for index in source_load.indices) == expected_base
+            assert tuple(_evaluate_copy_index(index, values) for index in dest_load.indices) == expected_base
+            for lane in range(vector_size):
+                logical = (expected_base[0], expected_base[1] + lane)
+                assert logical not in covered
+                covered.add(logical)
+                i, j = logical
+                assert i * 64 + (j // vector_size) % 64 == thread_value
+                assert j % vector_size + (j // (64 * vector_size)) * vector_size == iteration * vector_size + lane
+                fallback_values = {**values, fallback.var: lane}
+                assert tuple(_evaluate_copy_index(index, fallback_values) for index in stores[0].indices) == logical
+                assert tuple(_evaluate_copy_index(index, fallback_values) for index in stores[0].value.indices) == logical
+    assert covered == {(i, j) for i in range(4) for j in range(cols)}
 
 
 @tilelang.testing.requires_cuda
@@ -153,10 +245,11 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
         copy_calls = collect_calls(mod["main"], op="tl.tileop.copy")
-        assert all("tl.pipeline_mbar_phase_expr" not in call.annotations for call in copy_calls)
+        assert all("tl.pipeline_mbar_phase_expr" not in _call_annotations(call) for call in copy_calls)
         mod = tl.transform.LayoutInference()(mod)
         mod = tl.transform.LowerTileOp()(mod)
 
@@ -169,11 +262,11 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
     assert len(loop_waits) == 1
     barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
     assert sorted(barrier_indices) == list(range(num_stages))
-    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
-    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
+    simplified_phases = [tvm.sym.Analyzer().simplify(wait.args[1]) for wait in waits]
+    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, ir.IntImm)]
     assert constant_phases == [0] * (num_stages - 1)
-    expected = (loop.loop_var - loop.min) % 2
-    assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
+    expected = (loop.var - loop.begin) % 2
+    assert tvm.sym.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
 
 
 @tilelang.testing.requires_cuda
@@ -208,6 +301,7 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
         mod = tl.transform.LayoutInference()(mod)
@@ -222,11 +316,11 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
     assert len(loop_waits) == 1
     barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
     assert barrier_indices == [0] * num_stages
-    simplified_phases = [tvm.arith.Analyzer().simplify(wait.args[1]) for wait in waits]
-    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, tvm.tirx.IntImm)]
+    simplified_phases = [tvm.sym.Analyzer().simplify(wait.args[1]) for wait in waits]
+    constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, ir.IntImm)]
     assert constant_phases == [i % 2 for i in range(num_stages - 1)]
-    logical_epoch = loop.loop_var - loop.min + num_stages - 1
-    assert tvm.arith.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
+    logical_epoch = loop.var - loop.begin + num_stages - 1
+    assert tvm.sym.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
 
 
 def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_context():
@@ -255,8 +349,8 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
     calls = _count_calls(mod["main"])
 
     assert calls.get("tl.ptx_cp_async", 0) > 0
-    assert calls.get("tirx.ptx_commit_group", 0) == 0
-    assert calls.get("tirx.ptx_wait_group", 0) == 0
+    assert calls.get("tl.ptx_commit_group", 0) == 0
+    assert calls.get("tl.ptx_wait_group", 0) == 0
 
 
 @tilelang.testing.requires_cuda
@@ -281,7 +375,9 @@ def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.LayoutInference()(mod)
-        with pytest.raises(Exception, match="non-round-tripping inverse"):
+        # Native iter-map validation may reject this mapping before the
+        # explicit round-trip check. Either path must refuse to lower it.
+        with pytest.raises(Exception, match="non-round-tripping inverse|Mapped indices are not independent"):
             tl.transform.LowerTileOp()(mod)
 
 
@@ -313,51 +409,40 @@ def _var_name(var) -> str:
 
 def _vars_of(node) -> list:
     """Collect all Var objects referenced by an expression or statement."""
-    return collect_nodes(node, tvm.tirx.Var)
+    return collect_nodes(node, ir.Var)
 
 
-def _collect_var_names(func: tvm.tirx.PrimFunc):
+def _collect_var_names(func: tirx.Function):
     return {_var_name(var) for var in _vars_of(func.body)}
 
 
-def _for_predicate_annotations(func: tvm.tirx.PrimFunc) -> list:
-    """Every parallel_loop_predicate annotation expression in the function.
-
-    Generic statement visitors do not traverse annotation payloads, so the
-    annotation expressions are read out explicitly here.
-    """
-    predicates = []
-    for loop in collect_nodes(func, tvm.tirx.For):
-        predicate = loop.annotations.get("parallel_loop_predicate", None)
-        if predicate is not None:
-            predicates.append(predicate)
+def _for_predicate_annotations(func: tirx.Function) -> list:
+    """Read static and typed operand carriers; keep actual variable identities."""
+    predicates = [
+        loop.annotations["parallel_loop_predicate"] for loop in collect_nodes(func, ir.For) if "parallel_loop_predicate" in loop.annotations
+    ]
+    for region in collect_nodes(func, ir.RegionStmt):
+        if region.op.name != "tl.attr":
+            continue
+        fields = _attribute_fields(region)
+        if fields["key"] == "tl.loop.annotations" and "parallel_loop_predicate" in fields["value"]:
+            predicates.append(fields["value"]["parallel_loop_predicate"])
     return predicates
 
 
-def _thread_extent_vars(func: tvm.tirx.PrimFunc) -> list:
-    """Vars bound by threadIdx.x thread_extent AttrStmts (real thread bindings)."""
+def _thread_extent_vars(func: tirx.Function) -> list:
+    """Native launch_thread body parameters define real thread identities."""
     return [
-        attr.node.var
-        for attr in collect_nodes(func, tvm.tirx.AttrStmt)
-        if attr.attr_key == "thread_extent" and attr.node.thread_tag == "threadIdx.x"
+        region.body_params[0]
+        for region in collect_nodes(func, ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
     ]
 
 
-def _assert_no_unexpected_free_vars(func: tvm.tirx.PrimFunc):
-    """Every free var must be a buffer_map data var; nothing synthetic may leak.
-
-    Right after LowerTileOp/SplitHostDevice the buffer data vars still appear
-    "undefined" to var-use analysis (they are declared via match_buffer and
-    lowered later), so the assertion filters them out — by object identity,
-    not by name — and checks that no *other* free variable (e.g. a synthetic
-    thread placeholder) survives.
-    """
-    buffer_data_vars = [buffer.data for buffer in func.buffer_map.values()]
-    unexpected = [
-        var
-        for var in tvm.tirx.analysis.undefined_vars(func.body, func.params)
-        if not any(var.same_as(data_var) for data_var in buffer_data_vars)
-    ]
+def _assert_no_unexpected_free_vars(func: tirx.Function):
+    # Native TensorVar parameters own their layout/shape, and data_ptr is an
+    # explicit expression. No old buffer_map data-variable exclusion is needed.
+    unexpected = tirx.analysis.undefined_vars(func.body, func.params)
     assert not unexpected, f"unexpected free variables: {unexpected}"
 
 
@@ -563,7 +648,17 @@ def test_split_host_device_cpu_device_abi_is_clean():
     # reads/writes — any leaked synthetic scalar would show up as an extra
     # parameter here.
     device_param_names = {_var_name(param) for param in device_func.params}
-    assert device_param_names == {"flag", "out"}, f"unexpected device ABI: {device_param_names}"
+    assert device_param_names == {"flag_ptr", "out_ptr"}, f"unexpected device ABI: {device_param_names}"
+    assert all(isinstance(param.ty, ir.PtrType) for param in device_func.params)
+    declarations = [
+        bind
+        for bind in collect_nodes(device_func, ir.Bind)
+        if isinstance(bind.value, ir.Call) and bind.value.op.name == "tirx.decl_tensor" and bind.var.name in {"flag", "out"}
+    ]
+    assert len(declarations) == 2
+    for bind in declarations:
+        pointer = next(param for param in device_func.params if param.name == bind.var.name + "_ptr")
+        assert bind.value.args[0].same_as(pointer)
     _assert_no_unexpected_free_vars(device_func)
 
 

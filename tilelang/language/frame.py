@@ -1,10 +1,11 @@
 """Override the LetFrame to print a message when entering the frame."""
 
 from __future__ import annotations
-from tvm.tirx import Var, PrimExpr, BufferLoad, BufferRegion
-from tvm.ir import Range
-from tvm import DataType
-from tvm.tirx.script.builder.frame import TIRFrame
+from tilelang.language import _native
+from tilelang.language._native import Var, PrimExpr, BufferLoad, BufferRegion
+from tvm_tirx.ir import Range
+from tvm_ffi import dtype as DataType
+from tvm_tirx.script.ir_builder.frame import StmtFrame as TIRFrame
 from collections import deque
 import threading
 
@@ -147,11 +148,11 @@ class LetFrame(TIRFrame):
             indices = self.value.indices
             is_block_load = False
             for index in indices[:-1]:
-                if DataType(index.dtype).lanes > 1:
+                if DataType(_native.dtype_of(index)).lanes > 1:
                     is_block_load = True
                     break
             if is_block_load:
-                self.value = BufferRegion(self.value.buffer, [Range(x.base, x.lanes) for x in indices])
+                self.value = BufferRegion(self.value.source, [Range(x.base, x.lanes) for x in indices])
 
         _get_let_stack().push(self)
         return self.var

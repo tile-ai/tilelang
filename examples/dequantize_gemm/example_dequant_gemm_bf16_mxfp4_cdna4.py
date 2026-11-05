@@ -14,36 +14,37 @@ underlying HIP C++ (hip_fp4.h) is compiled only for __gfx950__.
 import itertools
 import tilelang
 import tilelang.language as T
-from tilelang import tvm as tvm
-from tvm import DataType
-from tvm import tirx
+from tvm_ffi import dtype as DataType
+from tvm_tirx import ir
+from tvm_tirx.target import Target
+from tvm_tirx.tirx import reinterpret
 import torch
 
 from quantize import get_mxfp_intrin_group
 from dequantize_utils import torch_convert_bit_twiddling, torch_convert
 
 
-def _tir_u8_to_f4_to_bf16(nbit: int, val: tirx.PrimExpr, pos: tirx.PrimExpr, scale: tirx.PrimExpr, dtype: str):
+def _tir_u8_to_f4_to_bf16(nbit: int, val: ir.Expr, pos: ir.Expr, scale: ir.Expr, dtype: str):
     """Convert a packed 4-bit FP4 field to bfloat16 (mirrors Hopper example, ignoring overflow clamp)."""
     assert nbit == 4
     assert dtype == T.bfloat16
-    assert val.dtype == T.uint8
-    mask = tirx.const((1 << nbit) - 1, T.uint16)
-    f4 = (val >> (pos.astype(T.uint16) * tirx.const(nbit, T.uint16))) & mask
-    s = f4 >> tirx.const(3, T.uint16)
-    e_f4 = (f4 & tirx.const(6, T.uint16)) >> tirx.const(1, T.uint16)
-    e_bf16 = e_f4 + tirx.const(126, T.uint16)
-    m_f4 = f4 & tirx.const(1, T.uint16)
-    val_bf16 = tirx.reinterpret(
-        T.bfloat16,
-        ((((s << tirx.const(8, T.uint16)) | e_bf16) << tirx.const(7, T.uint16)) | (m_f4 << tirx.const(6, T.uint16))).astype(T.uint16),
+    assert val.ty.dtype == T.uint8
+    mask = ir.const((1 << nbit) - 1, T.uint16)
+    f4 = (val >> (pos.astype(T.uint16) * ir.const(nbit, T.uint16))) & mask
+    s = f4 >> ir.const(3, T.uint16)
+    e_f4 = (f4 & ir.const(6, T.uint16)) >> ir.const(1, T.uint16)
+    e_bf16 = e_f4 + ir.const(126, T.uint16)
+    m_f4 = f4 & ir.const(1, T.uint16)
+    val_bf16 = reinterpret(
+        ((((s << ir.const(8, T.uint16)) | e_bf16) << ir.const(7, T.uint16)) | (m_f4 << ir.const(6, T.uint16))).astype(T.uint16),
+        ty=ir.PrimType(T.bfloat16),
     )
     return val_bf16
 
 
 def _get_target():
     """Return TVM hip target for gfx950."""
-    return tvm.target.Target({"kind": "hip", "mcpu": "gfx950"})
+    return Target({"kind": "hip", "mcpu": "gfx950"})
 
 
 def get_configs():

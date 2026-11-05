@@ -1,5 +1,11 @@
 # KDA kernel implementation with TileLang
-## Requirement
+## Original Benchmark Environment
+
+The versions below record the original comparison. For this source revision,
+use the matched TileLang/provider/FFI bundle from the
+[installation guide](../../docs/get_started/Installation.md); installing the
+historical TileLang wheel does not test the current source.
+
 - TileLang: 0.1.6.post2+cuda.git729e66ca
 - triton: 3.2.0
 - FLA: commit 9714c5(used for comparison)

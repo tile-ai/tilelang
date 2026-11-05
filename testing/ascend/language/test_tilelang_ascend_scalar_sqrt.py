@@ -6,7 +6,7 @@ import torch
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tvm import tirx
+from tvm_tirx import ir
 from testing.ascend._ir import nodes
 
 
@@ -35,16 +35,16 @@ def _mixed_math_kernel(vf, math_op=T.rsqrt):
 def test_rsqrt_frontend_composes_only_scalar_regions(vf):
     """The frontend emits division/sqrt only outside VF, without target binding."""
     func = _mixed_math_kernel(vf)
-    stores = {int(store.indices[0]): store.value for store in nodes(func, tirx.BufferStore)}
+    stores = {int(store.indices[0]): store.value for store in nodes(func, ir.TensorStore)}
     assert set(stores) == {0, 1, 2}
     for index in (0, 2):
         value = stores[index]
-        assert isinstance(value, tirx.Div)
-        assert value.dtype == value.a.dtype == value.b.dtype == "float32"
-        assert isinstance(value.a, tirx.FloatImm) and float(value.a.value) == 1.0
-        assert isinstance(value.b, tirx.Call) and value.b.op.name == "tirx.sqrt"
+        assert isinstance(value, ir.prim.Div)
+        assert value.ty.dtype == value.a.ty.dtype == value.b.ty.dtype == "float32"
+        assert isinstance(value.a, ir.FloatImm) and float(value.a.value) == 1.0
+        assert isinstance(value.b, ir.Call) and value.b.op.name == "prim.sqrt"
         assert value.b.args[0].same_as(func.params[0])
-    assert isinstance(stores[1], tirx.Call) and stores[1].op.name == "tirx.rsqrt"
+    assert isinstance(stores[1], ir.Call) and stores[1].op.name == "prim.rsqrt"
 
 
 def test_scalar_rsqrt_codegen_selects_backend_late():

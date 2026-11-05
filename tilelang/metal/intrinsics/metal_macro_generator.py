@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from tilelang._analyzer import create_analyzer
+
 import tilelang.metal.language as T
-from tvm import arith
-from tvm import tirx as tir
-from tvm.tirx import Buffer, BufferRegion
+from tilelang.language import _native as tir
+from tilelang.language._native import Buffer, BufferRegion
 
 OPERAND_LEFT = 0
 OPERAND_RIGHT = 1
@@ -88,22 +89,23 @@ class MPSIntrinEmitter:
         innermost dimension to be contiguous.
         """
         if isinstance(buf, BufferRegion):
-            buffer = buf.buffer
-            extra = tuple(r.min for r in buf.region[:-2])
-            off_row = buf.region[-2].min
-            off_col = buf.region[-1].min
+            buffer = buf.source
+            extra = tuple(r.begin for r in buf.region[:-2])
+            off_row = buf.region[-2].begin
+            off_col = buf.region[-1].begin
         else:
             buffer = buf
             extra = ()
             off_row = 0
             off_col = 0
-        if buffer.strides:
-            inner_stride = buffer.strides[-1]
-            if not arith.Analyzer().can_prove_equal(inner_stride, 1):
+        strides = tir.tensor_strides(buffer)
+        if strides:
+            inner_stride = strides[-1]
+            if not create_analyzer().can_prove_equal(inner_stride, 1):
                 raise ValueError(
                     f"Metal matrix operations require a contiguous innermost dimension (stride 1), but got stride {inner_stride}"
                 )
-            stride = buffer.strides[-2]
+            stride = strides[-2]
         else:
             stride = buffer.shape[-1]
         return buffer, extra, off_row, off_col, stride

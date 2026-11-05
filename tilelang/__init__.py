@@ -1,8 +1,4 @@
-import contextlib
-import ctypes
 import logging
-import os
-import sys
 import warnings
 from pathlib import Path
 
@@ -106,139 +102,89 @@ if not env.is_light_import():
 del _init_logger
 
 
-def _disable_tvm_ffi_torch_c_dlpack(torch_module):
-    is_rocm = getattr(torch_module.version, "hip", None) is not None
-    mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
-    is_mps = sys.platform == "darwin" and mps_backend is not None and mps_backend.is_available()
-    if not is_rocm and not is_mps:
-        return
-
-    os.environ.setdefault("TVM_FFI_DISABLE_TORCH_C_DLPACK", "1")
-    if is_mps:
-        # PyTorch's native exchange API queries a stream handle that MPS cannot provide.
-        os.environ.setdefault("TVM_FFI_SKIP_DLPACK_C_EXCHANGE_API", "1")
-    try:
-        from tvm_ffi import _optional_torch_c_dlpack
-    except Exception:
-        return
-
-    # TVM Relax calls this loader directly while importing, bypassing the
-    # tvm-ffi module-level env guard.
-    def _disabled_torch_c_dlpack_extension(*_args, **_kwargs):
-        return None
-
-    _optional_torch_c_dlpack.load_torch_c_dlpack_extension = _disabled_torch_c_dlpack_extension
-
-
-@contextlib.contextmanager
-def _lazy_load_lib():
-    import torch  # preload torch to avoid dlopen errors
-
-    _disable_tvm_ffi_torch_c_dlpack(torch)
-
-    if sys.platform.startswith("win32"):
-        yield
-        return
-
-    old_flags = sys.getdlopenflags()
-    old_init = ctypes.CDLL.__init__
-
-    def lazy_init(self, name, mode=ctypes.DEFAULT_MODE, *args, **kwargs):
-        return old_init(self, name, mode | os.RTLD_LAZY, *args, **kwargs)
-
-    sys.setdlopenflags(old_flags | os.RTLD_LAZY)
-    ctypes.CDLL.__init__ = lazy_init
-    try:
-        yield
-    finally:
-        sys.setdlopenflags(old_flags)
-        ctypes.CDLL.__init__ = old_init
-
-
-# Skip heavy imports in light import mode
+# The provider owns all compiler registration and library loading.  Python
+# consumers are loaded on demand, so imports cannot initialize a second compiler
+# or require an unrelated device SDK before a backend is selected.
 if not env.is_light_import():
-    with _lazy_load_lib():
-        from .env import (  # noqa: F401
-            enable_cache,
-            disable_cache,
-            is_cache_enabled,
-            get_runtime_library_dirs,
-            prepend_dll_search_path,
-        )
-        from . import libinfo
+    from ._provider import load_provider as _load_provider
+    from tvm_ffi import dtype as DataType  # noqa: F401
+    from .env import enable_cache as enable_cache, disable_cache as disable_cache, is_cache_enabled as is_cache_enabled
 
-        runtime_library_dirs = get_runtime_library_dirs()
-        if sys.platform.startswith("win32"):
-            # Make sibling-package DLLs (tvm_ffi, z3) discoverable via PATH,
-            # then register all native dependency dirs with the secure DLL
-            # loader used by Python 3.8+ for absolute-path DLL loads.
-            prepend_dll_search_path(runtime_library_dirs)
-            dll_dirs = dict.fromkeys([*libinfo.get_dll_directories(), *runtime_library_dirs])
-            _dll_handles = [os.add_dll_directory(p) for p in dll_dirs]
-        else:
-            # Symlink installs break sibling-relative RPATHs. TVM-FFI loads its
-            # own library during discovery above; load Z3 from its package path.
-            _z3_handles = [
-                ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-                for directory in runtime_library_dirs
-                if (path := Path(directory) / ("libz3.dylib" if sys.platform == "darwin" else "libz3.so")).is_file()
-            ]
+    tvm, _LIB = _load_provider()
+    _LIB_PATH = _LIB._name
+    del _load_provider
+    from ._extensions import install_frontend_extension_finder as _install_frontend_extension_finder
 
-        import tvm
-        import tvm.base  # noqa: F401
-        from tvm import DataType  # noqa: F401
+    _install_frontend_extension_finder()
+    del _install_frontend_extension_finder
+    # Importing a submodule assigns it to its parent package. Bind these public
+    # callables explicitly so language's jit.exceptions import cannot replace
+    # @tilelang.jit with the tilelang.jit module object.
+    from .jit import jit as jit, compile as compile, par_compile as par_compile
 
-        def _load_tile_lang_lib():
-            """Load Tile Lang lib"""
-            lib_path = libinfo.find_lib_path("tilelang")
-            return ctypes.CDLL(lib_path), lib_path
+    # Discover the built-in target descriptors in their established priority
+    # order. These modules register detection/normalization callbacks without
+    # loading compiler pipelines or requiring their optional device SDKs.
+    # Delaying them until backend resolution is too late for target="auto".
+    from importlib import import_module as _import_target_module
 
-        # only load once here
-        if env.SKIP_LOADING_TILELANG_SO == "0":
-            _LIB, _LIB_PATH = _load_tile_lang_lib()
+    for _target_package in ("cuda", "rocm", "ascend", "metal"):
+        _import_target_module(f"tilelang.{_target_package}.target")
+    del _import_target_module, _target_package
 
-    from .jit import jit, JITKernel, compile, par_compile  # noqa: F401
-    from .profiler import Profiler  # noqa: F401
-    from .utils import (
-        TensorSupplyType,  # noqa: F401
-        deprecated,  # noqa: F401
-        build_date,  # noqa: F401
-    )
-    from .layout import (
-        Layout,  # noqa: F401
-        Fragment,  # noqa: F401
-    )
-    from . import (
-        analysis,  # noqa: F401
-        transform,  # noqa: F401
-        language,  # noqa: F401
-        engine,  # noqa: F401
-        tools,  # noqa: F401
-    )
-    from .language import dtypes  # noqa: F401
-    from .autotuner import autotune  # noqa: F401
-    from .transform import PassConfigKey  # noqa: F401
-    from .engine import lower, register_cuda_postproc, register_hip_postproc, register_c_postproc  # noqa: F401
-    from .math import *  # noqa: F403
-    from . import ir  # noqa: F401
-    from . import tileop  # noqa: F401
-    from . import cpu as cpu  # noqa: F401
-    from . import ascend as ascend  # noqa: F401
-    from . import cuda as cuda  # noqa: F401
-    from . import rocm as rocm  # noqa: F401
-    from . import metal as metal  # noqa: F401
-    from . import webgpu as webgpu  # noqa: F401
+_PUBLIC_ATTRIBUTES = {
+    "jit": ("jit", "jit"),
+    "JITKernel": ("jit", "JITKernel"),
+    "compile": ("jit", "compile"),
+    "par_compile": ("jit", "par_compile"),
+    "Profiler": ("profiler", "Profiler"),
+    "TensorSupplyType": ("utils", "TensorSupplyType"),
+    "deprecated": ("utils", "deprecated"),
+    "build_date": ("utils", "build_date"),
+    "Layout": ("layout", "Layout"),
+    "Fragment": ("layout", "Fragment"),
+    "autotune": ("autotuner", "autotune"),
+    "PassConfigKey": ("transform", "PassConfigKey"),
+    "lower": ("engine", "lower"),
+    "register_cuda_postproc": ("engine", "register_cuda_postproc"),
+    "register_hip_postproc": ("engine", "register_hip_postproc"),
+    "register_c_postproc": ("engine", "register_c_postproc"),
+    "dtypes": ("language", "dtypes"),
+}
+_PUBLIC_MODULES = {
+    "analysis",
+    "transform",
+    "language",
+    "engine",
+    "tools",
+    "ir",
+    "tileop",
+    "cpu",
+    "ascend",
+    "cuda",
+    "rocm",
+    "metal",
+    "webgpu",
+}
 
-    if env.get_lower_trace_mode() is not None:
-        from .tools.lower_trace import enable as _lower_trace_enable
 
-        _lower_trace_enable()
-del _lazy_load_lib
+def __getattr__(name):
+    import importlib
 
-# Install pass diff hook if TILELANG_PASS_DIFF is enabled (zero overhead when off).
-# AutoDD uses a light package import so its CLI can run without loading TVM.
-if not env.is_light_import():
-    from .utils.pass_diff_hook import install_pass_diff_hook as _install_pass_diff_hook  # noqa: E402
+    if name in _PUBLIC_ATTRIBUTES:
+        module_name, attribute = _PUBLIC_ATTRIBUTES[name]
+        module = importlib.import_module(f".{module_name}", __name__)
+        value = getattr(module, attribute)
+    elif name in _PUBLIC_MODULES:
+        value = importlib.import_module(f".{name}", __name__)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
 
-    _install_pass_diff_hook()
-    del _install_pass_diff_hook
+
+def __dir__():
+    return sorted(set(globals()) | _PUBLIC_ATTRIBUTES.keys() | _PUBLIC_MODULES)
+
+
+from .math import next_power_of_2 as next_power_of_2, cdiv as cdiv

@@ -1,175 +1,107 @@
 /*!
  * \file tl/cpu/op/reduce.cc
- * \brief CPU implementation for tl.reduce lowering (serial, local buffers).
- *
- * First version is purely serial: the reduce dimension is accumulated in a
- * kSerial loop with no SIMD horizontal reduction and no thread-level
- * parallelism. Correctness and test coverage first; performance work
- * (SIMD / multi-thread reduce) is tracked in cpu_ops.md enhancement track.
- *
- * Scope is limited to local -> local/local.var buffers, which is the only
- * path the frontend emits on CPU (reduce_op.py:69-81 emits ReduceOp directly
- * only for local src with local/local.var dst; shared/fragment paths go
- * through alloc_fragment, which CPU does not have).
+ * \brief Serial CPU reduction of native local tensor regions.
  */
 
 #include "op/reduce.h"
-
-#include <tvm/runtime/logging.h>
-
-#include "backend/common/op/reduce.h"
+#include "backend/common/op/reduction_semantics.h"
 #include "backend/common/target_utils.h"
 #include "op/utils.h"
-#include "support/check.h"
 #include "transform/loop_partition.h"
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
+using namespace prim;
+using namespace ffi;
 
 namespace cpu {
-
 struct Reduce {
-  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
-    (void)analyzer;
-
-    // 1. nan_propagate guard: CPU codegen has no __hmax_nan/__hmin_nan
-    //    equivalent for fp16/bf16 max/min/absmax.
+  static Stmt Lower(const ReduceOpNode &op, const LowerArgs &args,
+                    sym::AnalyzerObj *analyzer) {
     if (op.nan_propagate &&
-        (op.dst->dtype.is_float16() || op.dst->dtype.is_bfloat16())) {
-      LOG(FATAL) << "CPU reduce does not support nan_propagate=True for "
-                    "float16/bfloat16 max/min/absmax: the CPU codegen has no "
-                    "__hmax_nan/__hmin_nan equivalent intrinsics (CUDA-only). "
-                    "Target was: "
-                 << lower_args.target->str();
+        (op.dst.dtype().MatchesElementType(kDLFloat, 16) ||
+         op.dst.dtype().MatchesElementType(kDLBfloat, 16))) {
+      TVM_FFI_THROW(ValueError) << "CPU reduce does not support "
+                                   "nan_propagate=True for float16/bfloat16";
     }
-
-    // 2. buffer_remap resolution (mirror backend/common/op/reduce.h:753-756).
-    auto get_buffer = [&](const Buffer &buffer) {
-      auto it = lower_args.buffer_remap.find(buffer);
-      return it == lower_args.buffer_remap.end() ? buffer : (*it).second;
-    };
-    Buffer src_buffer = get_buffer(op.src);
-    Buffer dst_buffer = get_buffer(op.dst);
-
-    // 3. Scope guard: only local src and local/local.var dst are accepted.
-    //    The frontend only emits this combination on CPU; give a readable
-    //    error for anything else instead of silently producing wrong code.
-    if (!IsLocalBuffer(op.src) || !IsLocalBuffer(op.dst, /*allow_var=*/true)) {
-      LOG(FATAL) << "CPU reduce only supports local src and "
-                    "local/local.var dst buffers, got src scope `"
-                 << op.src.scope() << "` and dst scope `" << op.dst.scope()
-                 << "`.";
-    }
-
-    // 4. Constraint checks.
-    //    batch is a GPU AllReduce barrier batching concept; CPU has no
-    //    thread-level reduction so batch > 1 is rejected.
+    ICHECK(IsLocalBuffer(op.src) && IsLocalBuffer(op.dst, true))
+        << "CPU reduce requires local source and local/local.var destination";
     ICHECK_EQ(op.batch, 1)
-        << "CPU reduce: batch > 1 is a GPU AllReduce barrier concept and "
-           "is not supported on CPU (no thread-level reduction).";
-    int src_dim = static_cast<int>(op.src->shape.size());
-    int dst_dim = static_cast<int>(op.dst->shape.size());
-    // dim should already be legalized to >= 0 by the frontend
-    // (_legalize_dim in reduce_op.py:12-15), but defend in depth.
-    ICHECK_GE(op.dim, 0) << "CPU reduce: dim must be non-negative";
-    ICHECK_LT(op.dim, src_dim) << "CPU reduce: dim " << op.dim
-                               << " out of range for src ndim " << src_dim;
-    ICHECK(dst_dim == src_dim - 1 || dst_dim == src_dim)
-        << "CPU reduce: dst ndim must be src_ndim-1 (no keepdim) or "
-           "src_ndim (keepdim), got src_ndim="
-        << src_dim << ", dst_ndim=" << dst_dim;
-    ICHECK(src_buffer->dtype == dst_buffer->dtype)
-        << "CPU reduce: src and dst dtypes must match, got "
-        << src_buffer->dtype << " vs " << dst_buffer->dtype;
-
-    // 5. Index construction (mirror backend LowerLocal reduce.h:651-671).
-    Array<Var> dst_vars;
-    Array<PrimExpr> dst_indices;
-    for (int i = 0; i < dst_dim; ++i) {
-      Var var("i" + std::to_string(i));
-      dst_vars.push_back(var);
-      dst_indices.push_back(var);
-    }
-
-    auto make_src_indices = [&](PrimExpr reduce_index) {
-      Array<PrimExpr> indices;
-      for (int i = 0; i < src_dim; ++i) {
-        if (i == op.dim) {
-          indices.push_back(reduce_index);
-        } else if (dst_dim == src_dim) {
-          // keepdim: dst has a size-1 axis at op.dim
-          indices.push_back(dst_vars[i]);
-        } else {
-          indices.push_back(dst_vars[i < op.dim ? i : i - 1]);
+        << "CPU reduce has no GPU AllReduce barrier batching";
+    // These loops use logical coordinates. LowerTileOp transforms their
+    // loads/stores and tensor identities together after this callback returns.
+    // Replacing only the tensor here would bypass a non-identity layout.
+    const TensorVar src = op.src, dst = op.dst;
+    ICHECK(src.dtype() == dst.dtype())
+        << "CPU reduction input/output dtype mismatch";
+    const Array<Range> &sr = op.srcRegion_->region;
+    const Array<Range> &dr = op.dstRegion_->region;
+    const size_t rank = sr.size(), out_rank = dr.size();
+    ICHECK_GE(op.dim, 0);
+    ICHECK_LT(static_cast<size_t>(op.dim), rank);
+    ICHECK(out_rank + 1 == rank || out_rank == rank);
+    const bool keepdim = out_rank == rank;
+    auto local = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+    for (size_t i = 0, j = 0; i < rank; ++i) {
+      if (i == static_cast<size_t>(op.dim)) {
+        if (keepdim) {
+          ICHECK(local->CanProveEqual(dr[j]->extent, 1))
+              << "A kept reduction axis must have unit extent";
+          ++j;
         }
+      } else {
+        ICHECK(local->CanProveEqual(sr[i]->extent, dr[j]->extent))
+            << "CPU reduction destination region shape mismatch";
+        ++j;
       }
-      return indices;
-    };
-
+    }
+    Array<PrimVar> vars;
+    Array<PrimExpr> dst_indices;
+    for (size_t i = 0; i < out_rank; ++i) {
+      PrimVar var("reduce_o" + std::to_string(i), dr[i]->extent.ty());
+      vars.push_back(var);
+      dst_indices.push_back(dr[i]->begin + var);
+    }
+    PrimVar rv("reduce_k", sr[op.dim]->extent.ty());
+    Array<PrimExpr> src_indices;
+    for (size_t i = 0; i < rank; ++i) {
+      PrimExpr relative =
+          i == static_cast<size_t>(op.dim)
+              ? PrimExpr(rv)
+              : PrimExpr(vars[keepdim                           ? i
+                              : i < static_cast<size_t>(op.dim) ? i
+                                                                : i - 1]);
+      src_indices.push_back(sr[i]->begin + relative);
+    }
     Array<Stmt> stmts;
-
-    // 6. Optional init using the type/dtype-correct identity value
-    //    (backend::reduce::MakeInitValue covers all 8 types x dtype split).
     if (op.clear) {
-      stmts.push_back(BufferStore(
-          dst_buffer, backend::reduce::MakeInitValue(op), dst_indices));
+      stmts.push_back(
+          TensorStore(dst, dst_indices, backend::reduce::MakeInitValue(op)));
     }
-
-    // 7. Inner reduce loop along op.dim. kSerial (NOT kUnrolled) to avoid
-    //    code-size blowup for large reduce extents compounded by JIT -O0.
-    //    clear=False accumulation falls out naturally: init is skipped and
-    //    MakeReduce reads the existing dst value as the accumulator.
-    Var rv("rv");
-    Stmt reduce_body =
-        BufferStore(dst_buffer,
-                    backend::reduce::MakeReduce(
-                        op, /*vsize=*/1, BufferLoad(dst_buffer, dst_indices),
-                        BufferLoad(src_buffer, make_src_indices(rv))),
-                    dst_indices);
-    stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kSerial,
-                        reduce_body, std::nullopt));
-
-    // 8. Outer dst-dim loops. Built as kSerial then wrapped with
-    //    PragmaUnrollLoop to match the fill.cc CPU op convention.
-    //    PragmaUnrollLoop (LoopPramaUnroller, loop_partition.cc)
-    //    only retags the outermost kSerial For it meets and returns without
-    //    recursing into the body, so the inner kSerial reduce loop above is
-    //    left untouched. Under the default UnrollLoopConfig
-    //    (explicit_unroll=false) this is a no-op (no loop body replication);
-    //    the tag is an intent marker consistent with other CPU ops.
-    Stmt body = SeqStmt::Flatten(stmts);
-    for (int i = dst_dim - 1; i >= 0; --i) {
-      body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kSerial, body,
-                 std::nullopt);
+    Stmt update = TensorStore(
+        dst, dst_indices,
+        backend::reduce::MakeReduce(op, 1, TensorLoad(dst, dst_indices),
+                                    TensorLoad(src, src_indices)));
+    stmts.push_back(For(rv, IntImm(rv.ty(), 0), sr[op.dim]->extent,
+                        IntImm(rv.ty(), 1), ForKind::kDefault,
+                        SeqStmt(update)));
+    Stmt body = SeqStmt(stmts);
+    for (size_t i = out_rank; i > 0; --i) {
+      const auto &var = vars[i - 1];
+      body = For(var, IntImm(var.ty(), 0), dr[i - 1]->extent,
+                 IntImm(var.ty(), 1), ForKind::kDefault, SeqStmt(body));
     }
-    if (dst_dim >= 1) {
-      body = PragmaUnrollLoop(Downcast<For>(body));
-    }
+    // Preserve the previous intent marker on the outer loop only. The actual
+    // accumulation loop stays serial, avoiding code-size growth and reordering.
+    if (out_rank)
+      body = PragmaUnrollLoop(body.as_or_throw<For>());
     return body;
   }
 };
-
 } // namespace cpu
 
-namespace {
-
-bool MatchCPUReduceTarget(Target target) { return TargetIsCPU(target); }
-
-bool RegisterCPUReduce() {
-  RegisterReduceImpl(ReduceImpl{
-      "cpu.Reduce",
-      MatchCPUReduceTarget,
-      cpu::Reduce::Lower,
-  });
-  return true;
+TVM_FFI_STATIC_INIT_BLOCK() {
+  RegisterReduceImpl(ReduceImpl{"cpu.Reduce", TargetIsCPU, cpu::Reduce::Lower});
 }
 
-const bool cpu_reduce_registered = RegisterCPUReduce();
-
-} // namespace
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

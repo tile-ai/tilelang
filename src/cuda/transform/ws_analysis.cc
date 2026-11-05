@@ -4,8 +4,10 @@
  */
 
 #include "./ws_analysis.h"
+#include "ir/lexical_scope.h"
 
-#include <tvm/tirx/builtin.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include "cuda/op/builtin.h"
@@ -14,8 +16,10 @@
 #include "layout/cute_layout.h"
 #include "op/gemm.h"
 #include "op/gemm_sp.h"
+#include "op/native_utils.h"
 #include "op/operator.h"
 #include "op/utils.h"
+#include "transform/common/native_layout_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -33,160 +37,89 @@ namespace {
 class SimtProducerDetector : public StmtExprVisitor {
 public:
   static bool Detect(const Stmt &stmt) {
-    SimtProducerDetector d;
-    d(stmt);
-    return d.writes_shared_ && d.reads_global_ && !d.reads_shared_local_;
+    auto detector = ffi::make_object<SimtProducerDetector>();
+    detector->Visit(stmt);
+    return detector->writes_shared_ && detector->reads_global_ &&
+           !detector->reads_shared_local_;
   }
 
 private:
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (IsSharedBuffer(op->buffer)) {
-      writes_shared_ = true;
-    }
-    StmtExprVisitor::VisitStmt_(op);
+  Optional<VisitInterrupt> Visit_(const TensorStoreObj *op) final {
+    writes_shared_ |= IsSharedBuffer(op->dest.as_or_throw<TensorVar>());
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (IsGlobalBuffer(op->buffer)) {
-      reads_global_ = true;
-    }
-    if (IsSharedBuffer(op->buffer) || IsLocalBuffer(op->buffer, true)) {
-      reads_shared_local_ = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+    auto tensor = op->source.as_or_throw<TensorVar>();
+    reads_global_ |= IsGlobalBuffer(tensor);
+    reads_shared_local_ |=
+        IsSharedBuffer(tensor) || IsLocalBuffer(tensor, true);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  bool writes_shared_{false};
-  bool reads_global_{false};
-  bool reads_shared_local_{false};
+  Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (const auto *name = op->op.as<OpObj>();
+        name && name->name == "tl.annotation")
+      return std::nullopt;
+    // Address-of TensorLoad denotes no memory read. Its index expressions can
+    // themselves load memory, so visit those, but never the addressed element.
+    if (op->op.same_as(tirx::address_of_op()) ||
+        op->op.same_as(tl::access_ptr())) {
+      if (const auto *load = op->args[0].as<TensorLoadObj>()) {
+        for (const PrimExpr &index : load->indices)
+          Visit(index);
+        for (size_t i = 1; i < op->args.size(); ++i)
+          Visit(op->args[i]);
+        return std::nullopt;
+      }
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+
+  bool writes_shared_{false}, reads_global_{false}, reads_shared_local_{false};
 };
 
-class EvaluateCallInSimpleWrapperExtractor
-    : public StmtFunctor<Optional<Call>(const Stmt &)> {
-public:
-  Optional<Call> VisitStmt_(const EvaluateNode *op) final {
-    return op->value.as<Call>();
+Optional<Call> EvaluateCall(const Stmt &stmt) {
+  if (const auto *seq = stmt.as<SeqStmtObj>()) {
+    return seq->seq.size() == 1 ? EvaluateCall(seq->seq[0]) : Optional<Call>{};
   }
-
-  Optional<Call> VisitStmt_(const IfThenElseNode *op) final {
-    if (op->else_case.defined()) {
-      return Optional<Call>();
-    }
-    return VisitStmt(op->then_case);
+  if (const auto *evaluate = stmt.as<EvaluateObj>())
+    return evaluate->value.as<Call>();
+  if (const auto *branch = stmt.as<IfObj>()) {
+    return !branch->else_case ? EvaluateCall(branch->then_case)
+                              : Optional<Call>{};
   }
-
-  Optional<Call> VisitStmt_(const AttrStmtNode *op) final {
-    return VisitStmt(op->body);
+  if (const auto *region = stmt.as<RegionStmtObj>()) {
+    // These wrappers impose a lexical/metadata scope, not new control flow.
+    if (region->op->name == "tl.attr" ||
+        region->op.same_as(tl::lexical_scope_op()))
+      return EvaluateCall(region->body);
   }
-
-  Optional<Call> VisitStmt_(const SBlockNode *op) final {
-    return VisitStmt(op->body);
-  }
-
-  Optional<Call> VisitStmt_(const SBlockRealizeNode *op) final {
-    return VisitStmt(op->block->body);
-  }
-
-  Optional<Call> VisitStmtDefault_(const Object *) final {
-    return Optional<Call>();
-  }
-};
+  return std::nullopt;
+}
 
 class BufferRemapper : public StmtExprMutator {
 public:
-  static Stmt Rewrite(Stmt stmt, const BufferRemap &buffer_remap) {
-    if (buffer_remap.empty()) {
-      return stmt;
-    }
-    BufferRemapper remapper(buffer_remap);
-    return remapper.VisitStmt(stmt);
+  explicit BufferRemapper(const BufferRemap &remap) {
+    for (const auto &[old_tensor, new_tensor] : remap)
+      VarRemapSet(old_tensor, new_tensor);
   }
-
-private:
-  explicit BufferRemapper(const BufferRemap &buffer_remap)
-      : buffer_remap_(buffer_remap) {
-    for (const auto &[old_buf, new_buf] : buffer_remap_) {
-      var_remap_.emplace(old_buf->data, new_buf->data);
-    }
-  }
-
-  Buffer RemapBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end()) {
-      return it->second;
-    }
-    return buffer;
-  }
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = var_remap_.find(ffi::GetRef<Var>(op));
-    if (it != var_remap_.end()) {
-      return it->second;
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    BufferLoad load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    Buffer new_buffer = RemapBuffer(load->buffer);
-    if (!new_buffer.same_as(load->buffer)) {
-      return BufferLoad(new_buffer, load->indices, load->predicate, load->span);
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    Buffer new_buffer = RemapBuffer(store->buffer);
-    if (!new_buffer.same_as(store->buffer)) {
-      return BufferStore(new_buffer, store->value, store->indices,
-                         store->predicate, store->span);
-    }
-    return store;
-  }
-
-  const BufferRemap &buffer_remap_;
-  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual> var_remap_;
-};
-
-class ManualWSDetector : public StmtExprVisitor {
-public:
-  static bool HasManualWS(const Stmt &stmt) {
-    ManualWSDetector d;
-    d(stmt);
-    return d.found_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    // Detect both the T.ws() language-level attr ("warp_specialize") and
-    // the compiler-level attr (kWarpSpecializationScope).
-    if (op->attr_key == "warp_specialize" ||
-        op->attr_key == attr::kWarpSpecializationScope) {
-      found_ = true;
-      return;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  bool found_{false};
 };
 
 } // namespace
 
 Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
-  EvaluateCallInSimpleWrapperExtractor extractor;
-  return extractor(stmt);
+  return EvaluateCall(stmt);
 }
 
 static bool ContainsPtxCpAsync(const Stmt &stmt) {
   bool found = false;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
     if (found) {
       return;
     }
-    if (const auto *call = node.as<CallNode>()) {
-      if (call->op.same_as(builtin::ptx_cp_async()) ||
+    if (const auto *call = node.as<CallObj>()) {
+      if (call->op.same_as(tl::ptx_cp_async_bytes()) ||
           call->op.same_as(tl::ptx_cp_async())) {
         found = true;
       }
@@ -197,26 +130,25 @@ static bool ContainsPtxCpAsync(const Stmt &stmt) {
 
 static bool IsPtxCommitGroup(const Stmt &stmt) {
   Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() &&
-         call.value()->op.same_as(builtin::ptx_commit_group());
+  return call.has_value() && call.value()->op.same_as(tl::ptx_commit_group());
 }
 
 static bool IsPtxWaitGroup(const Stmt &stmt) {
   Optional<Call> call = GetEvaluateCallInSimpleWrapper(stmt);
-  return call.defined() && call.value()->op.same_as(builtin::ptx_wait_group());
+  return call.has_value() && call.value()->op.same_as(tl::ptx_wait_group());
 }
 
-bool IsBarrierOrTmaControlCall(const CallNode *call) {
+bool IsBarrierOrTmaControlCall(const CallObj *call) {
   // TODO: support warp specialization for cluster kernels and for TMA
   // gather4 / scatter4 (their raw intrinsics and hand protocols decline).
   return call->op.same_as(mbarrier_wait_parity()) ||
          call->op.same_as(mbarrier_expect_tx()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier()) ||
+         call->op.same_as(tl::ptx_arrive_barrier()) ||
          call->op.same_as(tl::ptx_arrive_cluster_barrier()) ||
-         call->op.same_as(builtin::ptx_arrive_barrier_expect_tx()) ||
+         call->op.same_as(tl::ptx_arrive_barrier_expect_tx()) ||
          call->op.same_as(tl::named_barrier_arrive()) ||
          call->op.same_as(tl::ptx_fence_barrier_init()) ||
-         call->op.same_as(builtin::ptx_cp_async_barrier()) ||
+         call->op.same_as(tl::ptx_cp_async_barrier()) ||
          call->op.same_as(tl::ptx_cp_async_barrier_noinc()) ||
          call->op.same_as(tma_load()) || call->op.same_as(tma_load_im2col()) ||
          call->op.same_as(tma_load_multicast()) ||
@@ -226,7 +158,8 @@ bool IsBarrierOrTmaControlCall(const CallNode *call) {
          call->op.same_as(tma_store_cluster()) ||
          call->op.same_as(tma_store_arrive()) ||
          call->op.same_as(tma_store_wait()) ||
-         call->op.same_as(builtin::tvm_storage_sync()) ||
+         call->op.same_as(Op::Get("tirx.gpu_storage_sync")) ||
+         call->op.same_as(Op::Get("tl.storage_sync")) ||
          call->op.same_as(tl::sync_grid()) ||
          call->op.same_as(tl::syncthreads_count()) ||
          call->op.same_as(tl::syncthreads_and()) ||
@@ -235,9 +168,9 @@ bool IsBarrierOrTmaControlCall(const CallNode *call) {
 
 std::optional<GemmInfo> GetGemmInfo(const TileOperator &op) {
   if (const auto *gemm = op.as<GemmNode>())
-    return GemmInfo{gemm->cRegion_->buffer, gemm->wgWait_};
+    return GemmInfo{RegionTensor(gemm->cRegion_), gemm->wgWait_};
   if (const auto *gemm = op.as<GemmSPNode>())
-    return GemmInfo{gemm->cRegion_->buffer, gemm->wg_wait};
+    return GemmInfo{RegionTensor(gemm->cRegion_), gemm->wg_wait};
   return std::nullopt;
 }
 
@@ -264,8 +197,8 @@ TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
 
 TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
   // Tile-op Calls: classify directly via CopyNode checks.
-  if (auto *eval = stmt.as<EvaluateNode>()) {
-    if (auto *call = eval->value.as<CallNode>()) {
+  if (auto *eval = stmt.as<EvaluateObj>()) {
+    if (auto *call = eval->value.as<CallObj>()) {
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (tile_op.defined()) {
         if (auto *copy = tile_op.as<CopyNode>()) {
@@ -307,46 +240,87 @@ bool IsProducer(TileStmtKind kind) {
 }
 
 bool HasManualWarpSpecialization(const Stmt &stmt) {
-  return ManualWSDetector::HasManualWS(stmt);
+  bool found = false;
+  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
+    if (const auto *region = node.as<RegionStmtObj>();
+        region && region->op->name == "tl.attr") {
+      const auto data = ReadNativeAnnotations(region);
+      const auto key = data.at("key").cast<String>();
+      found |=
+          key == "warp_specialize" || key == attr::kWarpSpecializationScope;
+    }
+  });
+  return found;
 }
 
 Stmt RemapBuffers(Stmt stmt, const BufferRemap &remap) {
-  return BufferRemapper::Rewrite(std::move(stmt), remap);
+  if (remap.empty())
+    return stmt;
+  auto mutator = ffi::make_object<BufferRemapper>(remap);
+  return mutator->Mutate(stmt).ValueOrUnchanged(stmt);
 }
 
-bool IsTmaCompatibleLayout(const Layout &layout, const Buffer &buffer) {
+bool IsTmaCompatibleLayout(const Layout &layout, const TensorVar &buffer) {
   Optional<cute::ComposedLayout> composed =
       cute::ComposedLayoutFromTileLang(layout);
-  if (!composed.defined())
+  if (!composed.has_value())
     return false;
   // Recast to byte space (the swizzle atom is defined on byte addresses).
   cute::ComposedLayout composed_bytes =
-      composed.value().Recast(buffer->dtype.bits(), /*new_bits=*/8);
+      composed.value().Recast(buffer.dtype().bits(), /*new_bits=*/8);
   return composed_bytes->swizzle->IsTMACompatible();
 }
 
-void CollectAnnotatedLayouts(const SBlock &block, BufferLayoutMap &layouts) {
-  auto anno = block->annotations.Get("layout_map");
-  if (!anno.has_value())
-    return;
-  auto gmap = anno->as<Map<ObjectRef, ObjectRef>>();
-  if (!gmap.has_value())
-    return;
-  for (const auto &[key, val] : gmap.value()) {
-    Layout layout;
-    if (auto l = val.as<Layout>(); l.has_value())
-      layout = l.value();
-    if (auto buf = key.as<Buffer>(); buf.has_value()) {
-      layouts[buf.value()->data] = {buf.value(), layout};
-    } else if (auto var = key.as<Var>(); var.has_value()) {
-      for (const auto &buf : block->alloc_buffers) {
-        if (buf->data.same_as(var.value())) {
-          layouts[buf->data] = {buf, layout};
-          break;
-        }
-      }
+void CollectAnnotatedLayouts(const Stmt &body, BufferLayoutMap &layouts) {
+  auto collect = [&](const Map<String, Any> &annotations) {
+    auto encoded = annotations.Get("layout_map");
+    if (!encoded)
+      return;
+    for (const auto &[key, value] : encoded->cast<Map<Any, Any>>()) {
+      auto tensor = key.cast<TensorVar>();
+      Layout layout;
+      if (auto candidate = value.as<Layout>())
+        layout = *candidate;
+      layouts.insert_or_assign(tensor, std::make_pair(tensor, layout));
     }
+  };
+  VisitNativePostOrder(body, [&](const ObjectRef &node) {
+    if (const auto *call = node.as<CallObj>()) {
+      if (const auto *name = call->op.as<OpObj>();
+          name && name->name == "tl.annotation")
+        collect(ReadNativeAnnotations(call));
+    } else if (const auto *region = node.as<RegionStmtObj>();
+               region && region->op->name == "tl.attr") {
+      auto fields = ReadNativeAnnotations(region);
+      if (fields.at("key").cast<String>() == "tl.kernel")
+        collect(fields.at("value").cast<Map<String, Any>>());
+    }
+  });
+}
+
+TileOpArguments ReadWSCall(const CallObj *call) {
+  if (call->attrs) {
+    auto attributes = call->attrs.value().as<DictAttrs>();
+    if (attributes &&
+        attributes.value().GetAttr<Array<Any>>("annotation_schema"))
+      return DecodeTileOpArguments(call);
+    if (attributes)
+      return TileOpArguments{call->args, attributes.value()->dict};
   }
+  return TileOpArguments{call->args, {}};
+}
+
+Call RewriteWSCall(const CallObj *call, const Map<String, Any> &annotations,
+                   Optional<Op> replacement_op) {
+  TileOpArguments decoded = ReadWSCall(call);
+  auto op = replacement_op.value_or(call->op.as_or_throw<Op>());
+  auto attrs = call->attrs ? call->attrs.value().as<DictAttrs>() : std::nullopt;
+  if (!std::string(op->name).starts_with("tl.tileop.") &&
+      !(attrs && attrs.value().GetAttr<Array<Any>>("annotation_schema")))
+    return Call(call->ty, op, decoded.operands, DictAttrs(annotations),
+                call->ty_args, call->loc);
+  return MakeAnnotatedCall(call->ty, op, decoded.operands, annotations,
+                           call->loc);
 }
 
 } // namespace tl

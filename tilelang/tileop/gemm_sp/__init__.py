@@ -1,13 +1,14 @@
-from tilelang import tvm as tvm
 from tilelang.tileop.gemm_sp.registry import resolve_gemm_sp_impl
-from tvm import tirx
-from tvm.target import Target
-from tvm.ir.base import Node
-from tvm.ir import Range
-from tvm.runtime import Scriptable
+from tilelang.language import _native as tirx
+from tvm_tirx.target import Target
+from tvm_tirx.ir import Node
+from tvm_tirx.ir import Range
+from tvm_tirx.ir import Scriptable
 import tvm_ffi
 from tilelang import _ffi_api
 from tilelang.ir import GemmSPWarpPolicy
+from tilelang.tileop._lowering import close_lowered_function
+from tilelang.tileop import _register_default_callback
 
 
 @tvm_ffi.register_object("tl.GemmSP")
@@ -34,15 +35,15 @@ class GemmSP(Node, Scriptable):
     wg_wait: int
     policy: GemmSPWarpPolicy
 
-    @tvm_ffi.register_global_func("tl.gemm_sp.infer_layout")
+    @_register_default_callback("tl.gemm_sp.infer_layout")
     def gemm_sp_infer_layout(self, target: Target, thread_bounds: Range):
         thread_nums = thread_bounds.extent
         return self.infer_layout(target, thread_nums)
 
-    @tvm_ffi.register_global_func("tl.gemm_sp.lower")
+    @_register_default_callback("tl.gemm_sp.lower")
     def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: tirx.PrimExpr):
-        stmt = self.lower(target, layout_map, thread_bounds, thread_index)
-        return stmt
+        function = self.lower(target, layout_map, thread_bounds, thread_index)
+        return close_lowered_function(function)
 
     def infer_layout(self, target: Target, thread_nums: int):
         gemm_inst = self._select_gemm_instruction(thread_nums, target)

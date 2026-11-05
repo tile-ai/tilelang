@@ -1,140 +1,100 @@
-#if defined(__linux__)
-#include "support/check.h"
-#include <sys/stat.h>
-#include <tvm/ir/cast.h>
-#endif
-
-#include <hip/hip_runtime.h>
-
+/*!
+ * \file rocm/codegen/rt_mod_hip.cc
+ * \brief Native HIP source generation and runtime module construction.
+ */
 #include "codegen_hip.h"
-#include "config.h"
-#include "runtime/pack_args.h"
-#include "target/rocm/rocm_fallback_module.h"
 
-namespace tvm {
-namespace codegen {
+#include <unordered_set>
 
+#include "backend/rocm/codegen/rocm_fallback_module.h"
+#include "codegen/build_common.h"
+
+namespace tvm::codegen {
 using namespace ffi;
 
-static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
-  Map<String, runtime::FunctionInfo> fmap;
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
-        << "Can only lower IR Module with PrimFuncs";
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-
-    Array<DLDataType> arg_types;
-    Array<String> launch_param_tags;
-    for (size_t i = 0; i < f->params.size(); ++i) {
-      if (f->params[i]->dtype.is_handle()) {
-        auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
-        if (ptr && ptr->storage_scope == "grid_constant") {
-          arg_types.push_back(DataType(runtime::kDLGridConstant, 64, 1));
-          continue;
-        }
-      }
-      DataType dtype = f->params[i].dtype();
-      // Device runtime cannot directly take bool arguments, map to int32.
-      if (dtype.is_bool())
-        dtype = DataType::Int(32);
-      arg_types.push_back(dtype);
-    }
-    if (f->HasNonzeroAttr("use_cooperative_groups")) {
-      launch_param_tags.push_back(runtime::launch_param::kUseCooperativeLaunch);
-    }
-    if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
-      for (const auto &tag : opt.value()) {
-        launch_param_tags.push_back(tag);
-      }
-    }
-    auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-    std::string name = static_cast<std::string>(global_symbol.value());
-    fmap.Set(String(name), runtime::FunctionInfo(String(name), arg_types,
-                                                 launch_param_tags, {}));
+namespace {
+std::string EmitTileLangHIP(const IRModule &mod, const Target &target) {
+  With<Target> target_scope(target);
+  CodeGenTileLangHIP codegen;
+  codegen.Init(false);
+  codegen.SetTarget(target);
+  codegen.SetEmitLineDirectives(TileLangEmitLineDirectivesEnabled());
+  std::unordered_set<std::string> symbols;
+  for (const auto &[gvar, base] : mod->functions) {
+    auto func = base.as_or_throw<tirx::Function>();
+    auto symbol = func->GetAttr(tvm::attr::kGlobalSymbol);
+    TVM_FFI_CHECK(symbol.has_value(), ValueError)
+        << "HIP kernel requires global_symbol";
+    TVM_FFI_CHECK(symbols.insert(symbol.value()).second, ValueError)
+        << "Duplicate HIP kernel global_symbol: " << symbol.value();
+    TVM_FFI_CHECK(
+        func->GetAttr(tvm::attr::kCallingConv, CallingConv::kDefault).value() ==
+            CallingConv::kDeviceKernelLaunch,
+        ValueError)
+        << "TileLang HIP build requires device functions after host/device "
+           "split";
+    codegen.AddFunction(gvar, func);
   }
-  return fmap;
+  std::string source = codegen.Finish();
+  if (auto postproc =
+          ffi::Function::GetGlobal("tilelang_callback_hip_postproc"))
+    source = (*postproc)(source, target).cast<std::string>();
+  return source;
 }
 
+Map<String, runtime::FunctionInfo>
+TileLangHIPFunctionInfo(const IRModule &mod) {
+  auto infos = ExtractFuncInfo(mod);
+  for (const auto &[gvar, base] : mod->functions) {
+    auto func = base.as_or_throw<tirx::Function>();
+    if (!func->HasNonzeroAttr("use_cooperative_groups"))
+      continue;
+    auto name = func->GetAttr(tvm::attr::kGlobalSymbol).value();
+    const auto &info = infos.at(name);
+    Array<String> tags{runtime::launch_param::kUseCooperativeLaunch};
+    for (const String &tag : info->launch_param_tags)
+      if (tag != runtime::launch_param::kUseCooperativeLaunch)
+        tags.push_back(tag);
+    infos.Set(name, runtime::FunctionInfo(
+                        info->name, info->arg_types, tags, info->arg_extra_tags,
+                        info->cuda_launch_fields, info->cuda_kernel_attrs));
+  }
+  return infos;
+}
+} // namespace
+
 Module BuildTileLangHIP(IRModule mod, Target target) {
-  bool output_ssa = false;
-  CodeGenTileLangHIP cg;
-  cg.Init(output_ssa);
-  cg.SetTarget(target);
-  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
-        << "CodeGenTileLangHIP: Can only take PrimFunc";
-    auto f = Downcast<PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
-    ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
-    cg.AddFunction(f);
-  }
-
-  std::string code = cg.Finish();
-
-  // Use the new FFI API to get registered functions
-  if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
-    code = (*f)(code, target).cast<std::string>();
-  }
-
-  std::string fmt = "ptx";
-  std::string ptx;
-
-  if (auto f = Function::GetGlobal("tilelang_callback_hip_compile")) {
-    ptx = (*f)(code, target).cast<std::string>();
-    if (ptx[0] != '/')
-      fmt = "hsaco";
-  } else {
-    ICHECK(false) << "tilelang_callback_hip_compile is not set";
-  }
-
-  Map<String, String> source_map;
-  source_map.Set("hip", code);
-  return target::ROCmModuleCreateWithFallback(Bytes(ptx.data(), ptx.size()),
-                                              String(fmt), ExtractFuncInfo(mod),
-                                              source_map);
+  std::string source = EmitTileLangHIP(mod, target);
+  auto compile =
+      ffi::Function::GetGlobalRequired("tilelang_callback_hip_compile");
+  Any compiled = compile(source, target);
+  Bytes binary = [&]() {
+    if (auto bytes = compiled.as<Bytes>())
+      return bytes.value();
+    auto string = compiled.cast<String>();
+    return Bytes(string.data(), string.size());
+  }();
+  TVM_FFI_CHECK_GT(binary.size(), 0, ValueError)
+      << "HIP compiler returned an empty kernel binary";
+  return target::ROCmModuleCreateWithFallback(
+      binary, "hsaco", TileLangHIPFunctionInfo(mod), {{"hip", source}});
 }
 
 Module BuildTileLangHIPWithoutCompile(IRModule mod, Target target) {
-  bool output_ssa = false;
-  CodeGenTileLangHIP cg;
-  cg.Init(output_ssa);
-  cg.SetTarget(target);
-  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
-        << "CodeGenTileLangHIP: Can only take PrimFunc";
-    auto f = Downcast<PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
-    ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
-    cg.AddFunction(f);
-  }
-
-  std::string code = cg.Finish();
-
-  // Use the new FFI API to get registered functions
-  if (auto f = Function::GetGlobal("tilelang_callback_hip_postproc")) {
-    code = (*f)(code, target).cast<std::string>();
-  }
-
-  Map<String, String> source_map;
-  source_map.Set("hip", code);
-  static constexpr const char kDummyPtx[] = "ptx";
-  return target::ROCmModuleCreateWithFallback(
-      Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"),
-      ExtractFuncInfo(mod), source_map);
+  std::string source = EmitTileLangHIP(mod, target);
+  // Source-only JIT consumers must work without a HIP SDK or runtime sidecar,
+  // and must not cause an implicit compilation through runtime registration.
+  return target::ROCmFallbackModuleCreate(Bytes(source.data(), source.size()),
+                                          "hip", TileLangHIPFunctionInfo(mod),
+                                          {{"hip", source}});
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef()
+  tvm::transform::PassContext::RegisterConfigOption<String>(
+      "hip.kernels_output_dir");
+  reflection::GlobalDef()
       .def("target.build.tilelang_hip", BuildTileLangHIP)
       .def("target.build.tilelang_hip_without_compile",
            BuildTileLangHIPWithoutCompile);
 }
-
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::codegen

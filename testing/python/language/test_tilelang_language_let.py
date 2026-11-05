@@ -16,7 +16,11 @@ def test_kernel(
 @tilelang.testing.requires_cuda
 def test_let_vectorize_load():
     kernel_source = test_kernel.get_kernel_source()
-    assert "float4 b" in kernel_source
+    # The native simplifier may forward the immutable Bind directly to its
+    # store. Keep the four-lane load/store contract independent of its name.
+    assert kernel_source.count("tl::load_vector<float4, 16,") == 1
+    assert kernel_source.count("tl::store_vector<float4, 16,") == 1
+    assert "make_float4(A_ptr[" not in kernel_source
 
 
 @tilelang.jit

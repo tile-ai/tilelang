@@ -7,28 +7,24 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm as tvm
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
-from tvm.tirx.stmt_functor import ir_transform
+import tvm_ffi
+from tvm_tirx import ir, tirx
+from testing.python.transform._safe_memory_oracle import (
+    assert_nested_lookup,
+    assert_nonzero_async_padding,
+    assert_predicate_table,
+    assert_same_memory_effects,
+)
 
 
-def _strip_block_reads_writes(stmt, strip_annotations: bool = False):
-    """Strip non-behavioral block metadata before structural comparison."""
+def _single_stmt(stmt):
+    while isinstance(stmt, ir.SeqStmt) and len(stmt.seq) == 1:
+        stmt = stmt.seq[0]
+    return stmt
 
-    def _postorder(op):
-        if isinstance(op, tvm.tirx.SBlock):
-            annotations = {} if strip_annotations else op.annotations
-            return tvm.tirx.SBlock(
-                op.iter_vars,
-                [],
-                [],
-                op.name_hint,
-                op.body,
-                op.init,
-                op.alloc_buffers,
-                op.match_buffers,
-                annotations,
-            )
 
-    return ir_transform(stmt, None, _postorder)
+def _operand_count(call):
+    return int(call.attrs.get("operand_count", len(call.args))) if call.attrs else len(call.args)
 
 
 def _materialize_launch(func):
@@ -41,16 +37,16 @@ def _materialize_launch(func):
 
 
 def _is_call_to(expr, op_name):
-    return isinstance(expr, tvm.tirx.Call) and isinstance(expr.op, tvm.ir.Op) and str(expr.op.name) == op_name
+    return isinstance(expr, ir.Call) and isinstance(expr.op, tvm.ir.Op) and str(expr.op.name) == op_name
 
 
 def _is_int_zero(expr):
-    return isinstance(expr, tvm.tirx.IntImm) and int(expr.value) == 0
+    return isinstance(expr, ir.IntImm) and int(expr.value) == 0
 
 
 def _assert_tl_access_ptr_bases_are_buffer_loads(stmt):
     for call in collect_calls(stmt, op="tl.access_ptr"):
-        assert isinstance(call.args[0], tvm.tirx.BufferLoad)
+        assert isinstance(call.args[0], ir.TensorLoad)
 
 
 def _assert_legalize_matches_expected(before, expected, strip_annotations: bool = False):
@@ -59,10 +55,7 @@ def _assert_legalize_matches_expected(before, expected, strip_annotations: bool 
 
     _assert_tl_access_ptr_bases_are_buffer_loads(before.body)
     _assert_tl_access_ptr_bases_are_buffer_loads(transformed["main"].body)
-    tvm.ir.assert_structural_equal(
-        _strip_block_reads_writes(transformed["main"].body, strip_annotations),
-        _strip_block_reads_writes(expected.body, strip_annotations),
-    )
+    assert_same_memory_effects(transformed["main"], expected)
 
 
 def _apply_negative_index_then_safe_memory(func):
@@ -104,10 +97,7 @@ def assert_vectorize_access(M: int = 64, N: int = 64):
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
 
-    tvm.ir.assert_structural_equal(
-        _strip_block_reads_writes(transformed["main"].body),
-        _strip_block_reads_writes(expected.body),
-    )
+    assert_same_memory_effects(transformed["main"], expected)
 
 
 def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
@@ -149,10 +139,7 @@ def assert_vectorize_access_with_atmoic_add(M: int = 64, N: int = 64):
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     print(transformed)
     print(expected)
-    tvm.ir.assert_structural_equal(
-        _strip_block_reads_writes(transformed["main"].body),
-        _strip_block_reads_writes(expected.body),
-    )
+    assert_same_memory_effects(transformed["main"], expected)
 
 
 def oob_store_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: int = 2):
@@ -185,10 +172,7 @@ def assert_oob_store_legalize(M: int = 64, N: int = 64):
     func, expected = _materialize_launch(func), _materialize_launch(expected)
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
-    tvm.ir.assert_structural_equal(
-        _strip_block_reads_writes(transformed["main"].body),
-        _strip_block_reads_writes(expected.body),
-    )
+    assert_same_memory_effects(transformed["main"], expected)
 
 
 def cp_async_access_ptr_legalize():
@@ -231,9 +215,12 @@ def assert_cp_async_access_ptr_legalize():
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    cp_async_calls = collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) > 0
-    assert all(len(call.args) == 4 for call in cp_async_calls)
+    # Multi-element transfers retain their valid prefix through a guarded
+    # scalar fallback. One cp.async predicate alone cannot express that case.
+    assert all(_operand_count(call) == 3 for call in cp_async_calls)
+    assert collect_nodes(body, ir.If)
     _assert_legalize_matches_expected(func, expected)
 
 
@@ -479,11 +466,12 @@ def assert_cp_async_access_ptr_nonzero_safe_value_legalize():
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    cp_async_calls = collect_calls(body, op="tirx.ptx_cp_async") + collect_calls(body, op="tl.ptx_cp_async")
+    cp_async_calls = collect_calls(body, op="tl.ptx_cp_async")
     assert len(cp_async_calls) > 0
-    assert all(len(call.args) == 3 for call in cp_async_calls)
-    assert collect_nodes(body, tvm.tirx.IfThenElse)
-    _assert_legalize_matches_expected(func, expected, strip_annotations=True)
+    assert all(_operand_count(call) == 3 for call in cp_async_calls)
+    assert collect_nodes(body, ir.If)
+    _assert_tl_access_ptr_bases_are_buffer_loads(body)
+    assert_nonzero_async_padding(transformed["main"], expected)
 
 
 def assert_atomic_load_access_ptr_legalize():
@@ -493,7 +481,7 @@ def assert_atomic_load_access_ptr_legalize():
     body = transformed["main"].body
 
     _assert_tl_access_ptr_bases_are_buffer_loads(body)
-    if_then_else_calls = collect_calls(body, op="tirx.if_then_else")
+    if_then_else_calls = collect_calls(body, op="prim.if_then_else")
     assert any(
         len(call.args) == 3 and _is_call_to(call.args[1], "tl.atomic_load_elem_op") and _is_int_zero(call.args[2])
         for call in if_then_else_calls
@@ -524,7 +512,7 @@ def assert_call_extern_access_ptr_mask_legalize(access_type: str):
     body = transformed["main"].body
 
     _assert_tl_access_ptr_bases_are_buffer_loads(body)
-    assert collect_nodes(body, tvm.tirx.IfThenElse)
+    assert collect_nodes(body, ir.If)
     _assert_legalize_matches_expected(func, expected)
 
 
@@ -557,10 +545,7 @@ def assert_runtime_unknown_sign_vector_negative_index_legalize():
                 ]
 
     transformed = _apply_negative_index_then_safe_memory(main)
-    tvm.ir.assert_structural_equal(
-        _strip_block_reads_writes(transformed["main"].body),
-        _strip_block_reads_writes(expected.body),
-    )
+    assert_same_memory_effects(transformed["main"], expected)
 
 
 def test_vectorize_access():
@@ -605,14 +590,19 @@ def test_cp_async_signed_zero_safe_value_oob(safe_value):
     assert len(calls) == 1
     if math.copysign(1.0, safe_value) > 0:
         assert len(calls[0].args) == 4
-        assert not collect_nodes(body, tvm.tirx.IfThenElse)
+        assert not collect_nodes(body, ir.If)
     else:
         assert len(calls[0].args) == 3
-        assert len(collect_nodes(body, tvm.tirx.IfThenElse)) == 1
-        stores = collect_nodes(body, tvm.tirx.BufferStore)
+        assert len(collect_nodes(body, ir.If)) == 1
+        stores = collect_nodes(body, ir.TensorStore)
         assert len(stores) == 1
         fill = stores[0].value
-        assert isinstance(fill, tvm.tirx.FloatImm)
+        # The fallback retains a lazy source guard, so an invalid source is
+        # never dereferenced. Its padding value must preserve the sign bit.
+        assert _is_call_to(fill, "prim.if_then_else")
+        assert isinstance(fill.args[1], ir.TensorLoad)
+        fill = fill.args[2]
+        assert isinstance(fill, ir.FloatImm)
         assert fill.value == 0.0 and math.copysign(1.0, fill.value) < 0
 
 
@@ -666,17 +656,17 @@ def test_dynamic_index_load_store_conditions_are_combined():
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
 
-    load_guards = collect_calls(body, op="tirx.if_then_else")
+    load_guards = collect_calls(body, op="prim.if_then_else")
     assert len(load_guards) == 1
-    assert isinstance(load_guards[0].args[0], tvm.tirx.And)
-    assert isinstance(load_guards[0].args[1], tvm.tirx.BufferLoad)
-    assert isinstance(load_guards[0].args[2], tvm.tirx.FloatImm)
+    assert isinstance(load_guards[0].args[0], ir.prim.And)
+    assert isinstance(load_guards[0].args[1], ir.TensorLoad)
+    assert isinstance(load_guards[0].args[2], ir.FloatImm)
     assert float(load_guards[0].args[2].value) == 0.0
 
-    store_guards = collect_nodes(body, tvm.tirx.IfThenElse)
+    store_guards = collect_nodes(body, ir.If)
     assert len(store_guards) == 1
-    assert isinstance(store_guards[0].condition, tvm.tirx.And)
-    assert isinstance(store_guards[0].then_case, tvm.tirx.BufferStore)
+    assert isinstance(store_guards[0].condition, ir.prim.And)
+    assert isinstance(_single_stmt(store_guards[0].then_case), ir.TensorStore)
     tvm.ir.assert_structural_equal(load_guards[0].args[0], store_guards[0].condition)
 
 
@@ -693,19 +683,19 @@ def test_nested_buffer_load_index_is_safely_rewritten():
     mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    a_data = main.buffer_map[main.params[0]].data
-    b_data = main.buffer_map[main.params[1]].data
+    a_data = main.params[0]
+    b_data = main.params[1]
 
     def _is_load_from(expr, buffer_data):
-        return isinstance(expr, tvm.tirx.BufferLoad) and expr.buffer.data.same_as(buffer_data)
+        return isinstance(expr, ir.TensorLoad) and expr.source.same_as(buffer_data)
 
     def _assert_safe_b_index(expr):
-        assert _is_call_to(expr, "tirx.if_then_else")
-        assert isinstance(expr.args[0], tvm.tirx.And)
+        assert _is_call_to(expr, "prim.if_then_else")
+        assert isinstance(expr.args[0], ir.prim.And)
         assert _is_load_from(expr.args[1], b_data)
         assert _is_int_zero(expr.args[2])
 
-    all_guards = collect_calls(body, op="tirx.if_then_else")
+    all_guards = collect_calls(body, op="prim.if_then_else")
     inner_guards = [call for call in all_guards if len(call.args) == 3 and _is_load_from(call.args[1], a_data)]
     assert len(inner_guards) == 1
 
@@ -715,18 +705,26 @@ def test_nested_buffer_load_index_is_safely_rewritten():
 
     outer_guard = outer_guards[0]
     for fallback in (inner_guard.args[2], outer_guard.args[2]):
-        assert isinstance(fallback, tvm.tirx.FloatImm)
+        assert isinstance(fallback, ir.FloatImm)
         assert float(fallback.value) == 0.0
     _assert_safe_b_index(inner_guard.args[1].indices[0])
 
     for comparison in (inner_guard.args[0], outer_guard.args[0]):
-        assert isinstance(comparison, (tvm.tirx.LT, tvm.tirx.LE, tvm.tirx.GT, tvm.tirx.GE))
-        safe_indices = [operand for operand in (comparison.a, comparison.b) if _is_call_to(operand, "tirx.if_then_else")]
+        assert isinstance(comparison, (ir.prim.LT, ir.prim.LE, ir.prim.GT, ir.prim.GE))
+        safe_indices = [operand for operand in (comparison.a, comparison.b) if _is_call_to(operand, "prim.if_then_else")]
         assert len(safe_indices) == 1
         _assert_safe_b_index(safe_indices[0])
 
     guarded_b_indices = [call for call in all_guards if len(call.args) == 3 and _is_load_from(call.args[1], b_data)]
-    assert len(guarded_b_indices) == 1
+    # The typed mutator may rebuild a pure producer expression at each use.
+    # Every such expression must keep the same lazy bound check and fallback.
+    assert guarded_b_indices
+    for call in guarded_b_indices:
+        _assert_safe_b_index(call)
+        tvm.ir.assert_structural_equal(call, guarded_b_indices[0])
+    producer_loads = [load for load in collect_nodes(body, ir.TensorLoad) if load.source.same_as(b_data)]
+    assert {load for load in producer_loads} == {call.args[1] for call in guarded_b_indices}
+    assert_nested_lookup(transformed["main"])
 
 
 def test_ramp_load_conditions_are_combined():
@@ -745,31 +743,36 @@ def test_ramp_load_conditions_are_combined():
     body = transformed["main"].body
 
     load_guards = [
-        call
-        for call in collect_calls(body, op="tirx.if_then_else")
-        if len(call.args) == 3 and isinstance(call.args[1], tvm.tirx.BufferLoad)
+        call for call in collect_calls(body, op="prim.if_then_else") if len(call.args) == 3 and isinstance(call.args[1], ir.TensorLoad)
     ]
     assert len(load_guards) == 1
 
     guard = load_guards[0]
-    assert guard.args[0].dtype.lanes == 1
-    assert isinstance(guard.args[0], tvm.tirx.And)
-    assert guard.args[1].dtype.lanes == lanes
-    assert isinstance(guard.args[2], tvm.tirx.Broadcast)
-    assert guard.args[2].dtype.lanes == lanes
+    assert guard.args[0].ty.dtype.lanes == 1
+    assert isinstance(guard.args[0], ir.prim.And)
+    assert guard.args[1].ty.dtype.lanes == lanes
+    assert isinstance(guard.args[2], ir.prim.Broadcast)
+    assert guard.args[2].ty.dtype.lanes == lanes
 
-    predicate_nodes = collect_nodes(guard.args[0], tvm.runtime.Object)
-    comparisons = [node for node in predicate_nodes if isinstance(node, (tvm.tirx.LT, tvm.tirx.LE, tvm.tirx.GT, tvm.tirx.GE))]
-    # Prefix constraints eliminate the three lower-bound checks implied by
-    # `0 <= base`, while retaining the four progressively tighter upper bounds.
-    assert len(comparisons) == lanes + 1
-    assert all(not isinstance(node, tvm.tirx.BufferLoad) for node in predicate_nodes)
-    assert all(node.dtype.lanes == 1 for node in predicate_nodes if hasattr(node, "dtype"))
-    assert_call_count(guard.args[0], op="tirx.if_then_else", count=0)
+    predicate_nodes = collect_nodes(guard.args[0], tvm_ffi.Object)
+    comparisons = [node for node in predicate_nodes if isinstance(node, (ir.prim.LT, ir.prim.LE, ir.prim.GT, ir.prim.GE))]
+    # Target analysis retains a lower and upper bound for each lane. Preserve
+    # the scalar, memory-free combined guard and independently check its truth
+    # table instead of requiring the old Analyzer's redundant-check removal.
+    assert len(comparisons) == 2 * lanes
+    assert_predicate_table(
+        transformed["main"],
+        guard.args[0],
+        main.params[-1],
+        [(base, 0 <= base and base + lanes <= 16) for base in [-(2**31), *range(-4, 21), 2**31 - 4, 2**31 - 1]],  # noqa: SIM300 -- Interval oracle notation.
+    )
+    assert all(not isinstance(node, ir.TensorLoad) for node in predicate_nodes)
+    assert all(node.ty.dtype.lanes == 1 for node in predicate_nodes if isinstance(node, ir.Expr) and isinstance(node.ty, ir.PrimType))
+    assert_call_count(guard.args[0], op="prim.if_then_else", count=0)
 
 
 def _comparison_uses_var(comparison, var):
-    assert isinstance(comparison, (tvm.tirx.LT, tvm.tirx.LE, tvm.tirx.GT, tvm.tirx.GE))
+    assert isinstance(comparison, (ir.prim.LT, ir.prim.LE, ir.prim.GT, ir.prim.GE))
     return comparison.a.same_as(var) or comparison.b.same_as(var)
 
 
@@ -780,9 +783,9 @@ def _assert_single_opaque_call(body):
 
 
 def _assert_expr_guard_scope(body, index_var):
-    guards = [call for call in collect_calls(body, op="tirx.if_then_else") if len(call.args) == 3]
+    guards = [call for call in collect_calls(body, op="prim.if_then_else") if len(call.args) == 3]
     assert len(guards) == 4
-    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+    assert all(not isinstance(guard.args[0], ir.prim.And) for guard in guards)
 
     outer_lower = guards[-1]
     outer_upper = outer_lower.args[1]
@@ -791,32 +794,32 @@ def _assert_expr_guard_scope(body, index_var):
 
     inner_lower = outer_upper.args[1]
     inner_upper = inner_lower.args[1]
-    assert _is_call_to(inner_lower, "tirx.if_then_else")
-    assert _is_call_to(inner_upper, "tirx.if_then_else")
+    assert _is_call_to(inner_lower, "prim.if_then_else")
+    assert _is_call_to(inner_upper, "prim.if_then_else")
     assert not _comparison_uses_var(inner_lower.args[0], index_var)
     assert not _comparison_uses_var(inner_upper.args[0], index_var)
-    assert isinstance(inner_upper.args[1], tvm.tirx.BufferLoad)
+    assert isinstance(inner_upper.args[1], ir.TensorLoad)
     return inner_upper.args[1]
 
 
 def _assert_stmt_guard_scope(body, index_var):
-    guards = collect_nodes(body, tvm.tirx.IfThenElse)
+    guards = collect_nodes(body, ir.If)
     assert len(guards) == 4
-    assert all(not isinstance(guard.condition, tvm.tirx.And) for guard in guards)
+    assert all(not isinstance(guard.condition, ir.prim.And) for guard in guards)
 
     outer_lower = guards[-1]
-    outer_upper = outer_lower.then_case
+    outer_upper = _single_stmt(outer_lower.then_case)
     assert _comparison_uses_var(outer_lower.condition, index_var)
     assert _comparison_uses_var(outer_upper.condition, index_var)
 
-    inner_lower = outer_upper.then_case
-    inner_upper = inner_lower.then_case
-    assert isinstance(inner_lower, tvm.tirx.IfThenElse)
-    assert isinstance(inner_upper, tvm.tirx.IfThenElse)
+    inner_lower = _single_stmt(outer_upper.then_case)
+    inner_upper = _single_stmt(inner_lower.then_case)
+    assert isinstance(inner_lower, ir.If)
+    assert isinstance(inner_upper, ir.If)
     assert not _comparison_uses_var(inner_lower.condition, index_var)
     assert not _comparison_uses_var(inner_upper.condition, index_var)
-    assert isinstance(inner_upper.then_case, tvm.tirx.BufferStore)
-    return inner_upper.then_case
+    assert isinstance(_single_stmt(inner_upper.then_case), ir.TensorStore)
+    return _single_stmt(inner_upper.then_case)
 
 
 def test_opaque_index_guard_preserves_lazy_evaluation():
@@ -834,10 +837,10 @@ def test_opaque_index_guard_preserves_lazy_evaluation():
     mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    a_data = main.buffer_map[main.params[0]].data
+    a_data = main.params[0]
 
     load = _assert_expr_guard_scope(body, main.params[-1])
-    assert load.buffer.data.same_as(a_data)
+    assert load.source.same_as(a_data)
     assert_call_count(load.indices[0], op="tirx.call_extern", count=1)
     _assert_single_opaque_call(body)
 
@@ -856,44 +859,45 @@ def test_opaque_store_guard_preserves_lazy_evaluation():
     mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
-    a_data = main.buffer_map[main.params[0]].data
+    a_data = main.params[0]
 
     store = _assert_stmt_guard_scope(body, main.params[-1])
-    assert store.buffer.data.same_as(a_data)
+    assert store.dest.same_as(a_data)
     assert_call_count(store.indices[0], op="tirx.call_extern", count=1)
     _assert_single_opaque_call(body)
 
 
 def test_producer_load_index_guard_preserves_lazy_evaluation():
-    producer = tvm.te.placeholder((4,), dtype="int32", name="P")
-    buffer = tvm.tirx.decl_buffer((4, 4), "float32", name="A")
-    output = tvm.tirx.decl_buffer((1,), "float32", name="out")
-    producer_index = tvm.tirx.Var("producer_index", "int32")
-    later_index = tvm.tirx.Var("later_index", "int32")
-    mutable_index = tvm.tirx.ProducerLoad(producer, [producer_index])
-    load = tvm.tirx.BufferLoad(buffer, [mutable_index, later_index])
-    body = tvm.tirx.BufferStore(output, load, [0])
-    func = tvm.tirx.PrimFunc(
-        [buffer.data, output.data, producer_index, later_index],
-        body,
-        buffer_map={buffer.data: buffer, output.data: output},
+    producer = ir.Var("P", tirx.TensorType((4,), "int32"))
+    buffer = ir.Var("A", tirx.TensorType((4, 4), "float32"))
+    output = ir.Var("out", tirx.TensorType((1,), "float32"))
+    producer_index = ir.Var("producer_index", "int32")
+    later_index = ir.Var("later_index", "int32")
+    mutable_index = ir.TensorLoad(producer, [producer_index])
+    load = ir.TensorLoad(buffer, [mutable_index, later_index])
+    body = ir.TensorStore(output, [0], load)
+    func = tirx.Function(
+        [buffer, output, producer, producer_index, later_index],
+        [body],
     ).with_attr("global_symbol", "main")
     mod = tvm.IRModule.from_expr(func)
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
 
-    guarded = transformed["main"].body.value
+    guarded = _single_stmt(transformed["main"].body).value
     conditions = []
     for _ in range(4):
-        assert _is_call_to(guarded, "tirx.if_then_else")
+        assert _is_call_to(guarded, "prim.if_then_else")
         conditions.append(guarded.args[0])
         guarded = guarded.args[1]
 
-    assert isinstance(guarded, tvm.tirx.BufferLoad)
-    assert all(not isinstance(condition, tvm.tirx.And) for condition in conditions)
+    assert isinstance(guarded, ir.TensorLoad)
+    assert all(not isinstance(condition, ir.prim.And) for condition in conditions)
     assert all(_comparison_uses_var(condition, later_index) for condition in conditions[:2])
-    assert all(not collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[:2])
-    assert all(collect_nodes(condition, tvm.tirx.ProducerLoad) for condition in conditions[2:])
-    assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
+    assert all(
+        not [load for load in collect_nodes(condition, ir.TensorLoad) if load.source.same_as(producer)] for condition in conditions[:2]
+    )
+    assert all([load for load in collect_nodes(condition, ir.TensorLoad) if load.source.same_as(producer)] for condition in conditions[2:])
+    assert [load for load in collect_nodes(guarded.indices[0], ir.TensorLoad) if load.source.same_as(producer)]
 
 
 if __name__ == "__main__":

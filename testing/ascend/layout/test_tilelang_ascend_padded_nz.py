@@ -4,7 +4,7 @@ import pytest
 import torch
 import tilelang
 from tilelang.ascend import language as T
-from tvm import tirx
+from tvm_tirx import ir, tirx
 from tilelang.layout import make_ascend_compact_nz_layout
 
 ROWS, COLS, C0 = 16, 128, 16
@@ -43,9 +43,9 @@ def _copy_to_l1(mode):
 
 
 def test_compact_nz_layout_keeps_stages_tightly_packed():
-    buffer = tirx.decl_buffer((2, PADDED_ROWS, 256), "float32", name="A", scope="shared")
+    buffer = ir.Var("A", tirx.TensorType((2, PADDED_ROWS, 256), "float32", scope="shared"))
     layout = make_ascend_compact_nz_layout(buffer)
-    mapped = layout.map_forward_index([tirx.IntImm("int32", value) for value in (1, PADDED_ROWS - 1, 255)])
+    mapped = layout.map_forward_index([ir.IntImm("int32", value) for value in (1, PADDED_ROWS - 1, 255)])
 
     assert [int(value) for value in layout.get_output_shape()] == [64, PADDED_ROWS, 8]
     assert [int(value) for value in mapped] == [63, PADDED_ROWS - 1, 7]
@@ -137,7 +137,7 @@ def test_post_copy_from_offset_physical_view():
     def main(identity: T.Tensor((64, 64), "bfloat16"), x: T.Tensor((2, offset + size), "bfloat16"), out: T.Tensor((64, 64), "float32")):
         with T.MixedKernel(1) as (_, sid):
             owner = T.alloc_shared((offset + size,), "bfloat16")
-            view = tirx.decl_buffer((size,), "bfloat16", data=owner.data, elem_offset=offset, scope="shared.dyn")
+            view = T.decl_buffer((size,), "bfloat16", data=owner.data, elem_offset=offset, scope="shared.dyn")
             x_l1 = T.alloc_l1((64, 64), "bfloat16")
             identity_l1 = T.alloc_l1((64, 64), "bfloat16")
             result = T.alloc_l0c((64, 64), "float32")

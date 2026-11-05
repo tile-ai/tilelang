@@ -1,6 +1,11 @@
 # Gated Delta Net (GDN) kernel implementation with TileLang
 
-## Requirement
+## Original Benchmark Environment
+
+The versions below record the original comparison. For kernels from this
+revision, install the matched TileLang/provider/FFI bundle described in the
+[installation guide](../../docs/get_started/Installation.md). Benchmark results
+must be measured again for the selected compiler and device.
 
 - TileLang: `0.1.5+17fafc1b3026d910a83eb8052fdf811ba56be0b1`
 - Triton: `3.3.0` (used for comparison)

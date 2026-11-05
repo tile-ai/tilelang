@@ -186,7 +186,7 @@ def test_compile_only_cli_reports_compile_error(tmp_path: Path):
 
     assert result.returncode != 0
     assert result.stderr.strip()
-    assert "no @tilelang.jit kernel or PrimFunc found" in result.stderr
+    assert "no @tilelang.jit kernel or Function found" in result.stderr
     # A4: this is a compile diagnostic, not a missing-GPU / missing-driver abort.
     assert "CUDA" not in result.stderr
     assert "driver" not in result.stderr.lower()
@@ -204,7 +204,7 @@ def test_compile_only_cli_unlinks_stale_output_on_failure(tmp_path: Path):
     result = _run_cli("--output_file", str(output), str(example))
 
     assert result.returncode != 0
-    assert "no @tilelang.jit kernel or PrimFunc found" in result.stderr
+    assert "no @tilelang.jit kernel or Function found" in result.stderr
     assert not output.is_file() or output.read_text() != stale
 
 
@@ -256,7 +256,7 @@ def test_compile_only_cli_reports_empty_file(tmp_path: Path):
     result = _run_cli("--output_file", str(output), str(example))
 
     assert result.returncode != 0
-    assert "no @tilelang.jit kernel or PrimFunc found" in result.stderr
+    assert "no @tilelang.jit kernel or Function found" in result.stderr
     assert not output.is_file() or not output.read_text().strip()
 
 

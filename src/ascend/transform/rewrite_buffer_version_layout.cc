@@ -18,404 +18,498 @@
  */
 
 /*!
- * \file tl/ascend/transform/rewrite_buffer_version_layout.cc
- * \brief Align each physical version of a multi-buffered UB allocation.
+ * \file rewrite_buffer_version_layout.cc
+ * \brief Align physical Ascend UB slots while rebuilding every typed alias.
  */
-
+#include "auto_schedule/native_storage.h"
 #include "buffer_version.h"
-
-#include <tvm/arith/analyzer.h>
+#include "ir/analyzer.h"
+#include "ir/stmt_functor.h"
+#include "op/native_intrinsic.h"
+#include "op/utils.h"
+#include "transform/common/storage_size.h"
+#include <limits>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-
-#include <cstdint>
 #include <unordered_map>
-#include <utility>
+#include <vector>
 
-#include "arith/ir_mutator_with_analyzer.h"
-#include "op/builtin.h"
-#include "support/check.h"
-#include "tir/transforms/ir_utils.h"
-
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
+namespace {
 using namespace tirx;
 using namespace ffi;
+using namespace prim;
+using namespace ascend;
+constexpr const char *kPhysicalVersion = "tl.buffer_version";
+constexpr int kAlignmentBits = 256;
+using Fields = Map<String, Any>;
 
-namespace {
-
-constexpr int kVersionAlignmentBits = 256;
-
-bool IsUnifiedBuffer(const Var &data) {
-  String scope = GetPtrStorageScope(data);
-  return scope == "shared" || scope == "shared.dyn";
-}
-
-class BufferVersionCollector : public StmtExprVisitor {
-public:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tl::attr::kBufferVersion) {
-      auto versions = op->node.try_cast<BufferVersionMap>();
-      ICHECK(versions.has_value())
-          << "'" << tl::attr::kBufferVersion
-          << "' AttrStmt node must be a buffer version map";
-      for (const auto &[data, version] : versions.value()) {
-        ICHECK_GT(version, 0) << "'" << tl::attr::kBufferVersion
-                              << "' values must be positive version counts";
-        auto existing = versions_.find(data);
-        ICHECK(existing == versions_.end() || (*existing).second == version)
-            << "Conflicting buffer version counts for storage " << data;
-        versions_.Set(data, version);
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  BufferVersionMap versions_;
-};
-
-struct StorageAllocationInfo {
-  bool has_allocation{false};
-  Optional<Buffer> version_carrier;
-};
-
-using StorageAllocationTable =
-    std::unordered_map<Var, StorageAllocationInfo, ObjectPtrHash,
-                       ObjectPtrEqual>;
-
-class VersionedStorageAllocationCollector : public StmtExprVisitor {
-public:
-  explicit VersionedStorageAllocationCollector(BufferVersionMap versions)
-      : versions_(std::move(versions)) {}
-
-  void VisitStmt_(const AllocBufferNode *op) final {
-    const Buffer &buffer = op->buffer;
-    auto version = versions_.find(buffer->data);
-    if (version != versions_.end()) {
-      StorageAllocationInfo &info = allocations_[buffer->data];
-      info.has_allocation = true;
-      if (!info.version_carrier.has_value() && !buffer->shape.empty()) {
-        arith::Analyzer analyzer;
-        if (analyzer.CanProveEqual(
-                buffer->shape[0],
-                make_const(buffer->shape[0].dtype(), (*version).second))) {
-          info.version_carrier = buffer;
-        }
-      }
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  StorageAllocationTable allocations_;
-
-private:
-  BufferVersionMap versions_;
-};
-
-// Physical layout of one versioned storage, kept in *bit* units so aliases
-// with a different element dtype (e.g. a uint16 allocation viewed as uint8)
-// can be rewritten against the same shared storage. Per-access quantities are
-// converted back to the accessing buffer's element count in
-// RewriteCompactOffset.
 struct StorageLayout {
-  PrimExpr storage_base_bits;
-  PrimExpr compact_slot_bits;
-  PrimExpr aligned_slot_bits;
-  PrimExpr physical_extent_bits;
+  TensorVar owner;
+  PrimExpr base_bits;
+  PrimExpr slot_bits;
+  PrimExpr aligned_bits;
+  PrimExpr total_bits;
 };
-
-using StorageLayoutTable =
+using Layouts =
     std::unordered_map<Var, StorageLayout, ObjectPtrHash, ObjectPtrEqual>;
 
-// Rewrite to a physical one-dimensional view before the generic FlattenBuffer
-// pass. Merely changing a leading-axis stride would handle [versions, ...],
-// but not manually versioned flat buffers or aliases that hide that axis.
-class BufferVersionLayoutRewriter : public arith::IRMutatorWithAnalyzer {
+class VersionMetadata {
 public:
-  static PrimFunc Rewrite(PrimFunc func) {
-    BufferVersionCollector version_collector;
-    version_collector(func->body);
-    if (version_collector.versions_.empty()) {
-      return func;
-    }
-    VersionedStorageAllocationCollector allocation_collector(
-        version_collector.versions_);
-    allocation_collector(func->body);
-
-    arith::Analyzer layout_analyzer;
-    StorageLayoutTable layouts;
-    for (const auto &[data, num_versions] : version_collector.versions_) {
-      // This pass only realigns Unified Buffer versions; L1/L0 versioned
-      // storages keep their own layout. Skip before looking up the allocation
-      // so that non-UB versioned buffers (which need no UB alloc here) do not
-      // trip the owner-present check below.
-      if (num_versions == 1 || !IsUnifiedBuffer(data)) {
-        continue;
-      }
-
-      auto allocation = allocation_collector.allocations_.find(data);
-      ICHECK(allocation != allocation_collector.allocations_.end() &&
-             allocation->second.has_allocation)
-          << "No allocation owner found for versioned storage " << data;
-
-      // The pass only owns the layout of a storage whose accesses lay out the
-      // versions as N equal slots along a leading axis (auto-versioned buffers
-      // and the bare-buffer form of `annotate_manual_multi_buffer`, where the
-      // allocation has a leading version dim equal to `num_versions`). A
-      // count-only manual annotation (`{buf: N}`) on a flat buffer
-      // intentionally decouples the ring size from the shape and hand-lays-out
-      // disjoint slots plus padding/workspace; it has no such version-carrying
-      // alias, so leave its layout untouched.
-      Optional<Buffer> version_alias = allocation->second.version_carrier;
-      if (!version_alias.has_value()) {
-        continue;
-      }
-      const Buffer &owner = version_alias.value();
-
-      DataType index_dtype = owner->DefaultIndexType();
-      ICHECK(index_dtype.is_int() || index_dtype.is_uint())
-          << "Versioned buffer " << owner->name
-          << " must use an integer index dtype";
-      // The leading axis carries the versions; the trailing axes are one
-      // logical slot. Compute the slot size in bits so aliases of a different
-      // dtype resolve against the same shared storage.
-      int elem_bits = owner->dtype.bits() * owner->dtype.lanes();
-      ICHECK_EQ(kVersionAlignmentBits % elem_bits, 0)
-          << "32-byte version alignment cannot be represented in "
-          << owner->dtype << " elements";
-      PrimExpr slot_elems = make_const(index_dtype, 1);
-      for (size_t i = 1; i < owner->shape.size(); ++i) {
-        PrimExpr axis = owner->shape[i];
-        if (axis.dtype() != index_dtype) {
-          axis = cast(index_dtype, axis);
+  BufferVersionMap versions;
+  NativeStorageContext storage;
+  std::unordered_map<Var, TensorVar, ObjectPtrHash, ObjectPtrEqual> owners;
+  std::unordered_map<Var, std::vector<TensorVar>, ObjectPtrHash, ObjectPtrEqual>
+      views;
+  explicit VersionMetadata(const Stmt &stmt) {
+    storage.Collect(stmt);
+    VisitNativePostOrder(stmt, [&](const ObjectRef &object) {
+      if (const auto *bind = object.as<BindObj>()) {
+        Expr value = bind->value;
+        if (const auto *c = value.as<CallObj>(); IsScheduledBind(c))
+          value = ReadScheduledBinding(c).value;
+        const auto *call = value.as<CallObj>();
+        if (auto tensor = bind->var.as<TensorVar>()) {
+          Var root = storage.Identity(*tensor);
+          views[root].push_back(*tensor);
+          if (call && call->op.same_as(alloc_tensor_op()))
+            owners.emplace(root, *tensor);
         }
-        slot_elems = slot_elems * axis;
       }
-      slot_elems = layout_analyzer.Simplify(slot_elems);
-      PrimExpr compact_slot_bits =
-          slot_elems * make_const(index_dtype, elem_bits);
-      PrimExpr aligned_slot_bits = layout_analyzer.Simplify(
-          indexdiv(compact_slot_bits +
-                       make_const(index_dtype, kVersionAlignmentBits - 1),
-                   make_const(index_dtype, kVersionAlignmentBits)) *
-          make_const(index_dtype, kVersionAlignmentBits));
-      if (layout_analyzer.CanProveEqual(aligned_slot_bits, compact_slot_bits)) {
-        continue;
+      if (const auto *call = object.as<CallObj>();
+          loop_annotation_detail::IsAnnotation(call)) {
+        auto fields = ReadNativeAnnotations(call);
+        if (auto value = fields.Get(kPhysicalVersion))
+          Add(*value);
       }
-      // AutoSchedule accounts for the compact slot size when checking UB
-      // capacity. We intentionally do not feed this per-version padding back
-      // into that check: unaligned version slots are expected only in small
-      // kernels where the extra allocation cannot approach the UB limit.
-      PrimExpr physical_extent_bits = layout_analyzer.Simplify(
-          aligned_slot_bits * make_const(index_dtype, num_versions));
-      PrimExpr storage_base = owner->elem_offset.defined()
-                                  ? owner->elem_offset
-                                  : make_const(index_dtype, 0);
-      if (storage_base.dtype() != index_dtype) {
-        storage_base = cast(index_dtype, storage_base);
+      if (const auto *region = object.as<RegionStmtObj>()) {
+        if (auto attr = ReadTaskAttribute(region)) {
+          if (attr->key == kPhysicalVersion)
+            Add(attr->node);
+          else if (attr->key == "tl.sblock" ||
+                   attr->key == "tl.loop.annotations") {
+            auto fields = attr->value.cast<Fields>();
+            if (auto value = fields.Get(kPhysicalVersion))
+              Add(*value);
+            if (attr->key == "tl.sblock")
+              if (auto annotations = fields.Get("annotations"))
+                if (auto value =
+                        annotations->cast<Fields>().Get(kPhysicalVersion))
+                  Add(*value);
+          }
+        }
       }
-      PrimExpr storage_base_bits = layout_analyzer.Simplify(
-          storage_base * make_const(index_dtype, elem_bits));
-
-      layouts.emplace(data,
-                      StorageLayout{storage_base_bits,
-                                    layout_analyzer.Simplify(compact_slot_bits),
-                                    aligned_slot_bits, physical_extent_bits});
-    }
-
-    arith::Analyzer analyzer;
-    BufferVersionLayoutRewriter rewriter(&analyzer, std::move(layouts));
-    PrimFuncNode *writer = func.CopyOnWrite();
-    writer->body = rewriter(std::move(writer->body));
-    return func;
+    });
   }
 
 private:
-  using IRMutatorWithAnalyzer::VisitExpr;
-  using IRMutatorWithAnalyzer::VisitExpr_;
-  using IRMutatorWithAnalyzer::VisitStmt;
-  using IRMutatorWithAnalyzer::VisitStmt_;
-
-  BufferVersionLayoutRewriter(arith::Analyzer *analyzer,
-                              StorageLayoutTable layouts)
-      : IRMutatorWithAnalyzer(analyzer), layouts_(std::move(layouts)) {}
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tl::attr::kBufferVersion) {
-      return VisitStmt(op->body);
-    }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const AllocBufferNode *op) final {
-    auto node = Downcast<AllocBuffer>(StmtExprMutator::VisitStmt_(op));
-    node.CopyOnWrite()->buffer = GetPhysicalBuffer(node->buffer);
-    return node;
-  }
-
-  Stmt VisitStmt_(const DeclBufferNode *op) final {
-    auto node = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
-    node.CopyOnWrite()->buffer = GetPhysicalBuffer(node->buffer);
-    return node;
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    auto node = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    return RewriteBufferAccess(std::move(node));
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto node = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    return RewriteBufferAccess(std::move(node));
-  }
-
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::tvm_access_ptr()) && op->args.size() == 5U) {
-      Var data = Downcast<Var>(op->args[1]);
-      if (layouts_.count(data)) {
-        Array<PrimExpr> args = op->args;
-        int elem_bits = ElementBits(op->args[0].dtype());
-        PrimExpr old_offset = VisitExpr(op->args[2]);
-        PrimExpr extent = VisitExpr(op->args[3]);
-        PrimExpr new_offset = RewriteCompactOffset(data, old_offset, elem_bits);
-        ValidatePointerSpan(data, old_offset, extent, elem_bits);
-        args.Set(2, std::move(new_offset));
-        args.Set(3, std::move(extent));
-        args.Set(4, VisitExpr(op->args[4]));
-        return Call(op->dtype, op->op, std::move(args), op->span);
-      }
-    }
-    return IRMutatorWithAnalyzer::VisitExpr_(op);
-  }
-
-  template <typename Node> Node RewriteBufferAccess(Node node) {
-    const Var &data = node->buffer->data;
-    if (!layouts_.count(data)) {
-      return node;
-    }
-
-    Array<PrimExpr> compact_offsets = node->buffer->ElemOffset(node->indices);
-    ICHECK_EQ(compact_offsets.size(), 1U)
-        << "Versioned UB aliases must have one compact storage offset, but "
-        << node->buffer << " produced " << compact_offsets;
-    int elem_bits = ElementBits(node->buffer->dtype);
-    PrimExpr new_offset =
-        RewriteCompactOffset(data, compact_offsets[0], elem_bits);
-    auto *writer = node.CopyOnWrite();
-    writer->buffer = GetPhysicalBuffer(node->buffer);
-    writer->indices = {std::move(new_offset)};
-    return node;
-  }
-
-  // Remap a compact element offset (in `elem_bits`-wide elements of the
-  // accessing buffer) so that version `v` starts at its 32-byte-aligned slot.
-  // The stored layout is in bits, so aliases of any dtype resolve consistently.
-  PrimExpr RewriteCompactOffset(const Var &data, PrimExpr compact_offset,
-                                int elem_bits) {
-    auto layout = layouts_.find(data);
-    ICHECK(layout != layouts_.end());
-    const StorageLayout &info = layout->second;
-    DataType dtype = compact_offset.dtype();
-    PrimExpr elem_bits_c = make_const(dtype, elem_bits);
-    PrimExpr storage_base = CastIndex(info.storage_base_bits, dtype);
-    PrimExpr compact_slot = CastIndex(info.compact_slot_bits, dtype);
-    PrimExpr aligned_slot = CastIndex(info.aligned_slot_bits, dtype);
-    PrimExpr relative = compact_offset * elem_bits_c - storage_base;
-    PrimExpr version = indexdiv(relative, compact_slot);
-    PrimExpr inner = indexmod(relative, compact_slot);
-    PrimExpr new_bits = storage_base + version * aligned_slot + inner;
-    return analyzer_->Simplify(indexdiv(new_bits, elem_bits_c));
-  }
-
-  void ValidatePointerSpan(const Var &data, PrimExpr compact_offset,
-                           PrimExpr extent, int elem_bits) {
-    auto layout = layouts_.find(data);
-    ICHECK(layout != layouts_.end());
-    DataType dtype = compact_offset.dtype();
-    PrimExpr elem_bits_c = make_const(dtype, elem_bits);
-    PrimExpr storage_base = CastIndex(layout->second.storage_base_bits, dtype);
-    PrimExpr compact_slot = CastIndex(layout->second.compact_slot_bits, dtype);
-    if (extent.dtype() != dtype) {
-      extent = cast(dtype, extent);
-    }
-    PrimExpr inner =
-        indexmod(compact_offset * elem_bits_c - storage_base, compact_slot);
-    if (analyzer_->CanProve(inner + extent * elem_bits_c > compact_slot)) {
-      LOG(FATAL) << "tvm_access_ptr for versioned buffer " << data->name_hint
-                 << " crosses a 32-byte-aligned version slot: offset="
-                 << compact_offset << ", extent=" << extent
-                 << ", compact_slot_bits=" << compact_slot;
+  void Add(const Any &value) {
+    for (const auto &[key, count_any] : value.cast<Map<Any, Any>>()) {
+      Var variable = key.cast<Var>();
+      auto address = storage.Address(variable);
+      TVM_FFI_CHECK(address.exact && address.root.as<VarObj>(), ValueError)
+          << "Versioned storage requires exact native allocation provenance: "
+          << variable;
+      Var root = address.root.as_or_throw<Var>();
+      auto count = count_any.try_cast<int64_t>();
+      if (!count)
+        count = TryConstInt(count_any.cast<PrimExpr>());
+      TVM_FFI_CHECK(count && *count > 0 &&
+                        *count <= std::numeric_limits<int>::max(),
+                    ValueError)
+          << "Version count must be a positive int32 constant";
+      if (auto previous = versions.Get(root))
+        TVM_FFI_CHECK_EQ(*previous, *count, ValueError)
+            << "Conflicting buffer version counts for " << root;
+      versions.Set(root, static_cast<int>(*count));
     }
   }
-
-  static int ElementBits(DataType dtype) {
-    return dtype.bits() * dtype.lanes();
-  }
-
-  PrimExpr CastIndex(PrimExpr value, DataType dtype) const {
-    if (value.dtype() != dtype) {
-      value = cast(dtype, value);
-    }
-    return value;
-  }
-
-  Buffer GetPhysicalBuffer(Buffer buffer) {
-    auto cached = buffer_remap_.find(buffer);
-    if (cached != buffer_remap_.end()) {
-      return cached->second;
-    }
-    Buffer original = buffer;
-    auto layout = layouts_.find(buffer->data);
-    if (layout != layouts_.end()) {
-      const StorageLayout &info = layout->second;
-      // The physical extent is dtype-agnostic (kept in bits); express it in
-      // this alias's own element count so a dtype-changing view resolves
-      // against the same shared storage.
-      int elem_bits = ElementBits(buffer->dtype);
-      DataType extent_dtype = info.physical_extent_bits.dtype();
-      PrimExpr extent_elems = analyzer_->Simplify(indexdiv(
-          info.physical_extent_bits, make_const(extent_dtype, elem_bits)));
-      buffer = Buffer(buffer->data, buffer->dtype, {extent_elems}, {},
-                      make_const(extent_dtype, 0), buffer->name,
-                      buffer->data_alignment, buffer->offset_factor,
-                      buffer->buffer_type, {}, buffer->span);
-    }
-    buffer_remap_.emplace(std::move(original), buffer);
-    return buffer;
-  }
-
-  StorageLayoutTable layouts_;
-  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
-      buffer_remap_;
 };
 
-PrimFunc RewriteBufferVersionLayout(PrimFunc func) {
-  return BufferVersionLayoutRewriter::Rewrite(std::move(func));
-}
+class BufferVersionLayoutRewriter : public StmtExprMutatorWithAnalyzer {
+public:
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+  BufferVersionLayoutRewriter(const tirx::Function &function,
+                              NativeStorageContext storage, Layouts layouts,
+                              sym::Analyzer analyzer)
+      : StmtExprMutatorWithAnalyzer(analyzer), storage_(std::move(storage)),
+        layouts_(std::move(layouts)), analyzer_owner_(std::move(analyzer)) {
+    MarkTensorParamShapes(function);
+  }
 
+private:
+  NativeStorageContext storage_;
+  Layouts layouts_;
+  Map<TensorVar, TensorVar> tensors_;
+  // The native analyzer mutator retains a pointer, so own its lifetime here.
+  sym::Analyzer analyzer_owner_;
+
+  const StorageLayout *Layout(const Expr &value) const {
+    auto address = storage_.Address(value);
+    if (!address.root.as<VarObj>())
+      return nullptr;
+    auto found = layouts_.find(address.root.as_or_throw<Var>());
+    if (found == layouts_.end())
+      return nullptr;
+    // A transparent pointer chain can still identify this owner while its
+    // missing type, changed scope, or effectful offset prevents an exact
+    // address proof. Do not pad the owner and silently leave that alias in
+    // the old coordinates. This pass consumes fully typed storage addresses;
+    // it does not infer types for unfinished pointer expressions.
+    TVM_FFI_CHECK(address.exact, ValueError)
+        << "Versioned storage requires exact, fully typed pointer provenance "
+           "with a preserved storage scope and pure offset: "
+        << value;
+    return &found->second;
+  }
+  PrimExpr Wide(PrimExpr value) { return cast(value, PrimType::Int(64)); }
+  PrimExpr RewriteBits(const StorageLayout &layout, PrimExpr original) {
+    original = Wide(original);
+    PrimExpr relative = original - layout.base_bits;
+    PrimExpr mapped =
+        layout.base_bits +
+        FloorDiv(relative, layout.slot_bits) * layout.aligned_bits +
+        FloorMod(relative, layout.slot_bits);
+    // Prefix bytes before a nonzero layout origin are unchanged.
+    // tensor_data_ptr denotes the backing allocation, so it must continue to
+    // point at byte 0.
+    if (!IsZero(layout.base_bits))
+      mapped = Select(original < layout.base_bits, original, mapped);
+    return GetSyncedAnalyzer()->Simplify(mapped);
+  }
+  PrimExpr RewriteUnits(const StorageLayout &layout, PrimExpr original,
+                        int unit_bits) {
+    auto unit = IntImm::Int64(unit_bits);
+    auto aligned = [&](const PrimExpr &value) {
+      return GetSyncedAnalyzer()->CanProve(FloorMod(value, unit) == 0);
+    };
+    original = Wide(original);
+    // Construct the quotient in the access type's units when every boundary
+    // has that alignment. In particular, a dynamic compact stride n * bits
+    // remains an exact element stride without requiring the analyzer to
+    // distribute a second modulo through a symbolic FloorMod expression.
+    // A cross-dtype view can straddle differently sized source elements, so
+    // retain the general bit-coordinate mapping when this factoring fails.
+    if (aligned(original) && aligned(layout.base_bits) &&
+        aligned(layout.slot_bits) && aligned(layout.aligned_bits)) {
+      PrimExpr position =
+          GetSyncedAnalyzer()->Simplify(FloorDiv(original, unit));
+      PrimExpr base =
+          GetSyncedAnalyzer()->Simplify(FloorDiv(layout.base_bits, unit));
+      PrimExpr slot =
+          GetSyncedAnalyzer()->Simplify(FloorDiv(layout.slot_bits, unit));
+      PrimExpr stride =
+          GetSyncedAnalyzer()->Simplify(FloorDiv(layout.aligned_bits, unit));
+      PrimExpr relative = position - base;
+      PrimExpr mapped =
+          base + FloorDiv(relative, slot) * stride + FloorMod(relative, slot);
+      if (!IsZero(base))
+        mapped = Select(position < base, position, mapped);
+      return GetSyncedAnalyzer()->Simplify(mapped);
+    }
+    PrimExpr mapped = RewriteBits(layout, original);
+    TVM_FFI_CHECK(aligned(mapped), ValueError)
+        << "Versioned view is not aligned to its access width of " << unit_bits
+        << " bits";
+    return GetSyncedAnalyzer()->Simplify(FloorDiv(mapped, unit));
+  }
+  TensorVar Physical(const TensorVar &tensor) {
+    if (auto known = tensors_.Get(tensor))
+      return *known;
+    const auto *layout = Layout(tensor);
+    if (!layout)
+      return tensor;
+    int bits = tensor.dtype().bits() * tensor.dtype().lanes();
+    TVM_FFI_CHECK(bits > 0 && kAlignmentBits % bits == 0, ValueError)
+        << "UB version padding is not representable in " << tensor.dtype()
+        << " elements";
+    PrimExpr extent = GetSyncedAnalyzer()->Simplify(
+        FloorDiv(layout->total_bits + (bits - 1), IntImm::Int64(bits)));
+    TensorType type({extent}, tensor.dtype(), tensor.scope(),
+                    tensor.ty()->data_alignment, {}, tensor->loc);
+    TensorVar result(tensor->name, type, tensor->loc);
+    tensors_.Set(tensor, result);
+    VarRemapSetExpected(tensor, result).value();
+    return result;
+  }
+  PrimExpr OriginalBits(const TensorVar &tensor, Array<PrimExpr> indices) {
+    for (size_t i = 0; i < indices.size(); ++i)
+      indices.Set(i, Wide(indices[i]));
+    auto address = storage_.Address(tensor);
+    return GetSyncedAnalyzer()->Simplify(
+        Wide(address.byte_offset) * 8 +
+        Wide(TensorElementOffset(tensor, indices)) *
+            (tensor.dtype().bits() * tensor.dtype().lanes()));
+  }
+  PrimExpr Index(const TensorVar &tensor, Array<PrimExpr> indices) {
+    const auto *layout = Layout(tensor);
+    TVM_FFI_ICHECK(layout);
+    int bits = tensor.dtype().bits() * tensor.dtype().lanes();
+    PrimExpr original = OriginalBits(tensor, std::move(indices));
+    // A wider dtype can place one element across two compact versions.
+    // Mapping only its first bit would then read or write padding instead
+    // of the bytes in the next physical slot. Such an element needs the
+    // same contiguous-span check as an explicit access pointer.
+    ValidateSpan(*layout, original, IntImm::Int64(1), bits);
+    return RewriteUnits(*layout, original, bits);
+  }
+  void ValidateSpan(const StorageLayout &layout, PrimExpr start_bits,
+                    PrimExpr extent, int bits) {
+    PrimExpr span = Wide(extent) * bits;
+    PrimExpr inner =
+        FloorMod(Wide(start_bits) - layout.base_bits, layout.slot_bits);
+    // A pointer describes a contiguous physical range. Preserve the existing
+    // contract: reject a span proved to cross padding, using available lexical
+    // facts, while an unproved dynamic span remains the caller's
+    // responsibility. Requiring a positive proof would reject valid legacy
+    // calls whose bounds are guaranteed by the caller but are not encoded in
+    // this Function.
+    PrimExpr contiguous = inner + span <= layout.slot_bits;
+    if (!IsZero(layout.base_bits)) {
+      contiguous =
+          Select(Wide(start_bits) < layout.base_bits,
+                 span <= layout.base_bits - Wide(start_bits) + layout.slot_bits,
+                 contiguous);
+    }
+    TVM_FFI_CHECK(!GetSyncedAnalyzer()->CanProve(Not(contiguous)), ValueError)
+        << "Access pointer crosses a 32-byte-aligned version slot: offset="
+        << start_bits << ", extent=" << extent
+        << ", compact_slot_bits=" << layout.slot_bits;
+  }
+  Expr BasePointer(const StorageLayout &layout, Type type, Location loc) {
+    return tirx::reinterpret(type, Physical(layout.owner).data(), loc);
+  }
+  Fields Strip(Fields fields) {
+    fields.erase(kPhysicalVersion);
+    return fields;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (!loop_annotation_detail::IsAnnotation(call))
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    auto fields = ReadNativeAnnotations(call);
+    if (!fields.count(kPhysicalVersion))
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    fields = Strip(fields);
+    Stmt result = fields.empty() ? Stmt(SeqStmt({}))
+                                 : MakeNativeAnnotation(fields, op->loc);
+    return Mutate(result, mode).ValueOrUnchanged(result);
+  }
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    if (auto attr = ReadTaskAttribute(op)) {
+      if (attr->key == kPhysicalVersion)
+        return Mutate(op->body, mode).ValueOrUnchanged(op->body);
+      if (attr->key == "tl.sblock" || attr->key == "tl.loop.annotations") {
+        auto fields = attr->value.cast<Fields>();
+        auto updated = Strip(fields);
+        if (attr->key == "tl.sblock")
+          if (auto annotations = updated.Get("annotations"))
+            updated.Set("annotations", Strip(annotations->cast<Fields>()));
+        if (!StructuralEqual()(fields, updated)) {
+          RegionStmt next = MakeNativeAttribute(attr->node, attr->key, updated,
+                                                op->body, op->loc);
+          return Mutate(next, mode).ValueOrUnchanged(next);
+        }
+      }
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+  }
+  UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    auto tensor = op->var.as<TensorVar>();
+    if (!tensor || !Layout(*tensor))
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    const auto &layout = *Layout(*tensor);
+    Expr value = op->value;
+    const auto *marker = value.as<CallObj>();
+    bool scheduled = IsScheduledBind(marker);
+    if (scheduled)
+      value = ReadScheduledBinding(marker).value;
+    const auto *call = value.as<CallObj>();
+    TensorVar replacement = Physical(*tensor);
+    if (call && call->op.same_as(alloc_tensor_op())) {
+      value = Call(replacement.ty(), alloc_tensor_op(), call->args, call->attrs,
+                   {replacement.ty()}, call->loc);
+    } else {
+      // All typed aliases of this owner share the raw base after rewriting;
+      // each load/store now carries its complete remapped physical offset.
+      value =
+          Call(replacement.ty(), decl_tensor_op(),
+               {BasePointer(layout, replacement.ty()->DataPtrType(), op->loc)},
+               {}, {replacement.ty()}, op->loc);
+    }
+    Bind result(replacement, value, op->loc);
+    if (scheduled) {
+      auto metadata = ReadScheduledBinding(marker);
+      return MakeScheduledBinding(result, metadata.stage, metadata.task);
+    }
+    return result;
+  }
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                InplaceMode mode) final {
+    auto tensor = op->source.as_or_throw<TensorVar>();
+    if (!Layout(tensor))
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    PrimExpr index = Index(tensor, op->indices);
+    index = Mutate(index, mode).ValueOrUnchanged(index).as_or_throw<PrimExpr>();
+    return TensorLoad(Physical(tensor), {index}, op->loc);
+  }
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op, InplaceMode mode) final {
+    auto tensor = op->dest.as_or_throw<TensorVar>();
+    if (!Layout(tensor))
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    PrimExpr index = Index(tensor, op->indices);
+    index = Mutate(index, mode).ValueOrUnchanged(index).as_or_throw<PrimExpr>();
+    PrimExpr value = Mutate(op->value, mode)
+                         .ValueOrUnchanged(op->value)
+                         .as_or_throw<PrimExpr>();
+    return TensorStore(Physical(tensor), {index}, value, op->loc);
+  }
+  UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+    if (op->op.same_as(Op::Get("tl.access_ptr"))) {
+      TVM_FFI_CHECK_EQ(op->args.size(), 3U, ValueError);
+      const auto *load = op->args[0].as<TensorLoadObj>();
+      TVM_FFI_CHECK(load, ValueError);
+      auto tensor = load->source.as_or_throw<TensorVar>();
+      if (const auto *layout = Layout(tensor)) {
+        ValidateSpan(*layout, OriginalBits(tensor, load->indices),
+                     op->args[1].as_or_throw<PrimExpr>(),
+                     tensor.dtype().bits() * tensor.dtype().lanes());
+      }
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    }
+    if (op->op.same_as(Op::Get("tl.ptr_access"))) {
+      TVM_FFI_CHECK_EQ(op->args.size(), 4U, ValueError);
+      if (const auto *layout = Layout(op->args[0])) {
+        auto address = storage_.Address(op->args[0]);
+        auto ptr_type = op->args[0]->ty.as_or_throw<PtrType>();
+        auto dtype = ptr_type->element_type.as_or_throw<PrimType>();
+        int bits = dtype.bits() * dtype.lanes();
+        PrimExpr start = Wide(address.byte_offset) * 8 +
+                         Wide(op->args[1].as_or_throw<PrimExpr>()) * bits;
+        ValidateSpan(*layout, start, op->args[2].as_or_throw<PrimExpr>(), bits);
+        PrimExpr index = RewriteUnits(*layout, start, bits);
+        Array<Expr> args = {
+            BasePointer(*layout, ptr_type, op->loc), index,
+            Mutate(op->args[2], mode).ValueOrUnchanged(op->args[2]),
+            op->args[3]};
+        return Call(op->ty, op->op, args, op->attrs, op->ty_args, op->loc);
+      }
+    }
+    if (op->ty.as<PtrTypeObj>() && (op->op.same_as(tensor_data_ptr_op()) ||
+                                    op->op.same_as(ptr_byte_offset_op()) ||
+                                    op->op.same_as(reinterpret_op()))) {
+      if (const auto *layout = Layout(GetRef<Call>(op))) {
+        auto address = storage_.Address(GetRef<Call>(op));
+        PrimExpr offset =
+            RewriteUnits(*layout, Wide(address.byte_offset) * 8, 8);
+        Expr pointer = BasePointer(*layout, op->ty, op->loc);
+        return Call(op->ty, ptr_byte_offset_op(), {pointer, offset}, {}, {},
+                    op->loc);
+      }
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+  }
+};
+
+tirx::Function RewriteBufferVersionLayout(tirx::Function function) {
+  if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+    return function;
+  VersionMetadata metadata(function->body);
+  if (metadata.versions.empty())
+    return function;
+  auto analyzer = CreateTileLangAnalyzer();
+  Layouts layouts;
+  for (const auto &[root, count] : metadata.versions) {
+    String scope;
+    if (auto tensor = root.as<TensorVar>())
+      scope = tensor->scope().name();
+    else if (auto pointer = root->ty.as<PtrType>())
+      scope = pointer.value()->scope.name();
+    if (count == 1 || (scope != "shared" && scope != "shared.dyn"))
+      continue;
+    auto found = metadata.owners.find(root);
+    TVM_FFI_CHECK(found != metadata.owners.end(), ValueError)
+        << "No allocation owner found for versioned storage " << root;
+    TensorVar owner = found->second;
+    auto carries_versions = [&](const TensorVar &tensor) {
+      return !tensor.shape().empty() &&
+             analyzer->CanProveEqual(tensor.shape()[0],
+                                     IntImm(tensor.shape()[0].ty(), count));
+    };
+    Optional<TensorVar> carrier;
+    if (carries_versions(owner))
+      carrier = owner;
+    else
+      for (const TensorVar &view : metadata.views[root])
+        if (carries_versions(view)) {
+          carrier = view;
+          break;
+        }
+    if (!carrier)
+      continue;
+    const TensorVar &logical = *carrier;
+    int bits = logical.dtype().bits() * logical.dtype().lanes();
+    TVM_FFI_CHECK(bits > 0 && kAlignmentBits % bits == 0, ValueError);
+    Array<PrimExpr> zero, next;
+    for (size_t i = 0; i < logical.shape().size(); ++i) {
+      zero.push_back(IntImm::Int64(0));
+      next.push_back(IntImm::Int64(i == 0 ? 1 : 0));
+    }
+    PrimExpr pointer_bits =
+        cast(metadata.storage.Address(logical).byte_offset, PrimType::Int(64)) *
+        8;
+    PrimExpr base = analyzer->Simplify(
+        pointer_bits +
+        cast(TensorElementOffset(logical, zero), PrimType::Int(64)) * bits);
+    PrimExpr slot = analyzer->Simplify(
+        pointer_bits +
+        cast(TensorElementOffset(logical, next), PrimType::Int(64)) * bits -
+        base);
+    // A shaped alias can describe a flat ring allocation, but a small view of
+    // a larger workspace does not turn the whole workspace into version slots.
+    if (!logical.same_as(owner) &&
+        (!owner.ty()->HasDefaultLayout() ||
+         !analyzer->CanProveEqual(GetBufferStorageSizeBytes(owner) * 8,
+                                  base + slot * count)))
+      continue;
+    if (auto size = TryConstInt(slot)) {
+      TVM_FFI_CHECK(*size >= 0 && *size <= std::numeric_limits<int64_t>::max() -
+                                               kAlignmentBits + 1,
+                    ValueError)
+          << "Version slot size is invalid or overflows int64";
+      if (*size == 0)
+        continue;
+    }
+    PrimExpr aligned = analyzer->Simplify(
+        FloorDiv(slot + (kAlignmentBits - 1), IntImm::Int64(kAlignmentBits)) *
+        kAlignmentBits);
+    if (analyzer->CanProveEqual(slot, aligned))
+      continue;
+    PrimExpr total = analyzer->Simplify(base + aligned * count);
+    layouts.emplace(root, StorageLayout{owner, base, slot, aligned, total});
+  }
+  auto rewriter = make_object<BufferVersionLayoutRewriter>(
+      function, metadata.storage, layouts, CreateTileLangAnalyzer());
+  auto body = function->body;
+  function.CopyOnWrite()->body =
+      rewriter->Mutate(body, InplaceMode::kDisallow).ValueOrUnchanged(body);
+  return function;
+}
 } // namespace
-
 namespace transform {
-
-tirx::transform::Pass RewriteAscendBufferVersionLayout() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tirx::transform::PassContext &ctx) {
-    return RewriteBufferVersionLayout(std::move(func));
+tvm::transform::Pass RewriteAscendBufferVersionLayout() {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    return RewriteBufferVersionLayout(std::move(function));
   };
-  return tirx::transform::CreatePrimFuncPass(
-      pass_func, 0, "tl.RewriteAscendBufferVersionLayout", {});
+  return tirx::transform::CreateFunctionPass(
+      pass, 0, "tl.RewriteAscendBufferVersionLayout");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.RewriteAscendBufferVersionLayout",
-                        RewriteAscendBufferVersionLayout);
+  ffi::reflection::GlobalDef().def(
+      "tl.transform.RewriteAscendBufferVersionLayout",
+      RewriteAscendBufferVersionLayout);
 }
-
 } // namespace transform
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

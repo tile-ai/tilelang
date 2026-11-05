@@ -6,7 +6,7 @@ case with `q_len == kv_len` and one query tile per core. GQA flattens query grou
 into `q_len = S1 * G` and distributes the work across cores using `num_blocks`.
 
 GQA backward consumes the optional LSE output from forward and retains the
-fastest current path, using `T.Stage` with AutoSchedule. First,
+measured fused path, using `T.Stage` with AutoSchedule. First,
 `flash_attention_bwd_preprocess` computes `Delta = sum(O * dO, axis=-1)` for all
 query rows. A frontend-staged, KV-centric mixed kernel then performs five GEMMs
 in one launch, accumulates dK/dV privately, and reduces dQ into GM using bfloat16
@@ -51,7 +51,11 @@ packing also uses a fixed 128x128 tile:
 - **GQA `num_blocks` must divide `q_len / block_q`**, the number of M tiles,
   to avoid an uneven workload across cores.
 
-## Performance (current shapes, Ascend 950 / dav-3510, bf16)
+## Original performance snapshot (Ascend 950 / dav-3510, bf16)
+
+These measurements record the original implementation and toolchain comparison.
+Rerun them with the selected matched TileLang/provider/FFI bundle on the matching
+CANN/NPU environment before making a performance claim for this revision.
 
 | Kernel | Shape | TileLang | Torch SDPA | Comparison |
 |---|---|---|---|---|
@@ -134,7 +138,7 @@ indices, pipeline expansion, and the remaining local and cross-core
 synchronization. A variant without `T.Stage` passed correctness checks but took
 approximately 6.897 ms, so the stage constraints are retained.
 
-This PrimFunc keeps AutoSchedule and shared-memory reuse enabled by default.
+This kernel function keeps AutoSchedule and shared-memory reuse enabled by default.
 Only fast-math needs to be specified:
 
 ```python

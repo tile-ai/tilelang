@@ -1,11 +1,10 @@
 from dataclasses import dataclass
-from tilelang import tvm as tvm
-from tvm.target import Target
-from tvm import tirx
-from tvm.ir import Range
+from tvm_tirx.target import Target
+from tilelang.language import _native as tirx
+from tvm_tirx.ir import Range
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang.ir import GemmSPWarpPolicy
-from tvm.ir.base import Node
+from tvm_tirx.ir import Node
 
 
 @dataclass

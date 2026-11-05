@@ -26,7 +26,7 @@
 #define TVM_TL_LOOP_PARTITION_H_
 
 #include "support/check.h"
-#include <tvm/tirx/op.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt.h>
 
 #include "../layout/layout.h"
@@ -36,8 +36,9 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
-For PartitionLoop(For op, PrimExpr thread_index, arith::Analyzer *analyzer,
+For PartitionLoop(For op, PrimExpr thread_index, sym::AnalyzerObj *analyzer,
                   const Fragment &loop_layout,
                   bool require_padding_guard = false);
 
@@ -53,7 +54,7 @@ For PragmaUnrollLoop(For stmt);
  * \brief Lower a parallel loop by partitioning and vectorizing it.
  *
  * This function combines PartitionLoop and VectorizeLoop into a single
- * operation, and optionally wraps the result with an IfThenElse if a
+ * operation, and optionally wraps the result with an If if a
  * predicate is provided.
  *
  * \param loop The parallel For loop to lower.
@@ -65,7 +66,7 @@ For PragmaUnrollLoop(For stmt);
  *        definitions. Each lowering stage forks this context; region-local
  *        bindings are not exported back to it. In particular, do not pass an
  *        analyzer populated by visiting a previous version of this loop body.
- * \param predicate ffi::Optional predicate to wrap the loop with IfThenElse.
+ * \param predicate ffi::Optional predicate to wrap the loop with If.
  * \param parallel_loop Whether this is a true parallel loop requiring thread
  *        partitioning. False for loops that only operate on local/register
  *        buffers. (default true)
@@ -73,9 +74,10 @@ For PragmaUnrollLoop(For stmt);
  */
 Stmt LowerParallelLoop(
     For loop, const Fragment &loop_layout, PrimExpr thread_index,
-    const arith::Analyzer *analyzer, const LayoutMap &layout_map = {},
+    const sym::AnalyzerObj *analyzer, const LayoutMap &layout_map = {},
     ffi::Optional<PrimExpr> predicate = ffi::Optional<PrimExpr>(),
-    bool parallel_loop = true, bool require_padding_guard = false);
+    bool parallel_loop = true, bool require_padding_guard = false,
+    ffi::Optional<Target> target = std::nullopt);
 
 } // namespace tl
 } // namespace tvm

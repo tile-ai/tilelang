@@ -6,29 +6,34 @@
 
 #include "support/check.h"
 #include <algorithm>
-#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/tirx/op.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/tirx/op/memory.h>
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/utils.h"
+#include "ir/analyzer.h"
+#include "layout/expr_utils.h"
 #include "layout/layout.h"
+#include "layout/payload.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 // Expand a 2-D base layout to the rank of \p buffer by prepending the leading
 // (batch) dimensions of the buffer shape. Local copy of the swizzle helper so
 // this file does not depend on gemm_layouts.cc internals.
-static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
+static Layout ExpandLayout2D(const Layout &base, const TensorVar &buffer) {
   Array<PrimExpr> leading_shape;
-  leading_shape.reserve(buffer->shape.size() - 2);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    leading_shape.push_back(buffer->shape[i]);
+  leading_shape.reserve(buffer.shape().size() - 2);
+  for (size_t i = 0; i + 2 < buffer.shape().size(); ++i) {
+    leading_shape.push_back(buffer.shape()[i]);
   }
   return base->Expand(leading_shape);
 }
@@ -83,6 +88,41 @@ Layout MakeTaggedAscendFractalLayout(Array<PrimExpr> input_size,
   return Layout(std::move(node));
 }
 
+tvm::Tuple EncodeAscendFractalPayload(const Layout &layout) {
+  const auto *tagged = layout.as<AscendFractalLayoutNode>();
+  TVM_FFI_CHECK(tagged, TypeError)
+      << "Ascend fractal codec requires its registered layout subtype";
+  // The ordinary coordinate payload retains lambda binders and dynamic
+  // captures. The second explicit operand records the semantic fractal kind.
+  Layout coordinates(layout->InputShape(), layout->GetForwardIndex());
+  return tvm::Tuple({EncodeLayoutPayload(coordinates),
+                     IntImm::Int32(static_cast<int>(tagged->Kind()))});
+}
+
+Layout DecodeAscendFractalPayload(const tvm::Tuple &payload, int64_t version) {
+  TVM_FFI_CHECK_EQ(payload->fields.size(), 2U, ValueError)
+      << "Ascend fractal payload must contain coordinates and kind";
+  Layout coordinates = DecodeLayoutPayload(
+      payload->fields[0].as_or_throw<tvm::Tuple>(), "layout", version);
+  const auto *kind = payload->fields[1].as<IntImmObj>();
+  auto kind_type = payload->fields[1]->ty.as<PrimType>();
+  TVM_FFI_CHECK(kind && kind_type && kind_type.value().IsScalar() &&
+                    kind_type.value().MatchesElementType(kDLInt, 32),
+                TypeError)
+      << "Ascend fractal kind must be an int32 literal";
+  auto ordinal = kind->value.as<int64_t>();
+  TVM_FFI_CHECK(ordinal && *ordinal >= 0 && *ordinal <= 3, ValueError)
+      << "Unknown Ascend fractal kind";
+  TVM_FFI_CHECK(coordinates->InputDim() >= 2 &&
+                    coordinates->OutputDim() == coordinates->InputDim() + 2,
+                ValueError)
+      << "Ascend fractal payload must preserve leading axes and four matrix "
+         "coordinates";
+  return MakeTaggedAscendFractalLayout(
+      coordinates->InputShape(), coordinates->GetForwardIndex(),
+      static_cast<AscendFractalKind>(*ordinal));
+}
+
 std::pair<LogicalAxis, LogicalAxis> GetAxesForKind(AscendFractalKind kind) {
   ICHECK(kind == AscendFractalKind::kMajorK ||
          kind == AscendFractalKind::kMajorMN ||
@@ -118,10 +158,10 @@ int AscendC0(int element_bits) {
 
 static Layout MakeAscendMajorKLayout2D(PrimExpr rows, PrimExpr cols,
                                        int element_bits) {
-  PrimExpr c0 = Integer(AscendC0(element_bits));
-  PrimExpr row_frac = Integer(kAscendRowFractal);
-  Var i = InputPlaceholder(0); // row
-  Var j = InputPlaceholder(1); // col
+  PrimExpr c0 = IntImm::Int32(AscendC0(element_bits));
+  PrimExpr row_frac = IntImm::Int32(kAscendRowFractal);
+  PrimVar i = InputPlaceholder(0); // row
+  PrimVar j = InputPlaceholder(1); // col
   PrimExpr ro = FloorDiv(i, row_frac);
   PrimExpr ri = FloorMod(i, row_frac);
   PrimExpr co = FloorDiv(j, c0);
@@ -138,10 +178,10 @@ static Layout MakeAscendMajorKLayout2D(PrimExpr rows, PrimExpr cols,
 // TryExtractAscendFractalLayout as c0_axis == kRow.
 static Layout MakeAscendMajorMNLayout2D(PrimExpr rows, PrimExpr cols,
                                         int element_bits) {
-  PrimExpr c0 = Integer(AscendC0(element_bits));
-  PrimExpr row_frac = Integer(kAscendRowFractal);
-  Var i = InputPlaceholder(0); // row (contiguous M/N axis)
-  Var j = InputPlaceholder(1); // col (reduce-K axis)
+  PrimExpr c0 = IntImm::Int32(AscendC0(element_bits));
+  PrimExpr row_frac = IntImm::Int32(kAscendRowFractal);
+  PrimVar i = InputPlaceholder(0); // row (contiguous M/N axis)
+  PrimVar j = InputPlaceholder(1); // col (reduce-K axis)
   PrimExpr co = FloorDiv(i, c0);
   PrimExpr ci = FloorMod(i, c0);
   PrimExpr ro = FloorDiv(j, row_frac);
@@ -156,10 +196,10 @@ static void CheckStaticDivisible(const PrimExpr &value, int divisor,
   if (divisor <= 1) {
     return;
   }
-  arith::Analyzer analyzer;
-  PrimExpr simplified = analyzer.Simplify(value);
-  const int64_t *int_value = as_const_int(simplified);
-  ICHECK(int_value != nullptr)
+  auto analyzer = CreateTileLangAnalyzer();
+  PrimExpr simplified = analyzer->Simplify(value);
+  auto int_value = TryConstInt(simplified);
+  ICHECK(int_value.has_value())
       << what << " requires a static extent to verify divisibility by "
       << divisor << ", got " << value;
   ICHECK(*int_value % divisor == 0)
@@ -170,47 +210,47 @@ static void CheckStaticDivisible(const PrimExpr &value, int divisor,
       << divisor << ".";
 }
 
-Layout MakeAscendMajorKLayout(const Buffer &buffer, int k_align) {
-  ICHECK(buffer.defined() && buffer->shape.size() >= 2)
+Layout MakeAscendMajorKLayout(const TensorVar &buffer, int k_align) {
+  ICHECK(buffer.defined() && buffer.shape().size() >= 2)
       << "MakeAscendMajorKLayout expects rank >= 2 buffer";
-  size_t n = buffer->shape.size();
-  PrimExpr rows = buffer->shape[n - 2];
-  PrimExpr cols = buffer->shape[n - 1];
+  size_t n = buffer.shape().size();
+  PrimExpr rows = buffer.shape()[n - 2];
+  PrimExpr cols = buffer.shape()[n - 1];
   CheckStaticDivisible(cols, k_align,
                        "Ascend MajorK layout for " + buffer->name);
-  auto base = MakeAscendMajorKLayout2D(rows, cols, buffer->dtype.bits());
+  auto base = MakeAscendMajorKLayout2D(rows, cols, buffer.dtype().bits());
   return ExpandLayout2D(base, buffer);
 }
 
-Layout MakeAscendMajorMNLayout(const Buffer &buffer, int k_align) {
+Layout MakeAscendMajorMNLayout(const TensorVar &buffer, int k_align) {
   // For a [.., K, MN] logical tile the contiguous rows axis (dim -2) is the
   // output M/N axis, so C0 groups rows and the 16-fractal groups cols. This is
   // the swapped counterpart of MajorK and yields c0_axis == kRow.
-  ICHECK(buffer.defined() && buffer->shape.size() >= 2)
+  ICHECK(buffer.defined() && buffer.shape().size() >= 2)
       << "MakeAscendMajorMNLayout expects rank >= 2 buffer";
-  size_t n = buffer->shape.size();
-  PrimExpr rows = buffer->shape[n - 2];
-  PrimExpr cols = buffer->shape[n - 1];
+  size_t n = buffer.shape().size();
+  PrimExpr rows = buffer.shape()[n - 2];
+  PrimExpr cols = buffer.shape()[n - 1];
   CheckStaticDivisible(rows, k_align,
                        "Ascend MajorMN layout for " + buffer->name);
-  auto base = MakeAscendMajorMNLayout2D(rows, cols, buffer->dtype.bits());
+  auto base = MakeAscendMajorMNLayout2D(rows, cols, buffer.dtype().bits());
   return ExpandLayout2D(base, buffer);
 }
 
-Layout MakeAscendNZLayout(const Buffer &buffer) {
+Layout MakeAscendNZLayout(const TensorVar &buffer) {
   return MakeAscendMajorKLayout(buffer);
 }
 
-Layout MakeAscendCompactNZLayout(const Buffer &buffer) {
-  if (!buffer.defined() || buffer->shape.size() < 2) {
+Layout MakeAscendCompactNZLayout(const TensorVar &buffer) {
+  if (!buffer.defined() || buffer.shape().size() < 2) {
     TVM_FFI_THROW(ValueError)
         << "Compact Ascend NZ layout expects a rank >= 2 buffer";
   }
 
-  int c0 = AscendC0(buffer->dtype.bits());
-  const PrimExpr &cols = buffer->shape.back();
-  const int64_t *cols_value = as_const_int(cols);
-  if (cols_value == nullptr) {
+  int c0 = AscendC0(buffer.dtype().bits());
+  const PrimExpr &cols = buffer.shape().back();
+  auto cols_value = TryConstInt(cols);
+  if (!cols_value.has_value()) {
     TVM_FFI_THROW(ValueError)
         << "Compact Ascend NZ layout requires a static column extent, got "
         << cols;
@@ -221,42 +261,43 @@ Layout MakeAscendCompactNZLayout(const Buffer &buffer) {
         << ", got " << *cols_value;
   }
 
-  Array<IterVar> iter_vars;
-  iter_vars.reserve(buffer->shape.size());
-  for (size_t i = 0; i < buffer->shape.size(); ++i) {
-    iter_vars.push_back(MakeIterVar("i" + std::to_string(i), buffer->shape[i]));
+  Array<LayoutIterVar> iter_vars;
+  iter_vars.reserve(buffer.shape().size());
+  for (size_t i = 0; i < buffer.shape().size(); ++i) {
+    iter_vars.push_back(
+        MakeIterVar("i" + std::to_string(i), buffer.shape()[i]));
   }
 
-  PrimExpr stage = Integer(0);
-  for (size_t i = 0; i + 2 < buffer->shape.size(); ++i) {
-    stage = stage * buffer->shape[i] + iter_vars[i]->var;
+  PrimExpr stage = IntImm::Int32(0);
+  for (size_t i = 0; i + 2 < buffer.shape().size(); ++i) {
+    stage = stage * buffer.shape()[i] + iter_vars[i]->var;
   }
   const PrimExpr &row = iter_vars[iter_vars.size() - 2]->var;
   const PrimExpr &col = iter_vars.back()->var;
-  PrimExpr c0_expr = Integer(c0);
+  PrimExpr c0_expr = IntImm::Int32(c0);
   PrimExpr c0_groups = FloorDiv(cols, c0_expr);
   return Layout(iter_vars, {stage * c0_groups + FloorDiv(col, c0_expr), row,
                             FloorMod(col, c0_expr)});
 }
 
-bool IsAscendCompactNZLayout(const Layout &layout, const Buffer &buffer) {
-  if (!layout.defined() || !buffer.defined() || buffer->shape.size() < 2) {
+bool IsAscendCompactNZLayout(const Layout &layout, const TensorVar &buffer) {
+  if (!layout.defined() || !buffer.defined() || buffer.shape().size() < 2) {
     return false;
   }
-  int bits = buffer->dtype.bits();
+  int bits = buffer.dtype().bits();
   if (bits <= 0 || 256 % bits != 0)
     return false;
-  const int64_t *cols = as_const_int(buffer->shape.back());
-  if (cols == nullptr || *cols % AscendC0(bits) != 0)
+  auto cols = TryConstInt(buffer.shape().back());
+  if (!cols.has_value() || *cols % AscendC0(bits) != 0)
     return false;
   Layout expected = MakeAscendCompactNZLayout(buffer);
   return layout->IsEqual(expected.get());
 }
 
 static Layout MakeAscendL0CLayout2D(PrimExpr rows, PrimExpr cols) {
-  PrimExpr frac = Integer(kAscendRowFractal);
-  Var i = InputPlaceholder(0); // M row
-  Var j = InputPlaceholder(1); // N col
+  PrimExpr frac = IntImm::Int32(kAscendRowFractal);
+  PrimVar i = InputPlaceholder(0); // M row
+  PrimVar j = InputPlaceholder(1); // N col
   PrimExpr mo = FloorDiv(i, frac);
   PrimExpr mi = FloorMod(i, frac);
   PrimExpr no = FloorDiv(j, frac);
@@ -265,25 +306,25 @@ static Layout MakeAscendL0CLayout2D(PrimExpr rows, PrimExpr cols) {
       Array<PrimExpr>{rows, cols}, {no, mo, mi, ni}, AscendFractalKind::kL0C);
 }
 
-Layout MakeAscendL0CLayout(const Buffer &buffer) {
+Layout MakeAscendL0CLayout(const TensorVar &buffer) {
   ICHECK(buffer.defined()) << "L0C layout expects a defined buffer";
-  ICHECK(buffer->shape.size() >= 2)
+  ICHECK(buffer.shape().size() >= 2)
       << "L0C layout expects rank >= 2 buffer, got rank="
-      << buffer->shape.size();
-  size_t ndim = buffer->shape.size();
-  PrimExpr rows = buffer->shape[ndim - 2];
-  PrimExpr cols = buffer->shape[ndim - 1];
+      << buffer.shape().size();
+  size_t ndim = buffer.shape().size();
+  PrimExpr rows = buffer.shape()[ndim - 2];
+  PrimExpr cols = buffer.shape()[ndim - 1];
   auto base = MakeAscendL0CLayout2D(rows, cols);
   return ExpandLayout2D(base, buffer);
 }
 
 static Layout MakeAscendSFLayout2D(PrimExpr mn, PrimExpr k, int element_bits) {
-  PrimExpr mn_frac = Integer(kAscendRowFractal);
+  PrimExpr mn_frac = IntImm::Int32(kAscendRowFractal);
   ICHECK(element_bits > 0 && 16 % element_bits == 0)
       << "SF layout expects element bits to divide 16, got " << element_bits;
-  PrimExpr pack = Integer(16 / element_bits);
-  Var i = InputPlaceholder(0); // M/N axis
-  Var j = InputPlaceholder(1); // K axis in scale elements
+  PrimExpr pack = IntImm::Int32(16 / element_bits);
+  PrimVar i = InputPlaceholder(0); // M/N axis
+  PrimVar j = InputPlaceholder(1); // K axis in scale elements
   PrimExpr mo = FloorDiv(i, mn_frac);
   PrimExpr mi = FloorMod(i, mn_frac);
   PrimExpr ko = FloorDiv(j, pack);
@@ -292,49 +333,50 @@ static Layout MakeAscendSFLayout2D(PrimExpr mn, PrimExpr k, int element_bits) {
                                        AscendFractalKind::kSF);
 }
 
-Layout MakeAscendSFLayout(const Buffer &buffer) {
+Layout MakeAscendSFLayout(const TensorVar &buffer) {
   ICHECK(buffer.defined()) << "SF layout expects a defined buffer";
-  ICHECK(buffer->shape.size() >= 2)
+  ICHECK(buffer.shape().size() >= 2)
       << "SF layout expects rank >= 2 buffer with trailing [MN, K], got rank="
-      << buffer->shape.size();
-  size_t ndim = buffer->shape.size();
-  PrimExpr mn = buffer->shape[ndim - 2];
-  PrimExpr k = buffer->shape[ndim - 1];
-  ICHECK(buffer->dtype.bits() > 0 && 16 % buffer->dtype.bits() == 0)
+      << buffer.shape().size();
+  size_t ndim = buffer.shape().size();
+  PrimExpr mn = buffer.shape()[ndim - 2];
+  PrimExpr k = buffer.shape()[ndim - 1];
+  ICHECK(buffer.dtype().bits() > 0 && 16 % buffer.dtype().bits() == 0)
       << "SF layout expects storage dtype whose bit width divides 16, got "
-      << buffer->dtype;
-  if (buffer->dtype.bits() != 16) {
-    arith::Analyzer analyzer;
-    PrimExpr k_extent = analyzer.Simplify(k);
-    const int64_t *k_value = as_const_int(k_extent);
-    ICHECK(k_value != nullptr)
+      << buffer.dtype();
+  if (buffer.dtype().bits() != 16) {
+    auto analyzer = CreateTileLangAnalyzer();
+    PrimExpr k_extent = analyzer->Simplify(k);
+    auto k_value = TryConstInt(k_extent);
+    ICHECK(k_value.has_value())
         << "SF_K layout for non-uint16 storage requires a static K-axis "
            "extent to verify 2-byte alignment, got "
         << k;
-    ICHECK((*k_value * buffer->dtype.bits()) % 16 == 0)
-        << "SF_K layout for " << buffer->name << " with dtype " << buffer->dtype
+    ICHECK((*k_value * buffer.dtype().bits()) % 16 == 0)
+        << "SF_K layout for " << buffer->name << " with dtype "
+        << buffer.dtype()
         << " requires the K-axis extent to be 2-byte aligned. Got K="
         << *k_value << ". Pad the K-axis with identity e8m0 scale value 127.";
   }
-  auto base = MakeAscendSFLayout2D(mn, k, buffer->dtype.bits());
+  auto base = MakeAscendSFLayout2D(mn, k, buffer.dtype().bits());
   return ExpandLayout2D(base, buffer);
 }
 
 // ── Ascend fractal layout analysis ──────────────────────────────────
 
-bool TryExtractAscendFractalLayout(const Layout &layout, const Buffer &buf,
+bool TryExtractAscendFractalLayout(const Layout &layout, const TensorVar &buf,
                                    AscendFractalLayoutInfo *out) {
-  if (!layout.defined() || !buf.defined() || buf->shape.size() < 2)
+  if (!layout.defined() || !buf.defined() || buf.shape().size() < 2)
     return false;
 
-  auto I = [](int64_t v) { return make_const(DataType::Int(32), v); };
-  size_t n = buf->shape.size();
-  PrimExpr rows = buf->shape[n - 2];
-  PrimExpr cols = buf->shape[n - 1];
+  auto I = [](int64_t v) { return MakeConst(PrimType::Int(32), v); };
+  size_t n = buf.shape().size();
+  PrimExpr rows = buf.shape()[n - 2];
+  PrimExpr cols = buf.shape()[n - 1];
   PrimExpr row_frac = I(16);
 
   auto ceildiv_expr = [](const PrimExpr &v, const PrimExpr &f) {
-    return FloorDiv(v + f - Integer(1), f);
+    return FloorDiv(v + f - IntImm::Int32(1), f);
   };
   const auto *tagged = layout.as<AscendFractalLayoutNode>();
   ICHECK(tagged != nullptr)
@@ -346,17 +388,17 @@ bool TryExtractAscendFractalLayout(const Layout &layout, const Buffer &buf,
 
   AscendFractalKind kind = tagged->Kind();
   auto [c0_axis, row16_axis] = GetAxesForKind(kind);
-  PrimExpr c0;
+  PrimExpr c0{ffi::UnsafeInit{}};
   if (kind == AscendFractalKind::kL0C) {
     c0 = row_frac;
   } else if (kind == AscendFractalKind::kSF) {
-    int element_bits = buf->dtype.bits();
+    int element_bits = buf.dtype().bits();
     ICHECK(element_bits > 0 && 16 % element_bits == 0)
         << "Tagged Ascend SF layout expects element bits to divide 16, got "
         << element_bits << " for buffer " << buf->name;
     c0 = I(16 / element_bits);
   } else {
-    c0 = I(AscendC0(buf->dtype.bits()));
+    c0 = I(AscendC0(buf.dtype().bits()));
   }
   auto axis_extent = [&](LogicalAxis axis) {
     return axis == LogicalAxis::kRow ? rows : cols;
@@ -387,91 +429,81 @@ bool TryExtractAscendFractalRegion(const Layout &layout,
 // InputShape. Used only for copy-parameter derivation in lowering;
 // intentionally NOT anchored into layout_map/buffer_remap (an identity remap is
 // a no-op, and a flattening layout would alias GM/UB buffers to 1D).
-Layout makeAscendNDLayout(const Buffer &buffer) {
-  int ndim = static_cast<int>(buffer->shape.size());
-  Array<IterVar> iter_vars;
+Layout makeAscendNDLayout(const TensorVar &buffer) {
+  int ndim = static_cast<int>(buffer.shape().size());
+  Array<LayoutIterVar> iter_vars;
   Array<PrimExpr> forward_index;
   for (int i = 0; i < ndim; ++i) {
-    auto iv = MakeIterVar("i" + std::to_string(i), buffer->shape[i]);
+    auto iv = MakeIterVar("i" + std::to_string(i), buffer.shape()[i]);
     iter_vars.push_back(iv);
     forward_index.push_back(iv->var);
   }
   return Layout(iter_vars, forward_index);
 }
 
-// ── MakeStridedSlice ──────────────────────────────────────────────────
-// Given a physical (remapped) buffer and a layout, compute a 0-origin
-// strided buffer view for the given logical sub-region.
-//
-// Steps:
-// 1. MapRegionBounds(logical_region) → physical region (one Range per output
-// dim)
-// 2. Compute row-major strides from phys_buf shape (or use existing strides)
-// 3. offset = sum(phys_region[i].min * strides[i])
-// 4. shape  = [phys_region[i].extent for each dim]
-// 5. Return Buffer(same data, shape, strides, offset)
-tirx::Buffer MakeStridedSlice(const tirx::Buffer &phys_buf,
-                              const Layout &layout,
-                              const Array<Range> &logical_region) {
+// Map a logical sub-region to a native strided declaration over the physical
+// allocation. tensor_data_ptr denotes its base pointer; the existing layout
+// origin belongs in the new type exactly once, together with the region start.
+Expr MakeStridedSlice(const TensorVar &phys_buf, const Layout &layout,
+                      const Array<Range> &logical_region) {
   Array<Range> phys_region = layout->MapRegionBounds(logical_region);
-  int n = static_cast<int>(phys_region.size());
-
-  ICHECK_EQ(n, static_cast<int>(phys_buf->shape.size()))
+  size_t n = phys_region.size();
+  ICHECK_EQ(n, phys_buf.shape().size())
       << "MakeStridedSlice: physical region rank (" << n
-      << ") != physical buffer rank (" << phys_buf->shape.size() << ")";
+      << ") != physical tensor rank (" << phys_buf.shape().size() << ")";
 
-  // Use phys_buf's explicit strides if present, otherwise compute row-major.
-  Array<PrimExpr> strides;
-  if (!phys_buf->strides.empty()) {
-    strides = phys_buf->strides;
-  } else {
-    strides.resize(n);
-    PrimExpr cur = Integer(1);
-    for (int i = n - 1; i >= 0; --i) {
-      strides.Set(i, cur);
-      cur = cur * phys_buf->shape[i];
-    }
-  }
-
-  // Flat offset and shape from phys_region.
-  PrimExpr offset = make_const(DataType::Int(64), 0);
+  auto physical = MatchShapeStridePattern(phys_buf.ty());
+  TVM_FFI_CHECK(physical.has_value(), ValueError)
+      << "MakeStridedSlice requires a materialized strided physical tensor";
+  const Array<PrimExpr> &strides = physical.value().get<1>();
+  PrimExpr offset = cast(physical.value().get<2>(), PrimType::Int(64));
   Array<PrimExpr> shape;
-  shape.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    offset = offset + cast(DataType::Int(64), phys_region[i]->min) *
-                          cast(DataType::Int(64), strides[i]);
+  Array<tirx::Iter> iters;
+  const tirx::Axis memory = tirx::Axis::Get("m");
+  for (size_t i = 0; i < n; ++i) {
+    offset = offset + cast(phys_region[i]->begin, PrimType::Int(64)) *
+                          cast(strides[i], PrimType::Int(64));
     shape.push_back(phys_region[i]->extent);
+    iters.push_back(tirx::Iter(phys_region[i]->extent, strides[i], memory));
   }
-
-  return Buffer(phys_buf->data, phys_buf->dtype, shape, strides, offset,
-                phys_buf->name + "_slice", phys_buf->data_alignment,
-                phys_buf->offset_factor, phys_buf->buffer_type);
+  auto analyzer = CreateTileLangAnalyzer();
+  offset = analyzer->Simplify(offset);
+  TensorType type(shape, phys_buf.dtype(), phys_buf.scope(),
+                  phys_buf.ty()->data_alignment,
+                  tirx::TileLayout(iters, {}, {{memory, offset}}));
+  Expr data = Call(phys_buf.ty()->DataPtrType(), tensor_data_ptr_op(),
+                   {phys_buf}, {}, {}, phys_buf->loc);
+  return Call(type, decl_tensor_op(), {data}, {}, {type}, phys_buf->loc);
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   AscendFractalLayoutNode::RegisterReflection();
+  RegisterLayoutPayloadCodec({"tl.AscendFractalLayout", "ascend.fractal",
+                              EncodeAscendFractalPayload,
+                              DecodeAscendFractalPayload});
   refl::GlobalDef()
       .def("tl.make_ascend_major_k_layout",
-           [](const Buffer &buffer, int k_align) {
+           [](const TensorVar &buffer, int k_align) {
              return MakeAscendMajorKLayout(buffer, k_align);
            })
       .def("tl.make_ascend_major_mn_layout",
-           [](const Buffer &buffer, int k_align) {
+           [](const TensorVar &buffer, int k_align) {
              return MakeAscendMajorMNLayout(buffer, k_align);
            })
       .def("tl.make_ascend_l0c_layout",
-           [](const Buffer &buffer) { return MakeAscendL0CLayout(buffer); })
+           [](const TensorVar &buffer) { return MakeAscendL0CLayout(buffer); })
       .def("tl.make_ascend_sf_layout",
-           [](const Buffer &buffer) { return MakeAscendSFLayout(buffer); })
+           [](const TensorVar &buffer) { return MakeAscendSFLayout(buffer); })
       .def("tl.make_ascend_nz_layout",
-           [](const Buffer &buffer) { return MakeAscendNZLayout(buffer); })
+           [](const TensorVar &buffer) { return MakeAscendNZLayout(buffer); })
       .def("tl.make_ascend_compact_nz_layout",
-           [](const Buffer &buffer) {
+           [](const TensorVar &buffer) {
              return MakeAscendCompactNZLayout(buffer);
            })
       .def("tl.try_extract_fractal_layout",
-           [](Layout layout, const Buffer &buf) -> Optional<Map<String, Any>> {
+           [](Layout layout,
+              const TensorVar &buf) -> Optional<Map<String, Any>> {
              AscendFractalLayoutInfo info;
              if (!TryExtractAscendFractalLayout(layout, buf, &info))
                return std::nullopt;
@@ -479,18 +511,18 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              int row16_axis_int = static_cast<int>(info.row16_axis);
              int kind_int = static_cast<int>(info.kind);
              return Map<String, Any>{
-                 {"kind", Integer(kind_int)},
+                 {"kind", IntImm::Int32(kind_int)},
                  {"c0", info.c0},
                  {"row_frac", info.row_frac},
                  {"rows", info.rows},
                  {"cols", info.cols},
                  {"outer0", info.outer0},
                  {"outer1", info.outer1},
-                 {"c0_axis", Integer(c0_axis_int)},
-                 {"row16_axis", Integer(row16_axis_int)},
+                 {"c0_axis", IntImm::Int32(c0_axis_int)},
+                 {"row16_axis", IntImm::Int32(row16_axis_int)},
              };
            })
-      .def("tl.make_strided_slice", [](const Buffer &phys_buf, Layout layout,
+      .def("tl.make_strided_slice", [](const TensorVar &phys_buf, Layout layout,
                                        Array<Range> logical_region) {
         return MakeStridedSlice(phys_buf, layout, logical_region);
       });

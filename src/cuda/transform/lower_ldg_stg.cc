@@ -1,543 +1,315 @@
 /*!
  * \file lower_ldg_stg.cc
- * \brief Lower Ramp-based global memory load/store to ldg/stg intrinsics
+ * \brief Lower contiguous native global accesses to CUDA ldg/stg intrinsics.
  *
- * This pass transforms vectorized global memory loads and stores (using Ramp
- * indices) into explicit ldg32/64/128/256 and stg32/64/128/256 intrinsics for
- * better codegen.
- *
- * Key behaviors:
- * 1. Converts Ramp-based global BufferLoad to ldg intrinsics
- * 2. Converts Ramp-based global BufferStore to stg intrinsics
- * 3. Supports predicated loads (if_then_else with else=0)
- * 4. Supports predicated stores (if_then_else with empty then case)
- * 5. Only enabled for CUDA targets
- *
- * Pass configurations:
- * - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default:
- * OFF)
- * - tl.enable_lower_ldgstg_predicated: Enable predicated ldg/stg lowering
- * (default: OFF)
+ * Both ordinary and predicated lowering are opt-in. Native tensors keep their
+ * address/layout contract until tl.access_ptr is lowered; an index Ramp alone
+ * is not proof that a strided or swizzled tensor is physically contiguous.
  */
 
-#include "support/check.h"
-#include <tvm/runtime/logging.h>
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <cmath>
+#include <numeric>
+#include <optional>
+
 #include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
-#include "op/utils.h"
-#include "tir/ir/buffer_common.h"
+#include "ir/analyzer.h"
+#include "ir/tensor_utils.h"
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 class LowerLDGSTGRewriter : public StmtExprMutator {
 public:
-  explicit LowerLDGSTGRewriter(bool enable_non_predicated,
-                               bool enable_predicated)
-      : enable_non_predicated_(enable_non_predicated),
-        enable_predicated_(enable_predicated) {}
+  using StmtExprMutator::Mutate_;
 
-  Stmt VisitStmt_(const BufferStoreNode *store) final {
-    // Skip if non-predicated lowering is disabled
-    if (!enable_non_predicated_) {
-      return StmtExprMutator::VisitStmt_(store);
+  LowerLDGSTGRewriter(bool ordinary, bool predicated)
+      : ordinary_(ordinary), predicated_(predicated) {}
+
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *store,
+                            InplaceMode mode) final {
+    if (ordinary_) {
+      if (auto access =
+              GetAccess(store->dest, store->indices, store->value->ty))
+        return LowerStore(store, access.value(), std::nullopt, mode);
     }
-
-    // Only handle global memory stores
-    if (store->buffer.scope() != "global") {
-      return StmtExprMutator::VisitStmt_(store);
-    }
-
-    // Assume buffer has been flattened by FlattenBuffer pass
-    ICHECK(store->indices.size() == 1)
-        << "Expected flattened buffer with single index, but got "
-        << store->indices.size() << " indices for buffer "
-        << store->buffer->name;
-
-    // Check if this is a Ramp-based store (vectorized)
-    if (store->indices[0]->IsInstance<RampNode>()) {
-      auto ramp = store->indices[0].as<RampNode>();
-      // Check if stride is 1 (contiguous access)
-      if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
-        if (stride_imm->value == 1) {
-          // Get lanes from the index dtype
-          int lanes = store->indices[0]->dtype.lanes();
-          // Use bits() to correctly handle sub-byte types like float4_e2m1fn
-          int total_bits = lanes * store->buffer->dtype.bits();
-
-          // Check for supported vector widths (32/64/128/256 bits)
-          if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
-              total_bits == 256) {
-            return LowerToSTG(store, ramp->base, total_bits);
-          }
-        }
-      }
-    } else {
-      // Single element store (non-Ramp)
-      int bits = store->buffer->dtype.bits();
-      if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
-        return LowerToSTG(store, store->indices[0], bits);
-      }
-    }
-
-    // Check if store value is an if_then_else with empty then case (predicated
-    // store) This pattern appears as: if (pred) { store } which gets lowered to
-    // BufferStore with if_then_else in the IfThenElse statement handling
-    return StmtExprMutator::VisitStmt_(store);
+    return StmtExprMutator::Mutate_(store, mode);
   }
 
-  Stmt VisitStmt_(const IfThenElseNode *if_stmt) final {
-    // Skip if predicated lowering is disabled
-    if (!enable_predicated_) {
-      return StmtExprMutator::VisitStmt_(if_stmt);
-    }
-
-    // Check for predicated store pattern:
-    // if (pred) { } else { BufferStore(...) }
-    // This represents a store that only happens when pred is false
-    // We convert this to stg with predicate = !pred
-
-    // Actually, the more common pattern for predicated store is:
-    // if (pred) { BufferStore(...) }
-    // which means store only when pred is true
-    if (!if_stmt->else_case.defined()) {
-      // Check if then_case is a single BufferStore to global memory with Ramp
-      if (auto seq = if_stmt->then_case.as<SeqStmtNode>()) {
-        // Multiple statements, not a simple predicated store
-        return StmtExprMutator::VisitStmt_(if_stmt);
-      }
-
-      if (auto store = if_stmt->then_case.as<BufferStoreNode>()) {
-        // Only handle global memory stores
-        if (IsGlobalBuffer(store->buffer)) {
-          // Lowering `if (pred) { store(value); }` to
-          // `store_conditional(value, pred)` evaluates `value` before the
-          // predicate is applied by the intrinsic. This is only safe when the
-          // value can be evaluated unconditionally. Global loads are handled by
-          // this pass using predicated ldg intrinsics below; shared/local loads
-          // do not have an equivalent guard here and must remain inside the
-          // explicit IfThenElse.
-          if (!CanEvaluateStoreValueOutsidePredicate(store->value)) {
-            return StmtExprMutator::VisitStmt_(if_stmt);
-          }
-
-          // Assume buffer has been flattened by FlattenBuffer pass
-          ICHECK(store->indices.size() == 1)
-              << "Expected flattened buffer with single index, but got "
-              << store->indices.size() << " indices for buffer "
-              << store->buffer->name;
-
-          // Check if this is a Ramp-based store (vectorized)
-          if (store->indices[0]->IsInstance<RampNode>()) {
-            auto ramp = store->indices[0].as<RampNode>();
-            // Check if stride is 1 (contiguous access)
-            if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
-              if (stride_imm->value == 1) {
-                // Get lanes from the index dtype
-                int lanes = store->indices[0]->dtype.lanes();
-                // Use bits() to correctly handle sub-byte types like
-                // float4_e2m1fn
-                int total_bits = lanes * store->buffer->dtype.bits();
-
-                // Check for supported vector widths (32/64/128/256 bits)
-                if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
-                    total_bits == 256) {
-                  return LowerToSTGPredicated(store, ramp->base, total_bits,
-                                              if_stmt->condition);
-                }
-              }
-            }
-          } else {
-            // Single element predicated store (non-Ramp)
-            int bits = store->buffer->dtype.bits();
-            if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
-              return LowerToSTGPredicated(store, store->indices[0], bits,
-                                          if_stmt->condition);
-            }
+  UnchangedOr<Stmt> Mutate_(const IfObj *branch, InplaceMode mode) final {
+    // Native branch bodies are always SeqStmt, including singleton bodies.
+    if (predicated_ && !branch->else_case &&
+        branch->then_case->seq.size() == 1 &&
+        SafeScalarExpression(branch->condition)) {
+      if (auto store = branch->then_case->seq[0].as<TensorStoreObj>()) {
+        if (auto access =
+                GetAccess(store->dest, store->indices, store->value->ty)) {
+          if (SafeStoreValue(store->value)) {
+            PrimExpr predicate = Mutate(branch->condition, mode)
+                                     .ValueOrUnchanged(branch->condition);
+            return LowerStore(store, access.value(), predicate, mode);
           }
         }
       }
     }
-
-    return StmtExprMutator::VisitStmt_(if_stmt);
+    return StmtExprMutator::Mutate_(branch, mode);
   }
 
-  PrimExpr VisitExpr_(const BufferLoadNode *load) final {
-    // Only handle global memory loads
-    if (load->buffer.scope() != "global") {
-      return StmtExprMutator::VisitExpr_(load);
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *load,
+                                InplaceMode mode) final {
+    if (ordinary_ || predicate_) {
+      if (auto access = GetAccess(load->source, load->indices, load->ty))
+        return LowerLoad(load, access.value(), predicate_);
     }
-
-    // Check if we're in a predicated context (from IfThenElse store pattern)
-    // In this case, we need to use predicated load regardless of
-    // enable_non_predicated_
-    bool use_predicated = current_predicate_.defined();
-
-    // Skip if non-predicated lowering is disabled and we're not in predicated
-    // context
-    if (!enable_non_predicated_ && !use_predicated) {
-      return StmtExprMutator::VisitExpr_(load);
-    }
-
-    // Assume buffer has been flattened by FlattenBuffer pass
-    ICHECK(load->indices.size() == 1)
-        << "Expected flattened buffer with single index, but got "
-        << load->indices.size() << " indices for buffer " << load->buffer->name;
-
-    // Check if this is a Ramp-based load (vectorized)
-    if (load->indices[0]->IsInstance<RampNode>()) {
-      auto ramp = load->indices[0].as<RampNode>();
-      // Check if stride is 1 (contiguous access)
-      if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
-        if (stride_imm->value == 1) {
-          // Get lanes from the index dtype
-          int lanes = load->indices[0]->dtype.lanes();
-          // Use bits() to correctly handle sub-byte types like float4_e2m1fn
-          int total_bits = lanes * load->buffer->dtype.bits();
-
-          // Check for supported vector widths (32/64/128/256 bits)
-          if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
-              total_bits == 256) {
-            if (use_predicated) {
-              return LowerToLDGPredicated(load, ramp->base, total_bits,
-                                          current_predicate_.value());
-            }
-            return LowerToLDG(load, ramp->base, total_bits);
-          }
-        }
-      }
-    } else {
-      // Single element load (non-Ramp)
-      int bits = load->buffer->dtype.bits();
-      if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
-        if (use_predicated) {
-          return LowerToLDGPredicated(load, load->indices[0], bits,
-                                      current_predicate_.value());
-        }
-        return LowerToLDG(load, load->indices[0], bits);
-      }
-    }
-
-    return StmtExprMutator::VisitExpr_(load);
+    return StmtExprMutator::Mutate_(load, mode);
   }
 
-  PrimExpr VisitExpr_(const CallNode *call) final {
-    // Skip if predicated lowering is disabled
-    if (!enable_predicated_) {
-      return StmtExprMutator::VisitExpr_(call);
-    }
-
-    // Check for if_then_else pattern for predicated loads
-    if (call->op.same_as(builtin::if_then_else()) && call->args.size() == 3) {
-      PrimExpr condition = call->args[0];
-      // A load in a predicated store's value also needs the enclosing guard.
-      if (current_predicate_.defined()) {
-        condition = And(current_predicate_.value(), condition);
-      }
-      PrimExpr then_value = call->args[1];
-      PrimExpr else_value = call->args[2];
-
-      // Check if else value is zero (required for predicated ldg)
-      bool else_is_zero = false;
-      if (auto bcast = else_value.as<BroadcastNode>()) {
-        if (auto f = bcast->value.as<FloatImmNode>()) {
-          else_is_zero = (f->value == 0.0f);
-        } else if (auto i = bcast->value.as<IntImmNode>()) {
-          else_is_zero = (i->value == 0);
-        }
-      } else if (auto f = else_value.as<FloatImmNode>()) {
-        else_is_zero = (f->value == 0.0f);
-      } else if (auto i = else_value.as<IntImmNode>()) {
-        else_is_zero = (i->value == 0);
-      }
-
-      if (else_is_zero) {
-        // Check if then_value is a BufferLoad from global memory with Ramp
-        if (auto load = then_value.as<BufferLoadNode>()) {
-          if (IsGlobalBuffer(load->buffer)) {
-            // Assume buffer has been flattened by FlattenBuffer pass
-            ICHECK(load->indices.size() == 1)
-                << "Expected flattened buffer with single index, but got "
-                << load->indices.size() << " indices for buffer "
-                << load->buffer->name;
-
-            if (load->indices[0]->IsInstance<RampNode>()) {
-              auto ramp = load->indices[0].as<RampNode>();
-              if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
-                if (stride_imm->value == 1) {
-                  // Get lanes from the index dtype
-                  int lanes = load->indices[0]->dtype.lanes();
-                  // Use bits() to correctly handle sub-byte types like
-                  // float4_e2m1fn
-                  int total_bits = lanes * load->buffer->dtype.bits();
-
-                  // Check for supported vector widths (32/64/128/256 bits)
-                  if (total_bits == 32 || total_bits == 64 ||
-                      total_bits == 128 || total_bits == 256) {
-                    return LowerToLDGPredicated(load, ramp->base, total_bits,
-                                                condition);
-                  }
-                }
-              }
-            } else {
-              // Single element predicated load (non-Ramp)
-              int bits = load->buffer->dtype.bits();
-              if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
-                return LowerToLDGPredicated(load, load->indices[0], bits,
-                                            condition);
-              }
-            }
-          }
+  UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
+    // TensorLoad under these operators denotes an addressable element. It is
+    // not a memory read, including on a second invocation of this pass.
+    if (call->op.same_as(address_of_op()) ||
+        call->op.same_as(Op::Get("tl.access_ptr")))
+      return ffi::Unchanged();
+    if (predicated_ && call->op.same_as(if_then_else_op()) &&
+        call->args.size() == 3 && PositiveZero(call->args[2])) {
+      auto condition = call->args[0].as<PrimExpr>();
+      auto load = call->args[1].as<TensorLoadObj>();
+      if (condition && load && SafeScalarExpression(condition.value())) {
+        if (auto access = GetAccess(load->source, load->indices, load->ty)) {
+          PrimExpr guard = Mutate(condition.value(), mode)
+                               .ValueOrUnchanged(condition.value());
+          if (predicate_)
+            guard = And(predicate_.value(), guard);
+          return LowerLoad(load, access.value(), guard);
         }
       }
     }
-
-    return StmtExprMutator::VisitExpr_(call);
+    return StmtExprMutator::Mutate_(call, mode);
   }
 
 private:
-  bool enable_non_predicated_{false};
-  bool enable_predicated_{true};
-  ffi::Optional<PrimExpr>
-      current_predicate_; // Track predicate context for nested loads
+  struct Access {
+    TensorVar tensor;
+    PrimExpr base;
+    PrimType value_type;
+    int bits;
+    int index_lanes;
+  };
 
-  bool CanEvaluateStoreValueOutsidePredicate(const PrimExpr &value) {
+  bool ordinary_;
+  bool predicated_;
+  Optional<PrimExpr> predicate_;
+  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+
+  static bool PositiveZero(const Expr &value) {
+    if (auto broadcast = value.as<BroadcastObj>())
+      return PositiveZero(broadcast->value);
+    if (auto integer = value.as<IntImmObj>())
+      return integer->value == 0;
+    if (auto floating = value.as<FloatImmObj>())
+      return floating->value == 0.0 && !std::signbit(floating->value);
+    return false;
+  }
+
+  // Predicated instructions still evaluate their address/value arguments.
+  // Keep memory reads and potentially trapping arithmetic inside the original
+  // branch unless the load itself can be replaced by an equivalent masked ldg.
+  static bool HasTrappingArithmetic(const ffi::ObjectRef &node) {
+    return node.as<DivObj>() || node.as<ModObj>() || node.as<FloorDivObj>() ||
+           node.as<FloorModObj>();
+  }
+
+  static bool SafeScalarExpression(const Expr &expression) {
+    if (SideEffect(expression) > CallEffectKind::kPure)
+      return false;
     bool safe = true;
-    PostOrderVisit(value, [&](const ObjectRef &node) {
-      if (!safe) {
-        return;
-      }
-      if (const auto *load = node.as<BufferLoadNode>()) {
-        safe = IsGlobalBuffer(load->buffer);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+        expression,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          safe = safe && !HasTrappingArithmetic(node);
+          return ffi::WalkResult::Advance();
+        });
     return safe;
   }
 
-  // Create access pointer for the buffer at given base offset
-  PrimExpr CreateAccessPtr(const Buffer &buffer, const PrimExpr &base,
-                           int access_mask) {
-    // access_mask: 1 = read, 2 = write
-    return buffer.access_ptr(access_mask, DataType::Handle(), 1, base);
+  std::optional<Access> GetAccess(const Expr &source,
+                                  const Array<PrimExpr> &indices,
+                                  const Type &value_type) {
+    auto tensor = source.as<TensorVar>();
+    if (!tensor || tensor.value().scope() != runtime::MemoryScope::Global())
+      return std::nullopt;
+    TVM_FFI_CHECK_EQ(indices.size(), 1U, ValueError)
+        << "LowerLDGSTG requires a flattened tensor with one index: "
+        << tensor.value()->name;
+    auto primitive = value_type.as<PrimType>();
+    if (!primitive || primitive.value().IsScalableVector())
+      return std::nullopt;
+    PrimType type = primitive.value();
+    int64_t bits = static_cast<int64_t>(type.bits()) * type.lanes();
+    if (bits != 32 && bits != 64 && bits != 128 && bits != 256)
+      return std::nullopt;
+    PrimExpr base = indices[0];
+    int lanes = 1;
+    if (auto ramp = base.as<RampObj>()) {
+      if (!IsOne(ramp->stride))
+        return std::nullopt;
+      lanes = ramp->ty.as_or_throw<PrimType>().lanes();
+      base = ramp->base;
+    } else if (base->ty.as_or_throw<PrimType>().lanes() != 1) {
+      return std::nullopt;
+    }
+    if (!SafeScalarExpression(base))
+      return std::nullopt;
+    // These explicit PTX transactions require their natural byte alignment.
+    // A Ramp only proves lane spacing. Keep an unaligned vector access in IR
+    // for the owning emitter's guarded/byte-copy implementation instead of
+    // replacing it with an unconditionally aligned ldg/stg instruction.
+    const int bytes = static_cast<int>(bits) / 8;
+    const auto tensor_type = tensor.value().ty();
+    const PrimType element_type = tensor.value().dtype();
+    if (element_type.WithLanes(1) == PrimType::Bool() ||
+        tensor_type->data_alignment <= 0 ||
+        tensor_type->data_alignment % bytes != 0)
+      return std::nullopt;
+    Array<PrimExpr> offsets = tensor_type->ElemOffset({base});
+    if (offsets.size() != 1 || !SafeScalarExpression(offsets[0]))
+      return std::nullopt;
+    const int element_bits = element_type.bits() * element_type.lanes();
+    const int divisor =
+        static_cast<int>(bits) / std::gcd(static_cast<int>(bits), element_bits);
+    if (!analyzer_->CanProveEqual(
+            floormod(offsets[0], IntImm(offsets[0].ty(), divisor)), 0))
+      return std::nullopt;
+    // Prove physical contiguity for every lane, retaining type-carried offset
+    // and strides. This rejects e.g. a stride-2 view even with Ramp(base,1,4).
+    if (lanes > 1) {
+      for (int lane = 1; lane < lanes; ++lane) {
+        PrimExpr delta = IntImm(base->ty.as_or_throw<PrimType>(), lane);
+        Array<PrimExpr> next = tensor.value().ty()->ElemOffset({base + delta});
+        if (next.size() != 1 ||
+            !analyzer_->CanProveEqual(next[0] - offsets[0], delta))
+          return std::nullopt;
+      }
+    }
+    return Access{tensor.value(), base, type, static_cast<int>(bits), lanes};
   }
 
-  // Lower a BufferLoad to ldg intrinsic
-  PrimExpr LowerToLDG(const BufferLoadNode *load, const PrimExpr &base,
-                      int bits) {
-    PrimExpr ptr = CreateAccessPtr(load->buffer, base, 1);
-
-    DataType ret_dtype;
-    Op ldg_op;
-    if (bits == 32) {
-      ret_dtype = DataType::UInt(32);
-      ldg_op = ldg32();
-    } else if (bits == 64) {
-      ret_dtype = DataType::UInt(32, 2);
-      ldg_op = ldg64();
-    } else if (bits == 128) {
-      ret_dtype = DataType::UInt(32, 4);
-      ldg_op = ldg128();
-    } else if (bits == 256) {
-      ret_dtype = DataType::UInt(32, 8);
-      ldg_op = ldg256();
-    } else {
-      LOG(FATAL) << "Unsupported bit width for ldg: " << bits;
-      return PrimExpr();
-    }
-
-    // Create ldg call
-    PrimExpr ldg_result = Call(ret_dtype, ldg_op, {ptr});
-
-    // Reinterpret to the original dtype if needed
-    if (load->dtype != ret_dtype) {
-      return Call(load->dtype, builtin::reinterpret(), {ldg_result});
-    }
-    return ldg_result;
+  bool SafeStoreValue(const Expr &value) {
+    bool safe = true;
+    ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+        value,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (!safe)
+            return ffi::WalkResult::Skip();
+          if (auto load = node.as<TensorLoadObj>()) {
+            safe = GetAccess(load->source, load->indices, load->ty).has_value();
+          } else if (auto call = node.as<CallObj>()) {
+            if (!call->op.same_as(if_then_else_op()))
+              safe = SideEffect(GetRef<Call>(call)) <= CallEffectKind::kPure;
+          } else if (HasTrappingArithmetic(node)) {
+            safe = false;
+          }
+          return ffi::WalkResult::Advance();
+        });
+    return safe;
   }
 
-  // Lower a predicated BufferLoad to ldg intrinsic
-  PrimExpr LowerToLDGPredicated(const BufferLoadNode *load,
-                                const PrimExpr &base, int bits,
-                                const PrimExpr &predicate) {
-    PrimExpr ptr = CreateAccessPtr(load->buffer, base, 1);
-
-    DataType ret_dtype;
-    Op ldg_op;
-    if (bits == 32) {
-      ret_dtype = DataType::UInt(32);
-      ldg_op = ldg32();
-    } else if (bits == 64) {
-      ret_dtype = DataType::UInt(32, 2);
-      ldg_op = ldg64();
-    } else if (bits == 128) {
-      ret_dtype = DataType::UInt(32, 4);
-      ldg_op = ldg128();
-    } else if (bits == 256) {
-      ret_dtype = DataType::UInt(32, 8);
-      ldg_op = ldg256();
-    } else {
-      LOG(FATAL) << "Unsupported bit width for ldg: " << bits;
-      return PrimExpr();
-    }
-
-    // Create predicated ldg call
-    PrimExpr ldg_result = Call(ret_dtype, ldg_op, {ptr, predicate});
-
-    // Reinterpret to the original dtype if needed
-    if (load->dtype != ret_dtype) {
-      return Call(load->dtype, builtin::reinterpret(), {ldg_result});
-    }
-    return ldg_result;
-  }
-
-  // Lower a BufferStore to stg intrinsic
-  Stmt LowerToSTG(const BufferStoreNode *store, const PrimExpr &base,
-                  int bits) {
-    PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
-
-    // Get the value to store
-    PrimExpr value = this->VisitExpr(store->value);
-
-    // Reinterpret value to uint32xN if needed
-    DataType store_dtype;
-    const Op *stg_op;
+  static Op LoadOp(int bits) {
     switch (bits) {
     case 32:
-      store_dtype = DataType::UInt(32);
-      stg_op = &stg32();
-      break;
+      return ldg32();
     case 64:
-      store_dtype = DataType::UInt(32, 2);
-      stg_op = &stg64();
-      break;
+      return ldg64();
     case 128:
-      store_dtype = DataType::UInt(32, 4);
-      stg_op = &stg128();
-      break;
-    case 256:
-      store_dtype = DataType::UInt(32, 8);
-      stg_op = &stg256();
-      break;
+      return ldg128();
     default:
-      LOG(FATAL) << "Unsupported bit width for stg: " << bits;
-      return Stmt();
+      return ldg256();
     }
-
-    // Reinterpret value if dtype doesn't match
-    if (value.dtype() != store_dtype) {
-      value = Call(store_dtype, builtin::reinterpret(), {value});
-    }
-
-    // Create stg call
-    return Evaluate(Call(DataType::Handle(), *stg_op, {ptr, value}));
   }
 
-  // Lower a predicated BufferStore to stg intrinsic
-  Stmt LowerToSTGPredicated(const BufferStoreNode *store, const PrimExpr &base,
-                            int bits, const PrimExpr &predicate) {
-    PrimExpr ptr = CreateAccessPtr(store->buffer, base, 2);
-
-    // Set predicate context so that nested loads also use predicated version
-    ffi::Optional<PrimExpr> old_predicate = current_predicate_;
-    current_predicate_ = predicate;
-
-    // Get the value to store (loads inside will use predicated version)
-    PrimExpr value = this->VisitExpr(store->value);
-
-    // Restore old predicate context
-    current_predicate_ = old_predicate;
-
-    // Reinterpret value to uint32xN if needed
-    DataType store_dtype;
-    const Op *stg_op;
+  static Op StoreOp(int bits) {
     switch (bits) {
     case 32:
-      store_dtype = DataType::UInt(32);
-      stg_op = &stg32();
-      break;
+      return stg32();
     case 64:
-      store_dtype = DataType::UInt(32, 2);
-      stg_op = &stg64();
-      break;
+      return stg64();
     case 128:
-      store_dtype = DataType::UInt(32, 4);
-      stg_op = &stg128();
-      break;
-    case 256:
-      store_dtype = DataType::UInt(32, 8);
-      stg_op = &stg256();
-      break;
+      return stg128();
     default:
-      LOG(FATAL) << "Unsupported bit width for stg: " << bits;
-      return Stmt();
+      return stg256();
     }
+  }
 
-    // Reinterpret value if dtype doesn't match
-    if (value.dtype() != store_dtype) {
-      value = Call(store_dtype, builtin::reinterpret(), {value});
-    }
+  static Expr Pointer(const Access &access, int mask, const Location &loc) {
+    return MakeTensorAccessPtr(
+        TensorLoad(access.tensor, {access.base}, loc),
+        IntImm(access.base->ty.as_or_throw<PrimType>(), access.index_lanes),
+        mask);
+  }
 
-    // Create predicated stg call
-    return Evaluate(Call(DataType::Handle(), *stg_op, {ptr, value, predicate}));
+  static PrimExpr LowerLoad(const TensorLoadObj *load, const Access &access,
+                            const Optional<PrimExpr> &predicate) {
+    PrimType raw_type = PrimType::UInt(32, access.bits / 32);
+    Array<Expr> arguments{Pointer(access, 1, load->loc)};
+    if (predicate)
+      arguments.push_back(predicate.value());
+    Expr raw =
+        Call(raw_type, LoadOp(access.bits), arguments, {}, {}, load->loc);
+    return tirx::reinterpret(Type(access.value_type), raw, load->loc)
+        .as_or_throw<PrimExpr>();
+  }
+
+  Stmt LowerStore(const TensorStoreObj *store, const Access &access,
+                  const Optional<PrimExpr> &predicate, InplaceMode mode) {
+    Optional<PrimExpr> previous = predicate_;
+    predicate_ = predicate;
+    Expr value = Mutate(store->value, mode).ValueOrUnchanged(store->value);
+    predicate_ = previous;
+    PrimType raw_type = PrimType::UInt(32, access.bits / 32);
+    value = tirx::reinterpret(Type(raw_type), value, store->loc);
+    Array<Expr> arguments{Pointer(access, 2, store->loc), value};
+    if (predicate)
+      arguments.push_back(predicate.value());
+    return Evaluate(Call(PrimType::Void(), StoreOp(access.bits), arguments, {},
+                         {}, store->loc),
+                    store->loc);
   }
 };
 
-using namespace tirx::transform;
-
 tvm::transform::Pass LowerLDGSTG() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    // Check if target is CUDA
-    auto target_opt = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!target_opt.defined()) {
-      // No target bound, skip this pass
-      return f;
-    }
-    Target target = target_opt.value();
-    if (target->kind->name != "cuda") {
-      // Not a CUDA target, skip
-      return f;
-    }
-
-    // Skip for CuTeDSL backend
-    if (tl::TargetIsCuTeDSL(target)) {
-      return f;
-    }
-
-    // Read pass configurations
-    // Non-predicated ldg/stg: default OFF
-    bool enable_non_predicated =
-        ctx->GetConfig<Bool>(kEnableLowerLDGSTG, Bool(false)).value();
-    // Predicated ldg/stg: default OFF
-    bool enable_predicated =
-        ctx->GetConfig<Bool>(kEnableLowerLDGSTGPredicated, Bool(false)).value();
-
-    // If both are disabled, skip the pass entirely
-    if (!enable_non_predicated && !enable_predicated) {
-      return f;
-    }
-
-    auto *n = f.CopyOnWrite();
-    n->body =
-        LowerLDGSTGRewriter(enable_non_predicated, enable_predicated)(n->body);
-    return f;
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext context) {
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    if (!target || target.value()->kind->name != "cuda" ||
+        TargetIsCuTeDSL(target.value()))
+      return function;
+    bool ordinary =
+        context->GetConfig<bool>(kEnableLowerLDGSTG).value_or(false);
+    bool predicated =
+        context->GetConfig<bool>(kEnableLowerLDGSTGPredicated).value_or(false);
+    if (!ordinary && !predicated)
+      return function;
+    auto rewriter = ffi::make_object<LowerLDGSTGRewriter>(ordinary, predicated);
+    auto *node = function.CopyOnWrite();
+    node->body = rewriter->Mutate(node->body, InplaceMode::kAllow)
+                     .ValueOrUnchanged(node->body);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerLDGSTG", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LowerLDGSTG");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerLDGSTG", LowerLDGSTG);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.LowerLDGSTG",
+                                   LowerLDGSTG);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

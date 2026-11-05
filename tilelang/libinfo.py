@@ -21,17 +21,19 @@ def find_lib_path(name: str, py_ext=False):
     optional: boolean
         Whether the library is required
     """
+    if name == "tilelang" and not py_ext:
+        from tvm_tirx import base
+
+        compiler = base._LOADED_LIBS.get("tvm_tirx_compiler")
+        if compiler is None:
+            raise RuntimeError("TileLang requires the matching TIRx compiler provider")
+        return os.path.realpath(compiler._name)
     if py_ext:
         lib_names = [f"{name}{suffix}" for suffix in importlib.machinery.EXTENSION_SUFFIXES]
     elif sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
         lib_names = [f"lib{name}.so"]
     elif sys.platform.startswith("win32"):
-        if name == "tilelang":
-            # Windows links TileLang native registration objects into
-            # tvm_compiler.dll instead of a separate tilelang.dll.
-            lib_names = ["tvm_compiler.dll"]
-        else:
-            lib_names = [f"{name}.dll"]
+        lib_names = [f"{name}.dll"]
     elif sys.platform.startswith("darwin"):
         lib_names = [f"lib{name}.dylib"]
     else:

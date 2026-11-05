@@ -1,11 +1,16 @@
+import tvm_ffi
+
 """PTO MAD direction propagation and valid Python control-flow emission."""
+
+from tvm_tirx import ir
+from testing.ascend._ir import allocate, tensor
 
 import ast
 
 import pytest
 
 import tilelang
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import language as T
 
 
@@ -14,48 +19,39 @@ tirx = tvm.tirx
 
 def _codegen(body_builder):
     """Build minimal device IR directly, retaining loops at the codegen boundary."""
-    flag = tirx.Var("flag", "int32")
-    a = tirx.decl_buffer((256,), "bfloat16", name="a", scope="shared.l0a")
-    b = tirx.decl_buffer((256,), "bfloat16", name="b", scope="shared.l0b")
-    c = tirx.decl_buffer((256,), "float32", name="c", scope="shared.l0c")
-    value = tirx.decl_buffer((1,), "int32", name="value", scope="local.var")
+    flag = ir.Var("flag", "int32")
+    a = tensor((256,), "bfloat16", name="a", scope="shared.l0a")
+    b = tensor((256,), "bfloat16", name="b", scope="shared.l0b")
+    c = tensor((256,), "float32", name="c", scope="shared.l0c")
+    value = tensor((1,), "int32", name="value", scope="local.var")
 
     def mad():
-        return tirx.Evaluate(
-            tirx.call_intrin(
-                "handle",
+        return ir.Evaluate(
+            ir.Call(
                 tvm.ir.Op.get("tl.ascend_mad"),
-                tirx.address_of(c[0]),
-                tirx.address_of(a[0]),
-                tirx.address_of(b[0]),
-                16,
-                16,
-                16,
-                0,
-                1,
-                0,
-                True,
+                [tirx.address_of(c[0]), tirx.address_of(a[0]), tirx.address_of(b[0]), 16, 16, 16, 0, 1, 0, True],
+                ty="handle",
             )
         )
 
-    body = tirx.SeqStmt([tirx.AllocBuffer(buf) for buf in (a, b, c, value)] + body_builder(flag, value, mad))
+    body = ir.SeqStmt([allocate(buf) for buf in (a, b, c, value)] + body_builder(flag, value, mad))
     func = (
-        tirx.PrimFunc([flag], body)
+        tirx.Function([flag], body)
         .with_attr("global_symbol", "main")
         .with_attr("target", tvm.target.Target({"kind": "ascend", "keys": ["pto"]}))
     )
-    build = tvm.get_global_func("target.build.tilelang_pto")
+    build = tvm_ffi.get_global_func("target.build.tilelang_pto")
     source = build(tvm.IRModule({"main": func}), tvm.target.Target({"kind": "ascend", "keys": ["pto"]})).inspect_source()
     ast.parse(source)
     return source
 
 
 def _if(condition, then_case, else_case=None):
-    return tirx.IfThenElse(condition, then_case, else_case)
+    return ir.If(condition, then_case, else_case)
 
 
 def _set(direction):
-    return tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.ascend_set_mmad_direction"), direction))
+    return ir.Evaluate(ir.Call(tvm.ir.Op.get("tl.ascend_set_mmad_direction"), [direction], ty="handle"))
 
 
 def _mad_directions(source):
@@ -64,10 +60,10 @@ def _mad_directions(source):
 
 def test_nested_guards_preserve_direction():
     def body(flag, value, mad):
-        condition = tirx.And(flag > 0, flag < 10)
+        condition = ir.prim.And(flag > 0, flag < 10)
         return [
             _if(condition, _set("n")),
-            _if(flag > 0, _if(flag < 10, tirx.SeqStmt([mad(), _set("m")]))),
+            _if(flag > 0, _if(flag < 10, ir.SeqStmt([mad(), _set("m")]))),
             mad(),
         ]
 
@@ -85,9 +81,9 @@ def test_ambiguous_direction_is_rejected():
 def test_mutable_guards_are_not_correlated():
     def body(flag, value, mad):
         return [
-            tirx.BufferStore(value, flag, [0]),
+            ir.TensorStore(value, [0], flag),
             _if(value[0] > 0, _set("n")),
-            tirx.BufferStore(value, 1, [0]),
+            ir.TensorStore(value, [0], 1),
             _if(value[0] > 0, mad()),
         ]
 
@@ -98,7 +94,9 @@ def test_mutable_guards_are_not_correlated():
 @pytest.mark.parametrize("extent", [0, 1])
 def test_loop_reaches_codegen(extent):
     def body(flag, value, mad):
-        loop = tirx.For(tirx.Var("i", "int32"), 0, extent, tirx.ForKind.SERIAL, tirx.SeqStmt([mad(), _set("n")]))
+        loop = ir.For(
+            ir.Var("i", "int32"), ir.const(0), ir.const(0) + extent, ir.const(1), ir.ForKind.DEFAULT, ir.SeqStmt([mad(), _set("n")])
+        )
         return [loop, mad()]
 
     source = _codegen(body)
@@ -113,7 +111,16 @@ def test_loop_reaches_codegen(extent):
 
 def test_loop_backedge_conflict_is_rejected():
     def body(flag, value, mad):
-        return [tirx.For(tirx.Var("i", "int32"), 0, 2, tirx.ForKind.SERIAL, tirx.SeqStmt([mad(), _set("n")]))]
+        return [
+            ir.For(
+                ir.Var("i", "int32"),
+                ir.const(0),
+                ir.const(0) + ir.const(2),
+                ir.const(1),
+                ir.ForKind.DEFAULT,
+                ir.SeqStmt([mad(), _set("n")]),
+            )
+        ]
 
     with pytest.raises(Exception, match="MAD direction depends on control flow"):
         _codegen(body)
@@ -121,8 +128,8 @@ def test_loop_backedge_conflict_is_rejected():
 
 def test_break_does_not_restore_unreachable_direction():
     def body(flag, value, mad):
-        loop_body = tirx.SeqStmt([_set("n"), tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.loop_break"))), _set("m")])
-        return [tirx.While(tirx.const(True, "bool"), loop_body), mad()]
+        loop_body = ir.SeqStmt([_set("n"), ir.Evaluate(ir.Call(tvm.ir.Op.get("tl.loop_break"), [], ty="handle")), _set("m")])
+        return [ir.While(ir.const(True, "bool"), loop_body), mad()]
 
     assert _mad_directions(_codegen(body)) == [True]
 
@@ -135,9 +142,17 @@ def test_setter_only_control_flow_is_valid_python(kind):
         elif kind == "else":
             stmt = _if(flag > 0, mad(), _set("m"))
         elif kind == "while":
-            stmt = tirx.While(flag > 0, _set("m"))
+            stmt = ir.While(flag > 0, _set("m"))
         else:
-            stmt = tirx.For(tirx.Var("i", "int32"), 0, 1, tirx.ForKind.UNROLLED, _set("m"), annotations={"pragma_unroll_explicit": True})
+            stmt = ir.For(
+                ir.Var("i", "int32"),
+                ir.const(0),
+                ir.const(0) + ir.const(1),
+                ir.const(1),
+                ir.ForKind.UNROLLED,
+                _set("m"),
+                annotations={"pragma_unroll_explicit": True},
+            )
         return [stmt, mad()]
 
     _codegen(body)  # The shared verifier parses the generated Python source.
@@ -242,25 +257,19 @@ def test_scheduled_l0_branches_preserve_direction():
 
 
 def test_nz_post_copy_uses_independent_storage_pitches():
-    src = tirx.decl_buffer((4096,), "bfloat16", name="src", scope="shared.dyn")
-    dst = tirx.decl_buffer((4096,), "bfloat16", name="dst", scope="shared.l1")
-    call = tirx.Evaluate(
-        tirx.call_intrin(
-            "void",
+    src = tensor((4096,), "bfloat16", name="src", scope="shared.dyn")
+    dst = tensor((4096,), "bfloat16", name="dst", scope="shared.l1")
+    call = ir.Evaluate(
+        ir.Call(
             tvm.ir.Op.get("tl.ascend_nd2nz_post_copy"),
-            tirx.address_of(dst[512]),
-            tirx.address_of(src[128]),
-            8,
-            64,
-            64,
-            64,
-            "bfloat16_t",
+            [tirx.address_of(dst[512]), tirx.address_of(src[128]), 8, 64, 64, 64, "bfloat16_t"],
+            ty="void",
         )
     )
-    body = tirx.SeqStmt([tirx.AllocBuffer(src), tirx.AllocBuffer(dst), call])
+    body = ir.SeqStmt([allocate(src), allocate(dst), call])
     target = tvm.target.Target({"kind": "ascend", "keys": ["pto"]})
-    func = tirx.PrimFunc([], body).with_attr({"global_symbol": "main", "target": target})
-    source = tvm.get_global_func("target.build.tilelang_pto")(tvm.IRModule({"main": func}), target).inspect_source()
+    func = tirx.Function([], body).with_attr({"global_symbol": "main", "target": target})
+    source = tvm_ffi.get_global_func("target.build.tilelang_pto")(tvm.IRModule({"main": func}), target).inspect_source()
     ast.parse(source)
     assert ", 8, nburst=(4, 56, 56))" in source
 
@@ -269,7 +278,7 @@ def test_nz_post_copy_uses_independent_storage_pitches():
 @pytest.mark.parametrize("with_mad", [False, True])
 def test_repeated_mutable_guards_do_not_expand_direction_state(num_guards, with_mad):
     def body(flag, value, mad):
-        stores = [_if(value[0] > 0, tirx.BufferStore(value, i, [0])) for i in range(num_guards)]
+        stores = [_if(value[0] > 0, ir.TensorStore(value, [0], i)) for i in range(num_guards)]
         # A pure outer guard makes the direction predicate nonconstant. The
         # mutable inner guards preserve it on both paths, requiring idempotent
         # merges even when MAD analysis cannot be skipped.
@@ -277,7 +286,7 @@ def test_repeated_mutable_guards_do_not_expand_direction_state(num_guards, with_
         if with_mad:
             inner.append(mad())
         inner.append(_set("m"))
-        result = [_if(flag > 0, tirx.SeqStmt(inner))]
+        result = [_if(flag > 0, ir.SeqStmt(inner))]
         if with_mad:
             result.append(mad())
         return result

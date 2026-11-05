@@ -1,7 +1,7 @@
 """Ascend copy policy spelling is normalized at the public API boundary."""
 
 from tilelang.ascend import language as T
-from testing.ascend._ir import calls
+from testing.ascend._ir import call_annotations, calls
 
 
 def test_ascend_copy_l2_cache_ctrl_string_annotation_matches_keyword():
@@ -23,4 +23,4 @@ def test_ascend_copy_l2_cache_ctrl_string_annotation_matches_keyword():
 
     for func in (annotation_path, keyword_path):
         (copy,) = calls(func, "tl.tileop.ascend_copy")
-        assert int(copy.annotations["l2_cache_ctrl"]) == 0
+        assert int(call_annotations(copy)["l2_cache_ctrl"]) == 0

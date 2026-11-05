@@ -1,7 +1,9 @@
 import tilelang.language as T
+import re
 from tilelang.engine.lower import lower
 from tilelang.jit.adapter.utils import match_declare_kernel
 import tilelang.testing
+from tvm_tirx.tirx import Function
 
 
 def _simple_add_kernel():
@@ -28,28 +30,41 @@ def test_codegen_emits_const_for_readonly_params():
     assert 'extern "C" __global__' in src
 
     # Extract kernel signature and check qualifiers
-    lparen = match_declare_kernel(src)
-    rparen = src.find(")", lparen)
-    assert rparen != -1
-    signature = src[lparen:rparen]
+    declaration = re.match(
+        r"__global__\s+void\s+(?:__launch_bounds__\([^)]*\)\s+)?(?P<name>\w+)\s*\((?P<parameters>[^)]*)\)",
+        src[match_declare_kernel(src) :],
+    )
+    assert declaration is not None, "Expected the CUDA device entry declaration"
+    signature = declaration.group("parameters")
 
-    # x is read-only: should be `const` and `__restrict__`
-    assert "const float* __restrict__" in signature
-    # y is written: must not be const, but still `__restrict__` due to noalias
-    # We ensure there is a non-const float* parameter with __restrict__ as well
-    assert "const float* __restrict__ x" in src or "const float *__restrict__ x" in src
-    assert " float* __restrict__ y" in src or " float *__restrict__ y" in src
+    # Check the two device arguments in their ABI order. Native lowering can
+    # name the data-pointer parameters x_ptr/y_ptr; their C++ declaration must
+    # agree with the corresponding native Function parameters below.
+    parameters = [parameter.strip() for parameter in signature.split(",")]
+    assert len(parameters) == 2
+    readonly = re.fullmatch(r"const float\s*\*\s*__restrict__\s+(\w+)", parameters[0])
+    writable = re.fullmatch(r"float\s*\*\s*__restrict__\s+(\w+)", parameters[1])
+    assert readonly is not None, "Expected a const, restrict-qualified input pointer"
+    assert writable is not None, "Expected a writable, restrict-qualified output pointer"
+    parameter_names = [readonly.group(1), writable.group(1)]
 
     # Also validate the function attribute carries read-only param indices
     # Expect only the first handle parameter (x) to be marked read-only
     device_mod = artifact.device_mod
-    prim_funcs = [f for f in device_mod.functions.values() if hasattr(f, "attrs")]
-    assert prim_funcs, "No PrimFunc found in device module"
-    pf = prim_funcs[0]
+    device_funcs = [f for f in device_mod.functions.values() if isinstance(f, Function)]
+    entries = [
+        f
+        for f in device_funcs
+        if str(f.attrs.get("global_symbol", "")) == declaration.group("name")
+        and len(f.params) == 2
+        and [parameter.name for parameter in f.params] == parameter_names
+    ]
+    assert len(entries) == 1, "Expected one native device entry with the x/y parameter contract"
+    (pf,) = entries
     ro = pf.attrs.get("tl.readonly_param_indices")
     assert ro is not None, "Expected tl.readonly_param_indices to be present"
     ro_list = [int(i) for i in ro]
-    assert 0 in ro_list and 1 not in ro_list
+    assert ro_list == [0]
 
 
 if __name__ == "__main__":

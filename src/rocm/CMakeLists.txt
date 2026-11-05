@@ -4,6 +4,7 @@
 # common code and source generation. Compile them regardless of USE_ROCM.
 file(GLOB TILE_LANG_ROCM_ALWAYS_SRCS
   src/rocm/codegen/intrin_rule_hip.cc
+  src/rocm/codegen/target_kind.cc
   src/rocm/op/builtin.cc
   src/rocm/target_utils.cc
 )
@@ -16,7 +17,7 @@ endif()
 message(STATUS "ROCM Backend is enabled")
 
 set(CMAKE_HIP_STANDARD 17)
-include(${TVM_SOURCE}/cmake/utils/FindROCM.cmake)
+include(${TVM_TIRX_SOURCE}/cmake/utils/FindROCM.cmake)
 find_rocm(${USE_ROCM})
 add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 
@@ -37,7 +38,7 @@ add_compile_definitions(__HIP_PLATFORM_AMD__ __HIP_PLATFORM_HCC__=1)
 # both are exported by hip_stub and lazy-loaded from libhsa-runtime64 at run
 # time, so no HSA library is linked.
 if(NOT ROCM_FOUND AND TILELANG_USE_HIP_STUBS)
-  set(_TL_VENDORED_HIP_INC "${CMAKE_SOURCE_DIR}/3rdparty/hip-headers/include")
+  set(_TL_VENDORED_HIP_INC "${TILELANG_SOURCE_ROOT}/3rdparty/hip-headers/include")
   set(_TL_HIP_INC "")
   if(TILELANG_HIP_INCLUDE_DIR)
     set(_TL_HIP_INC "${TILELANG_HIP_INCLUDE_DIR}")

@@ -3,25 +3,27 @@
 from __future__ import annotations
 
 import tilelang.language as T
+import tvm_ffi
 from tilelang._typing import BufferLikeType
 from tilelang.language.gemm_op import _gemm_impl
 from tilelang.language.utils import _normalize_annotations, buffer_region_to_tile_region
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.utils.language import prim_expr_equal, retrieve_shape, to_buffer_region
-from tvm import arith, tirx
+from tilelang._analyzer import create_analyzer
+from tilelang.language import _native as tirx
 
 __all__ = ["gemm", "gemm_blockscaled"]
 
 
 def _legalize_argument(arg):
-    """Convert a let-bound variable to its corresponding buffer."""
-    if isinstance(arg, tirx.Var) and T.has_let_value(arg):
-        return T.get_let_value(arg).buffer
+    """Recover a macro operand while retaining its selected tensor region."""
+    while isinstance(arg, tirx.Var) and not isinstance(arg, tirx.Buffer) and T.has_let_value(arg):
+        arg = T.get_let_value(arg)
     return arg
 
 
 def _prove_equal(expr1, expr2) -> bool:
-    return prim_expr_equal(expr1, expr2) or arith.Analyzer().can_prove_equal(expr1, expr2)
+    return prim_expr_equal(expr1, expr2) or create_analyzer().can_prove_equal(expr1, expr2)
 
 
 def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy, clear_accum, annotations):
@@ -55,20 +57,20 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
     assert _prove_equal(K, K_B), f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
     assert _prove_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
 
-    node_M, node_N = C_region.buffer.shape[-2:]
-    node_K = A_region.buffer.shape[-2] if transpose_A else A_region.buffer.shape[-1]
+    node_M, node_N = C_region.source.ty.shape[-2:]
+    node_K = A_region.source.ty.shape[-2] if transpose_A else A_region.source.ty.shape[-1]
     for name, dim in (("M", node_M), ("N", node_N), ("K", node_K)):
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
-    C_coords = [r.min for r in C_region.region[-2:]]
+    C_coords = [r.begin for r in C_region.region[-2:]]
     A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
     B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
     C_arg = buffer_region_to_tile_region(C_region, "w" if isinstance(clear_accum, bool) and clear_accum else "rw", list(C_shape))
 
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.gemm"),
+        tirx.Op.get("tl.tileop.gemm"),
         A_arg,
         B_arg,
         C_arg,
@@ -91,7 +93,11 @@ def _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, a
     A_region = to_buffer_region(_legalize_argument(A))
     B_region = to_buffer_region(_legalize_argument(B))
     C_region = to_buffer_region(_legalize_argument(C))
-    if A_region.buffer.scope() == "shared.l0a" and B_region.buffer.scope() == "shared.l0b" and C_region.buffer.scope() == "shared.l0c":
+    if (
+        str(A_region.source.ty.scope) == "shared.l0a"
+        and str(B_region.source.ty.scope) == "shared.l0b"
+        and str(C_region.source.ty.scope) == "shared.l0c"
+    ):
         return _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy, clear_accum, annotations)
     return _gemm_impl(
         "tl.tileop.gemm",
@@ -151,17 +157,19 @@ def gemm_blockscaled(
     sfb_region = to_buffer_region(SFB, access_type="r")
     sfa_arg = buffer_region_to_tile_region(sfa_region, "r", list(retrieve_shape(sfa_region)))
     sfb_arg = buffer_region_to_tile_region(sfb_region, "r", list(retrieve_shape(sfb_region)))
-    annotations = dict(call.annotations)
+    operand_count = int(call.attrs["operand_count"])
+    annotations = dict(tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[operand_count], call.attrs["annotation_schema"]))
     annotations["sf_a_granularity_k"] = 32
     annotations["sf_b_granularity_k"] = 32
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.gemm_blockscaled"),
-        *call.args,
+        tirx.Op.get("tl.tileop.gemm_blockscaled"),
+        *call.args[:operand_count],
         sfa_arg,
         sfb_arg,
         tirx.const(0, dtype="int32"),
         annotations=annotations,
+        span=call.loc,
     )
 
 

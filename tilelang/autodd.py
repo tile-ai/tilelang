@@ -16,6 +16,7 @@ import io
 import multiprocessing
 import queue
 import subprocess
+import sys
 import tempfile
 import time
 import os
@@ -881,7 +882,7 @@ class SubProcRunner:
             except subprocess.TimeoutExpired:
                 return "", f"TimeoutError: Exceeded {timeout}s", False
 
-        result = await asyncio.get_running_loop().run_in_executor(None, run_subprocess, ["python3", f.name])
+        result = await asyncio.get_running_loop().run_in_executor(None, run_subprocess, [sys.executable, f.name])
         with contextlib.suppress(OSError):
             os.remove(f.name)
         return result

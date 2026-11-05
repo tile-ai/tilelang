@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from tvm import tirx
-from tvm.ir import PrimExpr
+from tilelang.language import _native as tirx
+from tilelang.language._native import PrimExpr
 
 
 class GemmBlockScaledMixin:

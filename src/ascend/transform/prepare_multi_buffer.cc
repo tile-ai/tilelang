@@ -21,10 +21,13 @@
  *  \brief Prepare logical storage epochs and physical multi-buffer protocols.
  */
 
-#include <tvm/arith/analyzer.h>
+#include "ir/analyzer.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -34,6 +37,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,33 +51,39 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/transform/attr.h"
 #include "ascend/transform/buffer_version.h"
-#include "tir/transforms/ir_utils.h"
+#include "op/native_utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ascend;
 
 namespace {
 
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 
+String NativeStorageScope(const Var &storage) {
+  if (auto tensor = storage.as<TensorVar>())
+    return tensor->scope().name();
+  return storage->ty.as_or_throw<PtrType>()->scope.name();
+}
+
 bool GuardExprEqual(const PrimExpr &a, const PrimExpr &b) {
   return a.same_as(b) || ffi::StructuralEqual()(a, b);
 }
 
 PrimExpr DisjoinGuards(const PrimExpr &a, const PrimExpr &b,
-                       arith::Analyzer *analyzer) {
-  if (is_zero(a) || is_one(b))
+                       const sym::Analyzer &analyzer) {
+  if (IsZero(a) || IsOne(b))
     return b;
-  if (is_zero(b) || is_one(a) || GuardExprEqual(a, b))
+  if (IsZero(b) || IsOne(a) || GuardExprEqual(a, b))
     return a;
 
   auto implies = [&](const PrimExpr &premise, const PrimExpr &conclusion) {
-    auto exit_constraint = analyzer->EnterConstraint(premise);
+    ScopedAnalyzerConstraints premise_context(analyzer, premise);
     bool result = analyzer->CanProve(conclusion);
-    exit_constraint();
     return result;
   };
   if (analyzer->CanProveEqual(a, b) || implies(b, a))
@@ -92,7 +102,7 @@ using GuardCube = std::vector<GuardLiteral>;
 
 void FlattenGuardDisjunction(const PrimExpr &expr,
                              std::vector<PrimExpr> *terms) {
-  if (const auto *op = expr.as<OrNode>()) {
+  if (const auto *op = expr.as<OrObj>()) {
     FlattenGuardDisjunction(op->a, terms);
     FlattenGuardDisjunction(op->b, terms);
     return;
@@ -102,7 +112,7 @@ void FlattenGuardDisjunction(const PrimExpr &expr,
 
 void FlattenGuardConjunction(const PrimExpr &expr,
                              std::vector<PrimExpr> *literals) {
-  if (const auto *op = expr.as<AndNode>()) {
+  if (const auto *op = expr.as<AndObj>()) {
     FlattenGuardConjunction(op->a, literals);
     FlattenGuardConjunction(op->b, literals);
     return;
@@ -113,14 +123,14 @@ void FlattenGuardConjunction(const PrimExpr &expr,
 bool AddGuardLiteral(const PrimExpr &expr, GuardCube *cube) {
   PrimExpr base = expr;
   bool negated = false;
-  while (const auto *op = base.as<NotNode>()) {
+  while (const auto *op = base.as<NotObj>()) {
     negated = !negated;
     base = op->a;
   }
 
-  if (is_one(base))
+  if (IsOne(base))
     return !negated;
-  if (is_zero(base))
+  if (IsZero(base))
     return negated;
 
   for (const GuardLiteral &literal : *cube) {
@@ -211,10 +221,10 @@ std::optional<GuardCube> TryMergeGuardCubes(const GuardCube &a,
 }
 
 PrimExpr RebuildGuardCube(const GuardCube &cube) {
-  PrimExpr result = Bool(true);
+  PrimExpr result = IntImm::Bool(true);
   for (const GuardLiteral &literal : cube) {
     PrimExpr expr = literal.negated ? !literal.expr : literal.expr;
-    result = is_one(result) ? expr : result && expr;
+    result = IsOne(result) ? expr : result && expr;
   }
   return result;
 }
@@ -234,7 +244,7 @@ PrimExpr SimplifyGuardUnion(const PrimExpr &guard) {
       cubes.push_back(std::move(cube.value()));
   }
   if (cubes.empty())
-    return Bool(false);
+    return IntImm::Bool(false);
 
   RemoveAbsorbedGuardCubes(&cubes);
   while (true) {
@@ -256,78 +266,238 @@ PrimExpr SimplifyGuardUnion(const PrimExpr &guard) {
       break;
   }
 
-  PrimExpr result = Bool(false);
+  PrimExpr result = IntImm::Bool(false);
   for (const GuardCube &cube : cubes) {
     PrimExpr term = RebuildGuardCube(cube);
-    result = is_zero(result) ? term : result || term;
+    result = IsZero(result) ? term : result || term;
   }
   return result;
 }
 
 PrimExpr CombineGuardTerms(const std::vector<PrimExpr> &terms,
-                           arith::Analyzer *analyzer) {
-  PrimExpr result = Bool(false);
+                           const sym::Analyzer &analyzer) {
+  PrimExpr result = IntImm::Bool(false);
   for (const PrimExpr &term : terms) {
     result = DisjoinGuards(result, term, analyzer);
-    if (is_one(result))
+    if (IsOne(result))
       break;
   }
   return SimplifyGuardUnion(result);
 }
 
 struct StorageEpochAnalysis {
-  PrimExpr active_guard{Bool(false)};
+  PrimExpr active_guard{IntImm::Bool(false)};
+  // An unavailable guard uses a conservative lexical clock. That fallback is
+  // not proof that another storage has the same actual activity predicate.
+  bool precise_guard{true};
   // Latest loop-body position that defines a variable used by active_guard.
   // Earlier representatives dominate every later proof-equivalent snapshot.
   int guard_ready_position{-1};
   bool has_write{false};
 };
 
+struct EpochBody {
+  IRStructure *parent;
+  IRStructure::ChildList *children;
+};
+
+EpochBody GetEpochBody(ControlNode *loop) {
+  EpochBody result{loop, &loop->children};
+  // Match AppendLoopAnnotation's placement inside a sole metadata-wrapper
+  // chain. Keep the native region scope: its local snapshot bindings must
+  // dominate both the epoch metadata and the counter advances that use them.
+  while (result.children->size() == 1) {
+    IRStructure *node = result.children->front().get();
+    if (!node->IsScope())
+      break;
+    auto *scope = static_cast<ScopeNode *>(node);
+    auto attribute = ReadTaskAttribute(scope->shell);
+    if (!attribute || attribute->key != "tl.loop.annotations")
+      break;
+    result = {scope, &scope->children};
+  }
+  return result;
+}
+
+std::set<int> OwnerRelativeStages(const IRStructure *node) {
+  // Nested loops are single operations in the outer owner's schedule. Lexical
+  // scopes, including loop metadata, retain the stages of their actual tasks.
+  if (!node->IsScope())
+    return {node->GetStage()};
+  std::set<int> result;
+  for (const auto *list : node->ChildLists())
+    for (const auto &child : *list) {
+      auto stages = OwnerRelativeStages(child.get());
+      result.insert(stages.begin(), stages.end());
+    }
+  if (result.empty() && node->HeaderTask())
+    result.insert(node->GetStage());
+  return result;
+}
+
+std::set<int> StorageAccessStages(const IRStructure *node, const Var &storage,
+                                  const L0StorageGroups &groups) {
+  auto touches = [&](const IRStructure *access) {
+    for (const Var &member : groups.Members(storage))
+      if (access->TouchesStorage(member))
+        return true;
+    return false;
+  };
+  if (!node->IsScope())
+    return touches(node) ? std::set<int>{node->GetStage()} : std::set<int>{};
+  std::set<int> result;
+  for (const auto *list : node->ChildLists())
+    for (const auto &child : *list) {
+      auto stages = StorageAccessStages(child.get(), storage, groups);
+      result.insert(stages.begin(), stages.end());
+    }
+  if (node->HeaderTask() && touches(node->HeaderTask())) {
+    // A memory-reading header follows a uniform descendant stage. If its
+    // descendants span stages, do not invent a single counter epoch for it.
+    auto stages = OwnerRelativeStages(node);
+    result.insert(stages.begin(), stages.end());
+  }
+  return result;
+}
+
+// Replay only total integer predicates. A pure operation can still trap when
+// moved outside its defining branch, so calls, memory reads, arbitrary division
+// and arithmetic that can overflow are deliberately not expanded here.
+bool CanReplayEpochPredicate(const PrimExpr &value) {
+  bool safe = true;
+  VisitNativePostOrder(value, [&](const ffi::ObjectRef &node) {
+    auto expression = node.as<PrimExpr>();
+    if (!expression)
+      return;
+    const PrimType &type = expression->ty();
+    if (!type.IsScalar() ||
+        !(type.MatchesCode(kDLInt) || type.MatchesCode(kDLUInt) ||
+          type.MatchesCode(kDLBool))) {
+      safe = false;
+      return;
+    }
+    if (node.as<IntImmObj>() || node.as<VarObj>() || node.as<EQObj>() ||
+        node.as<NEObj>() || node.as<LTObj>() || node.as<LEObj>() ||
+        node.as<GTObj>() || node.as<GEObj>() || node.as<AndObj>() ||
+        node.as<OrObj>() || node.as<NotObj>())
+      return;
+    PrimExpr divisor{ffi::UnsafeInit{}};
+    if (const auto *op = node.as<FloorDivObj>())
+      divisor = op->b;
+    else if (const auto *op = node.as<FloorModObj>())
+      divisor = op->b;
+    if (divisor.defined()) {
+      auto constant = TryConstInt(divisor);
+      safe &= constant && *constant > 0;
+    } else {
+      safe = false;
+    }
+  });
+  return safe;
+}
+
+PrimExpr ReplayEpochPredicate(const PrimExpr &guard, const TaskNode *task) {
+  if (!task)
+    return guard;
+  ffi::Map<Var, PrimExpr> bindings;
+  for (const Constr &entry : task->outer_ctx.constrs_) {
+    if (entry.kind != Constr::kBindValue || entry.var.same_as(entry.value) ||
+        !CanReplayEpochPredicate(entry.value))
+      continue;
+    bindings.Set(entry.var, SubstituteConstraintExpr(entry.value, bindings));
+  }
+  // Use bindings only, never the branch predicates themselves. Simplifying
+  // under a branch's full context could replace its activation with true.
+  return SubstituteConstraintExpr(guard, bindings);
+}
+
 StorageEpochAnalysis
 AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
                     const L0StorageGroups &groups = L0StorageGroups()) {
   std::vector<PrimExpr> guard_terms;
+  std::vector<const TaskNode *> guard_tasks;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> guard_definitions;
-  arith::Analyzer analyzer;
-  loop->GetLoopBodyContext().Populate(analyzer);
+  auto analyzer = CreateTileLangAnalyzer();
+  auto loop_context = loop->GetLoopBodyContext().Populate(analyzer);
 
   int first_access = -1;
   bool has_write = false;
   std::optional<int> access_stage;
   bool has_multiple_access_stages = false;
-  for (const auto &child : loop->children) {
-    int child_index = child->GetIndex();
-    for (const Var &var : child->GetWriteVars())
-      guard_definitions[var] = child_index;
+  bool precise_guard = true;
+  auto record = [&](const IRStructure *node, int position, int stage,
+                    const PrimExpr &guard, bool known_guard) {
     bool touches = false;
     for (const Var &member : groups.Members(storage))
-      touches |= child->TouchesStorage(member);
+      touches |= node->TouchesStorage(member);
     if (!touches)
-      continue;
-    if (!access_stage.has_value()) {
-      access_stage = child->GetStage();
-    } else if (access_stage.value() != child->GetStage()) {
-      has_multiple_access_stages = true;
-    }
+      return;
+    precise_guard &= known_guard;
+    if (!access_stage)
+      access_stage = stage;
+    else
+      has_multiple_access_stages |= *access_stage != stage;
     if (first_access < 0)
-      first_access = child_index;
+      first_access = position;
     for (const Var &member : groups.Members(storage))
-      has_write |= child->WritesStorage(member);
-    guard_terms.push_back(child->GetConditionGuard());
+      has_write |= node->WritesStorage(member);
+    guard_terms.push_back(guard);
+    const TaskNode *task = node->IsTask() ? static_cast<const TaskNode *>(node)
+                                          : node->HeaderTask();
+    guard_tasks.push_back(task);
+  };
+  std::function<void(const IRStructure *, int, PrimExpr, bool)> collect;
+  collect = [&](const IRStructure *node, int position, PrimExpr guard,
+                bool known_guard) {
+    guard = guard && node->GetConditionGuard();
+    if (!node->IsScope()) {
+      // A whole inner loop may execute zero or many times. Its internal
+      // induction variables do not dominate the outer owner's protocol.
+      record(node, position, node->GetStage(), guard, known_guard);
+      return;
+    }
+    const auto *scope = static_cast<const ScopeNode *>(node);
+    if (scope->task)
+      for (int stage : OwnerRelativeStages(scope))
+        record(scope->task.get(), position, stage, guard, known_guard);
+    PrimExpr condition = IntImm::Bool(true);
+    bool branch = false;
+    if (const auto *conditional = scope->shell.as<IfObj>()) {
+      // A captured mutable header is not a definition available after the
+      // scope. Advancing every iteration is conservative in that case.
+      branch = SideEffect(conditional->condition) <= CallEffectKind::kPure;
+      if (branch)
+        condition = conditional->condition;
+      else
+        known_guard = false;
+    }
+    for (const auto &child : scope->children)
+      collect(child.get(), position, guard && condition, known_guard);
+    for (const auto &child : scope->else_children)
+      collect(child.get(), position, branch ? guard && !condition : guard,
+              known_guard);
+  };
+  for (const auto &child : *GetEpochBody(loop).children) {
+    int position = child->GetIndex();
+    for (const Var &var : child->GetWriteVars())
+      guard_definitions[var] = position;
+    collect(child.get(), position, IntImm::Bool(true), true);
   }
-  ICHECK_GE(first_access, 0) << "Storage epoch analysis for "
-                             << storage->name_hint << " contains no access";
+  ICHECK_GE(first_access, 0) << "Storage epoch analysis for " << storage->name
+                             << " contains no access";
 
   StorageEpochAnalysis result;
   result.has_write = has_write;
+  result.precise_guard = precise_guard;
   if (has_multiple_access_stages) {
     // Snapshot guards from different stages describe different logical
     // iterations after pipeline lowering and cannot form one loop-local active
     // epoch. Keep the lexical domain unconditional instead.
-    result.active_guard = Bool(true);
+    result.active_guard = IntImm::Bool(true);
+    result.precise_guard = false;
     return result;
   }
-  result.active_guard = CombineGuardTerms(guard_terms, &analyzer);
+  result.active_guard = CombineGuardTerms(guard_terms, analyzer);
   for (const Var &var : UndefinedVars(result.active_guard)) {
     auto definition = guard_definitions.find(var);
     if (definition != guard_definitions.end()) {
@@ -336,9 +506,30 @@ AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
     }
   }
   if (result.guard_ready_position >= first_access) {
-    // A guard defined after the first storage access cannot safely guard a
-    // loop-boundary protocol.
-    result.active_guard = Bool(true);
+    // A branch-local SSA predicate can be replayed at the owner only when its
+    // computation is total and all remaining operands already dominate the
+    // first access. Keep the original captures and side-effecting expressions
+    // in place; this changes only the generated epoch predicate.
+    std::vector<PrimExpr> replayed_guard_terms;
+    replayed_guard_terms.reserve(guard_terms.size());
+    for (size_t i = 0; i < guard_terms.size(); ++i)
+      replayed_guard_terms.push_back(
+          ReplayEpochPredicate(guard_terms[i], guard_tasks[i]));
+    PrimExpr replayed = CombineGuardTerms(replayed_guard_terms, analyzer);
+    int ready = -1;
+    for (const Var &var : UndefinedVars(replayed)) {
+      auto definition = guard_definitions.find(var);
+      if (definition != guard_definitions.end())
+        ready = std::max(ready, definition->second);
+    }
+    if (ready < first_access) {
+      result.active_guard = replayed;
+      result.guard_ready_position = ready;
+      return result;
+    }
+    // An unavailable snapshot still cannot guard a loop-boundary protocol.
+    result.active_guard = IntImm::Bool(true);
+    result.precise_guard = false;
     result.guard_ready_position = -1;
   }
   return result;
@@ -347,9 +538,9 @@ AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
 std::vector<Var> CollectLoopStorages(ControlNode *loop) {
   std::vector<Var> result;
   VarSet seen;
-  auto append = [&](const std::vector<BufferRegion> &regions) {
-    for (const BufferRegion &region : regions) {
-      const Var &storage = region->buffer->data;
+  auto append = [&](const std::vector<TensorRegion> &regions) {
+    for (const TensorRegion &region : regions) {
+      Var storage = loop->StorageIdentity(RegionTensor(region));
       if (seen.insert(storage).second)
         result.push_back(storage);
     }
@@ -371,9 +562,9 @@ CoreMask GetStorageAccessCoreMask(const Var &storage, IRStructure *root,
             result |= static_cast<const TaskNode *>(node)->GetCoreMask();
             return;
           }
-          const auto *control = static_cast<const ControlNode *>(node);
-          for (const auto &child : control->children)
-            visit(child.get());
+          for (const auto *list : node->ChildLists())
+            for (const auto &child : *list)
+              visit(child.get());
         };
     visit(subtree);
     return result;
@@ -390,11 +581,12 @@ CoreMask GetStorageAccessCoreMask(const Var &storage, IRStructure *root,
       }
       return;
     }
-    auto *control = static_cast<ControlNode *>(node);
-    if (control->task->TouchesStorage(storage))
-      result |= subtree_core_mask(control);
-    for (const auto &child : control->children)
-      visit(child.get());
+    if (const auto *header = node->HeaderTask();
+        header && header->TouchesStorage(storage))
+      result |= subtree_core_mask(node);
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        visit(child.get());
   };
   visit(root);
   return result;
@@ -403,13 +595,14 @@ CoreMask GetStorageAccessCoreMask(const Var &storage, IRStructure *root,
 bool ExprUsesAnyVar(const PrimExpr &expr, const VarSet &vars) {
   if (!expr.defined() || vars.empty())
     return false;
-  return UsesVar(expr, [&](const VarNode *var) {
-    return vars.count(ffi::GetRef<Var>(var));
-  });
+  for (const Var &var : UndefinedVars(expr))
+    if (vars.count(var))
+      return true;
+  return false;
 }
 
 struct StorageState {
-  Var storage;
+  Var storage{ffi::UnsafeInit{}};
   int num_versions{1};
   BufferVersionMode requested{BufferVersionMode::kAuto};
   std::vector<ControlNode *> owners;
@@ -418,11 +611,13 @@ struct StorageState {
 struct PreparedOwner {
   MultiBufferOwnerInfo info;
   bool needs_counter{false};
+  bool can_share_counter{true};
 };
 
 struct PreparedStorage {
   MultiBufferInfo info;
   bool uses_counter{false};
+  bool can_share_counter{true};
   std::vector<int> storage_stages;
   CoreMask protocol_core_mask{kCoreUnassigned};
 };
@@ -432,7 +627,7 @@ public:
   MultiBufferPlanBuilder(const std::vector<std::shared_ptr<IRStructure>> &root,
                          const BufferVersionMap &selected_versions,
                          const BufferVersionModeTable &requested_modes,
-                         const ffi::Optional<Var> &outer_sid,
+                         const ffi::Optional<PrimVar> &outer_sid,
                          L0StorageGroups groups)
       : root_(root), selected_versions_(selected_versions),
         requested_modes_(requested_modes), groups_(std::move(groups)) {
@@ -446,7 +641,7 @@ public:
     CollectAllTaskNodes(root_, all_tasks);
     availability_.AddTasks(all_tasks);
     for (const TaskNode *task : all_tasks) {
-      if (Optional<Bind> bind = GetFlatTaskBind(task->stmt); bind.defined())
+      if (Optional<Bind> bind = GetFlatTaskBind(task->stmt); bind.has_value())
         bind_definitions_.emplace(bind.value()->var, task);
     }
     MultiBufferOwnerMap owners_by_storage =
@@ -464,7 +659,7 @@ public:
                std::is_permutation(member_owners->second.begin(),
                                    member_owners->second.end(),
                                    state.owners.begin()))
-            << "Bound L0 data/SF group " << state.storage->name_hint
+            << "Bound L0 data/SF group " << state.storage->name
             << " must have the same owner loops for every member";
       }
     }
@@ -472,7 +667,7 @@ public:
     std::vector<PreparedStorage> prepared;
     for (StorageState &state : storages_) {
       ICHECK(!state.owners.empty())
-          << "Automatic multi-buffer storage " << state.storage->name_hint
+          << "Automatic multi-buffer storage " << state.storage->name
           << " has no annotated owner loop";
       ValidateOwnersDisjoint(state);
       for (const Var &member : groups_.Members(state.storage)) {
@@ -488,6 +683,7 @@ public:
       for (ControlNode *owner : state.owners) {
         PreparedOwner prepared_owner = AnalyzeOwner(state.storage, owner);
         needs_counter |= prepared_owner.needs_counter;
+        storage.can_share_counter &= prepared_owner.can_share_counter;
         storage.info.owners.push_back(std::move(prepared_owner.info));
         storage.storage_stages.push_back(-1);
       }
@@ -505,10 +701,16 @@ public:
       ICHECK(state.requested != BufferVersionMode::kIteration ||
              state.owners.size() == 1U)
           << "Explicit iteration buffer versioning for storage "
-          << state.storage->name_hint
+          << state.storage->name
           << " requires exactly one owner; use counter mode for disjoint "
              "owners";
-      bool can_fallback_to_iteration = state.owners.size() == 1U;
+      bool can_fallback_to_iteration =
+          state.owners.size() == 1U &&
+          TryCalculateIterationCount(state.owners.front()).has_value();
+      ICHECK(state.requested != BufferVersionMode::kIteration ||
+             can_fallback_to_iteration)
+          << "Explicit iteration buffer versioning requires a provable native "
+             "loop ordinal; use counter mode for zero-step or wrapping loops";
       storage.uses_counter =
           state.requested == BufferVersionMode::kCounter ||
           (state.requested == BufferVersionMode::kAuto && needs_counter &&
@@ -517,7 +719,7 @@ public:
         for (size_t i = 0; i < storage.info.owners.size(); ++i) {
           if (!counter_stages[i].has_value()) {
             LOG(FATAL)
-                << "Counter multi-buffer storage " << state.storage->name_hint
+                << "Counter multi-buffer storage " << state.storage->name
                 << " is accessed at multiple schedule stages in one owner "
                    "loop. Align their T.Stage values, provide a compatible "
                    "manual owner, or use iteration mode with one owner";
@@ -529,12 +731,11 @@ public:
       } else {
         ICHECK_EQ(storage.info.owners.size(), 1U)
             << "Iteration multi-buffering requires exactly one owner";
-        storage.info.owners.front().active_guard = Bool(true);
+        storage.info.owners.front().active_guard = IntImm::Bool(true);
         ControlNode *owner = storage.info.owners.front().loop;
         if (HasNonAffineLoopPath(owner)) {
           LOG(WARNING) << "Iteration buffer versioning for storage "
-                       << state.storage->name_hint
-                       << " uses a non-affine loop nest"
+                       << state.storage->name << " uses a non-affine loop nest"
                        << (counter_available ? "; consider counter mode."
                                              : ".");
         }
@@ -577,35 +778,35 @@ private:
     }
     // A range may look like a pure Var while its Bind is re-evaluated inside
     // an enclosing loop body and can therefore change between iterations.
-    return UsesVar(expr, [&](const VarNode *node) {
-      auto definition = bind_definitions_.find(ffi::GetRef<Var>(node));
+    for (const Var &var : UndefinedVars(expr)) {
+      auto definition = bind_definitions_.find(var);
       if (definition == bind_definitions_.end())
-        return false;
+        continue;
       for (const ControlNode *outer_loop : outer_loops) {
         if (definition->second->IsWithin(outer_loop))
           return true;
       }
-      return false;
-    });
+    }
+    return false;
   }
 
   bool HasNonAffineLoopPath(const ControlNode *owner) const {
     VarSet outer_loop_vars;
     std::vector<const ControlNode *> outer_loops;
     for (const ControlNode *control : owner->GetAncestorControls()) {
-      if (control->HasConditions() || control->BodyHasLoopBreak())
+      if (control->HasConditions() || control->BodyHasLoopBreak() ||
+          !AnalyzeSerialInduction(control).no_wrap)
         return true;
       const For &loop = control->control;
       bool non_affine =
-          RangeUsesLoopVariantValue(loop->min, outer_loop_vars, outer_loops) ||
-          RangeUsesLoopVariantValue(loop->extent, outer_loop_vars, outer_loops);
-      if (loop->step.has_value()) {
-        non_affine |= RangeUsesLoopVariantValue(loop->step.value(),
-                                                outer_loop_vars, outer_loops);
-      }
+          RangeUsesLoopVariantValue(loop->begin, outer_loop_vars,
+                                    outer_loops) ||
+          RangeUsesLoopVariantValue(loop->end, outer_loop_vars, outer_loops);
+      non_affine |=
+          RangeUsesLoopVariantValue(loop->step, outer_loop_vars, outer_loops);
       if (non_affine)
         return true;
-      outer_loop_vars.insert(loop->loop_var);
+      outer_loop_vars.insert(loop->var);
       outer_loops.push_back(control);
     }
     return false;
@@ -613,22 +814,16 @@ private:
 
   std::optional<int> CounterStorageStage(const Var &storage,
                                          ControlNode *owner) const {
-    int storage_stage = -1;
+    std::set<int> storage_stages;
     for (const auto &child : owner->children) {
-      bool touches = false;
-      for (const Var &member : groups_.Members(storage))
-        touches |= child->TouchesStorage(member);
-      if (!touches)
-        continue;
-      if (storage_stage < 0) {
-        storage_stage = child->GetStage();
-        continue;
-      }
-      if (storage_stage != child->GetStage())
-        return std::nullopt;
+      auto stages = StorageAccessStages(child.get(), storage, groups_);
+      storage_stages.insert(stages.begin(), stages.end());
     }
-    ICHECK_GE(storage_stage, 0);
-    return storage_stage;
+    ICHECK(!storage_stages.empty());
+    if (storage_stages.size() != 1U)
+      return std::nullopt;
+    ICHECK_GE(*storage_stages.begin(), 0);
+    return *storage_stages.begin();
   }
 
   CoreMask GetCounterProtocolCoreMask(
@@ -643,7 +838,7 @@ private:
         result |= GetStorageAccessCoreMask(member, owner.loop,
                                            /*skip_broadcast_fills=*/true);
     ICHECK_NE(result, kCoreUnassigned)
-        << "Counter multi-buffer storage " << storage->name_hint
+        << "Counter multi-buffer storage " << storage->name
         << " has no core-assigned owner access";
     return result;
   }
@@ -651,14 +846,16 @@ private:
   PreparedOwner AnalyzeOwner(const Var &storage, ControlNode *owner) {
     StorageEpochAnalysis analysis =
         AnalyzeStorageEpoch(storage, owner, groups_);
-    bool has_non_affine_loop_path = HasNonAffineLoopPath(owner);
+    bool has_non_affine_loop_path =
+        HasNonAffineLoopPath(owner) || !TryCalculateIterationCount(owner);
     bool needs_counter =
-        !is_one(analysis.active_guard) || has_non_affine_loop_path;
+        !IsOne(analysis.active_guard) || has_non_affine_loop_path;
 
     PreparedOwner result;
     result.info.loop = owner;
     result.info.active_guard = analysis.active_guard;
     result.needs_counter = needs_counter;
+    result.can_share_counter = analysis.precise_guard;
     return result;
   }
 
@@ -671,13 +868,15 @@ private:
       std::vector<CoreMask> guard_core_masks;
       std::vector<int> storage_stages;
       CoreMask protocol_core_mask;
+      bool can_share_counter;
       int counter_group_id;
-      Buffer counter;
+      TensorVar counter{ffi::UnsafeInit{}};
     };
 
     auto compatible = [&](const CounterGroup &group,
                           const PreparedStorage &storage) {
-      if (group.representative_owners.size() != storage.info.owners.size() ||
+      if (!group.can_share_counter || !storage.can_share_counter ||
+          group.representative_owners.size() != storage.info.owners.size() ||
           group.storage_stages != storage.storage_stages) {
         return false;
       }
@@ -719,20 +918,19 @@ private:
         // this ID with the concrete owner loop, which uniquely selects that
         // owner's active guard.
         int counter_group_id = next_counter_group_id++;
-        Buffer counter =
-            decl_buffer({IntImm(DataType::Int(32), 1)}, DataType::Int(32),
-                        storage.info.storage->name_hint + "_version_counter_" +
-                            std::to_string(counter_group_id),
-                        "local.var");
+        TensorVar counter(storage.info.storage->name + "_version_counter_" +
+                              std::to_string(counter_group_id),
+                          TensorType({IntImm::Int32(1)}, PrimType::Int(32),
+                                     runtime::MemoryScope::Get("local.var")));
         std::vector<CoreMask> guard_core_masks;
         for (const MultiBufferOwnerInfo &owner : storage.info.owners) {
           guard_core_masks.push_back(
               availability_.GetExpressionCoreMask(owner.active_guard));
         }
-        groups.push_back(
-            CounterGroup{storage.info.owners, std::move(guard_core_masks),
-                         storage.storage_stages, storage.protocol_core_mask,
-                         counter_group_id, std::move(counter)});
+        groups.push_back(CounterGroup{
+            storage.info.owners, std::move(guard_core_masks),
+            storage.storage_stages, storage.protocol_core_mask,
+            storage.can_share_counter, counter_group_id, std::move(counter)});
         selected = &groups.back();
       } else {
         // compatible() rechecks every possible canonical guard against the
@@ -743,6 +941,12 @@ private:
               storage.info.owners[i].active_guard);
         }
       }
+      // AddInfo requires one canonical guard per shared counter. Semantic
+      // equivalence was proved above; the executable representative is chosen
+      // separately by AnnotateStorageEpochs using definition readiness.
+      for (size_t i = 0; i < storage.info.owners.size(); ++i)
+        storage.info.owners[i].active_guard =
+            selected->representative_owners[i].active_guard;
       storage.info.counter_group_id = selected->counter_group_id;
       storage.info.counter = selected->counter;
     }
@@ -753,7 +957,7 @@ private:
       for (size_t j = i + 1; j < state.owners.size(); ++j) {
         ICHECK(!state.owners[i]->IsWithin(state.owners[j]) &&
                !state.owners[j]->IsWithin(state.owners[i]))
-            << "Automatic multi-buffer storage " << state.storage->name_hint
+            << "Automatic multi-buffer storage " << state.storage->name
             << " has nested owner loops; owners for one storage must be "
                "disjoint";
       }
@@ -766,12 +970,12 @@ private:
   }
 
   static bool IsL1Storage(const Var &storage) {
-    ffi::String scope = GetPtrStorageScope(storage);
+    ffi::String scope = NativeStorageScope(storage);
     return scope == "shared.l1" || scope == "shared.l1.dyn";
   }
 
   static bool IsStrictlyWithinOneOwner(const StorageState &state,
-                                       const ControlNode *control) {
+                                       const IRStructure *control) {
     bool found_owner = false;
     for (const ControlNode *candidate : state.owners) {
       if (!control->IsWithin(candidate))
@@ -795,23 +999,24 @@ private:
         for (ControlNode *owner : state.owners)
           owner_count += task->IsWithin(owner);
         ICHECK_LE(owner_count, 1U)
-            << "Automatic multi-buffer storage " << state.storage->name_hint
+            << "Automatic multi-buffer storage " << state.storage->name
             << " has a task inside nested owner loops";
         if (owner_count == 1)
           return;
         ICHECK(!task->GuardsTouchStorage(state.storage))
-            << "Automatic multi-buffer storage " << state.storage->name_hint
+            << "Automatic multi-buffer storage " << state.storage->name
             << " is accessed by a task guard outside its annotated owner "
                "loops; guards can follow a physical version only when they "
                "are strictly inside one owner";
-        ICHECK(CanBroadcastFillToStorage(task->stmt, state.storage))
-            << "Automatic multi-buffer storage " << state.storage->name_hint
+        ICHECK(CanBroadcastFillToStorage(task->stmt, state.storage,
+                                         task->StorageContext()))
+            << "Automatic multi-buffer storage " << state.storage->name
             << " is accessed outside its annotated owner loops; "
                "only T.fill accesses that can be rewritten independently "
                "may target every physical version; offending task: "
             << task->stmt;
         ICHECK(state.num_versions <= 1 || !IsL1Storage(state.storage))
-            << "Broadcast fill for L1 storage " << state.storage->name_hint
+            << "Broadcast fill for L1 storage " << state.storage->name
             << " with " << state.num_versions << " versions is not supported";
         // ResolveCore needs this marker to exempt the owner-external task for
         // every logical multi-buffer plan. MaterializeMultiBuffer later clears
@@ -819,22 +1024,32 @@ private:
         AddMultiBufferBroadcastFill(task, state.storage);
         return;
       }
+      if (node->IsScope()) {
+        if (const auto *header = node->HeaderTask();
+            header && header->TouchesStorage(state.storage))
+          ICHECK(IsStrictlyWithinOneOwner(state, node))
+              << "A storage-dependent lexical header must remain inside its "
+                 "multi-buffer owner";
+        for (const auto *list : node->ChildLists())
+          for (const auto &child : *list)
+            visit(child.get());
+        return;
+      }
       auto *control = static_cast<ControlNode *>(node);
       const For &loop = control->control;
       bool range_touches_storage =
-          ExprTouchesStorage(loop->min, state.storage) ||
-          ExprTouchesStorage(loop->extent, state.storage) ||
-          (loop->step.has_value() &&
-           ExprTouchesStorage(loop->step.value(), state.storage));
+          ExprTouchesStorage(loop->begin, state.storage) ||
+          ExprTouchesStorage(loop->end, state.storage) ||
+          ExprTouchesStorage(loop->step, state.storage);
       ICHECK(!range_touches_storage)
-          << "Automatic multi-buffer storage " << state.storage->name_hint
+          << "Automatic multi-buffer storage " << state.storage->name
           << " is used by an unnormalized loop bound; run "
              "NormalizeControlFlowForSchedule before MaterializeScheduleUnits "
              "so buffer-dependent loop bounds become schedulable tasks";
       bool guard_touches_storage = control->GuardsTouchStorage(state.storage);
       if (guard_touches_storage) {
         ICHECK(IsStrictlyWithinOneOwner(state, control))
-            << "Automatic multi-buffer storage " << state.storage->name_hint
+            << "Automatic multi-buffer storage " << state.storage->name
             << " is used by a guard outside its owner; only guards strictly "
                "inside one owner can follow that owner's physical version";
       }
@@ -860,7 +1075,7 @@ MultiBufferPlan
 BuildMultiBufferPlan(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const BufferVersionMap &selected_versions,
                      const BufferVersionModeTable &requested_modes,
-                     const ffi::Optional<Var> &outer_sid,
+                     const ffi::Optional<PrimVar> &outer_sid,
                      const L0StorageGroups &groups) {
   return MultiBufferPlanBuilder(root, selected_versions, requested_modes,
                                 outer_sid, groups)
@@ -887,8 +1102,10 @@ ParseBufferVersionModes(const BufferVersionModeMap &serialized_modes) {
 
 Stmt MakeCompilerTask(const Stmt &body) {
   TaskMetadata metadata;
-  return AttrStmt(MergeTaskMetadata(metadata, IntImm(DataType::Int(32), 0)),
-                  attr::kAscendTask, Integer(1), body, body->span);
+  auto fields = MergeTaskMetadata(metadata, IntImm::Int32(0));
+  if (auto bind = body.as<Bind>())
+    return MakeScheduledBinding(*bind, 0, fields.cast<ScheduleUnitMetadata>());
+  return MakeNativeAttribute(fields, attr::kAscendTask, 1, body, body->loc);
 }
 
 std::shared_ptr<TaskNode> MakeCounterTask(const Stmt &body, int stage) {
@@ -899,13 +1116,14 @@ std::shared_ptr<TaskNode> MakeCounterTask(const Stmt &body, int stage) {
   // narrows this candidate from the prepared owner/core protocol.
   task->SetCoreMask(kCoreAll);
   task->SetPipeMask(static_cast<uint16_t>(ResourcePipe::kScalar));
+  ApplyTaskAccesses(AnalyzeTaskAccesses(body), task.get());
   return task;
 }
 
 void AnnotateStorageEpochs(
     const std::vector<std::shared_ptr<IRStructure>> &root,
     const MultiBufferPlan &plan, const BufferVersionMap &manual_buffer_versions,
-    const ffi::Optional<Var> &outer_sid, const L0StorageGroups &groups) {
+    const ffi::Optional<PrimVar> &outer_sid, const L0StorageGroups &groups) {
   std::vector<TaskNode *> tasks;
   CollectAllTaskNodes(root, tasks);
   CoreMaskAvailability availability(tasks);
@@ -928,18 +1146,19 @@ void AnnotateStorageEpochs(
 
   std::vector<ControlNode *> loops;
   std::function<void(IRStructure *)> collect_loops = [&](IRStructure *node) {
-    if (!node || !node->IsControl())
+    if (!node)
       return;
-    auto *loop = static_cast<ControlNode *>(node);
-    loops.push_back(loop);
-    for (const auto &child : loop->children)
-      collect_loops(child.get());
+    if (node->IsControl())
+      loops.push_back(static_cast<ControlNode *>(node));
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        collect_loops(child.get());
   };
   for (const auto &node : root)
     collect_loops(node.get());
 
   struct StorageEpoch {
-    Var storage;
+    Var storage{ffi::UnsafeInit{}};
     PrimExpr active_guard;
     int guard_ready_position;
     CoreMask required_core_mask{kCoreUnassigned};
@@ -989,7 +1208,7 @@ void AnnotateStorageEpochs(
       if (manual_buffer_versions.count(storage)) {
         continue;
       }
-      std::string storage_scope = GetPtrStorageScope(storage);
+      std::string storage_scope = NativeStorageScope(storage);
       if (storage_scope == "local" || storage_scope == "local.var" ||
           storage_scope == "local.fragment") {
         continue;
@@ -998,7 +1217,7 @@ void AnnotateStorageEpochs(
       // A read-only storage cannot induce an intra-loop RAW/WAW/WAR epoch.
       // Its enclosing dependency is represented in an ancestor lexical
       // domain, so avoid creating loop-local domains that no edge can select.
-      if (analysis.has_write && !is_one(analysis.active_guard)) {
+      if (analysis.has_write && !IsOne(analysis.active_guard)) {
         lexical_epochs.push_back({
             storage,
             analysis.active_guard,
@@ -1031,9 +1250,9 @@ void AnnotateStorageEpochs(
       CoreMask available_core_mask;
     };
     std::vector<GuardRepresentative> guard_representatives{
-        {Bool(true), kCoreAll}};
-    arith::Analyzer domain_analyzer;
-    loop->GetLoopBodyContext().Populate(domain_analyzer);
+        {IntImm::Bool(true), kCoreAll}};
+    auto domain_analyzer = CreateTileLangAnalyzer();
+    auto loop_context = loop->GetLoopBodyContext().Populate(domain_analyzer);
     StorageEpochGuardMap guard_map;
     for (const StorageEpoch &epoch : storage_epochs) {
       size_t representative_index = guard_representatives.size();
@@ -1047,8 +1266,8 @@ void AnnotateStorageEpochs(
           continue;
         }
         if (GuardExprEqual(representative.expression, epoch.active_guard) ||
-            domain_analyzer.CanProveEqual(representative.expression,
-                                          epoch.active_guard)) {
+            domain_analyzer->CanProveEqual(representative.expression,
+                                           epoch.active_guard)) {
           representative_index = i;
           break;
         }
@@ -1063,12 +1282,23 @@ void AnnotateStorageEpochs(
                     guard_representatives[representative_index].expression);
     }
 
-    For rewritten = loop->control;
-    ForNode *node = rewritten.CopyOnWrite();
+    ScheduleUnitMetadata fields;
     if (!counter_map.empty())
-      node->annotations.Set(kMultiBufferCounterMap, std::move(counter_map));
-    node->annotations.Set(kStorageEpochGuardMap, std::move(guard_map));
-    loop->control = std::move(rewritten);
+      fields.Set(kMultiBufferCounterMap, std::move(counter_map));
+    fields.Set(kStorageEpochGuardMap, std::move(guard_map));
+    // The analysis shell and current scheduler children share the same
+    // operand-bearing directive. Encoding uses current children, so the
+    // metadata is emitted once after the definitions it references.
+    loop->control = AppendLoopAnnotation(loop->control, fields);
+    auto carrier = std::make_shared<ScopeNode>();
+    carrier->shell = MakeNativeAnnotation(fields, loop->control->loc);
+    carrier->outer_ctx = loop->GetLoopBodyContext();
+    carrier->SetStorageContext(
+        std::make_shared<NativeStorageContext>(loop->StorageContext()));
+    auto body = GetEpochBody(loop);
+    carrier->SetParent(body.parent);
+    carrier->SetIndex(body.children->size());
+    body.children->push_back(carrier);
   }
 
   // Every counter owner must have been encountered through its storage access
@@ -1079,11 +1309,12 @@ void AnnotateStorageEpochs(
       continue;
     for (const MultiBufferOwnerInfo &owner : info.owners) {
       For loop = owner.loop->control;
-      auto counters = loop->annotations.Get(kMultiBufferCounterMap);
-      auto guards = loop->annotations.Get(kStorageEpochGuardMap);
+      auto counters =
+          ReadLoopAnnotations(loop.get()).Get(kMultiBufferCounterMap);
+      auto guards = ReadLoopAnnotations(loop.get()).Get(kStorageEpochGuardMap);
       ICHECK(counters.has_value() && guards.has_value())
           << "Counter owner is missing prepared epoch metadata for storage "
-          << info.storage->name_hint;
+          << info.storage->name;
       ICHECK(
           counters.value().cast<MultiBufferCounterMap>().count(info.storage));
       ICHECK(guards.value().cast<StorageEpochGuardMap>().count(info.storage));
@@ -1092,9 +1323,10 @@ void AnnotateStorageEpochs(
 }
 
 void MaterializeCounterProtocol(ScheduledTIR *scheduled_tir,
-                                const MultiBufferPlan &plan) {
+                                const MultiBufferPlan &plan,
+                                const L0StorageGroups &groups) {
   struct CounterProtocol {
-    Buffer counter;
+    TensorVar counter{ffi::UnsafeInit{}};
     std::vector<MultiBufferOwnerInfo> owners;
     std::vector<Var> storages;
   };
@@ -1123,17 +1355,18 @@ void MaterializeCounterProtocol(ScheduledTIR *scheduled_tir,
       advances;
   for (const auto &[_, protocol] : protocols) {
     for (const MultiBufferOwnerInfo &owner : protocol.owners) {
-      auto guards = owner.loop->control->annotations.Get(kStorageEpochGuardMap);
+      auto guards = ReadLoopAnnotations(owner.loop->control.get())
+                        .Get(kStorageEpochGuardMap);
       ICHECK(guards.has_value())
           << "Counter owner is missing its canonical epoch guard";
       StorageEpochGuardMap guard_map =
           guards.value().cast<StorageEpochGuardMap>();
-      PrimExpr active_guard;
+      PrimExpr active_guard{ffi::UnsafeInit{}};
       for (const Var &storage : protocol.storages) {
         auto guard = guard_map.Get(storage);
         ICHECK(guard.has_value())
             << "Counter owner is missing the epoch guard for storage "
-            << storage->name_hint;
+            << storage->name;
         if (!active_guard.defined()) {
           active_guard = guard.value();
         } else {
@@ -1147,30 +1380,35 @@ void MaterializeCounterProtocol(ScheduledTIR *scheduled_tir,
       ICHECK(active_guard.defined());
 
       IRStructure *anchor = nullptr;
-      for (const auto &child : owner.loop->children) {
+      std::set<int> storage_stages;
+      for (const auto &child : *GetEpochBody(owner.loop).children) {
         for (const Var &storage : protocol.storages) {
-          if (child->TouchesStorage(storage)) {
+          auto stages = StorageAccessStages(child.get(), storage, groups);
+          if (!stages.empty()) {
             anchor = child.get();
-            break;
+            storage_stages.insert(stages.begin(), stages.end());
           }
         }
       }
       ICHECK(anchor != nullptr)
           << "Counter multi-buffer owner has no storage access";
-      PrimExpr zero = IntImm(DataType::Int(32), 0);
-      PrimExpr value = BufferLoad(protocol.counter, {zero});
-      Stmt advance = BufferStore(protocol.counter,
-                                 value + IntImm(value.dtype(), 1), {zero});
+      ICHECK_EQ(storage_stages.size(), 1U)
+          << "Counter multi-buffer accesses must retain their validated stage";
+      PrimExpr zero = IntImm(PrimType::Int(32), 0);
+      PrimExpr value = TensorLoad(protocol.counter, {zero});
+      Stmt advance =
+          TensorStore(protocol.counter, {zero}, value + IntImm(value.ty(), 1));
       advance = WrapWithGuard(std::move(advance), active_guard);
       advances[owner.loop][anchor].push_back(
-          MakeCounterTask(advance, anchor->GetStage()));
+          MakeCounterTask(advance, *storage_stages.begin()));
     }
   }
 
   for (auto &[owner, owner_advances] : advances) {
+    auto body = GetEpochBody(owner);
     std::vector<std::shared_ptr<IRStructure>> rewritten;
-    rewritten.reserve(owner->children.size() + owner_advances.size());
-    for (const auto &child : owner->children) {
+    rewritten.reserve(body.children->size() + owner_advances.size());
+    for (const auto &child : *body.children) {
       rewritten.push_back(child);
       auto it = owner_advances.find(child.get());
       if (it != owner_advances.end()) {
@@ -1179,24 +1417,22 @@ void MaterializeCounterProtocol(ScheduledTIR *scheduled_tir,
     }
     for (size_t i = 0; i < rewritten.size(); ++i) {
       rewritten[i]->SetIndex(i);
-      rewritten[i]->SetParent(owner);
+      rewritten[i]->SetParent(body.parent);
     }
-    owner->children = std::move(rewritten);
+    *body.children = std::move(rewritten);
   }
 
-  Array<Buffer> alloc_buffers =
-      scheduled_tir->metadata.kernel_root->alloc_buffers;
   std::vector<std::shared_ptr<IRStructure>> initializers;
   for (const auto &[_, protocol] : protocols) {
-    alloc_buffers.push_back(protocol.counter);
-    PrimExpr zero = IntImm(DataType::Int(32), 0);
-    Stmt initialize = BufferStore(protocol.counter,
-                                  make_zero(protocol.counter->dtype), {zero});
+    auto allocation =
+        Bind(protocol.counter, Call(protocol.counter.ty(), alloc_tensor_op(),
+                                    {}, std::nullopt, {protocol.counter.ty()}));
+    initializers.push_back(MakeCounterTask(allocation, 0));
+    PrimExpr zero = IntImm(PrimType::Int(32), 0);
+    Stmt initialize = TensorStore(protocol.counter, {zero},
+                                  IntImm(protocol.counter.dtype(), 0));
     initializers.push_back(MakeCounterTask(initialize, 0));
   }
-  SBlock kernel_root = scheduled_tir->metadata.kernel_root;
-  kernel_root.CopyOnWrite()->alloc_buffers = std::move(alloc_buffers);
-  scheduled_tir->metadata.kernel_root = std::move(kernel_root);
 
   root->insert(root->begin(), initializers.begin(), initializers.end());
   for (size_t i = 0; i < root->size(); ++i) {
@@ -1209,13 +1445,14 @@ void MaterializeCounterProtocol(ScheduledTIR *scheduled_tir,
 
 tvm::transform::Pass PrepareMultiBuffer() {
   using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
+  auto pass_func = [](tirx::Function func, const IRModule &,
+                      const tvm::transform::PassContext &) -> tirx::Function {
     return RewriteTilelangKernels(
         std::move(func), "PrepareMultiBuffer",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir =
-              DecodeScheduledTIR(context.root, context.outer_ctx);
+              DecodeScheduledTIR(context.root, context.outer_ctx, nullptr, {},
+                                 context.parameter_alias_contract);
           std::vector<TaskNode *> tasks;
           CollectAllTaskNodes(scheduled_tir.tree, tasks);
           for (TaskNode *task : tasks) {
@@ -1237,11 +1474,11 @@ tvm::transform::Pass PrepareMultiBuffer() {
           AnnotateStorageEpochs(scheduled_tir.tree, plan,
                                 scheduled_tir.metadata.manual_buffer_versions,
                                 context.outer_sid, groups);
-          MaterializeCounterProtocol(&scheduled_tir, plan);
+          MaterializeCounterProtocol(&scheduled_tir, plan, groups);
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.PrepareMultiBuffer", {});
+  return CreateFunctionPass(pass_func, 0, "tl.PrepareMultiBuffer");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

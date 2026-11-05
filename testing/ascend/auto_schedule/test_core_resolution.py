@@ -1,35 +1,73 @@
 """Core assignment follows storage access and scalar availability."""
 
+from tvm_tirx import ir
+from testing.ascend._ir import (
+    access_tensor,
+    allocate,
+    allocated_tensors,
+    annotation,
+    attribute,
+    attribute_fields,
+    attribute_key,
+    call_annotations,
+    launch_thread,
+    loop_annotations,
+    sblock_annotations,
+    sblock_metadata,
+    sblocks,
+    scheduled_bind,
+    scheduled_fields,
+    single_statement,
+    tensor,
+)
+
 import pytest
-import tilelang.ascend.language as T
-from tilelang import tvm
+import tvm_tirx as tvm
+import tvm_ffi
 from tilelang.ascend import transform
-from tvm import tirx
+from tvm_tirx import tirx
+from tvm_tirx.tirx.layout import Axis, Iter
 from testing.ascend._ir import allocated_buffer, calls, copy, kernel, nodes, seq
 from testing.ascend.auto_schedule._scheduled_ir import copy_ring, unit
 
 
 def _tasks(mod):
-    return [node for node in nodes(mod, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+    return [node for node in nodes(mod, ir.RegionStmt) if attribute_key(node) == "tl.ascend_task"]
+
+
+def _tensor_declarations(value):
+    declarations = []
+    for binding in nodes(value, ir.Bind):
+        expression = binding.value.args[0] if scheduled_fields(binding) is not None else binding.value
+        if isinstance(expression, ir.Call) and expression.op.name == "tirx.decl_tensor":
+            declarations.append(binding)
+    return declarations
 
 
 @pytest.mark.parametrize("scope, expected", [("shared.dyn", 5), ("shared.l1", 2)])
 @pytest.mark.parametrize("sids", [1, 2])
 def test_copy_destination_selects_core(scope, expected, sids):
-    a = tirx.decl_buffer((16, 16), "float32", name="A")
-    local = tirx.decl_buffer((16, 16), "float32", name="local", scope=scope)
-    before = kernel(unit(copy(a, local), core=0), buffers=[local], params=[a], annotations={"vector_count": tirx.IntImm("int32", sids)})
+    a = tensor((16, 16), "float32", name="A")
+    local = tensor((16, 16), "float32", name="local", scope=scope)
+    before = kernel(
+        unit(copy(a, local), core=0),
+        buffers=[local],
+        params=[a],
+        annotations={"vector_count": ir.IntImm("int32", sids)},
+        allocation_stage=0,
+        allocation_core=0,
+    )
     after = transform.AssignCore()(before)
     (task,) = _tasks(after)
-    assert int(task.node["core_mask"]) == (expected & (3 if sids == 1 else 7))
+    assert int(attribute_fields(task)["node"]["core_mask"]) == (expected & (3 if sids == 1 else 7))
 
 
 def test_scalar_cannot_mix_cube_and_vector_local_memory():
-    ub = tirx.decl_buffer((1,), "int32", name="ub", scope="shared.dyn")
-    l1 = tirx.decl_buffer((1,), "int32", name="l1", scope="shared.l1")
-    value = tirx.Var("value", "int32")
-    before = kernel(unit(tirx.Bind(value, ub[0] + l1[0]), core=0), buffers=[ub, l1])
-    with pytest.raises(tvm.error.InternalError, match="incompatible core-local memories"):
+    ub = tensor((1,), "int32", name="ub", scope="shared.dyn")
+    l1 = tensor((1,), "int32", name="l1", scope="shared.l1")
+    value = ir.Var("value", "int32")
+    before = kernel(unit(ir.Bind(value, ub[0] + l1[0]), core=0), buffers=[ub, l1], allocation_stage=0, allocation_core=0)
+    with pytest.raises((ValueError, RuntimeError), match="incompatible core-local memories"):
         transform.AssignCore()(before)
 
 
@@ -37,14 +75,18 @@ def test_scalar_cannot_mix_cube_and_vector_local_memory():
     "producer_scope, consumer_scope", [("shared.dyn", "shared.l1"), ("shared.l1", "shared.dyn")], ids=["vector-to-cube", "cube-to-vector"]
 )
 def test_core_local_condition_cannot_control_other_core(producer_scope, consumer_scope):
-    pred = tirx.decl_buffer((1,), "int32", name="pred", scope=producer_scope)
-    a = tirx.decl_buffer((16, 16), "float32", name="A")
-    dst = tirx.decl_buffer((16, 16), "float32", name="dst", scope=consumer_scope)
-    condition = tirx.Var("condition", "bool")
+    pred = tensor((1,), "int32", name="pred", scope=producer_scope)
+    a = tensor((16, 16), "float32", name="A")
+    dst = tensor((16, 16), "float32", name="dst", scope=consumer_scope)
+    condition = ir.Var("condition", "bool")
     before = kernel(
-        seq(unit(tirx.Bind(condition, pred[0] > 0), core=0), unit(copy(a, dst), core=0, guard=condition)), buffers=[pred, dst], params=[a]
+        seq(unit(ir.Bind(condition, pred[0] > 0), core=0), unit(copy(a, dst), core=0, guard=condition)),
+        buffers=[pred, dst],
+        params=[a],
+        allocation_stage=0,
+        allocation_core=0,
     )
-    with pytest.raises(tvm.error.InternalError, match="unavailable on every legal execution core"):
+    with pytest.raises((ValueError, RuntimeError), match="unavailable on every legal execution core"):
         transform.AssignCore()(before)
 
 
@@ -55,7 +97,7 @@ def test_counter_updates_cover_all_protocol_cores(mixed):
     if mixed:
         # The first owner consumes L0C on Cube and shares the UB epoch with
         # Vector. Only this copy changes; the counter producer remains flexible.
-        accum = tirx.decl_buffer((1, 64), "float32", name="accum", scope="shared.l0c")
+        accum = tensor((1, 64), "float32", name="accum", scope="shared.l0c")
         ub = allocated_buffer(before, "ub")
         changed = False
 
@@ -63,243 +105,281 @@ def test_counter_updates_cover_all_protocol_cores(mixed):
             nonlocal changed
             if (
                 not changed
-                and isinstance(node, tirx.AttrStmt)
-                and node.attr_key == "tl.ascend_task"
-                and any(call.op.name == "tl.tileop.ascend_copy" for call in nodes(node.body, tirx.Call))
+                and isinstance(node, ir.RegionStmt)
+                and attribute_key(node) == "tl.ascend_task"
+                and any(call.op.name == "tl.tileop.ascend_copy" for call in nodes(node.body, ir.Call))
             ):
                 changed = True
-                return unit(copy(accum, ub), core=2).body
+                fields = attribute_fields(node)
+                return attribute({**dict(fields["node"]), "core_mask": 2}, fields["key"], fields["value"], copy(accum, ub), loc=node.loc)
+            return node
 
         func = before["main"]
-        body = tirx.stmt_functor.ir_transform(func.body, None, add_cube_reader)
+        body = tvm_ffi.structural_map(func.body, (ir.RegionStmt, add_cube_reader))
+        assert changed
         # The pass reasons about the L0C source scope; the allocation belongs
         # to the kernel even though no producer is needed in this pass input.
-        root = body.block
-        body = tirx.SBlockRealize(
-            [],
-            True,
-            tirx.SBlock([], [], [], "tilelang_root", root.body, alloc_buffers=[*root.alloc_buffers, accum], annotations=root.annotations),
-        )
+        root = single_statement(body)
+        fields = attribute_fields(root)
+        body = attribute(fields["node"], fields["key"], fields["value"], [unit(allocate(accum), core=7), *root.body.seq], loc=root.loc)
         before = tvm.IRModule({"main": func.with_body(body)})
     after = transform.ResolveCore()(before)
-    writes = [task for task in _tasks(after) if any(store.buffer.same_as(counter) for store in nodes(task.body, tirx.BufferStore))]
+    writes = [task for task in _tasks(after) if any(access_tensor(store).same_as(counter) for store in nodes(task.body, ir.TensorStore))]
     assert len(writes) == 3
-    assert {int(task.node["core_mask"]) for task in writes} == ({7} if mixed else {5})
+    assert {int(attribute_fields(task)["node"]["core_mask"]) for task in writes} == ({7} if mixed else {5})
 
 
 def test_control_extent_restricts_flexible_scalar_task():
-    ub = tirx.decl_buffer((1,), "int32", name="ub", scope="shared.dyn")
-    out = tirx.decl_buffer((4,), "int32", name="out")
-    i = tirx.Var("i", "int32")
-    loop = tirx.For(i, 0, ub[0], tirx.ForKind.SERIAL, unit(tirx.BufferStore(out, i, [i]), core=7))
-    before = kernel(unit(loop, core=None), buffers=[ub], params=[out])
+    ub = tensor((1,), "int32", name="ub", scope="shared.dyn")
+    out = tensor((4,), "int32", name="out")
+    i = ir.Var("i", "int32")
+    loop = ir.For(i, ir.const(0), ir.const(0) + ub[0], ir.const(1), ir.ForKind.DEFAULT, unit(ir.TensorStore(out, [i], i), core=7))
+    before = kernel(unit(loop, core=None), buffers=[ub], params=[out], allocation_stage=0)
     after = transform.ResolveCore()(before)
-    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {5}
+    assert {int(attribute_fields(task)["node"]["core_mask"]) for task in _tasks(after)} == {5}
 
 
 @pytest.mark.parametrize("control", ["bound", "assume"])
 def test_control_reads_must_be_available_on_child_core(control):
-    ub = tirx.decl_buffer((1,), "int32", name="ub", scope="shared.dyn")
-    a = tirx.decl_buffer((16, 16), "float32", name="A")
-    l1 = tirx.decl_buffer((16, 16), "float32", name="l1", scope="shared.l1")
-    i = tirx.Var("i", "int32")
-    loop = tirx.For(i, 0, ub[0] if control == "bound" else 1, tirx.ForKind.SERIAL, unit(copy(a, l1), core=2))
+    ub = tensor((1,), "int32", name="ub", scope="shared.dyn")
+    a = tensor((16, 16), "float32", name="A")
+    l1 = tensor((16, 16), "float32", name="l1", scope="shared.l1")
+    i = ir.Var("i", "int32")
+    loop = ir.For(
+        i, ir.const(0), ir.const(0) + (ub[0] if control == "bound" else 1), ir.const(1), ir.ForKind.DEFAULT, unit(copy(a, l1), core=2)
+    )
+    body = unit(loop, core=None)
     if control == "assume":
-        loop = tirx.AttrStmt(ub[0] >= 0, "tl.assume", 1, loop)
-    before = kernel(unit(loop, core=None), buffers=[ub, l1], params=[a])
-    with pytest.raises(tvm.error.InternalError, match="Cannot evaluate a loop bound or control guard"):
+        body = attribute(ub[0] >= 0, "tilelang_assume", 1, body)
+    before = kernel(body, buffers=[ub, l1], params=[a], allocation_stage=0)
+    with pytest.raises((ValueError, RuntimeError), match="Cannot evaluate a loop bound or control guard"):
         transform.ResolveCore()(before)
 
 
 @pytest.mark.parametrize("source", ["global", "shared.dyn"])
 def test_epoch_guard_producer_must_cover_all_protocol_cores(source):
-    pred = tirx.decl_buffer((1,), "int32", name="pred", scope=source)
-    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
-    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
-    out = tirx.decl_buffer((16, 16), "float32", name="out")
-    epoch = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
-    guard, i = tirx.Var("guard", "bool"), tirx.Var("i", "int32")
-    loop = tirx.For(
+    pred = tensor((1,), "int32", name="pred", scope=source)
+    ub = tensor((16, 16), "float32", name="ub", scope="shared.dyn")
+    accum = tensor((16, 16), "float32", name="accum", scope="shared.l0c")
+    out = tensor((16, 16), "float32", name="out")
+    epoch = tensor((1,), "int32", name="epoch", scope="local.var")
+    guard, i = ir.Var("guard", "bool"), ir.Var("i", "int32")
+    loop = ir.For(
         i,
-        0,
-        4,
-        tirx.ForKind.SERIAL,
+        ir.const(0),
+        ir.const(0) + ir.const(4),
+        ir.const(1),
+        ir.ForKind.DEFAULT,
         seq(
             unit(copy(accum, ub), core=2),
             unit(copy(ub, out), guard=guard),
-            unit(tirx.BufferStore(epoch, epoch[0] + 1, [0]), core=7, guard=guard),
+            unit(ir.TensorStore(epoch, [0], epoch[0] + 1), core=7, guard=guard),
         ),
-        annotations={
-            "multi_buffer_eligible": [ub.data],
-            "tl.multi_buffer_counter_map": {ub.data: epoch},
-            "tl.storage_epoch_guard_map": {ub.data: guard},
-        },
+        annotations={"multi_buffer_eligible": [ub], "tl.multi_buffer_counter_map": {ub: epoch}, "tl.storage_epoch_guard_map": {ub: guard}},
     )
     before = kernel(
         seq(
-            unit(tirx.Bind(guard, pred[0] > 0), core=7 if source == "global" else 5),
-            unit(tirx.BufferStore(epoch, 0, [0]), core=7),
+            unit(ir.Bind(guard, pred[0] > 0), core=7 if source == "global" else 5),
+            unit(ir.TensorStore(epoch, [0], 0), core=7),
             unit(loop, core=None),
         ),
         buffers=[ub, accum, epoch] + ([pred] if source != "global" else []),
         params=[out] + ([pred] if source == "global" else []),
-        annotations={"tl.buffer_versions_map": {ub.data: 2}},
+        annotations={"tl.buffer_versions_map": {ub: 2}},
+        allocation_stage=0,
     )
     if source != "global":
-        with pytest.raises(tvm.error.InternalError, match="storage-epoch guard .* is unavailable"):
+        with pytest.raises((ValueError, RuntimeError), match="storage-epoch guard .* is unavailable"):
             transform.ResolveCore()(before)
     else:
         after = transform.ResolveCore()(before)
-        (producer,) = [task for task in _tasks(after) if isinstance(task.body, tirx.Bind) and task.body.var.same_as(guard)]
-        assert int(producer.node["core_mask"]) == 7
+        (producer,) = [binding for binding in nodes(after, ir.Bind) if binding.var.same_as(guard)]
+        assert int(scheduled_fields(producer)["task"]["core_mask"]) == 7
 
 
 @pytest.mark.parametrize("context", ["task-guard", "ancestor", "pure-kernel"])
 def test_ambiguous_cross_core_pipe_uses_available_context(context):
-    pred = tirx.decl_buffer((1,), "int32", name="pred", scope="shared.dyn")
-    a = tirx.decl_buffer((16, 16), "float32", name="A")
-    l1 = tirx.decl_buffer((16, 16), "float32", name="l1", scope="shared.l1")
-    flag = tirx.Evaluate(tirx.Call("void", tvm.ir.Op.get("tl.ascend_cross_core_set_flag"), [4, "PIPE_S", 3]))
+    pred = tensor((1,), "int32", name="pred", scope="shared.dyn")
+    a = tensor((16, 16), "float32", name="A")
+    l1 = tensor((16, 16), "float32", name="l1", scope="shared.l1")
+    flag = ir.Evaluate(ir.Call(tvm.ir.Op.get("tl.ascend_cross_core_set_flag"), [4, "PIPE_S", 3], ty="void"))
     flag_unit = unit(flag, core=0, guard=pred[0] > 0 if context == "task-guard" else None)
     if context == "ancestor":
-        i = tirx.Var("i", "int32")
-        flag_unit = unit(tirx.For(i, 0, pred[0], tirx.ForKind.SERIAL, flag_unit), core=None)
+        i = ir.Var("i", "int32")
+        flag_unit = unit(ir.For(i, ir.const(0), ir.const(0) + pred[0], ir.const(1), ir.ForKind.DEFAULT, flag_unit), core=None)
     # A Cube copy supplies an opposing kernel context. Local scalar inputs
     # must take precedence; without those inputs the pure kernel selects Cube.
-    before = kernel(seq(unit(copy(a, l1), core=0), flag_unit), buffers=[pred, l1], params=[a])
+    before = kernel(seq(unit(copy(a, l1), core=0), flag_unit), buffers=[pred, l1], params=[a], allocation_stage=0, allocation_core=0)
     after = transform.AssignCore()(before)
-    (placed,) = [task for task in _tasks(after) if isinstance(task.body, tirx.Evaluate) and task.body.value.same_as(flag.value)]
-    assert int(placed.node["core_mask"]) == (2 if context == "pure-kernel" else 5)
+    (placed,) = [
+        task
+        for task in _tasks(after)
+        if isinstance(single_statement(task.body), ir.Evaluate) and single_statement(task.body).value.same_as(flag.value)
+    ]
+    assert int(attribute_fields(placed)["node"]["core_mask"]) == (2 if context == "pure-kernel" else 5)
 
 
 @pytest.mark.parametrize("scope, core", [("shared.dyn", 1), ("shared.l1", 2)])
 @pytest.mark.parametrize("assumption", [False, True])
 def test_subblock_guard_is_specialized_before_core_assignment(scope, core, assumption):
-    a = tirx.decl_buffer((16, 16), "float32", name="A")
-    dst = tirx.decl_buffer((16, 16), "float32", name="dst", scope=scope)
-    sid = tirx.Var("sid", "int32")
+    a = tensor((16, 16), "float32", name="A")
+    dst = tensor((16, 16), "float32", name="dst", scope=scope)
+    sid = ir.Var("sid", "int32")
     scheduled = unit(copy(a, dst), core=0, guard=sid == 0)
     if assumption:
-        scheduled = tirx.AttrStmt(
-            scheduled.node,
-            scheduled.attr_key,
-            scheduled.value,
-            tirx.AttrStmt(sid >= 0, "tl.assume", 1, scheduled.body),
-        )
-    before = kernel(scheduled, buffers=[dst], params=[a])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+        scheduled = attribute(sid >= 0, "tilelang_assume", 1, scheduled)
+    before = kernel(scheduled, buffers=[dst], params=[a], allocation_stage=0, allocation_core=0)
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
-    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {core}
+    assert {int(attribute_fields(task)["node"]["core_mask"]) for task in _tasks(after)} == {core}
     assert len(_tasks(after)) == 1
     assert all(not any(var.same_as(sid) for var in tirx.analysis.undefined_vars(task.body)) for task in _tasks(after))
 
 
 def test_scalar_global_store_uses_the_existing_vector_core():
-    src = tirx.decl_buffer((16,), "float32", name="src")
-    out = tirx.decl_buffer((16,), "float32", name="out")
-    ub = tirx.decl_buffer((16,), "float32", name="ub", scope="shared.dyn")
-    before = kernel(seq(unit(copy(src, ub), core=5), unit(tirx.BufferStore(out, src[0] + 1, [0]), core=7)), buffers=[ub], params=[src, out])
+    src = tensor((16,), "float32", name="src")
+    out = tensor((16,), "float32", name="out")
+    ub = tensor((16,), "float32", name="ub", scope="shared.dyn")
+    before = kernel(
+        seq(unit(copy(src, ub), core=5), unit(ir.TensorStore(out, [0], src[0] + 1), core=7)),
+        buffers=[ub],
+        params=[src, out],
+        allocation_stage=0,
+    )
     after = transform.ResolveCore()(before)
-    assert {int(task.node["core_mask"]) for task in _tasks(after)} == {5}
+    assert {int(attribute_fields(task)["node"]["core_mask"]) for task in _tasks(after)} == {5}
 
 
 @pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
 @pytest.mark.parametrize("view", [False, True], ids=["allocation", "view"])
 def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
-    sid = tirx.Var("sid", "int32")
-    storage = tirx.decl_buffer((16, 64), "float32", name="storage", scope="shared.dyn")
-    buffer = tirx.decl_buffer(
-        (16, (sid + 1) * 16 if field == "shape" else 16),
-        "float32",
-        name="view" if view else "ub",
-        data=storage.data if view else None,
-        scope="shared.dyn",
-        strides=[(sid + 1) * 16 if field == "strides" else 32, 1],
-        elem_offset=sid * 16 if field == "elem_offset" else 0,
+    sid = ir.Var("sid", "int32")
+    storage = tensor((16, 64), "float32", name="storage", scope="shared.dyn")
+    shape = (16, (sid + 1) * 16 if field == "shape" else 16)
+    strides = ((sid + 1) * 16 if field == "strides" else 32, 1)
+    layout = tirx.TileLayout.from_iters(
+        [Iter(extent, stride, "m") for extent, stride in zip(shape, strides)],
+        offset={"m": sid * 16 if field == "elem_offset" else 0},
     )
-    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
+    buffer = tensor(shape, "float32", name="view" if view else "ub", scope="shared.dyn", layout=layout)
+    accum = tensor((16, 16), "float32", name="accum", scope="shared.l0c")
     # The L0C producer is outside AssignCore's contract. Both accesses must
     # reuse the projected view, while allocation ownership follows its data.
-    task = unit(seq(tirx.DeclBuffer(buffer), copy(accum, buffer, dst_shape=[16, 16])), core=0)
+    # Native SSA declarations dominate both tasks and operand-bearing metadata.
+    declarations = [unit(ir.Bind(buffer, ir.Call("tirx.decl_tensor", [storage.data], ty_args=[buffer.ty])), core=0)] if view else []
+    task = unit(copy(accum, buffer, dst_shape=[16, 16]), core=0)
     before = kernel(
-        seq(task, unit(copy(accum, buffer, dst_shape=[16, 16]), core=0)),
+        seq(
+            *declarations,
+            annotation({"test.buffer_metadata": {buffer: buffer}}),
+            task,
+            unit(copy(accum, buffer, dst_shape=[16, 16]), core=0),
+        ),
         buffers=[accum, storage if view else buffer],
-        annotations={"test.buffer_metadata": {buffer: buffer}},
+        allocation_stage=0,
+        allocation_core=0,
     )
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
-    metadata = root.annotations["test.buffer_metadata"]
+    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
+    metadata = sblock_annotations(root)["test.buffer_metadata"]
     tasks = _tasks(after)
-    assert sorted(int(task.node["subcore"]) for task in tasks) == [0, 0, 1, 1]
-    projected, declared = {}, []
+    assert sorted(int(attribute_fields(task)["node"]["subcore"]) for task in tasks) == [0, 0, 1, 1]
+    projected, projected_storage = {}, {}
     for task in tasks:
-        owner = int(task.node["subcore"])
+        owner = int(attribute_fields(task)["node"]["subcore"])
         (operation,) = calls(task, "tl.tileop.ascend_copy")
-        result = operation.args[1].args[0].buffer
-        assert [int(value) for value in result.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
-        assert [int(value) for value in result.strides] == [(owner + 1) * 16 if field == "strides" else 32, 1]
-        assert int(result.elem_offset) == (owner * 16 if field == "elem_offset" else 0)
+        result = access_tensor(operation.args[1])
+        analyzer = tvm.sym.Analyzer()
+        assert [int(analyzer.simplify(value)) for value in result.ty.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
+        assert [int(analyzer.simplify(item.stride)) for item in result.ty.layout.shard] == [
+            (owner + 1) * 16 if field == "strides" else 32,
+            1,
+        ]
+        assert int(analyzer.simplify(result.ty.layout.offset.get(Axis.get("m"), ir.const(0)))) == (
+            owner * 16 if field == "elem_offset" else 0
+        )
         if owner in projected:
             assert result.same_as(projected[owner])
         projected[owner] = result
-        for definition in nodes(task, tirx.DeclBuffer):
-            assert definition.buffer.same_as(result)
-            declared.append(owner)
         assert metadata[result].same_as(result)
-        (allocation,) = [allocated for allocated in root.alloc_buffers if allocated.data.same_as(result.data)]
+        if view:
+            (definition,) = [binding for binding in _tensor_declarations(root) if binding.var.same_as(result)]
+            (pointer,) = calls(definition, "tirx.tensor_data_ptr")
+            storage_result = pointer.args[0]
+        else:
+            storage_result = result
+        (allocation,) = [allocated for allocated in allocated_tensors(root, include_scheduled=True) if allocated.same_as(storage_result)]
         assert view or allocation.same_as(result)
+        projected_storage[owner] = allocation
     assert set(projected) == {0, 1}
+    definitions = _tensor_declarations(root) if view else nodes(root, ir.Bind)
+    declared = [owner for binding in definitions for owner, result in projected.items() if binding.var.same_as(result)]
     assert sorted(declared) == [0, 1]
-    assert not projected[0].data.same_as(projected[1].data)
+    assert not projected_storage[0].same_as(projected_storage[1])
 
 
 @pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
 def test_nested_subcore_projection_reuses_binders_and_views(field):
-    sid, outer, middle = (tirx.Var(name, "int32") for name in ("sid", "outer", "middle"))
+    sid, outer, middle = (ir.Var(name, "int32") for name in ("sid", "outer", "middle"))
     # A source name may already have this suffix; projection must use identity.
-    i, value = tirx.Var("i_aiv0", "int32"), tirx.Var("value", "int32")
-    storage = tirx.decl_buffer((64,), "int32", name="storage", scope="shared.dyn")
-    view = tirx.decl_buffer(
-        (i + 1 if field == "shape" else 1,),
-        "int32",
-        name="view",
-        data=storage.data,
-        scope="shared.dyn",
-        strides=[i + 1 if field == "strides" else 1],
-        elem_offset=i if field == "elem_offset" else 0,
+    i, value = ir.Var("i_aiv0", "int32"), ir.Var("value", "int32")
+    storage = tensor((64,), "int32", name="storage", scope="shared.dyn")
+    shape = (i + 1 if field == "shape" else 1,)
+    layout = tirx.TileLayout.from_iters(
+        [Iter(shape[0], i + 1 if field == "strides" else 1, "m")],
+        offset={"m": i if field == "elem_offset" else 0},
     )
-    body = seq(tirx.Bind(value, i + outer + middle + sid), tirx.DeclBuffer(view), tirx.BufferStore(view, value, [0]))
-    inner = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"test.buffer_metadata": {view: view}})
-    nested = unit(tirx.For(middle, 0, 2, tirx.ForKind.SERIAL, unit(inner, core=0)), core=None)
-    before = kernel(unit(tirx.For(outer, 0, sid + 1, tirx.ForKind.SERIAL, nested), core=None), buffers=[storage])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    view = tensor(shape, "int32", name="view", scope="shared.dyn", layout=layout)
+    definition = ir.Bind(view, ir.Call("tirx.decl_tensor", [storage.data], ty_args=[view.ty]))
+    body = seq(
+        ir.Bind(value, i + outer + middle + sid),
+        definition,
+        annotation({"test.buffer_metadata": {view: view}}),
+        ir.TensorStore(view, [0], value),
+    )
+    inner = ir.For(i, ir.const(0), ir.const(0) + ir.const(4), ir.const(1), ir.ForKind.DEFAULT, body)
+    nested = unit(ir.For(middle, ir.const(0), ir.const(0) + ir.const(2), ir.const(1), ir.ForKind.DEFAULT, unit(inner, core=0)), core=None)
+    before = kernel(
+        unit(ir.For(outer, ir.const(0), ir.const(0) + (sid + 1), ir.const(1), ir.ForKind.DEFAULT, nested), core=None),
+        buffers=[storage],
+        allocation_stage=0,
+        allocation_core=0,
+    )
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
 
     after = transform.AssignCore()(before)
     assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
-    loops = nodes(after, tirx.For)
+    loops = nodes(after, ir.For)
     assert len(loops) == 6
-    assert {loop.loop_var.name for loop in loops} == {f"{var.name}_aiv{p}" for var in (outer, middle, i) for p in range(2)}
+    assert {loop.var.name for loop in loops} == {f"{var.name}_aiv{p}" for var in (outer, middle, i) for p in range(2)}
     tasks = _tasks(after)
-    assert sorted(int(task.node["subcore"]) for task in tasks) == [0, 1]
+    assert sorted(int(attribute_fields(task)["node"]["subcore"]) for task in tasks) == [0, 1]
     for task in tasks:
-        owner = int(task.node["subcore"])
-        (loop,) = nodes(task.body, tirx.For)
-        (binding,) = nodes(task.body, tirx.Bind)
-        (definition,) = nodes(task.body, tirx.DeclBuffer)
-        (store,) = nodes(task.body, tirx.BufferStore)
-        result = definition.buffer
+        owner = int(attribute_fields(task)["node"]["subcore"])
+        (loop,) = nodes(task.body, ir.For)
+        (binding,) = [binding for binding in nodes(task.body, ir.Bind) if not tirx.is_tensor_var(binding.var)]
+        (definition,) = _tensor_declarations(task.body)
+        (store,) = nodes(task.body, ir.TensorStore)
+        result = definition.var
         assert binding.var.name == f"value_aiv{owner}"
         assert store.value.same_as(binding.var)
         assert result.name == f"view_aiv{owner}"
-        assert store.buffer.same_as(result)
-        assert loop.annotations["test.buffer_metadata"][result].same_as(result)
-        assert result.data.same_as(allocated_buffer(after, f"storage_aiv{owner}").data)
-        expression = result.elem_offset if field == "elem_offset" else getattr(result, field)[0]
-        tvm.ir.assert_structural_equal(expression, loop.loop_var if field == "elem_offset" else loop.loop_var + 1)
+        assert access_tensor(store).same_as(result)
+        assert loop_annotations(loop)["test.buffer_metadata"][result].same_as(result)
+        (pointer,) = calls(definition, "tirx.tensor_data_ptr")
+        assert pointer.args[0].same_as(allocated_buffer(after, f"storage_aiv{owner}"))
+        expression = (
+            result.ty.layout.offset.get(Axis.get("m"), ir.const(0))
+            if field == "elem_offset"
+            else result.ty.shape[0]
+            if field == "shape"
+            else result.ty.layout.shard[0].stride
+        )
+        tvm.ir.assert_structural_equal(expression, loop.var if field == "elem_offset" else loop.var + 1)
 
 
 @pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
@@ -307,18 +387,16 @@ def test_nested_subcore_projection_reuses_binders_and_views(field):
 def test_subcore_view_metadata_projects_without_cloning_common_storage(field, scope):
     from tilelang.layout import Layout
 
-    sid = tirx.Var("sid", "int32")
-    storage = tirx.decl_buffer((16, 64), "float32", name="storage", scope=scope)
-    view = tirx.decl_buffer(
-        (16, (sid + 1) * 16 if field == "shape" else 16),
-        "float32",
-        name="view",
-        data=storage.data,
-        scope=scope,
-        strides=[(sid + 1) * 16 if field == "strides" else 32, 1],
-        elem_offset=sid * 16 if field == "elem_offset" else 0,
+    sid = ir.Var("sid", "int32")
+    storage = tensor((16, 64), "float32", name="storage", scope=scope)
+    shape = (16, (sid + 1) * 16 if field == "shape" else 16)
+    strides = ((sid + 1) * 16 if field == "strides" else 32, 1)
+    physical_layout = tirx.TileLayout.from_iters(
+        [Iter(extent, stride, "m") for extent, stride in zip(shape, strides)],
+        offset={"m": sid * 16 if field == "elem_offset" else 0},
     )
-    destination = tirx.decl_buffer((16, 16), "float32", name="destination", scope="shared.l1" if scope == "global" else "shared.l0a")
+    view = tensor(shape, "float32", name="view", scope=scope, layout=physical_layout)
+    destination = tensor((16, 16), "float32", name="destination", scope="shared.l1" if scope == "global" else "shared.l0a")
     annotations = {"test.buffer_metadata": {view: view}}
     layout = Layout((16, 16), lambda i, j: (i, j))
     if field != "shape":
@@ -326,34 +404,49 @@ def test_subcore_view_metadata_projects_without_cloning_common_storage(field, sc
     # No address or control expression mentions sid: the view's metadata is
     # the only reason these Cube copies require subcore projection.
     before = kernel(
-        unit(copy(view, destination, src_shape=[16, 16]), core=0),
+        seq(
+            unit(ir.Bind(view, ir.Call("tirx.decl_tensor", [storage.data], ty_args=[view.ty])), core=0),
+            annotation(annotations),
+            unit(copy(view, destination, src_shape=[16, 16]), core=0),
+        ),
         buffers=[destination] + ([storage] if scope != "global" else []),
         params=[storage] if scope == "global" else [],
-        annotations=annotations,
+        allocation_stage=0,
+        allocation_core=0,
     )
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
-    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
     tasks = _tasks(after)
-    assert sorted(int(task.node["subcore"]) for task in tasks) == [0, 1]
-    metadata = root.annotations["test.buffer_metadata"]
+    assert sorted(int(attribute_fields(task)["node"]["subcore"]) for task in tasks) == [0, 1]
+    metadata = sblock_annotations(root)["test.buffer_metadata"]
     for task in tasks:
-        owner = int(task.node["subcore"])
+        owner = int(attribute_fields(task)["node"]["subcore"])
         (operation,) = calls(task, "tl.tileop.ascend_copy")
-        result = operation.args[0].args[0].buffer
-        assert result.data.same_as(storage.data)
-        assert operation.args[1].args[0].buffer.same_as(destination)
-        assert [int(value) for value in result.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
-        assert [int(value) for value in result.strides] == [(owner + 1) * 16 if field == "strides" else 32, 1]
-        assert int(result.elem_offset) == (owner * 16 if field == "elem_offset" else 0)
+        result = access_tensor(operation.args[0])
+        (definition,) = [binding for binding in _tensor_declarations(root) if binding.var.same_as(result)]
+        (pointer,) = calls(definition, "tirx.tensor_data_ptr")
+        assert pointer.args[0].same_as(storage)
+        assert access_tensor(operation.args[1]).same_as(destination)
+        analyzer = tvm.sym.Analyzer()
+        assert [int(analyzer.simplify(value)) for value in result.ty.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
+        assert [int(analyzer.simplify(item.stride)) for item in result.ty.layout.shard] == [
+            (owner + 1) * 16 if field == "strides" else 32,
+            1,
+        ]
+        assert int(analyzer.simplify(result.ty.layout.offset.get(Axis.get("m"), ir.const(0)))) == (
+            owner * 16 if field == "elem_offset" else 0
+        )
         assert metadata[result].same_as(result)
         if field != "shape":
-            assert root.annotations["layout_map"][result].same_as(layout)
+            # Operand metadata decodes a fresh Layout with the same complete
+            # input domain and mapping; tensor/storage identities stay exact.
+            tvm.ir.assert_structural_equal(sblock_annotations(root)["layout_map"][result], layout)
     if scope == "global":
-        assert after["main"].buffer_map[storage.data].same_as(storage)
+        assert any(parameter.same_as(storage) for parameter in after["main"].params)
     else:
-        assert any(allocated.same_as(storage) for allocated in root.alloc_buffers)
+        assert any(allocated.same_as(storage) for allocated in allocated_tensors(root, include_scheduled=True))
 
 
 @pytest.mark.parametrize(
@@ -361,16 +454,16 @@ def test_subcore_view_metadata_projects_without_cloning_common_storage(field, sc
 )
 @pytest.mark.parametrize("per_core", [False, True])
 def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets, per_core):
-    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
-    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
-    out = tirx.decl_buffer((16, 16), "float32", name="out")
-    sid = tirx.Var("sid", "int32")
+    accum = tensor((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tensor((16, 16), "float32", name="ub", scope="shared.dyn")
+    out = tensor((16, 16), "float32", name="out")
+    sid = ir.Var("sid", "int32")
     copies = [
         copy(
             accum,
             ub,
-            annotations={"unit_flag_ctrl": tirx.IntImm("int32", flag)}
-            | ({} if target is None else {"sub_blockid": tirx.IntImm("int32", target)}),
+            annotations={"unit_flag_ctrl": ir.IntImm("int32", flag)}
+            | ({} if target is None else {"sub_blockid": ir.IntImm("int32", target)}),
         )
         for target, flag in zip(targets, (2, 3))
     ]
@@ -378,60 +471,66 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets, per_co
     # this pass's contract.
     producer = unit(seq(*copies), core=0)
     if per_core:
-        producer = unit(tirx.AttrStmt({}, "tl.ascend_per_core_task", 1, producer.body), core=None)
-    before = kernel(seq(producer, unit(copy(ub, out), core=0)), buffers=[accum, ub], params=[out])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+        producer = unit(attribute({}, "tl.ascend_per_core_task", 1, producer.body), core=None)
+    before = kernel(seq(producer, unit(copy(ub, out), core=0)), buffers=[accum, ub], params=[out], allocation_stage=0, allocation_core=0)
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     if targets[0] != targets[1]:
-        with pytest.raises(tvm.error.InternalError, match="same sub_blockid.*separate T.Task"):
+        with pytest.raises((ValueError, RuntimeError), match="same sub_blockid.*separate T.Task"):
             transform.AssignCore()(before)
     else:
         after = transform.AssignCore()(before)
         (task,) = [
             task
-            for task in nodes(after, tirx.AttrStmt)
-            if task.attr_key == ("tl.ascend_per_core_task" if per_core else "tl.ascend_task")
-            and any(call.args[0].args[0].buffer.same_as(accum) for call in calls(task, "tl.tileop.ascend_copy"))
+            for task in nodes(after, ir.RegionStmt)
+            if attribute_key(task) == ("tl.ascend_per_core_task" if per_core else "tl.ascend_task")
+            and any(access_tensor(call.args[0]).same_as(accum) for call in calls(task, "tl.tileop.ascend_copy"))
         ]
         projected = calls(task, "tl.tileop.ascend_copy")
         assert len(projected) == len(copies)
-        assert int(task.node["core_mask"]) == 2
-        assert {int(call.annotations["sub_blockid"]) for call in projected} == {targets[0]}
-        assert [int(call.annotations["unit_flag_ctrl"]) for call in projected] == [2, 3]
+        assert int(attribute_fields(task)["node"]["core_mask"]) == 2
+        assert {int(call_annotations(call)["sub_blockid"]) for call in projected} == {targets[0]}
+        assert [int(call_annotations(call)["unit_flag_ctrl"]) for call in projected] == [2, 3]
 
 
 @pytest.mark.parametrize("route_kind", ["bind", "load", "loop-var"])
 def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
-    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
-    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
-    routes = tirx.decl_buffer((1,), "int32", name="routes")
-    sid, route = tirx.Var("sid", "int32"), tirx.Var("route", "int32")
-    state = tirx.decl_buffer((1,), "int32", name="state", scope="local.var")
+    accum = tensor((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tensor((16, 16), "float32", name="ub", scope="shared.dyn")
+    routes = tensor((1,), "int32", name="routes")
+    sid, route = ir.Var("sid", "int32"), ir.Var("route", "int32")
+    state = tensor((1,), "int32", name="state", scope="local.var")
     target = state[0] if route_kind == "load" else route
     body = copy(accum, ub, annotations={"sub_blockid": target})
     if route_kind == "bind":
-        body = seq(tirx.Bind(route, routes[0] % 2), body)
+        body = seq(ir.Bind(route, routes[0] % 2), body)
     elif route_kind == "load":
-        body = seq(tirx.BufferStore(state, routes[0] % 2, [0]), body)
+        body = seq(ir.TensorStore(state, [0], routes[0] % 2), body)
     elif route_kind == "loop-var":
-        body = tirx.For(route, 0, 2, tirx.ForKind.SERIAL, body)
-    before = kernel(unit(body, core=0), buffers=[accum, ub] + ([state] if route_kind == "load" else []), params=[routes])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+        body = ir.For(route, ir.const(0), ir.const(0) + ir.const(2), ir.const(1), ir.ForKind.DEFAULT, body)
+    before = kernel(
+        unit(body, core=0),
+        buffers=[accum, ub] + ([state] if route_kind == "load" else []),
+        params=[routes],
+        allocation_stage=0,
+        allocation_core=0,
+    )
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
     tasks = _tasks(after)
     assert len(tasks) == 2
     for task in tasks:
-        (branch,) = nodes(task.body, tirx.IfThenElse)
+        (branch,) = nodes(task.body, ir.If)
         (operation,) = calls(branch.then_case, "tl.tileop.ascend_copy")
         if route_kind == "bind":
-            expected = nodes(task.body, tirx.Bind)[0].var
+            expected = nodes(task.body, ir.Bind)[0].var
         elif route_kind == "loop-var":
-            expected = nodes(task.body, tirx.For)[0].loop_var
+            expected = nodes(task.body, ir.For)[0].var
         else:
-            expected = nodes(task.body, tirx.BufferStore)[0].buffer[0]
-        tvm.ir.assert_structural_equal(branch.condition, expected == int(operation.annotations["sub_blockid"]))
+            expected = access_tensor(nodes(task.body, ir.TensorStore)[0])[0]
+        tvm.ir.assert_structural_equal(branch.condition, expected == int(call_annotations(operation)["sub_blockid"]))
 
 
 @pytest.mark.parametrize(
@@ -471,52 +570,54 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
     ],
 )
 def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routing, context):
-    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
-    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
-    out = tirx.decl_buffer((16, 16), "float32", name="out")
-    routes = tirx.decl_buffer((1,), "int32", name="routes")
-    sid, route = tirx.Var("sid", "int32"), tirx.Var("route", "int32")
-    selector = tirx.Var("selector", "int32")
-    sid_alias = tirx.Var("sid_alias", "int32")
+    accum = tensor((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tensor((16, 16), "float32", name="ub", scope="shared.dyn")
+    out = tensor((16, 16), "float32", name="out")
+    routes = tensor((1,), "int32", name="routes")
+    sid, route = ir.Var("sid", "int32"), ir.Var("route", "int32")
+    selector = ir.Var("selector", "int32")
+    sid_alias = ir.Var("sid_alias", "int32")
     if effect == "store":
-        side_effect = tirx.BufferStore(routes, routes[0] + 1, [0])
+        side_effect = ir.TensorStore(routes, [0], routes[0] + 1)
     elif effect == "gm-copy":
         side_effect = copy(accum, out)
     elif effect == "pure-call":
-        side_effect = tirx.Evaluate(tirx.call_pure_extern("int32", "read_route", route))
+        side_effect = ir.Evaluate(ir.Call("tirx.call_pure_extern", [ir.StringImm("read_route"), route], ty="int32"))
     elif effect == "route-call":
-        side_effect = tirx.Evaluate(0)
+        side_effect = ir.Evaluate(0)
     else:
-        side_effect = tirx.Evaluate(tirx.call_extern("int32", "record_route", route))
+        side_effect = ir.Evaluate(ir.Call("tirx.call_extern", [ir.StringImm("record_route"), route], ty="int32"))
     implicit = routing.startswith("implicit")
     sid_routing = routing.startswith("sid")
     single_projection = "single-projection" in routing
-    target = tirx.IntImm("int32", 0) if routing == "constant" else route
+    target = ir.IntImm("int32", 0) if routing == "constant" else route
     if sid_routing:
         target = sid
         if routing == "sid-expression":
-            target = tirx.if_then_else(selector % 2 == 0, sid, 1 - sid)
+            target = ir.prim.Select(selector % 2 == 0, sid, 1 - sid)
         elif routing == "sid-alias":
             target = sid_alias
     elif effect == "route-call" and routing != "constant":
-        target = tirx.call_extern("int32", "next_route")
+        target = ir.Call("tirx.call_extern", [ir.StringImm("next_route")], ty="int32")
     elif effect == "pure-call" and routing != "constant":
-        target = tirx.call_pure_extern("int32", "read_route", routes[0])
+        target = ir.Call("tirx.call_pure_extern", [ir.StringImm("read_route"), routes[0]], ty="int32")
     fix = copy(accum, ub, annotations={} if implicit else {"sub_blockid": target})
     if context == "separate":
         body = seq(unit(fix, core=0), unit(side_effect, core=0))
     else:
         effects = (fix, side_effect) if implicit or sid_routing else (side_effect, fix)
-        body = seq(tirx.Bind(route, routes[0] % 2), *effects)
+        body = seq(ir.Bind(route, routes[0] % 2), *effects)
         body = unit(body, core=0, guard=sid == 0 if single_projection and context != "guarded-loop" else None)
     if routing == "sid-alias":
-        body = seq(unit(tirx.Bind(sid_alias, sid), core=0), body)
+        body = seq(unit(ir.Bind(sid_alias, sid), core=0), body)
     if context not in ("task", "separate"):
-        i = tirx.Var("i", "int32")
+        i = ir.Var("i", "int32")
         if context == "nested-loop":
-            body = unit(tirx.For(tirx.Var("j", "int32"), 0, 2, tirx.ForKind.SERIAL, body), core=None)
+            body = unit(
+                ir.For(ir.Var("j", "int32"), ir.const(0), ir.const(0) + ir.const(2), ir.const(1), ir.ForKind.DEFAULT, body), core=None
+            )
         body = unit(
-            tirx.For(i, 0, sid + 2, tirx.ForKind.SERIAL, body),
+            ir.For(i, ir.const(0), ir.const(0) + (sid + 2), ir.const(1), ir.ForKind.DEFAULT, body),
             core=None,
             guard=sid == 0 if single_projection and context == "guarded-loop" else None,
         )
@@ -524,19 +625,21 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
         body,
         buffers=[accum, ub],
         params=[routes, out] + ([selector] if routing == "sid-expression" else []),
+        allocation_stage=0,
+        allocation_core=0,
     )
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     repeated = (routing in ("dynamic", "implicit") or sid_routing) and not single_projection
     if repeated and context != "separate" and effect != "pure-call":
-        with pytest.raises(tvm.error.InternalError, match="Fixpipe routing.*external side effects.*separate T.Task"):
+        with pytest.raises((ValueError, RuntimeError), match="Fixpipe routing.*external side effects.*separate T.Task"):
             transform.AssignCore()(before)
     else:
         after = transform.AssignCore()(before)
         expected_tasks = 3 if context == "separate" else 2 if repeated else 1
         assert len(_tasks(after)) == expected_tasks
         if effect == "gm-copy":
-            gm_copies = [call for call in calls(after, "tl.tileop.ascend_copy") if call.args[1].args[0].buffer.same_as(out)]
+            gm_copies = [call for call in calls(after, "tl.tileop.ascend_copy") if access_tensor(call.args[1]).same_as(out)]
             assert len(gm_copies) == 1
 
 
@@ -564,44 +667,53 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
     ],
 )
 def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested, via_scalar):
-    src = tirx.decl_buffer((16,), "float32", name="src")
-    buffers = [tirx.decl_buffer((16,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
-    i = tirx.Var("i", "int32")
+    src = tensor((16,), "float32", name="src")
+    buffers = [tensor((16,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
+    i = ir.Var("i", "int32")
     body = []
     for sid, core in enumerate((1, 4)):
-        marker = tirx.AttrStmt({"core_mask": core | 2, "subcore": sid}, "tl.ascend_task", 1, tirx.Evaluate(T.loop_break()))
+        marker = attribute({"core_mask": core | 2, "subcore": sid}, "tl.ascend_task", 1, ir.Break())
         body.extend((unit(marker, core=None, guard=i >= sid + 1), unit(copy(src, buffers[sid]), core=core)))
-    l1 = tirx.decl_buffer((16,), "float32", name="l1", scope="shared.l1")
+    l1 = tensor((16,), "float32", name="l1", scope="shared.l1")
     prefix, suffix = [], []
     for sid in cube_owners:
         metadata = {"core_mask": 2}
         if sid is not None:
             metadata["subcore"] = sid
-        cube = unit(tirx.AttrStmt(metadata, "tl.ascend_task", 1, copy(src, l1)), core=None)
+        cube = unit(attribute(metadata, "tl.ascend_task", 1, copy(src, l1)), core=None)
         if via_scalar:
-            value = tirx.decl_buffer((1,), "int32", name=f"value_{sid}", scope="local.var")
+            value = tensor((1,), "int32", name=f"value_{sid}", scope="local.var")
             buffers.append(value)
-            prefix.append(unit(tirx.BufferStore(value, 0, [0]), core=7))
+            prefix.append(unit(ir.TensorStore(value, [0], 0), core=7))
             suffix.append(unit(cube.body, core=None, guard=value[0] > 0))
-            cube = unit(tirx.AttrStmt({**metadata, "core_mask": 7}, "tl.ascend_task", 1, tirx.BufferStore(value, i, [0])), core=None)
+            cube = unit(attribute({**metadata, "core_mask": 7}, "tl.ascend_task", 1, ir.TensorStore(value, [0], i)), core=None)
         if nested:
-            cube = unit(tirx.For(tirx.Var("j", "int32"), 0, 2, tirx.ForKind.SERIAL, cube), core=None)
+            cube = unit(
+                ir.For(ir.Var("j", "int32"), ir.const(0), ir.const(0) + ir.const(2), ir.const(1), ir.ForKind.DEFAULT, cube), core=None
+            )
         body.append(cube)
     # A common scalar producer may be recomputed on Cube without owning its
     # loop control. Its fallback placement must not broaden either break.
-    body.append(unit(tirx.Bind(tirx.Var("value", "int32"), i), core=7))
+    body.append(unit(ir.Bind(ir.Var("value", "int32"), i), core=7))
     buffers.append(l1)
     before = kernel(
-        seq(*prefix, unit(tirx.For(i, 0, 3, tirx.ForKind.SERIAL, seq(*body)), core=None), *suffix), buffers=buffers, params=[src]
+        seq(
+            *prefix,
+            unit(ir.For(i, ir.const(0), ir.const(0) + ir.const(3), ir.const(1), ir.ForKind.DEFAULT, seq(*body)), core=None),
+            *suffix,
+        ),
+        buffers=buffers,
+        params=[src],
+        allocation_stage=0,
     )
     if cube_owners in ((None,), (0, 1)):
-        with pytest.raises(tvm.error.InternalError, match="Independent subcore loop_break.*separate loop"):
+        with pytest.raises((ValueError, RuntimeError), match="Independent subcore loop_break.*separate loop"):
             transform.ResolveCore()(before)
         return
     after = transform.ResolveCore()(before)
-    exits = [task for task in _tasks(after) if calls(task, "tl.loop_break")]
+    exits = [task for task in _tasks(after) if nodes(task, ir.Break)]
     assert len(exits) == 2
-    assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {
+    assert {int(attribute_fields(task)["node"]["subcore"]): int(attribute_fields(task)["node"]["core_mask"]) for task in exits} == {
         sid: core | (2 if sid in cube_owners else 0) for sid, core in enumerate((1, 4))
     }
 
@@ -610,32 +722,34 @@ def test_projected_loop_break_follows_its_cube_branch(cube_owners, nested, via_s
 @pytest.mark.parametrize("consumer", ["copy", "loop-bound", "loop-break"])
 @pytest.mark.parametrize("shared_consumer", [False, True])
 def test_projected_loop_exit_follows_scalar_demand_from_later_consumers(owner, consumer, shared_consumer):
-    src = tirx.decl_buffer((4, 16), "float32", name="src")
-    l1 = tirx.decl_buffer((16,), "float32", name="l1", scope="shared.l1")
-    ub = tirx.decl_buffer((16,), "float32", name="ub", scope="shared.dyn")
-    count = tirx.decl_buffer((1,), "int32", name="count", scope="local.var")
-    i, j, offset = (tirx.Var(name, "int32") for name in ("i", "j", "offset"))
-    stop = tirx.Var("stop", "bool")
+    src = tensor((4, 16), "float32", name="src")
+    l1 = tensor((16,), "float32", name="l1", scope="shared.l1")
+    ub = tensor((16,), "float32", name="ub", scope="shared.dyn")
+    count = tensor((1,), "int32", name="count", scope="local.var")
+    i, j, offset = (ir.Var(name, "int32") for name in ("i", "j", "offset"))
+    stop = ir.Var("stop", "bool")
 
     def task(body, core, sid=None, guard=None):
         metadata = {"core_mask": core}
         if sid is not None:
             metadata["subcore"] = sid
-        return unit(tirx.AttrStmt(metadata, "tl.ascend_task", 1, body), core=None, guard=guard)
+        if isinstance(body, ir.Bind):
+            binding = scheduled_bind(body, 0, metadata)
+            return ir.If(guard, [binding], None) if guard is not None else binding
+        return unit(attribute(metadata, "tl.ascend_task", 1, body), core=None, guard=guard)
 
     loop = unit(
-        tirx.For(
+        ir.For(
             i,
-            0,
-            4,
-            tirx.ForKind.SERIAL,
+            ir.const(0),
+            ir.const(0) + ir.const(4),
+            ir.const(1),
+            ir.ForKind.DEFAULT,
             seq(
-                # A common predicate is required by both exits. Its Cube
-                # execution must inherit the actual consumer's domain.
-                task(tirx.Bind(stop, i == 1), 7),
-                task(tirx.Evaluate(T.loop_break()), 3, 0, stop),
-                task(tirx.Evaluate(T.loop_break()), 6, 1, stop),
-                task(tirx.BufferStore(count, count[0] + 1, [0]), 7, owner),
+                task(ir.Bind(stop, i == 1), 7),
+                task(ir.Break(), 3, 0, stop),
+                task(ir.Break(), 6, 1, stop),
+                task(ir.TensorStore(count, [0], count[0] + 1), 7, owner),
                 task(copy(src, ub, src_indices=[i, 0], src_shape=[1, 16]), 4 if owner == 0 else 1, 1 - owner),
             ),
         ),
@@ -644,34 +758,44 @@ def test_projected_loop_exit_follows_scalar_demand_from_later_consumers(owner, c
     consumer_sid = None if shared_consumer else owner
     read = task(copy(src, l1, src_indices=[offset if consumer == "copy" else 0, 0], src_shape=[1, 16]), 2, consumer_sid)
     if consumer == "copy":
-        read = seq(task(tirx.Bind(offset, count[0] - 1), 7), read)
+        read = seq(task(ir.Bind(offset, count[0] - 1), 7), read)
     else:
         if consumer == "loop-break":
-            read = seq(task(tirx.Evaluate(T.loop_break()), 7, guard=j >= count[0]), read)
-        read = unit(tirx.For(j, 0, count[0] if consumer == "loop-bound" else 4, tirx.ForKind.SERIAL, read), core=None)
-    before = kernel(seq(task(tirx.BufferStore(count, 0, [0]), 7, owner), loop, read), buffers=[l1, ub, count], params=[src])
+            read = seq(task(ir.Break(), 7, guard=j >= count[0]), read)
+        read = unit(
+            ir.For(j, ir.const(0), ir.const(0) + (count[0] if consumer == "loop-bound" else 4), ir.const(1), ir.ForKind.DEFAULT, read),
+            core=None,
+        )
+    before = kernel(
+        seq(task(ir.TensorStore(count, [0], 0), 7, owner), loop, read), buffers=[l1, ub, count], params=[src], allocation_stage=0
+    )
     after = transform.ResolveCore()(before)
-    exits = [task for task in _tasks(after) if calls(task, "tl.loop_break") and "subcore" in task.node]
-    assert {int(task.node["subcore"]): int(task.node["core_mask"]) for task in exits} == {
+    exits = [task for task in _tasks(after) if nodes(task, ir.Break) and "subcore" in attribute_fields(task)["node"]]
+    assert {int(attribute_fields(task)["node"]["subcore"]): int(attribute_fields(task)["node"]["core_mask"]) for task in exits} == {
         sid: 2 if sid == owner else core for sid, core in enumerate((1, 4))
     }
-    count_writes = [task for task in _tasks(after) if any(store.buffer.same_as(count) for store in nodes(task, tirx.BufferStore))]
+    count_writes = [task for task in _tasks(after) if any(access_tensor(store).same_as(count) for store in nodes(task, ir.TensorStore))]
     assert len(count_writes) == 2
-    assert all(int(task.node["core_mask"]) & 2 for task in count_writes)
+    assert all(int(attribute_fields(task)["node"]["core_mask"]) & 2 for task in count_writes)
 
 
 def test_unit_flag_pairing_between_source_copies_remains_caller_managed():
-    accum = tirx.decl_buffer((16, 16), "float32", name="accum", scope="shared.l0c")
-    ub = tirx.decl_buffer((16, 16), "float32", name="ub", scope="shared.dyn")
-    sid = tirx.Var("sid", "int32")
-    fix = copy(accum, ub, annotations={"unit_flag_ctrl": tirx.IntImm("int32", 3)})
+    accum = tensor((16, 16), "float32", name="accum", scope="shared.l0c")
+    ub = tensor((16, 16), "float32", name="ub", scope="shared.dyn")
+    sid = ir.Var("sid", "int32")
+    fix = copy(accum, ub, annotations={"unit_flag_ctrl": ir.IntImm("int32", 3)})
     # Reusing an IR node still describes two source operations. This pass does
     # not validate their caller-managed protocol; no such kernel is executed.
-    before = kernel(seq(unit(fix, core=0, guard=sid == 0), unit(fix, core=0, guard=sid == 1)), buffers=[accum, ub])
-    thread = tirx.IterVar(tvm.ir.Range(0, 2), sid, tirx.IterVar.ThreadIndex, "cthread")
-    before = tvm.IRModule({"main": before["main"].with_body(tirx.AttrStmt(thread, "thread_extent", 2, before["main"].body))})
+    before = kernel(
+        seq(unit(fix, core=0, guard=sid == 0), unit(fix, core=0, guard=sid == 1)),
+        buffers=[accum, ub],
+        allocation_stage=0,
+        allocation_core=0,
+    )
+    thread = sid
+    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     copies = calls(after, "tl.tileop.ascend_copy")
     assert len(copies) == 2
-    assert {int(call.annotations["sub_blockid"]) for call in copies} == {0, 1}
-    assert all(int(call.annotations["unit_flag_ctrl"]) == 3 for call in copies)
+    assert {int(call_annotations(call)["sub_blockid"]) for call in copies} == {0, 1}
+    assert all(int(call_annotations(call)["unit_flag_ctrl"]) == 3 for call in copies)

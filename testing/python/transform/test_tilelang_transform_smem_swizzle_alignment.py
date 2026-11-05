@@ -63,10 +63,14 @@ def _compile_kernel(pad_elems: int, dtype: str, columns: int):
 
 def _dynamic_smem_offset(source: str, buffer_name: str) -> int:
     """Extract the byte offset of a dynamic shared-memory alias."""
-    pattern = rf"void\*\s+{re.escape(buffer_name)}\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\)"
-    match = re.search(pattern, source)
+    pattern = (
+        rf"^\s*(?P<dtype>[\w:]+)\*\s+{re.escape(buffer_name)}\s*=\s*"
+        r"\(\((?P=dtype)\*\)\(\((?P=dtype)\*\)\(\(\(char\*\)buf_dyn_shmem\)"
+        r"\s*\+\s*\(int64_t\)(?P<offset>\d+)\)\)\);\s*$"
+    )
+    match = re.search(pattern, source, re.MULTILINE)
     assert match is not None, f"dynamic shared buffer {buffer_name!r} not found in source:\n{source}"
-    return int(match.group(1))
+    return int(match["offset"])
 
 
 SWIZZLE_ALIGNMENT_CASES = [

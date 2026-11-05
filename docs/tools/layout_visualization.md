@@ -12,11 +12,13 @@ the mapping selected for buffers in a compiled kernel.
 
 ## Installation
 
-PNG, PDF, and SVG output requires Matplotlib. Install TileLang's visualization
-extra:
+First install the matched TileLang/provider/FFI bundle following the
+[installation guide](../get_started/Installation.md). PNG, PDF, and SVG output
+additionally requires Matplotlib, the dependency provided by TileLang's
+`vis` extra. In that environment, install it with:
 
 ```bash
-pip install "tilelang[vis]"
+python -m pip install matplotlib
 ```
 
 Text-only compiler output does not create a Matplotlib figure.

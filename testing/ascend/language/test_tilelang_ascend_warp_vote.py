@@ -47,6 +47,7 @@ def test_ascend_warp_vote_correctness(mask):
     kernel = tilelang.compile(
         warp_vote_kernel,
         out_idx=[1, 2, 3, 4, 5],
+        target="ascend",
         pass_configs={
             tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False,
             tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,

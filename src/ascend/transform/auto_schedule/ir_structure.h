@@ -1,15 +1,11 @@
 #pragma once
-#include <tvm/arith/analyzer.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/stmt.h>
 
+#include "../buffer_version.h"
+#include "../core_mask.h"
 #include "ascend/op/utils.h"
-#include "op/gemm.h"
-#include "transform/common/constr_visitor.h"
-#include <tvm/tirx/stmt_functor.h>
+#include "ir/loop_math.h"
+#include "native_storage.h"
+#include "task_resource.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -22,58 +18,18 @@
 #include <utility>
 #include <vector>
 
-#include "../ascend_pipe.h"
-#include "../buffer_version.h"
-#include "../core_mask.h"
-#include "op/utils.h"
-
-namespace tvm {
-namespace tl {
-namespace ascend {
+namespace tvm::tl::ascend {
 
 using namespace tirx;
+using namespace prim;
 using ffi::Any;
 using ffi::String;
+using Region = ffi::Array<Range>;
 
-// Forward declarations
 class IRStructure;
 class TaskNode;
 class ControlNode;
-
-// HBM bandwidth-contention resource bits. These are tracked separately from
-// ResourcePipe because a load and a store use different issue pipes but can
-// still contend on the same HBM port.
-enum class HbmPort : uint16_t {
-  kNone = 0,
-  kAiv = 1 << 0, // AIV HBM port: GM<->UB
-  kAic = 1 << 1, // AIC HBM port: GM->L1 / L0C->GM
-  // UB->GM and L0C->GM share the HBM store path even though their commands
-  // issue from different cores and hardware pipes.
-  kStore = 1 << 2,
-};
-
-constexpr uint16_t kHbmCoreAffinityMask =
-    static_cast<uint16_t>(HbmPort::kAiv) | static_cast<uint16_t>(HbmPort::kAic);
-
-// Special scalar "registers" written by config/control intrinsics and read by
-// their consumers. Pipe-order registers model a scalar synchronization call
-// that fences the hardware pipe named by its argument without making the call
-// itself consume that pipe.
-enum class SpecialRegister : uint16_t {
-  kNone = 0,
-  kHf32Mode = 1 << 0,    // set_hf32_mode      <- read by Cube (MAD) ops
-  kPadValue = 1 << 1,    // set_copy_pad_value <- read by padded MTE2 copies
-  kLoopControl = 1 << 2, // loop_break         <- read by every sibling (fence)
-  kAtomicMode = 1 << 3,  // set_atomic         <- read by GM-store copies
-  kPipeMTE1 = 1 << 4,
-  kPipeMTE2 = 1 << 5,
-  kPipeMTE3 = 1 << 6,
-  kPipeCube = 1 << 7,
-  kPipeVector = 1 << 8,
-  kPipeFixpipe = 1 << 9,
-  kPipeScalar = 1 << 10,
-  kMmadDirection = 1 << 11, // set_mmad_direction <- read by Cube (MAD) ops
-};
+class ScopeNode;
 
 inline uint16_t PipeSpecialRegisterMask(uint16_t pipe_mask) {
   uint16_t mask = 0;
@@ -96,14 +52,14 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
   if (a.size() != b.size())
     return false;
 
-  arith::Analyzer analyzer;
+  auto analyzer = CreateTileLangAnalyzer();
   for (size_t i = 0; i < a.size(); ++i) {
     // Check if min values are equal
-    if (!analyzer.CanProveEqual(a[i]->min, b[i]->min)) {
+    if (!analyzer->CanProveEqual(a[i]->begin, b[i]->begin)) {
       return false;
     }
     // Check if extent values are equal
-    if (!analyzer.CanProveEqual(a[i]->extent, b[i]->extent)) {
+    if (!analyzer->CanProveEqual(a[i]->extent, b[i]->extent)) {
       return false;
     }
   }
@@ -117,12 +73,12 @@ inline bool RegionCovers(const Region &outer, const Region &inner) {
   if (outer.size() != inner.size())
     return false;
 
-  arith::Analyzer analyzer;
+  auto analyzer = CreateTileLangAnalyzer();
   for (size_t i = 0; i < outer.size(); ++i) {
-    PrimExpr outer_end = outer[i]->min + outer[i]->extent;
-    PrimExpr inner_end = inner[i]->min + inner[i]->extent;
-    if (!analyzer.CanProve(outer[i]->min <= inner[i]->min) ||
-        !analyzer.CanProve(inner_end <= outer_end)) {
+    PrimExpr outer_end = outer[i]->begin + outer[i]->extent;
+    PrimExpr inner_end = inner[i]->begin + inner[i]->extent;
+    if (!analyzer->CanProve(outer[i]->begin <= inner[i]->begin) ||
+        !analyzer->CanProve(inner_end <= outer_end)) {
       return false;
     }
   }
@@ -132,40 +88,65 @@ inline bool RegionCovers(const Region &outer, const Region &inner) {
 constexpr int64_t kDynamicSerialTripCountFallback = 100;
 
 inline int64_t GetSerialTripCount(const For &loop,
-                                  arith::Analyzer *analyzer = nullptr) {
-  arith::Analyzer local_analyzer;
-  if (analyzer == nullptr)
-    analyzer = &local_analyzer;
-
-  auto upper_bound_or = [&](const PrimExpr &expr, int64_t fallback) {
-    if (const int64_t *value = as_const_int(expr))
-      return *value;
-
-    arith::ConstIntBound bound = analyzer->const_int_bound(expr);
-    arith::Analyzer unconstrained_analyzer;
-    Var unconstrained("unconstrained_trip_count", expr.dtype());
-    int64_t unconstrained_max =
-        unconstrained_analyzer.const_int_bound(unconstrained)->max_value;
-    bool has_useful_bound = bound->max_value >= 0 &&
-                            bound->max_value != arith::ConstIntBound::kPosInf &&
-                            bound->max_value < unconstrained_max;
-    return has_useful_bound ? bound->max_value : fallback;
-  };
-
-  PrimExpr step = loop->step.has_value() ? loop->step.value()
-                                         : IntImm(DataType::Int(32), 1);
-  int64_t extent =
-      upper_bound_or(loop->extent, kDynamicSerialTripCountFallback);
-  // A trip-count upper bound needs a lower bound for a symbolic positive
-  // step.  Use one when the step is not constant; using its upper bound would
-  // underestimate the number of serial iterations.
-  const int64_t *constant_step = as_const_int(step);
-  int64_t step_value = constant_step ? *constant_step : 1;
-  if (extent <= 0)
+                                  const sym::AnalyzerObj *context = nullptr) {
+  auto analyzer = context ? context->Clone() : CreateTileLangAnalyzer();
+  // Native For always tests var < end, including negative and zero steps.
+  // This API estimates scheduling cost; the fallback is not a proof that an
+  // entering nonpositive-step loop terminates after a finite number of trips.
+  if (SideEffect(loop->begin) > CallEffectKind::kPure ||
+      SideEffect(loop->end) > CallEffectKind::kPure)
+    return kDynamicSerialTripCountFallback;
+  if (analyzer->CanProve(loop->begin >= loop->end))
     return 0;
-  if (step_value <= 0)
-    return extent;
-  return extent / step_value + (extent % step_value != 0);
+  if (!CanUseLoopBounds(loop->begin, loop->end, loop->step, analyzer.get()))
+    return kDynamicSerialTripCountFallback;
+  // Widen before subtraction, so an int32 loop spanning zero does not wrap
+  // into a negative trip count.
+  PrimExpr distance =
+      cast(loop->end, PrimType::Int(64)) - cast(loop->begin, PrimType::Int(64));
+  auto step = TryConstInt(analyzer->Simplify(loop->step));
+  auto count = TryConstInt(analyzer->Simplify(distance));
+  int64_t extent;
+  if (count) {
+    extent = *count;
+  } else {
+    auto bound = analyzer->const_int_bound(distance);
+    auto unconstrained = CreateTileLangAnalyzer();
+    PrimVar variable("unconstrained_trip_count", distance.ty());
+    if (bound->max_value < 0 ||
+        bound->max_value == sym::ConstIntBound::kPosInf ||
+        bound->max_value >= unconstrained->const_int_bound(variable)->max_value)
+      return kDynamicSerialTripCountFallback;
+    extent = bound->max_value;
+  }
+  if (extent <= 0)
+    return kDynamicSerialTripCountFallback;
+  // A dynamic positive step has a lower bound of one. Using an upper bound
+  // would underestimate scheduling cost.
+  uint64_t stride = step ? static_cast<uint64_t>(*step) : 1;
+  uint64_t elements = static_cast<uint64_t>(extent);
+  return static_cast<int64_t>(elements / stride + (elements % stride != 0));
+}
+
+// Record the loop definition before its body facts, so RenameFrom can give
+// different iterations independent variables even without a finite range.
+inline void AppendSerialLoopFacts(ConstrSet *context, const For &loop) {
+  auto analyzer = CreateTileLangAnalyzer();
+  auto outer = context->Populate(analyzer);
+  bool pure_header = SideEffect(loop->begin) <= CallEffectKind::kPure &&
+                     SideEffect(loop->end) <= CallEffectKind::kPure &&
+                     SideEffect(loop->step) <= CallEffectKind::kPure;
+  if (CanUseLoopBounds(loop->begin, loop->end, loop->step, analyzer.get())) {
+    context->AddConstr(loop->var, Range(loop->begin, loop->end));
+  } else {
+    // A shared auxiliary symbol would equate independent producer/consumer
+    // iterations after renaming. An identity bind records only the definition.
+    context->AddConstr(loop->var, loop->var.as_or_throw<PrimExpr>());
+    if (pure_header)
+      context->AddConstr(loop->var < loop->end);
+  }
+  if (pure_header)
+    context->AddConstr(loop->begin < loop->end);
 }
 
 // A wrapper introduced at a node relative to its nearest surviving structural
@@ -194,10 +175,12 @@ public:
     return std::make_unique<ConditionGuard>(condition);
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    condition = Substitute(condition, {{old_var, new_var}});
+    condition = SubstituteConstraintExpr(
+        condition, {{old_var, new_var.as_or_throw<PrimExpr>()}});
   }
   Stmt Wrap(Stmt body) const final {
-    return IfThenElse(condition, std::move(body));
+    return If(condition, NativeTaskAttribute::AsSequence(body), std::nullopt,
+              body->loc);
   }
 
   PrimExpr condition;
@@ -205,30 +188,29 @@ public:
 
 class AttributeGuard final : public Guard {
 public:
-  AttributeGuard(Any node, String key, PrimExpr value, Span span)
+  AttributeGuard(Any node, String key, Any value, Location loc)
       : node(std::move(node)), key(std::move(key)), value(std::move(value)),
-        span(std::move(span)) {}
-
+        loc(std::move(loc)) {}
   Kind GetKind() const final { return Kind::kAttribute; }
   std::unique_ptr<Guard> Clone() const final {
-    return std::make_unique<AttributeGuard>(node, key, value, span);
+    return std::make_unique<AttributeGuard>(node, key, value, loc);
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    if (node.as<PrimExprNode>()) {
-      node = Substitute(Downcast<PrimExpr>(node), {{old_var, new_var}});
-    }
-    if (value.defined()) {
-      value = Substitute(value, {{old_var, new_var}});
-    }
+    auto attribute = MakeNativeAttribute(node, key, value, SeqStmt({}), loc);
+    auto remapped =
+        ReadTaskAttribute(RemapTaskStatement(attribute, {{old_var, new_var}}))
+            .value();
+    node = remapped.node;
+    value = remapped.value;
   }
   Stmt Wrap(Stmt body) const final {
-    return AttrStmt(node, key, value, std::move(body), span);
+    return MakeNativeAttribute(node, key, value,
+                               NativeTaskAttribute::AsSequence(body), loc);
   }
-
   Any node;
   String key;
-  PrimExpr value;
-  Span span;
+  Any value;
+  Location loc;
 };
 
 using GuardList = std::vector<std::unique_ptr<Guard>>;
@@ -246,7 +228,7 @@ public:
 // Structural and dependency-analysis state shared by both local IR phases.
 class IRStructure {
 public:
-  enum class Kind { kTask, kControl };
+  enum class Kind { kTask, kControl, kScope };
 
   explicit IRStructure(std::unique_ptr<IRExtraInfo> extra_info = nullptr)
       : extra_info_(std::move(extra_info)) {}
@@ -273,6 +255,9 @@ public:
     }
     return false;
   }
+
+  ControlNode *GetParentControl();
+  const ControlNode *GetParentControl() const;
 
   // Return the lowest common ancestor with another node. Nodes in different
   // top-level trees have no explicit common ancestor and return null.
@@ -313,10 +298,10 @@ public:
     guards_.insert(guards_.begin(), std::make_unique<ConditionGuard>(cond));
   }
   // Prepend an AttrStmt wrapper supported by AutoSchedule.
-  void PrependAttribute(const Any &node, const String &key,
-                        const PrimExpr &value, const Span &span) {
+  void PrependAttribute(const Any &node, const String &key, const Any &value,
+                        const Location &loc) {
     guards_.insert(guards_.begin(),
-                   std::make_unique<AttributeGuard>(node, key, value, span));
+                   std::make_unique<AttributeGuard>(node, key, value, loc));
   }
 
   // Pipeline stage assigned by the Z3 scheduler: producer = 0, consumers are
@@ -340,6 +325,24 @@ public:
   // Helper methods for safe casting
   bool IsTask() const { return GetKind() == Kind::kTask; }
   bool IsControl() const { return GetKind() == Kind::kControl; }
+  bool IsScope() const { return GetKind() == Kind::kScope; }
+
+  using ChildList = std::vector<std::shared_ptr<IRStructure>>;
+  virtual std::vector<ChildList *> ChildLists() { return {}; }
+  virtual std::vector<const ChildList *> ChildLists() const { return {}; }
+  virtual TaskNode *HeaderTask() { return nullptr; }
+  virtual const TaskNode *HeaderTask() const { return nullptr; }
+
+  void SetStorageContext(std::shared_ptr<const NativeStorageContext> value) {
+    storage_context_ = std::move(value);
+  }
+  const NativeStorageContext &StorageContext() const {
+    static const NativeStorageContext empty;
+    return storage_context_ ? *storage_context_ : empty;
+  }
+  Var StorageIdentity(const TensorVar &tensor) const {
+    return StorageContext().Identity(tensor);
+  }
 
   // Substitute a var inside this node's own guard deltas. Call from each
   // node's SubstituteVar override so core specialization reaches both If
@@ -348,6 +351,12 @@ public:
     for (auto &guard : guards_) {
       guard->SubstituteVar(old_var, new_var);
     }
+    // Cloned/specialized tasks share the original context until their own IR
+    // changes. Keep pointer origins consistent with the rewritten statements
+    // without changing provenance in sibling tasks or the original tree.
+    if (storage_context_)
+      storage_context_ = std::make_shared<NativeStorageContext>(
+          storage_context_->Substitute(old_var, new_var));
   }
 
   void CopyBaseMetadataFrom(const IRStructure &other) {
@@ -356,6 +365,7 @@ public:
     for (const auto &guard : other.guards_) {
       guards_.push_back(guard->Clone());
     }
+    storage_context_ = other.storage_context_;
     stage_ = other.stage_;
     index_ = other.index_;
     latency_ = other.latency_;
@@ -376,21 +386,21 @@ public:
   virtual uint16_t GetHbmMask() const = 0;
 
   // Logical access regions. Physical footprints are derived from current IR.
-  virtual std::vector<BufferRegion> GetReadRegions() const = 0;
-  virtual std::vector<BufferRegion> GetWriteRegions() const = 0;
+  virtual std::vector<TensorRegion> GetReadRegions() const = 0;
+  virtual std::vector<TensorRegion> GetWriteRegions() const = 0;
 
   // Storage identity is the Buffer data Var, so aliases with different shapes
   // and strides are treated as accesses to the same physical allocation.
   bool ReadsStorage(const Var &storage) const {
-    for (const BufferRegion &region : GetReadRegions()) {
-      if (region->buffer->data.same_as(storage))
+    for (const TensorRegion &region : GetReadRegions()) {
+      if (StorageIdentity(RegionTensor(region)).same_as(storage))
         return true;
     }
     return false;
   }
   bool WritesStorage(const Var &storage) const {
-    for (const BufferRegion &region : GetWriteRegions()) {
-      if (region->buffer->data.same_as(storage))
+    for (const TensorRegion &region : GetWriteRegions()) {
+      if (StorageIdentity(RegionTensor(region)).same_as(storage))
         return true;
     }
     return false;
@@ -408,12 +418,12 @@ public:
   std::vector<Var> GetOnChipStorages() const {
     std::vector<Var> storages;
     std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> seen;
-    auto collect = [&](const std::vector<BufferRegion> &regions) {
-      for (const BufferRegion &region : regions) {
-        if ((IsAscendOnChipBuffer(region->buffer) ||
-             IsL0SFBuffer(region->buffer)) &&
-            seen.insert(region->buffer->data).second) {
-          storages.push_back(region->buffer->data);
+    auto collect = [&](const std::vector<TensorRegion> &regions) {
+      for (const TensorRegion &region : regions) {
+        if ((IsAscendOnChipBuffer(RegionTensor(region)) ||
+             IsL0SFBuffer(RegionTensor(region))) &&
+            seen.insert(StorageIdentity(RegionTensor(region))).second) {
+          storages.push_back(StorageIdentity(RegionTensor(region)));
         }
       }
     };
@@ -479,6 +489,7 @@ protected:
   }
 
 private:
+  std::shared_ptr<const NativeStorageContext> storage_context_;
   IRStructure *parent_{nullptr};
   std::unique_ptr<IRExtraInfo> extra_info_;
   GuardList guards_;
@@ -496,7 +507,7 @@ public:
   explicit TaskNode(std::unique_ptr<IRExtraInfo> extra_info = nullptr)
       : IRStructure(std::move(extra_info)) {}
 
-  Stmt stmt;
+  Stmt stmt{ffi::UnsafeInit{}};
 
   // Snapshot of the surrounding-scope ConstrSet at the moment this task was
   // built or decoded. Captures ancestor For ranges, LetStmt bindings,
@@ -530,14 +541,17 @@ public:
   bool ReadsAtomicRegister() const override { return reads_atomic_; }
 
   // Logical access regions. Physical footprints are derived from current IR.
-  std::vector<BufferRegion> GetReadRegions() const override {
+  std::vector<TensorRegion> GetReadRegions() const override {
     return read_regions_;
   }
-  std::vector<BufferRegion> GetWriteRegions() const override {
+  std::vector<TensorRegion> GetWriteRegions() const override {
     return write_regions_;
   }
   std::vector<Var> GetReadVars() const override { return read_vars_; }
   std::vector<Var> GetWriteVars() const override { return write_vars_; }
+  const std::vector<Var> &GetOpaqueAccessVars() const {
+    return opaque_access_vars_;
+  }
 
   // Setters
   void SetPipeMask(uint16_t mask) { pipe_mask_ = mask; }
@@ -550,10 +564,10 @@ public:
   void AddSpecialWrite(SpecialRegister reg) {
     special_write_mask_ |= static_cast<uint16_t>(reg);
   }
-  void SetReadRegions(const std::vector<BufferRegion> &regions) {
+  void SetReadRegions(const std::vector<TensorRegion> &regions) {
     read_regions_ = regions;
   }
-  void SetWriteRegions(const std::vector<BufferRegion> &regions) {
+  void SetWriteRegions(const std::vector<TensorRegion> &regions) {
     write_regions_ = regions;
   }
   const Map<Var, Optional<PrimExpr>> &GetL0Pitches() const {
@@ -568,46 +582,41 @@ public:
   }
   void SetReadVars(const std::vector<Var> &vars) { read_vars_ = vars; }
   void SetWriteVars(const std::vector<Var> &vars) { write_vars_ = vars; }
+  void SetOpaqueAccessVars(const std::vector<Var> &vars) {
+    opaque_access_vars_ = vars;
+  }
+  void AddOpaqueAccessVar(const Var &var) {
+    if (std::none_of(
+            opaque_access_vars_.begin(), opaque_access_vars_.end(),
+            [&](const Var &existing) { return existing.same_as(var); }))
+      opaque_access_vars_.push_back(var);
+  }
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
-    Map<Var, PrimExpr> substitution{{old_var, new_var}};
+    ffi::Map<Var, Expr> substitution{{old_var, new_var}};
     auto substitute_vars = [&](std::vector<Var> &vars) {
-      for (auto &var : vars) {
+      for (auto &var : vars)
         if (var.same_as(old_var))
           var = new_var;
-      }
-    };
-    std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
-        buffer_remap;
-    auto substitute_regions = [&](std::vector<BufferRegion> &regions) {
-      for (auto &region : regions) {
-        Buffer buffer = region->buffer;
-        auto buffer_it = buffer_remap.find(buffer);
-        if (buffer_it != buffer_remap.end()) {
-          buffer = buffer_it->second;
-        } else if (buffer->data.same_as(old_var)) {
-          Buffer remapped = buffer;
-          remapped.CopyOnWrite()->data = new_var;
-          buffer_remap.emplace(buffer, remapped);
-          buffer = std::move(remapped);
-        }
-        region = BufferRegion(std::move(buffer),
-                              Substitute(region->region, substitution));
-      }
     };
     substitute_vars(read_vars_);
     substitute_vars(write_vars_);
-    substitute_regions(read_regions_);
-    substitute_regions(write_regions_);
-    Map<Var, Optional<PrimExpr>> pitches;
-    for (const auto &[storage, pitch] : l0_pitches_) {
-      pitches.Set(storage.same_as(old_var) ? new_var : storage,
-                  pitch.defined() ? Optional<PrimExpr>(
-                                        Substitute(pitch.value(), substitution))
-                                  : std::nullopt);
+    substitute_vars(opaque_access_vars_);
+    for (auto &region : read_regions_)
+      region = RemapTaskRegion(region, substitution);
+    for (auto &region : write_regions_)
+      region = RemapTaskRegion(region, substitution);
+    if (auto primitive = new_var.as<PrimExpr>()) {
+      ffi::Map<Var, PrimExpr> values{{old_var, primitive.value()}};
+      Map<Var, Optional<PrimExpr>> pitches;
+      for (const auto &[storage, pitch] : l0_pitches_)
+        pitches.Set(
+            storage.same_as(old_var) ? new_var : storage,
+            pitch ? Optional<PrimExpr>(SubstituteConstraintExpr(*pitch, values))
+                  : std::nullopt);
+      l0_pitches_ = std::move(pitches);
+      outer_ctx = outer_ctx.Substitute(values);
     }
-    l0_pitches_ = std::move(pitches);
-    outer_ctx = outer_ctx.Substitute(substitution);
-    stmt = Substitute(stmt, substitution);
+    stmt = RemapTaskStatement(stmt, substitution);
     SubstituteVarInGuards(old_var, new_var);
     SubstituteVarInExtraInfo(old_var, new_var);
   }
@@ -621,10 +630,10 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   // Helper methods to add regions (for incremental analysis)
-  void AddReadRegion(const BufferRegion &region) {
+  void AddReadRegion(const TensorRegion &region) {
     // Check for duplicate regions
     for (const auto &existing : read_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
+      if (existing->source.same_as(region->source) &&
           RegionsEqual(existing->region, region->region)) {
         return; // Region already exists
       }
@@ -632,10 +641,10 @@ public:
     read_regions_.push_back(region);
   }
 
-  void AddWriteRegion(const BufferRegion &region) {
+  void AddWriteRegion(const TensorRegion &region) {
     // Check for duplicate regions
     for (const auto &existing : write_regions_) {
-      if (existing->buffer.same_as(region->buffer) &&
+      if (existing->source.same_as(region->source) &&
           RegionsEqual(existing->region, region->region)) {
         return; // Region already exists
       }
@@ -673,11 +682,15 @@ private:
   bool is_per_core_task_{false};
 
   // Logical access regions. Physical footprints are derived from current IR.
-  std::vector<BufferRegion> read_regions_;
-  std::vector<BufferRegion> write_regions_;
+  std::vector<TensorRegion> read_regions_;
+  std::vector<TensorRegion> write_regions_;
   Map<Var, Optional<PrimExpr>> l0_pitches_;
   std::vector<Var> read_vars_;
   std::vector<Var> write_vars_;
+
+  // Memory references with no precise region. These retain dependencies even
+  // when the pointer came from an opaque native expression.
+  std::vector<Var> opaque_access_vars_;
 
   CoreMask core_mask_{kCoreUnassigned};
 };
@@ -690,11 +703,17 @@ public:
   explicit ControlNode(std::unique_ptr<IRExtraInfo> extra_info = nullptr)
       : IRStructure(std::move(extra_info)) {}
 
-  For control; // The For operation
+  For control{ffi::UnsafeInit{}}; // The For operation
   std::shared_ptr<TaskNode> task;
   std::vector<std::shared_ptr<IRStructure>> children;
 
   Kind GetKind() const override { return Kind::kControl; }
+  std::vector<ChildList *> ChildLists() final { return {&children}; }
+  std::vector<const ChildList *> ChildLists() const final {
+    return {&children};
+  }
+  TaskNode *HeaderTask() final { return task.get(); }
+  const TaskNode *HeaderTask() const final { return task.get(); }
 
   bool BodyHasLoopBreak() const {
     for (const auto &child : children) {
@@ -757,8 +776,8 @@ public:
   }
 
   // Memory access regions (aggregate from children & task)
-  std::vector<BufferRegion> GetReadRegions() const override {
-    std::vector<BufferRegion> regions;
+  std::vector<TensorRegion> GetReadRegions() const override {
+    std::vector<TensorRegion> regions;
     for (const auto &child : children) {
       if (child) {
         auto child_regions = child->GetReadRegions();
@@ -772,8 +791,8 @@ public:
     }
     return regions;
   }
-  std::vector<BufferRegion> GetWriteRegions() const override {
-    std::vector<BufferRegion> regions;
+  std::vector<TensorRegion> GetWriteRegions() const override {
+    std::vector<TensorRegion> regions;
     for (const auto &child : children) {
       if (child) {
         auto child_regions = child->GetWriteRegions();
@@ -819,21 +838,17 @@ public:
   }
 
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
-    Map<Var, PrimExpr> substitution{{old_var, new_var}};
-    for (auto &child : children) {
+    Map<Var, PrimExpr> substitution{{old_var, new_var.as_or_throw<PrimExpr>()}};
+    for (auto &child : children)
       if (child)
         child->SubstituteVar(old_var, new_var);
-    }
     if (task)
       task->SubstituteVar(old_var, new_var);
-    // Also substitute in the For statement's min/extent/step
     For new_for = control;
-    new_for.CopyOnWrite()->min = Substitute(control->min, substitution);
-    new_for.CopyOnWrite()->extent = Substitute(control->extent, substitution);
-    if (control->step.has_value()) {
-      new_for.CopyOnWrite()->step =
-          Substitute(control->step.value(), substitution);
-    }
+    auto *writer = new_for.CopyOnWrite();
+    writer->begin = SubstituteConstraintExpr(control->begin, substitution);
+    writer->end = SubstituteConstraintExpr(control->end, substitution);
+    writer->step = SubstituteConstraintExpr(control->step, substitution);
     control = new_for;
     loop_body_ctx_ = loop_body_ctx_.Substitute(substitution);
     SubstituteVarInGuards(old_var, new_var);
@@ -844,26 +859,9 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   int64_t GetTripCount() const {
-    arith::Analyzer analyzer;
-    if (task)
-      task->outer_ctx.Populate(analyzer);
-    return GetSerialTripCount(control, &analyzer);
-  }
-
-  ControlNode *GetParentControl() {
-    IRStructure *parent = GetParent();
-    if (parent == nullptr)
-      return nullptr;
-    ICHECK(parent->IsControl());
-    return static_cast<ControlNode *>(parent);
-  }
-
-  const ControlNode *GetParentControl() const {
-    const IRStructure *parent = GetParent();
-    if (parent == nullptr)
-      return nullptr;
-    ICHECK(parent->IsControl());
-    return static_cast<const ControlNode *>(parent);
+    auto analyzer = CreateTileLangAnalyzer();
+    auto context = task ? task->outer_ctx.Populate(analyzer) : nullptr;
+    return GetSerialTripCount(control, analyzer.get());
   }
 
   // Return the root-to-this chain of enclosing loop controls, inclusive.
@@ -891,7 +889,8 @@ public:
   }
 
   bool IsMultiBufferEligible(const Var &storage) const {
-    auto annotation = control->annotations.Get(kMultiBufferEligible);
+    auto annotation =
+        ReadLoopAnnotations(control.get()).Get(kMultiBufferEligible);
     if (!annotation.has_value())
       return false;
     for (const Var &eligible : annotation.value().cast<Array<Var>>()) {
@@ -913,6 +912,142 @@ private:
   ConstrSet loop_body_ctx_;
 };
 
+// A lexical If, assumption/loop-metadata region, or metadata statement.
+// Children stay inside the exact original scope, so mutable conditions execute
+// once and branch-local definitions can never leak into sibling sequences.
+class ScopeNode : public IRStructure {
+public:
+  explicit ScopeNode(std::unique_ptr<IRExtraInfo> extra = nullptr)
+      : IRStructure(std::move(extra)) {}
+  Stmt shell{ffi::UnsafeInit{}};
+  // The lexical context before this scope/header. Metadata statements have no
+  // schedulable header task, but their typed operands still have a definition
+  // and execution domain that analysis must preserve.
+  ConstrSet outer_ctx;
+  Optional<PrimExpr> condition_snapshot;
+  std::shared_ptr<TaskNode> task;
+  ChildList children;
+  ChildList else_children;
+  bool has_else{false};
+  Kind GetKind() const final { return Kind::kScope; }
+  std::shared_ptr<IRStructure> Clone() const final;
+  std::vector<ChildList *> ChildLists() final {
+    return has_else ? std::vector<ChildList *>{&children, &else_children}
+                    : std::vector<ChildList *>{&children};
+  }
+  std::vector<const ChildList *> ChildLists() const final {
+    return has_else ? std::vector<const ChildList *>{&children, &else_children}
+                    : std::vector<const ChildList *>{&children};
+  }
+  TaskNode *HeaderTask() final { return task.get(); }
+  const TaskNode *HeaderTask() const final { return task.get(); }
+
+  template <typename F> void Each(F visit) const {
+    if (task)
+      visit(task.get());
+    for (const auto *list : ChildLists())
+      for (const auto &child : *list)
+        visit(child.get());
+  }
+  uint16_t GetPipeMask() const final {
+    uint16_t result = 0;
+    Each([&](const IRStructure *node) { result |= node->GetPipeMask(); });
+    return result;
+  }
+  uint16_t GetHbmMask() const final {
+    uint16_t result = 0;
+    Each([&](const IRStructure *node) { result |= node->GetHbmMask(); });
+    return result;
+  }
+  uint16_t GetSpecialWriteMask() const final {
+    uint16_t result = 0;
+    Each([&](const IRStructure *node) {
+      result |= node->GetSpecialWriteMask();
+    });
+    return result;
+  }
+  bool ReadsPadValueRegister() const final {
+    bool result = false;
+    Each([&](const IRStructure *node) {
+      result |= node->ReadsPadValueRegister();
+    });
+    return result;
+  }
+  bool ReadsAtomicRegister() const final {
+    bool result = false;
+    Each([&](const IRStructure *node) {
+      result |= node->ReadsAtomicRegister();
+    });
+    return result;
+  }
+  std::vector<TensorRegion> GetReadRegions() const final {
+    std::vector<TensorRegion> result;
+    Each([&](const IRStructure *node) {
+      auto values = node->GetReadRegions();
+      result.insert(result.end(), values.begin(), values.end());
+    });
+    return result;
+  }
+  std::vector<TensorRegion> GetWriteRegions() const final {
+    std::vector<TensorRegion> result;
+    Each([&](const IRStructure *node) {
+      auto values = node->GetWriteRegions();
+      result.insert(result.end(), values.begin(), values.end());
+    });
+    return result;
+  }
+  std::vector<Var> GetReadVars() const final {
+    std::vector<Var> result;
+    Each([&](const IRStructure *node) {
+      auto values = node->GetReadVars();
+      result.insert(result.end(), values.begin(), values.end());
+    });
+    return result;
+  }
+  std::vector<Var> GetWriteVars() const final {
+    std::vector<Var> result;
+    Each([&](const IRStructure *node) {
+      auto values = node->GetWriteVars();
+      result.insert(result.end(), values.begin(), values.end());
+    });
+    return result;
+  }
+  void SubstituteVar(const Var &old_var, const Var &new_var) final {
+    shell = RemapTaskStatement(shell, {{old_var, new_var}});
+    if (auto primitive = new_var.as<PrimExpr>()) {
+      outer_ctx = outer_ctx.Substitute({{old_var, primitive.value()}});
+      if (condition_snapshot)
+        condition_snapshot = SubstituteConstraintExpr(
+            *condition_snapshot, {{old_var, primitive.value()}});
+    }
+    if (task)
+      task->SubstituteVar(old_var, new_var);
+    for (auto *list : ChildLists())
+      for (auto &child : *list)
+        child->SubstituteVar(old_var, new_var);
+    SubstituteVarInGuards(old_var, new_var);
+    SubstituteVarInExtraInfo(old_var, new_var);
+  }
+};
+
+inline ControlNode *IRStructure::GetParentControl() {
+  IRStructure *parent = GetParent();
+  if (parent == nullptr)
+    return nullptr;
+  while (parent && !parent->IsControl())
+    parent = parent->GetParent();
+  return static_cast<ControlNode *>(parent);
+}
+
+inline const ControlNode *IRStructure::GetParentControl() const {
+  const IRStructure *parent = GetParent();
+  if (parent == nullptr)
+    return nullptr;
+  while (parent && !parent->IsControl())
+    parent = parent->GetParent();
+  return static_cast<const ControlNode *>(parent);
+}
+
 // Pass-local multi-buffer owner loops keyed by storage identity. Each owner
 // vector follows tree order at collection time and remains valid while the
 // decoded IRStructure tree is alive.
@@ -924,8 +1059,25 @@ using MultiBufferOwnerMap = std::unordered_map<Var, std::vector<ControlNode *>,
 // lexicographic order. A null node is the virtual root above every tree.
 int CompareIRStructure(IRStructure *lhs, IRStructure *rhs);
 
+struct SerialInductionInfo {
+  bool no_wrap{false};
+  // Inclusive machine-coordinate bounds when representable in int64.
+  std::optional<std::pair<int64_t, int64_t>> bounds;
+  bool int64_delta{false};
+};
+
+// Header range facts or a mandatory tail Break may prove that every executed
+// induction update stays within its machine type. This is not a trip count.
+SerialInductionInfo AnalyzeSerialInduction(const ControlNode *loop);
+
 // Flatten the current iteration over a loop and all of its ancestors. The
 // kernel top level (null) has iteration zero.
+// Lexical mixed-radix coordinate, not a count of completed iterations. Inner
+// positive For ranges provide nominal spans; early Break may leave holes.
+// A single signed nonzero-step loop uses its local (var - begin) / step
+// ordinal only with no-wrap evidence. Unknown machine-coordinate or int64
+// arithmetic bounds return nullopt; the strict wrapper diagnoses that case.
+Optional<PrimExpr> TryCalculateIterationCount(ControlNode *loop = nullptr);
 PrimExpr CalculateIterationCount(ControlNode *loop = nullptr);
 
 // ConstrSet-populated analyzers are proof-only. Their rewrites must never enter
@@ -936,12 +1088,14 @@ bool GuardImplies(const PrimExpr &premise, const PrimExpr &conclusion,
                   const ConstrSet &outer_ctx);
 Stmt WrapWithGuard(Stmt stmt, const PrimExpr &guard);
 
-inline bool IsRegisterRegion(const BufferRegion &region) {
-  String scope = region->buffer.scope();
+inline bool IsRegisterRegion(const TensorRegion &region) {
+  String scope = RegionTensor(region).scope().name();
   return scope == "local" || scope == "local.var" || scope == "local.fragment";
 }
 
 void CollectAllTaskNodes(IRStructure *node, std::vector<TaskNode *> &all_tasks);
+void CollectTaskNodesAndHeaders(IRStructure *node,
+                                std::vector<TaskNode *> &tasks);
 
 inline void
 CollectAllTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
@@ -950,9 +1104,14 @@ CollectAllTaskNodes(const std::vector<std::shared_ptr<IRStructure>> &nodes,
     CollectAllTaskNodes(node.get(), all_tasks);
 }
 
+inline void CollectTaskNodesAndHeaders(
+    const std::vector<std::shared_ptr<IRStructure>> &nodes,
+    std::vector<TaskNode *> &tasks) {
+  for (const auto &node : nodes)
+    CollectTaskNodesAndHeaders(node.get(), tasks);
+}
+
 // Debug logging helpers.
 void PrintIRStructure(const IRStructure *node, int indent = 0);
 
-} // namespace ascend
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl::ascend

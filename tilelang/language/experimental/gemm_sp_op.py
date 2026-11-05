@@ -3,7 +3,7 @@
 from __future__ import annotations
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tirx
+from tilelang.language import _native as tirx
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -36,8 +36,8 @@ def _gemm_sp_impl(
     """
 
     def legalize_arguments(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
-        if isinstance(arg, tirx.Var) and T.has_let_value(arg):
-            return T.get_let_value(arg).buffer
+        if isinstance(arg, tirx.Var) and not isinstance(arg, tirx.Buffer) and T.has_let_value(arg):
+            return T.get_let_value(arg).source
         return arg
 
     annotations = _normalize_annotations(annotations)
@@ -86,7 +86,7 @@ def _gemm_sp_impl(
     C_arg = buffer_region_to_tile_region(C_region, "rw", [r for r in C_shape])
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get(op_key),
+        tirx.Op.get(op_key),
         A_arg,
         E_arg,
         B_arg,

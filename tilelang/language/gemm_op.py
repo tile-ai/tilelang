@@ -5,7 +5,8 @@ from __future__ import annotations
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tvm import tirx, arith
+from tilelang.language import _native as tirx
+from tilelang._analyzer import create_analyzer
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -26,13 +27,13 @@ def _legalize_buffer_arg(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
     Returns:
         Union[tirx.Buffer, tirx.Var]: The legalized argument
     """
-    if isinstance(arg, tirx.Var) and T.has_let_value(arg):
-        return T.get_let_value(arg).buffer
+    if isinstance(arg, tirx.Var) and not isinstance(arg, tirx.Buffer) and T.has_let_value(arg):
+        return T.get_let_value(arg).source
     return arg
 
 
 def _prove_equal(expr1, expr2) -> bool:
-    return prim_expr_equal(expr1, expr2) or arith.Analyzer().can_prove_equal(expr1, expr2)
+    return prim_expr_equal(expr1, expr2) or create_analyzer().can_prove_equal(expr1, expr2)
 
 
 def _gemm_dense_slots(
@@ -92,11 +93,16 @@ def _gemm_dense_slots(
             raise ValueError(f"{api_name} requires static tile dimensions, but {name} is symbolic: {dim}")
 
     if mbar is not None:
+        from tilelang.language.builtin import _mbar_to_buffer_load
+
         assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
             f"mbar for {api_name} must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
         )
-        mbar = to_buffer_region(mbar, access_type="rw")
-    C_coords = [r.min for r in C_region.region[-2:]]
+        # The dense GEMM protocol names one completion-barrier slot, not a
+        # tensor region. Preserve an explicit element index; bare barrier
+        # tensors follow the same slot-zero convention as the wait helper.
+        mbar = _mbar_to_buffer_load(mbar)
+    C_coords = [r.begin for r in C_region.region[-2:]]
     # Convert BufferRegion to tl.region calls for arguments
     A_arg = buffer_region_to_tile_region(A_region, "r", list(A_shape))
     B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
@@ -154,7 +160,7 @@ def _gemm_impl(
         mbar,
         use_2cta=bool(annotations.get("use_2cta", 0)),
     )
-    return tirx.call_intrin("handle", tirx.op.Op.get(op_key), *slots, annotations=annotations)
+    return tirx.call_intrin("handle", tirx.Op.get(op_key), *slots, annotations=annotations)
 
 
 def gemm(
@@ -263,7 +269,7 @@ def _gemm_blockscaled_impl(
 
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get(op_key),
+        tirx.Op.get(op_key),
         *slots,
         SFA_arg,
         SFB_arg,

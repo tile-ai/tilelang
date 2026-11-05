@@ -1,546 +1,137 @@
 /*!
- * \brief Planning where buffers to be allocated and update the AST.
  * \file plan_update_buffer_allocation_location.cc
+ * \brief Place native allocation definitions before their first scoped use.
  */
+#include "../op/native_utils.h"
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/ir/type.h>
-#include <tvm/s_tir/analysis.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/tirx/var.h>
 
-#include <unordered_map>
+#include <vector>
 
-#include "../op/utils.h"
-#include "tir/transforms/ir_utils.h"
+namespace tvm::tl {
+namespace {
 
-// Forward-declare tir's var-level LCA helper which has no public header.
-namespace tvm {
-namespace tirx {
-using namespace ffi;
-
-Map<Var, Optional<Stmt>> DetectBufferVarAccessLCA(const PrimFunc &func);
-} // namespace tirx
-} // namespace tvm
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-using namespace tirx::transform;
-using tirx::SBlockNode;
-using tirx::SBlockRealizeNode;
-
-// TVM's LCA detector parses StorageScope for every touched buffer, while this
-// TVM submodule does not know TileLang's Metal cooperative tensor scope yet.
-// Cooperative tensor allocations are preserved in their original blocks, so the
-// LCA query can use an analysis-only copy where those buffers look local.
-class MetalCooperativeTensorLCASanitizer : public StmtExprMutator {
+// Native allocations are executable SSA definitions, rather than entries in
+// an SBlock's alloc_buffers. Their enclosing region already gives the legal
+// lifetime. Sinking a definition through a loop would turn loop-carried
+// storage into fresh storage on each iteration. Only shorten a constant
+// allocation's prefix inside its existing lexical sequence here. Physical
+// hoisting/packing is subsequently handled by StorageRewrite.
+class AllocationLocator : public tirx::StmtExprMutator {
 public:
-  struct Result {
-    PrimFunc func;
-    std::unordered_map<const StmtNode *, const StmtNode *> stmt_remap;
-  };
+  using StmtExprMutator::Mutate_;
 
-  static Result Sanitize(PrimFunc func) {
-    MetalCooperativeTensorLCASanitizer sanitizer;
-    auto fptr = func.CopyOnWrite();
-    fptr->body = sanitizer.VisitStmt(func->body);
-    return {func, std::move(sanitizer.stmt_remap_)};
-  }
-
-private:
-  Stmt VisitStmt(const Stmt &stmt) final {
-    if (!stmt.defined()) {
-      return stmt;
-    }
-    const StmtNode *original = stmt.get();
-    Stmt result = StmtExprMutator::VisitStmt(stmt);
-    stmt_remap_.emplace(original, original);
-    stmt_remap_.emplace(result.get(), original);
-    return result;
-  }
-
-  Buffer VisitBufferDef(const Buffer &buffer, bool alloc_data) final {
-    Buffer new_buffer = StmtExprMutator::VisitBufferDef(buffer, alloc_data);
-    return SanitizeBuffer(new_buffer);
-  }
-
-  Buffer VisitBufferUse(const Buffer &buffer) final {
-    Buffer new_buffer = StmtExprMutator::VisitBufferUse(buffer);
-    return SanitizeBuffer(new_buffer);
-  }
-
-  Buffer SanitizeBuffer(const Buffer &buffer) {
-    if (!buffer.defined() || buffer.scope() != "metal.cooperative_tensor") {
-      return buffer;
-    }
-    auto it = sanitized_buffers_.find(buffer.get());
-    if (it != sanitized_buffers_.end()) {
-      return it->second;
-    }
-
-    const auto *ptr_type = buffer->data->type_annotation.as<PointerTypeNode>();
-    ICHECK(ptr_type != nullptr)
-        << "Expected cooperative tensor buffer data to have pointer type: "
-        << buffer;
-    Var local_data(buffer->data->name_hint,
-                   PointerType(ptr_type->element_type, "local"),
-                   buffer->data->span);
-    Buffer sanitized(local_data, buffer->dtype, buffer->shape, buffer->strides,
-                     buffer->elem_offset, buffer->name, buffer->data_alignment,
-                     buffer->offset_factor, buffer->buffer_type,
-                     buffer->axis_separators, buffer->span);
-    sanitized_buffers_.emplace(buffer.get(), sanitized);
-    buffer_remap_.Set(buffer, sanitized);
-    return sanitized;
-  }
-
-  std::unordered_map<const BufferNode *, Buffer> sanitized_buffers_;
-  std::unordered_map<const StmtNode *, const StmtNode *> stmt_remap_;
-};
-
-class CollectManagedAllocations : public StmtExprVisitor {
-public:
-  void VisitStmt_(const SBlockNode *op) final {
-    for (const auto &buf : op->alloc_buffers) {
-      managed_allocations.insert(buf->data.get());
-    }
-    for (const auto &buf : op->match_buffers) {
-      managed_allocations.insert(buf->buffer->data.get());
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  /*! \brief Buffers that are allocated outside of the SBlockNode, and should
-   * not be moved by BufferAllocationLocator. */
-  std::unordered_set<const VarNode *> managed_allocations;
-};
-
-/*! \brief Collect the allocate buffer order. */
-class BufferAllocateOrderCollector : public StmtExprVisitor {
-public:
-  static Array<Buffer> Collect(const PrimFunc &func) {
-    BufferAllocateOrderCollector collector;
-    for (const auto &kv : func->buffer_map) {
-      collector.buffer_alloc_recorder_.push_back(kv.second);
-    }
-    collector(func->body);
-    return std::move(collector.buffer_alloc_recorder_);
-  }
-
-private:
-  bool find(const Buffer &buf) {
-    return std::find(buffer_alloc_recorder_.begin(),
-                     buffer_alloc_recorder_.end(),
-                     buf) != buffer_alloc_recorder_.end();
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    for (const Buffer &buffer : op->alloc_buffers) {
-      buffer_alloc_recorder_.push_back(buffer);
-    }
-    // Also visit match_buffers to collect constant buffers associated with
-    // AllocateConst nodes. These buffers only appear in read and match_buffer
-    // regions.
-    for (const auto &region : op->match_buffers) {
-      if (!find(region->source->buffer)) {
-        buffer_alloc_recorder_.push_back(region->source->buffer);
-      }
-    }
-
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (!find(op->buffer)) {
-      buffer_alloc_recorder_.push_back(op->buffer);
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    if (!find(op->buffer)) {
-      buffer_alloc_recorder_.push_back(op->buffer);
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  /*! \brief The buffer allocated order recorder. */
-  Array<Buffer> buffer_alloc_recorder_;
-};
-
-/*! \brief Collect scope parent links and buffer vars referenced in for headers.
- *
- *  Allocations attached to a ForNode are injected into the loop body.  If a
- *  buffer var is referenced by the loop header itself (e.g. in the extent),
- *  the allocation must therefore be placed at an outer scope instead.
- */
-class ScopePlacementInfoCollector : public StmtExprVisitor {
-public:
-  static ScopePlacementInfoCollector Collect(const PrimFunc &func) {
-    ScopePlacementInfoCollector collector;
-    collector.scope_stack_.push_back(nullptr);
-    collector(func->body);
-    return collector;
-  }
-
-  std::unordered_map<const StmtNode *, const StmtNode *> parent_scope_;
-  std::unordered_map<const ForNode *, std::unordered_set<const VarNode *>>
-      for_header_vars_;
-
-private:
-  void VisitStmt_(const SBlockRealizeNode *op) final {
-    parent_scope_[op->block.get()] = scope_stack_.back();
-    scope_stack_.push_back(op->block.get());
-    if (!is_one(op->predicate)) {
-      this->VisitExpr(op->predicate);
-    }
-    this->VisitStmt(op->block->body);
-    scope_stack_.pop_back();
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    parent_scope_[op] = scope_stack_.back();
-    const ForNode *prev_for_header = current_for_header_;
-    current_for_header_ = op;
-    this->VisitExpr(op->min);
-    this->VisitExpr(op->extent);
-    for (const auto &kv : op->annotations) {
-      if (auto expr = kv.second.try_cast<PrimExpr>()) {
-        this->VisitExpr(expr.value());
-      }
-    }
-    current_for_header_ = prev_for_header;
-
-    scope_stack_.push_back(op);
-    this->VisitStmt(op->body);
-    scope_stack_.pop_back();
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    if (current_for_header_ != nullptr) {
-      for_header_vars_[current_for_header_].insert(op->buffer->data.get());
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  void VisitExpr_(const VarNode *op) final {
-    if (current_for_header_ != nullptr) {
-      for_header_vars_[current_for_header_].insert(op);
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
-  std::vector<const StmtNode *> scope_stack_;
-  const ForNode *current_for_header_{nullptr};
-};
-
-class BufferAllocationLocator : public StmtExprMutator {
-public:
-  explicit BufferAllocationLocator(const PrimFunc &func) {
-    // Use TVM's tir LCA detection implementation
-    MetalCooperativeTensorLCASanitizer::Result lca_input =
-        MetalCooperativeTensorLCASanitizer::Sanitize(func);
-    Map<Buffer, Optional<Stmt>> buffer_lca =
-        tirx::DetectBufferAccessLCA(lca_input.func);
-    Map<Var, Optional<Stmt>> var_lca =
-        tirx::DetectBufferVarAccessLCA(lca_input.func);
-
-    // The buffer_alloc_recorder Array is used to keep the buffer allocation
-    // order since the buffer_lca Map is unordered.
-    Array<Buffer> buffer_alloc_recorder =
-        BufferAllocateOrderCollector::Collect(func);
-    std::unordered_set<const VarNode *> arg_buffer_vars;
-    CollectManagedAllocations collector;
-    ScopePlacementInfoCollector scope_info =
-        ScopePlacementInfoCollector::Collect(func);
-    collector(func->body);
-    managed_allocations_ = collector.managed_allocations;
-    parent_scope_ = std::move(scope_info.parent_scope_);
-    for_header_vars_ = std::move(scope_info.for_header_vars_);
-
-    for (const auto &kv : func->buffer_map) {
-      const Buffer &buffer = kv.second;
-      arg_buffer_vars.emplace(buffer->data.get());
-      PushBinding(buffer->data, buffer);
-    }
-    // create buffers to be allocated at each stmts
-    for (const auto &buffer : buffer_alloc_recorder) {
-      // Shared barriers must stay in their original block so the accompanying
-      // barrier_init annotation remains attached to the block that owns the
-      // initialization. Moving them into injected opaque blocks causes
-      // LowerSharedBarrier to see barrier buffers without local annotations.
-      if (ShouldPreserveOriginalBlock(buffer)) {
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
+    SeqStmt sequence = StmtExprMutator::Mutate_(op, mode)
+                           .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                           .as_or_throw<SeqStmt>();
+    const auto &statements = sequence->seq;
+    std::vector<ffi::Array<Stmt>> insertions(statements.size());
+    std::vector<bool> moved(statements.size(), false);
+    bool changed = false;
+    for (size_t i = 0; i < statements.size(); ++i) {
+      const auto *binding = statements[i].as<BindObj>();
+      if (!CanDelay(binding))
         continue;
-      }
-      // Prefer the LCA derived from the underlying data var. If missing, fall
-      // back to Buffer LCA.
-      const StmtNode *stmt = nullptr;
-      auto vit = var_lca.find(buffer->data);
-      if (vit != var_lca.end()) {
-        stmt = RemapAnalysisStmt((*vit).second.get(), lca_input.stmt_remap);
-      } else {
-        auto bit = buffer_lca.find(buffer);
-        if (bit != buffer_lca.end()) {
-          stmt = RemapAnalysisStmt((*bit).second.get(), lca_input.stmt_remap);
+      size_t first_use = statements.size();
+      for (size_t j = i + 1; j < statements.size(); ++j) {
+        // Types are visited at definitions. A tensor used by a loop header,
+        // view, pointer alias, shape or layout must precede that entire
+        // statement, never just its body.
+        for (const Var &var : UndefinedVars(statements[j]))
+          if (var.same_as(binding->var))
+            first_use = j;
+        if (first_use != statements.size() ||
+            HasControlBoundary(statements[j])) {
+          first_use = j;
+          break;
         }
       }
-      stmt = ResolveAllocationSite(buffer->data.get(), stmt);
-      if (stmt != nullptr || vit != var_lca.end()) {
-        // Skip moving allocations that are already bound to func arguments.
-        if (arg_buffer_vars.count(buffer->data.get())) {
-          continue;
-        }
-        // Only allocate managed allocations (a.k.a ignore the ones that are not
-        // allocated outside of the block)
-        if (managed_allocations_.count(buffer->data.get())) {
-          alloc_buffers_[stmt].push_back(buffer);
-        }
-        // Do not push binding here. Bindings should reflect scope accurately,
-        // and will be pushed/popped when visiting the owning stmt.
-      }
+      // Preserve unused allocations and their annotations for their owners.
+      if (first_use == statements.size() || first_use <= i + 1)
+        continue;
+      insertions[first_use].push_back(statements[i]);
+      moved[i] = changed = true;
     }
+    if (!changed)
+      return sequence;
+    ffi::Array<Stmt> result;
+    for (size_t i = 0; i < statements.size(); ++i) {
+      for (const Stmt &binding : insertions[i])
+        result.push_back(binding);
+      if (!moved[i])
+        result.push_back(statements[i]);
+    }
+    return SeqStmt(result, sequence->loc);
   }
 
 private:
-  static const StmtNode *RemapAnalysisStmt(
-      const StmtNode *stmt,
-      const std::unordered_map<const StmtNode *, const StmtNode *> &remap) {
-    if (stmt == nullptr) {
-      return nullptr;
+  static bool CanDelay(const BindObj *binding) {
+    if (!binding)
+      return false;
+    const auto *call = binding->value.as<CallObj>();
+    if (!call || !call->op.same_as(tirx::alloc_tensor_op()) ||
+        !call->args.empty())
+      return false;
+    auto type = binding->var->ty.as<tirx::TensorType>();
+    if (!type || !UndefinedVars(*type).empty())
+      return false;
+    const auto scope = type.value()->scope.name();
+    // Barrier initialization, TMEM, Metal cooperative tensors and backend
+    // special storage are coupled to their original owning region.
+    if (scope != "local" && scope != "local.var" && scope != "shared" &&
+        scope != "shared.dyn")
+      return false;
+    if (type.value()->layout || type.value()->dtype.IsScalableVector())
+      return false;
+    for (const PrimExpr &extent : type.value()->shape) {
+      const auto *value = extent.as<IntImmObj>();
+      if (!value || value->value <= 0)
+        return false;
     }
-    auto it = remap.find(stmt);
-    return it == remap.end() ? stmt : it->second;
+    if (call->attrs) {
+      auto attrs = call->attrs.value().as<DictAttrs>();
+      if (!attrs || !attrs.value()->dict.empty())
+        return false;
+    }
+    return true;
   }
 
-  // Maintain a stack of Buffers per data var to correctly handle cases
-  // where multiple Buffer objects share the same underlying data Var.
-  void PushBinding(const Var &v, const Buffer &buf) {
-    Array<Buffer> arr;
-    auto it = buffer_data_to_buffers_.find(v);
-    if (it != buffer_data_to_buffers_.end()) {
-      arr = (*it).second;
-    }
-    arr.push_back(buf);
-    buffer_data_to_buffers_.Set(v, arr);
-  }
-
-  void PopBinding(const Var &v) {
-    auto it = buffer_data_to_buffers_.find(v);
-    if (it == buffer_data_to_buffers_.end())
-      return;
-    Array<Buffer> arr = (*it).second;
-    if (!arr.empty()) {
-      // erase last element
-      std::vector<Buffer> tmp;
-      tmp.reserve(arr.size() - 1);
-      for (size_t i = 0; i + 1 < arr.size(); ++i)
-        tmp.push_back(arr[i]);
-      arr = Array<Buffer>(tmp);
-    }
-    if (arr.empty()) {
-      buffer_data_to_buffers_.erase(v);
-    } else {
-      buffer_data_to_buffers_.Set(v, arr);
-    }
-  }
-
-  bool HasBinding(const Var &v) const {
-    auto it = buffer_data_to_buffers_.find(v);
-    return it != buffer_data_to_buffers_.end() && !(*it).second.empty();
-  }
-
-  // Snapshot the current top binding per Var for APIs that require
-  // a single Buffer per data Var (e.g. GetSBlockReadWriteRegion).
-  Map<Var, Buffer> SnapshotVarMap() const {
-    Map<Var, Buffer> out;
-    for (const auto &kv : buffer_data_to_buffers_) {
-      const Var &v = kv.first;
-      const Array<Buffer> &arr = kv.second;
-      if (!arr.empty()) {
-        out.Set(v, arr[arr.size() - 1]);
-      }
-    }
-    return out;
-  }
-
-  const StmtNode *ResolveAllocationSite(const VarNode *buffer_var,
-                                        const StmtNode *stmt) const {
-    while (stmt != nullptr && stmt->IsInstance<ForNode>()) {
-      const auto *for_node = static_cast<const ForNode *>(stmt);
-      auto header_it = for_header_vars_.find(for_node);
-      if (header_it == for_header_vars_.end() ||
-          !header_it->second.count(buffer_var)) {
-        break;
-      }
-      auto parent_it = parent_scope_.find(stmt);
-      if (parent_it == parent_scope_.end() || parent_it->second == nullptr) {
-        break;
-      }
-      stmt = parent_it->second;
-    }
-    return stmt;
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    auto it = alloc_buffers_.find(op);
-    if (it == alloc_buffers_.end()) {
-      return StmtMutator::VisitStmt_(op);
-    }
-    for (const Buffer &buf : it->second) {
-      PushBinding(buf->data, buf);
-    }
-    auto node = Downcast<For>(StmtMutator::VisitStmt_(op));
-    Array<Buffer> new_block_alloc_bufs;
-    for (const Buffer &buf : it->second) {
-      if (managed_allocations_.count(buf->data.get())) {
-        PopBinding(buf->data);
-        new_block_alloc_bufs.push_back(buf);
-      }
-    }
-
-    if (!new_block_alloc_bufs.empty()) {
-      node.CopyOnWrite()->body =
-          InjectOpaqueBlock(node->body, new_block_alloc_bufs);
-    }
-
-    return node;
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    ICHECK(!op->init.defined());
-    Array<Buffer> alloc_buffers;
-    Array<Buffer> preserved_original_block_buffers;
-    for (const Buffer &buf : op->alloc_buffers) {
-      if (ShouldPreserveOriginalBlock(buf)) {
-        alloc_buffers.push_back(buf);
-        preserved_original_block_buffers.push_back(buf);
-        PushBinding(buf->data, buf);
-      }
-    }
-    auto it = alloc_buffers_.find(op);
-    if (it != alloc_buffers_.end()) {
-      for (const Buffer &buf : it->second) {
-        alloc_buffers.push_back(buf);
-        PushBinding(buf->data, buf);
-      }
-    }
-    for (const MatchBufferRegion match_buffer : op->match_buffers) {
-      const Var &target_var = match_buffer->buffer->data;
-      const Var &source_var = match_buffer->source->buffer->data;
-      ICHECK(HasBinding(source_var));
-      PushBinding(target_var, match_buffer->buffer);
-    }
-    Stmt stmt = StmtMutator::VisitStmt_(op);
-    op = stmt.as<SBlockNode>();
-    ICHECK(op != nullptr);
-
-    // No longer consider buffers created by match_buffer inside the block when
-    // updating access region.
-    for (const MatchBufferRegion match_buffer : op->match_buffers) {
-      const Var &target_var = match_buffer->buffer->data;
-      PopBinding(target_var);
-    }
-    // No longer consider buffers allocated inside the block when updating
-    // access region.
-    if (it != alloc_buffers_.end()) {
-      for (const Buffer &buf : it->second) {
-        PopBinding(buf->data);
-      }
-    }
-    for (const Buffer &buf : preserved_original_block_buffers) {
-      PopBinding(buf->data);
-    }
-
-    ObjectPtr<SBlockNode> n = CopyOnWrite(op);
-    n->alloc_buffers = std::move(alloc_buffers);
-    // Erase buffer allocated inside the block from access region.
-    n->reads = RemoveRedundantBufferRegion(n->reads);
-    n->writes = RemoveRedundantBufferRegion(n->writes);
-    return Stmt(n);
-  }
-
-  Stmt InjectOpaqueBlock(Stmt body, const Array<Buffer> &alloc_buffers) {
-    ICHECK(!alloc_buffers.empty());
-    SBlock opaque_block(/*iter_vars=*/{},
-                        /*reads=*/{},
-                        /*writes=*/{},
-                        /*name_hint=*/"",
-                        /*body=*/std::move(body),
-                        /*init=*/std::nullopt,
-                        /*alloc_buffers=*/alloc_buffers);
-    ObjectPtr<SBlockNode> n = CopyOnWrite(opaque_block.get());
-    // Snapshot to a Var->Buffer map using the innermost binding for each Var.
-    Map<Var, Buffer> var_map = SnapshotVarMap();
-    Array<Array<BufferRegion>> access =
-        GetSBlockReadWriteRegion(opaque_block, var_map);
-    n->reads = access[0];
-    n->writes = access[1];
-    SBlockRealize realize({}, Bool(true), SBlock(n));
-    return realize;
-  }
-
-  Array<BufferRegion>
-  RemoveRedundantBufferRegion(const Array<BufferRegion> &region) const {
-    Array<BufferRegion> result;
-    for (const BufferRegion &buffer_region : region) {
-      if (HasBinding(buffer_region->buffer->data)) {
-        result.push_back(buffer_region);
-      }
-    }
-    return result;
-  }
-
-  /*! \brief The map from stmt to the buffers to be allocated under it. */
-  std::unordered_map<const StmtNode *, Array<Buffer>> alloc_buffers_;
-  /*! \brief Parent scope for each For/Block stmt. */
-  std::unordered_map<const StmtNode *, const StmtNode *> parent_scope_;
-  /*! \brief Buffer vars referenced in the header of each For stmt. */
-  std::unordered_map<const ForNode *, std::unordered_set<const VarNode *>>
-      for_header_vars_;
-  /*! \brief Stack of buffers per data var for scoping correctness. */
-  Map<Var, Array<Buffer>> buffer_data_to_buffers_;
-  /*! \brief Buffers that are allocated within a SBlockNode, and may be moved.
-   */
-  std::unordered_set<const VarNode *> managed_allocations_;
-
-  static bool ShouldPreserveOriginalBlock(const Buffer &buffer) {
-    String scope = buffer.scope();
-    return scope == "shared.barrier" || scope == "shared.cluster_barrier" ||
-           scope == "metal.cooperative_tensor";
+  static bool HasControlBoundary(const Stmt &statement) {
+    bool found = false;
+    VisitNativePostOrder(statement, [&](const ffi::ObjectRef &node) {
+      if (node.as<ReturnObj>() || node.as<BreakObj>() ||
+          node.as<ContinueObj>() || node.as<AssertStmtObj>() ||
+          node.as<WhileObj>() || node.as<RegionStmtObj>())
+        found = true;
+    });
+    return found;
   }
 };
-
-PrimFunc PlanAndUpdateBufferAllocationLocation(PrimFunc func) {
-  auto fptr = func.CopyOnWrite();
-  BufferAllocationLocator locator(func);
-  fptr->body = locator(fptr->body);
-  return func;
-}
+} // namespace
 
 namespace transform {
-
-Pass PlanAndUpdateBufferAllocationLocation() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return ::tvm::tl::PlanAndUpdateBufferAllocationLocation(std::move(f));
+tvm::transform::Pass PlanAndUpdateBufferAllocationLocation() {
+  auto rewrite = [](tirx::Function function, IRModule,
+                    tvm::transform::PassContext) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto locator = ffi::make_object<AllocationLocator>();
+    SeqStmt body = function->body;
+    function.CopyOnWrite()->body = locator->Mutate(body).ValueOrUnchanged(body);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0,
-                            "tl.PlanAndUpdateBufferAllocationLocation", {});
+  return tirx::transform::CreateFunctionPass(
+      rewrite, 0, "tl.PlanAndUpdateBufferAllocationLocation");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.PlanAndUpdateBufferAllocationLocation",
-                        PlanAndUpdateBufferAllocationLocation);
+  ffi::reflection::GlobalDef().def(
+      "tl.transform.PlanAndUpdateBufferAllocationLocation",
+      PlanAndUpdateBufferAllocationLocation);
 }
-
 } // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

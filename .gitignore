@@ -19,6 +19,8 @@
 
 debug/
 build/
+/build-python-components/
+/build-manifest-probe/
 *dist/
 dist*/
 wheelhouse/
@@ -130,3 +132,7 @@ maint/host_checks/logs/*
 
 # uv Lockfile
 uv.lock
+
+# Matched compiler/FFI packaging snapshots
+.native-stage/
+.native-*-stage/

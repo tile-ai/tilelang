@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tvm.target import Target
+from tvm_tirx.target import Target
 from .arch_base import TileDevice
 
 

@@ -7,10 +7,10 @@
 #include "./atomic_reduce.h"
 #include "support/check.h"
 #include "utils.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/attr.h>
+#include <tvm/tirx/op/math.h>
+#include <tvm/tirx/op/memory.h>
 
 #include "../layout/layout.h"
 
@@ -22,6 +22,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
@@ -65,25 +66,25 @@ void RegisterAtomicReduceImpl(AtomicReduceImpl impl) {
 // AtomicMax Implementation
 // ============================================================================
 
-AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+AtomicMax::AtomicMax(Array<Expr> args, Map<String, Any> annotations) {
   ICHECK(args.size() >= 2)
       << "AtomicMax expects at least 2 arguments (src, dst), got "
       << args.size();
   ObjectPtr<AtomicMaxNode> node = make_object<AtomicMaxNode>();
   std::vector<AccessRegion> access_regions;
 
-  if (IsBufferLikeExpr(args[0])) {
+  if (IsTensorLikeExpr(args[0])) {
     auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-    node->src = src_access.region->buffer;
+    node->src = RegionTensor(src_access.region);
     node->src_range = src_access.region->region;
     access_regions.push_back(std::move(src_access));
   } else {
-    node->src_value = args[0];
+    node->src_value = args[0].as_or_throw<PrimExpr>();
   }
 
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
   dst_access.access_mask = kAccessReadWrite;
-  node->dst = dst_access.region->buffer;
+  node->dst = RegionTensor(dst_access.region);
   node->dst_range = dst_access.region->region;
   access_regions.push_back(std::move(dst_access));
   node->SetAccessRegions(std::move(access_regions));
@@ -95,7 +96,7 @@ AtomicMax::AtomicMax(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 TileOperator AtomicMaxNode::Clone() const {
   auto op = make_object<AtomicMaxNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = (par_op_->Clone()).template as_or_throw<ParallelOp>();
   }
   return AtomicMax(op);
 }
@@ -106,25 +107,25 @@ const Op &AtomicMaxNode::GetElemOp() const { return atomic_max_elem_op(); }
 // AtomicMin Implementation
 // ============================================================================
 
-AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
+AtomicMin::AtomicMin(Array<Expr> args, Map<String, Any> annotations) {
   ICHECK(args.size() >= 2)
       << "AtomicMin expects at least 2 arguments (src, dst), got "
       << args.size();
   ObjectPtr<AtomicMinNode> node = make_object<AtomicMinNode>();
   std::vector<AccessRegion> access_regions;
 
-  if (IsBufferLikeExpr(args[0])) {
+  if (IsTensorLikeExpr(args[0])) {
     auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-    node->src = src_access.region->buffer;
+    node->src = RegionTensor(src_access.region);
     node->src_range = src_access.region->region;
     access_regions.push_back(std::move(src_access));
   } else {
-    node->src_value = args[0];
+    node->src_value = args[0].as_or_throw<PrimExpr>();
   }
 
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
   dst_access.access_mask = kAccessReadWrite;
-  node->dst = dst_access.region->buffer;
+  node->dst = RegionTensor(dst_access.region);
   node->dst_range = dst_access.region->region;
   access_regions.push_back(std::move(dst_access));
   node->SetAccessRegions(std::move(access_regions));
@@ -136,7 +137,7 @@ AtomicMin::AtomicMin(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
 TileOperator AtomicMinNode::Clone() const {
   auto op = make_object<AtomicMinNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = (par_op_->Clone()).template as_or_throw<ParallelOp>();
   }
   return AtomicMin(op);
 }
@@ -150,7 +151,7 @@ LayoutMap AtomicOpBaseNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 Stmt AtomicOpBaseNode::Lower(const LowerArgs &lower_args,
-                             arith::Analyzer *analyzer) const {
+                             sym::AnalyzerObj *analyzer) const {
   return ResolveAtomicReduceImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
@@ -160,14 +161,8 @@ Stmt AtomicOpBaseNode::Lower(const LowerArgs &lower_args,
 // ============================================================================
 
 TIR_REGISTER_TL_TILE_OP(AtomicMax, atomicmax)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
 TIR_REGISTER_TL_TILE_OP(AtomicMin, atomicmin)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   AtomicMaxNode::RegisterReflection();

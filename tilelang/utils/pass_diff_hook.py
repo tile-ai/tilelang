@@ -1,7 +1,7 @@
 """Framework-level pass diff hook.
 
 When the ``TILELANG_PASS_DIFF`` environment variable is enabled, this module
-monkey-patches ``tvm.ir.transform.Pass.__call__`` to automatically capture
+monkey-patches ``tvm_tirx.ir.transform.Pass.__call__`` to automatically capture
 IR before/after every pass and generate diff reports.
 
 Usage (no code changes needed)::
@@ -59,14 +59,12 @@ def _patched_call(self, mod):
     generate_html = _diff_utils["generate_html"]
     dim = _diff_utils["dim"]
     reset = _diff_utils["reset"]
+    get_script = _diff_utils["get_script"]
 
     mode = _mode or "terminal"
 
     # Capture before
-    try:
-        before_script = mod.script()
-    except Exception:
-        before_script = "<failed to capture>"
+    before_script = get_script(mod)
 
     before_lines = before_script.splitlines()
 
@@ -74,10 +72,7 @@ def _patched_call(self, mod):
     result = _original_call(self, mod)
 
     # Capture after
-    try:
-        after_script = result.script()
-    except Exception:
-        after_script = "<failed to capture>"
+    after_script = get_script(result)
 
     after_lines = after_script.splitlines()
 
@@ -139,6 +134,7 @@ def install_pass_diff_hook() -> None:
 
     # Preload diff utilities once at install time
     from tilelang.utils.pass_diff import (
+        _get_script,
         _compute_diff,
         _count_changes,
         _generate_html,
@@ -149,6 +145,7 @@ def install_pass_diff_hook() -> None:
     )
 
     _diff_utils = {
+        "get_script": _get_script,
         "compute_diff": _compute_diff,
         "count_changes": _count_changes,
         "generate_html": _generate_html,
@@ -158,7 +155,7 @@ def install_pass_diff_hook() -> None:
         "reset": _RESET,
     }
 
-    from tvm.ir.transform import Pass
+    from tvm_tirx.ir.transform import Pass
 
     _original_call = Pass.__call__
     Pass.__call__ = _patched_call  # type: ignore[assignment]
@@ -193,7 +190,7 @@ def uninstall_pass_diff_hook() -> None:
     if _original_call is None:
         return
 
-    from tvm.ir.transform import Pass
+    from tvm_tirx.ir.transform import Pass
 
     Pass.__call__ = _original_call  # type: ignore[assignment]
     _original_call = None

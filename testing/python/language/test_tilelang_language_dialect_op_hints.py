@@ -18,8 +18,8 @@ import tilelang.cpu.language as Tcpu
 import tilelang.language as T
 import tilelang.rocm.language as Trocm
 import tilelang.testing
-from tvm import tirx
-from tvm.tirx.stmt_functor import post_order_visit
+from tvm_tirx import ir
+import tvm_ffi
 
 
 def _keywords(func) -> set[str]:
@@ -34,10 +34,13 @@ def _tileop_annotations(func, opname: str) -> dict:
     found = {}
 
     def visit(node):
-        if isinstance(node, tirx.Call) and str(getattr(node.op, "name", "")) == opname:
-            found.update({str(k): v for k, v in node.annotations.items()})
+        if isinstance(node, ir.Call) and str(getattr(node.op, "name", "")) == opname:
+            count = int(node.attrs["operand_count"])
+            assert len(node.args) == count + 1
+            annotations = tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[count], node.attrs["annotation_schema"])
+            found.update({str(k): v for k, v in annotations.items()})
 
-    post_order_visit(func.body, visit)
+    tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, visit), order="post")
     return found
 
 
@@ -81,7 +84,7 @@ def test_cuda_copy_hints_are_recorded_as_annotations():
     ann = _tileop_annotations(main, "tl.tileop.copy")
     assert int(ann["disable_tma"]) == 1
     assert int(ann["eviction_policy"]) == 2
-    assert isinstance(ann["prefer_instruction"], tirx.StringImm) and ann["prefer_instruction"].value == "cp_async"
+    assert isinstance(ann["prefer_instruction"], ir.StringImm) and ann["prefer_instruction"].value == "cp_async"
 
 
 def test_cuda_atomic_add_use_tma_is_recorded_as_annotation():
@@ -108,10 +111,10 @@ def test_cuda_loop_hints_are_recorded_as_loop_annotations():
     annotations = {}
 
     def visit(node):
-        if isinstance(node, tirx.For):
+        if isinstance(node, ir.For):
             annotations.update({str(k): v for k, v in node.annotations.items()})
 
-    post_order_visit(main.body, visit)
+    tvm_ffi.structural_walk(main.body, (tvm_ffi.Object, visit), order="post")
     assert bool(annotations["parallel_prefer_async"])
     assert int(annotations["pragma_unroll_factor"]) == 2
 

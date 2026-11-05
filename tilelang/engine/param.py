@@ -1,188 +1,152 @@
-"""The profiler and convert to torch utils"""
+"""Native tensor/scalar metadata shared by code generation, JIT, and caching."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import torch
-from tilelang import tvm as tvm
-from tvm.tirx import Buffer, IntImm, Var, PrimExpr
-import tilelang.language as T
+from typing import TYPE_CHECKING, Literal
+
+import tvm_ffi
+from tvm_tirx import ir, tirx
+from tvm_tirx.target import Target
+
+if TYPE_CHECKING:
+    import torch
+    import tilelang.language as T
+
+
+def _storage_dtype(value) -> tvm_ffi.dtype:
+    """Preserve DLPack fields when a reflected primitive type crosses to Python."""
+    if isinstance(value, ir.PrimType):
+        value = value.dtype
+    return value if isinstance(value, tvm_ffi.dtype) else tvm_ffi.dtype(value)
 
 
 @dataclass
 class KernelParam:
-    """
-    Represents parameters for a kernel operation, storing dtype and shape information.
-    Used to describe tensor or scalar parameters in TVM/PyTorch interop.
+    """Describe one public argument without depending on a removed buffer_map.
+
+    ``kind`` distinguishes a rank-zero tensor from a scalar. Two-argument
+    construction keeps its established interpretation: an empty shape is a
+    scalar, and a nonempty shape is a tensor. Native constructors set the kind
+    from the parameter type, including for rank-zero tensors and raw pointers.
     """
 
-    # Use tvm.DataType (buffer.dtype) directly instead of torch.dtype to support more data types
-    # tvm.DataType can represent a much wider range of types than PyTorch's dtype system,
-    # including specialized types like float8_e4m3, float8_e5m2, custom quantized types, etc.
-    # This avoids information loss when converting from TVM buffer types
-    dtype: tvm.DataType  # Data type from buffer.dtype (supports all TVM types)
-    shape: list[int | Var]  # List of dimensions, can be integers or TVM variables
+    dtype: tvm_ffi.dtype
+    shape: list[int | ir.Expr]
+    kind: Literal["tensor", "scalar", "pointer"] | None = None
+
+    def __post_init__(self):
+        self.dtype = _storage_dtype(self.dtype)
+        if self.kind is None:
+            self.kind = "tensor" if self.shape else "scalar"
+        if self.kind not in ("tensor", "scalar", "pointer"):
+            raise ValueError(f"Unknown kernel parameter kind: {self.kind}")
+        if self.kind != "tensor" and self.shape:
+            raise ValueError("Only tensor parameters have a shape")
 
     @classmethod
-    def from_buffer(cls, buffer: Buffer):
-        """
-        Creates a KernelParam instance from a TVM Buffer object.
-
-        Args:
-            buffer: TVM Buffer object containing dtype and shape information
-
-        Returns:
-            KernelParam instance with dtype directly from buffer and shape
-
-        Raises:
-            ValueError: If dimension type is not supported (not IntImm or Var)
-        """
-        # Use buffer.dtype directly (tvm.DataType) to preserve all type information
-        # buffer.dtype is already a tvm.DataType object, no conversion needed
-        dtype = buffer.dtype
+    def from_tensor(cls, tensor: tirx.TensorType | ir.Expr):
+        """Read dtype and shape from a native TensorType or tensor expression."""
+        ty = tensor if isinstance(tensor, tirx.TensorType) else tensor.ty
+        if not isinstance(ty, tirx.TensorType):
+            raise TypeError(f"Expected a native tensor type, got {type(ty).__name__}")
         shape = []
-        for s in buffer.shape:
-            if isinstance(s, IntImm):
-                shape.append(s.value)
-            elif isinstance(s, (Var, PrimExpr)):
-                shape.append(s)
+        for dim in ty.shape:
+            if isinstance(dim, ir.IntImm):
+                shape.append(int(dim.value))
+            elif ir.is_prim_expr(dim):
+                shape.append(dim)
             else:
-                raise ValueError(f"Unsupported dimension type: {type(s)} {s}")
-        return cls(dtype, shape)
+                raise ValueError(f"Unsupported tensor dimension: {type(dim).__name__}")
+        return cls(_storage_dtype(ty.dtype), shape, "tensor")
 
     @classmethod
-    def from_var(cls, var: Var):
-        """
-        Creates a KernelParam instance from a TVM Variable object.
-        Used for scalar parameters.
+    def from_buffer(cls, buffer: tirx.TensorType | ir.Expr):
+        """Retain this metadata constructor spelling for native tensor inputs."""
+        return cls.from_tensor(buffer)
 
-        Args:
-            var: TVM Variable object containing dtype information
-
-        Returns:
-            KernelParam instance representing a scalar (empty shape)
-        """
-        # Use var.dtype directly (tvm.DataType) to preserve all type information
-        # var.dtype is already a tvm.DataType object, no conversion needed
-        dtype = var.dtype
-        return cls(dtype, [])
+    @classmethod
+    def from_var(cls, var: ir.Var):
+        """Dispatch by the native parameter type; raw pointers have no shape."""
+        if not isinstance(var, ir.Var):
+            raise TypeError("Kernel parameters must be native ir.Var objects")
+        if isinstance(var.ty, tirx.TensorType):
+            return cls.from_tensor(var)
+        if isinstance(var.ty, ir.PrimType):
+            return cls(_storage_dtype(var.ty), [], "scalar")
+        if isinstance(var.ty, ir.PtrType):
+            return cls(tvm_ffi.dtype("handle"), [], "pointer")
+        raise TypeError(f"Unsupported kernel parameter type: {var.ty}")
 
     def is_scalar(self) -> bool:
-        """
-        Checks if the parameter represents a scalar value.
-
-        Returns:
-            bool: True if parameter has no dimensions (empty shape), False otherwise
-        """
-        return len(self.shape) == 0
+        return self.kind != "tensor"
 
     def is_unsigned(self) -> bool:
-        """
-        Checks if the parameter represents an unsigned integer type.
-
-        Returns:
-            bool: True if parameter is an unsigned integer type, False otherwise
-        """
-        dtype_str = str(self.dtype)
-        if dtype_str.startswith("torch."):
-            dtype_str = dtype_str[6:]
-        return dtype_str.startswith("uint")
+        return self.dtype.type_code == tvm_ffi.dtype("uint8").type_code
 
     def is_float8(self) -> bool:
-        """
-        Checks if the parameter represents a float8 type.
-
-        Returns:
-            bool: True if parameter is a float8 type, False otherwise
-        """
-        dtype_str = str(self.dtype)
-        if dtype_str.startswith("torch."):
-            dtype_str = dtype_str[6:]
-        return dtype_str.startswith("float8")
+        return str(self.dtype).startswith("float8")
 
     def is_float4(self) -> bool:
-        """
-        Checks if the parameter represents a float4 type.
-
-        Returns:
-            bool: True if parameter is a float4 type, False otherwise
-        """
-        dtype_str = str(self.dtype)
-        if dtype_str.startswith("torch."):
-            dtype_str = dtype_str[6:]
-        return dtype_str.startswith("float4")
+        return str(self.dtype).startswith("float4") or str(self.dtype).startswith("custom[float4_")
 
     def is_boolean(self) -> bool:
-        """
-        Checks if the parameter represents a boolean type.
-
-        Returns:
-            bool: True if parameter is a boolean type, False otherwise
-        """
-        dtype_str = str(self.dtype)
-        if dtype_str.startswith("torch."):
-            dtype_str = dtype_str[6:]
-        return dtype_str.startswith("bool")
+        return self.dtype.is_bool
 
     def torch_dtype(self) -> torch.dtype:
-        """
-        Converts the TVM DataType to PyTorch dtype.
+        import tilelang.language as T
 
-        This method is used when creating PyTorch tensors from KernelParam,
-        as PyTorch's tensor creation functions require torch.dtype.
-
-        Returns:
-            torch.dtype: Corresponding PyTorch dtype
-
-        Example:
-            >>> param = KernelParam.from_buffer(buffer)
-            >>> tensor = torch.empty(shape, dtype=param.torch_dtype())
-        """
         return T.dtype(self.dtype).as_torch()
 
     def tilelang_dtype(self) -> T.dtype:
-        """
-        Converts the TVM DataType to TileLang dtype.
+        import tilelang.language as T
 
-        Returns:
-            T.dtype: Corresponding TileLang dtype
-        """
         return T.dtype(self.dtype)
 
 
 @dataclass
 class CompiledArtifact:
-    """
-    Represents a compiled kernel artifact containing both host and device code.
-    Stores all necessary components for kernel execution in the TVM runtime.
-    """
+    """IR, generated source, and optional executable for a compiled kernel."""
 
-    host_mod: tvm.IRModule  # Host-side TVM IR module for managing kernel execution
-    device_mod: tvm.IRModule  # Device-side TVM IR module containing the actual kernel code
-    params: list[KernelParam]  # List of parameters (tensors/scalars) used by the kernel
-    kernel_source: str  # Raw source code of the generated kernel
-    rt_mod: tvm.runtime.Module | None = None  # Runtime module for execution, may be lazily initialized
-    target: tvm.target.Target | None = None  # Normalized device target used for lowering
-    target_host: tvm.target.Target | None = None  # Normalized host target used for host codegen/export
+    host_mod: ir.IRModule
+    device_mod: ir.IRModule
+    params: list[KernelParam] | None
+    kernel_source: str
+    rt_mod: tvm_ffi.Module | None = None
+    target: Target | None = None
+    target_host: Target | None = None
+
+
+_PARAM_SCHEMA_VERSION = 2
 
 
 def dump_kernel_params(params: list[KernelParam]) -> str:
-    """Serialize kernel parameters to JSON text.
+    """Serialize the complete shape graph, retaining shared symbolic identities.
 
-    Uses TVM's JSON reflection (``tvm.ir.save_json``) so symbolic shape
-    expressions round-trip, including shared ``Var`` identity across params.
-    The result contains only IR node data and can be loaded without executing
-    any code, unlike a pickle.
+    The native cache format is intentionally versioned separately from the old
+    TVM cache. Data is reflected IR plus scalar metadata and executes no code.
     """
-    records = [{"dtype": str(param.dtype), "shape": list(param.shape)} for param in params]
-    return tvm.ir.save_json(tvm.runtime.convert(records))
+    records = [{"dtype": str(_storage_dtype(p.dtype)), "shape": list(p.shape), "kind": p.kind} for p in params]
+    payload = {"schema_version": _PARAM_SCHEMA_VERSION, "params": records}
+    return ir.save_json(tvm_ffi.convert(payload))
 
 
 def load_kernel_params(text: str) -> list[KernelParam]:
-    """Reconstruct kernel parameters written by :func:`dump_kernel_params`."""
+    """Read the matching native cache format; reject stale or invalid metadata."""
+    payload = ir.load_json(text)
+    if not isinstance(payload, tvm_ffi.Map) or payload.get("schema_version") != _PARAM_SCHEMA_VERSION:
+        raise ValueError("Unsupported TileLang kernel parameter cache schema; recompile the kernel")
     params = []
-    for record in tvm.ir.load_json(text):
-        dtype = tvm.DataType(str(record["dtype"]))
-        shape = [dim if isinstance(dim, PrimExpr) else int(dim) for dim in record["shape"]]
-        params.append(KernelParam(dtype, shape))
+    for record in payload["params"]:
+        shape = []
+        for dim in record["shape"]:
+            if isinstance(dim, int):
+                shape.append(dim)
+            elif isinstance(dim, ir.IntImm):
+                shape.append(int(dim.value))
+            elif ir.is_prim_expr(dim):
+                shape.append(dim)
+            else:
+                raise ValueError(f"Unsupported cached dimension: {type(dim).__name__}")
+        params.append(KernelParam(tvm_ffi.dtype(str(record["dtype"])), shape, str(record["kind"])))
     return params

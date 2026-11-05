@@ -1,3 +1,5 @@
+import re
+
 import tilelang as tl
 import tilelang.testing
 import tilelang.language as T
@@ -31,13 +33,13 @@ def test_issue_1549_strange_var_vectorization():
     kernel(data)
     code = kernel.get_kernel_source()
     print(code)
-    assert (
-        """for (int i = 0; i < 32; ++i) {
-    idx = ((i * 64) + ((int)threadIdx.x));
-    Data[((i * 64) + ((int)threadIdx.x))] = idx;
-  }"""
-        in code
-    )
+    # Native definition renewal may rename the loop and pointer. The mutable
+    # scalar must still be assigned inside its 32-iteration per-thread loop.
+    loop = re.search(r"for \(int (\w+) = 0; \1 < 32; \+\+\1\) \{([^}]+)\}", code)
+    assert loop is not None
+    assert re.search(r"idx = .*threadIdx\.x", loop.group(2))
+    assert re.search(r"Data(?:_ptr)?\[.*\] = idx;", loop.group(2))
+    torch.testing.assert_close(data, torch.arange(M, device="cuda", dtype=torch.int32), rtol=0, atol=0)
 
 
 if __name__ == "__main__":

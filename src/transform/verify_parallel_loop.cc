@@ -1,144 +1,171 @@
-#include "../op/reducer.h"
-#include "../op/utils.h"
+/*!
+ * \file verify_parallel_loop.cc
+ * \brief Diagnose native parallel stores using two logical executions.
+ */
+
 #include "common/constr_visitor.h"
+#include "op/builtin.h"
+#include "op/reducer.h"
 #include "span_utils.h"
-#include "support/check.h"
-#include "tvm/arith/analyzer.h"
-#include "tvm/ir/expr.h"
-#include <sstream>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
-#include <tvm/tirx/var.h>
-#include <utility>
+
+#include <exception>
+#include <sstream>
+#include <unordered_set>
+#include <vector>
 
 namespace tvm::tl {
-
-using namespace tirx;
-using namespace ffi;
-
 namespace {
-using tvm::tl::ConstrSet;
-using tvm::tl::ConstrVisitor;
+using namespace ffi;
+using namespace prim;
 
 struct ParallelLoopVerifier : public ConstrVisitor {
-  /*! \brief One suspected data race, reported together at the end. */
   struct RaceReport {
-    Buffer buffer;
+    tirx::TensorVar tensor;
     Array<PrimExpr> indices;
     Array<Var> failed_vars;
     String model;
-    Span span;
-    // Span of the innermost enclosing parallel loop; fallback location when
-    // the store itself carries no span.
-    Span loop_span;
+    Location loc;
+    Location loop_loc;
   };
 
-  std::vector<Var> parallel_loop_vars_;
-  std::vector<Span> parallel_loop_spans_;
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> reducers;
+  std::vector<Var> parallel_vars_;
+  std::vector<Location> parallel_locs_;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> reducers_;
   std::vector<RaceReport> reports_;
 
-  void VisitStmt_(const ForNode *op) override {
-    if (op->kind == ForKind::kParallel) {
-      parallel_loop_vars_.push_back(op->loop_var);
-      parallel_loop_spans_.push_back(op->span);
-      ConstrVisitor::VisitStmt_(op);
-      parallel_loop_vars_.pop_back();
-      parallel_loop_spans_.pop_back();
-    } else {
-      ConstrVisitor::VisitStmt_(op);
+  Result Visit_(const ForObj *op) override {
+    if (op->kind != ForKind::kParallel)
+      return ConstrVisitor::Visit_(op);
+    parallel_vars_.push_back(op->var.as_or_throw<Var>());
+    parallel_locs_.push_back(op->loc);
+    auto result = ConstrVisitor::Visit_(op);
+    parallel_vars_.pop_back();
+    parallel_locs_.pop_back();
+    return result;
+  }
+
+  Result Visit_(const SeqStmtObj *op) override {
+    auto saved = reducers_;
+    auto result = ConstrVisitor::Visit_(op);
+    reducers_ = std::move(saved);
+    return result;
+  }
+
+  void RecordReducers(const Map<Any, Any> &annotations) {
+    if (!annotations.count(attr::kReducerInfo))
+      return;
+    for (const auto &[tensor, info] :
+         annotations.at(attr::kReducerInfo).cast<Map<Any, Any>>()) {
+      (void)info;
+      reducers_.insert(tensor.cast<Var>());
     }
   }
-  void VisitStmt_(const BufferStoreNode *op) override {
-    if (reducers.count(op->buffer->data) ||
-        IsLocalBuffer(op->buffer, /*allow_var=*/true)) {
-      StmtExprVisitor::VisitStmt_(op);
-      return;
-    }
-    if (parallel_loop_vars_.empty()) {
-      StmtExprVisitor::VisitStmt_(op);
-      return;
-    }
 
-    ConstrSet cset{constr_stack_};
-    // Model a second logical iteration. Renaming starts at the outermost
-    // parallel loop variable: binds before it are outside all parallelism and
-    // stay shared, while the loop variables and anything inside the region are
-    // private per iteration. Merge, so a shared bind is not populated twice.
+  Result Visit_(const CallObj *op) override {
+    if (auto callee = op->op.as<Op>();
+        callee.has_value() && callee.value()->name == "tl.annotation") {
+      RecordReducers(
+          DecodeAnnotations(op->args[0].as_or_throw<tvm::Tuple>(),
+                            op->attrs.value()
+                                .as_or_throw<DictAttrs>()
+                                .GetAttr<Array<Any>>("annotation_schema")
+                                .value())
+              .cast<Map<Any, Any>>());
+      return std::nullopt;
+    }
+    return ConstrVisitor::Visit_(op);
+  }
+
+  Result Visit_(const RegionStmtObj *op) override {
+    auto saved = reducers_;
+    if (op->op->name == "tl.attr") {
+      auto values =
+          DecodeAnnotations(
+              op->args[0].as_or_throw<tvm::Tuple>(),
+              op->attrs.GetAttr<Array<Any>>("annotation_schema").value())
+              .cast<Map<Any, Any>>();
+      if (values.at("key").cast<String>() == attr::kReducerInfo)
+        RecordReducers({{String(attr::kReducerInfo), values.at("value")}});
+    }
+    auto result = ConstrVisitor::Visit_(op);
+    reducers_ = std::move(saved);
+    return result;
+  }
+
+  Result Visit_(const TensorStoreObj *op) override {
+    auto tensor = op->dest.as<tirx::TensorVar>();
+    if (!tensor.has_value() || parallel_vars_.empty())
+      return ConstrVisitor::Visit_(op);
+    const String scope = tensor.value().scope().name();
+    if (reducers_.count(tensor.value()) || scope == "local" ||
+        scope == "local.var")
+      return ConstrVisitor::Visit_(op);
+
+    // Definitions outside the first parallel loop are shared. Definitions
+    // inside it must have a distinct identity in the other logical execution.
+    ConstrSet cset{.constrs_ = constr_stack_};
     Map<Var, PrimExpr> subs;
-    cset = cset.Merge(
-        cset.RenameFrom("<OTHER>", subs, parallel_loop_vars_.front()));
-    for (const auto &idx : op->indices) {
-      cset.AddConstr(idx == tirx::Substitute(idx, subs));
-    }
-    arith::Analyzer analyzer;
-    cset.Populate(analyzer);
+    cset = cset.Merge(cset.RenameFrom("<OTHER>", subs, parallel_vars_.front()));
+    for (const PrimExpr &index : op->indices)
+      cset.AddConstr(index == SubstituteConstraintExpr(index, subs));
+    auto analyzer = CreateTileLangAnalyzer();
+    auto context = cset.Populate(analyzer);
 
-    Array<Var> parallel_var_pairs;
-    PrimExpr same_iteration = Bool(true);
-    for (const auto &var : parallel_loop_vars_) {
-      auto it = subs.find(var);
-      if (it != subs.end()) {
-        same_iteration = And(same_iteration, EQ(var, (*it).second));
-        parallel_var_pairs.push_back(var);
+    PrimExpr same_iteration = IntImm(PrimType::Bool(), 1);
+    Array<Var> pairs;
+    for (const Var &var : parallel_vars_) {
+      if (auto other = subs.Get(var)) {
+        same_iteration =
+            And(same_iteration, var.as_or_throw<PrimExpr>() == *other);
+        pairs.push_back(var);
       }
     }
-    PrimExpr same_value = op->value == tirx::Substitute(op->value, subs);
+    // A direct mutable read, just like a captured Bind, may evaluate to a
+    // different value at the other access point. Do not obtain same-value
+    // permission by treating two live memory reads as one immutable expression.
+    auto first = make_object<FreshenMutableReads>();
+    auto second = make_object<FreshenMutableReads>();
+    PrimExpr same_value = (*first)(op->value) ==
+                          (*second)(SubstituteConstraintExpr(op->value, subs));
     PrimExpr race_free = Or(same_iteration, same_value);
-    if (analyzer.CanProve(race_free)) {
-      StmtExprVisitor::VisitStmt_(op);
-      return;
-    }
+    if (analyzer->CanProve(race_free))
+      return ConstrVisitor::Visit_(op);
 
-    Array<Var> failed_vars;
-    for (const auto &var : parallel_var_pairs) {
-      if (!analyzer.CanProve(EQ(var, subs.at(var)))) {
-        failed_vars.push_back(var);
+    Array<Var> failed;
+    for (const Var &var : pairs)
+      if (!analyzer->CanProve(var.as_or_throw<PrimExpr>() == subs.at(var)))
+        failed.push_back(var);
+    if (!failed.empty()) {
+      String model;
+      try {
+        model = analyzer->z3_prover.GetModel(race_free);
+      } catch (const std::exception &) {
+        // Unsupported solver terms must not suppress the diagnostic itself.
       }
+      reports_.push_back({tensor.value(), op->indices, failed, model, op->loc,
+                          parallel_locs_.empty() ? Location(UnknownLoc())
+                                                 : parallel_locs_.back()});
     }
-    if (!failed_vars.empty()) {
-      reports_.push_back({op->buffer, op->indices, failed_vars,
-                          analyzer.z3_prover.GetModel(race_free), op->span,
-                          parallel_loop_spans_.empty()
-                              ? Span()
-                              : parallel_loop_spans_.back()});
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const SBlockNode *op) override {
-    if (op->annotations.count(attr::kReducerInfo)) {
-      auto map = op->annotations.Get(attr::kReducerInfo)
-                     ->as<Map<Var, Map<String, String>>>();
-      ICHECK(map) << "reducer_replication map is not defined";
-      for (const auto &[var, info] : map.value()) {
-        reducers.insert(var);
-      }
-    }
-    return StmtExprVisitor::VisitStmt_(op);
+    return ConstrVisitor::Visit_(op);
   }
 
-  /*! \brief Emit all collected races as one aggregated warning. */
   void EmitReport() const {
-    if (reports_.empty()) {
+    if (reports_.empty())
       return;
-    }
     std::ostringstream os;
     os << "Data race detected: " << reports_.size() << " potential race(s)\n";
     for (size_t k = 0; k < reports_.size(); ++k) {
-      const RaceReport &report = reports_[k];
-      os << "  [" << k + 1 << "] `" << report.buffer << report.indices
+      const auto &report = reports_[k];
+      os << "  [" << k + 1 << "] `" << report.tensor << report.indices
          << "` is written by multiple threads in loop " << report.failed_vars
-         << SpanHintSuffix({report.span, report.loop_span}) << "\n"
+         << SpanHintSuffix({report.loc, report.loop_loc}) << "\n"
          << "  Example:\n"
          << report.model;
-      if (report.model.empty()) {
+      if (report.model.empty())
         os << "\n";
-      }
     }
     os << "If you believe this is a false positive, disable the check by "
           "setting `PassKey.TL_DISABLE_DATA_RACE_CHECK` in the pass config, "
@@ -148,23 +175,23 @@ struct ParallelLoopVerifier : public ConstrVisitor {
   }
 };
 
-using namespace tirx::transform;
-
 tvm::transform::Pass VerifyParallelLoop() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    ParallelLoopVerifier verifier;
-    verifier(f->body);
-    verifier.EmitReport();
-    return f;
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext ctx) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) ||
+        ctx->GetConfig<bool>(kDisableDataRaceCheck).value_or(false))
+      return function;
+    auto verifier = make_object<ParallelLoopVerifier>();
+    verifier->Visit(function->body);
+    verifier->EmitReport();
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.VerifyParallelLoop", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.VerifyParallelLoop");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.VerifyParallelLoop", VerifyParallelLoop);
+  ffi::reflection::GlobalDef().def("tl.transform.VerifyParallelLoop",
+                                   VerifyParallelLoop);
 }
-
 } // namespace
-
 } // namespace tvm::tl

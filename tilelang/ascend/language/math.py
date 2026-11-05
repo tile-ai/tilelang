@@ -1,6 +1,8 @@
 """Ascend scalar math expressed with common TIR operations."""
 
-from tvm import tirx
+from tilelang.language import _native
+
+from tilelang.language import _native as tirx
 
 from tilelang.language.common import rsqrt as _common_rsqrt, sqrt as _common_sqrt
 from tilelang.language.kernel import KernelLaunchFrame
@@ -21,6 +23,6 @@ def rsqrt(x, *, dtype=None) -> tirx.PrimExpr:
         return _common_rsqrt(x, dtype=dtype)
 
     root = _common_sqrt(x, dtype=dtype)
-    if root.dtype != "float32":
+    if _native.dtype_of(root) != "float32":
         return _common_rsqrt(x, dtype=dtype)
-    return tirx.const(1, root.dtype) / root
+    return tirx.const(1, _native.dtype_of(root)) / root

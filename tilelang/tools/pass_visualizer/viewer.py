@@ -1,4 +1,4 @@
-"""Interactive pass browser: render the SBlock structure tree after every CUDA
+"""Interactive pass browser: render the native typed region tree after every CUDA
 lowering pass as a single self-contained HTML file.
 
 Left pane is the ordered pass list (click to select). Right pane shows the
@@ -27,7 +27,7 @@ import json
 import os
 import re
 
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.jit import JITImpl
@@ -38,19 +38,17 @@ from . import core as M
 
 # Field names that inspect_structure prints to the LEFT of the "→" arrow.
 _FIELDS = {
-    "iter_vars",
-    "reads",
-    "writes",
-    "alloc_buffers",
-    "match_buffers",
-    "init?",
+    "args",
+    "body_params",
+    "result_vars",
+    "metadata",
     "annotations",
     "params",
+    "param_types",
     "ret_type",
-    "buffer_map",
     "attrs",
 }
-_NODES = ("SBlock", "PrimFunc", "AttrStmt", "SeqStmt", "For", "IfThenElse", "Evaluate", "BufferStore", "SBlockRealize")
+_NODES = ("RegionStmt", "Function", "Bind", "SeqStmt", "For", "If", "While", "Evaluate", "TensorStore", "Return", "Yield")
 
 # Inline styles so highlighting survives even where external CSS classes don't
 # (some IDE HTML previews strip <style> or sanitize class names).
@@ -174,7 +172,7 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
     if resolved_target.kind.name != "cuda":
         raise ValueError(f"Pass Visualizer currently supports only CUDA targets, got {resolved_target.kind.name!r}.")
 
-    # Match JIT compilation's pass-config precedence: PrimFunc-level configs
+    # Match JIT compilation's pass-config precedence: Function-level configs
     # first, then explicit @tilelang.jit configs. Normalize enum keys before
     # handing them to TVM's PassContext.
     pass_configs = {}
@@ -320,7 +318,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     color: #1e1e1e; font-weight: 700; background: #ff9d3c;
     padding: 0 4px; border-radius: 3px;
   }
-  .field  { color: #9cdcfe; }                          /* SBlock/PrimFunc field names */
+  .field  { color: #9cdcfe; }                          /* native region/function field names */
   .node   { color: #4ec9b0; }                          /* Stmt node-type labels */
   .ty     { color: #c586c0; }                          /* Python type annotations (:IntImm, :Map, ...) */
   kbd { background:#333;border-radius:3px;padding:1px 5px;border:1px solid #555;font-size:11px; }

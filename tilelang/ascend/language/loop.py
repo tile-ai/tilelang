@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from tvm import tirx
-from tvm.tirx.script.builder import frame
+from tilelang.language import _native as tirx
+from tilelang.language._native import frame
 
 from tilelang.language.loop import unroll as _common_unroll
 

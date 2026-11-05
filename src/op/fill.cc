@@ -1,222 +1,109 @@
 /*!
  * \file tl/op/fill.cc
- *
- * Define elment-wise operators.
+ * \brief Native logical-region fill and target-specific lowering dispatch.
  */
 
 #include "fill.h"
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
-
 #include "utils.h"
 
-#include <vector>
-
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
-
 std::vector<FillImpl> &FillImplRegistry() {
   static std::vector<FillImpl> registry;
   return registry;
 }
 
 const FillImpl &ResolveFillImpl(Target target) {
-  const auto &registry = FillImplRegistry();
-  const FillImpl *matched_impl = nullptr;
-  for (const FillImpl &impl : registry) {
+  const FillImpl *matched = nullptr;
+  for (const FillImpl &impl : FillImplRegistry()) {
     if (impl.match_target(target)) {
-      ICHECK(matched_impl == nullptr)
-          << "tl.fill found multiple target-specific implementations for "
-          << target->str() << ": " << matched_impl->name << " and "
-          << impl.name;
-      matched_impl = &impl;
+      ICHECK(matched == nullptr)
+          << "Multiple tl.fill implementations for " << target->str();
+      matched = &impl;
     }
   }
-  ICHECK(matched_impl != nullptr)
-      << "tl.fill requires a target-specific implementation, but no fill "
-         "implementation is registered for "
-      << target->str();
-  return *matched_impl;
+  ICHECK(matched != nullptr)
+      << "No tl.fill implementation for " << target->str();
+  return *matched;
 }
-
 } // namespace
 
 void RegisterFillImpl(FillImpl impl) {
-  ICHECK(impl.name != nullptr);
-  ICHECK(impl.match_target != nullptr);
-  ICHECK(impl.lower != nullptr);
+  ICHECK(impl.name && impl.match_target && impl.lower);
   FillImplRegistry().push_back(impl);
 }
 
-/**
- * @brief Construct a Fill operator node from call arguments and a buffer map.
- *
- * This constructor builds a FillNode describing an element-wise fill of a
- * destination buffer region with a scalar/vector value and stores it in
- * `data_`.
- *
- * Detailed behavior:
- * - If `args[0]` is a `BufferLoad`, the loaded buffer becomes the destination
- * and the load indices are converted to per-dimension ranges:
- *   - `Ramp(base, lanes, stride)` is converted to `Range(base, lanes)`. Only
- * stride == 1 and constant `lanes` are supported.
- *   - Non-ramp indices become `Range(index, 1)`.
- * - Otherwise `args[0]` is treated as an access pointer; the destination buffer
- * is resolved via `vmap[GetVarFromAccessPtr(args[0])]` and the region is the
- * full buffer shape for each dimension.
- * - `args[1]` is used as the fill value; it is cast to the destination buffer's
- * dtype if necessary.
- * - Performs validation:
- *   - Region dimensionality must match destination rank.
- *   - For statically-known region mins and extents, checks that mins >= 0 and
- * extents do not exceed the corresponding destination shape extents.
- *
- * Parameters:
- * @param args Call arguments: expected layout is [dst_access_or_bufferload,
- * value].
- *             - args[0]: destination access (BufferLoad or pointer expression).
- *             - args[1]: value to fill (scalar or vector).
- *
- * Notes:
- * - The constructor enforces constraints (e.g., stride == 1 ramps, constant
- * lanes) and will terminate (via ICHECK) if inputs are unsupported or out
- * of bounds.
- */
-Fill::Fill(Array<PrimExpr> args, Map<String, ObjectRef> annotations) {
-  ObjectPtr<FillNode> node = make_object<FillNode>();
-
+Fill::Fill(Array<Expr> args, Map<String, Any> annotations) {
+  ICHECK_EQ(args.size(), 2U) << "tl.fill expects destination and value";
   AccessRegion dst_access = NormalizeToAccessRegion(args[0], kAccessWrite);
-  node->dst = dst_access.region->buffer;
-  node->region = dst_access.region->region;
+  TensorVar dst = RegionTensor(dst_access.region);
+  PrimExpr value = args[1].as_or_throw<PrimExpr>();
+  if (value.ty() != dst.dtype())
+    value = cast(value, dst.dtype());
+  const Array<Range> &region = dst_access.region->region;
+  ICHECK_EQ(region.size(), dst.shape().size());
+  for (size_t i = 0; i < region.size(); ++i) {
+    auto begin = TryConstInt(region[i]->begin);
+    auto extent = TryConstInt(region[i]->extent);
+    auto shape = TryConstInt(dst.shape()[i]);
+    if (begin)
+      ICHECK_GE(*begin, 0) << "Negative fill region origin";
+    if (extent)
+      ICHECK_GE(*extent, 0) << "Negative fill region extent";
+    if (extent && shape)
+      ICHECK_LE(*extent, *shape) << "Fill region exceeds tensor shape";
+    // Avoid a C++ overflow in the check itself. This also checks sliced fills.
+    if (begin && extent && shape)
+      ICHECK_LE(*begin, *shape - *extent);
+  }
+  auto node = make_object<FillNode>(dst, value, region);
   node->SetAccessRegions({dst_access});
-
-  if (args[1]->dtype != node->dst->dtype) {
-    node->value = Cast(node->dst->dtype, args[1]);
-  } else {
-    node->value = args[1];
-  }
-
-  ICHECK(node->region.size() == node->dst->shape.size())
-      << "region size = " << node->region.size()
-      << " != " << node->dst->shape.size();
-  for (int i = 0; i < node->region.size(); i++) {
-    // bound check if region is static
-    if (const auto *min_imm = node->region[i]->min.as<IntImmNode>()) {
-      int64_t min = min_imm->value;
-      ICHECK_GE(min, 0) << "region[" << i << "] = " << min << " < 0";
-    }
-    if (const auto *extent_imm = node->region[i]->extent.as<IntImmNode>()) {
-      // Only perform the upper-bound check when the destination shape
-      // extent is also statically known. If the shape is symbolic (e.g., Var),
-      // skip this static check to avoid invalid downcasts.
-      if (const auto *shape_imm = node->dst->shape[i].as<IntImmNode>()) {
-        ICHECK_LE(extent_imm->value, shape_imm->value)
-            << "region[" << i << "] = " << extent_imm->value << " > "
-            << node->dst->shape[i];
-      }
-    }
-  }
   data_ = std::move(node);
 }
 
-/**
- * @brief Create a copy of this FillNode and return it as a TileOperator.
- *
- * Constructs a new FillNode by copying the current node and wraps the copy in a
- * Fill TileOperator.
- *
- * @return TileOperator A TileOperator that owns the copied FillNode.
- */
 TileOperator FillNode::Clone() const {
-  auto op = make_object<FillNode>(*this);
-  return Fill(op);
+  return Fill(make_object<FillNode>(*this));
 }
 
-/**
- * @brief Build a SIMT-style nested parallel loop that fills the destination
- * buffer.
- *
- * Constructs per-dimension data-parallel loop iterators matching this node's
- * region extents, emits a BufferStore that writes the node's `value` into `dst`
- * at the loop indices, and nests the loops (innermost to outermost) as parallel
- * `For` nodes. Returns the outermost `For` loop representing the complete
- * multi-dimensional fill kernel.
- *
- * @return For Outermost parallel `For` loop of the generated nested SIMT loop.
- */
-For FillNode::MakeSIMTLoop(arith::Analyzer *analyzer) const {
-  int ndim = dst->shape.size();
-  Array<IterVar> loop_vars;
-  Array<PrimExpr> dst_indices;
-  for (int i = 0; i < ndim; i++) {
-    Var var = Var(std::string{char('i' + i)}, region[i]->extent->dtype);
-    loop_vars.push_back({region[i], var, IterVarType::kDataPar});
-    // Offset the loop induction variable by region min to honor sliced regions
-    dst_indices.push_back(region[i]->min + var);
+For FillNode::MakeSIMTLoop(sym::AnalyzerObj *analyzer) const {
+  (void)analyzer;
+  Array<PrimVar> vars;
+  Array<PrimExpr> indices;
+  for (size_t i = 0; i < region.size(); ++i) {
+    PrimVar var("fill_i" + std::to_string(i), region[i]->extent.ty());
+    vars.push_back(var);
+    indices.push_back(region[i]->begin + var);
   }
-  Stmt body = BufferStore(dst, value, dst_indices);
-  for (int i = ndim - 1; i >= 0; i--) {
-    body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
-               ForKind::kParallel, body);
+  Stmt body = TensorStore(dst, indices, value);
+  if (vars.empty()) {
+    PrimVar once("fill_scalar", PrimType::Int(32));
+    return For(once, 0, 1, 1, ForKind::kParallel, SeqStmt(body));
   }
-  return Downcast<For>(body);
+  for (size_t i = vars.size(); i > 0; --i) {
+    PrimType index_type = vars[i - 1].ty();
+    body = For(vars[i - 1], IntImm(index_type, 0), region[i - 1]->extent,
+               IntImm(index_type, 1), ForKind::kParallel, SeqStmt(body));
+  }
+  return body.as_or_throw<For>();
 }
 
-/**
- * @brief Lower this Fill operator to a TIR statement for the target.
- *
- * Lowers the FillNode into a Stmt according to the destination buffer scope:
- * - "local.fragment" and shared ("shared", "shared.dyn"): create a parallel
- *   operation from a SIMT loop, infer its layout, partition the root loop by
- *   the thread variable, vectorize the resulting thread loop, and, if a
- *   per-thread predicate exists, guard the vectorized loop with that
- *   predicate.
- * - "local": build a SIMT loop and return its vectorized form.
- * - other scopes: fatal error.
- *
- * The lowering may query layout and thread information from @p T and uses the
- * provided analyzer for any required arithmetic/layout analysis.
- *
- * @param lower_args Lowering arguments (target, thread bounds, thread var,
- * layout map).
- * @return Stmt The lowered TIR statement implementing the fill.
- */
-Stmt FillNode::Lower(const LowerArgs &lower_args,
-                     arith::Analyzer *analyzer) const {
-  return ResolveFillImpl(lower_args.target).lower(*this, lower_args, analyzer);
+Stmt FillNode::Lower(const LowerArgs &args, sym::AnalyzerObj *analyzer) const {
+  return ResolveFillImpl(args.target).lower(*this, args, analyzer);
 }
 
-/**
- * @brief Infer memory/layout mapping for the Fill operator.
- *
- * Returns the layout mapping produced by layout inference for this FillNode.
- * Currently no layout inference is performed for Fill and the function returns
- * an empty LayoutMap.
- *
- * @param layout_args Context required for layout inference (unused).
- * @param level The inference level requested (unused).
- * @return LayoutMap Empty map indicating no inferred layouts for this operator.
- */
-LayoutMap FillNode::InferLayout(const LayoutInferArgs &layout_args,
+LayoutMap FillNode::InferLayout(const LayoutInferArgs &args,
                                 InferLevel level) const {
+  // Fill constrains neither ownership nor address placement. Other consumers
+  // and the destination's explicit annotation determine its layout.
   return {};
 }
 
 TIR_REGISTER_TL_TILE_OP(Fill, fill)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() { FillNode::RegisterReflection(); }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

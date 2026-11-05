@@ -1,5 +1,7 @@
 """Loop induction bindings must not assign to older mutable scalar bindings."""
 
+import tvm_ffi
+
 import pytest
 import torch
 
@@ -51,10 +53,10 @@ def test_loop_target_is_not_buffer_store(kind, live):
 
 def count_local_var_stores(kernel):
     stores = []
-    tvm.tirx.stmt_functor.post_order_visit(
-        kernel.body, lambda node: stores.append(node) if isinstance(node, tvm.tirx.BufferStore) else None
+    tvm_ffi.structural_walk(
+        kernel.body, (tvm_ffi.Object, lambda node: stores.append(node) if isinstance(node, tvm.ir.TensorStore) else None), order="post"
     )
-    return len([node for node in stores if node.buffer.scope() == "local.var"])
+    return len([node for node in stores if str(node.dest.ty.scope) == "local.var"])
 
 
 def expired_var_kernel():

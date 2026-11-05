@@ -4,9 +4,11 @@ from collections.abc import Callable
 
 from tilelang.layout import Fragment, Layout, PartialFragment
 from tilelang.utils.language import is_fragment, is_reducer
-from tvm.tirx import FloatImm, IntImm, tvm_tuple
-from tvm.tirx.script.parser import attr
-from tvm.tirx.script.builder.ir import sblock_attr
+from tilelang.language._native import FloatImm, IntImm, tvm_tuple
+from tilelang.language._native import attr
+from tilelang.language._native import sblock_attr
+from tilelang.language._native import _source_sblock_attr, tensor_storage_source
+from tvm_tirx.tirx import is_tensor_var
 
 __all__ = [
     "WSID",
@@ -44,7 +46,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
 
 def annotate_layout(layout_map: dict):
     """Annotate the layout of the buffer."""
-    _layout_map = {}
+    values = []
     for buffer, layout in layout_map.items():
         if is_reducer(buffer):
             # The reducer's replicas are addends awaiting the finalize
@@ -57,30 +59,41 @@ def annotate_layout(layout_map: dict):
         elif is_fragment(buffer):
             assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
         if isinstance(layout, Layout):
-            _layout_map[buffer.data] = layout
+            values.append((buffer, layout))
         elif isinstance(layout, Callable):
-            _layout_map[buffer.data] = Layout(buffer.shape, layout)
+            values.append((buffer, Layout(buffer.shape, layout)))
         else:
             raise ValueError(f"Invalid layout: {layout}")
 
-    return sblock_attr({"layout_map": _layout_map})
+    return _annotate_tensor_values("layout_map", values)
+
+
+def _annotate_tensor_values(key, entries):
+    """Preserve same-call last assignment for an identical source data key."""
+    tensors, sources, selected = {}, {}, {}
+    for tensor, value in entries:
+        source = tensor_storage_source(tensor)
+        previous = selected.get(source)
+        if previous is not None:
+            del tensors[previous]
+        selected[source] = tensor
+        tensors[tensor] = value
+        sources[source] = value
+    return _source_sblock_attr({key: tensors}, {key: sources})
 
 
 def annotate_safe_value(safe_value_map: dict):
     """Annotate the safe value of the buffer."""
-    _safe_value_map = {}
-    for buffer, safe_value in safe_value_map.items():
-        _safe_value_map[buffer.data] = safe_value
-    return sblock_attr({"safe_value_map": _safe_value_map})
+    return _annotate_tensor_values("safe_value_map", safe_value_map.items())
 
 
 def annotate_l2_hit_ratio(l2_hit_ratio_map: dict):
     """Annotate the L2 hit ratio of the buffer."""
-    _l2_hit_ratio_map = {}
+    values = []
     for buffer, hit_ratio in l2_hit_ratio_map.items():
-        assert buffer.scope() == "global", "persistent L2 can only be applied to global buffers"
-        _l2_hit_ratio_map[buffer.data] = FloatImm("float32", float(hit_ratio))
-    return sblock_attr({"l2_hit_ratio_map": _l2_hit_ratio_map})
+        assert str(buffer.scope()) == "global", "persistent L2 can only be applied to global buffers"
+        values.append((buffer, FloatImm("float32", float(hit_ratio))))
+    return _annotate_tensor_values("l2_hit_ratio_map", values)
 
 
 def annotate_min_blocks_per_sm(n: int):
@@ -123,14 +136,14 @@ def annotate_restrict_buffers(*buffers):
     """
     if not buffers:
         return None
-    data_vars = []
+    tensors = []
     for buf in buffers:
-        try:
-            data_vars.append(buf.data)
-        except Exception as e:
-            raise TypeError(f"annotate_restrict_buffers expects Buffer arguments, got {type(buf)}") from e
-    # Also return as block attribute (root block exists by default) for readability/tools.
-    return sblock_attr({"tl.non_restrict_params": data_vars})
+        if not is_tensor_var(buf):
+            raise TypeError(f"annotate_restrict_buffers expects tensor arguments, got {type(buf)}")
+        tensors.append(buf)
+    # The consumer resolves explicit view aliases before lowering the ABI.
+    # A freshly constructed tensor_data_ptr Call is not a stable identity key.
+    return sblock_attr({"tl.non_restrict_params": tensors})
 
 
 def annotate_ws_pipeline_depth(depth_map: dict):
@@ -144,7 +157,9 @@ def annotate_ws_pipeline_depth(depth_map: dict):
     _map = {}
     for buffer, depth in depth_map.items():
         assert isinstance(depth, int) and depth >= 1, f"pipeline depth must be a positive int, got {depth!r}"
-        _map[buffer.data] = IntImm("int32", depth)
+        if not is_tensor_var(buffer):
+            raise TypeError(f"annotate_ws_pipeline_depth expects tensor keys, got {type(buffer)}")
+        _map[buffer] = IntImm("int32", depth)
     return attr(_map, "tl.ws_pipeline_depth", 0)
 
 

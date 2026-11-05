@@ -1,6 +1,29 @@
+import re
+
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+
+
+def _assert_vector_copy(kernel, shape, element_index, iterations, replicated=False):
+    import torch
+
+    code = kernel.get_kernel_source()
+    loop = re.search(r"for \(int (\w+) = 0; \1 < " + str(iterations) + r"; \+\+\1\)", code)
+    assert loop is not None, code
+    index = element_index(loop.group(1))
+    address = f"(static_cast<ptrdiff_t>({index}) * 4)"
+    load = f"tl::load_vector<float4, 16, false>(((const unsigned char*)A_ptr + {address}))"
+    store = f"tl::store_vector<float4, 16, false>(((unsigned char*)B_ptr + {address}), {load});"
+    assert store in code
+    if replicated:
+        # Only the canonical owner writes. Under this guard, the former
+        # threadIdx.x & 63 address is exactly threadIdx.x.
+        assert "if ((((int)threadIdx.x) >> 6) == 0)" in code
+    a = torch.arange(shape[0] * shape[1], dtype=torch.float32, device="cuda").reshape(shape)
+    b = torch.full_like(a, -12345.0)
+    kernel(a, b)
+    torch.testing.assert_close(b, a, rtol=0, atol=0)
 
 
 @tilelang.jit
@@ -25,10 +48,9 @@ def test_loop_layout_fragment_vec4():
     M, N = 128, 32
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
     kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
-    code = kernel.get_kernel_source()
 
-    # Expect vectorized copy along innermost dimension (float4)
-    assert "*(float4*)(B + ((i * 512) + (((int)threadIdx.x) * 4))) = *(float4*)(A + ((i * 512) + (((int)threadIdx.x) * 4)));" in code
+    # Expect vectorized copy along innermost dimension (float4).
+    _assert_vector_copy(kernel, (M, N), lambda i: f"(({i} * 512) + (((int)threadIdx.x) * 4))", 8)
 
 
 @tilelang.testing.requires_cuda
@@ -42,8 +64,7 @@ def test_loop_layout_identity():
     M, N = 128, 32
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn)
     kernel = loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
-    code = kernel.get_kernel_source()
-    assert "*(float4*)(B + ((((int)threadIdx.x) * 32) + (i * 4))) = *(float4*)(A + ((((int)threadIdx.x) * 32) + (i * 4)));" in code
+    _assert_vector_copy(kernel, (M, N), lambda i: f"((((int)threadIdx.x) * 32) + ({i} * 4))", 8)
 
 
 @tilelang.jit
@@ -67,12 +88,8 @@ def test_copy_loop_layout_annotated_replicate_vec4():
     M, N = 128, 32
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
     kernel = copy_with_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
-    code = kernel.get_kernel_source()
 
-    assert (
-        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
-        in code
-    )
+    _assert_vector_copy(kernel, (M, N), lambda i: f"(({i} * 256) + (((int)threadIdx.x) * 4))", 16, replicated=True)
 
 
 @tilelang.jit
@@ -99,11 +116,7 @@ def test_annotate_replicate_loop_layout_vec4():
 
     loop_layout = T.Fragment((M, N), forward_fn=loop_layout_fn, replicate=2)
     kernel = replicate_loop_layout_kernel.compile(M=M, N=N, loop_layout=loop_layout)
-    code = kernel.get_kernel_source()
-    assert (
-        "*(float4*)(B + ((i * 256) + ((((int)threadIdx.x) & 63) * 4))) = *(float4*)(A + ((i * 256) + ((((int)threadIdx.x) & 63) * 4)));"
-        in code
-    )
+    _assert_vector_copy(kernel, (M, N), lambda i: f"(({i} * 256) + (((int)threadIdx.x) * 4))", 16, replicated=True)
 
 
 if __name__ == "__main__":

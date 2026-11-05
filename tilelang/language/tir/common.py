@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import tvm.tirx.script.parser as _parser
+from tilelang.language import _native as _parser
 
 from .exports import BACKEND_ONLY_TIR_EXPORTS
 

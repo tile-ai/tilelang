@@ -1,6 +1,7 @@
 import tilelang
 import tilelang.testing
 import tilelang.language as T
+import torch
 
 
 @tilelang.testing.requires_cuda
@@ -18,7 +19,13 @@ def test_issue_1601():
         return main
 
     kernel = qwq()
-    assert "fp8_e4_t broadcast_var = fp8_e4_t(0x0p+0f/*0.000000e+00*/);" in kernel.get_kernel_source()
+    source = kernel.get_kernel_source()
+    assert "fp8_e4_t broadcast_var =" in source
+    assert "tl::broadcast<fp8_e4_4_t>(broadcast_var)" in source
+    data = torch.ones((8,), dtype=torch.float32, device="cuda").to(torch.float8_e4m3fn)
+    kernel(data)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(data.view(torch.uint8), torch.zeros((8,), dtype=torch.uint8, device="cuda"), rtol=0, atol=0)
 
 
 if __name__ == "__main__":

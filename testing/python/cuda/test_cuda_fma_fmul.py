@@ -1,5 +1,6 @@
 """Tests for CUDA-specific T.fma and T.fmul intrinsics."""
 
+import tvm_ffi
 import pytest
 import torch
 
@@ -62,7 +63,7 @@ def _lower_cutedsl_source(program) -> str:
         check_cutedsl_available()
     except ImportError as err:
         pytest.skip(f"CuTeDSL is not available: {err}")
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
+    build_cutedsl = tvm_ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
     if build_cutedsl is None:
         pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
 

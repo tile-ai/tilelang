@@ -1,3 +1,5 @@
+import re
+
 import torch
 import tilelang.testing
 import tilelang.language as T
@@ -91,7 +93,11 @@ def test_parallel_select_uniform_condition():
 
     assert "if (" not in source
     assert ") ? " in source
-    assert "*(float4*)" in source or "load_global_256" in source
+    assert (
+        "*(float4*)" in source
+        or "load_global_256" in source
+        or re.search(r"tl::load_vector<(?:float4|ulonglong[24]), (?:16|32), true>", source)
+    )
 
     A = torch.randn((1024,), dtype=torch.float32, device="cuda")
     B = torch.empty_like(A)
@@ -125,6 +131,8 @@ def test_parallel_data_dependent_select_disables_auto_vectorization():
     assert ") ? " in source
     assert "*(float4*)" not in source
     assert "load_global_256" not in source
+    assert "tl::load_vector<" not in source
+    assert "tl::store_vector<" not in source
 
     A = torch.randn((256,), dtype=torch.float32, device="cuda")
     B = torch.empty_like(A)

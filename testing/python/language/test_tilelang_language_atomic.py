@@ -6,6 +6,24 @@ import tilelang.layout
 import tilelang.language as T
 import torch
 from tilelang import tvm
+from tilelang.jit import JITImpl
+
+
+@pytest.fixture
+def _original_vector_alignment(monkeypatch):
+    # These width observers inherit the frozen Buffer's 64-byte guarantee.
+    # State it in the harness; default Tensor annotations promise only one
+    # byte, and their sliced-storage behavior is covered independently.
+    monkeypatch.setattr(T.Tensor, "default_align", 64)
+    # Earlier tests may have compiled these same factories with the default
+    # alignment. Isolate both per-decorator caches while changing the source
+    # annotation policy; disabling the persistent cache does not clear them.
+    for value in tuple(globals().values()):
+        if isinstance(value, JITImpl):
+            monkeypatch.setattr(value, "_kernel_cache", {})
+            monkeypatch.setattr(value, "_call_form_cache", type(value._call_form_cache)())
+            if hasattr(value.func, "p1_cache"):
+                monkeypatch.setattr(value.func, "p1_cache", {})
 
 
 # ======================= Thread-level atomic add =======================
@@ -447,10 +465,11 @@ def test_tma_atomic_add_32b_swizzle_runtime():
 @pytest.mark.parametrize("dtype", [T.int16, T.int64, T.float64, T.float32x2])
 def test_tma_atomic_add_rejects_unsupported_dtype(dtype):
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=rf"TMA atomic add does not support dtype {dtype}.*supported scalar dtypes",
-    ):
+    ) as raised:
         lower_tma_atomic_add(dtype)
+    assert raised.value.__tvm_ffi_error__.kind == "InternalError"
 
 
 @tilelang.testing.requires_cuda
@@ -484,19 +503,21 @@ def test_tma_atomic_add_splits_32b_swizzle_box():
 @tilelang.testing.requires_cuda
 def test_tma_atomic_add_rejects_pre_hopper_target():
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=r"TMA atomic add requires a CUDA target with TMA support \(SM90\+\)",
-    ):
+    ) as raised:
         lower_tma_atomic_add(T.float32, arch="sm_80")
+    assert raised.value.__tvm_ffi_error__.kind == "InternalError"
 
 
 @tilelang.testing.requires_cuda
 def test_tma_atomic_add_rejects_unencodable_explicit_layout():
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=r"TMA atomic add cannot encode the shared layout.*not representable by a TensorMap descriptor",
-    ):
+    ) as raised:
         lower_tma_atomic_add(T.uint64, explicit_layout=True)
+    assert raised.value.__tvm_ffi_error__.kind == "InternalError"
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
@@ -593,6 +614,7 @@ def test_atomic_addx2_float():
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_mixed_dtype_fp16():
     run_atomic_add_mixed_dtype(8, T.float32, T.float16)
     run_atomic_addx2_mixed_dtype(32, 64, 8, 16, T.float32, T.float16)
@@ -600,6 +622,7 @@ def test_atomic_add_mixed_dtype_fp16():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(7, 0)
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_mixed_dtype_bf16():
     run_atomic_add_mixed_dtype(8, T.float32, T.bfloat16)
     run_atomic_addx2_mixed_dtype(32, 64, 8, 16, T.float32, T.bfloat16)
@@ -619,6 +642,7 @@ _ORDERED_MEMORY_ORDERS = [("acquire", 2), ("release", 3), ("acq_rel", 4)]
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("memory_order, memory_order_id", _ORDERED_MEMORY_ORDERS)
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_vectorized_preserves_memory_order(memory_order, memory_order_id):
     run_atomic_add_vectorized_memory_order(64, 32, memory_order, memory_order_id, dtype=T.float16)
 
@@ -626,6 +650,7 @@ def test_atomic_add_vectorized_preserves_memory_order(memory_order, memory_order
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 @pytest.mark.parametrize("memory_order, memory_order_id", _ORDERED_MEMORY_ORDERS)
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_vectorized_preserves_memory_order_bf16(memory_order, memory_order_id):
     # bf16 takes a different device path depending on the target: below sm_90
     # there is no ordered bf16 atomic in any width, so AtomicAddx2 falls back to
@@ -667,12 +692,14 @@ def test_atomic_add():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_auto_vectorized():
     run_atomic_add_auto_vectorized(8, 128, 128, 32, 32, dtype=T.float32)
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_auto_vectorized_unit_test():
     run_atomic_add_auto_vectorized_unit_test(2, dtype=T.float32)
     run_atomic_add_auto_vectorized_unit_test(4, dtype=T.float32)
@@ -681,6 +708,7 @@ def test_atomic_add_auto_vectorized_unit_test():
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_complicated_parallel():
     run_atomic_add_complicated_parallel(8, 128, 128, 32, 32, dtype=T.float32)
 
@@ -1554,6 +1582,7 @@ def atomic_add_dynamic_rows_program(indirect):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @pytest.mark.parametrize("indirect", [False, True])
+@pytest.mark.usefixtures("_original_vector_alignment")
 def test_atomic_add_dynamic_rows_keep_x4(indirect):
     """Dynamic/indirect row offsets need int64 arithmetic but retain x4 lanes."""
     kernel = atomic_add_dynamic_rows_program(indirect)

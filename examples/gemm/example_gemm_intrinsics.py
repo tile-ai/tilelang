@@ -1,5 +1,5 @@
 from tilelang import tvm as tvm
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 import tilelang
 import tilelang.language as T
 from tilelang.cuda.intrinsics import get_swizzle_layout

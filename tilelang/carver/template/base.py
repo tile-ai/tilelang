@@ -11,7 +11,7 @@ from ..arch import (  # Import architecture-related utilities and classes
 )
 from ..roller.hint import Hint  # Import the Hint class
 from ..roller.node import OutputNode  # Import the OutputNode class
-from tvm.tirx import PrimFunc  # Import PrimFunc for handling tensor IR functions
+from tvm_tirx.tirx import Function
 
 
 @dataclass
@@ -26,7 +26,7 @@ class BaseTemplate(ABC):
     _arch: TileDevice = field(default_factory=auto_infer_current_arch, init=False, repr=False)
 
     # The function associated with this template, initially None
-    _func: PrimFunc = field(default=None, init=False, repr=False)
+    _func: Function = field(default=None, init=False, repr=False)
 
     # The outputs nodes associated with this template, initially None
     _output_nodes: list[OutputNode] = field(default=None, init=False, repr=False)
@@ -105,12 +105,12 @@ class BaseTemplate(ABC):
         """
         return is_rdna_arch(self._arch) if self._arch is not None else False
 
-    def equivalent_function(self) -> PrimFunc:
+    def equivalent_function(self) -> Function:
         """
         Returns the function associated with this template.
 
         Returns:
-            PrimFunc: The stored function.
+            Function: The stored function.
         """
         return self._func
 
@@ -124,12 +124,12 @@ class BaseTemplate(ABC):
         """
         raise NotImplementedError("initialize_function is not implemented")
 
-    def set_function(self, func: PrimFunc) -> "BaseTemplate":
+    def set_function(self, func: Function) -> "BaseTemplate":
         """
         Sets the function for this template and returns itself.
 
         Args:
-            func (PrimFunc): The function to associate with this template.
+            func (Function): The function to associate with this template.
 
         Returns:
             BaseTemplate: The instance with the updated function.

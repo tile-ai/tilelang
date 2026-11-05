@@ -2,7 +2,7 @@
 
 from enum import Enum
 import torch
-from tvm import tirx
+from tvm_tirx import ir
 import numpy as np
 
 
@@ -56,7 +56,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
 
         # Check if with dynamic symbolic shape
         for shape in param.shape:
-            if isinstance(shape, tirx.Var):
+            if isinstance(shape, ir.Var):
                 raise ValueError(
                     f"TensorType must have a static shape, but got {shape}, "
                     "likely you are trying to generate a random tensor with a dynamic symbolic shape."

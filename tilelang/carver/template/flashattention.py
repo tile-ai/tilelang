@@ -1,10 +1,14 @@
 from dataclasses import dataclass
+import logging
 from .base import BaseTemplate
-from tvm import te
+from .._workload import WorkloadBuilder
 from ..arch import TileDevice
 from ..roller import Hint
 from ..roller import PrimFuncNode, OutputNode, Edge
 from ..utils import get_roller_hints_from_output_nodes, get_tensorized_func_and_tags
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,7 +47,7 @@ class FlashAttentionTemplate(BaseTemplate):
         Defines and initializes the matrix multiplication computation.
 
         This method sets up placeholders for input matrices, computes
-        the matrix multiplication using TVM's compute API,
+        the matrix multiplication using the native workload builder,
         and optionally applies bias and type casting.
 
         Raises:
@@ -70,12 +74,13 @@ class FlashAttentionTemplate(BaseTemplate):
             weight_shape = (B, N, K)
             output_shape = (B, M, N)  # Shape of output matrix C
 
-            # Create TVM placeholders for input tensors
-            A = te.placeholder(input_shape, name="A", dtype=in_dtype)  # Input matrix A
-            B = te.placeholder(weight_shape, name="B", dtype=in_dtype)  # Weight matrix B
+            # Create typed native input tensors
+            workload = WorkloadBuilder()
+            A = workload.input(input_shape, name="A", dtype=in_dtype)  # Input matrix A
+            B = workload.input(weight_shape, name="B", dtype=in_dtype)  # Weight matrix B
 
             # Define a reduction axis for matrix multiplication
-            k = te.reduce_axis((0, K), name="k")
+            k = workload.reduce_axis((0, K), name="k")
 
             def _compute_matmul(b, i, j):
                 """
@@ -90,10 +95,10 @@ class FlashAttentionTemplate(BaseTemplate):
                 """
                 A_indices = [b, i, k]
                 B_indices = [b, j, k]
-                return te.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
+                return workload.sum(A[tuple(A_indices)].astype(accum_dtype) * B[tuple(B_indices)].astype(accum_dtype), axis=k)
 
             # Compute matrix multiplication result
-            C = te.compute(
+            C = workload.compute(
                 output_shape,
                 fcompute=_compute_matmul,
                 name="C",
@@ -101,14 +106,14 @@ class FlashAttentionTemplate(BaseTemplate):
 
             # Optionally cast the output to a different type
             if out_dtype != accum_dtype:
-                C = te.compute(
+                C = workload.compute(
                     output_shape,
                     lambda b, i, j: C[b, i, j].astype(out_dtype),
                     name="D",
                 )
 
             args = [A, B, C]
-            return te.create_prim_func(args)
+            return workload.to_function(args)
 
         MMA0_prim_func = create_matmul(QK_B, QK_M, QK_N, QK_K)
         MMA1_prim_func = create_matmul(SV_B, SV_M, SV_N, SV_K)
@@ -116,9 +121,15 @@ class FlashAttentionTemplate(BaseTemplate):
         self.set_function([MMA0_prim_func, MMA1_prim_func])
 
         def create_node_from_function(func, name):
-            tensorized_func, tags = get_tensorized_func_and_tags(func, self.arch.target)
-            assert tags is not None
-            return PrimFuncNode(tensorized_func, name=name, tags=tags)
+            # Tensor-core normalization is an optional hint strategy. A native
+            # workload remains executable when the current device has no
+            # matching tensor-core policy (including CPU and new GPU models).
+            try:
+                tensorized_func, tags = get_tensorized_func_and_tags(func, self.arch.target)
+            except ValueError as error:
+                logger.debug("Tensor-core candidate unavailable for %s: %s", name, error)
+                tensorized_func, tags = func, None
+            return PrimFuncNode(tensorized_func if tags else func, name=name, tags=tags)
 
         node_0 = create_node_from_function(MMA0_prim_func, name="MMA0")
         node_1 = create_node_from_function(MMA1_prim_func, name="MMA1")

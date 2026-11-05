@@ -1,110 +1,91 @@
 /*!
- * \file tl/transform/lower_l2_persistent_annotation.cc
- * \brief Lower L2 persistent annotation
+ * \file lower_l2_persistent_annotation.cc
+ * \brief Consume native L2 metadata without hiding tensor uses in attributes.
  */
+#include "transform/common/native_layout_utils.h"
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
 
-#include "cuda/op/builtin.h"
+#include <unordered_map>
 
-namespace tvm {
-namespace tl {
-
-namespace attr {
-// BlockAttr, Containing the layout for all the buffers in the block
-constexpr const char *kL2RatioMap = "l2_hit_ratio_map";
-constexpr const char *kL2PersistentMap = "l2_persistent_map";
-} // namespace attr
-
-using namespace tirx;
+namespace tvm::tl {
+namespace {
 using namespace ffi;
+using namespace tirx;
 
-class LowerL2Persistent : public StmtExprMutator {
+class L2PersistentLowerer : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f) {
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    LowerL2Persistent substituter;
-    // Trace the buffer map for tvm_access_ptr
-    substituter.buffer_map_.insert(f->buffer_map.begin(), f->buffer_map.end());
-    for (const auto &[_, buffer] : f->buffer_map) {
-      substituter.buffer_data_to_buffer_.Set(buffer->data, buffer);
+  using StmtExprMutator::Mutate_;
+
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *statement,
+                            InplaceMode mode) final {
+    const auto *call = statement->value.as<CallObj>();
+    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+      return StmtExprMutator::Mutate_(statement, mode);
+    auto annotations = ReadNativeAnnotations(call);
+    auto hints = annotations.Get("l2_hit_ratio_map");
+    if (!hints)
+      return StmtExprMutator::Mutate_(statement, mode);
+    for (const auto &[value, ratio] : hints->cast<Map<Any, Any>>()) {
+      TensorVar tensor = value.cast<TensorVar>();
+      TVM_FFI_CHECK(tensor.dtype().IsScalar(), ValueError)
+          << "L2 persistent windows require scalar tensor elements";
+      auto hit_ratio = ratio.cast<FloatImm>();
+      TVM_FFI_CHECK(hit_ratio->value >= 0 && hit_ratio->value <= 1, ValueError)
+          << "L2 persistent hit ratio must be in [0, 1]";
+      auto known = names_.find(tensor->name);
+      TVM_FFI_CHECK(known == names_.end() || known->second == tensor.get(),
+                    ValueError)
+          << "L2 persistent annotations require unambiguous tensor names";
+      names_.insert_or_assign(tensor->name, tensor.get());
+      // Preserve the source annotation's logical byte-window calculation.
+      // The native Hopper host consumer independently adds the typed origin.
+      PrimExpr bytes =
+          IntImm(PrimType::Int(64), (tensor.dtype().bits() + 7) / 8);
+      for (const PrimExpr &extent : tensor.shape())
+        bytes = bytes * prim::cast(extent, PrimType::Int(64));
+      entries.Set(tensor->name, {hit_ratio, bytes});
     }
-    fptr->body = substituter.VisitStmt(f->body);
-    Map<String, Array<PrimExpr>> init_l2_persistent_map;
-    for (auto [buffer, hit_ratio] : substituter.hit_ratio_map_) {
-      Array<PrimExpr> l2_persistent_arguments;
-      // Argument 0: hit ratio
-      // Argument 1: size in bytes
-      l2_persistent_arguments.push_back(hit_ratio);
-      PrimExpr size_in_bytes = IntImm(DataType::Int(64), buffer->dtype.bytes());
-      for (auto dim : buffer->shape) {
-        size_in_bytes = size_in_bytes * dim;
-      }
-      l2_persistent_arguments.push_back(size_in_bytes);
-      init_l2_persistent_map.Set(buffer->name, l2_persistent_arguments);
-    }
-    if (!init_l2_persistent_map.empty()) {
-      f = WithAttr(std::move(f), attr::kL2PersistentMap,
-                   init_l2_persistent_map);
-    }
-    return f;
+    annotations.erase("l2_hit_ratio_map");
+    changed = true;
+    if (annotations.empty())
+      return SeqStmt({}, statement->loc);
+    return MakeNativeAnnotation(annotations, statement->loc);
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    // Record the mapping from buffer data var to buffer for later lookup
-    for (auto buffer : op->alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
-    }
-    for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
-    }
-    for (auto buffer : op->alloc_buffers) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-
-    if (op->annotations.count(attr::kL2RatioMap)) {
-      auto hit_ratio_map = op->annotations.at(attr::kL2RatioMap)
-                               .as<Map<Var, FloatImm>>()
-                               .value();
-      for (auto [buffer_var, hit_ratio] : hit_ratio_map) {
-        Buffer buffer = buffer_data_to_buffer_.at(buffer_var);
-        hit_ratio_map_.Set(buffer, hit_ratio);
-      }
-    }
-    auto block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
-    auto block_ptr = block.CopyOnWrite();
-    block_ptr->annotations.erase(attr::kL2RatioMap);
-    return block;
-  }
+  Map<String, Array<Expr>> entries;
+  bool changed{false};
 
 private:
-  // Mapping from data Var of a Buffer to Buffer, for lookup
-  Map<Var, Buffer> buffer_data_to_buffer_;
-  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
-  Map<Buffer, FloatImm> hit_ratio_map_;
-  LowerL2Persistent() = default;
+  std::unordered_map<std::string, const VarObj *> names_;
 };
-
-using namespace tirx::transform;
+} // namespace
 
 tvm::transform::Pass LowerL2Persistent() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return LowerL2Persistent::Substitute(f);
+  auto rewrite = [](tirx::Function function, IRModule,
+                    tvm::transform::PassContext) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto lowerer = make_object<L2PersistentLowerer>();
+    SeqStmt body = function->body;
+    body = lowerer->Mutate(body).ValueOrUnchanged(body);
+    if (!lowerer->changed)
+      return function;
+    function.CopyOnWrite()->body = body;
+    if (!lowerer->entries.empty()) {
+      function =
+          WithAttr(std::move(function), "l2_persistent_map", lowerer->entries);
+      function = WithoutAttr(std::move(function), "tl.l2_policy_materialized");
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerL2Persistent", {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0,
+                                             "tl.LowerL2Persistent");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerL2Persistent",
-                        LowerL2Persistent);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.LowerL2Persistent",
+                                   LowerL2Persistent);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

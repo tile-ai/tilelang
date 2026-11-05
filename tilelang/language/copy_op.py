@@ -1,6 +1,7 @@
 """Copy operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
+from tilelang.language import _native
 from typing import Literal, Any
 
 from tilelang._typing import BufferLikeType
@@ -10,8 +11,8 @@ from tilelang.utils.language import (
 )
 from tilelang.utils.deprecated import deprecated
 from tilelang.language.utils import get_extent, buffer_region_to_tile_region, _normalize_annotations
-import tvm
-from tvm import ir, tirx
+from tvm_tirx import ir
+from tilelang.language import _native as tirx
 
 
 def _normalize_copy_regions(
@@ -123,11 +124,11 @@ def copy(
         # in copy.cc; cast to the load dtype, which is what BufferStore checks
         # once index lanes are folded in.
         value = src
-        if src.dtype != dst.dtype:
-            value = tirx.Cast(dst.dtype, src)
-        return tirx.BufferStore(dst.buffer, value, dst.indices)
+        if _native.dtype_of(src) != _native.dtype_of(dst):
+            value = tirx.Cast(_native.dtype_of(dst), src)
+        return tirx.BufferStore(dst.source, value, dst.indices)
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def copy_cluster(
@@ -182,7 +183,7 @@ def copy_cluster(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def async_copy(
@@ -218,11 +219,11 @@ def async_copy(
         ann["parallel_loop_layout"] = loop_layout
 
     if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
-        return tirx.BufferStore(dst.buffer, src, dst.indices)
+        return tirx.BufferStore(dst.source, src, dst.indices)
 
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.async_copy"),
+        tirx.Op.get("tl.tileop.async_copy"),
         src,
         dst,
         annotations=ann,
@@ -321,7 +322,7 @@ def tma_copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
 
-    return tirx.call_intrin("handle", tirx.op.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann)
+    return tirx.call_intrin("handle", tirx.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann)
 
 
 _TMA_SUPPORTED_DTYPES = frozenset(
@@ -371,20 +372,20 @@ def tma_gather4(
         raise TypeError("tma_gather4 src must be a tirx.Buffer (global)")
     if not isinstance(dst, tirx.Buffer):
         raise TypeError("tma_gather4 dst must be a tirx.Buffer (shared)")
-    if src.scope() != "global":
+    if str(src.scope()) != "global":
         raise ValueError(f"tma_gather4 src must be a global buffer, got scope={src.scope()}")
-    if dst.scope() not in ("shared", "shared.dyn"):
+    if str(dst.scope()) not in ("shared", "shared.dyn"):
         raise ValueError(f"tma_gather4 dst must be a shared buffer, got scope={dst.scope()}")
     if len(src.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 shared buffer (4 x K_box), got {len(dst.shape)}")
-    if src.dtype != dst.dtype:
-        raise ValueError(f"tma_gather4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
+    if _native.dtype_of(src) != _native.dtype_of(dst):
+        raise ValueError(f"tma_gather4 dtype mismatch: src={_native.dtype_of(src)}, dst={_native.dtype_of(dst)}")
     if not (isinstance(dst.shape[0], int) and dst.shape[0] == 4) and not (hasattr(dst.shape[0], "value") and int(dst.shape[0].value) == 4):
         raise ValueError(f"tma_gather4 shared tile leading dim must be 4, got {dst.shape[0]}")
-    if src.strides:
-        inner = src.strides[1]
+    if tirx.tensor_strides(src):
+        inner = tirx.tensor_strides(src)[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
@@ -416,15 +417,15 @@ def tma_gather4(
     ann.update(
         {
             "is_gather4": True,
-            "gather4_rows": rows,
-            "gather4_col": col,
+            "gather4_rows": [_native._expr(row) for row in rows],
+            "gather4_col": _native._expr(col),
             "barrier": bar_load,
             "eviction_policy": ep,
         }
     )
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.copy"),
+        tirx.Op.get("tl.tileop.copy"),
         src_region,
         dst_region,
         annotations=ann,
@@ -437,7 +438,9 @@ def tma_gather4_bytes(K_box, dtype: str) -> int:
     """
     if dtype not in _TMA_SUPPORTED_DTYPES:
         raise ValueError(f"Unsupported dtype: {dtype}")
-    dt = tvm.DataType(dtype)
+    from .dtypes import get_tvm_dtype
+
+    dt = get_tvm_dtype(dtype)
     if dt.is_float4_e2m1_unpacked():
         elem_bits = 4
     else:
@@ -469,20 +472,20 @@ def tma_scatter4(
         raise TypeError("tma_scatter4 src must be a tirx.Buffer (shared)")
     if not isinstance(dst, tirx.Buffer):
         raise TypeError("tma_scatter4 dst must be a tirx.Buffer (global)")
-    if src.scope() not in ("shared", "shared.dyn"):
+    if str(src.scope()) not in ("shared", "shared.dyn"):
         raise ValueError(f"tma_scatter4 src must be a shared buffer, got scope={src.scope()}")
-    if dst.scope() != "global":
+    if str(dst.scope()) != "global":
         raise ValueError(f"tma_scatter4 dst must be a global buffer, got scope={dst.scope()}")
     if len(src.shape) != 2:
         raise ValueError(f"tma_scatter4 expects rank-2 shared buffer (4 x K_box), got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_scatter4 expects rank-2 global buffer, got {len(dst.shape)}")
-    if src.dtype != dst.dtype:
-        raise ValueError(f"tma_scatter4 dtype mismatch: src={src.dtype}, dst={dst.dtype}")
+    if _native.dtype_of(src) != _native.dtype_of(dst):
+        raise ValueError(f"tma_scatter4 dtype mismatch: src={_native.dtype_of(src)}, dst={_native.dtype_of(dst)}")
     if not (isinstance(src.shape[0], int) and src.shape[0] == 4) and not (hasattr(src.shape[0], "value") and int(src.shape[0].value) == 4):
         raise ValueError(f"tma_scatter4 shared tile leading dim must be 4, got {src.shape[0]}")
-    if dst.strides:
-        inner = dst.strides[1]
+    if tirx.tensor_strides(dst):
+        inner = tirx.tensor_strides(dst)[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
@@ -508,14 +511,14 @@ def tma_scatter4(
     ann.update(
         {
             "is_scatter4": True,
-            "gather4_rows": rows,
-            "gather4_col": col,
+            "gather4_rows": [_native._expr(row) for row in rows],
+            "gather4_col": _native._expr(col),
             "eviction_policy": ep,
         }
     )
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.copy"),
+        tirx.Op.get("tl.tileop.copy"),
         src_region,
         dst_region,
         annotations=ann,
@@ -555,7 +558,7 @@ def transpose(
 
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.transpose"),
+        tirx.Op.get("tl.tileop.transpose"),
         src,
         dst,
         annotations=_normalize_annotations(annotations),
@@ -590,7 +593,7 @@ def im2col_impl(
     col_region = buffer_region_to_tile_region(col_region, "w", col_extents)
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.im2col"),
+        tirx.Op.get("tl.tileop.im2col"),
         img_region,
         col_region,
         nhw_step,

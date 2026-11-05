@@ -1,7 +1,7 @@
 from __future__ import annotations
 import re
-import tvm
-from tvm.target import Target
+import tvm_tirx as tvm
+from tvm_tirx.target import Target
 from .arch_base import TileDevice
 from .driver import cuda_driver
 

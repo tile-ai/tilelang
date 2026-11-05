@@ -1,6 +1,6 @@
 from __future__ import annotations
-from tvm import DataType
-from tvm.tirx import IndexMap
+from tvm_ffi import dtype as DataType
+from tvm_tirx.tirx import IndexMap
 import tilelang.language as T
 
 

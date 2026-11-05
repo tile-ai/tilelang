@@ -69,7 +69,7 @@ def test_eager_jit_binds_logical_stride_for_packed_fp4_tensor():
     packed = torch.empty((512, 256), dtype=torch.int8)[::2, :]
 
     prim_func = _fp4_eager_strided_kernel.get_tir(packed)
-    buffer = next(iter(prim_func.buffer_map.values()))
+    tensor_type = prim_func.params[0].ty
 
-    assert list(buffer.shape) == [256, 512]
-    assert list(buffer.strides) == [1024, 1]
+    assert list(tensor_type.shape) == [256, 512]
+    assert [tile.stride for tile in tensor_type.layout.shard] == [1024, 1]

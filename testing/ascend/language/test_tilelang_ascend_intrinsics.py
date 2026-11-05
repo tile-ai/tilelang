@@ -7,10 +7,11 @@ import tilelang.ascend.language as T
 import tilelang.testing
 from tilelang.ascend.language import simd as ascend_simd
 from tilelang.engine.lower import lower
-from tvm import tirx
-from tvm.script.ir_builder import IRBuilder
-from tvm.tirx import Call
-from testing.ascend._ir import calls
+import tvm_ffi
+from tvm_tirx import ir
+from tvm_tirx.script.ir_builder import IRBuilder
+from tvm_tirx.ir import Call
+from testing.ascend._ir import calls, tensor
 
 
 def _op_name(call_or_op):
@@ -19,14 +20,14 @@ def _op_name(call_or_op):
 
 
 def test_ascend_simd_pair_supports_heterogeneous_dtypes():
-    carrier = tirx.Var("pair", "int32x64")
+    carrier = ir.Var("pair", "int32x64")
     pair = ascend_simd.SimdPair(carrier, ("boolx256", "int32x64"))
 
     assert tuple(map(str, pair.dtype)) == ("boolx256", "int32x64")
 
     carry, result = pair
-    assert str(carry.dtype) == "boolx256"
-    assert str(result.dtype) == "int32x64"
+    assert str(carry.ty.dtype) == "boolx256"
+    assert str(result.ty.dtype) == "int32x64"
     assert _op_name(carry) == "tl.simd.pair_get"
     assert _op_name(result) == "tl.simd.pair_get"
     assert carry.args[0].same_as(carrier)
@@ -39,7 +40,7 @@ def test_ascend_simd_pair_supports_heterogeneous_dtypes():
 
 
 def test_ascend_simd_pair_validates_dtypes_and_index():
-    carrier = tirx.Var("pair", "int32x64")
+    carrier = ir.Var("pair", "int32x64")
 
     with pytest.raises(TypeError, match="tuple or list"):
         ascend_simd.SimdPair(carrier, "int32x64")
@@ -48,15 +49,15 @@ def test_ascend_simd_pair_validates_dtypes_and_index():
 
     pair = ascend_simd.SimdPair(carrier, ("boolx256", "int32x64"))
     with pytest.raises(TypeError, match="integer 0 or 1"):
-        ascend_simd.pair_get(pair, tirx.Var("index", "int32"))
+        ascend_simd.pair_get(pair, ir.Var("index", "int32"))
     with pytest.raises(IndexError, match="0 or 1"):
         ascend_simd.pair_get(pair, 2)
 
 
 def test_ascend_simd_vexpdif_rejects_widening_form():
-    src0 = tirx.Var("src0", "float16x128")
-    src1 = tirx.Var("src1", "float16x128")
-    mask = tirx.Var("mask", "boolx256")
+    src0 = ir.Var("src0", "float16x128")
+    src1 = ir.Var("src1", "float16x128")
+    mask = ir.Var("mask", "boolx256")
 
     with pytest.raises(TypeError, match="requires matching float32 vectors"):
         ascend_simd.vexpdif(src0, src1, mask)
@@ -145,9 +146,9 @@ def test_ascend_simd_vaddc_codegen(dtype):
 
     def collect_pair_get(node):
         if isinstance(node, Call) and _op_name(node) == "tl.simd.pair_get":
-            pair_get_dtypes.append(str(node.dtype))
+            pair_get_dtypes.append(str(node.ty.dtype))
 
-    tirx.stmt_functor.post_order_visit(func.body, collect_pair_get)
+    tvm_ffi.structural_walk(func.body, (ir.Call, collect_pair_get), order="post")
     assert sorted(pair_get_dtypes) == ["boolx256", f"{dtype}x64"]
 
     source = lower(func, target="ascend").kernel_source
@@ -245,21 +246,28 @@ def test_ascend_simd_vsstb_threads_pointer_state():
     pointer_stores = []
 
     def visit(node):
-        if isinstance(node, tirx.BufferStore) and node.buffer.scope() == "local.var" and node.buffer.dtype == "handle":
+        if (
+            isinstance(node, ir.TensorStore)
+            and str(node.dest.ty.scope) == "local.var"
+            and str(node.dest.ty.dtype) == "uint64"
+            and isinstance(node.value, ir.Call)
+            and node.value.op.name == "tirx.reinterpret"
+            and isinstance(node.value.args[0].ty, ir.PtrType)
+        ):
             pointer_stores.append(node)
 
-    tirx.stmt_functor.post_order_visit(func.body, visit)
+    tvm_ffi.structural_walk(func.body, (ir.TensorStore, visit), order="post")
     assert len(pointer_stores) == 3
-    pointer = pointer_stores[0].buffer
+    pointer = pointer_stores[0].dest
     for store in pointer_stores:
-        assert store.buffer.same_as(pointer)
+        assert store.dest.same_as(pointer)
 
     for store in pointer_stores[1:]:
-        update = store.value
+        update = store.value.args[0]
         assert isinstance(update, Call)
         assert _op_name(update) == "tl.simd.vsstb"
-        assert update.dtype == "handle"
-        assert update.args[1].dtype == "handle"
+        assert isinstance(update.ty, ir.PtrType)
+        assert isinstance(update.args[1].ty, ir.PtrType)
         assert str(update.args[4]) == '"POST_UPDATE"'
 
     source = lower(func, target="ascend").kernel_source
@@ -317,25 +325,25 @@ def test_vst2_covers_both_vectors_and_emits_one_store(dtype, bits):
 
 @pytest.mark.parametrize("dtype0,dtype1", [("uint32x64", "int32x64"), ("uint64x32", "uint64x32"), ("uint32x32", "uint32x32")])
 def test_vst2_rejects_invalid_vectors(dtype0, dtype1):
-    dst = tirx.decl_buffer((128,), "uint32", scope="shared")
+    dst = tensor((128,), "uint32", scope="shared")
     with pytest.raises(TypeError, match="matching full vectors"):
-        T.simd.vst2(dst[0], tirx.Var("a", dtype0), tirx.Var("b", dtype1))
+        T.simd.vst2(dst[0], ir.Var("a", dtype0), ir.Var("b", dtype1))
 
 
 def test_vst2_rejects_mismatched_destination():
-    dst = tirx.decl_buffer((128,), "float32", scope="shared")
+    dst = tensor((128,), "float32", scope="shared")
     with pytest.raises(TypeError, match="destination element dtype"):
-        T.simd.vst2(dst[0], tirx.Var("a", "uint32x64"), tirx.Var("b", "uint32x64"))
+        T.simd.vst2(dst[0], ir.Var("a", "uint32x64"), ir.Var("b", "uint32x64"))
 
 
 def test_vld_postupdate_rejects_invalid_pointer_and_increment():
-    buf = tirx.decl_buffer((128,), "uint16", scope="shared")
+    buf = tensor((128,), "uint16", scope="shared")
     with pytest.raises(ValueError, match="mutable pointer"):
         ascend_simd.vld(buf[0], post_inc=128)
-    untyped = tirx.decl_buffer((1,), "handle", scope="local.var")[0]
-    with pytest.raises(ValueError, match="declared with make_ubuf_ptr"):
-        ascend_simd.vld(untyped, post_inc=128)
     with IRBuilder(), T.sblock("root"):
+        untyped = T.alloc_var("handle", T.access_ptr(buf[0], "r"))[0]
+        with pytest.raises(ValueError, match="declared with make_ubuf_ptr"):
+            ascend_simd.vld(untyped, post_inc=128)
         ptr = ascend_simd.make_ubuf_ptr(buf[0], "uint16")[0]
         with pytest.raises(ValueError, match="must match dtype"):
             ascend_simd.vld(ptr, "BRC_B8", post_inc=1)
@@ -347,7 +355,7 @@ def test_vld_postupdate_rejects_invalid_pointer_and_increment():
         with pytest.raises(ValueError, match="8/16/32-bit pointer"):
             ascend_simd.vld(wide_ptr, post_inc=1)
         with pytest.raises(ValueError, match="source element dtype must match"):
-            ascend_simd.vsstb(tirx.Var("src", "float32x64"), ptr, 1, tirx.Var("mask", "boolx256"), update=True)
+            ascend_simd.vsstb(ir.Var("src", "float32x64"), ptr, 1, ir.Var("mask", "boolx256"), update=True)
 
 
 @pytest.mark.parametrize("dist", ["US_B32", "DS_B32", "E2B", "E2B_B8", "UNPK4_B16", "UNKNOWN_B16", None])
@@ -360,7 +368,7 @@ def test_vld_postupdate_rejects_unknown_distribution(dist):
 
 
 def test_vld2_rejects_a_single_vector_distribution():
-    src = tirx.decl_buffer((256,), "bfloat16", scope="shared.dyn")
+    src = tensor((256,), "bfloat16", scope="shared.dyn")
     with pytest.raises(ValueError, match="DINTLV"):
         T.simd.vld2(src[0], dist="NORM_B16")
 
@@ -417,9 +425,9 @@ def test_ascend_simd_histv2_codegen():
 )
 @pytest.mark.parametrize("operation", [T.simd.dhistv2, T.simd.chistv2])
 def test_histogram_rejects_invalid_bin(operation, value, error):
-    src = tirx.Var("src", "uint8x256")
-    dst = tirx.decl_buffer((1,), "uint16x128", name="dst", scope="local.var")[0]
-    mask = tirx.Var("mask", "boolx256")
+    src = ir.Var("src", "uint8x256")
+    dst = tensor((1,), "uint16x128", name="dst", scope="local.var")[0]
+    mask = ir.Var("mask", "boolx256")
     with pytest.raises(error, match="0 or 1"):
         operation(dst, src, mask, bin=value)
 

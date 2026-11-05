@@ -10,10 +10,11 @@ each dialect self-contained.
 """
 
 from __future__ import annotations
+from tilelang.language import _native
 
 from typing import Any
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 # The @macro helpers are target-neutral mechanism: they only emit the
 # debug_print_* externs that every backend's codegen implements.
@@ -41,21 +42,21 @@ def print(obj: Any = None, msg: str = "") -> None:  # noqa: A001
         buffer = obj
 
         elems = 1
-        for dim in buffer.shape:
+        for dim in buffer.ty.shape:
             elems *= dim
 
         if not msg:
-            msg = f"buffer<{buffer.name}, {buffer.dtype}>"
+            msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
 
-        if buffer.scope() == "local":
+        if str(buffer.ty.scope) == "local":
             print_local_buffer_with_condition(True, buffer, elems, msg)
-        elif buffer.scope() in {"shared", "shared.dyn"}:
+        elif str(buffer.ty.scope) in {"shared", "shared.dyn"}:
             print_shared_buffer_with_condition(True, buffer, elems, msg)
-        elif buffer.scope() == "global":
+        elif str(buffer.ty.scope) == "global":
             print_global_buffer_with_condition(True, buffer, elems, msg)
         else:
             raise ValueError(
-                f"T.print: unsupported buffer scope on Ascend: {buffer.scope()}. Copy the buffer to UB (shared) or GM (global) first."
+                f"T.print: unsupported buffer scope on Ascend: {str(buffer.ty.scope)}. Copy the buffer to UB (shared) or GM (global) first."
             )
 
     elif isinstance(obj, tirx.PrimExpr):

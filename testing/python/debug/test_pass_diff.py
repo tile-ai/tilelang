@@ -15,7 +15,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.env import env
 
 
@@ -53,7 +53,7 @@ def _simple_program():
 
 def _noop_pass():
     """A TVM pass that is unlikely to modify a simple IR."""
-    return tvm.tirx.transform.Simplify()
+    return tvm.tirx.transform.StmtSimplify()
 
 
 def _transforming_pass():
@@ -362,7 +362,7 @@ class TestPassDiffAPI:
         step = results[0]
         assert step["changed"] is True
         assert step["insertions"] > 0
-        assert "tvm_storage_sync" in step["after_script"]
+        assert "gpu_storage_sync" in step["after_script"]
 
     def test_context_parameter(self):
         from tilelang.utils.pass_diff import pass_diff
@@ -495,12 +495,12 @@ def _shared_rw_program():
     """A low-level TIR program with a shared-memory write→read dependency.
 
     Thread X writes to shared buffer B, then reads from B with a different
-    index pattern.  ThreadSync("shared") should insert tvm_storage_sync
+    index pattern.  ThreadSync("shared") should insert gpu_storage_sync
     between the write and the read.
     """
-    from tvm.script import tirx as TS
+    import tilelang.language as TS
 
-    @TS.prim_func(private=True)
+    @TS.prim_func
     def func(A: TS.Buffer((16,), "float32"), E: TS.Buffer((16,), "float32")):
         _block = TS.launch_thread("blockIdx.x", 1)
         B = TS.alloc_buffer((16,), "float32", scope="shared")
@@ -519,14 +519,14 @@ def _shared_rw_program():
         E_1 = TS.decl_buffer((16,), data=E.data)
         E_1[threadIdx_x] = C_1[0]
 
-    return func
+    return func.without_attr("global_symbol")
 
 
 def _atomic_no_sync_program():
     """A TIR program with only atomic writes — no sync should be inserted."""
-    from tvm.script import tirx as TS
+    import tilelang.language as TS
 
-    @TS.prim_func(private=True)
+    @TS.prim_func
     def func():
         A_shared = TS.alloc_buffer((128,), dtype="float32", scope="shared")
         tx = TS.launch_thread("threadIdx.x", 128)
@@ -535,7 +535,7 @@ def _atomic_no_sync_program():
         TS.evaluate(
             TS.call_intrin(
                 "float32",
-                tvm.tirx.op.Op.get("tl.atomic_add_elem_op"),
+                tvm.ir.Op.get("tl.atomic_add_elem_op"),
                 TS.tvm_access_ptr(
                     TS.type_annotation("float32"),
                     A_shared.data,
@@ -548,7 +548,7 @@ def _atomic_no_sync_program():
             )
         )
 
-    return func
+    return func.without_attr("global_symbol")
 
 
 class TestThreadSyncPassDiff:
@@ -568,21 +568,21 @@ class TestThreadSyncPassDiff:
         step = results[0]
         assert step["changed"] is True
         assert step["insertions"] > 0
-        # The inserted line should contain tvm_storage_sync
+        # The inserted line should contain gpu_storage_sync
         inserted_lines = [line for line in step["diff_lines"] if line.startswith("+") and not line.startswith("+++")]
-        assert any("tvm_storage_sync" in line for line in inserted_lines), f"Expected tvm_storage_sync in insertions, got: {inserted_lines}"
+        assert any("gpu_storage_sync" in line for line in inserted_lines), f"Expected gpu_storage_sync in insertions, got: {inserted_lines}"
 
     def test_thread_sync_after_script_contains_sync(self):
-        """The after_script should contain the inserted tvm_storage_sync call."""
+        """The after_script should contain the inserted gpu_storage_sync call."""
         from tilelang.utils.pass_diff import pass_diff
 
         func = _shared_rw_program()
         results = pass_diff(func, tilelang.transform.ThreadSync("shared"), mode="terminal")
 
         step = results[0]
-        assert "tvm_storage_sync" in step["after_script"]
+        assert "gpu_storage_sync" in step["after_script"]
         # The before_script should NOT have it
-        assert "tvm_storage_sync" not in step["before_script"]
+        assert "gpu_storage_sync" not in step["before_script"]
 
     def test_thread_sync_no_sync_for_atomics(self):
         """Atomic WAW/RMW should not trigger sync insertion — pass_diff reports no change."""
@@ -595,7 +595,7 @@ class TestThreadSyncPassDiff:
         assert step["changed"] is False
         assert step["insertions"] == 0
         assert step["deletions"] == 0
-        assert "tvm_storage_sync" not in step["after_script"]
+        assert "gpu_storage_sync" not in step["after_script"]
 
     def test_thread_sync_named_pass(self):
         """ThreadSync in a named (label, pass) tuple should appear with the given name."""
@@ -612,11 +612,11 @@ class TestThreadSyncPassDiff:
         assert results[0]["changed"] is True
 
     def test_thread_sync_pass_chain(self):
-        """Run a realistic pass chain: AnnotateDeviceRegions → SplitHostDevice → ThreadSync."""
+        """Run a realistic pass chain: OutlineDeviceRegions → SplitHostDevice → ThreadSync."""
         from tilelang.utils.pass_diff import pass_diff
-        from tvm.script import tirx as TS
+        import tilelang.language as TS
 
-        @TS.prim_func(private=True)
+        @TS.prim_func
         def func(A: TS.Buffer((16,), "float32"), E: TS.Buffer((16,), "float32")):
             _block = TS.launch_thread("blockIdx.x", 1)
             B = TS.alloc_buffer((16,), "float32", scope="shared")
@@ -637,19 +637,19 @@ class TestThreadSyncPassDiff:
         mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
 
         passes = [
-            ("AnnotateDeviceRegions", tvm.tirx.transform.AnnotateDeviceRegions()),
-            ("SplitHostDevice", tvm.tirx.transform.SplitHostDevice()),
+            ("OutlineDeviceRegions", tilelang.transform.OutlineDeviceRegions()),
+            ("SplitHostDevice", tilelang.transform.SplitHostDevice()),
             ("ThreadSync", tilelang.transform.ThreadSync("shared")),
         ]
         results = pass_diff(mod, passes, mode="terminal")
 
         assert len(results) == 3
-        assert results[0]["name"] == "AnnotateDeviceRegions"
+        assert results[0]["name"] == "OutlineDeviceRegions"
         assert results[1]["name"] == "SplitHostDevice"
         assert results[2]["name"] == "ThreadSync"
         # ThreadSync is the one that should produce changes
         assert results[2]["changed"] is True
-        assert "tvm_storage_sync" in results[2]["after_script"]
+        assert "gpu_storage_sync" in results[2]["after_script"]
 
     def test_thread_sync_html_report(self, tmp_path):
         """HTML report from ThreadSync should contain sync-related diff content."""
@@ -671,16 +671,16 @@ class TestThreadSyncPassDiff:
             content = f.read()
 
         # The HTML should reference the sync insertion
-        assert "tvm_storage_sync" in content
+        assert "gpu_storage_sync" in content
         # Should have at least one insertion (the sync call)
         assert results[0]["insertions"] > 0
 
     def test_thread_sync_shared_dyn(self):
         """ThreadSync('shared.dyn') should also work via pass_diff."""
         from tilelang.utils.pass_diff import pass_diff
-        from tvm.script import tirx as TS
+        import tilelang.language as TS
 
-        @TS.prim_func(private=True)
+        @TS.prim_func
         def func():
             buf_dyn = TS.alloc_buffer((256,), "float32", scope="shared.dyn")
             local_buf = TS.alloc_buffer((4,), "float32", scope="local")
@@ -698,7 +698,7 @@ class TestThreadSyncPassDiff:
 
         step = results[0]
         assert step["changed"] is True
-        assert 'tvm_storage_sync("shared.dyn")' in step["after_script"]
+        assert 'gpu_storage_sync("shared.dyn")' in step["after_script"]
 
 
 # ---------------------------------------------------------------------------

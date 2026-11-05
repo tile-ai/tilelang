@@ -1,5 +1,8 @@
 """Group-shared scalar storage: allocation, publication, and slot reuse."""
 
+from tvm_tirx import ir
+from testing.ascend._ir import access_tensor
+
 import re
 
 import pytest
@@ -7,9 +10,25 @@ import torch
 
 import tilelang
 import tilelang.ascend.language as T
-from tilelang import tvm
-from tvm import tirx
+import tvm_tirx as tvm
 from testing.ascend._ir import allocated_buffer, nodes
+from testing.ascend._memory_ir import element_offset, storage_owner
+
+
+def _ss_uint32_base_words(source):
+    """Resolve native typed views back to uint32 offsets in the SS pool."""
+    arenas = re.findall(r"volatile __ssbuf__ uint8_t\s*\*\s*(\w+)\s*=\s*\(volatile __ssbuf__ uint8_t\s*\*\)0;", source)
+    assert len(arenas) == 1
+    declarations = re.findall(r"volatile __ssbuf__ uint32_t\s*\*\s*(\w+)\s*=\s*(.+);", source)
+    assert declarations
+    bases = {}
+    for name, pointer in declarations:
+        offset = re.search(rf"\(volatile __ssbuf__ char\s*\*\){re.escape(arenas[0])}\)\s*\+\s*\(int64_t\)(\d+)\)", pointer)
+        assert offset is not None, pointer
+        byte_offset = int(offset.group(1))
+        assert byte_offset % 4 == 0
+        bases[name] = byte_offset // 4
+    return bases
 
 
 def _publish_to_cube(rounds=8, stage=0, versions=2, version_mode="auto"):
@@ -43,7 +62,7 @@ def _publish_to_cube(rounds=8, stage=0, versions=2, version_mode="auto"):
 def test_ss_codegen_materializes_versions_and_uses_mode4(versions, stage, version_mode):
     snapshots = {}
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class Capture:
         def run_after_pass(self, mod, info):
             if info.name == "tl.MaterializeMultiBuffer":
@@ -53,18 +72,24 @@ def test_ss_codegen_materializes_versions_and_uses_mode4(versions, stage, versio
         source = tilelang.lower(_publish_to_cube(versions=versions, stage=stage, version_mode=version_mode), target="ascend").kernel_source
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     words = allocated_buffer(materialized, "words")
-    actual_versions = int(words.shape[0])
+    actual_versions = int(words.ty.shape[0])
     assert (2 <= actual_versions <= 3) if versions is None else actual_versions == versions
-    assert tuple(int(dim) for dim in words.shape) == (actual_versions, 2)
+    assert tuple(int(dim) for dim in words.ty.shape) == (actual_versions, 2)
     accesses = [
         access
-        for kind in (tirx.BufferLoad, tirx.BufferStore)
+        for kind in (ir.TensorLoad, ir.TensorStore)
         for access in nodes(materialized, kind)
-        if access.buffer.data.same_as(words.data)
+        if storage_owner(materialized, access).same_as(words)
     ]
-    assert {access.buffer.dtype for access in accesses} == {"uint32", "uint64"}
+    assert {str(access_tensor(access).ty.dtype) for access in accesses} == {"uint32", "uint64"}
     assert all(len(access.indices) == 2 for access in accesses)
-    assert all(int(access.buffer.strides[0]) == (2 if access.buffer.dtype == "uint32" else 1) for access in accesses)
+    analyzer = tvm.sym.Analyzer()
+    for access in accesses:
+        tensor = access_tensor(access)
+        # Both dtype views must step over exactly the same physical slot.
+        # A version slot is two uint32 elements, or one uint64 element.
+        stride = element_offset(materialized, ir.TensorLoad(tensor, [1, 0])) - element_offset(materialized, ir.TensorLoad(tensor, [0, 0]))
+        assert analyzer.can_prove_equal(stride, 2 if str(tensor.ty.dtype) == "uint32" else 1)
     assert "volatile __ssbuf__" in source
     assert "(volatile __ssbuf__ uint32_t *)0" in source
     assert re.search(r"volatile __ssbuf__ uint64_t\s*\*", source)
@@ -82,7 +107,7 @@ def test_invalid_ss_allocation(shape, dtype, message):
 
 def test_dynamic_ss_allocation_is_rejected():
     with pytest.raises(ValueError, match="static shape"):
-        T.alloc_ss((tirx.Var("n", "int32"),), "uint32")
+        T.alloc_ss((ir.Var("n", "int32"),), "uint32")
 
 
 @pytest.mark.parametrize("size", [2, 400])
@@ -97,14 +122,15 @@ def test_ss_multiple_allocations_and_total_capacity(size):
             out[sid] = a[sid] + b[sid]
 
     if size == 400:
-        with pytest.raises(tvm.error.InternalError, match="3072"):
+        with pytest.raises(RuntimeError, match="3072"):
             tilelang.lower(main, target="ascend")
     else:
         source = tilelang.lower(main, target="ascend").kernel_source
         assert source.count("(volatile __ssbuf__ uint8_t *)0") == 1
         # Two eight-byte allocations must have separate 32-byte aligned bases.
-        stores = re.findall(r"\)\[(\d+)\] = \(uint32_t\)([12]);", source)
-        assert {(int(offset), int(value)) for offset, value in stores} == {(0, 1), (1, 1), (8, 2), (9, 2)}
+        bases = _ss_uint32_base_words(source)
+        stores = re.findall(r"\b(\w+)\[(\d+)\] = \(uint32_t\)([12]);", source)
+        assert {(bases[name] + int(offset), int(value)) for name, offset, value in stores} == {(0, 1), (1, 1), (8, 2), (9, 2)}
         assert "asc_sync_intra_" not in source
 
 
@@ -126,7 +152,7 @@ def test_ss_fixed_versions_check_final_allocation_capacity(size):
     # Fixed version counts are validated after materialization and packing.
     # Two allocations with two versions occupy 3072 or 3200 bytes.
     if size == 100:
-        with pytest.raises(tvm.error.InternalError, match="SS allocations require a static total size of at most 3072 bytes"):
+        with pytest.raises(RuntimeError, match="SS allocations require a static total size of at most 3072 bytes"):
             tilelang.lower(main, target="ascend", enable_device_compile=False)
     else:
         tilelang.lower(main, target="ascend", enable_device_compile=False)
@@ -148,7 +174,7 @@ def test_ss_peer_read_requires_explicit_synchronization(divergent):
             out[sid] = words[1 - sid]
 
     # Subcore projection exposes the missing AIV0 -> AIV1 ordering directly.
-    with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+    with pytest.raises(RuntimeError, match="does not support synchronization between AIV0 and AIV1"):
         tilelang.lower(main, target="ascend")
 
 
@@ -162,7 +188,7 @@ def test_ss_vf_access_is_rejected():
                 tx = T.get_thread_binding()
                 out[tx + sid * 128] = words[sid]
 
-    with pytest.raises(tvm.error.InternalError, match="SS supports scalar uint32/uint64 accesses outside VF blocks only"):
+    with pytest.raises(RuntimeError, match="SS supports scalar uint32/uint64 accesses outside VF blocks only"):
         tilelang.lower(main, target="ascend")
 
 

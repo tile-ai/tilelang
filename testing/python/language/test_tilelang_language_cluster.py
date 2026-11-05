@@ -1,3 +1,5 @@
+import re
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -87,10 +89,62 @@ def _get_clc_query_codegen_source() -> str:
     return artifact.kernel_source
 
 
+def _assert_cython_cluster_launch(source, cluster=(2, 1, 1)):
+    # Inspect the actual launch site, not the shared helper's clusterDim text.
+    # CUDA launch schema 1 assigns cluster.x/y/z to Field 6/7/8.
+    launches = list(re.finditer(r"tl_source_cuda_launch\(\(const void\*\)gemm_kernel, (\w+),", source))
+    assert len(launches) == 1
+    launch = launches[0]
+    values = re.escape(launch.group(1))
+    prefix = source[: launch.start()]
+    for field, expected in zip((6, 7, 8), cluster):
+        assignments = re.findall(
+            rf"{values}\.SetInt\(static_cast<tvm_cuda_launch::Field>\({field}\), (\w+)\);",
+            prefix,
+        )
+        assert len(assignments) == 1
+        argument = re.escape(assignments[0])
+        initializers = re.findall(rf"auto {argument} = \(int64_t\)(-?\d+);", prefix)
+        assert initializers == [str(expected)]
+
+
+def _assert_llvm_cluster_launch(source, cluster=(2, 1, 1)):
+    # LLVM may vectorize the type-index and padding stores. Follow the final
+    # writes into this kernel's packed argument array rather than matching one
+    # particular pretty-print of TVMFFIAny.
+    bodies = re.findall(r"^define [^\n]+\{\n(.*?)^}", source, flags=re.MULTILINE | re.DOTALL)
+    bodies = [body for body in bodies if "load ptr, ptr @.tvm_func.gemm_kernel," in body]
+    assert len(bodies) == 1
+    body = bodies[0]
+    handles = re.findall(r"(%[\w.]+) = load ptr, ptr @\.tvm_func\.gemm_kernel,", body)
+    assert len(handles) == 1
+    launch = re.search(
+        rf"call i32 %[\w.]+\(ptr {re.escape(handles[0])}, ptr (?:nonnull )?(%[\w.]+), i32 (\d+),",
+        body,
+    )
+    assert launch is not None
+    assert int(launch.group(2)) == 13  # Three kernel arguments and ten launch fields.
+    prefix = body[: launch.start()]
+    stack = re.escape(launch.group(1))
+    for slot, expected in zip((3, 4, 5), cluster):
+        pointers = {}
+        for member in (0, 2):  # TVMFFIAny.type_index and v_int64.
+            definitions = re.findall(
+                rf"(%[\w.]+) = getelementptr inbounds %[\w.]+, ptr {stack}, i64 {slot}, i32 {member},",
+                prefix,
+            )
+            assert len(definitions) == 1
+            pointers[member] = re.escape(definitions[0])
+        tags = re.findall(rf"store <2 x i32> <i32 (\d+), i32 (\d+)>, ptr {pointers[0]},", prefix)
+        assert tags and tags[-1] == ("1", "0")
+        values = re.findall(rf"store i64 (-?\d+), ptr {pointers[2]},", prefix)
+        assert values and values[-1] == str(expected)
+
+
 def run_cython_cluster_launch():
     kernel = matmul(1024, 1024, 1024, 128, 128, 32)
     mod = tilelang.compile(kernel, execution_backend="cython")
-    assert "clusterDim = {2, 1, 1}" in mod.get_host_source()
+    _assert_cython_cluster_launch(mod.get_host_source())
 
 
 def run_tvm_ffi_cluster_launch():
@@ -99,15 +153,19 @@ def run_tvm_ffi_cluster_launch():
     check_str = r"""
   (((TVMFFIAny*)stack_ffi_any)[3].type_index) = 1;
   (((TVMFFIAny*)stack_ffi_any)[3].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[3].v_int64) = ((int64_t)2);
+  (((TVMFFIAny*)stack_ffi_any)[3].v_int64) = (int64_t)2;
   (((TVMFFIAny*)stack_ffi_any)[4].type_index) = 1;
   (((TVMFFIAny*)stack_ffi_any)[4].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[4].v_int64) = ((int64_t)1);
+  (((TVMFFIAny*)stack_ffi_any)[4].v_int64) = (int64_t)1;
   (((TVMFFIAny*)stack_ffi_any)[5].type_index) = 1;
   (((TVMFFIAny*)stack_ffi_any)[5].zero_padding) = 0;
-  (((TVMFFIAny*)stack_ffi_any)[5].v_int64) = ((int64_t)1);
+  (((TVMFFIAny*)stack_ffi_any)[5].v_int64) = (int64_t)1;
 """
-    assert check_str in mod.get_host_source()
+    source = mod.get_host_source()
+    if re.search(r"^define ", source, flags=re.MULTILINE):
+        _assert_llvm_cluster_launch(source)
+    else:
+        assert check_str in source
 
 
 @tilelang.testing.requires_cuda

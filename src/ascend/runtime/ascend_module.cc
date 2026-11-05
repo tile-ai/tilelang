@@ -32,9 +32,9 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/thread_storage_scope.h"
-#include "support/bytes_io.h"
+#include "runtime/launch_param.h"
 #include "support/check.h"
+#include <tvm/support/bytes_io.h>
 
 #if TILELANG_ASCEND_PROFILER
 #include "ascend_profiling.h"
@@ -639,7 +639,7 @@ public:
     ThreadWorkLoad workload = launch_param_config_.Extract(args);
     size_t num_blocks = 1;
     for (size_t axis = 0; axis < 3; ++axis) {
-      size_t extent = workload.grid_dim(axis);
+      size_t extent = workload.GridDim(axis);
       TVM_FFI_CHECK(extent > 0, RuntimeError)
           << "Ascend launch grid must be positive for kernel "
           << function_name_;
@@ -714,8 +714,13 @@ AscendModuleNode::GetFunction(const ffi::String &name) {
   }
   ffi::ObjectPtr<ffi::Object> module_ref = ffi::GetObjectPtr<ffi::Object>(this);
   FunctionInfo info = function_info.value();
-  TVM_FFI_CHECK(info->arg_extra_tags.empty(), RuntimeError)
-      << "Ascend runtime does not support extra kernel argument tags";
+  for (auto tag : info->arg_extra_tags)
+    TVM_FFI_CHECK(tag == ArgExtraTags::kNone, RuntimeError)
+        << "Ascend runtime does not support extra kernel argument tags";
+  TVM_FFI_CHECK(info->cuda_launch_fields.empty() &&
+                    info->cuda_kernel_attrs.empty(),
+                RuntimeError)
+      << "Ascend runtime cannot consume CUDA launch metadata";
 #if TILELANG_ASCEND_PROFILER
   if (auto *profiler = AscendProfiler::GetIfEnabled()) {
     AscendWrappedFunc<ProfiledLaunchPolicy> function{

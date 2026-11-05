@@ -5,7 +5,10 @@ import re
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_ffi
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
+from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.layout import make_swizzled_layout
 from tilelang.backend.target import determine_target
 
@@ -375,27 +378,41 @@ def _find_after(src, needle, start=0):
     return pos
 
 
+def _annotations(node):
+    if node.attrs and "annotation_schema" in node.attrs:
+        return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[-1], node.attrs["annotation_schema"])
+    return {}
+
+
+def _ws_partition(func):
+    regions = [
+        region
+        for region in collect_nodes(func, ir.RegionStmt)
+        if region.op.name == "tl.attr" and _annotations(region).get("key") == "kWarpSpecializationScope"
+    ]
+    assert len(regions) == 1
+    (branch,) = regions[0].body.seq
+    assert isinstance(branch, ir.If) and branch.else_case is not None
+    return regions[0], branch
+
+
+def _ordered_statements(root):
+    """Lexical statement order, with loop/branch bodies kept under their parent."""
+    yield root
+    if isinstance(root, ir.SeqStmt):
+        for part in root.seq:
+            yield from _ordered_statements(part)
+    elif isinstance(root, (ir.For, ir.RegionStmt)):
+        yield from _ordered_statements(root.body)
+    elif isinstance(root, ir.If):
+        yield from _ordered_statements(root.then_case)
+        if root.else_case is not None:
+            yield from _ordered_statements(root.else_case)
+
+
 def _count_device_bound_copy_annotations(func):
-    annotated = 0
-    total = 0
-
-    def _visit(node):
-        nonlocal annotated, total
-        if not isinstance(node, tvm.tirx.Call) or not isinstance(node.op, tvm.ir.Op):
-            return
-        if str(node.op.name) not in {
-            "tl.tileop.copy",
-            "tl.tileop.async_copy",
-            "tl.tileop.tma_copy",
-        }:
-            return
-        total += 1
-        value = node.annotations.get("tma_descriptor_base_is_device_bound") if node.annotations else None
-        if isinstance(value, tvm.tirx.IntImm) and int(value.value) != 0:
-            annotated += 1
-
-    tvm.tirx.stmt_functor.post_order_visit(func.body, _visit)
-    return annotated, total
+    calls = [call for op in ("tl.tileop.copy", "tl.tileop.async_copy", "tl.tileop.tma_copy") for call in collect_calls(func, op=op)]
+    return sum(int(_annotations(call).get("tma_descriptor_base_is_device_bound", 0)) != 0 for call in calls), len(calls)
 
 
 def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, block_N=64, block_K=32):
@@ -420,7 +437,7 @@ def test_tiled_ws_skips_device_bound_tma_descriptor_base():
 
     script = mod["main"].script()
     assert "tl_tiled_ws_applied" not in script
-    assert "T.tma_copy" not in script
+    assert not collect_calls(mod["main"], op="tl.tileop.tma_copy")
 
 
 @tilelang.testing.requires_cuda
@@ -436,13 +453,15 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    branch = _find_after(script, "if tx < 128:")
-    producer_tma = _find_after(script, "T.tma_copy", branch)
-    consumer_branch = _find_after(script, "else:", producer_tma)
-    consumer_gemm = _find_after(script, "T.gemm", consumer_branch)
-
-    assert branch < producer_tma < consumer_branch < consumer_gemm
-    assert "if 128 <= tx:" not in script
+    _, branch = _ws_partition(mod["main"])
+    assert isinstance(branch.condition, ir.prim.LT)
+    assert int(branch.condition.b) == 128
+    assert collect_calls(branch.then_case, op="tl.tileop.tma_copy")
+    assert not collect_calls(branch.then_case, op="tl.tileop.gemm")
+    assert collect_calls(branch.else_case, op="tl.tileop.gemm")
+    assert not collect_calls(branch.else_case, op="tl.tileop.tma_copy")
+    assert tirx.analysis.check_well_formed(mod["main"])
+    assert not tirx.analysis.undefined_vars(mod["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -467,7 +486,7 @@ def test_tiled_ws_accepts_int64_pipeline_indices():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    assert "T.tma_copy" in script
+    assert collect_calls(mod["main"], op="tl.tileop.tma_copy")
 
 
 def _run_grouped_gemm_ws(kernel, batch_sizes, K=128, N=128, block_M=64, dtype="float16"):
@@ -762,15 +781,19 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    assert "T.ptx_cp_async" in script
-    assert "T.tma_copy" in script
-
-    consumer_branch = _find_after(script, "else:")
-    wait = _find_after(script, "T.mbarrier_wait_parity", consumer_branch)
-    cp_async_read = _find_after(script, "B_out[ko] = B_shared[0]", consumer_branch)
-    tma_read = _find_after(script, "A_out[ko, i] = A_shared", consumer_branch)
-
+    assert collect_calls(mod["main"], op="tl.ptx_cp_async")
+    assert collect_calls(mod["main"], op="tl.tileop.tma_copy")
+    _, branch = _ws_partition(mod["main"])
+    statements = list(_ordered_statements(branch.else_case))
+    wait = next(
+        i
+        for i, stmt in enumerate(statements)
+        if isinstance(stmt, ir.Evaluate) and isinstance(stmt.value, ir.Call) and stmt.value.op.name == "tl.mbarrier_wait_parity"
+    )
+    cp_async_read = next(i for i, stmt in enumerate(statements) if isinstance(stmt, ir.TensorStore) and stmt.dest.name == "B_out")
+    tma_read = next(i for i, stmt in enumerate(statements) if isinstance(stmt, ir.TensorStore) and stmt.dest.name == "A_out")
     assert wait < cp_async_read < tma_read
+    assert tirx.analysis.check_well_formed(mod["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -802,13 +825,23 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     script = mod["main"].script()
 
     assert "tl_tiled_ws_applied" in script
-    shared_base = _find_after(script, "base: T.int32 = idx[0]")
-    guard = _find_after(script, "if base < 64:")
-    branch = _find_after(script, 'T.attr([128, 128], "kWarpSpecializationScope", 0)')
-    producer_base = script.find("base = idx[0]", branch)
-
-    assert shared_base < guard < branch
-    assert producer_base < 0
+    region, branch = _ws_partition(mod["main"])
+    statements = list(_ordered_statements(mod["main"].body))
+    shared_base = next(
+        i
+        for i, stmt in enumerate(statements)
+        if isinstance(stmt, ir.Bind) and stmt.var.name == "base" and isinstance(stmt.value, ir.TensorLoad)
+    )
+    variable = statements[shared_base].var
+    guard = next(
+        i
+        for i, stmt in enumerate(statements)
+        if isinstance(stmt, ir.If) and isinstance(stmt.condition, ir.prim.LT) and stmt.condition.a.same_as(variable)
+    )
+    assert shared_base < guard < next(i for i, stmt in enumerate(statements) if stmt.same_as(region))
+    assert all(bind.var.name != "base" for bind in collect_nodes(branch.then_case, ir.Bind))
+    assert tirx.analysis.check_well_formed(mod["main"])
+    assert not tirx.analysis.undefined_vars(mod["main"])
 
 
 @tilelang.testing.requires_cuda

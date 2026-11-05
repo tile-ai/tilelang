@@ -7,6 +7,12 @@ execution.
 
 ![Ascend 950 backend architecture](../../images/ascend-950-backend-architecture.png)
 
+This historical diagram predates the native TIRx migration. Its `TIRX PrimFunc`
+box now corresponds to `tvm_tirx.tirx.Function`, with tensor parameters carried
+by `Var(TensorType)` and scoped operations by `RegionStmt`. The Ascend scheduling,
+device-code generation, and CANN execution roles remain as shown. The compiler
+comes from the matching TIRx provider built together with TileLang and its fixed FFI.
+
 ## Installation
 
 ### Prerequisites
@@ -35,19 +41,25 @@ From the repository root:
 
 ```bash
 git submodule update --init --recursive
-USE_ASCEND=ON USE_CUDA=OFF python -m pip install -v .
+export USE_ASCEND=ON
+export USE_CUDA=OFF
+python maint/scripts/build_native_artifacts.py stage --destination .native-ascend-stage
+python maint/scripts/build_native_artifacts.py build \
+  --stage .native-ascend-stage --output native-ascend-dist --frontend uv \
+  --wheel-only --install --jobs 4
 ```
 
 Ascend is enabled by default on Linux. These settings enable Ascend and
-disable CUDA, so a CUDA toolkit is not required. For an existing build
-directory, pass the corresponding `-DUSE_*=...` options through `CMAKE_ARGS`
-to override its cached settings.
+disable CUDA, so a CUDA toolkit is not required. Use the dedicated environment
+and C++20 toolchain described in the installation guide. The command builds the
+fixed FFI first, then the matching TIRx provider and TileLang frontend. Choose
+a fresh stage/output directory after native source edits or backend changes.
 
 For an editable development install:
 
 ```bash
-python -m pip install -r requirements-dev.txt
-USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
+uv pip install --find-links native-ascend-dist -r requirements-dev.txt
+uv pip install --no-deps -e .
 ```
 
 ## Quick Start
@@ -161,14 +173,17 @@ targets; the PTO target selects a different device code generator and the PTO
 execution adapter. For example, change the Quick Start decorator to
 `@tilelang.jit(target="pto")` to select PTO for that kernel. Leave
 `execution_backend` at its default `"auto"`: the PTO target selects the PTO
-execution backend automatically. Setting only `execution_backend="pto"` on an
-`"ascend"` target does not select PTO code generation and is rejected.
+execution backend automatically. The equivalent
+`@tilelang.jit(target="ascend", execution_backend="pto")` form also selects
+PTO code generation: execution-target normalization adds the `pto` target key
+before choosing the backend module and execution adapter.
 
 For source-only inspection, call `tilelang.lower(kernel, target="pto")` and
 read its `kernel_source`. PTO JIT compilation additionally requires PTODSL,
 `ptoas`, and `bisheng`; running the result requires the Ascend runtime and NPU.
-Automatic target detection selects the regular Ascend target, so specify
-`target="pto"` explicitly when PTO is required.
+Automatic target detection initially selects the regular Ascend target.
+Select `target="pto"` or an explicit `execution_backend="pto"` with that
+Ascend target when PTO is required.
 
 - Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
 - Ascend supports mixing SIMT and SIMD code within a single kernel, so

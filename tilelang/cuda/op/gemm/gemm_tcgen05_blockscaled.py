@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+from tilelang._analyzer import create_analyzer
+
 from tilelang import language as T
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import retrieve_ptr
-from tvm import tirx
-from tvm.arith import Analyzer
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang.language import _native as tirx
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
 
 from .gemm_tcgen05 import GemmTCGEN5
 
@@ -35,7 +36,7 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
     def _validate_operands(self) -> None:
         if not self.is_gemm_ss():
             raise ValueError(
-                f"Block-scaled TCGEN5MMA supports shared-memory A/B operands only, got A scope {self.A.scope()}, B scope {self.B.scope()}"
+                f"Block-scaled TCGEN5MMA supports shared-memory A/B operands only, got A scope {str(self.A.scope())}, B scope {str(self.B.scope())}"
             )
 
     def infer_layout(self, target: Target, thread_nums: int):
@@ -71,8 +72,8 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
         B_shared = self.BRegion
         C_local = self.CRegion
         clear_accum = self.clear_accum
-        SFA_tmem = self.SFARegion.buffer
-        SFB_tmem = self.SFBRegion.buffer
+        SFA_tmem = self.SFARegion.source
+        SFB_tmem = self.SFBRegion.source
         sf_k_start = self.sf_k_start
         sf_a_granularity_k = self.sf_a_granularity_k
         sf_b_granularity_k = self.sf_b_granularity_k
@@ -82,14 +83,14 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
         mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not self.use_2cta, disable_ws=True)
         enable_2cta = mma_emitter.tcgen05_meta.enable_2cta
 
-        analyzer = Analyzer()
+        analyzer = create_analyzer()
         warp_size = 32
         self._check_warp_aligned_thread_bounds(thread_bounds, analyzer)
         cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0
 
         @T.prim_func
         def _gemm_blockscaled_cond() -> None:
-            if cluster_cond and thread_index // 32 == thread_bounds.min // warp_size:
+            if cluster_cond and thread_index // 32 == thread_bounds.begin // warp_size:
                 mma_emitter.tcgen05mma_blockscaled(
                     A_shared,
                     B_shared,

@@ -1,25 +1,23 @@
 /*!
  * \file materialize_cpu_parallel_grid.cc
- * \brief Convert the annotated CPU grid loop nests to parallel loops.
+ * \brief Prove native CPU grid independence before enabling parallel loops.
  *
- * LowerCPUKernelLaunch marks grid axes when ``tl.cpu_parallel`` is enabled.
- * This pass checks trip count, access independence, and allocation privacy
- * after loop lowering. Safe nests become parallel; others remain serial.
- * C collapses grid axes; LLVM parallelizes the first non-unit axis.
- * All grid markers are removed before codegen.
+ * Tensor identity, aliases, physical layout and allocation lifetime are checked
+ * together. An inconclusive proof keeps the source grid serial. C collapses a
+ * perfect grid nest; LLVM parallelizes only its first non-unit dimension.
  */
 
 #include "cpu/op/builtin.h"
-#include "support/check.h"
-#include "transform/common/attr.h"
-#include <tvm/arith/analyzer.h>
-#include <tvm/arith/iter_affine_map.h>
+#include "ir/analyzer.h"
+
 #include <tvm/ffi/extra/structural_equal.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/ir/prim/vector_expr.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/sym/iter_affine_map.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -32,160 +30,324 @@
 #include <utility>
 #include <vector>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace tvm::ffi;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace prim;
+using tirx::StmtExprMutator;
+using tirx::StmtExprVisitor;
+using tirx::TensorType;
+using tirx::TensorTypeObj;
+using tirx::TensorVar;
+using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+template <class T>
+using VarMap = std::unordered_map<Var, T, ObjectPtrHash, ObjectPtrEqual>;
+using Ranges = Map<PrimVar, Range>;
 
-bool HasGridAnnotation(const ForNode *op) {
-  return op->annotations.count(attr::kCPUGridDim) > 0;
+std::optional<int64_t> ConstInt(const PrimExpr &expr) {
+  if (const auto *value = expr.as<IntImmObj>())
+    return value->value.as<int64_t>();
+  return std::nullopt;
 }
 
-Map<ffi::String, ffi::Any>
-StripGridAnnotation(const Map<ffi::String, ffi::Any> &annotations) {
-  Map<ffi::String, ffi::Any> out;
-  for (const auto &kv : annotations) {
-    if (kv.first != attr::kCPUGridDim) {
-      out.Set(kv.first, kv.second);
-    }
-  }
-  return out;
+PrimExpr Extent(const ForObj *op) {
+  return sym::Analyzer()->Simplify(op->end - op->begin);
 }
 
-/*! \brief Per-buffer access census: shallowest in-nest depth of plain
- * loads/stores, owning annotated nest(s), and outside/opaque/store flags. */
+bool HasGridAnnotation(const ForObj *op) {
+  return op && op->annotations.count(attr::kCPUGridDim);
+}
+
+Map<String, Any> StripGridAnnotation(Map<String, Any> annotations) {
+  annotations.erase(attr::kCPUGridDim);
+  return annotations;
+}
+
+bool IsTransparent(const RegionStmtObj *op) {
+  // These regions execute their body once without changing thread context.
+  // Analyze through their bodies, but preserve the lexical allocation boundary
+  // when rebuilding the grid. Other operators need their own analysis.
+  return op->body_params.empty() && op->result_vars.empty() &&
+         (op->op->name == "tl.attr" || op->op->name == "ir.scope" ||
+          op->op->name == "tl.lexical_scope");
+}
+
+bool IsDefinitionCall(const CallObj *op) {
+  return op && (op->op.same_as(tirx::alloc_tensor_op()) ||
+                op->op.same_as(tirx::decl_tensor_op()));
+}
+
+bool IsAnnotationCall(const CallObj *op) {
+  return op->op.same_as(Op::Get("tl.annotation"));
+}
+
+struct StorageRef {
+  Var root;
+  // Constant physical byte offset from root. A dynamic/unknown offset may
+  // still alias root but cannot justify a parallel access or a full reset.
+  std::optional<int64_t> byte_offset;
+};
+
+/*! \brief Resolve native tensor/pointer definitions before visiting accesses.
+ * Definitions alone are not memory reads or escapes. Alias declarations that
+ * move with a private allocation must move as one ordered definition group.
+ */
 class GridAccessAnalysis : public StmtExprVisitor {
 public:
-  explicit GridAccessAnalysis(const PrimFunc &func)
-      // SplitHostDevice defaults the kernel ABI to noalias. Respect an
-      // explicit opt-out before that later pass materializes the ABI.
-      : no_alias_(func->GetAttr<Integer>(tirx::attr::kNoAlias)
-                      .value_or(Integer(1))
-                      ->value != 0) {
-    for (const Var &param : func->params) {
-      if (param.dtype().is_handle()) {
-        parameter_data_.insert(param);
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  explicit GridAccessAnalysis(const tirx::Function &function,
+                              const ForObj *focus = nullptr)
+      : no_alias_(function->attrs.GetAttr<bool>("tirx.noalias").value_or(true)),
+        focus_(focus) {
+    for (const Var &param : function->params) {
+      if (param->ty.as<TensorTypeObj>() || param->ty.as<PtrTypeObj>()) {
+        storage_.emplace(param, StorageRef{param, 0});
+        parameter_roots_.insert(param);
       }
     }
-    for (const auto &[param, buffer] : func->buffer_map) {
-      parameter_data_.insert(buffer->data);
-    }
-    if (auto non_restrict =
-            func->GetAttr<Array<Var>>(attr::kNonRestrictParams)) {
-      for (const Var &data : non_restrict.value()) {
-        non_restrict_data_.insert(data);
-        if (auto buffer = func->buffer_map.Get(data)) {
-          non_restrict_data_.insert(buffer.value()->data);
-        }
-      }
-    }
+    if (auto values =
+            function->attrs.GetAttr<Array<Var>>(attr::kNonRestrictParams))
+      for (const Var &param : values.value())
+        non_restrict_.insert(param);
   }
 
   struct AccessInfo {
-    Optional<Buffer> allocation;
+    Optional<TensorVar> allocation;
     int min_depth = 0;
-    bool inside = false;        // plain load/store inside a nest
-    bool outside = false;       // plain load/store outside every nest
-    bool opaque = false;        // data var in a Call argument, anywhere
-    bool opaque_inside = false; // opaque use inside a nest
-    bool store_inside = false;  // plain store inside a nest
-    std::unordered_set<const ForNode *> nests;
+    bool inside = false;
+    bool outside = false;
+    bool opaque = false;
+    bool opaque_inside = false;
+    bool store_inside = false;
+    bool movable = true;
+    std::unordered_set<const ForObj *> nests;
+    std::unordered_set<const BindObj *> definitions;
   };
 
-  AccessInfo Lookup(const Var &data) const {
-    static const AccessInfo kNone{};
-    auto it = info_.find(data);
-    return it == info_.end() ? kNone : it->second;
+  StorageRef Resolve(const Var &var) const {
+    auto it = storage_.find(var);
+    return it == storage_.end() ? StorageRef{var, std::nullopt} : it->second;
   }
 
-  //! AllocBuffer data vars with grid-nest depth at declaration (0 = function
-  //! scope; only those may sink).
-  const std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> &
-  AllocDepths() const {
-    return alloc_depths_;
+  std::optional<StorageRef> ResolvePointer(const Expr &expr) const {
+    if (auto var = expr.as<Var>()) {
+      auto it = storage_.find(var.value());
+      if (it != storage_.end())
+        return it->second;
+      if (var.value()->ty.as<PtrTypeObj>())
+        return StorageRef{var.value(), 0};
+      return std::nullopt;
+    }
+    const auto *call = expr.as<CallObj>();
+    if (!call || call->args.empty())
+      return std::nullopt;
+    if (call->op.same_as(tirx::tensor_data_ptr_op())) {
+      if (auto tensor = call->args[0].as<Var>())
+        return Resolve(tensor.value());
+    }
+    if (call->op.same_as(tirx::reinterpret_op()))
+      return ResolvePointer(call->args[0]);
+    if ((call->op.same_as(tirx::ptr_byte_offset_op()) ||
+         call->op.same_as(tirx::handle_add_byte_offset_op())) &&
+        call->args.size() == 2) {
+      auto base = ResolvePointer(call->args[0]);
+      if (!base.has_value())
+        return std::nullopt;
+      auto extra = call->args[1].as<PrimExpr>();
+      auto offset = extra.has_value() ? ConstInt(extra.value()) : std::nullopt;
+      auto &old = base.value().byte_offset;
+      if (!old.has_value() || !offset.has_value() ||
+          (offset.value() > 0 &&
+           old.value() >
+               std::numeric_limits<int64_t>::max() - offset.value()) ||
+          (offset.value() < 0 &&
+           old.value() <
+               std::numeric_limits<int64_t>::min() - offset.value())) {
+        old = std::nullopt;
+      } else {
+        old = old.value() + offset.value();
+      }
+      return base;
+    }
+    return std::nullopt;
   }
 
-  //! True for data vars declared by an AllocBuffer anywhere (parameter and
-  //! global buffers have no declaration).
-  bool HasAllocation(const Var &data) const {
-    return alloc_depths_.count(data) > 0;
+  AccessInfo Lookup(const Var &var) const {
+    auto it = info_.find(Resolve(var).root);
+    return it == info_.end() ? AccessInfo{} : it->second;
   }
 
-  //! Distinct data vars need the parameter noalias guarantee.
-  //! Unrecognized external buffers may be views of an existing parameter.
-  bool MayAlias(const Var &lhs, const Var &rhs) const {
-    return !no_alias_ || !parameter_data_.count(lhs) ||
-           !parameter_data_.count(rhs) ||
-           (non_restrict_data_.count(lhs) && non_restrict_data_.count(rhs));
+  const VarMap<int> &AllocDepths() const { return alloc_depths_; }
+  bool FoundFocus() const { return seen_focus_; }
+  bool HasAllocation(const Var &var) const {
+    return alloc_depths_.count(Resolve(var).root);
+  }
+  Optional<Var> DefinitionRoot(const BindObj *bind) const {
+    auto it = definition_roots_.find(bind);
+    return it == definition_roots_.end() ? Optional<Var>{} : it->second;
+  }
+  bool MayAlias(const Var &left, const Var &right) const {
+    Var lhs = Resolve(left).root, rhs = Resolve(right).root;
+    return lhs.same_as(rhs) || !no_alias_ || !parameter_roots_.count(lhs) ||
+           !parameter_roots_.count(rhs) ||
+           (non_restrict_.count(lhs) && non_restrict_.count(rhs));
+  }
+
+  Optional<PrimExpr> PhysicalIndex(const TensorVar &tensor,
+                                   const Array<PrimExpr> &indices) const {
+    auto location = Resolve(tensor);
+    if (!location.byte_offset.has_value())
+      return std::nullopt;
+    // ElemOffset is valid only after the type describes physical memory.
+    // A memory-only strided pattern is also safe before flattening. Thread
+    // ownership, replicas and arbitrary composed layouts need tile lowering.
+    auto pattern = tirx::MatchShapeStridePattern(tensor.ty());
+    if (!pattern.has_value())
+      return std::nullopt;
+    auto offsets = tensor.ty()->ElemOffset(indices);
+    if (offsets.size() != 1)
+      return std::nullopt;
+    auto inliner = make_object<StmtExprMutator>();
+    for (const auto &[variable, value] : pure_bindings_)
+      inliner->VarRemapSet(variable, value);
+    PrimExpr index = inliner->Mutate(offsets[0]).ValueOrUnchanged(offsets[0]);
+    if (location.byte_offset.value() == 0)
+      return index;
+    PrimType dtype = tensor.dtype();
+    if (dtype.IsScalableVector() || dtype.bits() < 8)
+      return std::nullopt;
+    int64_t bytes = (dtype.bits() * dtype.lanes()) / 8;
+    if (bytes <= 0 || location.byte_offset.value() % bytes != 0)
+      return std::nullopt;
+    // Keep all iterator identities and physical offset widths explicit.
+    // A scalar 64-bit cast here is lossless for the supported index dtypes.
+    if (!index.ty().IsScalar() || !index.ty().MatchesCode(kDLInt) ||
+        index.ty().bits() > 64)
+      return std::nullopt;
+    return Cast(PrimType::Int(64), index) +
+           IntImm(PrimType::Int(64), location.byte_offset.value() / bytes);
+  }
+
+  Optional<VisitInterrupt> Visit_(const ForObj *op) final {
+    bool enter_focus = op == focus_;
+    if (enter_focus) {
+      inside_focus_ = true;
+      seen_focus_ = true;
+    }
+    bool grid = HasGridAnnotation(op) && (!focus_ || inside_focus_);
+    if (grid && grid_depth_++ == 0)
+      current_nest_ = op;
+    auto result = StmtExprVisitor::Visit_(op);
+    if (grid && --grid_depth_ == 0)
+      current_nest_ = nullptr;
+    if (enter_focus)
+      inside_focus_ = false;
+    return result;
+  }
+
+  Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+    if (const auto *call = op->value.as<CallObj>(); IsDefinitionCall(call)) {
+      TensorVar tensor(op->var);
+      StorageRef resolved{op->var, 0};
+      if (call->op.same_as(tirx::alloc_tensor_op())) {
+        alloc_depths_[op->var] = grid_depth_;
+        info_[op->var].allocation = tensor;
+        // Explicit placement and effectful shape evaluation are not duplicated.
+        if (!call->args.empty())
+          info_[op->var].movable = false;
+        for (const auto &dimension : tensor.shape())
+          if (SideEffect(dimension) != CallEffectKind::kPure)
+            info_[op->var].movable = false;
+      } else {
+        auto base = ResolvePointer(call->args[0]);
+        if (base.has_value())
+          resolved = base.value();
+        else
+          resolved.byte_offset = std::nullopt;
+      }
+      storage_.insert_or_assign(op->var, resolved);
+      info_[resolved.root].definitions.insert(op);
+      definition_roots_.emplace(op, resolved.root);
+      return std::nullopt;
+    }
+    if (op->var->ty.as<TensorTypeObj>() || op->var->ty.as<PtrTypeObj>()) {
+      if (auto resolved = ResolvePointer(op->value)) {
+        storage_.insert_or_assign(op->var, resolved.value());
+        info_[resolved.value().root].definitions.insert(op);
+        definition_roots_.emplace(op, resolved.value().root);
+        return std::nullopt;
+      }
+    }
+    // Native scalar Bind is an SSA definition. Expand only pure values for
+    // address proofs; a load or external call must remain at its source point.
+    if (op->var->ty.as<PrimTypeObj>()) {
+      if (auto value = op->value.as<PrimExpr>();
+          value.has_value() &&
+          SideEffect(value.value()) == CallEffectKind::kPure) {
+        auto inliner = make_object<StmtExprMutator>();
+        for (const auto &[variable, bound] : pure_bindings_)
+          inliner->VarRemapSet(variable, bound);
+        pure_bindings_.emplace(
+            op->var,
+            inliner->Mutate(value.value()).ValueOrUnchanged(value.value()));
+      }
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+
+  Optional<VisitInterrupt> Visit_(const TensorStoreObj *op) final {
+    if (auto tensor = op->dest.as<TensorVar>()) {
+      Touch(tensor.value(), true);
+      for (const auto &index : op->indices)
+        Visit(index);
+      return Visit(op->value);
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+    if (auto tensor = op->source.as<TensorVar>()) {
+      Touch(tensor.value(), false);
+      for (const auto &index : op->indices)
+        Visit(index);
+      return std::nullopt;
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const VarObj *op) final {
+    if (def_region_kind() == kTVMFFIDefRegionKindNone &&
+        (op->ty.as<TensorTypeObj>() || op->ty.as<PtrTypeObj>()))
+      TouchOpaque(GetRef<Var>(op));
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (IsAnnotationCall(op))
+      return std::nullopt;
+    if (op->op.same_as(tirx::address_of_op()) && !op->args.empty()) {
+      if (const auto *load = op->args[0].as<TensorLoadObj>())
+        if (auto tensor = load->source.as<Var>())
+          TouchOpaque(tensor.value());
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (IsTransparent(op))
+      return Visit(op->body);
+    return StmtExprVisitor::Visit_(op);
   }
 
 private:
-  void VisitStmt_(const ForNode *op) override {
-    bool grid = HasGridAnnotation(op);
-    if (grid) {
-      if (grid_depth_ == 0) {
-        current_nest_ = op; // chain head of this annotated nest
-      }
-      ++grid_depth_;
-    }
-    StmtExprVisitor::VisitStmt_(op);
-    if (grid) {
-      --grid_depth_;
-      if (grid_depth_ == 0) {
-        current_nest_ = nullptr;
-      }
-    }
-  }
-  void VisitStmt_(const AllocBufferNode *op) override {
-    // A declaration is not a use.
-    known_alloc_vars_.insert(op->buffer->data.get());
-    alloc_depths_[op->buffer->data] = grid_depth_;
-    info_[op->buffer->data].allocation = op->buffer;
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitStmt_(const BufferStoreNode *op) override {
-    if (grid_depth_ > 0) {
-      info_[op->buffer->data].store_inside = true;
-    }
-    Touch(op->buffer);
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitExpr_(const BufferLoadNode *op) override {
-    Touch(op->buffer);
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  void VisitExpr_(const VarNode *op) override {
-    if (known_alloc_vars_.count(op)) {
-      TouchOpaque(GetRef<Var>(op));
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  void VisitExpr_(const CallNode *op) override {
-    // address_of wraps its BufferLoad argument, hiding the buffer from the
-    // bare-Var check above.
-    if (op->op.same_as(builtin::address_of()) && !op->args.empty()) {
-      if (const auto *load = op->args[0].as<BufferLoadNode>();
-          load && known_alloc_vars_.count(load->buffer->data.get())) {
-        TouchOpaque(load->buffer->data);
-      }
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  void TouchOpaque(const Var &data) {
-    AccessInfo &entry = info_[data];
+  void TouchOpaque(const Var &var) {
+    auto &entry = info_[Resolve(var).root];
     entry.opaque = true;
     entry.min_depth = 0;
-    if (grid_depth_ > 0) {
-      entry.opaque_inside = true;
-      entry.inside = true;
+    if (grid_depth_) {
+      entry.opaque_inside = entry.inside = true;
       entry.nests.insert(current_nest_);
     }
   }
-  void Touch(const Buffer &buffer) {
-    AccessInfo &entry = info_[buffer->data];
+  void Touch(const Var &var, bool store) {
+    auto &entry = info_[Resolve(var).root];
     if (grid_depth_ == 0) {
       entry.min_depth = 0;
       entry.outside = true;
@@ -193,956 +355,881 @@ private:
       entry.min_depth =
           entry.inside ? std::min(entry.min_depth, grid_depth_) : grid_depth_;
       entry.inside = true;
+      entry.store_inside |= store;
       entry.nests.insert(current_nest_);
     }
   }
 
-  std::unordered_map<Var, AccessInfo, ObjectPtrHash, ObjectPtrEqual> info_;
-  std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> alloc_depths_;
+  VarMap<StorageRef> storage_;
+  VarMap<PrimExpr> pure_bindings_;
+  VarMap<AccessInfo> info_;
+  VarMap<int> alloc_depths_;
+  std::unordered_map<const BindObj *, Var> definition_roots_;
+  VarSet parameter_roots_, non_restrict_;
   bool no_alias_;
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> parameter_data_;
-  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> non_restrict_data_;
-  std::unordered_set<const VarNode *> known_alloc_vars_;
-  const ForNode *current_nest_ = nullptr;
+  const ForObj *focus_;
+  bool inside_focus_ = false;
+  bool seen_focus_ = false;
+  const ForObj *current_nest_ = nullptr;
   int grid_depth_ = 0;
 };
 
-//! A missing For step is the implicit default of 1; materialize the literal.
-PrimExpr NormalizedStep(const ForNode *op) {
-  return op->step.value_or(IntImm(op->loop_var.dtype(), 1));
-}
-
-/*! \brief Scalarize a possibly-vectorized flat index for affine analysis:
- * a Ramp gets a synthetic lane variable, anything else is used as-is. */
-PrimExpr ScalarizedIndex(const PrimExpr &index, ffi::Map<Var, Range> *ranges) {
-  if (const auto *ramp = index.as<RampNode>()) {
-    Var lane("affine_lane", DataType::Int(32));
-    ranges->Set(
-        lane, Range::FromMinExtent(IntImm(DataType::Int(32), 0), ramp->lanes));
+PrimExpr ScalarizedIndex(const PrimExpr &index, Ranges *ranges) {
+  if (const auto *ramp = index.as<RampObj>()) {
+    PrimVar lane("affine_lane", ramp->base.ty());
+    auto lanes = Cast(ramp->base.ty(), ramp->lanes);
+    ranges->Set(lane, Range(IntImm(lane.ty(), 0), lanes));
     return ramp->base + lane * ramp->stride;
   }
   return index;
 }
 
-/*! \brief Normalize lossless integer variable casts for DetectIterMap.
- * Narrowing is allowed only when the bound fits the destination dtype. */
 class CastVarFreshener : public StmtExprMutator {
 public:
-  explicit CastVarFreshener(arith::Analyzer *analyzer) : analyzer_(analyzer) {}
-
-  bool IsValid() const { return valid_; }
-
-  const std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> &
-  FreshVars() const {
-    return fresh_;
-  }
-
-  PrimExpr VisitExpr_(const CastNode *op) override {
-    if (const auto *var = op->value.as<VarNode>();
-        var && op->dtype.is_int() && var->dtype.is_int()) {
-      Var orig = GetRef<Var>(var);
-      if (op->dtype.bits() < var->dtype.bits()) {
-        arith::ConstIntBound bound = analyzer_->const_int_bound(orig);
-        int64_t limit = int64_t{1} << (op->dtype.bits() - 1);
-        if (bound->min_value < -limit || bound->max_value >= limit) {
-          valid_ = false;
-          return GetRef<PrimExpr>(op);
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+  explicit CastVarFreshener(sym::Analyzer analyzer)
+      : analyzer_(std::move(analyzer)) {}
+  bool valid = true;
+  // Each cast keeps its originating iterator identity. Two surviving
+  // representations of one iterator cannot be independent input dimensions.
+  VarMap<PrimVar> origins;
+  VarMap<std::unordered_map<int, PrimVar>> fresh;
+  UnchangedOr<PrimExpr> Mutate_(const CastObj *op, InplaceMode mode) final {
+    PrimType target = op->ty.as_or_throw<PrimType>();
+    auto value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
+    auto candidate = value.as<PrimVar>();
+    if (candidate.has_value() && target.IsScalar() &&
+        target.MatchesCode(kDLInt) && candidate.value().ty().IsScalar() &&
+        candidate.value().ty().MatchesCode(kDLInt)) {
+      PrimVar variable = candidate.value();
+      auto origin_it = origins.find(variable);
+      PrimVar original =
+          origin_it == origins.end() ? variable : origin_it->second;
+      if (target.bits() < original.ty().bits()) {
+        auto bound = analyzer_->const_int_bound(original);
+        if (target.bits() >= 64) {
+          if (bound->min_value == sym::ConstIntBound::kNegInf ||
+              bound->max_value == sym::ConstIntBound::kPosInf) {
+            valid = false;
+            return Cast(target, value, op->loc);
+          }
+        } else {
+          int64_t limit = int64_t{1} << (target.bits() - 1);
+          if (bound->min_value < -limit || bound->max_value >= limit) {
+            valid = false;
+            return Cast(target, value, op->loc);
+          }
         }
       }
-      auto it = fresh_.find(orig);
-      if (it != fresh_.end() && it->second.dtype() != op->dtype) {
-        // One original variable cannot stand for independent iterators of
-        // different dtypes. Keep the expression well-typed and refuse proof.
-        valid_ = false;
-        return GetRef<PrimExpr>(op);
+      if (target == variable.ty())
+        return variable;
+      auto &representations = fresh[original];
+      auto found = representations.find(target.bits());
+      if (found == representations.end()) {
+        PrimVar replacement(
+            original->name + "_i" + std::to_string(target.bits()), target);
+        origins.emplace(replacement, original);
+        found = representations.emplace(target.bits(), replacement).first;
       }
-      if (it == fresh_.end()) {
-        it = fresh_
-                 .emplace(orig, Var(orig->name_hint + "_i" +
-                                        std::to_string(op->dtype.bits()),
-                                    op->dtype))
-                 .first;
-      }
-      return it->second;
+      return found->second;
     }
-    return StmtExprMutator::VisitExpr_(op);
+    return Cast(target, value, op->loc);
   }
 
 private:
-  arith::Analyzer *analyzer_;
-  bool valid_ = true;
-  std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> fresh_;
+  sym::Analyzer analyzer_;
 };
 
-/*! \brief Prove the flat index is injective over the given variable scopes
- * (affine IterMap analysis at the bijective level). */
-bool ProveInjectiveIndex(const PrimExpr &index,
-                         const ffi::Map<Var, Range> &ranges) {
-  arith::Analyzer analyzer;
-  for (const auto &[var, range] : ranges) {
-    analyzer.Bind(var, range);
-  }
-  CastVarFreshener freshener(&analyzer);
-  PrimExpr normalized = freshener(index);
-  if (!freshener.IsValid()) {
-    return false;
-  }
-  // A remaining use of the original iterator must not become an unrelated
-  // symbolic parameter when its range is moved to the fresh iterator.
-  if (UsesVar(normalized, [&](const VarNode *var) {
-        return freshener.FreshVars().count(GetRef<Var>(var)) > 0;
-      })) {
-    return false;
-  }
-  normalized = analyzer.Simplify(normalized);
-  ffi::Map<Var, Range> norm_ranges;
-  for (const auto &[var, range] : ranges) {
-    auto it = freshener.FreshVars().find(var);
-    // Use the fresh cast-typed var *instead of* the original: DetectIterMap
-    // treats every range entry as an input iterator, so leaving both in
-    // would make the map trivially non-bijective.
-    norm_ranges.Set(it != freshener.FreshVars().end() ? it->second : var,
-                    range);
-  }
-  auto res = arith::DetectIterMap({normalized}, norm_ranges, /*predicate=*/1,
-                                  arith::IterMapLevel::Bijective, &analyzer);
-  return res->errors.empty();
-}
-
-bool StoreReadsSameBuffer(const BufferStore &op) {
-  bool reads = false;
-  PostOrderVisit(op->value, [&](const ObjectRef &node) {
-    if (const auto *load = node.as<BufferLoadNode>();
-        load && load->buffer->data.same_as(op->buffer->data)) {
-      reads = true;
-    }
-  });
-  return reads;
-}
-
-/*! \brief Find the scope at whose completion a store covers its allocation.
- * A loop suffix must have constant extents, unit steps, and an injective
- * in-bounds physical index. trip×lanes×element_bits must equal the allocation's
- * capacity, so fully overwriting a smaller view does not reset its backing
- * storage. Partial writes, dynamic or zero-trip loops, and non-affine indices
- * do not count as a reset.
- * Returning enclosing.size() means the store itself covers the buffer. */
-std::optional<size_t> FullRewriteScope(const BufferStore &op,
-                                       const Buffer &allocation,
-                                       const std::vector<For> &enclosing) {
-  if (op->predicate.defined() && !is_one(op->predicate.value())) {
+class IndexVariableCollector : public StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  VarSet used;
+  Optional<VisitInterrupt> Visit_(const VarObj *op) final {
+    used.insert(GetRef<Var>(op));
     return std::nullopt;
   }
-  // AllocBuffer is dense after FlattenBuffer / StorageRewrite. Refuse other
-  // allocation layouts rather than guessing their physical capacity.
-  if (!allocation->strides.empty() || !allocation->axis_separators.empty() ||
-      !is_zero(allocation->elem_offset) ||
-      allocation->dtype.is_scalable_vector() ||
-      op->buffer->dtype.is_scalable_vector()) {
-    return std::nullopt;
+};
+
+bool ProveInjectiveIndex(const PrimExpr &index, const Ranges &ranges) {
+  if (!index.ty().IsScalar() || !index.ty().MatchesCode(kDLInt))
+    return false;
+  sym::Analyzer analyzer;
+  for (const auto &[var, range] : ranges)
+    BindAnalyzer(analyzer, var, range);
+  auto freshener = make_object<CastVarFreshener>(analyzer);
+  auto normalized = freshener->Mutate(index).ValueOrUnchanged(index);
+  if (!freshener->valid)
+    return false;
+  auto variables = make_object<IndexVariableCollector>();
+  variables->Visit(normalized);
+  Ranges normalized_ranges;
+  for (const auto &[var, range] : ranges) {
+    PrimVar representative = var;
+    size_t count = variables->used.count(var);
+    auto found = freshener->fresh.find(var);
+    if (found != freshener->fresh.end())
+      for (const auto &[bits, replacement] : found->second)
+        if (variables->used.count(replacement)) {
+          representative = replacement;
+          ++count;
+        }
+    if (count > 1)
+      return false;
+    // Keep the original wide exclusive endpoint: [0, 128) is a valid
+    // int8 iterator domain, but int8(128) would become -128.
+    normalized_ranges.Set(representative, range);
   }
-  int64_t allocation_bits =
-      allocation->dtype.bits() * allocation->dtype.lanes();
-  int64_t element_bits = op->buffer->dtype.bits() * op->buffer->dtype.lanes();
-  // Sub-byte storage may be packed, and non-power-of-two elements may have
-  // ABI padding. Their logical bit counts do not prove physical capacity.
-  if (allocation->dtype.bits() < 8 || op->buffer->dtype.bits() < 8 ||
-      allocation->dtype.is_handle() || op->buffer->dtype.is_handle() ||
+  normalized = analyzer->Simplify(normalized);
+  auto result = sym::DetectIterMap({normalized}, normalized_ranges,
+                                   MakeConst(PrimType::Bool(), true),
+                                   sym::IterMapLevel::Bijective, analyzer);
+  return result->errors.empty();
+}
+
+class SameStorageReadFinder : public StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  SameStorageReadFinder(const GridAccessAnalysis &analysis, Var root)
+      : analysis_(analysis), root_(std::move(root)) {}
+  bool found = false;
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+    if (auto tensor = op->source.as<Var>())
+      found |= analysis_.Resolve(tensor.value()).root.same_as(root_);
+    return StmtExprVisitor::Visit_(op);
+  }
+
+private:
+  const GridAccessAnalysis &analysis_;
+  Var root_;
+};
+
+/*! \brief A reset covers the backing allocation, not merely the current view.
+ * Require injective, bounded physical addresses and exact byte capacity. This
+ * also rejects packed/sub-byte/padded vector allocations as proof premises.
+ */
+std::optional<size_t> FullRewriteScope(const TensorStoreObj *store,
+                                       const TensorVar &allocation,
+                                       const std::vector<For> &enclosing,
+                                       const GridAccessAnalysis &analysis) {
+  auto tensor = store->dest.as<TensorVar>();
+  if (!tensor.has_value() || !allocation.ty()->HasDefaultLayout())
+    return std::nullopt;
+  PrimType alloc_type = allocation.dtype(),
+           element_type = tensor.value().dtype();
+  if (alloc_type.IsScalableVector() || element_type.IsScalableVector())
+    return std::nullopt;
+  int64_t allocation_bits = alloc_type.bits() * alloc_type.lanes();
+  int64_t element_bits = element_type.bits() * element_type.lanes();
+  if (alloc_type.bits() < 8 || element_type.bits() < 8 ||
       allocation_bits <= 0 || element_bits <= 0 ||
-      (allocation_bits & (allocation_bits - 1)) != 0 ||
-      (element_bits & (element_bits - 1)) != 0) {
+      (allocation_bits & (allocation_bits - 1)) ||
+      (element_bits & (element_bits - 1)))
     return std::nullopt;
-  }
-  for (const PrimExpr &dim : allocation->shape) {
-    const auto *imm = dim.as<IntImmNode>();
-    if (!imm || imm->value <= 0 ||
-        allocation_bits > std::numeric_limits<int64_t>::max() / imm->value) {
+  for (const auto &dimension : allocation.shape()) {
+    auto extent = ConstInt(dimension);
+    if (!extent.has_value() || extent.value() <= 0 ||
+        allocation_bits > std::numeric_limits<int64_t>::max() / extent.value())
       return std::nullopt;
-    }
-    allocation_bits *= imm->value;
+    allocation_bits *= extent.value();
   }
-  if (allocation_bits % element_bits != 0) {
+  if (allocation_bits % element_bits)
     return std::nullopt;
-  }
   int64_t numel = allocation_bits / element_bits;
-  if (op->indices.size() != 1) {
+  auto index = analysis.PhysicalIndex(tensor.value(), store->indices);
+  if (!index.has_value())
     return std::nullopt;
-  }
-  Array<PrimExpr> offsets = op->buffer.OffsetOf(op->indices);
-  if (offsets.size() != 1) {
-    return std::nullopt;
-  }
-  PrimExpr index = offsets[0];
   int64_t lanes = 1;
-  if (const auto *ramp = index.as<RampNode>()) {
-    const int64_t *l = as_const_int(ramp->lanes);
-    if (l == nullptr || *l <= 0) {
+  if (const auto *ramp = index.value().as<RampObj>()) {
+    auto count = ConstInt(ramp->lanes);
+    if (!count.has_value() || count.value() <= 0)
       return std::nullopt;
-    }
-    lanes = *l;
-  } else if (index.as<BroadcastNode>()) {
+    lanes = count.value();
+  } else if (index.value().as<BroadcastObj>()) {
     return std::nullopt;
   }
-
-  // Prefer the innermost completed scope. An empty suffix also handles a
-  // scalar store or a single contiguous vector store covering the buffer.
   for (size_t start = enclosing.size() + 1; start-- > 0;) {
-    ffi::Map<Var, Range> ranges;
+    Ranges ranges;
     int64_t trip = 1;
-    bool ok = true;
+    bool valid = true;
     for (size_t i = start; i < enclosing.size(); ++i) {
-      const For &loop = enclosing[i];
-      const auto *extent = loop->extent.as<IntImmNode>();
-      if (!extent || extent->value <= 0 || !is_zero(loop->min) ||
-          !is_one(NormalizedStep(loop.get()))) {
-        ok = false;
+      const auto &loop = enclosing[i];
+      auto extent = ConstInt(Extent(loop.get()));
+      if (!extent.has_value() || extent.value() <= 0 || !IsZero(loop->begin) ||
+          !IsOne(loop->step) || trip > numel / extent.value()) {
+        valid = false;
         break;
       }
-      ranges.Set(loop->loop_var, Range::FromMinExtent(loop->min, loop->extent));
-      if (trip > numel / extent->value) {
-        ok = false;
-        break;
-      }
-      trip *= extent->value;
+      ranges.Set(loop->var, Range(loop->begin, loop->end));
+      trip *= extent.value();
     }
-    if (!ok || numel % lanes != 0 || trip != numel / lanes) {
+    if (!valid || numel % lanes || trip != numel / lanes)
       continue;
-    }
-    PrimExpr scalar_index = ScalarizedIndex(index, &ranges);
-    if (!scalar_index.dtype().is_scalar()) {
+    auto scalar_index = ScalarizedIndex(index.value(), &ranges);
+    if (!scalar_index.ty().IsScalar())
       continue;
-    }
-    arith::Analyzer analyzer;
-    for (const auto &[var, range] : ranges) {
-      analyzer.Bind(var, range);
-    }
-    arith::ConstIntBound bound = analyzer.const_int_bound(scalar_index);
+    sym::Analyzer analyzer;
+    for (const auto &[var, range] : ranges)
+      BindAnalyzer(analyzer, var, range);
+    auto bound = analyzer->const_int_bound(scalar_index);
     if (bound->min_value >= 0 && bound->max_value < numel &&
-        ProveInjectiveIndex(scalar_index, ranges)) {
+        ProveInjectiveIndex(scalar_index, ranges))
       return start;
-    }
   }
   return std::nullopt;
 }
 
-/*! \brief Per-nest check: does a buffer read observe the previous grid
- * iteration's value? Publish whole-buffer initialization only after its
- * covering loop completes, and never propagate it out of a possibly empty
- * loop or conditional region. */
 class IterationPrivacyChecker : public StmtExprVisitor {
 public:
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
   explicit IterationPrivacyChecker(const GridAccessAnalysis &analysis)
       : analysis_(analysis) {}
-
-  bool ReadsPrevious(const Var &data) const {
-    return reads_previous_.count(data) > 0;
+  bool ReadsPrevious(const Var &var) const {
+    return reads_previous_.count(analysis_.Resolve(var).root);
+  }
+  Optional<VisitInterrupt> Visit_(const ForObj *op) final {
+    auto before = initialized_;
+    loop_stack_.push_back(GetRef<For>(op));
+    loop_resets_.emplace_back();
+    auto result = StmtExprVisitor::Visit_(op);
+    auto extent = ConstInt(Extent(op));
+    if (extent.has_value() && extent.value() > 0 && IsOne(op->step))
+      initialized_.insert(loop_resets_.back().begin(),
+                          loop_resets_.back().end());
+    else
+      initialized_ = std::move(before);
+    loop_resets_.pop_back();
+    loop_stack_.pop_back();
+    return result;
+  }
+  Optional<VisitInterrupt> Visit_(const IfObj *op) final {
+    ++conditional_depth_;
+    auto result = StmtExprVisitor::Visit_(op);
+    --conditional_depth_;
+    return result;
+  }
+  Optional<VisitInterrupt> Visit_(const WhileObj *op) final {
+    ++conditional_depth_;
+    auto result = StmtExprVisitor::Visit_(op);
+    --conditional_depth_;
+    return result;
+  }
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (IsTransparent(op))
+      return Visit(op->body);
+    ++conditional_depth_;
+    auto result = StmtExprVisitor::Visit_(op);
+    --conditional_depth_;
+    return result;
+  }
+  Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+    if (analysis_.DefinitionRoot(op).has_value())
+      return std::nullopt;
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const TensorStoreObj *op) final {
+    auto result = StmtExprVisitor::Visit_(op);
+    auto tensor = op->dest.as<TensorVar>();
+    if (!tensor.has_value() || conditional_depth_)
+      return result;
+    auto info = analysis_.Lookup(tensor.value());
+    if (!info.allocation.has_value())
+      return result;
+    auto root = analysis_.Resolve(tensor.value()).root;
+    auto finder = make_object<SameStorageReadFinder>(analysis_, root);
+    finder->Visit(op->value);
+    if (finder->found)
+      return result;
+    if (auto scope = FullRewriteScope(op, info.allocation.value(), loop_stack_,
+                                      analysis_)) {
+      if (scope.value() == loop_stack_.size())
+        initialized_.insert(root);
+      else
+        loop_resets_[scope.value()].insert(root);
+    }
+    return result;
+  }
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+    if (auto tensor = op->source.as<Var>()) {
+      auto root = analysis_.Resolve(tensor.value()).root;
+      if (!initialized_.count(root))
+        reads_previous_.insert(root);
+    }
+    return StmtExprVisitor::Visit_(op);
   }
 
 private:
-  using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-
-  void VisitStmt_(const ForNode *op) override {
-    VarSet before = initialized_;
-    loop_stack_.push_back(GetRef<For>(op));
-    loop_resets_.emplace_back();
-    StmtExprVisitor::VisitStmt_(op);
-    const auto *extent = op->extent.as<IntImmNode>();
-    if (extent && extent->value > 0 && is_one(NormalizedStep(op))) {
-      initialized_.insert(loop_resets_.back().begin(),
-                          loop_resets_.back().end());
-    } else {
-      initialized_ = std::move(before);
-    }
-    loop_resets_.pop_back();
-    loop_stack_.pop_back();
-  }
-  void VisitStmt_(const IfThenElseNode *op) override {
-    ++conditional_depth_;
-    StmtExprVisitor::VisitStmt_(op);
-    --conditional_depth_;
-  }
-  void VisitStmt_(const WhileNode *op) override {
-    ++conditional_depth_;
-    StmtExprVisitor::VisitStmt_(op);
-    --conditional_depth_;
-  }
-  void VisitStmt_(const SBlockRealizeNode *op) override {
-    // Direct pass callers may retain blocks. Their predicates, and the
-    // first-reduction-iteration semantics of init, can skip initialization.
-    bool conditional = !is_one(op->predicate) || op->block->init.defined();
-    conditional_depth_ += conditional;
-    StmtExprVisitor::VisitStmt_(op);
-    conditional_depth_ -= conditional;
-  }
-  void VisitStmt_(const BufferStoreNode *op) override {
-    StmtExprVisitor::VisitStmt_(op);
-    BufferStore store = GetRef<BufferStore>(op);
-    if (StoreReadsSameBuffer(store) || conditional_depth_ > 0) {
-      return;
-    }
-    Optional<Buffer> allocation = analysis_.Lookup(op->buffer->data).allocation;
-    if (!allocation.defined()) {
-      return;
-    }
-    if (auto scope = FullRewriteScope(store, allocation.value(), loop_stack_)) {
-      if (*scope == loop_stack_.size()) {
-        initialized_.insert(op->buffer->data);
-      } else {
-        loop_resets_[*scope].insert(op->buffer->data);
-      }
-    }
-  }
-  void VisitExpr_(const BufferLoadNode *op) override {
-    if (!initialized_.count(op->buffer->data)) {
-      reads_previous_.insert(op->buffer->data);
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  VarSet initialized_;
-  VarSet reads_previous_;
   const GridAccessAnalysis &analysis_;
+  VarSet initialized_, reads_previous_;
   std::vector<For> loop_stack_;
   std::vector<VarSet> loop_resets_;
   int conditional_depth_ = 0;
 };
 
-/*! \brief Find calls whose effects cannot be proven safe to parallelize.
- * No pointer arguments does not imply purity: an extern may mutate its own
- * static state. Unknown callees/effects take the same conservative path. */
-Optional<Call> FindUnsafeCall(const Stmt &body) {
-  static const auto effect_map =
-      Op::GetAttrMap<TCallEffectKind>("TCallEffectKind");
-  Optional<Call> unsafe_call;
-  PostOrderVisit(body, [&](const ObjectRef &node) {
-    if (unsafe_call.defined()) {
-      return;
-    }
-    if (auto call = node.as<Call>()) {
-      auto op = call.value()->op.as<Op>();
-      if (!op || !effect_map.count(op.value()) ||
-          effect_map[op.value()]->value >
-              static_cast<int>(CallEffectKind::kPure)) {
-        unsafe_call = call.value();
-      }
-    }
-  });
-  return unsafe_call;
-}
+class UnsafeEffectFinder : public StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  bool unsafe = false;
+  bool parallel = false;
+  Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    static const auto effects = Op::GetAttrMap<int>("TCallEffectKind");
+    auto callee = op->op.as<Op>();
+    if (!IsDefinitionCall(op) && !IsAnnotationCall(op) &&
+        (!callee.has_value() || !effects.count(callee.value()) ||
+         effects[callee.value()] > static_cast<int>(CallEffectKind::kPure)))
+      unsafe = true;
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const ForObj *op) final {
+    parallel |= op->kind == ForKind::kParallel;
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const BreakObj *) final {
+    unsafe = true;
+    return std::nullopt;
+  }
+  Optional<VisitInterrupt> Visit_(const ContinueObj *) final {
+    unsafe = true;
+    return std::nullopt;
+  }
+  Optional<VisitInterrupt> Visit_(const ReturnObj *op) final {
+    unsafe = true;
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (!IsTransparent(op))
+      unsafe = true;
+    return Visit(op->body);
+  }
+};
 
-/*! \brief Per-nest check for parameter/global buffers (those without an
- * AllocBuffer): every write-relevant access must be provably race-free.
- * Accesses are collected during the traversal and evaluated in Finish():
- * opaque uses are unanalyzable (a bare data var in a Call argument, or
- * address_of — the callee may write past the addressed element); all store
- * addresses must agree and be injective over the parallel scope and the
- * per-iteration serial scopes (concurrent writes to one address race even
- * when the values agree); loads of a written buffer must use that same
- * address and storage element width. Distinct buffers also need the function's
- * parameter noalias guarantee, including its non-restrict exceptions.
- * Read-only buffers are always fine. */
 class OverlapStoreChecker : public StmtExprVisitor {
 public:
-  OverlapStoreChecker(const GridAccessAnalysis &analysis,
-                      std::vector<std::pair<Var, Range>> parallel_scope,
-                      std::vector<std::pair<Var, Range>> outer_serial_scope)
-      : analysis_(analysis), parallel_scope_(std::move(parallel_scope)),
-        outer_serial_scope_(std::move(outer_serial_scope)) {}
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  OverlapStoreChecker(const GridAccessAnalysis &analysis, Ranges scopes)
+      : analysis_(analysis), scopes_(std::move(scopes)) {}
+  bool found = false;
+  std::string buffer_name, reason;
 
-  bool found() const { return found_; }
-  const std::string &buffer_name() const { return buffer_name_; }
-  const std::string &reason() const { return reason_; }
-
-  //! Evaluate the collected accesses; call after the traversal.
   void Finish() {
-    arith::Analyzer analyzer;
-    for (const auto &[data, acc] : access_) {
-      if (acc.opaque_unanalyzable) {
-        Reject_(acc,
-                "opaque pointer use (call_extern / address_of / access_ptr)");
+    if (found)
+      return;
+    sym::Analyzer analyzer;
+    for (const auto &[root, access] : accesses_) {
+      if (access.opaque) {
+        Reject(root, "opaque pointer access");
         return;
       }
-      if (!acc.stores.empty()) {
-        if (acc.mixed_element_bits) {
-          Reject_(acc, "buffer views use different element widths");
+      if (!access.stores.empty()) {
+        if (access.mixed_width) {
+          Reject(root, "buffer views use different element widths");
           return;
         }
-        for (const auto &[other_data, other_acc] : access_) {
-          if (!data.same_as(other_data) &&
-              analysis_.MayAlias(data, other_data)) {
-            Reject_(acc, "may alias buffer `" + other_acc.name + "`");
+        for (const auto &[other, other_access] : accesses_)
+          if (!root.same_as(other) && analysis_.MayAlias(root, other)) {
+            Reject(root, "may alias buffer `" + std::string(other->name) + "`");
             return;
           }
+      }
+      Optional<PrimExpr> uniform;
+      for (const auto &store : access.stores) {
+        if (!store.index.has_value()) {
+          Reject(root, "unanalyzable store address");
+          return;
+        }
+        auto simplified = analyzer->Simplify(store.index.value());
+        if (uniform.has_value() &&
+            !StructuralEqual()(uniform.value(), simplified)) {
+          Reject(root, "stores to one buffer cover each other's addresses");
+          return;
+        }
+        uniform = simplified;
+        auto ranges = store.ranges;
+        if (!ProveInjectiveIndex(ScalarizedIndex(store.index.value(), &ranges),
+                                 ranges)) {
+          Reject(root, "write addresses collide across grid iterations");
+          return;
         }
       }
-      bool fail = false;
-      PrimExpr uniform;
-      for (const StoreRec &rec : acc.stores) {
-        PrimExpr simplified =
-            rec.index.defined() ? analyzer.Simplify(rec.index) : PrimExpr();
-        if (!simplified.defined()) {
-          fail = true;
-          reason_ = "unanalyzable store address";
-          break;
-        }
-        if (!uniform.defined()) {
-          uniform = simplified;
-        } else if (!StructuralEqual()(uniform, simplified)) {
-          fail = true; // stores to one buffer cover each other's addresses
-          reason_ = "stores to one buffer cover each other's addresses";
-          break;
-        }
-        auto ranges = rec.ranges;
-        if (!ProveInjectiveIndex(ScalarizedIndex(rec.index, &ranges), ranges)) {
-          fail = true; // colliding write across grid iterations
-          reason_ = "write addresses collide across grid iterations";
-          break;
-        }
-      }
-      if (!fail && uniform.defined()) {
-        // A written buffer may only be read at the same per-iteration
-        // address; anything else is a loop-carried dependency.
-        for (const PrimExpr &ld : acc.load_indices) {
-          if (!ld.defined() ||
-              !StructuralEqual()(uniform, analyzer.Simplify(ld))) {
-            fail = true;
-            reason_ = "cross-iteration dependency (loop-carried load)";
-            break;
+      if (uniform.has_value())
+        for (const auto &load : access.loads)
+          if (!load.has_value() ||
+              !StructuralEqual()(uniform.value(),
+                                 analyzer->Simplify(load.value()))) {
+            Reject(root, "cross-iteration dependency (loop-carried load)");
+            return;
           }
-        }
-      }
-      if (fail) {
-        Reject_(acc, reason_);
-        return;
-      }
     }
+  }
+
+  Optional<VisitInterrupt> Visit_(const ForObj *op) final {
+    if (!IsOne(op->step)) {
+      found = true;
+      reason = "non-unit inner loop step";
+    }
+    scopes_.Set(op->var, Range(op->begin, op->end));
+    auto result = StmtExprVisitor::Visit_(op);
+    scopes_.erase(op->var);
+    return result;
+  }
+  Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+    if (analysis_.DefinitionRoot(op).has_value())
+      return std::nullopt;
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const TensorStoreObj *op) final {
+    if (auto tensor = op->dest.as<TensorVar>()) {
+      if (!analysis_.HasAllocation(tensor.value())) {
+        auto &access = Record(tensor.value());
+        access.stores.push_back(
+            {analysis_.PhysicalIndex(tensor.value(), op->indices), scopes_});
+      }
+      for (const auto &index : op->indices)
+        Visit(index);
+      return Visit(op->value);
+    }
+    found = true;
+    reason = "tensor store destination is not a bound native tensor";
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+    if (auto tensor = op->source.as<TensorVar>()) {
+      if (!analysis_.HasAllocation(tensor.value()))
+        Record(tensor.value())
+            .loads.push_back(
+                analysis_.PhysicalIndex(tensor.value(), op->indices));
+      for (const auto &index : op->indices)
+        Visit(index);
+      return std::nullopt;
+    }
+    found = true;
+    reason = "tensor load source is not a bound native tensor";
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const VarObj *op) final {
+    if (def_region_kind() == kTVMFFIDefRegionKindNone &&
+        (op->ty.as<TensorTypeObj>() || op->ty.as<PtrTypeObj>()) &&
+        !analysis_.HasAllocation(GetRef<Var>(op)))
+      accesses_[analysis_.Resolve(GetRef<Var>(op)).root].opaque = true;
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (IsAnnotationCall(op))
+      return std::nullopt;
+    if (op->op.same_as(tirx::address_of_op()) && !op->args.empty()) {
+      if (const auto *load = op->args[0].as<TensorLoadObj>())
+        if (auto tensor = load->source.as<Var>();
+            tensor.has_value() && !analysis_.HasAllocation(tensor.value()))
+          accesses_[analysis_.Resolve(tensor.value()).root].opaque = true;
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (IsTransparent(op))
+      return Visit(op->body);
+    return StmtExprVisitor::Visit_(op);
   }
 
 private:
-  struct StoreRec {
-    PrimExpr index;
-    ffi::Map<Var, Range> ranges;
+  struct Store {
+    Optional<PrimExpr> index;
+    Ranges ranges;
   };
-  struct BufAccess {
-    std::string name;
-    std::vector<StoreRec> stores; // plain BufferStore addresses
-    std::vector<PrimExpr> load_indices;
+  struct Access {
+    std::vector<Store> stores;
+    std::vector<Optional<PrimExpr>> loads;
     int element_bits = 0;
-    bool mixed_element_bits = false;
-    bool opaque_unanalyzable = false;
+    bool mixed_width = false;
+    bool opaque = false;
   };
-
-  void Reject_(const BufAccess &acc, std::string reason) {
-    found_ = true;
-    buffer_name_ = acc.name;
-    reason_ = std::move(reason);
-  }
-
-  BufAccess &RecordAccess_(const Buffer &buffer) {
-    BufAccess &acc = access_[buffer->data];
-    acc.name = buffer->name;
-    int element_bits = buffer->dtype.bits() * buffer->dtype.lanes();
-    if (acc.element_bits != 0 && acc.element_bits != element_bits) {
-      acc.mixed_element_bits = true;
+  Access &Record(const TensorVar &tensor) {
+    auto &access = accesses_[analysis_.Resolve(tensor).root];
+    if (tensor.dtype().IsScalableVector()) {
+      access.mixed_width = true;
+      return access;
     }
-    acc.element_bits = element_bits;
-    return acc;
+    int width = tensor.dtype().bits() * tensor.dtype().lanes();
+    access.mixed_width |= access.element_bits && access.element_bits != width;
+    access.element_bits = width;
+    return access;
   }
-
-  ffi::Map<Var, Range> CurrentRanges() const {
-    ffi::Map<Var, Range> ranges;
-    for (const auto *scope :
-         {&parallel_scope_, &outer_serial_scope_, &serial_scope_}) {
-      for (const auto &[var, range] : *scope) {
-        ranges.Set(var, range);
-      }
-    }
-    return ranges;
+  void Reject(const Var &root, std::string why) {
+    found = true;
+    buffer_name = root->name;
+    reason = std::move(why);
   }
-
-  void VisitStmt_(const ForNode *op) override {
-    serial_scope_.push_back(
-        {op->loop_var, Range::FromMinExtent(op->min, op->extent)});
-    StmtExprVisitor::VisitStmt_(op);
-    serial_scope_.pop_back();
-  }
-  void VisitStmt_(const BufferStoreNode *op) override {
-    if (!analysis_.HasAllocation(op->buffer->data)) {
-      BufAccess &acc = RecordAccess_(op->buffer);
-      acc.stores.push_back(
-          {op->indices.size() == 1 ? op->indices[0] : PrimExpr(),
-           CurrentRanges()});
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-  void VisitExpr_(const BufferLoadNode *op) override {
-    if (!analysis_.HasAllocation(op->buffer->data)) {
-      BufAccess &acc = RecordAccess_(op->buffer);
-      acc.load_indices.push_back(op->indices.size() == 1 ? op->indices[0]
-                                                         : PrimExpr());
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-  void VisitExpr_(const CallNode *op) override {
-    // address_of hands the callee a raw pointer into the buffer; the write
-    // range through that pointer is unanalyzable (the callee may store past
-    // the addressed element), so it takes the same conservative path as
-    // access_ptr: refuse.
-    if (op->op.same_as(builtin::address_of()) && !op->args.empty()) {
-      if (const auto *load = op->args[0].as<BufferLoadNode>();
-          load && !analysis_.HasAllocation(load->buffer->data)) {
-        BufAccess &acc = access_[load->buffer->data];
-        acc.name = load->buffer->name;
-        acc.opaque_unanalyzable = true;
-      }
-    }
-    ++in_call_;
-    StmtExprVisitor::VisitExpr_(op);
-    --in_call_;
-  }
-  void VisitExpr_(const VarNode *op) override {
-    // A bare data var of a parameter/global buffer in a call argument is an
-    // unanalyzable opaque use (call_extern / access_ptr). Create the entry
-    // on demand: the buffer may have no plain load/store inside the nest.
-    if (in_call_ > 0 && op->dtype.is_handle() &&
-        !analysis_.HasAllocation(GetRef<Var>(op))) {
-      BufAccess &acc = access_[GetRef<Var>(op)];
-      acc.name = op->name_hint;
-      acc.opaque_unanalyzable = true;
-    }
-    StmtExprVisitor::VisitExpr_(op);
-  }
-
   const GridAccessAnalysis &analysis_;
-  std::vector<std::pair<Var, Range>> parallel_scope_;
-  std::vector<std::pair<Var, Range>> outer_serial_scope_;
-  std::vector<std::pair<Var, Range>> serial_scope_;
-  std::unordered_map<Var, BufAccess, ObjectPtrHash, ObjectPtrEqual> access_;
-  int in_call_ = 0;
-  bool found_ = false;
-  std::string buffer_name_;
-  std::string reason_;
+  Ranges scopes_;
+  VarMap<Access> accesses_;
 };
 
-struct GridRewriter : public StmtMutator {
-  GridRewriter(bool collapse_all_dims, int64_t min_trip,
-               const GridAccessAnalysis &analysis, bool force_serial = false)
-      : collapse_all_dims_(collapse_all_dims), min_trip_(min_trip),
-        analysis_(analysis), force_serial_(force_serial) {}
+class GridRewriter : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+  GridRewriter(bool collapse, int64_t min_trip, tirx::Function function,
+               bool force_serial)
+      : collapse_(collapse), min_trip_(min_trip),
+        function_(std::move(function)), force_serial_(force_serial) {}
 
-  //! The annotated chain head reachable through transparent wrappers, if any.
-  static const ForNode *TransparentNestHead(const Stmt &stmt) {
-    if (const auto *f = stmt.as<ForNode>()) {
-      return HasGridAnnotation(f) ? f : nullptr;
-    }
-    if (const auto *attr = stmt.as<AttrStmtNode>()) {
-      return TransparentNestHead(attr->body);
-    }
+  static const ForObj *TransparentNestHead(const Stmt &stmt) {
+    if (const auto *loop = stmt.as<ForObj>())
+      return HasGridAnnotation(loop) ? loop : nullptr;
+    if (const auto *sequence = stmt.as<SeqStmtObj>();
+        sequence && sequence->seq.size() == 1)
+      return TransparentNestHead(sequence->seq[0]);
+    if (const auto *region = stmt.as<RegionStmtObj>();
+        region && IsTransparent(region))
+      return TransparentNestHead(region->body);
     return nullptr;
   }
 
-  // SeqStmt is the only place where sibling allocations can be collected
-  // for sinking; everything else uses the mutator's default recursion.
-  Stmt VisitStmt_(const SeqStmtNode *op) override {
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
     Array<Stmt> out;
-    for (const Stmt &elem : op->seq) {
-      const ForNode *head = in_parallel_ ? nullptr : TransparentNestHead(elem);
-      if (head != nullptr) {
-        std::vector<Stmt> sunk = CollectSinkableAllocs(out, head);
-        out.push_back(ConvertNestElement(elem, head, std::move(sunk)));
-        continue;
-      }
-      out.push_back(VisitStmt(elem));
+    available_sequences_.push_back(&out);
+    for (const auto &element : op->seq) {
+      const auto *head = in_parallel_ ? nullptr : TransparentNestHead(element);
+      if (head)
+        out.push_back(
+            ConvertNestElement(element, head, CollectSinkableAllocs(head)));
+      else
+        out.push_back(Mutate(element, mode).ValueOrUnchanged(element));
     }
-    if (out.size() == 1) {
-      return out[0];
-    }
-    return SeqStmt(std::move(out));
+    available_sequences_.pop_back();
+    return SeqStmt(std::move(out), op->loc);
   }
 
-  Stmt VisitStmt_(const ForNode *op) override {
-    if (!HasGridAnnotation(op)) {
-      return StmtMutator::VisitStmt_(op);
-    }
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    if (IsTransparent(op))
+      return StmtExprMutator::Mutate_(op, mode);
+    DefinitionBoundary boundary(&available_begin_, available_sequences_.size());
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const IfObj *op, InplaceMode mode) final {
+    DefinitionBoundary boundary(&available_begin_, available_sequences_.size());
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const WhileObj *op, InplaceMode mode) final {
+    DefinitionBoundary boundary(&available_begin_, available_sequences_.size());
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    if (!HasGridAnnotation(op))
+      return StmtExprMutator::Mutate_(op, mode);
     if (in_parallel_) {
-      // Nested inside an already-parallel region: strip and stay serial.
-      LOG(WARNING) << "tl.cpu_parallel: grid loop `" << op->loop_var->name_hint
-                   << "` is nested inside another parallelized nest; it "
-                      "stays serial";
-      return For(op->loop_var, op->min, op->extent, ForKind::kSerial,
-                 VisitStmt(op->body), std::nullopt,
-                 StripGridAnnotation(op->annotations), NormalizedStep(op),
-                 op->span);
+      LOG(WARNING) << "tl.cpu_parallel: nested grid `" << op->var->name
+                   << "` stays serial";
+      auto body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+      return For(op->var, op->begin, op->end, op->step, ForKind::kDefault, body,
+                 StripGridAnnotation(op->annotations), op->loc);
     }
     return ConvertThenVisit(op, {});
   }
 
-  //! Convert the nest headed by `head`, rebuilding transparent wrappers.
-  Stmt ConvertNestElement(const Stmt &elem, const ForNode *head,
-                          std::vector<Stmt> sunk) {
-    if (const auto *attr = elem.as<AttrStmtNode>()) {
-      return AttrStmt(attr->node, attr->attr_key, attr->value,
-                      ConvertNestElement(attr->body, head, std::move(sunk)),
-                      attr->span);
-    }
-    return ConvertThenVisit(head, std::move(sunk));
-  }
+private:
+  // Ancestor allocations can move through serial loops and transparent
+  // metadata scopes, but not through a context-changing/conditional region.
+  struct DefinitionBoundary {
+    DefinitionBoundary(size_t *begin, size_t boundary)
+        : begin(begin), previous(std::exchange(*begin, boundary)) {}
+    ~DefinitionBoundary() { *begin = previous; }
+    size_t *begin;
+    size_t previous;
+  };
 
-  //! Convert the nest headed by `head`, then keep visiting the result: an
-  //! annotated nest hidden deeper must stay serial when this one turned
-  //! parallel, and converts independently otherwise.
-  Stmt ConvertThenVisit(const ForNode *head, std::vector<Stmt> sunk) {
-    auto [result, converted] = ConvertGridNest(head, std::move(sunk));
-    bool was_in_parallel = in_parallel_;
-    in_parallel_ = converted;
-    Stmt out = VisitStmt(result);
-    in_parallel_ = was_in_parallel;
-    return out;
-  }
-
-  static std::vector<const ForNode *> CollectChain(const ForNode *head) {
-    std::vector<const ForNode *> loops;
-    const ForNode *cur = head;
-    while (cur && HasGridAnnotation(cur)) {
-      loops.push_back(cur);
-      cur = cur->body.as<ForNode>();
+  static std::vector<const ForObj *> CollectChain(const ForObj *head) {
+    std::vector<const ForObj *> loops;
+    for (const auto *current = head; HasGridAnnotation(current);) {
+      loops.push_back(current);
+      current = current->body->seq.size() == 1
+                    ? current->body->seq[0].as<ForObj>()
+                    : nullptr;
     }
     return loops;
   }
-
-  /*! \brief Sink target within the chain: the innermost dim on ``c`` (keeps
-   * collapse(n) perfect nesting), the single parallelized dim on ``llvm``. */
-  static size_t SinkIndex(const std::vector<const ForNode *> &loops,
-                          bool collapse_all_dims) {
-    if (collapse_all_dims) {
+  size_t SinkIndex(const std::vector<const ForObj *> &loops) const {
+    if (collapse_)
       return loops.size() - 1;
-    }
-    for (size_t i = 0; i < loops.size(); ++i) {
-      const auto *extent = loops[i]->extent.as<IntImmNode>();
-      if (!extent || extent->value != 1) {
+    for (size_t i = 0; i < loops.size(); ++i)
+      if (ConstInt(Extent(loops[i])) != 1)
         return i;
-      }
-    }
     return 0;
   }
-
-  //! True when every use is a plain load/store inside the `head` nest.
-  static bool FullyOwnedBy(const GridAccessAnalysis::AccessInfo &info,
-                           const ForNode *head) {
-    return !info.opaque && !info.outside && info.inside &&
-           info.nests.size() == 1 && *info.nests.begin() == head;
+  static bool Sinkable(const GridAccessAnalysis::AccessInfo &info,
+                       const ForObj *head, int depth) {
+    return info.movable && !info.opaque && !info.outside && info.inside &&
+           info.nests.size() == 1 && info.nests.count(head) &&
+           info.min_depth >= depth;
   }
-
-  //! True when the buffer may be sunk into the `head` nest.
-  static bool SinkableAlloc(const GridAccessAnalysis::AccessInfo &info,
-                            const ForNode *head, int sink_depth) {
-    return FullyOwnedBy(info, head) && info.min_depth >= sink_depth;
-  }
-
-  //! Move sinkable allocations out of `out` and return them.
-  std::vector<Stmt> CollectSinkableAllocs(Array<Stmt> &out,
-                                          const ForNode *grid_head) {
-    if (out.empty()) {
-      return {};
+  const GridAccessAnalysis &Analysis(const ForObj *head) {
+    auto it = analyses_.find(head);
+    if (it == analyses_.end()) {
+      // Ownership is relative to this candidate nest. If an outer grid was
+      // kept serial, its allocation is still shared by an inner candidate.
+      auto analysis = make_object<GridAccessAnalysis>(function_, head);
+      analysis->Visit(function_->body);
+      TVM_FFI_ICHECK(analysis->FoundFocus())
+          << "CPU grid candidate must belong to the analyzed source function";
+      it = analyses_.emplace(head, std::move(analysis)).first;
     }
+    return *it->second;
+  }
+  IterationPrivacyChecker &Privacy(const ForObj *head) {
+    auto it = privacy_.find(head);
+    if (it == privacy_.end()) {
+      auto checker = make_object<IterationPrivacyChecker>(Analysis(head));
+      auto loops = CollectChain(head);
+      checker->Visit(loops[SinkIndex(loops)]->body);
+      it = privacy_.emplace(head, std::move(checker)).first;
+    }
+    return *it->second;
+  }
 
-    int sink_depth = static_cast<int>(SinkIndex(CollectChain(grid_head),
-                                                collapse_all_dims_)) +
-                     1;
-    std::vector<Stmt> sunk;
-    Array<Stmt> kept;
-    for (const Stmt &elem : out) {
-      const auto *alloc = elem.as<AllocBufferNode>();
-      if (alloc != nullptr &&
-          SinkableAlloc(analysis_.Lookup(alloc->buffer->data), grid_head,
-                        sink_depth) &&
-          !Privacy(grid_head).ReadsPrevious(alloc->buffer->data)) {
-        sunk.push_back(elem);
-      } else {
-        kept.push_back(elem);
+  std::vector<Stmt> CollectSinkableAllocs(const ForObj *head) {
+    const auto &analysis = Analysis(head);
+    auto depth = static_cast<int>(SinkIndex(CollectChain(head))) + 1;
+    VarSet roots;
+    std::unordered_set<const BindObj *> available;
+    for (size_t i = available_begin_; i < available_sequences_.size(); ++i)
+      for (const auto &element : *available_sequences_[i])
+        if (const auto *binding = element.as<BindObj>())
+          available.insert(binding);
+    for (size_t i = available_begin_; i < available_sequences_.size(); ++i) {
+      for (const auto &element : *available_sequences_[i]) {
+        const auto *binding = element.as<BindObj>();
+        if (!binding)
+          continue;
+        const auto *call = binding->value.as<CallObj>();
+        if (!call || !call->op.same_as(tirx::alloc_tensor_op()))
+          continue;
+        auto info = analysis.Lookup(binding->var);
+        if (!Sinkable(info, head, depth) ||
+            Privacy(head).ReadsPrevious(binding->var))
+          continue;
+        // Alias definitions may be inside the grid already. Other definitions
+        // must dominate it in an available sequence and move with their root.
+        bool closed = true;
+        for (const auto *definition : info.definitions) {
+          if (available.count(definition))
+            continue;
+          // A definition nested inside the grid remains dominated after
+          // sinking.
+          auto finder = make_object<DefinitionFinder>(definition);
+          finder->Visit(head->body);
+          if (!finder->found) {
+            closed = false;
+            break;
+          }
+        }
+        if (closed)
+          roots.insert(binding->var);
       }
     }
-    out = std::move(kept);
+    std::vector<Stmt> sunk;
+    // Preserve definition order from the outermost available sequence inward.
+    // Only these new output arrays are edited; the source function used by
+    // the access and reset analyses remains immutable.
+    for (size_t i = available_begin_; i < available_sequences_.size(); ++i) {
+      Array<Stmt> kept;
+      for (const auto &element : *available_sequences_[i]) {
+        const auto *binding = element.as<BindObj>();
+        auto root =
+            binding ? analysis.DefinitionRoot(binding) : Optional<Var>{};
+        if (root.has_value() && roots.count(root.value()))
+          sunk.push_back(element);
+        else
+          kept.push_back(element);
+      }
+      *available_sequences_[i] = std::move(kept);
+    }
     return sunk;
   }
 
-  /*! \brief Lazily run (and cache) the iteration-privacy check over the
-   * sink body of the nest headed by `head`. */
-  IterationPrivacyChecker &Privacy(const ForNode *head) {
-    auto it = privacy_cache_.find(head);
-    if (it == privacy_cache_.end()) {
-      it = privacy_cache_.emplace(head, IterationPrivacyChecker{analysis_})
-               .first;
-      std::vector<const ForNode *> loops = CollectChain(head);
-      it->second(loops[SinkIndex(loops, collapse_all_dims_)]->body);
+  class DefinitionFinder : public StmtExprVisitor {
+  public:
+    using StmtExprVisitor::Visit;
+    using StmtExprVisitor::Visit_;
+    explicit DefinitionFinder(const BindObj *target) : target_(target) {}
+    bool found = false;
+    Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+      found |= op == target_;
+      return StmtExprVisitor::Visit_(op);
     }
-    return it->second;
+
+  private:
+    const BindObj *target_;
+  };
+
+  Stmt ConvertNestElement(const Stmt &element, const ForObj *head,
+                          std::vector<Stmt> sunk) {
+    if (const auto *sequence = element.as<SeqStmtObj>())
+      return SeqStmt(
+          ConvertNestElement(sequence->seq[0], head, std::move(sunk)),
+          sequence->loc);
+    if (const auto *region = element.as<RegionStmtObj>())
+      return RegionStmt(
+          region->op, region->args, region->body_params, region->attrs,
+          SeqStmt(ConvertNestElement(region->body, head, std::move(sunk))),
+          region->result_vars, region->loc);
+    return ConvertThenVisit(head, std::move(sunk));
   }
-
-  /*! \brief Rewrite the outermost annotated grid nest `head`; the bool
-   * reports whether it was converted to parallel. */
-  std::pair<Stmt, bool> ConvertGridNest(const ForNode *head,
-                                        std::vector<Stmt> sunk) {
-    std::vector<const ForNode *> loops = CollectChain(head);
-    int sink_depth = static_cast<int>(SinkIndex(loops, collapse_all_dims_)) + 1;
-    // Failure paths: rebuild serial with annotations stripped.
-    auto rebuild_serial = [&loops, &sunk]() -> std::pair<Stmt, bool> {
-      Stmt body = loops.back()->body;
-      for (int i = static_cast<int>(loops.size()) - 1; i >= 0; --i) {
-        const ForNode *op = loops[i];
-        PrimExpr step = NormalizedStep(op);
-        body = For(op->loop_var, op->min, op->extent, ForKind::kSerial,
-                   std::move(body), std::nullopt,
-                   StripGridAnnotation(op->annotations), std::move(step),
-                   op->span);
+  Stmt ConvertThenVisit(const ForObj *head, std::vector<Stmt> sunk) {
+    auto [result, parallelized] = ConvertGridNest(head, sunk);
+    auto before = in_parallel_;
+    in_parallel_ |= parallelized;
+    result = Mutate(result).ValueOrUnchanged(result);
+    in_parallel_ = before;
+    return result;
+  }
+  Stmt Rebuild(const std::vector<const ForObj *> &loops,
+               const std::vector<Stmt> &sunk, bool parallelize, size_t sink) {
+    SeqStmt body = loops.back()->body;
+    for (size_t i = loops.size(); i-- > 0;) {
+      if (parallelize && i == sink && !sunk.empty()) {
+        Array<Stmt> inner(sunk.begin(), sunk.end());
+        inner.push_back(body);
+        body = SeqStmt(std::move(inner));
       }
-      if (!sunk.empty()) {
-        Array<Stmt> elements(sunk.begin(), sunk.end());
-        elements.push_back(body);
-        return {SeqStmt(std::move(elements)), false};
-      }
-      return {body, false};
-    };
-
-    // Atomic kernels keep the serial lowering (see pass_func): strip the
-    // annotations without converting.
-    if (force_serial_) {
-      return rebuild_serial();
-    }
-
-    int64_t trip = 1;
-    bool dynamic_extents = false;
-    for (const ForNode *op : loops) {
-      const auto *extent = op->extent.as<IntImmNode>();
-      if (!extent) {
-        dynamic_extents = true;
-        break;
-      }
-      if (extent->value <= 0) {
-        return rebuild_serial();
-      }
-      trip *= extent->value;
-    }
-    if (dynamic_extents && min_trip_ > 0) {
-      LOG(WARNING) << "tl.cpu_parallel: cannot evaluate "
-                      "tl.cpu_parallel_min_trip against a dynamic grid "
-                      "extent; grid loop `"
-                   << head->loop_var->name_hint << "` stays serial";
-      return rebuild_serial();
-    }
-    if (!dynamic_extents && trip < min_trip_) {
-      return rebuild_serial();
-    }
-
-    size_t parallel_idx = SinkIndex(loops, collapse_all_dims_);
-
-    if (!collapse_all_dims_) {
-      // The llvm parallel launch requires min=0 / step=1 and no nesting.
-      const ForNode *marked = loops[parallel_idx];
-      const auto *min = marked->min.as<IntImmNode>();
-      if (!min || min->value != 0) {
-        LOG(WARNING) << "tl.cpu_parallel: grid loop `"
-                     << marked->loop_var->name_hint
-                     << "` does not start at 0, which the llvm parallel "
-                        "launch requires; it stays serial";
-        return rebuild_serial();
-      }
-      if (marked->step.defined()) {
-        const auto *step = marked->step.as<IntImmNode>();
-        if (!step || step->value != 1) {
-          LOG(WARNING) << "tl.cpu_parallel: grid loop `"
-                       << marked->loop_var->name_hint
-                       << "` has a non-unit step, which the llvm parallel "
-                          "launch requires to be 1; it stays serial";
-          return rebuild_serial();
-        }
-      }
-      bool nested_parallel = false;
-      PostOrderVisit(loops[parallel_idx]->body, [&](const ObjectRef &node) {
-        if (const auto *f = node.as<ForNode>()) {
-          nested_parallel |= f->kind == ForKind::kParallel;
-        }
-      });
-      if (nested_parallel) {
-        LOG(WARNING) << "tl.cpu_parallel: the nest of grid loop `"
-                     << head->loop_var->name_hint
-                     << "` already contains a parallel loop, which the llvm "
-                        "backend rejects; it stays serial";
-        return rebuild_serial();
-      }
-    }
-
-    if (auto call = FindUnsafeCall(loops.back()->body)) {
-      LOG(WARNING) << "tl.cpu_parallel: call `" << call.value()->op
-                   << "` has effects that cannot be proven safe across grid "
-                      "iterations; grid loop `"
-                   << head->loop_var->name_hint << "` stays serial";
-      return rebuild_serial();
-    }
-
-    // Refuse writes to parameter/global buffers that cannot be proven
-    // race-free across grid iterations.
-    {
-      std::vector<std::pair<Var, Range>> parallel_scope, outer_serial;
-      for (size_t i = 0; i < loops.size(); ++i) {
-        bool parallel_dim =
-            collapse_all_dims_ || static_cast<size_t>(i) == parallel_idx;
-        (parallel_dim ? parallel_scope : outer_serial)
-            .emplace_back(
-                loops[i]->loop_var,
-                Range::FromMinExtent(loops[i]->min, loops[i]->extent));
-      }
-      OverlapStoreChecker overlap(analysis_, std::move(parallel_scope),
-                                  std::move(outer_serial));
-      overlap(loops.back()->body);
-      overlap.Finish();
-      if (overlap.found()) {
-        LOG(WARNING) << "tl.cpu_parallel: buffer `" << overlap.buffer_name()
-                     << "` cannot be proven race-free across grid iterations "
-                        "("
-                     << overlap.reason() << "); grid loop `"
-                     << head->loop_var->name_hint << "` stays serial";
-        return rebuild_serial();
-      }
-    }
-
-    // Refuse to parallelize when a function-scope buffer is mutated (or
-    // opaquely used) inside the nest but cannot be privatized into it;
-    // load-only sharing (e.g. a table initialized before the nest) is
-    // race-free.
-    for (const auto &kv : analysis_.AllocDepths()) {
-      const Var &data = kv.first;
-      if (kv.second != 0) {
-        continue;
-      }
-      GridAccessAnalysis::AccessInfo info = analysis_.Lookup(data);
-      if (!info.nests.count(head)) {
-        continue; // not used inside this nest
-      }
-      if (SinkableAlloc(info, head, sink_depth) &&
-          !Privacy(head).ReadsPrevious(data)) {
-        bool was_sunk =
-            std::any_of(sunk.begin(), sunk.end(), [&](const Stmt &s) {
-              const auto *alloc = s.as<AllocBufferNode>();
-              return alloc && alloc->buffer->data.same_as(data);
-            });
-        if (!was_sunk) {
-          LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
-                       << "` is used only inside the nest of grid loop `"
-                       << head->loop_var->name_hint
-                       << "` but its allocation is not adjacent to it, so it "
-                          "cannot be privatized; the nest stays serial";
-          return rebuild_serial();
-        }
-        continue;
-      }
-      if (info.store_inside || info.opaque_inside) {
-        const char *reason =
-            Privacy(head).ReadsPrevious(data)
-                ? "it carries state across grid iterations"
-            : info.opaque_inside
-                ? "it is referenced through opaque accesses (call_extern / "
-                  "address_of / access_ptr)"
-            : info.outside          ? "it is also used outside the nest"
-            : info.nests.size() > 1 ? "it is shared by multiple grid nests"
-                                    : "it is used across grid levels";
-        LOG(WARNING) << "tl.cpu_parallel: buffer `" << data->name_hint
-                     << "` is mutated inside the nest of grid loop `"
-                     << head->loop_var->name_hint
-                     << "` but cannot be privatized (" << reason
-                     << "); the nest stays serial";
-        return rebuild_serial();
-      }
-    }
-
-    // Rebuild from the true innermost body so loops below the parallelized
-    // dim are not duplicated; splice the sunk allocations when the wrap
-    // reaches the parallel dim.
-    Stmt body = loops.back()->body;
-    for (int i = static_cast<int>(loops.size()) - 1; i >= 0; --i) {
-      if (static_cast<size_t>(i) == parallel_idx && !sunk.empty()) {
-        Array<Stmt> elements(sunk.begin(), sunk.end());
-        elements.push_back(body);
-        body = SeqStmt(std::move(elements));
-      }
-      const ForNode *op = loops[i];
-      ForKind kind =
-          (collapse_all_dims_ || static_cast<size_t>(i) == parallel_idx)
-              ? ForKind::kParallel
-              : ForKind::kSerial;
-      Map<ffi::String, ffi::Any> annotations =
-          StripGridAnnotation(op->annotations);
-      PrimExpr step = NormalizedStep(op);
+      const auto *loop = loops[i];
+      auto kind = parallelize && (collapse_ || i == sink) ? ForKind::kParallel
+                                                          : ForKind::kDefault;
       body =
-          For(op->loop_var, op->min, op->extent, kind, std::move(body),
-              std::nullopt, std::move(annotations), std::move(step), op->span);
+          SeqStmt(For(loop->var, loop->begin, loop->end, loop->step, kind, body,
+                      StripGridAnnotation(loop->annotations), loop->loc));
     }
-
-    return {body, true};
+    if (!parallelize && !sunk.empty()) {
+      Array<Stmt> outer(sunk.begin(), sunk.end());
+      outer.push_back(body);
+      return SeqStmt(std::move(outer));
+    }
+    return body;
+  }
+  std::pair<Stmt, bool> ConvertGridNest(const ForObj *head,
+                                        const std::vector<Stmt> &sunk) {
+    const auto &analysis = Analysis(head);
+    auto loops = CollectChain(head);
+    size_t sink = SinkIndex(loops);
+    int depth = static_cast<int>(sink) + 1;
+    auto serial = [&]() -> std::pair<Stmt, bool> {
+      return {Rebuild(loops, sunk, false, sink), false};
+    };
+    if (force_serial_)
+      return serial();
+    int64_t trip = 1;
+    bool dynamic = false;
+    for (const auto *loop : loops) {
+      if (!IsOne(loop->step))
+        return serial();
+      auto extent = ConstInt(Extent(loop));
+      if (!extent.has_value()) {
+        dynamic = true;
+        continue;
+      }
+      if (extent.value() <= 0)
+        return serial();
+      trip = trip > std::numeric_limits<int64_t>::max() / extent.value()
+                 ? std::numeric_limits<int64_t>::max()
+                 : trip * extent.value();
+    }
+    if ((dynamic && min_trip_ > 0) || (!dynamic && trip < min_trip_))
+      return serial();
+    auto effects = make_object<UnsafeEffectFinder>();
+    effects->Visit(loops[sink]->body);
+    if (!collapse_ && (!IsZero(loops[sink]->begin) || effects->parallel))
+      return serial();
+    if (effects->unsafe) {
+      LOG(WARNING)
+          << "tl.cpu_parallel: grid `" << head->var->name
+          << "` contains effects that cannot be proven safe; it stays serial";
+      return serial();
+    }
+    Ranges scopes;
+    for (const auto *loop : loops)
+      scopes.Set(loop->var, Range(loop->begin, loop->end));
+    auto overlap = make_object<OverlapStoreChecker>(analysis, scopes);
+    overlap->Visit(loops.back()->body);
+    overlap->Finish();
+    if (overlap->found) {
+      LOG(WARNING) << "tl.cpu_parallel: buffer `" << overlap->buffer_name
+                   << "` cannot be proven race-free (" << overlap->reason
+                   << "); grid `" << head->var->name << "` stays serial";
+      return serial();
+    }
+    for (const auto &[root, allocation_depth] : analysis.AllocDepths()) {
+      if (allocation_depth >= depth)
+        continue;
+      auto info = analysis.Lookup(root);
+      if (!info.nests.count(head))
+        continue;
+      bool moved = std::any_of(sunk.begin(), sunk.end(), [&](const Stmt &stmt) {
+        const auto *binding = stmt.as<BindObj>();
+        return binding && binding->var.same_as(root);
+      });
+      if (Sinkable(info, head, depth) && !Privacy(head).ReadsPrevious(root) &&
+          moved)
+        continue;
+      if (info.store_inside || info.opaque_inside) {
+        LOG(WARNING) << "tl.cpu_parallel: allocation `" << root->name
+                     << "` carries state or cannot be privatized; grid `"
+                     << head->var->name << "` stays serial";
+        return serial();
+      }
+    }
+    return {Rebuild(loops, sunk, true, sink), true};
   }
 
-  bool collapse_all_dims_;
+  bool collapse_;
   int64_t min_trip_;
-  const GridAccessAnalysis &analysis_;
-  std::unordered_map<const ForNode *, IterationPrivacyChecker> privacy_cache_;
-  // Strip annotations without converting (kernels marked tl.cpu_had_atomics).
+  tirx::Function function_;
+  std::unordered_map<const ForObj *, ObjectPtr<GridAccessAnalysis>> analyses_;
   bool force_serial_;
-  // True while visiting the body of a successfully parallelized nest:
-  // annotated nests found there must stay serial.
   bool in_parallel_ = false;
+  std::vector<Array<Stmt> *> available_sequences_;
+  size_t available_begin_ = 0;
+  std::unordered_map<const ForObj *, ObjectPtr<IterationPrivacyChecker>>
+      privacy_;
 };
-
 } // namespace
 
-namespace transform {
-
-using namespace tirx::transform;
-
 tvm::transform::Pass MaterializeCPUParallelGrid() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) -> PrimFunc {
-    auto opt_target = func->GetAttr<Target>(tvm::attr::kTarget);
-    if (!opt_target)
-      return func;
-    std::string kind = opt_target.value()->kind->name;
-    bool collapse_all_dims;
-    if (kind == "c") {
-      collapse_all_dims = true;
-    } else if (kind == "llvm") {
-      collapse_all_dims = false;
-    } else {
-      return func;
-    }
-
-    GridAccessAnalysis analysis(func);
-    analysis(func->body);
-
-    int64_t min_trip = ctx->GetConfig<IntImm>(kCPUParallelMinTrip,
-                                              IntImm(DataType::Int(64), 0))
-                           .value()
-                           ->value;
-
-    bool force_serial =
-        func->GetAttr<Bool>(attr::kCPUHadAtomics).value_or(Bool(false))->value;
-    if (force_serial) {
-      LOG(WARNING) << "tl.cpu_parallel: the kernel calls atomic ops, which "
-                      "are lowered to serial read-modify-write on CPU; the "
-                      "grid nest stays serial to avoid a data race";
-    }
-
-    GridRewriter rewriter(collapse_all_dims, min_trip, analysis, force_serial);
-    func.CopyOnWrite()->body = rewriter(func->body);
-    return func;
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext context) {
+    auto target = function->attrs.GetAttr<Target>("target");
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) ||
+        !target.has_value())
+      return function;
+    auto kind = target.value()->kind->name;
+    if (kind != "c" && kind != "llvm")
+      return function;
+    auto minimum = context->GetConfig<int64_t>(kCPUParallelMinTrip).value_or(0);
+    auto force_serial =
+        function->attrs.GetAttr<bool>(attr::kCPUHadAtomics).value_or(false);
+    if (force_serial)
+      LOG(WARNING) << "tl.cpu_parallel: atomic kernels use serial "
+                      "read-modify-write; grid stays serial";
+    auto rewriter =
+        make_object<GridRewriter>(kind == "c", minimum, function, force_serial);
+    auto body = function->body;
+    auto result = rewriter->Mutate(body).ValueOrUnchanged(body);
+    if (!result.same_as(body))
+      function.CopyOnWrite()->body = result;
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MaterializeCPUParallelGrid", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.MaterializeCPUParallelGrid");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.cpu.transform.MaterializeCPUParallelGrid",
-                        MaterializeCPUParallelGrid);
+  ffi::reflection::GlobalDef().def(
+      "tl.cpu.transform.MaterializeCPUParallelGrid",
+      MaterializeCPUParallelGrid);
 }
-
-} // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

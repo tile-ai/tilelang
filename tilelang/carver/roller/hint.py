@@ -1,6 +1,6 @@
 """Hint definition for schedule"""
 
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 from . import PrimFuncNode
 import numpy as np
 from .rasterization import *

@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, TypeVar
 
-from tvm import IRModule
-from tvm.target import Target
+from tvm_tirx.ir import IRModule
+from tvm_tirx.target import Target
 
 if TYPE_CHECKING:
     from tilelang.backend.device_codegen import DeviceCodegen
@@ -233,6 +233,24 @@ class BackendContext:
 
 _BACKENDS: dict[str, BackendModule] = {}
 _TARGET_KIND_INDEX: dict[str, list[str]] = {}
+_BUILTIN_BACKEND_PACKAGES = {
+    "cpu": "cpu",
+    "cuda": "cuda",
+    "cutedsl": "cuda",
+    "rocm": "rocm",
+    "metal": "metal",
+    "webgpu": "webgpu",
+    "ascend": "ascend",
+    "pto": "ascend",
+}
+
+
+def _load_builtin_backend(name: str) -> None:
+    package = _BUILTIN_BACKEND_PACKAGES.get(name)
+    if package is not None:
+        from importlib import import_module
+
+        import_module(f"tilelang.{package}").register_backend()
 
 
 def register_backend(backend: BackendModule) -> BackendModule:
@@ -273,8 +291,10 @@ def register_backend(backend: BackendModule) -> BackendModule:
 
 
 def get_backend(name: str) -> BackendModule:
-    """Return a registered backend module by name."""
+    """Return a backend module, loading its built-in registration on demand."""
 
+    if name not in _BACKENDS:
+        _load_builtin_backend(name)
     try:
         return _BACKENDS[name]
     except KeyError as err:
@@ -285,6 +305,11 @@ def get_backend(name: str) -> BackendModule:
 def list_backends() -> dict[str, BackendModule]:
     """Return a copy of the registered backend modules."""
 
+    # An explicit enumeration includes built-ins, while importing TileLang
+    # alone continues to defer backend registration until it is needed.
+    for name in _BUILTIN_BACKEND_PACKAGES:
+        if name not in _BACKENDS:
+            _load_builtin_backend(name)
     return dict(_BACKENDS)
 
 
@@ -298,6 +323,20 @@ def _list_backend_modules_for_target_kind(target_kind: str) -> tuple[BackendModu
 
 
 def _resolve_backend_module(target: Target) -> BackendModule:
+    # Registration belongs to the selected backend. Importing TileLang or its
+    # language facade must not load every backend's compiler or optional SDK.
+    if target.kind.name not in _TARGET_KIND_INDEX:
+        name = {
+            "c": "cpu",
+            "llvm": "cpu",
+            "cuda": "cuda",
+            "hip": "rocm",
+            "metal": "metal",
+            "webgpu": "webgpu",
+            "ascend": "ascend",
+        }.get(target.kind.name)
+        if name is not None:
+            _load_builtin_backend(name)
     candidates = [backend for backend in _list_backend_modules_for_target_kind(target.kind.name) if backend.matches(target)]
     if not candidates:
         raise ValueError(f"No backend matches target {target}")

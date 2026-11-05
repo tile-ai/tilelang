@@ -3,7 +3,9 @@ import torch
 import tilelang.testing
 import tilelang.language as T
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import prim
+import tvm_ffi
 
 
 @tilelang.jit
@@ -186,14 +188,14 @@ def fp4_to_fp8_helper(lanes):
 @pytest.mark.parametrize("destination", ["float8_e4m3", "float8_e4m3fn"])
 @pytest.mark.parametrize("via_fp32", [False, True])
 def test_fp4_fp8_codegen(lanes, destination, via_fp32):
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the CUDA code generator")
     suffix = f"x{lanes}" if lanes > 1 else ""
-    value = tirx.Var("value", "float4_e2m1fn" + suffix)
-    source_value = tirx.Cast("float32" + suffix, value) if via_fp32 else value
-    converted = tirx.Cast(destination + suffix, source_value)
-    func = tirx.PrimFunc([value], tirx.Evaluate(converted))
+    value = ir.Var("value", "float4_e2m1fn" + suffix)
+    source_value = prim.Cast("float32" + suffix, value) if via_fp32 else value
+    converted = prim.Cast(destination + suffix, source_value)
+    func = tirx.Function([value], ir.SeqStmt([ir.Evaluate(converted)]), ir.TupleType([]))
     func = func.with_attr("global_symbol", "fp4_fp8_cast")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     source = build(tvm.IRModule({"fp4_fp8_cast": func}), tvm.target.Target("cuda")).inspect_source()
@@ -204,10 +206,18 @@ def test_fp4_fp8_codegen(lanes, destination, via_fp32):
     if via_fp32 and lanes == 2:
         # An annotation on either cast keeps the fp32 detour.
         for annotation_owner in ("inner", "outer"):
-            annotations = {"sat": tirx.IntImm("bool", 1)}
-            intermediate = tirx.Cast("float32" + suffix, value, annotations if annotation_owner == "inner" else None)
-            annotated = tirx.Cast(destination + suffix, intermediate, annotations if annotation_owner == "outer" else None)
-            annotated_func = func.with_body(tirx.Evaluate(annotated))
+            annotations = {"sat": True}
+            intermediate = (
+                ir.Call("tl.cast", [value], attrs=annotations, ty_args=[ir.PrimType("float32" + suffix)])
+                if annotation_owner == "inner"
+                else prim.Cast("float32" + suffix, value)
+            )
+            annotated = (
+                ir.Call("tl.cast", [intermediate], attrs=annotations, ty_args=[ir.PrimType(destination + suffix)])
+                if annotation_owner == "outer"
+                else prim.Cast(destination + suffix, intermediate)
+            )
+            annotated_func = func.with_body(ir.SeqStmt([ir.Evaluate(annotated)]))
             annotated_source = build(tvm.IRModule({"fp4_fp8_cast": annotated_func}), tvm.target.Target("cuda")).inspect_source()
             assert "__tl_cvt_e2m1" not in annotated_source
             assert "__tl_cvt_fp4x2_to_float2" in annotated_source

@@ -1,397 +1,457 @@
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
+ * or more contributor license agreements. See the NOTICE file
  * distributed with this work for additional information
  * regarding copyright ownership. The ASF licenses this file
  * to you under the Apache License, Version 2.0 (the
  * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * with the License. You may obtain a copy of the License at
  *
  *   http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied.  See the License for the
+ * KIND, either express or implied. See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
 
 /*!
  * \file lower_opaque_block.cc
+ * \brief Finish consumed TileLang metadata without dropping executable
+ * contracts.
  */
 
-#include "support/check.h"
-#include <tvm/ir/attrs.h>
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/s_tir/stmt.h>
-#include <tvm/tirx/stmt.h>
+#include "../ir/annotations.h"
+#include "../op/native_utils.h"
+#include "ir/lexical_scope.h"
+
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
 #include <string>
-#include <utility>
+#include <unordered_set>
 
-#include "../op/builtin.h"
-#include "common/attr.h"
-#include "tir/transforms/ir_utils.h"
+namespace tvm::tl {
+namespace {
+using ffi::Any;
+using ffi::Array;
+using ffi::Map;
+using ffi::String;
 
-namespace tvm {
-namespace tl {
+Map<String, Any> DecodeMetadata(const CallObj *call) {
+  auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
+  const auto decoded =
+      DecodeAnnotations(call->args[0].as_or_throw<tvm::Tuple>(),
+                        attrs.GetAttr<Array<Any>>("annotation_schema").value())
+          .cast<Map<Any, Any>>();
+  Map<String, Any> result;
+  for (const auto &[key, value] : decoded)
+    result.Set(key.cast<String>(), value);
+  return result;
+}
 
-using namespace tirx;
-using namespace ffi;
-using namespace tirx::attr;
-/*!
- * \brief Remove Block to ensure that the TIR can not be scheduled again.
- */
-class OpaqueBlockLower : public StmtExprMutator {
+Stmt Attribute(const Any &node, const String &key, const Any &value,
+               SeqStmt body, Location loc) {
+  auto encoded = EncodeAnnotations(
+      Map<String, Any>{{"node", node}, {"key", key}, {"value", value}});
+  return RegionStmt(
+      Op::Get("tl.attr"), {encoded.payload}, {},
+      DictAttrs({{"schema_version", 1}, {"annotation_schema", encoded.schema}}),
+      body, {}, loc);
+}
+
+// Removing metadata does not remove the definition scope it surrounded. A
+// SeqStmt constructor flattens nested sequences; a native scope is necessary
+// for allocations and binder-aware transforms even when code executes once.
+Stmt Lexical(SeqStmt body, Location loc, bool explicit_alloc_scope = false) {
+  return MakeLexicalScope(std::move(body), std::move(loc),
+                          explicit_alloc_scope);
+}
+
+class AnnotationFinalizer : public tirx::StmtExprMutator {
 public:
-  static PrimFunc Rewrite(PrimFunc f) {
-    auto fptr = f.CopyOnWrite();
-    OpaqueBlockLower lower;
-    if (auto existing =
-            fptr->attrs.GetAttr<Map<Var, PrimExpr>>(tl::attr::kLocalVarInit)) {
-      lower.local_var_init_map_ = existing.value();
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+
+  AnnotationFinalizer(const tirx::Function &function,
+                      const Array<String> &allowed_pending_regions)
+      : tile_ops_lowered_(
+            function->GetAttr<bool>("tl.tile_ops_lowered").value_or(false)),
+        safety_disabled_(
+            tvm::transform::PassContext::Current()
+                ->GetConfig<bool>("tl.disable_safe_memory_legalize")
+                .value_or(false)) {
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    is_ascend_ = target && target.value()->kind->name == "ascend";
+    if (target)
+      target_kind_ = target.value()->kind->name;
+    for (const auto &key : allowed_pending_regions)
+      allowed_pending_regions_.insert(key);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
+    // An annotation statement describes the statements following it in this
+    // lexical sequence. Convert code-generation annotations into explicit
+    // regions over that suffix, keeping all dynamic operands in the IR.
+    SeqStmt suffix(Array<Stmt>{}, op->loc);
+    for (size_t i = op->seq.size(); i-- > 0;) {
+      const Stmt &child = op->seq[i];
+      const auto *evaluate = child.as<EvaluateObj>();
+      const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
+      if (call && call->op.same_as(Op::Get("tl.annotation"))) {
+        suffix = Apply(DecodeMetadata(call), suffix, child->loc);
+      } else {
+        Stmt rewritten = Mutate(child, mode).ValueOrUnchanged(child);
+        suffix = SeqStmt({rewritten, suffix}, op->loc);
+      }
     }
-    lower.storage_align_ = CollectStorageAlignAnnotation(fptr->body);
-    fptr->body = lower(std::move(fptr->body));
-    if (!lower.local_var_init_map_.empty()) {
-      f = WithAttr(std::move(f), tl::attr::kLocalVarInit,
-                   lower.local_var_init_map_);
+    return suffix;
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    if (op->op->name != "tl.attr")
+      return StmtExprMutator::Mutate_(op, mode);
+    const auto fields = DecodeAttributeRegion(op);
+    const String key = fields.at("key").cast<String>();
+    if (key == "tl.size_var_defaults") {
+      // The packed binder consumes default domains after annotation lowering.
+      // Use native traversal so a definition remap also reaches its operands.
+      return StmtExprMutator::Mutate_(op, mode);
     }
-    if (lower.cluster_dims_.has_value()) {
-      f = WithAttr(std::move(f), "cluster_dims", lower.cluster_dims_.value());
+    SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    if (key == "lexical_alloc_scope")
+      return Lexical(body, op->loc, true);
+    if (key == "tl.sblock.init") {
+      // BlockFrame/WorkloadBuilder have already emitted the initializer's
+      // first-reduction-coordinate condition as an ordinary enclosing If.
+      // Removing this descriptive wrapper must not hoist its body across that
+      // If or flatten allocations/bindings into the surrounding block.
+      return Lexical(body, op->loc);
     }
-    return f;
+    if (key == "tl.sblock") {
+      auto block = ToStringMap(fields.at("value"));
+      String block_name;
+      if (auto name = block.Get("name")) {
+        block_name = name->as<StringImmObj>() ? name->as<StringImmObj>()->value
+                                              : name->cast<String>();
+      }
+      const bool vf_region = block_name == "SIMT_VF" || block_name == "SIMD_VF";
+      const bool execution_region =
+          block_name == "CUBE" || block_name == "VECTOR" || vf_region;
+      TVM_FFI_CHECK(!execution_region || is_ascend_, ValueError)
+          << "Ascend execution region " << block_name
+          << " requires an Ascend target";
+      Map<String, Any> annotations;
+      if (auto values = block.Get("annotations"))
+        annotations = ToStringMap(*values);
+      for (const auto &[name, value] : block) {
+        TVM_FFI_CHECK(name == "name" || name == "no_realize" ||
+                          name == "annotations",
+                      ValueError)
+            << "Unconsumed structured block field `" << name << "`";
+      }
+      for (const auto &[name, value] : annotations) {
+        if (name == "lexical_alloc_scope")
+          continue;
+        const bool vector_count =
+            block_name == "VECTOR" && name == "vector_count";
+        const bool source_index = vf_region && name == "tl.vf_source_index";
+        TVM_FFI_CHECK(vector_count || source_index, ValueError)
+            << "Unconsumed structured block annotation `" << name << "`";
+        const auto *literal = value.as<IntImmObj>();
+        TVM_FFI_CHECK(literal || value.try_cast<int64_t>().has_value(),
+                      ValueError)
+            << "Ascend execution-region annotation " << name
+            << " must be a constant integer";
+        const int64_t count = literal ? static_cast<int64_t>(literal->value)
+                                      : value.cast<int64_t>();
+        if (vector_count) {
+          TVM_FFI_CHECK(count == 1 || count == 2, ValueError)
+              << "VECTOR vector_count must be a constant integer 1 or 2";
+        } else {
+          TVM_FFI_CHECK_GE(count, 0, ValueError)
+              << "VF source index must be nonnegative";
+        }
+      }
+      // CUBE/VECTOR select execution cores; SIMD_VF/SIMT_VF select the helper
+      // calling convention and instruction domain in the Ascend/PTO emitters.
+      // Keep their native operands and definition scope through finalization.
+      if (execution_region) {
+        return RegionStmt(op->op, op->args, op->body_params, op->attrs, body,
+                          op->result_vars, op->loc);
+      }
+      // Ordinary BlockFrame axes and predicates are already native Binds/Ifs.
+      return Lexical(body, op->loc, annotations.count("lexical_alloc_scope"));
+    }
+    if (key == "tl.kernel") {
+      return Lexical(Apply(ToStringMap(fields.at("value")), body, op->loc),
+                     op->loc);
+    }
+    if (key == "tl.simtvf_scope" || key == "tl.simdvf_scope") {
+      TVM_FFI_CHECK(is_ascend_, ValueError)
+          << "Ascend VF scope " << key << " requires an Ascend target";
+      // PTO consumes SIMD scopes as vecscope/memory barriers. Both emitters
+      // retain the surrounding VF block to select their execution domain.
+      return RegionStmt(op->op, op->args, op->body_params, op->attrs, body,
+                        op->result_vars, op->loc);
+    }
+    if (IsRetired(key))
+      return Lexical(body, op->loc);
+    if (key == "tl.loop.annotations") {
+      Map<String, Any> values = ToStringMap(fields.at("value"));
+      for (const auto &[name, unused] : values) {
+        TVM_FFI_CHECK(IsRetiredLoopHint(name), ValueError)
+            << "TileLang loop annotation `" << name
+            << "` still needs its owning lowering pass";
+      }
+      return Lexical(body, op->loc);
+    }
+    // These regions have downstream consumers (codegen, CPU parallelism, or
+    // per-function alias analysis). Early CUDA finalization may also retain
+    // the two WS scopes until shared-memory planning, synchronization and
+    // register allocation have consumed them. Preserve every native operand
+    // and definition scope; a later strict finalizer checks consumption.
+    if (IsCodegenKey(key) || key == "tl.non_restrict_params" ||
+        key == "tl.cpu_num_threads" ||
+        key == "tl.assume_requires_runtime_check" ||
+        allowed_pending_regions_.count(key)) {
+      return RegionStmt(op->op, op->args, op->body_params, op->attrs, body,
+                        op->result_vars, op->loc);
+    }
+    TVM_FFI_CHECK(!RequiresOwningPass(key), ValueError)
+        << "Unconsumed TileLang region `" << key
+        << "` at FinalizeAnnotations; run its owning lowering pass first";
+    // Generic user hints have no executable consumer. The old AttrStmt
+    // emitters ignored their metadata and executed the body once. Keep the
+    // native definition scope instead of flattening its Binds/allocations.
+    return Lexical(body, op->loc);
+  }
+
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+    if (const auto *intrinsic = op->op.as<OpObj>()) {
+      TVM_FFI_CHECK(intrinsic->name.find("tl.tileop.") != 0, ValueError)
+          << "FinalizeAnnotations cannot run before LowerTileOp: "
+          << intrinsic->name;
+    }
+    // Source alloc_buffer's origin affects CPU lifetime placement only. Other
+    // targets keep their native lexical allocation and consume this marker
+    // before storage planning. A missing CPU preparation step cannot be
+    // repaired by discarding the marker after block scopes were finalized.
+    if (op->op.same_as(tirx::alloc_tensor_op()) && op->attrs) {
+      auto attributes = op->attrs.value().as<DictAttrs>();
+      if (attributes &&
+          attributes.value()->dict.count("tl.source_block_alloc")) {
+        const auto origin =
+            attributes.value()->dict.at("tl.source_block_alloc").as<IntImm>();
+        TVM_FFI_CHECK(origin && origin.value()->value == 1, ValueError)
+            << "tl.source_block_alloc must be the source allocation marker";
+        TVM_FFI_CHECK(!target_kind_.empty(), ValueError)
+            << "Finalizing source allocation origins requires a bound target";
+        TVM_FFI_CHECK(target_kind_ != "c" && target_kind_ != "llvm", ValueError)
+            << "CPU source allocation origins require LowerCPUKernelLaunch "
+               "before FinalizeAnnotations";
+        auto rewritten = StmtExprMutator::Mutate_(op, mode)
+                             .ValueOrUnchanged(ffi::GetRef<Expr>(op))
+                             .as_or_throw<Call>();
+        auto values = rewritten->attrs.value().as_or_throw<DictAttrs>()->dict;
+        values.erase("tl.source_block_alloc");
+        return Call(rewritten->ty, rewritten->op, rewritten->args,
+                    DictAttrs(values), rewritten->ty_args, rewritten->loc);
+      }
+    }
+    return StmtExprMutator::Mutate_(op, mode);
   }
 
 private:
-  Stmt MaterializeAllocations(const Array<Buffer> &alloc_buffers, Stmt body) {
-    for (size_t i = alloc_buffers.size(); i > 0; --i) {
-      const Buffer &buffer = alloc_buffers[i - 1];
-      Array<PrimExpr> allocation_shape = GetBufferAllocationShape(buffer);
-      body = SeqStmt({DeclBuffer(buffer), std::move(body)});
-      Map<String, Any> allocate_annotations;
-      auto it = storage_align_.find(buffer->data);
-      if (it != storage_align_.end()) {
-        StorageAlignAnnotation allocate_aligns;
-        for (auto tuple : it->second) {
-          tuple.Set<0>(-1);
-          allocate_aligns.push_back(tuple);
-        }
-        allocate_annotations.Set(s_tir::attr::buffer_dim_align,
-                                 allocate_aligns);
-      }
-      auto init_it = local_var_init_map_.find(buffer->data);
-      if (init_it != local_var_init_map_.end()) {
-        const PrimExpr &init = (*init_it).second;
-        allocate_annotations.Set(tl::attr::kLocalVarInit, init);
-      }
-      // Use AllocBuffer with annotations; buffer already carries shape info
-      Buffer alloc_buf(buffer->data, buffer->dtype, allocation_shape,
-                       buffer->strides, buffer->elem_offset, buffer->name,
-                       buffer->data_alignment, buffer->offset_factor,
-                       buffer->buffer_type);
-      body = SeqStmt(
-          {AllocBuffer(alloc_buf, allocate_annotations), std::move(body)});
-    }
-    return body;
+  static Map<String, Any> ToStringMap(const Any &input) {
+    Map<String, Any> result;
+    for (const auto &[key, value] : input.cast<Map<Any, Any>>())
+      result.Set(key.cast<String>(), value);
+    return result;
   }
 
-  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
-    // We have convert blocks into opaque blocks in previous passes.
-    ICHECK(op->iter_values.empty())
-        << "Non-opaque blocks are not allowed in FlattenBuffer. Please "
-           "call pass ConvertBlocksToOpaque before.";
-    // Step 1. Visit the body. The SBlock handler skips lowering alloc_buffers
-    // while this realized block is consuming them.
-    bool prev_inside_realize = inside_realize_;
-    inside_realize_ = true;
-    SBlock new_block = Downcast<SBlock>(this->VisitStmt(op->block));
-    inside_realize_ = prev_inside_realize;
-    PrimExpr predicate = this->VisitExpr(op->predicate);
-    // Step 2. Transform the `predicate` to if-then-else
-    Stmt body = new_block->body;
-    if (!is_one(predicate)) {
-      body = IfThenElse(predicate, std::move(body));
-    }
-    // Step 3. Handle annotations, block annotations are not preserved by
-    // default.
-    std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
-    HandleAnnotations(new_block->annotations, &pragma_attrs, /*is_block=*/true,
-                      new_block->alloc_buffers);
-
-    // Step 4. Lower allocations
-    body = MaterializeAllocations(new_block->alloc_buffers, std::move(body));
-    // Step 5. Materialize a lexical scope boundary only for blocks that were
-    // explicitly marked by an earlier semantic lowering pass (for example
-    // gemm/gemm_sp). We intentionally avoid re-inferring this from the
-    // lowered alloc_buffers here because provenance has already been blurred by
-    // earlier allocation planning/hoisting passes.
-    if (HasLexicalAllocScopeAnnotation(new_block->annotations)) {
-      body = AttrStmt(Integer(0), tl::attr::kLexicalAllocScope, Integer(1),
-                      std::move(body));
-    }
-    // Step 6. Insert attribute statements converted from pragmas
-    for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
-      body = AttrStmt(Integer(0), it->first, it->second, std::move(body));
-    }
-    return body;
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    bool was_inside_realize = inside_realize_;
-    inside_realize_ = false;
-    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
-    inside_realize_ = was_inside_realize;
-    if (block->annotations.count("stmt_group")) {
-      return block->body;
-    }
-    if (!inside_realize_ && !block->alloc_buffers.empty()) {
-      Stmt new_body = MaterializeAllocations(block->alloc_buffers, block->body);
-      auto n = block.CopyOnWrite();
-      n->body = std::move(new_body);
-      n->alloc_buffers = ffi::Array<Buffer>();
-      return block;
-    }
-    return block;
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    // Step 1. Update unit loop info.
-    PrimExpr min = this->VisitExpr(op->min);
-    PrimExpr extent = this->VisitExpr(op->extent);
-    bool is_unit_loop = is_one(extent) &&
-                        IsEffectivelyEmptyAnnotation(op->annotations) &&
-                        !ContainsLoopBreak(op->body);
-    if (is_unit_loop) {
-      // handling unit loop
-      unit_loop_vars_[op->loop_var] = min;
-    }
-    // Step 2. Visit recursively
-    Stmt body = this->VisitStmt(op->body);
-    // Step 3. Handle annotations
-    std::vector<std::pair<std::string, PrimExpr>> pragma_attrs;
-    Map<String, Any> new_annotations =
-        HandleAnnotations(op->annotations, &pragma_attrs, /*is_block=*/false);
-    // Step 4. Create new For loop accordingly
-    if (op->kind == ForKind::kThreadBinding) {
-      // Case 1. Thread binding
-      ICHECK(op->thread_binding.defined());
-      String thread_tag = op->thread_binding.value()->thread_tag;
-      body = MakeLaunchThread(min, extent, op->loop_var, thread_tag, body);
-    } else if (is_unit_loop) {
-      // Case 2. Unit loop
-      return body;
-    } else {
-      // Case 3. An ordinary loop
-      body = For(op->loop_var, std::move(min), std::move(extent), op->kind,
-                 std::move(body), std::nullopt, new_annotations, op->step,
-                 op->span);
-    }
-    // Step 5. Insert nested attrs
-    for (auto it = pragma_attrs.rbegin(); it != pragma_attrs.rend(); ++it) {
-      body = AttrStmt(op->loop_var, it->first, it->second, std::move(body));
-    }
-    return body;
-  }
-
-  // Treat annotations as empty if they are truly empty or contain only
-  // the unroll hint `pragma_unroll_explicit`. This allows unit-length
-  // loops produced by unroll pragmas to be simplified away.
-  bool IsEffectivelyEmptyAnnotation(const Map<String, Any> &annotations) const {
-    if (annotations.empty()) {
+  bool IsRetired(const String &key) const {
+    if (key == "layout_map") {
+      TVM_FFI_CHECK(tile_ops_lowered_, ValueError)
+          << "layout_map cannot be discarded before LowerTileOp has "
+             "materialized tensor layouts";
       return true;
     }
-    if (annotations.size() == 1) {
-      auto it = annotations.find(tirx::attr::pragma_unroll_explicit);
-      if (it != annotations.end()) {
-        return true;
-      }
+    if (key == "safe_value_map") {
+      TVM_FFI_CHECK(safety_disabled_, ValueError)
+          << "safe_value_map must be consumed by LegalizeSafeMemoryAccess";
+      return true;
     }
     return false;
   }
 
-  // Whether `stmt` contains a `tl.loop_break` call. Used to prevent unit-loop
-  // flattening from orphaning a `break;`.
-  static bool ContainsLoopBreak(const Stmt &stmt) {
-    bool found = false;
-    PostOrderVisit(stmt, [&found](const ObjectRef &node) {
-      if (found)
-        return;
-      if (const auto *call = node.as<CallNode>()) {
-        if (call->op.same_as(tl::loop_break())) {
-          found = true;
-        }
+  bool IsRetiredLoopHint(const String &key) const {
+    static const std::unordered_set<std::string> hints{
+        "prefer_async",         "async_scope",     "disable_tma",
+        "disable_async",        "coalesced_width", "vectorize",
+        "parallel_loop_layout", "predicate",       "padding_guard",
+        "loop_layout",          "tl.ws_op_id"};
+    if (!hints.count(key))
+      return false;
+    TVM_FFI_CHECK(tile_ops_lowered_, ValueError)
+        << "Loop lowering hints cannot be discarded before LowerTileOp";
+    return true;
+  }
+
+  static bool IsCodegenKey(const String &key) {
+    // Retain keys with actual codegen/outlined-source consumers. A prefix
+    // alone does not give a user hint executable semantics, and native host
+    // codegen deliberately rejects unlowered TileLang attribute regions.
+    return key == "pragma_import_c" || key == "pragma_unroll_factor" ||
+           key == "code_block_source" || key == "code_block_signature" ||
+           key == "code_block_entry_name" || key == "volatile_scope" ||
+           key == "fragment_shape" || key == "fragment_layout" ||
+           key == "threadblock_swizzle_pattern" ||
+           key == "tl.min_blocks_per_sm";
+  }
+
+  static bool RequiresOwningPass(const String &key) {
+    // Compiler-owned namespaces are never generic hints. Keep missing-pass
+    // diagnostics for reserved internal markers, including future markers,
+    // without treating arbitrary user keys as unimplemented contracts.
+    if (key.find("tl.") == 0 || key.find("tirx.") == 0)
+      return true;
+    static const std::unordered_set<std::string> contracts{
+        "barrier_init",
+        "l2_hit_ratio_map",
+        "metal_context",
+        "cluster_dims",
+        "use_2cta",
+        "warp_specialize",
+        "kWarpSpecializationScope",
+        "kCustomWarpSpecialization",
+        "thread_extent",
+        "virtual_thread",
+        "coproc_scope",
+        "pipeline_exec_scope",
+        "reduce_scope",
+        "vector_count",
+        "tilelang_assume",
+        "pragma_auto_unroll_max_step",
+        "pragma_unroll_explicit",
+        "pragma_debug_skip_region"};
+    return contracts.count(key);
+  }
+
+  SeqStmt Apply(const Map<String, Any> &values, SeqStmt body, Location loc) {
+    Map<String, Any> retained;
+    std::vector<String> codegen_keys;
+    bool explicit_alloc_scope = false;
+    for (const auto &[key, value] : values) {
+      if (key == "tl.source_block_annotation") {
+        TVM_FFI_CHECK(value.as<bool>().value_or(false), ValueError)
+            << "tl.source_block_annotation must be the source annotation "
+               "marker";
+        continue;
       }
-    });
-    return found;
-  }
-
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
-    auto it = unit_loop_vars_.find(var);
-    if (it == unit_loop_vars_.end()) {
-      return var;
-
-    } else {
-      PrimExpr expr = it->second;
-      if (expr.dtype() != var.dtype()) {
-        expr = tvm::cast(var.dtype(), std::move(expr));
+      // Native block axes are real scalar Bind/For definitions; reads and
+      // writes describe TensorLoad/Store accesses for stage analysis. Their
+      // execution semantics are present in the body before this boundary.
+      if (key == "tl.axis" || key == "tl.reads" || key == "tl.writes")
+        continue;
+      if (key == "lexical_alloc_scope") {
+        explicit_alloc_scope = true;
+        continue;
       }
-      return expr;
+      if (IsRetired(key))
+        continue;
+      if (IsCodegenKey(key))
+        codegen_keys.push_back(key);
+      else if (key == "tl.non_restrict_params")
+        retained.Set(key, value);
+      else if (RequiresOwningPass(key))
+        TVM_FFI_THROW(ValueError)
+            << "Unconsumed TileLang annotation `" << key
+            << "` at FinalizeAnnotations; run its owning lowering pass first";
+      // Other annotations are descriptive user hints. Consuming the metadata
+      // leaves its existing sequence and surrounding definition scope intact.
     }
-  }
-
-  static Stmt MakeLaunchThread(PrimExpr min, PrimExpr extent, Var var,
-                               const String &thread_tag, Stmt body) {
-    IterVar iter_var(/*dom=*/Range::FromMinExtent(std::move(min), extent),
-                     /*var=*/std::move(var),
-                     /*iter_type=*/IterVarType::kThreadIndex,
-                     /*thread_tag=*/thread_tag);
-    String attr_key = (thread_tag == "vthread" || thread_tag == "vthread.x" ||
-                       thread_tag == "vthread.y" || thread_tag == "vthread.z")
-                          ? s_tir::attr::virtual_thread
-                          : tirx::attr::thread_extent;
-    return AttrStmt(/*node=*/std::move(iter_var),
-                    /*attr_key=*/std::move(attr_key),
-                    /*value=*/std::move(extent),
-                    /*body=*/std::move(body));
-  }
-
-  /*! \brief Convert attr value from annotation map into PrimExpr. */
-  PrimExpr ConvertAttrValue(const String &key, const Any &obj) {
-    if (obj == nullptr) {
-      return PrimExpr();
-    } else if (auto expr = obj.try_cast<PrimExpr>()) {
-      return expr.value();
-    } else if (auto str = obj.try_cast<String>()) {
-      return std::move(StringImm(str.value()));
-    } else {
-      LOG(FATAL) << "Illegal attribute of key " << key << ", value type "
-                 << obj.GetTypeKey() << " not supported";
-      return PrimExpr();
+    std::sort(codegen_keys.begin(), codegen_keys.end());
+    for (auto it = codegen_keys.rbegin(); it != codegen_keys.rend(); ++it)
+      body = SeqStmt(Attribute(Any(), *it, values.at(*it), body, loc));
+    if (!retained.empty()) {
+      auto encoded = EncodeAnnotations(retained);
+      auto call =
+          Call(PrimType::Void(), Op::Get("tl.annotation"), {encoded.payload},
+               DictAttrs({{"schema_version", 1},
+                          {"annotation_schema", encoded.schema}}),
+               {}, loc);
+      body = SeqStmt({Evaluate(call, loc), body}, loc);
     }
+    if (explicit_alloc_scope)
+      body = SeqStmt(Lexical(body, loc, true), loc);
+    return body;
   }
 
-  /*!
-   * \brief Helper to handle annotation dict.
-   * (1) if the attr key is prefixed by `pragma_`, move to ordered kv list. They
-   * are lowered to `AttrStmt` by legacy TE schedule convention.
-   * (2) the non-pragma loop annotations are preserved
-   * (3) the non-pragma block annotations are dropped
-   * \return New annotation dict with preserved keys. Also update pragma attr
-   * pairs ordered by key.
-   */
-  Map<String, Any>
-  HandleAnnotations(const Map<String, Any> &annotations,
-                    std::vector<std::pair<std::string, PrimExpr>> *pragma_attrs,
-                    bool is_block,
-                    const Array<Buffer> &alloc_buffers = Array<Buffer>()) {
-    Map<String, Any> preserved_annotations;
-    pragma_attrs->clear();
-    for (const auto &kv : annotations) {
-      const String &key = kv.first;
-      if (tirx::attr::IsPragmaKey(key) || tl::attr::IsCodeBlockKey(key)) {
-        pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
-      } else if (key == tl::attr::kLocalVarInit) {
-        if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {
-          for (const auto &pair : local_init_map.value()) {
-            local_var_init_map_.Set(pair.first, pair.second);
-          }
-        } else if (auto init_expr = kv.second.try_cast<PrimExpr>()) {
-          ICHECK(is_block) << "`" << tl::attr::kLocalVarInit
-                           << "` on non-block annotations is not supported";
-          Buffer target = ResolveLocalVarBuffer(alloc_buffers);
-          if (!target.defined()) {
-            LOG(WARNING) << "Failed to resolve buffer for `"
-                         << tl::attr::kLocalVarInit << "` annotation";
-            continue;
-          }
-          local_var_init_map_.Set(target->data, init_expr.value());
-        } else {
-          LOG(FATAL) << "Expected `" << tl::attr::kLocalVarInit
-                     << "` to be a PrimExpr or Map<Var, PrimExpr>, but got "
-                     << kv.second.GetTypeKey();
-        }
-      } else if (key == "cluster_dims") {
-        if (auto arr = kv.second.try_cast<Array<Integer>>()) {
-          cluster_dims_ = arr.value();
-        } else {
-          LOG(FATAL) << "Expected `" << "cluster_dims"
-                     << "` to be an Array<Integer>, but got "
-                     << kv.second.GetTypeKey();
-        }
-      } else if (!is_block) {
-        // the loop annotation is preserved
-        preserved_annotations.Set(key, kv.second);
-      }
-    }
-    std::sort(
-        pragma_attrs->begin(), pragma_attrs->end(),
-        [](const auto &p1, const auto &p2) { return p1.first < p2.first; });
-    return preserved_annotations;
-  }
-
-  static bool
-  HasLexicalAllocScopeAnnotation(const Map<String, Any> &annotations) {
-    return annotations.find(tl::attr::kLexicalAllocScope) != annotations.end();
-  }
-
-  Buffer ResolveLocalVarBuffer(const Array<Buffer> &alloc_buffers) const {
-    for (const Buffer &buffer : alloc_buffers) {
-      std::string scope = buffer.scope();
-      if (scope.find("local.var") != std::string::npos) {
-        return buffer;
-      }
-    }
-    if (!alloc_buffers.empty()) {
-      return alloc_buffers.back();
-    }
-    return Buffer();
-  }
-
-  /*! \brief Record the loop_var and loop start value of unit loops, whose
-   * extent is one. */
-  std::unordered_map<Var, PrimExpr> unit_loop_vars_;
-
-  /*! \brief Attr keys to preserve into loop annotations. */
-  std::unordered_set<std::string> preserved_annotations_;
-
-  /*! \brief The map from buffer var to its storage alignment information. */
-  std::unordered_map<Var, StorageAlignAnnotation> storage_align_;
-
-  /*! \brief Local var initializers collected from block annotations. */
-  Map<Var, PrimExpr> local_var_init_map_;
-
-  /*! \brief Cluster dims collected from tilelang.cluster_dims block annotation.
-   */
-  Optional<Array<Integer>> cluster_dims_{std::nullopt};
-
-  /*! \brief True while we are visiting the inner Block of a BlockRealize.
-   * Used so that the SBlockNode handler does not double-lower alloc_buffers
-   * when the enclosing SBlockRealize handler is about to do it itself. */
-  bool inside_realize_ = false;
+  bool tile_ops_lowered_;
+  bool safety_disabled_;
+  bool is_ascend_{false};
+  String target_kind_;
+  std::unordered_set<std::string> allowed_pending_regions_;
 };
+} // namespace
 
-PrimFunc TLLowerOpaqueBlock(PrimFunc f) {
-  return OpaqueBlockLower::Rewrite(std::move(f));
-}
-
-tirx::transform::Pass LowerOpaqueBlock() {
-  using namespace tirx::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return TLLowerOpaqueBlock(std::move(f));
+namespace transform {
+tvm::transform::Pass
+FinalizeAnnotations(String target_kind,
+                    Array<String> allowed_pending_regions = {}) {
+  // This deferral is a scheduling boundary for the two known WS consumers;
+  // it cannot suppress unlowered barrier/safety or other internal contracts.
+  for (const auto &key : allowed_pending_regions) {
+    TVM_FFI_CHECK(key == "kWarpSpecializationScope" ||
+                      key == "kCustomWarpSpecialization",
+                  ValueError)
+        << "FinalizeAnnotations cannot defer region `" << key << "`";
+  }
+  auto pass = [target_kind,
+               allowed_pending_regions](tirx::Function function, IRModule,
+                                        tvm::transform::PassContext) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    if (!target_kind.empty()) {
+      auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+      TVM_FFI_CHECK(target && target.value()->kind->name == target_kind,
+                    ValueError)
+          << "FinalizeAnnotations target disagrees with Function target";
+    }
+    auto mutator = ffi::make_object<AnnotationFinalizer>(
+        function, allowed_pending_regions);
+    auto original = function->body;
+    function.CopyOnWrite()->body =
+        mutator->Mutate(original).ValueOrUnchanged(original);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerOpaqueBlock", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.FinalizeAnnotations");
 }
+
+tvm::transform::Pass LowerOpaqueBlock() { return FinalizeAnnotations(""); }
+} // namespace transform
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerOpaqueBlock", LowerOpaqueBlock);
+  ffi::reflection::GlobalDef()
+      .def_packed(
+          "tl.transform.FinalizeAnnotations",
+          [](ffi::PackedArgs args, ffi::Any *result) {
+            TVM_FFI_CHECK(args.size() == 1 || args.size() == 2, TypeError)
+                << "FinalizeAnnotations expects target_kind and optional "
+                   "allowed_pending_regions";
+            *result = transform::FinalizeAnnotations(
+                args[0].cast<String>(), args.size() == 2
+                                            ? args[1].cast<Array<String>>()
+                                            : Array<String>{});
+          })
+      .def("tl.transform.LowerOpaqueBlock", transform::LowerOpaqueBlock);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

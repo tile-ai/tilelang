@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from tilelang._typing import BufferLikeType
-from tvm import tirx
+from tilelang.language import _native as tirx
 from tilelang.language.common import has_let_value, get_let_value
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region
@@ -19,8 +19,8 @@ def fill(buffer: BufferLikeType, value: tirx.PrimExpr, annotations: dict | None 
     Returns:
         A TVM intrinsic call that performs the fill operation
     """
-    # Normalize Var with let value to its underlying object
-    if isinstance(buffer, tirx.Var) and has_let_value(buffer):
+    # Resolve scalar/slice aliases, preserving a native tensor definition.
+    if isinstance(buffer, tirx.Var) and not isinstance(buffer, tirx.Buffer) and has_let_value(buffer):
         buffer = get_let_value(buffer)
 
     # Build tl.region as argument
@@ -38,7 +38,7 @@ def fill(buffer: BufferLikeType, value: tirx.PrimExpr, annotations: dict | None 
         extents = []
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.fill"),
+        tirx.Op.get("tl.tileop.fill"),
         to_buffer_region(buffer, access_type="w", extents=extents),
         value,
         annotations=_normalize_annotations(annotations),
@@ -58,7 +58,7 @@ def clear(buffer: BufferLikeType, annotations: dict | None = None) -> tirx.PrimE
     Raises:
         ValueError: If the buffer variable contains an invalid buffer region
     """
-    if isinstance(buffer, tirx.Var) and has_let_value(buffer):
+    if isinstance(buffer, tirx.Var) and not isinstance(buffer, tirx.Buffer) and has_let_value(buffer):
         buffer_region = get_let_value(buffer)  # Get the actual buffer region from variable
         if isinstance(buffer_region, tirx.BufferRegion):
             return fill(buffer_region, 0, annotations=annotations)

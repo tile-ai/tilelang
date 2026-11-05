@@ -25,7 +25,7 @@
 
 #pragma once
 
-#include <tvm/tirx/op.h>
+#include <tvm/ir/prim/op.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -188,7 +188,7 @@ bool CanSeparatePeriodicLifetimes(
 struct GenerationLifetime {
   std::vector<IterationEvent> begin_sites;
   std::vector<IterationEvent> end_sites;
-  PrimExpr guard;
+  PrimExpr guard{ffi::UnsafeInit{}};
   bool guard_iteration_invariant{false};
 };
 

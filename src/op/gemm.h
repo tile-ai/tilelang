@@ -17,6 +17,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 enum class GemmWarpPolicyType : uint8_t {
@@ -102,13 +103,16 @@ public:
 
 class GemmNode : public TileOperatorNode {
 public:
-  tirx::Buffer a_, b_, c_;
-  // BufferRegion for A, B and C
-  BufferRegion aRegion_, bRegion_, cRegion_;
+  tirx::TensorVar a_{ffi::UnsafeInit{}}, b_{ffi::UnsafeInit{}},
+      c_{ffi::UnsafeInit{}};
+  // TensorRegion for A, B and C
+  TensorRegion aRegion_{ffi::UnsafeInit{}}, bRegion_{ffi::UnsafeInit{}},
+      cRegion_{ffi::UnsafeInit{}};
   bool transA_, transB_;
   int m_, n_, k_;
-  PrimExpr clearAccum_ = const_false();
-  tirx::BufferLoad mbar_; // mbar is optional, only used for TCGEN5MMA
+  PrimExpr clearAccum_ = IntImm(PrimType::Bool(), 0);
+  ffi::Optional<tvm::TensorLoad>
+      mbar_; // mbar is optional, only used for TCGEN5MMA
   Array<PrimExpr> cCoords_;
   // k_pack please ref to bitblas/tl/mfma_macro_generator.py::k_pack
   // only will be enabled under cdna mfma instructions
@@ -117,7 +121,7 @@ public:
   bool isWgmma_ = false;
   bool isTcgen05_ = false;
   mutable GemmWarpPolicy policy_;
-  Map<String, ObjectRef> annotations_;
+  Map<String, Any> annotations_;
 
   TVM_FFI_DECLARE_OBJECT_INFO("tl.Gemm", GemmNode, TileOperatorNode);
 
@@ -147,11 +151,11 @@ public:
   }
 
   Stmt Lower(const LowerArgs &lower_args,
-             arith::Analyzer *analyzer) const override;
+             sym::AnalyzerObj *analyzer) const override;
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+  ffi::Array<tvm::TensorRegion> GetReadBeforeWriteRegions() const override;
 
   TileOperator Clone() const override;
 
@@ -161,8 +165,8 @@ public:
   // Parse the 13 positional slots shared by every GEMM flavour
   // (see the protocol documented at Gemm::Gemm) into `node`. Shared by the
   // constructors of every GEMM flavour.
-  static void InitFromDenseArgs(GemmNode *node, const Array<PrimExpr> &args,
-                                const Map<String, ObjectRef> &annotations);
+  static void InitFromDenseArgs(GemmNode *node, const Array<Expr> &args,
+                                const Map<String, Any> &annotations);
 
 private:
   mutable bool completed_ = false;
@@ -191,8 +195,8 @@ const GemmImpl &ResolveGemmImpl(const Target &target);
 class Gemm : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Gemm, TileOperator, GemmNode);
-  TVM_DLL Gemm(Array<PrimExpr> args,
-               Map<String, ObjectRef> annotations = Map<String, ObjectRef>());
+  TVM_TIRX_DLL Gemm(Array<Expr> args,
+                    Map<String, Any> annotations = Map<String, Any>());
   static const Op &Get();
 };
 

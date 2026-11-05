@@ -67,7 +67,7 @@ from .allocate import (
     alloc_reducer,  # noqa: F401
     empty,  # noqa: F401
 )
-from tvm.tirx.script.builder.ir import alloc_buffer as allocate  # noqa: F401
+from tilelang.language._native import alloc_buffer as allocate  # noqa: F401
 from .copy_op import (  # noqa: F401
     copy,
     async_copy,
@@ -182,7 +182,7 @@ def import_source(source: str | None = None):
     compiler flags for macros that configure those headers. Imports preserve
     visitation order; a trailing newline is optional.
     """
-    from tvm.tirx.script.builder.ir import sblock_attr
+    from tilelang.language._native import sblock_attr
 
     return sblock_attr({"pragma_import_c": source}) if source is not None else None
 
@@ -260,6 +260,7 @@ _LOCAL_EXPORTS = (
     "copy",
     "cummax",
     "cumsum",
+    "dp4a",
     "dynamic",
     "symbolic",
     "empty",

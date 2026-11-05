@@ -8,14 +8,21 @@ from tilelang.jit import JITKernel
 
 
 class CuTeDSLKernelCache(KernelCache):
-    """Persist CuTeDSL kernels as Python modules plus launcher artifacts."""
+    """Persist native host modules and complete, typed CuTeDSL device artifacts."""
 
-    # CuTeDSL C++ launcher specific
     kernel_lib_path = "kernel.py"
     device_kernel_path = "device_kernel.py"
     host_kernel_path = "host_kernel.py"
-    launcher_lib_path = "launcher_lib.so"
-    launcher_cpp_path = "launcher.cpp"
+
+    @override
+    def _get_memory_cached_kernel(self, key: str) -> JITKernel | None:
+        kernel = super()._get_memory_cached_kernel(key)
+        if kernel is not None and kernel.adapter.lib_generator.runtime._closed:
+            # cleanup releases this adapter, not its reusable disk artifacts.
+            # A later compile must load a new runtime instead of returning it.
+            del self._memory_cache[key]
+            return None
+        return kernel
 
     @override
     def _save_kernel_source_code_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
@@ -47,30 +54,15 @@ class CuTeDSLKernelCache(KernelCache):
 
     @override
     def _save_so_cubin_to_disk(self, kernel: JITKernel, cache_path: str, verbose: bool = False):
-        """Save launcher shared objects and optional debugging artifacts."""
-        # Save C++ launcher library if it exists
-        lib_gen = getattr(kernel.adapter, "lib_generator", None)
-        if lib_gen and hasattr(lib_gen, "launcher_libpath") and lib_gen.launcher_libpath:
-            launcher_lib_path = os.path.join(cache_path, self.launcher_lib_path)
-            src_launcher_path = lib_gen.launcher_libpath
-            if verbose:
-                self.logger.debug(f"Saving C++ launcher library to cache: {src_launcher_path}")
-            KernelCache._safe_write_file(launcher_lib_path, "wb", lambda file: file.write(KernelCache._load_binary(src_launcher_path)))
+        """Publish each already compiled cubin and its symbol metadata together.
 
-        # Optionally save launcher C++ source for debugging
-        if hasattr(kernel.adapter, "launcher_cpp_code") and kernel.adapter.launcher_cpp_code:
-            launcher_cpp_path = os.path.join(cache_path, self.launcher_cpp_path)
-            if verbose:
-                self.logger.debug(f"Saving C++ launcher source to: {launcher_cpp_path}")
-            KernelCache._safe_write_file(launcher_cpp_path, "w", lambda file: file.write(kernel.adapter.launcher_cpp_code))
-
-    @override
-    def _get_required_files(self, cache_path: str) -> list[str]:
-        """Return the CuTeDSL cache files required for a runnable reload."""
-        return super()._get_required_files(cache_path) + [os.path.join(cache_path, self.launcher_lib_path)]
+        An unexecuted branch may have no cubin yet. The generated native module
+        contains its full compilation input, so those variants remain lazy.
+        """
+        kernel.adapter.lib_generator.runtime.export_artifacts(cache_path)
 
     @override
     def _set_adapter_cache_path(self, kernel: JITKernel, cache_path: str):
-        """Record the cache path so first execution can persist generated cubin."""
+        """Persist newly reached device variants after subsequent executions."""
         if hasattr(kernel, "adapter"):
             kernel.adapter._cache_path = cache_path

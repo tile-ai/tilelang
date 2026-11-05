@@ -45,38 +45,37 @@ constexpr const char *kBufferAliasMap = "tl.buffer_alias_map";
 // storages deliberately have no entry: both AIVs access the same instance.
 constexpr const char *kAivStorageMap = "tl.aiv_storage_map";
 constexpr const char *kSplitSubcores = "tl.split_subcores";
-using AivStorageMap = ffi::Map<tirx::Var, Integer>;
+using AivStorageMap = ffi::Map<Var, int>;
 
 /*! \brief Storage data Var -> storages proven safe to alias with it. */
-using BufferAliasMap = ffi::Map<tirx::Var, ffi::Array<tirx::Var>>;
+using BufferAliasMap = ffi::Map<Var, ffi::Array<Var>>;
 
-inline void AddBufferAliasStorage(BufferAliasMap *aliases,
-                                  const tirx::Var &storage) {
+inline void AddBufferAliasStorage(BufferAliasMap *aliases, const Var &storage) {
   if (!aliases->count(storage))
     aliases->Set(storage, {});
 }
 
-inline bool HasBufferAlias(const BufferAliasMap &aliases, const tirx::Var &lhs,
-                           const tirx::Var &rhs) {
+inline bool HasBufferAlias(const BufferAliasMap &aliases, const Var &lhs,
+                           const Var &rhs) {
   auto lhs_it = aliases.find(lhs);
   if (lhs_it == aliases.end())
     return false;
-  for (const tirx::Var &candidate : (*lhs_it).second) {
+  for (const Var &candidate : (*lhs_it).second) {
     if (candidate.same_as(rhs))
       return true;
   }
   return false;
 }
 
-inline void AddBufferAlias(BufferAliasMap *aliases, const tirx::Var &lhs,
-                           const tirx::Var &rhs) {
+inline void AddBufferAlias(BufferAliasMap *aliases, const Var &lhs,
+                           const Var &rhs) {
   ICHECK(!lhs.same_as(rhs)) << "A storage cannot alias itself in the "
                                "buffer-alias contract";
   AddBufferAliasStorage(aliases, lhs);
   AddBufferAliasStorage(aliases, rhs);
-  auto append = [&](const tirx::Var &from, const tirx::Var &to) {
-    ffi::Array<tirx::Var> values = aliases->at(from);
-    for (const tirx::Var &existing : values) {
+  auto append = [&](const Var &from, const Var &to) {
+    ffi::Array<Var> values = aliases->at(from);
+    for (const Var &existing : values) {
       if (existing.same_as(to))
         return;
     }
@@ -93,7 +92,7 @@ inline void AddBufferAlias(BufferAliasMap *aliases, const tirx::Var &lhs,
 // sequential allocation downstream.
 inline void ValidateBufferAliasMap(const BufferAliasMap &aliases) {
   for (const auto &[storage, compatible] : aliases) {
-    for (const tirx::Var &other : compatible) {
+    for (const Var &other : compatible) {
       ICHECK(!storage.same_as(other))
           << "Buffer-alias contract contains a self edge for " << storage;
       ICHECK(aliases.count(other))
@@ -109,19 +108,19 @@ inline void ValidateBufferAliasMap(const BufferAliasMap &aliases) {
 
 inline BufferAliasMap
 RemapBufferAliasMap(const BufferAliasMap &aliases,
-                    const ffi::Map<tirx::Var, tirx::Var> &storage_remap) {
+                    const ffi::Map<Var, Var> &storage_remap) {
   using VarVectorMap =
-      std::unordered_map<tirx::Var, std::vector<tirx::Var>, ffi::ObjectPtrHash,
+      std::unordered_map<Var, std::vector<Var>, ffi::ObjectPtrHash,
                          ffi::ObjectPtrEqual>;
   using VarSet =
-      std::unordered_set<tirx::Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
+      std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>;
 
   ValidateBufferAliasMap(aliases);
   VarVectorMap preimages;
-  std::vector<tirx::Var> remapped_order;
+  std::vector<Var> remapped_order;
   VarSet seen;
   for (const auto &[storage, _] : aliases) {
-    tirx::Var remapped = storage;
+    Var remapped = storage;
     auto remap = storage_remap.find(storage);
     if (remap != storage_remap.end())
       remapped = (*remap).second;
@@ -131,15 +130,15 @@ RemapBufferAliasMap(const BufferAliasMap &aliases,
   }
 
   BufferAliasMap result;
-  for (const tirx::Var &storage : remapped_order)
+  for (const Var &storage : remapped_order)
     AddBufferAliasStorage(&result, storage);
   for (size_t i = 0; i < remapped_order.size(); ++i) {
     for (size_t j = i + 1; j < remapped_order.size(); ++j) {
-      const tirx::Var &lhs = remapped_order[i];
-      const tirx::Var &rhs = remapped_order[j];
+      const Var &lhs = remapped_order[i];
+      const Var &rhs = remapped_order[j];
       bool compatible = true;
-      for (const tirx::Var &old_lhs : preimages.at(lhs)) {
-        for (const tirx::Var &old_rhs : preimages.at(rhs)) {
+      for (const Var &old_lhs : preimages.at(lhs)) {
+        for (const Var &old_rhs : preimages.at(rhs)) {
           if (!HasBufferAlias(aliases, old_lhs, old_rhs)) {
             compatible = false;
             break;

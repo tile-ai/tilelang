@@ -20,6 +20,7 @@
  * read-modify-write forms keep the annotation.
  */
 
+#include "backend/common/codegen/codegen_ir_utils.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/expr.h>
 
@@ -33,33 +34,33 @@ inline SfuPrecision PrecisionFromCode(int code) {
     return SfuPrecision::kExact;
   if (code == 2)
     return SfuPrecision::kKeepSub;
-  ICHECK_EQ(code, 0) << "SFU precision annotation must be 0 (hw), 1 (exact), "
-                        "or 2 (ftz_false), got "
-                     << code;
+  TVM_FFI_CHECK_EQ(code, 0, ValueError)
+      << "SFU precision annotation must be 0 (hw), 1 (exact), "
+         "or 2 (ftz_false), got "
+      << code;
   return SfuPrecision::kHw;
 }
 
 // MODE_MERGING calls are legalized to void calls, so use the explicit result
 // dtype supplied by the caller rather than reading op->dtype here.
-inline SfuPrecision ResolveSfuPrecision(const tirx::Call &op,
-                                        DataType result_dtype,
+inline SfuPrecision ResolveSfuPrecision(const Call &op, PrimType result_dtype,
                                         SfuPrecision fallback) {
   // Precise paths (vdiv_0ulp_ftz_true, *_ftz_false wrappers) are
   // float32-only: non-fp32 keeps the hardware instruction regardless of
   // annotations (historical UsePreciseVdiv contract: "non-fp32 always uses
   // hardware").
-  if (!result_dtype.is_float() || result_dtype.bits() != 32) {
+  if (!result_dtype.MatchesCode(kDLFloat) || result_dtype.bits() != 32) {
     return fallback;
   }
   // Per-op "precision" annotation (int code from the Python side, normalized
   // from the string aliases in tilelang/ascend/language/simd.py -- no alias
   // table here, mirroring the l2_cache_ctrl pattern).
-  if (auto p = op->annotations.Get("precision")) {
-    const auto *code = p.value().as<tirx::IntImmNode>();
-    ICHECK(code != nullptr)
+  if (auto p = CodegenCallAnnotations(op.get()).Get("precision")) {
+    const auto *code = p.value().as<IntImmObj>();
+    TVM_FFI_CHECK(code != nullptr, TypeError)
         << "SFU precision annotation must be an integer code, got "
         << p.value();
-    return PrecisionFromCode(static_cast<int>(code->value));
+    return PrecisionFromCode(static_cast<int>(CodegenInt(code)));
   }
   return fallback;
 }

@@ -1,10 +1,11 @@
 import pytest
 import torch
+import tvm_ffi
 
 import tilelang
 import tilelang.testing
 from tilelang import language as T, tvm
-from tvm import tirx
+from tvm_tirx import ir, prim, tirx
 
 
 @pytest.fixture(autouse=True)
@@ -39,17 +40,34 @@ def _copy_kernel(dtype, n, threads):
     return kernel
 
 
+def _device_function(params, body):
+    # The terminal native device-codegen ABI uses typed pointer parameters.
+    # Explicit tensor views replace the old PrimFunc.buffer_map side table.
+    device_params = []
+    declarations = []
+    for param in params:
+        if isinstance(param.ty, tirx.TensorType):
+            pointer = ir.Var(param.name, ir.PtrType(param.ty.dtype, param.ty.scope))
+            device_params.append(pointer)
+            declarations.append(ir.Bind(param, ir.Call("tirx.decl_tensor", [pointer], ty_args=[param.ty])))
+        else:
+            device_params.append(param)
+    function = tirx.Function(device_params, ir.SeqStmt([*declarations, body]))
+    assert tirx.analysis.check_well_formed(function)
+    return function
+
+
 def _packed_x2_select_source(dtype):
-    on_true = tirx.Var("on_true", f"{dtype}x2")
-    on_false = tirx.Var("on_false", f"{dtype}x2")
-    ramp = tirx.Ramp(0, 1, 2)
-    limit = tirx.Broadcast(tirx.const(1, "int32"), 2)
-    selected = tirx.Select(ramp < limit, on_true, on_false)
-    func = tirx.PrimFunc([on_true, on_false], tirx.Evaluate(selected))
+    on_true = ir.Var("on_true", f"{dtype}x2")
+    on_false = ir.Var("on_false", f"{dtype}x2")
+    ramp = prim.Ramp(0, 1, 2)
+    limit = prim.Broadcast(ir.const(1, "int32"), 2)
+    selected = prim.Select(ramp < limit, on_true, on_false)
+    func = _device_function([on_true, on_false], ir.Evaluate(selected))
     func = func.with_attr("global_symbol", "packed_x2_select")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({"packed_x2_select": func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -57,29 +75,30 @@ def _packed_x2_constructor_source(dtype, constructor):
     name = f"packed_{dtype}_x2_{constructor}"
     if constructor == "broadcast":
         value = -3 if dtype == "int4" else 13
-        func = tirx.PrimFunc([], tirx.Evaluate(tirx.Broadcast(tirx.const(value, dtype), 2)))
+        func = _device_function([], ir.Evaluate(prim.Broadcast(ir.const(value, dtype), 2)))
     elif constructor == "scalar_load":
-        buffer = tirx.decl_buffer((4,), dtype=dtype, name="input")
-        index = tirx.Ramp(tirx.const(0, "int32"), tirx.const(2, "int32"), 2)
-        func = tirx.PrimFunc(
-            [buffer.data],
-            tirx.Evaluate(tirx.BufferLoad(buffer, [index])),
-            buffer_map={buffer.data: buffer},
+        buffer = ir.Var("input", tirx.TensorType((4,), dtype, layout="default"))
+        index = prim.Ramp(ir.const(0, "int32"), ir.const(2, "int32"), 2)
+        func = _device_function(
+            [buffer],
+            ir.Evaluate(ir.TensorLoad(buffer, [index])),
         )
     elif constructor == "shuffle":
-        low = tirx.Var("low", dtype)
-        high = tirx.Var("high", dtype)
-        func = tirx.PrimFunc([low, high], tirx.Evaluate(tirx.Shuffle([low, high], [0, 1])))
+        low = ir.Var("low", dtype)
+        high = ir.Var("high", dtype)
+        func = _device_function([low, high], ir.Evaluate(prim.Shuffle([low, high], [0, 1])))
     elif constructor == "ramp":
-        ramp = tirx.Ramp(tirx.const(0, dtype), tirx.const(1, dtype), 2)
-        func = tirx.PrimFunc([], tirx.Evaluate(ramp))
+        # Native Ramp carries index-width arithmetic; narrow each lane only
+        # after constructing it, as the vectorized public kernel does.
+        ramp = prim.Cast(f"{dtype}x2", prim.Ramp(ir.const(0, "int32"), ir.const(1, "int32"), 2))
+        func = _device_function([], ir.Evaluate(ramp))
     else:
         raise ValueError(f"Unknown constructor: {constructor}")
 
     func = func.with_attr("global_symbol", name)
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -93,28 +112,27 @@ def _packed_vector_load_source(
     lanes=2,
 ):
     name = f"packed_{dtype}_x{lanes}_load"
-    buffer = tirx.decl_buffer((64,), dtype=dtype, name="input")
-    params = [buffer.data]
+    buffer = ir.Var("input", tirx.TensorType((64,), dtype, layout="default"))
+    params = [buffer]
 
     if dynamic_base:
-        dynamic = tirx.Var("base", "int32")
+        dynamic = ir.Var("base", "int32")
         params.append(dynamic)
-        base_expr = dynamic * tirx.const(dynamic_scale, "int32") + tirx.const(
+        base_expr = dynamic * ir.const(dynamic_scale, "int32") + ir.const(
             base,
             "int32",
         )
     else:
-        base_expr = tirx.const(base, "int32")
+        base_expr = ir.const(base, "int32")
 
-    index = tirx.Ramp(
+    index = prim.Ramp(
         base_expr,
-        tirx.const(stride, "int32"),
+        ir.const(stride, "int32"),
         lanes,
     )
-    func = tirx.PrimFunc(
+    func = _device_function(
         params,
-        tirx.Evaluate(tirx.BufferLoad(buffer, [index])),
-        buffer_map={buffer.data: buffer},
+        ir.Evaluate(ir.TensorLoad(buffer, [index])),
     )
     func = func.with_attr("global_symbol", name)
     func = func.with_attr(
@@ -122,7 +140,7 @@ def _packed_vector_load_source(
         tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
     mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -136,29 +154,28 @@ def _packed_vector_store_source(
     lanes=2,
 ):
     name = f"packed_{dtype}_x{lanes}_store"
-    buffer = tirx.decl_buffer((64,), dtype=dtype, name="output")
-    value = tirx.Var("value", f"{dtype}x{lanes}")
-    params = [buffer.data, value]
+    buffer = ir.Var("output", tirx.TensorType((64,), dtype, layout="default"))
+    value = ir.Var("value", f"{dtype}x{lanes}")
+    params = [buffer, value]
 
     if dynamic_base:
-        dynamic = tirx.Var("base", "int32")
+        dynamic = ir.Var("base", "int32")
         params.append(dynamic)
-        base_expr = dynamic * tirx.const(dynamic_scale, "int32") + tirx.const(
+        base_expr = dynamic * ir.const(dynamic_scale, "int32") + ir.const(
             base,
             "int32",
         )
     else:
-        base_expr = tirx.const(base, "int32")
+        base_expr = ir.const(base, "int32")
 
-    index = tirx.Ramp(
+    index = prim.Ramp(
         base_expr,
-        tirx.const(stride, "int32"),
+        ir.const(stride, "int32"),
         lanes,
     )
-    func = tirx.PrimFunc(
+    func = _device_function(
         params,
-        tirx.BufferStore(buffer, value, [index]),
-        buffer_map={buffer.data: buffer},
+        ir.TensorStore(buffer, [index], value),
     )
     func = func.with_attr("global_symbol", name)
     func = func.with_attr(
@@ -166,7 +183,7 @@ def _packed_vector_store_source(
         tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
     mod = tvm.IRModule({name: func})
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
     return build(mod, tvm.target.Target("cuda")).inspect_source()
 
 
@@ -276,7 +293,16 @@ def test_packed_int4x2_constructor_codegen(dtype, constructor):
     helper = "tl_pack_uint4x2" if dtype == "uint4" else "tl_pack_int4x2"
     calls = [line for line in source.splitlines() if f"{helper}(" in line and not line.lstrip().startswith("TL_DEVICE")]
 
-    assert len(calls) == 1
+    if constructor == "ramp":
+        # Native index Ramp followed by a narrow cast packs each lane into the
+        # same byte. Verify both disjoint nibble writes; runtime tests below
+        # also check the exact packed result for distinct signed/unsigned lanes.
+        stores = [line for line in source.splitlines() if line.lstrip().startswith("((unsigned char*)") and " = " in line]
+        assert len(stores) == 2
+        assert "v_.x" in stores[0] and "& 0x0fu" in stores[0] and "<< 0" in stores[0]
+        assert "v_.y" in stores[1] and "& 0x0fu" in stores[1] and "<< 4" in stores[1]
+    else:
+        assert len(calls) == 1
     assert "make_int8_t(" not in source
     assert "make_uint8_t(" not in source
 
@@ -403,7 +429,7 @@ def test_packed_int4x2_unsafe_store_rejected(
     dynamic_base,
     dynamic_scale,
 ):
-    with pytest.raises(tvm.TVMError, match="provably divisible by the vector lane count"):
+    with pytest.raises(RuntimeError, match="provably divisible by the vector lane count"):
         _packed_vector_store_source(
             dtype,
             base,
@@ -490,7 +516,7 @@ def test_packed_int4_wide_unsafe_store_rejected(dtype, lanes):
     ]
     for base, stride, dynamic_base, dynamic_scale in unsafe_cases:
         with pytest.raises(
-            tvm.TVMError,
+            RuntimeError,
             match="provably divisible by the vector lane count",
         ):
             _packed_vector_store_source(
@@ -649,7 +675,8 @@ def test_packed_int4x2_distinct_lane_runtime(dtype, offset, expected):
     compiled(output)
 
     assert output.view(torch.uint8).item() == expected
-    assert f"tl_pack_{dtype}x2(" in compiled.get_kernel_source()
+    # This exact byte distinguishes the two lanes even when native lowering
+    # constructs the packed carrier with masked lane stores instead of a helper.
 
 
 if __name__ == "__main__":

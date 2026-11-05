@@ -426,14 +426,14 @@ def test_explicit_gemm_2cta_ts_thread_handoff_correctness():
     [_make_2cta_without_cluster_kernel, _make_2cta_invalid_cluster_kernel],
 )
 def test_tcgen05_gemm_2cta_requires_two_cta_cluster(kernel_factory):
-    with pytest.raises(tvm.error.InternalError, match=r"requires cluster_dims"):
+    with pytest.raises(ValueError, match=r"requires cluster_dims"):
         tilelang.compile(kernel_factory(), target="cuda")
 
 
 @tilelang.testing.requires_cuda
 def test_tcgen05_gemm_2cta_rejects_non_blackwell_target():
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
-    with pytest.raises(tvm.error.InternalError, match=r"requires Blackwell TCGEN5MMA"):
+    with pytest.raises(RuntimeError, match=r"requires Blackwell TCGEN5MMA"):
         tilelang.compile(_make_explicit_2cta_gemm_kernel(), target=target)
 
 
@@ -466,15 +466,15 @@ def test_tcgen05_gemm_rejects_non_tcgen05_lowering():
             T.copy(C_local, D[0:128, 0:128])
 
     with pytest.raises(
-        tvm.error.InternalError,
+        RuntimeError,
         match=r"T\.tcgen05_gemm\(\) requires Blackwell TCGEN5MMA lowering",
     ) as excinfo:
         tilelang.compile(main, target="cuda")
     message = str(excinfo.value)
     assert "target=" in message
-    assert "A(scope=shared.dyn, dtype=bfloat16)" in message
-    assert "B(scope=shared.dyn, dtype=bfloat16)" in message
-    assert "C(scope=local.fragment, dtype=float32)" in message
+    assert "A(scope=shared.dyn, dtype=T.bfloat16)" in message
+    assert "B(scope=shared.dyn, dtype=T.bfloat16)" in message
+    assert "C(scope=local.fragment, dtype=T.float32)" in message
     assert "M=128, N=128, K=128" in message
     _assert_error_at(excinfo, "tcgen05_dense_error_span")
 

@@ -4,7 +4,7 @@ Regression tests for HIP/AMD codegen fixes in TileLang.
 Covers nine HIP/AMD codegen and runtime bug fixes:
 
   Fix 1 (reduce.h)            warp_reduce 5-step butterfly with width=32
-  Fix 2 (codegen_hip.cc,      ShuffleNode bfloat16x2/float16x2 packing;
+  Fix 2 (codegen_hip.cc,      ShuffleObj bfloat16x2/float16x2 packing;
           common.h)            uint1 bf16x2 math overloads
   Fix 3 (allocate.py,         T.alloc_var(init=<literal>) emits a correctly
           codegen_hip.cc)      initialised scalar on HIP
@@ -12,9 +12,9 @@ Covers nine HIP/AMD codegen and runtime bug fixes:
   Fix 5 (codegen_hip.cc,      T.sync_grid() lowered to cooperative groups
           rt_mod_hip.cc,       grid barrier; runtime launch infrastructure
           stubs/)              added
-  Fix 6 (pipeline_planning.cc) T.Pipelined(num_stages>1) falls back to a
-                               plain sequential loop on ROCM to avoid LDS
-                               overflow (hipModuleLaunchKernel EINVAL)
+  Fix 6 (pipeline_planning.cc) Positive-stage loops use the HIP async pipeline
+                               on gfx950; other ROCm targets use sequential
+                               copy to avoid unvalidated LDS multibuffering
   Fix 7 (codegen_hip.cc)      Packed int4 shared allocations round their
                               int32 storage-word extent up instead of down
   Fix 8 (intrin_rule_hip.cc)  Vector math intrinsics are scalarized on HIP
@@ -161,16 +161,17 @@ def test_warp_reduce_with_64_threads_two_groups():
     torch.cuda.synchronize()
 
     assert not out.isnan().any(), "NaN in two-warp reduce — width=32 fix not applied"
+    torch.testing.assert_close(out, x.sum(dim=1), atol=0, rtol=0)
 
 
 # ---------------------------------------------------------------------------
-# Fix 2 — src/rocm/codegen/codegen_hip.cc (VisitExpr_ ShuffleNode)
+# Fix 2 — src/rocm/codegen/codegen_hip.cc (VisitExpr_ ShuffleObj)
 #         src/tl_templates/hip/common.h (uint1 bfloat16x2 math overloads)
 #
-# Symptom: Packing two bfloat16 scalars into a bfloat16x2 ShuffleNode caused
+# Symptom: Packing two bfloat16 scalars into a bfloat16x2 ShuffleObj caused
 #   CodeGenC to emit `uint1(a, b)` — invalid HIP constructor → compile error.
 #
-# Fix (codegen_hip.cc): Override VisitExpr_(ShuffleNode) to emit
+# Fix (codegen_hip.cc): Override VisitExpr_(ShuffleObj) to emit
 #   `uint1{__pack_bfloat162(a, b)}` / `uint1{__pack_half2(a, b)}`.
 # Fix (common.h): Add abs2/max2/min2/add2/mul2 overloads for uint1 as a
 #   packed bfloat16x2 carrier.
@@ -209,14 +210,14 @@ def test_bfloat16_shuffle_codegen_and_correctness():
 
     # Source check: no invalid two-argument constructor
     src = kernel.get_kernel_source()
-    assert "uint1(a" not in src and "uint1(b" not in src, "Old `uint1(a, b)` constructor found — ShuffleNode fix not applied"
+    assert "uint1(a" not in src and "uint1(b" not in src, "Old `uint1(a, b)` constructor found — ShuffleObj fix not applied"
 
     # Runtime correctness
     x = torch.randn(n_tok, n_exp, dtype=torch.bfloat16, device="cuda")
     out = torch.zeros(n_tok, dtype=torch.float32, device="cuda")
     kernel(x, out)
     torch.cuda.synchronize()
-    assert not out.isnan().any(), "bf16 ShuffleNode reduction NaN"
+    assert not out.isnan().any(), "bf16 ShuffleObj reduction NaN"
     torch.testing.assert_close(out, x.float().sum(dim=1), atol=5e-2, rtol=1e-2)
 
 
@@ -252,7 +253,7 @@ def test_float16_shuffle_correctness():
     out = torch.zeros(n_tok, dtype=torch.float32, device="cuda")
     f16_reduce(n_tok, n_exp)(x, out)
     torch.cuda.synchronize()
-    assert not out.isnan().any(), "float16 ShuffleNode reduction NaN"
+    assert not out.isnan().any(), "float16 ShuffleObj reduction NaN"
     torch.testing.assert_close(out, x.float().sum(dim=1), atol=1e-1, rtol=1e-2)
 
 
@@ -664,18 +665,16 @@ def test_sync_grid_cooperative_groups_in_hip_source():
 
 # ---------------------------------------------------------------------------
 # Fix 6 — src/transform/pipeline_planning.cc
-#   Skip T.Pipelined(num_stages>1) pipeline planning on ROCM
+#   Select the gfx950 HIP pipeline or the other ROCm sequential fallback
 #
 # Symptom: Double-buffering doubled the LDS allocation for every shared buffer
 #   inside the loop body, exhausting the per-workgroup LDS budget and causing
 #   hipModuleLaunchKernel to return HIPERRORINVALIDVALUE.  LDS limits:
 #     gfx942 (CDNA3 / MI300X): 64 KB;  gfx950 (CDNA4 / MI350): 160 KB (#2058)
-#   Even with gfx950's larger budget, double-buffering large shared tiles can
-#   still exceed 160 KB, and the HIP async-copy infrastructure has no ROCM
-#   equivalent, so the planner cannot safely pipeline on any ROCM target.
-#
-# Fix: when TargetIsRocm() && num_stages > 1, skip pipeline planning and fall
-#   back to a plain sequential loop with synchronous T.copy — always LDS-safe.
+#   Large shared tiles can still exceed a device's LDS budget. The current
+#   planner keeps the HIP async-copy pipeline on gfx950. Other ROCm targets
+#   with num_stages >= 1 fall back to a sequential loop with synchronous copy;
+#   this removes additional pipeline allocations, not the original LDS usage.
 # ---------------------------------------------------------------------------
 
 
@@ -687,7 +686,8 @@ def test_pipelined_no_lds_overflow(num_stages):
     must produce the correct result regardless of N.
 
     Old: num_stages=2 doubled LDS → EINVAL (64 KB on gfx942, 160 KB on gfx950).
-    New: multi-stage loops fall back to plain sequential on ROCM.
+    Current: gfx950 retains its HIP pipeline; other ROCm targets use the
+    sequential fallback. Both paths must satisfy the same numerical oracle.
     """
     M, K, blk = 32, 256, 64
 
@@ -784,6 +784,8 @@ def test_static_packed_int4_shared_allocation_rounds_up(dtype, storage_type):
 #   "" for non-scalar dtypes, so DispatchPureExtern returned the op
 #   unchanged and CodeGenTileLangHIP -> CodeGenC then threw
 #       tvm.error.InternalError: Unresolved call ir.Op(name="tirx.exp2")
+# These names describe the original regression; the native expression op is
+# now prim.exp2. Neither spelling may remain in generated HIP source.
 #   at codegen_c.cc:771.
 #
 # Fix: DispatchPureExternScalarized resolves the extern name from the
@@ -818,6 +820,7 @@ def test_vector_math_scalarized_in_hip_source():
     assert "tirx.exp2" not in src, (
         "Vectorized tirx.exp2 was left unlowered (would emit 'Unresolved call' from CodeGenC). Generated HIP source:\n" + src
     )
+    assert "prim.exp2" not in src, "Native vector exp2 must be lowered to scalar HIP calls:\n" + src
     assert src.count("exp2f") >= 4, (
         "Expected one 'exp2f' per lane (>=4) in HIP source for vectorized "
         f"T.exp2 over float32x4, got {src.count('exp2f')}. "

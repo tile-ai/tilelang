@@ -5,17 +5,17 @@
 
 #include "op/copy.h"
 #include "support/check.h"
-#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
+#include "op/native_intrinsic.h"
 #include "op/utils.h"
 #include "rocm/op/builtin.h"
 #include "rocm/target_utils.h"
 #include "rocm/transform/async_copy_injector.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
+#include <tvm/ir/prim/op.h>
 
-#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/transform.h>
 
 #include <cstdint>
@@ -25,16 +25,15 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace rocm {
 
 namespace {
 
 bool GetBoolAnnotation(const CopyNode &op, const char *key) {
-  if (auto val = op.annotations.Get(key)) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
+  if (auto value = op.annotations.Get(key)) {
+    return tvm::tl::GetBoolAnnotation(*value);
   }
   return false;
 }
@@ -68,16 +67,16 @@ struct Copy {
 
   static CopyInst SelectInst(const CopyNode &op, Target target,
                              const LayoutMap &layout_map,
-                             arith::Analyzer *analyzer) {
+                             sym::AnalyzerObj *analyzer) {
     if (GetIsAsyncCopy(op) || GetNoImplicitAsyncCommitWait(op)) {
       bool cp_async_supported =
           CheckCPAsyncCopy(op, target, layout_map, analyzer);
       ICHECK(cp_async_supported)
           << "Explicit async copy semantics require ROCm async copy lowering, "
              "but constraints were not satisfied. Got src="
-          << op.src->name << " (scope=" << op.src.scope()
-          << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
-          << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype
+          << op.src->name << " (scope=" << op.src.scope().name()
+          << ", dtype=" << op.src.dtype() << "), dst=" << op.dst->name
+          << " (scope=" << op.dst.scope().name() << ", dtype=" << op.dst.dtype()
           << ").";
       return CopyInst::kCPAsync;
     }
@@ -85,7 +84,7 @@ struct Copy {
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     auto copy_inst =
         SelectInst(op, lower_args.target, lower_args.layout_map, analyzer);
     if (copy_inst == CopyInst::kCPAsync) {
@@ -99,12 +98,12 @@ struct Copy {
 
 private:
   static Stmt LowerCPAsync(const CopyNode &op, const LowerArgs &lower_args,
-                           arith::Analyzer *analyzer) {
+                           sym::AnalyzerObj *analyzer) {
     using namespace tvm::transform;
 
     PassContext pass_ctx = PassContext::Current();
     bool enable_async_copy =
-        pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(true)).value();
+        pass_ctx->GetConfig<bool>(kEnableAsyncCopy).value_or(true);
     bool no_implicit_commit_wait = GetNoImplicitAsyncCommitWait(op);
     bool explicit_async_semantics =
         no_implicit_commit_wait || GetIsAsyncCopy(op);
@@ -113,7 +112,7 @@ private:
     }
 
     auto simt_loop = op.MakeSIMTLoop(analyzer);
-    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+    auto fused_loop = ParallelLoopFuser::Fuse(simt_loop).as_or_throw<For>();
     auto par_op = ParallelOp(fused_loop);
 
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
@@ -131,7 +130,8 @@ private:
     Stmt lowered_loop = LowerParallelLoop(
         par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
         lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard(),
+        lower_args.target);
 
     auto inject_result =
         InjectROCmAsyncCopy(lowered_loop, /*async_without_async_commit_wait=*/
@@ -139,10 +139,10 @@ private:
     Stmt async_copy_loop = inject_result.stmt;
     if (!inject_result.injected_rocm_async_copy) {
       DLOG(WARNING) << "ROCm async-copy rewrite miss for copy src="
-                    << op.src->name << " (scope=" << op.src.scope()
-                    << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
-                    << " (scope=" << op.dst.scope()
-                    << ", dtype=" << op.dst->dtype
+                    << op.src->name << " (scope=" << op.src.scope().name()
+                    << ", dtype=" << op.src.dtype() << "), dst=" << op.dst->name
+                    << " (scope=" << op.dst.scope().name()
+                    << ", dtype=" << op.dst.dtype()
                     << "), no_implicit_async_commit_wait="
                     << no_implicit_commit_wait
                     << ", is_async_copy=" << GetIsAsyncCopy(op);
@@ -168,7 +168,7 @@ private:
     }
     if (GetIsAsyncCopy(op)) {
       Stmt commit_group =
-          Evaluate(Call(DataType::Handle(), builtin::ptx_commit_group(), {}));
+          Evaluate(Call(PrimType::Void(), Op::Get("tl.ptx_commit_group"), {}));
       return SeqStmt({async_copy_loop, commit_group});
     }
     return async_copy_loop;
@@ -178,7 +178,7 @@ private:
     if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
       return false;
     }
-    if (op.src->dtype != op.dst->dtype) {
+    if (op.src.dtype() != op.dst.dtype()) {
       return false;
     }
     return true;
@@ -186,7 +186,7 @@ private:
 
   static bool CheckCPAsyncCopy(const CopyNode &op, Target target,
                                const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer) {
+                               sym::AnalyzerObj *analyzer) {
     if (!TargetRocmHasAsyncCopy(target)) {
       return false;
     }

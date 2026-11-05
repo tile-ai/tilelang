@@ -3,6 +3,8 @@
 
 An example of implementing a dequantization GEMM:
 
+The [fine-grained example](example_dequant_gemm_fine_grained.py) uses PyTorch for host-side packed-weight permutations and the local decoder in `quantize/lop3.py`. It runs with TileLang's matching TIRx provider and FFI without importing BitBLAS. Use a separate environment and process for comparisons with the external BitBLAS project linked below.
+
 ```python
 @T.prim_func
 def dequant_matmul(

@@ -1,9 +1,4 @@
-"""TileLang-specific runtime overrides.
+"""TileLang construction policies live in ``language._native`` and the eager builder.
 
-Importing this package registers custom handlers that extend or override
-behavior from upstream TVMScript for TileLang semantics.
+Importing the language no longer mutates another package's parser or Buffer class.
 """
-
-# Register parser overrides upon import.
-from . import parser  # noqa: F401
-from . import buffer  # noqa: F401

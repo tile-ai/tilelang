@@ -109,12 +109,9 @@ def test_profiler_dynamic_symbolic_missing_constraint():
     profiler = kernel.get_profiler(tensor_supply_type=tilelang.TensorSupplyType.Normal)
 
     # Test that missing constraint raises ValueError
-    try:
+    with pytest.raises(ValueError, match="Dynamic symbolic variable 'm' not found in constraints") as error:
         profiler.do_bench(dynamic_symbolic_constraints={"wrong_name": 256})
-        raise ValueError("Expected ValueError for missing constraint")
-    except ValueError as e:
-        assert "m" in str(e), f"Error message should mention missing variable 'm', got: {e}"
-        print(f"Correctly raised error for missing constraint: {e}")
+    assert "wrong_name" in str(error.value)
 
 
 def test_profiler_dynamic_symbolic_with_input_tensors():

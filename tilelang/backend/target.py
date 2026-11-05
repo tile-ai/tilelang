@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 TargetConfig = dict[str, object]
 TargetInput = str | Mapping[str, object] | Target

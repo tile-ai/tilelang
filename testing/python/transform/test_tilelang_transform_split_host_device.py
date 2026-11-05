@@ -2,14 +2,17 @@
 """Tests for SplitHostDevice pass."""
 # ruff: noqa
 
-from tilelang import tvm as tvm
+import tvm_tirx as tvm
+import tvm_ffi
+from tvm_tirx import ir
+from tilelang.testing.ir import collect_nodes, collect_calls
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
+from tvm_tirx import tirx
 
 
-def run_split_host_device_passes(func: tvm.tirx.PrimFunc):
+def run_split_host_device_passes(func: tirx.Function):
     """Run the necessary passes before and including SplitHostDevice."""
     mod = tvm.IRModule({func.attrs["global_symbol"]: func})
     mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda", "c"))(mod)
@@ -36,47 +39,23 @@ def get_host_func(mod: tvm.IRModule):
     return None
 
 
-def collect_assume_vars(func: tvm.tirx.PrimFunc):
-    """Collect all variables used in assume statements."""
-    assume_vars = set()
-    in_assume = [False]  # Use list to allow mutation in nested function
-    assume_nodes = []
-
-    def collect_assumes(stmt):
-        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == "tl.assume":
-            assume_nodes.append(stmt.node)
-
-    tirx.stmt_functor.post_order_visit(func.body, collect_assumes)
-
-    # Now collect variables from assume nodes
-    def collect_vars_from_expr(expr):
-        if isinstance(expr, tirx.Var):
-            assume_vars.add(expr)
-
-    for node in assume_nodes:
-        tirx.stmt_functor.post_order_visit(node, collect_vars_from_expr)
-
-    return assume_vars
+def collect_assume_vars(func: tirx.Function):
+    """Collect typed variables from native optimizer facts by identity."""
+    return {var for condition in collect_assume_conditions(func) for var in collect_nodes(condition, ir.Var)}
 
 
-def collect_attr_conditions(func: tvm.tirx.PrimFunc, attr_key: str):
-    """Collect conditions stored in attributes with the requested key."""
-    conditions = []
-
-    def collect_attrs(stmt):
-        if isinstance(stmt, tirx.AttrStmt) and stmt.attr_key == attr_key:
-            conditions.append(stmt.node)
-
-    tirx.stmt_functor.post_order_visit(func.body, collect_attrs)
-    return conditions
+def collect_assume_conditions(func: tirx.Function):
+    return [call.args[0] for call in collect_calls(func, op="prim.assume")]
 
 
-def collect_assume_conditions(func: tvm.tirx.PrimFunc):
-    return collect_attr_conditions(func, "tl.assume")
-
-
-def collect_runtime_check_conditions(func: tvm.tirx.PrimFunc):
-    return collect_attr_conditions(func, "tl.assume_requires_runtime_check")
+def collect_runtime_check_conditions(func: tirx.Function):
+    # The native split boundary has already materialized checked assumptions
+    # as assertions. Their message preserves the user-assume origin.
+    return [
+        stmt.condition
+        for stmt in collect_nodes(func, ir.AssertStmt)
+        if any(isinstance(part, ir.StringImm) and part.value.startswith("Assume:") for part in stmt.message_parts)
+    ]
 
 
 def get_var_name(var):
@@ -90,7 +69,7 @@ def get_var_name(var):
         return str(var).split(":")[0].strip()
 
 
-def get_param_by_name(func: tvm.tirx.PrimFunc, name: str):
+def get_param_by_name(func: tirx.Function, name: str):
     """Get a parameter by name_hint."""
     for param in func.params:
         if get_var_name(param) == name:
@@ -132,7 +111,7 @@ def test_split_host_device_with_user_assume():
 
     # Check that device function has assume statements
     device_str = str(device_func)
-    assert "tl.assume" in device_str, "Device function should have assume statements"
+    assert collect_assume_conditions(device_func), "Device function should have assume statements"
 
     # Check that assume variables are the same objects as function parameters
     # (not dangling variables like n_1)
@@ -175,7 +154,7 @@ def test_split_host_device_with_buffer_shape_assume():
 
     # Check that assumes exist
     device_str = str(device_func)
-    assert "tl.assume" in device_str, "Device function should have assume statements"
+    assert collect_assume_conditions(device_func), "Device function should have assume statements"
 
     # Check that assume variables match parameters
     assume_vars = collect_assume_vars(device_func)
@@ -210,7 +189,7 @@ def test_split_host_device_multiple_assumes():
 
     device_str = str(device_func)
     # Should have multiple assume statements
-    assert device_str.count("tl.assume") >= 3, "Should have at least 3 assume statements"
+    assert len(collect_assume_conditions(device_func)) >= 3, "Should have at least 3 assume statements"
 
     # All assumes should use the parameter, not dangling variables
     assume_vars = collect_assume_vars(device_func)
@@ -241,39 +220,11 @@ def test_split_host_device_no_dangling_vars():
     device_func = get_device_func(mod)
     assert device_func is not None
 
-    device_str = str(device_func)
-
-    # Check for common patterns of dangling variables
-    # These patterns indicate that ConvertSSA created separate variables
-    # for assumes that should have used the function parameters
-    import re
-
-    # Look for patterns like "n_1 = T.int32()" which indicate dangling vars
-    dangling_pattern = r"\bn_\d+\s*=\s*T\.int32\(\)"
-    matches = re.findall(dangling_pattern, device_str)
-
-    # Filter out legitimate uses (like in blocks that might have their own scope)
-    # We're specifically looking for dangling declarations at function level
-    lines = device_str.split("\n")
-    dangling_decls = []
-    for line in lines:
-        # Check if this is a top-level dangling declaration
-        # (not inside a block's T.reads()/T.writes())
-        stripped = line.strip()
-        if re.match(r"^n_\d+\s*=\s*T\.int32\(\)$", stripped):
-            dangling_decls.append(stripped)
-
-    # If assume is immediately followed by a dangling var declaration, that's the bug
-    assume_indices = [i for i, line in enumerate(lines) if "tl.assume" in line]
-    for idx in assume_indices:
-        # Check if line before assume has dangling var
-        if idx > 0:
-            prev_line = lines[idx - 1].strip()
-            if re.match(r"^n_\d+\s*=\s*T\.int32\(\)$", prev_line):
-                raise AssertionError(
-                    f"Found dangling variable declaration '{prev_line}' before assume. "
-                    "This indicates SplitHostDevice did not properly substitute variables."
-                )
+    assert tirx.analysis.check_well_formed(device_func)
+    parameter = get_param_by_name(device_func, "n")
+    assert parameter is not None
+    named = [var for var in collect_assume_vars(device_func) if get_var_name(var) == "n"]
+    assert named and all(var.same_as(parameter) for var in named)
 
 
 @tilelang.testing.requires_cuda
@@ -291,9 +242,9 @@ def test_split_host_device_lifts_host_evaluable_device_assume():
     assert device_func is not None
 
     expected = main.params[1] % 4 == 0
-    assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_assume_conditions(host_func))
-    assert any(tvm.ir.structural_equal(condition, expected, map_free_vars=True) for condition in collect_assume_conditions(device_func))
-    assert any(tvm.ir.structural_equal(condition, expected) for condition in collect_runtime_check_conditions(host_func))
+    assert any(tvm_ffi.structural_equal(condition, expected) for condition in collect_assume_conditions(host_func))
+    assert any(tvm_ffi.structural_equal(condition, expected, map_free_vars=True) for condition in collect_assume_conditions(device_func))
+    assert any(tvm_ffi.structural_equal(condition, expected) for condition in collect_runtime_check_conditions(host_func))
     assert not collect_runtime_check_conditions(device_func)
 
 

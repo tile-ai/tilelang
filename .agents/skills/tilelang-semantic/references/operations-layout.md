@@ -15,7 +15,7 @@
 
 Give every TileOp an explicit semantic contract covering:
 
-- accepted operand kinds (`Buffer`, `BufferLoad`, `BufferRegion`, pointer);
+- accepted operand kinds (`TensorVar`, `TensorLoad`, `TensorRegion`, typed pointer);
 - logical rank, shape, and region extents;
 - operand, accumulator, and result dtypes;
 - required storage scopes and address spaces;
@@ -151,7 +151,7 @@ Require:
 
 - integer, nonnegative shape/region extents when statically known;
 - nonzero loop steps and legal annotation values;
-- BufferStore values convertible under the language's explicit cast rules;
+- TensorStore values convertible under the language's explicit cast rules;
 - vector lane counts and lane extraction indices to be valid;
 - reinterpret/view operations to preserve total storage size and alignment;
 - atomics, reducers, scans, and MMA operands to use supported dtypes;

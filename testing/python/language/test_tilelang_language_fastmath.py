@@ -6,7 +6,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
+from tvm_tirx import ir
 
 
 FASTMATH_INTRINSICS = [
@@ -39,7 +39,7 @@ FASTMATH_INTRINSICS = [
 )
 @pytest.mark.parametrize("intrinsic", FASTMATH_INTRINSICS)
 def test_fastmath_rejects_unsupported_dtype(intrinsic, dtype):
-    value = tirx.Var("value", dtype)
+    value = ir.Var("value", dtype)
 
     with pytest.raises(
         TypeError,
@@ -52,11 +52,11 @@ def test_fastmath_rejects_unsupported_dtype(intrinsic, dtype):
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32", "float64"])
 @pytest.mark.parametrize("intrinsic", FASTMATH_INTRINSICS)
 def test_fastmath_accepts_float_dtype_at_frontend(intrinsic, dtype):
-    value = tirx.Var("value", dtype)
+    value = ir.Var("value", dtype)
     result = intrinsic(value)
 
-    assert isinstance(result, tirx.Call)
-    assert result.dtype == dtype
+    assert isinstance(result, ir.Call)
+    assert result.ty == ir.PrimType(dtype)
 
 
 # Rows written by the kernels below, in order. The "pos" domain keeps the log

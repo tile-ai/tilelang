@@ -4,6 +4,47 @@
 
 Carver combines hardware architecture information, user-defined tile structures, and built-in heuristics to recommend tiling strategies (or "hints"). The recommended hints are easily adaptable to multiple backends, including [TVM](https://tvm.apache.org/), [triton](https://github.com/openai/triton), [tilelang](https://github.com/tile-ai/tilelang) (or other domain-specific compilers).
 
+## Native TIRx input contract
+
+The template constructors and `recommend_hints` entry points retain their existing
+arguments. `equivalent_function()` now returns a native
+`tvm_tirx.tirx.Function`; the attention template returns its existing pair of
+functions. Tensor parameters are `ir.Var` objects whose `TensorType` owns shape,
+dtype, scope and layout. The function body is a `SeqStmt`. Consumers of the former
+`PrimFunc.buffer_map` or TVM scheduling objects must use this native contract:
+
+```python
+from tilelang import carver
+from tvm_tirx import tirx
+
+func = carver.MatmulTemplate(M=128, N=128, K=128).equivalent_function()
+assert isinstance(func, tirx.Function)
+tensors = [parameter for parameter in func.params if tirx.is_tensor_var(parameter)]
+shapes = [tuple(parameter.ty.shape) for parameter in tensors]
+```
+
+Carver's private workload builder emits real native loads, stores, typed tensor
+allocations and TileLang stage annotations. Its private `NativeSchedule` tracks
+stage, loop and tensor views over those objects. It does not provide the former
+TE stack or a general replacement for TVM's `Schedule`. User-supplied functions
+can retain `T.sblock`, `T.axis.spatial` and `T.axis.reduce` declarations through
+`import tilelang.language as T`.
+
+Graph rewrites require independent, directly bound stages with an explicit
+`tirx.noalias` contract. They preserve public tensor parameters, element types,
+strides and offsets. Reindexing materializes private storage; layout changes
+must be invertible, and reduction transformations preserve accumulation order.
+Parallel loops, shared loop stages, pointer aliases, intervening writes and effectful producers
+are rejected when the rewrite cannot prove the required ordering. A failed
+candidate preserves the original function, so another hint strategy can be
+tried. Successful changes invalidate old analysis handles; consumers refresh
+surviving handles through the analysis that created them.
+
+`FlashAttentionTemplate` remains a hint model for its QK and SV matrix products.
+Its equivalent functions do not include softmax or causal masking. A proposed
+hint is a tile configuration; compiling and numerically validating the consumer
+kernel remains necessary on its selected backend.
+
 ---
 
 ## Key Features
@@ -144,7 +185,7 @@ Adding a new architecture is as simple as implementing a new subclass of `TileDe
 Below is an **illustrative snippet** of the CUDA backend:
 ```python
 class CUDA(TileDevice):
-    def __init__(self, target: Union[tvm.target.Target, str]):
+    def __init__(self, target: Union[tvm_tirx.target.Target, str]):
         ...
         self.platform = "CUDA"
         # Device constraints

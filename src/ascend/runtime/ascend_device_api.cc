@@ -5,15 +5,22 @@
  *
  * The Ascend target reports DLPack device type kDLExtDev (12) — the same type
  * torch_npu assigns to NPU tensors. Because kDLExtDev != kDLCPU,
- * `MakePackedAPI` injects a `__tvm_set_device(12, dev_id)` call into the host
- * stub (see DeviceAPI::NeedSetDevice). That call resolves the DeviceAPI factory
- * "device_api." + DLDeviceType2Str(kDLExtDev) == "device_api.ext_dev".
+ * `MakePackedAPI` injects a `TVMBackendSetDevice(12, dev_id)` call into the
+ * host stub (see DeviceAPI::NeedSetDevice). That call resolves the DeviceAPI
+ * factory "device_api." + DLDeviceType2Str(kDLExtDev) == "device_api.ext_dev".
  *
  * On the tvm_ffi execution path the actual device context, allocation and
  * stream are owned by PyTorch (torch_npu), exactly as in the legacy cython
- * path. So this DeviceAPI only needs to exist and answer kExist; SetDevice and
- * StreamSync are no-ops. Allocation / copy are not used on this path and throw
- * if reached, to surface accidental misuse rather than silently corrupt state.
+ * path. This remains a limited shim: GetAttr("exist") reports that the shim is
+ * registered, while SetDevice and StreamSync leave the Torch-owned context and
+ * synchronization unchanged. It does not probe physical NPU availability.
+ * SetStream/GetCurrentStream inherit the shared FFI stream environment; they
+ * borrow stream handles and do not own or release them. GetDeviceIndex remains
+ * unsupported rather than inventing a current device for tensor-free calls.
+ *
+ * Empty, workspace allocation/free and copy are not used on this path and
+ * throw if reached. In particular, Empty must not wrap borrowed Torch storage
+ * as an owning TIRx tensor.
  */
 #include <tvm/ffi/error.h>
 #include <tvm/ffi/function.h>
@@ -27,21 +34,23 @@ class AscendDeviceAPI final : public DeviceAPI {
 public:
   void SetDevice(Device dev) final {}
 
-  void GetAttr(Device dev, DeviceAttrKind kind, ffi::Any *rv) final {
-    if (kind == kExist) {
-      *rv = 1;
-    }
+  ffi::Any GetAttr(Device dev, const ffi::String &name) final {
+    if (name == "exist")
+      return true;
+    return nullptr;
   }
 
-  void *AllocDataSpace(Device dev, size_t nbytes, size_t alignment,
-                       DLDataType type_hint) final {
+  ffi::Tensor Empty(ffi::ShapeView shape, DLDataType dtype, Device device,
+                    ffi::Optional<MemoryScope> mem_scope) final {
     TVM_FFI_THROW(RuntimeError)
         << "AscendDeviceAPI does not allocate device memory; NPU buffers are "
            "managed by PyTorch (torch_npu).";
     TVM_FFI_UNREACHABLE();
   }
 
-  void FreeDataSpace(Device dev, void *ptr) final {
+  // The native default FreeWorkspace owns tensors created by Empty. Preserve
+  // this shim's explicit rejection instead of accepting external Torch memory.
+  void FreeWorkspace(Device dev, void *ptr) final {
     TVM_FFI_THROW(RuntimeError)
         << "AscendDeviceAPI does not free device memory; NPU buffers are "
            "managed by PyTorch (torch_npu).";

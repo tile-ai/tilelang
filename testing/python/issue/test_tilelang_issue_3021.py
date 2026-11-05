@@ -2,10 +2,10 @@
 
 Logical `T.Not` on a `bool` buffer inside an auto-vectorized `T.Parallel`
 loop used to emit a scalar `!` on the whole vector carrier (e.g.
-`!ushort4`), which nvcc rejects. The NotNode visitor must scalarize the
+`!ushort4`), which nvcc rejects. The NotObj visitor must scalarize the
 negation lane by lane.
 
-The negated operand must be a plain `bool` buffer load: a NotNode over a
+The negated operand must be a plain `bool` buffer load: a NotObj over a
 comparison (e.g. `T.Not(A[i] > 0)`) is rewritten by the simplifier before
 codegen and would not exercise the vectorized path.
 """

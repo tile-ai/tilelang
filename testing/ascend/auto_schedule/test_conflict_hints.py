@@ -3,14 +3,16 @@
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from testing.ascend._ir import calls, schedule, nodes
+from tvm_tirx import ir
+from testing.ascend._ir import calls, disjoint_argument_fixture, schedule, nodes
 
 
-def _insert_sync(program):
+def _insert_sync(program, *, disjoint_arguments=()):
     before = schedule(program, through="ResolveCore", auto_schedule=False)
+    if disjoint_arguments:
+        before = disjoint_argument_fixture(before, *disjoint_arguments)
     return transform.InsertSync()(before)
 
 
@@ -48,14 +50,16 @@ def _hint_program(scope, exact, cross, explicit_root):
     ],
 )
 def test_hint_scope_and_region(scope, exact, cross, explicit_root):
-    mod = _insert_sync(_hint_program(scope, exact, cross, explicit_root))
+    # Count only the requested local hint protocol in an explicitly disjoint
+    # A/C fixture. The original allowed-alias graph is checked independently.
+    mod = _insert_sync(_hint_program(scope, exact, cross, explicit_root), disjoint_arguments=[("A", "C")])
     for op in ("set", "wait"):
         events = [call for call in calls(mod, "tl.ascend_" + op + "_flag") if call.args[0].value == "MTE2_MTE3"]
         expected = (2 if cross else 1) if exact else 0
         assert len(events) == expected
 
 
-def test_assume_no_conflict_overrides_alias_conservatism():
+def _make_no_conflict_alias_program():
     @T.prim_func
     def main(
         A: T.Tensor((2, 4, 16), "float32"),
@@ -69,9 +73,13 @@ def test_assume_no_conflict_overrides_alias_conservatism():
                 T.copy(A[i, :, :], alias)
                 T.copy(ub, C[i, :])
 
-    after = _insert_sync(main)
+    return main
 
-    (loop,) = nodes(after, tirx.For)
+
+def test_assume_no_conflict_overrides_alias_conservatism():
+    after = _insert_sync(_make_no_conflict_alias_program(), disjoint_arguments=[("A", "C")])
+
+    (loop,) = nodes(after, ir.For)
     assert _event_count(loop, "set", "MTE2_MTE3") == 0
     assert _event_count(loop, "wait", "MTE2_MTE3") == 0
 

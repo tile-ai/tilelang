@@ -3,6 +3,10 @@
 
 cmake_minimum_required(VERSION 3.26)
 
+get_filename_component(TILELANG_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
+option(TILELANG_BUILD_COMPILER "Build the combined TileLang/TIRx compiler provider" ON)
+option(TILELANG_BUILD_PYTHON_EXTENSIONS "Build the TileLang Python extensions" ON)
+
 # Activate the build toolchain before project(): the MSVC environment has to be in
 # place when the compilers are probed, and the generator resolves CMAKE_MAKE_PROGRAM
 # there. CUDA detection lives in the same module but must run after project() instead
@@ -20,13 +24,17 @@ set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
 
+include(cmake/CompilerIdentity.cmake)
+
 # Detect CUDA toolkit: tries host installation first, then falls back to
 # pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect). This has to
 # run after project() so that an enabled language is available -- FindCUDAToolkit's
 # imported-target setup calls find_package(Threads REQUIRED), which hard-errors
 # otherwise. CMAKE_CUDA_COMPILER is published as a cache entry, so subprojects
 # configured further down (add_subdirectory(${TVM_SOURCE}) below) still see it.
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
+if(TILELANG_BUILD_COMPILER)
+  include(${CMAKE_CURRENT_LIST_DIR}/cmake/FindPipCUDAToolkit.cmake)
+endif()
 
 _tilelang_get_native_windows_arch(_tilelang_native_windows_arch)
 
@@ -80,7 +88,7 @@ if(MSVC)
   #     flags injected by CMake/TVM (e.g. /FS, /Zc:preprocessor, /MP).
   #   * -fdelayed-template-parsing: TVM headers declare std::vector<T>
   #     members where T is only forward-declared at that point (e.g.
-  #     std::vector<tvm::tir::Stmt> in src/transform/tvm_ffi_binder.h). cl.exe
+  #     compiler node containers). cl.exe
   #     defers template parsing by default so the late stmt.h include in
   #     the .cc file resolves T before instantiation; modern clang parses
   #     templates eagerly and emits "incomplete type" errors. Re-enabling
@@ -182,7 +190,7 @@ function(tilelang_generate_windows_import_library DLL_PATH OUTPUT_VAR STEM)
   set(${OUTPUT_VAR} "${_tilelang_import_lib}" PARENT_SCOPE)
 endfunction()
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -193,33 +201,12 @@ endif()
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.gitmodules" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-  find_package(Git QUIET)
-  if(Git_FOUND)
-    execute_process(
-      COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
-      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-      RESULT_VARIABLE TILELANG_GIT_SUBMODULE_RESULT
-    )
-    if(NOT TILELANG_GIT_SUBMODULE_RESULT EQUAL 0)
-      message(
-        FATAL_ERROR
-          "Failed to initialize git submodules. Please run "
-          "`git submodule update --init --recursive` and re-run CMake."
-      )
-    endif()
-  else()
-    message(
-      FATAL_ERROR
-        "Git is required to initialize TileLang submodules. "
-        "Please install git or fetch the submodules manually."
-    )
-  endif()
-endif()
+# Dependency initialization is an explicit checkout step.  Configuring a build
+# must not change the selected dependency commits or reset an implementation branch.
 
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
-  message(STATUS "Using ccache: ${CCACHE_PROGRAM} with base_dir=${CMAKE_SOURCE_DIR}")
+  message(STATUS "Using ccache: ${CCACHE_PROGRAM} with base_dir=${TILELANG_SOURCE_ROOT}")
   if(APPLE OR WIN32)
     # Passing configs like `ccache base_dir=/xxx cc ...` is supported
     # (likely) since ccache 4.x, which has been provided by homebrew.
@@ -227,7 +214,7 @@ if(CCACHE_PROGRAM)
     # provides ccache 3.x and do not support this form.
     # `cibuildwheel` uses fixed folder on Linux (`/project`) as working directory,
     # so cache would work without setting `base_dir`.
-    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${CMAKE_SOURCE_DIR};hash_dir=false")
+    set(CCACHE_PROGRAM "${CCACHE_PROGRAM};base_dir=${TILELANG_SOURCE_ROOT};hash_dir=false")
   endif()
 
   # Make ccache hits survive uv's PEP 517 build isolation on Windows.
@@ -270,8 +257,8 @@ if(CCACHE_PROGRAM)
   if(WIN32)
     set(_tilelang_pep517_python "")
     foreach(_candidate
-        "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe"
-        "${CMAKE_SOURCE_DIR}/venv/Scripts/python.exe")
+        "${TILELANG_SOURCE_ROOT}/.venv/Scripts/python.exe"
+        "${TILELANG_SOURCE_ROOT}/venv/Scripts/python.exe")
       if(EXISTS "${_candidate}")
         set(_tilelang_pep517_python "${_candidate}")
         break()
@@ -279,7 +266,7 @@ if(CCACHE_PROGRAM)
     endforeach()
     if(_tilelang_pep517_python)
       set(_tilelang_pep517_wrapper
-          "${_tilelang_pep517_python} ${CMAKE_SOURCE_DIR}/cmake/ccache_strip_pep517.py")
+          "${_tilelang_pep517_python} ${TILELANG_SOURCE_ROOT}/cmake/ccache_strip_pep517.py")
       set(CCACHE_PROGRAM
           "${CCACHE_PROGRAM};prefix_command_cpp=${_tilelang_pep517_wrapper}")
       message(STATUS "  ccache: stripping PEP 517 .tmpXXX paths via ${_tilelang_pep517_wrapper}")
@@ -299,6 +286,12 @@ else()
     set(CMAKE_CUDA_COMPILER_LAUNCHER "${SCCACHE_PROGRAM}" CACHE STRING "CUDA compiler launcher")
   endif()
 endif()
+
+include(cmake/CompilerIdentity.cmake)
+
+# The frontend wheel only builds its Python extensions. It does not configure
+# another compiler, FFI, device SDK, or copy of the provider's libraries.
+if(TILELANG_BUILD_COMPILER)
 
 # Configs
 include(cmake/BackendOptions.cmake)
@@ -356,38 +349,18 @@ option(TILELANG_USE_ASCEND_STUBS
 unset(_TILELANG_USE_ASCEND_STUBS_DEFAULT)
 # Configs end
 
-include(cmake/load_tvm.cmake)
-
-if(EXISTS ${TVM_SOURCE}/cmake/config.cmake)
-  include(${TVM_SOURCE}/cmake/config.cmake)
-else()
-  message(FATAL_ERROR "Nor tvm provided or submodule checkout-ed.")
-endif()
-# Re-apply TileLang's preferred backend settings after TVM's config may have
-# overridden the USE_* cache entries.
-foreach(BACKEND IN LISTS TILELANG_BACKENDS)
-  set(_backend_var "USE_${BACKEND}")
-  set(_doc "${TILELANG_BACKEND_DOC_${BACKEND}}")
-  set(${_backend_var} ${TILELANG_OPTION_${_backend_var}} CACHE STRING "${_doc}" FORCE)
-  set(${_backend_var} ${TILELANG_OPTION_${_backend_var}})
-endforeach()
-# tvm tries to detect gtest by default, but may fail if its header is not installed.
-set(USE_GTEST OFF)
-
-# TileLang is built as a separate shared library on POSIX and subclasses / calls
-# TVM C++ internals. TVM 0.25 defaults to hiding private symbols, which makes
-# those out-of-DSO references unresolved when libtilelang.so is dlopened.
-set(HIDE_PRIVATE_SYMBOLS OFF CACHE BOOL "Compile TVM with -fvisibility=hidden." FORCE)
+include(cmake/load_tirx.cmake)
 
 # Include directories for TileLang
-set(TILE_LANG_INCLUDES ${TVM_INCLUDES})
+
 # Add TileLang's own src/ to include path so cross-directory includes
 # can use paths relative to src/ (e.g. "backend/common/target_utils.h", "op/builtin.h").
 list(INSERT TILE_LANG_INCLUDES 0 "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # Collect source files
-file(GLOB TILE_LANG_SRCS
+file(GLOB TILE_LANG_SRCS CONFIGURE_DEPENDS
   src/*.cc
+  src/ir/*.cc
   src/layout/*.cc
   src/transform/*.cc
   src/transform/common/*.cc
@@ -398,11 +371,14 @@ file(GLOB TILE_LANG_SRCS
   src/backend/common/codegen/codegen_utils.cc
   src/backend/common/codegen/codegen_c_host.cc
   src/backend/common/codegen/codegen_py.cc
+  src/backend/common/codegen/source_host.cc
 )
 
 # Always include CPU-safe runtime helpers
 list(APPEND TILE_LANG_SRCS
   src/runtime/error_helpers.cc
+  src/runtime/output_frame.cc
+  src/runtime/output_module.cc
 )
 # Backend-local CMake files own native source lists, stubs, include paths, and
 # compile definitions. Top-level CMake only selects and delegates.
@@ -437,7 +413,15 @@ endif()
 option(TILELANG_RELEASE_BUILD "Strip source paths from log messages (for wheel releases)" ${TILELANG_RELEASE_BUILD_DEFAULT})
 
 # Include tvm after configs have been populated
-add_subdirectory(${TVM_SOURCE} tvm EXCLUDE_FROM_ALL)
+# Map the public TileLang build switches to the standalone compiler.  The
+# frontend and native extensions are compiled against its own FFI source target.
+foreach(_backend CUDA ROCM METAL LLVM)
+  set(TVM_TIRX_USE_${_backend} "${USE_${_backend}}" CACHE STRING
+      "TIRx backend selected by TileLang" FORCE)
+endforeach()
+set(TVM_TIRX_USE_Z3 "${USE_Z3}" CACHE STRING "TIRx symbolic prover" FORCE)
+set(TVM_TIRX_USE_CUSTOM_LOGGING ON CACHE BOOL "TileLang logging" FORCE)
+add_subdirectory(${TVM_TIRX_SOURCE} tvm-tirx)
 
 # Strip the hardcoded /Zi PRIVATE option that tvm-ffi attaches in its
 # tvm_ffi_add_msvc_flags() helper. It overrides our Embedded debug info
@@ -460,7 +444,7 @@ if(MSVC)
   # TVM links against tvm_ffi_shared on Windows. Do not also export tvm-ffi
   # inline class members from TileLang-built TVM DLLs, or lld-link reports
   # duplicate symbols for tvm::ffi types already exported by tvm_ffi.dll.
-  foreach(_tilelang_tvm_obj_tgt IN ITEMS tvm_objs tvm_runtime_objs)
+  foreach(_tilelang_tvm_obj_tgt IN ITEMS tvm_tirx_compiler_objs tvm_runtime_objs)
     if(TARGET ${_tilelang_tvm_obj_tgt})
       get_target_property(_tilelang_tvm_defs ${_tilelang_tvm_obj_tgt} COMPILE_DEFINITIONS)
       if(_tilelang_tvm_defs)
@@ -479,77 +463,36 @@ if(TILELANG_RELEASE_BUILD)
   target_compile_definitions(tvm_runtime_objs PRIVATE TILELANG_RELEASE_BUILD=1)
 endif()
 
-# Resolve compile warnings in tvm
-add_compile_definitions(DMLC_USE_LOGGING_LIBRARY=<tvm/runtime/logging.h>)
+# Compiler registrations are linked into the same DSO on every platform.
+include(cmake/TileLangCompiler.cmake)
+set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_tirx_compiler)
+# Backend modules are created in the TIRx subdirectory. Its local variable
+# TVM_RUNTIME_BACKEND_LIBS is not exported to the embedding directory, so read
+# the actual shared-library targets rather than silently omitting the sidecars.
+get_property(_tilelang_tirx_targets DIRECTORY "${TVM_TIRX_SOURCE}"
+             PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_target IN LISTS _tilelang_tirx_targets)
+  if(_target MATCHES "^tvm_runtime_")
+    get_target_property(_target_type ${_target} TYPE)
+    if(_target_type STREQUAL "SHARED_LIBRARY")
+      list(APPEND TILELANG_OUTPUT_TARGETS ${_target})
+    endif()
+  endif()
+endforeach()
+foreach(_target IN LISTS TILELANG_OUTPUT_TARGETS)
+  if(TARGET ${_target})
+    set_property(TARGET ${_target} PROPERTY EXCLUDE_FROM_ALL FALSE)
+  endif()
+endforeach()
 
-add_library(tilelang_objs OBJECT ${TILE_LANG_SRCS})
-if(MSVC)
-  # Keep the wider project on its current baseline, but let TileLang's C++
-  # sources use C++20 so designated initializers compile under MSVC.
-  target_compile_features(tilelang_objs PRIVATE cxx_std_20)
-endif()
+endif() # TILELANG_BUILD_COMPILER
 
-# A direct single-config CMake build with no selected build type otherwise
-# compiles TileLang without optimization. Layout validation includes bounded
-# exhaustive expression evaluation, which is prohibitively slow at -O0.
-# Explicit Debug/Release configurations and multi-config generators keep their
-# normal toolchain flags.
-if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE STREQUAL "" AND
-   CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-  target_compile_options(tilelang_objs PRIVATE -O2)
-endif()
+if(TILELANG_BUILD_PYTHON_EXTENSIONS)
 
-# Set debug mode compile definitions
-# Enable the TVM debug option, i.e., TVM_LOG_DEBUG
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  message(STATUS "Building TileLang with DEBUG mode")
-  target_compile_definitions(tilelang_objs PRIVATE "TVM_LOG_DEBUG")
-endif()
-
-target_include_directories(tilelang_objs PRIVATE ${TILE_LANG_INCLUDES})
-target_compile_definitions(tilelang_objs PRIVATE TVM_LOG_CUSTOMIZE=1)
-if(WIN32)
-  # Some TVM headers define inline/template members behind TVM_DLL. MSVC
-  # rejects those definitions when TVM_DLL expands to dllimport in TileLang's
-  # consumer translation units, so consume them as ordinary declarations here.
-  target_compile_definitions(tilelang_objs PRIVATE TVM_DLL=)
-endif()
-if(TILELANG_RELEASE_BUILD)
-  target_compile_definitions(tilelang_objs PRIVATE TILELANG_RELEASE_BUILD=1)
-endif()
-
-set(TILELANG_OUTPUT_TARGETS tvm_runtime tvm_compiler)
-if(WIN32)
-  # Windows ships tvm_runtime.dll and tvm_compiler.dll. The compiler DLL also
-  # carries TileLang's native registration/object code: TileLang uses TVM
-  # compiler-side C++ internals that are not consistently exported from a
-  # separate tilelang.dll, while exporting every TVM compiler object would exceed
-  # Windows' 65535-symbol DLL limit. This keeps Windows on explicit split TVM
-  # DLL names without falling back to the old unified tvm.dll.
-  target_sources(tvm_compiler PRIVATE $<TARGET_OBJECTS:tilelang_objs>)
-else()
-  add_library(tilelang SHARED $<TARGET_OBJECTS:tilelang_objs>)
-  target_link_libraries(tilelang PUBLIC tvm_compiler)
-
-  # Place dev build outputs under build/lib for consistency
-  set_target_properties(tilelang PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
-  )
-  list(PREPEND TILELANG_OUTPUT_TARGETS tilelang)
-endif()
-
-if(WIN32)
-  # TVM is added with EXCLUDE_FROM_ALL above. The split Windows build ships the
-  # same native target set as POSIX, so make sure default builds materialize all
-  # DLLs needed by Python import and wheel installation.
-  foreach(_tilelang_win_target IN LISTS TILELANG_OUTPUT_TARGETS)
-    set_property(TARGET ${_tilelang_win_target} PROPERTY EXCLUDE_FROM_ALL FALSE)
-  endforeach()
-endif()
 # Build cython extension
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module ${SKBUILD_SABI_COMPONENT})
+install(FILES "${TILELANG_IDENTITY_DIR}/_build_info.py"
+        DESTINATION tilelang COMPONENT tilelang_python)
 
 add_custom_command(
   OUTPUT "${CMAKE_BINARY_DIR}/tilelang_cython_wrapper.cpp"
@@ -656,9 +599,9 @@ set_target_properties(tilelang_deepgemm_heuristics PROPERTIES
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
 )
 install(TARGETS tilelang_deepgemm_heuristics
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
+        LIBRARY DESTINATION tilelang/lib COMPONENT tilelang_python
+        RUNTIME DESTINATION tilelang/lib COMPONENT tilelang_python
+        ARCHIVE DESTINATION tilelang/lib COMPONENT tilelang_python)
 
 # Ensure dev builds drop the extension into build/lib alongside other shared libs
 set_target_properties(tilelang_cython_wrapper PROPERTIES
@@ -679,17 +622,21 @@ set_target_properties(tilelang_ascend_npu_exchange PROPERTIES
 
 # Install the extension into tilelang/lib inside the wheel
 install(TARGETS tilelang_cython_wrapper
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
+        LIBRARY DESTINATION tilelang/lib COMPONENT tilelang_python
+        RUNTIME DESTINATION tilelang/lib COMPONENT tilelang_python
+        ARCHIVE DESTINATION tilelang/lib COMPONENT tilelang_python)
 install(TARGETS tilelang_pto_wrapper
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
+        LIBRARY DESTINATION tilelang/lib COMPONENT tilelang_python
+        RUNTIME DESTINATION tilelang/lib COMPONENT tilelang_python
+        ARCHIVE DESTINATION tilelang/lib COMPONENT tilelang_python)
 install(TARGETS tilelang_ascend_npu_exchange
-        LIBRARY DESTINATION tilelang/lib
-        RUNTIME DESTINATION tilelang/lib
-        ARCHIVE DESTINATION tilelang/lib)
+        LIBRARY DESTINATION tilelang/lib COMPONENT tilelang_python
+        RUNTIME DESTINATION tilelang/lib COMPONENT tilelang_python
+        ARCHIVE DESTINATION tilelang/lib COMPONENT tilelang_python)
+
+endif() # TILELANG_BUILD_PYTHON_EXTENSIONS
+
+if(TILELANG_BUILD_COMPILER)
 
 # Copy libz3 into the build-tree library folder on platforms where the
 # PyPI Z3 finder does not already normalize a build-tree runtime copy.
@@ -775,9 +722,14 @@ if(DEFINED TILELANG_ACTIVE_BACKEND_PATCHELF_REMOVE AND PATCHELF_EXECUTABLE)
   endforeach()
 endif()
 
-install(
-  TARGETS ${TILELANG_OUTPUT_TARGETS}
-  LIBRARY DESTINATION tilelang/lib
-  RUNTIME DESTINATION tilelang/lib
-  ARCHIVE DESTINATION tilelang/lib
-)
+# TIRx installs its compiler, runtime, backend libraries and public headers in
+# its own component. Only the extra stubs belong to this component, under the
+# provider's wheel.install-dir (tvm_tirx). No library is owned by both wheels.
+if(TILELANG_ACTIVE_BACKEND_STUB_TARGETS)
+  install(TARGETS ${TILELANG_ACTIVE_BACKEND_STUB_TARGETS}
+    LIBRARY DESTINATION lib COMPONENT tilelang_compiler_extra
+    RUNTIME DESTINATION lib COMPONENT tilelang_compiler_extra
+    ARCHIVE DESTINATION lib COMPONENT tilelang_compiler_extra)
+endif()
+
+endif() # TILELANG_BUILD_COMPILER

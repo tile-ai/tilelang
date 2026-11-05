@@ -6,6 +6,7 @@
 
 #include "runtime.h"
 #include "support/check.h"
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
 #include "cuda/stubs/cuda.h"

@@ -6,10 +6,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from tvm import IRModule
-from tvm.target import Target
+from tvm_tirx.ir import IRModule
+from tvm_tirx.target import Target
 
-from tilelang import tvm
+import tvm_ffi
 from tilelang.instrumentation import run_codegen_with_instrumentation
 
 HostCodegenFunc = Callable[[IRModule, Target], IRModule]
@@ -24,7 +24,7 @@ def global_func_host_codegen(global_func_name: str) -> HostCodegenFunc:
             global_func_name,
             mod,
             target_host,
-            lambda: tvm.ffi.get_global_func(global_func_name)(mod, target_host),
+            lambda: tvm_ffi.get_global_func(global_func_name)(mod, target_host),
             role="host",
         )
 

@@ -1,9 +1,8 @@
 import tilelang.testing
 import tilelang.language as T
-from tvm.arith import Analyzer
-from tvm.ir.expr import Range
-from tvm.tirx.expr import Not, Or
-from tvm import tirx
+from tvm_tirx.sym import Analyzer, ConstraintContext, RangeConstraint
+from tvm_tirx.ir import Range
+from tvm_tirx.ir.prim import Not, Or, all as all_expr
 
 
 def implies(x, y):
@@ -14,7 +13,9 @@ def test_cloned_analyzer_outlives_source():
     x = T.Var("x", T.int32)
 
     analyzer = Analyzer()
-    analyzer.bind(x, Range.from_min_extent(0, 16))
+    constraints = ConstraintContext()
+    constraints.append(RangeConstraint(x, Range.from_min_extent(0, 16)))
+    analyzer.sync_constraint_context(constraints)
 
     # CopyFrom must keep the clone's Z3 handles valid on their own context
     # even after the source Analyzer is destroyed.
@@ -39,23 +40,23 @@ def test_hard_prove():
             raise AssertionError(f"Failed to prove: {expr}\nSMT-LIB2:\n{smtlib2}")
 
     def complex_expr_1():
-        return implies(tirx.all(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
+        return implies(all_expr(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
 
     check_expr(complex_expr_1())
 
     def complex_expr_2():
-        return implies(tirx.all(a < b, b < c, a * d < b * d), b * d < c * d)
+        return implies(all_expr(a < b, b < c, a * d < b * d), b * d < c * d)
 
     check_expr(complex_expr_2())
 
     def complex_expr_3():
-        return implies(tirx.all(a >= 0, a < 128), a // 128 == (a // 64 * 32 + a % 32 // 16 * 8) // 64)
+        return implies(all_expr(a >= 0, a < 128), a // 128 == (a // 64 * 32 + a % 32 // 16 * 8) // 64)
 
     check_expr(complex_expr_3())
 
     def complex_expr_4():
         return implies(
-            tirx.all(a >= 0, a < 128),
+            all_expr(a >= 0, a < 128),
             (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 + 16 - (a // 64 + a % 8 // 4) // 2 * 64) // 512
             == (a % 16 * 64 + a // 64 * 32 + a % 8 // 4 * 32 + (a % 32 // 16 + a % 2) % 2 * 8 - (a // 64 + a % 8 // 4) // 2 * 64) // 512,
         )
@@ -71,7 +72,7 @@ def test_smtlib2():
     c = T.Var("c", T.int32)
 
     def complex_expr_1():
-        return implies(tirx.all(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
+        return implies(all_expr(a > 0, b > 0, c > 0), ((b - a) // c) * c + a <= b)
 
     e = complex_expr_1()
     analyzer = Analyzer()
@@ -89,9 +90,11 @@ def test_bind():
     c = T.Var("c", T.int32)
 
     analyzer = Analyzer()
-    analyzer.bind(a, Range(1, 100000))
-    analyzer.bind(b, Range(1, 100000))
-    analyzer.bind(c, Range(1, 100000))
+    constraints = ConstraintContext()
+    constraints.append(RangeConstraint(a, Range(1, 100000)))
+    constraints.append(RangeConstraint(b, Range(1, 100000)))
+    constraints.append(RangeConstraint(c, Range(1, 100000)))
+    analyzer.sync_constraint_context(constraints)
 
     expr = ((b - a) // c) * c + a <= b
     smtlib2 = analyzer.get_smtlib2(expr)
@@ -105,6 +108,8 @@ def test_bind():
 
 def test_divmod():
     analyzer = Analyzer()
+    # TileLang preserves the legacy terminal Z3 fallback as an explicit policy.
+    analyzer.set_z3_default_fallback(True)
     a = T.Var("a", T.int32)
 
     assert not analyzer.can_prove(a % 2 % -2 - a % 2 == 0)

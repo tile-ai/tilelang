@@ -4,6 +4,10 @@ license: mit
 
 This is a Tilelang Implementation for the reproduced 1.58bit model from [1bitLLM/bitnet_b1_58-3B](https://huggingface.co/1bitLLM/bitnet_b1_58-3B). We replaced the original simulated Int8x3bit Quantized Inference Kernel with INT8xINT2 Kernel. We also evaluated the model's correctness and performance through `eval_correctness.py` and `benchmark_inference_latency.py`.
 
+The native TileLang kernel examples are [decode](kernel_benchmark/tilelang_bitnet_158_int8xint2_decode.py), [prefill](kernel_benchmark/tilelang_bitnet_158_int8xint2_prefill.py), and [INT8 GEMM](kernel_benchmark/tl_int8xint8.py). Run them in the environment containing the matching TileLang, TIRx provider, and FFI packages.
+
+The model/checkpoint and vLLM integration below is a separate BitBLAS reference workflow. Use its own environment and process; do not import its compiler stack into a native TileLang kernel process. The tables below retain their historical results and do not measure the native TIRx build or establish full-model integration with it.
+
 ## Make Checkpoints for vLLM
 
 We provide two scripts to make the checkpoints for vLLM. The first script is `generate_bitnet_model_native_format.sh`, which is used to make a checkpoint with fp16 uncompressed metaadta, the main difference with the original checkpoint is the `quant_config.json`, which allow vLLM to load the model and execute with a quant extension.
@@ -30,7 +34,7 @@ cd vllm_workspace
 # inference with the ckpt with fp16 uncompressed metadata
 python3 inference_with_native_format.py
 # inference with the ckpt with BitBLAS compressed metadata
-python3 inference_with_bitblas_format.py
+python3 inference_with_compress_format.py
 ```
 
 **Benchmark results of vLLM**

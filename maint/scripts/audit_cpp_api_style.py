@@ -70,7 +70,17 @@ QUALIFIER_TOKENS = {
 
 REGISTERED_TL_BUILTIN_RE = re.compile(r"\bTIR_DEFINE_TL_BUILTIN\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)")
 REGISTERED_LITERAL_TL_OP_RE = re.compile(r'\bTVM_REGISTER_OP\s*\(\s*"tl\.([A-Za-z_][A-Za-z0-9_]*)"\s*\)')
-OP_ACCESSOR_DECL_RE = re.compile(r"^(?:TVM_DLL\s+)?const\s+Op\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+REGISTERED_NATIVE_TL_OP_RE = re.compile(r'\bOpDef(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\(\s*"tl\.([A-Za-z_][A-Za-z0-9_]*)"\s*\)')
+# Recognize the finite literal-name loops used by native builtin registration.
+# General computed names still require manual review; an arbitrary "tl.*"
+# string or Op::Get lookup is not evidence of a registration.
+REGISTERED_NATIVE_TL_LOOP_RE = re.compile(
+    r"\bfor\s*\(\s*const\s+char\s*\*\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\{([^{}]*)\}\s*\)\s*\{"
+    r"\s*OpDef\s+[A-Za-z_][A-Za-z0-9_]*\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*;"
+)
+EXPORT_MACRO_RE = r"(?:TVM_DLL|TVM_TIRX_DLL|TVM_RUNTIME_DLL|TVM_FFI_DLL)"
+EXPORT_PREFIX_RE = rf"(?:{EXPORT_MACRO_RE}\s+)?"
+OP_ACCESSOR_DECL_RE = re.compile(rf"^{EXPORT_PREFIX_RE}const\s+Op\s*&\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 
 @dataclass(order=True)
@@ -237,12 +247,22 @@ def collect_registered_op_names(args: argparse.Namespace) -> set[str]:
     names: set[str] = set()
     for path in registry_scan_files(args):
         text = strip_block_comments(path.read_text(encoding="utf-8", errors="replace"))
+        statements = []
         for line in text.splitlines():
             stripped = strip_line_comment(line).strip()
             if not stripped or stripped.startswith("#define"):
                 continue
             names.update(REGISTERED_TL_BUILTIN_RE.findall(stripped))
             names.update(REGISTERED_LITERAL_TL_OP_RE.findall(stripped))
+            statements.append(stripped)
+        native_text = " ".join(statements)
+        names.update(REGISTERED_NATIVE_TL_OP_RE.findall(native_text))
+        for variable, literals, operand in REGISTERED_NATIVE_TL_LOOP_RE.findall(native_text):
+            if variable != operand:
+                continue
+            literal_names = [re.fullmatch(r'\s*"tl\.([A-Za-z_][A-Za-z0-9_]*)"\s*', item) for item in literals.split(",")]
+            if literal_names and all(literal_names):
+                names.update(match.group(1) for match in literal_names)
     return names
 
 
@@ -298,6 +318,7 @@ def parameter_name(param: str) -> str | None:
 def function_statement_name(statement: str) -> tuple[str, str] | None:
     compact = " ".join(statement.strip().split())
     compact = re.sub(r"^template\s*<[^>]+>\s*", "", compact)
+    compact = re.sub(rf"^{EXPORT_MACRO_RE}\s+", "", compact)
     if not compact or compact.startswith("#"):
         return None
     first_token = compact.split(maxsplit=1)[0]
@@ -368,7 +389,7 @@ def audit_functions(path: Path, lines: list[str], registered_op_names: set[str])
                 function_body_pending_until = -1
             continue
 
-        class_match = re.search(r"\b(class|struct)\s+([A-Za-z_][A-Za-z0-9_]*)\b", stripped)
+        class_match = re.search(rf"\b(class|struct)\s+{EXPORT_PREFIX_RE}([A-Za-z_][A-Za-z0-9_]*)\b", stripped)
         if class_match and "{" in stripped and not stripped.endswith(";"):
             default_access = "public" if class_match.group(1) == "struct" else "private"
             class_stack.append(ClassState(class_match.group(2), brace_depth, default_access))
@@ -385,6 +406,24 @@ def audit_functions(path: Path, lines: list[str], registered_op_names: set[str])
             brace_depth += stripped.count("{") - stripped.count("}")
             while class_stack and brace_depth <= class_stack[-1].brace_depth:
                 class_stack.pop()
+            continue
+
+        if stripped.startswith("}"):
+            # Do not prepend a previous scope's closing brace to the next
+            # declaration. It would hide export/registration prefixes.
+            brace_depth += stripped.count("{") - stripped.count("}")
+            while class_stack and brace_depth <= class_stack[-1].brace_depth:
+                class_stack.pop()
+            continue
+        if stripped.startswith("TVM_FFI_STATIC_INIT_BLOCK(") and "{" in stripped:
+            # This is an implementation body, like a function. OpDef local
+            # constructors inside it are not public function declarations.
+            function_body_depth = brace_depth + 1
+            function_body_pending_until = index
+            brace_depth += stripped.count("{") - stripped.count("}")
+            if brace_depth < function_body_depth:
+                function_body_depth = None
+                function_body_pending_until = -1
             continue
 
         statement, end_index = statement_starting_at(lines, index)
@@ -487,7 +526,7 @@ def audit_object_node_fields(path: Path, lines: list[str]) -> list[Finding]:
 
     for index, line in enumerate(lines):
         stripped = strip_line_comment(line).strip()
-        class_match = re.search(r"\b(class|struct)\s+([A-Za-z_][A-Za-z0-9_]*Node)\b", stripped)
+        class_match = re.search(rf"\b(class|struct)\s+{EXPORT_PREFIX_RE}([A-Za-z_][A-Za-z0-9_]*Node)\b", stripped)
         if class_match:
             default_access = "public" if class_match.group(1) == "struct" else "private"
             class_stack.append(ClassState(class_match.group(2), brace_depth, default_access))

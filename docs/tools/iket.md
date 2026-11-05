@@ -77,7 +77,7 @@ with iket.session(output_dir="/tmp/tilelang_iket"):
 The session must be active when `tilelang.compile(...)` generates CUDA source.
 Kernel construction inside the session is recommended because it gives the
 session a fresh event registry, but it is not required. Event metadata is
-embedded in TIR, so a `PrimFunc` constructed before entering the session still
+embedded in TIR, so a `Function` constructed before entering the session still
 retains the information needed during compilation.
 
 Running a program directly compiles and executes the instrumented kernel. To
@@ -173,7 +173,7 @@ with iket.session(
 The parameters control the following state:
 
 - `reset_events` clears frontend event allocation for kernels constructed
-  afterward. Metadata already embedded in a `PrimFunc` is unaffected.
+  afterward. Metadata already embedded in a `Function` is unaffected.
 - `override` permits IKET to replace an existing
   `tilelang_callback_cuda_postproc` callback while the outermost session is
   active.
@@ -340,7 +340,7 @@ Each frontend event call carries a canonical metadata token in TIR. The token
 contains the event name, kind, range identity, and payload schema. This has two
 important consequences:
 
-- A prebuilt `PrimFunc` retains its event metadata across session entry and
+- A prebuilt `Function` retains its event metadata across session entry and
   frontend registry resets.
 - Structurally similar kernels with different event names have different IR
   cache identities.

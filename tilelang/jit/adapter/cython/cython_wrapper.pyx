@@ -5,7 +5,7 @@ cimport cython
 import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
-from tvm import tirx
+from tvm_tirx import ir
 
 
 cdef class CythonKernelWrapper:
@@ -27,6 +27,7 @@ cdef class CythonKernelWrapper:
         list param_shapes              # Cache for parameter shapes as native Python lists
         object get_current_device
         object get_current_stream      # Raw-stream provider injected by the adapter (None = CUDA default)
+        object source_abi_plan
 
     def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None):
         # Initialize wrapper with kernel configuration
@@ -35,7 +36,7 @@ cdef class CythonKernelWrapper:
         self.lib = lib
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
-        self.param_dtypes = [param.torch_dtype() for param in params]
+        self.param_dtypes = [None if param.kind == "pointer" else param.torch_dtype() for param in params]
         # Convert TVM shape arrays to native Python lists
         self.param_shapes = []
         self.get_current_device = get_current_device if get_current_device is not None else torch.cuda.current_device
@@ -43,13 +44,17 @@ cdef class CythonKernelWrapper:
         for param in params:
             native_shape = []
             for dim in param.shape:
-                if isinstance(dim, tirx.IntImm):
+                if isinstance(dim, ir.IntImm):
                     native_shape.append(int(dim))
-                elif isinstance(dim, tirx.Var):
-                    native_shape.append(dim)  # Keep tirx.Var for dynamic dimensions
+                elif isinstance(dim, ir.Var):
+                    native_shape.append(dim)
                 else:
                     native_shape.append(dim)
             self.param_shapes.append(native_shape)
+
+    def set_source_abi_plan(self, plan):
+        self.source_abi_plan = plan
+        return self
 
     def set_dynamic_symbolic_map(self, dynamic_symbolic_map):
         self.dynamic_symbolic_map = dynamic_symbolic_map
@@ -206,16 +211,20 @@ cdef class CythonKernelWrapper:
                 tensor_list[i] = inputs[ins_idx]
                 ins_idx += 1
 
+        bindings = None
+        if self.source_abi_plan is not None:
+            bindings = self.source_abi_plan.bind_arguments(tensor_list, validate=not skip_tensor_validation)
+
         # Prepare output tensors
         for i in range(len(self.params)):
             if i in self.result_idx:
                 dtype = self.param_dtypes[i]
                 shape = []
                 # Now working with native Python list, no FFI calls needed
-                for s in self.param_shapes[i]:
-                    if isinstance(s, tirx.Var):
+                for s in (() if bindings is not None else self.param_shapes[i]):
+                    if isinstance(s, ir.Var):
                         for key in self.dynamic_symbolic_map:
-                            if str(s) == str(key):
+                            if s.same_as(key):
                                 ref_id, ref_tensor_idx, ref_shape_idx, stride_scale = self.dynamic_symbolic_map[key]
                                 if ref_id == 0:
                                     shape.append(tensor_list[ref_tensor_idx].shape[ref_shape_idx])
@@ -223,6 +232,8 @@ cdef class CythonKernelWrapper:
                                     shape.append(tensor_list[ref_tensor_idx].stride(ref_shape_idx) * stride_scale)
                     else:  # Already converted to Python int during initialization
                         shape.append(s)
+                if bindings is not None:
+                    shape = list(self.source_abi_plan.output_shape(i, bindings))
 
                 if device is None:
                     device = self._infer_output_device(inputs)
@@ -253,6 +264,9 @@ cdef class CythonKernelWrapper:
             torch.int16: ctypes.c_int16,
             torch.int32: ctypes.c_int32,
             torch.int64: ctypes.c_int64,
+            torch.uint8: ctypes.c_uint8,
+            torch.uint16: ctypes.c_uint16,
+            torch.uint32: ctypes.c_uint32,
             torch.uint64: ctypes.c_uint64,
             torch.bool: ctypes.c_bool,
         }
@@ -285,10 +299,9 @@ cdef class CythonKernelWrapper:
         # Add dynamic dimension values to kernel arguments
         for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():
             # Cascaded resolution across all carrier buffers to handle None
-            var_key = str(var)
-            sources = self.dynamic_symbolic_sources.get(var_key, [(ref_id, buffer_idx, shape_idx, stride_scale)])
+            sources = self.dynamic_symbolic_sources.get(var, [(ref_id, buffer_idx, shape_idx, stride_scale)])
             value = 0
-            for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in sources:
+            for src_ref_id, src_buf_idx, src_dim_idx, src_stride_scale in (() if bindings is not None else sources):
                 tensor = tensor_list[src_buf_idx]
                 if tensor is not None:
                     if src_ref_id == 0:
@@ -296,7 +309,20 @@ cdef class CythonKernelWrapper:
                     else:
                         value = tensor.stride(src_dim_idx) * src_stride_scale
                     break
-            call_args.append(ctypes.c_int64(value))
+            if bindings is not None:
+                resolved = bindings.try_evaluate(var)
+                # Retain the raw nullable ABI's zero value when no live tensor
+                # provides a symbol that is not needed to allocate an output.
+                value = 0 if resolved is None else resolved
+            scalar_ctype = {
+                "int8": ctypes.c_int8, "uint8": ctypes.c_uint8,
+                "int16": ctypes.c_int16, "uint16": ctypes.c_uint16,
+                "int32": ctypes.c_int32, "uint32": ctypes.c_uint32,
+                "int64": ctypes.c_int64, "uint64": ctypes.c_uint64,
+            }.get(str(var.ty.dtype))
+            if scalar_ctype is None:
+                raise TypeError(f"Unsupported dynamic symbol type: {var.ty}")
+            call_args.append(scalar_ctype(value))
 
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))

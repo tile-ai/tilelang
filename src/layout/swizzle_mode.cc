@@ -20,9 +20,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   // EnumObj subclasses have no __ffi_init__; allocate via init(false).
   refl::ObjectDef<SwizzleModeObj>(
       refl::init(false)); // NOLINT(bugprone-unused-raii)
-  refl::TypeAttrDef<SwizzleModeObj>().def(
-      refl::type_attr::kConvert,
-      &refl::details::FFIConvertFromAnyViewToObjectRef<SwizzleMode>);
+  refl::TypeAttrDef<SwizzleModeObj>().def_convert<SwizzleMode>();
   refl::EnumDef<SwizzleModeObj>("NONE");         // ordinal 0
   refl::EnumDef<SwizzleModeObj>("SWIZZLE_32B");  // ordinal 1
   refl::EnumDef<SwizzleModeObj>("SWIZZLE_64B");  // ordinal 2

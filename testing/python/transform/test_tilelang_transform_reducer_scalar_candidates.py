@@ -9,6 +9,9 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tilelang.analysis._visitor import tilelang_metadata
+from tilelang.testing.ir import collect_nodes
+import tvm_ffi
 
 
 def make_reducer(**kwargs):
@@ -20,6 +23,7 @@ def make_reducer(**kwargs):
 
 
 def infer_reducer(model="register-count", factory=make_reducer, **kwargs):
+    tl.cuda.register_backend()
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
     with target:
         mod = tvm.IRModule({"main": factory(**kwargs)})
@@ -30,12 +34,12 @@ def infer_reducer(model="register-count", factory=make_reducer, **kwargs):
             mod = tl.transform.LayoutInference()(mod)
     layouts = {}
 
-    def visit(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            for buffer, layout in node.annotations.get("layout_map", {}).items():
-                layouts[buffer.name] = layout
-
-    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+    for node in collect_nodes(mod["main"], tvm_ffi.Object):
+        metadata = tilelang_metadata(node)
+        if metadata is not None:
+            layout_map = metadata["value"] if metadata.get("key") == "layout_map" else metadata.get("layout_map", {})
+            for tensor, layout in layout_map.items():
+                layouts[tensor.name] = layout
     return layouts
 
 
@@ -111,14 +115,25 @@ def make_reducer_with_pinned_consumer(width=None):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("width", [None, 4])
 def test_failed_reducer_attempt_can_retry(width):
-    # The native column layout conflicts with the pinned consumer when
-    # finalize publishes its narrow result. Its other consumer leaves pending
-    # propagation work. A later attempt must still find scalar ownership, or
-    # the wide fallback if an explicit width prevents the scalar candidate.
+    # Native attempts conflict with the pinned consumer and leave pending
+    # propagation work. With no width hint, the reducer root retries scalar
+    # ownership. With width=4, the later scalar-copy rescue can still establish
+    # the same ownership: coalesced_width caps a feasible vector width, and
+    # does not require fully replicated publication after other roots fail.
     layouts = infer_reducer(factory=make_reducer_with_pinned_consumer, width=width)
-    assert int(layouts["result"].replicate_size) == (1 if width is None else 128)
-    if width is None:
-        assert int(layouts["acc"].combine_size) == 1
+    repeated = infer_reducer(factory=make_reducer_with_pinned_consumer, width=width)
+    analyzer = tvm.sym.Analyzer()
+    assert int(layouts["acc"].combine_size) == 1
+    for name in ("values", "acc", "result", "other", "out"):
+        layout = layouts[name]
+        assert int(layout.replicate_size) == 1
+        assert layout.is_equal(repeated[name])
+        points = ((i, j) for i in range(8) for j in range(128)) if name == "values" else ((j,) for j in range(128))
+        for point in points:
+            owner = [int(analyzer.simplify(value)) for value in layout.map_forward_thread(list(point))]
+            slot = [int(analyzer.simplify(value)) for value in layout.map_forward_index(list(point))]
+            assert owner == [point[-1]], (name, point, owner)
+            assert slot == ([point[0]] if name == "values" else [0]), (name, point, slot)
 
     kernel = tl.compile(
         make_reducer_with_pinned_consumer(width),

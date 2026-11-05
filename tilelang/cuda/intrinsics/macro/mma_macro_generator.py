@@ -1,14 +1,14 @@
 from __future__ import annotations
 from enum import IntEnum
-import tilelang.cuda.language as T
+import tilelang.language as T
 from typing import Literal
 from collections.abc import Callable
-from tvm import DataType
-from tvm import tirx
-from tvm.ir import Range
-from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
-from tilelang import tvm as tvm
-from tvm.runtime import convert
+from tvm_ffi import dtype as DataType
+from tilelang.language import _native as tirx
+from tvm_tirx.ir import Range
+from tilelang.language._native import PrimExpr, Buffer, Var, BufferRegion, BufferLoad
+from tvm_tirx.tirx import IndexMap
+from tvm_ffi import convert
 from ..layout.utils import (
     mma_store_index_map,
     mma_store_index_map_fp64,
@@ -72,6 +72,7 @@ class TensorCoreIntrinEmitter:
         "float4_e2m1fn": "e2m1",
         "custom[float4_e2m1_unpacked]8": "e2m1",
         "custom[tfloat32]": "tf32",
+        "custom[tfloat32]32": "tf32",
     }
 
     # Represent the thread binding in the form of (tx, warp_n, warp_m)
@@ -300,10 +301,10 @@ class TensorCoreIntrinEmitter:
             thread_binding = self.get_thread_binding()
             # legalize shared buffer to region
             A_region = self._legalize_to_buffer_region(A_shared_buf)
-            A_buf = A_region.buffer
-            A_base0 = A_region.region[-2].min
-            A_base1 = A_region.region[-1].min
-            A_other = [r.min for r in A_region.region[:-2]]
+            A_buf = A_region.source
+            A_base0 = A_region.region[-2].begin
+            A_base1 = A_region.region[-1].begin
+            A_other = [r.begin for r in A_region.region[:-2]]
 
             @T.macro
             def _warp_ld_a_fp64(
@@ -353,10 +354,10 @@ class TensorCoreIntrinEmitter:
 
         # legalize shared buffer to region
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
+        A_buf = A_region.source
+        A_base0 = A_region.region[-2].begin
+        A_base1 = A_region.region[-1].begin
+        A_other = [r.begin for r in A_region.region[:-2]]
         A_ext0 = A_region.region[-2].extent
         A_ext1 = A_region.region[-1].extent
         A_stride_last = A_buf.shape[-1]
@@ -415,10 +416,10 @@ class TensorCoreIntrinEmitter:
 
             # legalize shared buffer to region
             B_region = self._legalize_to_buffer_region(B_shared_buf)
-            B_buf = B_region.buffer
-            B_base0 = B_region.region[-2].min
-            B_base1 = B_region.region[-1].min
-            B_other = [r.min for r in B_region.region[:-2]]
+            B_buf = B_region.source
+            B_base0 = B_region.region[-2].begin
+            B_base1 = B_region.region[-1].begin
+            B_other = [r.begin for r in B_region.region[:-2]]
 
             @T.macro
             def _warp_ld_b_fp64(
@@ -452,10 +453,10 @@ class TensorCoreIntrinEmitter:
 
         # legalize shared buffer to region
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
+        B_buf = B_region.source
+        B_base0 = B_region.region[-2].begin
+        B_base1 = B_region.region[-1].begin
+        B_other = [r.begin for r in B_region.region[:-2]]
         B_ext0 = B_region.region[-2].extent
         B_ext1 = B_region.region[-1].extent
         B_stride_last = B_buf.shape[-1]
@@ -916,7 +917,7 @@ class TensorCoreIntrinEmitter:
             mins = [idx for idx in obj.indices]
             ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.buffer, ranges)
+            return BufferRegion(obj.source, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
 

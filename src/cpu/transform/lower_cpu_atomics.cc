@@ -1,296 +1,360 @@
 /*!
  * \file lower_cpu_atomics.cc
- * \brief Lower `tl.atomic_*_elem_op` intrinsics to plain serial
- *        read-modify-write for CPU targets.
+ * \brief Lower CPU atomics to ordered serial native tensor accesses.
  *
- * CPU execution is serial, so an atomic update degenerates to a plain
- * read-modify-write: `dst = dst <op> value`, with `return_prev` yielding the
- * value stored before the update. `memory_order` arguments are accepted and
- * ignored (there is no memory ordering semantics without concurrency); when
- * CPU gains thread-level parallelism this pass (together with
- * src/cpu/op/atomic_rmw.h for the tile-region path) is the single place to
- * switch to `__atomic_*` / `std::atomic_ref`.
- *
- * The pass runs on the CPU pipeline right after LowerTileOp (tile-region
- * atomics are already lowered to plain RMW loops by src/cpu/op/atomic_add.cc
- * and atomic_reduce.cc) and before LegalizeVectorizedLoop /
- * LegalizeSafeMemoryAccess / LowerAccessPtr, so every downstream pass and
- * both CPU codegens only ever see plain BufferLoad/BufferStore. This is also
- * why no CPU codegen changes are needed: the `c` codegen rejects unknown
- * intrinsics at compile time with an `Unresolved call` InternalError
- * (3rdparty/tvm/src/target/source/codegen_c.cc), and the `llvm` codegen
- * (vendored TVM) rejects them as unknown intrinsics.
+ * MarkCPUAtomics runs before tile-op lowering and keeps the CPU grid serial.
+ * This pass preserves call-argument evaluation, return_prev, conditional
+ * expressions and repeated while conditions while replacing scalar atomics
+ * with native Bind/TensorLoad/TensorStore. Memory-order flags have no further
+ * effect on this serial execution route.
  */
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include "op/builtin.h"
+
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/ir/prim/vector_expr.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <optional>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include "op/builtin.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+using ffi::Array;
+using ffi::Optional;
+using ffi::UnchangedOr;
+using namespace prim;
 
-/// Kind of an atomic read-modify-write elem op.
-enum class AtomicRMWKind { kAdd, kMax, kMin, kOr, kStore, kAddVec };
-
-struct AtomicRMWOp {
-  AtomicRMWKind kind;
-  int lanes;         ///< 1 for scalar ops, 2/4 for kAddVec
-  bool returns_prev; ///< `_ret` variants return the pre-update value
+enum class AtomicKind { kAdd, kMax, kMin, kOr, kStore, kAddVector };
+struct AtomicOp {
+  AtomicKind kind;
+  int lanes;
+  bool returns_previous;
 };
 
-/// Match all 12 side-effect atomic elem ops (everything but atomic_load).
-std::optional<AtomicRMWOp> MatchAtomicRMWOp(const ObjectRef &op) {
+std::optional<AtomicOp> MatchAtomic(const Expr &op) {
   if (op.same_as(atomic_add_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kAdd, 1, false};
+    return AtomicOp{AtomicKind::kAdd, 1, false};
   if (op.same_as(atomic_add_ret_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kAdd, 1, true};
+    return AtomicOp{AtomicKind::kAdd, 1, true};
   if (op.same_as(atomic_max_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kMax, 1, false};
+    return AtomicOp{AtomicKind::kMax, 1, false};
   if (op.same_as(atomic_max_ret_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kMax, 1, true};
+    return AtomicOp{AtomicKind::kMax, 1, true};
   if (op.same_as(atomic_min_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kMin, 1, false};
+    return AtomicOp{AtomicKind::kMin, 1, false};
   if (op.same_as(atomic_min_ret_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kMin, 1, true};
+    return AtomicOp{AtomicKind::kMin, 1, true};
   if (op.same_as(atomic_or_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kOr, 1, false};
+    return AtomicOp{AtomicKind::kOr, 1, false};
   if (op.same_as(atomic_store_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kStore, 1, false};
+    return AtomicOp{AtomicKind::kStore, 1, false};
   if (op.same_as(atomic_addx2_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kAddVec, 2, false};
+    return AtomicOp{AtomicKind::kAddVector, 2, false};
   if (op.same_as(atomic_addx4_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kAddVec, 4, false};
+    return AtomicOp{AtomicKind::kAddVector, 4, false};
   if (op.same_as(atomic_addx2_ret_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kAddVec, 2, true};
+    return AtomicOp{AtomicKind::kAddVector, 2, true};
   if (op.same_as(atomic_addx4_ret_elem_op()))
-    return AtomicRMWOp{AtomicRMWKind::kAddVec, 4, true};
+    return AtomicOp{AtomicKind::kAddVector, 4, true};
   return std::nullopt;
 }
 
-/// Buffer and element indices recovered from a `tl.access_ptr` argument.
+PrimExpr Combine(AtomicKind kind, const PrimExpr &previous,
+                 const PrimExpr &value) {
+  switch (kind) {
+  case AtomicKind::kAdd:
+  case AtomicKind::kAddVector:
+    return previous + value;
+  case AtomicKind::kMax:
+    return max(previous, value);
+  case AtomicKind::kMin:
+    return min(previous, value);
+  case AtomicKind::kOr:
+    return previous | value;
+  case AtomicKind::kStore:
+    return value;
+  }
+  TVM_FFI_THROW(InternalError) << "Unreachable CPU atomic kind";
+}
+
+class AtomicFinder : public tirx::StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
+  bool found = false;
+  Optional<ffi::VisitInterrupt> Visit_(const CallObj *call) final {
+    if (call->op.same_as(atomic_load_elem_op()) || MatchAtomic(call->op)) {
+      found = true;
+      return ffi::VisitInterrupt();
+    }
+    if (const auto *op = call->op.as<OpObj>();
+        op && op->name == "tl.annotation")
+      return std::nullopt;
+    return StmtExprVisitor::Visit_(call);
+  }
+};
+
 struct AtomicAccess {
-  Buffer buffer;
+  tirx::TensorVar tensor;
   Array<PrimExpr> indices;
 };
 
-PrimExpr MakeRMWCombine(AtomicRMWKind kind, const PrimExpr &old,
-                        const PrimExpr &value) {
-  switch (kind) {
-  case AtomicRMWKind::kAdd:
-  case AtomicRMWKind::kAddVec:
-    return old + value;
-  case AtomicRMWKind::kMax:
-    return Max(old, value);
-  case AtomicRMWKind::kMin:
-    return Min(old, value);
-  case AtomicRMWKind::kOr:
-    return old | value;
-  case AtomicRMWKind::kStore:
-    return value;
-  }
-  LOG(FATAL) << "Unreachable atomic RMW kind";
-  return PrimExpr();
-}
-
-PrimExpr CastIfNeeded(DataType dtype, const PrimExpr &value) {
-  return value->dtype == dtype ? value : Cast(dtype, value);
-}
-
-class CPUAtomicRewriter : public StmtExprMutator {
+class CPUAtomicRewriter : public tirx::StmtExprMutator {
 public:
-  CPUAtomicRewriter() = default;
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
 
-  static PrimFunc Rewrite(PrimFunc func) {
-    if (!func.defined() || !func->body.defined()) {
-      return func;
+  // Each statement owns its own evaluation prefix. Children cannot leak
+  // prefixes across a branch or into the enclosing statement's scope.
+  UnchangedOr<ffi::Any> Mutate(ffi::AnyView value, InplaceMode mode) final {
+    const auto *statement = value.as<StmtObj>();
+    if (statement == nullptr)
+      return StmtExprMutator::Mutate(value, mode);
+    auto outer = std::move(prefix_);
+    prefix_ = {};
+    auto result = StmtExprMutator::Mutate(value, mode);
+    Stmt rewritten = std::move(result).ValueOrUnchanged(value).cast<Stmt>();
+    if (!prefix_.empty()) {
+      prefix_.push_back(rewritten);
+      rewritten = SeqStmt(std::move(prefix_), statement->loc);
     }
-    CPUAtomicRewriter rewriter;
-    PrimFuncNode *n = func.CopyOnWrite();
-    n->body = rewriter(std::move(n->body));
-    return func;
+    prefix_ = std::move(outer);
+    return ffi::Any(rewritten);
   }
 
-  // A `return_prev` rewrite records (Bind of the old value, RMW store) pairs
-  // while visiting expressions; each statement is wrapped so that the pairs
-  // execute before the original statement:
-  //   SeqStmt(Bind(old, BufferLoad(dst, idx)),
-  //           BufferStore(dst, old <op> v, idx),
-  //           <stmt using old>)
-  // Bind has no body: the variable is visible in the subsequent statements
-  // of the enclosing SeqStmt, so the old value is read before the store.
-  Stmt VisitStmt(const Stmt &stmt) final {
-    std::vector<Stmt> outer_prefix = std::move(pending_prefix_);
-    pending_prefix_.clear();
-
-    Stmt result = StmtExprMutator::VisitStmt(stmt);
-
-    if (!pending_prefix_.empty()) {
-      pending_prefix_.push_back(result);
-      result = SeqStmt::Flatten(pending_prefix_);
-    }
-
-    pending_prefix_ = std::move(outer_prefix);
-    return result;
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    // Statement position: the result (if any) is discarded, so `_ret`
-    // variants lower to the same plain RMW as their base op.
-    if (const auto *call = op->value.as<CallNode>()) {
-      if (std::optional<AtomicRMWOp> rmw = MatchAtomicRMWOp(call->op)) {
-        return LowerStmtAtomic(*call, *rmw);
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    if (const auto *call = op->value.as<CallObj>()) {
+      if (auto atomic = MatchAtomic(call->op)) {
+        LowerAtomic(*call, *atomic, false);
+        return Evaluate(0, op->loc);
       }
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return StmtExprMutator::Mutate_(op, mode);
   }
 
-  PrimExpr VisitExpr_(const CallNode *op) final {
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                InplaceMode mode) final {
+    // Freeze each read at its original evaluation point. Otherwise a later
+    // return_prev prefix could update memory before an earlier sibling read.
+    auto indices = MutateIndices(op->indices, mode);
+    return Capture(TensorLoad(op->source, indices, op->loc), "cpu_load")
+        .as_or_throw<PrimExpr>();
+  }
+
+  UnchangedOr<PrimExpr> Mutate_(const prim::LetObj *op,
+                                InplaceMode mode) final {
+    auto value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
+    prefix_.push_back(Bind(op->var, value, op->loc));
+    return Mutate(op->body, mode).ValueOrUnchanged(op->body);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const WhileObj *op, InplaceMode mode) final {
+    auto outer = std::move(prefix_);
+    prefix_ = {};
+    PrimExpr condition =
+        Mutate(op->condition, mode).ValueOrUnchanged(op->condition);
+    auto condition_prefix = std::move(prefix_);
+    prefix_ = {};
+    SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    prefix_ = std::move(outer);
+    if (condition_prefix.empty())
+      return While(condition, body, op->loc);
+    condition_prefix.push_back(
+        If(!condition, Break(op->loc), std::nullopt, op->loc));
+    condition_prefix.push_back(body);
+    return While(MakeConst(PrimType::Bool(), true),
+                 SeqStmt(std::move(condition_prefix), op->loc), op->loc);
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
     if (op->op.same_as(atomic_load_elem_op())) {
-      // Pure read on a serial target.
-      AtomicAccess access = ParseAtomicAccessPtr(op->args[0], "atomic_load");
-      return BufferLoad(access.buffer, MutateIndices(access.indices));
+      auto access = ParseAccess(op->args[0], mode);
+      return Capture(TensorLoad(access.tensor, access.indices, op->loc),
+                     "atomic_load");
     }
-    if (std::optional<AtomicRMWOp> rmw = MatchAtomicRMWOp(op->op)) {
-      ICHECK(rmw->returns_prev)
-          << "CPU atomic lowering: " << op->op
-          << " has no return value and cannot appear in expression position; "
-             "use it as a standalone statement.";
-      ICHECK(rmw->lanes == 1)
-          << "CPU atomic lowering: atomic_addx" << rmw->lanes
-          << " with return_prev=True is not supported on CPU (the previous "
-             "vector value cannot be represented without TIR vector "
-             "construction); drop return_prev or use scalar atomic_add.";
-      return RewriteRetAtomic(*op, *rmw);
+    if (auto atomic = MatchAtomic(op->op)) {
+      TVM_FFI_CHECK(atomic->returns_previous, ValueError)
+          << "CPU atomic lowering: a non-returning atomic must be a standalone "
+             "statement";
+      TVM_FFI_CHECK_EQ(atomic->lanes, 1, ValueError)
+          << "CPU atomic lowering: atomic_addx" << atomic->lanes
+          << " with return_prev=True is not supported on CPU";
+      return LowerAtomic(*op, *atomic, true).value();
     }
-    return StmtExprMutator::VisitExpr_(op);
+    if (op->op.same_as(Op::Get("prim.if_then_else"))) {
+      PrimExpr condition = Mutate(op->args[0], mode)
+                               .ValueOrUnchanged(op->args[0])
+                               .as_or_throw<PrimExpr>();
+      auto true_branch = CaptureBranch(op->args[1], mode);
+      auto false_branch = CaptureBranch(op->args[2], mode);
+      if (true_branch.first.empty() && false_branch.first.empty()) {
+        return Call(op->ty, op->op,
+                    {condition, true_branch.second, false_branch.second},
+                    op->attrs, op->ty_args, op->loc);
+      }
+      tirx::TensorType slot_type({}, op->ty.as_or_throw<PrimType>(),
+                                 runtime::MemoryScope("local"));
+      tirx::TensorVar slot("atomic_branch_" + std::to_string(counter_++),
+                           slot_type, op->loc);
+      prefix_.push_back(Bind(slot,
+                             Call(slot_type, tirx::alloc_tensor_op(), {}, {},
+                                  {slot_type}, op->loc),
+                             op->loc));
+      true_branch.first.push_back(TensorStore(
+          slot, {}, true_branch.second.as_or_throw<PrimExpr>(), op->loc));
+      false_branch.first.push_back(TensorStore(
+          slot, {}, false_branch.second.as_or_throw<PrimExpr>(), op->loc));
+      prefix_.push_back(
+          If(condition, SeqStmt(std::move(true_branch.first), op->loc),
+             SeqStmt(std::move(false_branch.first), op->loc), op->loc));
+      return TensorLoad(slot, {}, op->loc);
+    }
+    if (const auto *primitive = op->op.as<OpObj>()) {
+      if (primitive->name == "tl.annotation")
+        return ffi::Unchanged();
+      if (primitive->name == "tl.access_ptr" ||
+          primitive->name == "tirx.address_of") {
+        // A TensorLoad inside an address operator denotes an address, not a
+        // read.
+        if (const auto *load = op->args[0].as<TensorLoadObj>()) {
+          Array<Expr> arguments;
+          arguments.push_back(TensorLoad(
+              load->source, MutateIndices(load->indices, mode), load->loc));
+          for (size_t i = 1; i < op->args.size(); ++i)
+            arguments.push_back(
+                Mutate(op->args[i], mode).ValueOrUnchanged(op->args[i]));
+          return Call(op->ty, op->op, arguments, op->attrs, op->ty_args,
+                      op->loc);
+        }
+      }
+    }
+    Expr rewritten = StmtExprMutator::Mutate_(op, mode).ValueOrUnchanged(
+        ffi::GetRef<Expr>(op));
+    const auto *call = rewritten.as<CallObj>();
+    if (call && call->ty.as<PrimTypeObj>() &&
+        !call->ty.as_or_throw<PrimType>().IsVoid()) {
+      auto primitive = call->op.as<Op>();
+      static const auto effects = Op::GetAttrMap<int>("TCallEffectKind");
+      if (!primitive.has_value() || !effects.count(primitive.value()) ||
+          effects[primitive.value()] > static_cast<int>(CallEffectKind::kPure))
+        return Capture(rewritten, "cpu_call");
+    }
+    return rewritten;
   }
 
 private:
-  AtomicAccess ParseAtomicAccessPtr(const PrimExpr &ptr, const char *role) {
-    const auto *call = ptr.as<CallNode>();
-    ICHECK(call != nullptr && call->op.same_as(tl::access_ptr()))
-        << "CPU atomic lowering expects the " << role
-        << " argument to be a tl.access_ptr call, but got: " << ptr;
-    const auto *load = call->args[0].as<BufferLoadNode>();
-    ICHECK(load != nullptr)
-        << "CPU atomic lowering expects the tl.access_ptr base of " << role
-        << " to be a BufferLoad, but got: " << call->args[0];
-    return {load->buffer, load->indices};
+  Expr Capture(Expr value, const std::string &name) {
+    Var variable(name + "_" + std::to_string(counter_++), value->ty,
+                 value->loc);
+    prefix_.push_back(Bind(variable, std::move(value), variable->loc));
+    return variable;
   }
 
-  Array<PrimExpr> MutateIndices(const Array<PrimExpr> &indices) {
-    Array<PrimExpr> mutated;
-    mutated.reserve(indices.size());
-    for (const PrimExpr &index : indices) {
-      mutated.push_back(VisitExpr(index));
-    }
-    return mutated;
+  std::pair<Array<Stmt>, Expr> CaptureBranch(const Expr &expression,
+                                             InplaceMode mode) {
+    auto outer = std::move(prefix_);
+    prefix_ = {};
+    Expr result = Mutate(expression, mode).ValueOrUnchanged(expression);
+    auto branch = std::move(prefix_);
+    prefix_ = std::move(outer);
+    return {std::move(branch), std::move(result)};
   }
 
-  // Indices of the k-th element of a vectorized (x2/x4) access: the vector
-  // occupies consecutive elements along the last index (a slice `b[i, j:j+2]`
-  // reaches here as its scalar minimum `j`, so plain `+ k` is the expansion).
-  Array<PrimExpr> ElemIndices(Array<PrimExpr> indices, int k) {
-    if (k == 0) {
-      return indices;
-    }
-    PrimExpr last = indices.back();
-    if (const auto *ramp = last.as<RampNode>()) {
+  Array<PrimExpr> MutateIndices(const Array<PrimExpr> &indices,
+                                InplaceMode mode) {
+    Array<PrimExpr> result;
+    for (const auto &index : indices)
+      result.push_back(Mutate(index, mode).ValueOrUnchanged(index));
+    return result;
+  }
+
+  AtomicAccess ParseAccess(const Expr &pointer, InplaceMode mode) {
+    const auto *call = pointer.as<CallObj>();
+    TVM_FFI_CHECK(call && call->op.same_as(access_ptr()) && !call->args.empty(),
+                  ValueError)
+        << "CPU atomic lowering expects a typed tl.access_ptr";
+    const auto *load = call->args[0].as<TensorLoadObj>();
+    TVM_FFI_CHECK(load != nullptr, ValueError)
+        << "CPU atomic lowering expects a TensorLoad address operand";
+    return {load->source.as_or_throw<tirx::TensorVar>(),
+            MutateIndices(load->indices, mode)};
+  }
+
+  Array<PrimExpr> ElementIndices(Array<PrimExpr> indices, int lane) {
+    TVM_FFI_CHECK(!indices.empty(), ValueError)
+        << "A vector atomic needs an element axis";
+    auto last = indices.back();
+    if (const auto *ramp = last.as<prim::RampObj>())
       indices.Set(indices.size() - 1,
-                  ramp->base + make_const(ramp->base->dtype, k) * ramp->stride);
-    } else {
-      indices.Set(indices.size() - 1, last + make_const(last->dtype, k));
-    }
+                  ramp->base + MakeConst(ramp->base.ty(), lane) * ramp->stride);
+    else if (lane != 0)
+      indices.Set(indices.size() - 1, last + MakeConst(last.ty(), lane));
     return indices;
   }
 
-  // Expression position `_ret`: bind the pre-update value to a fresh var
-  // (executed first), perform the RMW store, and evaluate to the old value.
-  PrimExpr RewriteRetAtomic(const CallNode &call, const AtomicRMWOp &rmw) {
-    AtomicAccess dst = ParseAtomicAccessPtr(call.args[0], "atomic dst");
-    Array<PrimExpr> indices = MutateIndices(dst.indices);
-    PrimExpr value = CastIfNeeded(dst.buffer->dtype, VisitExpr(call.args[1]));
-
-    BufferLoad old_load(dst.buffer, indices);
-    Var old_var("atomic_old_" + std::to_string(atomic_old_counter_++),
-                old_load->dtype);
-    pending_prefix_.push_back(Bind(old_var, old_load));
-    pending_prefix_.push_back(BufferStore(
-        dst.buffer, MakeRMWCombine(rmw.kind, old_var, value), indices));
-    return old_var;
-  }
-
-  Stmt LowerStmtAtomic(const CallNode &call, const AtomicRMWOp &rmw) {
-    AtomicAccess dst = ParseAtomicAccessPtr(call.args[0], "atomic dst");
-
-    if (rmw.kind == AtomicRMWKind::kAddVec) {
-      // args = (dst access_ptr, value access_ptr): expand to per-element RMW.
-      AtomicAccess src = ParseAtomicAccessPtr(call.args[1], "atomic_addx");
-      std::vector<Stmt> stores;
-      for (int k = 0; k < rmw.lanes; ++k) {
-        Array<PrimExpr> dst_indices =
-            MutateIndices(ElemIndices(dst.indices, k));
-        Array<PrimExpr> src_indices =
-            MutateIndices(ElemIndices(src.indices, k));
-        PrimExpr elem = CastIfNeeded(dst.buffer->dtype,
-                                     BufferLoad(src.buffer, src_indices));
-        stores.push_back(BufferStore(dst.buffer,
-                                     BufferLoad(dst.buffer, dst_indices) + elem,
-                                     dst_indices));
+  Optional<Expr> LowerAtomic(const CallObj &call, const AtomicOp &op,
+                             bool result_needed) {
+    AtomicAccess destination =
+        ParseAccess(call.args[0], InplaceMode::kDisallow);
+    if (op.kind == AtomicKind::kAddVector) {
+      AtomicAccess source = ParseAccess(call.args[1], InplaceMode::kDisallow);
+      for (int lane = 0; lane < op.lanes; ++lane) {
+        auto dst_indices = ElementIndices(destination.indices, lane);
+        auto src_indices = ElementIndices(source.indices, lane);
+        PrimExpr value = cast(TensorLoad(source.tensor, src_indices),
+                              destination.tensor.dtype());
+        prefix_.push_back(TensorStore(
+            destination.tensor, dst_indices,
+            TensorLoad(destination.tensor, dst_indices) + value, call.loc));
       }
-      return SeqStmt::Flatten(stores);
+      return std::nullopt;
     }
-
-    // Scalar forms: args = (ptr, value[, memory_order]); the optional
-    // trailing memory_order id is intentionally ignored on a serial target.
-    Array<PrimExpr> indices = MutateIndices(dst.indices);
-    PrimExpr value = CastIfNeeded(dst.buffer->dtype, VisitExpr(call.args[1]));
-    return BufferStore(
-        dst.buffer,
-        MakeRMWCombine(rmw.kind, BufferLoad(dst.buffer, indices), value),
-        indices);
+    Expr argument = Mutate(call.args[1]).ValueOrUnchanged(call.args[1]);
+    PrimExpr value =
+        cast(argument.as_or_throw<PrimExpr>(), destination.tensor.dtype());
+    if (op.kind == AtomicKind::kStore) {
+      prefix_.push_back(TensorStore(destination.tensor, destination.indices,
+                                    value, call.loc));
+      return std::nullopt;
+    }
+    PrimExpr previous =
+        Capture(TensorLoad(destination.tensor, destination.indices, call.loc),
+                "atomic_old")
+            .as_or_throw<PrimExpr>();
+    prefix_.push_back(TensorStore(destination.tensor, destination.indices,
+                                  Combine(op.kind, previous, value), call.loc));
+    return result_needed ? Optional<Expr>(previous) : std::nullopt;
   }
 
-  int atomic_old_counter_ = 0;
-  // Bind/Store prefix statements recorded by `return_prev` rewrites, spliced
-  // before the enclosing statement by VisitStmt.
-  std::vector<Stmt> pending_prefix_;
+  Array<Stmt> prefix_;
+  int counter_ = 0;
 };
-
 } // namespace
 
-namespace transform {
-
 tvm::transform::Pass LowerCPUAtomics() {
-  auto pass_func = [](PrimFunc f, const IRModule &m,
-                      const tvm::transform::PassContext &ctx) {
-    return CPUAtomicRewriter::Rewrite(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    auto finder = ffi::make_object<AtomicFinder>();
+    finder->Visit(function->body);
+    if (!finder->found)
+      return function;
+    auto rewriter = ffi::make_object<CPUAtomicRewriter>();
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(function->body).ValueOrUnchanged(function->body);
+    return function;
   };
-  return tvm::tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                                  "tl.LowerCPUAtomics", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LowerCPUAtomics");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cpu.transform.LowerCPUAtomics", LowerCPUAtomics);
+  ffi::reflection::GlobalDef().def("tl.cpu.transform.LowerCPUAtomics",
+                                   LowerCPUAtomics);
 }
-
-} // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

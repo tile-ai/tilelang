@@ -1,173 +1,155 @@
 /*!
  * \file mark_scalar_dcache_bypass.cc
- * \brief Rewrite scalar BufferLoad/BufferStore on global buffers that have
- * writes (either scalar BufferStore or MTE copy) into explicit
- * ascend_read/write_gm_bypass_dcache Call nodes.
- *
- * Pure-read global buffers keep their normal BufferLoad (dcache path).
+ * \brief Bypass scalar GM dcache for physical storage that is written.
  */
-
+#include "ascend/op/builtin.h"
+#include "ir/alias_analysis.h"
+#include "native_vf_utils.h"
+#include "op/builtin.h"
+#include "op/native_intrinsic.h"
+#include "op/native_utils.h"
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
+#include <unordered_set>
 
-#include "../../../3rdparty/tvm/src/tirx/transform/ir_utils.h"
-#include "ascend/op/builtin.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+using namespace ffi;
+using namespace tirx;
 
-/*!
- * \brief Check whether a Var points to a global-memory buffer.
- */
-bool IsGlobalBufferVar(const Var &var) {
-  std::string scope = GetPtrStorageScope(var);
-  return scope == "global";
+bool IsGlobal(const Expr &expression) {
+  if (const auto *tensor = expression->ty.as<TensorTypeObj>())
+    return tensor->scope == runtime::MemoryScope::Global();
+  if (const auto *pointer = expression->ty.as<PtrTypeObj>())
+    return pointer->scope == runtime::MemoryScope::Global();
+  return false;
 }
-
-/*!
- * \brief Collect the set of global-buffer data Vars that have writes.
- *
- * Walks the PrimFunc body and records:
- *  - BufferStore to a global buffer
- *  - MTE copy ops (ascend_copy_ubuf_to_gm / ascend_copy_matrix_cc_to_gm)
- *    whose destination is a global buffer.
- */
-std::unordered_set<const VarNode *>
-CollectGlobalWriteBufferVars(const PrimFunc &f) {
-  std::unordered_set<const VarNode *> write_vars;
-
-  PostOrderVisit(f->body, [&](const ObjectRef &n) {
-    if (const auto *store = n.as<BufferStoreNode>()) {
-      if (IsGlobalBufferVar(store->buffer->data)) {
-        write_vars.insert(store->buffer->data.get());
-      }
-    }
-    if (const auto *call = n.as<CallNode>()) {
-      if (!call->op.same_as(ascend_copy_ubuf_to_gm()) &&
-          !call->op.same_as(ascend_copy_matrix_cc_to_gm())) {
-        return;
-      }
-      // First arg is tvm_access_ptr(TypeAnnotation, data_var, offset, ...)
-      if (call->args.empty())
-        return;
-      const auto *access_ptr = call->args[0].as<CallNode>();
-      if (!access_ptr || !access_ptr->op.same_as(builtin::tvm_access_ptr())) {
-        return;
-      }
-      if (access_ptr->args.size() < 2)
-        return;
-      const auto *data_var = access_ptr->args[1].as<VarNode>();
-      if (!data_var)
-        return;
-      if (IsGlobalBufferVar(GetRef<Var>(data_var))) {
-        write_vars.insert(data_var);
-      }
-    }
-  });
-
-  return write_vars;
-}
-
-} // namespace
 
 class ScalarDcacheBypassRewriter : public StmtExprMutator {
 public:
-  explicit ScalarDcacheBypassRewriter(
-      std::unordered_set<const VarNode *> bypass_vars)
-      : bypass_vars_(std::move(bypass_vars)) {}
+  using StmtExprMutator::Mutate_;
+  explicit ScalarDcacheBypassRewriter(const tirx::Function &function)
+      : roots_(function) {
+    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
+      if (const auto *store = object.as<TensorStoreObj>())
+        RecordWrite(store->dest);
+      if (const auto *call = object.as<CallObj>()) {
+        if (call->op.same_as(ascend_copy_ubuf_to_gm()) ||
+            call->op.same_as(ascend_copy_matrix_cc_to_gm()) ||
+            call->op.same_as(ascend_write_gm_bypass_dcache())) {
+          auto operands = NativeIntrinsicOperands(call);
+          if (!operands.empty())
+            RecordWrite(operands[0]);
+        }
+      }
+    });
+  }
 
-  static PrimFunc Rewrite(PrimFunc f) {
-    auto write_vars = CollectGlobalWriteBufferVars(f);
-    if (write_vars.empty()) {
-      // No global buffers have writes → nothing to do.
-      return f;
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    // Skipping the whole VF also handles nested scopes without leaking a
+    // boolean state into later siblings. VF memory has its dedicated path.
+    if (GetAscendVFKind(op) != AscendVFKind::kNone)
+      return Unchanged();
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                InplaceMode mode) final {
+    auto original = GetRef<PrimExpr>(op);
+    auto load = StmtExprMutator::Mutate_(op, mode)
+                    .ValueOrUnchanged(original)
+                    .as_or_throw<TensorLoad>();
+    if (load->indices.size() == 1 && load.ty().lanes() == 1 &&
+        ShouldBypass(load->source)) {
+      return Call(load->ty, ascend_read_gm_bypass_dcache(), {Address(load)}, {},
+                  {}, load->loc)
+          .as_or_throw<PrimExpr>();
     }
-    ScalarDcacheBypassRewriter rewriter(std::move(write_vars));
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
+    return load;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op, InplaceMode mode) final {
+    auto original = GetRef<Stmt>(op);
+    auto store = StmtExprMutator::Mutate_(op, mode)
+                     .ValueOrUnchanged(original)
+                     .as_or_throw<TensorStore>();
+    if (store->indices.size() == 1 && store->value.ty().lanes() == 1 &&
+        ShouldBypass(store->dest)) {
+      TensorLoad destination(store->dest, store->indices, store->loc);
+      return Evaluate(Call(PrimType::Void(), ascend_write_gm_bypass_dcache(),
+                           {Address(destination), store->value}, {}, {},
+                           store->loc),
+                      store->loc);
+    }
+    return store;
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+    if ((op->op.same_as(tirx::address_of_op()) ||
+         op->op.same_as(tl::access_ptr())) &&
+        !op->args.empty()) {
+      if (const auto *load = op->args[0].as<TensorLoadObj>()) {
+        // An address marker does not read the tensor. Its index expressions
+        // still execute normally, so nested scalar loads in indices do rewrite.
+        auto args = op->args;
+        auto source = Mutate(load->source, mode).ValueOrUnchanged(load->source);
+        Array<PrimExpr> indices;
+        for (const auto &index : load->indices)
+          indices.push_back(Mutate(index, mode).ValueOrUnchanged(index));
+        args.Set(0, TensorLoad(source, indices, load->loc));
+        for (size_t i = 1; i < args.size(); ++i)
+          args.Set(i, Mutate(args[i], mode).ValueOrUnchanged(args[i]));
+        return Call(op->ty, op->op, args, op->attrs, op->ty_args, op->loc);
+      }
+    }
+    return StmtExprMutator::Mutate_(op, mode);
   }
 
 private:
-  std::unordered_set<const VarNode *> bypass_vars_;
-  bool inside_vf_{false};
-
-  bool ShouldBypass(const Buffer &buffer) const {
-    if (inside_vf_)
+  void RecordWrite(const Expr &expression) {
+    if (!IsGlobal(expression))
+      return;
+    auto root = roots_.Root(expression);
+    if (root)
+      writable_.insert(root.value().get());
+    else
+      unknown_write_ = true;
+  }
+  bool ShouldBypass(const Expr &expression) const {
+    if (!IsGlobal(expression))
       return false;
-    if (!IsGlobalBufferVar(buffer->data))
-      return false;
-    return bypass_vars_.count(buffer->data.get()) > 0;
+    auto root = roots_.Root(expression);
+    return unknown_write_ || (root ? writable_.count(root.value().get()) != 0
+                                   : !writable_.empty());
   }
-
-  PrimExpr MakeAddressOf(PrimExpr load) const {
-    return Call(DataType::Handle(), tirx::builtin::address_of(), {load});
+  static Expr Address(const TensorLoad &load) {
+    auto tensor_type = load->source->ty.as_or_throw<TensorType>();
+    return Call(tensor_type->DataPtrType(), tirx::address_of_op(), {load}, {},
+                {}, load->loc);
   }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    bool is_vf = (op->name_hint == "SIMT_VF" || op->name_hint == "SIMD_VF");
-    if (is_vf)
-      inside_vf_ = true;
-    Stmt ret = StmtExprMutator::VisitStmt_(op);
-    if (is_vf)
-      inside_vf_ = false;
-    return ret;
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    if (op->indices.size() == 1 && op->dtype.is_scalar() &&
-        ShouldBypass(op->buffer)) {
-      ICHECK(!op->predicate.defined())
-          << "ScalarDcacheBypass: predicated buffer load not implemented";
-      // Replace with: ascend_read_gm_bypass_dcache(address_of(BufferLoad))
-      return Call(op->dtype, ascend_read_gm_bypass_dcache(),
-                  {MakeAddressOf(GetRef<PrimExpr>(op))});
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    if (op->indices.size() == 1 && op->buffer->dtype.is_scalar() &&
-        ShouldBypass(op->buffer)) {
-      ICHECK(!op->predicate.defined())
-          << "ScalarDcacheBypass: predicated buffer store not implemented";
-      ICHECK(op->value.dtype().is_scalar())
-          << "ScalarDcacheBypass: vector-valued buffer store not implemented";
-      // Replace with:
-      //   Evaluate(ascend_write_gm_bypass_dcache(address_of(BufferLoad),
-      //                                           value))
-      auto addr =
-          MakeAddressOf(BufferLoad(op->buffer, op->indices, op->predicate));
-      auto call = Call(DataType::Void(), ascend_write_gm_bypass_dcache(),
-                       {addr, VisitExpr(op->value)});
-      return Evaluate(call);
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
+  PhysicalRootAnalysis roots_;
+  std::unordered_set<const VarObj *> writable_;
+  bool unknown_write_{false};
 };
-
-using namespace tirx::transform;
+} // namespace
 
 tvm::transform::Pass MarkScalarDcacheBypass() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return ScalarDcacheBypassRewriter::Rewrite(f);
+  auto pass = [](tirx::Function function, const IRModule &,
+                 const tvm::transform::PassContext &) {
+    if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) {
+      auto rewriter = ffi::make_object<ScalarDcacheBypassRewriter>(function);
+      function.CopyOnWrite()->body =
+          rewriter->Mutate(function->body).ValueOrUnchanged(function->body);
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MarkScalarDcacheBypass", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.MarkScalarDcacheBypass");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MarkScalarDcacheBypass",
-                        MarkScalarDcacheBypass);
+  ffi::reflection::GlobalDef().def("tl.transform.MarkScalarDcacheBypass",
+                                   MarkScalarDcacheBypass);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

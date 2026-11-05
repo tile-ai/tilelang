@@ -1,188 +1,168 @@
 #include "codegen_cuda.h"
-#include "config.h"
-#include "op/builtin.h"
-#include "runtime/pack_args.h"
-#include "runtime/thread_storage_scope.h"
-#include "support/check.h"
-#include "target/cuda/cuda_fallback_module.h"
-#include "transform/common/attr.h"
-#include <tvm/ir/cast.h>
+
 #include <tvm/ir/transform.h>
 
-namespace tvm {
-namespace codegen {
+#include <bit>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
+#include "backend/cuda/codegen/cuda_fallback_module.h"
+#include "codegen/build_common.h"
+#include "support/check.h"
+
+namespace tvm::codegen {
 
 using namespace ffi;
 
-static std::string GetDeviceGlobalSymbol(const GlobalVar &gvar,
-                                         const tirx::PrimFunc &f) {
-  if (auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
-    return static_cast<std::string>(global_symbol.value());
-  }
-  return gvar->name_hint;
-}
+namespace {
 
-static void ValidateUniqueDeviceGlobalSymbols(const IRModule &mod) {
-  std::unordered_map<std::string, std::string> symbol_to_gvar;
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
-        << "Can only lower IR Module with PrimFuncs";
-    auto gvar = Downcast<GlobalVar>(kv.first);
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-    std::string global_symbol = GetDeviceGlobalSymbol(gvar, f);
-
-    auto [it, inserted] =
-        symbol_to_gvar.emplace(global_symbol, gvar->name_hint);
-    ICHECK(inserted)
-        << "Duplicate CUDA kernel global_symbol `" << global_symbol
-        << "` found on PrimFuncs `" << it->second << "` and `"
+void ValidateDeviceFunctions(const IRModule &mod) {
+  std::unordered_map<std::string, std::string> symbols;
+  for (const auto &[gvar, base] : mod->functions) {
+    const auto func = base.as_or_throw<tirx::Function>();
+    auto symbol = func->GetAttr(tvm::attr::kGlobalSymbol);
+    TVM_FFI_CHECK(symbol.has_value(), ValueError)
+        << "TileLang CUDA kernel " << gvar->name_hint
+        << " requires global_symbol";
+    auto [previous, inserted] =
+        symbols.emplace(symbol.value(), gvar->name_hint);
+    TVM_FFI_CHECK(inserted, ValueError)
+        << "Duplicate CUDA kernel global_symbol `" << symbol.value()
+        << "` on functions `" << previous->second << "` and `"
         << gvar->name_hint
-        << "`. T.CUDASourceCodeKernel emits raw CUDA source without "
-           "renaming, so CUDA entry names must be unique within the compiled "
-           "module.";
+        << "`; raw CUDA source entry names cannot be renamed";
+    TVM_FFI_CHECK(
+        func->GetAttr(tvm::attr::kCallingConv, CallingConv::kDefault).value() ==
+            CallingConv::kDeviceKernelLaunch,
+        ValueError)
+        << "TileLang CUDA build requires device kernels after host/device "
+           "splitting";
   }
 }
 
-static Map<String, runtime::FunctionInfo> ExtractFuncInfo(const IRModule &mod) {
-  Map<String, runtime::FunctionInfo> fmap;
+std::string EmitTileLangCUDA(const IRModule &mod, const Target &target) {
+  With<Target> target_scope(target);
+  ValidateDeviceFunctions(mod);
+  if (auto callback =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_validate"))
+    (*callback)(mod);
+  CodeGenTileLangCUDA codegen;
+  codegen.Init(false);
+  codegen.SetEmitLineDirectives(TileLangEmitLineDirectivesEnabled());
+  for (const auto &[gvar, base] : mod->functions)
+    codegen.AddFunction(gvar, base.as_or_throw<tirx::Function>());
+  std::string code = codegen.Finish();
+  if (auto callback =
+          ffi::Function::GetGlobal("tilelang_callback_cuda_postproc"))
+    code = (*callback)(code, target).cast<std::string>();
+  return code;
+}
 
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<tirx::PrimFuncNode>())
-        << "Can only lower IR Module with PrimFuncs";
-    auto f = Downcast<tirx::PrimFunc>(kv.second);
-
-    Array<DLDataType> arg_types;
-    Array<String> launch_param_tags;
-
-    for (size_t i = 0; i < f->params.size(); ++i) {
-      if (f->params[i]->dtype.is_handle()) {
-        auto ptr = f->params[i]->type_annotation.as<PointerTypeNode>();
-        if (ptr && ptr->storage_scope == "grid_constant") {
-          arg_types.push_back(DataType(runtime::kDLGridConstant, 64, 1));
+Map<String, runtime::FunctionInfo> TileLangFunctionInfo(const IRModule &mod) {
+  // Native extraction carries TensorMap argument tags and the complete launch
+  // field schema. Kernel source, packed calls and runtime must share this ABI.
+  auto infos = ExtractFuncInfo(mod);
+  for (const auto &[gvar, base] : mod->functions) {
+    const auto func = base.as_or_throw<tirx::Function>();
+    auto symbol = func->GetAttr(tvm::attr::kGlobalSymbol).value();
+    auto info = infos.at(symbol);
+    if (func->GetAttr<String>("code_block_source")) {
+      auto argument_types = info->arg_types;
+      bool has_boolean = false;
+      for (size_t index = 0; index < argument_types.size(); ++index) {
+        if (argument_types[index].code != kDLBool)
           continue;
-        }
+        TVM_FFI_CHECK_EQ(argument_types[index].lanes, 1, ValueError)
+            << "Raw CUDA boolean arguments must be scalar";
+        // Raw CUDA text retains its bool8 parameter. CUDA's void** launcher
+        // reads that parameter's one byte from a normalized 0/1 int32 holder,
+        // matching the established raw-source ABI on little-endian hosts.
+        // Generated kernels have real int32 parameters before this stage.
+        TVM_FFI_CHECK(std::endian::native == std::endian::little, ValueError)
+            << "Raw CUDA bool argument holders require little-endian hosts";
+        argument_types.Set(index, DLDataType{kDLInt, 32, 1});
+        has_boolean = true;
       }
-      DataType dtype = f->params[i].dtype();
-      if (dtype.is_bool())
-        dtype = DataType::Int(32);
-      arg_types.push_back(dtype);
-    }
-    if (f->HasNonzeroAttr(tl::attr::kHasGridSync)) {
-      launch_param_tags.push_back(
-          runtime::launch_param::kUseProgramaticDependentLaunch);
-    }
-    if (f->HasNonzeroAttr("use_cooperative_groups")) {
-      launch_param_tags.push_back(runtime::launch_param::kUseCooperativeLaunch);
-    }
-    if (f->GetAttr<Array<Integer>>("cluster_dims").defined()) {
-      launch_param_tags.push_back(runtime::launch_param::kClusterDimX);
-      launch_param_tags.push_back(runtime::launch_param::kClusterDimY);
-      launch_param_tags.push_back(runtime::launch_param::kClusterDimZ);
-    }
-    if (auto opt = f->GetAttr<Array<String>>(tirx::attr::kKernelLaunchParams)) {
-      for (const auto &tag : opt.value()) {
-        if (tag != runtime::launch_param::kClusterDimX &&
-            tag != runtime::launch_param::kClusterDimY &&
-            tag != runtime::launch_param::kClusterDimZ) {
-          launch_param_tags.push_back(tag);
-        }
+      if (has_boolean) {
+        info = runtime::FunctionInfo(
+            info->name, argument_types, info->launch_param_tags,
+            info->arg_extra_tags, info->cuda_launch_fields,
+            info->cuda_kernel_attrs);
+        infos.Set(symbol, info);
       }
     }
-    std::string sym = GetDeviceGlobalSymbol(Downcast<GlobalVar>(kv.first), f);
-    fmap.Set(String(sym), runtime::FunctionInfo(String(sym), arg_types,
-                                                launch_param_tags, {}));
+    if (!info->cuda_launch_fields.empty())
+      continue;
+    Array<String> tags;
+    auto append_flag = [&](const char *key, const char *tag) {
+      if (!func->HasNonzeroAttr(key))
+        return;
+      for (const auto &existing : info->launch_param_tags)
+        if (existing == tag)
+          return;
+      tags.push_back(tag);
+    };
+    append_flag("has_cuda_pdl_sync",
+                runtime::launch_param::kUseProgramaticDependentLaunch);
+    append_flag("use_cooperative_groups",
+                runtime::launch_param::kUseCooperativeLaunch);
+    for (const auto &tag : info->launch_param_tags)
+      tags.push_back(tag);
+    infos.Set(symbol, runtime::FunctionInfo(info->name, info->arg_types, tags,
+                                            info->arg_extra_tags,
+                                            info->cuda_launch_fields,
+                                            info->cuda_kernel_attrs));
   }
-  return fmap;
+  return infos;
 }
+
+Map<String, String> SourceMap(const IRModule &mod, const std::string &code) {
+  Map<String, String> source{{"cuda", code}};
+  if (auto config = mod->GetAttr<String>("backend_config"))
+    source.Set("backend_config", config.value());
+  return source;
+}
+
+} // namespace
 
 Module BuildTileLangCUDA(IRModule mod, Target target) {
-  bool output_ssa = false;
-  CodeGenTileLangCUDA cg;
-  cg.Init(output_ssa);
-  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
-
-  ValidateUniqueDeviceGlobalSymbols(mod);
-  if (const auto f = Function::GetGlobal("tilelang_callback_cuda_validate")) {
-    (*f)(mod);
-  }
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
-        << "CodeGenTileLangCUDA: Can only take PrimFunc";
-    auto gvar = Downcast<GlobalVar>(kv.first);
-    auto f = Downcast<PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
-    ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
-    cg.AddFunction(gvar, f);
-  }
-
-  std::string code = cg.Finish();
-  if (const auto f = Function::GetGlobal("tilelang_callback_cuda_postproc")) {
-    code = (*f)(code, target).cast<std::string>();
-  }
-  std::string fmt = "ptx";
-  std::string ptx;
-  if (const auto f = Function::GetGlobal("tilelang_callback_cuda_compile")) {
-    // Fetch current pass context config and pass into the compile callback
-    tvm::transform::PassContext pass_ctx =
-        tvm::transform::PassContext::Current();
-    ptx = (*f)(code, target, pass_ctx->config).cast<std::string>();
-    if (ptx[0] != '/')
-      fmt = "cubin";
-  } else {
-    ICHECK(0);
-  }
-  Map<String, String> source_map;
-  source_map.Set("cuda", code);
-  return target::CUDAModuleCreateWithFallback(Bytes(ptx.data(), ptx.size()),
-                                              String(fmt), ExtractFuncInfo(mod),
-                                              source_map);
+  std::string code = EmitTileLangCUDA(mod, target);
+  auto compile =
+      ffi::Function::GetGlobalRequired("tilelang_callback_cuda_compile");
+  auto result =
+      compile(code, target, tvm::transform::PassContext::Current()->config);
+  Bytes binary = [&]() -> Bytes {
+    if (auto bytes = result.as<Bytes>())
+      return bytes.value();
+    const auto text = result.cast<String>();
+    return Bytes(text.data(), text.size());
+  }();
+  TVM_FFI_CHECK_GT(binary.size(), 0, ValueError)
+      << "CUDA compiler returned an empty kernel binary";
+  // TileLang's callback returns cubin bytes or NVCC's textual PTX.
+  String format = binary.data()[0] == '/' ? "ptx" : "cubin";
+  return target::CUDAModuleCreateWithFallback(
+      binary, format, TileLangFunctionInfo(mod), SourceMap(mod, code));
 }
 
 Module BuildTileLangCUDAWithoutCompile(IRModule mod, Target target) {
-  bool output_ssa = false;
-  CodeGenTileLangCUDA cg;
-  cg.Init(output_ssa);
-  cg.SetEmitLineDirectives(tl::tl_config::EmitLineDirectivesEnabled());
-
-  ValidateUniqueDeviceGlobalSymbols(mod);
-  if (const auto f = Function::GetGlobal("tilelang_callback_cuda_validate")) {
-    (*f)(mod);
-  }
-
-  for (auto kv : mod->functions) {
-    ICHECK(kv.second->IsInstance<PrimFuncNode>())
-        << "CodeGenTileLangCUDA: Can only take PrimFunc";
-    auto gvar = Downcast<GlobalVar>(kv.first);
-    auto f = Downcast<PrimFunc>(kv.second);
-    auto calling_conv = f->GetAttr<Integer>(tvm::attr::kCallingConv);
-    ICHECK(calling_conv == CallingConv::kDeviceKernelLaunch);
-    cg.AddFunction(gvar, f);
-  }
-
-  std::string code = cg.Finish();
-  if (const auto f = Function::GetGlobal("tilelang_callback_cuda_postproc")) {
-    code = (*f)(code, target).cast<std::string>();
-  }
-  Map<String, String> source_map;
-  source_map.Set("cuda", code);
-  // The no-compile path still needs a code payload and format for the CUDA
-  // module container.  Keep a tiny dummy PTX payload; the generated CUDA source
-  // is preserved in source_map for InspectSource/get_source.
-  static constexpr const char kDummyPtx[] = "ptx";
-  return target::CUDAModuleCreateWithFallback(
-      Bytes(kDummyPtx, sizeof(kDummyPtx) - 1), String("ptx"),
-      ExtractFuncInfo(mod), source_map);
+  std::string code = EmitTileLangCUDA(mod, target);
+  // This entry is used by external JIT adapters. Preserve real source in a
+  // serializable CUDA module; neither runtime availability nor import order
+  // may turn a source-only request into implicit device compilation.
+  return target::CUDAFallbackModuleCreate(Bytes(code.data(), code.size()),
+                                          "cuda", TileLangFunctionInfo(mod),
+                                          SourceMap(mod, code));
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef()
+  tvm::transform::PassContext::RegisterConfigOption<String>(
+      "cuda.kernels_output_dir");
+  reflection::GlobalDef()
       .def("target.build.tilelang_cuda", BuildTileLangCUDA)
       .def("target.build.tilelang_cuda_without_compile",
            BuildTileLangCUDAWithoutCompile);
 }
 
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::codegen

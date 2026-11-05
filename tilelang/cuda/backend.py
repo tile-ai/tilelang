@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from tvm import tirx
+from tvm_tirx import tirx
 
 from tilelang.backend.device_codegen import DeviceCodegen
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
@@ -29,7 +29,7 @@ def _collect_external_cuda_kernel_names(source: str) -> list[str]:
 
 def tilelang_callback_cuda_validate(device_mod):
     for _, base_func in device_mod.functions.items():
-        if not isinstance(base_func, tirx.PrimFunc) or not base_func.attrs:
+        if not isinstance(base_func, tirx.Function) or not base_func.attrs:
             continue
 
         code_block_source = base_func.attrs.get("code_block_source")
@@ -38,7 +38,7 @@ def tilelang_callback_cuda_validate(device_mod):
 
         global_symbol = base_func.attrs.get("global_symbol")
         if global_symbol is None:
-            raise ValueError("CodeGenTileLangCUDA expects source-kernel PrimFunc to have the global_symbol attribute")
+            raise ValueError("CodeGenTileLangCUDA expects source-kernel Function to have the global_symbol attribute")
 
         expected_name = str(global_symbol)
         code_block_entry_name = base_func.attrs.get("code_block_entry_name")

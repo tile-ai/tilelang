@@ -1,3 +1,4 @@
+#include "ir/loop_math.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -17,767 +18,887 @@
  * under the License.
  */
 
-/*!
- * \file lower_scheduled_tir.cc
- * \brief Lower scheduled TIR into final Ascend core TIR.
+/*! \file lower_scheduled_tir.cc
+ *  \brief Lower native scheduled tasks into executable Ascend core streams.
  */
 
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/scheduled_tir.h"
 #include "buffer_alias.h"
 
-#include <tvm/ffi/container/array.h>
-#include <tvm/ffi/container/map.h>
-#include <tvm/ffi/optional.h>
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/ir/function.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
 #include <cstdint>
-#include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
-#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "ascend/transform/attr.h"
-#include "op/builtin.h"
-#include "support/check.h"
-#include "transform/common/attr.h"
-
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
 using namespace tirx;
+using namespace prim;
 using namespace ascend;
-using ffi::Array;
-using ffi::GetRef;
-using ffi::Map;
-using ffi::ObjectPtrEqual;
-using ffi::ObjectPtrHash;
-using ffi::Optional;
-using ffi::String;
 
 namespace {
 
-Stmt MakeSequence(const Array<Stmt> &statements) {
-  if (statements.empty())
-    return Stmt();
-  if (statements.size() == 1)
-    return statements[0];
-  return SeqStmt::Flatten(statements);
+using VarSet = std::unordered_set<const VarObj *>;
+
+void Append(ffi::Array<Stmt> *out, const Stmt &statement) {
+  if (const auto *sequence = statement.as<SeqStmtObj>()) {
+    for (const auto &child : sequence->seq)
+      Append(out, child);
+  } else {
+    out->push_back(statement);
+  }
 }
 
-Array<Stmt> GetSequence(const Stmt &stmt) {
-  if (const auto *sequence = stmt.as<SeqStmtNode>())
-    return sequence->seq;
-  return {stmt};
+void CollectDefinitions(const Stmt &statement, VarSet *out) {
+  VisitNativePostOrder(statement, [&](const ffi::ObjectRef &object) {
+    if (const auto *bind = object.as<BindObj>())
+      out->insert(bind->var.get());
+    if (const auto *loop = object.as<ForObj>())
+      out->insert(loop->var.get());
+    if (const auto *region = object.as<RegionStmtObj>()) {
+      for (const auto &var : region->body_params)
+        out->insert(var.get());
+      for (const auto &var : region->result_vars)
+        out->insert(var.get());
+    }
+  });
 }
 
-class LetVarSubstituter : public StmtExprMutator {
+bool ConsumedSchedulingKey(const ffi::String &key) {
+  return key == "num_stages" || key == "enable_offset" ||
+         key == "tl_pipeline_order" || key == "tl_pipeline_stage" ||
+         key == kMultiBufferEligible || key == kBufferVersionsMap ||
+         key == kBufferVersionMode || key == "conflict_hint" ||
+         key == kRootConflictHints || key == "tl.scoped_conflict_hints" ||
+         key == "tl.conflict_scope_id" || key == kSplitSubcores;
+}
+
+For PromoteDynamicLoopAnnotations(For loop) {
+  ScheduleUnitMetadata constant, dynamic;
+  for (const auto &[key, value] : loop->annotations) {
+    auto encoded = EncodeAnnotations(value);
+    if (UndefinedVars(encoded.payload).empty())
+      constant.Set(key, value);
+    else
+      dynamic.Set(key, value);
+  }
+  if (dynamic.empty())
+    return loop;
+  // Native structural definition renewal intentionally skips the constant
+  // For annotation map. Retain actual IR references as operands inside the
+  // loop's definition region, where every generic visitor can follow them.
+  auto body = loop->body;
+  auto *node = loop.CopyOnWrite();
+  node->annotations = std::move(constant);
+  node->body = SeqStmt({MakeNativeAttribute(nullptr, "tl.loop.annotations",
+                                            dynamic, body, loop->loc)},
+                       body->loc);
+  return loop;
+}
+
+// Filter storage maps before renewing definitions. Each core retains only
+// references whose actual definitions survive extraction. Empty alias maps
+// remain present: their presence disables unproved physical storage reuse.
+class MetadataCleaner : public StmtExprMutator {
 public:
-  explicit LetVarSubstituter(const Map<Var, PrimExpr> &vmap) : vmap_(vmap) {}
+  using StmtExprMutator::Mutate_;
+  MetadataCleaner(VarSet all, VarSet kept)
+      : all_(std::move(all)), kept_(std::move(kept)) {}
 
-private:
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    auto it = vmap_.find(GetRef<Var>(op));
-    return it != vmap_.end() ? (*it).second : StmtExprMutator::VisitExpr_(op);
-  }
-
-  Buffer VisitBufferUse(const Buffer &buffer) final {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end())
-      return (*it).second;
-    auto var_it = vmap_.find(buffer->data);
-    if (var_it == vmap_.end())
-      return buffer;
-    const auto *data = (*var_it).second.as<VarNode>();
-    if (data == nullptr)
-      return buffer;
-    Buffer new_buffer = buffer;
-    new_buffer.CopyOnWrite()->data = GetRef<Var>(data);
-    buffer_remap_[buffer] = new_buffer;
-    return new_buffer;
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    ffi::Any node = op->node;
-    bool node_changed = false;
-    if (const auto *expr_node = op->node.as<PrimExprNode>()) {
-      PrimExpr old_node = GetRef<PrimExpr>(expr_node);
-      PrimExpr new_node = VisitExpr(old_node);
-      node_changed = !new_node.same_as(old_node);
-      node = std::move(new_node);
+  ScheduleUnitMetadata Fields(const ScheduleUnitMetadata &fields) const {
+    ScheduleUnitMetadata result;
+    for (const auto &[key, value] : fields) {
+      if (ConsumedSchedulingKey(key))
+        continue;
+      if (key == "annotations") {
+        result.Set(key, Fields(value.cast<ScheduleUnitMetadata>()));
+      } else if (auto retained = Prune(value)) {
+        result.Set(key, *retained);
+      }
     }
-    PrimExpr value = VisitExpr(op->value);
-    Stmt body = VisitStmt(op->body);
-    if (!node_changed && value.same_as(op->value) && body.same_as(op->body))
-      return GetRef<Stmt>(op);
-    return AttrStmt(node, op->attr_key, value, body, op->span);
-  }
-
-  const Map<Var, PrimExpr> &vmap_;
-  std::unordered_map<Buffer, Buffer, ObjectPtrHash, ObjectPtrEqual>
-      buffer_remap_;
-};
-
-Stmt SubstituteLetVars(Stmt stmt, const Map<Var, PrimExpr> &vmap) {
-  if (vmap.empty())
-    return stmt;
-  return LetVarSubstituter(vmap)(std::move(stmt));
-}
-
-CoreMask GetUnitCoreMask(const AttrStmtNode *op) {
-  return RequireScheduledCoreMask(op);
-}
-
-int GetMarkerStage(const AttrStmtNode *op) { return GetScheduleUnitStage(op); }
-
-Stmt StripTaskMarker(const Stmt &stmt) {
-  if (const auto *attribute = stmt.as<AttrStmtNode>()) {
-    if (attribute->attr_key == attr::kAscendTask)
-      return attribute->body;
-  }
-  return stmt;
-}
-
-Optional<Bind> FindTaskBind(const Stmt &task_body) {
-  Stmt current = task_body;
-  while (true) {
-    if (const auto *bind = current.as<BindNode>())
-      return GetRef<Bind>(bind);
-    if (const auto *conditional = current.as<IfThenElseNode>()) {
-      if (conditional->else_case.has_value())
-        return std::nullopt;
-      current = conditional->then_case;
-      continue;
-    }
-    if (const auto *attribute = current.as<AttrStmtNode>()) {
-      current = attribute->body;
-      continue;
-    }
-    return std::nullopt;
-  }
-}
-
-Stmt ReplaceTaskBind(const Stmt &task_body, const Stmt &replacement) {
-  if (task_body.as<BindNode>())
-    return replacement;
-  if (const auto *conditional = task_body.as<IfThenElseNode>()) {
-    ICHECK(!conditional->else_case.has_value());
-    return IfThenElse(conditional->condition,
-                      ReplaceTaskBind(conditional->then_case, replacement),
-                      std::nullopt, conditional->span);
-  }
-  const auto *attribute = task_body.as<AttrStmtNode>();
-  ICHECK(attribute != nullptr)
-      << "Expected a native guard chain around Bind, got " << task_body;
-  return AttrStmt(attribute->node, attribute->attr_key, attribute->value,
-                  ReplaceTaskBind(attribute->body, replacement),
-                  attribute->span);
-}
-
-bool IsGuardedTaskBind(const AttrStmtNode *marker) {
-  Stmt task_body = StripTaskMarker(marker->body);
-  return FindTaskBind(task_body).defined() &&
-         task_body.as<BindNode>() == nullptr;
-}
-
-class CoreExtractor : public StmtMutator {
-public:
-  static Optional<Stmt> Extract(const Stmt &stmt, CoreMask target_core,
-                                bool allow_shared_scalar_stream = false,
-                                Optional<Var> sid = std::nullopt) {
-    ICHECK(IsCoreLocalMask(target_core));
-    CoreExtractor extractor(target_core, allow_shared_scalar_stream, sid);
-    Stmt result = extractor.VisitStmt(stmt);
-    if (!extractor.found_core_)
-      return std::nullopt;
-    ICHECK(result.defined()) << "CoreExtractor removed detected core "
-                             << static_cast<int>(target_core);
+    if (auto aliases = result.Get(kBufferAliasMap))
+      ValidateBufferAliasMap(aliases->cast<BufferAliasMap>());
     return result;
   }
 
 private:
-  CoreExtractor(CoreMask target_core, bool allow_shared_scalar_stream,
-                Optional<Var> sid)
-      : target_core_(target_core),
-        allow_shared_scalar_stream_(allow_shared_scalar_stream), sid_(sid) {}
+  bool UsesRemoved(const ffi::Any &value) const {
+    bool removed = false;
+    auto encoded = EncodeAnnotations(value);
+    VisitNativePostOrder(Evaluate(encoded.payload),
+                         [&](const ffi::ObjectRef &object) {
+                           if (const auto *var = object.as<VarObj>())
+                             removed |= all_.count(var) && !kept_.count(var);
+                         });
+    return removed;
+  }
 
-  CoreMask VectorMask(const Stmt &stmt) const {
+  std::optional<ffi::Any> Prune(const ffi::Any &value) const {
+    if (const auto *map = value.as<ffi::MapObj>()) {
+      ffi::Map<ffi::Any, ffi::Any> result;
+      for (const auto &[key, item] : *map) {
+        if (UsesRemoved(key))
+          continue;
+        if (auto retained = Prune(item))
+          result.Set(key, *retained);
+      }
+      return result;
+    }
+    if (const auto *array = value.as<ffi::ArrayObj>()) {
+      ffi::Array<ffi::Any> result;
+      for (const auto &item : *array)
+        if (auto retained = Prune(item))
+          result.push_back(*retained);
+      return result;
+    }
+    return UsesRemoved(value) ? std::nullopt : std::optional<ffi::Any>(value);
+  }
+
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+    if (IsScheduledBind(op)) {
+      Expr value = ReadScheduledBinding(op).value;
+      return Mutate(value, mode).ValueOrUnchanged(value);
+    }
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
+                                 InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (call && call->op.same_as(Op::Get("tl.annotation"))) {
+      auto fields = Fields(ReadNativeAnnotations(call));
+      return fields.empty() ? Stmt(SeqStmt({}, op->loc))
+                            : MakeNativeAnnotation(fields, op->loc);
+    }
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    auto attribute = ReadTaskAttribute(op);
+    if (!attribute)
+      return StmtExprMutator::Mutate_(op, mode);
+    SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    if (IsSemanticTaskKey(attribute->key) ||
+        attribute->key == attr::kScheduleUnit ||
+        ConsumedSchedulingKey(attribute->key))
+      return body;
+    ffi::Any node = attribute->node, value = attribute->value;
+    if (attribute->key == "tl.loop.annotations" ||
+        attribute->key == "tl.kernel" || attribute->key == "tl.sblock") {
+      auto fields = Fields(value.cast<ScheduleUnitMetadata>());
+      if (attribute->key == "tl.loop.annotations" && fields.empty())
+        return body;
+      value = fields;
+    } else if (attribute->key == kBufferAliasMap ||
+               attribute->key == kAivStorageMap) {
+      node = Prune(node).value();
+      if (attribute->key == kBufferAliasMap)
+        ValidateBufferAliasMap(node.cast<BufferAliasMap>());
+    }
+    return MakeNativeAttribute(node, attribute->key, value, body, op->loc);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    For loop = StmtExprMutator::Mutate_(op, mode)
+                   .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                   .as_or_throw<For>();
+    loop.CopyOnWrite()->annotations = Fields(loop->annotations);
+    return PromoteDynamicLoopAnnotations(loop);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
+    ffi::Array<Stmt> statements;
+    for (const auto &statement : op->seq)
+      Append(&statements, Mutate(statement, mode).ValueOrUnchanged(statement));
+    return SeqStmt(statements, op->loc);
+  }
+
+  VarSet all_, kept_;
+};
+
+class MetadataRemapper : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+  ScheduleUnitMetadata Fields(const ScheduleUnitMetadata &fields) {
+    auto encoded = EncodeAnnotations(fields);
+    Expr payload = encoded.payload;
+    payload = Mutate(payload).ValueOrUnchanged(payload);
+    return DecodeAnnotations(payload.as_or_throw<tvm::Tuple>(), encoded.schema)
+        .cast<ScheduleUnitMetadata>();
+  }
+
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    For loop = StmtExprMutator::Mutate_(op, mode)
+                   .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                   .as_or_throw<For>();
+    // Native For mutation leaves its static map untouched. Older producers
+    // can put IR references there, so apply the same stage substitutions as
+    // the operand-bearing metadata carriers before renewing definitions.
+    loop.CopyOnWrite()->annotations = Fields(loop->annotations);
+    return PromoteDynamicLoopAnnotations(loop);
+  }
+};
+
+struct StageBounds {
+  int first{std::numeric_limits<int>::max()};
+  int last{std::numeric_limits<int>::min()};
+  bool empty() const { return first > last; }
+  void Add(int stage) {
+    TVM_FFI_CHECK_GE(stage, 0, ValueError)
+        << "LowerScheduledTIR requires resolved nonnegative stages";
+    first = std::min(first, stage);
+    last = std::max(last, stage);
+  }
+  void Add(StageBounds bounds) {
+    if (!bounds.empty()) {
+      Add(bounds.first);
+      Add(bounds.last);
+    }
+  }
+};
+
+bool IsTransparentMetadata(const IRStructure *node) {
+  if (!node->IsScope())
+    return false;
+  auto attribute =
+      ReadTaskAttribute(static_cast<const ScopeNode *>(node)->shell);
+  return attribute && attribute->key == "tl.loop.annotations";
+}
+
+// Bounds are proof-only. No expression simplified under a populated context
+// is emitted: mutable-read snapshots belong to the analyzer, not native IR.
+std::optional<std::pair<int64_t, int64_t>>
+IntegerBounds(const PrimExpr &expression, const sym::Analyzer &analyzer) {
+  if (auto value = TryConstInt(analyzer->Simplify(expression)))
+    return std::pair(*value, *value);
+  PrimType type = expression.ty();
+  if (!type.IsScalar() || !type.MatchesCode(kDLInt, kDLUInt) ||
+      (type.code() == kDLUInt && type.bits() >= 64))
+    return std::nullopt;
+  auto bound = analyzer->const_int_bound(expression);
+  ffi::BigInt minimum = type.code() == kDLUInt
+                            ? ffi::BigInt(0)
+                            : -(ffi::BigInt(1) << (type.bits() - 1));
+  ffi::BigInt maximum =
+      (ffi::BigInt(1) << (type.bits() - (type.code() == kDLInt))) - 1;
+  minimum = std::max(minimum, ffi::BigInt(bound->min_value));
+  maximum = std::min(maximum, ffi::BigInt(bound->max_value));
+  auto lo = minimum.as<int64_t>(), hi = maximum.as<int64_t>();
+  if (!lo || !hi || *lo > *hi)
+    return std::nullopt;
+  return std::pair(*lo, *hi);
+}
+
+struct PipelineClock {
+  PrimVar original;
+  PrimVar physical;
+  PrimExpr begin;
+  PrimExpr step;
+  PrimExpr trips;
+  int first_stage;
+
+  PrimExpr Logical(int stage) const {
+    return physical - IntImm::Int64(int64_t(stage) - first_stage);
+  }
+  PrimExpr Guard(int stage) const {
+    PrimExpr logical = Logical(stage);
+    return logical >= IntImm::Int64(0) && logical < trips;
+  }
+  PrimExpr Coordinate(int stage) const {
+    // Clamping keeps pure scalar definitions and native storage declarations
+    // valid during fill/drain. Observable reads and effects remain guarded.
+    PrimExpr ordinal =
+        Max(IntImm::Int64(0), Min(trips - IntImm::Int64(1), Logical(stage)));
+    return cast(begin + ordinal * step, original.ty());
+  }
+};
+
+// SS names one static pool shared by the whole MIX group. Keep each native
+// allocation owner outside the separate core streams; definition renewal can
+// then freshen private state and views without splitting that physical owner.
+struct SharedSSStorage {
+  ffi::Array<Stmt> allocations;
+  VarSet variables;
+
+  explicit SharedSSStorage(const Stmt &body) { Collect(body); }
+
+private:
+  void Collect(const Stmt &statement) {
+    // Metadata may contain native Stmt templates. Only declarations reached
+    // through executable statement bodies own storage in this kernel.
+    if (const auto *sequence = statement.as<SeqStmtObj>()) {
+      for (const auto &child : sequence->seq)
+        Collect(child);
+    } else if (const auto *loop = statement.as<ForObj>()) {
+      Collect(loop->body);
+    } else if (const auto *loop = statement.as<WhileObj>()) {
+      Collect(loop->body);
+    } else if (const auto *branch = statement.as<IfObj>()) {
+      Collect(branch->then_case);
+      if (branch->else_case)
+        Collect(*branch->else_case);
+    } else if (const auto *region = statement.as<RegionStmtObj>()) {
+      Collect(region->body);
+    } else if (const auto *bind = statement.as<BindObj>()) {
+      auto tensor = bind->var.as<TensorVar>();
+      if (!tensor || (tensor->scope().name() != "shared.ss" &&
+                      tensor->scope().name() != "shared.ss.dyn"))
+        return;
+      Expr value = bind->value;
+      if (IsScheduledBind(value.as<CallObj>()))
+        value = ReadScheduledBinding(value.as<CallObj>()).value;
+      const auto *call = value.as<CallObj>();
+      if (!call || !call->op.same_as(alloc_tensor_op()))
+        return;
+      Stmt allocation = Bind(bind->var, value, bind->loc);
+      TVM_FFI_CHECK(UndefinedVars(allocation).empty(), ValueError)
+          << "Group-shared SS allocations require static, self-contained "
+             "native types";
+      TVM_FFI_CHECK(variables.insert(bind->var.get()).second, ValueError)
+          << "SS storage must have one native allocation definition";
+      allocations.push_back(allocation);
+    }
+  }
+};
+
+class SharedSSDefinitionRetirer : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+  explicit SharedSSDefinitionRetirer(VarSet variables)
+      : variables_(std::move(variables)) {}
+
+private:
+  ffi::UnchangedOr<ffi::Any> Mutate(ffi::AnyView value,
+                                    InplaceMode mode) final {
+    if (value.as<Expr>())
+      return ffi::Unchanged();
+    return StmtExprMutator::Mutate(value, mode);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    if (variables_.count(op->var.get()))
+      return SeqStmt({}, op->loc);
+    return ffi::Unchanged();
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    if (body.same_as(op->body))
+      return ffi::Unchanged();
+    auto copy = ffi::make_object<RegionStmtObj>(*op);
+    copy->body = body;
+    return RegionStmt(copy);
+  }
+
+  VarSet variables_;
+};
+
+class CoreBodyBuilder {
+public:
+  CoreBodyBuilder(const ScheduledTIR &scheduled, CoreMask target, PrimVar sid,
+                  int vector_count, const VarSet &shared_ss)
+      : scheduled_(scheduled), target_(target), sid_(std::move(sid)),
+        vector_count_(vector_count),
+        remapper_(ffi::make_object<MetadataRemapper>()) {
+    if (!shared_ss.empty())
+      ss_retirer_ = ffi::make_object<SharedSSDefinitionRetirer>(shared_ss);
+    VarSet all, kept;
+    CollectDefinitions(scheduled.metadata.kernel_root->body, &all);
+    for (const auto &node : scheduled.tree)
+      CollectSelectedDefinitions(node.get(), &kept);
+    kept.insert(shared_ss.begin(), shared_ss.end());
+    cleaner_ =
+        ffi::make_object<MetadataCleaner>(std::move(all), std::move(kept));
+  }
+
+  SeqStmt Build() {
+    SeqStmt body = LowerList(scheduled_.tree, nullptr, kCoreUnassigned);
+    // Renew a whole native definition region in one operation: types,
+    // metadata operands, aliases and uses follow the corresponding fresh Var.
+    return RenewDef(tirx::Function({}, body))->body;
+  }
+
+private:
+  CoreMask SelectedMask(const IRStructure *node) const {
+    if (node->IsTask()) {
+      auto mask = static_cast<const TaskNode *>(node)->GetCoreMask();
+      TVM_FFI_CHECK_NE(mask, kCoreUnassigned, ValueError)
+          << "LowerScheduledTIR requires assigned task cores";
+      return mask & target_;
+    }
     CoreMask result = kCoreUnassigned;
-    PostOrderVisit(stmt, [&](const ObjectRef &node) {
-      if (const auto *attr = node.as<AttrStmtNode>();
-          attr && IsScheduleUnit(attr))
-        if (auto mask = GetScheduledCoreMask(attr))
-          result |= *mask & kCoreVector;
-    });
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        result |= SelectedMask(child.get());
     return result;
   }
 
-  Stmt GuardSubcore(Stmt stmt, CoreMask mask) const {
-    if (target_core_ == kCoreVector && IsVectorCore(mask)) {
-      ICHECK(sid_.has_value()) << "An AIV-specific task requires a sid";
-      return IfThenElse(sid_.value() == VectorSid(mask), std::move(stmt));
-    }
-    return stmt;
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> statements;
-    for (const Stmt &stmt : op->seq) {
-      Stmt rewritten = VisitStmt(stmt);
-      if (rewritten.defined())
-        statements.push_back(std::move(rewritten));
-    }
-    return MakeSequence(statements);
-  }
-
-  Stmt VisitStmt_(const ForNode *op) final {
-    Map<Var, PrimExpr> outer_remap = var_remap_;
-    PrimExpr min = Substitute(op->min, var_remap_);
-    PrimExpr extent = Substitute(op->extent, var_remap_);
-    Optional<PrimExpr> step = op->step;
-    if (step.has_value())
-      step = Substitute(step.value(), var_remap_);
-    Var loop_var = op->loop_var.copy_with_suffix("");
-    var_remap_.Set(op->loop_var, loop_var);
-    Stmt body = VisitStmt(op->body);
-    var_remap_ = std::move(outer_remap);
-    if (!body.defined())
-      return Stmt();
-    Stmt loop = For(loop_var, min, extent, op->kind, std::move(body),
-                    op->thread_binding, op->annotations, step, op->span);
-    return target_core_ == kCoreVector
-               ? GuardSubcore(std::move(loop), VectorMask(GetRef<Stmt>(op)))
-               : loop;
-  }
-
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    PrimExpr condition = Substitute(op->condition, var_remap_);
-    Stmt then_case = VisitStmt(op->then_case);
-    Optional<Stmt> else_case;
-    if (op->else_case.has_value()) {
-      Stmt rewritten_else = VisitStmt(op->else_case.value());
-      if (rewritten_else.defined())
-        else_case = std::move(rewritten_else);
-    }
-    if (!then_case.defined()) {
-      if (!else_case.has_value())
-        return Stmt();
-      return IfThenElse(Not(condition), else_case.value(), std::nullopt,
-                        op->span);
-    }
-    return IfThenElse(condition, std::move(then_case), std::move(else_case),
-                      op->span);
-  }
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (IsScheduleUnit(op)) {
-      if (GetScheduledCoreMask(op).has_value())
-        return ExtractCoreOwnedUnit(op);
-      Stmt body = VisitStmt(op->body);
-      if (!body.defined())
-        return Stmt();
-      return AttrStmt(op->node, op->attr_key, op->value, std::move(body),
-                      op->span);
-    }
-    Stmt body = VisitStmt(op->body);
-    if (!body.defined())
-      return Stmt();
-    return SubstituteLetVars(
-        AttrStmt(op->node, op->attr_key, op->value, std::move(body), op->span),
-        var_remap_);
-  }
-
-  Stmt ExtractCoreOwnedUnit(const AttrStmtNode *op) {
-    CoreMask task_core_mask = GetUnitCoreMask(op);
-    CoreMask selected = task_core_mask & target_core_;
-    if (selected == kCoreUnassigned)
-      return Stmt();
-    // Scalars shared across core types follow their consumers. An all-scalar
-    // kernel can establish a Vector stream when no consumer selects a core.
-    found_core_ |=
-        IsCoreLocalMask(task_core_mask) || allow_shared_scalar_stream_;
-
-    Stmt body = SubstituteLetVars(op->body, var_remap_);
-    Optional<Bind> bind = FindTaskBind(body);
-    if (!IsCoreLocalMask(task_core_mask) && bind.defined()) {
-      Var source_var = bind.value()->var;
-      Var output_var = source_var.copy_with_suffix("");
-      body = ReplaceTaskBind(
-          body, Bind(output_var, bind.value()->value, bind.value()->span));
-      var_remap_.Set(source_var, output_var);
-    }
-    body = GuardSubcore(std::move(body), selected);
-    return AttrStmt(op->node, op->attr_key, op->value, std::move(body),
-                    op->span);
-  }
-
-  CoreMask target_core_;
-  bool allow_shared_scalar_stream_{false};
-  bool found_core_{false};
-  Optional<Var> sid_;
-  Map<Var, PrimExpr> var_remap_;
-};
-
-class ConditionalLetCollector : public StmtVisitor {
-public:
-  static Map<Var, Buffer> Collect(const Stmt &stmt) {
-    ConditionalLetCollector collector;
-    collector(stmt);
-    return collector.buffers_;
-  }
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (!IsScheduleUnit(op) || !GetScheduledCoreMask(op).has_value()) {
-      StmtVisitor::VisitStmt_(op);
+  void CollectSelectedDefinitions(const IRStructure *node, VarSet *kept) {
+    if (SelectedMask(node) == kCoreUnassigned)
+      return;
+    if (node->IsTask()) {
+      CollectDefinitions(static_cast<const TaskNode *>(node)->stmt, kept);
       return;
     }
-    Optional<Bind> bind = FindTaskBind(op->body);
-    if (!bind.defined() || !IsGuardedTaskBind(op) ||
-        bind.value()->value.dtype().is_handle())
-      return;
-    Var var = bind.value()->var;
-    if (!buffers_.count(var)) {
-      buffers_.Set(var, decl_buffer({IntImm(DataType::Int(32), 1)},
-                                    bind.value()->value.dtype(), var->name_hint,
-                                    "local.var"));
-    }
+    if (node->IsControl())
+      kept->insert(static_cast<const ControlNode *>(node)->control->var.get());
+    for (const auto *list : node->ChildLists())
+      for (const auto &child : *list)
+        CollectSelectedDefinitions(child.get(), kept);
   }
 
-  Map<Var, Buffer> buffers_;
-};
-
-int GetUnitStage(const Stmt &stmt) {
-  Stmt current = stmt;
-  while (true) {
-    if (const auto *attribute = current.as<AttrStmtNode>()) {
-      if (IsScheduleUnit(attribute))
-        return GetMarkerStage(attribute);
-      current = attribute->body;
-      continue;
-    }
-    if (const auto *conditional = current.as<IfThenElseNode>()) {
-      ICHECK(!conditional->else_case.has_value())
-          << "A scheduled control guard may not contain an else branch";
-      current = conditional->then_case;
-      continue;
-    }
-    LOG(FATAL) << "Expected a `tl.schedule_unit` AttrStmt, got " << current;
-  }
-}
-
-bool IsScheduledLetUnit(const Stmt &stmt) {
-  const auto *attribute = stmt.as<AttrStmtNode>();
-  return attribute != nullptr && IsScheduleUnit(attribute) &&
-         GetScheduledCoreMask(attribute).has_value() &&
-         FindTaskBind(attribute->body).defined();
-}
-
-Map<String, ffi::Any>
-FilterSchedulingAnnotations(const Map<String, ffi::Any> &annotations) {
-  Map<String, ffi::Any> result = annotations;
-  result.erase("num_stages");
-  result.erase(kMultiBufferEligible);
-  result.erase("conflict_hint");
-  return result;
-}
-
-class PipelineLowerer : public StmtMutator {
-public:
-  static Stmt Lower(const Stmt &stmt) {
-    Map<Var, Buffer> conditional_lets = ConditionalLetCollector::Collect(stmt);
-    Map<Var, PrimExpr> substitutions;
-    for (const auto &[var, buffer] : conditional_lets) {
-      substitutions.Set(var,
-                        BufferLoad(buffer, {IntImm(DataType::Int(32), 0)}));
-    }
-    Stmt rewritten = SubstituteLetVars(stmt, substitutions);
-    return PipelineLowerer(std::move(conditional_lets))(rewritten);
+  StageBounds Stages(const IRStructure::ChildList &nodes) const {
+    StageBounds result;
+    for (const auto &node : nodes)
+      result.Add(Stages(node.get()));
+    return result;
   }
 
-private:
-  explicit PipelineLowerer(Map<Var, Buffer> conditional_lets)
-      : conditional_lets_(std::move(conditional_lets)) {}
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> statements;
-    for (const Stmt &stmt : op->seq) {
-      Stmt lowered = VisitStmt(stmt);
-      if (lowered.defined())
-        statements.push_back(std::move(lowered));
+  StageBounds Stages(const IRStructure *node) const {
+    StageBounds result;
+    if (SelectedMask(node) == kCoreUnassigned)
+      return result;
+    if (!node->IsScope()) {
+      result.Add(node->GetStage());
+      return result;
     }
-    if (statements.empty())
-      return Evaluate(0);
-    return MakeSequence(statements);
+    for (const auto *list : node->ChildLists())
+      result.Add(Stages(*list));
+    TVM_FFI_CHECK(IsTransparentMetadata(node) || result.empty() ||
+                      result.first == result.last,
+                  ValueError)
+        << "A lexical condition or assumption must stay in one pipeline stage";
+    return result;
   }
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (!IsScheduleUnit(op))
-      return StmtMutator::VisitStmt_(op);
-    if (!GetScheduledCoreMask(op).has_value())
-      return VisitStmt(op->body);
-    return LowerCoreOwnedUnit(op);
+  template <typename T> T Remap(const T &value) {
+    return remapper_->Mutate(value).ValueOrUnchanged(value);
   }
 
-  Stmt VisitStmt_(const ForNode *op) final {
-    Array<Stmt> children = GetSequence(op->body);
-    ICHECK(!children.empty()) << "Scheduled control may not have an empty body";
-    int min_stage = std::numeric_limits<int>::max();
-    int max_stage = std::numeric_limits<int>::min();
-    for (const Stmt &child : children) {
-      int stage = GetUnitStage(child);
-      min_stage = std::min(min_stage, stage);
-      max_stage = std::max(max_stage, stage);
-    }
-
-    PrimExpr loop_step =
-        op->step.has_value() ? op->step.value() : IntImm(DataType::Int(32), 1);
-    Array<Stmt> body;
-    for (const Stmt &child : children) {
-      int stage = GetUnitStage(child);
-      bool is_let = IsScheduledLetUnit(child);
-      Stmt lowered = VisitStmt(child);
-      ICHECK(lowered.defined());
-      if (min_stage == max_stage) {
-        body.push_back(std::move(lowered));
-        continue;
-      }
-
-      Map<Var, PrimExpr> substitution;
-      substitution.Set(op->loop_var,
-                       op->loop_var -
-                           loop_step * (static_cast<int>(stage) - min_stage));
-      if (is_let) {
-        Map<Var, PrimExpr> clamped_substitution;
-        clamped_substitution.Set(
-            op->loop_var,
-            Max(op->min,
-                Min(op->min + op->extent - loop_step,
-                    op->loop_var -
-                        loop_step * (static_cast<int>(stage) - min_stage))));
-        body.push_back(Substitute(std::move(lowered), clamped_substitution));
-        continue;
-      }
-
-      PrimExpr condition =
-          And(op->loop_var < op->min + op->extent, op->loop_var >= op->min);
-      if (stage == min_stage)
-        condition = op->loop_var < op->min + op->extent;
-      if (stage == max_stage)
-        condition = op->loop_var >= op->min;
-      body.push_back(
-          Substitute(IfThenElse(condition, std::move(lowered)), substitution));
-    }
-
-    PrimExpr extent = op->extent;
-    if (min_stage != max_stage)
-      extent = extent + loop_step * (max_stage - min_stage);
-    return For(op->loop_var, op->min, extent, op->kind, MakeSequence(body),
-               op->thread_binding, FilterSchedulingAnnotations(op->annotations),
-               op->step, op->span);
-  }
-
-  Stmt LowerCoreOwnedUnit(const AttrStmtNode *op) {
-    Optional<Bind> bind = FindTaskBind(op->body);
-    if (!bind.defined())
-      return op->body;
-
-    Var var = bind.value()->var;
-    if (IsGuardedTaskBind(op) && !bind.value()->value.dtype().is_handle()) {
-      auto buffer = conditional_lets_.Get(var);
-      ICHECK(buffer.has_value())
-          << "Missing local.var buffer for guarded scalar Bind " << var;
-      Map<String, ffi::Any> annotations;
-      annotations.Set(attr::kLocalVarInit, make_zero(buffer.value()->dtype));
-      Stmt allocation = AllocBuffer(buffer.value(), annotations);
-      Stmt store = ReplaceTaskBind(
-          op->body, BufferStore(buffer.value(), bind.value()->value,
-                                {IntImm(DataType::Int(32), 0)}));
-      return SeqStmt::Flatten(Array<Stmt>{allocation, std::move(store)});
-    }
-
-    // Guarded handle bindings must remain unconditional so that their pointer
-    // is in scope for later buffer uses. Unguarded bindings are already native.
-    return Bind(var, bind.value()->value, bind.value()->span);
-  }
-
-  Map<Var, Buffer> conditional_lets_;
-};
-
-class TaskMarkerStripper : public StmtMutator {
-private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == attr::kAscendTask ||
-        op->attr_key == attr::kAscendPerCoreTask)
-      return VisitStmt(op->body);
-    return StmtMutator::VisitStmt_(op);
-  }
-};
-
-Optional<Stmt> LowerCore(const Stmt &scheduled_body, CoreMask target_core,
-                         bool allow_shared_scalar_stream = false,
-                         Optional<Var> sid = std::nullopt) {
-  Optional<Stmt> extracted = CoreExtractor::Extract(
-      scheduled_body, target_core, allow_shared_scalar_stream, sid);
-  if (!extracted.has_value())
-    return std::nullopt;
-  Stmt lowered = PipelineLowerer::Lower(extracted.value());
-  return TaskMarkerStripper()(std::move(lowered));
-}
-
-// Re-write empty AttrStmt markers to nest them properly. A flat Bind remains
-// visible to subsequent statements in the same SeqStmt scope.
-class AttrStmtNester : public StmtMutator {
-public:
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> statements;
-    for (const Stmt &statement : op->seq)
-      statements.push_back(VisitStmt(statement));
-
-    Array<Stmt> flattened;
-    for (const Stmt &statement : statements) {
-      if (const auto *sequence = statement.as<SeqStmtNode>()) {
-        for (const Stmt &inner : sequence->seq)
-          flattened.push_back(inner);
+  Stmt GuardStatement(Stmt statement, const PrimExpr &guard) {
+    if (IsOne(guard))
+      return statement;
+    if (const auto *bind = SingleStatement(statement).as<BindObj>()) {
+      Expr value = bind->value;
+      if (auto primitive = value.as<PrimExpr>()) {
+        if (SideEffect(value) > CallEffectKind::kPure)
+          value = if_then_else(guard, *primitive, MakeConst(primitive->ty(), 0),
+                               value->loc);
+      } else if (value->ty.as<PtrTypeObj>()) {
+        PrimExpr bits = Call(PrimType::UInt(64), reinterpret_op(), {value})
+                            .as_or_throw<PrimExpr>();
+        bits = if_then_else(guard, bits, IntImm(PrimType::UInt(64), 0));
+        value = Call(value->ty, reinterpret_op(), {bits});
       } else {
-        flattened.push_back(statement);
-      }
-    }
-    statements = std::move(flattened);
-
-    for (int index = static_cast<int>(statements.size()) - 2; index >= 0;
-         --index) {
-      if (const auto *attribute = statements[index].as<AttrStmtNode>()) {
-        if (IsEmptyBody(attribute->body)) {
-          Stmt body = CollectRemaining(statements, index + 1);
-          statements =
-              TruncateAndReplace(statements, index,
-                                 AttrStmt(attribute->node, attribute->attr_key,
-                                          attribute->value, std::move(body)));
+        const auto *call = value.as<CallObj>();
+        bool declaration = call && (call->op.same_as(alloc_tensor_op()) ||
+                                    call->op.same_as(decl_tensor_op()));
+        TVM_FFI_CHECK(value.as<TensorVar>().has_value() || declaration,
+                      ValueError)
+            << "A guarded native tensor definition must be an allocation or "
+               "a declared view";
+        if (call && call->op.same_as(decl_tensor_op())) {
+          auto pointer = call->args[0];
+          if (SideEffect(pointer) > CallEffectKind::kPure) {
+            PrimExpr bits =
+                Call(PrimType::UInt(64), reinterpret_op(), {pointer})
+                    .as_or_throw<PrimExpr>();
+            bits = if_then_else(guard, bits, IntImm(PrimType::UInt(64), 0));
+            Call rewritten = ffi::GetRef<Call>(call);
+            rewritten.CopyOnWrite()->args.Set(
+                0, Call(pointer->ty, reinterpret_op(), {bits}));
+            value = rewritten;
+          }
         }
       }
+      return Bind(bind->var, value, bind->loc);
     }
-
-    if (statements.empty())
-      return Evaluate(0);
-    return MakeSequence(statements);
+    return If(guard, NativeTaskAttribute::AsSequence(statement), std::nullopt,
+              statement->loc);
   }
 
-private:
-  static bool IsEmptyBody(const Stmt &stmt) {
-    if (const auto *evaluate = stmt.as<EvaluateNode>()) {
-      if (const auto *integer = evaluate->value.as<IntImmNode>())
-        return integer->value == 0;
-    }
-    return false;
-  }
-
-  static Stmt CollectRemaining(const Array<Stmt> &statements, int start) {
-    if (start >= static_cast<int>(statements.size()))
-      return Evaluate(0);
-    Array<Stmt> remaining;
-    for (int index = start; index < static_cast<int>(statements.size());
-         ++index) {
-      remaining.push_back(statements[index]);
-    }
-    return MakeSequence(remaining);
-  }
-
-  static Array<Stmt> TruncateAndReplace(const Array<Stmt> &statements,
-                                        int index, Stmt replacement) {
-    Array<Stmt> result;
-    for (int current = 0; current < index; ++current)
-      result.push_back(statements[current]);
-    result.push_back(std::move(replacement));
-    return result;
-  }
-};
-
-// Recursively flatten all nested SeqStmt nodes before AttrStmtNester absorbs
-// empty AttrStmt markers, preventing absorption across nested boundaries.
-class SeqStmtFlattener : public StmtMutator {
-public:
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> visited;
-    for (const Stmt &statement : op->seq)
-      visited.push_back(VisitStmt(statement));
-
-    Array<Stmt> flattened;
-    std::function<void(const Stmt &)> flatten = [&](const Stmt &statement) {
-      if (const auto *sequence = statement.as<SeqStmtNode>()) {
-        for (const Stmt &inner : sequence->seq)
-          flatten(inner);
+  Stmt ApplyNodeGuards(const IRStructure *node, Stmt body) {
+    for (auto it = node->GetGuards().rbegin(); it != node->GetGuards().rend();
+         ++it) {
+      if ((*it)->IsCondition()) {
+        auto *condition = static_cast<const ConditionGuard *>(it->get());
+        body = GuardStatement(body, Remap(condition->condition));
       } else {
-        flattened.push_back(statement);
+        const auto *attribute = static_cast<const AttributeGuard *>(it->get());
+        Stmt header =
+            MakeNativeAttribute(attribute->node, attribute->key,
+                                attribute->value, SeqStmt({}), attribute->loc);
+        header = Remap(cleaner_->Mutate(header).ValueOrUnchanged(header));
+        if (auto retained = ReadTaskAttribute(header))
+          body = retained->WithBody(body);
       }
-    };
-    for (const Stmt &statement : visited)
-      flatten(statement);
-    if (flattened.empty())
-      return Evaluate(0);
-    return MakeSequence(flattened);
-  }
-};
-
-Stmt ReNestAttrStmts(const Stmt &stmt) {
-  Stmt flattened = SeqStmtFlattener()(stmt);
-  return AttrStmtNester()(flattened);
-}
-
-class MixedKernelSidRelocator : public StmtMutator {
-public:
-  static Stmt Relocate(const Stmt &stmt) {
-    MixedKernelSidRelocator relocator;
-    return relocator(stmt);
-  }
-
-private:
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    const auto *iter_var = op->node.as<IterVarNode>();
-    bool is_outer_cthread =
-        op->attr_key == tirx::attr::thread_extent && iter_var != nullptr &&
-        iter_var->thread_tag == "cthread" && inside_vector_ == 0;
-    if (!is_outer_cthread)
-      return StmtMutator::VisitStmt_(op);
-
-    IterVar cthread = GetRef<IterVar>(iter_var);
-    cthread_stack_.push_back(cthread);
-    Stmt body = VisitStmt(op->body);
-    cthread_stack_.pop_back();
+    }
     return body;
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    bool is_vector = op->name_hint == "VECTOR";
-    if (is_vector)
-      ++inside_vector_;
-    SBlock block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
-    if (is_vector)
-      --inside_vector_;
-    if (!is_vector || cthread_stack_.empty())
-      return block;
-
-    IterVar outer_cthread = cthread_stack_.back();
-    IterVar inner_cthread(outer_cthread->dom, outer_cthread->var,
-                          outer_cthread->iter_type, outer_cthread->thread_tag);
-    Stmt block_body = block->body;
-    block.CopyOnWrite()->body =
-        AttrStmt(inner_cthread, tirx::attr::thread_extent,
-                 outer_cthread->dom->extent, std::move(block_body));
-    return block;
+  SeqStmt LowerList(const IRStructure::ChildList &nodes,
+                    const PipelineClock *clock, CoreMask enclosed) {
+    ffi::Array<Stmt> statements;
+    for (const auto &node : nodes) {
+      if (IsTransparentMetadata(node.get())) {
+        if (clock)
+          remapper_->VarRemapSet(clock->original,
+                                 clock->Coordinate(clock->first_stage));
+        Append(&statements,
+               LowerScope(static_cast<const ScopeNode *>(node.get()), clock,
+                          enclosed));
+        continue;
+      }
+      StageBounds stages = Stages(node.get());
+      if (stages.empty()) {
+        if (node->IsScope()) {
+          const auto *scope = static_cast<const ScopeNode *>(node.get());
+          if (IsTaskMetadataStatement(scope->shell)) {
+            if (clock)
+              remapper_->VarRemapSet(clock->original,
+                                     clock->Coordinate(clock->first_stage));
+            Stmt metadata =
+                cleaner_->Mutate(scope->shell).ValueOrUnchanged(scope->shell);
+            Append(&statements, Remap(metadata));
+          }
+        }
+        continue;
+      }
+      PrimExpr guard = IntImm::Bool(true);
+      if (clock) {
+        TVM_FFI_CHECK_EQ(stages.first, stages.last, ValueError);
+        remapper_->VarRemapSet(clock->original,
+                               clock->Coordinate(stages.first));
+        guard = clock->Guard(stages.first);
+      }
+      CoreMask selected = SelectedMask(node.get());
+      CoreMask inner_enclosed = enclosed;
+      if (target_ != kCoreCube && vector_count_ > 1 && IsVectorCore(selected) &&
+          selected != enclosed) {
+        PrimExpr subcore = sid_ == IntImm(sid_.ty(), VectorSid(selected));
+        guard = IsOne(guard) ? subcore : guard && subcore;
+        inner_enclosed = selected;
+      }
+      Stmt body =
+          node->IsTask() ? LowerTask(static_cast<const TaskNode *>(node.get()))
+          : node->IsControl()
+              ? LowerControl(static_cast<const ControlNode *>(node.get()),
+                             inner_enclosed)
+              : LowerScope(static_cast<const ScopeNode *>(node.get()), nullptr,
+                           inner_enclosed);
+      body = ApplyNodeGuards(node.get(), std::move(body));
+      Append(&statements, GuardStatement(std::move(body), guard));
+    }
+    return SeqStmt(statements);
   }
 
-  int inside_vector_{0};
-  std::vector<IterVar> cthread_stack_;
+  Stmt LowerTask(const TaskNode *task) {
+    Stmt statement = cleaner_->Mutate(task->stmt).ValueOrUnchanged(task->stmt);
+    if (ss_retirer_)
+      statement = ss_retirer_->Mutate(statement).ValueOrUnchanged(statement);
+    return Remap(statement);
+  }
+
+  Stmt LowerScope(const ScopeNode *scope, const PipelineClock *clock,
+                  CoreMask enclosed) {
+    if (const auto *branch = scope->shell.as<IfObj>()) {
+      PrimExpr condition = Remap(branch->condition);
+      SeqStmt then_case = LowerList(scope->children, nullptr, enclosed);
+      ffi::Optional<SeqStmt> else_case;
+      if (scope->has_else)
+        else_case = LowerList(scope->else_children, nullptr, enclosed);
+      return If(condition, then_case, else_case, branch->loc);
+    }
+    auto attribute = ReadTaskAttribute(scope->shell);
+    TVM_FFI_CHECK(attribute.has_value(), ValueError)
+        << "Unknown scheduled lexical scope";
+    Stmt header = attribute->WithBody(SeqStmt({}));
+    header = cleaner_->Mutate(header).ValueOrUnchanged(header);
+    header = Remap(header);
+    SeqStmt body = LowerList(scope->children, clock, enclosed);
+    if (auto retained = ReadTaskAttribute(header))
+      return retained->WithBody(body);
+    return body;
+  }
+
+  Stmt LowerControl(const ControlNode *control, CoreMask enclosed) {
+    const For &source = control->control;
+    PrimExpr begin = Remap(source->begin), end = Remap(source->end);
+    PrimExpr step = Remap(source->step);
+    auto annotations = cleaner_->Fields(source->annotations);
+    StageBounds stages = Stages(control->children);
+    if (stages.empty() || stages.first == stages.last) {
+      annotations = remapper_->Fields(annotations);
+      SeqStmt body = LowerList(control->children, nullptr, enclosed);
+      return PromoteDynamicLoopAnnotations(For(source->var, begin, end, step,
+                                               source->kind, body, annotations,
+                                               source->loc));
+    }
+
+    auto analyzer = CreateTileLangAnalyzer();
+    auto context = control->task->outer_ctx.Populate(analyzer);
+    TVM_FFI_CHECK(!control->BodyHasLoopBreak() &&
+                      CanUseLoopBounds(source->begin, source->end, source->step,
+                                       analyzer.get()),
+                  ValueError)
+        << "Pipeline stage expansion requires a positive, non-wrapping For "
+           "without early exit";
+    auto begin_bound = IntegerBounds(source->begin, analyzer);
+    auto end_bound = IntegerBounds(source->end, analyzer);
+    auto step_bound = IntegerBounds(source->step, analyzer);
+    TVM_FFI_CHECK(begin_bound && end_bound && step_bound &&
+                      step_bound->first > 0,
+                  ValueError)
+        << "Pipeline iteration arithmetic must have representable int64 bounds";
+    ffi::BigInt distance_bound = std::max(
+        ffi::BigInt(0), ffi::BigInt(end_bound->second) - begin_bound->first);
+    ffi::BigInt trip_bound = distance_bound / step_bound->first +
+                             (distance_bound % step_bound->first != 0 ? 1 : 0);
+    int64_t span = int64_t(stages.last) - stages.first;
+    TVM_FFI_CHECK(distance_bound.as<int64_t>() &&
+                      (trip_bound + span).as<int64_t>(),
+                  ValueError)
+        << "Pipeline fill/drain would overflow the int64 iteration clock";
+
+    PrimExpr begin64 = cast(begin, PrimType::Int(64));
+    PrimExpr end64 = cast(end, PrimType::Int(64));
+    PrimExpr step64 = cast(step, PrimType::Int(64));
+    PrimExpr distance = Max(end64 - begin64, IntImm::Int64(0));
+    PrimExpr trips =
+        FloorDiv(distance, step64) +
+        cast(FloorMod(distance, step64) != IntImm::Int64(0), PrimType::Int(64));
+    PrimVar physical(source->var->name + "_pipeline", PrimType::Int(64));
+    PipelineClock clock{source->var, physical, begin64,
+                        step64,      trips,    stages.first};
+    auto previous = remapper_->VarRemapGet(source->var);
+    remapper_->VarRemapSet(source->var, clock.Coordinate(clock.first_stage));
+    annotations = remapper_->Fields(annotations);
+    SeqStmt body = LowerList(control->children, &clock, enclosed);
+    remapper_->VarRemapSet(
+        source->var, previous.as<ExprObj>() ? previous : ffi::Any(source->var));
+    Stmt expanded = PromoteDynamicLoopAnnotations(
+        For(physical, IntImm::Int64(0), trips + IntImm::Int64(span),
+            IntImm::Int64(1), source->kind, body, annotations, source->loc));
+    // A zero-trip source cannot execute speculative definitions in fill/drain.
+    return If(begin < end, NativeTaskAttribute::AsSequence(expanded),
+              std::nullopt, source->loc);
+  }
+
+  const ScheduledTIR &scheduled_;
+  CoreMask target_;
+  PrimVar sid_;
+  int vector_count_;
+  ffi::ObjectPtr<MetadataRemapper> remapper_;
+  ffi::ObjectPtr<MetadataCleaner> cleaner_;
+  ffi::ObjectPtr<SharedSSDefinitionRetirer> ss_retirer_;
 };
 
-Stmt LowerScheduledKernel(const Stmt &scheduled_body,
-                          Optional<Var> external_sid, int vector_count) {
-  CoreMask vector_mask = VectorCoreMask(vector_count);
-  Var sid = external_sid.has_value() ? external_sid.value()
-                                     : Var("sid", DataType::Int(32));
-  Optional<Stmt> vector_body =
-      LowerCore(scheduled_body, vector_mask, false, sid);
-  Optional<Stmt> cube_body = LowerCore(scheduled_body, kCoreCube);
-  if (!vector_body.has_value() && !cube_body.has_value()) {
-    vector_body = LowerCore(scheduled_body, vector_mask,
-                            /*allow_shared_scalar_stream=*/true, sid);
+bool HasCoreStream(const ScheduledTIR &scheduled, CoreMask target) {
+  std::vector<TaskNode *> tasks;
+  CollectAllTaskNodes(scheduled.tree, tasks);
+  return std::any_of(tasks.begin(), tasks.end(), [&](const TaskNode *task) {
+    return IsCoreLocalMask(task->GetCoreMask()) &&
+           (task->GetCoreMask() & target) != kCoreUnassigned;
+  });
+}
+
+RegionStmt CoreBlock(ffi::String name, SeqStmt body,
+                     ScheduleUnitMetadata annotations = {}) {
+  return MakeNativeAttribute(nullptr, "tl.sblock",
+                             ScheduleUnitMetadata{{"name", name},
+                                                  {"no_realize", true},
+                                                  {"annotations", annotations}},
+                             body, body->loc);
+}
+
+// cthread names an AIV. An externally declared launch must enclose only the
+// VECTOR body; retaining it around CUBE would duplicate the cube stream.
+class SidRelocator : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    bool is_cthread = op->op.same_as(launch_thread_op()) &&
+                      op->args[0].as_or_throw<StringImm>()->value == "cthread";
+    if (is_cthread && !inside_vector_) {
+      launches_.push_back(ffi::GetRef<RegionStmt>(op));
+      SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+      launches_.pop_back();
+      return body;
+    }
+    bool vector = NativeBlockName(op).value_or("") == "VECTOR";
+    bool previous = inside_vector_;
+    inside_vector_ |= vector;
+    RegionStmt region = StmtExprMutator::Mutate_(op, mode)
+                            .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                            .as_or_throw<RegionStmt>();
+    inside_vector_ = previous;
+    if (vector && !launches_.empty()) {
+      SeqStmt body = region->body;
+      for (auto it = launches_.rbegin(); it != launches_.rend(); ++it) {
+        RegionStmt launch = *it;
+        launch.CopyOnWrite()->body = body;
+        body = SeqStmt({launch}, body->loc);
+      }
+      // One outer launch may have enclosed several kernels. Their new launch
+      // definitions must be fresh independently, including every sid use.
+      region.CopyOnWrite()->body = RenewDef(tirx::Function({}, body))->body;
+    }
+    return region;
   }
-  bool needs_sid = vector_body.has_value() &&
-                   UsesVar(vector_body.value(), [&](const VarNode *var) {
-                     return var == sid.get();
-                   });
-  if (vector_body.has_value() && !external_sid.has_value() &&
-      (cube_body.has_value() || needs_sid)) {
-    IterVar sid_thread(Range(0, vector_count), sid, IterVarType::kThreadIndex,
-                       "cthread");
-    vector_body = AttrStmt(sid_thread, tirx::attr::thread_extent,
-                           Integer(vector_count), vector_body.value());
+
+  bool inside_vector_{false};
+  std::vector<RegionStmt> launches_;
+};
+
+// Consume only tl.kernel carriers read by the shared kernel collector. A
+// nested launch starts its own metadata chain, and an already lowered root
+// ends the chain before the generated VECTOR execution annotation.
+class KernelVectorCountConsumer : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+private:
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    if (kernel_rewriter_detail::IsRoot(op)) {
+      reached_root_ = true;
+      return ffi::Unchanged();
+    }
+    bool old_chain = in_kernel_chain_;
+    bool old_root = reached_root_;
+    bool anchor = kernel_rewriter_detail::IsKernelAnchor(op);
+    if (anchor)
+      in_kernel_chain_ = true;
+    reached_root_ = false;
+    RegionStmt region = StmtExprMutator::Mutate_(op, mode)
+                            .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                            .as_or_throw<RegionStmt>();
+    bool owns_root = reached_root_;
+    auto attribute = ReadTaskAttribute(region);
+    if (in_kernel_chain_ && owns_root && attribute &&
+        attribute->key == "tl.kernel") {
+      auto fields = attribute->value.cast<ScheduleUnitMetadata>();
+      fields.erase(kVectorCount);
+      region = MakeNativeAttribute(attribute->node, attribute->key, fields,
+                                   region->body, region->loc);
+    }
+    in_kernel_chain_ = old_chain;
+    reached_root_ = old_root || (!anchor && owns_root);
+    return region;
   }
-  if (vector_body.has_value() && cube_body.has_value()) {
-    Array<Stmt> blocks;
-    blocks.push_back(SBlock({}, {}, {}, "CUBE", cube_body.value(), std::nullopt,
-                            {}, {}, {}));
-    Map<String, ffi::Any> vector_annotations;
-    vector_annotations.Set("vector_count", Integer(vector_count));
-    blocks.push_back(SBlock({}, {}, {}, "VECTOR", vector_body.value(),
-                            std::nullopt, {}, {}, vector_annotations));
-    return SeqStmt(blocks);
+
+  bool in_kernel_chain_{false};
+  bool reached_root_{false};
+};
+
+RegionStmt LowerKernel(const TilelangKernelContext &context) {
+  ScheduledTIR scheduled = DecodeScheduledTIR(
+      context.root, context.outer_ctx, nullptr, context.kernel_annotations,
+      context.parameter_alias_contract);
+  int vector_count = scheduled.metadata.num_aiv_subcores.value_or(2);
+  // DecodeScheduledTIR reads metadata statements directly in the root body.
+  // Nested scopes have separate owners and must retain their own fields.
+  for (const auto &node : scheduled.tree) {
+    if (!node->IsScope())
+      continue;
+    auto *scope = static_cast<ScopeNode *>(node.get());
+    if (!IsTaskMetadataStatement(scope->shell))
+      continue;
+    auto fields = ReadNativeAnnotations(
+        scope->shell.as<EvaluateObj>()->value.as<CallObj>());
+    if (fields.count(kVectorCount)) {
+      fields.erase(kVectorCount);
+      scope->shell = MakeNativeAnnotation(fields, scope->shell->loc);
+    }
   }
-  if (vector_body.has_value()) {
-    Map<String, ffi::Any> annotations;
-    if (external_sid.has_value() || needs_sid)
-      annotations.Set("vector_count", Integer(vector_count));
-    return SBlock({}, {}, {}, "VECTOR", vector_body.value(), std::nullopt, {},
-                  {}, annotations);
+  CoreMask vectors = VectorCoreMask(vector_count);
+  bool cube = HasCoreStream(scheduled, kCoreCube);
+  bool vector = HasCoreStream(scheduled, vectors);
+  if (!cube && !vector)
+    vector = true;
+  PrimVar sid = context.outer_sid.value_or(PrimVar("sid", PrimType::Int(32)));
+  SharedSSStorage shared_ss(context.root->body);
+  ffi::Array<Stmt> streams = shared_ss.allocations;
+  if (cube)
+    streams.push_back(
+        CoreBlock("CUBE", CoreBodyBuilder(scheduled, kCoreCube, sid,
+                                          vector_count, shared_ss.variables)
+                              .Build()));
+  if (vector) {
+    SeqStmt body = CoreBodyBuilder(scheduled, vectors, sid, vector_count,
+                                   shared_ss.variables)
+                       .Build();
+    bool uses_sid =
+        UsesAnyVar(body, [&](const VarObj *var) { return var == sid.get(); });
+    if (!context.outer_sid && (cube || uses_sid)) {
+      auto launch =
+          RegionStmt(launch_thread_op(),
+                     {StringImm("cthread"), IntImm::Int32(vector_count)}, {sid},
+                     DictAttrs(), body);
+      body = SeqStmt({launch}, body->loc);
+    }
+    ScheduleUnitMetadata annotations;
+    if (cube || uses_sid || context.outer_sid)
+      annotations.Set(kVectorCount, IntImm::Int32(vector_count));
+    streams.push_back(CoreBlock("VECTOR", body, annotations));
   }
-  if (cube_body.has_value()) {
-    return SBlock({}, {}, {}, "CUBE", cube_body.value(), std::nullopt, {}, {},
-                  {});
+  auto root = ReadTaskAttribute(context.root).value();
+  auto cleaner = ffi::make_object<MetadataCleaner>(VarSet(), VarSet());
+  auto fields = cleaner->Fields(root.value.cast<ScheduleUnitMetadata>());
+  if (auto annotations = fields.Get("annotations")) {
+    auto values = annotations->cast<ScheduleUnitMetadata>();
+    values.erase(kVectorCount);
+    fields.Set("annotations", values);
   }
-  return Evaluate(0);
+  return MakeNativeAttribute(root.node, root.key, fields, SeqStmt(streams),
+                             context.root->loc);
 }
 
 } // namespace
 
 tvm::transform::Pass LowerScheduledTIR() {
-  using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &,
-                      const tvm::transform::PassContext &) -> PrimFunc {
-    func = RewriteTilelangKernels(
-        std::move(func), "LowerScheduledTIR",
-        [](const TilelangKernelContext &context) {
-          SBlock root = context.root;
-          ScheduledTIR scheduled_tir =
-              DecodeScheduledTIR(root, context.outer_ctx);
-          int vector_count =
-              scheduled_tir.metadata.num_aiv_subcores.value_or(2);
-          Optional<BufferAliasMap> aliases;
-          if (auto value = root->annotations.Get(kBufferAliasMap)) {
-            aliases = value.value().cast<BufferAliasMap>();
-            ValidateBufferAliasMap(aliases.value());
-          }
-          Stmt body =
-              LowerScheduledKernel(root->body, context.outer_sid, vector_count);
-          SBlockNode *writer = root.CopyOnWrite();
-          if (aliases.has_value()) {
-            Map<String, ffi::Any> annotations = writer->annotations;
-            annotations.erase(kBufferAliasMap);
-            writer->annotations = std::move(annotations);
-            body = AttrStmt(aliases.value(), kBufferAliasMap, Integer(1),
-                            std::move(body));
-          }
-          if (auto aiv_storages = root->annotations.Get(kAivStorageMap)) {
-            body = AttrStmt(aiv_storages.value(), kAivStorageMap, Integer(1),
-                            body);
-            writer->annotations.erase(kAivStorageMap);
-          }
-          writer->annotations.erase(kSplitSubcores);
-          writer->body = std::move(body);
-          return root;
-        });
-    Stmt body = ReNestAttrStmts(func->body);
-    func.CopyOnWrite()->body = MixedKernelSidRelocator::Relocate(body);
-    return func;
+  auto transform = [](tirx::Function function, const IRModule &,
+                      const tvm::transform::PassContext &) {
+    function = RewriteTilelangKernels(std::move(function), "LowerScheduledTIR",
+                                      LowerKernel);
+    if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) {
+      auto consumer = ffi::make_object<KernelVectorCountConsumer>();
+      SeqStmt consumed =
+          consumer->Mutate(function->body).ValueOrUnchanged(function->body);
+      auto relocator = ffi::make_object<SidRelocator>();
+      SeqStmt body = relocator->Mutate(consumed).ValueOrUnchanged(consumed);
+      function.CopyOnWrite()->body = std::move(body);
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerScheduledTIR", {});
+  return tirx::transform::CreateFunctionPass(transform, 0,
+                                             "tl.LowerScheduledTIR");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LowerScheduledTIR", LowerScheduledTIR);
+  ffi::reflection::GlobalDef().def("tl.transform.LowerScheduledTIR",
+                                   LowerScheduledTIR);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

@@ -15,7 +15,7 @@ def test_tilelang_intimm():
     a & 0x7FFFFFFF
 
     a = T.uint32()
-    a & 0xFFFFFFFF
+    a & T.uint32(0xFFFFFFFF)
 
     a = T.int64()
     a & 0x7FFFFFFFFFFFFFFF

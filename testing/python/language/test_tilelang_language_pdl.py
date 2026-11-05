@@ -1,3 +1,4 @@
+import ast
 import importlib.metadata
 import os
 import platform
@@ -168,6 +169,14 @@ def _get_sm90_cuda_device():
     pytest.skip("CuTeDSL PDL runtime test requires an SM90+ CUDA device")
 
 
+def _runtime_cutedsl_target(device):
+    """Compile runtime cases for the selected device's cubin architecture."""
+    import torch
+
+    major, minor = torch.cuda.get_device_capability(device)
+    return {"kind": "cutedsl", "arch": f"sm_{major}{minor}"}
+
+
 def _package_version(package_name: str) -> str:
     """Return an installed package version or a readable placeholder."""
     try:
@@ -319,12 +328,25 @@ def test_cutedsl_pdl_codegen_and_launcher_support():
 
     sync_artifact, sync_wrapper = _lower_cutedsl_for_pdl(kernels_with_pdl_sync(64, block_size=64))
     assert "tl.griddepcontrol_wait()" in sync_artifact.kernel_source
-    assert "use_pdl=True" in sync_wrapper.host_func
-    assert "--gpu-arch=sm_90" in sync_wrapper.host_func
+    namespace = {}
+    exec(sync_wrapper.host_func, namespace)
+    assert namespace["_cutedsl_arch"] == "sm_90"
+    (key,) = namespace["_cutedsl_compile_specs"]
+    spec = namespace["_cutedsl_compile_specs"][key]
+    fields = {field["name"]: field for field in spec["fields"]}
+    assert fields["programmatic_stream_serialization"]["constant"] == 1
+    assert "programmatic_stream_serialization" in namespace["_kernel_specs"][key]["cuda_launch_fields"]
 
-    launcher_cpp = sync_wrapper.get_launcher_cpp_code()
-    assert "CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION" in launcher_cpp
-    assert "cuLaunchKernelEx" in launcher_cpp
+    from tilelang.jit.adapter.cutedsl._compiler import launch_source
+
+    options, unsupported = launch_source(spec)
+    assert not unsupported
+    launch = ast.parse(f"launch({options})", mode="eval").body
+    pdl = next(keyword.value for keyword in launch.keywords if keyword.arg == "use_pdl")
+    assert isinstance(pdl, ast.Constant) and pdl.value == 1
+    # Native FunctionInfo and launch fields select the provider's CUDA launcher.
+    # This wrapper no longer emits or loads a separate C++ launcher library.
+    assert sync_wrapper.get_launcher_cpp_code() is None
 
     import tilelang.contrib.cutedsl as tl
 
@@ -344,7 +366,7 @@ def test_cutedsl_pdl_runtime_pipeline():
         _lower_cutedsl_for_pdl(kernels_with_pdl_pipeline(N, block_size=64))
         kernel = tilelang.compile(
             kernels_with_pdl_pipeline(N, block_size=64),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target=_runtime_cutedsl_target(device),
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         b = torch.empty_like(a)
@@ -378,8 +400,9 @@ def test_cutedsl_pdl_overlap_microbenchmark():
     N = num_blocks * block_size
 
     _print_pdl_benchmark_environment(device)
+    target = _runtime_cutedsl_target(device)
     print("PDL microbenchmark config:")
-    print("  target=cutedsl sm_90")
+    print(f"  target=cutedsl {target['arch']}")
     print(f"  num_blocks={num_blocks}")
     print(f"  block_size={block_size}")
     print(f"  work_iters={work_iters}")
@@ -389,11 +412,11 @@ def test_cutedsl_pdl_overlap_microbenchmark():
     with torch.cuda.device(device):
         serial_kernel = tilelang.compile(
             kernels_without_pdl_overlap_window(N, block_size=block_size, work_iters=work_iters),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target=target,
         )
         pdl_kernel = tilelang.compile(
             kernels_with_pdl_overlap_window(N, block_size=block_size, work_iters=work_iters),
-            target={"kind": "cutedsl", "arch": "sm_90"},
+            target=target,
         )
         a = torch.randn(N, dtype=torch.float32, device=device)
         serial_outputs = [torch.empty_like(a) for _ in range(4)]

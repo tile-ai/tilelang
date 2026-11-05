@@ -28,7 +28,6 @@
 #include <tvm/tirx/expr.h>
 
 #include "ascend/op/utils.h"
-#include "transform/common/attr.h"
 
 namespace tvm {
 namespace tl {
@@ -44,7 +43,11 @@ constexpr const char *kManualMultiBuffer = "tl.manual_multi_buffer";
 constexpr const char *kMultiBufferEligible = "multi_buffer_eligible";
 
 /*! \brief Storage data Var -> positive compile-time version count. */
-using BufferVersionMap = ffi::Map<tirx::Var, int>;
+using BufferVersionMap = ffi::Map<Var, int>;
+
+// Storage-level selection mode, independent of the physical counter plan.
+constexpr const char *kBufferVersionMode = "tl.buffer_version_mode";
+using BufferVersionModeMap = ffi::Map<Var, ffi::String>;
 
 // Logical reads/writes remain separate. Ownership, physical versions and
 // address reuse use the same allocation group, represented by the data Var.
@@ -55,11 +58,11 @@ public:
     for (const auto &[sf, data] : bindings_)
       scales_.Set(data, sf);
   }
-  tirx::Var Representative(const tirx::Var &storage) const {
+  Var Representative(const Var &storage) const {
     return bindings_.Get(storage).value_or(storage);
   }
-  ffi::Array<tirx::Var> Members(const tirx::Var &storage) const {
-    tirx::Var data = Representative(storage);
+  ffi::Array<Var> Members(const Var &storage) const {
+    Var data = Representative(storage);
     if (auto sf = scales_.Get(data))
       return {data, sf.value()};
     return {data};
@@ -74,16 +77,16 @@ private:
 // User overrides and prepared metadata must describe the entire group.
 // Contradictory member requests are errors, rather than last-writer wins.
 template <typename T>
-ffi::Map<tirx::Var, T> ExpandL0StorageGroupValues(ffi::Map<tirx::Var, T> values,
-                                                  const L0StorageGroups &groups,
-                                                  const char *description) {
+ffi::Map<Var, T> ExpandL0StorageGroupValues(ffi::Map<Var, T> values,
+                                            const L0StorageGroups &groups,
+                                            const char *description) {
   auto original = values;
   for (const auto &[storage, value] : original) {
-    for (const tirx::Var &member : groups.Members(storage)) {
+    for (const Var &member : groups.Members(storage)) {
       if (auto existing = values.Get(member)) {
         ICHECK(existing.value() == value)
             << "Conflicting " << description << " for bound L0 data/SF group "
-            << groups.Representative(storage)->name_hint;
+            << groups.Representative(storage)->name;
       }
       values.Set(member, value);
     }

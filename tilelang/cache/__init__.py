@@ -4,36 +4,47 @@ from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Literal
-from tvm.target import Target as TVMTarget
-from tvm.tirx import PrimFunc
+from tvm_tirx.target import Target as TVMTarget
+from tvm_tirx.tirx import Function
 from tilelang.jit import JITKernel
 from tilelang import env
-from tilelang.jit.adapter.cutedsl.kernel_cache import CuTeDSLKernelCache
-from tilelang.jit.adapter.cython.kernel_cache import CythonKernelCache
-from tilelang.jit.adapter.nvrtc.kernel_cache import NVRTCKernelCache
-from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
-from tilelang.jit.adapter.kernel_cache import TVMFFIKernelCache
-from tilelang.ascend.kernel_cache import AscendCythonKernelCache, AscendTVMFFIKernelCache
+from importlib import import_module
+import threading
 
 if TYPE_CHECKING:
     from .kernel_cache import KernelCache
 
 TargetLike = str | dict[str, object] | TVMTarget
 
-# Create a map of singleton instance of KernelCaches
-_dispatch_map: dict[str, KernelCache] = {
-    "tvm_ffi": TVMFFIKernelCache(),
-    "cython": CythonKernelCache(),
-    "nvrtc": NVRTCKernelCache(),
-    "cutedsl": CuTeDSLKernelCache(),
-    "pto": CythonKernelCache(),
-    "torch": TorchKernelCache(),
+# Resolve one cache implementation with its matching runtime adapter. Optional
+# backend imports must not become prerequisites for compiling a CPU function.
+_CACHE_CLASSES = {
+    "tvm_ffi": ("tilelang.jit.adapter.kernel_cache", "TVMFFIKernelCache"),
+    "cython": ("tilelang.jit.adapter.cython.kernel_cache", "CythonKernelCache"),
+    "nvrtc": ("tilelang.jit.adapter.nvrtc.kernel_cache", "NVRTCKernelCache"),
+    "cutedsl": ("tilelang.jit.adapter.cutedsl.kernel_cache", "CuTeDSLKernelCache"),
+    "pto": ("tilelang.jit.adapter.cython.kernel_cache", "CythonKernelCache"),
+    "torch": ("tilelang.jit.adapter.torch.kernel_cache", "TorchKernelCache"),
 }
+_ASCEND_CACHE_CLASSES = {
+    "tvm_ffi": ("tilelang.ascend.kernel_cache", "AscendTVMFFIKernelCache"),
+    "cython": ("tilelang.ascend.kernel_cache", "AscendCythonKernelCache"),
+}
+_dispatch_map: dict[str, KernelCache] = {}
+_ascend_dispatch_map: dict[str, KernelCache] = {}
+_dispatch_lock = threading.RLock()
 
-_ascend_dispatch_map: dict[str, KernelCache] = {
-    "tvm_ffi": AscendTVMFFIKernelCache(),
-    "cython": AscendCythonKernelCache(),
-}
+
+def _load_cache(name: str, *, ascend: bool):
+    mapping = _ascend_dispatch_map if ascend else _dispatch_map
+    classes = _ASCEND_CACHE_CLASSES if ascend else _CACHE_CLASSES
+    with _dispatch_lock:
+        if name not in mapping:
+            if name not in classes:
+                raise ValueError(f'Cannot find support for execution backend "{name}"')
+            module_name, class_name = classes[name]
+            mapping[name] = getattr(import_module(module_name), class_name)()
+        return mapping[name]
 
 
 def _resolve_cache_dispatch(
@@ -67,14 +78,12 @@ def _resolve_cache_dispatch(
                 ", ".join(sorted(allowed_now)),
             )
     # Dispatch on the resolved backend module rather than on the target kind.
-    dispatch_map = _ascend_dispatch_map if context.module.name == "ascend" else _dispatch_map
-    if resolved_backend not in dispatch_map:
-        raise ValueError(f'Cannot find support for execution backend "{resolved_backend}"')
-    return dispatch_map[resolved_backend], context, verbose
+    cache = _load_cache(resolved_backend, ascend=context.module.name == "ascend")
+    return cache, context, verbose
 
 
 def cached(
-    func: PrimFunc = None,
+    func: Function = None,
     out_idx: list[int] = None,
     *args,
     target: TargetLike | None = None,

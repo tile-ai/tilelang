@@ -20,8 +20,9 @@ namespace tl {
  */
 class GemmBlockScaledNode : public GemmNode {
 public:
-  tirx::BufferRegion sfaRegion_, sfbRegion_;
-  PrimExpr sfKStart_;
+  tvm::TensorRegion sfaRegion_{ffi::UnsafeInit{}},
+      sfbRegion_{ffi::UnsafeInit{}};
+  PrimExpr sfKStart_{ffi::UnsafeInit{}};
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.GemmBlockScaled", GemmBlockScaledNode,
                                     GemmNode);
@@ -34,8 +35,10 @@ public:
   }
 
   AccessRegions GetAccessRegions() const override;
-  ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const override;
+  ffi::Array<tvm::TensorRegion> GetReadBeforeWriteRegions() const override;
   TileOperator Clone() const override;
+  Stmt Lower(const LowerArgs &lower_args,
+             sym::AnalyzerObj *analyzer) const override;
 
   // Calls the backend's dedicated block-scaled instruction selector, or
   // rejects the operation if that selector is not registered.
@@ -48,9 +51,9 @@ class GemmBlockScaled : public Gemm {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(GemmBlockScaled, Gemm,
                                              GemmBlockScaledNode);
-  TVM_DLL
-  GemmBlockScaled(ffi::Array<PrimExpr> args,
-                  ffi::Map<ffi::String, ffi::ObjectRef> annotations = {});
+  TVM_TIRX_DLL
+  GemmBlockScaled(ffi::Array<Expr> args,
+                  ffi::Map<ffi::String, ffi::Any> annotations = {});
   static const Op &Get();
 };
 
@@ -67,6 +70,9 @@ struct GemmBlockScaledImpl {
   GemmTargetPredicate match_target;
   ffi::String (*select_inst)(const GemmBlockScaled &op, int block_size,
                              const Target &target);
+  // Optional backend operand validation at the native lowering boundary.
+  void (*validate)(const GemmBlockScaled &op, const LowerArgs &lower_args,
+                   sym::AnalyzerObj *analyzer) = nullptr;
 };
 
 void RegisterGemmBlockScaledImpl(GemmBlockScaledImpl impl);

@@ -1,7 +1,10 @@
 # CUDA, ROCm, and Ascend Stub Libraries
 
 This document describes TileLang's stub mechanism for GPU/NPU driver and
-runtime libraries (CUDA, ROCm/HIP, and Ascend/CANN).
+runtime libraries (CUDA, ROCm/HIP, and Ascend/CANN). The matched
+`apache-tvm-tirx` provider owns the combined compiler, device runtimes and
+enabled stub libraries. The `tilelang` frontend wheel does not install a
+second copy of these libraries.
 
 ## Purpose
 
@@ -26,7 +29,7 @@ ROCm:
    have already loaded HIP.
 2. **HIP Runtime Compiler (`hiprtc_stub`, file `libstub_hiprtc.so`)**: Lazily
    loads `libhiprtc.so` and exposes the minimal HIPRTC API subset used by
-   TileLang/TVM.
+   TileLang/TIRx.
 
 Ascend:
 
@@ -67,7 +70,7 @@ Ascend stubs in `src/ascend/stubs/` implement a lazy-loading mechanism:
   TileLang links against these stubs instead of the system CUDA toolkit
   libraries.
 - `TILELANG_USE_HIP_STUBS` (Default: `ON`) controls ROCm stubs. When enabled
-  (and `USE_ROCM=ON`), TileLang/TVM link against `hip_stub` / `hiprtc_stub`
+  (and `USE_ROCM=ON`), TileLang/TIRx link against `hip_stub` / `hiprtc_stub`
   instead of the system ROCm libraries.
 - `TILELANG_USE_ASCEND_STUBS` (Default: `ON` on non-Windows) controls the
   Ascend stub. When enabled (and `USE_ASCEND=ON`), TileLang links against

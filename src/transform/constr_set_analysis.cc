@@ -15,7 +15,9 @@
  *   ["bind",   Var, PrimExpr]                -- flat `v = expr` bind
  *   ["range",  Var, PrimExpr, PrimExpr]      -- `v in [min, min+extent)`
  */
+#include "../support/check.h"
 #include "common/constr_visitor.h"
+#include <tvm/ffi/reflection/registry.h>
 
 namespace tvm {
 namespace tl {
@@ -27,26 +29,27 @@ namespace {
 
 Constr ParseConstr(const Array<ObjectRef> &spec) {
   ICHECK(!spec.empty()) << "ConstrSetsProve: empty entry spec";
-  const auto *kind_imm = spec[0].as<StringImmNode>();
+  const auto *kind_imm = spec[0].as<StringImmObj>();
   ICHECK(kind_imm != nullptr)
       << "ConstrSetsProve: entry kind must be a StringImm";
   const std::string kind = kind_imm->value;
   if (kind == "pred" || kind == "assume") {
     ICHECK_EQ(spec.size(), 2U)
         << "ConstrSetsProve: [\"" << kind << "\", PrimExpr] expects 2 fields";
-    return Constr(Downcast<PrimExpr>(spec[1]), /*is_assume=*/kind == "assume");
+    return Constr(spec[1].as_or_throw<PrimExpr>(),
+                  /*is_assume=*/kind == "assume");
   }
   if (kind == "bind") {
     ICHECK_EQ(spec.size(), 3U)
         << "ConstrSetsProve: [\"bind\", Var, PrimExpr] expects 3 fields";
-    return Constr(Downcast<Var>(spec[1]), Downcast<PrimExpr>(spec[2]));
+    return Constr(spec[1].as_or_throw<Var>(), spec[2].as_or_throw<PrimExpr>());
   }
   if (kind == "range") {
     ICHECK_EQ(spec.size(), 4U)
         << "ConstrSetsProve: [\"range\", Var, min, extent] expects 4 fields";
-    return Constr(Downcast<Var>(spec[1]),
-                  Range::FromMinExtent(Downcast<PrimExpr>(spec[2]),
-                                       Downcast<PrimExpr>(spec[3])));
+    return Constr(spec[1].as_or_throw<Var>(),
+                  Range::FromMinExtent(spec[2].as_or_throw<PrimExpr>(),
+                                       spec[3].as_or_throw<PrimExpr>()));
   }
   LOG(FATAL) << "ConstrSetsProve: unknown entry kind '" << kind
              << "' (expected pred/assume/bind/range)";
@@ -68,7 +71,7 @@ bool ConstrSetsProve(Array<Array<ObjectRef>> first,
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
+  namespace refl = ffi::reflection;
   refl::GlobalDef().def("tl.analysis.ConstrSetsProve", ConstrSetsProve);
 }
 

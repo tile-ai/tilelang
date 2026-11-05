@@ -14,10 +14,9 @@ from __future__ import annotations
 
 import threading
 
-from tvm import tirx
-from tvm.tirx import Var
+from tilelang.language import _native as tirx
+from tilelang.language._native import Var
 
-from tilelang import _ffi_api
 from tilelang.jit.exceptions import JITNoBuilderError
 from tilelang.language.kernel import (
     FrameStack,
@@ -225,4 +224,5 @@ def MixedKernel(
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
 
-    return _ffi_api.MixedKernelLaunch(blocks, sids, attrs)
+    attrs["vector_count"] = sids
+    return KernelLaunchFrame((*blocks, sids), None, attrs, grid_tags=("blockIdx.x", "cthread"))

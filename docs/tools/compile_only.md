@@ -85,8 +85,8 @@ extern "C" __global__ void __launch_bounds__(64, 1) add_kernel(const half_t* __r
   runs. Keep examples compile-only: define kernels, do not launch them or
   allocate tensors at import time. Running the CLI with `python -I` (isolated
   mode) is recommended, and is how Compiler Explorer invokes it.
-- The first `@tilelang.jit` function or `PrimFunc` in module order is selected.
-  Objects are inspected in definition order, so a `PrimFunc` defined before a
+- The first `@tilelang.jit` function or `Function` in module order is selected.
+  Objects are inspected in definition order, so a `Function` defined before a
   `@tilelang.jit` kernel wins.
 - The kernel is lowered but never device-compiled or executed, so no tensor
   arguments are needed and no GPU is touched.
@@ -140,7 +140,7 @@ as tracebacks about missing GPUs or drivers:
 
 ```text
 $ python -I -m tilelang.tools.compile_only --output_file out.c broken.py
-tilelang compile-only error: no @tilelang.jit kernel or PrimFunc found
+tilelang compile-only error: no @tilelang.jit kernel or Function found
 ```
 
 Syntax errors in the input, missing input files, and empty kernels are
@@ -167,7 +167,7 @@ source = compile_kernel_source(add.get_tir())  # default target "c"
 cuda_source = compile_kernel_source(add.get_tir(), "cuda")  # pinned to sm_80
 ```
 
-- `compile_kernel_source(func, target="c")` lowers a `PrimFunc` (for example
+- `compile_kernel_source(func, target="c")` lowers a `Function` (for example
   from `JITImpl.get_tir()`) and returns the non-empty kernel source string.
 - `resolve_target(target)` maps a CLI-style target string to the explicit
   target passed to `lower()`, applying the rules from the table above.
@@ -176,7 +176,7 @@ cuda_source = compile_kernel_source(add.get_tir(), "cuda")  # pinned to sm_80
 
 ## Limitations
 
-- Only the first `@tilelang.jit` kernel or `PrimFunc` in the module is
+- Only the first `@tilelang.jit` kernel or `Function` in the module is
   compiled; additional kernels in the same file are ignored.
 - The output is lowered kernel source, not a compiled binary: nothing is
   passed to `nvcc`, and PTX/SASS is out of scope.

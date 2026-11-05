@@ -2,8 +2,8 @@
 
 import tilelang.ascend.language as T
 from tilelang.ascend import transform
-from tilelang import tvm
-from testing.ascend._ir import schedule, nodes
+import tilelang
+from testing.ascend._ir import schedule, annotations
 
 
 def _make_cyclic_scalar_program(interleave: bool = False, versions: int = 1):
@@ -32,12 +32,12 @@ def _make_cyclic_scalar_program(interleave: bool = False, versions: int = 1):
 
 
 def _insert_sync_alias_pairs(program, *, disable_reuse=False) -> set[tuple[str, str]]:
-    with tvm.transform.PassContext(config={"tl.disable_shared_memory_reuse": disable_reuse}):
+    with tilelang.transform.PassContext(config={"tl.disable_shared_memory_reuse": disable_reuse}):
         before = schedule(program, through="ResolveCore", auto_schedule=False)
         mod = transform.InsertSync()(before)
     pairs = set()
-    for block in nodes(mod, tvm.tirx.SBlock):
-        for storage, compatible in block.annotations.get("tl.buffer_alias_map", {}).items():
+    for fields in annotations(mod):
+        for storage, compatible in fields.get("tl.buffer_alias_map", {}).items():
             for other in compatible:
                 pairs.add(tuple(sorted((storage.name, other.name))))
     return pairs

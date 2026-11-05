@@ -3,6 +3,15 @@
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
+import tilelang.ascend.debug
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enable_device_assert_for_source_checks(monkeypatch):
+    # These tests inspect generated CCE source without executing NPU code.
+    # Enable the macro's availability gate explicitly on SDK-free hosts.
+    monkeypatch.setattr(tilelang.ascend.debug, "_IS_ASCEND_AVAILABLE", True)
 
 
 def _source(program):

@@ -109,9 +109,9 @@ def make_strided_slice(phys_buf, layout, logical_region):
     Compute a 0-origin strided buffer view for a logical sub-region on a
     layout-annotated physical buffer.
 
-    The result is a plain strided Buffer sharing ``phys_buf``'s data pointer,
-    with explicit shape (extents) and strides pointing at the sub-region's
-    base element. No layout knowledge is needed by the consumer.
+    The native tensor declaration shares ``phys_buf``'s storage and preserves
+    its physical strides, element origin, dtype, scope, and data alignment.
+    The requested sub-region contributes an additional element offset.
 
     Args:
         phys_buf: The physical (remapped) buffer, e.g. with NZ shape
@@ -120,9 +120,18 @@ def make_strided_slice(phys_buf, layout, logical_region):
         logical_region: One ``Range`` per layout input dim, ``[min, min+extent)``.
 
     Returns:
-        Buffer: A strided buffer view into ``phys_buf``.
+        A bound native TensorVar inside an IR builder. Outside a builder,
+        returns the native ``tirx.decl_tensor`` expression; bind it with
+        ``ir.Bind`` before using tensor load/store syntax.
     """
-    return _ffi_api.make_strided_slice(phys_buf, layout, logical_region)
+    from tvm_tirx.script.ir_builder import IRBuilder
+
+    value = _ffi_api.make_strided_slice(phys_buf, layout, logical_region)
+    if IRBuilder.is_in_scope():
+        from tilelang.language._native import bind
+
+        return bind(value)
+    return value
 
 
 class FractalLayoutInfo:

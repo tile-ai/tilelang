@@ -14,8 +14,11 @@ level, how they map to hardware concepts, and how to use them correctly.
 ## Data Movement
 
 Use `T.copy(src, dst, *, coalesced_width=None, loop_layout=None)`
-to move tiles between memory scopes. It accepts `tir.Buffer`, `BufferLoad`, or
-`BufferRegion`; extents are inferred or broadcast when possible. Backend
+to move tiles between memory scopes. It accepts whole tensor variables, scalar tensor loads, or tensor regions;
+the native IR uses tensor-typed `Var`, `TensorLoad`, and `TensorRegion`.
+C++ consumers can use the checked `tirx::TensorVar` view. Existing
+`T.Tensor`/`T.Buffer` annotations and slicing spellings remain language APIs.
+Extents are inferred or broadcast when possible. Backend
 dialects add their lowering hints as extra keywords: the CUDA dialect (the
 default `tilelang.language` facade) accepts `disable_tma`, `eviction_policy`
 and `prefer_instruction`. Hints are recorded on the op and ignored by targets

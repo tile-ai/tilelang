@@ -16,16 +16,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-import tilelang.language.common as T
+import tilelang.language as T
 from tilelang import _ffi_api
-from tilelang import tvm as tvm
-from tvm import tirx
-from tvm.ir import Range
-from tvm.target import Target
-from tvm.tirx import Buffer, BufferLoad, BufferRegion, IndexMap, PrimExpr, Var
-from tvm.runtime import convert
+from tilelang.language import _native as tirx
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
+from tilelang.language._native import Buffer, BufferLoad, BufferRegion, PrimExpr, Var
+from tvm_tirx.tirx import IndexMap
+from tvm_ffi import convert
 
-from tilelang.language.utils import get_buffer_region_from_load
+from tilelang.utils import get_buffer_region_from_load
 from tilelang.utils import is_fragment
 from .wmma_layout import (
     get_wmma_a_layout_funcs,
@@ -68,6 +68,7 @@ class WMMAIntrinEmitter:
         thread_var: Var | None = None,
         target: Target | None = None,
     ):
+        a_dtype, b_dtype, accum_dtype = str(a_dtype), str(b_dtype), str(accum_dtype)
         assert a_dtype in ("float16", "bfloat16"), f"Unsupported a_dtype: {a_dtype}"
         assert accum_dtype == "float32", f"Unsupported accum_dtype: {accum_dtype}"
         assert target is not None, "WMMAIntrinEmitter requires a HIP target to select WMMA layouts."
@@ -186,11 +187,11 @@ class WMMAIntrinEmitter:
 
         # legalize shared buffer to region
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
+        A_buf = A_region.source
+        A_base0 = A_region.region[-2].begin
+        A_base1 = A_region.region[-1].begin
         # Leading dimensions (e.g. pipeline stage axis) – empty for 2-D buffers
-        A_other = [r.min for r in A_region.region[:-2]]
+        A_other = [r.begin for r in A_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_a(A_local_buf, A_shared_buf, ki, thread_binding, rk=0):
@@ -240,11 +241,11 @@ class WMMAIntrinEmitter:
 
         # legalize shared buffer to region
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
+        B_buf = B_region.source
+        B_base0 = B_region.region[-2].begin
+        B_base1 = B_region.region[-1].begin
         # Leading dimensions (e.g. pipeline stage axis) – empty for 2-D buffers
-        B_other = [r.min for r in B_region.region[:-2]]
+        B_other = [r.begin for r in B_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_b(B_local_buf, B_shared_buf, ki, thread_binding, rk=0):
@@ -509,5 +510,5 @@ class WMMAIntrinEmitter:
             mins = list(obj.indices)
             ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.buffer, ranges)
+            return BufferRegion(obj.source, ranges)
         raise ValueError(f"Unsupported argument type: {type(obj)}")

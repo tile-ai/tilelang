@@ -1,8 +1,8 @@
-"""Turn Python classes/methods into TIR, in both eager and lazy modes.
+"""Turn Python classes and methods into native IR in both frontend modes.
 
-Two DSL primitives -- ``inline`` (method -> inlined TIR) and ``meta_class``
-(class of JIT-time stateful helpers) -- that behave the same in eager
-(``@tilelang.jit``) and lazy (``@T.prim_func``) frontends. See each function's
+The ``inline`` method decorator and ``meta_class`` stateful-helper decorator
+share construction contracts across the TileLang eager builder and the native
+script parser. See each function's
 docstring for the details.
 """
 
@@ -24,7 +24,7 @@ class _InlineMethod:
     def __init__(self, func: Callable) -> None:
         self._func = func
         self._eager = None  # eager macro, built lazily
-        self._lazy = None  # TVMScript parser inline, built lazily
+        self._lazy = None  # native statement runner, built lazily
         self.__name__ = getattr(func, "__name__", "inline")
         self.__doc__ = getattr(func, "__doc__", None)
 
@@ -37,9 +37,32 @@ class _InlineMethod:
 
     def _lazy_macro(self):
         if self._lazy is None:
-            from tvm.tirx.script.parser.entry import inline as _tvm_inline
+            from functools import wraps
+            from tvm_tirx.script.parser.entry import _run_statements
+            from tvm_tirx.script.parser.inspect_source import capture_lexical_bindings
+            from tvm_tirx.tirx.script import ir_builder
 
-            self._lazy = _tvm_inline(self._func)
+            signature = inspect.signature(self._func)
+
+            @wraps(self._func)
+            def invoke(*args, **kwargs):
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                # This descriptor already owns its original method. Native
+                # inline decorators require definition-site @ application;
+                # execute the body in the caller's existing builder instead.
+                # Refresh closure cells for each call, as native inline does.
+                environment = {**self._func.__globals__, **capture_lexical_bindings(self._func)}
+                return _run_statements(
+                    self._func,
+                    ir_builder,
+                    {**environment, **bound.arguments},
+                    set(bound.arguments),
+                    preserve_return=True,
+                    definition_scope=environment,
+                )
+
+            self._lazy = invoke
         return self._lazy
 
     def _dispatch(self, obj: Any, *args: Any, **kwargs: Any):
@@ -62,13 +85,14 @@ def inline(func: Callable) -> _InlineMethod:
     the same method works in both frontends:
 
     - eager mode (an eager ``Builder`` is active) -> the eager ``macro`` engine;
-    - lazy mode (no eager builder; a TVMScript parser is active) -> TVM's
-      parser-level ``inline`` (``TIRInline``).
+    - native script mode (a native IRBuilder is active) -> the shared native
+      statement runner, using the original method source, bound Python
+      arguments/defaults, and current lexical closure values.
 
     Both engines are built lazily on first use of the respective mode.
 
     Inside an inlined method, read scalar state via ``self.x[0]`` and write via
-    ``self.x[0] = ...``; the store lowers to ``BufferStore`` through whichever
+    ``self.x[0] = ...``; the store lowers to ``TensorStore`` through whichever
     engine is active, so no core builder/parser changes are needed.
     """
     return _InlineMethod(func)
@@ -78,8 +102,8 @@ def _emits_store(func: Callable) -> bool:
     """True if ``func`` contains a buffer store (subscript-target assignment).
 
     A subscript target ``self.x[...] = ...`` (or its augmented form) is how state
-    methods lower to ``BufferStore``, so such methods must be inlined. Methods
-    without any store only build/return ``PrimExpr`` values and are kept plain
+    methods lower to ``TensorStore``, so such methods must be inlined. Methods
+    without any store only build/return scalar ``ir.Expr`` values and are kept plain
     Python (they work in both modes and can be reused statelessly).
     """
     try:
@@ -102,8 +126,8 @@ def _emits_store(func: Callable) -> bool:
 
 def _name_buffer(meta_name: str, attr: str, value: Any) -> None:
     """Give a state buffer a readable name ``{meta_name}_{attr}`` in the IR."""
-    from tvm.script.ir_builder import IRBuilder
-    from tvm.tirx import Buffer
+    from tvm_tirx.script.ir_builder import IRBuilder
+    from tilelang.language._native import Buffer
 
     if not isinstance(value, Buffer):
         return
@@ -155,7 +179,7 @@ def meta_class(cls: _C) -> _C:
     buffers as state (``T.alloc_var`` emits into the active IR frame in both
     modes). The decorator has three responsibilities:
 
-    1. Mark the class with ``_is_meta_class``. The lazy parser needs this to
+    1. Mark the class with ``_is_meta_class``. The native parser uses this to
        bind ``sched = Sched(...)`` as a (non-TIR) instance in its scope instead
        of trying to turn it into a constant.
     2. Auto-``inline`` every TIR-emitting method, so methods need no per-method
@@ -167,7 +191,7 @@ def meta_class(cls: _C) -> _C:
        - ``staticmethod`` / ``classmethod`` / ``property``,
        - methods already decorated with ``@inline``,
        - methods with no buffer store -- pure compile-time helpers that only
-         build/return ``PrimExpr`` expressions (e.g. ``valid`` returning a
+         build/return scalar ``ir.Expr`` expressions (e.g. ``valid`` returning a
          loop condition, or a ``coord(tile_id)`` decode returning ``(m, n)``).
          These stay plain so they can return values and be reused statelessly.
          A method that emits TIR only through control flow / nested calls (no
@@ -176,7 +200,7 @@ def meta_class(cls: _C) -> _C:
        ``name`` is the optional constructor argument named ``name`` (so
        ``Sched(..., name="sched")`` yields ``sched_m_idx`` etc.; the default
        ``None`` skips naming). This wraps ``__init__`` to capture ``name`` and
-       installs a ``__setattr__`` that names any ``Buffer`` assigned to an
+       installs a ``__setattr__`` that names any native tensor assigned to an
        attribute (leading underscores are stripped, so ``self._m_idx``
        becomes ``sched_m_idx``); non-buffers (compile-time ints like
        ``num_n_tiles``) are skipped, and naming is

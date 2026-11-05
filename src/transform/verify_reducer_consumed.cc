@@ -1,87 +1,71 @@
 /*!
  * \file verify_reducer_consumed.cc
- * \brief Assert that no reducer v2 construct survives past materialization.
- *
- * Runs after LowerTileOp. If any `local.reducer` allocation, first-class
- * reducer op, unconsumed multiplicity marker, or reducer_info_v2 annotation
- * is still present, some pass failed to consume it — that must be a compile
- * error, never silently-wrong generated code.
+ * \brief Reject any first-class reducer contract left after materialization.
  */
+#include "common/native_reducer_utils.h"
 
-#include "support/check.h"
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../op/reducer.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
+void CheckMetadata(const reducer_native::Metadata &metadata) {
+  TVM_FFI_CHECK(!metadata.count(attr::kReducerInfoV2), ValueError)
+      << "reducer_info_v2 annotation survived past ReducerPlanAndMaterialize";
+  if (auto layouts = metadata.Get(attr::kLayoutMap)) {
+    for (const auto &[tensor, layout] : reducer_native::ReadLayouts(*layouts))
+      TVM_FFI_CHECK(!IsReducerV2Buffer(tensor) &&
+                        !layout.as<PartialFragmentNode>(),
+                    ValueError)
+          << "Partial reducer layout survived past ReducerPlanAndMaterialize "
+             "for "
+          << tensor;
+  }
+}
 
-void CheckFunc(const PrimFunc &f) {
-  PostOrderVisit(f->body, [&](const ObjectRef &obj) {
-    if (const auto *block = obj.as<SBlockNode>()) {
-      for (const auto &buffer : block->alloc_buffers) {
-        ICHECK(!IsReducerV2Buffer(buffer))
-            << "internal error: reducer `" << buffer
-            << "` (scope local.reducer) survived past "
-               "ReducerPlanAndMaterialize; it was never materialized.";
-      }
-      ICHECK(!block->annotations.count(attr::kReducerInfoV2))
-          << "internal error: reducer_info_v2 annotation survived past "
-             "ReducerPlanAndMaterialize.";
-      // The inferred PartialFragment entries are keyed by local.reducer
-      // buffers and must be consumed (and erased) by the materializer:
-      // downstream layout consumers know only value-replication semantics.
-      if (auto layout_anno = block->annotations.Get(tl::attr::kLayoutMap)) {
-        if (auto as_map = layout_anno.value().as<Map<Buffer, Layout>>()) {
-          for (const auto &[buffer, layout] : as_map.value()) {
-            ICHECK(!IsReducerV2Buffer(buffer))
-                << "internal error: the partial layout of reducer `" << buffer
-                << "` survived past ReducerPlanAndMaterialize in a block's "
-                   "layout_map annotation.";
-          }
-        }
-      }
-    } else if (const auto *call = obj.as<CallNode>()) {
-      ICHECK(!call->op.same_as(ReducerInitOp::Get()) &&
-             !call->op.same_as(reducer_update()) &&
-             !call->op.same_as(FinalizeReducerV2Op::Get()))
-          << "internal error: first-class reducer op `" << call->op
-          << "` survived past ReducerPlanAndMaterialize.";
-    } else if (const auto *attr_stmt = obj.as<AttrStmtNode>()) {
-      ICHECK(attr_stmt->attr_key != attr::kParallelMultiplicity)
-          << "internal error: unconsumed tl.parallel_multiplicity marker "
-             "survived past PartitionLoop; the marked statement's execution "
-             "count is undefined.";
+void CheckFunction(const tirx::Function &function) {
+  if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+    return;
+  VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
+    if (auto tensor = object.as<tirx::TensorVar>()) {
+      TVM_FFI_CHECK(!IsReducerV2Buffer(*tensor), ValueError)
+          << "local.reducer tensor survived past ReducerPlanAndMaterialize: "
+          << *tensor;
+    } else if (const auto *call = object.as<CallObj>()) {
+      TVM_FFI_CHECK(!call->op.same_as(ReducerInitOp::Get()) &&
+                        !call->op.same_as(reducer_update()) &&
+                        !call->op.same_as(FinalizeReducerV2Op::Get()),
+                    ValueError)
+          << "First-class reducer op survived past ReducerPlanAndMaterialize: "
+          << call->op;
+      if (reducer_native::IsMetadataCall(call))
+        CheckMetadata(ReadNativeAnnotations(call));
+    } else if (const auto *region = object.as<RegionStmtObj>();
+               region && region->op->name == "tl.attr") {
+      auto fields = ReadNativeAnnotations(region);
+      auto key = fields.at("key").as_or_throw<ffi::String>();
+      TVM_FFI_CHECK(key != attr::kParallelMultiplicity, ValueError)
+          << "Unconsumed tl.parallel_multiplicity marker survived past "
+             "PartitionLoop";
+      if (key == "tl.kernel")
+        CheckMetadata(reducer_native::StringMap(fields.at("value")));
+      else if (reducer_native::IsReducerMetadataKey(key))
+        CheckMetadata({{key, fields.at("value")}});
     }
   });
 }
-
 } // namespace
 
-using namespace tirx::transform;
-
 tvm::transform::Pass VerifyReducerConsumed() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    CheckFunc(f);
-    return f;
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    CheckFunction(function);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.VerifyReducerConsumed", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.VerifyReducerConsumed");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.VerifyReducerConsumed",
-                        VerifyReducerConsumed);
+  ffi::reflection::GlobalDef().def("tl.transform.VerifyReducerConsumed",
+                                   VerifyReducerConsumed);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

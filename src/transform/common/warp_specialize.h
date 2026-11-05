@@ -4,17 +4,17 @@
  *
  * A WSSchedule is the complete description of how to transform a
  * straight-line kernel into a warp-specialized one. These are frontend IR
- * constructs (implemented in src/ir.cc): they are
+ * constructs (implemented in src/ir/warp_specialize.cc): they are
  * built on the Python side (T.WSSchedule / T.WSRole / T.WSPipeline /
- * T.WSScope), attached to the tilelang_root block by
+ * T.WSScope), encoded as explicit region operands by
  * T.annotate_ws_schedule, and consumed by the MaterializeWSSchedule pass.
  *
  * Structure:
  *  - WSRole: a contiguous warp range [warp_lo, warp_hi) with one duty and an
  *    optional register budget.
  *  - WSPipeline: a full/empty mbarrier pair protecting a set of buffers with
- *    `depth` versions. Buffers are referenced directly (matched to block
- *    allocations by their data var).
+ *    `depth` versions. Buffers are referenced directly (matched by native
+ * TensorVar identity).
  *  - WSInstr: one step of a role's program. Either a WSOpRef, naming a tile
  *    op or child scope by its stable `tl.ws_op_id`, or a WSSync, a pipeline
  *    synchronization point (producer_acquire / producer_commit /
@@ -34,7 +34,7 @@
 #include <tvm/ffi/container/map.h>
 #include <tvm/ffi/enum.h>
 #include <tvm/ffi/string.h>
-#include <tvm/tirx/buffer.h>
+#include <tvm/tirx/expr.h>
 
 #include "support/check.h"
 
@@ -85,8 +85,8 @@ public:
 
 class WSRole : public ffi::ObjectRef {
 public:
-  TVM_DLL WSRole(ffi::String name, int64_t warp_lo, int64_t warp_hi,
-                 int64_t max_nreg);
+  TVM_TIRX_DLL WSRole(ffi::String name, int64_t warp_lo, int64_t warp_hi,
+                      int64_t max_nreg);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSRole, ffi::ObjectRef,
                                              WSRoleNode);
 };
@@ -97,7 +97,7 @@ public:
   /*! \brief Pipeline name; referenced by WSSync instructions. */
   ffi::String name;
   /*! \brief The buffers this pipeline protects (and multi-versions). */
-  ffi::Array<tirx::Buffer> buffers;
+  ffi::Array<tirx::TensorVar> buffers;
   /*! \brief Number of buffer versions. */
   int64_t depth;
 
@@ -110,8 +110,8 @@ public:
 
 class WSPipeline : public ffi::ObjectRef {
 public:
-  TVM_DLL WSPipeline(ffi::String name, ffi::Array<tirx::Buffer> buffers,
-                     int64_t depth);
+  TVM_TIRX_DLL WSPipeline(ffi::String name, ffi::Array<tirx::TensorVar> buffers,
+                          int64_t depth);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSPipeline, ffi::ObjectRef,
                                              WSPipelineNode);
 };
@@ -142,7 +142,7 @@ public:
 
 class WSOpRef : public WSInstr {
 public:
-  TVM_DLL explicit WSOpRef(ffi::String id);
+  TVM_TIRX_DLL explicit WSOpRef(ffi::String id);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSOpRef, WSInstr, WSOpRefNode);
 };
 
@@ -155,8 +155,8 @@ public:
 
 class WSSyncKind : public ffi::Enum {
 public:
-  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSSyncKind, ffi::Enum,
-                                             WSSyncKindObj);
+  TVM_FFI_DEFINE_OBJECT_REF_METHODS_NOTNULLABLE(WSSyncKind, ffi::Enum,
+                                                WSSyncKindObj);
 
   static WSSyncKind ProducerAcquire() { return Get("PRODUCER_ACQUIRE"); }
   static WSSyncKind ProducerCommit() { return Get("PRODUCER_COMMIT"); }
@@ -164,7 +164,7 @@ public:
   static WSSyncKind ConsumerRelease() { return Get("CONSUMER_RELEASE"); }
 
   int CanonicalOrdinal() const {
-    return static_cast<int>(operator->()->_value);
+    return static_cast<int>(operator->()->_int_index);
   }
 
   bool IsProducerAcquire() const { return CanonicalOrdinal() == 0; }
@@ -180,7 +180,7 @@ public:
 
 private:
   static WSSyncKind Get(const ffi::String &name) {
-    ffi::Enum e = ffi::EnumObj::Get<WSSyncKindObj>(name);
+    ffi::Enum e = ffi::EnumObj::_GetByStrIndex<WSSyncKindObj>(name);
     const auto *node = e.as<WSSyncKindObj>();
     ICHECK(node != nullptr)
         << "WSSyncKind entry `" << name << "` is not a WSSyncKindObj";
@@ -191,6 +191,8 @@ private:
 /*! \brief A pipeline synchronization point. */
 class WSSyncNode : public WSInstrNode {
 public:
+  explicit WSSyncNode(WSSyncKind kind) : kind(std::move(kind)) {}
+  explicit WSSyncNode(ffi::UnsafeInit tag) : kind(tag) {}
   WSSyncKind kind;
   /*! \brief Name of the pipeline being synchronized. */
   ffi::String pipeline;
@@ -203,7 +205,7 @@ public:
 
 class WSSync : public WSInstr {
 public:
-  TVM_DLL WSSync(WSSyncKind kind, ffi::String pipeline, int64_t stage);
+  TVM_TIRX_DLL WSSync(WSSyncKind kind, ffi::String pipeline, int64_t stage);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSSync, WSInstr, WSSyncNode);
 };
 
@@ -223,8 +225,8 @@ public:
 
 class WSScope : public ffi::ObjectRef {
 public:
-  TVM_DLL WSScope(ffi::String id,
-                  ffi::Map<ffi::String, ffi::Array<WSInstr>> bodies);
+  TVM_TIRX_DLL WSScope(ffi::String id,
+                       ffi::Map<ffi::String, ffi::Array<WSInstr>> bodies);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSScope, ffi::ObjectRef,
                                              WSScopeNode);
 };
@@ -247,9 +249,9 @@ public:
 
 class WSSchedule : public ffi::ObjectRef {
 public:
-  TVM_DLL WSSchedule(int64_t num_warps, ffi::Array<WSRole> roles,
-                     ffi::Array<WSPipeline> pipelines,
-                     ffi::Array<WSScope> scopes);
+  TVM_TIRX_DLL WSSchedule(int64_t num_warps, ffi::Array<WSRole> roles,
+                          ffi::Array<WSPipeline> pipelines,
+                          ffi::Array<WSScope> scopes);
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(WSSchedule, ffi::ObjectRef,
                                              WSScheduleNode);
 };

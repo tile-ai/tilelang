@@ -1,132 +1,193 @@
 /*!
- *  \file lower_shared_tmem.cc
- *  \brief Convert shared.tmem buffers to plain shared + ptx init, and do
- *         coordinate translation (from logical address to physical address)
+ * \file lower_shared_tmem.cc
+ * \brief Lower native physical TMEM tensors to shared address words.
  *
- *  Logical buffers are not one-to-one with tcgen05.alloc calls: PlanTmemArenas
- *  packs several into one allocation when that saves columns, and shifts every
- *  address a packed buffer forms by where it starts in the allocation.
+ * LowerTileOp has already materialized (datapath, value-column) coordinates.
+ * This pass allocates b32 column arenas and preserves both address-token and
+ * base/offset intrinsic contracts, including aliases and explicit release.
  */
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/utils.h"
-#include "support/check.h"
-#include "tvm/ir/type.h"
-#include <algorithm>
-#include <string>
-#include <tvm/arith/analyzer.h>
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "ir/analyzer.h"
+#include "op/native_intrinsic.h"
+#include "transform/common/native_layout_utils.h"
+
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/op/gpu.h>
 #include <tvm/tirx/transform.h>
+
+#include <algorithm>
+#include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
+namespace tvm::tl {
+namespace {
 using namespace ffi;
+using namespace tirx;
+using namespace prim;
+using VarSet = std::unordered_set<const VarObj *>;
 
-using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
+bool IsTmem(const TensorVar &tensor) {
+  return tensor.scope().name() == "shared.tmem";
+}
 
-/*!
- * \brief Collect TMEM buffers explicitly deallocated on fallthrough paths.
- *
- * A "fallthrough path" is one that reaches the end of the statement without
- * hitting thread_return().  Buffers deallocated on every such path already
- * have an explicit dealloc, so we can skip the auto-dealloc at block end.
- *
- * \return {buffers deallocated on fallthrough, whether the stmt can
- * fallthrough}
- */
-static std::pair<VarSet, bool> CollectFallthroughDeallocs(const Stmt &stmt) {
-  if (!stmt.defined())
-    return {{}, true};
-
-  // Unwrap transparent wrapper nodes
-  if (stmt.as<BindNode>())
-    return {{}, true};
-  if (auto *n = stmt.as<AttrStmtNode>())
-    return CollectFallthroughDeallocs(n->body);
-  if (auto *n = stmt.as<SBlockNode>())
-    return CollectFallthroughDeallocs(n->body);
-  if (auto *n = stmt.as<SBlockRealizeNode>())
-    return CollectFallthroughDeallocs(n->block->body);
-  if (auto *n = stmt.as<ForNode>())
-    return CollectFallthroughDeallocs(n->body);
-
-  // Sequential: accumulate deallocs; stop if any child doesn't fallthrough
-  if (auto *seq = stmt.as<SeqStmtNode>()) {
-    VarSet deallocs;
-    for (const auto &child : seq->seq) {
-      auto [d, ft] = CollectFallthroughDeallocs(child);
-      if (!ft)
-        return {{}, false};
-      deallocs.insert(d.begin(), d.end());
-    }
-    return {std::move(deallocs), true};
+// Layout and safe-value maps described the logical tensor before LowerTileOp
+// and LegalizeSafeMemoryAccess. They cannot be attached to its uint32 address
+// word: that would describe the wrong rank, dtype and storage object.
+Map<Any, Any> WithoutTmemEntries(const Any &value, bool *changed) {
+  Map<Any, Any> result;
+  for (const auto &[key, item] : value.cast<Map<Any, Any>>()) {
+    if (auto tensor = key.as<TensorVar>(); tensor && IsTmem(*tensor))
+      *changed = true;
+    else
+      result.Set(key, item);
   }
+  return result;
+}
 
-  // Branch: collect deallocs only from branches that can fallthrough
-  if (auto *iff = stmt.as<IfThenElseNode>()) {
-    auto [then_d, then_ft] = CollectFallthroughDeallocs(iff->then_case);
-    auto [else_d, else_ft] =
-        iff->else_case.defined()
-            ? CollectFallthroughDeallocs(iff->else_case.value())
-            : std::pair<VarSet, bool>{{}, true};
-    VarSet deallocs;
-    if (then_ft)
-      deallocs.insert(then_d.begin(), then_d.end());
-    if (else_ft)
-      deallocs.insert(else_d.begin(), else_d.end());
-    return {std::move(deallocs), then_ft || else_ft};
-  }
-
-  // Leaf: detect deallocate_tmem and thread_return
-  if (auto *eval = stmt.as<EvaluateNode>()) {
-    if (auto *call = eval->value.as<CallNode>()) {
-      if (call->op.same_as(tl::deallocate_tmem())) {
-        ICHECK_EQ(call->args.size(), 1U);
-        auto *buf = call->args[0].as<VarNode>();
-        ICHECK(buf) << "tl.deallocate_tmem expects a buffer data Var";
-        return {{GetRef<Var>(buf)}, true};
-      }
-      if (call->op.same_as(builtin::thread_return())) {
-        return {{}, false};
+bool ConsumeTmemMetadata(Map<String, Any> *metadata) {
+  bool changed = false;
+  for (const char *key : {"layout_map", "safe_value_map"}) {
+    if (auto value = metadata->Get(key)) {
+      bool removed = false;
+      auto remaining = WithoutTmemEntries(*value, &removed);
+      if (removed) {
+        changed = true;
+        if (remaining.empty())
+          metadata->erase(key);
+        else
+          metadata->Set(key, remaining);
       }
     }
   }
-
-  return {{}, true};
+  return changed;
 }
 
-/*!
- * \brief Collect every TMEM buffer named by a tl.deallocate_tmem call.
- *
- * Unlike CollectFallthroughDeallocs this ignores control flow: a buffer whose
- * lifetime the kernel manages by hand -- even on a path that ends in
- * thread_return() -- must own its physical allocation outright, because
- * releasing it would release whatever is packed alongside it.
- */
-static VarSet CollectExplicitDeallocs(const Stmt &stmt) {
-  VarSet deallocs;
-  PostOrderVisit(stmt, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallNode>();
-    if (call == nullptr || !call->op.same_as(tl::deallocate_tmem()))
-      return;
-    ICHECK_EQ(call->args.size(), 1U);
-    const auto *buffer_data = call->args[0].as<VarNode>();
-    ICHECK(buffer_data) << "tl.deallocate_tmem expects a buffer data Var";
-    deallocs.insert(GetRef<Var>(buffer_data));
-  });
-  return deallocs;
-}
+class SourceBindings : public StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit_;
+  Optional<VisitInterrupt> Visit_(const BindObj *binding) final {
+    bindings.Set(binding->var, binding->value);
+    return StmtExprVisitor::Visit_(binding);
+  }
+  Map<Var, Expr> bindings;
+};
+
+// Recover only pointer/tensor provenance, never an integer obtained by reading
+// an address word. The latter is already an encoded hardware address.
+class TmemProvenance {
+public:
+  explicit TmemProvenance(Map<Var, Expr> bindings)
+      : bindings_(std::move(bindings)) {}
+
+  std::optional<TensorVar> Root(const Expr &value) const {
+    std::unordered_set<const VarObj *> seen;
+    return Root(value, &seen);
+  }
+
+  std::pair<VarSet, bool> Fallthrough(const Stmt &statement) const {
+    if (const auto *sequence = statement.as<SeqStmtObj>()) {
+      VarSet result;
+      for (const Stmt &child : sequence->seq) {
+        auto [released, fallthrough] = Fallthrough(child);
+        if (!fallthrough)
+          return {{}, false};
+        result.insert(released.begin(), released.end());
+      }
+      return {std::move(result), true};
+    }
+    if (const auto *branch = statement.as<IfObj>()) {
+      auto [then_released, then_fallthrough] = Fallthrough(branch->then_case);
+      auto [else_released, else_fallthrough] =
+          branch->else_case ? Fallthrough(branch->else_case.value())
+                            : std::pair<VarSet, bool>{{}, true};
+      VarSet result;
+      if (then_fallthrough)
+        result.insert(then_released.begin(), then_released.end());
+      if (else_fallthrough)
+        result.insert(else_released.begin(), else_released.end());
+      // Explicit deallocation is warp-managed. Preserve the source contract:
+      // an explicit release on a surviving path (e.g. tx < 32) suppresses the
+      // automatic first-warp tail. Do not add a duplicate release on that warp.
+      return {std::move(result), then_fallthrough || else_fallthrough};
+    }
+    if (const auto *loop = statement.as<ForObj>())
+      return Fallthrough(loop->body);
+    if (const auto *region = statement.as<RegionStmtObj>())
+      return Fallthrough(region->body);
+    if (const auto *evaluate = statement.as<EvaluateObj>()) {
+      if (const auto *call = evaluate->value.as<CallObj>()) {
+        if (call->op.same_as(gpu_thread_return_op()))
+          return {{}, false};
+        if (call->op.same_as(deallocate_tmem())) {
+          auto args = NativeIntrinsicOperands(call);
+          TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
+          auto tensor = Root(args[0]);
+          TVM_FFI_CHECK(tensor, ValueError)
+              << "tl.deallocate_tmem requires native TMEM backing";
+          return {{tensor.value().get()}, true};
+        }
+      }
+    }
+    return {{}, true};
+  }
+
+  VarSet Explicit(const Stmt &statement) const {
+    VarSet result;
+    VisitNativePostOrder(statement, [&](const ObjectRef &object) {
+      if (const auto *call = object.as<CallObj>();
+          call && call->op.same_as(deallocate_tmem())) {
+        auto args = NativeIntrinsicOperands(call);
+        TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
+        auto tensor = Root(args[0]);
+        TVM_FFI_CHECK(tensor, ValueError)
+            << "tl.deallocate_tmem requires native TMEM backing";
+        result.insert(tensor.value().get());
+      }
+    });
+    return result;
+  }
+
+  const Map<Var, Expr> &bindings() const { return bindings_; }
+
+private:
+  std::optional<TensorVar>
+  Root(const Expr &value, std::unordered_set<const VarObj *> *seen) const {
+    if (auto variable = value.as<Var>()) {
+      if (!seen->insert(variable->get()).second)
+        return std::nullopt;
+      auto binding = bindings_.Get(*variable);
+      if (auto tensor = variable->as<TensorVar>(); tensor && IsTmem(*tensor)) {
+        if (!binding)
+          return tensor;
+        if (const auto *call = binding->as<CallObj>()) {
+          if (call->op.same_as(alloc_tensor_op()))
+            return tensor;
+          if (call->op.same_as(decl_tensor_op()))
+            return Root(call->args[0], seen);
+        }
+      }
+      return binding ? Root(*binding, seen) : std::nullopt;
+    }
+    if (const auto *load = value.as<TensorLoadObj>())
+      return Root(load->source, seen);
+    if (const auto *call = value.as<CallObj>()) {
+      if (call->op.same_as(tensor_data_ptr_op()) ||
+          call->op.same_as(reinterpret_op()) ||
+          call->op.same_as(ptr_byte_offset_op()) ||
+          call->op.same_as(address_of_op()) ||
+          call->op.same_as(Op::Get("tl.access_ptr")) ||
+          call->op.same_as(Op::Get("tl.ptr_access")))
+        return Root(call->args[0], seen);
+    }
+    return std::nullopt;
+  }
+  Map<Var, Expr> bindings_;
+};
 
 // A CTA's tensor memory is 128 datapaths (rows) of 512 32-bit columns.
 static constexpr int kTmemNumDatapaths = 128;
@@ -221,7 +282,7 @@ struct TmemArena {
 static std::pair<std::vector<TmemArena>, std::vector<TmemPlacement>>
 PlanTmemArenas(const std::vector<int> &num_cols,
                const std::vector<bool> &packable) {
-  ICHECK_EQ(num_cols.size(), packable.size());
+  TVM_FFI_CHECK_EQ(num_cols.size(), packable.size(), ValueError);
 
   std::vector<int> order(num_cols.size());
   for (size_t i = 0; i < order.size(); ++i) {
@@ -275,556 +336,541 @@ PlanTmemArenas(const std::vector<int> &num_cols,
   return {std::move(arenas), std::move(placements)};
 }
 
-class SharedTmemRewriter : public StmtExprMutator {
+struct TmemReference {
+  TensorVar tensor;
+  TensorVar word;
+  PrimExpr offset;
+  int columns;
+  bool two_cta;
+};
+
+class SharedTmemLowerer : public StmtExprMutatorWithAnalyzer {
 public:
-  static Stmt Rewrite(Stmt body, Target target) {
-    SharedTmemRewriter rewriter;
-    rewriter.target_ = std::move(target);
-    return rewriter(body);
-  }
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+  SharedTmemLowerer(sym::AnalyzerObj *analyzer, Target target,
+                    Map<Var, Expr> bindings)
+      : StmtExprMutatorWithAnalyzer(analyzer), target_(std::move(target)),
+        provenance_(std::move(bindings)) {}
 
-private:
-  static int GetValueBitWidth(DataType dtype) {
-    int value_bits = dtype.bits() * dtype.lanes();
-    ICHECK_GT(value_bits, 0) << "Invalid TMEM value dtype " << dtype;
-    return value_bits;
-  }
-
-  static PrimExpr ValueColumnOffsetToB32Column(PrimExpr value_col,
-                                               DataType dtype) {
-    arith::Analyzer analyzer;
-    DataType index_dtype = value_col->dtype;
-    PrimExpr value_bits = IntImm(index_dtype, GetValueBitWidth(dtype));
-    PrimExpr bits_per_column = IntImm(index_dtype, 32);
-    PrimExpr bit_offset = analyzer.Simplify(value_col * value_bits);
-    ICHECK(analyzer.CanProveEqual(FloorMod(bit_offset, bits_per_column),
-                                  IntImm(index_dtype, 0)))
-        << "TMEM address must start on a b32 column, but value-column offset "
-        << value_col << " of dtype " << dtype << " has bit offset "
-        << bit_offset;
-    return analyzer.Simplify(FloorDiv(bit_offset, bits_per_column));
-  }
-
-  /*!
-   * \brief The number of 32-bit TMEM columns a buffer occupies.
-   *
-   * LowerTileOp has already materialized the buffer's inferred layout, so the
-   * buffer shape is the physical (datapath, value-column) footprint.  This is
-   * what a buffer *needs*; PlanTmemArenas decides how many columns are actually
-   * allocated for it, alone or shared.
-   */
-  int GetNumB32ColsRequired(const Buffer &buffer) const {
-    ICHECK_EQ(buffer->shape.size(), 2U);
-
-    arith::Analyzer analyzer;
-    int num_rows_required =
-        analyzer.const_int_bound(buffer->shape[0])->max_value;
-    ICHECK(num_rows_required <= kTmemNumDatapaths)
-        << "The number of rows required for tmem buffer " << buffer->name
-        << " is " << num_rows_required << ", which exceeds the maximum of "
-        << kTmemNumDatapaths << " rows";
-
-    int num_value_cols_required =
-        analyzer.const_int_bound(buffer->shape[1])->max_value;
-    // Layout column coordinates count values of buffer->dtype; PTX TMEM
-    // allocation counts 32-bit columns.  Round up so a final partially
-    // occupied b32 column is included.
-    int num_cols_required =
-        (num_value_cols_required * GetValueBitWidth(buffer->dtype) + 31) / 32;
-    ICHECK(num_cols_required <= kTmemNumColumns)
-        << "The number of columns required for tmem buffer " << buffer->name
-        << " is " << num_cols_required << ", which exceeds the maximum of "
-        << kTmemNumColumns << " columns";
-    return num_cols_required;
-  }
-
-  /*! \brief The b32 column offset of a TMEM buffer inside its arena. */
-  int GetArenaColOffset(const Var &buffer_data) const {
-    auto it = tmem_col_offsets_.find(buffer_data);
-    return it == tmem_col_offsets_.end() ? 0 : it->second;
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block = GetRef<SBlock>(op);
-    if (op->annotations.count(attr::kLayoutMap)) {
-      auto layout_map = op->annotations.Get(attr::kLayoutMap);
-      ICHECK(layout_map) << "layout map is not defined";
-      layout_map_ = layout_map->as<Map<Buffer, Layout>>().value();
-    }
-
-    // Record the mapping from buffer data var to buffer for later lookup
-    for (auto buffer : op->alloc_buffers) {
-      buffer_map_.insert({buffer->data, buffer});
-    }
-    for (auto match_buffer : op->match_buffers) {
-      buffer_map_.insert({match_buffer->buffer->data, match_buffer->buffer});
-    }
-
-    // The TMEM buffers this block introduces, in declaration order.  Arena
-    // column offsets follow this order, so it must not come from a hash table.
-    Array<Buffer> tmem_buffers;
-    auto collect_tmem_buffer = [&](const Buffer &buffer) {
-      const auto *ptr_type =
-          buffer->data->type_annotation.as<PointerTypeNode>();
-      ICHECK(ptr_type) << "LowerSharedTmem requires buffer " << buffer->name
-                       << "'s data Var to have a PointerType annotation";
-      if (ptr_type->storage_scope != "shared.tmem")
-        return;
-      // Already lowered together with an enclosing block.
-      if (var_remap_.count(buffer->data))
-        return;
-      tmem_buffers.push_back(buffer);
-    };
-    for (auto buffer : op->alloc_buffers) {
-      collect_tmem_buffer(buffer);
-    }
-    for (auto match_buffer : op->match_buffers) {
-      collect_tmem_buffer(match_buffer->buffer);
-    }
-
-    if (tmem_buffers.empty()) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
-    ICHECK(thread_var_.defined()) << "thread_var_ is not defined";
-
-    auto [fallthrough_deallocs, _] = CollectFallthroughDeallocs(op->body);
-    VarSet explicit_deallocs = CollectExplicitDeallocs(op->body);
-
-    for (auto buffer : tmem_buffers) {
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-
-    // If block has use_2cta attr, add use_2cta: 1 to tmem alloc/dealloc call
-    // annotations.
-    Map<String, ObjectRef> tmem_call_ann;
-    if (op->annotations.count("use_2cta")) {
-      PrimExpr val = Downcast<PrimExpr>(op->annotations["use_2cta"]);
-      // Bool in TVM is a subclass of IntImm, so only check IntImm.
-      if (const auto *i = val.as<IntImmNode>()) {
-        if (i->value != 0) {
-          tmem_call_ann.Set("use_2cta", IntImm(DataType::Int(32), 1));
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
+                            InplaceMode mode) final {
+    auto saved_thread = thread_;
+    bool saved_two_cta = two_cta_;
+    if (region->op.same_as(launch_thread_op()) &&
+        region->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
+      thread_ = region->body_params[0].as_or_throw<PrimVar>();
+    if (region->op->name == "tl.attr") {
+      auto fields = ReadNativeAnnotations(region);
+      const String key = fields.at("key").cast<String>();
+      if (key == "layout_map" || key == "safe_value_map") {
+        bool removed = false;
+        auto remaining = WithoutTmemEntries(fields.at("value"), &removed);
+        if (removed) {
+          SeqStmt body =
+              Mutate(region->body, mode).ValueOrUnchanged(region->body);
+          if (remaining.empty())
+            return body;
+          return MakeNativeAttribute(fields.at("node"), key, remaining, body,
+                                     region->loc);
         }
       }
-    }
-
-    /*
-    Replace the tmem buffers with one shared address word per physical
-    allocation, and allocate each of those once:
-        tmem_buf0 = T.alloc_buffer((128, 384), "float32", scope="shared.tmem")
-        tmem_buf1 = T.alloc_buffer((128, 4), "uint32", scope="shared.tmem")
-
-    into:
-        tmem_buf0 = T.alloc_buffer((1,), "uint32", scope="shared")
-
-        if tx // 32 == 0:
-          T.ptx_init_tensor_memory(tmem_buf0[0], 512)
-
-    where tmem_buf1 shares tmem_buf0's allocation and is addressed as
-    tmem_buf0[0] + 384.  See PlanTmemArenas for which buffers get packed.
-    */
-    // 1. plan the physical allocations
-    std::vector<int> num_cols_required;
-    std::vector<bool> packable;
-    for (const Buffer &buffer : tmem_buffers) {
-      num_cols_required.push_back(GetNumB32ColsRequired(buffer));
-      packable.push_back(!explicit_deallocs.count(buffer->data));
-    }
-    auto [arenas, placements] = PlanTmemArenas(num_cols_required, packable);
-
-    // 2. one shared address word per allocation, named after the arena's first
-    // (widest) member so that a block with a single TMEM buffer -- or with
-    // buffers packing cannot help -- lowers exactly as it did before.
-    std::vector<Buffer> arena_buffers;
-    for (const TmemArena &arena : arenas) {
-      const Buffer &base_buffer = tmem_buffers[arena.members.front()];
-      Var arena_data(base_buffer->data->name_hint,
-                     PointerType(PrimType(tmem_dtype_), "shared"));
-      Buffer arena_buffer(arena_data, tmem_dtype_, Array<PrimExpr>({1}),
-                          Array<PrimExpr>({1}), PrimExpr(0), base_buffer->name,
-                          base_buffer->data_alignment,
-                          base_buffer->offset_factor, base_buffer->buffer_type);
-      arena_buffers.push_back(arena_buffer);
-      buffer_data_to_buffer_.Set(arena_data, arena_buffer);
-      for (int member : arena.members) {
-        const Buffer &buffer = tmem_buffers[member];
-        var_remap_.Set(buffer->data, arena_data);
-        buffer_remap_.Set(buffer, arena_buffer);
-        tmem_col_offsets_[buffer->data] = placements[member].col_offset;
-        tmem_num_cols_allocated_[buffer->data] = arena.num_cols_allocated;
-        tmem_call_annotations_[buffer->data] = tmem_call_ann;
+      if (key == "tl.kernel") {
+        auto metadata = fields.at("value").cast<Map<String, Any>>();
+        two_cta_ = ReadFlag(metadata.Get("use_2cta"));
+        if (ConsumeTmemMetadata(&metadata)) {
+          SeqStmt body =
+              Mutate(region->body, mode).ValueOrUnchanged(region->body);
+          thread_ = saved_thread;
+          two_cta_ = saved_two_cta;
+          return MakeNativeAttribute(fields.at("node"), key, metadata, body,
+                                     region->loc);
+        }
+      } else if (key == "use_2cta") {
+        two_cta_ = ReadFlag(fields.at("value"));
       }
     }
-
-    // 3. swap the tmem buffers for their arenas' address words
-    Array<Buffer> alloc_buffers;
-    std::unordered_set<const BufferNode *> declared_arenas;
-    for (const Buffer &buffer : op->alloc_buffers) {
-      auto it = buffer_remap_.find(buffer);
-      if (it == buffer_remap_.end()) {
-        alloc_buffers.push_back(buffer);
-        continue;
-      }
-      // Buffers sharing an allocation share its word: declare it once, where
-      // the first of them used to be.
-      Buffer arena_buffer = (*it).second;
-      if (declared_arenas.insert(arena_buffer.get()).second) {
-        alloc_buffers.push_back(arena_buffer);
-      }
-    }
-    block.CopyOnWrite()->alloc_buffers = alloc_buffers;
-
-    // 4. create one init & dealloc call per allocation
-    std::vector<Stmt> init_mtmem_calls_;
-    std::vector<Stmt> dealloc_tmem_calls_;
-    int num_cols_total = 0;
-    for (size_t i = 0; i < arenas.size(); ++i) {
-      const TmemArena &arena = arenas[i];
-      int num_cols_allocated = arena.num_cols_allocated;
-      num_cols_total += num_cols_allocated;
-
-      auto arena_access = arena_buffers[i].access_ptr(1, DataType::Handle(), 1,
-                                                      PrimExpr(0), PrimExpr(1));
-      auto alloc_call =
-          Call(DataType::Handle(), tl::ptx_init_tensor_memory(),
-               {arena_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
-      init_mtmem_calls_.push_back(Evaluate(alloc_call));
-      // A buffer that releases itself on every fallthrough path replaces the
-      // dealloc at block end.  Packing leaves such buffers alone, so an
-      // allocation released by hand never holds anything else.
-      bool released_by_hand =
-          arena.members.size() == 1 &&
-          fallthrough_deallocs.count(tmem_buffers[arena.members.front()]->data);
-      if (!released_by_hand) {
-        auto dealloc_call =
-            Call(DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
-                 {arena_access, PrimExpr(num_cols_allocated)}, tmem_call_ann);
-        dealloc_tmem_calls_.push_back(Evaluate(dealloc_call));
-      }
-    }
-    // Without an explicit tl.deallocate_tmem every allocation in the block is
-    // live at once, so an over-budget kernel can be reported here instead of
-    // failing inside tcgen05.alloc on device.
-    if (explicit_deallocs.empty()) {
-      ICHECK(num_cols_total <= kTmemNumColumns)
-          << "This block allocates " << num_cols_total
-          << " TMEM columns across " << arenas.size()
-          << " tcgen05.alloc calls, but a CTA only has " << kTmemNumColumns
-          << " columns; shrink the TMEM footprint or release a buffer earlier "
-             "with T.deallocate_tmem";
-    }
-    // PTX forbids a tcgen05.alloc from asking for more columns than one issued
-    // before it in the same CTA, so allocate the widest first.
-    auto compare_by_num_cols_desc = [&](const Stmt &a, const Stmt &b) {
-      auto call_a = a.as<EvaluateNode>()->value.as<CallNode>();
-      auto call_b = b.as<EvaluateNode>()->value.as<CallNode>();
-      auto num_cols_a = call_a->args[1].as<IntImmNode>()->value;
-      auto num_cols_b = call_b->args[1].as<IntImmNode>()->value;
-      return num_cols_a > num_cols_b;
-    };
-    std::sort(init_mtmem_calls_.begin(), init_mtmem_calls_.end(),
-              compare_by_num_cols_desc);
-
-    Array<Stmt> new_body;
-    ICHECK(target_.defined()) << "LowerSharedTmem requires a bound target";
-    auto warp_size = TargetCudaGetWarpSize(target_);
-    auto thread_var_div_warp_size =
-        FloorDiv(thread_var_->var, IntImm(thread_var_->var->dtype, warp_size));
-    new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
-                                  init_mtmem_calls_.size() > 1
-                                      ? SeqStmt(init_mtmem_calls_)
-                                      : init_mtmem_calls_.back(),
-                                  Stmt()));
-    new_body.push_back(
-        Evaluate(Call(DataType::Handle(), builtin::tvm_storage_sync(),
-                      {StringImm("shared")})));
-    new_body.push_back(block->body);
-    if (!dealloc_tmem_calls_.empty()) {
-      if (tmem_call_ann.find("use_2cta") != tmem_call_ann.end()) {
-        new_body.push_back(
-            Evaluate(Call(DataType::Handle(), tl::cluster_sync(), {})));
-      }
-      new_body.push_back(IfThenElse(EQ(thread_var_div_warp_size, 0),
-                                    dealloc_tmem_calls_.size() > 1
-                                        ? SeqStmt(dealloc_tmem_calls_)
-                                        : dealloc_tmem_calls_.back(),
-                                    Stmt()));
-    }
-
-    auto block_ptr = block.CopyOnWrite();
-    block_ptr->annotations.erase(attr::kLayoutMap);
-    block_ptr->body = SeqStmt(new_body);
-
-    return StmtExprMutator::VisitStmt_(block.get());
-  }
-
-  PrimExpr GetTmemOffset(const Buffer &buffer, const Array<PrimExpr> &indices) {
-    // LowerTileOp MATERIALIZED the buffer's inferred layout: it rewrote the
-    // allocation to the layout's physical shape and pushed every address
-    // token through Layout::Forward.  Whatever the fragment's structure --
-    // interleaved datapaths (PTX Layout F), weight-stationary N folding
-    // (Layouts E/G), 2SM shards, leading batch modes -- `indices` here are
-    // always the resulting physical (datapath, value-column) pair; this pass
-    // only encodes them into the hardware word.  A TMEM buffer that skipped
-    // layout inference would still be logical, which the rank check below
-    // (and the 2-D allocation check above) rejects.
-    ICHECK_EQ(indices.size(), 2U)
-        << "TMEM address for " << buffer->name
-        << " must be a (datapath, value-column) coordinate";
-    // https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-memory-addressing
-    PrimExpr result = indices[0] << 16 |
-                      ValueColumnOffsetToB32Column(indices[1], buffer->dtype);
+    auto result = StmtExprMutatorWithAnalyzer::Mutate_(region, mode);
+    thread_ = saved_thread;
+    two_cta_ = saved_two_cta;
     return result;
   }
 
-  /*!
-   * \brief GetTmemOffset, shifted to where the buffer starts in its arena.
-   *
-   * A TMEM address is datapath<<16 | b32_column, so adding a column offset to
-   * the encoded coordinate lands in the same datapath of a later column -- the
-   * arena's base address plus this is the buffer's own base address.
-   */
-  PrimExpr GetArenaTmemOffset(const Buffer &buffer,
-                              const Array<PrimExpr> &indices) {
-    PrimExpr offset = GetTmemOffset(buffer, indices);
-    int col_offset = GetArenaColOffset(buffer->data);
-    if (col_offset == 0) {
-      return offset;
-    }
-    return offset + IntImm(offset.dtype(), col_offset);
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    // Translate tmem[datapath, value_col] to tmem[0] + tmem_offset
-    // Where
-    // - (datapath, value_col) is the physical address in the tmem buffer
-    // - tmem[0] is the base address of the allocation holding the buffer
-    // - tmem_offset = datapath<<16 | b32_col, with b32_col converted from
-    //   the typed value-column coordinate and shifted by the buffer's column
-    //   offset when it shares that allocation with others
-    auto load = Downcast<BufferLoad>(StmtExprMutator::VisitExpr_(op));
-    auto buffer = load->buffer;
-    auto indices = load->indices;
-
-    if (buffer_remap_.count(buffer)) {
-      auto new_buffer = buffer_remap_[load->buffer];
-      return BufferLoad(new_buffer, {0}) + GetArenaTmemOffset(buffer, indices);
-    } else if (var_remap_.count(buffer->data)) {
-      Buffer arena_buffer = buffer_data_to_buffer_.at(var_remap_[buffer->data]);
-      return BufferLoad(arena_buffer, {0}) +
-             GetArenaTmemOffset(buffer, indices);
-    }
-    return load;
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    auto store = Downcast<BufferStore>(StmtExprMutator::VisitStmt_(op));
-    auto buffer = store->buffer;
-    ICHECK(!IsTmemBuffer(buffer))
-        << "We should never directly store data into tmem!";
-    return store;
-  }
-
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::deallocate_tmem())) {
-      ICHECK_EQ(op->args.size(), 1U);
-      Var buffer_data = Downcast<Var>(op->args[0]);
-      auto num_cols_it = tmem_num_cols_allocated_.find(buffer_data);
-      ICHECK(num_cols_it != tmem_num_cols_allocated_.end())
-          << "tl.deallocate_tmem expects a TMEM buffer allocated in the same "
-             "or an enclosing block";
-      ICHECK(buffer_data_to_buffer_.count(buffer_data))
-          << "TMEM buffer for tl.deallocate_tmem is not tracked";
-      Buffer old_buffer = buffer_data_to_buffer_.at(buffer_data);
-      ICHECK(buffer_remap_.count(old_buffer))
-          << "TMEM buffer for tl.deallocate_tmem has not been remapped";
-      Buffer new_buffer = buffer_remap_[old_buffer];
-      auto new_buffer_access = new_buffer.access_ptr(1, DataType::Handle(), 1,
-                                                     PrimExpr(0), PrimExpr(1));
-
-      Map<String, ObjectRef> ann;
-      auto ann_it = tmem_call_annotations_.find(buffer_data);
-      if (ann_it != tmem_call_annotations_.end()) {
-        ann = ann_it->second;
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *sequence,
+                            InplaceMode mode) final {
+    const auto saved_references = references_;
+    auto explicit_releases = provenance_.Explicit(GetRef<Stmt>(sequence));
+    auto [tail_releases, falls_through] =
+        provenance_.Fallthrough(GetRef<Stmt>(sequence));
+    (void)falls_through;
+    std::vector<TensorVar> tensors;
+    size_t first_allocation = sequence->seq.size();
+    for (size_t i = 0; i < sequence->seq.size(); ++i) {
+      const auto *binding = sequence->seq[i].as<BindObj>();
+      if (!binding)
+        continue;
+      auto tensor = binding->var.as<TensorVar>();
+      const auto *call = binding->value.as<CallObj>();
+      if (tensor && IsTmem(*tensor) && call &&
+          call->op.same_as(alloc_tensor_op())) {
+        TVM_FFI_CHECK(call->args.empty(), ValueError)
+            << "A native TMEM allocation takes no operands";
+        tensors.push_back(*tensor);
+        first_allocation = std::min(first_allocation, i);
+      } else if (auto variable = binding->var.as<PrimVar>()) {
+        if (auto expression = binding->value.as<PrimExpr>();
+            expression && SideEffect(*expression) <= CallEffectKind::kPure)
+          BindAnalyzer(GetSyncedAnalyzer(), *variable, *expression, true);
       }
-      return Call(DataType::Handle(), tl::ptx_deallocate_tensor_memory(),
-                  {new_buffer_access, PrimExpr(num_cols_it->second)}, ann);
     }
-    if (op->op.same_as(builtin::tvm_access_ptr())) {
-      ICHECK_EQ(op->args.size(), 5U);
-      Var buffer_data = Downcast<Var>(op->args[1]);
-      if (!var_remap_.count(buffer_data)) {
-        return StmtExprMutator::VisitExpr_(op);
+    std::vector<int> required;
+    std::vector<bool> packable;
+    for (const TensorVar &tensor : tensors) {
+      required.push_back(RequiredColumns(tensor));
+      packable.push_back(!explicit_releases.count(tensor.get()) &&
+                         !HasOpaqueAllocationAttrs(tensor));
+    }
+    auto [arenas, placements] = PlanTmemArenas(required, packable);
+    Array<Stmt> definitions;
+    std::vector<Stmt> initializers;
+    Array<Stmt> finalizers;
+    int total_columns = 0;
+    for (size_t i = 0; i < arenas.size(); ++i) {
+      const TmemArena &arena = arenas[i];
+      const TensorVar &first = tensors[arena.members.front()];
+      int alignment = first.ty()->data_alignment;
+      for (int member : arena.members)
+        alignment = std::max(alignment, tensors[member].ty()->data_alignment);
+      TensorVar word(first->name,
+                     TensorType({IntImm(PrimType::Int(32), 1)},
+                                PrimType::UInt(32),
+                                runtime::MemoryScope("shared"), alignment),
+                     first->loc);
+      auto allocation_attrs = AllocationAttrs(first)->dict;
+      for (int member : arena.members)
+        if (NeedsVolatileWord(tensors[member]))
+          allocation_attrs.Set(tirx::attr::kVolatile.name, true);
+      definitions.push_back(
+          Bind(word,
+               Call(word->ty, alloc_tensor_op(), {},
+                    DictAttrs(allocation_attrs), {word->ty}, first->loc),
+               first->loc));
+      for (int member : arena.members) {
+        references_.insert_or_assign(
+            tensors[member].get(),
+            TmemReference{
+                tensors[member], word,
+                IntImm(PrimType::UInt(32), placements[member].col_offset),
+                arena.num_cols_allocated, two_cta_});
       }
-      // A pointer to the address word carries no column offset, so a buffer
-      // sharing an allocation cannot be reached this way.  See
-      // VisitExpr_(VarNode) for the same argument.
-      CheckAddressableWithoutColOffset(buffer_data);
-      Var new_data = var_remap_[buffer_data];
-      return Call(
-          op->dtype, op->op,
-          {op->args[0], new_data, op->args[2], op->args[3], op->args[4]});
+      initializers.push_back(Evaluate(
+          AllocationCall(ptx_init_tensor_memory(), word,
+                         arena.num_cols_allocated, two_cta_, first->loc),
+          first->loc));
+      const bool explicit_tail =
+          arena.members.size() == 1 && tail_releases.count(first.get());
+      if (!explicit_tail)
+        finalizers.push_back(Evaluate(
+            AllocationCall(ptx_deallocate_tensor_memory(), word,
+                           arena.num_cols_allocated, two_cta_, first->loc),
+            first->loc));
+      total_columns += arena.num_cols_allocated;
     }
-    if (HasPackedTmemOperand(op)) {
-      ICHECK(TakesTmemBaseOffsetPairs(op->op))
-          << op->op
-          << " names a TMEM buffer that shares a physical allocation, but only "
-             "the tl.ptx_tcgen05_* intrinsics pass tensor memory as a "
-             "(base, offset) pair this pass can shift";
-      return RebaseTmemOperands(op);
+    if (explicit_releases.empty())
+      TVM_FFI_CHECK_LE(total_columns, kTmemNumColumns, ValueError)
+          << "This scope allocates " << total_columns << " TMEM columns across "
+          << arenas.size()
+          << " tcgen05.alloc calls, but a CTA only has 512 columns";
+    std::stable_sort(
+        initializers.begin(), initializers.end(),
+        [](const Stmt &a, const Stmt &b) {
+          const auto aa = NativeIntrinsicOperands(
+              a.as_or_throw<Evaluate>()->value.as_or_throw<Call>().get());
+          const auto bb = NativeIntrinsicOperands(
+              b.as_or_throw<Evaluate>()->value.as_or_throw<Call>().get());
+          return aa[1].as_or_throw<IntImm>()->value >
+                 bb[1].as_or_throw<IntImm>()->value;
+        });
+    Array<Stmt> output;
+    for (size_t i = 0; i < sequence->seq.size(); ++i) {
+      if (i == first_allocation && !initializers.empty()) {
+        for (const Stmt &definition : definitions)
+          output.push_back(definition);
+        output.push_back(
+            FirstWarp(Array<Stmt>(initializers.begin(), initializers.end()),
+                      sequence->loc));
+        output.push_back(
+            Evaluate(Call(PrimType::Void(), gpu_storage_sync_op(),
+                          {StringImm("shared")}, {}, {}, sequence->loc),
+                     sequence->loc));
+      }
+      output.push_back(
+          Mutate(sequence->seq[i], mode).ValueOrUnchanged(sequence->seq[i]));
     }
-    auto expr = StmtExprMutator::VisitExpr_(op);
-    return expr;
+    if (!finalizers.empty()) {
+      if (two_cta_)
+        output.push_back(Evaluate(
+            Call(PrimType::Void(), cluster_sync(), {}, {}, {}, sequence->loc),
+            sequence->loc));
+      output.push_back(FirstWarp(finalizers, sequence->loc));
+    }
+    references_ = saved_references;
+    return SeqStmt(output, sequence->loc);
   }
 
-  /*!
-   * \brief Whether a call names a TMEM buffer that starts inside an allocation.
-   *
-   * Calls that only name buffers at column 0 need no rewriting, so they keep
-   * the exact expression -- source span included -- that they had before.
-   */
-  bool HasPackedTmemOperand(const CallNode *op) const {
-    for (const PrimExpr &arg : op->args) {
-      const auto *var = arg.as<VarNode>();
-      if (var != nullptr && GetArenaColOffset(GetRef<Var>(var)) != 0) {
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *evaluate,
+                            InplaceMode mode) final {
+    const auto *call = evaluate->value.as<CallObj>();
+    if (call && call->op.same_as(Op::Get("tl.annotation"))) {
+      auto metadata = ReadNativeAnnotations(call);
+      if (ConsumeTmemMetadata(&metadata)) {
+        if (metadata.empty())
+          return SeqStmt({}, evaluate->loc);
+        auto replacement = MakeNativeAnnotation(metadata, evaluate->loc)
+                               .as_or_throw<Evaluate>();
+        return StmtExprMutatorWithAnalyzer::Mutate_(replacement.get(), mode)
+            .ValueOrUnchanged(replacement);
+      }
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(evaluate, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const BindObj *binding, InplaceMode mode) final {
+    if (auto tensor = binding->var.as<TensorVar>(); tensor && IsTmem(*tensor)) {
+      const auto *call = binding->value.as<CallObj>();
+      if (call && call->op.same_as(alloc_tensor_op())) {
+        TVM_FFI_CHECK(references_.count(tensor.value().get()), ValueError);
+        return SeqStmt({}, binding->loc);
+      }
+      Expr source = call && call->op.same_as(decl_tensor_op()) ? call->args[0]
+                                                               : binding->value;
+      auto alias = ResolvePointer(source);
+      TVM_FFI_CHECK(alias, ValueError)
+          << "TMEM view must refer to an allocated native TMEM tensor";
+      alias->tensor = *tensor;
+      references_.insert_or_assign(tensor.value().get(), *alias);
+      return SeqStmt({}, binding->loc);
+    }
+    if (binding->var->ty.as<PtrTypeObj>() && ResolvePointer(binding->value))
+      return SeqStmt({}, binding->loc);
+    return StmtExprMutatorWithAnalyzer::Mutate_(binding, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const TensorStoreObj *store,
+                            InplaceMode mode) final {
+    if (auto tensor = store->dest.as<TensorVar>(); tensor && IsTmem(*tensor))
+      TVM_FFI_THROW(ValueError) << "TMEM stores must be lowered to tcgen05 "
+                                   "instructions before LowerSharedTmem";
+    return StmtExprMutatorWithAnalyzer::Mutate_(store, mode);
+  }
+
+  UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *load,
+                                InplaceMode mode) final {
+    auto tensor = load->source.as<TensorVar>();
+    if (tensor) {
+      auto found = references_.find(tensor.value().get());
+      if (found != references_.end()) {
+        Array<PrimExpr> indices;
+        for (const PrimExpr &value : load->indices)
+          indices.push_back(Mutate(value, mode).ValueOrUnchanged(value));
+        PrimExpr offset = GetSyncedAnalyzer()->Simplify(
+            found->second.offset + EncodeCoordinates(*tensor, indices));
+        return GetSyncedAnalyzer()->Simplify(
+            TensorLoad(found->second.word, {IntImm(PrimType::Int(32), 0)},
+                       load->loc) +
+            offset);
+      }
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(load, mode);
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
+    if (call->op.same_as(deallocate_tmem())) {
+      auto args = NativeIntrinsicOperands(call);
+      TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
+      auto reference = ResolvePointer(args[0]);
+      TVM_FFI_CHECK(reference, ValueError)
+          << "tl.deallocate_tmem expects a TMEM allocation in the same or "
+             "enclosing scope";
+      return AllocationCall(ptx_deallocate_tensor_memory(), reference->word,
+                            reference->columns, reference->two_cta, call->loc);
+    }
+    auto op = call->op.as<Op>();
+    if (op && op.value()->name.find("tl.ptx_tcgen05_") == 0) {
+      auto operands = NativeIntrinsicOperands(call);
+      Array<Expr> rewritten;
+      bool changed = false;
+      for (size_t i = 0; i < operands.size(); ++i) {
+        if (auto reference = ResolvePointer(operands[i])) {
+          TVM_FFI_CHECK_LT(i + 1, operands.size(), ValueError)
+              << op.value()->name << " must pass a TMEM (base, offset) pair";
+          PrimExpr offset = operands[++i].as_or_throw<IntExpr>();
+          offset = Mutate(offset, mode).ValueOrUnchanged(offset);
+          rewritten.push_back(WordPointer(reference->word));
+          rewritten.push_back(GetSyncedAnalyzer()->Simplify(
+              offset + cast(reference->offset, offset.ty())));
+          changed = true;
+        } else {
+          Expr value = Mutate(operands[i], mode).ValueOrUnchanged(operands[i]);
+          changed |= !value.same_as(operands[i]);
+          rewritten.push_back(value);
+        }
+      }
+      if (!changed)
+        return Unchanged();
+      for (size_t i = operands.size(); i < call->args.size(); ++i)
+        rewritten.push_back(
+            Mutate(call->args[i], mode).ValueOrUnchanged(call->args[i]));
+      return Call(call->ty, call->op, rewritten, call->attrs, call->ty_args,
+                  call->loc);
+    }
+    if (auto reference = ResolvePointer(GetRef<Expr>(call)))
+      return UnshiftedPointer(*reference);
+    return StmtExprMutatorWithAnalyzer::Mutate_(call, mode);
+  }
+
+  UnchangedOr<Expr> Mutate_(const VarObj *variable, InplaceMode mode) final {
+    if (def_region_kind() == kTVMFFIDefRegionKindNone) {
+      if (auto tensor = GetRef<Var>(variable).as<TensorVar>();
+          tensor && IsTmem(*tensor))
+        TVM_FFI_THROW(ValueError)
+            << "TMEM TensorVar must be consumed by a memory-address intrinsic "
+               "after layout lowering";
+      if (auto reference = ResolvePointer(GetRef<Expr>(variable)))
+        return UnshiftedPointer(*reference);
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(variable, mode);
+  }
+
+private:
+  static bool ReadFlag(std::optional<Any> value) {
+    if (!value)
+      return false;
+    if (auto boolean = value->as<bool>())
+      return *boolean;
+    if (auto integer = value->as<int64_t>())
+      return *integer != 0;
+    if (const auto *integer = value->as<IntImmObj>())
+      return integer->value != 0;
+    TVM_FFI_THROW(ValueError) << "use_2cta requires a constant integer or bool";
+  }
+
+  DictAttrs AllocationAttrs(const TensorVar &tensor) const {
+    auto call = provenance_.bindings().at(tensor).as_or_throw<Call>();
+    auto attrs = call->attrs ? call->attrs.value().as_or_throw<DictAttrs>()
+                             : DictAttrs();
+    if (!attrs->dict.count("tl.source_block_alloc"))
+      return attrs;
+    const auto origin = attrs->dict.at("tl.source_block_alloc").as<IntImm>();
+    TVM_FFI_CHECK(origin && origin.value()->value == 1, ValueError)
+        << "tl.source_block_alloc must be the source allocation marker";
+    // The frontend origin controls CPU allocation placement. TMEM's native
+    // lexical allocation and explicit release already determine its arena
+    // lifetime, so the lowered shared address word must not inherit it.
+    auto values = attrs->dict;
+    values.erase("tl.source_block_alloc");
+    return DictAttrs(values);
+  }
+
+  bool HasOpaqueAllocationAttrs(const TensorVar &tensor) const {
+    for (const auto &[key, value] : AllocationAttrs(tensor)->dict)
+      if (key != tirx::attr::kVolatile.name)
         return true;
-      }
+    return false;
+  }
+
+  bool NeedsVolatileWord(const TensorVar &tensor) const {
+    for (const auto &[variable, expression] : provenance_.bindings()) {
+      const auto *call = expression.as<CallObj>();
+      if (!call || !call->attrs ||
+          (!call->op.same_as(alloc_tensor_op()) &&
+           !call->op.same_as(decl_tensor_op())))
+        continue;
+      auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
+      if (!attrs.GetAttr(tirx::attr::kVolatile).value_or(false))
+        continue;
+      auto root = provenance_.Root(variable);
+      if (root && root->same_as(tensor))
+        return true;
     }
     return false;
   }
 
-  /*!
-   * \brief Whether an op takes its tensor-memory operands as (base, offset).
-   *
-   * Every tl.ptx_tcgen05_* intrinsic passes a tensor-memory operand as the
-   * buffer's base-address Var immediately followed by that operand's address
-   * offset: see ptx_tcgen05_mma_ss, _mma_ts, _mma_blockscaled_ss and
-   * cp_warpx4 in codegen_cuda.cc, which all emit
-   * `*(uint32_t*)base + offset`.  Packing folds a buffer's column offset into
-   * the second half of each such pair.
-   */
-  static bool TakesTmemBaseOffsetPairs(const RelaxExpr &op) {
-    const auto *op_node = op.as<OpNode>();
-    if (op_node == nullptr) {
-      return false;
-    }
-    const std::string name = op_node->name;
-    return name.rfind("tl.ptx_tcgen05_", 0) == 0;
+  int ValueBits(const TensorVar &tensor) const {
+    int bits = tensor.dtype().bits() * tensor.dtype().lanes();
+    TVM_FFI_CHECK_GT(bits, 0, ValueError);
+    return bits;
   }
 
-  /*!
-   * \brief Add the arena column offsets to one tl.ptx_tcgen05_* call's
-   * operands.
-   */
-  PrimExpr RebaseTmemOperands(const CallNode *op) {
-    Array<PrimExpr> args;
-    for (size_t i = 0; i < op->args.size(); ++i) {
-      const auto *var = op->args[i].as<VarNode>();
-      if (var == nullptr || !var_remap_.count(GetRef<Var>(var))) {
-        args.push_back(VisitExpr(op->args[i]));
-        continue;
+  int RequiredColumns(const TensorVar &tensor) const {
+    TVM_FFI_CHECK_EQ(tensor.shape().size(), 2U, ValueError)
+        << "Native TMEM must have a materialized (datapath, value-column) "
+           "shape";
+    const auto rows =
+        GetSyncedAnalyzer()->const_int_bound(tensor.shape()[0])->max_value;
+    const auto values =
+        GetSyncedAnalyzer()->const_int_bound(tensor.shape()[1])->max_value;
+    TVM_FFI_CHECK(rows > 0 && rows <= kTmemNumDatapaths, ValueError)
+        << "TMEM datapath extent must be provably in [1, 128]";
+    const int bits = ValueBits(tensor);
+    TVM_FFI_CHECK(values > 0 && values <= kTmemNumColumns * 32 / bits,
+                  ValueError)
+        << "TMEM allocation exceeds 512 b32 columns or has an unbounded "
+           "value-column extent";
+    return static_cast<int>((values * bits + 31) / 32);
+  }
+
+  PrimExpr EncodeCoordinates(const TensorVar &tensor,
+                             const Array<PrimExpr> &indices) const {
+    TVM_FFI_CHECK_EQ(indices.size(), 2U, ValueError)
+        << "TMEM address requires a physical (datapath, value-column) "
+           "coordinate";
+    const auto i64 = PrimType::Int(64);
+    const auto u32 = PrimType::UInt(32);
+    PrimExpr bits = GetSyncedAnalyzer()->Simplify(
+        cast(indices[1], i64) * IntImm(i64, ValueBits(tensor)));
+    TVM_FFI_CHECK(GetSyncedAnalyzer()->CanProveEqual(
+                      floormod(bits, IntImm(i64, 32)), IntImm(i64, 0)),
+                  ValueError)
+        << "TMEM address must start on a b32 column";
+    return GetSyncedAnalyzer()->Simplify(
+        (cast(indices[0], u32) << IntImm(u32, 16)) |
+        cast(floordiv(bits, IntImm(i64, 32)), u32));
+  }
+
+  std::optional<TmemReference> ResolvePointer(const Expr &value) {
+    std::unordered_set<const VarObj *> seen;
+    return ResolvePointer(value, &seen);
+  }
+
+  std::optional<TmemReference>
+  ResolvePointer(const Expr &value, std::unordered_set<const VarObj *> *seen) {
+    if (auto variable = value.as<Var>()) {
+      auto found = references_.find(variable->get());
+      if (found != references_.end())
+        return found->second;
+      if (!seen->insert(variable->get()).second)
+        return std::nullopt;
+      auto binding = provenance_.bindings().Get(*variable);
+      return binding ? ResolvePointer(*binding, seen) : std::nullopt;
+    }
+    const auto *call = value.as<CallObj>();
+    if (!call)
+      return std::nullopt;
+    if (call->op.same_as(tensor_data_ptr_op()) ||
+        call->op.same_as(reinterpret_op()))
+      return ResolvePointer(call->args[0], seen);
+    if (call->op.same_as(decl_tensor_op()))
+      return ResolvePointer(call->args[0], seen);
+    if (call->op.same_as(address_of_op()) ||
+        call->op.same_as(Op::Get("tl.access_ptr"))) {
+      const auto *load = call->args[0].as<TensorLoadObj>();
+      if (!load)
+        return std::nullopt;
+      auto reference = ResolvePointer(load->source, seen);
+      if (reference)
+        reference->offset = GetSyncedAnalyzer()->Simplify(
+            reference->offset +
+            EncodeCoordinates(reference->tensor, load->indices));
+      return reference;
+    }
+    if (call->op.same_as(ptr_byte_offset_op()) ||
+        call->op.same_as(Op::Get("tl.ptr_access"))) {
+      auto reference = ResolvePointer(call->args[0], seen);
+      if (!reference)
+        return std::nullopt;
+      auto offset = call->args[1].as_or_throw<IntExpr>();
+      const auto i64 = PrimType::Int(64);
+      int bits_per_unit = 8;
+      if (!call->op.same_as(ptr_byte_offset_op())) {
+        auto element = call->args[0]
+                           ->ty.as_or_throw<PtrType>()
+                           ->element_type.as_or_throw<PrimType>();
+        bits_per_unit = element.bits() * element.lanes();
       }
-      Var buffer_data = GetRef<Var>(var);
-      ICHECK_LT(i + 1, op->args.size())
-          << op->op << " passes TMEM buffer " << buffer_data
-          << " without the address offset that has to follow it";
-      PrimExpr offset = VisitExpr(op->args[i + 1]);
-      ICHECK(offset.dtype().is_int() || offset.dtype().is_uint())
-          << op->op << " expects an integer TMEM address offset after buffer "
-          << buffer_data << ", got " << offset << " of type " << offset.dtype();
-      int col_offset = GetArenaColOffset(buffer_data);
-      args.push_back(var_remap_[buffer_data]);
-      args.push_back(col_offset == 0
-                         ? offset
-                         : offset + IntImm(offset.dtype(), col_offset));
-      // The offset argument was consumed together with its base.
-      ++i;
+      PrimExpr bit_offset = cast(offset, i64) * IntImm(i64, bits_per_unit);
+      PrimExpr value_bits = IntImm(i64, ValueBits(reference->tensor));
+      TVM_FFI_CHECK(GetSyncedAnalyzer()->CanProveEqual(
+                        floormod(bit_offset, value_bits), IntImm(i64, 0)),
+                    ValueError)
+          << "TMEM pointer offset cannot split a physical tensor element";
+      PrimExpr elements = floordiv(bit_offset, value_bits);
+      PrimExpr width = cast(reference->tensor.shape()[1], i64);
+      reference->offset = GetSyncedAnalyzer()->Simplify(
+          reference->offset +
+          EncodeCoordinates(reference->tensor, {floordiv(elements, width),
+                                                floormod(elements, width)}));
+      return reference;
     }
-    return Call(op->dtype, op->op, args, op->annotations, op->span);
+    return std::nullopt;
   }
 
-  /*!
-   * \brief Reject a base address that no column offset can be attached to.
-   *
-   * A buffer that starts partway into a shared allocation is only addressable
-   * through a construct this pass knows how to shift.  Reaching one of the
-   * remaining paths would silently address the start of the allocation --
-   * another buffer's data -- so report it instead.
-   */
-  void CheckAddressableWithoutColOffset(const Var &buffer_data) const {
-    int col_offset = GetArenaColOffset(buffer_data);
-    ICHECK_EQ(col_offset, 0)
-        << "TMEM buffer " << buffer_data
-        << " shares a physical TMEM allocation and starts at column "
-        << col_offset
-        << " of it, but its base address reaches an operation LowerSharedTmem "
-           "cannot offset; teach RebaseTmemOperands about that operation";
+  Expr UnshiftedPointer(const TmemReference &reference) const {
+    TVM_FFI_CHECK(GetSyncedAnalyzer()->CanProveEqual(
+                      reference.offset, IntImm(PrimType::UInt(32), 0)),
+                  ValueError)
+        << "Packed or offset TMEM base requires a supported (base, offset) "
+           "intrinsic";
+    return WordPointer(reference.word);
   }
 
-  PrimExpr VisitExpr_(const VarNode *op) final {
-    Var var = GetRef<Var>(op);
-    if (var_remap_.count(var)) {
-      // The base address escaped the (base, offset) rewrite above, so nothing
-      // downstream adds this buffer's column offset.
-      CheckAddressableWithoutColOffset(var);
-      return var_remap_[var];
-    }
-    return var;
+  static Expr WordPointer(const TensorVar &word) {
+    return Call(word.ty()->DataPtrType(), tensor_data_ptr_op(), {word}, {}, {},
+                word->loc);
   }
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        ICHECK(iv->dom->extent.as<IntImmNode>());
-        thread_var_ = iv;
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
+  static Call AllocationCall(Op op, const TensorVar &word, int columns,
+                             bool two_cta, Location loc) {
+    Array<Expr> args{WordPointer(word), IntImm(PrimType::Int(32), columns)};
+    if (two_cta)
+      return MakeAnnotatedCall(PrimType::Void(), op, args,
+                               {{"use_2cta", IntImm(PrimType::Int(32), 1)}},
+                               loc);
+    return Call(PrimType::Void(), op, args, {}, {}, loc);
   }
 
-  // Datatypes for tmem
-  const DataType tmem_dtype_ = DataType::UInt(32);
-  // This is a workaround for cpu backend,
-  // we need to define a thread_var for the serial loop.
-  IterVar thread_var_;
+  Stmt FirstWarp(const Array<Stmt> &statements, Location loc) const {
+    TVM_FFI_CHECK(thread_, ValueError)
+        << "LowerSharedTmem requires an enclosing threadIdx.x region";
+    const int warp_size = TargetCudaGetWarpSize(target_);
+    auto zero = IntImm(thread_.value().ty(), 0);
+    PrimExpr selected =
+        floordiv(*thread_, IntImm(thread_.value().ty(), warp_size)) == zero;
+    return If(selected, SeqStmt(statements, loc), std::nullopt, loc);
+  }
+
   Target target_;
-  Map<Var, Var> var_remap_;
-  Map<Var, Buffer> buffer_data_to_buffer_;
-  Map<Buffer, Buffer> buffer_remap_;
-  // Mapping from data Var of a Buffer to Buffer, for lookup
-  std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
-  std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual>
-      tmem_num_cols_allocated_;
-  // b32 columns between a TMEM buffer and the base of the allocation it shares
-  std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> tmem_col_offsets_;
-  std::unordered_map<Var, Map<String, ObjectRef>, ObjectPtrHash, ObjectPtrEqual>
-      tmem_call_annotations_;
-  Map<Buffer, Layout> layout_map_;
+  TmemProvenance provenance_;
+  Optional<PrimVar> thread_;
+  bool two_cta_{false};
+  std::unordered_map<const VarObj *, TmemReference> references_;
 };
-
-PrimFunc LowerSharedTmem(PrimFunc f) {
-  auto target = f->GetAttr<Target>(tvm::attr::kTarget);
-  ICHECK(target.defined()) << "LowerSharedTmem: Require the target attribute";
-  f.CopyOnWrite()->body = SharedTmemRewriter::Rewrite(f->body, target.value());
-  return f;
-}
+} // namespace
 
 namespace transform {
-using namespace tirx::transform;
-
 tvm::transform::Pass LowerSharedTmem() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return tl::LowerSharedTmem(std::move(f));
+  auto rewrite = [](tirx::Function function, IRModule,
+                    tvm::transform::PassContext) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    TVM_FFI_CHECK(target, ValueError)
+        << "LowerSharedTmem requires a bound target";
+    auto collector = make_object<SourceBindings>();
+    collector->Visit(function->body);
+    auto analyzer = CreateTileLangAnalyzer();
+    auto lowerer = make_object<SharedTmemLowerer>(
+        analyzer.get(), target.value(), collector->bindings);
+    SeqStmt body = function->body;
+    function.CopyOnWrite()->body = lowerer->Mutate(body).ValueOrUnchanged(body);
+    // Cluster launch lowering may consume use_2cta only after this owner has
+    // used it to choose the one- or two-CTA allocation/release instructions.
+    return WithAttr(function, "tl.shared_tmem_lowered", true);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerSharedTmem", {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0, "tl.LowerSharedTmem");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerSharedTmem", LowerSharedTmem);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.LowerSharedTmem",
+                                   LowerSharedTmem);
 }
-
 } // namespace transform
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

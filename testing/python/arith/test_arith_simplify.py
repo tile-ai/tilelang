@@ -15,28 +15,31 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from tilelang import tvm
+from tvm_tirx import ir, sym
+from tvm_tirx.ir import prim
+from tvm_tirx.ir import assert_structural_equal
+import pytest
 import tilelang.testing
-from tvm import tirx
-import tvm.ir
 
 
 def test_simplify_reshape_flattened_index():
-    ana = tvm.arith.Analyzer()
+    ana = sym.Analyzer()
+    constraints = sym.ConstraintContext()
 
-    i0 = tirx.Var("i0", "int64")
-    i1 = tirx.Var("i1", "int64")
-    ana.bind(i0, tvm.ir.Range(0, 8))
-    ana.bind(i1, tvm.ir.Range(0, 3))
+    i0 = ir.Var("i0", "int64")
+    i1 = ir.Var("i1", "int64")
+    constraints.append(sym.RangeConstraint(i0, ir.Range(0, 8)))
+    constraints.append(sym.RangeConstraint(i1, ir.Range(0, 3)))
+    ana.sync_constraint_context(constraints)
 
     i_flattened = i0 * 3 + i1
-    tvm.ir.assert_structural_equal(
+    assert_structural_equal(
         ana.simplify((i_flattened) // 12 * 12 + (i_flattened) % 12 // 4 * 4 + (i_flattened) % 4),
         i_flattened,
     )
 
 
-dtype = tvm.testing.parameter(
+_dtypes = (
     "uint8",
     "uint16",
     "uint32",
@@ -51,30 +54,40 @@ dtype = tvm.testing.parameter(
 )
 
 
-def test_can_prove_self_identity(dtype):
-    ana = tvm.arith.Analyzer()
+@pytest.fixture(params=_dtypes)
+def dtype(request):
+    return request.param
 
-    n = tirx.Var("n", dtype)
+
+def test_can_prove_self_identity(dtype):
+    ana = sym.Analyzer()
+
+    n = ir.Var("n", dtype)
     assert ana.can_prove(n == n)
 
 
 def test_can_prove_self_equal_to_self(dtype):
-    ana = tvm.arith.Analyzer()
+    ana = sym.Analyzer()
 
-    n = tirx.Var("n", dtype)
+    n = ir.Var("n", dtype)
     assert ana.can_prove_equal(n, n)
 
 
 def test_simplify_symbolic_comparison():
-    ana = tvm.arith.Analyzer()
+    ana = sym.Analyzer()
+    constraints = sym.ConstraintContext()
 
-    i0 = tirx.Var("i0", "int64")
-    i1 = tirx.Var("i1", "int64")
-    n, m = tvm.tirx.SizeVar("n", "int64"), tvm.tirx.SizeVar("m", "int64")
+    i0 = ir.Var("i0", "int64")
+    i1 = ir.Var("i1", "int64")
+    n, m = ir.Var("n", "int64"), ir.Var("m", "int64")
+    # Size variables previously carried this fact through their node type.
+    constraints.append(sym.PredicateConstraint(n >= 0))
+    constraints.append(sym.PredicateConstraint(m >= 0))
     outer = (n + 31) // 32
-    ana.bind(i0, tvm.ir.Range(0, outer))
-    ana.bind(i1, tvm.ir.Range(0, 32))
-    PS = tvm.arith.ProofStrength
+    constraints.append(sym.RangeConstraint(i0, ir.Range(0, outer)))
+    constraints.append(sym.RangeConstraint(i1, ir.Range(0, 32)))
+    ana.sync_constraint_context(constraints)
+    PS = sym.ProofStrength
 
     assert ana.can_prove(i0 * 32 + i1 < (n + 31) // 32 * 32, PS.SYMBOLIC_BOUND)
     assert ana.can_prove(i0 * 32 + i1 < (n + 31) // 32 * 32 + m, PS.SYMBOLIC_BOUND)
@@ -84,10 +97,10 @@ def test_simplify_symbolic_comparison():
 
 
 def test_regression_simplify_inf_recursion():
-    ana = tvm.arith.Analyzer()
-    cond = tirx.Var("cond", "int32")
+    ana = sym.Analyzer()
+    cond = ir.Var("cond", "int32")
 
-    res = (tvm.tirx.NE(cond, 0).astype("int8") - tvm.tirx.NE(cond, 0).astype("int8")).astype("int32") == 0
+    res = (prim.NE(cond, 0).astype("int8") - prim.NE(cond, 0).astype("int8")).astype("int32") == 0
     # regression in a previous case
     # try compare and int set recursive call can cause infinite loop
     ana.rewrite_simplify(res)
@@ -97,24 +110,24 @@ def test_simplify_floor_mod_with_linear_offset():
     """
     Test that the floor_mod is simplified correctly when the offset is linear.
     """
-    ana = tvm.arith.Analyzer()
-    past_decoder_sequence_length = tirx.Var("past_decoder_sequence_length", "int64")
+    ana = sym.Analyzer()
+    past_decoder_sequence_length = ir.Var("past_decoder_sequence_length", "int64")
     expr1 = (past_decoder_sequence_length + 1) * 64
     divisor1 = (past_decoder_sequence_length + 1) * 32
-    assert ana.can_prove_equal(tvm.tirx.floormod(expr1, divisor1), 0)
+    assert ana.can_prove_equal(prim.floormod(expr1, divisor1), 0)
     divisor2 = 32 * (past_decoder_sequence_length + 1)
-    assert ana.can_prove_equal(tvm.tirx.floormod(expr1, divisor2), 0)
+    assert ana.can_prove_equal(prim.floormod(expr1, divisor2), 0)
 
 
 def test_simplify_float_division():
     # Test for the discussion:
     # https://discuss.tvm.apache.org/t/discuss-is-constant-division-to-multiplication-rewrite-in-tvm-necessary/18615
-    ana = tvm.arith.Analyzer()
-    x = tirx.Var("x", "float32")
+    ana = sym.Analyzer()
+    x = ir.Var("x", "float32")
     ry = x / 27
     # in old version, the division will be rewritten into x * T.float32(1 / 27)
     sy = ana.rewrite_simplify(ry)
-    tvm.ir.assert_structural_equal(ry, sy)
+    assert_structural_equal(ry, sy)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,13 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# Native IR fixtures are shared by the Python and Ascend regression suites.
+# Resolve them from this checkout, including when pytest selects only one
+# consumer file; no external research runner is required.
+NATIVE_FIXTURE_ROOT = os.path.join(REPO_ROOT, "testing", "ir")
+if NATIVE_FIXTURE_ROOT not in sys.path:
+    sys.path.insert(0, NATIVE_FIXTURE_ROOT)
+
 
 def _configure_torch_extensions_dir():
     cache_dir = os.environ.get("TILELANG_CACHE_DIR", os.path.expanduser("~/.tilelang/cache"))

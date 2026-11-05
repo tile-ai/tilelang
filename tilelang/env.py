@@ -40,37 +40,14 @@ CUTLASS_NOT_FOUND_MESSAGE = "CUTLASS is not installed or found in the expected p
 ", which may lead to compilation bugs when utilize tilelang backend."
 TL_TEMPLATE_NOT_FOUND_MESSAGE = "TileLang is not installed or found in the expected path"
 ", which may lead to compilation bugs when utilize tilelang backend."
-TVM_LIBRARY_NOT_FOUND_MESSAGE = "TVM is not installed or found in the expected path"
+TVM_LIBRARY_NOT_FOUND_MESSAGE = "The matching TIRx provider is not installed"
 
 TL_ROOT = os.path.dirname(os.path.abspath(__file__))
-# Only expose the internal lib directory to sys.path to avoid shadowing
-# common top-level module names (e.g., utils, analysis) from user projects.
-TL_LIBS = [os.path.join(TL_ROOT, "lib")]
-TL_LIBS = [i for i in TL_LIBS if os.path.exists(i)]
-
-DEV = False
-THIRD_PARTY_ROOT = os.path.join(TL_ROOT, "3rdparty")
-if not os.path.exists(THIRD_PARTY_ROOT):
-    DEV = True
-    tl_dev_root = os.path.dirname(TL_ROOT)
-
-    dev_lib_root = os.path.join(tl_dev_root, "build")
-    # In dev builds, place artifacts under build/lib and point search path there
-    # to avoid adding the entire build root to sys.path.
-    TL_LIBS = [os.path.join(dev_lib_root, "lib"), os.path.join(dev_lib_root, "tvm")]
-    THIRD_PARTY_ROOT = os.path.join(tl_dev_root, "3rdparty")
-    logger.warning(f"Loading tilelang libs from dev root: {dev_lib_root}")
-else:
-    try:
-        import z3  # noqa: F401
-    except ImportError:
-        logger.error("Failed to import z3, consider to reinstall tilelang.")
-
-assert TL_LIBS and all(os.path.exists(i) for i in TL_LIBS), f"tilelang lib root do not exists: {TL_LIBS}"
-
-for lib in TL_LIBS:
-    if lib not in sys.path:
-        sys.path.insert(0, lib)
+DEV = not os.path.exists(os.path.join(TL_ROOT, "3rdparty"))
+THIRD_PARTY_ROOT = os.path.join(os.path.dirname(TL_ROOT) if DEV else TL_ROOT, "3rdparty")
+# Cython adapters live here; the compiler itself belongs to the TIRx provider.
+# Merely importing configuration must also work before a native build exists.
+TL_LIBS = [os.path.join(os.path.dirname(TL_ROOT), "build", "lib") if DEV else os.path.join(TL_ROOT, "lib")]
 
 
 def prepend_dll_search_path(paths: list[str]) -> None:
@@ -90,28 +67,8 @@ def prepend_dll_search_path(paths: list[str]) -> None:
 
 prepend_dll_search_path(TL_LIBS)
 
-# TVM's Python loader (3rdparty/tvm/python/tvm/base.py) ORs ``os.RTLD_LAZY``
-# into ``ctypes.CDLL`` mode unconditionally. Windows has no lazy dlopen mode,
-# so we expose a 0 sentinel to keep ``LoadLibrary``'s default behavior.
-if sys.platform.startswith("win32") and not hasattr(os, "RTLD_LAZY"):
-    os.RTLD_LAZY = 0  # type: ignore[attr-defined]
-
-    # tvm-ffi's Cython layer defaults to ``Py_BEGIN_ALLOW_THREADS`` around every
-    # global function call (see ``TVM_FFI_RELEASE_GIL_BY_DEFAULT`` in
-    # ``3rdparty/tvm/3rdparty/tvm-ffi/python/tvm_ffi/cython/function.pxi``).
-    # That default contradicts tvm-ffi's own ``TypeTable``/``GlobalFunctionTable``
-    # single-threaded contract: with the GIL released, two Python threads can
-    # enter the unsynchronized C++ registries concurrently. POSIX hides the race
-    # behind glibc/x86 luck; Windows MSVC turns it into access violations
-    # inside ``Map::find`` / vector reallocation under the autotuner ThreadPool.
-    #
-    # Pinning the default to "0" lets the GIL serialize tvm-ffi calls (matching
-    # the upstream contract). Subprocess work like ``nvcc`` still releases the
-    # GIL on its own via the ``subprocess`` module, so the autotuner pool keeps
-    # real concurrency exactly where it matters. Users that opt back into the
-    # upstream behavior can still set ``TVM_FFI_RELEASE_GIL_BY_DEFAULT=1`` in
-    # their environment.
-    os.environ.setdefault("TVM_FFI_RELEASE_GIL_BY_DEFAULT", "0")
+# The selected FFI owns registry concurrency.  Do not monkey-patch ctypes,
+# Python's global dlopen flags, or another package's loader.
 
 
 def _get_package_version(pkg: str) -> str | None:
@@ -627,18 +584,8 @@ def prepend_pythonpath(path):
     sys.path.insert(0, path)
 
 
-# Initialize TVM paths
-if env.TVM_IMPORT_PYTHON_PATH is not None:
-    prepend_pythonpath(env.TVM_IMPORT_PYTHON_PATH)
-else:
-    tvm_path = os.path.join(THIRD_PARTY_ROOT, "tvm", "python")
-    assert os.path.exists(tvm_path), tvm_path
-    if tvm_path not in sys.path:
-        prepend_pythonpath(tvm_path)
-        env.TVM_IMPORT_PYTHON_PATH = tvm_path
-# By default, the built TVM-related libraries are stored in TL_LIBS.
-if os.environ.get("TVM_LIBRARY_PATH") is None:
-    os.environ["TVM_LIBRARY_PATH"] = env.TVM_LIBRARY_PATH = os.pathsep.join(TL_LIBS)
+# Native compiler discovery belongs to tilelang._provider.  In particular,
+# neither sys.path nor TVM_LIBRARY_PATH points to a legacy vendored TVM.
 
 # Initialize CUTLASS paths
 if os.environ.get("TL_CUTLASS_PATH", None) is None:

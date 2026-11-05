@@ -7,6 +7,7 @@ file(GLOB TILE_LANG_METAL_ALWAYS_SRCS
   src/metal/codegen/codegen_metal.cc
   src/metal/op/*.cc
   src/metal/target_utils.cc
+  src/metal/transform/*.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_METAL_ALWAYS_SRCS})
 

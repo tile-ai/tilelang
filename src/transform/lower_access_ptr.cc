@@ -1,140 +1,100 @@
 /*!
  * \file lower_access_ptr.cc
- * \brief Lower TileLang frontend `tl.access_ptr` to
- * `tir.builtin.tvm_access_ptr`.
+ * \brief Consume TileLang access contracts at the native address boundary.
  */
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/ir/prim/vector_expr.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include "../ir/analyzer.h"
 #include "../op/builtin.h"
-#include "common/access_ptr_utils.h"
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-
+namespace tvm::tl {
 namespace {
 
-DataType IndexDTypeFromBuffer(const Buffer &buffer) {
-  if (!buffer.defined() || buffer->shape.empty()) {
-    return DataType::Int(32);
-  }
-  return buffer->shape[0].dtype();
-}
-
-Array<PrimExpr> RowMajorStrides(const Buffer &buffer) {
-  int ndim = static_cast<int>(buffer->shape.size());
-  Array<PrimExpr> strides;
-  DataType idx_dtype = IndexDTypeFromBuffer(buffer);
-  for (int i = 0; i < ndim; ++i) {
-    PrimExpr stride = make_const(idx_dtype, 1);
-    for (int j = i + 1; j < ndim; ++j) {
-      stride = stride * buffer->shape[j];
-    }
-    strides.push_back(stride);
-  }
-  return strides;
-}
-
-PrimExpr BaseIndexForOffset(const PrimExpr &index) {
-  if (const auto *ramp = index.as<RampNode>()) {
-    return ramp->base;
-  }
-  if (const auto *broadcast = index.as<BroadcastNode>()) {
-    return broadcast->value;
-  }
-  return index;
-}
-
-PrimExpr LinearOffsetFromLoad(const BufferLoad &load) {
-  Buffer buffer = load->buffer;
-  ICHECK(buffer.defined());
-  int ndim = static_cast<int>(buffer->shape.size());
-  ICHECK_EQ(static_cast<int>(load->indices.size()), ndim)
-      << "tl.access_ptr expects a BufferLoad with indices matching buffer ndim";
-
-  Array<PrimExpr> strides;
-  if (!buffer->strides.empty() &&
-      buffer->strides.size() == buffer->shape.size()) {
-    strides = buffer->strides;
-  } else {
-    strides = RowMajorStrides(buffer);
-  }
-
-  DataType idx_dtype = IndexDTypeFromBuffer(buffer);
-  PrimExpr offset = make_const(idx_dtype, 0);
-  for (int i = 0; i < ndim; ++i) {
-    PrimExpr idx = BaseIndexForOffset(load->indices[i]);
-    offset = offset + idx * strides[i];
-  }
-  return offset;
-}
-
-class AccessPtrLowerer : public StmtExprMutator {
+class AccessPtrLowerer : public tirx::StmtExprMutator {
 public:
-  PrimExpr VisitExpr_(const CallNode *op) final {
-    if (!op->op.same_as(tl::access_ptr())) {
-      return StmtExprMutator::VisitExpr_(op);
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
+    if (!op->op.same_as(access_ptr()) && !op->op.same_as(ptr_access())) {
+      return StmtExprMutator::Mutate_(op, mode);
+    }
+    if (op->op.same_as(access_ptr())) {
+      TVM_FFI_CHECK_EQ(op->args.size(), 3U, ValueError);
+      const auto load = op->args[0].as_or_throw<TensorLoad>();
+      Expr source = Mutate(load->source, mode).ValueOrUnchanged(load->source);
+      ffi::Array<PrimExpr> indices;
+      for (const PrimExpr &original : load->indices) {
+        PrimExpr index = Mutate(original, mode).ValueOrUnchanged(original);
+        // The pointer names the first lane, while extent already counts all
+        // lanes requested by the frontend. It does not evaluate a memory load.
+        if (const auto *ramp = index.as<prim::RampObj>())
+          index = ramp->base;
+        if (const auto *broadcast = index.as<prim::BroadcastObj>())
+          index = broadcast->value;
+        indices.push_back(index);
+      }
+      TensorLoad address(source, indices, load->loc);
+      // Keep the logical address until LowerTensorLayouts/FlattenTensor. The
+      // owning native tensor type accounts for strides, offsets and composed
+      // layouts; computing a row-major offset here would lose those contracts.
+      return Call(op->ty, tirx::address_of_op(), {address}, {}, {}, op->loc);
     }
 
-    ICHECK_EQ(op->args.size(), 3U)
-        << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-
-    auto visit_expr = [this](const PrimExpr &expr) {
-      return this->VisitExpr(expr);
-    };
-    BufferLoad base_load = detail::VisitAccessPtrBase(op->args[0], visit_expr);
-    Buffer buffer = base_load->buffer;
-    ICHECK(buffer.defined());
-
-    PrimExpr extent = VisitExpr(op->args[1]);
-    PrimExpr rw_mask = VisitExpr(op->args[2]);
-
-    PrimExpr ptype = tirx::TypeAnnotation(buffer->dtype);
-    PrimExpr data = buffer->data;
-    PrimExpr offset = buffer->elem_offset + LinearOffsetFromLoad(base_load);
-
-    Array<PrimExpr> args{ptype, data, offset, extent, rw_mask};
-    return Call(DataType::Handle(), builtin::tvm_access_ptr(), args);
+    TVM_FFI_CHECK_EQ(op->args.size(), 4U, ValueError);
+    Expr pointer = Mutate(op->args[0], mode).ValueOrUnchanged(op->args[0]);
+    PrimExpr offset = Mutate(op->args[1], mode)
+                          .ValueOrUnchanged(op->args[1])
+                          .as_or_throw<PrimExpr>();
+    const PtrType pointer_type = pointer->ty.as_or_throw<PtrType>();
+    const PrimType element_type =
+        pointer_type->element_type.as_or_throw<PrimType>();
+    const int bits = element_type.bits() * element_type.lanes();
+    TVM_FFI_CHECK_GT(bits, 0, ValueError)
+        << "Access pointer needs a sized element type";
+    // Sub-byte element addresses select their containing physical byte, as in
+    // TileLang's packed storage addressing. Dtype reinterpretation was already
+    // made explicit by the producer, before this element offset is applied.
+    PrimExpr bytes =
+        floordiv(offset * IntImm(offset.ty(), bits), IntImm(offset.ty(), 8));
+    bytes = analyzer_->Simplify(bytes);
+    return Call(op->ty, tirx::ptr_byte_offset_op(), {pointer, bytes}, {}, {},
+                op->loc);
   }
+
+private:
+  sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
 };
-
-PrimFunc LowerAccessPtrPrimFunc(PrimFunc f) {
-  if (!f.defined() || !f->body.defined()) {
-    return f;
-  }
-  AccessPtrLowerer lowerer;
-  PrimFuncNode *n = f.CopyOnWrite();
-  n->body = lowerer(std::move(n->body));
-  return f;
-}
 
 } // namespace
 
 namespace transform {
 
 tvm::transform::Pass LowerAccessPtr() {
-  auto pass_func = [](PrimFunc f, const IRModule &m,
-                      const tvm::transform::PassContext &ctx) {
-    return LowerAccessPtrPrimFunc(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    auto lowerer = ffi::make_object<AccessPtrLowerer>();
+    const auto body = function->body;
+    SeqStmt result = lowerer->Mutate(body).ValueOrUnchanged(body);
+    if (!result.same_as(body))
+      function.CopyOnWrite()->body = result;
+    return function;
   };
-  return tvm::tirx::transform::CreatePrimFuncPass(pass_func, 0,
-                                                  "tl.LowerAccessPtr", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LowerAccessPtr");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerAccessPtr", LowerAccessPtr);
+  ffi::reflection::GlobalDef().def("tl.transform.LowerAccessPtr",
+                                   LowerAccessPtr);
 }
 
 } // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

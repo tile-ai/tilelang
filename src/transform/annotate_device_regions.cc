@@ -1,81 +1,42 @@
 /*!
  * \file annotate_device_regions.cc
- * \brief Split device function from host.
+ * \brief Mark CPU compute regions for native host/device splitting.
  */
-#include "common/attr.h"
-#include "support/check.h"
-#include "tir/transforms/ir_utils.h"
-#include <tvm/ir/transform.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <utility>
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-
-class DeviceRegionAnnotater : public StmtMutator {
-public:
-  explicit DeviceRegionAnnotater(Target device_target)
-      : device_target_(std::move(device_target)) {}
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tvm::attr::kTarget) {
-      // If a target attribute already exists, use it as-is.
-      return tvm::ffi::GetRef<Stmt>(op);
-    } else if (op->attr_key == tirx::attr::thread_extent ||
-               op->attr_key == tl::attr::pipeline_exec_scope ||
-               op->attr_key == tirx::attr::device_scope) {
-      // These attributes are only allowed in device-side code, so
-      // they should be annotated with the function's default target.
-      Stmt body = tvm::ffi::GetRef<Stmt>(op);
-      return AttrStmt(device_target_, tvm::attr::kTarget, 0, body);
-    } else {
-      // All other annotations are ignored
-      return StmtMutator::VisitStmt_(op);
-    }
-  }
-
-private:
-  Target device_target_;
-};
+namespace tvm::tl {
 
 tvm::transform::Pass AnnotateDeviceRegions() {
-  using namespace tirx::transform;
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) -> PrimFunc {
-    auto opt_target = func->GetAttr<Target>(tvm::attr::kTarget);
-    ICHECK(opt_target) << "AnnotateDeviceRegions: Require the target attribute";
-    Target target = opt_target.value();
-    Target device_target = target.WithoutHost();
-
-    if (target->GetHost()) {
-      if (device_target->kind->name == "c") {
-        // Annotate the function with the device target
-        auto func_body = func->body;
-        func.CopyOnWrite()->body =
-            AttrStmt(device_target, tvm::attr::kTarget, 0, func_body);
-      }
-
-      DeviceRegionAnnotater mutator(target.WithoutHost());
-      func.CopyOnWrite()->body = mutator(func->body);
-    }
-    return func;
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    TVM_FFI_CHECK(target.has_value(), ValueError)
+        << "AnnotateDeviceRegions requires a target";
+    auto kind = target.value()->kind->name;
+    // Native SplitHostDevice recognizes launch_thread/device_entry for GPU
+    // targets. CPU kernels instead consist of ordinary For loops and still
+    // need a compute function with the original TileLang device signature.
+    if (kind != "c" && kind != "llvm")
+      return function;
+    if (function->GetAttr<bool>("tl.cpu_compute_region").value_or(false))
+      return function;
+    auto region = RegionStmt(
+        Op::Get("tirx.device_scope"), {}, {},
+        DictAttrs({{tvm::attr::kTarget.name, target.value().WithoutHost()}}),
+        function->body);
+    function.CopyOnWrite()->body = SeqStmt(region);
+    return WithAttr(function, "tl.cpu_compute_region", true);
   };
-
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateDeviceRegions", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.AnnotateDeviceRegions");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.AnnotateDeviceRegions",
-                        AnnotateDeviceRegions);
+  ffi::reflection::GlobalDef().def("tl.transform.AnnotateDeviceRegions",
+                                   AnnotateDeviceRegions);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

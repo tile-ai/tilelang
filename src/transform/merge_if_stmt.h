@@ -17,9 +17,9 @@ using namespace tirx;
 class MergeIfStmtRewriter;
 
 /*!
- * \brief Apply MergeIfStmt transformation to a PrimFunc
+ * \brief Apply MergeIfStmt transformation to a Function
  *
- * This function merges consecutive IfThenElse statements that have the same
+ * This function merges consecutive If statements that have the same
  * condition into a single if statement with a SeqStmt body.
  *
  * Example:
@@ -34,10 +34,10 @@ class MergeIfStmtRewriter;
  *     stmt3
  *   }
  *
- * \param f The PrimFunc to transform
- * \return Transformed PrimFunc with merged if statements
+ * \param f The Function to transform
+ * \return Transformed Function with merged if statements
  */
-PrimFunc MergeIfStmtSubstitute(PrimFunc &f);
+Function MergeIfStmtSubstitute(Function &f);
 
 /*!
  * \brief Apply MergeIfStmt transformation to a statement

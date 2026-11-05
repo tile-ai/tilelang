@@ -45,15 +45,15 @@ Use the following names in new C++ code.
 | Parameters and locals | `lower_snake_case` | `layout_map`, `thread_bounds`, `buffer_remap` |
 | Private/protected members | `lower_snake_case_` | `layout_remap_`, `analyzer_` |
 | Constants and enum values | `kPascalCase` | `kWarpSize`, `kAccessRead` |
-| Macros | `UPPER_SNAKE_CASE` | `TVM_REGISTER_GLOBAL`, `TIR_REGISTER_TL_TILE_OP` |
+| Macros | `UPPER_SNAKE_CASE` | `TVM_FFI_STATIC_INIT_BLOCK`, `TIR_REGISTER_TL_TILE_OP` |
 
 Prefer:
 
 ```cpp
 Layout MakeLinearLayout(Array<PrimExpr> shape);
-bool IsSharedBuffer(const Buffer& buffer);
+bool IsSharedBuffer(const tirx::TensorVar& buffer);
 
-Stmt Lower(const LowerArgs& args, arith::Analyzer* analyzer) const;
+Stmt Lower(const LowerArgs& args, sym::AnalyzerObj* analyzer) const;
 LayoutMap InferLayout(const LayoutInferArgs& args, InferLevel level) const;
 ```
 
@@ -61,8 +61,8 @@ Avoid adding new names like:
 
 ```cpp
 Layout makeLinearLayout(Array<PrimExpr> shape);
-bool isSharedBuffer(const Buffer& buffer);
-Stmt Lower(const LowerArgs& T, arith::Analyzer* analyzer) const;
+bool isSharedBuffer(const tirx::TensorVar& buffer);
+Stmt Lower(const LowerArgs& T, sym::AnalyzerObj* analyzer) const;
 ```
 
 Existing lowerCamelCase names can be migrated when related code is touched. Do
@@ -71,46 +71,53 @@ and easy to review.
 
 ## TVM Object And FFI Types
 
-TileLang C++ code uses TVM object handles heavily. Treat `Stmt`, `PrimExpr`,
-`Buffer`, `Var`, `SBlock`, `Layout`, and similar types as `ObjectRef` handles.
-Treat `StmtNode`, `BufferNode`, `VarNode`, and other `*Node` types as raw node
+TileLang C++ code uses TVM object handles heavily. Treat `Stmt`, `Expr`, `PrimExpr`,
+`tirx::TensorVar`, `Var`, `RegionStmt`, `Layout`, and similar types as `ObjectRef` handles.
+Treat `StmtNode`, `VarNode`, and other `*Node` types as raw node
 views used mainly for visitor callbacks and local inspection.
 
 Use handle types across function boundaries:
 
 ```cpp
 Optional<For> FindPipelineLoop(const Stmt& stmt);
-Map<Buffer, Layout> InferBufferLayouts(const SBlock& block);
+Map<tirx::TensorVar, Layout> InferTensorLayouts(const RegionStmt& region);
 ```
 
 Keep raw node pointers local to visitor callbacks, pattern checks, and
 `CopyOnWrite()` mutation sites:
 
 ```cpp
-Stmt VisitStmt_(const ForNode* op) final {
-  For loop = GetRef<For>(op);
+ffi::UnchangedOr<Stmt> Mutate_(const ForNode* op, InplaceMode mode) final {
+  For loop = ffi::GetRef<For>(op);
   Optional<For> pipeline_loop = FindPipelineLoop(loop->body);
-  if (pipeline_loop.defined() && pipeline_loop.value().same_as(loop)) {
-    ...
+  if (pipeline_loop.has_value() && pipeline_loop.value().same_as(loop)) {
+    // Inspect or retain the handle here.
   }
-  return StmtMutator::VisitStmt_(op);
+  return StmtExprMutator::Mutate_(op, mode);
 }
 ```
 
 For identity comparisons between handles, use `.same_as(other)`. For structural
-comparisons, use TVM structural equality utilities such as `StructuralEqual`.
+comparisons, use TVM structural equality utilities such as `ffi::StructuralEqual`.
 Do not use `handle.get() == other.get()` outside narrow adapter code.
 
 For unordered identity maps or sets keyed by TVM handles, use TVM pointer hash
 and equality helpers:
 
 ```cpp
-using BufferSet = std::unordered_set<Buffer, ObjectPtrHash, ObjectPtrEqual>;
+using BufferSet = std::unordered_set<tirx::TensorVar, ObjectPtrHash, ObjectPtrEqual>;
 using VarMap = std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
 ```
 
 Use `Optional<T>` for nullable TVM handle values. Avoid storing `const *Node`
 pointers as nullable state.
+
+`tirx::TensorVar` is a checked view of an ordinary `Var` with `TensorType`;
+it does not introduce a `TensorVarNode` or a second identity. Use `shape()`,
+`dtype()`, `scope()` and `data()` for its contract. Generic expressions use
+`Expr`; numeric-only helpers may use `PrimExpr` after checking the type.
+`IntImmNode::value` is `ffi::BigInt`: check `as<int64_t>()` when a machine
+integer is required, instead of assuming every literal fits.
 
 ## ObjectNode Fields
 
@@ -120,12 +127,12 @@ For TVM-style `ObjectNode` classes, public reflected fields should use
 ```cpp
 class CopyNode : public TileOperatorNode {
  public:
-  Buffer src;
-  Buffer dst;
+  tirx::TensorVar src{ffi::UnsafeInit{}};
+  tirx::TensorVar dst{ffi::UnsafeInit{}};
   Array<Range> ranges;
 
   static void RegisterReflection() {
-    namespace refl = reflection;
+    namespace refl = ffi::reflection;
     refl::ObjectDef<CopyNode>()
         .def_ro("src", &CopyNode::src)
         .def_ro("dst", &CopyNode::dst)
@@ -137,9 +144,9 @@ class CopyNode : public TileOperatorNode {
 Use trailing underscores for private or protected implementation state:
 
 ```cpp
-class LayoutRemapRewriter : public arith::IRMutatorWithAnalyzer {
+class LayoutRemapRewriter : public tirx::StmtExprMutatorWithAnalyzer {
  private:
-  Map<Buffer, Layout> layout_remap_;
+  Map<tirx::TensorVar, Layout> layout_remap_;
 };
 ```
 
@@ -152,7 +159,7 @@ changing them.
 Use descriptive parameter names:
 
 ```cpp
-Stmt Lower(const LowerArgs& args, arith::Analyzer* analyzer) const;
+Stmt Lower(const LowerArgs& args, sym::AnalyzerObj* analyzer) const;
 LayoutMap InferLayout(const LayoutInferArgs& args, InferLevel level) const;
 ```
 
@@ -186,7 +193,7 @@ Prefer:
 namespace tvm {
 namespace tl {
 
-using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
+using LayoutMap = ffi::Map<tirx::TensorVar, Layout>;
 
 }  // namespace tl
 }  // namespace tvm
@@ -216,8 +223,8 @@ not add namespace-wide imports there. Use qualified names for ordinary types:
 ```cpp
 class LayoutNode : public ffi::Object {
  public:
-  ffi::Array<tirx::PrimExpr> input_shape;
-  ffi::Optional<tirx::Buffer> buffer;
+  ffi::Array<tvm::PrimExpr> input_shape;
+  ffi::Optional<tirx::TensorVar> buffer;
 };
 ```
 
@@ -225,7 +232,7 @@ Use a narrow alias in a header only when the alias is part of the API or removes
 real repetition:
 
 ```cpp
-using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
+using LayoutMap = ffi::Map<tirx::TensorVar, Layout>;
 ```
 
 Implementation files may use file-local namespace imports when the file is
@@ -267,7 +274,7 @@ Good comments describe invariants:
 
 ```cpp
 // The barrier buffer is allocated lazily because only TMA paths require it.
-Optional<Buffer> mbarrier_buffer;
+Optional<tirx::TensorVar> mbarrier_buffer;
 ```
 
 Avoid comments that restate the code:

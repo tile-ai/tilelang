@@ -15,11 +15,11 @@ branch instead of opening a duplicate PR.
 ## Inspect the Patch
 
 - Check the worktree, branch, upstream, remotes, Git identity, PR head, and base.
-  Preserve unrelated edits and real changes inside `3rdparty/tvm`.
+  Preserve unrelated edits and real changes inside `3rdparty/tvm-tirx` and its `3rdparty/tvm-ffi`.
 - Review the complete diff against the PR base, not only unstaged changes.
   Separate the intended fix from cleanup or generated files before staging.
-- After switching branches or changing the TVM gitlink, align a clean TVM
-  submodule and rebuild before trusting tests that load native libraries. Never
+- After switching branches or changing a TIRx/FFI gitlink, align clean dependency
+  submodules and rebuild the matched provider/frontend before trusting tests that load native libraries. Never
   overwrite a dirty submodule to make the checkout appear clean.
 
 ## Audit Test Portability

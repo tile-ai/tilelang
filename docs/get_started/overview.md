@@ -41,7 +41,7 @@ Figure 1: High-level overview of the TileLang compilation flow.
    Expert-level developers can explicitly use low-level threading constructs to hand-optimize data layout, synchronization, and memory usage.
 
 4. **IRModule**
-   After the program is composed with libraries or thread primitives, it is lowered to an intermediate representation (IR) that captures the necessary hardware details.
+   After the program is composed with libraries or thread primitives, it is lowered to an intermediate representation (IR) that captures the necessary hardware details. The native TIRx module contains `Function` objects; tensor parameters use `Var(TensorType)` and scoped tile operations use `RegionStmt`. These internal objects preserve the TileLang language interfaces shown below.
 
 5. **Source Code Generation (C/CUDA/HIP/LLVM/…)**
    From the IR, the system generates target-specific source code. This source code is tuned for the desired backends or GPU architectures (e.g., NVIDIA, AMD).

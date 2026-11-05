@@ -1,3 +1,4 @@
+import tvm_ffi
 import builtins
 
 import pytest
@@ -6,13 +7,33 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tvm import IRModule, arith, tirx
+from tvm_tirx import IRModule, ir, sym as arith, tirx
+from tvm_tirx.script.ir_builder import IRBuilder
 
 
 def stores(func):
     result = []
-    tirx.stmt_functor.post_order_visit(func.body, lambda node: result.append(node) if isinstance(node, tirx.BufferStore) else None)
+    tvm_ffi.structural_walk(
+        func.body, (tvm_ffi.Object, lambda node: result.append(node) if isinstance(node, ir.TensorStore) else None), order="post"
+    )
     return result
+
+
+def resolve_bound_values(func, expression):
+    """Inspect immutable snapshots without asking LetInline to duplicate reads.
+
+    These comprehension kernels read each source before their output stores.
+    Native Bind preserves that read as an SSA value. Resolve its definition
+    only for the expression oracle; leave executable IR and memory effects intact.
+    """
+    bindings = {}
+
+    def visit(node):
+        if isinstance(node, ir.Bind) and ir.is_prim_expr(node.value):
+            bindings[node.var] = tvm_ffi.structural_map(node.value, (ir.Var, lambda var: bindings.get(var, var)))
+
+    tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, visit), order="post")
+    return tvm_ffi.structural_map(expression, (ir.Var, lambda var: bindings.get(var, var)))
 
 
 @pytest.fixture(params=["ir", pytest.param("cuda", marks=tilelang.testing.requires_cuda.marks())])
@@ -39,8 +60,8 @@ def forbid_device_iteration(monkeypatch):
     def unexpected_iteration(self):
         pytest.fail("Device values must be rejected before acquiring a Python iterator")
 
-    monkeypatch.setattr(tirx.Buffer, "__iter__", unexpected_iteration, raising=False)
-    monkeypatch.setattr(tirx.Var, "__iter__", unexpected_iteration)
+    # Native scalar and tensor variables share ir.Var.
+    monkeypatch.setattr(ir.Var, "__iter__", unexpected_iteration, raising=False)
 
 
 def test_comprehensions(check_kernel):
@@ -124,10 +145,12 @@ def test_dynamic_serial(loop, check_kernel):
                 B[i] = i
 
     loops = []
-    tirx.stmt_functor.post_order_visit(main.body, lambda node: loops.append(node) if isinstance(node, tirx.For) else None)
-    loops = [loop for loop in loops if loop.thread_binding is None]
+    tvm_ffi.structural_walk(
+        main.body, (tvm_ffi.Object, lambda node: loops.append(node) if isinstance(node, ir.For) else None), order="post"
+    )
     assert len(loops) == 1
-    assert loops[0].extent.same_as(main.buffer_map[main.params[0]].shape[0])
+    assert int(loops[0].begin) == 0 and int(loops[0].step) == 1
+    assert loops[0].end.same_as(main.params[0].ty.shape[0])
     for size in [1, 7, 33]:
         check_kernel(main, list(range(size)))
 
@@ -288,8 +311,9 @@ def test_serial_inside_python_loop(check_kernel):
                 B[3] = offset
 
     loops = []
-    tirx.stmt_functor.post_order_visit(main.body, lambda node: loops.append(node) if isinstance(node, tirx.For) else None)
-    loops = [loop for loop in loops if loop.thread_binding is None]
+    tvm_ffi.structural_walk(
+        main.body, (tvm_ffi.Object, lambda node: loops.append(node) if isinstance(node, ir.For) else None), order="post"
+    )
     assert len(loops) == 2
     assert all("break" in loop.script() for loop in loops)
     check_kernel(main, [1, 1, -9999, 1])
@@ -376,9 +400,9 @@ def test_symbolic_comprehension_elements(check_kernel):
     inlined = tilelang.transform.LetInline()(IRModule.from_expr(main))["main"]
     results = stores(inlined)
     assert len(results) == 3
-    a = inlined.buffer_map[inlined.params[0]]
+    a = inlined.params[0]
     analyzer = arith.Analyzer()
-    assert all(analyzer.can_prove_equal(store.value, a[0] + 3 * i) for i, store in enumerate(results))
+    assert all(analyzer.can_prove_equal(resolve_bound_values(inlined, store.value), a[0] + 3 * i) for i, store in enumerate(results))
     for value in [-7, 13]:
         check_kernel(main, [value + 3 * i for i in range(3)], [value])
 
@@ -395,12 +419,12 @@ def test_comprehensions_accept_shape_and_buffer_containers(check_kernel):
                 C[i] = value
 
     inlined = tilelang.transform.LetInline()(IRModule.from_expr(main))["main"]
-    a, b = (inlined.buffer_map[p] for p in inlined.params[:2])
+    a, b = inlined.params[:2]
     expected = [a.shape[0], a[0], b[0]]
     results = stores(inlined)
     assert len(results) == len(expected)
     analyzer = arith.Analyzer()
-    assert all(analyzer.can_prove_equal(store.value, value) for store, value in zip(results, expected))
+    assert all(analyzer.can_prove_equal(resolve_bound_values(inlined, store.value), value) for store, value in zip(results, expected))
     for size in [1, 7, 33]:
         check_kernel(main, [size, -3, 11], [-3] * size, [11] * size)
 
@@ -440,7 +464,7 @@ def test_comprehension_unwraps_mutable_values(check_kernel):
 
     initialization, output = stores(main)
     assert int(initialization.value) == 3
-    assert arith.Analyzer().can_prove_equal(output.value, initialization.buffer[0] + 1)
+    assert arith.Analyzer().can_prove_equal(output.value, initialization.dest[0] + 1)
     check_kernel(main, [4])
 
 
@@ -455,7 +479,7 @@ def test_python_loop_preserves_value_scope(stop_early, check_kernel):
                     break
             B[0] = value
 
-    defined = [buffer.data for buffer in main.buffer_map.values()]
+    defined = list(main.params)
     assert not tirx.analysis.undefined_vars(main.body, defined)
     check_kernel(main, [8 if stop_early else 14], [7, 13])
 
@@ -549,13 +573,18 @@ def test_python_container_construction(consumer, args, kwargs, check_kernel):
 
     assert [int(s.value) for s in stores(main)] == expected
     device_nodes = []
-    tirx.stmt_functor.post_order_visit(
+    tvm_ffi.structural_walk(
         main.body,
-        lambda node: (
-            device_nodes.append(node)
-            if isinstance(node, tirx.AllocBuffer) or (isinstance(node, tirx.For) and node.thread_binding is None)
-            else None
+        (
+            tvm_ffi.Object,
+            lambda node: (
+                device_nodes.append(node)
+                if (isinstance(node, ir.Bind) and isinstance(node.value, ir.Call) and node.value.op.name == "tirx.alloc_tensor")
+                or isinstance(node, ir.For)
+                else None
+            ),
         ),
+        order="post",
     )
     assert not device_nodes, "Python container construction must not allocate storage or emit a device loop"
     check_kernel(main, expected + [-9999] * (4 - len(expected)))
@@ -588,7 +617,8 @@ def test_python_container_construction(consumer, args, kwargs, check_kernel):
 def test_python_builtin_iterable_checks(consumer, operands):
     # Cover argument conventions and rejected types, not their Cartesian product.
     # Calls do not consume lazy results, so a regression cannot loop over a Buffer.
-    args, kwargs = operands(T.dynamic("n"), tirx.decl_buffer((4,), "int32"))
+    with IRBuilder():
+        args, kwargs = operands(T.dynamic("n"), ir.Var("A", tirx.TensorType((4,), "int32", layout="default")))
     with pytest.raises(TypeError, match=rf"{consumer.__name__}\(\):.*not .*iterable"):
 
         @T.prim_func
@@ -630,7 +660,7 @@ def test_enumerate_rejects_device_loop_source(use_buffer):
 def test_zip_strict_preserves_errors_and_builder_state(form, check_kernel):
     from tilelang.language.eager.builder import Builder
     from tilelang.language.kernel import KernelLaunchFrame
-    from tvm.script.ir_builder import IRBuilder
+    from tvm_tirx.script.ir_builder import IRBuilder
 
     def make_main(mismatched):
         @T.prim_func
@@ -657,7 +687,7 @@ def test_zip_strict_preserves_errors_and_builder_state(form, check_kernel):
     main = make_main(False)
     inlined = tilelang.transform.LetInline()(IRModule.from_expr(main))["main"]
     (output,) = stores(inlined)
-    assert arith.Analyzer().can_prove_equal(output.value, output.buffer[0] + 4)
+    assert arith.Analyzer().can_prove_equal(resolve_bound_values(inlined, output.value), output.dest[0] + 4)
     check_kernel(main, [11], initial=[7])
 
 

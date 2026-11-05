@@ -5,11 +5,14 @@
 #ifndef TVM_TL_TARGET_CODEGEN_CUDA_H_
 #define TVM_TL_TARGET_CODEGEN_CUDA_H_
 
+#include "backend/common/codegen/codegen_ir_utils.h"
 #include "support/check.h"
 #include <optional>
-#include <tvm/target/codegen.h>
+#include <tvm/codegen/codegen.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 
 #include <string>
 #include <unordered_map>
@@ -22,78 +25,93 @@ namespace codegen {
 
 class CodeGenTileLangCUDA final : public CodeGenTileLangCBase {
 public:
+  using CodeGenTileLangCBase::Dispatch_;
+  using CodeGenTileLangCBase::PrintType;
   CodeGenTileLangCUDA();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
-  void PrintExtraAttrs(const PrimFunc &f);
-  void VisitStmt_(const ForNode *op) final;
-  void PrintStorageSync(const CallNode *op) final;
-  void PrintStorageScope(const std::string &scope,
+  void PrintExtraAttrs(const tirx::Function &f, std::ostream &os) override;
+  void Dispatch_(const ForObj *op) final;
+  void PrintStorageSync(const CallObj *op) final;
+  void PrintStorageScope(const runtime::MemoryScope &scope,
                          std::ostream &os) final; // NOLINT(*)
-  void PrintVecBinaryOp(const std::string &op, DataType t, PrimExpr lhs,
+  void PrintVecBinaryOp(const std::string &op, const PrimType &t, PrimExpr lhs,
                         PrimExpr rhs,
-                        std::ostream &os) final;                // NOLINT(*)
-  void PrintType(DataType t, std::ostream &os) final;           // NOLINT(*)
-  void PrintVecConstructor(DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintVecElemLoad(const std::string &vec, DataType t, int i,
+                        std::ostream &os) final;             // NOLINT(*)
+  void PrintType(const PrimType &t, std::ostream &os) final; // NOLINT(*)
+  void PrintType(const Type &t, std::ostream &os) final;     // NOLINT(*)
+  void PrintVecConstructor(const PrimType &t,
+                           std::ostream &os) final; // NOLINT(*)
+  void PrintVecElemLoad(const std::string &vec, const PrimType &t, int i,
                         std::ostream &os) final; // NOLINT(*)
-  void PrintVecElemStore(const std::string &vec, DataType t, int i,
+  void PrintVecElemStore(const std::string &vec, const PrimType &t, int i,
                          const std::string &value) final;
-  std::string GetVecLoad(DataType t, const BufferNode *buffer,
+  std::string GetVecLoad(const PrimType &t, const VarObj *buffer,
                          PrimExpr base) final;
-  void PrintVecStore(const BufferNode *buffer, DataType t, PrimExpr base,
+  void PrintVecStore(const VarObj *buffer, const PrimType &t, PrimExpr base,
                      const std::string &value) final;
-  void BindThreadIndex(const IterVar &iv) final; // NOLINT(*)
-  void PrintVecElemLoadExpr(DataType t, int i, const std::string &value,
+  void BindThreadIndex(const PrimVar &var,
+                       const ffi::String &thread_tag) final; // NOLINT(*)
+  void PrintVecElemLoadExpr(const PrimType &t, int i, const std::string &value,
                             std::ostream &os) final;
-  std::string CastFromTo(std::string value, DataType from,
-                         DataType target) final;
+  std::string CastFromTo(std::string value, const PrimType &from,
+                         const PrimType &target) final;
   // overload visitor
-  void VisitExpr_(const RampNode *op, std::ostream &os) final;      // NOLINT(*)
-  void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
-  void VisitExpr_(const CallNode *op, std::ostream &os) final;
-  void VisitExpr_(const CastNode *op, std::ostream &os) final;
-  void VisitExpr_(const ShuffleNode *op, std::ostream &os) final;
-  void VisitExpr_(const MinNode *op, std::ostream &os) final;
-  void VisitExpr_(const MaxNode *op, std::ostream &os) final;
-  void VisitExpr_(const NotNode *op, std::ostream &os) final;
-  void VisitStmt_(const AssertStmtNode *op) final;
-  void VisitStmt_(const EvaluateNode *op) final;
-  void VisitStmt_(const AllocBufferNode *op) final;
-  void VisitStmt_(const AttrStmtNode *op) final;
-  void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
-  void VisitStmt_(const BufferStoreNode *op) final;
-  void VisitExpr_(const SelectNode *op, std::ostream &os) final;
+  void Dispatch_(const prim::RampObj *op, std::ostream &os) final; // NOLINT(*)
+  void Dispatch_(const prim::BroadcastObj *op,
+                 std::ostream &os) final; // NOLINT(*)
+  void Dispatch_(const FloatImmObj *op, std::ostream &os) final;
+  void Dispatch_(const CallObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::CastObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::ShuffleObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::MinObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::MaxObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::NotObj *op, std::ostream &os) final;
+  void Dispatch_(const prim::BitwiseNotObj *op, std::ostream &os) final;
+  void Dispatch_(const AssertStmtObj *op) final;
+  void Dispatch_(const EvaluateObj *op) final;
+  void Dispatch_(const ReturnObj *op) final;
+  void Dispatch_(const BindObj *op) final;
+  void Dispatch_(const RegionStmtObj *op) final;
+  void Dispatch_(const TensorLoadObj *op, std::ostream &os) final;
+  void Dispatch_(const TensorStoreObj *op) final;
+  void Dispatch_(const prim::SelectObj *op, std::ostream &os) final;
 
   // Override this as a work around for __grid_constant__ parameter
-  void AddFunction(const GlobalVar &gvar, const PrimFunc &f);
+  void AddFunction(const GlobalVar &gvar, const tirx::Function &f);
   void PrintFunctionSignature(const ffi::String &function_name,
-                              const PrimFunc &func, std::ostream &os);
+                              const tirx::Function &func, std::ostream &os);
 
 protected:
   void EmitPreamble_(std::ostream &os) const final;
   void ReserveKeywordsAsUnique_();
-  virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
+  virtual std::string GetBufferRef(const PrimType &t, const VarObj *buffer,
                                    PrimExpr index) final;
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
-                       const ffi::Array<PrimExpr> &args, bool skip_first_arg,
+                       const ffi::Array<Expr> &args, bool skip_first_arg,
                        std::ostream &os) final; // NOLINT(*)
 
 private:
+  std::string GetVectorByteAddress_(const VarObj *buffer, PrimExpr base,
+                                    bool read_only);
+  bool CanUseAlignedVectorAccess_(const PrimType &type, const VarObj *buffer,
+                                  const PrimExpr &base);
+  void PrintCast(const PrimExpr &value, const PrimType &target_type,
+                 const std::string &rounding, bool saturate,
+                 ffi::Optional<PrimExpr> random_bits, std::ostream &os);
   // Handle volatile loads
-  void HandleVolatileLoads(const std::string &value, const BufferLoadNode *op,
+  void HandleVolatileLoads(const std::string &value, const TensorLoadObj *op,
                            std::ostream &os) final;
-  bool HandleLateIntrinsicCall(const CallNode *op, std::ostream &os);
-  bool TryEmitPackedBinaryOp_(const std::string &op, DataType result_type,
+  bool HandleLateIntrinsicCall(const CallObj *op, std::ostream &os);
+  bool TryEmitPackedBinaryOp_(const std::string &op, PrimType result_type,
                               const PrimExpr &lhs, const PrimExpr &rhs,
                               std::ostream &os);
-  bool TryEmitPackedComparison_(const std::string &op, DataType result_type,
-                                DataType lhs_type, DataType rhs_type,
+  bool TryEmitPackedComparison_(const std::string &op, PrimType result_type,
+                                PrimType lhs_type, PrimType rhs_type,
                                 const std::string &lhs, const std::string &rhs,
                                 const std::string &result);
-  void EmitScalarizedBinaryOp_(const std::string &op, DataType result_type,
-                               DataType lhs_type, DataType rhs_type,
+  void EmitScalarizedBinaryOp_(const std::string &op, PrimType result_type,
+                               PrimType lhs_type, PrimType rhs_type,
                                const std::string &lhs, const std::string &rhs,
                                const std::string &result);
   bool TryEmitFastMathCall_(const Call &call, std::ostream &os);
@@ -102,17 +120,17 @@ private:
   // Emit a vector op of dtype t as lanes/2 packed x2 calls (tl::mul2,
   // tl::fma2, ...). All args must already have dtype t; requires
   // CanEmitPackedX2Math(t).
-  void EmitPackedX2Call(const std::string &tl_func, DataType t,
+  void EmitPackedX2Call(const std::string &tl_func, const PrimType &t,
                         const std::vector<PrimExpr> &args, std::ostream &os);
   // Emit a vector op of dtype t as one scalar call per lane.
-  void EmitPerLaneScalarCall(const std::string &func_name, DataType t,
+  void EmitPerLaneScalarCall(const std::string &func_name, const PrimType &t,
                              const std::vector<PrimExpr> &args,
                              std::ostream &os);
 
   // Whether scope such as "__shared__" or "__constant__"  is part of type.
   bool IsScopePartOfType() const final { return false; }
 
-  friend void PrintConst(const FloatImmNode *op, std::ostream &os,
+  friend void PrintConst(const FloatImmObj *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
 
   // Global curand state
@@ -123,7 +141,7 @@ private:
   // sync-insertion passes may split the block containing rng_init across
   // __syncthreads(), which would put a call-site declaration out of scope
   // for later rng_rand / rng_rand_float uses.
-  std::unordered_map<const CallNode *, std::string> rng_state_name_map_;
+  std::unordered_map<const CallObj *, std::string> rng_state_name_map_;
 
   // whether enable fp16
   bool enable_fp16_{false};
@@ -151,6 +169,8 @@ private:
   bool need_copy_sm90_h_{false};
   // whether need tl SM100 TMA/tensor-memory copy helpers
   bool need_copy_sm100_h_{false};
+  // whether need guarded ordinary vector memory helpers
+  bool need_vector_memory_h_{false};
   // whether need tl mbarrier helpers
   bool need_barrier_h_{false};
   // whether need mma.h
@@ -188,30 +208,30 @@ private:
       Op::GetAttrMap<bool>("cuda.need_warp_shuffle");
 
   // The name of the barrier array in shared memory
-  const std::string barrier_name_ = "barrier";
+  std::string legacy_barrier_name_;
+  std::string BarrierReference(const Expr &barrier);
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // The name of the mbarrier array in shared memory
   // The same as injected_mbarrier_name_ in transform/common/mbarrier.h
-  const std::string mbarrier_name_ = "mbarrier";
   // The type name of the mbarrier array
   const std::string mbarrier_dtype_ = "Barrier";
   // The alignment of the barrier array in shared memory
   // Set to 16 to maintain minimum alignment requirements for async bulk copy
   const int barrier_alignment_bytes_ = 16;
 
-  std::unordered_map<const VarNode *, std::string> fragment_shapes;
-  std::unordered_map<const VarNode *, std::string> fragment_layouts;
-  std::unordered_map<const VarNode *, IntImm> unroll_factor;
+  std::unordered_map<const VarObj *, std::string> fragment_shapes;
+  std::unordered_map<const VarObj *, std::string> fragment_layouts;
+  std::unordered_map<const VarObj *, IntImm> unroll_factor;
   std::optional<std::tuple<int64_t, int64_t, int64_t>> cluster_dims;
   // Physical backing variable name for each packed local FP4 buffer.
   std::unordered_map<Var, std::string, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       fp4_packed_buffers_;
-  friend void PrintConst(const FloatImmNode *op, std::ostream &os,
+  friend void PrintConst(const FloatImmObj *op, std::ostream &os,
                          CodeGenTileLangCUDA *p);
-  void PrintWmmaScope(const std::string &scope, DataType t,
-                      const VarNode *variable, std::ostream &os);
-  int32_t GetWmmaFragmentSize(const std::string &scope, const VarNode *variable,
+  void PrintWmmaScope(const std::string &scope, const PrimType &t,
+                      const VarObj *variable, std::ostream &os);
+  int32_t GetWmmaFragmentSize(const std::string &scope, const VarObj *variable,
                               int32_t size);
 
   std::vector<std::string> eviction_policy_names_ = {

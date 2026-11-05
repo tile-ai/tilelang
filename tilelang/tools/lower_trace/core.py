@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from tilelang.env import env
+from tilelang.utils.pass_diff import _get_script
 from tilelang.instrumentation import (
     CodegenEvent,
     IncompletePass,
@@ -184,14 +185,23 @@ def _inspect_module_source(mod) -> str:
 
 
 def _make_patched_source_module(original_module, patched_source: str):
-    """Build a real TVM ``CSourceModule`` carrying user-edited source."""
-    import tvm.runtime._ffi_api as _ffi_api
+    """Create a native source module retaining the source container's exports."""
+    import tvm_ffi
 
-    try:
-        module_format = original_module.format
-    except Exception:
-        module_format = "c"
-    return _ffi_api.CSourceModuleCreate(patched_source, module_format, [], None)
+    formats = list(original_module.get_write_formats())
+    module_format = formats[0] if formats else original_module.kind
+    names, constants = [], []
+    if original_module.kind == "c":
+        names = list(original_module.get_function("get_func_names")())
+        constants = list(original_module.get_function("get_const_vars")())
+    elif original_module.kind == "cuda":
+        # The source-only CUDA fallback exposes its entry names without asking
+        # a runtime to load or execute CUDA code.
+        _, _, names = original_module.get_function("__tvm_cuda_binary")()
+    result = tvm_ffi.get_global_func("runtime.CSourceModuleCreate")(patched_source, module_format, names, constants)
+    for imported in original_module.imports:
+        result.import_module(imported)
+    return result
 
 
 def _codegen_path_lock(path: str) -> threading.Lock:
@@ -439,7 +449,7 @@ class LowerTraceSession(PassInstrumentationTool):
 
         if self.should_generate_html:
             self.ensure_run_dir()
-        before_text = str(event.mod)
+        before_text = _get_script(event.mod)
         output_path = self.get_codegen_output_path(event.role)
         name = "codegen" if event.role is None else f"codegen_{event.role}"
 
@@ -547,10 +557,10 @@ class _LowerTraceObserver(PassEventObserver):
     def pass_started(self, mod, event: PassEvent) -> str:
         if self.session.should_generate_html:
             self.session.ensure_run_dir()
-        return str(mod)
+        return _get_script(mod)
 
     def pass_finished(self, mod, event: PassEvent, before_text: str) -> None:
-        after_text = str(mod)
+        after_text = _get_script(mod)
         changed = before_text != after_text
         add_count, del_count = _count_line_changes(before_text, after_text) if changed else (0, 0)
         phase = event.phase or _UNSCOPED_PHASE

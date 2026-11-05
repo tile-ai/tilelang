@@ -7,10 +7,10 @@
 #include "./atomic_add.h"
 #include "support/check.h"
 #include "utils.h"
-#include <tvm/ir/cast.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/attr.h>
+#include <tvm/tirx/op/math.h>
+#include <tvm/tirx/op/memory.h>
 
 #include "builtin.h"
 
@@ -20,6 +20,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace {
 
@@ -62,7 +63,7 @@ void RegisterAtomicAddImpl(AtomicAddImpl impl) {
  *
  * Builds the internal AtomicAddNode, extracts the source and destination
  * regions and their backing Buffers from the first two region-style expressions
- * in `args` (BufferLoad/BufferRegion), and stores them along with their
+ * in `args` (TensorLoad/TensorRegion), and stores them along with their
  * ranges. Annotations are copied directly from the Call node.
  *
  * @param args Call-style PrimExprs where:
@@ -75,26 +76,26 @@ void RegisterAtomicAddImpl(AtomicAddImpl impl) {
  * - The constructor checks that args[0] and args[1] are region-compatible.
  * - The constructed node is stored in this->data_.
  */
-AtomicAdd::AtomicAdd(ffi::Array<PrimExpr> args,
-                     ffi::Map<ffi::String, ffi::ObjectRef> annotations) {
+AtomicAdd::AtomicAdd(ffi::Array<Expr> args,
+                     ffi::Map<ffi::String, ffi::Any> annotations) {
   ICHECK(args.size() >= 2)
       << "AtomicAdd expects at least 2 arguments (src, dst), got "
       << args.size();
   ffi::ObjectPtr<AtomicAddNode> node = tvm::ffi::make_object<AtomicAddNode>();
   std::vector<AccessRegion> access_regions;
 
-  if (IsBufferLikeExpr(args[0])) {
+  if (IsTensorLikeExpr(args[0])) {
     auto src_access = NormalizeToAccessRegion(args[0], kAccessRead);
-    node->src = src_access.region->buffer;
+    node->src = RegionTensor(src_access.region);
     node->src_range = src_access.region->region;
     access_regions.push_back(std::move(src_access));
   } else {
-    node->src_value = args[0];
+    node->src_value = args[0].as_or_throw<PrimExpr>();
   }
 
   auto dst_access = NormalizeToAccessRegion(args[1], kAccessReadWrite);
   dst_access.access_mask = kAccessReadWrite;
-  node->dst = dst_access.region->buffer;
+  node->dst = RegionTensor(dst_access.region);
   node->dst_range = dst_access.region->region;
   access_regions.push_back(std::move(dst_access));
   node->SetAccessRegions(std::move(access_regions));
@@ -116,7 +117,7 @@ AtomicAdd::AtomicAdd(ffi::Array<PrimExpr> args,
 TileOperator AtomicAddNode::Clone() const {
   auto op = tvm::ffi::make_object<AtomicAddNode>(*this);
   if (par_op_.defined()) {
-    op->par_op_ = Downcast<ParallelOp>(par_op_->Clone());
+    op->par_op_ = (par_op_->Clone()).template as_or_throw<ParallelOp>();
   }
   return AtomicAdd(op);
 }
@@ -130,15 +131,12 @@ LayoutMap AtomicAddNode::InferLayout(const LayoutInferArgs &layout_args,
 }
 
 Stmt AtomicAddNode::Lower(const LowerArgs &lower_args,
-                          arith::Analyzer *analyzer) const {
+                          sym::AnalyzerObj *analyzer) const {
   return ResolveAtomicAddImpl(lower_args.target)
       .lower(*this, lower_args, analyzer);
 }
 
 TIR_REGISTER_TL_TILE_OP(AtomicAdd, atomicadd)
-    .set_num_inputs(2)
-    .set_attr<TCallEffectKind>("TCallEffectKind",
-                               Integer(CallEffectKind::kOpaque));
 
 TVM_FFI_STATIC_INIT_BLOCK() { AtomicAddNode::RegisterReflection(); }
 

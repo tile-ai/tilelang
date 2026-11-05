@@ -5,7 +5,8 @@ import tilelang
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx as tvm
+from tvm_tirx import ir, tirx
 
 BC, BK, NB = 16, 64, 16
 MESSAGE = "Buffer read before initialization"
@@ -53,7 +54,7 @@ def _gemm_kernel(init_mode):
 
 def _verify(func, capfd):
     """Run the pass on ``func`` and return whatever it wrote to stderr."""
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm.IRModule({"main": func})
     tl.transform.VerifyBufferInit()(mod)
     return capfd.readouterr().err
 
@@ -483,5 +484,49 @@ def test_pipeline_silent_when_disabled_via_pass_config(capfd, no_kernel_cache):
     assert MESSAGE not in capfd.readouterr().err
 
 
+@pytest.mark.parametrize("mask,warns", [("r", True), ("w", False), ("rw", False)])
+def test_native_pointer_escape_respects_declared_access_mask(mask, warns, capfd):
+    @T.prim_func
+    def kernel(C: T.Tensor((1,), "float32")):
+        value = T.alloc_local((1,), "float32")
+        T.call_extern("void", "fill_or_read", T.access_ptr(value[0], mask))
+        C[0] = value[0]
+
+    assert (MESSAGE in _verify(kernel, capfd)) is warns
+
+
+@pytest.mark.parametrize("initialize_view", [False, True])
+def test_native_tensor_view_is_alias_but_not_initializer(initialize_view, capfd):
+    output = ir.Var("output", tirx.TensorType((1,), "int32", layout="default"))
+    storage = ir.Var("storage", tirx.TensorType((2,), "int32", scope="local", layout="default"))
+    alias = ir.Var("alias", tirx.TensorType((1,), "int32", scope="local", layout="default"))
+    body = [
+        ir.Bind(storage, ir.Call("tirx.alloc_tensor", [], ty_args=[storage.ty])),
+        ir.Bind(alias, ir.Call("tirx.decl_tensor", [tirx.tensor_data_ptr(storage)], ty_args=[alias.ty])),
+    ]
+    if initialize_view:
+        body.append(ir.TensorStore(alias, [0], ir.const(7, "int32")))
+    body.append(ir.TensorStore(output, [0], ir.TensorLoad(storage, [0])))
+    function = tirx.Function([output], body, ret_type=ir.PrimType("void"))
+    assert (MESSAGE in _verify(function, capfd)) is not initialize_view
+
+
+def test_native_names_do_not_merge_distinct_storage_identities(capfd):
+    output = ir.Var("output", tirx.TensorType((1,), "int32", layout="default"))
+    dtype = tirx.TensorType((1,), "int32", scope="local", layout="default")
+    initialized, untouched = ir.Var("value", dtype), ir.Var("value", dtype)
+    function = tirx.Function(
+        [output],
+        [
+            ir.Bind(initialized, ir.Call("tirx.alloc_tensor", [], ty_args=[dtype])),
+            ir.Bind(untouched, ir.Call("tirx.alloc_tensor", [], ty_args=[dtype])),
+            ir.TensorStore(initialized, [0], ir.const(3, "int32")),
+            ir.TensorStore(output, [0], ir.TensorLoad(untouched, [0])),
+        ],
+        ret_type=ir.PrimType("void"),
+    )
+    assert MESSAGE in _verify(function, capfd)
+
+
 if __name__ == "__main__":
-    tilelang.testing.main()
+    pytest.main([__file__])

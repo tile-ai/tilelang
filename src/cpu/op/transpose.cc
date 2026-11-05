@@ -4,7 +4,6 @@
  */
 
 #include "op/transpose.h"
-#include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
 
 #include "backend/common/target_utils.h"
@@ -19,7 +18,7 @@ namespace cpu {
 
 struct Transpose {
   static Stmt Lower(const TransposeNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     if (!(IsLocalBuffer(op.src, true) || IsGlobalBuffer(op.src)) ||
         !(IsLocalBuffer(op.dst, true) || IsGlobalBuffer(op.dst))) {
       LOG(FATAL) << "CPU transpose only supports local and global buffers, but "
@@ -27,8 +26,10 @@ struct Transpose {
                  << op.dst.scope() << "`.";
     }
     auto simt_loop = op.MakeSIMTLoop(analyzer);
-    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
-    return VectorizeLoop(fused_loop, lower_args.layout_map);
+    auto fused_loop =
+        (ParallelLoopFuser::Fuse(simt_loop)).template as_or_throw<For>();
+    return VectorizeLoop(fused_loop, lower_args.layout_map, -1,
+                         lower_args.target);
   }
 };
 

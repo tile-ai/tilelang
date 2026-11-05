@@ -16,18 +16,17 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
+from tilelang.language import _native
 from typing import overload, Literal
 from tilelang._typing import DType, ShapeType
-from tilelang import tvm as tvm
-from tvm.script import tirx as T
-from tvm.tirx import PrimExpr
-from tvm.tirx.script.builder.ir import sblock_attr
-from tvm.tirx.buffer import Buffer
-from tvm.tirx.expr import FloatImm, IntImm
+from tilelang.language import _native as T
+from tilelang.language._native import PrimExpr
+from tilelang.language._native import Buffer
+from tilelang.language._native import FloatImm, IntImm
 
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
-from .eager.builder import OutTensor
+from .eager.builder import OutTensor, PointerRef, unwrap_expr
 from .proxy import Tensor, ptr as _ptr_sentinel
 
 
@@ -93,14 +92,14 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
 
 
 @overload
-def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer: ...
+def alloc_var(dtype: DType, init: PrimExpr | int | float, scope: str = "local.var") -> Buffer | PointerRef: ...
 
 
 @overload
-def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer: ...
+def alloc_var(dtype: DType, scope: str = "local.var", *, init: PrimExpr | int | float | None = None) -> Buffer | PointerRef: ...
 
 
-def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | int | float | None = None) -> Buffer:
+def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | int | float | None = None) -> Buffer | PointerRef:
     """Allocate a single-element variable buffer.
 
     Args:
@@ -122,7 +121,11 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         a = T.alloc_var('int32', 'local.var', init=1) # var with init 1 and local.var scope
         a = T.alloc_var('int32', init=1) # var with init 1 and local.var scope
     Returns:
-        T.Buffer: A TVM buffer object allocated as a single-element variable
+        A native one-element tensor for numeric values. A ``handle`` uses a
+        construction-time pointer reference over a uint64 address cell; its
+        loads restore the initializer's pointer type and address space, and
+        later assignments must preserve that address space. ``T.ptr`` retains
+        its existing int64 address-storage contract.
     """
     parsed_scope = scope
     parsed_init = init
@@ -151,6 +154,19 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
     if dtype is _ptr_sentinel:
         dtype = _dtypes.int64
 
+    if str(_dtypes.get_tvm_dtype(dtype)) == "handle":
+        from tvm_tirx import ir
+        from tvm_tirx.script.ir_builder import IRBuilder
+
+        parsed_init = unwrap_expr(parsed_init)
+        pointer_type = parsed_init.ty if isinstance(parsed_init, ir.Expr) and isinstance(parsed_init.ty, ir.PtrType) else ir.PtrType("void")
+        storage = _with_span(T.sblock_alloc_buffer([1], "uint64", scope=parsed_scope))
+        pointer = PointerRef(T.BufferLoad(storage, [0]), pointer_type, IRBuilder.current())
+        # An explicit store also gives nullptr initialization a well-defined
+        # IR contract, independent of the backend's local-var declarations.
+        pointer.store(0 if parsed_init is None else parsed_init)
+        return pointer
+
     buffer = _with_span(T.sblock_alloc_buffer([1], dtype, scope=parsed_scope))
     if parsed_init is not None:
         # Always use T.buffer_store for reliable initialisation across all
@@ -161,7 +177,7 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
         # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float)):
-            parsed_init = tvm.tirx.const(parsed_init, dtype=tl_dtype(dtype))
+            parsed_init = _native.const(parsed_init, dtype=tl_dtype(dtype))
         elif isinstance(parsed_init, (IntImm, FloatImm)):
             parsed_init = tl_dtype(dtype)(parsed_init)
         T.buffer_store(buffer, parsed_init, 0)
@@ -216,10 +232,10 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
     else:
         arrive_count = list(arrive_count)
     buffer = _with_span(T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier"))
-    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
-    # Use buffer.data as key to support multiple barrier buffer allocations
+    # Native TensorVar keys keep allocations distinct and expose their uses
+    # through the annotation Tuple to all structural transformations.
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    _native._allocation_annotation({"barrier_init": {buffer: arrive_count_exprs}})
 
     return buffer
 
@@ -243,10 +259,9 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
     else:
         arrive_count = list(arrive_count)
     buffer = _with_span(T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier"))
-    # Convert to TIR IntImm expressions for C++ pass to consume as Map<Var, Array<PrimExpr>>
-    # Use buffer.data as key to support multiple barrier buffer allocations
+    # Match alloc_barrier's native TensorVar -> arrival-counts contract.
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    sblock_attr({"barrier_init": {buffer.data: arrive_count_exprs}})
+    _native._allocation_annotation({"barrier_init": {buffer: arrive_count_exprs}})
 
     return buffer
 
@@ -345,11 +360,11 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
         )
         assert replication in ["all", "none"]
         reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
-        sblock_attr({"reducer_info": {reducer.data: {"rep": replication, "op": op}}})
+        _native._allocation_annotation({"reducer_info": {reducer: {"rep": replication, "op": op}}})
         return reducer
 
     reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
-    sblock_attr({"reducer_info_v2": {reducer.data: {"op": op}}})
+    _native._allocation_annotation({"reducer_info_v2": {reducer: {"op": op}}})
 
     return reducer
 

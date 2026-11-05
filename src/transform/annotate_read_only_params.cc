@@ -1,206 +1,125 @@
 /*!
  * \file annotate_read_only_params.cc
- * \brief Annotate PrimFunc parameters that are read-only (never written).
+ * \brief Preserve const-parameter contracts over native pointer and tensor
+ * views.
  */
-
-#include "support/check.h"
-#include <string>
-#include <tvm/ir/transform.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
+#include "../ir/alias_analysis.h"
+#include "../op/native_intrinsic.h"
+#include "../op/native_utils.h"
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_set>
 
-namespace tvm {
-namespace tl {
-using namespace tirx;
-using namespace ffi;
+namespace tvm::tl {
+namespace {
 
-/*!
- * \brief A simple visitor that marks handle parameters as written when they
- *        appear on the LHS of a BufferStore or in a tvm_access_ptr with write
- * flag.
- */
-class ReadWriteMarker : public StmtExprVisitor {
-public:
-  explicit ReadWriteMarker(
-      const std::unordered_set<const VarNode *> &param_or_data_vars)
-      : param_or_data_vars_(param_or_data_vars) {}
-
-  const std::unordered_set<const VarNode *> &written() const {
-    return written_;
+tirx::Function MarkReadOnly(tirx::Function function) {
+  if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+    return function;
+  PhysicalRootAnalysis aliases(function);
+  std::unordered_set<const VarObj *> parameters, written, non_restrict;
+  for (const Var &parameter : function->params) {
+    if (parameter->ty.as<PtrTypeObj>() ||
+        parameter->ty.as<tirx::TensorTypeObj>())
+      parameters.insert(parameter.get());
   }
-
-  // Try to resolve the underlying buffer data Var from a pointer-like
-  // argument. Supports:
-  //  - address_of(BufferLoad(...)) -> returns buffer->data
-  //  - BufferLoad(...)             -> returns buffer->data
-  // Otherwise returns nullptr.
-  const VarNode *ResolveDataVarFromPtrArg(const PrimExpr &arg) const {
-    if (const auto *call = arg.as<CallNode>()) {
-      if (call->op.same_as(builtin::address_of())) {
-        if (call->args.size() == 1U) {
-          if (const auto *load = call->args[0].as<BufferLoadNode>()) {
-            return load->buffer->data.get();
-          }
+  if (auto exceptions =
+          function->GetAttr<ffi::Array<Var>>("tl.non_restrict_params")) {
+    for (const Var &value : exceptions.value()) {
+      if (auto root = aliases.Root(value))
+        non_restrict.insert(root.value().get());
+    }
+  }
+  auto mark = [&](const Expr &expression) {
+    auto root = aliases.Root(expression);
+    if (!root)
+      written.insert(parameters.begin(), parameters.end());
+    else if (parameters.count(root.value().get()))
+      written.insert(root.value().get());
+  };
+  VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
+    if (const auto *store = object.as<TensorStoreObj>())
+      mark(store->dest);
+    if (const auto *call = object.as<CallObj>()) {
+      // Creating local storage or an explicit alias does not modify inputs.
+      if (call->op.same_as(tirx::alloc_tensor_op()) ||
+          call->op.same_as(tirx::decl_tensor_op()))
+        return;
+      if (tvm::SideEffect(ffi::GetRef<Expr>(call)) <=
+          CallEffectKind::kReadState)
+        return;
+      if (const auto *op = call->op.as<OpObj>()) {
+        // These cooperative operations have explicit write operands. A load
+        // updates its fragment, a store updates its memory pointer, and MMA
+        // updates only its first fragment. Their other operands stay
+        // readable through const input pointers in Metal source. Nested
+        // operand calls are visited separately, so this cannot hide an
+        // opaque producer.
+        int destination = -1;
+        if (op->name == "tl.cooperative_tensor_load" ||
+            op->name == "tl.cooperative_tensor_fill" ||
+            op->name == "tl.cooperative_tensor_multiply_accumulate")
+          destination = 0;
+        else if (op->name == "tl.cooperative_tensor_store")
+          destination = 2;
+        if (destination >= 0) {
+          const auto operands = NativeIntrinsicOperands(call);
+          TVM_FFI_ICHECK_LT(static_cast<size_t>(destination), operands.size());
+          mark(operands[destination]);
+          return;
         }
       }
-    } else if (const auto *load = arg.as<BufferLoadNode>()) {
-      return load->buffer->data.get();
-    }
-    return nullptr;
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    const VarNode *data = op->buffer->data.get();
-    if (param_or_data_vars_.count(data)) {
-      written_.insert(data);
-    }
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    // Detect tvm_access_ptr writes. Be conservative if rw_mask is non-constant.
-    if (op->op.same_as(builtin::tvm_access_ptr())) {
-      if (op->args.size() == 5U) {
-        if (const VarNode *buf = op->args[1].as<VarNode>()) {
-          const IntImmNode *flag = op->args[4].as<IntImmNode>();
-          bool maybe_write = true; // default conservative
-          if (flag) {
-            maybe_write = (flag->value & 2) != 0; // write bit set
-          }
-          if (maybe_write && param_or_data_vars_.count(buf)) {
-            written_.insert(buf);
-          }
+      bool pointer_operand = false;
+      for (const Expr &operand : call->args) {
+        if (operand->ty.as<PtrTypeObj>() ||
+            operand->ty.as<tirx::TensorTypeObj>()) {
+          pointer_operand = true;
+          mark(operand);
         }
       }
-    } else {
-      // Generic fallback: mark buffers that appear as
-      // address_of(BufferLoad(...)) in call arguments as written. This matches
-      // patterns like
-      //   tl.tma_store(address_of(smem[..]), address_of(gmem[..]), ...)
-      //   call_extern("AtomicAdd*", address_of(gmem[..]), ...)
-      // and avoids over-marking plain BufferLoad used for reads.
-      //
-      // For call_extern specifically, also conservatively mark bare buffer data
-      // vars as written, since we cannot know whether the extern writes through
-      // the pointer. This matches patterns like:
-      //   call_extern("store_val", Out.data, value)
-      const bool is_call_extern = op->op.same_as(builtin::call_extern());
-
-      for (const PrimExpr &a : op->args) {
-        if (const auto *c = a.as<CallNode>()) {
-          if (c->op.same_as(builtin::address_of()) && c->args.size() == 1U) {
-            if (const auto *bl = c->args[0].as<BufferLoadNode>()) {
-              const VarNode *data = bl->buffer->data.get();
-              if (param_or_data_vars_.count(data)) {
-                written_.insert(data);
-              }
-            }
-          }
-        } else if (is_call_extern) {
-          // Bare data var passed to call_extern: conservatively assume
-          // the callee may write through it. We only apply this to call_extern,
-          // not to pure intrinsics or other calls with known semantics.
-          if (const auto *v = a.as<VarNode>()) {
-            if (param_or_data_vars_.count(v)) {
-              written_.insert(v);
-            }
-          }
-        }
-      }
+      // An opaque call can write through a previously escaped pointer even
+      // when its current signature has no direct pointer operand.
+      if (!pointer_operand)
+        written.insert(parameters.begin(), parameters.end());
     }
-    StmtExprVisitor::VisitExpr_(op);
+  });
+  const bool noalias = function->GetAttr(tirx::attr::kNoAlias).value_or(false);
+  if (!noalias && !written.empty())
+    written.insert(parameters.begin(), parameters.end());
+  if (noalias) {
+    bool aliased_write = false;
+    for (const auto *parameter : non_restrict)
+      aliased_write |= written.count(parameter) != 0;
+    if (aliased_write)
+      written.insert(non_restrict.begin(), non_restrict.end());
   }
-
-private:
-  std::unordered_set<const VarNode *> param_or_data_vars_;
-  std::unordered_set<const VarNode *> written_;
-};
-
-/*!
- * \brief Annotate PrimFunc with indices of read-only handle parameters.
- *
- * Adds an Array<Integer> attribute "tl.readonly_param_indices" that lists
- * parameter indices which correspond to handle parameters that are never
- * written inside the function body. This can be used by codegen to emit
- * `const` qualifiers to enable read-only caching (e.g., __ldg on CUDA).
- */
-static tirx::PrimFunc MarkReadOnlyParams(tirx::PrimFunc f) {
-  // Gather handle params and their corresponding buffer data vars (aliases).
-  std::unordered_set<const VarNode *> param_or_data_vars;
-  // Map back from data var to parameter index for result attribution.
-  std::unordered_map<const VarNode *, size_t> data_var_to_param_idx;
-
-  for (size_t i = 0; i < f->params.size(); ++i) {
-    const Var &p = f->params[i];
-    if (!p->dtype.is_handle())
-      continue;
-    param_or_data_vars.insert(p.get());
-    // If there is a buffer_map entry for this param, include its data var too.
-    if (auto opt = f->buffer_map.Get(p)) {
-      const VarNode *data = opt.value()->data.get();
-      param_or_data_vars.insert(data);
-      data_var_to_param_idx[data] = i;
-    }
+  ffi::Array<int64_t> readonly;
+  for (size_t i = 0; i < function->params.size(); ++i) {
+    const auto *variable = function->params[i].get();
+    if (parameters.count(variable) && !written.count(variable))
+      readonly.push_back(i);
   }
-  if (param_or_data_vars.empty())
-    return f;
-
-  ReadWriteMarker marker(param_or_data_vars);
-  marker(f->body);
-
-  // Determine read-only parameter indices among all params (handle only)
-  Array<Integer> readonly_indices;
-  for (size_t i = 0; i < f->params.size(); ++i) {
-    const Var &v = f->params[i];
-    if (!v->dtype.is_handle())
-      continue;
-
-    bool is_written = false;
-    // Direct param var written?
-    if (marker.written().count(v.get())) {
-      is_written = true;
-    } else {
-      // Or any aliased data var written?
-      if (auto opt = f->buffer_map.Get(v)) {
-        if (marker.written().count(opt.value()->data.get())) {
-          is_written = true;
-        }
-      }
-    }
-
-    if (!is_written) {
-      readonly_indices.push_back(Integer(static_cast<int>(i)));
-    }
-  }
-
-  if (!readonly_indices.empty()) {
-    Map<String, Any> attrs;
-    attrs.Set(String("tl.readonly_param_indices"), readonly_indices);
-    f = WithAttrs(std::move(f), attrs);
-  }
-  return f;
+  function = WithoutAttr(function, "tl.readonly_param_indices");
+  if (!readonly.empty())
+    function = WithAttr(function, "tl.readonly_param_indices", readonly);
+  return function;
 }
+} // namespace
 
 namespace transform {
-using namespace tirx::transform;
-
-Pass AnnotateReadOnlyParams() {
-  auto pass_func = [](PrimFunc f, const IRModule &m,
-                      const tvm::transform::PassContext &ctx) {
-    return MarkReadOnlyParams(std::move(f));
+tvm::transform::Pass AnnotateReadOnlyParams() {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    return MarkReadOnly(function);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateReadOnlyParams", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.AnnotateReadOnlyParams");
 }
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.AnnotateReadOnlyParams",
-                        AnnotateReadOnlyParams);
-}
-
 } // namespace transform
-} // namespace tl
-} // namespace tvm
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("tl.transform.AnnotateReadOnlyParams",
+                                   transform::AnnotateReadOnlyParams);
+}
+} // namespace tvm::tl

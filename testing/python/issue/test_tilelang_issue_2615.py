@@ -1,3 +1,4 @@
+import tvm_ffi
 import pytest
 
 import tilelang.testing
@@ -30,13 +31,12 @@ def test_u8_to_f4_to_bf16_traces_symbolic_exponent_clamp(use_buffer_scale):
                 )
 
     min_nodes = []
-    tvm.tirx.stmt_functor.post_order_visit(
-        main.body,
-        lambda node: min_nodes.append(node) if isinstance(node, tvm.tirx.Min) else None,
+    tvm_ffi.structural_walk(
+        main.body, (tvm_ffi.Object, lambda node: min_nodes.append(node) if isinstance(node, tvm.tirx.Min) else None), order="post"
     )
 
     assert len(min_nodes) == 1
-    assert min_nodes[0].dtype == T.uint16
+    assert min_nodes[0].ty.dtype == T.uint16
 
 
 if __name__ == "__main__":

@@ -135,11 +135,13 @@ TileLang uses `Target` objects to represent compilation targets. The default `au
 
 ## Installation
 
-Install the latest stable release from PyPI:
+Published releases are available from PyPI. For this native TIRx rebase, use the matched TileLang, TIRx provider and FFI bundle from the selected build; source-specific dependency versions are not automatically published:
 
 ```bash
-pip install tilelang
+pip install --find-links /path/to/wheelhouse tilelang
 ```
+
+See the [source build instructions](docs/get_started/Installation.md#building-from-source) to build a local bundle. The provider owns the combined compiler and runtime; a generic upstream TIRx wheel does not contain TileLang's native registrations.
 
 Verify the installation:
 
@@ -155,7 +157,7 @@ pip install tilelang --find-links https://tile-ai.github.io/whl/nightly
 
 On AMD GPUs the same Linux wheels work out of the box: install a ROCm build of PyTorch first (e.g. `pip install torch --index-url https://download.pytorch.org/whl/rocm7.0`), then `pip install tilelang`. A host ROCm installation is required at runtime; see the [ROCm notes](https://tilelang.com/get_started/Installation.html#installing-on-amd-gpus-rocm) in the installation guide.
 
-Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a custom TVM checkout, follow the complete [installation guide](https://tilelang.com/get_started/Installation.html).
+Nightly builds may be less stable than official releases. For source builds, editable installs, Docker, ROCm setup, pip-provided CUDA toolchains, or a versioned TIRx dependency, follow the complete [installation guide](https://tilelang.com/get_started/Installation.html).
 
 ## Quick Start
 

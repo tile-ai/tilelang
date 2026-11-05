@@ -4,7 +4,15 @@ import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
 import tilelang.testing
-from tvm import tirx
+from tvm_tirx import ir
+import tvm_ffi
+from tilelang.testing.ir import collect_nodes
+
+
+def _post_order_visit(stmt, visit):
+    for node in collect_nodes(stmt, tvm_ffi.Object):
+        visit(node)
+
 
 auto_target = tvm.target.Target(determine_target("auto"))
 
@@ -14,10 +22,14 @@ def _check(original, transformed):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.cuda.transform.InjectFenceProxy()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    # This test observes the fence pass before shared-memory planning and
+    # synchronization consume warp-specialization scopes. Preserve those
+    # regions on both sides while normalizing already-consumed annotations.
+    finalize = tl.transform.FinalizeAnnotations(allowed_pending_regions=("kWarpSpecializationScope", "kCustomWarpSpecialization"))
+    mod = finalize(mod)
     transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
-    transformed = tl.transform.LowerOpaqueBlock()(transformed)
+    transformed = finalize(transformed)
 
     tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
@@ -46,15 +58,15 @@ def test_async_to_generic_no_double_fence():
 
         def visit(node):
             nonlocal count
-            if isinstance(node, tirx.Evaluate):
+            if isinstance(node, ir.Evaluate):
                 call = node.value
-                if isinstance(call, tirx.Call):
+                if isinstance(call, ir.Call):
                     op = call.op
                     name = getattr(op, "name", None)
                     if name == "tl.fence_proxy_async":
                         count += 1
 
-        tirx.stmt_functor.post_order_visit(stmt, visit)
+        _post_order_visit(stmt, visit)
         return count
 
     assert _count_fences(mod["main"].body) == 1
@@ -152,14 +164,14 @@ def test_unknown_extern_default_is_none():
 
         def visit(node):
             nonlocal count
-            if isinstance(node, tirx.Evaluate):
+            if isinstance(node, ir.Evaluate):
                 call = node.value
-                if isinstance(call, tirx.Call):
+                if isinstance(call, ir.Call):
                     name = getattr(call.op, "name", None)
                     if name == "tl.fence_proxy_async":
                         count += 1
 
-        tirx.stmt_functor.post_order_visit(stmt, visit)
+        _post_order_visit(stmt, visit)
         return count
 
     assert _count_fences(mod["main"].body) == 0
@@ -309,7 +321,7 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
     def before():
         with T.Kernel(8):
             A_global = T.decl_buffer((128,), T.float16, scope="global")
-            T.evaluate(T.call_intrin("handle", tirx.op.Op.get("tl.tma_store"), A_global.data))
+            T.evaluate(T.call_intrin("handle", ir.Op.get("tl.tma_store"), A_global.data))
 
     mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
@@ -320,16 +332,16 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
 
     def visit(node):
         nonlocal arrives, waits
-        if isinstance(node, tirx.Evaluate):
+        if isinstance(node, ir.Evaluate):
             call = node.value
-            if isinstance(call, tirx.Call):
+            if isinstance(call, ir.Call):
                 name = getattr(call.op, "name", None)
                 if name == "tl.tma_store_arrive":
                     arrives += 1
                 elif name in ("tl.tma_store_wait", "tl.tma_store_wait<0>"):
                     waits += 1
 
-    tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+    _post_order_visit(mod["main"].body, visit)
     assert arrives == 0
     assert waits == 0
 
@@ -370,12 +382,12 @@ def test_wgmma_marked_async():
     order = []
 
     def visit(node):
-        if isinstance(node, tirx.Evaluate):
+        if isinstance(node, ir.Evaluate):
             call = node.value
-            if isinstance(call, tirx.Call):
+            if isinstance(call, ir.Call):
                 order.append(getattr(call.op, "name", ""))
 
-    tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+    _post_order_visit(mod["main"].body, visit)
 
     assert "tl.ptx_wgmma_ss" in order
     assert "tl.fence_proxy_async" in order
@@ -389,7 +401,7 @@ def test_sparse_mma_intrinsics_marked_async():
         "tl.ptx_wgmma_sp_rs",
         "tl.ptx_tcgen05_mma_blockscaled_ss",
     ):
-        target_op = tirx.op.Op.get(op_name)
+        target_op = ir.Op.get(op_name)
 
         @T.prim_func
         def before():
@@ -404,14 +416,14 @@ def test_sparse_mma_intrinsics_marked_async():
         order = []
 
         def visit(node):
-            if isinstance(node, tirx.BufferStore):
+            if isinstance(node, ir.TensorStore):
                 order.append("shared_store")
-            elif isinstance(node, tirx.Evaluate):
+            elif isinstance(node, ir.Evaluate):
                 call = node.value
-                if isinstance(call, tirx.Call):
+                if isinstance(call, ir.Call):
                     order.append(getattr(call.op, "name", ""))
 
-        tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+        _post_order_visit(mod["main"].body, visit)
 
         assert order.count("shared_store") == 1
         assert order.count("tl.fence_proxy_async") == 1
@@ -576,8 +588,8 @@ def test_regression_0219_fence_no_fence_inserted():
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
         if T.shuffle_elect(0):
-            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), A_desc)
-            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), B_desc)
+            T.call_intrin("handle", ir.Op.get("tl.prefetch_tma_descriptor"), A_desc)
+            T.call_intrin("handle", ir.Op.get("tl.prefetch_tma_descriptor"), B_desc)
             T.ptx_init_barrier_thread_count(mbarrier[0], 128)
             T.ptx_init_barrier_thread_count(mbarrier[1], 128)
             T.ptx_init_barrier_thread_count(mbarrier[2], 128)
@@ -740,8 +752,8 @@ def test_regression_0219_fence_no_fence_inserted():
         tx = T.launch_thread("threadIdx.x", 256)
         mbarrier = T.decl_buffer((6,), "uint64", scope="shared.barrier")
         if T.shuffle_elect(0):
-            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), A_desc)
-            T.call_intrin("handle", tirx.op.Op.get("tl.prefetch_tma_descriptor"), B_desc)
+            T.call_intrin("handle", ir.Op.get("tl.prefetch_tma_descriptor"), A_desc)
+            T.call_intrin("handle", ir.Op.get("tl.prefetch_tma_descriptor"), B_desc)
             T.ptx_init_barrier_thread_count(mbarrier[0], 128)
             T.ptx_init_barrier_thread_count(mbarrier[1], 128)
             T.ptx_init_barrier_thread_count(mbarrier[2], 128)
@@ -887,7 +899,7 @@ def test_ldmatrix_then_wgmma_does_not_inject_fence_proxy():
             C_local = T.decl_buffer((32,), T.float16, scope="local")
             T.call_intrin(
                 "handle",
-                tirx.op.Op.get("tl.ptx_ldmatrix"),
+                ir.Op.get("tl.ptx_ldmatrix"),
                 T.int32(0),
                 1,
                 T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 1),
@@ -927,7 +939,7 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
             C_local = T.decl_buffer((32,), T.float16, scope="local")
             T.call_intrin(
                 "handle",
-                tirx.op.Op.get("tl.ptx_stmatrix"),
+                ir.Op.get("tl.ptx_stmatrix"),
                 T.int32(0),
                 1,
                 T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 2),
@@ -962,7 +974,7 @@ def test_stmatrix_then_wgmma_injects_fence_proxy():
             C_local = T.decl_buffer((32,), T.float16, scope="local")
             T.call_intrin(
                 "handle",
-                tirx.op.Op.get("tl.ptx_stmatrix"),
+                ir.Op.get("tl.ptx_stmatrix"),
                 T.int32(0),
                 1,
                 T.tvm_access_ptr(T.type_annotation(T.float16), smem.data, 0, 16, 2),

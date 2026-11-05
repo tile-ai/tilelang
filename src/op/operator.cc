@@ -1,109 +1,114 @@
 /*!
- * \file tl/op/op.cc
- *
- * Define operators usd in tile library.
+ * \file tl/op/operator.cc
+ * \brief Native typed tile-operator registration and decoding.
  */
 
 #include "operator.h"
-#include "support/check.h"
-#include <tvm/runtime/logging.h>
+
+#include <tvm/ffi/reflection/registry.h>
 
 #include "builtin.h"
 
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op_attr_types.h>
+namespace tvm::tl {
 
-namespace tvm {
-namespace tl {
+namespace {
 
-using namespace tirx;
+void ValidateTileOperatorCall(const CallObj *call) {
+  auto decoded = DecodeTileOpArguments(call);
+  const Op op = call->op.as_or_throw<Op>();
+  auto builders = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
+  ICHECK(builders.count(op)) << "No builder registered for " << op->name;
+  // A builder checks operand categories, arity and static semantic constraints.
+  // It must not allocate runtime resources or run target-dependent lowering.
+  ICHECK(builders[op](decoded.operands, decoded.annotations).defined());
+  ICHECK(call->ty.as<PrimType>().has_value() &&
+         call->ty.as_or_throw<PrimType>().IsVoid())
+      << op->name << " must return void";
+}
 
-/**
- * @brief Construct a TileOperator from a TIR Call using a registered builder.
- *
- * Looks up a builder function in the "TLOpBuilder" Op attribute map for the
- * operator referenced by `call` and invokes it to produce a TileOperator. If no
- * builder is registered for the operator, returns a default-constructed (empty)
- * TileOperator.
- *
- * @param call The TIR Call whose operator and arguments will be used to build
- * the TileOperator. Its `call->annotations` are passed through as TileOp-local
- * annotations.
- * @param block_annotations The complete enclosing SBlock annotations visible
- * while parsing this TileOp.
- * @return TileOperator The constructed TileOperator, or a default (empty)
- * TileOperator if no builder exists.
- */
+} // namespace
+
+void RegisterTileOperator(const ffi::String &name, OpBuilderFunc builder,
+                          ffi::Optional<OpBlockAnnotationHandlerFunc> handler) {
+  OpDef definition(name);
+  definition
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(
+              const CallObj *)>::FromNative<&ValidateTileOperatorCall>())
+      .signature(sig::var_args<Expr>("operands_and_annotations"),
+                 sig::call_attrs<DictAttrsObj>())
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kUpdateState)
+      .set_attr<OpBuilderFunc>("TLOpBuilder", builder);
+  if (handler.has_value()) {
+    definition.set_attr<OpBlockAnnotationHandlerFunc>(
+        kTLOpBlockAnnotationHandler, handler.value());
+  }
+}
+
 TileOperator ParseOperator(const Call &call,
                            const BlockAnnotations &block_annotations) {
-  auto op_map = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
-  auto block_annotation_handler_map =
-      Op::GetAttrMap<OpBlockAnnotationHandlerFunc>(kTLOpBlockAnnotationHandler);
-  Op op = call->op.as<Op>().value();
-  if (op_map.count(op)) {
-    auto tile_op = op_map[op](call->args, call->annotations);
-    ICHECK(tile_op.defined());
-    if (block_annotation_handler_map.count(op)) {
-      tile_op = block_annotation_handler_map[op](tile_op, block_annotations);
-      ICHECK(tile_op.defined());
-    }
-    return tile_op;
+  auto op = call->op.as<Op>();
+  if (!op.has_value() || !Op::HasAttrMap("TLOpBuilder")) {
+    return TileOperator();
   }
-  return TileOperator();
+  auto builders = Op::GetAttrMap<OpBuilderFunc>("TLOpBuilder");
+  if (!builders.count(op.value())) {
+    return TileOperator();
+  }
+  auto decoded = DecodeTileOpArguments(call.get());
+  auto result = builders[op.value()](decoded.operands, decoded.annotations);
+  ICHECK(result.defined());
+  if (Op::HasAttrMap(kTLOpBlockAnnotationHandler)) {
+    auto handlers = Op::GetAttrMap<OpBlockAnnotationHandlerFunc>(
+        kTLOpBlockAnnotationHandler);
+    if (handlers.count(op.value())) {
+      result = handlers[op.value()](result, block_annotations);
+      ICHECK(result.defined());
+    }
+  }
+  return result;
 }
 
-/**
- * @brief Parse a TileOperator from a TIR statement if it contains a call.
- *
- * If `stmt` is an Evaluate node whose value is a Call, delegates to
- * ParseOperator(Call, block_annotations) and returns the resulting
- * TileOperator.
- * Otherwise returns a default-constructed (empty) TileOperator.
- *
- * @param stmt TIR statement to inspect; expected to be an Evaluate of a Call.
- * @return TileOperator Parsed operator on success, or a default (empty)
- * TileOperator if `stmt` is not an Evaluate(Call).
- */
 TileOperator ParseOperator(const Stmt &stmt,
                            const BlockAnnotations &block_annotations) {
-  if (stmt.as<Evaluate>() && stmt.as<EvaluateNode>()->value.as<CallNode>()) {
-    auto call = stmt.as<EvaluateNode>()->value.as<CallNode>();
-    return ParseOperator(tvm::ffi::GetRef<Call>(call), block_annotations);
+  if (const auto *evaluate = stmt.as<EvaluateObj>()) {
+    if (auto call = evaluate->value.as<Call>()) {
+      return ParseOperator(call.value(), block_annotations);
+    }
   }
   return TileOperator();
 }
 
-/**
- * @brief Extracts the Var referenced by a `tvm_access_ptr` call expression.
- *
- * The function expects `expr` to be a `Call` to the builtin `tvm_access_ptr`
- * and returns the `Var` found in the call's second argument (`args[1]`). The
- * function performs runtime checks and will abort if `expr` is not a call, the
- * call is not `tvm_access_ptr`, or the second argument is not a `Var`.
- *
- * @param expr A `PrimExpr` representing a `tvm_access_ptr(...)` call.
- * @return tvm::Var The `Var` referenced by the `tvm_access_ptr` call.
- */
-Var GetVarFromAccessPtr(const PrimExpr &expr) {
-  auto call = expr.as<CallNode>();
-  ICHECK(call);
-  if (call->op.same_as(builtin::tvm_access_ptr())) {
-    auto var = call->args[1].as<VarNode>();
-    ICHECK(var);
-    return tvm::ffi::GetRef<Var>(var);
-  }
-  if (call->op.same_as(tl::access_ptr())) {
-    ICHECK_EQ(call->args.size(), 3U);
-    auto load = call->args[0].as<BufferLoadNode>();
-    ICHECK(load);
-    auto var = load->buffer->data.as<VarNode>();
-    ICHECK(var);
-    return tvm::ffi::GetRef<Var>(var);
-  }
-  LOG(FATAL) << "GetVarFromAccessPtr expects a tvm_access_ptr or tl.access_ptr "
-                "call, but got: "
-             << tvm::ffi::GetRef<Call>(call);
+tirx::TensorVar GetTensorFromAccessPtr(const Expr &expr) {
+  const Call call = expr.as_or_throw<Call>();
+  ICHECK(call->op.same_as(tl::access_ptr()))
+      << "Expected tl.access_ptr carrying a TensorLoad, got " << expr;
+  ICHECK_EQ(call->args.size(), 3U);
+  const TensorLoad load = call->args[0].as_or_throw<TensorLoad>();
+  return load->source.as_or_throw<tirx::TensorVar>();
 }
 
-} // namespace tl
-} // namespace tvm
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def_packed(
+      "tl.GetTileOpAccessRegions", [](ffi::PackedArgs args, ffi::Any *result) {
+        TVM_FFI_CHECK(args.size() == 1 || args.size() == 2, TypeError)
+            << "GetTileOpAccessRegions expects a Call and optional block "
+               "annotations";
+        Call call = args[0].cast<Call>();
+        BlockAnnotations annotations = args.size() == 2
+                                           ? args[1].cast<BlockAnnotations>()
+                                           : BlockAnnotations();
+        TileOperator operation = ParseOperator(call, annotations);
+        TVM_FFI_CHECK(operation.defined(), ValueError)
+            << "GetTileOpAccessRegions requires a registered TileLang tile "
+               "operator";
+        // Query the same operator and lexical annotation handler as lowering.
+        // No target selection or layout inference is needed to report effects.
+        AccessRegions accesses = operation->GetAccessRegions();
+        *result = ffi::Map<ffi::String, ffi::Array<TensorRegion>>{
+            {"reads", accesses.reads}, {"writes", accesses.writes}};
+      });
+}
+
+} // namespace tvm::tl

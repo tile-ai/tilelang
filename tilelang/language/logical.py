@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from tilelang import language as T
-from tvm.tirx import Buffer, BufferRegion, BufferLoad
-from tvm import tirx
+from tilelang.language._native import Buffer, BufferRegion, BufferLoad
+from tilelang.language import _native as tirx
 from tilelang.utils.language import get_buffer_elems
 from tilelang._typing import BufferLikeType
 
@@ -21,26 +21,26 @@ def any_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tirx.op.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
+        return T.call_intrin(return_type, tirx.Op.get("tl.any_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
-        buffer, region = buffer.buffer, buffer.region
+        buffer, region = buffer.source, buffer.region
         new_region = []
         extent = 1
         for i, r in enumerate(region):
             extent = r.extent
             if extent == 1:
-                new_region.append(r.min)
+                new_region.append(r.begin)
             else:
                 # check the idx is the last dimension
                 if i != len(region) - 1:
                     raise ValueError(
                         "Only support the last dimension to be for T.any currently, please contact us if you need this feature"
                     )
-                new_region.append(r.min)
+                new_region.append(r.begin)
         buffer_load = BufferLoad(buffer, new_region)
         return T.call_intrin(
             return_type,
-            tirx.op.Op.get("tl.any_of"),
+            tirx.Op.get("tl.any_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
         )
@@ -60,26 +60,26 @@ def all_of(buffer: BufferLikeType) -> tirx.PrimExpr:
     return_type: str = "bool"
     if isinstance(buffer, Buffer):
         elems = get_buffer_elems(buffer)
-        return T.call_intrin(return_type, tirx.op.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
+        return T.call_intrin(return_type, tirx.Op.get("tl.all_of"), T.access_ptr(buffer, "r"), elems)
     elif isinstance(buffer, BufferRegion):
-        buffer, region = buffer.buffer, buffer.region
+        buffer, region = buffer.source, buffer.region
         new_region = []
         extent = 1
         for i, r in enumerate(region):
             extent = r.extent
             if extent == 1:
-                new_region.append(r.min)
+                new_region.append(r.begin)
             else:
                 # check the idx is the last dimension
                 if i != len(region) - 1:
                     raise ValueError(
                         "Only support the last dimension to be for T.any currently, please contact us if you need this feature"
                     )
-                new_region.append(r.min)
+                new_region.append(r.begin)
         buffer_load = BufferLoad(buffer, new_region)
         return T.call_intrin(
             return_type,
-            tirx.op.Op.get("tl.all_of"),
+            tirx.Op.get("tl.all_of"),
             T.access_ptr(buffer_load, "r", extent=extent),
             extent,
         )

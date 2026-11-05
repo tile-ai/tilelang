@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from tvm import IRModule, s_tir, tirx
-from tvm.target import Target
-from tvm.tirx import PrimFunc, SBlock
-from tvm.tirx.stmt_functor import post_order_visit
+import tvm_ffi
+from tvm_tirx import IRModule, ir, tirx
+from tvm_tirx.backend.cuda import transform as native_cuda
+from tvm_tirx.target import Target
 
 import tilelang
 from tilelang.backend.pass_pipeline import PassPipeline
@@ -54,20 +54,28 @@ def _module_has_shared_barrier(mod: IRModule) -> bool:
 
     def visit(node):
         nonlocal found
-        if isinstance(node, SBlock):
-            for buffer in node.alloc_buffers:
-                if buffer.scope() in ("shared.barrier", "shared.cluster_barrier"):
-                    found = True
+        if (
+            isinstance(node.value, ir.Call)
+            and getattr(node.value.op, "name", "") == "tirx.alloc_tensor"
+            and isinstance(node.var.ty, tirx.TensorType)
+            and str(node.var.ty.scope) in ("shared.barrier", "shared.cluster_barrier")
+        ):
+            found = True
 
-    for _, func in mod.functions.items():
-        if isinstance(func, PrimFunc):
-            post_order_visit(func.body, visit)
+    tvm_ffi.structural_walk(mod, (ir.Bind, visit), order="pre")
     return found
 
 
 def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
+    # This entry is also used directly by Pass consumers, before a JIT backend
+    # context exists. Load the selected backend's layout/lowering callbacks.
+    tilelang.cuda.register_backend()
+    mod = tilelang.transform.NormalizeAliasAnnotations()(mod)
+    mod = tilelang.transform.LowerTensorSpec()(mod)
     mod = tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch(lower_thread_binding=True, default_threads=128)(mod)
+    mod = native_cuda.BindBackendConfig()(mod)
+    mod = native_cuda.SpecializeEntryHelpers()(mod)
     # Record body-bound global bases before optional let inlining obscures
     # their provenance. CopyAnalysis consumes this marker for every lowering
     # path, independently of whether warp specialization is enabled.
@@ -152,8 +160,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
     # Add safety checks for memory accesses
     mod = tilelang.transform.LegalizeSafeMemoryAccess()(mod)
-    # Lower frontend pointer metadata op to standard tvm_access_ptr
-    mod = tilelang.transform.LowerAccessPtr()(mod)
     # Simplify again to clean up any duplicated conditions
     # that may have been introduced by safety checks
     # use an enhanced pass to simplify the dynamic symbolics
@@ -201,22 +207,32 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         mod = tilelang.cuda.transform.FuseMBarrierArriveExpectTx()(mod)
 
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
-    mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    # Cluster geometry stays per kernel until tile/TMEM owners have consumed
+    # two-CTA requirements. Grid/block sizes are derived again at final launch
+    # lowering, after all thread/resource rewrites have completed.
+    mod = tilelang.cuda.transform.LowerClusterLaunch()(mod)
+    # WS role scopes still describe shared-memory lifetimes and synchronization
+    # domains. Keep them until their last consumer, AnnotateWarpGroupRegAlloc.
+    mod = tilelang.transform.FinalizeAnnotations(
+        target.kind.name,
+        allowed_pending_regions=("kWarpSpecializationScope", "kCustomWarpSpecialization"),
+    )(mod)
     mod = tilelang.transform.Simplify()(mod)
-    mod = tirx.transform.NarrowDataType(32)(mod)
+    mod = tilelang.transform.LowerTensorLayouts()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
+    mod = tirx.transform.NarrowDataType(32)(mod)
     # ConfigIndexBitwidth must be applied after FlattenBuffer
     # as it will flatten index computing
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
-    mod = tirx.transform.Simplify()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
     mod = tilelang.transform.UnrollLoop()(mod)
-    mod = s_tir.transform.RenormalizeSplitPattern()(mod)
-    mod = tirx.transform.Simplify()(mod)
-    mod = tirx.transform.RemoveNoOp()(mod)
-    mod = s_tir.transform.HoistIfThenElse()(mod)
+    mod = tirx.transform.RenormalizeSplitPattern()(mod)
+    mod = tirx.transform.StmtSimplify()(mod)
+    mod = tilelang.transform.RemoveNoOp()(mod)
+    mod = tilelang.transform.HoistIf()(mod)
 
     mod = tirx.transform.VerifyMemory()(mod)
     mod = tirx.transform.AnnotateEntryFunc()(mod)
@@ -229,7 +245,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # We can find a way better to create var instead
     # of putting the LowerThreadAllreduce before
     # the Legalization.
-    mod = s_tir.transform.InferFragment()(mod)
+    mod = tilelang.transform.InferWmmaFragmentMetadata()(mod)
     mod = tilelang.transform.LowerThreadAllreduce()(mod)
 
     # @CUDA-specific
@@ -237,14 +253,16 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.cuda.transform.LowerHopperIntrin()(mod)
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
-    mod = tilelang.transform.SplitHostDevice()(mod)
+    # Resource requirements can change in the device passes below.
+    # Keep host calls in native IR until their final launch ABI is known.
+    mod = tilelang.transform.OutlineDeviceRegions()(mod)
 
     # @CUDA-specific
     # Mark the function contains pdl_sync or pdl_trigger
     mod = tilelang.cuda.transform.MarkCudaSyncCalls(have_pdl(target))(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
-    # MergeSharedMemoryAllocations must be applied after SplitHostDevice
+    # MergeSharedMemoryAllocations must be applied after device outlining
     # because the merged allocation site is at the beginning of each device function
     enable_aggressive_merge = should_enable_aggressive_merge(pass_ctx=pass_ctx, target=target)
     disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
@@ -270,13 +288,27 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
         mod = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
 
-    mod = tilelang.transform.MakePackedAPI()(mod)
-    mod = tilelang.transform.Simplify()(mod)
-    mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    # Outlining has split host/device targets. Finalize every function strictly
+    # and reject leftover WS markers if their owner did not run.
+    mod = tilelang.transform.FinalizeAnnotations()(mod)
 
-    # @CUDA-specific
-    # Transform threadblock to persistent threadblock
+    # Cooperative-grid requirements must reach both the emitter and runtime.
     mod = tilelang.cuda.transform.PersistThreadblock()(mod)
+    mod = tilelang.transform.Simplify()(mod)
+    # Synchronization and fence passes still require the access extent/mask.
+    # Erase that contract only when entering the final native address/launch ABI.
+    mod = tilelang.transform.LowerAccessPtr()(mod)
+    mod = tilelang.transform.LowerDeviceKernelLaunch()(mod)
+    mod = native_cuda.LowerIket()(mod)
+    mod = native_cuda.SpecializeDeviceHelpers()(mod)
+    # TileLang CUDA emits bfloat16_t and provides pre-SM80 software fallbacks.
+    # Keep device BF16 types for those helpers; host storage is legalized only
+    # after host/device separation in engine.host_codegen.
+    mod = tirx.transform.FP8ComputeLegalize()(mod)
+    mod = tilelang.transform.MakePackedAPI()(mod)
+    mod = tirx.transform.FP8StorageLegalize()(mod)
+    mod = tilelang.transform.HoistNonRestrictParams(finalize=True)(mod)
+    mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     return mod
 

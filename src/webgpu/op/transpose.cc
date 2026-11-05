@@ -4,8 +4,8 @@
  */
 
 #include "op/transpose.h"
-#include <tvm/ir/cast.h>
 
+#include "op/parallel.h"
 #include "op/utils.h"
 #include "transform/common/loop_fusion_utils.h"
 #include "transform/loop_partition.h"
@@ -21,13 +21,14 @@ namespace webgpu {
 
 struct Transpose {
   static Stmt Lower(const TransposeNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     bool is_cpu_target = lower_args.target->GetTargetDeviceType() == kDLCPU;
     auto simt_loop = op.MakeSIMTLoop(analyzer);
-    auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
+    auto fused_loop = ParallelLoopFuser::Fuse(simt_loop).as_or_throw<For>();
 
     if (is_cpu_target || IsLocalBuffer(op.src) || IsLocalBuffer(op.dst)) {
-      return VectorizeLoop(fused_loop, lower_args.layout_map);
+      return VectorizeLoop(fused_loop, lower_args.layout_map, -1,
+                           lower_args.target);
     }
 
     auto par_op = ParallelOp(fused_loop);
@@ -46,7 +47,8 @@ struct Transpose {
     return LowerParallelLoop(
         par_op->GetRoot(), loop_layout, lower_args.thread_index, analyzer,
         lower_args.layout_map, par_op->GetPredicate(lower_args.thread_index),
-        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard());
+        /*parallel_loop=*/true, par_op->LoopLayoutRequiresPaddingGuard(),
+        lower_args.target);
   }
 };
 

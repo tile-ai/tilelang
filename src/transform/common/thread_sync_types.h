@@ -6,9 +6,22 @@
 
 #include <cstdint>
 #include <functional>
+#include <tvm/ir/prim/expr.h>
 
 namespace tvm {
 namespace tl {
+
+// Analysis metadata for a native launch_thread body parameter. It adds no
+// compatibility IR object or object type to the FFI registry.
+struct NativeThreadBinding {
+  PrimVar var;
+  Range dom;
+  ffi::String tag;
+
+  bool IsBlockThread() const {
+    return tag == "threadIdx.x" || tag == "threadIdx.y" || tag == "threadIdx.z";
+  }
+};
 
 struct ThreadBoundKey {
   int64_t tx_min, tx_max, ty_min, ty_max, tz_min, tz_max;

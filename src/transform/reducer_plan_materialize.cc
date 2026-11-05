@@ -50,249 +50,200 @@
  * differential testing.
  */
 
-#include "support/check.h"
-#include <tvm/arith/iter_affine_map.h>
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "backend/common/op/reduce.h"
+#include "backend/common/target_utils.h"
+#include "common/native_reducer_utils.h"
+#include "common/pipeline_utils.h"
+#include "config.h"
+#include "ir/analyzer.h"
+#include "op/copy.h"
+#include "op/fill.h"
+
+#include "ir/stmt_functor.h"
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
-#include <functional>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
-#include "../config.h"
-#include "../layout/layout.h"
-#include "../layout/utils.h"
-#include "../op/builtin.h"
-#include "../op/copy.h"
-#include "../op/fill.h"
-#include "../op/reducer.h"
-#include "../op/utils.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "arith/ir_visitor_with_analyzer.h"
-#include "backend/common/op/reduce.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-using arith::IRMutatorWithAnalyzer;
-using arith::IRVisitorWithAnalyzer;
-
+namespace tvm::tl {
 namespace {
-
-/*! \brief Build a tl.region(...) call over the full extent of `buffer`. */
-PrimExpr MakeFullRegion(const Buffer &buffer, int access_mask) {
-  Array<PrimExpr> zeros;
-  zeros.reserve(buffer->shape.size());
-  for (size_t i = 0; i < buffer->shape.size(); ++i) {
-    zeros.push_back(make_zero(DataType::Int(32)));
-  }
-  Array<PrimExpr> args;
-  args.push_back(BufferLoad(buffer, zeros));
-  args.push_back(IntImm(DataType::Int(32), access_mask));
-  for (const auto &extent : buffer->shape) {
-    args.push_back(extent);
-  }
-  return Call(DataType::Handle(), region(), args);
-}
-
-// ---------------------------------------------------------------------------
-// Phase A: epoch collection
-// ---------------------------------------------------------------------------
+using namespace tirx;
+using namespace prim;
+using namespace ffi;
+using namespace reducer_native;
 
 struct UpdateSite {
-  Fragment loop_layout;    // solved layout of the enclosing parallel nest
-  Array<Var> loop_vars;    // nest loop vars in order
-  Array<PrimExpr> indices; // logical output indices of the update target
-  PrimExpr value;          // contribution expression
-  // Serial loops between the parallel nest and the update (outermost
-  // first). They accumulate on one thread; the packed-accumulation
-  // optimization uses the innermost one as its lane source.
-  Array<Var> serial_vars;
+  Fragment loop_layout;
+  Array<PrimVar> loop_vars;
+  Array<PrimExpr> indices;
+  PrimExpr value{UnsafeInit{}};
+  Array<PrimVar> serial_vars;
   Array<PrimExpr> serial_extents;
 };
 
 struct EpochInfo {
-  Buffer buffer;
+  TensorVar buffer{UnsafeInit{}};
   ReducerV2OpType op{ReducerV2OpType::kSum};
   Optional<PrimExpr> seed;
-  int64_t thread_extent{-1}; // participant extent at the init site
+  int64_t thread_extent{-1};
   int64_t thread_min{0};
   std::vector<UpdateSite> updates;
-  Buffer dst;
+  TensorVar dst{UnsafeInit{}};
   int64_t batch{1};
-  // False when some structural prerequisite for plan analysis is missing
-  // (e.g. an update site without a solved loop layout).
   bool analyzable{true};
 };
 
-class ReducerEpochCollector : public IRVisitorWithAnalyzer {
+class ReducerEpochCollector : public StmtExprVisitorWithAnalyzer {
 public:
-  std::unordered_map<const VarNode *, EpochInfo> epochs_;
+  ReducerEpochCollector() {}
+  using StmtExprVisitorWithAnalyzer::Visit_;
+  std::unordered_map<const VarObj *, EpochInfo> epochs;
+  MetadataIndex metadata;
+  bool cpu{false};
 
-  void Collect(const PrimFunc &f) { VisitStmt(f->body); }
-
-private:
-  void VisitStmt_(const SBlockNode *op) final {
-    if (auto anno = op->annotations.Get(attr::kReducerInfoV2)) {
-      auto map = anno.value().as<Map<Var, Map<String, Any>>>();
-      ICHECK(map) << "malformed reducer_info_v2 annotation";
-      for (const auto &[var, info] : map.value()) {
-        EpochInfo &epoch = epochs_[var.get()];
-        epoch.op = ParseReducerV2OpType(info.Get("op").value().cast<String>());
-      }
+  void Collect(const tirx::Function &function) {
+    metadata = MetadataIndex::Collect(function);
+    cpu = TargetIsCPU(function->GetAttr<Target>(tvm::attr::kTarget).value());
+    for (const auto &[tensor, info] : metadata.v2) {
+      TVM_FFI_CHECK(metadata.allocations.count(tensor), ValueError)
+          << "Reducer metadata must refer to an allocation";
+      auto &epoch = epochs[tensor.get()];
+      epoch.buffer = tensor;
+      epoch.op = ParseReducerV2OpType(info.at("op").as_or_throw<String>());
     }
-    for (const auto &buffer : op->alloc_buffers) {
-      if (IsReducerV2Buffer(buffer)) {
-        epochs_[buffer->data.get()].buffer = buffer;
-      }
-    }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
+    if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      Visit(function->body);
   }
 
-  void VisitStmt_(const AttrStmtNode *op) final {
-    auto prev_thread_var = thread_var_;
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        thread_var_ = iv;
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    auto previous_thread = thread_;
+    auto previous_pending = pending_layout_;
+    if (op->op.same_as(launch_thread_op()) &&
+        op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
+      thread_ = op->body_params[0].as_or_throw<PrimVar>();
+    if (op->op->name == "tl.attr") {
+      auto fields = ReadNativeAnnotations(op);
+      if (fields.at("key").as_or_throw<String>() == "tl.loop.annotations") {
+        auto values = StringMap(fields.at("value"));
+        if (auto layout = values.Get(attr::kParallelLoopLayout))
+          pending_layout_ = layout->as_or_throw<Fragment>();
       }
+      // The annotation tuple carries expressions and tensor references for
+      // analysis. It is not an execution of those values.
+      Visit(op->body);
+    } else {
+      StmtExprVisitorWithAnalyzer::Visit_(op);
     }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-    thread_var_ = prev_thread_var;
+    thread_ = previous_thread;
+    pending_layout_ = previous_pending;
+    return std::nullopt;
   }
 
-  void VisitStmt_(const ForNode *op) final {
-    if (op->kind == ForKind::kParallel &&
-        op->annotations.count(tl::attr::kParallelLoopLayout)) {
-      auto prev_layout = cur_loop_layout_;
-      auto prev_vars = cur_loop_vars_;
-      cur_loop_layout_ = Downcast<Fragment>(
-          op->annotations.Get(tl::attr::kParallelLoopLayout).value());
-      // Gather the consecutive parallel nest the annotation covers.
-      Array<Var> vars;
-      const ForNode *cur = op;
-      while (true) {
-        vars.push_back(cur->loop_var);
-        const auto *inner = cur->body.as<ForNode>();
-        if (inner != nullptr && inner->kind == ForKind::kParallel) {
-          cur = inner;
-        } else {
-          break;
-        }
+  Optional<VisitInterrupt> Visit_(const ForObj *op) final {
+    auto annotations = ReadLoopAnnotations(op);
+    Optional<Fragment> layout = pending_layout_;
+    if (auto value = annotations.Get(attr::kParallelLoopLayout))
+      layout = value->as_or_throw<Fragment>();
+    if (op->kind == ForKind::kParallel && layout) {
+      auto previous_layout = loop_layout_;
+      auto previous_vars = loop_vars_;
+      auto previous_serial_vars = serial_vars_;
+      auto previous_serial_extents = serial_extents_;
+      auto previous_pending = pending_layout_;
+      pending_layout_ = std::nullopt;
+      loop_layout_ = layout;
+      loop_vars_.clear();
+      for (const ForObj *current = op; current != nullptr;) {
+        loop_vars_.push_back(current->var);
+        const auto *inner = SingleNestedFor(current->body);
+        current = inner && inner->kind == ForKind::kParallel ? inner : nullptr;
       }
-      cur_loop_vars_ = vars;
-      auto prev_serial_vars = cur_serial_vars_;
-      auto prev_serial_extents = cur_serial_extents_;
-      cur_serial_vars_.clear();
-      cur_serial_extents_.clear();
-      IRVisitorWithAnalyzer::VisitStmt_(op);
-      cur_loop_layout_ = prev_layout;
-      cur_loop_vars_ = prev_vars;
-      cur_serial_vars_ = prev_serial_vars;
-      cur_serial_extents_ = prev_serial_extents;
-      return;
+      serial_vars_.clear();
+      serial_extents_.clear();
+      StmtExprVisitorWithAnalyzer::Visit_(op);
+      loop_layout_ = previous_layout;
+      loop_vars_ = previous_vars;
+      serial_vars_ = previous_serial_vars;
+      serial_extents_ = previous_serial_extents;
+      pending_layout_ = previous_pending;
+      return std::nullopt;
     }
-    if (op->kind == ForKind::kSerial && cur_loop_layout_.defined()) {
-      cur_serial_vars_.push_back(op->loop_var);
-      cur_serial_extents_.push_back(op->extent);
-      IRVisitorWithAnalyzer::VisitStmt_(op);
-      cur_serial_vars_.pop_back();
-      cur_serial_extents_.pop_back();
-      return;
+    const bool serial =
+        op->kind == ForKind::kDefault && loop_layout_.has_value();
+    if (serial) {
+      serial_vars_.push_back(op->var);
+      serial_extents_.push_back(LoopExtent(op));
     }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
+    StmtExprVisitorWithAnalyzer::Visit_(op);
+    if (serial) {
+      serial_vars_.pop_back();
+      serial_extents_.pop_back();
+    }
+    return std::nullopt;
   }
 
-  void VisitExpr_(const CallNode *op) final {
+  Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (IsMetadataCall(op))
+      return std::nullopt;
     if (op->op.same_as(ReducerInitOp::Get())) {
-      if (EpochInfo *epoch = FindEpoch(op->args[0])) {
-        if (op->args.size() >= 2) {
-          epoch->seed = op->args[1];
-        }
-        if (thread_var_.defined() &&
-            analyzer_.const_int_bound.IsBound(thread_var_->var)) {
-          auto bound = analyzer_.const_int_bound(thread_var_->var);
-          epoch->thread_min = bound->min_value;
-          epoch->thread_extent = bound->max_value - bound->min_value + 1;
-        } else {
-          epoch->analyzable = false;
-        }
+      auto args = DecodeTileOpArguments(op).operands;
+      auto &epoch = Find(args[0]);
+      if (args.size() == 2)
+        epoch.seed = args[1].as_or_throw<PrimExpr>();
+      if (cpu) {
+        epoch.thread_extent = 1;
+        epoch.thread_min = 0;
+      } else {
+        TVM_FFI_CHECK(
+            thread_ && GetSyncedAnalyzer()->const_int_bound.IsBound(*thread_),
+            ValueError)
+            << "reducer_init must execute inside a kernel launch with known "
+               "threadIdx.x bounds";
+        auto bound = GetSyncedAnalyzer()->const_int_bound(*thread_);
+        epoch.thread_min = bound->min_value;
+        epoch.thread_extent = bound->max_value - bound->min_value + 1;
       }
-      return;
+      TVM_FFI_CHECK_GT(epoch.thread_extent, 0, ValueError);
+      return std::nullopt;
     }
     if (op->op.same_as(reducer_update())) {
-      const auto *load = op->args[0].as<BufferLoadNode>();
-      auto it = load != nullptr ? epochs_.find(load->buffer->data.get())
-                                : epochs_.end();
-      if (it != epochs_.end()) {
-        EpochInfo *epoch = &it->second;
-        if (cur_loop_layout_.defined()) {
-          ReducerUpdateArgs update = ParseReducerUpdate(op);
-          epoch->updates.push_back(UpdateSite{
-              cur_loop_layout_.value(), cur_loop_vars_, update.indices,
-              update.value, cur_serial_vars_, cur_serial_extents_});
-        } else {
-          epoch->analyzable = false;
-        }
-      }
-      return;
+      auto update = ParseReducerUpdate(op);
+      auto &epoch = epochs.at(update.reducer.get());
+      if (loop_layout_)
+        epoch.updates.push_back({*loop_layout_, loop_vars_, update.indices,
+                                 update.value, serial_vars_, serial_extents_});
+      else
+        epoch.analyzable = false;
+      return std::nullopt;
     }
     if (op->op.same_as(FinalizeReducerV2Op::Get())) {
-      if (EpochInfo *epoch = FindEpoch(op->args[0])) {
-        if (auto call2 = op->args[1].as<CallNode>()) {
-          if (call2->op.same_as(region())) {
-            if (auto load = call2->args[0].as<BufferLoadNode>()) {
-              epoch->dst = load->buffer;
-            }
-          }
-        }
-        if (auto batch = op->annotations.Get("batch")) {
-          if (const auto *imm = batch.value().as<IntImmNode>()) {
-            epoch->batch = imm->value;
-          }
-        }
-      }
-      return;
+      auto decoded = DecodeTileOpArguments(op);
+      auto &epoch = Find(decoded.operands[0]);
+      epoch.dst = reducer_native::RegionTensor(decoded.operands[1]);
+      if (auto batch = decoded.annotations.Get("batch"))
+        epoch.batch = GetIntegerAnnotation(*batch);
+      return std::nullopt;
     }
-    IRVisitorWithAnalyzer::VisitExpr_(op);
+    return StmtExprVisitorWithAnalyzer::Visit_(op);
   }
 
-  EpochInfo *FindEpoch(const PrimExpr &region_arg) {
-    if (auto call = region_arg.as<CallNode>()) {
-      if (call->op.same_as(region())) {
-        if (auto load = call->args[0].as<BufferLoadNode>()) {
-          auto it = epochs_.find(load->buffer->data.get());
-          if (it != epochs_.end()) {
-            return &it->second;
-          }
-        }
-      }
-    }
-    return nullptr;
+private:
+  EpochInfo &Find(const Expr &region) {
+    auto tensor = reducer_native::RegionTensor(region);
+    auto found = epochs.find(tensor.get());
+    TVM_FFI_CHECK(found != epochs.end(), ValueError)
+        << "Unknown reducer " << tensor;
+    return found->second;
   }
-
-  IterVar thread_var_;
-  Optional<Fragment> cur_loop_layout_;
-  Array<Var> cur_loop_vars_;
-  Array<Var> cur_serial_vars_;
-  Array<PrimExpr> cur_serial_extents_;
+  Optional<PrimVar> thread_;
+  Optional<Fragment> pending_layout_;
+  Optional<Fragment> loop_layout_;
+  Array<PrimVar> loop_vars_, serial_vars_;
+  Array<PrimExpr> serial_extents_;
 };
-
-// ---------------------------------------------------------------------------
-// Phase B: narrow-plan analysis
-// ---------------------------------------------------------------------------
 
 struct NarrowDecision {
   Fragment storage_layout; // induced partial layout (also post-collective)
@@ -305,7 +256,7 @@ struct NarrowDecision {
   // that must be overridden together so the connecting copies stay
   // slot-compatible.
   bool override_dst_layout{false};
-  std::vector<Buffer> override_chain;
+  std::vector<TensorVar> override_chain;
   // Packed partial accumulation (16-bit floats): updates write two
   // interleaved lanes per logical slot selected by the parity of
   // `pack_lane_var` (the innermost on-thread reduction loop), which breaks
@@ -314,7 +265,7 @@ struct NarrowDecision {
   // into the plain induced storage before the collective, so the plan's
   // communication and destination proofs are untouched.
   bool packed{false};
-  Var pack_lane_var;
+  PrimVar pack_lane_var{UnsafeInit{}};
   Fragment packed_layout; // storage_layout with an extra innermost lane dim
 };
 
@@ -327,23 +278,24 @@ struct NarrowDecision {
  *  layouts LayoutInference picked for them never constrained anything
  *  else. */
 struct BufferUseCensus {
-  int64_t loads{0};        // every BufferLoad occurrence (incl. regions)
-  int64_t stores{0};       // ordinary stores (must be zero)
+  int64_t loads{0}; // every BufferLoad occurrence (incl. regions)
+  int64_t stores{0};
+  int64_t other_uses{0};   // ordinary stores (must be zero)
   int64_t finalize_dst{0}; // finalize_reducer destination regions
   int64_t copy_src{0};     // tl.copy source regions
   int64_t copy_dst{0};     // tl.copy destination regions
 };
 
 struct CopyEdge {
-  const VarNode *src{nullptr};
-  const VarNode *dst{nullptr};
+  const VarObj *src{nullptr};
+  const VarObj *dst{nullptr};
   bool dst_global{false};
   bool dst_fragment{false};
-  Buffer dst_buffer;
+  TensorVar dst_buffer{UnsafeInit{}};
 };
 
 struct UseGraph {
-  std::unordered_map<const VarNode *, BufferUseCensus> census;
+  std::unordered_map<const VarObj *, BufferUseCensus> census;
   std::vector<CopyEdge> copies;
 };
 
@@ -352,10 +304,10 @@ struct UseGraph {
  *  with it. Returns false when any buffer on the chain has uses beyond
  *  "written once by its producer, read only by copies to global or further
  *  chain members". */
-bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
-                          std::vector<Buffer> *chain) {
-  std::unordered_set<const VarNode *> visited;
-  std::function<bool(const VarNode *)> visit = [&](const VarNode *var) -> bool {
+bool CollectOverrideChain(const VarObj *root, const UseGraph &graph,
+                          std::vector<TensorVar> *chain) {
+  std::unordered_set<const VarObj *> visited;
+  std::function<bool(const VarObj *)> visit = [&](const VarObj *var) -> bool {
     if (!visited.insert(var).second) {
       return false; // cycle
     }
@@ -363,7 +315,7 @@ bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
     BufferUseCensus c =
         it == graph.census.end() ? BufferUseCensus{} : it->second;
     bool is_root = (var == root);
-    if (c.stores != 0) {
+    if (c.stores != 0 || c.other_uses != 0) {
       return false;
     }
     if (is_root ? (c.finalize_dst != 1 || c.copy_dst != 0)
@@ -407,9 +359,9 @@ bool CollectOverrideChain(const VarNode *root, const UseGraph &graph,
  *  slots and the final global publication takes the static-index
  *  replica-zero path. Returns the layout entries to publish, or nothing when
  *  the chain has other consumers (their inferred layouts then stand). */
-std::optional<std::vector<std::pair<Buffer, Fragment>>>
+std::optional<std::vector<std::pair<TensorVar, Fragment>>>
 TryWideFinalizeDstOverride(const EpochInfo &epoch,
-                           const Map<Buffer, Layout> &known_layouts,
+                           const Map<TensorVar, Layout> &known_layouts,
                            const UseGraph &use_graph) {
   if (!epoch.dst.defined() || !IsFragmentBuffer(epoch.dst) ||
       epoch.thread_extent <= 0) {
@@ -420,26 +372,26 @@ TryWideFinalizeDstOverride(const EpochInfo &epoch,
   if (!known_layouts.count(epoch.dst)) {
     return std::nullopt;
   }
-  std::vector<Buffer> chain;
-  if (!CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
+  std::vector<TensorVar> chain;
+  if (!CollectOverrideChain(epoch.dst.get(), use_graph, &chain)) {
     return std::nullopt;
   }
-  std::vector<std::pair<Buffer, Fragment>> entries;
-  auto add_entry = [&](const Buffer &buffer) -> bool {
-    for (const auto &dim : buffer->shape) {
-      if (!as_const_int(dim)) {
+  std::vector<std::pair<TensorVar, Fragment>> entries;
+  auto add_entry = [&](const TensorVar &buffer) -> bool {
+    for (const auto &dim : buffer.shape()) {
+      if (!TryConstInt(dim)) {
         return false;
       }
     }
     Fragment layout = Fragment::FullyReplicated(
-        buffer->shape, IntImm(DataType::Int(32), epoch.thread_extent));
+        buffer.shape(), IntImm(PrimType::Int(32), epoch.thread_extent));
     if (epoch.thread_min != 0) {
       // Copy loop layouts derived from these fragments carry the thread
       // range; warp-specialized participants need the real one, not
       // FullyReplicated's default [0, extent).
       layout = layout->BindThreadRange(Range(
-          IntImm(DataType::Int(32), epoch.thread_min),
-          IntImm(DataType::Int(32), epoch.thread_min + epoch.thread_extent)));
+          IntImm(PrimType::Int(32), epoch.thread_min),
+          IntImm(PrimType::Int(32), epoch.thread_min + epoch.thread_extent)));
     }
     entries.emplace_back(buffer, layout);
     return true;
@@ -447,7 +399,7 @@ TryWideFinalizeDstOverride(const EpochInfo &epoch,
   if (!add_entry(epoch.dst)) {
     return std::nullopt;
   }
-  for (const Buffer &staged : chain) {
+  for (const TensorVar &staged : chain) {
     if (!add_entry(staged)) {
       return std::nullopt;
     }
@@ -457,14 +409,14 @@ TryWideFinalizeDstOverride(const EpochInfo &epoch,
 
 std::optional<NarrowDecision>
 DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
-                     const Map<Buffer, Layout> &known_layouts,
-                     const UseGraph &use_graph, arith::Analyzer *analyzer,
+                     const Map<TensorVar, Layout> &known_layouts,
+                     const UseGraph &use_graph, sym::AnalyzerObj *analyzer,
                      std::string *reason) {
   auto fail = [&](const std::string &why) -> std::optional<NarrowDecision> {
     *reason = why;
     return std::nullopt;
   };
-  const Buffer &buffer = epoch.buffer;
+  const TensorVar &buffer = epoch.buffer;
 
   // The solved partial IS the plan: storage and collective steps are read
   // off the node (LayoutInference proved them at the update sites and
@@ -484,16 +436,17 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
   // profit-only: any layout keeps the plan correct.
   const Fragment &storage = decision.storage_layout;
   if (epoch.updates.size() == 1 && epoch.analyzable &&
-      (buffer->dtype.is_float16() || buffer->dtype.is_bfloat16()) &&
+      (buffer.dtype().MatchesElementType(kDLFloat, 16) ||
+       buffer.dtype().MatchesElementType(kDLBfloat, 16)) &&
       storage->OutputDim() == 1) {
     const UpdateSite &site = epoch.updates.front();
     size_t ndim = site.loop_vars.size();
     // NOTE: `tirx::Var()` default-constructs a REAL variable named "v",
     // not a null ref; use Optional to represent "no lane source found".
-    Optional<Var> lane_var;
+    Optional<PrimVar> lane_var;
     if (!site.serial_vars.empty()) {
-      const int64_t *extent =
-          as_const_int(site.serial_extents[site.serial_extents.size() - 1]);
+      auto extent =
+          TryConstInt(site.serial_extents[site.serial_extents.size() - 1]);
       if (extent && *extent >= 2 && *extent % 2 == 0) {
         lane_var = site.serial_vars[site.serial_vars.size() - 1];
       }
@@ -504,11 +457,11 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
       // plan itself no longer depends on it.
       ReducerUpdateSiteHint hint{site.loop_layout, site.loop_vars, site.indices,
                                  site.value};
-      ReducerSiteAnalysis analysis = AnalyzeReducerUpdateSite(
-          hint, buffer->shape, epoch.thread_extent, epoch.thread_min, analyzer);
+      ReducerSiteAnalysis analysis =
+          AnalyzeReducerUpdateSite(hint, buffer.shape(), epoch.thread_extent,
+                                   epoch.thread_min, analyzer);
       if (analysis.narrow_eligible && !analysis.is_output_dim[ndim - 1]) {
-        const int64_t *extent =
-            as_const_int(site.loop_layout->InputShape()[ndim - 1]);
+        auto extent = TryConstInt(site.loop_layout->InputShape()[ndim - 1]);
         if (extent) {
           int64_t thread_multiplicity = 1;
           // Packing pays off only when the dim's LOW BIT stays on one
@@ -516,7 +469,7 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
           // pins the lane parity per thread, leaving one lane idle.
           bool bit0_serial = true;
           auto inner_steps = backend::reduce::CollectThreadReduceSteps(
-              analysis.iter_sum, Downcast<Var>(InputPlaceholder(ndim - 1)));
+              analysis.iter_sum.value(), InputPlaceholder(ndim - 1));
           for (const auto &step : inner_steps) {
             thread_multiplicity *= step.extent;
             if (step.lower_factor % 2 != 0) {
@@ -532,15 +485,15 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
     }
     if (lane_var.has_value()) {
       Array<PrimExpr> slot_args;
-      for (size_t d = 0; d < buffer->shape.size(); ++d) {
+      for (size_t d = 0; d < buffer.shape().size(); ++d) {
         slot_args.push_back(InputPlaceholder(d));
       }
       Array<PrimExpr> fwd_index = storage->Forward(slot_args);
       PrimExpr fwd_thread =
           storage->ForwardThread(slot_args, ReplicationPlaceholder());
-      PrimExpr lane = InputPlaceholder(buffer->shape.size());
-      Array<PrimExpr> packed_shape = buffer->shape;
-      packed_shape.push_back(IntImm(DataType::Int(32), 2));
+      PrimExpr lane = InputPlaceholder(buffer.shape().size());
+      Array<PrimExpr> packed_shape = buffer.shape();
+      packed_shape.push_back(IntImm(PrimType::Int(32), 2));
       decision.packed_layout =
           Fragment(packed_shape, {fwd_index[0] * 2 + lane}, fwd_thread,
                    storage->ReplicateExtent(), std::nullopt)
@@ -560,16 +513,16 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
       return fail("destination has a non-fragment layout");
     }
     Array<PrimExpr> element_indices;
-    for (size_t d = 0; d < buffer->shape.size(); ++d) {
-      Var placeholder = InputPlaceholder(d);
-      analyzer->Bind(
-          placeholder,
-          Range::FromMinExtent(make_zero(DataType::Int(32)), buffer->shape[d]),
-          /*allow_override=*/true);
+    for (size_t d = 0; d < buffer.shape().size(); ++d) {
+      PrimVar placeholder = InputPlaceholder(d);
+      BindAnalyzer(analyzer, placeholder,
+                   Range::FromMinExtent(IntImm::Int32(0), buffer.shape()[d]),
+                   /*allow_override=*/true);
       element_indices.push_back(placeholder);
     }
     if (!ProveFragmentContains(dst_frag.value(), decision.storage_layout,
-                               element_indices, element_indices, *analyzer)) {
+                               element_indices, element_indices,
+                               GetRef<sym::Analyzer>(analyzer))) {
       // The inferred layout mismatches the reduction's natural placement.
       // When the whole destination chain is unconstrained (finalize-written,
       // read only by copies to global or by staging copies into further
@@ -579,8 +532,8 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
       // overrides; ParallelOp validates its candidates against the solved
       // fragment layouts and returns an operand-compatible one, so
       // multi-slot overrides are safe.
-      std::vector<Buffer> chain;
-      if (CollectOverrideChain(epoch.dst->data.get(), use_graph, &chain)) {
+      std::vector<TensorVar> chain;
+      if (CollectOverrideChain(epoch.dst.get(), use_graph, &chain)) {
         decision.override_dst_layout = true;
         decision.override_chain = std::move(chain);
       } else {
@@ -593,708 +546,498 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
   return decision;
 }
 
-// ---------------------------------------------------------------------------
-// Phase C: materialization
-// ---------------------------------------------------------------------------
-
-class ReducerPlanAndMaterializeRewriter : public IRMutatorWithAnalyzer {
+// TensorRegion has no implicit TensorLoad child in native IR. Census its
+// address descriptor once, and count arbitrary tensor/address uses separately.
+// Otherwise an unsafe alias could be mistaken for a free finalize destination.
+class UseGraphCollector : public StmtExprVisitor {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
-    // Phase A: collect epochs.
-    ReducerEpochCollector collector;
-    collector.Collect(f);
-    if (collector.epochs_.empty()) {
-      return f;
+  using StmtExprVisitor::Visit_;
+  UseGraph graph;
+  Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+    return Visit(op->value);
+  }
+  Optional<VisitInterrupt> Visit_(const VarObj *op) final {
+    if (op->ty.as<TensorTypeObj>())
+      graph.census[op].other_uses++;
+    return std::nullopt;
+  }
+  Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+    graph.census[op->source.as_or_throw<TensorVar>().get()].loads++;
+    for (const auto &index : op->indices)
+      Visit(index);
+    return std::nullopt;
+  }
+  Optional<VisitInterrupt> Visit_(const TensorRegionObj *op) final {
+    graph.census[op->source.as_or_throw<TensorVar>().get()].loads++;
+    for (const auto &range : op->region) {
+      Visit(range->begin);
+      Visit(range->extent);
     }
-    // The inferred layout map (identical on every block) feeds the
-    // destination-containment proof and carries each reducer's solved
-    // partial layout; the per-buffer use census decides whether an inferred
-    // destination layout may be replaced.
-    Map<Buffer, Layout> known_layouts;
-    UseGraph use_graph;
-    PostOrderVisit(f->body, [&](const ObjectRef &obj) {
-      if (const auto *block = obj.as<SBlockNode>()) {
-        if (auto anno = block->annotations.Get(tl::attr::kLayoutMap)) {
-          if (auto as_map = anno.value().as<Map<Buffer, Layout>>()) {
-            for (const auto &[buffer, layout] : as_map.value()) {
-              known_layouts.Set(buffer, layout);
-            }
-          }
-        }
-      } else if (const auto *load = obj.as<BufferLoadNode>()) {
-        use_graph.census[load->buffer->data.get()].loads++;
-      } else if (const auto *store = obj.as<BufferStoreNode>()) {
-        use_graph.census[store->buffer->data.get()].stores++;
-      } else if (const auto *call = obj.as<CallNode>()) {
-        auto region_buffer = [](const PrimExpr &arg) -> Buffer {
-          if (auto region_call = arg.as<CallNode>()) {
-            if (region_call->op.same_as(region())) {
-              if (auto ld = region_call->args[0].as<BufferLoadNode>()) {
-                return ld->buffer;
-              }
-            }
-          }
-          return Buffer();
-        };
-        // Recognize tile copies through the op builder so dialect copy ops
-        // (e.g. tl.tileop.ascend_copy) are censused like plain tl.tileop.copy.
-        // Only strict CopyNode refinements qualify: other spellings that build
-        // a plain CopyNode (async_copy, tma_copy) keep their historical
-        // exclusion from the census.
-        auto is_tile_copy = [](const CallNode *call) {
-          if (call->op.same_as(Copy::Get())) {
-            return true;
-          }
-          if (!call->op.as<OpNode>()) {
-            return false;
-          }
-          TileOperator tile_op = ParseOperator(tvm::ffi::GetRef<Call>(call));
-          const CopyNode *copy = tile_op.as<CopyNode>();
-          return copy != nullptr &&
-                 copy->type_index() != CopyNode::RuntimeTypeIndex();
-        };
-        if (is_tile_copy(call) && call->args.size() >= 2) {
-          Buffer src = region_buffer(call->args[0]);
-          Buffer dst = region_buffer(call->args[1]);
-          if (src.defined() && dst.defined()) {
-            use_graph.census[src->data.get()].copy_src++;
-            use_graph.census[dst->data.get()].copy_dst++;
-            use_graph.copies.push_back(
-                CopyEdge{src->data.get(), dst->data.get(), IsGlobalBuffer(dst),
-                         IsFragmentBuffer(dst), dst});
-          }
-        } else if (call->op.same_as(FinalizeReducerV2Op::Get())) {
-          Buffer dst = region_buffer(call->args[1]);
-          if (dst.defined()) {
-            use_graph.census[dst->data.get()].finalize_dst++;
-          }
-        }
-      }
-    });
+    return std::nullopt;
+  }
+  Optional<VisitInterrupt> Visit_(const TensorStoreObj *op) final {
+    graph.census[op->dest.as_or_throw<TensorVar>().get()].stores++;
+    Visit(op->value);
+    for (const auto &index : op->indices)
+      Visit(index);
+    return std::nullopt;
+  }
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (op->op->name == "tl.attr")
+      return Visit(op->body);
+    return StmtExprVisitor::Visit_(op);
+  }
+  Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (IsMetadataCall(op))
+      return std::nullopt;
+    bool copy = op->op.same_as(Copy::Get());
+    if (!copy && op->op.as<OpObj>()) {
+      TileOperator tile = ParseOperator(GetRef<Call>(op));
+      if (const auto *refinement = tile.as<CopyNode>())
+        copy = refinement->type_index() != CopyNode::RuntimeTypeIndex();
+    }
+    if (copy || op->op.same_as(FinalizeReducerV2Op::Get())) {
+      auto decoded = DecodeTileOpArguments(op);
+      TVM_FFI_CHECK_GE(decoded.operands.size(), 2U, ValueError);
+      auto source = NormalizeToTensorRegion(decoded.operands[0]);
+      auto dest = NormalizeToTensorRegion(decoded.operands[1]);
+      auto src_tensor = tl::RegionTensor(source),
+           dst_tensor = tl::RegionTensor(dest);
+      if (copy) {
+        graph.census[src_tensor.get()].copy_src++;
+        graph.census[dst_tensor.get()].copy_dst++;
+        graph.copies.push_back({src_tensor.get(), dst_tensor.get(),
+                                IsGlobalBuffer(dst_tensor),
+                                IsFragmentBuffer(dst_tensor), dst_tensor});
+      } else
+        graph.census[dst_tensor.get()].finalize_dst++;
+      Visit(source);
+      Visit(dest);
+      for (size_t i = 2; i < decoded.operands.size(); ++i)
+        Visit(decoded.operands[i]);
+      Visit(decoded.annotations);
+      return std::nullopt;
+    }
+    return StmtExprVisitor::Visit_(op);
+  }
+};
 
-    // Phase B: decide a physical plan per epoch.
-    arith::Analyzer analyzer;
-    ReducerPlanAndMaterializeRewriter rewriter(&analyzer);
-    rewriter.known_layouts_ = known_layouts;
-    for (const auto &[var, epoch] : collector.epochs_) {
-      if (!epoch.buffer.defined()) {
-        continue;
-      }
-      // The decision is read directly off the solved PartialFragment — the
-      // node IS the plan (its algebra is the storage, CombineSize/
-      // CombineSteps the communication). The FullParticipant object
-      // (combine == replicate == participant extent, thread == _rep) is the
-      // wide fallback: engine-widened multi-site disagreement, zero-update
-      // seeds, per-site proof rejections and tl.reducer_force_baseline all
-      // resolve to it at proposal/commit time. Anything else is a proven
-      // narrow plan — including all-combine nodes with no copy groups
-      // (W == rep < participants), which keep compact storage and
-      // unguarded updates. Only the destination-containment lowerability
-      // gate can still demote a narrow node at materialize.
-      std::string reason;
+struct Plan {
+  TensorVar old_tensor{UnsafeInit{}};
+  TensorVar storage{UnsafeInit{}};
+  Fragment layout;
+  ReducerV2OpType op;
+  Optional<TensorVar> seed_storage;
+  Optional<PrimExpr> seed;
+  bool narrow{false};
+  bool cpu{false};
+  std::vector<std::pair<int, int>> steps;
+  Optional<TensorVar> packed_storage;
+  Fragment packed_layout;
+  Optional<PrimVar> pack_lane_var;
+};
+
+class ReducerMaterializer : public StmtExprMutatorWithAnalyzer {
+public:
+  explicit ReducerMaterializer(const sym::Analyzer &analyzer)
+      : StmtExprMutatorWithAnalyzer(analyzer) {}
+  using StmtExprMutatorWithAnalyzer::Mutate;
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+
+  tirx::Function Run(tirx::Function function) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto collector = make_object<ReducerEpochCollector>();
+    collector->Collect(function);
+    if (collector->epochs.empty())
+      return function;
+    known_layouts_ = collector->metadata.layouts;
+    auto census = make_object<UseGraphCollector>();
+    census->Visit(function->body);
+    for (const auto &[var, epoch] : collector->epochs) {
+      TVM_FFI_CHECK(epoch.dst.defined() && epoch.thread_extent > 0, ValueError)
+          << "Reducer epoch is missing init/finalize; run VerifyReducerEpoch "
+             "first";
       std::optional<NarrowDecision> decision;
-      const PartialFragmentNode *partial = nullptr;
-      Optional<PartialFragment> partial_ref;
-      if (auto partial_entry = known_layouts.Get(epoch.buffer)) {
-        partial_ref = Downcast<PartialFragment>(partial_entry.value());
-        partial = partial_ref.value().get();
-        ICHECK(partial != nullptr) << "reducer `" << epoch.buffer->name
-                                   << "` carries a non-partial layout: "
-                                   << partial_entry.value()->DebugOutput();
+      std::string reason;
+      if (!collector->cpu) {
+        auto entry = known_layouts_.Get(epoch.buffer);
+        TVM_FFI_CHECK(entry.has_value(), ValueError)
+            << "No solved partial layout for " << epoch.buffer
+            << "; run LayoutInference first";
+        auto partial = entry->as_or_throw<PartialFragment>();
+        auto combine = TryConstInt(partial->CombineSize());
+        auto replication = TryConstInt(partial->ReplicateExtent());
+        TVM_FFI_CHECK(combine && replication, ValueError)
+            << "Reducer partial decomposition must be compile-time constant";
+        bool wide = *combine == *replication &&
+                    *replication == epoch.thread_extent &&
+                    partial->IsCompletedReplicated();
+        if (!wide)
+          decision =
+              DeriveNarrowLowering(epoch, partial, known_layouts_,
+                                   census->graph, GetSyncedAnalyzer(), &reason);
+        else
+          reason = "FullParticipant partial";
       }
-      bool node_narrow = false;
-      if (partial == nullptr) {
-        reason = "no solved partial layout for this epoch";
-      } else {
-        const int64_t *combine = as_const_int(partial->CombineSize());
-        const int64_t *rep = as_const_int(partial->ReplicateExtent());
-        ICHECK(combine != nullptr && rep != nullptr)
-            << "reducer `" << epoch.buffer->name
-            << "` carries a non-constant partial decomposition: "
-            << partial->DebugOutput();
-        bool full_participant = (*combine == *rep) &&
-                                (*rep == epoch.thread_extent) &&
-                                partial->IsCompletedReplicated();
-        node_narrow = !full_participant;
-        if (!node_narrow) {
-          reason = "FullParticipant partial (wide fallback)";
-        }
+      if (decision && decision->override_dst_layout) {
+        extra_layouts_.Set(epoch.dst, decision->storage_layout);
+        for (const auto &tensor : decision->override_chain)
+          extra_layouts_.Set(tensor, decision->storage_layout);
+      } else if (!collector->cpu && !decision) {
+        if (auto overrides = TryWideFinalizeDstOverride(epoch, known_layouts_,
+                                                        census->graph))
+          for (const auto &[tensor, layout] : *overrides)
+            extra_layouts_.Set(tensor, layout);
       }
-      if (node_narrow) {
-        decision =
-            DeriveNarrowLowering(epoch, partial_ref.value(), known_layouts,
-                                 use_graph, &analyzer, &reason);
-        if (!decision.has_value()) {
-          // Destination containment demoted the epoch: the node keeps its
-          // narrow decomposition for cost accounting; the physical plan
-          // falls back to FullParticipant.
-          DLOG(INFO) << "[ReducerPlan] narrow partial of `"
-                     << epoch.buffer->name
-                     << "` demoted to the wide plan: " << reason;
-        }
+      Plan plan;
+      plan.old_tensor = epoch.buffer;
+      plan.op = epoch.op;
+      plan.cpu = collector->cpu;
+      plan.narrow = decision.has_value();
+      plan.storage =
+          WithScope(epoch.buffer, plan.cpu ? "local" : "local.fragment");
+      if (epoch.seed) {
+        plan.seed_storage =
+            TensorVar(epoch.buffer->name + "_seed",
+                      TensorType({1}, epoch.buffer.dtype(),
+                                 runtime::MemoryScope::Get("local")),
+                      epoch.buffer->loc);
+        plan.seed = TensorLoad(*plan.seed_storage, {0}, epoch.buffer->loc);
       }
-      bool verbose = tl_config::ReducerPlanVerboseEnabled();
-      if (decision.has_value()) {
-        std::string msg = "[ReducerPlan] `" + std::string(epoch.buffer->name) +
-                          "`: narrow plan, ";
-        if (decision->steps.empty()) {
-          msg += "no collective";
-        } else {
-          for (const auto &[rt, s] : decision->steps) {
-            msg += "AllReduce<" + std::to_string(rt) + "," + std::to_string(s) +
-                   "> ";
-          }
-        }
+      if (decision) {
+        plan.layout = decision->storage_layout;
+        plan.steps = decision->steps;
         if (decision->packed) {
-          msg += ", packed lanes";
-        }
-        if (verbose) {
-          LOG(INFO) << msg;
-        } else {
-          DLOG(INFO) << msg;
-        }
-        rewriter.narrow_decisions_.emplace(var, *decision);
-        // Destination-layout overrides must be registered BEFORE traversal:
-        // LayoutInference publishes the stale entry on every block, and the
-        // materializer's block post-processing runs bottom-up — a sibling
-        // block processed before the finalize statement would otherwise
-        // keep the stale entry and shadow the override in LowerTileOp's
-        // block-by-block annotation accumulation.
-        if (decision->override_dst_layout) {
-          // Retirement telemetry: with spill priced in the layout cost model
-          // this rewrite should stay silent — a hit means inference still
-          // chose a placement the plan must correct (verify cache-disabled).
-          DLOG(INFO) << "[ReducerOverride] narrow dst chain of `"
-                     << epoch.buffer->name << "` re-layouted ("
-                     << decision->override_chain.size() + 1 << " buffer(s))";
-          rewriter.extra_layout_entries_.Set(epoch.dst,
-                                             decision->storage_layout);
-          for (const Buffer &staged : decision->override_chain) {
-            rewriter.extra_layout_entries_.Set(staged,
-                                               decision->storage_layout);
-          }
+          auto shape = epoch.buffer.shape();
+          shape.push_back(IntImm::Int32(2));
+          plan.packed_storage =
+              TensorVar(epoch.buffer->name + "_pk",
+                        TensorType(shape, epoch.buffer.dtype(),
+                                   runtime::MemoryScope::Get("local.fragment"),
+                                   epoch.buffer.ty()->data_alignment),
+                        epoch.buffer->loc);
+          plan.packed_layout = decision->packed_layout;
+          plan.pack_lane_var = decision->pack_lane_var;
         }
       } else {
-        // Same pre-traversal registration rationale as the narrow overrides
-        // above; per-buffer participant-wide replication instead of the
-        // induced layout.
-        auto wide_override =
-            TryWideFinalizeDstOverride(epoch, known_layouts, use_graph);
-        if (wide_override.has_value()) {
-          for (const auto &[buffer, layout] : *wide_override) {
-            // Retirement telemetry: only actual changes are logged (the
-            // steered finalize dst is usually already participant-wide);
-            // with spill priced in the cost model the whole chain should
-            // arrive replicated and this stays silent (verify
-            // cache-disabled).
-            auto existing = known_layouts.Get(buffer);
-            if (!existing.has_value() ||
-                !layout->IsEqual(existing.value().get())) {
-              DLOG(INFO) << "[ReducerOverride] wide dst chain member `"
-                         << buffer->name << "` re-layouted to "
-                         << layout->DebugOutput();
-            }
-            rewriter.extra_layout_entries_.Set(buffer, layout);
+        if (!plan.cpu) {
+          constexpr int64_t limit = 256;
+          int64_t slots = 1;
+          for (const auto &extent : epoch.buffer.shape()) {
+            auto count = TryConstInt(extent);
+            TVM_FFI_CHECK(count && *count > 0, ValueError)
+                << "reducer shape must be compile-time positive";
+            TVM_FFI_CHECK(*count <= limit && slots <= limit / *count,
+                          ValueError)
+                << "Reducer needs more than " << limit
+                << " per-thread partial slots under the FullParticipant "
+                   "baseline";
+            slots *= *count;
           }
         }
-        std::string msg =
-            "[ReducerPlan] `" + std::string(epoch.buffer->name) +
-            "`: wide plan (FullParticipant); narrow rejected: " + reason;
-        if (wide_override.has_value()) {
-          msg += "; unconstrained finalize destination re-layouted to "
-                 "participant-wide replication";
-        }
-        if (verbose) {
-          LOG(INFO) << msg;
-        } else {
-          DLOG(INFO) << msg;
-        }
+        plan.layout = Fragment::FullyReplicated(
+            epoch.buffer.shape(), IntImm::Int32(epoch.thread_extent));
+        plan.layout = plan.layout->BindThreadRange(
+            Range(IntImm::Int32(epoch.thread_min),
+                  IntImm::Int32(epoch.thread_min + epoch.thread_extent)));
       }
+      if (!plan.cpu && IsFragmentBuffer(epoch.dst) &&
+          !known_layouts_.count(epoch.dst) &&
+          !extra_layouts_.count(epoch.dst)) {
+        extra_layouts_.Set(
+            epoch.dst,
+            plan.narrow ? plan.layout
+                        : Fragment::FullyReplicated(
+                              epoch.dst.shape(), plan.layout->ReplicateExtent())
+                              ->BindThreadRange(plan.layout->ThreadRange()));
+        assigned_destinations_.insert(epoch.dst.get());
+      }
+      if (tl_config::ReducerPlanVerboseEnabled())
+        LOG(INFO) << "[ReducerPlan] " << epoch.buffer->name << ": "
+                  << (plan.cpu      ? "CPU sequential partial"
+                      : plan.narrow ? "narrow"
+                                    : "wide FullParticipant")
+                  << (plan.packed_storage ? ", packed lanes" : "") << " "
+                  << reason;
+      plans_.emplace(var, std::move(plan));
     }
+    SeqStmt body = Mutate(function->body).ValueOrUnchanged(function->body);
+    auto rewrite = make_object<MetadataRewriter>([this](Metadata metadata) {
+      metadata.erase(attr::kReducerInfoV2);
+      if (auto entry = metadata.Get(attr::kLayoutMap)) {
+        Map<TensorVar, Layout> layouts;
+        for (const auto &[tensor, layout] : ReadLayouts(*entry)) {
+          if (IsReducerV2Buffer(tensor))
+            continue;
+          layouts.Set(tensor, extra_layouts_.Get(tensor).value_or(layout));
+        }
+        if (layouts.empty())
+          metadata.erase(attr::kLayoutMap);
+        else
+          metadata.Set(attr::kLayoutMap, layouts);
+      }
+      return metadata;
+    });
+    body = rewrite->Mutate(body).ValueOrUnchanged(body);
+    function.CopyOnWrite()->body = body;
+    return function;
+  }
 
-    // Phase C: materialize.
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = rewriter.VisitStmt(f->body);
-    return f;
+  UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    if (auto found = plans_.find(op->var.get()); found != plans_.end()) {
+      const auto *call = op->value.as<CallObj>();
+      TVM_FFI_CHECK(call && call->op.same_as(alloc_tensor_op()), ValueError)
+          << "A reducer must be an allocation, not an aliased tensor";
+      const Plan &plan = found->second;
+      Array<Stmt> statements{Allocate(plan.storage, op->loc, call->attrs)};
+      Map<TensorVar, Layout> layouts;
+      if (!plan.cpu)
+        layouts.Set(plan.storage, plan.layout);
+      if (plan.packed_storage) {
+        statements.push_back(
+            Allocate(*plan.packed_storage, op->loc, call->attrs));
+        layouts.Set(*plan.packed_storage, plan.packed_layout);
+      }
+      if (plan.seed_storage)
+        statements.push_back(Allocate(*plan.seed_storage, op->loc));
+      if (!layouts.empty())
+        statements.push_back(
+            MakeNativeAnnotation({{attr::kLayoutMap, layouts}}, op->loc));
+      return SeqStmt(statements, op->loc);
+    }
+    auto result =
+        StmtExprMutatorWithAnalyzer::Mutate_(op, mode).ValueOrUnchanged(
+            GetRef<Stmt>(op));
+    if (auto tensor = op->var.as<TensorVar>())
+      if (auto extra = extra_layouts_.Get(*tensor))
+        return SeqStmt(
+            {result,
+             MakeNativeAnnotation({{attr::kLayoutMap,
+                                    Map<TensorVar, Layout>{{*tensor, *extra}}}},
+                                  op->loc)},
+            op->loc);
+    return result;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    if (op->op->name == "tl.attr") {
+      auto copy = make_object<RegionStmtObj>(*op);
+      copy->body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+      return Stmt(copy);
+    }
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (!call)
+      return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
+    if (IsMetadataCall(call))
+      return Unchanged();
+    if (call->op.same_as(ReducerInitOp::Get()))
+      return MaterializeInit(call, mode);
+    if (call->op.same_as(reducer_update()))
+      return MaterializeUpdate(call, mode);
+    if (call->op.same_as(FinalizeReducerV2Op::Get()))
+      return MaterializeFinalize(call, mode);
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
   }
 
 private:
-  explicit ReducerPlanAndMaterializeRewriter(arith::Analyzer *analyzer)
-      : IRMutatorWithAnalyzer(analyzer) {}
-
-  struct Plan {
-    Buffer old_buffer;
-    Buffer new_buffer;
-    Fragment layout;
-    ReducerV2OpType op;
-    Optional<PrimExpr> seed;
-    // Per-thread register capturing the seed expression at the init site.
-    // The epoch may reopen once per iteration of an enclosing serial loop,
-    // and the seed expression (e.g. a running maximum) may be overwritten
-    // between init and finalize — the finalize-time combine must read the
-    // value the epoch opened with.
-    Buffer seed_buffer;
-    bool narrow{false};
-    std::vector<std::pair<int, int>> steps;
-    // Packed accumulation: updates RMW `packed_buffer[slot, lane_var % 2]`;
-    // finalize folds the lanes into `new_buffer` before the collective.
-    bool packed{false};
-    Buffer packed_buffer;
-    Fragment packed_layout;
-    Var pack_lane_var;
-  };
-
-  // ---- context tracking ---------------------------------------------------
-
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    auto prev_thread_var = thread_var_;
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        thread_var_ = iv;
-      }
-    }
-    auto result = IRMutatorWithAnalyzer::VisitStmt_(op);
-    thread_var_ = prev_thread_var;
-    return result;
+  const Plan &FindPlan(const Expr &region) const {
+    auto tensor = reducer_native::RegionTensor(region);
+    auto found = plans_.find(tensor.get());
+    TVM_FFI_CHECK(found != plans_.end(), ValueError)
+        << "Unknown reducer " << tensor;
+    return found->second;
   }
 
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    if (auto anno = op->annotations.Get(attr::kReducerInfoV2)) {
-      auto map = anno.value().as<Map<Var, Map<String, Any>>>();
-      ICHECK(map) << "malformed reducer_info_v2 annotation";
-      for (const auto &[var, info] : map.value()) {
-        reducer_info_.emplace(var.get(), info);
-      }
+  Stmt MaterializeInit(const CallObj *call, InplaceMode mode) {
+    auto args = DecodeTileOpArguments(call).operands;
+    const Plan &plan = FindPlan(args[0]);
+    const TensorVar target = plan.packed_storage.value_or(plan.storage);
+    Stmt fill = TileCall(
+        Fill::Get(),
+        {FullRegion(target), ReducerV2Identity(plan.op, target.dtype())}, {},
+        call->loc);
+    if (plan.seed_storage) {
+      TVM_FFI_CHECK_EQ(args.size(), 2U, ValueError)
+          << "Duplicated epoch sites disagree about the seed";
+      auto value = args[1].as_or_throw<PrimExpr>();
+      value = Mutate(value, mode).ValueOrUnchanged(value);
+      return SeqStmt(
+          {TensorStore(*plan.seed_storage, {0}, value, call->loc), fill},
+          call->loc);
     }
-
-    auto result = IRMutatorWithAnalyzer::VisitStmt_(op).as<SBlock>().value();
-    auto *p_result = result.CopyOnWrite();
-
-    // Swap materialized storage into this block's allocations and publish
-    // the storage layouts (plus any planner-assigned destination layouts)
-    // for LowerTileOp's buffer remap.
-    bool changed = false;
-    Array<Buffer> new_allocs;
-    Map<Buffer, Layout> layout_map;
-    if (auto layout_anno = p_result->annotations.Get(tl::attr::kLayoutMap)) {
-      auto as_map = layout_anno.value().as<Map<Buffer, Layout>>();
-      ICHECK(as_map) << "kLayoutMap must be Buffer-keyed after LayoutInference";
-      layout_map = as_map.value();
-    }
-    for (const auto &buffer : p_result->alloc_buffers) {
-      auto it = plans_.find(buffer->data.get());
-      if (it != plans_.end()) {
-        new_allocs.push_back(it->second.new_buffer);
-        layout_map.Set(it->second.new_buffer, it->second.layout);
-        if (it->second.packed) {
-          new_allocs.push_back(it->second.packed_buffer);
-          layout_map.Set(it->second.packed_buffer, it->second.packed_layout);
-        }
-        if (it->second.seed_buffer.defined()) {
-          // Plain per-thread register; no fragment layout to publish.
-          new_allocs.push_back(it->second.seed_buffer);
-        }
-        changed = true;
-      } else {
-        new_allocs.push_back(buffer);
-        if (auto extra = extra_layout_entries_.Get(buffer)) {
-          layout_map.Set(buffer, extra.value());
-          changed = true;
-        }
-      }
-    }
-    // Layout overrides must win on EVERY block: LayoutInference publishes
-    // the full inferred map on each block, and LowerTileOp accumulates the
-    // annotations block by block — a stale entry on an inner block would
-    // silently shadow the override.
-    for (const auto &[buffer, layout] : extra_layout_entries_) {
-      if (layout_map.count(buffer) && !layout_map[buffer].same_as(layout)) {
-        layout_map.Set(buffer, layout);
-        changed = true;
-      }
-    }
-    // The inferred PartialFragment entries are consumed by this pass and
-    // must not flow past it: downstream consumers (LowerTileOp's buffer
-    // remap) know only value-replication semantics. Also on EVERY block —
-    // LayoutInference publishes the full map on each one.
-    {
-      Array<Buffer> consumed;
-      for (const auto &[buffer, layout] : layout_map) {
-        if (IsReducerV2Buffer(buffer)) {
-          consumed.push_back(buffer);
-        }
-      }
-      for (const auto &buffer : consumed) {
-        layout_map.erase(buffer);
-        changed = true;
-      }
-    }
-    if (changed) {
-      p_result->alloc_buffers = new_allocs;
-      p_result->annotations.Set(tl::attr::kLayoutMap, layout_map);
-    }
-    if (p_result->annotations.count(attr::kReducerInfoV2)) {
-      p_result->annotations.erase(attr::kReducerInfoV2);
-    }
-    return result;
-  }
-
-  // ---- epoch op materialization -------------------------------------------
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    const auto *call = op->value.as<CallNode>();
-    if (call == nullptr) {
-      return IRMutatorWithAnalyzer::VisitStmt_(op);
-    }
-    if (call->op.same_as(ReducerInitOp::Get())) {
-      return MaterializeInit(call);
-    }
-    if (call->op.same_as(reducer_update())) {
-      return MaterializeUpdate(call);
-    }
-    if (call->op.same_as(FinalizeReducerV2Op::Get())) {
-      return MaterializeFinalize(call);
-    }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
-  }
-
-  Stmt MaterializeInit(const CallNode *call) {
-    Buffer old_buffer = RegionArgBuffer(call->args[0]);
-    const auto *var = old_buffer->data.get();
-    ICHECK(reducer_info_.count(var))
-        << "reducer_init on unknown reducer `" << old_buffer << "`";
-    if (plans_.count(var)) {
-      // VerifyReducerEpoch guarantees one epoch site per allocation in the
-      // code the user wrote, but software pipelining / unrolling may have
-      // multi-versioned the enclosing loop since, duplicating the site.
-      // Every copy shares the allocation's plan; each emits its own
-      // capture+fill.
-      return EmitInitStmts(plans_.at(var), call);
-    }
-
-    Plan plan;
-    plan.old_buffer = old_buffer;
-    const auto &info = reducer_info_.at(var);
-    plan.op = ParseReducerV2OpType(info.Get("op").value().cast<String>());
-    if (call->args.size() >= 2) {
-      // Logical starting value from T.reducer_init(acc, init): captured
-      // into a per-thread register here at the init site, and combined
-      // exactly once per logical output at finalize time. Capturing (rather
-      // than re-evaluating at finalize) keeps a loop-variant seed correct
-      // when the epoch sits inside a serial loop.
-      Var seed_var(old_buffer->data->name_hint + "_seed",
-                   PointerType(PrimType(old_buffer->dtype), "local"));
-      plan.seed_buffer =
-          Buffer(seed_var, old_buffer->dtype, {IntImm(DataType::Int(32), 1)},
-                 /*strides=*/{}, old_buffer->elem_offset,
-                 old_buffer->name + "_seed", old_buffer->data_alignment,
-                 old_buffer->offset_factor, old_buffer->buffer_type);
-      plan.seed = BufferLoad(plan.seed_buffer, {make_zero(DataType::Int(32))});
-    }
-
-    auto narrow_it = narrow_decisions_.find(var);
-    if (narrow_it != narrow_decisions_.end()) {
-      const NarrowDecision &decision = narrow_it->second;
-      plan.narrow = true;
-      plan.layout = decision.storage_layout;
-      plan.steps = decision.steps;
-      plan.packed = decision.packed;
-      plan.packed_layout = decision.packed_layout;
-      plan.pack_lane_var = decision.pack_lane_var;
-    } else {
-      // Wide-plan storage: one full logical partial per participant. The
-      // analyzer narrows threadIdx.x inside warp-specialized branches.
-      ICHECK(thread_var_.defined())
-          << "reducer_init must execute inside a kernel launch";
-      ICHECK(analyzer_->const_int_bound.IsBound(thread_var_->var))
-          << "reducer_init: threadIdx.x bounds are unknown";
-      auto bound = analyzer_->const_int_bound(thread_var_->var);
-      int64_t thread_extent = bound->max_value - bound->min_value + 1;
-      ICHECK_GT(thread_extent, 0);
-
-      static constexpr int64_t kMaxWidePlanSlots = 256;
-      int64_t slots = 1;
-      for (const auto &extent : old_buffer->shape) {
-        const int64_t *p = as_const_int(extent);
-        ICHECK(p) << "reducer shape must be compile-time constant, got "
-                  << old_buffer->shape;
-        slots *= *p;
-      }
-      ICHECK_LE(slots, kMaxWidePlanSlots)
-          << "reducer `" << old_buffer << "` needs " << slots
-          << " per-thread partial slots under the FullParticipant baseline, "
-             "exceeding the current policy limit of "
-          << kMaxWidePlanSlots
-          << "; split the reduction into tiles or use T.reduce_* per tile.";
-      plan.layout = Fragment::FullyReplicated(old_buffer->shape,
-                                              static_cast<int>(thread_extent));
-    }
-
-    Var new_var(old_buffer->data->name_hint,
-                PointerType(PrimType(old_buffer->dtype), "local.fragment"));
-    plan.new_buffer = Buffer(
-        new_var, old_buffer->dtype, old_buffer->shape, old_buffer->strides,
-        old_buffer->elem_offset, old_buffer->name, old_buffer->data_alignment,
-        old_buffer->offset_factor, old_buffer->buffer_type);
-    if (plan.packed) {
-      Array<PrimExpr> packed_shape = old_buffer->shape;
-      packed_shape.push_back(IntImm(DataType::Int(32), 2));
-      Var packed_var(
-          old_buffer->data->name_hint + "_pk",
-          PointerType(PrimType(old_buffer->dtype), "local.fragment"));
-      plan.packed_buffer =
-          Buffer(packed_var, old_buffer->dtype, packed_shape,
-                 /*strides=*/{}, old_buffer->elem_offset,
-                 old_buffer->name + "_pk", old_buffer->data_alignment,
-                 old_buffer->offset_factor, old_buffer->buffer_type);
-    }
-    plans_.emplace(var, plan);
-    return EmitInitStmts(plans_.at(var), call);
-  }
-
-  /*! \brief The statements a reducer_init site lowers to: the identity fill
-   *  of the physical partials, preceded by the seed capture when the epoch
-   *  declares a starting value. */
-  Stmt EmitInitStmts(const Plan &stored, const CallNode *call) {
-    // Every participant starts from the combine identity; the seed is
-    // captured here and combined exactly once at finalize. Packed plans
-    // accumulate into the lane buffer (`new_buffer` is fully written by the
-    // finalize fold).
-    const Buffer &init_target =
-        stored.packed ? stored.packed_buffer : stored.new_buffer;
-    PrimExpr identity = ReducerV2Identity(stored.op, init_target->dtype);
-    Stmt fill =
-        Evaluate(Call(DataType::Handle(), Fill::Get(),
-                      {MakeFullRegion(init_target, kAccessWrite), identity}));
-    if (stored.seed_buffer.defined()) {
-      ICHECK_GE(call->args.size(), 2)
-          << "reducer_init on `" << stored.old_buffer
-          << "`: duplicated epoch sites disagree about the seed";
-      Stmt capture = BufferStore(stored.seed_buffer, VisitExpr(call->args[1]),
-                                 {make_zero(DataType::Int(32))});
-      return SeqStmt({capture, fill});
-    }
+    TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
     return fill;
   }
 
-  Stmt MaterializeUpdate(const CallNode *call) {
-    ReducerUpdateArgs update = ParseReducerUpdate(call);
-    auto it = plans_.find(update.reducer->data.get());
-    ICHECK(it != plans_.end())
-        << "reducer_update on `" << update.reducer
-        << "` before reducer_init (should have been rejected by "
-           "VerifyReducerEpoch)";
-    const Plan &plan = it->second;
-
-    PrimExpr value = VisitExpr(update.value);
-    Array<PrimExpr> indices = update.indices;
-    Buffer target = plan.new_buffer;
-    if (plan.packed) {
-      // Alternate between the two lanes of the executing thread's slot:
-      // the lane parity splits the on-thread combine chain in half and
-      // makes adjacent iterations touch adjacent physical elements.
-      target = plan.packed_buffer;
-      indices.push_back(
-          FloorMod(plan.pack_lane_var, IntImm(DataType::Int(32), 2)));
-    }
-    PrimExpr current = BufferLoad(target, indices);
+  Stmt MaterializeUpdate(const CallObj *call, InplaceMode mode) {
+    auto update = ParseReducerUpdate(call);
+    const Plan &plan = plans_.at(update.reducer.get());
+    auto value = Mutate(update.value, mode).ValueOrUnchanged(update.value);
+    Array<PrimExpr> indices;
+    for (const auto &index : update.indices)
+      indices.push_back(Mutate(index, mode).ValueOrUnchanged(index));
+    auto target = plan.packed_storage.value_or(plan.storage);
+    if (plan.pack_lane_var)
+      indices.push_back(FloorMod(plan.pack_lane_var.value(), IntImm::Int32(2)));
     Stmt store =
-        BufferStore(target, ReducerV2Combine(plan.op, current, value), indices);
-    if (plan.narrow) {
-      // Narrow plan: every replica executes the update. Each thread's
-      // partial accumulates exactly the contributions of the iterations
-      // mapped to it, so no multiplicity guard is needed.
+        TensorStore(target, indices,
+                    ReducerV2Combine(
+                        plan.op, TensorLoad(target, indices, call->loc), value),
+                    call->loc);
+    if (plan.narrow || plan.cpu)
       return store;
-    }
-    // Wide plan: generic execution-multiplicity contract — one dynamic
-    // logical iteration of the enclosing T.Parallel loop contributes exactly
-    // once, no matter how the loop layout replicates iterations over threads.
-    return AttrStmt(plan.new_buffer->data, attr::kParallelMultiplicity,
-                    IntImm(DataType::Int(32), 1), store);
+    return MakeNativeAttribute(plan.storage, attr::kParallelMultiplicity,
+                               IntImm::Int32(1), SeqStmt(store), call->loc);
   }
 
-  Stmt MaterializeFinalize(const CallNode *call) {
-    Buffer old_buffer = RegionArgBuffer(call->args[0]);
-    Buffer dst = RegionArgBuffer(call->args[1]);
-    auto it = plans_.find(old_buffer->data.get());
-    ICHECK(it != plans_.end())
-        << "finalize_reducer on `" << old_buffer
-        << "` before reducer_init (should have been rejected by "
-           "VerifyReducerEpoch)";
-    const Plan &plan = it->second;
-
-    // A destination only written by finalize (and read by scalar or uniform
-    // code) may have no inferred layout. The planner then assigns one that
-    // is trivially covered: the induced layout itself (narrow) or a
-    // FullyReplicated layout (wide). A layout inferred from downstream
-    // consumers is respected (destination-layout OVERRIDES are registered in
-    // Phase B, before traversal). This fresh assignment is order-safe here:
-    // no block carries a stale entry for a buffer inference never layouted,
-    // and the allocating block is an ancestor of this finalize statement.
-    bool planner_assigned_dst_layout = false;
-    if (IsFragmentBuffer(dst) && !known_layouts_.count(dst) &&
-        !extra_layout_entries_.count(dst)) {
-      Fragment dst_layout =
-          plan.narrow ? plan.layout
-                      : Fragment::FullyReplicated(
-                            dst->shape, plan.layout->ReplicateExtent());
-      extra_layout_entries_.Set(dst, dst_layout);
-      planner_assigned_dst_layout = true;
+  // All generated loops use the new begin/end/step contract and their dynamic
+  // layout metadata lives in region operands, outside the static For attrs.
+  Stmt ElementLoop(const TensorVar &tensor,
+                   const std::function<Stmt(const Array<PrimExpr> &)> &element,
+                   bool parallel, Location loc,
+                   Optional<Fragment> layout = std::nullopt) {
+    Array<PrimVar> variables;
+    Array<PrimExpr> indices;
+    for (size_t d = 0; d < tensor.shape().size(); ++d) {
+      PrimVar var("__reducer_" + std::to_string(d), tensor.shape()[d].ty());
+      variables.push_back(var);
+      indices.push_back(var);
     }
-
-    Array<Stmt> seq;
-    if (plan.narrow) {
-      if (plan.packed) {
-        // Fold the two accumulation lanes into the plain induced storage.
-        // The fold loop is a frozen-layout parallel nest (the storage
-        // fragment doubles as its loop layout): every thread combines the
-        // lanes of exactly the slots it owns, replicas included, so the
-        // collective and destination proofs below see the unpacked layout
-        // they were made for.
-        Array<Var> fold_vars;
-        Array<PrimExpr> fold_indices;
-        for (size_t d = 0; d < plan.new_buffer->shape.size(); ++d) {
-          Var v("__red_fold_" + std::to_string(d), DataType::Int(32));
-          fold_vars.push_back(v);
-          fold_indices.push_back(v);
-        }
-        Array<PrimExpr> lane0 = fold_indices;
-        lane0.push_back(IntImm(DataType::Int(32), 0));
-        Array<PrimExpr> lane1 = fold_indices;
-        lane1.push_back(IntImm(DataType::Int(32), 1));
-        Stmt fold = BufferStore(
-            plan.new_buffer,
-            ReducerV2Combine(plan.op, BufferLoad(plan.packed_buffer, lane0),
-                             BufferLoad(plan.packed_buffer, lane1)),
-            fold_indices);
-        for (int d = static_cast<int>(fold_vars.size()) - 1; d >= 0; --d) {
-          Map<String, Any> annotations;
-          if (d == 0) {
-            annotations.Set(tl::attr::kParallelLoopLayout, plan.layout);
-          }
-          fold = For(fold_vars[d], make_zero(DataType::Int(32)),
-                     plan.new_buffer->shape[d], ForKind::kParallel, fold,
-                     std::nullopt, annotations);
-        }
-        seq.push_back(fold);
-      }
-      // Narrow plan: combine only the reduction-axis splits (when any);
-      // replication groups already hold equal values.
-      if (!plan.steps.empty() || plan.seed.defined()) {
-        Array<PrimExpr> args = {
-            MakeFullRegion(plan.new_buffer, kAccessReadWrite),
-            IntImm(DataType::Int(32), static_cast<int>(plan.op))};
-        for (const auto &[reducing_threads, scale] : plan.steps) {
-          args.push_back(IntImm(DataType::Int(32), reducing_threads));
-          args.push_back(IntImm(DataType::Int(32), scale));
-        }
-        Map<String, ObjectRef> annotations = call->annotations;
-        annotations.Set("plan", Integer(1));
-        if (plan.seed.defined()) {
-          annotations.Set("seed", plan.seed.value());
-        }
-        seq.push_back(Evaluate(Call(
-            DataType::Handle(), FinalizeReducerOp::Get(), args, annotations)));
-      }
-      // Publish via tl.copy: it partitions by the destination layout, and
-      // destination containment was proven (or the destination layout IS
-      // the induced layout).
-      seq.push_back(Evaluate(Call(DataType::Handle(), Copy::Get(),
-                                  {MakeFullRegion(plan.new_buffer, kAccessRead),
-                                   MakeFullRegion(dst, kAccessWrite)})));
-      return seq.size() == 1 ? seq[0] : SeqStmt(seq);
+    Stmt body = element(indices);
+    for (int d = static_cast<int>(variables.size()) - 1; d >= 0; --d) {
+      auto type = variables[d].ty();
+      body =
+          For(variables[d], IntImm(type, 0), tensor.shape()[d], IntImm(type, 1),
+              parallel ? ForKind::kParallel : ForKind::kDefault, SeqStmt(body),
+              {}, loc);
     }
+    if (layout)
+      body = MakeNativeAttribute(nullptr, "tl.loop.annotations",
+                                 Metadata{{attr::kParallelLoopLayout, *layout}},
+                                 SeqStmt(body), loc);
+    return body;
+  }
 
-    // Wide plan: participant-extent AllReduce per logical output, then the
-    // optional seed combined once per slot inside the finalize lowering.
-    // The finalize call's annotations (e.g. `batch`) are forwarded.
-    {
-      Map<String, ObjectRef> annotations = call->annotations;
-      if (plan.seed.defined()) {
-        annotations.Set("seed", plan.seed.value());
-      }
-      seq.push_back(
-          Evaluate(Call(DataType::Handle(), FinalizeReducerOp::Get(),
-                        {MakeFullRegion(plan.new_buffer, kAccessReadWrite),
-                         IntImm(DataType::Int(32), static_cast<int>(plan.op))},
-                        annotations)));
+  Stmt MaterializeFinalize(const CallObj *call, InplaceMode mode) {
+    auto decoded = DecodeTileOpArguments(call);
+    const Plan &plan = FindPlan(decoded.operands[0]);
+    auto destination = reducer_native::RegionTensor(decoded.operands[1]);
+    Array<Stmt> statements;
+    // Finalize consumes whole logical tensors, including when the operands
+    // were written as regions. Layout steering is optional, so its shape
+    // comparison cannot establish this contract for the generated copy.
+    TVM_FFI_CHECK(plan.storage.dtype() == destination.dtype(), TypeError)
+        << "finalize_reducer: reducer dtype " << plan.storage.dtype()
+        << " does not match destination dtype " << destination.dtype();
+    TVM_FFI_CHECK_EQ(plan.storage.shape().size(), destination.shape().size(),
+                     ValueError)
+        << "finalize_reducer: reducer and destination must have the same "
+           "logical shape";
+    for (size_t d = 0; d < plan.storage.shape().size(); ++d) {
+      const auto &source_extent = plan.storage.shape()[d];
+      const auto &destination_extent = destination.shape()[d];
+      if (GetSyncedAnalyzer()->CanProveEqual(source_extent, destination_extent))
+        continue;
+      std::string message =
+          "finalize_reducer: reducer and destination must have the same "
+          "logical shape (axis " +
+          std::to_string(d) + ")";
+      TVM_FFI_CHECK(
+          !GetSyncedAnalyzer()->CanProve(source_extent != destination_extent),
+          ValueError)
+          << message << ": " << source_extent << " vs " << destination_extent;
+      // Unknown is not unequal. Keep dynamic shapes valid when they agree
+      // at runtime, and check before any finalize storage access. This uses
+      // the mutator's current branch/assert facts, not an unscoped analyzer.
+      statements.push_back(AssertStmt(source_extent == destination_extent,
+                                      StringImm("ValueError"),
+                                      {StringImm(message)}, call->loc));
     }
-
-    // Publish the logical result into the independent destination fragment.
-    if (planner_assigned_dst_layout) {
-      // The planner declared dst FullyReplicated, so EVERY replica must be
-      // written. tl.copy would only produce the canonical replica; instead
-      // emit a per-thread local copy — after the collective every
-      // participant holds the complete result, and both layouts use
-      // identity physical indexing.
-      Array<PrimExpr> indices;
-      Array<Var> loop_vars;
-      for (size_t i = 0; i < dst->shape.size(); ++i) {
-        Var v("__finred_cp_" + std::to_string(i), DataType::Int(32));
-        loop_vars.push_back(v);
-        indices.push_back(v);
+    if (plan.cpu) {
+      // The CPU kernel has one logical reducer participant per grid task.
+      // Capturing the seed remains necessary even without a collective.
+      statements.push_back(ElementLoop(
+          destination,
+          [&](const Array<PrimExpr> &indices) -> Stmt {
+            PrimExpr result = TensorLoad(plan.storage, indices, call->loc);
+            if (plan.seed)
+              result = ReducerV2Combine(plan.op, result, *plan.seed);
+            return TensorStore(destination, indices, result, call->loc);
+          },
+          false, call->loc));
+      return SeqStmt(statements, call->loc);
+    }
+    if (plan.packed_storage) {
+      statements.push_back(ElementLoop(
+          plan.storage,
+          [&](const Array<PrimExpr> &indices) -> Stmt {
+            auto first = indices, second = indices;
+            first.push_back(IntImm::Int32(0));
+            second.push_back(IntImm::Int32(1));
+            return TensorStore(
+                plan.storage, indices,
+                ReducerV2Combine(
+                    plan.op, TensorLoad(*plan.packed_storage, first, call->loc),
+                    TensorLoad(*plan.packed_storage, second, call->loc)),
+                call->loc);
+          },
+          true, call->loc, plan.layout));
+    }
+    if (!plan.narrow || !plan.steps.empty() || plan.seed) {
+      Array<Expr> args{FullRegion(plan.storage),
+                       IntImm::Int32(static_cast<int>(plan.op))};
+      Metadata metadata = decoded.annotations;
+      if (plan.narrow) {
+        metadata.Set("plan", 1);
+        for (const auto &[threads, scale] : plan.steps) {
+          args.push_back(IntImm::Int32(threads));
+          args.push_back(IntImm::Int32(scale));
+        }
       }
-      Stmt body =
-          BufferStore(dst, BufferLoad(plan.new_buffer, indices), indices);
-      for (int i = static_cast<int>(loop_vars.size()) - 1; i >= 0; --i) {
-        body = For(loop_vars[i], make_zero(DataType::Int(32)), dst->shape[i],
-                   ForKind::kSerial, body);
-      }
-      seq.push_back(body);
+      if (plan.seed)
+        metadata.Set("seed", *plan.seed);
+      statements.push_back(
+          TileCall(FinalizeReducerOp::Get(), args, metadata, call->loc));
+    }
+    if (!plan.narrow && assigned_destinations_.count(destination.get())) {
+      statements.push_back(ElementLoop(
+          destination,
+          [&](const Array<PrimExpr> &indices) -> Stmt {
+            return TensorStore(destination, indices,
+                               TensorLoad(plan.storage, indices, call->loc),
+                               call->loc);
+          },
+          false, call->loc));
     } else {
-      // dst's layout came from LayoutInference (real consumers); tl.copy
-      // writes each thread's owned slots, reading from the fully
-      // replicated source.
-      seq.push_back(Evaluate(Call(DataType::Handle(), Copy::Get(),
-                                  {MakeFullRegion(plan.new_buffer, kAccessRead),
-                                   MakeFullRegion(dst, kAccessWrite)})));
+      statements.push_back(TileCall(
+          Copy::Get(), {FullRegion(plan.storage), FullRegion(destination)}, {},
+          call->loc));
     }
-    return seq.size() == 1 ? seq[0] : SeqStmt(seq);
+    return SeqStmt(statements, call->loc);
   }
 
-  // ---- helpers ------------------------------------------------------------
-
-  static Buffer RegionArgBuffer(const PrimExpr &arg) {
-    if (auto call = arg.as<CallNode>()) {
-      if (call->op.same_as(region())) {
-        if (auto load = call->args[0].as<BufferLoadNode>()) {
-          return load->buffer;
-        }
-      }
-    }
-    LOG(FATAL) << "expected a tl.region argument wrapping a buffer, got "
-               << arg;
-    return Buffer(); // unreachable
-  }
-
-  IterVar thread_var_;
-  std::unordered_map<const VarNode *, Map<String, Any>> reducer_info_;
-  std::unordered_map<const VarNode *, Plan> plans_;
-  std::unordered_map<const VarNode *, NarrowDecision> narrow_decisions_;
-  Map<Buffer, Layout> known_layouts_;
-  Map<Buffer, Layout> extra_layout_entries_;
+  Map<TensorVar, Layout> known_layouts_, extra_layouts_;
+  std::unordered_map<const VarObj *, Plan> plans_;
+  std::unordered_set<const VarObj *> assigned_destinations_;
 };
-
 } // namespace
 
-using namespace tirx::transform;
-
 tvm::transform::Pass ReducerPlanAndMaterialize() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    // tl.reducer_force_baseline acts at the proposal side (ParallelOp pins
-    // the partial to FullParticipant), so the node this pass reads back
-    // already reflects it.
-    return ReducerPlanAndMaterializeRewriter::Substitute(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    auto analyzer = CreateTileLangAnalyzer();
+    return make_object<ReducerMaterializer>(analyzer)->Run(std::move(function));
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.ReducerPlanAndMaterialize", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.ReducerPlanAndMaterialize");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.ReducerPlanAndMaterialize",
-                        ReducerPlanAndMaterialize);
+  ffi::reflection::GlobalDef().def("tl.transform.ReducerPlanAndMaterialize",
+                                   ReducerPlanAndMaterialize);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

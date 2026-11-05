@@ -1,4 +1,5 @@
 import pytest
+import tvm_ffi
 
 from tilelang import tvm as tvm
 import tilelang as tl
@@ -8,7 +9,7 @@ from tilelang.testing.ir import assert_call_count
 
 target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
 pytestmark = pytest.mark.skipif(
-    tvm.get_global_func("tl.cuda.transform.FuseMBarrierArriveExpectTx", allow_missing=True) is None,
+    tvm_ffi.get_global_func("tl.cuda.transform.FuseMBarrierArriveExpectTx", allow_missing=True) is None,
     reason="FuseMBarrierArriveExpectTx is not compiled into this build",
 )
 
@@ -17,7 +18,10 @@ def _apply(func):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(target)(mod)
     mod = tl.cuda.transform.FuseMBarrierArriveExpectTx()(mod)
-    return tl.transform.LowerOpaqueBlock()(mod)
+    # Native frontend IR has no opaque block to remove. This test stops at
+    # FuseMBarrierArriveExpectTx so the enclosing warp-specialization scope
+    # remains available to its later consumer.
+    return mod
 
 
 def test_fuse_simple_tma_expect_arrive():
@@ -40,9 +44,9 @@ def test_fuse_simple_tma_expect_arrive():
 
     mod = _apply(before)
     main = mod["main"]
-    assert_call_count(main, op="tirx.ptx_arrive_barrier_expect_tx", count=1)
+    assert_call_count(main, op="tl.ptx_arrive_barrier_expect_tx", count=1)
     assert_call_count(main, op="tl.mbarrier_expect_tx", count=0)
-    assert_call_count(main, op="tirx.ptx_arrive_barrier", count=0)
+    assert_call_count(main, op="tl.ptx_arrive_barrier", count=0)
 
 
 def test_fuse_requires_same_barrier():
@@ -65,9 +69,9 @@ def test_fuse_requires_same_barrier():
 
     mod = _apply(before)
     main = mod["main"]
-    assert_call_count(main, op="tirx.ptx_arrive_barrier_expect_tx", count=0)
+    assert_call_count(main, op="tl.ptx_arrive_barrier_expect_tx", count=0)
     assert_call_count(main, op="tl.mbarrier_expect_tx", count=1)
-    assert_call_count(main, op="tirx.ptx_arrive_barrier", count=1)
+    assert_call_count(main, op="tl.ptx_arrive_barrier", count=1)
 
 
 def test_fuse_inside_warp_specialization_scope():
@@ -100,9 +104,9 @@ def test_fuse_inside_warp_specialization_scope():
 
     mod = _apply(before)
     main = mod["main"]
-    assert_call_count(main, op="tirx.ptx_arrive_barrier_expect_tx", count=1)
+    assert_call_count(main, op="tl.ptx_arrive_barrier_expect_tx", count=1)
     assert_call_count(main, op="tl.mbarrier_expect_tx", count=0)
-    assert_call_count(main, op="tirx.ptx_arrive_barrier", count=0)
+    assert_call_count(main, op="tl.ptx_arrive_barrier", count=0)
 
 
 if __name__ == "__main__":

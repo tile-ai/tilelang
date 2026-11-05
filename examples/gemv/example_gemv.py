@@ -2,7 +2,7 @@ import argparse
 import itertools
 import tilelang as tl
 import tilelang.language as T
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 from tilelang.autotuner import autotune
 from tilelang import jit
 

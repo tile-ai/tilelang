@@ -3,10 +3,11 @@
 An interactive, pass-by-pass **structure-tree** visualizer for TileLang kernels.
 
 This is a debugging complement to [`tilelang.utils.pass_diff`](../../utils/pass_diff.py).
-Where `pass_diff` shows a line-level diff of the **TVMScript text**, this tool
-renders the IR as an **`SBlock` structure tree** — the block nesting plus
-`reads` / `writes` / `alloc_buffers` / `annotations` fields — and expands every
-tile op by field name. A TVM `PassInstrument` observes the canonical CUDA
+Where `pass_diff` shows a line-level diff of the **native IR script text**, this tool
+renders the IR as a **native statement/region structure tree** —
+`RegionStmt` arguments, body parameters, results and decoded metadata, with
+tensor definitions represented by `Bind` — and expands every
+tile op by field name. A TIRx `PassInstrument` observes the canonical CUDA
 lowering prologue, so conditional passes and their order match the pipeline that
 actually executes. The tool emits a single self-contained, interactive HTML
 file that steps through those passes.
@@ -23,7 +24,7 @@ and operator semantics change, not just which text lines moved.
 
 | Aspect | `pass_diff` | `pass_visualizer` |
 |--------|-------------|-------------------|
-| Compared object | TVMScript text lines | `SBlock` structure tree |
+| Compared object | Native IR script lines | Native statement/region structure tree |
 | Operator display | Raw one-liner, positional args | Expanded **by field name** (`M=64`, `K=32`, `policy=0`) |
 | Highlighting | Generic `+` / `-` | Per-class: tile op / sync primitive / lowered hardware intrinsic |
 | Trigger | Environment-variable hook, captures the real full pipeline | Explicit CLI, instruments the real focused lowering prologue |

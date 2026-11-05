@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
 
-# Build for local architecture
-CIBW_BUILD='cp310-*' cibuildwheel . 2>&1 | tee cibuildwheel.log
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+CIBW_BUILD='cp310-*' python maint/scripts/build_native_wheels.py \
+  --stage .native-local-wheel-stage --output wheelhouse --jobs "${CMAKE_BUILD_PARALLEL_LEVEL:-4}" \
+  2>&1 | tee cibuildwheel.log

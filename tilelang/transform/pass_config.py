@@ -387,9 +387,29 @@ def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) 
 
     normalized: dict[str, Any] = {}
     warned_keys: set[str] = set()
+    config_types = None
 
     for key, value in (pass_configs or {}).items():
         normalized_key = key.value if isinstance(key, PassConfigKey) else key
+
+        # Native PassContext stores POD bool/int values. Keep the public JIT
+        # spelling with integer IR literals without coercing arbitrary Exprs,
+        # strings, floats, or values of unregistered configuration keys.
+        from tvm_tirx.ir import IntImm
+
+        if isinstance(value, IntImm):
+            if config_types is None:
+                from tvm_tirx.ir.transform import PassContext
+
+                config_types = PassContext.list_configs()
+            config_type = config_types.get(normalized_key, {}).get("type")
+            if config_type == "bool":
+                value = value.value != 0
+            elif config_type == "int":
+                literal = int(value.value)
+                if not -(1 << 63) <= literal < (1 << 63):
+                    raise OverflowError(f"Pass config {normalized_key} requires a signed 64-bit integer")
+                value = literal
 
         normalized[normalized_key] = value
 

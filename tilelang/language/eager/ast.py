@@ -10,6 +10,8 @@ from collections.abc import Iterable
 import inspect
 import textwrap
 
+from tvm_tirx import ir
+
 # from .utils import get_ast, get_compiled_object
 from . import utils
 from .. import dtypes
@@ -100,7 +102,20 @@ def get_boolop_name(boolop: ast.boolop) -> BoolOp:
 _T = TypeVar("_T")
 
 
+def _bitwise_literal(value: Any, peer: Any) -> Any:
+    # The native Python overload first consumes a bare integer through its
+    # int32 FFI overload. Keep wide source masks in the peer's actual type.
+    # This is a DSL boundary; native Expr methods are unchanged.
+    if type(value) is int and not -(1 << 31) <= value < (1 << 31) and ir.is_prim_expr(peer):
+        dtype = peer.ty.dtype
+        if dtype.is_integer:
+            return ir.const(value, dtype)
+    return value
+
+
 def eval_op(op: Operator, left: Any, right: Any) -> Any:
+    if op in ("BitOr", "BitXor", "BitAnd"):
+        left, right = _bitwise_literal(left, right), _bitwise_literal(right, left)
     if op == "Add":
         return left + right
     if op == "Sub":
@@ -249,14 +264,23 @@ class BaseBuilder:
         while cond():
             yield
 
+    def unpack_value(self, value):
+        return self.unwrap_value(value)
+
     def bind(self, name: str, value: Any, annot: Any = empty, *, loop_target: bool = False) -> Any:
         return value
 
     def unwrap_value(self, value):
         return value
 
+    def getitem(self, value: Any, sl: slice):
+        return value[sl]
+
     def assign_slice(self, lval: Any, sl: slice, value: Any, annot: Any = empty):
         lval[sl] = value
+
+    def binop(self, op: Operator, left: Any, right: Any) -> Any:
+        return eval_op(op, left, right)
 
     def aug_assign(self, op: Operator, target: Any, aug_value: Any, name: str | None = None) -> Any:
         return eval_op(op, target, aug_value)
@@ -286,8 +310,16 @@ class BaseBuilder:
     def ret(self, value: Any) -> Any:
         return value
 
-    def ctx_with(self, ctx: AbstractContextManager[Any]) -> AbstractContextManager[Any]:
-        return ctx
+    def ctx_with(self, ctx: AbstractContextManager[Any], *, unpack: bool = False) -> AbstractContextManager[Any]:
+        if not unpack:
+            return ctx
+
+        @contextmanager
+        def unpack_context():
+            with ctx as value:
+                yield self.unpack_value(value)
+
+        return unpack_context()
 
     def assert_expr(self, cond: Any, msg: Any):
         assert cond, msg
@@ -428,6 +460,12 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_continue(): continue", span=node)
 
+    def visit_Subscript(self, node: ast.Subscript):
+        node = self.generic_visit(node)
+        if isinstance(node.ctx, ast.Load):
+            return quote_expr("__tb.getitem(value, indices)", value=node.value, indices=node.slice, span=node)
+        return node
+
     def visit_Break(self, node: ast.Break):
         node = self.generic_visit(node)
         return quote("if __tb.ctx_break(): break", span=node)
@@ -482,7 +520,7 @@ class DSLMutator(ast.NodeTransformer):
                     s = ast.unparse(target)
                     raise NotImplementedError(f"Attribute assignment not supported yet, `{s}`")
 
-            unpack_stmt = ast.Assign(targets=[_visit_target(target)], value=quote_expr("__tb.unwrap_value(rval)", rval=rval, span=rval))
+            unpack_stmt = ast.Assign(targets=[_visit_target(target)], value=quote_expr("__tb.unpack_value(rval)", rval=rval, span=rval))
             ast_set_span(unpack_stmt, ast_get_span(target))
             stmts: list[ast.stmt] = [unpack_stmt]
             bind_lvals: list[str] = []
@@ -656,17 +694,32 @@ class DSLMutator(ast.NodeTransformer):
 
         # case 2: subscript(attribute(T, Tensor), ...) or call(attribute(T, Tensor), ...)
         inner = None
-        if isinstance(annot, ast.Call) and isinstance(annot.func, ast.Attribute):
+        if isinstance(annot, ast.Call):
             inner = annot.func
         if isinstance(annot, ast.Subscript) and isinstance(annot.value, ast.Attribute):
             inner = annot.value
-        if inner is not None and inner.attr in ["Tensor", "StridedTensor", "ptr"]:
+        if inner is not None:
             eval_res = self._try_eval(inner)
             from tilelang.language.proxy import TensorProxy, StridedTensorProxy, ptr
+            from tvm_tirx import ir, tirx
 
-            if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr:
-                self.extra_type_hints[name] = ptr
+            native_type = any(eval_res is constructor for constructor in (ir.PrimType, ir.PtrType, tirx.TensorType))
+            if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr or native_type:
+                from tilelang.language._native import deferred_arg
+
+                self.extra_type_hints[name] = deferred_arg
                 return
+
+    def visit_BinOp(self, node: ast.BinOp):
+        node = self.generic_visit(node)
+        if isinstance(node.op, (ast.BitAnd, ast.BitOr, ast.BitXor)):
+            return quote_expr(
+                f"__tb.binop('{get_operator_name(node.op)}', left, right)",
+                left=node.left,
+                right=node.right,
+                span=node,
+            )
+        return node
 
     def visit_BoolOp(self, node: ast.BoolOp):
         node = self.generic_visit(node)
@@ -736,7 +789,12 @@ class DSLMutator(ast.NodeTransformer):
                     break
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=node)
+            expr.context_expr = quote_expr(
+                "__tb.ctx_with(e, unpack=unpack)",
+                e=expr.context_expr,
+                unpack=ast.Constant(isinstance(expr.optional_vars, (ast.Tuple, ast.List))),
+                span=node,
+            )
         if is_kernel_ctx:
             return [quote1("if __tb.skip_kernel_ctx(): return", span=node), node]
         return node

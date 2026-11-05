@@ -567,7 +567,7 @@ MLX-style swizzle is correct but is not currently the fastest default strategy.
 | Core GEMM op | `src/op/gemm.h`, `src/op/gemm.cc` | GEMM op metadata |
 | Metal op lowering | `src/metal/op/gemm.cc`, `src/metal/op/utils.h` | `SelectInst`, validation, scope utilities |
 | Metal codegen | `src/metal/codegen/codegen_metal.cc`, `.h` | MSL emission |
-| TVM runtime | `3rdparty/tvm/src/runtime/metal/metal_module.mm` | guarded `MTLLanguageVersion4_0` selection |
+| TIRx runtime | `3rdparty/tvm-tirx/src/backend/metal/runtime/metal_module.mm` | guarded `MTLLanguageVersion4_0` selection |
 | Runtime tests | `testing/python/metal/test_metal_gemm_v2.py` | Metal correctness |
 | Codegen tests | `testing/python/metal/test_metal_gemm_v2_linux.py` | source-level Metal codegen |
 | Simdgroup tests | `testing/python/metal/test_metal_simdgroup_store.py` | simdgroup direct store |
@@ -590,7 +590,7 @@ When changing codegen, check:
 - whether generated MSL avoids repeated physical swizzle arithmetic;
 - whether the fp32 accumulation to fp16 output store-cast path still works.
 
-When changing TVM / Metal runtime code, check:
+When changing the TIRx Metal runtime, check:
 
 - whether MSL 4.0 is requested only when SDK, runtime OS, and hardware support
   Metal 4;

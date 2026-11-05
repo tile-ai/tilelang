@@ -136,9 +136,8 @@ results = lt.lower_trace(func, transform.Simplify(), mode="terminal")
 results = lt.lower_trace(
     func,
     [
-        ("Annotate", tvm.tirx.transform.AnnotateDeviceRegions()),
-        ("Split", tvm.tirx.transform.SplitHostDevice()),
-        ("ThreadSync", transform.ThreadSync("shared")),
+        ("Simplify", transform.Simplify()),
+        ("RemoveNoOp", tvm.tirx.transform.RemoveNoOp()),
     ],
     mode="both",
     html_path="my_diff.html",
@@ -147,7 +146,7 @@ results = lt.lower_trace(
 
 | Parameter | Description | Default |
 | --- | --- | --- |
-| `func_or_mod` | A `PrimFunc` or `IRModule` to run passes on | Required |
+| `func_or_mod` | A `Function` or `IRModule` to run passes on | Required |
 | `passes` | A single pass, a list of passes, or a list of `(name, pass)` tuples | Required |
 | `mode` | `"terminal"`, `"html"`, or `"both"` | `terminal` |
 | `context` | Number of context lines in the unified diff | `3` |
@@ -156,6 +155,9 @@ results = lt.lower_trace(
 Returns a `list[dict]` with one entry per pass step, each containing `name`,
 `before_script`, `after_script`, `diff_lines`, `insertions`, `deletions`, and
 `changed`.
+
+For backend stages such as device outlining and kernel launch lowering, use the
+compilation instrumentation below to observe the actual pipeline order.
 
 ### Compilation instrumentation: `enable()` / `disable()`
 
@@ -244,7 +246,10 @@ The HTML report is a single self-contained file (no external assets) providing:
 :alt: Screenshot of the IR Lower Trace HTML report
 :align: center
 
-IR Lower Trace HTML report.
+Historical IR Lower Trace HTML report from before the native TIRx migration.
+The current viewer uses the same layout; IR text now describes native
+`Function`, typed tensors, and `RegionStmt`, and the pass list follows the
+selected backend pipeline.
 ```
 
 ## Codegen Source Capture & Edit-Recompile Workflow

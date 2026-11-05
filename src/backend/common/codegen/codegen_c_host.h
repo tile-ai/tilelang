@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "backend/common/codegen/codegen_c_base.h"
-#include "tvm/target/codegen.h"
+#include <tvm/codegen/codegen.h>
 #include <tvm/tirx/expr.h>
 
 namespace tvm {
@@ -24,6 +24,9 @@ using namespace ffi;
 // TileLang copy of TVM's CodeGenCHost, under the tl namespace.
 class CodeGenCHost : public tvm::codegen::CodeGenTileLangCBase {
 public:
+  using tvm::codegen::CodeGenTileLangCBase::Dispatch;
+  using tvm::codegen::CodeGenTileLangCBase::Dispatch_;
+
   CodeGenCHost();
   void Init(bool output_ssa, bool emit_asserts, bool emit_fwd_func_decl,
             std::string target_str,
@@ -32,8 +35,8 @@ public:
   void InitGlobalContext();
 
   void AddFunction(const tvm::GlobalVar &gvar,
-                   const tvm::tirx::PrimFunc &f) override;
-  void AddFunction(const tvm::GlobalVar &gvar, const tvm::tirx::PrimFunc &f,
+                   const tvm::tirx::Function &f) override;
+  void AddFunction(const tvm::GlobalVar &gvar, const tvm::tirx::Function &f,
                    bool emit_fwd_func_decl);
   /*!
    * \brief Add functions from the (unordered) range to the current module in a
@@ -46,31 +49,42 @@ public:
   void DefineModuleName();
 
   using tvm::codegen::CodeGenC::PrintType;
-  void PrintType(tvm::DataType t, std::ostream &os) final; // NOLINT(*)
-  void PrintFuncPrefix(std::ostream &os) final;            // NOLINT(*)
+  void PrintType(const tvm::Type &t, std::ostream &os) override; // NOLINT(*)
+  void PrintType(const tvm::PrimType &t,
+                 std::ostream &os) override;       // NOLINT(*)
+  void PrintFuncPrefix(std::ostream &os) override; // NOLINT(*)
+  void PrintFunctionSignature(const ffi::String &name,
+                              const tvm::tirx::Function &function,
+                              std::ostream &os) override;
 
   // overload visitor functions
-  void VisitExpr_(const tvm::tirx::BroadcastNode *op,
-                  std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const tvm::tirx::CallNode *op,
-                  std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const tvm::FloatImmObj *op,
+                 std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const tvm::prim::BroadcastObj *op,
+                 std::ostream &os) override; // NOLINT(*)
+  void Dispatch_(const tvm::CallObj *op,
+                 std::ostream &os) override; // NOLINT(*)
   // overload min and max to use the ternary operator, so we don't rely on the
   // standard library implementations
-  void VisitExpr_(const tvm::tirx::MinNode *op,
-                  std::ostream &os) final; // NOLINT(*)
-  void VisitExpr_(const tvm::tirx::MaxNode *op,
-                  std::ostream &os) final; // NOLINT(*)
+  void Dispatch_(const tvm::prim::MinObj *op,
+                 std::ostream &os) final; // NOLINT(*)
+  void Dispatch_(const tvm::prim::MaxObj *op,
+                 std::ostream &os) final; // NOLINT(*)
 
-  void VisitStmt_(const tvm::tirx::EvaluateNode *op) final; // NOLINT(*)
+  void Dispatch_(const tvm::EvaluateObj *op) override; // NOLINT(*)
+  void Dispatch_(const tvm::BindObj *op) override;     // NOLINT(*)
 
-  void VisitStmt_(const tvm::tirx::AssertStmtNode *op) final; // NOLINT(*)
+  void Dispatch_(const tvm::AssertStmtObj *op) final; // NOLINT(*)
 
-  void VisitStmt_(const tvm::tirx::AttrStmtNode *op) final; // NOLINT(*)
+  void Dispatch_(const tvm::RegionStmtObj *op) final; // NOLINT(*)
 
   void GenerateForwardFunctionDeclarations(String global_symbol,
                                            const Array<tvm::Type> &arg_types,
                                            const tvm::Type &ret_type) override;
   Array<String> GetFunctionNames() { return function_names_; }
+
+protected:
+  bool IsScopePartOfType() const override { return false; }
 
 private:
   std::string module_name_;
@@ -88,10 +102,17 @@ private:
 
   bool is_in_metal_context = false;
 
-  std::string GetPackedName(const tvm::tirx::CallNode *op);
+  std::string GetPackedName(const tvm::CallObj *op);
   void PrintGetFuncFromBackend(const std::string &func_name,
                                const std::string &packed_func_name);
-  void PrintCallPacked(const tvm::tirx::CallNode *op);
+  void PrintCallPacked(const tvm::CallObj *op, std::ostream &os,
+                       bool discard_result = false);
+  void PrintAnyListInvoke(const tvm::CallObj *op, std::ostream &os);
+  void PrintAnyListShape(const tvm::CallObj *op, std::ostream &os);
+  void PrintAnyListDescriptor(const tvm::CallObj *op, std::ostream &os);
+  void PrintPackedFailureReturn();
+  bool anylist_helpers_emitted_ = false;
+  std::vector<std::string> anylist_error_cleanups_;
   /*!
    * \brief Print ternary conditional operator implementing binary `op`
    * Forces the operands to be in SSA form.

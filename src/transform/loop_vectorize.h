@@ -26,14 +26,42 @@
 #define TVM_TL_LOOP_VECTORIZE_H_
 
 #include "../op/operator.h"
-#include <tvm/arith/analyzer.h>
+#include <memory>
+#include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/function.h>
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
+
+// A production Function pass supplies the allocation, alias and write facts
+// used by indirect-index queries. The scope is thread-local, nestable, and
+// restored on exceptions. Facts are recomputed from each pass's actual input;
+// an expression-only caller has no implicit read-only-memory permission.
+class VectorizeMemoryScope {
+public:
+  explicit VectorizeMemoryScope(const tirx::Function &function);
+  ~VectorizeMemoryScope();
+  VectorizeMemoryScope(const VectorizeMemoryScope &) = delete;
+  VectorizeMemoryScope &operator=(const VectorizeMemoryScope &) = delete;
+
+private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  const Impl *previous_;
+  static thread_local const Impl *current_;
+  friend bool IsStableVectorizeIndex(const PrimExpr &expression);
+};
+
+// Pure address arithmetic is always eligible for subsequent lane/alignment
+// proofs. A TensorLoad additionally needs a current Function scope proving
+// that no write can alias its storage and that no opaque/volatile observation
+// invalidates reusing its value. This does not change IR effect annotations.
+bool IsStableVectorizeIndex(const PrimExpr &expression);
 
 // Widest vector memory access, in bits, that the vectorize planner will
 // consider for code whose memory-access mix is described by
@@ -43,38 +71,44 @@ using namespace tirx;
 // the cap the vectorizer will later enforce on it.
 int MaxVectorLoadBits(const Target &target, bool global_only_access);
 
-// Extract an existing BufferLoad, optionally wrapped in address_of/access_ptr.
+// Extract an existing TensorLoad, optionally wrapped in address_of/access_ptr.
 // tvm_access_ptr carries a flat offset instead and must be handled separately.
-ffi::Optional<BufferLoad> ExtractBufferLoadForAtomic(const PrimExpr &expr);
+ffi::Optional<TensorLoad> ExtractBufferLoadForAtomic(const Expr &expr);
 
 // Target/dtype/address-space capability; access legality is checked separately.
-int GetMaxAtomicVectorSize(DataType dtype, const ffi::String &storage_scope,
+int GetMaxAtomicVectorSize(PrimType dtype, const ffi::String &storage_scope,
                            const Target &target);
 
-int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {});
+// Production callers supply the Function's target. The optional fallback is
+// retained for direct helper callers that explicitly enter a Target context.
+int GetVectorizeSize(const For &loop, const LayoutMap &layout_map = {},
+                     ffi::Optional<Target> target = std::nullopt);
 
 // The supplied context is read-only. Planning adds local bindings only to its
 // own clone; callers must not supply bindings from before a loop rewrite.
-int GetVectorizeSize(const For &loop, const arith::Analyzer *analyzer,
-                     const LayoutMap &layout_map = {});
+int GetVectorizeSize(const For &loop, const sym::AnalyzerObj *analyzer,
+                     const LayoutMap &layout_map = {},
+                     ffi::Optional<Target> target = std::nullopt);
 
 For VectorizeLoop(const For &loop, const LayoutMap &layout_map = {},
-                  int vectorize_hint = -1);
+                  int vectorize_hint = -1,
+                  ffi::Optional<Target> target = std::nullopt);
 
-For VectorizeLoop(const For &loop, const arith::Analyzer *analyzer,
-                  const LayoutMap &layout_map = {}, int vectorize_hint = -1);
+For VectorizeLoop(const For &loop, const sym::AnalyzerObj *analyzer,
+                  const LayoutMap &layout_map = {}, int vectorize_hint = -1,
+                  ffi::Optional<Target> target = std::nullopt);
 
 // Can prove expr is independent with var, i.e. the value of expr doesn't change
 // when var changes
 bool CanProveIndependent(const PrimExpr &expr, Var var,
-                         arith::Analyzer *analyzer);
+                         sym::AnalyzerObj *analyzer);
 
 // Check if expr is invariant within groups of consecutive unit-step iterations.
 // The minimum defaults to zero.
 bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
                                      const PrimExpr &extent,
                                      int target_vectorized_size,
-                                     arith::Analyzer *analyzer,
+                                     sym::AnalyzerObj *analyzer,
                                      const PrimExpr &min = 0);
 
 /*!
@@ -99,8 +133,8 @@ bool IsExprInvariantInVectorBoundary(const PrimExpr &expr, const Var &var,
  */
 bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
                          const PrimExpr &extent, int target_vectorized_size,
-                         arith::Analyzer *analyzer, bool allow_broadcast = true,
-                         const PrimExpr &min = 0);
+                         sym::AnalyzerObj *analyzer,
+                         bool allow_broadcast = true, const PrimExpr &min = 0);
 
 } // namespace tl
 } // namespace tvm

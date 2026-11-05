@@ -1,4 +1,8 @@
+from tvm_tirx import ir
+import tvm_ffi
+
 """Tests for explicit SimtVF/SimdVF mode handling in Ascend codegen."""
+
 
 import re
 
@@ -7,7 +11,7 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.engine.lower import lower
 
 tirx = tvm.tirx
@@ -18,20 +22,20 @@ def _simd_register_kernel(dtype):
     def main():
         with T.Kernel(1), T.SimdVF():
             value = T.alloc_var(dtype)
-            T.evaluate(tirx.call_extern("int32", "consume", value))
+            T.evaluate(tirx.call_extern("consume", value, ty="int32"))
 
     return main
 
 
 def _simt_broadcast_kernel(dtype):
-    vector_dtype = tvm.DataType(dtype)
+    vector_dtype = tvm_ffi.dtype(dtype)
     element_dtype = dtype.rsplit("x", 1)[0]
 
     @T.prim_func
     def main():
         with T.Kernel(1), T.SimtVF(threads=1):
-            value = tirx.Broadcast(tirx.const(1, element_dtype), vector_dtype.lanes)
-            T.evaluate(tirx.call_extern("int32", "consume", value))
+            value = ir.prim.Broadcast(ir.const(1, element_dtype), vector_dtype.lanes)
+            T.evaluate(tirx.call_extern("consume", value, ty="int32"))
 
     return main
 
@@ -42,7 +46,7 @@ def test_vf_mode_is_restored_between_helpers():
         with T.Kernel(1):
             with T.SimtVF(threads=1):
                 value = T.Broadcast(T.float16(1), 8)
-                T.evaluate(tirx.call_extern("int32", "consume", value))
+                T.evaluate(tirx.call_extern("consume", value, ty="int32"))
 
             with T.SimdVF():
                 mask = T.simd.pset(32)
@@ -55,7 +59,7 @@ def test_vf_mode_is_restored_between_helpers():
                     T.Broadcast(T.float16(3), 8),
                     T.Broadcast(T.float16(4), 8),
                 )
-                T.evaluate(tirx.call_extern("int32", "consume", value))
+                T.evaluate(tirx.call_extern("consume", value, ty="int32"))
 
     source = lower(main, target="ascend").kernel_source
 
@@ -79,7 +83,7 @@ def test_simdvf_accepts_full_register_types():
             fp8 = T.simd.alloc_var("float8_e4m3fn")
             fp4 = T.simd.alloc_var("float4_e2m1fn")
             mask = T.simd.pset(32)
-            T.evaluate(tirx.call_extern("int32", "consume", f32, f16, bf16, s8, u16, s64, fp8, fp4, mask))
+            T.evaluate(tirx.call_extern("consume", f32, f16, bf16, s8, u16, s64, fp8, fp4, mask, ty="int32"))
 
     source = lower(main, target="ascend").kernel_source
 
@@ -103,14 +107,14 @@ def test_simdvf_accepts_full_register_types():
 )
 def test_simdvf_rejects_partial_data_registers(dtype, expected_lanes):
     with pytest.raises(
-        tvm.error.InternalError,
-        match=rf"invalid SIMD register type {dtype}.*2048-bit register.*x{expected_lanes}",
+        RuntimeError,
+        match=rf"invalid SIMD register type {re.escape(repr(ir.PrimType(dtype)))}.*2048-bit register.*x{expected_lanes}",
     ):
         lower(_simd_register_kernel(dtype), target="ascend")
 
 
 def test_simdvf_rejects_small_predicate_carrier():
-    with pytest.raises(tvm.error.InternalError, match=r"predicates must be boolx256"):
+    with pytest.raises(RuntimeError, match=r"predicates must be boolx256"):
         lower(_simd_register_kernel("boolx8"), target="ascend")
 
 
@@ -119,9 +123,9 @@ def test_simdvf_rejects_generic_vector_broadcast():
     def main():
         with T.Kernel(1), T.SimdVF():
             value = T.Broadcast(T.float32(1), 8)
-            T.evaluate(tirx.call_extern("int32", "consume", value))
+            T.evaluate(tirx.call_extern("consume", value, ty="int32"))
 
-    with pytest.raises(tvm.error.InternalError, match=r"Generic vector Broadcast.*inside SimdVF"):
+    with pytest.raises(RuntimeError, match=r"Generic vector Broadcast.*inside SimdVF"):
         lower(main, target="ascend")
 
 
@@ -148,7 +152,7 @@ def test_simtvf_capture_signature_uses_kernel_abi_type():
             captured = T.alloc_var("float8_e4m3fn")
             captured = data[0]
             with T.SimtVF(threads=1):
-                T.evaluate(tirx.call_extern("int32", "consume", captured))
+                T.evaluate(tirx.call_extern("consume", captured, ty="int32"))
 
     source = lower(main, target="ascend").kernel_source
 
@@ -168,8 +172,13 @@ def test_simdvf_local_register_address_uses_register_data():
 
     source = lower(main, target="ascend").kernel_source
 
-    assert "vector_s8 dst[1];" in source
-    assert "simd_inst::vmula((&(dst[0])), src, src, mask, MODE_ZEROING)" in source
+    # Native pointer lowering may name the array after its data pointer. Check
+    # the same physical register array is initialized and passed by address.
+    destinations = re.findall(r"vector_s8 (\w+)\[1\];", source)
+    assert len(destinations) == 1
+    destination = destinations[0]
+    assert f"{destination}[0] = src;" in source
+    assert f"simd_inst::vmula((&({destination}[0])), src, src, mask, MODE_ZEROING)" in source
 
 
 def test_simd_intrinsic_requires_simdvf_context():
@@ -178,7 +187,7 @@ def test_simd_intrinsic_requires_simdvf_context():
         with T.Kernel(1):
             T.evaluate(T.simd.pset(32))
 
-    with pytest.raises(tvm.error.InternalError, match=r"tl\.simd\.pset.*inside SimdVF"):
+    with pytest.raises(RuntimeError, match=r"tl\.simd\.pset.*inside SimdVF"):
         lower(main, target="ascend")
 
 
@@ -199,7 +208,7 @@ def test_nested_vf_blocks_are_rejected():
         with T.Kernel(1), T.SimtVF(threads=1), T.SimdVF():
             T.evaluate(0)
 
-    with pytest.raises(tvm.error.InternalError, match=r"Nested Ascend VF blocks"):
+    with pytest.raises(RuntimeError, match=r"Nested Ascend VF blocks"):
         lower(main, target="ascend")
 
 
@@ -232,14 +241,14 @@ def test_vf_helpers_are_unique_after_explicit_unroll():
 
     source = lower(main, target="ascend").kernel_source
 
-    assert source.count("__simd_vf__ inline void main_kernel_simd_vf_0(") == 1
-    assert source.count("__simd_vf__ inline void main_kernel_simd_vf_0_1(") == 1
-    assert source.count("__simt_vf__ __launch_bounds__(1) inline void main_kernel_simt_vf_0(") == 1
-    assert source.count("__simt_vf__ __launch_bounds__(1) inline void main_kernel_simt_vf_0_1(") == 1
-    assert source.count("main_kernel_simd_vf_0();") == 1
-    assert source.count("main_kernel_simd_vf_0_1();") == 1
-    assert source.count("main_kernel_simt_vf_0>(cce::dim3(1));") == 1
-    assert source.count("main_kernel_simt_vf_0_1>(cce::dim3(1));") == 1
+    simd_names = re.findall(r"__simd_vf__ inline void (main_kernel_simd_vf_\w+)\(", source)
+    simt_names = re.findall(r"__simt_vf__ __launch_bounds__\(1\) inline void (main_kernel_simt_vf_\w+)\(", source)
+    assert len(simd_names) == len(set(simd_names)) == 2
+    assert len(simt_names) == len(set(simt_names)) == 2
+    for name in simd_names:
+        assert source.count(f"{name}();") == 1
+    for name in simt_names:
+        assert source.count(f"{name}>(cce::dim3(1));") == 1
 
 
 @tilelang.testing.requires_ascend(support_required="compile-only")
@@ -251,9 +260,9 @@ def test_imported_helper_precedes_vf_definitions():
         with T.Kernel(1):
             T.import_source(imported_source)
             with T.SimdVF():
-                T.evaluate(tirx.call_extern("int32", "imported_helper", 1))
+                T.evaluate(tirx.call_extern("imported_helper", 1, ty="int32"))
             with T.SimtVF(threads=1):
-                T.evaluate(tirx.call_extern("int32", "imported_helper", 2))
+                T.evaluate(tirx.call_extern("imported_helper", 2, ty="int32"))
 
     source = lower(main, target="ascend").kernel_source
 

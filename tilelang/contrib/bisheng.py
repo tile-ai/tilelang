@@ -12,9 +12,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from tilelang.env import env
-from tvm.base import py_str
-from tvm.contrib import utils
-from tvm.target import Target
+from tvm_tirx.support import utils
+from tvm_tirx.target import Target
+from ._utils import py_str
 
 
 def find_bisheng_path() -> str:

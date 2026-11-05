@@ -19,565 +19,529 @@
 
 /*!
  * \file materialize_schedule_units.cc
- * \brief Normalize task boundaries and materialize trivial schedule units.
+ * \brief Normalize native task boundaries without hiding SSA definitions.
  */
 
-#include <tvm/ffi/container/array.h>
+#include "auto_schedule/kernel_rewriter.h"
+#include "auto_schedule/task_resource.h"
+
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include "ascend/op/builtin.h"
-#include "ascend/transform/attr.h"
-#include "ascend/transform/auto_schedule/kernel_rewriter.h"
-#include "ascend/transform/auto_schedule/scheduled_tir.h"
-#include "ascend/transform/auto_schedule/task_analysis.h"
-#include "ascend/transform/auto_schedule/task_annotations.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace tirx::transform;
+namespace tvm::tl {
+namespace {
 using namespace ascend;
+using namespace prim;
+using namespace tirx;
 using ffi::Array;
 using ffi::GetRef;
+using ffi::Optional;
 
-namespace {
-
-Stmt MakeSequence(const std::vector<Stmt> &statements) {
-  if (statements.empty())
-    return Evaluate(0);
-  if (statements.size() == 1)
-    return statements[0];
-  Array<Stmt> sequence;
-  sequence.reserve(statements.size());
-  for (const Stmt &stmt : statements)
-    sequence.push_back(stmt);
-  return SeqStmt::Flatten(sequence);
+bool IsSerialLoop(const ForObj *loop) {
+  return loop->kind == ForKind::kDefault || loop->kind == ForKind::kUnrolled;
 }
 
-bool IsTaskBoundary(const Stmt &stmt) {
-  if (const auto *loop = stmt.as<ForNode>())
-    return loop->kind != ForKind::kSerial && loop->kind != ForKind::kUnrolled;
-  return stmt.as<EvaluateNode>() || stmt.as<BufferStoreNode>() ||
-         stmt.as<BindNode>() || stmt.as<WhileNode>() || stmt.as<SBlockNode>();
+bool IsMetadataScope(const NativeTaskAttribute &attribute) {
+  return attribute.key == "tl.loop.annotations";
 }
 
-class TaskNormalizer : public StmtMutator {
+bool IsStandaloneCrossCoreSync(const Stmt &body) {
+  const auto *evaluate = SingleStatement(body).as<EvaluateObj>();
+  const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
+  return call && task_resource_detail::IsCrossCoreSyncCall(call);
+}
+
+// Keep lexical scopes intact while normalizing candidate boundaries. A Bind
+// local to a branch or a PerCoreTask must keep dominating its local users.
+class TaskNormalizer {
 public:
-  static Stmt Rewrite(const Stmt &body) {
-    TaskNormalizer normalizer;
-    return normalizer(body);
-  }
-
-private:
-  Stmt VisitStmt(const Stmt &stmt) final {
-    if (const auto *attribute = stmt.as<AttrStmtNode>()) {
-      if (attribute->attr_key == tl::attr::kAscendStage) {
-        ICHECK_EQ(task_marker_depth_, 0)
+  Stmt Rewrite(const Stmt &stmt, int task_depth = 0, int per_core_depth = 0) {
+    if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+      Array<Stmt> body;
+      for (const Stmt &child : sequence->seq)
+        body.push_back(Rewrite(child, task_depth, per_core_depth));
+      return SeqStmt(body, stmt->loc);
+    }
+    if (auto attribute = ReadTaskAttribute(stmt)) {
+      const auto &key = attribute->key;
+      if (key == attr::kAscendStage) {
+        TVM_FFI_CHECK(task_depth == 0 && per_core_depth == 0, ValueError)
             << "T.Stage must wrap a complete scheduler task; it cannot appear "
-               "inside T.Task";
-        ICHECK_EQ(per_core_task_depth_, 0)
-            << "T.Stage must wrap a complete scheduler task; it cannot appear "
-               "inside T.PerCoreTask";
+               "inside T.Task, T.PerCoreTask or an atomic VF task boundary";
       }
-      if (attribute->attr_key == tl::attr::kAscendTask) {
-        ++task_marker_depth_;
-        Stmt result = StmtMutator::VisitStmt(stmt);
-        --task_marker_depth_;
-        const auto *normalized = result.as<AttrStmtNode>();
-        ICHECK(normalized && normalized->attr_key == tl::attr::kAscendTask);
-        TaskMetadata metadata;
-        return AttrStmt(MergeTaskMetadata(metadata, normalized->node),
-                        normalized->attr_key, normalized->value,
-                        normalized->body, normalized->span);
-      }
-      if (attribute->attr_key == tl::attr::kAscendPerCoreTask) {
-        ICHECK_EQ(task_marker_depth_, 0)
+      if (key == attr::kAscendPerCoreTask) {
+        TVM_FFI_CHECK_EQ(task_depth, 0, ValueError)
             << "T.PerCoreTask cannot be nested inside T.Task. Place T.Task "
                "candidate regions inside T.PerCoreTask instead.";
-        ++per_core_task_depth_;
-        Stmt body = VisitStmt(attribute->body);
-        --per_core_task_depth_;
-        TaskMetadata metadata;
-        return AttrStmt(MergeTaskMetadata(metadata, attribute->node),
-                        attribute->attr_key, attribute->value, std::move(body),
-                        attribute->span);
+        auto body =
+            Rewrite(attribute->region->body, task_depth, per_core_depth + 1);
+        return MakeNativeAttribute(
+            MergeTaskMetadata({}, attribute->node), key, attribute->value,
+            NativeTaskAttribute::AsSequence(body), stmt->loc);
       }
+      if (key == attr::kAscendTask) {
+        auto body =
+            Rewrite(attribute->region->body, task_depth + 1, per_core_depth);
+        return MakeNativeAttribute(
+            MergeTaskMetadata({}, attribute->node), key, attribute->value,
+            NativeTaskAttribute::AsSequence(body), stmt->loc);
+      }
+      if (key == "tl.sblock" && task_depth == 0)
+        return MakeTask(stmt);
+      return attribute->WithBody(
+          Rewrite(attribute->region->body, task_depth, per_core_depth));
     }
-
-    if (task_marker_depth_ > 0)
-      return StmtMutator::VisitStmt(stmt);
-
-    if (!IsTaskBoundary(stmt))
-      return StmtMutator::VisitStmt(stmt);
-
-    if (per_core_task_depth_ > 0 && stmt.as<BindNode>()) {
-      ICHECK(!HasTaskBufferAccess(stmt))
-          << "An unmarked scalar Bind inside T.PerCoreTask may not access "
-             "buffers: synchronization with statements outside the "
-             "PerCoreTask is emitted only at T.Task candidate sites, so an "
-             "external buffer dependency could not be synchronized at this "
-             "Bind. Dependency-free scalar Bind control is allowed. Move the "
-             "buffer access into a supported same-pipe T.Task candidate. Bind="
-          << stmt;
+    if (const auto *bind = stmt.as<BindObj>()) {
+      if (task_depth == 0 && per_core_depth > 0)
+        TVM_FFI_CHECK(!HasTaskBufferAccess(stmt), ValueError)
+            << "An unmarked scalar Bind inside T.PerCoreTask may not access "
+               "buffers: external synchronization is emitted only at T.Task "
+               "candidate sites. Move the access into a same-pipe T.Task "
+               "candidate. Bind="
+            << stmt;
+      // Top-level Bind is marked in its value by ScheduleUnitMaterializer;
+      // a PerCoreTask-local scalar Bind stays in that task's lexical scope.
+      return GetRef<Bind>(bind);
     }
-
-    TaskMetadata metadata;
-    return AttrStmt(MergeTaskMetadata(metadata, IntImm(DataType::Int(32), 0)),
-                    tl::attr::kAscendTask, IntImm(DataType::Int(32), 1), stmt,
-                    stmt->span);
+    bool boundary = stmt.as<EvaluateObj>() || stmt.as<TensorStoreObj>() ||
+                    stmt.as<WhileObj>() || stmt.as<AssertStmtObj>() ||
+                    stmt.as<BreakObj>();
+    if (const auto *loop = stmt.as<ForObj>())
+      boundary |= !IsSerialLoop(loop);
+    if (task_depth == 0 && boundary) {
+      if (IsTaskMetadataStatement(stmt))
+        return stmt;
+      return MakeTask(stmt);
+    }
+    if (const auto *loop = stmt.as<ForObj>()) {
+      For rewritten = GetRef<For>(loop);
+      rewritten.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
+          Rewrite(loop->body, task_depth, per_core_depth));
+      return rewritten;
+    }
+    if (const auto *branch = stmt.as<IfObj>()) {
+      If rewritten = GetRef<If>(branch);
+      auto *writer = rewritten.CopyOnWrite();
+      writer->then_case = NativeTaskAttribute::AsSequence(
+          Rewrite(branch->then_case, task_depth, per_core_depth));
+      if (branch->else_case)
+        writer->else_case = NativeTaskAttribute::AsSequence(
+            Rewrite(branch->else_case.value(), task_depth, per_core_depth));
+      return rewritten;
+    }
+    if (const auto *loop = stmt.as<WhileObj>()) {
+      While rewritten = GetRef<While>(loop);
+      rewritten.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
+          Rewrite(loop->body, task_depth, per_core_depth));
+      return rewritten;
+    }
+    if (const auto *region = stmt.as<RegionStmtObj>()) {
+      RegionStmt rewritten = GetRef<RegionStmt>(region);
+      rewritten.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
+          Rewrite(region->body, task_depth, per_core_depth));
+      return rewritten;
+    }
+    return stmt;
   }
-
-  int task_marker_depth_{0};
-  int per_core_task_depth_{0};
 };
 
-ScheduleUnitMetadata MakeInitialScheduleMetadata() {
-  ScheduleUnitMetadata metadata;
-  metadata.Set(kScheduleUnitStage, Integer(kUnscheduledStage));
-  return metadata;
-}
-
-Stmt MakeInitialScheduleUnit(Stmt body) {
-  Span span = body->span;
-  return AttrStmt(MakeInitialScheduleMetadata(), attr::kScheduleUnit,
-                  Integer(1), std::move(body), span);
-}
-
-Stmt MakeNoOpTask() {
-  TaskMetadata metadata;
-  Stmt body = Evaluate(0);
-  return AttrStmt(MergeTaskMetadata(metadata, IntImm(DataType::Int(32), 0)),
-                  tl::attr::kAscendTask, IntImm(DataType::Int(32), 1),
-                  std::move(body));
-}
-
-AttrStmt RequireScheduleUnit(const Stmt &stmt) {
-  const auto *unit = stmt.as<AttrStmtNode>();
-  ICHECK(unit != nullptr && IsScheduleUnit(unit))
-      << "MaterializeScheduleUnits expected a schedule unit, got " << stmt;
-  return GetRef<AttrStmt>(unit);
-}
-
-Stmt RebuildWithPrependedGuard(const AttrStmt &unit, Stmt guarded_body) {
-  return AttrStmt(unit->node, unit->attr_key, unit->value,
-                  std::move(guarded_body), unit->span);
-}
-
-Stmt AssignStage(const Stmt &stmt, int stage) {
-  AttrStmt unit = RequireScheduleUnit(stmt);
-  ICHECK_EQ(GetScheduleUnitStage(unit.get()), kUnscheduledStage)
-      << "Nested T.Stage scopes are not supported";
-  ScheduleUnitMetadata metadata = unit->node.cast<ScheduleUnitMetadata>();
-  metadata.Set(kScheduleUnitStage, Integer(stage));
-  return AttrStmt(metadata, unit->attr_key, unit->value, unit->body,
-                  unit->span);
-}
-
-Stmt PrependConditionGuard(const Stmt &stmt, const PrimExpr &condition) {
-  AttrStmt unit = RequireScheduleUnit(stmt);
-  return RebuildWithPrependedGuard(unit, IfThenElse(condition, unit->body));
-}
-
-Stmt PrependAttributeGuard(const Stmt &stmt, const AttrStmtNode *attribute) {
-  AttrStmt unit = RequireScheduleUnit(stmt);
-  return RebuildWithPrependedGuard(
-      unit, AttrStmt(attribute->node, attribute->attr_key, attribute->value,
-                     unit->body, attribute->span));
-}
-
-class PerCoreTaskControlValidator : public StmtExprVisitor {
+class TaskControlValidator : public StmtExprVisitor {
 public:
-  explicit PerCoreTaskControlValidator(uint16_t pipe_mask)
-      : expected_pipe_("PIPE_" + GetResourcePipeName(pipe_mask)) {}
+  using StmtExprVisitor::Visit_;
+  TaskControlValidator(bool reject_selection, bool allow_cross_core)
+      : reject_selection_(reject_selection),
+        allow_cross_core_(allow_cross_core) {}
 
-private:
-  void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::ascend_cross_core_set_flag()) ||
-        op->op.same_as(tl::ascend_cross_core_wait_flag())) {
-      ICHECK_EQ(op->args.size(), 3);
-      const auto *mode = op->args[0].as<IntImmNode>();
-      ICHECK(mode) << "Cross-core synchronization mode must be a constant "
-                      "integer, got "
-                   << op->args[0];
-      const auto *pipe = op->args[1].as<StringImmNode>();
-      ICHECK(pipe) << "Inter-core synchronization pipe must be a constant "
-                      "string, got "
-                   << op->args[1];
-      ICHECK_EQ(pipe->value, expected_pipe_)
-          << "Inter-core synchronization inside T.PerCoreTask must use its "
-             "inferred pipe "
-          << expected_pipe_ << ", got " << pipe->value;
+  Optional<ffi::VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (auto attribute = ReadTaskAttribute(op)) {
+      TVM_FFI_CHECK(attribute->key != attr::kAscendTask, ValueError)
+          << "Nested T.Task regions are not supported";
+      TVM_FFI_CHECK(attribute->key != attr::kAscendStage, ValueError)
+          << "T.Stage must wrap a complete scheduler task. Place it outside "
+             "T.Task, T.SimtVF, T.SimdVF, SBlock and parallel-loop boundaries.";
+      TVM_FFI_CHECK(attribute->key != attr::kAscendPerCoreTask, ValueError)
+          << "T.PerCoreTask cannot be nested inside T.Task";
     }
-    StmtExprVisitor::VisitExpr_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  std::string expected_pipe_;
-};
-
-class TaskMarkerControlValidator : public StmtExprVisitor {
-public:
-  TaskMarkerControlValidator(bool reject_candidate_selection,
-                             bool allow_cross_core_sync)
-      : reject_candidate_selection_(reject_candidate_selection),
-        allow_cross_core_sync_(allow_cross_core_sync) {}
-
-private:
-  void VisitStmt_(const AttrStmtNode *op) final {
-    ICHECK_NE(op->attr_key, tl::attr::kAscendTask)
-        << "Nested T.Task regions are not supported";
-    ICHECK_NE(op->attr_key, tl::attr::kAscendStage)
-        << "T.Stage must wrap a complete scheduler task. Place T.Stage outside "
-           "T.Task, T.SimtVF, T.SimdVF, SBlock, and parallel-loop task "
-           "boundaries.";
-    StmtExprVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const IfThenElseNode *op) final {
-    ICHECK(!reject_candidate_selection_)
+  Optional<ffi::VisitInterrupt> Visit_(const IfObj *op) final {
+    TVM_FFI_CHECK(!reject_selection_, ValueError)
         << "Control flow selecting a T.Task candidate must be outside the "
            "T.Task scope";
-    StmtExprVisitor::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  void VisitExpr_(const CallNode *op) final {
-    ICHECK(allow_cross_core_sync_ ||
-           (!op->op.same_as(tl::ascend_cross_core_set_flag()) &&
-            !op->op.same_as(tl::ascend_cross_core_wait_flag())))
+  Optional<ffi::VisitInterrupt> Visit_(const CallObj *op) final {
+    TVM_FFI_CHECK(allow_cross_core_ ||
+                      !task_resource_detail::IsCrossCoreSyncCall(op),
+                  ValueError)
         << "Inter-core synchronization inside T.Task must be the task's only "
            "statement";
-    StmtExprVisitor::VisitExpr_(op);
+    return StmtExprVisitor::Visit_(op);
   }
 
-  bool reject_candidate_selection_;
-  bool allow_cross_core_sync_;
+private:
+  bool reject_selection_;
+  bool allow_cross_core_;
 };
-
-bool IsStandaloneCrossCoreSync(const Stmt &stmt) {
-  const auto *evaluate = stmt.as<EvaluateNode>();
-  if (!evaluate)
-    return false;
-  const auto *call = evaluate->value.as<CallNode>();
-  return call && (call->op.same_as(tl::ascend_cross_core_set_flag()) ||
-                  call->op.same_as(tl::ascend_cross_core_wait_flag()));
-}
 
 struct ValidatedTask {
-  uint16_t pipe_mask{0};
-  bool has_buffer_access{false};
+  uint16_t pipe_mask;
+  bool has_buffer_access;
 };
 
-ValidatedTask ValidateTask(const AttrStmtNode *op, bool inside_per_core_task) {
-  ICHECK_EQ(op->attr_key, tl::attr::kAscendTask);
-
-  Stmt task_body = op->body;
-  TaskMarkerControlValidator control_validator(
-      inside_per_core_task, IsStandaloneCrossCoreSync(task_body));
-  control_validator(task_body);
-
-  Stmt task = GetRef<Stmt>(op);
-  TaskResourceUsage resource_usage = AnalyzeTaskResourceUsage(task);
-  uint16_t issue_pipe_mask = resource_usage.pipe_mask;
-  if (AnalyzeSpecialRegisterWrites(task) != 0)
-    issue_pipe_mask |= static_cast<uint16_t>(ResourcePipe::kScalar);
-  ICHECK((issue_pipe_mask & (issue_pipe_mask - 1)) == 0)
+ValidatedTask ValidateTask(const NativeTaskAttribute &task,
+                           bool inside_per_core_task) {
+  TVM_FFI_CHECK_EQ(task.key, attr::kAscendTask, ValueError);
+  ParseTaskMetadata(task.node);
+  auto validator = ffi::make_object<TaskControlValidator>(
+      inside_per_core_task, IsStandaloneCrossCoreSync(task.region->body));
+  validator->Visit(task.region->body);
+  auto usage = AnalyzeTaskResourceUsage(task.region);
+  uint16_t issue_pipe_mask = usage.pipe_mask;
+  if (AnalyzeSpecialRegisterWrites(task.region) != 0)
+    issue_pipe_mask |= PipeMask(ResourcePipe::kScalar);
+  TVM_FFI_CHECK(IsSingleResourcePipe(issue_pipe_mask), ValueError)
       << "T.Task supports exactly one Ascend hardware pipe, but its body uses "
          "multiple pipes (mask="
       << issue_pipe_mask
-      << "). Split the statements into separate T.Task regions. Body=" << task;
-  uint16_t hbm_core_affinity = resource_usage.hbm_mask & kHbmCoreAffinityMask;
-  ICHECK((hbm_core_affinity & (hbm_core_affinity - 1)) == 0)
+      << "). Split the statements into separate T.Task regions. Body="
+      << task.region;
+  uint16_t affinity = usage.hbm_mask & kHbmCoreAffinityMask;
+  TVM_FFI_CHECK((affinity & (affinity - 1)) == 0, ValueError)
       << "T.Task requires one Ascend core affinity, but its body uses both AIC "
          "and AIV HBM paths. Split GM-to-L1 and GM-to-UB operations into "
          "separate T.Task regions. Body="
-      << task;
-  return {resource_usage.pipe_mask, HasTaskBufferAccess(task)};
+      << task.region;
+  return {usage.pipe_mask, HasTaskBufferAccess(task.region)};
 }
 
-bool IsPerCoreTaskScalarControl(const AttrStmtNode *task) {
-  ICHECK_EQ(task->attr_key, tl::attr::kAscendTask);
-  Stmt body = task->body;
-  if (body.as<BindNode>())
-    return true;
-  const auto *evaluate = body.as<EvaluateNode>();
-  if (!evaluate)
-    return false;
-  if (is_zero(evaluate->value))
-    return true;
-  const auto *call = evaluate->value.as<CallNode>();
-  return call && (call->op.same_as(tl::ascend_cross_core_set_flag()) ||
-                  call->op.same_as(tl::ascend_cross_core_wait_flag()));
+bool IsPerCoreScalarControl(const Stmt &stmt) {
+  Stmt body = SingleStatement(stmt);
+  if (body.as<BindObj>())
+    return !HasTaskBufferAccess(body);
+  const auto *evaluate = body.as<EvaluateObj>();
+  return evaluate && (tirx::IsNoOp(body) || IsStandaloneCrossCoreSync(body));
 }
 
-class PerCoreTaskBodyValidator : public StmtVisitor {
+class PerCoreControlValidator : public StmtExprVisitor {
 public:
-  static void Validate(const Stmt &body, uint16_t expected_pipe_mask) {
-    PerCoreTaskBodyValidator validator(expected_pipe_mask);
-    validator(body);
-    ICHECK(validator.has_dependency_task_)
-        << "T.PerCoreTask must contain at least one dependency-bearing task "
-           "after task normalization";
+  using StmtExprVisitor::Visit_;
+  explicit PerCoreControlValidator(uint16_t pipe)
+      : expected_("PIPE_" + GetResourcePipeName(pipe)) {}
+  Optional<ffi::VisitInterrupt> Visit_(const CallObj *op) final {
+    if (task_resource_detail::IsCrossCoreSyncCall(op)) {
+      TVM_FFI_CHECK_EQ(op->args.size(), 3U, ValueError);
+      TVM_FFI_CHECK(op->args[0].as<IntImmObj>(), ValueError)
+          << "Cross-core synchronization mode must be a constant integer";
+      const auto *pipe = op->args[1].as<StringImmObj>();
+      TVM_FFI_CHECK(pipe && pipe->value == expected_, ValueError)
+          << "Inter-core synchronization inside T.PerCoreTask must use its "
+             "inferred pipe "
+          << expected_;
+    }
+    return StmtExprVisitor::Visit_(op);
   }
 
 private:
-  explicit PerCoreTaskBodyValidator(uint16_t expected_pipe_mask)
-      : expected_pipe_mask_(expected_pipe_mask) {}
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tl::attr::kAscendTask) {
-      ValidatedTask task = ValidateTask(op, /*inside_per_core_task=*/true);
-      if (!task.has_buffer_access) {
-        ICHECK(IsPerCoreTaskScalarControl(op))
-            << "T.PerCoreTask only permits scalar Bind/condition/loop control "
-               "and inter-core synchronization in addition to operations on "
-               "its inferred pipe; got "
-            << GetRef<Stmt>(op);
-        return;
-      }
-      ICHECK_NE(task.pipe_mask, 0)
-          << "Cannot infer an Ascend pipe for T.PerCoreTask candidate "
-          << GetRef<Stmt>(op);
-      ICHECK_EQ(task.pipe_mask & (task.pipe_mask - 1), 0)
-          << "Each dependency-bearing statement in T.PerCoreTask must use "
-             "exactly one hardware pipe, but statement mask="
-          << task.pipe_mask << ", statement=" << GetRef<Stmt>(op);
-      ICHECK_EQ(task.pipe_mask, expected_pipe_mask_)
-          << "T.PerCoreTask candidate pipe does not match its inferred pipe. "
-             "Inferred mask="
-          << expected_pipe_mask_ << ", statement mask=" << task.pipe_mask
-          << ", statement=" << GetRef<Stmt>(op);
-      has_dependency_task_ = true;
-      return;
-    }
-    ICHECK_NE(op->attr_key, tl::attr::kAscendPerCoreTask)
-        << "Nested T.PerCoreTask regions are not supported";
-    ICHECK_NE(op->attr_key, attr::kScheduleUnit)
-        << "T.PerCoreTask contains an already-materialized schedule unit";
-    ICHECK(IsScheduleGuardAttribute(op->attr_key))
-        << "MaterializeScheduleUnits only supports known scheduling AttrStmt "
-           "wrappers inside T.PerCoreTask. Unsupported attr_key: "
-        << op->attr_key;
-    StmtVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const ForNode *op) final {
-    if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled)
-      FatalUnmarkedTask("MaterializeScheduleUnits", "parallel loop");
-    StmtVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const EvaluateNode *) final {
-    FatalUnmarkedTask("MaterializeScheduleUnits", "Evaluate");
-  }
-
-  void VisitStmt_(const BufferStoreNode *) final {
-    FatalUnmarkedTask("MaterializeScheduleUnits", "BufferStore");
-  }
-
-  void VisitStmt_(const BindNode *) final {
-    FatalUnmarkedTask("MaterializeScheduleUnits", "Bind");
-  }
-
-  void VisitStmt_(const WhileNode *) final {
-    FatalUnmarkedTask("MaterializeScheduleUnits", "While");
-  }
-
-  void VisitStmt_(const SBlockNode *) final {
-    FatalUnmarkedTask("MaterializeScheduleUnits", "block");
-  }
-
-  uint16_t expected_pipe_mask_{0};
-  bool has_dependency_task_{false};
+  std::string expected_;
 };
 
-void ValidatePerCoreTask(const AttrStmtNode *op) {
-  ICHECK_EQ(op->attr_key, tl::attr::kAscendPerCoreTask);
-  TaskResourceUsage resource_usage = AnalyzeTaskResourceUsage(op->body);
-  uint16_t pipe_mask = resource_usage.pipe_mask;
-  ICHECK_NE(pipe_mask, 0) << "Cannot infer an Ascend pipe for T.PerCoreTask";
-  ICHECK_EQ(pipe_mask & (pipe_mask - 1), 0)
+void ValidatePerCoreTask(const NativeTaskAttribute &task) {
+  ParseTaskMetadata(task.node);
+  auto usage = AnalyzeTaskResourceUsage(task.region->body);
+  TVM_FFI_CHECK(IsSingleResourcePipe(usage.pipe_mask), ValueError)
       << "T.PerCoreTask requires exactly one inferred hardware pipe, but its "
          "mask is "
-      << pipe_mask;
-  PerCoreTaskBodyValidator::Validate(op->body, pipe_mask);
-  PerCoreTaskControlValidator control_validator(pipe_mask);
-  control_validator(op->body);
+      << usage.pipe_mask;
+  bool has_dependency_task = false;
+  std::function<void(const Stmt &)> visit = [&](const Stmt &stmt) {
+    if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+      for (const Stmt &child : sequence->seq)
+        visit(child);
+      return;
+    }
+    if (auto attribute = ReadTaskAttribute(stmt)) {
+      if (attribute->key == attr::kAscendTask) {
+        auto candidate = ValidateTask(attribute.value(), true);
+        if (!candidate.has_buffer_access) {
+          TVM_FFI_CHECK(IsPerCoreScalarControl(attribute->region->body),
+                        ValueError)
+              << "T.PerCoreTask only permits scalar Bind/condition/loop "
+                 "control and inter-core synchronization in addition to "
+                 "operations on its inferred pipe";
+          return;
+        }
+        TVM_FFI_CHECK(candidate.pipe_mask == usage.pipe_mask, ValueError)
+            << "T.PerCoreTask candidate pipe does not match its inferred pipe";
+        has_dependency_task = true;
+        return;
+      }
+      TVM_FFI_CHECK(attribute->key != attr::kAscendPerCoreTask, ValueError)
+          << "Nested T.PerCoreTask regions are not supported";
+      TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
+                        IsMetadataScope(attribute.value()),
+                    ValueError)
+          << "Unsupported attribute inside T.PerCoreTask: " << attribute->key;
+      visit(attribute->region->body);
+      return;
+    }
+    if (const auto *loop = stmt.as<ForObj>()) {
+      TVM_FFI_CHECK(IsSerialLoop(loop), ValueError)
+          << "T.PerCoreTask has an unmarked parallel loop";
+      visit(loop->body);
+      return;
+    }
+    if (const auto *branch = stmt.as<IfObj>()) {
+      visit(branch->then_case);
+      if (branch->else_case)
+        visit(branch->else_case.value());
+      return;
+    }
+    if (stmt.as<BindObj>()) {
+      TVM_FFI_CHECK(!HasTaskBufferAccess(stmt), ValueError)
+          << "An unmarked scalar Bind inside T.PerCoreTask may not access "
+             "buffers";
+      return;
+    }
+    if (IsTaskMetadataStatement(stmt))
+      return;
+    FatalUnmarkedTask("MaterializeScheduleUnits", stmt->GetTypeKey());
+  };
+  visit(task.region->body);
+  TVM_FFI_CHECK(has_dependency_task, ValueError)
+      << "T.PerCoreTask must contain at least one dependency-bearing task "
+         "after task normalization";
+  auto validator = ffi::make_object<PerCoreControlValidator>(usage.pipe_mask);
+  validator->Visit(task.region->body);
 }
 
-// Lower normalized Task TIR into the canonical scheduled-TIR grammar without
-// making scheduling decisions. A child list without T.Stage uses stage -1
-// throughout. If any child has a requested non-negative stage, unannotated
-// siblings are normalized to stage 0 so AutoSchedule can identify manual mode
-// from a uniform per-list invariant.
+// Walk units belonging to one scheduling child list. Branches and assumption
+// regions retain lexical scope; a serial loop begins a separate child list.
+Stmt MapChildUnits(const Stmt &stmt,
+                   const std::function<Stmt(const Stmt &)> &map) {
+  if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+    Array<Stmt> body;
+    for (const Stmt &child : sequence->seq)
+      body.push_back(MapChildUnits(child, map));
+    return SeqStmt(body, stmt->loc);
+  }
+  if (const auto *bind = stmt.as<BindObj>(); IsScheduledBind(bind))
+    return map(stmt);
+  if (const auto *region = stmt.as<RegionStmtObj>(); IsScheduleUnit(region))
+    return map(stmt);
+  if (const auto *branch = stmt.as<IfObj>()) {
+    If rewritten = GetRef<If>(branch);
+    auto *writer = rewritten.CopyOnWrite();
+    writer->then_case =
+        NativeTaskAttribute::AsSequence(MapChildUnits(branch->then_case, map));
+    if (branch->else_case)
+      writer->else_case = NativeTaskAttribute::AsSequence(
+          MapChildUnits(branch->else_case.value(), map));
+    return rewritten;
+  }
+  if (auto attribute = ReadTaskAttribute(stmt)) {
+    TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
+                      IsMetadataScope(attribute.value()),
+                  ValueError)
+        << "Expected a scheduling guard or loop metadata scope, got "
+        << attribute->key;
+    return attribute->WithBody(MapChildUnits(attribute->region->body, map));
+  }
+  TVM_FFI_CHECK(IsTaskMetadataStatement(stmt), ValueError)
+      << "Incomplete native schedule: unmarked " << stmt->GetTypeKey();
+  return stmt;
+}
+
+Stmt SetUnitStage(const Stmt &stmt, int stage) {
+  if (const auto *bind = stmt.as<BindObj>(); IsScheduledBind(bind)) {
+    auto binding = ReadScheduledBinding(bind->value.as<CallObj>());
+    return WithScheduledBindingMetadata(GetRef<Bind>(bind), stage,
+                                        binding.task);
+  }
+  auto attribute = ReadTaskAttribute(stmt).value();
+  auto metadata = attribute.node.cast<ScheduleUnitMetadata>();
+  metadata.Set(kScheduleUnitStage, IntImm(PrimType::Int(64), stage));
+  return attribute.WithNode(metadata);
+}
+
+void ValidateScheduledList(const Stmt &body) {
+  MapChildUnits(body, [](const Stmt &stmt) {
+    GetScheduleUnitStage(stmt);
+    if (const auto *bind = stmt.as<BindObj>(); IsScheduledBind(bind)) {
+      ReadScheduledBinding(bind->value.as<CallObj>());
+      return stmt;
+    }
+    auto unit = ReadTaskAttribute(stmt).value();
+    Stmt payload = SingleStatement(unit.region->body);
+    if (const auto *loop = payload.as<ForObj>()) {
+      TVM_FFI_CHECK(IsSerialLoop(loop), ValueError)
+          << "Scheduled control must be a serial or unrolled loop";
+      ValidateScheduledList(loop->body);
+    } else {
+      auto task = ReadTaskAttribute(payload);
+      TVM_FFI_CHECK(task && IsSemanticTaskKey(task->key), ValueError)
+          << "Scheduled leaf must contain exactly one T.Task/T.PerCoreTask";
+      if (task->key == attr::kAscendTask)
+        ValidateTask(task.value(), false);
+      else
+        ValidatePerCoreTask(task.value());
+    }
+    return stmt;
+  });
+}
+
 class ScheduleUnitMaterializer {
 public:
-  static Stmt Rewrite(const Stmt &body) {
+  static SeqStmt Rewrite(const SeqStmt &body) {
+    bool already_scheduled = false;
+    VisitNativePostOrder(body, [&](const ffi::ObjectRef &object) {
+      if (const auto *region = object.as<RegionStmtObj>())
+        already_scheduled |= IsScheduleUnit(region);
+      if (const auto *call = object.as<CallObj>())
+        already_scheduled |= IsScheduledBind(call);
+    });
+    if (already_scheduled) {
+      ValidateScheduledList(body);
+      return body;
+    }
     ScheduleUnitMaterializer materializer;
-    std::vector<Stmt> units = materializer.MaterializeChildList(body);
-    return MakeSequence(units);
+    Stmt normalized = TaskNormalizer().Rewrite(body);
+    return materializer.MaterializeChildList(normalized);
   }
 
 private:
-  // Only kernel roots and loop bodies define child-list boundaries. Conditions
-  // and attributes flatten into their enclosing list and are normalized there.
-  std::vector<Stmt> MaterializeChildList(const Stmt &stmt) {
-    std::vector<Stmt> units = MaterializeList(stmt);
-    EnsureNonEmpty(&units);
-    NormalizeRequestedStages(&units);
-    return units;
-  }
-
-  std::vector<Stmt> MaterializeList(const Stmt &stmt) {
-    if (!stmt.defined())
-      return {};
-    if (const auto *sequence = stmt.as<SeqStmtNode>()) {
-      std::vector<Stmt> result;
-      for (const Stmt &child : sequence->seq) {
-        std::vector<Stmt> child_units = MaterializeList(child);
-        result.insert(result.end(), child_units.begin(), child_units.end());
-      }
-      return result;
+  Stmt EnsureNonEmpty(Stmt body) {
+    bool has_unit = false;
+    MapChildUnits(body, [&](const Stmt &unit) {
+      has_unit = true;
+      return unit;
+    });
+    if (!has_unit) {
+      auto empty_task = MakeTask(SeqStmt(Array<Stmt>{}, body->loc));
+      body = SeqStmt({body, MakeScheduleUnit(empty_task, kUnscheduledStage)},
+                     body->loc);
     }
-    if (const auto *loop = stmt.as<ForNode>())
-      return MaterializeLoop(loop);
-    if (const auto *condition = stmt.as<IfThenElseNode>())
-      return MaterializeCondition(condition);
-    if (const auto *attribute = stmt.as<AttrStmtNode>())
-      return MaterializeAttribute(attribute);
-    if (stmt.as<EvaluateNode>())
-      FatalUnmarkedTask("MaterializeScheduleUnits", "Evaluate");
-    if (stmt.as<BufferStoreNode>())
-      FatalUnmarkedTask("MaterializeScheduleUnits", "BufferStore");
-    if (stmt.as<BindNode>())
-      FatalUnmarkedTask("MaterializeScheduleUnits", "Bind");
-    if (stmt.as<WhileNode>())
-      FatalUnmarkedTask("MaterializeScheduleUnits", "While");
-    if (stmt.as<SBlockNode>())
-      FatalUnmarkedTask("MaterializeScheduleUnits", "block");
-    LOG(FATAL) << "MaterializeScheduleUnits found an unsupported statement: "
-               << stmt;
-  }
-
-  std::vector<Stmt> MaterializeLoop(const ForNode *op) {
-    if (op->kind != ForKind::kSerial && op->kind != ForKind::kUnrolled)
-      FatalUnmarkedTask("MaterializeScheduleUnits", "parallel loop");
-    std::vector<Stmt> body = MaterializeChildList(op->body);
-    For loop = GetRef<For>(op);
-    loop.CopyOnWrite()->body = MakeSequence(body);
-    return {MakeInitialScheduleUnit(std::move(loop))};
-  }
-
-  std::vector<Stmt> MaterializeCondition(const IfThenElseNode *op) {
-    std::vector<Stmt> result = MaterializeList(op->then_case);
-    for (Stmt &unit : result)
-      unit = PrependConditionGuard(unit, op->condition);
-    if (!op->else_case.defined())
-      return result;
-
-    std::vector<Stmt> else_units = MaterializeList(op->else_case.value());
-    PrimExpr else_condition = Not(op->condition);
-    for (Stmt &unit : else_units)
-      unit = PrependConditionGuard(unit, else_condition);
-    result.insert(result.end(), else_units.begin(), else_units.end());
-    return result;
-  }
-
-  std::vector<Stmt> MaterializeAttribute(const AttrStmtNode *op) {
-    ICHECK_NE(op->attr_key, attr::kScheduleUnit)
-        << "MaterializeScheduleUnits cannot run on an already-materialized "
-           "schedule";
-    if (op->attr_key == tl::attr::kAscendTask) {
-      ValidateTask(op, /*inside_per_core_task=*/false);
-      return {MakeInitialScheduleUnit(GetRef<Stmt>(op))};
-    }
-    if (op->attr_key == tl::attr::kAscendPerCoreTask) {
-      ValidatePerCoreTask(op);
-      return {MakeInitialScheduleUnit(GetRef<Stmt>(op))};
-    }
-    if (op->attr_key == tl::attr::kAscendStage) {
-      PrimExpr stage_expr = op->node.cast<PrimExpr>();
-      const auto *stage = stage_expr.as<IntImmNode>();
-      ICHECK(stage != nullptr && stage->value >= 0 &&
-             stage->value <= std::numeric_limits<int>::max())
-          << "T.Stage requires a non-negative constant integer, got "
-          << stage_expr;
-      std::vector<Stmt> body = MaterializeList(op->body);
-      EnsureNonEmpty(&body);
-      for (Stmt &unit : body)
-        unit = AssignStage(unit, static_cast<int>(stage->value));
-      return body;
-    }
-    ICHECK(IsScheduleGuardAttribute(op->attr_key))
-        << "MaterializeScheduleUnits only supports known scheduling AttrStmt "
-           "wrappers inside the schedulable tilelang_root body. Unsupported "
-           "attr_key: "
-        << op->attr_key;
-    std::vector<Stmt> body = MaterializeList(op->body);
-    EnsureNonEmpty(&body);
-    for (Stmt &unit : body)
-      unit = PrependAttributeGuard(unit, op);
     return body;
   }
 
-  void EnsureNonEmpty(std::vector<Stmt> *units) {
-    ICHECK(units != nullptr);
-    if (units->empty())
-      units->push_back(MakeInitialScheduleUnit(MakeNoOpTask()));
+  SeqStmt MaterializeChildList(const Stmt &stmt) {
+    Stmt result = EnsureNonEmpty(Materialize(stmt));
+    bool manual = false;
+    MapChildUnits(result, [&](const Stmt &unit) {
+      manual |= GetScheduleUnitStage(unit) != kUnscheduledStage;
+      return unit;
+    });
+    if (manual)
+      result = MapChildUnits(result, [](const Stmt &unit) {
+        return GetScheduleUnitStage(unit) == kUnscheduledStage
+                   ? SetUnitStage(unit, 0)
+                   : unit;
+      });
+    return NativeTaskAttribute::AsSequence(result);
   }
 
-  void NormalizeRequestedStages(std::vector<Stmt> *units) {
-    ICHECK(units != nullptr);
-    bool manual_schedule =
-        std::any_of(units->begin(), units->end(), [](const Stmt &unit) {
-          return GetScheduleUnitStage(RequireScheduleUnit(unit).get()) !=
-                 kUnscheduledStage;
-        });
-    if (!manual_schedule)
-      return;
-    for (Stmt &unit : *units) {
-      if (GetScheduleUnitStage(RequireScheduleUnit(unit).get()) ==
-          kUnscheduledStage) {
-        unit = AssignStage(unit, 0);
-      }
+  Stmt Materialize(const Stmt &stmt) {
+    if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+      Array<Stmt> body;
+      for (const Stmt &child : sequence->seq)
+        body.push_back(Materialize(child));
+      return SeqStmt(body, stmt->loc);
     }
+    if (IsTaskMetadataStatement(stmt))
+      return stmt;
+    if (const auto *bind = stmt.as<BindObj>())
+      return MakeScheduledBinding(GetRef<Bind>(bind), kUnscheduledStage);
+    if (const auto *loop = stmt.as<ForObj>()) {
+      TVM_FFI_CHECK(IsSerialLoop(loop), ValueError)
+          << "MaterializeScheduleUnits found an unmarked parallel loop";
+      For rewritten = GetRef<For>(loop);
+      rewritten.CopyOnWrite()->body = MaterializeChildList(loop->body);
+      return MakeScheduleUnit(rewritten, kUnscheduledStage);
+    }
+    if (const auto *branch = stmt.as<IfObj>()) {
+      If rewritten = GetRef<If>(branch);
+      auto *writer = rewritten.CopyOnWrite();
+      writer->then_case =
+          NativeTaskAttribute::AsSequence(Materialize(branch->then_case));
+      if (branch->else_case)
+        writer->else_case = NativeTaskAttribute::AsSequence(
+            Materialize(branch->else_case.value()));
+      return rewritten;
+    }
+    auto attribute = ReadTaskAttribute(stmt);
+    TVM_FFI_CHECK(attribute.has_value(), ValueError)
+        << "MaterializeScheduleUnits found an unmarked " << stmt->GetTypeKey();
+    if (attribute->key == attr::kAscendTask) {
+      ValidateTask(attribute.value(), false);
+      return MakeScheduleUnit(stmt, kUnscheduledStage);
+    }
+    if (attribute->key == attr::kAscendPerCoreTask) {
+      ValidatePerCoreTask(attribute.value());
+      return MakeScheduleUnit(stmt, kUnscheduledStage);
+    }
+    if (attribute->key == attr::kAscendStage) {
+      const auto *stage = task_metadata_detail::RequireConstantTaskMetadataInt(
+          attribute->node, "stage");
+      int64_t value = stage->value.as<int64_t>().value();
+      TVM_FFI_CHECK(value >= 0 && value <= std::numeric_limits<int>::max(),
+                    ValueError)
+          << "T.Stage requires a non-negative constant int32 value";
+      Stmt body = EnsureNonEmpty(Materialize(attribute->region->body));
+      return MapChildUnits(body, [&](const Stmt &unit) {
+        TVM_FFI_CHECK_EQ(GetScheduleUnitStage(unit), kUnscheduledStage,
+                         ValueError)
+            << "Nested T.Stage scopes are not supported";
+        return SetUnitStage(unit, static_cast<int>(value));
+      });
+    }
+    TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
+                      IsMetadataScope(attribute.value()),
+                  ValueError)
+        << "MaterializeScheduleUnits only supports known scheduling "
+           "attributes inside a kernel; unsupported attr_key: "
+        << attribute->key;
+    return attribute->WithBody(
+        EnsureNonEmpty(Materialize(attribute->region->body)));
   }
 };
 
 } // namespace
 
-/*! \brief Normalize task boundaries and materialize unscheduled units. */
 tvm::transform::Pass MaterializeScheduleUnits() {
-  auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
-    return RewriteTilelangKernels(
-        std::move(func), "MaterializeScheduleUnits",
+  auto pass_func = [](tirx::Function function, const IRModule &,
+                      const tvm::transform::PassContext &) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    CheckWellFormed(function);
+    auto result = RewriteTilelangKernels(
+        std::move(function), "MaterializeScheduleUnits",
         [](const TilelangKernelContext &context) {
-          SBlock root = context.root;
-          Stmt normalized = TaskNormalizer::Rewrite(root->body);
-          root.CopyOnWrite()->body =
-              ScheduleUnitMaterializer::Rewrite(normalized);
+          RegionStmt root = context.root;
+          SeqStmt body = ScheduleUnitMaterializer::Rewrite(root->body);
+          if (!body.same_as(root->body))
+            root.CopyOnWrite()->body = std::move(body);
           return root;
         },
-        /*require_kernel=*/false);
+        false);
+    CheckWellFormed(result);
+    return result;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MaterializeScheduleUnits", {});
+  return tirx::transform::CreateFunctionPass(pass_func, 0,
+                                             "tl.MaterializeScheduleUnits");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.MaterializeScheduleUnits",
-                        MaterializeScheduleUnits);
+  ffi::reflection::GlobalDef().def("tl.transform.MaterializeScheduleUnits",
+                                   MaterializeScheduleUnits);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

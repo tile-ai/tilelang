@@ -3,997 +3,900 @@
 
 /*!
  * \file ascend_simdvf_lower_parallel.cc
- * \brief Lower T.Parallel loops inside SIMD_VF blocks to Ascend SIMD
- *        return-value vector instructions.
+ * \brief Lower native SIMD_VF parallel loops and tile ops to register SSA.
  */
-
-#include <tvm/arith/analyzer.h>
+#include "ir/analyzer.h"
+#include "ir/loop_math.h"
+#include "ir/tensor_utils.h"
+#include "native_vf_utils.h"
+#include "op/native_intrinsic.h"
+#include "op/native_utils.h"
+#include "op/reducer.h"
+#include "op/utils.h"
+#include <cmath>
+#include <limits>
 #include <tvm/ffi/reflection/registry.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
-
-#include "ascend/op/builtin.h"
-#include "ascend/op/copy.h"
-#include "op/utils.h"
-
-#include <functional>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
+namespace {
+using namespace ffi;
 using namespace tirx;
-using ffi::Array;
+using namespace prim;
 
-class AscendSimdVFLowerParallel : public StmtExprMutator {
+class SimdVFLowerer : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
-    AscendSimdVFLowerParallel substituter;
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = substituter.VisitStmt(f->body);
-    return ffi::GetRef<PrimFunc>(fptr);
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+  explicit SimdVFLowerer(const tirx::Function &function) {
+    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
+      if (const auto *bind = object.as<BindObj>())
+        definitions_.Set(bind->var, bind->value);
+    });
+  }
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
+                            InplaceMode mode) final {
+    auto kind = GetAscendVFKind(region);
+    bool previous = inside_;
+    if (kind != AscendVFKind::kNone)
+      inside_ = kind == AscendVFKind::kSimd;
+    auto result = StmtExprMutator::Mutate_(region, mode);
+    inside_ = previous;
+    return result;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ForObj *loop, InplaceMode mode) final {
+    if (!inside_ || loop->kind != ForKind::kParallel)
+      return StmtExprMutator::Mutate_(loop, mode);
+    RecordNarrowRange(loop);
+    auto leaf = Peel(loop->body);
+    const auto *inner = leaf.as<ForObj>();
+    if (inner && inner->kind == ForKind::kParallel) {
+      RecordNarrowRange(inner);
+      auto nested = Peel(inner->body);
+      const auto *third = nested.as<ForObj>();
+      TVM_FFI_CHECK(!third || third->kind != ForKind::kParallel, ValueError)
+          << "SIMD_VF supports at most two parallel dimensions";
+      if (!StoreBody(inner->body))
+        return StmtExprMutator::Mutate_(loop, mode);
+      const auto *store = FirstStore(inner->body);
+      SeqStmt leaf_body({RemoveInnerLoop(loop->body, inner)});
+      if (StoreStride(store, inner->var) == 1 && prim::IsOne(inner->step))
+        return LowerParallel(inner, loop, leaf_body);
+      if (StoreStride(store, loop->var) == 1 && prim::IsOne(loop->step))
+        return LowerParallel(loop, inner, leaf_body);
+      TVM_FFI_THROW(ValueError)
+          << "SIMD_VF 2D parallel requires a unit-step contiguous dimension";
+    }
+    if (!StoreBody(loop->body))
+      return StmtExprMutator::Mutate_(loop, mode);
+    return LowerParallel(loop, nullptr, loop->body);
+  }
+
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *evaluate,
+                            InplaceMode mode) final {
+    const auto *call = evaluate->value.as<CallObj>();
+    const auto *op = call ? call->op.as<OpObj>() : nullptr;
+    if (!inside_ || !op)
+      return StmtExprMutator::Mutate_(evaluate, mode);
+    if (op->name == "tl.tileop.fill")
+      return LowerFill(call);
+    if (op->name == "tl.tileop.copy" || op->name == "tl.tileop.ascend_copy")
+      return LowerCopy(call);
+    if (op->name == "tl.tileop.reduce")
+      return LowerReduce(call);
+    return StmtExprMutator::Mutate_(evaluate, mode);
   }
 
 private:
-  bool inside_simdvf_{false};
-
-  const VarNode *parallel_var_{nullptr};
-  int64_t parallel_extent_{0};
-
-  const VarNode *outer_parallel_var_{nullptr};
-  Var outer_serial_var_;
-
-  int64_t vreg_size_{0};
-  Var chunk_var_;
-  Var mask_var_;
-
-  int frag_counter_{0};
-  int64_t elem_bits_{0};
-  std::vector<Stmt> scalar_loads_;
-
-  static int64_t ComputeVRegSize(DataType dtype) {
-    return 8 * 32 / (dtype.bits() / 8);
+  static int64_t VRegSize(PrimType dtype) {
+    TVM_FFI_CHECK(dtype.lanes() == 1 && dtype.bits() >= 8 &&
+                      dtype.bits() <= 64 && 2048 % dtype.bits() == 0,
+                  TypeError)
+        << "SIMD_VF parallel lowering needs an 8/16/32/64-bit scalar element "
+           "type, got "
+        << dtype;
+    return 2048 / dtype.bits();
+  }
+  static PrimExpr I32(int64_t value) {
+    return IntImm(PrimType::Int(32), value);
+  }
+  static Expr Text(const char *text) { return StringImm(text); }
+  Var Register(PrimType dtype) {
+    return Var("vreg_" + std::to_string(next_register_++),
+               dtype.WithLanes(VRegSize(dtype)));
+  }
+  Call Intrinsic(const char *name, Type type, Array<Expr> operands,
+                 Location loc = UnknownLoc(),
+                 Map<String, Any> annotations = {}) {
+    auto op = Op::Get(String("tl.simd.") + name);
+    return annotations.empty()
+               ? Call(type, op, operands, {}, {}, loc)
+               : MakeAnnotatedCall(type, op, operands, annotations, loc);
+  }
+  Bind Mask(const Var &mask, PrimType dtype, Location loc) {
+    return Bind(
+        mask,
+        Intrinsic("pset", mask->ty, {I32(dtype.bits()), Text("PAT_ALL")}, loc),
+        loc);
+  }
+  static For Serial(PrimVar variable, PrimExpr end, SeqStmt body,
+                    Location loc) {
+    return For(variable, IntImm(variable.ty(), 0), std::move(end),
+               IntImm(variable.ty(), 1), ForKind::kDefault, std::move(body), {},
+               loc);
   }
 
-  static PrimExpr MatchIndexDType(const PrimExpr &value, DataType dtype) {
-    return value.dtype() == dtype ? value : Cast(dtype, value);
-  }
-
-  static Array<PrimExpr> InferCompactStrides(const Array<PrimExpr> &shape) {
-    int ndim = static_cast<int>(shape.size());
-    std::vector<PrimExpr> strides(ndim);
-    PrimExpr stride = IntImm(shape.back().dtype(), 1);
-    for (int i = ndim - 1; i >= 0; --i) {
-      strides[i] = stride;
-      stride = stride * shape[i];
-    }
-    return Array<PrimExpr>(strides.begin(), strides.end());
-  }
-
-  // True when a row-major walk of the region is a contiguous element sequence,
-  // so a VReg-sized vsts from each linearized chunk address is legal. Leading
-  // unit-extent dims (the in-loop multi-buffer version slot) are skipped.
-  static bool IsContiguousRegion(const Buffer &buf,
-                                 const std::vector<int64_t> &extents) {
-    int ndim = static_cast<int>(extents.size());
-    ICHECK_EQ(static_cast<int>(buf->shape.size()), ndim);
-    Array<PrimExpr> strides =
-        buf->strides.empty() ? InferCompactStrides(buf->shape) : buf->strides;
-    ICHECK_EQ(static_cast<int>(strides.size()), ndim);
-    int64_t expected = 1;
-    for (int i = ndim - 1; i >= 0; --i) {
-      if (extents[i] == 1) {
+  // Look through metadata while retaining it during reconstruction. Never
+  // treat a computational region or a conditional as a transparent wrapper.
+  static Stmt Peel(Stmt stmt) {
+    while (true) {
+      if (const auto *seq = stmt.as<SeqStmtObj>();
+          seq && seq->seq.size() == 1) {
+        stmt = seq->seq[0];
         continue;
       }
-      const auto *stride = strides[i].as<IntImmNode>();
-      if (!stride || stride->value != expected) {
-        return false;
+      if (const auto *region = stmt.as<RegionStmtObj>();
+          region && region->op->name == "tl.attr" &&
+          region->body_params.empty() && region->result_vars.empty() &&
+          GetAscendVFKind(region) == AscendVFKind::kNone) {
+        stmt = region->body;
+        continue;
       }
+      return stmt;
+    }
+  }
+  static Stmt RemoveInnerLoop(const Stmt &stmt, const ForObj *inner) {
+    if (stmt.get() == inner)
+      return inner->body;
+    if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+      TVM_FFI_CHECK_EQ(sequence->seq.size(), 1U, ValueError);
+      return SeqStmt({RemoveInnerLoop(sequence->seq[0], inner)}, stmt->loc);
+    }
+    auto region = stmt.as_or_throw<RegionStmt>();
+    return RegionStmt(region->op, region->args, region->body_params,
+                      region->attrs,
+                      SeqStmt({RemoveInnerLoop(region->body, inner)}),
+                      region->result_vars, region->loc);
+  }
+  static bool StoreBody(const Stmt &stmt) {
+    if (stmt.as<TensorStoreObj>())
+      return true;
+    if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+      if (sequence->seq.empty())
+        return false;
+      for (const Stmt &child : sequence->seq)
+        if (!StoreBody(child))
+          return false;
+      return true;
+    }
+    if (const auto *region = stmt.as<RegionStmtObj>())
+      return region->op->name == "tl.attr" && region->body_params.empty() &&
+             region->result_vars.empty() &&
+             GetAscendVFKind(region) == AscendVFKind::kNone &&
+             StoreBody(region->body);
+    return false;
+  }
+  static const TensorStoreObj *FirstStore(const Stmt &stmt) {
+    if (const auto *store = stmt.as<TensorStoreObj>())
+      return store;
+    if (const auto *sequence = stmt.as<SeqStmtObj>())
+      return FirstStore(sequence->seq[0]);
+    return FirstStore(stmt.as_or_throw<RegionStmt>()->body);
+  }
+
+  PrimExpr Substitute(const PrimExpr &expr) {
+    auto mutator = make_object<StmtExprMutator>();
+    for (const auto &[var, value] : substitutions_)
+      mutator->VarRemapSet(var, value);
+    return analyzer_->Simplify(mutator->Mutate(expr).ValueOrUnchanged(expr));
+  }
+  bool Uses(const PrimExpr &expr, const PrimVar &variable) {
+    return UsesAnyVar(expr,
+                      [&](const VarObj *var) { return var == variable.get(); });
+  }
+  void RecordNarrowRange(const ForObj *loop) {
+    if (loop->var.ty().bits() > 16 || !prim::IsOne(loop->step))
+      return;
+    const auto *begin = loop->begin.as<IntImmObj>();
+    const auto *end = loop->end.as<IntImmObj>();
+    if (begin && end) {
+      auto lo = begin->value.as<int64_t>(), hi = end->value.as<int64_t>();
+      if (lo && hi && *hi > *lo && *hi - *lo <= 4096)
+        narrow_ranges_[loop->var.get()] = {*lo, *hi};
+    }
+  }
+  int64_t Stride(const PrimExpr &offset, const PrimVar &variable) {
+    if (!Uses(offset, variable))
+      return 0;
+    // Compare physical offsets in a wide type. An int8 delta of +1 must not
+    // disguise a memory discontinuity at the int8 wraparound boundary.
+    auto wide_offset = prim::Cast(PrimType::Int(64), offset);
+    auto substitute = make_object<StmtExprMutator>();
+    substitute->VarRemapSet(variable, variable + IntImm(variable.ty(), 1));
+    auto next = substitute->Mutate(wide_offset).ValueOrUnchanged(wide_offset);
+    auto difference = analyzer_->Simplify(next - wide_offset);
+    const auto *constant = difference.as<IntImmObj>();
+    if (constant)
+      return constant->value.as<int64_t>().value_or(-1);
+    // Narrow machine indices can have casts whose generic difference is not
+    // affine. For a small complete constant domain, establish every adjacent
+    // physical difference. This never extends a proof beyond the loop domain.
+    auto range = narrow_ranges_.find(variable.get());
+    if (range == narrow_ranges_.end() ||
+        range->second.second - range->second.first < 2)
+      return -1;
+    Optional<int64_t> stride;
+    Optional<PrimExpr> previous;
+    for (int64_t i = range->second.first; i < range->second.second; ++i) {
+      auto point = make_object<StmtExprMutator>();
+      point->VarRemapSet(variable, IntImm(variable.ty(), i));
+      auto current = analyzer_->Simplify(
+          point->Mutate(wide_offset).ValueOrUnchanged(wide_offset));
+      if (previous) {
+        auto delta = analyzer_->Simplify(current - *previous);
+        const auto *literal = delta.as<IntImmObj>();
+        auto value = literal ? literal->value.as<int64_t>() : std::nullopt;
+        if (!value || (stride && *stride != *value))
+          return -1;
+        stride = *value;
+      }
+      previous = current;
+    }
+    return stride.value_or(-1);
+  }
+  int64_t StoreStride(const TensorStoreObj *store, const PrimVar &variable) {
+    auto tensor = store->dest.as_or_throw<TensorVar>();
+    return Stride(TensorElementOffset(tensor, store->indices), variable);
+  }
+  Expr Address(const TensorVar &tensor, Array<PrimExpr> indices, int access,
+               int64_t elements, Location loc) {
+    for (size_t i = 0; i < indices.size(); ++i)
+      indices.Set(i, Substitute(indices[i]));
+    auto index_type = indices.empty() ? PrimType::Int(32) : indices[0].ty();
+    auto extent_type = index_type.bits() < 32 ? PrimType::Int(32) : index_type;
+    return MakeTensorAccessPtr(TensorLoad(tensor, indices, loc),
+                               IntImm(extent_type, elements), access);
+  }
+
+  Var Decompose(const PrimExpr &expression, PrimType dtype, const Var &mask,
+                Array<Stmt> *statements) {
+    if (const auto *load = expression.as<TensorLoadObj>()) {
+      auto tensor = load->source.as_or_throw<TensorVar>();
+      TVM_FFI_CHECK(tensor.dtype() == dtype &&
+                        load->ty.as_or_throw<PrimType>() == dtype,
+                    TypeError)
+          << "SIMD_VF element expression needs one uniform scalar dtype";
+      int64_t stride =
+          Stride(TensorElementOffset(tensor, load->indices), *vector_var_);
+      TVM_FFI_CHECK(stride == 0 || stride == 1, ValueError)
+          << "SIMD_VF vector load requires unit physical stride or a scalar "
+             "broadcast";
+      Var value = Register(dtype);
+      auto distribution = stride == 1
+                              ? String("NORM")
+                              : String("BRC_B" + std::to_string(dtype.bits()));
+      statements->push_back(
+          Bind(value,
+               Intrinsic("vld", value->ty,
+                         {Address(tensor, load->indices, 1,
+                                  stride ? vector_size_ : 1, load->loc),
+                          StringImm(distribution)},
+                         load->loc),
+               load->loc));
+      return value;
+    }
+    auto binary = [&](const PrimExpr &left, const PrimExpr &right,
+                      const char *name) {
+      Var lhs = Decompose(left, dtype, mask, statements);
+      Var rhs = Decompose(right, dtype, mask, statements);
+      Var output = Register(dtype);
+      statements->push_back(Bind(
+          output,
+          Intrinsic(name, output->ty, {lhs, rhs, mask, Text("MODE_ZEROING")},
+                    expression->loc),
+          expression->loc));
+      return output;
+    };
+    if (const auto *op = expression.as<prim::AddObj>())
+      return binary(op->a, op->b, "vadd");
+    if (const auto *op = expression.as<prim::SubObj>()) {
+      const auto *zero = op->a.as<FloatImmObj>();
+      if (prim::IsZero(op->a) || (zero && zero->value == 0.0)) {
+        Var input = Decompose(op->b, dtype, mask, statements);
+        Var output = Register(dtype);
+        statements->push_back(Bind(
+            output,
+            Intrinsic("vneg", output->ty, {input, mask, Text("MODE_ZEROING")},
+                      expression->loc),
+            expression->loc));
+        return output;
+      }
+      return binary(op->a, op->b, "vsub");
+    }
+    if (const auto *op = expression.as<prim::MulObj>())
+      return binary(op->a, op->b, "vmul");
+    if (const auto *op = expression.as<prim::DivObj>())
+      return binary(op->a, op->b, "vdiv");
+    if (const auto *op = expression.as<prim::MaxObj>())
+      return binary(op->a, op->b, "vmax");
+    if (const auto *op = expression.as<prim::MinObj>())
+      return binary(op->a, op->b, "vmin");
+    if (const auto *call = expression.as<CallObj>()) {
+      const auto *op = call->op.as<OpObj>();
+      std::string name = op ? std::string(op->name) : "";
+      const char *instruction = name == "prim.exp" ? "vexp"
+                                : name == "prim.log" || name == "prim.ln"
+                                    ? "vln"
+                                : name == "prim.sqrt" ? "vsqrt"
+                                : name == "prim.fabs" ? "vabs"
+                                                      : nullptr;
+      auto arguments = NativeIntrinsicOperands(call);
+      if (instruction && arguments.size() == 1) {
+        auto input = Decompose(arguments[0].as_or_throw<PrimExpr>(), dtype,
+                               mask, statements);
+        auto output = Register(dtype);
+        Map<String, Any> annotations;
+        if (arguments.size() != call->args.size())
+          annotations = DecodeTileOpArguments(call).annotations;
+        statements->push_back(
+            Bind(output,
+                 Intrinsic(instruction, output->ty,
+                           {input, mask, Text("MODE_ZEROING")}, call->loc,
+                           annotations),
+                 call->loc));
+        return output;
+      }
+    }
+    bool scalar = expression.as<IntImmObj>() || expression.as<FloatImmObj>() ||
+                  expression.as<VarObj>();
+    if (const auto *cast = expression.as<prim::CastObj>()) {
+      bool has_load = false;
+      VisitNativePostOrder(Evaluate(cast->value), [&](const ObjectRef &node) {
+        has_load |= node.as<TensorLoadObj>() != nullptr;
+      });
+      scalar = !UsesAnyVar(cast->value, [&](const VarObj *var) {
+        return vector_var_ && var == vector_var_.value().get();
+      }) && !has_load;
+    }
+    if (scalar && !Uses(expression, *vector_var_)) {
+      auto value = Substitute(expression);
+      if (value.ty() != dtype)
+        value = prim::Cast(dtype, value);
+      Var output = Register(dtype);
+      statements->push_back(
+          Bind(output,
+               Intrinsic("vdup", output->ty,
+                         {value, mask, Text("MODE_ZEROING")}, expression->loc),
+               expression->loc));
+      return output;
+    }
+    TVM_FFI_THROW(ValueError)
+        << "Unsupported SIMD_VF vector expression: " << expression;
+    return Var(ffi::UnsafeInit{});
+  }
+
+  Stmt LowerBody(const Stmt &stmt, PrimType dtype, const Var &mask) {
+    if (const auto *store = stmt.as<TensorStoreObj>()) {
+      auto destination = store->dest.as_or_throw<TensorVar>();
+      TVM_FFI_CHECK(destination.dtype() == dtype &&
+                        StoreStride(store, *vector_var_) == 1,
+                    ValueError)
+          << "SIMD_VF stores need one uniform dtype and contiguous physical "
+             "vector dimension";
+      Array<Stmt> sequence;
+      Var value = Decompose(store->value, dtype, mask, &sequence);
+      sequence.push_back(
+          Evaluate(Intrinsic("vsts", PrimType::Void(),
+                             {Address(destination, store->indices, 2,
+                                      vector_size_, store->loc),
+                              value, mask, Text("NORM_B32")},
+                             store->loc),
+                   store->loc));
+      return SeqStmt(sequence, store->loc);
+    }
+    if (const auto *sequence = stmt.as<SeqStmtObj>()) {
+      Array<Stmt> result;
+      for (const Stmt &child : sequence->seq)
+        result.push_back(LowerBody(child, dtype, mask));
+      return SeqStmt(result, stmt->loc);
+    }
+    auto region = stmt.as_or_throw<RegionStmt>();
+    Array<Expr> arguments;
+    auto substitution = make_object<StmtExprMutator>();
+    for (const auto &[var, value] : substitutions_)
+      substitution->VarRemapSet(var, value);
+    for (const Expr &arg : region->args)
+      arguments.push_back(substitution->Mutate(arg).ValueOrUnchanged(arg));
+    return RegionStmt(region->op, arguments, {}, region->attrs,
+                      SeqStmt({LowerBody(region->body, dtype, mask)}), {},
+                      region->loc);
+  }
+
+  Stmt LowerParallel(const ForObj *vector_loop, const ForObj *serial_loop,
+                     SeqStmt leaf_body) {
+    TVM_FFI_CHECK(prim::IsOne(vector_loop->step), ValueError)
+        << "SIMD_VF vector dimension must have unit step";
+    int vector_count = ConstantUnrollTripCount(vector_loop, analyzer_);
+    int serial_count =
+        serial_loop ? ConstantUnrollTripCount(serial_loop, analyzer_) : 1;
+    TVM_FFI_CHECK(vector_count >= 0 && serial_count >= 0, ValueError)
+        << "SIMD_VF parallel ranges need finite constant iteration counts";
+    auto dtype =
+        FirstStore(leaf_body)->dest->ty.as_or_throw<TensorType>()->dtype;
+    vector_size_ = VRegSize(dtype);
+    TVM_FFI_CHECK_EQ(vector_count % vector_size_, 0, ValueError)
+        << "SIMD_VF parallel extent must be divisible by VReg size "
+        << vector_size_;
+    if (vector_count == 0 || serial_count == 0)
+      return SeqStmt({}, vector_loop->loc);
+    auto previous_vars = substitutions_;
+    auto previous_vector = vector_var_;
+    vector_var_ = vector_loop->var;
+    // Counting complete registers needs a type which can represent VRegSize.
+    // Keep the source loop's index type at the final substitution boundary.
+    auto counter_type = [](PrimType type) {
+      return type.bits() < 32 ? PrimType::Int(32) : type;
+    };
+    PrimVar chunk("vchunk", counter_type(vector_loop->var.ty()));
+    PrimExpr vector_index = prim::Cast(chunk.ty(), vector_loop->begin) +
+                            chunk * IntImm(chunk.ty(), vector_size_);
+    substitutions_.Set(vector_loop->var,
+                       prim::Cast(vector_loop->var.ty(), vector_index));
+    PrimVar serial("vserial", serial_loop ? counter_type(serial_loop->var.ty())
+                                          : PrimType::Int(32));
+    if (serial_loop) {
+      PrimExpr serial_index =
+          prim::Cast(serial.ty(), serial_loop->begin) +
+          serial * prim::Cast(serial.ty(), serial_loop->step);
+      substitutions_.Set(serial_loop->var,
+                         prim::Cast(serial_loop->var.ty(), serial_index));
+    }
+    Var mask("mask", PrimType::Bool(256));
+    SeqStmt body({Mask(mask, dtype, vector_loop->loc),
+                  LowerBody(leaf_body, dtype, mask)});
+    Stmt result = For(chunk, IntImm(chunk.ty(), 0),
+                      IntImm(chunk.ty(), vector_count / vector_size_),
+                      IntImm(chunk.ty(), 1), ForKind::kDefault, body,
+                      vector_loop->annotations, vector_loop->loc);
+    if (serial_loop)
+      result =
+          For(serial, IntImm(serial.ty(), 0), IntImm(serial.ty(), serial_count),
+              IntImm(serial.ty(), 1), ForKind::kDefault, SeqStmt({result}),
+              serial_loop->annotations, serial_loop->loc);
+    substitutions_ = previous_vars;
+    vector_var_ = previous_vector;
+    return result;
+  }
+
+  std::vector<int64_t> Extents(const TensorRegion &region, int64_t *total) {
+    std::vector<int64_t> extents;
+    *total = 1;
+    for (const Range &range : region->region) {
+      const auto *extent = range->extent.as<IntImmObj>();
+      auto value = extent ? extent->value.as<int64_t>() : std::nullopt;
+      TVM_FFI_CHECK(
+          value && *value >= 0 &&
+              (*value == 0 ||
+               *total <= std::numeric_limits<int64_t>::max() / *value),
+          ValueError)
+          << "SIMD_VF tile regions need non-negative constant extents without "
+             "overflow";
+      extents.push_back(*value);
+      *total *= *value;
+    }
+    return extents;
+  }
+  bool Contiguous(const TensorVar &tensor,
+                  const std::vector<int64_t> &extents) {
+    auto pattern = tirx::MatchShapeStridePattern(tensor.ty());
+    if (!pattern || extents.size() != tensor.shape().size())
+      return false;
+    auto [shape, strides, origin] = pattern.value();
+    int64_t expected = 1;
+    for (size_t i = extents.size(); i-- > 0;) {
+      if (extents[i] == 1)
+        continue;
+      if (!analyzer_->CanProveEqual(strides[i],
+                                    IntImm(strides[i].ty(), expected)))
+        return false;
       expected *= extents[i];
     }
     return true;
   }
-
-  static bool TryGetConstExtents(const Array<Range> &ranges,
-                                 std::vector<int64_t> *extents,
-                                 int64_t *total) {
-    extents->clear();
-    *total = 1;
-    for (const Range &range : ranges) {
-      const auto *ext = range->extent.as<IntImmNode>();
-      if (!ext) {
-        return false;
+  void FullRegion(const TensorRegion &region) {
+    auto tensor = RegionTensor(region);
+    TVM_FFI_CHECK_EQ(region->region.size(), tensor.shape().size(), ValueError);
+    for (size_t i = 0; i < tensor.shape().size(); ++i)
+      TVM_FFI_CHECK(prim::IsZero(region->region[i]->begin) &&
+                        analyzer_->CanProveEqual(region->region[i]->extent,
+                                                 tensor.shape()[i]),
+                    ValueError)
+          << "SIMD_VF copy/reduce requires full-buffer regions";
+  }
+  Array<PrimExpr> RegionIndices(const TensorRegion &region,
+                                const std::vector<int64_t> &extents,
+                                PrimExpr flat) {
+    Array<PrimExpr> indices;
+    for (size_t axis = extents.size(); axis-- > 0;) {
+      PrimExpr index = flat;
+      if (axis != 0) {
+        index = floormod(flat, IntImm(flat.ty(), extents[axis]));
+        flat = floordiv(flat, IntImm(flat.ty(), extents[axis]));
       }
-      extents->push_back(ext->value);
-      *total *= ext->value;
+      auto begin = region->region[axis]->begin;
+      if (index.ty() != begin.ty())
+        index = prim::Cast(begin.ty(), index);
+      indices.insert(indices.begin(), begin + index);
     }
-    return true;
+    return indices;
   }
 
-  // Delinearize a flattened region offset. Mins may be symbolic (the physical
-  // version index after MaterializeMultiBuffer).
-  static Array<PrimExpr> MakeRegionIndices(const Array<Range> &ranges,
-                                           const std::vector<int64_t> &extents,
-                                           PrimExpr flat_idx) {
-    int ndim = static_cast<int>(ranges.size());
-    ICHECK_EQ(static_cast<int>(extents.size()), ndim);
-    DataType dtype = flat_idx.dtype();
-    if (ndim == 1) {
-      return {ranges[0]->min +
-              MatchIndexDType(flat_idx, ranges[0]->min.dtype())};
-    }
-    Array<PrimExpr> idxs;
-    PrimExpr remaining = flat_idx;
-    for (int i = ndim - 1; i >= 1; --i) {
-      PrimExpr ext = IntImm(dtype, extents[i]);
-      PrimExpr coord = FloorMod(remaining, ext);
-      idxs.insert(idxs.begin(),
-                  ranges[i]->min +
-                      MatchIndexDType(coord, ranges[i]->min.dtype()));
-      remaining = FloorDiv(remaining, ext);
-    }
-    idxs.insert(idxs.begin(),
-                ranges[0]->min +
-                    MatchIndexDType(remaining, ranges[0]->min.dtype()));
-    return idxs;
-  }
-
-  // vsts_norm lowers to asc_storealign and requires a 32-byte-aligned base.
-  // Prove the linearized region byte offset is a multiple of 32 (mirrors
-  // insert_nd2nz.cc:HasAlignedScatterBase); symbolic version indices remain
-  // provable when the per-version stride is 32-byte aligned.
-  static void ValidateFillBaseAlignment(const Buffer &buf,
-                                        const Array<Range> &ranges) {
-    arith::Analyzer analyzer;
-    DataType index_dtype = DataType::Int(64);
-    PrimExpr offset = cast(index_dtype, buf->elem_offset);
-    PrimExpr compact_stride = make_const(index_dtype, 1);
-    for (size_t axis = buf->shape.size(); axis-- > 0;) {
-      PrimExpr stride = buf->strides.empty()
-                            ? compact_stride
-                            : cast(index_dtype, buf->strides[axis]);
-      offset = offset + cast(index_dtype, ranges[axis]->min) * stride;
-      compact_stride = compact_stride * cast(index_dtype, buf->shape[axis]);
-    }
-    PrimExpr element_bytes =
-        make_const(index_dtype, (buf->dtype.bits() + 7) / 8);
-    PrimExpr alignment = make_const(index_dtype, 32);
-    if (!analyzer.CanProveEqual(FloorMod(offset * element_bytes, alignment),
-                                make_const(index_dtype, 0))) {
-      TVM_FFI_THROW(ValueError)
-          << "T.fill inside SimdVF requires a 32-byte-aligned region base "
-             "address, got region ["
-          << ranges << "] of buffer " << buf->name
-          << " with linearized byte offset " << offset * element_bytes
-          << " (element size " << (buf->dtype.bits() + 7) / 8
-          << " bytes). Use a region whose base is 32-byte aligned.";
-    }
-  }
-
-  static bool CanLowerFillRegion(const Buffer &buf, const Array<Range> &ranges,
-                                 int64_t vreg_size, int64_t *total,
-                                 std::vector<int64_t> *extents) {
-    if (ranges.empty() || static_cast<int>(ranges.size()) !=
-                              static_cast<int>(buf->shape.size())) {
-      return false;
-    }
-    if (!TryGetConstExtents(ranges, extents, total)) {
-      return false;
-    }
-    if (*total <= 0 || *total % vreg_size != 0) {
-      return false;
-    }
-    if (!IsContiguousRegion(buf, *extents)) {
-      return false;
-    }
-    // Structural checks passed; report a misaligned base with a clear error.
-    ValidateFillBaseAlignment(buf, ranges);
-    return true;
-  }
-
-  Var MakeReg(DataType dtype) {
-    std::string name = "vreg_" + std::to_string(frag_counter_++);
-    int vl = ComputeVRegSize(dtype);
-    return Var(name, dtype.with_lanes(vl));
-  }
-
-  static Stmt MakeSeq(Array<Stmt> seq) {
-    if (seq.empty()) {
-      return Evaluate(IntImm(DataType::Int(32), 0));
-    }
-    if (seq.size() == 1) {
-      return seq[0];
-    }
-    return SeqStmt(seq);
-  }
-
-  static Stmt AppendStmt(Array<Stmt> seq, const Stmt &tail) {
-    seq.push_back(tail);
-    return MakeSeq(seq);
-  }
-
-  static Stmt BindStmt(const Var &var, const PrimExpr &value, Stmt body) {
-    return SeqStmt({tirx::Bind(var, value), body});
-  }
-
-  static int64_t GetVarStride(const PrimExpr &expr, const VarNode *var) {
-    if (const auto *v = expr.as<VarNode>()) {
-      return (v == var) ? 1 : 0;
-    }
-    if (expr.as<IntImmNode>() || expr.as<FloatImmNode>()) {
-      return 0;
-    }
-    if (const auto *add = expr.as<AddNode>()) {
-      int64_t sa = GetVarStride(add->a, var);
-      int64_t sb = GetVarStride(add->b, var);
-      return (sa < 0 || sb < 0) ? -1 : sa + sb;
-    }
-    if (const auto *sub = expr.as<SubNode>()) {
-      int64_t sa = GetVarStride(sub->a, var);
-      int64_t sb = GetVarStride(sub->b, var);
-      return (sa < 0 || sb < 0) ? -1 : sa - sb;
-    }
-    if (const auto *mul = expr.as<MulNode>()) {
-      if (const auto *imm = mul->b.as<IntImmNode>()) {
-        int64_t sa = GetVarStride(mul->a, var);
-        return sa < 0 ? -1 : sa * imm->value;
-      }
-      if (const auto *imm = mul->a.as<IntImmNode>()) {
-        int64_t sb = GetVarStride(mul->b, var);
-        return sb < 0 ? -1 : sb * imm->value;
-      }
-      int64_t sa = GetVarStride(mul->a, var);
-      int64_t sb = GetVarStride(mul->b, var);
-      return (sa != 0 && sb != 0) ? -1 : ((sa == 0) ? sb : sa);
-    }
-    if (const auto *fd = expr.as<FloorDivNode>()) {
-      int64_t sa = GetVarStride(fd->a, var);
-      if (sa == 0) {
-        return 0;
-      }
-      if (const auto *imm = fd->b.as<IntImmNode>()) {
-        return (sa > 0 && sa % imm->value == 0) ? sa / imm->value : -1;
-      }
-      return -1;
-    }
-    if (const auto *fm = expr.as<FloorModNode>()) {
-      return GetVarStride(fm->a, var) == 0 ? 0 : -1;
-    }
-    if (const auto *cast = expr.as<CastNode>()) {
-      return GetVarStride(cast->value, var);
-    }
-    return -1;
-  }
-
-  static Stmt StripAttr(const Stmt &body) {
-    Stmt cur = body;
-    while (const auto *attr = cur.as<AttrStmtNode>()) {
-      cur = attr->body;
-    }
-    return cur;
-  }
-
-  int64_t GetStrideInStore(const Stmt &body, const VarNode *var) {
-    auto get = [&](const BufferStoreNode *store) -> int64_t {
-      PrimExpr flat = store->indices[0];
-      for (size_t d = 1; d < store->indices.size(); ++d) {
-        flat = flat * store->buffer->shape[d] + store->indices[d];
-      }
-      return GetVarStride(flat, var);
-    };
-    Stmt b = StripAttr(body);
-    if (const auto *store = b.as<BufferStoreNode>()) {
-      return get(store);
-    }
-    if (const auto *seq = b.as<SeqStmtNode>()) {
-      for (const Stmt &s : seq->seq) {
-        if (const auto *store = s.as<BufferStoreNode>()) {
-          return get(store);
-        }
-      }
-    }
-    return -1;
-  }
-
-  PrimExpr SubstituteIndex(const PrimExpr &index) {
-    class Replacer : public ExprMutator {
-      const VarNode *pv_;
-      PrimExpr pr_;
-      const VarNode *ov_;
-      PrimExpr or_;
-
-    public:
-      Replacer(const VarNode *pv, PrimExpr pr, const VarNode *ov, PrimExpr or_)
-          : pv_(pv), pr_(pr), ov_(ov), or_(or_) {}
-
-      PrimExpr VisitExpr_(const VarNode *op) override {
-        if (pv_ && op == pv_) {
-          return pr_;
-        }
-        if (ov_ && op == ov_) {
-          return or_;
-        }
-        return ffi::GetRef<PrimExpr>(op);
-      }
-    };
-
-    PrimExpr par_repl = chunk_var_ * IntImm(DataType::Int(32), vreg_size_);
-    PrimExpr outer_repl = outer_parallel_var_
-                              ? PrimExpr(outer_serial_var_)
-                              : PrimExpr(IntImm(DataType::Int(32), 0));
-    return Replacer(parallel_var_, par_repl, outer_parallel_var_,
-                    outer_repl)(index);
-  }
-
-  static PrimExpr MakeAccessPtr(const Buffer &buffer,
-                                const Array<PrimExpr> &idx, int rw_mask) {
-    return Call(DataType::Handle(), tl::access_ptr(),
-                {BufferLoad(buffer, idx), IntImm(DataType::Int(32), 1),
-                 IntImm(DataType::Int(32), rw_mask)});
-  }
-
-  PrimExpr MakeAddressOf(const Buffer &buffer,
-                         const Array<PrimExpr> &orig_indices, int rw_mask) {
-    Array<PrimExpr> idx;
-    for (const auto &i : orig_indices) {
-      idx.push_back(SubstituteIndex(i));
-    }
-    return MakeAccessPtr(buffer, idx, rw_mask);
-  }
-
-  Var EmitUnary(const PrimExpr &value, DataType dtype, const Op &op,
-                Array<Stmt> *stmts) {
-    Var src = DecomposeExpr(value, dtype, stmts);
-    Var dst = MakeReg(dtype);
-    stmts->push_back(
-        tirx::Bind(dst, Call(dst->dtype, op,
-                             {src, mask_var_, StringImm("MODE_ZEROING")})));
-    return dst;
-  }
-
-  Var EmitBinary(const PrimExpr &lhs_expr, const PrimExpr &rhs_expr,
-                 DataType dtype, const Op &op, Array<Stmt> *stmts) {
-    Var lhs = DecomposeExpr(lhs_expr, dtype, stmts);
-    Var rhs = DecomposeExpr(rhs_expr, dtype, stmts);
-    Var dst = MakeReg(dtype);
-    stmts->push_back(tirx::Bind(
-        dst, Call(dst->dtype, op,
-                  {lhs, rhs, mask_var_, StringImm("MODE_ZEROING")})));
-    return dst;
-  }
-
-  Var DecomposeExpr(const PrimExpr &expr, DataType dtype, Array<Stmt> *stmts) {
-    if (const auto *load = expr.as<BufferLoadNode>()) {
-      Var reg = MakeReg(dtype);
-      bool depends_on_vreg = false;
-      if (parallel_var_) {
-        for (const auto &idx : load->indices) {
-          if (GetVarStride(idx, parallel_var_) != 0) {
-            depends_on_vreg = true;
-            break;
-          }
-        }
-      }
-
-      PrimExpr addr = MakeAddressOf(load->buffer, load->indices, /*rw_mask=*/1);
-      PrimExpr vld_call =
-          Call(reg->dtype, simd_vld(),
-               {addr, StringImm(depends_on_vreg ? "NORM" : "BRC_B32")});
-      if (!depends_on_vreg && outer_parallel_var_) {
-        scalar_loads_.push_back(tirx::Bind(reg, vld_call));
-      } else {
-        stmts->push_back(tirx::Bind(reg, vld_call));
-      }
-      return reg;
-    }
-
-    if (const auto *n = expr.as<AddNode>()) {
-      return EmitBinary(n->a, n->b, dtype, simd_vadd(), stmts);
-    }
-    if (const auto *n = expr.as<SubNode>()) {
-      if (is_zero(n->a)) {
-        return EmitUnary(n->b, dtype, simd_vneg(), stmts);
-      }
-      return EmitBinary(n->a, n->b, dtype, simd_vsub(), stmts);
-    }
-    if (const auto *n = expr.as<MulNode>()) {
-      return EmitBinary(n->a, n->b, dtype, simd_vmul(), stmts);
-    }
-    if (const auto *n = expr.as<DivNode>()) {
-      return EmitBinary(n->a, n->b, dtype, simd_vdiv(), stmts);
-    }
-
-    if (const auto *call = expr.as<CallNode>()) {
-      if (const auto *opn = call->op.as<OpNode>()) {
-        std::string n = opn->name;
-        if (n == "tir.exp" && call->args.size() == 1) {
-          return EmitUnary(call->args[0], dtype, simd_vexp(), stmts);
-        }
-        if ((n == "tir.log" || n == "tir.ln") && call->args.size() == 1) {
-          return EmitUnary(call->args[0], dtype, simd_vln(), stmts);
-        }
-        if (n == "tir.sqrt" && call->args.size() == 1) {
-          return EmitUnary(call->args[0], dtype, simd_vsqrt(), stmts);
-        }
-        if (n == "tir.fabs" && call->args.size() == 1) {
-          return EmitUnary(call->args[0], dtype, simd_vabs(), stmts);
-        }
-      }
-    }
-
-    if (expr.as<FloatImmNode>() || expr.as<IntImmNode>()) {
-      Var reg = MakeReg(dtype);
-      stmts->push_back(
-          tirx::Bind(reg, Call(reg->dtype, simd_vdup(),
-                               {expr, mask_var_, StringImm("MODE_ZEROING")})));
-      return reg;
-    }
-
-    LOG(FATAL) << "AscendSimdVFLowerParallel: unsupported expr: " << expr;
-    return Var();
-  }
-
-  Stmt LowerBufferStore(const BufferStoreNode *store, DataType dtype) {
-    Array<Stmt> stmts;
-    Var result = DecomposeExpr(store->value, dtype, &stmts);
-    Stmt vsts_stmt = Evaluate(
-        Call(DataType::Void(), simd_vsts(),
-             {MakeAddressOf(store->buffer, store->indices, /*rw_mask=*/2),
-              result, mask_var_, StringImm("NORM_B32")}));
-    return AppendStmt(stmts, vsts_stmt);
-  }
-
-  bool CanLowerBody(const Stmt &body) {
-    Stmt b = StripAttr(body);
-    if (b.as<BufferStoreNode>()) {
-      return true;
-    }
-    if (const auto *s = b.as<SeqStmtNode>()) {
-      for (const Stmt &st : s->seq) {
-        if (!st.as<BufferStoreNode>()) {
-          return false;
-        }
-      }
-      return true;
-    }
-    return false;
-  }
-
-  Stmt LowerParallelBody(const Stmt &body, DataType dtype) {
-    Stmt b = StripAttr(body);
-    if (const auto *s = b.as<BufferStoreNode>()) {
-      return LowerBufferStore(s, dtype);
-    }
-    if (const auto *s = b.as<SeqStmtNode>()) {
-      Array<Stmt> lowered;
-      for (const Stmt &st : s->seq) {
-        lowered.push_back(LowerBufferStore(st.as<BufferStoreNode>(), dtype));
-      }
-      return MakeSeq(lowered);
-    }
-    LOG(FATAL) << "AscendSimdVFLowerParallel: bad parallel body: "
-               << b->GetTypeKey();
-    return Stmt();
-  }
-
-  DataType InferDType(const Stmt &body) {
-    Stmt b = StripAttr(body);
-    if (const auto *s = b.as<BufferStoreNode>()) {
-      return s->buffer->dtype;
-    }
-    if (const auto *s = b.as<SeqStmtNode>()) {
-      for (const Stmt &st : s->seq) {
-        if (const auto *bs = st.as<BufferStoreNode>()) {
-          return bs->buffer->dtype;
-        }
-      }
-    }
-    return DataType::Float(32);
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) override {
-    if (op->name_hint != "SIMD_VF") {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
-    bool saved = inside_simdvf_;
-    int saved_cnt = frag_counter_;
-    inside_simdvf_ = true;
-    frag_counter_ = 0;
-
-    Stmt new_body = VisitStmt(op->body);
-
-    inside_simdvf_ = saved;
-    frag_counter_ = saved_cnt;
-
-    if (new_body.same_as(op->body)) {
-      return ffi::GetRef<Stmt>(op);
-    }
-
-    return SBlock(op->iter_vars, op->reads, op->writes, op->name_hint, new_body,
-                  op->init, op->alloc_buffers, op->match_buffers,
-                  op->annotations);
-  }
-
-  Stmt VisitStmt_(const ForNode *op) override {
-    if (!inside_simdvf_ || op->kind != ForKind::kParallel) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
-    Stmt stripped = StripAttr(op->body);
-    const auto *inner = stripped.as<ForNode>();
-    if (inner && inner->kind == ForKind::kParallel) {
-      if (const auto *t = inner->body.as<ForNode>()) {
-        if (t->kind == ForKind::kParallel) {
-          LOG(FATAL) << "3D+ parallel not supported";
-        }
-      }
-      if (!CanLowerBody(inner->body)) {
-        return StmtExprMutator::VisitStmt_(op);
-      }
-
-      int64_t outer_stride = GetStrideInStore(inner->body, op->loop_var.get());
-      int64_t inner_stride =
-          GetStrideInStore(inner->body, inner->loop_var.get());
-
-      if (inner_stride == 1) {
-        return LowerParallel(inner, op);
-      }
-      if (outer_stride == 1) {
-        return LowerParallel(op, inner);
-      }
-
-      LOG(FATAL) << "2D parallel requires one dimension with stride=1, got "
-                 << "outer stride=" << outer_stride
-                 << " inner stride=" << inner_stride;
-    }
-
-    if (!CanLowerBody(op->body)) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-    return LowerParallel(op, nullptr);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) override {
-    if (!inside_simdvf_) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
-    const auto *call = op->value.as<CallNode>();
-    if (!call) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
-
-    if (const auto *opnode = call->op.as<OpNode>()) {
-      if (opnode->name == "tl.tileop.fill") {
-        return LowerFill(call);
-      }
-      if (IsAscendCopyCall(call)) {
-        return LowerCopy(call);
-      }
-      if (opnode->name == "tl.tileop.reduce") {
-        return LowerReduce(call);
-      }
-    }
-    return StmtExprMutator::VisitStmt_(op);
-  }
-
-  Stmt LowerFill(const CallNode *call) {
-    int saved_frag_counter = frag_counter_;
-    frag_counter_ = 0;
-
-    BufferRegion buf_region = NormalizeToBufferRegion(call->args[0]);
-    Buffer buf = buf_region->buffer;
-    Array<Range> ranges = buf_region->region;
-    PrimExpr value = call->args[1];
-    DataType dtype = buf->dtype;
-
-    if (value->dtype != dtype) {
-      value = Cast(dtype, value);
-    }
-
-    vreg_size_ = ComputeVRegSize(dtype);
-    elem_bits_ = dtype.bits();
-
-    // Fill the *region*, not the physical allocation. After
-    // MaterializeMultiBuffer, an in-loop T.fill of a logical UB becomes a
-    // leading unit-extent version slice (e.g. [v:v+1, 0:64] on shape [2, 64]).
-    // That is a contiguous fill whose element count is divisible by the VReg
-    // size and whose base address is 32-byte aligned (the per-version stride
-    // is a multiple of the VReg byte width).
-    int64_t total = 0;
-    std::vector<int64_t> extents;
-    ICHECK(CanLowerFillRegion(buf, ranges, vreg_size_, &total, &extents))
-        << "T.fill inside SimdVF requires a contiguous region whose element "
-           "count is divisible by VReg size ("
-        << vreg_size_ << "), got region " << buf_region << " of buffer " << buf;
-
-    int64_t nchunks = total / vreg_size_;
-    Var frag = MakeReg(dtype);
-    Var mask("mask", DataType::Bool(256));
-    Var chunk("vchunk", DataType::Int(32));
-
-    PrimExpr mask_value =
-        Call(DataType::Bool(256), simd_pset(),
-             {IntImm(DataType::Int(32), elem_bits_), StringImm("PAT_ALL")});
-    PrimExpr flat_idx = chunk * IntImm(DataType::Int(32), vreg_size_);
-    Array<PrimExpr> idxs = MakeRegionIndices(ranges, extents, flat_idx);
-
-    PrimExpr addr = MakeAccessPtr(buf, idxs, /*rw_mask=*/2);
-    Stmt store = Evaluate(Call(DataType::Void(), simd_vsts(),
-                               {addr, frag, mask, StringImm("NORM_B32")}));
-    Stmt loop =
-        For(chunk, IntImm(DataType::Int(32), 0),
-            IntImm(DataType::Int(32), nchunks), ForKind::kSerial, store);
-    PrimExpr vdup_call = Call(frag->dtype, simd_vdup(),
-                              {value, mask, StringImm("MODE_ZEROING")});
-
-    Stmt result = MakeSeq(
-        {tirx::Bind(mask, mask_value), tirx::Bind(frag, vdup_call), loop});
-    frag_counter_ = saved_frag_counter;
-    return result;
-  }
-
-  Stmt LowerCopy(const CallNode *call) {
-    int saved_frag_counter = frag_counter_;
-    frag_counter_ = 0;
-
-    BufferRegion src_region = NormalizeToBufferRegion(call->args[0]);
-    BufferRegion dst_region = NormalizeToBufferRegion(call->args[1]);
-    Buffer src_buf = src_region->buffer;
-    Buffer dst_buf = dst_region->buffer;
-    Array<Range> src_ranges = src_region->region;
-    Array<Range> dst_ranges = dst_region->region;
-    DataType src_dtype = src_buf->dtype;
-    DataType dst_dtype = dst_buf->dtype;
-    bool is_cast = (dst_dtype != src_dtype);
-
-    ICHECK(!is_cast || (src_dtype.is_float() &&
-                        (dst_dtype.is_float16() || dst_dtype.is_bfloat16())))
-        << "T.copy inside SimdVF: cast copy only supports f32->bf16 or "
-           "f32->half";
-
-    vreg_size_ = ComputeVRegSize(src_dtype);
-    int src_elem_bits = src_dtype.bits();
-    int dst_elem_bits = dst_dtype.bits();
-
-    auto is_full = [](const Array<Range> &ranges, const Array<PrimExpr> &shape,
-                      int64_t *total) -> bool {
-      *total = 1;
-      for (size_t i = 0; i < ranges.size(); i++) {
-        const auto *mi = ranges[i]->min.as<IntImmNode>();
-        const auto *ei = ranges[i]->extent.as<IntImmNode>();
-        const auto *si = shape[i].as<IntImmNode>();
-        if (!mi || !ei || !si || mi->value != 0 || ei->value != si->value) {
-          return false;
-        }
-        *total *= ei->value;
-      }
-      return true;
-    };
-
-    int64_t src_total = 0, dst_total = 0;
-    ICHECK(is_full(src_ranges, src_buf->shape, &src_total) &&
-           is_full(dst_ranges, dst_buf->shape, &dst_total))
-        << "T.copy inside SimdVF requires full-buffer regions";
-    ICHECK_EQ(src_total, dst_total) << "T.copy inside SimdVF requires src and "
-                                       "dst to have same element count";
-    ICHECK_EQ(src_total % vreg_size_, 0)
-        << "T.copy inside SimdVF requires total elements divisible by VReg "
-           "size ("
-        << vreg_size_ << "), got " << src_total;
-
-    int64_t nchunks = src_total / vreg_size_;
-    Var load_frag = MakeReg(src_dtype);
-    Var cast_frag;
-    if (is_cast) {
-      cast_frag = MakeReg(dst_dtype);
-    }
-
-    Var chunk("vchunk", DataType::Int(32));
-    mask_var_ = Var("mask", DataType::Bool(256));
-    int mask_elem_bits = is_cast ? dst_elem_bits : src_elem_bits;
-    PrimExpr mask_value =
-        Call(DataType::Bool(256), simd_pset(),
-             {IntImm(DataType::Int(32), mask_elem_bits), StringImm("PAT_ALL")});
-
-    auto flat_addr = [&](const Buffer &buf, int ndim, int rw_mask) -> PrimExpr {
-      PrimExpr flat_idx = chunk * IntImm(DataType::Int(32), vreg_size_);
-      Array<PrimExpr> idxs;
-      if (ndim == 1) {
-        idxs.push_back(flat_idx);
-      } else {
-        PrimExpr r = flat_idx;
-        for (int i = ndim - 1; i >= 1; i--) {
-          idxs.insert(idxs.begin(), FloorMod(r, buf->shape[i]));
-          r = FloorDiv(r, buf->shape[i]);
-        }
-        idxs.insert(idxs.begin(), r);
-      }
-      return MakeAccessPtr(buf, idxs, rw_mask);
-    };
-
-    PrimExpr src_addr = flat_addr(src_buf, src_ranges.size(), /*rw_mask=*/1);
-    PrimExpr dst_addr = flat_addr(dst_buf, dst_ranges.size(), /*rw_mask=*/2);
-    PrimExpr vld_call =
-        Call(load_frag->dtype, simd_vld(), {src_addr, StringImm("NORM")});
-
-    Array<Stmt> body;
-    body.push_back(tirx::Bind(load_frag, vld_call));
-    if (is_cast) {
-      PrimExpr vcvt_call = Call(cast_frag->dtype, simd_vcvt(),
-                                {load_frag, mask_var_, StringImm("ROUND_R"),
-                                 StringImm("RS_ENABLE"), StringImm("PART_EVEN"),
-                                 StringImm("MODE_ZEROING")});
-      body.push_back(tirx::Bind(cast_frag, vcvt_call));
-      body.push_back(Evaluate(
-          Call(DataType::Void(), simd_vsts(),
-               {dst_addr, cast_frag, mask_var_, StringImm("NORM_B32")})));
-    } else {
-      body.push_back(Evaluate(
-          Call(DataType::Void(), simd_vsts(),
-               {dst_addr, load_frag, mask_var_, StringImm("NORM_B32")})));
-    }
-
-    Stmt loop = For(chunk, IntImm(DataType::Int(32), 0),
-                    IntImm(DataType::Int(32), nchunks), ForKind::kSerial,
-                    MakeSeq(body));
-    Stmt result = MakeSeq({tirx::Bind(mask_var_, mask_value), loop});
-    frag_counter_ = saved_frag_counter;
-    return result;
-  }
-
-  Stmt LowerReduce(const CallNode *call) {
-    int saved_frag_counter = frag_counter_;
-    frag_counter_ = 0;
-
-    BufferRegion src_region = NormalizeToBufferRegion(call->args[0]);
-    BufferRegion dst_region = NormalizeToBufferRegion(call->args[1]);
-    Buffer src = src_region->buffer;
-    Buffer dst = dst_region->buffer;
-    Array<Range> sr = src_region->region;
-    Array<Range> dr = dst_region->region;
-
-    std::string rtype = call->args[2].as<StringImmNode>()->value;
-    int dim = static_cast<int>(call->args[3].as<IntImmNode>()->value);
-    bool clear = call->args[4].as<Bool>().value();
-
-    DataType dtype = src->dtype;
-    vreg_size_ = ComputeVRegSize(dtype);
-    elem_bits_ = dtype.bits();
-
-    ICHECK(sr.size() == 2 && dr.size() == 1 && (dim == 0 || dim == 1))
-        << "T.reduce inside SimdVF requires 2D src -> 1D dst, dim=0 or 1";
-
-    auto is_full = [](const Array<Range> &ranges, const Array<PrimExpr> &shape,
-                      int64_t *total) -> bool {
-      *total = 1;
-      for (size_t i = 0; i < ranges.size(); i++) {
-        const auto *mi = ranges[i]->min.as<IntImmNode>();
-        const auto *ei = ranges[i]->extent.as<IntImmNode>();
-        const auto *si = shape[i].as<IntImmNode>();
-        if (!mi || !ei || !si || mi->value != 0 || ei->value != si->value) {
-          return false;
-        }
-        *total *= ei->value;
-      }
-      return true;
-    };
-
-    int64_t st = 0, dt = 0;
-    ICHECK(is_full(sr, src->shape, &st) && is_full(dr, dst->shape, &dt))
-        << "T.reduce inside SimdVF requires full-buffer regions";
-
-    int64_t reduce_extent = Downcast<IntImm>(sr[dim]->extent)->value;
-    int64_t outer_extent = Downcast<IntImm>(sr[1 - dim]->extent)->value;
-    ICHECK_EQ(reduce_extent % vreg_size_, 0)
-        << "T.reduce requires dim extent multiple of VReg (" << vreg_size_
-        << "), got " << reduce_extent;
-    int64_t nchunks = reduce_extent / vreg_size_;
-
-    const Op &element_op = (rtype == "sum") ? simd_vadd() : simd_vmax();
-    const Op &reduce_op = (rtype == "sum") ? simd_vcadd() : simd_vcmax();
-    PrimExpr init_value = (rtype == "sum")
-                              ? PrimExpr(FloatImm(dtype, 0.0))
-                              : PrimExpr(FloatImm(dtype, -3.402823e+38));
-
-    auto i32 = [](int64_t v) { return IntImm(DataType::Int(32), v); };
-    auto addr1d = [&](const Buffer &buf, const PrimExpr &i0, int rw_mask) {
-      return MakeAccessPtr(buf, {i0}, rw_mask);
-    };
-    auto addr2d = [&](const Buffer &buf, const PrimExpr &i0, const PrimExpr &i1,
-                      int rw_mask) {
-      return MakeAccessPtr(buf, {i0, i1}, rw_mask);
-    };
-
-    mask_var_ = Var("mask", DataType::Bool(256));
-    PrimExpr mask_value =
-        Call(DataType::Bool(256), simd_pset(),
-             {IntImm(DataType::Int(32), elem_bits_), StringImm("PAT_ALL")});
-    Var rep("vrepeat", DataType::Int(32));
-
-    if (dim == 1) {
-      Array<Stmt> row;
-      Var acc = MakeReg(dtype);
-      row.push_back(tirx::Bind(
-          acc, Call(acc->dtype, simd_vdup(),
-                    {init_value, mask_var_, StringImm("MODE_ZEROING")})));
-
-      for (int64_t ck = 0; ck < nchunks; ++ck) {
-        PrimExpr col = i32(ck * vreg_size_);
-        Var loaded = MakeReg(dtype);
-        Var reduced = MakeReg(dtype);
-        Var next_acc = MakeReg(dtype);
-        row.push_back(tirx::Bind(
-            loaded,
-            Call(loaded->dtype, simd_vld(),
-                 {addr2d(src, rep, col, /*rw_mask=*/1), StringImm("NORM")})));
-        row.push_back(tirx::Bind(
-            reduced, Call(reduced->dtype, reduce_op,
-                          {loaded, mask_var_, StringImm("MODE_ZEROING")})));
-        row.push_back(tirx::Bind(next_acc, Call(next_acc->dtype, element_op,
-                                                {acc, reduced, mask_var_,
-                                                 StringImm("MODE_ZEROING")})));
-        acc = next_acc;
-      }
-
-      PrimExpr dst_off = rep;
-      if (!clear) {
-        Var old = MakeReg(dtype);
-        Var merged = MakeReg(dtype);
-        row.push_back(tirx::Bind(old, Call(old->dtype, simd_vld(),
-                                           {addr1d(dst, dst_off, /*rw_mask=*/1),
-                                            StringImm("BRC_B32")})));
-        row.push_back(tirx::Bind(
-            merged, Call(merged->dtype, element_op,
-                         {acc, old, mask_var_, StringImm("MODE_ZEROING")})));
-        acc = merged;
-      }
-      row.push_back(Evaluate(Call(DataType::Void(), simd_vsts(),
-                                  {addr1d(dst, dst_off, /*rw_mask=*/2), acc,
-                                   mask_var_, StringImm("ONEPT_B32")})));
-
-      Stmt row_body =
-          MakeSeq({tirx::Bind(mask_var_, mask_value), MakeSeq(row)});
-      Stmt result =
-          For(rep, i32(0), i32(outer_extent), ForKind::kSerial, row_body);
-      frag_counter_ = saved_frag_counter;
+  Optional<PrimExpr> ByteOrigin(const Expr &value,
+                                std::unordered_set<const VarObj *> *active) {
+    if (auto variable = value.as<Var>()) {
+      if (!active->insert(variable.value().get()).second)
+        return std::nullopt;
+      auto definition = definitions_.Get(*variable);
+      Optional<PrimExpr> result =
+          definition ? ByteOrigin(*definition, active)
+                     : Optional<PrimExpr>(IntImm(PrimType::Int(64), 0));
+      active->erase(variable.value().get());
       return result;
     }
-
-    Var chunk("vchunk", DataType::Int(32));
-    PrimExpr col = chunk * i32(vreg_size_);
-    Array<Stmt> chunk_body;
-    Var acc = MakeReg(dtype);
-    chunk_body.push_back(tirx::Bind(
-        acc,
-        Call(acc->dtype, simd_vld(),
-             {addr2d(src, i32(0), col, /*rw_mask=*/1), StringImm("NORM")})));
-
-    for (int64_t row_idx = 1; row_idx < outer_extent; ++row_idx) {
-      Var loaded = MakeReg(dtype);
-      Var next_acc = MakeReg(dtype);
-      chunk_body.push_back(tirx::Bind(
-          loaded, Call(loaded->dtype, simd_vld(),
-                       {addr2d(src, i32(row_idx), col, /*rw_mask=*/1),
-                        StringImm("NORM")})));
-      chunk_body.push_back(tirx::Bind(
-          next_acc, Call(next_acc->dtype, element_op,
-                         {acc, loaded, mask_var_, StringImm("MODE_ZEROING")})));
-      acc = next_acc;
-    }
-
-    if (!clear) {
-      Var old = MakeReg(dtype);
-      Var merged = MakeReg(dtype);
-      chunk_body.push_back(tirx::Bind(
-          old, Call(old->dtype, simd_vld(),
-                    {addr1d(dst, col, /*rw_mask=*/1), StringImm("BRC_B32")})));
-      chunk_body.push_back(tirx::Bind(
-          merged, Call(merged->dtype, element_op,
-                       {acc, old, mask_var_, StringImm("MODE_ZEROING")})));
-      acc = merged;
-    }
-    chunk_body.push_back(Evaluate(Call(DataType::Void(), simd_vsts(),
-                                       {addr1d(dst, col, /*rw_mask=*/2), acc,
-                                        mask_var_, StringImm("NORM_B32")})));
-
-    Stmt loop =
-        For(chunk, i32(0), i32(nchunks), ForKind::kSerial, MakeSeq(chunk_body));
-    Stmt result = MakeSeq({tirx::Bind(mask_var_, mask_value), loop});
-    frag_counter_ = saved_frag_counter;
-    return result;
-  }
-
-  Stmt LowerParallel(const ForNode *vreg_for, const ForNode *serial_for) {
-    int saved_frag_counter = frag_counter_;
-    frag_counter_ = 0;
-
-    int64_t vreg_ext = Downcast<IntImm>(vreg_for->extent)->value;
-    int64_t serial_ext =
-        serial_for ? Downcast<IntImm>(serial_for->extent)->value : 1;
-
-    DataType dtype = InferDType(vreg_for->body);
-    vreg_size_ = ComputeVRegSize(dtype);
-    elem_bits_ = dtype.bits();
-    ICHECK_EQ(vreg_ext % vreg_size_, 0)
-        << "T.Parallel inside SimdVF requires VReg extent divisible by VReg "
-           "size ("
-        << vreg_size_ << "), got " << vreg_ext;
-    int64_t nchunks = vreg_ext / vreg_size_;
-
-    const VarNode *saved_pv = parallel_var_;
-    const VarNode *saved_ov = outer_parallel_var_;
-    int64_t saved_extent = parallel_extent_;
-
-    parallel_var_ = vreg_for->loop_var.get();
-    parallel_extent_ = vreg_ext;
-    if (serial_for) {
-      outer_parallel_var_ = serial_for->loop_var.get();
-      outer_serial_var_ = Var("vserial", DataType::Int(32));
-    } else {
-      outer_parallel_var_ = nullptr;
-    }
-
-    chunk_var_ = Var("vchunk", DataType::Int(32));
-    mask_var_ = Var("mask", DataType::Bool(256));
-    scalar_loads_.clear();
-
-    PrimExpr mask_value =
-        Call(DataType::Bool(256), simd_pset(),
-             {IntImm(DataType::Int(32), elem_bits_), StringImm("PAT_ALL")});
-
-    Stmt body = LowerParallelBody(vreg_for->body, dtype);
-    Stmt masked_body = BindStmt(mask_var_, mask_value, body);
-    Stmt inner_loop =
-        For(chunk_var_, IntImm(DataType::Int(32), 0),
-            IntImm(DataType::Int(32), nchunks), ForKind::kSerial, masked_body);
-
-    Stmt per_iter_body = inner_loop;
-    if (!scalar_loads_.empty()) {
-      Array<Stmt> seq;
-      for (const Stmt &s : scalar_loads_) {
-        seq.push_back(s);
+    if (const auto *call = value.as<CallObj>()) {
+      if (call->op.same_as(tirx::alloc_tensor_op()))
+        return IntImm(PrimType::Int(64), 0);
+      if (call->op.same_as(tirx::decl_tensor_op()) ||
+          call->op.same_as(tirx::tensor_data_ptr_op()) ||
+          call->op.same_as(tirx::reinterpret_op()))
+        return ByteOrigin(call->args[0], active);
+      if (call->op.same_as(tirx::ptr_byte_offset_op())) {
+        auto base = ByteOrigin(call->args[0], active);
+        if (base)
+          return base.value() +
+                 prim::Cast(PrimType::Int(64),
+                            call->args[1].as_or_throw<PrimExpr>());
       }
-      seq.push_back(per_iter_body);
-      per_iter_body = MakeSeq(seq);
-      scalar_loads_.clear();
     }
-
-    Stmt result;
-    if (serial_for) {
-      result = For(outer_serial_var_, IntImm(DataType::Int(32), 0),
-                   IntImm(DataType::Int(32), serial_ext), ForKind::kSerial,
-                   per_iter_body);
-    } else {
-      result = per_iter_body;
-    }
-
-    parallel_var_ = saved_pv;
-    parallel_extent_ = saved_extent;
-    outer_parallel_var_ = saved_ov;
-    frag_counter_ = saved_frag_counter;
-    return result;
+    return std::nullopt;
   }
-};
+  void FillAlignment(const TensorRegion &region) {
+    auto tensor = RegionTensor(region);
+    Array<PrimExpr> starts;
+    for (const Range &range : region->region)
+      starts.push_back(range->begin);
+    auto offset = TensorElementOffset(tensor, starts);
+    std::unordered_set<const VarObj *> active;
+    auto origin = ByteOrigin(tensor, &active);
+    TVM_FFI_CHECK(origin, ValueError)
+        << "SIMD_VF fill cannot establish its backing pointer's alignment";
+    auto bytes = prim::Cast(PrimType::Int(64), offset) *
+                     IntImm(PrimType::Int(64), tensor.dtype().bits() / 8) +
+                 *origin;
+    TVM_FFI_CHECK(
+        analyzer_->CanProveEqual(floormod(bytes, IntImm(bytes.ty(), 32)),
+                                 IntImm(bytes.ty(), 0)),
+        ValueError)
+        << "T.fill inside SIMD_VF requires a 32-byte-aligned region base, got "
+        << bytes;
+  }
 
-using namespace tirx::transform;
+  Stmt LowerFill(const CallObj *call) {
+    auto decoded = DecodeTileOpArguments(call);
+    TVM_FFI_CHECK_EQ(decoded.operands.size(), 2U, ValueError);
+    auto region = NormalizeToTensorRegion(decoded.operands[0]);
+    auto tensor = RegionTensor(region);
+    auto dtype = tensor.dtype();
+    auto size = VRegSize(dtype);
+    int64_t total;
+    auto extents = Extents(region, &total);
+    TVM_FFI_CHECK(!extents.empty() && total > 0 && total % size == 0 &&
+                      Contiguous(tensor, extents),
+                  ValueError)
+        << "T.fill inside SIMD_VF needs a contiguous region divisible by VReg "
+           "size "
+        << size;
+    FillAlignment(region);
+    auto value = decoded.operands[1].as_or_throw<PrimExpr>();
+    if (value.ty() != dtype)
+      value = prim::Cast(dtype, value);
+    Var mask("mask", PrimType::Bool(256));
+    Var value_register = Register(dtype);
+    PrimVar chunk("vchunk", PrimType::Int(32));
+    auto address =
+        Address(tensor, RegionIndices(region, extents, chunk * I32(size)), 2,
+                size, call->loc);
+    auto store =
+        Evaluate(Intrinsic("vsts", PrimType::Void(),
+                           {address, value_register, mask, Text("NORM_B32")},
+                           call->loc, decoded.annotations),
+                 call->loc);
+    return SeqStmt(
+        {Mask(mask, dtype, call->loc),
+         Bind(value_register,
+              Intrinsic("vdup", value_register->ty,
+                        {value, mask, Text("MODE_ZEROING")}, call->loc),
+              call->loc),
+         Serial(chunk, I32(total / size), SeqStmt({store}), call->loc)},
+        call->loc);
+  }
+
+  Stmt LowerCopy(const CallObj *call) {
+    auto decoded = DecodeTileOpArguments(call);
+    TVM_FFI_CHECK_EQ(decoded.operands.size(), 2U, ValueError);
+    auto source = NormalizeToTensorRegion(decoded.operands[0]);
+    auto destination = NormalizeToTensorRegion(decoded.operands[1]);
+    FullRegion(source);
+    FullRegion(destination);
+    auto src = RegionTensor(source), dst = RegionTensor(destination);
+    auto from = src.dtype(), to = dst.dtype();
+    bool convert = from != to;
+    TVM_FFI_CHECK(!convert || (from == PrimType::Float(32) &&
+                               (to == PrimType::Float(16) ||
+                                to == PrimType(kDLBfloat, 16))),
+                  TypeError)
+        << "SIMD_VF cast copy supports float32 to float16/bfloat16";
+    for (const char *key :
+         {"transpose", "nd2nz", "dual_dst_ctl", "data_select"})
+      if (auto value = decoded.annotations.Get(key))
+        TVM_FFI_CHECK(!AscendVFBoolean(*value), ValueError)
+            << "SIMD_VF copy does not accept DMA transform " << key;
+    int64_t src_total, dst_total;
+    auto src_extents = Extents(source, &src_total);
+    auto dst_extents = Extents(destination, &dst_total);
+    auto size = VRegSize(from);
+    TVM_FFI_CHECK(src_total == dst_total && src_total % size == 0 &&
+                      Contiguous(src, src_extents) &&
+                      Contiguous(dst, dst_extents),
+                  ValueError)
+        << "SIMD_VF copy needs equal contiguous regions divisible by VReg size "
+        << size;
+    Var mask("mask", PrimType::Bool(256));
+    PrimVar chunk("vchunk", PrimType::Int(32));
+    Var loaded = Register(from);
+    Array<Stmt> body;
+    body.push_back(Bind(
+        loaded,
+        Intrinsic(
+            "vld", loaded->ty,
+            {Address(src, RegionIndices(source, src_extents, chunk * I32(size)),
+                     1, size, call->loc),
+             Text("NORM")},
+            call->loc),
+        call->loc));
+    Var value = loaded;
+    if (convert) {
+      value = Register(to);
+      body.push_back(
+          Bind(value,
+               Intrinsic("vcvt", value->ty,
+                         {loaded, mask, Text("ROUND_R"), Text("RS_ENABLE"),
+                          Text("PART_EVEN"), Text("MODE_ZEROING")},
+                         call->loc, decoded.annotations),
+               call->loc));
+    }
+    // PART_EVEN f32->f16/bf16 conversion populates the low half of each
+    // 32-bit slot. PK_B32 stores those halves contiguously, matching
+    // T.simd.vcvt
+    // + vsts in the existing cast kernels; NORM_B32 would double the footprint.
+    body.push_back(Evaluate(
+        Intrinsic(
+            "vsts", PrimType::Void(),
+            {Address(dst,
+                     RegionIndices(destination, dst_extents, chunk * I32(size)),
+                     2, size, call->loc),
+             value, mask, Text(convert ? "PK_B32" : "NORM_B32")},
+            call->loc),
+        call->loc));
+    return SeqStmt(
+        {Mask(mask, convert ? to : from, call->loc),
+         Serial(chunk, I32(src_total / size), SeqStmt(body), call->loc)},
+        call->loc);
+  }
+
+  Stmt LowerReduce(const CallObj *call) {
+    auto decoded = DecodeTileOpArguments(call);
+    TVM_FFI_CHECK_EQ(decoded.operands.size(), 5U, ValueError);
+    auto source = NormalizeToTensorRegion(decoded.operands[0]);
+    auto destination = NormalizeToTensorRegion(decoded.operands[1]);
+    FullRegion(source);
+    FullRegion(destination);
+    auto src = RegionTensor(source), dst = RegionTensor(destination);
+    auto type = src.dtype();
+    int64_t src_total, dst_total;
+    auto src_shape = Extents(source, &src_total);
+    auto dst_shape = Extents(destination, &dst_total);
+    const auto *dimension = decoded.operands[3].as<IntImmObj>();
+    TVM_FFI_CHECK(dimension, ValueError);
+    int dim = dimension->value.as<int>().value();
+    TVM_FFI_CHECK(src_shape.size() == 2 && (dim == 0 || dim == 1) &&
+                      (dst_shape.size() == 1 || dst_shape.size() == 2) &&
+                      src.dtype() == dst.dtype(),
+                  ValueError)
+        << "SIMD_VF reduce requires a 2D source and matching 1D/keepdims "
+           "output";
+    TVM_FFI_CHECK_EQ(dst_total, src_shape[1 - dim], ValueError);
+    if (dst_shape.size() == 2)
+      TVM_FFI_CHECK(dst_shape[dim] == 1 &&
+                        dst_shape[1 - dim] == src_shape[1 - dim],
+                    ValueError);
+    auto operation = AscendVFString(decoded.operands[2]);
+    bool absolute = operation == "abssum" || operation == "absmax";
+    bool sum = operation == "sum" || operation == "abssum";
+    bool maximum = operation == "max" || operation == "absmax";
+    bool minimum = operation == "min";
+    bool bitwise =
+        operation == "bitand" || operation == "bitor" || operation == "bitxor";
+    TVM_FFI_CHECK(sum || maximum || minimum || bitwise, ValueError)
+        << "Unsupported SIMD_VF reduction " << operation;
+    TVM_FFI_CHECK(!bitwise || type.MatchesCode(kDLInt, kDLUInt), TypeError)
+        << "Bitwise SIMD_VF reduction requires integer data";
+    bool clear = AscendVFBoolean(decoded.operands[4]);
+    const char *element_op = sum                     ? "vadd"
+                             : maximum               ? "vmax"
+                             : minimum               ? "vmin"
+                             : operation == "bitand" ? "vand"
+                             : operation == "bitor"  ? "vor"
+                                                     : "vxor";
+    const char *horizontal_op = sum ? "vcadd" : maximum ? "vcmax" : "vcmin";
+    int64_t size = VRegSize(type);
+    int64_t rows = src_shape[0], columns = src_shape[1];
+    if (dst_total == 0 || (src_shape[dim] == 0 && !clear))
+      return SeqStmt({}, call->loc);
+    if (src_shape[dim] == 0) {
+      // The identity is part of the reducer contract, even when no source
+      // element is read. Use the shared native helper instead of inventing
+      // finite float sentinels or reading row zero of an empty tensor.
+      auto combine = ParseReducerV2OpType(sum       ? String("sum")
+                                          : maximum ? String("max")
+                                          : minimum ? String("min")
+                                                    : operation);
+      auto identity = operation == "absmax" ? MakeConst(type, 0)
+                                            : ReducerV2Identity(combine, type);
+      Var mask("mask", PrimType::Bool(256));
+      Var value = Register(type);
+      PrimVar point("vpoint", PrimType::Int(32));
+      auto store = Evaluate(
+          Intrinsic("vsts", PrimType::Void(),
+                    {Address(dst, RegionIndices(destination, dst_shape, point),
+                             2, 1, call->loc),
+                     value, mask, Text("ONEPT_B32")},
+                    call->loc),
+          call->loc);
+      return SeqStmt(
+          {Mask(mask, type, call->loc),
+           Bind(value,
+                Intrinsic("vdup", value->ty,
+                          {identity, mask, Text("MODE_ZEROING")}, call->loc),
+                call->loc),
+           Serial(point, I32(dst_total), SeqStmt({store}), call->loc)},
+          call->loc);
+    }
+    TVM_FFI_CHECK(rows > 0 && columns > 0 && columns % size == 0 &&
+                      Contiguous(src, src_shape) && Contiguous(dst, dst_shape),
+                  ValueError)
+        << "SIMD_VF reduce needs contiguous rows whose column extent is "
+           "divisible by VReg size";
+    Var mask("mask", PrimType::Bool(256));
+    PrimVar repeat(dim == 1 ? "vrow" : "vchunk", PrimType::Int(32));
+    Array<Stmt> body;
+    auto load = [&](const TensorVar &tensor, Array<PrimExpr> indices,
+                    bool broadcast) {
+      Var value = Register(type);
+      String distribution = broadcast
+                                ? String("BRC_B" + std::to_string(type.bits()))
+                                : String("NORM");
+      body.push_back(Bind(value,
+                          Intrinsic("vld", value->ty,
+                                    {Address(tensor, indices, 1,
+                                             broadcast ? 1 : size, call->loc),
+                                     StringImm(distribution)},
+                                    call->loc),
+                          call->loc));
+      return value;
+    };
+    auto unary = [&](Var input, const char *op) {
+      Var output = Register(type);
+      body.push_back(
+          Bind(output,
+               Intrinsic(op, output->ty, {input, mask, Text("MODE_ZEROING")},
+                         call->loc),
+               call->loc));
+      return output;
+    };
+    auto combine = [&](Var left, Var right) {
+      Var output = Register(type);
+      body.push_back(
+          Bind(output,
+               Intrinsic(element_op, output->ty,
+                         {left, right, mask, Text("MODE_ZEROING")}, call->loc),
+               call->loc));
+      return output;
+    };
+    auto destination_indices = [&](PrimExpr index) -> Array<PrimExpr> {
+      return dst_shape.size() == 1 ? Array<PrimExpr>{index}
+             : dim == 0            ? Array<PrimExpr>{I32(0), index}
+                                   : Array<PrimExpr>{index, I32(0)};
+    };
+    Optional<Var> accumulator;
+    if (dim == 1) {
+      // A horizontal bitwise instruction is not part of the Ascend intrinsic
+      // surface. Broadcast one scalar at a time and fold in register SSA;
+      // unlike mapping every non-sum reduction to max this preserves the op.
+      int64_t step = bitwise ? 1 : size;
+      for (int64_t column = 0; column < columns; column += step) {
+        Var value = load(src, {repeat, I32(column)}, bitwise);
+        if (absolute)
+          value = unary(value, "vabs");
+        if (!bitwise)
+          value = unary(value, horizontal_op);
+        accumulator = accumulator ? combine(*accumulator, value) : value;
+      }
+    } else {
+      // Vector lanes enumerate OUTPUT columns; the scalar fold enumerates
+      // REDUCED rows. Their extents are independent, including non-square
+      // inputs.
+      for (int64_t row = 0; row < rows; ++row) {
+        Var value = load(src, {I32(row), repeat * I32(size)}, false);
+        if (absolute)
+          value = unary(value, "vabs");
+        accumulator = accumulator ? combine(*accumulator, value) : value;
+      }
+    }
+    PrimExpr output_index = dim == 1 ? PrimExpr(repeat) : repeat * I32(size);
+    if (!clear) {
+      Var previous = load(dst, destination_indices(output_index), dim == 1);
+      accumulator = combine(*accumulator, previous);
+    }
+    body.push_back(
+        Evaluate(Intrinsic("vsts", PrimType::Void(),
+                           {Address(dst, destination_indices(output_index), 2,
+                                    dim == 1 ? 1 : size, call->loc),
+                            *accumulator, mask,
+                            Text(dim == 1 ? "ONEPT_B32" : "NORM_B32")},
+                           call->loc),
+                 call->loc));
+    return SeqStmt({Mask(mask, type, call->loc),
+                    Serial(repeat, I32(dim == 1 ? rows : columns / size),
+                           SeqStmt(body), call->loc)},
+                   call->loc);
+  }
+
+  bool inside_{false};
+  int next_register_{0};
+  int64_t vector_size_{0};
+  Optional<PrimVar> vector_var_;
+  Map<PrimVar, PrimExpr> substitutions_;
+  Map<Var, Expr> definitions_;
+  std::unordered_map<const VarObj *, std::pair<int64_t, int64_t>>
+      narrow_ranges_;
+  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+};
+} // namespace
 
 tvm::transform::Pass AscendSimdVFLowerParallel() {
-  auto pass_func = [=](PrimFunc f, IRModule m, PassContext ctx) {
-    return AscendSimdVFLowerParallel::Substitute(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) {
+      auto lowerer = ffi::make_object<SimdVFLowerer>(function);
+      auto body = function->body;
+      function.CopyOnWrite()->body =
+          lowerer->Mutate(body).ValueOrUnchanged(body);
+    }
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AscendSimdVFLowerParallel", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.AscendSimdVFLowerParallel");
 }
-
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.AscendSimdVFLowerParallel",
-                        AscendSimdVFLowerParallel);
+  ffi::reflection::GlobalDef().def("tl.transform.AscendSimdVFLowerParallel",
+                                   AscendSimdVFLowerParallel);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

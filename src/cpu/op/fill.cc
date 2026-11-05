@@ -18,17 +18,17 @@ namespace cpu {
 
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     if (IsLocalBuffer(op.dst, true) || IsGlobalBuffer(op.dst)) {
       auto init_loop = op.MakeSIMTLoop(analyzer);
-      auto vectorized_loop =
-          VectorizeLoop(init_loop, analyzer, lower_args.layout_map);
+      auto vectorized_loop = VectorizeLoop(
+          init_loop, analyzer, lower_args.layout_map, -1, lower_args.target);
       return PragmaUnrollLoop(vectorized_loop);
     }
 
     LOG(FATAL) << "CPU fill only supports local and global buffers, but got "
                << "dst scope `" << op.dst.scope() << "`.";
-    return Stmt();
+    TVM_FFI_UNREACHABLE();
   }
 };
 

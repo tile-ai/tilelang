@@ -3,8 +3,8 @@
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-from tvm import tirx
-from testing.ascend._ir import nodes
+from tvm_tirx import ir, tirx
+from testing.ascend._ir import allocated_buffer, annotations, calls, nodes
 
 
 def test_buffer_version_annotations_use_storage_identity():
@@ -17,16 +17,23 @@ def test_buffer_version_annotations_use_storage_identity():
             inferred = T.alloc_shared((64,), "float32")
             T.annotate_buffer_versions({fixed: 2, alias: "counter", explicit: (3, "counter"), inferred: "iteration"})
 
-    root = next(block for block in nodes(main, tirx.SBlock) if block.name_hint == "tilelang_root")
-    storages = {buffer.name: buffer.data for buffer in root.alloc_buffers}
-    versions = root.annotations["tl.buffer_versions_map"]
-    modes = root.annotations["tl.buffer_version_mode"]
+    # Native annotations carry the view TensorVar. The alias definition keeps
+    # the shared storage relation explicit instead of exposing Buffer.data.
+    module = ir.IRModule({"main": main})
+    module = tilelang.transform.LowerTensorSpec()(module)
+    assert tirx.analysis.check_well_formed(module["main"])
+    storages = {name: allocated_buffer(module, name) for name in ("fixed", "explicit", "inferred")}
+    values = {key: value for fields in annotations(module) for key, value in fields.items()}
+    (alias,) = [binding for binding in nodes(module, ir.Bind) if binding.var.name == "alias"]
+    assert any(call.args[0].same_as(storages["fixed"]) for call in calls(alias.value, "tirx.tensor_data_ptr"))
+    versions = values["tl.buffer_versions_map"]
+    modes = values["tl.buffer_version_mode"]
     assert len(versions) == 2
     assert int(versions[storages["fixed"]]) == 2
     assert int(versions[storages["explicit"]]) == 3
     assert storages["inferred"] not in versions
     assert len(modes) == 3
-    assert str(modes[storages["fixed"]]) == "counter"
+    assert str(modes[alias.var]) == "counter"
     assert str(modes[storages["explicit"]]) == "counter"
     assert str(modes[storages["inferred"]]) == "iteration"
 

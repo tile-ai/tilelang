@@ -1,10 +1,11 @@
 """The reuse contract survives scheduled lowering and is consumed by packing."""
 
+from tvm_tirx import ir
+from testing.ascend._ir import access_tensor, allocations, annotations, sblock_annotations, sblocks
+
 import tilelang
 import tilelang.ascend.language as T
-from tilelang import tvm
-from tvm import tirx
-from testing.ascend._ir import nodes
+import tvm_tirx as tvm
 from testing.ascend.auto_schedule._reuse_utils import _make_cyclic_scalar_program
 
 
@@ -16,7 +17,7 @@ def test_alias_contract_lifetime():
         "tl.MergeUBAllocations",
     }
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class CapturePassIR:
         def run_after_pass(self, mod, info):
             if info.name in wanted:
@@ -25,9 +26,9 @@ def test_alias_contract_lifetime():
     with tvm.transform.PassContext(opt_level=3, instruments=[CapturePassIR()]):
         tilelang.lower(_make_cyclic_scalar_program(), target="ascend")
 
-    assert any("tl.buffer_alias_map" in block.annotations for block in nodes(snapshots["tl.InsertSync"], tirx.SBlock))
-    assert any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.LowerScheduledTIR"], tirx.AttrStmt))
-    assert not any(node.attr_key == "tl.buffer_alias_map" for node in nodes(snapshots["tl.MergeUBAllocations"], tirx.AttrStmt))
+    assert any("tl.buffer_alias_map" in sblock_annotations(block) for block in sblocks(snapshots["tl.InsertSync"]))
+    assert any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.LowerScheduledTIR"]))
+    assert not any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.MergeUBAllocations"]))
 
 
 def test_fixed_versions_allow_ub_reuse_above_raw_capacity():
@@ -47,23 +48,23 @@ def test_fixed_versions_allow_ub_reuse_above_raw_capacity():
                 with T.Stage(0):
                     out[i, 1] = b[i * 4096]
 
-    allocations = []
+    merged_allocations = []
 
-    @tvm.ir.instrument.pass_instrument
+    @ir.transform.pass_instrument
     class CaptureAllocations:
         def run_after_pass(self, mod, info):
             if info.name == "tl.MergeUBAllocations":
-                allocations.extend(
-                    node.buffer
+                merged_allocations.extend(
+                    access_tensor(node)
                     for func in mod.functions.values()
-                    for node in nodes(func, tirx.AllocBuffer)
-                    if node.buffer.scope() == "shared.dyn"
+                    for node in allocations(func)
+                    if access_tensor(node).ty.scope.name == "shared.dyn"
                 )
 
     with tvm.transform.PassContext(instruments=[CaptureAllocations()]):
         tilelang.lower(main, target="ascend", enable_device_compile=False)
 
     # The raw sum is 256 KiB, but disjoint lifetimes need only 128 KiB of UB.
-    (allocation,) = allocations
-    assert allocation.dtype == "uint8"
-    assert tuple(int(dim) for dim in allocation.shape) == (131072,)
+    (allocation,) = merged_allocations
+    assert str(allocation.ty.dtype.dtype) == "uint8"
+    assert tuple(int(dim) for dim in allocation.ty.shape) == (131072,)

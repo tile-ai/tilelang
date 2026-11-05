@@ -154,19 +154,18 @@ def test_gfx950_cp_async_gs_16_in_codegen():
 @tilelang.testing.requires_rocm
 def test_gfx950_smem_cap_160kb():
     """CDNA arch helper must report 160 KB LDS for gfx950."""
-    from tilelang import tvm
+    from tvm_tirx import runtime
+    from tvm_tirx.target import Target
     from tilelang.carver.arch.cdna import CDNA, _GFX950_LDS_SIZE
 
-    target = tvm.target.Target("rocm")
+    target = Target("rocm")
     arch = CDNA(target)
 
     if _is_gfx950():
         assert arch.smem_cap == _GFX950_LDS_SIZE, f"Expected smem_cap={_GFX950_LDS_SIZE} for gfx950, got {arch.smem_cap}"
     else:
         # On non-gfx950 devices the override must NOT kick in
-        from tilelang import tvm as _tvm
-
-        dev = _tvm.device("rocm", 0)
+        dev = runtime.rocm(0)
         assert arch.smem_cap == dev.max_shared_memory_per_block
 
 

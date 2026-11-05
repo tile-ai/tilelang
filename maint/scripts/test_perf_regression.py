@@ -9,13 +9,9 @@ import numpy as np
 import textwrap
 from pathlib import Path
 
-try:
-    import tilelang
-
-    tilelang.disable_cache()
-    os.environ["TILELANG_DISABLE_CACHE"] = "1"
-except Exception:
-    tilelang = None
+# Each child interpreter selects its own installed compiler and FFI. The
+# comparison process only reads benchmark results.
+os.environ["TILELANG_DISABLE_CACHE"] = "1"
 
 OLD_PYTHON = os.environ.get("OLD_PYTHON", "./old/bin/python")
 NEW_PYTHON = os.environ.get("NEW_PYTHON", "./new/bin/python")

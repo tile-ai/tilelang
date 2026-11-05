@@ -1,157 +1,141 @@
 /*!
  * \file lower_blackwell_2sm.cc
- * \brief Lower 2SM TCGEN5MMA and related on Blackwell target
- *
- * This pass runs before LowerTileOp. At that point the IR still has T.gemm
- * (tl.tileop.gemm Call), not the lowered tl::tcgen5mma_gemm_ss/ts. We detect
- * Gemm ops that will be lowered to TCGEN5MMA with use_2cta and set block attr.
+ * \brief Carry two-CTA GEMM requirements in their native kernel scope.
  */
+#include "cuda/target_utils.h"
+#include "transform/common/native_layout_utils.h"
 
-// todo: consider mixture of 1cta/2cta tcgen5mma in the same kernel
-
-#include "support/check.h"
-#include <tvm/ir/expr.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
-#include <tvm/tirx/stmt_functor.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
 
-#include "backend/common/target_utils.h"
-#include "op/gemm.h"
-#include "op/operator.h"
-
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
+namespace tvm::tl {
+namespace {
 using namespace ffi;
+using namespace tirx;
 
-namespace attr {
-constexpr const char *kUse2Cta = "use_2cta";
-} // namespace attr
-
-/**
- * \brief Check if any block in the body has cluster_dims (2,1,1) or (1,2,1).
- * enable_2cta is only allowed when cluster_dims matches one of these.
- */
-static bool HasValidClusterDimsFor2Cta(const Stmt &body) {
-  bool found = false;
-  PostOrderVisit(body, [&](const ObjectRef &node) {
-    if (found)
-      return;
-    if (const auto *block = node.as<SBlockNode>()) {
-      if (block->annotations.count("cluster_dims")) {
-        if (auto arr = block->annotations.Get("cluster_dims")
-                           ->try_cast<Array<Integer>>()) {
-          if (arr.value().size() == 3) {
-            int64_t x = arr.value()[0]->value;
-            int64_t y = arr.value()[1]->value;
-            int64_t z = arr.value()[2]->value;
-            found =
-                (x == 2 && y == 1 && z == 1) || (x == 1 && y == 2 && z == 1);
-          }
-        }
-      }
-    }
-  });
-  return found;
+Optional<int64_t> ConstantMetadata(const Any &value) {
+  if (auto integer = value.as<int64_t>())
+    return integer;
+  if (auto boolean = value.as<bool>())
+    return *boolean ? 1 : 0;
+  if (const auto *integer = value.as<IntImmObj>())
+    return integer->value.as<int64_t>();
+  return std::nullopt;
 }
 
-/**
- * \brief Detect 2SM TCGEN5MMA in the kernel (before LowerTileOp).
- * Looks for T.gemm (tl.tileop.gemm Call); if it will be lowered to TCGEN5MMA
- * with use_2cta, sets the flag for the mutator to add block attr.
- */
-class Tcgen5_2SmLower : public StmtExprMutator {
-public:
-  Tcgen5_2SmLower(bool cluster_dims_valid)
-      : cluster_dims_valid_(cluster_dims_valid) {}
-  bool has_2sm_tcgen5mma() const { return has_2sm_tcgen5mma_; }
+bool ValidClusterDims(const Map<String, Any> &metadata) {
+  auto value = metadata.Get("cluster_dims");
+  if (!value)
+    return false;
+  auto dims = value->cast<Array<Any>>();
+  if (dims.size() != 3)
+    return false;
+  auto x = ConstantMetadata(dims[0]);
+  auto y = ConstantMetadata(dims[1]);
+  auto z = ConstantMetadata(dims[2]);
+  return x && y && z && *z == 1 &&
+         ((*x == 2 && *y == 1) || (*x == 1 && *y == 2));
+}
 
-private:
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (const CallNode *call = op->value.as<CallNode>()) {
-      TileOperator tile_op = ParseOperator(GetRef<Stmt>(op));
-      if (tile_op.defined() && tile_op.as<Gemm>()) {
-        // Check if the user explicitly requested 2CTA via the use_2cta
-        // annotation on the Call node (set by T.tcgen05_gemm(use_2cta=True)).
-        if (call->annotations.count(attr::kUse2Cta)) {
-          auto val = call->annotations.Get(attr::kUse2Cta).value();
-          if (const auto *imm = val.as<IntImmNode>()) {
-            if (imm->value) {
-              if (!cluster_dims_valid_) {
-                LOG(FATAL) << "T.tcgen05_gemm(use_2cta=True) requires "
-                              "cluster_dims (2,1,1) or (1,2,1); a one-CTA "
-                              "fallback is not valid for rank-sharded "
-                              "operands.";
-              }
-              has_2sm_tcgen5mma_ = true;
-            }
-          }
+class Kernel2SmLowerer : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
+                            InplaceMode mode) final {
+    const bool launch = region->op->name == "tl.launch_kernel";
+    Map<String, Any> fields;
+    if (region->op->name == "tl.attr") {
+      fields = ReadNativeAnnotations(region);
+      if (fields.at("key").cast<String>() != "tl.kernel")
+        return StmtExprMutator::Mutate_(region, mode);
+    } else if (!launch) {
+      return StmtExprMutator::Mutate_(region, mode);
+    }
+    Map<String, Any> metadata;
+    if (launch) {
+      metadata = DecodeAnnotations(
+                     region->args[4].as_or_throw<tvm::Tuple>(),
+                     region->attrs.GetAttr<Array<Any>>("hint_schema").value())
+                     .cast<Map<String, Any>>();
+    } else {
+      metadata = fields.at("value").cast<Map<String, Any>>();
+    }
+    KernelState state{ValidClusterDims(metadata), false};
+    auto *saved = kernel_;
+    kernel_ = &state;
+    SeqStmt body = Mutate(region->body, mode).ValueOrUnchanged(region->body);
+    kernel_ = saved;
+    if (state.requested)
+      metadata.Set("use_2cta", IntImm(PrimType::Int(32), 1));
+    if (launch) {
+      auto encoded = EncodeAnnotations(metadata);
+      auto arguments = region->args;
+      arguments.Set(4, encoded.payload);
+      auto attrs = region->attrs->dict;
+      attrs.Set("hint_schema", encoded.schema);
+      return RegionStmt(region->op, arguments, region->body_params,
+                        DictAttrs(attrs), body, region->result_vars,
+                        region->loc);
+    }
+    return MakeNativeAttribute(fields.at("node"), "tl.kernel", metadata, body,
+                               region->loc);
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
+    auto op = call->op.as<Op>();
+    // Dense and block-scaled GEMM are the two native GemmNode families.
+    // Keep the metadata on the original Call for instruction selection; only
+    // publish the allocation requirement to the enclosing kernel's consumers.
+    if (op && (op.value()->name == "tl.tileop.gemm" ||
+               op.value()->name == "tl.tileop.gemm_blockscaled" ||
+               op.value()->name == "tl.tileop.tcgen05_gemm" ||
+               op.value()->name == "tl.tileop.wgmma_gemm")) {
+      auto args = DecodeTileOpArguments(call);
+      if (auto value = args.annotations.Get("use_2cta")) {
+        auto enabled = ConstantMetadata(*value);
+        TVM_FFI_CHECK(enabled, ValueError)
+            << "use_2cta must be a constant integer or bool";
+        if (*enabled != 0) {
+          TVM_FFI_CHECK(kernel_ && kernel_->valid_cluster, ValueError)
+              << "T.tcgen05_gemm(use_2cta=True) requires cluster_dims (2,1,1) "
+                 "or (1,2,1) on its own kernel; a one-CTA fallback is not "
+                 "valid "
+                 "for rank-sharded operands";
+          kernel_->requested = true;
         }
       }
     }
-    return StmtExprMutator::VisitStmt_(op);
+    return StmtExprMutator::Mutate_(call, mode);
   }
-
-  bool cluster_dims_valid_;
-  bool has_2sm_tcgen5mma_ = false;
-};
-
-class Tcgen5_2SmAnnotator : public StmtExprMutator {
-public:
-  explicit Tcgen5_2SmAnnotator() {}
 
 private:
-  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
-    Stmt new_realize = StmtExprMutator::VisitStmt_(op);
-    if (root_block_annotated_)
-      return new_realize;
-    const auto *realize = new_realize.as<SBlockRealizeNode>();
-    ICHECK(realize);
-    SBlock block = realize->block;
-    SBlockNode *n = block.CopyOnWrite();
-    // Set block attr: {use_2cta: 1}
-    // lower_shared_tmem.cc will depend on this to allocate/deallocate tmem with
-    // 2cta.
-    n->annotations.Set(attr::kUse2Cta, IntImm(DataType::Int(32), 1));
-    root_block_annotated_ = true;
-    return SBlockRealize(realize->iter_values, realize->predicate, block);
-  }
-
-  bool root_block_annotated_ = false;
+  struct KernelState {
+    bool valid_cluster;
+    bool requested;
+  };
+  KernelState *kernel_{nullptr};
 };
-
-using namespace tirx::transform;
+} // namespace
 
 tvm::transform::Pass LowerBlackwell2SM() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, PassContext ctx) {
-    Optional<Target> opt_target = f->GetAttr<Target>(tvm::attr::kTarget);
-    if (!opt_target.defined() || !TargetIsSm100(opt_target.value())) {
-      return f;
-    }
-    Stmt body = f->body;
-    bool cluster_dims_valid = HasValidClusterDimsFor2Cta(body);
-    Tcgen5_2SmLower lower(cluster_dims_valid);
-    body = lower(std::move(body));
-    if (lower.has_2sm_tcgen5mma()) {
-      // Annotate block attr for using 2cta tcgen5
-      Tcgen5_2SmAnnotator annotator;
-      body = annotator(std::move(body));
-    }
-    return PrimFunc(f->params, body, f->ret_type, f->buffer_map, f->attrs);
+  auto rewrite = [](tirx::Function function, IRModule,
+                    tvm::transform::PassContext) {
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    if (!target || !TargetIsSm100(target.value()) ||
+        function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    auto lowerer = make_object<Kernel2SmLowerer>();
+    SeqStmt body = function->body;
+    function.CopyOnWrite()->body = lowerer->Mutate(body).ValueOrUnchanged(body);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LowerBlackwell2SM", {});
+  return tirx::transform::CreateFunctionPass(rewrite, 0,
+                                             "tl.LowerBlackwell2SM");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.cuda.transform.LowerBlackwell2SM",
-                        LowerBlackwell2SM);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.LowerBlackwell2SM",
+                                   LowerBlackwell2SM);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

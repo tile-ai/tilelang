@@ -17,22 +17,10 @@
 # This file is modified from the original version,
 # which is part of the TVM project (https://tvm.apache.org/).
 # ruff: noqa
-"""The tir parser"""
+"""Historical frontend namespace backed by TileLang's F1 builder."""
 
-from typing import TYPE_CHECKING
+from tilelang.language.common import *  # noqa: F401,F403
+from tilelang.language.common import __all__ as _common_all
+from .entry import Buffer, Ptr, macro, prim_func
 
-from ..ast import *  # pylint: disable=redefined-builtin
-from ..ast import ir as _tir
-from . import operation as _operation
-from . import parser as _parser
-from .entry import Buffer, Ptr
-
-if TYPE_CHECKING:
-    # pylint: disable=invalid-name
-    # Define prim_func and make it type check as static method
-    # so most tvmscript won't trigger pylint error here.
-    prim_func = staticmethod
-else:
-    from .entry import macro, prim_func
-
-__all__ = _tir.__all__ + ["Buffer", "Ptr", "bool", "prim_func", "macro"]
+__all__ = tuple(dict.fromkeys([*_common_all, "Buffer", "Ptr", "macro", "prim_func"]))

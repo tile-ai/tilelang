@@ -1,6 +1,6 @@
 from __future__ import annotations
-import tvm
-from tvm.target import Target
+import tvm_tirx as tvm
+from tvm_tirx.target import Target
 from .arch_base import TileDevice
 
 # LDS size per CU for specific AMD GPU architectures (in bytes).

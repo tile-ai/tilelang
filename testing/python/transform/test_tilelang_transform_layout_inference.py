@@ -1,5 +1,8 @@
 import re
 
+import tvm_ffi
+from tvm_tirx import ir
+
 from tilelang import tvm as tvm
 from tilelang.backend.target import determine_target
 import tilelang as tl
@@ -16,6 +19,12 @@ def _assert_launch_bounds(kernel_source: str, threads: int) -> None:
     assert re.search(rf"__launch_bounds__\({threads}\b", kernel_source)
 
 
+def _assert_serial_extent(source, extent):
+    match = re.search(rf"for \(int ([A-Za-z_]\w*) = 0; \1 < {extent}; \+\+\1\)", source)
+    assert match, f"Expected a zero-based loop with exactly {extent} iterations:\n{source}"
+    return match.group(1)
+
+
 @pytest.mark.parametrize(
     "block_M, block_N, block_K, threads, vec_load_b, dtype",
     [
@@ -23,8 +32,8 @@ def _assert_launch_bounds(kernel_source: str, threads: int) -> None:
     ],
 )
 def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
-    N = tvm.te.var("n")
-    K = tvm.te.var("k")
+    N = ir.Var("n", "int32")
+    K = ir.Var("k", "int32")
 
     def before():
         @T.prim_func
@@ -99,14 +108,14 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
         mod = tvm.tirx.transform.BindTarget(auto_target)(before())
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.LayoutInference()(mod)
-        mod = tvm.tirx.transform.Simplify()(mod)
+        mod = tl.transform.Simplify()(mod)
         ref_mod = tvm.tirx.transform.BindTarget(auto_target)(after())
         ref_mod = tl.transform.MaterializeKernelLaunch()(ref_mod)
-        ref_mod = tvm.tirx.transform.Simplify()(ref_mod)
+        ref_mod = tl.transform.Simplify()(ref_mod)
         # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
         # This loop is "for vec in T.parallel(1)",
         # Since the loop var "vec" is never used in the loop body, it does not affect the correctness
-        tvm.ir.structural_equal(mod, ref_mod)
+        tvm_ffi.structural_equal(mod, ref_mod)
         # tvm.ir.assert_structural_equal(mod, ref_mod)
 
 
@@ -137,7 +146,7 @@ def test_register_count_is_default_layout_cost_model():
     io_aware = infer({"tl.layout_cost_model": "io-aware"})
 
     tvm.ir.assert_structural_equal(default, register_count)
-    assert not tvm.ir.structural_equal(default, io_aware)
+    assert not tvm_ffi.structural_equal(default, io_aware)
 
 
 def test_static_ragged_copy_minimizes_full_thread_padding():
@@ -157,7 +166,7 @@ def test_static_ragged_copy_minimizes_full_thread_padding():
 
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 128)
-    assert "for (int i = 0; i < 5; ++i)" in kernel_source
+    _assert_serial_extent(kernel_source, 5)
     assert "threadIdx.x) >> 1)) < 257" in kernel_source
     assert "float2" not in kernel_source
     assert "threadIdx.x) < 1" not in kernel_source
@@ -180,7 +189,7 @@ def test_static_ragged_fp8_copy_minimizes_full_thread_padding():
 
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 128)
-    assert "for (int i = 0; i < 3; ++i)" in kernel_source
+    _assert_serial_extent(kernel_source, 3)
     assert "fp8_e4_8_t" in kernel_source
     assert "fp8_e4_16_t" not in kernel_source
 
@@ -202,8 +211,9 @@ def test_static_ragged_copy_allows_1024_elements_384_threads():
 
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 384)
-    assert "for (int i = 0; i < 3; ++i)" in kernel_source
-    assert "B[((i * 384) + ((int)threadIdx.x))]" in kernel_source
+    _assert_serial_extent(kernel_source, 3)
+    loop = _assert_serial_extent(kernel_source, 3)
+    assert re.search(rf"B(?:_ptr)?\[\(\({re.escape(loop)} \* 384\) \+ \(\(int\)threadIdx.x\)\)\]", kernel_source)
     assert "(((int)threadIdx.x) >> 7)) < 8" in kernel_source
     assert "threadIdx.x) < 128" not in kernel_source
 

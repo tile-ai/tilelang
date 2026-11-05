@@ -142,12 +142,18 @@ def AscendThreadSync(storage_scope: str):
 def AscendLayoutInference():
     """Ascend fork of LayoutInference: VF regions are opaque to the worklist
     and SIMT_VF bodies infer against the region's own lane scope."""
+    from tilelang.tileop import _register_builtin_callbacks
+
+    _register_builtin_callbacks("ascend")
     return _ffi_api.AscendLayoutInference()  # type: ignore
 
 
 def AscendLowerTileOp():
     """Ascend fork of LowerTileOp: VF region scopes, buffer-version key remap,
     and no CUDA async-copy post-processing."""
+    from tilelang.tileop import _register_builtin_callbacks
+
+    _register_builtin_callbacks("ascend")
     return _ffi_api.AscendLowerTileOp()  # type: ignore
 
 

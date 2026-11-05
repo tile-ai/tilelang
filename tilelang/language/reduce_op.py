@@ -1,12 +1,13 @@
 """Reduce operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
+from tilelang.language import _native
 from typing import Literal
-from tvm import tirx
+from tilelang.language import _native as tirx
 from tilelang.language.common import copy, macro, alloc_fragment, evaluate
 from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment, is_local
-from tvm.script.ir_builder import IRBuilder
+from tvm_tirx.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
 
 
@@ -56,15 +57,15 @@ def reduce(
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_region = to_buffer_region(out)
-    out_buffer = out_region.buffer
+    out_buffer = out_region.source
     if reduce_type in ("bitand", "bitor", "bitxor"):
         # Both faces must be integral: a float source would otherwise be silently
         # value-cast to an integer before the bitwise reduction runs.
-        buf_dtype = _get_buffer(buffer).dtype
+        buf_dtype = _native.dtype_of(_get_buffer(buffer))
         if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
+        if not (_native.dtype_of(out_buffer).startswith(("int", "uint")) or _native.dtype_of(out_buffer) == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {_native.dtype_of(out_buffer)}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out_region)
@@ -82,11 +83,11 @@ def reduce(
 
     # Emit local reductions before macro expansion so alloc_var retains its
     # underlying Buffer rather than becoming a scalar expression.
-    if is_local(buffer) and out_buffer.scope() in ("local", "local.var"):
+    if is_local(buffer) and str(out_buffer.scope()) in ("local", "local.var"):
         return evaluate(
             tirx.call_intrin(
                 "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
+                tirx.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
                 to_tile_region(out_buffer, access_type="w"),
                 reduce_type,
@@ -100,8 +101,8 @@ def reduce(
     def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
         buf_shape = retrieve_shape(buffer)
         out_shape = retrieve_shape(out)
-        buf_dtype = _get_buffer(buffer).dtype
-        out_dtype = _get_buffer(out).dtype
+        buf_dtype = _native.dtype_of(_get_buffer(buffer))
+        out_dtype = _native.dtype_of(_get_buffer(out))
         buf_name = _get_buffer(buffer).name
         out_name = _get_buffer(out).name
         buf_scope = _get_buffer(buffer).scope()
@@ -120,7 +121,7 @@ def reduce(
             copy(buffer, red_frag_in)
             tirx.call_intrin(
                 "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
+                tirx.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(red_frag_in, access_type="r"),
                 to_tile_region(red_frag_out, access_type="w"),
                 reduce_type,
@@ -136,7 +137,7 @@ def reduce(
             copy(buffer, red_frag_in)
             tirx.call_intrin(
                 "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
+                tirx.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(red_frag_in, access_type="r"),
                 to_tile_region(out, access_type="w"),
                 reduce_type,
@@ -153,7 +154,7 @@ def reduce(
 
             tirx.call_intrin(
                 "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
+                tirx.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
                 to_tile_region(red_frag_out, access_type="w"),
                 reduce_type,
@@ -165,7 +166,7 @@ def reduce(
         elif is_fragment(buffer) and is_fragment(out):
             tirx.call_intrin(
                 "handle",
-                tirx.op.Op.get(_REDUCE_OP_KEY),
+                tirx.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
                 to_tile_region(out, access_type="w"),
                 reduce_type,
@@ -392,11 +393,11 @@ def reducer_init(reducer: tirx.Buffer, init=None) -> tirx.PrimExpr:
     args = [to_tile_region(reducer, access_type="w")]
     if init is not None:
         if isinstance(init, (int, float)):
-            init = tirx.const(init, reducer.dtype)
+            init = tirx.const(init, _native.dtype_of(reducer))
         args.append(init)
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.reducer_init"),
+        tirx.Op.get("tl.tileop.reducer_init"),
         *args,
     )
 
@@ -421,17 +422,17 @@ def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
         raise ValueError(
             f"reducer_update expects `acc[indices]` as its first argument, got {type(target)}; the reducer cannot be read or aliased."
         )
-    dtype = target.buffer.dtype
+    dtype = _native.dtype_of(target.source)
     if isinstance(value, (int, float)):
         value = tirx.const(value, dtype)
-    elif isinstance(value, tirx.PrimExpr) and value.dtype != dtype:
+    elif isinstance(value, tirx.PrimExpr) and _native.dtype_of(value) != dtype:
         value = tirx.Cast(dtype, value)
     # A builtin intrinsic, not a tile op: the target rides as a plain
     # BufferLoad (an update descriptor keeping the multi-dim indices for the
     # planner), and the layout story belongs to the enclosing T.Parallel.
     return tirx.call_intrin(
-        "handle",
-        tirx.op.Op.get("tl.reducer_update"),
+        "void",
+        tirx.Op.get("tl.reducer_update"),
         target,
         value,
     )
@@ -469,14 +470,14 @@ def finalize_reducer(
     if dst is not None:
         return tirx.call_intrin(
             "handle",
-            tirx.op.Op.get("tl.tileop.finalize_reducer_v2"),
+            tirx.Op.get("tl.tileop.finalize_reducer_v2"),
             to_tile_region(reducer, access_type="rw"),
             to_tile_region(dst, access_type="w"),
             annotations=annotations,
         )
     return tirx.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tileop.finalize_reducer"),
+        tirx.Op.get("tl.tileop.finalize_reducer"),
         to_tile_region(reducer, access_type="w"),
         annotations=annotations,
     )
@@ -495,7 +496,7 @@ def warp_reduce_sum(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced sum value (same on all threads in the warp)
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.warp_reduce_sum"), value)
+    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_sum"), value)
 
 
 def warp_reduce_max(value: tirx.PrimExpr) -> tirx.PrimExpr:
@@ -511,7 +512,7 @@ def warp_reduce_max(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced max value (same on all threads in the warp)
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.warp_reduce_max"), value)
+    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_max"), value)
 
 
 def warp_reduce_min(value: tirx.PrimExpr) -> tirx.PrimExpr:
@@ -527,7 +528,7 @@ def warp_reduce_min(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced min value (same on all threads in the warp)
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.warp_reduce_min"), value)
+    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_min"), value)
 
 
 def warp_reduce_bitand(value: tirx.PrimExpr) -> tirx.PrimExpr:
@@ -543,7 +544,7 @@ def warp_reduce_bitand(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced bitwise-and value (same on all threads in the warp)
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.warp_reduce_bitand"), value)
+    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_bitand"), value)
 
 
 def warp_reduce_bitor(value: tirx.PrimExpr) -> tirx.PrimExpr:
@@ -559,4 +560,4 @@ def warp_reduce_bitor(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced bitwise-or value (same on all threads in the warp)
     """
-    return tirx.call_intrin(value.dtype, tirx.op.Op.get("tl.warp_reduce_bitor"), value)
+    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_bitor"), value)

@@ -19,6 +19,21 @@ on:
       - cmake/**
       - VERSION
       - version_provider.py
+      - provider_metadata.py
+      - tilelang_build_backend.py
+      - tilelang_packaging/**
+      - requirements*.txt
+      - .gitmodules
+      - 3rdparty/tvm-tirx
+      - tilelang/_provider.py
+      - tilelang/__init__.py
+      - tilelang/libinfo.py
+      - tilelang/env.py
+      - maint/scripts/build_native_artifacts.py
+      - maint/scripts/build_native_wheels.py
+      - maint/scripts/verify_native_install.py
+      - maint/scripts/*distribut*.sh
+      - maint/scripts/pypi.manylinux.Dockerfile
       - .github/workflows/dist.yml
       - .github/scripts/**
       # Exercised by the GPU wheel-test job below.
@@ -79,7 +94,10 @@ jobs:
 
       - name: Build SDist
         run: |
-          uv run --no-project --with=build -m -- build --sdist --outdir=dist
+          python maint/scripts/build_native_artifacts.py stage --destination .native-sdist-stage
+          python maint/scripts/build_native_artifacts.py build --stage .native-sdist-stage --output dist \
+            --frontend uv --sdist-only --jobs 4
+          cp dist/artifacts.json dist/native-sdist-bundle.json
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1
@@ -99,7 +117,7 @@ jobs:
           TEMP_DIR="$(mktemp -d -t tilelang-sdist-test)"
           cp -r dist "${TEMP_DIR}/dist"
           cd "${TEMP_DIR}"
-          env -u NO_VERSION_LABEL uv pip install -v dist/*.tar.gz
+          env -u NO_VERSION_LABEL uv pip install -v --find-links dist dist/*.tar.gz
           env -u NO_VERSION_LABEL python3 -c "import tilelang; print(tilelang.__version__)"
 
       - name: Upload SDist
@@ -108,7 +126,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sdist
-          path: dist/*.tar.gz
+          path: |
+            dist/*.tar.gz
+            dist/native-sdist-bundle.json
           if-no-files-found: error
 
   build-wheels:
@@ -134,6 +154,7 @@ jobs:
     env:
       IS_RELEASE: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]') }}
       NO_VERSION_LABEL: "OFF"
+      NATIVE_BUNDLE_LABEL: "${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}-py${{ matrix.target.python_version }}"
 
     steps:
       - name: Enable git long paths
@@ -227,46 +248,20 @@ jobs:
             "NO_VERSION_LABEL=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
-      - name: Build wheels
-        if: runner.os != 'Windows'
-        uses: pypa/cibuildwheel@v4.3
-        with:
-          package-dir: .
-          output-dir: wheelhouse
-          config-file: "{package}/pyproject.toml"
-
-      # Fixed dependency paths allow ccache direct hits across runner instances.
-      # cibuildwheel's random PEP 517 directories forced 700/703 warm hits through
-      # preprocessing and also installed/tested the same cp310 wheel twice.
-      - name: Build wheels (Windows)
-        id: windows_wheel
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          CCACHE_STATSLOG: ${{ runner.temp }}/tilelang-wheel-ccache.log
+      - name: Build matched FFI, provider and TileLang wheels
+        id: native_wheels
+        shell: bash
         run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          "started=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_OUTPUT
-          $python = (Resolve-Path .venv/Scripts/python.exe).Path
-          uv pip install --python $python build tomli "cmake>=3.26.1" "ninja>=1.11"
-          $requirements = & $python -c "import tomli; print('\n'.join(tomli.load(open('pyproject.toml', 'rb'))['build-system']['requires']))"
-          uv pip install --python $python @requirements
-          $extra = @(& $python -c "from build import ProjectBuilder; print('\n'.join(ProjectBuilder('.').get_requires_for_build('wheel')))") | Where-Object { $_ -ne '' }
-          if ($extra.Count) {
-            uv pip install --python $python @extra
-          }
-          uv build --wheel --no-build-isolation --python $python --out-dir raw-wheelhouse `
-            -C cmake.build-type=Release -C "cmake.define.Python3_EXECUTABLE=$python"
-          Get-ChildItem raw-wheelhouse -Filter *.whl | ForEach-Object {
-            uvx delvewheel repair -w wheelhouse $_.FullName
-          }
+          echo "started=$(date +%s)" >> "${GITHUB_OUTPUT}"
+          python maint/scripts/build_native_wheels.py --stage .native-wheel-stage --output wheelhouse --jobs 4
+          cp wheelhouse/native-wheel-bundle.json "wheelhouse/native-wheel-bundle-${NATIVE_BUNDLE_LABEL}.json"
 
       - name: Windows wheel build summary
         if: ${{ always() && runner.os == 'Windows' }}
         shell: pwsh
         env:
-          BUILD_OUTCOME: ${{ steps.windows_wheel.outcome }}
-          BUILD_STARTED: ${{ steps.windows_wheel.outputs.started }}
+          BUILD_OUTCOME: ${{ steps.native_wheels.outcome }}
+          BUILD_STARTED: ${{ steps.native_wheels.outputs.started }}
           CCACHE_STATSLOG: ${{ runner.temp }}/tilelang-wheel-ccache.log
         run: |
           $summary = @('## Windows wheel build', '', "Build step: **$env:BUILD_OUTCOME**")
@@ -308,7 +303,7 @@ jobs:
       - name: Test built wheels
         if: runner.os != 'Windows'
         run: |
-          for WHEEL in wheelhouse/*.whl; do
+          for WHEEL in wheelhouse/tilelang-*.whl; do
             echo "Testing wheel: ${WHEEL}"
             if [[ "${WHEEL}" == *"abi3"* ]]; then
               uvx abi3audit --verbose --strict "${WHEEL}"
@@ -318,7 +313,7 @@ jobs:
               uv venv test-venv
               source test-venv/bin/activate
 
-              uv pip install -v "${WHEEL}"
+              uv pip install -v --find-links wheelhouse "${WHEEL}"
               (
                 set -e
                 cd /
@@ -334,8 +329,12 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
+          $verifier = (Resolve-Path maint/scripts/verify_native_install.py).Path
+          $expectedSource = (Resolve-Path .native-wheel-stage/manifest.json).Path
+          $receiptDirectory = (Resolve-Path wheelhouse).Path
+          Get-ChildItem wheelhouse -Filter tilelang-*.whl | ForEach-Object {
             $wheel = $_.FullName
+            $wheelStem = $_.BaseName
             Write-Host "Testing wheel: $wheel"
             if ($_.Name -like "*abi3*") {
               uvx abi3audit --verbose --strict $wheel
@@ -346,10 +345,14 @@ jobs:
             uv venv test-venv
             $python = Join-Path (Resolve-Path test-venv).Path "Scripts\python.exe"
 
-            uv pip install -v --python $python $wheel
+            uv pip install -v --python $python --find-links wheelhouse $wheel
             Push-Location $env:RUNNER_TEMP
             try {
               & $python -c "import tilelang; print(tilelang.__version__)"
+              foreach ($order in @("tilelang-first", "tirx-first")) {
+                $receipt = Join-Path $receiptDirectory "native-install-${env:NATIVE_BUNDLE_LABEL}-basic-$wheelStem-$order.json"
+                & $python $verifier --expected-source $expectedSource --import-order $order --output $receipt
+              }
             } finally {
               Pop-Location
             }
@@ -363,14 +366,14 @@ jobs:
           VERSION_LOG=$(mktemp)
           for UV_TORCH_BACKEND in ${{ matrix.target.test_backends }}; do
             export UV_TORCH_BACKEND
-            for WHEEL in wheelhouse/*.whl; do
+            for WHEEL in wheelhouse/tilelang-*.whl; do
               echo "Testing wheel: ${WHEEL}"
               (
                 set -e
                 uv venv test-venv
                 source test-venv/bin/activate
 
-                uv pip install -v "${WHEEL}"
+                uv pip install -v --find-links wheelhouse "${WHEEL}"
                 (
                   set -e
                   cd /
@@ -388,6 +391,9 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          $verifier = (Resolve-Path maint/scripts/verify_native_install.py).Path
+          $expectedSource = (Resolve-Path .native-wheel-stage/manifest.json).Path
+          $receiptDirectory = (Resolve-Path wheelhouse).Path
           $torchPackage = "${{ matrix.target.torch_package }}"
           $torchIndex = "${{ matrix.target.torch_index_url }}"
           if ($torchPackage) {
@@ -409,8 +415,9 @@ jobs:
             if (-not $torchPackage) {
               $env:UV_TORCH_BACKEND = $backend
             }
-            Get-ChildItem wheelhouse -Filter *.whl | ForEach-Object {
+            Get-ChildItem wheelhouse -Filter tilelang-*.whl | ForEach-Object {
               $wheel = $_.FullName
+              $wheelStem = $_.BaseName
               Write-Host "Testing wheel: $wheel"
               if ($_.Name -like "*abi3*") {
                 uvx abi3audit --verbose --strict $wheel
@@ -424,13 +431,17 @@ jobs:
               if ($torchPackage) {
                 uv pip install -v --python $python $torchPackage --index $torchIndex
               }
-              uv pip install -v --python $python $wheel
+              uv pip install -v --python $python --find-links wheelhouse $wheel
               Push-Location $env:RUNNER_TEMP
               try {
                 if ($torchPackage) {
                   & $python -c "import torch; assert torch.version.cuda == '13.4', torch.version.cuda"
                 }
                 & $python -c "import tilelang, torch; print(tilelang.__version__, torch.__version__)" | Out-File -Append -FilePath $versionLog -Encoding utf8
+                foreach ($order in @("tilelang-first", "tirx-first")) {
+                  $receipt = Join-Path $receiptDirectory "native-install-${env:NATIVE_BUNDLE_LABEL}-$backend-$wheelStem-$order.json"
+                  & $python $verifier --expected-source $expectedSource --import-order $order --output $receipt
+                }
               } finally {
                 Pop-Location
               }
@@ -445,7 +456,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
-          path: wheelhouse/*.whl
+          path: |
+            wheelhouse/*.whl
+            wheelhouse/native-wheel-bundle-*.json
+            wheelhouse/native-install-*.json
           if-no-files-found: error
 
   test-wheels-gpu:
@@ -570,7 +584,7 @@ jobs:
           export TILELANG_DISABLE_CACHE=1
 
           ls -lh wheelhouse/
-          for WHEEL in wheelhouse/*.whl; do
+          for WHEEL in wheelhouse/tilelang-*.whl; do
             echo "Testing wheel: ${WHEEL}"
             (
               set -e
@@ -581,7 +595,7 @@ jobs:
               # wheel, so the resolver cannot substitute a mismatched build
               # from PyPI (e.g. the CUDA torch on a ROCm host).
               uv pip install -v --index-url "${TORCH_INDEX_URL}" torch
-              uv pip install -v "${WHEEL}"
+              uv pip install -v --find-links wheelhouse "${WHEEL}"
               # Run from RUNNER_TEMP so `import tilelang` resolves to the
               # installed wheel rather than the repository source tree.
               cp maint/scripts/smoke_test_wheel.py "${RUNNER_TEMP}/"
@@ -662,5 +676,12 @@ jobs:
       - name: List distributions
         run: ls -lh dist/*
 
+      - name: Select TileLang artifacts for its publisher
+        run: |
+          mkdir frontend-dist
+          cp dist/tilelang-*.whl dist/tilelang-*.tar.gz frontend-dist/
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: frontend-dist

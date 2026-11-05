@@ -1,51 +1,34 @@
 /*!
  * \file access_ptr_utils.h
- * \brief Shared utilities for tl.access_ptr lowering helpers.
+ * \brief Traverse address indices without introducing a memory read.
  */
 #ifndef TVM_TL_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_
 
-#include <tvm/tirx/expr.h>
+#include <tvm/ir/expr.h>
 
-namespace tvm {
-namespace tl {
-
-namespace detail {
+namespace tvm::tl::detail {
 
 template <typename VisitExprFn>
-tirx::BufferLoad VisitAccessPtrBase(const tvm::PrimExpr &expr,
-                                    VisitExprFn &&visit_expr) {
-  const auto *base_load_node = expr.as<tirx::BufferLoadNode>();
-  ICHECK(base_load_node) << "tl.access_ptr base must be BufferLoad, but got "
-                         << expr;
-  tirx::BufferLoad base_load =
-      tvm::ffi::GetRef<tirx::BufferLoad>(base_load_node);
-
-  tvm::ffi::Array<tvm::PrimExpr> indices;
+TensorLoad VisitAccessPtrBase(const Expr &expr, VisitExprFn &&visit_expr) {
+  const auto *node = expr.as<TensorLoadObj>();
+  TVM_FFI_CHECK(node, TypeError)
+      << "tl.access_ptr base must be a native TensorLoad, but got " << expr;
+  TensorLoad load = ffi::GetRef<TensorLoad>(node);
+  ffi::Array<PrimExpr> indices;
   bool changed = false;
-  for (const tvm::PrimExpr &index : base_load->indices) {
-    tvm::PrimExpr new_index = visit_expr(index);
-    changed = changed || !new_index.same_as(index);
-    indices.push_back(new_index);
+  for (const PrimExpr &index : load->indices) {
+    PrimExpr replacement = visit_expr(index);
+    changed |= !replacement.same_as(index);
+    indices.push_back(replacement);
   }
-
-  tvm::ffi::Optional<tvm::PrimExpr> predicate = base_load->predicate;
-  if (predicate.defined()) {
-    tvm::PrimExpr new_predicate = visit_expr(predicate.value());
-    changed = changed || !new_predicate.same_as(predicate.value());
-    predicate = new_predicate;
-  }
-
-  if (!changed) {
-    return base_load;
-  }
-  return tirx::BufferLoad(base_load->buffer, indices, predicate,
-                          base_load->span);
+  if (!changed)
+    return load;
+  // Predication belongs to the containing native If. Preserve the stored type
+  // until an index-width-changing caller deliberately reinfers this load.
+  return TensorLoad(load->source, std::move(indices), load.ty(), load->loc);
 }
 
-} // namespace detail
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl::detail
 
 #endif // TVM_TL_TRANSFORM_COMMON_ACCESS_PTR_UTILS_H_

@@ -54,11 +54,34 @@ def test_scalar_copy_annotations_preserved():
             T.copy(A[0], B[0], annotations={"test.copy": "sync"})
             T.async_copy(A[0], A_shared[0], annotations={"test.copy": "async"})
 
-    lines = main.script().splitlines()
-    copy_line = next(line for line in lines if "T.copy(" in line)
-    async_line = next(line for line in lines if "T.async_copy(" in line)
-    assert 'test.copy="sync"' in copy_line
-    assert 'test.copy="async"' in async_line
+    import tvm_ffi
+    from tvm_tirx import ir, tirx
+    from tilelang.testing.ir import collect_calls, collect_nodes
+
+    assert main.script()
+    for function in (main, ir.load_json(ir.save_json(main))):
+        assert tirx.analysis.check_well_formed(function)
+        (allocation,) = collect_calls(function, op="tirx.alloc_tensor")
+        (binding,) = [node for node in collect_nodes(function, ir.Bind) if node.value.same_as(allocation)]
+        assert str(binding.var.ty.scope) == "shared.dyn"
+        for opname, label, destination in (
+            ("tl.tileop.copy", "sync", function.params[1]),
+            ("tl.tileop.async_copy", "async", binding.var),
+        ):
+            (call,) = collect_calls(function, op=opname)
+            assert call.ty == ir.PrimType("void")
+            assert int(call.attrs["schema_version"]) == 1
+            assert int(call.attrs["operand_count"]) == 2
+            assert len(call.args) == 3 and isinstance(call.args[2], ir.Tuple)
+            source, dest = call.args[:2]
+            assert isinstance(source, ir.TensorLoad) and isinstance(dest, ir.TensorLoad)
+            assert source.source.same_as(function.params[0])
+            assert dest.source.same_as(destination)
+            assert len(source.indices) == len(dest.indices) == 1
+            assert int(source.indices[0]) == int(dest.indices[0]) == 0
+            annotations = tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[2], call.attrs["annotation_schema"])
+            assert isinstance(annotations["test.copy"], ir.StringImm)
+            assert annotations["test.copy"].value == label
 
 
 def run_tilelang_copy_cross_dtype(M=256, N=256, block_M=128, block_N=128, src_dtype=T.float16, dst_dtype=T.bfloat16):

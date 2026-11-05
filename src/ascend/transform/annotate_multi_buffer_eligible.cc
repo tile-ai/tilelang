@@ -30,10 +30,10 @@
  */
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/ir/transform.h>
 #include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -48,8 +48,9 @@
 #include "ascend/transform/auto_schedule/multi_buffer.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/buffer_version.h"
+#include "ir/analyzer.h"
 #include "op/builtin.h"
-#include "transform/common/attr.h"
+#include "op/native_intrinsic.h"
 
 namespace tvm {
 namespace tl {
@@ -57,6 +58,7 @@ namespace tl {
 using namespace tirx;
 using namespace ascend;
 using namespace ffi;
+using namespace prim;
 
 namespace {
 
@@ -64,19 +66,40 @@ using StorageSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 using ControlStorageClaims =
     std::unordered_map<ControlNode *, std::vector<Var>>;
 
-Array<Var> NormalizeEligibleStorages(const Any &annotation) {
+Var CanonicalStorage(const Var &storage, const NativeStorageContext &context) {
+  auto address = context.Address(storage);
+  return address.exact && address.root.as<VarObj>()
+             ? address.root.as_or_throw<Var>()
+             : storage;
+}
+
+template <typename T>
+Map<Var, T> CanonicalVersions(const Map<Var, T> &versions,
+                              const NativeStorageContext &context) {
+  Map<Var, T> result;
+  for (const auto &[storage, value] : versions) {
+    Var root = CanonicalStorage(storage, context);
+    if (auto prior = result.Get(root))
+      TVM_FFI_CHECK(*prior == value, ValueError)
+          << "Conflicting buffer version policies for native aliases of "
+          << root;
+    result.Set(root, value);
+  }
+  return result;
+}
+
+Array<Var> NormalizeEligibleStorages(const Any &annotation,
+                                     const NativeStorageContext &context) {
   Array<Var> result;
   StorageSet seen;
-  for (const Any &item : Downcast<Array<Any>>(annotation)) {
-    Var storage;
-    if (auto buffer = item.try_cast<Buffer>()) {
-      storage = buffer.value()->data;
-    } else if (auto var = item.try_cast<Var>()) {
-      storage = var.value();
-    } else {
-      LOG(FATAL) << "'" << kMultiBufferEligible
-                 << "' entries must be Buffer or Var objects, got " << item;
-    }
+  for (const Any &item : annotation.cast<Array<Any>>()) {
+    Var storage = item.cast<Var>();
+    TVM_FFI_CHECK(storage->ty.as<TensorTypeObj>() ||
+                      storage->ty.as<PtrTypeObj>(),
+                  ValueError)
+        << "multi_buffer_eligible entries must name native tensor or pointer "
+           "storage";
+    storage = CanonicalStorage(storage, context);
     if (seen.insert(storage).second)
       result.push_back(storage);
   }
@@ -172,254 +195,222 @@ AccessOrder AssumeForExecutes(AccessOrder body) {
 
 class WriteFirstClassifier : public StmtExprVisitor {
 public:
-  AccessOrder Classify(const Stmt &s, const Var &storage) {
-    target_storage_ = storage;
+  using Result = Optional<VisitInterrupt>;
+  explicit WriteFirstClassifier(NativeStorageContext storage)
+      : storage_(std::move(storage)) {}
+  AccessOrder Classify(const Stmt &stmt, const Var &storage) {
+    target_ = storage;
     result_ = AccessOrder::kUntouched;
-    StmtExprVisitor::VisitStmt(s);
+    Visit(stmt);
     return result_;
   }
-
-  AccessOrder Classify(const PrimExpr &e, const Var &storage) {
-    target_storage_ = storage;
+  AccessOrder Classify(const Expr &expr, const Var &storage) {
+    target_ = storage;
     result_ = AccessOrder::kUntouched;
-    StmtExprVisitor::VisitExpr(e);
+    Visit(expr);
     return result_;
   }
 
 private:
-  Var target_storage_;
-  AccessOrder result_ = AccessOrder::kUntouched;
-
-  // Dispatch short-circuit: skip further work once a terminal is reached.
-  void VisitStmt(const Stmt &s) final {
-    if (IsTerminal(result_))
-      return;
-    StmtExprVisitor::VisitStmt(s);
-  }
-  void VisitExpr(const PrimExpr &e) final {
-    if (IsTerminal(result_))
-      return;
-    StmtExprVisitor::VisitExpr(e);
-  }
-
-  template <typename F> AccessOrder ClassifyLocal(F f) {
-    AccessOrder saved = result_;
+  NativeStorageContext storage_;
+  Var target_{UnsafeInit{}};
+  AccessOrder result_{AccessOrder::kUntouched};
+  template <typename F> AccessOrder Local(F function) {
+    auto old = result_;
     result_ = AccessOrder::kUntouched;
-    f();
-    AccessOrder local = result_;
-    result_ = saved;
-    return local;
+    function();
+    auto result = result_;
+    result_ = old;
+    return result;
   }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    for (const auto &idx : op->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(op->buffer->data))
-      result_ = AccessOrder::kReadFirst;
+  bool Touches(const Expr &value) const {
+    auto address = storage_.Address(value), target = storage_.Address(target_);
+    if (address.exact && target.exact)
+      return address.root.same_as(target.root);
+    // Opaque pointer producers cannot justify a write-first or no-read claim.
+    return value->ty.as<TensorTypeObj>() || value->ty.as<PtrTypeObj>();
   }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    // value first, then indices, then the store itself.
-    VisitExpr(op->value);
-    if (IsTerminal(result_))
+  void Access(const Expr &value, int mask) {
+    if (IsTerminal(result_) || !Touches(value))
       return;
-    for (const auto &idx : op->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(op->buffer->data))
+    if (mask & kAccessRead)
+      result_ = AccessOrder::kReadFirst;
+    else if (mask & kAccessWrite)
       result_ = AccessOrder::kWriteFirst;
   }
-
-  void VisitStmt_(const SeqStmtNode *op) final {
-    for (const auto &s : op->seq) {
-      VisitStmt(s);
-      if (IsTerminal(result_))
-        return;
+  void Bounds(const TensorRegion &region) {
+    for (const auto &range : region->region) {
+      Visit(range->begin);
+      Visit(range->extent);
     }
+    Visit(region->source->ty);
   }
-
-  void VisitStmt_(const EvaluateNode *op) final { VisitExpr(op->value); }
-
-  void VisitStmt_(const ForNode *op) final {
-    VisitExpr(op->min);
+  Result Visit_(const VarObj *op) final {
+    // A bare native tensor/pointer consumed by an unknown expression can keep
+    // its contents live. Definitions, known address ops and metadata skip it.
+    Access(GetRef<Var>(op), kAccessRead);
+    return std::nullopt;
+  }
+  Result Visit_(const TensorLoadObj *op) final {
     if (IsTerminal(result_))
-      return;
-    VisitExpr(op->extent);
+      return std::nullopt;
+    for (const auto &index : op->indices)
+      Visit(index);
+    Visit(op->source->ty);
+    Access(op->source, kAccessRead);
+    return std::nullopt;
+  }
+  Result Visit_(const TensorStoreObj *op) final {
     if (IsTerminal(result_))
-      return;
-    if (op->step.has_value()) {
-      VisitExpr(op->step.value());
+      return std::nullopt;
+    Visit(op->value);
+    for (const auto &index : op->indices)
+      Visit(index);
+    Visit(op->dest->ty);
+    Access(op->dest, kAccessWrite);
+    return std::nullopt;
+  }
+  Result Visit_(const SeqStmtObj *op) final {
+    for (const auto &stmt : op->seq) {
       if (IsTerminal(result_))
-        return;
+        break;
+      Visit(stmt);
     }
-    auto body = ClassifyLocal([&] { VisitStmt(op->body); });
+    return std::nullopt;
+  }
+  Result Visit_(const BindObj *op) final {
+    if (IsTerminal(result_))
+      return std::nullopt;
+    Expr value = op->value;
+    if (const auto *call = value.as<CallObj>(); IsScheduledBind(call))
+      value = ReadScheduledBinding(call).value;
+    const auto *call = value.as<CallObj>();
+    if (call && (call->op.same_as(alloc_tensor_op()) ||
+                 call->op.same_as(decl_tensor_op()))) {
+      Visit(op->var->ty);
+      // Pointer computation is not a read of the storage being described.
+      if (call->op.same_as(decl_tensor_op()))
+        AddressOperands(call->args[0]);
+      return std::nullopt;
+    }
+    return Visit(value);
+  }
+  Result Visit_(const ForObj *op) final {
+    if (IsTerminal(result_))
+      return std::nullopt;
+    Visit(op->begin);
+    Visit(op->end);
+    Visit(op->step);
+    if (IsTerminal(result_))
+      return std::nullopt;
+    auto body = Local([&] { Visit(op->body); });
     result_ = SeqCompose(result_, AssumeForExecutes(body));
+    return std::nullopt;
   }
-
-  void VisitStmt_(const IfThenElseNode *op) final {
-    VisitExpr(op->condition);
+  Result Visit_(const IfObj *op) final {
     if (IsTerminal(result_))
-      return;
-    auto t = ClassifyLocal([&] { VisitStmt(op->then_case); });
-    AccessOrder branch;
-    if (op->else_case) {
-      auto e = ClassifyLocal([&] { VisitStmt(op->else_case.value()); });
-      branch = MergeIfThenElse(t, e);
-    } else {
-      branch = MergeIfThenOnly(t);
-    }
+      return std::nullopt;
+    Visit(op->condition);
+    if (IsTerminal(result_))
+      return std::nullopt;
+    auto yes = Local([&] { Visit(op->then_case); });
+    auto branch =
+        op->else_case
+            ? MergeIfThenElse(yes, Local([&] { Visit(*op->else_case); }))
+            : MergeIfThenOnly(yes);
     result_ = SeqCompose(result_, branch);
+    return std::nullopt;
   }
-
-  void VisitStmt_(const BindNode *op) final { VisitExpr(op->value); }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (CanRewriteMultiBufferAttrNode(op->attr_key, op->node)) {
-      VisitExpr(Downcast<PrimExpr>(op->node));
-      if (IsTerminal(result_))
-        return;
-    }
-    VisitExpr(op->value);
+  Result Visit_(const WhileObj *op) final {
     if (IsTerminal(result_))
-      return;
-    VisitStmt(op->body);
+      return std::nullopt;
+    Visit(op->condition);
+    if (!IsTerminal(result_))
+      result_ = SeqCompose(
+          result_,
+          DemoteIfNotMustExecute(Local([&] { Visit(op->body); }), false));
+    return std::nullopt;
   }
-
-  void VisitStmt_(const WhileNode *op) final {
-    VisitExpr(op->condition);
+  Result Visit_(const RegionStmtObj *op) final {
     if (IsTerminal(result_))
-      return;
-    auto body = ClassifyLocal([&] { VisitStmt(op->body); });
-    result_ = SeqCompose(result_,
-                         DemoteIfNotMustExecute(body, /*must_execute=*/false));
+      return std::nullopt;
+    if (auto attr = ReadTaskAttribute(op)) {
+      if (CanRewriteMultiBufferAttrNode(attr->key, attr->node))
+        Visit(attr->node.cast<Expr>());
+      if (!IsTerminal(result_))
+        Visit(op->body);
+      return std::nullopt;
+    }
+    for (const auto &arg : op->args)
+      Visit(arg);
+    if (!IsTerminal(result_))
+      Visit(op->body);
+    return std::nullopt;
   }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    // Reduce-init runs only on the first iteration of the surrounding loop;
-    // its writes are not guaranteed across iterations -> kMaybeWriteFirst.
-    if (op->init.defined()) {
-      auto init = ClassifyLocal([&] { VisitStmt(op->init.value()); });
-      AccessOrder init_eff = init;
-      if (init == AccessOrder::kWriteFirst)
-        init_eff = AccessOrder::kMaybeWriteFirst;
-      result_ = SeqCompose(result_, init_eff);
-      if (IsTerminal(result_))
+  void AddressOperands(const Expr &value) {
+    if (value.as<VarObj>())
+      return;
+    if (const auto *call = value.as<CallObj>()) {
+      if (call->op.same_as(tensor_data_ptr_op())) {
+        Visit(call->args[0]->ty);
         return;
-    }
-    VisitStmt(op->body);
-  }
-
-  void VisitStmt_(const SBlockRealizeNode *op) final {
-    VisitExpr(op->predicate);
-    if (IsTerminal(result_))
-      return;
-    bool must_execute = false;
-    if (const auto *imm = op->predicate.as<IntImmNode>())
-      must_execute = (imm->value != 0);
-    auto body = ClassifyLocal([&] { VisitStmt(op->block); });
-    result_ = SeqCompose(result_, DemoteIfNotMustExecute(body, must_execute));
-  }
-
-  void VisitExpr_(const CallNode *op) final {
-    static const Op &region_op = region();
-    static const auto access_ptr_op = Op::Get("tl.access_ptr");
-
-    if (op->op.same_as(region_op)) {
-      HandleRegionCall(op);
-      return;
-    }
-    if (op->op.same_as(access_ptr_op)) {
-      HandleAccessPtrCall(op);
-      return;
-    }
-    for (const auto &arg : op->args) {
-      VisitExpr(arg);
-      if (IsTerminal(result_))
-        return;
-    }
-  }
-
-  // tl.region(BufferLoad(buf, indices...), access_type, extents...)
-  //   access_type: bit 0 = read, bit 1 = write.
-  void HandleRegionCall(const CallNode *op) {
-    if (op->args.size() < 2) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
       }
-      return;
-    }
-    const auto *bl = op->args[0].as<BufferLoadNode>();
-    const auto *mode = op->args[1].as<IntImmNode>();
-    if (!bl || !mode) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
+      if (call->op.same_as(reinterpret_op())) {
+        AddressOperands(call->args[0]);
+        return;
       }
-      return;
-    }
-    for (const auto &idx : bl->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
+      if (call->op.same_as(ptr_byte_offset_op())) {
+        AddressOperands(call->args[0]);
+        Visit(call->args[1]);
         return;
+      }
     }
-    for (size_t i = 2; i < op->args.size(); ++i) {
-      VisitExpr(op->args[i]);
-      if (IsTerminal(result_))
-        return;
-    }
-    if (target_storage_.same_as(bl->buffer->data)) {
-      int m = mode->value;
-      if (m & 1)
-        result_ = AccessOrder::kReadFirst;
-      else if (m & 2)
-        result_ = AccessOrder::kWriteFirst;
-    }
+    Visit(value);
   }
-
-  // tl.access_ptr(BufferLoad(buf, indices...), extent, rw_mask)
-  //   rw_mask: bit 0 = read, bit 1 = write.
-  void HandleAccessPtrCall(const CallNode *op) {
-    if (op->args.size() < 3) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
+  Result Visit_(const CallObj *op) final {
+    if (IsTerminal(result_) || loop_annotation_detail::IsAnnotation(op))
+      return std::nullopt;
+    if (IsScheduledBind(op))
+      return Visit(ReadScheduledBinding(op).value);
+    if (op->op.same_as(Op::Get("tl.access_ptr"))) {
+      const auto *load = op->args[0].as<TensorLoadObj>();
+      TVM_FFI_CHECK(load && op->args.size() == 3, ValueError);
+      for (const auto &index : load->indices)
+        Visit(index);
+      Visit(op->args[1]);
+      Visit(op->args[2]);
+      Visit(load->source->ty);
+      Access(load->source,
+             GetConservativeAccessMask(op->args[2].as_or_throw<PrimExpr>()));
+      return std::nullopt;
     }
-    const auto *bl = op->args[0].as<BufferLoadNode>();
-    const auto *mask = op->args[2].as<IntImmNode>();
-    if (!bl || !mask) {
-      for (const auto &arg : op->args) {
-        VisitExpr(arg);
-        if (IsTerminal(result_))
-          return;
-      }
-      return;
+    if (op->op.same_as(Op::Get("tl.ptr_access"))) {
+      TVM_FFI_CHECK_EQ(op->args.size(), 4U, ValueError);
+      AddressOperands(op->args[0]);
+      for (size_t i = 1; i < op->args.size(); ++i)
+        Visit(op->args[i]);
+      Access(op->args[0],
+             GetConservativeAccessMask(op->args[3].as_or_throw<PrimExpr>()));
+      return std::nullopt;
     }
-    for (const auto &idx : bl->indices) {
-      VisitExpr(idx);
-      if (IsTerminal(result_))
-        return;
+    if (auto tile = ParseOperator(GetRef<Call>(op)); tile.defined()) {
+      auto access = tile->GetAccessRegions();
+      for (const auto &region : access.reads)
+        Bounds(region);
+      for (const auto &region : access.writes)
+        Bounds(region);
+      // Only scalar/value operands execute as ordinary expressions. The
+      // tensor regions themselves are addresses described by the op effects.
+      for (const auto &arg : DecodeTileOpArguments(op).operands)
+        if (!IsTensorLikeExpr(arg))
+          Visit(arg);
+      for (const auto &region : access.reads)
+        Access(region->source, kAccessRead);
+      for (const auto &region : access.writes)
+        Access(region->source, kAccessWrite);
+      return std::nullopt;
     }
-    VisitExpr(op->args[1]);
-    if (IsTerminal(result_))
-      return;
-    if (target_storage_.same_as(bl->buffer->data)) {
-      int rw = mask->value;
-      if (rw & 1)
-        result_ = AccessOrder::kReadFirst;
-      else if (rw & 2)
-        result_ = AccessOrder::kWriteFirst;
-    }
+    return StmtExprVisitor::Visit_(op);
   }
 };
 
@@ -464,7 +455,7 @@ public:
     }
     if (!state.touched)
       return AccessOrder::kUntouched;
-    return IsCovered(Bool(true), state.written_guard, outer_ctx)
+    return IsCovered(IntImm::Bool(true), state.written_guard, outer_ctx)
                ? AccessOrder::kWriteFirst
                : AccessOrder::kMaybeWriteFirst;
   }
@@ -473,7 +464,7 @@ private:
   struct State {
     bool touched{false};
     bool unsafe{false};
-    PrimExpr written_guard{Bool(false)};
+    PrimExpr written_guard{IntImm::Bool(false)};
   };
 
   static bool IsCovered(const PrimExpr &access_guard,
@@ -485,9 +476,9 @@ private:
 
   static PrimExpr MergeWriteGuard(const PrimExpr &known, const PrimExpr &added,
                                   const ConstrSet &outer_ctx) {
-    if (is_zero(known))
+    if (IsZero(known))
       return added;
-    if (is_zero(added) || GuardsEquivalent(known, added, outer_ctx) ||
+    if (IsZero(added) || GuardsEquivalent(known, added, outer_ctx) ||
         GuardImplies(added, known, outer_ctx)) {
       return known;
     }
@@ -514,14 +505,15 @@ private:
 
   static AccessOrder ClassifyPayload(const IRStructure *node,
                                      const Var &storage) {
-    WriteFirstClassifier classifier;
+    auto classifier = make_object<WriteFirstClassifier>(node->StorageContext());
     if (node->IsTask()) {
-      return classifier.Classify(static_cast<const TaskNode *>(node)->stmt,
-                                 storage);
+      return classifier->Classify(static_cast<const TaskNode *>(node)->stmt,
+                                  storage);
     }
 
+    TVM_FFI_ICHECK(node->IsControl());
     const auto *control = static_cast<const ControlNode *>(node);
-    AccessOrder header = classifier.Classify(control->task->stmt, storage);
+    AccessOrder header = classifier->Classify(control->task->stmt, storage);
     if (header == AccessOrder::kReadFirst ||
         header == AccessOrder::kWriteFirst) {
       return header;
@@ -533,25 +525,56 @@ private:
   }
 
   static void ProcessNode(const IRStructure *node, const Var &storage,
-                          const ConstrSet &outer_ctx, State *state) {
-    PrimExpr active_guard = Bool(true);
-    WriteFirstClassifier classifier;
+                          const ConstrSet &outer_ctx, State *state,
+                          PrimExpr active_guard = IntImm::Bool(true)) {
+    auto classifier = make_object<WriteFirstClassifier>(node->StorageContext());
     for (const auto &guard : node->GetGuards()) {
       if (guard->IsCondition()) {
         const PrimExpr &condition =
             static_cast<const ConditionGuard *>(guard.get())->condition;
-        ProcessAccess(classifier.Classify(condition, storage), active_guard,
+        ProcessAccess(classifier->Classify(condition, storage), active_guard,
                       outer_ctx, state);
         active_guard =
-            is_one(active_guard) ? condition : active_guard && condition;
+            IsOne(active_guard) ? condition : active_guard && condition;
         continue;
       }
 
       const auto *attribute = static_cast<const AttributeGuard *>(guard.get());
       if (auto node_expr = attribute->node.try_cast<PrimExpr>()) {
-        ProcessAccess(classifier.Classify(node_expr.value(), storage),
+        ProcessAccess(classifier->Classify(node_expr.value(), storage),
                       active_guard, outer_ctx, state);
       }
+    }
+    if (node->IsScope()) {
+      const auto *scope = static_cast<const ScopeNode *>(node);
+      if (scope->task)
+        ProcessAccess(classifier->Classify(scope->task->stmt, storage),
+                      active_guard, outer_ctx, state);
+      if (state->unsafe)
+        return;
+      PrimExpr condition = IntImm::Bool(true);
+      bool branch = scope->shell.as<IfObj>() != nullptr;
+      if (const auto *statement = scope->shell.as<IfObj>()) {
+        condition = statement->condition;
+        // Two separate evaluations of a mutable condition are not the same
+        // guard. The branches of this one scope share a fresh proof value.
+        if (SideEffect(condition) > CallEffectKind::kPure)
+          condition = PrimVar("eligibility_condition", PrimType::Bool());
+      }
+      for (const IRStructure *child : GetWriteFirstOrder(scope->children)) {
+        ProcessNode(child, storage, outer_ctx, state,
+                    branch ? active_guard && condition : active_guard);
+        if (state->unsafe)
+          return;
+      }
+      for (const IRStructure *child :
+           GetWriteFirstOrder(scope->else_children)) {
+        ProcessNode(child, storage, outer_ctx, state,
+                    active_guard && !condition);
+        if (state->unsafe)
+          return;
+      }
+      return;
     }
     ProcessAccess(ClassifyPayload(node, storage), active_guard, outer_ctx,
                   state);
@@ -632,7 +655,8 @@ private:
         continue;
       bool broadcast_fill = members.size() == 1 &&
                             !task->GuardsTouchStorage(storage) &&
-                            CanBroadcastFillToStorage(task->stmt, storage);
+                            CanBroadcastFillToStorage(task->stmt, storage,
+                                                      task->StorageContext());
       if (!broadcast_fill)
         result.AddUncoveredAccess();
       else if (result.coverage == Coverage::kUntouched)
@@ -653,6 +677,17 @@ private:
     if (node->IsTask())
       return PlanLeaf(static_cast<const TaskNode *>(node), members);
 
+    if (node->IsScope()) {
+      auto *scope = static_cast<ScopeNode *>(node);
+      CoveragePlan result;
+      if (scope->task)
+        result.Merge(PlanLeaf(scope->task.get(), members));
+      for (const auto *children : scope->ChildLists())
+        result.Merge(PlanList(*children, members));
+      return result;
+    }
+
+    TVM_FFI_ICHECK(node->IsControl());
     auto *control = static_cast<ControlNode *>(node);
     CoveragePlan result = PlanList(control->children, members);
     if (result.CanClaimHere()) {
@@ -679,10 +714,16 @@ private:
 
 // Normalize explicit claims and add the automatic owner frontier directly to
 // the decoded ControlNodes. Encoding preserves schedule-unit stages and guards.
+struct LoopEligibilityPlan {
+  Var variable;
+  Array<Var> eligible;
+};
+
 class MultiBufferAnnotator {
 public:
-  static void Rewrite(ScheduledTIR *scheduled_tir, StorageSet manual_buffers,
-                      const L0StorageGroups &groups) {
+  static std::vector<LoopEligibilityPlan>
+  Rewrite(ScheduledTIR *scheduled_tir, StorageSet manual_buffers,
+          const L0StorageGroups &groups) {
     ICHECK(scheduled_tir != nullptr);
     // This pass precedes AutoSchedule: these counts are frontend overrides,
     // not solver-selected versions. Only a bare frontend 1 means opt-out.
@@ -707,6 +748,7 @@ public:
     MultiBufferAnnotator annotator(std::move(claims), std::move(manual_buffers),
                                    std::move(single_version_buffers), groups);
     annotator.RewriteNodes(scheduled_tir->tree);
+    return std::move(annotator.plans_);
   }
 
 private:
@@ -722,33 +764,34 @@ private:
   StorageSet manual_buffers_;
   StorageSet single_version_buffers_;
   StorageSet warned_excluded_storages_;
+  std::vector<LoopEligibilityPlan> plans_;
 
   static void CollectExplicitStorages(
       const std::vector<std::shared_ptr<IRStructure>> &nodes,
       StorageSet *storages) {
     ICHECK(storages != nullptr);
     for (const auto &node : nodes) {
-      if (!node->IsControl())
-        continue;
-      const auto *control = static_cast<const ControlNode *>(node.get());
-      if (auto annotation =
-              control->control->annotations.Get(kMultiBufferEligible)) {
-        for (const Var &storage :
-             NormalizeEligibleStorages(annotation.value())) {
-          storages->insert(storage);
+      if (node->IsControl()) {
+        const auto *control = static_cast<const ControlNode *>(node.get());
+        if (auto annotation = ReadLoopAnnotations(control->control.get())
+                                  .Get(kMultiBufferEligible)) {
+          for (const Var &storage : NormalizeEligibleStorages(
+                   annotation.value(), control->StorageContext())) {
+            storages->insert(storage);
+          }
         }
       }
-      CollectExplicitStorages(control->children, storages);
+      for (const auto *children : node->ChildLists())
+        CollectExplicitStorages(*children, storages);
     }
   }
 
   void RewriteNodes(std::vector<std::shared_ptr<IRStructure>> &nodes) {
     for (const auto &node : nodes) {
-      if (!node->IsControl())
-        continue;
-      auto *control = static_cast<ControlNode *>(node.get());
-      RewriteNodes(control->children);
-      RewriteControl(control);
+      if (node->IsControl())
+        RewriteControl(static_cast<ControlNode *>(node.get()));
+      for (auto *children : node->ChildLists())
+        RewriteNodes(*children);
     }
   }
 
@@ -756,12 +799,14 @@ private:
     For loop = control->control;
     Array<Var> eligible;
     StorageSet already;
-    if (auto annotation = loop->annotations.Get(kMultiBufferEligible)) {
-      for (const Var &storage : NormalizeEligibleStorages(annotation.value())) {
+    if (auto annotation =
+            ReadLoopAnnotations(loop.get()).Get(kMultiBufferEligible)) {
+      for (const Var &storage : NormalizeEligibleStorages(
+               annotation.value(), control->StorageContext())) {
         if (manual_buffers_.count(storage)) {
           if (warned_excluded_storages_.insert(storage).second) {
             LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
-                         << "' claim for storage " << storage->name_hint
+                         << "' claim for storage " << storage->name
                          << " because it is already manually multi-buffered";
           }
           continue;
@@ -769,7 +814,7 @@ private:
         if (single_version_buffers_.count(storage)) {
           if (warned_excluded_storages_.insert(storage).second) {
             LOG(WARNING) << "Ignoring explicit '" << kMultiBufferEligible
-                         << "' claim for storage " << storage->name_hint
+                         << "' claim for storage " << storage->name
                          << " because T.annotate_buffer_versions({buf: 1}) "
                             "disables multi-buffer eligibility; use "
                             "{buf: (1, \"auto\")} to retain eligibility with "
@@ -792,8 +837,88 @@ private:
       }
     }
 
-    loop.CopyOnWrite()->annotations.Set(kMultiBufferEligible, eligible);
-    control->control = std::move(loop);
+    plans_.push_back({loop->var, std::move(eligible)});
+  }
+};
+
+// The schedule encoder rebuilds a control's body from its child nodes. Apply
+// native annotation edits to that final body, otherwise old marker children
+// would overwrite them. Match the scheduled-control traversal, including
+// lexical branches; atomic task-internal loops are not scheduled controls.
+// This also distinguishes repeated occurrences with the same Var identity.
+class EmptyEligibilityCarrierRemover : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (loop_annotation_detail::IsAnnotation(call) &&
+        ReadNativeAnnotations(call).empty())
+      return SeqStmt({});
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+  UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
+    SeqStmt sequence = StmtExprMutator::Mutate_(op, mode)
+                           .ValueOrUnchanged(GetRef<SeqStmt>(op))
+                           .as_or_throw<SeqStmt>();
+    Array<Stmt> statements;
+    for (const Stmt &statement : sequence->seq) {
+      const auto *empty = statement.as<SeqStmtObj>();
+      if (!empty || !empty->seq.empty())
+        statements.push_back(statement);
+    }
+    return statements.size() == sequence->seq.size()
+               ? Stmt(sequence)
+               : Stmt(SeqStmt(statements, sequence->loc));
+  }
+};
+
+class EligibilityCarrierWriter : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+  explicit EligibilityCarrierWriter(std::vector<LoopEligibilityPlan> plans)
+      : plans_(std::move(plans)) {}
+
+  RegionStmt Run(const RegionStmt &root) {
+    RegionStmt result = Mutate(root, InplaceMode::kDisallow)
+                            .ValueOrUnchanged(root)
+                            .as_or_throw<RegionStmt>();
+    TVM_FFI_ICHECK_EQ(cursor_, plans_.size());
+    return result;
+  }
+
+private:
+  std::vector<LoopEligibilityPlan> plans_;
+  size_t cursor_{0};
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    auto attr = ReadTaskAttribute(op);
+    if (attr && IsSemanticTaskKey(attr->key))
+      return Unchanged();
+    const auto *loop = attr && attr->key == attr::kScheduleUnit
+                           ? SingleStatement(op->body).as<ForObj>()
+                           : nullptr;
+    if (!loop)
+      return StmtExprMutator::Mutate_(op, mode);
+    TVM_FFI_ICHECK_LT(cursor_, plans_.size());
+    const size_t index = cursor_++;
+    TVM_FFI_ICHECK(loop->var.same_as(plans_[index].variable));
+    RegionStmt region = StmtExprMutator::Mutate_(op, mode)
+                            .ValueOrUnchanged(GetRef<RegionStmt>(op))
+                            .as_or_throw<RegionStmt>();
+    For updated = SingleStatement(region->body).as_or_throw<For>();
+    updated =
+        RewriteLoopAnnotationCarriers(updated, [](Map<String, Any> fields) {
+          fields.erase(kMultiBufferEligible);
+          return fields;
+        });
+    updated.CopyOnWrite()->annotations.erase(kMultiBufferEligible);
+    auto remover = make_object<EmptyEligibilityCarrierRemover>();
+    auto body = updated->body;
+    updated.CopyOnWrite()->body =
+        remover->Mutate(body, mode).ValueOrUnchanged(body);
+    updated = AppendLoopAnnotation(
+        updated, {{kMultiBufferEligible, plans_[index].eligible}});
+    return ReadTaskAttribute(region)->WithBody(updated);
   }
 };
 
@@ -802,32 +927,50 @@ private:
 using namespace tirx::transform;
 
 tvm::transform::Pass AnnotateMultiBufferEligible() {
-  auto pass_func = [=](PrimFunc f, const IRModule &, const PassContext &) {
+  auto pass_func = [=](tirx::Function f, const IRModule &,
+                       const PassContext &) {
     return RewriteTilelangKernels(
         std::move(f), "AnnotateMultiBufferEligible",
         [](const TilelangKernelContext &context) {
-          ScheduledTIR scheduled_tir =
-              DecodeScheduledTIR(context.root, context.outer_ctx);
-          L0StorageGroups groups(CollectL0SFBindings(context.root));
+          ScheduledTIR scheduled_tir = DecodeScheduledTIR(
+              context.root, context.outer_ctx, nullptr,
+              context.kernel_annotations, context.parameter_alias_contract);
+          NativeStorageContext storage;
+          storage.Collect(context.root->body);
+          L0SFBindings bindings;
+          for (const auto &[sf, data] : CollectL0SFBindings(context.root)) {
+            Var scale_root = CanonicalStorage(sf, storage);
+            Var data_root = CanonicalStorage(data, storage);
+            if (auto previous = bindings.Get(scale_root))
+              TVM_FFI_CHECK(previous->same_as(data_root), ValueError)
+                  << "Conflicting data owners for an aliased L0 scale tensor";
+            bindings.Set(scale_root, data_root);
+          }
+          L0StorageGroups groups(bindings);
           auto &metadata = scheduled_tir.metadata;
           metadata.buffer_versions = ExpandL0StorageGroupValues(
-              metadata.buffer_versions, groups, "version counts");
+              CanonicalVersions(metadata.buffer_versions, storage), groups,
+              "version counts");
           metadata.manual_buffer_versions = ExpandL0StorageGroupValues(
-              metadata.manual_buffer_versions, groups, "manual version counts");
+              CanonicalVersions(metadata.manual_buffer_versions, storage),
+              groups, "manual version counts");
           metadata.buffer_version_modes = ExpandL0StorageGroupValues(
-              metadata.buffer_version_modes, groups, "version modes");
+              CanonicalVersions(metadata.buffer_version_modes, storage), groups,
+              "version modes");
           StorageSet manual_buffers;
           for (const auto &[storage, _] :
                scheduled_tir.metadata.manual_buffer_versions) {
             manual_buffers.insert(storage);
           }
-          MultiBufferAnnotator::Rewrite(&scheduled_tir,
-                                        std::move(manual_buffers), groups);
-          return EncodeScheduledTIR(std::move(scheduled_tir));
+          auto plans = MultiBufferAnnotator::Rewrite(
+              &scheduled_tir, std::move(manual_buffers), groups);
+          RegionStmt encoded = EncodeScheduledTIR(std::move(scheduled_tir));
+          return make_object<EligibilityCarrierWriter>(std::move(plans))
+              ->Run(encoded);
         },
         /*require_kernel=*/false);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.AnnotateMultiBufferEligible", {});
+  return CreateFunctionPass(pass_func, 0, "tl.AnnotateMultiBufferEligible");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

@@ -15,7 +15,10 @@ import tilelang
 import tilelang.testing
 import torch
 from tilelang import language as T
-from tilelang import tvm
+import tvm_tirx as tvm
+import tvm_ffi
+from tvm_tirx import ir
+from tilelang.testing.ir import collect_nodes
 
 _TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
 
@@ -42,27 +45,23 @@ def _schedule(func):
 
 def _root_schedule(func):
     result = None
-
-    def visit(node):
-        nonlocal result
-        if isinstance(node, tvm.tirx.SBlock) and node.name_hint == "tilelang_root":
-            result = node.annotations.get("tl.ws_schedule")
-
-    tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
+    for call in collect_nodes(func, ir.Call):
+        if isinstance(call.op, ir.Op) and call.op.name == "tl.annotation":
+            annotations = tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[0], call.attrs["annotation_schema"])
+            if "tl.ws_schedule" in annotations:
+                assert result is None, "A kernel must carry one materialized WS schedule"
+                result = annotations["tl.ws_schedule"]
     return result
 
 
 def _alloc_buffers(mod):
-    """name -> Buffer allocated by the scheduled kernel's root block, for
-    building expected schedules that structurally match the emitted one."""
+    """name -> native tensor allocation for comparing emitted schedule identities."""
     out = {}
-
-    def visit(node):
-        if isinstance(node, tvm.tirx.SBlock):
-            for buffer in node.alloc_buffers:
-                out[str(buffer.name)] = buffer
-
-    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, visit)
+    for bind in collect_nodes(mod["main"], ir.Bind):
+        if isinstance(bind.value, ir.Call) and bind.value.op.same_as(ir.Op.get("tirx.alloc_tensor")):
+            name = str(bind.var.name)
+            assert name not in out
+            out[name] = bind.var
     return out
 
 
@@ -384,10 +383,16 @@ def test_worker_gemm_topology_materializes():
         ),
     )
 
-    script = str(tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"])
-    assert 'T.launch_thread("threadIdx.x", 256)' in script
-    assert "T.tma_copy" in script
-    assert "ws_schedule" not in script
+    transformed = tilelang.cuda.transform.MaterializeWSSchedule()(mod)["main"]
+    (launch,) = [
+        region
+        for region in collect_nodes(transformed, ir.RegionStmt)
+        if region.op.name == "tirx.launch_thread" and region.args[0].value == "threadIdx.x"
+    ]
+    assert int(launch.args[1]) == 256
+    assert any(call.op.name == "tl.tileop.tma_copy" for call in collect_nodes(transformed, ir.Call))
+    assert _root_schedule(transformed) is None
+    assert tvm.tirx.analysis.check_well_formed(transformed)
 
 
 def _tmem_gemm():
@@ -623,7 +628,7 @@ def test_guarded_write_into_versioned_pipeline_declines():
     pipelines (FA's rescale) keep source semantics and stay schedulable."""
     prepared = _prepare(_guarded_producer_kernel())
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 def _rmw_accumulator_kernel():
@@ -876,7 +881,7 @@ def test_read_before_nested_cycle_declines():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -921,7 +926,7 @@ def test_no_shared_handoff_is_left_unchanged():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 def _persistent_while_kernel():
@@ -1098,7 +1103,7 @@ def test_storage_cycling_in_sibling_loops_declines():
     data the first loop's consumer still reads. The kernel declines."""
     prepared = _prepare(_two_loop_kernel())
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 def _non_tma_layout_kernel():
@@ -1262,7 +1267,7 @@ def test_async_wgmma_wait_kernel_is_left_unchanged():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -1289,7 +1294,7 @@ def test_raw_cp_async_kernel_is_left_unchanged():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 def _pointer_table_kernel():
@@ -1372,7 +1377,7 @@ def test_unschedulable_constructs_decline():
     for kernel in (atomic_kernel, hosted_async_kernel, sync_threads_kernel):
         prepared = _prepare(kernel)
         scheduled = _auto_warp_specialization(prepared)
-        assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+        assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda
@@ -1409,7 +1414,7 @@ def test_thread_budget_exceeded_declines():
 
     prepared = _prepare(kernel)
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 def _waved_rmw_accumulator_kernel(depth=None, inner_depth=None):
@@ -1502,7 +1507,7 @@ def test_annotated_ws_pipeline_depth_on_inner_binding_declines():
     depth declines."""
     prepared = _prepare(_waved_rmw_accumulator_kernel(inner_depth=2))
     scheduled = _auto_warp_specialization(prepared)
-    assert tvm.ir.structural_equal(scheduled["main"], prepared["main"])
+    assert tvm_ffi.structural_equal(scheduled["main"], prepared["main"])
 
 
 @tilelang.testing.requires_cuda

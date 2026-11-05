@@ -203,7 +203,7 @@ tuner.set_profile_args(supply_prog=supply_prog)
 - `Integer`, `Uniform`, `Normal`, `Randn`, `Zero`, `One`
 
 Important
-- Built‑in generators require static shapes; if your PrimFunc uses symbolic
+- Built‑in generators require static shapes; if your Function uses symbolic
   dimensions (T.dyn), supply concrete inputs via (1) or (2).
 - Float8 dtypes require PyTorch 2.1+ for `torch.float8_*` support.
 

@@ -1,8 +1,9 @@
+import tvm_ffi
 import pytest
 
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir, tirx
 
 
 FAST_MATH_OPS = ["exp", "exp10", "log", "log2", "log10", "tan", "cos", "sin"]
@@ -30,14 +31,14 @@ BINARY_OPS = [(tirx.Add, "add2"), (tirx.Sub, "sub2"), (tirx.Mul, "mul2"), (tirx.
 
 
 def _intrinsic(dtype, name, *arguments):
-    return tirx.call_intrin(dtype, tvm.ir.Op.get(name), *arguments)
+    return tirx.call_intrin(name, *arguments, ty=dtype)
 
 
 def _source(expression, parameters, arch="sm_90"):
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("CUDA codegen is not enabled")
-    function = tirx.PrimFunc(parameters, tirx.Evaluate(expression))
+    function = tirx.Function(parameters, ir.Evaluate(expression), ret_type=ir.PrimType("void"))
     function = function.with_attr("global_symbol", "math_dispatch")
     function = function.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
@@ -110,7 +111,7 @@ def test_half_ieee_math_names(operation, operand_count, expected, dtype):
 def test_half_ieee_math_rejects_other_rounding(operation, base_name, operand_count, dtype, rounding_mode):
     parameters = [tirx.Var(f"operand_{index}", dtype) for index in range(operand_count)]
     expression = _intrinsic(dtype, f"tl.{operation}", *parameters, rounding_mode)
-    with pytest.raises(tvm.error.InternalError, match="Only rounding mode 'rn'"):
+    with pytest.raises(RuntimeError, match="Only rounding mode 'rn'"):
         _source(expression, parameters)
 
 
@@ -125,7 +126,7 @@ def test_ieee_rsqrt_implicit_rounding(dtype, expected):
 @tilelang.testing.requires_cuda
 def test_ieee_rsqrt_rejects_float64():
     value = tirx.Var("value", "float64")
-    with pytest.raises(tvm.error.InternalError, match="frsqrt is not supported for float64"):
+    with pytest.raises(RuntimeError, match="frsqrt is not supported for float64"):
         _source(_intrinsic("float64", "tl.ieee_frsqrt", value), [value])
 
 
@@ -229,8 +230,8 @@ def test_wide_packed_fma_fusion(dtype, arch, lanes, commuted):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("constructor", [tirx.EQ, tirx.NE, tirx.LT, tirx.LE, tirx.GT, tirx.GE, tirx.Div])
 def test_vector_arguments_are_not_reemitted_for_fallback(constructor):
-    lhs = tirx.call_extern("float16x2", "read_lhs")
-    rhs = tirx.call_extern("float16x2", "read_rhs")
+    lhs = tirx.call_extern("read_lhs", ty="float16x2")
+    rhs = tirx.call_extern("read_rhs", ty="float16x2")
     source = _source(constructor(lhs, rhs), [])
     assert source.count("read_lhs(") == 2
     assert source.count("read_rhs(") == 2
@@ -239,7 +240,7 @@ def test_vector_arguments_are_not_reemitted_for_fallback(constructor):
 @tilelang.testing.requires_cuda
 def test_unhandled_call_keeps_default_codegen():
     value = tirx.Var("value", "float32")
-    source = _source(tirx.call_pure_extern("float32", "user_math", value), [value])
+    source = _source(tirx.call_pure_extern("user_math", value, ty="float32"), [value])
     assert "user_math(value)" in source
     assert "#include <tl_templates/cuda/math.h>" not in source
 

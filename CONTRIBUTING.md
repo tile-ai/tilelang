@@ -92,7 +92,11 @@ Before contributing to TileLang, please follow the instructions below to setup.
 
     source .venv/bin/activate
     python3 -m pip install --upgrade pip setuptools wheel "build[uv]"
-    uv pip install --requirements requirements-dev.txt
+    python maint/scripts/build_native_artifacts.py stage --destination .native-dev-stage
+    python maint/scripts/build_native_artifacts.py build \
+      --stage .native-dev-stage --output native-dev-dist --frontend uv \
+      --role ffi --wheel-only --install --jobs 4
+    uv pip install --find-links native-dev-dist --requirements requirements-dev.txt
     ```
 
 3. Setup the [`pre-commit`](https://pre-commit.com) hooks:
@@ -105,10 +109,14 @@ Then you are ready to rock. Thanks for contributing to TileLang!
 
 ## Install Develop Version
 
-To install TileLang in an "editable" mode, run:
+Install the provider and frontend from the stage prepared above, then enable
+editable Python imports:
 
 ```bash
-python3 -m pip install --no-build-isolation --verbose --editable .
+python maint/scripts/build_native_artifacts.py build \
+  --stage .native-dev-stage --output native-dev-dist --frontend uv \
+  --role provider --role frontend --wheel-only --install --jobs 4
+uv pip install --no-deps --editable .
 ```
 
 in the main directory. This installation is removable by:
@@ -117,7 +125,12 @@ in the main directory. This installation is removable by:
 python3 -m pip uninstall tilelang
 ```
 
-We also recommend installing TileLang in a more manual way for better control over the build process, by compiling the C++ extensions first and set the `PYTHONPATH`. See [Working from Source via `PYTHONPATH`](https://tilelang.com/get_started/Installation.html#working-from-source-via-pythonpath) for detailed instructions.
+The `apache-tvm-tirx` provider owns the combined compiler and runtime, and
+`apache-tvm-ffi` owns its shared object system. Removing the frontend leaves
+these separate dependencies installed. Native edits require a new matched
+provider/frontend build; Python-only edits use the editable package. Follow
+the [source build and rebuild guide](docs/get_started/Installation.md#faster-rebuild-for-developers).
+Do not load an old TVM compiler through `PYTHONPATH` or a stale build directory.
 
 ## Lint Check
 
@@ -139,7 +152,13 @@ python3 -m pytest testing
 
 ## Build Wheels
 
-_TBA_
+Build a matched FFI, provider and frontend bundle with
+`maint/scripts/build_native_artifacts.py`; omit `--wheel-only` to verify the
+sdist-to-wheel path. Portable platform wheels use
+`maint/scripts/build_native_wheels.py`. See the
+[installation guide](docs/get_started/Installation.md#repairing-wheels) for
+toolchains, wheel repair and installation verification. These commands build
+local artifacts; they do not publish them.
 
 ## Documentation
 

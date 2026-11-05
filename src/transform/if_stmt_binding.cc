@@ -1,375 +1,194 @@
 /*!
  * \file if_stmt_binding.cc
- * \brief Bind the If Stmt to each Stmt in SeqStmt
+ * \brief Distribute guards while preserving native definitions and effects.
  */
 
-#include "support/check.h"
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/op.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include <utility>
-#include <vector>
-
 #include "../op/builtin.h"
-#include "../op/operator.h"
-#include "../op/parallel.h"
 #include "common/bind_utils.h"
+#include "common/pipeline_access.h"
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
+namespace {
 
 using namespace tirx;
-using namespace ffi;
 
 class IfStmtBindingRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc &f, bool inline_replayable_binds) {
-    auto rewriter = IfStmtBindingRewriter(inline_replayable_binds);
-    for (const auto &[_, buffer] : f->buffer_map) {
-      rewriter.buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-    f.CopyOnWrite()->body = rewriter(f->body);
-    return f;
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
+
+  IfStmtBindingRewriter(const tirx::Function &function,
+                        bool inline_replayable_binds)
+      : memory_(function),
+        target_(function->GetAttr<Target>("target").value_or(Target("llvm"))),
+        inline_replayable_binds_(inline_replayable_binds) {}
+
+  ffi::UnchangedOr<Stmt> Mutate_(const IfObj *op, InplaceMode mode) final {
+    auto rewritten = StmtExprMutator::Mutate_(op, mode)
+                         .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                         .as_or_throw<If>();
+    // An else branch is one control-flow choice, not two independent guards.
+    if (rewritten->else_case)
+      return rewritten;
+    return Distribute(rewritten->condition, rewritten->then_case,
+                      rewritten->loc);
   }
 
 private:
-  explicit IfStmtBindingRewriter(bool inline_replayable_binds)
-      : inline_replayable_binds_(inline_replayable_binds) {}
-
-  class IfStmtAccessCollector : public StmtExprVisitor {
-  public:
-    explicit IfStmtAccessCollector(Map<Var, Buffer> buffer_data_to_buffer)
-        : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)) {}
-
-    std::pair<Array<BufferRegion>, Array<BufferRegion>>
-    Collect(const Stmt &stmt) {
-      this->VisitStmt(stmt);
-      return {std::move(reads_), std::move(writes_)};
-    }
-
-  private:
-    void AddRead(const Buffer &buffer) {
-      reads_.push_back(BufferRegion::FullRegion(buffer));
-    }
-
-    void AddWrite(const Buffer &buffer) {
-      writes_.push_back(BufferRegion::FullRegion(buffer));
-    }
-
-    void AddAccess(const Buffer &buffer, int access_mask) {
-      if (access_mask & kAccessRead) {
-        AddRead(buffer);
-      }
-      if (access_mask & kAccessWrite) {
-        AddWrite(buffer);
-      }
-    }
-
-    void VisitStmt_(const BufferStoreNode *op) final {
-      AddWrite(op->buffer);
-      StmtExprVisitor::VisitStmt_(op);
-    }
-
-    void VisitExpr_(const BufferLoadNode *op) final {
-      AddRead(op->buffer);
-      StmtExprVisitor::VisitExpr_(op);
-    }
-
-    void VisitExpr_(const CallNode *op) final {
-      if (auto tile_op = ParseOperator(GetRef<Call>(op)); tile_op.defined()) {
-        if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-          this->VisitStmt(parallel->GetRoot());
-        } else {
-          AccessRegions access = tile_op->GetAccessRegions();
-          reads_.insert(reads_.end(), access.reads.begin(), access.reads.end());
-          writes_.insert(writes_.end(), access.writes.begin(),
-                         access.writes.end());
-        }
-        StmtExprVisitor::VisitExpr_(op);
-        return;
-      }
-      if (op->op.same_as(builtin::address_of())) {
-        if (const auto *load = op->args[0].as<BufferLoadNode>()) {
-          AddRead(load->buffer);
-        } else if (const auto *var_node = op->args[0].as<VarNode>()) {
-          auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
-          if (it != buffer_data_to_buffer_.end()) {
-            AddRead((*it).second);
-          }
-        }
-      } else if (op->op.same_as(tl::access_ptr())) {
-        ICHECK_EQ(op->args.size(), 3U);
-        const auto *load = op->args[0].as<BufferLoadNode>();
-        ICHECK(load) << "tl.access_ptr base must be a BufferLoad";
-        AddAccess(load->buffer, GetConservativeAccessMask(op->args[2]));
-        for (const PrimExpr &index : load->indices) {
-          this->VisitExpr(index);
-        }
-        if (load->predicate.defined()) {
-          this->VisitExpr(load->predicate.value());
-        }
-        this->VisitExpr(op->args[1]);
-        this->VisitExpr(op->args[2]);
-        return;
-      } else if (op->op.same_as(builtin::tvm_access_ptr())) {
-        if (op->args.size() > 1) {
-          if (const auto *var_node = op->args[1].as<VarNode>()) {
-            auto it = buffer_data_to_buffer_.find(GetRef<Var>(var_node));
-            if (it != buffer_data_to_buffer_.end()) {
-              const int access_mask =
-                  op->args.size() == 5U ? GetConservativeAccessMask(op->args[4])
-                                        : kAccessReadWrite;
-              AddAccess((*it).second, access_mask);
-            }
-          }
-        }
-      }
-      StmtExprVisitor::VisitExpr_(op);
-    }
-
-    Map<Var, Buffer> buffer_data_to_buffer_;
-    Array<BufferRegion> reads_;
-    Array<BufferRegion> writes_;
+  struct AccessSummary {
+    ffi::Array<TensorRegion> reads;
+    TensorSet writes;
+    bool unknown{false};
   };
 
-  static Stmt MakeSeq(Array<Stmt> seq, Span span = Span()) {
-    ICHECK(!seq.empty());
-    return seq.size() == 1 ? seq[0] : SeqStmt(std::move(seq), span);
+  AccessSummary Accesses(const Stmt &statement) const {
+    auto collector =
+        ffi::make_object<PipelineAccessCollector>(&memory_, target_);
+    collector->Visit(statement);
+    AccessSummary result{
+        collector->GetReads(), {}, collector->HasUnknownAccess()};
+    for (const auto &write : collector->GetWrites())
+      result.writes.insert(RegionTensor(write));
+    // Calls may change state not represented by a tensor operand (e.g. an
+    // external callback). Never infer disjointness solely from absent writes.
+    // Pure scalar values remain replayable across these calls.
+    VisitNativePostOrder(statement, [&](const ffi::ObjectRef &node) {
+      if (const auto *call = node.as<CallObj>()) {
+        if (SideEffect(ffi::GetRef<Call>(call)) >= CallEffectKind::kReadState &&
+            !ParseOperator(ffi::GetRef<Call>(call)).defined())
+          result.unknown = true;
+      }
+    });
+    return result;
   }
 
-  std::pair<Array<BufferRegion>, Array<BufferRegion>>
-  CollectStmtAccessRegions(const Stmt &stmt) const {
-    IfStmtAccessCollector collector(buffer_data_to_buffer_);
-    return collector.Collect(stmt);
+  bool Replayable(const Stmt &statement, const AccessSummary &body) const {
+    const auto *bind = statement.as<BindObj>();
+    if (!bind)
+      return false;
+    auto access = Accesses(statement);
+    if ((access.unknown || body.unknown) &&
+        SideEffect(bind->value) > CallEffectKind::kPure)
+      return false;
+    return IsReplayableScalarBind(
+        statement, access.reads, body.writes,
+        [this](const TensorVar &a, const TensorVar &b) {
+          return memory_.MayAlias(a, b);
+        });
   }
 
-  BufferSet CollectWriteBuffers(const Array<Stmt> &stmts) const {
-    BufferSet write_buffers;
-    for (const Stmt &stmt : stmts) {
-      auto [_, writes] = CollectStmtAccessRegions(stmt);
-      for (const BufferRegion &write : writes) {
-        write_buffers.insert(write->buffer);
+  static ffi::Array<Stmt> Flatten(const SeqStmt &body) {
+    ffi::Array<Stmt> result;
+    for (const Stmt &statement : body->seq) {
+      if (auto nested = statement.as<SeqStmt>()) {
+        for (const Stmt &child : Flatten(*nested))
+          result.push_back(child);
+      } else {
+        result.push_back(statement);
       }
     }
-    return write_buffers;
+    return result;
   }
 
-  bool IsReplayableBindStmt(const Stmt &stmt,
-                            const BufferSet &write_buffers) const {
-    auto [reads, _] = CollectStmtAccessRegions(stmt);
-    return IsReplayableScalarBind(stmt, reads, write_buffers);
+  static bool DefinesInSequence(const Stmt &statement) {
+    if (statement.as<BindObj>())
+      return true;
+    if (const auto *region = statement.as<RegionStmtObj>())
+      return !region->result_vars.empty();
+    return false;
   }
 
-  PrimExpr
-  RewriteWithReplayableBinds(const PrimExpr &expr,
-                             const Map<Var, PrimExpr> &replayable_binds) const {
-    return replayable_binds.empty() ? expr
-                                    : tirx::Substitute(expr, replayable_binds);
+  static Stmt Guard(const PrimExpr &condition, const Stmt &body,
+                    const Location &loc) {
+    auto seq = body.as<SeqStmt>();
+    return If(condition, seq.value_or(SeqStmt({body}, body->loc)), std::nullopt,
+              loc);
   }
 
-  Stmt
-  RewriteWithReplayableBinds(const Stmt &stmt,
-                             const Map<Var, PrimExpr> &replayable_binds) const {
-    return replayable_binds.empty() ? stmt
-                                    : tirx::Substitute(stmt, replayable_binds);
-  }
-
-  Stmt RewriteBindWithReplayableBinds(
-      const BindNode *bind, const Map<Var, PrimExpr> &replayable_binds) const {
-    PrimExpr value = RewriteWithReplayableBinds(bind->value, replayable_binds);
-    if (value.same_as(bind->value)) {
-      return GetRef<Stmt>(bind);
-    }
-    return Bind(bind->var, value, bind->span);
-  }
-
-  Stmt GuardStmt(const PrimExpr &condition, const Stmt &stmt, Span span) const {
-    return IfThenElse(condition, stmt, Stmt(), span);
-  }
-
-  Stmt GuardStmts(const Array<Stmt> &stmts, const PrimExpr &condition,
-                  Span span) const {
-    ICHECK(!stmts.empty());
-    if (stmts.size() == 1) {
-      return GuardStmt(condition, stmts[0], span);
-    }
-
-    Array<Stmt> guarded_stmts;
-    PrimExpr guard_condition = condition;
-    Var condition_snapshot("if_condition", condition.dtype(), span);
-    Stmt condition_bind = Bind(condition_snapshot, condition, span);
-    auto [condition_reads, _] = CollectStmtAccessRegions(condition_bind);
-    const BufferSet write_buffers = CollectWriteBuffers(stmts);
-    // Replay a read-only condition when no guarded body can change its inputs.
-    // Otherwise preserve the original if's single condition evaluation.
-    if (!IsReplayableScalarBind(condition_bind, condition_reads,
-                                write_buffers)) {
-      guarded_stmts.push_back(condition_bind);
-      guard_condition = condition_snapshot;
-    }
-    for (const Stmt &stmt : stmts) {
-      guarded_stmts.push_back(GuardStmt(guard_condition, stmt, span));
-    }
-    return MakeSeq(std::move(guarded_stmts), span);
-  }
-
-  Stmt BindIfStmtLegacy(const Stmt &body, const PrimExpr &condition,
-                        Span span) const {
-    if (auto seq_stmt = body.as<SeqStmtNode>()) {
-      Array<Stmt> guarded_bodies;
-      const size_t n = seq_stmt->seq.size();
-      size_t i = 0;
-      for (; i < n && !seq_stmt->seq[i].as<BindNode>(); ++i) {
-        guarded_bodies.push_back(seq_stmt->seq[i]);
-      }
-
-      // A direct Bind is emitted as a C/CUDA declaration. Keep it and the
-      // following statements in one lexical block, matching old LetStmt scope
-      // semantics.
-      if (i < n) {
-        Array<Stmt> bind_scope;
-        for (; i < n; ++i) {
-          bind_scope.push_back(seq_stmt->seq[i]);
-        }
-        guarded_bodies.push_back(MakeSeq(std::move(bind_scope), span));
-      }
-      return GuardStmts(guarded_bodies, condition, span);
-    }
-    return GuardStmt(condition, body, span);
-  }
-
-  Stmt BindIfStmtWithReplayableBindInlining(const Stmt &body,
-                                            const PrimExpr &condition,
-                                            Span span) const {
-    if (!inline_replayable_binds_) {
-      return BindIfStmtLegacy(body, condition, span);
-    }
-    auto seq_stmt = body.as<SeqStmtNode>();
-    if (seq_stmt == nullptr) {
-      return GuardStmt(condition, body, span);
-    }
-
-    const BufferSet write_buffers = CollectWriteBuffers(seq_stmt->seq);
-    Map<Var, PrimExpr> replayable_binds;
-    Array<Stmt> guarded_bodies;
-    Array<Stmt> bind_scope;
-    bool in_bind_scope = false;
-
-    for (const Stmt &stmt : seq_stmt->seq) {
-      if (!in_bind_scope) {
-        if (const auto *bind = stmt.as<BindNode>()) {
-          if (IsReplayableBindStmt(stmt, write_buffers)) {
-            replayable_binds.Set(bind->var, RewriteWithReplayableBinds(
-                                                bind->value, replayable_binds));
-            continue;
-          }
-          bind_scope.push_back(
-              RewriteBindWithReplayableBinds(bind, replayable_binds));
-          in_bind_scope = true;
-          continue;
-        }
-        guarded_bodies.push_back(
-            RewriteWithReplayableBinds(stmt, replayable_binds));
+  Stmt Distribute(const PrimExpr &condition, const SeqStmt &body,
+                  const Location &loc) const {
+    const auto statements = Flatten(body);
+    const auto accesses = Accesses(body);
+    // One mutator owns all remappings for this sequence. Rewriting each
+    // statement independently loses fresh tensor identities when a substituted
+    // scalar occurs only in a definition's type, shape, stride, or layout.
+    auto inliner = ffi::make_object<StmtExprMutator>();
+    ffi::Array<Stmt> groups, tail;
+    bool in_definition_scope = false;
+    for (const Stmt &statement : statements) {
+      if (!in_definition_scope && inline_replayable_binds_ &&
+          Replayable(statement, accesses)) {
+        const auto *bind = statement.as<BindObj>();
+        Expr value = inliner->Mutate(bind->value).ValueOrUnchanged(bind->value);
+        inliner->VarRemapSet(bind->var, value);
         continue;
       }
-      bind_scope.push_back(RewriteWithReplayableBinds(stmt, replayable_binds));
+      Stmt rewritten = inliner->Mutate(statement).ValueOrUnchanged(statement);
+      if (DefinesInSequence(statement))
+        in_definition_scope = true;
+      if (in_definition_scope)
+        tail.push_back(rewritten);
+      else
+        groups.push_back(rewritten);
     }
+    // Bind and RegionStmt results cannot escape a separately guarded lexical
+    // block. Keep the first materialized definition and every consumer
+    // together.
+    if (!tail.empty())
+      groups.push_back(SeqStmt(tail, body->loc));
+    if (groups.empty())
+      return If(condition, SeqStmt({}, body->loc), std::nullopt, loc);
+    if (groups.size() == 1)
+      return Guard(condition, groups[0], loc);
 
-    if (!bind_scope.empty()) {
-      guarded_bodies.push_back(MakeSeq(std::move(bind_scope), span));
+    ffi::Array<Stmt> result;
+    PrimExpr guard = condition;
+    PrimVar snapshot("if_condition", condition.ty(), condition->loc);
+    Bind condition_bind(snapshot, condition, condition->loc);
+    // The source if evaluates its condition once. A body write through another
+    // view or parameter may alias that condition even when Var identities
+    // differ.
+    if (!Replayable(condition_bind, accesses)) {
+      result.push_back(condition_bind);
+      guard = snapshot;
     }
-    if (guarded_bodies.empty()) {
-      return Evaluate(0, span);
-    }
-    return GuardStmts(guarded_bodies, condition, span);
+    for (const Stmt &group : groups)
+      result.push_back(Guard(guard, group, loc));
+    return SeqStmt(result, loc);
   }
 
-  Stmt VisitStmt_(const IfThenElseNode *op) final {
-    auto condition = VisitExpr(op->condition);
-    auto then_case = VisitStmt(op->then_case);
-    Optional<Stmt> else_case = op->else_case;
-    if (else_case.defined()) {
-      Stmt new_else = VisitStmt(else_case.value());
-      return IfThenElse(condition, then_case, new_else, op->span);
-    }
-    ICHECK(then_case.defined()) << "then_case must be defined";
-    ICHECK(!else_case.defined()) << "else_case must be undefined";
-
-    return BindIfStmtWithReplayableBindInlining(then_case, condition, op->span);
-  }
-
-  Stmt VisitStmt_(const SeqStmtNode *op) final {
-    Array<Stmt> seq;
-    std::vector<std::pair<Var, Optional<Buffer>>> old_bindings;
-
-    auto register_buffer = [&](const Buffer &buffer) {
-      old_bindings.emplace_back(buffer->data,
-                                buffer_data_to_buffer_.Get(buffer->data));
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    };
-
-    for (auto stmt : op->seq) {
-      Stmt new_stmt = VisitStmt(stmt);
-      seq.push_back(new_stmt);
-      if (const auto *alloc = new_stmt.as<AllocBufferNode>()) {
-        register_buffer(alloc->buffer);
-      } else if (const auto *decl = new_stmt.as<DeclBufferNode>()) {
-        register_buffer(decl->buffer);
-      }
-    }
-
-    for (auto it = old_bindings.rbegin(); it != old_bindings.rend(); ++it) {
-      if (it->second.defined()) {
-        buffer_data_to_buffer_.Set(it->first, it->second.value());
-      } else {
-        buffer_data_to_buffer_.erase(it->first);
-      }
-    }
-    return SeqStmt(std::move(seq), op->span);
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    std::vector<std::pair<Var, Optional<Buffer>>> old_bindings;
-    for (const Buffer &buffer : op->alloc_buffers) {
-      old_bindings.emplace_back(buffer->data,
-                                buffer_data_to_buffer_.Get(buffer->data));
-      buffer_data_to_buffer_.Set(buffer->data, buffer);
-    }
-
-    SBlock block = Downcast<SBlock>(StmtExprMutator::VisitStmt_(op));
-
-    for (auto it = old_bindings.rbegin(); it != old_bindings.rend(); ++it) {
-      if (it->second.defined()) {
-        buffer_data_to_buffer_.Set(it->first, it->second.value());
-      } else {
-        buffer_data_to_buffer_.erase(it->first);
-      }
-    }
-    return block;
-  }
-
-  Map<Var, Buffer> buffer_data_to_buffer_;
-  bool inline_replayable_binds_{true};
+  PipelineMemoryAnalysis memory_;
+  Target target_;
+  bool inline_replayable_binds_;
 };
 
-using namespace tirx::transform;
+} // namespace
+
 tvm::transform::Pass IfStmtBinding() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    bool inline_replayable_binds =
-        ctx->GetConfig<Bool>(kIfStmtBindingInlineReplayableBinds, Bool(true))
-            .value();
-    return IfStmtBindingRewriter::Substitute(f, inline_replayable_binds);
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext context) {
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
+      return function;
+    bool inline_binds =
+        context->GetConfig<bool>(kIfStmtBindingInlineReplayableBinds)
+            .value_or(true);
+    auto rewriter =
+        ffi::make_object<IfStmtBindingRewriter>(function, inline_binds);
+    auto body = function->body;
+    function.CopyOnWrite()->body =
+        rewriter->Mutate(body).ValueOrUnchanged(body);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.IfStmtBinding", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.IfStmtBinding");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.IfStmtBinding", IfStmtBinding);
+  ffi::reflection::GlobalDef().def("tl.transform.IfStmtBinding", IfStmtBinding);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

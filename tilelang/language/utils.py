@@ -2,39 +2,43 @@
 
 from __future__ import annotations
 
-from tilelang import tvm as tvm
-from tvm import ir, tirx
-from tvm.tirx import PrimExpr, BufferLoad, op
+from tvm_tirx import ir
+from tilelang.language import _native as tirx
+from tilelang.language._native import PrimExpr, BufferLoad
 from tilelang import language as T
 from tilelang._typing import BufferLikeType, ShapeType
 
 
 def _normalize_annotations(annotations: dict | None) -> dict:
-    """Copy a tile-op annotations dict, lifting plain str values to StringImm.
+    """Copy annotations, normalizing top-level strings to StringImm.
 
-    ``Call::annotations`` is ``Map<String, ObjectRef>``: unlike For/SBlock
-    annotations (``Any``-valued, where raw Python strings pass through as
-    ffi String), a bare str is rejected at the Call constructor, so it must
-    be wrapped in a TIR StringImm. Other values pass through unchanged.
+    Other values pass through unchanged. The native call codec handles
+    the resulting annotations' representation.
     """
     return {k: tirx.StringImm(v) if isinstance(v, str) else v for k, v in (annotations or {}).items()}
 
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr) -> PrimExpr:
-    """Create a tl.region call for a BufferLoad and extents."""
-    access_type = {"r": 1, "w": 2, "rw": 3}[access_type]
-    return T.call_intrin("handle", op.Op.get("tl.region"), buffer, access_type, *args)
+    """Describe a native tensor region; the tile operator owns read/write roles."""
+    if access_type not in {"r", "w", "rw"}:
+        raise ValueError(f"Unknown tensor access mode {access_type!r}")
+    if len(buffer.indices) != len(args):
+        raise ValueError("Region extent count must match the tensor rank")
+    return tirx.BufferRegion(
+        buffer.source,
+        [ir.Range.from_min_extent(begin, extent) for begin, extent in zip(buffer.indices, args)],
+    )
 
 
 def buffer_region_to_tile_region(buffer_region: tirx.BufferRegion, access_type: str, extents: list[tirx.PrimExpr]) -> PrimExpr:
-    """Clamp extents and return a tl.region call."""
-    mins = [r.min for r in buffer_region.region]
+    """Clamp extents and return a native TensorRegion."""
+    mins = [r.begin for r in buffer_region.region]
     region_extents = [r.extent for r in buffer_region.region]
     assert len(region_extents) >= len(extents), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
     clamped_extents = [
         tirx.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i] for i in range(len(region_extents))
     ]
-    return region(tirx.BufferLoad(buffer_region.buffer, mins), access_type, *clamped_extents)
+    return region(tirx.BufferLoad(buffer_region.source, mins), access_type, *clamped_extents)
 
 
 def index_to_coordinates(index, shape) -> list[PrimExpr]:
@@ -119,7 +123,7 @@ def get_buffer_region_from_load(buffer_load: tirx.BufferLoad, extents: list[Prim
     If the buffer load has ramp indices, we will use the ramp's base and lanes to create the region.
     Otherwise, return None since the load cannot be converted to a region.
     """
-    buffer, indices = buffer_load.buffer, buffer_load.indices
+    buffer, indices = buffer_load.source, buffer_load.indices
     regions = []
     found_ramp: bool = False
 
@@ -148,7 +152,7 @@ def get_buffer_region_from_load(buffer_load: tirx.BufferLoad, extents: list[Prim
 def get_extent(data: BufferLikeType) -> ShapeType | None:
     """Return the inferred extent (shape) of a buffer-like object.
 
-    If `data` is a Var bound to a let value, the let value is resolved before inspection.
+    Scalar aliases resolve their let value; native tensor Vars retain their type and identity.
 
     Parameters:
         data: A Var, Buffer, BufferLoad or BufferRegion to inspect.
@@ -157,7 +161,7 @@ def get_extent(data: BufferLikeType) -> ShapeType | None:
         The shape/extents as a list-like of PrimExpr (Buffer.shape or list of region item extents), or None if the extent cannot be determined.
     """
 
-    if isinstance(data, tirx.Var) and T.has_let_value(data):
+    if isinstance(data, tirx.Var) and not isinstance(data, tirx.Buffer) and T.has_let_value(data):
         data = T.get_let_value(data)
     if isinstance(data, tirx.Buffer):
         return data.shape

@@ -3,14 +3,10 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include "ir/analyzer.h"
 #include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/ir/repr.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
-#include <tvm/s_tir/utils.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/index_map.h>
-#include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -33,24 +29,26 @@
 #include "../../op/utils.h"
 #include "../../span_utils.h"
 #include "../common/loop_fusion_utils.h"
+#include "../common/native_layout_utils.h"
 #include "../common/pipeline_utils.h"
 #include "../common/union_find.h"
-#include "arith/ir_mutator_with_analyzer.h"
-#include "arith/ir_visitor_with_analyzer.h"
+#include "../loop_vectorize.h"
 #include "backend/common/target_utils.h"
+#include "ir/stmt_functor.h"
 #include "layout_cost_model.h"
+#include "native_policy.h"
 #include "parallel_loop_layout_validator.h"
-#include "tir/transforms/ir_utils.h"
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
 
-int64_t GetElementStorageBits(DataType dtype) {
+int64_t GetElementStorageBits(PrimType dtype) {
   // Layout aliasing must be reasoned about in logical storage bits per element,
   // not in bytes.  For sub-byte dtypes such as fp4, `dtype.bytes()` rounds up
   // to 1 and loses the "two fp4 values share one byte" relationship that
@@ -59,7 +57,7 @@ int64_t GetElementStorageBits(DataType dtype) {
 }
 
 bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
-                 arith::Analyzer *analyzer) {
+                 sym::AnalyzerObj *analyzer) {
   if (lhs.size() != rhs.size()) {
     return false;
   }
@@ -71,15 +69,29 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
   return true;
 }
 
-Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
-                                        const Layout &layout,
-                                        arith::Analyzer *analyzer) {
+// Applying a physical layout to a shared allocation still requires a static
+// tile shape. Plain symbolic shared allocations without a layout are valid.
+// Diagnose at the map boundary, before remapping or querying layout capacity.
+void ValidateSharedLayoutShape(const TensorVar &buffer) {
+  if (!IsSharedBuffer(buffer))
+    return;
+  for (const PrimExpr &extent : buffer.shape()) {
+    TVM_FFI_CHECK(TryConstInt(extent).has_value(), ValueError)
+        << "Shared buffer `" << buffer->name << "` has symbolic extent "
+        << extent << "; applying a layout requires constant extents"
+        << SpanHintSuffix(buffer->loc);
+  }
+}
+
+Optional<TensorVar> FindLayoutAnchorBuffer(const Array<TensorVar> &buffers,
+                                           const Layout &layout,
+                                           sym::AnalyzerObj *analyzer) {
   for (const auto &buffer : buffers) {
-    if (ShapesEqual(layout->InputShape(), buffer->shape, analyzer)) {
+    if (ShapesEqual(layout->InputShape(), buffer.shape(), analyzer)) {
       return buffer;
     }
   }
-  return Optional<Buffer>();
+  return Optional<TensorVar>();
 }
 
 // A fragment layout published into the global layout map must be a closed
@@ -90,15 +102,15 @@ Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
 // every other consumer of the buffer. The placeholders are memoized
 // singletons, so pointer identity is the right membership test.
 bool FragmentReferencesForeignVars(const Fragment &fragment) {
-  std::unordered_set<const VarNode *> allowed;
+  std::unordered_set<const VarObj *> allowed;
   allowed.insert(ReplicationPlaceholder().get());
   for (int i = 0; i < static_cast<int>(fragment->InputDim()); ++i) {
     allowed.insert(InputPlaceholder(i).get());
   }
   bool foreign = false;
   auto scan = [&](const PrimExpr &expr) {
-    PostOrderVisit(expr, [&](const ObjectRef &obj) {
-      if (const auto *var = obj.as<VarNode>()) {
+    VisitNativePostOrder(expr, [&](const ObjectRef &obj) {
+      if (const auto *var = obj.as<VarObj>()) {
         if (!allowed.count(var)) {
           foreign = true;
         }
@@ -116,7 +128,7 @@ bool FragmentReferencesForeignVars(const Fragment &fragment) {
 // still valid inside their own op's scope (LowerTileOp's local re-inference
 // serves genuinely loop-local buffers), so such an entry is dropped rather
 // than rejected — a later proposer in program order supplies the closed form.
-bool IsOpenFragmentLayout(const Buffer &buffer, const Layout &layout) {
+bool IsOpenFragmentLayout(const TensorVar &buffer, const Layout &layout) {
   if (!IsFragmentBuffer(buffer)) {
     return false;
   }
@@ -131,14 +143,13 @@ bool IsOpenFragmentLayout(const Buffer &buffer, const Layout &layout) {
 } // namespace
 
 using namespace tirx;
-using arith::IRMutatorWithAnalyzer;
-using arith::IRVisitorWithAnalyzer;
+using namespace prim;
 
 struct LayoutInferenceResult {
-  Map<Buffer, Layout> layout_map;
+  Map<TensorVar, Layout> layout_map;
   Map<For, Fragment> for_map;
   Map<For, PrimExpr> predicate_map;
-  Map<For, Bool> padding_guard_map;
+  Map<For, bool> padding_guard_map;
 };
 
 /*! \brief Everything the inference engine knows about reducer dst-steering,
@@ -167,17 +178,16 @@ public:
    *  use_list_, so an update nest's commit re-enqueues the finalize like any
    *  buffer edge, and zero-update reducers are pre-seeded wide by the
    *  engine — finalize always finds a solved partial to read. */
-  void
-  Reserve(const std::vector<TileOperator> &infer_list,
-          const std::vector<Range> &thread_bounds_vec,
-          const std::vector<std::unique_ptr<arith::Analyzer>> &analyzer_vec,
-          const Map<Buffer, Layout> &annotated_layouts) {
+  void Reserve(const std::vector<TileOperator> &infer_list,
+               const std::vector<Range> &thread_bounds_vec,
+               const std::vector<sym::Analyzer> &analyzer_vec,
+               const Map<TensorVar, Layout> &annotated_layouts) {
     for (int i = 0; i < static_cast<int>(infer_list.size()); ++i) {
       const auto *finalize = infer_list[i].as<FinalizeReducerV2OpNode>();
       if (finalize == nullptr) {
         continue;
       }
-      const Buffer &dst = finalize->dst;
+      const TensorVar &dst = finalize->dst;
       if (annotated_layouts.count(dst) ||
           !FinalizeReducerV2OpNode::CanSteerDst(finalize->reducer, dst,
                                                 thread_bounds_vec[i],
@@ -196,7 +206,7 @@ public:
    *  loop genuinely forces replication); common/free proposals must come
    *  from the owning finalize. Consumers frozen before the owner's proposal
    *  lands re-validate when the engine re-enqueues them. */
-  bool AllowsCommit(const Buffer &buffer, int proposer,
+  bool AllowsCommit(const TensorVar &buffer, int proposer,
                     InferLevel level) const {
     if (level == InferLevel::kStrict) {
       return true;
@@ -209,11 +219,11 @@ public:
    *  component pinned to the universally readable replicated layout. Empty
    *  for components without reservations, which therefore fall through to
    *  the ordinary "no available layout" failure unchanged. */
-  std::vector<std::pair<Buffer, Fragment>>
+  std::vector<std::pair<TensorVar, Fragment>>
   FallbackSeeds(const std::vector<int> &members,
                 const std::vector<TileOperator> &infer_list,
                 const std::vector<Range> &thread_bounds_vec) const {
-    std::vector<std::pair<Buffer, Fragment>> seeds;
+    std::vector<std::pair<TensorVar, Fragment>> seeds;
     for (int member : members) {
       if (finalize_ops_.count(member) == 0) {
         continue;
@@ -228,17 +238,16 @@ public:
   }
 
 private:
-  std::unordered_map<Buffer, std::unordered_set<int>, ObjectPtrHash,
+  std::unordered_map<TensorVar, std::unordered_set<int>, ObjectPtrHash,
                      ObjectPtrEqual>
       owners_;
   std::unordered_set<int> finalize_ops_;
 };
 
-class BufferUseDefCollector : public IRVisitorWithAnalyzer {
+class TensorUseDefCollector : public StmtExprVisitorWithAnalyzer {
 public:
-  BufferUseDefCollector() = default;
-
-  using arith::IRVisitorWithAnalyzer::IRVisitorWithAnalyzer;
+  explicit TensorUseDefCollector(NativeLayoutInferenceOptions options = {})
+      : options_(std::move(options)) {}
 
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
@@ -257,7 +266,7 @@ public:
     auto &next = infer_list_[cur_infer_id];
     auto thread_index = thread_index_vec_[cur_infer_id];
     auto thread_bounds = thread_bounds_vec_[cur_infer_id];
-    arith::Analyzer *cur_analyzer = analyzer_vec_[cur_infer_id].get();
+    sym::AnalyzerObj *cur_analyzer = analyzer_vec_[cur_infer_id].get();
     // Double-check that 'next' is valid
     ICHECK(next.defined()) << "infer_list_[" << cur_infer_id
                            << "] is null inside run_infer_step.";
@@ -268,8 +277,8 @@ public:
     ICHECK(thread_bounds.defined())
         << "thread_bounds_vec_[" << cur_infer_id << "] is not defined.";
 
-    const int64_t *extent_ptr = as_const_int(thread_bounds->extent);
-    ICHECK(extent_ptr != nullptr)
+    const auto extent_ptr = TryConstInt(thread_bounds->extent);
+    ICHECK(extent_ptr.has_value())
         << "thread_bounds->extent is not a constant integer, which is "
            "required for layout inference.";
 
@@ -299,6 +308,7 @@ public:
       // Basic validity checks
       ICHECK(buffer.defined()) << "InferLayout returned an undefined buffer.";
       ICHECK(layout.defined()) << "InferLayout returned an undefined layout.";
+      ValidateSharedLayoutShape(buffer);
 
       // Gate 1 of the global map: only closed layouts may enter (see
       // IsOpenFragmentLayout).
@@ -309,20 +319,21 @@ public:
       }
 
       // Helper: propagate inferred layout to alias buffers (same data Var)
-      auto propagate_alias = [&](const Buffer &src_buffer,
+      auto propagate_alias = [&](const TensorVar &src_buffer,
                                  const Layout &src_layout) {
-        if (!buffer_data_to_buffers_.count(src_buffer->data))
+        if (!buffer_data_to_buffers_.count(aliases_.Identity(src_buffer)))
           return;
-        const auto &siblings = buffer_data_to_buffers_[src_buffer->data];
+        const auto &siblings =
+            buffer_data_to_buffers_[aliases_.Identity(src_buffer)];
         for (const auto &sib : siblings) {
           if (sib.same_as(src_buffer))
             continue;
           bool shapes_equal =
-              src_layout->InputShape().size() == sib->shape.size();
+              src_layout->InputShape().size() == sib.shape().size();
           if (shapes_equal) {
             for (size_t i = 0; i < src_layout->InputShape().size(); ++i) {
-              if (!analyzer_.CanProveEqual(src_layout->InputShape()[i],
-                                           sib->shape[i])) {
+              if (!GetSyncedAnalyzer()->CanProveEqual(
+                      src_layout->InputShape()[i], sib.shape()[i])) {
                 shapes_equal = false;
                 break;
               }
@@ -337,9 +348,10 @@ public:
                   // keeps the physical storage footprint unchanged while
                   // allowing the logical element count to change.
                   : src_layout->Reshape(
-                        sib->shape, &analyzer_,
-                        Integer(GetElementStorageBits(src_buffer->dtype)),
-                        Integer(GetElementStorageBits(sib->dtype)));
+                        sib.shape(), GetSyncedAnalyzer(),
+                        IntImm::Int32(
+                            GetElementStorageBits(src_buffer.dtype())),
+                        IntImm::Int32(GetElementStorageBits(sib.dtype())));
           if (layout_map.count(sib)) {
             ICHECK(target_layout->IsEqual(layout_map[sib].get()))
                 << "Get different layout for alias buffer " << sib
@@ -393,7 +405,7 @@ public:
             throw LayoutConflictException(oss.str());
           }
           Layout widened = PartialFragment::FullyReplicated(
-              buffer->shape, thread_bounds->extent, thread_bounds);
+              buffer.shape(), thread_bounds->extent, thread_bounds);
           if (widened->IsEqual(existing)) {
             continue; // already at the lattice top
           }
@@ -428,14 +440,15 @@ public:
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
-          arith::Analyzer inner_analyzer;
+          auto inner_analyzer = CreateTileLangAnalyzer();
           for (int i = 0; i < dst_layout->InputDim(); ++i) {
             auto x = InputPlaceholder(i);
             indices.push_back(x);
             // should be literal - literal = 0, any analyzer will work
-            ICHECK(is_zero(inner_analyzer.Simplify(
+            ICHECK(IsZero(inner_analyzer->Simplify(
                 dst_layout->InputShape()[i] - src_layout->InputShape()[i])));
-            inner_analyzer.Bind(x, Range(0, dst_layout->InputShape()[i]));
+            BindAnalyzer(inner_analyzer, x,
+                         Range(0, dst_layout->InputShape()[i]));
           }
           if (ProveFragmentContains(src_layout, dst_layout, indices, indices,
                                     inner_analyzer)) {
@@ -464,7 +477,7 @@ public:
                      << "\n current layout: " << layout->DebugOutput()
                      << "\n previous layout: "
                      << layout_map[buffer]->DebugOutput()
-                     << SpanHintSuffix(buffer->span);
+                     << SpanHintSuffix(buffer->loc);
         }
         // Ensure aliases are consistent too
         propagate_alias(buffer, layout);
@@ -559,9 +572,26 @@ public:
     // anything else relevant to your setup.
 
     // Copy the annotated layout map to local variable
-    Map<Buffer, Layout> layout_map = annotated_layout_map_;
-    Map<Buffer, Layout> strict_layout_map;
+    Map<TensorVar, Layout> layout_map = annotated_layout_map_;
+    Map<TensorVar, Layout> strict_layout_map;
     int num_infer = infer_list_.size();
+
+    // A CPU grid task owns all of its fragment elements. CPU copy/fill do
+    // not propose a GPU thread distribution, and finalize's steering rule
+    // intentionally applies only to a multi-participant collective. Seed
+    // the ordinary one-participant layout here so fragment-only copy chains
+    // and legacy reducer destinations have a physical storage contract too.
+    // An explicit user layout remains authoritative and is still validated.
+    if (TargetIsCPU(target_)) {
+      for (const auto &[buffer, users] : use_list_) {
+        if (!IsFragmentBuffer(buffer) || layout_map.count(buffer))
+          continue;
+        const Range bounds = Range(IntImm::Int32(0), IntImm::Int32(1));
+        layout_map.Set(
+            buffer, Fragment::FullyReplicated(buffer.shape(), IntImm::Int32(1))
+                        ->BindThreadRange(bounds));
+      }
+    }
 
     // Prepare BFS queue for iterative inference
     std::deque<int> q;
@@ -581,7 +611,7 @@ public:
       if (layout_map.count(buffer))
         continue;
       auto frag =
-          Fragment::FullyReplicated(buffer->shape, thread_bounds->extent)
+          Fragment::FullyReplicated(buffer.shape(), thread_bounds->extent)
               ->BindThreadRange(thread_bounds);
       layout_map.Set(buffer, frag);
     }
@@ -593,14 +623,14 @@ public:
     // any level runs, so finalize can always read a solved partial.
     for (const auto &[buffer, users] : use_list_) {
       if (!IsReducerV2Buffer(buffer) || layout_map.count(buffer) ||
-          reducer_update_sites_.count(buffer->data.get())) {
+          reducer_update_sites_.count(buffer.get())) {
         continue;
       }
       ICHECK(!users.empty());
       const Range &thread_bounds = thread_bounds_vec_[users.front()];
       layout_map.Set(buffer,
                      PartialFragment::FullyReplicated(
-                         buffer->shape, thread_bounds->extent, thread_bounds));
+                         buffer.shape(), thread_bounds->extent, thread_bounds));
     }
 
     // step 1: infer strict layout
@@ -623,7 +653,7 @@ public:
     // propagate (reshape if needed) to the rest to ensure completeness.
     for (const auto &[var, buffers] : buffer_data_to_buffers_) {
       // Find a representative with existing layout
-      Optional<Buffer> rep;
+      Optional<TensorVar> rep;
       Optional<Layout> rep_layout;
       for (const auto &buf : buffers) {
         if (layout_map.count(buf)) {
@@ -632,17 +662,17 @@ public:
           break;
         }
       }
-      if (!rep_layout.defined())
+      if (!rep_layout.has_value())
         continue;
       for (const auto &buf : buffers) {
         if (!layout_map.count(buf)) {
           bool shapes_equal =
-              rep_layout.value()->InputShape().size() == buf->shape.size();
+              rep_layout.value()->InputShape().size() == buf.shape().size();
           if (shapes_equal) {
             for (size_t i = 0; i < rep_layout.value()->InputShape().size();
                  ++i) {
-              if (!analyzer_.CanProveEqual(rep_layout.value()->InputShape()[i],
-                                           buf->shape[i])) {
+              if (!GetSyncedAnalyzer()->CanProveEqual(
+                      rep_layout.value()->InputShape()[i], buf.shape()[i])) {
                 shapes_equal = false;
                 break;
               }
@@ -652,9 +682,10 @@ public:
               shapes_equal
                   ? rep_layout.value()
                   : rep_layout.value()->Reshape(
-                        buf->shape, &analyzer_,
-                        Integer(GetElementStorageBits(rep.value()->dtype)),
-                        Integer(GetElementStorageBits(buf->dtype)));
+                        buf.shape(), GetSyncedAnalyzer(),
+                        IntImm::Int32(
+                            GetElementStorageBits(rep.value().dtype())),
+                        IntImm::Int32(GetElementStorageBits(buf.dtype())));
           layout_map.Set(buf, reshaped);
         }
       }
@@ -665,22 +696,20 @@ public:
       if (IsFragmentBuffer(buffer)) {
         ICHECK_NE(layout_map.count(buffer), 0)
             << "The layout for fragment " << buffer
-            << " can not be inferred correctly."
-            << SpanHintSuffix(buffer->span);
+            << " can not be inferred correctly." << SpanHintSuffix(buffer->loc);
       } else if (IsReducerV2Buffer(buffer)) {
         // Every reducer must end up with a partial layout: update nests
         // propose it, and zero-update epochs were seeded wide in step 0.5.
         ICHECK_NE(layout_map.count(buffer), 0)
             << "The partial layout for reducer " << buffer
-            << " can not be inferred correctly."
-            << SpanHintSuffix(buffer->span);
+            << " can not be inferred correctly." << SpanHintSuffix(buffer->loc);
       }
     }
 
     // Collect layout info for For nodes
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
-    Map<For, Bool> padding_guard_map;
+    Map<For, bool> padding_guard_map;
     ICHECK(infer_list_.size() == thread_index_vec_.size())
         << "infer_list_ and thread_index_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
@@ -697,7 +726,7 @@ public:
             << for_infer->GetRoot();
         for_map.Set(for_infer->GetRoot(), for_infer->GetLoopLayout());
         if (for_infer->LoopLayoutRequiresPaddingGuard()) {
-          padding_guard_map.Set(for_infer->GetRoot(), Bool(true));
+          padding_guard_map.Set(for_infer->GetRoot(), bool(true));
         }
         // thread_index should be defined if we rely on it
         ICHECK(thread_index.defined())
@@ -712,38 +741,21 @@ public:
     return {layout_map, for_map, predicate_map, padding_guard_map};
   }
 
-  void Collect(const PrimFunc &f) {
-    for (const auto &[_, buffer] : f->buffer_map) {
-      if (buffer_data_to_buffers_.count(buffer->data)) {
-        auto buffers = buffer_data_to_buffers_[buffer->data];
-        buffers.push_back(buffer);
-        buffer_data_to_buffers_.Set(buffer->data, buffers);
-      } else {
-        buffer_data_to_buffers_.Set(buffer->data, {buffer});
-      }
-    }
+  void Collect(const tirx::Function &f) {
+    aliases_.Collect(f);
+    buffer_data_to_buffers_ = aliases_.groups;
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
-    ICHECK(target.defined())
-        << "Layout_Inference: Require the target attribute";
-    target_ = target.value();
-    this->operator()(f->body);
-    // Compute floating fragment buffers after collection
+    TVM_FFI_CHECK(target.has_value(), ValueError)
+        << "LayoutInference requires a target";
+    target_ = *target;
+    if (!(!f->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return;
+    Visit(f->body);
+    ApplyAnnotatedLayouts();
     ComputeFloatingFragmentBuffers(f->body);
   }
 
 private:
-  Map<Var, Buffer> GetBufferMap() const {
-    Map<Var, Buffer> buffer_map;
-    for (const auto &[var, buffers] : buffer_data_to_buffers_) {
-      // Use the first buffer for each var
-      // TODO(lei): phaseout buffer_map in future.
-      if (!buffers.empty()) {
-        buffer_map.Set(var, buffers[0]);
-      }
-    }
-    return buffer_map;
-  }
-
   // Return true if any buffer that this op (idx) touches already has
   // an inferred layout in layout_map. Used to prioritize enqueue order.
   bool HasKnownLayoutAnchor(int idx, const LayoutMap &layout_map) const {
@@ -776,82 +788,41 @@ private:
     }
   }
 
-  void VisitExpr_(const CallNode *op) final {
-    IRVisitorWithAnalyzer::VisitExpr_(op);
-    // Do not analysis the call node to the global function.
-    if (op->op.as<GlobalVarNode>())
-      return;
-
-    TileOperator p;
-    try {
-      p = ParseOperator(GetRef<Call>(op));
-    } catch (const std::bad_optional_access &e) {
-      LOG(FATAL) << "bad_optional_access while parsing tile op call: "
-                 << GetRef<Call>(op);
-    }
-    if (p.defined()) {
-      for (const auto &arg : op->args) {
-        if (auto buffer = getBufferFromAccessPtr(arg)) {
-          addToUseList(buffer.value());
-        } else if (auto buffer = getBufferFromRegion(arg)) {
-          addToUseList(buffer.value());
-        }
-        // Check if the argument uses any Bind variables that reference
-        // fragment buffers. If so, add those buffers to the use list.
-        // This handles cases like: a = block_mask_f[i]; T.copy(A[a, 0], ...)
-        CollectFragmentBuffersFromExpr(arg);
-      }
-      // Compute thread_index and thread_bounds
-      thread_index_vec_.push_back(CurrentThreadIndex());
-      thread_bounds_vec_.push_back(CurrentThreadBounds());
-      analyzer_vec_.push_back(analyzer_.Clone());
-
-      // Add the tile operator to infer_list_
-      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
-      infer_list_.push_back(std::move(p));
-    }
-  }
-
-  Optional<Buffer> getBufferFromAccessPtr(const PrimExpr &expr) {
-    if (auto bl = expr.as<BufferLoadNode>()) {
-      return bl->buffer;
-    }
-    auto call = expr.as<CallNode>();
-    if (!call) {
-      return std::nullopt;
-    }
-    if (call->op.same_as(builtin::tvm_access_ptr())) {
-      auto var_opt = call->args[1].as<Var>();
-      if (!var_opt.has_value()) {
-        LOG(WARNING) << "[getBufferFromAccessPtr] args[1] is not a Var, type: "
-                     << call->args[1]->GetTypeKey();
+  ffi::Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+    if (op->op.as<OpObj>() &&
+        op->op.as_or_throw<Op>()->name == "tl.annotation") {
+      auto metadata = ReadNativeAnnotations(op);
+      // The enclosing source owner already supplied the complete merged map,
+      // including declarations later in this sequence. Do not replace it with
+      // one earlier declaration's partial map while visiting its payload.
+      if (metadata.count("tl.source_block_annotation"))
         return std::nullopt;
-      }
-      const auto &var = var_opt.value();
-      if (buffer_data_to_buffers_.count(var)) {
-        const auto &buffers = buffer_data_to_buffers_[var];
-        if (!buffers.empty()) {
-          return buffers[0]; // Return the first buffer
-        }
-      }
+      for (const auto &[key, value] : metadata)
+        block_annotations_.Set(key, value);
+      if (auto value = metadata.Get(attr::kLayoutMap))
+        RecordLayoutMap(*value);
       return std::nullopt;
     }
+    TileOperator tile = ParseOperator(GetRef<Call>(op), block_annotations_);
+    if (!tile.defined())
+      return StmtExprVisitorWithAnalyzer::Visit_(op);
+    auto accesses = tile->GetAccessRegions();
+    for (const auto &region : accesses.reads)
+      addToUseList(RegionTensor(region));
+    for (const auto &region : accesses.writes)
+      addToUseList(RegionTensor(region));
+    auto operands = DecodeTileOpArguments(op).operands;
+    for (const Expr &value : operands)
+      CollectFragmentBuffersFromExpr(value);
+    thread_index_vec_.push_back(CurrentThreadIndex());
+    thread_bounds_vec_.push_back(CurrentThreadBounds());
+    analyzer_vec_.push_back(GetSyncedAnalyzer()->Clone());
+    infer_list_stmt_.push_back(GetRef<Call>(op));
+    infer_list_.push_back(std::move(tile));
     return std::nullopt;
   }
 
-  Optional<Buffer> getBufferFromRegion(const PrimExpr &expr) {
-    if (auto call = expr.as<CallNode>()) {
-      if (call->op.same_as(region())) {
-        if (auto bl = call->args[0].as<BufferLoadNode>()) {
-          return bl->buffer;
-        }
-        return std::nullopt;
-      }
-    }
-    return std::nullopt;
-  }
-
-  void addToUseList(const Buffer &buffer) {
+  void addToUseList(const TensorVar &buffer) {
     // Fragment buffers and reducers (whose PartialFragment travels the same
     // use_list_ edges: commits notify users, shared buffers union free-mode
     // components) both register; anything else has no layout to solve.
@@ -868,410 +839,238 @@ private:
     // Avoid duplicates.
     auto &vec = op_touched_buffers_[infer_idx];
     if (std::none_of(vec.begin(), vec.end(),
-                     [&](const Buffer &b) { return b.same_as(buffer); })) {
+                     [&](const TensorVar &b) { return b.same_as(buffer); })) {
       vec.push_back(buffer);
     }
   }
 
-  void VisitStmt_(const ForNode *op) final {
-    if (op->kind == ForKind::kParallel) {
-      auto infer = ParallelOp(GetRef<For>(op));
-      for (const auto &buffer : infer->GetAccessOrder()) {
-        addToUseList(buffer);
-      }
-
-      // This nest becomes infer_list_[op_idx] (pushed below).
-      int op_idx = static_cast<int>(infer_list_.size());
-      PostOrderVisit(op->body, [this, op_idx](const ObjectRef &node) {
-        if (auto *call = node.as<CallNode>()) {
-          if (call->op.same_as(reducer_update())) {
-            // Record the update site for finalize's dst-steering hints, and
-            // register this nest as a use_list_ user of the reducer (at this
-            // point infer_list_.size() == op_idx: the nest is pushed below).
-            ReducerUpdateArgs update = ParseReducerUpdate(call);
-            reducer_update_sites_[update.reducer->data.get()].push_back(
-                ReducerUpdateSiteRecord{op_idx, update.indices, update.value});
-            addToUseList(update.reducer);
-          }
-        }
-        if (auto *buffer_load = node.as<BufferLoadNode>()) {
-          if (buffer_load->buffer.defined() &&
-              buffer_load->buffer->data.defined()) {
-            if (buffer_data_to_buffers_.count(buffer_load->buffer->data)) {
-              // Check if this buffer is already in the list
-              auto buffers = buffer_data_to_buffers_[buffer_load->buffer->data];
-              bool found = false;
-              for (const auto &buf : buffers) {
-                if (buf.same_as(buffer_load->buffer)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) {
-                buffers.push_back(buffer_load->buffer);
-                buffer_data_to_buffers_.Set(buffer_load->buffer->data, buffers);
-                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
-                           << buffer_load->buffer
-                           << " buffer.get() = " << buffer_load->buffer.get()
-                           << " data = " << buffer_load->buffer->data.get();
-              }
-            } else {
-              buffer_data_to_buffers_.Set(buffer_load->buffer->data,
-                                          {buffer_load->buffer});
-              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
-                         << buffer_load->buffer
-                         << " buffer.get() = " << buffer_load->buffer.get()
-                         << " data = " << buffer_load->buffer->data.get();
-            }
-          }
-        } else if (auto *buffer_store = node.as<BufferStoreNode>()) {
-          if (buffer_store->buffer.defined() &&
-              buffer_store->buffer->data.defined()) {
-            if (buffer_data_to_buffers_.count(buffer_store->buffer->data)) {
-              auto buffers =
-                  buffer_data_to_buffers_[buffer_store->buffer->data];
-              bool found = false;
-              for (const auto &buf : buffers) {
-                if (buf.same_as(buffer_store->buffer)) {
-                  found = true;
-                  break;
-                }
-              }
-              if (!found) {
-                buffers.push_back(buffer_store->buffer);
-                buffer_data_to_buffers_.Set(buffer_store->buffer->data,
-                                            buffers);
-                DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
-                           << buffer_store->buffer
-                           << " buffer.get() = " << buffer_store->buffer.get()
-                           << " data = " << buffer_store->buffer->data.get();
-              }
-            } else {
-              buffer_data_to_buffers_.Set(buffer_store->buffer->data,
-                                          {buffer_store->buffer});
-              DLOG(INFO) << "[LayoutInference] BufferStore: new buffer "
-                         << buffer_store->buffer
-                         << " buffer.get() = " << buffer_store->buffer.get()
-                         << " data = " << buffer_store->buffer->data.get();
-            }
-          }
-        }
-      });
-      infer_list_stmt_.push_back(GetRef<ObjectRef>(op));
-      infer_list_.push_back(std::move(infer));
-      thread_index_vec_.push_back(CurrentThreadIndex());
-      thread_bounds_vec_.push_back(CurrentThreadBounds());
-      analyzer_vec_.push_back(analyzer_.Clone());
-    } else {
-      IRVisitorWithAnalyzer::VisitStmt(op->body);
-    }
-  }
-
-  void VisitStmt_(const SBlockNode *op) final {
-    for (auto buffer : op->alloc_buffers) {
-      if (buffer_data_to_buffers_.count(buffer->data)) {
-        auto buffers = buffer_data_to_buffers_[buffer->data];
-        buffers.push_back(buffer);
-        buffer_data_to_buffers_.Set(buffer->data, buffers);
-      } else {
-        buffer_data_to_buffers_.Set(buffer->data, {buffer});
-      }
-    }
-
-    // First, visit the block body to collect all buffers from
-    // BufferLoad/BufferStore
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-
-    // After visiting, apply layouts to all collected buffers
-    if (op->annotations.count(attr::kLayoutMap)) {
-      // Check if the layout map is Map<Var, Layout>
-      auto map =
-          op->annotations.Get(attr::kLayoutMap)->as<Map<Var, Layout>>().value();
-      for (const auto &[var, layout] : map) {
-        ICHECK(buffer_data_to_buffers_.count(var))
-            << "buffer " << var << " is not found in the block";
-        const auto &buffers = buffer_data_to_buffers_[var];
-        ICHECK(!buffers.empty()) << "buffer list for " << var << " is empty";
-        for (const auto &buffer : buffers) {
-          if (!IsReducerV2Buffer(buffer)) {
-            continue;
-          }
-          const auto *partial = layout.as<PartialFragmentNode>();
-          if (partial == nullptr) {
-            TVM_FFI_THROW(ValueError)
-                << "Invalid layout for reducer `" << buffer->name
-                << "`: T.annotate_layout on a T.alloc_reducer buffer requires "
-                   "a PartialFragment (its replicas are addends awaiting the "
-                   "finalize collective, not equal copies), got "
-                << layout->GetTypeKey() << ".";
-          }
-          // Reshape would degrade the partial kind to a plain Fragment, so
-          // the annotated shape must match the reducer exactly.
-          if (!ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_)) {
-            TVM_FFI_THROW(ValueError)
-                << "Invalid layout for reducer `" << buffer->name
-                << "`: the PartialFragment shape " << layout->InputShape()
-                << " must equal the reducer shape " << buffer->shape
-                << " exactly. Check the layout passed to T.annotate_layout.";
-          }
-          arith::IterMapResult injectivity = partial->DetectInjective();
-          if (!injectivity->errors.empty()) {
-            TVM_FFI_THROW(ValueError)
-                << "Invalid layout for reducer `" << buffer->name
-                << "`: the partial map must be injective over "
-                   "(thread, index). Details: "
-                << injectivity->errors << ". Layout: " << partial->DebugOutput()
-                << ". Check the layout passed to T.annotate_layout.";
-          }
-        }
-        Optional<Buffer> anchor_buffer =
-            FindLayoutAnchorBuffer(buffers, layout, &analyzer_);
-        int64_t anchor_bits =
-            anchor_buffer.defined()
-                ? GetElementStorageBits(anchor_buffer.value()->dtype)
-                : GetElementStorageBits(buffers[0]->dtype);
-        // Apply layout to all buffers associated with this var
-        for (const auto &buffer : buffers) {
-
-          // Reshape the layout to match the buffer's shape
-          // Check if shapes are structurally equal
-          bool shapes_equal =
-              ShapesEqual(layout->InputShape(), buffer->shape, &analyzer_);
-
-          Layout resolved_layout =
-              shapes_equal
-                  ? layout
-                  : layout->Reshape(
-                        buffer->shape, &analyzer_, Integer(anchor_bits),
-                        Integer(GetElementStorageBits(buffer->dtype)));
-          if (IsSharedBuffer(buffer)) {
-            arith::IterMapResult injectivity =
-                resolved_layout->DetectInjective();
-            if (!injectivity->errors.empty()) {
-              TVM_FFI_THROW(ValueError)
-                  << "Invalid layout for shared buffer `" << buffer->name
-                  << "`: the forward map must be injective. Details: "
-                  << injectivity->errors
-                  << ". Layout: " << resolved_layout->DebugOutput()
-                  << ". Check the layout passed to T.annotate_layout.";
-            }
-          }
-          annotated_layout_map_.Set(buffer, resolved_layout);
-        }
-      }
-    }
-  }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      if (iv->thread_tag == "threadIdx.x") {
-        ICHECK(iv->dom->extent.as<IntImmNode>());
-        thread_binding_ = iv;
-      }
-    }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const BindNode *op) final {
-    // Record Bind variable to its bound expression.
-    // This enables tracking fragment buffer accesses through Bind values.
-    bind_var_to_expr_.Set(op->var, op->value);
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-  }
-
-  // Helper: recursively collect fragment buffers from an expression,
-  // following Bind value chains.
-  void CollectFragmentBuffersFromExpr(const PrimExpr &expr) {
-    PostOrderVisit(expr, [this](const ObjectRef &node) {
-      if (auto bl = node.as<BufferLoadNode>()) {
-        if (IsFragmentBuffer(bl->buffer)) {
-          addToUseList(bl->buffer);
-        }
-      } else if (auto var_node = node.as<VarNode>()) {
-        auto var = GetRef<Var>(var_node);
-        if (bind_var_to_expr_.count(var)) {
-          CollectFragmentBuffersFromExpr(bind_var_to_expr_[var]);
+  ffi::Optional<VisitInterrupt> Visit_(const ForObj *op) final {
+    if (op->kind != ForKind::kParallel)
+      return StmtExprVisitorWithAnalyzer::Visit_(op);
+    auto hints = ReadLoopAnnotations(op);
+    for (const auto &[key, value] : loop_annotations_)
+      hints.Set(key, value);
+    auto infer = ParallelOp(GetRef<For>(op), hints);
+    for (const TensorVar &tensor : infer->GetAccessOrder())
+      addToUseList(tensor);
+    const int index = static_cast<int>(infer_list_.size());
+    VisitNativePostOrder(op->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallObj>()) {
+        if (call->op.same_as(reducer_update())) {
+          auto update = ParseReducerUpdate(call);
+          reducer_update_sites_[update.reducer.get()].push_back(
+              ReducerUpdateSiteRecord{index, update.indices, update.value});
+          addToUseList(update.reducer);
         }
       }
     });
+    infer_list_stmt_.push_back(GetRef<For>(op));
+    infer_list_.push_back(std::move(infer));
+    thread_index_vec_.push_back(CurrentThreadIndex());
+    thread_bounds_vec_.push_back(CurrentThreadBounds());
+    analyzer_vec_.push_back(GetSyncedAnalyzer()->Clone());
+    return std::nullopt;
+  }
+
+  void RecordLayoutMap(const Any &value) {
+    for (const auto &[tensor, layout] : value.cast<Map<Expr, Layout>>()) {
+      if (auto previous = source_layouts_.Get(tensor)) {
+        TVM_FFI_CHECK((*previous)->IsEqual(layout.get()), ValueError)
+            << "Conflicting annotated layouts for " << tensor;
+      }
+      source_layouts_.Set(tensor, layout);
+    }
+  }
+
+  void ApplyAnnotatedLayouts() {
+    for (const auto &[var, layout] : source_layouts_) {
+      Expr identity = aliases_.Identity(var);
+      auto group = buffer_data_to_buffers_.Get(identity);
+      TVM_FFI_CHECK(group.has_value() && !group->empty(), ValueError)
+          << "Annotated tensor is not defined in the function: " << var;
+      const auto &buffers = *group;
+      auto anchor =
+          FindLayoutAnchorBuffer(buffers, layout, GetSyncedAnalyzer());
+      int64_t anchor_bits =
+          GetElementStorageBits(anchor.value_or(buffers[0]).dtype());
+      for (const TensorVar &buffer : buffers) {
+        if (IsReducerV2Buffer(buffer)) {
+          const auto *partial = layout.as<PartialFragmentNode>();
+          TVM_FFI_CHECK(partial, ValueError)
+              << "T.annotate_layout on a reducer requires a PartialFragment";
+          TVM_FFI_CHECK(ShapesEqual(layout->InputShape(), buffer.shape(),
+                                    GetSyncedAnalyzer()),
+                        ValueError)
+              << "PartialFragment shape must equal the reducer shape exactly";
+          TVM_FFI_CHECK(partial->DetectInjective()->errors.empty(), ValueError)
+              << "Reducer partial map must be injective over (thread, index)";
+        }
+        Layout resolved =
+            ShapesEqual(layout->InputShape(), buffer.shape(),
+                        GetSyncedAnalyzer())
+                ? layout
+                : layout->Reshape(
+                      buffer.shape(), GetSyncedAnalyzer(),
+                      IntImm::Int32(anchor_bits),
+                      IntImm::Int32(GetElementStorageBits(buffer.dtype())));
+        if (IsSharedBuffer(buffer)) {
+          auto injectivity = resolved->DetectInjective();
+          TVM_FFI_CHECK(injectivity->errors.empty(), ValueError)
+              << "T.annotate_layout on shared buffer `" << buffer->name
+              << "` must be injective: " << injectivity->errors;
+          ValidateSharedLayoutShape(buffer);
+        }
+        annotated_layout_map_.Set(buffer, resolved);
+      }
+    }
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const SeqStmtObj *op) final {
+    auto previous = block_annotations_;
+    auto result = StmtExprVisitorWithAnalyzer::Visit_(op);
+    block_annotations_ = std::move(previous);
+    return result;
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+    if (options_.IsOpaque(op))
+      return std::nullopt;
+    auto previous_thread = thread_binding_;
+    auto previous_loop = loop_annotations_;
+    auto previous_block = block_annotations_;
+    if (op->op.same_as(launch_thread_op()) &&
+        op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
+      thread_binding_ = op->body_params[0].as_or_throw<PrimVar>();
+    if (op->op->name == "tl.attr") {
+      auto fields = ReadNativeAnnotations(op);
+      String key = fields.at("key").cast<String>();
+      if (key == "tl.loop.annotations")
+        loop_annotations_ = fields.at("value").cast<Map<String, Any>>();
+      else if (key == attr::kLayoutMap)
+        RecordLayoutMap(fields.at("value"));
+      else if (key == "tl.kernel")
+        for (const auto &[name, value] :
+             fields.at("value").cast<Map<String, Any>>())
+          block_annotations_.Set(name, value);
+      else
+        block_annotations_.Set(key, fields.at("value"));
+      if (key == "tl.kernel" || key == "tl.sblock") {
+        const auto metadata = CollectSourceBlockAnnotations(op->body);
+        for (const auto &[name, value] : metadata)
+          block_annotations_.Set(name, value);
+        if (auto value = metadata.Get(attr::kLayoutMap))
+          RecordLayoutMap(*value);
+      }
+    }
+    auto result = StmtExprVisitorWithAnalyzer::Visit_(op);
+    thread_binding_ = previous_thread;
+    loop_annotations_ = std::move(previous_loop);
+    block_annotations_ = std::move(previous_block);
+    return result;
+  }
+
+  ffi::Optional<VisitInterrupt> Visit_(const BindObj *op) final {
+    bind_var_to_expr_.Set(op->var, op->value);
+    return StmtExprVisitorWithAnalyzer::Visit_(op);
+  }
+
+  void CollectFragmentBuffersFromExpr(const Expr &expr) {
+    std::unordered_set<const VarObj *> expanded;
+    std::function<void(const Expr &)> collect = [&](const Expr &value) {
+      VisitNativePostOrder(value, [&](const ObjectRef &node) {
+        if (const auto *load = node.as<TensorLoadObj>())
+          addToUseList(load->source.as_or_throw<TensorVar>());
+        else if (const auto *variable = node.as<VarObj>()) {
+          if (!expanded.insert(variable).second)
+            return;
+          if (auto bound = bind_var_to_expr_.Get(GetRef<Var>(variable)))
+            collect(*bound);
+        }
+      });
+    };
+    collect(expr);
   }
 
   Range CurrentThreadBounds() const {
-    return ComputeThreadBounds(thread_binding_, analyzer_);
+    return ComputeThreadBounds(thread_binding_, GetAnalyzer());
   }
-
-  // Logical thread index for the current collection point: the real
-  // threadIdx.x Var when a thread_extent binding exists, otherwise constant
-  // 0 (e.g. CPU serial launch). Never an unbound synthetic Var.
   PrimExpr CurrentThreadIndex() const {
-    if (thread_binding_.defined()) {
-      return thread_binding_->var;
-    }
-    return IntImm(DataType::Int(32), 0);
+    return thread_binding_.has_value() ? PrimExpr(*thread_binding_)
+                                       : PrimExpr(0);
   }
 
-  void VisitExpr_(const BufferLoadNode *op) final {
-    // Collect buffer from BufferLoad
-    if (op->buffer.defined() && op->buffer->data.defined()) {
-      if (buffer_data_to_buffers_.count(op->buffer->data)) {
-        // Check if this buffer is already in the list
-        auto buffers = buffer_data_to_buffers_[op->buffer->data];
-        bool found = false;
-        for (const auto &buf : buffers) {
-          if (buf.same_as(op->buffer)) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          buffers.push_back(op->buffer);
-          buffer_data_to_buffers_.Set(op->buffer->data, buffers);
-          DLOG(INFO) << "[LayoutInference] BufferLoad: added buffer "
-                     << op->buffer << " buffer.get() = " << op->buffer.get()
-                     << " data = " << op->buffer->data.get();
-        }
-      } else {
-        buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
-        DLOG(INFO) << "[LayoutInference] BufferLoad: new buffer " << op->buffer
-                   << " buffer.get() = " << op->buffer.get()
-                   << " data = " << op->buffer->data.get();
-      }
-    }
-    IRVisitorWithAnalyzer::VisitExpr_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    // Collect buffer from BufferStore
-    if (op->buffer.defined() && op->buffer->data.defined()) {
-      if (buffer_data_to_buffers_.count(op->buffer->data)) {
-        // Check if this buffer is already in the list
-        auto buffers = buffer_data_to_buffers_[op->buffer->data];
-        bool found = false;
-        for (const auto &buf : buffers) {
-          if (buf.same_as(op->buffer)) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          buffers.push_back(op->buffer);
-          buffer_data_to_buffers_.Set(op->buffer->data, buffers);
-          DLOG(INFO) << "[LayoutInference] BufferStore: added buffer "
-                     << op->buffer << " buffer.get() = " << op->buffer.get()
-                     << " data = " << op->buffer->data.get();
-        }
-      } else {
-        buffer_data_to_buffers_.Set(op->buffer->data, {op->buffer});
-        DLOG(INFO) << "[LayoutInference] BufferStore: new buffer " << op->buffer
-                   << " buffer.get() = " << op->buffer.get()
-                   << " data = " << op->buffer->data.get();
-      }
-    }
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-  }
-
-  // Compute floating fragment buffers after collection is done.
-  //
-  // A "floating" fragment buffer is one that has accesses outside of any
-  // TileOp (Copy, Gemm, Reduce, Parallel, etc.). For example:
-  //
-  //   T.copy(BlockMask[by, :], block_mask_f)  // block_mask_f accessed IN
-  //   TileOp for i in T.Pipelined(N_S):
-  //       if block_mask_f[i] >= 0:           // block_mask_f accessed OUTSIDE
-  //       TileOp (floating!)
-  //           T.copy(A[...], A_shared)
-  //
-  // In this example, `block_mask_f[i]` in the if-condition is a "floating"
-  // access because it's not inside any TileOp. Such buffers need special
-  // handling: they must be fully replicated across all threads since the
-  // access pattern cannot be inferred from TileOp semantics.
-  //
-  // This function identifies these buffers by:
-  // 1. Collecting all IR nodes that are inside TileOps (from infer_list_stmt_)
-  // 2. Scanning the entire function body for fragment buffer accesses
-  // 3. Any access not inside a TileOp means the buffer is "floating"
-  // 4. Recording the thread_bounds at the point of each floating access
-  void ComputeFloatingFragmentBuffers(const Stmt &func_body) {
-    // Step 1: Collect all nodes that are inside TileOps
-    std::unordered_set<const Object *> nodes_in_tileops;
-    for (const auto &stmt : infer_list_stmt_) {
-      PostOrderVisit(stmt, [&](const ObjectRef &node) {
-        nodes_in_tileops.insert(node.get());
-      });
-    }
-
-    // Step 2: Use a visitor to scan for floating accesses while tracking thread
-    // context
-    class FloatingBufferCollector : public IRVisitorWithAnalyzer {
+  void ComputeFloatingFragmentBuffers(const Stmt &body) {
+    std::unordered_set<const Object *> contained;
+    for (const auto &op : infer_list_stmt_)
+      VisitNativePostOrder(
+          op, [&](const ObjectRef &node) { contained.insert(node.get()); });
+    class Collector : public StmtExprVisitorWithAnalyzer {
     public:
-      FloatingBufferCollector(
-          const std::unordered_set<const Object *> &nodes_in_tileops,
-          std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
-              &floating_buffers)
-          : nodes_in_tileops_(nodes_in_tileops),
-            floating_buffers_(floating_buffers) {}
-
-      void VisitStmt_(const AttrStmtNode *op) final {
-        if (op->attr_key == tirx::attr::thread_extent) {
-          IterVar iv = Downcast<IterVar>(op->node);
-          if (iv->thread_tag == "threadIdx.x") {
-            thread_var_ = iv;
-          }
-        }
-        IRVisitorWithAnalyzer::VisitStmt_(op);
+      Collector(const std::unordered_set<const Object *> &contained,
+                std::unordered_map<TensorVar, Range, ObjectPtrHash,
+                                   ObjectPtrEqual> &result,
+                const NativeLayoutInferenceOptions &options)
+          : contained_(contained), result_(result), options_(options) {}
+      ffi::Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
+        if (options_.IsOpaque(op))
+          return std::nullopt;
+        auto previous = thread_;
+        if (op->op.same_as(launch_thread_op()) &&
+            op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
+          thread_ = op->body_params[0].as_or_throw<PrimVar>();
+        auto result = StmtExprVisitorWithAnalyzer::Visit_(op);
+        thread_ = previous;
+        return result;
       }
-
-      void VisitExpr_(const BufferLoadNode *op) final {
-        CheckFloatingAccess(op->buffer, op);
-        IRVisitorWithAnalyzer::VisitExpr_(op);
+      ffi::Optional<VisitInterrupt> Visit_(const TensorLoadObj *op) final {
+        Record(op->source.as_or_throw<TensorVar>(), op);
+        return StmtExprVisitorWithAnalyzer::Visit_(op);
       }
-
-      void VisitStmt_(const BufferStoreNode *op) final {
-        CheckFloatingAccess(op->buffer, op);
-        IRVisitorWithAnalyzer::VisitStmt_(op);
+      ffi::Optional<VisitInterrupt> Visit_(const TensorStoreObj *op) final {
+        Record(op->dest.as_or_throw<TensorVar>(), op);
+        return StmtExprVisitorWithAnalyzer::Visit_(op);
+      }
+      ffi::Optional<VisitInterrupt> Visit_(const CallObj *op) final {
+        if (op->op.as<OpObj>() &&
+            op->op.as_or_throw<Op>()->name == "tl.annotation")
+          return std::nullopt;
+        return StmtExprVisitorWithAnalyzer::Visit_(op);
       }
 
     private:
-      void CheckFloatingAccess(const Buffer &buffer, const Object *node) {
-        if (!IsFragmentBuffer(buffer))
+      void Record(const TensorVar &tensor, const Object *node) {
+        if (!IsFragmentBuffer(tensor) || contained_.count(node))
           return;
-        if (nodes_in_tileops_.find(node) != nodes_in_tileops_.end())
-          return;
-        // This is a floating access - record buffer with current thread_bounds
-        if (floating_buffers_.find(buffer) != floating_buffers_.end())
-          return; // Already recorded
-        floating_buffers_[buffer] = CurrentThreadBounds();
+        Range range = ComputeThreadBounds(thread_, GetAnalyzer());
+        if (auto found = result_.find(tensor); found != result_.end()) {
+          auto previous = found->second;
+          PrimExpr begin =
+              GetSyncedAnalyzer()->Simplify(min(previous->begin, range->begin));
+          PrimExpr end = GetSyncedAnalyzer()->Simplify(
+              max(previous->begin + previous->extent,
+                  range->begin + range->extent));
+          found->second = Range(begin, end);
+        } else
+          result_.emplace(tensor, range);
       }
-
-      Range CurrentThreadBounds() const {
-        return ComputeThreadBounds(thread_var_, analyzer_);
-      }
-
-      const std::unordered_set<const Object *> &nodes_in_tileops_;
-      std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
-          &floating_buffers_;
-      IterVar thread_var_;
+      const std::unordered_set<const Object *> &contained_;
+      std::unordered_map<TensorVar, Range, ObjectPtrHash, ObjectPtrEqual>
+          &result_;
+      ffi::Optional<PrimVar> thread_;
+      const NativeLayoutInferenceOptions &options_;
     };
-
-    FloatingBufferCollector collector(nodes_in_tileops,
-                                      floating_fragment_buffers_);
-    collector(func_body);
-
-    // Debug log floating fragment buffers
-    if (!floating_fragment_buffers_.empty()) {
-      DLOG(INFO)
-          << "Floating fragment buffers (have accesses outside TileOps):";
-      for (const auto &[buffer, thread_bounds] : floating_fragment_buffers_) {
-        DLOG(INFO) << "    " << buffer
-                   << " with thread_bounds: " << thread_bounds;
-      }
-    }
+    auto collector =
+        make_object<Collector>(contained, floating_fragment_buffers_, options_);
+    collector->Visit(body);
   }
 
-  Map<Var, Array<Buffer>> buffer_data_to_buffers_;
-  // Map from Bind variable to its bound expression
-  Map<Var, PrimExpr> bind_var_to_expr_;
+  NativeLayoutInferenceOptions options_;
+  NativeTensorAliases aliases_;
+  Map<Expr, Array<TensorVar>> buffer_data_to_buffers_;
+  Map<Expr, Layout> source_layouts_;
+  Map<Var, Expr> bind_var_to_expr_;
+  Map<String, Any> block_annotations_;
+  Map<String, Any> loop_annotations_;
   std::vector<ObjectRef> infer_list_stmt_;
   std::vector<TileOperator> infer_list_;
   // Fragment buffers that have accesses outside of TileOps.
@@ -1279,9 +1078,9 @@ private:
   // access patterns cannot be inferred from TileOp semantics.
   // Maps buffer -> thread_bounds at the point of floating access.
   // See ComputeFloatingFragmentBuffers() for detailed explanation.
-  std::unordered_map<Buffer, Range, ObjectPtrHash, ObjectPtrEqual>
+  std::unordered_map<TensorVar, Range, ObjectPtrHash, ObjectPtrEqual>
       floating_fragment_buffers_;
-  std::unordered_map<Buffer, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
+  std::unordered_map<TensorVar, std::vector<int>, ObjectPtrHash, ObjectPtrEqual>
       use_list_;
   // One reducer_update site inside a parallel nest: the infer_list_ index of
   // the enclosing ParallelOp plus the update's logical indices and
@@ -1295,23 +1094,23 @@ private:
     PrimExpr value;
   };
   // reducer data Var -> its update sites, in program order.
-  std::unordered_map<const VarNode *, std::vector<ReducerUpdateSiteRecord>>
+  std::unordered_map<const VarObj *, std::vector<ReducerUpdateSiteRecord>>
       reducer_update_sites_;
   // All reducer dst-steering knowledge, behind one interface (see the class
   // comment). Populated once in Run(), consulted at the commit point and by
   // the free-mode attempt runner.
   ReducerDstSteering steering_;
   // Per-op list of buffers it touches (fragment scope), used for prioritization
-  std::unordered_map<int, std::vector<Buffer>> op_touched_buffers_;
+  std::unordered_map<int, std::vector<TensorVar>> op_touched_buffers_;
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU),
   // where the logical thread index is the constant 0 and thread bounds are
   // [0, 1) — no synthetic fallback Var is ever created.
-  IterVar thread_binding_;
+  ffi::Optional<PrimVar> thread_binding_;
   std::vector<PrimExpr> thread_index_vec_;
   std::vector<Range> thread_bounds_vec_;
-  std::vector<std::unique_ptr<arith::Analyzer>> analyzer_vec_;
-  Target target_;
+  std::vector<sym::Analyzer> analyzer_vec_;
+  Target target_{ffi::UnsafeInit{}};
   LayoutMap annotated_layout_map_;
 
   std::vector<TileOperator> BackupInferList() {
@@ -1340,8 +1139,9 @@ private:
   std::optional<AttemptOutcome> RunOneAttempt(
       int attempt_root, const std::vector<int> &members,
       const LayoutMap &base_layout_map, const LayoutMap &strict_layout_map,
-      const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0) {
+      const std::vector<std::pair<TensorVar, Fragment>> &seed_layouts,
+      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0,
+      std::string *failure_message = nullptr) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
     // A failed attempt can leave pending propagation work. Keep both the
@@ -1388,6 +1188,9 @@ private:
     } else {
       DLOG(INFO) << "[InferInFreeMode] attempt root " << attempt_root
                  << " discarded: " << failure;
+      if (failure_message != nullptr) {
+        *failure_message = failure;
+      }
     }
     infer_list_ = std::move(back_infer_list);
     return outcome;
@@ -1411,15 +1214,15 @@ private:
       if (infer_indices.empty())
         continue;
 
-      // Union all infer_list_ indices that share the same Buffer object
+      // Union all infer_list_ indices that share the same TensorVar object
       int first_idx = infer_indices[0];
       for (size_t i = 1; i < infer_indices.size(); i++) {
         uf.Union(first_idx, infer_indices[i]);
       }
     }
     // Additionally, union across buffers that share the same underlying
-    // buffer->data (Var). This handles cases like reshape where multiple
-    // Buffer objects alias the same storage.
+    // aliases_.Identity(buffer) (Var). This handles cases like reshape where
+    // multiple TensorVar objects alias the same storage.
     for (const auto &[var, buffers] : buffer_data_to_buffers_) {
       std::vector<int> merged;
       for (const auto &buf : buffers) {
@@ -1447,7 +1250,7 @@ private:
       components[root].push_back(i);
     }
     // Create a map from root to buffers
-    std::unordered_map<int, std::vector<Buffer>> components_buffers;
+    std::unordered_map<int, std::vector<TensorVar>> components_buffers;
     for (const auto &[buffer, infer_indices] : use_list_) {
       int root = uf.Find(infer_indices[0]);
       components_buffers[root].push_back(buffer);
@@ -1468,6 +1271,10 @@ private:
       AttemptCost best_cost;
       bool has_best = false;
       int best_infer_root = -1;
+      // Keep the caught cause local to this component. Retrying a candidate
+      // must not erase the original operator's useful diagnostic when every
+      // candidate fails, or inherit an unrelated cause from an earlier group.
+      std::string last_failure;
 
       auto adopt = [&](AttemptOutcome &&outcome, int attempt_root) {
         best_infer_list = std::move(outcome.infer_list);
@@ -1482,11 +1289,11 @@ private:
       // slots; the existing cost model decides whether that is worthwhile.
       for (int attempt_infer_root : members) {
         const auto *loop = infer_list_[attempt_infer_root].as<ParallelOpNode>();
-        bool try_scalar =
-            cost_model->ExploreReducerScalarLayouts() && loop &&
-            loop->HasReducerUpdates() && !loop->GetLoopLayout().defined() &&
-            !loop->annotated_layout_unbound_.defined() &&
-            !loop->GetRoot()->annotations.count(attr::kCoalescedWidth);
+        bool try_scalar = cost_model->ExploreReducerScalarLayouts() && loop &&
+                          loop->HasReducerUpdates() &&
+                          !loop->GetLoopLayout().defined() &&
+                          !loop->annotated_layout_unbound_.has_value() &&
+                          !loop->GetHints().count(attr::kCoalescedWidth);
         for (int candidate_vector_size_limit : {0, 1}) {
           if (candidate_vector_size_limit != 0 && !try_scalar) {
             continue;
@@ -1497,7 +1304,8 @@ private:
                      << candidate_vector_size_limit << '\n';
           auto outcome = RunOneAttempt(
               attempt_infer_root, members, layout_map, strict_layout_map,
-              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit);
+              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit,
+              &last_failure);
           if (!outcome) {
             continue;
           }
@@ -1515,6 +1323,24 @@ private:
         }
       }
       if (!has_best) {
+        // A vectorized copy can induce a sparse reducer owner map whose
+        // rectangular inverse is unavailable. Try scalar copy ownership only
+        // after every normal plan failed; all injectivity, owner and lowering
+        // checks still apply. Explicit layout/width hints stay authoritative.
+        for (int attempt_root : members) {
+          const auto *copy = infer_list_[attempt_root].as<CopyNode>();
+          if (!copy || copy->annotations.count(attr::kParallelLoopLayout) ||
+              copy->annotations.count(attr::kCoalescedWidth))
+            continue;
+          auto outcome = RunOneAttempt(
+              attempt_root, members, layout_map, strict_layout_map,
+              /*seed_layouts=*/{}, *cost_model,
+              /*candidate_vector_size_limit=*/1, &last_failure);
+          if (outcome && (!has_best || outcome->cost.BetterThan(best_cost)))
+            adopt(std::move(*outcome), attempt_root);
+        }
+      }
+      if (!has_best) {
         // Reducer-only rescue (dst-steering): the verdict can be an induced
         // narrow layout no consumer ordering can live with (e.g. a consumer
         // also reads a strict-pinned conflicting source), killing every
@@ -1529,14 +1355,16 @@ private:
         if (!seeds.empty()) {
           DLOG(INFO) << "[InferInFreeMode] all attempts failed; retrying with "
                      << "wide fallback dst layouts";
-          auto outcome = RunOneAttempt(members.front(), members, layout_map,
-                                       strict_layout_map, seeds, *cost_model);
+          auto outcome =
+              RunOneAttempt(members.front(), members, layout_map,
+                            strict_layout_map, seeds, *cost_model,
+                            /*candidate_vector_size_limit=*/0, &last_failure);
           if (outcome) {
             adopt(std::move(*outcome), members.front());
           }
         }
       }
-      ICHECK(has_best) << "no available layout found" << '\n';
+      ICHECK(has_best) << "no available layout found" << '\n' << last_failure;
       // Apply the best plan for this component
       infer_list_ = std::move(best_infer_list);
       layout_map = best_layout_map;
@@ -1548,116 +1376,115 @@ private:
   }
 };
 
-class LayoutInferencer : public IRMutatorWithAnalyzer {
+class LayoutInferencer : public StmtExprMutatorWithAnalyzer {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
-    arith::Analyzer analyzer;
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = ParallelLoopFuser::Fuse(f->body);
-    BufferUseDefCollector collector;
-    collector.Collect(f);
-    auto result = collector.Run();
-    LayoutInferencer substituter(result, &analyzer);
-    fptr->body = substituter.VisitStmt(f->body);
-    return f;
+  LayoutInferencer(LayoutInferenceResult result, sym::AnalyzerObj *analyzer,
+                   NativeLayoutInferenceOptions options)
+      : StmtExprMutatorWithAnalyzer(analyzer), result_(std::move(result)),
+        options_(std::move(options)) {}
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+
+  static tirx::Function Apply(tirx::Function function,
+                              const NativeLayoutInferenceOptions &options) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    function.CopyOnWrite()->body =
+        SeqStmt(ParallelLoopFuser::Fuse(function->body, options));
+    auto collector = make_object<TensorUseDefCollector>(options);
+    collector->Collect(function);
+    auto result = collector->Run();
+    auto analyzer = CreateTileLangAnalyzer();
+    auto rewriter =
+        make_object<LayoutInferencer>(result, analyzer.get(), options);
+    SeqStmt body =
+        rewriter->Mutate(function->body).ValueOrUnchanged(function->body);
+    LayoutMap param_layouts;
+    for (const Var &param : function->params)
+      if (auto tensor = param.as<TensorVar>())
+        if (auto layout = result.layout_map.Get(*tensor))
+          param_layouts.Set(*tensor, *layout);
+    if (!param_layouts.empty())
+      body = SeqStmt({MakeNativeAnnotation({{attr::kLayoutMap, param_layouts}},
+                                           function->loc),
+                      body});
+    function.CopyOnWrite()->body = body;
+    ParallelLoopLayoutValidator::Validate(body, options);
+    return function;
   }
 
-private:
-  LayoutInferencer(const LayoutInferenceResult &result,
-                   arith::Analyzer *analyzer)
-      : arith::IRMutatorWithAnalyzer(analyzer), result_(result) {};
-
-  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
-
-  /**
-   * @brief Visit and mutate a Block node to attach inferred layout information.
-   *
-   * Converts the visited Block via the base visitor and attaches
-   * result_.layout_map to the Block's annotations under attr::kLayoutMap.
-   *
-   * @return Stmt The (possibly modified) Block statement with the layout-map
-   * annotation set.
-   */
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
-
-    auto block_ptr = block.CopyOnWrite();
-    block_ptr->annotations.Set(attr::kLayoutMap, result_.layout_map);
-    return block;
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    if (options_.IsOpaque(op))
+      return ffi::Unchanged();
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
   }
 
-  /**
-   * @brief Visit and transform For nodes by storing inferred layout information
-   *        as annotations instead of expanding the loop.
-   *
-   * If the For node is present in result_.for_map, this method stores the
-   * inferred loop layout and predicate as annotations on the For node, rather
-   * than performing loop partition and vectorization.
-   *
-   * The stored annotations are:
-   * - attr::kParallelLoopLayout: The Fragment layout for the parallel loop
-   * - attr::kParallelLoopPredicate: The predicate expression (if any)
-   * - attr::kParallelLoopRequiresPaddingGuard: Whether inverse lowering must
-   *   allow and guard padded points from a ragged SIMT partition
-   *
-   * @return The For statement with layout annotations attached
-   */
-  Stmt VisitStmt_(const ForNode *op) final {
-    if (!result_.for_map.count(GetRef<For>(op))) {
-      return IRMutatorWithAnalyzer::VisitStmt_(op);
+  UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    Stmt result =
+        StmtExprMutatorWithAnalyzer::Mutate_(op, mode).ValueOrUnchanged(
+            GetRef<Stmt>(op));
+    if (auto tensor = op->var.as<TensorVar>()) {
+      if (auto layout = result_.layout_map.Get(*tensor))
+        return SeqStmt(
+            {result, MakeNativeAnnotation(
+                         {{attr::kLayoutMap, LayoutMap{{*tensor, *layout}}}},
+                         op->loc)});
     }
+    return result;
+  }
 
-    For for_node = Downcast<For>(IRMutatorWithAnalyzer::VisitStmt_(op));
-    auto root = GetRef<For>(op);
-
-    auto loop_layout = result_.for_map[root];
-
-    // Store the loop layout as an annotation on the For node (outermost)
-    auto for_ptr = for_node.CopyOnWrite();
-    for_ptr->annotations.Set(attr::kParallelLoopLayout, loop_layout);
-    if (result_.padding_guard_map.count(root)) {
-      for_ptr->annotations.Set(attr::kParallelLoopRequiresPaddingGuard,
-                               result_.padding_guard_map[root]);
-    }
-
-    // Store the predicate as an annotation if it exists and is not trivially
-    // true
-    if (result_.predicate_map.count(root)) {
-      PrimExpr predicate = analyzer_->Simplify(result_.predicate_map[root]);
-      // Only store predicate if it's not trivially true
-      if (!is_const_int(predicate, 1)) {
-        for_ptr->annotations.Set(attr::kParallelLoopPredicate, predicate);
+  UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
+    if (const auto *call = op->value.as<CallObj>()) {
+      if (call->op.as<OpObj>() &&
+          call->op.as_or_throw<Op>()->name == "tl.annotation") {
+        auto metadata = ReadNativeAnnotations(call);
+        metadata.erase(attr::kLayoutMap);
+        return metadata.empty() ? Stmt(SeqStmt(ffi::Array<Stmt>{}))
+                                : MakeNativeAnnotation(metadata, op->loc);
       }
     }
-
-    return for_node;
+    return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
   }
 
-  Stmt VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    auto result =
+        StmtExprMutatorWithAnalyzer::Mutate_(op, mode).ValueOrUnchanged(
+            GetRef<Stmt>(op));
+    For original = GetRef<For>(op);
+    auto layout = result_.for_map.Get(original);
+    if (!layout.has_value())
+      return result;
+    Map<String, Any> metadata{{attr::kParallelLoopLayout, *layout}};
+    if (auto padding = result_.padding_guard_map.Get(original))
+      metadata.Set(attr::kParallelLoopRequiresPaddingGuard, *padding);
+    if (auto predicate = result_.predicate_map.Get(original)) {
+      PrimExpr value = GetSyncedAnalyzer()->Simplify(*predicate);
+      if (!IsConstInt(value, 1))
+        metadata.Set(attr::kParallelLoopPredicate, value);
     }
-    return IRMutatorWithAnalyzer::VisitStmt_(op);
+    return MakeNativeAttribute(nullptr, "tl.loop.annotations", metadata,
+                               SeqStmt(result), op->loc);
   }
 
 private:
-  const LayoutInferenceResult result_;
+  LayoutInferenceResult result_;
+  NativeLayoutInferenceOptions options_;
 };
 
-tvm::transform::Pass LayoutInference() {
-  using namespace tirx::transform;
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    f = LayoutInferencer::Substitute(std::move(f));
-    // Validate parallel loop layout annotations
-    ParallelLoopLayoutValidator::Validate(f->body);
-    return f;
+tvm::transform::Pass
+LayoutInferenceWithPolicy(NativeLayoutInferenceOptions options) {
+  auto pass = [options = std::move(options)](tirx::Function function, IRModule,
+                                             tvm::transform::PassContext) {
+    VectorizeMemoryScope memory_scope(function);
+    return LayoutInferencer::Apply(std::move(function), options);
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LayoutInference", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LayoutInference");
 }
 
+tvm::transform::Pass LayoutInference() { return LayoutInferenceWithPolicy({}); }
+
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LayoutInference", LayoutInference);
+  ffi::reflection::GlobalDef().def("tl.transform.LayoutInference",
+                                   LayoutInference);
 }
 
 } // namespace tl

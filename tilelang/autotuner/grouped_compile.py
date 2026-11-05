@@ -9,8 +9,11 @@ from __future__ import annotations
 from typing import Any
 from collections.abc import Callable
 
-from tilelang import tvm
-from tvm.tirx import PrimFunc
+import tvm_ffi
+from tvm_tirx import ir
+from tvm_tirx.tirx import Function
+from tvm_tirx.ir.transform import PassContext
+from tvm_tirx.ir.transform.instrument import DumpIR
 
 from tilelang.autotuner.param import CompileArgs
 from tilelang.backend.module import create_backend_context
@@ -30,13 +33,13 @@ CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | Non
 def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
-    elaborate_func: Callable[..., PrimFunc],
+    elaborate_func: Callable[..., Function],
 ) -> list[CompileUnitResult]:
     """Compile one grouped unit for CUDA+tvm_ffi backend.
 
     Flow:
-    1. Elaborate each config into a PrimFunc.
-    2. Lower each PrimFunc and build its host module.
+    1. Elaborate each config into a native Function.
+    2. Lower each Function and build its host module.
     3. Merge all device IR and compile it once.
     4. Import the shared device module into each host runtime module.
     5. Construct per-config JITKernel objects that share the grouped device module.
@@ -48,7 +51,7 @@ def compile_grouped_unit_tvm_ffi(
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
-            base_pass_instruments.append(tvm.ir.instrument.DumpIR(dump_dir=dump_ir_path))
+            base_pass_instruments.append(DumpIR(dump_dir=dump_ir_path))
 
         unit_results: list[CompileUnitResult] = []
         lowered_items: list[dict[str, Any]] = []
@@ -76,8 +79,8 @@ def compile_grouped_unit_tvm_ffi(
                     *base_pass_instruments,
                 ]
                 with (
-                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
-                    compile_args.target,
+                    PassContext(opt_level=3, config=pass_configs, instruments=config_instruments),
+                    backend_context.target,
                 ):
                     host_mod, device_mod, params, normalized_target, normalized_target_host = lower_to_host_device_ir(
                         program,
@@ -90,7 +93,7 @@ def compile_grouped_unit_tvm_ffi(
                     *base_pass_instruments,
                 ]
                 with (
-                    tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
+                    PassContext(opt_level=3, config=pass_configs, instruments=host_instruments),
                     normalized_target,
                 ):
                     host_rt_mod = host_codegen(host_mod, backend_context)
@@ -101,9 +104,11 @@ def compile_grouped_unit_tvm_ffi(
                         "config_arg": config_arg,
                         "program": program,
                         "host_rt_mod": host_rt_mod,
+                        "host_mod": host_mod,
                         "device_mod": device_mod,
                         "params": params,
                         "target": normalized_target,
+                        "target_host": normalized_target_host,
                         "output_indices": output_indices,
                     }
                 )
@@ -122,14 +127,14 @@ def compile_grouped_unit_tvm_ffi(
                 if merged_attrs is None:
                     merged_attrs = device_mod.attrs
                 for global_var, func in device_mod.functions.items():
-                    name_hint = getattr(global_var, "name_hint", str(global_var))
+                    name_hint = str(global_var.name_hint)
                     if name_hint in merged_names:
                         raise RuntimeError(
                             f"Duplicate device global symbol '{name_hint}' during grouped compilation (config index={item['idx']})."
                         )
                     merged_names.add(name_hint)
                     merged_funcs[global_var] = func
-            merged_device_mod = tvm.IRModule(merged_funcs, attrs=merged_attrs)
+            merged_device_mod = ir.IRModule(merged_funcs, attrs=merged_attrs)
 
             reference_target = lowered_items[0]["target"]
             grouped_config_indices = ",".join(str(item["idx"]) for item in lowered_items)
@@ -139,7 +144,7 @@ def compile_grouped_unit_tvm_ffi(
                 *base_pass_instruments,
             ]
             with (
-                tvm.transform.PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
+                PassContext(opt_level=3, config=pass_configs, instruments=device_instruments),
                 reference_target,
             ):
                 grouped_device_rt_mod = device_codegen(merged_device_mod, backend_context)
@@ -152,13 +157,20 @@ def compile_grouped_unit_tvm_ffi(
                 try:
                     host_rt_mod = item["host_rt_mod"]
                     host_rt_mod.import_module(grouped_device_rt_mod)
+                    host_mod = item["host_mod"]
+                    if host_mod.attrs and "tl.output_module_schema" in host_mod.attrs:
+                        host_rt_mod = tvm_ffi.get_global_func("tl.runtime.MakeOutputModule")(
+                            host_rt_mod, host_mod.attrs["tl.output_module_schema"]
+                        )
 
                     artifact = CompiledArtifact(
-                        host_mod=host_rt_mod,
+                        host_mod=host_mod,
                         device_mod=item["device_mod"],
                         params=item["params"],
                         kernel_source=grouped_kernel_source,
                         rt_mod=host_rt_mod,
+                        target=item["target"],
+                        target_host=item["target_host"],
                     )
 
                     adapter = TVMFFIKernelAdapter(

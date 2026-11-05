@@ -20,6 +20,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace cpu {
 
@@ -31,7 +32,7 @@ struct AtomicReduce {
   }
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     (void)analyzer;
     AtomicCombine combine;
     if (op.GetElemOp().same_as(atomic_max_elem_op())) {

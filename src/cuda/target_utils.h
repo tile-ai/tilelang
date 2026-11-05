@@ -6,7 +6,7 @@
 #ifndef TVM_TL_CUDA_TARGET_UTILS_H_
 #define TVM_TL_CUDA_TARGET_UTILS_H_
 
-#include <tvm/runtime/data_type.h>
+#include <tvm/ir/type.h>
 #include <tvm/target/target.h>
 
 namespace tvm {
@@ -32,8 +32,8 @@ bool TargetSupportsNamedBarrier(Target target);
 bool TargetSupportVectorize256(Target target);
 bool TargetHasSMVersionGE(Target target, int version);
 
-bool IsCudaVectorizableFP8(DataType dtype);
-bool IsCudaVectorizableCast(DataType from_ty, DataType target_ty);
+bool IsCudaVectorizableFP8(PrimType dtype);
+bool IsCudaVectorizableCast(PrimType from_ty, PrimType target_ty);
 
 } // namespace tl
 } // namespace tvm

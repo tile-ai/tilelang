@@ -9,13 +9,14 @@ need an LLVM-enabled build.
 """
 
 import pytest
+import tvm_ffi
 import torch
 
 import tilelang
 import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import tirx
 
 
 def _widen(size):
@@ -50,14 +51,14 @@ def _unlegalized(mod) -> list[str]:
     def visit(node):
         if not isinstance(node, tirx.Cast):
             return
-        source, target = str(node.value.dtype), str(node.dtype)
+        source, target = str(node.value.ty.dtype), str(node.ty.dtype)
         bf16 = source.startswith("bfloat16") or target.startswith("bfloat16")
         bits = {source.split("x")[0], target.split("x")[0]} == {"uint16", "float32"}
         if bf16 or bits:
             found.append(f"{source} -> {target}")
 
     for _, func in mod.functions.items():
-        tirx.stmt_functor.post_order_visit(func.body, visit)
+        tvm_ffi.structural_walk(func.body, (tirx.Cast, visit), order="post")
     return found
 
 

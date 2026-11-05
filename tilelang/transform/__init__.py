@@ -2,18 +2,89 @@
 # pylint: disable=invalid-name, unsupported-binary-operation
 
 from . import _ffi_api
-from .simplify import Simplify, simplify_prim_func, LetInline  # noqa: F401
 from .pass_config import PassConfigKey  # noqa: F401
 from tilelang import tvm as tvm  # noqa: F401
-from tvm.ir.transform import PassContext  # noqa: F401
-from .add_bufstore_wrapper import AddWrapperForSingleBufStore  # noqa: F401
-from .hoist_broadcast_values import HoistBroadcastValues  # noqa: F401
-from .decouple_type_cast import DecoupleTypeCast  # noqa: F401
+from tvm_tirx.ir.transform import PassContext  # noqa: F401
+
+_PYTHON_PASSES = {
+    "Simplify": "simplify",
+    "simplify_prim_func": "simplify",
+    "LetInline": "simplify",
+    "AddWrapperForSingleBufStore": "add_bufstore_wrapper",
+    "HoistBroadcastValues": "hoist_broadcast_values",
+    "DecoupleTypeCast": "decouple_type_cast",
+}
+
+
+def __getattr__(name):
+    from importlib import import_module
+
+    if name not in _PYTHON_PASSES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(f".{_PYTHON_PASSES[name]}", __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | _PYTHON_PASSES.keys())
 
 
 def get_pass_context():
     """Get the current pass context"""
     return PassContext.current()
+
+
+def RemoveNoOp():
+    """Remove dead control flow and pure evaluations with TileLang store semantics.
+
+    Element types, volatile memory and index side effects are preserved. This
+    cleanup does not enable the optional arithmetic or Bind-inlining policies
+    of :func:`Simplify`; it consumes the existing ``tirx.RemoveNoOp`` config.
+    """
+    return _ffi_api.RemoveNoOp()
+
+
+def HoistIf():
+    """Reuse native conditional hoisting with TileLang's typed store cleanup.
+
+    The native factory is a Sequential whose last stage assumes arithmetic
+    subtraction on all stored element types. Keep its hoisting and SSA stages,
+    replacing only that cleanup; fail explicitly if an upstream rebase changes
+    this internal composition.
+    """
+    from tvm_tirx import tirx
+    from tvm_tirx.ir.transform import Sequential
+
+    pipeline = tirx.transform.HoistIf()
+    expected = ("tirx.InsertHoistedIf", "tirx.StmtSimplify", "tirx.RemoveNoOp")
+    if not isinstance(pipeline, Sequential):
+        raise RuntimeError("TIRx HoistIf is no longer a Sequential; review the TileLang cleanup boundary")
+    stages = list(pipeline.passes)
+    actual = tuple(stage.info.name for stage in stages)
+    if actual != expected:
+        raise RuntimeError(f"TIRx HoistIf stages changed: expected {expected}, got {actual}; review the TileLang cleanup boundary")
+    return Sequential([*stages[:-1], RemoveNoOp()], opt_level=pipeline.info.opt_level, name="tl.HoistIf")
+
+
+def PrepareAnyList():
+    """Prepare boxed Any-list operands for TileLang's owned call envelope.
+
+    Run before native LowerTVMBuiltin. TileLang's host emitter owns each
+    invocation's arguments, result, and inline tensor descriptors through the
+    public TVM FFI C ABI. Ordinary packed calls retain native lowering.
+    """
+    return _ffi_api.PrepareAnyList()
+
+
+def LowerCustomDatatypes():
+    """Lower host custom storage after packed ABI checks have been emitted.
+
+    User arithmetic conversions use native Expr callbacks registered under
+    ``tvm.datatype.lower.<target>.*``; storage conversion alone does not define
+    custom arithmetic or change the logical input/output dtype checks.
+    """
+    return _ffi_api.LowerCustomDatatypes()
 
 
 def PipelinePlanning():
@@ -35,6 +106,9 @@ def LayoutInference():
     fpass : tvm.transform.Pass
         The result pass
     """
+    from tilelang.tileop import _register_builtin_callbacks
+
+    _register_builtin_callbacks()
     return _ffi_api.LayoutInference()  # type: ignore
 
 
@@ -46,6 +120,9 @@ def LowerTileOp():
     fpass : tvm.transform.Pass
         The result pass
     """
+    from tilelang.tileop import _register_builtin_callbacks
+
+    _register_builtin_callbacks()
     return _ffi_api.LowerTileOp()  # type: ignore
 
 
@@ -187,6 +264,25 @@ def LowerAccessPtr():
     return _ffi_api.LowerAccessPtr()  # type: ignore
 
 
+def LowerFrontendScopes():
+    """Represent lexical allocation boundaries with native TIRx scope regions."""
+    return _ffi_api.LowerFrontendScopes()
+
+
+def LowerTensorSpec():
+    """Materialize frontend tensor specifications as native typed SSA values."""
+    return _ffi_api.LowerTensorSpec()
+
+
+def LowerTensorDescriptors():
+    """Resolve original tensor handles to packed slots before tensor lowering.
+
+    Run after frontend specialization. Later signature changes must preserve
+    these slots or remap them, as TileLang's parameter-pruning pass does.
+    """
+    return _ffi_api.LowerTensorDescriptors()
+
+
 def MakePackedAPI():
     """MakePackedAPI
 
@@ -293,6 +389,11 @@ def SplitHostDevice():
     return _ffi_api.SplitHostDevice()  # type: ignore
 
 
+def OutlineDeviceRegions():
+    """Outline kernels before device storage, synchronization and launch lowering."""
+    return _ffi_api.OutlineDeviceRegions()
+
+
 def AnnotateReadOnlyParams():
     """Annotate read-only handle parameters for PrimFuncs.
 
@@ -329,6 +430,27 @@ def ConfigIndexBitwidth():
     ----
     """
     return _ffi_api.ConfigIndexBitwidth()  # type: ignore
+
+
+def PrepareTensorLayouts():
+    """Materialize compact layouts before native definition-based lowering.
+
+    The pass preserves the original Function and updates native definitions
+    and uses together. Existing explicit layouts and view offsets are kept.
+    """
+    return _ffi_api.PrepareTensorLayouts()
+
+
+def LowerTensorLayouts():
+    """Lower physical tensor accesses while retaining the public parameter ABI.
+
+    This includes layout preparation. Run LowerTensorSpec first to preserve
+    explicit source stride declarations even when their addresses are compact.
+    Implicit parameters and unmarked native default layouts retain compact
+    validation; other stride/offset expressions remain in parameter types.
+    This boundary consumes source declaration flags before host/device outlining.
+    """
+    return _ffi_api.LowerTensorLayouts()
 
 
 def FlattenBuffer():
@@ -375,8 +497,14 @@ def HoistGlobalBufferAllocations():
     return _ffi_api.HoistGlobalBufferAllocations()  # type: ignore
 
 
-def HoistNonRestrictParams():
-    return _ffi_api.HoistNonRestrictParams()  # type: ignore
+def NormalizeAliasAnnotations():
+    """Move signature alias annotations into explicit IR operands before rewriting."""
+    return _ffi_api.NormalizeAliasAnnotations()
+
+
+def HoistNonRestrictParams(finalize: bool = False):
+    """Resolve alias exceptions by physical identity; finalize after ABI splitting."""
+    return _ffi_api.HoistNonRestrictParams(finalize)
 
 
 def StorageRewrite():
@@ -391,8 +519,32 @@ def StorageRewrite():
 
 
 def LowerOpaqueBlock():
-    """LowerOpaqueBlock"""
+    """Finish materialized TileLang annotations and preserve native scopes."""
     return _ffi_api.LowerOpaqueBlock()  # type: ignore
+
+
+def FinalizeAnnotations(target_kind: str = "", *, allowed_pending_regions=()):
+    """Consume finished layout hints; retain metadata with later consumers.
+
+    LayoutInference and LowerTileOp must precede this pass. Safety and barrier
+    metadata require their dedicated lowering passes, and unknown structural
+    annotations are reported instead of being silently removed.
+
+    Early CUDA finalization may explicitly retain ``kWarpSpecializationScope``
+    and ``kCustomWarpSpecialization`` for shared-memory planning, synchronization,
+    and register allocation. These are the only supported pending region keys.
+    Run this pass again with the default empty list after those consumers.
+    """
+    return _ffi_api.FinalizeAnnotations(target_kind, list(allowed_pending_regions))
+
+
+def InferWmmaFragmentMetadata():
+    """Check whole-function WMMA shape/layout metadata and attach allocation hints.
+
+    This preserves the old InferFragment consistency checks. It does not
+    establish initialization dominance; a store can supply fragment metadata.
+    """
+    return _ffi_api.InferWmmaFragmentMetadata()
 
 
 def LowerThreadAllreduce():

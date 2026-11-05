@@ -1,31 +1,52 @@
 """Strided view shape, dtype and storage contracts (no device required)."""
 
 import pytest
-from tilelang import tvm
+from tvm_tirx import ir, tirx, sym
+from tvm_tirx.tirx.layout import Iter
 import tilelang.language as T
 
 BATCH, ROWS, COLS_I8 = 2, 3, 16
 COLS_I32 = COLS_I8 // 4
 
 
-def strided_buffer(shape, dtype, strides, name="A"):
-    return tvm.tirx.decl_buffer(shape, dtype, name=name, strides=strides)
+def strided_buffer(shape, dtype, strides=None, name="A", elem_offset=0):
+    # An annotation has no storage identity. Construct the native tensor value
+    # that T.view receives inside a kernel, with its strides in the type.
+    if strides is None:
+        strides = []
+        stride = 1
+        for extent in reversed(shape):
+            strides.append(stride)
+            stride *= extent
+        strides.reverse()
+    layout = tirx.TileLayout.from_iters(
+        [Iter(extent, stride, "m") for extent, stride in zip(shape, strides, strict=True)],
+        offset={"m": elem_offset},
+    )
+    return ir.Var(name, tirx.TensorType(shape, dtype, layout=layout))
+
+
+def assert_same_storage(viewed, src):
+    # Outside a builder the view is a declaration spec. Its pointer expression
+    # must refer to this exact source tensor, rather than an unrelated Var.
+    assert viewed.data.op.name == "tirx.tensor_data_ptr"
+    assert viewed.data.args[0].same_as(src)
 
 
 @pytest.mark.parametrize("src_dtype,dtype", [("float32", "float16"), ("float16", "float32"), ("float16x2", "float16")])
 def test_scalar_view_rejects_different_bit_count(src_dtype, dtype):
-    src = T.Tensor((), src_dtype)
+    src = strided_buffer((), src_dtype)
     with pytest.raises(ValueError, match="logical bit count"):
         T.view(src, shape=(), dtype=dtype)
 
 
 @pytest.mark.parametrize("src_dtype,dtype", [("float32", "float32"), ("float32", "int32"), ("float16x2", "int32")])
 def test_scalar_view_preserves_bit_count(src_dtype, dtype):
-    src = T.Tensor((), src_dtype)
+    src = strided_buffer((), src_dtype)
     viewed = T.view(src, shape=(), dtype=dtype)
     assert len(viewed.shape) == 0
     assert str(viewed.dtype) == dtype
-    assert viewed.data.same_as(src.data)
+    assert_same_storage(viewed, src)
 
 
 @pytest.mark.parametrize(
@@ -38,11 +59,11 @@ def test_scalar_view_preserves_bit_count(src_dtype, dtype):
     ],
 )
 def test_scalar_view_rank_change(src_shape, src_dtype, shape, dtype):
-    src = T.Tensor(src_shape, src_dtype)
+    src = strided_buffer(src_shape, src_dtype)
     viewed = T.view(src, shape=shape, dtype=dtype)
     assert tuple(int(dim) for dim in viewed.shape) == shape
     assert str(viewed.dtype) == dtype
-    assert viewed.data.same_as(src.data)
+    assert_same_storage(viewed, src)
 
 
 def test_view_requires_explicit_strides_for_noncontiguous_source():
@@ -59,10 +80,10 @@ def test_view_accepts_explicit_strides_for_rank_change():
     src = strided_buffer((BATCH, ROWS, COLS_I8), "int8", (stride0, stride1, 1))
     viewed = T.view(src, (BATCH * ROWS, COLS_I32), dtype=T.int32, strides=(stride1 // 4, 1))
 
-    analyzer = tvm.arith.Analyzer()
+    analyzer = sym.Analyzer()
     assert analyzer.can_prove_equal(viewed.strides[0], stride1 // 4)
     assert int(viewed.strides[1]) == 1
-    assert viewed.data.same_as(src.data)
+    assert_same_storage(viewed, src)
 
 
 def test_view_ignores_singleton_dimension_stride():
@@ -79,6 +100,6 @@ def test_view_rejects_invalid_strided_views():
         T.view(src, (BATCH * ROWS, COLS_I32), dtype=T.int32, strides=(1,))
     with pytest.raises(ValueError, match="logical bit count"):
         T.view(src, (BATCH * ROWS, 100), dtype=T.int32, strides=(100, 1))
-    offset_src = tvm.tirx.decl_buffer((16,), "int8", name="offset_src", elem_offset=1)
+    offset_src = strided_buffer((16,), "int8", name="offset_src", elem_offset=1)
     with pytest.raises(ValueError, match="non-zero elem_offset"):
         T.view(offset_src, (16,))

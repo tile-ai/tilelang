@@ -1,6 +1,7 @@
 """Small numerical kernels for Ascend SIMD arithmetic instructions."""
 
 import pytest
+from tvm_ffi import dtype as DataType
 import torch
 import tilelang
 import tilelang.testing
@@ -161,7 +162,7 @@ def test_vlrelu_vprelu():
 
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
 def test_absolute_difference(dtype):
-    lanes = 2048 // tilelang.tvm.DataType(dtype).bits
+    lanes = 2048 // DataType(dtype).bits
 
     @T.prim_func
     def kernel(a: T.Tensor((lanes,), dtype), b: T.Tensor((lanes,), dtype), out: T.Tensor((lanes,), dtype)):
@@ -185,7 +186,7 @@ def test_absolute_difference(dtype):
 @pytest.mark.parametrize("op", ["vmadd", "vmula"])
 @pytest.mark.parametrize("dtype,atol", [("float32", 1e-5), ("float16", 1e-2), ("bfloat16", 1e-1)])
 def test_fused_multiply_add(op, dtype, atol):
-    bits = tilelang.tvm.DataType(dtype).bits
+    bits = DataType(dtype).bits
     lanes = 2048 // bits
     n = lanes * 2
 

@@ -1,5 +1,12 @@
 # DeepSeek V3.2
 
+Install the matching TileLang frontend, TIRx provider and FFI bundle using the
+[source installation guide](../../../docs/get_started/Installation.md), then
+install this directory's `requirements.txt`. The former `tilelang==0.1.6` pin
+describes the original demo environment; it must not replace the selected
+compiler bundle when exercising this revision. Model weights and the required
+GPU capacity are separate from compiler installation.
+
 First convert huggingface model weights to the format required by our inference demo. Set `MP` to match your available GPU count:
 ```bash
 cd inference

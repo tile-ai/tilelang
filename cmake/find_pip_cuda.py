@@ -17,7 +17,6 @@ import json
 import os
 import pathlib
 import site
-import subprocess
 import sys
 
 
@@ -153,29 +152,6 @@ def _ensure_lib_symlinks(cu_dir):
                 base.symlink_to(so.name)
 
 
-def _ensure_cuda_stub(cu_dir):
-    """Create a minimal Linux libcuda.so stub for build-time -lcuda linking."""
-    if os.name == "nt":
-        return
-
-    stubs_dir = cu_dir / "lib" / "stubs"
-    stub = stubs_dir / "libcuda.so"
-    if stub.exists():
-        return
-    stubs_dir.mkdir(parents=True, exist_ok=True)
-    src = stubs_dir / "_stub.c"
-    try:
-        src.write_text("void cuGetErrorString(void){}\n")
-        subprocess.check_call(
-            ["gcc", "-shared", "-o", str(stub), str(src)],
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    finally:
-        src.unlink(missing_ok=True)
-
-
 def _library_dir(cu_dir: pathlib.Path) -> pathlib.Path:
     if os.name == "nt":
         return cu_dir / "lib" / "x64"
@@ -199,7 +175,9 @@ def main():
         sys.exit(1)
 
     _ensure_lib_symlinks(cu_dir)
-    _ensure_cuda_stub(cu_dir)
+    # The driver comes from the system/SDK or the portable cuda_stub CMake
+    # target. A fabricated libcuda.so would mask discovery without providing
+    # the entrypoints needed by the runtime.
 
     print(
         json.dumps(

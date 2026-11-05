@@ -15,32 +15,37 @@
 #include <utility>
 #include <vector>
 
-#include <tvm/arith/analyzer.h>
 #include <tvm/ir/op.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/ir/stmt.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/target/target.h>
-#include <tvm/tirx/buffer.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/op_attr_types.h>
+#include <tvm/tirx/expr.h>
+#include <tvm/tirx/op/attr.h>
 #include <tvm/tirx/stmt.h>
 
+#include "../ir/analyzer.h"
+#include "../ir/annotations.h"
 #include "../layout/layout.h"
 #include "support/check.h"
 
 namespace tvm {
 namespace tl {
 
-using AddWorkspaceCallback = std::function<PrimExpr(int, DataType)>;
+// Workspace callbacks return a typed pointer expression, never a scalar IR
+// value whose apparent dtype is an opaque handle.
+using AddWorkspaceCallback = std::function<Expr(int, PrimType)>;
 // Allocate a compiler-generated shared mbarrier slot. The optional hint names
 // the backing barrier buffer when the first slot is created; later slots share
 // the same buffer and may ignore the hint.
 using AllocMBarrierCallback =
     std::function<int(int arrive_count, std::optional<std::string> name)>;
-using UpdateBarrierArriveCallback = std::function<void(tirx::Var, PrimExpr)>;
+using UpdateBarrierArriveCallback =
+    std::function<void(tirx::TensorVar, PrimExpr)>;
 // Record a minimum shared-memory base alignment (bytes) required for the
 // buffer backed by the given data Var (e.g. TMA/MMA swizzle constraints).
-using RequireSmemAlignmentCallback = std::function<void(tirx::Var, int)>;
-using LayoutMap = ffi::Map<tirx::Buffer, Layout>;
-using BufferMap = ffi::Map<tirx::Var, tirx::Buffer>;
+using RequireSmemAlignmentCallback = std::function<void(tirx::TensorVar, int)>;
+using LayoutMap = ffi::Map<tirx::TensorVar, Layout>;
 using BlockAnnotations = ffi::Map<ffi::String, ffi::Any>;
 
 enum AccessMask : int {
@@ -52,25 +57,26 @@ enum AccessMask : int {
 // Preserve known read/write bits and conservatively assume both when a mask
 // cannot be resolved at compile time.
 inline int GetConservativeAccessMask(const PrimExpr &rw_mask) {
-  if (const auto *mask = rw_mask.as<IntImmNode>()) {
-    return static_cast<int>(mask->value) & kAccessReadWrite;
+  if (const auto *mask = rw_mask.as<IntImmObj>()) {
+    if (auto value = mask->value.as<int64_t>())
+      return static_cast<int>(*value) & kAccessReadWrite;
   }
   return kAccessReadWrite;
 }
 
 struct AccessRegion {
-  tirx::BufferRegion region;
+  TensorRegion region;
   int access_mask{kAccessReadWrite};
 };
 
 struct AccessRegions {
-  ffi::Array<tirx::BufferRegion> reads;
-  ffi::Array<tirx::BufferRegion> writes;
+  ffi::Array<TensorRegion> reads;
+  ffi::Array<TensorRegion> writes;
 };
 
 inline void AppendAccessRegionByMask(const AccessRegion &access,
-                                     ffi::Array<tirx::BufferRegion> *reads,
-                                     ffi::Array<tirx::BufferRegion> *writes) {
+                                     ffi::Array<TensorRegion> *reads,
+                                     ffi::Array<TensorRegion> *writes) {
   if (!access.region.defined()) {
     return;
   }
@@ -104,25 +110,25 @@ inline const char *InferLevelToString(InferLevel level) {
 
 struct LowerArgs {
   Target target;
-  Range thread_bounds;
+  Range thread_bounds{Range::FromMinExtent(0, 1)};
   // Logical thread index consumed by lowering helpers. This is an expression
   // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by
-  // a thread_extent AttrStmt), while targets without thread bindings (e.g.
-  // CPU) pass constant 0. It must never be an unbound synthetic Var.
-  PrimExpr thread_index;
+  // a tirx.launch_thread RegionStmt), while targets without thread bindings
+  // (e.g. CPU) pass constant 0. It must never be an unbound synthetic Var.
+  PrimExpr thread_index{0};
   LayoutMap layout_map;
-  ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
+  ffi::Map<tirx::TensorVar, tirx::TensorVar> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
-  ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
+  ffi::Map<Var, Expr> bind_var_to_expr;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
   // zero-based epoch of the nearest enclosing serial loop.
-  PrimExpr mbar_phase_expr = IntImm(DataType::Int(32), 0);
+  PrimExpr mbar_phase_expr = IntImm(PrimType::Int(32), 0);
   // Pointer to the shared.barrier buffer for compiler-generated mbarriers.
   // Points to the LowerTileOpPass member so copy.cc sees the buffer
   // even when created lazily by the alloc_mbarrier callback.
-  ffi::Optional<tirx::Buffer> *mbarrier_buffer = nullptr;
+  ffi::Optional<tirx::TensorVar> *mbarrier_buffer = nullptr;
   // Product of cluster_dims (from block annotation). Defaults to 1 (no
   // cluster). Used by TMA copy lowering to scale expect_tx bytes for cluster
   // barriers.
@@ -137,8 +143,12 @@ struct LowerArgs {
   // buffer's data Var. Lowerings that bind a buffer to a swizzle-sensitive
   // instruction (TMA bulk copy, wgmma/tcgen05 descriptors) report the
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
-  // the results into the kSmemAlignmentMap PrimFunc attribute.
+  // the results into the kSmemAlignmentMap Function attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
+  // Read-only snapshot decoded from the current lexical scope's explicit
+  // annotation payloads. Backend lowerings must retain native Expr identities
+  // and must not move these values into implicit Call/Function attributes.
+  BlockAnnotations block_annotations;
 };
 
 /*! \brief One reducer_update site, as seen by layout analysis: the update
@@ -149,20 +159,20 @@ struct LowerArgs {
  *  (both feed AnalyzeReducerUpdateSite). */
 struct ReducerUpdateSiteHint {
   Fragment loop_layout; // undefined while the update loop is unsolved
-  ffi::Array<tirx::Var> loop_vars;
+  ffi::Array<PrimVar> loop_vars;
   ffi::Array<PrimExpr> indices;
-  PrimExpr value;
+  PrimExpr value{ffi::UnsafeInit{}};
 };
 
 struct LayoutInferArgs {
   Target target;
-  Range thread_bounds;
+  Range thread_bounds{Range::FromMinExtent(0, 1)};
   LayoutMap layout_map;
-  arith::Analyzer *analyzer;
-  ffi::Map<tirx::Buffer, tirx::Buffer> buffer_remap;
+  sym::AnalyzerObj *analyzer{nullptr};
+  ffi::Map<tirx::TensorVar, tirx::TensorVar> buffer_remap;
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
-  ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
+  ffi::Map<Var, Expr> bind_var_to_expr;
   // Whether the current TileOp is nested inside a pipelined loop
   // (i.e. a surrounding loop annotated with num_stages > 0).
   bool in_pipeline = false;
@@ -182,8 +192,8 @@ class TileOperator;
 
 class TileOperatorNode : public ffi::Object {
 public:
-  virtual tirx::Stmt Lower(const LowerArgs &lower_args,
-                           arith::Analyzer *analyzer) const = 0;
+  virtual Stmt Lower(const LowerArgs &lower_args,
+                     sym::AnalyzerObj *analyzer) const = 0;
 
   virtual LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                                 InferLevel level) const = 0;
@@ -207,7 +217,7 @@ public:
    * conservative for dependency analysis. Ops whose read set depends on an
    * argument value narrow it here; the default reports every read.
    */
-  virtual ffi::Array<tirx::BufferRegion> GetReadBeforeWriteRegions() const {
+  virtual ffi::Array<TensorRegion> GetReadBeforeWriteRegions() const {
     return GetAccessRegions().reads;
   }
 
@@ -227,36 +237,44 @@ public:
                                              TileOperatorNode);
 };
 
-tirx::Var GetVarFromAccessPtr(const PrimExpr &expr);
+// The returned identity is the tensor operand of tl.access_ptr. Physical
+// pointers alone cannot recover a tensor's shape or aliasing contract.
+tirx::TensorVar GetTensorFromAccessPtr(const Expr &expr);
 
 TileOperator
-ParseOperator(const tirx::Call &call,
+ParseOperator(const Call &call,
               const BlockAnnotations &block_annotations = BlockAnnotations());
 TileOperator
-ParseOperator(const tirx::Stmt &stmt,
+ParseOperator(const Stmt &stmt,
               const BlockAnnotations &block_annotations = BlockAnnotations());
 
 using OpBuilderFunc = ffi::TypedFunction<TileOperator(
-    ffi::Array<PrimExpr>, ffi::Map<ffi::String, ffi::ObjectRef>)>;
+    ffi::Array<Expr>, ffi::Map<ffi::String, ffi::Any>)>;
 using OpBlockAnnotationHandlerFunc =
     ffi::TypedFunction<TileOperator(TileOperator, BlockAnnotations)>;
 
 static constexpr const char *kTLOpBlockAnnotationHandler =
     "TLOpBlockAnnotationHandler";
 
+// All tile operators use explicit operands followed by the annotation Tuple.
+// The per-operator builder validates the decoded native operand contract.
+void RegisterTileOperator(
+    const ffi::String &name, OpBuilderFunc builder,
+    ffi::Optional<OpBlockAnnotationHandlerFunc> handler = std::nullopt);
+
 #define TIR_REGISTER_TL_TILE_OP(Entry, OpName)                                 \
   const Op &Entry::Get() {                                                     \
-    static const Op &op = Op::Get("tl.tileop." #OpName);                       \
+    static const Op op = Op::Get("tl.tileop." #OpName);                        \
     return op;                                                                 \
   }                                                                            \
-  TVM_REGISTER_OP("tl.tileop." #OpName)                                        \
-      .set_attr<tirx::TScriptPrinterName>("TScriptPrinterName", #OpName)       \
-      .set_attr<OpBuilderFunc>(                                                \
-          "TLOpBuilder",                                                       \
-          [](ffi::Array<PrimExpr> args,                                        \
-             ffi::Map<ffi::String, ffi::ObjectRef> annotations) {              \
-            return Entry(args, annotations);                                   \
-          })
+  TVM_FFI_STATIC_INIT_BLOCK() {                                                \
+    RegisterTileOperator("tl.tileop." #OpName,                                 \
+                         [](ffi::Array<Expr> args,                             \
+                            ffi::Map<ffi::String, ffi::Any> annotations) {     \
+                           return Entry(std::move(args),                       \
+                                        std::move(annotations));               \
+                         });                                                   \
+  }
 
 } // namespace tl
 } // namespace tvm

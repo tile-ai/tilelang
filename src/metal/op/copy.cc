@@ -5,17 +5,18 @@
 
 #include "op/copy.h"
 
+#include "ir/tensor_utils.h"
 #include "metal/op/builtin.h"
 #include "metal/op/utils.h"
 #include "metal/target_utils.h"
 #include "op/utils.h"
-
-#include <tvm/tirx/builtin.h>
+#include <tvm/ir/prim/op.h>
 
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace metal {
 
@@ -32,15 +33,15 @@ bool CheckCooperativeTensorCopy(const CopyNode &op) {
 }
 
 Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
-                        arith::Analyzer *analyzer) {
+                        sym::AnalyzerObj *analyzer) {
   (void)analyzer;
   TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
 
   int total_elements = 1;
-  for (auto s : op.src->shape) {
-    auto imm = s.as<IntImmNode>();
+  for (auto s : op.src.shape()) {
+    auto imm = s.as<IntImmObj>();
     TVM_FFI_ICHECK(imm) << "simdgroup buffer must have constant shape";
-    total_elements *= imm->value;
+    total_elements *= RequireStaticInt(s, "Metal copy tensor shape");
   }
   TVM_FFI_ICHECK(total_elements % 64 == 0)
       << "simdgroup buffer size must be multiple of 64 (8x8), got "
@@ -50,24 +51,24 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
       << "Expected 2D source for simdgroup store";
   TVM_FFI_ICHECK(op.dst_range.size() == 2)
       << "Expected 2D destination for simdgroup store";
-  PrimExpr dst_row_base = op.dst_range[0]->min;
-  PrimExpr dst_col_base = op.dst_range[1]->min;
-  PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
+  PrimExpr dst_row_base = op.dst_range[0]->begin;
+  PrimExpr dst_col_base = op.dst_range[1]->begin;
+  PrimExpr dst_stride = op.dst.shape()[op.dst.shape().size() - 1];
 
   int warp_size = TargetMetalGetWarpSize(lower_args.target);
-  const auto *block_size_imm =
-      lower_args.thread_bounds->extent.as<IntImmNode>();
+  const auto *block_size_imm = lower_args.thread_bounds->extent.as<IntImmObj>();
   TVM_FFI_ICHECK(block_size_imm)
       << "simdgroup copy requires constant thread bounds";
-  int block_size = block_size_imm->value;
+  int block_size =
+      RequireStaticInt(lower_args.thread_bounds->extent, "Metal thread bound");
   int num_warps = block_size / warp_size;
   PrimExpr warp_id = FloorDiv(lower_args.thread_index, warp_size);
 
-  const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
-  const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();
+  const auto *m_imm = op.src_range[0]->extent.as<IntImmObj>();
+  const auto *n_imm = op.src_range[1]->extent.as<IntImmObj>();
   TVM_FFI_ICHECK(m_imm && n_imm) << "simdgroup copy requires constant extents";
-  int M = m_imm->value;
-  int N = n_imm->value;
+  int M = RequireStaticInt(op.src_range[0]->extent, "Metal row extent");
+  int N = RequireStaticInt(op.src_range[1]->extent, "Metal column extent");
 
   constexpr int kMPerWarp = 8;
   constexpr int kNPerWarp = 8;
@@ -94,14 +95,14 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
           dst_row_base + warp_m * (warp_row_tiles * kMPerWarp) + i * kMPerWarp;
       PrimExpr col =
           dst_col_base + warp_n * (warp_col_tiles * kNPerWarp) + j * kNPerWarp;
-      PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                          {BufferLoad(op.dst, {row, col})});
-      stmts.push_back(Evaluate(
-          Call(DataType::Handle(), builtin::simdgroup_store(),
-               {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr,
-                dst_stride, IntImm(DataType::Int(32), kMPerWarp),
-                IntImm(DataType::Int(32), kNPerWarp),
-                Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
+      Expr ptr = MakeTensorAccessPtr(TensorLoad(op.dst, {row, col}),
+                                     IntImm::Int32(1), 2);
+      stmts.push_back(
+          Evaluate(Call(PrimType::Void(), Op::Get("tirx.metal.simdgroup_store"),
+                        {op.src, IntImm(PrimType::Int(32), tile_idx), ptr,
+                         dst_stride, IntImm(PrimType::Int(32), kMPerWarp),
+                         IntImm(PrimType::Int(32), kNPerWarp),
+                         IntImm(PrimType::Bool(), 0)})));
     }
   }
   if (stmts.size() == 1) {
@@ -111,14 +112,14 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
 }
 
 Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &lower_args,
-                                arith::Analyzer *analyzer) {
+                                sym::AnalyzerObj *analyzer) {
   (void)analyzer;
   TVM_FFI_ICHECK(IsCooperativeTensorBuffer(op.src));
   int total_elements = 1;
-  for (auto s : op.src->shape) {
-    auto imm = s.as<IntImmNode>();
+  for (auto s : op.src.shape()) {
+    auto imm = s.as<IntImmObj>();
     TVM_FFI_ICHECK(imm) << "cooperative_tensor buffer must have constant shape";
-    total_elements *= imm->value;
+    total_elements *= RequireStaticInt(s, "Metal copy tensor shape");
   }
 
   constexpr int kTileSize = 16;
@@ -129,25 +130,25 @@ Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &lower_args,
 
   TVM_FFI_ICHECK(op.dst_range.size() == 2)
       << "Expected 2D destination for cooperative_tensor store";
-  PrimExpr dst_row_base = op.dst_range[0]->min;
-  PrimExpr dst_col_base = op.dst_range[1]->min;
-  PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
+  PrimExpr dst_row_base = op.dst_range[0]->begin;
+  PrimExpr dst_col_base = op.dst_range[1]->begin;
+  PrimExpr dst_stride = op.dst.shape()[op.dst.shape().size() - 1];
 
   int warp_size = TargetMetalGetWarpSize(lower_args.target);
-  const auto *block_size_imm =
-      lower_args.thread_bounds->extent.as<IntImmNode>();
+  const auto *block_size_imm = lower_args.thread_bounds->extent.as<IntImmObj>();
   TVM_FFI_ICHECK(block_size_imm)
       << "cooperative_tensor copy requires constant thread bounds";
-  int block_size = block_size_imm->value;
+  int block_size =
+      RequireStaticInt(lower_args.thread_bounds->extent, "Metal thread bound");
   int num_warps = block_size / warp_size;
   PrimExpr warp_id = FloorDiv(lower_args.thread_index, warp_size);
 
-  const auto *m_imm = op.src_range[0]->extent.as<IntImmNode>();
-  const auto *n_imm = op.src_range[1]->extent.as<IntImmNode>();
+  const auto *m_imm = op.src_range[0]->extent.as<IntImmObj>();
+  const auto *n_imm = op.src_range[1]->extent.as<IntImmObj>();
   TVM_FFI_ICHECK(m_imm && n_imm)
       << "cooperative_tensor copy requires constant extents";
-  int M = m_imm->value;
-  int N = n_imm->value;
+  int M = RequireStaticInt(op.src_range[0]->extent, "Metal row extent");
+  int N = RequireStaticInt(op.src_range[1]->extent, "Metal column extent");
 
   int kMPerWarp = kTileSize;
   int kNPerWarp = kTileSize * 2;
@@ -214,16 +215,16 @@ Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &lower_args,
       int tile_idx = i * warp_col_tiles + j;
       PrimExpr row = dst_row_base + warp_m * warp_M + i * kTileM;
       PrimExpr col = dst_col_base + warp_n * warp_N + j * kTileN;
-      PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                          {BufferLoad(op.dst, {row, col})});
+      Expr ptr = MakeTensorAccessPtr(TensorLoad(op.dst, {row, col}),
+                                     IntImm::Int32(1), 2);
       int kMMAK = kTileSize;
       stmts.push_back(Evaluate(Call(
-          DataType::Handle(), cooperative_tensor_store(),
-          {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr, dst_stride,
-           IntImm(DataType::Int(32), kTileM), IntImm(DataType::Int(32), kTileN),
-           Cast(DataType::Bool(), IntImm(DataType::Int(32), 0)),
-           IntImm(DataType::Int(32), kTileM), IntImm(DataType::Int(32), kTileN),
-           IntImm(DataType::Int(32), kMMAK), IntImm(DataType::Int(32), 2)})));
+          PrimType::Void(), cooperative_tensor_store(),
+          {op.src, IntImm(PrimType::Int(32), tile_idx), ptr, dst_stride,
+           IntImm(PrimType::Int(32), kTileM), IntImm(PrimType::Int(32), kTileN),
+           IntImm(PrimType::Bool(), 0), IntImm(PrimType::Int(32), kTileM),
+           IntImm(PrimType::Int(32), kTileN), IntImm(PrimType::Int(32), kMMAK),
+           IntImm(PrimType::Int(32), 2)})));
     }
   }
   if (stmts.size() == 1) {
@@ -242,7 +243,7 @@ struct Copy {
   }
 
   static Stmt Lower(const CopyNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     if (CheckSIMDGroupCopy(op)) {
       return LowerSIMDGroupCopy(op, lower_args, analyzer);
     }

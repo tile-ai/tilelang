@@ -22,77 +22,61 @@
  * \brief Legalize the program from frontend
  */
 
-#include "support/check.h"
-#include <tvm/tirx/op.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/expr.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "arith/ir_mutator_with_analyzer.h"
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-
-class LetInliner : public arith::IRMutatorWithAnalyzer {
+class LetInliner : public tirx::StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
-    arith::Analyzer analyzer;
-    LetInliner substituter(&analyzer);
-    PrimFuncNode *fptr = f.CopyOnWrite();
-    fptr->body = substituter.VisitStmt(f->body);
-    return f;
-  }
+  using StmtExprMutator::Mutate;
+  using StmtExprMutator::Mutate_;
 
-private:
-  using arith::IRMutatorWithAnalyzer::IRMutatorWithAnalyzer;
-
-  Stmt VisitStmt_(const ForNode *node) final {
-    if (node->kind == ForKind::kParallel) {
-      parallel_for_scope_++;
+  ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
+    Expr value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
+    // A tensor declaration/allocation supplies a stable typed identity to the
+    // layout and tile-op passes. A memory read or effect must keep its original
+    // evaluation point. Only pure scalar expressions are safe to duplicate.
+    if (value.as<PrimExpr>() && SideEffect(value) <= CallEffectKind::kPure) {
+      VarRemapSet(op->var, value);
+      return SeqStmt(ffi::Array<Stmt>{}, op->loc);
     }
-    auto n = StmtExprMutator::VisitStmt_(node);
-    if (node->kind == ForKind::kParallel) {
-      parallel_for_scope_--;
+    return StmtExprMutator::Mutate_(op, mode);
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const prim::LetObj *op,
+                                     InplaceMode mode) final {
+    PrimExpr value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
+    if (SideEffect(value) > CallEffectKind::kPure) {
+      return StmtExprMutator::Mutate_(op, mode);
     }
-    return n;
+    VarRemapSet(op->var, value);
+    return Mutate(op->body, mode).ValueOrUnchanged(op->body);
   }
-
-  PrimExpr VisitExpr_(const VarNode *node) final {
-    if (let_bindings_.count(node)) {
-      return arith::IRMutatorWithAnalyzer::VisitExpr(let_bindings_[node]);
-    } else {
-      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
-    }
-  }
-
-  Stmt VisitStmt_(const BindNode *node) final {
-    let_bindings_[node->var.get()] = node->value;
-    return Evaluate(Integer(0));
-  }
-
-  PrimExpr VisitExpr_(const LetNode *node) final {
-    let_bindings_[node->var.get()] = node->value;
-    return arith::IRMutatorWithAnalyzer::VisitExpr(node->body);
-  }
-
-  int parallel_for_scope_ = 0;
-  std::unordered_map<const VarNode *, PrimExpr> let_bindings_;
 };
 
-using namespace tirx::transform;
+} // namespace
 
-Pass LetInline() {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return LetInliner::Substitute(std::move(f));
+tvm::transform::Pass LetInline() {
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    auto inliner = ffi::make_object<LetInliner>();
+    SeqStmt body =
+        inliner->Mutate(function->body).ValueOrUnchanged(function->body);
+    if (!body.same_as(function->body))
+      function.CopyOnWrite()->body = body;
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LetInline", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.LetInline");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.transform.LetInline", LetInline);
+  ffi::reflection::GlobalDef().def("tl.transform.LetInline", LetInline);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

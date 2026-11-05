@@ -2,555 +2,235 @@
  * \file cpu/codegen/codegen_c.cc
  */
 #include "codegen_c.h"
-#include "support/check.h"
-#include <tvm/runtime/logging.h>
-
-#include <tvm/runtime/module.h>
-#include <tvm/target/codegen.h>
-
-#include <string>
-#include <unordered_set>
-#include <utility>
-
-#include "cpu/op/builtin.h"
-#include "support/str_escape.h"
-#include "target/build_common.h"
-#include "target/source/codegen_params.h"
-#include "transform/common/attr.h"
 
 #include <cmath>
 #include <sstream>
 
-namespace tvm {
-namespace codegen {
-
-using namespace ffi;
-
-CodeGenTileLangC::CodeGenTileLangC() {
-  module_name_ = name_supply_->FreshName("__tvm_ffi_library_ctx");
-}
+namespace tvm::codegen {
 
 void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
                             bool emit_fwd_func_decl, std::string target_str,
                             const std::unordered_set<std::string> &devices) {
-  emit_asserts_ = emit_asserts;
-  emit_fwd_func_decl_ = emit_fwd_func_decl;
-  declared_globals_.clear();
-  preamble_stream_ << "// tilelang target: " << target_str << "\n";
-  preamble_stream_ << "#include <tl_templates/cpp/common.h>\n";
-  preamble_stream_ << "\n";
-  CodeGenC::Init(output_ssa);
+  tl::CodeGenCHost::Init(output_ssa, emit_asserts, emit_fwd_func_decl,
+                         target_str, devices);
+  preamble_stream_ << "#include <tl_templates/cpp/common.h>\n\n";
+  omp_chain_members_.clear();
 }
 
-void CodeGenTileLangC::InitGlobalContext() {
-  decl_stream << "void* " << symbol::tvm_ffi_library_ctx << " = NULL;\n";
-}
-
-void CodeGenTileLangC::DefineModuleName() {
-  decl_stream << "void* " << module_name_ << " = NULL;\n";
-}
-
-void CodeGenTileLangC::GenerateForwardFunctionDeclarations(
-    String global_symbol,
-
-    const Array<Type> &arg_types, const Type &ret_type) {
-  if (!emit_fwd_func_decl_) {
-    return;
-  }
-  for (auto &func_already_defined : GetFunctionNames()) {
-    if (global_symbol == func_already_defined) {
-      return;
-    }
-  }
-  this->PrintFuncPrefix(fwd_decl_stream);
-  this->PrintType(ret_type, fwd_decl_stream);
-  fwd_decl_stream << " " << global_symbol << "(";
-  for (size_t i = 0; i < arg_types.size(); ++i) {
-    if (i > 0) {
-      fwd_decl_stream << ", ";
-    }
-    CodeGenSourceBase::PrintType(arg_types[i], fwd_decl_stream);
-  }
-  fwd_decl_stream << ");\n";
-}
-
-void CodeGenTileLangC::PrintFuncPrefix(std::ostream &os) { // NOLINT(*)
-  os << "#ifdef __cplusplus\n"
-     << "extern \"C\"\n"
-     << "#endif\n";
-}
-
-void CodeGenTileLangC::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
-  int lanes = t.lanes();
-  if (t.is_handle()) {
-    ICHECK_EQ(lanes, 1) << "does not support vector types";
-    os << "void*";
-    return;
-  }
-  if (t.is_void()) {
-    os << "void";
-    return;
-  }
-  if (t == DataType::Bool()) {
-    os << "bool";
-    return;
-  }
-  bool fail = false;
-  if (t.is_float()) {
-    switch (t.bits()) {
-    case 16:
-      os << "half";
-      break;
-    case 32:
-      os << "float";
-      break;
-    case 64:
-      os << "double";
-      break;
-    default:
-      fail = true;
-      break;
-    }
-    if (!fail && lanes == 1)
-      return;
-    if (!fail && (lanes >= 2 && lanes <= 16)) {
-      os << lanes;
-      return;
-    }
-  } else if (t.is_uint() || t.is_int()) {
-    if (t.is_uint()) {
-      os << 'u';
-    }
-    switch (t.bits()) {
-    case 8:
-      os << "int8_t";
-      break;
-    case 16:
-      os << "int16_t";
-      break;
-    case 32:
-      os << "int32_t";
-      break;
-    case 64:
-      os << "int64_t";
-      break;
-    case 1:
-      os << "int32_t";
-      break;
-    default:
-      fail = true;
-      break;
-    }
-    if (!fail && lanes == 1)
-      return;
-    if (!fail && (lanes >= 2 && lanes <= 16)) {
-      os << lanes;
-      return;
-    }
-  }
-  LOG(FATAL) << "Cannot convert type " << t << " to C type";
-}
-
-void CodeGenTileLangC::VisitExpr_(const BroadcastNode *op,
-                                  std::ostream &os) { // NOLINT(*)
-  std::string v = PrintExpr(op->value);
-  int lanes = op->dtype.lanes();
-  os << "((";
-  PrintType(op->dtype, os);
-  os << ")(";
-  for (int i = 0; i < lanes; ++i) {
-    if (i != 0)
-      os << ", ";
-    os << v;
-  }
-  os << "))";
-}
-
-void CodeGenTileLangC::PrintGetFuncFromBackend(
-    const std::string &func_name, const std::string &packed_func_name) {
-  this->PrintIndent();
-  this->stream << "if (" << packed_func_name << " == NULL) {\n";
-  int packed_func_if_scope = this->BeginScope();
-  this->PrintIndent();
-  this->stream << "if (TVMBackendGetFuncFromEnv(" << module_name_ << ", \""
-               << func_name << "\""
-               << ", &" << packed_func_name << ") != 0) {\n";
-  int get_func_env_scope = this->BeginScope();
-  this->PrintIndent();
-  this->stream << "return -1;\n";
-  this->EndScope(get_func_env_scope);
-  this->PrintIndent();
-  this->stream << "}\n";
-  this->EndScope(packed_func_if_scope);
-  this->PrintIndent();
-  this->stream << "}\n";
-}
-
-void CodeGenTileLangC::PrintFuncCall(const std::string &packed_func_name,
-                                     int num_args) {
-  this->PrintIndent();
-  std::string ret_val = name_supply_->FreshName("ret_val");
-  std::string ret_type_code = name_supply_->FreshName("ret_type_code");
-  this->stream << "TVMFFIAny " << ret_val << ";\n";
-  this->PrintIndent();
-  this->stream << "int " << ret_type_code << ";\n";
-  this->PrintIndent();
-  this->stream << "if (TVMFuncCall(" << packed_func_name << ", "
-               << "(TVMFFIAny*) stack_value"
-               << ", "
-               << "(int*) stack_tcode"
-               << ", " << num_args << ", "
-               << "&" << ret_val << ", "
-               << "&" << ret_type_code << ") != 0) {\n";
-  int func_call_scope = this->BeginScope();
-  this->PrintIndent();
-  this->stream << "return -1;\n";
-  this->EndScope(func_call_scope);
-  this->PrintIndent();
-  this->stream << "}\n";
-}
-
-void CodeGenTileLangC::PrintFuncCallC(const std::string &packed_func_name,
-                                      int num_args,
-                                      const std::string &resource_handle_name) {
-  this->PrintIndent();
-  std::string ret_val = name_supply_->FreshName("ret_val");
-  std::string ret_type_code = name_supply_->FreshName("ret_type_code");
-  this->stream << "TVMFFIAny " << ret_val << ";\n";
-  this->PrintIndent();
-  this->stream << "int " << ret_type_code << ";\n";
-  this->PrintIndent();
-
-  this->stream << "if (" << packed_func_name << "( "
-               << "(TVMFFIAny*) stack_value "
-               << ", "
-               << "(int*) stack_tcode"
-               << ", " << num_args << ", "
-               << "&" << ret_val << ", "
-               << "&" << ret_type_code << ", " << resource_handle_name
-               << ") != 0){\n";
-
-  int func_call_scope = this->BeginScope();
-  this->PrintIndent();
-  this->stream << "return -1;\n";
-  this->EndScope(func_call_scope);
-  this->PrintIndent();
-  this->stream << "}\n";
-}
-
-void CodeGenTileLangC::AddFunction(const PrimFunc &f) {
-  // clear previous generated state.
-  this->InitFuncState(f);
-  // reserve keywords
-  ReserveKeywordsAsUnique();
-
-  auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
-  ICHECK(global_symbol)
-      << "CodeGenC: Expect PrimFunc to have the global_symbol attribute";
-  bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
-  std::unordered_set<const VarNode *> non_restrict;
-  if (auto opt = f->GetAttr<Array<tirx::Var>>(tl::attr::kNonRestrictParams)) {
-    for (const tirx::Var &v : opt.value())
-      non_restrict.insert(v.get());
-  }
-
-  this->PrintFuncPrefix(stream);
-  CodeGenC::PrintType(f->ret_type, stream);
-  this->PrintExtraAttrs(f, stream);
-  this->stream << " " << static_cast<std::string>(global_symbol.value()) << "(";
-
-  for (size_t i = 0; i < f->params.size(); ++i) {
-    tirx::Var v = f->params[i];
-    std::string vid = AllocVarID(v.get());
-    if (i != 0)
-      stream << ", ";
-    if (v.dtype().is_handle()) {
-      // work around for grid constant parameters.
-      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
-        if (ptr->storage_scope == "grid_constant") {
-          stream << "__grid_constant__ const ";
-          CodeGenC::PrintType(ptr->element_type, stream);
-          stream << ' ' << vid;
-          continue;
-        }
-      }
-
-      auto it = alloc_storage_scope_.find(v.get());
-      if (it != alloc_storage_scope_.end()) {
-        PrintStorageScope(it->second, stream);
-      }
-
-      CodeGenC::PrintType(GetType(v), stream);
-      if (auto *ptr = v->type_annotation.as<PointerTypeNode>()) {
-        if (auto *prim = ptr->element_type.as<PrimTypeNode>()) {
-          RegisterHandleType(v.get(), prim->dtype);
-        }
-      }
-
-      if (no_alias && !non_restrict.count(v.get())) {
-        PrintRestrict(v, stream);
-      }
-    } else {
-      CodeGenC::PrintType(GetType(v), stream);
-    }
-    stream << ' ' << vid;
-  }
-  stream << ") {\n";
-  this->PreFunctionBody(f);
-  int func_scope = this->BeginScope();
-  this->PrintStmt(f->body);
-  this->EndScope(func_scope);
-  this->PrintIndent();
-  this->stream << "}\n\n";
-}
-
-std::string CodeGenTileLangC::GetPackedName(const CallNode *op) {
-  const StringImmNode *s = op->args[0].as<StringImmNode>();
-  ICHECK(s != nullptr)
-      << "tvm_call_packed_lowered expects first argument as function name";
-  std::string func_name = s->value;
-  std::string packed_func_name = func_name + "_packed";
-  std::string unique_name;
-  auto it = declared_globals_.find(packed_func_name);
-  if (it != declared_globals_.end()) {
-    unique_name = it->second;
-  } else {
-    unique_name = name_supply_->FreshName(packed_func_name);
-    declared_globals_[packed_func_name] = unique_name;
-    decl_stream << "static void* " << unique_name << " = NULL;\n";
-  }
-  return unique_name;
-}
-
-CodeGenTileLangC::FunctionInfo
-CodeGenTileLangC::GetFunctionInfo(const CallNode *op,
-                                  bool has_resource_handle) {
-  const StringImmNode *s = op->args[0].as<StringImmNode>();
-  ICHECK(s != nullptr)
-      << "tvm_call_[c]packed_lowered expects first argument as function name";
-  int64_t begin = op->args[3].as<IntImmNode>()->value;
-  int64_t end = op->args[4].as<IntImmNode>()->value;
-  int64_t num_args = end - begin;
-  ICHECK_GE(num_args, 0);
-  std::string func_name = s->value;
-
-  if (has_resource_handle) {
-    const StringImmNode *resource_handle_var = op->args[5].as<StringImmNode>();
-    if (resource_handle_var != nullptr) {
-      std::string resource_handle_name = resource_handle_var->value;
-      return {func_name, num_args - 1, resource_handle_name};
-    } else {
-      // The final arg should be "(void*) NULL" to indicate the empty
-      // resource_handle.
-      num_args--;
-
-      const CallNode *reinterpret_call = op->args[5].as<CallNode>();
-      ICHECK_NE(reinterpret_call, (void *)nullptr)
-          << "At CallNode to " << s
-          << "arg 5: Expect either StringImm naming the resource_handle var "
-             "from interface API or "
-          << "reinterpret(0); got: " << op->args[5];
-      ICHECK_EQ(reinterpret_call->op, builtin::reinterpret())
-          << "At CallNode to " << s
-          << "arg 5: Expect either StringImm naming the resource_handle var "
-             "from interface API or "
-          << "reinterpret(0); got: " << op->args[5];
-      ICHECK(is_zero(reinterpret_call->args[0]))
-          << "At CallNode to " << s
-          << " arg 5: Expect either StringImm naming the "
-             "resource_handle var from interface API, or "
-          << "zero; got " << op->args[5];
-    }
-  }
-  return {func_name, num_args, "NULL"};
-}
-
-void CodeGenTileLangC::VisitExpr_(const CallNode *op,
-                                  std::ostream &os) { // NOLINT(*)
-  if (op->op.same_as(tl::clamp())) {
-    ICHECK_EQ(op->args.size(), 3);
+void CodeGenTileLangC::Dispatch_(const CallObj *op, std::ostream &os) {
+  const auto *callee = op->op.as<OpObj>();
+  if (callee && callee->name == "tl.clamp") {
+    TVM_FFI_ICHECK_EQ(op->args.size(), 3);
     os << "tl::clamp(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
-  } else if (op->op.same_as(builtin::tvm_stack_alloca())) {
-    std::string stack_name = name_supply_->FreshName("stack");
-    const std::string &type = op->args[0].as<StringImmNode>()->value;
-    const IntImmNode *num = op->args[1].as<IntImmNode>();
-    ICHECK(num != nullptr);
-    static_assert(alignof(TVMFFIAny) % alignof(DLTensor) == 0, "invariant");
-    size_t unit = sizeof(TVMFFIAny);
-    size_t size = 0;
-    if (type == "shape") {
-      size = (num->value * sizeof(int64_t) + unit - 1) / unit;
-    } else if (type == "arg_value") {
-      size = (num->value * sizeof(TVMFFIAny) + unit - 1) / unit;
-    } else if (type == "arg_tcode") {
-      size = (num->value * sizeof(int) + unit - 1) / unit;
-    } else if (type == "array") {
-      size = (num->value * sizeof(DLTensor) + unit - 1) / unit;
-    } else {
-      LOG(FATAL) << "Unknown stack alloca type " << type;
-    }
-    this->PrintIndent();
-    if (type == "arg_value") {
-      this->stream << "alignas(128) TVMFFIAny " << stack_name << "[" << size
-                   << "];\n";
-    } else {
-      this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
-    }
-    os << stack_name;
-  } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
-    auto function_info = GetFunctionInfo(op, false /* has_resource_handle */);
-    std::string func_name_packed = GetPackedName(op);
-    this->PrintGetFuncFromBackend(function_info.func_name, func_name_packed);
-    this->PrintFuncCall(func_name_packed, function_info.num_args);
-  } else if (op->op.same_as(builtin::tvm_call_cpacked_lowered())) {
-    auto function_info = GetFunctionInfo(op, true /* has_resource_handle */);
-    this->PrintFuncCallC(function_info.func_name, function_info.num_args,
-                         function_info.resource_handle_name);
-  } else if (op->op.same_as(builtin::tvm_throw_last_error())) {
-    this->PrintIndent();
-    this->stream << "return -1;\n";
+  } else if (callee && callee->name == "prim.fma") {
+    // Explicit FMA is fused. Do not install an FLowerIntrinsic entry for it:
+    // LowerIntrin would then also start contracting ordinary a*b+c on CPUs.
+    PrimType type = op->ty.as_or_throw<PrimType>();
+    TVM_FFI_CHECK(type.IsScalar() && type.MatchesCode(kDLFloat) &&
+                      (type.bits() == 32 || type.bits() == 64),
+                  TypeError)
+        << "CPU fma requires scalar float32 or float64, got " << type;
+    PrintCallExtern(type, type.bits() == 32 ? "fmaf" : "fma", op->args, false,
+                    os);
   } else {
-    CodeGenC::VisitExpr_(op, os);
+    tl::CodeGenCHost::Dispatch_(op, os);
   }
 }
 
-void CodeGenTileLangC::VisitStmt_(const AssertStmtNode *op) { // NOLINT(*)
-  if (emit_asserts_) {
-    std::string cond = PrintExpr(op->condition);
-    PrintIndent();
-    stream << "if (!(" << cond << ")) {\n";
-    int assert_if_scope = this->BeginScope();
-    PrintIndent();
-    // Join message_parts into a single string
-    std::string joined_msg;
-    for (const auto &part : op->message_parts) {
-      joined_msg += part->value;
-    }
-    stream << "TVMAPISetLastError(\"" << joined_msg << "\");\n";
-    PrintIndent();
-    stream << "return -1;\n";
-    this->EndScope(assert_if_scope);
-    PrintIndent();
-    stream << "}\n";
-  }
+void CodeGenTileLangC::InitFuncState(const Function &func) {
+  tl::CodeGenCHost::InitFuncState(func);
+  name_supply_->ReserveName("fma");
+  name_supply_->ReserveName("fmaf");
 }
 
-void CodeGenTileLangC::VisitStmt_(const AllocBufferNode *op) {
-  std::string vid = AllocVarID(op->buffer->data.get());
-
-  this->PrintIndent();
-  std::string scope = GetPtrStorageScope(op->buffer->data);
-
-  PrintType(op->buffer->dtype, stream);
-  const auto &shape = op->buffer->shape;
-  size_t constant_size = 1;
-  for (const auto &dim : shape) {
-    const IntImmNode *dim_imm = dim.as<IntImmNode>();
-    ICHECK(dim_imm) << "Can only handle constant size stack allocation for now";
-    constant_size *= dim_imm->value;
-  }
-  ICHECK_GT(constant_size, 0)
-      << "Can only handle constant size stack allocation for now";
-
-  stream << ' ' << vid << '[' << constant_size << "];\n";
-
-  RegisterHandleType(op->buffer->data.get(), op->buffer->dtype);
+void CodeGenTileLangC::PrintVecElemLoad(const std::string &vec,
+                                        const PrimType &type, int lane,
+                                        std::ostream &os) {
+  TVM_FFI_ICHECK(lane >= 0 && lane < type.lanes());
+  os << '(' << vec << ")[" << lane << ']';
 }
 
-void CodeGenTileLangC::VisitStmt_(const ForNode *op) {
+void CodeGenTileLangC::PrintVecElemStore(const std::string &vec,
+                                         const PrimType &type, int lane,
+                                         const std::string &value) {
+  PrintIndent();
+  PrintVecElemLoad(vec, type, lane, stream);
+  stream << " = " << value << ";\n";
+}
+
+void CodeGenTileLangC::PrintVecElemLoadExpr(const PrimType &type, int lane,
+                                            const std::string &value,
+                                            std::ostream &os) {
+  // CPU byte vectors have the same lane-array representation as other types;
+  // the shared C emitter's packed integer expression is not that storage.
+  TVM_FFI_ICHECK(type.lanes() > 1 && lane >= 0 && lane < type.lanes());
+  if (lane == 0) {
+    PrintVecConstructor(type, os);
+    os << '(';
+  } else {
+    os << ", ";
+  }
+  os << value;
+  if (lane + 1 == type.lanes())
+    os << ')';
+}
+
+void CodeGenTileLangC::Dispatch_(const prim::BroadcastObj *op,
+                                 std::ostream &os) {
+  PrintVecConstructor(op->ty.as_or_throw<PrimType>(), os);
+  // The scalar constructor broadcasts one evaluation, including a memory read.
+  os << '(' << PrintExpr(op->value) << ')';
+}
+
+void CodeGenTileLangC::PrintType(const PrimType &type, std::ostream &os) {
+  if (type.MatchesCode(kDLBool) && type.IsFixedLengthVector()) {
+    os << "vec_type<bool, " << type.lanes() << ">";
+    return;
+  }
+  tl::CodeGenCHost::PrintType(type, os);
+}
+
+void CodeGenTileLangC::PrintVecBinaryOp(const std::string &op,
+                                        const PrimType &type, PrimExpr lhs,
+                                        PrimExpr rhs, std::ostream &os) {
+  if (!type.MatchesCode(kDLBool))
+    return tl::CodeGenCHost::PrintVecBinaryOp(op, type, lhs, rhs, os);
+  // Comparisons return booleans while their operands retain signedness and
+  // precision. Materialize each operand once, including an effectful load.
+  std::string left = PrintExprToSSA(lhs), right = PrintExprToSSA(rhs);
+  std::string result = name_supply_->FreshName("predicate");
+  PrintIndent();
+  PrintType(type, stream);
+  stream << ' ' << result << ";\n";
+  for (int lane = 0; lane < type.lanes(); ++lane) {
+    std::ostringstream value;
+    value << '(';
+    if (lhs.ty().IsScalar())
+      value << left;
+    else
+      PrintVecElemLoad(left, lhs.ty(), lane, value);
+    value << ' ' << op << ' ';
+    if (rhs.ty().IsScalar())
+      value << right;
+    else
+      PrintVecElemLoad(right, rhs.ty(), lane, value);
+    value << ')';
+    PrintVecElemStore(result, type, lane, value.str());
+  }
+  os << result;
+}
+
+void CodeGenTileLangC::Dispatch_(const prim::NotObj *op, std::ostream &os) {
+  PrimType type = op->ty.as_or_throw<PrimType>();
+  if (type.IsScalar())
+    return tl::CodeGenCHost::Dispatch_(op, os);
+  std::string operand = PrintExprToSSA(op->a);
+  std::string result = name_supply_->FreshName("predicate");
+  PrintIndent();
+  PrintType(type, stream);
+  stream << ' ' << result << ";\n";
+  for (int lane = 0; lane < type.lanes(); ++lane) {
+    std::ostringstream value;
+    value << "(!";
+    PrintVecElemLoad(operand, type, lane, value);
+    value << ')';
+    PrintVecElemStore(result, type, lane, value.str());
+  }
+  os << result;
+}
+
+void CodeGenTileLangC::Dispatch_(const prim::SelectObj *op, std::ostream &os) {
+  PrimType type = op->ty.as_or_throw<PrimType>();
+  if (type.IsScalar())
+    return tl::CodeGenCHost::Dispatch_(op, os);
+  // Native Select evaluates its condition and both arms. Use scalar ternary
+  // operators only after each whole vector operand has been evaluated once.
+  std::string condition = PrintExprToSSA(op->condition);
+  std::string on_true = PrintExprToSSA(op->true_value);
+  std::string on_false = PrintExprToSSA(op->false_value);
+  std::string result = name_supply_->FreshName("selected");
+  PrintIndent();
+  PrintType(type, stream);
+  stream << ' ' << result << ";\n";
+  for (int lane = 0; lane < type.lanes(); ++lane) {
+    std::ostringstream value;
+    value << '(';
+    if (op->condition.ty().IsScalar())
+      value << condition;
+    else
+      PrintVecElemLoad(condition, op->condition.ty(), lane, value);
+    value << " ? ";
+    PrintVecElemLoad(on_true, type, lane, value);
+    value << " : ";
+    PrintVecElemLoad(on_false, type, lane, value);
+    value << ')';
+    PrintVecElemStore(result, type, lane, value.str());
+  }
+  os << result;
+}
+
+void CodeGenTileLangC::PrintStorageScope(const runtime::MemoryScope &scope,
+                                         std::ostream &os) {
+  // CPU allocations are ordinary arrays. The scope still participates in IR
+  // analysis, but does not add a C address-space or storage qualifier.
+  // alloc_shared defaults to shared.dyn even when its shape is constant.
+  const std::string name = scope.name();
+  TVM_FFI_CHECK(name == "global" || name == "shared" || name == "shared.dyn" ||
+                    name == "local" || name.rfind("local.", 0) == 0,
+                ValueError)
+      << "Unsupported TileLang CPU allocation scope " << name;
+}
+
+void CodeGenTileLangC::Dispatch_(const ForObj *op) {
   if (op->kind == ForKind::kParallel && omp_chain_members_.count(op) == 0) {
-    // Head of a parallel chain: count the perfectly-nested kParallel body
-    // loops for the collapse(n) clause, then print serially via the base
-    // class. Chain members are remembered by node identity so that a
-    // *different* kParallel loop reached through wrapper statements
-    // (IfThenElse / AttrStmt / SeqStmt) inside the chain body still gets
-    // its own pragma instead of being mistaken for a member.
     auto saved_members = omp_chain_members_;
     int depth = 1;
-    for (const ForNode *child = op->body.as<ForNode>();
+    auto single_loop = [](const SeqStmt &body) -> const ForObj * {
+      return body->seq.size() == 1 ? body->seq[0].as<ForObj>() : nullptr;
+    };
+    for (const ForObj *child = single_loop(op->body);
          child && child->kind == ForKind::kParallel;
-         child = child->body.as<ForNode>()) {
+         child = single_loop(child->body)) {
       omp_chain_members_.insert(child);
       ++depth;
     }
-    this->PrintIndent();
+    PrintIndent();
     stream << "#pragma omp parallel for";
-    if (depth > 1) {
+    if (depth > 1)
       stream << " collapse(" << depth << ")";
-    }
-    if (auto num_threads = op->annotations.Get(tl::attr::kCPUNumThreads)) {
-      if (const auto *imm = num_threads->as<IntImmNode>()) {
-        stream << " num_threads(" << imm->value << ")";
+    if (auto num_threads = op->annotations.Get("tl.cpu_num_threads")) {
+      int64_t count;
+      if (const auto *literal = num_threads->as<IntImmObj>()) {
+        count = literal->value.as<int64_t>().value();
+      } else {
+        count = num_threads->cast<int64_t>();
       }
+      TVM_FFI_CHECK_GT(count, 0, ValueError)
+          << "OpenMP num_threads must be positive";
+      stream << " num_threads(" << count << ")";
     }
-    stream << "\n";
-    CodeGenC::VisitStmt_(op);
+    stream << '\n';
+    CodeGenC::Dispatch_(op);
     omp_chain_members_ = std::move(saved_members);
     return;
   }
-  if (op->kind == ForKind::kParallel) {
-    // Continuation of an already-annotated chain: print serially.
-    CodeGenC::VisitStmt_(op);
-    return;
-  }
-  CodeGenC::VisitStmt_(op);
+  CodeGenC::Dispatch_(op);
 }
 
-void CodeGenTileLangC::VisitExpr_(const MinNode *op,
-                                  std::ostream &os) { // NOLINT(*)
-  PrintTernaryCondExpr(op, "<", os);
-}
-
-void CodeGenTileLangC::VisitExpr_(const MaxNode *op,
-                                  std::ostream &os) { // NOLINT(*)
-  PrintTernaryCondExpr(op, ">", os);
-}
-
-void CodeGenTileLangC::VisitExpr_(const FloatImmNode *op,
-                                  std::ostream &os) { // NOLINT(*)
-  // Only intercept inf/nan: the TVM base class prints the IEEE text ("-inf")
-  // then appends the float suffix ('f'), producing "-inff" / "nanf", which
-  // C/C++ compilers reject (no inf/nan literal with a float suffix). Emit the
-  // C99 macros INFINITY / NAN for those two cases.
-  //
-  // Finite values delegate to the base class so its per-bit-width formatting
-  // is preserved. In particular fp16 keeps the legal cast form
-  // `(half)1.5e+00f`. The 'h' suffix copied from Metal (codegen_metal.cc)
-  // is MSL-only and invalid in C/C++ (g++: "no matching literal operator
-  // ... operator""h"), so it must not be replicated here. The base class
-  // default branch also throws InternalError on bad bit-widths, which a
-  // hand-rolled else would silently drop.
+void CodeGenTileLangC::Dispatch_(const FloatImmObj *op, std::ostream &os) {
+  // C/C++ have no `inff` or `nanf` numeric literals. The template header owns
+  // half support; finite formatting continues to use the shared emitter.
   if (std::isinf(op->value)) {
-    std::ostringstream temp;
-    if (op->value < 0) {
-      temp << "-";
-    }
-    temp << "INFINITY";
-    MarkConst(temp.str());
-    os << temp.str();
+    const std::string literal = op->value < 0 ? "-INFINITY" : "INFINITY";
+    MarkConst(literal);
+    os << literal;
   } else if (std::isnan(op->value)) {
     MarkConst("NAN");
     os << "NAN";
   } else {
-    CodeGenC::VisitExpr_(op, os);
+    CodeGenC::Dispatch_(op, os);
   }
 }
 
-template <typename T>
-inline void
-CodeGenTileLangC::PrintTernaryCondExpr(const T *op, const char *compare,
-                                       std::ostream &os) { // NOLINT(*)
-  std::ostringstream temp_a;
-  VisitExpr(op->a, temp_a);
-  std::string a_id = SSAGetID(temp_a.str(), op->a.dtype());
-  std::ostringstream temp_b;
-  VisitExpr(op->b, temp_b);
-  std::string b_id = SSAGetID(temp_b.str(), op->b.dtype());
-
-  os << "((" << a_id << ") " << compare << " (" << b_id << ") "
-     << "? (" << a_id << ") : (" << b_id << "))";
-}
-
-} // namespace codegen
-} // namespace tvm
+} // namespace tvm::codegen

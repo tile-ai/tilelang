@@ -1,294 +1,130 @@
 /*!
  * \file legalize_negative_index.cc
- * \brief Legalize negative indices in buffer load/store expressions.
+ * \brief Retain TileLang negative-index semantics on native tensor accesses.
  */
 
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt_functor.h>
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/ir/prim/vector_expr.h>
+#include <tvm/tirx/expr.h>
 #include <tvm/tirx/transform.h>
 
-#include <unordered_map>
-#include <variant>
-#include <vector>
+#include "../ir/analyzer.h"
 
-#include "arith/ir_mutator_with_analyzer.h"
-#include "arith/ir_visitor_with_analyzer.h"
+namespace tvm::tl {
+namespace {
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace ffi;
-using arith::IRVisitorWithAnalyzer;
-
-enum class IndexSignState { kNonNegative, kNegative, kUnknown };
-
-using BufferAccessVariant =
-    std::variant<const BufferLoadNode *, const BufferStoreNode *>;
-using LoadStore2StateMap =
-    std::unordered_map<BufferAccessVariant, std::vector<IndexSignState>>;
-
-class NegativeIndexAnalyzer : public IRVisitorWithAnalyzer {
+class NegativeIndexRewriter : public tl::StmtExprMutatorWithAnalyzer {
 public:
-  explicit NegativeIndexAnalyzer(LoadStore2StateMap *result)
-      : result_(result) {}
+  explicit NegativeIndexRewriter(const sym::Analyzer &analyzer)
+      : StmtExprMutatorWithAnalyzer(analyzer) {}
+  using StmtExprMutatorWithAnalyzer::Mutate;
+  using StmtExprMutatorWithAnalyzer::Mutate_;
+
+  SeqStmt Rewrite(const tirx::Function &function) {
+    MarkTensorParamShapes(function);
+    return Mutate(function->body).ValueOrUnchanged(function->body);
+  }
+
+  ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
+                                     InplaceMode mode) final {
+    auto load = StmtExprMutatorWithAnalyzer::Mutate_(op, mode)
+                    .ValueOrUnchanged(ffi::GetRef<TensorLoad>(op))
+                    .as_or_throw<TensorLoad>();
+    auto tensor = load->source.as_or_throw<tirx::TensorVar>();
+    return TensorLoad(tensor, RewriteIndices(load->indices, tensor.shape()),
+                      load->loc);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
+                                 InplaceMode mode) final {
+    auto store = StmtExprMutatorWithAnalyzer::Mutate_(op, mode)
+                     .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                     .as_or_throw<TensorStore>();
+    auto tensor = store->dest.as_or_throw<tirx::TensorVar>();
+    return TensorStore(tensor, RewriteIndices(store->indices, tensor.shape()),
+                       store->value, store->loc);
+  }
 
 private:
-  std::vector<IndexSignState> ProcessIdx(const Array<PrimExpr> &indices,
-                                         String buffer_name) {
-    std::vector<IndexSignState> states;
-    states.reserve(indices.size());
+  PrimExpr RewriteScalar(const PrimExpr &index, const PrimExpr &extent) {
+    // Preserve the existing contract: a provably negative scalar is wrapped
+    // once. An unknown scalar is left to the bounds legalizer; it is not a
+    // Python modulo index. Mixed vector lanes are handled separately below.
+    if (GetSyncedAnalyzer()->CanProve(index < 0))
+      return GetSyncedAnalyzer()->Simplify(extent + index);
+    return index;
+  }
 
-    for (size_t i = 0; i < indices.size(); ++i) {
-      PrimExpr simplified = analyzer_.Simplify(indices[i]);
-      IndexSignState state = IndexSignState::kUnknown;
-
-      // Handle scalar indices with the standard analyzer
-      if (simplified.dtype().lanes() == 1) {
-        if (analyzer_.CanProve(simplified >= 0))
-          state = IndexSignState::kNonNegative;
-        else if (analyzer_.CanProve(simplified < 0))
-          state = IndexSignState::kNegative;
-        else
-          DLOG(WARNING)
-              << "LegalizeNegativeIndex: cannot prove non-negative index "
-              << simplified << " for buffer " << buffer_name << " (axis " << i
-              << ", index " + indices[i]->Script() + ").";
-      }
-      // Vector indices: try to reason about non-negativity/negativity
-      // Common patterns are Ramp(base, stride, lanes) and Broadcast(value,
-      // lanes).
-      else if (const auto *ramp = simplified.as<RampNode>()) {
-        // Compute a safe lower/upper bound for the vector lanes
-        // lower_bound = base_min + min(0, stride_min) * (lanes - 1)
-        // upper_bound = base_max + max(0, stride_max) * (lanes - 1)
-        auto base_bound = analyzer_.const_int_bound(ramp->base);
-        auto stride_bound = analyzer_.const_int_bound(ramp->stride);
-        int lanes = *as_const_int(ramp->lanes);
-
-        int64_t base_min = base_bound->min_value;
-        int64_t base_max = base_bound->max_value;
-        int64_t s_min = stride_bound->min_value;
-        int64_t s_max = stride_bound->max_value;
-
-        // Guard against overflow is not strictly necessary here because
-        // bounds may be +/-inf represented by sentinel values.
-        int64_t lower = base_min;
-        if (s_min < 0)
-          lower += s_min * (lanes - 1);
-        int64_t upper = base_max;
-        if (s_max > 0)
-          upper += s_max * (lanes - 1);
-
-        if (lower >= 0)
-          state = IndexSignState::kNonNegative;
-        else if (upper < 0)
-          state = IndexSignState::kNegative;
-        else
-          DLOG(WARNING)
-              << "LegalizeNegativeIndex: cannot prove non-negative index "
-              << simplified << " for buffer " << buffer_name << " (axis " << i
-              << ", index " + indices[i]->Script() + ").";
-      } else if (const auto *broadcast = simplified.as<BroadcastNode>()) {
-        auto v = analyzer_.Simplify(broadcast->value);
-        if (analyzer_.CanProve(v >= 0))
-          state = IndexSignState::kNonNegative;
-        else if (analyzer_.CanProve(v < 0))
-          state = IndexSignState::kNegative;
-        else {
-          // Try const bound if proof unavailable
-          auto vb = analyzer_.const_int_bound(v);
-          if (vb->min_value >= 0)
-            state = IndexSignState::kNonNegative;
-          else if (vb->max_value < 0)
-            state = IndexSignState::kNegative;
-          else
-            DLOG(WARNING)
-                << "LegalizeNegativeIndex: cannot prove non-negative index "
-                << simplified << " for buffer " << buffer_name << " (axis " << i
-                << ", index " + indices[i]->Script() + ").";
+  ffi::Array<PrimExpr> RewriteIndices(const ffi::Array<PrimExpr> &indices,
+                                      const ffi::Array<PrimExpr> &shape) {
+    TVM_FFI_CHECK_EQ(indices.size(), shape.size(), ValueError);
+    ffi::Array<PrimExpr> result;
+    for (size_t axis = 0; axis < indices.size(); ++axis) {
+      const PrimExpr &index = indices[axis];
+      const PrimExpr &extent = shape[axis];
+      PrimExpr simplified = GetSyncedAnalyzer()->Simplify(index);
+      if (simplified.ty().IsScalar()) {
+        result.push_back(RewriteScalar(index, extent));
+      } else if (const auto *ramp = simplified.as<prim::RampObj>()) {
+        const auto *lanes = ramp->lanes.as<IntImmObj>();
+        TVM_FFI_CHECK(lanes != nullptr, ValueError)
+            << "Negative-index legalization requires a fixed lane count";
+        // A wrapped negative lane can require the extent's wider type even
+        // when the ramp itself uses int32.  All Shuffle inputs, including
+        // unchanged non-negative lanes and both Select branches, must share
+        // the promoted type.  Do not truncate a large tensor extent back to
+        // the ramp's original index type.
+        PrimType lane_type = (extent + ramp->base).ty().WithLanes(1);
+        ffi::Array<PrimExpr> values;
+        ffi::Array<PrimExpr> order;
+        for (int lane = 0; lane < lanes->value; ++lane) {
+          PrimExpr scalar =
+              GetSyncedAnalyzer()->Simplify(ramp->base + ramp->stride * lane);
+          PrimExpr value = RewriteScalar(scalar, extent);
+          if (value.same_as(scalar) &&
+              !GetSyncedAnalyzer()->CanProve(scalar >= 0)) {
+            PrimExpr wrapped = prim::cast(extent + scalar, lane_type);
+            PrimExpr original = prim::cast(scalar, lane_type);
+            value = prim::Select(scalar < 0, wrapped, original);
+          }
+          values.push_back(prim::cast(value, lane_type));
+          order.push_back(IntImm(PrimType::Int(32), lane));
         }
+        result.push_back(GetSyncedAnalyzer()->Simplify(
+            prim::Shuffle(values, order, index->loc)));
+      } else if (const auto *broadcast = simplified.as<prim::BroadcastObj>()) {
+        result.push_back(
+            prim::Broadcast(RewriteScalar(broadcast->value, extent),
+                            broadcast->lanes, index->loc));
+      } else {
+        result.push_back(index);
       }
-      states.push_back(state);
     }
-
-    return std::move(states);
+    return result;
   }
-
-  bool NeedRecord(const std::vector<IndexSignState> &states) {
-    return std::any_of(states.begin(), states.end(),
-                       [](const IndexSignState &state) {
-                         return state == IndexSignState::kUnknown ||
-                                state == IndexSignState::kNegative;
-                       });
-  }
-
-  void VisitExpr_(const BufferLoadNode *op) final {
-    std::vector<IndexSignState> states =
-        ProcessIdx(op->indices, op->buffer->name);
-
-    if (NeedRecord(states))
-      (*result_)[op] = std::move(states);
-
-    IRVisitorWithAnalyzer::VisitExpr_(op);
-  }
-
-  void VisitStmt_(const BufferStoreNode *op) final {
-    std::vector<IndexSignState> states =
-        ProcessIdx(op->indices, op->buffer->name);
-
-    if (NeedRecord(states))
-      (*result_)[op] = std::move(states);
-
-    IRVisitorWithAnalyzer::VisitStmt_(op);
-  }
-
-private:
-  LoadStore2StateMap *result_;
 };
 
-class NegativeIndexRewriter : public arith::IRMutatorWithAnalyzer {
-public:
-  static PrimFunc Apply(PrimFunc func, const LoadStore2StateMap &states) {
-    arith::Analyzer analyzer;
-    NegativeIndexRewriter rewriter(&analyzer, states);
-    PrimFuncNode *func_node = func.CopyOnWrite();
-    func_node->body = rewriter.VisitStmt(func_node->body);
-    return func;
-  }
-
-private:
-  NegativeIndexRewriter(arith::Analyzer *analyzer,
-                        const LoadStore2StateMap &states)
-      : arith::IRMutatorWithAnalyzer(analyzer), states_(states) {}
-
-  PrimExpr TryRewriteMixedRamp(const PrimExpr &index,
-                               const PrimExpr &buffer_extent) {
-    PrimExpr value = analyzer_->Simplify(index);
-    const auto *ramp = value.as<RampNode>();
-    if (ramp == nullptr)
-      return PrimExpr();
-
-    int lanes = *as_const_int(ramp->lanes);
-    ffi::Array<PrimExpr> values;
-    ffi::Array<PrimExpr> shuffle_indices;
-    DataType dtype =
-        analyzer_->Simplify(buffer_extent + ramp->base).dtype().element_of();
-    for (int lane_id = 0; lane_id < lanes; ++lane_id) {
-      PrimExpr lane = analyzer_->Simplify(
-          ramp->base + ramp->stride * IntImm(ramp->stride.dtype(), lane_id));
-      if (analyzer_->CanProve(lane < 0))
-        lane = analyzer_->Simplify(buffer_extent + lane);
-      else if (!analyzer_->CanProve(lane >= 0)) {
-        PrimExpr original = lane;
-        PrimExpr wrapped = analyzer_->Simplify(buffer_extent + lane);
-        wrapped = wrapped.dtype() == dtype ? wrapped : Cast(dtype, wrapped);
-        original = original.dtype() == dtype ? original : Cast(dtype, original);
-        lane = analyzer_->Simplify(Select(lane < 0, wrapped, original));
-      }
-      values.push_back(lane.dtype() == dtype ? lane : Cast(dtype, lane));
-      shuffle_indices.push_back(IntImm(DataType::Int(32), lane_id));
-    }
-    return analyzer_->Simplify(Shuffle(values, shuffle_indices, value->span));
-  }
-
-  BufferRegion UpdateRegion(BufferRegion region) {
-    for (const Range &range : region->region) {
-      if (analyzer_->CanProve(analyzer_->Simplify(range->min) < 0))
-        return BufferRegion::FullRegion(region->buffer);
-    }
-    return region;
-  }
-
-  ffi::Array<PrimExpr> UpdateIdx(const ffi::Array<PrimExpr> &indices,
-                                 const ffi::Array<PrimExpr> &buffer_shape,
-                                 const std::vector<IndexSignState> &state_vec) {
-    ICHECK_EQ(state_vec.size(), indices.size())
-        << "State vector size mismatch for buffer load/store indices ("
-        << indices << ")";
-    Array<PrimExpr> new_indices = indices;
-    for (size_t i = 0; i < indices.size(); ++i) {
-      if (state_vec[i] == IndexSignState::kNegative) {
-        new_indices.Set(i, analyzer_->Simplify(buffer_shape[i] + indices[i]));
-      } else if (state_vec[i] == IndexSignState::kUnknown) {
-        PrimExpr rewritten = TryRewriteMixedRamp(indices[i], buffer_shape[i]);
-        if (rewritten.defined())
-          new_indices.Set(i, rewritten);
-      }
-    }
-    return new_indices;
-  }
-
-  PrimExpr VisitExpr_(const BufferLoadNode *op) final {
-    BufferLoad load =
-        Downcast<BufferLoad>(arith::IRMutatorWithAnalyzer::VisitExpr_(op));
-
-    auto it = states_.find(op);
-    if (it == states_.end())
-      return load;
-
-    auto indices = UpdateIdx(load->indices, load->buffer->shape, it->second);
-    return BufferLoad(load->buffer, indices, load->predicate);
-  }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    BufferStore store =
-        Downcast<BufferStore>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-
-    auto it = states_.find(op);
-    if (it == states_.end())
-      return store;
-
-    auto indices = UpdateIdx(store->indices, store->buffer->shape, it->second);
-    return BufferStore(store->buffer, store->value, indices, store->predicate);
-  }
-
-  Stmt VisitStmt_(const SBlockNode *op) final {
-    SBlock block =
-        Downcast<SBlock>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
-    SBlockNode *n = block.CopyOnWrite();
-    n->reads.MutateByApply(
-        [this](BufferRegion region) { return UpdateRegion(region); });
-    n->writes.MutateByApply(
-        [this](BufferRegion region) { return UpdateRegion(region); });
-    return block;
-  }
-
-private:
-  const LoadStore2StateMap &states_;
-};
-
-PrimFunc LegalizeNegativeIndex(PrimFunc func) {
-  if (!func->body.defined()) {
-    return func;
-  }
-
-  LoadStore2StateMap states;
-  NegativeIndexAnalyzer analyzer(&states);
-  analyzer(func->body);
-  if (states.empty()) {
-    return func;
-  }
-
-  return NegativeIndexRewriter::Apply(std::move(func), states);
-}
+} // namespace
 
 tvm::transform::Pass LegalizeNegativeIndexPass() {
-  using namespace tirx::transform;
-  auto pass_func = [](PrimFunc f, const IRModule &, PassContext) {
-    return LegalizeNegativeIndex(std::move(f));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    auto analyzer = CreateTileLangAnalyzer();
+    auto rewriter = ffi::make_object<NegativeIndexRewriter>(analyzer);
+    function.CopyOnWrite()->body = rewriter->Rewrite(function);
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.LegalizeNegativeIndex", {});
+  return tirx::transform::CreateFunctionPass(pass, 0,
+                                             "tl.LegalizeNegativeIndex");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LegalizeNegativeIndex",
-                        LegalizeNegativeIndexPass);
+  ffi::reflection::GlobalDef().def("tl.transform.LegalizeNegativeIndex",
+                                   LegalizeNegativeIndexPass);
 }
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

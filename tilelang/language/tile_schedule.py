@@ -2,7 +2,7 @@
 
 ``@meta_class`` auto-inlines every method that emits a buffer store, so state
 methods can freely read scalar state via ``self._x[0]`` and write via
-``self._x[0] = ...`` (the latter lowers to a ``BufferStore``). Store-free
+``self._x[0] = ...`` (the latter lowers to a native ``TensorStore``). Store-free
 methods (``valid``, ``coord``) and the read-only state properties (``m_idx``,
 ``n_idx``, ``current_iter``) stay plain Python and just return ``PrimExpr``
 values, so they work in conditions and can be reused statelessly. State lives
@@ -20,7 +20,6 @@ uniform runtime arithmetic. The store-free ``coord`` may use a compile-time
 from __future__ import annotations
 
 import tilelang.language as T
-from tilelang.carver.arch import driver
 from tilelang.language.meta import meta_class
 
 
@@ -216,7 +215,7 @@ class PersistentTileScheduler(BaseTileScheduler):
     properties: ``sched.m_idx`` / ``sched.current_iter`` etc. return the scalar
     ``PrimExpr`` directly (no ``[0]``). Only scheduler methods mutate state, via
     ``self._x[0] = ...`` on the underlying buffers; the ``[0]`` is required
-    there for the write to lower to a ``BufferStore``."""
+    there for the write to lower to a native ``TensorStore``."""
 
     def __init__(
         self,
@@ -232,6 +231,8 @@ class PersistentTileScheduler(BaseTileScheduler):
         super().__init__(stateful=stateful, name=name)
         self.cluster_size = cluster_size
         if num_workers is None:
+            from tilelang.carver.arch import driver
+
             num_workers = driver.get_num_sms() // cluster_size
         self.num_workers = num_workers
         self.swizzle_size = swizzle_size

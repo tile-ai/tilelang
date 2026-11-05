@@ -48,7 +48,7 @@ Choose exactly one primary category:
   declare compatible target backends; do not add a target pipeline unless
   target semantics change.
 
-Do not conflate a backend name, Python package name, TVM target kind, and
+Do not conflate a backend name, Python package name, TIRx target kind, and
 execution backend name.
 
 ### 2. Define the Capability Contract
@@ -63,7 +63,7 @@ Before implementation, record:
 - eager versus deferred device compilation;
 - hardware-free and hardware-required validation boundaries.
 
-If TVM does not recognize the target kind, treat TVM target registration as a
+If TIRx does not recognize the target kind, treat TIRx target registration as a
 prerequisite. Do not emulate an unknown kind with scattered TileLang strings.
 
 ### 3. Inspect Before Copying
@@ -108,7 +108,9 @@ Account for these current transitional details:
 - Native `target.build.*` functions currently combine parts of CodeGen and
   Build. Preserve source-only codegen when deferred Build needs it.
 - Backend Python packages are wheel-included automatically, but native sources
-  require explicit backend-local CMake integration.
+  require explicit backend-local CMake integration into `tilelang_objs` and
+  the single `tvm_tirx_compiler`. Native changes require a matched provider and
+  frontend rebuild; the frontend wheel does not own the compiler.
 
 Do not deepen these transitional couplings. In particular, do not add
 target-kind branches to execution dispatch or execution-name checks to passes.

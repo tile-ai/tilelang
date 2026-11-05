@@ -4,8 +4,8 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
-from tvm.tirx.stmt_functor import post_order_visit
+import tvm_tirx as tvm
+import tvm_ffi
 
 
 def _make_gemm_kernel(M, N, K, block_M, block_N, block_K, in_dtype, out_dtype, accum_dtype):
@@ -168,6 +168,38 @@ def _make_pipelined_gemm_kernel(
 
 
 @tilelang.testing.requires_cuda
+def test_sm75_complete_lowered_modules_keep_source_graph_and_output_schema():
+    from tilelang.utils.pass_diff import _get_script
+
+    # Reuse the existing kernel unchanged. Cross-compilation does not claim
+    # execution on SM75 silicon; both complete modules are the JSON input.
+    kernel = tilelang.compile(
+        _make_pipelined_gemm_kernel(128, 128, 128, 64, 64, 32, 2, True),
+        target={"kind": "cuda", "arch": "sm_75"},
+        out_idx=[2],
+    )
+    for module in (kernel.artifact.host_mod, kernel.artifact.device_mod):
+        payload = module.attrs["tl.output_module_schema"]
+        assert isinstance(payload, bytes) and len(payload) == 172
+        assert isinstance(module.attrs["tl.source_host_module"], tvm.ir.IRModule)
+        # Diagnostic capture keeps the printer limitation visible and falls
+        # back to the complete native graph. It is not TVMScript source.
+        snapshot = _get_script(module)
+        marker = "# Snapshot format: native IR JSON (not TVMScript)\n"
+        assert snapshot.startswith("# TVMScript capture failed (")
+        assert marker in snapshot
+        for restored in (
+            tvm.ir.load_json(tvm.ir.save_json(module)),
+            tvm.ir.load_json(snapshot.split(marker, 1)[1]),
+        ):
+            assert restored.attrs["tl.output_module_schema"] == payload
+            assert isinstance(restored.attrs["tl.source_host_module"], tvm.ir.IRModule)
+            tvm.ir.assert_structural_equal(module, restored)
+            tvm.ir.assert_structural_equal(restored, module)
+            assert tvm_ffi.structural_hash(module) == tvm_ffi.structural_hash(restored)
+
+
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(7, 5)
 @pytest.mark.parametrize("transpose_B", [True, False])
 def test_sm75_f16_gemm_pipelined_multi_stage_matches_torch(transpose_B):
@@ -208,34 +240,46 @@ def test_sm75_ldmatrix_shared_reads_stay_in_bounds(in_dtype, accum_dtype, block_
     )
     (func,) = kernel.artifact.device_mod.functions.values()
 
-    analyzer = tvm.arith.Analyzer()
+    analyzer = tvm.sym.Analyzer()
+    constraints = tvm.sym.ConstraintContext()
     buffer_sizes = {}
     ldmatrix_calls = []
 
     def visit(node):
-        if isinstance(node, tvm.tirx.AttrStmt) and str(node.attr_key) == "thread_extent":
-            analyzer.update(node.node.var, tvm.arith.ConstIntBound(0, int(node.value) - 1))
-        elif isinstance(node, tvm.tirx.For):
-            analyzer.update(
-                node.loop_var,
-                tvm.arith.ConstIntBound(int(node.min), int(node.min) + int(node.extent) - 1),
-            )
-        elif isinstance(node, (tvm.tirx.AllocBuffer, tvm.tirx.DeclBuffer)):
+        if isinstance(node, tvm.ir.RegionStmt) and node.op.name == "tirx.launch_thread":
+            (variable,) = node.body_params
+            constraints.append(tvm.sym.RangeConstraint(variable, tvm.ir.Range(0, int(node.args[1]))))
+        elif isinstance(node, tvm.ir.For):
+            assert int(node.step) > 0
+            constraints.append(tvm.sym.RangeConstraint(node.var, tvm.ir.Range(int(node.begin), int(node.end))))
+        elif isinstance(node, tvm.ir.Bind) and isinstance(node.var.ty, tvm.tirx.TensorType):
+            assert isinstance(node.value, tvm.ir.Call)
+            assert node.value.op.name in ("tirx.alloc_tensor", "tirx.decl_tensor")
             size = 1
-            for extent in node.buffer.shape:
+            for extent in node.var.ty.shape:
                 size *= int(extent)
-            buffer_sizes[node.buffer.data] = size
-        elif isinstance(node, tvm.tirx.Call) and str(getattr(node.op, "name", "")) == "tl.ptx_ldmatrix":
+            buffer_sizes[node.var] = size
+        elif isinstance(node, tvm.ir.Call) and str(getattr(node.op, "name", "")) == "tl.ptx_ldmatrix":
             ldmatrix_calls.append(node)
 
-    post_order_visit(func.body, visit)
+    tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, visit), order="pre")
+    analyzer.sync_constraint_context(constraints)
     assert ldmatrix_calls, "expected ldmatrix lowering for sm_75"
 
     for call in ldmatrix_calls:
         src = call.args[2]
-        assert str(src.op.name) == "tirx.tvm_access_ptr"
-        data, offset, extent = src.args[1], src.args[2], int(src.args[3])
-        assert data in buffer_sizes, f"ldmatrix source {data.name} has no visible allocation"
+        assert isinstance(src, tvm.ir.Call) and src.op.name == "tirx.address_of"
+        (load,) = src.args
+        assert isinstance(load, tvm.ir.TensorLoad) and len(load.indices) == 1
+        data, offset = load.source, load.indices[0]
+        assert data in buffer_sizes, f"ldmatrix source {data.name} has no visible allocation or view"
+        assert str(data.ty.scope).startswith("shared")
+        # Final native IR has lowered access_ptr to a typed address. Each
+        # ldmatrix row reads 16 bytes; check that interval inside the referenced
+        # tile view, not merely inside the larger pooled arena.
+        element_bits = data.ty.dtype.dtype.bits * data.ty.dtype.dtype.lanes
+        assert 128 % element_bits == 0
+        extent = 128 // element_bits
         bound = analyzer.const_int_bound(offset)
         assert bound.min_value >= 0
         assert bound.max_value + extent <= buffer_sizes[data], (

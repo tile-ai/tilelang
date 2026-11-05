@@ -1,69 +1,56 @@
 /*!
  * \file mark_cpu_atomics.cc
- * \brief Mark PrimFuncs that call atomic ops, for the CPU parallel-grid pass.
- *
- * Both atomic forms are lowered to plain read-modify-write long before the
- * tail of the CPU pipeline (region forms `tl.tileop.atomic*` inside
- * LowerTileOp, scalar `tl.atomic_*_elem_op` intrinsics by LowerCPUAtomics),
- * so the parallel-grid pass cannot see them anymore. This pass runs before
- * LowerTileOp and tags the function with the ``tl.cpu_had_atomics``
- * attribute when any atomic op call is present; MaterializeCPUParallelGrid
- * refuses to parallelize such kernels — a parallel grid would turn the
- * serial RMW into a data race.
+ * \brief Keep CPU grids serial when atomics will become serial RMW operations.
  */
 
 #include "cpu/op/builtin.h"
-#include "support/check.h"
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/op.h>
+
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-namespace tvm {
-namespace tl {
-
-using namespace tirx;
-using namespace tvm::ffi;
-
-namespace transform {
-
-using namespace tirx::transform;
-
+namespace tvm::tl {
 namespace {
-
-bool HasAtomicCall(const Stmt &body) {
+class AtomicCallFinder : public tirx::StmtExprVisitor {
+public:
+  using StmtExprVisitor::Visit;
+  using StmtExprVisitor::Visit_;
   bool found = false;
-  PostOrderVisit(body, [&](const ObjectRef &node) {
-    if (const auto *call = node.as<CallNode>()) {
-      if (const auto *op = call->op.as<OpNode>();
-          op && (op->name.find("tl.atomic") == 0 ||
-                 op->name.find("tl.tileop.atomic") == 0)) {
-        found = true;
-      }
-    }
-  });
-  return found;
-}
 
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallObj *call) final {
+    if (auto op = call->op.as<Op>()) {
+      const auto &name = op.value()->name;
+      if (name.find("tl.atomic") == 0 || name.find("tl.tileop.atomic") == 0) {
+        found = true;
+        return ffi::VisitInterrupt();
+      }
+      if (name == "tl.annotation")
+        return std::nullopt;
+    }
+    return StmtExprVisitor::Visit_(call);
+  }
+};
 } // namespace
 
 tvm::transform::Pass MarkCPUAtomics() {
-  auto pass_func = [](PrimFunc func, const IRModule &mod,
-                      const tvm::transform::PassContext &ctx) -> PrimFunc {
-    if (HasAtomicCall(func->body)) {
-      return WithAttr(std::move(func), attr::kCPUHadAtomics, Bool(true));
+  auto pass = [](tirx::Function function, IRModule,
+                 tvm::transform::PassContext) {
+    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
+      return function;
+    auto finder = ffi::make_object<AtomicCallFinder>();
+    finder->Visit(function->body);
+    if (finder->found) {
+      auto attrs = function->attrs->dict;
+      attrs.Set(attr::kCPUHadAtomics, true);
+      function.CopyOnWrite()->attrs = DictAttrs(attrs);
     }
-    return func;
+    return function;
   };
-  return CreatePrimFuncPass(pass_func, 0, "tl.MarkCPUAtomics", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.MarkCPUAtomics");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.cpu.transform.MarkCPUAtomics", MarkCPUAtomics);
+  ffi::reflection::GlobalDef().def("tl.cpu.transform.MarkCPUAtomics",
+                                   MarkCPUAtomics);
 }
-
-} // namespace transform
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

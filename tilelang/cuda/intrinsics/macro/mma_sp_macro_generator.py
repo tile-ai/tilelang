@@ -3,10 +3,12 @@ from __future__ import annotations
 import tilelang.language as T
 from typing import Literal
 from collections.abc import Callable
-from tvm import DataType, tirx
-from tvm.tirx import PrimExpr, IndexMap, Buffer, Var, BufferRegion, BufferLoad
-from tvm.ir import Range
-from tvm.runtime import convert
+from tvm_ffi import dtype as DataType
+from tilelang.language import _native as tirx
+from tilelang.language._native import PrimExpr, Buffer, Var, BufferRegion, BufferLoad
+from tvm_tirx.tirx import IndexMap
+from tvm_tirx.ir import Range
+from tvm_ffi import convert
 from ..layout.utils import (
     mma_store_index_map,
     get_ldmatrix_offset,
@@ -134,9 +136,9 @@ class SparseTensorCoreIntrinEmitter:
         assert self.local_size_out > 0, f"local_size_out must be greater than 0, got {self.local_size_out}"
 
     def _initialize_abbrev(self, a_dtype, b_dtype, accum_dtype):
-        self.a_dtype_abbrv = self.dtype_abbrv[a_dtype]
-        self.b_dtype_abbrv = self.dtype_abbrv[b_dtype]
-        self.accum_dtype_abbrv = self.dtype_abbrv[accum_dtype]
+        self.a_dtype_abbrv = self.dtype_abbrv[str(a_dtype)]
+        self.b_dtype_abbrv = self.dtype_abbrv[str(b_dtype)]
+        self.accum_dtype_abbrv = self.dtype_abbrv[str(accum_dtype)]
 
     def _initialize_mma_sp_prefix(self, k_dim: int = 16):
         if k_dim == 16:
@@ -252,10 +254,10 @@ class SparseTensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         A_region = self._legalize_to_buffer_region(A_shared_buf)
-        A_buf = A_region.buffer
-        A_base0 = A_region.region[-2].min
-        A_base1 = A_region.region[-1].min
-        A_other = [r.min for r in A_region.region[:-2]]
+        A_buf = A_region.source
+        A_base0 = A_region.region[-2].begin
+        A_base1 = A_region.region[-1].begin
+        A_other = [r.begin for r in A_region.region[:-2]]
         A_stride_last = A_buf.shape[-1]
 
         @T.macro
@@ -344,10 +346,10 @@ class SparseTensorCoreIntrinEmitter:
         thread_binding = self.get_thread_binding()
 
         E_region = self._legalize_to_buffer_region(E_shared_buf)
-        E_buf = E_region.buffer
-        E_base0 = E_region.region[-2].min
-        E_base1 = E_region.region[-1].min
-        E_other = [r.min for r in E_region.region[:-2]]
+        E_buf = E_region.source
+        E_base0 = E_region.region[-2].begin
+        E_base1 = E_region.region[-1].begin
+        E_other = [r.begin for r in E_region.region[:-2]]
 
         @T.macro
         def _warp_ldmatrix_e(
@@ -399,10 +401,10 @@ class SparseTensorCoreIntrinEmitter:
                 raise ValueError(f"Unsupported dtype: {b_dtype}")
 
         B_region = self._legalize_to_buffer_region(B_shared_buf)
-        B_buf = B_region.buffer
-        B_base0 = B_region.region[-2].min
-        B_base1 = B_region.region[-1].min
-        B_other = [r.min for r in B_region.region[:-2]]
+        B_buf = B_region.source
+        B_base0 = B_region.region[-2].begin
+        B_base1 = B_region.region[-1].begin
+        B_other = [r.begin for r in B_region.region[:-2]]
         B_stride_last = B_buf.shape[-1]
 
         @T.macro
@@ -493,7 +495,7 @@ class SparseTensorCoreIntrinEmitter:
             mins = [idx for idx in obj.indices]
             ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.buffer, ranges)
+            return BufferRegion(obj.source, ranges)
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
     def mma_sp(self, A_local_buf: Buffer, E_local_buf: Buffer, B_local_buf: Buffer, C_local_buf: Buffer, k_inner: PrimExpr = 0):

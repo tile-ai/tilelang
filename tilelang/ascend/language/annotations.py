@@ -1,8 +1,9 @@
 """Ascend auto-schedule annotations: multi-buffer version control and memory
 capacity overrides consumed by the Z3 scheduler."""
 
-from tvm.tirx import IntImm
-from tvm.tirx.script.builder.ir import sblock_attr
+from tilelang.language._native import IntImm
+from tilelang.language._native import sblock_attr
+from tilelang.language._native import tensor_storage_source
 
 _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b")
 
@@ -65,6 +66,8 @@ def annotate_buffer_versions(buffer_versions_map: dict):
     """
     versions = {}
     modes = {}
+    storage_versions = {}
+    storage_modes = {}
     for buffer, specification in buffer_versions_map.items():
         if isinstance(specification, tuple):
             if len(specification) != 2:
@@ -81,20 +84,26 @@ def annotate_buffer_versions(buffer_versions_map: dict):
             has_num_versions = True
             has_mode = False
 
-        data = buffer.data
+        storage = tensor_storage_source(buffer)
         if has_num_versions:
             if not isinstance(num_versions, int) or num_versions < 1:
                 raise ValueError(f"num_versions must be a positive integer, got {num_versions} for buffer {buffer}")
-            if data in versions and versions[data] != num_versions:
-                raise ValueError(f"aliases of one buffer storage must use the same version count, got {versions[data]} and {num_versions}")
-            versions[data] = num_versions
+            if storage in storage_versions and storage_versions[storage] != num_versions:
+                raise ValueError(
+                    f"aliases of one buffer storage must use the same version count, got {storage_versions[storage]} and {num_versions}"
+                )
+            storage_versions[storage] = num_versions
+            versions[buffer] = num_versions
 
         if has_mode:
             if mode not in _VALID_BUFFER_VERSION_MODES:
                 raise ValueError(f"buffer version mode must be one of {_VALID_BUFFER_VERSION_MODES}, got {mode!r} for buffer {buffer}")
-            if data in modes and modes[data] != mode:
-                raise ValueError(f"aliases of one buffer storage must use the same version mode, got {modes[data]!r} and {mode!r}")
-            modes[data] = mode
+            if storage in storage_modes and storage_modes[storage] != mode:
+                raise ValueError(
+                    f"aliases of one buffer storage must use the same version mode, got {storage_modes[storage]!r} and {mode!r}"
+                )
+            storage_modes[storage] = mode
+            modes[buffer] = mode
 
     annotations = {}
     if versions:
@@ -149,7 +158,7 @@ def annotate_manual_multi_buffer(*items):
     for item in items:
         if isinstance(item, dict):
             for buffer, num_versions in item.items():
-                _buffer_versions_map[buffer.data] = _as_count(num_versions, buffer)
+                _buffer_versions_map[buffer] = _as_count(num_versions, buffer)
             continue
         buffer = item
         shape0 = buffer.shape[0]
@@ -158,7 +167,7 @@ def annotate_manual_multi_buffer(*items):
                 f"annotate_manual_multi_buffer needs a constant leading (version) dimension "
                 f"to infer N for buffer {buffer}; pass {{buffer: N}} to specify it explicitly"
             )
-        _buffer_versions_map[buffer.data] = _as_count(shape0, buffer)
+        _buffer_versions_map[buffer] = _as_count(shape0, buffer)
     return sblock_attr({"tl.manual_multi_buffer": _buffer_versions_map})
 
 

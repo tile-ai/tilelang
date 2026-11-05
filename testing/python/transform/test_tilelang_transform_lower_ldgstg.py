@@ -1,6 +1,10 @@
 """Tests for LowerLDGSTG pass that converts Ramp-based global memory
 load/store to ldg/stg intrinsics.
 
+Vector-width positives explicitly promise 64-byte-aligned, separate parameters.
+Public Tensor defaults remain byte-aligned; scalar negative controls below keep
+that contract.
+
 Pass configurations:
 - tl.enable_lower_ldgstg: Enable non-predicated ldg/stg lowering (default: OFF)
 - tl.enable_lower_ldgstg_predicated: Enable predicated ldg/stg lowering (default: OFF)
@@ -14,11 +18,16 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.transform import PassConfigKey
-from tvm import tirx
+from tvm_tirx import ir
+import tvm_ffi
 
 
 def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
-    """Apply the LowerLDGSTG pass and related lowering passes."""
+    """Apply passes under the same explicit parameter alias contract as JIT."""
+    mod = mod.clone()
+    for global_var, func in mod.functions.items():
+        if "tirx.noalias" not in func.attrs:
+            mod[global_var] = func.with_attr("tirx.noalias", True)
     mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
@@ -33,9 +42,23 @@ def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
 
 
 requires_ldgstg = pytest.mark.skipif(
-    tvm.get_global_func("tl.cuda.transform.LowerLDGSTG", allow_missing=True) is None,
+    tvm_ffi.get_global_func("tl.cuda.transform.LowerLDGSTG", allow_missing=True) is None,
     reason="LowerLDGSTG is not compiled into this build",
 )
+
+
+def _assert_parameter_storage(func, tensor, parameter_index):
+    parameter = func.params[parameter_index]
+    if tensor.same_as(parameter):
+        return
+    # Native flattening retains the public parameter and declares a physical
+    # tensor over precisely that parameter's data pointer.
+    definitions = [bind for bind in collect_nodes(func, ir.Bind) if bind.var.same_as(tensor)]
+    assert len(definitions) == 1
+    value = definitions[0].value
+    assert isinstance(value, ir.Call) and value.op.same_as(ir.Op.get("tirx.decl_tensor"))
+    assert len(value.args) == 1
+    tvm.ir.assert_structural_equal(value.args[0], parameter.data)
 
 
 def _assert_global_access(func, direction, bits, buffer_index, predicate=None):
@@ -46,12 +69,13 @@ def _assert_global_access(func, direction, bits, buffer_index, predicate=None):
     is_load = direction == "ldg"
     assert len(call.args) == (1 if is_load else 2) + (predicate is not None)
     packed_dtype = "uint32" if bits == 32 else f"uint32x{bits // 32}"
-    assert (call.dtype if is_load else call.args[1].dtype) == packed_dtype
+    assert (call.ty if is_load else call.args[1].ty) == ir.PrimType(packed_dtype)
     ptr = call.args[0]
-    assert isinstance(ptr, tirx.Call) and ptr.op.same_as(tvm.ir.Op.get("tirx.tvm_access_ptr"))
-    buffer = func.buffer_map[func.params[buffer_index]]
-    assert ptr.args[1].same_as(buffer.data)
-    assert ptr.args[4].value == (1 if is_load else 2)
+    assert isinstance(ptr, ir.Call) and ptr.op.same_as(ir.Op.get("tl.access_ptr"))
+    assert len(ptr.args) == 3
+    assert isinstance(ptr.args[0], ir.TensorLoad)
+    _assert_parameter_storage(func, ptr.args[0].source, buffer_index)
+    assert ptr.args[2].value == (1 if is_load else 2)
     if predicate is not None:
         tvm.ir.assert_structural_equal(call.args[-1], predicate)
     return call
@@ -72,7 +96,7 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
     iterator = T.serial if lanes == 1 else T.vectorized
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), outer: T.int32, inner: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), outer: T.int32, inner: T.int32):
         for i in T.thread_binding(128 // lanes, "threadIdx.x"):
             for j in iterator(lanes):
                 if enclosing_store:
@@ -87,7 +111,7 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
     stores = collect_calls(lowered, function="main", op=f"tl.stg{32 * lanes}")
     assert len(loads) == 1
     outer, inner = func.params[2:]
-    expected = tirx.And(outer > 0, inner > 0) if enclosing_store else inner > 0
+    expected = ir.prim.And(outer > 0, inner > 0) if enclosing_store else inner > 0
     tvm.ir.assert_structural_equal(loads[0].args[-1], expected)
     if enclosing_store:
         assert len(stores) == 1
@@ -99,7 +123,7 @@ def test_nested_predicated_load_does_not_leak_store_guard():
     """A subsequent load uses its own condition, not a preceding store guard."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), outer: T.int32, inner: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), outer: T.int32, inner: T.int32):
         for i in T.thread_binding(128, "threadIdx.x"):
             with T.If(outer > 0), T.Then():
                 B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
@@ -110,7 +134,7 @@ def test_nested_predicated_load_does_not_leak_store_guard():
     predicates = [call.args[-1] for call in collect_calls(lowered, op="tl.ldg32", function="main")]
     assert len(predicates) == 2
     outer, inner = func.params[2:]
-    tvm.ir.assert_structural_equal(predicates[0], tirx.And(outer > 0, inner > 0))
+    tvm.ir.assert_structural_equal(predicates[0], ir.prim.And(outer > 0, inner > 0))
     tvm.ir.assert_structural_equal(predicates[1], inner > 0)
 
 
@@ -119,7 +143,7 @@ def test_lower_ldg32_default_off():
     """Test that non-predicated ldg/stg lowering is OFF by default."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64)):
         for i in T.thread_binding(128, "threadIdx.x"):
             B[i] = A[i]
 
@@ -136,7 +160,7 @@ def test_lower_ldg32_enabled():
     """Test that ldg32/stg32 works when enabled."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64)):
         for i in T.thread_binding(128, "threadIdx.x"):
             B[i] = A[i]
 
@@ -153,7 +177,7 @@ def test_lower_ldg64_enabled():
     """Test that ldg64/stg64 works when enabled."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64)):
         for i in T.thread_binding(64, "threadIdx.x"):
             for j in T.vectorized(2):
                 B[i * 2 + j] = A[i * 2 + j]
@@ -171,7 +195,7 @@ def test_lower_ldg128_enabled():
     """Test that ldg128/stg128 works when enabled."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64)):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 B[i * 4 + j] = A[i * 4 + j]
@@ -189,7 +213,7 @@ def test_lower_ldg256_enabled():
     """Test that ldg256/stg256 works when enabled."""
 
     @T.prim_func
-    def func(A: T.Buffer((256,), "float32"), B: T.Buffer((256,), "float32")):
+    def func(A: T.Buffer((256,), "float32", align=64), B: T.Buffer((256,), "float32", align=64)):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(8):
                 B[i * 8 + j] = A[i * 8 + j]
@@ -207,7 +231,7 @@ def test_lower_ldg32_predicated():
     """Test predicated ldg32 for single element load."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         for i in T.thread_binding(128, "threadIdx.x"):
             # Predicate doesn't depend on loop var, so it can be lowered
             B[i] = T.if_then_else(pred > 0, A[i], T.float32(0))
@@ -224,7 +248,7 @@ def test_lower_stg32_predicated():
     """Test predicated stg32 for single element store."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         for i in T.thread_binding(128, "threadIdx.x"):
             # Predicate doesn't depend on loop var, so it can be lowered
             with T.If(pred > 0), T.Then():
@@ -242,7 +266,7 @@ def test_lower_ldg128_predicated():
     """Test predicated ldg128 for vectorized load."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 # Predicate doesn't depend on vectorized loop var
@@ -260,7 +284,7 @@ def test_lower_stg128_predicated():
     """Test predicated stg128 for vectorized store."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 # Predicate doesn't depend on vectorized loop var
@@ -284,7 +308,7 @@ def test_predicated_store_with_load():
     """
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 with T.If(pred > 0), T.Then():
@@ -306,7 +330,7 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     """Do not hoist shared-memory loads out of a predicated global store."""
 
     @T.prim_func
-    def func(B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         S = T.alloc_buffer((128,), dtype=T.float32, scope="shared")
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
@@ -319,20 +343,19 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     print(mod)
 
     func = mod["main"]
-    guards = collect_nodes(func, tirx.IfThenElse)
+    guards = collect_nodes(func, ir.If)
     assert len(guards) == 1
     guard = guards[0]
     tvm.ir.assert_structural_equal(guard.condition, func.params[-1] > 0)
-    shared_loads = [load for load in collect_nodes(func, tirx.BufferLoad) if load.buffer.scope() == "shared"]
+    shared_loads = [load for load in collect_nodes(func, ir.TensorLoad) if str(load.source.ty.scope) == "shared"]
     assert shared_loads, "Expected a shared-memory load"
-    guarded_loads = collect_nodes(guard.then_case, tirx.BufferLoad)
+    guarded_loads = collect_nodes(guard.then_case, ir.TensorLoad)
     assert all(any(load.same_as(guarded) for guarded in guarded_loads) for load in shared_loads)
-    stores = collect_nodes(func, tirx.BufferStore)
-    guarded_stores = collect_nodes(guard.then_case, tirx.BufferStore)
+    stores = collect_nodes(func, ir.TensorStore)
+    guarded_stores = collect_nodes(guard.then_case, ir.TensorStore)
     assert len(stores) == len(guarded_stores) == 1
     assert stores[0].same_as(guarded_stores[0])
-    # FlattenBuffer can create a new Buffer handle for the same storage.
-    assert stores[0].buffer.data.same_as(func.buffer_map[func.params[0]].data)
+    _assert_parameter_storage(func, stores[0].dest, 0)
     _assert_no_global_intrinsics(mod["main"])
 
 
@@ -341,7 +364,7 @@ def test_predicated_disabled():
     """Test that predicated lowering can be disabled."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), N: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), N: T.int32):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 idx = i * 4 + j
@@ -350,8 +373,8 @@ def test_predicated_disabled():
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=False)
     _assert_no_global_intrinsics(mod["main"])
-    assert collect_nodes(mod["main"], tirx.BufferLoad)
-    assert collect_nodes(mod["main"], tirx.BufferStore)
+    assert collect_nodes(mod["main"], ir.TensorLoad)
+    assert collect_nodes(mod["main"], ir.TensorStore)
 
 
 @requires_ldgstg
@@ -359,7 +382,7 @@ def test_predicated_option_controls_eligible_load():
     """Disabling the option must change an otherwise eligible lowering."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32"), pred: T.int32):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64), pred: T.int32):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 B[i * 4 + j] = T.if_then_else(pred > 0, A[i * 4 + j], T.float32(0))
@@ -371,8 +394,8 @@ def test_predicated_option_controls_eligible_load():
     mod = _apply_passes(mod, enable_predicated=False)
     # Both lowering options are disabled; the original memory operations remain.
     _assert_no_global_intrinsics(mod["main"])
-    assert collect_nodes(mod["main"], tirx.BufferLoad)
-    assert collect_nodes(mod["main"], tirx.BufferStore)
+    assert collect_nodes(mod["main"], ir.TensorLoad)
+    assert collect_nodes(mod["main"], ir.TensorStore)
 
 
 @requires_ldgstg
@@ -380,7 +403,7 @@ def test_non_cuda_target_skip():
     """Test that the pass is skipped for non-CUDA targets."""
 
     @T.prim_func
-    def func(A: T.Buffer((128,), "float32"), B: T.Buffer((128,), "float32")):
+    def func(A: T.Buffer((128,), "float32", align=64), B: T.Buffer((128,), "float32", align=64)):
         for i in T.thread_binding(32, "threadIdx.x"):
             for j in T.vectorized(4):
                 B[i * 4 + j] = A[i * 4 + j]
@@ -426,7 +449,11 @@ def test_e2e_load_global_store_global():
     src = copy_kernel.get_kernel_source(N=128)
     print("=== Generated kernel source ===")
     print(src)
-    assert "load_global_128" in src or "store_global_128" in src, "Expected load_global_128/store_global_128 in generated source"
+    # The public Tensor annotation carries no 16-byte pointer promise. The
+    # generic helper retains a vector-width fast path and safe unaligned copy.
+    assert "tl::load_vector<float4, 16, false>" in src
+    assert "tl::store_vector<float4, 16, false>" in src
+    assert "load_global_128(" not in src and "store_global_128(" not in src
 
 
 @tilelang.testing.requires_cuda
@@ -463,9 +490,39 @@ def test_e2e_load_global_store_global_predicated():
     src = copy_kernel.get_kernel_source(N=128)
     print("=== Generated kernel source ===")
     print(src)
-    assert "load_global_128_conditional" in src or "store_global_128_conditional" in src, (
-        "Expected load_global_128_conditional/store_global_128_conditional in generated source"
-    )
+    # Preserve the original eager kernel's byte-aligned public Tensor contract.
+    # Its masked read must remain lazy, and the emitter owns safe vector access.
+    assert "tl::load_vector<float4, 16, false>" in src
+    assert "tl::store_vector<float4, 16, false>" in src
+    assert "load_global_128_conditional(" not in src
+
+
+@pytest.mark.parametrize(
+    "alignment,noalias,expected_bits",
+    [(1, True, None), (4, True, None), (16, True, 128), (64, False, 32), (64, True, 128)],
+)
+def test_vector_lowering_requires_alignment_and_noalias(alignment, noalias, expected_bits):
+    """Standalone passes cannot invent pointer alignment or independence."""
+
+    @T.prim_func
+    def func(A: T.Buffer((128,), "float32", align=alignment), B: T.Buffer((128,), "float32", align=alignment)):
+        for i in T.thread_binding(32, "threadIdx.x"):
+            for j in T.vectorized(4):
+                B[i * 4 + j] = A[i * 4 + j]
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main").with_attr("tirx.noalias", noalias))
+    lowered = _apply_passes(mod, enable_non_predicated=True)
+    if expected_bits is None:
+        # Generic vector memory retains its safe unaligned emission; opt-in
+        # PTX transactions must not infer alignment from the index Ramp.
+        _assert_no_global_intrinsics(lowered["main"])
+        return
+    _assert_global_access(lowered["main"], "ldg", expected_bits, 0)
+    _assert_global_access(lowered["main"], "stg", expected_bits, 1)
+    for bits in (64, 128, 256):
+        if bits != expected_bits:
+            assert_call_count(lowered["main"], op=f"tl.ldg{bits}", count=0)
+            assert_call_count(lowered["main"], op=f"tl.stg{bits}", count=0)
 
 
 if __name__ == "__main__":

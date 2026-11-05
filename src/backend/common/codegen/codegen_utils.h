@@ -17,6 +17,10 @@ namespace codegen {
  * \return true if the first character is '(' and the last character is ')'
  *         and they form a matching pair
  */
+/*! \brief Escape C string contents using fixed-width octal for arbitrary bytes.
+ */
+std::string EscapeCString(const std::string &value);
+
 bool CheckOutermostParenthesesMatch(const std::string &s);
 
 /*!

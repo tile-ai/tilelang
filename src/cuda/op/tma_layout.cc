@@ -4,6 +4,7 @@
  */
 
 #include "cuda/op/tma_layout.h"
+#include "layout/expr_utils.h"
 
 #include <sstream>
 #include <utility>
@@ -13,12 +14,13 @@ namespace tl {
 namespace cuda {
 
 using namespace tirx;
+using namespace prim;
 
 TMASharedLayoutAnalysis AnalyzeTMASharedLayout(const Layout &layout,
-                                               DataType dtype) {
+                                               PrimType dtype) {
   ffi::Optional<cute::ComposedLayout> composed =
       cute::ComposedLayoutFromTileLang(layout);
-  if (!composed.defined()) {
+  if (!composed.has_value()) {
     return {std::nullopt,
             "layout is not a recoverable XOR swizzle over an affine layout"};
   }
@@ -40,12 +42,12 @@ TMASharedLayoutAnalysis AnalyzeTMASharedLayout(const Layout &layout,
 }
 
 void RequireTMASmemAlignment(const LowerArgs &lower_args,
-                             const tirx::Buffer &shared_tensor,
+                             const tirx::TensorVar &shared_tensor,
                              const SwizzleMode &swizzle_mode) {
   if (!lower_args.require_smem_alignment) {
     return;
   }
-  lower_args.require_smem_alignment(shared_tensor->data,
+  lower_args.require_smem_alignment(shared_tensor,
                                     swizzle_mode.SmemAlignment());
 }
 
@@ -57,15 +59,15 @@ Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
   // pipeline version therefore owns one contiguous run of complete TMA boxes.
   ffi::Array<PrimExpr> fixed, outer, inner;
   for (size_t i = 0; i < shape.size(); i++) {
-    Var v = InputPlaceholder(i);
-    if (!region.empty() && is_one(region[i]->extent)) {
+    PrimVar v = InputPlaceholder(i);
+    if (!region.empty() && IsOne(region[i]->extent)) {
       fixed.push_back(v);
       continue;
     }
-    const int64_t *s = as_const_int(shape[i]);
-    if (s != nullptr && *s > kTmaMaxBoxDim && *s % kTmaMaxBoxDim == 0) {
-      outer.push_back(FloorDiv(v, Integer(kTmaMaxBoxDim)));
-      inner.push_back(FloorMod(v, Integer(kTmaMaxBoxDim)));
+    const auto s = TryConstInt(shape[i]);
+    if (s.has_value() && *s > kTmaMaxBoxDim && *s % kTmaMaxBoxDim == 0) {
+      outer.push_back(FloorDiv(v, IntImm(PrimType::Int(32), kTmaMaxBoxDim)));
+      inner.push_back(FloorMod(v, IntImm(PrimType::Int(32), kTmaMaxBoxDim)));
     } else {
       inner.push_back(v);
     }

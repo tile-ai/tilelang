@@ -1,7 +1,8 @@
 """Policy for tensorcore schedule"""
 
 from __future__ import annotations
-import tvm
+import tvm_tirx as tvm
+from tvm_ffi import dtype as DataType
 import numpy as np
 import logging
 from ..hint import Hint, Stride, TileDict, IntrinInfo
@@ -22,7 +23,7 @@ class TensorCorePolicy(DefaultPolicy):
     use_async_copy: bool = False
     block_reduction_depth: int | None = None
 
-    def _init_with_prim_func(self, func: tvm.tirx.PrimFunc, name: str | None = None):
+    def _init_with_prim_func(self, func: tvm.tirx.Function, name: str | None = None):
         super()._init_with_prim_func(func, name)
         self._legalize_info()
         return self
@@ -350,7 +351,7 @@ class TensorCorePolicy(DefaultPolicy):
             overall_gmem_size_in_bytes: int = 0
             for node in self.ordered_nodes:
                 for buffer in node.input_buffers:
-                    overall_gmem_size_in_bytes += int(np.prod(buffer.shape)) * tvm.DataType(buffer.dtype).bits // 8
+                    overall_gmem_size_in_bytes += int(np.prod(buffer.shape)) * DataType(buffer.dtype).bits // 8
             return overall_gmem_size_in_bytes < self.arch.l2_cache_size_bytes
 
         conditions.append(_check_memory_size())

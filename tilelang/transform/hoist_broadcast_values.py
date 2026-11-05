@@ -1,99 +1,75 @@
-from tvm import tirx
-from tvm.tirx import (
-    BufferStore,
-    Broadcast,
-    Var,
-    PrimFunc,
-    PyStmtExprMutator,
-    SeqStmt,
-)
-from tvm.tirx.stmt import Bind
-from tvm.tirx.transform import prim_func_pass
+"""Bind scalar broadcast constants next to their native statement consumers."""
 
-from tilelang.ir import get_stmt_span, stamp_stmt_spans
+import tvm_ffi
+from tvm_tirx import ir, tirx
+from tvm_tirx.ir import prim
 
 
-@tirx.functor.mutator
-class HoistBroadcastValuesMutator(PyStmtExprMutator):
-    def __init__(self):
-        super().__init__()
-        self.pending_defs = []
-        self.hoist_enabled = False
+class HoistBroadcastValuesMutator:
+    def visit_stmt(self, statement):
+        return tvm_ffi.structural_mutate(
+            statement,
+            [
+                (ir.SeqStmt, self.visit_seq),
+                ((ir.Bind, ir.TensorStore), self.visit_consumer),
+            ],
+        )
 
-    def visit_broadcast_(self, op):
-        if self.hoist_enabled and isinstance(op.value, (tirx.IntImm, tirx.FloatImm)):
-            val = self.visit_expr(op.value)
-            new_var = Var("broadcast_var", dtype=val.dtype)
-            self.pending_defs.append((new_var, val))
-            return Broadcast(new_var, op.lanes)
-        return Broadcast(self.visit_expr(op.value), self.visit_expr(op.lanes))
+    def visit_seq(self, node, mutator):
+        # Constructing the normalized SeqStmt splices the new scalar Bind
+        # before its consumer in the original lexical definition scope.
+        return ir.SeqStmt([mutator.mutate(stmt) for stmt in node.seq], loc=node.loc)
 
-    def visit_buffer_store_(self, op: BufferStore):
-        saved_hoist_enabled = self.hoist_enabled
-        saved_pending_defs = self.pending_defs
+    def visit_consumer(self, node, _mutator):
+        pending = []
 
-        self.hoist_enabled = True
-        self.pending_defs = []
+        def broadcast(value, mutator):
+            # Native low-precision literals are Cast(FloatImm), because the
+            # immediate carries the source precision.  Keep the complete
+            # cast chain in the Bind: evaluating it as a Python number would
+            # lose rounding and dtype semantics.  A cast of a Var, load, or
+            # Call is not a literal and must keep its original read point.
+            literal = value.value
+            while isinstance(literal, prim.Cast):
+                literal = literal.value
+            if isinstance(literal, (ir.IntImm, ir.FloatImm)):
+                scalar = value.value
+                variable = ir.Var("broadcast_var", scalar.ty, loc=value.loc)
+                pending.append(ir.Bind(variable, scalar, loc=node.loc))
+                return prim.Broadcast(variable, value.lanes, loc=value.loc)
+            return mutator.default_mutate(value)
 
-        new_indices = [self.visit_expr(idx) for idx in op.indices]
-        new_stmt = BufferStore(op.buffer, self.visit_expr(op.value), new_indices)
+        def map_value(value):
+            return tvm_ffi.structural_mutate(
+                value,
+                [
+                    (prim.Broadcast, broadcast),
+                    # A function/lambda has its own definitions and captures.
+                    # A statement-level hoist cannot introduce a free variable
+                    # into it; its body is processed in its own compilation.
+                    ((ir.LambdaExpr, tirx.Function), lambda value, _mutator: value),
+                ],
+            )
 
-        if self.pending_defs:
-            stmts = [Bind(var, val) for var, val in self.pending_defs]
-            stmts.append(new_stmt)
-            new_stmt = SeqStmt(stmts)
-
-        self.hoist_enabled = saved_hoist_enabled
-        self.pending_defs = saved_pending_defs
-
-        stamp_stmt_spans(new_stmt, get_stmt_span(op))
-        return new_stmt
-
-    def visit_bind_(self, op: Bind):
-        saved_hoist_enabled = self.hoist_enabled
-        saved_pending_defs = self.pending_defs
-
-        self.hoist_enabled = True
-        self.pending_defs = []
-
-        new_value = self.visit_expr(op.value)
-
-        new_stmt = Bind(op.var, new_value)
-
-        if self.pending_defs:
-            stmts = [Bind(var, val) for var, val in self.pending_defs]
-            stmts.append(new_stmt)
-            new_stmt = SeqStmt(stmts)
-
-        self.hoist_enabled = saved_hoist_enabled
-        self.pending_defs = saved_pending_defs
-
-        stamp_stmt_spans(new_stmt, get_stmt_span(op))
-        return new_stmt
+        if isinstance(node, ir.Bind):
+            result = ir.Bind(node.var, map_value(node.value), loc=node.loc)
+        else:
+            indices = [map_value(index) for index in node.indices]
+            result = ir.TensorStore(node.dest, indices, map_value(node.value), loc=node.loc)
+        return ir.SeqStmt([*pending, result], loc=node.loc) if pending else result
 
 
 def HoistBroadcastValues():
-    """
-    TVM Pass: HoistBroadcastValues.
+    """Hoist literal Broadcast values while preserving lanes, types and scope.
 
-    This pass scans the TIR for Broadcast operations involving immediate constants (IntImm, FloatImm).
-    It extracts these constants into variables defined via Bind immediately preceding
-    the statement where the broadcast occurs.
-
-    Example Transformation:
-    -----------------------
-    Before:
-        A[i] = B[i] + T.Broadcast(3.14, 4) + T.Broadcast(3.14, 4)
-
-    After:
-        bv_3_14 = 3.14
-        bv_3_14_1 = 3.14
-        A[i] = B[i] + T.Broadcast(bv_3_14, 4) + T.Broadcast(bv_3_14_1, 4)
+    Each extracted constant gets a native scalar Bind immediately before the
+    original Bind or TensorStore. Existing Bind identities are retained so
+    subsequent statement uses remain dominated by their definitions.
     """
 
-    def pass_fn(func: PrimFunc, mod, ctx):
-        mutator = HoistBroadcastValuesMutator()
-        new_body = mutator.visit_stmt(func.body)
-        return func.with_body(new_body, span=func.span)
+    def pass_fn(func, _mod, _ctx):
+        if func.attrs.get("declaration", False):
+            return func
+        return func.with_body(HoistBroadcastValuesMutator().visit_stmt(func.body), loc=func.loc)
 
-    return prim_func_pass(pass_fn, opt_level=0)
+    return tirx.transform.function_pass(pass_fn, opt_level=0, name="tl.HoistBroadcastValues")

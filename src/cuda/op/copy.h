@@ -23,6 +23,7 @@ namespace tl {
 namespace cuda {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 enum class CopyInst : uint8_t {
@@ -53,18 +54,18 @@ struct TMADesc {
   Array<PrimExpr> global_stride;
   Array<PrimExpr> smem_box;
   Array<PrimExpr> smem_stride;
-  PrimExpr global_addr;
+  Expr global_addr{ffi::UnsafeInit{}};
   int swizzle;
   int interleave;
   int oob_fill;
   int l2_promotion;
 
-  Array<PrimExpr> EncodeCallArgs() const {
-    Array<PrimExpr> args;
+  Array<Expr> EncodeCallArgs() const {
+    Array<Expr> args;
     args.reserve(rank * 4 + 7);
 
-    args.push_back(data_type);
-    args.push_back(static_cast<int>(rank));
+    args.push_back(IntImm(PrimType::Int(32), data_type));
+    args.push_back(IntImm(PrimType::Int(32), static_cast<int>(rank)));
     args.push_back(global_addr);
     for (auto e : global_shape)
       args.push_back(e);
@@ -74,10 +75,10 @@ struct TMADesc {
       args.push_back(e);
     for (auto e : smem_stride)
       args.push_back(e);
-    args.push_back(interleave);
-    args.push_back(swizzle);
-    args.push_back(l2_promotion);
-    args.push_back(oob_fill);
+    args.push_back(IntImm(PrimType::Int(32), interleave));
+    args.push_back(IntImm(PrimType::Int(32), swizzle));
+    args.push_back(IntImm(PrimType::Int(32), l2_promotion));
+    args.push_back(IntImm(PrimType::Int(32), oob_fill));
 
     return args;
   }
@@ -91,7 +92,8 @@ struct TMADesc {
 // instruction `rest_idx` (std::nullopt when rest_size == 1).
 struct TMABulkCopyPlan {
   TMADesc desc;
-  Buffer shared_tensor;          // physical (remapped) shared buffer
+  TensorVar shared_tensor{
+      ffi::UnsafeInit{}};        // physical (remapped) shared buffer
   int64_t box_size;              // elements per TMA instruction
   int64_t rest_size;             // TMA instructions per copy
   cute::IntTuple shared_offset;  // physical offset of the tile base
@@ -119,15 +121,15 @@ struct TMABulkCopyAnalysis {
 // `box_dim_caps` overrides the per-global-dim box limit of kTmaMaxBoxDim
 // (im2col allows 1024 pixels per column).
 TMABulkCopyAnalysis
-AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
-                   Buffer shared_tensor, const Array<Range> &global_range,
+AnalyzeTMABulkCopy(const LowerArgs &lower_args, const TensorVar &global_tensor,
+                   TensorVar shared_tensor, const Array<Range> &global_range,
                    const Array<Range> &shared_range,
                    const std::vector<int64_t> &box_dim_caps = {});
 
 struct CopyAnalysisContext {
-  Target target;
+  Target target{ffi::UnsafeInit{}};
   const LayoutMap *layout_map = nullptr;
-  arith::Analyzer *analyzer = nullptr;
+  sym::AnalyzerObj *analyzer = nullptr;
   bool emit_diagnostics = false;
 };
 

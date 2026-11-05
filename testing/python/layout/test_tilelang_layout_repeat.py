@@ -1,11 +1,7 @@
 import pytest
 
-import tilelang
-import tilelang.testing
 from tilelang.layout import Layout
 from tilelang import _ffi_api
-
-tilelang.testing.set_random_seed()
 
 
 def test_layout_repeat_dim0_linear():
@@ -72,4 +68,4 @@ def test_layout_repeat_invalid_args_cpp_raises_value_error():
 
 
 if __name__ == "__main__":
-    tilelang.testing.main()
+    pytest.main([__file__])

@@ -13,8 +13,9 @@ dispatch.
 """
 
 from __future__ import annotations
+from tilelang.language import _native
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 from tilelang.language.common import evaluate
 from tilelang.language.reduce_op import (
@@ -57,13 +58,13 @@ def reduce(
     # regions: no fragment exists inside SimdVF to round-trip through.
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
-    out_buffer = to_buffer_region(out).buffer
+    out_buffer = to_buffer_region(out).source
     if reduce_type in ("bitand", "bitor", "bitxor"):
-        buf_dtype = _get_buffer(buffer).dtype
+        buf_dtype = _native.dtype_of(_get_buffer(buffer))
         if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
+        if not (_native.dtype_of(out_buffer).startswith(("int", "uint")) or _native.dtype_of(out_buffer) == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {_native.dtype_of(out_buffer)}")
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out)
     expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
@@ -81,7 +82,7 @@ def reduce(
     return evaluate(
         tirx.call_intrin(
             "handle",
-            tirx.op.Op.get(_REDUCE_OP_KEY),
+            tirx.Op.get(_REDUCE_OP_KEY),
             to_tile_region(buffer, access_type="r"),
             to_tile_region(out, access_type="w"),
             reduce_type,

@@ -1,172 +1,156 @@
+"""Static tile-operation work estimates over native Function and TensorRegion IR."""
+
 from __future__ import annotations
-import numpy as np
+
 from dataclasses import dataclass
-from tilelang import tvm
-from tvm.tirx.stmt_functor import ir_transform
 import logging
+import math
 
-# Configuration for different hardware architectures.
-# Each entry contains: (cores per SM, default clock (GHz), FLOPs per cycle, max SM count)
+import tvm_ffi
+from tvm_tirx import ir, tirx
+
+from tilelang._analyzer import create_analyzer
+from tilelang.analysis._visitor import tensor_scope
+from tilelang.language._native import dtype_of
+
+
+# (cores per SM, default clock in GHz, FLOPs per cycle, maximum SM count).
 ARCH_CONFIGS = {"80": (128, 1.41, 2, 108), "86": (128, 1.70, 2, 84), "89": (128, 2.52, 2, 128)}
-
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class AnalysisResult:
-    """
-    A data class to store the results of the analysis.
-    Attributes:
-        total_flops: Total floating-point operations.
-        total_global_bytes: Total bytes transferred to/from global memory.
-        estimated_time: Estimated execution time (seconds).
-        tflops: Achieved TFLOPS (trillions of FLOPs per second).
-        bandwidth_GBps: Achieved memory bandwidth in GB/s.
-    """
+    """Static arithmetic/transfer counts and the existing roofline estimate."""
 
     total_flops: int
     total_global_bytes: int
     estimated_time: float
-    expected_tflops: float
+    expected_tflops: float | None
     expected_bandwidth_GBps: float
 
 
 class Analyzer:
-    """
-    A class to analyze the performance of a TVM IR module.
-    It calculates metrics such as FLOPs, memory bandwidth, and estimated execution time.
+    """Estimate dense GEMM work and copy traffic without changing native IR.
+
+    The counts describe tile operators and their enclosing static loop/grid
+    multiplicities. They do not measure runtime branch frequencies or achieved
+    bandwidth. Calls after lowering have no tile-op cost model in this helper.
     """
 
     def __init__(self, fn, device):
-        """
-        Initialize the Analyzer.
-        Args:
-            fn: A TVM IRModule or PrimFunc to analyze.
-            device: The target device information.
-        """
-        if isinstance(fn, tvm.tirx.function.PrimFunc):
-            self.fn = tvm.IRModule({"main": fn})
-        else:
-            self.fn = fn
+        self.fn = ir.IRModule.from_expr(fn) if isinstance(fn, tirx.Function) else fn
+        if not isinstance(self.fn, ir.IRModule):
+            raise TypeError("Analyzer expects a native Function or IRModule")
         self.device = device
-        self.total_flops = 0  # Total floating-point operations
-        self.total_global_bytes = 0  # Total global memory bytes
-        self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1}  # Block dimensions
-        self.loop_stack = []  # Stack to track nested loops
-        self.global_buffers = set()  # Set of global memory buffers
+        self.total_flops = 0
+        self.total_global_bytes = 0
+        self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1, "blockIdx.z": 1}
+        self.loop_stack = []
+        self.global_buffers = set()
+        self.symbolic = create_analyzer()
+
+    def _static_int(self, value, description):
+        if isinstance(value, int):
+            return value
+        simplified = self.symbolic.simplify(value)
+        if not isinstance(simplified, ir.IntImm):
+            raise ValueError(f"Static performance analysis needs a concrete {description}, got {simplified}")
+        return int(simplified)
+
+    def _trip_count(self, begin, end, step):
+        stride = self._static_int(step, "loop step")
+        if stride == 0:
+            raise ValueError("Static performance analysis cannot use a zero loop step")
+        difference = self._static_int(end - begin, "loop extent")
+        # Native For always tests var < end, independently of the step sign.
+        # An initially false condition performs no work. A negative step from
+        # an initially true condition has no finite mathematical trip count.
+        if difference <= 0:
+            return 0
+        if stride < 0:
+            raise ValueError("Static performance analysis requires a finite increasing loop")
+        return (difference + stride - 1) // stride
+
+    def _multiplicity(self):
+        return math.prod(self.loop_stack) * math.prod(self.block_counts.values())
 
     def _analyze_copy(self, call):
-        """
-        Analyze memory copy operations (e.g., tl.copy).
-        Args:
-            call: A TVM Call node representing the copy operation.
-        """
-        src_buffer = call.args[0].args[0].buffer
-        dst_buffer = call.args[1].args[0].buffer
-
-        # Determine if the source or destination is a global buffer
-        if src_buffer in self.global_buffers:
-            buffer_region = call.args[0]
-        elif dst_buffer in self.global_buffers:
-            buffer_region = call.args[1]
+        if len(call.args) < 2 or not all(isinstance(value, ir.TensorRegion) for value in call.args[:2]):
+            raise TypeError("Native copy analysis requires source and destination TensorRegion operands")
+        source, destination = call.args[:2]
+        # Retain the existing transfer convention: when both ends are global,
+        # count the source edge once. Shared/global copies select their actual
+        # global edge, whose element type may differ from the shared tensor.
+        if tensor_scope(source.source) == "global":
+            region = source
+        elif tensor_scope(destination.source) == "global":
+            region = destination
         else:
             return
-
-        # Calculate the number of elements being copied
-        elements = 1
-        for r in range(2, len(buffer_region.args)):
-            elements *= buffer_region.args[r]
-        dtype_size = np.dtype(buffer_region.args[0].buffer.dtype).itemsize  # Size of the data type
-        bytes_transferred = elements * dtype_size  # Total bytes transferred
-
-        # Account for loop and block dimensions
-        loop_product = 1
-        for extent in self.loop_stack:
-            loop_product *= extent.value if hasattr(extent, "value") else extent
-        total_blocks = self.block_counts["blockIdx.x"] * self.block_counts["blockIdx.y"]
-        total_bytes = bytes_transferred * loop_product * total_blocks
-        self.total_global_bytes += total_bytes
+        elements = math.prod(self._static_int(axis.extent, "copy extent") for axis in region.region)
+        dtype = dtype_of(region.source)
+        byte_count = (elements * dtype.bits * dtype.lanes + 7) // 8
+        self.total_global_bytes += byte_count * self._multiplicity()
 
     def _analyze_gemm(self, call):
-        """
-        Analyze matrix multiplication (GEMM) operations (e.g., tl.gemm).
-        Args:
-            call: A TVM Call node representing the GEMM operation.
-        """
-        M = call.args[5].value
-        N = call.args[6].value
-        K = call.args[7].value
-        flops_per_call = 2 * M * N * K  # FLOPs for one GEMM operation
+        # The shared dense GEMM contract keeps M/N/K in slots 5/6/7. Tensor
+        # operands are native regions; the final annotation Tuple is excluded.
+        dimensions = [self._static_int(value, "GEMM tile dimension") for value in call.args[5:8]]
+        if len(dimensions) != 3:
+            raise ValueError("Native dense GEMM call is missing its M/N/K operands")
+        self.total_flops += 2 * math.prod(dimensions) * self._multiplicity()
 
-        # Account for loop and block dimensions
-        loop_product = 1
-        for extent in self.loop_stack:
-            loop_product *= extent.value if hasattr(extent, "value") else extent
-        total_blocks = self.block_counts["blockIdx.x"] * self.block_counts["blockIdx.y"]
-        self.total_flops += flops_per_call * loop_product * total_blocks
+    def _visit_for(self, node, visitor):
+        self.loop_stack.append(self._trip_count(node.begin, node.end, node.step))
+        try:
+            visitor.visit(node.body)
+        finally:
+            self.loop_stack.pop()
+
+    def _visit_region(self, node, visitor):
+        previous = self.block_counts
+        self.block_counts = previous.copy()
+        try:
+            if node.op.name == "tl.launch_kernel":
+                begins, ends, steps = [value.fields for value in node.args[:3]]
+                tags = node.attrs.get("grid_tags", [f"blockIdx.{axis}" for axis in "xyz"[: len(ends)]])
+                for tag, begin, end, step in zip(tags, begins, ends, steps):
+                    self.block_counts[str(tag)] = self._trip_count(begin, end, step)
+            elif node.op.name == "tirx.launch_thread":
+                tag = node.args[0].value
+                if tag.startswith("blockIdx."):
+                    self.block_counts[tag] = self._static_int(node.args[1], "grid extent")
+            visitor.visit(node.body)
+        finally:
+            self.block_counts = previous
+
+    def _visit_call(self, node, visitor):
+        if isinstance(node.op, ir.Op) and node.op.name in {"tl.copy", "tl.tileop.copy"}:
+            self._analyze_copy(node)
+        elif isinstance(node.op, ir.Op) and node.op.name in {"tl.gemm", "tl.tileop.gemm"}:
+            self._analyze_gemm(node)
+        else:
+            visitor.default_visit(node)
 
     def ir_pass(self):
-        """
-        Traverse and transform the IR module to extract performance-related information.
-        Returns:
-            self: The Analyzer instance.
-        """
-
-        def _ftransform(f, mod, ctx):
-            # Initialize the set of global buffers
-            self.global_buffers = set(f.buffer_map.values())
-            self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1}
+        """Recompute totals from each function with fresh loop and grid state."""
+        self.total_flops = 0
+        self.total_global_bytes = 0
+        for function in self.fn.functions.values():
+            if not isinstance(function, tirx.Function) or function.attrs.get("declaration", False):
+                continue
+            self.global_buffers = {
+                parameter
+                for parameter in function.params
+                if isinstance(parameter.ty, tirx.TensorType) and tensor_scope(parameter) == "global"
+            }
+            self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1, "blockIdx.z": 1}
             self.loop_stack.clear()
-
-            def _pre_visit(stmt):
-                """
-                Pre-visit callback for IR nodes.
-                Args:
-                    stmt: The current IR node being visited.
-                """
-                if isinstance(stmt, tvm.tirx.AttrStmt):
-                    # Handle thread extent attributes
-                    if stmt.attr_key == "thread_extent":
-                        iter_var = stmt.node
-                        thread_tag = iter_var.thread_tag
-                        if thread_tag in self.block_counts:
-                            extent = stmt.value.value if hasattr(stmt.value, "value") else stmt.value
-                            self.block_counts[thread_tag] = extent
-                elif isinstance(stmt, tvm.tirx.For):
-                    thread_binding = stmt.thread_binding
-                    if thread_binding is not None:
-                        thread_tag = thread_binding.thread_tag
-                        if thread_tag in self.block_counts:
-                            extent = stmt.extent.value if hasattr(stmt.extent, "value") else stmt.extent
-                            self.block_counts[thread_tag] = extent
-                    else:
-                        self.loop_stack.append(stmt.extent)
-                elif isinstance(stmt, tvm.tirx.Evaluate):
-                    # Handle Evaluate nodes containing calls
-                    value = stmt.value
-                    if isinstance(value, tvm.tirx.Call):
-                        if value.op.name in ("tl.copy", "tl.tileop.copy"):
-                            self._analyze_copy(value)
-                        elif value.op.name in ("tl.gemm", "tl.tileop.gemm"):
-                            self._analyze_gemm(value)
-                return None
-
-            def _post_visit(stmt):
-                """
-                Post-visit callback for IR nodes.
-                Args:
-                    stmt: The current IR node being visited.
-                """
-                if isinstance(stmt, tvm.tirx.For) and stmt.thread_binding is None and self.loop_stack:
-                    self.loop_stack.pop()
-                return None
-
-            # Use IR transformation to traverse and modify the function body
-            new_body = ir_transform(f.body, _pre_visit, _post_visit)
-            return f.with_body(new_body)
-
-        # Apply the custom PrimFunc pass
-        tvm.tirx.transform.prim_func_pass(_ftransform, opt_level=0)(self.fn)
+            tvm_ffi.structural_visit(
+                function.body,
+                [(ir.For, self._visit_for), (ir.RegionStmt, self._visit_region), (ir.Call, self._visit_call)],
+            )
         return self
 
     def calculate(self) -> AnalysisResult:
@@ -215,9 +199,9 @@ class Analyzer:
     @classmethod
     def analysis(cls, fn, device):
         """
-        Perform a full analysis of the given IR module or PrimFunc.
+        Perform a full analysis of the given IR module or Function.
         Args:
-            fn: A TVM IRModule or PrimFunc to analyze.
+            fn: A native IRModule or Function to analyze.
             device: The target device information.
         Returns:
             AnalysisResult: The calculated performance metrics.

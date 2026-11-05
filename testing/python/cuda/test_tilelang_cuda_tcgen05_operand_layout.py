@@ -3,7 +3,7 @@
 import pytest
 
 import tilelang.language as T
-from tilelang import tvm
+from tvm_tirx import ir, tirx
 from tilelang.cuda.intrinsics.layout.mma_sm100_layout import (
     TCGEN05Meta,
     TCGEN05TmemAllocMode,
@@ -20,6 +20,14 @@ from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
 from tilelang.layout import Layout
 
 
+def _tensor(shape, dtype, *, scope):
+    return ir.Var("tensor", tirx.TensorType(shape, dtype, scope=scope, layout="default"))
+
+
+def _region(tensor, ranges):
+    return ir.TensorRegion(tensor, ranges, ir.TensorRegionType())
+
+
 def _swizzle_128b(shape, plain_address):
     """Construct BF16 ``Sw<3,3,3> o plain_address`` for layout probes."""
 
@@ -31,7 +39,7 @@ def _swizzle_128b(shape, plain_address):
 
 
 def _ranges(mins, extents):
-    return [tvm.ir.Range.from_min_extent(begin, extent) for begin, extent in zip(mins, extents, strict=True)]
+    return [ir.Range.from_min_extent(begin, extent) for begin, extent in zip(mins, extents, strict=True)]
 
 
 def _make_emitter():
@@ -59,16 +67,16 @@ def _make_emitter():
 
 def _valid_operand_regions():
     """Whole-buffer A/B/C Regions aligned to ``_make_emitter``'s atom grid."""
-    a_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((256, 32), "bfloat16", scope="shared"),
+    a_region = _region(
+        _tensor((256, 32), "bfloat16", scope="shared"),
         _ranges((0, 0), (256, 32)),
     )
-    b_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((32, 64), "bfloat16", scope="shared"),
+    b_region = _region(
+        _tensor((32, 64), "bfloat16", scope="shared"),
         _ranges((0, 0), (32, 64)),
     )
-    c_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((256, 128), "float32", scope="shared.tmem"),
+    c_region = _region(
+        _tensor((256, 128), "float32", scope="shared.tmem"),
         _ranges((0, 0), (256, 128)),
     )
     return a_region, b_region, c_region
@@ -107,7 +115,7 @@ def test_tcgen05_tmem_atoms_match_cutlass(
 
 
 def test_tcgen05_tmem_fragment_tiles_outer_m_and_n():
-    buffer = tvm.tirx.decl_buffer((256, 128), "float32", scope="shared.tmem")
+    buffer = _tensor((256, 128), "float32", scope="shared.tmem")
     fragment = make_tmem_frg(
         buffer,
         1,
@@ -125,7 +133,7 @@ def test_tcgen05_tmem_fragment_tiles_outer_m_and_n():
 
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 def test_tcgen05_tmem_c_fragment_restrides_values_to_int32_storage(dtype):
-    buffer = tvm.tirx.decl_buffer((128, 128), dtype, scope="shared.tmem")
+    buffer = _tensor((128, 128), dtype, scope="shared.tmem")
     fragment = make_tmem_frg_c(buffer, TCGEN05Meta(128, 64, 16, False, False), is_ts=True)
     layout = fragment.to_tilelang()
 
@@ -138,7 +146,7 @@ def test_tcgen05_tmem_c_fragment_restrides_values_to_int32_storage(dtype):
 
 
 def test_tcgen05_tmem_fragment_tiles_leading_batch_modes():
-    buffer = tvm.tirx.decl_buffer((2, 2, 128, 64), "float32", scope="shared.tmem")
+    buffer = _tensor((2, 2, 128, 64), "float32", scope="shared.tmem")
     fragment = make_tmem_frg_c(buffer, TCGEN05Meta(128, 64, 16, False, False), is_ts=True)
     layout = fragment.to_tilelang()
 
@@ -151,7 +159,7 @@ def test_tcgen05_tmem_fragment_tiles_leading_batch_modes():
 
 
 def test_tcgen05_tmem_fragment_rejects_unrepresentable_2sm_duplication():
-    buffer = tvm.tirx.decl_buffer((64, 128), "bfloat16", scope="shared.tmem")
+    buffer = _tensor((64, 128), "bfloat16", scope="shared.tmem")
     with pytest.raises(ValueError, match=r"duplicated 2SM M64 allocation"):
         make_tmem_frg_a(buffer, TCGEN05Meta(128, 64, 16, False, True))
 
@@ -160,7 +168,7 @@ def test_tcgen05_tmem_m64_dense_fragment_interleaves_half_datapaths():
     # tmem_frg 1SM M64: the ((16,4),N):((1,32),128) atom spreads consecutive
     # M through datapath quarters; INTERLEAVED tiles the second M atom into
     # the odd 16-datapath slots of the same columns.
-    buffer = tvm.tirx.decl_buffer((128, 32), "float32", scope="shared.tmem")
+    buffer = _tensor((128, 32), "float32", scope="shared.tmem")
     fragment = make_tmem_frg_c(buffer, TCGEN05Meta(64, 32, 16, False, False), is_ts=False)
     layout = fragment.to_tilelang()
     assert [int(x) for x in layout.map_forward_index([16, 0])] == [32, 0]
@@ -171,7 +179,7 @@ def test_tcgen05_tmem_m64_dense_fragment_interleaves_half_datapaths():
 def test_tcgen05_tmem_ws_c_fragment_matches_cutlass_ws_atom():
     # tmem_frg_ws 1SM M64: (64,(N/2,2)):(1,(128,64)) folds the upper half of N
     # into datapaths 64..127 instead of interleaving M tiles.
-    buffer = tvm.tirx.decl_buffer((64, 64), "float32", scope="shared.tmem")
+    buffer = _tensor((64, 64), "float32", scope="shared.tmem")
     fragment = make_tmem_frg_c(buffer, TCGEN05Meta(64, 64, 16, True, False), is_ts=False)
     layout = fragment.to_tilelang()
     assert [int(x) for x in layout.map_forward_index([32, 0])] == [32, 0]
@@ -180,7 +188,7 @@ def test_tcgen05_tmem_ws_c_fragment_matches_cutlass_ws_atom():
 
 
 def test_tcgen05_tmem_ws_c_fragment_requires_ws_metadata():
-    buffer = tvm.tirx.decl_buffer((64, 64), "float32", scope="shared.tmem")
+    buffer = _tensor((64, 64), "float32", scope="shared.tmem")
     # A ws=False meta selects the ordinary dense fragment, not Layout E.
     dense = make_tmem_frg_c(buffer, TCGEN05Meta(64, 64, 16, False, False), is_ts=False)
     ws = make_tmem_frg_c(buffer, TCGEN05Meta(64, 64, 16, True, False), is_ts=False)
@@ -212,7 +220,7 @@ def test_tcgen05_tmem_fragment_tilelang_roundtrip(name, shape, dtype, meta, is_t
 
     from tilelang.layout import cute
 
-    buffer = tvm.tirx.decl_buffer(shape, dtype, scope="shared.tmem")
+    buffer = _tensor(shape, dtype, scope="shared.tmem")
     fragment = make_tmem_frg_c(buffer, TCGEN05Meta.from_ffi(meta), is_ts=is_ts)
     recovered = cute.Layout.from_tilelang_hierarchical(fragment.to_tilelang())
     assert recovered is not None, f"{name} is not decodable by the CuTe analyzer"
@@ -273,8 +281,8 @@ def test_tcgen05_matrix_regions_reject_partial_atom_extents(
 ):
     emitter = _make_emitter()
     a_region, b_region, c_region = _valid_operand_regions()
-    sliced = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer(shape, "bfloat16", scope="shared"),
+    sliced = _region(
+        _tensor(shape, "bfloat16", scope="shared"),
         _ranges(mins, extents),
     )
     regions = {"A": a_region, "B": b_region, "C": c_region, operand: sliced}
@@ -292,9 +300,9 @@ def test_tcgen05_matrix_regions_reject_partial_atom_extents(
 def test_tcgen05_accumulator_regions_reject_partial_atom_extents(extents, message):
     emitter = _make_emitter()
     a_region, b_region, _ = _valid_operand_regions()
-    c_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((256, 128), "float32", scope="shared.tmem"),
-        [tvm.ir.Range.from_min_extent(0, extent) for extent in extents],
+    c_region = _region(
+        _tensor((256, 128), "float32", scope="shared.tmem"),
+        [ir.Range.from_min_extent(0, extent) for extent in extents],
     )
     with pytest.raises(AssertionError, match=message):
         emitter.validate_tcgen05_operand_regions(a_region, b_region, c_region, is_ts=False)
@@ -303,8 +311,8 @@ def test_tcgen05_accumulator_regions_reject_partial_atom_extents(extents, messag
 def test_tcgen05_matrix_region_rejects_wide_leading_mode():
     emitter = _make_emitter()
     _, b_region, c_region = _valid_operand_regions()
-    a_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((2, 128, 16), "bfloat16", scope="shared"),
+    a_region = _region(
+        _tensor((2, 128, 16), "bfloat16", scope="shared"),
         _ranges((0, 0, 0), (2, 128, 16)),
     )
     with pytest.raises(AssertionError, match=r"A leading mode 0 must have unit extent"):
@@ -313,16 +321,16 @@ def test_tcgen05_matrix_region_rejects_wide_leading_mode():
 
 def test_tcgen05_operand_validation_pins_leading_modes():
     emitter = _make_emitter()
-    a_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((2, 3, 256, 128), "bfloat16", scope="shared"),
+    a_region = _region(
+        _tensor((2, 3, 256, 128), "bfloat16", scope="shared"),
         _ranges((1, 2, 128, 16), (1, 1, 128, 32)),
     )
-    b_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((32, 64), "bfloat16", scope="shared"),
+    b_region = _region(
+        _tensor((32, 64), "bfloat16", scope="shared"),
         _ranges((0, 0), (32, 64)),
     )
-    c_region = tvm.tirx.BufferRegion(
-        tvm.tirx.decl_buffer((2, 3, 256, 128), "float32", scope="shared.tmem"),
+    c_region = _region(
+        _tensor((2, 3, 256, 128), "float32", scope="shared.tmem"),
         _ranges((1, 1, 128, 64), (1, 1, 128, 64)),
     )
     emitter.validate_tcgen05_operand_regions(a_region, b_region, c_region, is_ts=False)
@@ -336,7 +344,7 @@ def test_tcgen05_descriptor_pins_leading_stage_mode():
     def plain_2d(m, k):
         return m * 64 + k % 64 + (k // 64) * m_extent * 64
 
-    reference_buffer = tvm.tirx.decl_buffer((m_extent, k_extent), "bfloat16", scope="shared")
+    reference_buffer = _tensor((m_extent, k_extent), "bfloat16", scope="shared")
     reference = compute_umma_descriptor(
         _swizzle_128b((m_extent, k_extent), plain_2d),
         reference_buffer,
@@ -345,7 +353,7 @@ def test_tcgen05_descriptor_pins_leading_stage_mode():
     )
 
     parent_shape = (3, m_extent, k_extent)
-    parent_buffer = tvm.tirx.decl_buffer(parent_shape, "bfloat16", scope="shared")
+    parent_buffer = _tensor(parent_shape, "bfloat16", scope="shared")
     parent_layout = _swizzle_128b(
         parent_shape,
         lambda stage, m, k: stage * m_extent * k_extent + plain_2d(m, k),
@@ -388,7 +396,7 @@ def test_tcgen05_descriptor_k_panel_stride_follows_the_buffer():
         return m * atom_elems + k % atom_elems + (k // atom_elems) * m_extent * atom_elems
 
     layout = _swizzle_128b((m_extent, k_extent), plain_2d)
-    buffer = tvm.tirx.decl_buffer((m_extent, k_extent), "bfloat16", scope="shared")
+    buffer = _tensor((m_extent, k_extent), "bfloat16", scope="shared")
 
     whole = compute_umma_descriptor(layout, buffer, False, region=_ranges((0, 0), (m_extent, k_extent)))
     sliced = compute_umma_descriptor(layout, buffer, False, region=_ranges((128, 0), (128, k_extent)))

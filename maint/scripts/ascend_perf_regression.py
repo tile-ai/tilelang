@@ -1,7 +1,7 @@
 """Ascend perf-regression driver with a supervised persistent worker.
 
-Run via `maint/scripts/run_perf_regression_ascend.sh`, which overlays this driver and
-the Ascend examples onto each tested ref, or invoke this file directly.
+Run via `maint/scripts/run_perf_regression_ascend.sh`, which snapshots this driver and
+the Ascend examples and runs them with each isolated installation, or invoke this file directly.
 
 Why this file uses a worker
 ---------------------------

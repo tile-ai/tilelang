@@ -2,7 +2,9 @@
 
 #include "common.h"
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+// NVCC also parses kernel bodies in its host pass, where __CUDA_ARCH__ is
+// absent. Keep the wrapper types visible there without enabling old devices.
+#if defined(__CUDACC__) && (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800))
 #include <cuda_fp4.h>
 
 // Wrapper for __nv_fp4_e2m1 with implicit conversions

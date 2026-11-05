@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from tvm import arith
+from tilelang._analyzer import create_analyzer
 
 from tilelang._typing import DType, ShapeType
 from tilelang.language.allocate import _with_span
-from tvm import DataType
-from tvm.script import tirx as T
-from tvm.tirx import IntImm
-from tvm.tirx.buffer import Buffer
-from tvm.tirx.script.builder.ir import sblock_attr
+from tvm_ffi import dtype as DataType
+from tilelang.language import _native as T
+from tilelang.language._native import IntImm
+from tilelang.language._native import Buffer
+from tilelang.language._native import _allocation_annotation
 
 
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
@@ -58,7 +58,7 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
         raise ValueError(f"alloc_ss requires uint32 or uint64, got {dtype}")
     if isinstance(shape, int):
         shape = (shape,)
-    analyzer = arith.Analyzer()
+    analyzer = create_analyzer()
     extents = [analyzer.simplify(extent) for extent in shape]
     if not extents or any(not isinstance(extent, IntImm) or int(extent) <= 0 for extent in extents):
         raise ValueError("alloc_ss requires a nonempty static shape with positive extents")
@@ -67,7 +67,7 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
         elements *= int(extent)
     if elements * dtype.bits // 8 > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
-    return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
+    return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss", align=32))
 
 
 def alloc_l0a(shape: ShapeType, dtype: DType, scope="shared.l0a") -> Buffer:
@@ -101,8 +101,8 @@ def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool =
     if layout:
         from tilelang.layout import make_ascend_l0c_layout
 
-        if len(buf.shape) >= 2:
-            sblock_attr({"layout_map": {buf.data: make_ascend_l0c_layout(buf)}})
+        if len(buf.ty.shape) >= 2:
+            _allocation_annotation({"layout_map": {buf: make_ascend_l0c_layout(buf)}})
     return buf
 
 
@@ -112,27 +112,28 @@ _MX_SF_K_PER_SCALE_BYTE = 32
 
 
 def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: ShapeType | None) -> Buffer:
-    if buf.scope() != expected_scope:
-        raise ValueError(f"expected a {expected_scope} data tile, got scope {buf.scope()} for {buf.name}")
-    if len(buf.shape) < 2:
-        raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
+    scope, shape = str(buf.ty.scope), tuple(buf.ty.shape)
+    if scope != expected_scope:
+        raise ValueError(f"expected a {expected_scope} data tile, got scope {scope} for {buf.name}")
+    if len(shape) < 2:
+        raise ValueError(f"L0 SF requires trailing matrix dimensions, got {shape}")
     dtype = DataType(sf_dtype)
     if dtype.bits not in (8, 16) or dtype.lanes != 1:
         raise ValueError(f"L0 SF storage must contain 8-bit scales or 16-bit scale pairs, got {sf_dtype}")
     if sf_shape is None:
         k_per_sf = _MX_SF_K_PER_SCALE_BYTE * (dtype.bits // 8)
-        rows, k = buf.shape[-2], buf.shape[-1]
+        rows, k = shape[-2], shape[-1]
         if (isinstance(k, int) or hasattr(k, "value")) and int(k) % k_per_sf != 0:
             raise ValueError(
                 f"data tile K extent {k} of {buf.name} is not divisible by {k_per_sf} "
                 f"(K elements per {sf_dtype} scale element); pass sf_shape explicitly for a transposed tile"
             )
-        sf_shape = (*buf.shape[:-2], rows, k // k_per_sf)
-    analyzer = arith.Analyzer()
-    if len(sf_shape) != len(buf.shape) or any(not analyzer.can_prove_equal(a, b) for a, b in zip(sf_shape[:-2], buf.shape[:-2])):
-        raise ValueError(f"L0 SF shape {sf_shape} must preserve the data buffer's leading dimensions {buf.shape[:-2]}")
+        sf_shape = (*shape[:-2], rows, k // k_per_sf)
+    analyzer = create_analyzer()
+    if len(sf_shape) != len(shape) or any(not analyzer.can_prove_equal(a, b) for a, b in zip(sf_shape[:-2], shape[:-2])):
+        raise ValueError(f"L0 SF shape {sf_shape} must preserve the data buffer's leading dimensions {shape[:-2]}")
     sf = _with_span(T.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
-    sblock_attr({"tl.l0_sf_bindings": {sf.data: buf.data}})
+    _allocation_annotation({"tl.l0_sf_bindings": {sf: buf}})
     return sf
 
 

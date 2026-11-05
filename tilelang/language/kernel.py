@@ -1,30 +1,17 @@
 """Kernel launching language interface in TileLang."""
 
 from __future__ import annotations
+from tilelang.language import _native
 from collections import deque
 import os
 from typing import Any
-from tvm import tirx
-from tvm.tirx import Var
-from tvm.tirx.script.builder import evaluate as T_evaluate
-from tvm.tirx.script.builder.frame import TIRFrame
-from tvm.tirx.script.builder.frame import SBlockFrame
-from tvm.ffi import register_object
-from tilelang import _ffi_api
+from tilelang.language import _native as tirx
+from tilelang.language._native import Var
+from tvm_tirx import ir
+from tvm_tirx.tirx.script import ir_builder as _builder
+from tilelang.language._native import evaluate as T_evaluate
 from tilelang.jit.exceptions import JITNoBuilderError
 import threading
-
-# Ensure single-dimension kernel bindings can be unpacked like iterables.
-# especially for issue https://github.com/tile-ai/tilelang/issues/830
-if not hasattr(Var, "__iter__"):
-
-    def _var_iter(self):
-        yield self
-
-    Var.__iter__ = _var_iter  # type: ignore[attr-defined]
-
-if not hasattr(Var, "__len__"):
-    Var.__len__ = lambda self: 1  # type: ignore[attr-defined]
 
 
 class FrameStack:
@@ -151,8 +138,7 @@ def _normalize_cluster_dims(
     return None if cluster_dims == [1, 1, 1] else cluster_dims
 
 
-@register_object("tl.KernelLaunchFrame")
-class KernelLaunchFrame(TIRFrame):
+class KernelLaunchFrame:
     """
     KernelLaunchFrame is a custom TIRFrame that manages block/thread indices
     and handles the entry and exit of the kernel launch scope.
@@ -164,28 +150,41 @@ class KernelLaunchFrame(TIRFrame):
     passed to :func:`Kernel`.
     """
 
+    def __init__(self, blocks, threads, annotations, *, grid_tags=None):
+        self.grid_extents = [tirx._expr(value) for value in blocks]
+        self.thread_extents = None if threads is None else [tirx._expr(value) for value in threads]
+        self.annotations = dict(annotations)
+        hint_schema, hint_values = tirx.encode_annotations(self.annotations)
+        begin = ir.Tuple([ir.const(0, _native.dtype_of(value.ty)) for value in self.grid_extents])
+        end = ir.Tuple(self.grid_extents)
+        step = ir.Tuple([ir.const(1, _native.dtype_of(value.ty)) for value in self.grid_extents])
+        self._frame = _builder.region(
+            "tl.launch_kernel",
+            [begin, end, step, ir.Tuple(self.thread_extents or []), hint_values],
+            attrs={
+                "schema_version": 1,
+                "grid_tags": list(grid_tags) if grid_tags is not None else ["blockIdx." + axis for axis in "xyz"[: len(blocks)]],
+                "thread_tags": ["threadIdx." + axis for axis in "xyz"],
+                "threads_was_specified": threads is not None,
+                "hint_schema": hint_schema,
+            },
+        )
+        self.grid_vars = list(self._frame.body_params[: len(blocks)])
+        self.thread_vars = list(self._frame.body_params[len(blocks) :])
+        self.frames = [self._frame]
+
     def __enter__(self) -> Var | list[Var]:
-        """
-        Enters the KernelLaunchFrame scope and pushes this frame onto the stack.
-        Returns one Var for a single grid dimension, or a list of Vars otherwise.
-        """
-        super().__enter__()
+        self._frame.__enter__()
         _get_current_stack().push(self)
-
-        last_block_frame = self.frames[-1]
-        assert isinstance(last_block_frame, SBlockFrame), f"Last frame must be a block frame, got {last_block_frame}"
-
-        return _normalize_bindings(list(self.grid_vars))
+        return _normalize_bindings(self.grid_vars)
 
     def __exit__(self, ptype, value, trace):
-        """
-        Exits the KernelLaunchFrame scope and pops this frame from the stack,
-        but only if it's indeed the topmost frame.
-        """
-        stack = _get_current_stack()
-        if stack.top() is self:
-            stack.pop()
-        super().__exit__(ptype, value, trace)
+        try:
+            return self._frame.__exit__(ptype, value, trace)
+        finally:
+            stack = _get_current_stack()
+            if stack and stack.top() is self:
+                stack.pop()
 
     @classmethod
     def Current(cls) -> KernelLaunchFrame | None:
@@ -275,7 +274,7 @@ class KernelLaunchFrame(TIRFrame):
         Returns the launch annotation ``key`` recorded by T.Kernel (e.g. ``cluster_dims``),
         or ``default`` when it was not given.
         """
-        annotations = self.frames[-1].annotations
+        annotations = self.annotations
         if annotations is None or key not in annotations:
             return default
         return annotations[key]
@@ -316,7 +315,7 @@ class KernelLaunchFrame(TIRFrame):
         cluster_dim = self.get_cluster_dims()[dim]
         if cluster_dim == 1:
             return block
-        return tirx.floordiv(block, tirx.IntImm(block.dtype, cluster_dim))
+        return tirx.floordiv(block, tirx.IntImm(tirx.dtype_of(block), cluster_dim))
 
     def get_cluster_ids(self) -> list[Var | tirx.PrimExpr]:
         """
@@ -424,7 +423,7 @@ def launch_kernel(
         if value is not None:
             attrs[key] = value
 
-    return _ffi_api.KernelLaunch(blocks, _normalize_threads(threads), attrs)
+    return KernelLaunchFrame(blocks, _normalize_threads(threads), attrs)
 
 
 @kernel_launch_factory
@@ -567,7 +566,13 @@ def CUDASourceCodeKernel(
     if prelude is not None:
         source = prelude + "\n" + source
 
-    attrs: dict = {"code_block_source": source}
+    # External source has no analyzable tensor uses in its placeholder body.
+    # Keep the signature's tensors as actual metadata operands, so frontend
+    # simplification cannot discard a tensor that the CUDA entry consumes.
+    # The host/device bridge completes this list from the finalized Function
+    # before outlining (including parameters declared later by eager mode).
+    source_parameters = [parameter for parameter in Builder.current()._parameter_order.values() if _native.is_tensor(parameter)]
+    attrs: dict = {"code_block_source": source, "code_block_signature": source_parameters}
     if not isinstance(entry_name, str) or not entry_name.strip():
         raise ValueError("entry_name must be a non-empty string when provided")
     attrs["code_block_entry_name"] = entry_name
@@ -578,9 +583,9 @@ def CUDASourceCodeKernel(
     if cluster_dims is not None:
         attrs["cluster_dims"] = cluster_dims
 
-    with _ffi_api.KernelLaunch(blocks, threads, attrs):
+    with KernelLaunchFrame(blocks, threads, attrs):
         # Keep the launch frame alive until SplitHostDevice can lift the
-        # external CUDA source pragma onto the device PrimFunc.
+        # external CUDA source metadata onto the device Function.
         T_evaluate(tirx.call_extern("int32", entry_name))
 
 

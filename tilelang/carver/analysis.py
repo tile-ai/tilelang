@@ -3,28 +3,26 @@
 from __future__ import annotations
 from typing import Literal
 
-from tvm import ir, tirx, DataType
-from tvm.ffi import get_global_func
-from tvm.target.target import Target
-from tvm.tirx import IterVar
-from tvm.s_tir import Schedule
-from tvm.s_tir.schedule import LoopRV, SBlockRV
+from tvm_tirx import ir, tirx
+from tvm_ffi import dtype as DataType
+from tvm_tirx.target import Target
+from ._native_analysis import NativeSchedule, StageRef, LoopRef, StageView, TensorView, post_order_visit
 
 
 class IterInfo:
     """Information about a loop/iter var."""
 
     kind: Literal["S", "R", "O"]
-    var: tirx.Var
-    _dom: tirx.PrimExpr
-    loop_rv: LoopRV
+    var: ir.Var
+    _dom: ir.Expr
+    loop_rv: LoopRef
 
     def __init__(
         self,
         kind: Literal["S", "R", "O"],
-        var: tirx.Var,
-        dom: tirx.PrimExpr,
-        loop_rv: LoopRV,
+        var: ir.Var,
+        dom: ir.Expr,
+        loop_rv: LoopRef,
     ):
         """Construct an IterInfo object."""
         self.kind = kind
@@ -33,9 +31,9 @@ class IterInfo:
         self.loop_rv = loop_rv
 
     @property
-    def dom(self) -> int | tirx.PrimExpr:
+    def dom(self) -> int | ir.Expr:
         """The iteration domain of the loop."""
-        return int(self._dom) if isinstance(self._dom, tirx.IntImm) else self._dom
+        return int(self._dom) if isinstance(self._dom, ir.IntImm) else self._dom
 
     def __str__(self) -> str:
         return f'Iter("{self.kind}", {self.dom})'
@@ -49,14 +47,14 @@ class BlockInfo:
 
     name: str
     iters: list[IterInfo]
-    block_rv: SBlockRV
+    block_rv: StageRef
     _reduction_block: bool
 
     def __init__(
         self,
         name: str,
         iters: list[IterInfo],
-        block_rv: SBlockRV,
+        block_rv: StageRef,
         reduction_block: bool = False,
     ):
         """Construct a BlockInfo object."""
@@ -65,7 +63,7 @@ class BlockInfo:
         self.iters = iters
         self._reduction_block = reduction_block
 
-    def dom(self) -> list[int | tirx.PrimExpr]:
+    def dom(self) -> list[int | ir.Expr]:
         """The iteration domain of the block."""
         return [i.dom for i in self.iters]
 
@@ -77,11 +75,11 @@ class BlockInfo:
         """Whether the block is injective, i.e. all its iteration domains are injective."""
         return all(k == "S" for k in self.dom_kind())
 
-    def is_elementwise(self, sch: Schedule) -> bool:
+    def is_elementwise(self, sch: NativeSchedule) -> bool:
         """Whether the block is elementwise, i.e. trivial mapping between read/write region"""
 
-        def _check_unit_var_range(dom: ir.Range, var: tirx.Var) -> bool:
-            return dom.min.same_as(var) and dom.extent == 1
+        def _check_unit_var_range(dom: ir.Range, var: ir.Var) -> bool:
+            return dom.begin.same_as(var) and dom.extent == 1
 
         if not self.is_injective():
             return False
@@ -92,8 +90,8 @@ class BlockInfo:
         w_region = block.writes[0].region
         if len(r_region) != len(w_region):
             return False
-        for var, r_dom, w_dom in zip(block.iter_vars, r_region, w_region):
-            if not _check_unit_var_range(var, r_dom) or not _check_unit_var_range(var, w_dom):
+        for var, r_dom, w_dom in zip(block.axes, r_region, w_region):
+            if not _check_unit_var_range(r_dom, var.var) or not _check_unit_var_range(w_dom, var.var):
                 return False
         return True
 
@@ -117,59 +115,36 @@ class BlockInfo:
         return str(self)
 
 
-_normalize_prim_func = get_global_func("tirx.schedule.NormalizePrimFunc", allow_missing=True) or get_global_func(
-    "s_tir.schedule.NormalizePrimFunc"
-)
-
-
-def normalize_prim_func(sch: Schedule) -> list[BlockInfo] | None:
-    """Normalize the primfunc to normal form"""
-    try:
-        result = _normalize_prim_func(sch)
-        if result is None:
-            return None
-    except Exception:  # pylint: disable=broad-except
+def normalize_prim_func(sch: NativeSchedule) -> list[BlockInfo] | None:
+    """Normalize native stage axes, preserving the original failure boundary."""
+    blocks = sch.normalize()
+    if blocks is None:
         return None
-
-    def _iter_kind(i: tirx.IterVar) -> str:
-        return {
-            tirx.IterVar.DataPar: "S",
-            tirx.IterVar.CommReduce: "R",
-        }.get(i.iter_type, "O")
-
-    blocks: list[BlockInfo] = []
-    for block, loops, iters, is_reduction in zip(*result):
-        blocks.append(
-            BlockInfo(
-                name=sch.get(block).name_hint,
-                iters=[
-                    IterInfo(
-                        kind=_iter_kind(iter),  # type: ignore
-                        var=iter.var,
-                        dom=iter.dom,
-                        loop_rv=loop,
-                    )
-                    for loop, iter in zip(loops, iters)
-                ],
-                block_rv=block,
-                reduction_block=is_reduction,
-            )
+    return [
+        BlockInfo(
+            name=sch.get(block).name_hint,
+            iters=[IterInfo(axis.kind, axis.var, axis.domain, loop) for axis, loop in zip(sch.get(block).axes, sch.get_loops(block))],
+            block_rv=block,
+            reduction_block=sch.get(block).init is not None,
         )
-    return blocks
+        for block in blocks
+    ]
 
 
 def find_var_from_func(func, var: str):
-    for buffer in func.buffer_map.values():
-        for i in buffer.shape:
-            if isinstance(i, tirx.Var) and i.name == var:
-                return i
-    return None
+    matches = set()
+    for buffer in (param for param in func.params if tirx.is_tensor_var(param)):
+        for dim in buffer.ty.shape:
+            matches.update(candidate for candidate in collect_vars_used_in_prim_expr(dim) if candidate.name == var)
+    if len(matches) > 1:
+        raise ValueError(f"Ambiguous Carver shape variable name {var!r}; use distinct names for distinct identities")
+    return next(iter(matches)) if matches else None
 
 
 def check_func_with_dynamic(func):
-    for buffer in func.buffer_map.values():
-        for i in buffer.shape:
-            if isinstance(i, tirx.Var):
+    for buffer in (param for param in func.params if tirx.is_tensor_var(param)):
+        for i in buffer.ty.shape:
+            if collect_vars_used_in_prim_expr(i):
                 return True
     return False
 
@@ -198,38 +173,36 @@ def get_max_shared_memory_per_block(target: Target) -> int:
     return int(max_shared_memory_per_block)
 
 
-def get_root_block(sch: Schedule, func_name: str = "main") -> SBlockRV:
-    try:
-        block = sch.mod[func_name].body.block
-    except Exception:
-        raise ValueError(f"The function body is expected to be the root block, but got:\n{sch.mod[func_name].body}") from None
-    return sch.get_sblock(block.name_hint)
+def get_root_block(sch: NativeSchedule, func_name: str = "main") -> StageRef:
+    if func_name != "main":
+        raise ValueError(f"Unknown Carver function {func_name!r}")
+    return sch.root
 
 
-def collect_block_iter_vars_used_in_access_region(block: tirx.SBlock, region: list[ir.Range]) -> set[tirx.Var]:
+def collect_block_iter_vars_used_in_access_region(block: StageView, region: list[ir.Range]) -> set[ir.Var]:
     """Collect the block iter variables used in the access region of a buffer region."""
     tir_vars = set()
     for expr in region:
         if expr.extent != 1:
             continue
-        tir_vars |= collect_vars_used_in_prim_expr(expr.min)
-    tir_vars &= set(iter_var.var for iter_var in block.iter_vars)
+        tir_vars |= collect_vars_used_in_prim_expr(expr.begin)
+    tir_vars &= set(iter_var.var for iter_var in block.axes)
     return tir_vars
 
 
-def collect_vars_used_in_prim_expr(expr: tirx.PrimExpr) -> set[tirx.Var]:
+def collect_vars_used_in_prim_expr(expr: ir.Expr) -> set[ir.Var]:
     """Collect the variables used in the PrimExpr."""
     tir_vars = set()
 
     def _collect_tir_var(expr):
-        if isinstance(expr, tirx.Var):
+        if isinstance(expr, ir.Var):
             tir_vars.add(expr)
 
-    tirx.stmt_functor.post_order_visit(expr, _collect_tir_var)
+    post_order_visit(expr, _collect_tir_var)
     return tir_vars
 
 
-def detect_dominant_read(block: tirx.SBlock) -> tirx.PrimExpr:
+def detect_dominant_read(block: StageView) -> ir.Expr:
     """Detect the dominant read indices in the block."""
     dominant_read = None
     num_read_iters = -1
@@ -239,20 +212,22 @@ def detect_dominant_read(block: tirx.SBlock) -> tirx.PrimExpr:
             num_read_iters = len(tir_vars)
             dominant_read = buffer_region
     assert dominant_read is not None
-    (result,) = dominant_read.buffer.offset_of([e.min for e in dominant_read.region])
+    (result,) = dominant_read.tensor.offset_of([e.begin for e in dominant_read.region])
     return result
 
 
 def is_broadcast_epilogue(
-    sch: Schedule,
-    block: SBlockRV,
-    epilogue: SBlockRV,
+    sch: NativeSchedule,
+    block: StageRef,
+    epilogue: StageRef,
 ) -> bool:
     """Check if the epilogue block is a broadcast pattern"""
-    write_buffers = {r.buffer for r in sch.get(block).writes}
-    epilogue_iters = {i.var: i for i in sch.get(epilogue).iter_vars if i.dom != 1}
+    write_buffers = {r.tensor for r in sch.get(block).writes}
+    epilogue_iters = {
+        i.var: i for i in sch.get(epilogue).axes if not (isinstance(i.domain.extent, ir.IntImm) and int(i.domain.extent) == 1)
+    }
     for buffer_region in sch.get(epilogue).reads:
-        if buffer_region.buffer not in write_buffers:
+        if buffer_region.tensor not in write_buffers:
             continue
         tir_vars = collect_block_iter_vars_used_in_access_region(sch.get(epilogue), buffer_region.region)
         if len(tir_vars) < len(epilogue_iters):
@@ -260,17 +235,17 @@ def is_broadcast_epilogue(
     return False
 
 
-def get_reduction_blocks(sch: Schedule, blocks: list[SBlockRV]) -> list[SBlockRV]:
+def get_reduction_blocks(sch: NativeSchedule, blocks: list[StageRef]) -> list[StageRef]:
     # Get the main computation block
-    def is_reduction(block: SBlockRV) -> bool:
+    def is_reduction(block: StageRef) -> bool:
         block_stmt = sch.get(block)
-        iter_types = {iter_var.iter_type for iter_var in block_stmt.iter_vars}
-        return iter_types == {IterVar.CommReduce, IterVar.DataPar}
+        iter_types = {iter_var.kind for iter_var in block_stmt.axes}
+        return iter_types == {"R", "S"}
 
-    def is_spatial(block: SBlockRV) -> bool:
+    def is_spatial(block: StageRef) -> bool:
         block_stmt = sch.get(block)
-        iter_types = {iter_var.iter_type for iter_var in block_stmt.iter_vars}
-        return iter_types == {IterVar.DataPar}
+        iter_types = {iter_var.kind for iter_var in block_stmt.axes}
+        return iter_types == {"S"}
 
     # NOTE: We assume there is only one reduction block in the function
     # all blocks are required to be spatial or reduction
@@ -284,14 +259,14 @@ def get_reduction_blocks(sch: Schedule, blocks: list[SBlockRV]) -> list[SBlockRV
     return reduction_blocks
 
 
-def get_coalesced_veclen(block_stmt: tirx.SBlock, target_bits: int = 128) -> int:
+def get_coalesced_veclen(block_stmt: StageView, target_bits: int = 128) -> int:
     # gpu memory prefer 128 bits coalesced access (e.g. four banks)
     # 128 bits
-    buffers: list[tirx.Buffer] = []
+    buffers: list[TensorView] = []
     for read in block_stmt.reads:
-        buffers.append(read.buffer)
+        buffers.append(read.tensor)
     for write in block_stmt.writes:
-        buffers.append(write.buffer)
+        buffers.append(write.tensor)
     # pick the dtype with the largest bits
     max_dtype_bits: int = 0
     for buffer in buffers:

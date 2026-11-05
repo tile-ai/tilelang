@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tilelang import tvm as tvm
+from tvm_ffi import dtype as DataType
 from tilelang.layout import Layout
 from tilelang.metal import language as T
 from tilelang.metal.utils import (
@@ -15,9 +15,9 @@ from tilelang.utils.language import (
     is_global,
     is_shared,
 )
-from tvm import tirx as tir
-from tvm.ir import Range
-from tvm.target import Target
+from tilelang.language import _native as tir
+from tvm_tirx.ir import Range
+from tvm_tirx.target import Target
 
 
 GEMM_INST_METAL = "metal.simdgroup"
@@ -28,7 +28,7 @@ def _make_padded_layout(buffer):
     shape = buffer.shape
     stride = int(shape[-2])
     continuous = int(shape[-1])
-    element_bits = int(tvm.DataType(buffer.dtype).bits)
+    element_bits = int(DataType(buffer.dtype).bits)
     padded = continuous
     if (element_bits * continuous) % 256 == 0:
         padded += 128 // element_bits
@@ -84,18 +84,18 @@ class GemmMetalSimdGroup(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        C_buf = C_region.buffer
+        C_buf = C_region.source
         clear_accum = self.clear_accum
         c_in_register = is_fragment(C_buf) or is_metal_simdgroup(C_buf)
 
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
         assert is_full_region(C_region), "Fragment output C must be a full region"
         assert c_in_register or is_shared(C_buf), (
-            f"Metal GEMM requires C in local.fragment, metal.simdgroup or shared scope, got {C_buf.scope()}"
+            f"Metal GEMM requires C in local.fragment, metal.simdgroup or shared scope, got {str(C_buf.scope())}"
         )
 
         if not self.is_gemm_ss():
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {str(self.A.scope())}, B: {str(self.B.scope())}")
 
         if c_in_register:
 
@@ -207,7 +207,7 @@ class GemmMetal(GemmBase):
     @staticmethod
     def _get_padded_stride(buffer):
         continuous = int(buffer.shape[-1])
-        element_bits = int(tvm.DataType(buffer.dtype).bits)
+        element_bits = int(DataType(buffer.dtype).bits)
         padded = continuous
         if (element_bits * continuous) % 256 == 0:
             padded += 128 // element_bits
@@ -269,13 +269,13 @@ class GemmMetal(GemmBase):
         A_region = self.ARegion
         B_region = self.BRegion
         C_region = self.CRegion
-        C_buf = C_region.buffer
+        C_buf = C_region.source
         clear_accum = self.clear_accum
         c_in_cooperative_tensor = is_metal_cooperative_tensor(C_buf) or is_fragment(C_buf)
         assert block_K >= micro_size_k, f"block_K ({block_K}) must be >= micro_size_k ({micro_size_k})"
 
         if not (self.is_gemm_ss() or self.is_gemm_gg()):
-            raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+            raise ValueError(f"Unsupported gemm combination, A: {str(self.A.scope())}, B: {str(self.B.scope())}")
 
         if c_in_cooperative_tensor:
             assert is_full_region(C_region), "Fragment output C must be a full region"

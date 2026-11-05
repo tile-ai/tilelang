@@ -13,47 +13,50 @@ namespace tl {
 
 using namespace ffi;
 using namespace tirx;
+using namespace prim;
 
 void ValidateL0SFGemm(const GemmBlockScaled &gemm, const L0SFBindings &bindings,
-                      arith::Analyzer *analyzer) {
-  auto validate = [&](const BufferRegion &data, const BufferRegion &sf,
+                      sym::AnalyzerObj *analyzer) {
+  auto validate = [&](const TensorRegion &data, const TensorRegion &sf,
                       bool transpose, bool is_a) {
-    if (IsL1Buffer(data->buffer)) {
-      ICHECK(IsL1Buffer(sf->buffer))
+    if (IsL1Buffer(RegionTensor(data))) {
+      ICHECK(IsL1Buffer(RegionTensor(sf)))
           << "L1 gemm_blockscaled requires L1 scale operands";
       return;
     }
-    ICHECK(is_a ? IsL0ABuffer(data->buffer) : IsL0BBuffer(data->buffer))
+    ICHECK(is_a ? IsL0ABuffer(RegionTensor(data))
+                : IsL0BBuffer(RegionTensor(data)))
         << "gemm_blockscaled requires L0A/L0B data operands";
-    ICHECK(is_a ? IsL0ASFBuffer(sf->buffer) : IsL0BSFBuffer(sf->buffer))
+    ICHECK(is_a ? IsL0ASFBuffer(RegionTensor(sf))
+                : IsL0BSFBuffer(RegionTensor(sf)))
         << "gemm_blockscaled requires the matching L0A/L0B SF scope for "
-        << data->buffer->name;
-    auto bound = bindings.Get(sf->buffer->data);
+        << RegionTensor(data)->name;
+    auto bound = bindings.Get(RegionTensor(sf));
     ICHECK(bound.has_value())
-        << "L0 SF " << sf->buffer->name
+        << "L0 SF " << RegionTensor(sf)->name
         << " has no allocation binding; use alloc_l0a_sf/alloc_l0b_sf";
-    ICHECK(bound.value().same_as(data->buffer->data))
-        << "L0 SF " << sf->buffer->name << " is bound to "
-        << bound.value()->name_hint << ", but gemm_blockscaled consumes "
-        << data->buffer->name;
+    ICHECK(bound.value().same_as(RegionTensor(data)))
+        << "L0 SF " << RegionTensor(sf)->name << " is bound to "
+        << bound.value()->name << ", but gemm_blockscaled consumes "
+        << RegionTensor(data)->name;
     size_t rank = data->region.size();
     ICHECK_GE(rank, 2U);
     ICHECK_EQ(sf->region.size(), rank)
         << "L0 SF and data must have matching leading dimensions";
     for (size_t i = 0; i + 2 < rank; ++i) {
-      ICHECK(
-          analyzer->CanProveEqual(data->region[i]->min, sf->region[i]->min) &&
-          analyzer->CanProveEqual(data->region[i]->extent, 1) &&
-          analyzer->CanProveEqual(sf->region[i]->extent, 1))
-          << "L0 SF " << sf->buffer->name
+      ICHECK(analyzer->CanProveEqual(data->region[i]->begin,
+                                     sf->region[i]->begin) &&
+             analyzer->CanProveEqual(data->region[i]->extent, 1) &&
+             analyzer->CanProveEqual(sf->region[i]->extent, 1))
+          << "L0 SF " << RegionTensor(sf)->name
           << " and data must select the same leading index on axis " << i;
     }
     for (size_t i = rank - 2; i < rank; ++i) {
-      ICHECK(analyzer->CanProveEqual(sf->region[i]->min, 0))
+      ICHECK(analyzer->CanProveEqual(sf->region[i]->begin, 0))
           << "Compact L0 SF regions require zero-origin trailing dimensions";
     }
-    int bits = sf->buffer->dtype.bits();
-    ICHECK((bits == 8 || bits == 16) && sf->buffer->dtype.lanes() == 1)
+    int bits = RegionTensor(sf).dtype().bits();
+    ICHECK((bits == 8 || bits == 16) && RegionTensor(sf).dtype().lanes() == 1)
         << "L0 SF storage must contain 8-bit scales or 16-bit scale pairs";
     PrimExpr mn = data->region[rank - (transpose ? 1 : 2)]->extent;
     PrimExpr k = data->region[rank - (transpose ? 2 : 1)]->extent;
@@ -83,6 +86,11 @@ String SelectBlockScaledGemmInst(const GemmBlockScaled &op, int block_size,
   return kAscendMADBlockScaled;
 }
 
+void ValidateBlockScaledGemm(const GemmBlockScaled &op, const LowerArgs &args,
+                             sym::AnalyzerObj *analyzer) {
+  ValidateL0SFGemm(op, GetL0SFBindings(args.block_annotations), analyzer);
+}
+
 } // namespace
 } // namespace ascend
 
@@ -97,6 +105,7 @@ bool RegisterAscendGemmBlockScaled() {
       "ascend.GemmBlockScaled",
       MatchAscendGemmBlockScaledTarget,
       ascend::SelectBlockScaledGemmInst,
+      ascend::ValidateBlockScaledGemm,
   });
   return true;
 }

@@ -11,10 +11,11 @@
 #include <string>
 #include <utility>
 
-#include <tvm/arith/analyzer.h>
-#include <tvm/arith/iter_affine_map.h>
-#include <tvm/tirx/buffer.h>
+#include <tvm/sym/analyzer.h>
+#include <tvm/sym/iter_affine_map.h>
+#include <tvm/tirx/expr.h>
 
+#include "iter_var.h"
 #include "support/check.h"
 #include "swizzle_mode.h"
 
@@ -121,11 +122,11 @@ public:
   // the output in the view dtype's element units; widening requires storage
   // to be contiguous and aligned at the new element width.
   virtual Layout Reshape(const ffi::Array<PrimExpr> &shape,
-                         arith::Analyzer *analyzer = nullptr,
-                         const PrimExpr rescale_num = Integer(1),
-                         const PrimExpr rescale_den = Integer(1)) const;
+                         sym::AnalyzerObj *analyzer = nullptr,
+                         const PrimExpr rescale_num = IntImm::Int32(1),
+                         const PrimExpr rescale_den = IntImm::Int32(1)) const;
 
-  virtual std::pair<Layout, arith::IterMapLevel>
+  virtual std::pair<Layout, sym::IterMapLevel>
   InverseWithLevel(bool require_padding_guard = false) const;
 
   /*!
@@ -135,7 +136,7 @@ public:
    * The returned errors array is empty on success. Exact fallback checks may
    * succeed without populating the normalized iter-map indices.
    */
-  virtual arith::IterMapResult
+  virtual sym::IterMapResult
   DetectInjective(bool require_padding_guard = false) const;
 
   virtual std::string DebugOutput() const;
@@ -148,8 +149,8 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  virtual ffi::Map<tirx::Var, Range> GetVarMap() const;
-  void UpdateAnalyzer(arith::Analyzer *analyzer) const;
+  virtual ffi::Map<PrimVar, Range> GetVarMap() const;
+  void UpdateAnalyzer(sym::AnalyzerObj *analyzer) const;
   ffi::Array<PrimExpr> forward_index_;
   ffi::Array<PrimExpr> input_size_;
 };
@@ -159,10 +160,10 @@ protected:
  */
 class Layout : public ffi::ObjectRef {
 public:
-  TVM_DLL Layout(ffi::Array<tirx::IterVar> forward_var,
-                 ffi::Array<PrimExpr> forward_index);
-  TVM_DLL Layout(ffi::Array<PrimExpr> input_size,
-                 ffi::Array<PrimExpr> forward_index);
+  TVM_TIRX_DLL Layout(ffi::Array<LayoutIterVar> forward_var,
+                      ffi::Array<PrimExpr> forward_index);
+  TVM_TIRX_DLL Layout(ffi::Array<PrimExpr> input_size,
+                      ffi::Array<PrimExpr> forward_index);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ffi::ObjectRef,
                                              LayoutNode);
@@ -182,11 +183,11 @@ public:
   Layout Inverse() const final;
 
   Layout Reshape(const ffi::Array<PrimExpr> &shape,
-                 arith::Analyzer *analyzer = nullptr,
-                 const PrimExpr rescale_num = Integer(1),
-                 const PrimExpr rescale_den = Integer(1)) const;
+                 sym::AnalyzerObj *analyzer = nullptr,
+                 const PrimExpr rescale_num = IntImm::Int32(1),
+                 const PrimExpr rescale_den = IntImm::Int32(1)) const;
 
-  std::pair<Layout, arith::IterMapLevel>
+  std::pair<Layout, sym::IterMapLevel>
   InverseWithLevel(bool require_padding_guard = false) const final;
 
   PrimExpr ThreadExtent() const;
@@ -207,9 +208,9 @@ public:
 
   std::string DebugOutput() const override;
 
-  Fragment BindThreadRange(Range thread_range) const;
+  Fragment BindThreadRange(ffi::Optional<Range> thread_range) const;
 
-  Range ThreadRange() const { return thread_range_; }
+  ffi::Optional<Range> ThreadRange() const { return thread_range_; }
 
   bool IsEqual(const FragmentNode *other, bool skip_index = false) const;
 
@@ -221,8 +222,7 @@ public:
 
   bool IsCompletedReplicated() const;
 
-  arith::IterMapResult
-  DetectInjective(bool require_padding_guard = false) const;
+  sym::IterMapResult DetectInjective(bool require_padding_guard = false) const;
 
   static void RegisterReflection();
 
@@ -231,10 +231,10 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  ffi::Map<tirx::Var, Range> GetVarMap() const final;
-  Range thread_range_;
-  PrimExpr forward_thread_;
-  PrimExpr replicate_size_;
+  ffi::Map<PrimVar, Range> GetVarMap() const final;
+  ffi::Optional<Range> thread_range_;
+  PrimExpr forward_thread_{0};
+  PrimExpr replicate_size_{1};
 };
 
 /*!
@@ -242,14 +242,15 @@ protected:
  */
 class Fragment : public Layout {
 public:
-  TVM_DLL Fragment(ffi::Array<tirx::IterVar> forward_var,
-                   ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
-                   tirx::IterVar thread_replicate);
+  TVM_TIRX_DLL Fragment(ffi::Array<LayoutIterVar> forward_var,
+                        ffi::Array<PrimExpr> forward_index,
+                        PrimExpr forward_thread,
+                        LayoutIterVar thread_replicate);
 
-  TVM_DLL Fragment(ffi::Array<PrimExpr> input_size,
-                   ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
-                   PrimExpr replicate_size,
-                   ffi::Optional<tirx::Var> replicate_var);
+  TVM_TIRX_DLL Fragment(ffi::Array<PrimExpr> input_size,
+                        ffi::Array<PrimExpr> forward_index,
+                        PrimExpr forward_thread, PrimExpr replicate_size,
+                        ffi::Optional<PrimVar> replicate_var);
 
   /*!
    * \brief Create a fully replicated fragment layout.
@@ -262,8 +263,8 @@ public:
    * \param thread_extent The number of threads.
    * \return A Fragment where each thread has a complete copy of all elements.
    */
-  TVM_DLL static Fragment FullyReplicated(ffi::Array<PrimExpr> shape,
-                                          PrimExpr thread_extent);
+  TVM_TIRX_DLL static Fragment FullyReplicated(ffi::Array<PrimExpr> shape,
+                                               PrimExpr thread_extent);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Fragment, Layout, FragmentNode);
 };
@@ -327,7 +328,7 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
-  PrimExpr combine_size_;
+  PrimExpr combine_size_{1};
 };
 
 /*!
@@ -335,34 +336,34 @@ protected:
  */
 class PartialFragment : public Fragment {
 public:
-  TVM_DLL PartialFragment(ffi::Array<PrimExpr> input_size,
-                          ffi::Array<PrimExpr> forward_index,
-                          PrimExpr forward_thread, PrimExpr replicate_size,
-                          PrimExpr combine_size,
-                          ffi::Optional<tirx::Var> replicate_var,
-                          ffi::Optional<Range> thread_range = std::nullopt);
+  TVM_TIRX_DLL
+  PartialFragment(ffi::Array<PrimExpr> input_size,
+                  ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
+                  PrimExpr replicate_size, PrimExpr combine_size,
+                  ffi::Optional<PrimVar> replicate_var,
+                  ffi::Optional<Range> thread_range = std::nullopt);
 
   /*! \brief Reinterpret a solved Fragment as per-thread partials whose
    *  ENTIRE replication coordinate is addend lanes (combine ==
    *  ReplicateExtent). This is the annotation semantics: the user declares
    *  W combine lanes, copy groups come only from loop replication. */
-  TVM_DLL static PartialFragment FromFragment(const Fragment &fragment);
+  TVM_TIRX_DLL static PartialFragment FromFragment(const Fragment &fragment);
 
   /*! \brief Reinterpret an induced projection (built under the low-bits
    *  convention) as per-thread partials with `combine_size` addend lanes in
    *  the low bits of the replication coordinate. */
-  TVM_DLL static PartialFragment FromInduced(const Fragment &fragment,
-                                             PrimExpr combine_size);
+  TVM_TIRX_DLL static PartialFragment FromInduced(const Fragment &fragment,
+                                                  PrimExpr combine_size);
 
   /*! \brief The wide plan: every participant holds one full-shape partial
    *  (combine == thread_extent, no copy groups). */
-  TVM_DLL static PartialFragment
+  TVM_TIRX_DLL static PartialFragment
   FullyReplicated(ffi::Array<PrimExpr> shape, PrimExpr thread_extent,
                   ffi::Optional<Range> thread_range = std::nullopt);
 
   /*! \brief The same algebraic map read as a plain Fragment: after the
    *  finalize collective every replica holds the combined value. */
-  TVM_DLL Fragment AsPostCollective() const;
+  TVM_TIRX_DLL Fragment AsPostCollective() const;
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(PartialFragment, Fragment,
                                              PartialFragmentNode);
@@ -381,9 +382,9 @@ std::pair<Fragment, PrimExpr>
 CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
                                     const PrimExpr &combine_size);
 
-tirx::Var InputPlaceholder(size_t idx);
-tirx::Var ReplicationPlaceholder();
-tirx::IterVar MakeIterVar(std::string name, PrimExpr dom);
+PrimVar InputPlaceholder(size_t idx);
+PrimVar ReplicationPlaceholder();
+LayoutIterVar MakeIterVar(std::string name, PrimExpr dom);
 
 Fragment MakeGemmFragment8x8();
 Fragment MakeGemmFragment8x8Transposed();
@@ -439,26 +440,27 @@ Layout MakeTensorOpMultiplicand(int mat_stride, int mat_continuous,
 Layout MakeGemmSparseAmpereABLayout(int mat_stride, int mat_continuous,
                                     int elementsize);
 
-Layout MakeSwizzledLayout(const tirx::Buffer &buffer, bool k_inner = true,
+Layout MakeSwizzledLayout(const tirx::TensorVar &buffer, bool k_inner = true,
                           bool allow_pad = true);
-Layout MakeVoltaSwizzledLayout(const tirx::Buffer &buffer, bool is_a = true,
+Layout MakeVoltaSwizzledLayout(const tirx::TensorVar &buffer, bool is_a = true,
                                bool k_inner = true);
-Layout MakeWgmmaSwizzledLayout(const tirx::Buffer &buffer, int continuity = -1,
-                               bool k_inner = true);
-Layout MakeTcgen05MmaSwizzledLayout(const tirx::Buffer &buffer,
+Layout MakeWgmmaSwizzledLayout(const tirx::TensorVar &buffer,
+                               int continuity = -1, bool k_inner = true);
+Layout MakeTcgen05MmaSwizzledLayout(const tirx::TensorVar &buffer,
                                     int continuity = -1, bool k_inner = true);
-Layout MakeFullBankSwizzleLayout(const tirx::Buffer &buffer);
-Layout MakeHalfBankSwizzleLayout(const tirx::Buffer &buffer);
-Layout MakeQuarterBankSwizzleLayout(const tirx::Buffer &buffer);
+Layout MakeFullBankSwizzleLayout(const tirx::TensorVar &buffer);
+Layout MakeHalfBankSwizzleLayout(const tirx::TensorVar &buffer);
+Layout MakeQuarterBankSwizzleLayout(const tirx::TensorVar &buffer);
 
 // Detect which swizzle mode a layout uses
-SwizzleMode DetectSwizzleMode(const Layout &layout, const tirx::Buffer &buffer);
+SwizzleMode DetectSwizzleMode(const Layout &layout,
+                              const tirx::TensorVar &buffer);
 
 // Merge two swizzle layouts by taking the smaller granularity
 // Returns NullOpt if either layout is not a swizzle layout
 ffi::Optional<Layout> MergeSwizzleLayouts(const Layout &layout1,
                                           const Layout &layout2,
-                                          const tirx::Buffer &buffer);
+                                          const tirx::TensorVar &buffer);
 
 namespace attr {
 // BlockAttr, Containing the layout for all the buffers in the block

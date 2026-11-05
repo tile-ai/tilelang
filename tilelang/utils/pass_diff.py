@@ -7,13 +7,12 @@ Usage
     from tilelang.utils.pass_diff import pass_diff
 
     # Single pass, terminal colored diff
-    pass_diff(func, tilelang.transform.ThreadSync("shared"))
+    pass_diff(func, tilelang.transform.Simplify())
 
     # Pass chain with named steps
     pass_diff(func, [
-        ("AnnotateDeviceRegions", tvm.tirx.transform.AnnotateDeviceRegions()),
-        ("SplitHostDevice",       tvm.tirx.transform.SplitHostDevice()),
-        ("ThreadSync",            tilelang.transform.ThreadSync("shared")),
+        ("Simplify", tilelang.transform.Simplify()),
+        ("RemoveNoOp", tilelang.transform.RemoveNoOp()),
     ])
 
     # Generate HTML report
@@ -27,6 +26,7 @@ from __future__ import annotations
 
 import difflib
 import html as html_module
+import json
 import os
 from typing import TYPE_CHECKING
 
@@ -48,7 +48,7 @@ _RESET = "\033[0m"
 
 
 def _to_mod(func_or_mod) -> IRModule:
-    """Convert a PrimFunc or IRModule to IRModule."""
+    """Convert a Function or IRModule to IRModule."""
     from tilelang import tvm
 
     if isinstance(func_or_mod, tvm.IRModule):
@@ -57,8 +57,24 @@ def _to_mod(func_or_mod) -> IRModule:
 
 
 def _get_script(mod: IRModule) -> str:
-    """Get the TIR script text from an IRModule."""
-    return mod.script()
+    """Capture diagnostic IR without letting unsupported printing stop a pass.
+
+    The upstream printer cannot express every native metadata value, including
+    an IRModule retained inside another module's attributes. Keep that error
+    visible and capture native JSON instead. This text is for diagnostics, not
+    a replacement for TVMScript parsing or the cache's serialization contract.
+    """
+    try:
+        return mod.script()
+    except Exception as script_error:
+        from tvm_tirx import ir
+
+        notice = f"# TVMScript capture failed ({type(script_error).__name__}): {script_error}\n"
+        try:
+            snapshot = json.dumps(json.loads(ir.save_json(mod)), indent=2, ensure_ascii=False)
+        except Exception as json_error:
+            return notice + f"# Native IR JSON capture also failed ({type(json_error).__name__}): {json_error}"
+        return notice + "# Snapshot format: native IR JSON (not TVMScript)\n" + snapshot
 
 
 def _compute_diff(
@@ -1039,7 +1055,7 @@ def pass_diff(
 
     Parameters
     ----------
-    func_or_mod : PrimFunc or IRModule
+    func_or_mod : Function or IRModule
         The starting IR.
     passes : Pass or list[Pass] or list[tuple[str, Pass]]
         A single pass, a list of passes, or a list of (name, pass) pairs.

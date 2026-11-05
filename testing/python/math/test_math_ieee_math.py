@@ -6,7 +6,8 @@ import pytest
 
 ROUNDING_MODES = ["rn", "rz", "ru", "rd"]
 
-# (dtype, rounding_mode) pairs that must compile and produce correct results.
+# (dtype, rounding_mode) pairs that must compile. The rn cases also invoke the
+# kernel; result presence below does not establish directed-rounding accuracy.
 # - fp32/fp64: all four IEEE rounding modes are natively supported by CUDA.
 # - fp16/bf16: only round-to-nearest-even is available.
 IEEE_DTYPE_MODES = [
@@ -132,7 +133,7 @@ def run_ieee_math_test(
     if not run_execution:
         return
 
-    # Test numerical execution
+    # Test invocation. Keep numerical accuracy separate from result presence.
     torch_dtype = dtype.as_torch()
     a = torch.randn(M, N, device="cuda", dtype=torch_dtype)
 
@@ -148,18 +149,15 @@ def run_ieee_math_test(
         b = torch.abs(b) + 0.1  # Avoid division by zero
 
     # Execute kernel
-    try:
-        if num_inputs == 1:
-            result = kernel(a)
-        elif num_inputs == 2:
-            result = kernel(a, b)
-        else:  # num_inputs == 3
-            result = kernel(a, b, c)
+    if num_inputs == 1:
+        result = kernel(a)
+    elif num_inputs == 2:
+        result = kernel(a, b)
+    else:  # num_inputs == 3
+        result = kernel(a, b, c)
 
-        assert result is not None
-        print(f"✓ {mathop_name} numerical execution test passed")
-    except Exception as e:
-        print(f"Warning: {mathop_name} execution failed: {e}")
+    assert result is not None
+    print(f"✓ {mathop_name} invocation completed")
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +177,7 @@ def test_rounding_mode_validation():
 
 
 # ---------------------------------------------------------------------------
-# Numerical tests — every (op × dtype × rounding_mode) valid combination
+# Compile every valid combination; invoke the round-to-nearest cases
 # ---------------------------------------------------------------------------
 
 
@@ -187,8 +185,7 @@ def test_rounding_mode_validation():
 @pytest.mark.parametrize("op_name,op_func", IEEE_OPS_WITH_RM)
 @pytest.mark.parametrize("dtype,mode", IEEE_DTYPE_MODES)
 def test_ieee_with_rounding_mode(op_name, op_func, dtype, mode):
-    """Compile + run every IEEE op across fp32 / fp64 / fp16 / bf16 and all rounding
-    modes that the hardware supports."""
+    """Compile supported IEEE dtype/mode combinations and invoke rn kernels."""
     run_ieee_math_test(op_name, op_func, rounding_mode=mode, dtype=dtype, run_execution=(mode == "rn"))
 
 

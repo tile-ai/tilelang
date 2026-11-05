@@ -1,34 +1,38 @@
 """DMA bounds are clamped without introducing scheduling-time copy guards."""
 
+from tvm_tirx import ir
+import tvm_ffi
+from testing.ascend._ir import access_tensor, sblock, sblocks, substitute, tensor
+
 import pytest
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_nz_layout, make_ascend_major_k_layout
-from tvm import tirx
+from tvm_tirx import tirx
 from testing.ascend._ir import calls, nodes
 
 
 def _copy_module(src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_extent=None, *, scope="shared.l1", transpose=False):
-    src = tirx.decl_buffer(src_shape, "bfloat16", name="src")
-    dst = tirx.decl_buffer(dst_shape, "bfloat16", name="dst", scope=scope)
+    src = tensor(src_shape, "bfloat16", name="src")
+    dst = tensor(dst_shape, "bfloat16", name="dst", scope=scope)
 
     def region(buffer, mask, mins, extents):
-        return tirx.Call("handle", tvm.ir.Op.get("tl.region"), [buffer[tuple(mins)], mask, *extents])
+        return ir.TensorRegion(
+            buffer, [ir.Range.from_min_extent(start, extent) for start, extent in zip(mins, extents)], ir.TensorRegionType()
+        )
 
-    copy = tirx.Call(
-        "handle",
+    copy = tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
+        ir.PrimType("void"),
         tvm.ir.Op.get("tl.tileop.ascend_copy"),
-        [
-            region(src, 1, src_min, src_extent),
-            region(dst, 2, dst_min or [0] * len(dst_shape), dst_extent or dst_shape),
-        ],
-        annotations={"transpose": tirx.IntImm("int32", 1)} if transpose else {},
+        [region(src, 1, src_min, src_extent), region(dst, 2, dst_min or [0] * len(dst_shape), dst_extent or dst_shape)],
+        {"transpose": ir.IntImm("int32", 1)} if transpose else {},
+        ir.UnknownLoc(),
     )
     annotations = {"layout_map": {dst: make_ascend_nz_layout(dst)}} if scope == "shared.l1" else {}
-    root = tirx.SBlock([], [], [], "root", tirx.Evaluate(copy), alloc_buffers=[dst], annotations=annotations)
-    body = tirx.SBlockRealize([], True, root)
-    params = [src.data, *tirx.analysis.undefined_vars(body, [src.data])]
-    return tvm.IRModule({"main": tirx.PrimFunc(params, body, buffer_map={src.data: src})})
+    root = sblock("root", ir.Evaluate(copy), buffers=[dst], annotations=annotations)
+    body = root
+    params = [src, *tirx.analysis.undefined_vars(body, [src])]
+    return tvm.IRModule({"main": tirx.Function(params, body)})
 
 
 @pytest.mark.parametrize("transpose", [False, True], ids=["direct", "transpose"])
@@ -36,15 +40,19 @@ def test_clamped_copy_and_padding_use_destination_axes(transpose):
     before = _copy_module((8, 10) if transpose else (10, 8), (16, 32), [0, 0], [32, 16] if transpose else [16, 32], transpose=transpose)
     after = transform.AscendInsertOOBPadding()(before)
     (copy,) = calls(after, "tl.tileop.ascend_copy")
-    assert [int(x) for x in copy.args[0].args[2:]] == ([8, 10] if transpose else [10, 8])
-    assert [int(x) for x in copy.args[1].args[2:]] == [10, 8]
+    assert [int(axis.extent) for axis in copy.args[0].region] == ([8, 10] if transpose else [10, 8])
+    assert [int(axis.extent) for axis in copy.args[1].region] == [10, 8]
     fills = calls(after, "tl.tileop.fill")
     regions = {
-        tuple(int(tvm.arith.Analyzer().simplify(x)) for x in [*call.args[0].args[0].indices, *call.args[0].args[2:]]) for call in fills
+        tuple(
+            int(tvm.sym.Analyzer().simplify(x))
+            for x in [*[axis.begin for axis in call.args[0].region], *[axis.extent for axis in call.args[0].region]]
+        )
+        for call in fills
     }
     assert regions == {(0, 16, 16, 16), (10, 0, 6, 32)}
     assert all(float(call.args[1]) == 0 for call in fills)
-    assert not nodes(after, tirx.IfThenElse)
+    assert not nodes(after, ir.If)
 
 
 @pytest.mark.parametrize("axis", ["row", "col"])
@@ -58,7 +66,7 @@ def test_padding_requires_the_complete_orthogonal_axis(axis, complete):
         before = _copy_module((32, 128), (32, 64), [0, 112], [width, 64], dst_extent=[width, 64])
         message = "covering the full row axis"
     if not complete:
-        with pytest.raises(tvm.error.InternalError, match=message):
+        with pytest.raises(RuntimeError, match=message):
             transform.AscendInsertOOBPadding()(before)
     else:
         after = transform.AscendInsertOOBPadding()(before)
@@ -78,23 +86,32 @@ def test_in_bounds_copy_does_not_fill_extra_storage(case):
 
 
 def test_tile_aligned_opaque_offset_has_no_partial_row_padding():
-    index = tirx.decl_buffer((1,), "int32", scope="local.var")[0]
+    index = tensor((1,), "int32", scope="local.var")[0]
     before = _copy_module((64, 16), (16, 16), [index * 16, 0], [16, 16])
     after = transform.AscendInsertOOBPadding()(before)
     assert not calls(after, "tl.tileop.fill")
 
 
 def test_dynamic_copy_clamps_extents_without_guarding_the_first_write():
-    rows, group = tirx.Var("rows", "int32"), tirx.Var("group", "int32")
+    rows, group = ir.Var("rows", "int32"), ir.Var("group", "int32")
     before = _copy_module((4, 16, 64), (16, 64), [group, 0, 0], [1, rows, 64], dst_extent=[rows, 64], scope="shared.dyn")
     after = transform.AscendInsertOOBPadding()(before)
-    assert not nodes(after, tirx.IfThenElse)
+    assert not nodes(after, ir.If)
     (copy,) = calls(after, "tl.tileop.ascend_copy")
-    assert isinstance(after["main"].body.block.body, tirx.Evaluate)
+    # Native allocation/metadata definitions precede the same unguarded first
+    # write directly in the root; no intervening loop or region may guard it.
+    (root,) = sblocks(after, "root")
+    assert isinstance(root.body, ir.SeqStmt)
+    assert isinstance(root.body.seq[-1], ir.Evaluate) and root.body.seq[-1].value.same_as(copy)
+    assert all(
+        (isinstance(statement, ir.Bind) and statement.value.op.name in {"tirx.alloc_tensor", "tirx.decl_tensor"})
+        or (isinstance(statement, ir.Evaluate) and isinstance(statement.value, ir.Call) and statement.value.op.name == "tl.annotation")
+        for statement in root.body.seq[:-1]
+    )
     for group_value, row_count in [(0, 0), (0, 5), (3, 16), (4, 5)]:
         actual = [
-            int(tvm.arith.Analyzer().simplify(tirx.stmt_functor.substitute(x, {rows: row_count, group: group_value})))
-            for x in copy.args[0].args[2:]
+            int(tvm.sym.Analyzer().simplify(substitute(x, {rows: row_count, group: group_value})))
+            for x in [axis.extent for axis in copy.args[0].region]
         ]
         assert actual == [int(group_value < 4), row_count, 64]
 
@@ -105,39 +122,36 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128, dtype="float8_e4m3fn"):
     dst_transposed = layout == "mn-contiguous"
     src_shape = (k_alloc, mn) if src_transposed else (mn, k_alloc)
     dst_shape = (k_alloc, mn) if dst_transposed else (mn, k_alloc)
-    a = tirx.decl_buffer(src_shape, dtype, name="A")
-    l1 = tirx.decl_buffer(dst_shape, dtype, name="l1", scope="shared.l1")
-    scale = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="scale", scope="shared.l1")
-    l0a = tirx.decl_buffer(dst_shape, dtype, name="l0a", scope="shared.l0a")
-    l0b = tirx.decl_buffer((mn, k_alloc), dtype, name="l0b", scope="shared.l0b")
-    sfa = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="sfa", scope="shared.l0a.sf")
-    sfb = tirx.decl_buffer((mn, k_alloc // 64), "int16", name="sfb", scope="shared.l0b.sf")
-    acc = tirx.decl_buffer((mn, mn), "float32", name="acc", scope="shared.l0c")
+    a = tensor(src_shape, dtype, name="A")
+    l1 = tensor(dst_shape, dtype, name="l1", scope="shared.l1")
+    scale = tensor((mn, k_alloc // 64), "int16", name="scale", scope="shared.l1")
+    l0a = tensor(dst_shape, dtype, name="l0a", scope="shared.l0a")
+    l0b = tensor((mn, k_alloc), dtype, name="l0b", scope="shared.l0b")
+    sfa = tensor((mn, k_alloc // 64), "int16", name="sfa", scope="shared.l0a.sf")
+    sfb = tensor((mn, k_alloc // 64), "int16", name="sfb", scope="shared.l0b.sf")
+    acc = tensor((mn, mn), "float32", name="acc", scope="shared.l0c")
 
     def region(buffer, transposed):
         shape = (actual_k, mn) if transposed else (mn, actual_k)
-        return tirx.BufferRegion(buffer, [tvm.ir.Range.from_min_extent(0, extent) for extent in shape])
+        return ir.TensorRegion(buffer, [tvm.ir.Range.from_min_extent(0, extent) for extent in shape], ir.TensorRegionType())
 
     # The MX load and consumer identify the semantic K axis. Their other inputs
     # are already available at this pass boundary; no full kernel is needed.
-    body = tirx.SeqStmt(
+    body = ir.SeqStmt(
         [
-            tirx.Evaluate(T.copy(region(a, src_transposed), region(l1, dst_transposed), transpose=src_transposed != dst_transposed)),
-            tirx.Evaluate(T.copy(l1, l0a)),
-            tirx.Evaluate(T.copy(scale, sfa)),
-            tirx.Evaluate(T.gemm_blockscaled(l0a, l0b, acc, sfa, sfb, transpose_A=dst_transposed, transpose_B=True, clear_accum=True)),
+            ir.Evaluate(T.copy(region(a, src_transposed), region(l1, dst_transposed), transpose=src_transposed != dst_transposed)),
+            ir.Evaluate(T.copy(l1, l0a)),
+            ir.Evaluate(T.copy(scale, sfa)),
+            ir.Evaluate(T.gemm_blockscaled(l0a, l0b, acc, sfa, sfb, transpose_A=dst_transposed, transpose_B=True, clear_accum=True)),
         ]
     )
-    root = tirx.SBlock(
-        [],
-        [],
-        [],
+    root = sblock(
         "root",
         body,
-        alloc_buffers=[l1, scale, l0a, l0b, acc, sfa, sfb],
-        annotations={"tl.l0_sf_bindings": {sfa.data: l0a.data, sfb.data: l0b.data}, "layout_map": {l1: make_ascend_major_k_layout(l1)}},
+        buffers=[l1, scale, l0a, l0b, acc, sfa, sfb],
+        annotations={"tl.l0_sf_bindings": {sfa: l0a, sfb: l0b}, "layout_map": {l1: make_ascend_major_k_layout(l1)}},
     )
-    return tvm.IRModule({"main": tirx.PrimFunc([a.data], tirx.SBlockRealize([], True, root), buffer_map={a.data: a})}), l1
+    return tvm.IRModule({"main": tirx.Function([a], root)}), l1
 
 
 @pytest.mark.parametrize(
@@ -166,17 +180,17 @@ def test_mx_copy_pads_only_the_unwritten_k_tail(dtype, layout, actual_k, tail):
     if tail is None:
         return
     (fill,) = fills
-    dst, value = fill.args
-    assert dst.args[0].buffer.same_as(l1)
+    dst, value = fill.args[:2]
+    assert access_tensor(dst).same_as(l1)
     assert float(value) == 0
     k_axis = 0 if layout == "mn-contiguous" else 1
     start, extent = tail
-    assert [int(index) for index in dst.args[0].indices] == ([start, 0] if k_axis == 0 else [0, start])
+    assert [int(axis.begin) for axis in dst.region] == ([start, 0] if k_axis == 0 else [0, start])
     mn = 64 if dtype == "float4_e2m1fn" else 32
-    assert [int(size) for size in dst.args[2:]] == ([extent, mn] if k_axis == 0 else [mn, extent])
+    assert [int(axis.extent) for axis in dst.region] == ([extent, mn] if k_axis == 0 else [mn, extent])
     # Padding must follow the GM write and precede the MX operand's L1 read.
     copies = calls(after, "tl.tileop.ascend_copy")
-    operations = nodes(after, tirx.Call)
+    operations = nodes(after, ir.Call)
 
     def position(call):
         return next(i for i, candidate in enumerate(operations) if candidate.same_as(call))
@@ -186,5 +200,5 @@ def test_mx_copy_pads_only_the_unwritten_k_tail(dtype, layout, actual_k, tail):
 
 def test_mx_padding_rejects_an_incomplete_physical_scale_group():
     before, _ = _mx_operand_copy("k-contiguous", 96, k_alloc=96)
-    with pytest.raises(tvm.error.InternalError, match="divisible by 64"):
+    with pytest.raises(ValueError, match="divisible by 64"):
         transform.AscendInsertOOBPadding()(before)

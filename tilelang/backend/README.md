@@ -272,7 +272,8 @@ configure those headers must be supplied through compiler flags, such as
 Backend builders pass `tl.emit_line_directives` to `SetEmitLineDirectives`.
 The default is off. A custom `AddFunction` implementation must call
 `PreFunctionBody` after its compiler-generated prologue to emit the function
-entry span before printing the body.
+entry `Location` before printing the body; `SourceLoc` and `CallSiteLoc`
+are consumed without reconstructing legacy `Span` objects.
 
 ## Execution Backend Compatibility
 
@@ -303,7 +304,7 @@ invoke target-owned compiler callbacks during Build, but those callbacks do not
 make JIT/Runtime a target-backend implementation area.
 
 A target's `ExecutionBackendSpec` may provide an optional `wrap_callable`
-callback. It receives the execution callable and the kernel's `PrimFunc`, and
+callback. It receives the execution callable and the kernel's native `Function`, and
 returns the callable to install. Shared JIT invokes it once per fresh adapter
 after compilation, disk-cache loading, or grouped compilation. It uses the
 already selected spec in `BackendContext`; adapters do not import target-owned

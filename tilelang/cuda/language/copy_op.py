@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.copy_op import (

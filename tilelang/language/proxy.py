@@ -6,9 +6,11 @@ from typing import Any, TYPE_CHECKING, Generic, TypeVar
 from tilelang._typing import DType, ShapeType
 from typing_extensions import Self
 
-from tvm import DataType, ir as tvm_ir, tirx
-from tvm.tirx import Var, PrimExpr
-from tvm.tirx.script.builder import bind, buffer, handle, match_buffer
+from tvm_ffi import dtype as DataType
+from tvm_tirx import ir as tvm_ir
+from tilelang.language import _native as tirx
+from tilelang.language._native import Var, PrimExpr
+from tilelang.language._native import bind, buffer, handle, match_buffer
 from tilelang.utils import deprecated
 from tilelang.jit.exceptions import JITNoBuilderError
 
@@ -155,13 +157,9 @@ class TensorProxy(BaseTensorProxy):
     """
 
     def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> tirx.Buffer:
-        # Imported lazily: `tilelang.language.eager` pulls in the builder, which
-        # imports this module transitively.
-        from tilelang.language.eager.utils import construct_strides
-
         if isinstance(shape, (int, PrimExpr)):
             shape = (shape,)
-        return super().__call__(shape, dtype=dtype, strides=construct_strides(shape), data=data, scope=scope)
+        return super().__call__(shape, dtype=dtype, data=data, scope=scope)
 
 
 class StridedTensorProxy(BaseTensorProxy):
@@ -274,7 +272,8 @@ def ptr(dtype: DType | None = None, storage_scope: str = "global", *, is_size_va
         The storage scope of the pointer.
 
     is_size_var: bool
-        Whether or not to return a SizeVar instead of Var.
+        Retained for source compatibility. Native pointer Vars have no numerical
+        nonnegative domain, regardless of this keyword.
 
     Returns
     -------
@@ -284,9 +283,9 @@ def ptr(dtype: DType | None = None, storage_scope: str = "global", *, is_size_va
     return handle(dtype=dtype, storage_scope=storage_scope, is_size_var=is_size_var)
 
 
-def _get_pointer_type_annotation(value: object) -> tvm_ir.PointerType | None:
-    type_annotation = getattr(value, "type_annotation", None)
-    if isinstance(type_annotation, tvm_ir.PointerType):
+def _get_pointer_type_annotation(value: object) -> tvm_ir.PtrType | None:
+    type_annotation = getattr(value, "ty", None)
+    if isinstance(type_annotation, tvm_ir.PtrType):
         return type_annotation
     return None
 
@@ -298,8 +297,8 @@ def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: 
     if builder is None:
         raise JITNoBuilderError("T.make_tensor() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
-    value = addr if str(addr.dtype) == "handle" else tirx.reinterpret("handle", addr)
-    ptr_type = tvm_ir.PointerType(tvm_ir.PrimType(DataType(dtype)), storage_scope)
+    ptr_type = tvm_ir.PtrType(tvm_ir.PrimType(DataType(dtype)), storage_scope)
+    value = addr if getattr(addr, "ty", None) == ptr_type else tirx.reinterpret(addr, ty=ptr_type)
     return bind(value, type_annotation=ptr_type)
 
 
@@ -335,5 +334,5 @@ def make_tensor(
         return Tensor.from_ptr(ptr, shape, dtype, strides)
 
     ptr_type = _get_pointer_type_annotation(ptr)
-    storage_scope = ptr_type.storage_scope if ptr_type is not None and ptr_type.storage_scope else "global"
+    storage_scope = ptr_type.scope if ptr_type is not None and ptr_type.scope else "global"
     return make_tensor_from_addr(ptr, shape, dtype=dtype, strides=strides, storage_scope=storage_scope)

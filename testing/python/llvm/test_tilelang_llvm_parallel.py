@@ -1,11 +1,12 @@
 import pytest
+import tvm_ffi
 import torch
 
 import tilelang
 import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir
 
 M = N = K = 256
 BLOCK_M = BLOCK_N = 64
@@ -36,8 +37,8 @@ def _parallel_loop_count(func, pass_configs):
     loops = []
     for mod in (lowered.host_mod, lowered.device_mod):
         for func in mod.functions.values():
-            tirx.stmt_functor.post_order_visit(
-                func.body, lambda node: loops.append(node) if isinstance(node, tirx.For) and node.kind == tirx.ForKind.PARALLEL else None
+            tvm_ffi.structural_walk(
+                func.body, (ir.For, lambda node: loops.append(node) if node.kind == ir.ForKind.PARALLEL else None), order="post"
             )
     return len(loops)
 

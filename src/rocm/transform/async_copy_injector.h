@@ -1,12 +1,12 @@
 #pragma once
 
-#include <tvm/tirx/stmt.h>
+#include <tvm/ir/stmt.h>
 
 namespace tvm {
 namespace tl {
 
 struct ROCmAsyncCopyInjectResult {
-  tvm::tirx::Stmt stmt;
+  tvm::Stmt stmt;
   bool injected_rocm_async_copy{false};
 };
 
@@ -14,11 +14,11 @@ struct ROCmAsyncCopyInjectResult {
  *
  * This is the statement-level entrypoint used by other transforms to apply the
  * same rewrite as ROCm async-copy lowering, but scoped to a region (e.g., a
- * lowered parallel loop) rather than the whole PrimFunc. Callers decide whether
- * a region should use async-copy lowering before invoking this helper.
+ * lowered parallel loop) rather than the whole native Function. Callers decide
+ * whether a region should use async-copy lowering before invoking this helper.
  */
 ROCmAsyncCopyInjectResult
-InjectROCmAsyncCopy(const tvm::tirx::Stmt &body,
+InjectROCmAsyncCopy(const tvm::Stmt &body,
                     bool async_without_async_commit_wait = false);
 
 } // namespace tl

@@ -5,8 +5,11 @@ import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
-from tvm import tirx
+from tvm_tirx import ir
 
+
+# Direct pipeline tests initialize the owning lowering callbacks explicitly.
+tl.cuda.register_backend()
 
 sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
 sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
@@ -34,14 +37,14 @@ def _count_extern_calls_with_prefix(stmt, prefix: str):
     return sum(
         1
         for call in collect_calls(stmt, op="tirx.call_extern")
-        if call.args and isinstance(call.args[0], tirx.StringImm) and call.args[0].value.startswith(prefix)
+        if call.args and isinstance(call.args[0], ir.StringImm) and call.args[0].value.startswith(prefix)
     )
 
 
 def _tcgen05_ld_call(tmem_ref, local_buf):
     return T.call_intrin(
         "handle",
-        tirx.op.Op.get("tl.tcgen05_ld"),
+        ir.Op.get("tl.tcgen05_ld"),
         32,
         128,
         False,
@@ -127,14 +130,14 @@ def test_blockscaled_issue_without_arrive_gets_handoff_fences():
             T.ptx_arrive_barrier(barrier[0])
 
     body = _apply(before)["main"].body
-    calls = [str(getattr(call.op, "name", "")) for call in collect_nodes(body, tirx.Call)]
+    calls = [str(getattr(call.op, "name", "")) for call in collect_nodes(body, ir.Call)]
     assert_call_count(body, op="tl.tcgen05_after_thread_sync", count=1)
     assert_call_count(body, op="tl.tcgen05_before_thread_sync", count=1)
     assert_call_count(body, op="tl.tcgen05_mma_arrive", count=0)
     assert calls.index("tl.mbarrier_wait_parity") < calls.index("tl.tcgen05_after_thread_sync")
     assert calls.index("tl.tcgen05_after_thread_sync") < calls.index("tl.ptx_tcgen05_mma_blockscaled_ss")
     assert calls.index("tl.ptx_tcgen05_mma_blockscaled_ss") < calls.index("tl.tcgen05_before_thread_sync")
-    assert calls.index("tl.tcgen05_before_thread_sync") < calls.index("tirx.ptx_arrive_barrier")
+    assert calls.index("tl.tcgen05_before_thread_sync") < calls.index("tl.ptx_arrive_barrier")
 
 
 @tilelang.testing.requires_cuda

@@ -1,8 +1,7 @@
 import torch
 import torch.backends
 import tilelang.testing
-from tilelang import tvm as tvm
-from tvm import DataType
+from tvm_ffi import dtype as DataType
 import tilelang.language as T
 
 tilelang.testing.set_random_seed(0)
@@ -11,6 +10,64 @@ tilelang.testing.set_random_seed(0)
 def _unpack_unsigned_int4_to_half(qB):
     qB = qB.to(torch.uint8)
     return torch.stack((qB & 0x0F, qB >> 4), dim=-1).reshape(qB.shape[0], qB.shape[1] * 2).to(torch.half)
+
+
+def _ladder_permutate_int4(qB, transform_kind, datatype="float16"):
+    """Arrange packed B bytes for the existing Ladder MMA load contract.
+
+    Stage one splits 16-row tiles, stage two permutes the lanes loaded by
+    ldmatrix, and stage three writes each lane's register values consecutively.
+    All operations move bytes; the two nibbles in each byte remain unchanged.
+    """
+    if qB.ndim != 2 or qB.dtype != torch.int8:
+        raise ValueError("packed B must be a two-dimensional int8 tensor")
+    if datatype not in ("float16", "int8") or transform_kind not in (1, 2, 3):
+        raise ValueError("Ladder int4 supports float16/int8 and stages 1, 2, 3")
+    tile_k = 16 if datatype == "float16" else 32
+    packed_k = tile_k // 2
+    rows, columns = qB.shape
+    if rows % 16 or columns % packed_k:
+        raise ValueError("packed B must contain complete 16-row MMA tiles")
+    tiles = qB.reshape(rows // 16, 16, columns // packed_k, packed_k).permute(0, 2, 1, 3).contiguous()
+    if transform_kind == 1:
+        return tiles
+
+    row = torch.arange(16, device=qB.device)[:, None]
+    column = torch.arange(packed_k, device=qB.device)[None, :]
+    lane = row * 2 + (column * 2) // packed_k
+    local = (column * 2) % packed_k
+    source_row = (lane // 16) * 8 + lane % 8
+    source_column = (packed_k * ((lane % 16) // 8) + local) // 2
+    tiles = tiles[..., source_row, source_column]
+    if transform_kind == 2:
+        return tiles.contiguous()
+
+    # Scatter is the inverse gather of the stage-three coordinate map.
+    group = tile_k // 8
+    register_lane = (lane % 8) * 4 + local // group
+    register_local = (lane // 8) * group + local % group
+    linear = register_lane * packed_k + register_local
+    destination_row = linear // tile_k
+    destination_column = (linear % tile_k) // 2
+    result = torch.empty_like(tiles)
+    result[..., destination_row, destination_column] = tiles
+    return result.contiguous()
+
+
+def _lop3_permutate_int4(packed, datatype="float16"):
+    """Interleave four packed bytes for decode_i4u_to_f16's paired lanes."""
+    if packed.dtype != torch.int8 or packed.numel() % 4:
+        raise ValueError("LOP3 int4 requires complete groups of four int8 bytes")
+    if datatype not in ("float16", "int8"):
+        raise ValueError("LOP3 int4 supports float16 and int8 lane widths")
+    bits_stride = 16 if datatype == "float16" else 8
+    groups = 32 // bits_stride
+    words = packed.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    result = torch.zeros_like(words)
+    for offset in range(8):
+        shift = (offset % groups) * bits_stride + (offset // groups) * 4
+        result |= ((words >> (offset * 4)) & 15) << shift
+    return result.to(torch.int32).view(torch.int8).reshape(packed.shape)
 
 
 @tilelang.jit(out_idx=[2])
@@ -133,7 +190,6 @@ def run_gemm(
     profiler.assert_allclose(ref_program)
 
 
-@tvm.testing.requires_package("bitblas")
 def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
     M,
     N,
@@ -148,7 +204,7 @@ def tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(
         TensorCoreIntrinEmitterWithLadderTransform,
     )
 
-    from bitblas.gpu.intrin.lop3 import decode_i4_to_f16
+    from quantize.lop3 import decode_i4_to_f16
 
     assert in_dtype in [
         T.float16,
@@ -363,8 +419,6 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     accum_dtype,
     transform_b,
 ):
-    import bitblas
-
     matmul = tl_matmul_with_ladder_weight_only_transform_block_reduce_int4(M, N, K, in_dtype, out_dtype, accum_dtype, transform_b)
 
     kernel = tilelang.compile(matmul, out_idx=[2])
@@ -381,30 +435,8 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     qB = torch.randint(0, 127, (N, K // num_elems_per_byte), device="cuda", dtype=getattr(torch, storage_dtype))
     C = torch.zeros(M, N, device="cuda", dtype=getattr(torch, accum_dtype))
 
-    ladder_permutate_config = bitblas.ops.LadderPermutateConfig(
-        M=N,
-        N=K,
-        transform_kind=transform_b,
-        transpose_matrix=True,
-        dequantize_bits=num_bits,
-        storage_dtype=storage_dtype,
-    )
-
-    ladder_permutate = bitblas.ops.LadderPermutate(ladder_permutate_config)
-
-    lop3_permutate_config = bitblas.ops.LOP3PermutateConfig(
-        M=N,
-        N=K,
-        datatype=in_dtype,
-        dequantize_bits=num_bits,
-        storage_dtype=storage_dtype,
-    )
-    lop3_permutate = bitblas.ops.LOP3Permutate(
-        config=lop3_permutate_config,
-        target=tvm.target.Target("llvm"),
-    )
-    QLB = ladder_permutate(qB.cpu()).cuda()
-    QLB = lop3_permutate(QLB.cpu()).cuda()
+    QLB = _ladder_permutate_int4(qB.cpu(), transform_b)
+    QLB = _lop3_permutate_int4(QLB, in_dtype).cuda()
 
     kernel(A, QLB, C)
 
@@ -422,13 +454,11 @@ def assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correct
     torch.testing.assert_close(C, ref_c, rtol=1e-2, atol=1e-2)
 
 
-@tilelang.testing.requires_package("bitblas")
 def test_run_dequantize_gemm():
     run_gemm(256, 256, 256, T.float16, T.float16, T.float16, 128, 128, 32, num_threads=128)
     run_gemm(256, 256, 256, T.int8, T.int32, T.int32, 128, 128, 32, num_threads=128)
 
 
-@tilelang.testing.requires_package("bitblas")
 def test_assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4():
     assert_tl_matmul_with_ladder_weight_only_transform_block_reduce_int4_correctness(256, 1024, 512, T.float16, T.float16, T.float16, 3)
 

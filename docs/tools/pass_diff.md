@@ -54,7 +54,9 @@ process exit.
 :alt: Pass Diff HTML report showing TIR before and after a compiler pass
 :align: center
 
-Pass Diff HTML report.
+Historical Pass Diff HTML report from before the native TIRx migration.
+The current report retains this before/after layout and displays the native
+IR and operator names produced by the selected compiler.
 ```
 
 The HTML viewer provides side-by-side before and after source, collapsible pass
@@ -70,7 +72,7 @@ debugging overhead. Leave the feature disabled for normal builds and benchmarks.
 
 ## Compare Selected Passes
 
-The `pass_diff` Python API accepts a `PrimFunc` or `IRModule` and applies the
+The `pass_diff` Python API accepts a `Function` or `IRModule` and applies the
 provided passes in order:
 
 ```python
@@ -81,9 +83,8 @@ from tilelang.utils.pass_diff import pass_diff
 steps = pass_diff(
     func,
     [
-        ("AnnotateDeviceRegions", tvm.tirx.transform.AnnotateDeviceRegions()),
-        ("SplitHostDevice", tvm.tirx.transform.SplitHostDevice()),
-        ("ThreadSync", tilelang.transform.ThreadSync("shared")),
+        ("Simplify", tilelang.transform.Simplify()),
+        ("RemoveNoOp", tvm.tirx.transform.RemoveNoOp()),
     ],
     mode="both",
     context=5,
@@ -94,12 +95,12 @@ steps = pass_diff(
 A single unnamed pass is also accepted:
 
 ```python
-steps = pass_diff(func, tilelang.transform.ThreadSync("shared"))
+steps = pass_diff(func, tilelang.transform.Simplify())
 ```
 
 | Parameter | Description | Default |
 | --- | --- | --- |
-| `func_or_mod` | Starting `PrimFunc` or `IRModule`; a `PrimFunc` is wrapped as `main` | Required |
+| `func_or_mod` | Starting `Function` or `IRModule`; a `Function` is wrapped as `main` | Required |
 | `passes` | One pass, a list of passes, or a list of `(name, pass)` pairs | Required |
 | `mode` | `terminal`, `html`, or `both` | `terminal` |
 | `context` | Unchanged context lines included around each diff hunk | `3` |
@@ -117,13 +118,16 @@ The return value contains one dictionary per pass with these fields:
 | `deletions` | Number of removed lines |
 | `changed` | Whether the pass changed the rendered TIR |
 
-For example, a test can assert that a transformation introduced an expected
-intrinsic:
+For example, verify that a cleanup pass removes an explicit no-op:
 
 ```python
-steps = pass_diff(func, tilelang.transform.ThreadSync("shared"))
+from tilelang import tvm
+from tilelang.utils.pass_diff import pass_diff
+
+noop = tvm.tirx.Function([], [tvm.ir.Evaluate(tvm.ir.const(1))])
+steps = pass_diff(noop, tvm.tirx.transform.RemoveNoOp())
 assert steps[0]["changed"]
-assert "tvm_storage_sync" in steps[0]["after_script"]
+assert "T.evaluate(" not in steps[0]["after_script"]
 ```
 
 Do not enable the process-wide `TILELANG_PASS_DIFF` hook when using the

@@ -75,11 +75,17 @@ def test_scheduled_bind_with_replayed_input_runtime():
                 value: T.float32 = shared[tx] + bias
                 B[k * 32 + tx] = value
 
-    mod = tilelang.transform.InjectSoftwarePipeline()(tilelang.tvm.IRModule.from_expr(main))
+    # The three tensors below are separately allocated. The original CUDA
+    # lowering also marked the emitted kernel noalias; provide that caller
+    # contract explicitly to this direct, earlier pipeline-pass invocation.
+    scheduled = main.with_attr("tirx.noalias", True)
+    mod = tilelang.transform.InjectSoftwarePipeline()(tilelang.tvm.IRModule.from_expr(scheduled))
     kernel = tilelang.compile(mod["main"], target="cuda")
     a = torch.arange(128, dtype=torch.float32, device="cuda")
     ids = torch.arange(4, dtype=torch.float32, device="cuda") * 100
     b = torch.full_like(a, -1)
+    ranges = sorted((tensor.data_ptr(), tensor.data_ptr() + tensor.numel() * tensor.element_size()) for tensor in (a, ids, b))
+    assert all(left[1] <= right[0] for left, right in zip(ranges, ranges[1:]))
     kernel(a, ids, b)
     torch.testing.assert_close(b.view(4, 32), a.view(4, 32) + ids[:, None], atol=0, rtol=0)
 

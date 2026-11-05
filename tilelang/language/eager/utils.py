@@ -6,7 +6,7 @@ from typing import Any, Literal
 from collections.abc import Callable, Sequence
 from tilelang import env
 from hashlib import sha256
-from tvm import tirx
+from tilelang.language import _native as tirx
 import linecache
 
 

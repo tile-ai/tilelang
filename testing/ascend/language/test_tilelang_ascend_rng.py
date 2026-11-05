@@ -1,6 +1,6 @@
 """Ascend codegen RNG state isolation across device kernels.
 
-One ``CodeGenTileLangAscend`` instance serves every ``PrimFunc`` of the device
+One ``CodeGenTileLangAscend`` instance serves every ``Function`` of the device
 module, so the Philox state variable name emitted for ``tl::philox_rand*`` is
 a C++ local of the function that ran ``tl.rng_init`` and must never leak into a
 sibling kernel.
@@ -12,7 +12,6 @@ import torch
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
 
 N = 256
 THREADS = 64
@@ -61,7 +60,7 @@ def _two_kernel_program(second_kernel_has_init):
 
 @tilelang.testing.requires_ascend(support_required="compile-only")
 def test_rng_rand_without_rng_init_is_rejected_at_codegen():
-    with pytest.raises(tvm.error.InternalError, match="preceding T.rng_init"):
+    with pytest.raises(RuntimeError, match="preceding T.rng_init"):
         tilelang.lower(_rand_only_kernel(), target="ascend")
 
 
@@ -71,7 +70,7 @@ def test_rng_state_does_not_leak_between_kernels():
     # name; if B is emitted first, B fails on its own. Both module iteration
     # orders must surface the same clear codegen error instead of generating
     # AscendC source that references another function's C++ local.
-    with pytest.raises(tvm.error.InternalError, match="preceding T.rng_init"):
+    with pytest.raises(RuntimeError, match="preceding T.rng_init"):
         tilelang.lower(_two_kernel_program(second_kernel_has_init=False), target="ascend")
 
 

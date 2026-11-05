@@ -1,5 +1,6 @@
 """Packed FP16/BF16 comparisons must preserve scalar boolean semantics."""
 
+import tvm_ffi
 import operator
 import re
 
@@ -10,7 +11,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
-from tvm import tirx
+from tvm_tirx import ir, tirx
 
 
 OPS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt, "le": operator.le, "gt": operator.gt, "ge": operator.ge}
@@ -19,13 +20,13 @@ OPS = {"eq": operator.eq, "ne": operator.ne, "lt": operator.lt, "le": operator.l
 def _source(dtype, lanes, op, broadcast=False):
     lhs = tirx.Var("a", f"{dtype}x{lanes}")
     rhs = tirx.Var("b", dtype if broadcast else f"{dtype}x{lanes}")
-    value = tirx.Broadcast(rhs, lanes) if broadcast else rhs
+    value = ir.prim.Broadcast(rhs, lanes) if broadcast else rhs
     # Var == Var is an identity operation in Python; use explicit TIR constructors.
     comparison = getattr(tirx, op.upper())(lhs, value)
-    func = tirx.PrimFunc([lhs, rhs], tirx.Evaluate(comparison))
+    func = tirx.Function([lhs, rhs], ir.Evaluate(comparison), ret_type=ir.PrimType("void"))
     func = func.with_attr("global_symbol", "compare")
     func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("CUDA codegen is not enabled")
     return build(tvm.IRModule({"compare": func}), tvm.target.Target({"kind": "cuda", "arch": "sm_90"})).inspect_source()

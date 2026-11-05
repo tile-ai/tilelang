@@ -2,7 +2,7 @@ import tilelang.testing
 from tilelang import carver
 from tilelang.carver.roller import PrimFuncNode, OutputNode, Edge
 from tilelang.carver.arch import auto_infer_current_arch
-from tvm import te
+from tilelang.carver._workload import WorkloadBuilder
 from tilelang.language import dtypes as T
 
 
@@ -10,20 +10,21 @@ def run_general_matmul_emit_configs(M, N, K, topk: int = 20):
     arch = auto_infer_current_arch()
 
     def gemm(M, N, K):
-        A = te.placeholder((M, K), name="A", dtype=T.float16)
-        B = te.placeholder((N, K), name="B", dtype=T.float16)
+        workload = WorkloadBuilder()
+        A = workload.input((M, K), name="A", dtype=T.float16)
+        B = workload.input((N, K), name="B", dtype=T.float16)
 
-        # Describe the matrix multiplication in TE
-        k = te.reduce_axis((0, K), name="k")
+        # Describe the matrix multiplication in native IR
+        k = workload.reduce_axis((0, K), name="k")
 
-        C = te.compute((M, N), lambda i, j: te.sum(A[i, k].astype(T.float16) * B[j, k].astype(T.float16), axis=[k]), name="C")
+        C = workload.compute((M, N), lambda i, j: workload.sum(A[i, k].astype(T.float16) * B[j, k].astype(T.float16), axis=[k]), name="C")
 
-        return A, B, C
+        return workload.to_function([A, B, C])
 
     arg1 = gemm(M, N, K)
     args = arg1
 
-    func = te.create_prim_func(args)
+    func = args
 
     tensorized_func, tags = carver.utils.get_tensorized_func_and_tags(func, arch.target)
     print(tags)
@@ -58,20 +59,21 @@ def run_general_matmul_matmul_emit_configs(M, N, K, topk: int = 20):
     arch = auto_infer_current_arch()
 
     def gemm(M, N, K):
-        A = te.placeholder((M, K), name="A", dtype=T.float16)
-        B = te.placeholder((N, K), name="B", dtype=T.float16)
+        workload = WorkloadBuilder()
+        A = workload.input((M, K), name="A", dtype=T.float16)
+        B = workload.input((N, K), name="B", dtype=T.float16)
 
-        # Describe the matrix multiplication in TE
-        k = te.reduce_axis((0, K), name="k")
+        # Describe the matrix multiplication in native IR
+        k = workload.reduce_axis((0, K), name="k")
 
-        C = te.compute((M, N), lambda i, j: te.sum(A[i, k].astype(T.float16) * B[j, k].astype(T.float16), axis=[k]), name="C")
+        C = workload.compute((M, N), lambda i, j: workload.sum(A[i, k].astype(T.float16) * B[j, k].astype(T.float16), axis=[k]), name="C")
 
-        return A, B, C
+        return workload.to_function([A, B, C])
 
     arg1 = gemm(M, N, K)
     args = arg1
 
-    func = te.create_prim_func(args)
+    func = args
 
     tensorized_func, tags = carver.utils.get_tensorized_func_and_tags(func, arch.target)
     print(tags)

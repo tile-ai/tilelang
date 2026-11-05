@@ -29,7 +29,7 @@ Before proposing or changing a rule:
 
 1. Locate the source API under `tilelang/language/`.
 2. Determine its source TIR representation. Do not infer semantics from the
-   Python spelling alone: `T.Pipelined` is a serial `For` with annotations, and
+   Python spelling alone: `T.Pipelined` is a serial `For` with native `tl.loop.annotations` metadata, and
    `T.Persistent` expands early into binds plus a serial loop.
 3. Trace the construct through the target pipelines and identify the first pass
    that assumes the proposed invariant.
@@ -90,11 +90,11 @@ instead of pattern-matching incidental lowered shapes.
 
 - Keep validation side-effect free.
 - Maintain lexical state with a stack and restore it on every exit path.
-- Use `For`, `Buffer`, `Var`, and other ObjectRef handles for retained identity;
+- Use `For`, `tirx::TensorVar`, `Var`, and other ObjectRef handles for retained identity;
   follow `$tilelang-tvm-ir` for C++ TIR code.
 - Share traversal/variable-use utilities when rules need the same facts, but
   keep diagnostics and rule ownership independent.
-- Include source spans when the IR carries them.
+- Include native `Location` information when the IR carries it; preserve the `CallSiteLoc` chain for macro/closure diagnostics.
 - Use a stable prefix such as `[TileLang Semantic Check]` and describe a legal
   replacement.
 - Honor the existing global pre-lower opt-out for compatibility. Do not add a

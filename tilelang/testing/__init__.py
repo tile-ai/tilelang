@@ -8,7 +8,7 @@ from tilelang.contrib import nvcc
 from tilelang.backend.target import determine_target
 from tilelang.cuda.target import target_is_cuda
 from tilelang.rocm.target import target_is_cdna, target_is_gfx950
-from tvm.testing.utils import Feature, requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
+from .features import Feature, requires_cuda, requires_package, requires_llvm, requires_metal, requires_rocm, _compose
 
 from tilelang.utils.tensor import torch_assert_close as torch_assert_close
 from .perf_regression import process_func, regression
@@ -63,11 +63,11 @@ def ascend_backend_compiled() -> bool:
     cheapest reliable probe: it is registered from src/ascend.
     """
     try:
-        import tvm
+        from tvm_tirx.ir.transform import PassContext
 
         from tilelang.transform import PassConfigKey
 
-        with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: True}):
+        with PassContext(config={PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: True}):
             pass
         return True
     except Exception:

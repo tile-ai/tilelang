@@ -1,8 +1,8 @@
-import tvm.tirx.script.builder.ir as _ir
-from tvm.tirx.script.builder import frame
-from tvm.tirx import PrimExpr, IntImm, StringImm
-from tvm.tirx import _ffi_api as _tir_ffi
-from tvm.tirx.expr import Select as _Select
+from tilelang.language import _native as _ir
+from tilelang.language._native import frame
+from tilelang.language._native import PrimExpr, IntImm, StringImm
+from tvm_tirx import ir as _native_ir
+from tilelang.language._native import Select as _Select
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
@@ -175,7 +175,7 @@ def Select(condition: PrimExpr | bool, true_value: PyPrimExpr, false_value: PyPr
     ``Select`` evaluates both value expressions. Use ``if_then_else`` when a
     branch must guard side effects or out-of-bounds memory accesses.
     """
-    return _Select(condition, true_value, false_value, span)
+    return _Select(condition, true_value, false_value, _ir._loc() if span is None else span)
 
 
 def min(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-builtin
@@ -318,16 +318,9 @@ vectorcombine = _dtype_forward(_tir_op.vectorcombine)
 # ---------------------------------------------------------------------------
 # Cast with optional CUDA/PTX rounding hints.
 #
-# Upstream ``tvm.tir.generic.cast`` only takes a generic ``annotations`` map
-# on the resulting CastNode (it is backend-agnostic). The tilelang wrapper
-# below exposes a friendly keyword API (``round`` / ``sat`` / ``rbits``) that
-# maps onto the PTX ``cvt`` instruction family used by the CUDA backend, and
-# translates the kwargs into entries on the CastNode annotations map:
-#
-#   round=<str>  -> "round" (StringImm)
-#   sat=False    -> "sat"   (IntImm bool 0; sat=True is the default and
-#                            emits no annotation)
-#   rbits=<expr> -> "rbits" (PrimExpr; required when round="rs")
+# Native prim.Cast represents ordinary conversions. Explicit rounding or
+# saturation controls belong to the TileLang-owned tl.cast operation. Random
+# bits are an ordinary operand so every visitor and typed rewrite sees them.
 # ---------------------------------------------------------------------------
 
 _VALID_CAST_ROUNDING_MODES = {"", "rn", "rz", "rp", "rm", "rs"}
@@ -356,7 +349,7 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
 
     Returns
     -------
-    op : tvm.tir.PrimExpr
+    op : tvm_tirx.ir.Expr
         The cast expression.
     """
     if round not in _VALID_CAST_ROUNDING_MODES:
@@ -368,18 +361,21 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
     if round != "rs" and rbits is not None:
         raise ValueError("rbits is only valid with round='rs' (stochastic rounding)")
 
-    annotations: dict = {}
-    if round:
-        annotations["round"] = StringImm(round)
-    if not sat:
-        annotations["sat"] = IntImm("bool", 0)
+    value = _ir._expr(value)
+    target_type = _native_ir.PrimType(dtype)
+    location = span or _ir._loc()
+    if not round and sat:
+        return _ir.Cast(target_type, value, location)
+    operands = [value]
     if rbits is not None:
-        annotations["rbits"] = rbits
-
-    # Go through the TIR FFI directly: ``tvm.tir.generic.cast`` is overridden
-    # by ``topi.math.cast`` (a 2/3-arg signature) via TVM's GenericFunc
-    # dispatch, so calling it would lose the ``annotations`` argument.
-    return _tir_ffi._cast(dtype, value, annotations or None, span)
+        operands.append(_ir._expr(rbits))
+    return _native_ir.Call(
+        "tl.cast",
+        operands,
+        attrs={"round": round, "sat": sat},
+        ty_args=[target_type],
+        loc=location,
+    )
 
 
 # PrimExpr/IntImm/StringImm/Shuffle/Any are TVM/typing primitives re-exported as

@@ -58,13 +58,6 @@ class _HangingProcess:
         pass
 
 
-class _ScriptableFunc:
-    attrs = {"global_symbol": "cache_diag_kernel"}
-
-    def script(self, show_meta=True):
-        return "cache_diag_kernel"
-
-
 def _make_cuda_compile_probe():
     from tilelang import language as T
 
@@ -272,28 +265,37 @@ def test_compile_timeout_env_parser_accepts_empty_zero_and_positive(monkeypatch)
 def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, capture_tilelang_logs):
     import tilelang.cache.kernel_cache as kernel_cache_mod
     from tilelang.cache.kernel_cache import KernelCache
-    from tilelang.env import env
+    from tilelang.env import CacheState, env
+    from tvm_tirx import tirx
 
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
+    monkeypatch.setattr(CacheState, "_enabled", True)
     monkeypatch.setenv("TILELANG_JIT_DIAGNOSTICS", "1")
+    compile_calls = []
 
     class _FakeKernel:
         params = []
         kernel_source = "// device"
 
         def __init__(self, *args, **kwargs):
+            compile_calls.append(args[0])
             raise RuntimeError("compile failed")
 
     monkeypatch.setattr(kernel_cache_mod, "JITKernel", _FakeKernel)
 
     caplog.set_level(logging.INFO, logger="tilelang.jit.diagnostics")
     cache = KernelCache()
+    # Cache identity serializes the typed native graph before compilation.
+    # A script-only Python double would fail before the diagnostic phase.
+    func = _make_cuda_compile_probe().with_attr("global_symbol", "cache_diag_kernel")
+    assert isinstance(func, tirx.Function)
 
     with pytest.raises(RuntimeError, match="compile failed"):
         cache.cached(
-            _ScriptableFunc(),
+            func,
             out_idx=[],
             target={"kind": "cuda", "arch": "sm_120"},
             target_host=None,
@@ -303,6 +305,8 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
             compile_flags=None,
         )
 
+    assert len(compile_calls) == 1
+    assert compile_calls[0].same_as(func)
     messages = [record.getMessage() for record in caplog.records]
     assert any("TileLang JIT phase start: cache.compile" in message for message in messages)
     assert any("TileLang JIT phase failed: cache.compile" in message for message in messages)

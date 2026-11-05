@@ -6,6 +6,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls
+from tvm_tirx import ir, tirx
 
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -93,44 +94,18 @@ def test_dealloc_before_thread_return_keeps_auto_dealloc():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
-def test_untyped_buffer_reports_internal_error():
-    valid_buffer = tvm.tirx.decl_buffer((1,), name="malformed_buffer")
-    untyped_data = tvm.tirx.Var("malformed_buffer", "handle")
-    malformed_buffer = tvm.ir.make_node(
-        "tirx.Buffer",
-        data=untyped_data,
-        dtype=valid_buffer.dtype,
-        shape=valid_buffer.shape,
-        strides=valid_buffer.strides,
-        axis_separators=valid_buffer.axis_separators,
-        elem_offset=valid_buffer.elem_offset,
-        name=valid_buffer.name,
-        data_alignment=valid_buffer.data_alignment,
-        offset_factor=valid_buffer.offset_factor,
-        buffer_type=valid_buffer.buffer_type,
-        span=None,
-    )
-    block = tvm.tirx.SBlock(
-        iter_vars=[],
-        reads=[],
-        writes=[],
-        name_hint="root",
-        body=tvm.tirx.Evaluate(0),
-        alloc_buffers=[malformed_buffer],
-    )
-    func = tvm.tirx.PrimFunc([], block).with_attr("target", TARGET)
-    mod = tvm.IRModule.from_expr(func)
-
-    with pytest.raises(
-        tvm.error.InternalError,
-        match=r"LowerSharedTmem requires buffer malformed_buffer's data Var "
-        r"to have a PointerType annotation",
-    ):
-        tl.cuda.transform.LowerSharedTmem()(mod)
+def test_untyped_tensor_producer_reports_type_error():
+    # Native tensors carry their storage type directly. The old Buffer with an
+    # independently untyped data Var is no longer constructible; an incorrectly
+    # typed producer must instead be rejected by the native call verifier.
+    tensor_type = tirx.TensorType((128, 1), "float32", scope="shared.tmem")
+    malformed = ir.Call("tirx.alloc_tensor", [], ty=ir.PrimType("int64"), ty_args=[tensor_type])
+    with pytest.raises(TypeError, match="Tensor producer result must match its TensorType argument"):
+        malformed.validate()
 
 
 if __name__ == "__main__":
     test_explicit_deallocate_tmem_suppresses_auto_dealloc()
     test_explicit_deallocate_only_suppresses_matching_buffer()
     test_dealloc_before_thread_return_keeps_auto_dealloc()
-    test_untyped_buffer_reports_internal_error()
+    test_untyped_tensor_producer_reports_type_error()

@@ -1,6 +1,8 @@
 """Test T.annotate_compile_flags, T.annotate_pass_configs, and out_idx via PrimFunc attrs."""
 
 import pytest
+from tvm_ffi import Module
+from tvm_tirx.codegen import Executable
 import torch
 import tilelang
 import tilelang.testing
@@ -10,13 +12,13 @@ from tilelang.transform import PassConfigKey
 
 def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
     """T.empty outputs and their ABI should survive a disk cache round trip."""
-    from tilelang.cache import _dispatch_map
+    from tilelang.cache import _load_cache
     from tilelang.env import CacheState, env
 
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(env, "TILELANG_DISABLE_CACHE", "0")
     monkeypatch.setattr(CacheState, "_enabled", True)
-    cache = _dispatch_map["tvm_ffi"]
+    cache = _load_cache("tvm_ffi", ascend=False)
     monkeypatch.setattr(cache, "_memory_cache", {})
 
     @T.prim_func
@@ -44,10 +46,10 @@ def test_out_idx_via_attr_lazy(monkeypatch, tmp_path):
 
         executable = compiled.adapter.get_exportable_executable()
         if disk_cache_hit:
-            assert isinstance(executable, tilelang.tvm.runtime.Module)
+            assert isinstance(executable, Module)
         else:
-            assert isinstance(executable, tilelang.tvm.runtime.Executable)
-        rt_mod = executable.jit() if isinstance(executable, tilelang.tvm.runtime.Executable) else executable
+            assert isinstance(executable, Executable)
+        rt_mod = executable.jit() if isinstance(executable, Executable) else executable
         assert rt_mod.get_function(str(kernel.attrs["global_symbol"]), query_imports=True) is not None
         with pytest.raises(AttributeError):
             rt_mod.get_function(f"{kernel.attrs['global_symbol']}_auto_output", query_imports=True)
@@ -131,7 +133,14 @@ def test_empty_subbyte_output_uses_torch_storage_dtype(
     output = compiled()
 
     assert compiled.adapter._ffi_callee_allocated_output_abi
-    assert "TVMFFIEnvTensorAlloc" in compiled.get_host_source()
+    # The native packed worker delegates allocation to the C++ output frame;
+    # TVMFFIEnvTensorAlloc is called there, outside the generated LLVM module.
+    assert "tl.runtime.AllocateOutput" in compiled.get_host_source()
+    executable = compiled.adapter.get_exportable_executable()
+    rt_mod = executable.jit() if isinstance(executable, Executable) else executable
+    symbol = str(kernel.attrs["global_symbol"])
+    for worker in (f"__tl_output_allocate_{symbol}", f"__tl_output_compute_{symbol}"):
+        assert rt_mod.get_function(worker, query_imports=True) is not None
     assert output.dtype == expected_torch_dtype
     assert output.shape == expected_shape
 

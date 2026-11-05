@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from tvm import IRModule
-from tvm.target import Target
+from tvm_tirx.ir import IRModule
+from tvm_tirx.target import Target
 
-from tilelang import tvm
+import tvm_ffi
 from tilelang.instrumentation import run_codegen_with_instrumentation
 
 DeviceCodegenFunc = Callable[[IRModule, Target], IRModule]
@@ -22,7 +22,7 @@ def global_func_device_codegen(global_func_name: str) -> DeviceCodegenFunc:
             global_func_name,
             mod,
             target,
-            lambda: tvm.ffi.get_global_func(global_func_name)(mod, target),
+            lambda: tvm_ffi.get_global_func(global_func_name)(mod, target),
             role="device",
         )
 

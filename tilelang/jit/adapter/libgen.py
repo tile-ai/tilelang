@@ -5,9 +5,10 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
@@ -38,7 +39,7 @@ class LibraryGenerator:
         self.verbose = verbose
 
     def assign_pass_configs(self, pass_configs: dict[str, Any] | None = None):
-        self.pass_configs = pass_configs
+        self.pass_configs = pass_configs or {}
 
     def assign_compile_flags(self, compile_flags: list[str] | None = None):
         if compile_flags is None:
@@ -184,6 +185,35 @@ class LibraryGenerator:
         command += [
             "-I" + TILELANG_TEMPLATE_PATH,
         ]
+
+        # Native C host code and source-adapter error paths use the same FFI
+        # and runtime as the compiler provider. Resolve headers and libraries
+        # from those imported packages, never an unrelated system TVM install.
+        from tvm_ffi import libinfo as ffi_info
+        from tvm_tirx import libinfo as tirx_info
+
+        command += [
+            "-I" + path
+            for path in (
+                tirx_info.find_include_path(),
+                ffi_info.find_include_path(),
+                ffi_info.find_dlpack_include_path(),
+            )
+        ]
+        ffi_library = Path(ffi_info.find_libtvm_ffi()).resolve()
+        runtime_library = Path(tirx_info.find_libtvm_runtime()).resolve()
+        if sys.platform == "win32":
+            runtime_import = runtime_library.with_suffix(".lib")
+            if not runtime_import.is_file():
+                raise RuntimeError(f"The TIRx provider is missing its runtime import library: {runtime_import}")
+            command += [ffi_info.find_windows_implib(), str(runtime_import)]
+        else:
+            command += [str(ffi_library), str(runtime_library)]
+            for directory in dict.fromkeys((ffi_library.parent, runtime_library.parent)):
+                if is_cuda_target(target):
+                    command += ["-Xlinker", "-rpath", "-Xlinker", str(directory)]
+                else:
+                    command += ["-Wl,-rpath," + str(directory)]
 
         command += [item for item in extra_compile_options if item not in command]
 

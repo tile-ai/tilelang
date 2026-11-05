@@ -59,7 +59,7 @@ def lower_to_metal(enable_device_compile: bool) -> str:
 
 
 def test_both_metal_build_paths_use_type_driven_shared_aliases(monkeypatch):
-    monkeypatch.setenv("TVM_COMPILE_FORCE_FALLBACK", "1")
+    monkeypatch.setenv("TVM_TIRX_COMPILE_FORCE_FALLBACK", "1")
     compiled_source = lower_to_metal(enable_device_compile=True)
     source_only = lower_to_metal(enable_device_compile=False)
 

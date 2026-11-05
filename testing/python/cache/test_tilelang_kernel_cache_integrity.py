@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tilelang import tvm
+from tvm_ffi import dtype as DataType
 
 import tilelang.cache.kernel_cache as kernel_cache_mod
 from tilelang.backend import create_backend_context
@@ -35,7 +35,7 @@ class _FakeKernel:
     def __init__(self, libpath: str):
         self.adapter = _FakeAdapter(libpath)
         self.kernel_source = "// device kernel"
-        self.params = [KernelParam(tvm.DataType("float32"), [4])]
+        self.params = [KernelParam(DataType("float32"), [4])]
 
 
 @pytest.fixture
@@ -151,7 +151,7 @@ def test_legacy_entry_without_manifest_misses_and_save_repairs(cache_dirs, tmp_p
     (cache_path / cache.device_kernel_path).write_text("// device kernel")
     (cache_path / cache.host_kernel_path).write_text("// host kernel")
     (cache_path / cache.kernel_lib_path).write_bytes(b"legacy-truncated")
-    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
+    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(DataType("float32"), [4])]))
 
     assert _load_expecting_no_build(cache, key, monkeypatch) is None
 

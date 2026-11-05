@@ -1,92 +1,60 @@
 /*!
  * \file lower_pdl.cc
- * \brief Mark Device PrimFunc with attributes if CUDA PDL functions are called
+ * \brief Mark native device functions that use CUDA PDL operations.
  */
 
-#include "backend/common/target_utils.h"
-#include "cuda/op/builtin.h"
-#include "support/check.h"
-#include "transform/common/attr.h"
-#include "tvm/ir/type.h"
-#include <tvm/runtime/logging.h>
-#include <tvm/tirx/analysis.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/stmt.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-namespace tvm {
-namespace tl {
+#include "cuda/op/builtin.h"
 
+namespace tvm::tl {
 using namespace tirx;
 
-// NVCC has issues with __ldg when using PDL (Programmatic Dependent Launch)
-// synchronization. Suppress the annotation when kHasGridSync is set.
-class CheckLDGCalls : public StmtExprVisitor {
+class CudaSyncCallCollector : public StmtExprVisitor {
 public:
-  void VisitExpr_(const tirx::CallNode *op) final {
-    if (op->op.same_as(tl::__ldg())) {
-      LOG(FATAL) << "Cannot invoke __ldg function with pdl_sync";
-    }
-    StmtExprVisitor::VisitExpr_(op);
+  using StmtExprVisitor::Visit_;
+
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallObj *call) final {
+    has_trigger_launch |= call->op.same_as(pdl_trigger());
+    has_grid_sync |= call->op.same_as(pdl_sync());
+    if (auto op = call->op.as<OpObj>())
+      has_ldg |= op->name == "tl.__ldg";
+    return StmtExprVisitor::Visit_(call);
   }
+
+  bool has_trigger_launch{false};
+  bool has_grid_sync{false};
+  bool has_ldg{false};
 };
-
-class MarkCudaSyncCalls : public StmtExprMutator {
-public:
-  static PrimFunc Substitute(PrimFunc f, bool support_pdl) {
-    MarkCudaSyncCalls mutator;
-    PrimFunc new_f = f;
-    new_f.CopyOnWrite()->body = mutator.VisitStmt(f->body);
-
-    if (!support_pdl) {
-      ICHECK(!mutator.has_trigger_launch_ && !mutator.has_grid_sync_)
-          << "PDL is not supported";
-    }
-
-    if (mutator.has_trigger_launch_) {
-      new_f = WithAttr(std::move(new_f), attr::kHasTriggerLaunch, 1);
-    }
-    if (mutator.has_grid_sync_) {
-      new_f = WithAttr(std::move(new_f), attr::kHasGridSync, 1);
-      CheckLDGCalls analyzer;
-      analyzer(f->body);
-    }
-    return new_f;
-  }
-
-  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
-    if (op->op.same_as(tl::pdl_trigger())) {
-      has_trigger_launch_ = true;
-    } else if (op->op.same_as(tl::pdl_sync())) {
-      has_grid_sync_ = true;
-    }
-    return StmtExprMutator::VisitExpr_(op);
-  }
-
-private:
-  bool has_trigger_launch_ = false;
-  bool has_grid_sync_ = false;
-
-  MarkCudaSyncCalls() = default;
-};
-
-using namespace tirx::transform;
 
 tvm::transform::Pass MarkCudaSyncCallsPass(bool support_pdl) {
-  auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
-    return MarkCudaSyncCalls::Substitute(f, support_pdl);
+  auto pass = [support_pdl](tirx::Function function, IRModule,
+                            tvm::transform::PassContext) {
+    auto collector = ffi::make_object<CudaSyncCallCollector>();
+    collector->Visit(function->body);
+    TVM_FFI_CHECK(support_pdl || (!collector->has_trigger_launch &&
+                                  !collector->has_grid_sync),
+                  ValueError)
+        << "PDL is not supported";
+    // NVCC's read-only __ldg cache is incompatible with PDL's visibility
+    // boundary. This concerns the explicit __ldg intrinsic, not all global
+    // loads or the independent ldg32/64/128/256 instruction family.
+    TVM_FFI_CHECK(!collector->has_grid_sync || !collector->has_ldg, ValueError)
+        << "Cannot invoke __ldg function with pdl_sync";
+    if (collector->has_trigger_launch)
+      function =
+          WithAttr(std::move(function), "has_cuda_pdl_trigger", int64_t{1});
+    if (collector->has_grid_sync)
+      function = WithAttr(std::move(function), "has_cuda_pdl_sync", int64_t{1});
+    return function;
   };
-
-  return CreatePrimFuncPass(pass_func, 0, "tl.MarkCudaSyncCalls", {});
+  return tirx::transform::CreateFunctionPass(pass, 0, "tl.MarkCudaSyncCalls");
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = tvm::ffi::reflection;
-  refl::GlobalDef().def("tl.cuda.transform.MarkCudaSyncCalls",
-                        MarkCudaSyncCallsPass);
+  ffi::reflection::GlobalDef().def("tl.cuda.transform.MarkCudaSyncCalls",
+                                   MarkCudaSyncCallsPass);
 }
-
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl

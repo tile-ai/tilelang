@@ -1,11 +1,14 @@
+import tvm_ffi
+
+from tvm_tirx import ir
+from testing.ascend._ir import access_tensor, walk_ir
 import pytest
 
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx as tvm
 from tilelang.ascend import transform
-from tvm import tirx
 
 
 @T.prim_func
@@ -71,27 +74,27 @@ def test_legalize_simd_merging_marks_destination_read_write():
     merging_calls = []
 
     def collect(node):
-        if isinstance(node, tirx.Call) and getattr(node.op, "name", None) == "tl.simd.vadds" and str(node.args[-1]) == '"MODE_MERGING"':
+        if isinstance(node, ir.Call) and getattr(node.op, "name", None) == "tl.simd.vadds" and str(node.args[-1]) == '"MODE_MERGING"':
             merging_calls.append(node)
 
-    tirx.stmt_functor.post_order_visit(after.body, collect)
+    walk_ir(after.body, collect)
 
     assert len(merging_calls) == 1
     call = merging_calls[0]
-    assert call.dtype == tvm.DataType("")
+    assert call.ty.dtype == tvm_ffi.dtype("")
     assert len(call.args) == 5
     destination = call.args[0]
-    assert isinstance(destination, tirx.Call)
+    assert isinstance(destination, ir.Call)
     assert destination.op.name == "tl.access_ptr"
     assert destination.args[1].value == 1
     assert destination.args[2].value == 3
     destination_load = destination.args[0]
-    assert isinstance(destination_load, tirx.BufferLoad)
-    assert destination_load.buffer.name == "dst"
+    assert isinstance(destination_load, ir.TensorLoad)
+    assert access_tensor(destination_load).name == "dst"
 
 
 def _inplace_vadds(dtype, mode):
-    bits = tvm.DataType(dtype).bits
+    bits = tvm_ffi.dtype(dtype).bits
     lanes = 2048 // bits
 
     @T.prim_func
@@ -129,7 +132,7 @@ def test_simd_vadds_inplace_destination(dtype, mode):
 
 
 def test_simd_merging_requires_mutable_destination():
-    with pytest.raises(tvm.error.InternalError, match="read-modify-write"):
+    with pytest.raises(RuntimeError, match="read-modify-write"):
         transform.LegalizeSimdMerging()(_as_module(merging_without_mutable_destination))
 
 

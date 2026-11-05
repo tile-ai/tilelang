@@ -19,6 +19,7 @@ import tilelang.language as T
 import pytest
 import torch
 import tilelang.testing
+from tvm_tirx import ir
 
 
 PREDICATE_INTRINSICS = [
@@ -34,7 +35,7 @@ PREDICATE_INTRINSICS = [
 
 @pytest.mark.parametrize("intrinsic", PREDICATE_INTRINSICS)
 def test_predicate_intrinsics_reject_float(intrinsic):
-    predicate = tilelang.tvm.tirx.FloatImm("float32", 0.5)
+    predicate = ir.FloatImm("float32", 0.5)
 
     with pytest.raises(TypeError, match="requires an integer or boolean predicate"):
         intrinsic(predicate)
@@ -45,7 +46,7 @@ def test_predicate_intrinsics_reject_float(intrinsic):
 def test_predicate_intrinsics_accept_integer_or_boolean(intrinsic, predicate):
     result = intrinsic(predicate)
 
-    assert isinstance(result, tilelang.tvm.tirx.Call)
+    assert isinstance(result, ir.Call)
 
 
 # ---------------------------------------------------------------------------

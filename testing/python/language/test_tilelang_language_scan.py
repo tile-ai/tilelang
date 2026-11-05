@@ -61,11 +61,41 @@ def test_fragment_scan_annotations_preserved():
             T.cumsum(sum_frag, annotations={"test.scan": "cumsum"})
             T.cummax(max_frag, annotations={"test.scan": "cummax"})
 
-    lines = scan.script().splitlines()
-    cumsum_line = next(line for line in lines if "T.cumsum(" in line)
-    cummax_line = next(line for line in lines if "T.cummax(" in line)
-    assert 'test.scan="cumsum"' in cumsum_line
-    assert 'test.scan="cummax"' in cummax_line
+    import tvm_ffi
+    from tvm_tirx import ir, tirx
+    from tilelang.testing.ir import collect_calls
+
+    assert scan.script()
+    for function in (scan, ir.load_json(ir.save_json(scan))):
+        assert tirx.analysis.check_well_formed(function)
+        copies = collect_calls(function, op="tl.tileop.copy")
+        fragments = []
+        for name in ("cumsum", "cummax"):
+            (call,) = collect_calls(function, op="tl.tileop." + name)
+            assert call.ty == ir.PrimType("void")
+            assert int(call.attrs["schema_version"]) == 1
+            assert int(call.attrs["operand_count"]) == 4
+            assert len(call.args) == 5 and isinstance(call.args[4], ir.Tuple)
+            source, destination, dim, reverse = call.args[:4]
+            assert isinstance(source, ir.TensorRegion) and isinstance(destination, ir.TensorRegion)
+            assert source.source.same_as(destination.source)
+            assert str(source.source.ty.scope) == "shared.dyn"
+            for region in (source, destination):
+                assert len(region.region) == 1
+                assert int(region.region[0].begin) == 0 and int(region.region[0].extent) == 32
+            assert int(dim) == 0 and reverse.ty == ir.PrimType("bool") and not bool(reverse)
+            annotations = tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[4], call.attrs["annotation_schema"])
+            assert isinstance(annotations["test.scan"], ir.StringImm)
+            assert annotations["test.scan"].value == name
+            # Fragment scans stage through shared memory. The annotated op
+            # must stay between copies from and back to that same fragment.
+            (incoming,) = [copy for copy in copies if copy.args[1].source.same_as(source.source)]
+            (outgoing,) = [copy for copy in copies if copy.args[0].source.same_as(source.source)]
+            fragment = incoming.args[0].source
+            assert str(fragment.ty.scope) == "local.fragment"
+            assert outgoing.args[1].source.same_as(fragment)
+            fragments.append(fragment)
+        assert not fragments[0].same_as(fragments[1])
 
 
 def run_cumsum(M, N, block_M, block_N, dim=0, reverse=False, dtype=T.float32, scope="smem"):
@@ -545,7 +575,6 @@ def test_cummax_fragment_1d():
 
 
 def cumsum_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
-
     @T.prim_func
     def cumsum_strided(
         A: T.Tensor((M, N), dtype),
@@ -580,7 +609,6 @@ def run_cumsum_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
 
 
 def cummax_strided_region_test(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
-
     @T.prim_func
     def cummax_strided(
         A: T.Tensor((M, N), dtype),
@@ -615,7 +643,6 @@ def run_cummax_strided(M, N, NBIG, dim=0, reverse=False, dtype=T.float32):
 
 
 def scan_strided_out_of_place_test(M, N, src_pitch, dst_pitch, op="cumsum", dim=0, reverse=False, dtype=T.float32, threads=256):
-
     @T.prim_func
     def scan_strided_out_of_place(
         A: T.Tensor((M, N), dtype),

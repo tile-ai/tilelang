@@ -7,8 +7,9 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
-from tvm import tirx
-from tvm.tirx.script.builder import evaluate as T_evaluate
+from tvm_tirx import ir
+
+from tilelang.language._native import call_extern, evaluate as T_evaluate
 
 from .metadata import MAX_EVENT_NAME_BYTES, Event, encode_event
 
@@ -103,7 +104,7 @@ def range_pop(name: str | None = None):
     started = stack.pop()
     if name is not None and name != started:
         raise RuntimeError(f"iket.range_pop({name!r}) does not match active range {started!r}")
-    return tirx.call_extern("handle", _EVENT_EXTERN, _RANGE_END_EVENT_ID)
+    return call_extern("handle", _EVENT_EXTERN, _RANGE_END_EVENT_ID)
 
 
 def range_start(name: str, payload: Any = None):
@@ -193,12 +194,16 @@ def _validate_payload_compat(event: Event, payload_spec: PayloadSpec | None) -> 
 def _event_call(event: Event, payload_spec: PayloadSpec | None):
     token = encode_event(event)
     if payload_spec is None:
-        return tirx.call_extern("handle", _EVENT_EXTERN, event.event_id, token)
+        return call_extern("handle", _EVENT_EXTERN, event.event_id, token)
     extern = _EVENT_PAYLOAD_F32_EXTERN if payload_spec.dtype == "float32" else _EVENT_PAYLOAD_U32_EXTERN
-    return tirx.call_extern("handle", extern, event.event_id, payload_spec.expr, token)
+    return call_extern("handle", extern, event.event_id, payload_spec.expr, token)
 
 
 def _infer_payload_dtype(expr: Any) -> str:
+    if isinstance(expr, ir.Expr):
+        if not isinstance(expr.ty, ir.PrimType):
+            raise TypeError("IKET payload must be a scalar primitive expression, not a tensor or pointer")
+        return str(expr.ty.dtype)
     dtype = getattr(expr, "dtype", None)
     if dtype is not None:
         return str(dtype)

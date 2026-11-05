@@ -763,7 +763,7 @@ and its original caller, with repeated-run checks when determinism is required.
 
 ## 11. Compilation and Execution
 
-Given a PrimFunc `program` with bf16 inputs `X[M, K]`, `W[N, K]`, and one output:
+Given a native `Function` named `program` (for example, returned by `@T.prim_func`) with bf16 inputs `X[M, K]`, `W[N, K]`, and one output:
 
 ```python
 import tilelang

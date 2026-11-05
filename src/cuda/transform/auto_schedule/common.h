@@ -15,6 +15,7 @@
 #include <tvm/target/target.h>
 #include <tvm/tirx/stmt.h>
 
+#include "cuda/transform/ws_native.h"
 #include "support/check.h"
 #include "transform/common/warp_specialize.h"
 
@@ -22,8 +23,8 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
-using SchedulerFn = ffi::Optional<WSSchedule> (*)(const tirx::SBlock &block,
-                                                  const tirx::Stmt &body,
+using SchedulerFn = ffi::Optional<WSSchedule> (*)(const NativeWSKernel &kernel,
+                                                  const Stmt &body,
                                                   int worker_threads,
                                                   const Target &target);
 
@@ -32,7 +33,7 @@ using SchedulerFn = ffi::Optional<WSSchedule> (*)(const tirx::SBlock &block,
 inline ffi::String ExtractOpId(const ffi::Any &value) {
   if (auto string = value.try_cast<ffi::String>())
     return string.value();
-  if (const auto *imm = value.as<tirx::StringImmNode>())
+  if (const auto *imm = value.as<StringImmObj>())
     return imm->value;
   TVM_FFI_THROW(ValueError) << "AutoWarpSpecialization op id must be a string";
   return "";

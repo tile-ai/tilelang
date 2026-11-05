@@ -4,6 +4,8 @@
  */
 
 #include "op/fill.h"
+#include "backend/common/op/fill.h"
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
 
 #include "backend/common/target_utils.h"
@@ -13,25 +15,24 @@
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
 
-#include <tvm/tirx/builtin.h>
-
 namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace metal {
 
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     if (IsCooperativeTensorBuffer(op.dst)) {
       int region_elements = 1;
       for (auto r : op.region) {
-        auto imm = r->extent.as<IntImmNode>();
+        auto imm = r->extent.as<IntImmObj>();
         TVM_FFI_ICHECK(imm)
             << "cooperative_tensor fill region must have constant extents";
-        region_elements *= imm->value;
+        region_elements *= RequireStaticInt(r->extent, "Metal fill region");
       }
       constexpr int kTileM = 16;
       constexpr int kTileN = 32;
@@ -40,14 +41,14 @@ struct Fill {
           << "cooperative_tensor buffer size must be multiple of " << kTileElems
           << ", got " << region_elements;
       int num_tiles = region_elements / kTileElems;
-      PrimExpr fill_value = Cast(op.dst->dtype, op.value);
+      PrimExpr fill_value = cast(op.value, op.dst.dtype());
       Array<Stmt> stmts;
       for (int i = 0; i < num_tiles; i++) {
         stmts.push_back(
-            Evaluate(Call(DataType::Handle(), cooperative_tensor_fill(),
-                          {op.dst->data, IntImm(DataType::Int(32), i),
-                           fill_value, IntImm(DataType::Int(32), kTileM),
-                           IntImm(DataType::Int(32), kTileN)})));
+            Evaluate(Call(PrimType::Void(), cooperative_tensor_fill(),
+                          {op.dst, IntImm(PrimType::Int(32), i), fill_value,
+                           IntImm(PrimType::Int(32), kTileM),
+                           IntImm(PrimType::Int(32), kTileN)})));
       }
       if (stmts.size() == 1) {
         return stmts[0];
@@ -58,23 +59,41 @@ struct Fill {
     if (IsSIMDGroupBuffer(op.dst)) {
       int region_elements = 1;
       for (auto r : op.region) {
-        auto imm = r->extent.as<IntImmNode>();
+        auto imm = r->extent.as<IntImmObj>();
         TVM_FFI_ICHECK(imm)
             << "simdgroup fill region must have constant extents";
-        region_elements *= imm->value;
+        region_elements *= RequireStaticInt(r->extent, "Metal fill region");
       }
       TVM_FFI_ICHECK(region_elements % 64 == 0)
           << "simdgroup buffer size must be multiple of 64 (8x8), got "
           << region_elements;
 
       int num_matrices = region_elements / 64;
-      PrimExpr fill_value = Cast(op.dst->dtype, op.value);
+      if (auto physical = lower_args.buffer_remap.Get(op.dst)) {
+        // A promoted fragment denotes a logical matrix distributed over warps.
+        // Its typed replacement contains only the matrices owned by one warp.
+        for (size_t axis = 0; axis < op.region.size(); ++axis) {
+          TVM_FFI_CHECK(IsZero(op.region[axis]->begin) &&
+                            analyzer->CanProveEqual(op.region[axis]->extent,
+                                                    op.dst.shape()[axis]),
+                        ValueError)
+              << "Metal SIMD-group fill requires a full accumulator region";
+        }
+        int elements = 1;
+        for (const auto &extent : physical.value().shape())
+          elements *=
+              RequireStaticInt(extent, "Metal per-warp accumulator shape");
+        TVM_FFI_CHECK_EQ(elements % 64, 0, ValueError);
+        num_matrices = elements / 64;
+      }
+      PrimExpr fill_value = cast(op.value, op.dst.dtype());
       Array<Stmt> stmts;
       for (int i = 0; i < num_matrices; i++) {
         stmts.push_back(Evaluate(Call(
-            DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
-            {op.dst->data, IntImm(DataType::Int(32), i), fill_value,
-             IntImm(DataType::Int(32), 8), IntImm(DataType::Int(32), 8)})));
+            PrimType::Void(),
+            Op::Get("tirx.metal.make_filled_simdgroup_matrix"),
+            {op.dst, IntImm(PrimType::Int(32), i), fill_value,
+             IntImm(PrimType::Int(32), 8), IntImm(PrimType::Int(32), 8)})));
       }
       if (stmts.size() == 1) {
         return stmts[0];
@@ -82,60 +101,7 @@ struct Fill {
       return SeqStmt(stmts);
     }
 
-    if (IsFragmentBuffer(op.dst)) {
-      auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
-      par_op->InferLayout({lower_args.target,
-                           lower_args.thread_bounds,
-                           lower_args.layout_map,
-                           analyzer,
-                           lower_args.buffer_remap,
-                           {}},
-                          InferLevel::kFree);
-      auto thread_loop =
-          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
-                        par_op->GetLoopLayout());
-      auto vectorized_loop =
-          VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
-      auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-
-      if (par_op->GetPredicate(lower_args.thread_index).defined()) {
-        return IfThenElse(par_op->GetPredicate(lower_args.thread_index).value(),
-                          unrolled_loop);
-      }
-      return unrolled_loop;
-    }
-
-    if (IsLocalBuffer(op.dst) || IsLocalVarBuffer(op.dst)) {
-      auto init_loop = op.MakeSIMTLoop(analyzer);
-      auto vectorized_loop =
-          VectorizeLoop(init_loop, analyzer, lower_args.layout_map);
-      return PragmaUnrollLoop(vectorized_loop);
-    }
-
-    if (IsSharedBuffer(op.dst) || IsGlobalBuffer(op.dst)) {
-      auto par_op = ParallelOp(op.MakeSIMTLoop(analyzer));
-      par_op->InferLayout({lower_args.target,
-                           lower_args.thread_bounds,
-                           lower_args.layout_map,
-                           analyzer,
-                           lower_args.buffer_remap,
-                           {}},
-                          InferLevel::kFree);
-      auto thread_loop =
-          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
-                        par_op->GetLoopLayout());
-      auto vectorized_loop =
-          VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
-      auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
-      if (par_op->GetPredicate(lower_args.thread_index).defined()) {
-        return IfThenElse(par_op->GetPredicate(lower_args.thread_index).value(),
-                          unrolled_loop);
-      }
-      return unrolled_loop;
-    }
-
-    LOG(FATAL) << "Unsupported scope " << op.dst.scope();
-    return Stmt();
+    return backend::Fill::Lower(op, lower_args, analyzer);
   }
 };
 

@@ -22,41 +22,40 @@ namespace tl {
 namespace cuda {
 
 using namespace tirx;
+using namespace prim;
 using namespace ffi;
 
 namespace {
 
-int TMAPayloadElementBits(DataType dtype) {
-  if (dtype.is_float4_e2m1_unpacked()) {
+int TMAPayloadElementBits(PrimType dtype) {
+  if (dtype.MatchesCode(static_cast<DLDataTypeCode>(kFloat4E2M1Unpacked))) {
     return 4;
   }
   return dtype.bits();
 }
 
 PrimExpr TMABytesFromElements(PrimExpr elements, int bits) {
-  PrimExpr elements_i64 = cast(DataType::Int(64), elements);
+  PrimExpr elements_i64 = Cast(PrimType::Int(64), elements);
   if (bits % 8 == 0) {
-    return elements_i64 * IntImm(DataType::Int(64), bits / 8);
+    return elements_i64 * IntImm(PrimType::Int(64), bits / 8);
   }
-  return FloorDiv(elements_i64 * IntImm(DataType::Int(64), bits) +
-                      IntImm(DataType::Int(64), 7),
-                  IntImm(DataType::Int(64), 8));
+  return FloorDiv(elements_i64 * IntImm(PrimType::Int(64), bits) +
+                      IntImm(PrimType::Int(64), 7),
+                  IntImm(PrimType::Int(64), 8));
 }
 
-PrimExpr TMAGlobalBytesFromElements(PrimExpr elements, DataType dtype) {
+PrimExpr TMAGlobalBytesFromElements(PrimExpr elements, PrimType dtype) {
   return TMABytesFromElements(elements, TMAPayloadElementBits(dtype));
 }
 
-PrimExpr TMAGlobalBitsFromElements(PrimExpr elements, DataType dtype) {
-  return cast(DataType::Int(64), elements) *
-         IntImm(DataType::Int(64), TMAPayloadElementBits(dtype));
+PrimExpr TMAGlobalBitsFromElements(PrimExpr elements, PrimType dtype) {
+  return Cast(PrimType::Int(64), elements) *
+         IntImm(PrimType::Int(64), TMAPayloadElementBits(dtype));
 }
 
 bool GetBoolAnnotation(const CopyNode &op, const char *key) {
   if (auto val = op.annotations.Get(key)) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value != 0;
-    }
+    return tl::GetBoolAnnotation(val.value());
   }
   return false;
 }
@@ -71,9 +70,7 @@ bool GetIsTmaCopy(const CopyNode &op) {
 
 int64_t GetClusterMask(const CopyNode &op) {
   if (auto val = op.annotations.Get("cluster_mask")) {
-    if (auto int_val = val->as<IntImmNode>()) {
-      return int_val->value;
-    }
+    return GetIntegerAnnotation(val.value());
   }
   return 0;
 }
@@ -115,7 +112,10 @@ std::optional<std::string> GetStringAnnotation(const CopyNode &op,
   if (!val) {
     return std::nullopt;
   }
-  auto str = val->as<StringImmNode>();
+  if (auto str = val->as<String>()) {
+    return std::string(str.value());
+  }
+  auto str = val->as<StringImmObj>();
   ICHECK(str) << "T.copy " << key << " annotation must be a string, but got "
               << val.value().GetTypeKey();
   return str->value;
@@ -140,21 +140,21 @@ PreferredCopyInstruction GetPreferredInstruction(const CopyNode &op) {
   return PreferredCopyInstruction::kAuto;
 }
 
-bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
+bool CheckGlobalStrides(const TensorVar &buffer, sym::AnalyzerObj *analyzer,
                         bool emit_diagnostics) {
-  Array<PrimExpr> strides = buffer->strides;
-  if (strides.empty()) {
-    PrimExpr stride = 1;
-    strides.resize(buffer->shape.size());
-    for (int i = static_cast<int>(buffer->shape.size()) - 1; i >= 0; --i) {
-      strides.Set(i, stride);
-      stride *= buffer->shape[i];
+  auto pattern = MatchShapeStridePattern(buffer.ty());
+  if (!pattern) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "TMA requires a shape-aligned strided global tensor: "
+                    << buffer->name;
     }
+    return false;
   }
+  const Array<PrimExpr> strides = pattern.value().get<1>();
 
   if (!strides.empty() &&
       analyzer->CanProve(strides[strides.size() - 1] != 1,
-                         arith::ProofStrength::kSymbolicBound)) {
+                         sym::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
       DLOG(WARNING)
           << "TMA bulk copy requires contiguous innermost global stride"
@@ -166,10 +166,10 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
 
   for (size_t i = 0; i + 1 < strides.size(); ++i) {
     PrimExpr stride_bytes =
-        TMAGlobalBytesFromElements(strides[i], buffer->dtype);
+        TMAGlobalBytesFromElements(strides[i], buffer.dtype());
     if (analyzer->CanProve(
-            FloorMod(stride_bytes, IntImm(DataType::Int(64), 16)) != 0,
-            arith::ProofStrength::kSymbolicBound)) {
+            FloorMod(stride_bytes, IntImm(PrimType::Int(64), 16)) != 0,
+            sym::ProofStrength::kSymbolicBound)) {
       if (emit_diagnostics) {
         DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
                       << stride_bytes << " for buffer " << buffer->name
@@ -177,8 +177,7 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
       }
       return false;
     }
-    if (const int64_t *stride =
-            as_const_int(analyzer->Simplify(stride_bytes))) {
+    if (const auto stride = TryConstInt(analyzer->Simplify(stride_bytes))) {
       if (*stride >= (int64_t{1} << 40)) {
         if (emit_diagnostics) {
           DLOG(WARNING) << "TMA bulk copy cannot support a global stride of "
@@ -192,37 +191,39 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
-bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
-                   bool check_last_dim, bool emit_diagnostics) {
+bool CheckBulkLoad(const CopyNode &op, Target target,
+                   sym::AnalyzerObj *analyzer, bool check_last_dim,
+                   bool emit_diagnostics) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
-  if (op.src.scope() != "global" ||
-      (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
+  if (op.src.scope().name() != "global" ||
+      (op.dst.scope().name() != "shared.dyn" &&
+       op.dst.scope().name() != "shared")) {
     return false;
   }
   if (check_last_dim &&
       analyzer->CanProve(
-          FloorMod(
-              TMAGlobalBitsFromElements(
-                  op.src_range[op.src_range.size() - 1]->extent, op.src->dtype),
-              IntImm(DataType::Int(64), 128)) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
+          FloorMod(TMAGlobalBitsFromElements(
+                       op.src_range[op.src_range.size() - 1]->extent,
+                       op.src.dtype()),
+                   IntImm(PrimType::Int(64), 128)) != 0,
+          sym::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
       DLOG(WARNING)
           << "src range must have last dim multiple of 16 for tma bulk load "
           << op.src->name << " range "
           << op.src_range[op.src_range.size() - 1]->extent << " * "
-          << op.src->dtype.bits() << " bits % 128 != 0";
+          << op.src.dtype().bits() << " bits % 128 != 0";
     }
     return false;
   }
 
-  if (!IsValidTMALoadDtypePair(op.src->dtype, op.dst->dtype)) {
+  if (!IsValidTMALoadDtypePair(op.src.dtype(), op.dst.dtype())) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "src and dst must have compatible dtypes for tma load "
                     << op.src->name << " vs. " << op.dst->name << " dtype "
-                    << op.src->dtype << " vs. " << op.dst->dtype
+                    << op.src.dtype() << " vs. " << op.dst.dtype()
                     << " will be fallback to normal copy";
     }
     return false;
@@ -231,36 +232,37 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
 }
 
 bool CheckBulkStore(const CopyNode &op, Target target,
-                    arith::Analyzer *analyzer, bool check_last_dim,
+                    sym::AnalyzerObj *analyzer, bool check_last_dim,
                     bool emit_diagnostics) {
   if (!TargetHasBulkCopy(target)) {
     return false;
   }
-  if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
-      op.dst.scope() != "global") {
+  if ((op.src.scope().name() != "shared.dyn" &&
+       op.src.scope().name() != "shared") ||
+      op.dst.scope().name() != "global") {
     return false;
   }
   if (check_last_dim &&
       analyzer->CanProve(
-          FloorMod(
-              TMAGlobalBitsFromElements(
-                  op.dst_range[op.dst_range.size() - 1]->extent, op.dst->dtype),
-              IntImm(DataType::Int(64), 128)) != 0,
-          arith::ProofStrength::kSymbolicBound)) {
+          FloorMod(TMAGlobalBitsFromElements(
+                       op.dst_range[op.dst_range.size() - 1]->extent,
+                       op.dst.dtype()),
+                   IntImm(PrimType::Int(64), 128)) != 0,
+          sym::ProofStrength::kSymbolicBound)) {
     if (emit_diagnostics) {
       DLOG(WARNING)
           << "dst range must have last dim multiple of 16 for tma bulk store "
           << op.dst->name << " range "
           << op.dst_range[op.dst_range.size() - 1]->extent << " * "
-          << op.dst->dtype.bits() << " bits % 128 != 0";
+          << op.dst.dtype().bits() << " bits % 128 != 0";
     }
     return false;
   }
-  if (!IsValidTMAStoreDtypePair(op.dst->dtype, op.src->dtype)) {
+  if (!IsValidTMAStoreDtypePair(op.dst.dtype(), op.src.dtype())) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "src and dst must have compatible dtypes for tma store "
                     << op.src->name << " vs. " << op.dst->name << " dtype "
-                    << op.src->dtype << " vs. " << op.dst->dtype
+                    << op.src.dtype() << " vs. " << op.dst.dtype()
                     << " will be fallback to normal copy";
     }
     return false;
@@ -270,7 +272,7 @@ bool CheckBulkStore(const CopyNode &op, Target target,
 
 bool IsSemanticallyLinearLayout(const Layout &layout,
                                 const Array<PrimExpr> &shape,
-                                arith::Analyzer *analyzer) {
+                                sym::AnalyzerObj *analyzer) {
   Array<PrimExpr> input_shape = layout->InputShape();
   if (input_shape.size() != shape.size()) {
     return false;
@@ -286,33 +288,35 @@ bool IsSemanticallyLinearLayout(const Layout &layout,
                                  linear_layout->GetLinearizedForwardIndex());
 }
 
-bool IsContiguousGlobalRegion(const Buffer &global_tensor,
+bool IsContiguousGlobalRegion(const TensorVar &global_tensor,
                               const Array<Range> &global_range,
-                              arith::Analyzer *analyzer) {
-  ICHECK_EQ(global_range.size(), global_tensor->shape.size());
-  ICHECK(global_tensor->strides.empty() ||
-         global_tensor->strides.size() == global_tensor->shape.size());
+                              sym::AnalyzerObj *analyzer) {
+  ICHECK_EQ(global_range.size(), global_tensor.shape().size());
+  auto pattern = MatchShapeStridePattern(global_tensor.ty());
+  if (!pattern) {
+    return false;
+  }
+  const Array<PrimExpr> strides = pattern.value().get<1>();
 
   // Pointer-based 1D TMA can coalesce multiple logical dimensions only when
   // every varying dimension is packed directly after its contiguous suffix.
   bool non_full_dim_encountered = false;
   PrimExpr expected_stride = 1;
   for (int i = static_cast<int>(global_range.size()) - 1; i >= 0; --i) {
-    bool is_singleton = analyzer->CanProve(
-        global_range[i]->extent == 1, arith::ProofStrength::kSymbolicBound);
+    bool is_singleton = analyzer->CanProve(global_range[i]->extent == 1,
+                                           sym::ProofStrength::kSymbolicBound);
     if (!non_full_dim_encountered) {
-      if (!is_singleton && !global_tensor->strides.empty() &&
-          !analyzer->CanProveEqual(global_tensor->strides[i],
-                                   expected_stride)) {
+      if (!is_singleton &&
+          !analyzer->CanProveEqual(strides[i], expected_stride)) {
         return false;
       }
 
-      bool is_full_dim = analyzer->CanProve(
-          global_range[i]->extent == global_tensor->shape[i] &&
-              global_range[i]->min == 0,
-          arith::ProofStrength::kSymbolicBound);
+      bool is_full_dim = analyzer->CanProve(global_range[i]->extent ==
+                                                    global_tensor.shape()[i] &&
+                                                global_range[i]->begin == 0,
+                                            sym::ProofStrength::kSymbolicBound);
       if (is_full_dim) {
-        expected_stride *= global_tensor->shape[i];
+        expected_stride *= global_tensor.shape()[i];
       } else {
         non_full_dim_encountered = true;
       }
@@ -323,16 +327,17 @@ bool IsContiguousGlobalRegion(const Buffer &global_tensor,
   return true;
 }
 
-bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
+bool CheckBulkCopy1D(const TensorVar &global_tensor,
+                     const TensorVar &shared_tensor,
                      const Array<Range> &global_range,
                      const Array<Range> &shared_range,
-                     const LayoutMap &layout_map, arith::Analyzer *analyzer) {
+                     const LayoutMap &layout_map, sym::AnalyzerObj *analyzer) {
   bool shared_is_contiguous = true;
   if (layout_map.count(shared_tensor)) {
     Layout existing =
         layout_map.Get(shared_tensor).value().as<Layout>().value();
     shared_is_contiguous =
-        IsSemanticallyLinearLayout(existing, shared_tensor->shape, analyzer);
+        IsSemanticallyLinearLayout(existing, shared_tensor.shape(), analyzer);
   }
 
   bool global_is_contiguous =
@@ -351,41 +356,41 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   bool element_match =
       analyzer->CanProveEqual(shared_elements, global_elements);
 
-  PrimExpr total_bits = shared_elements * shared_tensor->dtype.bits();
+  PrimExpr total_bits = shared_elements * shared_tensor.dtype().bits();
 
   // Reject only when the total transfer size is provably not 16-byte
   // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
   // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
   bool total_16b_aligned = !analyzer->CanProve(
-      FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
+      FloorMod(total_bits, 128) != 0, sym::ProofStrength::kSymbolicBound);
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
 }
 
-bool CanProveRegionInBounds(const Buffer &buffer, const Array<Range> &region,
-                            arith::Analyzer *analyzer) {
-  if (buffer->shape.size() != region.size()) {
+bool CanProveRegionInBounds(const TensorVar &buffer, const Array<Range> &region,
+                            sym::AnalyzerObj *analyzer) {
+  if (buffer.shape().size() != region.size()) {
     return false;
   }
   for (size_t i = 0; i < region.size(); ++i) {
-    PrimExpr min = region[i]->min;
+    PrimExpr min = region[i]->begin;
     PrimExpr extent = region[i]->extent;
-    if (!analyzer->CanProve(min >= 0 && min + extent <= buffer->shape[i],
-                            arith::ProofStrength::kSymbolicBound)) {
+    if (!analyzer->CanProve(min >= 0 && min + extent <= buffer.shape()[i],
+                            sym::ProofStrength::kSymbolicBound)) {
       return false;
     }
   }
   return true;
 }
 
-bool CanProveCopyInBounds(const CopyNode &op, arith::Analyzer *analyzer) {
+bool CanProveCopyInBounds(const CopyNode &op, sym::AnalyzerObj *analyzer) {
   return CanProveRegionInBounds(op.src, op.src_range, analyzer) &&
          CanProveRegionInBounds(op.dst, op.dst_range, analyzer);
 }
 
 bool CheckBulkLoad1D(const CopyNode &op, Target target,
-                     const LayoutMap &layout_map, arith::Analyzer *analyzer,
+                     const LayoutMap &layout_map, sym::AnalyzerObj *analyzer,
                      bool emit_diagnostics) {
   if (!CheckBulkLoad(op, target, analyzer, false, emit_diagnostics)) {
     return false;
@@ -395,7 +400,7 @@ bool CheckBulkLoad1D(const CopyNode &op, Target target,
 }
 
 bool CheckBulkStore1D(const CopyNode &op, Target target,
-                      const LayoutMap &layout_map, arith::Analyzer *analyzer,
+                      const LayoutMap &layout_map, sym::AnalyzerObj *analyzer,
                       bool emit_diagnostics) {
   if (!CheckBulkStore(op, target, analyzer, false, emit_diagnostics)) {
     return false;
@@ -426,11 +431,11 @@ bool CheckTMemStore(const CopyNode &op, Target target) {
 
 bool CheckCPAsyncCopyPreconditions(const CopyNode &op) {
   return IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst) &&
-         op.src->dtype == op.dst->dtype;
+         op.src.dtype() == op.dst.dtype();
 }
 
 bool CheckCPAsyncCopy(const CopyNode &op, Target target,
-                      const LayoutMap &layout_map, arith::Analyzer *analyzer) {
+                      const LayoutMap &layout_map, sym::AnalyzerObj *analyzer) {
   if (!TargetCudaHasAsyncCopy(target)) {
     return false;
   }
@@ -531,23 +536,26 @@ CopyInstSelection Unsupported(std::string reason) {
 std::string MakeTmaUnavailableReason(const CopyNode &op) {
   std::ostringstream oss;
   if (GetTmaDescriptorBaseIsDeviceBound(op)) {
-    const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
+    const TensorVar &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
     oss << "Descriptor-based TMA cannot use global base pointer `"
-        << global_buffer->data->name_hint
+        << global_buffer->name
         << "` because it is bound inside the device function body. "
            "TensorMap descriptors are encoded on the host; use plain T.copy "
            "to allow a descriptorless or synchronous fallback.";
     return oss.str();
   }
-  if (op.src->dtype.is_float4_e2m1_unpacked() ||
-      op.dst->dtype.is_float4_e2m1_unpacked()) {
+  if (op.src.dtype().MatchesCode(
+          static_cast<DLDataTypeCode>(kFloat4E2M1Unpacked)) ||
+      op.dst.dtype().MatchesCode(
+          static_cast<DLDataTypeCode>(kFloat4E2M1Unpacked))) {
     oss << "T.tma_copy() only supports float4_e2m1_unpacked as an FP4 unpack "
            "load from packed global float4_e2m1fn to unpacked shared memory. "
            "The reverse unpacked shared -> packed global TMA store is not "
            "supported. Got src="
-        << op.src->name << " (scope=" << op.src.scope()
-        << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
-        << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
+        << op.src->name << " (scope=" << op.src.scope().name()
+        << ", dtype=" << op.src.dtype() << "), dst=" << op.dst->name
+        << " (scope=" << op.dst.scope().name() << ", dtype=" << op.dst.dtype()
+        << ").";
     return oss.str();
   }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
@@ -567,18 +575,20 @@ std::string MakeAsyncUnavailableReason(const CopyNode &op, Target target) {
   } else if (!IsGlobalBuffer(op.src) || !IsSharedBuffer(op.dst)) {
     oss << "T.async_copy only supports global->shared/shared.dyn copies. "
            "Got src="
-        << op.src->name << " (scope=" << op.src.scope()
-        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope() << ").";
-  } else if (op.src->dtype != op.dst->dtype) {
+        << op.src->name << " (scope=" << op.src.scope().name()
+        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope().name()
+        << ").";
+  } else if (op.src.dtype() != op.dst.dtype()) {
     oss << "T.async_copy requires equal byte-addressable dtypes. Got src "
            "dtype="
-        << op.src->dtype << ", dst dtype=" << op.dst->dtype << ".";
+        << op.src.dtype() << ", dst dtype=" << op.dst.dtype() << ".";
   } else {
     oss << "Explicit async copy semantics require cp.async lowering, but "
            "constraints were not satisfied. Got src="
-        << op.src->name << " (scope=" << op.src.scope()
-        << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
-        << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
+        << op.src->name << " (scope=" << op.src.scope().name()
+        << ", dtype=" << op.src.dtype() << "), dst=" << op.dst->name
+        << " (scope=" << op.dst.scope().name() << ", dtype=" << op.dst.dtype()
+        << ").";
   }
   return oss.str();
 }
@@ -586,8 +596,7 @@ std::string MakeAsyncUnavailableReason(const CopyNode &op, Target target) {
 bool IsAutoAsyncCopyEnabled(bool default_enabled) {
   using namespace tvm::transform;
   PassContext pass_ctx = PassContext::Current();
-  return pass_ctx->GetConfig<Bool>(kEnableAsyncCopy, Bool(default_enabled))
-      .value();
+  return pass_ctx->GetConfig<bool>(kEnableAsyncCopy).value_or(default_enabled);
 }
 
 CopyInst SelectTmaInst(const CopyFacts &facts, bool allow_load,
@@ -639,18 +648,17 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.cluster_mask = GetClusterMask(op);
   facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
-  facts.pass_context_disables_tma =
-      tvm::transform::PassContext::Current()
-          ->GetConfig<Bool>(kDisableTMALower, Bool(false))
-          .value();
+  facts.pass_context_disables_tma = tvm::transform::PassContext::Current()
+                                        ->GetConfig<bool>(kDisableTMALower)
+                                        .value_or(false);
 
   if (!facts.cuda_like_target) {
     return facts;
   }
 
-  arith::Analyzer local_analyzer;
-  arith::Analyzer *analyzer =
-      ctx.analyzer != nullptr ? ctx.analyzer : &local_analyzer;
+  auto local_analyzer = CreateTileLangAnalyzer();
+  sym::AnalyzerObj *analyzer =
+      ctx.analyzer != nullptr ? ctx.analyzer : local_analyzer.get();
   static const LayoutMap empty_layout_map;
   const LayoutMap &layout_map =
       ctx.layout_map != nullptr ? *ctx.layout_map : empty_layout_map;
@@ -740,8 +748,9 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     oss << "cluster_mask=0x" << std::hex << facts.cluster_mask
         << " requires descriptor-based TMA (kBulkLoad), but the copy does not "
            "meet TMA bulk-load constraints. src="
-        << op.src->name << " (scope=" << op.src.scope()
-        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope() << ").";
+        << op.src->name << " (scope=" << op.src.scope().name()
+        << "), dst=" << op.dst->name << " (scope=" << op.dst.scope().name()
+        << ").";
     return Unsupported(oss.str());
   }
 

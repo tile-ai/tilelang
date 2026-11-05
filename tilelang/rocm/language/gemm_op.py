@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tilelang.language import _native as tirx
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.gemm_op import GemmWarpPolicy, _gemm_impl

@@ -212,7 +212,7 @@ def test_matmul():
 
 def test_pointer_table_annotation_lowers_to_int64_buffer():
     program = pointer_table_multi_copy_test(4, 8)
-    src_ptrs = program.buffer_map[program.params[0]]
+    src_ptrs = program.params[0]
 
     assert src_ptrs.dtype == "int64"
     assert [int(dim) for dim in src_ptrs.shape] == [4]

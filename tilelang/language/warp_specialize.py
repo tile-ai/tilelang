@@ -12,8 +12,8 @@ from __future__ import annotations
 from typing import ClassVar
 
 import tvm_ffi
-from tvm.ir import Node
-from tvm import tirx
+from tvm_tirx.ir import Node
+from tilelang.language import _native as tirx
 from tvm_ffi.dataclasses import Enum
 
 from tilelang import _ffi_api

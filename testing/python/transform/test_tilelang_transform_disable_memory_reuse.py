@@ -125,16 +125,15 @@ def test_disable_reuse_no_overlap():
     src_reuse = kernel_reuse.get_kernel_source()
 
     def extract_smem_offsets(src: str) -> list[int]:
-        """Extract merged shared-memory offsets from generated code."""
-        # Alias-preserving lowering emits:
-        #   void* a_shared = ((void*)((char*)buf_dyn_shmem + 0));
-        alias_pattern = r"void\*\s+\w+\s*=\s*\(\(void\*\)\(\(char\*\)buf_dyn_shmem\s*\+\s*(\d+)\)\);"
-        # Direct merged-buffer lowering emits access patterns such as:
-        #   buf_dyn_shmem)[1024])
-        direct_pattern = r"buf_dyn_shmem\)\[(\d+)\]"
-        offsets = {int(m) for m in re.findall(alias_pattern, src)}
-        offsets.update(int(m) for m in re.findall(direct_pattern, src))
-        return sorted(offsets)
+        """Read both typed aliases, keeping byte-address arithmetic explicit."""
+        pattern = (
+            r"^\s*half_t\*\s+(?P<name>a_shared|b_shared)\s*=\s*"
+            r"\(\(half_t\*\)\(\(half_t\*\)\(\(\(char\*\)buf_dyn_shmem\)"
+            r"\s*\+\s*\(int64_t\)(?P<offset>\d+)\)\)\);\s*$"
+        )
+        matches = list(re.finditer(pattern, src, re.MULTILINE))
+        assert [match["name"] for match in matches] == ["a_shared", "b_shared"], src
+        return sorted({int(match["offset"]) for match in matches})
 
     offsets_no_reuse = extract_smem_offsets(src_no_reuse)
     offsets_reuse = extract_smem_offsets(src_reuse)

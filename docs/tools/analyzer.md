@@ -17,7 +17,7 @@ analyzer does not execute the kernel.
 
 ## Quick Start
 
-Create specialized TIR with `get_tir()`, then analyze the resulting `PrimFunc`:
+Create specialized TIR with `get_tir()`, then analyze the resulting `Function`:
 
 ```python
 import tilelang
@@ -75,7 +75,7 @@ The main entry point is:
 result = Analyzer.analysis(fn, device)
 ```
 
-- `fn` is a `tvm.IRModule` or `tvm.tirx.PrimFunc` containing TileLang TIR.
+- `fn` is a `tvm_tirx.ir.IRModule` or `tvm_tirx.tirx.Function` containing TileLang TIR.
 - `device` is a TileLang device description such as
   `tilelang.carver.arch.CUDA("cuda")`.
 - The method returns an immutable `AnalysisResult`.

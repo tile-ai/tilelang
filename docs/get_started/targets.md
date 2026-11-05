@@ -1,13 +1,13 @@
 # Understanding Targets
 
-TileLang is built on top of TVM, which relies on **targets** to describe the device you want to compile for.
+TileLang uses TIRx **targets** to describe the device you want to compile for.
 The target determines which code generator is used (CUDA, HIP, Metal, LLVM, …) and allows you to pass
 device-specific options such as GPU architecture flags. This page summarises how to pick and customise a target
 when compiling TileLang programs.
 
 ## Common targets
 
-TileLang ships with a small set of common target kinds. Use a bare string for the kind, or a TVM target config
+TileLang ships with a small set of common target kinds. Use a bare string for the kind, or a TIRx target config
 dictionary when you need options such as GPU architecture or CPU model. The most frequent choices are listed below:
 
 | Base name | Description |
@@ -20,7 +20,7 @@ dictionary when you need options such as GPU architecture or CPU model. The most
 | `ascend` | Huawei Ascend NPUs. Use `execution_backend="pto"` to select PTO code generation. |
 | `llvm` | CPU execution. Use a config dict for options such as `{"kind": "llvm", "mtriple": "x86_64-linux-gnu"}`. |
 | `webgpu` | Browser / WebGPU runtimes. |
-| `c` | Emit plain C source for inspection or custom toolchains. |
+| `c` | CPU execution through a host C/C++ compiler, with generated C source available for inspection. |
 
 To add options, pass a target config dictionary. For example:
 
@@ -41,15 +41,17 @@ Most TileLang APIs that accept a target, such as `tilelang.compile`, `tilelang.j
 same input forms:
 
 ```python
+from tvm_tirx.target import Target
+
 target = "auto"  # detect CUDA, HIP, or Metal
-target = "cuda"  # bare TVM target kind
+target = "cuda"  # bare target kind
 target = {"kind": "cuda", "arch": "sm_90"}  # target config dict
-target = tvm.target.Target({"kind": "cuda"})  # already-built TVM Target
+target = Target({"kind": "cuda"})  # already-built TIRx Target
 ```
 
 Use the bare string form for simple cases. Use a config dictionary when you need target attributes such as CUDA
 `arch`, CUDA `code`, HIP `mcpu`, or LLVM CPU options. Dictionary keys must be valid attributes for that target kind;
-invalid attributes are rejected when TVM constructs the target.
+invalid attributes are rejected when TIRx constructs the target.
 
 ## Default target
 
@@ -90,7 +92,7 @@ kernel = tilelang.compile(func, target=target)
 
 ## CUDA `arch` and `code`
 
-For CUDA targets, `arch` selects the SM family TileLang/TVM should compile for. TileLang accepts `sm_...` architecture
+For CUDA targets, `arch` selects the SM family TileLang should compile for. TileLang accepts `sm_...` architecture
 tokens for this field. In the common case, setting only `arch` is enough:
 
 ```python
@@ -129,12 +131,12 @@ When `code` contains more than one entry, TileLang emits a fat binary (`fatbin`)
 ### Advanced: Specify Exact Hardware
 
 When you already know the precise GPU model, you can encode it in the target config via `arch="sm_XX"` or by
-using one of TVM’s pre-defined target tags such as `nvidia/nvidia-h100`. Supplying this detail is optional for
-TileLang in general use, but it becomes valuable when the TVM cost model is enabled (e.g. during autotuning).  The
+using one of TIRx’s pre-defined target tags such as `nvidia/nvidia-h100`. Supplying this detail is optional for
+TileLang in general use, but it becomes valuable when a cost model uses device limits (e.g. during autotuning). The
 cost model uses the extra attributes to make better scheduling predictions.  If you skip this step (or do not use the
 cost model), generic targets like `cuda` or `auto` are perfectly fine.
 
-All CUDA compute capabilities recognised by TVM’s target registry are listed below.  Pick the one that matches your
+Examples from TIRx’s CUDA target registry are listed below. Pick the one that matches your
 GPU and set it in the target config or use the corresponding target tag—for example `nvidia/nvidia-a100`.
 
 | Architecture | GPUs (examples) |
@@ -160,8 +162,8 @@ GPU and set it in the target config or use the corresponding target tag—for ex
 | `sm_90a` | `nvidia/nvidia-h100` (DPX profile) |
 | `sm_100a` | `nvidia/nvidia-b100` |
 
-Refer to NVIDIA’s [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) page or the TVM source
-(`3rdparty/tvm/src/target/tag.cc`) for the latest mapping between devices and compute capabilities.
+Refer to NVIDIA’s [CUDA GPUs](https://developer.nvidia.com/cuda-gpus) page or the TIRx source
+(`3rdparty/tvm-tirx/src/target/tag.cc`) for the mapping in the version bundled with TileLang.
 
 ## Creating targets programmatically
 
@@ -178,10 +180,10 @@ tvm_target = determine_target(
 kernel = tilelang.compile(func, target=tvm_target)
 ```
 
-You can also build targets directly through TVM:
+You can also build targets directly through TIRx:
 
 ```python
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 target = Target("cuda", host="llvm")
 target = target.with_host(Target({"kind": "llvm", "mcpu": "skylake"}))

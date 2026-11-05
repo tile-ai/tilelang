@@ -6,7 +6,6 @@ import torch
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
 
 
 @pytest.mark.parametrize("disable_reuse", [False, True])
@@ -118,7 +117,7 @@ def test_pointer_store_outside_view_waits_before_scalar_read(disable_reuse, stri
             if strided:
                 view = T.StridedTensor((80,), (2,), "float32", data=allocation.data, scope="shared.dyn")
             else:
-                view = tvm.tirx.decl_buffer((96,), "float32", data=allocation.data, scope="shared.dyn")
+                view = T.decl_buffer((96,), "float32", data=allocation.data, scope="shared.dyn")
             with T.Stage(0):
                 with T.SimdVF():
                     T.simd.vsts(view[64], T.simd.vdup(T.float32(1), "float32"))
@@ -149,7 +148,7 @@ def test_pointer_reads_physical_elements_outside_the_logical_view(disable_reuse,
             if strided:
                 view = T.StridedTensor((view_size,), (2,), "int32", data=a.data, scope="shared.dyn")
             else:
-                view = tvm.tirx.decl_buffer((view_size,), "int32", data=a.data, scope="shared.dyn")
+                view = T.decl_buffer((view_size,), "int32", data=a.data, scope="shared.dyn")
             with T.Stage(0):
                 a[1] = 100
                 b[1] = 200
@@ -185,9 +184,9 @@ def test_changed_layout_metadata_keeps_the_original_physical_value(disable_reuse
                 if metadata_kind == "stride":
                     view = T.StridedTensor((8,), (metadata[0],), "int32", data=a.data, scope="shared.dyn")
                 elif metadata_kind == "offset":
-                    view = tvm.tirx.decl_buffer((8,), "int32", data=a.data, elem_offset=metadata[0], scope="shared.dyn")
+                    view = T.decl_buffer((8,), "int32", data=a.data, elem_offset=metadata[0], scope="shared.dyn")
                 else:
-                    view = tvm.tirx.decl_buffer((2, metadata[0]), "int32", data=a.data, scope="shared.dyn")
+                    view = T.decl_buffer((2, metadata[0]), "int32", data=a.data, scope="shared.dyn")
                 a[1] = 100
                 b[1] = 200
                 out[1] = b[1]

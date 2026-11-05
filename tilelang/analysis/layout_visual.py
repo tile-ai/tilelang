@@ -5,11 +5,10 @@ import warnings
 
 import tilelang.language as T
 from tilelang.layout import PartialFragment
-from tvm import tirx
-from tvm.tirx import PyStmtExprVisitor
+import tvm_ffi
+from tvm_tirx import tirx
 
-from tvm.tirx.transform import prim_func_pass
-from tilelang.tools.plot_layout import plot_layout
+from ._visitor import NativeStmtVisitor, tilelang_metadata
 
 
 def print_fragment_format(layout: T.Fragment) -> None:
@@ -43,8 +42,7 @@ def print_fragment_format(layout: T.Fragment) -> None:
         raise ValueError(f"Expected T.Fragment, but got {type(layout).__name__}")
 
 
-@tirx.functor.visitor
-class _LayoutVisualVisitor(PyStmtExprVisitor):
+class _LayoutVisualVisitor(NativeStmtVisitor):
     """
     User-friendly pass which visualizes fragment layouts inferred during compilation.
 
@@ -84,29 +82,55 @@ class _LayoutVisualVisitor(PyStmtExprVisitor):
         else:
             parsed = [str(f).strip() for f in formats if str(f).strip()]
         self.formats_list = [f for f in parsed if f != "txt"]
+        self.printed = {}
 
-    def visit_sblock_(self, op: tirx.SBlock) -> None:
-        if "layout_map" in op.annotations:
-            layout_map = op.annotations["layout_map"]
+    def _print_metadata(self, metadata):
+        if metadata is None:
+            return
+        if metadata.get("key") == "layout_map":
+            layout_map = metadata["value"]
+        else:
+            layout_map = metadata.get("layout_map", {})
+        for tensor, layout in layout_map.items():
+            if not isinstance(layout, T.Fragment):
+                continue
+            previous = self.printed.get(tensor)
+            if previous is not None and tvm_ffi.structural_equal(previous, layout):
+                continue
+            self.printed[tensor] = layout
+            name = getattr(tensor, "name", str(tensor))
+            print(f"{name} inferred layout:")
+            print_fragment_format(layout)
+            if self.formats_list and len(layout.get_input_shape()) != 2:
+                warnings.warn(
+                    f"Skip plotting {name} layout: input_shape={layout.get_input_shape()} is not 2D.",
+                    stacklevel=2,
+                )
+                continue
+            for fmt in self.formats_list:
+                from tilelang.tools.plot_layout import plot_layout
 
-            for key, layout in layout_map.items():
-                if isinstance(layout, T.Fragment):
-                    print(f"{key} inferred layout:")
-                    print_fragment_format(layout)
-                    for fmt in self.formats_list:
-                        input_shape = layout.get_input_shape()
-                        if len(input_shape) != 2:
-                            warnings.warn(
-                                f"Skip plotting {key} layout: input_shape={input_shape} is not 2D.",
-                                stacklevel=2,
-                            )
-                            continue
-                        plot_layout(layout, name=f"{key}_layout", formats=fmt)
+                plot_layout(layout, name=f"{name}_layout", formats=fmt)
+
+    def visit_call(self, node, visitor):
+        self._print_metadata(tilelang_metadata(node))
+        super().visit_call(node, visitor)
+
+    def visit_region(self, node, visitor):
+        self._print_metadata(tilelang_metadata(node))
+        super().visit_region(node, visitor)
 
 
 def LayoutVisual(formats: str | Sequence[str] = ""):
-    def pass_fn(func: tirx.PrimFunc, mod, ctx):
+    """Print/plot the native lexical layout_map published by layout inference.
+
+    TensorVar keys stay bound at the publication site, including annotations
+    following local allocation Bind statements. The layout objects are the
+    explicit TileLang inference representation decoded from schema version 1.
+    """
+
+    def pass_fn(func, _mod, _ctx):
         _LayoutVisualVisitor(formats=formats).visit_stmt(func.body)
         return func
 
-    return prim_func_pass(pass_fn, opt_level=0, name="tl.LayoutVisual")
+    return tirx.transform.function_pass(pass_fn, opt_level=0, name="tl.LayoutVisual")

@@ -1,32 +1,33 @@
 """Control normalization snapshots mutable memory before scheduling splits tasks."""
 
 import pytest
-from tilelang import tvm
 from tilelang.ascend import transform
-from tvm import tirx
-from testing.ascend._ir import kernel, nodes
+from tvm_tirx import ir, tirx
+from testing.ascend._ir import allocated_buffer, attributes, kernel, nodes, tensor
 
 
 @pytest.mark.parametrize("control", ["condition", "loop-bound"])
 def test_control_read_is_snapshotted_before_body_mutates_it(control):
-    pred = tirx.decl_buffer((1,), "int32", name="pred", scope="shared.dyn")
-    write = tirx.BufferStore(pred, 0, [0])
+    pred = tensor((1,), "int32", name="pred", scope="shared.dyn")
+    write = ir.TensorStore(pred, [0], ir.const(0))
     if control == "condition":
-        body = tirx.IfThenElse(pred[0] > 0, write, tirx.BufferStore(pred, 1, [0]))
+        body = ir.If(ir.TensorLoad(pred, [0]) > 0, [write], [ir.TensorStore(pred, [0], ir.const(1))])
     else:
-        body = tirx.For(tirx.Var("i", "int32"), 0, pred[0], tirx.ForKind.SERIAL, write)
+        body = ir.For(ir.Var("i", "int32"), ir.const(0), ir.TensorLoad(pred, [0]), ir.const(1), ir.ForKind.DEFAULT, [write])
     before = kernel(body, buffers=[pred])
     after = transform.NormalizeControlFlowForSchedule()(before)
-    (snapshot,) = nodes(after, tirx.Bind)
-    (load,) = nodes(snapshot.value, tirx.BufferLoad)
-    assert load.buffer.same_as(pred)
+    (snapshot,) = [binding for binding in nodes(after, ir.Bind) if not tirx.is_tensor_var(binding.var)]
+    (load,) = nodes(snapshot.value, ir.TensorLoad)
+    assert load.source.same_as(pred)
     if control == "condition":
-        (branch,) = nodes(after, tirx.IfThenElse)
+        (branch,) = nodes(after, ir.If)
         assert branch.condition.same_as(snapshot.var)
-        assert isinstance(branch.then_case, tirx.BufferStore) and isinstance(branch.else_case, tirx.BufferStore)
+        assert isinstance(branch.then_case.seq[0], ir.TensorStore) and isinstance(branch.else_case.seq[0], ir.TensorStore)
     else:
-        (loop,) = nodes(after, tirx.For)
-        assert loop.extent.same_as(snapshot.var)
-    before_snapshot, after_snapshot = after["main"].body.block.body.seq
+        (loop,) = nodes(after, ir.For)
+        assert loop.end.same_as(snapshot.var)
+    (root,) = attributes(after, "tl.sblock")
+    allocation, before_snapshot, after_snapshot = root.body.seq
+    assert allocation.var.same_as(allocated_buffer(after, "pred"))
     assert before_snapshot.same_as(snapshot)
-    tvm.ir.assert_structural_equal(nodes(after_snapshot, tirx.BufferStore)[0], write)
+    ir.assert_structural_equal(nodes(after_snapshot, ir.TensorStore)[0], write)

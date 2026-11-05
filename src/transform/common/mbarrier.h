@@ -1,46 +1,25 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_MBARRIER_H_
 #define TVM_TL_TRANSFORM_COMMON_MBARRIER_H_
 
-#include "../../op/builtin.h"
-#include <tvm/ir/expr.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
-#include <tvm/tirx/op.h>
-#include <tvm/tirx/stmt.h>
+#include "ir/tensor_utils.h"
+#include <tvm/tirx/op/memory.h>
 
-namespace tvm {
-namespace tl {
+namespace tvm::tl {
 
-using namespace tirx;
-
-/*!
- * \brief Create an mbarrier buffer with shared.barrier storage scope.
- *
- * \param name The name of the buffer.
- * \param num_barriers The number of barriers in the buffer.
- * \return A Buffer object for mbarrier with shared.barrier scope.
- */
-inline Buffer CreateMBarrierBuffer(const std::string &name, int num_barriers) {
-  Var data(name, PointerType(PrimType(DataType::UInt(64)), "shared.barrier"));
-  return Buffer(data, DataType::UInt(64),
-                {IntImm(DataType::Int(32), num_barriers)}, {}, PrimExpr(), name,
-                0, 0, kDefault);
+inline tirx::TensorVar CreateMBarrierBuffer(const std::string &name,
+                                            int count) {
+  TVM_FFI_CHECK_GT(count, 0, ValueError);
+  return tirx::TensorVar(
+      name,
+      tirx::TensorType({IntImm(PrimType::Int(32), count)}, PrimType::UInt(64),
+                       runtime::MemoryScope::Get("shared.barrier")));
 }
 
-/*!
- * \brief Create a BufferLoad reference to a specific barrier slot.
- *
- * \param barrier_buf The shared.barrier scope buffer.
- * \param barrier_id  The index expression for the barrier slot.
- * \return A BufferLoad expression referencing the barrier.
- */
-inline PrimExpr MakeBarrierRef(const Buffer &barrier_buf, PrimExpr barrier_id) {
-  return BufferLoad(barrier_buf, {std::move(barrier_id)});
+inline PrimExpr MakeBarrierRef(const tirx::TensorVar &buffer, PrimExpr index) {
+  return TensorLoad(buffer, {std::move(index)});
 }
 
-const std::string injected_mbarrier_name_ =
-    "mbarrier"; // todo: avoid conflict with user-defined mbarriers
+inline const std::string injected_mbarrier_name_ = "mbarrier";
 
-} // namespace tl
-} // namespace tvm
+} // namespace tvm::tl
 #endif // TVM_TL_TRANSFORM_COMMON_MBARRIER_H_

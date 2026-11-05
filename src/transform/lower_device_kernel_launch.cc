@@ -1,468 +1,719 @@
 /*!
  * \file lower_device_kernel_launch.cc
- * \brief Split device function from host.
+ * \brief Finalize TileLang device resources before native launch ABI lowering.
  */
-#include "support/check.h"
-#include <tvm/ir/cast.h>
-#include <tvm/ir/transform.h>
-#include <tvm/runtime/logging.h>
-#include <tvm/target/target.h>
-#include <tvm/tirx/builtin.h>
-#include <tvm/tirx/expr.h>
+#include "common/storage_size.h"
+#include "ir/analyzer.h"
+#include "op/native_utils.h"
+
+#include <tvm/backend/cuda/attr.h>
+#include <tvm/ffi/extra/structural_mutate.h>
+#include <tvm/ffi/reflection/registry.h>
+#include <tvm/ir/analysis.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/attr.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "common/storage_size.h"
-#include "runtime/thread_storage_scope.h"
-#include "tir/transforms/ir_utils.h"
+#include "upstream_pass_bridge.h"
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
-namespace tvm {
-namespace tl {
-
+namespace tvm::tl {
+namespace {
 using namespace tirx;
 using namespace ffi;
-namespace {
 
-// Whether the target launches only a grid: thread domains stay local to
-// device-side regions and must not become runtime launch dimensions.
-bool LaunchGridOnly(const Target &target) {
-  return target.defined() &&
-         target->GetAttr<Bool>("launch_grid_only", Bool(false)).value();
-}
-
-struct KernelInfo {
-  // The device on which the PrimFunc runs
-  Target target;
-
-  // The externally visible symbol which may refer to the PrimFunc
-  // when launching a device kernel.
-  String global_symbol;
-
-  // The parameters accepted by the PrimFunc.  Used to rewrite
-  // `launch_args` to be in terms of the calling scope.
-  Array<Var> params;
-
-  // The launch parameters that should annotate the PrimFunc, if the
-  // kernel is ever called from the host.
-  Array<String> launch_params;
-
-  // Additional arguments which must be provided to the host-side
-  // PackedFunc.  These may be in terms of the function's parameters
-  // (e.g. a function that computes the average of `N` elements, and
-  // which must be launched with `N` CUDA threads).
-  Array<PrimExpr> launch_args;
-
-  // The extent of each thread
-  Map<String, PrimExpr> thread_extent;
-  // The amount of dynamic shared memory used
-  Optional<PrimExpr> dyn_shmem_size{std::nullopt};
-  // Cluster dimensions for SM90+ cluster launch
-  Optional<Array<Integer>> cluster_dims{std::nullopt};
-};
-
-/*!
- * \brief Visitor class to collect device-side program information.
- */
-class DeviceInfoCollector : public StmtVisitor {
+// CUDA's packed runtime accepts int32 scalars, but has no bool converter.
+// Legalize the actual device signature and both native call spellings together.
+// The public host signature remains intact for the original boolean checks.
+class CudaBooleanCallRewriter : public StmtExprMutator {
 public:
-  static KernelInfo Collect(const GlobalVar &gvar, const PrimFunc &func) {
-    DeviceInfoCollector collector;
-    collector.info_.target =
-        func->GetAttr<Target>(tvm::attr::kTarget).value().WithoutHost();
-    collector.info_.params = func->params;
+  using StmtExprMutator::Mutate_;
 
-    collector(func->body);
+  std::unordered_map<const GlobalVarObj *, std::vector<size_t>> by_global;
+  std::unordered_map<std::string, std::vector<size_t>> by_symbol;
 
-    // Cluster dims are promoted to a PrimFunc attr by LowerOpaqueBlock.
-    if (auto opt = func->GetAttr<Array<Integer>>("cluster_dims")) {
-      collector.info_.cluster_dims = opt.value();
-    }
-
-    // The dynamic shared memory is required to be the last of the
-    // kernel launch parameters
-    if (collector.dyn_shmem_size) {
-      collector.info_.launch_params.push_back(
-          tvm::runtime::launch_param::kUseDynamicSharedMemoryTag);
-    }
-
-    collector.info_.global_symbol =
-        func->GetAttr<String>(tvm::attr::kGlobalSymbol)
-            .value_or(gvar->name_hint);
-
-    collector.info_.launch_args = collector.info_.launch_params.Map(
-        [&](const auto &param) { return collector.GetArgument(param); });
-    collector.info_.dyn_shmem_size = collector.dyn_shmem_size;
-    collector.info_.thread_extent = collector.thread_extent;
-
-    // Prepend cluster dim tags and static values so the TVM runtime
-    // can read them from packed-function args at launch time.
-    if (collector.info_.cluster_dims.defined()) {
-      auto dims = collector.info_.cluster_dims.value();
-      Array<PrimExpr> new_launch_args = {PrimExpr(dims[0]), PrimExpr(dims[1]),
-                                         PrimExpr(dims[2])};
-      for (auto arg : collector.info_.launch_args)
-        new_launch_args.push_back(arg);
-      collector.info_.launch_args = new_launch_args;
-
-      Array<String> new_launch_params = {
-          String(tvm::runtime::launch_param::kClusterDimX),
-          String(tvm::runtime::launch_param::kClusterDimY),
-          String(tvm::runtime::launch_param::kClusterDimZ)};
-      for (auto param : collector.info_.launch_params)
-        new_launch_params.push_back(param);
-      collector.info_.launch_params = new_launch_params;
-    }
-
-    return collector.info_;
-  }
-
-private:
-  PrimExpr GetArgument(const String &launch_param) const {
-    if (launch_param ==
-        tvm::runtime::launch_param::kUseDynamicSharedMemoryTag) {
-      ICHECK(dyn_shmem_size.defined())
-          << "Compute kernel requires launch parameter \"" << launch_param
-          << "\", but PrimFunc did not contain Allocate node with shared "
-             "dynamic scope.";
-      return dyn_shmem_size.value();
-    }
-
-    auto extent = thread_extent.Get(launch_param);
-    ICHECK(extent) << "Compute kernel requires launch parameter \""
-                   << launch_param
-                   << "\", but PrimFunc does not contain AttrStmt \""
-                   << tirx::attr::thread_extent
-                   << "\" defining this thread extent";
-    return extent.value();
-  }
-
-  void VisitStmt_(const AttrStmtNode *op) final {
-    if (op->attr_key == tirx::attr::thread_extent) {
-      IterVar iv = Downcast<IterVar>(op->node);
-      ICHECK_NE(iv->thread_tag.length(), 0U);
-      // thread_extent can appear multiple times
-      // use the first appearance as def.
-      if (!defined_thread.count(iv.get())) {
-        defined_thread.insert(iv.get());
-        thread_extent.Set(iv->thread_tag, op->value);
-        // Grid-only launch targets keep thread domains local to device-side
-        // regions; only the blockIdx.* grid axes are runtime launch
-        // dimensions.
-        std::string thread_tag = iv->thread_tag;
-        if (!LaunchGridOnly(info_.target) ||
-            thread_tag.rfind("blockIdx.", 0) == 0) {
-          info_.launch_params.push_back(iv->thread_tag);
+  UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
+    auto mapped = StmtExprMutator::Mutate_(call, mode);
+    Call current = mapped.IsUnchanged() ? GetRef<Call>(call)
+                                        : AnyView(mapped).cast<Call>();
+    const std::vector<size_t> *positions = nullptr;
+    size_t offset = 0;
+    if (auto global = current->op.as<GlobalVar>()) {
+      if (auto found = by_global.find(global->get()); found != by_global.end())
+        positions = &found->second;
+    } else if (current->op.same_as(call_ffi_kernel_op()) &&
+               !current->args.empty()) {
+      if (auto name = current->args[0].as<StringImm>()) {
+        if (auto found = by_symbol.find((*name)->value);
+            found != by_symbol.end()) {
+          positions = &found->second;
+          offset = 1;
         }
       }
     }
-
-    StmtVisitor::VisitStmt_(op);
-  }
-
-  void VisitStmt_(const AllocBufferNode *op) final {
-    auto scope = GetPtrStorageScope(op->buffer->data);
-    if (scope == "metal.cooperative_tensor") {
-      StmtVisitor::VisitStmt_(op);
-      return;
+    if (!positions)
+      return mapped;
+    auto arguments = current->args;
+    for (size_t position : *positions) {
+      size_t index = position + offset;
+      TVM_FFI_CHECK_LT(index, arguments.size(), ValueError)
+          << "CUDA boolean ABI argument is missing";
+      auto value = arguments[index].as_or_throw<PrimExpr>();
+      TVM_FFI_CHECK(value.ty() == PrimType::Bool(), TypeError)
+          << "CUDA boolean ABI requires a boolean caller operand";
+      arguments.Set(index, prim::Cast(PrimType::Int(32), value));
     }
-
-    auto storage_scope = runtime::StorageScope::Create(scope);
-    if (storage_scope.rank == runtime::StorageRank::kShared &&
-        storage_scope.tag == ".dyn") {
-      ICHECK(!dyn_shmem_size.defined())
-          << "Only one dynamic shared memory allocation is allowed.";
-      ICHECK_GT(op->buffer->shape.size(), 0);
-
-      dyn_shmem_size = GetBufferStorageSizeBytes(op->buffer);
-    }
-    StmtVisitor::VisitStmt_(op);
+    return Call(current->ty, current->op, arguments, current->attrs,
+                current->ty_args, current->loc);
   }
-
-  // The collected results
-  KernelInfo info_;
-  // recording what thread axis have been visited.
-  std::unordered_set<const IterVarNode *> defined_thread;
-  // The extent of each thread
-  Map<String, PrimExpr> thread_extent;
-  // The amount of dynamic shared memory used
-  Optional<PrimExpr> dyn_shmem_size{std::nullopt};
 };
 
-class ReturnRemover : public StmtExprMutator {
+tvm::transform::Pass LowerCudaBooleanParameters() {
+  return tvm::transform::CreateModulePass(
+      [](IRModule module, tvm::transform::PassContext) {
+        auto calls = make_object<CudaBooleanCallRewriter>();
+        auto functions = module->functions;
+        for (const auto &[global, base] : module->functions) {
+          auto optional = base.as<tirx::Function>();
+          if (!optional)
+            continue;
+          const auto function = *optional;
+          auto target = function->GetAttr(tvm::attr::kTarget);
+          // Run after native launch classification. A global CUDA helper
+          // without a launch keeps its original boolean interface; a real
+          // kernel need not have carried is_global_func before lowering.
+          if (!target || target.value()->GetHost() ||
+              target.value()->GetTargetDeviceType() != kDLCUDA ||
+              function->GetAttr(tvm::attr::kCallingConv, CallingConv::kDefault)
+                      .value() != CallingConv::kDeviceKernelLaunch)
+            continue;
+          // Raw CUDA text owns its external bool8 signature. Its runtime
+          // adapter uses an explicit normalized int32 conversion holder.
+          if (function->GetAttr<String>("code_block_source"))
+            continue;
+          auto parameters = function->params;
+          Map<Var, PrimExpr> replacements;
+          std::vector<size_t> positions;
+          for (size_t index = 0; index < parameters.size(); ++index) {
+            auto parameter = parameters[index].as<PrimVar>();
+            if (!parameter || parameter->ty() != PrimType::Bool())
+              continue;
+            PrimVar storage(std::string((*parameter)->name) + "_abi",
+                            PrimType::Int(32), (*parameter)->loc);
+            parameters.Set(index, storage);
+            replacements.Set(*parameter, prim::Cast(PrimType::Bool(), storage));
+            positions.push_back(index);
+          }
+          if (positions.empty())
+            continue;
+          auto replace =
+              [&](const Var &variable) -> Expected<UnchangedOr<Any>> {
+            if (auto replacement = replacements.Get(variable))
+              return Any(*replacement);
+            return Unchanged();
+          };
+          // Structural hooks rebuild changed parameter types and their uses
+          // together. Function attributes are metadata to those hooks, so
+          // remap their explicit variable references separately.
+          auto attributes =
+              StructuralMap<WalkOrder::kPreOrder>(function->attrs, replace)
+                  .as_or_throw<DictAttrs>();
+          auto changed =
+              tirx::Function(parameters, function->body, function->ret_type,
+                             attributes, function->loc);
+          changed = StructuralMap<WalkOrder::kPreOrder>(changed, replace)
+                        .as_or_throw<tirx::Function>();
+          functions.Set(global, changed);
+          calls->by_global.emplace(global.get(), positions);
+          if (auto symbol = function->GetAttr(tvm::attr::kGlobalSymbol))
+            calls->by_symbol.emplace(*symbol, positions);
+        }
+        if (calls->by_global.empty())
+          return module;
+        const auto device_updates = functions;
+        for (const auto &[global, base] : device_updates) {
+          if (auto function = base.as<tirx::Function>()) {
+            auto body = (*function)->body;
+            auto rewritten = calls->Mutate(body, InplaceMode::kDisallow)
+                                 .ValueOrUnchanged(body);
+            if (!rewritten.same_as(body)) {
+              auto updated = *function;
+              updated.CopyOnWrite()->body = rewritten;
+              functions.Set(global, updated);
+            }
+          }
+        }
+        return IRModule(functions, module->attrs, module->global_infos);
+      },
+      0, "tl.LowerCudaBooleanParameters");
+}
+
+// These attributes are consumed by TileLang's runtime adapters and codegen.
+// Keep their expressions in the final device-parameter coordinate system;
+// native launch lowering substitutes those parameters at each host call site.
+class LaunchMetadata : public StmtExprVisitor {
 public:
-  static Stmt Apply(const Stmt &stmt) {
-    ReturnRemover mutator;
-    return mutator(stmt);
+  using StmtExprVisitor::Visit_;
+  explicit LaunchMetadata(const tirx::Function &function)
+      : function_(function), analyzer_(CreateTileLangAnalyzer()) {
+    target_ = function->GetAttr<Target>(tvm::attr::kTarget).value();
+    for (const Var &parameter : function->params)
+      parameters_.insert(parameter.get());
+    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
+      if (const auto *bind = object.as<BindObj>()) {
+        if (auto value = bind->value.as<PrimExpr>())
+          definitions_.Set(bind->var, value.value());
+      }
+    });
   }
 
-private:
-  using Parent = StmtExprMutator;
-  Stmt VisitStmt_(const EvaluateNode *op) override {
-    if (auto *call = op->value.as<CallNode>()) {
-      if (call->op.same_as(builtin::ret())) {
-        ICHECK_EQ(call->args.size(), 1);
-        auto as_int = call->args[0].as<IntImmNode>();
-        ICHECK(as_int && as_int->value == 0)
-            << "Device kernel may only contain successful return, T.ret(0)";
-        return Evaluate(0);
+  Optional<VisitInterrupt> Visit_(const RegionStmtObj *region) final {
+    if (region->op.same_as(launch_thread_op())) {
+      String tag = region->args[0].as_or_throw<StringImm>()->value;
+      const bool grid_only =
+          target_->GetAttr<bool>("launch_grid_only").value_or(false);
+      if (tag.find("vthread") != 0 &&
+          (!grid_only || tag.find("blockIdx.") == 0)) {
+        auto extent = Expand(region->args[1].as_or_throw<PrimExpr>());
+        if (auto previous = extents.Get(tag)) {
+          TVM_FFI_CHECK(analyzer_->CanProveEqual(previous.value(), extent),
+                        ValueError)
+              << "Incompatible launch extents for " << tag;
+        } else {
+          extents.Set(tag, extent);
+        }
       }
     }
-    return Parent::VisitStmt_(op);
+    return StmtExprVisitor::Visit_(region);
   }
 
-  PrimExpr VisitExpr_(const CallNode *op) override {
-    if (op->op.same_as(builtin::ret())) {
-      LOG(FATAL) << "Call to builtin::ret() should only appear within an "
-                    "Evaluate node";
+  Optional<VisitInterrupt> Visit_(const BindObj *binding) final {
+    const auto *call = binding->value.as<CallObj>();
+    if (call && call->op.same_as(alloc_tensor_op())) {
+      auto tensor = binding->var.as_or_throw<TensorVar>();
+      if (tensor.scope().name() == "shared.dyn") {
+        TVM_FFI_CHECK(!dynamic_bytes, ValueError)
+            << "LowerDeviceKernelLaunch requires one final shared.dyn "
+               "allocation; "
+               "run MergeSharedMemoryAllocations first";
+        dynamic_bytes = Expand(GetBufferStorageSizeBytes(tensor));
+      }
     }
-    return Parent::VisitExpr_(op);
+    return StmtExprVisitor::Visit_(binding);
   }
+
+  PrimExpr Expand(PrimExpr expression) const {
+    for (size_t count = 0; count <= definitions_.size(); ++count) {
+      bool changed = false;
+      expression = ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+                       expression,
+                       [&](const Var &variable) -> Expected<UnchangedOr<Any>> {
+                         if (parameters_.count(variable.get()))
+                           return Unchanged();
+                         if (auto value = definitions_.Get(variable)) {
+                           changed = true;
+                           return Any(value.value());
+                         }
+                         return Unchanged();
+                       })
+                       .as_or_throw<PrimExpr>();
+      if (!changed)
+        break;
+      TVM_FFI_CHECK(count < definitions_.size(), ValueError)
+          << "Cyclic scalar definitions in launch metadata";
+    }
+    for (const Var &variable : UndefinedVars(expression)) {
+      TVM_FFI_CHECK(parameters_.count(variable.get()), ValueError)
+          << "Launch metadata refers to a device-local variable: " << variable;
+    }
+    VisitNativePostOrder(expression, [](const ObjectRef &object) {
+      TVM_FFI_CHECK(!object.as<TensorLoadObj>(), ValueError)
+          << "Launch metadata cannot read device memory";
+      if (const auto *call = object.as<CallObj>()) {
+        TVM_FFI_CHECK(tvm::SideEffect(GetRef<Call>(call)) <=
+                          CallEffectKind::kPure,
+                      ValueError)
+            << "Launch metadata cannot evaluate device-dependent calls";
+      }
+    });
+    return analyzer_->Simplify(expression);
+  }
+
+  Map<String, PrimExpr> extents;
+  Optional<PrimExpr> dynamic_bytes;
+
+private:
+  tirx::Function function_;
+  Target target_{UnsafeInit{}};
+  sym::Analyzer analyzer_;
+  Map<Var, PrimExpr> definitions_;
+  std::unordered_set<const VarObj *> parameters_;
+};
+
+// Explicit native launch operands remain on the host until every device pass
+// has completed. Derive TileLang grid/block geometry in this final callee's
+// parameter coordinates, then substitute the actual operands at each call.
+// Cluster dimensions and user-supplied streams/events are already host values.
+class ConfiguredLaunchMetadata : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+  explicit ConfiguredLaunchMetadata(IRModule module)
+      : module_(std::move(module)), analyzer_(CreateTileLangAnalyzer()) {}
+
+  UnchangedOr<Stmt> Mutate_(const RegionStmtObj *statement,
+                            InplaceMode mode) final {
+    if (!statement->op.same_as(upstream_pass_bridge::PendingCudaLaunchOp()))
+      return StmtExprMutator::Mutate_(statement, mode);
+    Stmt body = statement->body;
+    while (const auto *sequence = body.as<SeqStmtObj>()) {
+      TVM_FFI_CHECK_EQ(sequence->seq.size(), 1, ValueError)
+          << "Pending CUDA launch must contain one outlined call";
+      body = sequence->seq[0];
+    }
+    const auto *evaluate = body.as<EvaluateObj>();
+    const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
+    TVM_FFI_CHECK(call && call->op.as<GlobalVarObj>(), ValueError)
+        << "Pending CUDA launch must contain one outlined GlobalVar call";
+    GlobalVar symbol = call->op.as_or_throw<GlobalVar>();
+    auto function = device_updates.Get(symbol).value_or(
+        module_->Lookup(symbol).as_or_throw<tirx::Function>());
+    // The native configured-launch lowerer currently emits the CUDA ABI.
+    // Other backends use ordinary GlobalVar calls, which this visitor leaves
+    // unchanged. Reject an explicitly configured non-CUDA callee before that
+    // lowerer could attach CUDA metadata to it.
+    auto target = function->GetAttr<Target>(tvm::attr::kTarget);
+    TVM_FFI_CHECK(target && target.value()->GetTargetDeviceType() == kDLCUDA,
+                  ValueError)
+        << "Explicit native CUDA launch configuration requires a CUDA device "
+           "kernel";
+    auto kernel_args = call->args;
+    TVM_FFI_CHECK_EQ(kernel_args.size(), function->params.size(), ValueError)
+        << "Native launch arguments must match the final device parameters";
+    auto attrs = statement->attrs->dict;
+    auto fields =
+        attrs.at(backend::cuda::attr::kLaunchFields.name).cast<Array<String>>();
+    auto values = statement->args;
+    TVM_FFI_CHECK_EQ(fields.size(), values.size(), ValueError)
+        << "CUDA launch fields must describe every configuration operand";
+    std::unordered_map<std::string, size_t> positions;
+    for (size_t i = 0; i < fields.size(); ++i) {
+      TVM_FFI_CHECK(positions.emplace(fields[i], i).second, ValueError)
+          << "Duplicate CUDA launch field: " << fields[i];
+    }
+    auto set = [&](String name, Expr value) {
+      if (auto found = positions.find(name); found != positions.end()) {
+        values.Set(found->second, value);
+      } else {
+        positions.emplace(name, fields.size());
+        fields.push_back(name);
+        values.push_back(value);
+      }
+    };
+    auto require_flag = [&](String name) {
+      if (auto found = positions.find(name); found != positions.end()) {
+        auto value =
+            analyzer_->Simplify(values[found->second].as_or_throw<PrimExpr>());
+        TVM_FFI_CHECK(prim::IsOne(value), ValueError)
+            << "The device kernel requires CUDA launch field " << name
+            << " = 1";
+      } else {
+        set(name, IntImm::Int32(1));
+      }
+    };
+
+    auto metadata = make_object<LaunchMetadata>(function);
+    metadata->Visit(function->body);
+    Map<Var, Expr> arguments;
+    for (size_t i = 0; i < kernel_args.size(); ++i)
+      arguments.Set(function->params[i], kernel_args[i]);
+    auto in_caller = [&](PrimExpr expression) {
+      return analyzer_->Simplify(
+          ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+              expression,
+              [&](const Var &variable) -> Expected<UnchangedOr<Any>> {
+                if (auto argument = arguments.Get(variable))
+                  return Any(*argument);
+                return Unchanged();
+              })
+              .as_or_throw<PrimExpr>());
+    };
+
+    if (attrs.Get("tl.derive_launch_geometry")
+            .value_or(Any(false))
+            .cast<bool>()) {
+      const auto &extents = metadata->extents;
+      TVM_FFI_CHECK(!extents.empty(), ValueError)
+          << "TileLang cluster launch requires final physical thread extents";
+      for (const auto &prefix : {std::pair{"blockIdx.", "grid."},
+                                 std::pair{"threadIdx.", "block."}}) {
+        for (char axis : {'x', 'y', 'z'}) {
+          PrimExpr extent = IntImm::Int32(1);
+          if (auto value = extents.Get(std::string(prefix.first) + axis)) {
+            extent = in_caller(*value);
+          }
+          set(std::string(prefix.second) + axis, analyzer_->Simplify(extent));
+        }
+      }
+      attrs.erase("tl.derive_launch_geometry");
+    }
+
+    // These requirements are discovered after outlining. A configured launch
+    // uses ordinary scalar fields for flags; the flag-only legacy tags must
+    // never coexist with this ABI in runtime FunctionInfo.
+    if (function->GetAttr<int64_t>("has_cuda_pdl_trigger").value_or(0) ||
+        function->GetAttr<int64_t>("has_cuda_pdl_sync").value_or(0))
+      require_flag("programmatic_stream_serialization");
+    if (function->GetAttr<int64_t>("use_cooperative_groups").value_or(0))
+      require_flag("cooperative");
+    auto kernel_attrs = attrs.Get(backend::cuda::attr::kKernelAttrs.name)
+                            .value_or(Any(Map<String, int64_t>{}))
+                            .cast<Map<String, int64_t>>();
+    if (auto requested = function->GetAttr(tirx::attr::kKernelLaunchParams)) {
+      for (const String &tag : requested.value()) {
+        if (tag == "tirx.use_programtic_dependent_launch")
+          require_flag("programmatic_stream_serialization");
+        else if (tag == "tirx.use_cooperative_launch")
+          require_flag("cooperative");
+        else if (tag == "tirx.use_required_block_dimension")
+          kernel_attrs.Set("required_block_size", 1);
+        else
+          TVM_FFI_THROW(ValueError)
+              << "Cannot mix native CUDA launch fields with legacy tag " << tag;
+      }
+    }
+    Array<Stmt> prefix;
+    Optional<PrimExpr> required_bytes;
+    if (metadata->dynamic_bytes)
+      required_bytes = in_caller(*metadata->dynamic_bytes);
+    if (auto pool = attrs.Get(backend::cuda::attr::kSmemRequired.name)) {
+      PrimExpr bytes = IntImm::Int64(pool->cast<int64_t>());
+      required_bytes =
+          required_bytes ? prim::Max(*required_bytes, bytes) : bytes;
+    }
+    if (required_bytes) {
+      auto bytes = analyzer_->Simplify(*required_bytes);
+      auto supplied = positions.find("dynamic_smem_bytes");
+      if (supplied == positions.end()) {
+        TVM_FFI_CHECK(!prim::IsZero(bytes) ||
+                          attrs.count(backend::cuda::attr::kSmemRequired.name),
+                      ValueError)
+            << "A shared.dyn placeholder requires explicit dynamic_smem_bytes";
+        set("dynamic_smem_bytes", bytes);
+      } else {
+        auto available = values[supplied->second].as_or_throw<PrimExpr>();
+        auto condition = analyzer_->Simplify(available >= bytes);
+        TVM_FFI_CHECK(!prim::IsZero(condition), ValueError)
+            << "dynamic_smem_bytes is smaller than the final kernel allocation";
+        if (!prim::IsOne(condition))
+          prefix.push_back(
+              AssertStmt(condition, StringImm("ValueError"),
+                         {StringImm("dynamic_smem_bytes is smaller than the "
+                                    "final kernel allocation")},
+                         statement->loc));
+      }
+    }
+
+    // Only compile-time block/cluster dimensions belong to the device. All
+    // dynamic geometry and stream/event handles remain host Call operands.
+    Array<PrimExpr> dimensions;
+    for (const char *axis_prefix : {"block.", "cluster."}) {
+      for (char axis : {'x', 'y', 'z'}) {
+        PrimExpr dimension = IntImm::Int32(1);
+        if (auto found = positions.find(std::string(axis_prefix) + axis);
+            found != positions.end()) {
+          auto value = analyzer_->Simplify(
+              values[found->second].as_or_throw<PrimExpr>());
+          dimension = value.as<IntImmObj>() ? value : IntImm::Int32(0);
+        }
+        dimensions.push_back(dimension);
+      }
+    }
+    if (auto previous = device_updates.Get(symbol)) {
+      auto prior_dimensions =
+          (*previous)->GetAttr(backend::cuda::attr::kLaunchDimensions).value();
+      TVM_FFI_CHECK(
+          (*previous)->GetAttr(backend::cuda::attr::kLaunchFields).value() ==
+                  fields &&
+              (*previous)->GetAttr(backend::cuda::attr::kKernelAttrs).value() ==
+                  kernel_attrs,
+          ValueError)
+          << "Incompatible CUDA launch schemas for one device function";
+      for (size_t i = 0; i < dimensions.size(); ++i)
+        if (!analyzer_->CanProveEqual(dimensions[i], prior_dimensions[i]))
+          dimensions.Set(i, IntImm::Int32(0));
+    }
+    String name =
+        function->GetAttr(tvm::attr::kGlobalSymbol).value_or(symbol->name_hint);
+    function = WithAttrs(
+        function,
+        {{tvm::attr::kGlobalSymbol.name, name},
+         {tvm::attr::kCallingConv.name, tvm::CallingConv::kDeviceKernelLaunch},
+         {tirx::attr::kIsGlobalFunc.name, true},
+         {backend::cuda::attr::kLaunchFields.name, fields},
+         {backend::cuda::attr::kKernelAttrs.name, kernel_attrs},
+         {backend::cuda::attr::kLaunchDimensions.name, dimensions}});
+    function = WithoutAttr(function, tirx::attr::kKernelLaunchParams.name);
+    device_updates.Set(symbol, function);
+    auto launch = make_object<CallFFIKernelAttr>();
+    launch->launch_fields = fields;
+    launch->kernel_attrs = kernel_attrs;
+    launch->num_kernel_args = kernel_args.size();
+    Array<Expr> operands{StringImm(name)};
+    operands.insert(operands.end(), kernel_args.begin(), kernel_args.end());
+    operands.insert(operands.end(), values.begin(), values.end());
+    prefix.push_back(Evaluate(Call(PrimType::Int(32), call_ffi_kernel_op(),
+                                   operands, Attrs(launch), {}, statement->loc),
+                              statement->loc));
+    return SeqStmt(prefix, statement->loc);
+  }
+
+  Map<GlobalVar, tirx::Function> device_updates;
+
+private:
+  IRModule module_;
+  sym::Analyzer analyzer_;
+};
+// Native outlining supplies the final argument order. Adapt its legacy CUDA
+// schema to explicit fields so zero geometry reaches the runtime validator,
+// rather than being interpreted as an omitted legacy dimension. Other device
+// backends keep their schemas. All backends use TileLang's packed storage size.
+class LegacyLaunchRewriter final : public StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+  explicit LegacyLaunchRewriter(const IRModule &module) {
+    for (const auto &[symbol, base] : module->functions) {
+      auto function = base.as<tirx::Function>();
+      if (!function)
+        continue;
+      auto target = (*function)->GetAttr(tvm::attr::kTarget);
+      if (!target || (*target)->GetHost() ||
+          (*target)->GetTargetDeviceType() == kDLCPU)
+        continue;
+      auto metadata = make_object<LaunchMetadata>(*function);
+      metadata->Visit((*function)->body);
+      if (metadata->dynamic_bytes ||
+          ((*target)->GetTargetDeviceType() == kDLCUDA &&
+           (*function)->GetAttr(tirx::attr::kKernelLaunchParams))) {
+        String name = (*function)
+                          ->GetAttr(tvm::attr::kGlobalSymbol)
+                          .value_or(symbol->name_hint);
+        TVM_FFI_CHECK(entries_
+                          .emplace(name, Entry{symbol, *function,
+                                               metadata->dynamic_bytes})
+                          .second,
+                      ValueError)
+            << "Duplicate device symbol in launch metadata: " << name;
+      }
+    }
+  }
+
+  UnchangedOr<Expr> Mutate_(const CallObj *node, InplaceMode mode) final {
+    const auto *attrs = node->attrs.as<CallFFIKernelAttr>();
+    if (!node->op.same_as(call_ffi_kernel_op()) || !attrs ||
+        !attrs->launch_fields.empty() || node->args.empty())
+      return StmtExprMutator::Mutate_(node, mode);
+    const auto *name = node->args[0].as<StringImmObj>();
+    auto entry = name ? entries_.find(name->value) : entries_.end();
+    if (entry == entries_.end())
+      return StmtExprMutator::Mutate_(node, mode);
+    const auto &function = entry->second.function;
+    Array<Expr> operands = node->args;
+    size_t position = 1 + function->params.size();
+    TVM_FFI_CHECK_LE(position, operands.size(), ValueError);
+    Map<Var, Expr> parameters;
+    for (size_t i = 0; i < function->params.size(); ++i)
+      parameters.Set(function->params[i], operands[1 + i]);
+    for (const String &tag : attrs->launch_params) {
+      if (tag == "tirx.use_programtic_dependent_launch" ||
+          tag == "tirx.use_cooperative_launch" ||
+          tag == "tirx.use_required_block_dimension")
+        continue;
+      TVM_FFI_CHECK_LT(position, operands.size(), ValueError);
+      if (tag == "tirx.use_dyn_shared_memory" && entry->second.bytes) {
+        auto bytes =
+            ffi::StructuralMap<ffi::WalkOrder::kPreOrder>(
+                *entry->second.bytes,
+                [&](const Var &variable) -> Expected<UnchangedOr<Any>> {
+                  if (auto argument = parameters.Get(variable))
+                    return Any(*argument);
+                  return Unchanged();
+                })
+                .as_or_throw<PrimExpr>();
+        operands.Set(position, CreateTileLangAnalyzer()->Simplify(bytes));
+      }
+      ++position;
+    }
+    TVM_FFI_CHECK_EQ(position, operands.size(), ValueError)
+        << "Legacy launch tags do not match the operand suffix";
+    if (function->GetAttr(tvm::attr::kTarget).value()->GetTargetDeviceType() ==
+        kDLCUDA) {
+      auto tags = function->GetAttr(tirx::attr::kKernelLaunchParams).value();
+      TVM_FFI_CHECK(tags == attrs->launch_params, ValueError)
+          << "CUDA call and device function must share the launch schema";
+      auto launch = make_object<CallFFIKernelAttr>();
+      launch->num_kernel_args = function->params.size();
+      launch->kernel_attrs =
+          function->GetAttr(backend::cuda::attr::kKernelAttrs)
+              .value_or(attrs->kernel_attrs);
+      Array<Expr> arguments(operands.begin(),
+                            operands.begin() + 1 + function->params.size());
+      position = arguments.size();
+      for (const String &tag : tags) {
+        if (tag == "tirx.use_required_block_dimension") {
+          launch->kernel_attrs.Set("required_block_size", 1);
+          continue;
+        }
+        String field;
+        Expr value{UnsafeInit{}};
+        if (tag == "tirx.use_programtic_dependent_launch" ||
+            tag == "tirx.use_cooperative_launch") {
+          field = tag == "tirx.use_cooperative_launch"
+                      ? "cooperative"
+                      : "programmatic_stream_serialization";
+          value = IntImm::Int32(1);
+        } else {
+          field = CudaField(tag);
+          value = operands[position++];
+        }
+        launch->launch_fields.push_back(field);
+        arguments.push_back(value);
+      }
+      auto device = WithAttr(function, backend::cuda::attr::kLaunchFields.name,
+                             launch->launch_fields);
+      if (!launch->kernel_attrs.empty())
+        device = WithAttr(device, backend::cuda::attr::kKernelAttrs.name,
+                          launch->kernel_attrs);
+      device = WithoutAttr(device, tirx::attr::kKernelLaunchParams.name);
+      device_updates.Set(entry->second.symbol, device);
+      return Call(node->ty, node->op, arguments, Attrs(launch), node->ty_args,
+                  node->loc);
+    }
+    return Call(node->ty, node->op, operands, node->attrs, node->ty_args,
+                node->loc);
+  }
+
+  Map<GlobalVar, tirx::Function> device_updates;
+
+private:
+  static String CudaField(const String &tag) {
+    if (tag == "tirx.use_dyn_shared_memory")
+      return "dynamic_smem_bytes";
+    for (const auto &prefix :
+         {std::pair{"blockIdx.", "grid."}, std::pair{"threadIdx.", "block."},
+          std::pair{"clusterCtaIdx.", "cluster."},
+          std::pair{"preferredClusterCtaIdx.", "preferred_cluster."}}) {
+      for (char axis : {'x', 'y', 'z'})
+        if (tag == std::string(prefix.first) + axis)
+          return std::string(prefix.second) + axis;
+    }
+    TVM_FFI_THROW(ValueError) << "Unsupported CUDA launch tag: " << tag;
+  }
+
+  struct Entry {
+    GlobalVar symbol;
+    tirx::Function function;
+    Optional<PrimExpr> bytes;
+  };
+  std::unordered_map<std::string, Entry> entries_;
 };
 } // namespace
 
-class DeviceKernelMutator : public StmtExprMutator {
-public:
-  using Parent = StmtExprMutator;
-
-  explicit DeviceKernelMutator(
-      std::unordered_map<const GlobalVarNode *, KernelInfo> device_info_map)
-      : device_info_map_(std::move(device_info_map)) {}
-
-  PrimFunc RewriteKernelLaunchSite(const GlobalVar &gvar, PrimFunc func) {
-    ICHECK(!current_target_.defined());
-    auto it = device_info_map_.find(gvar.get());
-    ICHECK(it != device_info_map_.end());
-    current_target_ = it->second.target;
-
-    auto body = VisitStmt(func->body);
-    if (!body.same_as(func->body)) {
-      func.CopyOnWrite()->body = body;
-    }
-
-    current_target_ = std::nullopt;
-    return func;
-  }
-
-  PrimFunc UpdateKernelAttributes(const GlobalVar &gvar, PrimFunc func) const {
-    bool is_kernel_launch = device_kernel_launch_.count(gvar.get());
-    bool is_call_extern = extern_function_call_.count(gvar.get());
-    ICHECK(!is_kernel_launch || !is_call_extern)
-        << "Function " << gvar << " has multiple callees, "
-        << "and would need to be lowered into a call_extern at some call "
-           "sites, "
-        << "and a device kernel launch at others.  "
-        << "This case is not yet supported.";
-
-    if (is_kernel_launch || is_call_extern) {
-      func =
-          WithAttr(std::move(func), tvm::tirx::attr::kIsGlobalFunc, Bool(true));
-    }
-
-    if (is_kernel_launch) {
-      const auto &info = device_info_map_.at(gvar.get());
-
-      // Kernel launches provide an int32 error code to the caller,
-      // but do not accept any return type from the callee.
-      {
-        auto write_ptr = func.CopyOnWrite();
-        write_ptr->ret_type = VoidType();
-        write_ptr->body = ReturnRemover::Apply(write_ptr->body);
-      }
-
-      func =
-          WithAttrs(std::move(func),
-                    {{tvm::attr::kCallingConv,
-                      Integer(tvm::CallingConv::kDeviceKernelLaunch)},
-                     {tvm::tirx::attr::kKernelLaunchParams, info.launch_params},
-                     {tvm::attr::kGlobalSymbol, info.global_symbol}});
-    }
-    // Preserve any global_symbol chosen earlier during device splitting.
-    // Source kernels rely on this to launch the external CUDA entry directly.
-    if (!func->GetAttr<String>(tvm::attr::kGlobalSymbol)) {
-      func =
-          WithAttr(std::move(func), tvm::attr::kGlobalSymbol, gvar->name_hint);
-    }
-
-    const auto &info = device_info_map_.at(gvar.get());
-    if (LaunchGridOnly(
-            func->GetAttr<Target>(tvm::attr::kTarget).value_or(info.target))) {
-      // Grid-only launch: keep blockIdx extents (grid shape) but drop
-      // threadIdx extents, which are managed inside device-side regions.
-      Map<String, PrimExpr> grid_extent;
-      for (const auto &kv : info.thread_extent) {
-        if (std::string(kv.first).find("blockIdx") != std::string::npos) {
-          grid_extent.Set(kv.first, kv.second);
-        }
-      }
-      if (!grid_extent.empty()) {
-        func = WithAttr(std::move(func), "thread_extent", grid_extent);
-      }
-    } else {
-      const auto &thread_extent = info.thread_extent;
-      func = WithAttr(std::move(func), "thread_extent", thread_extent);
-    }
-    if (info.dyn_shmem_size.defined()) {
-      func = WithAttr(std::move(func), "dyn_shared_memory_buf",
-                      info.dyn_shmem_size.value());
-    }
-    if (info.cluster_dims.defined()) {
-      func =
-          WithAttr(std::move(func), "cluster_dims", info.cluster_dims.value());
-    }
-    return func;
-  }
-
-private:
-  PrimExpr VisitExpr_(const CallNode *op) override {
-    auto node = Downcast<Call>(Parent::VisitExpr_(op));
-
-    auto *gvar = op->op.as<GlobalVarNode>();
-    if (!gvar)
-      return std::move(node);
-
-    auto it = device_info_map_.find(gvar);
-    ICHECK(it != device_info_map_.end())
-        << "CallNode attempted subroutine call to " << gvar->name_hint
-        << ", but " << gvar->name_hint << " did not appear within the IRModule";
-    const KernelInfo &dev_info = it->second;
-
-    auto caller_target = current_target_.value();
-    auto callee_target = dev_info.target;
-
-    bool same_target = caller_target->str() == callee_target->str();
-
-    if (same_target) {
-      // Calls within the same target may be handled at codegen time
-      // as internal subroutine calls.
-      return std::move(node);
-    }
-
-    bool same_device_type = caller_target->GetTargetDeviceType() ==
-                            callee_target->GetTargetDeviceType();
-    // Kernels of packed-launch-only targets are separately compiled
-    // artifacts the host cannot reach through call_extern, even when the
-    // caller reports the same device type; force the kernel-launch path.
-    if (same_device_type) {
-      // Calls to another target using the same device (e.g. LLVM
-      // calling a custom TIRToRuntime target) do not require a kernel
-      // launch, but need to be replaced with call_extern.
-      extern_function_call_.insert(gvar);
-      Array<PrimExpr> args;
-      args.push_back(StringImm(dev_info.global_symbol));
-      for (const auto &arg : node->args) {
-        args.push_back(arg);
-      }
-      return Call(node->dtype, builtin::call_extern(), args);
-    }
-
-    ICHECK(dev_info.launch_params.defined())
-        << "CallNode attempted kernel launch to " << gvar->name_hint
-        << " on target " << dev_info.target << ", but subroutine "
-        << gvar->name_hint
-        << " did not have the tirx::attr::kKernelLaunchParams attribute "
-        << "required for cross-target kernel launch";
-
-    // Collected kernel information may be in terms of the callee's
-    // arguments, but we need expressions for them in terms of the
-    // caller's parameters.  The param_map allows substitution of
-    // parameter values into the thread extents, to generate
-    // expressions that are valid within the caller.
-    Map<Var, PrimExpr> param_map = [&]() {
-      Map<Var, PrimExpr> param_map;
-      ICHECK_EQ(node->args.size(), dev_info.params.size())
-          << "Function " << gvar->name_hint << " accepts "
-          << dev_info.params.size()
-          << " arguments as input, but is called using " << node->args.size()
-          << " arguments";
-      for (size_t i = 0; i < node->args.size(); i++) {
-        param_map.Set(dev_info.params[i], node->args[i]);
-      }
-      return param_map;
-    }();
-
-    device_kernel_launch_.insert(gvar);
-
-    Array<PrimExpr> call_args;
-    call_args.push_back(StringImm(dev_info.global_symbol));
-    for (PrimExpr arg : node->args) {
-      call_args.push_back(arg);
-    }
-    for (const auto &launch_arg : dev_info.launch_args) {
-      call_args.push_back(Substitute(launch_arg, param_map));
-    }
-
-    auto dtype = node->dtype.is_void() ? DataType::Int(32) : node->dtype;
-
-    return Call(dtype, builtin::tvm_call_packed(), call_args);
-  }
-
-  Optional<Target> current_target_;
-  std::unordered_map<const GlobalVarNode *, KernelInfo> device_info_map_;
-  std::unordered_set<const GlobalVarNode *> device_kernel_launch_;
-  std::unordered_set<const GlobalVarNode *> extern_function_call_;
-};
-
 namespace transform {
-
 tvm::transform::Pass LowerDeviceKernelLaunch() {
-  auto pass_func = [](IRModule mod,
-                      const tirx::transform::PassContext &ctx) -> IRModule {
-    auto mutator = [&mod]() {
-      std::unordered_map<const GlobalVarNode *, KernelInfo> device_info_map;
-      for (const auto &[gvar, base_func] : mod->functions) {
-        if (auto prim_func = base_func.as<PrimFunc>()) {
-          device_info_map[gvar.get()] =
-              DeviceInfoCollector::Collect(gvar, prim_func.value());
+  auto record = tirx::transform::CreateFunctionPass(
+      [](tirx::Function function, IRModule, tvm::transform::PassContext) {
+        if (function->GetAttr(tvm::attr::kDeclaration).value_or(false) ||
+            !function->GetAttr<Target>(tvm::attr::kTarget))
+          return function;
+        auto metadata = make_object<LaunchMetadata>(function);
+        metadata->Visit(function->body);
+        // Runtime launch data stays in the final body and Call operands.
+        // No closed-metadata codec or parameter-index attribute is required.
+        Array<String> launch_flags;
+        if (auto flags = function->GetAttr(tirx::attr::kKernelLaunchParams)) {
+          // Repeated lowering must preserve existing value-bearing tags too;
+          // finalized calls no longer pass through the native GlobalVar
+          // rewriter.
+          launch_flags = flags.value();
         }
-      }
-      return DeviceKernelMutator(std::move(device_info_map));
-    }();
-
-    {
-      IRModule updates;
-      for (const auto &[gvar, base_func] : mod->functions) {
-        if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func =
-              mutator.RewriteKernelLaunchSite(gvar, GetRef<PrimFunc>(ptr));
-          if (!prim_func.same_as(base_func)) {
-            updates->Add(gvar, prim_func);
+        auto add_flag = [&](String flag) {
+          for (const String &existing : launch_flags)
+            if (existing == flag)
+              return;
+          launch_flags.push_back(flag);
+        };
+        // Re-running the pass on finalized native calls must not reintroduce
+        // the mutually exclusive legacy schema.
+        if (!function->GetAttr(backend::cuda::attr::kLaunchFields)) {
+          if (function->GetAttr<int64_t>("has_cuda_pdl_trigger").value_or(0) ||
+              function->GetAttr<int64_t>("has_cuda_pdl_sync").value_or(0))
+            add_flag("tirx.use_programtic_dependent_launch");
+          if (function->GetAttr<int64_t>("use_cooperative_groups").value_or(0))
+            add_flag("tirx.use_cooperative_launch");
+        }
+        if (!launch_flags.empty())
+          function = WithAttr(function, tirx::attr::kKernelLaunchParams.name,
+                              launch_flags);
+        return function;
+      },
+      0, "tl.RecordDeviceLaunchMetadata");
+  auto configure = tvm::transform::CreateModulePass(
+      [](IRModule module, tvm::transform::PassContext) {
+        auto mutator = make_object<ConfiguredLaunchMetadata>(module);
+        IRModule result(module->functions, module->attrs, module->global_infos);
+        for (const auto &[symbol, base] : module->functions) {
+          auto function = base.as<tirx::Function>();
+          if (!function || function.value()
+                               ->GetAttr(tvm::attr::kDeclaration)
+                               .value_or(false))
+            continue;
+          auto current = function.value();
+          SeqStmt original = current->body;
+          auto body = mutator->Mutate(original).ValueOrUnchanged(original);
+          if (!body.same_as(original)) {
+            current.CopyOnWrite()->body = body;
+            result->Add(symbol, current, true);
           }
         }
-      }
-
-      if (!updates->functions.empty()) {
-        mod.CopyOnWrite()->Update(updates);
-      }
-    }
-    {
-      IRModule updates;
-      for (const auto &[gvar, base_func] : mod->functions) {
-        if (auto *ptr = base_func.as<PrimFuncNode>()) {
-          auto prim_func =
-              mutator.UpdateKernelAttributes(gvar, GetRef<PrimFunc>(ptr));
-          if (!prim_func.same_as(base_func)) {
-            updates->Add(gvar, prim_func);
+        for (const auto &[symbol, function] : mutator->device_updates)
+          result->Add(symbol, function, true);
+        return result;
+      },
+      0, "tl.ConfigureFinalDeviceLaunch");
+  auto finalize_launch = tvm::transform::CreateModulePass(
+      [](IRModule module, tvm::transform::PassContext) {
+        auto mutator = make_object<LegacyLaunchRewriter>(module);
+        auto functions = module->functions;
+        for (const auto &[symbol, base] : module->functions) {
+          if (auto function = base.as<tirx::Function>()) {
+            auto current = *function;
+            auto original = current->body;
+            auto rewritten =
+                mutator->Mutate(original).ValueOrUnchanged(original);
+            if (!rewritten.same_as(original)) {
+              current.CopyOnWrite()->body = rewritten;
+              functions.Set(symbol, current);
+            }
           }
         }
-      }
-
-      if (!updates->functions.empty()) {
-        mod.CopyOnWrite()->Update(updates);
-      }
-    }
-    return mod;
-  };
-
-  return tvm::transform::CreateModulePass(pass_func, 0,
-                                          "tl.LowerDeviceKernelLaunch", {});
+        for (const auto &[symbol, function] : mutator->device_updates)
+          functions.Set(symbol, function);
+        return IRModule(functions, module->attrs, module->global_infos);
+      },
+      0, "tl.FinalizeDeviceLaunchABI");
+  return tvm::transform::Sequential(
+      {record, configure, upstream_pass_bridge::LowerDeviceKernelLaunch(),
+       finalize_launch, LowerCudaBooleanParameters()},
+      "tl.LowerDeviceKernelLaunch");
 }
-
-TVM_FFI_STATIC_INIT_BLOCK() {
-  namespace refl = reflection;
-  refl::GlobalDef().def("tl.transform.LowerDeviceKernelLaunch",
-                        LowerDeviceKernelLaunch);
-}
-
 } // namespace transform
-} // namespace tl
-} // namespace tvm
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef().def("tl.transform.LowerDeviceKernelLaunch",
+                                   transform::LowerDeviceKernelLaunch);
+}
+} // namespace tvm::tl

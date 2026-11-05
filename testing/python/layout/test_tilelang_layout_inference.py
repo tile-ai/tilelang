@@ -3,9 +3,9 @@ import re
 import pytest
 import tilelang
 import tilelang.testing
-import tvm
+import tvm_tirx as tvm
 from tilelang import language as T
-from tvm.target import Target
+from tvm_tirx.target import Target
 
 
 @tilelang.jit

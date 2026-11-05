@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.26)
+
+# Activate the Windows compiler before this project's first compiler probe.
+set(TILELANG_SOURCE_ROOT "${CMAKE_CURRENT_LIST_DIR}/tilelang-source")
+set(TILELANG_PRE_PROJECT_ONLY ON)
+include("${TILELANG_SOURCE_ROOT}/cmake/FindPipCUDAToolkit.cmake")
+unset(TILELANG_PRE_PROJECT_ONLY)
+project(TileLangTIRxProvider C CXX)
+
+set(TILELANG_BUILD_COMPILER ON CACHE BOOL "Build the compiler provider" FORCE)
+set(TILELANG_BUILD_PYTHON_EXTENSIONS OFF CACHE BOOL "Extensions belong to TileLang" FORCE)
+set(TVM_TIRX_BUILD_PYTHON_MODULE ON CACHE BOOL "Install provider package data" FORCE)
+# Package discovery uses tvm_tirx/lib on every host, including distributions
+# whose GNUInstallDirs default would otherwise be lib64 or a multiarch path.
+set(CMAKE_INSTALL_LIBDIR lib CACHE STRING "Provider wheel library directory" FORCE)
+add_subdirectory("${TILELANG_SOURCE_ROOT}" tilelang)

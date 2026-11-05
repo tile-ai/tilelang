@@ -1,9 +1,11 @@
+import tvm_ffi
 import torch
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tvm_tirx import ir, sym
 
 
 @tilelang.jit
@@ -80,23 +82,28 @@ def _check_nonzero_min_nested_guards_staging(target, device):
     # Preserve the nested guards until decoupling; earlier simplification could
     # otherwise hide a missing guard in either generated copy direction.
     mod = tilelang.transform.DecoupleTypeCast()(tvm.IRModule.from_expr(main))
-    analyzer = tvm.arith.Analyzer()
+    analyzer = sym.Analyzer()
+    constraints = sym.ConstraintContext()
 
     def bind_loop(node):
-        if isinstance(node, tvm.tirx.For):
-            analyzer.bind(node.loop_var, tvm.ir.Range.from_min_extent(node.min, node.extent))
+        if isinstance(node, ir.For):
+            constraints.append(sym.RangeConstraint(node.var, ir.Range(node.begin, node.end)))
 
-    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, bind_loop)
+    tvm_ffi.structural_walk(mod["main"].body, (tvm_ffi.Object, bind_loop), order="post")
+    analyzer.sync_constraint_context(constraints)
     buffers = {}
 
     def check_staging(node):
-        if isinstance(node, (tvm.tirx.BufferLoad, tvm.tirx.BufferStore)) and "_local_cast" in node.buffer.name:
-            buffers[node.buffer.name.split("_local_cast")[0]] = [int(dim) for dim in node.buffer.shape]
-            for index, extent in zip(node.indices, node.buffer.shape, strict=True):
+        if not isinstance(node, (ir.TensorLoad, ir.TensorStore)):
+            return
+        tensor = node.source if isinstance(node, ir.TensorLoad) else node.dest
+        if "_local_cast" in tensor.name:
+            buffers[tensor.name.split("_local_cast")[0]] = [int(dim) for dim in tensor.ty.shape]
+            for index, extent in zip(node.indices, tensor.ty.shape, strict=True):
                 assert analyzer.can_prove(index >= 0)
                 assert analyzer.can_prove(index < extent)
 
-    tvm.tirx.stmt_functor.post_order_visit(mod["main"].body, check_staging)
+    tvm_ffi.structural_walk(mod["main"].body, (tvm_ffi.Object, check_staging), order="post")
     assert buffers == {"A": [4], "B": [4]}
     kernel = tilelang.compile(mod["main"], target=target, execution_backend="cython")
     a = torch.arange(8, device=device, dtype=torch.float16)

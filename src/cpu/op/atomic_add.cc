@@ -17,6 +17,7 @@ namespace tvm {
 namespace tl {
 
 using namespace tirx;
+using namespace prim;
 
 namespace cpu {
 
@@ -28,7 +29,7 @@ struct AtomicAdd {
   }
 
   static Stmt Lower(const AtomicAddNode &op, const LowerArgs &lower_args,
-                    arith::Analyzer *analyzer) {
+                    sym::AnalyzerObj *analyzer) {
     (void)analyzer;
     return LowerAtomicRMW(op, AtomicCombine::kAdd, lower_args, "atomic_add");
   }
