@@ -2,6 +2,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+from types import CodeType
 from typing import Any, Literal
 from collections.abc import Callable, Sequence
 from tilelang import env
@@ -57,7 +58,7 @@ def get_func_nonlocals(func):
     return nonlocal_vars
 
 
-def get_ast(func: Callable):
+def get_ast(func: Callable | CodeType):
     _, start = inspect.getsourcelines(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     # Normalize to an absolute path so that source spans and remapped
