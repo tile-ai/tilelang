@@ -60,12 +60,14 @@
 // X-macro for listing all required CUDA driver API functions.
 // Format: _(function_name)
 // These are the core functions used by TVM/tilelang CUDA runtime.
+// Keep cuMemHostGetDevicePointer_v2 explicit: symbol lookup stringifies these
+// names without expanding CUDA aliases, and the old entry has a 32-bit ABI.
 #define TILELANG_LIBCUDA_API_REQUIRED(_)                                       \
   _(cuGetErrorName)                                                            \
   _(cuGetErrorString)                                                          \
   _(cuCtxGetDevice)                                                            \
   _(cuMemHostGetFlags)                                                         \
-  _(cuMemHostGetDevicePointer)                                                 \
+  _(cuMemHostGetDevicePointer_v2)                                              \
   _(cuCtxGetLimit)                                                             \
   _(cuCtxSetLimit)                                                             \
   _(cuCtxResetPersistingL2Cache)                                               \

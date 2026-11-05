@@ -10,6 +10,38 @@ import tilelang.testing
 BACKENDS = ["cython", "tvm_ffi"]
 
 
+@tilelang.testing.requires_cuda
+def test_host_mapped_cuda_stub_pointer_query():
+    import ctypes
+
+    from tilelang.libinfo import find_lib_path
+
+    try:
+        stub_path = find_lib_path("stub_cuda")
+    except RuntimeError:
+        pytest.skip("requires a CUDA stub build")
+
+    # Call the stub explicitly: ELF symbol interposition can otherwise route
+    # the runtime helper directly to an already-loaded CUDA driver library.
+    stub = ctypes.CDLL(stub_path)
+    get_pointer = stub.cuMemHostGetDevicePointer_v2
+    get_pointer.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_void_p, ctypes.c_uint]
+    get_pointer.restype = ctypes.c_int
+
+    torch.empty(1, device="cuda")  # Ensure a CUDA context is current.
+    storage = torch.empty(128, pin_memory=True)
+    base_pointer = ctypes.c_uint64()
+    status = get_pointer(ctypes.byref(base_pointer), ctypes.c_void_p(storage.data_ptr()), 0)
+    assert status == 0, f"CUDA stub mapping failed with error {status}"
+    assert base_pointer.value != 0
+
+    view = storage[4:]
+    view_pointer = ctypes.c_uint64()
+    status = get_pointer(ctypes.byref(view_pointer), ctypes.c_void_p(view.data_ptr()), 0)
+    assert status == 0, f"CUDA stub view mapping failed with error {status}"
+    assert view_pointer.value == base_pointer.value + 4 * storage.element_size()
+
+
 def _affine(n=4099, stride=1, annotated=True):
     @T.prim_func
     def kernel(src: T.Tensor((n,), T.float32), dst: T.StridedTensor((n,), (stride,), T.float32)):
