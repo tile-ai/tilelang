@@ -59,3 +59,20 @@ def test_pto_atomic_integer(name, dtype, initial, value):
     tilelang.compile(main, target="pto")(counter)
     expected = {"add": initial + value, "max": max(initial, value), "min": min(initial, value)}[name]
     assert counter.item() == expected
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.pto
+def test_pto_atomic_max_uses_pointer_signedness():
+    @T.prim_func
+    def main(C: T.Tensor((1,), "uint32"), V: T.Tensor((1,), "int32")):
+        with T.Kernel(1):
+            value_ub = T.alloc_shared((1,), "int32")
+            T.copy(V, value_ub)
+            with T.SimtVF(threads=1):
+                T.atomic_max(C[0], value_ub[0])
+
+    counter = torch.tensor([7], dtype=torch.uint32, device="npu")
+    value = torch.tensor([-1], dtype=torch.int32, device="npu")
+    tilelang.compile(main, target="pto")(counter, value)
+    assert counter.item() == 2**32 - 1
