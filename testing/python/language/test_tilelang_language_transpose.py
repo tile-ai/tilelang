@@ -243,5 +243,44 @@ def test_tilelang_transpose_matrix_instructions():
         torch.testing.assert_close(_bits(b), _bits(expected), rtol=0, atol=0)
 
 
+def tilelang_transpose_pipelined_gemm(K, M, N, block_K, dtype):
+    """C = A^T @ B, transposing each pipelined stage of A in shared memory so the
+    transpose reads a multi-buffered stage and a GEMM consumes its output."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((K, M), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((block_K, M), dtype)
+            A_T = T.alloc_shared((M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, N), dtype)
+            C_local = T.alloc_fragment((M, N), T.float32)
+            T.clear(C_local)
+            for k in T.Pipelined(K // block_K, num_stages=2):
+                T.copy(A[k * block_K, 0], A_shared)
+                T.copy(B[k * block_K, 0], B_shared)
+                T.transpose(A_shared, A_T)
+                T.gemm(A_T, B_shared, C_local)
+            T.copy(C_local, C)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tilelang_transpose_pipelined_gemm():
+    K, M, N, block_K = 256, 64, 64, 64
+    kernel = tilelang.compile(tilelang_transpose_pipelined_gemm(K, M, N, block_K, T.float16), target="cuda")
+    assert "ptx_stmatrix" in kernel.get_kernel_source()
+    a = torch.randn(K, M, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    c = torch.empty(M, N, device="cuda", dtype=torch.float32)
+    kernel(a, b, c)
+    torch.testing.assert_close(c, a.float().t() @ b.float(), rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

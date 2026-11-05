@@ -22,7 +22,8 @@ bool MatchCudaTransposeTarget(Target target) {
   return TargetIsCuda(target) || TargetIsCuTeDSL(target);
 }
 
-// Element offset of a logical coordinate in the physical shared allocation.
+// Element offset of a logical coordinate from the start of the shared
+// allocation, including the buffer's own element offset.
 PrimExpr PhysicalElementOffset(const Buffer &buffer,
                                const Array<PrimExpr> &indices,
                                const LayoutMap &layout_map) {
@@ -33,7 +34,7 @@ PrimExpr PhysicalElementOffset(const Buffer &buffer,
     coords = layout->Forward(indices);
     shape = layout->OutputShape();
   }
-  PrimExpr offset = make_zero(coords[0].dtype());
+  PrimExpr offset = cast(coords[0].dtype(), buffer->elem_offset);
   PrimExpr stride = make_const(coords[0].dtype(), 1);
   for (int i = static_cast<int>(coords.size()) - 1; i >= 0; --i) {
     offset = offset + coords[i] * stride;
@@ -55,19 +56,19 @@ Array<PrimExpr> RegionIndices(const Array<Range> &range, const PrimExpr &row,
 
 // Every `width`-element row segment of the region must be one 16-byte-aligned
 // run in the physical allocation, which is what ldmatrix and stmatrix address.
-bool RowSegmentsAreContiguous(const Buffer &buffer, const Array<Range> &range,
-                              int64_t rows, int64_t cols, int width,
-                              const LayoutMap &layout_map,
-                              arith::Analyzer *analyzer) {
+bool RowSegmentsAreAlignedRuns(const Buffer &buffer, const Array<Range> &range,
+                               int64_t rows, int64_t cols, int width,
+                               const LayoutMap &layout_map,
+                               arith::Analyzer *analyzer) {
   if (!buffer->strides.empty())
     return false;
   Var row("transpose_row"), segment("transpose_segment"),
-      lane("transpose_elem");
+      elem("transpose_elem");
   analyzer->Bind(row, Range(0, IntImm(row.dtype(), rows)));
   analyzer->Bind(segment, Range(0, IntImm(segment.dtype(), cols / width)));
   PrimExpr offset = PhysicalElementOffset(
-      buffer, RegionIndices(range, row, segment * width + lane), layout_map);
-  return IndicesCanVectorize(offset, lane, IntImm(lane.dtype(), width), width,
+      buffer, RegionIndices(range, row, segment * width + elem), layout_map);
+  return IndicesCanVectorize(offset, elem, IntImm(elem.dtype(), width), width,
                              analyzer, /*allow_broadcast=*/false);
 }
 
@@ -161,10 +162,10 @@ Stmt LowerWarpMatrixTranspose(const TransposeNode &op,
       *thread_min % 32 != 0 || *thread_extent % 32 != 0 || *thread_extent == 0)
     return Stmt();
 
-  if (!RowSegmentsAreContiguous(src, op.src_range, rows, cols, tile,
-                                lower_args.layout_map, analyzer) ||
-      !RowSegmentsAreContiguous(dst, op.dst_range, cols, rows, tile,
-                                lower_args.layout_map, analyzer))
+  if (!RowSegmentsAreAlignedRuns(src, op.src_range, rows, cols, tile,
+                                 lower_args.layout_map, analyzer) ||
+      !RowSegmentsAreAlignedRuns(dst, op.dst_range, cols, rows, tile,
+                                 lower_args.layout_map, analyzer))
     return Stmt();
 
   const int64_t tile_cols = cols / tile;
