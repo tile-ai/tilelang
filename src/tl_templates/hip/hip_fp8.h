@@ -1,6 +1,7 @@
 #pragma once
 #include <hip/amd_detail/amd_hip_fp8.h>
 #include <stdint.h>
+#include <type_traits>
 
 #define HIP_FP8_ENABLED 1
 
@@ -159,9 +160,78 @@ __device__ __forceinline__ void tl_fp8x2_set_lane(PackedType &packed, int lane,
       (static_cast<unsigned int>(value.data) << 8));
 }
 
-// Note: E8M0 types are not supported in current HIP version
-// using fp8_e8_t = __hip_fp8_e8m0_fnuz;
-// using fp8_e8_2_t = __hip_fp8x2_e8m0_fnuz;
+// E8M0 (float8_e8m0fnu): a bare biased power-of-two exponent, 0xFF is NaN.
+// HIP ships no native type, so this mirrors __nv_fp8_e8m0, whose float
+// constructor uses cudaRoundPosInf and __NV_SATFINITE: |val| rounds up to a
+// power of two, results below 2^-127 clip to it, results above 2^127 saturate
+// to it, and NaN converts to 0xFF.
+struct fp8_e8_t {
+  unsigned char data;
+  __device__ fp8_e8_t() {}
+  __device__ fp8_e8_t(float val) {
+    uint32_t bits = __float_as_uint(val);
+    uint32_t exponent = (bits >> 23) & 0xFF;
+    uint32_t mantissa = bits & 0x7FFFFF;
+    if (val != val) {
+      data = 0xFF;
+      return;
+    }
+    // Subnormals up to 2^-127 (mantissa <= 2^22) keep exponent 0, i.e. clip to
+    // 2^-127.
+    if (exponent != 0xFF && mantissa != 0 &&
+        (exponent != 0 || mantissa > 0x400000u)) {
+      ++exponent;
+    }
+    data = static_cast<unsigned char>(exponent == 0xFF ? 0xFE : exponent);
+  }
+  // A double converts directly, as with __nv_fp8_e8m0(double): narrowing it to
+  // float first can round it down onto a power of two (1 + 2^-25 to 1.0).
+  // Integers have their own constructor below; other types use the float one.
+  template <typename T, typename = typename std::enable_if<
+                            std::is_same<T, double>::value>::type>
+  __device__ fp8_e8_t(T val) {
+    uint64_t bits = static_cast<uint64_t>(__double_as_longlong(val));
+    int exponent = static_cast<int>((bits >> 52) & 0x7FF);
+    bool inexact = (bits & 0xFFFFFFFFFFFFFull) != 0;
+    if (val != val) {
+      data = 0xFF;
+      return;
+    }
+    // Zero and subnormal doubles are far below 2^-127 and clip to it.
+    int e8 = exponent == 0 ? 0 : exponent - 1023 + 127 + inexact;
+    data = static_cast<unsigned char>(
+        exponent == 0x7FF || e8 > 254 ? 0xFE : (e8 < 0 ? 0 : e8));
+  }
+  // Integers round exactly: narrowing to float can land on a power of two
+  // (2^24 + 1 to 2^24), and so can narrowing a 64-bit value to double.
+  template <typename T,
+            typename std::enable_if<std::is_integral<T>::value &&
+                                        !std::is_same<T, bool>::value,
+                                    int>::type = 0>
+  __device__ fp8_e8_t(T val) {
+    using U = typename std::make_unsigned<T>::type;
+    // |val| in unsigned arithmetic, which also holds the most negative value.
+    U mag = (std::is_signed<T>::value && val < 0)
+                ? static_cast<U>(U(0) - static_cast<U>(val))
+                : static_cast<U>(val);
+    if (mag == 0) {
+      data = 0; // zero clips to 2^-127
+      return;
+    }
+    int log2_floor = 63 - __builtin_clzll(static_cast<unsigned long long>(mag));
+    data =
+        static_cast<unsigned char>(127 + log2_floor + ((mag & (mag - 1)) != 0));
+  }
+  __device__ operator float() const {
+    if (data == 0xFF) {
+      return __uint_as_float(0x7FC00000u);
+    }
+    if (data == 0) {
+      return __uint_as_float(0x00400000u); // 2^-127 is a float32 denormal
+    }
+    return __uint_as_float(static_cast<uint32_t>(data) << 23);
+  }
+};
 
 // Simple wrapper that provides member access for generated code
 struct __align__(4) fp8_e4_4_t {
