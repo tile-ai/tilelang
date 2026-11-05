@@ -27,7 +27,7 @@ import json
 import os
 import re
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tilelang.engine.semantic_check import PreLowerSemanticCheck
 from tilelang.jit import JITImpl
@@ -192,10 +192,10 @@ def build_pass_data(path: str, factory: str | None, target: str, kwargs: dict[st
         include_default_tools=False,
         reuse_existing=False,
     ):
-        with tvm.transform.PassContext(opt_level=3, config=pass_configs), resolved_target:
+        with tvm_tirx.transform.PassContext(opt_level=3, config=pass_configs), resolved_target:
             PreLowerSemanticCheck(mod)
         with (
-            tvm.transform.PassContext(
+            tvm_tirx.transform.PassContext(
                 opt_level=3,
                 config=pass_configs,
                 instruments=create_pass_instruments(),

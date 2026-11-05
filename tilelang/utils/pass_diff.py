@@ -31,7 +31,7 @@ import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tilelang.tvm import IRModule
+    from tvm_tirx import IRModule
 
 # ANSI color codes
 _RED = "\033[91m"
@@ -49,11 +49,11 @@ _RESET = "\033[0m"
 
 def _to_mod(func_or_mod) -> IRModule:
     """Convert a Function or IRModule to IRModule."""
-    from tilelang import tvm
+    import tvm_tirx
 
-    if isinstance(func_or_mod, tvm.IRModule):
+    if isinstance(func_or_mod, tvm_tirx.IRModule):
         return func_or_mod
-    return tvm.IRModule({"main": func_or_mod})
+    return tvm_tirx.IRModule({"main": func_or_mod})
 
 
 def _get_script(mod: IRModule) -> str:

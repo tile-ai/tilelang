@@ -1,5 +1,5 @@
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 
 import tilelang
 import tilelang.language as T
@@ -46,7 +46,7 @@ def _make_im2col_kernel(use_deprecated_alias=False, channels=32, block_K=32, blo
 
 def _lower_to_cuda_source(func, arch):
     target = {"kind": "cuda", "arch": arch}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(func, target=target)
     assert artifact.kernel_source is not None
     return artifact.kernel_source

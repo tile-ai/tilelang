@@ -1,4 +1,4 @@
-import tvm_tirx as tvm
+import tvm_tirx
 import pytest
 from tvm_tirx import ir, tirx
 from tilelang.testing.ir import collect_nodes
@@ -42,16 +42,16 @@ def _assert_function_equal(actual, expected):
     # 2 + (outer*2 + lane) describe the same fixed-width address expression.
     # The loops, types, layouts and memory operations still compare structurally.
     def canonical(function):
-        module = tvm.IRModule({"main": function.without_attr("global_symbol")})
+        module = tvm_tirx.IRModule({"main": function.without_attr("global_symbol")})
         return tirx.transform.StmtSimplify()(module)["main"]
 
-    tvm.ir.assert_structural_equal(canonical(actual), canonical(expected))
+    tvm_tirx.ir.assert_structural_equal(canonical(actual), canonical(expected))
 
 
 def assert_vectorize_access(M: int = 64, N: int = 64):
     func, expected = vectorize_access_legalize(M, N)
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    with tvm.target.Target("cuda"):
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
+    with tvm_tirx.target.Target("cuda"):
         transformed = tl.transform.LegalizeVectorizedLoop()(mod)
     _assert_function_equal(transformed["main"], expected)
 
@@ -79,8 +79,8 @@ def test_vectorized_nonzero_min_uses_aligned_vector_width():
             for vec in T.vectorized(2):
                 B[2 + (value_outer * 2 + vec)] = A[2 + (value_outer * 2 + vec)] + 1
 
-    mod = tvm.IRModule.from_expr(before)
-    with tvm.target.Target("cuda"):
+    mod = tvm_tirx.IRModule.from_expr(before)
+    with tvm_tirx.target.Target("cuda"):
         transformed = tl.transform.LegalizeVectorizedLoop()(mod)
     _assert_function_equal(transformed["before"], expected)
 
@@ -93,8 +93,8 @@ def test_vectorized_split_preserves_large_int64_extent():
     body = ir.TensorStore(a, [i], ir.TensorLoad(a, [i]) + 1)
     loop = ir.For(i, ir.const(start, "int64"), ir.const(start + extent, "int64"), ir.const(1, "int64"), ir.ForKind.VECTORIZED, [body])
     func = tirx.Function([a], [loop], ir.PrimType("void"))
-    with tvm.target.Target("cuda"):
-        mod = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule({"main": func}))
+    with tvm_tirx.target.Target("cuda"):
+        mod = tl.transform.LegalizeVectorizedLoop()(tvm_tirx.IRModule({"main": func}))
     loops = collect_nodes(mod["main"], ir.For)
     assert len(loops) == 2
     assert all(loop.var.ty.dtype == "int64" for loop in loops)
@@ -111,7 +111,7 @@ def _target_width_function():
 
 
 def _assert_target_width(function, expected_width):
-    transformed = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule({"main": function}))["main"]
+    transformed = tl.transform.LegalizeVectorizedLoop()(tvm_tirx.IRModule({"main": function}))["main"]
     loops = collect_nodes(transformed, ir.For)
     (vector,) = [loop for loop in loops if loop.kind == ir.ForKind.VECTORIZED]
     (outer,) = [loop for loop in loops if loop.kind != ir.ForKind.VECTORIZED]
@@ -123,10 +123,10 @@ def _assert_target_width(function, expected_width):
 
 @pytest.mark.parametrize("target,width", [("ascend", 2), ({"kind": "cuda", "arch": "sm_80"}, 4)])
 def test_vectorize_uses_bound_function_target_without_context(target, width):
-    assert tvm.target.Target.current() is None
-    function = _target_width_function().with_attr("target", tvm.target.Target(target))
+    assert tvm_tirx.target.Target.current() is None
+    function = _target_width_function().with_attr("target", tvm_tirx.target.Target(target))
     _assert_target_width(function, width)
-    assert tvm.target.Target.current() is None
+    assert tvm_tirx.target.Target.current() is None
 
 
 @pytest.mark.parametrize(
@@ -137,26 +137,26 @@ def test_vectorize_uses_bound_function_target_without_context(target, width):
     ],
 )
 def test_vectorize_function_target_wins_over_different_context(bound, ambient, width):
-    target = tvm.target.Target(bound)
+    target = tvm_tirx.target.Target(bound)
     function = _target_width_function().with_attr("target", target)
-    with tvm.target.Target(ambient) as outer:
+    with tvm_tirx.target.Target(ambient) as outer:
         transformed = _assert_target_width(function, width)
-        assert tvm.target.Target.current().same_as(outer)
+        assert tvm_tirx.target.Target.current().same_as(outer)
         assert transformed.attrs["target"].same_as(target)
-    assert tvm.target.Target.current() is None
+    assert tvm_tirx.target.Target.current() is None
 
 
 @pytest.mark.parametrize("target,width", [("ascend", 2), ({"kind": "cuda", "arch": "sm_80"}, 4)])
 def test_vectorize_unbound_function_retains_explicit_context_fallback(target, width):
-    with tvm.target.Target(target):
+    with tvm_tirx.target.Target(target):
         _assert_target_width(_target_width_function(), width)
-    assert tvm.target.Target.current() is None
+    assert tvm_tirx.target.Target.current() is None
 
 
 def test_vectorize_missing_both_target_sources_is_an_error():
-    assert tvm.target.Target.current() is None
+    assert tvm_tirx.target.Target.current() is None
     with pytest.raises(RuntimeError, match="Target context required"):
-        tl.transform.LegalizeVectorizedLoop()(tvm.IRModule({"main": _target_width_function()}))
+        tl.transform.LegalizeVectorizedLoop()(tvm_tirx.IRModule({"main": _target_width_function()}))
 
 
 def test_vectorize_no_vector_loop_does_not_require_a_target():
@@ -165,9 +165,9 @@ def test_vectorize_no_vector_loop_does_not_require_a_target():
         for i in T.serial(16):
             A[i] = A[i] + 1
 
-    assert tvm.target.Target.current() is None
-    result = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule({"main": serial_only}))["main"]
-    tvm.ir.assert_structural_equal(result, serial_only)
+    assert tvm_tirx.target.Target.current() is None
+    result = tl.transform.LegalizeVectorizedLoop()(tvm_tirx.IRModule({"main": serial_only}))["main"]
+    tvm_tirx.ir.assert_structural_equal(result, serial_only)
 
 
 if __name__ == "__main__":

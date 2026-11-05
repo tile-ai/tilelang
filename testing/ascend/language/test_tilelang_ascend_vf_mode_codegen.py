@@ -11,10 +11,10 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.engine.lower import lower
 
-tirx = tvm.tirx
+tirx = tvm_tirx.tirx
 
 
 def _simd_register_kernel(dtype):

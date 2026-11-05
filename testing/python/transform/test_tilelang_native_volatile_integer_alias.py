@@ -3,7 +3,7 @@
 import re
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.target import Target
 from testing.python.transform import test_tilelang_native_shared_arena as author
@@ -19,7 +19,7 @@ def llvm_source(function, tmp_path):
     )
     assert tirx.analysis.check_well_formed(function)
     (tmp_path / "input.py").write_text(function.script())
-    module = tvm_ffi.get_global_func("target.build.llvm")(tvm.IRModule({"main": function}), Target("llvm"))
+    module = tvm_ffi.get_global_func("target.build.llvm")(tvm_tirx.IRModule({"main": function}), Target("llvm"))
     source = module.inspect_source("ll")
     (tmp_path / "kernel.ll").write_text(source)
     return source
@@ -82,7 +82,7 @@ def test_integer_pointer_transport_preserves_volatile(backend, target, format, m
     else:
         (tmp_path / "input.py").write_text(func.script())
         module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + "_without_compile")(
-            tvm.IRModule({"main": func}), Target(target)
+            tvm_tirx.IRModule({"main": func}), Target(target)
         )
         source = module.inspect_source(format)
         (tmp_path / ("kernel." + format)).write_text(source)

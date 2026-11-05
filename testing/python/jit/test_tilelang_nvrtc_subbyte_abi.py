@@ -1,5 +1,7 @@
 """NVRTC byte carriers retain their source ABI and actual storage bounds."""
 
+import tvm_tirx
+
 from functools import lru_cache
 
 import numpy as np
@@ -16,7 +18,7 @@ def _adapter(function, outputs=()):
     from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
 
     adapter = NVRTCKernelAdapter.__new__(NVRTCKernelAdapter)
-    adapter.ir_module = tilelang.tvm.IRModule({function.attrs["global_symbol"]: function})
+    adapter.ir_module = tvm_tirx.IRModule({function.attrs["global_symbol"]: function})
     adapter.params = extrac_params(function)
     adapter.result_idx = list(outputs)
     adapter._initialize_native_arguments()
@@ -106,7 +108,7 @@ def _affine_unpack(explicit_stride):
     # byte/nibble oracle run unchanged in both isolated environments.
     scalars = []
     if hasattr(main, "buffer_map"):
-        tirx = tilelang.tvm.tirx
+        tirx = tvm_tirx.tirx
 
         scalars.append(main.buffer_map[main.params[1]].shape[0])
         if explicit_stride:

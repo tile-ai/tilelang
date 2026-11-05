@@ -12,7 +12,7 @@ Pass configurations:
 
 import pytest
 
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -28,10 +28,10 @@ def _apply_passes(mod, enable_non_predicated=False, enable_predicated=False):
     for global_var, func in mod.functions.items():
         if "tirx.noalias" not in func.attrs:
             mod[global_var] = func.with_attr("tirx.noalias", True)
-    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(tvm_tirx.target.Target("cuda"))(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
-    with tvm.transform.PassContext(
+    with tvm_tirx.transform.PassContext(
         config={
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG: enable_non_predicated,
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: enable_predicated,
@@ -58,7 +58,7 @@ def _assert_parameter_storage(func, tensor, parameter_index):
     value = definitions[0].value
     assert isinstance(value, ir.Call) and value.op.same_as(ir.Op.get("tirx.decl_tensor"))
     assert len(value.args) == 1
-    tvm.ir.assert_structural_equal(value.args[0], parameter.data)
+    tvm_tirx.ir.assert_structural_equal(value.args[0], parameter.data)
 
 
 def _assert_global_access(func, direction, bits, buffer_index, predicate=None):
@@ -77,7 +77,7 @@ def _assert_global_access(func, direction, bits, buffer_index, predicate=None):
     _assert_parameter_storage(func, ptr.args[0].source, buffer_index)
     assert ptr.args[2].value == (1 if is_load else 2)
     if predicate is not None:
-        tvm.ir.assert_structural_equal(call.args[-1], predicate)
+        tvm_tirx.ir.assert_structural_equal(call.args[-1], predicate)
     return call
 
 
@@ -105,17 +105,17 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
                 else:
                     B[i * lanes + j] = T.if_then_else(inner > 0, A[i * lanes + j], T.float32(0))
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     lowered = _apply_passes(mod, enable_non_predicated=enable_non_predicated, enable_predicated=True)
     loads = collect_calls(lowered, function="main", op=f"tl.ldg{32 * lanes}")
     stores = collect_calls(lowered, function="main", op=f"tl.stg{32 * lanes}")
     assert len(loads) == 1
     outer, inner = func.params[2:]
     expected = ir.prim.And(outer > 0, inner > 0) if enclosing_store else inner > 0
-    tvm.ir.assert_structural_equal(loads[0].args[-1], expected)
+    tvm_tirx.ir.assert_structural_equal(loads[0].args[-1], expected)
     if enclosing_store:
         assert len(stores) == 1
-        tvm.ir.assert_structural_equal(stores[0].args[-1], outer > 0)
+        tvm_tirx.ir.assert_structural_equal(stores[0].args[-1], outer > 0)
 
 
 @tilelang.testing.requires_cuda
@@ -129,13 +129,13 @@ def test_nested_predicated_load_does_not_leak_store_guard():
                 B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
             B[i] = T.if_then_else(inner > 0, A[i], T.float32(0))
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     lowered = _apply_passes(mod, enable_predicated=True)
     predicates = [call.args[-1] for call in collect_calls(lowered, op="tl.ldg32", function="main")]
     assert len(predicates) == 2
     outer, inner = func.params[2:]
-    tvm.ir.assert_structural_equal(predicates[0], ir.prim.And(outer > 0, inner > 0))
-    tvm.ir.assert_structural_equal(predicates[1], inner > 0)
+    tvm_tirx.ir.assert_structural_equal(predicates[0], ir.prim.And(outer > 0, inner > 0))
+    tvm_tirx.ir.assert_structural_equal(predicates[1], inner > 0)
 
 
 @requires_ldgstg
@@ -147,7 +147,7 @@ def test_lower_ldg32_default_off():
         for i in T.thread_binding(128, "threadIdx.x"):
             B[i] = A[i]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod)  # Default: enable_non_predicated=False
     print("=== test_lower_ldg32_default_off ===")
     print(mod)
@@ -164,7 +164,7 @@ def test_lower_ldg32_enabled():
         for i in T.thread_binding(128, "threadIdx.x"):
             B[i] = A[i]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg32_enabled ===")
     print(mod)
@@ -182,7 +182,7 @@ def test_lower_ldg64_enabled():
             for j in T.vectorized(2):
                 B[i * 2 + j] = A[i * 2 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg64_enabled ===")
     print(mod)
@@ -200,7 +200,7 @@ def test_lower_ldg128_enabled():
             for j in T.vectorized(4):
                 B[i * 4 + j] = A[i * 4 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg128_enabled ===")
     print(mod)
@@ -218,7 +218,7 @@ def test_lower_ldg256_enabled():
             for j in T.vectorized(8):
                 B[i * 8 + j] = A[i * 8 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_non_predicated=True)
     print("=== test_lower_ldg256_enabled ===")
     print(mod)
@@ -236,7 +236,7 @@ def test_lower_ldg32_predicated():
             # Predicate doesn't depend on loop var, so it can be lowered
             B[i] = T.if_then_else(pred > 0, A[i], T.float32(0))
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_ldg32_predicated ===")
     print(mod)
@@ -254,7 +254,7 @@ def test_lower_stg32_predicated():
             with T.If(pred > 0), T.Then():
                 B[i] = A[i]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_stg32_predicated ===")
     print(mod)
@@ -272,7 +272,7 @@ def test_lower_ldg128_predicated():
                 # Predicate doesn't depend on vectorized loop var
                 B[i * 4 + j] = T.if_then_else(pred > 0, A[i * 4 + j], T.float32(0))
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_ldg128_predicated ===")
     print(mod)
@@ -291,7 +291,7 @@ def test_lower_stg128_predicated():
                 with T.If(pred > 0), T.Then():
                     B[i * 4 + j] = A[i * 4 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_lower_stg128_predicated ===")
     print(mod)
@@ -314,7 +314,7 @@ def test_predicated_store_with_load():
                 with T.If(pred > 0), T.Then():
                     B[i * 4 + j] = A[i * 4 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_predicated_store_with_load ===")
     print(mod)
@@ -337,7 +337,7 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
                 with T.If(pred > 0), T.Then():
                     B[i * 4 + j] = S[i * 4 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=True)
     print("=== test_predicated_store_with_shared_load_keeps_explicit_guard ===")
     print(mod)
@@ -346,7 +346,7 @@ def test_predicated_store_with_shared_load_keeps_explicit_guard():
     guards = collect_nodes(func, ir.If)
     assert len(guards) == 1
     guard = guards[0]
-    tvm.ir.assert_structural_equal(guard.condition, func.params[-1] > 0)
+    tvm_tirx.ir.assert_structural_equal(guard.condition, func.params[-1] > 0)
     shared_loads = [load for load in collect_nodes(func, ir.TensorLoad) if str(load.source.ty.scope) == "shared"]
     assert shared_loads, "Expected a shared-memory load"
     guarded_loads = collect_nodes(guard.then_case, ir.TensorLoad)
@@ -370,7 +370,7 @@ def test_predicated_disabled():
                 idx = i * 4 + j
                 B[idx] = T.if_then_else(idx < N, A[idx], T.float32(0))
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = _apply_passes(mod, enable_predicated=False)
     _assert_no_global_intrinsics(mod["main"])
     assert collect_nodes(mod["main"], ir.TensorLoad)
@@ -387,7 +387,7 @@ def test_predicated_option_controls_eligible_load():
             for j in T.vectorized(4):
                 B[i * 4 + j] = T.if_then_else(pred > 0, A[i * 4 + j], T.float32(0))
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     # Establish that this same input is eligible when the option is enabled.
     enabled = _apply_passes(mod, enable_predicated=True)
     _assert_global_access(enabled["main"], "ldg", 128, 0, predicate=enabled["main"].params[-1] > 0)
@@ -409,12 +409,12 @@ def test_non_cuda_target_skip():
                 B[i * 4 + j] = A[i * 4 + j]
 
     # Use a CPU target
-    cpu_target = tvm.target.Target("llvm")
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(cpu_target)(mod)
+    cpu_target = tvm_tirx.target.Target("llvm")
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(cpu_target)(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)
-    with tvm.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):
+    with tvm_tirx.transform.PassContext(config={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True}):
         mod = tl.cuda.transform.LowerLDGSTG()(mod)
     print("=== test_non_cuda_target_skip ===")
     print(mod)
@@ -510,7 +510,7 @@ def test_vector_lowering_requires_alignment_and_noalias(alignment, noalias, expe
             for j in T.vectorized(4):
                 B[i * 4 + j] = A[i * 4 + j]
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main").with_attr("tirx.noalias", noalias))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main").with_attr("tirx.noalias", noalias))
     lowered = _apply_passes(mod, enable_non_predicated=True)
     if expected_bits is None:
         # Generic vector memory retains its safe unaligned emission; opt-in

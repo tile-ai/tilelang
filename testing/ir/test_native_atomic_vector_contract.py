@@ -1,7 +1,7 @@
 """Packed atomic plans retain physical provenance, range, and scalar fallbacks."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 import tilelang as tl
 from tvm_tirx import ir, tirx
 from tilelang.testing.ir import collect_nodes
@@ -30,7 +30,7 @@ def module(source, destination, lane, ptr, lanes=4, arch="sm_90", extras=(), ord
     body = ir.For(lane, 0, lanes, 1, ir.ForKind.VECTORIZED, ir.Evaluate(call))
     params = [source, destination, *extras]
     func = tirx.Function(params, body).with_attr("global_symbol", "main")
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     return ir.IRModule({"main": func.with_attrs({"target": target, "tirx.noalias": True})}), target
 
 

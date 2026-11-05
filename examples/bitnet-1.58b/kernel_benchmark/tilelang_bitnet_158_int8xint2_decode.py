@@ -5,7 +5,6 @@ import torch
 import torch.backends
 import tilelang
 import tilelang.language as T
-from tilelang import tvm as tvm
 from tvm_ffi import dtype as DataType
 import numpy as np
 

@@ -3,7 +3,7 @@ import re
 import pytest
 import tilelang
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang import language as T
 from tvm_tirx.target import Target
 
@@ -109,7 +109,7 @@ def _lower_fully_replicated_readback(use_copy: bool) -> str:
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True,
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK.value: True,
     }
-    with tvm.transform.PassContext(config=pass_configs), target:
+    with tvm_tirx.transform.PassContext(config=pass_configs), target:
         artifact = tilelang.lower(main, target=target)
     return artifact.kernel_source
 

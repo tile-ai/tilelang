@@ -353,7 +353,7 @@ def create_backend_context(
 ) -> BackendContext:
     """Resolve user inputs into the immutable context for one compilation."""
 
-    from tilelang import tvm
+    import tvm_tirx
     from tilelang.backend.target import determine_target, normalize_target_for_execution
 
     normalized_target = determine_target(target, return_object=True)
@@ -361,7 +361,7 @@ def create_backend_context(
     normalized_target = normalize_target_for_execution(normalized_target, execution_backend)
 
     if target_host is None:
-        target_host = "llvm" if tvm.runtime.enabled("llvm") else "c"
+        target_host = "llvm" if tvm_tirx.runtime.enabled("llvm") else "c"
     normalized_target_host = Target(target_host)
     normalized_target = Target(normalized_target, normalized_target_host)
 

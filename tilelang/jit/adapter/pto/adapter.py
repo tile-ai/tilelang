@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.target import Target
 from tilelang_pto_wrapper import PTOKernelWrapper
@@ -44,7 +44,7 @@ def _device_providers():
     return current_device, current_stream
 
 
-def _storage_pack_factor(dtype: tvm.DataType) -> int:
+def _storage_pack_factor(dtype: tvm_tirx.DataType) -> int:
     """Return the number of PTO logical values stored in one Torch element."""
     # Bool uses one byte per value. Only int4/uint4 and FP4 use packed storage.
     dtype_name = str(dtype).removeprefix("torch.")
@@ -59,7 +59,7 @@ def _storage_pack_factor(dtype: tvm.DataType) -> int:
     return storage_bits // logical_bits
 
 
-def _accepted_storage_dtypes(dtype: tvm.DataType) -> torch.dtype | tuple[torch.dtype, ...]:
+def _accepted_storage_dtypes(dtype: tvm_tirx.DataType) -> torch.dtype | tuple[torch.dtype, ...]:
     from tilelang.language import dtype as language_dtype
 
     torch_dtype = language_dtype(dtype).as_torch()
@@ -93,9 +93,9 @@ class PTOKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int] | int | None,
         target: str | dict[str, object] | Target,
-        func_or_mod: tirx.Function | tvm.IRModule,
-        host_mod: tvm.IRModule | None = None,
-        device_mod: tvm.IRModule | None = None,
+        func_or_mod: tirx.Function | tvm_tirx.IRModule,
+        host_mod: tvm_tirx.IRModule | None = None,
+        device_mod: tvm_tirx.IRModule | None = None,
         device_kernel_source: str | None = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
@@ -124,7 +124,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int] | int | None,
         target: str | dict[str, object] | Target,
-        func_or_mod: tirx.Function | tvm.IRModule,
+        func_or_mod: tirx.Function | tvm_tirx.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -146,7 +146,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
         if isinstance(func_or_mod, tirx.Function):
-            self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            self.ir_module = tvm_tirx.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
         self.target = Target(determine_target(target))

@@ -1,4 +1,4 @@
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -7,12 +7,12 @@ import pytest
 
 def _check(original, transformed):
     func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.LetInline()(mod)
     expected = transformed.with_attr("global_symbol", "main")
-    tvm.tirx.analysis.check_well_formed(mod["main"])
-    tvm.tirx.analysis.check_well_formed(expected)
-    tvm.ir.assert_structural_equal(mod["main"], expected)
+    tvm_tirx.tirx.analysis.check_well_formed(mod["main"])
+    tvm_tirx.tirx.analysis.check_well_formed(expected)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], expected)
 
 
 def test_let_binding():

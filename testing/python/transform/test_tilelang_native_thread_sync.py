@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -44,8 +44,8 @@ def _syncs(root, scope="shared"):
 
 
 def _lower(function, scope="shared"):
-    function = function.with_attr("target", tvm.target.Target({"kind": "cuda", "arch": "sm_90"}))
-    return tilelang.transform.ThreadSync(scope)(tvm.IRModule({"main": function}))["main"]
+    function = function.with_attr("target", tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"}))
+    return tilelang.transform.ThreadSync(scope)(tvm_tirx.IRModule({"main": function}))["main"]
 
 
 def _sequence_contains(root, first, last):

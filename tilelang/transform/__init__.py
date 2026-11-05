@@ -3,7 +3,7 @@
 
 from . import _ffi_api
 from .pass_config import PassConfigKey  # noqa: F401
-from tilelang import tvm as tvm  # noqa: F401
+import tvm_tirx  # noqa: F401
 from tvm_tirx.ir.transform import PassContext  # noqa: F401
 
 _PYTHON_PASSES = {
@@ -92,7 +92,7 @@ def PipelinePlanning():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.PipelinePlanning()  # type: ignore
@@ -103,7 +103,7 @@ def LayoutInference():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     from tilelang.tileop import _register_builtin_callbacks
@@ -117,7 +117,7 @@ def LowerTileOp():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     from tilelang.tileop import _register_builtin_callbacks
@@ -131,7 +131,7 @@ def InjectSoftwarePipeline():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.InjectSoftwarePipeline()  # type: ignore
@@ -142,7 +142,7 @@ def LegalizeNegativeIndex():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.LegalizeNegativeIndex()  # type: ignore
@@ -154,7 +154,7 @@ def InjectAssumes():
 
     Returns:
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.InjectAssumes()
@@ -165,7 +165,7 @@ def VerifyParallelLoop():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.VerifyParallelLoop()  # type: ignore
@@ -176,7 +176,7 @@ def VerifyBufferInit():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The registered pass. It inspects the IR and returns it unchanged.
     """
     return _ffi_api.VerifyBufferInit()  # type: ignore
@@ -192,7 +192,7 @@ def ThreadSync(storage_scope: str):
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.ThreadSync(storage_scope)  # type: ignore
@@ -203,7 +203,7 @@ def IfStmtBinding():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.IfStmtBinding()  # type: ignore
@@ -214,7 +214,7 @@ def MergeIfStmt():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.MergeIfStmt()  # type: ignore
@@ -225,7 +225,7 @@ def LoopUnswitching():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.LoopUnswitching()  # type: ignore
@@ -236,7 +236,7 @@ def LegalizeVectorizedLoop():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.LegalizeVectorizedLoop()  # type: ignore
@@ -247,7 +247,7 @@ def LegalizeSafeMemoryAccess():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.LegalizeSafeMemoryAccess()  # type: ignore
@@ -258,7 +258,7 @@ def LowerAccessPtr():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.LowerAccessPtr()  # type: ignore
@@ -288,7 +288,7 @@ def MakePackedAPI():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.MakePackedAPI()  # type: ignore
@@ -348,7 +348,7 @@ def MaterializeKernelLaunch(
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     if lower_grid_binding is None:
@@ -372,7 +372,7 @@ def AnnotateDeviceRegions():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.AnnotateDeviceRegions()  # type: ignore
@@ -383,7 +383,7 @@ def SplitHostDevice():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.SplitHostDevice()  # type: ignore
@@ -403,7 +403,7 @@ def AnnotateReadOnlyParams():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.AnnotateReadOnlyParams()  # type: ignore
@@ -414,7 +414,7 @@ def VectorizeLoop(enable_vectorize: bool = True):
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.VectorizeLoop(enable_vectorize)  # type: ignore
@@ -425,7 +425,7 @@ def ConfigIndexBitwidth():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     ----
     """
@@ -458,7 +458,7 @@ def FlattenBuffer():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.FlattenBuffer()  # type: ignore
@@ -469,7 +469,7 @@ def MergeSharedMemoryAllocations(enable_aggressive_merge: bool = False, align_by
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.MergeSharedMemoryAllocations(enable_aggressive_merge, align_bytes, disable_reuse)  # type: ignore
@@ -480,7 +480,7 @@ def PlanAndUpdateBufferAllocationLocation():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.PlanAndUpdateBufferAllocationLocation()  # type: ignore
@@ -491,7 +491,7 @@ def HoistGlobalBufferAllocations():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.HoistGlobalBufferAllocations()  # type: ignore
@@ -512,7 +512,7 @@ def StorageRewrite():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.StorageRewrite()  # type: ignore
@@ -565,7 +565,7 @@ def LowerDeviceKernelLaunch():
     IR suitable for backend code generation and device-side lowering.
 
     Returns:
-        tvm.transform.Pass: The transform pass that performs device kernel launch lowering.
+        tvm_tirx.transform.Pass: The transform pass that performs device kernel launch lowering.
     """
     return _ffi_api.LowerDeviceKernelLaunch()  # type: ignore
 
@@ -579,7 +579,7 @@ def CanonicalizeLegacyReducer():
     access patterns are compile errors, never silently accepted.
 
     Returns:
-        tvm.transform.Pass: The canonicalization pass.
+        tvm_tirx.transform.Pass: The canonicalization pass.
     """
     return _ffi_api.CanonicalizeLegacyReducer()  # type: ignore
 
@@ -593,7 +593,7 @@ def VerifyReducerEpoch():
     no ordinary reads/writes/aliasing of the reducer handle.
 
     Returns:
-        tvm.transform.Pass: The verification pass.
+        tvm_tirx.transform.Pass: The verification pass.
     """
     return _ffi_api.VerifyReducerEpoch()  # type: ignore
 
@@ -606,7 +606,7 @@ def ReducerPlanAndMaterialize():
     guarded read-modify-write updates, and an explicit finalize plan.
 
     Returns:
-        tvm.transform.Pass: The planning/materialization pass.
+        tvm_tirx.transform.Pass: The planning/materialization pass.
     """
     return _ffi_api.ReducerPlanAndMaterialize()  # type: ignore
 
@@ -615,7 +615,7 @@ def VerifyReducerConsumed():
     """Assert no reducer v2 construct survives past materialization.
 
     Returns:
-        tvm.transform.Pass: The verification pass.
+        tvm_tirx.transform.Pass: The verification pass.
     """
     return _ffi_api.VerifyReducerConsumed()  # type: ignore
 
@@ -632,7 +632,7 @@ def UnrollLoop():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.UnrollLoop()  # type: ignore

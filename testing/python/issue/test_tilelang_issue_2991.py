@@ -8,7 +8,8 @@ import torch
 
 import tilelang
 import tilelang.testing
-from tilelang import language as T, tvm
+import tvm_tirx
+from tilelang import language as T
 
 N = 4
 
@@ -66,11 +67,11 @@ def _compound_expected_kernel():
 
 @pytest.mark.parametrize("dtype", ["int32", "float32"])
 def test_unary_plus_traces_to_identity(dtype):
-    tvm.ir.assert_structural_equal(_unary_plus_kernel(dtype), _identity_kernel(dtype))
+    tvm_tirx.ir.assert_structural_equal(_unary_plus_kernel(dtype), _identity_kernel(dtype))
 
 
 def test_unary_plus_on_loop_var_compound_expr_and_macro():
-    tvm.ir.assert_structural_equal(_compound_unary_plus_kernel(), _compound_expected_kernel())
+    tvm_tirx.ir.assert_structural_equal(_compound_unary_plus_kernel(), _compound_expected_kernel())
 
 
 @tilelang.testing.requires_cuda

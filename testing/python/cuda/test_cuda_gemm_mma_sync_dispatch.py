@@ -3,7 +3,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 def _make_gemm_kernel(dtype, accum_dtype, K=64):
@@ -97,7 +97,7 @@ def test_gemm_mma_sync_supported_dtype_combo_runs(dtype, accum_dtype):
     ],
 )
 def test_gemm_k_shape_uses_architecture_specific_atom(arch, dtype, accum_dtype, k):
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     with target:
         lowered = tilelang.lower(_make_gemm_kernel(dtype, accum_dtype, K=k), target=target)
     assert "tl::mma_sync" in lowered.kernel_source
@@ -118,6 +118,6 @@ def test_gemm_k_shape_uses_architecture_specific_atom(arch, dtype, accum_dtype, 
     ],
 )
 def test_gemm_partial_k_atom_requires_padding(arch, dtype, accum_dtype, k, atom_k):
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     with target, pytest.raises(ValueError, match=rf"tile K={k} must be divisible by {atom_k}"):
         tilelang.lower(_make_gemm_kernel(dtype, accum_dtype, K=k), target=target)

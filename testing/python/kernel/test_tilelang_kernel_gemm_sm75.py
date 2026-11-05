@@ -4,7 +4,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 
 
@@ -181,7 +181,7 @@ def test_sm75_complete_lowered_modules_keep_source_graph_and_output_schema():
     for module in (kernel.artifact.host_mod, kernel.artifact.device_mod):
         payload = module.attrs["tl.output_module_schema"]
         assert isinstance(payload, bytes) and len(payload) == 172
-        assert isinstance(module.attrs["tl.source_host_module"], tvm.ir.IRModule)
+        assert isinstance(module.attrs["tl.source_host_module"], tvm_tirx.ir.IRModule)
         # Diagnostic capture keeps the printer limitation visible and falls
         # back to the complete native graph. It is not TVMScript source.
         snapshot = _get_script(module)
@@ -189,13 +189,13 @@ def test_sm75_complete_lowered_modules_keep_source_graph_and_output_schema():
         assert snapshot.startswith("# TVMScript capture failed (")
         assert marker in snapshot
         for restored in (
-            tvm.ir.load_json(tvm.ir.save_json(module)),
-            tvm.ir.load_json(snapshot.split(marker, 1)[1]),
+            tvm_tirx.ir.load_json(tvm_tirx.ir.save_json(module)),
+            tvm_tirx.ir.load_json(snapshot.split(marker, 1)[1]),
         ):
             assert restored.attrs["tl.output_module_schema"] == payload
-            assert isinstance(restored.attrs["tl.source_host_module"], tvm.ir.IRModule)
-            tvm.ir.assert_structural_equal(module, restored)
-            tvm.ir.assert_structural_equal(restored, module)
+            assert isinstance(restored.attrs["tl.source_host_module"], tvm_tirx.ir.IRModule)
+            tvm_tirx.ir.assert_structural_equal(module, restored)
+            tvm_tirx.ir.assert_structural_equal(restored, module)
             assert tvm_ffi.structural_hash(module) == tvm_ffi.structural_hash(restored)
 
 
@@ -240,26 +240,26 @@ def test_sm75_ldmatrix_shared_reads_stay_in_bounds(in_dtype, accum_dtype, block_
     )
     (func,) = kernel.artifact.device_mod.functions.values()
 
-    analyzer = tvm.sym.Analyzer()
-    constraints = tvm.sym.ConstraintContext()
+    analyzer = tvm_tirx.sym.Analyzer()
+    constraints = tvm_tirx.sym.ConstraintContext()
     buffer_sizes = {}
     ldmatrix_calls = []
 
     def visit(node):
-        if isinstance(node, tvm.ir.RegionStmt) and node.op.name == "tirx.launch_thread":
+        if isinstance(node, tvm_tirx.ir.RegionStmt) and node.op.name == "tirx.launch_thread":
             (variable,) = node.body_params
-            constraints.append(tvm.sym.RangeConstraint(variable, tvm.ir.Range(0, int(node.args[1]))))
-        elif isinstance(node, tvm.ir.For):
+            constraints.append(tvm_tirx.sym.RangeConstraint(variable, tvm_tirx.ir.Range(0, int(node.args[1]))))
+        elif isinstance(node, tvm_tirx.ir.For):
             assert int(node.step) > 0
-            constraints.append(tvm.sym.RangeConstraint(node.var, tvm.ir.Range(int(node.begin), int(node.end))))
-        elif isinstance(node, tvm.ir.Bind) and isinstance(node.var.ty, tvm.tirx.TensorType):
-            assert isinstance(node.value, tvm.ir.Call)
+            constraints.append(tvm_tirx.sym.RangeConstraint(node.var, tvm_tirx.ir.Range(int(node.begin), int(node.end))))
+        elif isinstance(node, tvm_tirx.ir.Bind) and isinstance(node.var.ty, tvm_tirx.tirx.TensorType):
+            assert isinstance(node.value, tvm_tirx.ir.Call)
             assert node.value.op.name in ("tirx.alloc_tensor", "tirx.decl_tensor")
             size = 1
             for extent in node.var.ty.shape:
                 size *= int(extent)
             buffer_sizes[node.var] = size
-        elif isinstance(node, tvm.ir.Call) and str(getattr(node.op, "name", "")) == "tl.ptx_ldmatrix":
+        elif isinstance(node, tvm_tirx.ir.Call) and str(getattr(node.op, "name", "")) == "tl.ptx_ldmatrix":
             ldmatrix_calls.append(node)
 
     tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, visit), order="pre")
@@ -268,9 +268,9 @@ def test_sm75_ldmatrix_shared_reads_stay_in_bounds(in_dtype, accum_dtype, block_
 
     for call in ldmatrix_calls:
         src = call.args[2]
-        assert isinstance(src, tvm.ir.Call) and src.op.name == "tirx.address_of"
+        assert isinstance(src, tvm_tirx.ir.Call) and src.op.name == "tirx.address_of"
         (load,) = src.args
-        assert isinstance(load, tvm.ir.TensorLoad) and len(load.indices) == 1
+        assert isinstance(load, tvm_tirx.ir.TensorLoad) and len(load.indices) == 1
         data, offset = load.source, load.indices[0]
         assert data in buffer_sizes, f"ldmatrix source {data.name} has no visible allocation or view"
         assert str(data.ty.scope).startswith("shared")

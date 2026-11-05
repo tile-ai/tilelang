@@ -1,5 +1,5 @@
 # ruff: noqa
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
@@ -14,24 +14,24 @@ def _post_order_visit(stmt, visit):
         visit(node)
 
 
-auto_target = tvm.target.Target(determine_target("auto"))
+auto_target = tvm_tirx.target.Target(determine_target("auto"))
 
 
 def _check(original, transformed):
     func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.cuda.transform.InjectFenceProxy()(mod)
     # This test observes the fence pass before shared-memory planning and
     # synchronization consume warp-specialization scopes. Preserve those
     # regions on both sides while normalizing already-consumed annotations.
     finalize = tl.transform.FinalizeAnnotations(allowed_pending_regions=("kWarpSpecializationScope", "kCustomWarpSpecialization"))
     mod = finalize(mod)
-    transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
-    transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tvm_tirx.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
+    transformed = tvm_tirx.tirx.transform.BindTarget(auto_target)(transformed)
     transformed = finalize(transformed)
 
-    tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
@@ -49,8 +49,8 @@ def test_async_to_generic_no_double_fence():
             T.fence_proxy_async()
             T.call_extern("handle", "generic_op")
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     def _count_fences(stmt):
@@ -155,8 +155,8 @@ def test_unknown_extern_default_is_none():
             smem[0] = T.float16(0)
             T.evaluate(T.call_extern("handle", "custom_op"))
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     def _count_fences(stmt):
@@ -323,8 +323,8 @@ def test_inject_fence_proxy_does_not_inject_tma_store_sync():
             A_global = T.decl_buffer((128,), T.float16, scope="global")
             T.evaluate(T.call_intrin("handle", ir.Op.get("tl.tma_store"), A_global.data))
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.cuda.transform.InjectFenceProxy()(mod)
 
     arrives = 0
@@ -376,8 +376,8 @@ def test_wgmma_marked_async():
                 1,
             )
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.cuda.transform.InjectFenceProxy()(mod)
     order = []
 
@@ -410,8 +410,8 @@ def test_sparse_mma_intrinsics_marked_async():
                 smem[0] = T.float16(0)
                 T.evaluate(T.call_intrin("handle", target_op))
 
-        mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-        mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+        mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+        mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
         mod = tl.cuda.transform.InjectFenceProxy()(mod)
         order = []
 

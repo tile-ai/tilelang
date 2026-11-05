@@ -7,7 +7,7 @@ to simdgroup_store directly to device memory via LowerSIMDGroupStore.
 """
 
 import tilelang
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.testing
 import tilelang.language as T
 import torch
@@ -58,7 +58,7 @@ def assert_simdgroup_store_correctness(M, N, K, block_M, block_N, block_K, dtype
 
 def assert_simdgroup_store_codegen(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
     func = _make_simdgroup_gemm_func(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
-    with tvm.transform.PassContext(), tvm.target.Target("metal"):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target("metal"):
         artifact = tilelang.lower(func, target="metal")
 
     src = artifact.kernel_source

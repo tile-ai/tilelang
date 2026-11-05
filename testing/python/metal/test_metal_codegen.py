@@ -1,5 +1,4 @@
 import tilelang
-from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 import torch

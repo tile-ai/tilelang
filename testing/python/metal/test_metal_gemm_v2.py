@@ -5,7 +5,6 @@ operations by comparing results against torch.matmul.
 """
 
 import tilelang
-from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 import torch

@@ -1,7 +1,7 @@
 """Policy for tensorcore schedule"""
 
 from __future__ import annotations
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_ffi import dtype as DataType
 import numpy as np
 import logging
@@ -23,7 +23,7 @@ class TensorCorePolicy(DefaultPolicy):
     use_async_copy: bool = False
     block_reduction_depth: int | None = None
 
-    def _init_with_prim_func(self, func: tvm.tirx.Function, name: str | None = None):
+    def _init_with_prim_func(self, func: tvm_tirx.tirx.Function, name: str | None = None):
         super()._init_with_prim_func(func, name)
         self._legalize_info()
         return self

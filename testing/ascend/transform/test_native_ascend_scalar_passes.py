@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -75,7 +75,7 @@ def apply(name, params, body, tmp_path):
     assert tirx.analysis.check_well_formed(before)
     original = ir.save_json(before)
     operation = tvm_ffi.get_global_func("tl.transform." + name)()
-    result = operation(tvm.IRModule({"main": before}))
+    result = operation(tvm_tirx.IRModule({"main": before}))
     assert tirx.analysis.check_well_formed(result)
     for expr in objects(result, ir.Call):
         expr.validate()
@@ -327,9 +327,9 @@ def test_native_cce_source_contains_merging_and_scalar_bypass(tmp_path):
         .with_attr("global_symbol", "native_ascend")
         .with_attr("calling_conv", 2)
     )
-    result = tvm_ffi.get_global_func("tl.transform.LowerAccessPtr")()(tvm.IRModule({"native_ascend": result}))["native_ascend"]
+    result = tvm_ffi.get_global_func("tl.transform.LowerAccessPtr")()(tvm_tirx.IRModule({"native_ascend": result}))["native_ascend"]
     module = tvm_ffi.get_global_func("target.build.tilelang_ascend_without_compile")(
-        tvm.IRModule({"native_ascend": result}), tvm.target.Target("ascend")
+        tvm_tirx.IRModule({"native_ascend": result}), tvm_tirx.target.Target("ascend")
     )
     source = module.inspect_source("asc")
     (tmp_path / "native_ascend.asc").write_text(source)

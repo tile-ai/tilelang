@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -11,8 +11,8 @@ from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.testing.packed import compile_packed_function
 
 
-HOST = tvm.target.Target("c")
-CUDA = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+HOST = tvm_tirx.target.Target("c")
+CUDA = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"})
 
 
 def _assume(condition):
@@ -28,7 +28,7 @@ def _launch(value, *, prefix=()):
 
 def _outline(parameters, body, *, round_trip=False):
     function = tirx.Function(parameters, body, ir.PrimType("void")).with_attr(
-        {"global_symbol": "main", "target": tvm.target.Target(CUDA, host=HOST)}
+        {"global_symbol": "main", "target": tvm_tirx.target.Target(CUDA, host=HOST)}
     )
     module = ir.IRModule({"main": function})
     assert tirx.analysis.check_well_formed(module)
@@ -174,7 +174,7 @@ def test_single_iteration_induction_value_is_substituted_only_in_the_host_check(
     (check,) = collect_nodes(module["main"], ir.AssertStmt)
     assert all(variable.same_as(module["main"].params[0]) for variable in collect_nodes(check.condition, ir.Var))
     expected = module["main"].params[0] >= 7
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     ir.assert_structural_equal(analyzer.simplify(check.condition), analyzer.simplify(expected))
     (retained_loop,) = collect_nodes(devices[0], ir.For)
     assert any(variable.same_as(retained_loop.var) for variable in collect_nodes(_facts(devices[0])[0], ir.Var))
@@ -184,7 +184,7 @@ def test_single_iteration_induction_value_is_substituted_only_in_the_host_check(
 def test_repeated_simplification_cannot_prove_a_runtime_check_from_its_own_fact(simplification_rounds):
     n = ir.Var("n", "int32")
     function = tirx.Function([n], [_assume(n >= 3), ir.Return(n + 1)], ir.PrimType("int32")).with_attr(
-        {"global_symbol": "main", "target": tvm.target.Target(HOST, host=HOST)}
+        {"global_symbol": "main", "target": tvm_tirx.target.Target(HOST, host=HOST)}
     )
     module = tilelang.transform.InjectAssumes()(ir.IRModule({"main": function}))
     module = tilelang.transform.OutlineDeviceRegions()(module)

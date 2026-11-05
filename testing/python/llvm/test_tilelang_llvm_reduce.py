@@ -14,7 +14,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 def _ref_reduce(A, op, dim):
@@ -67,7 +67,7 @@ def test_llvm_reduce_2d(op, dtype):
             for i in T.grid(M):
                 B[i] = dst[i]
 
-    with tvm.target.Target("llvm"):
+    with tvm_tirx.target.Target("llvm"):
         kernel = tilelang.compile(main, out_idx=[2], target="llvm", execution_backend="tvm_ffi")
 
     tdtype = getattr(torch, dtype)
@@ -105,7 +105,7 @@ def test_llvm_reduce_keepdim():
             for i in T.grid(M):
                 B[i, 0] = dst[i, 0]
 
-    with tvm.target.Target("llvm"):
+    with tvm_tirx.target.Target("llvm"):
         kernel = tilelang.compile(main, out_idx=[1], target="llvm", execution_backend="tvm_ffi")
 
     A = torch.randn((M, N), dtype=torch.float32)
@@ -136,7 +136,7 @@ def test_llvm_reduce_clear_false_accumulates():
             for i in T.grid(M):
                 B[i] = dst[i]
 
-    with tvm.target.Target("llvm"):
+    with tvm_tirx.target.Target("llvm"):
         kernel = tilelang.compile(main, out_idx=[2], target="llvm", execution_backend="tvm_ffi")
 
     A = torch.randn((M, N), dtype=torch.float32)

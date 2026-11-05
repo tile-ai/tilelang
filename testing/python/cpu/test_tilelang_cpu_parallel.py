@@ -8,7 +8,7 @@ import tilelang.cpu.language as T
 import tilelang.testing
 from tilelang.transform import PassConfigKey
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import tirx
 from tvm_tirx.target import Target
 
@@ -97,7 +97,7 @@ def test_cpu_parallel_codegen_nested_parallel_keeps_pragma():
 
     from tilelang.cpu.codegen import build_c
 
-    mod = tvm.IRModule.from_expr(main)
+    mod = tvm_tirx.IRModule.from_expr(main)
     mod = tirx.transform.BindTarget(Target("c"))(mod)
     source = build_c(mod, Target("c")).inspect_source()
     assert source.count("#pragma omp parallel for") == 2

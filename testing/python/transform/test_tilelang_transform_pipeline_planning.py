@@ -1,4 +1,4 @@
-import tvm_tirx as tvm
+import tvm_tirx
 import tilelang as tl
 import pytest
 import tilelang.testing
@@ -9,9 +9,9 @@ import tilelang.rocm.target  # noqa: F401
 import tilelang.metal.target  # noqa: F401
 import tilelang.ascend.target  # noqa: F401
 
-sm80_target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
-sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+sm80_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
+sm90_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
+sm100_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
 # These tests transform IR; their architecture should not depend on local hardware.
 auto_target = sm80_target
 
@@ -31,25 +31,25 @@ def _check(original, transformed, target=auto_target):
     # Exact scheduling oracles assume distinct parameter storage. This is an
     # explicit IR-harness precondition, not a change to the source kernel.
     func = original.with_attr("tirx.noalias", True)
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.IfStmtBinding()(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     mod = tl.transform.Simplify()(mod)
-    transformed = tvm.IRModule.from_expr(transformed.with_attr({"global_symbol": "main", "tirx.noalias": True}))
-    transformed = tvm.tirx.transform.BindTarget(target)(transformed)
-    tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+    transformed = tvm_tirx.IRModule.from_expr(transformed.with_attr({"global_symbol": "main", "tirx.noalias": True}))
+    transformed = tvm_tirx.tirx.transform.BindTarget(target)(transformed)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
 def _collect_pipeline_loop_annotations(func):
-    return [node.annotations for node in collect_nodes(func, tvm.ir.For) if "software_pipeline_stage" in node.annotations]
+    return [node.annotations for node in collect_nodes(func, tvm_tirx.ir.For) if "software_pipeline_stage" in node.annotations]
 
 
 def _run_pipeline_planning(func, target=auto_target, *, allow_parameter_alias=False):
     if not allow_parameter_alias:
         func = func.with_attr("tirx.noalias", True)
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.IfStmtBinding()(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     return mod
@@ -605,8 +605,8 @@ def test_simple_pipeline():
             T.copy(C_local, C[by * 128, bx * 128])
 
     func = before
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.IfStmtBinding()(mod)
     mod = tl.transform.PipelinePlanning()(mod)
     mod = tl.transform.Simplify()(mod)
@@ -702,7 +702,7 @@ def test_pipeline_planning_marks_async_producers_per_statement():
 
 
 def test_pipeline_planning_keeps_plain_hopper_pipeline_copies_sync():
-    hopper_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    hopper_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
     @T.prim_func
     def before(
@@ -884,7 +884,7 @@ def test_pipeline_planning_keeps_disjoint_thread_copy_regions(threads_x, threads
                 B[k * 64 + tx + threads_x * ty] = shared[tx + threads_x * ty]
                 B[k * 64 + tx + threads_x * ty + 32] = shared[tx + threads_x * ty + 32]
 
-    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm_tirx.IRModule.from_expr(before))
     mod = _run_pipeline_planning(mod["before"], sm80_target)
     anno = _collect_pipeline_loop_annotations(mod["main"])[0]
     stages = [int(value) for value in anno["software_pipeline_stage"]]
@@ -911,7 +911,7 @@ def test_pipeline_planning_tracks_cross_thread_index_producers(materialize_launc
                 B[k * 32 + tx] = data[tx]
 
     if materialize_launch:
-        before = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))["before"]
+        before = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm_tirx.IRModule.from_expr(before))["before"]
     mod = _run_pipeline_planning(before, sm80_target)
     anno = _collect_pipeline_loop_annotations(mod["main"])[0]
     assert [int(value) for value in anno["software_pipeline_stage"]] == [0, 0, 0, 0, 1]
@@ -1050,7 +1050,7 @@ def test_pipeline_planning_skips_transitive_tma_pipeline():
 
     mod = _run_pipeline_planning(before, sm90_target)
     assert not _collect_pipeline_loop_annotations(mod["main"])
-    loops = collect_nodes(mod["main"], tvm.ir.For)
+    loops = collect_nodes(mod["main"], tvm_tirx.ir.For)
     assert all("num_stages" not in loop.annotations for loop in loops)
     tl.transform.InjectSoftwarePipeline()(mod)
 

@@ -126,7 +126,7 @@ hook:
 
 ```python
 from tilelang.tools import lower_trace as lt
-from tilelang import tvm
+import tvm_tirx
 import tilelang.transform as transform
 
 # Diff a single pass
@@ -137,7 +137,7 @@ results = lt.lower_trace(
     func,
     [
         ("Simplify", transform.Simplify()),
-        ("RemoveNoOp", tvm.tirx.transform.RemoveNoOp()),
+        ("RemoveNoOp", tvm_tirx.tirx.transform.RemoveNoOp()),
     ],
     mode="both",
     html_path="my_diff.html",

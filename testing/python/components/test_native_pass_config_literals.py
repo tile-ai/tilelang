@@ -1,5 +1,7 @@
 """Public JIT configuration literals cross the native POD boundary explicitly."""
 
+import tvm_tirx
+
 import pytest
 
 import tilelang
@@ -51,7 +53,7 @@ def test_unknown_key_is_not_coerced_or_silently_accepted():
         PassContext(config=configs)
 
 
-@pytest.mark.skipif(not tilelang.tvm.runtime.enabled("llvm"), reason="LLVM backend is required")
+@pytest.mark.skipif(not tvm_tirx.runtime.enabled("llvm"), reason="LLVM backend is required")
 def test_cpu_jit_accepts_literal_pass_configs():
     import torch
 

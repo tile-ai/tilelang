@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from tilelang.testing.packed import compile_packed_function
@@ -38,7 +38,7 @@ def apply(params, body, dataflow=False):
     assert tirx.analysis.check_well_formed(before)
     saved = ir.save_json(before)
     transform = tvm_ffi.get_global_func("tl.transform.AscendRemoveNoOp")()
-    with tvm.transform.PassContext(config={"tl.AscendRemoveNoOp": {"use_dataflow_analysis": dataflow}}):
+    with tvm_tirx.transform.PassContext(config={"tl.AscendRemoveNoOp": {"use_dataflow_analysis": dataflow}}):
         after = transform(ir.IRModule({"main": before}))["main"]
         assert tirx.analysis.check_well_formed(after)
         for call in objects(after, ir.Call):
@@ -183,8 +183,8 @@ def test_native_numeric_effects_and_alias_dse(tmp_path):
     ]
     result = apply([a, b, output], body, True).with_attr("global_symbol", "main")
     executable = compile_packed_function(result)
-    backing = tvm.runtime.tensor(np.arange(8, dtype="int32"))
-    destination = tvm.runtime.tensor(np.full(8, -1, dtype="int32"))
+    backing = tvm_tirx.runtime.tensor(np.arange(8, dtype="int32"))
+    destination = tvm_tirx.runtime.tensor(np.full(8, -1, dtype="int32"))
     executable(backing, backing, destination)
     assert backing.numpy()[0] == 3
     assert destination.numpy()[0] == 2

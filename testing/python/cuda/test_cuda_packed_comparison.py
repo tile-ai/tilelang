@@ -10,7 +10,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -25,11 +25,11 @@ def _source(dtype, lanes, op, broadcast=False):
     comparison = getattr(tirx, op.upper())(lhs, value)
     func = tirx.Function([lhs, rhs], ir.Evaluate(comparison), ret_type=ir.PrimType("void"))
     func = func.with_attr("global_symbol", "compare")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("CUDA codegen is not enabled")
-    return build(tvm.IRModule({"compare": func}), tvm.target.Target({"kind": "cuda", "arch": "sm_90"})).inspect_source()
+    return build(tvm_tirx.IRModule({"compare": func}), tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})).inspect_source()
 
 
 @tilelang.testing.requires_cuda
@@ -105,7 +105,7 @@ def test_packed_comparison_ptx_and_older_arch_fallback(dtype):
     version = subprocess.check_output([get_nvcc_compiler(), "--version"], text=True)
     if not re.search(r"release (?:1[2-9]|[2-9]\d)\.", version):
         pytest.skip("Mask intrinsics require CUDA 12+")
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     with target:
         source = tilelang.lower(_kernel(dtype, 2, "ne", False), target=target).kernel_source
     ptx = bytes(compile_cuda(source, "ptx", arch="sm_90", options=default_compile_options())).decode()

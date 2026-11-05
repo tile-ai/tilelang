@@ -5,7 +5,7 @@ import torch
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.testing.ir import collect_nodes
 
@@ -23,13 +23,13 @@ def _compile_serial(func, out_idx=-1):
 
 
 def _parallel_loop_count(func, target):
-    with tvm.target.Target(target), tvm.transform.PassContext(config={"tl.cpu_parallel": True}):
+    with tvm_tirx.target.Target(target), tvm_tirx.transform.PassContext(config={"tl.cpu_parallel": True}):
         lowered = tilelang.lower(func, target=target)
     return sum(loop.kind == ir.ForKind.PARALLEL for mod in (lowered.host_mod, lowered.device_mod) for loop in collect_nodes(mod, ir.For))
 
 
 def _lower_grid(func, target="c"):
-    mod = tvm.IRModule.from_expr(func.with_attr({"target": tvm.target.Target(target), "global_symbol": "main"}))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr({"target": tvm_tirx.target.Target(target), "global_symbol": "main"}))
     result = tilelang.cpu.transform.MaterializeCPUParallelGrid()(mod)["main"]
     grids = [loop for loop in collect_nodes(result, ir.For) if loop.var.name == "bx"]
     assert len(grids) == 1
@@ -234,7 +234,7 @@ def test_parameter_alias_contract(target, alias_contract):
 @pytest.mark.usefixtures("fresh_compilation")
 @pytest.mark.parametrize(
     "target",
-    ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm.runtime.enabled("llvm"), reason="LLVM support is not built"))],
+    ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm_tirx.runtime.enabled("llvm"), reason="LLVM support is not built"))],
 )
 @pytest.mark.parametrize("view_dtype", [T.uint8, T.uint32], ids=str)
 def test_parameter_view_access_width(target, view_dtype, capfd):
@@ -330,7 +330,7 @@ def test_local_view_reset_covers_allocation(target, reset_kind):
 
 @pytest.mark.parametrize(
     "target",
-    ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm.runtime.enabled("llvm"), reason="LLVM support is not built"))],
+    ["c", pytest.param("llvm", marks=pytest.mark.skipif(not tvm_tirx.runtime.enabled("llvm"), reason="LLVM support is not built"))],
 )
 @pytest.mark.parametrize("complete_reset", [False, True])
 def test_local_view_preserves_iteration_state(target, complete_reset):

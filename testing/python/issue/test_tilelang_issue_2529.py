@@ -3,7 +3,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.engine.lower import lower
 from tilelang.layout import make_linear_layout
 
@@ -23,7 +23,7 @@ def _make_tma_store_kernel(n, block, annotate_linear=False):
 
 
 def _lower_source(n, block, annotate_linear=False):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     with target:
         artifact = lower(
             _make_tma_store_kernel(n, block, annotate_linear),

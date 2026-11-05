@@ -5,7 +5,7 @@ import tilelang
 import pytest
 import torch
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.language._native import encode_annotations
 
@@ -66,7 +66,7 @@ def _annotation(values):
 
 
 def _function(body, parameters=()):
-    return tirx.Function(list(parameters), body, ir.PrimType("void")).with_attr("target", tvm.target.Target("llvm"))
+    return tirx.Function(list(parameters), body, ir.PrimType("void")).with_attr("target", tvm_tirx.target.Target("llvm"))
 
 
 def _finalize(function):

@@ -4,7 +4,7 @@ import json
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -49,7 +49,7 @@ def test_registered_pipeline_to_device_source(backend, case, tmp_path):
     # integrated. This explicitly selected no-WS policy is a supported path.
     function = globals()[case]()
     before = ir.save_json(function)
-    target = tvm.target.Target(TARGETS[backend])
+    target = tvm_tirx.target.Target(TARGETS[backend])
     with tilelang.transform.PassContext(config={"tl.disable_warp_specialized": True}):
         artifact = tilelang.lower(function, target=target, target_host={"kind": "llvm", "mcpu": "generic"})
     assert ir.save_json(function) == before

@@ -20,7 +20,7 @@ import logging
 from dataclasses import dataclass
 
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.target import Target
 
@@ -85,7 +85,7 @@ def kernel_to_tir(kernel, **kwargs) -> tirx.Function:
 
 def build_module(func: tirx.Function, target: str | Target = "auto"):
     """Wrap a Function into an IRModule and resolve the (target, target_host) pair."""
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
 
     context = create_backend_context(target)
     return mod, context.target
@@ -295,7 +295,7 @@ def _walk_stmt(node, indent: str) -> None:
         print(f"{indent}{type(node).__name__}: {node}")
 
 
-def inspect_structure(mod: tvm.IRModule) -> None:
+def inspect_structure(mod: tvm_tirx.IRModule) -> None:
     """Print native function parameter types, attributes and lexical region bodies."""
     for gv, func in mod.functions.items():
         if not isinstance(func, tirx.Function):
@@ -314,7 +314,7 @@ def inspect_structure(mod: tvm.IRModule) -> None:
         print()
 
 
-def capture_structure(mod: tvm.IRModule) -> list[str]:
+def capture_structure(mod: tvm_tirx.IRModule) -> list[str]:
     """Render ``inspect_structure`` into stable text lines for diffing."""
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -349,13 +349,13 @@ class _StructureTreeObserver(PassEventObserver):
         self.input_lines = None
         self.incomplete_passes.clear()
 
-    def pass_started(self, mod: tvm.IRModule, event: PassEvent) -> list[str]:
+    def pass_started(self, mod: tvm_tirx.IRModule, event: PassEvent) -> list[str]:
         before_lines = capture_structure(mod)
         if self.input_lines is None:
             self.input_lines = before_lines
         return before_lines
 
-    def pass_finished(self, mod: tvm.IRModule, event: PassEvent, before_lines: list[str]):
+    def pass_finished(self, mod: tvm_tirx.IRModule, event: PassEvent, before_lines: list[str]):
         self.records.append(
             PassStructureRecord(
                 name=event.name,

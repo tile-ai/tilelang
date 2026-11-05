@@ -9,7 +9,6 @@ store-side TMA constraints are satisfied. In that case lowering emits both
 tma_store_arrive and tma_store_wait automatically.
 """
 
-from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
 import tilelang

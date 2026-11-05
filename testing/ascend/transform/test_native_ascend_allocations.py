@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, sym, tirx
 
 from tilelang.testing.packed import compile_packed_function
@@ -575,7 +575,7 @@ def test_single_version_opt_out_is_distinct_from_an_explicit_mode(mode, expected
 
 
 def compile_cpu(function, tmp_path):
-    target = tvm.target.Target("c")
+    target = tvm_tirx.target.Target("c")
     function = function.with_attr("global_symbol", "main").with_attr("target", target)
     module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(ir.IRModule({"main": function}))
     (tmp_path / "lowered.json").write_text(ir.save_json(module))
@@ -592,7 +592,7 @@ def test_merged_arena_executes_values_on_cpu(disable_reuse, tmp_path):
         body.extend(ir.TensorStore(out, [output_offset + index], ir.TensorLoad(value, [index])) for index in range(4))
     result = apply("MergeUBAllocations", body, [out], arguments=(16, disable_reuse))
     function = compile_cpu(result, tmp_path)
-    array = tvm.runtime.tensor(np.full(8, -1, dtype="int32"))
+    array = tvm_tirx.runtime.tensor(np.full(8, -1, dtype="int32"))
     function(array)
     np.testing.assert_array_equal(array.numpy(), np.arange(10, 18, dtype="int32"))
 
@@ -608,7 +608,7 @@ def test_padded_versions_and_flat_alias_execute_values_on_cpu(tmp_path):
     body.extend(ir.TensorStore(out, [index], ir.TensorLoad(alias, [index])) for index in range(6))
     result = apply("RewriteAscendBufferVersionLayout", body, [out])
     function = compile_cpu(result, tmp_path)
-    array = tvm.runtime.tensor(np.full(6, -1, dtype="int32"))
+    array = tvm_tirx.runtime.tensor(np.full(6, -1, dtype="int32"))
     function(array)
     np.testing.assert_array_equal(array.numpy(), np.array([100, 101, 102, 110, 111, 112], dtype="int32"))
 
@@ -853,6 +853,6 @@ def test_dynamic_version_shape_executes_on_cpu(size, tmp_path):
     loop = ir.For(version, integer(0), integer(2), integer(1), ir.ForKind.DEFAULT, [inner])
     result = apply("RewriteAscendBufferVersionLayout", [allocate(storage), annotation({"tl.buffer_version": {storage: 2}}), loop], [n, out])
     function = compile_cpu(result, tmp_path)
-    array = tvm.runtime.tensor(np.full((2, size), -1, dtype="int32"))
+    array = tvm_tirx.runtime.tensor(np.full((2, size), -1, dtype="int32"))
     function(size, array)
     np.testing.assert_array_equal(array.numpy(), np.arange(size, dtype="int32")[None, :] + np.array([0, 100], dtype="int32")[:, None])

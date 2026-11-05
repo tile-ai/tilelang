@@ -316,10 +316,10 @@ def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, c
 @tilelang.testing.requires_cuda
 def test_explicit_cuda_arch_source_generation_probe():
     import tilelang
-    from tilelang import tvm
+    import tvm_tirx
     from tilelang.engine.lower import lower as tilelang_lower
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_120"})
     tilelang.disable_cache()
     try:
         with target:

@@ -4,7 +4,7 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -91,8 +91,8 @@ def test_location_graph_line_directives(location_graph, emit, tmp_path):
     func = func.with_attr("global_symbol", "location_probe")
     build = tvm_ffi.get_global_func("target.build.tilelang_c_host")
     config = {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: emit}
-    with tvm.transform.PassContext(config=config):
-        source = build(tvm.IRModule({"location_probe": func}), tvm.target.Target("c")).inspect_source()
+    with tvm_tirx.transform.PassContext(config=config):
+        source = build(tvm_tirx.IRModule({"location_probe": func}), tvm_tirx.target.Target("c")).inspect_source()
     (tmp_path / "location.c").write_text(source)
     directives = [(int(line), name) for line, name in re.findall(r'^#line (\d+) "(.*)"$', source, re.M)]
     if not emit:

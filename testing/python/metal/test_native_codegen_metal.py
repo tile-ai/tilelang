@@ -4,14 +4,14 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.backend.metal import op as M
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def _allocation(name, size, dtype, scope):
-    tensor = I.Var(name, tvm.tirx.TensorType((size,), dtype, scope=scope, layout="default"))
+    tensor = I.Var(name, tvm_tirx.tirx.TensorType((size,), dtype, scope=scope, layout="default"))
     return tensor, I.Bind(tensor, I.Call("tirx.alloc_tensor", [], ty_args=[tensor.ty]))
 
 
@@ -25,12 +25,12 @@ def _thread(body, threads=32):
 
 
 def _source(params, body, tmp_path, attrs=None):
-    func = tvm.tirx.Function(params, body, ret_type=I.PrimType("void"))
+    func = tvm_tirx.tirx.Function(params, body, ret_type=I.PrimType("void"))
     func = func.with_attr("global_symbol", "kernel").with_attr("calling_conv", 2)
     for key, value in (attrs or {}).items():
         func = func.with_attr(key, value)
     source = tvm_ffi.get_global_func("target.build.tilelang_metal_without_compile")(
-        tvm.IRModule({"kernel": func}), tvm.target.Target("metal")
+        tvm_tirx.IRModule({"kernel": func}), tvm_tirx.target.Target("metal")
     ).inspect_source("metal")
     (tmp_path / "kernel.metal").write_text(source)
     return source

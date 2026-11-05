@@ -18,7 +18,7 @@ from testing.ascend._ir import (
 
 import pytest
 import tilelang
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_l0c_layout, make_ascend_nz_layout, make_ascend_major_mn_layout, make_ascend_sf_layout
 from tvm_tirx import tirx
@@ -38,7 +38,7 @@ def _module(owner, view, body):
     statements = [] if owner.same_as(view) else [_view_binding(view, owner)]
     statements += [annotation({"layout_map": {view: make_ascend_nz_layout(view)}}), body]
     block = sblock("root", statements, buffers=[owner])
-    return tvm.IRModule({"main": tirx.Function(tirx.analysis.undefined_vars(block), block)})
+    return tvm_tirx.IRModule({"main": tirx.Function(tirx.analysis.undefined_vars(block), block)})
 
 
 @pytest.mark.parametrize(
@@ -60,7 +60,7 @@ def test_canonical_allocation_rounds_only_fractal_axes(shape, dtype, padded):
     assert allocation.name == buffer.name
     assert tuple(int(x) for x in buffer.ty.shape) == shape
     assert nodes(after, ir.TensorLoad)[0].source.same_as(allocation)
-    tvm.ir.assert_structural_equal(after, transform.NormalizeAscendFractalStorage()(after))
+    tvm_tirx.ir.assert_structural_equal(after, transform.NormalizeAscendFractalStorage()(after))
 
 
 @pytest.mark.parametrize("kind", ["view", "reshape", "reinterpret"])
@@ -99,7 +99,7 @@ def test_pointer_base_is_reexpressed_in_canonical_indices(raw):
     (pointer,) = calls(after, "tl.access_ptr")
     load, extent, _ = pointer.args
     assert access_tensor(load).same_as(allocated_tensors(single_statement(after["main"].body))[0])
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert analyzer.can_prove_equal(load.indices[0], 1 if raw else row * 5)
     assert int(load.indices[1]) == 0 and int(extent) == 1
 
@@ -137,8 +137,8 @@ def test_incompatible_alias_storage_is_rejected(kind, message):
 def test_oob_copy_expands_only_a_complete_destination_axis(rows, expected_rows):
     src = tensor((31, 128), "bfloat16")
     dst = tensor((31, 64), "bfloat16", scope="shared.l1")
-    read = ir.TensorRegion(src, [tvm.ir.Range(0, rows), tvm.ir.Range(112, 176)], ir.TensorRegionType())
-    write = ir.TensorRegion(dst, [tvm.ir.Range(0, rows), tvm.ir.Range(0, 64)], ir.TensorRegionType())
+    read = ir.TensorRegion(src, [tvm_tirx.ir.Range(0, rows), tvm_tirx.ir.Range(112, 176)], ir.TensorRegionType())
+    write = ir.TensorRegion(dst, [tvm_tirx.ir.Range(0, rows), tvm_tirx.ir.Range(0, 64)], ir.TensorRegionType())
     before = _module(dst, dst, ir.Evaluate(T.copy(read, write)))
     after = transform.NormalizeAscendFractalStorage()(before)
     (copy,) = calls(after, "tl.tileop.ascend_copy")
@@ -150,7 +150,7 @@ def _make_alias_region_module(view_shape, mins, extents):
     owner = tensor((15, 15), "bfloat16", name="owner", scope="shared.l1")
     view = tensor(view_shape, "bfloat16", name="view", scope="shared.l1")
     layout = tilelang.layout.make_ascend_nz_layout(owner)
-    ranges = [tvm.ir.Range.from_min_extent(start, extent) for start, extent in zip(mins, extents)]
+    ranges = [tvm_tirx.ir.Range.from_min_extent(start, extent) for start, extent in zip(mins, extents)]
     region = ir.TensorRegion(view, ranges, ir.TensorRegionType())
     load = ir.TensorLoad(view, mins)
     region_call = ir.TensorRegion(view, ranges, ir.TensorRegionType())
@@ -165,7 +165,7 @@ def _make_alias_region_module(view_shape, mins, extents):
         ],
         buffers=[owner],
     )
-    return tvm.IRModule({"main": tirx.Function([], block)})
+    return tvm_tirx.IRModule({"main": tirx.Function([], block)})
 
 
 def test_alias_indices_and_access_regions_use_the_same_padded_storage():
@@ -177,11 +177,11 @@ def test_alias_indices_and_access_regions_use_the_same_padded_storage():
     assert owner.same_as(alias)
     assert tuple(int(x) for x in owner.ty.shape) == tuple(int(x) for x in alias.ty.shape) == (16, 16)
     assert [(int(r.begin), int(r.extent)) for r in metadata["reads"][0].region] == [(1, 2), (0, 15)]
-    tvm.ir.assert_structural_equal(metadata["reads"][0], metadata["writes"][0])
+    tvm_tirx.ir.assert_structural_equal(metadata["reads"][0], metadata["writes"][0])
     for node in [*nodes(root, ir.TensorStore), *nodes(root, ir.TensorLoad)]:
         assert tuple(int(x) for x in node.indices) == (1, 0)
         assert tuple(int(x) for x in access_tensor(node).ty.shape) == (16, 16)
-    tvm.ir.assert_structural_equal(normalized, tilelang.ascend.transform.NormalizeAscendFractalStorage()(normalized))
+    tvm_tirx.ir.assert_structural_equal(normalized, tilelang.ascend.transform.NormalizeAscendFractalStorage()(normalized))
 
 
 def test_alias_normalization_preserves_allocation_properties():
@@ -202,7 +202,7 @@ def test_alias_normalization_preserves_allocation_properties():
         ],
         buffers=[owner],
     )
-    mod = tvm.IRModule({"main": tirx.Function([], block)})
+    mod = tvm_tirx.IRModule({"main": tirx.Function([], block)})
     normalized = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
     allocation = allocated_tensors(single_statement(normalized["main"].body))[0]
     assert allocation.name == owner.name
@@ -257,7 +257,7 @@ def _make_fixpipe_module(
     annotations = tvm_ffi.convert({"dual_dst_ctl": ir.IntImm("int32", dual_dst_ctl)})
     copy = tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
         ir.PrimType("void"),
-        tvm.ir.Op.get(copy_op),
+        tvm_tirx.ir.Op.get(copy_op),
         [
             _make_region(src, src_extents if src_extents is not None else (rows, cols), 1),
             _make_region(dst, dst_extents if dst_extents is not None else (rows, cols), 2, dst_mins),
@@ -271,7 +271,7 @@ def _make_fixpipe_module(
     # native symbolic proof contract.
     body = ir.SeqStmt([*[ir.Evaluate(ir.prim.assume(condition)) for condition in assumptions], body])
     root = sblock("root", body, buffers=[src, dst], annotations={"layout_map": {src: make_ascend_l0c_layout(src)}})
-    return tvm.IRModule({"main": tirx.Function(list(params), root)})
+    return tvm_tirx.IRModule({"main": tirx.Function(list(params), root)})
 
 
 def _normalize(mod):
@@ -315,7 +315,7 @@ def test_l0c_to_ub_regions_are_padded_to_32_bytes(dst_dtype, aligned_cols, copy_
 
     assert [int(x) for x in _region_extents(copy.args[0])] == [4, aligned_cols]
     assert [int(x) for x in _region_extents(copy.args[1])] == [4, aligned_cols]
-    tvm.ir.assert_structural_equal(normalized, _normalize(normalized))
+    tvm_tirx.ir.assert_structural_equal(normalized, _normalize(normalized))
 
 
 def test_l0c_to_ub_dynamic_tail_is_rounded_up():
@@ -329,10 +329,10 @@ def test_l0c_to_ub_dynamic_tail_is_rounded_up():
     src_width = _region_extents(copy.args[0])[-1]
     dst_width = _region_extents(copy.args[1])[-1]
 
-    tvm.ir.assert_structural_equal(src_width, dst_width)
+    tvm_tirx.ir.assert_structural_equal(src_width, dst_width)
     for value in range(5):
         width = substitute(dst_width, {actual_n: ir.IntImm("int32", value)})
-        assert int(tvm.sym.Analyzer().simplify(width)) == (8 if value else 0)
+        assert int(tvm_tirx.sym.Analyzer().simplify(width)) == (8 if value else 0)
 
 
 @pytest.mark.parametrize("rows", [1, 4])
@@ -414,7 +414,7 @@ def test_l0c_to_ub_pads_the_hardware_transfer_width(dual, src_n, dst_n, expected
     copy = _find_copy(normalized)
     assert [int(x) for x in _region_extents(copy.args[0])] == [4, expected_src]
     assert [int(x) for x in _region_extents(copy.args[1])] == [2 if dual else 4, expected_dst]
-    tvm.ir.assert_structural_equal(normalized, _normalize(normalized))
+    tvm_tirx.ir.assert_structural_equal(normalized, _normalize(normalized))
 
 
 @pytest.mark.parametrize("known_unit_stride", [False, True])
@@ -465,7 +465,7 @@ def test_l0c_to_ub_unknown_capacity_keeps_the_original_region(capfd):
     capfd.readouterr()
     copy = _find_copy(_normalize(mod))
     stderr = capfd.readouterr().err
-    tvm.ir.assert_structural_equal(_region_extents(copy.args[1])[-1], n)
+    tvm_tirx.ir.assert_structural_equal(_region_extents(copy.args[1])[-1], n)
     assert "cannot prove padding" in stderr
     assert "undefined" not in stderr
 
@@ -477,7 +477,7 @@ def test_l0c_to_ub_padding_preserves_an_empty_source():
     width = _region_extents(copy.args[0])[-1]
     for value in (0, 4):
         evaluated = substitute(width, {n: ir.IntImm("int32", value)})
-        assert int(tvm.sym.Analyzer().simplify(evaluated)) == (8 if value else 0)
+        assert int(tvm_tirx.sym.Analyzer().simplify(evaluated)) == (8 if value else 0)
 
 
 @pytest.mark.parametrize("dual,src_n,dst_n,expected_n", [(False, 4, 4, 8), (False, 10, 4, 8), (True, 10, 8, 16)])
@@ -513,7 +513,7 @@ def test_l0c_to_ub_lowered_descriptor_is_aligned(dual, src_n, dst_n, expected_n)
 
                 walk_ir(mod["main"].body, visit)
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         tilelang.lower(main, target="ascend")
     assert descriptors == [(expected_n, 16, int(dual))]
 
@@ -544,8 +544,8 @@ def test_l0_copy_regions_match_instruction_transfer(
     operation = _find_copy(after)
     assert [int(x) for x in _region_extents(operation.args[0])] == expected_source
     assert [int(x) for x in _region_extents(operation.args[1])] == expected_destination
-    tvm.ir.assert_structural_equal(after, _normalize(after))
-    with tvm.target.Target("ascend"):
+    tvm_tirx.ir.assert_structural_equal(after, _normalize(after))
+    with tvm_tirx.target.Target("ascend"):
         (load,) = calls(transform.AscendLowerTileOp()(after), "tl.ascend_load_cbuf_to_ca")
     assert int(load.args[7]) == pitch
 
@@ -566,14 +566,14 @@ def test_l0_copy_normalization_preserves_dynamic_empty_transfer(empty_operand):
     )
     after = _normalize(before)
     operation = _find_copy(after)
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for value in (-1, 0, 1, 24):
         extents = [
             analyzer.simplify(substitute(_region_extents(operand)[0], {n: ir.IntImm("int32", value)})) for operand in operation.args[:2]
         ]
         expected = 0 if value <= 0 else (32 if value == 24 and empty_operand == "source" else 16)
         assert [int(x) for x in extents] == [expected, expected]
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         lowered = transform.AscendLowerTileOp()(after)
     assert calls(lowered, "tl.ascend_load_cbuf_to_ca")
     (guard,) = nodes(lowered, ir.If)

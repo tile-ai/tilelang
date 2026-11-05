@@ -18,7 +18,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 import torch
-import tvm_tirx as tvm
+import tvm_tirx
 
 tilelang.testing.set_random_seed()
 
@@ -1662,7 +1662,7 @@ def test_update_packed_fp32x2_sm100_codegen():
     """On SM100+, a 2-lane fp32 combine takes the f32x2 packed-math path
     (fadd2). Codegen-only: lower for sm_100a and inspect the source."""
     target = {"kind": "cuda", "arch": "sm_100a"}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(_contiguous_update_kernel(256, 128, T.float32, run=2), target=target)
     assert "add2" in artifact.kernel_source, artifact.kernel_source
 

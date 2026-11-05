@@ -4,7 +4,7 @@ import torch
 import re
 import pytest
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 from tilelang.backend.target import determine_target
 
@@ -60,18 +60,18 @@ def test_hoist_broadcast(dtype):
     kernel(a, b, c, d, e)
 
 
-auto_target = tvm.target.Target(determine_target("auto"))
+auto_target = tvm_tirx.target.Target(determine_target("auto"))
 
 
 def _check(original, transformed):
-    mod = tvm.IRModule.from_expr(original.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(original.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.HoistBroadcastValues()(mod)
 
-    transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
-    transformed = tvm.tirx.transform.BindTarget(auto_target)(transformed)
+    transformed = tvm_tirx.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
+    transformed = tvm_tirx.tirx.transform.BindTarget(auto_target)(transformed)
 
-    tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
 def test_transform_hoist():

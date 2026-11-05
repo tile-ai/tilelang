@@ -22,7 +22,7 @@ from testing.ascend._ir import (
 )
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tilelang.ascend import transform
 from tvm_tirx import tirx
@@ -122,7 +122,7 @@ def test_counter_updates_cover_all_protocol_cores(mixed):
         root = single_statement(body)
         fields = attribute_fields(root)
         body = attribute(fields["node"], fields["key"], fields["value"], [unit(allocate(accum), core=7), *root.body.seq], loc=root.loc)
-        before = tvm.IRModule({"main": func.with_body(body)})
+        before = tvm_tirx.IRModule({"main": func.with_body(body)})
     after = transform.ResolveCore()(before)
     writes = [task for task in _tasks(after) if any(access_tensor(store).same_as(counter) for store in nodes(task.body, ir.TensorStore))]
     assert len(writes) == 3
@@ -202,7 +202,7 @@ def test_ambiguous_cross_core_pipe_uses_available_context(context):
     pred = tensor((1,), "int32", name="pred", scope="shared.dyn")
     a = tensor((16, 16), "float32", name="A")
     l1 = tensor((16, 16), "float32", name="l1", scope="shared.l1")
-    flag = ir.Evaluate(ir.Call(tvm.ir.Op.get("tl.ascend_cross_core_set_flag"), [4, "PIPE_S", 3], ty="void"))
+    flag = ir.Evaluate(ir.Call(tvm_tirx.ir.Op.get("tl.ascend_cross_core_set_flag"), [4, "PIPE_S", 3], ty="void"))
     flag_unit = unit(flag, core=0, guard=pred[0] > 0 if context == "task-guard" else None)
     if context == "ancestor":
         i = ir.Var("i", "int32")
@@ -230,7 +230,7 @@ def test_subblock_guard_is_specialized_before_core_assignment(scope, core, assum
         scheduled = attribute(sid >= 0, "tilelang_assume", 1, scheduled)
     before = kernel(scheduled, buffers=[dst], params=[a], allocation_stage=0, allocation_core=0)
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     assert {int(attribute_fields(task)["node"]["core_mask"]) for task in _tasks(after)} == {core}
     assert len(_tasks(after)) == 1
@@ -281,7 +281,7 @@ def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
     metadata = sblock_annotations(root)["test.buffer_metadata"]
@@ -292,7 +292,7 @@ def test_subcore_buffer_expressions_preserve_definitions_and_views(field, view):
         owner = int(attribute_fields(task)["node"]["subcore"])
         (operation,) = calls(task, "tl.tileop.ascend_copy")
         result = access_tensor(operation.args[1])
-        analyzer = tvm.sym.Analyzer()
+        analyzer = tvm_tirx.sym.Analyzer()
         assert [int(analyzer.simplify(value)) for value in result.ty.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
         assert [int(analyzer.simplify(item.stride)) for item in result.ty.layout.shard] == [
             (owner + 1) * 16 if field == "strides" else 32,
@@ -349,7 +349,7 @@ def test_nested_subcore_projection_reuses_binders_and_views(field):
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
 
     after = transform.AssignCore()(before)
     assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
@@ -379,7 +379,7 @@ def test_nested_subcore_projection_reuses_binders_and_views(field):
             if field == "shape"
             else result.ty.layout.shard[0].stride
         )
-        tvm.ir.assert_structural_equal(expression, loop.var if field == "elem_offset" else loop.var + 1)
+        tvm_tirx.ir.assert_structural_equal(expression, loop.var if field == "elem_offset" else loop.var + 1)
 
 
 @pytest.mark.parametrize("field", ["shape", "strides", "elem_offset"])
@@ -415,7 +415,7 @@ def test_subcore_view_metadata_projects_without_cloning_common_storage(field, sc
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
     tasks = _tasks(after)
@@ -429,7 +429,7 @@ def test_subcore_view_metadata_projects_without_cloning_common_storage(field, sc
         (pointer,) = calls(definition, "tirx.tensor_data_ptr")
         assert pointer.args[0].same_as(storage)
         assert access_tensor(operation.args[1]).same_as(destination)
-        analyzer = tvm.sym.Analyzer()
+        analyzer = tvm_tirx.sym.Analyzer()
         assert [int(analyzer.simplify(value)) for value in result.ty.shape] == [16, (owner + 1) * 16 if field == "shape" else 16]
         assert [int(analyzer.simplify(item.stride)) for item in result.ty.layout.shard] == [
             (owner + 1) * 16 if field == "strides" else 32,
@@ -442,7 +442,7 @@ def test_subcore_view_metadata_projects_without_cloning_common_storage(field, sc
         if field != "shape":
             # Operand metadata decodes a fresh Layout with the same complete
             # input domain and mapping; tensor/storage identities stay exact.
-            tvm.ir.assert_structural_equal(sblock_annotations(root)["layout_map"][result], layout)
+            tvm_tirx.ir.assert_structural_equal(sblock_annotations(root)["layout_map"][result], layout)
     if scope == "global":
         assert any(parameter.same_as(storage) for parameter in after["main"].params)
     else:
@@ -474,7 +474,7 @@ def test_grouped_fixpipe_copies_require_matching_subcore_targets(targets, per_co
         producer = unit(attribute({}, "tl.ascend_per_core_task", 1, producer.body), core=None)
     before = kernel(seq(producer, unit(copy(ub, out), core=0)), buffers=[accum, ub], params=[out], allocation_stage=0, allocation_core=0)
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     if targets[0] != targets[1]:
         with pytest.raises((ValueError, RuntimeError), match="same sub_blockid.*separate T.Task"):
             transform.AssignCore()(before)
@@ -516,7 +516,7 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     assert not tirx.analysis.undefined_vars(after["main"].body, after["main"].params)
     tasks = _tasks(after)
@@ -530,7 +530,7 @@ def test_fixpipe_route_keeps_its_task_local_scope(route_kind):
             expected = nodes(task.body, ir.For)[0].var
         else:
             expected = access_tensor(nodes(task.body, ir.TensorStore)[0])[0]
-        tvm.ir.assert_structural_equal(branch.condition, expected == int(call_annotations(operation)["sub_blockid"]))
+        tvm_tirx.ir.assert_structural_equal(branch.condition, expected == int(call_annotations(operation)["sub_blockid"]))
 
 
 @pytest.mark.parametrize(
@@ -629,7 +629,7 @@ def test_projected_fixpipe_route_rejects_repeated_external_effects(effect, routi
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     repeated = (routing in ("dynamic", "implicit") or sid_routing) and not single_projection
     if repeated and context != "separate" and effect != "pure-call":
         with pytest.raises((ValueError, RuntimeError), match="Fixpipe routing.*external side effects.*separate T.Task"):
@@ -793,7 +793,7 @@ def test_unit_flag_pairing_between_source_copies_remains_caller_managed():
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     copies = calls(after, "tl.tileop.ascend_copy")
     assert len(copies) == 2

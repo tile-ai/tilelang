@@ -8,7 +8,7 @@ import pytest
 import torch
 import tilelang
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.cpu.language as T
 
 
@@ -54,7 +54,7 @@ def ref_matmul(A, B, trans_A, trans_B):
 
 def run_gemm_compile(M, N, K, block_M, block_N, block_K, trans_A=False, trans_B=False, dtype=T.float32):
     func = matmul(M, N, K, block_M, block_N, block_K, trans_A, trans_B, dtype=dtype)
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         kernel = tilelang.compile(func, out_idx=[2], target="c", target_host="c", execution_backend="cython")
 
     torch_dtype = torch.__getattribute__(dtype)

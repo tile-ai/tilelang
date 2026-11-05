@@ -4,7 +4,7 @@ import pytest
 
 import tilelang
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 
 
 @pytest.mark.parametrize("operation", ["copy", "add"])
@@ -18,7 +18,7 @@ def test_native_metal_bf16_copy_and_arithmetic(operation):
                 else:
                     B[i] = A[i] + T.Cast("bfloat16", 1)
 
-    target = tvm.target.Target("metal", host="c")
+    target = tvm_tirx.target.Target("metal", host="c")
     artifact = tilelang.lower(main, target=target, target_host="c", enable_host_codegen=False, enable_device_compile=False)
     source = artifact.kernel_source
     assert "device bfloat*" in source

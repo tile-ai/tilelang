@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import tilelang as tl
 import tilelang.language as T  # noqa: F401  (cases import via common)
-from tilelang import tvm
+import tvm_tirx
 from tilelang.backend.target import determine_target
 from tilelang.layout import Fragment
 from tilelang.analysis._visitor import single_loop, tensor_scope, tilelang_metadata
@@ -32,12 +32,12 @@ COST_MODELS = ("register-count", "io-aware")
 def _run_passes(prim_func, cost_model: str, target=None):
     """The exact pass prefix LayoutInference sees in the real pipeline."""
     if target is None:
-        target = tvm.target.Target(determine_target("auto"))
-    mod = tvm.IRModule({"main": prim_func})
-    with tvm.target.Target(target):
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        target = tvm_tirx.target.Target(determine_target("auto"))
+    mod = tvm_tirx.IRModule({"main": prim_func})
+    with tvm_tirx.target.Target(target):
+        mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
-        with tvm.transform.PassContext(config={"tl.layout_cost_model": cost_model}):
+        with tvm_tirx.transform.PassContext(config={"tl.layout_cost_model": cost_model}):
             mod = tl.transform.LayoutInference()(mod)
     return mod["main"]
 
@@ -79,8 +79,8 @@ def lower_and_extract_vector_widths(prim_func, target=None) -> dict[str, int]:
     emitted for the layout that won.
     """
     if target is None:
-        target = tvm.target.Target(determine_target("auto"))
-    with tvm.target.Target(target), tvm.transform.PassContext(config={"tl.layout_cost_model": "io-aware"}):
+        target = tvm_tirx.target.Target(determine_target("auto"))
+    with tvm_tirx.target.Target(target), tvm_tirx.transform.PassContext(config={"tl.layout_cost_model": "io-aware"}):
         artifact = tl.lower(prim_func, target=target, enable_device_compile=False)
     widths: dict[str, int] = {}
 
@@ -136,9 +136,9 @@ def _loop_key(for_node) -> str:
         names.append(cur.var.name)
         step = analyzer.simplify(cur.step)
         if analyzer.can_prove(step > 0):
-            extent = tvm.tirx.max(tvm.tirx.ceildiv(cur.end - cur.begin, step), 0)
+            extent = tvm_tirx.tirx.max(tvm_tirx.tirx.ceildiv(cur.end - cur.begin, step), 0)
         elif analyzer.can_prove(step < 0):
-            extent = tvm.tirx.max(tvm.tirx.ceildiv(cur.begin - cur.end, -step), 0)
+            extent = tvm_tirx.tirx.max(tvm_tirx.tirx.ceildiv(cur.begin - cur.end, -step), 0)
         else:
             raise ValueError("Cannot form a layout loop key without a proven nonzero step")
         extents.append(str(analyzer.simplify(extent)))

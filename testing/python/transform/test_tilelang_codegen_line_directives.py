@@ -13,7 +13,7 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -47,7 +47,7 @@ def _lowered_source(func, emit: bool) -> str:
     # target is not passed to lower() explicitly: it resolves through
     # determine_target("auto") reading the ambient Target("c") context.
     config = {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: emit}
-    with tvm.target.Target("c"), tvm.transform.PassContext(opt_level=3, config=config):
+    with tvm_tirx.target.Target("c"), tvm_tirx.transform.PassContext(opt_level=3, config=config):
         artifact = tilelang.lower(func)
     source = artifact.kernel_source
     assert source is not None, "CPU C codegen produced no kernel source"
@@ -92,7 +92,7 @@ def test_line_directives_disabled_by_default():
 
 def test_line_directives_disabled_when_config_absent():
     """The default path (config key entirely absent) must not emit either."""
-    with tvm.target.Target("c"), tvm.transform.PassContext(opt_level=3):
+    with tvm_tirx.target.Target("c"), tvm_tirx.transform.PassContext(opt_level=3):
         artifact = tilelang.lower(vec_add)
     assert artifact.kernel_source is not None
     assert "#line" not in artifact.kernel_source, artifact.kernel_source
@@ -103,7 +103,7 @@ def test_line_directives_cuda_source():
     """CUDA source (compile-only path, no GPU/nvcc) also maps statements."""
     target = {"kind": "cuda"}
     config = {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: True}
-    with tvm.transform.PassContext(opt_level=3, config=config), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(opt_level=3, config=config), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(vec_add_cuda, target=target)
     source = artifact.kernel_source
     assert source is not None, "CUDA codegen produced no kernel source"
@@ -117,7 +117,7 @@ def test_line_directives_hip_source():
     """HIP source (compile-only path, no GPU/hipcc) also maps statements."""
     target = {"kind": "hip"}
     config = {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: True}
-    with tvm.transform.PassContext(opt_level=3, config=config), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(opt_level=3, config=config), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(vec_add_hip, target=target)
     source = artifact.kernel_source
     assert source is not None, "HIP codegen produced no kernel source"
@@ -162,17 +162,17 @@ def test_host_and_metal_line_directives(codegen, target, emit):
     build = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
     if build is None:
         pytest.skip(f"{codegen} codegen is not built")
-    source_name = tvm.ir.SourceName(__file__)
+    source_name = tvm_tirx.ir.SourceName(__file__)
     entry_span = ir.SourceLoc(source_name, 10, 0, 10, 1)
     stmt_span = ir.SourceLoc(source_name, 20, 0, 20, 1)
     body = ir.SeqStmt([ir.Evaluate(tirx.call_extern("consume", ir.IntImm("int32", value), ty="int32"), loc=stmt_span) for value in (1, 2)])
     func = tirx.Function([], body, ir.PrimType("void"), loc=entry_span).with_attr("global_symbol", "line_kernel")
     if target == "metal":
-        func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+        func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
         func = func.with_attr("tirx.kernel_launch_params", [])
     config = {} if emit is None else {tilelang.PassConfigKey.TL_EMIT_LINE_DIRECTIVES: emit}
-    with tvm.transform.PassContext(config=config):
-        source = build(tvm.IRModule.from_expr(func), tvm.target.Target(target)).inspect_source()
+    with tvm_tirx.transform.PassContext(config=config):
+        source = build(tvm_tirx.IRModule.from_expr(func), tvm_tirx.target.Target(target)).inspect_source()
 
     directives = _line_directives(source)
     if emit:

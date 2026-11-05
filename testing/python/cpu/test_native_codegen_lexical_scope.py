@@ -4,9 +4,9 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def _scope(body):
@@ -21,7 +21,7 @@ def test_lexical_alloc_scope_is_a_real_block(backend, in_loop, nested, tmp_path)
     # CHost sees global allocations after host workspace lowering; the device
     # and CPU emitters also accept local stack allocations directly.
     scope = "global" if backend == "c_host" else "local"
-    scratch = I.Var("lexical_scratch", tvm.tirx.TensorType((4,), "float32", scope=scope, layout="default"))
+    scratch = I.Var("lexical_scratch", tvm_tirx.tirx.TensorType((4,), "float32", scope=scope, layout="default"))
     allocate = I.Bind(scratch, I.Call("tirx.alloc_tensor", [], ty_args=[scratch.ty]))
     body = _scope([allocate, I.TensorStore(scratch, [0], I.const(3, "float32"))])
     if nested:
@@ -29,12 +29,14 @@ def test_lexical_alloc_scope_is_a_real_block(backend, in_loop, nested, tmp_path)
     if in_loop:
         body = I.For(I.Var("i", "int32"), 0, 3, 1, I.ForKind.DEFAULT, [body])
     after = I.Bind(I.Var("after_scope", "int32"), I.const(9, "int32"))
-    func = tvm.tirx.Function([], [body, after], ret_type=I.PrimType("void")).with_attr("global_symbol", "kernel")
+    func = tvm_tirx.tirx.Function([], [body, after], ret_type=I.PrimType("void")).with_attr("global_symbol", "kernel")
     if backend in ("cuda", "hip", "metal"):
         func = func.with_attr("calling_conv", 2)
     suffix = "_without_compile" if backend in ("cuda", "hip", "metal") else ""
     target = "rocm" if backend == "hip" else "c" if backend == "c_host" else backend
-    module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + suffix)(tvm.IRModule({"kernel": func}), tvm.target.Target(target))
+    module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + suffix)(
+        tvm_tirx.IRModule({"kernel": func}), tvm_tirx.target.Target(target)
+    )
     code = module.inspect_source()
     (tmp_path / "kernel.txt").write_text(code)
     name = "lexical_scratch_ptr" if backend in ("c", "c_host") else "lexical_scratch"
@@ -57,7 +59,7 @@ def test_lexical_alloc_scope_is_a_real_block(backend, in_loop, nested, tmp_path)
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_cuda_lexical_scope_with_following_loop_sibling_is_not_merged(nested, tmp_path):
-    scratch = I.Var("lexical_scratch", tvm.tirx.TensorType((4,), "float32", scope="local", layout="default"))
+    scratch = I.Var("lexical_scratch", tvm_tirx.tirx.TensorType((4,), "float32", scope="local", layout="default"))
     allocate = I.Bind(scratch, I.Call("tirx.alloc_tensor", [], ty_args=[scratch.ty]))
     body = _scope([allocate, I.TensorStore(scratch, [0], I.const(3, "float32"))])
     if nested:
@@ -66,11 +68,13 @@ def test_cuda_lexical_scope_with_following_loop_sibling_is_not_merged(nested, tm
     loop = I.For(I.Var("i", "int32"), 0, 3, 1, I.ForKind.DEFAULT, [body, following])
     after = I.Bind(I.Var("after_loop", "int32"), I.const(9, "int32"))
     func = (
-        tvm.tirx.Function([], [loop, after], ret_type=I.PrimType("void")).with_attr("global_symbol", "kernel").with_attr("calling_conv", 2)
+        tvm_tirx.tirx.Function([], [loop, after], ret_type=I.PrimType("void"))
+        .with_attr("global_symbol", "kernel")
+        .with_attr("calling_conv", 2)
     )
     saved = I.save_json(func)
     module = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
-        tvm.IRModule({"kernel": func}), tvm.target.Target("cuda")
+        tvm_tirx.IRModule({"kernel": func}), tvm_tirx.target.Target("cuda")
     )
     assert I.save_json(func) == saved
     code = module.inspect_source()

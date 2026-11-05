@@ -5,9 +5,10 @@ TileLang keeps its public DSL spellings, including `import tilelang.language as 
 objects returned by those entry points use the native TIRx interfaces. Extension
 code that inspects or rewrites IR must use these interfaces as well.
 
-`tilelang.tvm` is an alias of `tvm_tirx`. It exposes the same object system and
-compiler provider; it does not install a top-level `tvm` module or recreate the
-old `PrimFunc`, `Buffer`, visitor, or registry interfaces.
+Import `tvm_tirx` directly to access the native object system and compiler
+provider. TileLang-specific exception classes are available from
+`tilelang.errors`. The old `PrimFunc`, `Buffer`, visitor, and registry interfaces
+are not recreated.
 
 ## Inspect a Kernel
 

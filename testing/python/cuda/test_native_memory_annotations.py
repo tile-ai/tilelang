@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, sym, tirx
 from tvm_tirx.tirx.layout import S, TileLayout
 
@@ -51,9 +51,9 @@ def apply(name, params, statements, tmp_path, *, config=None, attrs=None):
     before = ir.save_json(function)
     assert tirx.analysis.check_well_formed(function)
     operation = tvm_ffi.get_global_func(PREFIX + name)()
-    with tvm.transform.PassContext(config=config or {}):
-        result = operation(tvm.IRModule({"main": function}))
-        tvm.ir.assert_structural_equal(operation(result), result)
+    with tvm_tirx.transform.PassContext(config=config or {}):
+        result = operation(tvm_tirx.IRModule({"main": function}))
+        tvm_tirx.ir.assert_structural_equal(operation(result), result)
     assert ir.save_json(function) == before
     assert tirx.analysis.check_well_formed(result)
     (tmp_path / "before.json").write_text(before)
@@ -128,7 +128,7 @@ def test_l2_annotation_connects_to_host_origin_consumer(tmp_path):
     result = apply(
         "LowerL2Persistent", [source], [annotation({"l2_hit_ratio_map": {source: ir.FloatImm("float64", 0.5)}}), launch([])], tmp_path
     )
-    lowered = tvm_ffi.get_global_func(PREFIX + "LowerHopperIntrin")()(tvm.IRModule({"main": result}))["main"]
+    lowered = tvm_ffi.get_global_func(PREFIX + "LowerHopperIntrin")()(tvm_tirx.IRModule({"main": result}))["main"]
     windows = [call for call in calls(lowered, "tirx.call_packed") if call.args[0].value == "__tvm_cuda_stream_set_access_policy_window"]
     assert len(windows) == 1
     assert windows[0].args[1].op.name == "tirx.handle_add_byte_offset"
@@ -163,7 +163,7 @@ def test_barrier_initializers_share_one_fence_and_respect_election(disable, tmp_
     assert not calls(result, "tl.annotation")
     condition = nodes(result, ir.If)[0].condition
     if disable:
-        tvm.ir.assert_structural_equal(condition, thread == 0)
+        tvm_tirx.ir.assert_structural_equal(condition, thread == 0)
     else:
         assert condition.op.name == "tl.tl_shuffle_elect"
     assert all(bool(binding.value.attrs["tl.barrier_initialized"]) for binding in nodes(result, ir.Bind))

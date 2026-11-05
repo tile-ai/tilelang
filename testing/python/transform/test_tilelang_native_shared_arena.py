@@ -260,9 +260,9 @@ def test_merged_arena_executes_through_tilelang_c_emitter(reuse, tmp_path):
     )
     transformed = merge(source, reuse=reuse)
     module, code = build_own_c(transformed, tmp_path, retain_allocations=True)
-    import tvm_tirx as tvm
+    import tvm_tirx
 
-    result = tvm.runtime.tensor(np.zeros(2, dtype="int32"))
+    result = tvm_tirx.runtime.tensor(np.zeros(2, dtype="int32"))
     module(result)
     np.testing.assert_array_equal(result.numpy(), np.array([7, 9], dtype="int32"))
     assert "buf_dyn_shmem" in code and "__shared__" not in code
@@ -395,7 +395,7 @@ def test_pointer_to_integer_to_pointer_retains_backing_lifetime():
 
 def test_pointer_integer_roundtrip_preserves_c_execution(tmp_path):
     from testing.python.cpu.test_native_codegen_c import build_own_c
-    import tvm_tirx as tvm
+    import tvm_tirx
 
     original, _, _ = integer_pointer_roundtrip()
     actual = []
@@ -403,7 +403,7 @@ def test_pointer_integer_roundtrip_preserves_c_execution(tmp_path):
         output_dir = tmp_path / label
         output_dir.mkdir()
         module, _ = build_own_c(function, output_dir, retain_allocations=True)
-        output = tvm.runtime.tensor(np.zeros(1, dtype="int32"))
+        output = tvm_tirx.runtime.tensor(np.zeros(1, dtype="int32"))
         module(output)
         actual.append(int(output.numpy()[0]))
     assert actual == [7, 7]

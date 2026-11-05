@@ -44,7 +44,7 @@ def get_tensor_supply(supply_type: TensorSupplyType = TensorSupplyType.Integer):
     from .device import get_current_device
 
     def get_tensor(param: KernelParam) -> torch.Tensor:
-        # Convert tvm.DataType to torch.dtype for tensor creation
+        # Convert tvm_tirx.DataType to torch.dtype for tensor creation
         dtype: torch.dtype = param.torch_dtype()
         device = get_current_device()
 

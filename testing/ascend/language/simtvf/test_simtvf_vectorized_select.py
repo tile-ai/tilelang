@@ -1,5 +1,7 @@
 """Regression tests for vectorized Select codegen in Ascend SIMT blocks."""
 
+import tvm_tirx
+
 import pytest
 
 import tilelang
@@ -8,7 +10,7 @@ import tilelang.testing
 
 
 def _source(func, *, target, pass_configs=None):
-    with tilelang.tvm.target.Target(target), tilelang.transform.PassContext(config=pass_configs or {}):
+    with tvm_tirx.target.Target(target), tilelang.transform.PassContext(config=pass_configs or {}):
         return tilelang.lower(func, target=target).kernel_source
 
 

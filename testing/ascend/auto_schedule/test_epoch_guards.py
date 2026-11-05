@@ -1,7 +1,7 @@
 """PrepareMultiBuffer groups equivalent clocks and respects lexical scope."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tilelang.ascend import transform
 from tvm_tirx import ir, tirx
@@ -53,7 +53,9 @@ def test_guard_equivalence_preserves_storage_epochs(relation, share_clock):
         ]
         assert len(updates) == 1
         expected = loop_annotations(owner)["tl.storage_epoch_guard_map"][storage]
-        assert any(isinstance(parent, ir.If) and tvm.sym.Analyzer().can_prove_equal(parent.condition, expected) for parent in updates[0][1])
+        assert any(
+            isinstance(parent, ir.If) and tvm_tirx.sym.Analyzer().can_prove_equal(parent.condition, expected) for parent in updates[0][1]
+        )
 
 
 @pytest.mark.parametrize("case", ["inner-guard", "mutated-bound"])
@@ -81,7 +83,7 @@ def test_nested_condition_cannot_escape_into_outer_epoch(case):
     )
     after = transform.PrepareMultiBuffer()(before)
     (owner,) = [loop for loop in nodes(after, ir.For) if loop.var.same_as(i)]
-    assert tvm.sym.Analyzer().can_prove(loop_annotations(owner)["tl.storage_epoch_guard_map"][ub])
+    assert tvm_tirx.sym.Analyzer().can_prove(loop_annotations(owner)["tl.storage_epoch_guard_map"][ub])
     clock = loop_annotations(owner)["tl.multi_buffer_counter_map"][ub]
     advances = [
         (stmt, parents)
@@ -118,7 +120,7 @@ def test_lexical_epoch_guard_is_available_at_first_access(case):
     # A pure late SSA alias can be replayed using the dominating parameter q;
     # a post-write memory snapshot and a different stage cannot be replayed.
     expected = tirx.Or(p, q) if case in ("union", "late-definition") else ir.const(True, "bool")
-    assert tvm.sym.Analyzer().can_prove_equal(guard, expected)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(guard, expected)
 
 
 @pytest.mark.parametrize("mode, owners", [("auto", 1), ("counter", 1), ("auto", 2)])

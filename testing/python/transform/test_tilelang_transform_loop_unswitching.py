@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 import tilelang as tl
 import tilelang.language as T
@@ -14,8 +14,8 @@ def _apply(function, config=None):
     # alias exceptions and plain native Functions are covered independently.
     function = function.with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
     before = ir.save_json(function)
-    with tvm.transform.PassContext(config=config or {}):
-        module = tl.transform.LoopUnswitching()(tvm.IRModule({"main": function}))
+    with tvm_tirx.transform.PassContext(config=config or {}):
+        module = tl.transform.LoopUnswitching()(tvm_tirx.IRModule({"main": function}))
     assert ir.save_json(function) == before
     assert tirx.analysis.check_well_formed(module)
     return module
@@ -28,7 +28,7 @@ def _check(original, transformed):
 def _check_with_config(original, transformed, config):
     module = _apply(original, config)
     expected = transformed.with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
-    tvm.ir.assert_structural_equal(module["main"], expected, map_free_vars=True)
+    tvm_tirx.ir.assert_structural_equal(module["main"], expected, map_free_vars=True)
 
 
 def test_basic_hoist():
@@ -71,8 +71,8 @@ def test_hoist_preserves_non_unit_loop_step(backend):
     mod = _apply(before)
     target = "c" if backend == "c" else {"kind": "llvm", "mcpu": "generic"}
     executable = tirx.compile(mod, target=target)
-    result = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
-    condition = tvm.runtime.tensor(np.ones(1, dtype="int32"))
+    result = tvm_tirx.runtime.tensor(np.zeros(6, dtype="int32"))
+    condition = tvm_tirx.runtime.tensor(np.ones(1, dtype="int32"))
     executable(result, condition)
     np.testing.assert_array_equal(result.numpy(), np.array([0, 1, 0, 1, 0, 1], dtype="int32"))
 
@@ -329,7 +329,7 @@ def test_unswitch_restores_ssa_after_simplify_keeps_bind():
             if condition:
                 out[i] = 1
 
-    mod = tvm.IRModule({"main": before.with_attr("global_symbol", "main")})
+    mod = tvm_tirx.IRModule({"main": before.with_attr("global_symbol", "main")})
     mod = tirx.transform.StmtSimplify()(mod)
     mod = tl.transform.LoopUnswitching()(mod)
 
@@ -347,7 +347,7 @@ def test_unswitch_freshens_non_condition_bind_definitions():
             if enabled > 0:
                 out[i] = value
 
-    mod = tvm.IRModule({"main": before.with_attr("global_symbol", "main")})
+    mod = tvm_tirx.IRModule({"main": before.with_attr("global_symbol", "main")})
     mod = tl.transform.LoopUnswitching()(mod)
 
     assert tirx.analysis.check_well_formed(mod)

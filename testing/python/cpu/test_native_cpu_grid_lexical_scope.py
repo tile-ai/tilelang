@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_ffi.serialization import to_json_graph_str
 from tvm_tirx import ir, tirx
 
@@ -35,7 +35,9 @@ def _grid(bx, body):
 
 
 def _materialize(out, body, target):
-    function = tirx.Function([out], body).with_attr({"global_symbol": "main", "target": tvm.target.Target(target), "tirx.noalias": True})
+    function = tirx.Function([out], body).with_attr(
+        {"global_symbol": "main", "target": tvm_tirx.target.Target(target), "tirx.noalias": True}
+    )
     module = ir.IRModule.from_expr(function)
     assert tirx.analysis.check_well_formed(module)
     module = tilelang.cpu.transform.MaterializeCPUParallelGrid()(module)
@@ -49,7 +51,7 @@ def _parallel(module):
 
 
 def _execute(module, expected):
-    output = tvm.runtime.tensor(np.zeros(16, dtype="int32"))
+    output = tvm_tirx.runtime.tensor(np.zeros(16, dtype="int32"))
     # Numerical checks use the TileLang C boundary. Parallel eligibility and
     # allocation ownership are checked on the IR independently above; this
     # scalar C host oracle does not claim LLVM or parallel-runtime coverage.

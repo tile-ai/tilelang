@@ -1,4 +1,4 @@
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import tirx
 import tilelang as tl
 import tilelang.testing
@@ -39,19 +39,19 @@ def negative_index_symbolic_before(shift: T.int32, A: T.Buffer((16,), T.float32)
 
 
 def test_legalize_negative_index_scalar():
-    mod = tvm.IRModule({"main": negative_index_before})
+    mod = tvm_tirx.IRModule({"main": negative_index_before})
     transformed = tl.transform.LegalizeNegativeIndex()(mod)
     _assert_same_function(transformed["main"], negative_index_expected)
 
 
 def test_legalize_negative_index_affine_expr():
-    mod = tvm.IRModule({"main": negative_index_loop_before})
+    mod = tvm_tirx.IRModule({"main": negative_index_loop_before})
     transformed = tl.transform.LegalizeNegativeIndex()(mod)
     _assert_same_function(transformed["main"], negative_index_loop_expected)
 
 
 def test_legalize_negative_index_symbolic_passthrough():
-    mod = tvm.IRModule({"main": negative_index_symbolic_before})
+    mod = tvm_tirx.IRModule({"main": negative_index_symbolic_before})
     transformed = tl.transform.LegalizeNegativeIndex()(mod)
     _assert_same_function(transformed["main"], negative_index_symbolic_before)
 
@@ -61,7 +61,7 @@ def _assert_same_function(actual, expected):
     # the complete signatures and bodies so identity mapping stays scoped.
     assert tirx.analysis.check_well_formed(actual)
     assert tirx.analysis.check_well_formed(expected)
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         actual.with_attr("global_symbol", "main"),
         expected.with_attr("global_symbol", "main"),
     )

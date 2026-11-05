@@ -8,8 +8,8 @@ TileLang uses a matched set of three distributions:
 
 The source manifest fixes both dependency versions. A normal upstream TIRx wheel
 has no TileLang compiler registrations and cannot replace the matched provider.
-The legacy `tvm` package is not used. `tilelang.tvm` refers to `tvm_tirx`;
-compiler extensions use its native `Function`, typed tensor and statement APIs.
+Compiler extensions import `tvm_tirx` directly and use its native `Function`,
+typed tensor and statement APIs.
 
 ## Installing with pip
 

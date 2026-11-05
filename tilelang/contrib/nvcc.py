@@ -13,7 +13,7 @@ from tilelang.env import CUDA_HOME, CUTLASS_INCLUDE_DIR, TILELANG_TEMPLATE_PATH,
 import shutil
 import tempfile
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.target import Target
 from tvm_tirx.ir.transform import PassContext
 
@@ -120,7 +120,7 @@ def compile_cuda(code, target_format="ptx", arch=None, options=None, path_target
     """
     target_code = None
     if arch is None:
-        # If None, then it will use `tvm.target.Target.current().arch`.
+        # If None, then it will use `tvm_tirx.target.Target.current().arch`.
         target_arch, target_code = get_target_arch_and_code(Target.current(allow_none=True))
         gencode_code = format_target_code_for_gencode(target_code)
         if gencode_code is None:
@@ -473,7 +473,7 @@ def get_target_compute_version(target=None):
 
     Parameters
     ----------
-    target : tvm.target.Target, optional
+    target : tvm_tirx.target.Target, optional
         The compilation target
 
     Returns
@@ -498,8 +498,8 @@ def get_target_compute_version(target=None):
             raise ValueError(f"Unsupported arch: {arch}")
 
     # 3. GPU compute version
-    if tvm.cuda(0).exist:
-        return tvm.cuda(0).compute_version
+    if tvm_tirx.cuda(0).exist:
+        return tvm_tirx.cuda(0).compute_version
 
     raise ValueError(
         "No CUDA architecture was specified or GPU detected. Specify it with a target config such as {'kind': 'cuda', 'arch': 'sm_90'}."
@@ -579,13 +579,13 @@ def have_tensorcore(compute_version=None, target=None):
     compute_version : str, optional
         compute capability of a GPU (e.g. "7.0").
 
-    target : tvm.target.Target, optional
+    target : tvm_tirx.target.Target, optional
         The compilation target, will be used to determine arch if compute_version
         isn't specified.
     """
     if compute_version is None:
-        if tvm.cuda(0).exist:
-            compute_version = tvm.cuda(0).compute_version
+        if tvm_tirx.cuda(0).exist:
+            compute_version = tvm_tirx.cuda(0).compute_version
         else:
             if target is None or "arch" not in target.attrs:
                 warnings.warn(
@@ -647,7 +647,7 @@ def have_tma(target):
 
     Parameters
     ----------
-    target : tvm.target.Target
+    target : tvm_tirx.target.Target
         The compilation target
     """
     if target.kind.name != "cuda":

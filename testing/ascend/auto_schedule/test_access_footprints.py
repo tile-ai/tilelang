@@ -7,7 +7,7 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tilelang.language._native import decl_buffer
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs, _make_cyclic_scalar_program
@@ -18,7 +18,7 @@ def _physical_alias_pair(program, left_name, right_name):
     bindings = nodes(program, ir.Bind)
 
     def named_tensor(name):
-        found = [binding.var for binding in bindings if binding.var.name == name and isinstance(binding.var.ty, tvm.tirx.TensorType)]
+        found = [binding.var for binding in bindings if binding.var.name == name and isinstance(binding.var.ty, tvm_tirx.tirx.TensorType)]
         assert len(found) == 1, (name, found)
         return found[0]
 
@@ -45,9 +45,9 @@ def _physical_alias_pair(program, left_name, right_name):
 def _infer_fractal_layouts(program):
     """Prepare the physical layouts expected at the scheduling boundary."""
     tilelang.ascend.register_backend()
-    mod = tvm.IRModule({"main": program.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tvm_tirx.IRModule({"main": program.with_attr("target", tvm_tirx.target.Target("ascend"))})
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
         mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
     return mod["main"]
@@ -330,7 +330,7 @@ def _make_mixed_opaque_access_program():
             b[0] = y[0]
             out_b[0] = b[0]
             with T.Task():
-                T.evaluate(tvm.tirx.call_extern("consume", T.access_ptr(a[0], "r", extent=8), ty="int32"))
+                T.evaluate(tvm_tirx.tirx.call_extern("consume", T.access_ptr(a[0], "r", extent=8), ty="int32"))
                 a[0] = z[0]
             out_a[0] = a[0]
 
@@ -401,7 +401,7 @@ def _make_cross_row_access_ptr_program():
                         a[1, j] = x[k]
                 with T.Task():
                     T.evaluate(
-                        tvm.tirx.call_extern(
+                        tvm_tirx.tirx.call_extern(
                             "consume",
                             T.access_ptr(a[1, 4], "r", extent=8),
                             ty="int32",
@@ -667,9 +667,9 @@ def test_nz_column_slice_keeps_unmodified_rows_live(explicit, overwrite_rows):
                 else:
                     T.copy(a[:64, 16:32], dst)
 
-    mod = tvm.IRModule({"main": main.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tvm_tirx.IRModule({"main": main.with_attr("target", tvm_tirx.target.Target("ascend"))})
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
         mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
         mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
@@ -699,9 +699,9 @@ def test_nd2nz_scatter_keeps_partial_vector_tail_live(cols):
                 T.fill(a[:16, :], T.float32(300))
                 T.copy(a[:16, :], dst[:16, :])
 
-    mod = tvm.IRModule({"main": main.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tvm_tirx.IRModule({"main": main.with_attr("target", tvm_tirx.target.Target("ascend"))})
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
         mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
         mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
@@ -727,8 +727,8 @@ def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility():
                     T.simd.vsts(other[0, 0], T.simd.vdup(T.float32(200), "float32"))
                 out[0] = other[0, 0]
 
-    mod = tvm.IRModule({"main": _infer_fractal_layouts(main)})
-    with tvm.target.Target("ascend"):
+    mod = tvm_tirx.IRModule({"main": _infer_fractal_layouts(main)})
+    with tvm_tirx.target.Target("ascend"):
         mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
     assert ("dst", "src") in _insert_sync_alias_pairs(mod["main"])
 

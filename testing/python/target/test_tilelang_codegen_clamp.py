@@ -4,7 +4,7 @@ import tvm_ffi
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.engine import lower
 
 
@@ -58,12 +58,12 @@ def test_clamp_backend_codegen(target_config, build_func):
         # Exercise C++ source generation without requiring the CuTeDSL Python
         # runtime. Both CUDA variants consume the lowered native device
         # Function; the owning emitter implements its clamp semantics.
-        cuda_target = tvm.target.Target({"kind": "cuda", "arch": target_config["arch"]})
+        cuda_target = tvm_tirx.target.Target({"kind": "cuda", "arch": target_config["arch"]})
         with cuda_target:
             artifact = lower(_clamp_kernel(), target=cuda_target)
         source = tvm_ffi.get_global_func(build_func)(artifact.device_mod, target).inspect_source()
     else:
-        target = tvm.target.Target(target_config)
+        target = tvm_tirx.target.Target(target_config)
         with target:
             source = lower(_clamp_kernel(), target=target).kernel_source
     if target_config["kind"] in ("cuda", "c"):
@@ -83,8 +83,10 @@ def test_clamp_fallback_registration(kind):
     from tvm_tirx import ir, tirx
 
     x = T.Var("x", "float32x4")
-    func = tirx.Function([x], ir.Evaluate(T.clamp(x, -1.0, 1.0)), ret_type=ir.PrimType("void")).with_attr("target", tvm.target.Target(kind))
-    mod = tilelang.transform.LowerIntrin()(tvm.IRModule({"main": func}))
+    func = tirx.Function([x], ir.Evaluate(T.clamp(x, -1.0, 1.0)), ret_type=ir.PrimType("void")).with_attr(
+        "target", tvm_tirx.target.Target(kind)
+    )
+    mod = tilelang.transform.LowerIntrin()(tvm_tirx.IRModule({"main": func}))
     calls = []
     tvm_ffi.structural_walk(mod["main"].body, (ir.Call, calls.append), order="post")
     assert not any(call.op.same_as(ir.Op.get("tl.clamp")) for call in calls)
@@ -95,7 +97,7 @@ def test_clamp_fallback_registration(kind):
 def test_clamp_cpu_templates(dtype):
     import torch
 
-    target = tvm.target.Target("c")
+    target = tvm_tirx.target.Target("c")
     with target:
         kernel = tilelang.compile(_clamp_kernel(dtype), target=target, target_host="c", execution_backend="cython")
     a = torch.tensor([float("nan"), -2.0, 0.5, 2.0], dtype=getattr(torch, dtype)).repeat(32)
@@ -119,7 +121,7 @@ def test_clamp_cpu_single_evaluation():
                 T.atomic_add(A[2], 0.25, return_prev=True),
             )
 
-    target = tvm.target.Target("c")
+    target = tvm_tirx.target.Target("c")
     with target:
         kernel = tilelang.compile(main, target=target, target_host="c", execution_backend="cython")
     a = torch.tensor([0.0, -1.0, 1.0])

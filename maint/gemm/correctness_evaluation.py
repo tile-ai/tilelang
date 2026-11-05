@@ -1,6 +1,5 @@
 # pytest correctness_evaluation.py -n 32
 import pytest
-from tilelang import tvm as tvm
 import tilelang.testing
 from tilelang import language as T
 import torch

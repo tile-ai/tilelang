@@ -1,6 +1,7 @@
 import tilelang
 import tilelang.testing
-from tilelang import language as T, tvm
+import tvm_tirx
+from tilelang import language as T
 
 
 @tilelang.jit
@@ -46,7 +47,7 @@ def _get_device_kernel_script(detect_inplace: bool) -> str:
     pass_configs = {}
     if detect_inplace:
         pass_configs[tilelang.PassConfigKey.TL_STORAGE_REWRITE_DETECT_INPLACE] = True
-    with tvm.transform.PassContext(config=pass_configs):
+    with tvm_tirx.transform.PassContext(config=pass_configs):
         artifact = tilelang.lower(kernel.get_tir(), target="cuda")
     return artifact.kernel_source
 

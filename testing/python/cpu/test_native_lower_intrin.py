@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.script import tirx as T
 
 from testing.python.cpu.test_native_codegen_c import build_own_c
@@ -18,7 +18,7 @@ def test_floor_divmod_integer_boundaries(dtype, divisor, tmp_path):
     n = len(numerators)
 
     def select_divisor(value):
-        return value if divisor is None else tvm.ir.const(divisor, dtype)
+        return value if divisor is None else tvm_tirx.ir.const(divisor, dtype)
 
     @T.function
     def divide(
@@ -31,15 +31,15 @@ def test_floor_divmod_integer_boundaries(dtype, divisor, tmp_path):
             quotients[i] = T.floordiv(source[i], select_divisor(divisors[i]))
             remainders[i] = T.floormod(source[i], select_divisor(divisors[i]))
 
-    target = tvm.target.Target("c", host="c")
+    target = tvm_tirx.target.Target("c", host="c")
     original = divide.with_attr("target", target).with_attr("global_symbol", "main")
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": original}))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": original}))
     (tmp_path / "tilelang_lowered.py").write_text(lowered.script())
     assert "floordiv" not in lowered.script() and "floormod" not in lowered.script()
     module, _ = build_own_c(lowered["main"], tmp_path)
-    quotient = tvm.runtime.tensor(np.zeros_like(numerators))
-    remainder = tvm.runtime.tensor(np.zeros_like(numerators))
-    module(tvm.runtime.tensor(numerators), tvm.runtime.tensor(denominators), quotient, remainder)
+    quotient = tvm_tirx.runtime.tensor(np.zeros_like(numerators))
+    remainder = tvm_tirx.runtime.tensor(np.zeros_like(numerators))
+    module(tvm_tirx.runtime.tensor(numerators), tvm_tirx.runtime.tensor(denominators), quotient, remainder)
 
     # Use Python integers, not a native-width reference that could share an
     # intermediate overflow. No denominator is zero or the signed min / -1.
@@ -51,41 +51,41 @@ def test_floor_divmod_integer_boundaries(dtype, divisor, tmp_path):
 
 
 def test_lower_intrin_requires_explicit_target():
-    function = tvm.tirx.Function([], [], ret_type=tvm.ir.PrimType("void"))
+    function = tvm_tirx.tirx.Function([], [], ret_type=tvm_tirx.ir.PrimType("void"))
     with pytest.raises(ValueError, match="target attribute"):
-        tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": function}))
+        tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": function}))
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_isfinite_default_lowering_preserves_nan_and_infinity(dtype, tmp_path):
     def isfinite(value):
-        return tvm.ir.Call("tl.isfinite", [value])
+        return tvm_tirx.ir.Call("tl.isfinite", [value])
 
     @T.function
     def finite(source: T.Tensor((5,), dtype), output: T.Tensor((5,), "bool")):
         for i in range(5):
             output[i] = isfinite(source[i])
 
-    target = tvm.target.Target("c", host="c")
+    target = tvm_tirx.target.Target("c", host="c")
     function = finite.with_attr("target", target).with_attr("global_symbol", "main")
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": function}))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": function}))
     assert "tl.isfinite" not in lowered.script()
     module, _ = build_own_c(lowered["main"], tmp_path)
     values = np.array([-np.inf, np.inf, np.nan, 0, -1.25], dtype=dtype)
-    output = tvm.runtime.tensor(np.zeros(5, dtype="bool"))
-    module(tvm.runtime.tensor(values), output)
+    output = tvm_tirx.runtime.tensor(np.zeros(5, dtype="bool"))
+    module(tvm_tirx.runtime.tensor(values), output)
     np.testing.assert_array_equal(output.numpy(), np.isfinite(values))
 
 
 def test_explicit_isfinite_intrinsic_rejects_non_float_input():
     with pytest.raises(TypeError, match="requires a floating-point value"):
-        tvm.ir.Call("tl.isfinite", [tvm.ir.Var("x", "int32")])
+        tvm_tirx.ir.Call("tl.isfinite", [tvm_tirx.ir.Var("x", "int32")])
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_scalar_c_math_lowering(dtype, tmp_path):
     def constant(value):
-        return tvm.ir.const(value, dtype)
+        return tvm_tirx.ir.const(value, dtype)
 
     @T.function
     def math(
@@ -101,24 +101,24 @@ def test_scalar_c_math_lowering(dtype, tmp_path):
             remainder[i] = T.fmod(source[i], constant(2))
             multiply_add[i] = T.fma(source[i], constant(2), constant(0.5))
 
-    target = tvm.target.Target("c", host="c")
+    target = tvm_tirx.target.Target("c", host="c")
     function = math.with_attr("target", target).with_attr("global_symbol", "main")
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": function}))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": function}))
     module, source = build_own_c(lowered["main"], tmp_path)
     suffix = "f" if dtype == "float32" else ""
     for name in ("fabs", "exp2", "fmod", "fma"):
         assert name + suffix + "(" in source
     values = np.arange(-3, 4, dtype=dtype)
-    outputs = [tvm.runtime.tensor(np.zeros_like(values)) for _ in range(4)]
-    module(tvm.runtime.tensor(values), *outputs)
+    outputs = [tvm_tirx.runtime.tensor(np.zeros_like(values)) for _ in range(4)]
+    module(tvm_tirx.runtime.tensor(values), *outputs)
     references = [np.abs(values), np.exp2(values), np.fmod(values, 2), values * 2 + 0.5]
     for actual, reference in zip(outputs, references):
         np.testing.assert_array_equal(actual.numpy(), reference)
 
 
 def test_c_intrinsic_rules_do_not_enable_implicit_fma():
-    x, y, z = [tvm.ir.Var(name, "float32") for name in ("x", "y", "z")]
-    function = tvm.tirx.Function([x, y, z], [tvm.ir.Evaluate(x * y + z)], ret_type=tvm.ir.PrimType("void"))
-    function = function.with_attr("target", tvm.target.Target("c"))
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": function}))
-    assert isinstance(lowered["main"].body.seq[0].value, tvm.ir.prim.Add)
+    x, y, z = [tvm_tirx.ir.Var(name, "float32") for name in ("x", "y", "z")]
+    function = tvm_tirx.tirx.Function([x, y, z], [tvm_tirx.ir.Evaluate(x * y + z)], ret_type=tvm_tirx.ir.PrimType("void"))
+    function = function.with_attr("target", tvm_tirx.target.Target("c"))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": function}))
+    assert isinstance(lowered["main"].body.seq[0].value, tvm_tirx.ir.prim.Add)

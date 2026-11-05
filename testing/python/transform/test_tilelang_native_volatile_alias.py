@@ -4,7 +4,7 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.target import Target
 
@@ -56,7 +56,9 @@ def test_volatile_access_after_offset_alias(backend, target, format, indirect, m
     func = _kernel(indirect=indirect, merged=merged)
     assert tirx.analysis.check_well_formed(func)
     (tmp_path / "input.py").write_text(func.script())
-    module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + "_without_compile")(tvm.IRModule({"main": func}), Target(target))
+    module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + "_without_compile")(
+        tvm_tirx.IRModule({"main": func}), Target(target)
+    )
     source = module.inspect_source(format)
     (tmp_path / ("kernel." + format)).write_text(source)
     output_line = next(line for line in source.splitlines() if re.search(r"output_ptr\[0\]\s*=", line))
@@ -69,7 +71,9 @@ def test_volatile_access_after_offset_alias(backend, target, format, indirect, m
 @pytest.mark.parametrize("merged", [False, True])
 def test_false_volatile_attribute_is_not_treated_as_true(backend, target, format, merged, tmp_path):
     func = _kernel(indirect=False, merged=merged, qualifier=False)
-    module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + "_without_compile")(tvm.IRModule({"main": func}), Target(target))
+    module = tvm_ffi.get_global_func("target.build.tilelang_" + backend + "_without_compile")(
+        tvm_tirx.IRModule({"main": func}), Target(target)
+    )
     source = module.inspect_source(format)
     (tmp_path / ("kernel." + format)).write_text(source)
     output_line = next(line for line in source.splitlines() if re.search(r"output_ptr\[0\]\s*=", line))

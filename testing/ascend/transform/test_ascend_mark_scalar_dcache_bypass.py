@@ -6,7 +6,7 @@ from tvm_tirx import ir
 from testing.ascend._ir import access_tensor, sblock, tensor
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import tirx
 from testing.ascend._ir import calls, nodes
@@ -24,9 +24,9 @@ def test_only_writable_global_storage_bypasses_dcache(writer):
         op = "tl.ascend_copy_ubuf_to_gm" if writer == "mte3" else "tl.ascend_copy_matrix_cc_to_gm"
         # The pass runs on lowered DMA intrinsics. The destination access_ptr
         # is the write footprint; transfer geometry is irrelevant here.
-        write = ir.Evaluate(ir.Call(tvm.ir.Op.get(op), [T.access_ptr(writable, "w"), T.access_ptr(local, "r")], ty="void"))
+        write = ir.Evaluate(ir.Call(tvm_tirx.ir.Op.get(op), [T.access_ptr(writable, "w"), T.access_ptr(local, "r")], ty="void"))
     # Put the read first: writability is a property of the entire function.
-    before = tvm.IRModule({"main": tirx.Function([writable, readonly], ir.SeqStmt([read, write]))})
+    before = tvm_tirx.IRModule({"main": tirx.Function([writable, readonly], ir.SeqStmt([read, write]))})
     after = transform.MarkScalarDcacheBypass()(before)
     (bypass,) = calls(after, "tl.ascend_read_gm_bypass_dcache")
     assert access_tensor(bypass.args[0].args[0]).same_as(writable)
@@ -42,6 +42,6 @@ def test_only_writable_global_storage_bypasses_dcache(writer):
 def test_vf_memory_operations_keep_their_own_access_path(kind):
     buffer = tensor((64,), "float32", name="buffer")
     body = ir.TensorStore(buffer, [0], buffer[0] + ir.const(1, "float32"))
-    before = tvm.IRModule({"main": tirx.Function([buffer], sblock(kind, body))})
+    before = tvm_tirx.IRModule({"main": tirx.Function([buffer], sblock(kind, body))})
     after = transform.MarkScalarDcacheBypass()(before)
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)

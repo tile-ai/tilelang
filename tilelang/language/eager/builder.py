@@ -16,7 +16,7 @@ from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, muta
 from .utils import construct_strides
 from tilelang.language.frame import clear_let_values, register_let_value
 from tilelang.language._native import side_effect
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tilelang.language._native import Buffer, tensor_strides, dtype_of
 from tilelang.language import _native as tirx
@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 def _is_runtime_parameter_annotation(value):
     """Recognize source and native parameter annotations before meta values."""
-    if isinstance(value, tvm.ir.Type):
-        if not isinstance(value, (tvm.ir.PrimType, tvm.ir.PtrType, tvm.tirx.TensorType)):
+    if isinstance(value, tvm_tirx.ir.Type):
+        if not isinstance(value, (tvm_tirx.ir.PrimType, tvm_tirx.ir.PtrType, tvm_tirx.tirx.TensorType)):
             raise TypeError(f"A native TileLang runtime parameter requires PrimType, PtrType or TensorType, got {type(value).__name__}")
         return True
     return isinstance(value, (Buffer, Var))
@@ -220,7 +220,7 @@ class PointerRef(Ref):
     the resulting IR contains TensorLoad/Store and typed reinterpret calls.
     """
 
-    pointer_type: tvm.ir.PtrType
+    pointer_type: tvm_tirx.ir.PtrType
     ir_builder: IRBuilder
 
     @property
@@ -231,16 +231,16 @@ class PointerRef(Ref):
         value = unwrap_expr(value)
         if isinstance(value, int) and not isinstance(value, bool):
             address = _native.const(value, "uint64")
-        elif isinstance(value, tvm.ir.Expr) and isinstance(value.ty, tvm.ir.PtrType):
+        elif isinstance(value, tvm_tirx.ir.Expr) and isinstance(value.ty, tvm_tirx.ir.PtrType):
             if value.ty.scope != self.pointer_type.scope:
                 raise TypeError("A mutable handle assignment must preserve its pointer address space")
-            address = tvm.tirx.reinterpret(value, ty=tvm.ir.PrimType("uint64"), loc=_native._loc())
+            address = tvm_tirx.tirx.reinterpret(value, ty=tvm_tirx.ir.PrimType("uint64"), loc=_native._loc())
         else:
             raise TypeError("A mutable handle requires a pointer expression or an integer address")
         tirx.buffer_store(self.buffer, address, self.bufload.indices)
 
     def load(self):
-        value = tvm.tirx.reinterpret(self.bufload, ty=self.pointer_type, loc=_native._loc())
+        value = tvm_tirx.tirx.reinterpret(self.bufload, ty=self.pointer_type, loc=_native._loc())
         # Construction-only provenance. Compiler consumers use the actual
         # PtrType on value and never rely on this Python attribute.
         value._tilelang_pointer_ref = self
@@ -393,10 +393,10 @@ class Builder(BaseBuilder):
     @property
     def current_location(self):
         if not self._spans_enabled or self.current_line <= 0:
-            return tvm.ir.UnknownLoc()
-        loc = tvm.ir.SourceLoc(tvm.ir.SourceName(self.current_file), self.current_line, 0, self.current_line, 0)
+            return tvm_tirx.ir.UnknownLoc()
+        loc = tvm_tirx.ir.SourceLoc(tvm_tirx.ir.SourceName(self.current_file), self.current_line, 0, self.current_line, 0)
         for file, line, _ in self.macro_fileline_stack:
-            loc = tvm.ir.CallSiteLoc(loc, tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0))
+            loc = tvm_tirx.ir.CallSiteLoc(loc, tvm_tirx.ir.SourceLoc(tvm_tirx.ir.SourceName(file), line, 0, line, 0))
         return loc
 
     def get(self) -> PrimFunc:
@@ -417,7 +417,7 @@ class Builder(BaseBuilder):
         func = _native.attach_size_var_defaults(func)
         if self._spans_enabled and self._span_first_fileline is not None:
             file, line = self._span_first_fileline
-            self.ir_builder._attach_loc(func, tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0))
+            self.ir_builder._attach_loc(func, tvm_tirx.ir.SourceLoc(tvm_tirx.ir.SourceName(file), line, 0, line, 0))
         return func
 
     def match_parameter_buffer(self, value, spec):
@@ -428,7 +428,7 @@ class Builder(BaseBuilder):
         temporary handle is dropped when the final parameter order is rebuilt;
         no extra public argument or detached shape-variable table is created.
         """
-        if not isinstance(value, Var) or not isinstance(value.ty, tvm.ir.PtrType):
+        if not isinstance(value, Var) or not isinstance(value.ty, tvm_tirx.ir.PtrType):
             return None
         if value in self._matched_parameters:
             previous = self._matched_parameters[value]
@@ -461,8 +461,8 @@ class Builder(BaseBuilder):
         tensor parameters, entry Bind statements and pointer-equality checks
         carry the entire runtime contract through serialization and lowering.
         """
-        ir = tvm.ir
-        native = tvm.tirx
+        ir = tvm_tirx.ir
+        native = tvm_tirx.tirx
         used = set()
         for root in (func.body, func.attrs):
             if root is not None:
@@ -547,7 +547,7 @@ class Builder(BaseBuilder):
         if not self._spans_enabled or self.current_line <= 0:
             return buffer
 
-        if isinstance(buffer.loc, tvm.ir.UnknownLoc):
+        if isinstance(buffer.loc, tvm_tirx.ir.UnknownLoc):
             self.ir_builder._attach_loc(buffer, self.current_location)
         return buffer
 
@@ -576,9 +576,9 @@ class Builder(BaseBuilder):
             stmts = frame.stmts
         except Exception:
             return
-        span = tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0)
+        span = tvm_tirx.ir.SourceLoc(tvm_tirx.ir.SourceName(file), line, 0, line, 0)
         for i in range(start, len(stmts)):
-            if isinstance(stmts[i].loc, tvm.ir.UnknownLoc):
+            if isinstance(stmts[i].loc, tvm_tirx.ir.UnknownLoc):
                 self.ir_builder._attach_loc(stmts[i], span)
 
     def _stamp_new_parent_stmts(self, parent, start: int, file: str, line: int):
@@ -599,14 +599,14 @@ class Builder(BaseBuilder):
             return
         if len(stmts) <= start:
             return
-        span = tvm.ir.SourceLoc(tvm.ir.SourceName(file), line, 0, line, 0)
+        span = tvm_tirx.ir.SourceLoc(tvm_tirx.ir.SourceName(file), line, 0, line, 0)
 
         def stamp(node):
-            if isinstance(node, tvm.ir.Stmt) and isinstance(node.loc, tvm.ir.UnknownLoc):
+            if isinstance(node, tvm_tirx.ir.Stmt) and isinstance(node.loc, tvm_tirx.ir.UnknownLoc):
                 self.ir_builder._attach_loc(node, span)
 
         for i in range(start, len(stmts)):
-            tvm_ffi.structural_walk(stmts[i], (tvm.ir.Stmt, stamp), order="post")
+            tvm_ffi.structural_walk(stmts[i], (tvm_tirx.ir.Stmt, stamp), order="post")
 
     def find_frame_idx(self, frame: type | tuple[type, ...], start=0) -> int | None:
         for idx in reversed(range(start, len(self.frames))):
@@ -694,7 +694,7 @@ class Builder(BaseBuilder):
             self.enter_frame(val)
         elif isinstance(val, tirx.AlreadyEmitted):
             return val
-        elif isinstance(val, (PrimExpr, tvm.ir.Call, tvm.ir.Return)):
+        elif isinstance(val, (PrimExpr, tvm_tirx.ir.Call, tvm_tirx.ir.Return)):
             # A native Call can carry MissingType until the owning builder
             # infers its result. In particular, handle-returning barrier calls
             # must still become statements; a type predicate must not discard
@@ -990,7 +990,7 @@ class Builder(BaseBuilder):
             # Regions are native indexing expressions. They carry the tensor
             # and slice directly and have no separately nameable definition.
             return value
-        elif isinstance(value, tvm.ir.Expr):
+        elif isinstance(value, tvm_tirx.ir.Expr):
             # Native calls may return a tensor, tuple or function. Every such
             # result needs a typed Bind before consumers use its variable;
             # primitive-expression membership alone misses tensor views.
@@ -1315,10 +1315,10 @@ _T = TypeVar("_T")
 if TYPE_CHECKING:
 
     class PrimFunc(Generic[_P, _T], _native.Function):
-        params: list[tvm.ir.Var | Buffer]
-        body: tvm.ir.Stmt
-        ret_type: tvm.ir.Type
-        attrs: tvm.ir.DictAttrs | None
+        params: list[tvm_tirx.ir.Var | Buffer]
+        body: tvm_tirx.ir.Stmt
+        ret_type: tvm_tirx.ir.Type
+        attrs: tvm_tirx.ir.DictAttrs | None
         span: Span | None
         ir_gen: IRGenerator[_P, _T] | None
         orig_func: Callable[_P, _T] | None
@@ -1571,7 +1571,7 @@ class TirTemplate(Generic[_P, _T]):
 
     name: str
     prim_func: PrimFunc[_P, _T]
-    matcher: dict[Var, tuple[tvm.ir.Var, str, int, str]] | None = None
+    matcher: dict[Var, tuple[tvm_tirx.ir.Var, str, int, str]] | None = None
     constexprs: set[Var] = None
     is_lazy_style: bool = False  # True if from lazy-style (returns PrimFunc directly)
     ir_gen: IRGenerator[_P, _T] | None = None
@@ -1904,7 +1904,7 @@ class JITFunc(Generic[_P, _T]):
     orig_func: Callable[_P, _T]
     signature: inspect.Signature
     arg_names: list[str]
-    tensor_args: dict[str, Buffer | Var | tvm.ir.Type]
+    tensor_args: dict[str, Buffer | Var | tvm_tirx.ir.Type]
     tensor_args_defaults: dict[str, Any]
     ir_gen: IRGenerator[_P, _T]
     mode: Literal["auto", "lazy", "eager"] = "auto"
@@ -2039,8 +2039,8 @@ def substitute_primfunc(prim_func, vmap):
     arguments nor renumbers output indices. Eager JIT uses AST reconstruction
     in ``TirTemplate.get_tir`` rather than this directly callable helper.
     """
-    ir = tvm.ir
-    if not isinstance(prim_func, tvm.tirx.Function):
+    ir = tvm_tirx.ir
+    if not isinstance(prim_func, tvm_tirx.tirx.Function):
         raise TypeError("substitute_primfunc expects a native Function")
     replacements = {}
     parameters = set(prim_func.params)
@@ -2090,7 +2090,7 @@ def substitute_primfunc(prim_func, vmap):
         return analyzer.simplify(mapped) if ir.is_prim_expr(mapped) else mapped
 
     result = tvm_ffi.structural_mutate(prim_func, [(ir.Var, replace_variable), (ir.Expr, replace_expression)])
-    tvm.tirx.analysis.check_well_formed(result)
+    tvm_tirx.tirx.analysis.check_well_formed(result)
     return result
 
 
@@ -2114,7 +2114,7 @@ def prim_func(func: Callable[_P, _T] = None, *, eager_jit: bool = False, private
             # annotations: Expr.__call__ builds an IR call, including on pointer
             # Vars returned by T.handle(...), and must not run as a factory.
             # Typing generics such as Optional[int] cannot be instantiated either.
-            if not isinstance(annot[k], (type, tvm.ir.Expr, tvm.ir.Type)) and callable(annot[k]) and get_origin(annot[k]) is None:
+            if not isinstance(annot[k], (type, tvm_tirx.ir.Expr, tvm_tirx.ir.Type)) and callable(annot[k]) and get_origin(annot[k]) is None:
                 annot[k] = annot[k]()
 
         if eager_jit:

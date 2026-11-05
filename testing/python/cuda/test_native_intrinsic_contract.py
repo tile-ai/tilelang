@@ -1,10 +1,10 @@
 """Check typed scalar calls and expression-bearing annotation payloads."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def test_native_result_inference_and_explicit_native_type():

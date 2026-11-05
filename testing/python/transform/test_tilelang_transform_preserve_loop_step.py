@@ -5,7 +5,7 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 
 import tilelang as tl
-from tilelang import tvm
+import tvm_tirx
 from tilelang.testing.packed import compile_packed_function
 
 
@@ -25,10 +25,10 @@ def test_lower_opaque_block_preserves_non_unit_loop_step():
         [loop],
     ).with_attr("global_symbol", "main")
 
-    mod = tl.transform.LowerOpaqueBlock()(tvm.IRModule.from_expr(before))
+    mod = tl.transform.LowerOpaqueBlock()(tvm_tirx.IRModule.from_expr(before))
     executable = compile_packed_function(mod["main"])
 
-    output = tvm.runtime.tensor(np.zeros(6, dtype="int32"))
+    output = tvm_tirx.runtime.tensor(np.zeros(6, dtype="int32"))
     executable(output)
 
     np.testing.assert_array_equal(
@@ -57,7 +57,7 @@ def test_unroll_loop_preserves_non_unit_loop_step(rng, explicit):
         [loop],
     ).with_attr("global_symbol", "main")
 
-    mod = tl.transform.UnrollLoop()(tvm.IRModule.from_expr(before))
+    mod = tl.transform.UnrollLoop()(tvm_tirx.IRModule.from_expr(before))
     if not explicit:
         loops = []
         tvm_ffi.structural_walk(mod["main"].body, (ir.For, loops.append))
@@ -68,7 +68,7 @@ def test_unroll_loop_preserves_non_unit_loop_step(rng, explicit):
     # UnrollLoop as part of tirx.compile's default pipeline.
     executable = compile_packed_function(mod["main"])
 
-    output = tvm.runtime.tensor(np.zeros(8, dtype="int32"))
+    output = tvm_tirx.runtime.tensor(np.zeros(8, dtype="int32"))
     executable(output)
 
     np.testing.assert_array_equal(
@@ -94,10 +94,10 @@ def test_unroll_loop_preserves_empty_non_unit_loop():
         [loop],
     ).with_attr("global_symbol", "main")
 
-    mod = tl.transform.UnrollLoop()(tvm.IRModule.from_expr(before))
+    mod = tl.transform.UnrollLoop()(tvm_tirx.IRModule.from_expr(before))
     executable = compile_packed_function(mod["main"])
 
-    output = tvm.runtime.tensor(np.zeros(1, dtype="int32"))
+    output = tvm_tirx.runtime.tensor(np.zeros(1, dtype="int32"))
     executable(output)
 
     np.testing.assert_array_equal(output.numpy(), np.zeros(1, dtype="int32"))
@@ -126,16 +126,16 @@ def _build_loop_source(backend, start, stop, step, kind, unroll_factor=None, lex
     declaration = ir.Bind(output, ir.Call("tirx.decl_tensor", [output_ptr], ty_args=[output.ty]))
     func = tirx.Function(params, [declaration, body])
     func = func.with_attr("global_symbol", "loop_step")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
     assert tirx.analysis.check_well_formed(func)
-    mod = tvm.IRModule({"loop_step": func})
+    mod = tvm_tirx.IRModule({"loop_step": func})
     build = tvm_ffi.get_global_func(f"target.build.tilelang_{backend}_without_compile", allow_missing=True)
     if build is None:
         pytest.skip(f"TileLang was built without the {backend} code generator")
     target_config = {"kind": "cuda", "arch": "sm_80"} if backend == "cuda" else {"kind": "hip", "mcpu": "gfx942"}
     # The native emitter consumes physical pointer operands. Preserve the raw
     # loop while applying only the annotation and tensor-address boundaries.
-    target = tvm.target.Target(target_config)
+    target = tvm_tirx.target.Target(target_config)
     with target:
         mod = tl.transform.LowerOpaqueBlock()(mod)
         mod = tirx.transform.LowerTensorLayouts()(mod)

@@ -5,14 +5,14 @@ from testing.ascend._ir import allocate, sblock, tensor
 
 import pytest
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import tirx
 from testing.ascend._ir import annotations
 
 
 def _call(name, *args):
-    return ir.Evaluate(ir.Call(tvm.ir.Op.get("tl." + name), list(args), ty="void"))
+    return ir.Evaluate(ir.Call(tvm_tirx.ir.Op.get("tl." + name), list(args), ty="void"))
 
 
 def _load(gm, ub):
@@ -28,7 +28,7 @@ def _flags(pipe):
 
 
 def _module(buffers, body, gm):
-    return tvm.IRModule({"main": tirx.Function([gm], ir.SeqStmt([*[allocate(buffer) for buffer in buffers], *body]))})
+    return tvm_tirx.IRModule({"main": tirx.Function([gm], ir.SeqStmt([*[allocate(buffer) for buffer in buffers], *body]))})
 
 
 def _may_alias(after, a, b):

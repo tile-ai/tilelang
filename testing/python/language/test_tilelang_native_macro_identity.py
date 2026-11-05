@@ -1,7 +1,7 @@
 """Macro expansion must not mutate the IR definitions supplied by its caller."""
 
 import numpy as np
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.testing.packed import compile_packed_function
 
@@ -31,7 +31,7 @@ def test_nested_macro_preserves_captured_input_function():
     lowered = tirx.Function([lowered.params[0], thread], lowered.body, lowered.ret_type, lowered.attrs, lowered.loc)
     assert tirx.analysis.check_well_formed(lowered)
     compiled = compile_packed_function(lowered, tilelang_owned=False)
-    output = tvm.runtime.tensor(np.zeros(1, dtype="int32"), tvm.cpu())
+    output = tvm_tirx.runtime.tensor(np.zeros(1, dtype="int32"), tvm_tirx.cpu())
     compiled(output, 37)
     np.testing.assert_array_equal(output.numpy(), [38])
 
@@ -53,6 +53,6 @@ def test_macro_reference_keeps_caller_index_definition():
     lowered = tirx.Function([lowered.params[0], index], lowered.body, lowered.ret_type, lowered.attrs, lowered.loc)
     assert tirx.analysis.check_well_formed(lowered)
     compiled = compile_packed_function(lowered, tilelang_owned=False)
-    output = tvm.runtime.tensor(np.arange(4, dtype="int32"), tvm.cpu())
+    output = tvm_tirx.runtime.tensor(np.arange(4, dtype="int32"), tvm_tirx.cpu())
     compiled(output, 2)
     np.testing.assert_array_equal(output.numpy(), [0, 1, 4, 3])

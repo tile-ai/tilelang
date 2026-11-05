@@ -4,7 +4,7 @@ from tvm_tirx import ir
 from testing.ascend._ir import sblock, tensor
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from testing.ascend._ir import copy, kernel, seq, statements
 from testing.ascend.auto_schedule._scheduled_ir import unit
@@ -102,7 +102,7 @@ def test_missing_counter_channel_keeps_lexical_handshake(nested, second_stage, v
         return
     after = transform.InsertSync()(before)
     forward_ids = []
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for operation in ("set", "wait"):
         forward = list(_flag_sites(after, operation, "V_S"))
         identifiers = [analyzer.simplify(call.args[1]) for call, _ in forward]

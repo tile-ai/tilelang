@@ -4,7 +4,7 @@ import pytest
 
 import tilelang.testing
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from tilelang.layout import Layout
@@ -509,7 +509,7 @@ def test_cosize_dynamic_is_symbolic():
     # |stride| term emits CuTe's abs(stride). Check by substituting s.
     got = cute.cosize(cute.make_layout((4, 8), stride=(s, 1)))
     assert ir.is_prim_expr(got)
-    ana = tvm.sym.Analyzer()
+    ana = tvm_tirx.sym.Analyzer()
     for sv, expect in [(5, 3 * 5 + 8), (-5, 3 * 5 + 8)]:
         sub = tvm_ffi.structural_map(got, (ir.Var, lambda var, sv=sv: ir.const(sv, "int32") if var.same_as(s) else var), order="post")
         assert int(ana.simplify(sub)) == expect
@@ -553,7 +553,7 @@ def test_complement_rank1_dynamic():
     comp = cute.complement(cute.make_layout(4, stride=s), 1024)
     assert comp.shape[0] == s and comp.stride[0] == 1
     # rest stride = 4*s ; rest extent = ceil_div(1024, 4*s) (symbolic).
-    ana = tvm.sym.Analyzer()
+    ana = tvm_tirx.sym.Analyzer()
     assert ana.simplify(comp.stride[1] - 4 * s) == 0
 
 
@@ -587,7 +587,7 @@ def test_logical_divide_dynamic_layout_stride():
     # works because complement is on the (static) tiler and composition handles
     # the dynamic layout stride. (8):(s) by (2):(1) -> (2, 4):(s, 2s).
     res = cute.logical_divide(cute.make_layout(8, stride=s), cute.make_layout(2, stride=1))
-    ana = tvm.sym.Analyzer()
+    ana = tvm_tirx.sym.Analyzer()
     # Result is hierarchical: shape (2, (4,)), stride (s, (2s,)).
     assert ana.simplify(res(0) - 0) == 0
     assert ana.simplify(res(1) - s) == 0  # next tile element: stride s
@@ -747,7 +747,7 @@ def test_restrict_slices_basis_coordinate_layout():
     restride = cute.make_layout((128, 16384), stride=(cute.E(0), cute.E(1)))
     frag = cute.composition(restride, cute.make_layout(((16, 4), 32), stride=((1, 32), 128)))
     assert frag((16, 0)) == (32, 0)
-    offset, tile = cute.restrict(frag, [tvm.ir.Range.from_min_extent(0, 64), tvm.ir.Range.from_min_extent(8, 24)])
+    offset, tile = cute.restrict(frag, [tvm_tirx.ir.Range.from_min_extent(0, 64), tvm_tirx.ir.Range.from_min_extent(8, 24)])
     assert offset == (0, 8)
     assert tile((0, 3)) == (0, 3)
     for i in range(0, 64, 7):
@@ -1197,7 +1197,7 @@ def test_restrict_dynamic_slice_origin():
     j = ir.Var("j", "int32")
     L = cute.make_layout((64, 256), (256, 1))
     off, sub = cute.restrict(L, [Range.from_min_extent(0, 64), Range.from_min_extent(j * 64, 64)])
-    ana = tvm.sym.Analyzer()
+    ana = tvm_tirx.sym.Analyzer()
     assert ana.simplify(off - j * 64) == 0
     assert sub.shape == (64, 64)
     # Identity holds symbolically.
@@ -1220,7 +1220,7 @@ def test_restrict_hierarchical_mode():
     j = ir.Var("j", "int32")
     L = cute.make_layout((64, (64, 4)), (64, (1, 4096)))
     off, sub = cute.restrict(L, [Range.from_min_extent(0, 64), Range.from_min_extent(j * 64, 64)])
-    ana = tvm.sym.Analyzer()
+    ana = tvm_tirx.sym.Analyzer()
     # Logical K-origin j*64 maps through the split layout to physical j*4096.
     assert ana.simplify(off - j * 4096) == 0
     assert sub.shape == (64, 64)

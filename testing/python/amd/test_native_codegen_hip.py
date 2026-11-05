@@ -2,24 +2,24 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.ir import prim as P
 from tvm_tirx.script import tirx as T
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def _tensor_arg(name, dtype, size):
     data = I.Var(name, I.PtrType(I.PrimType(dtype)))
-    tensor = I.Var(name + "_view", tvm.tirx.TensorType((size,), dtype, layout="default"))
+    tensor = I.Var(name + "_view", tvm_tirx.tirx.TensorType((size,), dtype, layout="default"))
     bind = I.Bind(tensor, I.Call("tirx.decl_tensor", [data], ty_args=[tensor.ty]))
     return data, tensor, bind
 
 
 def _source(params, body, name="vector_select", target="rocm"):
-    func = tvm.tirx.Function(params, body, ret_type=I.PrimType("void")).with_attr("global_symbol", name).with_attr("calling_conv", 2)
+    func = tvm_tirx.tirx.Function(params, body, ret_type=I.PrimType("void")).with_attr("global_symbol", name).with_attr("calling_conv", 2)
     return tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile")(
-        tvm.IRModule({name: func}), tvm.target.Target(target)
+        tvm_tirx.IRModule({name: func}), tvm_tirx.target.Target(target)
     ).inspect_source("hip")
 
 
@@ -106,7 +106,7 @@ def test_launch_bounds_keep_the_subwavefront_rule(threads):
 
     kernel = kernel.with_attr("global_symbol", "kernel").with_attr("calling_conv", 2)
     source = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile")(
-        tvm.IRModule({"kernel": kernel}), tvm.target.Target("rocm")
+        tvm_tirx.IRModule({"kernel": kernel}), tvm_tirx.target.Target("rocm")
     ).inspect_source("hip")
     assert ("__launch_bounds__" in source) == (threads >= 64)
     if threads >= 64:

@@ -7,7 +7,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.backend.module import create_backend_context
 from tilelang.engine.lower import host_codegen
 from tilelang.testing.ir import collect_nodes
@@ -16,8 +16,8 @@ from tvm_tirx.codegen import Executable
 
 
 DTYPES = [("custom[tfloat32]32", 32), ("custom[float4_e2m1_unpacked]8", 8)]
-HOST = tvm.target.Target("c")
-LLVM_HOST = tvm.target.Target({"kind": "llvm", "mcpu": "generic"})
+HOST = tvm_tirx.target.Target("c")
+LLVM_HOST = tvm_tirx.target.Target({"kind": "llvm", "mcpu": "generic"})
 
 
 def _function(dtype, variant="copy", target=HOST):
@@ -245,7 +245,7 @@ class _DLTensor(ctypes.Structure):
 def test_physical_host_storage_keeps_packed_logical_dtype_checks(dtype, bits, tmp_path):
     a, b = [ir.Var(name, tirx.TensorType([4], dtype)) for name in ("input", "output")]
     function = tirx.Function([a, b], [ir.TensorStore(b, [j], ir.TensorLoad(a, [j])) for j in range(4)])
-    target = tvm.target.Target(HOST, host=HOST)
+    target = tvm_tirx.target.Target(HOST, host=HOST)
     function = function.with_attr({"global_symbol": "main", "target": target})
     packed = tilelang.transform.MakePackedAPI()(ir.IRModule({"main": function}))
     assert tirx.analysis.check_well_formed(packed)

@@ -1,5 +1,5 @@
 import tilelang
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.testing
 import tilelang.language as T
 
@@ -43,7 +43,7 @@ def assert_gemm_codegen(
 ):
     func = matmul(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
     # Because the current pass context have been polluted by previous testing.
-    with tvm.transform.PassContext(), tvm.target.Target("webgpu"):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target("webgpu"):
         artifact = tilelang.lower(func, target="webgpu")
 
     src_code = artifact.kernel_source

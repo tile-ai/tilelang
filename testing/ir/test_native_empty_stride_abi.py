@@ -1,5 +1,7 @@
 """Empty DLPack tensors have no addressed element and may carry arbitrary strides."""
 
+import tvm_tirx
+
 import numpy as np
 import pytest
 import torch
@@ -75,7 +77,7 @@ def test_explicit_layout_fixed_strides_remain_checked(shape):
 @pytest.mark.parametrize("extent", [0, 1, 7])
 @pytest.mark.parametrize("allocate", [False, True])
 def test_dsl_compact_slices_preserve_empty_shapes_and_offset_addresses(kind, extent, allocate):
-    if kind == "llvm" and not tilelang.tvm.runtime.enabled("llvm"):
+    if kind == "llvm" and not tvm_tirx.runtime.enabled("llvm"):
         pytest.skip("Optional LLVM code generation is disabled")
     size = C.dynamic("size", "int64")
 

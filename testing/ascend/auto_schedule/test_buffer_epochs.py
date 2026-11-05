@@ -1,7 +1,7 @@
 """PrepareMultiBuffer chooses storage clocks and scopes their updates."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import ir
 from testing.ascend._ir import allocated_buffer, loop_annotations, nodes, serial, statements, tensor
@@ -44,7 +44,7 @@ def test_storage_clock(mode, guarded, owners, uses_counter, versions):
     assert len(resets) == 1 and int(resets[0][0].value) == 0
     assert not any(isinstance(parent, ir.For) for parent in resets[0][1])
     assert len(advances) == owners
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for store, parents in advances:
         assert analyzer.can_prove_equal(store.value, counter[0] + 1)
         owner = next(parent for parent in reversed(parents) if isinstance(parent, ir.For))
@@ -106,8 +106,8 @@ def test_bound_sf_and_data_share_counter_and_union_epoch_guard(owners, last_memb
         counters.append(mapping[data])
         guards = loop_annotations(loop)["tl.storage_epoch_guard_map"]
         expected = loop.var % 2 == 0 if index == owners - 1 and last_members == "sf" else ir.const(True, "bool")
-        assert tvm.sym.Analyzer().can_prove_equal(guards[data], expected)
-        assert tvm.sym.Analyzer().can_prove_equal(guards[data], guards[sf])
+        assert tvm_tirx.sym.Analyzer().can_prove_equal(guards[data], expected)
+        assert tvm_tirx.sym.Analyzer().can_prove_equal(guards[data], guards[sf])
     assert all(counter.same_as(counters[0]) for counter in counters)
     updates = [store for store in nodes(after, ir.TensorStore) if store.dest.same_as(counters[0])]
     assert len(updates) == owners + 1  # One reset, one increment per owner.

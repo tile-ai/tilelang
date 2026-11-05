@@ -5,7 +5,7 @@ import torch
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang import tvm
+import tvm_tirx
 
 
 @pytest.mark.parametrize(
@@ -28,7 +28,7 @@ def test_cpu_transpose_swaps_only_the_final_two_axes(src_shape):
         with T.Kernel(1):
             T.transpose(src, dst)
 
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         kernel = tilelang.compile(
             main,
             out_idx=[1],
@@ -60,7 +60,7 @@ def test_cpu_transpose_maps_destination_boundary_predicate():
                 dst[0:2, 0:4, 1:4],
             )
 
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         kernel = tilelang.compile(
             main,
             out_idx=[1],
@@ -93,7 +93,7 @@ def test_cpu_transpose_guards_out_of_bounds_singleton_destination():
                 dst[0:2, 1:2, 0:3],
             )
 
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         kernel = tilelang.compile(
             main,
             out_idx=[1],
@@ -124,7 +124,7 @@ def test_cpu_transpose_guards_out_of_bounds_singleton_source():
                 dst[0:2, 0:1, 0:3],
             )
 
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         kernel = tilelang.compile(
             main,
             out_idx=[1],

@@ -8,7 +8,7 @@ import site
 import pytest
 import tilelang
 import torch
-import tvm_tirx as tvm
+import tvm_tirx
 
 
 def make_kernel(control, style, hint_key):
@@ -84,9 +84,9 @@ def test_cutedsl_hint_scope_keeps_control_flow(control, style, hint_key):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required for CuTe control-flow execution")
     major, minor = torch.cuda.get_device_capability()
-    target = tvm.target.Target({"kind": "cuda", "arch": f"sm_{major}{minor}", "keys": ["cuda", "cutedsl"]})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": f"sm_{major}{minor}", "keys": ["cuda", "cutedsl"]})
     function = make_kernel(control, style, hint_key)
-    assert tvm.tirx.analysis.check_well_formed(function)
+    assert tvm_tirx.tirx.analysis.check_well_formed(function)
     executable = tilelang.compile(function, target=target, execution_backend="cutedsl")
     source = executable.get_kernel_source()
     if control == "break":
@@ -127,9 +127,9 @@ def test_nested_break_guards_the_enclosing_sequence_suffix(hint_key):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required for CuTe control-flow execution")
     major, minor = torch.cuda.get_device_capability()
-    target = tvm.target.Target({"kind": "cuda", "arch": f"sm_{major}{minor}", "keys": ["cuda", "cutedsl"]})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": f"sm_{major}{minor}", "keys": ["cuda", "cutedsl"]})
     function = make_nested_break(hint_key)
-    assert tvm.tirx.analysis.check_well_formed(function)
+    assert tvm_tirx.tirx.analysis.check_well_formed(function)
     executable = tilelang.compile(function, target=target, execution_backend="cutedsl")
     source = executable.get_kernel_source()
     assert not [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Break)]

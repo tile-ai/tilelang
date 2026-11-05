@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -31,7 +31,7 @@ def nodes(value, kind):
 
 
 def prepare(function):
-    target = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
+    target = tvm_tirx.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
     module = ir.IRModule({"main": function})
     module = tilelang.transform.NormalizeAliasAnnotations()(module)
     module = tilelang.transform.LowerTensorSpec()(module)

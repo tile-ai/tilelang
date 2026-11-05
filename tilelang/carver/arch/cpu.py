@@ -1,4 +1,4 @@
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.target import Target
 from .arch_base import TileDevice
 
@@ -12,10 +12,10 @@ def is_cpu_arch(arch: TileDevice) -> bool:
 class CPU(TileDevice):
     def __init__(self, target: Target):
         self.target = target
-        device = tvm.runtime.cpu(0)
+        device = tvm_tirx.runtime.cpu(0)
         if not device.exist:
             raise RuntimeError("Cannot find cpu device 0.")
-        self.device: tvm.runtime.Device = device
+        self.device: tvm_tirx.runtime.Device = device
         self.platform: str = "CPU"
 
 

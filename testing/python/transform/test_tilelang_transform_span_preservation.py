@@ -11,7 +11,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.ir import get_stmt_span, span_to_location
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir.transform.instrument import pass_instrument
@@ -97,7 +97,7 @@ def _make_gemm():
 
 def _lower_with_recorder(func, target: str) -> _SpanCoverageRecorder:
     recorder = _SpanCoverageRecorder()
-    with tvm.target.Target(target), tvm.transform.PassContext(opt_level=3, instruments=[recorder]):
+    with tvm_tirx.target.Target(target), tvm_tirx.transform.PassContext(opt_level=3, instruments=[recorder]):
         tilelang.lower(func, target=target)
     return recorder
 
@@ -139,7 +139,7 @@ def test_span_survives_lowering_cpu():
 
     # The final IR still contains a BufferStore pointing at the user store line.
     # (Checked on the last pipeline row's module indirectly: re-lower and walk.)
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         artifact = tilelang.lower(_make_vector_add(), target="c")
 
     found = False
@@ -169,7 +169,7 @@ def test_span_survives_lowering_gemm_metal():
     recorder = _lower_with_recorder(_make_gemm(), target="metal")
     _assert_no_span_loss(recorder)
 
-    with tvm.target.Target("metal"):
+    with tvm_tirx.target.Target("metal"):
         artifact = tilelang.lower(_make_gemm(), target="metal")
 
     lines = set()

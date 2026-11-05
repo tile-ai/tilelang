@@ -10,14 +10,14 @@ from __future__ import annotations
 from functools import lru_cache
 
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
 def _bodies(root, function, *, with_names=True):
     if function is not None and not isinstance(function, str):
         raise TypeError("function must be a global function name or None")
-    if isinstance(root, tvm.IRModule):
+    if isinstance(root, tvm_tirx.IRModule):
         functions = {var.name_hint: func for var, func in root.functions.items()}
         if function is not None:
             if function not in functions:
@@ -74,8 +74,8 @@ def _collect(body, node_type):
 def _resolve_op(op):
     if isinstance(op, str):
         # Deliberately let Op.get fail for unregistered names, even for count=0.
-        return tvm.ir.Op.get(op)
-    if not isinstance(op, tvm.ir.Op):
+        return tvm_tirx.ir.Op.get(op)
+    if not isinstance(op, tvm_tirx.ir.Op):
         raise TypeError("op must be a registered Op or its full name")
     return op
 
@@ -84,10 +84,10 @@ def _resolve_op(op):
 def _call_index(body):
     """Index one immutable body; keep function ownership outside the cache."""
     calls = _collect(body, ir.Call)
-    by_op: dict[tvm.ir.Op, list[ir.Call]] = {}
+    by_op: dict[tvm_tirx.ir.Op, list[ir.Call]] = {}
     for call in calls:
         op = call.op
-        if isinstance(op, tvm.ir.Op):
+        if isinstance(op, tvm_tirx.ir.Op):
             # TVM Op keys compare by identity, even across Python handles.
             by_op.setdefault(op, []).append(call)
     return calls, by_op
@@ -105,7 +105,7 @@ def collect_nodes(root, node_type, *, function: str | None = None) -> list:
     return [node for _, body in _bodies(root, function) for node in _collect(body, node_type)]
 
 
-def collect_calls(root, *, op: str | tvm.ir.Op, function: str | None = None) -> list[ir.Call]:
+def collect_calls(root, *, op: str | tvm_tirx.ir.Op, function: str | None = None) -> list[ir.Call]:
     """Collect calls to one exact registered Op; never match name fragments.
 
     GlobalVar and other non-Op callees do not match. An unregistered name raises
@@ -118,7 +118,7 @@ def collect_calls(root, *, op: str | tvm.ir.Op, function: str | None = None) -> 
     return [call for _, body in _bodies(root, function, with_names=False) for call in _call_index(body)[1].get(target, ())]
 
 
-def assert_call_count(root, *, op: str | tvm.ir.Op, count: int, function: str | None = None) -> None:
+def assert_call_count(root, *, op: str | tvm_tirx.ir.Op, count: int, function: str | None = None) -> None:
     """Assert a static call count, showing function ownership on failure.
 
     Reuse the same internal body index as collect_calls. Function selection

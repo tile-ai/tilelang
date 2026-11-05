@@ -5,7 +5,7 @@ import tvm_ffi
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir
 from tilelang.testing.ir import collect_nodes
 
@@ -61,8 +61,8 @@ def test_cpu_launch_thread_count_is_per_kernel(parallel):
     assert sorted(int(_launch_hints(region)["tl.cpu_num_threads"]) for region in launches) == [3, 5]
     assert all("tl.cpu_num_threads" not in loop.annotations for loop in _nodes(main, ir.For))
 
-    mod = tvm.IRModule.from_expr(main)
-    with tvm.transform.PassContext(config={"tl.cpu_parallel": parallel}):
+    mod = tvm_tirx.IRModule.from_expr(main)
+    with tvm_tirx.transform.PassContext(config={"tl.cpu_parallel": parallel}):
         materialized = _materialize(mod)
         prepared = tilelang.cpu.transform.LowerCPUKernelLaunch()(materialized)
         lowered = tilelang.transform.LowerOpaqueBlock()(prepared)
@@ -84,7 +84,7 @@ def test_cpu_launch_thread_count_is_per_kernel(parallel):
     for original, serial in zip(loops, _nodes(lowered["main"], ir.For), strict=True):
         assert serial.kind == ir.ForKind.DEFAULT
         assert serial.var.same_as(original.var)
-        tvm.ir.assert_structural_equal(original.annotations, serial.annotations)
+        tvm_tirx.ir.assert_structural_equal(original.annotations, serial.annotations)
 
 
 def test_cpu_launch_marks_only_grid_loops():
@@ -95,8 +95,8 @@ def test_cpu_launch_marks_only_grid_loops():
                 A[((bx * 3 + by) * 4 + bz) * 2 + i] = 1
 
     (launch,) = _launches(main)
-    with tvm.transform.PassContext(config={"tl.cpu_parallel": True}):
-        materialized = _materialize(tvm.IRModule.from_expr(main))
+    with tvm_tirx.transform.PassContext(config={"tl.cpu_parallel": True}):
+        materialized = _materialize(tvm_tirx.IRModule.from_expr(main))
         prepared = tilelang.cpu.transform.LowerCPUKernelLaunch()(materialized)
     loops = _nodes(prepared["main"], ir.For)
     grid = [next(loop for loop in loops if loop.var.same_as(var)) for var in launch.body_params[:3]]
@@ -113,7 +113,7 @@ def test_cpu_launch_without_thread_count_is_unchanged():
         with T.Kernel(2) as bx:
             A[bx] = 1
 
-    mod = _materialize(tvm.IRModule.from_expr(main))
+    mod = _materialize(tvm_tirx.IRModule.from_expr(main))
     original = mod["main"].body[0]
     result = tilelang.cpu.transform.LowerCPUKernelLaunch()(mod)["main"]
     (serial,) = _nodes(result, ir.For)
@@ -122,4 +122,4 @@ def test_cpu_launch_without_thread_count_is_unchanged():
     # Disabling parallelism consumes the intermediate grid marker. The loop
     # range, body and variable identity retain the original serial behavior.
     expected = ir.For(original.var, original.begin, original.end, original.step, original.kind, original.body)
-    tvm.ir.assert_structural_equal(expected, serial)
+    tvm_tirx.ir.assert_structural_equal(expected, serial)

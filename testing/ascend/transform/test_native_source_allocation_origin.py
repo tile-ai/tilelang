@@ -3,7 +3,7 @@
 import pytest
 import tilelang
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import ir, tirx
 
@@ -17,14 +17,14 @@ def _module(attrs, count=2):
     # intentionally leaves allocations unchanged, even when reuse is disabled.
     body.append(annotation({"tl.buffer_alias_map": {var: [] for var in variables}}))
     body.extend(ir.TensorStore(var, [0], i) for i, var in enumerate(variables))
-    function = tirx.Function([], body).with_attr("target", tvm.target.Target("ascend")).with_attr("global_symbol", "main")
+    function = tirx.Function([], body).with_attr("target", tvm_tirx.target.Target("ascend")).with_attr("global_symbol", "main")
     return ir.IRModule({"main": function})
 
 
 def test_source_origin_does_not_change_the_sequential_arena_plan():
     plain = transform.MergeUBAllocations(disable_reuse=True)(_module({}))
     marked = transform.MergeUBAllocations(disable_reuse=True)(_module({"tl.source_block_alloc": ir.IntImm("int32", 1)}))
-    tvm.ir.assert_structural_equal(plain, marked, map_free_vars=True)
+    tvm_tirx.ir.assert_structural_equal(plain, marked, map_free_vars=True)
     (arena,) = allocations(marked)
     assert int(arena.var.ty.data_alignment) == 128
     assert "tl.source_block_alloc" not in (dict(arena.value.attrs) if arena.value.attrs is not None else {})

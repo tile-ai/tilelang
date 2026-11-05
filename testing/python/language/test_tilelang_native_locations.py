@@ -87,7 +87,7 @@ def test_select_construction_supplies_a_native_location():
 
 def test_select_default_location_compiles_both_results():
     import numpy as np
-    import tvm_tirx as tvm
+    import tvm_tirx
 
     @T.prim_func
     def kernel(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
@@ -96,6 +96,6 @@ def test_select_default_location_compiles_both_results():
 
     assert tirx.analysis.check_well_formed(kernel)
     data = np.array([-1, 0, 1, 2], dtype="int32")
-    output = tvm.runtime.tensor(np.zeros(4, dtype="int32"), tvm.cpu())
-    compile_packed_function(kernel, tilelang_owned=False)(tvm.runtime.tensor(data, tvm.cpu()), output)
+    output = tvm_tirx.runtime.tensor(np.zeros(4, dtype="int32"), tvm_tirx.cpu())
+    compile_packed_function(kernel, tilelang_owned=False)(tvm_tirx.runtime.tensor(data, tvm_tirx.cpu()), output)
     np.testing.assert_array_equal(output.numpy(), [-3, -3, 7, 7])

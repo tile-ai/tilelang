@@ -10,7 +10,7 @@ import sys
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,9 +38,9 @@ def _thread(body, tx):
 def _source(parameters, body, *, name="native_kernel", tmp_path=None):
     func = tirx.Function(parameters, body, ir.PrimType("void"))
     func = func.with_attr("global_symbol", name).with_attr("calling_conv", 2)
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
     if any(isinstance(parameter.ty, tirx.TensorType) for parameter in parameters):
-        host_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}, host="c")
+        host_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"}, host="c")
         func = func.without_attr("calling_conv").with_attr("target", host_target)
         with host_target:
             native = tirx.transform.LowerTensorLayouts()(ir.IRModule({name: func}))
@@ -77,7 +77,7 @@ def _load_cute_helpers():
 
 
 def _run(source, data, output, tmp_path, *, dynamic_size=None, shared_bytes=0):
-    if not tvm.cuda(0).exist:
+    if not tvm_tirx.cuda(0).exist:
         pytest.skip("CUDA device required for CuTeDSL numerical validation")
     _load_cute_helpers()
     import cutlass.cute as cute
@@ -100,11 +100,11 @@ def launch(a: cute.Tensor, b: cute.Tensor, stream: driver.CUstream):
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
-    a, b = tvm.runtime.tensor(data, tvm.cuda(0)), tvm.runtime.tensor(output, tvm.cuda(0))
+    a, b = tvm_tirx.runtime.tensor(data, tvm_tirx.cuda(0)), tvm_tirx.runtime.tensor(output, tvm_tirx.cuda(0))
     ca, cb = cute.runtime.from_dlpack(a), cute.runtime.from_dlpack(b)
     compiled = cute.compile(module.launch, ca, cb, driver.CUstream(0))
     compiled(ca, cb, driver.CUstream(0))
-    tvm.cuda(0).sync()
+    tvm_tirx.cuda(0).sync()
     return b.numpy()
 
 

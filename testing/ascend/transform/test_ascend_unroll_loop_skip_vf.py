@@ -1,7 +1,7 @@
 """Explicit unrolling expands host-side loops and preserves vector-function loops."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import ir, tirx
 from testing.ascend._ir import nodes, sblock, sblocks, tensor
@@ -17,7 +17,7 @@ def _loop(body, *, kind=ir.ForKind.UNROLLED, explicit=True, trip_count=2, step=N
 
 
 def _apply(body, output):
-    before = tvm.IRModule({"main": tirx.Function([output], body)})
+    before = tvm_tirx.IRModule({"main": tirx.Function([output], body)})
     assert tirx.analysis.check_well_formed(before["main"])
     after = transform.UnrollLoopSkipVF()(before)
     assert tirx.analysis.check_well_formed(after["main"])
@@ -46,7 +46,7 @@ def test_only_explicit_unrolled_loops_outside_vf_expand(kind, explicit, block, e
         assert [int(store.value) for store in nodes(after, ir.TensorStore)] == [0, 1]
     else:
         (retained,) = nodes(after, ir.For)
-        tvm.ir.assert_structural_equal(retained, loop)
+        tvm_tirx.ir.assert_structural_equal(retained, loop)
 
 
 def test_explicit_inner_loop_expands_inside_a_retained_loop():
@@ -76,5 +76,5 @@ def test_expansion_around_vf_preserves_its_inner_loop():
     blocks = sblocks(after, "SIMD_VF")
     assert len(blocks) == 2
     for block in blocks:
-        tvm.ir.assert_structural_equal(block.body, ir.SeqStmt([inner]), map_free_vars=True)
+        tvm_tirx.ir.assert_structural_equal(block.body, ir.SeqStmt([inner]), map_free_vars=True)
     assert len(nodes(after, ir.For)) == 2

@@ -4,7 +4,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import tvm_ffi
-from tilelang import tvm as tvm
+import tvm_tirx
 from tilelang.language._native import encode_annotations
 from tilelang.testing.ir import collect_nodes
 from tilelang.testing.packed import compile_packed_function
@@ -49,7 +49,7 @@ def _canonicalize_for_comparison(mod):
     for symbol, function in list(mod.functions.items()):
         if "target" not in function.attrs:
             unbound.append(symbol)
-            mod[symbol] = function.with_attr("target", tvm.target.Target("cuda"))
+            mod[symbol] = function.with_attr("target", tvm_tirx.target.Target("cuda"))
     mod = tilelang.transform.FinalizeAnnotations("cuda")(mod)
     for symbol in unbound:
         mod[symbol] = mod[symbol].without_attr("target")
@@ -65,10 +65,10 @@ def _canonicalize_for_comparison(mod):
 
 def _check(original, transformed):
     """Apply DecoupleTypeCast pass and check IR matches expected output."""
-    mod = tvm.IRModule.from_expr(original.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(original.with_attr("global_symbol", "main"))
     mod = DecoupleTypeCast()(mod)
 
-    transformed = tvm.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
+    transformed = tvm_tirx.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
 
     # The facade's named sblock and the pass's allocation marker describe the
     # same lexical scope. Compare their real native lowering, including the
@@ -79,7 +79,7 @@ def _check(original, transformed):
     mod = _canonicalize_for_comparison(mod)
     transformed = _canonicalize_for_comparison(transformed)
 
-    tvm.ir.assert_structural_equal(mod["main"], transformed["main"], True)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], transformed["main"], True)
 
 
 @pytest.mark.parametrize("offset", [0, 3])
@@ -87,8 +87,8 @@ def test_comparison_layout_canonicalization_keeps_addresses(offset):
     layout = tirx.TileLayout.from_iters([Iter(4, 4, "m"), Iter(4, 1, "m")], [], {"m": offset})
     tensor = ir.Var("a", tirx.TensorType((4, 4), "float32", layout=layout, align=4))
     function = tirx.Function([tensor], ir.Evaluate(ir.const(0)), ret_type=ir.PrimType("void"))
-    normalized = _canonicalize_for_comparison(tvm.IRModule.from_expr(function))["main"]
-    analyzer = tvm.sym.Analyzer()
+    normalized = _canonicalize_for_comparison(tvm_tirx.IRModule.from_expr(function))["main"]
+    analyzer = tvm_tirx.sym.Analyzer()
     for index in range(16):
         before = analyzer.simplify(layout.apply(index)["m"])
         after = analyzer.simplify(normalized.params[0].ty.layout.apply(index)["m"])
@@ -116,12 +116,12 @@ def test_comparison_keeps_scope_bindings_and_provenance(boundary):
     outer_attrs = {"explicit_alloc_scope": True} if boundary == "explicit_marker" else {}
     outer = ir.RegionStmt("tl.lexical_scope", [], [], outer_attrs, body)
     function = tirx.Function([tensor], outer, ret_type=ir.PrimType("void"))
-    normalized = _canonicalize_for_comparison(tvm.IRModule.from_expr(function))["main"]
+    normalized = _canonicalize_for_comparison(tvm_tirx.IRModule.from_expr(function))["main"]
     scopes = collect_nodes(normalized, ir.RegionStmt)
     assert len(scopes) == (1 if boundary == "empty" else 2)
     assert sum(bool(scope.attrs.dict.get("explicit_alloc_scope", False)) for scope in scopes) == (2 if boundary == "explicit_marker" else 1)
     if boundary != "empty":
-        tvm.ir.assert_structural_equal(normalized, function, True)
+        tvm_tirx.ir.assert_structural_equal(normalized, function, True)
 
 
 @pytest.mark.parametrize("difference", ["memory_offset", "store_index", "allocation_annotation"])
@@ -140,8 +140,8 @@ def test_comparison_still_rejects_memory_and_annotation_changes(difference):
             ret_type=ir.PrimType("void"),
         )
 
-    before = _canonicalize_for_comparison(tvm.IRModule.from_expr(function(False)))
-    after = _canonicalize_for_comparison(tvm.IRModule.from_expr(function(True)))
+    before = _canonicalize_for_comparison(tvm_tirx.IRModule.from_expr(function(False)))
+    after = _canonicalize_for_comparison(tvm_tirx.IRModule.from_expr(function(True)))
     assert not tvm_ffi.structural_equal(before, after, map_free_vars=True)
 
 
@@ -320,8 +320,8 @@ def test_decouple_preserves_logical_loop_domain(loop_min):
     )
     expected = before.with_body(scope)
 
-    actual_mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
-    tvm.ir.assert_structural_equal(actual_mod["main"], expected, True)
+    actual_mod = DecoupleTypeCast()(tvm_tirx.IRModule.from_expr(before))
+    tvm_tirx.ir.assert_structural_equal(actual_mod["main"], expected, True)
 
 
 @pytest.mark.parametrize("decouple", [False, True])
@@ -348,16 +348,16 @@ def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values
         ir.TensorStore(a, [index], value),
     )
     func = tirx.Function([a], loop, ret_type=ir.PrimType("void")).with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
-    with tvm.target.Target("c"):
+    mod = tvm_tirx.IRModule.from_expr(func)
+    with tvm_tirx.target.Target("c"):
         if decouple:
             mod = DecoupleTypeCast()(mod)
         mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
         mod = tilelang.transform.LowerOpaqueBlock()(mod)
     # Execute the legalized domains with scalar C codegen.
-    with tvm.ir.transform.PassContext(config={"tirx.disable_vectorize": True}):
+    with tvm_tirx.ir.transform.PassContext(config={"tirx.disable_vectorize": True}):
         executable = compile_packed_function(mod["main"])
-    output = tvm.runtime.tensor(np.full(8, -1, dtype="float32"))
+    output = tvm_tirx.runtime.tensor(np.full(8, -1, dtype="float32"))
     executable["main"](output)
     expected = np.full(8, -1, dtype="float32")
     expected[: len(values)] += values
@@ -384,10 +384,10 @@ def test_nonunit_step_remains_scalar(step):
         ret_type=ir.PrimType("void"),
     )
     expected = before.with_body(ir.For(i, begin, end, step, ir.ForKind.DEFAULT, body))
-    with tvm.target.Target("c"):
-        mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+    with tvm_tirx.target.Target("c"):
+        mod = DecoupleTypeCast()(tvm_tirx.IRModule.from_expr(before))
         mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], expected, True)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], expected, True)
 
 
 def test_no_transform_same_dtype():
@@ -471,7 +471,7 @@ def test_rmw_same_buffer_different_indices():
                 T.float8_e4m3fn,
             )
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = DecoupleTypeCast()(mod)
 
     # Sanity checks: pass ran, two distinct cast buffers were created, and the
@@ -654,7 +654,7 @@ def test_cast_buffers_wrapped_in_lexical_alloc_scope():
         for i in T.vectorized(16):
             b[i] = b_frag[i]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = DecoupleTypeCast()(mod)
 
     annotated_blocks = [0]
@@ -1105,7 +1105,7 @@ def test_nested_guard_preserves_conditional_evaluation():
                 if 16 // i > 2:
                     b[i] = local[i]
 
-    mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+    mod = DecoupleTypeCast()(tvm_tirx.IRModule.from_expr(before))
     copy_conditions = []
 
     def collect(node):
@@ -1122,7 +1122,7 @@ def test_nested_guard_preserves_conditional_evaluation():
     assert len(copy_conditions) == 1
     condition = copy_conditions[0]
     assert isinstance(condition, ir.Call)
-    assert condition.op.same_as(tvm.ir.Op.get("prim.if_then_else"))
+    assert condition.op.same_as(tvm_tirx.ir.Op.get("prim.if_then_else"))
     assert int(condition.args[2]) == 0
 
 

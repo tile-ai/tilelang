@@ -1,7 +1,7 @@
 """Queries keep exact op identity, per-function counts, and native type uses."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from tilelang.testing.ir import (
@@ -26,7 +26,7 @@ def test_native_queries_deduplicate_shared_objects_per_function():
     function = _function([stmt, stmt])
     assert len(collect_nodes(function, ir.Evaluate)) == 1
     assert_call_count(function, op="tirx.call_extern", count=1)
-    module = tvm.IRModule({"first": function, "second": function})
+    module = tvm_tirx.IRModule({"first": function, "second": function})
     assert_call_count(module, op="tirx.call_extern", count=2)
     assert_call_count(module, op="tirx.call_extern", count=1, function="second")
 
@@ -49,7 +49,7 @@ def test_native_queries_do_not_visit_function_signature_or_module_metadata():
     function = tirx.Function([tensor], [ir.Evaluate(_call("body_only"))], ir.PrimType("void"))
     assert [str(call.args[0].value) for call in collect_calls(function, op="tirx.call_extern")] == ["body_only"]
     declaration = tirx.Function([], None, ir.PrimType("void"))
-    module = tvm.IRModule({"fn": function, "declaration": declaration})
+    module = tvm_tirx.IRModule({"fn": function, "declaration": declaration})
     assert_call_count(module, op="tirx.call_extern", count=1)
     assert collect_nodes(declaration, ir.Call) == []
 
@@ -75,7 +75,7 @@ def test_native_extern_query_matches_complete_symbol_only():
 def test_native_query_validation_and_diagnostics():
     function = _function([ir.Evaluate(_call("actual"))], "named_function")
     with pytest.raises(ValueError, match="No function"):
-        collect_nodes(tvm.IRModule({"main": function}), ir.Call, function="missing")
+        collect_nodes(tvm_tirx.IRModule({"main": function}), ir.Call, function="missing")
     with pytest.raises(ValueError, match="only be selected"):
         collect_nodes(function, ir.Call, function="main")
     with pytest.raises(TypeError, match="node_type"):

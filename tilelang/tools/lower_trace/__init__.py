@@ -76,7 +76,7 @@ def lower_trace(
         ``name``, ``before_script``, ``after_script``, ``diff_lines``,
         ``insertions``, ``deletions``, ``changed``.
     """
-    import tvm_tirx as tvm
+    import tvm_tirx
     from tilelang.utils.pass_diff import _get_script
     from .diff import unified_diff
 
@@ -84,10 +84,10 @@ def lower_trace(
     if mode not in ("terminal", "html", "both"):
         raise ValueError(f"mode must be one of 'terminal', 'html', 'both', got {mode!r}")
 
-    if isinstance(func_or_mod, tvm.IRModule):
+    if isinstance(func_or_mod, tvm_tirx.IRModule):
         mod = func_or_mod
     else:
-        mod = tvm.IRModule({"main": func_or_mod})
+        mod = tvm_tirx.IRModule({"main": func_or_mod})
 
     # A bare ``(name, pass)`` tuple is a single named pass, not an iterable of
     # passes; wrap it so the loop below treats it as one entry. A non-list/tuple

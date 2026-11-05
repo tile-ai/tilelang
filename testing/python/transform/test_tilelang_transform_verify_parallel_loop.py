@@ -1,6 +1,6 @@
 import tilelang as tl
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang import ir as tl_ir
 
@@ -18,7 +18,7 @@ def _make_parallel_store(*, injective_indices: bool, varying_value: bool = True)
     body = ir.SeqStmt([ir.Bind(i, ti), ir.Bind(j, tj), store])
     body = ir.For(tj, 0, 128, 1, ir.ForKind.PARALLEL, body)
     body = ir.For(ti, 0, 32, 1, ir.ForKind.PARALLEL, body)
-    return tvm.IRModule({"main": tirx.Function([output], body, ret_type=ir.PrimType("void"))})
+    return tvm_tirx.IRModule({"main": tirx.Function([output], body, ret_type=ir.PrimType("void"))})
 
 
 def _verify(mod, capfd):
@@ -52,7 +52,7 @@ def _make_two_racy_stores():
     store_b = ir.TensorStore(out_b, [0], ti)
     body = ir.SeqStmt([store_a, store_b])
     body = ir.For(ti, 0, 32, 1, ir.ForKind.PARALLEL, body)
-    mod = tvm.IRModule({"main": tirx.Function([out_a, out_b], body, ret_type=ir.PrimType("void"))})
+    mod = tvm_tirx.IRModule({"main": tirx.Function([out_a, out_b], body, ret_type=ir.PrimType("void"))})
     return mod, store_a, store_b
 
 
@@ -93,7 +93,7 @@ def test_race_check_pass_config_overrides_env_var(monkeypatch):
 
 
 def _native_module(output, body):
-    return tvm.IRModule({"main": tirx.Function([output], body, ret_type=ir.PrimType("void"))})
+    return tvm_tirx.IRModule({"main": tirx.Function([output], body, ret_type=ir.PrimType("void"))})
 
 
 @pytest.mark.parametrize("bind_read", [False, True])

@@ -3,13 +3,13 @@ import pytest
 
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.engine.lower import lower
 from tilelang.cuda.target import normalize_cutedsl_target
 
 
 def _lower_cutedsl_partial_reduce():
-    if not tvm.runtime.enabled("cuda"):
+    if not tvm_tirx.runtime.enabled("cuda"):
         pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
 
     build_cutedsl = tvm_ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)

@@ -1,7 +1,7 @@
 from tvm_tirx import ir
 from testing.ascend._ir import nodes, tensor
 import tilelang
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import tirx
 import tilelang.language as T
@@ -16,12 +16,12 @@ def test_ascend_remove_no_op_preserves_handle_store():
     buffer = tensor((1,), "uint64", scope="local.var")
     declare = ir.Bind(buffer, ir.Call("tirx.decl_tensor", [data], ty_args=[buffer.ty]))
     store = ir.TensorStore(buffer, [0], tirx.reinterpret(value, ty="uint64"))
-    mod = tvm.IRModule.from_expr(tirx.Function([data, value], [declare, store]))
+    mod = tvm_tirx.IRModule.from_expr(tirx.Function([data, value], [declare, store]))
 
     after = transform.AscendRemoveNoOp()(mod)["main"]
 
     (result,) = nodes(after.body, ir.TensorStore)
-    tvm.ir.assert_structural_equal(result, store)
+    tvm_tirx.ir.assert_structural_equal(result, store)
 
 
 def test_ascend_remove_no_op_removes_numeric_self_store():
@@ -29,7 +29,7 @@ def test_ascend_remove_no_op_removes_numeric_self_store():
     def before(a: T.Buffer((1,), "float32")):
         a[0] = a[0]
 
-    mod = tvm.IRModule.from_expr(before)
+    mod = tvm_tirx.IRModule.from_expr(before)
     after = transform.AscendRemoveNoOp()(mod)["main"]
 
     assert isinstance(after.body, ir.SeqStmt) and len(after.body) == 0

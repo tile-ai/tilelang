@@ -5,7 +5,7 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from tilelang.engine.lower import lower
 from tilelang.backend.target import determine_target
 from tilelang.cuda.target import normalize_cutedsl_target
@@ -39,7 +39,7 @@ def test_cutedsl_string_target_uses_detected_cuda_arch(monkeypatch):
 
 
 def test_cutedsl_codegen_supports_tl_ptx_cp_async():
-    if not tvm.runtime.enabled("cuda"):
+    if not tvm_tirx.runtime.enabled("cuda"):
         pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
 
     build_cutedsl = tvm_ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)

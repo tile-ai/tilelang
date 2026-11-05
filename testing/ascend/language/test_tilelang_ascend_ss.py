@@ -10,7 +10,7 @@ import torch
 
 import tilelang
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from testing.ascend._ir import allocated_buffer, nodes
 from testing.ascend._memory_ir import element_offset, storage_owner
 
@@ -68,7 +68,7 @@ def test_ss_codegen_materializes_versions_and_uses_mode4(versions, stage, versio
             if info.name == "tl.MaterializeMultiBuffer":
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         source = tilelang.lower(_publish_to_cube(versions=versions, stage=stage, version_mode=version_mode), target="ascend").kernel_source
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     words = allocated_buffer(materialized, "words")
@@ -83,7 +83,7 @@ def test_ss_codegen_materializes_versions_and_uses_mode4(versions, stage, versio
     ]
     assert {str(access_tensor(access).ty.dtype) for access in accesses} == {"uint32", "uint64"}
     assert all(len(access.indices) == 2 for access in accesses)
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for access in accesses:
         tensor = access_tensor(access)
         # Both dtype views must step over exactly the same physical slot.

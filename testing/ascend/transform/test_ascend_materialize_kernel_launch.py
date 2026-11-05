@@ -22,13 +22,13 @@ import tvm_ffi
 import pytest
 import tilelang
 import tilelang.ascend.language as TA
-import tvm_tirx as tvm
+import tvm_tirx
 from testing.ascend._ir import nodes as _collect
 
 
 def _materialize(func, target: str = "ascend", **kwargs):
-    mod = tvm.IRModule.from_expr(func)
-    mod = tvm.tirx.transform.BindTarget(tvm.target.Target(target))(mod)
+    mod = tvm_tirx.IRModule.from_expr(func)
+    mod = tvm_tirx.tirx.transform.BindTarget(tvm_tirx.target.Target(target))(mod)
     mod = tilelang.transform.MaterializeKernelLaunch(**kwargs)(mod)
     return mod[func.attrs["global_symbol"]]
 

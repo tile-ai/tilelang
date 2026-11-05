@@ -78,7 +78,9 @@ def test_provider_uses_native_namespace_and_one_registry():
     import tvm_tirx
     from tilelang._provider import FFI_REF, FFI_VERSION
 
-    assert tilelang.tvm is tvm_tirx
+    assert tilelang._LIB is tvm_tirx.base._LOADED_LIBS["tvm_tirx_compiler"]
+    assert not hasattr(tilelang, "tvm")
+    assert not any(name == "tilelang.tvm" or name.startswith("tilelang.tvm.") for name in sys.modules)
     assert "tvm" not in sys.modules
     assert dict(tvm_ffi.get_global_func("tl.CompilerBuildInfo")())["ffi_ref"] == FFI_REF
     assert version("apache-tvm-ffi") == FFI_VERSION

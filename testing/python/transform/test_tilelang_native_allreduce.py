@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 from tvm_tirx.script.ir_builder import IRBuilder
@@ -79,7 +79,7 @@ def make_tuple_reduction(threads=32):
 
 
 def lower(function, target="cuda", *, use_native_default=False):
-    backend = tvm.target.Target(target)
+    backend = tvm_tirx.target.Target(target)
     function = function.with_attr("target", backend)
     original = ir.save_json(function)
     if use_native_default:
@@ -213,7 +213,7 @@ def test_tilelang_allreduce_does_not_accept_arbitrary_scratch_scopes(scope):
 
 
 def test_allreduce_keeps_global_callees_and_module_context_visible_to_instruments():
-    backend = tvm.target.Target("cuda")
+    backend = tvm_tirx.target.Target("cuda")
     helper_var = ir.GlobalVar("helper")
     helper = tirx.Function([], [ir.Evaluate(ir.const(0))], ret_type=ir.PrimType("void"), attrs=ir.DictAttrs({"target": backend}))
     main = make_reduction("int8").with_attr("target", backend)
@@ -270,9 +270,9 @@ def test_tilelang_allreduce_cuda_executes(dtype, threads, groups, valid, maximum
     selected = values if valid is None else values[:, :valid]
     expected = selected.max(axis=-1) if maximum else selected.sum(axis=-1).astype(dtype)
     expected = np.repeat(expected[:, None], threads, axis=1)
-    device = tvm.cuda(0)
-    src = tvm.runtime.tensor(values, device)
-    output = tvm.runtime.tensor(np.zeros_like(values), device)
+    device = tvm_tirx.cuda(0)
+    src = tvm_tirx.runtime.tensor(values, device)
+    output = tvm_tirx.runtime.tensor(np.zeros_like(values), device)
     for _ in range(10):
         module(src, output)
         np.testing.assert_array_equal(output.numpy(), expected)
@@ -300,8 +300,8 @@ def test_noncontiguous_reduction_axis_executes(tmp_path):
     module, _ = build_cuda(function, tmp_path)
     values = (np.arange(48) % 5 - 8).reshape(3, 16).astype("int8")
     expected = np.repeat(values.max(axis=1)[:, None], 16, axis=1)
-    source = tvm.runtime.tensor(values, tvm.cuda(0))
-    output = tvm.runtime.tensor(np.zeros_like(values), tvm.cuda(0))
+    source = tvm_tirx.runtime.tensor(values, tvm_tirx.cuda(0))
+    output = tvm_tirx.runtime.tensor(np.zeros_like(values), tvm_tirx.cuda(0))
     for _ in range(10):
         module(source, output)
         np.testing.assert_array_equal(output.numpy(), expected)
@@ -317,9 +317,9 @@ def test_tuple_allreduce_executes_with_two_result_types(tmp_path):
     function = lower(make_tuple_reduction()).without_attr("target")
     module, _ = build_cuda(function, tmp_path)
     values = (np.arange(32) % 7 - 10).astype("int8")
-    source = tvm.runtime.tensor(values, tvm.cuda(0))
-    sums = tvm.runtime.tensor(np.zeros(32, dtype="int32"), tvm.cuda(0))
-    maxima = tvm.runtime.tensor(np.zeros(32, dtype="int8"), tvm.cuda(0))
+    source = tvm_tirx.runtime.tensor(values, tvm_tirx.cuda(0))
+    sums = tvm_tirx.runtime.tensor(np.zeros(32, dtype="int32"), tvm_tirx.cuda(0))
+    maxima = tvm_tirx.runtime.tensor(np.zeros(32, dtype="int8"), tvm_tirx.cuda(0))
     for _ in range(10):
         module(source, sums, maxima)
         np.testing.assert_array_equal(sums.numpy(), np.full(32, values.sum(dtype="int32")))

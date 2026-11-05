@@ -1,5 +1,5 @@
 # ruff: noqa
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -11,13 +11,13 @@ from tvm_tirx import ir
 # Direct pipeline tests initialize the owning lowering callbacks explicitly.
 tl.cuda.register_backend()
 
-sm100_target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
-sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+sm100_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
+sm90_target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
 
 def _apply(func, target=sm100_target):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.cuda.transform.InjectTcgen05Fence()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     return mod
@@ -25,10 +25,10 @@ def _apply(func, target=sm100_target):
 
 def _check(original, expected, target=sm100_target):
     mod = _apply(original, target)
-    expected_mod = tvm.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
-    expected_mod = tvm.tirx.transform.BindTarget(target)(expected_mod)
+    expected_mod = tvm_tirx.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
+    expected_mod = tvm_tirx.tirx.transform.BindTarget(target)(expected_mod)
     expected_mod = tl.transform.LowerOpaqueBlock()(expected_mod)
-    tvm.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
 
 
 def _count_extern_calls_with_prefix(stmt, prefix: str):
@@ -105,7 +105,7 @@ def test_lower_tmem_copy_uses_tcgen05_ld_intrin():
             T.copy(C_tmem, C_local)
             T.copy(C_local, Y[0, 0])
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with sm100_target:
         mod = CUDAPassPipelineBodyPrologue(mod, sm100_target)
         mod = tl.cuda.transform.LowerSharedTmem()(mod)
@@ -181,7 +181,7 @@ def test_lower_tmem_copy_uses_tcgen05_st_intrin():
                 clear_accum=True,
             )
 
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with sm100_target:
         mod = CUDAPassPipelineBodyPrologue(mod, sm100_target)
         mod = tl.cuda.transform.LowerSharedTmem()(mod)

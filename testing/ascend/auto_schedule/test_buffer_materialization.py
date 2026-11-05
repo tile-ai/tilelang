@@ -16,7 +16,7 @@ from testing.ascend._ir import (
 )
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from testing.ascend._ir import allocated_buffer, calls, kernel, nodes, region, seq
 from testing.ascend.auto_schedule._scheduled_ir import copy_ring, unit
@@ -41,7 +41,7 @@ def test_physical_versions_use_the_prepared_clock(mode, owners, guarded, version
     else:
         (loop,) = nodes(before, ir.For)
         clock = loop.var
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     if versions > 1:
         assert all(analyzer.can_prove_equal(operand.region[0].begin, clock % versions) for operand in accesses)
     else:
@@ -109,7 +109,7 @@ def test_aliases_use_allocation_pitch(scope, base_dtype, shape, dtype, pitch):
     (view_definition,) = [binding for binding in nodes(after, ir.Bind) if binding.var.same_as(access_tensor(alias_store))]
     (storage_pointer,) = calls(view_definition, "tirx.tensor_data_ptr")
     assert storage_pointer.args[0].same_as(access_tensor(base_store))
-    tvm.ir.assert_structural_equal(alias_store.indices[0], base_store.indices[0])
+    tvm_tirx.ir.assert_structural_equal(alias_store.indices[0], base_store.indices[0])
 
 
 @pytest.mark.parametrize("partial", [False, True], ids=["whole-tile", "partial-tile"])
@@ -120,7 +120,7 @@ def test_broadcast_fill_initializes_every_version(partial, versions):
     fill = ir.Evaluate(
         tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
             ir.PrimType("void"),
-            tvm.ir.Op.get("tl.tileop.fill"),
+            tvm_tirx.ir.Op.get("tl.tileop.fill"),
             [region(ub, 2, shape=[32 if partial else 64]), ir.const(0, "float32")],
             {},
             ir.UnknownLoc(),
@@ -176,7 +176,7 @@ def test_storage_reads_in_guards_follow_the_owner_version(kind):
     assert len(expressions) == 1
     (load,) = nodes(expressions[0], ir.TensorLoad)
     assert len(load.indices) == 2
-    assert tvm.sym.Analyzer().can_prove_equal(load.indices[0], i % 2)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(load.indices[0], i % 2)
 
 
 @pytest.mark.parametrize("start, step", [(0, 1), (3, 2)])
@@ -201,7 +201,7 @@ def test_iteration_clock_counts_logical_trips_across_nested_loops(start, step):
     after = transform.MaterializeMultiBuffer()(before)
     (store,) = nodes(after, ir.TensorStore)
     expected = (outer * (4 // step) + (inner - start) // step) % 3
-    assert tvm.sym.Analyzer().can_prove_equal(store.indices[0], expected)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(store.indices[0], expected)
 
 
 @pytest.mark.parametrize("versions", [(1, 1), (1, 2)], ids=["unit-only-group", "mixed-group"])
@@ -240,7 +240,7 @@ def test_counter_group_survives_only_for_physical_versions(versions):
     if versions[1] > 1:
         assert len(counters) == 1 and len(updates) == 2
         assert len(y_store.indices) == 2
-        assert tvm.sym.Analyzer().can_prove_equal(y_store.indices[0], epoch[0] % versions[1])
+        assert tvm_tirx.sym.Analyzer().can_prove_equal(y_store.indices[0], epoch[0] % versions[1])
     else:
         assert not counters and not updates
         assert len(y_store.indices) == 1
@@ -298,5 +298,5 @@ def test_bound_data_and_sf_preserve_user_leading_dimensions_under_one_ring():
     stores = nodes(after, ir.TensorStore)
     assert len(stores) == 2
     for store in stores:
-        assert tvm.sym.Analyzer().can_prove_equal(store.indices[0], i % 2)
+        assert tvm_tirx.sym.Analyzer().can_prove_equal(store.indices[0], i % 2)
         assert [int(x) for x in store.indices[1:]] == [1, 2, 0, 0]

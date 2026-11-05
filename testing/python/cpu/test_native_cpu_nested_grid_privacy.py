@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang.cpu.transform
@@ -29,7 +29,9 @@ def _grid(index, body):
 
 
 def _run(out, body, target):
-    function = tirx.Function([out], body).with_attr({"target": tvm.target.Target(target), "global_symbol": "main", "tirx.noalias": True})
+    function = tirx.Function([out], body).with_attr(
+        {"target": tvm_tirx.target.Target(target), "global_symbol": "main", "tirx.noalias": True}
+    )
     module = ir.IRModule.from_expr(function)
     snapshot = ir.save_json(module)
     assert tirx.analysis.check_well_formed(module)
@@ -58,7 +60,7 @@ def test_nested_grid_sinks_alias_group_without_erasing_lexical_boundary(target):
     assert region.op.name == "tl.lexical_scope" and region.attrs["explicit_alloc_scope"]
     assert parallel in _walk(region.body, ir.For)
     if target == "c":
-        actual = tvm.runtime.tensor(np.zeros(16, dtype="int32"))
+        actual = tvm_tirx.runtime.tensor(np.zeros(16, dtype="int32"))
         compile_packed_function(result)(actual)
         np.testing.assert_array_equal(actual.numpy(), np.tile(np.arange(1, 9, dtype="int32"), 2))
 

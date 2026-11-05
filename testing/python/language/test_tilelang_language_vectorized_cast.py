@@ -2,7 +2,7 @@ import pytest
 import torch
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 import tvm_ffi
@@ -197,8 +197,8 @@ def test_fp4_fp8_codegen(lanes, destination, via_fp32):
     converted = prim.Cast(destination + suffix, source_value)
     func = tirx.Function([value], ir.SeqStmt([ir.Evaluate(converted)]), ir.TupleType([]))
     func = func.with_attr("global_symbol", "fp4_fp8_cast")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    source = build(tvm.IRModule({"fp4_fp8_cast": func}), tvm.target.Target("cuda")).inspect_source()
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    source = build(tvm_tirx.IRModule({"fp4_fp8_cast": func}), tvm_tirx.target.Target("cuda")).inspect_source()
     assert source.count(fp4_to_fp8_helper(lanes)) == max(1, lanes // 4)
     assert "__tl_cvt_fp4x2_to_float2" not in source
     assert "__nv_cvt_float2_to_fp8x2" not in source
@@ -218,7 +218,7 @@ def test_fp4_fp8_codegen(lanes, destination, via_fp32):
                 else prim.Cast(destination + suffix, intermediate)
             )
             annotated_func = func.with_body(ir.SeqStmt([ir.Evaluate(annotated)]))
-            annotated_source = build(tvm.IRModule({"fp4_fp8_cast": annotated_func}), tvm.target.Target("cuda")).inspect_source()
+            annotated_source = build(tvm_tirx.IRModule({"fp4_fp8_cast": annotated_func}), tvm_tirx.target.Target("cuda")).inspect_source()
             assert "__tl_cvt_e2m1" not in annotated_source
             assert "__tl_cvt_fp4x2_to_float2" in annotated_source
             assert "__nv_cvt_float2_to_fp8x2" in annotated_source

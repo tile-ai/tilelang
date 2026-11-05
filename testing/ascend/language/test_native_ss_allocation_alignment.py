@@ -7,7 +7,7 @@ from testing.ascend._ir import allocated_tensors, kernel, nodes, tensor
 from testing.ascend._memory_ir import address_bits
 from tilelang.ascend import transform
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -90,7 +90,7 @@ def test_original_two_allocation_kernel_has_exact_native_store_addresses(tmp_pat
                 snapshots.append(module)
 
     saved = ir.save_json(main)
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(main, target="ascend", enable_device_compile=False)
     assert ir.save_json(main) == saved
     (merged,) = snapshots

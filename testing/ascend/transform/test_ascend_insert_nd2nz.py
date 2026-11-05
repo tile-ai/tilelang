@@ -4,7 +4,7 @@ from tvm_tirx import ir
 from testing.ascend._ir import allocated_tensors, sblock, single_statement, tensor
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_compact_nz_layout
 from tvm_tirx import tirx
@@ -28,8 +28,8 @@ def _module(*, rows=16, cols=128, padding=1, strides=None, staged=False, reshape
     i = ir.Var("stage", "int32")
 
     def region(buffer):
-        ranges = [tvm.ir.Range.from_min_extent(i, 1)] if staged else []
-        return ir.TensorRegion(buffer, ranges + [tvm.ir.Range(0, rows), tvm.ir.Range(0, cols)], ir.TensorRegionType())
+        ranges = [tvm_tirx.ir.Range.from_min_extent(i, 1)] if staged else []
+        return ir.TensorRegion(buffer, ranges + [tvm_tirx.ir.Range(0, rows), tvm_tirx.ir.Range(0, cols)], ir.TensorRegionType())
 
     body = ir.Evaluate(T.copy(region(src), region(dst)))
     if vf:
@@ -39,7 +39,7 @@ def _module(*, rows=16, cols=128, padding=1, strides=None, staged=False, reshape
     if reshape:
         body = ir.SeqStmt([_view_binding(src, owner), body])
     root = sblock("root", body, buffers=[owner, dst], annotations={"layout_map": {dst: make_ascend_compact_nz_layout(dst)}})
-    return tvm.IRModule({"main": tirx.Function([], root)})
+    return tvm_tirx.IRModule({"main": tirx.Function([], root)})
 
 
 @pytest.mark.parametrize("case", ["plain", "staged", "reshape", "simd", "simt"])
@@ -47,14 +47,14 @@ def test_scatter_regions_and_vf_boundary(case):
     before = _module(staged=case == "staged", reshape=case == "reshape", vf={"simd": "SIMD_VF", "simt": "SIMT_VF"}.get(case))
     after = transform.InsertNd2Nz()(before)
     if case == "simt":
-        tvm.ir.assert_structural_equal(after, before)
+        tvm_tirx.ir.assert_structural_equal(after, before)
         return
     (scatter,) = calls(after, "tl.ascend_nd2nz_scatter")
     assert [int(x) for x in scatter.args[2:4]] == [16, 128]
     assert [str(x.value) for x in scatter.args[5:7]] == ["bfloat16_t", "float"]
     assert not calls(after, "tl.tileop.ascend_copy")
     # The destination footprint includes the bank-conflict padding row.
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert int(analyzer.simplify(scatter.args[0].args[1])) == 16 * 128
     assert int(analyzer.simplify(scatter.args[1].args[1])) == ((128 // 8 - 1) * 17 + 16) * 8
     if case == "staged":
@@ -107,7 +107,7 @@ def test_partial_nz_copy_uses_complete_storage_pitches(padding, parts):
         assert [int(x) for x in call.args[2:6]] == [rows, 64, 64 + padding, 64]
         assert [int(x) for x in call.args[1].args[0].indices] == [1, i * rows, 16]
         assert [int(x) for x in call.args[0].args[0].indices] == [1, i * rows, 32]
-        assert int(tvm.sym.Analyzer().simplify(call.args[1].args[1])) == (3 * (64 + padding) + rows) * 16
+        assert int(tvm_tirx.sym.Analyzer().simplify(call.args[1].args[1])) == (3 * (64 + padding) + rows) * 16
 
 
 @pytest.mark.parametrize("padding", [0, 1, 7])

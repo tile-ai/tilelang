@@ -7,7 +7,7 @@ import torch
 
 from typing import Any
 from collections.abc import Callable
-from tilelang import tvm as tvm
+import tvm_tirx
 from tvm_tirx.target import Target
 from tilelang.engine.param import KernelParam
 from tvm_tirx import ir, tirx
@@ -68,7 +68,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
 
     # Class attributes to store compiled kernel information
     target: str | Target = "cuda"
-    ir_module: tvm.IRModule | None = None
+    ir_module: tvm_tirx.IRModule | None = None
     # The global source code of the kernel -> global means the source code of the kernel
     # that is not wrapped by the wrapper code
     host_kernel_source: str | None = None
@@ -101,9 +101,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         target: str | Target,
-        func_or_mod: tirx.Function | tvm.IRModule,
-        host_mod: tvm.IRModule | None = None,
-        device_mod: tvm.IRModule | None = None,
+        func_or_mod: tirx.Function | tvm_tirx.IRModule,
+        host_mod: tvm_tirx.IRModule | None = None,
+        device_mod: tvm_tirx.IRModule | None = None,
         device_kernel_source: str | None = None,
         verbose: bool = False,
         pass_configs: dict[str, Any] | None = None,
@@ -124,7 +124,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         self.kernel_global_source = device_kernel_source  # Set alias for compatibility
 
         if isinstance(func_or_mod, tirx.Function):
-            self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            self.ir_module = tvm_tirx.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
 
@@ -183,7 +183,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         target: str,
-        func_or_mod: tirx.Function | tvm.IRModule,
+        func_or_mod: tirx.Function | tvm_tirx.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -200,7 +200,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tirx.Function):
-            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            adapter.ir_module = tvm_tirx.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             adapter.ir_module = func_or_mod
 

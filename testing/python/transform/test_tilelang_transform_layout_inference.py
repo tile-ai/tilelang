@@ -3,7 +3,7 @@ import re
 import tvm_ffi
 from tvm_tirx import ir
 
-from tilelang import tvm as tvm
+import tvm_tirx
 from tilelang.backend.target import determine_target
 import tilelang as tl
 import tilelang.language as T
@@ -11,7 +11,7 @@ import tilelang.testing
 import pytest
 import torch
 
-auto_target = tvm.target.Target(determine_target("auto"))
+auto_target = tvm_tirx.target.Target(determine_target("auto"))
 
 
 def _assert_launch_bounds(kernel_source: str, threads: int) -> None:
@@ -60,7 +60,7 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                 T.float16(0),
                             )
 
-        return tvm.IRModule({"main": main})
+        return tvm_tirx.IRModule({"main": main})
 
     def after():
         @T.prim_func
@@ -102,21 +102,21 @@ def test_loop_tail_split(block_M, block_N, block_K, threads, vec_load_b, dtype):
                                     T.float16(0),
                                 )
 
-        return tvm.IRModule({"main": main})
+        return tvm_tirx.IRModule({"main": main})
 
-    with tvm.target.Target(auto_target):
-        mod = tvm.tirx.transform.BindTarget(auto_target)(before())
+    with tvm_tirx.target.Target(auto_target):
+        mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(before())
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.LayoutInference()(mod)
         mod = tl.transform.Simplify()(mod)
-        ref_mod = tvm.tirx.transform.BindTarget(auto_target)(after())
+        ref_mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(after())
         ref_mod = tl.transform.MaterializeKernelLaunch()(ref_mod)
         ref_mod = tl.transform.Simplify()(ref_mod)
         # Note(tzj): The structures are equal except one more "for" loop after the LayoutInference pass
         # This loop is "for vec in T.parallel(1)",
         # Since the loop var "vec" is never used in the loop body, it does not affect the correctness
         tvm_ffi.structural_equal(mod, ref_mod)
-        # tvm.ir.assert_structural_equal(mod, ref_mod)
+        # tvm_tirx.ir.assert_structural_equal(mod, ref_mod)
 
 
 def test_register_count_is_default_layout_cost_model():
@@ -135,9 +135,9 @@ def test_register_count_is_default_layout_cost_model():
     target = auto_target
 
     def infer(pass_configs=None):
-        with target, tvm.transform.PassContext(config=pass_configs or {}):
-            mod = tvm.IRModule({"main": main})
-            mod = tvm.tirx.transform.BindTarget(target)(mod)
+        with target, tvm_tirx.transform.PassContext(config=pass_configs or {}):
+            mod = tvm_tirx.IRModule({"main": main})
+            mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
             mod = tl.transform.MaterializeKernelLaunch()(mod)
             return tl.transform.LayoutInference()(mod)
 
@@ -145,7 +145,7 @@ def test_register_count_is_default_layout_cost_model():
     register_count = infer({"tl.layout_cost_model": "register-count"})
     io_aware = infer({"tl.layout_cost_model": "io-aware"})
 
-    tvm.ir.assert_structural_equal(default, register_count)
+    tvm_tirx.ir.assert_structural_equal(default, register_count)
     assert not tvm_ffi.structural_equal(default, io_aware)
 
 
@@ -161,7 +161,7 @@ def test_static_ragged_copy_minimizes_full_thread_padding():
         with T.Kernel(1, threads=threads):
             T.copy(A, B)
 
-    with tvm.target.Target(auto_target):
+    with tvm_tirx.target.Target(auto_target):
         artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
 
     kernel_source = str(artifact.kernel_source)
@@ -184,7 +184,7 @@ def test_static_ragged_fp8_copy_minimizes_full_thread_padding():
             S = T.alloc_shared((n,), T.float8_e4m3)
             T.copy(S, B, disable_tma=True)
 
-    with tvm.target.Target(auto_target):
+    with tvm_tirx.target.Target(auto_target):
         artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
 
     kernel_source = str(artifact.kernel_source)
@@ -206,7 +206,7 @@ def test_static_ragged_copy_allows_1024_elements_384_threads():
         with T.Kernel(1, threads=threads):
             T.copy(A, B, coalesced_width=1)
 
-    with tvm.target.Target(auto_target):
+    with tvm_tirx.target.Target(auto_target):
         artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
 
     kernel_source = str(artifact.kernel_source)
@@ -240,7 +240,7 @@ def test_column_broadcast_fragment_tile_width_lowers(block_n):
             T.copy(x, xs)
             T.copy(xs, Out[by * block_m, bx * block_n])
 
-    with tvm.target.Target(auto_target):
+    with tvm_tirx.target.Target(auto_target):
         artifact = tl.lower(main, target=auto_target, enable_device_compile=False)
 
     assert artifact.kernel_source

@@ -10,7 +10,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.ir import (
     get_buffer_span,
@@ -224,7 +224,7 @@ def _make_pipeline_duplicate_order():
 @tilelang.testing.requires_metal
 def test_error_span_pipeline_duplicate_order():
     func = _make_pipeline_duplicate_order()
-    with pytest.raises(Exception) as excinfo, tvm.target.Target("metal"):
+    with pytest.raises(Exception) as excinfo, tvm_tirx.target.Target("metal"):
         tilelang.lower(func, target="metal")
     assert "same order" in str(excinfo.value)
     _expect_error_at(excinfo, "span_marker_pipe_copy2")

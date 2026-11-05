@@ -10,7 +10,7 @@ import torch
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout
 
 
@@ -85,7 +85,7 @@ def _manual_mixed_dual_copy():
 
 
 def test_manual_pipeline_rewrites_compact_nz_dual_copy():
-    with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
+    with tvm_tirx.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
         source = tilelang.lower(_manual_compact_nz_dual_copy(), target="ascend").kernel_source
     assert "__global__ __mix__(1, 2)" in source
     assert source.count("asc_get_sub_block_id()") == 1
@@ -93,7 +93,7 @@ def test_manual_pipeline_rewrites_compact_nz_dual_copy():
 
 
 def test_manual_mixed_pipeline_shares_sub_block_id():
-    with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
+    with tvm_tirx.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE.value: False}):
         source = tilelang.lower(_manual_mixed_dual_copy(), target="ascend").kernel_source
     assert "__global__ __mix__(1, 2)" in source
     assert source.count("asc_get_sub_block_id()") == 1

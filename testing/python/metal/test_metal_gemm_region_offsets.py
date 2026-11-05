@@ -2,7 +2,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import torch
-from tilelang import tvm
+import tvm_tirx
 
 
 @T.prim_func
@@ -23,7 +23,7 @@ def region_gemm(
 
 
 def test_region_offsets_lower_for_transposed_rhs():
-    with tvm.transform.PassContext(), tvm.target.Target("metal"):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target("metal"):
         tilelang.lower(region_gemm, target="metal")
 
 

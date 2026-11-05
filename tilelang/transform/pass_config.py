@@ -24,7 +24,7 @@ class PassConfigKey(str, Enum):
     - enable_simplify_let_inline: bool, default True
 
     Usage:
-        with tvm.transform.PassContext(config={
+        with tvm_tirx.transform.PassContext(config={
             "tl.Simplify": {"enable_simplify_let_inline": False}
         }):
             mod = tl.transform.Simplify()(mod)

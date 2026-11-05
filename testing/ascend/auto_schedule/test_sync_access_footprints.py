@@ -6,7 +6,7 @@ from testing.ascend._ir import tensor
 import pytest
 
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tilelang.layout import make_ascend_nz_layout
 from testing.ascend._ir import calls, copy, kernel, schedule, seq
@@ -14,7 +14,7 @@ from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
 def _events(program, disable_reuse=False, auto_schedule=False):
-    with tvm.transform.PassContext(config={"tl.disable_shared_memory_reuse": disable_reuse}):
+    with tvm_tirx.transform.PassContext(config={"tl.disable_shared_memory_reuse": disable_reuse}):
         before = schedule(program, through="ResolveCore", auto_schedule=auto_schedule)
         after = transform.InsertSync()(before)
         return {
@@ -29,7 +29,7 @@ def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope
     src = tensor((48, 16), "bfloat16", name="src", scope="shared.l1")
     dst = tensor((32, 16), "bfloat16", name="dst", scope=scope)
     load = unit(copy(src, dst, src_shape=[24, 16], dst_shape=[24, 16]), core=2)
-    padding = ir.TensorRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)], ir.TensorRegionType())
+    padding = ir.TensorRegion(src, [tvm_tirx.ir.Range.from_min_extent(row, 8), tvm_tirx.ir.Range(0, 16)], ir.TensorRegionType())
     fill = unit(ir.Evaluate(T.fill(padding, 0)), core=2)
     # The copy normalizer exposes its two transferred row16 blocks. Fill
     # keeps the explicitly requested eight rows.
@@ -45,7 +45,7 @@ def test_l0_tail_load_accounts_for_source_fractal_padding(fill_first, row, scope
     events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
     if row == 24:
         assert len(events) == 2
-        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+        tvm_tirx.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
     else:
         assert not events
 
@@ -77,7 +77,7 @@ def test_declared_l1_pointer_read_keeps_its_own_footprint(fill_first, row):
     read = unit(
         ir.Evaluate(ir.Call("tirx.call_extern", [ir.StringImm("read_l1"), T.access_ptr(src[0, 0], "r", 24, 16)], ty="int32")), core=2
     )
-    region = ir.TensorRegion(src, [tvm.ir.Range.from_min_extent(row, 8), tvm.ir.Range(0, 16)], ir.TensorRegionType())
+    region = ir.TensorRegion(src, [tvm_tirx.ir.Range.from_min_extent(row, 8), tvm_tirx.ir.Range(0, 16)], ir.TensorRegionType())
     fill = unit(ir.Evaluate(T.fill(region, 0)), core=2)
     before = kernel(seq(fill, read) if fill_first else seq(read, fill), buffers=[src], allocation_stage=0)
     after = transform.InsertSync()(before)
@@ -85,7 +85,7 @@ def test_declared_l1_pointer_read_keeps_its_own_footprint(fill_first, row):
     events = [call for op in ("set", "wait") for call in calls(after, "tl.ascend_" + op + "_flag") if call.args[0].value == pipe]
     assert len(events) == (2 if row == 16 else 0)
     if events:
-        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+        tvm_tirx.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
 
 
 @pytest.mark.parametrize("disable_reuse", [False, True])

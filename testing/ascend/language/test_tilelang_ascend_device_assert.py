@@ -1,5 +1,7 @@
 """Test T.device_assert() on Ascend target."""
 
+import tvm_tirx
+
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -16,7 +18,7 @@ def _enable_device_assert_for_source_checks(monkeypatch):
 
 def _source(program):
     with (
-        tilelang.tvm.target.Target("ascend"),
+        tvm_tirx.target.Target("ascend"),
         tilelang.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}),
     ):
         return tilelang.lower(program, target="ascend").kernel_source

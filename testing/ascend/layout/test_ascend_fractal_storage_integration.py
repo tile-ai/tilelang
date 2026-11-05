@@ -7,7 +7,7 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from testing.ascend._ir import allocated_buffer, calls, statements
 from testing.ascend._memory_ir import element_offset, storage_owner
 
@@ -32,7 +32,7 @@ def test_padded_alias_storage_sets_the_physical_version_pitch():
             if info.name in {"tl.MaterializeMultiBuffer", "tl.FlattenBuffer"}:
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         tilelang.lower(main, target="ascend")
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     storage = allocated_buffer(materialized, "storage")
@@ -40,7 +40,7 @@ def test_padded_alias_storage_sets_the_physical_version_pitch():
     # between the two actual coordinates, retaining any view's base address.
     first = ir.TensorLoad(storage, [0] * len(storage.ty.shape))
     next_version = ir.TensorLoad(storage, [1, *([0] * (len(storage.ty.shape) - 1))])
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert analyzer.can_prove_equal(element_offset(materialized, next_version) - element_offset(materialized, first), 256)
     flat = snapshots["tl.FlattenBuffer"]
     (allocation,) = [access_tensor(node) for node in allocations(flat) if access_tensor(node).ty.scope.name == "shared.l1"]
@@ -76,14 +76,14 @@ def test_dynamic_fixpipe_padding_survives_full_lowering():
             if info.name == "tl.AscendLowerTileOp":
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         tilelang.lower(main, target="ascend")
     lowered = snapshots["tl.AscendLowerTileOp"]
     (copy,) = calls(lowered, "tl.ascend_copy_matrix_cc_to_ub")
     (parents,) = [ancestors for stmt, ancestors in statements(lowered) if isinstance(stmt, ir.Evaluate) and stmt.value.same_as(copy)]
     guard = next(parent.condition for parent in reversed(parents) if isinstance(parent, ir.If))
     n = lowered["main"].params[-1]
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for value in range(5):
         replacements = {n: ir.IntImm("int32", value)}
         assert int(analyzer.simplify(substitute(copy.args[3], replacements))) == (8 if value else 0)

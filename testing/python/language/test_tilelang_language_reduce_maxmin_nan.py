@@ -1,6 +1,8 @@
 """Tests for the per-call ``nan_propagate`` kwarg on T.reduce_max / reduce_min /
 reduce_absmax for float16 and bfloat16 buffers (CUDA only)."""
 
+import tvm_tirx
+
 import math
 
 import pytest
@@ -193,9 +195,9 @@ def test_reduce_nan_dtype_contract(reduce_fn, dtype, clear, nan_propagate):
             reduce_fn(values, result, clear=clear, nan_propagate=nan_propagate)
             T.copy(result, out)
 
-    target = tilelang.tvm.target.Target("c")
-    mod = tilelang.tvm.IRModule({"main": kernel})
-    mod = tilelang.tvm.tirx.transform.BindTarget(target)(mod)
+    target = tvm_tirx.target.Target("c")
+    mod = tvm_tirx.IRModule({"main": kernel})
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     if nan_propagate and dtype not in (T.float16, T.bfloat16):
         with pytest.raises(ValueError, match=rf"nan_propagate=True requires float16 or bfloat16 output, got T\.{dtype}\b"):

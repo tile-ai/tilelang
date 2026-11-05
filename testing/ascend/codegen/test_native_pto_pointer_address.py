@@ -4,11 +4,11 @@ import ast
 from dataclasses import dataclass
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 
 from testing.ascend.codegen.test_native_codegen_pto import _alloc, _decl, _mad, _ptr, _source, _tensor
 
-I = tvm.ir
+I = tvm_tirx.ir
 SPACES = {
     "shared.dyn": "ub",
     "shared.l1": "mat",
@@ -78,7 +78,7 @@ def _address_oracle(source, bindings=None):
 def test_non_cube_allocation_has_a_typed_address(scope, space, index, tmp_path):
     tensor = _tensor("storage", "float32", scope, (256,))
     pointer = _ptr("result", "float32", scope)
-    source = _source([], [_alloc(tensor), I.Bind(pointer, tvm.tirx.address_of(tensor[index]))], tmp_path)
+    source = _source([], [_alloc(tensor), I.Bind(pointer, tvm_tirx.tirx.address_of(tensor[index]))], tmp_path)
     values = _address_oracle(source)
     assert values["storage"] == Pointer(0, PointerType(4, space))
     assert values["result"] == Pointer(index * 4, PointerType(4, space))
@@ -90,12 +90,12 @@ def test_non_cube_allocation_has_a_typed_address(scope, space, index, tmp_path):
 def test_declared_reinterpret_view_retains_nonzero_byte_base(scope, space, index, tmp_path):
     raw = _ptr("raw", "uint8", scope)
     dtype = I.PtrType(I.PrimType("float32"), scope)
-    offset = tvm.tirx.ptr_byte_offset(raw, I.const(64, "int64"), ty=raw.ty)
+    offset = tvm_tirx.tirx.ptr_byte_offset(raw, I.const(64, "int64"), ty=raw.ty)
     tensor = _tensor("view", "float32", scope)
     pointer = _ptr("result", "float32", scope)
     source = _source(
         [raw],
-        [_decl(tensor, I.Call("tirx.reinterpret", [offset], ty=dtype)), I.Bind(pointer, tvm.tirx.address_of(tensor[index]))],
+        [_decl(tensor, I.Call("tirx.reinterpret", [offset], ty=dtype)), I.Bind(pointer, tvm_tirx.tirx.address_of(tensor[index]))],
         tmp_path,
     )
     values = _address_oracle(source, {"raw": Pointer(4096, PointerType(1, space))})
@@ -109,7 +109,7 @@ def test_cube_integer_allocation_casts_before_element_offset(index, tmp_path):
     b = _tensor("b", "float32", "shared.l0b", (256,))
     c = _tensor("c", "float32", "shared.l0c", (256,))
     pointer = _ptr("result", "float32", "shared.l0a")
-    source = _source([], [_alloc(a), _alloc(b), _alloc(c), I.Bind(pointer, tvm.tirx.address_of(a[index])), _mad(a, b, c)], tmp_path)
+    source = _source([], [_alloc(a), _alloc(b), _alloc(c), I.Bind(pointer, tvm_tirx.tirx.address_of(a[index])), _mad(a, b, c)], tmp_path)
     values = _address_oracle(source)
     assert values["a"] == 0
     assert values["result"] == Pointer(index * 4, PointerType(4, "left"))
@@ -121,11 +121,11 @@ def test_scalar_fp4_odd_pointer_offset_remains_rejected(scope, tmp_path):
     tensor = _tensor("view", "float4_e2m1fn", scope)
     pointer = _ptr("result", "float4_e2m1fn", scope)
     with pytest.raises(RuntimeError, match="offset must be aligned to packed storage"):
-        _source([raw], [_decl(tensor, raw), I.Bind(pointer, tvm.tirx.address_of(tensor[1]))], tmp_path)
+        _source([raw], [_decl(tensor, raw), I.Bind(pointer, tvm_tirx.tirx.address_of(tensor[1]))], tmp_path)
 
 
 def test_register_tensor_has_no_invented_memory_address_space(tmp_path):
     tensor = _tensor("reg", "int32", "local.var", (1,))
     pointer = _ptr("result", "int32", "local.var")
     with pytest.raises(ValueError, match="unsupported address space: local.var"):
-        _source([], [_alloc(tensor), I.Bind(pointer, tvm.tirx.address_of(tensor[0]))], tmp_path)
+        _source([], [_alloc(tensor), I.Bind(pointer, tvm_tirx.tirx.address_of(tensor[0]))], tmp_path)

@@ -8,7 +8,7 @@ import sys
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.ir.transform import PassContext
 from tvm_tirx.support import tar, utils
 
@@ -19,7 +19,7 @@ def test_toolchains_import_without_legacy_tvm():
     assert "tvm" not in sys.modules
     assert cc._utils is utils
     assert cc._tar is tar
-    assert nvcc.Target is tvm.target.Target
+    assert nvcc.Target is tvm_tirx.target.Target
 
 
 def test_native_cc_compiles_and_executes(tmp_path):
@@ -64,7 +64,7 @@ def test_nvcc_uses_native_target_and_persistent_pass_context(tmp_path):
         pytest.skip("NVCC is unavailable")
     artifacts = tmp_path / "kernels"
     source = 'extern "C" __global__ void bump(float* p) { p[threadIdx.x] += 2.0f; }'
-    with tvm.target.Target({"kind": "cuda", "arch": "sm_80"}), PassContext(config={"cuda.kernels_output_dir": str(artifacts)}):
+    with tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"}), PassContext(config={"cuda.kernels_output_dir": str(artifacts)}):
         binary = nvcc.compile_cuda(source, target_format="ptx")
     assert b".visible .entry bump" in binary
     inputs = list(artifacts.glob("*.cu"))
@@ -80,7 +80,7 @@ def test_nvrtc_uses_native_target_context(tmp_path):
 
     source = 'extern "C" __global__ void bump(float* p) { p[threadIdx.x] += 2.0f; }'
     templates = Path(__file__).resolve().parents[3] / "src"
-    with tvm.target.Target({"kind": "cuda", "arch": "sm_80"}):
+    with tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"}):
         binary = nvrtc.compile_cuda(source, target_format="ptx", options=["--std=c++17", f"-I{templates}"], verbose=True)
     (tmp_path / "kernel.ptx").write_bytes(binary)
     assert b".visible .entry bump" in binary
@@ -109,7 +109,7 @@ def test_windows_import_libraries_follow_selected_native_provider(tmp_path, monk
     ffi.parent.mkdir()
     for path in (runtime, implib, ffi, provider / "tvm.lib"):
         path.touch()
-    monkeypatch.setattr(tvm.libinfo, "find_libtvm_runtime", lambda: str(runtime))
+    monkeypatch.setattr(tvm_tirx.libinfo, "find_libtvm_runtime", lambda: str(runtime))
     monkeypatch.setattr(tvm_ffi.libinfo, "find_windows_implib", lambda: str(ffi))
     directories, libraries = msvc._find_import_libs()
     assert libraries == [str(implib), str(ffi)]
@@ -120,6 +120,6 @@ def test_windows_missing_runtime_import_lib_cannot_fall_back_to_legacy(tmp_path,
     runtime = tmp_path / "tvm_runtime.dll"
     runtime.touch()
     (tmp_path / "tvm.lib").touch()
-    monkeypatch.setattr(tvm.libinfo, "find_libtvm_runtime", lambda: str(runtime))
+    monkeypatch.setattr(tvm_tirx.libinfo, "find_libtvm_runtime", lambda: str(runtime))
     with pytest.raises(RuntimeError, match="Missing TIRx runtime import library"):
         msvc._find_import_libs()

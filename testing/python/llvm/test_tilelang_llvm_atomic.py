@@ -13,11 +13,11 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 def _compile_llvm(func, out_idx):
-    with tvm.target.Target("llvm"):
+    with tvm_tirx.target.Target("llvm"):
         return tilelang.compile(func, out_idx=out_idx, target="llvm", execution_backend="tvm_ffi")
 
 

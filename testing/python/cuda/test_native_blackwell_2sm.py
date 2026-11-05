@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -69,12 +69,12 @@ def apply(body, tmp_path, arch="sm_100a", params=()):
     function = (
         tirx.Function(list(params), body)
         .with_attr("global_symbol", "main")
-        .with_attr("target", tvm.target.Target({"kind": "cuda", "arch": arch}))
+        .with_attr("target", tvm_tirx.target.Target({"kind": "cuda", "arch": arch}))
     )
     assert tirx.analysis.check_well_formed(function)
     before = ir.save_json(function)
     operation = tvm_ffi.get_global_func("tl.cuda.transform.LowerBlackwell2SM")()
-    result = operation(tvm.IRModule({"main": function}))
+    result = operation(tvm_tirx.IRModule({"main": function}))
     ir.assert_structural_equal(operation(result), result)
     assert tirx.analysis.check_well_formed(result)
     assert ir.save_json(function) == before

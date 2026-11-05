@@ -15,7 +15,7 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm as tvm
+import tvm_tirx
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +232,7 @@ def test_get_mxfp_intrin_group_returns_hip_source():
     """get_mxfp_intrin_group() returns HIP C++ source (not CUDA PTX) for gfx950."""
     from examples.dequantize_gemm.quantize import get_mxfp_intrin_group
 
-    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx950"})
+    target = tvm_tirx.target.Target({"kind": "hip", "mcpu": "gfx950"})
     info = get_mxfp_intrin_group(
         out_dtype=T.bfloat16,
         source_bit=4,

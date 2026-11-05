@@ -11,7 +11,7 @@ import torch
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang import tvm
+import tvm_tirx
 
 _FLOAT_OPS = ("sum", "max", "min", "abssum", "absmax")
 _BIT_OPS = ("bitand", "bitor", "bitxor")
@@ -126,7 +126,7 @@ def _make_kernel_3d(op: str, P: int, Q: int, R: int, dim: int, dtype: str):
 
 
 def _compile_c(func):
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         return tilelang.compile(
             func,
             out_idx=[2],
@@ -181,7 +181,7 @@ def test_cpu_reduce_3d(op, dim):
     P, Q, R = 2, 3, 4
     dtype = "float32" if op != "bitand" else "int32"
     func = _make_kernel_3d(op, P, Q, R, dim, dtype)
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         kernel = tilelang.compile(
             func,
             out_idx=[1],

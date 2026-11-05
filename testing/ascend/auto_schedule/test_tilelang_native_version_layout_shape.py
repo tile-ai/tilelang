@@ -1,7 +1,7 @@
 """Version layouts preserve logical index types and wide physical pitches."""
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import ir, tirx
 
@@ -43,7 +43,7 @@ def test_compact_versions_keep_exact_extent_types(index_type):
         assert str(dimension.ty) == index_type
     for original, extent in zip(storage.ty.shape, result.ty.shape[1:]):
         assert original.same_as(extent)
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert [int(analyzer.simplify(iterator.stride)) for iterator in layout.shard] == [1024, 64, 1]
     assert all(str(iterator.stride.ty) == "int64" for iterator in layout.shard)
 
@@ -55,7 +55,7 @@ def test_compact_versions_keep_exact_extent_types(index_type):
 def test_physical_stride_does_not_wrap_at_the_logical_index_width(index_type, shape, pitch):
     _, result = versioned(shape, index_type, "uint8")
     layout = result.ty.layout
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert int(analyzer.simplify(layout.shard[0].stride)) == pitch
     assert str(layout.shard[0].stride.ty) == "int64"
     for dimension, iterator in zip(result.ty.shape, layout.shard):

@@ -1,5 +1,7 @@
 """Test T.print() on Ascend target."""
 
+import tvm_tirx
+
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
@@ -7,7 +9,7 @@ import tilelang.testing
 
 def _source(program):
     with (
-        tilelang.tvm.target.Target("ascend"),
+        tvm_tirx.target.Target("ascend"),
         tilelang.transform.PassContext(config={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False}),
     ):
         return tilelang.lower(program, target="ascend").kernel_source

@@ -1,14 +1,14 @@
 import tilelang
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
 def test_same_device_cross_target_call_uses_callee_global_symbol():
-    callee_gvar = tvm.ir.GlobalVar("callee_hint")
+    callee_gvar = tvm_tirx.ir.GlobalVar("callee_hint")
     callee = (
         tirx.Function([], [ir.Return(ir.const(0, "int32"))], ret_type=ir.PrimType("int32"))
-        .with_attr("target", tvm.target.Target("llvm"))
+        .with_attr("target", tvm_tirx.target.Target("llvm"))
         .with_attr("global_symbol", "actual_callee")
     )
     caller = (
@@ -16,15 +16,15 @@ def test_same_device_cross_target_call_uses_callee_global_symbol():
             [],
             [ir.Evaluate(ir.Call(callee_gvar, [], ty="int32"))],
         )
-        .with_attr("target", tvm.target.Target({"kind": "llvm", "mcpu": "generic"}))
+        .with_attr("target", tvm_tirx.target.Target({"kind": "llvm", "mcpu": "generic"}))
         .with_attr("global_symbol", "caller")
     )
-    mod = tvm.IRModule({callee_gvar: callee, "caller": caller})
+    mod = tvm_tirx.IRModule({callee_gvar: callee, "caller": caller})
 
     after = tilelang.transform.LowerDeviceKernelLaunch()(mod)
     call = after["caller"].body[0].value
 
-    assert call.op.same_as(tvm.ir.Op.get("tirx.call_extern"))
+    assert call.op.same_as(tvm_tirx.ir.Op.get("tirx.call_extern"))
     assert call.args[0].value == "actual_callee"
 
 
@@ -35,16 +35,16 @@ def test_existing_extern_name_is_preserved_when_nested_argument_is_lowered(neste
         [],
         [ir.Return(ir.const(7, "int32"))],
         ret_type=ir.PrimType("int32"),
-        attrs=ir.DictAttrs({"global_symbol": "actual_callee", "target": tvm.target.Target("llvm")}),
+        attrs=ir.DictAttrs({"global_symbol": "actual_callee", "target": tvm_tirx.target.Target("llvm")}),
     )
     argument = ir.Call(symbol, [], ty="int32") if nested else ir.const(2, "int32")
     explicit = ir.Call("tirx.call_extern", [ir.StringImm("callee_hint"), argument], ty="int32")
     caller = tirx.Function(
         [],
         [ir.Evaluate(explicit), ir.Evaluate(ir.Call(symbol, [], ty="int32"))],
-        attrs=ir.DictAttrs({"global_symbol": "caller", "target": tvm.target.Target({"kind": "llvm", "mcpu": "generic"})}),
+        attrs=ir.DictAttrs({"global_symbol": "caller", "target": tvm_tirx.target.Target({"kind": "llvm", "mcpu": "generic"})}),
     )
-    module = tvm.IRModule({symbol: callee, "caller": caller}, attrs=ir.DictAttrs({"test_marker": 37}))
+    module = tvm_tirx.IRModule({symbol: callee, "caller": caller}, attrs=ir.DictAttrs({"test_marker": 37}))
     original = ir.save_json(module)
     lowered = tilelang.transform.LowerDeviceKernelLaunch()(module)
     explicit_result = lowered["caller"].body[0].value
@@ -61,7 +61,7 @@ def test_existing_extern_name_is_preserved_when_nested_argument_is_lowered(neste
 
 def test_same_target_globalvar_edge_is_preserved():
     symbol = ir.GlobalVar("callee_hint")
-    target = tvm.target.Target("llvm")
+    target = tvm_tirx.target.Target("llvm")
     callee = tirx.Function(
         [],
         [ir.Return(ir.const(1, "int32"))],
@@ -73,7 +73,7 @@ def test_same_target_globalvar_edge_is_preserved():
         [ir.Evaluate(ir.Call(symbol, [], ty="int32"))],
         attrs=ir.DictAttrs({"target": target, "global_symbol": "caller"}),
     )
-    module = tvm.IRModule({symbol: callee, "caller": caller})
+    module = tvm_tirx.IRModule({symbol: callee, "caller": caller})
     after = tilelang.transform.LowerDeviceKernelLaunch()(module)
     assert after["caller"].body[0].value.op.same_as(symbol)
 

@@ -5,9 +5,9 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def _ptr(name, dtype="float32", scope="global"):
@@ -15,7 +15,7 @@ def _ptr(name, dtype="float32", scope="global"):
 
 
 def _tensor(name, dtype="float32", scope="global", shape=(16,)):
-    return I.Var(name, tvm.tirx.TensorType(shape, dtype, scope=scope, layout="default"))
+    return I.Var(name, tvm_tirx.tirx.TensorType(shape, dtype, scope=scope, layout="default"))
 
 
 def _decl(tensor, pointer):
@@ -42,10 +42,10 @@ def _thread(var, size, body, tag="threadIdx.x"):
 
 
 def _source(params, body, tmp_path, *, name="kernel"):
-    func = tvm.tirx.Function(params, body, ret_type=I.PrimType("void"))
+    func = tvm_tirx.tirx.Function(params, body, ret_type=I.PrimType("void"))
     func = func.with_attr("global_symbol", name).with_attr("calling_conv", 2)
     module = tvm_ffi.get_global_func("target.build.tilelang_pto_without_compile")(
-        tvm.IRModule({name: func}), tvm.target.Target({"kind": "ascend", "keys": ["pto"]})
+        tvm_tirx.IRModule({name: func}), tvm_tirx.target.Target({"kind": "ascend", "keys": ["pto"]})
     )
     source = module.inspect_source("py")
     (tmp_path / (name + ".py")).write_text(source)
@@ -54,11 +54,11 @@ def _source(params, body, tmp_path, *, name="kernel"):
 
 
 def _data(tensor):
-    return tvm.tirx.op.tensor_data_ptr(tensor)
+    return tvm_tirx.tirx.op.tensor_data_ptr(tensor)
 
 
 def _offset(pointer, byte_offset):
-    return tvm.tirx.op.ptr_byte_offset(pointer, I.const(byte_offset), ty=pointer.ty)
+    return tvm_tirx.tirx.op.ptr_byte_offset(pointer, I.const(byte_offset), ty=pointer.ty)
 
 
 def _mad(a, b, c, flag=0):

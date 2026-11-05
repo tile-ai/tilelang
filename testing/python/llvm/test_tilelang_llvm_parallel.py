@@ -5,7 +5,7 @@ import torch
 import tilelang
 import tilelang.cpu.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir
 
 M = N = K = 256
@@ -32,7 +32,7 @@ def gemm(
 
 
 def _parallel_loop_count(func, pass_configs):
-    with tvm.target.Target("llvm"), tvm.transform.PassContext(config=pass_configs):
+    with tvm_tirx.target.Target("llvm"), tvm_tirx.transform.PassContext(config=pass_configs):
         lowered = tilelang.lower(func, target="llvm")
     loops = []
     for mod in (lowered.host_mod, lowered.device_mod):

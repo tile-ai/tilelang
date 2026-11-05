@@ -25,7 +25,7 @@ import os
 from os.path import join, exists
 
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.codegen import llvm
 
 from tvm_tirx.support import utils
@@ -219,8 +219,8 @@ def have_matrixcore(compute_version=None):
         True if MatrixCore support is provided, False otherwise
     """
     if compute_version is None:
-        if tvm.rocm(0).exist:
-            compute_version = tvm.rocm(0).compute_version
+        if tvm_tirx.rocm(0).exist:
+            compute_version = tvm_tirx.rocm(0).compute_version
         else:
             raise RuntimeError("No ROCm runtime found")
     major, _ = parse_compute_version(compute_version)

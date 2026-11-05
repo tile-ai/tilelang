@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from tilelang.transform import PassConfigKey
 from tilelang.instrumentation import (
     compile_pass_instrumentation,
@@ -29,14 +29,14 @@ def _simple_module():
             tid = T.get_thread_binding()
             B[tid] = A[tid] + 1.0
 
-    return tvm.IRModule({"main": program})
+    return tvm_tirx.IRModule({"main": program})
 
 
 def test_pass_timing_records_simple_pass():
     timing = TileLangPassTimingInstrument()
 
-    with tvm.transform.PassContext(instruments=[timing.instrument]):
-        tvm.tirx.transform.StmtSimplify()(_simple_module())
+    with tvm_tirx.transform.PassContext(instruments=[timing.instrument]):
+        tvm_tirx.tirx.transform.StmtSimplify()(_simple_module())
 
     assert timing.records
     assert any(record.name.endswith(".StmtSimplify") for record in timing.records)
@@ -88,7 +88,7 @@ def test_jit_compile_session_owns_configured_timing_tool(monkeypatch):
     }
     kernel.compile_flags = None
     kernel.verbose = False
-    kernel.target = tvm.target.Target("c")
+    kernel.target = tvm_tirx.target.Target("c")
     kernel.target_host = None
     kernel.execution_backend = "cython"
     artifact = object()
@@ -124,7 +124,7 @@ def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
     clock = [0.0]
     timing_tool = PassTimingTool()
 
-    @tvm.transform.pass_instrument
+    @tvm_tirx.transform.pass_instrument
     class AdvanceClockAfterPass:
         def run_after_pass(self, mod, info):
             clock[0] += 1.0
@@ -140,8 +140,8 @@ def test_pass_timing_excludes_later_after_pass_callbacks(monkeypatch):
             *create_pass_instruments(context="stage=test"),
             AdvanceClockAfterPass(),
         ]
-        with tvm.transform.PassContext(instruments=instruments):
-            tvm.tirx.transform.StmtSimplify()(_simple_module())
+        with tvm_tirx.transform.PassContext(instruments=instruments):
+            tvm_tirx.tirx.transform.StmtSimplify()(_simple_module())
 
     timing = timing_tool.timings[0]
     assert timing.records[0].duration_s == 0.0
@@ -223,11 +223,11 @@ def test_pass_timing_cleans_incomplete_frames_after_pass_failure(monkeypatch):
         lambda message, *args: warnings.append(message % args),
     )
 
-    @tvm.transform.module_pass(opt_level=0, name="FailingPass")
+    @tvm_tirx.transform.module_pass(opt_level=0, name="FailingPass")
     def failing_pass(mod, ctx):
         raise RuntimeError("expected failure")
 
-    with pytest.raises(RuntimeError, match="expected failure"), tvm.transform.PassContext(instruments=[timing.instrument]):
+    with pytest.raises(RuntimeError, match="expected failure"), tvm_tirx.transform.PassContext(instruments=[timing.instrument]):
         failing_pass(_simple_module())
 
     assert not timing._stack
@@ -253,8 +253,8 @@ def test_pass_timing_ignores_unmatched_after_callback(monkeypatch):
 def test_pass_timing_captures_kernel_name_from_module():
     timing = TileLangPassTimingInstrument()
 
-    with tvm.transform.PassContext(instruments=[timing.instrument]):
-        tvm.tirx.transform.StmtSimplify()(_simple_module())
+    with tvm_tirx.transform.PassContext(instruments=[timing.instrument]):
+        tvm_tirx.tirx.transform.StmtSimplify()(_simple_module())
 
     # The kernel name follows the PrimFunc's global_symbol attribute (which in
     # the real compilation flow is also used as the IRModule key).
@@ -266,8 +266,8 @@ def test_pass_timing_captures_kernel_name_from_module():
 def test_pass_timing_record_name_unaffected_by_kernel():
     timing = TileLangPassTimingInstrument()
 
-    with tvm.transform.PassContext(instruments=[timing.instrument]):
-        tvm.tirx.transform.StmtSimplify()(_simple_module())
+    with tvm_tirx.transform.PassContext(instruments=[timing.instrument]):
+        tvm_tirx.tirx.transform.StmtSimplify()(_simple_module())
 
     record = timing.records[0]
     assert record.name.endswith(".StmtSimplify")
@@ -276,7 +276,7 @@ def test_pass_timing_record_name_unaffected_by_kernel():
 
 def test_extract_kernel_label_none_or_empty():
     assert _extract_kernel_label(None) == ""
-    assert _extract_kernel_label(tvm.IRModule()) == ""
+    assert _extract_kernel_label(tvm_tirx.IRModule()) == ""
 
 
 def test_extract_kernel_label_single_function():
@@ -296,7 +296,7 @@ def test_extract_kernel_label_multiple_functions_shows_count():
             tid = T.get_thread_binding()
             B[tid] = A[tid] + 2.0
 
-    mod = tvm.IRModule({"kernel_a": func_a, "kernel_b": func_b})
+    mod = tvm_tirx.IRModule({"kernel_a": func_a, "kernel_b": func_b})
 
     label = _extract_kernel_label(mod)
 

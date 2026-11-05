@@ -3,7 +3,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 def _marker_line(marker: str) -> int:
@@ -432,7 +432,7 @@ def test_tcgen05_gemm_2cta_requires_two_cta_cluster(kernel_factory):
 
 @tilelang.testing.requires_cuda
 def test_tcgen05_gemm_2cta_rejects_non_blackwell_target():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     with pytest.raises(RuntimeError, match=r"requires Blackwell TCGEN5MMA"):
         tilelang.compile(_make_explicit_2cta_gemm_kernel(), target=target)
 

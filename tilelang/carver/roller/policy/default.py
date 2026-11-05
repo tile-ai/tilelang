@@ -7,7 +7,7 @@ from queue import PriorityQueue
 from collections.abc import Iterable
 
 import numpy as np
-import tvm_tirx as tvm
+import tvm_tirx
 
 from ...arch import TileDevice
 from ..bestfit import BestFit
@@ -23,7 +23,7 @@ class DefaultPolicy:
     minimize memory traffic and maximize parallelism.for BitBLAS Schedule.
     """
 
-    func: tvm.tirx.Function
+    func: tvm_tirx.tirx.Function
     nodes: list[PrimFuncNode] = []
     arch: TileDevice
     tags: dict
@@ -37,15 +37,15 @@ class DefaultPolicy:
         self.rasterization = NoRasterization()
 
     @classmethod
-    def from_prim_func(cls, func: tvm.tirx.Function, arch: TileDevice, tags: dict | None = None, name: str = "PrimFuncNode"):
+    def from_prim_func(cls, func: tvm_tirx.tirx.Function, arch: TileDevice, tags: dict | None = None, name: str = "PrimFuncNode"):
         return cls(arch, tags)._init_with_prim_func(func, name)
 
     @classmethod
     def from_output_nodes(cls, nodes: list[OutputNode], arch: TileDevice, tags: dict | None = None):
         return cls(arch, tags)._init_with_output_nodes(nodes)
 
-    def _init_with_prim_func(self, func: tvm.tirx.Function, name: str = "PrimFuncNode") -> DefaultPolicy:
-        if func is not None and isinstance(func, tvm.tirx.Function):
+    def _init_with_prim_func(self, func: tvm_tirx.tirx.Function, name: str = "PrimFuncNode") -> DefaultPolicy:
+        if func is not None and isinstance(func, tvm_tirx.tirx.Function):
             self.func = func
             self.prim_func_node = PrimFuncNode(self.func, tags=self.tags, name=name)
         else:

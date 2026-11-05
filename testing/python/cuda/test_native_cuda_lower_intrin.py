@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.script import tirx as T
 
 from testing.python.cuda.test_native_codegen_cuda import build_cuda
@@ -20,16 +20,16 @@ def test_popcount_preserves_input_bit_width(dtype, tmp_path):
             if tx < 5:
                 output[tx] = T.popcount(source[tx])
 
-    target = tvm.target.Target("cuda", host="c")
+    target = tvm_tirx.target.Target("cuda", host="c")
     function = population.with_attr("target", target).with_attr("global_symbol", "main")
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": function}))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": function}))
     (tmp_path / "tilelang_lowered.py").write_text(lowered.script())
     assert "popcount(" not in lowered.script()
     module, source = build_cuda(lowered["main"], tmp_path)
     assert ("__popcll" if info.bits == 64 else "__popc") in source
-    dev = tvm.cuda(0)
-    output = tvm.runtime.tensor(np.zeros_like(values), dev)
-    module(tvm.runtime.tensor(values, dev), output)
+    dev = tvm_tirx.cuda(0)
+    output = tvm_tirx.runtime.tensor(np.zeros_like(values), dev)
+    module(tvm_tirx.runtime.tensor(values, dev), output)
     mask = (1 << info.bits) - 1
     expected = np.array([(int(value) & mask).bit_count() for value in values], dtype=dtype)
     np.testing.assert_array_equal(output.numpy(), expected)
@@ -38,7 +38,7 @@ def test_popcount_preserves_input_bit_width(dtype, tmp_path):
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 def test_isfinite_result_remains_boolean(dtype, tmp_path):
     def isfinite(value):
-        return tvm.ir.Call("tl.isfinite", [value])
+        return tvm_tirx.ir.Call("tl.isfinite", [value])
 
     @T.function
     def finite(source: T.Tensor((5,), dtype), output: T.Tensor((5,), "bool")):
@@ -46,13 +46,13 @@ def test_isfinite_result_remains_boolean(dtype, tmp_path):
             if tx < 5:
                 output[tx] = isfinite(source[tx])
 
-    target = tvm.target.Target("cuda", host="c")
+    target = tvm_tirx.target.Target("cuda", host="c")
     function = finite.with_attr("target", target).with_attr("global_symbol", "main")
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule({"main": function}))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule({"main": function}))
     module, source = build_cuda(lowered["main"], tmp_path)
     assert "isfinite(" in source
     values = np.array([-np.inf, np.inf, np.nan, 0, -1.25], dtype=dtype)
-    dev = tvm.cuda(0)
-    output = tvm.runtime.tensor(np.zeros(5, dtype="bool"), dev)
-    module(tvm.runtime.tensor(values, dev), output)
+    dev = tvm_tirx.cuda(0)
+    output = tvm_tirx.runtime.tensor(np.zeros(5, dtype="bool"), dev)
+    module(tvm_tirx.runtime.tensor(values, dev), output)
     np.testing.assert_array_equal(output.numpy(), np.isfinite(values))

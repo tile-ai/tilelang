@@ -1,4 +1,4 @@
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -52,12 +52,12 @@ def _normalize_index_lanes(function):
 def _check(original, expected):
     """Check well-formedness and the full Function with equivalent index lanes."""
     func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.LegalizeNegativeIndex()(mod)
-    expected = tvm.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
-    tvm.tirx.analysis.check_well_formed(mod["main"])
-    tvm.tirx.analysis.check_well_formed(expected["main"])
-    tvm.ir.assert_structural_equal(_normalize_index_lanes(mod["main"]), _normalize_index_lanes(expected["main"]))
+    expected = tvm_tirx.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
+    tvm_tirx.tirx.analysis.check_well_formed(mod["main"])
+    tvm_tirx.tirx.analysis.check_well_formed(expected["main"])
+    tvm_tirx.ir.assert_structural_equal(_normalize_index_lanes(mod["main"]), _normalize_index_lanes(expected["main"]))
 
 
 def test_buffer_load_negative_index_legalized():
@@ -549,8 +549,8 @@ def test_mixed_ramp_unknown_sign_preserves_int64_extent():
         for i in T.serial(-2, 3):
             A[T.Ramp(i, 1, 4)] = T.Broadcast(T.float32(2.0), 4)
 
-    result = tl.transform.LegalizeNegativeIndex()(tvm.IRModule.from_expr(before))["before"]
-    tvm.tirx.analysis.check_well_formed(result)
+    result = tl.transform.LegalizeNegativeIndex()(tvm_tirx.IRModule.from_expr(before))["before"]
+    tvm_tirx.tirx.analysis.check_well_formed(result)
     loop = result.body.seq[0]
     assert isinstance(loop, ir.For)
     (store,) = loop.body.seq

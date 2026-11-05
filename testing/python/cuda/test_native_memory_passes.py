@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 from tvm_tirx.tirx.layout import S, TileLayout
@@ -20,13 +20,13 @@ def _index(lanes, base=0, stride=1):
 def _function(params, body, *, target="cuda"):
     attrs = {"global_symbol": "main", "calling_conv": 2}
     if target is not None:
-        attrs["target"] = tvm.target.Target(target)
+        attrs["target"] = tvm_tirx.target.Target(target)
     return tirx.Function(params, body, ret_type=ir.PrimType("void"), attrs=ir.DictAttrs(attrs))
 
 
 def _apply(function, *, ordinary=False, predicated=False):
-    with tvm.transform.PassContext(config={"tl.enable_lower_ldgstg": ordinary, "tl.enable_lower_ldgstg_predicated": predicated}):
-        result = tvm_ffi.get_global_func("tl.cuda.transform.LowerLDGSTG")()(tvm.IRModule({"main": function}))["main"]
+    with tvm_tirx.transform.PassContext(config={"tl.enable_lower_ldgstg": ordinary, "tl.enable_lower_ldgstg_predicated": predicated}):
+        result = tvm_ffi.get_global_func("tl.cuda.transform.LowerLDGSTG")()(tvm_tirx.IRModule({"main": function}))["main"]
     assert tirx.analysis.check_well_formed(result)
     return result
 
@@ -183,7 +183,7 @@ def test_pdl_flags_preserve_calls_and_mark_native_function(sync, trigger):
         if enabled:
             statements.append(ir.Evaluate(ir.Call(name, [], ty_args=[ir.PrimType("void")])))
     before = _function([], statements)
-    result = tvm_ffi.get_global_func("tl.cuda.transform.MarkCudaSyncCalls")(True)(tvm.IRModule({"main": before}))["main"]
+    result = tvm_ffi.get_global_func("tl.cuda.transform.MarkCudaSyncCalls")(True)(tvm_tirx.IRModule({"main": before}))["main"]
     assert tirx.analysis.check_well_formed(result)
     assert bool(result.attrs.get("has_cuda_pdl_sync", 0)) == sync
     assert bool(result.attrs.get("has_cuda_pdl_trigger", 0)) == trigger
@@ -194,7 +194,7 @@ def test_pdl_flags_preserve_calls_and_mark_native_function(sync, trigger):
 def test_pdl_calls_reject_unsupported_target(name):
     before = _function([], [ir.Evaluate(ir.Call(name, [], ty_args=[ir.PrimType("void")]))])
     with pytest.raises(ValueError, match="PDL is not supported"):
-        tvm_ffi.get_global_func("tl.cuda.transform.MarkCudaSyncCalls")(False)(tvm.IRModule({"main": before}))
+        tvm_ffi.get_global_func("tl.cuda.transform.MarkCudaSyncCalls")(False)(tvm_tirx.IRModule({"main": before}))
 
 
 def test_pdl_sync_rejects_readonly_cache_intrinsic():
@@ -202,4 +202,4 @@ def test_pdl_sync_rejects_readonly_cache_intrinsic():
     readonly = ir.Call("tl.__ldg", [tirx.address_of(ir.TensorLoad(source, [_index(1)]))], ty_args=[ir.PrimType("float32")])
     before = _function([source], [ir.Evaluate(readonly), ir.Evaluate(ir.Call("tl.pdl_sync", [], ty_args=[ir.PrimType("void")]))])
     with pytest.raises(ValueError, match="Cannot invoke __ldg function with pdl_sync"):
-        tvm_ffi.get_global_func("tl.cuda.transform.MarkCudaSyncCalls")(True)(tvm.IRModule({"main": before}))
+        tvm_ffi.get_global_func("tl.cuda.transform.MarkCudaSyncCalls")(True)(tvm_tirx.IRModule({"main": before}))

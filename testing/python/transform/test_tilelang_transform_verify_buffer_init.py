@@ -5,7 +5,7 @@ import tilelang
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 BC, BK, NB = 16, 64, 16
@@ -54,7 +54,7 @@ def _gemm_kernel(init_mode):
 
 def _verify(func, capfd):
     """Run the pass on ``func`` and return whatever it wrote to stderr."""
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     tl.transform.VerifyBufferInit()(mod)
     return capfd.readouterr().err
 

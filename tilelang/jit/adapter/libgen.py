@@ -10,7 +10,6 @@ from typing import Any
 
 from tvm_tirx.target import Target
 
-from tilelang import tvm as tvm
 from tilelang.transform import PassConfigKey
 from tilelang.contrib.nvcc import (
     format_target_code_for_gencode,

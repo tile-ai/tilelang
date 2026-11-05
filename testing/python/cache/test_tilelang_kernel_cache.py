@@ -19,6 +19,7 @@
 # - Python comments do NOT affect cache key (not in TIR)
 # - Must use .with_attr("global_symbol", ...) to create unique cache keys
 
+import tvm_tirx
 import pytest
 import tilelang
 import tilelang.testing
@@ -230,7 +231,7 @@ def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
     assert cold_library.is_file()
     assert cached_kernel.artifact is None
     assert cached_library.read_bytes() == Path(cached_kernel.adapter.libpath).read_bytes()
-    assert tilelang.tvm.runtime.load_module(str(cached_library)) is not None
+    assert tvm_tirx.runtime.load_module(str(cached_library)) is not None
 
 
 @tilelang.testing.requires_cuda

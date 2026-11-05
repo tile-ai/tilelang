@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, sym, tirx
 from tvm_tirx.target import Target
 
@@ -60,7 +60,7 @@ def _module(*, dtype="float32", flags=False, bad_extent=None, extra_allocation=F
         .with_attr("target", Target("llvm"))
         .with_attr("global_symbol", "main")
     )
-    return tvm.IRModule({symbol: device, "main": host}), symbol
+    return tvm_tirx.IRModule({symbol: device, "main": host}), symbol
 
 
 def _lower(module):
@@ -104,7 +104,7 @@ def _configured_device_scope(dtype):
         ret_type=ir.PrimType("void"),
         attrs=ir.DictAttrs({"global_symbol": "main", "target": Target("cuda", host="c")}),
     )
-    return tvm.IRModule({"main": function})
+    return tvm_tirx.IRModule({"main": function})
 
 
 def _regions(module, name):
@@ -169,7 +169,7 @@ def test_outline_preserves_targetless_declarations():
     declaration = tirx.Function([], [], ret_type=ir.PrimType("void"), attrs=ir.DictAttrs({"declaration": True}))
     main = tirx.Function([], [ir.Evaluate(0)], ret_type=ir.PrimType("void"))
     main = main.with_attr({"global_symbol": "main", "target": Target("c", host="c")})
-    module = tvm.IRModule({"main": main, "external": declaration})
+    module = tvm_tirx.IRModule({"main": main, "external": declaration})
     result = tilelang.transform.OutlineDeviceRegions()(module)
     ir.assert_structural_equal(result["external"], declaration)
     # The native verifier requires definitions. Verify the unchanged declaration

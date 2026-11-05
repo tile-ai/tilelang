@@ -21,7 +21,7 @@ try:
     import tilelang
     import tilelang.testing
     import tilelang.language as T
-    import tvm_tirx as tvm
+    import tvm_tirx
     from tilelang.tools.lower_trace import core as _core
 finally:
     for key, value in _saved_trace_env.items():
@@ -58,7 +58,7 @@ def _simple_program():
 
 def _noop_pass():
     """Return a Simplify pass (typically a no-op on the simple test program)."""
-    return tvm.tirx.transform.StmtSimplify()
+    return tvm_tirx.tirx.transform.StmtSimplify()
 
 
 def test_env_default_off():
@@ -190,20 +190,20 @@ def test_multiple_pipelines_share_one_compile_session(monkeypatch, tmp_path):
             for i in T.serial(32):
                 B[i] = A[i] + 1.0
 
-    mod = tvm.IRModule({"main": tiny})
+    mod = tvm_tirx.IRModule({"main": tiny})
     context = create_backend_context("c", "c", "cython")
 
     with compile_pass_instrumentation(name="two-pipelines") as compile_session:
         trace = compile_session.find_tool(_core.LowerTraceSession)
         assert trace is not None
         assert trace.pipeline_count == 0
-        with tvm.transform.PassContext(instruments=create_pass_instruments()):
+        with tvm_tirx.transform.PassContext(instruments=create_pass_instruments()):
             context.lower(mod)
         run1_count = len(trace.records)
         assert trace.pipeline_count == 1
         assert run1_count > 0
 
-        with tvm.transform.PassContext(instruments=create_pass_instruments()):
+        with tvm_tirx.transform.PassContext(instruments=create_pass_instruments()):
             context.lower(mod)
         assert trace.pipeline_count == 2
         assert len(trace.records) > run1_count
@@ -452,16 +452,16 @@ def _run_codegen(session, build, ffi_name, mod="fake_mod", target=None):
 def test_pass_instrument_captures_nested_tvm_passes(tmp_path):
     """The instrument backend records C++-nested passes with parent metadata."""
 
-    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
+    @tvm_tirx.transform.module_pass(opt_level=0, name="test.Outer")
     def outer_pass(mod, _ctx):
-        return tvm.tirx.transform.StmtSimplify()(mod)
+        return tvm_tirx.tirx.transform.StmtSimplify()(mod)
 
     program = _simple_program()
-    mod = tvm.IRModule({"main": program})
+    mod = tvm_tirx.IRModule({"main": program})
     trace = _make_trace_session(tmp_path, mode="html")
     instrument = trace.create_pass_instrument()
     assert instrument is not None
-    with tvm.transform.PassContext(instruments=[instrument]):
+    with tvm_tirx.transform.PassContext(instruments=[instrument]):
         outer_pass(mod)
 
     records = [record for record in trace.records if record.name in ("Outer", "StmtSimplify")]
@@ -581,7 +581,7 @@ def test_codegen_no_proxy_for_full_compile(tmp_path, capsys):
     trace = _make_trace_session(tmp_path)
     codegen_path = trace.get_codegen_output_path()
     assert codegen_path is not None
-    target = tvm.target.Target("cuda")
+    target = tvm_tirx.target.Target("cuda")
 
     with _patch_make_patched_source_module() as mock_factory:
         result1 = _run_codegen(trace, mock_build, ffi_name, target=target)

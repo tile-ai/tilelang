@@ -5,21 +5,21 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.script import tirx as T
 from tvm_tirx.tirx.compilation_pipeline import tirx_pipeline
 
 
 def build_own_c(func, tmp_path, *, retain_allocations=False):
-    target = tvm.target.Target("c", host="c")
+    target = tvm_tirx.target.Target("c", host="c")
     func = func.with_attr("global_symbol", "main")
     lowering, host, _ = tirx_pipeline(target=target)
-    lowered = lowering(tvm.IRModule({"main": func}))
+    lowered = lowering(tvm_tirx.IRModule({"main": func}))
     if retain_allocations:
         # Exercise the emitter's native allocation boundary independently of
         # LowerTVMBuiltin, which promotes non-global CPU allocations to runtime
         # workspace calls. Packed ABI lowering has already run above.
-        lowered = tvm.tirx.transform.LowerIntrin()(lowered)
+        lowered = tvm_tirx.tirx.transform.LowerIntrin()(lowered)
     else:
         lowered = host()(lowered)
     module = tvm_ffi.get_global_func("target.build.tilelang_c")(lowered, target)
@@ -28,8 +28,8 @@ def build_own_c(func, tmp_path, *, retain_allocations=False):
     (tmp_path / "lowered.py").write_text(lowered.script())
     root = Path(__file__).resolve().parents[3]
     library = tmp_path / "kernel.so"
-    tvm.codegen.Executable(module).export_library(str(library), cc="c++", options=["-std=c++17", "-fopenmp", f"-I{root / 'src'}"])
-    return tvm.runtime.load_module(str(library)), code
+    tvm_tirx.codegen.Executable(module).export_library(str(library), cc="c++", options=["-std=c++17", "-fopenmp", f"-I{root / 'src'}"])
+    return tvm_tirx.runtime.load_module(str(library)), code
 
 
 @pytest.mark.parametrize("n", [1, 17, 257])
@@ -44,8 +44,8 @@ def test_dynamic_float32_add(n, tmp_path):
     module, code = build_own_c(add, tmp_path)
     rng = np.random.default_rng(23)
     source = rng.uniform(-4, 4, n).astype("float32")
-    output = tvm.runtime.tensor(np.empty_like(source))
-    module(tvm.runtime.tensor(source), output)
+    output = tvm_tirx.runtime.tensor(np.empty_like(source))
+    module(tvm_tirx.runtime.tensor(source), output)
     np.testing.assert_array_equal(output.numpy(), source + np.float32(1.25))
     assert "tl_templates/cpp/common.h" in code
     assert "TVMFFIAny" in code
@@ -59,8 +59,8 @@ def test_bool_complement(tmp_path):
 
     module, _ = build_own_c(complement, tmp_path)
     source = np.array([-3, -1, 0, 1, 2], dtype="int32")
-    output = tvm.runtime.tensor(np.empty(5, dtype="bool"))
-    module(tvm.runtime.tensor(source), output)
+    output = tvm_tirx.runtime.tensor(np.empty(5, dtype="bool"))
+    module(tvm_tirx.runtime.tensor(source), output)
     np.testing.assert_array_equal(output.numpy(), np.logical_not(source))
 
 
@@ -72,14 +72,14 @@ def test_parallel_collapse_and_thread_count(tmp_path):
                 output[i, j] = source[i, j] + T.float32(2)
 
     outer = row_add.body.seq[0]
-    parallel = tvm.ir.For(outer.var, outer.begin, outer.end, outer.step, outer.kind, outer.body, annotations={"tl.cpu_num_threads": 2})
+    parallel = tvm_tirx.ir.For(outer.var, outer.begin, outer.end, outer.step, outer.kind, outer.body, annotations={"tl.cpu_num_threads": 2})
     row_add = row_add.with_body([parallel, *row_add.body.seq[1:]])
     module, code = build_own_c(row_add, tmp_path)
     assert code.count("#pragma omp parallel for") == 1
     assert "#pragma omp parallel for collapse(2) num_threads(2)" in code
     source = np.arange(15, dtype="float32").reshape(3, 5)
-    output = tvm.runtime.tensor(np.empty_like(source))
-    module(tvm.runtime.tensor(source), output)
+    output = tvm_tirx.runtime.tensor(np.empty_like(source))
+    module(tvm_tirx.runtime.tensor(source), output)
     np.testing.assert_array_equal(output.numpy(), source + np.float32(2))
 
 
@@ -92,7 +92,7 @@ def test_nonfinite_float_literals(tmp_path):
 
     module, code = build_own_c(fill, tmp_path)
     assert "INFINITY" in code and "NAN" in code
-    output = tvm.runtime.tensor(np.zeros(3, dtype="float32"))
+    output = tvm_tirx.runtime.tensor(np.zeros(3, dtype="float32"))
     module(output)
     np.testing.assert_array_equal(output.numpy(), np.array([np.inf, -np.inf, np.nan], dtype="float32"))
 
@@ -119,6 +119,6 @@ def test_cpu_shared_allocation(scope, retain_allocations, tmp_path):
         assert "TVMBackendFreeWorkspace" in code
     assert "__shared__" not in code
     source = np.arange(17, dtype="float32") - np.float32(8)
-    output = tvm.runtime.tensor(np.empty_like(source))
-    module(tvm.runtime.tensor(source), output)
+    output = tvm_tirx.runtime.tensor(np.empty_like(source))
+    module(tvm_tirx.runtime.tensor(source), output)
     np.testing.assert_array_equal(output.numpy(), source * np.float32(2) + np.float32(1))

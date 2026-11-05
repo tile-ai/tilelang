@@ -1,6 +1,5 @@
 # pytest correctness_evaluation_tcgen05_2cta.py -n 32
 import pytest
-from tilelang import tvm as tvm
 import tilelang
 import tilelang.testing
 import tilelang.language as T

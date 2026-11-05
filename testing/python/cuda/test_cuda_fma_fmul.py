@@ -7,7 +7,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.cuda.target import normalize_cutedsl_target
 from tilelang.engine.lower import lower
 
@@ -48,14 +48,14 @@ def _make_vectorized_program(dtype=T.float32):
 
 def _lower_cuda_source(program, arch: str) -> str:
     target = {"kind": "cuda", "arch": arch}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(program, target=target)
     assert artifact.kernel_source is not None
     return artifact.kernel_source
 
 
 def _lower_cutedsl_source(program) -> str:
-    if not tvm.runtime.enabled("cuda"):
+    if not tvm_tirx.runtime.enabled("cuda"):
         pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
     from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 
@@ -77,9 +77,9 @@ def _lower_cutedsl_source(program) -> str:
 
 @tilelang.testing.requires_cuda
 def test_fma_fmul_build_registered_intrinsics():
-    x = tvm.tirx.Var("x", "float32")
-    y = tvm.tirx.Var("y", "float32")
-    z = tvm.tirx.Var("z", "float32")
+    x = tvm_tirx.tirx.Var("x", "float32")
+    y = tvm_tirx.tirx.Var("y", "float32")
+    z = tvm_tirx.tirx.Var("z", "float32")
 
     assert T.fmul(x, y).op.name == "tl.fmul"
     assert T.fma(x, y, z).op.name == "tl.fma"
@@ -87,15 +87,15 @@ def test_fma_fmul_build_registered_intrinsics():
 
 @pytest.mark.parametrize("intrinsic", [T.fma, T.fmul])
 def test_fma_fmul_reject_integer_inputs(intrinsic):
-    x = tvm.tirx.Var("x", "int32")
+    x = tvm_tirx.tirx.Var("x", "int32")
     args = (x, x, x) if intrinsic is T.fma else (x, x)
     with pytest.raises(TypeError, match="only supports floating-point inputs"):
         intrinsic(*args)
 
 
 def test_fma_fmul_reject_mixed_dtypes():
-    x = tvm.tirx.Var("x", "float32")
-    y = tvm.tirx.Var("y", "float16")
+    x = tvm_tirx.tirx.Var("x", "float32")
+    y = tvm_tirx.tirx.Var("y", "float16")
     with pytest.raises(ValueError, match="same dtype"):
         T.fmul(x, y)
     with pytest.raises(ValueError, match="same dtype"):

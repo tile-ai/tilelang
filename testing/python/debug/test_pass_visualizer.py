@@ -15,7 +15,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 
 from tilelang.tools.pass_visualizer import (
     build_module,
@@ -73,7 +73,7 @@ def _build_small_module():
     """Build an IRModule + resolved cuda target for the small kernel."""
     kernel = _gemm_relu_kernel()
     func = kernel.get_tir(M=128, N=128, K=128, block_M=64, block_N=64, block_K=32)
-    cuda_target = tvm.target.Target("cuda", host="llvm")
+    cuda_target = tvm_tirx.target.Target("cuda", host="llvm")
     return build_module(func, target=cuda_target)
 
 
@@ -88,8 +88,8 @@ def test_structure_tree_instrument_records_real_passes():
     mod, target = _build_small_module()
     instrument = StructureTreePassInstrument()
 
-    with tvm.transform.PassContext(instruments=[instrument]), target:
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with tvm_tirx.transform.PassContext(instruments=[instrument]), target:
+        mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
         tilelang.transform.MaterializeKernelLaunch()(mod)
 
     records = instrument.ordered_records()
@@ -103,11 +103,11 @@ def test_structure_tree_instrument_ignores_nested_passes():
     mod, _target = _build_small_module()
     instrument = StructureTreePassInstrument()
 
-    @tvm.transform.module_pass(opt_level=0, name="test.Outer")
+    @tvm_tirx.transform.module_pass(opt_level=0, name="test.Outer")
     def outer_pass(mod, _ctx):
-        return tvm.tirx.transform.StmtSimplify()(mod)
+        return tvm_tirx.tirx.transform.StmtSimplify()(mod)
 
-    with tvm.transform.PassContext(instruments=[instrument]):
+    with tvm_tirx.transform.PassContext(instruments=[instrument]):
         outer_pass(mod)
 
     records = instrument.ordered_records()
@@ -138,19 +138,19 @@ def test_structure_tree_instrument_cleans_up_after_failure():
     mod, _target = _build_small_module()
     instrument = StructureTreePassInstrument()
 
-    @tvm.transform.module_pass(opt_level=0, name="test.Fail")
+    @tvm_tirx.transform.module_pass(opt_level=0, name="test.Fail")
     def failing_pass(_mod, _ctx):
         raise RuntimeError("expected failure")
 
-    with pytest.raises(RuntimeError, match="expected failure"), tvm.transform.PassContext(instruments=[instrument]):
+    with pytest.raises(RuntimeError, match="expected failure"), tvm_tirx.transform.PassContext(instruments=[instrument]):
         failing_pass(mod)
 
     assert instrument.records == []
     assert instrument.incomplete_passes == ["test.Fail"]
 
     # Entering a new context resets the incomplete frame and records normally.
-    with tvm.transform.PassContext(instruments=[instrument]):
-        tvm.tirx.transform.StmtSimplify()(mod)
+    with tvm_tirx.transform.PassContext(instruments=[instrument]):
+        tvm_tirx.tirx.transform.StmtSimplify()(mod)
     assert [record.name for record in instrument.ordered_records()] == ["tirx.StmtSimplify"]
     assert instrument.incomplete_passes == []
 
@@ -255,7 +255,7 @@ def test_build_pass_data_observes_canonical_prologue(monkeypatch):
     with open(kernel_path) as f:
         source = f.read()
 
-    @tvm.transform.module_pass(opt_level=0, name="test.InjectedPipelinePass")
+    @tvm_tirx.transform.module_pass(opt_level=0, name="test.InjectedPipelinePass")
     def injected_pass(mod, _ctx):
         return mod
 

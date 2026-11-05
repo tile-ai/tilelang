@@ -1,3 +1,4 @@
+import tvm_tirx
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -23,7 +24,7 @@ def _producer_bind_kernel(
 
 @tilelang.testing.requires_cuda
 def test_pipeline_planning_tracks_transitive_copy_index_producer():
-    target = tilelang.tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
     with target:
         tilelang.lower(_producer_bind_kernel, target=target)
 
@@ -79,7 +80,7 @@ def test_scheduled_bind_with_replayed_input_runtime():
     # lowering also marked the emitted kernel noalias; provide that caller
     # contract explicitly to this direct, earlier pipeline-pass invocation.
     scheduled = main.with_attr("tirx.noalias", True)
-    mod = tilelang.transform.InjectSoftwarePipeline()(tilelang.tvm.IRModule.from_expr(scheduled))
+    mod = tilelang.transform.InjectSoftwarePipeline()(tvm_tirx.IRModule.from_expr(scheduled))
     kernel = tilelang.compile(mod["main"], target="cuda")
     a = torch.arange(128, dtype=torch.float32, device="cuda")
     ids = torch.arange(4, dtype=torch.float32, device="cuda") * 100

@@ -6,7 +6,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.layout import make_swizzled_layout
@@ -425,9 +425,9 @@ def _compile_grouped_gemm_ws(batch_sizes=(63, 77), K=128, N=128, block_M=64, blo
 @tilelang.testing.requires_cuda
 def test_tiled_ws_skips_device_bound_tma_descriptor_base():
     func = device_bound_copy_pipelined().with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.AnnotateDeviceBoundTmaCopies()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
@@ -445,9 +445,9 @@ def test_tiled_ws_places_producer_in_first_warp_group():
     """Auto-WS should put the producer in the low threadIdx.x partition."""
 
     func = matmul_pipelined(64, 64, 64, 64, 32, 64, num_stages=2).with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
@@ -478,9 +478,9 @@ def test_tiled_ws_accepts_int64_pipeline_indices():
         num_stages=4,
         dtype="bfloat16",
     ).with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
@@ -773,9 +773,9 @@ def test_tiled_ws_explicit_cp_async_wait_precedes_first_consumer_read():
     """Explicit cp.async destinations must pull the consumer wait earlier."""
 
     func = explicit_cp_async_wait_position().with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()
@@ -817,9 +817,9 @@ def test_tiled_ws_propagates_nested_postloop_liveness_to_outer_prelude():
     """Outer scalar binds used by nested post-loop consumers must stay shared."""
 
     func = guarded_prelude_tma_postloop_scalar().with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
     script = mod["main"].script()

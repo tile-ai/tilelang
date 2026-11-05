@@ -35,11 +35,11 @@ The tracker understands the TileLang intrinsics for TMA load/store, shared-memor
 The pass is part of the default TileLang lowering pipeline. To apply it manually:
 
 ```python
-from tilelang import tvm
+import tvm_tirx
 from tilelang.cuda import transform
 
-mod = tvm.IRModule({"main": prim_func})
-with tvm.transform.PassContext():
+mod = tvm_tirx.IRModule({"main": prim_func})
+with tvm_tirx.transform.PassContext():
     mod = transform.InjectFenceProxy()(mod)
 ```
 

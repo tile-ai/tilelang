@@ -5,7 +5,7 @@ import tilelang.testing
 import tilelang.layout
 import tilelang.language as T
 import torch
-from tilelang import tvm
+import tvm_tirx
 from tilelang.jit import JITImpl
 
 
@@ -353,7 +353,7 @@ def tma_atomic_add_compile_program(dtype, shape=(16, 16), explicit_layout=False)
 
 
 def lower_tma_atomic_add(dtype, arch="sm_90", shape=(16, 16), explicit_layout=False):
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     with target:
         return tilelang.lower(
             tma_atomic_add_compile_program(dtype, shape=shape, explicit_layout=explicit_layout),

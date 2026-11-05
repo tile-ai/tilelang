@@ -20,7 +20,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.autotuner.grouped_compile import compile_grouped_unit_tvm_ffi
 from tilelang.autotuner.param import CompileArgs
 
@@ -126,7 +126,7 @@ def test_grouped_layout_inference_uses_fresh_z3_context_per_kernel():
     unit_items = [(index, dict(zip(_STATE_CACHE_CONFIG_KEYS, config))) for index, config in enumerate(_STATE_CACHE_CASES)]
     compile_args = CompileArgs(
         execution_backend="tvm_ffi",
-        target=tvm.target.Target("cuda"),
+        target=tvm_tirx.target.Target("cuda"),
         pass_configs=_STATE_CACHE_PASS_CONFIGS,
     )
 
@@ -149,7 +149,7 @@ def test_grouped_tvm_ffi_manual_out_idx_uses_callee_allocation():
     compile_args = CompileArgs(
         out_idx=[1],
         execution_backend="tvm_ffi",
-        target=tvm.target.Target("cuda"),
+        target=tvm_tirx.target.Target("cuda"),
     )
 
     results = compile_grouped_unit_tvm_ffi(

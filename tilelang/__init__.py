@@ -110,7 +110,7 @@ if not env.is_light_import():
     from tvm_ffi import dtype as DataType  # noqa: F401
     from .env import enable_cache as enable_cache, disable_cache as disable_cache, is_cache_enabled as is_cache_enabled
 
-    tvm, _LIB = _load_provider()
+    _LIB = _load_provider()[1]
     _LIB_PATH = _LIB._name
     del _load_provider
     from ._extensions import install_frontend_extension_finder as _install_frontend_extension_finder

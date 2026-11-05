@@ -2,7 +2,7 @@
 
 import pytest
 
-from tilelang import tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -13,12 +13,12 @@ from tilelang.cuda.intrinsics.layout.mma_sm100_layout import (
 )
 
 
-TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
 
 
 def _lower(func):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(TARGET)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(TARGET)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.transform.LayoutInference()(mod)
     # LowerTileOp materializes the inferred TMEM layout (physical buffer

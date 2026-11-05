@@ -2,7 +2,6 @@ import pytest
 
 
 import tilelang.testing
-from tilelang import tvm as tvm
 from tvm_tirx.target import Target
 
 from tilelang.backend.target import determine_target

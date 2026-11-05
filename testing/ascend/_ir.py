@@ -6,7 +6,7 @@ code generation or compilation. Prepared pass inputs are constructed directly.
 
 import tilelang
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform as ascend
 from tvm_tirx import ir, tirx
 
@@ -137,7 +137,7 @@ def kernel(
         statements.append(annotation(operands))
     statements.extend(body.seq if isinstance(body, ir.SeqStmt) else body if isinstance(body, (list, tuple)) else [body])
     root = attribute(None, "tl.sblock", {"name": "tilelang_root", "no_realize": True, "annotations": constants}, statements)
-    function = tirx.Function(list(params), [root]).with_attr("global_symbol", "main").with_attr("target", tvm.target.Target("ascend"))
+    function = tirx.Function(list(params), [root]).with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("ascend"))
     return ir.IRModule({"main": function})
 
 
@@ -261,7 +261,7 @@ def schedule_snapshots(program, pass_names, *, auto_schedule=True, infer_layouts
     if not requested <= available:
         raise ValueError(f"Unknown or disabled scheduling passes: {sorted(requested - available)}")
     snapshots = {}
-    target = tvm.target.Target("ascend")
+    target = tvm_tirx.target.Target("ascend")
     with target:
         mod = ir.IRModule({"main": program.with_attr("global_symbol", "main")})
         mod = tilelang.transform.NormalizeAliasAnnotations()(mod)

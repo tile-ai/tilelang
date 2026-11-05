@@ -3,7 +3,7 @@
 import pytest
 import tilelang.ascend.language as T
 from tilelang.ascend.language import kernel as K
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir
 from testing.ascend._ir import attribute_fields, attributes, nodes
 
@@ -11,7 +11,7 @@ from testing.ascend._ir import attribute_fields, attributes, nodes
 @pytest.mark.parametrize("threads, expected", [(128, [128, 1, 1]), ([64, 2, 1], [64, 2, 1])], ids=["one-dimensional", "two-dimensional"])
 def test_thread_queries_match_frame_bindings(threads, expected):
     queries = {}
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
 
         @T.prim_func
         def program(A: T.Tensor((128,), "float32"), B: T.Tensor((128,), "float32")):
@@ -40,7 +40,7 @@ def test_thread_queries_match_frame_bindings(threads, expected):
 
 def test_sequential_vf_regions_have_independent_bindings():
     queries = {}
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
 
         @T.prim_func
         def program(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32"), C: T.Tensor((256,), "float32")):

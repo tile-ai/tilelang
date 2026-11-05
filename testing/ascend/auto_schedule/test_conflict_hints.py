@@ -3,7 +3,7 @@
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import ir
 from testing.ascend._ir import calls, disjoint_argument_fixture, schedule, nodes
@@ -105,7 +105,7 @@ def test_assume_conflict_uses_common_projection_domain():
                 if i % 3 == 0:
                     T.copy(consumer, C[i * tile : (i + 1) * tile])
 
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         after = _insert_sync(main)
 
     assert _event_count(after, "set", "V_MTE3")
@@ -137,7 +137,7 @@ def test_assume_conflict_keeps_same_and_cross_distances_separate():
                     T.copy(same_consumer, C[i * tile : (i + 1) * tile])
                     T.copy(cross_consumer, D[i * tile : (i + 1) * tile])
 
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         after = _insert_sync(main)
 
     assert _event_count(after, "wait", "MTE2_MTE3") == 1

@@ -7,7 +7,7 @@ choose any legal numbering or reuse strategy.
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform as ascend_transform
 from tvm_tirx import ir
 from testing.ascend._ir import calls, disjoint_argument_fixture, schedule, statements
@@ -303,13 +303,13 @@ def _event_ranges(mod, operation, hard_event):
         if not isinstance(stmt, ir.Evaluate) or not isinstance(stmt.value, ir.Call):
             continue
         call = stmt.value
-        if not isinstance(call.op, tvm.ir.Op) or call.op.name != op_name or str(call.args[0].value) != hard_event:
+        if not isinstance(call.op, tvm_tirx.ir.Op) or call.op.name != op_name or str(call.args[0].value) != hard_event:
             continue
-        analyzer = tvm.sym.Analyzer()
-        constraints = tvm.sym.ConstraintContext()
+        analyzer = tvm_tirx.sym.Analyzer()
+        constraints = tvm_tirx.sym.ConstraintContext()
         for ancestor in ancestors:
             if isinstance(ancestor, ir.For):
-                constraints.append(tvm.sym.RangeConstraint(ancestor.var, ir.Range(ancestor.begin, ancestor.end)))
+                constraints.append(tvm_tirx.sym.RangeConstraint(ancestor.var, ir.Range(ancestor.begin, ancestor.end)))
         analyzer.sync_constraint_context(constraints)
         bound = analyzer.const_int_bound(call.args[1])
         ranges.append((bound.min_value, bound.max_value))
@@ -324,7 +324,7 @@ def test_serial_protocols_fit_hardware_flag_budget(count):
         waits = _events(mod, "wait", event)
         assert sets and waits
         assert sorted(str(expr) for expr in sets) == sorted(str(expr) for expr in waits)
-        analyzer = tvm.sym.Analyzer()
+        analyzer = tvm_tirx.sym.Analyzer()
         assert all(analyzer.can_prove(expr >= 0) and analyzer.can_prove(expr < 8) for expr in [*sets, *waits])
 
 
@@ -337,7 +337,7 @@ def test_sibling_counter_owners_share_one_release_ring():
         dynamic = [expr for expr in _events(mod, operation, "MTE3_MTE2") if not isinstance(expr, ir.IntImm)]
         assert len(dynamic) == 4
         for expr in dynamic[1:]:
-            tvm.ir.assert_structural_equal(expr, dynamic[0])
+            tvm_tirx.ir.assert_structural_equal(expr, dynamic[0])
         assert len(_constant_ids(mod, operation, "MTE3_MTE2")) == 2
 
 
@@ -353,7 +353,7 @@ def test_distinct_counter_channels_keep_exclusive_rings_and_spill():
 
 
 def test_flag_spill_preserves_bound_dynamic_ids():
-    mod = tvm.IRModule({"main": _make_bound_flag_spill_program()})
+    mod = tvm_tirx.IRModule({"main": _make_bound_flag_spill_program()})
     rewritten = ascend_transform.RewriteFlagToBuf()(mod)
     assert calls(rewritten, "tl.ascend_get_buf")
     assert calls(rewritten, "tl.ascend_rls_buf")
@@ -362,7 +362,7 @@ def test_flag_spill_preserves_bound_dynamic_ids():
 
 
 def test_sparse_out_of_range_flags_are_compacted_without_spill():
-    mod = tvm.IRModule({"main": _make_sparse_out_of_range_flag_program()})
+    mod = tvm_tirx.IRModule({"main": _make_sparse_out_of_range_flag_program()})
     expected_before = [(0, 1), (2, 3), (4, 4), (6, 6), (8, 8)]
     for operation in ("set", "wait"):
         assert _event_ranges(mod, operation, "V_MTE3") == expected_before
@@ -376,9 +376,9 @@ def test_sparse_out_of_range_flags_are_compacted_without_spill():
 
 
 def test_legal_sparse_flags_remain_unchanged():
-    mod = tvm.IRModule({"main": _make_legal_sparse_flag_program()})
+    mod = tvm_tirx.IRModule({"main": _make_legal_sparse_flag_program()})
     rewritten = ascend_transform.RewriteFlagToBuf()(mod)
-    tvm.ir.assert_structural_equal(rewritten, mod)
+    tvm_tirx.ir.assert_structural_equal(rewritten, mod)
     assert not calls(rewritten, "tl.ascend_get_buf")
     assert not calls(rewritten, "tl.ascend_rls_buf")
     for operation in ("set", "wait"):

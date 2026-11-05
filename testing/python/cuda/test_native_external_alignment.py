@@ -1,5 +1,7 @@
 """Unknown external alignment and explicit vector promises are distinct contracts."""
 
+import tvm_tirx
+
 import pytest
 import torch
 from tvm_tirx import ir, tirx
@@ -24,8 +26,8 @@ def test_default_tensor_atomic_plan_has_no_unproven_vector_alignment(dtype, exte
             T.atomic_add(B[i], A[i])
 
     assert all(parameter.ty.data_alignment == 1 for parameter in add.params)
-    target = tilelang.tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
-    module = tilelang.tvm.IRModule({"main": add})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
+    module = tvm_tirx.IRModule({"main": add})
     with target:
         module = tirx.transform.BindTarget(target)(module)
         module = tilelang.transform.LowerAccessPtr()(module)

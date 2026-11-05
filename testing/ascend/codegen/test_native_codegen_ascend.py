@@ -4,9 +4,9 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def _ptr(name, dtype="float32", scope="global"):
@@ -14,7 +14,7 @@ def _ptr(name, dtype="float32", scope="global"):
 
 
 def _tensor(name, dtype="float32", scope="global", shape=(16,)):
-    return I.Var(name, tvm.tirx.TensorType(shape, dtype, scope=scope, layout="default"))
+    return I.Var(name, tvm_tirx.tirx.TensorType(shape, dtype, scope=scope, layout="default"))
 
 
 def _decl(tensor, pointer):
@@ -41,13 +41,13 @@ def _thread(var, size, body, tag="threadIdx.x"):
 
 
 def _source(params, body, tmp_path, *, name="kernel", attrs=None):
-    func = tvm.tirx.Function(params, body, ret_type=I.PrimType("void"))
+    func = tvm_tirx.tirx.Function(params, body, ret_type=I.PrimType("void"))
     func = func.with_attr("global_symbol", name).with_attr("calling_conv", 2)
     for key, value in (attrs or {}).items():
         func = func.with_attr(key, value)
     saved = I.save_json(func)
     module = tvm_ffi.get_global_func("target.build.tilelang_ascend_without_compile")(
-        tvm.IRModule({name: func}), tvm.target.Target("ascend")
+        tvm_tirx.IRModule({name: func}), tvm_tirx.target.Target("ascend")
     )
     source = module.inspect_source("asc")
     assert I.save_json(func) == saved
@@ -56,7 +56,7 @@ def _source(params, body, tmp_path, *, name="kernel", attrs=None):
 
 
 def test_native_ascend_target_and_typed_scalar_memory(tmp_path):
-    target = tvm.target.Target("ascend")
+    target = tvm_tirx.target.Target("ascend")
     assert target.launch_grid_only and target.max_vector_bits == 64
     pointer = _ptr("source")
     tensor = _tensor("source_view")
@@ -89,7 +89,7 @@ def test_native_ascend_local_allocation_accepts_optional_attrs(allocation_attrs,
     tensor = _tensor("scratch", dtype="int32", scope="local", shape=(8,))
     allocation = I.Bind(tensor, I.Call("tirx.alloc_tensor", [], ty_args=[tensor.ty], attrs=allocation_attrs))
     body = [allocation, I.TensorStore(tensor, [0], I.const(7, "int32"))]
-    assert tvm.tirx.analysis.check_well_formed(tvm.tirx.Function([], body, ret_type=I.PrimType("void")))
+    assert tvm_tirx.tirx.analysis.check_well_formed(tvm_tirx.tirx.Function([], body, ret_type=I.PrimType("void")))
     code = _source([], body, tmp_path)
     assert re.search(r"\bint32_t scratch_ptr\[8\];", code)
     assert "scratch_ptr[0] = 7;" in code
@@ -104,7 +104,7 @@ def _unrolled_loop(factor=None):
 @pytest.mark.parametrize("factor", [4, I.const(4, "int32")], ids=["python-integer", "native-integer"])
 def test_native_ascend_loop_factor_is_consumed(factor, tmp_path):
     loop = _unrolled_loop(factor)
-    assert tvm.tirx.analysis.check_well_formed(tvm.tirx.Function([], [loop], ret_type=I.PrimType("void")))
+    assert tvm_tirx.tirx.analysis.check_well_formed(tvm_tirx.tirx.Function([], [loop], ret_type=I.PrimType("void")))
     code = _source([], [loop], tmp_path)
     assert re.findall(r"#pragma unroll[^\n]*", code) == ["#pragma unroll 4"]
 
@@ -129,7 +129,7 @@ def test_native_ascend_unroll_hint_does_not_match_same_name_parameter(tmp_path):
     unrelated = I.Var("i", "int32")
     loop = _unrolled_loop()
     carrier = _legacy_unroll_carrier(unrelated, 2, loop)
-    assert tvm.tirx.analysis.check_well_formed(tvm.tirx.Function([unrelated], [carrier], ret_type=I.PrimType("void")))
+    assert tvm_tirx.tirx.analysis.check_well_formed(tvm_tirx.tirx.Function([unrelated], [carrier], ret_type=I.PrimType("void")))
     code = _source([unrelated], [carrier], tmp_path)
     assert re.findall(r"#pragma unroll[^\n]*", code) == ["#pragma unroll"]
 
@@ -201,7 +201,7 @@ def test_native_ascend_typed_pointer_reinterpret_and_byte_offset(tmp_path):
     source = _ptr("source", "uint8")
     shifted = _ptr("shifted", "float32")
     data = I.Call("tirx.reinterpret", [source], ty=shifted.ty)
-    data = tvm.tirx.op.ptr_byte_offset(data, I.const(4), ty=shifted.ty)
+    data = tvm_tirx.tirx.op.ptr_byte_offset(data, I.const(4), ty=shifted.ty)
     tensor = _tensor("view")
     code = _source([source], [I.Bind(shifted, data), _decl(tensor, shifted), I.TensorStore(tensor, [0], I.const(1, "float32"))], tmp_path)
     assert "__gm__ float" in code and "+ 4" in code
@@ -217,10 +217,10 @@ def test_native_ascend_vf_rejects_nested_sections(tmp_path):
 def test_native_ascend_direct_pointer_reinterpret_bind(tmp_path, source_dtype):
     source = _ptr("source", source_dtype)
     shifted = _ptr("shifted", "float32")
-    data = tvm.tirx.op.reinterpret(source, ty=shifted.ty)
+    data = tvm_tirx.tirx.op.reinterpret(source, ty=shifted.ty)
     tensor = _tensor("view")
     body = [I.Bind(shifted, data), _decl(tensor, shifted), I.TensorStore(tensor, [0], I.const(1, "float32"))]
-    assert tvm.tirx.analysis.check_well_formed(tvm.tirx.Function([source], body, ret_type=I.PrimType("void")))
+    assert tvm_tirx.tirx.analysis.check_well_formed(tvm_tirx.tirx.Function([source], body, ret_type=I.PrimType("void")))
     code = _source([source], body, tmp_path)
     assert "__gm__ float *shifted" in code
     assert "source" in code and "shifted[0]" in code
@@ -230,10 +230,10 @@ def test_native_ascend_direct_pointer_reinterpret_bind(tmp_path, source_dtype):
 def test_native_ascend_integer_reinterpret_bind_stays_scoped(tmp_path, source_dtype):
     source = I.Var("address", I.PrimType(source_dtype))
     shifted = _ptr("shifted", "float32")
-    data = tvm.tirx.op.reinterpret(source, ty=shifted.ty)
+    data = tvm_tirx.tirx.op.reinterpret(source, ty=shifted.ty)
     tensor = _tensor("view")
     body = [I.Bind(shifted, data), _decl(tensor, shifted), I.TensorStore(tensor, [0], I.const(1, "float32"))]
-    assert tvm.tirx.analysis.check_well_formed(tvm.tirx.Function([source], body, ret_type=I.PrimType("void")))
+    assert tvm_tirx.tirx.analysis.check_well_formed(tvm_tirx.tirx.Function([source], body, ret_type=I.PrimType("void")))
     code = _source([source], body, tmp_path)
     assert "__gm__ float *shifted" in code
     assert "address" in code and "shifted[0]" in code

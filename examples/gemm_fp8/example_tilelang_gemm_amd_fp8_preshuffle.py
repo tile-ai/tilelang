@@ -2,7 +2,6 @@ import torch
 import itertools
 import tilelang
 import tilelang.testing
-from tilelang import tvm as tvm
 import tilelang.rocm.language as T
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.layout import make_swizzled_layout

@@ -5,7 +5,7 @@ from testing.ascend._ir import access_tensor, allocations, annotations, sblock_a
 
 import tilelang
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from testing.ascend.auto_schedule._reuse_utils import _make_cyclic_scalar_program
 
 
@@ -23,7 +23,7 @@ def test_alias_contract_lifetime():
             if info.name in wanted:
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(opt_level=3, instruments=[CapturePassIR()]):
+    with tvm_tirx.transform.PassContext(opt_level=3, instruments=[CapturePassIR()]):
         tilelang.lower(_make_cyclic_scalar_program(), target="ascend")
 
     assert any("tl.buffer_alias_map" in sblock_annotations(block) for block in sblocks(snapshots["tl.InsertSync"]))
@@ -61,7 +61,7 @@ def test_fixed_versions_allow_ub_reuse_above_raw_capacity():
                     if access_tensor(node).ty.scope.name == "shared.dyn"
                 )
 
-    with tvm.transform.PassContext(instruments=[CaptureAllocations()]):
+    with tvm_tirx.transform.PassContext(instruments=[CaptureAllocations()]):
         tilelang.lower(main, target="ascend", enable_device_compile=False)
 
     # The raw sum is 256 KiB, but disjoint lifetimes need only 128 KiB of UB.

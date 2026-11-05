@@ -606,7 +606,7 @@ To reproduce the fp16-output MSL snippet in Section 1.4 from the repository root
 TILELANG_DISABLE_CACHE=1 python - <<'PY'
 import tilelang
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from testing.python.metal.test_metal_gemm_v2_linux import matmul_gemm_v2_global_c
 
 func = matmul_gemm_v2_global_c(
@@ -616,8 +616,8 @@ func = matmul_gemm_v2_global_c(
     threads=128,
 )
 
-metal4_target = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
-with tvm.transform.PassContext(), metal4_target:
+metal4_target = tvm_tirx.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
+with tvm_tirx.transform.PassContext(), metal4_target:
     print(tilelang.lower(func, target=metal4_target).kernel_source)
 PY
 ```

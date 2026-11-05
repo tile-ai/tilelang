@@ -1,3 +1,4 @@
+import tvm_tirx
 import tvm_ffi
 import tilelang
 import tilelang.language as T
@@ -15,7 +16,7 @@ def test_alloc_var_preserves_float64_initializer_dtype() -> None:
     initializers = []
 
     def collect_float64_initializer(node):
-        if isinstance(node, tilelang.tvm.ir.FloatImm) and str(node.ty.dtype) == str(T.float64):
+        if isinstance(node, tvm_tirx.ir.FloatImm) and str(node.ty.dtype) == str(T.float64):
             initializers.append(node.value)
 
     tvm_ffi.structural_walk(kernel.body, (tvm_ffi.Object, collect_float64_initializer), order="post")

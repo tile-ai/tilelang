@@ -8,7 +8,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 M = N = K = 128
@@ -44,7 +44,7 @@ def shared_alias_gemm():
 
 
 def lower_to_metal(enable_device_compile: bool) -> str:
-    target = tvm.target.Target("metal", tvm.target.Target("llvm"))
+    target = tvm_tirx.target.Target("metal", tvm_tirx.target.Target("llvm"))
     with target:
         artifact = tilelang.lower(
             shared_alias_gemm(),

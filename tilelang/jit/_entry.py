@@ -113,11 +113,11 @@ def compile(
     execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : str, dict, or tvm.target.Target, optional
+    target : str, dict, or tvm_tirx.target.Target, optional
         Compilation target. If None, reads from TILELANG_DEFAULT_TARGET environment
         variable (defaults to "auto"). Use a dict for target attributes, for example
         {"kind": "cuda", "arch": "sm_90"}.
-    target_host : str, dict, or tvm.target.Target, optional
+    target_host : str, dict, or tvm_tirx.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -199,11 +199,11 @@ def par_compile(
     execution_backend : Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"], optional
         Execution backend to use for kernel execution. If None, reads from
         TILELANG_EXECUTION_BACKEND environment variable (defaults to "auto").
-    target : str, dict, or tvm.target.Target, optional
+    target : str, dict, or tvm_tirx.target.Target, optional
         Compilation target. If None, reads from TILELANG_DEFAULT_TARGET environment
         variable (defaults to "auto"). Use a dict for target attributes, for example
         {"kind": "cuda", "arch": "sm_90"}.
-    target_host : str, dict, or tvm.target.Target, optional
+    target_host : str, dict, or tvm_tirx.target.Target, optional
         Target host for cross-compilation (default: None).
     verbose : bool, optional
         Whether to enable verbose output. If None, reads from
@@ -322,9 +322,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         Index(es) of output tensor(s) to return (lazy mode only).
     execution_backend : str | None
         Backend for kernel execution ("auto", "tvm_ffi", etc.).
-    target : str | tvm.target.Target | None
+    target : str | tvm_tirx.target.Target | None
         TVM compilation target (e.g., "cuda", "llvm", "auto").
-    target_host : str | tvm.target.Target | None
+    target_host : str | tvm_tirx.target.Target | None
         Host target for cross-compilation.
     verbose : bool | None
         Enable verbose compilation output.
@@ -618,9 +618,9 @@ def jit(
     ----------
     out_idx : list[int] | int | None
         Output tensor index(es). Only supported in lazy mode.
-    target : str | tvm.target.Target | None
+    target : str | tvm_tirx.target.Target | None
         Compilation target (e.g., "cuda", "llvm", "auto").
-    target_host : str | tvm.target.Target | None
+    target_host : str | tvm_tirx.target.Target | None
         Host target for cross-compilation.
     execution_backend : ExecutionBackend | None
         Backend for kernel execution.

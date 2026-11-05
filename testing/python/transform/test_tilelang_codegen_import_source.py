@@ -9,7 +9,7 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang.testing
@@ -56,7 +56,7 @@ def _generate_source(codegen, target, imports):
     build = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
     if build is None:
         pytest.skip(f"{codegen} codegen is not built")
-    target = tvm.target.Target(target)
+    target = tvm_tirx.target.Target(target)
     body = ir.SeqStmt([ir.Evaluate(tirx.call_extern("call_helper", ir.IntImm("int32", 1), ty="int32"))])
     for source in reversed(imports):
         schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": None, "key": "pragma_import_c", "value": source})
@@ -76,9 +76,9 @@ def _generate_source(codegen, target, imports):
         )
     func = tirx.Function([], body, ir.PrimType("void")).with_attr("global_symbol", "import_kernel")
     if target.kind.name != "c":
-        func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+        func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
         func = func.with_attr("tirx.kernel_launch_params", [])
-    return build(tvm.IRModule.from_expr(func), target).inspect_source()
+    return build(tvm_tirx.IRModule.from_expr(func), target).inspect_source()
 
 
 @pytest.mark.parametrize(("codegen", "target", "qualifier"), CODEGENS)

@@ -1,5 +1,5 @@
 from tilelang.language import _native
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir
 import functools
 import torch
@@ -158,7 +158,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
         return _prim.Shuffle(list(args), list(range(len(args))))
     expr = args[0] if args else None
     if expr is None:
-        value = tvm.ir.Var("", ir.PrimType(self))
+        value = tvm_tirx.ir.Var("", ir.PrimType(self))
         # Record a TileLang source default, not a property of the native Var
         # or a permanent Analyzer premise. The completed Function carries the
         # identity as an ordinary IR operand for serialization/remapping.
@@ -166,9 +166,9 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
             tvm_ffi.get_global_func("tl.MarkSizeVarDefault")(value)
         return value
     if isinstance(expr, int_):
-        return tvm.ir.const(expr, self)
+        return tvm_tirx.ir.const(expr, self)
     expr = _prim.convert(expr)
-    if isinstance(expr, tvm.ir.Expr) and tirx.dtype_of(expr) == self:
+    if isinstance(expr, tvm_tirx.ir.Expr) and tirx.dtype_of(expr) == self:
         return expr
     if not ir.is_prim_expr(expr):
         raise TypeError(f"Convert to datatype `{self}` expects a primitive expression")

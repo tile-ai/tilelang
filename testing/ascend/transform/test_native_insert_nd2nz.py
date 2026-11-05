@@ -9,7 +9,7 @@ import math
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -92,7 +92,7 @@ def metadata(call):
 
 
 def constant(expr):
-    return int(tvm.sym.Analyzer().simplify(expr))
+    return int(tvm_tirx.sym.Analyzer().simplify(expr))
 
 
 def function(body, buffers=(), definitions=(), layouts=None, params=(), carrier="sblock"):
@@ -104,7 +104,7 @@ def function(body, buffers=(), definitions=(), layouts=None, params=(), carrier=
         statements += [
             attribute("tl.sblock", {"name": "tilelang_root", "no_realize": True, "annotations": {"layout_map": layouts or {}}}, list(body))
         ]
-    return tirx.Function(list(params), statements).with_attr("target", tvm.target.Target("ascend")).with_attr("global_symbol", "main")
+    return tirx.Function(list(params), statements).with_attr("target", tvm_tirx.target.Target("ascend")).with_attr("global_symbol", "main")
 
 
 def apply(before):

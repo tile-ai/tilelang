@@ -149,7 +149,9 @@ def main():
     from tvm_tirx import base
 
     assert "tvm" not in sys.modules, "A legacy top-level TVM package was imported"
-    assert tilelang.tvm is tvm_tirx and sys.modules["tilelang.tvm"] is tvm_tirx
+    assert not hasattr(tilelang, "tvm")
+    assert not any(name == "tilelang.tvm" or name.startswith("tilelang.tvm.") for name in sys.modules)
+    assert tilelang._LIB is tvm_tirx.base._LOADED_LIBS["tvm_tirx_compiler"]
     assert not base._RUNTIME_ONLY
     native_info = dict(tvm_ffi.get_global_func("tl.CompilerBuildInfo")())
     for key in ("source_digest", "provider_version", "ffi_ref"):

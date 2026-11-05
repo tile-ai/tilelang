@@ -6,7 +6,7 @@ model. They are model-contract checks, not new NPU timing measurements.
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -51,7 +51,7 @@ def fields(reg):
 
 def estimate(params, body):
     root = attribute(None, "tl.sblock", {"name": "tilelang_root", "no_realize": True}, body)
-    before = tirx.Function(params, [root]).with_attr("target", tvm.target.Target("ascend"))
+    before = tirx.Function(params, [root]).with_attr("target", tvm_tirx.target.Target("ascend"))
     assert tirx.analysis.check_well_formed(before)
     source = ir.save_json(before)
     pass_ = tvm_ffi.get_global_func("tl.transform.EstimateLatency")()

@@ -21,7 +21,7 @@ import numpy as np
 import tilelang
 from tvm_tirx.script import tirx as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tvm_tirx import ir, tirx
 from tvm_tirx.script import ir as I
@@ -50,7 +50,7 @@ def _marked_assume(condition, message):
         }
     )
     return ir.RegionStmt(
-        tvm.ir.Op.get("tl.attr"),
+        tvm_tirx.ir.Op.get("tl.attr"),
         [payload],
         [],
         {"schema_version": 1, "annotation_schema": schema},
@@ -62,13 +62,13 @@ def _marked_assume(condition, message):
 def _prepare_packed(function):
     # The native pipeline materializes checked markers at the host/device
     # boundary, before the packed binder. Keep that explicit pass contract.
-    module = tilelang.transform.SplitHostDevice()(tvm.IRModule.from_expr(function))
+    module = tilelang.transform.SplitHostDevice()(tvm_tirx.IRModule.from_expr(function))
     return tilelang.transform.MakePackedAPI()(module)
 
 
 @pytest.mark.parametrize("use_global_symbol", [False])
 def test_no_op_when_global_symbol_is_absent(use_global_symbol):
-    func_attr = {"target": tvm.target.Target("llvm", host="llvm")}
+    func_attr = {"target": tvm_tirx.target.Target("llvm", host="llvm")}
 
     @T.function(private=True)
     def before():
@@ -78,11 +78,11 @@ def test_no_op_when_global_symbol_is_absent(use_global_symbol):
     if use_global_symbol:
         before = before.with_attr("global_symbol", "main")
 
-    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
+    after = tilelang.transform.MakePackedAPI()(tvm_tirx.IRModule.from_expr(before))["main"]
     if use_global_symbol:
         assert len(after.params) == 4
     else:
-        tvm.ir.assert_structural_equal(before, after)
+        tvm_tirx.ir.assert_structural_equal(before, after)
 
 
 def test_target_host_removed():
@@ -93,7 +93,7 @@ def test_target_host_removed():
     only contain the host-side target.
     """
 
-    host = tvm.target.Target("llvm")
+    host = tvm_tirx.target.Target("llvm")
 
     @I.ir_module
     class before:
@@ -130,11 +130,11 @@ def test_internal_subroutine_call():
             T.evaluate(A_data)
 
     after = tilelang.transform.MakePackedAPI()(before)
-    tvm.ir.assert_structural_equal(before["subroutine"], after["subroutine"])
+    tvm_tirx.ir.assert_structural_equal(before["subroutine"], after["subroutine"])
 
     compute_scope = _find_compute_scope(after["main"])
-    subroutine_call_op = next(call.op for call in collect_nodes(compute_scope, ir.Call) if isinstance(call.op, tvm.ir.GlobalVar))
-    assert isinstance(subroutine_call_op, tvm.ir.GlobalVar), (
+    subroutine_call_op = next(call.op for call in collect_nodes(compute_scope, ir.Call) if isinstance(call.op, tvm_tirx.ir.GlobalVar))
+    assert isinstance(subroutine_call_op, tvm_tirx.ir.GlobalVar), (
         f"The main function's CallObj should use the subroutine's GLobalVar as the operation, "
         f"but instead has an operation of type {subroutine_call_op}"
     )
@@ -148,7 +148,7 @@ def test_assume_requires_runtime_check_is_lowered_to_assert():
     # a sequential operation, so a duplicate optimizer-only fact follows it.
     body = [_marked_assume(condition, message), ir.Evaluate(ir.Call("prim.assume", [condition], ty="void"))]
     before = tirx.Function([n], body, ir.PrimType("void")).with_attr("global_symbol", "main")
-    before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
+    before = before.with_attr("target", tvm_tirx.target.Target("cuda", host="llvm"))
     after_mod = _prepare_packed(before)
     after = after_mod["main"]
     assert not [stmt for stmt in collect_nodes(after, ir.RegionStmt) if stmt.op.name == "tl.attr"]
@@ -160,14 +160,14 @@ def test_assume_requires_runtime_check_is_lowered_to_assert():
             if any(isinstance(part, ir.StringImm) and part.value == message for part in stmt.message_parts)
         ]
         assert len(matching_asserts) == 1
-        tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
+        tvm_tirx.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
 
 
 def test_optimizer_only_assume_is_not_lowered_to_assert():
     n = ir.Var("n", "int32")
     condition = n > 0
     before = tirx.Function([n], [ir.Evaluate(ir.Call("prim.assume", [condition], ty="void"))], ir.PrimType("void"))
-    before = before.with_attr("global_symbol", "main").with_attr("target", tvm.target.Target("cuda", host="llvm"))
+    before = before.with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("cuda", host="llvm"))
     after = _prepare_packed(before)["main"]
     assert collect_calls(after, op="prim.assume")
     assert not [
@@ -206,7 +206,7 @@ def test_subroutine_call_to_externally_visible_subroutine():
     assert subroutine_compute_scope is not None
 
     subroutine_call_op = collect_calls(main_compute_scope, op="tirx.call_cpacked")[0].op
-    assert isinstance(subroutine_call_op, tvm.ir.Op) and subroutine_call_op.name == "tirx.call_cpacked", (
+    assert isinstance(subroutine_call_op, tvm_tirx.ir.Op) and subroutine_call_op.name == "tirx.call_cpacked", (
         f"The main function's CallObj should be lowered to the builtin 'tirx.call_cpacked', "
         f"but instead has an operation of type {subroutine_call_op}"
     )
@@ -253,8 +253,8 @@ def test_function_call_with_null_data_pointer():
 
     built = compile_packed_function(func)
 
-    A = tvm.runtime.tensor(np.zeros([16], dtype="int32"))
-    B = tvm.runtime.empty([16, 16], "int32", tvm.cpu())
+    A = tvm_tirx.runtime.tensor(np.zeros([16], dtype="int32"))
+    B = tvm_tirx.runtime.empty([16, 16], "int32", tvm_tirx.cpu())
 
     with pytest.raises(RuntimeError, match="ndim"):
         built(A, B)
@@ -270,8 +270,8 @@ def test_function_call_with_wrong_dimensionality():
 
     built = compile_packed_function(func)
 
-    A = tvm.runtime.tensor(np.zeros([16], dtype="int32"))
-    B = tvm.runtime.empty([16], "int32", tvm.cpu())
+    A = tvm_tirx.runtime.tensor(np.zeros([16], dtype="int32"))
+    B = tvm_tirx.runtime.empty([16], "int32", tvm_tirx.cpu())
 
     with pytest.raises(RuntimeError, match="ndim"):
         built(A, B)

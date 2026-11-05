@@ -5,7 +5,7 @@ import tvm_ffi
 from testing.ascend._ir import sblock, sblock_annotations, sblock_metadata, sblocks, substitute, tensor
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_major_k_layout, make_ascend_major_mn_layout
 from testing.ascend._ir import allocated_buffer, calls, copy, kernel, nodes, seq, statements
@@ -28,7 +28,7 @@ def test_ring_flags_use_the_data_clock(mode, owners, guarded):
         # finite proof still checks actual addresses, epochs and completion.
         return
     clock = allocated_buffer(before, "epoch")[0] if mode == "counter" else nodes(before, ir.For)[0].var
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     ring_slots = set()
     for pipe in ("MTE2_MTE3", "MTE3_MTE2"):
         for operation in ("set", "wait"):
@@ -97,7 +97,7 @@ def test_sync_respects_atomic_task_boundary(guard_inside_task):
             if guard_inside_task:
                 assert not guards
             if guards:
-                tvm.ir.assert_structural_equal(guards[-1], enabled)
+                tvm_tirx.ir.assert_structural_equal(guards[-1], enabled)
 
 
 def test_dma_issue_order_is_not_completion_order():
@@ -137,11 +137,11 @@ def test_manually_indexed_storage_keeps_the_lexical_clock_under_a_guard():
         if call.op.name not in ("tl.ascend_set_flag", "tl.ascend_wait_flag") or call.args[0].value != "MTE2_MTE3":
             continue
         assert not any(isinstance(parent, ir.If) for parent in parents)
-        identifier = tvm.sym.Analyzer().simplify(call.args[1])
-        assert isinstance(identifier, ir.IntImm) or isinstance(tvm.sym.Analyzer().simplify(identifier - i % 2), ir.IntImm)
+        identifier = tvm_tirx.sym.Analyzer().simplify(call.args[1])
+        assert isinstance(identifier, ir.IntImm) or isinstance(tvm_tirx.sym.Analyzer().simplify(identifier - i % 2), ir.IntImm)
         dynamic.append(call)
     assert len(dynamic) == 2
-    tvm.ir.assert_structural_equal(dynamic[0].args[1], dynamic[1].args[1])
+    tvm_tirx.ir.assert_structural_equal(dynamic[0].args[1], dynamic[1].args[1])
 
 
 @pytest.mark.parametrize("overlap", [False, True], ids=["disjoint-rows", "same-row"])
@@ -160,7 +160,7 @@ def test_dma_row_writes_only_serialize_overlapping_regions(overlap):
     releases = _events(after, "set", "MTE2_MTE3")
     waits = _events(after, "wait", "MTE2_MTE3")
     assert len(releases) == len(waits) == 1
-    tvm.ir.assert_structural_equal(releases[0].args[1], waits[0].args[1])
+    tvm_tirx.ir.assert_structural_equal(releases[0].args[1], waits[0].args[1])
 
 
 @pytest.mark.parametrize(
@@ -230,7 +230,7 @@ def test_different_l0_pitches_conflict_within_same_plane(transposed, plane, mn_s
     # GEMM reads rows [0,32) at pitch=2. A subsequent load of [32,64)
     # at pitch=4 overlaps that compact storage, despite logical separation.
     operand_shape = (1, 64, 32) if transposed else (1, 32, 64)
-    lhs = ir.TensorRegion(a, [tvm.ir.Range.from_min_extent(0, e) for e in operand_shape], ir.TensorRegionType())
+    lhs = ir.TensorRegion(a, [tvm_tirx.ir.Range.from_min_extent(0, e) for e in operand_shape], ir.TensorRegionType())
     if transposed:
         c = tensor((64, 32), "float32", name="c", scope="shared.l0c")
         gemm = T.gemm(b, lhs, c, clear_accum=True)
@@ -328,7 +328,7 @@ def test_atomic_l0_copies_require_a_uniform_pitch(overlap, unroll, varying_pitch
         dst_shape=[16, 16],
         annotations={"l0_pitch": 1 + i if varying_pitch else ir.IntImm("int32", 1)},
     )
-    lhs = ir.TensorRegion(a, [tvm.ir.Range.from_min_extent(0, e) for e in (16, 32 if overlap else 16)], ir.TensorRegionType())
+    lhs = ir.TensorRegion(a, [tvm_tirx.ir.Range.from_min_extent(0, e) for e in (16, 32 if overlap else 16)], ir.TensorRegionType())
     # Mixed pitches conservatively conflict even when the K regions are disjoint.
     loads = (
         seq(*(substitute(load, {i: value}) for value in (0, 1)))
@@ -385,9 +385,9 @@ def test_equivalent_lexical_epoch_serializes_counter_ring():
         released = _events(after, "set", pipe)
         acquired = _events(after, "wait", pipe)
         assert released and acquired
-        assert all(isinstance(tvm.sym.Analyzer().simplify(event.args[1]), ir.IntImm) for event in released + acquired)
-        assert sorted(int(tvm.sym.Analyzer().simplify(event.args[1])) for event in released) == sorted(
-            int(tvm.sym.Analyzer().simplify(event.args[1])) for event in acquired
+        assert all(isinstance(tvm_tirx.sym.Analyzer().simplify(event.args[1]), ir.IntImm) for event in released + acquired)
+        assert sorted(int(tvm_tirx.sym.Analyzer().simplify(event.args[1])) for event in released) == sorted(
+            int(tvm_tirx.sym.Analyzer().simplify(event.args[1])) for event in acquired
         )
     root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
     assert int(sblock_annotations(root)["tl.buffer_versions_map"][ub]) == 2

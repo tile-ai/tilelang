@@ -1,5 +1,5 @@
 # ruff: noqa
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 from tilelang.backend.target import determine_target
 import tilelang.language as T
@@ -12,12 +12,12 @@ import tvm_ffi
 # Direct pass tests own the registration that engine.lower normally performs.
 tl.cuda.register_backend()
 
-auto_target = tvm.target.Target(determine_target("auto"))
+auto_target = tvm_tirx.target.Target(determine_target("auto"))
 
 
 def _apply(func):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.cuda.transform.LowerSharedBarrier()(mod)
     return mod
@@ -151,9 +151,9 @@ def test_plan_update_keeps_barrier_init_with_tcgen05_no_tma():
             T.copy(C_local, Y_shared)
             T.copy(Y_shared, Y[by * 128, bx * 128])
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
-    with tvm.transform.PassContext(config=pass_configs), target:
-        mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
+    with tvm_tirx.transform.PassContext(config=pass_configs), target:
+        mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
         mod = CUDAPassPipelineBodyPrologue(mod, target)
         mod = tl.cuda.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)

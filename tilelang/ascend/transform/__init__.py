@@ -189,7 +189,7 @@ def MergeUBAllocations(align_bytes: int = 16, disable_reuse: bool = False):
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.MergeUBAllocations(align_bytes, disable_reuse)  # type: ignore

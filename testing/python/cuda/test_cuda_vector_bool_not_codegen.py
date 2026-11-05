@@ -5,7 +5,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -14,15 +14,15 @@ def _make_vector_not_module(lanes, bitwise=False):
     negated = ~value if bitwise else tirx.Not(value)
     func = tirx.Function([value], ir.Evaluate(negated), ret_type=ir.PrimType("void"))
     func = func.with_attr("global_symbol", "vector_not")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    return tvm.IRModule({"vector_not": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    return tvm_tirx.IRModule({"vector_not": func})
 
 
 def _build_vector_not_source(lanes):
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the CUDA code generator")
-    return build(_make_vector_not_module(lanes), tvm.target.Target("cuda")).inspect_source()
+    return build(_make_vector_not_module(lanes), tvm_tirx.target.Target("cuda")).inspect_source()
 
 
 @pytest.mark.parametrize(
@@ -48,7 +48,7 @@ def test_vector_not_compiles(lanes):
 
     get_backend("cuda")  # Direct FFI builds need the owning compiler callback.
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda")
-    build(_make_vector_not_module(lanes), tvm.target.Target("cuda"))
+    build(_make_vector_not_module(lanes), tvm_tirx.target.Target("cuda"))
 
 
 @tilelang.testing.requires_cuda
@@ -70,7 +70,7 @@ def test_vector_boolean_bitwise_not_compiles():
 
     get_backend("cuda")
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda")
-    build(_make_vector_not_module(2, bitwise=True), tvm.target.Target("cuda"))
+    build(_make_vector_not_module(2, bitwise=True), tvm_tirx.target.Target("cuda"))
 
 
 @tilelang.testing.requires_cuda

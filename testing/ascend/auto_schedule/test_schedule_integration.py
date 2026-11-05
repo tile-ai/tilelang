@@ -21,7 +21,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from testing.ascend._ir import nodes, calls, allocated_buffer
 
 TILE = 16
@@ -146,7 +146,7 @@ def test_sibling_l0_rings_survive_layout_lowering(k_tiles):
             if info.name in ("tl.PrepareMultiBuffer", "tl.MaterializeMultiBuffer"):
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_make_shared_l0_ring_program(k_tiles), target="ascend")
     prepared = snapshots["tl.PrepareMultiBuffer"]
     a, b = allocated_buffer(prepared, "l0a"), allocated_buffer(prepared, "l0b")
@@ -233,7 +233,7 @@ def test_subcore_roles_survive_complete_lowering(pattern):
             if info.name in ("tl.ResolveCore", "tl.MaterializeMultiBuffer"):
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_make_subcore_gemm(pattern, 5), target="ascend")
     assert artifact.kernel_source and artifact.device_mod
     resolved = snapshots["tl.ResolveCore"]
@@ -586,7 +586,7 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
             if info.name in ("tl.AssignCore", "tl.InsertSync", "tl.LowerScheduledTIR"):
                 snapshots[info.name] = mod
 
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(_make_epilogue_program(sids), target="ascend")
     vector_mask = 1 if sids == 1 else 5
     assigned = [task for task in nodes(snapshots["tl.AssignCore"], ir.RegionStmt) if attribute_key(task) == "tl.ascend_task"]
@@ -597,7 +597,7 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
     # AIC flags address exactly the participating AIV banks. The uniform AIV
     # body and its synchronization stay shared when both subcores participate.
     cube_banks = set()
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for task in nodes(snapshots["tl.InsertSync"], ir.RegionStmt):
         if attribute_key(task) != "tl.ascend_task":
             continue
@@ -628,7 +628,7 @@ def test_every_kernel_is_scheduled_and_called_in_program_order():
                 snapshots[info.name] = mod
 
     program = make_multi_kernel_program()
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(program, target="ascend")
     for name, mod in snapshots.items():
         roots = [block for block in sblocks(mod) if sblock_metadata(block)["name"] == "tilelang_root"]
@@ -743,7 +743,7 @@ def test_single_version_sibling_protocol_survives_reuse_and_lowering():
 
     # This integration boundary protects the single-version counter cleanup
     # together with the alias contract produced by InsertSync and consumed by packing.
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(main, target="ascend")
     inserted = snapshots["tl.InsertSync"]
     ub = allocated_buffer(inserted, "ub")
@@ -843,7 +843,7 @@ def test_sf_group_owners_survive_a_plain_gemm_sibling(versions):
 
     # Owner and counter metadata must survive Prepare -> ResolveCore -> Sync
     # and reconstruct the same physical ring in MaterializeMultiBuffer.
-    with tvm.transform.PassContext(instruments=[Capture()]):
+    with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(main, target="ascend")
     prepared = snapshots["tl.InsertSync"]
     for data_name, sf_name in [("a0", "sa"), ("b0", "sb")]:

@@ -3,16 +3,16 @@ import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.language import _native
 from tilelang.testing.ir import collect_nodes
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 
 
-_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-_SM89_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
-_SM90_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+_TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
+_SM89_TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_89"})
+_SM90_TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
 
 
 def _tensor(shape, dtype, name, *, scope="global", strides=None, elem_offset=0):
@@ -23,15 +23,15 @@ def _tensor(shape, dtype, name, *, scope="global", strides=None, elem_offset=0):
 
 
 def _run_layout_inference(func):
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     with _TARGET:
-        mod = tvm.tirx.transform.BindTarget(_TARGET)(mod)
+        mod = tvm_tirx.tirx.transform.BindTarget(_TARGET)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         return tl.transform.LayoutInference()(mod)
 
 
 def _run_vectorized_loop_legalizer(func):
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     with _TARGET:
         mod = tirx.transform.BindTarget(_TARGET)(mod)
         return tl.transform.LegalizeVectorizedLoop()(mod)
@@ -41,9 +41,9 @@ def _run_vectorize_loop(func, target=_SM90_TARGET):
     # Match the public kernel ABI's disjoint-parameter contract. A raw native
     # Function without it intentionally keeps the scalar atomic loop.
     func = func.with_attr("tirx.noalias", True)
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.LowerAccessPtr()(mod)
         mod = tl.transform.FlattenBuffer()(mod)
         return tl.transform.VectorizeLoop()(mod)
@@ -164,7 +164,7 @@ def _plan_atomic_loop(
     # These source/output fixtures model separate kernel arguments. State the
     # engine's default noalias contract before invoking individual native passes.
     func = tirx.Function([source, output, offset], body).with_attr("global_symbol", "main").with_attr("tirx.noalias", True)
-    return tvm.IRModule({"main": func})
+    return tvm_tirx.IRModule({"main": func})
 
 
 @tilelang.testing.requires_cuda
@@ -195,8 +195,8 @@ def test_vector_group_boundary_is_relative_to_min(access):
     else:
         body = ir.If(i // 4 == 0, ir.TensorStore(b, [i - 2], i), None)
     func = tirx.Function([a, b], ir.For(i, 2, 6, 1, ir.ForKind.VECTORIZED, body))
-    with tvm.target.Target("c"):
-        planned = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+    with tvm_tirx.target.Target("c"):
+        planned = tl.transform.LegalizeVectorizedLoop()(tvm_tirx.IRModule.from_expr(func))
     # At width 4 the lane values of i // 4 are [0, 0, 1, 1], not uniform.
     assert _vectorized_extents(planned["main"]) == [2]
 
@@ -363,7 +363,7 @@ def test_large_int32_bounded_residual_access_ptr_does_not_abort():
                 T.evaluate(
                     T.call_intrin(
                         "float32",
-                        tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                        tvm_tirx.ir.Op.get("tl.atomic_add_elem_op"),
                         T.tvm_access_ptr(
                             T.type_annotation("float32"),
                             A.data,

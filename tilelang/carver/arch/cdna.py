@@ -1,5 +1,5 @@
 from __future__ import annotations
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.target import Target
 from .arch_base import TileDevice
 
@@ -12,7 +12,7 @@ def is_cdna_arch(arch: TileDevice) -> bool:
     return isinstance(arch, CDNA)
 
 
-def _get_l2_cache_size_bytes(target: Target, device: tvm.runtime.Device) -> int:
+def _get_l2_cache_size_bytes(target: Target, device: tvm_tirx.runtime.Device) -> int:
     value = getattr(target, "l2_cache_size_bytes", None)
     if value is None:
         value = target.attrs.get("l2_cache_size_bytes", None)
@@ -28,10 +28,10 @@ class CDNA(TileDevice):
 
             target = determine_target(target, return_object=True)
         self.target = target
-        device = tvm.runtime.rocm(0)
+        device = tvm_tirx.runtime.rocm(0)
         if not device.exist:
             raise RuntimeError("Cannot find HIP device 0.")
-        self.device: tvm.runtime.Device = device
+        self.device: tvm_tirx.runtime.Device = device
         self.platform: str = "CDNA"
 
         # TVM runtime should correctly report 160 KB (163840 B) for gfx950; the

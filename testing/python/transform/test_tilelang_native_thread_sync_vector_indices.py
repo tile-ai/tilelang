@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, runtime, tirx
 from tvm_tirx.ir import prim
 
@@ -45,7 +45,7 @@ def _case(write_index, read_index, threads=64, size=2048):
         body.append(ir.Evaluate(read_value))
     launch = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(threads)], [tx], {}, body)
     function = tirx.Function([output], launch, ret_type=ir.PrimType("void")).with_attr(
-        "target", tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+        "target", tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     )
     assert tirx.analysis.check_well_formed(function)
     return function
@@ -151,7 +151,7 @@ def test_unknown_vector_addresses_keep_a_possible_conflict():
         ],
     )
     function = tirx.Function([output, unknown], launch, ret_type=ir.PrimType("void")).with_attr(
-        "target", tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+        "target", tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     )
     assert len(_barriers(_lower(function))) == 1
 
@@ -171,7 +171,7 @@ def test_subbyte_vector_lanes_keep_shared_word_conflicts():
         ],
     )
     function = tirx.Function([], launch, ret_type=ir.PrimType("void")).with_attr(
-        "target", tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+        "target", tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     )
     lowered = _lower(function)
     assert len(_barriers(lowered)) == 1

@@ -1,5 +1,5 @@
 # ruff: noqa
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -51,14 +51,14 @@ def simplify_and_compare(before, expected, config=None):
 
     full_config = {PassConfigKey.TL_SIMPLIFY.value: config}
 
-    with tvm.transform.PassContext(config=full_config):
+    with tvm_tirx.transform.PassContext(config=full_config):
         after = tl.transform.Simplify()(before)
 
     # Compare bodies only, ignoring function name differences
     # Use map_free_vars=True to allow mapping of free variables (function parameters)
     after_func = after["main"]
     expected_func = expected["main"]
-    tvm.ir.assert_structural_equal(after_func.body, expected_func.body, map_free_vars=True)
+    tvm_tirx.ir.assert_structural_equal(after_func.body, expected_func.body, map_free_vars=True)
     return after
 
 
@@ -69,7 +69,7 @@ def test_stmt_simplify():
 
     store = ir.TensorStore(A, [i], C[i])
     loop = ir.For(i, 0, n, 1, ir.ForKind.DEFAULT, ir.If(i < 12, store, None))
-    mod = tvm.IRModule.from_expr(tirx.Function([A, C], bind_then(n, 10, loop)))
+    mod = tvm_tirx.IRModule.from_expr(tirx.Function([A, C], bind_then(n, 10, loop)))
     body = tl.transform.Simplify()(mod)["main"].body
     assert len(collect_nodes(body, ir.If)) == 0
     assert len(collect_nodes(body, ir.For)) == 1
@@ -88,7 +88,7 @@ def test_thread_extent_simplify():
     stmt = thread_scope(ty, "threadIdx.y", 1, stmt)
     stmt = thread_scope(tx, "threadIdx.x", n, stmt)
     stmt = thread_scope(tx_outer, "threadIdx.x", n, stmt)
-    mod = tvm.IRModule.from_expr(tirx.Function([A, C], bind_then(n, 10, stmt)))
+    mod = tvm_tirx.IRModule.from_expr(tirx.Function([A, C], bind_then(n, 10, stmt)))
     body = tl.transform.Simplify()(mod)["main"].body
     assert len(collect_nodes(body, ir.If)) == 0
     assert len(collect_nodes(body, ir.RegionStmt)) == 3
@@ -106,7 +106,7 @@ def test_dynamic_reduction_tail_guard():
     guard = ir.If(offset < batch * 192, store, None)
     loop = ir.For(i, 0, (batch * 192 - 1) // 128 + 1, 1, ir.ForKind.DEFAULT, guard)
     body = thread_scope(tx, "threadIdx.x", 128, loop)
-    mod = tvm.IRModule.from_expr(tirx.Function([source, output], body))
+    mod = tvm_tirx.IRModule.from_expr(tirx.Function([source, output], body))
 
     # For batch=1, i=1 and tx=64, the offset is 192 and the guard is false.
     # Incorrect modular bounds used to prove it true without a batch > 0 assume.
@@ -171,8 +171,8 @@ def test_context_singleton_floordiv_index():
         ir.If(tx < 128, ir.Evaluate(0), expected_body),
     )
 
-    mod_before = tvm.IRModule.from_expr(tirx.Function([A, C], before_stmt))
-    mod_expected = tvm.IRModule.from_expr(tirx.Function([A, C], expected_stmt))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([A, C], before_stmt))
+    mod_expected = tvm_tirx.IRModule.from_expr(tirx.Function([A, C], expected_stmt))
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -188,7 +188,7 @@ def test_if_likely():
     stmt = ir.If(cond, ir.If(cond, store, None), None)
     stmt = thread_scope(ty, "threadIdx.y", 32, stmt)
     stmt = thread_scope(tx, "threadIdx.x", 32, stmt)
-    mod = tvm.IRModule.from_expr(tirx.Function([A, C, n], stmt))
+    mod = tvm_tirx.IRModule.from_expr(tirx.Function([A, C, n], stmt))
     body = tl.transform.Simplify()(mod)["main"].body
     assert len(collect_nodes(body, ir.If)) == 1
     assert len(collect_nodes(body, ir.TensorStore)) == 1
@@ -205,8 +205,8 @@ def test_load_store_noop():
     def expected(A: T.Buffer((1,), "float32")):
         T.evaluate(0)
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -221,8 +221,8 @@ def test_load_store_noop_after_simplify():
     def expected(A: T.Buffer((1,), "float32")):
         T.evaluate(0)
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -242,8 +242,8 @@ def test_nested_condition():
             if i == 5:
                 A[i] = 0.0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -263,8 +263,8 @@ def test_nested_provable_condition():
             if i == 5:
                 A[i] = 0.0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -284,8 +284,8 @@ def test_nested_var_condition():
             if i == n:
                 A[i] = 0.0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -299,7 +299,7 @@ def test_altered_buffer_contents():
             if A[0] == n:
                 A[0] = 0
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     # Expected is the same as before
     simplify_and_compare(mod_before, mod_before)
 
@@ -322,8 +322,8 @@ def test_negation_of_condition():
             if i == 5:
                 A[i] = 1
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -345,8 +345,8 @@ def test_negation_of_not_equal():
             if i != 5:
                 A[i] = 1
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -368,8 +368,8 @@ def test_negation_of_var_condition():
             if i == n:
                 A[i] = 1
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -389,8 +389,8 @@ def test_literal_constraint_split_boolean_and():
             if i == n and j == n:
                 A[i, j] = 0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -416,8 +416,8 @@ def test_literal_constraint_split_boolean_or():
             else:
                 A[i, j] = 2
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -434,8 +434,8 @@ def test_if_then_else_expr():
             if i < 12:
                 A[i] = 1.0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -450,8 +450,8 @@ def test_ceil_log2_int():
     def expected(A: T.Buffer(1, "int32")):
         A[0] = 4
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -469,8 +469,8 @@ def test_left_shift_lower_bound():
         for i in T.serial(16):
             A[i] = 0.0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -488,8 +488,8 @@ def test_left_shift_upper_bound():
         for i in T.serial(16):
             A[i] = 0.0
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -506,8 +506,8 @@ def test_conditional_floor_mod():
         if T.floormod(i, -2) == 0:
             A[0] = True
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -522,8 +522,8 @@ def test_simplify_rhs_of_boolean_and_using_lhs():
     def expected(A: T.Buffer(1, "bool"), n: T.int32):
         A[0] = n < 5
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_APPLY_CONSTRAINTS_TO_BOOLEAN_BRANCHES.value: True})
 
 
@@ -538,8 +538,8 @@ def test_simplify_lhs_of_boolean_and_using_rhs():
     def expected(A: T.Buffer(1, "bool"), n: T.int32):
         A[0] = n < 5
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_APPLY_CONSTRAINTS_TO_BOOLEAN_BRANCHES.value: True})
 
 
@@ -554,8 +554,8 @@ def test_simplify_rhs_of_boolean_or_using_lhs():
     def expected(A: T.Buffer(1, "bool"), n: T.int32):
         A[0] = n < 10
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_APPLY_CONSTRAINTS_TO_BOOLEAN_BRANCHES.value: True})
 
 
@@ -570,8 +570,8 @@ def test_simplify_lhs_of_boolean_or_using_rhs():
     def expected(A: T.Buffer(1, "bool"), n: T.int32):
         A[0] = n < 10
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_APPLY_CONSTRAINTS_TO_BOOLEAN_BRANCHES.value: True})
 
 
@@ -589,8 +589,8 @@ def test_simplify_conditional_using_buffer_value():
         A[0] = 0
         A[0] = 42
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_PROPAGATE_KNOWNS_TO_PROVE_CONDITIONAL.value: True})
 
 
@@ -607,8 +607,8 @@ def test_simplify_non_conditional():
         A[0] = 0
         A[0] = 1
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_PROPAGATE_KNOWNS_TO_SIMPLIFY_EXPRESSIONS.value: True})
 
 
@@ -620,7 +620,7 @@ def test_suppress_simplify_non_conditional():
         A[0] = 0
         A[0] = A[0] + 1
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     simplify_and_compare(mod_before, mod_before, {PassConfigKey.TL_SIMPLIFY_PROPAGATE_KNOWNS_TO_SIMPLIFY_EXPRESSIONS.value: False})
 
 
@@ -637,8 +637,8 @@ def test_simplify_buffer_store():
         A[0] = 5
         A[0] = 12
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_PROPAGATE_KNOWNS_TO_SIMPLIFY_EXPRESSIONS.value: True})
 
 
@@ -653,8 +653,8 @@ def test_rewrite_as_and_of_ors():
     def expected(A: T.Buffer(3, "bool")):
         T.evaluate((A[0] or A[1]) and (A[0] or A[2]))
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_CONVERT_BOOLEAN_TO_AND_OF_ORS.value: True})
 
 
@@ -665,7 +665,7 @@ def test_suppress_rewrite_as_and_of_ors():
     def before(A: T.Buffer(3, "bool")):
         T.evaluate(A[0] or (A[1] and A[2]))
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     simplify_and_compare(mod_before, mod_before, {PassConfigKey.TL_SIMPLIFY_CONVERT_BOOLEAN_TO_AND_OF_ORS.value: False})
 
 
@@ -682,8 +682,8 @@ def test_buffer_shape_constraint():
         A = T.match_buffer(a, (n * 32,), "float32")
         A[T.int64(0)] = T.float32(0)
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -701,8 +701,8 @@ def test_tilelang_enable_simplify_let_inline_true():
         for i in T.serial(16):
             A[i] = i + 1
 
-    mod_before = tvm.IRModule({"main": before})
-    mod_expected = tvm.IRModule({"main": expected})
+    mod_before = tvm_tirx.IRModule({"main": before})
+    mod_expected = tvm_tirx.IRModule({"main": expected})
     # Default behavior: let statements are inlined
     simplify_and_compare(mod_before, mod_expected, {PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE.value: True})
 
@@ -716,7 +716,7 @@ def test_tilelang_enable_simplify_let_inline_false():
             x = i + 1
             A[i] = x
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     # When disabled, let statements should be preserved (before == after)
     simplify_and_compare(mod_before, mod_before, {PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE.value: False})
 
@@ -740,11 +740,11 @@ def test_simplify_removes_unused_macro_argument(capfd):
             x = T.alloc_var("float32")
             B[0] = 7.0
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     tl.transform.VerifyBufferInit()(mod_before)
     assert "Buffer read before initialization" in capfd.readouterr().err
 
-    after = simplify_and_compare(mod_before, tvm.IRModule({"main": expected}))
+    after = simplify_and_compare(mod_before, tvm_tirx.IRModule({"main": expected}))
     tl.transform.VerifyBufferInit()(after)
     assert "Buffer read before initialization" not in capfd.readouterr().err
 
@@ -770,7 +770,7 @@ def test_simplify_removes_unused_macro_bind_chain():
             x = T.alloc_var("float32")
             B[0] = 7.0
 
-    simplify_and_compare(tvm.IRModule({"main": before}), tvm.IRModule({"main": expected}))
+    simplify_and_compare(tvm_tirx.IRModule({"main": before}), tvm_tirx.IRModule({"main": expected}))
 
 
 def test_simplify_keeps_used_macro_argument(capfd):
@@ -787,7 +787,7 @@ def test_simplify_keeps_used_macro_argument(capfd):
             x = T.alloc_var("float32")
             B[0] = increment(x)
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     after = tl.transform.Simplify()(mod_before)
     # Native Bind simplification can inline the final pure arithmetic use,
     # but the argument's actual uninitialized load must remain observable.
@@ -806,7 +806,7 @@ def test_simplify_keeps_bind_read_before_write():
         A[0] = 2.0
         C[0] = value
 
-    mod_before = tvm.IRModule({"main": before})
+    mod_before = tvm_tirx.IRModule({"main": before})
     simplify_and_compare(mod_before, mod_before)
 
 
@@ -837,8 +837,8 @@ def test_simplify_keeps_bind_with_side_effects(make_value):
         unused_consumer = ir.Bind(ir.Var("unused", value.ty), result + 1)
 
     before_body = ir.SeqStmt([effectful_bind, unused_consumer])
-    mod_before = tvm.IRModule.from_expr(tirx.Function([A], before_body))
-    mod_expected = tvm.IRModule.from_expr(tirx.Function([A], effectful_bind))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([A], before_body))
+    mod_expected = tvm_tirx.IRModule.from_expr(tirx.Function([A], effectful_bind))
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -859,7 +859,7 @@ def test_simplify_keeps_bind_reading_volatile_buffer(annotation):
         if annotation == "volatile_scope":
             body = attribute(A.data, "volatile_scope", 1, body)
         body = ir.SeqStmt([ir.Bind(A, allocation), body])
-        return tvm.IRModule.from_expr(tirx.Function([], body))
+        return tvm_tirx.IRModule.from_expr(tirx.Function([], body))
 
     volatile_read = ir.Bind(value, alias[0])
     unused_consumer = ir.Bind(ir.Var("unused", "float32"), value + 1.0)
@@ -888,7 +888,7 @@ def test_simplify_keeps_binds_used_in_buffer_metadata():
             ir.TensorStore(view, [0], 1.0),
         ]
     )
-    mod_before = tvm.IRModule.from_expr(tirx.Function([source], body))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([source], body))
     simplify_and_compare(mod_before, mod_before)
 
 
@@ -908,7 +908,7 @@ def test_simplify_keeps_bind_used_in_nested_annotation():
         annotations={"test.metadata": {"nested": [tag]}},
     )
     body = bind_then(tag, source[0], loop)
-    mod_before = tvm.IRModule.from_expr(tirx.Function([source, output], body))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([source, output], body))
     simplify_and_compare(mod_before, mod_before)
 
 
@@ -923,8 +923,8 @@ def test_simplify_inlines_constant_but_keeps_annotation_binding():
     before_loop = ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, ir.TensorStore(output, [i], tag + 1), annotations=annotations)
     # The store simplifies to 5, while the annotation still requires tag = 4.
     expected_loop = ir.For(i, 0, 2, 1, ir.ForKind.DEFAULT, ir.TensorStore(output, [i], 5), annotations=annotations)
-    mod_before = tvm.IRModule.from_expr(tirx.Function([output], bind_then(tag, 4, before_loop)))
-    mod_expected = tvm.IRModule.from_expr(tirx.Function([output], bind_then(tag, 4, expected_loop)))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([output], bind_then(tag, 4, before_loop)))
+    mod_expected = tvm_tirx.IRModule.from_expr(tirx.Function([output], bind_then(tag, 4, expected_loop)))
     simplify_and_compare(mod_before, mod_expected)
 
 
@@ -956,7 +956,7 @@ def test_simplify_keeps_bind_used_in_metadata_objects(site):
     func = tirx.Function([source, output], bind_then(tag, source[0], body))
     if site == "function":
         func = func.with_attr("test.metadata", metadata["test.metadata"])
-    mod_before = tvm.IRModule.from_expr(func)
+    mod_before = tvm_tirx.IRModule.from_expr(func)
     simplify_and_compare(mod_before, mod_before)
 
 
@@ -972,7 +972,7 @@ def test_simplify_keeps_bind_used_only_in_buffer_predicate(access):
     else:
         body = ir.If(predicate, ir.TensorStore(C, [0], 1.0), None)
     body = bind_then(predicate, prim.LT(0, source[0]), body)
-    mod_before = tvm.IRModule.from_expr(tirx.Function([source, A, C], body))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([source, A, C], body))
     simplify_and_compare(mod_before, mod_before)
 
 
@@ -996,8 +996,8 @@ def test_simplify_dead_bind_with_shared_nodes(store_uses_shared_value):
     if store_uses_shared_value:
         expected_body = bind_then(value, A[0], expected_body)
 
-    mod_before = tvm.IRModule.from_expr(tirx.Function([A, C, cond], before_body))
-    mod_expected = tvm.IRModule.from_expr(tirx.Function([A, C, cond], expected_body))
+    mod_before = tvm_tirx.IRModule.from_expr(tirx.Function([A, C, cond], before_body))
+    mod_expected = tvm_tirx.IRModule.from_expr(tirx.Function([A, C, cond], expected_body))
     simplify_and_compare(mod_before, mod_expected)
 
 

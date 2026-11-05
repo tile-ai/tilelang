@@ -9,7 +9,7 @@ from tvm_tirx import ir, tirx
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_ffi import dtype as DataType
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import SM120BlockScaleTile
@@ -130,7 +130,7 @@ def test_default_tensor_core_intrin_emitter_stays_arch_neutral():
     assert (
         resolve_gemm_impl(
             GEMM_INST_MMA_BLOCK_SCALED,
-            tvm.target.Target({"kind": "cuda", "arch": "sm_120"}),
+            tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_120"}),
         )
         is GemmMMASm120BlockScaled
     )
@@ -746,10 +746,10 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units(target_kind):
             B[0] = a[0]
             B[1] = b[0]
 
-    mod = tvm.IRModule.from_expr(
+    mod = tvm_tirx.IRModule.from_expr(
         before.with_attr("global_symbol", "main").with_attr(
             "target",
-            tvm.target.Target(target_kind),
+            tvm_tirx.target.Target(target_kind),
         )
     )
     mod = tilelang.transform.LowerOpaqueBlock()(mod)
@@ -924,7 +924,7 @@ def test_nvf4_mma_block_scale_compact_fragment_diagnostic(fragment_a, fragment_s
         fragment_scales=fragment_scales,
         sf_layout="blockscaled_chunk_kmajor",
     )
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_120a"})
     with target, pytest.raises(Exception, match="currently require.*sf_layout='rowmajor'"):
         tilelang.lower(program, target=target, enable_device_compile=False)
 
@@ -965,7 +965,7 @@ def test_nvf4_mma_block_scale_scale_buffer_aliasing(policy, fragment_a, fragment
             )
             T.copy(C, O)
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_120a"})
     if fragment_scales and alias_scales:
         diagnostic = "cannot reuse fragment buffer '[^']+' as SFB:.*different fragment layouts.*Use separate SFA and SFB fragment buffers"
         with target, pytest.raises(ValueError, match=diagnostic):

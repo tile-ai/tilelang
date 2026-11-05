@@ -1,7 +1,7 @@
+import tvm_tirx
 import torch
 import pytest
 
-import tilelang
 import tilelang.language as T
 from tilelang.engine.lower import extrac_params
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available
@@ -14,7 +14,7 @@ from tilelang.jit.adapter.nvrtc.adapter import NVRTCKernelAdapter
 
 def _make_host_only_adapter(program, result_idx=None):
     adapter = NVRTCKernelAdapter.__new__(NVRTCKernelAdapter)
-    adapter.ir_module = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
+    adapter.ir_module = tvm_tirx.IRModule({program.attrs["global_symbol"]: program})
     adapter.params = extrac_params(program)
     adapter.result_idx = [] if result_idx is None else result_idx
     adapter._initialize_native_arguments()

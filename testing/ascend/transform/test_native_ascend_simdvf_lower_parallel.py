@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import Axis
 
@@ -65,7 +65,7 @@ def apply(params, body, tmp_path):
     assert tirx.analysis.check_well_formed(before)
     saved = ir.save_json(before)
     operation = tvm_ffi.get_global_func("tl.transform.AscendSimdVFLowerParallel")()
-    initial = tvm.IRModule({"simdvf_native": before})
+    initial = tvm_tirx.IRModule({"simdvf_native": before})
     result = operation(initial)
     ir.assert_structural_equal(operation(ir.load_json(ir.save_json(initial))), result)
     assert tirx.analysis.check_well_formed(result)
@@ -466,13 +466,13 @@ def test_real_cce_source_consumes_native_simdvf_lowering(operation, tmp_path):
     else:
         body = [tileop("reduce", region(src), region(dst), ir.StringImm("sum"), integer(1), ir.const(True, "bool"))]
     function = apply([raw, raw_dst], definitions + [vf(body)], tmp_path).with_attr("calling_conv", 2)
-    module = tvm.IRModule({"simdvf_native": function})
-    with tvm.target.Target("ascend"):
+    module = tvm_tirx.IRModule({"simdvf_native": function})
+    with tvm_tirx.target.Target("ascend"):
         module = tirx.transform.LowerTensorLayouts()(module)
         module = tirx.transform.FlattenTensor()(module)
     module = tvm_ffi.get_global_func("tl.transform.LowerAccessPtr")()(module)
     (tmp_path / "codegen-input.json").write_text(ir.save_json(module))
-    codegen = tvm_ffi.get_global_func("target.build.tilelang_ascend_without_compile")(module, tvm.target.Target("ascend"))
+    codegen = tvm_ffi.get_global_func("target.build.tilelang_ascend_without_compile")(module, tvm_tirx.target.Target("ascend"))
     source = codegen.inspect_source("asc")
     (tmp_path / "native_simdvf.asc").write_text(source)
     assert "__simd_vf__" in source and "simd_inst::vsts_" in source
@@ -502,7 +502,7 @@ def test_parallel_between_loop_metadata_and_annotations_survive(tmp_path):
         for node in objects(function, ir.RegionStmt)
     ]
     (between,) = [item for item in metadata if item["key"] == "trace_between"]
-    assert tvm.sym.Analyzer().simplify(between["value"]).name == "vserial"
+    assert tvm_tirx.sym.Analyzer().simplify(between["value"]).name == "vserial"
     assert sorted(int(value) for node in objects(function, ir.For) for value in node.annotations.values()) == [17, 23]
     data = np.arange(256, dtype="float32").reshape(2, 128)
     result = np.zeros_like(data)

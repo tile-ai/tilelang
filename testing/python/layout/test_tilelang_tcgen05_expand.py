@@ -15,7 +15,7 @@
 import pytest
 
 from tilelang import _ffi_api
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.layout import cute
 
 
@@ -65,12 +65,12 @@ def test_expand_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs, chu
 
     # Bind one symbolic variable per replication axis and prove the fragment
     # inverts the DstLayout formulas for every assignment simultaneously.
-    ana = tvm.sym.Analyzer()
-    constraints = tvm.sym.ConstraintContext()
+    ana = tvm_tirx.sym.Analyzer()
+    constraints = tvm_tirx.sym.ConstraintContext()
 
     def var(name, extent):
-        v = tvm.ir.Var(name, "int32")
-        constraints.append(tvm.sym.RangeConstraint(v, tvm.ir.Range(0, extent)))
+        v = tvm_tirx.ir.Var(name, "int32")
+        constraints.append(tvm_tirx.sym.RangeConstraint(v, tvm_tirx.ir.Range(0, extent)))
         return v
 
     t = var("t", 32)  # lane within the warp
@@ -162,12 +162,12 @@ def test_expand_half_matches_cutlass_dst_layout(meta, width, regs, ndup, num_wgs
     # One issue per warp, so no duplicate registers: ndup drops out.
     assert plan.vals_per_issue == regs * chunks
 
-    ana = tvm.sym.Analyzer()
-    constraints = tvm.sym.ConstraintContext()
+    ana = tvm_tirx.sym.Analyzer()
+    constraints = tvm_tirx.sym.ConstraintContext()
 
     def var(name, extent):
-        v = tvm.ir.Var(name, "int32")
-        constraints.append(tvm.sym.RangeConstraint(v, tvm.ir.Range(0, extent)))
+        v = tvm_tirx.ir.Var(name, "int32")
+        constraints.append(tvm_tirx.sym.RangeConstraint(v, tvm_tirx.ir.Range(0, extent)))
         return v
 
     t = var("t", 32)

@@ -4,7 +4,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, sym
 
 
@@ -81,7 +81,7 @@ def _check_nonzero_min_nested_guards_staging(target, device):
 
     # Preserve the nested guards until decoupling; earlier simplification could
     # otherwise hide a missing guard in either generated copy direction.
-    mod = tilelang.transform.DecoupleTypeCast()(tvm.IRModule.from_expr(main))
+    mod = tilelang.transform.DecoupleTypeCast()(tvm_tirx.IRModule.from_expr(main))
     analyzer = sym.Analyzer()
     constraints = sym.ConstraintContext()
 

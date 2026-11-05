@@ -13,7 +13,7 @@ import sys
 import threading
 
 import torch
-from tilelang import tvm
+import tvm_tirx
 import tvm_ffi
 from tvm_tirx import runtime, tirx
 from tvm_tirx.codegen import Executable
@@ -55,7 +55,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
     # Class attributes to store compiled kernel information
     target: str | Target = "cuda"
-    ir_module: tvm.IRModule | None = None
+    ir_module: tvm_tirx.IRModule | None = None
     # The global source code of the kernel -> global means the source code of the kernel
     # that is not wrapped by the wrapper code
     host_kernel_source: str | None = None
@@ -64,9 +64,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     # Pass configs for the compiler
     pass_configs: dict[str, Any] | None = None
     # host_mod
-    host_mod: tvm.IRModule | None = None
+    host_mod: tvm_tirx.IRModule | None = None
     # device_mod
-    device_mod: tvm.IRModule | None = None
+    device_mod: tvm_tirx.IRModule | None = None
     # rt_mod
     rt_mod: tvm_ffi.Module | None = None
     # Maps symbolic variables to their corresponding buffer and shape indices
@@ -85,9 +85,9 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         target: str | Target,
-        func_or_mod: tirx.Function | tvm.IRModule,
-        host_mod: tvm.IRModule | None = None,
-        device_mod: tvm.IRModule | None = None,
+        func_or_mod: tirx.Function | tvm_tirx.IRModule,
+        host_mod: tvm_tirx.IRModule | None = None,
+        device_mod: tvm_tirx.IRModule | None = None,
         rt_mod: tvm_ffi.Module | None = None,
         host_kernel_source: str | None = None,
         device_kernel_source: str | None = None,
@@ -110,7 +110,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         self.device_kernel_source = device_kernel_source
 
         if isinstance(func_or_mod, tirx.Function):
-            self.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            self.ir_module = tvm_tirx.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             self.ir_module = func_or_mod
 
@@ -314,7 +314,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         params: list[KernelParam],
         result_idx: list[int],
         target: str,
-        func_or_mod: tirx.Function | tvm.IRModule,
+        func_or_mod: tirx.Function | tvm_tirx.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -335,7 +335,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         adapter.pass_configs = pass_configs
 
         if isinstance(func_or_mod, tirx.Function):
-            adapter.ir_module = tvm.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
+            adapter.ir_module = tvm_tirx.IRModule({func_or_mod.attrs["global_symbol"]: func_or_mod})
         else:
             adapter.ir_module = func_or_mod
 

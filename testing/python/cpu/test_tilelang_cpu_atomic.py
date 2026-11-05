@@ -17,11 +17,11 @@ import torch
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang import tvm
+import tvm_tirx
 
 
 def _compile_c(func, out_idx):
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         return tilelang.compile(
             func,
             out_idx=out_idx,

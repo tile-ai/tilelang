@@ -1,13 +1,13 @@
 import pytest
 import tvm_ffi
 
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count
 
-target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
 pytestmark = pytest.mark.skipif(
     tvm_ffi.get_global_func("tl.cuda.transform.FuseMBarrierArriveExpectTx", allow_missing=True) is None,
     reason="FuseMBarrierArriveExpectTx is not compiled into this build",
@@ -15,8 +15,8 @@ pytestmark = pytest.mark.skipif(
 
 
 def _apply(func):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.cuda.transform.FuseMBarrierArriveExpectTx()(mod)
     # Native frontend IR has no opaque block to remove. This test stops at
     # FuseMBarrierArriveExpectTx so the enclosing warp-specialization scope

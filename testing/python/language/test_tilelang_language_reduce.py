@@ -8,7 +8,7 @@ import pytest
 import torch
 import tvm_ffi
 from tvm_tirx import ir
-from tilelang import tvm
+import tvm_tirx
 from tilelang.utils.language import to_buffer_region
 
 tilelang.testing.set_random_seed()
@@ -394,7 +394,7 @@ def test_reduce_partial_thread_barrier_offset_thread_range(keepdim, clear):
 def test_reduce_partial_thread_barrier_ignores_large_unused_layout_dimension():
     """Barrier resolution enumerates CTA threads, not layout coordinates."""
     target = {"kind": "cuda", "arch": "sm_80"}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(_make_large_unused_reduce_dimension_kernel(), target=target)
     assert "tl::NamedBarrier<64>" in artifact.kernel_source
 
@@ -402,7 +402,7 @@ def test_reduce_partial_thread_barrier_ignores_large_unused_layout_dimension():
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_sm80_batch_reduce_uses_named_barrier():
     target = {"kind": "cuda", "arch": "sm_80"}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(_make_sm80_batch_reduce_kernel(), target=target)
     assert "NamedBarrier<" in artifact.kernel_source
     assert "tl::SyncThreadsBarrier" not in artifact.kernel_source
@@ -529,7 +529,7 @@ def test_reduce_local_packed_codegen(op, packed_op):
             B[0] = dst[0]
 
     target = {"kind": "cuda", "arch": "sm_80"}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(main, target=target)
     assert f"tl::{packed_op}" in artifact.kernel_source
 
@@ -553,7 +553,7 @@ def test_reduce_local_noncontiguous_dim_packed_codegen(op, packed_op):
                 B[j] = dst[j]
 
     target = {"kind": "cuda", "arch": "sm_80"}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(main, target=target)
     assert f"tl::{packed_op}" in artifact.kernel_source
 
@@ -575,7 +575,7 @@ def test_reduce_local_to_var_packed_codegen(op, packed_op):
             B[0] = dst
 
     target = {"kind": "cuda", "arch": "sm_80"}
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(main, target=target)
     assert f"tl::{packed_op}" in artifact.kernel_source
 
@@ -736,7 +736,7 @@ def test_reduce_rejects_invalid_destination_shape(out_shape):
             T.evaluate(native_reduce(src, dst))
             T.copy(dst, B)
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
     with target, pytest.raises(RuntimeError, match="ReduceOp: invalid destination shape"):
         tilelang.lower(kernel, target=target)
 
@@ -817,7 +817,7 @@ def test_finalize_reducer_codegen(op, dtype, block_M, block_N, batch):
 @pytest.mark.parametrize("batch", [1, 4])
 def test_finalize_reducer_sm80_uses_named_barrier(batch):
     target = {"kind": "cuda", "arch": "sm_80"}
-    with tvm.transform.PassContext(config=_COMPILE_FLAGS), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(config=_COMPILE_FLAGS), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(
             _make_finalize_reducer_kernel(128, 64, T.float32, "sum", batch),
             target=target,

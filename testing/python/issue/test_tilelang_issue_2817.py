@@ -1,7 +1,7 @@
 # Regression test for https://github.com/tile-ai/tilelang/issues/2817
 # Cached kernel parameters used to be stored with cloudpickle, so loading a
 # cache entry deserialized arbitrary pickle bytes. They are now stored as
-# JSON produced by TVM's reflection (``tvm.ir.save_json``), which only
+# JSON produced by TVM's reflection (``tvm_tirx.ir.save_json``), which only
 # rebuilds IR nodes and never executes code. Host-side only, no GPU needed.
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ import pytest
 
 import tilelang
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_ffi import dtype as DataType
 from tilelang.cache.kernel_cache import KernelCache
 from tilelang.engine.param import KernelParam, dump_kernel_params, load_kernel_params
@@ -35,7 +35,7 @@ def _check_round_trip(params, loaded):
     assert isinstance(loaded[0].shape[0], tirx.Var) and loaded[0].shape[0].name == "n"
     # A symbolic dim shared by two params is the same Var after loading.
     assert loaded[1].shape[0].a.same_as(loaded[0].shape[0])
-    tvm.ir.assert_structural_equal(loaded[1].shape[0], loaded[0].shape[0] * 2)
+    tvm_tirx.ir.assert_structural_equal(loaded[1].shape[0], loaded[0].shape[0] * 2)
     assert loaded[2].is_float8()
     assert loaded[3].is_scalar()
 

@@ -7,7 +7,7 @@ import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tvm_tirx import ir, tirx
 
@@ -43,7 +43,7 @@ def _attribute_fields(region):
 
 
 def _count_calls(func: tirx.Function):
-    return Counter(str(call.op.name) for call in collect_nodes(func, ir.Call) if isinstance(call.op, tvm.ir.Op))
+    return Counter(str(call.op.name) for call in collect_nodes(func, ir.Call) if isinstance(call.op, tvm_tirx.ir.Op))
 
 
 def _find_loop_with_annotation(func: tirx.Function, annotation: str):
@@ -54,7 +54,7 @@ def _find_loop_with_annotation(func: tirx.Function, annotation: str):
 
 @tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -72,7 +72,7 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
         )
         B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(before)
+    mod = tvm_tirx.IRModule.from_expr(before)
     with target:
         mod = tl.transform.LowerTileOp()(mod)
     calls = _count_calls(mod["main"])
@@ -84,7 +84,7 @@ def test_lower_tile_op_respects_copy_annotation_for_pipeline_managed_cp_async():
 
 @tilelang.testing.requires_cuda
 def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -102,7 +102,7 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
         )
         B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(before)
+    mod = tvm_tirx.IRModule.from_expr(before)
     with target:
         mod = tl.transform.LowerTileOp()(mod)
     calls = _count_calls(mod["main"])
@@ -120,7 +120,7 @@ def test_lower_tile_op_respects_copy_annotation_for_explicit_async_copy():
 )
 def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dtype, enable_let_inline):
     """Simplify inverse-layout indices enough to prove cp.async contiguity."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
     layout = T.Fragment(
         (4, cols),
         forward_fn=lambda i, j: (
@@ -139,9 +139,9 @@ def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dty
             T.copy(shared, B)
 
     config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: enable_let_inline}}
-    with target, tvm.transform.PassContext(config=config):
-        mod = tvm.IRModule.from_expr(main)
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with target, tvm_tirx.transform.PassContext(config=config):
+        mod = tvm_tirx.IRModule.from_expr(main)
+        mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.Simplify()(mod)
         mod = tl.transform.LayoutInference()(mod)
@@ -222,7 +222,7 @@ def test_lower_tile_op_async_copy_with_partitioned_layout(cols, vector_size, dty
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("num_stages", [2, 3])
 def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(num_stages):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
     @T.prim_func
     def before(
@@ -243,8 +243,8 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
                 T.copy(A[i, 0:16], shared, prefer_instruction="tma")
                 T.copy(shared, B[i, 0:16], prefer_instruction="sync")
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
@@ -262,17 +262,17 @@ def test_pipelined_tma_copy_compiler_generated_barrier_uses_emitted_loop_epoch(n
     assert len(loop_waits) == 1
     barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
     assert sorted(barrier_indices) == list(range(num_stages))
-    simplified_phases = [tvm.sym.Analyzer().simplify(wait.args[1]) for wait in waits]
+    simplified_phases = [tvm_tirx.sym.Analyzer().simplify(wait.args[1]) for wait in waits]
     constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, ir.IntImm)]
     assert constant_phases == [0] * (num_stages - 1)
     expected = (loop.var - loop.begin) % 2
-    assert tvm.sym.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(loop_waits[0].args[1], expected)
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("num_stages", [2, 3])
 def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
     @T.prim_func
     def before(
@@ -299,8 +299,8 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
                 )
                 T.copy(shared, B[i, 0:16], prefer_instruction="sync")
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.InjectSoftwarePipeline()(mod)
@@ -316,15 +316,15 @@ def test_pipelined_tma_copy_explicit_mbar_uses_logical_epoch(num_stages):
     assert len(loop_waits) == 1
     barrier_indices = [int(wait.args[0].indices[0]) for wait in waits]
     assert barrier_indices == [0] * num_stages
-    simplified_phases = [tvm.sym.Analyzer().simplify(wait.args[1]) for wait in waits]
+    simplified_phases = [tvm_tirx.sym.Analyzer().simplify(wait.args[1]) for wait in waits]
     constant_phases = [int(phase) for phase in simplified_phases if isinstance(phase, ir.IntImm)]
     assert constant_phases == [i % 2 for i in range(num_stages - 1)]
     logical_epoch = loop.var - loop.begin + num_stages - 1
-    assert tvm.sym.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(loop_waits[0].args[1], logical_epoch % 2)
 
 
 def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_context():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -342,7 +342,7 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
             S[i] = A[i]
         B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(before)
+    mod = tvm_tirx.IRModule.from_expr(before)
     with target:
         mod = tl.transform.LayoutInference()(mod)
         mod = tl.transform.LowerTileOp()(mod)
@@ -357,7 +357,7 @@ def test_lower_tile_op_respects_parallel_loop_async_annotation_without_pipeline_
 def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
     """Reject #2948 instead of silently dropping a fragment index rotation."""
     size = 128
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(
@@ -370,8 +370,8 @@ def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
             for i in T.Parallel(size):
                 B[i] = fragment[(i + 1) % size]
 
-    mod = tvm.IRModule.from_expr(before)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.LayoutInference()(mod)
@@ -382,7 +382,7 @@ def test_lower_tile_op_rejects_shifted_modulo_fragment_index():
 
 
 def test_lower_tile_op_preserves_ragged_parallel_padding_guard():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def before(B: T.Tensor((8, 384), T.int32)):
@@ -392,7 +392,7 @@ def test_lower_tile_op_preserves_ragged_parallel_padding_guard():
         for row, col in T.Parallel(8, 384):
             B[row, col] = T.if_then_else(col < 264, col, 2147483647)
 
-    mod = tvm.IRModule.from_expr(before)
+    mod = tvm_tirx.IRModule.from_expr(before)
     with target:
         mod = tl.transform.LayoutInference()(mod)
         assert "parallel_loop_requires_padding_guard" in mod.script(show_meta=True)
@@ -446,15 +446,15 @@ def _assert_no_unexpected_free_vars(func: tirx.Function):
     assert not unexpected, f"unexpected free variables: {unexpected}"
 
 
-def _cpu_target(with_host: bool = False) -> tvm.target.Target:
-    host = tvm.target.Target("llvm") if with_host else None
-    return tvm.target.Target("c", host) if with_host else tvm.target.Target("c")
+def _cpu_target(with_host: bool = False) -> tvm_tirx.target.Target:
+    host = tvm_tirx.target.Target("llvm") if with_host else None
+    return tvm_tirx.target.Target("c", host) if with_host else tvm_tirx.target.Target("c")
 
 
 @pytest.mark.parametrize("target_kind", ["cuda", "hip"])
 @pytest.mark.parametrize("rows,cols,threads,thread_start", [(1, 2, 2, 0), (2, 8, 4, 0), (3, 5, 8, 0), (2, 8, 8, 4)])
 def test_lower_tile_op_parallel_let_indices(target_kind, rows, cols, threads, thread_start):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "hip", "mcpu": "gfx1100"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"} if target_kind == "cuda" else {"kind": "hip", "mcpu": "gfx1100"})
     size = 2 * rows * cols + 8
 
     @T.prim_func
@@ -471,9 +471,9 @@ def test_lower_tile_op_parallel_let_indices(target_kind, rows, cols, threads, th
                     B[idx] = B[idx] + 5
 
     config = {tl.PassConfigKey.TL_SIMPLIFY: {tl.PassConfigKey.TL_SIMPLIFY_ENABLE_LET_INLINE: False}}
-    with target, tvm.transform.PassContext(config=config):
-        mod = tvm.IRModule.from_expr(main)
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+    with target, tvm_tirx.transform.PassContext(config=config):
+        mod = tvm_tirx.IRModule.from_expr(main)
+        mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         mod = tl.transform.Simplify()(mod)
         mod = tl.transform.LayoutInference()(mod)
@@ -500,9 +500,9 @@ def _cpu_while_kernel_module(with_host: bool = False):
 
             out[0] = state[0]
 
-    mod = tvm.IRModule.from_expr(main)
+    mod = tvm_tirx.IRModule.from_expr(main)
     target = _cpu_target(with_host)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
     return mod, target
 
@@ -526,9 +526,9 @@ def _cpu_parallel_kernel_module():
             for i in T.Parallel(16):
                 B[i] = frag[i]
 
-    mod = tvm.IRModule.from_expr(main)
+    mod = tvm_tirx.IRModule.from_expr(main)
     target = _cpu_target()
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
     return mod, target
 
@@ -570,9 +570,9 @@ def test_layout_inference_metal_parallel_predicate_uses_real_thread_var():
             for i in T.Parallel(8):
                 B[i] = A[i] * 2.0
 
-    mod = tvm.IRModule.from_expr(main)
-    target = tvm.target.Target("metal")
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(main)
+    target = tvm_tirx.target.Target("metal")
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     with target:
         mod = tl.transform.LayoutInference()(mod)
@@ -678,9 +678,9 @@ def test_cpu_legitimate_v_thread_param_is_preserved():
             out[0] = state[0]
 
     original_param = main.params[0]
-    mod = tvm.IRModule.from_expr(main)
+    mod = tvm_tirx.IRModule.from_expr(main)
     target = _cpu_target()
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=False)(mod)
     with target:
         mod = tl.transform.LayoutInference()(mod)

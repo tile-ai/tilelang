@@ -34,7 +34,7 @@ The test has two parts:
 
 import torch
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 
 import tilelang
 import tilelang.testing
@@ -111,7 +111,7 @@ def _make_buggy_arena_kernel(M, N, K, BM, BN, BK):
 def _lower_for(arch: str):
     M, N, K = 128, 128, 256
     BM, BN, BK = 64, 64, 32
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     tilelang.disable_cache()
     try:
         with target:
@@ -125,7 +125,7 @@ def _lower_for(arch: str):
 
 
 def _is_op_call(node, op_name: str) -> bool:
-    return isinstance(node, tvm.ir.Call) and isinstance(node.op, tvm.ir.Op) and node.op.name == op_name
+    return isinstance(node, tvm_tirx.ir.Call) and isinstance(node.op, tvm_tirx.ir.Op) and node.op.name == op_name
 
 
 def _collect_tma_loads(mod):
@@ -136,7 +136,7 @@ def _collect_tma_loads(mod):
             loads.append(node)
 
     for _, func in mod.functions.items():
-        if isinstance(func, tvm.tirx.Function):
+        if isinstance(func, tvm_tirx.tirx.Function):
             tvm_ffi.structural_walk(func.body, (tvm_ffi.Object, _visit), order="post")
     return loads
 
@@ -145,7 +145,7 @@ def _tensor_definitions(mod):
     definitions = {}
 
     def visit(node):
-        if isinstance(node, tvm.ir.Bind) and isinstance(node.var.ty, tvm.tirx.TensorType):
+        if isinstance(node, tvm_tirx.ir.Bind) and isinstance(node.var.ty, tvm_tirx.tirx.TensorType):
             definitions[node.var] = node.value
 
     tvm_ffi.structural_walk(mod, (tvm_ffi.Object, visit), order="post")
@@ -156,13 +156,13 @@ def _byte_offset(pointer, definitions, depth=0):
     assert depth < 32, "cyclic shared tensor declaration"
     if _is_op_call(pointer, "tirx.ptr_byte_offset"):
         base, offset = _byte_offset(pointer.args[0], definitions, depth + 1)
-        return base, offset + tvm.ir.prim.Cast("int64", pointer.args[1])
+        return base, offset + tvm_tirx.ir.prim.Cast("int64", pointer.args[1])
     if _is_op_call(pointer, "tirx.tensor_data_ptr"):
         (tensor,) = pointer.args
         assert tensor in definitions, f"no visible allocation for TMA tensor {tensor}"
         definition = definitions[tensor]
         if _is_op_call(definition, "tirx.alloc_tensor"):
-            return tensor, tvm.ir.const(0, "int64")
+            return tensor, tvm_tirx.ir.const(0, "int64")
         assert _is_op_call(definition, "tirx.decl_tensor"), definition
         return _byte_offset(definition.args[0], definitions, depth + 1)
     if _is_op_call(pointer, "tirx.reinterpret"):
@@ -174,7 +174,7 @@ def _assert_tma_destinations_128_aligned(arch: str, mod):
     loads = _collect_tma_loads(mod)
     assert loads, f"[{arch}] expected at least one tl.tma_load in generated TIR — the kernel layout should produce TMA loads"
 
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     definitions = _tensor_definitions(mod)
     for load in loads:
         assert len(load.args) >= 3, f"[{arch}] malformed tl.tma_load call: {load}"

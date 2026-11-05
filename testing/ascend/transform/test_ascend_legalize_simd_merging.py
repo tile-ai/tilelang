@@ -7,7 +7,7 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 
 
@@ -66,7 +66,7 @@ def merging_without_mutable_destination(
 
 
 def _as_module(func):
-    return tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    return tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
 
 
 def test_legalize_simd_merging_marks_destination_read_write():
@@ -120,7 +120,7 @@ def test_simd_vadds_inplace_destination(dtype, mode):
     before = _as_module(_inplace_vadds(dtype, mode))
     after = transform.LegalizeSimdMerging()(before)
     if mode == "MODE_ZEROING":
-        tvm.ir.assert_structural_equal(after, before)
+        tvm_tirx.ir.assert_structural_equal(after, before)
         return
     from testing.ascend._ir import calls
 
@@ -128,7 +128,7 @@ def test_simd_vadds_inplace_destination(dtype, mode):
     destination, source = call.args[:2]
     assert destination.op.name == "tl.access_ptr"
     assert int(destination.args[2]) == 3
-    tvm.ir.assert_structural_equal(destination.args[0], source)
+    tvm_tirx.ir.assert_structural_equal(destination.args[0], source)
 
 
 def test_simd_merging_requires_mutable_destination():

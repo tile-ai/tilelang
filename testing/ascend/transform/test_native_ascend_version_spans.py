@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 _spec = importlib.util.spec_from_file_location("allocation_helpers", Path(__file__).with_name("test_native_ascend_allocations.py"))
@@ -53,7 +53,7 @@ def test_unproven_dynamic_span_preserves_valid_legacy_calls(pointer_kind, tmp_pa
     module = tvm_ffi.get_global_func("tl.transform.LowerAccessPtr")()(ir.IRModule({"main": result}))
     execute = helpers.compile_cpu(module["main"], tmp_path)
     for amount in [0, 1, 3]:
-        output = tvm.runtime.tensor(np.full(6, -1, dtype="int32"))
+        output = tvm_tirx.runtime.tensor(np.full(6, -1, dtype="int32"))
         execute(output, amount)
         expected = np.array([100 + index if index < amount else -1 for index in range(6)], dtype="int32")
         np.testing.assert_array_equal(output.numpy(), expected)
@@ -65,7 +65,7 @@ def test_proven_dynamic_span_executes_without_changing_values(pointer_kind, tmp_
     module = tvm_ffi.get_global_func("tl.transform.LowerAccessPtr")()(ir.IRModule({"main": result}))
     execute = helpers.compile_cpu(module["main"], tmp_path)
     for amount in [0, 1, 3, 4]:
-        output = tvm.runtime.tensor(np.full(6, -1, dtype="int32"))
+        output = tvm_tirx.runtime.tensor(np.full(6, -1, dtype="int32"))
         execute(output, amount)
         copied = amount if amount <= 3 else 0
         expected = np.array([100 + index if index < copied else -1 for index in range(6)], dtype="int32")

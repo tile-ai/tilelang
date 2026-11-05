@@ -2,7 +2,7 @@ import tilelang
 import tilelang.testing
 import numpy as np
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 import tilelang.language as T
 from tilelang.testing.packed import compile_packed_function
@@ -33,7 +33,7 @@ def test_flatten_buffer_promotes_tvm_access_ptr_offset_to_int64():
                 )
             )
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     before_offsets = _collect_tvm_access_ptr_offsets(mod["main"])
     assert len(before_offsets) == 1
     assert before_offsets[0].ty == ir.PrimType("int32")
@@ -58,7 +58,7 @@ def test_flatten_buffer_keeps_safe_tvm_access_ptr_offset_int32():
                 )
             )
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     before_offsets = _collect_tvm_access_ptr_offsets(mod["main"])
     assert len(before_offsets) == 1
     assert before_offsets[0].ty == ir.PrimType("int32")
@@ -82,7 +82,7 @@ def test_flatten_buffer_executes_large_element_offsets_without_narrow_overflow()
         [source, output],
         [ir.For(index, start, start + 2, 1, ir.ForKind.DEFAULT, [ir.TensorStore(output, [index - start], byte_distance)])],
     ).with_attr("global_symbol", "main")
-    module = tilelang.transform.FlattenBuffer()(tvm.IRModule({"main": function}))
+    module = tilelang.transform.FlattenBuffer()(tvm_tirx.IRModule({"main": function}))
     module = tilelang.transform.LowerAccessPtr()(module)
     assert tirx.analysis.check_well_formed(module)
     executable = compile_packed_function(module, c_codegen="compute")

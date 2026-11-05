@@ -1,6 +1,6 @@
 import tilelang
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.cpu.language as T
 import torch
 
@@ -45,7 +45,7 @@ def test_matmul_compile():
     M, N, K = 1024, 512, 512
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     cpu_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         complied_fun = tilelang.compile(cpu_func, -1, execution_backend="cython")
 
     in_dtype = T.float16

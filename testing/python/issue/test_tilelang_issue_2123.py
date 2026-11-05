@@ -2,7 +2,7 @@ import tilelang
 import tilelang.testing
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.cuda.pipeline import CUDAPassPipelineBody
 from tilelang.transform import LowerAccessPtr
@@ -80,7 +80,7 @@ def _assert_access_ptr_lowered(mod):
 
 def test_issue_2123_atomic_load_lower_access_ptr_direct():
     func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
 
     lowered = LowerAccessPtr()(mod)
 
@@ -89,9 +89,9 @@ def test_issue_2123_atomic_load_lower_access_ptr_direct():
 
 @tilelang.testing.requires_cuda
 def test_issue_2123_atomic_load_lower_access_ptr_pipeline():
-    target = tvm.target.Target("cuda", host="llvm")
+    target = tvm_tirx.target.Target("cuda", host="llvm")
     func = issue_2123_atomic_load_repro(4).with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
 
     # Access extent/mask remain live through synchronization and fence passes;
     # the native pipeline erases them at its final address/launch boundary.

@@ -6,7 +6,7 @@ import operator
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -193,8 +193,8 @@ def _events(function):
 @pytest.mark.parametrize("kind", (*_NONLOCAL, *_LOCAL))
 def test_parallel_opaque_address_has_correct_iteration_ownership(kind, tmp_path):
     function = _kernel(kind)
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    module = tvm.IRModule({"main": function.with_attr("target", target)})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
+    module = tvm_tirx.IRModule({"main": function.with_attr("target", target)})
     module = tilelang.transform.MaterializeKernelLaunch()(module)
     with target:
         module = tilelang.transform.LayoutInference()(module)
@@ -241,13 +241,13 @@ def _native_pointer_function(scope, *, fragment_alias=None):
     call = ir.Evaluate(tirx.call_extern("record_once", _byte_offset(pointer, slot * 4), index, ty="int32"))
     loop = ir.For(index, ir.const(0), ir.const(16), ir.const(1), ir.ForKind.PARALLEL, [call], annotations={"parallel_loop_layout": layout})
     region = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), ir.const(4)], [thread], {}, [*prefix, loop])
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
     return tirx.Function(params, [region], ir.PrimType("void"), ir.DictAttrs({"target": target}))
 
 
 @pytest.mark.parametrize("scope", ["global", "local"])
 def test_parallel_raw_pointer_scope_without_tensor_binding(scope, tmp_path):
-    module = tvm.IRModule({"main": _native_pointer_function(scope)})
+    module = tvm_tirx.IRModule({"main": _native_pointer_function(scope)})
     assert tirx.analysis.check_well_formed(module)
     module = tilelang.transform.LowerTileOp()(module)
     assert tirx.analysis.check_well_formed(module)
@@ -261,7 +261,7 @@ def test_parallel_raw_pointer_scope_without_tensor_binding(scope, tmp_path):
 
 @pytest.mark.parametrize("address_kind", ["address_of", "access_ptr"])
 def test_parallel_fragment_pointer_alias_keeps_original_ownership_after_local_remap(address_kind, tmp_path):
-    module = tvm.IRModule({"main": _native_pointer_function("local.fragment", fragment_alias=address_kind)})
+    module = tvm_tirx.IRModule({"main": _native_pointer_function("local.fragment", fragment_alias=address_kind)})
     assert tirx.analysis.check_well_formed(module)
     module = tilelang.transform.LowerTileOp()(module)
     assert tirx.analysis.check_well_formed(module)

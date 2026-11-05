@@ -1,6 +1,6 @@
 import tilelang
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.language as T
 import torch
 
@@ -46,7 +46,7 @@ def test_matmul_compile():
     M, N, K = 1024, 512, 512
     block_M, block_N, block_K = M // 4, N // 4, K // 4
     llvm_func = matmul_jit_test(M, N, K, block_M, block_N, block_K)
-    with tvm.target.Target("llvm"):
+    with tvm_tirx.target.Target("llvm"):
         complied_fun = tilelang.compile(llvm_func, -1)
     assert complied_fun.execution_backend == "tvm_ffi"
 

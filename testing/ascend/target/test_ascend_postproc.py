@@ -1,5 +1,7 @@
 """The Ascend source hook applies during lowering and is isolated per test."""
 
+import tvm_tirx
+
 import tilelang
 import tilelang.ascend.language as T
 import tvm_ffi
@@ -24,7 +26,7 @@ def test_postproc_callback():
             seen_targets.append(target.kind.name)
             return marker + "\n" + code
 
-        with tilelang.tvm.target.Target("ascend"):
+        with tvm_tirx.target.Target("ascend"):
             source = tilelang.lower(kernel, target="ascend").kernel_source
         assert marker in source
         assert seen_targets == ["ascend"]

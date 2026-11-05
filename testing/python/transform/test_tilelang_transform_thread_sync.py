@@ -3,7 +3,7 @@
 import pytest
 
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 import tilelang.testing
 import tilelang.language as T
@@ -13,11 +13,11 @@ from tilelang.testing.ir import collect_calls, collect_nodes
 
 
 def run_passes(func: tirx.Function):
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
 
-    cuda_target = tvm.target.Target("cuda", host="llvm")
+    cuda_target = tvm_tirx.target.Target("cuda", host="llvm")
 
-    mod = tvm.IRModule({gv: f.with_attr({"global_symbol": "test", "target": cuda_target}) for gv, f in mod.functions.items()})
+    mod = tvm_tirx.IRModule({gv: f.with_attr({"global_symbol": "test", "target": cuda_target}) for gv, f in mod.functions.items()})
 
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
@@ -35,7 +35,7 @@ def _canonicalize_loops(mod):
         body = tvm_ffi.structural_map(loop.body, (ir.Var, lambda value: index if value.same_as(loop.var) else value))
         return ir.For(variable, ir.const(0, variable.ty.dtype), extent, ir.const(1, variable.ty.dtype), loop.kind, body, loop.annotations)
 
-    return tvm.IRModule({gv: fn.with_body(tvm_ffi.structural_map(fn.body, (ir.For, normalize))) for gv, fn in mod.functions.items()})
+    return tvm_tirx.IRModule({gv: fn.with_body(tvm_ffi.structural_map(fn.body, (ir.For, normalize))) for gv, fn in mod.functions.items()})
 
 
 def _sum_allreduce(value, destination, thread):
@@ -167,7 +167,7 @@ def test_no_sync_between_atomic_adds_to_shared():
                 )
             )
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     assert not _storage_syncs(mod["main"])
 
@@ -193,7 +193,7 @@ def test_thread_sync_shared_dyn_alias_different_element_sizes():
         y_local_1[T.Ramp(0, 1, 4)] = T.Cast("float8_e4m3fnx4", x_local_1[T.Ramp(0, 1, 4)])
         y_ub_1[T.Ramp(tx * 4, 1, 4)] = y_local_1[T.Ramp(0, 1, 4)]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     lowered = mod["main"]
     syncs = _storage_syncs(lowered, "shared.dyn")
@@ -239,7 +239,7 @@ def test_thread_sync_handles_int64_tvm_access_ptr_offset():
             )
         )
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     assert not _storage_syncs(mod["main"], "shared.dyn")
 
@@ -362,7 +362,7 @@ def test_sync_shared():
         E_1 = T.decl_buffer((16,), data=T.tensor_data_ptr(E))
         E_1[threadIdx_x] = D_1_1[threadIdx_x]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     assert tvm_ffi.structural_equal(mod["main"], expected), str(mod["main"])
 
@@ -419,7 +419,7 @@ def test_sync_let_stmt():
         cross_thread_A_temp_1_1 = T.decl_buffer((1,), data=T.tensor_data_ptr(cross_thread_A_temp_1), scope="local")
         T.evaluate(_sum_allreduce(in_thread_A_temp_1_1[0], cross_thread_A_temp_1_1[0], threadIdx_x))
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     assert tvm_ffi.structural_equal(mod["main"], expected), str(mod["main"])
 
@@ -464,7 +464,7 @@ def test_sync_shared_dyn_stmatrix_loop_carry():
                 )
             )
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     lowered = mod["main"]
     syncs = _storage_syncs(lowered, "shared.dyn")
@@ -503,7 +503,7 @@ def test_loop_carry_no_dependency_same_index():
             temp_shared[tx] = T.float32(i)
             result_local[0] = result_local[0] + temp_shared[tx]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     # Should NOT have sync inside the loop since A[tx] in iteration i
@@ -542,7 +542,7 @@ def test_loop_carry_with_cross_thread_dependency():
             # Then reads from neighbor (creates cross-thread dependency)
             result_local[0] = result_local[0] + temp_shared[(tx + 127) % 128]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     # Should have sync because thread tx reads from thread (tx+127)%128's location
@@ -584,7 +584,7 @@ def test_loop_carry_respects_loop_step(start, stop, step, expected_syncs, canoni
             temp_shared[i % 4, tx] = T.Cast("float32", i)
             result_local[0] = result_local[0] + temp_shared[(i + 2) % 4, (tx + 1) % 32]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     if canonicalize:
         mod = _canonicalize_loops(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
@@ -621,7 +621,7 @@ def test_loop_carry_non_unit_step_last_pair(canonicalize):
             # Only i=9 -> i=12 aliases across neighboring threads.
             result_local[0] = result_local[0] + temp_shared[21 - i, (tx + 1) % 32]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     if canonicalize:
         mod = _canonicalize_loops(mod)
     mod = tilelang.transform.ThreadSync("shared")(mod)
@@ -666,7 +666,7 @@ def test_loop_carry_modulo_buffering():
             temp_shared[i % 2, tx] = T.float32(i)
             result_local[0] = result_local[0] + temp_shared[i % 2, tx]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     # Each thread owns both slots, including across iterations.
@@ -698,7 +698,7 @@ def test_loop_carry_different_indices():
             temp_shared[i] = T.float32(i)
             result_local[0] = result_local[0] + temp_shared[i + 1]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     assert not _storage_syncs(lowered)
@@ -735,7 +735,7 @@ def test_sync_hoist_non_uniform_if_with_threadidx():
             # the sync must be hoisted to before the if
             result_local[0] = temp_shared[tx + 64]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     guard = _guard(lowered, _thread_var(lowered) < 64)
@@ -775,7 +775,7 @@ def test_no_sync_for_thread_private_read_inside_non_uniform_if():
             # Inside the if, we read from data_shared
             result_local[0] = data_shared[tx]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     assert not _storage_syncs(lowered)
@@ -805,7 +805,7 @@ def test_sync_inside_uniform_if_blockidx():
             # will either all enter or all skip this branch
             result_local[0] = temp_shared[(tx + 64) % 128]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     # Should have sync (either inside or outside the if is fine for uniform condition)
@@ -828,7 +828,7 @@ def test_sync_inside_uniform_if_runtime_block_uniform_condition():
             temp_shared[tx] = T.float32(tx)
             result_local[0] = temp_shared[(tx + 64) % 128]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     flags = lowered.params[0]
@@ -859,7 +859,7 @@ def test_sync_hoist_nested_non_uniform_if():
                 # Sync needed here must be hoisted all the way out
                 result_local[0] = temp_shared[tx + 64]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     guard = _guard(lowered, _thread_var(lowered) < 64)
@@ -896,7 +896,7 @@ def test_no_sync_for_thread_private_read_inside_non_uniform_if_in_loop():
             if token_ids[tx] != -1:
                 result_local[0] = result_local[0] + data_shared[tx]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     assert not _storage_syncs(lowered)
@@ -923,7 +923,7 @@ def test_no_sync_needed_uniform_accesses():
         if tx < 64:
             result_local[0] = temp_local[0]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     # No sync needed - only local memory is accessed
@@ -953,7 +953,7 @@ def test_no_sync_for_thread_private_write_read_by_if_condition_in_loop():
             if token_ids[tx] >= 0:
                 result_local[0] = T.float32(1)
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     assert not _storage_syncs(lowered)
@@ -1058,7 +1058,7 @@ def test_partial_sync_non_warp_multiple_rejected():
                 # Cross-thread read: planner must insert a sync here.
                 acc[0] += S[47 - tx]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     with pytest.raises(Exception, match="not warp-uniform"):
         tilelang.transform.ThreadSync("shared")(mod)
 
@@ -1082,7 +1082,7 @@ def test_partial_sync_warp_multiple_still_lowered():
                 S[tx] = T.float32(1)
                 acc[0] += S[31 - tx]
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     guard = _guard(lowered, _thread_var(lowered) < 32)
@@ -1432,9 +1432,9 @@ def test_assume_serves_as_a_premise_like_an_assert():
             s[tx] = T.cast(tx, "float32")
             l[0] = s[(tx + 64) % 128]
 
-    mod = tvm.IRModule({"main": func})
-    cuda_target = tvm.target.Target("cuda", host="llvm")
-    mod = tvm.IRModule({gv: f.with_attr({"global_symbol": "test", "target": cuda_target}) for gv, f in mod.functions.items()})
+    mod = tvm_tirx.IRModule({"main": func})
+    cuda_target = tvm_tirx.target.Target("cuda", host="llvm")
+    mod = tvm_tirx.IRModule({gv: f.with_attr({"global_symbol": "test", "target": cuda_target}) for gv, f in mod.functions.items()})
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
@@ -1655,7 +1655,7 @@ def test_unbounded_atomic_touched_range_stays_conservative():
                 )
             )
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     # Must not throw; the unprovable pair keeps its conservative barrier.
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
@@ -1695,7 +1695,7 @@ def test_sync_grid_acts_as_shared_barrier():
                 )
             )
 
-    mod = tvm.IRModule({"main": func})
+    mod = tvm_tirx.IRModule({"main": func})
     mod = tilelang.transform.ThreadSync("shared")(mod)
     lowered = mod["main"]
     assert not _storage_syncs(lowered)
@@ -1776,7 +1776,7 @@ def test_partial_sync_assertion_checks_id_and_participant_count(barrier_id, thre
 
 
 def _thread_sync_calls(func):
-    mod = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))
+    mod = tilelang.transform.ThreadSync("shared")(tvm_tirx.IRModule({"main": func}))
     barriers = []
 
     def collect(node):

@@ -4,7 +4,7 @@ Tests compare these actual coordinates with independent expected geometry.
 Unsupported pointer forms fail explicitly; no IR-print parsing is used.
 """
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from testing.ascend._ir import nodes, scheduled_fields
@@ -36,11 +36,11 @@ def address_bits(program, expression):
             # the surrounding Bind still owns the allocation/view identity.
             assert set(fields) == {"stage", "task"}
             assert len(value.args) == 2
-            tvm.ir.assert_structural_equal(value.ty, value.args[0].ty)
+            tvm_tirx.ir.assert_structural_equal(value.ty, value.args[0].ty)
             value = value.args[0]
         bindings[binding.var] = value
     visiting = set()
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
 
     def tensor_access(tensor, indices):
         owner, base = walk(tensor)
@@ -99,7 +99,7 @@ def element_offset(program, expression):
     _, bits = address_bits(program, expression)
     ty = expression.dest.ty if isinstance(expression, ir.TensorStore) else expression.ty
     width = _element_bits(ty)
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert analyzer.can_prove_equal(bits % width, 0), "Nonintegral element address"
     return analyzer.simplify(bits // width)
 

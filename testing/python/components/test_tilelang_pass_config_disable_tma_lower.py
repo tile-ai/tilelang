@@ -2,16 +2,16 @@ import warnings
 
 import tilelang
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.jit.kernel import JITKernel
 
 
 def test_disable_tma_lower_pass_context_compat():
-    with tvm.transform.PassContext(config={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True}):
-        assert bool(tvm.transform.PassContext.current().config["tl.disable_tma_lower"])
+    with tvm_tirx.transform.PassContext(config={tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True}):
+        assert bool(tvm_tirx.transform.PassContext.current().config["tl.disable_tma_lower"])
 
-    with tvm.transform.PassContext(config={"tl.disable_tma_lower": True}):
-        assert bool(tvm.transform.PassContext.current().config["tl.disable_tma_lower"])
+    with tvm_tirx.transform.PassContext(config={"tl.disable_tma_lower": True}):
+        assert bool(tvm_tirx.transform.PassContext.current().config["tl.disable_tma_lower"])
 
 
 def test_disable_tma_lower_warns_in_jit_entry():

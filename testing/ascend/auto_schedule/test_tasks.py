@@ -15,7 +15,7 @@ from testing.ascend._ir import (
 
 import pytest
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import tirx
 from testing.ascend._ir import calls, copy, kernel, nodes, region, seq, statements
@@ -62,7 +62,7 @@ def test_invalid_atomic_task(case, message):
                         T.copy(A, ub)
 
     with pytest.raises((ValueError, RuntimeError), match=message):
-        transform.MaterializeScheduleUnits()(tvm.IRModule({"main": before}))
+        transform.MaterializeScheduleUnits()(tvm_tirx.IRModule({"main": before}))
 
 
 @pytest.mark.parametrize("explicit, mixed", [(True, False), (False, False), (True, True)], ids=["explicit", "inferred", "mixed"])
@@ -85,7 +85,7 @@ def test_per_core_candidates_preserve_conditions(explicit, mixed):
                     else:
                         T.copy(B, l1)
 
-    after = transform.MaterializeScheduleUnits()(tvm.IRModule({"main": before}))
+    after = transform.MaterializeScheduleUnits()(tvm_tirx.IRModule({"main": before}))
     groups = [node for node in nodes(after, ir.RegionStmt) if attribute_key(node) == "tl.ascend_per_core_task"]
     assert len(groups) == 1
     candidates = [node for node in nodes(groups[0].body, ir.RegionStmt) if attribute_key(node) == "tl.ascend_task"]
@@ -125,7 +125,7 @@ def test_per_core_fixpipe_candidates_keep_separate_routes(routing, bound_guard, 
         body = unit(ir.For(ir.Var("i", "int32"), ir.const(0), ir.const(0) + (sid + 2), ir.const(1), ir.ForKind.DEFAULT, body), core=None)
     before = kernel(body, buffers=[accum, ub], params=[block, counter], allocation_stage=0, allocation_core=0)
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     if side_effect and routing == "local":
         with pytest.raises((ValueError, RuntimeError), match="Fixpipe routing.*external side effects"):
             transform.AssignCore()(before)
@@ -138,7 +138,7 @@ def test_per_core_fixpipe_candidates_keep_separate_routes(routing, bound_guard, 
         if isinstance(stmt, ir.RegionStmt) and attribute_key(stmt) == "tl.ascend_per_core_task"
     ]
     assert len(groups) == 2
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for group, parents in groups:
         projected_sid = int(attribute_fields(group)["node"]["subcore"])
         assert int(attribute_fields(group)["node"]["core_mask"]) == 2
@@ -151,7 +151,7 @@ def test_per_core_fixpipe_candidates_keep_separate_routes(routing, bound_guard, 
                 in_candidate = any(isinstance(parent, ir.RegionStmt) and attribute_key(parent) == "tl.ascend_task" for parent in ancestors)
                 if isinstance(statement, ir.Bind) and not in_candidate:
                     assert bound_guard
-                    tvm.ir.assert_structural_equal(statement.value, block % 2 == 0)
+                    tvm_tirx.ir.assert_structural_equal(statement.value, block % 2 == 0)
                     scalar_controls.append(statement)
                 else:
                     assert in_candidate
@@ -185,7 +185,7 @@ def test_per_core_vector_candidates_project_to_distinct_aivs(direction):
     group = attribute({}, "tl.ascend_per_core_task", 1, seq(*candidates))
     before = kernel(unit(group, core=None), buffers=[ub], params=[gm, block], allocation_stage=0, allocation_core=0)
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     after = transform.AssignCore()(before)
     groups = [node for node in nodes(after, ir.RegionStmt) if attribute_key(node) == "tl.ascend_per_core_task"]
     assert len(groups) == 2
@@ -199,7 +199,7 @@ def test_per_core_vector_candidates_project_to_distinct_aivs(direction):
             source, destination = operation.args[:2]
             global_access, local_access = (source, destination) if direction == "load" else (destination, source)
             assert access_tensor(global_access).same_as(gm)
-            assert int(tvm.sym.Analyzer().simplify(global_access.region[0].begin)) == index * 128 + projected_sid * 64
+            assert int(tvm_tirx.sym.Analyzer().simplify(global_access.region[0].begin)) == index * 128 + projected_sid * 64
             if index == 0:
                 storages.append(access_tensor(local_access))
             else:
@@ -228,7 +228,7 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
     ub = tensor((16, 16), "float32", name="ub", scope="shared.dyn")
     sid, block = ir.Var("sid", "int32"), ir.Var("block", "int32")
     sync = [
-        unit(ir.Evaluate(ir.Call(tvm.ir.Op.get(op), [0, "PIPE_FIX", 15], ty="void")), core=0)
+        unit(ir.Evaluate(ir.Call(tvm_tirx.ir.Op.get(op), [0, "PIPE_FIX", 15], ty="void")), core=0)
         for op in ("tl.ascend_cross_core_set_flag", "tl.ascend_cross_core_wait_flag")
     ]
     candidates = []
@@ -261,7 +261,7 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
         allocation_core=0,
     )
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", sids, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", sids, before["main"].body))})
     if sync_inside and sids == 2 and routing in ("mixed", "implicit", "local", "sid", "sid-expression"):
         with pytest.raises((ValueError, RuntimeError), match="PerCoreTask.*explicit synchronization.*Fixpipe.*outside"):
             transform.AssignCore()(before)
@@ -276,7 +276,7 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
         for operation in ("set", "wait")
     }
     assert events["set"] and events["wait"]
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for block_id in range(4):
         selected = {}
         for operation, candidates in events.items():
@@ -291,7 +291,7 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
                 if int(active):
                     active_events.append(event)
             (selected[operation],) = active_events
-        tvm.ir.assert_structural_equal(selected["set"].args, selected["wait"].args)
+        tvm_tirx.ir.assert_structural_equal(selected["set"].args, selected["wait"].args)
 
 
 def test_sync_set_is_migrated_into_each_per_core_candidate():
@@ -322,8 +322,8 @@ def test_sync_set_is_migrated_into_each_per_core_candidate():
         if isinstance(stmt, ir.Evaluate) and any(stmt.value.same_as(event) for event in sets):
             guards.append(next(parent.condition for parent in reversed(parents) if isinstance(parent, ir.If)))
     assert len(guards) == 2
-    assert tvm.sym.Analyzer().can_prove(ir.prim.Or(*guards))
-    assert all(tvm.sym.Analyzer().can_prove_equal(event.args[1], waits[0].args[1]) for event in sets)
+    assert tvm_tirx.sym.Analyzer().can_prove(ir.prim.Or(*guards))
+    assert all(tvm_tirx.sym.Analyzer().can_prove_equal(event.args[1], waits[0].args[1]) for event in sets)
 
 
 def test_guarded_per_core_task_keeps_wider_sync_outside_candidates():
@@ -356,7 +356,7 @@ def test_fill_outside_vf_synchronizes_on_scalar_pipe(dynamic):
     fill = ir.Evaluate(
         tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
             ir.PrimType("void"),
-            tvm.ir.Op.get("tl.tileop.fill"),
+            tvm_tirx.ir.Op.get("tl.tileop.fill"),
             [region(ub, 2, shape=[extent if dynamic else 64]), ir.const(0, "float32")],
             {},
             ir.UnknownLoc(),

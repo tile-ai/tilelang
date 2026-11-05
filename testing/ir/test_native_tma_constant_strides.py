@@ -4,7 +4,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 
 
 @pytest.mark.parametrize(
@@ -23,7 +23,7 @@ import tvm_tirx as tvm
 @tilelang.testing.requires_cuda
 def test_tma_global_byte_stride_contract(dtype, row_stride, accepted):
     # Lower only: the large-stride boundaries need no allocation or GPU run.
-    stride = tvm.ir.const(row_stride, "int64")
+    stride = tvm_tirx.ir.const(row_stride, "int64")
 
     @T.prim_func
     def main(
@@ -41,7 +41,7 @@ def test_tma_global_byte_stride_contract(dtype, row_stride, accepted):
     target = {"kind": "cuda", "arch": "sm_90"}
 
     def lower():
-        with tvm.transform.PassContext(), tvm.target.Target(target):
+        with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
             return tilelang.lower(main, target=target)
 
     if accepted:
@@ -71,7 +71,7 @@ def test_im2col_channel_geometry_byte_stride(dtype, channels, accepted):
     target = {"kind": "cuda", "arch": "sm_90"}
 
     def lower():
-        with tvm.transform.PassContext(), tvm.target.Target(target):
+        with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
             return tilelang.lower(main, target=target)
 
     if accepted:

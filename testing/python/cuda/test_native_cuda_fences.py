@@ -9,7 +9,7 @@ import subprocess
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -52,11 +52,11 @@ def op_names(body):
 def apply(name, body, tmp_path, *, params=(), arch="sm_100a"):
     function = tirx.Function(list(params), body).with_attr("global_symbol", "fences")
     if arch is not None:
-        function = function.with_attr("target", tvm.target.Target({"kind": "cuda", "arch": arch}))
+        function = function.with_attr("target", tvm_tirx.target.Target({"kind": "cuda", "arch": arch}))
     assert tirx.analysis.check_well_formed(function)
     before = ir.save_json(function)
     operation = tvm_ffi.get_global_func("tl.cuda.transform." + name)()
-    module = operation(tvm.IRModule({"fences": function}))
+    module = operation(tvm_tirx.IRModule({"fences": function}))
     assert tirx.analysis.check_well_formed(module)
     ir.assert_structural_equal(operation(module), module)
     assert ir.save_json(function) == before
@@ -497,13 +497,13 @@ def test_generated_fence_sequence_compiles_with_the_cuda_sdk(kind, tmp_path):
     thread = ir.Var("thread", "int32")
     region = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), integer(128)], [thread], {}, body)
     _, function = apply(operation, [region], tmp_path, params=[global_tensor])
-    function = function.with_attr("target", tvm.target.Target({"kind": "cuda", "arch": "sm_100a"}, host="c"))
-    split = tirx.transform.SplitHostDevice()(tvm.IRModule({"fences": function}))
+    function = function.with_attr("target", tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"}, host="c"))
+    split = tirx.transform.SplitHostDevice()(tvm_tirx.IRModule({"fences": function}))
     kernels = {symbol: value for symbol, value in split.functions.items() if int(value.attrs.get("calling_conv", 0)) == 2}
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule(kernels))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule(kernels))
     assert tirx.analysis.check_well_formed(lowered)
     module = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
-        lowered, tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        lowered, tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"})
     )
     source = module.inspect_source("cuda")
     source_path = tmp_path / "fences.cu"

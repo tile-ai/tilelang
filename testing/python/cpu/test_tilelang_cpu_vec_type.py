@@ -18,7 +18,7 @@ import torch
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang import tvm
+import tvm_tirx
 
 N = 256
 
@@ -43,7 +43,7 @@ def vec_arith(
 
 
 def _lowered_source() -> str:
-    with tvm.target.Target("c"):
+    with tvm_tirx.target.Target("c"):
         artifact = tilelang.lower(vec_arith)
     source = artifact.kernel_source
     assert source is not None, "CPU C codegen produced no kernel source"

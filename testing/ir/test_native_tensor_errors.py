@@ -1,5 +1,7 @@
 """Packed tensor diagnostics preserve the frontend's exception contract."""
 
+import tvm_tirx
+
 import numpy as np
 import pytest
 import torch
@@ -39,7 +41,7 @@ def test_packed_tensor_error_kind_belongs_to_its_frontend(tilelang_owned):
 
 
 def test_tilelang_packed_signature_and_policies_are_self_contained():
-    function = _native_function().with_attr("target", tilelang.tvm.target.Target("c", host="c"))
+    function = _native_function().with_attr("target", tvm_tirx.target.Target("c", host="c"))
     before = ir.save_json(function)
     packed = tilelang.transform.MakePackedAPI()(ir.IRModule({"main": function}))["main"]
     assert len(packed.params) == len(packed.ty.arg_types) == 4

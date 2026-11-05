@@ -15,7 +15,7 @@ import torch
 import tilelang
 import tilelang.cpu.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import tirx
 
 
@@ -69,7 +69,7 @@ def test_cpu_lowering_survives_storage_legalization(kind, factory):
     from tilelang.engine.lower import lower_to_host_device_ir
 
     context = create_backend_context(kind, None, "auto")
-    with tvm.transform.PassContext(), context.target:
+    with tvm_tirx.transform.PassContext(), context.target:
         host_mod, _, _, _, target_host = lower_to_host_device_ir(factory(8), context)
         # What host codegen does next: without compute legalization this failed
         # with "Cannot find var remap" or a uint16 store mismatch.

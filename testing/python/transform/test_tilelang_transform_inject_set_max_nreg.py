@@ -1,4 +1,4 @@
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir
 import tilelang as tl
 import tilelang.language as T
@@ -78,7 +78,7 @@ def test_inject_set_max_nreg():
 
     # Apply the InjectSetMaxNReg pass
     func = before
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tl.transform.LowerFrontendScopes()(mod)
 
@@ -108,7 +108,7 @@ def test_raw_set_max_nreg_keeps_legacy_behavior_with_simt_copy():
                 T.set_max_nreg(240, 1)
                 B[bx * 64, v] = A_shared[v]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tl.transform.LowerFrontendScopes()(mod)
 
@@ -146,7 +146,7 @@ def test_inject_set_max_nreg_no_set_max_nreg():
 
     # Apply the InjectSetMaxNReg pass
     func = before_no_set_max_nreg
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
     mod = tl.transform.LowerFrontendScopes()(mod)
 

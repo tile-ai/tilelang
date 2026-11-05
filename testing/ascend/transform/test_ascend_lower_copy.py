@@ -18,7 +18,7 @@ from tilelang.language._native import buffer as tensor_spec
 import math
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T, transform
 from tilelang.layout import (
     make_ascend_nz_layout,
@@ -41,7 +41,7 @@ def _region(buffer, extents=None, mins=None):
     return ir.TensorRegion(
         buffer,
         [
-            tvm.ir.Range.from_min_extent(m, e)
+            tvm_tirx.ir.Range.from_min_extent(m, e)
             for m, e in zip(mins if mins is not None else [0] * len(buffer.ty.shape), extents if extents is not None else buffer.ty.shape)
         ],
         ir.TensorRegionType(),
@@ -62,13 +62,13 @@ def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings
         buffers=[b for b in buffers if b.ty.scope.name != "global"],
         annotations={"layout_map": layouts or {}, "tl.l0_sf_bindings": bindings or {}},
     )
-    target = tvm.target.Target("ascend")
+    target = tvm_tirx.target.Target("ascend")
     body = root
     params = [b for b in globals_]
     params += tirx.analysis.undefined_vars(body, params)
     func = tirx.Function(params, body).with_attr("target", target)
     with target:
-        mod = tvm.IRModule({"main": func})
+        mod = tvm_tirx.IRModule({"main": func})
         if normalize:
             mod = transform.NormalizeAscendFractalStorage()(mod)
         return transform.AscendLowerTileOp()(mod)
@@ -76,7 +76,7 @@ def _lower(src, dst, src_region=None, dst_region=None, *, layouts=None, bindings
 
 def _equal(actual, expected):
     assert len(actual) == len(expected)
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for a, b in zip(actual, expected):
         assert analyzer.can_prove_equal(a, b), (a, b)
 
@@ -152,7 +152,7 @@ def test_dynamic_rows_keep_the_stride_across_a_fixed_middle_axis():
     (guard,) = nodes(after, ir.If)
     for count in (0, 1, 4):
         condition = substitute(guard.condition, {rows: count})
-        assert bool(tvm.sym.Analyzer().simplify(condition)) == (count > 0)
+        assert bool(tvm_tirx.sym.Analyzer().simplify(condition)) == (count > 0)
 
 
 def test_fixed_outer_axis_affects_the_pointer_but_not_the_l1_row_pitch():
@@ -311,7 +311,7 @@ def test_explicit_l0_pitch_controls_offsets_and_keeps_plane_capacity(v_layout, o
             },
         },
     )
-    with tvm.target.Target("ascend"):
+    with tvm_tirx.target.Target("ascend"):
         if oversized:
             with pytest.raises(ValueError, match="l0_pitch"):
                 transform.AscendLowerTileOp()(mod)
@@ -393,9 +393,9 @@ def test_pad_value_is_set_before_the_padded_dma():
         dst = T.alloc_shared((4, 32), "float32")
         T.copy(src, dst[:, :30], pad_value=0.0)
 
-    target = tvm.target.Target("ascend")
+    target = tvm_tirx.target.Target("ascend")
     with target:
-        after = transform.AscendLowerTileOp()(tvm.IRModule({"main": before.with_attr("target", target)}))
+        after = transform.AscendLowerTileOp()(tvm_tirx.IRModule({"main": before.with_attr("target", target)}))
     (copy,) = calls(after, "tl.ascend_copy_gm_to_ubuf")
     _equal([copy.args[i] for i in (3, 4, 5, 6, 7, 9, 10)], [4, 120, 0, 2, 1, 120, 128])
     body = after["main"].body
@@ -474,7 +474,7 @@ def test_alignment_checks_only_nonempty_iterations_but_preserves_the_guard(axis,
         assert calls(guard.then_case, "tl.ascend_load_cbuf_to_ca")
         for iteration in range(4):
             condition = substitute(guard.condition, {i: iteration})
-            assert bool(tvm.sym.Analyzer().simplify(condition)) == (iteration < 3)
+            assert bool(tvm_tirx.sym.Analyzer().simplify(condition)) == (iteration < 3)
 
 
 def test_simt_copy_is_lowered_per_thread_and_does_not_change_later_dma():

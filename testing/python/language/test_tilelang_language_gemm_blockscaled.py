@@ -12,7 +12,7 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 import tvm_ffi
 
@@ -97,7 +97,7 @@ def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, ex
     from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 
     op = _make_blockscaled_op(gemm_api, c_scope=c_scope, use_2cta=use_2cta)
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     inst = op._select_gemm_instruction(128, target)
     assert inst == expected
     impl_class = op._get_implementation_class(inst, target)
@@ -111,7 +111,7 @@ def test_blockscaled_instruction_selection(gemm_api, arch, c_scope, use_2cta, ex
 @pytest.mark.parametrize("gemm_api", ["gemm_blockscaled", "mma_gemm_blockscaled"])
 def test_blockscaled_sm120_selects_fragment_a(gemm_api):
     op = _make_blockscaled_op(gemm_api, a_scope="local.fragment", c_scope="local.fragment")
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_120"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_120"})
     assert op._select_gemm_instruction(256, target) == "cuda.mma.blockscaled"
 
 
@@ -121,7 +121,7 @@ def test_blockscaled_sm120_selects_fragment_a(gemm_api):
 def test_blockscaled_tcgen05_rejects_tmem_a(gemm_api, use_2cta):
     op = _make_blockscaled_op(gemm_api, a_scope="shared.tmem", use_2cta=use_2cta)
     with pytest.raises(Exception, match="Block-scaled GEMM requires.*A/B in shared memory"):
-        op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": "sm_100"}))
+        op._select_gemm_instruction(128, tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"}))
 
 
 @tilelang.testing.requires_cuda
@@ -129,14 +129,14 @@ def test_blockscaled_tcgen05_rejects_tmem_a(gemm_api, use_2cta):
 def test_blockscaled_tcgen05_request_cannot_select_sm120_mma(gemm_api, use_2cta):
     op = _make_blockscaled_op(gemm_api, c_scope="local.fragment", use_2cta=use_2cta)
     with pytest.raises(Exception, match="Block-scaled GEMM requires Blackwell SM100 TCGEN5MMA"):
-        op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": "sm_120"}))
+        op._select_gemm_instruction(128, tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_120"}))
 
 
 @tilelang.testing.requires_cuda
 def test_blockscaled_gemm_rejects_wgmma_annotation():
     op = _make_blockscaled_op(annotations={"is_wgmma": 1})
     with pytest.raises(Exception, match="Block-scaled GEMM does not support WGMMA"):
-        op._select_gemm_instruction(128, tvm.target.Target({"kind": "cuda", "arch": "sm_100"}))
+        op._select_gemm_instruction(128, tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"}))
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ def test_gemm_blockscaled_parses_to_its_own_tile_op():
 
     # The dense op refuses the 16-slot protocol rather than ignoring SFA/SFB,
     # and a short call is rejected up front instead of indexing out of range.
-    dense_builder = tvm.ir.Op.get("tl.tileop.gemm").get_attr("TLOpBuilder")
+    dense_builder = tvm_tirx.ir.Op.get("tl.tileop.gemm").get_attr("TLOpBuilder")
     with pytest.raises(Exception, match="exactly 13 positional slots, but got 16"):
         dense_builder(_operands(call), _annotations(call))
     with pytest.raises(Exception, match="exactly 13 positional slots, but got 12"):
@@ -359,12 +359,12 @@ def test_blockscaled_gemm_without_mbar_requires_explicit_async(gemm_api):
 
     (call,) = _gemm_calls(main)
     op = call.op.get_attr("TLOpBuilder")(_operands(call), _annotations(call))
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
     with target:
         layouts = op.infer_layout(target, 128)
 
         def lower():
-            return op.lower(layouts, target, tvm.ir.Range(0, 128), ir.Var("tx", "int32"), ir.const(0, "int32"))
+            return op.lower(layouts, target, tvm_tirx.ir.Range(0, 128), ir.Var("tx", "int32"), ir.const(0, "int32"))
 
         if gemm_api == "gemm_blockscaled":
             with pytest.raises(ValueError, match="requires a valid mbarrier"):
@@ -408,11 +408,11 @@ def test_gemm_blockscaled_waits_implicitly_like_gemm(gemm_api):
 
     (call,) = _gemm_calls(main)
     op = call.op.get_attr("TLOpBuilder")(_operands(call), _annotations(call))
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
     loop_phase = ir.Var("loop_phase", "int32")
     with target:
         layouts = op.infer_layout(target, 128)
-        lowered = str(op.lower(layouts, target, tvm.ir.Range(0, 128), ir.Var("tx", "int32"), loop_phase))
+        lowered = str(op.lower(layouts, target, tvm_tirx.ir.Range(0, 128), ir.Var("tx", "int32"), loop_phase))
 
     assert "ptx_tcgen05_mma_blockscaled_ss" in lowered
     assert "tcgen05_mma_arrive" in lowered
@@ -493,9 +493,9 @@ def test_blockscaled_gemm_rejected_by_backend_without_support():
             )
             T.copy(c, C)
 
-    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
-    target = tvm.target.Target("c")
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    target = tvm_tirx.target.Target("c")
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     with target, pytest.raises(Exception, match="Block-scaled GEMM is not supported by the cpu.Gemm backend"):
         tilelang.transform.LayoutInference()(mod)

@@ -27,7 +27,7 @@ Two idiomatic TileLang patterns trigger this:
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import tirx
 from tilelang.backend.target import determine_target
 
@@ -392,9 +392,9 @@ def persistent_matmul_guarded_deep_pipeline(
 
 def _apply_ws_pass(func):
     func = func.with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     target = determine_target({"kind": "cuda", "arch": "sm_90"}, return_object=True)
-    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     assert tirx.analysis.check_well_formed(mod["main"])
     result = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)

@@ -2,7 +2,7 @@ import tvm_ffi
 import pytest
 
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -40,10 +40,10 @@ def _source(expression, parameters, arch="sm_90"):
         pytest.skip("CUDA codegen is not enabled")
     function = tirx.Function(parameters, ir.Evaluate(expression), ret_type=ir.PrimType("void"))
     function = function.with_attr("global_symbol", "math_dispatch")
-    function = function.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    function = function.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": arch})
     with target:
-        return build(tvm.IRModule({"math_dispatch": function}), target).inspect_source()
+        return build(tvm_tirx.IRModule({"math_dispatch": function}), target).inspect_source()
 
 
 @tilelang.testing.requires_cuda

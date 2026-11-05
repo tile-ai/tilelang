@@ -5,7 +5,7 @@ import tvm_ffi
 from testing.ascend._ir import access_tensor, sblock, sblocks, substitute, tensor
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_nz_layout, make_ascend_major_k_layout
 from tvm_tirx import tirx
@@ -23,7 +23,7 @@ def _copy_module(src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_ex
 
     copy = tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
         ir.PrimType("void"),
-        tvm.ir.Op.get("tl.tileop.ascend_copy"),
+        tvm_tirx.ir.Op.get("tl.tileop.ascend_copy"),
         [region(src, 1, src_min, src_extent), region(dst, 2, dst_min or [0] * len(dst_shape), dst_extent or dst_shape)],
         {"transpose": ir.IntImm("int32", 1)} if transpose else {},
         ir.UnknownLoc(),
@@ -32,7 +32,7 @@ def _copy_module(src_shape, dst_shape, src_min, src_extent, dst_min=None, dst_ex
     root = sblock("root", ir.Evaluate(copy), buffers=[dst], annotations=annotations)
     body = root
     params = [src, *tirx.analysis.undefined_vars(body, [src])]
-    return tvm.IRModule({"main": tirx.Function(params, body)})
+    return tvm_tirx.IRModule({"main": tirx.Function(params, body)})
 
 
 @pytest.mark.parametrize("transpose", [False, True], ids=["direct", "transpose"])
@@ -45,7 +45,7 @@ def test_clamped_copy_and_padding_use_destination_axes(transpose):
     fills = calls(after, "tl.tileop.fill")
     regions = {
         tuple(
-            int(tvm.sym.Analyzer().simplify(x))
+            int(tvm_tirx.sym.Analyzer().simplify(x))
             for x in [*[axis.begin for axis in call.args[0].region], *[axis.extent for axis in call.args[0].region]]
         )
         for call in fills
@@ -82,7 +82,7 @@ def test_in_bounds_copy_does_not_fill_extra_storage(case):
     else:
         before = _copy_module((1, 32), (16, 32), [0, 0], [1, 32], dst_min=[15, 0], dst_extent=[1, 32])
     after = transform.AscendInsertOOBPadding()(before)
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 def test_tile_aligned_opaque_offset_has_no_partial_row_padding():
@@ -110,7 +110,7 @@ def test_dynamic_copy_clamps_extents_without_guarding_the_first_write():
     )
     for group_value, row_count in [(0, 0), (0, 5), (3, 16), (4, 5)]:
         actual = [
-            int(tvm.sym.Analyzer().simplify(substitute(x, {rows: row_count, group: group_value})))
+            int(tvm_tirx.sym.Analyzer().simplify(substitute(x, {rows: row_count, group: group_value})))
             for x in [axis.extent for axis in copy.args[0].region]
         ]
         assert actual == [int(group_value < 4), row_count, 64]
@@ -133,7 +133,7 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128, dtype="float8_e4m3fn"):
 
     def region(buffer, transposed):
         shape = (actual_k, mn) if transposed else (mn, actual_k)
-        return ir.TensorRegion(buffer, [tvm.ir.Range.from_min_extent(0, extent) for extent in shape], ir.TensorRegionType())
+        return ir.TensorRegion(buffer, [tvm_tirx.ir.Range.from_min_extent(0, extent) for extent in shape], ir.TensorRegionType())
 
     # The MX load and consumer identify the semantic K axis. Their other inputs
     # are already available at this pass boundary; no full kernel is needed.
@@ -151,7 +151,7 @@ def _mx_operand_copy(layout, actual_k, k_alloc=128, dtype="float8_e4m3fn"):
         buffers=[l1, scale, l0a, l0b, acc, sfa, sfb],
         annotations={"tl.l0_sf_bindings": {sfa: l0a, sfb: l0b}, "layout_map": {l1: make_ascend_major_k_layout(l1)}},
     )
-    return tvm.IRModule({"main": tirx.Function([a], root)}), l1
+    return tvm_tirx.IRModule({"main": tirx.Function([a], root)}), l1
 
 
 @pytest.mark.parametrize(

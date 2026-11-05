@@ -1,5 +1,5 @@
 import pytest
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -14,7 +14,7 @@ import tilelang.testing
 def copy_target(request):
     # These diagnostics come from SIMT copy vectorization. Ascend DMA copies
     # do not use the coalesced-width planner.
-    return tvm.target.Target(request.param)
+    return tvm_tirx.target.Target(request.param)
 
 
 def _lower_without_device_compile(func, target):

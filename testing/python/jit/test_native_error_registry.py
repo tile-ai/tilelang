@@ -89,7 +89,7 @@ def test_real_compiler_error_has_the_canonical_type():
     with pytest.raises(errors.InternalError, match="is not registered") as raised:
         tvm_tirx.ir.Op.get("tirx.call_packed").get_attr("tilelang.testing.missing_error_attr")
     assert type(raised.value) is errors.InternalError
-    assert isinstance(raised.value, tilelang.tvm.TVMError)
+    assert isinstance(raised.value, errors.TVMError)
 
 
 def test_reload_and_repeated_bootstrap_preserve_canonical_classes():
@@ -100,14 +100,15 @@ def test_reload_and_repeated_bootstrap_preserve_canonical_classes():
     importlib.reload(errors)
     errors._ensure_error_registration()
     next_provider, next_library = _provider.load_provider()
-    assert provider is next_provider is tilelang.tvm is tvm_tirx
+    assert provider is next_provider is tvm_tirx
     assert library is next_library
     for name, cls in previous.items():
         assert getattr(errors, name) is cls
         assert type(pickle.loads(pickle.dumps(instances[name]))) is cls
-    assert importlib.import_module("tilelang.tvm.error") is errors
-    assert tvm_tirx.error is errors
-    assert tvm_tirx.TVMError is errors.TVMError
+    assert importlib.import_module("tilelang.errors") is errors
+    assert not hasattr(tilelang, "tvm")
+    assert "error" not in vars(tvm_tirx)
+    assert "TVMError" not in vars(tvm_tirx)
     assert "tvm" not in sys.modules
 
 
@@ -131,15 +132,18 @@ def test_import_order_uses_one_native_provider_and_error_namespace(first, tmp_pa
         import tvm_tirx
         import tvm_ffi
         from tilelang import errors
-        from tilelang.tvm.error import InternalError
-        assert tilelang.tvm is tvm_tirx
-        assert tilelang.tvm.ir is tvm_tirx.ir
-        assert tilelang.tvm.tirx.Function is tvm_tirx.tirx.Function
-        assert tvm_tirx.error is errors
+        from tilelang.errors import InternalError
+        provider, library = tilelang._provider.load_provider()
+        assert provider is tvm_tirx
+        assert library is tilelang._LIB
+        assert not hasattr(tilelang, "tvm")
+        assert "error" not in vars(tvm_tirx)
+        assert "TVMError" not in vars(tvm_tirx)
         assert InternalError is errors.InternalError
         assert type(tvm_ffi.core.Error("InternalError", "message", "").py_error()) is InternalError
         assert "tvm" not in sys.modules
-        assert importlib.import_module("tilelang.tvm.error") is errors
+        assert not any(name == "tilelang.tvm" or name.startswith("tilelang.tvm.") for name in sys.modules)
+        assert importlib.import_module("tilelang.errors") is errors
         """,
         tmp_path,
     )
@@ -188,18 +192,15 @@ def test_registration_conflict_is_rejected_without_writes(kind, monkeypatch):
     assert (dict(by_name), dict(by_type)) == before
 
 
-@pytest.mark.parametrize("kind", ["error", "TVMError", "module_alias"])
-def test_namespace_conflict_does_not_overwrite_other_owners(kind, monkeypatch):
+@pytest.mark.parametrize("kind", ["error", "TVMError"])
+def test_bootstrap_preserves_foreign_provider_attributes(kind, monkeypatch):
     sentinel = object()
-    if kind == "module_alias":
-        monkeypatch.setitem(sys.modules, "tilelang.tvm.error", sentinel)
-    else:
-        monkeypatch.setattr(tvm_tirx, kind, sentinel)
+    monkeypatch.setattr(tvm_tirx, kind, sentinel, raising=False)
     before = dict(tvm_ffi.core.ERROR_NAME_TO_TYPE), dict(tvm_ffi.core.ERROR_TYPE_TO_NAME)
-    with pytest.raises(ImportError):
-        _provider._install_error_namespace(tvm_tirx)
+    provider, library = _provider.load_provider()
+    assert provider is tvm_tirx and library is tilelang._LIB
     assert (dict(tvm_ffi.core.ERROR_NAME_TO_TYPE), dict(tvm_ffi.core.ERROR_TYPE_TO_NAME)) == before
-    assert (sys.modules["tilelang.tvm.error"] if kind == "module_alias" else getattr(tvm_tirx, kind)) is sentinel
+    assert getattr(tvm_tirx, kind) is sentinel
 
 
 def test_enrichment_retains_identity_traceback_cause_and_other_args(tmp_path):

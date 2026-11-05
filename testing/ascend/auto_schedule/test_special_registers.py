@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 import tilelang.ascend.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tilelang.ascend.transform import z3_scheduler
 from testing.ascend._ir import calls, copy, kernel, nodes, seq, task_core_masks
@@ -79,7 +79,7 @@ def test_projected_special_register_writers_keep_their_subcore(operation):
     body = seq(*(unit(ir.Evaluate(setter), core=0, guard=sid == index) for index, setter in enumerate(setters)), unit(reader, core=0))
     before = kernel(body, buffers=[ub], params=[a], allocation_stage=0, allocation_cost=(1, 1), allocation_core=0)
     thread = sid
-    before = tvm.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
     assigned = transform.AssignCore()(before)
     for mod, masks in ((assigned, {0: 3, 1: 6}), (transform.ResolveCore()(assigned), {0: 1, 1: 4})):
         writers = [
@@ -199,7 +199,7 @@ def test_cube_mode_schedule_preserves_iteration_order(mode, enable_offset, start
     children = _direct_statement_units(scheduled_loop.body)
     assert [int(attribute_fields(child)["node"]["stage"]) for child in children] == stages
     for child, index in zip(children, order):
-        tvm.ir.assert_structural_equal(_task_body(child), operations[index])
+        tvm_tirx.ir.assert_structural_equal(_task_body(child), operations[index])
 
 
 def test_manual_stages_break_scalar_pipe_ties_by_iteration():
@@ -223,7 +223,7 @@ def test_manual_stages_break_scalar_pipe_ties_by_iteration():
     children = _direct_statement_units(scheduled_loop.body)
     assert [int(attribute_fields(child)["node"]["stage"]) for child in children] == [1, 0]
     for child, op in zip(children, reversed(operations)):
-        tvm.ir.assert_structural_equal(_task_body(child), op)
+        tvm_tirx.ir.assert_structural_equal(_task_body(child), op)
 
 
 @pytest.mark.parametrize("mode", ["hf32", "mmad-direction"])

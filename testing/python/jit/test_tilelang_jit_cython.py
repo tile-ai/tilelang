@@ -1,4 +1,4 @@
-from tilelang import tvm as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import Iter
 import tilelang.language as T
@@ -20,9 +20,9 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     b_buffer = ir.Var("B", tirx.TensorType((size,), "float32", layout="default"))
     func = tirx.Function([a_buffer, b_buffer], ir.Evaluate(ir.const(0)), ret_type=ir.PrimType("void"))
     adapter = CythonKernelAdapter.__new__(CythonKernelAdapter)
-    adapter.ir_module = tvm.IRModule({"main": func})
+    adapter.ir_module = tvm_tirx.IRModule({"main": func})
     adapter.result_idx = []
-    adapter.target = tvm.target.Target("c")
+    adapter.target = tvm_tirx.target.Target("c")
 
     class CaptureLibrary:
         def call(self, *args):

@@ -9,15 +9,15 @@ import pytest
 import tvm_ffi
 
 import tilelang
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.testing
 import tilelang.language as T
 from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import S
 from tilelang.metal.intrinsics.metal_macro_generator import MPSIntrinEmitter
 
-METAL_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
-METAL4_TARGET = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
+METAL_TARGET = tvm_tirx.target.Target({"kind": "metal", "keys": ["metal", "gpu"]})
+METAL4_TARGET = tvm_tirx.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
 
 
 def matmul_gemm_v2(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
@@ -135,7 +135,7 @@ def assert_metal_gemm_v2_codegen(
     accum_dtype=T.float32,
 ):
     func = matmul_gemm_v2(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
-    with tvm.transform.PassContext(), tvm.target.Target("metal"):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target("metal"):
         artifact = tilelang.lower(func, target="metal")
 
     src_code = artifact.kernel_source
@@ -158,7 +158,7 @@ def assert_metal_gemm_v2_cooperative_tensor_codegen(
     accum_dtype=T.float32,
 ):
     func = matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
-    with tvm.transform.PassContext(), METAL4_TARGET:
+    with tvm_tirx.transform.PassContext(), METAL4_TARGET:
         artifact = tilelang.lower(func, target=METAL4_TARGET)
 
     src_code = artifact.kernel_source
@@ -192,7 +192,7 @@ def assert_metal_gemm_v2_global_cooperative_tensor_codegen(
         swizzle_panel=swizzle_panel,
         swizzle_order=swizzle_order,
     )
-    with tvm.transform.PassContext(), METAL4_TARGET:
+    with tvm_tirx.transform.PassContext(), METAL4_TARGET:
         artifact = tilelang.lower(func, target=METAL4_TARGET)
 
     src_code = artifact.kernel_source
@@ -241,7 +241,7 @@ def test_metal_gemm_v2_cooperative_tensor_codegen():
 
 def test_metal_gemm_v2_without_metal4_uses_simdgroup():
     func = matmul_gemm_v2_shared_c(128, 128, 128, 32, 64, 32, dtype=T.float16)
-    with tvm.transform.PassContext(), METAL_TARGET:
+    with tvm_tirx.transform.PassContext(), METAL_TARGET:
         artifact = tilelang.lower(func, target=METAL_TARGET)
 
     src_code = artifact.kernel_source

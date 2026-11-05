@@ -4,7 +4,7 @@ import ctypes
 
 import numpy as np
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import S
 
@@ -63,7 +63,7 @@ def _function(params, body, ret_type="int32", target="c"):
     return tirx.Function(params, body, ret_type).with_attr(
         {
             "global_symbol": "main",
-            "target": tvm.target.Target(target, host="c"),
+            "target": tvm_tirx.target.Target(target, host="c"),
         }
     )
 
@@ -168,7 +168,7 @@ def test_inlined_getters_are_pinned_on_host_before_device_outlining(target, roun
         "tirx.device_scope",
         [],
         [],
-        {"target": tvm.target.Target(target)},
+        {"target": tvm_tirx.target.Target(target)},
         [
             ir.Evaluate(tirx.call_extern("opaque_descriptor_consumer", getter, getter, ty="int32")),
         ],

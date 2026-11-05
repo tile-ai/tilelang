@@ -15,7 +15,7 @@ import pytest
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.env import env
 
 
@@ -53,12 +53,12 @@ def _simple_program():
 
 def _noop_pass():
     """A TVM pass that is unlikely to modify a simple IR."""
-    return tvm.tirx.transform.StmtSimplify()
+    return tvm_tirx.tirx.transform.StmtSimplify()
 
 
 def _transforming_pass():
     """A TVM pass that modifies the IR."""
-    return tvm.tirx.transform.UnrollLoop()
+    return tvm_tirx.tirx.transform.UnrollLoop()
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +535,7 @@ def _atomic_no_sync_program():
         TS.evaluate(
             TS.call_intrin(
                 "float32",
-                tvm.ir.Op.get("tl.atomic_add_elem_op"),
+                tvm_tirx.ir.Op.get("tl.atomic_add_elem_op"),
                 TS.tvm_access_ptr(
                     TS.type_annotation("float32"),
                     A_shared.data,
@@ -632,9 +632,9 @@ class TestThreadSyncPassDiff:
             E_1 = TS.decl_buffer((16,), data=E.data)
             E_1[threadIdx_x] = C_1[0]
 
-        cuda_target = tvm.target.Target("cuda", host="llvm")
-        mod = tvm.IRModule({"main": func})
-        mod = tvm.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
+        cuda_target = tvm_tirx.target.Target("cuda", host="llvm")
+        mod = tvm_tirx.IRModule({"main": func})
+        mod = tvm_tirx.tirx.transform.Apply(lambda f: f.with_attr({"global_symbol": "test", "target": cuda_target}))(mod)
 
         passes = [
             ("OutlineDeviceRegions", tilelang.transform.OutlineDeviceRegions()),

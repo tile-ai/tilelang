@@ -2,7 +2,7 @@ from tvm_tirx import tirx
 
 from tvm_tirx import ir
 from testing.ascend._ir import access_tensor, single_statement, tensor
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 
 
@@ -13,7 +13,7 @@ def _restore(body, loop_var, output=None):
         loop_var, ir.const(3), ir.const(3) + ir.const(8), ir.const(1), ir.ForKind.DEFAULT, body, annotations={"synthetic_while": 1}
     )
     func = tirx.Function([output], synthetic_loop).with_attr("global_symbol", "main")
-    return single_statement(transform.RestoreWhileLoops()(tvm.IRModule.from_expr(func))["main"].body)
+    return single_statement(transform.RestoreWhileLoops()(tvm_tirx.IRModule.from_expr(func))["main"].body)
 
 
 def test_restore_while_loops_preserves_residual_loop_var_with_counter():
@@ -40,7 +40,7 @@ def test_restore_while_loops_preserves_residual_loop_var_with_counter():
     assert restored_store.indices[0].same_as(snapshot.var)
     assert isinstance(increment, ir.TensorStore)
     assert access_tensor(increment).same_as(allocation.var)
-    tvm.ir.assert_structural_equal(increment.value, snapshot.var + 1)
+    tvm_tirx.ir.assert_structural_equal(increment.value, snapshot.var + 1)
 
 
 def test_restore_while_loops_avoids_counter_when_loop_var_is_dead():
@@ -70,7 +70,7 @@ def test_restore_while_loops_avoids_counter_after_version_index_simplification()
     assert isinstance(single_statement(body.body), ir.For)
     restored_store = single_statement(single_statement(body.body).body)
     assert isinstance(restored_store, ir.TensorStore)
-    tvm.ir.assert_structural_equal(restored_store.indices[0], inner_var % 2)
+    tvm_tirx.ir.assert_structural_equal(restored_store.indices[0], inner_var % 2)
 
 
 if __name__ == "__main__":

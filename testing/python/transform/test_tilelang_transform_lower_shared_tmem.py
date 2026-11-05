@@ -1,7 +1,7 @@
 # ruff: noqa
 import pytest
 
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
@@ -9,12 +9,12 @@ from tilelang.testing.ir import assert_call_count, collect_calls
 from tvm_tirx import ir, tirx
 
 
-TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
+TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"})
 
 
 def _apply(func):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(TARGET)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(TARGET)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.cuda.transform.LowerSharedTmem()(mod)
     return mod

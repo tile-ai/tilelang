@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 
@@ -13,7 +13,7 @@ from tilelang.testing.ir import collect_calls
 from tilelang.testing.packed import compile_packed_function
 
 
-CPU = tvm.target.Target("c")
+CPU = tvm_tirx.target.Target("c")
 
 
 def _tensor(name, shape):

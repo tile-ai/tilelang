@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir
 
 import tilelang
@@ -18,18 +18,18 @@ from testing.python.cuda.test_native_codegen_cuda import build_cuda
 
 
 def _ordered(function):
-    if not tvm.cuda(0).exist:
+    if not tvm_tirx.cuda(0).exist:
         pytest.skip("CUDA runtime and device required for synchronization execution")
-    arch = os.environ.get("TILELANG_TEST_CUDA_ARCH", "sm_" + tvm.cuda(0).compute_version.replace(".", ""))
-    function = function.with_attr("target", tvm.target.Target({"kind": "cuda", "arch": arch}))
-    function = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": function}))["main"]
+    arch = os.environ.get("TILELANG_TEST_CUDA_ARCH", "sm_" + tvm_tirx.cuda(0).compute_version.replace(".", ""))
+    function = function.with_attr("target", tvm_tirx.target.Target({"kind": "cuda", "arch": arch}))
+    function = tilelang.transform.ThreadSync("shared")(tvm_tirx.IRModule({"main": function}))["main"]
     return function.without_attr("target")
 
 
 def _check(module, values, expected, tmp_path):
-    device = tvm.cuda(0)
-    source = tvm.runtime.tensor(values, device)
-    output = tvm.runtime.tensor(np.full_like(expected, -999), device)
+    device = tvm_tirx.cuda(0)
+    source = tvm_tirx.runtime.tensor(values, device)
+    output = tvm_tirx.runtime.tensor(np.full_like(expected, -999), device)
     for _ in range(10):
         module(source, output)
         np.testing.assert_array_equal(output.numpy(), expected)
@@ -43,7 +43,7 @@ def _check(module, values, expected, tmp_path):
         json.dumps(
             {
                 "tilelang": tilelang.__file__,
-                "tvm_tirx": tvm.__file__,
+                "tvm_tirx": tvm_tirx.__file__,
                 "tvm_ffi": tvm_ffi.__file__,
                 "loaded_libraries": libraries,
                 "input": values.tolist(),

@@ -14,7 +14,7 @@ import tilelang.language as T
 import tilelang
 import tilelang.testing
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir
 from tilelang.testing.ir import collect_nodes
 
@@ -56,8 +56,8 @@ def _launch_hints(func):
 
 
 def _materialize(func, target: str, **kwargs):
-    mod = tvm.IRModule.from_expr(func)
-    mod = tvm.tirx.transform.BindTarget(tvm.target.Target(target))(mod)
+    mod = tvm_tirx.IRModule.from_expr(func)
+    mod = tvm_tirx.tirx.transform.BindTarget(tvm_tirx.target.Target(target))(mod)
     mod = tl.transform.MaterializeKernelLaunch(**kwargs)(mod)
     return mod[func.attrs["global_symbol"]]
 
@@ -137,13 +137,13 @@ def test_materialize_launch_preserves_existing_grid_annotations():
 
 def test_materialize_launch_does_not_read_cpu_parallel_config():
     source = _parallel_kernel()
-    with tvm.transform.PassContext(config={"tl.cpu_parallel": True}):
+    with tvm_tirx.transform.PassContext(config={"tl.cpu_parallel": True}):
         enabled = _materialize(source, "c", lower_thread_binding=False)
-    with tvm.transform.PassContext(config={"tl.cpu_parallel": False}):
+    with tvm_tirx.transform.PassContext(config={"tl.cpu_parallel": False}):
         disabled = _materialize(source, "c", lower_thread_binding=False)
     # Native grid provenance is independent of the later CPU parallel policy.
     # Compare the complete results so a config-dependent change cannot hide.
-    tvm.ir.assert_structural_equal(enabled, disabled)
+    tvm_tirx.ir.assert_structural_equal(enabled, disabled)
 
 
 def test_traced_launch_records_grid_and_thread_placeholders():

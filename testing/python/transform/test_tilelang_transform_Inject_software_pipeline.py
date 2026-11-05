@@ -3,7 +3,7 @@ from collections import Counter
 import pytest
 
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.analysis._visitor import tilelang_metadata
 from tilelang.language._native import dtype_of
@@ -16,12 +16,12 @@ from tilelang.testing.ir import collect_calls, collect_nodes
 
 def _check(original, transformed):
     func = original
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
     assert tirx.analysis.check_well_formed(mod["main"])
     mod = tl.transform.Simplify()(mod)
-    tvm.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), True)
+    tvm_tirx.ir.assert_structural_equal(mod["main"], transformed.with_attr("global_symbol", "main"), True)
 
 
 @pytest.mark.parametrize("stages,orders", [([1, 0], [0, 1]), ([0, 0], [1, 0])])
@@ -38,7 +38,7 @@ def test_inject_software_pipeline_checks_cross_thread_raw_reordering(stages, ord
                 shared[tx] = k
                 B[k * 32 + tx] = shared[tx + offset]
 
-    mod = tvm.IRModule.from_expr(before)
+    mod = tvm_tirx.IRModule.from_expr(before)
     if thread_form != "unmaterialized":
         mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(mod)
     if thread_form == "native":
@@ -54,7 +54,7 @@ def test_inject_software_pipeline_checks_cross_thread_raw_reordering(stages, ord
             return ir.RegionStmt(node.op, node.args, [variable], node.attrs, body, node.result_vars, node.loc)
 
         function = mod["before"]
-        mod = tvm.IRModule.from_expr(function.with_body(tvm_ffi.structural_map(function.body, (ir.RegionStmt, renew_thread))))
+        mod = tvm_tirx.IRModule.from_expr(function.with_body(tvm_ffi.structural_map(function.body, (ir.RegionStmt, renew_thread))))
     # Without materialized thread bounds, even the two halves may overlap.
     if offset == 1 or thread_form == "unmaterialized":
         with pytest.raises(RuntimeError, match="later stage|cannot be reordered"):
@@ -191,7 +191,7 @@ def test_async_pipeline_groups_multiple_copy_producers():
                     T.writes(C[tx, i])
                     C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
     assert tirx.analysis.check_well_formed(mod["main"])
@@ -254,7 +254,7 @@ def test_async_pipeline_waits_for_individual_physical_commit_group():
                     T.writes(C[tx, i])
                     C[tx, i] = C[tx, i] + D_shared[tx, 0]
 
-    mod = tvm.IRModule.from_expr(before.with_attr({"global_symbol": "main", "tirx.noalias": True}))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr({"global_symbol": "main", "tirx.noalias": True}))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
     assert tirx.analysis.check_well_formed(mod["main"])
@@ -320,7 +320,7 @@ def test_async_pipeline_only_wraps_producer_statements_from_explicit_group_annot
                     T.writes(C[tx, i])
                     C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
     assert tirx.analysis.check_well_formed(mod["main"])
@@ -356,7 +356,7 @@ def test_async_pipeline_marks_copy_ops_for_pipeline_managed_cp_async_sync():
                 T.copy(B[tx, i : i + 1], B_shared[tx, 0:1])
                 C[tx, i] = A_shared[tx, 0] + B_shared[tx, 0]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     annotated, total = _count_copy_calls_with_annotation(mod["main"], "no_implicit_async_commit_wait")
@@ -389,14 +389,14 @@ def test_pipeline_explicit_gemm_mbar_uses_logical_epoch(num_stages):
                 T.copy(B[i, 0:16, 0:16], B_shared)
                 T.gemm(A_shared, B_shared, C_local, mbar=mbar)
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     loop = _find_pipelined_loop(mod["main"])
     phases = _collect_call_annotation_values(loop, "tl.tileop.gemm", "tl.pipeline_mbar_phase_expr")
 
     assert len(phases) == 1
     expected = (loop.var - loop.begin) % 2
-    assert tvm.sym.Analyzer().can_prove_equal(phases[0], expected)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(phases[0], expected)
 
 
 def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
@@ -421,7 +421,7 @@ def test_async_pipeline_does_not_mark_non_cp_async_compatible_copy():
                 T.copy(A[tx, i : i + 1], S[tx, 0:1])
                 C[tx, i] = S[tx, 0]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     annotated, total = _count_copy_calls_with_annotation(mod["main"], "no_implicit_async_commit_wait")
@@ -454,7 +454,7 @@ def test_async_pipeline_relaxes_loop_wait_and_descends_trailing_drain():
                 for j in range(4):
                     B[i * 4 + j] = S[j]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
 
@@ -484,7 +484,7 @@ def test_degenerate_pipeline_with_single_stage_is_not_expanded():
                     scale[i] = split[i]
                     B[i] = scale[i]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     mod = tl.transform.Simplify()(mod)
 
@@ -519,7 +519,7 @@ def test_inject_software_pipeline_expands_annotated_layout():
                         for j in T.serial(16):
                             B[k, i, j] = shared[i, j]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     layout_map = _find_layout_map(mod["main"])
@@ -575,7 +575,7 @@ def test_inject_software_pipeline_sibling_buffers(first, second, flat_alloc):
             shared[0, 0] = A[0, 0, 0]
             B[0, 0, 0] = shared[0, 0]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     func = mod["main"]
     layout_map = _find_layout_map(func)
@@ -586,7 +586,7 @@ def test_inject_software_pipeline_sibling_buffers(first, second, flat_alloc):
     assert [int(dim) for dim in shared.shape] == [capacity, 8, 16]
     assert layout_map[shared].is_equal(layout.expand([capacity]))
 
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     moduli = set()
     accesses = [
         node
@@ -659,7 +659,7 @@ def test_inject_software_pipeline_replays_scalar_bind_without_annotation_slot():
                     T.writes(B[base + tx])
                     B[base + tx] = shared[tx]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
@@ -702,7 +702,7 @@ def test_inject_software_pipeline_replays_readonly_bufferload_bind():
                     T.writes(B[idx + tx])
                     B[idx + tx] = shared[tx]
 
-    mod = tvm.IRModule.from_expr(before.with_attr({"global_symbol": "main", "tirx.noalias": True}))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr({"global_symbol": "main", "tirx.noalias": True}))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
@@ -733,7 +733,7 @@ def test_inject_software_pipeline_rejects_side_effecting_replay_mask():
             out[i * 2] = pos
             out[i * 2 + 1] = pos
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     with pytest.raises(RuntimeError, match="cannot be replayed safely"):
         tl.transform.InjectSoftwarePipeline()(mod)
 
@@ -767,7 +767,7 @@ def test_inject_software_pipeline_schedules_bind_that_reads_pipeline_buffer(repl
                     T.writes(B[base + tx])
                     B[base + tx] = value
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
@@ -808,7 +808,7 @@ def test_inject_software_pipeline_ignores_legacy_scalar_bind_annotation_slot():
                     T.writes(B[base + tx])
                     B[base + tx] = shared[tx]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
@@ -844,7 +844,7 @@ def test_inject_software_pipeline_replays_scalar_bind_dependencies():
                     T.writes(B[offset])
                     B[offset] = shared[tx]
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
 
     leading_binds = _collect_leading_bind_names(mod, {"copy", "store"})
@@ -876,7 +876,7 @@ def test_inject_software_pipeline_checks_physical_strided_regions(stages, orders
             shared[write_index] = k
             B[k] = shared[read_index]
 
-    mod = tvm.IRModule.from_expr(original)
+    mod = tvm_tirx.IRModule.from_expr(original)
     if aliases:
         with pytest.raises(RuntimeError, match="later stage|cannot be reordered"):
             tl.transform.InjectSoftwarePipeline()(mod)
@@ -894,7 +894,7 @@ def test_inject_software_pipeline_checks_threaded_strided_regions(row_stride):
                 shared[0, tx] = k
                 B[k * 32 + tx] = shared[1, tx]
 
-    mod = tvm.IRModule.from_expr(original)
+    mod = tvm_tirx.IRModule.from_expr(original)
     if row_stride < 32:
         with pytest.raises(RuntimeError, match="later stage"):
             tl.transform.InjectSoftwarePipeline()(mod)
@@ -914,7 +914,7 @@ def test_inject_software_pipeline_versions_thread_regions(offset, versions):
                 shared[tx] = A[k * 32 + tx]
                 B[k * 32 + tx] = shared[tx + offset]
 
-    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm.IRModule.from_expr(before))
+    mod = tl.transform.MaterializeKernelLaunch(lower_thread_binding=True)(tvm_tirx.IRModule.from_expr(before))
     mod = tl.transform.InjectSoftwarePipeline()(mod)
     buffers = _allocations(mod["before"])
     (shared,) = [buffer for buffer in buffers if buffer.name == "shared"]

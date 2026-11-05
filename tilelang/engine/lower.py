@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import nullcontext
 import tilelang.transform
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import tirx
 from tvm_tirx.ir import CallingConv
 from tvm_tirx.target import Target
@@ -60,7 +60,7 @@ def extrac_params(func: tirx.Function) -> list[KernelParam]:
     return [KernelParam.from_var(parameter) for parameter in func.params]
 
 
-def _make_parameter_alias_contract_explicit(mod: tvm.IRModule) -> tvm.IRModule:
+def _make_parameter_alias_contract_explicit(mod: tvm_tirx.IRModule) -> tvm_tirx.IRModule:
     """Expose the kernel ABI's alias default before dependence analysis.
 
     TileLang's previous SplitHostDevice supplied noalias=True to device
@@ -78,14 +78,14 @@ def _make_parameter_alias_contract_explicit(mod: tvm.IRModule) -> tvm.IRModule:
 
 
 def host_codegen(
-    host_mod: tvm.IRModule,
+    host_mod: tvm_tirx.IRModule,
     context: BackendContext,
-) -> tvm.IRModule:
+) -> tvm_tirx.IRModule:
     """Generate host-side code from the lowered IR module.
 
     Parameters
     ----------
-    host_mod : tvm.IRModule
+    host_mod : tvm_tirx.IRModule
         The host-side IR module to compile.
     context : BackendContext
         Resolved backend, device target, host target, and execution policy.
@@ -105,7 +105,7 @@ def host_codegen(
     return context.codegen_host(host_mod)
 
 
-def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
+def _prepare_device_codegen_mod(device_mod: tvm_tirx.IRModule) -> tvm_tirx.IRModule:
     # TileLang's rule maps take precedence over the shared target/default
     # maps. Applying the generic finalizer first irreversibly expands calls
     # such as Ascend rsqrt before the owning emitter can select its domain.
@@ -114,23 +114,23 @@ def _prepare_device_codegen_mod(device_mod: tvm.IRModule) -> tvm.IRModule:
     return tilelang.transform.HoistBroadcastValues()(device_mod)
 
 
-def device_codegen(device_mod: tvm.IRModule, context: BackendContext) -> tvm.IRModule:
+def device_codegen(device_mod: tvm_tirx.IRModule, context: BackendContext) -> tvm_tirx.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
     return context.codegen_device(device_mod, compile_device=True)
 
 
-def device_codegen_without_compile(device_mod: tvm.IRModule, context: BackendContext) -> tvm.IRModule:
+def device_codegen_without_compile(device_mod: tvm_tirx.IRModule, context: BackendContext) -> tvm_tirx.IRModule:
     device_mod = _prepare_device_codegen_mod(device_mod)
     return context.codegen_device(device_mod, compile_device=False)
 
 
 def lower_to_host_device_ir(
-    func_or_mod: tirx.Function | tvm.IRModule,
+    func_or_mod: tirx.Function | tvm_tirx.IRModule,
     context: BackendContext,
     runtime_only: bool = False,
     *,
     enable_host_codegen: bool = True,
-) -> tuple[tvm.IRModule, tvm.IRModule, list[KernelParam] | None, Target, Target]:
+) -> tuple[tvm_tirx.IRModule, tvm_tirx.IRModule, list[KernelParam] | None, Target, Target]:
     """Lower to split IR under a per-compilation instrumentation session.
 
     Direct callers receive a packable host module by default, including
@@ -147,7 +147,7 @@ def lower_to_host_device_ir(
             if isinstance(func_or_mod, tirx.Function):
                 func = func_or_mod
                 params = extrac_params(func) if not runtime_only else None
-                mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+                mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
 
             target = context.target
             target_host = context.target_host
@@ -175,7 +175,7 @@ def lower_to_host_device_ir(
 
 
 def lower_with_context(
-    func_or_mod: tirx.Function | tvm.IRModule,
+    func_or_mod: tirx.Function | tvm_tirx.IRModule,
     context: BackendContext,
     *,
     runtime_only: bool = False,
@@ -205,7 +205,7 @@ def lower_with_context(
 
 
 def _lower_with_context_impl(
-    func_or_mod: tirx.Function | tvm.IRModule,
+    func_or_mod: tirx.Function | tvm_tirx.IRModule,
     context: BackendContext,
     *,
     runtime_only: bool,
@@ -252,7 +252,7 @@ def _lower_with_context_impl(
 
 
 def lower(
-    func_or_mod: tirx.Function | tvm.IRModule,
+    func_or_mod: tirx.Function | tvm_tirx.IRModule,
     target: str | Target = "auto",
     target_host: str | Target | None = None,
     runtime_only: bool = False,

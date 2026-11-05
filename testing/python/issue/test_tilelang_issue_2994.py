@@ -4,7 +4,8 @@ import tvm_ffi
 
 import tilelang
 import tilelang.testing
-from tilelang import language as T, tvm
+import tvm_tirx
+from tilelang import language as T
 from tvm_tirx import ir, prim, tirx
 
 
@@ -65,10 +66,10 @@ def _packed_x2_select_source(dtype):
     selected = prim.Select(ramp < limit, on_true, on_false)
     func = _device_function([on_true, on_false], ir.Evaluate(selected))
     func = func.with_attr("global_symbol", "packed_x2_select")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({"packed_x2_select": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    mod = tvm_tirx.IRModule({"packed_x2_select": func})
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("cuda")).inspect_source()
 
 
 def _packed_x2_constructor_source(dtype, constructor):
@@ -96,10 +97,10 @@ def _packed_x2_constructor_source(dtype, constructor):
         raise ValueError(f"Unknown constructor: {constructor}")
 
     func = func.with_attr("global_symbol", name)
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({name: func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    mod = tvm_tirx.IRModule({name: func})
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("cuda")).inspect_source()
 
 
 def _packed_vector_load_source(
@@ -137,11 +138,11 @@ def _packed_vector_load_source(
     func = func.with_attr("global_symbol", name)
     func = func.with_attr(
         "calling_conv",
-        tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
+        tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
-    mod = tvm.IRModule({name: func})
+    mod = tvm_tirx.IRModule({name: func})
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("cuda")).inspect_source()
 
 
 def _packed_vector_store_source(
@@ -180,11 +181,11 @@ def _packed_vector_store_source(
     func = func.with_attr("global_symbol", name)
     func = func.with_attr(
         "calling_conv",
-        tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
+        tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH,
     )
-    mod = tvm.IRModule({name: func})
+    mod = tvm_tirx.IRModule({name: func})
     build = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")
-    return build(mod, tvm.target.Target("cuda")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("cuda")).inspect_source()
 
 
 def _packed_x2_broadcast_kernel(dtype, value):

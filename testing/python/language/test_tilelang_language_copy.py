@@ -2,7 +2,7 @@ import tilelang
 import tilelang.language as T
 import torch
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.layout import make_gemm_fragment_8x8_transposed
 
 print(torch.__version__)
@@ -470,7 +470,7 @@ def test_tilelang_copy_uses_stmatrix_m16n8_for_sm100_int8_shared_store():
             T.copy(frag, smem)
 
     target = {"kind": "cuda", "arch": "sm_100a"}
-    with tvm.target.Target(target):
+    with tvm_tirx.target.Target(target):
         artifact = tilelang.lower(main, target=target)
 
     assert "tl::ptx_stmatrix_m16n8_x1_trans" in artifact.kernel_source

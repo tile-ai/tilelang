@@ -1,4 +1,4 @@
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang as tl
 from tilelang.cuda import transform as cuda_transform
 from tilelang.backend.target import determine_target
@@ -10,7 +10,7 @@ import tvm_ffi
 
 # Direct pass tests must register the backend that engine.lower normally owns.
 tl.cuda.register_backend()
-auto_target = tvm.target.Target(determine_target("auto"))
+auto_target = tvm_tirx.target.Target(determine_target("auto"))
 
 
 def _allocations(body):
@@ -35,7 +35,7 @@ def _assert_shared_barrier_init(func):
     barrier = alloc.var
     assert barrier.ty.scope.name == "shared.barrier"
     assert str(barrier.ty.dtype) == "uint64"
-    tvm.ir.assert_structural_equal(barrier.ty.shape, tvm_ffi.convert([ir.IntImm("int32", 4)]))
+    tvm_tirx.ir.assert_structural_equal(barrier.ty.shape, tvm_ffi.convert([ir.IntImm("int32", 4)]))
     assert alloc.value.attrs["tl.barrier_initialized"]
 
     (guard,) = collect_nodes(body, ir.If)
@@ -64,7 +64,7 @@ def _assert_shared_barrier_init(func):
             ir.Evaluate(ir.Call("tirx.gpu_storage_sync", [ir.StringImm("shared")], ty="void")),
         ]
     )
-    tvm.ir.assert_structural_equal(ir.SeqStmt(seq.seq[1:4]), expected)
+    tvm_tirx.ir.assert_structural_equal(ir.SeqStmt(seq.seq[1:4]), expected)
 
 
 def _assert_tma_descriptor_init_after_alloc(func, original_call):
@@ -77,7 +77,7 @@ def _assert_tma_descriptor_init_after_alloc(func, original_call):
 
     (alloc,) = _allocations(body)
     assert alloc.var.ty.scope.name == "global" and str(alloc.var.ty.dtype) == "float16"
-    tvm.ir.assert_structural_equal(alloc.var.ty.shape, tvm_ffi.convert([ir.IntImm("int32", 32)]))
+    tvm_tirx.ir.assert_structural_equal(alloc.var.ty.shape, tvm_ffi.convert([ir.IntImm("int32", 32)]))
     original_pointer = original_call.args[2]
     assert isinstance(original_pointer, ir.Call) and original_pointer.op.name == "tirx.tensor_data_ptr"
     assert original_pointer.args[0].same_as(alloc.var)
@@ -91,7 +91,7 @@ def _assert_tma_descriptor_init_after_alloc(func, original_call):
     # by-value grid-constant kernel arguments; it replaces the old scope tag.
     init_args = tvm_ffi.convert([ir.StringImm("__tvm_tensormap_create_tiled"), descriptor, *original_call.args])
     (init_call,) = collect_calls(body, op="tirx.call_packed")
-    tvm.ir.assert_structural_equal(init_call.args, init_args)
+    tvm_tirx.ir.assert_structural_equal(init_call.args, init_args)
     assert init_call.args[1].same_as(descriptor)
     assert init_call.args[4].same_as(original_pointer)
     assert_call_count(body, op="tirx.stack_alloca", count=1)
@@ -104,7 +104,7 @@ def _assert_tma_descriptor_init_after_alloc(func, original_call):
             ir.Evaluate(ir.Call("tirx.call_packed", init_args, ty="int32")),
         ]
     )
-    tvm.ir.assert_structural_equal(ir.SeqStmt(seq.seq[1:3]), expected_init)
+    tvm_tirx.ir.assert_structural_equal(ir.SeqStmt(seq.seq[1:3]), expected_init)
     # The launch follows initialization in the same scope; the prefetch is
     # guarded inside that launch and uses the very same descriptor Var.
     launch = seq.seq[3]
@@ -121,10 +121,10 @@ def _assert_tma_descriptor_init_after_alloc(func, original_call):
             ir.Evaluate(descriptor),
         ]
     )
-    tvm.ir.assert_structural_equal(launch.body, expected_body)
+    tvm_tirx.ir.assert_structural_equal(launch.body, expected_body)
     (metadata_descriptor,) = list(func.attrs["tma_descriptor_args"])
     assert metadata_descriptor.same_as(descriptor)
-    tvm.ir.assert_structural_equal(func.attrs["tma_descriptor_args"][descriptor], init_args)
+    tvm_tirx.ir.assert_structural_equal(func.attrs["tma_descriptor_args"][descriptor], init_args)
 
 
 @tilelang.testing.requires_cuda
@@ -142,8 +142,8 @@ def test_lower_shared_barrier():
             _ = T.launch_thread("threadIdx.x", 128)
             mbarrier = T.alloc_barrier([128, 128, 128, 128])  # noqa: F841
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = cuda_transform.LowerSharedBarrier()(mod)
     mod = tl.transform.LowerOpaqueBlock()(mod)
@@ -186,8 +186,8 @@ def test_tma_descriptor_init_after_alloc_global():
                 )
             )
 
-    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(auto_target)(mod)
+    mod = tvm_tirx.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     (original_call,) = collect_calls(mod["main"].body, op="tl.create_tma_descriptor")
     mod = cuda_transform.LowerHopperIntrin()(mod)

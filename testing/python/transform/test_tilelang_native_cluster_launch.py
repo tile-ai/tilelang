@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, sym, tirx
 from tvm_tirx.target import Target
 
@@ -40,7 +40,7 @@ def _source(clusters=((2, 1, 1), (1, 2, 1)), two_cta=None, extra=None):
         launches.append(_thread("blockIdx.x", n + index, [_thread("threadIdx.x", 32 * (index + 1), [kernel])]))
     function = tirx.Function([n], launches, ret_type=ir.PrimType("void"))
     function = function.with_attr("global_symbol", "main").with_attr("target", Target({"kind": "cuda", "arch": "sm_100a"}, host="llvm"))
-    return tvm.IRModule({"main": function})
+    return tvm_tirx.IRModule({"main": function})
 
 
 def _owners(module):
@@ -182,7 +182,7 @@ def test_existing_native_launch_configuration_is_preserved_or_rejected(conflict)
         function.body,
     )
     wrapped = tirx.Function(function.params, [scope], function.ret_type, function.attrs)
-    wrapped = tvm.IRModule({"main": wrapped})
+    wrapped = tvm_tirx.IRModule({"main": wrapped})
     if conflict:
         with pytest.raises(ValueError, match="disagrees with cluster_dims"):
             _cluster(wrapped)
@@ -291,7 +291,7 @@ def _configured(*, dtype="float32", flags=True, bad_extent=None, supplied_flags=
     )
     host = tirx.Function([host_output, host_n, stream], [pending])
     host = host.with_attr("target", Target("llvm")).with_attr("global_symbol", "main")
-    return tvm.IRModule({symbol: device, "main": host}), symbol
+    return tvm_tirx.IRModule({symbol: device, "main": host}), symbol
 
 
 @pytest.mark.parametrize("dtype,bits", [("float32", 32), ("int4", 4), ("int4x4", 16)])
@@ -357,7 +357,7 @@ def test_non_cuda_ordinary_launch_keeps_backend_metadata(backend):
     host_extent = ir.Var("host_extent", "int64")
     host = tirx.Function([host_extent], [ir.Evaluate(ir.Call(symbol, [host_extent + 1], ty="void"))])
     host = host.with_attr("target", Target("llvm")).with_attr("global_symbol", "main")
-    module = tvm.IRModule({symbol: device, "main": host})
+    module = tvm_tirx.IRModule({symbol: device, "main": host})
     before = ir.save_json(module)
     result = _launch(module)
     assert ir.save_json(module) == before
@@ -483,7 +483,7 @@ def test_annotation_statement_cluster_requires_kernel_and_completed_owners(insid
         message = "after LowerTileOp and LowerSharedTmem"
     else:
         function = source["main"]
-        source = tvm.IRModule(
+        source = tvm_tirx.IRModule(
             {"main": tirx.Function(function.params, [_annotation_statement({"cluster_dims": [2, 1, 1]})], attrs=function.attrs)}
         )
         message = "enclosing physical kernel launch"

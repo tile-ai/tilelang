@@ -14,7 +14,7 @@ Three kinds of tests:
 """
 
 import tilelang
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.language as T
 import tilelang.testing
 import pytest
@@ -93,7 +93,7 @@ def _make_unary_kernel(op_func, dtype_tl):
 
 
 def _lower_to_cuda_source(func, target=SM80_TARGET, pass_configs=None) -> str:
-    with tvm.transform.PassContext(config=pass_configs or {}), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(config=pass_configs or {}), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(func, target=target)
     assert artifact.kernel_source is not None
     return artifact.kernel_source
@@ -268,8 +268,8 @@ def _torch_reduce(a, op_name):
 
 @pytest.mark.parametrize("op_name,op_func", _BINARY_OPS, ids=[n for n, _ in _BINARY_OPS])
 def test_binary_rejects_mixed_packed_dtypes(op_name, op_func):
-    x = tvm.tirx.Var("x", "float16x2")
-    y = tvm.tirx.Var("y", "bfloat16x2")
+    x = tvm_tirx.tirx.Var("x", "float16x2")
+    y = tvm_tirx.tirx.Var("y", "bfloat16x2")
 
     with pytest.raises(ValueError, match="same dtype"):
         op_func(x, y)
@@ -277,8 +277,8 @@ def test_binary_rejects_mixed_packed_dtypes(op_name, op_func):
 
 @pytest.mark.parametrize("mixed_index", [0, 1, 2])
 def test_fma2_rejects_mixed_packed_dtypes(mixed_index):
-    x = tvm.tirx.Var("x", "float16x2")
-    y = tvm.tirx.Var("y", "bfloat16x2")
+    x = tvm_tirx.tirx.Var("x", "float16x2")
+    y = tvm_tirx.tirx.Var("y", "bfloat16x2")
     args = [x, x, x]
     args[mixed_index] = y
 

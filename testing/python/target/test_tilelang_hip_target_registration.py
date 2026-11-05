@@ -5,10 +5,10 @@ import subprocess
 import sys
 
 import pytest
-from tilelang import tvm
+import tvm_tirx
 from tilelang.rocm.target import with_rocm_target_attrs
 
-Target = tvm.target.Target
+Target = tvm_tirx.target.Target
 RESOURCE_KEYS = {
     "max_num_threads",
     "max_threads_per_block",
@@ -144,10 +144,10 @@ def test_hip_arch_callback_does_not_introduce_resource_defaults(tmp_path):
     source = """
 import json
 import tilelang
-from tilelang import tvm
+import tvm_tirx
 import tvm_ffi
 tvm_ffi.register_global_func("tvm_callback_rocm_get_arch", lambda: "gfx942", override=True)
-target = tvm.target.Target({"kind": "hip"})
+target = tvm_tirx.target.Target({"kind": "hip"})
 assert target.kind.name == "hip"
 assert list(target.keys) == ["hip", "gpu"]
 assert target.attrs["mcpu"] == "gfx942"
@@ -157,7 +157,7 @@ resource_keys = {
     "max_shared_memory_per_block", "thread_warp_size",
 }
 assert not set(target.attrs).intersection(resource_keys)
-print(json.dumps({"passed": True, "compiler": tvm.__file__}))
+print(json.dumps({"passed": True, "compiler": tvm_tirx.__file__}))
 """
     script = tmp_path / "hip_callback.py"
     script.write_text(source)

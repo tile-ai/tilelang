@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, sym, tirx
 from tvm_tirx.tirx.layout import S, TileLayout
 
@@ -39,7 +39,7 @@ def _launch(body, *, thread=None, tag="threadIdx.x", extent=32):
 
 
 def _function(params, body, *, attrs=None, ret_type="void"):
-    fields = {"global_symbol": "main", "target": tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}, host="c")}
+    fields = {"global_symbol": "main", "target": tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"}, host="c")}
     fields.update(attrs or {})
     result = tirx.Function(params, body, ir.PrimType(ret_type), attrs=ir.DictAttrs(fields))
     assert tirx.analysis.check_well_formed(result)
@@ -48,8 +48,8 @@ def _function(params, body, *, attrs=None, ret_type="void"):
 
 def _apply(function, tmp_path, *, disable_elect=False):
     before = ir.save_json(function)
-    with tvm.transform.PassContext(config={"tl.disable_shuffle_elect": disable_elect}):
-        result = tvm_ffi.get_global_func("tl.cuda.transform.LowerHopperIntrin")()(tvm.IRModule({"main": function}))["main"]
+    with tvm_tirx.transform.PassContext(config={"tl.disable_shuffle_elect": disable_elect}):
+        result = tvm_ffi.get_global_func("tl.cuda.transform.LowerHopperIntrin")()(tvm_tirx.IRModule({"main": function}))["main"]
     assert ir.save_json(function) == before
     assert tirx.analysis.check_well_formed(result)
     assert not tirx.analysis.undefined_vars(result)
@@ -184,7 +184,7 @@ def test_host_split_captures_tensormap_without_descriptor_metadata(tmp_path):
     # The projection is not an input to closure conversion. Erasing it must
     # leave the exact same actual descriptor and dynamic inputs available.
     without_projection = result.without_attr("tma_descriptor_args")
-    split = tirx.transform.SplitHostDevice()(tvm.IRModule({"main": without_projection}))
+    split = tirx.transform.SplitHostDevice()(tvm_tirx.IRModule({"main": without_projection}))
     assert len(split.functions) == 2
     assert tirx.analysis.check_well_formed(split)
     (tmp_path / "split.py").write_text(split.script())
@@ -197,7 +197,7 @@ def test_host_split_captures_tensormap_without_descriptor_metadata(tmp_path):
     assert len(_calls(device.body, "tirx.call_packed")) == 0
     assert len(_calls(device.body, "tl.prefetch_tma_descriptor")) == 1
     source_module = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
-        tvm.IRModule({"main_kernel": device}), device.attrs["target"]
+        tvm_tirx.IRModule({"main_kernel": device}), device.attrs["target"]
     )
     generated = source_module.inspect_source("cuda")
     (tmp_path / "kernel.cu").write_text(generated)

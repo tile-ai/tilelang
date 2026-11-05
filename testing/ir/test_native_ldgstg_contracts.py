@@ -5,19 +5,19 @@ import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.transform import PassConfigKey
 from tvm_tirx import ir
 
 
 def _lower(function, *, vectorize=True):
-    module = tvm.IRModule.from_expr(function.with_attr("global_symbol", "main").with_attr("tirx.noalias", True))
-    module = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(module)
+    module = tvm_tirx.IRModule.from_expr(function.with_attr("global_symbol", "main").with_attr("tirx.noalias", True))
+    module = tvm_tirx.tirx.transform.BindTarget(tvm_tirx.target.Target("cuda"))(module)
     if vectorize:
         module = tilelang.transform.FlattenBuffer()(module)
         module = tilelang.transform.VectorizeLoop()(module)
-    with tvm.transform.PassContext(
+    with tvm_tirx.transform.PassContext(
         config={
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
             PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True,

@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import S, Axis
 
@@ -47,7 +47,7 @@ def apply(params, body, tmp_path):
     assert tirx.analysis.check_well_formed(before)
     source = ir.save_json(before)
     operation = tvm_ffi.get_global_func("tl.transform.RewriteFp4ToFp4x2")()
-    module = operation(tvm.IRModule({"fp4_storage": before}))
+    module = operation(tvm_tirx.IRModule({"fp4_storage": before}))
     assert tirx.analysis.check_well_formed(module)
     for expr in objects(module, ir.Call):
         expr.validate()
@@ -59,7 +59,7 @@ def apply(params, body, tmp_path):
 
 
 def constant(value):
-    return int(tvm.sym.Analyzer().simplify(value).value)
+    return int(tvm_tirx.sym.Analyzer().simplify(value).value)
 
 
 @pytest.mark.parametrize("index,extent", [(0, 2), (2, 4), (6, 8), (14, 2)])
@@ -158,8 +158,8 @@ def test_fp4_dynamic_even_shape_and_offset_remain_well_typed(tmp_path):
     source = tensor("source", (2 * n,))
     result = apply([n, k, source], [ir.Evaluate(access(source, 2 * k, 2 * n))], tmp_path)
     (address,) = calls(result, "tl.access_ptr")
-    assert tvm.sym.Analyzer().can_prove_equal(address.args[0].indices[0], k)
-    assert tvm.sym.Analyzer().can_prove_equal(address.args[1], n)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(address.args[0].indices[0], k)
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(address.args[1], n)
 
 
 @pytest.mark.parametrize("which", ["shape", "index", "extent", "origin"])
@@ -191,7 +191,7 @@ def test_fp4_cce_pointer_address_is_one_byte_per_pair(tmp_path):
     address = ir.Call("tirx.address_of", [ir.TensorLoad(source, [6])])
     result = apply([raw], [declare(source, raw), ir.Evaluate(address)], tmp_path).with_attr("calling_conv", 2)
     module = tvm_ffi.get_global_func("target.build.tilelang_ascend_without_compile")(
-        tvm.IRModule({"fp4_storage": result}), tvm.target.Target("ascend")
+        tvm_tirx.IRModule({"fp4_storage": result}), tvm_tirx.target.Target("ascend")
     )
     source_code = module.inspect_source("asc")
     (tmp_path / "fp4_storage.asc").write_text(source_code)

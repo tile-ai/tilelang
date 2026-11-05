@@ -43,7 +43,7 @@ def compile_cuda(
         The bytearray of the cubin or ptx code.
     """
     if arch is None:
-        # If None, then it will use `tvm.target.Target.current().arch`.
+        # If None, then it will use `tvm_tirx.target.Target.current().arch`.
         # Target arch could be a str like "80", "90", "90a", etc.
         major, minor = parse_compute_version(get_target_compute_version(Target.current(allow_none=True)))
         arch = major * 10 + minor

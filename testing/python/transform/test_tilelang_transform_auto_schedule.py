@@ -15,17 +15,17 @@ import tilelang
 import tilelang.testing
 import torch
 from tilelang import language as T
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tvm_tirx import ir
 from tilelang.testing.ir import collect_nodes
 
-_TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+_TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"})
 
 
 def _prepare(func):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    mod = tvm.tirx.transform.BindTarget(_TARGET)(mod)
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.tirx.transform.BindTarget(_TARGET)(mod)
     mod = tilelang.transform.MaterializeKernelLaunch()(mod)
     mod = tilelang.transform.InjectAssumes()(mod)
     return mod
@@ -33,7 +33,7 @@ def _prepare(func):
 
 def _auto_warp_specialization(mod, scheduler="role_based"):
     """Apply AutoWarpSpecialization with the scheduler opted in via pass config."""
-    with tvm.transform.PassContext(config={"tl.enable_auto_warp_specialization": scheduler}):
+    with tvm_tirx.transform.PassContext(config={"tl.enable_auto_warp_specialization": scheduler}):
         return tilelang.cuda.transform.AutoWarpSpecialization()(mod)
 
 
@@ -87,7 +87,7 @@ def test_tma_load_pipeline():
     mod, schedule = _schedule(_pipelined_load_kernel())
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -123,7 +123,7 @@ def test_tma_load_pipeline():
 def test_num_stages_sets_pipeline_depth():
     mod, schedule = _schedule(_pipelined_load_kernel(num_stages=3))
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=3))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=3))
     assert len(schedule.pipelines) == 1
 
 
@@ -152,7 +152,7 @@ def test_two_cycles_on_one_buffer_and_root_depth():
     mod, schedule = _schedule(_two_cycle_kernel())
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -216,7 +216,7 @@ def _gather_kernel(worker_uses_index):
 def test_bind_placed_with_its_single_consumer_role():
     """A pure Bind read only by the TMA copy moves into the Load role."""
     _, schedule = _schedule(_gather_kernel(worker_uses_index=False))
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[0],
         T.WSScope(
             "loop_0",
@@ -243,7 +243,7 @@ def test_bind_duplicated_into_two_roles():
     """A pure global-reading Bind used by two roles is placed in both; the
     materializer re-emits it per role."""
     _, schedule = _schedule(_gather_kernel(worker_uses_index=True))
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[0],
         T.WSScope(
             "loop_0",
@@ -289,7 +289,7 @@ def test_bind_chain_through_local_buffer_moves_together():
     Load role together: moving only the Bind would make the TMA warp read
     another warp's private register."""
     _, schedule = _schedule(_local_chain_kernel())
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[0],
         T.WSScope(
             "loop_0",
@@ -339,7 +339,7 @@ def test_worker_gemm_topology_materializes():
     assert schedule is not None
     bufs = _alloc_buffers(mod)
     # One pipeline per storage (merging is a TODO).
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -392,7 +392,7 @@ def test_worker_gemm_topology_materializes():
     assert int(launch.args[1]) == 256
     assert any(call.op.name == "tl.tileop.tma_copy" for call in collect_nodes(transformed, ir.Call))
     assert _root_schedule(transformed) is None
-    assert tvm.tirx.analysis.check_well_formed(transformed)
+    assert tvm_tirx.tirx.analysis.check_well_formed(transformed)
 
 
 def _tmem_gemm():
@@ -435,7 +435,7 @@ def test_tmem_gemm_four_role_topology():
     mod, schedule = _schedule(_tmem_gemm())
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -561,7 +561,7 @@ def test_unrolled_epilogue_is_scheduled():
     assert schedule is not None
     # The epilogue scope is the unrolled loop; its schedule matches the
     # serial one's.
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[0],
         T.WSScope(
             "unroll_0",
@@ -580,7 +580,7 @@ def test_unrolled_epilogue_is_scheduled():
             },
         ),
     )
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[2],
         T.WSScope(
             T.WSScope.ROOT,
@@ -676,7 +676,7 @@ def test_rmw_accumulator_nested_pipelines():
     mod, schedule = _schedule(_rmw_accumulator_kernel())
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -803,7 +803,7 @@ def test_post_loop_read_forms_outer_pipeline():
     mod, schedule = _schedule(_post_loop_read_kernel())
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -902,10 +902,10 @@ def test_post_loop_read_numerical():
 @tilelang.testing.requires_cuda
 def test_pipeline_opt_in_runs_automatic_ws():
     func = _local_accumulator_gemm().with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     with (
         _TARGET,
-        tvm.transform.PassContext(config={"tl.enable_auto_warp_specialization": "role_based"}),
+        tvm_tirx.transform.PassContext(config={"tl.enable_auto_warp_specialization": "role_based"}),
     ):
         out = tilelang.cuda.pipeline.CUDAPassPipelineBodyPrologue(mod, _TARGET)["main"]
 
@@ -955,7 +955,7 @@ def test_while_scope_is_scheduled():
     assert schedule is not None
     bufs = _alloc_buffers(mod)
     # The wave bump ("wave_1") is duplicated into both roles.
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule,
         T.WSSchedule(
             num_warps=8,
@@ -1142,9 +1142,9 @@ def test_non_tma_layout_copy_stays_worker():
     assert schedule is not None
     bufs = _alloc_buffers(mod)
     # S_perm stays out of the pipelines; the Worker keeps its copy.
-    tvm.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=2))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=2))
     assert len(schedule.pipelines) == 1
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[0],
         T.WSScope(
             "loop_0",
@@ -1202,8 +1202,8 @@ def test_cp_async_copy_is_a_load_producer():
     mod, schedule = _schedule(_cp_async_load_kernel())
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=2))
-    tvm.ir.assert_structural_equal(
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=2))
+    tvm_tirx.ir.assert_structural_equal(
         schedule.scopes[0],
         T.WSScope(
             "loop_0",
@@ -1474,7 +1474,7 @@ def test_annotated_ws_pipeline_depth_overrides_num_stages():
     mod, schedule = _schedule(kernel)
     assert schedule is not None
     bufs = _alloc_buffers(mod)
-    tvm.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=3))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[0], T.WSPipeline("S", [bufs["S"]], depth=3))
     assert len(schedule.pipelines) == 1
 
 
@@ -1489,15 +1489,15 @@ def test_annotated_ws_pipeline_depth_ring_accumulator():
     assert schedule is not None
     bufs = _alloc_buffers(mod)
     # Inner alternation and outer binding both pinned single-buffered.
-    tvm.ir.assert_structural_equal(schedule.pipelines[2], T.WSPipeline("C_tmem", [bufs["C_tmem"]], depth=1))
-    tvm.ir.assert_structural_equal(schedule.pipelines[3], T.WSPipeline("C_tmem_loop_1", [bufs["C_tmem"]], depth=1))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[2], T.WSPipeline("C_tmem", [bufs["C_tmem"]], depth=1))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[3], T.WSPipeline("C_tmem_loop_1", [bufs["C_tmem"]], depth=1))
 
     mod, schedule = _schedule(_waved_rmw_accumulator_kernel(depth=2))
     assert schedule is not None
     bufs = _alloc_buffers(mod)
     # The inner binding stays pinned; the annotation gives the wave ring.
-    tvm.ir.assert_structural_equal(schedule.pipelines[2], T.WSPipeline("C_tmem", [bufs["C_tmem"]], depth=1))
-    tvm.ir.assert_structural_equal(schedule.pipelines[3], T.WSPipeline("C_tmem_loop_1", [bufs["C_tmem"]], depth=2))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[2], T.WSPipeline("C_tmem", [bufs["C_tmem"]], depth=1))
+    tvm_tirx.ir.assert_structural_equal(schedule.pipelines[3], T.WSPipeline("C_tmem_loop_1", [bufs["C_tmem"]], depth=2))
 
 
 @tilelang.testing.requires_cuda

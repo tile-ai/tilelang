@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -41,7 +41,7 @@ def rewrite(value, config=None):
 
 def run(value, expected):
     executable = compile_packed_function(value, c_codegen="compute")
-    result = tvm.runtime.tensor(np.full(len(expected), -99, dtype="int32"))
+    result = tvm_tirx.runtime.tensor(np.full(len(expected), -99, dtype="int32"))
     executable(result)
     np.testing.assert_array_equal(result.numpy(), expected)
 

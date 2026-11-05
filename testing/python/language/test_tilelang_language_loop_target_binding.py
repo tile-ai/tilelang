@@ -8,7 +8,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 def make_kernel(kind, live=False):
@@ -54,7 +54,7 @@ def test_loop_target_is_not_buffer_store(kind, live):
 def count_local_var_stores(kernel):
     stores = []
     tvm_ffi.structural_walk(
-        kernel.body, (tvm_ffi.Object, lambda node: stores.append(node) if isinstance(node, tvm.ir.TensorStore) else None), order="post"
+        kernel.body, (tvm_ffi.Object, lambda node: stores.append(node) if isinstance(node, tvm_tirx.ir.TensorStore) else None), order="post"
     )
     return len([node for node in stores if str(node.dest.ty.scope) == "local.var"])
 

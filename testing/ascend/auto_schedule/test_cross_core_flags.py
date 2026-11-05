@@ -7,7 +7,7 @@ from testing.ascend._ir import access_tensor, attribute_fields, attribute_key, l
 import pytest
 import tilelang.ascend.language as T
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from testing.ascend._ir import calls, copy, kernel, nodes, schedule, seq, substitute
 from testing.ascend.auto_schedule._scheduled_ir import unit
@@ -55,7 +55,7 @@ def _generated_slots(mod, operation):
     # Both AIV subcores use the same 16-slot namespace, offset by subcore id.
     slots = set()
     for call in generated:
-        slot = tvm.sym.Analyzer().simplify(call.args[2])
+        slot = tvm_tirx.sym.Analyzer().simplify(call.args[2])
         if isinstance(slot, ir.IntImm):
             slots.add(int(slot) % 16)
     assert slots
@@ -72,7 +72,7 @@ def _generated_slots(mod, operation):
     ],
 )
 def test_generated_flags_do_not_collide_with_explicit_flags(reservation, reserved):
-    with tvm.transform.PassContext(config={"tl.Simplify": {"enable_simplify_let_inline": False}}):
+    with tvm_tirx.transform.PassContext(config={"tl.Simplify": {"enable_simplify_let_inline": False}}):
         before = schedule(_program(reservation), through="ResolveCore", auto_schedule=False, infer_layouts=True)
         mod = transform.InsertSync()(before)
     sets = _generated_slots(mod, "set")
@@ -178,16 +178,16 @@ def test_alternating_epilogue_uses_each_aiv_flag_bank(versions):
             continue
         core = int(attribute_fields(task)["node"]["core_mask"])
         for call in calls(task.body, "tl.ascend_cross_core_set_flag") + calls(task.body, "tl.ascend_cross_core_wait_flag"):
-            analyzer = tvm.sym.Analyzer()
+            analyzer = tvm_tirx.sym.Analyzer()
             bound = analyzer.const_int_bound(analyzer.simplify(call.args[2]))
             assert bound.min_value >= 0
             assert bound.max_value < (32 if core == 2 else 16)
     cube_ids = {
-        int(tvm.sym.Analyzer().simplify(call.args[2]))
+        int(tvm_tirx.sym.Analyzer().simplify(call.args[2]))
         for task in nodes(after, ir.RegionStmt)
         if attribute_key(task) == "tl.ascend_task" and int(attribute_fields(task)["node"]["core_mask"]) == 2
         for call in calls(task.body, "tl.ascend_cross_core_wait_flag")
-        if isinstance(tvm.sym.Analyzer().simplify(call.args[2]), ir.IntImm)
+        if isinstance(tvm_tirx.sym.Analyzer().simplify(call.args[2]), ir.IntImm)
     }
     assert any(slot < 16 for slot in cube_ids) and any(slot >= 16 for slot in cube_ids)
 
@@ -321,7 +321,7 @@ def test_ss_uses_standard_cross_core_sync(packed, to_cube, versions):
         for operation, events in endpoints.items():
             for call in calls(task.body, "tl.ascend_cross_core_" + operation + "_flag"):
                 assert int(call.args[0]) == 4 and call.args[1].value == "PIPE_S"
-                events.append((int(attribute_fields(task)["node"]["core_mask"]), tvm.sym.Analyzer().simplify(call.args[2])))
+                events.append((int(attribute_fields(task)["node"]["core_mask"]), tvm_tirx.sym.Analyzer().simplify(call.args[2])))
     if versions > 1:
         initial, drained = (
             {int(slot) + (16 if core == 4 else 0) for core, slot in endpoints[operation] if isinstance(slot, ir.IntImm)}
@@ -330,7 +330,7 @@ def test_ss_uses_standard_cross_core_sync(packed, to_cube, versions):
         assert initial == drained and len(initial) == 2 * versions
         (ring_loop,) = nodes(after, ir.For)
         assert (int(ring_loop.begin), int(ring_loop.end), int(ring_loop.step)) == (0, 8, 1)
-        analyzer = tvm.sym.Analyzer()
+        analyzer = tvm_tirx.sym.Analyzer()
         for operation, events in endpoints.items():
             dynamic = [(core, slot) for core, slot in events if not isinstance(slot, ir.IntImm)]
             assert len(dynamic) == 4  # Publication and reuse, separately for both AIVs.

@@ -4,7 +4,7 @@ from tvm_tirx import ir
 from testing.ascend._ir import allocate, allocations, attribute, attribute_key, launch_thread, tensor
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import tirx
 from testing.ascend._ir import nodes
@@ -22,7 +22,7 @@ def test_packer_respects_complete_allocation_conflicts(disable_reuse):
             *[ir.TensorStore(buffer, [0], index) for index, buffer in enumerate((a, b, c))],
         ]
     )
-    before = tvm.IRModule({"main": tirx.Function([], attribute(contract, "tl.buffer_alias_map", 1, body))})
+    before = tvm_tirx.IRModule({"main": tirx.Function([], attribute(contract, "tl.buffer_alias_map", 1, body))})
     after = transform.MergeUBAllocations(disable_reuse=disable_reuse)(before)
     assert not [node for node in nodes(after, ir.RegionStmt) if attribute_key(node) == "tl.buffer_alias_map"]
     offsets = {int(store.value): int(element_offset(after, store)) for store in nodes(after, ir.TensorStore)}
@@ -48,11 +48,11 @@ def test_subcore_ub_allocations_have_independent_address_spaces(disable_reuse):
     body = attribute({dq: 0, epi: 1}, "tl.aiv_storage_map", 1, body)
     thread = ir.Var("block", "int32")
     body = launch_thread(thread, "blockIdx.x", 1, body)
-    after = transform.MergeUBAllocations(disable_reuse=disable_reuse)(tvm.IRModule({"main": tirx.Function([], body)}))
+    after = transform.MergeUBAllocations(disable_reuse=disable_reuse)(tvm_tirx.IRModule({"main": tirx.Function([], body)}))
     offsets = {int(store.value): int(element_offset(after, store)) for store in nodes(after, ir.TensorStore)}
     assert set(offsets) == {0, 1, 2}
     (allocation,) = allocations(after)
-    allocated_bytes = int(tvm.sym.Analyzer().simplify(allocation.var.ty.shape[0])) * allocation.var.ty.dtype.dtype.bits // 8
+    allocated_bytes = int(tvm_tirx.sym.Analyzer().simplify(allocation.var.ty.shape[0])) * allocation.var.ty.dtype.dtype.bits // 8
     # Private AIV storage shares numeric addresses, while the common buffer
     # must remain disjoint on both cores. Placement order is not the contract.
     assert allocated_bytes == (32 + max(128, 64)) * 4
@@ -78,7 +78,7 @@ def test_ss_allocations_remain_disjoint_and_aligned_even_with_alias_contract():
         ]
     )
     body = launch_thread(ir.Var("bx", "int32"), "blockIdx.x", 1, body)
-    before = tvm.IRModule({"main": tirx.Function([], attribute(contract, "tl.buffer_alias_map", 1, body))})
+    before = tvm_tirx.IRModule({"main": tirx.Function([], attribute(contract, "tl.buffer_alias_map", 1, body))})
     after = transform.MergeUBAllocations(disable_reuse=False)(before)
     stores = nodes(after, ir.TensorStore)
     offsets = [int(element_offset(after, store)) * 4 for store in stores]
@@ -99,7 +99,7 @@ def test_ss_native_default_alignment_is_preserved_by_merge():
         ]
     )
     body = launch_thread(ir.Var("bx", "int32"), "blockIdx.x", 1, body)
-    before = tvm.IRModule({"main": tirx.Function([], attribute({a: [b], b: [a]}, "tl.buffer_alias_map", 1, body))})
+    before = tvm_tirx.IRModule({"main": tirx.Function([], attribute({a: [b], b: [a]}, "tl.buffer_alias_map", 1, body))})
     after = transform.MergeUBAllocations(disable_reuse=False)(before)
     offsets = [int(element_offset(after, store)) * 4 for store in nodes(after, ir.TensorStore)]
     assert sorted(offsets) == [0, 64]

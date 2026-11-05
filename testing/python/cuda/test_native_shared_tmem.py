@@ -2,7 +2,7 @@
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, sym, tirx
 
 
@@ -110,13 +110,13 @@ def apply(body, tmp_path, *, params=(), thread=None, two_cta=False):
     region = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), integer(128)], [thread], {}, body)
     function = (
         tirx.Function(list(params), [region])
-        .with_attr("target", tvm.target.Target({"kind": "cuda", "arch": "sm_100a"}))
+        .with_attr("target", tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"}))
         .with_attr("global_symbol", "main")
     )
     assert tirx.analysis.check_well_formed(function)
     before = ir.save_json(function)
     operation = tvm_ffi.get_global_func("tl.cuda.transform.LowerSharedTmem")()
-    module = operation(tvm.IRModule({"main": function}))
+    module = operation(tvm_tirx.IRModule({"main": function}))
     assert tirx.analysis.check_well_formed(module)
     ir.assert_structural_equal(operation(module), module)
     assert ir.save_json(function) == before
@@ -412,16 +412,16 @@ def test_cuda_sdk_compiles_a_real_native_tmem_arena(tmp_path):
 
     values = [tensor("accumulator", 384), tensor("scale", 4, "uint32")]
     result = apply([*(allocate(value) for value in values), *statements(values)], tmp_path).with_attr("global_symbol", "tmem_arena")
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"}, host="c")
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"}, host="c")
     result = result.with_attr("target", target)
-    split = tirx.transform.SplitHostDevice()(tvm.IRModule({"main": result}))
+    split = tirx.transform.SplitHostDevice()(tvm_tirx.IRModule({"main": result}))
     assert tirx.analysis.check_well_formed(split)
     kernels = {symbol: value for symbol, value in split.functions.items() if int(value.attrs.get("calling_conv", 0)) == 2}
     assert len(kernels) == 1
-    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm.IRModule(kernels))
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerIntrin")()(tvm_tirx.IRModule(kernels))
     assert tirx.analysis.check_well_formed(lowered)
     module = tvm_ffi.get_global_func("target.build.tilelang_cuda_without_compile")(
-        lowered, tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+        lowered, tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"})
     )
     source = module.inspect_source("cuda")
     (tmp_path / "tmem.cu").write_text(source)

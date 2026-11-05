@@ -1,11 +1,11 @@
 import pytest
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.layout import Layout
 
 
 def _assert_indices_equal(lhs, rhs):
-    assert tvm.sym.Analyzer().can_prove_equal(lhs, rhs), f"{lhs} != {rhs}"
+    assert tvm_tirx.sym.Analyzer().can_prove_equal(lhs, rhs), f"{lhs} != {rhs}"
 
 
 def test_linearized_forward_index_for_multi_dimensional_output():

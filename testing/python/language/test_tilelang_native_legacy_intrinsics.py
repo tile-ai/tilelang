@@ -7,7 +7,7 @@ import math
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 
@@ -18,7 +18,7 @@ from tilelang.testing.packed import compile_packed_function
 
 NATIVE_TARGETS = [
     "c",
-    pytest.param("llvm", marks=pytest.mark.skipif(not tvm.runtime.enabled("llvm"), reason="LLVM support is not built")),
+    pytest.param("llvm", marks=pytest.mark.skipif(not tvm_tirx.runtime.enabled("llvm"), reason="LLVM support is not built")),
 ]
 
 
@@ -112,7 +112,7 @@ def test_thread_invariant_preserves_the_primitive_operand_type(dtype):
 
 
 def test_native_lowering_reaches_tilelang_cuda_emitter():
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100a"})
     for name in GPU_NAMES:
         (args, _, _, _), params = _gpu_case(name)
         call = getattr(T, name)(*args)
@@ -149,7 +149,7 @@ def test_profile_markers_are_typed_and_pure(name):
 def test_profile_llvm_ignores_id_without_evaluating_it(name):
     poison = tirx.call_extern("legacy_profile_id_must_not_execute", ty="int32")
     call = getattr(T, name)(poison)
-    target = tvm.target.Target({"kind": "llvm", "mcpu": "generic"})
+    target = tvm_tirx.target.Target({"kind": "llvm", "mcpu": "generic"})
     function = tirx.Function([], [ir.Evaluate(call)], ir.NoneType()).with_attr("target", target)
     lowered = tirx.transform.LowerIntrin()(ir.IRModule({"main": function}))
     assert tirx.analysis.check_well_formed(lowered)
@@ -158,7 +158,7 @@ def test_profile_llvm_ignores_id_without_evaluating_it(name):
     assert not calls
     # The ordinary C/CUDA emitters did not implement the Hexagon hook. The
     # LLVM-only rule must not silently generalize that backend capability.
-    function = function.with_attr("target", tvm.target.Target("c"))
+    function = function.with_attr("target", tvm_tirx.target.Target("c"))
     lowered_c = tirx.transform.LowerIntrin()(ir.IRModule({"main": function}))
     calls = []
     tvm_ffi.structural_walk(lowered_c, (ir.Call, calls.append))
@@ -204,7 +204,7 @@ def test_quantized_public_operations_execute_rounding_and_final_narrowing(target
     function = tirx.Function([value, output], stores, ir.NoneType()).with_attr("global_symbol", "main")
     assert tirx.analysis.check_well_formed(function)
     executable = _compile_semantics(function, target)
-    result = tvm.runtime.tensor(np.zeros(len(cases), dtype=np.int32))
+    result = tvm_tirx.runtime.tensor(np.zeros(len(cases), dtype=np.int32))
     for x in [-32768, -4097, -17, -3, -1, 0, 1, 3, 17, 4097, 32767]:
         executable(x, result)
         assert result.numpy().tolist() == [_q_expected(kind, args, x) for kind, args in cases]
@@ -218,7 +218,7 @@ def test_quantized_non_overflowing_int64_product_narrows_to_signed_int32(target)
     function = tirx.Function([x, output], [ir.TensorStore(output, [ir.const(0, "int64")], expression)], ir.NoneType())
     function = function.with_attr("global_symbol", "main")
     executable = _compile_semantics(function, target)
-    result = tvm.runtime.tensor(np.zeros(1, dtype=np.int32))
+    result = tvm_tirx.runtime.tensor(np.zeros(1, dtype=np.int32))
     for value in [-2147483648, 2147483647]:
         expected = _q_expected("q_multiply_shift", [1457846997, 23, 0], value)
         expected = ((expected + (1 << 31)) % (1 << 32)) - (1 << 31)
@@ -240,7 +240,7 @@ def test_quantized_dynamic_shift_multiplier_and_left_flag_execute(target):
     function = function.with_attr("global_symbol", "main")
     assert tirx.analysis.check_well_formed(function)
     executable = _compile_semantics(function, target)
-    result = tvm.runtime.tensor(np.zeros(2, dtype=np.int32))
+    result = tvm_tirx.runtime.tensor(np.zeros(2, dtype=np.int32))
     for value, amount, mult, lshift, rshift, flag in [
         (-17, -2, 1457846997, 2, 0, False),
         (-3, 2, 1457846997, 2, 0, True),

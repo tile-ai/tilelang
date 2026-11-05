@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang as tl
@@ -35,10 +35,10 @@ def test_replay_rejects_potentially_written_parameter_alias(non_restrict):
 
 
 def inject(function):
-    before = tvm.ir.save_json(function)
-    module = tvm.IRModule.from_expr(function.with_attr("global_symbol", "main"))
+    before = tvm_tirx.ir.save_json(function)
+    module = tvm_tirx.IRModule.from_expr(function.with_attr("global_symbol", "main"))
     module = tl.transform.InjectSoftwarePipeline()(module)
-    assert tvm.ir.save_json(function) == before
+    assert tvm_tirx.ir.save_json(function) == before
     function = module["main"]
     assert tirx.analysis.check_well_formed(function)
     return function
@@ -46,8 +46,8 @@ def inject(function):
 
 def execute(function, data):
     compiled = compile_packed_function(function, c_codegen="compute")
-    source = tvm.runtime.tensor(data, tvm.cpu())
-    result = tvm.runtime.tensor(np.zeros_like(data), tvm.cpu())
+    source = tvm_tirx.runtime.tensor(data, tvm_tirx.cpu())
+    result = tvm_tirx.runtime.tensor(np.zeros_like(data), tvm_tirx.cpu())
     compiled(source, result)
     return result.numpy()
 

@@ -1,5 +1,7 @@
 """Regression for analyzer bindings across parallel-loop rewrites."""
 
+import tvm_tirx
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -16,7 +18,7 @@ def test_nested_serial_bounds_after_thread_partition():
                         out[p, y, x] = x
 
     # Partitioning changes bounds[p, ...] without changing the serial loop Vars.
-    target = tilelang.tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
     with target:
         tilelang.lower(main, target=target, enable_host_codegen=False, enable_device_compile=False)
 

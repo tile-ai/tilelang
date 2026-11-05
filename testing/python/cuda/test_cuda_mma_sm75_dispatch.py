@@ -1,7 +1,7 @@
 import pytest
 
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 import tilelang.testing
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import TensorCoreIntrinEmitter, TensorCoreIntrinEmitterWithLadderTransform
 from tilelang.cuda.intrinsics.macro.mma_sm75_macro_generator import TensorCoreIntrinEmitterSM75
@@ -13,7 +13,7 @@ from tilelang.tileop.gemm.registry import resolve_gemm_impl
 
 
 def test_sm75_uses_sm75_mma_gemm_impl():
-    Target = tvm.target.Target
+    Target = tvm_tirx.target.Target
 
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_70"})) is GemmMMASm70
     assert resolve_gemm_impl("cuda.mma", Target({"kind": "cuda", "arch": "sm_75"})) is GemmMMASm75

@@ -7,7 +7,7 @@ import re
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang.testing
@@ -32,11 +32,11 @@ def _compile_cuda(source):
         pytest.skip(str(error))
     if not Path(compiler).is_file():
         pytest.skip(f"NVCC is not installed: {compiler}")
-    return tilelang_callback_cuda_compile(source, tvm.target.Target({"kind": "cuda", "arch": "sm_100"}))
+    return tilelang_callback_cuda_compile(source, tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_100"}))
 
 
 def _source(codegen, target, statements, *, params=(), imported="", label="kernel"):
-    target = tvm.target.Target(target)
+    target = tvm_tirx.target.Target(target)
     body = ir.SeqStmt(statements)
     if imported:
         schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": None, "key": "pragma_import_c", "value": imported})
@@ -61,7 +61,7 @@ def _source(codegen, target, statements, *, params=(), imported="", label="kerne
     build = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}", allow_missing=True)
     if build is None:
         pytest.skip(f"{codegen} codegen is not built")
-    result = build(tvm.IRModule.from_expr(function), target).inspect_source()
+    result = build(tvm_tirx.IRModule.from_expr(function), target).inspect_source()
     artifacts = os.environ.get("EXTERN79_ARTIFACTS")
     if artifacts:
         out = Path(artifacts) / (label + "-" + codegen + ".txt")
@@ -115,8 +115,8 @@ def test_discarded_internal_call_keeps_existing_void_declaration(codegen):
     caller = tirx.Function(
         [], ir.SeqStmt([ir.Evaluate(tirx.call_extern("internal_helper", ty=ir.PtrType("void")))]), ir.PrimType("void")
     ).with_attr("global_symbol", "caller")
-    module = tvm.IRModule({"internal_helper": helper, "caller": caller})
-    source = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}")(module, tvm.target.Target("c")).inspect_source()
+    module = tvm_tirx.IRModule({"internal_helper": helper, "caller": caller})
+    source = tvm_ffi.get_global_func(f"target.build.tilelang_{codegen}")(module, tvm_tirx.target.Target("c")).inspect_source()
     assert re.search(r"\n\s*internal_helper\(\);", source), source
     assert not re.search(r"void\s*\*\s*internal_helper", source), source
     assert "((void*)internal_helper" not in source

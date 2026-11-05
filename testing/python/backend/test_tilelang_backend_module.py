@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from tilelang import tvm
+import tvm_tirx
 from tilelang.backend import BackendContext, create_backend_context, get_backend, list_backends, register_backend
 
 
@@ -83,7 +83,7 @@ def test_backend_methods_are_the_primary_component_interface(target_kind: str, b
     assert backend.get_device_codegen(target).name == component_name
     assert context.execution_backend.name in backend.allowed_execution_backends(target)
     if any(spec.enable_host_codegen for spec in backend.execution_backends):
-        assert backend.get_host_codegen(tvm.target.Target("c")).name == "c"
+        assert backend.get_host_codegen(tvm_tirx.target.Target("c")).name == "c"
 
 
 def test_backend_owns_compile_callbacks():
@@ -95,8 +95,8 @@ def test_backend_owns_compile_callbacks():
 
 
 def test_cutedsl_backend_reuses_cuda_pipeline():
-    cuda_target = tvm.target.Target("cuda")
-    cutedsl_target = tvm.target.Target({"kind": "cuda", "keys": ["cuda", "gpu", "cutedsl"]})
+    cuda_target = tvm_tirx.target.Target("cuda")
+    cutedsl_target = tvm_tirx.target.Target({"kind": "cuda", "keys": ["cuda", "gpu", "cutedsl"]})
     cuda_backend = get_backend("cuda")
     cutedsl_backend = get_backend("cutedsl")
 
@@ -108,7 +108,7 @@ def test_cutedsl_backend_reuses_cuda_pipeline():
 
 
 def test_webgpu_only_exposes_tvm_ffi_execution():
-    target = tvm.target.Target("webgpu")
+    target = tvm_tirx.target.Target("webgpu")
     backend = get_backend("webgpu")
 
     assert backend.allowed_execution_backends(target) == ("tvm_ffi",)
@@ -124,4 +124,4 @@ def test_create_backend_context_binds_compile_state():
     assert context.execution_backend.name == "tvm_ffi"
 
     with pytest.raises(AttributeError):
-        context.target = tvm.target.Target("llvm")
+        context.target = tvm_tirx.target.Target("llvm")

@@ -3,7 +3,7 @@ import pytest
 
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from examples.dequantize_gemm.quantize import _tir_u8_to_f4_to_bf16
 
 
@@ -32,7 +32,7 @@ def test_u8_to_f4_to_bf16_traces_symbolic_exponent_clamp(use_buffer_scale):
 
     min_nodes = []
     tvm_ffi.structural_walk(
-        main.body, (tvm_ffi.Object, lambda node: min_nodes.append(node) if isinstance(node, tvm.tirx.Min) else None), order="post"
+        main.body, (tvm_ffi.Object, lambda node: min_nodes.append(node) if isinstance(node, tvm_tirx.tirx.Min) else None), order="post"
     )
 
     assert len(min_nodes) == 1

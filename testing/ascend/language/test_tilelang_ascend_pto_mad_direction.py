@@ -10,11 +10,11 @@ import ast
 import pytest
 
 import tilelang
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T
 
 
-tirx = tvm.tirx
+tirx = tvm_tirx.tirx
 
 
 def _codegen(body_builder):
@@ -28,7 +28,7 @@ def _codegen(body_builder):
     def mad():
         return ir.Evaluate(
             ir.Call(
-                tvm.ir.Op.get("tl.ascend_mad"),
+                tvm_tirx.ir.Op.get("tl.ascend_mad"),
                 [tirx.address_of(c[0]), tirx.address_of(a[0]), tirx.address_of(b[0]), 16, 16, 16, 0, 1, 0, True],
                 ty="handle",
             )
@@ -38,10 +38,10 @@ def _codegen(body_builder):
     func = (
         tirx.Function([flag], body)
         .with_attr("global_symbol", "main")
-        .with_attr("target", tvm.target.Target({"kind": "ascend", "keys": ["pto"]}))
+        .with_attr("target", tvm_tirx.target.Target({"kind": "ascend", "keys": ["pto"]}))
     )
     build = tvm_ffi.get_global_func("target.build.tilelang_pto")
-    source = build(tvm.IRModule({"main": func}), tvm.target.Target({"kind": "ascend", "keys": ["pto"]})).inspect_source()
+    source = build(tvm_tirx.IRModule({"main": func}), tvm_tirx.target.Target({"kind": "ascend", "keys": ["pto"]})).inspect_source()
     ast.parse(source)
     return source
 
@@ -51,7 +51,7 @@ def _if(condition, then_case, else_case=None):
 
 
 def _set(direction):
-    return ir.Evaluate(ir.Call(tvm.ir.Op.get("tl.ascend_set_mmad_direction"), [direction], ty="handle"))
+    return ir.Evaluate(ir.Call(tvm_tirx.ir.Op.get("tl.ascend_set_mmad_direction"), [direction], ty="handle"))
 
 
 def _mad_directions(source):
@@ -128,7 +128,7 @@ def test_loop_backedge_conflict_is_rejected():
 
 def test_break_does_not_restore_unreachable_direction():
     def body(flag, value, mad):
-        loop_body = ir.SeqStmt([_set("n"), ir.Evaluate(ir.Call(tvm.ir.Op.get("tl.loop_break"), [], ty="handle")), _set("m")])
+        loop_body = ir.SeqStmt([_set("n"), ir.Evaluate(ir.Call(tvm_tirx.ir.Op.get("tl.loop_break"), [], ty="handle")), _set("m")])
         return [ir.While(ir.const(True, "bool"), loop_body), mad()]
 
     assert _mad_directions(_codegen(body)) == [True]
@@ -261,15 +261,15 @@ def test_nz_post_copy_uses_independent_storage_pitches():
     dst = tensor((4096,), "bfloat16", name="dst", scope="shared.l1")
     call = ir.Evaluate(
         ir.Call(
-            tvm.ir.Op.get("tl.ascend_nd2nz_post_copy"),
+            tvm_tirx.ir.Op.get("tl.ascend_nd2nz_post_copy"),
             [tirx.address_of(dst[512]), tirx.address_of(src[128]), 8, 64, 64, 64, "bfloat16_t"],
             ty="void",
         )
     )
     body = ir.SeqStmt([allocate(src), allocate(dst), call])
-    target = tvm.target.Target({"kind": "ascend", "keys": ["pto"]})
+    target = tvm_tirx.target.Target({"kind": "ascend", "keys": ["pto"]})
     func = tirx.Function([], body).with_attr({"global_symbol": "main", "target": target})
-    source = tvm_ffi.get_global_func("target.build.tilelang_pto")(tvm.IRModule({"main": func}), target).inspect_source()
+    source = tvm_ffi.get_global_func("target.build.tilelang_pto")(tvm_tirx.IRModule({"main": func}), target).inspect_source()
     ast.parse(source)
     assert ", 8, nburst=(4, 56, 56))" in source
 

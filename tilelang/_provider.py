@@ -14,25 +14,6 @@ FFI_VERSION = "0.1.15.post3.dev30+g3e906bc68"
 _dll_handles = []
 
 
-def _install_error_namespace(provider):
-    """Expose canonical TileLang errors without changing native IR objects."""
-    from . import errors
-
-    # Reject a namespace collision before registering any exception class.
-    # tilelang.tvm remains the provider module itself; only the established
-    # error namespace and TVMError spelling are added to that module.
-    for name, value in (("error", errors), ("TVMError", errors.TVMError)):
-        if name in vars(provider) and vars(provider)[name] is not value:
-            raise ImportError(f"The TIRx provider already has an incompatible {name!r} binding")
-    error_alias = "tilelang.tvm.error"
-    if error_alias in sys.modules and sys.modules[error_alias] is not errors:
-        raise ImportError(f"The {error_alias!r} module alias is already owned by another module")
-    errors._ensure_error_registration()
-    provider.error = errors
-    provider.TVMError = errors.TVMError
-    sys.modules[error_alias] = errors
-
-
 def load_provider():
     """Return the native provider; never load another copy of its compiler DSO.
 
@@ -92,8 +73,9 @@ def load_provider():
         installed_version = importlib.metadata.version("apache-tvm-tirx")
         if installed_version != COMPILER_INFO["provider_version"]:
             raise ImportError(f"TileLang requires its exact compiler provider; found {installed_version}")
-    _install_error_namespace(provider)
-    # The alias exposes native TIRx interfaces; it does not install a top-level
-    # tvm alias or emulate the removed PrimFunc/Buffer object model.
-    sys.modules["tilelang.tvm"] = provider
+    from . import errors
+
+    # Keep exception transport in the shared FFI registry and the Python
+    # exception classes in tilelang.errors, without modifying TIRx's namespace.
+    errors._ensure_error_registration()
     return provider, base._LOADED_LIBS["tvm_tirx_compiler"]

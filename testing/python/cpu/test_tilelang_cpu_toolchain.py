@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from tilelang.cpu import toolchain
-from tilelang import tvm
+import tvm_tirx
 
 
 @pytest.mark.parametrize("backend", ["cython", "tvm_ffi"])
@@ -22,13 +22,13 @@ from tilelang import tvm
     ],
 )
 def test_cpu_compile_flag_policy(monkeypatch, backend, target, pass_configs, expected):
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"} if target == "cuda" else target)
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"} if target == "cuda" else target)
     monkeypatch.setattr(toolchain.sys, "platform", "linux")
     assert toolchain.get_compile_flags(target, pass_configs, execution_backend=backend) == expected
 
 
 def test_cpu_openmp_runtime_flags():
-    flags = toolchain.get_compile_flags(tvm.target.Target("c"), {"tl.cpu_parallel": True}, execution_backend="cython")
+    flags = toolchain.get_compile_flags(tvm_tirx.target.Target("c"), {"tl.cpu_parallel": True}, execution_backend="cython")
     assert "-O2" in flags
     if sys.platform != "win32" and (sys.platform != "darwin" or toolchain._find_libomp() is not None):
         assert "-fopenmp" in flags
@@ -36,7 +36,7 @@ def test_cpu_openmp_runtime_flags():
 
 @pytest.mark.parametrize("backend,expected", [("cython", ["-O2"]), ("tvm_ffi", [])])
 def test_cpu_windows_serial_fallback(monkeypatch, backend, expected):
-    target = tvm.target.Target("c")
+    target = tvm_tirx.target.Target("c")
     monkeypatch.setattr(toolchain.sys, "platform", "win32")
     with pytest.warns(UserWarning, match="compiling serially"):
         assert toolchain.get_compile_flags(target, {"tl.cpu_parallel": True}, execution_backend=backend) == expected
@@ -63,7 +63,7 @@ def test_tvm_ffi_uses_cpu_toolchain_flags(monkeypatch):
 
     adapter = tvm_ffi.TVMFFIKernelAdapter.__new__(tvm_ffi.TVMFFIKernelAdapter)
     adapter.rt_mod = object()
-    adapter.target = tvm.target.Target("c")
+    adapter.target = tvm_tirx.target.Target("c")
     adapter.pass_configs = {"tl.cpu_parallel": True}
     adapter.compile_flags = ["-DTEST_CPU_FLAG=1"]
     monkeypatch.setattr(tvm_ffi, "Executable", Executable)

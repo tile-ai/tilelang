@@ -15,7 +15,7 @@ def AutoWarpSpecialization():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.AutoWarpSpecialization()  # type: ignore
@@ -26,7 +26,7 @@ def AnnotateDeviceBoundTmaCopies():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.AnnotateDeviceBoundTmaCopies()  # type: ignore
@@ -41,7 +41,7 @@ def ProducerConsumerWarpSpecialized():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.ProducerConsumerWarpSpecialized()  # type: ignore
@@ -51,7 +51,7 @@ def LowerBlackwell2SM():
     """Lower 2SM TCGEN5MMA and related on Blackwell target
 
     Returns:
-        fpass : tvm.transform.Pass
+        fpass : tvm_tirx.transform.Pass
             The result pass
     """
     return _ffi_api.LowerBlackwell2SM()  # type: ignore
@@ -110,7 +110,7 @@ def LowerLDGSTG():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.LowerLDGSTG()  # type: ignore
@@ -126,7 +126,7 @@ def InjectFenceProxy():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.InjectFenceProxy()  # type: ignore
@@ -144,7 +144,7 @@ def InjectTcgen05Fence():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.InjectTcgen05Fence()  # type: ignore
@@ -159,7 +159,7 @@ def AnnotateWarpGroupRegAlloc():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
@@ -175,7 +175,7 @@ def MaterializeWSSchedule():
 
     Returns
     -------
-    fpass : tvm.transform.Pass
+    fpass : tvm_tirx.transform.Pass
         The result pass
     """
     return _ffi_api.MaterializeWSSchedule()  # type: ignore

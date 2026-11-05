@@ -5,7 +5,7 @@ from collections.abc import Callable
 from tilelang.jit.adapter.utils import is_cutedsl_target, is_metal_target, is_cuda_target, is_hip_target
 from tvm_tirx.tirx import Function
 
-from tilelang import tvm
+import tvm_tirx
 from tilelang import env
 from tilelang.backend.module import BackendContext, create_backend_context
 from tvm_tirx.target import Target
@@ -77,16 +77,16 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        func : tvm.tirx.Function, optional
+        func : tvm_tirx.tirx.Function, optional
             The TileLang TIR function to compile and wrap.
         out_idx : Union[List[int], int], optional
             Index(es) of the output tensors to return (default: None).
         execution_backend : Literal["tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"], optional
             Execution backend to use for kernel execution.
-        target : str, dict, or tvm.target.Target, optional
+        target : str, dict, or tvm_tirx.target.Target, optional
             Compilation target (default: "auto"). Use a dict for target attributes,
             for example {"kind": "cuda", "arch": "sm_90"}.
-        target_host : str, dict, or tvm.target.Target, optional
+        target_host : str, dict, or tvm_tirx.target.Target, optional
             Target host for cross-compilation (default: None).
         verbose : bool, optional
             Whether to enable verbose output (default: False).
@@ -300,7 +300,7 @@ class JITKernel(Generic[_P, _T]):
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")
-            base_pass_instruments.append(tvm.ir.transform.instrument.DumpIR(dump_dir=dump_ir_path))
+            base_pass_instruments.append(tvm_tirx.ir.transform.instrument.DumpIR(dump_dir=dump_ir_path))
 
         pass_instrument_context = f"stage=jit-lower, kernel={compile_metadata['kernel']}, backend={compile_metadata['backend']}"
         pass_instruments = [
@@ -309,7 +309,7 @@ class JITKernel(Generic[_P, _T]):
         ]
         with (
             jit_phase("lower", verbose=self.verbose, **compile_metadata),
-            tvm.ir.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
+            tvm_tirx.ir.transform.PassContext(opt_level=3, config=pass_configs, instruments=pass_instruments),
             self.target,
         ):
             from tilelang.engine.lower import lower_with_context
@@ -449,7 +449,7 @@ class JITKernel(Generic[_P, _T]):
         params: list[KernelParam],
         result_idx: list[int] | int,
         target: TargetLike,
-        func_or_mod: Function | tvm.IRModule,
+        func_or_mod: Function | tvm_tirx.IRModule,
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
@@ -540,7 +540,7 @@ class JITKernel(Generic[_P, _T]):
 
         Parameters
         ----------
-        tilelang_func : tvm.tirx.Function
+        tilelang_func : tvm_tirx.tirx.Function
             The TileLang (TVM TIR) function to compile.
         **kwargs : dict
             Additional keyword arguments to pass to the constructor.
@@ -804,7 +804,7 @@ class JITKernel(Generic[_P, _T]):
         kernel_file : str
             The path to the shared library file to create.
         """
-        # rt_module: tvm.runtime.Module = None
+        # rt_module: tvm_tirx.runtime.Module = None
         # rt_params: dict = None
         # adapter: BaseKernelAdapter = None
         # torch_function: Callable = None

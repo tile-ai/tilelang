@@ -18,7 +18,7 @@ import pytest
 import tvm_ffi
 from tvm_tirx import ir, tirx
 
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.testing
 import tilelang.language as T
 import tilelang
@@ -756,7 +756,7 @@ def test_device_bound_pointer_keeps_descriptorless_bulk1d():
             T.copy(src, src_shared, prefer_instruction="tma")
             T.copy(src_shared, out, prefer_instruction="sync")
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     with target:
         artifact = tilelang.lower(
             main,
@@ -783,13 +783,13 @@ def test_device_bound_descriptor_tma_is_rejected_when_ws_disabled():
             src_shared = T.alloc_shared((16, 16), T.float16)
             T.copy(src[0, 0], src_shared, prefer_instruction="tma")
 
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     pass_configs = {
         tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True,
     }
     with (
         target,
-        tvm.transform.PassContext(config=pass_configs),
+        tvm_tirx.transform.PassContext(config=pass_configs),
         pytest.raises(
             RuntimeError,
             match="bound inside the device function body",

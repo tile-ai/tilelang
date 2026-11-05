@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from tilelang.testing.packed import compile_packed_function
@@ -44,7 +44,7 @@ def apply(name, function):
 
 
 def compile_native(function, tmp_path):
-    function = function.with_attr("global_symbol", "main").with_attr("target", tvm.target.Target("c"))
+    function = function.with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("c"))
     module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(ir.IRModule({"main": function}))
     (tmp_path / "lowered.json").write_text(ir.save_json(module))
     return compile_packed_function(module)
@@ -65,8 +65,8 @@ def test_while_condition_is_repeated_and_break_is_native(tmp_path):
     assert objects(synthetic.body.seq[0].value, ir.TensorLoad)
     restored = apply("RestoreWhileLoops", normalized)
     executable = compile_native(restored, tmp_path)
-    state = tvm.runtime.tensor(np.array([0], dtype="int32"))
-    result = tvm.runtime.tensor(np.full(16, -1, dtype="int32"))
+    state = tvm_tirx.runtime.tensor(np.array([0], dtype="int32"))
+    result = tvm_tirx.runtime.tensor(np.full(16, -1, dtype="int32"))
     executable(state, result)
     np.testing.assert_array_equal(state.numpy(), np.array([7], dtype="int32"))
     expected = np.full(16, -1, dtype="int32")
@@ -84,7 +84,7 @@ def test_residual_iteration_counter_advances_on_continue(tmp_path):
     assert len([call for call in objects(restored, ir.Call) if call.op.name == "tirx.alloc_tensor"]) == 1
     assert not any(var.same_as(w) for var in objects(restored, ir.Var))
     executable = compile_native(restored, tmp_path)
-    result = tvm.runtime.tensor(np.full(12, -1, dtype="int32"))
+    result = tvm_tirx.runtime.tensor(np.full(12, -1, dtype="int32"))
     executable(result)
     expected = np.full(12, -1, dtype="int32")
     expected[[3, 4, 6, 7]] = [3, 4, 6, 7]
@@ -110,8 +110,8 @@ def test_loop_bound_snapshots_keep_evaluation_on_entry(step, tmp_path):
     assert all(isinstance(value, ir.Var) for value in (actual_loop.begin, actual_loop.end, actual_loop.step))
     executable = compile_native(normalized, tmp_path)
     begin, end = (1, 6) if step > 0 else (6, 1)
-    state = tvm.runtime.tensor(np.array([begin, end, step], dtype="int32"))
-    result = tvm.runtime.tensor(np.full(8, -1, dtype="int32"))
+    state = tvm_tirx.runtime.tensor(np.array([begin, end, step], dtype="int32"))
+    result = tvm_tirx.runtime.tensor(np.full(8, -1, dtype="int32"))
     executable(state, result)
     expected = np.full(8, -1, dtype="int32")
     # Native For always tests i < end; Python descending range is a frontend
@@ -181,6 +181,6 @@ def test_native_negative_step_with_less_than_condition_and_break(tmp_path):
     )
     normalized = apply("NormalizeControlFlowForSchedule", tirx.Function([bounds, output], [root([loop])]))
     executable = compile_native(normalized, tmp_path)
-    result = tvm.runtime.tensor(np.full(8, -1, dtype="int32"))
-    executable(tvm.runtime.tensor(np.array([3, 5, -1], dtype="int32")), result)
+    result = tvm_tirx.runtime.tensor(np.full(8, -1, dtype="int32"))
+    executable(tvm_tirx.runtime.tensor(np.array([3, 5, -1], dtype="int32")), result)
     np.testing.assert_array_equal(result.numpy(), np.array([10, 11, 12, 13, -1, -1, -1, -1], dtype="int32"))

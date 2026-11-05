@@ -1,3 +1,4 @@
+import tvm_tirx
 import importlib
 
 import pytest
@@ -123,7 +124,7 @@ def test_rocm_language_composes_common_and_rocm_symbols():
 def test_rocm_emitters_resolve_backend_tir_intrinsics(emitter_name, method_name, mcpu, expected_call):
     from tilelang.rocm import intrinsics
 
-    target = tilelang.tvm.target.Target({"kind": "hip", "mcpu": mcpu})
+    target = tvm_tirx.target.Target({"kind": "hip", "mcpu": mcpu})
     emitter_cls = getattr(intrinsics, emitter_name)
     emitter = emitter_cls(
         a_dtype="float16",

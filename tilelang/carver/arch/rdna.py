@@ -1,6 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.target import Target
 from .arch_base import TileDevice
 from .cuda import TensorInstruction
@@ -71,10 +71,10 @@ class RDNA(TileDevice):
         if self.rdna_generation not in (11, 12):
             arch = self.mcpu or str(target)
             raise ValueError(f"RDNA device model currently supports gfx11/gfx12 targets only, got {arch}.")
-        device = tvm.runtime.rocm(0)
+        device = tvm_tirx.runtime.rocm(0)
         if not device.exist:
             raise RuntimeError("Cannot find HIP device 0.")
-        self.device: tvm.runtime.Device = device
+        self.device: tvm_tirx.runtime.Device = device
         self.platform: str = "RDNA"
 
         reported_smem = device.max_shared_memory_per_block

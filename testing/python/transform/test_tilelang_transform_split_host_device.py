@@ -2,7 +2,7 @@
 """Tests for SplitHostDevice pass."""
 # ruff: noqa
 
-import tvm_tirx as tvm
+import tvm_tirx
 import tvm_ffi
 from tvm_tirx import ir
 from tilelang.testing.ir import collect_nodes, collect_calls
@@ -14,8 +14,8 @@ from tvm_tirx import tirx
 
 def run_split_host_device_passes(func: tirx.Function):
     """Run the necessary passes before and including SplitHostDevice."""
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda", "c"))(mod)
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.tirx.transform.BindTarget(tvm_tirx.target.Target("cuda", "c"))(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.transform.InjectAssumes()(mod)
     mod = tl.transform.AnnotateDeviceRegions()(mod)
@@ -23,7 +23,7 @@ def run_split_host_device_passes(func: tirx.Function):
     return mod
 
 
-def get_device_func(mod: tvm.IRModule):
+def get_device_func(mod: tvm_tirx.IRModule):
     """Get the device kernel function from the module."""
     for gvar, func in mod.functions.items():
         if "kernel" in gvar.name_hint:
@@ -31,7 +31,7 @@ def get_device_func(mod: tvm.IRModule):
     return None
 
 
-def get_host_func(mod: tvm.IRModule):
+def get_host_func(mod: tvm_tirx.IRModule):
     """Get the host function from the module."""
     for gvar, func in mod.functions.items():
         if "kernel" not in gvar.name_hint:

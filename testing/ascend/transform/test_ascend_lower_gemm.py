@@ -6,7 +6,7 @@ from testing.ascend._ir import sblock, tensor
 import math
 
 import pytest
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_major_k_layout, make_ascend_l0c_layout
 from tvm_tirx import tirx
@@ -21,7 +21,7 @@ def _lower(m, n, k, *, blockscaled=False):
     c = tensor((64, 64), "float32", name="c", scope="shared.l0c")
 
     def region(buffer, rows, cols):
-        return ir.TensorRegion(buffer, [tvm.ir.Range(0, rows), tvm.ir.Range(0, cols)], ir.TensorRegionType())
+        return ir.TensorRegion(buffer, [tvm_tirx.ir.Range(0, rows), tvm_tirx.ir.Range(0, cols)], ir.TensorRegionType())
 
     bindings = {}
     alloc_buffers = [a, b, c]
@@ -45,11 +45,11 @@ def _lower(m, n, k, *, blockscaled=False):
             "layout_map": {a: make_ascend_major_k_layout(a), b: make_ascend_major_k_layout(b), c: make_ascend_l0c_layout(c)},
         },
     )
-    target = tvm.target.Target("ascend")
+    target = tvm_tirx.target.Target("ascend")
     body = root
     before = tirx.Function(tirx.analysis.undefined_vars(body), body).with_attr("target", target)
     with target:
-        return transform.AscendLowerTileOp()(tvm.IRModule({"main": before}))
+        return transform.AscendLowerTileOp()(tvm_tirx.IRModule({"main": before}))
 
 
 @pytest.mark.parametrize("blockscaled", [False, True], ids=["mad", "blockscaled-mad"])
@@ -59,7 +59,7 @@ def test_mad_uses_region_geometry_without_shrinking_storage(blockscaled, symboli
     k = 128 if blockscaled else 24
     after = _lower(m, n, k, blockscaled=blockscaled)
     (mad,) = calls(after, "tl.ascend_mad_mx" if blockscaled else "tl.ascend_mad")
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     for actual, expected in zip(mad.args[3:6], [m, k, n]):
         assert analyzer.can_prove_equal(actual, expected)
     for name in ("a", "b"):
@@ -80,7 +80,7 @@ def _sf_gemm(case):
         bindings[tensor(sf.ty.shape, sf.ty.dtype, scope="shared.l0a.sf")] = a
 
     def region(buf, mins, extents):
-        return ir.TensorRegion(buf, [tvm.ir.Range.from_min_extent(m, e) for m, e in zip(mins, extents)], ir.TensorRegionType())
+        return ir.TensorRegion(buf, [tvm_tirx.ir.Range.from_min_extent(m, e) for m, e in zip(mins, extents)], ir.TensorRegionType())
 
     ar = region(a, [1, 2, 0, 0], [1, 1, 17, 64 if case == "compact" else 128])
     sr = region(sf, [0 if case == "leading" else 1, 2, 1 if case == "origin" else 0, 0], [1, 1, 17, 1 if case in ("k", "compact") else 2])
@@ -121,7 +121,7 @@ def test_invalid_binding_and_slice_are_rejected(case, error_type, diagnostic):
 def test_matching_leading_indices_and_compact_regions(case):
     after = transform.AscendLowerTileOp()(_sf_gemm(case))
     (mad,) = calls(after, "tl.ascend_mad_mx")
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert analyzer.can_prove_equal(element_offset(after, mad.args[1]), 5 * 32 * 128)
     assert analyzer.can_prove_equal(mad.args[4], 64 if case == "compact" else 128)
 

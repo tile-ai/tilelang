@@ -8,7 +8,7 @@ import torch
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 from tilelang.analysis._visitor import tilelang_metadata
 from tilelang.testing.ir import collect_nodes
 import tvm_ffi
@@ -24,10 +24,10 @@ def make_reducer(**kwargs):
 
 def infer_reducer(model="register-count", factory=make_reducer, **kwargs):
     tl.cuda.register_backend()
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
     with target:
-        mod = tvm.IRModule({"main": factory(**kwargs)})
-        mod = tvm.tirx.transform.BindTarget(target)(mod)
+        mod = tvm_tirx.IRModule({"main": factory(**kwargs)})
+        mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.MaterializeKernelLaunch()(mod)
         configs = {} if model is None else {"tl.layout_cost_model": model}
         with tl.transform.PassContext(config=configs):
@@ -122,7 +122,7 @@ def test_failed_reducer_attempt_can_retry(width):
     # does not require fully replicated publication after other roots fail.
     layouts = infer_reducer(factory=make_reducer_with_pinned_consumer, width=width)
     repeated = infer_reducer(factory=make_reducer_with_pinned_consumer, width=width)
-    analyzer = tvm.sym.Analyzer()
+    analyzer = tvm_tirx.sym.Analyzer()
     assert int(layouts["acc"].combine_size) == 1
     for name in ("values", "acc", "result", "other", "out"):
         layout = layouts[name]

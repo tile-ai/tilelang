@@ -1,4 +1,3 @@
-from tilelang import tvm as tvm
 from tvm_ffi import dtype as DataType
 import tilelang
 import tilelang.language as T

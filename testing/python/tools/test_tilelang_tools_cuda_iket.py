@@ -7,7 +7,7 @@ import tvm_ffi
 
 import tilelang
 import tilelang.language as T
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.cache import _load_cache
 from tilelang.env import CacheState
 from tilelang.tools.cuda import iket
@@ -84,9 +84,9 @@ def _make_float_payload_kernel():
 @pytest.mark.parametrize("dtype, identifier", [("int32", 5), ("uint32", 6), ("float32", 13)])
 @pytest.mark.parametrize("tensor_load", [False, True])
 def test_payload_infers_native_expression_type(dtype, identifier, tensor_load):
-    value = tvm.ir.Var("value", dtype)
+    value = tvm_tirx.ir.Var("value", dtype)
     if tensor_load:
-        tensor = tvm.ir.Var("tensor", tvm.tirx.TensorType([1], dtype))
+        tensor = tvm_tirx.ir.Var("tensor", tvm_tirx.tirx.TensorType([1], dtype))
         value = tensor[0]
     specification = iket.payload(value)
     assert specification.dtype == dtype and specification.iket_id == identifier
@@ -96,17 +96,17 @@ def test_payload_infers_native_expression_type(dtype, identifier, tensor_load):
 
 
 def test_payload_rejects_nonprimitive_native_objects_and_unsupported_types():
-    tensor = tvm.ir.Var("tensor", tvm.tirx.TensorType([1], "float32"))
+    tensor = tvm_tirx.ir.Var("tensor", tvm_tirx.tirx.TensorType([1], "float32"))
     for value in (tensor, tensor.data):
         with pytest.raises(TypeError, match="scalar primitive"):
             iket.payload(value)
     with pytest.raises(ValueError, match="Unsupported IKET payload dtype"):
-        iket.payload(tvm.ir.Var("wide", "float64"))
+        iket.payload(tvm_tirx.ir.Var("wide", "float64"))
     assert iket.payload(True).dtype == "uint32"
 
 
 def _lower_cuda_source(func, target=_SM90_TARGET) -> str:
-    with tvm.transform.PassContext(), tvm.target.Target(target):
+    with tvm_tirx.transform.PassContext(), tvm_tirx.target.Target(target):
         artifact = tilelang.lower(func, target=target)
     assert artifact.kernel_source is not None
     return artifact.kernel_source
@@ -118,21 +118,21 @@ def _cache_key(func) -> str:
         out_idx=[0],
         execution_backend="tvm_ffi",
         args=(),
-        target=tvm.target.Target(_SM90_TARGET),
+        target=tvm_tirx.target.Target(_SM90_TARGET),
     )
 
 
-def _iket_calls(func) -> list[tvm.ir.Call]:
+def _iket_calls(func) -> list[tvm_tirx.ir.Call]:
     calls = []
 
     def collect(node):
-        if not isinstance(node, tvm.ir.Call) or not node.args:
+        if not isinstance(node, tvm_tirx.ir.Call) or not node.args:
             return
         extern_name = node.args[0]
-        if isinstance(extern_name, tvm.ir.StringImm) and extern_name.value.startswith("TL_IKET_EVENT"):
+        if isinstance(extern_name, tvm_tirx.ir.StringImm) and extern_name.value.startswith("TL_IKET_EVENT"):
             calls.append(node)
 
-    tvm_ffi.structural_walk(func.body, (tvm.ir.Call, collect), order="post")
+    tvm_ffi.structural_walk(func.body, (tvm_tirx.ir.Call, collect), order="post")
     return calls
 
 
@@ -158,7 +158,7 @@ def test_event_metadata_is_preserved_in_tir_and_injected_source():
 
     calls = _iket_calls(kernel)
     assert len(calls) == 3
-    assert sum(isinstance(arg, tvm.ir.StringImm) for call in calls for arg in call.args[1:]) >= 2
+    assert sum(isinstance(arg, tvm_tirx.ir.StringImm) for call in calls for arg in call.args[1:]) >= 2
     assert _IKET_SOURCE_MARKER in source
     assert "__iket_meta_info" in source
     assert "__iket_evt_decl_compute_phase" in source
@@ -195,7 +195,7 @@ def test_prebuilt_payload_primfunc_enables_runtime_payloads_during_lowering():
     calls = _iket_calls(kernel)
     assert len(calls) == 1
     assert calls[0].args[0].value == "TL_IKET_EVENT_PAYLOAD_F32"
-    assert isinstance(calls[0].args[-1], tvm.ir.StringImm)
+    assert isinstance(calls[0].args[-1], tvm_tirx.ir.StringImm)
 
     with iket.session(runtime_payloads=True):
         source = _lower_cuda_source(kernel)
@@ -227,7 +227,7 @@ def test_prebuilt_primfunc_keeps_metadata_when_session_resets_registry():
     kernel = _make_mark_kernel("parsed_before_session")
     calls = _iket_calls(kernel)
     assert len(calls) == 1
-    assert isinstance(calls[0].args[-1], tvm.ir.StringImm)
+    assert isinstance(calls[0].args[-1], tvm_tirx.ir.StringImm)
 
     # session() resets process-local state by default. The generated source must
     # therefore recover its metadata from the already parsed PrimFunc.
@@ -252,7 +252,7 @@ def test_independently_built_primfuncs_get_module_wide_event_ids():
     first = _make_mark_kernel("module_first").with_attr("global_symbol", "first")
     iket.reset()
     second = _make_mark_kernel("module_second").with_attr("global_symbol", "second")
-    module = tvm.IRModule({"first": first, "second": second})
+    module = tvm_tirx.IRModule({"first": first, "second": second})
 
     with iket.session():
         source = _lower_cuda_source(module)
@@ -353,7 +353,7 @@ def test_session_restores_a_previous_callback():
         assert "__iket_evt_decl_with_previous_callback" in source
 
     restored = tvm_ffi.get_global_func(_CUDA_POSTPROC)
-    assert restored("kernel source", tvm.target.Target(_SM90_TARGET)).startswith("// previous callback")
+    assert restored("kernel source", tvm_tirx.target.Target(_SM90_TARGET)).startswith("// previous callback")
 
 
 def test_failed_non_overriding_session_restores_host_state(tmp_path):
@@ -377,4 +377,4 @@ def test_failed_non_overriding_session_restores_host_state(tmp_path):
     assert CacheState.is_enabled() == original_cache_state
     assert iket.runtime_payloads_enabled() == original_runtime_payloads
     restored = tvm_ffi.get_global_func(_CUDA_POSTPROC)
-    assert restored("kernel source", tvm.target.Target(_SM90_TARGET)) == "kernel source"
+    assert restored("kernel source", tvm_tirx.target.Target(_SM90_TARGET)) == "kernel source"

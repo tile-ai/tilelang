@@ -1,7 +1,7 @@
 import pytest
 
 import tilelang.testing
-import tvm_tirx as tvm
+import tvm_tirx
 from tilelang.ascend import transform as ascend_transform
 from tvm_tirx import ir, tirx
 from testing.ascend._ir import is_sblock, launch_thread, nodes, sblock, sblock_metadata, single_statement, tensor
@@ -22,9 +22,9 @@ def _vf(body, name="SIMT_VF"):
 
 def _module(body, buffers=()):
     func = tirx.Function(list(buffers), body)
-    func = func.with_attr("global_symbol", "main").with_attr("target", tvm.target.Target("ascend"))
+    func = func.with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("ascend"))
     assert tirx.analysis.check_well_formed(func)
-    return tvm.IRModule.from_expr(func)
+    return tvm_tirx.IRModule.from_expr(func)
 
 
 def _syncs(body):
@@ -96,7 +96,7 @@ def test_ascend_thread_sync_inserts_barrier_inside_vf(storage_scope, thread_coun
     assert len(syncs) == 1
     assert len(syncs[0].args) == 1
     assert syncs[0].args[0].value == storage_scope
-    tvm.ir.assert_structural_equal(after.params, before["main"].params)
+    tvm_tirx.ir.assert_structural_equal(after.params, before["main"].params)
     assert all(actual.same_as(original) for actual, original in zip(after.params, before["main"].params))
 
 
@@ -107,7 +107,7 @@ def test_ascend_thread_sync_keeps_thread_private_accesses_unsynchronized(storage
 
     after = ascend_transform.AscendThreadSync(storage_scope)(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +197,7 @@ def test_ascend_thread_sync_does_not_synchronize_between_vfs(storage_scope):
 
     after = ascend_transform.AscendThreadSync(storage_scope)(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 def test_ascend_thread_sync_plans_each_vf_independently():
@@ -226,7 +226,7 @@ def test_ascend_thread_sync_leaves_non_simt_code_unchanged(block_name):
 
     after = ascend_transform.AscendThreadSync("shared")(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 @pytest.mark.parametrize("storage_scope", ["shared", "shared.dyn"])
@@ -255,10 +255,10 @@ def test_ascend_thread_sync_respects_disable_config(storage_scope):
     shared, output = _buffers(storage_scope)
     before = _module(_vf(_read_after_write(shared, output)), [shared, output])
 
-    with tvm.transform.PassContext(config={"tl.disable_thread_storage_sync": True}):
+    with tvm_tirx.transform.PassContext(config={"tl.disable_thread_storage_sync": True}):
         after = ascend_transform.AscendThreadSync(storage_scope)(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 @pytest.mark.parametrize("storage_scope", ["global", "shared.dyn"])
@@ -268,7 +268,7 @@ def test_ascend_thread_sync_leaves_other_scopes_unchanged(storage_scope):
 
     after = ascend_transform.AscendThreadSync(storage_scope)(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 def test_ascend_thread_sync_skips_wait_group_insertion():
@@ -277,7 +277,7 @@ def test_ascend_thread_sync_skips_wait_group_insertion():
 
     after = ascend_transform.AscendThreadSync("shared")(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 def test_ascend_thread_sync_skips_partial_barrier_rewriting():
@@ -287,7 +287,7 @@ def test_ascend_thread_sync_skips_partial_barrier_rewriting():
 
     after = ascend_transform.AscendThreadSync("shared")(before)
 
-    tvm.ir.assert_structural_equal(after, before)
+    tvm_tirx.ir.assert_structural_equal(after, before)
 
 
 def test_ascend_thread_sync_cuda_fallback_distinguishes_rectangles():
@@ -302,8 +302,8 @@ def test_ascend_thread_sync_cuda_fallback_distinguishes_rectangles():
             ]
         )
 
-    func = tirx.Function([], _thread_body(make_body, 256)).with_attr("target", tvm.target.Target("cuda"))
-    before = tvm.IRModule.from_expr(func)
+    func = tirx.Function([], _thread_body(make_body, 256)).with_attr("target", tvm_tirx.target.Target("cuda"))
+    before = tvm_tirx.IRModule.from_expr(func)
 
     after = ascend_transform.AscendThreadSync("shared")(before)["main"]
 
@@ -323,8 +323,8 @@ def test_ascend_thread_sync_cuda_fallback_multidimensional_rectangle(domain_exte
     sync = ir.Evaluate(tirx.op.gpu_storage_sync("shared"))
     body = ir.If(tx // 32 == 0, sync, None)
     body = launch_thread(tx, "threadIdx.x", 64, launch_thread(ty, "threadIdx.y", 2, body))
-    func = tirx.Function([], body).with_attr("target", tvm.target.Target("cuda"))
-    before = tvm.IRModule.from_expr(func)
+    func = tirx.Function([], body).with_attr("target", tvm_tirx.target.Target("cuda"))
+    before = tvm_tirx.IRModule.from_expr(func)
 
     after = ascend_transform.AscendThreadSync("shared")(before)["main"]
     syncs = _syncs(after.body)

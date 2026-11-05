@@ -5,7 +5,7 @@ import pytest
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm as tvm
+import tvm_tirx
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 import tvm_ffi
 from tvm_tirx import ir, tirx
@@ -30,14 +30,14 @@ def _operand_count(call):
 def _materialize_launch(func):
     """Run the launch materialization the pipeline performs before
     LegalizeSafeMemoryAccess, so thread indices carry their extents."""
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
-    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(mod)
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.tirx.transform.BindTarget(tvm_tirx.target.Target("cuda"))(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     return mod[func.attrs["global_symbol"]]
 
 
 def _is_call_to(expr, op_name):
-    return isinstance(expr, ir.Call) and isinstance(expr.op, tvm.ir.Op) and str(expr.op.name) == op_name
+    return isinstance(expr, ir.Call) and isinstance(expr.op, tvm_tirx.ir.Op) and str(expr.op.name) == op_name
 
 
 def _is_int_zero(expr):
@@ -50,7 +50,7 @@ def _assert_tl_access_ptr_bases_are_buffer_loads(stmt):
 
 
 def _assert_legalize_matches_expected(before, expected, strip_annotations: bool = False):
-    mod = tvm.IRModule({before.attrs["global_symbol"]: before})
+    mod = tvm_tirx.IRModule({before.attrs["global_symbol"]: before})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
 
     _assert_tl_access_ptr_bases_are_buffer_loads(before.body)
@@ -59,7 +59,7 @@ def _assert_legalize_matches_expected(before, expected, strip_annotations: bool 
 
 
 def _apply_negative_index_then_safe_memory(func):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tl.transform.LegalizeNegativeIndex()(mod)
     return tl.transform.LegalizeSafeMemoryAccess()(mod)
 
@@ -94,7 +94,7 @@ def vectorize_access_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_off
 def assert_vectorize_access(M: int = 64, N: int = 64):
     func, expected = vectorize_access_legalize(M, N)
     func, expected = _materialize_launch(func), _materialize_launch(expected)
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
 
     assert_same_memory_effects(transformed["main"], expected)
@@ -135,7 +135,7 @@ def vectorize_access_with_atmoic_add_legalize(M: int = 64, N: int = 64, M_offset
 def assert_vectorize_access_with_atmoic_add(M: int = 64, N: int = 64):
     func, expected = vectorize_access_with_atmoic_add_legalize(M, N)
     func, expected = _materialize_launch(func), _materialize_launch(expected)
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     print(transformed)
     print(expected)
@@ -170,7 +170,7 @@ def oob_store_legalize(M: int = 64, N: int = 64, M_offset: int = 2, N_offset: in
 def assert_oob_store_legalize(M: int = 64, N: int = 64):
     func, expected = oob_store_legalize(M, N)
     func, expected = _materialize_launch(func), _materialize_launch(expected)
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     assert_same_memory_effects(transformed["main"], expected)
 
@@ -212,7 +212,7 @@ def cp_async_access_ptr_legalize():
 
 def assert_cp_async_access_ptr_legalize():
     func, expected = cp_async_access_ptr_legalize()
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     cp_async_calls = collect_calls(body, op="tl.ptx_cp_async")
@@ -463,7 +463,7 @@ def call_extern_multiple_access_ptrs_legalize():
 
 def assert_cp_async_access_ptr_nonzero_safe_value_legalize():
     func, expected = cp_async_access_ptr_nonzero_safe_value_legalize()
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     cp_async_calls = collect_calls(body, op="tl.ptx_cp_async")
@@ -476,7 +476,7 @@ def assert_cp_async_access_ptr_nonzero_safe_value_legalize():
 
 def assert_atomic_load_access_ptr_legalize():
     func, expected = atomic_load_access_ptr_legalize()
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
 
@@ -507,7 +507,7 @@ def assert_atomic_store_access_ptr_legalize():
 
 def assert_call_extern_access_ptr_mask_legalize(access_type: str):
     func, expected = call_extern_access_ptr_mask_legalize(access_type)
-    mod = tvm.IRModule({func.attrs["global_symbol"]: func})
+    mod = tvm_tirx.IRModule({func.attrs["global_symbol"]: func})
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
 
@@ -584,7 +584,7 @@ def test_cp_async_signed_zero_safe_value_oob(safe_value):
             T.ptx_commit_group()
             T.ptx_wait_group(0)
 
-    mod = tl.transform.LegalizeSafeMemoryAccess()(tvm.IRModule.from_expr(main))
+    mod = tl.transform.LegalizeSafeMemoryAccess()(tvm_tirx.IRModule.from_expr(main))
     body = mod["main"].body
     calls = collect_calls(body, op="tl.ptx_cp_async")
     assert len(calls) == 1
@@ -652,7 +652,7 @@ def test_dynamic_index_load_store_conditions_are_combined():
         out[0] = A[index]
         A[index] = T.float32(1)
 
-    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
 
@@ -667,7 +667,7 @@ def test_dynamic_index_load_store_conditions_are_combined():
     assert len(store_guards) == 1
     assert isinstance(store_guards[0].condition, ir.prim.And)
     assert isinstance(_single_stmt(store_guards[0].then_case), ir.TensorStore)
-    tvm.ir.assert_structural_equal(load_guards[0].args[0], store_guards[0].condition)
+    tvm_tirx.ir.assert_structural_equal(load_guards[0].args[0], store_guards[0].condition)
 
 
 def test_nested_buffer_load_index_is_safely_rewritten():
@@ -680,7 +680,7 @@ def test_nested_buffer_load_index_is_safely_rewritten():
     ):
         out[0] = A[B[index]]
 
-    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     a_data = main.params[0]
@@ -721,7 +721,7 @@ def test_nested_buffer_load_index_is_safely_rewritten():
     assert guarded_b_indices
     for call in guarded_b_indices:
         _assert_safe_b_index(call)
-        tvm.ir.assert_structural_equal(call, guarded_b_indices[0])
+        tvm_tirx.ir.assert_structural_equal(call, guarded_b_indices[0])
     producer_loads = [load for load in collect_nodes(body, ir.TensorLoad) if load.source.same_as(b_data)]
     assert {load for load in producer_loads} == {call.args[1] for call in guarded_b_indices}
     assert_nested_lookup(transformed["main"])
@@ -738,7 +738,7 @@ def test_ramp_load_conditions_are_combined():
     ):
         out[T.Ramp(0, 1, lanes)] = A[T.Ramp(base, 1, lanes)]
 
-    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
 
@@ -834,7 +834,7 @@ def test_opaque_index_guard_preserves_lazy_evaluation():
             index,
         ]
 
-    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     a_data = main.params[0]
@@ -856,7 +856,7 @@ def test_opaque_store_guard_preserves_lazy_evaluation():
             index,
         ] = T.float32(1)
 
-    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
     body = transformed["main"].body
     a_data = main.params[0]
@@ -880,7 +880,7 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
         [buffer, output, producer, producer_index, later_index],
         [body],
     ).with_attr("global_symbol", "main")
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
 
     guarded = _single_stmt(transformed["main"].body).value

@@ -3,7 +3,7 @@ import pytest
 import tilelang
 import tilelang.testing
 
-from tilelang import tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -56,22 +56,22 @@ def _build_vector_select_source(
     if wrap_input_in_reinterpret:
         input_vector = tirx.reinterpret(input_vector, ty=f"int32x{lanes}")
     if wrap_input_in_abs:
-        input_vector = ir.Call(tvm.ir.Op.get("tl.abs2"), [input_vector], ty=f"bfloat16x{lanes}")
+        input_vector = ir.Call(tvm_tirx.ir.Op.get("tl.abs2"), [input_vector], ty=f"bfloat16x{lanes}")
     if wrap_input_in_packed_call:
         bias = ir.prim.Broadcast(tirx.const(1, "float32"), lanes)
-        input_vector = ir.Call(tvm.ir.Op.get("tl.add2"), [input_vector, bias], ty=f"float32x{lanes}")
+        input_vector = ir.Call(tvm_tirx.ir.Op.get("tl.add2"), [input_vector, bias], ty=f"float32x{lanes}")
     mask_zero = ir.prim.Broadcast(tirx.const(0, "float32"), lanes)
     result_zero = ir.prim.Broadcast(tirx.const(0, output_dtype), lanes)
     selected = tirx.Select(mask_vector > mask_zero, input_vector, result_zero)
     body = ir.TensorStore(output_buffer, [ramp], selected)
     func = _make_device_function([mask_buffer, input_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "vector_select")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({"vector_select": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    mod = tvm_tirx.IRModule({"vector_select": func})
     build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
-    return build(mod, tvm.target.Target("rocm")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("rocm")).inspect_source()
 
 
 def _build_vector_select_with_vector_argument_source():
@@ -87,12 +87,12 @@ def _build_vector_select_with_vector_argument_source():
     body = ir.TensorStore(output_buffer, [ramp], selected)
     func = _make_device_function([value, mask_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "vector_select_argument")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({"vector_select_argument": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    mod = tvm_tirx.IRModule({"vector_select_argument": func})
     build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
-    return build(mod, tvm.target.Target("rocm")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("rocm")).inspect_source()
 
 
 def _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, result_dtype, result_lanes):
@@ -112,8 +112,8 @@ def _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, re
     body = ir.TensorStore(output_buffer, [mask_ramp], selected)
     func = _make_device_function([mask_buffer, input_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "lane_changing_reinterpret_select")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    return tvm.IRModule({"lane_changing_reinterpret_select": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    return tvm_tirx.IRModule({"lane_changing_reinterpret_select": func})
 
 
 def _build_lane_changing_reinterpret_select_source(source_dtype, source_lanes, result_dtype, result_lanes):
@@ -121,7 +121,7 @@ def _build_lane_changing_reinterpret_select_source(source_dtype, source_lanes, r
     build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
-    return build(mod, tvm.target.Target("rocm")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("rocm")).inspect_source()
 
 
 def _make_narrow_vector_select_module(dtype, lanes):
@@ -136,8 +136,8 @@ def _make_narrow_vector_select_module(dtype, lanes):
     )
     func = tirx.Function([on_true, on_false], ir.Evaluate(selected), ret_type=ir.PrimType("void"))
     func = func.with_attr("global_symbol", "narrow_vector_select")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    return tvm.IRModule({"narrow_vector_select": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    return tvm_tirx.IRModule({"narrow_vector_select": func})
 
 
 def _build_narrow_vector_select_source(dtype, lanes):
@@ -145,7 +145,7 @@ def _build_narrow_vector_select_source(dtype, lanes):
     build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
-    return build(mod, tvm.target.Target("rocm")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("rocm")).inspect_source()
 
 
 def _build_scalar_select_source():
@@ -161,12 +161,12 @@ def _build_scalar_select_source():
     body = ir.TensorStore(output_buffer, [0], selected)
     func = _make_device_function([mask_buffer, input_buffer, output_buffer], body)
     func = func.with_attr("global_symbol", "scalar_select")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    mod = tvm.IRModule({"scalar_select": func})
+    func = func.with_attr("calling_conv", tvm_tirx.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    mod = tvm_tirx.IRModule({"scalar_select": func})
     build = tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
     if build is None:
         pytest.skip("TileLang was built without the ROCm code generator")
-    return build(mod, tvm.target.Target("rocm")).inspect_source()
+    return build(mod, tvm_tirx.target.Target("rocm")).inspect_source()
 
 
 def test_vector_condition_select_is_scalarized_in_hip_source():
@@ -409,7 +409,7 @@ def test_wide_bool_vector_results_use_packed_bit_access(lanes, carrier_type):
 def test_narrow_vector_select_compiles_with_packed_hip_carriers(dtype, lanes):
     mod = _make_narrow_vector_select_module(dtype, lanes)
     build = tvm_ffi.get_global_func("target.build.tilelang_hip")
-    build(mod, tvm.target.Target("rocm"))
+    build(mod, tvm_tirx.target.Target("rocm"))
 
 
 @tilelang.testing.requires_rocm
@@ -420,7 +420,7 @@ def test_narrow_vector_select_compiles_with_packed_hip_carriers(dtype, lanes):
 def test_lane_changing_reinterpret_select_compiles(source_dtype, source_lanes, result_dtype, result_lanes):
     mod = _make_lane_changing_reinterpret_select_module(source_dtype, source_lanes, result_dtype, result_lanes)
     build = tvm_ffi.get_global_func("target.build.tilelang_hip")
-    build(mod, tvm.target.Target("rocm"))
+    build(mod, tvm_tirx.target.Target("rocm"))
 
 
 if __name__ == "__main__":

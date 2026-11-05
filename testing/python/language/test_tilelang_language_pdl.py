@@ -1,3 +1,4 @@
+import tvm_tirx
 import ast
 import importlib.metadata
 import os
@@ -315,7 +316,7 @@ def _lower_cutedsl_for_pdl(program):
     target = determine_target({"kind": "cutedsl", "arch": "sm_90"})
     with target:
         artifact = tilelang.lower(program, target=target)
-    mod = tilelang.tvm.IRModule({program.attrs["global_symbol"]: program})
+    mod = tvm_tirx.IRModule({program.attrs["global_symbol"]: program})
     wrapper = TLCuTeDSLSourceWrapper(mod, artifact.kernel_source, target, artifact.device_mod, artifact.host_mod)
     return artifact, wrapper
 

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang
@@ -76,7 +76,7 @@ def test_written_condition_is_evaluated_once(inline, initial):
     assert isinstance(statements[0], ir.Bind)
     assert len(statements) == 3
     assert all(node.condition.same_as(statements[0].var) for node in statements[1:])
-    actual = tvm.runtime.tensor(np.array([initial, -99], dtype="int32"))
+    actual = tvm_tirx.runtime.tensor(np.array([initial, -99], dtype="int32"))
     compile_llvm(after)(actual)
     np.testing.assert_array_equal(actual.numpy(), [-1, 7] if initial >= 0 else [initial, -99])
 
@@ -118,7 +118,7 @@ def test_unannotated_parameter_identities_do_not_prove_non_aliasing():
         )
     )
     assert isinstance(flat(after.body)[0], ir.Bind)
-    actual = tvm.runtime.tensor(np.array([0, -99], dtype="int32"))
+    actual = tvm_tirx.runtime.tensor(np.array([0, -99], dtype="int32"))
     compile_llvm(after.with_attr("tirx.noalias", False))(actual, actual)
     np.testing.assert_array_equal(actual.numpy(), [-1, 7])
 
@@ -144,7 +144,7 @@ def test_read_bind_keeps_original_value_across_alias_writes():
     )
     assert len(objects(after, ir.Bind)) == 1
     assert len(flat(after.body)) == 1
-    actual = tvm.runtime.tensor(np.array([13, 0], dtype="int32"))
+    actual = tvm_tirx.runtime.tensor(np.array([13, 0], dtype="int32"))
     compile_llvm(after.with_attr("tirx.noalias", False))(1, actual, actual)
     np.testing.assert_array_equal(actual.numpy(), [-5, 13])
 
@@ -170,7 +170,7 @@ def test_type_only_scalar_use_retypes_definition_and_all_uses(inline):
     assert all(node.dest.same_as(rebuilt) for node in stores)
     if inline:
         assert all(node.name != "size" for node in objects(after, ir.Var))
-    output_value = tvm.runtime.tensor(np.full(2, -99, dtype="int32"))
+    output_value = tvm_tirx.runtime.tensor(np.full(2, -99, dtype="int32"))
     compile_llvm(after)(3, output_value)
     np.testing.assert_array_equal(output_value.numpy(), [7, 3])
 
@@ -262,7 +262,7 @@ def test_public_dsl_aliases_execute_after_guard_distribution():
                 output[1] = 7
 
     after = rewrite(main)
-    target = tvm.target.Target("c")
+    target = tvm_tirx.target.Target("c")
     kernel = tilelang.compile(after, target=target, target_host=target, execution_backend="tvm_ffi")
     value = torch.tensor([0, -99], dtype=torch.int32)
     kernel(value, value)

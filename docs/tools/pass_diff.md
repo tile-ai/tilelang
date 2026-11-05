@@ -64,7 +64,7 @@ sections, expandable unchanged context, copy controls, light and dark themes,
 and aggregate insertion and deletion counts.
 
 :::{note}
-The pipeline hook wraps `tvm.ir.transform.Pass.__call__` for the entire process,
+The pipeline hook wraps `tvm_tirx.ir.transform.Pass.__call__` for the entire process,
 so it observes TVM passes outside the immediate `tilelang.compile()` call as
 well. Capturing IR and, in HTML mode, rewriting the report after every pass adds
 debugging overhead. Leave the feature disabled for normal builds and benchmarks.
@@ -77,14 +77,14 @@ provided passes in order:
 
 ```python
 import tilelang
-from tilelang import tvm
+import tvm_tirx
 from tilelang.utils.pass_diff import pass_diff
 
 steps = pass_diff(
     func,
     [
         ("Simplify", tilelang.transform.Simplify()),
-        ("RemoveNoOp", tvm.tirx.transform.RemoveNoOp()),
+        ("RemoveNoOp", tvm_tirx.tirx.transform.RemoveNoOp()),
     ],
     mode="both",
     context=5,
@@ -121,11 +121,11 @@ The return value contains one dictionary per pass with these fields:
 For example, verify that a cleanup pass removes an explicit no-op:
 
 ```python
-from tilelang import tvm
+import tvm_tirx
 from tilelang.utils.pass_diff import pass_diff
 
-noop = tvm.tirx.Function([], [tvm.ir.Evaluate(tvm.ir.const(1))])
-steps = pass_diff(noop, tvm.tirx.transform.RemoveNoOp())
+noop = tvm_tirx.tirx.Function([], [tvm_tirx.ir.Evaluate(tvm_tirx.ir.const(1))])
+steps = pass_diff(noop, tvm_tirx.tirx.transform.RemoveNoOp())
 assert steps[0]["changed"]
 assert "T.evaluate(" not in steps[0]["after_script"]
 ```

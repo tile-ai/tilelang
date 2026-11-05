@@ -1,6 +1,6 @@
 from __future__ import annotations
 import re
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx.target import Target
 from .arch_base import TileDevice
 from .driver import cuda_driver
@@ -143,11 +143,11 @@ class CUDA(TileDevice):
             target = determine_target(target, return_object=True)
         self.target = target
         self.sm_version = check_sm_version(self.target.attrs["arch"])
-        device = tvm.runtime.cuda(0)
+        device = tvm_tirx.runtime.cuda(0)
         if not device.exist:
             raise RuntimeError("Cannot find cuda device 0.")
         self.name = cuda_driver.get_device_name()
-        self.device: tvm.runtime.Device = device
+        self.device: tvm_tirx.runtime.Device = device
         self.platform: str = "CUDA"
         # TODO(lei): maybe static shared memory, can be improved in future
         self.smem_cap = cuda_driver.get_shared_memory_per_block()

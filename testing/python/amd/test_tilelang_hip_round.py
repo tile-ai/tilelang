@@ -7,7 +7,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
+import tvm_tirx
 
 
 def _round_kernel(dtype, lanes):
@@ -36,8 +36,8 @@ def test_round_ties_to_even_codegen(dtype, intrinsic, lanes):
     if tvm_ffi.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True) is None:
         pytest.skip("TileLang HIP codegen is not enabled")
 
-    target = tvm.target.Target({"kind": "hip", "mcpu": "gfx942"})
-    with tvm.transform.PassContext(), target:
+    target = tvm_tirx.target.Target({"kind": "hip", "mcpu": "gfx942"})
+    with tvm_tirx.transform.PassContext(), target:
         artifact = tilelang.lower(_round_kernel(dtype, lanes), target=target, enable_device_compile=False)
 
     source = artifact.kernel_source

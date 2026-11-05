@@ -11,7 +11,7 @@ Verifies that:
 
 import tilelang as tl
 import tilelang.language as T
-from tilelang import tvm
+import tvm_tirx
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm_tirx import ir
 from tilelang.testing.ir import collect_nodes
@@ -44,9 +44,9 @@ def _count_allocate_inside_attr(func, attr_key):
 
 
 def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
-    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     pass_configs = pass_configs or {}
-    with target, tvm.transform.PassContext(config=pass_configs):
+    with target, tvm_tirx.transform.PassContext(config=pass_configs):
         mod = CUDAPassPipelineBodyPrologue(mod, target)
         mod = tl.cuda.transform.LowerSharedTmem()(mod)
         mod = tl.transform.IfStmtBinding()(mod)
@@ -63,7 +63,7 @@ def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
     """An explicitly annotated block should produce a lexical_alloc_scope."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -80,7 +80,7 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
                 S[tx] = A[tx]
                 B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     lowered = mod["main"]
 
@@ -97,7 +97,7 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_unmarked_local_alloc():
     """An unmarked local-alloc block should not produce a lexical_alloc_scope."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -113,7 +113,7 @@ def test_lower_opaque_block_skips_unmarked_local_alloc():
                 S[tx] = A[tx]
                 B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     lowered = mod["main"]
 
@@ -126,7 +126,7 @@ def test_lower_opaque_block_skips_unmarked_local_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_empty_alloc():
     """A block without alloc_buffers should not produce a lexical_alloc_scope."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -140,7 +140,7 @@ def test_lower_opaque_block_skips_empty_alloc():
             with T.sblock():
                 B[tx] = A[tx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     lowered = mod["main"]
 
@@ -154,7 +154,7 @@ def test_lower_opaque_block_skips_empty_alloc():
 @tilelang.testing.requires_cuda
 def test_lower_opaque_block_inserts_scope_for_gemm_descriptor_alloc():
     """Lowered WGMMA descriptor buffers inside a loop should trigger lexical_alloc_scope."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
 
     @T.prim_func
     def func(
@@ -185,7 +185,7 @@ def test_lower_opaque_block_inserts_scope_for_gemm_descriptor_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_local_var_only_alloc():
     """A block that allocates only local.var should not get lexical_alloc_scope."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -201,7 +201,7 @@ def test_lower_opaque_block_skips_local_var_only_alloc():
                 idx = tx
                 B[tx] = A[idx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     lowered = mod["main"]
 
@@ -214,7 +214,7 @@ def test_lower_opaque_block_skips_local_var_only_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
     """A top-level explicitly annotated local alloc should get lexical_alloc_scope."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -230,7 +230,7 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
             S[tx] = A[tx]
             B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     lowered = mod["main"]
 
@@ -243,7 +243,7 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_skips_fragment_alloc():
     """A fragment alloc should not force lexical_alloc_scope by itself."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -258,7 +258,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
             S[tx] = A[tx]
             B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     lowered = mod["main"]
 
@@ -272,7 +272,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
 @tilelang.testing.requires_cuda
 def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
     """A fragment root block should not force lexical_alloc_scope in disable-ws pipeline."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90a"})
     pass_configs = {tl.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED.value: True}
 
     @T.prim_func
@@ -313,7 +313,7 @@ def test_lower_opaque_block_skips_fragment_root_in_disable_ws_pipeline():
 # ---------------------------------------------------------------------------
 def test_storage_rewrite_preserves_scope():
     """lexical_alloc_scope should survive StorageRewrite without crashing."""
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    target = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_80"})
 
     @T.prim_func
     def func(
@@ -330,7 +330,7 @@ def test_storage_rewrite_preserves_scope():
                 S[tx] = A[tx]
                 B[tx] = S[tx]
 
-    mod = tvm.IRModule.from_expr(func)
+    mod = tvm_tirx.IRModule.from_expr(func)
     mod = tl.transform.LowerOpaqueBlock()(mod)
     mod = tl.transform.Simplify()(mod)
     mod = tl.transform.FlattenBuffer()(mod)

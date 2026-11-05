@@ -7,24 +7,24 @@ import subprocess
 
 import pytest
 import tvm_ffi
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_ffi.libinfo import include_paths
 from tvm_tirx.libinfo import find_include_path
 
-I = tvm.ir
+I = tvm_tirx.ir
 
 
 def _emit(backend, *, invalid=False, roundtrip=False):
     count = I.Var("count", "int32")
     pointer = I.Var("output", I.PtrType(I.PrimType("int32")))
-    tensor = I.Var("output_view", tvm.tirx.TensorType((1,), "int32", layout="default"))
+    tensor = I.Var("output_view", tvm_tirx.tirx.TensorType((1,), "int32", layout="default"))
     condition = count if invalid else count > 0
     hint = I.Evaluate(I.Call("prim.assume", [condition]))
     body = [I.Bind(tensor, I.Call("tirx.decl_tensor", [pointer], ty_args=[tensor.ty])), hint, I.TensorStore(tensor, [0], count + 1)]
     # Metal's runtime binds leading buffers, then packs trailing scalars.
     # SplitHostDevice normally establishes this order before this emitter.
     params = [pointer, count] if backend == "metal" else [count, pointer]
-    function = tvm.tirx.Function(params, body, ret_type=I.PrimType("void")).with_attr("global_symbol", "hint_kernel")
+    function = tvm_tirx.tirx.Function(params, body, ret_type=I.PrimType("void")).with_attr("global_symbol", "hint_kernel")
     if backend in ("cuda", "hip", "metal"):
         function = function.with_attr("calling_conv", 2)
     if roundtrip:
@@ -32,7 +32,7 @@ def _emit(backend, *, invalid=False, roundtrip=False):
     suffix = "_without_compile" if backend in ("cuda", "hip", "metal") else ""
     target = "c" if backend == "c_host" else backend
     return tvm_ffi.get_global_func("target.build.tilelang_" + backend + suffix)(
-        tvm.IRModule({"hint_kernel": function}), tvm.target.Target(target)
+        tvm_tirx.IRModule({"hint_kernel": function}), tvm_tirx.target.Target(target)
     ).inspect_source()
 
 

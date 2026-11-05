@@ -5,7 +5,7 @@ source code while correctly handling both float16 and bfloat16.
 """
 
 import tilelang
-from tilelang import tvm as tvm
+import tvm_tirx
 import tilelang.testing
 import tilelang.language as T
 
@@ -39,7 +39,7 @@ def repro_gemm(dtype: str):
 
 def lower_to_metal(dtype: str) -> str:
     prim_func = repro_gemm.get_tir(dtype)
-    target = tvm.target.Target("metal", tvm.target.Target("llvm"))
+    target = tvm_tirx.target.Target("metal", tvm_tirx.target.Target("llvm"))
     with target:
         artifact = tilelang.lower(
             prim_func,

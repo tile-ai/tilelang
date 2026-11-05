@@ -17,7 +17,7 @@ from testing.ascend._memory_ir import address_bits, storage_owner
 from testing.ascend.auto_schedule._scheduled_ir import unit
 from tilelang.ascend import transform
 
-import tvm_tirx as tvm
+import tvm_tirx
 from tvm_tirx import ir, tirx
 
 
@@ -140,7 +140,7 @@ def test_sibling_kernels_keep_distinct_group_owners_after_sid_relocation(outer_s
 
 def scalar(expression, environment):
     replacements = {var: ir.IntImm(var.ty, value) for var, value in environment.items()}
-    result = tvm.sym.Analyzer().simplify(substitute(expression, replacements))
+    result = tvm_tirx.sym.Analyzer().simplify(substitute(expression, replacements))
     assert isinstance(result, ir.IntImm), result
     return int(result)
 
