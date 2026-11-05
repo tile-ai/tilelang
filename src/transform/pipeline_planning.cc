@@ -20,6 +20,7 @@
 
 #include "../op/builtin.h"
 #include "../op/copy.h"
+#include "../op/gemm.h"
 #include "../op/operator.h"
 #include "../op/parallel.h"
 #include "../op/utils.h"
@@ -422,6 +423,8 @@ struct PipelineStageInfo {
   Array<BufferRegion> reads, writes;
   ScalarVarSet scalar_defs;
   ScalarVarSet scalar_uses;
+  std::vector<std::pair<BufferLoad, Array<BufferRegion>>> async_gemm_operands;
+  Array<BufferLoad> completion_waits;
   int original_stmt_index{};
   int order = -1, stage = -1;
   bool copy_stage = false;
@@ -666,6 +669,61 @@ public:
       }
       pinfo.direct_copy_last_use_stmt_index = pinfo.last_use_stmt_index;
     }
+  }
+
+  // MMA issue does not release shared operands. Treat the completion wait as
+  // their last reader; unprovable completion keeps the loop sequential.
+  bool ExtendAsyncGemmLifetimes(
+      std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
+    arith::Analyzer analyzer;
+    for (size_t i = 0; i < pipeline_stage_infos->size(); ++i) {
+      for (const auto &[barrier, operands] :
+           (*pipeline_stage_infos)[i].async_gemm_operands) {
+        bool matched = false;
+        for (size_t j = i + 1; j < pipeline_stage_infos->size(); ++j) {
+          auto &completion = (*pipeline_stage_infos)[j];
+          if (completion.conditional_execution) {
+            continue;
+          }
+          for (const BufferLoad &wait : completion.completion_waits) {
+            if (!barrier->buffer.same_as(wait->buffer) ||
+                barrier->indices.size() != wait->indices.size()) {
+              continue;
+            }
+            bool same_indices = true;
+            for (size_t k = 0; k < barrier->indices.size(); ++k) {
+              same_indices &=
+                  analyzer.CanProveEqual(barrier->indices[k], wait->indices[k]);
+            }
+            if (same_indices) {
+              for (auto &copy : *pipeline_stage_infos) {
+                if (!copy.IsCopyStage() || copy.original_stmt_index >= i) {
+                  continue;
+                }
+                for (const BufferRegion &operand : operands) {
+                  for (const BufferRegion &write : copy.writes) {
+                    if (PipelineRegionsMayConflict(write, operand,
+                                                   thread_domains_)) {
+                      copy.last_use_stmt_index = std::max(
+                          copy.last_use_stmt_index, static_cast<int>(j));
+                    }
+                  }
+                }
+              }
+              matched = true;
+              break;
+            }
+          }
+          if (matched) {
+            break;
+          }
+        }
+        if (!matched) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   using ScalarDefMap =
@@ -982,6 +1040,35 @@ public:
     pinfo.scalar_uses = std::move(scalar_uses);
     pinfo.original_stmt_index = idx;
     pinfo.conditional_execution = MayBeConditionallyExecuted(block->body);
+    PostOrderVisit(block->body, [&](const ObjectRef &node) {
+      const auto *call = node.as<CallNode>();
+      if (!call) {
+        return;
+      }
+      if (call->op.same_as(mbarrier_wait_parity()) &&
+          block->body.as<EvaluateNode>() && !pinfo.conditional_execution) {
+        if (const auto *wait = call->args[0].as<BufferLoadNode>()) {
+          pinfo.completion_waits.push_back(GetRef<BufferLoad>(wait));
+        }
+      }
+      if (!call->op.as<OpNode>()) {
+        return;
+      }
+      auto tile_op = ParseOperator(GetRef<Call>(call));
+      if (const auto *gemm = tile_op.as<GemmNode>()) {
+        if (gemm->mbar_.defined()) {
+          Array<BufferRegion> operands;
+          for (const BufferRegion &region : {gemm->aRegion_, gemm->bRegion_}) {
+            if (IsSharedBuffer(region->buffer)) {
+              operands.push_back(region);
+            }
+          }
+          if (!operands.empty()) {
+            pinfo.async_gemm_operands.emplace_back(gemm->mbar_, operands);
+          }
+        }
+      }
+    });
     bool pure_copy_stage =
         collector.GetGlobalCopyPattern() && IsPureCopyStmt(block->body);
     pinfo.copy_stage = pure_copy_stage;
@@ -1183,10 +1270,14 @@ private:
       pipeline_stage_infos.push_back(std::move(pinfo));
     }
 
-    // Determine each real copy's scheduling anchor before extending the
-    // producer group. Non-copy producers inherit this anchor rather than
-    // replacing it with their direct consumer.
+    // Preserve the direct consumer for async commit groups, then extend only
+    // the reuse anchor through asynchronous MMA completion.
     AnalyzeCopyLastUse(&pipeline_stage_infos);
+    if (!MakeStageAnalyzer().ExtendAsyncGemmLifetimes(&pipeline_stage_infos)) {
+      For sequential = GetRef<For>(loop);
+      sequential.CopyOnWrite()->annotations.erase("num_stages");
+      return StmtExprMutator::VisitStmt_(sequential.get());
+    }
 
     // Follow scalar use-def and buffer RAW edges in one backward worklist.
     // This reaches mixed chains such as buffer store -> Bind -> copy and keeps

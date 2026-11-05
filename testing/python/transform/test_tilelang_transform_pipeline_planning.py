@@ -465,16 +465,16 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
                     ],
                     "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [
+                        T.int32(0),
                         T.int32(1),
                         T.int32(2),
-                        T.int32(0),
                         T.int32(3),
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(2),
-                        T.int32(2),
+                        T.int32(1),
+                        T.int32(1),
                     ],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
@@ -496,6 +496,54 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
             T.copy(C_shared, D[0:128, 0:128])
 
     _check(before, after, target=sm100_target)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(sm100_target)(mod)
+    mod = tl.transform.IfStmtBinding()(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    annotations = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(x) for x in annotations["software_pipeline_stage"]]
+    order = [int(x) for x in annotations["software_pipeline_order"]]
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    versions = {}
+    for block in collect_nodes(mod["main"].body, tvm.tirx.SBlock):
+        for buffer in block.alloc_buffers:
+            if buffer.name in ("A_shared", "B_shared"):
+                versions[buffer.name] = int(buffer.shape[0]) if len(buffer.shape) == 3 else 1
+    assert versions == {"A_shared": 2, "B_shared": 2}
+    for copy, name in enumerate(("A_shared", "B_shared")):
+        # Compare wait(i) with copy(i + versions) after stage/order normalization.
+        assert (stages[3], order[3]) < (versions[name] + stages[copy], order[copy])
+
+
+@pytest.mark.parametrize("wait_kind", ["wrong_index", "wrong_buffer", "conditional", "missing"])
+def test_pipeline_planning_tcgen05_unproven_completion(wait_kind):
+    @T.prim_func
+    def main(A: T.Tensor((128, 96), T.float16), B: T.Tensor((96, 96), T.float16)):
+        with T.Kernel(1, threads=384):
+            A_shared = T.alloc_shared((128, 32), T.float16)
+            B_shared = T.alloc_shared((96, 32), T.float16)
+            C_tmem = T.alloc_tmem((128, 96), T.float32)
+            mbar = T.alloc_barrier([1, 1])
+            other = T.alloc_barrier(1)
+            for k in T.Pipelined(3, num_stages=2):
+                T.copy(A[:, k * 32 : (k + 1) * 32], A_shared)
+                T.copy(B[:, k * 32 : (k + 1) * 32], B_shared)
+                T.tcgen05_gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar[0], clear_accum=k == 0)
+                if wait_kind == "wrong_index":
+                    T.mbarrier_wait_parity(mbar[1], k % 2)
+                elif wait_kind == "wrong_buffer":
+                    T.mbarrier_wait_parity(other, k % 2)
+                elif wait_kind == "conditional" and k > 0:
+                    T.mbarrier_wait_parity(mbar[0], k % 2)
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(sm100_target)(mod)
+    mod = tl.transform.IfStmtBinding()(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    assert not _collect_pipeline_loop_annotations(mod["main"])
+    for loop in collect_nodes(mod["main"].body, tvm.tirx.For):
+        assert "num_stages" not in loop.annotations
 
 
 def test_pipeline_planning_before_after_explicit_plan_drops_replayable_bind_slot():
