@@ -6,13 +6,7 @@ import ptodsl._scalar as _scalar
 from ptodsl import pto
 from ptodsl._ops_common import _pointer_element_type
 from ptodsl._scalar import _emit_llvm_byte_pointer
-from ptodsl._surface_values import (
-    _ADDRESS_SPACE_VALUE_TO_KEYWORD,
-    VecValue,
-    unwrap_surface_value,
-    wrap_surface_value,
-    resolve_address_access,
-)
+from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value, resolve_address_access
 from ptodsl._types import (
     _DType,
     _integer_signedness,
@@ -20,7 +14,7 @@ from ptodsl._types import (
     _signless_integer_type,
     _strip_integer_signedness,
 )
-from ptoas.mlir.dialects import llvm
+from ptoas.mlir.dialects import llvm, pto as _pto
 from ptoas.mlir.ir import IntegerType
 
 
@@ -175,46 +169,38 @@ def _scalar_select_compat(cond, true_val, false_val):
 _scalar.select = _scalar_select_compat
 
 
-def _atomic_signless_ptr(ptr_value):
+def _atomic_signless_ptr(ptr, element_type):
     """Re-author an integer pointer with its signless PTO element type."""
-    element_type = _pointer_element_type(ptr_value, context="atomic")
-    if not IntegerType.isinstance(element_type):
-        return ptr_value
     signless_element = _signless_integer_type(element_type)
     if signless_element == element_type:
-        return ptr_value
-    raw_ptr = unwrap_surface_value(ptr_value)
-    memory_space = getattr(raw_ptr.type, "memory_space", None)
-    if memory_space is None:
-        space = "gm"
-    else:
-        space = _ADDRESS_SPACE_VALUE_TO_KEYWORD.get(getattr(memory_space, "value", None))
-        if space is None:
-            space = str(memory_space).rsplit("<", 1)[-1].rstrip(">")
-    return pto.castptr(ptr_value, pto.ptr(signless_element, space))
+        return ptr
+    payload_dtype = {32: pto.i32, 64: pto.i64}[element_type.width]
+    pointer_type = _pto.PtrType(unwrap_surface_value(ptr).type)
+    payload_ptr_type = _pto.PtrType.get(payload_dtype.resolve(), memory_space=pointer_type.memory_space)
+    return pto.castptr(ptr, payload_ptr_type)
 
 
 def _atomic_integer_compat(op, ptr, value, *, l2cache, with_signedness):
     # PTO atomics require signless i32/i64 operands. TileLang carries integer
     # signedness in siXX/uiXX, so strip it at the call and restore it on the
-    # returned old value. Untyped literals inherit the pointer element type.
-    raw_value = unwrap_surface_value(value)
-    value_type = getattr(raw_value, "type", None)
-    if value_type is None:
-        value_type = _pointer_element_type(ptr, context="atomic")
-    if not IntegerType.isinstance(value_type):
+    # returned old value. The pointer element type defines the atomic's
+    # signedness; the value is only re-typed for the operand.
+    element_type = _pointer_element_type(ptr, context="atomic")
+    if not IntegerType.isinstance(element_type):
         return op(ptr, value, l2cache=l2cache)
-    signedness = "unsigned" if _integer_signedness(value_type) == "unsigned" else "signed"
-    if getattr(raw_value, "type", None) is None:
-        converted_value = value
-    else:
+    signedness = "unsigned" if _integer_signedness(element_type) == "unsigned" else "signed"
+    raw_value = unwrap_surface_value(value)
+    raw_type = getattr(raw_value, "type", None)
+    if raw_type is not None and IntegerType.isinstance(raw_type):
         converted_value = wrap_surface_value(_strip_integer_signedness(raw_value))
-    signless_ptr = _atomic_signless_ptr(ptr)
+    else:
+        converted_value = value
+    signless_ptr = _atomic_signless_ptr(ptr, element_type)
     if with_signedness:
         result = op(signless_ptr, converted_value, l2cache=l2cache, signedness=signedness)
     else:
         result = op(signless_ptr, converted_value, l2cache=l2cache)
-    return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), value_type))
+    return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), element_type))
 
 
 def atomic_add(ptr, value, *, l2cache="nmfv"):
