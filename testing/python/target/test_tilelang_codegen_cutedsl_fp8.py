@@ -73,3 +73,7 @@ def test_fp8_vector_op_evaluates_once(op):
     helpers = ('tl.fp8_binary("max"', 'tl.fp8_binary("min"') if op == "clamp" else (f'tl.fp8_binary("{op}"',)
     for helper in helpers:
         assert source.count(helper) == 1
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

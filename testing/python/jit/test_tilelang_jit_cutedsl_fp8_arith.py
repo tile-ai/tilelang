@@ -150,3 +150,7 @@ def test_cutedsl_fp8_nan_propagates(dtype):
     out = torch.empty(nan_in_clamp.numel(), dtype=DTYPES[dtype], device="cuda")
     tilelang.compile(_clamp_kernel(dtype, nan_in_clamp.numel(), 1), target="cutedsl")(nan_in_clamp, out)
     assert torch.isnan(out.float()[0]), "clamp dropped a NaN input"
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()
