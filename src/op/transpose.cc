@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/transpose.cc
- * \brief Transpose operator that swaps the final two axes using SIMT loops.
+ * \brief Transpose operator that swaps the final two axes.
  */
 
 #include "transpose.h"
@@ -236,7 +236,7 @@ Stmt TransposeNode::Lower(const LowerArgs &lower_args,
 
 LayoutMap TransposeNode::InferLayout(const LayoutInferArgs &layout_args,
                                      InferLevel level) const {
-  // Transpose always uses SIMT loops; no special layout inference needed.
+  // Lowerings adapt to the layouts other ops choose; transpose constrains none.
   return {};
 }
 

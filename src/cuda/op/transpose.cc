@@ -134,6 +134,20 @@ Stmt LowerWarpMatrixTranspose(const TransposeNode &op,
       *dst_cols != rows)
     return Stmt();
 
+  // ldmatrix/stmatrix rows past a buffer edge would reach the neighbouring row
+  // or allocation; the SIMT loop predicates those elements instead.
+  for (const auto &[buffer, range] :
+       {std::pair{&src, &op.src_range}, std::pair{&dst, &op.dst_range}}) {
+    for (size_t i = 0; i < range->size(); ++i) {
+      const Range &axis = (*range)[i];
+      if (!analyzer->CanProve(axis->min >= 0,
+                              arith::ProofStrength::kSymbolicBound) ||
+          !analyzer->CanProve(axis->min + axis->extent <= (*buffer)->shape[i],
+                              arith::ProofStrength::kSymbolicBound))
+        return Stmt();
+    }
+  }
+
   // A 16-byte row segment holds `tile` elements; a tile is tile x tile.
   const int tile = bits == 8 ? 16 : 8;
   if (rows % tile != 0 || cols % tile != 0)

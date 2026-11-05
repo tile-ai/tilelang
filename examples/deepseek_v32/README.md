@@ -207,13 +207,14 @@ transpose through a 16x16 register staging buffer, with bitwise-identical output
 
 The transpose only depends on `KV_shared`, so it is issued before the QK GEMM
 and overlaps with the asynchronous wgmma that follows. Measured on H800 SXM at
-S=8192, H=128, topk=2048: 25.79 ms with the `mma.sync` fallback, 14.24 ms with a
-K-major V, and 13.77 ms for the bf16 kernel of the same structure.
+S=8192, H=128, topk=2048 with the earlier hand-written transpose: 25.79 ms with
+the `mma.sync` fallback, 14.24 ms with a K-major V, and 13.77 ms for the bf16
+kernel of the same structure.
 
-Two notes on the numbers. FP8 does not beat bf16 here -- the kernel is limited by
-softmax and shared-memory traffic rather than Tensor Core throughput, so the
-gain from FP8 arithmetic has nothing to absorb it; the win is the smaller KV
-cache. And the manually pipelined bf16 kernel above is considerably faster than
+Two notes on those H800 numbers. FP8 did not beat bf16 there -- the kernel was
+limited by softmax and shared-memory traffic rather than Tensor Core throughput,
+so the gain from FP8 arithmetic had nothing to absorb it; the win is the smaller
+KV cache. And the manually pipelined bf16 kernel above is considerably faster than
 both; applying the same K-major V change there is future work.
 
 ### Sparse MLA Backward

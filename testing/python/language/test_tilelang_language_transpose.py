@@ -168,20 +168,33 @@ def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=512, block_M=128)
 
 
-def tilelang_transpose_staged(M, N, dtype, src_offset=0, stages=2):
+def tilelang_transpose_matrix_case(M, N, dtype, src_offset=0, swizzle=False, dst_col=0, consumer=False):
     """Transpose one stage of a multi-buffered source, as T.Pipelined produces:
-    the source region has a leading extent-1 axis that the destination lacks."""
+    the source region has a leading extent-1 axis that the destination lacks.
+
+    `dst_col` shifts the destination region right so it crosses the buffer edge,
+    and `consumer` runs the transpose on threads 128..255 only."""
+    from tilelang.layout import make_swizzled_layout
+
+    stages = 2
 
     @T.prim_func
     def main(
         A: T.Tensor((M, src_offset + N), dtype),
         B: T.Tensor((N, M), dtype),
     ):
-        with T.Kernel(1, threads=128) as _:
+        with T.Kernel(1, threads=256 if consumer else 128) as _:
             tile = T.alloc_shared((stages, M, src_offset + N), dtype)
             tile_T = T.alloc_shared((N, M), dtype)
+            if swizzle:
+                T.annotate_layout({tile: make_swizzled_layout(tile), tile_T: make_swizzled_layout(tile_T)})
             T.copy(A, tile[stages - 1, :, :])
-            T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
+            T.fill(tile_T, 0)
+            if consumer:
+                if T.get_thread_binding() >= 128:
+                    T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
+            else:
+                T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T[:, dst_col : dst_col + M])
             T.copy(tile_T, B)
 
     return main
@@ -194,32 +207,38 @@ def _bits(x):
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tilelang_transpose_matrix_instructions():
-    # (dtype, M, N, src_offset, uses ldmatrix/stmatrix)
+    # (dtype, M, N, keyword arguments, uses ldmatrix/stmatrix)
     cases = [
-        (T.float16, 40, 72, 0, True),
-        (T.bfloat16, 64, 128, 0, True),
-        (T.float8_e4m3fn, 64, 512, 0, True),
-        (T.int8, 48, 80, 0, True),
+        (T.float16, 40, 72, {}, True),
+        (T.bfloat16, 64, 128, {"consumer": True}, True),
+        (T.float8_e4m3fn, 64, 512, {}, True),
+        (T.float8_e4m3fn, 64, 128, {"swizzle": True}, True),
+        (T.int8, 48, 80, {}, True),
         # rows that do not start on a 16-byte boundary keep the SIMT loop
-        (T.float16, 16, 16, 4, False),
-        (T.float8_e4m3fn, 16, 16, 8, False),
-        (T.float32, 32, 64, 0, False),
+        (T.float16, 16, 16, {"src_offset": 4}, False),
+        (T.float8_e4m3fn, 16, 16, {"src_offset": 8}, False),
+        # a destination region past the buffer edge keeps the predicated loop
+        (T.float16, 16, 16, {"dst_col": 8}, False),
+        (T.float32, 32, 64, {}, False),
     ]
-    for dtype, M, N, src_offset, matrix in cases:
+    for dtype, M, N, kwargs, matrix in cases:
         kernel = tilelang.compile(
-            tilelang_transpose_staged(M, N, dtype, src_offset),
+            tilelang_transpose_matrix_case(M, N, dtype, **kwargs),
             out_idx=[1],
+            target="cuda",
             pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
         )
-        assert ("ptx_stmatrix" in kernel.get_kernel_source()) == matrix, (dtype, M, N, src_offset)
+        assert ("ptx_stmatrix" in kernel.get_kernel_source()) == matrix, (dtype, M, N, kwargs)
+        src_offset, dst_col = kwargs.get("src_offset", 0), kwargs.get("dst_col", 0)
         torch_dtype = getattr(torch, dtype)
         a = (
             torch.randint(0, 256, (M, src_offset + N), dtype=torch.uint8, device="cuda").view(torch_dtype)
             if torch_dtype.itemsize == 1
             else torch.randn(M, src_offset + N, device="cuda").to(torch_dtype)
         )
-        b = kernel(a)
-        torch.testing.assert_close(_bits(b), _bits(a[:, src_offset:].t().contiguous()), rtol=0, atol=0)
+        expected = torch.zeros(N, M, dtype=torch_dtype, device="cuda")
+        expected[:, dst_col:] = a[: M - dst_col, src_offset:].t()
+        torch.testing.assert_close(_bits(kernel(a)), _bits(expected), rtol=0, atol=0)
 
 
 if __name__ == "__main__":
