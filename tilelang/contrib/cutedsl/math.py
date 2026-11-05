@@ -172,6 +172,8 @@ def truncdiv(x, y, *, loc=None, ip=None):
         q = abs(x) // abs(y)
         return -q if (x < 0) != (y < 0) else q
 
+    if isinstance(x, TensorSSA) and isinstance(y, TensorSSA) and x.shape != y.shape:
+        raise ValueError(f"truncdiv expects tensors of the same shape, but got {x.shape} and {y.shape}")
     if isinstance(x, TensorSSA) or isinstance(y, TensorSSA):
         tensor = x if isinstance(x, TensorSSA) else y
         x = x if isinstance(x, TensorSSA) else cute.full_like(tensor, x, loc=loc, ip=ip)

@@ -69,7 +69,10 @@ def test_truncdiv_runtime_divisors_and_extrema(dtype, lanes):
 
     a = torch.tensor(values, dtype=torch_dtype, device="cuda")
     b = torch.tensor(divisors, dtype=torch_dtype, device="cuda")
-    quotients, remainders = tilelang.compile(kernel, target="cutedsl", out_idx=-1)(a, b).tolist()
+    compiled = tilelang.compile(kernel, target="cutedsl", out_idx=-1)
+    if lanes > 1:
+        assert ".store(tl.truncdiv(" in compiled.get_kernel_source()
+    quotients, remainders = compiled(a, b).tolist()
     for x, y, q, r in zip(values, divisors, quotients, remainders):
         expected = int(Fraction(x, y))
         assert q == expected, (x, y, q, expected)
