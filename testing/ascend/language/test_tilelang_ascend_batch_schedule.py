@@ -10,9 +10,10 @@ import tilelang.testing
 from tilelang import tvm
 
 
-def _two_kernels():
+def _two_kernels(batch: bool):
     @T.prim_func
     def main(out: T.Tensor((2,), "int32")):
+        T.func_attr({"ascend.batch_schedule": batch})
         with T.Kernel(1):
             out[0] = 1
         with T.Kernel(1):
@@ -24,9 +25,10 @@ def _two_kernels():
 @tilelang.testing.requires_ascend(support_required="compile-only")
 @pytest.mark.parametrize("enabled", [None, False, True])
 def test_batch_schedule_survives_host_device_split(enabled):
-    func = _two_kernels()
-    if enabled is not None:
-        func = func.with_attr("ascend.batch_schedule", enabled)
+    if enabled:
+        func = _two_kernels(batch=True)
+    else:
+        func = _two_kernels(batch=False)
     source = tilelang.lower(func, target="ascend").kernel_source
     assert source.count('extern "C"') == 2
     assert source.count("__schedmode__(1)") == (2 if enabled else 0)
