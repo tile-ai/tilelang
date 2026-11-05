@@ -516,7 +516,7 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
         assert (stages[3], order[3]) < (versions[name] + stages[copy], order[copy])
 
 
-@pytest.mark.parametrize("wait_kind", ["wrong_index", "wrong_buffer", "conditional", "missing"])
+@pytest.mark.parametrize("wait_kind", ["wrong_index", "wrong_buffer", "conditional", "missing", "multiple", "buffer_index"])
 def test_pipeline_planning_tcgen05_unproven_completion(wait_kind):
     @T.prim_func
     def main(A: T.Tensor((128, 96), T.float16), B: T.Tensor((96, 96), T.float16)):
@@ -526,16 +526,29 @@ def test_pipeline_planning_tcgen05_unproven_completion(wait_kind):
             C_tmem = T.alloc_tmem((128, 96), T.float32)
             mbar = T.alloc_barrier([1, 1])
             other = T.alloc_barrier(1)
+            selector = T.alloc_local((1,), T.int32)
+            selector[0] = 0
             for k in T.Pipelined(3, num_stages=2):
                 T.copy(A[:, k * 32 : (k + 1) * 32], A_shared)
                 T.copy(B[:, k * 32 : (k + 1) * 32], B_shared)
-                T.tcgen05_gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar[0], clear_accum=k == 0)
+                if wait_kind == "buffer_index":
+                    T.tcgen05_gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar[selector[0]], clear_accum=k == 0)
+                else:
+                    T.tcgen05_gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar[0], clear_accum=k == 0)
                 if wait_kind == "wrong_index":
                     T.mbarrier_wait_parity(mbar[1], k % 2)
                 elif wait_kind == "wrong_buffer":
                     T.mbarrier_wait_parity(other, k % 2)
                 elif wait_kind == "conditional" and k > 0:
                     T.mbarrier_wait_parity(mbar[0], k % 2)
+                elif wait_kind == "multiple":
+                    T.mbarrier_wait_parity(mbar[0], (k + 1) % 2)
+                    T.mbarrier_wait_parity(mbar[0], k % 2)
+                elif wait_kind == "buffer_index":
+                    selector[0] = 1
+                    T.mbarrier_wait_parity(mbar[selector[0]], 1)
+                    T.mbarrier_wait_parity(mbar[0], k % 2)
+                    selector[0] = 0
 
     mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
     mod = tvm.tirx.transform.BindTarget(sm100_target)(mod)

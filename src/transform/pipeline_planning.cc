@@ -676,10 +676,22 @@ public:
   bool ExtendAsyncGemmLifetimes(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     arith::Analyzer analyzer;
+    auto has_buffer_load = [](const PrimExpr &expr) {
+      bool found = false;
+      PostOrderVisit(expr, [&](const ObjectRef &node) {
+        found |= node.as<BufferLoadNode>() != nullptr;
+      });
+      return found;
+    };
     for (size_t i = 0; i < pipeline_stage_infos->size(); ++i) {
       for (const auto &[barrier, operands] :
            (*pipeline_stage_infos)[i].async_gemm_operands) {
-        bool matched = false;
+        for (const PrimExpr &index : barrier->indices) {
+          if (has_buffer_load(index)) {
+            return false;
+          }
+        }
+        int completion_index = -1;
         for (size_t j = i + 1; j < pipeline_stage_infos->size(); ++j) {
           auto &completion = (*pipeline_stage_infos)[j];
           if (completion.conditional_execution) {
@@ -692,34 +704,39 @@ public:
             }
             bool same_indices = true;
             for (size_t k = 0; k < barrier->indices.size(); ++k) {
+              // Equal load expressions need not read the same value at issue
+              // and wait. Do not skip an uncertain wait for another candidate.
+              if (has_buffer_load(wait->indices[k])) {
+                return false;
+              }
               same_indices &=
                   analyzer.CanProveEqual(barrier->indices[k], wait->indices[k]);
             }
             if (same_indices) {
-              for (auto &copy : *pipeline_stage_infos) {
-                if (!copy.IsCopyStage() || copy.original_stmt_index >= i) {
-                  continue;
-                }
-                for (const BufferRegion &operand : operands) {
-                  for (const BufferRegion &write : copy.writes) {
-                    if (PipelineRegionsMayConflict(write, operand,
-                                                   thread_domains_)) {
-                      copy.last_use_stmt_index = std::max(
-                          copy.last_use_stmt_index, static_cast<int>(j));
-                    }
-                  }
-                }
+              // Without phase analysis, multiple waits are ambiguous: the first
+              // may complete an older phase rather than this MMA.
+              if (completion_index != -1) {
+                return false;
               }
-              matched = true;
-              break;
+              completion_index = static_cast<int>(j);
             }
           }
-          if (matched) {
-            break;
-          }
         }
-        if (!matched) {
+        if (completion_index == -1) {
           return false;
+        }
+        for (auto &copy : *pipeline_stage_infos) {
+          if (!copy.IsCopyStage() || copy.original_stmt_index >= i) {
+            continue;
+          }
+          for (const BufferRegion &operand : operands) {
+            for (const BufferRegion &write : copy.writes) {
+              if (PipelineRegionsMayConflict(write, operand, thread_domains_)) {
+                copy.last_use_stmt_index =
+                    std::max(copy.last_use_stmt_index, completion_index);
+              }
+            }
+          }
         }
       }
     }
