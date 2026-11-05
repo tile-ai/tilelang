@@ -211,11 +211,17 @@ def test_kernel_cache_multiple_roots(tmp_path, monkeypatch, invalid):
 @pytest.mark.parametrize("backend", ["cutedsl", "nvrtc"])
 def test_cached_module_import_does_not_write_bytecode(tmp_path, monkeypatch, backend):
     import sys
-    from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
-    from tilelang.jit.adapter.nvrtc.libgen import NVRTCLibraryGenerator
+
+    if backend == "cutedsl":
+        from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator as generator
+    else:
+        from tilelang.jit.adapter.nvrtc import is_nvrtc_available, NVRTC_UNAVAILABLE_MESSAGE
+
+        if not is_nvrtc_available:
+            pytest.skip(NVRTC_UNAVAILABLE_MESSAGE)
+        from tilelang.jit.adapter.nvrtc.libgen import NVRTCLibraryGenerator as generator
 
     monkeypatch.setattr(sys, "dont_write_bytecode", False)
-    generator = CuTeDSLLibraryGenerator if backend == "cutedsl" else NVRTCLibraryGenerator
 
     path = tmp_path / "kernel.py"
     path.write_text("value = 42\n")
