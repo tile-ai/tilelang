@@ -209,7 +209,7 @@ CodeGenTileLangCuTeDSL::CodeGenTileLangCuTeDSL() {
 
   // Read tl.enable_fast_math config, default to false
   enable_fastmath_ =
-      pass_ctx->GetConfig<bool>("tl.enable_fast_math").value_or(false);
+      pass_ctx->GetConfig<bool>(tl::kEnableFastMath).value_or(false);
 }
 
 void CodeGenTileLangCuTeDSL::InitFuncState_(const tirx::Function &f) {

@@ -2,6 +2,7 @@
 #include "ascend/op/nd2nz.h"
 #include "ir/analyzer.h"
 #include "native_ascend_ir.h"
+#include "op/builtin.h"
 #include "support/check.h"
 
 #include <algorithm>
@@ -351,7 +352,7 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
   CodeGenC::Init(output_ssa);
   auto pass_ctx = tvm::transform::PassContext::Current();
   enable_fast_math_ =
-      pass_ctx->GetConfig<bool>("tl.enable_fast_math").value_or(false);
+      pass_ctx->GetConfig<bool>(tl::kEnableFastMath).value_or(false);
   preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
   preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
 }

@@ -8,6 +8,7 @@
 
 #include "ascend/op/builtin.h"
 #include "backend/common/codegen/codegen_utils.h"
+#include "op/builtin.h"
 #include "support/check.h"
 
 #include "ascend/codegen/native_ascend_ir.h"
@@ -1766,7 +1767,7 @@ bool AreComplementaryConditions(const PrimExpr &lhs, const PrimExpr &rhs) {
 CodeGenTileLangPTO::CodeGenTileLangPTO() {
   auto pass_ctx = tvm::transform::PassContext::Current();
   enable_fast_math_ =
-      pass_ctx->GetConfig<bool>("tl.enable_fast_math").value_or(false);
+      pass_ctx->GetConfig<bool>(tl::kEnableFastMath).value_or(false);
 }
 
 void CodeGenTileLangPTO::ValidateVecMode_(const CallObj *op, size_t mode_idx,
