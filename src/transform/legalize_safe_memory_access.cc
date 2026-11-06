@@ -6,7 +6,7 @@
 #include "../ir/analyzer.h"
 #include "../ir/annotations.h"
 #include "../op/utils.h"
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "common/constr_visitor.h"
 #include "cuda/op/builtin.h"
 #include "ir/annotations.h"

@@ -3,7 +3,7 @@
  * \brief Prepare Ascend execution-region contracts for code generation.
  */
 
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "ir/annotations.h"
 
 #include <tvm/ffi/reflection/registry.h>

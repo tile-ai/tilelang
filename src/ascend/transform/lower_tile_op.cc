@@ -2,7 +2,6 @@
  * \file ascend/transform/lower_tile_op.cc
  * \brief Native Ascend lowering and retirement of validated MX slot handles.
  */
-#include "ascend/ir/block.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "ir/annotations.h"

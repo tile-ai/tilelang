@@ -23,7 +23,6 @@
 #ifndef TILELANG_ASCEND_TRANSFORM_SOURCE_SCOPES_H_
 #define TILELANG_ASCEND_TRANSFORM_SOURCE_SCOPES_H_
 
-#include "ascend/ir/block.h"
 #include "ascend/ir/task.h"
 #include "ir/annotations.h"
 #include "ir/stmt_functor.h"

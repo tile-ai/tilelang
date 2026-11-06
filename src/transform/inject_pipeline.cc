@@ -3,7 +3,7 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers.
  */
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "backend/common/target_utils.h"
 #include "common/bind_utils.h"
 #include "common/pipeline_access.h"

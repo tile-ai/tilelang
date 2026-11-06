@@ -6,7 +6,6 @@
  * acquire predicates here; DMA lowering derives copy guards from the final
  * possibly-empty regions after scheduling.
  */
-#include "ascend/ir/block.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"

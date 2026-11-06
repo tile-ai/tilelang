@@ -3,7 +3,7 @@
  * \brief infer the fragment/shared memory layout
  */
 
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "ir/analyzer.h"
 #include "layout/expr_utils.h"
 #include "support/check.h"

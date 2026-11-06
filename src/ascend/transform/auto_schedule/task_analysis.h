@@ -20,6 +20,7 @@
 #pragma once
 
 #include "ascend/ir/task.h"
+#include "ascend/op/builtin.h"
 #include "ascend/transform/source_scopes.h"
 #include "ir/stmt_functor.h"
 #include "ir_structure.h"

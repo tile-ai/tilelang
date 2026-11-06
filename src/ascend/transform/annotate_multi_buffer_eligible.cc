@@ -28,6 +28,7 @@
  *  T.annotate_buffer_versions({buf: 1}) removes the storage from eligibility;
  *  (1, mode) retains eligibility.
  */
+#include "ascend/op/builtin.h"
 #include "ascend/transform/source_scopes.h"
 #include "ir/loop_annotations.h"
 #include "ir/stmt_functor.h"

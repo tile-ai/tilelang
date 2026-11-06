@@ -2,7 +2,7 @@
  * \file lower_tile_op.cc
  * \brief Lower TileLang operators and logical layouts into native typed IR.
  */
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "ir/lexical_scope.h"
 #include "ir/stmt_functor.h"
 #include "layout/expr_utils.h"

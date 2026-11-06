@@ -22,6 +22,7 @@
  * \brief Normalize native task boundaries without hiding SSA definitions.
  */
 
+#include "ascend/op/builtin.h"
 #include "ascend/transform/source_scopes.h"
 #include "auto_schedule/kernel_rewriter.h"
 #include "auto_schedule/task_resource.h"

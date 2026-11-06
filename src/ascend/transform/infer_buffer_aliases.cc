@@ -28,6 +28,7 @@
  */
 #include "ascend/ir/core_mask.h"
 #include "ascend/ir/task.h"
+#include "ascend/op/builtin.h"
 #include "ascend/transform/source_scopes.h"
 #include "ascend_pipe.h"
 #include "auto_schedule/multi_buffer.h"

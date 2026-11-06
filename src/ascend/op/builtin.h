@@ -7,9 +7,32 @@
 #define TVM_TL_ASCEND_OP_BUILTIN_H_
 
 #include <tvm/ir/op.h>
+#include <tvm/ir/stmt.h>
 
 namespace tvm {
 namespace tl {
+
+// Native execution-domain operator for CUBE, VECTOR, SIMD_VF and SIMT_VF.
+namespace ascend {
+
+TVM_TIRX_DLL const Op &ascend_block_op();
+
+inline bool IsAscendBlock(const RegionStmtObj *region) {
+  return region && region->op.same_as(ascend_block_op());
+}
+
+enum class VFKind { kNone, kSimd, kSimt };
+
+inline VFKind GetVFKind(const RegionStmtObj *region) {
+  if (!IsAscendBlock(region))
+    return VFKind::kNone;
+  const auto name = region->attrs.GetAttr<ffi::String>("name").value();
+  return name == "SIMD_VF"   ? VFKind::kSimd
+         : name == "SIMT_VF" ? VFKind::kSimt
+                             : VFKind::kNone;
+}
+
+} // namespace ascend
 
 // Ascend-specific pass configuration keys. Their string values remain stable
 // because they are part of the Python PassContext interface.

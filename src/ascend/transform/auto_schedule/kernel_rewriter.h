@@ -26,6 +26,7 @@
 
 #include "ascend/analysis/storage.h"
 #include "ascend/ir/task.h"
+#include "ascend/op/builtin.h"
 #include "ascend/transform/source_scopes.h"
 #include "transform/common/constr_visitor.h"
 #include <tvm/tirx/op/region.h>

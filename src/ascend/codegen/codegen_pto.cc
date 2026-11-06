@@ -11,7 +11,6 @@
 #include "op/builtin.h"
 #include "support/check.h"
 
-#include "ascend/ir/block.h"
 #include "ascend/target_utils.h"
 #include "op/utils.h"
 #include <algorithm>

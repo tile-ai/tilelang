@@ -22,7 +22,6 @@
  * \brief Split native software dual copies using the lexical AIV subcore.
  */
 
-#include "ascend/ir/block.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"

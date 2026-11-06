@@ -2,7 +2,7 @@
  * \file ascend/transform/layout_inference.cc
  * \brief Ascend region policy over the shared native layout inference engine.
  */
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "ir/analyzer.h"

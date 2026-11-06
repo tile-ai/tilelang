@@ -22,6 +22,7 @@
  */
 #include "transform/thread_storage_sync.h"
 #include "ascend/ir/task.h"
+#include "ascend/op/builtin.h"
 #include "ascend/target_utils.h"
 #include "ascend/transform/source_scopes.h"
 #include "op/builtin.h"

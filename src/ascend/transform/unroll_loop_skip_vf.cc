@@ -21,7 +21,7 @@
  * \file unroll_loop_skip_vf.cc
  * \brief Expand explicit native loops while preserving Ascend VF bodies.
  */
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "ir/annotations.h"
 #include "ir/loop_annotations.h"
 #include "ir/loop_math.h"

@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "ascend/op/builtin.h"
 #include "ir/loop_annotations.h"
 #include "transform/common/constr_visitor.h"
 #include <tvm/ffi/any.h>

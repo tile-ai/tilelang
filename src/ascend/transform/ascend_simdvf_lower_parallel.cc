@@ -5,7 +5,7 @@
  * \file ascend_simdvf_lower_parallel.cc
  * \brief Lower native SIMD_VF parallel loops and tile ops to register SSA.
  */
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "ir/annotations.h"
 #include "ir/loop_math.h"
 #include "ir/tensor_utils.h"

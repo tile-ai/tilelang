@@ -4,7 +4,7 @@
  */
 
 #include "annotations.h"
-#include "ascend/ir/block.h"
+#include "ascend/op/builtin.h"
 #include "layout/payload.h"
 #include "lexical_scope.h"
 #include "transform/common/warp_specialize.h"

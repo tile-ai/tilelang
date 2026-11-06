@@ -18,7 +18,6 @@
  */
 
 #include "storage.h"
-#include "ascend/ir/block.h"
 #include "ascend/ir/task.h"
 #include "ascend/transform/source_scopes.h"
 #include "ir/annotations.h"

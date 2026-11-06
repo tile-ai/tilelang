@@ -7,6 +7,7 @@
  * the native For stores an exclusive end, not the former (min, extent) pair.
  */
 
+#include "ascend/op/builtin.h"
 #include "ir/loop_annotations.h"
 #include "layout/expr_utils.h"
 #include <tvm/ffi/extra/structural_visit.h>

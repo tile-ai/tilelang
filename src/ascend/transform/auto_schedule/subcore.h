@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "ascend/op/builtin.h"
 #include "ascend/transform/source_scopes.h"
 #include "ir/annotations.h"
 #include "ir/lexical_scope.h"

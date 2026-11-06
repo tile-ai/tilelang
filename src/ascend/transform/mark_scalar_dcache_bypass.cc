@@ -2,7 +2,6 @@
  * \file mark_scalar_dcache_bypass.cc
  * \brief Bypass scalar GM dcache for physical storage that is written.
  */
-#include "ascend/ir/block.h"
 #include "ascend/op/builtin.h"
 #include "ir/alias_analysis.h"
 #include "ir/annotations.h"
