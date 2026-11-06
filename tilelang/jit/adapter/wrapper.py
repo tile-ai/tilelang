@@ -742,6 +742,7 @@ class TLCPUSourceWrapper:
     _TYPE_MAP = {
         "float32": "float",
         "float16": "half",
+        "bfloat16": "uint16_t",
         "int32": "int32_t",
         "int8": "int8_t",
         "uint8": "uint8_t",

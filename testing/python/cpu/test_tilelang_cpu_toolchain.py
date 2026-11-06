@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from tilelang.cpu import toolchain
+from tilelang.cpu import amx_target
 from tilelang import tvm
 
 
@@ -32,6 +33,43 @@ def test_cpu_openmp_runtime_flags():
     assert "-O2" in flags
     if sys.platform != "win32" and (sys.platform != "darwin" or toolchain._find_libomp() is not None):
         assert "-fopenmp" in flags
+
+
+@pytest.mark.parametrize("backend", ["cython", "tvm_ffi"])
+def test_amx_compile_flags(backend):
+    flags = toolchain.get_compile_flags(amx_target(), {}, execution_backend=backend)
+    assert flags == [
+        "-O3",
+        "-mavx512f",
+        "-mavx512bw",
+        "-mavx512vbmi",
+        "-mamx-tile",
+        "-mamx-bf16",
+        "-mamx-int8",
+    ]
+
+
+def test_amx_target_is_explicit_c_target():
+    target = amx_target()
+    assert target.kind.name == "c"
+    assert {str(key) for key in target.keys} == {"cpu", "amx"}
+    with pytest.raises(ValueError, match="requires the TileLang 'c' target"):
+        amx_target("llvm")
+
+
+def test_amx_and_openmp_compile_flags(monkeypatch):
+    monkeypatch.setattr(toolchain.sys, "platform", "linux")
+    flags = toolchain.get_compile_flags(amx_target(), {"tl.cpu_parallel": True}, execution_backend="cython")
+    assert flags == [
+        "-O3",
+        "-mavx512f",
+        "-mavx512bw",
+        "-mavx512vbmi",
+        "-mamx-tile",
+        "-mamx-bf16",
+        "-mamx-int8",
+        "-fopenmp",
+    ]
 
 
 @pytest.mark.parametrize("backend,expected", [("cython", ["-O2"]), ("tvm_ffi", [])])
