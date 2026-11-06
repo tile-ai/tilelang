@@ -286,33 +286,30 @@ bool IsSemanticallyLinearLayout(const Layout &layout,
                                  linear_layout->GetLinearizedForwardIndex());
 }
 
-bool IsContiguousGlobalRegion(const Buffer &global_tensor,
-                              const Array<Range> &global_range,
+bool IsContiguousBufferRegion(const Buffer &buffer, const Array<Range> &region,
                               arith::Analyzer *analyzer) {
-  ICHECK_EQ(global_range.size(), global_tensor->shape.size());
-  ICHECK(global_tensor->strides.empty() ||
-         global_tensor->strides.size() == global_tensor->shape.size());
+  ICHECK_EQ(region.size(), buffer->shape.size());
+  ICHECK(buffer->strides.empty() ||
+         buffer->strides.size() == buffer->shape.size());
 
   // Pointer-based 1D TMA can coalesce multiple logical dimensions only when
   // every varying dimension is packed directly after its contiguous suffix.
   bool non_full_dim_encountered = false;
   PrimExpr expected_stride = 1;
-  for (int i = static_cast<int>(global_range.size()) - 1; i >= 0; --i) {
+  for (int i = static_cast<int>(region.size()) - 1; i >= 0; --i) {
     bool is_singleton = analyzer->CanProve(
-        global_range[i]->extent == 1, arith::ProofStrength::kSymbolicBound);
+        region[i]->extent == 1, arith::ProofStrength::kSymbolicBound);
     if (!non_full_dim_encountered) {
-      if (!is_singleton && !global_tensor->strides.empty() &&
-          !analyzer->CanProveEqual(global_tensor->strides[i],
-                                   expected_stride)) {
+      if (!is_singleton && !buffer->strides.empty() &&
+          !analyzer->CanProveEqual(buffer->strides[i], expected_stride)) {
         return false;
       }
 
       bool is_full_dim = analyzer->CanProve(
-          global_range[i]->extent == global_tensor->shape[i] &&
-              global_range[i]->min == 0,
+          region[i]->extent == buffer->shape[i] && region[i]->min == 0,
           arith::ProofStrength::kSymbolicBound);
       if (is_full_dim) {
-        expected_stride *= global_tensor->shape[i];
+        expected_stride *= buffer->shape[i];
       } else {
         non_full_dim_encountered = true;
       }
@@ -327,16 +324,18 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
                      const Array<Range> &global_range,
                      const Array<Range> &shared_range,
                      const LayoutMap &layout_map, arith::Analyzer *analyzer) {
-  bool shared_is_contiguous = true;
+  bool shared_is_contiguous =
+      IsContiguousBufferRegion(shared_tensor, shared_range, analyzer);
   if (layout_map.count(shared_tensor)) {
     Layout existing =
         layout_map.Get(shared_tensor).value().as<Layout>().value();
     shared_is_contiguous =
+        shared_is_contiguous &&
         IsSemanticallyLinearLayout(existing, shared_tensor->shape, analyzer);
   }
 
   bool global_is_contiguous =
-      IsContiguousGlobalRegion(global_tensor, global_range, analyzer);
+      IsContiguousBufferRegion(global_tensor, global_range, analyzer);
 
   PrimExpr shared_elements = 1;
   for (size_t i = 0; i < shared_range.size(); i++) {
