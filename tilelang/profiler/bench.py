@@ -54,6 +54,10 @@ def do_bench(
     explicit CUDA/HIP, MPS, or NPU device enables synchronization before and after
     each wall-clock sample, including launch and synchronization overhead.
 
+    NPU event and msprof timing require a device and CANN runtime supporting
+    aclrtDeviceL2CacheFlush. Cache flushing is excluded from the returned kernel
+    timings, including any deferred output writeback performed by the next flush.
+
     Args:
         fn: Function to benchmark
         warmup: Target warmup time in milliseconds (default: 25)
@@ -67,7 +71,7 @@ def do_bench(
             cache buffers, and synchronization are scoped to that device.
             Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
             Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
-        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
+        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall" and NPU timing
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
@@ -191,8 +195,8 @@ def _do_bench_impl(
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
+    cache_device_type = torch.device(_cache_device(device_idx)).type
     if backend in ("cupti", "cudagraph"):
-        cache_device_type = torch.device(_cache_device(device_idx)).type
         if cache_device_type == "mps":
             raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
         if cache_device_type == "npu":
@@ -202,29 +206,46 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    # Create an int32 L2 cache flush buffer (`cache_size` MB).
-    cache_numel = cache_size * 1024 * 1024 // 4
-    cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
+    if cache_device_type == "npu":
+        from .npu import flush_l2_cache as flush_cache
 
-    # Warm the flush buffer once outside the timed estimate: the first
-    # kernel launch may pay one-time backend init (e.g. ~250 ms on torch_npu).
-    # Read the buffer to evict L2 without dirty cache lines requiring writeback.
-    # Reduce independent chunks to avoid global reduction synchronization.
-    # Preserve the dtype to avoid a full-buffer int64 cast.
-    cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
+        cache = None
+    else:
+        cache_numel = cache_size * 1024 * 1024 // 4
+        cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
+
+        def flush_cache():
+            # Read independent chunks without dirtying the flush buffer or
+            # allocating a full-buffer int64 cast.
+            cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
+
+    # Warm cache maintenance outside the estimate to exclude backend setup.
+    flush_cache()
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
     start_event = Event(enable_timing=True)
     end_event = Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
-        fn()
-    end_event.record()
-    start_event.synchronize()
-    end_event.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
+    if cache_device_type == "npu":
+        # The synchronous host flush must not inflate the kernel estimate or
+        # trigger early stopping solely because cache maintenance is expensive.
+        estimate_ms = 0.0
+        for _ in range(5):
+            flush_cache()
+            start_event.record()
+            fn()
+            end_event.record()
+            end_event.synchronize()
+            estimate_ms += start_event.elapsed_time(end_event) / 5
+    else:
+        start_event.record()
+        for _ in range(5):
+            flush_cache()
+            fn()
+        end_event.record()
+        start_event.synchronize()
+        end_event.synchronize()
+        estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # Early stop: skip full benchmark if estimate exceeds baseline
     if early_stop_baseline is not None and estimate_ms > early_stop_baseline:

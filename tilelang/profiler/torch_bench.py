@@ -62,20 +62,27 @@ class suppress_stdout_stderr:
 
 def bench_with_cuda_events(
     fn: Callable,
-    cache: torch.Tensor,
+    cache: torch.Tensor | None,
     n_repeat: int,
     quantiles: list[float] | None,
     return_mode: str,
     device_idx: int | torch.device | None,
 ) -> float | list[float]:
-    """Benchmark using CUDA/HIP or MPS events for timing."""
+    """Benchmark using CUDA/HIP, MPS, or NPU events for timing."""
+    if cache is None:
+        from .npu import flush_l2_cache as flush_cache
+    else:
+
+        def flush_cache():
+            cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
+
     # Create timing events
     start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
     end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
 
     # Run benchmark iterations
     for i in range(n_repeat):
-        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer
+        flush_cache()
         start_events[i].record()
         fn()
         end_events[i].record()
