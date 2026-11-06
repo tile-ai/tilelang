@@ -63,7 +63,9 @@ struct ascend_nd2nz_scatter_impl<
     int pass = 0;
     while (count > 0) {
       vector_bool mask;
-      if constexpr (sizeof(T) == 2) {
+      if constexpr (sizeof(T) == 1) {
+        mask = asc_update_mask_b8(count);
+      } else if constexpr (sizeof(T) == 2) {
         mask = asc_update_mask_b16(count);
       } else if constexpr (sizeof(T) == 4) {
         mask = asc_update_mask_b32(count);

@@ -3,7 +3,7 @@
 import pytest
 from tilelang import tvm
 from tilelang.ascend import language as T, transform
-from tilelang.layout import make_ascend_compact_nz_layout
+from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout
 from tvm import tirx
 from testing.ascend._ir import calls
 
@@ -269,3 +269,25 @@ def test_explicit_post_copy_checks_capacity_relative_to_view(elem_offset, index,
     else:
         with pytest.raises(ValueError, match="physical span exceeds"):
             transform.InsertNd2Nz()(before)
+
+
+# Lower a full FP8 ND tile to scatter plus UB-to-L1 post-copy.
+def test_fp8_automatic_l1_scatter_lowering():
+    @T.prim_func
+    def before():
+        with T.sblock("root"):
+            src = T.alloc_shared((16, 288), "float8_e4m3fn")
+            dst = T.alloc_l1((16, 288), "float8_e4m3fn")
+            T.sblock_attr({"layout_map": {dst: make_ascend_nz_layout(dst)}})
+            T.copy(src, dst)
+
+    after = transform.InsertNd2Nz()(tvm.IRModule({"main": before}))
+    (scatter,) = calls(after, "tl.ascend_nd2nz_scatter")
+    (post_copy,) = calls(after, "tl.ascend_nd2nz_post_copy")
+    assert not calls(after, "tl.tileop.ascend_copy")
+    assert [str(x.value) for x in scatter.args[5:7]] == ["fp8_e4_t", "fp8_e4_t"]
+    assert [int(x) for x in scatter.args[2:4]] == [16, 288]
+    assert [int(x) for x in post_copy.args[2:6]] == [16, 288, 17, 16]
+    analyzer = tvm.arith.Analyzer()
+    assert int(analyzer.simplify(scatter.args[0].args[1])) == 16 * 288
+    assert int(analyzer.simplify(scatter.args[1].args[1])) == 17 * 288
