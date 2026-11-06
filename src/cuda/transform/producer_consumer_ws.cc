@@ -1415,6 +1415,56 @@ private:
       compute_cursor = wait_pos;
     }
 
+    // Statements moved into a group's producer prefix run under that group's
+    // back-pressure wait, so the group's consumer release must also cover the
+    // last consumer access of every shared buffer they write. Otherwise the
+    // producer can overwrite that stage while the consumer still reads it
+    // (e.g. a synchronous scale copy moved in front of a TMA A load whose
+    // release is placed right after A is copied to registers).
+    for (int ti = 0; ti < num_producer_groups; ++ti) {
+      std::vector<Var> prefix_written;
+      auto add_written = [&](const Var &data) {
+        for (const auto &v : prefix_written) {
+          if (v.same_as(data))
+            return;
+        }
+        prefix_written.push_back(data);
+      };
+      for (const auto &stmt : producer_loop_prefix_stmts[ti]) {
+        if (Optional<Var> w = ExtractProducerWriteBufferData(stmt)) {
+          add_written(w.value());
+        }
+        PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+          if (const auto *store = obj.as<BufferStoreNode>()) {
+            if (IsSharedBuffer(store->buffer)) {
+              add_written(store->buffer->data);
+            }
+          }
+        });
+      }
+      for (const auto &data : prefix_written) {
+        for (int ci = static_cast<int>(consumer_compute_stmts.size()) - 1;
+             ci >= 0; --ci) {
+          if (moved_compute_stmts[ci]) {
+            continue;
+          }
+          BufferDataAccessInfo access = AnalyzeBufferDataAccess(
+              consumer_compute_stmts[ci], data, buffer_data_to_buffer_);
+          if (access.HasAnyAccess()) {
+            arrive_insert_pos[ti] = std::max(arrive_insert_pos[ti], ci + 1);
+            break;
+          }
+        }
+      }
+    }
+    if (can_merge_tma_barriers) {
+      int merged_arrive = arrive_insert_pos[0];
+      for (int g = 1; g < num_producer_groups; ++g) {
+        merged_arrive = std::max(merged_arrive, arrive_insert_pos[g]);
+      }
+      arrive_insert_pos[0] = merged_arrive;
+    }
+
     bool producer_needs_full_thread_extent = false;
     for (size_t i = 0;
          i < flat_stmts.size() && !producer_needs_full_thread_extent; ++i) {
