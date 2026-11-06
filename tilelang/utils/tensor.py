@@ -265,7 +265,7 @@ def torch_assert_close(
     # If there are mismatched elements, print the first mismatch
     if num_mismatched > 0:
         # Find the first mismatch index
-        flat_idx = torch.argmax(mismatched.view(-1).int()).item()
+        flat_idx = torch.argmax(mismatched.reshape(-1).int()).item()
         idx = np.unravel_index(flat_idx, tensor_a.shape)
         idx = [int(i) for i in idx]
         a_val = tensor_a.reshape(-1)[flat_idx].item()
