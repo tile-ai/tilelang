@@ -2154,6 +2154,7 @@ def test_warp_uniform_rejection_names_the_split_wave():
     message = str(excinfo.value)
     assert "not warp-uniform" in message
     assert "wave 1" in message, message
+    assert "threads 0-31 take the branch" in message, message
     assert "64 thread(s)" in message, message
     assert "wave-aligned bounds" in message, message
     assert "T.assume" in message, message
@@ -2193,14 +2194,6 @@ def test_warp_uniform_guard_within_one_wave_still_lowers():
     _assert_partial_sync_params(syncs, 64)
 
 
-def test_warp_uniform_rejection_keeps_the_original_wording():
-    """Existing callers match on "not warp-uniform"; keep that prefix stable."""
-    import pytest
-
-    with pytest.raises(Exception, match="not warp-uniform"):
-        _run_passes_with_warp_size(_split_wave_guard_func(), 64)
-
-
 def test_wave_diagnostic_handles_multiple_thread_rows():
     """Both waves 1 and 3 split; no single-wave explanation is valid."""
 
@@ -2221,7 +2214,9 @@ def test_wave_diagnostic_handles_multiple_thread_rows():
 
     with pytest.raises(Exception, match="not warp-uniform") as excinfo:
         _run_passes_with_warp_size(func, 64)
-    assert "every wave except" not in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "every wave except" not in message
+    assert "64 thread(s); a partial barrier needs whole waves." in message
 
 
 def test_wave_diagnostic_identifies_split_in_second_row():
