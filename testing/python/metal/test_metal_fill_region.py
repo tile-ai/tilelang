@@ -105,6 +105,64 @@ def test_partial_fill_preserves_outside(row_begin, row_end, col_begin, col_end, 
     torch.testing.assert_close(output.cpu(), reference, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "row_begin,row_end,col_begin,col_end,expected",
+    [*_CASES, pytest.param(8, 16, 8, 16, [3], id="both-mins")],
+)
+@pytest.mark.parametrize("shared", [False, True], ids=["global", "shared"])
+def test_partial_fill_copy_region(row_begin, row_end, col_begin, col_end, expected, shared):
+    rows, cols = row_end - row_begin, col_end - col_begin
+
+    @T.prim_func
+    def kernel(output: T.Tensor((24, 24), T.float32)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((16, 16), T.float32, scope="metal.simdgroup")
+            T.fill(buf, T.float32(-7))
+            T.fill(buf[row_begin:row_end, col_begin:col_end], T.float32(3))
+            if shared:
+                staging = T.alloc_shared((24, 24), T.float32)
+                T.fill(staging, T.float32(5))
+                T.copy(buf[row_begin:row_end, col_begin:col_end], staging[8 : 8 + rows, 8 : 8 + cols])
+                T.copy(staging, output)
+            else:
+                T.copy(buf[row_begin:row_end, col_begin:col_end], output[8 : 8 + rows, 8 : 8 + cols])
+
+    compiled = tilelang.compile(kernel, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    output = torch.full((24, 24), 5.0, dtype=torch.float32, device="mps")
+    compiled(output)
+    torch.mps.synchronize()
+    reference = torch.full((24, 24), 5.0, dtype=torch.float32)
+    reference[8 : 8 + rows, 8 : 8 + cols] = 3
+    torch.testing.assert_close(output.cpu(), reference, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "threads,active_threads,row_begin,row_end,reason",
+    [
+        pytest.param(64, 64, 0, 16, "exactly one simdgroup", id="multi-group"),
+        pytest.param(64, 32, 0, 16, "exactly one simdgroup", id="predicated-group"),
+        pytest.param((32, 2), 32, 0, 16, "exactly one simdgroup", id="2d-launch"),
+        pytest.param(32, 16, 0, 16, "complete simdgroup execution range", id="incomplete-group"),
+        pytest.param(32, 32, 1, 9, "8-aligned", id="unaligned-min"),
+        pytest.param(32, 32, 0, 7, "8-aligned", id="unaligned-extent"),
+    ],
+)
+def test_partial_source_copy_diagnostic(threads, active_threads, row_begin, row_end, reason):
+    @T.prim_func
+    def kernel(output: T.Tensor((16, 8), T.float32)):
+        with T.Kernel(1, threads=threads):
+            buf = T.alloc_local((16, 16), T.float32, scope="metal.simdgroup")
+            T.fill(buf, T.float32(3))
+            tx = T.get_thread_binding()
+            if tx < active_threads:
+                T.copy(buf[row_begin:row_end, 0:8], output[0 : row_end - row_begin, 0:8])
+
+    with pytest.raises(ValueError, match="Metal partial-source copy:.*" + reason):
+        _lower(kernel)
+
+
 def _make_predicated_fill_kernel(threads, begin, end):
     @T.prim_func
     def kernel(output: T.Tensor((16, 16), T.float32)):
