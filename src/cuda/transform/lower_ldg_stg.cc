@@ -70,10 +70,10 @@ public:
       // Check if stride is 1 (contiguous access)
       if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
         if (stride_imm->value == 1) {
-          // Get lanes from the index dtype
-          int lanes = store->indices[0]->dtype.lanes();
-          // Use bits() to correctly handle sub-byte types like float4_e2m1fn
-          int total_bits = lanes * store->buffer->dtype.bits();
+          // The access dtype includes buffer element and index lanes.
+          // Use bits() to also handle sub-byte types.
+          int total_bits =
+              store->value.dtype().bits() * store->value.dtype().lanes();
 
           // Check for supported vector widths (32/64/128/256 bits)
           if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
@@ -82,9 +82,9 @@ public:
           }
         }
       }
-    } else {
-      // Single element store (non-Ramp)
-      int bits = store->buffer->dtype.bits();
+    } else if (store->indices[0].dtype().is_scalar()) {
+      // Single buffer element, which may itself be vector-valued.
+      int bits = store->value.dtype().bits() * store->value.dtype().lanes();
       if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
         return LowerToSTG(store, store->indices[0], bits);
       }
@@ -143,11 +143,10 @@ public:
             // Check if stride is 1 (contiguous access)
             if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
               if (stride_imm->value == 1) {
-                // Get lanes from the index dtype
-                int lanes = store->indices[0]->dtype.lanes();
-                // Use bits() to correctly handle sub-byte types like
-                // float4_e2m1fn
-                int total_bits = lanes * store->buffer->dtype.bits();
+                // The access dtype includes buffer element and index lanes.
+                // Use bits() to also handle sub-byte types.
+                int total_bits =
+                    store->value.dtype().bits() * store->value.dtype().lanes();
 
                 // Check for supported vector widths (32/64/128/256 bits)
                 if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
@@ -157,9 +156,10 @@ public:
                 }
               }
             }
-          } else {
-            // Single element predicated store (non-Ramp)
-            int bits = store->buffer->dtype.bits();
+          } else if (store->indices[0].dtype().is_scalar()) {
+            // Single buffer element, which may itself be vector-valued.
+            int bits =
+                store->value.dtype().bits() * store->value.dtype().lanes();
             if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
               return LowerToSTGPredicated(store, store->indices[0], bits,
                                           if_stmt->condition);
@@ -200,10 +200,9 @@ public:
       // Check if stride is 1 (contiguous access)
       if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
         if (stride_imm->value == 1) {
-          // Get lanes from the index dtype
-          int lanes = load->indices[0]->dtype.lanes();
-          // Use bits() to correctly handle sub-byte types like float4_e2m1fn
-          int total_bits = lanes * load->buffer->dtype.bits();
+          // The access dtype includes buffer element and index lanes.
+          // Use bits() to also handle sub-byte types.
+          int total_bits = load->dtype.bits() * load->dtype.lanes();
 
           // Check for supported vector widths (32/64/128/256 bits)
           if (total_bits == 32 || total_bits == 64 || total_bits == 128 ||
@@ -216,9 +215,9 @@ public:
           }
         }
       }
-    } else {
-      // Single element load (non-Ramp)
-      int bits = load->buffer->dtype.bits();
+    } else if (load->indices[0].dtype().is_scalar()) {
+      // Single buffer element, which may itself be vector-valued.
+      int bits = load->dtype.bits() * load->dtype.lanes();
       if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
         if (use_predicated) {
           return LowerToLDGPredicated(load, load->indices[0], bits,
@@ -275,11 +274,9 @@ public:
               auto ramp = load->indices[0].as<RampNode>();
               if (auto stride_imm = ramp->stride.as<IntImmNode>()) {
                 if (stride_imm->value == 1) {
-                  // Get lanes from the index dtype
-                  int lanes = load->indices[0]->dtype.lanes();
-                  // Use bits() to correctly handle sub-byte types like
-                  // float4_e2m1fn
-                  int total_bits = lanes * load->buffer->dtype.bits();
+                  // The access dtype includes buffer element and index lanes.
+                  // Use bits() to also handle sub-byte types.
+                  int total_bits = load->dtype.bits() * load->dtype.lanes();
 
                   // Check for supported vector widths (32/64/128/256 bits)
                   if (total_bits == 32 || total_bits == 64 ||
@@ -289,9 +286,9 @@ public:
                   }
                 }
               }
-            } else {
-              // Single element predicated load (non-Ramp)
-              int bits = load->buffer->dtype.bits();
+            } else if (load->indices[0].dtype().is_scalar()) {
+              // Single buffer element, which may itself be vector-valued.
+              int bits = load->dtype.bits() * load->dtype.lanes();
               if (bits == 32 || bits == 64 || bits == 128 || bits == 256) {
                 return LowerToLDGPredicated(load, load->indices[0], bits,
                                             condition);
