@@ -192,7 +192,7 @@ def test_ptodsl_frontend_subprocess_resolves_installed_ptodsl(tmp_path):
     assert out_path.read_text(encoding="utf-8") == "module {}"
 
 
-def test_pto_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
+def test_pto_binary_cache_corrupted_entry_raises(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     compile_calls = []
     compile_pto = _patch_callback(monkeypatch, compile_calls)
@@ -200,14 +200,18 @@ def test_pto_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     target = Target({"kind": "ascend"})
     source = "from ptodsl import pto\n"
 
-    first = compile_pto(source, target)
+    compile_pto(source, target)
     assert len(compile_calls) == 1
 
     [cache_file] = (tmp_path / "cache").glob(f"*/pto-binaries/*/kernel.{AIBIN}")
-    # Same-size in-place corruption, so only the metadata sha256 check can
-    # catch it.
-    cache_file.write_bytes(b"\x00" * cache_file.stat().st_size)
+    # Same-size corruption, as left behind by a crashed writer/filesystem client.
+    corrupted = b"\x00" * cache_file.stat().st_size
+    cache_file.write_bytes(corrupted)
+    metadata_path = cache_file.parent / "metadata.json"
+    original_metadata = metadata_path.read_bytes()
 
-    recovered = compile_pto(source, target)
-    assert bytes(recovered) == bytes(first)
-    assert len(compile_calls) == 2
+    with pytest.raises(ValueError, match="checksum"):
+        compile_pto(source, target)
+    assert len(compile_calls) == 1
+    assert cache_file.read_bytes() == corrupted
+    assert metadata_path.read_bytes() == original_metadata
