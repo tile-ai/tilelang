@@ -891,6 +891,19 @@ def test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma():
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_multi_versioned_small_smem_aligned_for_tma():
+    """Each version of a 64-byte shared buffer starts on the 128-byte
+    alignment that a tensor TMA destination needs, so the versions are padded."""
+    func = _wide_linear_reduce_kernel(rows=8, mids=2, width=8, batches=4, rows_per_batch=2, dtype="float32")
+    kernel = tilelang.compile(func, target="cuda")
+    src = kernel.get_kernel_source()
+    assert "__launch_bounds__(256, 1)" in src
+    assert "tl::tma_load(src_desc" in src
+    _run_wide_linear_reduce(kernel, 8, 2, 8, "float32")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_tiled_ws_wide_linear_smem_multi_way_box_split():
     """1024 bf16 columns force a (256, 4) split of the contiguous box mode."""
     func = _wide_linear_reduce_kernel(rows=64, mids=2, width=1024, batches=4, rows_per_batch=16, dtype="bfloat16")
@@ -928,5 +941,6 @@ if __name__ == "__main__":
     test_tiled_ws_keeps_shared_prelude_local_vars_for_grouped_gemm()
     test_tiled_ws_does_not_clone_local_var_into_producer_branch()
     test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
+    test_tiled_ws_multi_versioned_small_smem_aligned_for_tma()
     test_tiled_ws_wide_linear_smem_multi_way_box_split()
     test_tiled_ws_wide_linear_smem_three_stages()

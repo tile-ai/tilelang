@@ -14,6 +14,7 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <functional>
+#include <numeric>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -325,12 +326,56 @@ public:
       Var buffer_var = buffer->data;
       rewriter.buffer_data_to_buffer_.Set(buffer_var, buffer);
     }
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      const auto *block = node.as<SBlockNode>();
+      if (block == nullptr || !block->annotations.count(attr::kLayoutMap)) {
+        return;
+      }
+      auto layout_map = block->annotations.Get(attr::kLayoutMap)
+                            .value()
+                            .as<Map<Var, Layout>>();
+      if (!layout_map.has_value()) {
+        return;
+      }
+      for (const auto &[var, _] : layout_map.value()) {
+        rewriter.annotated_layout_vars_.insert(var.get());
+      }
+    });
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
 
 private:
   explicit MultiVersionBufferRewriter() = default;
+
+  // A bulk tensor copy (TMA) needs a shared memory destination aligned to 128
+  // bytes, so each version of a buffer starts at a multiple of this size.
+  static constexpr int64_t kVersionAlignBytes = 128;
+
+  // Returns the extent of the outermost dimension that makes one version of
+  // buffer a multiple of kVersionAlignBytes, or the extent itself when the
+  // version already is one or its size is not static.
+  static PrimExpr AlignedOuterExtent(const Buffer &buffer) {
+    const auto *outer = buffer->shape[0].as<IntImmNode>();
+    if (outer == nullptr) {
+      return buffer->shape[0];
+    }
+    int64_t row_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
+    for (size_t i = 1; i < buffer->shape.size(); ++i) {
+      const auto *extent = buffer->shape[i].as<IntImmNode>();
+      if (extent == nullptr) {
+        return buffer->shape[0];
+      }
+      row_bytes *= extent->value;
+    }
+    if (row_bytes <= 0 ||
+        (outer->value * row_bytes) % kVersionAlignBytes == 0) {
+      return buffer->shape[0];
+    }
+    int64_t step = kVersionAlignBytes / std::gcd(row_bytes, kVersionAlignBytes);
+    int64_t rows = (outer->value + step - 1) / step * step;
+    return make_const(buffer->shape[0].dtype(), rows);
+  }
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
@@ -483,7 +528,7 @@ private:
     return versioned_buffers;
   }
 
-  static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
+  Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) const {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     if (buffer.scope() == "shared.barrier") {
       // Barrier buffers: expand first dimension to keep 1D shape.
@@ -492,6 +537,12 @@ private:
       new_buffer->shape.Set(0, make_const(shape_dtype, num_versions) *
                                    new_buffer->shape[0]);
     } else {
+      // Pad the outermost dimension so that every version starts on a TMA
+      // alignment. An annotated layout keeps the shape that it describes.
+      if (new_buffer->strides.empty() && !new_buffer->shape.empty() &&
+          !annotated_layout_vars_.count(buffer->data.get())) {
+        new_buffer->shape.Set(0, AlignedOuterExtent(buffer));
+      }
       new_buffer->shape.insert(new_buffer->shape.begin(),
                                PrimExpr(num_versions));
       if (!new_buffer->strides.empty()) {
@@ -900,8 +951,13 @@ private:
         const Buffer &new_buffer = (*it).second;
         const PrimExpr &old_index = call->args[i + 1];
         PrimExpr offset;
-        if (new_buffer->strides.empty()) {
+        if (buffer.scope() == "shared.barrier") {
           offset = product(buffer->shape, old_index.dtype());
+        } else if (new_buffer->strides.empty()) {
+          // One version spans the padded shape after the version dimension.
+          Array<PrimExpr> version_shape(new_buffer->shape.begin() + 1,
+                                        new_buffer->shape.end());
+          offset = product(version_shape, old_index.dtype());
         } else {
           offset = tvm::cast(old_index.dtype(), new_buffer->strides[0]);
         }
@@ -927,6 +983,8 @@ private:
   // Remember each block's alloc list so the loop can see buffers defined in
   // parents.
   std::unordered_map<const SBlockNode *, Array<Buffer>> block_alloc_buffers_;
+  // The data of the buffers that a block annotates with a layout.
+  std::unordered_set<const VarNode *> annotated_layout_vars_;
 };
 
 PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
