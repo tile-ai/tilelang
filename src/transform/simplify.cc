@@ -14,12 +14,16 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <algorithm>
+#include <limits>
 #include <optional>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "arith/const_fold.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "arith/product_normal_form.h"
 #include "common/attr.h"
 #include "tir/analysis/control_flow_graph.h"
 #include "tir/analysis/var_use_def_analysis.h"
@@ -425,6 +429,302 @@ TVM_FFI_STATIC_INIT_BLOCK() { SimplifyConfigNode::RegisterReflection(); }
 
 TVM_REGISTER_PASS_CONFIG_OPTION("tl.Simplify", SimplifyConfig);
 
+// Remainder canonicalization and factor matching substantially follow the
+// approach in penguin-wwy's PR #3267. Match reassociated products without
+// changing arithmetic widths or distributing through casts.
+class LayoutDivModSimplifier : public StmtExprMutator {
+public:
+  explicit LayoutDivModSimplifier(arith::Analyzer *analyzer)
+      : analyzer_(analyzer) {}
+
+  PrimExpr Simplify(const PrimExpr &expr) { return VisitExpr(expr); }
+
+  PrimExpr VisitExpr_(const FloorModNode *op) final {
+    PrimExpr value = StmtExprMutator::VisitExpr_(op);
+    const auto *mod = value.as<FloorModNode>();
+    const auto *radix = mod ? mod->b.as<IntImmNode>() : nullptr;
+    if (radix && radix->value > 0 && (radix->value & (radix->value - 1)) == 0 &&
+        IsSupportedInteger(value.dtype()) &&
+        SideEffect(value) == CallEffectKind::kPure) {
+      if (auto reduced = RecoverRemainder_(mod->a, mod->b)) {
+        return floormod(reduced.value(), mod->b);
+      }
+    }
+    return value;
+  }
+
+  PrimExpr VisitExpr_(const SubNode *op) final {
+    PrimExpr value = StmtExprMutator::VisitExpr_(op);
+    const auto *sub = value.as<SubNode>();
+    if (!sub || !IsSupportedInteger(value.dtype()) ||
+        SideEffect(value) != CallEffectKind::kPure) {
+      return value;
+    }
+    if (auto divisor = MatchProduct_(sub->b, sub->a)) {
+      return floormod(sub->a, divisor.value());
+    }
+    if (auto reduced = RecoverRemainder_(value)) {
+      return reduced.value();
+    }
+    return value;
+  }
+
+  PrimExpr VisitExpr_(const AddNode *op) final {
+    PrimExpr value = StmtExprMutator::VisitExpr_(op);
+    const auto *add = value.as<AddNode>();
+    if (!add || SideEffect(value) != CallEffectKind::kPure) {
+      return value;
+    }
+    if (IsSupportedInteger(value.dtype())) {
+      for (int i = 0; i < 2; ++i) {
+        PrimExpr product = i == 0 ? add->a : add->b;
+        PrimExpr remainder = i == 0 ? add->b : add->a;
+        if (const auto *mod = remainder.as<FloorModNode>()) {
+          auto divisor = MatchProduct_(product, mod->a);
+          if (divisor && ffi::StructuralEqual()(divisor.value(), mod->b)) {
+            // q*d + r = x also holds under signed word wrapping.
+            value = mod->a;
+            break;
+          }
+        }
+      }
+    }
+    const auto *sum = value.as<AddNode>();
+    if (!sum) {
+      return value;
+    }
+    PrimExpr left = sum->a;
+    PrimExpr right = sum->b;
+    if (auto result = Combine_(left, right)) {
+      return result.value();
+    }
+    if (auto result = Combine_(right, left)) {
+      return result.value();
+    }
+    return value;
+  }
+
+private:
+  arith::Analyzer *analyzer_;
+
+  bool IsSupportedInteger(DataType dtype) {
+    return dtype.is_scalar() && (dtype.is_int() || dtype.is_uint()) &&
+           (dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32 ||
+            dtype.bits() == 64);
+  }
+
+  // Drop only casts that preserve every value of the source type. In
+  // particular, sign extension into an unsigned type is not a value-preserving
+  // widening.
+  bool IsValuePreservingWiden(DataType from, DataType to) {
+    return IsSupportedInteger(from) && IsSupportedInteger(to) &&
+           from.bits() < to.bits() && (from.is_uint() || to.is_int());
+  }
+
+  bool FitsInType(const arith::ConstIntBound &bound, DataType dtype) {
+    int bits = dtype.bits();
+    int64_t minimum = dtype.is_uint()
+                          ? 0
+                          : (bits == 64 ? std::numeric_limits<int64_t>::min()
+                                        : -(int64_t{1} << (bits - 1)));
+    uint64_t maximum =
+        dtype.is_int() ? (uint64_t{1} << (bits - 1)) - 1
+                       : (std::numeric_limits<uint64_t>::max() >> (64 - bits));
+    return bound->min_value != arith::ConstIntBoundNode::kNegInf &&
+           bound->max_value != arith::ConstIntBoundNode::kPosInf &&
+           bound->min_value >= minimum &&
+           (bound->max_value < 0 || uint64_t(bound->max_value) <= maximum);
+  }
+
+  // Analyzer and its Z3 prover use mathematical integers. Only ask them for
+  // word properties when each intermediate and cast agrees with that
+  // interpretation. Bound-preserving casts are legal even when the source type
+  // itself is wider.
+  bool HasUnprovenWrap(const PrimExpr &expr, arith::Analyzer *analyzer) {
+    bool may_wrap = false;
+    PostOrderVisit(expr, [&](const ffi::ObjectRef &node) {
+      if (may_wrap) {
+        return;
+      }
+      if (const auto *cast = node.as<CastNode>()) {
+        may_wrap =
+            !IsSupportedInteger(cast->value.dtype()) ||
+            !IsSupportedInteger(cast->dtype) ||
+            (cast->dtype != cast->value.dtype() &&
+             !IsValuePreservingWiden(cast->value.dtype(), cast->dtype) &&
+             !FitsInType(analyzer->const_int_bound(cast->value), cast->dtype));
+      } else if (const auto *mul = node.as<MulNode>()) {
+        may_wrap = !IsSupportedInteger(mul->dtype) ||
+                   !ProductFits(mul->a, mul->b, analyzer, false);
+      } else if (node.as<AddNode>() || node.as<SubNode>()) {
+        // These composite bounds may describe an already-wrapped result.
+        // Leave them unchanged rather than build a second range analyzer.
+        may_wrap = true;
+      }
+    });
+    return may_wrap;
+  }
+
+  bool ProductFits(const PrimExpr &a, const PrimExpr &b,
+                   arith::Analyzer *analyzer, bool positive) {
+    auto left = analyzer->const_int_bound(a);
+    auto right = analyzer->const_int_bound(b);
+    int64_t minimum = positive ? 1 : 0;
+    if (left->min_value < minimum || right->min_value < minimum ||
+        left->max_value == arith::ConstIntBoundNode::kPosInf ||
+        right->max_value == arith::ConstIntBoundNode::kPosInf) {
+      return false;
+    }
+    DataType dtype = a.dtype();
+    uint64_t maximum = dtype.is_int() ? (uint64_t{1} << (dtype.bits() - 1)) - 1
+                                      : std::numeric_limits<uint64_t>::max() >>
+                                            (64 - dtype.bits());
+    // A constraint on the wrapped product cannot prove that it did not wrap.
+    // Divide the type limit instead of multiplying the operand upper bounds.
+    return right->max_value == 0 ||
+           uint64_t(left->max_value) <= maximum / uint64_t(right->max_value);
+  }
+
+  ffi::Optional<PrimExpr> Combine_(const PrimExpr &product,
+                                   const PrimExpr &remainder) {
+    const auto *mul = product.as<MulNode>();
+    const auto *mod = remainder.as<FloorModNode>();
+    if (!mul || !mod) {
+      return std::nullopt;
+    }
+    const auto *inner = mod->a.as<FloorDivNode>();
+    if (!inner || !IsSupportedInteger(inner->dtype) ||
+        HasUnprovenWrap(inner->b, analyzer_) ||
+        HasUnprovenWrap(mod->b, analyzer_) ||
+        !ProductFits(inner->b, mod->b, analyzer_, true)) {
+      return std::nullopt;
+    }
+    for (int i = 0; i < 2; ++i) {
+      PrimExpr quotient = i == 0 ? mul->a : mul->b;
+      PrimExpr radix = i == 0 ? mul->b : mul->a;
+      const auto *outer = quotient.as<FloorDivNode>();
+      if (!outer || !ffi::StructuralEqual()(radix, mod->b) ||
+          !ffi::StructuralEqual()(outer->a, inner->a)) {
+        continue;
+      }
+      PrimExpr combined = inner->b * mod->b;
+      if (SameProduct_(outer->b, combined)) {
+        // q = floor(x/a); floor(x/(a*b))*b + q%b = q. Positive
+        // denominators and non-wrapping products justify the factorization.
+        return mod->a;
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Simplification can interleave a swizzle's offsets with x - (x/d)*d.
+  // Recover the remainder without distributing products or crossing casts.
+  ffi::Optional<PrimExpr>
+  RecoverRemainder_(const PrimExpr &value,
+                    ffi::Optional<PrimExpr> modulus = std::nullopt) {
+    std::vector<std::pair<PrimExpr, bool>> terms;
+    arith::UnpackSum(value, [&](const PrimExpr &term, int sign) {
+      terms.emplace_back(term, sign < 0);
+    });
+    if (terms.size() > 32) {
+      return std::nullopt;
+    }
+    for (size_t i = 0; i < terms.size(); ++i) {
+      if (!terms[i].second) {
+        continue;
+      }
+      std::vector<PrimExpr> factors;
+      CollectFactors_(terms[i].first, &factors);
+      for (const PrimExpr &factor : factors) {
+        const auto *div = factor.as<FloorDivNode>();
+        if (!div || !MatchProduct_(terms[i].first, div->a)) {
+          continue;
+        }
+        std::vector<std::pair<PrimExpr, bool>> dividend;
+        arith::UnpackSum(div->a, [&](const PrimExpr &term, int sign) {
+          dividend.emplace_back(term, sign < 0);
+        });
+        std::vector<bool> used(terms.size(), false);
+        used[i] = true;
+        bool matched = true;
+        for (const auto &term : dividend) {
+          size_t j = 0;
+          for (; j < terms.size(); ++j) {
+            if (!used[j] && term.second == terms[j].second &&
+                ffi::StructuralEqual()(term.first, terms[j].first)) {
+              used[j] = true;
+              break;
+            }
+          }
+          if (j == terms.size()) {
+            // A power-of-two outer modulus also discards word overflow.
+            // Missing multiples of it can be restored before matching x-q*d.
+            if (modulus.defined() && !HasUnprovenWrap(term.first, analyzer_) &&
+                analyzer_->CanProve(floormod(term.first, modulus.value()) ==
+                                    0)) {
+              continue;
+            }
+            matched = false;
+            break;
+          }
+        }
+        if (matched) {
+          PrimExpr result = floormod(div->a, div->b);
+          for (size_t j = 0; j < terms.size(); ++j) {
+            if (!used[j]) {
+              result = terms[j].second ? result - terms[j].first
+                                       : result + terms[j].first;
+            }
+          }
+          return result;
+        }
+      }
+    }
+    return std::nullopt;
+  }
+
+  static ffi::Optional<PrimExpr> MatchProduct_(const PrimExpr &product,
+                                               const PrimExpr &dividend) {
+    std::vector<PrimExpr> factors;
+    CollectFactors_(product, &factors);
+    for (size_t i = 0; i < factors.size(); ++i) {
+      const auto *quotient = factors[i].as<FloorDivNode>();
+      if (!quotient || !ffi::StructuralEqual()(quotient->a, dividend)) {
+        continue;
+      }
+      std::vector<PrimExpr> divisor_factors;
+      CollectFactors_(quotient->b, &divisor_factors);
+      auto remaining = factors;
+      remaining.erase(remaining.begin() + i);
+      if (SameFactors_(remaining, divisor_factors)) {
+        return quotient->b;
+      }
+    }
+    return std::nullopt;
+  }
+
+  static bool SameProduct_(const PrimExpr &a, const PrimExpr &b) {
+    if (a.dtype() != b.dtype())
+      return false;
+    std::vector<PrimExpr> left, right;
+    CollectFactors_(a, &left);
+    CollectFactors_(b, &right);
+    return SameFactors_(left, right);
+  }
+
+  static bool SameFactors_(const std::vector<PrimExpr> &left,
+                           const std::vector<PrimExpr> &right) {
+    return std::is_permutation(left.begin(), left.end(), right.begin(),
+                               right.end(), ffi::StructuralEqual());
+  }
+
+  static void CollectFactors_(const PrimExpr &value,
+                              std::vector<PrimExpr> *factors) {
+    arith::UnpackReduction<MulNode>(
+        value, [&](const PrimExpr &factor) { factors->push_back(factor); });
+  }
+};
+
 class StmtSimplifier : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc
@@ -542,6 +842,7 @@ private:
       simplified = analyzer_->Simplify(expr);
     }
 
+    simplified = LayoutDivModSimplifier(analyzer_).Simplify(simplified);
     ContextSingletonFloorDivFolder folder(analyzer_);
     PrimExpr folded = folder.Fold(simplified);
     if (!folded.same_as(simplified)) {
