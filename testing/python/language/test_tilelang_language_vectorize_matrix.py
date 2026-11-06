@@ -28,6 +28,8 @@ MATRIX_DTYPES = [
     "bfloat16",
     "int8",
     "uint8",
+    "int16",
+    "uint16",
     "int4",
     "uint4",
     "int32",
