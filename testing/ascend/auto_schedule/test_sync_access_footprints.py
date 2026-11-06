@@ -6,7 +6,7 @@ import tilelang.ascend.language as T
 from tilelang import tvm
 from tilelang.ascend import transform
 from tilelang.layout import make_ascend_nz_layout
-from testing.ascend._ir import calls, copy, kernel, schedule, seq
+from testing.ascend._ir import calls, copy, kernel, nodes, schedule, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
 from tvm import tirx
 
@@ -18,6 +18,44 @@ def _events(program, disable_reuse=False, auto_schedule=False):
         return {
             (operation, call.args[0].value) for operation in ("set", "wait") for call in calls(after, "tl.ascend_" + operation + "_flag")
         }
+
+
+@pytest.mark.parametrize("auto_schedule", [False, True], ids=["sync", "schedule-and-sync"])
+@pytest.mark.parametrize("layout", ["cross_row", "short_cross_row", "transposed"])
+def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
+    width = 256 if layout == "short_cross_row" else 128
+    transposed = layout == "transposed"
+
+    @T.prim_func
+    def main(A: T.Tensor((64,), "float16"), Out: T.Tensor((128,), "float16")):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, width), "float16")
+            out = T.alloc_shared((128,), "float16")
+            if transposed:
+                view = T.view(work, shape=(width, 2), strides=(1, width))
+                T.copy(A, view[:64, 1])
+                with T.SimdVF():
+                    T.simd.vsts(out[0], T.simd.vld(view[width - 64, 0]), dist="NORM_B16")
+            else:
+                T.copy(A, work[1, :64])
+                with T.SimdVF():
+                    T.simd.vsts(out[0], T.simd.vld(work[0, width - 64]), dist="NORM_B16")
+            T.copy(out, Out)
+
+    # IR-only: the DMA initializes just the overlapping half of the vector.
+    after = schedule(main, through="InsertSync", auto_schedule=auto_schedule)
+    trace = []
+    events = []
+    for call in nodes(after, tirx.Call):
+        if call.op.name == "tl.tileop.ascend_copy":
+            trace.append("copy")
+        elif call.op.name == "tl.simd.vld":
+            trace.append("load")
+        elif call.op.name in ("tl.ascend_set_flag", "tl.ascend_wait_flag") and call.args[0].value == "MTE2_V":
+            trace.append("set" if call.op.name == "tl.ascend_set_flag" else "wait")
+            events.append(call)
+    assert trace == ["copy", "set", "wait", "load", "copy"]
+    tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
 
 
 @pytest.mark.parametrize("fill_first", [False, True], ids=["protect-source-reuse", "wait-for-source-padding"])
