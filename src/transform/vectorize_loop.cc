@@ -270,7 +270,7 @@ Optional<Expr> VectorizeCPAsync(Call call, Var lane, PrimExpr lane_count,
   // A dynamic metadata payload must retain its per-call meaning.
   if (call->args.size() > operands.size() && UsesLane(call->args.back(), lane))
     return std::nullopt;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   // Explicit sub-instruction counts are defined by their complete vector
   // group. They are not independently executable scalar transactions. Keep
   // the original low-level final-instruction alignment obligation local to
@@ -321,7 +321,7 @@ Optional<Expr> VectorizeAtomicAdd(Call call, Var lane, PrimExpr lane_count,
     if (UsesLane(call->args[index], lane) ||
         SideEffect(call->args[index]) > CallEffectKind::kPure)
       return std::nullopt;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   if (!AtomicAccessContract(operands[0], lane, analyzer.get()) ||
       !IsContiguous(operands[0], lane, lanes, element.bits(), analyzer.get()))
     return std::nullopt;

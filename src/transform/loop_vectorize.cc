@@ -868,12 +868,12 @@ private:
 
 int GetVectorizeSize(const For &loop, const LayoutMap &layouts,
                      Optional<Target> target) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   return GetVectorizeSize(loop, analyzer.get(), layouts, std::move(target));
 }
 int GetVectorizeSize(const For &loop, const sym::AnalyzerObj *analyzer,
                      const LayoutMap &layouts, Optional<Target> target) {
-  auto context = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+  auto context = analyzer ? analyzer->Clone() : sym::Analyzer();
   Target effective_target =
       target.has_value() ? target.value() : Target::Current(false).value();
   return make_object<VectorizePlanner>(context, layouts, effective_target)
@@ -881,14 +881,14 @@ int GetVectorizeSize(const For &loop, const sym::AnalyzerObj *analyzer,
 }
 For VectorizeLoop(const For &loop, const LayoutMap &layouts, int hint,
                   Optional<Target> target) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   return VectorizeLoop(loop, analyzer.get(), layouts, hint, std::move(target));
 }
 For VectorizeLoop(const For &loop, const sym::AnalyzerObj *analyzer,
                   const LayoutMap &layouts, int hint, Optional<Target> target) {
   if (hint <= 0)
     hint = GetVectorizeSize(loop, analyzer, layouts, std::move(target));
-  auto context = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+  auto context = analyzer ? analyzer->Clone() : sym::Analyzer();
   auto rewriter = make_object<VectorizeRewriter>(hint, context);
   return rewriter->Mutate(loop).ValueOrUnchanged(loop).as_or_throw<For>();
 }

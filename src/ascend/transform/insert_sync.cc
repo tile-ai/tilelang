@@ -204,7 +204,7 @@ struct SyncInsertionSite {
       if (control->BodyHasLoopBreak())
         break;
       const ForObj *for_node = control->control.get();
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       auto context = control->task->outer_ctx.Populate(analyzer);
       if (!CanUseLoopBounds(for_node->begin, for_node->end, for_node->step,
                             analyzer.get()) ||
@@ -1761,7 +1761,7 @@ private:
       // reused.
       if (loop != nullptr) {
         const ForObj *inner = loop->control.get();
-        auto analyzer = CreateTileLangAnalyzer();
+        sym::Analyzer analyzer;
         auto context = loop->task->outer_ctx.Populate(analyzer);
         if (CanUseLoopBounds(inner->begin, inner->end, inner->step,
                              analyzer.get())) {
@@ -2020,7 +2020,7 @@ private:
              "arguments";
 
       PrimExpr flag_id = op->args[2].as_or_throw<PrimExpr>();
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       auto context = GetConstrSet().Populate(analyzer);
       // Populate may bind an SSA snapshot to a fresh symbolic value. Its
       // guards constrain that value, while ConstIntBound on the original Var
@@ -2028,7 +2028,7 @@ private:
       // the source flag expression and its single-read semantics in the IR.
       sym::ConstIntBound bound =
           analyzer->const_int_bound(analyzer->Simplify(flag_id));
-      auto unconstrained_analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer unconstrained_analyzer;
       Var unconstrained_flag_id("unconstrained_cross_core_flag_id",
                                 flag_id.ty());
       sym::ConstIntBound unconstrained_bound =

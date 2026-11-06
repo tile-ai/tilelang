@@ -171,8 +171,15 @@ def _ramp_value_kernel(explicit):
 @pytest.mark.parametrize("explicit", [False, True], ids=["parallel-index", "strided-ramp"])
 def test_pto_ramp_value_is_one_vector_argument(explicit):
     source = _source(_ramp_value_kernel(explicit), target={"kind": "ascend", "keys": ["pto", "ascend"]})
-    lanes = 4 if explicit else 2
-    assert re.search(rf"pto\.store\(.*tl\.vector_from_list\(pto\.i32, .*contiguous={lanes}\)", source)
+    if explicit:
+        # Layout lowering leaves a widening cast around the address lanes.
+        # Preserve that cast and materialize the Ramp value once for scatter.
+        assert source.count("lambda _ramp_base, _ramp_stride:") == 1
+        assert "tl_values = tl.vector_to_list(" in source
+        for lane in range(4):
+            assert f"pto.store(tl_values[{lane}], out_ub," in source
+    else:
+        assert re.search(r"pto\.store\(.*tl\.vector_from_list\(pto\.i32, .*contiguous=2\)", source)
 
 
 def test_pto_ramp_operands_are_evaluated_once():
@@ -293,9 +300,16 @@ def _vector_local_cross_slot_kernel(load_stride=1, store_stride=1):
 
 def test_pto_vector_local_cross_slot_offsets():
     source = tilelang.lower(_vector_local_cross_slot_kernel(), target="pto", enable_device_compile=False).kernel_source
-    for offset in (2, 4):
-        assert f"pto.load(vals, {offset}, contiguous=4)" in source
-    assert re.search(r"pto\.store\([^\n]+, vals, 2, contiguous=4\)", source)
+    # Each native vector slot contains two scalar elements. A gathered slot
+    # must address both lanes, preserving slot units through the widening cast.
+    for slot in range(2):
+        for lane in range(2):
+            assert re.search(rf"pto\.load\(vals, \(pto\.cast\(tl_indices\w*\[{slot}\], pto\.i64\) \* 2 \+ {lane}\)\)", source)
+    for lane in range(4):
+        assert re.search(
+            rf"pto\.store\(tl_values\w*\[{lane}\], vals, \(pto\.cast\(tl_indices\w*\[{lane // 2}\], pto\.i64\) \* 2 \+ {lane % 2}\)\)",
+            source,
+        )
 
 
 @tilelang.testing.requires_ascend
@@ -311,10 +325,11 @@ def test_pto_vector_local_cross_slot_mutation_preserves_neighbors():
 
 
 @pytest.mark.parametrize("access_kind", ["load", "store"])
-def test_pto_vector_local_cross_slot_rejects_noncontiguous_ramp(access_kind):
+def test_pto_vector_local_cross_slot_scalarizes_noncontiguous_ramp(access_kind):
     func = _vector_local_cross_slot_kernel(**{f"{access_kind}_stride": 2})
-    with pytest.raises(RuntimeError, match=rf"vector {access_kind}.*Ramp stride must be 1"):
-        tilelang.lower(func, target="pto", enable_device_compile=False)
+    source = tilelang.lower(func, target="pto", enable_device_compile=False).kernel_source
+    assert "tl.vector_to_list(" in source and "tl_indices" in source
+    assert re.search(rf"pto\.{access_kind}\([^\n]*tl_indices\[", source)
 
 
 def _unsigned_local_min_max_kernel(vector_elements):
@@ -348,8 +363,16 @@ def _unsigned_local_min_max_kernel(vector_elements):
 def test_pto_local_vector_load_restores_unsigned_type(vector_elements):
     source = tilelang.lower(_unsigned_local_min_max_kernel(vector_elements), target="pto", enable_device_compile=False).kernel_source
     assert "pto.alloc_buffer((4,), pto.i32)" in source
-    for offset in (0, 2):
-        assert f"pto.cast(pto.load(vals, {offset}, contiguous=2), pto.ui32)" in source
+    if vector_elements:
+        for offset in (0, 2):
+            assert f"pto.cast(pto.load(vals, {offset}, contiguous=2), pto.ui32)" in source
+    else:
+        # Gathered scalar storage also restores the unsigned value type before
+        # min/max. Index Cast/Shuffle nodes need not be rewritten to a Ramp.
+        loads = re.findall(r"pto\.load\(vals, pto\.cast\(tl_indices\w*\[\d\], pto\.i64\)\)", source)
+        assert len(loads) == 8
+        for load in loads:
+            assert f"pto.cast({load}, pto.ui32)" in source
 
 
 @tilelang.testing.requires_ascend
@@ -397,7 +420,7 @@ def test_shuffle_buffer_load_is_materialized_before_lane_access():
         target="ascend",
         pass_configs={tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True},
     )
-    assert re.search(r"float2\s+\w+\s*=\s*\*\(__ubuf__ float2\*\)", source)
+    assert re.search(r"float2\s+\w+\s*=\s*(?:float2\{|\*\(__ubuf__ float2\*\))", source)
     assert re.search(r"=\s*\w+\.x;", source)
     assert not re.search(r"\*\(__ubuf__ float2\*\)\([^;]*\)\.x", source)
 

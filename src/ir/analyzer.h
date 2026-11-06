@@ -1,6 +1,6 @@
 /*!
  * \file tl/ir/analyzer.h
- * \brief TileLang's policy for best-effort native symbolic proofs.
+ * \brief TileLang constraint binding and scopes for the native analyzer.
  */
 
 #ifndef TILELANG_IR_ANALYZER_H_
@@ -11,14 +11,6 @@
 #include <tvm/sym/constraint.h>
 
 namespace tvm::tl {
-
-// Use the upstream expression rules and its instance-local DEFAULT fallback.
-// An analyzer starts without premises; callers supply the facts in their scope.
-inline sym::Analyzer CreateTileLangAnalyzer() {
-  sym::Analyzer analyzer;
-  analyzer->SetZ3DefaultFallback(true);
-  return analyzer;
-}
 
 /*! \brief Append a durable premise to this analyzer's explicitly owned context.
  * A Var identity can be bound only once, as required by the upstream analyzer.

@@ -657,7 +657,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
     return facts;
   }
 
-  auto local_analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer local_analyzer;
   sym::AnalyzerObj *analyzer =
       ctx.analyzer != nullptr ? ctx.analyzer : local_analyzer.get();
   static const LayoutMap empty_layout_map;

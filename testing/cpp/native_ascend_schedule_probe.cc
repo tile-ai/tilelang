@@ -38,7 +38,7 @@ template <typename T> ffi::Array<T> ArrayOf(const std::vector<T> &values) {
 
 ffi::Array<ffi::Any> Prove(const ConstrSet &context,
                            const ffi::Array<PrimExpr> &queries) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto scope = context.Populate(analyzer);
   ffi::Array<ffi::Any> results;
   for (const auto &query : queries)
@@ -119,7 +119,7 @@ ffi::Array<ffi::Any> InspectStorage(Stmt definitions,
   TVM_FFI_CHECK_EQ(tensors.size(), indices.size(), ValueError);
   auto context = MakeAscendStorageProvenance();
   context.Collect(definitions);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   ffi::Array<ffi::Any> results;
   for (size_t i = 0; i < tensors.size(); ++i) {
     auto address = context.Address(tensors[i]);

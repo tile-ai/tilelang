@@ -376,7 +376,7 @@ Array<LayoutIterVar> CopyNode::MakeIterVars() const {
   // Improved logic: use two pointers to traverse both base_ranges and
   // src_range, skipping dimensions with extent == 1. The number of non-1
   // extents must match.
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
 
   size_t base_dim = 0, src_dim = 0;
   while (base_dim < base_ranges.size() && src_dim < src_range.size()) {
@@ -491,8 +491,7 @@ Optional<PrimExpr> CopyNode::MakePredicate(sym::AnalyzerObj *analyzer,
 
 // Constructs a SIMT-style nested loop that implements the copy.
 For CopyNode::MakeSIMTLoop(sym::AnalyzerObj *analyzer) const {
-  auto scoped_analyzer =
-      analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+  auto scoped_analyzer = analyzer ? analyzer->Clone() : sym::Analyzer();
   analyzer = scoped_analyzer.get();
   if (IsFP4UnpackLoad(src, dst)) {
     LOG(FATAL) << "SIMT copy from packed global float4_e2m1fn to unpacked "
@@ -570,7 +569,7 @@ LayoutMap CopyNode::InferLayout(const LayoutInferArgs &layout_args,
 LayoutMap CopyNode::InferSIMTLayout(const LayoutInferArgs &layout_args,
                                     InferLevel level) const {
   if (!par_op_.defined()) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     par_op_ = ParallelOp(MakeSIMTLoop(analyzer.get()), annotations);
   }
   return par_op_->InferLayout(layout_args, level);

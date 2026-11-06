@@ -5,12 +5,12 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/loop_annotations.h"
 #include "ir/tensor_utils.h"
 #include "layout/expr_utils.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/sym/int_set.h>
 #include <tvm/tirx/op/region.h>
 
@@ -73,7 +73,7 @@ PipelineRegionsMayConflict(const TensorRegion &lhs, const TensorRegion &rhs,
       lhs->region.size() != rhs->region.size())
     return true;
   auto tensor = RegionTensor(lhs);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto disjoint = [&](const sym::IntSet &a, const sym::IntSet &b) {
     if (a.IsNothing() || b.IsNothing())
       return true;

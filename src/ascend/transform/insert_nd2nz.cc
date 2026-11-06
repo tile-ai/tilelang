@@ -26,11 +26,11 @@
 #include "ascend/op/nd2nz.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
-#include "ir/analyzer.h"
 #include "ir/tensor_utils.h"
 #include "op/copy.h"
 #include "op/utils.h"
 #include "support/check.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm {
 namespace tl {
@@ -115,7 +115,7 @@ public:
   static tirx::Function Rewrite(tirx::Function func) {
     if (func->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return func;
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     analyzer->z3_prover.SetRLimit(50000);
     auto inserter = make_object<Nd2NzInserter>(analyzer);
     inserter->MarkTensorParamShapes(func);

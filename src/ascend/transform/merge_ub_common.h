@@ -25,7 +25,6 @@
 
 #include "ascend/analysis/storage.h"
 #include "ascend/ir/task.h"
-#include "ir/analyzer.h"
 #include "layout/expr_utils.h"
 #include "transform/common/storage_size.h"
 #include <algorithm>
@@ -33,6 +32,7 @@
 #include <string>
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <unordered_map>
@@ -157,7 +157,7 @@ BuildSequentialPlan(const AllocationMap &allocations, int align_bytes,
       order.begin(), order.end(),
       [](const VarObj *a, const VarObj *b) { return a->name < b->name; });
   PrimExpr cursor = IntImm::Int64(0);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (const VarObj *var : order) {
     auto binding = allocations.at(var);
     auto tensor = AllocationTensor(binding);
@@ -265,7 +265,7 @@ Stmt MergeAllocations(Stmt stmt, int align_bytes, bool verbose,
   collector(stmt);
   auto rewriter = make_object<SharedMemoryRewriter>();
   auto expander = make_object<ArenaSizeExpander>(stmt);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   Array<Stmt> prefix;
   auto run = [&](const AllocationMap &allocations, const AllocationOrder &order,
                  const std::string &target_scope) {

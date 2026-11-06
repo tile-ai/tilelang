@@ -3,7 +3,7 @@ from __future__ import annotations
 from tilelang.language import _tensor_spec
 from tvm_tirx import ir as _ir
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 import tilelang.metal.language as T
 
@@ -105,7 +105,7 @@ class MPSIntrinEmitter:
         strides = _tensor_spec.tensor_strides(buffer)
         if strides:
             inner_stride = strides[-1]
-            if not create_analyzer().can_prove_equal(inner_stride, 1):
+            if not sym.Analyzer().can_prove_equal(inner_stride, 1):
                 raise ValueError(
                     f"Metal matrix operations require a contiguous innermost dimension (stride 1), but got stride {inner_stride}"
                 )

@@ -9,7 +9,7 @@ from tilelang._typing import ShapeType, DType, BufferLikeType
 import tilelang.language as T
 from tvm_ffi import dtype as DataType
 from tvm_ffi._dtype import DataTypeCode
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 from tvm_tirx.ir import Expr as PrimExpr
 from tilelang.language._tensor_spec import TensorValue as Buffer
 from tvm_tirx.ir.prim import Broadcast
@@ -100,7 +100,7 @@ def reshape(src: Buffer, shape: ShapeType) -> Buffer:
         Buffer: A new buffer view with the specified shape
     """
     bits, src_bits = bits_product(shape, _construction.dtype_of(src)), bits_product(src.shape, _construction.dtype_of(src))
-    assert prim_expr_equal(bits, src_bits) or create_analyzer().can_prove_equal(bits, src_bits), (
+    assert prim_expr_equal(bits, src_bits) or sym.Analyzer().can_prove_equal(bits, src_bits), (
         f"T.reshape/view shape check failed. {bits_product(shape, _construction.dtype_of(src))}, {bits_product(src.shape, _construction.dtype_of(src))}"
     )
     return T.Tensor(shape, _construction.dtype_of(src), src.data)
@@ -131,7 +131,7 @@ def view(
     if dtype is None:
         dtype = _construction.dtype_of(src)
 
-    analyzer = create_analyzer()
+    analyzer = sym.Analyzer()
 
     # A view must describe the same logical storage starting at the same address.
     view_bits = bits_product(shape, dtype)

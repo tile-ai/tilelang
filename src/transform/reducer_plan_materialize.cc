@@ -1061,7 +1061,7 @@ private:
 tvm::transform::Pass ReducerPlanAndMaterialize() {
   auto pass = [](tirx::Function function, IRModule,
                  tvm::transform::PassContext) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     return make_object<ReducerMaterializer>(analyzer)->Run(std::move(function));
   };
   return tirx::transform::CreateFunctionPass(pass, 0,

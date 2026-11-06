@@ -12,10 +12,11 @@
 #include "ascend/op/utils.h"
 #include "ascend/transform/source_scopes.h"
 #include "ir/alias_analysis.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "op/builtin.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
@@ -690,7 +691,7 @@ namespace transform {
 tvm::transform::Pass NormalizeAscendFractalStorage() {
   return tirx::transform::CreateFunctionPass(
       [](tirx::Function function, IRModule, tvm::transform::PassContext) {
-        auto analyzer = CreateTileLangAnalyzer();
+        sym::Analyzer analyzer;
         return ffi::make_object<FractalStorageNormalizer>(analyzer.get())
             ->Apply(std::move(function));
       },

@@ -122,9 +122,10 @@ Use a populated native `sym::Analyzer` for `Simplify`, `CanProve`,
 `CanProveEqual`, bounds, and modular reasoning. Bind loop/shape variable ranges
 before asking the analyzer to prove facts. If a function accepts an optional
 analyzer pointer, create a local fallback only for simple self-contained
-reasoning. TileLang's `CreateTileLangAnalyzer()` enables its late outer-query
-Z3 fallback while preserving native expression categories and simplification
-rules; it does not silently select `SYMBOLIC_BOUND` for internal queries.
+reasoning. Construct `sym::Analyzer` directly: the pinned upstream enables Z3
+fallback for `DEFAULT` queries after native analysis fails. Use
+`SetZ3DefaultFallback(false)` when a specific analyzer should disable that
+fallback; explicit `SYMBOLIC_BOUND` queries can still use Z3.
 
 Be careful mixing `int32` and `int64` in analyzer-sensitive expressions. In
 layout/swizzle code, preserve the native dtype of the expression spine when
@@ -203,7 +204,7 @@ factory:
 tvm::transform::Pass MyPass() {
   auto pass_func = [](tirx::Function func, IRModule mod,
                       tvm::transform::PassContext ctx) -> tirx::Function {
-    sym::Analyzer analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     return MyRewriter::Rewrite(std::move(func), analyzer.get());
   };
   return tirx::transform::CreateFunctionPass(pass_func, 0, "tl.MyPass");

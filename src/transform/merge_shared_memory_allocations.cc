@@ -6,11 +6,11 @@
 #include "common/storage_size.h"
 #include "cuda/op/builtin.h"
 #include "ir/alias_analysis.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/lexical_scope.h"
 #include "op/builtin.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
@@ -490,7 +490,7 @@ tirx::Function Merge(tirx::Function function, bool merge_static,
   if (all.empty())
     return function;
   SharedLiveness liveness(function, &all, aggressive);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   std::unordered_set<const VarObj *> parameters;
   for (const Var &parameter : function->params) {
     parameters.insert(parameter.get());

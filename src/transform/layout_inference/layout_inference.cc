@@ -448,7 +448,7 @@ public:
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
-          auto inner_analyzer = CreateTileLangAnalyzer();
+          sym::Analyzer inner_analyzer;
           for (int i = 0; i < dst_layout->InputDim(); ++i) {
             auto x = InputPlaceholder(i);
             indices.push_back(x);
@@ -1414,7 +1414,7 @@ public:
     auto collector = make_object<TensorUseDefCollector>(options);
     collector->Collect(function);
     auto result = collector->Run();
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto rewriter =
         make_object<LayoutInferencer>(result, analyzer.get(), options);
     SeqStmt body =

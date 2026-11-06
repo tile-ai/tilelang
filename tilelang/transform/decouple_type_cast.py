@@ -12,7 +12,7 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 from tilelang.analysis._visitor import tensor_scope
 from tilelang.language._annotation_codec import encode_annotations
 
@@ -239,7 +239,7 @@ class AccessReplacer:
 class DecoupleTypeCastMutator:
     def __init__(self):
         self._var_counter = 0
-        self.analyzer = create_analyzer()
+        self.analyzer = sym.Analyzer()
 
     def visit_stmt(self, statement):
         return tvm_ffi.structural_mutate(statement, (ir.For, self.visit_for))

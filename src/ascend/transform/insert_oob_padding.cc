@@ -11,10 +11,10 @@
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
 #include "ir/alias_analysis.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "op/gemm_blockscaled.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
@@ -362,7 +362,7 @@ tvm::transform::Pass AscendInsertOOBPadding() {
       [](tirx::Function function, IRModule, tvm::transform::PassContext) {
         if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
           return function;
-        auto analyzer = CreateTileLangAnalyzer();
+        sym::Analyzer analyzer;
         TensorAliasGroups aliases;
         aliases.Collect(function);
         auto rewriter = ffi::make_object<OOBPaddingInserter>(

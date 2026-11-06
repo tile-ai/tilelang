@@ -14,7 +14,7 @@
 
 #include <vector>
 
-#include "ir/analyzer.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm {
 namespace tl {
@@ -316,7 +316,7 @@ private:
 };
 
 Stmt LowerIntrinStmt(Stmt stmt, const std::string &target) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   return ffi::make_object<IntrinInjecter>(analyzer, target)
       ->Mutate(stmt, InplaceMode::kAllow)
       .ValueOrUnchanged(stmt);
@@ -330,7 +330,7 @@ tvm::transform::Pass LowerIntrin() {
     auto target = func->GetAttr<Target>(tvm::attr::kTarget);
     TVM_FFI_CHECK(target.has_value(), ValueError)
         << "LowerIntrin requires the target attribute";
-    sym::Analyzer analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     ffi::String triple =
         target.value()->GetAttr<ffi::String>("mtriple").value_or("");
     bool fast_math =

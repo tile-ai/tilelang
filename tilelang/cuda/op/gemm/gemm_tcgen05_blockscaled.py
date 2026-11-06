@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tvm_tirx import ir as _ir
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 from tilelang import language as T
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
@@ -85,7 +85,7 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
         mma_emitter.get_tcgen5_mma_meta(int(self.M), int(self.N), k, disable_2cta=not self.use_2cta, disable_ws=True)
         enable_2cta = mma_emitter.tcgen05_meta.enable_2cta
 
-        analyzer = create_analyzer()
+        analyzer = sym.Analyzer()
         warp_size = 32
         self._check_warp_aligned_thread_bounds(thread_bounds, analyzer)
         cluster_cond = not enable_2cta or T.block_rank_in_cluster() == 0

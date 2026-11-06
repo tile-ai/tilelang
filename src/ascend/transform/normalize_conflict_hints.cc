@@ -28,10 +28,10 @@
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/loop_math.h"
 #include "op/utils.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 using namespace tirx;
@@ -158,7 +158,7 @@ private:
   };
 
   static unsigned AfterLoop(const ForObj *loop, unsigned body_exit) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     bool pure_header = SideEffect(loop->begin) <= CallEffectKind::kPure &&
                        SideEffect(loop->end) <= CallEffectKind::kPure &&
                        SideEffect(loop->step) <= CallEffectKind::kPure;

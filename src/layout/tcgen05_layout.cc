@@ -320,7 +320,7 @@ Fragment FragmentToTileLang(const cute::Layout &layout) {
   int64_t r = cute::Rank(layout);
   Array<LayoutIterVar> ivs;
   Array<cute::IntTuple> coords;
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (int64_t i = 0; i < r; ++i) {
     int64_t size = cute::AsConst(cute::Product(layout->shape[i]));
     LayoutIterVar iv =

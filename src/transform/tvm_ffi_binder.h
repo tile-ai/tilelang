@@ -40,8 +40,6 @@
 #include <utility>
 #include <vector>
 
-#include "../ir/analyzer.h"
-
 namespace tvm {
 namespace tl {
 using namespace tirx;
@@ -513,7 +511,7 @@ private:
    * substitution. */
   std::vector<PendingConstAssert> pending_const_asserts_;
   /*! \brief internal analyzer. */
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
   ffi::Array<Var> size_var_defaults_;
 
   // Function metadata

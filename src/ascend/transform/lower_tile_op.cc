@@ -5,11 +5,11 @@
 #include "ascend/ir/block.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/lexical_scope.h"
 #include "layout/expr_utils.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
@@ -87,7 +87,7 @@ Function ValidateSFOwnership(Function function) {
   // Erasing a logical handle is valid only after its definitions and all
   // explicit binding operands have been checked in their native scopes.
   CheckWellFormed(function);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (const auto &[sf_var, data_var] : bindings) {
     auto sf = sf_var.as_or_throw<TensorVar>();
     auto data = data_var.as_or_throw<TensorVar>();
@@ -190,7 +190,7 @@ public:
           }
           return ffi::WalkResult::Advance();
         });
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     for (const auto &[sf, data] : bindings_) {
       auto count = versions.Get(sf);
       if (!count)

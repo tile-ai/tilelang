@@ -14,7 +14,6 @@
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/utils.h"
-#include "ir/analyzer.h"
 #include "layout/expr_utils.h"
 #include "layout/layout.h"
 #include "layout/payload.h"
@@ -213,7 +212,7 @@ static void CheckStaticDivisible(const PrimExpr &value, int divisor,
   if (divisor <= 1) {
     return;
   }
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   PrimExpr simplified = analyzer->Simplify(value);
   auto int_value = TryConstInt(simplified);
   ICHECK(int_value.has_value())
@@ -362,7 +361,7 @@ Layout MakeAscendSFLayout(const TensorVar &buffer) {
       << "SF layout expects storage dtype whose bit width divides 16, got "
       << buffer.dtype();
   if (buffer.dtype().bits() != 16) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     PrimExpr k_extent = analyzer->Simplify(k);
     auto k_value = TryConstInt(k_extent);
     ICHECK(k_value.has_value())
@@ -483,7 +482,7 @@ Expr MakeStridedSlice(const TensorVar &phys_buf, const Layout &layout,
     shape.push_back(phys_region[i]->extent);
     iters.push_back(tirx::Iter(phys_region[i]->extent, strides[i], memory));
   }
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   offset = analyzer->Simplify(offset);
   TensorType type(shape, phys_buf.dtype(), phys_buf.scope(),
                   phys_buf.ty()->data_alignment,

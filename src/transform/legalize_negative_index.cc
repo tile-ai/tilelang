@@ -10,7 +10,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/transform.h>
 
-#include "../ir/analyzer.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 namespace {
@@ -113,7 +113,7 @@ tvm::transform::Pass LegalizeNegativeIndexPass() {
                  tvm::transform::PassContext) {
     if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
       return function;
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto rewriter = ffi::make_object<NegativeIndexRewriter>(analyzer);
     function.CopyOnWrite()->body = rewriter->Rewrite(function);
     return function;

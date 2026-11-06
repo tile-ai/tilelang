@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "backend/common/codegen/codegen_py.h"
-#include "ir/analyzer.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm {
 namespace codegen {
@@ -124,15 +124,17 @@ private:
                         int64_t thread_y, int64_t thread_z);
   void ExtractSimtThreadExtents(const RegionStmtObj *op, int64_t *thread_x,
                                 int64_t *thread_y, int64_t *thread_z) const;
-  std::string ScalarLoad(const VarObj *buffer, const PrimExpr &index);
+  std::string ScalarLoad(const VarObj *buffer, const std::string &index);
   std::string LocalVarStoreValue(const PrimExpr &value, PrimType dtype);
   void EmitScalarStore(const VarObj *buffer, const std::string &value,
-                       const PrimExpr &index);
+                       const std::string &index);
   void EmitBlockRegion_(const RegionStmtObj *op);
   void EmitTensorAllocation_(const BindObj *op, const CallObj *call) override;
   void EmitTensorDeclaration_(const BindObj *op, const CallObj *call) override;
   void EmitBufferAllocation(const VarObj *buffer);
   void EmitLocalVarInitialization_(const VarObj *buffer, std::string vid);
+  std::vector<std::string> MaterializeIndexLanes(const PrimExpr &index,
+                                                 int element_lanes);
   void EmitScalarizedLoad(const TensorLoadObj *op, std::ostream &os);
   void EmitScalarizedStore(const TensorStoreObj *op);
   bool TryEmitRngBroadcastStore(const TensorStoreObj *op,
@@ -155,7 +157,6 @@ private:
   std::string current_function_name_;
   bool inside_simtvf_body_{false};
   bool enable_fast_math_{false};
-  sym::Analyzer index_analyzer_{tl::CreateTileLangAnalyzer()};
   // Outer local buffers referenced by a SIMT section. Var identity is the
   // ownership key because lowering can leave duplicate name hints behind.
   std::unordered_set<const VarObj *> persistent_buffer_vars_;

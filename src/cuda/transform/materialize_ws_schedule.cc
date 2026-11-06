@@ -2240,7 +2240,7 @@ private:
       auto bits =
           elements * IntImm(elements.ty(),
                             expanded.dtype().bits() * expanded.dtype().lanes());
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       TVM_FFI_CHECK(analyzer->CanProve(floormod(bits, 8) == 0), ValueError)
           << "A versioned pointer must begin on a byte boundary";
       return analyzer->Simplify(floordiv(bits, 8));
@@ -2644,7 +2644,7 @@ private:
     for (int delta : plan.delta)
       if (delta <= step)
         deltas.insert(delta);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     struct Branch {
       PrimExpr guard;
       SeqStmt body;
@@ -2762,7 +2762,7 @@ private:
     // Avoid inventing a dead steady-state loop for a short static pipeline.
     // Effectful bound evaluation must still occur, even when algebra can
     // prove the iteration count zero.
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     if (!(SideEffect(loop_min) <= CallEffectKind::kPure &&
           SideEffect(loop_extent) <= CallEffectKind::kPure &&
           IsZero(analyzer->Simplify(loop_extent)))) {

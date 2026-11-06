@@ -3,10 +3,10 @@
  * \brief Preserve public types while legalizing native address arithmetic.
  */
 #include "config_index_bitwidth.h"
-#include "../ir/analyzer.h"
 #include "../op/builtin.h"
 #include "common/int64_promoter.h"
 #include "op/builtin.h"
+#include <tvm/sym/analyzer.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/reflection/registry.h>
@@ -21,7 +21,7 @@ public:
   using StmtExprMutatorWithAnalyzer::Mutate;
   using StmtExprMutatorWithAnalyzer::Mutate_;
   explicit IndexLegalizer(bool force_wide,
-                          sym::Analyzer analyzer = CreateTileLangAnalyzer())
+                          sym::Analyzer analyzer = sym::Analyzer())
       : StmtExprMutatorWithAnalyzer(analyzer),
         analyzer_owner_(std::move(analyzer)), force_wide_(force_wide) {}
 

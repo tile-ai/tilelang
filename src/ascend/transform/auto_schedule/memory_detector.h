@@ -88,7 +88,7 @@ inline void MergeL0Pitch(Map<Var, Optional<PrimExpr>> *pitches,
                          const Var &storage, Optional<PrimExpr> pitch) {
   auto it = pitches->find(storage);
   if (it != pitches->end()) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     if (!(*it).second || !pitch ||
         !analyzer->CanProveEqual(*(*it).second, *pitch))
       pitch = std::nullopt;
@@ -225,7 +225,7 @@ private:
   std::vector<std::vector<sym::IntSet>> write_regions_;
   AccessMode mode_;
   /*!\ brief Internal analyzer. */
-  sym::Analyzer ana_{CreateTileLangAnalyzer()};
+  sym::Analyzer ana_;
   StorageProvenance storage_ = MakeAscendStorageProvenance();
   ConstrSet context_;
   std::unique_ptr<ConstrAnalyzerContext> proof_context_;
@@ -241,7 +241,7 @@ private:
 
   void Reset() {
     proof_context_.reset();
-    ana_ = CreateTileLangAnalyzer();
+    ana_ = sym::Analyzer();
     proof_context_ = context_.Populate(ana_);
     l0_pitches_.clear();
     operation_pitches_.clear();
@@ -570,7 +570,7 @@ private:
     // DMA rows follow the coalesced source/destination layouts, not the last
     // logical buffer axis. Use the same coalescing and unit-axis normalization
     // as PlanMTECopy, then select the row boundary from the strided side.
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto src_range =
         NormalizeEmptyUnitAxesForMTE(copy->src_range, analyzer.get());
     auto dst_range =

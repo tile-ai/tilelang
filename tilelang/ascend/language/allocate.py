@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from tilelang.language import _allocation
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 from tilelang._typing import DType, ShapeType
 from tilelang.language.allocate import _with_span
@@ -60,7 +60,7 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
         raise ValueError(f"alloc_ss requires uint32 or uint64, got {dtype}")
     if isinstance(shape, int):
         shape = (shape,)
-    analyzer = create_analyzer()
+    analyzer = sym.Analyzer()
     extents = [analyzer.simplify(extent) for extent in shape]
     if not extents or any(not isinstance(extent, IntImm) or int(extent) <= 0 for extent in extents):
         raise ValueError("alloc_ss requires a nonempty static shape with positive extents")
@@ -131,7 +131,7 @@ def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: Sh
                 f"(K elements per {sf_dtype} scale element); pass sf_shape explicitly for a transposed tile"
             )
         sf_shape = (*shape[:-2], rows, k // k_per_sf)
-    analyzer = create_analyzer()
+    analyzer = sym.Analyzer()
     if len(sf_shape) != len(shape) or any(not analyzer.can_prove_equal(a, b) for a, b in zip(sf_shape[:-2], shape[:-2])):
         raise ValueError(f"L0 SF shape {sf_shape} must preserve the data buffer's leading dimensions {shape[:-2]}")
     sf = _with_span(_allocation.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))

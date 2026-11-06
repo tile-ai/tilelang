@@ -21,9 +21,9 @@
 
 #include "cuda/op/builtin.h"
 #include "cuda/runtime.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/tensor_utils.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 using namespace tirx;
@@ -431,7 +431,7 @@ SeqStmt MaterializeL2Policy(const tirx::Function &function, SeqStmt body,
     }
   }
   Array<Stmt> prologue;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (const auto &[name, arguments] : entries.value()) {
     auto found = parameters.find(name);
     if (found == parameters.end())

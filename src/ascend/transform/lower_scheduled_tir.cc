@@ -668,7 +668,7 @@ private:
                                                source->loc));
     }
 
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = control->task->outer_ctx.Populate(analyzer);
     TVM_FFI_CHECK(!control->BodyHasLoopBreak() &&
                       CanUseLoopBounds(source->begin, source->end, source->step,

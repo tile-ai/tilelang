@@ -277,7 +277,7 @@ private:
   // The inner_vars_
   Map<Var, LayoutIterVar> inner_vars_;
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
-  mutable sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
+  mutable sym::Analyzer analyzer_ = sym::Analyzer();
   // Whether the loop body has cross-thread shared/global memory access.
   bool has_cross_thread_access_ = false;
   // Buffers that are stored to shared/global memory in the loop body.

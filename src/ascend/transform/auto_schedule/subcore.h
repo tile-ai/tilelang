@@ -308,8 +308,7 @@ private:
     using StmtExprMutator::Mutate;
     using StmtExprMutator::Mutate_;
     Rewriter(SubcoreProjector *owner, int p, bool allow_constants = true)
-        : owner_(owner), p_(p), conditional_depth_(allow_constants ? 0 : 1),
-          analyzer_(CreateTileLangAnalyzer()) {}
+        : owner_(owner), p_(p), conditional_depth_(allow_constants ? 0 : 1) {}
 
     Stmt Rewrite(const Stmt &value) {
       return Mutate(value).ValueOrUnchanged(value);
@@ -822,7 +821,7 @@ private:
           auto rewriter =
               ffi::make_object<Rewriter>(this, p, !conditional_parent);
           body = rewriter->Rewrite(body);
-          auto analyzer = CreateTileLangAnalyzer();
+          sym::Analyzer analyzer;
           PrimExpr active = analyzer->Simplify(rewriter->active_);
           if (IsZero(active))
             continue;

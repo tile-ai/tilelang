@@ -9,7 +9,7 @@ import math
 import tvm_ffi
 from tvm_tirx import ir, tirx
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 from tilelang.analysis._visitor import tensor_scope
 from tilelang.language._construction import dtype_of
 
@@ -48,7 +48,7 @@ class Analyzer:
         self.block_counts = {"blockIdx.x": 1, "blockIdx.y": 1, "blockIdx.z": 1}
         self.loop_stack = []
         self.global_buffers = set()
-        self.symbolic = create_analyzer()
+        self.symbolic = sym.Analyzer()
 
     def _static_int(self, value, description):
         if isinstance(value, int):

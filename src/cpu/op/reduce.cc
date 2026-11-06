@@ -41,7 +41,7 @@ struct Reduce {
     ICHECK_LT(static_cast<size_t>(op.dim), rank);
     ICHECK(out_rank + 1 == rank || out_rank == rank);
     const bool keepdim = out_rank == rank;
-    auto local = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+    auto local = analyzer ? analyzer->Clone() : sym::Analyzer();
     for (size_t i = 0, j = 0; i < rank; ++i) {
       if (i == static_cast<size_t>(op.dim)) {
         if (keepdim) {

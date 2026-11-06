@@ -3,7 +3,6 @@ from __future__ import annotations
 from tilelang.language import _tensor_spec
 from tvm_tirx import ir as _ir
 
-from tilelang._analyzer import create_analyzer
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import (
@@ -195,7 +194,7 @@ class GemmTCGEN5(GemmBase):
         clear_accum = self.clear_accum
         mbar_phase = mbar_phase_expr if mbar_phase_expr is not None else 0
 
-        analyzer = create_analyzer()
+        analyzer = Analyzer()
         warp_size = 32
         self._check_warp_aligned_thread_bounds(thread_bounds, analyzer)
 

@@ -240,7 +240,7 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     ICHECK(reducer_layout->InputDim() == orig_dst_layout->InputDim());
 
     // Keep placeholder bindings local to this containment check.
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto indices = InputPlaceholders(reducer_layout->InputDim());
     for (size_t i = 0; i < indices.size(); i++) {
       BindAnalyzer(analyzer, indices[i].as_or_throw<PrimVar>(),

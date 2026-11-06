@@ -21,10 +21,10 @@
  * \file legalize_vectorized_loop.cc
  * \brief Plan vector widths on native loop domains before vector IR expansion.
  */
-#include "../ir/analyzer.h"
 #include "ir/stmt_functor.h"
 #include "loop_vectorize.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/transform.h>
 
 namespace tvm::tl {
@@ -65,7 +65,7 @@ tvm::transform::Pass LegalizeVectorizedLoop() {
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return function;
     VectorizeMemoryScope memory_scope(function);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     // The Function's bound target is authoritative even when the pass is run
     // without an ambient context, or inside a context for another target.
     // Unbound direct callers retain the helper's explicit-context fallback.

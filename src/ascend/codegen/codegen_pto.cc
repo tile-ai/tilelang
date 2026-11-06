@@ -11,10 +11,8 @@
 #include "op/builtin.h"
 #include "support/check.h"
 
-#include "ascend/codegen/vector_index.h"
 #include "ascend/ir/block.h"
 #include "ascend/target_utils.h"
-#include "ir/analyzer.h"
 #include <algorithm>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_visit.h>
@@ -43,17 +41,6 @@ namespace codegen {
 using namespace tirx;
 
 namespace {
-
-std::string PTOBlockName(const RegionStmtObj *region);
-
-TensorVar PTOTensor(const TensorLoadObj *load) {
-  return load->source.as_or_throw<TensorVar>();
-}
-TensorVar PTOTensor(const TensorStoreObj *store) {
-  return store->dest.as_or_throw<TensorVar>();
-}
-
-PrimExpr PTOZero(PrimType type) { return MakeConst(type, 0); }
 
 constexpr const char *kModeMerging = "MODE_MERGING";
 constexpr const char *kModeZeroing = "MODE_ZEROING";
@@ -460,7 +447,7 @@ bool IsPowerOfTwo(int64_t value) {
 
 void CheckContiguousRampStride(const PrimExpr &index, const char *access_kind) {
   if (const auto *ramp = index.as<prim::RampObj>()) {
-    PrimExpr stride_expr = tl::CreateTileLangAnalyzer()->Simplify(ramp->stride);
+    PrimExpr stride_expr = sym::Analyzer()->Simplify(ramp->stride);
     int64_t stride = 0;
     ICHECK(TryGetConstInt(stride_expr, &stride) && stride == 1)
         << "PTO SIMT vector " << access_kind
@@ -480,8 +467,7 @@ PrimExpr SIMTVectorLocalScalarOffset(const PrimExpr &index, int element_lanes,
   ICHECK(slot.ty().IsScalar())
       << "PTO SIMT vector local " << access_kind
       << " requires a scalar index or a unit-stride Ramp, got " << index;
-  return tl::CreateTileLangAnalyzer()->Simplify(
-      slot * MakeConst(slot.ty(), element_lanes));
+  return sym::Analyzer()->Simplify(slot * MakeConst(slot.ty(), element_lanes));
 }
 
 void CheckConstZero(const PrimExpr &expr, const char *name) {
@@ -653,9 +639,12 @@ void ValidateKernelCapabilities(const tirx::Function &func) {
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
       func->body,
       [&](const RegionStmtObj *block) -> ffi::Expected<ffi::WalkResult> {
-        if (PTOBlockName(block) == "CUBE") {
+        if (!tl::ascend::IsAscendBlock(block))
+          return ffi::WalkResult::Advance();
+        const auto name = block->attrs.GetAttr<ffi::String>("name").value();
+        if (name == "CUBE") {
           has_cube_block = true;
-        } else if (PTOBlockName(block) == "VECTOR") {
+        } else if (name == "VECTOR") {
           has_vector_block = true;
         }
         return ffi::WalkResult::Advance();
@@ -822,7 +811,7 @@ PrimType GetAnnotatedPointerDtype(const Expr &expr, PrimType fallback_dtype) {
     const auto args = call->args;
     if (!args.empty())
       if (const auto *load = args[0].as<TensorLoadObj>())
-        return PTOTensor(load).dtype();
+        return load->source.as_or_throw<TensorVar>().dtype();
   }
   return fallback_dtype;
 }
@@ -852,7 +841,7 @@ PrimExpr VectorBufferElemIndex(const PrimExpr &index) {
   if (const auto *ramp = index.as<prim::RampObj>()) {
     int lanes = ramp->ty.as_or_throw<PrimType>().lanes();
     if (lanes > 0) {
-      return tl::CreateTileLangAnalyzer()->Simplify(
+      return sym::Analyzer()->Simplify(
           floordiv(ramp->base, MakeConst(ramp->base.ty(), lanes)));
     }
   }
@@ -888,10 +877,10 @@ bool GetNativeByteOffset(const Expr &expr, PrimExpr *bytes,
     if (call->op.same_as(tl::ptr_access())) {
       offset = ElementIndexToByteOffsetExpr(
           offset, GetAnnotatedPointerDtype(args[0], PrimType::Void()),
-          "PTO pointer access", tl::CreateTileLangAnalyzer());
+          "PTO pointer access", sym::Analyzer());
     }
-    *bytes = tl::CreateTileLangAnalyzer()->Simplify(
-        *bytes + prim::Cast(PrimType::Int(64), offset));
+    *bytes = sym::Analyzer()->Simplify(*bytes +
+                                       prim::Cast(PrimType::Int(64), offset));
     return true;
   }
   if ((call->op.same_as(tl::access_ptr()) ||
@@ -900,11 +889,14 @@ bool GetNativeByteOffset(const Expr &expr, PrimExpr *bytes,
     const auto *load = args[0].as<TensorLoadObj>();
     if (!load || load->indices.size() != 1)
       return false;
-    *base = PTOTensor(load).get();
-    auto analyzer = tl::CreateTileLangAnalyzer();
+    const auto tensor = load->source.as_or_throw<TensorVar>();
+    *base = tensor.get();
+    sym::Analyzer analyzer;
     *bytes = ElementIndexToByteOffsetExpr(
-        ascend::NormalizeVectorIndex(load->indices[0], analyzer),
-        PTOTensor(load).dtype(), "PTO tensor access", analyzer);
+        load->indices[0].ty().IsScalar()
+            ? load->indices[0]
+            : prim::Shuffle::ExtractElement(load->indices[0], 0),
+        tensor.dtype(), "PTO tensor access", analyzer);
     return true;
   }
   return false;
@@ -919,7 +911,7 @@ bool GetAddressOfIndex(const Expr &expr, PrimExpr *index,
   if (dtype.IsVoid())
     return false;
   const int64_t bits = PhysicalElementBits(dtype);
-  sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   if (bits < 8) {
     TVM_FFI_CHECK(bits > 0 && 8 % bits == 0, ValueError);
     *index = analyzer->Simplify(bytes * MakeConst(bytes.ty(), 8 / bits));
@@ -933,16 +925,6 @@ bool GetAddressOfIndex(const Expr &expr, PrimExpr *index,
     *index = analyzer->Simplify(floordiv(bytes, divisor));
   }
   return true;
-}
-
-std::string PTOBlockName(const RegionStmtObj *region) {
-  return tl::ascend::IsAscendBlock(region)
-             ? std::string(region->attrs.GetAttr<ffi::String>("name").value())
-             : std::string();
-}
-
-bool PTOIsTensorBind(const BindObj *bind) {
-  return bind->var->ty.as<tirx::TensorTypeObj>() != nullptr;
 }
 
 PrimExpr PTOLoopCondition(const ForObj *loop) {
@@ -1089,7 +1071,7 @@ private:
   uint8_t Dispatch_(const ReturnObj *, uint8_t state) final { return state; }
 
   std::unordered_map<Call, uint8_t, ObjectPtrHash, ObjectPtrEqual> gemm_modes_;
-  sym::Analyzer analyzer_ = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer_;
 };
 
 // Retain guards for immutable SSA conditions split apart by AutoSchedule.
@@ -1327,7 +1309,7 @@ private:
 
   std::unordered_map<Call, uint8_t, ObjectPtrHash, ObjectPtrEqual>
       mad_directions_;
-  sym::Analyzer analyzer_ = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer_;
 };
 
 // These emitter queries use native statement dispatch and the structural
@@ -1427,7 +1409,7 @@ private:
       simt_accesses_.insert(tensor);
   }
   void Dispatch_(const BindObj *op) final {
-    if (PTOIsTensorBind(op)) {
+    if (op->var->ty.as<TensorTypeObj>()) {
       const auto scope = CodegenStorageScope(op->var);
       if (simt_depth_ == 0 && (scope == "local" || scope == "local.fragment"))
         outer_local_allocations_.insert(op->var.get());
@@ -1435,16 +1417,18 @@ private:
     PTOIRVisitor::Dispatch_(op);
   }
   void Dispatch_(const RegionStmtObj *op) final {
-    const bool simt = PTOBlockName(op) == "SIMT_VF";
+    const bool simt =
+        tl::ascend::IsAscendBlock(op) &&
+        op->attrs.GetAttr<ffi::String>("name").value() == "SIMT_VF";
     simt_depth_ += simt;
     PTOIRVisitor::Dispatch_(op);
     simt_depth_ -= simt;
   }
   void ObserveLoad(const TensorLoadObj *op) final {
-    RecordAccess(PTOTensor(op).get());
+    RecordAccess(op->source.as_or_throw<TensorVar>().get());
   }
   void Dispatch_(const TensorStoreObj *op) final {
-    RecordAccess(PTOTensor(op).get());
+    RecordAccess(op->dest.as_or_throw<TensorVar>().get());
     PTOIRVisitor::Dispatch_(op);
   }
   int simt_depth_{0};
@@ -1463,7 +1447,9 @@ class MixedSectionLocalVarAnalyzer {
   using OwnerMap = std::unordered_map<const VarObj *, const RegionStmtObj *>;
 
   static bool IsPhysical(const RegionStmtObj *op) {
-    const std::string name = PTOBlockName(op);
+    if (!tl::ascend::IsAscendBlock(op))
+      return false;
+    const auto name = op->attrs.GetAttr<ffi::String>("name").value();
     return name == "CUBE" || name == "VECTOR";
   }
   static bool IsLocalVar(const VarObj *tensor) {
@@ -1515,7 +1501,7 @@ class MixedSectionLocalVarAnalyzer {
       ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
           expr,
           [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
-            Read(PTOTensor(load).get(), defined);
+            Read(load->source.as_or_throw<TensorVar>().get(), defined);
             return ffi::WalkResult::Advance();
           });
     }
@@ -1556,7 +1542,7 @@ class MixedSectionLocalVarAnalyzer {
       ReadExpression(op->value, defined);
       for (const auto &index : op->indices)
         ReadExpression(index, defined);
-      Read(PTOTensor(op).get(), defined);
+      Read(op->dest.as_or_throw<TensorVar>().get(), defined);
       return defined;
     }
     VarSet Dispatch_(const AssertStmtObj *op, VarSet defined) override {
@@ -1957,7 +1943,6 @@ void CodeGenTileLangPTO::ResetRngState_() {
 }
 
 void CodeGenTileLangPTO::ResetFunctionState_() {
-  index_analyzer_ = tl::CreateTileLangAnalyzer();
   integer_address_vars_.clear();
   local_var_buffers_.clear();
   current_unroll_factor_loop_var_ = Optional<Var>();
@@ -2244,7 +2229,8 @@ bool CodeGenTileLangPTO::IsAscendCubeKernel(const tirx::Function &func) const {
         if (found)
           return ffi::WalkResult::Advance();
 
-        found = PTOBlockName(block) == "CUBE";
+        found = tl::ascend::IsAscendBlock(block) &&
+                block->attrs.GetAttr<ffi::String>("name").value() == "CUBE";
         return ffi::WalkResult::Advance();
       },
       [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
@@ -2289,8 +2275,11 @@ bool CodeGenTileLangPTO::IsAscendMixedKernel(const tirx::Function &func) const {
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
       func->body,
       [&](const RegionStmtObj *block) -> ffi::Expected<ffi::WalkResult> {
-        has_cube = has_cube || PTOBlockName(block) == "CUBE";
-        has_vector = has_vector || PTOBlockName(block) == "VECTOR";
+        if (!tl::ascend::IsAscendBlock(block))
+          return ffi::WalkResult::Advance();
+        const auto name = block->attrs.GetAttr<ffi::String>("name").value();
+        has_cube = has_cube || name == "CUBE";
+        has_vector = has_vector || name == "VECTOR";
         return ffi::WalkResult::Advance();
       });
   return has_cube && has_vector;
@@ -2422,10 +2411,12 @@ std::string CodeGenTileLangPTO::GetPointerExpr(const VarObj *buffer_var,
     return base;
   }
 
-  PrimExpr ptr_index = ascend::NormalizeVectorIndex(index, index_analyzer_);
-  if (const auto *ramp = ptr_index.as<prim::RampObj>()) {
-    CheckContiguousRampStride(ptr_index, "pointer address");
-    ptr_index = tl::CreateTileLangAnalyzer()->Simplify(ramp->base);
+  PrimExpr ptr_index = index;
+  if (const auto *ramp = index.as<prim::RampObj>();
+      ramp && ramp->stride.as<IntImmObj>()) {
+    ptr_index = ramp->base;
+  } else if (!index.ty().IsScalar()) {
+    ptr_index = prim::Shuffle::ExtractElement(index, 0);
   }
 
   std::string index_str;
@@ -2521,15 +2512,15 @@ std::string CodeGenTileLangPTO::PrintCondition(const Expr &condition) {
 }
 
 std::string CodeGenTileLangPTO::ScalarLoad(const VarObj *buffer,
-                                           const PrimExpr &index) {
+                                           const std::string &index_str) {
   std::string scope = ScopeOfBuffer(buffer);
   if (scope == "local.var") {
     return GetVarID(buffer);
   }
 
-  std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
   if (inside_simtvf_body_ && (scope == "local.fragment" || scope == "local")) {
-    ICHECK(IsSupportedSIMTLocalScalarAccessType(CodegenTensorDType(buffer)))
+    ICHECK(IsSupportedSIMTLocalScalarAccessType(
+        CodegenTensorDType(buffer).WithLanes(1)))
         << "PTO SIMT local scalar load supports float16, float32, bfloat16, "
            "int8, uint8, int32, uint32, and FP8 only, got "
         << CodegenTensorDType(buffer);
@@ -2586,9 +2577,8 @@ std::string CodeGenTileLangPTO::LocalVarStoreValue(const PrimExpr &value,
 
 void CodeGenTileLangPTO::EmitScalarStore(const VarObj *buffer,
                                          const std::string &value,
-                                         const PrimExpr &index) {
+                                         const std::string &index_str) {
   std::string scope = ScopeOfBuffer(buffer);
-  std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
 
   if (scope == "local.var") {
     stream << GetVarID(buffer) << " = " << value << "\n";
@@ -2816,10 +2806,10 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
     sym::Analyzer padding_analyzer;
     ICHECK(padding_analyzer->CanProveEqual(
                op->args[5].as_or_throw<PrimExpr>(),
-               PTOZero(op->args[5]->ty.as_or_throw<PrimType>())) &&
+               MakeConst(op->args[5]->ty.as_or_throw<PrimType>(), 0)) &&
            padding_analyzer->CanProveEqual(
                op->args[6].as_or_throw<PrimExpr>(),
-               PTOZero(op->args[6]->ty.as_or_throw<PrimType>())))
+               MakeConst(op->args[6]->ty.as_or_throw<PrimType>(), 0)))
         << "PTO GM->UB MTE cannot use left/right padding when dataSelect == 0";
   }
   int64_t l2_cache_ctrl = 0;
@@ -2909,7 +2899,7 @@ std::string CodeGenTileLangPTO::GetAscendCopyUbGmExpr_(const CallObj *op) {
   ValidateUBCopyLayout_(
       src_index, src_dtype, op->args[3].as_or_throw<PrimExpr>(),
       op->args[4].as_or_throw<PrimExpr>(), op->args[7].as_or_throw<PrimExpr>(),
-      PTOZero(PrimType::Int(32)), PTOZero(PrimType::Int(32)), false,
+      MakeConst(PrimType::Int(32), 0), MakeConst(PrimType::Int(32), 0), false,
       "PTO UB->GM MTE source");
   std::string dst = RemoveOutermostParentheses(PrintExpr_(op->args[0]));
   std::string src = current_function_is_cube_
@@ -3046,7 +3036,7 @@ void CodeGenTileLangPTO::ValidateUBCopyLayout_(
       << context << " requires a scalar or packed FP4-pair dtype, got "
       << dtype;
 
-  sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   PrimExpr elem_index = index;
   if (const auto *ramp = index.as<prim::RampObj>()) {
     CheckContiguousRampStride(index, context);
@@ -3057,7 +3047,7 @@ void CodeGenTileLangPTO::ValidateUBCopyLayout_(
       ElementIndexToByteOffsetExpr(elem_index, dtype, context, analyzer);
   PrimExpr offset_mod = analyzer->Simplify(
       floormod(byte_offset, MakeConst(byte_offset.ty(), 32)));
-  if (!analyzer->CanProveEqual(offset_mod, PTOZero(offset_mod.ty()))) {
+  if (!analyzer->CanProveEqual(offset_mod, MakeConst(offset_mod.ty(), 0))) {
     int64_t offset_remainder = 0;
     ICHECK(!TryGetConstInt(offset_mod, &offset_remainder))
         << context << " address must be 32-byte aligned, but element offset "
@@ -3088,18 +3078,19 @@ void CodeGenTileLangPTO::ValidateUBCopyLayout_(
   bool has_const_left = TryGetConstInt(left_padding, &left);
   bool has_const_right = TryGetConstInt(right_padding, &right);
   if (!has_const_left) {
-    ICHECK(analyzer->CanProve(left_padding >= PTOZero(left_padding.ty())))
+    ICHECK(analyzer->CanProve(left_padding >= MakeConst(left_padding.ty(), 0)))
         << context << " requires a non-negative left padding count, got "
         << left_padding;
   }
   if (!has_const_right) {
-    ICHECK(analyzer->CanProve(right_padding >= PTOZero(right_padding.ty())))
+    ICHECK(
+        analyzer->CanProve(right_padding >= MakeConst(right_padding.ty(), 0)))
         << context << " requires a non-negative right padding count, got "
         << right_padding;
   }
   if (uses_padding) {
     if (!has_const_len) {
-      ICHECK(analyzer->CanProve(burst_len >= PTOZero(burst_len.ty())))
+      ICHECK(analyzer->CanProve(burst_len >= MakeConst(burst_len.ty(), 0)))
           << context << " requires a non-negative burst length, got "
           << burst_len;
     }
@@ -3257,7 +3248,7 @@ std::string CodeGenTileLangPTO::GetLocalByteAddrExpr(
   PrimExpr elem_index = index;
   if (const auto *ramp = index.as<prim::RampObj>()) {
     CheckContiguousRampStride(index, "local pointer offset");
-    elem_index = tl::CreateTileLangAnalyzer()->Simplify(ramp->base);
+    elem_index = sym::Analyzer()->Simplify(ramp->base);
   }
 
   int64_t const_index = 0;
@@ -3360,7 +3351,7 @@ void CodeGenTileLangPTO::RestoreMixedSectionVariables(
   auto section_vars = mixed_external_vars_by_section_.find(section);
   ICHECK(section_vars != mixed_external_vars_by_section_.end())
       << "Missing mixed-section variable analysis for "
-      << PTOBlockName(section);
+      << section->attrs.GetAttr<ffi::String>("name").value();
 
   std::vector<std::pair<std::string, std::string>> restores;
   restores.reserve(section_vars->second.size());
@@ -3603,12 +3594,12 @@ void CodeGenTileLangPTO::ValidateFractalAddressAlignment_(
   const bool is_fp4_packed = IsPackedFp4Pair(dtype);
   ICHECK((dtype.IsScalar() || is_fp4_packed))
       << context << " requires a scalar or packed-FP4 dtype, got " << dtype;
-  sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   PrimExpr byte_offset =
       ElementIndexToByteOffsetExpr(index, dtype, context, analyzer);
   PrimExpr offset_mod = analyzer->Simplify(
       floormod(byte_offset, MakeConst(byte_offset.ty(), 32)));
-  if (!analyzer->CanProveEqual(offset_mod, PTOZero(offset_mod.ty()))) {
+  if (!analyzer->CanProveEqual(offset_mod, MakeConst(offset_mod.ty(), 0))) {
     int64_t remainder = 0;
     ICHECK(!TryGetConstInt(offset_mod, &remainder))
         << context << " address must be 32-byte aligned, but element offset "
@@ -4315,7 +4306,7 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
     EndScope(false_scope);
   };
 
-  sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   emit_for_unit_flag(emit_for_unit_flag,
                      analyzer->Simplify(op->args[6].as_or_throw<PrimExpr>()));
 }
@@ -4568,7 +4559,8 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     // Taking an address must not emit the TensorLoad. In particular, scalar
     // GM cache-bypass calls require a pointer to the original element, not
     // its value or the beginning of the tensor.
-    os << GetPointerExpr(PTOTensor(load).get(), load->indices[0]);
+    os << GetPointerExpr(load->source.as_or_throw<TensorVar>().get(),
+                         load->indices[0]);
     return;
   }
   if (op->op.same_as(tirx::tensor_data_ptr_op())) {
@@ -4596,7 +4588,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     if (op->op.same_as(tl::ptr_access())) {
       bytes = ElementIndexToByteOffsetExpr(
           bytes, GetAnnotatedPointerDtype(args[0], PrimType::Void()),
-          "PTO pointer access", tl::CreateTileLangAnalyzer());
+          "PTO pointer access", sym::Analyzer());
     }
     os << "pto.castptr(pto.addptr(pto.castptr(" << PrintExpr_(args[0]) << ", "
        << PointerTypeName(PrimType::UInt(8), space) << "), "
@@ -4963,7 +4955,8 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
         << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
     const auto *load = op->args[0].as<TensorLoadObj>();
     ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
-    os << GetPointerExpr(PTOTensor(load).get(), load->indices[0]);
+    os << GetPointerExpr(load->source.as_or_throw<TensorVar>().get(),
+                         load->indices[0]);
     return;
   }
 
@@ -6042,12 +6035,11 @@ void CodeGenTileLangPTO::Dispatch_(const prim::CastObj *op,
     os << ScalarCastExpr(PrintExpr_(op->value), to, "PTO integer cast");
     return;
   }
-  if (from_integer && to_integer && from.bits() <= to.bits()) {
-    // Address-index widening should not become Python int(...), because that
-    // coerces PTODSL runtime values and breaks tracing. Same-width int/uint
-    // casts are handled above to preserve signedness for downstream scalar
-    // lowering.
-    PrintExpr_(op->value, os);
+  if (from_integer && to_integer && !from.IsScalar()) {
+    os << "tl.vector_from_list(" << DataTypeName(to.WithLanes(1))
+       << ", tuple(pto.cast(pto.cast(lane, " << DataTypeName(from.WithLanes(1))
+       << "), " << DataTypeName(to.WithLanes(1))
+       << ") for lane in tl.vector_to_list(" << PrintExpr_(op->value) << ")))";
     return;
   }
 
@@ -6471,23 +6463,27 @@ void CodeGenTileLangPTO::Dispatch_(const prim::RampObj *op,
     }
     os << "(_ramp_base)+(_ramp_stride*" << lane << ")";
   }
-  os << ")))(" << PrintExpr_(op->base) << ", " << PrintExpr_(op->stride) << ")";
+  os << ")))("
+     << ScalarCastExpr(PrintExpr_(op->base), dtype.WithLanes(1), "Ramp base")
+     << ", "
+     << ScalarCastExpr(PrintExpr_(op->stride), dtype.WithLanes(1),
+                       "Ramp stride")
+     << ")";
 }
 
 void CodeGenTileLangPTO::Dispatch_(const prim::BroadcastObj *op,
                                    std::ostream &os) { // NOLINT(*)
   PrimType elem_dtype = op->value.ty();
   ICHECK(elem_dtype.MatchesElementType(kDLFloat, 16) || IsFloat32(elem_dtype) ||
-         elem_dtype.MatchesElementType(kDLBfloat, 16))
-      << "PTO vector broadcast currently supports f16, f32, and bf16 only, got "
-      << elem_dtype;
+         elem_dtype.MatchesElementType(kDLBfloat, 16) ||
+         elem_dtype.MatchesCode(kDLInt, kDLUInt, kDLBool))
+      << "Unsupported PTO vector broadcast element type: " << elem_dtype;
   std::string value = PrintExpr_(op->value);
   os << "pto.Vec(" << DataTypeName(elem_dtype) << ", "
      << op->ty.as_or_throw<PrimType>().lanes() << ", init=" << value << ")";
 }
 
 void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
-  ascend::BindIndexConstant(op, index_analyzer_);
   if (const auto *call = op->value.as<CallObj>()) {
     if (call->op.same_as(tirx::alloc_tensor_op()))
       return EmitTensorAllocation_(op, call);
@@ -6865,7 +6861,7 @@ void CodeGenTileLangPTO::Dispatch_(const ForObj *op) {
   int entry_pad_value_id = current_copy_pad_value_id_;
   PrimType entry_pad_value_dtype = current_copy_pad_value_dtype_;
 
-  sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   PrimExpr start = analyzer->Simplify(op->begin);
   PrimExpr extent = analyzer->Simplify((op->end - op->begin));
   PrimExpr step = analyzer->Simplify(op->step);
@@ -6925,12 +6921,14 @@ void CodeGenTileLangPTO::Dispatch_(const ForObj *op) {
         op->body,
         [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
           if (load->indices.size() == 1)
-            check_local_index(PTOTensor(load).get(), load->indices[0]);
+            check_local_index(load->source.as_or_throw<TensorVar>().get(),
+                              load->indices[0]);
           return ffi::WalkResult::Advance();
         },
         [&](const TensorStoreObj *store) -> ffi::Expected<ffi::WalkResult> {
           if (store->indices.size() == 1)
-            check_local_index(PTOTensor(store).get(), store->indices[0]);
+            check_local_index(store->dest.as_or_throw<TensorVar>().get(),
+                              store->indices[0]);
           return ffi::WalkResult::Advance();
         });
   }
@@ -7020,9 +7018,10 @@ void CodeGenTileLangPTO::Dispatch_(const WhileObj *op) {
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
       op->body,
       [&](const TensorStoreObj *store) -> ffi::Expected<ffi::WalkResult> {
-        const VarObj *var = PTOTensor(store).get();
+        const auto tensor = store->dest.as_or_throw<TensorVar>();
+        const VarObj *var = tensor.get();
         if (local_var_buffers_.count(var) && var_idmap_.count(var) &&
-            !(!CodegenTensorDType(PTOTensor(store).get()).IsScalar())) {
+            tensor.dtype().IsScalar()) {
           carried_locals.insert(GetVarID(var));
         }
         return ffi::WalkResult::Advance();
@@ -7118,7 +7117,7 @@ void CodeGenTileLangPTO::EmitBlockRegion_(const RegionStmtObj *op) {
 
 void CodeGenTileLangPTO::Dispatch_(const IfObj *op) {
   // Fold compile-time conditions; keep runtime control flow as native Python.
-  PrimExpr cond_simp = tl::CreateTileLangAnalyzer()->Simplify(op->condition);
+  PrimExpr cond_simp = sym::Analyzer()->Simplify(op->condition);
   if (const auto *imm = cond_simp.as<IntImmObj>()) {
     if (imm->value != 0) {
       PrintStmt_(op->then_case);
@@ -7245,36 +7244,29 @@ void CodeGenTileLangPTO::Dispatch_(const EvaluateObj *op) {
 
 void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  if (op->indices.size() == 1) {
-    PrimExpr index =
-        ascend::NormalizeVectorIndex(op->indices[0], index_analyzer_);
-    if (!index.same_as(op->indices[0])) {
-      Dispatch_(TensorLoad(op->source, {index}, op->loc).get(), os);
-      return;
-    }
-  }
+  const auto tensor = op->source.as_or_throw<TensorVar>();
   // S.alloc_var inside T.SimdVF() creates a `local.var`-scope buffer with a
   // vector dtype (e.g. float32x64). In PTODSL it is a plain Python variable
   // holding a vector register value, so load at index 0 is just the variable
   // itself. Skip the scalar-only CheckLocalVarBuffer below.
-  if (CodegenTensorDType(PTOTensor(op).get()).lanes() > 1) {
-    std::string scope = ScopeOfBuffer(PTOTensor(op).get());
+  if (tensor.dtype().lanes() > 1) {
+    std::string scope = ScopeOfBuffer(tensor.get());
     if (scope == "local.var") {
       ICHECK_EQ(op->indices.size(), 1U)
           << "PTO vector local.var load expects a single index";
       int64_t index = 0;
       ICHECK(TryGetConstInt(op->indices[0], &index) && index == 0)
           << "PTO vector local.var load expects index 0";
-      os << LocalVarID(PTOTensor(op).get());
+      os << LocalVarID(tensor.get());
       return;
     }
   }
 
-  if (IsLocalVarBuffer(PTOTensor(op).get())) {
+  if (IsLocalVarBuffer(tensor.get())) {
     // Vector SSA and scalar PTO surface values both load as Python variables.
-    CheckLocalVarBuffer(PTOTensor(op).get());
-    if (CodegenTensorDType(PTOTensor(op).get()).lanes() > 1) {
-      os << LocalVarID(PTOTensor(op).get());
+    CheckLocalVarBuffer(tensor.get());
+    if (tensor.dtype().lanes() > 1) {
+      os << LocalVarID(tensor.get());
       return;
     }
     ICHECK_EQ(op->indices.size(), 1U)
@@ -7283,15 +7275,15 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
     ICHECK(TryGetConstInt(op->indices[0], &index) && index == 0)
         << "PTO local.var load expects index 0";
     if (current_function_has_gemm_) {
-      os << LocalVarID(PTOTensor(op).get());
+      os << LocalVarID(tensor.get());
       return;
     }
-    if (IsVectorLocalVarDtype(CodegenTensorDType(PTOTensor(op).get())) ||
-        IsSurfaceScalarLocalVarDtype(CodegenTensorDType(PTOTensor(op).get()))) {
-      os << LocalVarID(PTOTensor(op).get());
+    if (IsVectorLocalVarDtype(tensor.dtype()) ||
+        IsSurfaceScalarLocalVarDtype(tensor.dtype())) {
+      os << LocalVarID(tensor.get());
     } else {
-      TVM_FFI_THROW(InternalError) << "Unsupported PTO local.var load dtype: "
-                                   << CodegenTensorDType(PTOTensor(op).get());
+      TVM_FFI_THROW(InternalError)
+          << "Unsupported PTO local.var load dtype: " << tensor.dtype();
     }
     return;
   }
@@ -7300,7 +7292,7 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
       << "CodeGenTileLangPTO only supports flat buffer loads";
 
   PrimType value_dtype = op->ty.as_or_throw<PrimType>();
-  PrimType element_dtype = CodegenTensorDType(PTOTensor(op).get());
+  PrimType element_dtype = tensor.dtype();
   if (value_dtype.lanes() > 1) {
     EmitScalarizedLoad(op, os);
     return;
@@ -7311,7 +7303,8 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
          "dtype, got "
       << value_dtype << " vs " << element_dtype;
 
-  std::string loaded = ScalarLoad(PTOTensor(op).get(), op->indices[0]);
+  std::string loaded = ScalarLoad(
+      tensor.get(), RemoveOutermostParentheses(PrintExpr_(op->indices[0])));
   if (value_dtype.MatchesCode(kDLBool)) {
     os << "tl.as_logical_bool(" << loaded << ")";
   } else {
@@ -7319,12 +7312,76 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
   }
 }
 
+std::vector<std::string>
+CodeGenTileLangPTO::MaterializeIndexLanes(const PrimExpr &index,
+                                          int element_lanes) {
+  ICHECK(index.ty().IsFixedLengthVector());
+  std::string value = PrintExpr_(index);
+  std::string name = name_supply_->FreshName("tl_indices");
+  PrintIndent();
+  stream << name << " = tl.vector_to_list(" << value << ")\n";
+  std::vector<std::string> result;
+  for (int i = 0; i < index.ty().lanes(); ++i) {
+    std::string slot = ScalarCastExpr(name + "[" + std::to_string(i) + "]",
+                                      index.ty().WithLanes(1), "vector index");
+    // First honor the authored index width, then scale in address width.
+    if (element_lanes > 1 && index.ty().bits() < 64) {
+      slot = ScalarCastExpr(slot, PrimType::Int(64), "vector slot offset");
+    }
+    for (int j = 0; j < element_lanes; ++j) {
+      result.push_back(element_lanes == 1
+                           ? slot
+                           : "(" + slot + " * " +
+                                 std::to_string(element_lanes) + " + " +
+                                 std::to_string(j) + ")");
+    }
+  }
+  return result;
+}
+
 void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
                                             std::ostream &os) {
   PrimType value_dtype = op->ty.as_or_throw<PrimType>();
-  PrimType element_dtype = CodegenTensorDType(PTOTensor(op).get());
-  std::string scope = ScopeOfBuffer(PTOTensor(op).get());
+  const auto tensor = op->source.as_or_throw<TensorVar>();
+  PrimType element_dtype = tensor.dtype();
+  std::string scope = ScopeOfBuffer(tensor.get());
   PrimExpr index = op->indices[0];
+
+  const auto *ramp = index.as<prim::RampObj>();
+  if (index.ty().IsFixedLengthVector() &&
+      !(ramp && IsOne(sym::Analyzer()->Simplify(ramp->stride)))) {
+    ICHECK(element_dtype.IsScalar() ||
+           (inside_simtvf_body_ &&
+            (scope == "local.fragment" || scope == "local")))
+        << "PTO vector-element gather requires SIMT local storage";
+    ICHECK(!tl::IsAscendVectorizableFP8(element_dtype))
+        << "PTO FP8 gather requires supported scalar lane conversion";
+    // Keep the address computation expression-local: this load may occur in
+    // a Let body or a lazy branch. The lambda evaluates the vector index once.
+    std::string value = PrintExpr_(index);
+    std::string name = name_supply_->FreshName("tl_indices");
+    ICHECK_EQ(index.ty().lanes() * element_dtype.lanes(), value_dtype.lanes());
+    os << "(lambda " << name << ": tl.vector_from_list("
+       << DataTypeName(value_dtype.WithLanes(1)) << ", (";
+    for (int i = 0; i < index.ty().lanes(); ++i) {
+      std::string slot =
+          ScalarCastExpr(name + "[" + std::to_string(i) + "]",
+                         index.ty().WithLanes(1), "vector index");
+      if (!element_dtype.IsScalar() && index.ty().bits() < 64) {
+        slot = ScalarCastExpr(slot, PrimType::Int(64), "vector slot offset");
+      }
+      for (int j = 0; j < element_dtype.lanes(); ++j) {
+        std::string offset = element_dtype.IsScalar()
+                                 ? slot
+                                 : "(" + slot + " * " +
+                                       std::to_string(element_dtype.lanes()) +
+                                       " + " + std::to_string(j) + ")";
+        os << ScalarLoad(tensor.get(), offset) << ", ";
+      }
+    }
+    os << ")))(tl.vector_to_list(" << value << "))";
+    return;
+  }
 
   if (inside_simtvf_body_ && !element_dtype.IsScalar() &&
       (scope == "local.fragment" || scope == "local")) {
@@ -7338,12 +7395,10 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
   // Python index expression.
   if (element_dtype.lanes() > 1) {
     if (scope == "local.fragment" || scope == "local") {
-      os << GetVectorLocalRef(PTOTensor(op).get(), op->indices[0],
-                              "PTO vector load");
+      os << GetVectorLocalRef(tensor.get(), index, "PTO vector load");
     } else {
-      std::string index_str =
-          RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-      os << GetVarID(PTOTensor(op).get()) << "[" << index_str << "]";
+      std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+      os << GetVarID(tensor.get()) << "[" << index_str << "]";
     }
     return;
   }
@@ -7376,7 +7431,7 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
     std::string index_str =
         RemoveOutermostParentheses(PrintExpr_(scalar_index));
     if (scope == "local.fragment" || scope == "local") {
-      std::string value = "pto.load(" + GetVarID(PTOTensor(op).get()) + ", " +
+      std::string value = "pto.load(" + GetVarID(tensor.get()) + ", " +
                           index_str + ", contiguous=" + std::to_string(lanes) +
                           ")";
       // Local integer storage is signless; restore the authored signedness.
@@ -7387,15 +7442,13 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {
-      std::string base =
-          ScalarPointerBase_(PTOTensor(op).get(), element_dtype, scope);
+      std::string base = ScalarPointerBase_(tensor.get(), element_dtype, scope);
       os << "pto.load(" << base << ", " << index_str << ", contiguous=" << lanes
          << ")";
       return;
     }
     if (scope == "global" || scope.empty()) {
-      std::string base =
-          ScalarPointerBase_(PTOTensor(op).get(), element_dtype, scope);
+      std::string base = ScalarPointerBase_(tensor.get(), element_dtype, scope);
       os << "pto.load(" << base << ", " << index_str << ", contiguous=" << lanes
          << ")";
       return;
@@ -7408,9 +7461,9 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
   // contiguous=N to read all lanes in one shot.
   if (value_dtype.lanes() > 1) {
     const int lanes = value_dtype.lanes();
-    PrimExpr scalar_index = op->indices[0];
-    if (const auto *ramp = op->indices[0].as<prim::RampObj>()) {
-      CheckContiguousRampStride(op->indices[0], "load");
+    PrimExpr scalar_index = index;
+    if (const auto *ramp = index.as<prim::RampObj>()) {
+      CheckContiguousRampStride(index, "load");
       scalar_index = ramp->base;
     }
     std::string index_str =
@@ -7418,7 +7471,7 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
     if (scope == "local.fragment" || scope == "local") {
       // Non-SIMT local buffers are Python lists; rebuild a typed vector from
       // their scalar lanes instead of calling pto.load on the list.
-      const std::string list_ref = GetVarID(PTOTensor(op).get());
+      const std::string list_ref = GetVarID(tensor.get());
       os << "tl.vector_from_list(" << DataTypeName(element_dtype) << ", (";
       for (int lane = 0; lane < lanes; ++lane) {
         if (lane != 0) {
@@ -7434,15 +7487,13 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {
-      std::string base =
-          ScalarPointerBase_(PTOTensor(op).get(), element_dtype, scope);
+      std::string base = ScalarPointerBase_(tensor.get(), element_dtype, scope);
       os << "pto.load(" << base << ", " << index_str << ", contiguous=" << lanes
          << ")";
       return;
     }
     if (scope == "global" || scope.empty()) {
-      std::string base =
-          ScalarPointerBase_(PTOTensor(op).get(), element_dtype, scope);
+      std::string base = ScalarPointerBase_(tensor.get(), element_dtype, scope);
       os << "pto.load(" << base << ", " << index_str << ", contiguous=" << lanes
          << ")";
       return;
@@ -7456,20 +7507,13 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
 }
 
 void CodeGenTileLangPTO::Dispatch_(const TensorStoreObj *op) {
-  if (op->indices.size() == 1) {
-    PrimExpr index =
-        ascend::NormalizeVectorIndex(op->indices[0], index_analyzer_);
-    if (!index.same_as(op->indices[0])) {
-      Dispatch_(TensorStore(op->dest, {index}, op->value, op->loc).get());
-      return;
-    }
-  }
+  const auto tensor = op->dest.as_or_throw<TensorVar>();
   // S.alloc_var inside T.SimdVF() creates a `local.var`-scope buffer with a
   // vector dtype (e.g. float32x64). In PTODSL it is a plain Python variable
   // holding a vector register value, so store at index 0 is just
   // `var = value`. Skip the scalar-only CheckLocalVarBuffer below.
-  if (CodegenTensorDType(PTOTensor(op).get()).lanes() > 1) {
-    std::string scope = ScopeOfBuffer(PTOTensor(op).get());
+  if (tensor.dtype().lanes() > 1) {
+    std::string scope = ScopeOfBuffer(tensor.get());
     if (scope == "local.var") {
       ICHECK_EQ(op->indices.size(), 1U)
           << "PTO vector local.var store expects a single index";
@@ -7478,20 +7522,20 @@ void CodeGenTileLangPTO::Dispatch_(const TensorStoreObj *op) {
           << "PTO vector local.var store expects index 0";
       std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
       PrintIndent();
-      stream << LocalVarID(PTOTensor(op).get()) << " = " << value << "\n";
-      EmitMixedEntrySnapshot(PTOTensor(op).get());
+      stream << LocalVarID(tensor.get()) << " = " << value << "\n";
+      EmitMixedEntrySnapshot(tensor.get());
       return;
     }
   }
 
-  if (IsLocalVarBuffer(PTOTensor(op).get())) {
+  if (IsLocalVarBuffer(tensor.get())) {
     // Vector SSA and scalar PTO surface values both store as Python variables.
-    CheckLocalVarBuffer(PTOTensor(op).get());
-    if (CodegenTensorDType(PTOTensor(op).get()).lanes() > 1) {
+    CheckLocalVarBuffer(tensor.get());
+    if (tensor.dtype().lanes() > 1) {
       std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
       PrintIndent();
-      stream << LocalVarID(PTOTensor(op).get()) << " = " << value << "\n";
-      EmitMixedEntrySnapshot(PTOTensor(op).get());
+      stream << LocalVarID(tensor.get()) << " = " << value << "\n";
+      EmitMixedEntrySnapshot(tensor.get());
       return;
     }
     ICHECK_EQ(op->indices.size(), 1U)
@@ -7499,8 +7543,8 @@ void CodeGenTileLangPTO::Dispatch_(const TensorStoreObj *op) {
     int64_t index = 0;
     ICHECK(TryGetConstInt(op->indices[0], &index) && index == 0)
         << "PTO local.var store expects index 0";
-    std::string vid = LocalVarID(PTOTensor(op).get());
-    PrimType dtype = CodegenTensorDType(PTOTensor(op).get());
+    std::string vid = LocalVarID(tensor.get());
+    PrimType dtype = tensor.dtype();
     std::string value;
     if (current_function_has_gemm_) {
       value = LocalVarStoreValue(op->value, dtype);
@@ -7515,7 +7559,7 @@ void CodeGenTileLangPTO::Dispatch_(const TensorStoreObj *op) {
     }
     PrintIndent();
     stream << vid << " = " << value << "\n";
-    EmitMixedEntrySnapshot(PTOTensor(op).get());
+    EmitMixedEntrySnapshot(tensor.get());
     return;
   }
 
@@ -7529,14 +7573,39 @@ void CodeGenTileLangPTO::Dispatch_(const TensorStoreObj *op) {
 
   std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
   PrintIndent();
-  EmitScalarStore(PTOTensor(op).get(), value, op->indices[0]);
+  EmitScalarStore(tensor.get(), value,
+                  RemoveOutermostParentheses(PrintExpr_(op->indices[0])));
 }
 
 void CodeGenTileLangPTO::EmitScalarizedStore(const TensorStoreObj *op) {
-  PrimType buffer_dtype = CodegenTensorDType(PTOTensor(op).get());
+  const auto tensor = op->dest.as_or_throw<TensorVar>();
+  PrimType buffer_dtype = tensor.dtype();
   PrimType value_dtype = op->value.ty();
-  std::string scope = ScopeOfBuffer(PTOTensor(op).get());
+  std::string scope = ScopeOfBuffer(tensor.get());
   PrimExpr index = op->indices[0];
+
+  const auto *ramp = index.as<prim::RampObj>();
+  if (index.ty().IsFixedLengthVector() &&
+      !(ramp && IsOne(sym::Analyzer()->Simplify(ramp->stride)))) {
+    ICHECK(buffer_dtype.IsScalar() ||
+           (inside_simtvf_body_ &&
+            (scope == "local.fragment" || scope == "local")))
+        << "PTO vector-element scatter requires SIMT local storage";
+    ICHECK(!tl::IsAscendVectorizableFP8(buffer_dtype))
+        << "PTO FP8 scatter requires supported scalar lane conversion";
+    auto indices = MaterializeIndexLanes(index, buffer_dtype.lanes());
+    ICHECK_EQ(indices.size(), value_dtype.lanes());
+    std::string value = PrintExpr_(op->value);
+    std::string name = name_supply_->FreshName("tl_values");
+    PrintIndent();
+    stream << name << " = tl.vector_to_list(" << value << ")\n";
+    for (int i = 0; i < value_dtype.lanes(); ++i) {
+      PrintIndent();
+      EmitScalarStore(tensor.get(), name + "[" + std::to_string(i) + "]",
+                      indices[i]);
+    }
+    return;
+  }
 
   if (inside_simtvf_body_ && !buffer_dtype.IsScalar() &&
       (scope == "local.fragment" || scope == "local")) {
@@ -7552,14 +7621,12 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const TensorStoreObj *op) {
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
     PrintIndent();
     if (scope == "local.fragment" || scope == "local") {
-      stream << GetVectorLocalRef(PTOTensor(op).get(), op->indices[0],
-                                  "PTO vector store")
+      stream << GetVectorLocalRef(tensor.get(), index, "PTO vector store")
              << " = " << value << "\n";
     } else {
-      std::string index_str =
-          RemoveOutermostParentheses(PrintExpr_(op->indices[0]));
-      stream << GetVarID(PTOTensor(op).get()) << "[" << index_str
-             << "] = " << value << "\n";
+      std::string index_str = RemoveOutermostParentheses(PrintExpr_(index));
+      stream << GetVarID(tensor.get()) << "[" << index_str << "] = " << value
+             << "\n";
     }
     return;
   }
@@ -7599,20 +7666,20 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const TensorStoreObj *op) {
     const std::string contiguous_suffix =
         store_lanes > 1 ? ", contiguous=" + std::to_string(store_lanes) : "";
     if (scope == "local.fragment" || scope == "local") {
-      stream << "pto.store(" << value << ", " << GetVarID(PTOTensor(op).get())
-             << ", " << index_str << contiguous_suffix << ")\n";
+      stream << "pto.store(" << value << ", " << GetVarID(tensor.get()) << ", "
+             << index_str << contiguous_suffix << ")\n";
       return;
     }
     if (scope == "shared" || scope == "shared.dyn") {
-      std::string base = ScalarPointerBase_(
-          PTOTensor(op).get(), CodegenTensorDType(PTOTensor(op).get()), scope);
+      std::string base =
+          ScalarPointerBase_(tensor.get(), tensor.dtype(), scope);
       stream << "pto.store(" << value << ", " << base << ", " << index_str
              << contiguous_suffix << ")\n";
       return;
     }
     if (scope == "global" || scope.empty()) {
-      std::string base = ScalarPointerBase_(
-          PTOTensor(op).get(), CodegenTensorDType(PTOTensor(op).get()), scope);
+      std::string base =
+          ScalarPointerBase_(tensor.get(), tensor.dtype(), scope);
       stream << "pto.store(" << value << ", " << base << ", " << index_str
              << contiguous_suffix << ")\n";
       return;
@@ -7625,9 +7692,9 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const TensorStoreObj *op) {
   // contiguous=N to write all lanes in one shot.
   if (value_dtype.lanes() > 1) {
     std::string value = RemoveOutermostParentheses(PrintExpr_(op->value));
-    PrimExpr scalar_index = op->indices[0];
-    if (const auto *ramp = op->indices[0].as<prim::RampObj>()) {
-      CheckContiguousRampStride(op->indices[0], "store");
+    PrimExpr scalar_index = index;
+    if (const auto *ramp = index.as<prim::RampObj>()) {
+      CheckContiguousRampStride(index, "store");
       scalar_index = ramp->base;
     }
     std::string index_str =
@@ -7636,7 +7703,7 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const TensorStoreObj *op) {
       // Non-SIMT local buffers are Python lists.  PTODSL pto.store does
       // not accept a list as a vector destination, so extract each lane and
       // assign it directly.
-      const std::string list_ref = GetVarID(PTOTensor(op).get());
+      const std::string list_ref = GetVarID(tensor.get());
       PrintIndent();
       stream << "tl.store_vector_to_list(" << list_ref << ", " << index_str
              << ", " << value << ")\n";
@@ -7644,16 +7711,16 @@ void CodeGenTileLangPTO::EmitScalarizedStore(const TensorStoreObj *op) {
     }
     if (scope == "shared" || scope == "shared.dyn") {
       PrintIndent();
-      std::string base = ScalarPointerBase_(
-          PTOTensor(op).get(), CodegenTensorDType(PTOTensor(op).get()), scope);
+      std::string base =
+          ScalarPointerBase_(tensor.get(), tensor.dtype(), scope);
       stream << "pto.store(" << value << ", " << base << ", " << index_str
              << ", contiguous=" << value_dtype.lanes() << ")\n";
       return;
     }
     if (scope == "global" || scope.empty()) {
       PrintIndent();
-      std::string base = ScalarPointerBase_(
-          PTOTensor(op).get(), CodegenTensorDType(PTOTensor(op).get()), scope);
+      std::string base =
+          ScalarPointerBase_(tensor.get(), tensor.dtype(), scope);
       stream << "pto.store(" << value << ", " << base << ", " << index_str
              << ", contiguous=" << value_dtype.lanes() << ")\n";
       return;
@@ -7698,7 +7765,8 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const TensorStoreObj *op,
     base_index = ramp->base;
   }
 
-  sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
+  const auto tensor = op->dest.as_or_throw<TensorVar>();
+  sym::Analyzer analyzer;
   for (int64_t lane = 0; lane < 2; ++lane) {
     std::string tmp = name_supply_->FreshName("_tl_rng_value");
     std::string value =
@@ -7708,7 +7776,8 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const TensorStoreObj *op,
     PrimExpr lane_index =
         analyzer->Simplify(base_index + MakeConst(base_index.ty(), lane));
     PrintIndent();
-    EmitScalarStore(PTOTensor(op).get(), tmp, lane_index);
+    EmitScalarStore(tensor.get(), tmp,
+                    RemoveOutermostParentheses(PrintExpr_(lane_index)));
   }
   return true;
 }

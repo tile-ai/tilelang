@@ -216,7 +216,7 @@ private:
                       TensorElementOffset(tensor, zero);
     PrimExpr bits = offset * IntImm(offset.ty(), tensor.dtype().bits() *
                                                      tensor.dtype().lanes());
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     TVM_FFI_CHECK(analyzer->CanProve(floormod(bits, 8) == 0), ValueError)
         << "A versioned raw tensor pointer must start at a byte boundary";
     return analyzer->Simplify(floordiv(bits, 8));
@@ -320,7 +320,7 @@ private:
         for (const auto &[old, tensor] : replacements_)
           expanded |= load && load->source.same_as(tensor);
         if (expanded) {
-          auto analyzer = CreateTileLangAnalyzer();
+          sym::Analyzer analyzer;
           auto at_min =
               analyzer->Simplify(tirx::SubstituteWithDataTypeLegalization(
                   call->args[1].as_or_throw<PrimExpr>(),

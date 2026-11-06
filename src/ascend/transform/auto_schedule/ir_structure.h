@@ -58,7 +58,7 @@ inline bool RegionsEqual(const Region &a, const Region &b) {
   if (a.size() != b.size())
     return false;
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (size_t i = 0; i < a.size(); ++i) {
     // Check if min values are equal
     if (!analyzer->CanProveEqual(a[i]->begin, b[i]->begin)) {
@@ -79,7 +79,7 @@ inline bool RegionCovers(const Region &outer, const Region &inner) {
   if (outer.size() != inner.size())
     return false;
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (size_t i = 0; i < outer.size(); ++i) {
     PrimExpr outer_end = outer[i]->begin + outer[i]->extent;
     PrimExpr inner_end = inner[i]->begin + inner[i]->extent;
@@ -95,7 +95,7 @@ constexpr int64_t kDynamicSerialTripCountFallback = 100;
 
 inline int64_t GetSerialTripCount(const For &loop,
                                   const sym::AnalyzerObj *context = nullptr) {
-  auto analyzer = context ? context->Clone() : CreateTileLangAnalyzer();
+  auto analyzer = context ? context->Clone() : sym::Analyzer();
   // Native For always tests var < end, including negative and zero steps.
   // This API estimates scheduling cost; the fallback is not a proof that an
   // entering nonpositive-step loop terminates after a finite number of trips.
@@ -117,7 +117,7 @@ inline int64_t GetSerialTripCount(const For &loop,
     extent = *count;
   } else {
     auto bound = analyzer->const_int_bound(distance);
-    auto unconstrained = CreateTileLangAnalyzer();
+    sym::Analyzer unconstrained;
     PrimVar variable("unconstrained_trip_count", distance.ty());
     if (bound->max_value < 0 ||
         bound->max_value == sym::ConstIntBound::kPosInf ||
@@ -137,7 +137,7 @@ inline int64_t GetSerialTripCount(const For &loop,
 // Record the loop definition before its body facts, so RenameFrom can give
 // different iterations independent variables even without a finite range.
 inline void AppendSerialLoopFacts(ConstrSet *context, const For &loop) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto outer = context->Populate(analyzer);
   bool pure_header = SideEffect(loop->begin) <= CallEffectKind::kPure &&
                      SideEffect(loop->end) <= CallEffectKind::kPure &&
@@ -874,7 +874,7 @@ public:
   std::shared_ptr<IRStructure> Clone() const override;
 
   int64_t GetTripCount() const {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = task ? task->outer_ctx.Populate(analyzer) : nullptr;
     return GetSerialTripCount(control, analyzer.get());
   }

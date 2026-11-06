@@ -22,13 +22,13 @@
  * \brief Expand explicit native loops while preserving Ascend VF bodies.
  */
 #include "ascend/ir/block.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/loop_annotations.h"
 #include "ir/loop_math.h"
 #include "ir/stmt_functor.h"
 #include "op/builtin.h"
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -106,7 +106,7 @@ public:
   }
 
 private:
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
 };
 } // namespace
 

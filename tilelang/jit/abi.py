@@ -10,7 +10,6 @@ from tvm_tirx import ir, sym, tirx
 from tvm_tirx.ir import prim
 from tvm_tirx.tirx.layout import Axis
 
-from tilelang._analyzer import create_analyzer
 
 # Declarative attribute: which parameters are outputs (mirrors out_idx).
 OUT_IDX_ATTR = "tilelang_out_idx"
@@ -124,7 +123,7 @@ class ShapeBindings:
 
     def __init__(self, *, tensor_error_type: type[Exception] = ValueError, size_var_defaults=()):
         self.values: dict[ir.Var, int] = {}
-        self.analyzer = create_analyzer()
+        self.analyzer = sym.Analyzer()
         self.tensor_error_type = tensor_error_type
         self.size_var_defaults = tuple(size_var_defaults)
         self.context = sym.ConstraintContext()

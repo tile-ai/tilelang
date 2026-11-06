@@ -166,7 +166,7 @@ EstimateRegionElementUpperBound(const TensorVar &tensor, const Region &ranges,
       auto shape = i < tensor.shape().size() ? TryConstInt(tensor.shape()[i])
                                              : std::nullopt;
       auto bound = analyzer->const_int_bound(expression);
-      auto unconstrained = CreateTileLangAnalyzer();
+      sym::Analyzer unconstrained;
       PrimVar variable("unconstrained_extent", expression.ty());
       bool finite = bound->max_value >= 0 &&
                     bound->max_value != sym::ConstIntBound::kPosInf;

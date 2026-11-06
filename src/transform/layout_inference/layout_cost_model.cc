@@ -725,7 +725,7 @@ private:
   ffi::Optional<VisitInterrupt> Visit_(const ForObj *op) final {
     if (op->kind == ForKind::kParallel)
       return StmtExprVisitor::Visit_(op);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto extent =
         TryConstInt(analyzer->Simplify(ceildiv(op->end - op->begin, op->step)));
     serial_stack_.push_back(extent ? *extent : -1);
@@ -937,7 +937,7 @@ int64_t CountSpilledBytes(const std::vector<int> &members,
     if (!loop_layout.defined()) {
       return;
     }
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     FragmentThreadIndexProbe probe(loop_layout, loop_op->GetLoopVars(),
                                    analyzer.get());
     if (!probe.valid()) {

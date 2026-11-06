@@ -21,10 +21,10 @@
 
 #include "ascend/analysis/storage.h"
 #include "ascend/ir/task.h"
-#include "ir/analyzer.h"
 #include "ir/tensor_utils.h"
 #include "transform/common/storage_size.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 
 #include <algorithm>
 #include <limits>
@@ -147,7 +147,7 @@ public:
   tirx::TensorType VersionedType(const TensorVar &tensor, int versions) const {
     TVM_FFI_CHECK_GT(versions, 0, ValueError);
     auto storage = storage_.Identity(tensor);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     PrimExpr pitch = analyzer->Simplify(
         FloorDiv(PitchBits(storage), IntImm::Int64(ElementBits(tensor))));
     PrimExpr count = IntImm(tensor.ty()->DefaultIndexType(), versions);
@@ -194,7 +194,7 @@ public:
     bool rewritten = false;
     const auto scope = owner.scope().name();
     if (count > 1 && (scope == "shared" || scope == "shared.dyn")) {
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       auto carries_versions = [&](const TensorVar &tensor) {
         return !tensor.shape().empty() &&
                analyzer->CanProveEqual(tensor.shape()[0],
@@ -275,7 +275,7 @@ private:
     return cast(value, PrimType::Int(64));
   }
   static std::optional<ffi::BigInt> Constant(const PrimExpr &value) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto result = analyzer->Simplify(value);
     if (auto integer = result.as<IntImmObj>())
       return integer->value;
@@ -355,7 +355,7 @@ private:
       }
     if (all_constant)
       return IntImm::Int64(Checked(constant));
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     return analyzer->Simplify(span);
   }
 };

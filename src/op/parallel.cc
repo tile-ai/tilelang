@@ -356,8 +356,8 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
   // Start each inference attempt from the caller's lexical snapshot, then add
   // this nest's iterators. A fresh clone keeps both local planning facts and
   // facts from a previous attempt out of the caller's analyzer.
-  analyzer_ = layout_args.analyzer ? layout_args.analyzer->Clone()
-                                   : CreateTileLangAnalyzer();
+  analyzer_ =
+      layout_args.analyzer ? layout_args.analyzer->Clone() : sym::Analyzer();
   for (const auto &iv : loop_vars_)
     BindAnalyzer(analyzer_, iv->var, iv->dom);
   for (const auto &[var, iv] : inner_vars_)

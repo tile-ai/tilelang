@@ -542,7 +542,7 @@ struct ExactInjectivityResult {
 ExactInjectivityResult
 CheckStaticInjectivity(const Array<PrimExpr> &forward_indices,
                        const Map<PrimVar, Range> &input_iters) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   std::vector<PrimVar> vars;
   std::vector<int64_t> mins;
   std::vector<int64_t> extents;
@@ -625,7 +625,7 @@ struct InverseRoundTripResult {
 
 bool GetStaticDomain(const Array<PrimExpr> &shape,
                      std::vector<int64_t> *extents, int64_t *domain_size) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   *domain_size = 1;
   extents->clear();
   extents->reserve(shape.size());
@@ -668,7 +668,7 @@ EvaluateStaticMap(const Array<PrimExpr> &indices,
                      IntImm(placeholder.ty(), static_cast<int64_t>(input[i])));
   }
 
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   std::vector<int64_t> output;
   output.reserve(indices.size());
   for (const PrimExpr &index : indices) {
@@ -687,7 +687,7 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
                               const Array<PrimExpr> &output_shape,
                               const Array<PrimExpr> &forward_indices,
                               const Array<PrimExpr> &backward_indices) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
 
   Array<PrimVar> logical_vars;
   Map<PrimVar, PrimExpr> logical_substitution;
@@ -852,7 +852,7 @@ TryCompactStaticInverse(const Array<PrimExpr> &input_shape,
       input_size <= 0 || input_size != output_size)
     return std::nullopt;
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   PrimVar flat("__layout_flat", PrimType::Int(32));
   BindAnalyzer(analyzer, flat, Range(0, IntImm::Int32(input_size)));
   auto coordinates = RecoverOriginalIndices(input_shape, flat);
@@ -884,7 +884,7 @@ TryCompactStaticInverse(const Array<PrimExpr> &input_shape,
 
 bool CanProveInjective(const Array<PrimExpr> &forward_indices,
                        const Map<PrimVar, Range> &input_iters) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   Map<PrimVar, PrimExpr> other_substitution;
   PrimExpr same_input = IntImm::Bool(true);
   for (const auto &[var, range] : input_iters) {
@@ -910,7 +910,7 @@ bool CanProveInjective(const Array<PrimExpr> &forward_indices,
 // coordinate must still be recovered on the original input domain.
 bool CanProveLeftInverse(const Array<PrimExpr> &forward_indices,
                          const Map<PrimVar, Range> &input_iters) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   // Match the lossless coordinate view used by InverseWithLevel. A generated
   // wide partition index contains direct casts of int32 placeholders, which
   // native IterMap does not recognize as iterators. The view preserves their
@@ -958,7 +958,7 @@ DetectInjectiveMapping(const Array<PrimExpr> &forward_indices,
                        const Map<PrimVar, Range> &input_iters,
                        bool require_padding_guard) {
   if (!require_padding_guard) {
-    sym::Analyzer analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     sym::IterMapResult iter_map =
         sym::DetectIterMap(forward_indices, input_iters, 1,
                            sym::IterMapLevel::Bijective, analyzer);
@@ -996,7 +996,7 @@ LayoutNode::LayoutNode(Array<PrimExpr> input_size,
                        Array<PrimExpr> forward_index) {
   input_size_ = input_size;
   InitCoordinates();
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer.get());
   forward_index_ = forward_index.Map([&](const PrimExpr &e) {
     return BindCoordinates(analyzer->Simplify(e));
@@ -1111,7 +1111,7 @@ Array<PrimExpr> LayoutNode::GetForwardVars() const {
 Array<PrimExpr> LayoutNode::OutputShape() const {
   const auto forward_index = GetForwardIndex();
   Array<PrimExpr> ret(OutputDim(), 1);
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer.get());
   // Mutable loads are not durable analyzer premises. The layout's domains
   // still define this one bound query, so pass them explicitly instead of
@@ -1173,7 +1173,7 @@ Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
       << "MapRegionBounds: region rank (" << region.size()
       << ") != layout input rank (" << InputDim() << ")";
 
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   // Bind each InputPlaceholder to the sub-range [min, min + extent)
   // instead of the full extent [0, input_size) that OutputShape uses.
   Map<Var, sym::IntSet> domains;
@@ -1463,7 +1463,7 @@ Fragment FragmentNode::Replicate(int repeats) const {
 
 Fragment FragmentNode::DeReplicate() const {
   ICHECK(OutputDim() == 1);
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer.get());
   int factor = 1;
   auto rep_size = TryConstInt(ReplicateExtent());
@@ -1494,7 +1494,7 @@ FragmentNode::BindThreadRange(ffi::Optional<Range> thread_range) const {
 
 std::pair<Layout, sym::IterMapLevel>
 LayoutNode::InverseWithLevel(bool require_padding_guard) const {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto collect_symbolic = [&](const Array<PrimExpr> &shape) {
     Array<PrimExpr> symbolic_dims;
     for (const auto &dim : shape) {
@@ -1592,7 +1592,7 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
 
   // Use provided analyzer if present, otherwise a local fallback to avoid
   // potential null dereference paths flagged by static analysis.
-  sym::Analyzer fallback_analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer fallback_analyzer;
   sym::AnalyzerObj *az = analyzer ? analyzer : fallback_analyzer.get();
   ICHECK(az->CanProveEqual(input_shape_product * rescale_num,
                            shape_product * rescale_den))
@@ -1645,7 +1645,7 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
     shape_prod *= d;
 
   // Use provided analyzer if present, otherwise a local fallback.
-  sym::Analyzer fallback_analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer fallback_analyzer;
   sym::AnalyzerObj *az = analyzer ? analyzer : fallback_analyzer.get();
   ICHECK(az->CanProveEqual(input_prod * rescale_num, shape_prod * rescale_den))
       << "InputShape() = " << InputShape() << " shape = " << shape
@@ -1693,7 +1693,7 @@ PrimExpr infer_fragment_index(const Map<PrimVar, Range> &input_iters,
   // we build iter_vars from input_iters, but set _rep to range [0, 1)
   // to make it not contribute to the index of the forward_idx
   Array<LayoutIterVar> iter_vars;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (const auto &[var, range_] : input_iters) {
     Range range = range_;
     if (var.same_as(ReplicationPlaceholder())) {
@@ -1721,7 +1721,7 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size,
   input_size_ = input_size;
   InitCoordinates();
   replicate_size_ = replicate_size;
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer.get());
   forward_thread_ = BindCoordinates(analyzer->Simplify(forward_thread));
   if (forward_index.empty()) {
@@ -1784,7 +1784,7 @@ PartialFragmentNode::PartialFragmentNode(Array<PrimExpr> input_size,
                                          Optional<Range> thread_range)
     : FragmentNode(std::move(input_size), std::move(forward_index),
                    std::move(forward_thread), std::move(replicate_size)) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   combine_size_ = analyzer->Simplify(combine_size);
   // The low-bits convention only makes sense when the combine width evenly
   // tiles the replication coordinate.
@@ -1863,7 +1863,7 @@ Fragment PartialFragment::AsPostCollective() const {
 
 std::string PartialFragmentNode::DebugOutput() const {
   std::stringstream ss;
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   ss << "PartialFragment(" << InputShape() << " -> " << OutputShape()
      << ", replicate: " << ReplicateExtent() << " (combine " << combine_size_
      << " x copy "
@@ -1899,7 +1899,7 @@ std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
   // thread stride `scale` — the complete communication spec of the finalize
   // collective. Mirrors backend CollectThreadReduceSteps, which cannot be
   // used here for layering reasons.
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   PrimExpr rep_extent = ReplicateExtent();
   PrimExpr copy_extent =
       analyzer->Simplify(FloorDiv(rep_extent, combine_size_));
@@ -1943,7 +1943,7 @@ std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
 
 // which means the forward_thread is rep_var -> lambda i, rep: rep
 bool FragmentNode::IsCompletedReplicated() const {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   return ExprDeepEqual()(analyzer->Simplify(GetForwardThread()),
                          ReplicationPlaceholder());
 }
@@ -1966,7 +1966,7 @@ FragmentNode::DetectInjective(bool require_padding_guard) const {
 
 PrimExpr FragmentNode::ThreadExtent() const {
   Array<PrimExpr> ret(OutputDim(), 1);
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   UpdateAnalyzer(analyzer.get());
   Map<Var, sym::IntSet> domains;
   for (const auto &[var, range] : GetVarMap())
@@ -2017,7 +2017,7 @@ FragmentNode::InverseWithLevel(bool require_padding_guard) const {
 }
 
 Fragment FragmentNode::CondenseReplicateVar() const {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto input_iters = GetVarMap();
   input_iters.Set(ReplicationPlaceholder(), {0, ReplicateExtent()});
   PrimExpr new_forward_thread{0};
@@ -2032,7 +2032,7 @@ Fragment FragmentNode::CondenseReplicateVar() const {
 std::pair<Fragment, PrimExpr>
 CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
                                     const PrimExpr &combine_size) {
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   const FragmentNode *node = fragment.get();
   ICHECK(node != nullptr);
   PrimExpr rep_extent = node->ReplicateExtent();

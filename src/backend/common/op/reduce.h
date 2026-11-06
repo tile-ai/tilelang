@@ -181,7 +181,7 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
   ICHECK_GT(*replicate, 0)
       << "tl.reduce: reduce layout replicate extent must be positive";
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
     PrimVar placeholder = InputPlaceholder(i);
     BindAnalyzer(analyzer, placeholder,
@@ -551,7 +551,7 @@ BuildLocalReduceIterator(const PrimExpr &index_expr,
                          sym::AnalyzerObj *analyzer) {
   auto [expr, iter_var] =
       CompressIterator(index_expr, input_iters, reduce_var, analyzer);
-  auto proof_analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer proof_analyzer;
   for (const auto &iv : input_iters) {
     BindAnalyzer(proof_analyzer, iv->var, iv->dom, /*allow_override=*/true);
   }

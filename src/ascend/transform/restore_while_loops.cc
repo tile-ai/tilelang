@@ -17,8 +17,8 @@
 
 #include <utility>
 
-#include "ir/analyzer.h"
 #include "ir/stmt_functor.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 using namespace tirx;
@@ -46,7 +46,7 @@ public:
   }
 
 private:
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
 };
 
 class WhileLoopRestorer : public LayoutMapMutator {

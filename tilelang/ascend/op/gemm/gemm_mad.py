@@ -4,7 +4,7 @@ from tilelang.language import _construction
 from tilelang.language import _intrinsics
 from tvm_tirx import ir as _ir
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.ascend import language as T
@@ -77,7 +77,7 @@ class GemmMAD(GemmBase):
         if isinstance(remainder, int):
             aligned = remainder == 0
         else:
-            analyzer = create_analyzer()
+            analyzer = sym.Analyzer()
             aligned = analyzer.can_prove_equal(remainder, _ir.const(0, _construction.dtype_of(remainder)))
         assert aligned, (
             f"Ascend blockscaled GEMM requires operation K to be divisible by 64, got K={self.K}. "
@@ -139,7 +139,7 @@ class GemmMAD(GemmBase):
 
     def _l0_operation_extents(self):
         """Return the logical MAD M/N/K carried by the three L0 regions."""
-        analyzer = create_analyzer()
+        analyzer = sym.Analyzer()
 
         def prove_equal(lhs, rhs) -> bool:
             return analyzer.can_prove_equal(lhs, rhs)

@@ -3,8 +3,8 @@
  * \brief Lower typed TileLang kernel regions to CPU loops or device launches.
  */
 
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
+#include <tvm/sym/analyzer.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
@@ -186,7 +186,7 @@ private:
         // Frontend grids are zero-based, but an explicitly transformed range
         // keeps its original coordinate through a separate bound index.
         PrimExpr zero = IntImm(var.ty(), 0);
-        auto analyzer = CreateTileLangAnalyzer();
+        sym::Analyzer analyzer;
         PrimExpr extent = ends[i];
         PrimVar physical = var;
         if (!IsZero(begins[i]) || !IsOne(steps[i])) {

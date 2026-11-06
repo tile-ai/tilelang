@@ -13,7 +13,7 @@ from tilelang.language.gemm_op import _gemm_impl
 from tilelang.language.utils import _normalize_annotations, buffer_region_to_tile_region
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.utils.language import prim_expr_equal, retrieve_shape, to_buffer_region
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 
 __all__ = ["gemm", "gemm_blockscaled"]
@@ -27,7 +27,7 @@ def _legalize_argument(arg):
 
 
 def _prove_equal(expr1, expr2) -> bool:
-    return prim_expr_equal(expr1, expr2) or create_analyzer().can_prove_equal(expr1, expr2)
+    return prim_expr_equal(expr1, expr2) or sym.Analyzer().can_prove_equal(expr1, expr2)
 
 
 def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy, clear_accum, annotations):

@@ -3,11 +3,11 @@
  * \brief Hoist invariant guards while retaining native scopes and storage
  * effects.
  */
-#include "../ir/analyzer.h"
 #include "../op/builtin.h"
 #include "common/pipeline_access.h"
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/region.h>
 
 #include <tvm/ffi/reflection/registry.h>
@@ -113,8 +113,7 @@ public:
   LoopUnswitcher(const tirx::Function &function, bool allow_non_trivial_else)
       : memory_(function),
         target_(function->GetAttr<Target>("target").value_or(Target("llvm"))),
-        allow_non_trivial_else_(allow_non_trivial_else),
-        analyzer_(CreateTileLangAnalyzer()) {}
+        allow_non_trivial_else_(allow_non_trivial_else) {}
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {

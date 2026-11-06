@@ -64,7 +64,7 @@ public:
                              LayoutInferenceOptions options = {})
       : StmtExprMutatorWithAnalyzer(analyzer), options_(std::move(options)) {}
   static Stmt Fuse(const Stmt &stmt, LayoutInferenceOptions options = {}) {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto fuser =
         ffi::make_object<ParallelLoopFuser>(analyzer.get(), std::move(options));
     return fuser->Mutate(stmt).ValueOrUnchanged(stmt);

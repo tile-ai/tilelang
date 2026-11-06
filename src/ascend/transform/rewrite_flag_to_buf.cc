@@ -121,7 +121,7 @@ using FlagCallRanges =
 // and assumptions.
 EventIdBounds EventIdRange(const ConstrSet &constraints, const std::string &he,
                            const PrimExpr &event_id) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto context = constraints.Populate(analyzer);
   sym::ConstIntBound bound =
       analyzer->const_int_bound(analyzer->Simplify(event_id));

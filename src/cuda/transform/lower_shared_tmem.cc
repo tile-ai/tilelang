@@ -861,7 +861,7 @@ tvm::transform::Pass LowerSharedTmem() {
         << "LowerSharedTmem requires a bound target";
     auto collector = make_object<SourceBindings>();
     collector->Visit(function->body);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto lowerer = make_object<SharedTmemLowerer>(
         analyzer.get(), target.value(), collector->bindings);
     SeqStmt body = function->body;

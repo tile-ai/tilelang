@@ -22,6 +22,7 @@
  * \brief Helper utility to match and bind packed function arguments.
  */
 #include "tvm_ffi_binder.h"
+#include "ir/analyzer.h"
 
 #include <tvm/ffi/cast.h>
 #include <tvm/ffi/extra/structural_visit.h>

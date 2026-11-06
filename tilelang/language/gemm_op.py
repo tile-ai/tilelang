@@ -11,7 +11,7 @@ from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 from tilelang.utils.language import (
     to_buffer_region,
     retrieve_shape,
@@ -38,7 +38,7 @@ def _legalize_buffer_arg(arg: BufferLikeType | _ir.Var) -> BufferLikeType:
 
 
 def _prove_equal(expr1, expr2) -> bool:
-    return prim_expr_equal(expr1, expr2) or create_analyzer().can_prove_equal(expr1, expr2)
+    return prim_expr_equal(expr1, expr2) or sym.Analyzer().can_prove_equal(expr1, expr2)
 
 
 def _gemm_dense_slots(

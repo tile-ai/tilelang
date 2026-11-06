@@ -878,7 +878,7 @@ tvm::transform::Pass LegalizeSafeMemoryAccess() {
           retirer->Mutate(body).ValueOrUnchanged(body);
       return function;
     }
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto mutator = ffi::make_object<SafeMemoryRewriter>(analyzer);
     function.CopyOnWrite()->body = mutator->Rewrite(function);
     return function;

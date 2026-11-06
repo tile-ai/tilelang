@@ -331,7 +331,7 @@ tvm::transform::Pass AscendRemoveNoOp() {
       return f;
     auto config =
         ctx->GetConfigOrDefault<AscendRemoveNoOpConfig>("tl.AscendRemoveNoOp");
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     analyzer->rewrite_simplify.SetMaximumRewriteSteps(
         config->max_simplification_steps);
     SeqStmt body = f->body;

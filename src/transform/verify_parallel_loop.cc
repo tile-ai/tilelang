@@ -105,7 +105,7 @@ struct ParallelLoopVerifier : public ConstrVisitor {
     cset = cset.Merge(cset.RenameFrom("<OTHER>", subs, parallel_vars_.front()));
     for (const PrimExpr &index : op->indices)
       cset.AddConstr(index == SubstituteConstraintExpr(index, subs));
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = cset.Populate(analyzer);
 
     PrimExpr same_iteration = IntImm(PrimType::Bool(), 1);

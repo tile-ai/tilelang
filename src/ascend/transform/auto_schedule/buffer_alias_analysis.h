@@ -198,7 +198,7 @@ TryMergeDenseRegions(const TensorRegion &lhs, const TensorRegion &rhs) {
   if (RegionCovers(rhs->region, lhs->region))
     return rhs;
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   std::optional<size_t> differing_axis;
   for (size_t i = 0; i < lhs->region.size(); ++i) {
     const Range &lhs_range = lhs->region[i];
@@ -298,7 +298,7 @@ inline bool LoopHasKnownProgress(const ControlNode *control, bool single_trip) {
       SideEffect(loop->end) > CallEffectKind::kPure ||
       SideEffect(loop->step) > CallEffectKind::kPure)
     return false;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto context =
       control->task ? control->task->outer_ctx.Populate(analyzer) : nullptr;
   // The loop condition remains var < end for every step sign. A negative
@@ -812,7 +812,7 @@ private:
     }
     std::reverse(path.begin(), path.end());
 
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     ConstrAnalyzerContext bind_context;
     for (const Constr &constraint : task->outer_ctx.constrs_) {
       // A mutable Bind is one SSA snapshot. Keep its variable shared between
@@ -859,7 +859,7 @@ private:
                              ControlNode *scope) const {
     if (conclusion.empty())
       return true;
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     analyzer->z3_prover.SetRLimit(50000);
     auto context = scope && scope->task
                        ? scope->task->outer_ctx.Populate(analyzer)
@@ -875,7 +875,7 @@ private:
                               ControlNode *scope) const {
     if (!lhs.defined() || !rhs.defined())
       return false;
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     analyzer->z3_prover.SetRLimit(50000);
     auto context = scope && scope->task
                        ? scope->task->outer_ctx.Populate(analyzer)
@@ -1096,7 +1096,7 @@ private:
                                        uint64_t(max_offset) / stride;
     }
     if (regions_periodic) {
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       // Do not bind the loop variable to its finite range: periodicity must
       // hold for shifted generations as well as the current iteration.
       VarSet variant_vars = CollectIterationVariantVars(analysis_scope);
@@ -1455,7 +1455,7 @@ private:
     }
     std::vector<GenerationLifetime> generations;
     if (!parent_live_through) {
-      auto guard_analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer guard_analyzer;
       auto control_signature =
           CollectConditionSignature(control->HeaderTask(), parent_scope);
       if (!control_signature)

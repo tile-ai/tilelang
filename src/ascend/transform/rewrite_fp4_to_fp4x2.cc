@@ -7,13 +7,13 @@
  * fp4 views have already been handled by AscendCopy and are left unchanged.
  */
 #include "ir/alias_analysis.h"
-#include "ir/analyzer.h"
 #include "ir/stmt_functor.h"
 #include "op/builtin.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/vector_expr.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -332,7 +332,7 @@ tvm::transform::Pass RewriteFp4ToFp4x2() {
   auto pass = [](tirx::Function function, IRModule,
                  tvm::transform::PassContext) {
     if (!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) {
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       auto rewriter = ffi::make_object<Fp4StorageRewriter>(function, analyzer);
       function.CopyOnWrite()->body = rewriter->Rewrite(function->body);
     }

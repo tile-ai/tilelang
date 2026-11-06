@@ -3,7 +3,6 @@
  * \brief Lower TileLang operators and logical layouts into native typed IR.
  */
 #include "ascend/ir/block.h"
-#include "ir/analyzer.h"
 #include "ir/lexical_scope.h"
 #include "ir/stmt_functor.h"
 #include "layout/expr_utils.h"
@@ -12,6 +11,7 @@
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -307,7 +307,7 @@ public:
   static tirx::Function Apply(tirx::Function function) {
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return function;
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto lowerer = make_object<LowerTileOpPass>(analyzer.get());
     auto target = function->GetAttr<Target>(tvm::attr::kTarget);
     TVM_FFI_CHECK(target.has_value(), ValueError)

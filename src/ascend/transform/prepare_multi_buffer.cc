@@ -423,7 +423,7 @@ AnalyzeStorageEpoch(const Var &storage, ControlNode *loop,
   std::vector<PrimExpr> guard_terms;
   std::vector<const TaskNode *> guard_tasks;
   std::unordered_map<Var, int, ObjectPtrHash, ObjectPtrEqual> guard_definitions;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto loop_context = loop->GetLoopBodyContext().Populate(analyzer);
 
   int first_access = -1;
@@ -1257,7 +1257,7 @@ void AnnotateStorageEpochs(
     };
     std::vector<GuardRepresentative> guard_representatives{
         {IntImm::Bool(true), kCoreAll}};
-    auto domain_analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer domain_analyzer;
     auto loop_context = loop->GetLoopBodyContext().Populate(domain_analyzer);
     StorageEpochGuardMap guard_map;
     for (const StorageEpoch &epoch : storage_epochs) {

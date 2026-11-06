@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 from tvm_tirx import ir, tirx
 
@@ -10,7 +10,7 @@ from ..source_host import SourceHostProgram
 
 
 def _constant_extent(value, tag):
-    value = create_analyzer().simplify(value)
+    value = sym.Analyzer().simplify(value)
     if not isinstance(value, ir.IntImm):
         raise ValueError(f"The Torch Metal adapter requires a static {tag} extent, got {value}")
     extent = int(value.value)

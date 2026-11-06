@@ -255,7 +255,7 @@ private:
     return std::nullopt;
   }
 
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
   PrimExpr state_{Mode(kDisabled)};
   Hf32ModeMap modes_;
 };
@@ -1964,7 +1964,7 @@ private:
   }
 
   const CandidateCostMap &candidate_costs_;
-  sym::Analyzer arith_analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer arith_analyzer_;
 };
 
 bool IsComposedLatencyStmt(const Stmt &stmt) {
@@ -1983,7 +1983,7 @@ bool IsComposedLatencyStmt(const Stmt &stmt) {
 
 void TaskCostEstimator::Estimate(TaskNode *task) {
   ICHECK(task != nullptr);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto context = task->outer_ctx.Populate(analyzer);
   TaskCostFeatures cost_features =
       CostFeatureAnalyzer::Analyze(task->stmt, analyzer.get(), hf32_modes_);
@@ -2065,7 +2065,7 @@ TaskCostEstimator::EstimateStmtCost(const Stmt &stmt,
     if (loop->kind != ForKind::kDefault && loop->kind != ForKind::kUnrolled)
       return EstimateLeafTaskCost(stmt, outer_ctx);
 
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = outer_ctx.Populate(analyzer);
     int64_t trip_count = GetSerialTripCount(GetRef<For>(loop), analyzer.get());
     ConstrSet body_ctx = outer_ctx;

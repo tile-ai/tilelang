@@ -5,7 +5,6 @@
 #include "ir/analyzer.h"
 #include "op/builtin.h"
 #include "support/check.h"
-#include "vector_index.h"
 #include <tvm/ffi/extra/structural_visit.h>
 
 #include <algorithm>
@@ -150,11 +149,9 @@ SfuPrecision ResolveSfuPrecision(const Call &op, PrimType result_dtype,
   // Per-op "precision" annotation (int code from the Python side,
   // normalized from the string aliases in tilelang/ascend/language/simd.py
   // -- no alias table here, mirroring the l2_cache_ctrl pattern).
-  if (const auto *attrs = op->attrs.as<DictAttrsObj>()) {
-    if (auto code = attrs->dict.Get("precision")) {
-      return PrecisionFromCode(
-          code->cast<IntImm>()->value.as<int64_t>().value());
-    }
+  auto attrs = op->attrs.as<DictAttrs>();
+  if (auto code = attrs ? attrs->GetAttr<IntImm>("precision") : std::nullopt) {
+    return PrecisionFromCode(code.value()->value.as<int64_t>().value());
   }
   return fallback;
 }
@@ -2020,6 +2017,13 @@ void CodeGenTileLangAscend::Dispatch_(const CallObj *op, std::ostream &os) {
       os << "float4_e2m1x2_t*)" << GetVarID(buf_var) << ")[";
       PrintExpr(byte_idx, os);
       os << "]))";
+    } else if (!load->indices[0].ty().IsScalar()) {
+      SSAOperationScope ssa_scope(this);
+      auto indices = MaterializeIndexLanes(load->indices[0]);
+      TensorLoad scalar_load(load->source, {indices.front()}, load->loc);
+      Call address(op->ty, op->op, {scalar_load}, op->attrs, op->ty_args,
+                   op->loc);
+      CodeGenC::Dispatch_(address.get(), os);
     } else {
       CodeGenC::Dispatch_(op, os);
     }
@@ -2617,13 +2621,6 @@ std::string CodeGenTileLangAscend::GetGmBypassPtr(PrimType dtype,
 
 void CodeGenTileLangAscend::Dispatch_(const TensorLoadObj *op,
                                       std::ostream &os) {
-  if (op->indices.size() == 1) {
-    PrimExpr index = ascend::NormalizeVectorIndex(op->indices[0], analyzer_);
-    if (!index.same_as(op->indices[0])) {
-      Dispatch_(TensorLoad(op->source, {index}, op->loc).get(), os);
-      return;
-    }
-  }
   PrimType value_dtype = op->ty.as_or_throw<PrimType>();
   const VarObj *buf_var = op->source.as<VarObj>();
 
@@ -2667,6 +2664,86 @@ void CodeGenTileLangAscend::Dispatch_(const TensorLoadObj *op,
   CodeGenC::Dispatch_(op, os);
 }
 
+// Materialize the original index expression lane by lane. CCE has no generic
+// int64 vector carrier, so index arithmetic must also work as typed scalars.
+// Keep every Cast at its original level; do not infer an affine Ramp.
+std::vector<PrimExpr>
+CodeGenTileLangAscend::MaterializeIndexLanes(const PrimExpr &index) {
+  auto bind = [&](const PrimExpr &value) -> PrimExpr {
+    Var var("index_lane", value.ty());
+    var_idmap_[var.get()] =
+        SSAGetID(PrintExpr(value), value.ty(),
+                 tvm::SideEffect(value) == CallEffectKind::kPure);
+    index_temporaries_.push_back(var);
+    return var.as_or_throw<PrimExpr>();
+  };
+  if (index.ty().IsScalar())
+    return {bind(index)};
+  ICHECK(index.ty().IsFixedLengthVector())
+      << "Expected a fixed-length index: " << index;
+  const PrimType elem = index.ty().WithLanes(1);
+  const int lanes = index.ty().lanes();
+  std::vector<PrimExpr> result;
+  if (const auto *ramp = index.as<prim::RampObj>()) {
+    PrimExpr base = bind(ramp->base), stride = bind(ramp->stride);
+    // Compute in the source width before any enclosing widening cast.
+    PrimType unsigned_type = PrimType::UInt(std::max(32, elem.bits()));
+    for (int i = 0; i < lanes; ++i) {
+      result.push_back(bind(prim::Cast(
+          elem, prim::Add(prim::Cast(unsigned_type, base),
+                          prim::Mul(prim::Cast(unsigned_type, stride),
+                                    MakeConst(unsigned_type, i))))));
+    }
+    return result;
+  }
+  if (const auto *broadcast = index.as<prim::BroadcastObj>()) {
+    return std::vector<PrimExpr>(lanes, bind(broadcast->value));
+  }
+  if (const auto *cast = index.as<prim::CastObj>()) {
+    for (const auto &value : MaterializeIndexLanes(cast->value))
+      result.push_back(bind(prim::Cast(elem, value, cast->loc)));
+    return result;
+  }
+  if (const auto *shuffle = index.as<prim::ShuffleObj>()) {
+    std::vector<PrimExpr> inputs;
+    for (const auto &vector : shuffle->vectors) {
+      auto values = MaterializeIndexLanes(vector);
+      inputs.insert(inputs.end(), values.begin(), values.end());
+    }
+    for (const auto &position : shuffle->indices) {
+      auto i = position.as_or_throw<IntImm>()->value.as<int64_t>();
+      ICHECK(i && *i >= 0 && static_cast<size_t>(*i) < inputs.size());
+      result.push_back(inputs[*i]);
+    }
+    return result;
+  }
+#define TL_INDEX_BINARY(Op)                                                    \
+  if (const auto *op = index.as<prim::Op##Obj>()) {                            \
+    auto lhs = MaterializeIndexLanes(op->a);                                   \
+    auto rhs = MaterializeIndexLanes(op->b);                                   \
+    for (int i = 0; i < lanes; ++i) {                                          \
+      if (elem.MatchesCode(kDLInt, kDLUInt)) {                                 \
+        PrimType u = PrimType::UInt(std::max(32, elem.bits()));                \
+        result.push_back(bind(prim::Cast(                                      \
+            elem, prim::Op(prim::Cast(u, lhs[i]), prim::Cast(u, rhs[i])))));   \
+      } else {                                                                 \
+        result.push_back(bind(prim::Op(lhs[i], rhs[i])));                      \
+      }                                                                        \
+    }                                                                          \
+    return result;                                                             \
+  }
+  TL_INDEX_BINARY(Add)
+  TL_INDEX_BINARY(Sub)
+  TL_INDEX_BINARY(Mul)
+#undef TL_INDEX_BINARY
+  // Other supported vector expressions use their normal emitter. Save the
+  // complete value once before extracting lanes (loads and calls included).
+  PrimExpr value = bind(index);
+  for (int i = 0; i < lanes; ++i)
+    result.push_back(bind(prim::Shuffle::ExtractElement(value, i)));
+  return result;
+}
+
 bool CodeGenTileLangAscend::VectorAccessIsAligned(const PrimExpr &index,
                                                   int lanes) {
   // Only a unit-stride ramp can become a reinterpret-cast vector access.
@@ -2686,7 +2763,7 @@ void CodeGenTileLangAscend::EmitScalarizedLoad(const TensorLoadObj *op,
   PrimType value_dtype = op->ty.as_or_throw<PrimType>();
   ValidateGenericVectorType("BufferLoad", value_dtype);
   int lanes = value_dtype.lanes();
-  PrimExpr index = op->indices[0];
+  PrimExpr index = analyzer_->Simplify(op->indices[0]);
 
   // A vectorized GM access on the scalar core (outside any VF body) has no
   // valid lowering: the only scalar-pipe GM path is the per-element
@@ -2713,34 +2790,33 @@ void CodeGenTileLangAscend::EmitScalarizedLoad(const TensorLoadObj *op,
 
   // Otherwise scalarize: load each lane from its scalar element offset and pack
   // with a brace-initializer (which bisheng accepts, unlike `T(a, b)`).
-  PrimType elem_dtype = value_dtype.WithLanes(1);
-  const prim::RampObj *ramp = index.as<prim::RampObj>();
+  SSAOperationScope ssa_scope(this);
+  auto indices = MaterializeIndexLanes(index);
+  PrimType element_dtype = op->source.as_or_throw<TensorVar>().dtype();
+  ICHECK_EQ(indices.size() * element_dtype.lanes(), lanes);
   std::ostringstream init;
   PrintType(value_dtype, init);
   init << "{";
-  for (int i = 0; i < lanes; ++i) {
-    if (i != 0) {
-      init << ", ";
+  for (size_t i = 0; i < indices.size(); ++i) {
+    std::string ref =
+        GetBufferRef(element_dtype, op->source.as<VarObj>(), indices[i]);
+    if (!element_dtype.IsScalar()) {
+      ref = SSAGetID(ref, element_dtype, false);
     }
-    PrimExpr lane_index =
-        ramp ? (ramp->base + ramp->stride * MakeConst(ramp->base.ty(), i))
-             : index;
-    std::string lane_ref = GetBufferRef(elem_dtype, op->source.as<VarObj>(),
-                                        analyzer_->Simplify(lane_index));
-    init << lane_ref;
+    for (int j = 0; j < element_dtype.lanes(); ++j) {
+      if (i != 0 || j != 0)
+        init << ", ";
+      if (element_dtype.IsScalar())
+        init << ref;
+      else
+        PrintVecElemLoad(ref, element_dtype, j, init);
+    }
   }
   init << "}";
   os << init.str();
 }
 
 void CodeGenTileLangAscend::Dispatch_(const TensorStoreObj *op) {
-  if (op->indices.size() == 1) {
-    PrimExpr index = ascend::NormalizeVectorIndex(op->indices[0], analyzer_);
-    if (!index.same_as(op->indices[0])) {
-      Dispatch_(TensorStore(op->dest, {index}, op->value, op->loc).get());
-      return;
-    }
-  }
   PrimType value_dtype = op->value.ty();
   PrimType element_dtype = op->dest.as_or_throw<TensorVar>().dtype();
   const VarObj *buf_var = op->dest.as<VarObj>();
@@ -2755,34 +2831,6 @@ void CodeGenTileLangAscend::Dispatch_(const TensorStoreObj *op) {
       !IsGlobalGmBuffer(op->dest.as<VarObj>()) &&
       EmitOutOfVFBroadcastStore(op)) {
     return;
-  }
-
-  if (value_dtype.lanes() > 1 && op->indices.size() == 1) {
-    const auto *broadcast_index = index_expr.as<prim::BroadcastObj>();
-    auto scope_it = alloc_storage_scope_.find(buf_var);
-    std::string buffer_scope = op->dest.as_or_throw<TensorVar>().scope().name();
-    bool is_local_scope = buffer_scope == "local" ||
-                          buffer_scope == "local.var" ||
-                          (scope_it != alloc_storage_scope_.end() &&
-                           (scope_it->second.name() == "local" ||
-                            scope_it->second.name() == "local.var"));
-    if (broadcast_index && is_local_scope &&
-        value_dtype.lanes() ==
-            broadcast_index->ty.as_or_throw<PrimType>().lanes()) {
-      std::string buf_name = GetVarID(buf_var);
-      std::string value = PrintExpr(op->value);
-
-      PrintIndent();
-      stream << "*(";
-      PrintType(value_dtype, stream);
-      stream << "*)(" << buf_name;
-      if (!IsZero(broadcast_index->value)) {
-        stream << " + ";
-        PrintExpr(broadcast_index->value, stream);
-      }
-      stream << ") = " << value << ";\n";
-      return;
-    }
   }
 
   // For Ascend: scalar FP8 stores to shared/UBUF memory need to write the raw
@@ -2830,14 +2878,13 @@ bool CodeGenTileLangAscend::EmitOutOfVFBroadcastStore(
   const int lanes = broadcast->ty.as_or_throw<PrimType>().lanes();
   PrimType elem_dtype = op->dest.as_or_throw<TensorVar>().dtype();
   SSAOperationScope ssa_scope(this);
+  auto indices = MaterializeIndexLanes(op->indices[0]);
   std::string value =
       SSAGetID(PrintExpr(broadcast->value), elem_dtype,
                tvm::SideEffect(broadcast->value) == CallEffectKind::kPure);
   for (int i = 0; i < lanes; ++i) {
-    PrimExpr lane_index =
-        analyzer_->Simplify(ramp->base + MakeConst(ramp->base.ty(), i));
     PrintIndent();
-    stream << GetBufferRef(elem_dtype, op->dest.as<VarObj>(), lane_index)
+    stream << GetBufferRef(elem_dtype, op->dest.as<VarObj>(), indices[i])
            << " = " << value << ";\n";
   }
   return true;
@@ -2847,7 +2894,7 @@ bool CodeGenTileLangAscend::EmitScalarizedStore(const TensorStoreObj *op) {
   PrimType value_dtype = op->value.ty();
   ValidateGenericVectorType("BufferStore", value_dtype);
   int lanes = value_dtype.lanes();
-  PrimExpr index = op->indices[0];
+  PrimExpr index = analyzer_->Simplify(op->indices[0]);
 
   // A vectorized GM access on the scalar core (outside any VF body) has no
   // valid lowering: the only scalar-pipe GM path is the per-element
@@ -2862,31 +2909,39 @@ bool CodeGenTileLangAscend::EmitScalarizedStore(const TensorStoreObj *op) {
            "T.copy or a T.SimtVF/T.SimdVF region for vector GM traffic.";
   }
 
-  // Provably aligned: let the base class emit a single reinterpret vector
-  // store.
+  // The native simplifier may expose a contiguous index without changing
+  // the input TensorStore. Emit that proven fast path directly.
   if (VectorAccessIsAligned(index, lanes)) {
-    return false;
+    std::string value = PrintExpr(op->value);
+    PrintVecStore(op->dest.as<VarObj>(), value_dtype,
+                  index.as<prim::RampObj>()->base, value);
+    return true;
   }
 
   // Otherwise scalarize: evaluate the value once, then store each lane to its
   // scalar element offset. PrintVecElemLoad reads lane i from the value temp;
   // no vector index is constructed.
-  const prim::RampObj *ramp = index.as<prim::RampObj>();
-  ICHECK(ramp) << "scalarized store expects a ramp index, got " << index;
-  PrimType elem_dtype = value_dtype.WithLanes(1);
   SSAOperationScope ssa_scope(this);
+  auto indices = MaterializeIndexLanes(index);
+  PrimType element_dtype = op->dest.as_or_throw<TensorVar>().dtype();
+  ICHECK_EQ(indices.size() * element_dtype.lanes(), lanes);
   std::string value =
       SSAGetID(PrintExpr(op->value), value_dtype,
                tvm::SideEffect(op->value) == CallEffectKind::kPure);
-  for (int i = 0; i < lanes; ++i) {
-    PrimExpr lane_index =
-        ramp->base + ramp->stride * MakeConst(ramp->base.ty(), i);
-    std::string lane_ref = GetBufferRef(elem_dtype, op->dest.as<VarObj>(),
-                                        analyzer_->Simplify(lane_index));
-    std::ostringstream lane_val;
-    PrintVecElemLoad(value, value_dtype, i, lane_val);
-    PrintIndent();
-    stream << lane_ref << " = " << lane_val.str() << ";\n";
+  for (size_t i = 0; i < indices.size(); ++i) {
+    std::string ref =
+        GetBufferRef(element_dtype, op->dest.as<VarObj>(), indices[i]);
+    for (int j = 0; j < element_dtype.lanes(); ++j) {
+      std::ostringstream lane_value;
+      PrintVecElemLoad(value, value_dtype, i * element_dtype.lanes() + j,
+                       lane_value);
+      if (element_dtype.IsScalar()) {
+        PrintIndent();
+        stream << ref << " = " << lane_value.str() << ";\n";
+      } else {
+        PrintVecElemStore("(" + ref + ")", element_dtype, j, lane_value.str());
+      }
+    }
   }
   return true;
 }
@@ -3222,7 +3277,6 @@ void CodeGenTileLangAscend::EmitTensorAllocation_(const BindObj *op) {
 }
 
 void CodeGenTileLangAscend::Dispatch_(const BindObj *op) {
-  ascend::BindIndexConstant(op, analyzer_);
   if (const auto *call = op->value.as<CallObj>();
       call && call->op.same_as(tirx::alloc_tensor_op()))
     return EmitTensorAllocation_(op);

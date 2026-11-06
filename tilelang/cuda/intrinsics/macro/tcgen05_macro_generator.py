@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tilelang.language import _tensor_spec
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 from tvm_tirx import ir
 from dataclasses import dataclass
@@ -193,7 +193,7 @@ def compute_umma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         slice_off_elems, tile = cute.restrict(composed_elem.layout, region)
         slice_byte_offset = slice_off_elems * elem_bits // 8
         if not isinstance(slice_byte_offset, int):
-            slice_byte_offset = create_analyzer().simplify(slice_byte_offset)
+            slice_byte_offset = sym.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"UMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
     # Present in UMMA (MN, K) order, then recast the swizzled element layout to
     # uint128_t (exactly CuTe's recast<uint128_t const>(tensor)).
@@ -402,7 +402,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
                 f"2CTA TCGEN5MMA currently supports a single instruction along N; "
                 f"got N={self.block_col_warps * self.warp_col_tiles} with instruction N={meta.atom_n}"
             )
-        analyzer = create_analyzer()
+        analyzer = sym.Analyzer()
 
         def check(region, operand, transposed, mn_atom, k_atom, mn_axis_name, k_axis_name):
             ranges = region.region

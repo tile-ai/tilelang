@@ -16,7 +16,7 @@ from tilelang.language.copy_op import (
 )
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 
 __all__ = ["copy", "dual_copy"]
@@ -318,7 +318,7 @@ def copy(  # noqa: A001
     if _tensor_spec.is_buffer_like(src) and _tensor_spec.is_buffer_like(dst):
         src_elems = prod(src.ty.shape)
         dst_elems = prod(dst.ty.shape)
-        if not create_analyzer().can_prove_equal(src_elems, dst_elems):
+        if not sym.Analyzer().can_prove_equal(src_elems, dst_elems):
             raise ValueError(
                 f"Ascend T.copy src/dst element count mismatch: "
                 f"{src.name} shape={src.ty.shape} ({src_elems}) vs {dst.name} shape={dst.ty.shape} ({dst_elems}). "

@@ -67,7 +67,7 @@ bool GuardImpliesWithAnalyzer(const sym::Analyzer &analyzer,
 
 bool GuardsEquivalent(const PrimExpr &a, const PrimExpr &b,
                       const ConstrSet &outer_ctx) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto context = outer_ctx.Populate(analyzer);
   return GuardsEquivalentWithAnalyzer(analyzer, a, b);
 }
@@ -77,7 +77,7 @@ bool GuardImplies(const PrimExpr &premise, const PrimExpr &conclusion,
   if (IsZero(premise) || IsOne(conclusion) ||
       GuardsStructurallyEqual(premise, conclusion))
     return true;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto context = outer_ctx.Populate(analyzer);
   return GuardImpliesWithAnalyzer(analyzer, premise, conclusion);
 }
@@ -402,7 +402,7 @@ SerialInductionInfo AnalyzeSerialInduction(const ControlNode *control) {
       SideEffect(loop->end) > CallEffectKind::kPure ||
       SideEffect(loop->step) > CallEffectKind::kPure)
     return {};
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto outer = control->task->outer_ctx.Populate(analyzer);
   bool header_range =
       CanUseLoopBounds(loop->begin, loop->end, loop->step, analyzer.get());
@@ -492,7 +492,7 @@ Optional<PrimExpr> TryCalculateIterationCount(ControlNode *loop) {
   for (auto *ancestor = loop; ancestor;
        ancestor = ancestor->GetParentControl()) {
     const ForObj *node = ancestor->control.get();
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = ancestor->task->outer_ctx.Populate(analyzer);
     if (SideEffect(node->begin) <= CallEffectKind::kPure &&
         SideEffect(node->end) <= CallEffectKind::kPure &&
@@ -503,7 +503,7 @@ Optional<PrimExpr> TryCalculateIterationCount(ControlNode *loop) {
   ffi::BigInt total_bound = 0, multiplier_bound = 1;
   for (; loop != nullptr; loop = loop->GetParentControl()) {
     const ForObj *node = loop->control.get();
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = loop->task->outer_ctx.Populate(analyzer);
     if (SideEffect(node->begin) > CallEffectKind::kPure ||
         SideEffect(node->end) > CallEffectKind::kPure ||

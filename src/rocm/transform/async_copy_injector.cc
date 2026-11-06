@@ -722,7 +722,7 @@ private:
   bool async_without_async_commit_wait_{false};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
-  sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer_;
   bool injected_rocm_async_copy_{false};
   bool pending_sync_copies_{false};
   bool uncommitted_sync_copies_{false};

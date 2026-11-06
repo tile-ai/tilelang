@@ -112,7 +112,7 @@ PartitionInverseView(const Fragment &layout, PrimExpr thread,
   auto range = layout->ThreadRange();
   if (!range)
     return {layout, thread};
-  auto proof = context ? context->Clone() : CreateTileLangAnalyzer();
+  auto proof = context ? context->Clone() : sym::Analyzer();
   Map<PrimVar, PrimExpr> zero;
   for (int i = 0; i < layout->InputDim(); ++i) {
     PrimVar input = InputPlaceholder(i);
@@ -154,7 +154,7 @@ PartitionInverseView(const Fragment &layout, PrimExpr thread,
 // guard alone cannot repair an inverse that loses valid logical coordinates.
 void ValidateGuardedInverse(const Fragment &layout, const Layout &inverse,
                             const sym::AnalyzerObj *context) {
-  auto analyzer = context ? context->Clone() : CreateTileLangAnalyzer();
+  auto analyzer = context ? context->Clone() : sym::Analyzer();
   Array<PrimExpr> logical;
   PrimExpr nonempty = IntImm::Bool(true);
   for (const PrimExpr &extent : layout->InputShape()) {
@@ -286,7 +286,7 @@ public:
   using LayoutMapMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const ForObj *node, InplaceMode mode) final {
     if (node->kind == ForKind::kDefault && IsOne(node->step)) {
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       if (TryConstInt(analyzer->Simplify(LoopExtent(node)))) {
         auto copy = make_object<ForObj>(*node);
         copy->kind = ForKind::kUnrolled;
@@ -412,7 +412,7 @@ Stmt LowerParallelLoop(For loop, const Fragment &layout, PrimExpr thread_index,
   writer->annotations.erase(attr::kParallelLoopPredicate);
   writer->annotations.erase(attr::kParallelLoopRequiresPaddingGuard);
   if (parallel_loop) {
-    auto fork = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+    auto fork = analyzer ? analyzer->Clone() : sym::Analyzer();
     result = PartitionLoop(result, thread_index, fork.get(), layout,
                            require_padding_guard);
   }

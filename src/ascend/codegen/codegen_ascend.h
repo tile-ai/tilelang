@@ -4,10 +4,10 @@
 #include <cstddef>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "backend/common/codegen/codegen_c_base.h"
 #include "codegen/c/codegen_c.h"
-#include "ir/analyzer.h"
 #include <tvm/sym/analyzer.h>
 
 namespace tvm {
@@ -19,7 +19,8 @@ public:
   using CodeGenTileLangCBase::PrintType;
   void InitFuncState(const tirx::Function &f) override {
     CodeGenTileLangCBase::InitFuncState(f);
-    analyzer_ = tl::CreateTileLangAnalyzer();
+    analyzer_ = sym::Analyzer();
+    index_temporaries_.clear();
     name_supply_->ReserveName("block_idx");
     for (const auto &param : f->params) {
       if (const auto *pointer = param->ty.as<PtrTypeObj>())
@@ -179,7 +180,7 @@ private:
   bool enable_fast_math_{false};
 
   // Accumulates constraints along the traversal
-  sym::Analyzer analyzer_{tl::CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
 
   const char *VFModeName(VFMode mode) const;
   bool IsInsideSimtVF() const { return vf_mode_ == VFMode::kSimt; }
@@ -189,6 +190,9 @@ private:
   void RejectGenericVectorInSimd(const char *op_name, PrimType dtype) const;
   void ValidateGenericVectorType(const char *op_name, PrimType dtype);
 
+  std::vector<PrimExpr> MaterializeIndexLanes(const PrimExpr &index);
+  // Own the IR handles used to name codegen-only scalar index temporaries.
+  std::vector<Var> index_temporaries_;
   bool VectorAccessIsAligned(const PrimExpr &index, int lanes);
 
   void EmitSimtVectorPredicateNot(const PrimExpr &value, PrimType dtype,

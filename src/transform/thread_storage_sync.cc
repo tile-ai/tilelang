@@ -290,7 +290,7 @@ bool UniformCondition(const PrimExpr &condition, const ConstrSet &premises,
     return true;
   auto left = premises.RenameFrom("<T1>", first, std::nullopt, false);
   auto right = premises.RenameFrom("<T2>", second, std::nullopt, false);
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto context =
       left.ToConstraints().Merge(right.ToConstraints()).Populate(analyzer);
   auto lhs = SubstituteConstraintExpr(condition, first);
@@ -763,7 +763,7 @@ public:
     Visit(op->step);
     auto header = std::move(current_.access);
     collecting_ = false;
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = GetConstrSet().Populate(analyzer);
     if (SideEffect(op->begin) <= CallEffectKind::kPure &&
         SideEffect(op->end) <= CallEffectKind::kPure &&
@@ -1068,7 +1068,7 @@ ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const IfObj *op) {
   auto should_hoist = [&](const PrimExpr &condition, const char *branch) {
     ConditionProperty property =
         GetConditionProperty(condition, threads_, properties_);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = GetConstrSet().Populate(analyzer);
     if (const auto *tx = FindThread(threads_, "threadIdx.x")) {
       auto extent = analyzer->Simplify(tx->dom->extent).as<IntImmObj>();
@@ -1292,7 +1292,7 @@ bool ThreadSyncPlanner::Conflict(const AccessEntry &previous,
       !previous.width_bits || !current.width_bits)
     return true;
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   ConstrSet left = previous.constraints, right = current.constraints;
   Map<Var, PrimExpr> left_sub, right_sub;
   PrimExpr left_start = previous.address.bit_offset.value();
@@ -1333,7 +1333,7 @@ bool ThreadSyncPlanner::Conflict(const AccessEntry &previous,
   if (loop) {
     auto step = loop->step.as<IntImmObj>();
     auto value = step ? step->value.as<int64_t>() : std::nullopt;
-    auto loop_analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer loop_analyzer;
     auto loop_context = previous.constraints.Populate(loop_analyzer);
     // The shifted-iteration proof below requires monotonic, non-wrapping
     // induction. Otherwise retain the possible loop-carried hazard.
@@ -1483,7 +1483,7 @@ public:
     if (!thread_constraint)
       return std::nullopt;
 
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = GetConstrSet().Populate(analyzer);
     std::array<std::pair<int64_t, int64_t>, 3> bounds{{{0, 0}, {0, 0}, {0, 0}}};
     std::array<int64_t, 3> extents{{1, 1, 1}};

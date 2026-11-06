@@ -85,8 +85,7 @@ public:
   using Result = Optional<VisitInterrupt>;
   using StmtExprVisitor::Visit_;
   SyncAwareLinearizer(const Stmt &stmt, AllocationMap allocations)
-      : allocations_(std::move(allocations)),
-        analyzer_(CreateTileLangAnalyzer()) {
+      : allocations_(std::move(allocations)) {
     storage_.Collect(stmt);
   }
   std::vector<LinearEvent> linear_events;
@@ -676,7 +675,7 @@ private:
     auto add_endpoint = [&](int idx, bool is_set, bool is_cross,
                             const std::string &hard_event, int mode_id) {
       EventInstance &inst = instances[idx];
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       auto value = TryConstInt(analyzer->Simplify(inst.event_id_expr));
       if (!value)
         return;

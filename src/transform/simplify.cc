@@ -707,7 +707,7 @@ tvm::transform::Pass Simplify(bool simplify_arguments) {
                  tvm::transform::PassContext) {
           if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
             return function;
-          auto analyzer = CreateTileLangAnalyzer();
+          sym::Analyzer analyzer;
           return RemoveUnusedBindings(
               ffi::make_object<NativeSimplifier>(analyzer, config)
                   ->Run(function));
@@ -745,7 +745,7 @@ tvm::transform::Pass RemoveNoOp() {
                           type_key, "max_simplification_steps")(*options)
                           .cast<int64_t>();
     }
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     analyzer->rewrite_simplify.SetMaximumRewriteSteps(maximum_steps);
     auto config_node = ffi::make_object<SimplifyConfigNode>();
     auto config = ffi::GetRef<SimplifyConfig>(config_node.get());

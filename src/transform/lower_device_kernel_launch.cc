@@ -3,8 +3,8 @@
  * \brief Finalize TileLang device resources before native launch ABI lowering.
  */
 #include "common/storage_size.h"
-#include "ir/analyzer.h"
 #include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/sym/analyzer.h>
 
 #include <tvm/backend/cuda/attr.h>
 #include <tvm/ffi/extra/structural_mutate.h>
@@ -160,7 +160,7 @@ class LaunchMetadata : public StmtExprVisitor {
 public:
   using StmtExprVisitor::Visit_;
   explicit LaunchMetadata(const tirx::Function &function)
-      : function_(function), analyzer_(CreateTileLangAnalyzer()) {
+      : function_(function) {
     target_ = function->GetAttr<Target>(tvm::attr::kTarget).value();
     for (const Var &parameter : function->params)
       parameters_.insert(parameter.get());
@@ -268,7 +268,7 @@ class ConfiguredLaunchMetadata : public StmtExprMutator {
 public:
   using StmtExprMutator::Mutate_;
   explicit ConfiguredLaunchMetadata(IRModule module)
-      : module_(std::move(module)), analyzer_(CreateTileLangAnalyzer()) {}
+      : module_(std::move(module)) {}
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *statement,
                             InplaceMode mode) final {
@@ -549,7 +549,7 @@ public:
                   return Unchanged();
                 })
                 .as_or_throw<PrimExpr>();
-        operands.Set(position, CreateTileLangAnalyzer()->Simplify(bytes));
+        operands.Set(position, sym::Analyzer()->Simplify(bytes));
       }
       ++position;
     }

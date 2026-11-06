@@ -22,8 +22,8 @@
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
-#include "ir/analyzer.h"
 #include "ir/tensor_utils.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 using namespace tirx;
@@ -109,7 +109,7 @@ private:
   bool ordinary_;
   bool predicated_;
   Optional<PrimExpr> predicate_;
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
 
   static bool PositiveZero(const Expr &value) {
     if (auto broadcast = value.as<BroadcastObj>())

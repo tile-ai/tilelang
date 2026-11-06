@@ -439,7 +439,7 @@ struct ConstrSet {
     return {};
   }
   bool CanProve(const PrimExpr &expr) const {
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = Populate(analyzer);
     return analyzer->CanProve(expr);
   }
@@ -601,7 +601,7 @@ public:
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->end));
     TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(op->step));
     auto scope = Scope();
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     auto context = GetConstrSet().Populate(analyzer);
     if (CanUseLoopBounds(op->begin, op->end, op->step, analyzer.get())) {
       constr_stack_.emplace_back(op->var, Range(op->begin, op->end));

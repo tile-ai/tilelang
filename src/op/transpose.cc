@@ -179,7 +179,7 @@ TransposeNode::MakePredicate(sym::AnalyzerObj *analyzer,
 }
 
 For TransposeNode::MakeSIMTLoop(sym::AnalyzerObj *analyzer) const {
-  auto context = analyzer ? analyzer->Clone() : CreateTileLangAnalyzer();
+  auto context = analyzer ? analyzer->Clone() : sym::Analyzer();
   analyzer = context.get();
   Array<LayoutIterVar> loop_vars = MakeIterVars();
   bool is_scalar = loop_vars.empty();

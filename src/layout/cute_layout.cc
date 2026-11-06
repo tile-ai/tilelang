@@ -608,7 +608,7 @@ bool Compatible(const IntTuple &a, const IntTuple &b) {
       AsPrimExpr(a).ty() != AsPrimExpr(b_size).ty()) {
     return false;
   }
-  sym::Analyzer analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   return analyzer->CanProveEqual(AsConstOrPrimExpr(a, dtype),
                                  AsConstOrPrimExpr(b_size, dtype));
 }
@@ -1812,7 +1812,7 @@ bool ProveEquivalent(const AddrProbe &probe, const Swizzle &swizzle,
     return false;
 
   // Analyzer with each coordinate range-bound: x_k in [0, shape[k]).
-  sym::Analyzer ana = CreateTileLangAnalyzer();
+  sym::Analyzer ana;
   std::vector<PrimVar> vars;
   for (size_t k = 0; k < shape.size(); ++k) {
     PrimVar v("c" + std::to_string(k), PrimType::Int(32));

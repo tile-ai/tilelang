@@ -1,5 +1,5 @@
 from __future__ import annotations
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 
 import tilelang.cuda.language as T
 from dataclasses import dataclass
@@ -195,7 +195,7 @@ def compute_gmma_descriptor(tl_layout, buffer, transposed: bool, micro_size_k: i
         # A statically-zero origin is a plain int 0; a runtime origin is a PrimExpr.
         slice_byte_offset = slice_off_elems * bits // 8
         if not isinstance(slice_byte_offset, int):
-            slice_byte_offset = create_analyzer().simplify(slice_byte_offset)
+            slice_byte_offset = sym.Analyzer().simplify(slice_byte_offset)
     assert cute.rank(tile) == 2, f"WGMMA operand tile must be rank-2 (MN, K), got rank {cute.rank(tile)}"
 
     # Present in GMMA (MN, K) order, then recast the swizzled element layout to

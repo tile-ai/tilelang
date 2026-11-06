@@ -169,12 +169,12 @@ def test_ordinary_block_and_task_still_keep_the_general_operand_codec():
     from testing.ascend._block import attribute, attribute_fields
 
     tensor = ir.Var("tensor", tirx.TensorType((8,), "float32"))
-    for node, key, value in [
-        (None, "tl.sblock", {"name": "tilelang_root", "annotations": {"mapping": {tensor: [tensor]}}}),
-        ({"capture": tensor}, "tl.ascend_task", ir.const(1)),
+    for node, key, value, op_name in [
+        (None, "tl.sblock", {"name": "tilelang_root", "annotations": {"mapping": {tensor: [tensor]}}}, "tl.attr"),
+        ({"capture": tensor}, "tl.ascend_task", ir.const(1), "tl.ascend.task"),
     ]:
         region = attribute(node, key, value, [])
-        assert region.op.name == "tl.attr"
+        assert region.op.name == op_name
         assert len(region.args) == 1 and "annotation_schema" in region.attrs
         assert any(var.same_as(tensor) for var in collect_nodes(region.args[0], ir.Var))
         assert attribute_fields(region)["key"] == key

@@ -22,10 +22,10 @@
  * \brief Materialize source tensor constraints before layout and ABI lowering.
  */
 
-#include "../ir/analyzer.h"
 #include "../ir/annotations.h"
 #include "ir/stmt_functor.h"
 #include "tensor_descriptor.h"
+#include <tvm/sym/analyzer.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
@@ -518,7 +518,7 @@ private:
     return result;
   }
 
-  sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer_;
   TensorSpecs specs_;
   Map<Var, Expr> definitions_;
   std::unordered_set<const ExprObj *> annotated_storage_;

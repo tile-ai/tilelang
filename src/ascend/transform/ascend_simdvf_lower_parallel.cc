@@ -6,7 +6,6 @@
  * \brief Lower native SIMD_VF parallel loops and tile ops to register SSA.
  */
 #include "ascend/ir/block.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/loop_math.h"
 #include "ir/tensor_utils.h"
@@ -16,6 +15,7 @@
 #include <limits>
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -917,7 +917,7 @@ private:
   Map<Var, Expr> definitions_;
   std::unordered_map<const VarObj *, std::pair<int64_t, int64_t>>
       narrow_ranges_;
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
 };
 } // namespace
 

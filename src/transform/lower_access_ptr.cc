@@ -10,8 +10,8 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
-#include "../ir/analyzer.h"
 #include "../op/builtin.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 namespace {
@@ -69,7 +69,7 @@ public:
   }
 
 private:
-  sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer_;
 };
 
 } // namespace

@@ -24,7 +24,6 @@
 #include "ascend/analysis/storage.h"
 #include "ascend/transform/source_scopes.h"
 #include "buffer_version.h"
-#include "ir/analyzer.h"
 #include "ir/annotations.h"
 #include "ir/stmt_functor.h"
 #include "ir/tensor_utils.h"
@@ -33,8 +32,10 @@
 #include "op/utils.h"
 #include "transform/common/storage_size.h"
 #include <limits>
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_map>
@@ -438,7 +439,7 @@ tirx::Function RewriteBufferVersionLayout(tirx::Function function) {
   VersionMetadata metadata(function->body);
   if (metadata.versions.empty())
     return function;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   Layouts layouts;
   for (const auto &[root, count] : metadata.versions) {
     String scope;
@@ -510,7 +511,7 @@ tirx::Function RewriteBufferVersionLayout(tirx::Function function) {
     layouts.emplace(root, StorageLayout{owner, base, slot, aligned, total});
   }
   auto rewriter = make_object<BufferVersionLayoutRewriter>(
-      function, metadata.storage, layouts, CreateTileLangAnalyzer());
+      function, metadata.storage, layouts, sym::Analyzer());
   auto body = function->body;
   function.CopyOnWrite()->body =
       rewriter->Mutate(body, InplaceMode::kDisallow).ValueOrUnchanged(body);

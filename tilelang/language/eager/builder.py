@@ -19,7 +19,7 @@ import inspect
 import builtins
 from functools import partial
 
-from tilelang._analyzer import create_analyzer
+from tvm_tirx import sym
 from tilelang import env
 from tilelang.language.kernel import KernelLaunchFrame
 from tvm_tirx.ir import Location as Span
@@ -1049,7 +1049,7 @@ class Builder(BaseBuilder):
             indices = sl if isinstance(sl, (tuple, list)) else (sl,)
             if any(isinstance(index, slice) for index in indices):
                 normalized = []
-                analyzer = create_analyzer()
+                analyzer = sym.Analyzer()
                 for index in indices:
                     if isinstance(index, slice):
                         step = 1 if index.step is None else index.step
@@ -2087,7 +2087,7 @@ def substitute_primfunc(prim_func, vmap):
             raise TypeError("a function parameter must remain a Var after substitution")
         replacements[variable] = value
 
-    analyzer = create_analyzer()
+    analyzer = sym.Analyzer()
 
     def replace_variable(variable, mutator):
         cached = mutator.var_remap_get(variable)

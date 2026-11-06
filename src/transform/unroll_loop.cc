@@ -17,10 +17,10 @@
 #include <limits>
 #include <unordered_set>
 
-#include "../ir/analyzer.h"
 #include "../ir/annotations.h"
 #include "../op/builtin.h"
 #include "ir/loop_math.h"
+#include <tvm/sym/analyzer.h>
 
 namespace tvm::tl {
 
@@ -299,7 +299,7 @@ private:
   int64_t step_count_{0};
   int normal_depth_{0}, unroll_depth_{0};
   std::unordered_set<const VarObj *> local_indices_;
-  sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer_;
 };
 } // namespace
 

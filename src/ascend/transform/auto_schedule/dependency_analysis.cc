@@ -146,7 +146,7 @@ Map<Var, PrimExpr> HintPureDefinitions(const ConstrSet &context) {
 
 bool HintStatementMayAbandon(const Stmt &statement, const ConstrSet &context) {
   bool result = false;
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   auto scope = context.Populate(analyzer);
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
       statement,
@@ -396,7 +396,7 @@ struct ScopedConflictHintIndex::Impl {
     }
     if (node->IsControl()) {
       const auto *control = static_cast<const ControlNode *>(node);
-      auto analyzer = CreateTileLangAnalyzer();
+      sym::Analyzer analyzer;
       auto outer = contexts.at(control).Populate(analyzer);
       if (!CanUseLoopBounds(control->control->begin, control->control->end,
                             control->control->step, analyzer.get()))
@@ -621,7 +621,7 @@ struct ScopedConflictHintIndex::Impl {
         sid && GetTaskSubcore(query.stmt) != sid)
       return false;
     auto definitions = HintPureDefinitions(source.context);
-    auto analyzer = CreateTileLangAnalyzer();
+    sym::Analyzer analyzer;
     analyzer->z3_prover.SetRLimit(50000);
     auto context = contexts.at(&query).Populate(analyzer);
     for (const Constr &constraint : source.context.constrs_) {
@@ -921,7 +921,7 @@ StorageIterationNest(ControlNode *loop, const StorageAddress &address) {
 }
 
 struct ConflictProof {
-  sym::Analyzer analyzer{CreateTileLangAnalyzer()};
+  sym::Analyzer analyzer;
   Map<Var, PrimExpr> a_sub, b_sub;
   std::unique_ptr<ConstrAnalyzerContext> context;
 
@@ -968,7 +968,7 @@ struct ConflictProof {
           different =
               different || (SubstituteConstraintExpr(iteration, a_sub) !=
                             SubstituteConstraintExpr(iteration, b_sub));
-          auto progress = CreateTileLangAnalyzer();
+          sym::Analyzer progress;
           auto outer = control->task->outer_ctx.Populate(progress);
           distinct_coordinates &=
               induction(control).no_wrap &&

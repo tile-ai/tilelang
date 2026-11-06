@@ -5,9 +5,9 @@
 #ifndef TILELANG_IR_STMT_FUNCTOR_H_
 #define TILELANG_IR_STMT_FUNCTOR_H_
 
-#include "analyzer.h"
 #include "annotations.h"
 #include "loop_math.h"
+#include <tvm/sym/analyzer.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -119,7 +119,7 @@ public:
   using tirx::StmtExprMutatorWithConstraintContext::Mutate_;
 
   explicit StmtExprMutatorWithAnalyzer(
-      const sym::Analyzer &analyzer = CreateTileLangAnalyzer())
+      const sym::Analyzer &analyzer = sym::Analyzer())
       : tirx::StmtExprMutatorWithConstraintContext(
             analyzer->GetConstraintContext()),
         proof_analyzer_(analyzer->Clone()) {}
@@ -207,7 +207,7 @@ public:
   using tirx::StmtExprVisitorWithConstraintContext::Visit_;
 
   explicit StmtExprVisitorWithAnalyzer(
-      const sym::Analyzer &analyzer = CreateTileLangAnalyzer())
+      const sym::Analyzer &analyzer = sym::Analyzer())
       : proof_analyzer_(analyzer->Clone()) {
     constraints = analyzer->GetConstraintContext();
   }

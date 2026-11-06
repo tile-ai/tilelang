@@ -38,7 +38,7 @@ private:
 
 ffi::Map<ffi::String, ffi::Any>
 LowerNativeOperatorForTest(Call call, Target target, LayoutMap layouts) {
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   TileOperator operation = ParseOperator(call);
   TVM_FFI_CHECK(operation.defined(), ValueError)
       << "The test bridge requires a registered TileLang tile operator";

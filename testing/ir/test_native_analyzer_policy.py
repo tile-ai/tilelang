@@ -1,17 +1,14 @@
-"""TileLang's native proof policy and the pinned upstream's known limitations."""
+"""Native analyzer defaults used by TileLang and known upstream limitations."""
 
 import pytest
 import tvm_ffi
 from tvm_tirx import ir, sym, tirx
 
-from tilelang._analyzer import create_analyzer
 
-
-def test_tilelang_policy_is_local_and_clone_preserves_it():
+def test_native_default_fallback_is_local_and_clone_preserves_it():
     native = sym.Analyzer()
     native.set_z3_default_fallback(False)
-    analyzer = create_analyzer()
-    assert isinstance(analyzer, sym.Analyzer)
+    analyzer = sym.Analyzer()
     # Consumers still receive the target's simplification rules.
     x = ir.Var("x", "int32")
     assert tvm_ffi.structural_equal(analyzer.simplify(x + 0), native.simplify(x + 0))
@@ -27,8 +24,8 @@ def test_tilelang_policy_is_local_and_clone_preserves_it():
 
 
 @pytest.mark.xfail(strict=True, reason="Inherited upstream narrowing-cast proof defect; deferred from this rebase")
-def test_tilelang_fallback_proves_only_with_sound_typed_constraints():
-    analyzer = create_analyzer()
+def test_native_fallback_proves_only_with_sound_typed_constraints():
+    analyzer = sym.Analyzer()
     if not analyzer.is_z3_enabled:
         pytest.skip("This build has no Z3 backend")
     x = ir.Var("x", "uint32")
@@ -42,8 +39,8 @@ def test_tilelang_fallback_proves_only_with_sound_typed_constraints():
     assert not analyzer.can_prove(predicate)
 
 
-def test_tilelang_fallback_keeps_budget_and_native_fast_path():
-    analyzer = create_analyzer()
+def test_native_fallback_keeps_budget_and_native_fast_path():
+    analyzer = sym.Analyzer()
     if not analyzer.is_z3_enabled:
         pytest.skip("This build has no Z3 backend")
     x, y = ir.Var("x", "int32"), ir.Var("y", "int32")
@@ -53,7 +50,7 @@ def test_tilelang_fallback_keeps_budget_and_native_fast_path():
     native_only.set_z3_default_fallback(False)
     assert not native_only.can_prove(predicate)
     assert analyzer.can_prove(predicate)
-    limited = create_analyzer()
+    limited = sym.Analyzer()
     limited.set_z3_rlimit(1)
     assert not limited.can_prove(predicate)
     assert limited.can_prove(x == x)

@@ -209,7 +209,7 @@ ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
     return Layout();
   }
 
-  auto analyzer = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer;
   if (!ShapesEqual(layout->InputShape(), old_buffer.shape(), analyzer.get())) {
     return Layout();
   }
@@ -2240,7 +2240,7 @@ private:
           new ScopedAnalyzerConstraints(analyzer_.get(), loop_iter < end));
     }
 
-    auto ana_normalized = CreateTileLangAnalyzer();
+    sym::Analyzer ana_normalized;
     if (!is_unit_loop) {
       BindAnalyzer(ana_normalized, new_loop_var.as_or_throw<PrimVar>(),
                    Range::FromMinExtent(pipeline_loop_->begin, extent));
@@ -2432,7 +2432,7 @@ private:
     return result;
   }
 
-  sym::Analyzer analyzer_ = CreateTileLangAnalyzer();
+  sym::Analyzer analyzer_;
   const PipelineMemoryAnalysis *memory_;
   Array<TensorVar> pipeline_allocs_;
   Array<TensorVar> local_allocs_;
