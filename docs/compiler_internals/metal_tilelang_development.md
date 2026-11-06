@@ -200,7 +200,7 @@ count. It does not look at whether A/B are global or shared.
 
 | Condition | Instruction kind |
 | --- | --- |
-| C is in `local.fragment` or `metal.simdgroup` | `metal.simdgroup` |
+| A, B, or C is in `local.fragment`, or C is in `metal.simdgroup` | `metal.simdgroup` |
 | Target has the `metal4` key and `CanUseCooperativeTensor(policy, M, N, K, warps)` is true | `metal.cooperative_tensor` |
 | Otherwise | `metal.simdgroup` as a safe lowering fallback |
 
@@ -311,18 +311,22 @@ the current measurements, it is slower than the direct-global path.
 
 ### 3.2 Simdgroup Fallback
 
-The simdgroup path lowers GEMM to simdgroup matrix intrinsics:
+The simdgroup path lowers GEMM to 8x8 SIMD-group matrix instructions. A and B
+can independently reside in shared memory or logical fragments. Shared operands
+use `simdgroup_load`; fragment operands feed the matrix instruction directly.
+C can reside in shared memory or a fragment.
 
-```text
-threadgroup A/B -> simdgroup_load -> simdgroup_multiply_accumulate -> simdgroup_store
-```
+GEMM fragments retain their logical shape through layout inference. The inferred
+layout maps each element to a SIMD group, lane, and one of the lane's two matrix
+elements. Ordinary `T.Parallel`, `T.copy`, and `T.fill` operations therefore work
+on GEMM accumulators and operands. Metal codegen represents these buffers as
+native matrix objects and emits `thread_elements()` accesses. Vectorization is
+limited to two elements for accesses to these objects. Fragment operands must be
+full regions; transpose flags and warp policies are handled by their layouts.
 
-It is a compatibility path used when C is in `local.fragment` or
-`metal.simdgroup`, or when lowering-time cooperative tensor conditions are not
-met. Compared with cooperative tensor, it behaves more like an explicit
-fragment backend: the backend manages fragment layout, load/store, and
-accumulation/store policy. It is therefore not the M5 / Metal 4 optimization
-mainline.
+This path is selected when A, B, or C is a fragment, when C uses explicit
+`metal.simdgroup` scope, or when cooperative tensor conditions are not met. It
+remains distinct from the M5 / Metal 4 cooperative tensor optimization path.
 
 ### 3.3 Why These Paths Are Kept
 
@@ -563,14 +567,14 @@ MLX-style swizzle is correct but is not currently the fastest default strategy.
 | GEMM lowering | `tilelang/metal/op/gemm/gemm_metal.py` | direct-global/shared dataflow split, warp partition, dtype policy |
 | Intrinsic helper | `tilelang/metal/intrinsics/metal_macro_generator.py` | simdgroup and cooperative tensor intrinsic emission |
 | Metal pipeline | `tilelang/metal/pipeline.py` | Metal-specific pipeline transform placement |
-| Fragment rewrite | `tilelang/metal/transform/metal_fragment_to_simdgroup.py` | legacy fragment accumulator to `metal.simdgroup` |
+| Fragment vectorization | `tilelang/metal/transform/legalize_simdgroup.py` | keep vector accesses within per-lane matrix elements |
 | Core GEMM op | `src/op/gemm.h`, `src/op/gemm.cc` | GEMM op metadata |
 | Metal op lowering | `src/metal/op/gemm.cc`, `src/metal/op/utils.h` | `SelectInst`, validation, scope utilities |
 | Metal codegen | `src/metal/codegen/codegen_metal.cc`, `.h` | MSL emission |
 | TVM runtime | `3rdparty/tvm/src/runtime/metal/metal_module.mm` | guarded `MTLLanguageVersion4_0` selection |
 | Runtime tests | `testing/python/metal/test_metal_gemm_v2.py` | Metal correctness |
 | Codegen tests | `testing/python/metal/test_metal_gemm_v2_linux.py` | source-level Metal codegen |
-| Simdgroup tests | `testing/python/metal/test_metal_simdgroup_store.py` | simdgroup direct store |
+| Simdgroup tests | `testing/python/metal/test_metal_simdgroup_store.py` | fragment copies and GEMM correctness |
 | Benchmark | `benchmark/matmul_metal/benchmark_matmul_metal.py` | PyTorch / MLX / TileLang comparison |
 
 ### 5.8 Developer Checklist
