@@ -240,6 +240,20 @@ Block-wide predicated sync
 - `T.syncthreads_and(predicate)` → `int32`: Sync; non-zero iff ALL threads have non-zero predicate (`__syncthreads_and`).
 - `T.syncthreads_or(predicate)` → `int32`: Sync; non-zero iff ANY thread has non-zero predicate (`__syncthreads_or`).
 
+> **Note on predicate width:** `any_sync`, `all_sync`, `ballot_sync`, `ballot`, and `syncthreads_count/and/or` follow the native CUDA/HIP **32-bit `int`** predicate semantics. A wider integer is converted to `int` before the intrinsic tests it for non-zero, so a value whose low 32 bits are all zero votes **false** even when the value itself is non-zero — for example an `int64` `1 << 32` narrows to `0`. Floating-point predicates are rejected with `TypeError`.
+>
+> To test the complete value of an `int64`/`uint64` operand, compare it with zero explicitly before calling the intrinsic:
+>
+> ```python
+> # inside a kernel, with `flags` stored as int64
+> tid = T.get_thread_binding(0)
+> predicate = flags[tid] != 0   # 32-bit boolean: every bit of the value participates
+> votes = T.ballot_sync(predicate)
+> count = T.syncthreads_count(predicate)
+> ```
+>
+> The `uint64` ballot *result* describes the participating lanes; that width is unrelated to the 32-bit predicate *parameter*.
+
 Warp-shuffle (intra-warp data exchange). All accept a trailing `mask` kwarg that defaults to `0xFFFFFFFF`.
 - `T.shfl_sync(value, src_lane[, width, mask])`: Broadcast value from `src_lane` to all lanes (`__shfl_sync`).
 - `T.shfl_xor(value, delta[, width, mask])`: XOR-swap across lanes (`__shfl_xor_sync`).
