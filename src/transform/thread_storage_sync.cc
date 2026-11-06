@@ -316,9 +316,24 @@ WaveSplitDiagnostic DiagnoseNonUniformGuard(const PrimExpr &condition,
   arith::Analyzer analyzer;
   std::vector<bool> taken(static_cast<size_t>(thread_count), false);
   for (int64_t lane = 0; lane < thread_count; ++lane) {
-    PrimExpr value = analyzer.Simplify(Substitute(
-        condition,
-        {{tx->var, make_const(tx->var.dtype(), min_imm->value + lane)}}));
+    Map<Var, PrimExpr> bindings;
+    int64_t stride = 1;
+    for (const char *tag : {"threadIdx.x", "threadIdx.y", "threadIdx.z"}) {
+      for (const auto &iv : env_threads) {
+        if (iv->thread_tag != tag)
+          continue;
+        const auto *min = iv->dom->min.as<IntImmNode>();
+        const auto *extent = iv->dom->extent.as<IntImmNode>();
+        if (min == nullptr || extent == nullptr || extent->value <= 0)
+          return diagnostic;
+        bindings.Set(iv->var,
+                     make_const(iv->var.dtype(),
+                                min->value + (lane / stride) % extent->value));
+        stride *= extent->value;
+        break;
+      }
+    }
+    PrimExpr value = analyzer.Simplify(Substitute(condition, bindings));
     const auto *constant = value.as<IntImmNode>();
     if (constant == nullptr) {
       // Not a per-thread constant: the wave story does not apply.
@@ -371,6 +386,13 @@ WaveSplitDiagnostic DiagnoseNonUniformGuard(const PrimExpr &condition,
     return found;
   };
   const bool taken_first = taken[static_cast<size_t>(split_wave)];
+  bool switched = false;
+  for (int64_t lane = split_wave; lane < end; ++lane) {
+    if (taken[static_cast<size_t>(lane)] != taken_first)
+      switched = true;
+    else if (switched)
+      return diagnostic;
+  }
   const bool want = taken_first;
   const bool other = !taken_first;
   if (last_in(other) != -1) {
@@ -1378,30 +1400,70 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
                  "participating warp to reach the barrier. Condition: "
               << branch_condition << ". ";
           if (diagnostic.wave >= 0 && diagnostic.taken_to >= 0) {
-            // The wave the guard cuts, and the two wave-aligned bounds that
-            // would put it whole on one side of the branch.
-            const int64_t cut = diagnostic.taken_to + 1;
-            const int64_t below =
-                cut / diagnostic.warp_size * diagnostic.warp_size;
-            const int64_t above = below + diagnostic.warp_size;
             message << "The guard is constant inside every wave except wave "
                     << diagnostic.wave << ", where its threads 0-"
                     << diagnostic.taken_to -
                            diagnostic.wave * diagnostic.warp_size
-                    << " take the branch and the rest do not. "
+                    << (diagnostic.taken
+                            ? " take the branch and the rest do not. "
+                            : " do not take the branch and the rest do. ")
                     << "The wave size is " << diagnostic.warp_size
-                    << " thread(s), so "
-                    << "a bound that is a multiple of " << diagnostic.warp_size
-                    << " keeps whole waves together: " << below << " (wave "
-                    << diagnostic.wave << " out, " << above << " (wave "
-                    << diagnostic.wave
-                    << " in). Constraining the bound with a "
-                       "T.assume works too when the bound is a parameter.";
+                    << " thread(s). ";
+            // Numeric bounds describe a simple comparison against a zero-based
+            // one-dimensional thread index, not a scaled or multidimensional
+            // guard.
+            IterVar x;
+            bool one_dimensional = true;
+            for (const auto &iv : env_threads_) {
+              if (iv->thread_tag == "threadIdx.x")
+                x = iv;
+              else if (runtime::ThreadScope::Create(iv->thread_tag).rank == 1) {
+                const auto *extent = iv->dom->extent.as<IntImmNode>();
+                if (!extent || extent->value != 1)
+                  one_dimensional = false;
+              }
+            }
+            bool simple = false;
+            bool inclusive_offset = false;
+            if (x.defined() && one_dimensional) {
+              const auto *min = x->dom->min.as<IntImmNode>();
+              if (min && min->value == 0) {
+                auto direct = [&](const PrimExpr &a, const PrimExpr &b) {
+                  return a.same_as(x->var) && b.as<IntImmNode>();
+                };
+                if (const auto *op = branch_condition.as<LTNode>())
+                  simple = direct(op->a, op->b);
+                else if (const auto *op = branch_condition.as<GENode>())
+                  simple = direct(op->a, op->b);
+                else if (const auto *op = branch_condition.as<LENode>()) {
+                  simple = direct(op->a, op->b);
+                  inclusive_offset = true;
+                } else if (const auto *op = branch_condition.as<GTNode>()) {
+                  simple = direct(op->a, op->b);
+                  inclusive_offset = true;
+                }
+              }
+            }
+            if (simple) {
+              const int64_t cut = diagnostic.taken_to + 1;
+              const int64_t below =
+                  cut / diagnostic.warp_size * diagnostic.warp_size -
+                  inclusive_offset;
+              const int64_t above = below + diagnostic.warp_size;
+              message << "For this thread-index comparison, wave-aligned "
+                         "bounds are "
+                      << below << " (wave " << diagnostic.wave
+                      << (diagnostic.taken ? " out), " : " in), ") << above
+                      << " (wave " << diagnostic.wave
+                      << (diagnostic.taken ? " in). " : " out). ");
+            }
+            message << "If a symbolic bound is known to be wave-aligned, "
+                       "express that constraint with T.assume.";
           } else {
             message << "The wave size is " << warp_size_
-                    << " thread(s); a partial barrier needs whole waves, so "
-                       "make the bound a multiple of it, or constrain the "
-                       "condition with a T.assume.";
+                    << " thread(s); a partial barrier needs whole waves. "
+                       "Consider a wave-aligned thread-index guard, or use "
+                       "T.assume to express a known alignment constraint.";
           }
           LOG(FATAL) << message.str();
         }

@@ -2155,7 +2155,7 @@ def test_warp_uniform_rejection_names_the_split_wave():
     assert "not warp-uniform" in message
     assert "wave 1" in message, message
     assert "64 thread(s)" in message, message
-    assert "multiple of 64" in message, message
+    assert "wave-aligned bounds" in message, message
     assert "T.assume" in message, message
 
 
@@ -2168,7 +2168,7 @@ def test_warp_uniform_split_reports_the_aligned_bounds():
         _run_passes_with_warp_size(_split_wave_guard_func(), 64)
 
     message = str(excinfo.value)
-    assert "64 (wave 1 out" in message, message
+    assert "64 (wave 1 out)" in message, message
     assert "128 (wave 1 in)" in message, message
 
 
@@ -2199,6 +2199,124 @@ def test_warp_uniform_rejection_keeps_the_original_wording():
 
     with pytest.raises(Exception, match="not warp-uniform"):
         _run_passes_with_warp_size(_split_wave_guard_func(), 64)
+
+
+def test_wave_diagnostic_handles_multiple_thread_rows():
+    """Both waves 1 and 3 split; no single-wave explanation is valid."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 2)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx < 96:
+            for i in range(2):
+                S[ty * 128 + tx] = T.float32(1)
+                acc[0] = S[ty * 128 + (tx ^ 1)]
+
+    import pytest
+
+    with pytest.raises(Exception, match="not warp-uniform") as excinfo:
+        _run_passes_with_warp_size(func, 64)
+    assert "every wave except" not in str(excinfo.value)
+
+
+def test_wave_diagnostic_identifies_split_in_second_row():
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((256,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 2)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if ty == 1 and tx < 96:
+            for i in range(2):
+                S[ty * 128 + tx] = T.float32(1)
+                acc[0] = S[ty * 128 + (tx ^ 1)]
+
+    import pytest
+
+    with pytest.raises(Exception, match="not warp-uniform") as excinfo:
+        _run_passes_with_warp_size(func, 64)
+    message = str(excinfo.value)
+    assert "except wave 3" in message
+    assert "threads 0-31 take the branch" in message
+    assert "wave-aligned bounds are" not in message
+
+
+def test_wave_diagnostic_reversed_guard():
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx >= 32:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    import pytest
+
+    with pytest.raises(Exception, match="not warp-uniform") as excinfo:
+        _run_passes_with_warp_size(func, 64)
+    message = str(excinfo.value)
+    assert "threads 0-31 do not take the branch and the rest do" in message
+    assert "0 (wave 0 in)" in message
+    assert "64 (wave 0 out)" in message
+
+
+def test_wave_diagnostic_inclusive_guard():
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx <= 95:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    import pytest
+
+    with pytest.raises(Exception, match="not warp-uniform") as excinfo:
+        _run_passes_with_warp_size(func, 64)
+    message = str(excinfo.value)
+    assert "63 (wave 1 out)" in message
+    assert "127 (wave 1 in)" in message
+
+
+def test_wave_diagnostic_scaled_guard_does_not_suggest_numeric_bounds():
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((128,), dtype="float32", scope="shared")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if 2 * tx < 192:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+
+    import pytest
+
+    with pytest.raises(Exception, match="not warp-uniform") as excinfo:
+        _run_passes_with_warp_size(func, 64)
+    message = str(excinfo.value)
+    assert "except wave 1" in message
+    assert "(wave 1 out" not in message
+    assert "wave-aligned bounds are" not in message
 
 
 if __name__ == "__main__":
