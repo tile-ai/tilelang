@@ -10,11 +10,7 @@ import tvm_ffi
 import os
 import json
 import time
-import threading
 from pathlib import Path
-
-# Global lock to serialize Z3 calls — Z3 is not thread-safe
-_z3_lock = threading.Lock()
 
 # Try to import z3, but handle missing installation gracefully
 try:
@@ -249,17 +245,15 @@ def z3_schedule_ffi(
     pipe_order_deps_list = _convert_int_tuples(pipe_order_deps, 2)
     owner_exclusion_deps_list = _convert_int_tuples(owner_exclusion_deps, 4)
 
-    # Call the actual scheduler (Z3 is not thread-safe, serialize access)
-    with _z3_lock:
-        start_times, _ = z3_schedule_python(
-            latencies_list,
-            iis_list,
-            resource_flags_list,
-            data_deps_list,
-            resource_deps_list,
-            owner_exclusion_deps=owner_exclusion_deps_list,
-            pipe_order_deps=pipe_order_deps_list,
-        )
+    start_times, _ = z3_schedule_python(
+        latencies_list,
+        iis_list,
+        resource_flags_list,
+        data_deps_list,
+        resource_deps_list,
+        owner_exclusion_deps=owner_exclusion_deps_list,
+        pipe_order_deps=pipe_order_deps_list,
+    )
 
     # Return only start_times, C++ side will sort by start_time
     return start_times
@@ -856,26 +850,24 @@ def z3_schedule_loop_ffi(
     pipe_order_deps_list = _convert_int_tuples(pipe_order_deps, 2)
     owner_exclusion_deps_list = _convert_int_tuples(owner_exclusion_deps, 4)
 
-    # Call the actual scheduler (Z3 is not thread-safe, serialize access)
-    with _z3_lock:
-        start_times, buffer_versions, best_ii = z3_schedule_loop_python(
-            num_stages,
-            latencies_list,
-            iis_list,
-            resource_flags_list,
-            data_deps_list,
-            resource_deps_list,
-            owner_exclusion_deps_list,
-            pipe_order_deps_list,
-            buffer_sizes_list,
-            memory_groups_list,
-            stage_order_deps=stage_order_deps_list,
-            enable_offset=bool(enable_offset),
-            manual_stages=manual_stages_list,
-            manual_schedule=bool(manual_schedule),
-            register_phase_deps=register_phase_deps_list,
-            seed=42,
-        )
+    start_times, buffer_versions, best_ii = z3_schedule_loop_python(
+        num_stages,
+        latencies_list,
+        iis_list,
+        resource_flags_list,
+        data_deps_list,
+        resource_deps_list,
+        owner_exclusion_deps_list,
+        pipe_order_deps_list,
+        buffer_sizes_list,
+        memory_groups_list,
+        stage_order_deps=stage_order_deps_list,
+        enable_offset=bool(enable_offset),
+        manual_stages=manual_stages_list,
+        manual_schedule=bool(manual_schedule),
+        register_phase_deps=register_phase_deps_list,
+        seed=42,
+    )
 
     # Return start_times and buffer_versions as separate arrays for easier FFI handling
     # C++ side expects a tuple of (start_times_array, buffer_versions_array, best_ii)
