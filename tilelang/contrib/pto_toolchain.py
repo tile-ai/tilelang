@@ -71,7 +71,7 @@ def parse_pto_kernel_names(ptodsl_source: str) -> list[str]:
     return names
 
 
-def _compile_ptodsl_to_pto(
+def compile_ptodsl_to_pto(
     ptodsl_source: str,
     kernel_names: list[str],
     src_path: str | Path,
@@ -268,7 +268,7 @@ def compile_ptodsl_to_aibin(
         so_path = work / "lib_kernel.so"
 
         kernel_names = parse_pto_kernel_names(ptodsl_source)
-        _compile_ptodsl_to_pto(ptodsl_source, kernel_names, source_path, pto_path, verbose)
+        compile_ptodsl_to_pto(ptodsl_source, kernel_names, source_path, pto_path, verbose)
         run_ptoas(pto_path, fatobj_path, pto_arch, pto_flags, verbose)
         bisheng_fatobj_link(fatobj_path, so_path, verbose)
         return extract_aicore_binary(so_path)

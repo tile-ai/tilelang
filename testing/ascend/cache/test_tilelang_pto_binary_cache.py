@@ -188,7 +188,7 @@ def test_ptodsl_frontend_subprocess_resolves_installed_ptodsl(tmp_path):
     )
     src_path = tmp_path / "fake.ptodsl.py"
     out_path = tmp_path / "fake.pto"
-    pto_toolchain._compile_ptodsl_to_pto(source, ["fake_kernel"], src_path, out_path)
+    pto_toolchain.compile_ptodsl_to_pto(source, ["fake_kernel"], src_path, out_path)
     assert out_path.read_text(encoding="utf-8") == "module {}"
 
 
