@@ -1,3 +1,4 @@
+import pytest
 import tilelang
 import tilelang.language as T
 import torch
@@ -386,6 +387,69 @@ def run_tilelang_copy_shape_mismatched(M=1024, N=1024, dtype=T.float16):
 
 def test_tilelang_copy_shape_mismatched():
     run_tilelang_copy_shape_mismatched(M=128, N=128)
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_iteration_rank_mismatch_writeback():
+    """Regression: a row staged through shared, written back partially.
+
+    `T.copy(A[i, :], s)` gives the shared side a one-dimensional region, while
+    `T.copy(s, B[i, 0:k])` gives the global side (index, slice). The two sides
+    then iterate different numbers of dimensions. Lowering used to abort with
+    "idx == ivs.size() is false" from deep inside the copy op.
+    """
+    M, N = 128, 128
+
+    @T.prim_func
+    def main(A: T.Tensor((M, N), T.float32), B: T.Tensor((M, N), T.float32)):
+        with T.Kernel(1, threads=128):
+            s = T.alloc_shared((N,), T.float32)
+            T.copy(A[4, :], s)
+            T.copy(s, B[4, 0:1])
+
+    with pytest.raises(Exception, match="iterate the same number of dimensions"):
+        tilelang.compile(main, target="cuda")
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_iteration_rank_mismatch_reverse():
+    @T.prim_func
+    def main(A: T.Tensor((128, 128), T.float32), B: T.Tensor((128,), T.float32)):
+        with T.Kernel(1, threads=128):
+            s = T.alloc_shared((128,), T.float32)
+            T.copy(A[4, 0:1], s)
+            T.copy(s, B)
+
+    with pytest.raises(Exception, match="iterate the same number of dimensions"):
+        tilelang.compile(main, target="cuda")
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("k", [1, 16])
+def test_tilelang_copy_partial_row_with_degenerate_dim(k):
+    """The same partial writeback written as a copy that iterates the same rank.
+
+    Slice both the shared source and destination to the same width.
+    This copies exactly the requested elements and leaves the rest alone.
+    """
+    M, N = 128, 128
+
+    @T.prim_func
+    def main(A: T.Tensor((M, N), T.float32), B: T.Tensor((M, N), T.float32)):
+        with T.Kernel(1, threads=128):
+            s = T.alloc_shared((N,), T.float32)
+            T.copy(A[4, :], s)
+            T.copy(s[:k], B[4:5, :k])
+
+    kernel = tilelang.compile(main, target="cuda")
+    a = torch.arange(M * N, device="cuda", dtype=torch.float32).view(M, N)
+    b = torch.full((M, N), -7.0, device="cuda", dtype=torch.float32)
+    kernel(a, b)
+    torch.cuda.synchronize()
+
+    expected = torch.full_like(a, -7.0)
+    expected[4:5, :k] = a[4:5, :k]
+    torch.testing.assert_close(b, expected, rtol=0, atol=0)
 
 
 def run_tilelang_copy_fp8_e8m0(M=1024, N=1024, block_M=128, block_N=128, src_dtype=T.float8_e8m0fnu, dst_dtype=T.float8_e8m0fnu):
