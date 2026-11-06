@@ -69,7 +69,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
         mask: T.Tensor([batch, seqlen_kv, groups], "uint8"),
         Output: T.Tensor(shape_o, dtype),
     ):
-        glse = T.alloc_global([batch, heads, num_split], dtype)
+        glse = T.alloc_global([batch, heads, num_split], accum_dtype)
         Output_partial = T.alloc_global(part_shape, dtype)
         # split
         with T.Kernel(batch, heads // valid_block_H, num_split, threads=threads) as (bx, by, bz):
@@ -161,7 +161,7 @@ def flashattn(batch, heads, groups, seqlen_kv, dim, block_N, block_H, num_split,
         with T.Kernel(heads, batch, threads=128) as (by, bz):
             po_local = T.alloc_fragment([dim], dtype)
             o_accum_local = T.alloc_fragment([dim], accum_dtype)
-            lse_local = T.alloc_fragment([num_split, 128], dtype)
+            lse_local = T.alloc_fragment([num_split, 128], accum_dtype)
             lse_logsum_local = T.alloc_fragment([128], accum_dtype)
             lse_max_local = T.alloc_fragment([128], accum_dtype)
             scale_local = T.alloc_fragment([128], accum_dtype)
@@ -267,6 +267,10 @@ def ref_program(query, key, value, mask):
     #     Outputs:
     #     - output (Tensor): [batch, heads, dim]
     #     """
+    output_dtype = query.dtype
+    query = query.float()
+    key = key.float()
+    value = value.float()
     dim = query.shape[-1]
     num_head_groups = query.shape[1] // key.shape[2]
     scale = dim**0.5
@@ -285,7 +289,7 @@ def ref_program(query, key, value, mask):
 
     out = einsum(attention, value, "b g h s, b h s d -> b g h d")  # [batch_size, num_head_groups, groups, dim]
     out = rearrange(out, "b g h d -> b (h g) d")  # [batch_size, heads, dim]
-    return out
+    return out.to(output_dtype)
 
 
 def flash_split_ref(Q, K, V, mask):
