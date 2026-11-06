@@ -98,6 +98,8 @@ GEMM and sparse GEMM
   a backend without an implementation rejects the op instead of dropping
   the scale factors. Current CUDA implementations select TCGEN05 on SM100
   with `C` in tensor memory or `mma.sync` on SM120 with `C` in a fragment.
+  The SM120 path covers NVFP4, MXFP4 and MXFP8 (including FP8 x E2M1
+  operands) and also lowers through the `cutedsl` target.
   The CUDA dialect adds `mbar`, `use_2cta` and `sf_layout`. Like `T.gemm`,
   the op is synchronous: the TCGEN05 path requires a completion barrier and
   TileLang inserts the matching `mbarrier_wait_parity` implicitly after

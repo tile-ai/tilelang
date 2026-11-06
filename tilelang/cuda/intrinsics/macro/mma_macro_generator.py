@@ -285,6 +285,19 @@ class TensorCoreIntrinEmitter:
             )
             return lane_id, warp_n, warp_m
 
+    @staticmethod
+    def _ldmatrix_variant(dtype, ldmatrix_available: bool) -> str | None:
+        """ldmatrix element-format variant for an operand dtype.
+
+        ``float4_e2m1_unpacked`` shared memory holds padded 4-bit rows that only
+        an expanding ldmatrix can read into the 8-bit MMA containers.
+        """
+        if "float4_e2m1_unpacked" not in str(dtype):
+            return None
+        if not ldmatrix_available:
+            raise ValueError("float4_e2m1_unpacked operands must be K-major (A non-transposed, B transposed)")
+        return "b4x16_p64"
+
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         # Fast path for fp64: no ldmatrix support, do direct per-lane loads
         a_dtype = self.a_dtype
@@ -335,6 +348,7 @@ class TensorCoreIntrinEmitter:
         a_transposed = self.a_transposed
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
+        ldmatrix_variant = self._ldmatrix_variant(a_dtype, ldmatrix_available)
 
         def mma_load_layout(i, j):
             return i, j
@@ -389,6 +403,7 @@ class TensorCoreIntrinEmitter:
                         4,
                         T.access_ptr(A_buf[src_indices], "r", extent=8),
                         T.access_ptr(A_local_buf[i * local_size_a], "w", extent=8),
+                        variant=ldmatrix_variant,
                     )
                 else:
                     for j in T.serial(local_size_a):
@@ -462,6 +477,7 @@ class TensorCoreIntrinEmitter:
         replicate_b = self.n_dim == 16
         # ldmatrix cannot be used for int8 + trans case.
         ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
+        ldmatrix_variant = self._ldmatrix_variant(b_dtype, ldmatrix_available)
 
         def mma_load_layout(i, j):
             return i, j
@@ -507,6 +523,7 @@ class TensorCoreIntrinEmitter:
                         num,
                         T.access_ptr(B_buf[src_indices], "r", extent=2 * num),
                         T.access_ptr(B_local_buf[i * local_size_b], "w", extent=2 * num),
+                        variant=ldmatrix_variant,
                     )
 
                 else:

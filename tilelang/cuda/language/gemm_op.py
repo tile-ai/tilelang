@@ -115,11 +115,16 @@ def gemm_blockscaled(
       barrier must flip once per call. ``use_2cta=True`` requests
       ``cta_group::2`` and requires ``cluster_dims`` of ``(2,1,1)`` or
       ``(1,2,1)``.
-    - SM120, ``C`` in a fragment: synchronous
-      ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale`` with E2M1 operands,
-      UE4M3 scale factors and FP32 accumulation. A/B and packed scale words
-      reside in shared memory. ``sf_layout`` describes the scale words;
-      this path ignores ``mbar``.
+    - SM120 family (SM120, SM121), ``C`` in a fragment: synchronous warp
+      MMA with FP32 accumulation. Packed E2M1 operands use
+      ``mma.sync.m16n8k64.kind::mxf4nvf4.block_scale``, with UE4M3 scales
+      for granularity 16 (NVFP4) or UE8M0 scales for granularity 32 (MXFP4).
+      E4M3/E5M2 operands, or E2M1 in
+      ``float4_e2m1_unpacked`` shared memory, use
+      ``mma.sync.m16n8k32.kind::mxf8f6f4.block_scale`` with UE8M0 scales
+      (granularity 32); A and B may differ. Scale words pack four
+      consecutive scales of one row. ``sf_layout`` describes the scale
+      words; this path ignores ``mbar``.
 
     Unsupported combinations fail compilation instead of dropping scales.
     Use ``T.tcgen05_gemm_blockscaled`` for explicit asynchronous TCGEN05
@@ -420,9 +425,17 @@ def mma_gemm_blockscaled(
     path is synchronous warp-level ``mma.sync`` and does not use tensor memory
     or mbarriers, so ``C`` must be a fragment.
 
-    The current supported instruction is SM120 NVF4:
-    ``m16n8k64.kind::mxf4nvf4.block_scale.scale_vec::4X`` with E2M1 operands,
-    FP32 accumulation, and UE4M3 scale factors.
+    The operand dtypes select the instruction:
+
+    - packed E2M1 A and B: ``m16n8k64.kind::mxf4nvf4.block_scale.scale_vec::4X``
+      with UE4M3 scales and ``sf_*_granularity_k=16`` (NVFP4), or
+      ``scale_vec::2X`` with UE8M0 scales and ``sf_*_granularity_k=32``
+      (MXFP4, ``sf_layout="rowmajor"``);
+    - E4M3/E5M2, or E2M1 stored as ``float4_e2m1_unpacked`` shared memory:
+      ``m16n8k32.kind::mxf8f6f4.block_scale.scale_vec::1X`` with UE8M0 scales,
+      ``sf_*_granularity_k=32`` and ``sf_layout="rowmajor"``.
+
+    Both accumulate in FP32 and run on SM120 and SM121.
     """
 
     ann: dict = {}
