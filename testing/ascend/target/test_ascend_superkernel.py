@@ -84,6 +84,7 @@ def test_task_context_by_kernel_kind(kind, qualifier):
         assert helper is not None
         assert "tl_sk_block_idx" in helper.group(0)
     else:
+        # Cube and MIX 1:2 keep their original block index.
         assert "tl_sk_sys->SkGetBlockIdx()" not in body
         assert "block_idx" in body
     assert source.count("SK_BIND(") == 1
