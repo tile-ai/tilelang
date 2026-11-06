@@ -6,8 +6,13 @@
 #define TVM_TL_TRANSFORM_COMMON_PIPELINE_UTILS_H_
 
 #include "ir/analyzer.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/sym/int_set.h>
+#include <tvm/tirx/op/region.h>
 
 namespace tvm::tl {
 using namespace tirx;
@@ -41,18 +46,20 @@ inline Stmt MakePipelineBody(const ffi::Array<Stmt> &statements) {
 inline ffi::Map<Var, sym::IntSet>
 CollectPipelineThreadDomains(const Stmt &body) {
   ffi::Map<Var, sym::IntSet> domains;
-  VisitNativePostOrder(body, [&](const ffi::ObjectRef &node) {
-    const auto *region = node.as<RegionStmtObj>();
-    if (!region || !region->op.same_as(launch_thread_op()))
-      return;
-    auto var = region->body_params[0].as_or_throw<PrimVar>();
-    auto extent = region->args[1].as_or_throw<PrimExpr>();
-    auto domain = sym::IntSet::FromRange(
-        Range::FromMinExtent(IntImm(extent.ty(), 0), extent));
-    if (auto previous = domains.Get(var))
-      domain = sym::Union({previous.value(), domain});
-    domains.Set(var, domain);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const RegionStmtObj *region) -> ffi::Expected<ffi::WalkResult> {
+        if (!region->op.same_as(launch_thread_op()))
+          return ffi::WalkResult::Advance();
+
+        auto var = region->body_params[0].as_or_throw<PrimVar>();
+        auto extent = region->args[1].as_or_throw<PrimExpr>();
+        auto domain = sym::IntSet::FromRange(
+            Range::FromMinExtent(IntImm(extent.ty(), 0), extent));
+        if (auto previous = domains.Get(var))
+          domain = sym::Union({previous.value(), domain});
+        domains.Set(var, domain);
+        return ffi::WalkResult::Advance();
+      });
   return domains;
 }
 

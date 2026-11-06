@@ -1,8 +1,7 @@
 import tilelang
 import tilelang.language as T
 from tilelang.tools import Analyzer
-from tilelang.carver.arch import CUDA
-from tilelang.carver.arch import CDNA
+from types import SimpleNamespace
 import torch
 
 M = N = K = 1024
@@ -51,8 +50,11 @@ def kernel(
 def main():
     my_func = kernel.get_tir(block_M=128, block_N=128, block_K=32, num_stages=3, thread_num=128, enable_rasteration=True)
 
-    cuda_device = CUDA("cuda") if torch.version.hip is None else CDNA("hip")
-    result = Analyzer.analysis(my_func, cuda_device)
+    is_hip = torch.version.hip is not None
+    capability = torch.cuda.get_device_properties(0).gcnArchName if is_hip else "".join(map(str, torch.cuda.get_device_capability(0)))
+    # These are the existing roofline model assumptions in MB/s, not measurements.
+    device = SimpleNamespace(compute_capability=capability, bandwidth=[1300, 14000] if is_hip else [750, 12080])
+    result = Analyzer.analysis(my_func, device)
 
     print(f"Analyzed FLOPs: {result.total_flops}")
     print(f"Expected FLOPs: {2 * M * N * K}")

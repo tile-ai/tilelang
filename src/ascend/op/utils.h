@@ -15,7 +15,6 @@
 #include <algorithm>
 
 #include "ir/tensor_utils.h"
-#include "op/native_utils.h"
 #include "op/utils.h"
 
 namespace tvm {

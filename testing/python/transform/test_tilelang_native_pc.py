@@ -222,7 +222,7 @@ def _protocol_trace(function, thread):
                     )
                 )
             else:
-                assert name in {"tl.annotation", "tl.tileop.copy", "tl.tileop.fill"}
+                assert call.op.same_as(ir.Op.get("tl.layout_map")) or name in {"tl.annotation", "tl.tileop.copy", "tl.tileop.fill"}
         else:
             raise AssertionError(type(stmt))
 
@@ -258,8 +258,9 @@ def test_protocol_uses_executed_transaction_count_and_preserves_user_guards(fact
 
 def _layouts(function):
     result = {}
-    for call in collect_calls(function, op="tl.annotation"):
-        result.update(ordinary._annotations(call).get("layout_map", {}))
+    for call in collect_nodes(function, ir.Call):
+        if isinstance(call.op, ir.Op) and call.op.same_as(ir.Op.get("tl.layout_map")):
+            result.update(call.attrs["layout_map"])
     return result
 
 

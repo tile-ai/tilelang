@@ -23,6 +23,7 @@
  */
 
 #include <string>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -89,11 +90,13 @@ static Optional<Call> GetCrossCoreCall(const Call &call) {
 
 static std::vector<Call> CollectCrossCoreCalls(const TaskNode *task) {
   std::vector<Call> calls;
-  VisitNativePostOrder(task->stmt, [&](const ObjectRef &node) {
-    if (auto call = node.as<Call>();
-        call && GetCrossCoreCall(*call).has_value())
-      calls.push_back(*call);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      task->stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (auto call = node.as<Call>();
+            call && GetCrossCoreCall(*call).has_value())
+          calls.push_back(*call);
+        return ffi::WalkResult::Advance();
+      });
   return calls;
 }
 

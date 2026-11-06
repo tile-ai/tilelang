@@ -13,6 +13,7 @@ from testing.ascend._ir import (
     tensor,
 )
 from testing.ascend.auto_schedule._scheduled_ir import unit
+from tilelang import transform as common_transform
 from tilelang.ascend import transform
 
 from tvm_tirx import ir, tirx
@@ -95,6 +96,10 @@ def test_unexecuted_template_cannot_consume_ss_pool_capacity(scope, tmp_path):
             sizes[index] *= int(extent)
     (tmp_path / "observed.json").write_text(json.dumps({"arena_sizes_bytes": sizes, "architectural_capacity_bytes": 3072}, indent=2) + "\n")
     device = ir.IRModule({"main": pooled["main"].with_attr("calling_conv", int(ir.CallingConv.DEVICE_KERNEL_LAUNCH))})
+    # Codegen consumes lowered IR, just as in the production Ascend pipeline.
+    # The source root must not rely on an emitter-side SBlock decoder.
+    device = common_transform.LowerSourceAnnotations()(device)
+    assert tirx.analysis.check_well_formed(device)
     snapshot(device, tmp_path / "device")
     emitted = tvm_ffi.get_global_func("target.build.tilelang_ascend_without_compile")(device, device["main"].attrs["target"])
     source = emitted.inspect_source()

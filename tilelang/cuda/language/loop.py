@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+from tvm_tirx.script.ir_builder import frame as _stmt_frame
+
 from typing import Any
 
-from tilelang.language import _native as tirx
-from tilelang.language._native import frame
+
+pass
 
 from tilelang.language.loop import (
     Parallel as _common_Parallel,
@@ -16,12 +19,12 @@ __all__ = ["Parallel", "Unroll", "unroll"]
 
 
 def Parallel(
-    *extents: int | tirx.PrimExpr,
+    *extents: int | _ir.Expr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
     prefer_async: bool | None = None,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Construct a nested parallel loop, with CUDA lowering hints.
 
     Same semantics as the common :func:`tilelang.language.loop.Parallel`.
@@ -55,14 +58,14 @@ def Parallel(
 
 
 def unroll(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     explicit: bool = False,
     unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """The unrolled For statement, with the CUDA unroll-factor pragma.
 
     Same semantics as the common :func:`tilelang.language.loop.unroll`.
@@ -88,14 +91,14 @@ def unroll(
 
 
 def Unroll(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     explicit: bool = False,
     unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Alias of the CUDA dialect's :func:`unroll`."""
 
     return unroll(start, stop, step, explicit=explicit, unroll_factor=unroll_factor, annotations=annotations)

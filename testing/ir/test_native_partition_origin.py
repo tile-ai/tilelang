@@ -44,6 +44,7 @@ def _function(mode="serial", thread_begin=0, padded=False, shifted_slot=False, t
     layout = create_object(
         "tl.Fragment",
         input_size=layout.input_size,
+        coordinate_vars=layout.coordinate_vars,
         forward_index=layout.forward_index,
         forward_thread=layout.forward_thread,
         replicate_size=layout.replicate_size,

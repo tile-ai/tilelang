@@ -5,8 +5,10 @@
 #ifndef TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 #define TVM_TL_TRANSFORM_PARALLEL_LOOP_LAYOUT_VALIDATOR_H_
 
-#include "../common/native_layout_utils.h"
-#include "native_policy.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
+#include "policy.h"
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm::tl {
 
@@ -14,18 +16,17 @@ inline int CountNestedParallelLoops(const ForObj *loop) {
   int count = 0;
   while (loop && loop->kind == ForKind::kParallel) {
     ++count;
-    loop = SingleNestedFor(loop->body);
+    loop = (loop->body->seq.size() == 1 ? loop->body->seq[0].as<ForObj>()
+                                        : nullptr);
   }
   return count;
 }
 
 class ParallelLoopLayoutValidator : public tirx::StmtExprVisitor {
 public:
-  explicit ParallelLoopLayoutValidator(
-      NativeLayoutInferenceOptions options = {})
+  explicit ParallelLoopLayoutValidator(LayoutInferenceOptions options = {})
       : options_(std::move(options)) {}
-  static void Validate(const Stmt &stmt,
-                       NativeLayoutInferenceOptions options = {}) {
+  static void Validate(const Stmt &stmt, LayoutInferenceOptions options = {}) {
     ffi::make_object<ParallelLoopLayoutValidator>(std::move(options))
         ->Visit(stmt);
   }
@@ -36,7 +37,7 @@ public:
       return std::nullopt;
     auto previous = hints_;
     if (op->op->name == "tl.attr") {
-      auto annotation = ReadNativeAnnotations(op);
+      auto annotation = ReadAnnotations(op);
       if (annotation.at("key").cast<ffi::String>() == "tl.loop.annotations")
         hints_ = annotation.at("value").cast<ffi::Map<ffi::String, ffi::Any>>();
     }
@@ -61,7 +62,8 @@ public:
         << "Parallel layout InputDim must match the complete loop nest";
     const ForObj *inner = op;
     for (int i = 1; i < count; ++i) {
-      inner = SingleNestedFor(inner->body);
+      inner = (inner->body->seq.size() == 1 ? inner->body->seq[0].as<ForObj>()
+                                            : nullptr);
       TVM_FFI_CHECK(!inner->annotations.count(attr::kParallelLoopLayout),
                     ValueError)
           << "Only the outermost parallel loop may carry a layout";
@@ -74,7 +76,7 @@ public:
   }
 
 private:
-  NativeLayoutInferenceOptions options_;
+  LayoutInferenceOptions options_;
   ffi::Map<ffi::String, ffi::Any> hints_;
 };
 

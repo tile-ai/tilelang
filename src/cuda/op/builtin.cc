@@ -5,9 +5,11 @@
 
 #include "builtin.h"
 
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/transform.h>
+#include <tvm/tirx/op/attr.h>
 
-#include "op/native_intrinsic.h"
+#include "ir/annotations.h"
 
 namespace tvm {
 namespace tl {
@@ -546,6 +548,408 @@ const Op &mvb_stage_index() {
   return op;
 }
 
+namespace {
+using PointerExpr = TypedExpr<PtrType>;
+
+void CheckCudaResult(const CallObj *call, const Type &result) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  if (!call->ty_args.empty())
+    TVM_FFI_CHECK(ffi::StructuralEqual()(call->ty_args[0], result), TypeError)
+        << "Intrinsic result type disagrees with its type argument";
+  TVM_FFI_CHECK(ffi::StructuralEqual()(call->ty, result), TypeError)
+      << "Intrinsic result type disagrees with its operands";
+}
+
+template <int N, bool Rounding> Type InferCudaArithmetic(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), N + (Rounding ? 1U : 0U), ValueError)
+      << "CUDA arithmetic has the wrong number of runtime operands";
+  const auto dtype = args[0].as_or_throw<PrimExpr>().ty();
+  TVM_FFI_CHECK(!dtype.IsVoid(), TypeError);
+  for (int i = 1; i < N; ++i)
+    TVM_FFI_CHECK_EQ(args[i].as_or_throw<PrimExpr>().ty(), dtype, TypeError)
+        << "CUDA arithmetic operands must have matching primitive types";
+  return dtype;
+}
+
+template <int N, bool Rounding>
+void ValidateCudaArithmetic(const CallObj *call) {
+  CheckCudaResult(call, InferCudaArithmetic<N, Rounding>(call));
+  if constexpr (Rounding) {
+    const auto args = DecodeCallOperands(call);
+    const auto mode = args[N].as_or_throw<StringImm>()->value;
+    TVM_FFI_CHECK(mode == "rn" || mode == "rz" || mode == "rm" || mode == "rp",
+                  ValueError)
+        << "CUDA arithmetic has an invalid rounding mode";
+  }
+}
+
+template <int N, bool Rounding = false>
+void DefineCudaArithmetic(const char *name, CallEffectKind effect,
+                          bool vectorizable = false) {
+  OpDef def(name);
+  def.set_validator(
+         ffi::reflection::NativeFunctionView<void(const CallObj *)>::FromNative<
+             &ValidateCudaArithmetic<N, Rounding>>())
+      .template set_native_fn_attr<&InferCudaArithmetic<N, Rounding>>(
+          tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, effect)
+      .set_attr(tirx::op_attr::kVectorizable, vectorizable);
+  if constexpr (N == 1 && !Rounding)
+    def.signature(sig::arg<PrimExpr>("x"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else if constexpr (N == 1)
+    def.signature(sig::arg<PrimExpr>("x"), sig::arg<StringImm>("rounding_mode"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else if constexpr (N == 2 && !Rounding)
+    def.signature(sig::arg<PrimExpr>("x"), sig::arg<PrimExpr>("y"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else if constexpr (N == 2)
+    def.signature(sig::arg<PrimExpr>("x"), sig::arg<PrimExpr>("y"),
+                  sig::arg<StringImm>("rounding_mode"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else if constexpr (!Rounding)
+    def.signature(sig::arg<PrimExpr>("x"), sig::arg<PrimExpr>("y"),
+                  sig::arg<PrimExpr>("z"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else
+    def.signature(sig::arg<PrimExpr>("x"), sig::arg<PrimExpr>("y"),
+                  sig::arg<PrimExpr>("z"), sig::arg<StringImm>("rounding_mode"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+}
+
+// PTX instructions used as statements mutate storage or device state. Their
+// source wrappers historically retain handle or accumulator-dtype results;
+// typed C++ lowerings use void. This compatibility is confined to that ABI.
+Type InferPtxStatement(const CallObj *call) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  const Type result = !call->ty_args.empty()           ? call->ty_args[0]
+                      : !call->ty.as<MissingTypeObj>() ? call->ty
+                                                       : Type(PrimType::Void());
+  TVM_FFI_CHECK(result.as<PrimType>() || result.as<PtrType>(), TypeError)
+      << "PTX statement result must be primitive or pointer typed";
+  return result;
+}
+
+// This checks the typed operand descriptors used by this backend's instruction
+// and integer-query families. Runtime arity is checked after metadata decoding.
+// PointerExpr is the native TypedExpr<PtrType> view, not an untyped handle.
+template <typename T> void CheckPtxOperand(const Expr &expr) {
+  expr.as_or_throw<T>();
+  if constexpr (std::is_same_v<T, IntImm>) {
+    const auto dtype = expr.as_or_throw<PrimExpr>().ty();
+    TVM_FFI_CHECK(dtype.IsScalar() &&
+                      dtype.MatchesCode(kDLInt, kDLUInt, kDLBool),
+                  TypeError);
+  } else if constexpr (std::is_same_v<T, IntExpr>)
+    TVM_FFI_CHECK(expr.as_or_throw<IntExpr>().ty().IsScalar(), TypeError)
+        << "PTX index and control operands must be scalar integers";
+  else if constexpr (std::is_same_v<T, PrimExpr>)
+    TVM_FFI_CHECK(!expr.as_or_throw<PrimExpr>().ty().IsVoid(), TypeError);
+  else if constexpr (std::is_same_v<T, Expr>) {
+    // Descriptors and barrier references can be typed pointers or integer
+    // register values, depending on the lowering stage.
+    const auto primitive = expr->ty.as<PrimType>();
+    TVM_FFI_CHECK(expr->ty.as<PtrType>() ||
+                      (primitive && primitive->IsScalar() &&
+                       primitive->MatchesCode(kDLInt, kDLUInt, kDLBool)),
+                  TypeError)
+        << "PTX descriptor or barrier must be a pointer or scalar integer";
+  }
+}
+
+template <typename... Operands> void ValidatePtxStatement(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), sizeof...(Operands), ValueError)
+      << "PTX instruction has the wrong number of runtime operands";
+  size_t index = 0;
+  (CheckPtxOperand<Operands>(args[index++]), ...);
+  CheckCudaResult(call, InferPtxStatement(call));
+}
+
+template <typename... Operands>
+void DefinePtxStatement(const char *name, sig::arg<Operands>... operands) {
+  OpDef(name)
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(const CallObj *)>::
+              FromNative<&ValidatePtxStatement<Operands...>>())
+      .signature(operands..., sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<Type>("statement_type"))
+      .template set_native_fn_attr<&InferPtxStatement>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+}
+
+template <typename... Operands>
+void ValidateCudaIntegerQuery(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), sizeof...(Operands), ValueError)
+      << "CUDA integer query has the wrong number of runtime operands";
+  size_t index = 0;
+  (CheckPtxOperand<Operands>(args[index++]), ...);
+  CheckCudaResult(
+      call, Op::GetAttrMap(
+                tvm::op_attr::kFixedReturnType)[call->op.as_or_throw<Op>()]);
+  if (call->op.same_as(pack_b8x4()))
+    for (const Expr &arg : args) {
+      const auto dtype = arg.as_or_throw<PrimExpr>().ty();
+      TVM_FFI_CHECK(dtype.IsScalar() && dtype.bits() == 8, TypeError)
+          << "pack_b8x4 requires four scalar 8-bit values";
+    }
+}
+
+template <typename... Operands>
+void DefineCudaIntegerQuery(const char *name, PrimType result,
+                            sig::arg<Operands>... operands) {
+  OpDef(name)
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(const CallObj *)>::
+              FromNative<&ValidateCudaIntegerQuery<Operands...>>())
+      .signature(operands..., sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_attr(tvm::op_attr::kFixedReturnType, result)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+}
+
+Type InferThreadCoordinate(const CallObj *call) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  const Type result = call->ty_args.empty() ? call->ty : call->ty_args[0];
+  TVM_FFI_CHECK(!result.as<MissingTypeObj>(), TypeError)
+      << "Thread coordinate requires an explicit result type";
+  const auto dtype = result.as_or_throw<PrimType>();
+  TVM_FFI_CHECK(dtype.IsScalar() && dtype.MatchesCode(kDLInt, kDLUInt),
+                TypeError)
+      << "Thread coordinate requires a scalar integer result";
+  return dtype;
+}
+
+template <int MaxParameters>
+void ValidateThreadCoordinate(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_LE(args.size(), MaxParameters, ValueError)
+      << "Thread coordinate has too many runtime operands";
+  for (const Expr &arg : args)
+    CheckPtxOperand<IntExpr>(arg);
+  CheckCudaResult(call, InferThreadCoordinate(call));
+}
+
+template <int MaxParameters> void DefineThreadCoordinate(const char *name) {
+  OpDef(name)
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(const CallObj *)>::
+              FromNative<&ValidateThreadCoordinate<MaxParameters>>())
+      .signature(
+          sig::var_args<Expr>("optional_warp_dimensions_and_annotations"),
+          sig::var_ty_args<PrimType>("index_type"))
+      .template set_native_fn_attr<&InferThreadCoordinate>(
+          tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+}
+
+Type InferTensorMap(const CallObj *call) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  const Type result = !call->ty_args.empty() ? call->ty_args[0]
+                      : !call->ty.as<MissingTypeObj>()
+                          ? call->ty
+                          : Type(CuTensorMapType());
+  return result.as_or_throw<PtrType>();
+}
+
+template <bool Im2Col> void ValidateTensorMap(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_GE(args.size(), 3U, ValueError)
+      << "TMA descriptor requires dtype, rank, and global pointer runtime "
+         "operands";
+  args[0].as_or_throw<IntImm>();
+  const auto rank = args[1].as_or_throw<IntImm>()->value.as<int64_t>();
+  TVM_FFI_CHECK(rank && *rank >= (Im2Col ? 3 : 1) && *rank <= 5, ValueError)
+      << "TMA descriptor rank must be in the supported hardware range";
+  // TMADesc carries four rank-sized vectors. Im2Col carries three rank-sized
+  // vectors, two rank-2 corner vectors, and two box dimensions.
+  TVM_FFI_CHECK_EQ(args.size(), Im2Col ? 5 * *rank + 5 : 4 * *rank + 7,
+                   ValueError)
+      << "TMA descriptor runtime operands disagree with its rank";
+  args[2].as_or_throw<PointerExpr>();
+  for (size_t i = 3; i < args.size(); ++i)
+    CheckPtxOperand<IntExpr>(args[i]);
+  CheckCudaResult(call, InferTensorMap(call));
+}
+
+template <bool Im2Col> void DefineTensorMap(const char *name) {
+  OpDef(name)
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(
+              const CallObj *)>::FromNative<&ValidateTensorMap<Im2Col>>())
+      .signature(
+          sig::arg<IntImm>("data_type"), sig::arg<IntImm>("rank"),
+          sig::arg<PointerExpr>("global_pointer"),
+          sig::var_args<Expr>("ranked_shape_stride_options_and_annotations"),
+          sig::var_ty_args<PtrType>("descriptor_type"))
+      .template set_native_fn_attr<&InferTensorMap>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+}
+
+enum class TmaTransfer { Load, Multicast, Im2Col, Store, Gather4, Scatter4 };
+
+template <TmaTransfer Kind> void ValidateTmaTransfer(const CallObj *call) {
+  constexpr bool load =
+      Kind != TmaTransfer::Store && Kind != TmaTransfer::Scatter4;
+  constexpr bool multicast = Kind == TmaTransfer::Multicast;
+  const auto args = DecodeCallOperands(call);
+  if constexpr (Kind == TmaTransfer::Gather4 || Kind == TmaTransfer::Scatter4)
+    TVM_FFI_CHECK_EQ(args.size(), load ? 9U : 8U, ValueError)
+        << "TMA gather/scatter has the wrong number of runtime operands";
+  else if constexpr (Kind == TmaTransfer::Im2Col)
+    TVM_FFI_CHECK(args.size() == 8 || args.size() == 10 || args.size() == 12,
+                  ValueError)
+        << "TMA im2col runtime operands require rank 3, 4, or 5";
+  else
+    TVM_FFI_CHECK(args.size() >= (multicast ? 6U : 5U) &&
+                      args.size() <= (multicast ? 10U : 9U),
+                  ValueError)
+        << "TMA transfer runtime operands require one to five coordinates";
+  args[0].as_or_throw<PointerExpr>();
+  if constexpr (load)
+    CheckPtxOperand<Expr>(args[1]);
+  args[load ? 2 : 1].as_or_throw<PointerExpr>();
+  for (size_t i = load ? 3 : 2; i < args.size(); ++i)
+    CheckPtxOperand<IntExpr>(args[i]);
+  args.back().as_or_throw<IntImm>();
+  if constexpr (Kind == TmaTransfer::Store)
+    args[args.size() - 2].as_or_throw<IntImm>();
+  CheckCudaResult(call, InferPtxStatement(call));
+}
+
+template <TmaTransfer Kind> void DefineTmaTransfer(const char *name) {
+  OpDef def(name);
+  def.set_validator(
+         ffi::reflection::NativeFunctionView<void(
+             const CallObj *)>::FromNative<&ValidateTmaTransfer<Kind>>())
+      .template set_native_fn_attr<&InferPtxStatement>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+  if constexpr (Kind == TmaTransfer::Store || Kind == TmaTransfer::Scatter4)
+    def.signature(sig::arg<PointerExpr>("descriptor"),
+                  sig::arg<PointerExpr>("shared_pointer"),
+                  sig::var_args<Expr>("coordinates_options_and_annotations"),
+                  sig::var_ty_args<Type>("statement_type"));
+  else if constexpr (Kind == TmaTransfer::Multicast)
+    def.signature(sig::arg<PointerExpr>("descriptor"),
+                  sig::arg<Expr>("barrier"),
+                  sig::arg<PointerExpr>("shared_pointer"),
+                  sig::arg<IntExpr>("multicast_mask"),
+                  sig::var_args<Expr>("coordinates_options_and_annotations"),
+                  sig::var_ty_args<Type>("statement_type"));
+  else
+    def.signature(sig::arg<PointerExpr>("descriptor"),
+                  sig::arg<Expr>("barrier"),
+                  sig::arg<PointerExpr>("shared_pointer"),
+                  sig::var_args<Expr>("coordinates_options_and_annotations"),
+                  sig::var_ty_args<Type>("statement_type"));
+}
+
+template <int Bits, bool Global, bool Store>
+void ValidatePtxMemory(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  constexpr size_t required = Store ? 2 : 1;
+  TVM_FFI_CHECK(args.size() == required ||
+                    (Global && args.size() == required + 1),
+                ValueError)
+      << "PTX memory instruction has the wrong number of runtime operands";
+  args[0].as_or_throw<PointerExpr>();
+  if (args.size() > required) {
+    const auto pred = args.back().as_or_throw<PrimExpr>().ty();
+    TVM_FFI_CHECK(pred.IsScalar() && pred.MatchesCode(kDLBool, kDLInt, kDLUInt),
+                  TypeError)
+        << "PTX memory predicate must be a scalar boolean or integer";
+  }
+  if constexpr (Store) {
+    const auto dtype = args[1].as_or_throw<PrimExpr>().ty();
+    TVM_FFI_CHECK(!dtype.IsVoid() && dtype.bits() * dtype.lanes() == Bits,
+                  TypeError)
+        << "PTX store value width disagrees with the instruction";
+    CheckCudaResult(call, InferPtxStatement(call));
+  } else {
+    CheckCudaResult(call, PrimType::UInt(32, Bits / 32));
+  }
+}
+
+template <int Bits, bool Global, bool Store>
+void DefinePtxMemory(const char *name) {
+  OpDef def(name);
+  def.set_validator(
+         ffi::reflection::NativeFunctionView<void(const CallObj *)>::FromNative<
+             &ValidatePtxMemory<Bits, Global, Store>>())
+      .set_attr(tvm::op_attr::kCallEffectKind,
+                Store ? CallEffectKind::kOpaque : CallEffectKind::kReadState)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+  if constexpr (Store) {
+    def.template set_native_fn_attr<&InferPtxStatement>(
+        tvm::op_attr::kInferType);
+    if constexpr (Global)
+      def.signature(sig::arg<PointerExpr>("pointer"),
+                    sig::arg<PrimExpr>("value"),
+                    sig::var_args<Expr>("predicate_and_annotations"),
+                    sig::var_ty_args<Type>("statement_type"));
+    else
+      def.signature(sig::arg<PointerExpr>("pointer"),
+                    sig::arg<PrimExpr>("value"),
+                    sig::var_args<tvm::Tuple>("annotation_payload"),
+                    sig::var_ty_args<Type>("statement_type"));
+  } else {
+    def.set_attr(tvm::op_attr::kFixedReturnType, PrimType::UInt(32, Bits / 32));
+    if constexpr (Global)
+      def.signature(sig::arg<PointerExpr>("pointer"),
+                    sig::var_args<Expr>("predicate_and_annotations"),
+                    sig::var_ty_args<PrimType>("result_type"));
+    else
+      def.signature(sig::arg<PointerExpr>("pointer"),
+                    sig::var_args<tvm::Tuple>("annotation_payload"),
+                    sig::var_ty_args<PrimType>("result_type"));
+  }
+}
+
+void ValidateTensorMemoryTransfer(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK(args.size() == 6 || args.size() == 7, ValueError)
+      << "tcgen05 transfer requires six or seven runtime operands";
+  for (int i : {0, 1, 2})
+    args[i].as_or_throw<IntImm>();
+  CheckPtxOperand<Expr>(args[3]);
+  CheckPtxOperand<IntExpr>(args[4]);
+  if (args.size() == 7)
+    args[5].as_or_throw<IntImm>();
+  args.back().as_or_throw<PointerExpr>();
+  CheckCudaResult(call, InferPtxStatement(call));
+}
+
+void DefineTensorMemoryTransfer(const char *name) {
+  OpDef(name)
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(
+              const CallObj *)>::FromNative<&ValidateTensorMemoryTransfer>())
+      .signature(
+          sig::arg<IntImm>("instruction_bits"), sig::arg<IntImm>("chunks"),
+          sig::arg<IntImm>("pack_or_unpack_16"), sig::arg<Expr>("tmem_column"),
+          sig::arg<IntExpr>("column_offset"),
+          sig::arg<Expr>("pointer_or_datapaths"),
+          sig::var_args<Expr>("pointer_and_annotations"),
+          sig::var_ty_args<Type>("statement_type"))
+      .template set_native_fn_attr<&InferPtxStatement>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+}
+} // namespace
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   tvm::transform::PassContext::RegisterConfigOption<bool>(
       kDisableWarpSpecialized);
@@ -562,272 +966,241 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   tvm::transform::PassContext::RegisterConfigOption<bool>(kEnableLowerLDGSTG);
   tvm::transform::PassContext::RegisterConfigOption<bool>(
       kEnableLowerLDGSTGPredicated);
-  DefineNativeIntrinsic(OpDef("tl.__exp"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__exp10"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__log"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__log2"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__log10"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__tan"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__cos"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__sin"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.fast_rcp"), 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.max_nan"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.min_nan"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_add"), 3, 3, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_sub"), 3, 3, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_mul"), 3, 3, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_fmaf"), 4, 4, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_frcp"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_fsqrt"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_frsqrt"), 1, 1, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ieee_fdiv"), 3, 3, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.fma"), 3, 3, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, true);
-  DefineNativeIntrinsic(OpDef("tl.fmul"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, true);
-  DefineNativeIntrinsic(OpDef("tl.max2_nan"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.min2_nan"), 2, 2, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.create_tma_descriptor"), 0, -1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.create_tma_im2col_descriptor"), 0, -1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.prefetch_tma_descriptor"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_load"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_load_im2col"), 0, -1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_load_multicast"), 0, -1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_store"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_load_gather4"), 9, 9,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_store_scatter4"), 8, 8,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_fence_barrier_init"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_arrive_cluster_barrier"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_wgmma_ss"), 15, 15,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_wgmma_rs"), 15, 15,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_wgmma_sp_ss"), 18, 18,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_wgmma_sp_rs"), 17, 17,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_mma_block_scale"), 21, 21,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_tcgen05_mma_ss"), 14, 14,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_tcgen05_mma_ts"), 13, 13,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_tcgen05_mma_blockscaled_ss"), 16, 16,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_tcgen05_cp_warpx4"), 3, 3,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_tcgen05_sf_warp_transpose"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.deallocate_tmem"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_init_tensor_memory"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_deallocate_tensor_memory"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_mma_sm70"), 13, 13,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_ldmatrix"), 4, 4, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_cp_async_barrier_noinc"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_st_bulk_shared"), 3, 3,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.fence_proxy_async"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tcgen05_before_thread_sync"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tcgen05_after_thread_sync"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_store_arrive"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_store_wait"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.set_max_nreg"), 2, 2, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.warpgroup_arrive"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.warpgroup_commit_batch"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.warpgroup_wait"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.warpgroup_fence_operand"), 4, 4,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.get_lane_idx"), 0, 1, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.get_warp_idx_sync"), 0, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.get_warp_idx"), 0, 1, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.get_warp_group_idx"), 0, 2,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.pack_b8x4"), 4, 4, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.cluster_arrive_relaxed"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.cluster_arrive"), 0, 0,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.cluster_wait"), 0, 0, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.cluster_sync"), 0, 0, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.block_rank_in_cluster"), 0, 0,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.clc_try_cancel"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.clc_try_cancel_multicast"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.clc_is_canceled"), 1, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.clc_get_first_ctaid_x"), 1, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.clc_get_first_ctaid_y"), 1, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.clc_get_first_ctaid_z"), 1, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.named_barrier_arrive"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.pdl_trigger"), 0, 0, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.pdl_sync"), 0, 0, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tl_shuffle_elect"), 1, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.initialize_wgmma_descriptor"), 5, 5,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.initialize_tcgen05_descriptor"), 7, 7,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.increase_descriptor_offset"), 2, 2,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tcgen05_mma_arrive"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tcgen05_ld"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tcgen05_st"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__ffs"), 1, 1, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.__fns"), 3, 3, CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ldg32"), 0, -1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ldg64"), 0, -1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ldg128"), 0, -1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.lds32"), 1, 1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.lds64"), 1, 1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.lds128"), 1, 1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ldg256"), 0, -1, CallEffectKind::kReadState,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.stg32"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.stg64"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.stg128"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.sts32"), 2, 2, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.sts64"), 2, 2, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.sts128"), 2, 2, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.stg256"), 0, -1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.ptx_cluster_store"), 4, 4,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.tma_store_cluster"), 5, 5,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kAnyScalar, false);
-  DefineNativeIntrinsic(OpDef("tl.mvb_stage_index"), 1, 1,
-                        CallEffectKind::kPure,
-                        NativeIntrinsicResult::kAnyScalar, false);
+  DefineCudaArithmetic<1>("tl.__exp", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__exp10", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__log", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__log2", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__log10", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__tan", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__cos", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.__sin", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<1>("tl.fast_rcp", CallEffectKind::kOpaque);
+  DefineCudaArithmetic<2, false>("tl.max_nan", CallEffectKind::kPure);
+  DefineCudaArithmetic<2, false>("tl.min_nan", CallEffectKind::kPure);
+  DefineCudaArithmetic<2, true>("tl.ieee_add", CallEffectKind::kPure);
+  DefineCudaArithmetic<2, true>("tl.ieee_sub", CallEffectKind::kPure);
+  DefineCudaArithmetic<2, true>("tl.ieee_mul", CallEffectKind::kPure);
+  DefineCudaArithmetic<3, true>("tl.ieee_fmaf", CallEffectKind::kPure);
+  DefineCudaArithmetic<1, true>("tl.ieee_frcp", CallEffectKind::kPure);
+  DefineCudaArithmetic<1, true>("tl.ieee_fsqrt", CallEffectKind::kPure);
+  DefineCudaArithmetic<1, false>("tl.ieee_frsqrt", CallEffectKind::kPure);
+  DefineCudaArithmetic<2, true>("tl.ieee_fdiv", CallEffectKind::kPure);
+  DefineCudaArithmetic<3, false>("tl.fma", CallEffectKind::kPure, true);
+  DefineCudaArithmetic<2, false>("tl.fmul", CallEffectKind::kPure, true);
+  DefineCudaArithmetic<2, false>("tl.max2_nan", CallEffectKind::kPure);
+  DefineCudaArithmetic<2, false>("tl.min2_nan", CallEffectKind::kPure);
+  DefineTensorMap<false>("tl.create_tma_descriptor");
+  DefineTensorMap<true>("tl.create_tma_im2col_descriptor");
+  DefinePtxStatement("tl.prefetch_tma_descriptor",
+                     sig::arg<PointerExpr>("descriptor"));
+  DefineTmaTransfer<TmaTransfer::Load>("tl.tma_load");
+  DefineTmaTransfer<TmaTransfer::Im2Col>("tl.tma_load_im2col");
+  DefineTmaTransfer<TmaTransfer::Multicast>("tl.tma_load_multicast");
+  DefineTmaTransfer<TmaTransfer::Store>("tl.tma_store");
+  DefineTmaTransfer<TmaTransfer::Gather4>("tl.tma_load_gather4");
+  DefineTmaTransfer<TmaTransfer::Scatter4>("tl.tma_store_scatter4");
+  DefinePtxStatement("tl.ptx_fence_barrier_init");
+  DefinePtxStatement("tl.ptx_arrive_cluster_barrier", sig::arg<Expr>("barrier"),
+                     sig::arg<IntExpr>("cta"));
+  DefinePtxStatement(
+      "tl.ptx_wgmma_ss", sig::arg<StringImm>("shape"),
+      sig::arg<PrimExpr>("a_is_k_major"), sig::arg<PrimExpr>("b_is_k_major"),
+      sig::arg<StringImm>("a_dtype"), sig::arg<StringImm>("b_dtype"),
+      sig::arg<StringImm>("c_dtype"), sig::arg<Expr>("a_descriptor"),
+      sig::arg<IntExpr>("a_offset"), sig::arg<Expr>("b_descriptor"),
+      sig::arg<IntExpr>("b_offset"), sig::arg<PointerExpr>("accumulator"),
+      sig::arg<IntExpr>("c_offset"), sig::arg<PrimExpr>("scale_out"),
+      sig::arg<IntExpr>("scale_in_a"), sig::arg<IntExpr>("scale_in_b"));
+  DefinePtxStatement(
+      "tl.ptx_wgmma_rs", sig::arg<StringImm>("shape"),
+      sig::arg<PrimExpr>("b_is_k_major"), sig::arg<StringImm>("a_dtype"),
+      sig::arg<StringImm>("b_dtype"), sig::arg<StringImm>("c_dtype"),
+      sig::arg<PointerExpr>("a"), sig::arg<IntExpr>("a_offset"),
+      sig::arg<Expr>("b_descriptor"), sig::arg<IntExpr>("b_offset"),
+      sig::arg<PointerExpr>("accumulator"), sig::arg<IntExpr>("c_offset"),
+      sig::arg<PrimExpr>("scale_out"), sig::arg<IntExpr>("scale_in_a"),
+      sig::arg<IntExpr>("scale_in_b"));
+  DefinePtxStatement(
+      "tl.ptx_wgmma_sp_ss", sig::arg<StringImm>("shape"),
+      sig::arg<PrimExpr>("a_is_k_major"), sig::arg<PrimExpr>("b_is_k_major"),
+      sig::arg<StringImm>("a_dtype"), sig::arg<StringImm>("b_dtype"),
+      sig::arg<StringImm>("c_dtype"), sig::arg<Expr>("a_descriptor"),
+      sig::arg<IntExpr>("a_offset"), sig::arg<PointerExpr>("metadata"),
+      sig::arg<IntExpr>("metadata_offset"),
+      sig::arg<IntExpr>("sparse_selector"), sig::arg<Expr>("b_descriptor"),
+      sig::arg<IntExpr>("b_offset"), sig::arg<PointerExpr>("accumulator"),
+      sig::arg<IntExpr>("c_offset"), sig::arg<PrimExpr>("scale_out"),
+      sig::arg<IntExpr>("scale_in_a"), sig::arg<IntExpr>("scale_in_b"));
+  DefinePtxStatement(
+      "tl.ptx_wgmma_sp_rs", sig::arg<StringImm>("shape"),
+      sig::arg<PrimExpr>("b_is_k_major"), sig::arg<StringImm>("a_dtype"),
+      sig::arg<StringImm>("b_dtype"), sig::arg<StringImm>("c_dtype"),
+      sig::arg<PointerExpr>("a"), sig::arg<IntExpr>("a_offset"),
+      sig::arg<PointerExpr>("metadata"), sig::arg<IntExpr>("metadata_offset"),
+      sig::arg<IntExpr>("sparse_selector"), sig::arg<Expr>("b_descriptor"),
+      sig::arg<IntExpr>("b_offset"), sig::arg<PointerExpr>("accumulator"),
+      sig::arg<IntExpr>("c_offset"), sig::arg<PrimExpr>("scale_out"),
+      sig::arg<IntExpr>("scale_in_a"), sig::arg<IntExpr>("scale_in_b"));
+  DefinePtxStatement(
+      "tl.ptx_mma_block_scale", sig::arg<StringImm>("accum_dtype"),
+      sig::arg<StringImm>("shape"), sig::arg<StringImm>("a_layout"),
+      sig::arg<StringImm>("b_layout"), sig::arg<StringImm>("kind"),
+      sig::arg<IntImm>("scale_vector_size"), sig::arg<StringImm>("a_dtype"),
+      sig::arg<StringImm>("b_dtype"), sig::arg<StringImm>("scale_type"),
+      sig::arg<PointerExpr>("a"), sig::arg<IntExpr>("a_index"),
+      sig::arg<PointerExpr>("b"), sig::arg<IntExpr>("b_index"),
+      sig::arg<PointerExpr>("accumulator"), sig::arg<IntExpr>("c_index"),
+      sig::arg<Expr>("scale_a"), sig::arg<Expr>("scale_b"),
+      sig::arg<IntExpr>("scale_a_byte"), sig::arg<IntExpr>("scale_a_thread"),
+      sig::arg<IntExpr>("scale_b_byte"), sig::arg<IntExpr>("scale_b_thread"));
+  DefinePtxStatement(
+      "tl.ptx_tcgen05_mma_ss", sig::arg<StringImm>("kind_dtype"),
+      sig::arg<Expr>("a_descriptor"), sig::arg<IntExpr>("a_offset"),
+      sig::arg<Expr>("b_descriptor"), sig::arg<IntExpr>("b_offset"),
+      sig::arg<Expr>("c_pointer"), sig::arg<IntExpr>("c_offset"),
+      sig::arg<Expr>("instruction_descriptor"), sig::arg<PrimExpr>("scale_out"),
+      sig::arg<IntExpr>("mask0"), sig::arg<IntExpr>("mask1"),
+      sig::arg<IntExpr>("mask2"), sig::arg<IntExpr>("mask3"),
+      sig::arg<PrimExpr>("enable_ws"), sig::arg<PrimExpr>("enable_2cta"));
+  DefinePtxStatement(
+      "tl.ptx_tcgen05_mma_ts", sig::arg<StringImm>("kind_dtype"),
+      sig::arg<Expr>("a_pointer"), sig::arg<IntExpr>("a_offset"),
+      sig::arg<Expr>("b_descriptor"), sig::arg<IntExpr>("b_offset"),
+      sig::arg<Expr>("c_pointer"), sig::arg<IntExpr>("c_offset"),
+      sig::arg<Expr>("instruction_descriptor"), sig::arg<PrimExpr>("scale_out"),
+      sig::arg<IntExpr>("mask0"), sig::arg<IntExpr>("mask1"),
+      sig::arg<IntExpr>("mask2"), sig::arg<IntExpr>("mask3"),
+      sig::arg<PrimExpr>("enable_2cta"));
+  DefinePtxStatement(
+      "tl.ptx_tcgen05_mma_blockscaled_ss", sig::arg<StringImm>("kind_dtype"),
+      sig::arg<Expr>("a_descriptor"), sig::arg<IntExpr>("a_offset"),
+      sig::arg<Expr>("b_descriptor"), sig::arg<IntExpr>("b_offset"),
+      sig::arg<Expr>("c_pointer"), sig::arg<IntExpr>("c_offset"),
+      sig::arg<Expr>("instruction_descriptor"), sig::arg<PrimExpr>("scale_out"),
+      sig::arg<Expr>("sfa_pointer"), sig::arg<IntExpr>("sfa_offset"),
+      sig::arg<Expr>("sfb_pointer"), sig::arg<IntExpr>("sfb_offset"),
+      sig::arg<IntExpr>("reserved0"), sig::arg<IntExpr>("reserved1"),
+      sig::arg<PrimExpr>("enable_2cta"));
+  DefinePtxStatement(
+      "tl.ptx_tcgen05_cp_warpx4", sig::arg<PointerExpr>("shared_pointer"),
+      sig::arg<Expr>("tmem_pointer"), sig::arg<IntExpr>("column_offset"));
+  DefinePtxStatement("tl.ptx_tcgen05_sf_warp_transpose",
+                     sig::arg<PointerExpr>("shared_pointer"));
+  DefinePtxStatement("tl.deallocate_tmem",
+                     sig::arg<PointerExpr>("tmem_pointer"));
+  DefinePtxStatement("tl.ptx_init_tensor_memory",
+                     sig::arg<PointerExpr>("tmem_pointer"),
+                     sig::arg<IntExpr>("columns"));
+  DefinePtxStatement("tl.ptx_deallocate_tensor_memory",
+                     sig::arg<Expr>("tmem_address"),
+                     sig::arg<IntExpr>("columns"));
+  DefinePtxStatement(
+      "tl.ptx_mma_sm70", sig::arg<StringImm>("shape"),
+      sig::arg<StringImm>("a_layout"), sig::arg<StringImm>("b_layout"),
+      sig::arg<StringImm>("a_dtype"), sig::arg<StringImm>("b_dtype"),
+      sig::arg<StringImm>("c_dtype"), sig::arg<PointerExpr>("a"),
+      sig::arg<IntExpr>("a_index"), sig::arg<PointerExpr>("b"),
+      sig::arg<IntExpr>("b_index"), sig::arg<PointerExpr>("accumulator"),
+      sig::arg<IntExpr>("c_index"));
+  DefinePtxStatement("tl.ptx_ldmatrix", sig::arg<PrimExpr>("transpose"),
+                     sig::arg<IntExpr>("registers"),
+                     sig::arg<PointerExpr>("shared_pointer"),
+                     sig::arg<PointerExpr>("destination"));
+  DefinePtxStatement("tl.ptx_cp_async_barrier_noinc",
+                     sig::arg<Expr>("barrier"));
+  DefinePtxStatement("tl.ptx_st_bulk_shared",
+                     sig::arg<PointerExpr>("shared_pointer"),
+                     sig::arg<IntImm>("bytes"), sig::arg<IntImm>("value"));
+  DefinePtxStatement("tl.fence_proxy_async");
+  DefinePtxStatement("tl.tcgen05_before_thread_sync");
+  DefinePtxStatement("tl.tcgen05_after_thread_sync");
+  DefinePtxStatement("tl.tma_store_arrive");
+  DefinePtxStatement("tl.tma_store_wait", sig::arg<IntExpr>("count"),
+                     sig::arg<PrimExpr>("read"));
+  DefinePtxStatement("tl.set_max_nreg", sig::arg<IntExpr>("count"),
+                     sig::arg<PrimExpr>("increase"));
+  DefinePtxStatement("tl.warpgroup_arrive");
+  DefinePtxStatement("tl.warpgroup_commit_batch");
+  DefinePtxStatement("tl.warpgroup_wait", sig::arg<IntExpr>("pending_groups"));
+  DefinePtxStatement("tl.warpgroup_fence_operand", sig::arg<StringImm>("dtype"),
+                     sig::arg<PointerExpr>("data"), sig::arg<IntExpr>("offset"),
+                     sig::arg<IntExpr>("register_count"));
+  DefineThreadCoordinate<1>("tl.get_lane_idx");
+  DefineThreadCoordinate<1>("tl.get_warp_idx_sync");
+  DefineThreadCoordinate<1>("tl.get_warp_idx");
+  DefineThreadCoordinate<2>("tl.get_warp_group_idx");
+  DefineCudaIntegerQuery("tl.pack_b8x4", PrimType::Int(32),
+                         sig::arg<PrimExpr>("x0"), sig::arg<PrimExpr>("x1"),
+                         sig::arg<PrimExpr>("x2"), sig::arg<PrimExpr>("x3"));
+  DefinePtxStatement("tl.cluster_arrive_relaxed");
+  DefinePtxStatement("tl.cluster_arrive");
+  DefinePtxStatement("tl.cluster_wait");
+  DefinePtxStatement("tl.cluster_sync");
+  DefineCudaIntegerQuery("tl.block_rank_in_cluster", PrimType::Int(32));
+  DefinePtxStatement("tl.clc_try_cancel", sig::arg<PointerExpr>("result"),
+                     sig::arg<PointerExpr>("barrier"));
+  DefinePtxStatement("tl.clc_try_cancel_multicast",
+                     sig::arg<PointerExpr>("result"),
+                     sig::arg<PointerExpr>("barrier"));
+  DefineCudaIntegerQuery("tl.clc_is_canceled", PrimType::Int(32),
+                         sig::arg<PointerExpr>("result_pointer"));
+  DefineCudaIntegerQuery("tl.clc_get_first_ctaid_x", PrimType::UInt(32),
+                         sig::arg<PointerExpr>("result_pointer"));
+  DefineCudaIntegerQuery("tl.clc_get_first_ctaid_y", PrimType::UInt(32),
+                         sig::arg<PointerExpr>("result_pointer"));
+  DefineCudaIntegerQuery("tl.clc_get_first_ctaid_z", PrimType::UInt(32),
+                         sig::arg<PointerExpr>("result_pointer"));
+  DefinePtxStatement("tl.named_barrier_arrive", sig::arg<IntExpr>("barrier_id"),
+                     sig::arg<IntExpr>("thread_count"));
+  DefinePtxStatement("tl.pdl_trigger");
+  DefinePtxStatement("tl.pdl_sync");
+  DefineCudaIntegerQuery("tl.tl_shuffle_elect", PrimType::Bool(),
+                         sig::arg<IntExpr>("thread_extent"));
+  DefinePtxStatement(
+      "tl.initialize_wgmma_descriptor", sig::arg<Expr>("descriptor"),
+      sig::arg<PointerExpr>("start_address"), sig::arg<IntExpr>("layout_type"),
+      sig::arg<IntExpr>("leading_byte_offset"),
+      sig::arg<IntExpr>("stride_byte_offset"));
+  DefinePtxStatement(
+      "tl.initialize_tcgen05_descriptor", sig::arg<Expr>("descriptor"),
+      sig::arg<PointerExpr>("start_address"),
+      sig::arg<IntExpr>("leading_byte_offset"),
+      sig::arg<IntExpr>("stride_byte_offset"), sig::arg<IntExpr>("base_offset"),
+      sig::arg<IntExpr>("leading_is_absolute"), sig::arg<IntExpr>("swizzle"));
+  DefinePtxStatement("tl.increase_descriptor_offset",
+                     sig::arg<Expr>("descriptor"), sig::arg<IntExpr>("offset"));
+  DefinePtxStatement("tl.tcgen05_mma_arrive", sig::arg<Expr>("barrier"));
+  DefineTensorMemoryTransfer("tl.tcgen05_ld");
+  DefineTensorMemoryTransfer("tl.tcgen05_st");
+  DefineCudaIntegerQuery("tl.__ffs", PrimType::Int(32),
+                         sig::arg<IntExpr>("value"));
+  DefineCudaIntegerQuery("tl.__fns", PrimType::UInt(32),
+                         sig::arg<IntExpr>("mask"), sig::arg<IntExpr>("base"),
+                         sig::arg<IntExpr>("offset"));
+  DefinePtxMemory<32, true, false>("tl.ldg32");
+  DefinePtxMemory<64, true, false>("tl.ldg64");
+  DefinePtxMemory<128, true, false>("tl.ldg128");
+  DefinePtxMemory<32, false, false>("tl.lds32");
+  DefinePtxMemory<64, false, false>("tl.lds64");
+  DefinePtxMemory<128, false, false>("tl.lds128");
+  DefinePtxMemory<256, true, false>("tl.ldg256");
+  DefinePtxMemory<32, true, true>("tl.stg32");
+  DefinePtxMemory<64, true, true>("tl.stg64");
+  DefinePtxMemory<128, true, true>("tl.stg128");
+  DefinePtxMemory<32, false, true>("tl.sts32");
+  DefinePtxMemory<64, false, true>("tl.sts64");
+  DefinePtxMemory<128, false, true>("tl.sts128");
+  DefinePtxMemory<256, true, true>("tl.stg256");
+  DefinePtxStatement("tl.ptx_cluster_store", sig::arg<PointerExpr>("buffer"),
+                     sig::arg<PrimExpr>("value"),
+                     sig::arg<IntExpr>("destination_cta"),
+                     sig::arg<IntExpr>("index"));
+  DefinePtxStatement(
+      "tl.tma_store_cluster", sig::arg<PointerExpr>("destination"),
+      sig::arg<PointerExpr>("source"), sig::arg<IntExpr>("destination_cta"),
+      sig::arg<IntExpr>("bytes"), sig::arg<Expr>("barrier"));
+  DefineCudaIntegerQuery("tl.mvb_stage_index", PrimType::Int(32),
+                         sig::arg<IntExpr>("stage"));
 }
 
 namespace {
@@ -865,6 +1238,11 @@ void ValidateWmmaLoadMatrixSync(const CallObj *call) {
       << "WMMA load layout must be row_major or column_major";
 }
 } // namespace
+
+const Op &wmma_load_matrix_sync() {
+  static const Op op = Op::Get("tl.wmma_load_matrix_sync");
+  return op;
+}
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   // This operation reads the source pointer and writes the fragment operand.

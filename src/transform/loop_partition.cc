@@ -22,9 +22,12 @@
  * \brief Native thread partitioning, guarded replicas and loop intent.
  */
 #include "loop_partition.h"
-#include "../op/native_utils.h"
 #include "../op/utils.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
+#include "ir/loop_math.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
 #include "loop_vectorize.h"
 #include <tvm/tirx/stmt_functor.h>
 
@@ -33,13 +36,13 @@ using namespace tirx;
 using namespace prim;
 using namespace ffi;
 
-class BufferIndiceSimplify : public StmtExprMutator {
+class BufferIndiceSimplify : public LayoutMapMutator {
 public:
   explicit BufferIndiceSimplify(sym::AnalyzerObj *analyzer)
       : analyzer_(analyzer) {}
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const BindObj *node, InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate_(node, mode)
+    auto result = LayoutMapMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(GetRef<Stmt>(node))
                       .as_or_throw<Bind>();
     if (auto var = result->var.as<PrimVar>()) {
@@ -51,7 +54,7 @@ public:
   }
   UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *node,
                                 InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate_(node, mode)
+    auto result = LayoutMapMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(PrimExpr(GetRef<TensorLoad>(node)))
                       .as_or_throw<TensorLoad>();
     auto indices = result->indices.Map(
@@ -60,7 +63,7 @@ public:
   }
   UnchangedOr<Stmt> Mutate_(const TensorStoreObj *node,
                             InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate_(node, mode)
+    auto result = LayoutMapMutator::Mutate_(node, mode)
                       .ValueOrUnchanged(GetRef<Stmt>(node))
                       .as_or_throw<TensorStore>();
     auto indices = result->indices.Map(
@@ -72,14 +75,14 @@ private:
   sym::AnalyzerObj *analyzer_;
 };
 
-class MultiplicityMarkerLowerer : public StmtExprMutator {
+class MultiplicityMarkerLowerer : public LayoutMapMutator {
 public:
   explicit MultiplicityMarkerLowerer(Optional<PrimExpr> guard)
       : guard_(std::move(guard)) {}
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     if (op->op->name == "tl.attr") {
-      auto metadata = DecodeAttributeRegion(op);
+      auto metadata = ReadAnnotations(op);
       if (auto key = metadata.Get("key");
           key && key->cast<String>() == "tl.parallel_multiplicity") {
         ICHECK(op->body_params.empty() && op->result_vars.empty());
@@ -89,7 +92,7 @@ public:
         return body;
       }
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
 private:
@@ -220,7 +223,10 @@ For PartitionLoop(For op, PrimExpr thread_index, sym::AnalyzerObj *analyzer,
     ends.push_back(loop->end);
     body = loop->body;
   }
-  body = SubstituteLoopVars(body, replacements);
+  body = tl::SubstituteWithDataTypeLegalization(
+      body, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+        return replacements.Get(var);
+      });
   PrimExpr guard = IntImm::Bool(true);
   if (!inverse_view.first.same_as(layout)) {
     // The normalized inverse has a smaller physical thread domain. Guard it
@@ -275,9 +281,9 @@ For PartitionLoop(For op, PrimExpr thread_index, sym::AnalyzerObj *analyzer,
   return body.as_or_throw<For>();
 }
 
-class LoopPragmaUnroller : public StmtExprMutator {
+class LoopPragmaUnroller : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const ForObj *node, InplaceMode mode) final {
     if (node->kind == ForKind::kDefault && IsOne(node->step)) {
       auto analyzer = CreateTileLangAnalyzer();
@@ -289,7 +295,7 @@ public:
         return For(copy);
       }
     }
-    return StmtExprMutator::Mutate_(node, mode);
+    return LayoutMapMutator::Mutate_(node, mode);
   }
 };
 

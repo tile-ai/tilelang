@@ -10,11 +10,12 @@
 #include "ir/analyzer.h"
 #include "ir/stmt_functor.h"
 #include "op/builtin.h"
-#include "op/native_utils.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/vector_expr.h>
 #include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_set>
 
@@ -51,14 +52,16 @@ public:
       if (IsFp4StorageType(parameter->ty))
         genuine_roots_.insert(parameter.get());
     }
-    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>()) {
-        const auto *call = bind->value.as<CallObj>();
-        if (call && call->op.same_as(tirx::alloc_tensor_op()) &&
-            IsFp4StorageType(bind->var->ty))
-          genuine_roots_.insert(bind->var.get());
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+          const auto *call = bind->value.as<CallObj>();
+          if (call && call->op.same_as(tirx::alloc_tensor_op()) &&
+              IsFp4StorageType(bind->var->ty))
+            genuine_roots_.insert(bind->var.get());
+
+          return ffi::WalkResult::Advance();
+        });
   }
 
   SeqStmt Rewrite(const SeqStmt &body) {

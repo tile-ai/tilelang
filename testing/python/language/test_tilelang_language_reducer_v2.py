@@ -1423,14 +1423,8 @@ def test_narrow_steering_unsatisfiable_falls_back_wide():
 # ---------------------------------------------------------------------------
 
 
-def _accumulator_vector_address(expression, *, load, lanes=4):
+def _accumulator_vector_address(expression, *, lanes=4):
     """Return an exact accumulator address with a matching vector width."""
-    operation = "load" if load else "store"
-    helper = re.fullmatch(rf"tl::{operation}_vector<float{lanes},{4 * lanes},(?:true|false)>\((.+)\)", expression)
-    if helper:
-        pointer = helper.group(1)
-        if re.fullmatch(r"\(\((?:const)?unsignedchar\*\)acc(?:\+.+)?\)", pointer):
-            return "bytes", pointer.replace("(constunsignedchar*)", "(unsignedchar*)")
     direct = re.fullmatch(rf"\*\(float{lanes}\*\)\((acc(?:\+.+)?)\)", expression)
     if direct:
         return "typed", direct.group(1)
@@ -1441,7 +1435,7 @@ def _has_vector_accumulator_load(source):
     code = re.sub(r"\s+", "", source)
     for match in re.finditer(r"\bfloat(\d+)v\w*=([^;]+);", code):
         lanes = int(match.group(1))
-        if lanes > 1 and _accumulator_vector_address(match.group(2), load=True, lanes=lanes) is not None:
+        if lanes > 1 and _accumulator_vector_address(match.group(2), lanes=lanes) is not None:
             return True
     return False
 
@@ -1450,15 +1444,11 @@ def _assert_vector_accumulator_rmw(source):
     """Check a float4 accumulator load, both packed adds and matching writeback."""
     code = re.sub(r"\s+", "", source)
     stores = []
-    for match in re.finditer(r"tl::store_vector<float4,16,(?:true|false)>\(([^;]+),(\w+)\);", code):
-        call = match.group(0)[:-1]
-        call = call[: -(len(match.group(2)) + 2)] + ")"
-        stores.append((match.start(), _accumulator_vector_address(call, load=False), match.group(2)))
     for match in re.finditer(r"(\*\(float4\*\)\(acc(?:\+[^;]+)?\))=(\w+);", code):
-        stores.append((match.start(), _accumulator_vector_address(match.group(1), load=False), match.group(2)))
+        stores.append((match.start(), _accumulator_vector_address(match.group(1)), match.group(2)))
     definitions = {match.group(1) for match in re.finditer(r"\bfloat4(v\w*)=[^;]+;", code)}
     for load in re.finditer(r"\bfloat4(v\w*)=([^;]+);", code):
-        address = _accumulator_vector_address(load.group(2), load=True)
+        address = _accumulator_vector_address(load.group(2))
         if address is None:
             continue
         for store_position, store_address, result in stores:
@@ -1482,13 +1472,9 @@ def _assert_vector_accumulator_rmw(source):
     raise AssertionError("expected float4 accumulator load/add/writeback at the same address\n" + source)
 
 
-def _vector_rmw_observer_source(memory):
-    if memory == "helper":
-        load = "tl::load_vector<float4, 16, false>(((const unsigned char*)acc + 16))"
-        store = "tl::store_vector<float4, 16, false>(((unsigned char*)acc + 16), sum_)"
-    else:
-        load = "*(float4*)(acc + 4)"
-        store = "*(float4*)(acc + 4) = sum_"
+def _vector_rmw_observer_source():
+    load = "*(float4*)(acc + 4)"
+    store = "*(float4*)(acc + 4) = sum_"
     return f"""float4 sum_;
 float4 v_acc = {load};
 float4 v_source = *(float4*)(a_buf + 4);
@@ -1498,12 +1484,10 @@ float4 v_source = *(float4*)(a_buf + 4);
 """
 
 
-@pytest.mark.parametrize("memory", ["helper", "direct"])
-def test_vector_rmw_source_observer_accepts_exact_load_add_store(memory):
-    _assert_vector_accumulator_rmw(_vector_rmw_observer_source(memory))
+def test_vector_rmw_source_observer_accepts_exact_load_add_store():
+    _assert_vector_accumulator_rmw(_vector_rmw_observer_source())
 
 
-@pytest.mark.parametrize("memory", ["helper", "direct"])
 @pytest.mark.parametrize(
     "defect",
     [
@@ -1517,8 +1501,8 @@ def test_vector_rmw_source_observer_accepts_exact_load_add_store(memory):
         "wrong_store_address",
     ],
 )
-def test_vector_rmw_source_observer_rejects_disconnected_or_narrow_access(memory, defect):
-    source = _vector_rmw_observer_source(memory)
+def test_vector_rmw_source_observer_rejects_disconnected_or_narrow_access(defect):
+    source = _vector_rmw_observer_source()
     lines = source.splitlines()
     if defect == "scalar_load":
         lines[1] = "float v_acc = acc[4];"

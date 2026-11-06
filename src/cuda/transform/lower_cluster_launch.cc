@@ -4,8 +4,7 @@
  */
 
 #include "ir/annotations.h"
-#include "op/native_utils.h"
-#include "transform/common/native_layout_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/backend/cuda/attr.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -41,21 +40,20 @@ public:
 
   explicit ClusterLaunchLowerer(const tirx::Function &function)
       : owners_finished_(
-            function->GetAttr<bool>("tl.tile_ops_lowered").value_or(false) &&
             function->GetAttr<bool>("tl.shared_tmem_lowered").value_or(false)) {
   }
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *statement,
                             InplaceMode mode) final {
     const auto *call = statement->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!IsAnnotationCall(call))
       return StmtExprMutator::Mutate_(statement, mode);
-    auto metadata = ReadNativeAnnotations(call);
+    auto metadata = ReadAnnotations(call);
     if (!ConsumeClusterMetadata(metadata))
       return StmtExprMutator::Mutate_(statement, mode);
     // Pipeline lowering can materialize kernel hints as annotation statements.
     // Keep every unrelated field at its original position and lexical scope.
-    return MakeNativeAnnotation(metadata, statement->loc);
+    return MakeAnnotation(metadata, statement->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
@@ -75,19 +73,23 @@ public:
 
       // A completion attribute alone must not hide new allocations or tile ops
       // inserted after their owners ran.
-      VisitNativePostOrder(result, [](const ObjectRef &object) {
-        if (const auto *type = object.as<TensorTypeObj>()) {
-          TVM_FFI_CHECK(type->scope.name() != "shared.tmem", ValueError)
-              << "LowerClusterLaunch requires LowerSharedTmem to consume all "
-                 "shared.tmem tensors first";
-        }
-        if (const auto *call = object.as<CallObj>()) {
-          if (const auto *op = call->op.as<OpObj>()) {
-            TVM_FFI_CHECK(op->name.find("tl.tileop.") != 0, ValueError)
-                << "LowerClusterLaunch requires LowerTileOp first";
-          }
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          result,
+          [](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+            if (const auto *type = object.as<TensorTypeObj>()) {
+              TVM_FFI_CHECK(type->scope.name() != "shared.tmem", ValueError)
+                  << "LowerClusterLaunch requires LowerSharedTmem to consume "
+                     "all "
+                     "shared.tmem tensors first";
+            }
+            if (const auto *call = object.as<CallObj>()) {
+              if (const auto *op = call->op.as<OpObj>()) {
+                TVM_FFI_CHECK(op->name.find("tl.tileop.") != 0, ValueError)
+                    << "LowerClusterLaunch requires LowerTileOp first";
+              }
+            }
+            return ffi::WalkResult::Advance();
+          });
 
       Array<String> fields;
       Array<Expr> values;
@@ -141,7 +143,7 @@ public:
     }
     if (region->op->name != "tl.attr")
       return StmtExprMutator::Mutate_(region, mode);
-    auto fields = DecodeAttributeRegion(region);
+    auto fields = ReadAnnotations(region);
     if (fields.at("key").cast<String>() != "tl.kernel")
       return StmtExprMutator::Mutate_(region, mode);
     auto metadata = fields.at("value").cast<Map<String, Any>>();

@@ -3,11 +3,12 @@
 import tilelang.language as T
 import tilelang
 import pytest
+import re
 import torch
 import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
-from tilelang.language._native import encode_annotations
+from tilelang.language._annotation_codec import encode_annotations
 
 
 def make_kernel(style, hint_key):
@@ -69,9 +70,9 @@ def _function(body, parameters=()):
     return tirx.Function(list(parameters), body, ir.PrimType("void")).with_attr("target", tvm_tirx.target.Target("llvm"))
 
 
-def _finalize(function):
+def _lower_source(function):
     assert tirx.analysis.check_well_formed(function)
-    return tilelang.transform.FinalizeAnnotations("llvm")(ir.IRModule({"main": function}))["main"]
+    return tilelang.transform.LowerSourceAnnotations()(ir.IRModule({"main": function}))["main"]
 
 
 @pytest.mark.parametrize("key", ["user_hint_152", "pragma_unknown_152", "code_block_unknown_152"])
@@ -81,7 +82,7 @@ def test_unknown_attribute_preserves_adjacent_definition_scopes(key):
         _attribute(key, 1, [ir.Bind(left, ir.const(7)), ir.Evaluate(left + 1)]),
         _attribute(key, 1, [ir.Bind(right, ir.const(9)), ir.Evaluate(right + 2)]),
     ]
-    result = _finalize(_function(body))
+    result = _lower_source(_function(body))
     assert tirx.analysis.check_well_formed(result)
     assert tirx.analysis.check_well_formed(tirx.renew_def(result))
     assert len(result.body.seq) == 2
@@ -111,8 +112,11 @@ def test_unknown_attribute_preserves_adjacent_definition_scopes(key):
 )
 def test_known_and_internal_contracts_still_require_their_owning_pass(carrier, key, value):
     statement = _attribute(key, value, []) if carrier == "region" else _annotation({key: value})
-    with pytest.raises(ValueError, match="Unconsumed|must be consumed|cannot be discarded"):
-        _finalize(_function([statement]))
+    # Source lowering transports semantic contracts; only the terminal
+    # check rejects a contract whose owner has not consumed it.
+    lowered = _lower_source(_function([statement]))
+    with pytest.raises(ValueError, match=re.escape(key)):
+        tilelang.transform.VerifyLoweredAnnotations()(ir.IRModule({"main": lowered}))
 
 
 @pytest.mark.parametrize(
@@ -130,11 +134,11 @@ def test_known_and_internal_contracts_still_require_their_owning_pass(carrier, k
         ("tl.min_blocks_per_sm", 2),
     ],
 )
-def test_real_codegen_keys_are_preserved_by_finalizer(key, value):
+def test_real_codegen_keys_are_preserved_by_source_lowering(key, value):
     # These are transport checks; individual consumers retain their own value
     # validation and target constraints. Do not declare a backend compile here.
     original = _attribute(key, value, [])
-    result = _finalize(_function([original]))
+    result = _lower_source(_function([original]))
     region = result.body.seq[0]
     assert region.op.name == "tl.attr"
     assert tvm_ffi.structural_equal(region.args, original.args)

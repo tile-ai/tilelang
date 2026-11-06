@@ -2,15 +2,19 @@
  * \file ascend/transform/layout_inference.cc
  * \brief Ascend region policy over the shared native layout inference engine.
  */
+#include "ascend/ir/block.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "op/gemm_blockscaled.h"
 #include "op/reducer.h"
-#include "transform/common/native_layout_utils.h"
-#include "transform/layout_inference/native_policy.h"
+#include "transform/layout_inference/policy.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
+#include <string_view>
 #include <tvm/ffi/reflection/registry.h>
 
 namespace tvm::tl::ascend {
@@ -18,9 +22,15 @@ namespace {
 using namespace tirx;
 
 bool ScopeIs(const RegionStmtObj *region, const char *name) {
+  if (IsAscendBlock(region)) {
+    const auto block = AscendBlockName(region);
+    return (std::string_view(name) == "tl.simdvf_scope" &&
+            block == "SIMD_VF") ||
+           (std::string_view(name) == "tl.simtvf_scope" && block == "SIMT_VF");
+  }
   if (region->op->name != "tl.attr")
     return false;
-  auto fields = ReadNativeAnnotations(region);
+  auto fields = ReadAnnotations(region);
   return fields.at("key").cast<ffi::String>() == name &&
          GetIntegerAnnotation(fields.at("value")) != 0;
 }
@@ -57,7 +67,7 @@ tvm::transform::Pass AscendLayoutInference() {
         return function;
       },
       0, "tl.ValidateAscendLayoutOperands");
-  NativeLayoutInferenceOptions options;
+  LayoutInferenceOptions options;
   options.opaque_region = [](const RegionStmtObj *region) {
     return ScopeIs(region, "tl.simdvf_scope");
   };
@@ -69,10 +79,11 @@ tvm::transform::Pass AscendLayoutInference() {
     if (!simt)
       return false;
     bool reducer = false;
-    VisitNativePostOrder(loop->body, [&](const ffi::ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>())
-        reducer |= call->op.same_as(reducer_update());
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        loop->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          reducer |= call->op.same_as(reducer_update());
+          return ffi::WalkResult::Advance();
+        });
     return reducer;
   };
   return tvm::transform::Sequential(

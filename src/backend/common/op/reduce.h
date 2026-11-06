@@ -10,6 +10,7 @@
 #include "backend/common/op/reduction_semantics.h"
 #include "backend/common/target_utils.h"
 #include "ir/analyzer.h"
+#include "layout/expr_utils.h"
 #include "op/reduce.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>

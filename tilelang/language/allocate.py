@@ -16,13 +16,19 @@ with the appropriate memory scope.
 """
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _allocation
+from tilelang.language import _construction
+from tilelang.language import _source_scope
+from tvm_tirx import ir as _ir
+
 from typing import overload, Literal
 from tilelang._typing import DType, ShapeType
-from tilelang.language import _native as T
-from tilelang.language._native import PrimExpr
-from tilelang.language._native import Buffer
-from tilelang.language._native import FloatImm, IntImm
+
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import FloatImm
+from tvm_tirx.ir import IntImm
 
 from . import dtypes as _dtypes
 from .dtypes import dtype as tl_dtype
@@ -60,7 +66,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
         # lei: This is a hack to handle bool type.
         # Because tilelang's merge smem pass cannot merge bool type currently.
         scope = "shared"
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
@@ -74,7 +80,7 @@ def alloc_local(shape: ShapeType, dtype: DType, scope="local") -> Buffer:
     Returns:
         T.Buffer: A TVM buffer object allocated in local memory
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Buffer:
@@ -88,7 +94,7 @@ def alloc_fragment(shape: ShapeType, dtype: DType, scope="local.fragment") -> Bu
     Returns:
         T.Buffer: A TVM buffer object allocated in fragment memory
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 @overload
@@ -160,14 +166,16 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
 
         parsed_init = unwrap_expr(parsed_init)
         pointer_type = parsed_init.ty if isinstance(parsed_init, ir.Expr) and isinstance(parsed_init.ty, ir.PtrType) else ir.PtrType("void")
-        storage = _with_span(T.sblock_alloc_buffer([1], "uint64", scope=parsed_scope))
-        pointer = PointerRef(T.BufferLoad(storage, [0]), pointer_type, IRBuilder.current())
+        storage = _with_span(_allocation.sblock_alloc_buffer([1], "uint64", scope=parsed_scope))
+        pointer = PointerRef(
+            _ir.TensorLoad(storage, _construction.as_indices([0]), _construction.current_location()), pointer_type, IRBuilder.current()
+        )
         # An explicit store also gives nullptr initialization a well-defined
         # IR contract, independent of the backend's local-var declarations.
         pointer.store(0 if parsed_init is None else parsed_init)
         return pointer
 
-    buffer = _with_span(T.sblock_alloc_buffer([1], dtype, scope=parsed_scope))
+    buffer = _with_span(_allocation.sblock_alloc_buffer([1], dtype, scope=parsed_scope))
     if parsed_init is not None:
         # Always use T.buffer_store for reliable initialisation across all
         # backends.  The sblock_attr("tl.local_var_init") path feeds into the
@@ -177,10 +185,10 @@ def alloc_var(dtype: DType, *args, scope: str = "local.var", init: PrimExpr | in
         # uninitialised).  T.buffer_store emits an explicit BufferStore TIR
         # node that every backend lowers to an assignment statement.
         if isinstance(parsed_init, (int, float)):
-            parsed_init = _native.const(parsed_init, dtype=tl_dtype(dtype))
+            parsed_init = _ir.const(parsed_init, dtype=tl_dtype(dtype))
         elif isinstance(parsed_init, (IntImm, FloatImm)):
             parsed_init = tl_dtype(dtype)(parsed_init)
-        T.buffer_store(buffer, parsed_init, 0)
+        _construction.buffer_store(buffer, parsed_init, 0)
     return buffer
 
 
@@ -204,7 +212,7 @@ def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
         T.Buffer: A TVM buffer object allocated in global memory
     """
 
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
@@ -231,11 +239,11 @@ def alloc_barrier(arrive_count: int | list[int]) -> Buffer:
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
-    buffer = _with_span(T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier"))
+    buffer = _with_span(_allocation.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.barrier"))
     # Native TensorVar keys keep allocations distinct and expose their uses
     # through the annotation Tuple to all structural transformations.
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    _native._allocation_annotation({"barrier_init": {buffer: arrive_count_exprs}})
+    _source_scope._allocation_annotation({"barrier_init": {buffer: arrive_count_exprs}})
 
     return buffer
 
@@ -258,10 +266,10 @@ def alloc_cluster_barrier(arrive_count: int | list[int]) -> Buffer:
         arrive_count = [arrive_count]
     else:
         arrive_count = list(arrive_count)
-    buffer = _with_span(T.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier"))
+    buffer = _with_span(_allocation.sblock_alloc_buffer((len(arrive_count),), _dtypes.uint64, scope="shared.cluster_barrier"))
     # Match alloc_barrier's native TensorVar -> arrival-counts contract.
     arrive_count_exprs = [IntImm("int32", c) for c in arrive_count]
-    _native._allocation_annotation({"barrier_init": {buffer: arrive_count_exprs}})
+    _source_scope._allocation_annotation({"barrier_init": {buffer: arrive_count_exprs}})
 
     return buffer
 
@@ -301,7 +309,7 @@ def alloc_tmem(shape: ShapeType, dtype: DType) -> Buffer:
     # dimensions (for example a software-pipeline stage) that repeat the
     # accumulator along TMEM columns.
     assert len(shape) >= 2, "shape must be a 2D or higher tensor for TMEM allocation"
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope="shared.tmem"))
 
 
 ReducerOp = Literal["sum", "max", "min", "bitand", "bitor", "bitxor"]
@@ -359,12 +367,12 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
             stacklevel=2,
         )
         assert replication in ["all", "none"]
-        reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
-        _native._allocation_annotation({"reducer_info": {reducer: {"rep": replication, "op": op}}})
+        reducer = _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope="local.fragment"))
+        _source_scope._allocation_annotation({"reducer_info": {reducer: {"rep": replication, "op": op}}})
         return reducer
 
-    reducer = _with_span(T.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
-    _native._allocation_annotation({"reducer_info_v2": {reducer: {"op": op}}})
+    reducer = _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope="local.reducer"))
+    _source_scope._allocation_annotation({"reducer_info_v2": {reducer: {"op": op}}})
 
     return reducer
 
@@ -388,7 +396,7 @@ def alloc_descriptor(
     scope = "local.descriptor." + kind
     # Buffer naming via `name` is not supported by this TVM builder signature;
     # keep parameter for forward-compat, but do not pass it.
-    return _with_span(T.sblock_alloc_buffer([1], dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer([1], dtype, scope=scope))
 
 
 def alloc_wgmma_desc(dtype: DType = _dtypes.uint64) -> Buffer:
@@ -429,7 +437,7 @@ def empty(*shape, dtype: DType = _dtypes.float32) -> Tensor:
         return OutTensor(shape[0], dtype)
     elif len(shape) == 2 and isinstance(shape[0], (tuple, list)) and isinstance(shape[1], str):
         return OutTensor(shape[0], shape[1])
-    elif all([isinstance(x, (int, PrimExpr)) for x in shape]):
+    elif all([(isinstance(x, int) or _construction.is_scalar_expr(x)) for x in shape]):
         return OutTensor(shape, dtype)
     else:
         raise TypeError(f"Invalid shape {shape}")

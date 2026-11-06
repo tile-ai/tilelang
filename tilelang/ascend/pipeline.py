@@ -183,10 +183,10 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = ascend_transform.AscendThreadSync("shared")(mod)
     mod = ascend_transform.AscendThreadSync("shared.dyn")(mod)
-    # Scoped conflict hints and execution regions belong to the scheduler and
-    # synchronization passes above. Finalize them only after their consumers;
-    # outlined host and device functions now have different targets.
-    mod = tilelang.transform.FinalizeAnnotations()(mod)
+    # Ascend owns execution-region metadata after scheduling and synchronization.
+    mod = ascend_transform.LowerAscendAnnotations()(mod)
+    mod = tilelang.transform.LowerSourceAllocations()(mod)
+    mod = tilelang.transform.LowerSourceAnnotations()(mod)
     mod = tilelang.transform.MergeIfStmt()(mod)
     mod = tilelang.transform.Simplify()(mod)
     # The scheduler and synchronization analysis need the declared region and
@@ -200,6 +200,7 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.MakePackedAPI()(mod)
     mod = tilelang.transform.HoistNonRestrictParams(finalize=True)(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
+    mod = tilelang.transform.VerifyLoweredAnnotations()(mod)
     return mod
 
 

@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from tilelang.language import _tensor_spec
 from tvm_tirx import ir
 
 from dataclasses import dataclass
@@ -6,7 +8,10 @@ from dataclasses import dataclass
 import tilelang.language as T
 from tilelang.utils.language import is_fragment
 from tvm_ffi import convert
-from tilelang.language._native import Buffer, BufferRegion, PrimExpr, Var
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import TensorRegion as BufferRegion
+from tvm_tirx.ir import Expr as PrimExpr
+from tvm_tirx.ir import Var
 
 from ..layout.mma_layout import (
     ldmatrix_32x16_to_shared_8x64_layout_b,
@@ -520,7 +525,7 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
     def _scale_region_parts(self, scale_buf: Buffer | BufferRegion):
         if isinstance(scale_buf, BufferRegion):
             scale_region = scale_buf
-        elif isinstance(scale_buf, Buffer):
+        elif _tensor_spec.is_buffer_like(scale_buf):
             scale_region = self._legalize_to_buffer_region(scale_buf)
         else:
             raise ValueError(f"Unsupported scale buffer type: {type(scale_buf)}")

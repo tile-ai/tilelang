@@ -9,6 +9,9 @@
  * view type, or mutable definition is hoisted into an enclosing IR header.
  */
 
+#include "ascend/transform/source_scopes.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -26,10 +29,9 @@
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "ir/loop_math.h"
-#include "op/native_intrinsic.h"
 #include "op/utils.h"
-#include "transform/common/native_layout_utils.h"
 
 namespace tvm::tl {
 using namespace tirx;
@@ -101,24 +103,25 @@ private:
   }
 
   void ReserveExistingIds(const Stmt &body) {
-    VisitNativePostOrder(body, [&](const ObjectRef &object) {
-      if (const auto *loop = object.as<ForObj>()) {
-        if (auto id = loop->annotations.Get(kScopeId)) {
-          String name = id->cast<String>();
-          scope_ids_.emplace(loop, name);
-          used_scopes_.insert(std::string(name));
-        }
-      }
-      if (const auto *call = object.as<CallObj>();
-          IsCallNamed(call, "tl.annotation")) {
-        if (auto value = ReadNativeAnnotations(call).Get(kScoped))
-          for (const Any &entry : value->cast<Array<Any>>()) {
-            auto fields = entry.cast<Fields>();
-            used_hints_.insert(
-                std::string(fields.at("hint_id").cast<String>()));
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *loop = object.as<ForObj>()) {
+            if (auto id = loop->annotations.Get(kScopeId)) {
+              String name = id->cast<String>();
+              scope_ids_.emplace(loop, name);
+              used_scopes_.insert(std::string(name));
+            }
           }
-      }
-    });
+          if (const auto *call = object.as<CallObj>(); IsAnnotationCall(call)) {
+            if (auto value = ReadAnnotations(call).Get(kScoped))
+              for (const Any &entry : value->cast<Array<Any>>()) {
+                auto fields = entry.cast<Fields>();
+                used_hints_.insert(
+                    std::string(fields.at("hint_id").cast<String>()));
+              }
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
   static int ConstantInteger(const Expr &expr, const char *field) {
@@ -203,7 +206,7 @@ private:
     } else if (const auto *scope = stmt.as<RegionStmtObj>()) {
       // Thread launch regions do not enter the counted loop chain. A dynamic
       // or atomic region retains its source context for the analysis index.
-      auto attribute = ReadTaskAttribute(scope);
+      auto attribute = ReadSourceAttribute(scope);
       bool transparent = attribute && attribute->key == "tl.loop.annotations";
       return Scan(scope->body, transparent ? direct_scope : kNoDirectScope);
     } else if (stmt.as<BreakObj>()) {
@@ -216,7 +219,7 @@ private:
       const auto *call = evaluate->value.as<CallObj>();
       if (!IsCallNamed(call, kMarker))
         return kFallsThrough;
-      auto args = NativeIntrinsicOperands(call);
+      auto args = DecodeCallOperands(call);
       TVM_FFI_CHECK_EQ(args.size(), 6U, ValueError)
           << "conflict-hint marker expects 6 arguments";
       const auto polarity_type = args[5]->ty.as<PrimType>();
@@ -362,7 +365,7 @@ private:
     if (!IsCallNamed(op->value.as<CallObj>(), kMarker))
       return StmtExprMutator::Mutate_(op, mode);
     TVM_FFI_ICHECK_LT(cursor_, markers_.size());
-    return MakeNativeAnnotation(RewriteMarker(markers_[cursor_++]), op->loc);
+    return MakeAnnotation(RewriteMarker(markers_[cursor_++]), op->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {

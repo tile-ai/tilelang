@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from tilelang._analyzer import create_analyzer
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
@@ -16,7 +19,7 @@ from tilelang.cuda.intrinsics.macro.tcgen05_macro_generator import (
 from tilelang import language as T
 from tilelang.utils.language import retrieve_ptr
 from tilelang.transform.simplify import _Simplify
-from tilelang.language import _native as tirx
+
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
 from tvm_tirx.sym import Analyzer
@@ -93,7 +96,7 @@ class GemmTCGEN5(GemmBase):
             "TCGEN5MMA requires thread bounds to be multiples of warp size (32) and aligned to warps."
         )
 
-    def infer_shared_layout(self, buffer: tirx.Buffer, continuity: int) -> Callable[[tirx.Buffer], Layout]:
+    def infer_shared_layout(self, buffer: _tensor_spec.TensorValue, continuity: int) -> Callable[[_tensor_spec.TensorValue], Layout]:
         """Infer a standard shared-memory swizzle layout for TCGEN05 operands."""
         elem_bits = buffer.dtype.bits
         vectorized_size = 128 // elem_bits
@@ -143,8 +146,8 @@ class GemmTCGEN5(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         """Lower the GEMM tile-op into a TIR prim_func containing TCGEN5MMA calls."""
         thread_nums = thread_bounds.extent

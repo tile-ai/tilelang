@@ -174,7 +174,6 @@ tvm::transform::Pass OutlineDeviceRegions() {
         auto size_defaults = CollectSizeVarDefaults(staged);
         const bool may_alias =
             !staged->GetAttr(tirx::attr::kNoAlias).value_or(true);
-        auto tile_ops_lowered = staged->GetAttr<bool>("tl.tile_ops_lowered");
         Location source_location = staged->loc;
         const SeqStmt pre_split_body = staged->body;
         auto host = tirx::SplitHostDevice(std::move(staged), &devices, supply);
@@ -190,12 +189,6 @@ tvm::transform::Pass OutlineDeviceRegions() {
           if (may_alias)
             kernel =
                 WithAttr(std::move(kernel), tirx::attr::kNoAlias.name, false);
-          // The native splitter does not know TileLang's lowering stages.
-          // FinalizeAnnotations still needs this completed-stage fact when
-          // consuming loop hints in this source's extracted device body.
-          if (tile_ops_lowered)
-            kernel = WithAttr(std::move(kernel), "tl.tile_ops_lowered",
-                              tile_ops_lowered.value());
           if (!source_location.as<UnknownLocObj>())
             kernel.CopyOnWrite()->loc = source_location;
           devices->Update(kernel_symbol, kernel);

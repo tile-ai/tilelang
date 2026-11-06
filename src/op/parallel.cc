@@ -5,9 +5,14 @@
 
 #include "parallel.h"
 #include "ir/analyzer.h"
+#include "ir/loop_math.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
 #include <tvm/ir/prim/op.h>
@@ -199,22 +204,24 @@ ParallelOpNode::ParallelOpNode(For root, Map<String, Any> hints)
     }
   }
   // Collect cross-thread access info and buffer store info.
-  VisitNativePostOrder(root_, [&](const ObjectRef &obj) {
-    if (const auto *store = obj.as<TensorStoreObj>()) {
-      auto buffer = store->dest.as_or_throw<TensorVar>();
-      if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
-        has_cross_thread_access_ = true;
-        store_shared_global_buffers_.emplace_back(buffer);
-      } else if (IsFragmentBuffer(buffer)) {
-        store_fragment_buffers_.emplace_back(buffer);
-      }
-    } else if (const auto *load = obj.as<TensorLoadObj>()) {
-      if (IsSharedBuffer(load->source.as_or_throw<TensorVar>()) ||
-          IsGlobalBuffer(load->source.as_or_throw<TensorVar>())) {
-        has_cross_thread_access_ = true;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      root_, [&](const ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *store = obj.as<TensorStoreObj>()) {
+          auto buffer = store->dest.as_or_throw<TensorVar>();
+          if (IsSharedBuffer(buffer) || IsGlobalBuffer(buffer)) {
+            has_cross_thread_access_ = true;
+            store_shared_global_buffers_.emplace_back(buffer);
+          } else if (IsFragmentBuffer(buffer)) {
+            store_fragment_buffers_.emplace_back(buffer);
+          }
+        } else if (const auto *load = obj.as<TensorLoadObj>()) {
+          if (IsSharedBuffer(load->source.as_or_throw<TensorVar>()) ||
+              IsGlobalBuffer(load->source.as_or_throw<TensorVar>())) {
+            has_cross_thread_access_ = true;
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
 }
 
 TileOperator ParallelOpNode::Clone() const {
@@ -228,29 +235,34 @@ void ParallelOpNode::ExpandBindValues(const Map<Var, Expr> &bind_var_to_expr) {
 
   // Helper function to recursively find BufferLoads through Bind values
   std::function<void(const Expr &)> expand = [&](const Expr &expr) {
-    VisitNativePostOrder(expr, [&](const ObjectRef &node) {
-      if (auto bl = node.as<TensorLoadObj>()) {
-        if (IsFragmentBuffer(bl->source.as_or_throw<TensorVar>())) {
-          RecordBufferAccess(bl->source.as_or_throw<TensorVar>(), bl->indices,
-                             /*is_write=*/false);
-        }
-      } else if (auto var_node = node.as<VarObj>()) {
-        auto var = GetRef<Var>(var_node);
-        if (bind_var_to_expr.count(var)) {
-          expand(bind_var_to_expr[var]);
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expr, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (auto bl = node.as<TensorLoadObj>()) {
+            if (IsFragmentBuffer(bl->source.as_or_throw<TensorVar>())) {
+              RecordBufferAccess(bl->source.as_or_throw<TensorVar>(),
+                                 bl->indices,
+                                 /*is_write=*/false);
+            }
+          } else if (auto var_node = node.as<VarObj>()) {
+            auto var = GetRef<Var>(var_node);
+            if (bind_var_to_expr.count(var)) {
+              expand(bind_var_to_expr[var]);
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
   };
 
   // Only expand Bind values that are used in root_
   // First, collect all vars used in root_
   std::unordered_set<const VarObj *> used_vars;
-  VisitNativePostOrder(root_, [&](const ObjectRef &node) {
-    if (auto var_node = node.as<VarObj>()) {
-      used_vars.insert(var_node);
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      root_, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (auto var_node = node.as<VarObj>()) {
+          used_vars.insert(var_node);
+        }
+        return ffi::WalkResult::Advance();
+      });
 
   // Only expand Bind values for vars that are actually used in root_
   for (const auto &[var, expr] : bind_var_to_expr) {
@@ -831,8 +843,12 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
 
 Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
   if (predicate_.has_value()) {
-    return SubstituteLoopVars(predicate_.value(),
-                              {{InputPlaceholder(0), thread_index}});
+    return tirx::SubstituteWithDataTypeLegalization(
+        predicate_.value(),
+        [values = ffi::Map<Var, PrimExpr>{{InputPlaceholder(0), thread_index}}](
+            const Var &var) -> ffi::Optional<PrimExpr> {
+          return values.Get(var);
+        });
   } else {
     return std::nullopt;
   }
@@ -996,13 +1012,16 @@ Fragment ParallelOpNode::ComputeLoopLayoutFromBuffer(
         src_layout->ForwardThread(GetAccessInfo(buffer).indices, rep);
     loop_var_to_thread = analyzer_->Simplify(loop_var_to_thread);
     ffi::Optional<Var> conflicting_var;
-    VisitNativePostOrder(loop_var_to_thread, [&](const ObjectRef &objref) {
-      if (auto opt_var = objref.as<Var>(); opt_var &&
-                                           inner_vars_.count(*opt_var) &&
-                                           !conflicting_var.has_value()) {
-        conflicting_var = *opt_var;
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        loop_var_to_thread,
+        [&](const ObjectRef &objref) -> ffi::Expected<ffi::WalkResult> {
+          if (auto opt_var = objref.as<Var>(); opt_var &&
+                                               inner_vars_.count(*opt_var) &&
+                                               !conflicting_var.has_value()) {
+            conflicting_var = *opt_var;
+          }
+          return ffi::WalkResult::Advance();
+        });
     // StructuralWalk propagates FFI errors through a noexcept boundary.
     // Keep this local search exception outside the callback so free inference
     // can catch it, discard the conflicting candidate, and try another layout.
@@ -1335,17 +1354,31 @@ bool FragmentThreadIndexProbe::AccessUsesThread(
     return false;
   }
   Array<PrimExpr> indices = access_indices.Map([&](const PrimExpr &index) {
-    return SubstituteLoopVars(index, loop_var_map_);
+    return tirx::SubstituteWithDataTypeLegalization(
+        index, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+          return loop_var_map_.Get(var);
+        });
   });
   if (has_thread_offset_) {
-    indices = SubstituteLoopVars(indices, thread_offset_map_);
+    indices = indices.Map([&](const PrimExpr &index) {
+      return tirx::SubstituteWithDataTypeLegalization(
+          index, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+            return thread_offset_map_.Get(var);
+          });
+    });
   }
   Array<PrimExpr> physical_indices = fragment_layout->Forward(indices);
   for (const auto &index : physical_indices) {
     PrimExpr simplified = analyzer_->Simplify(index);
-    if (UsesAnyVar(simplified, [&](const VarObj *var_node) {
-          return GetRef<Var>(var_node).same_as(thread_var_);
-        })) {
+    if (ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+            simplified,
+            [&](const VarObj *var_node) -> ffi::Expected<ffi::WalkResult> {
+              return (GetRef<Var>(var_node).same_as(thread_var_))
+                         ? ffi::WalkResult::Interrupt(
+                               ffi::VisitInterrupt(ffi::GetRef<Var>(var_node)))
+                         : ffi::WalkResult::Skip();
+            })
+            .has_value()) {
       return true;
     }
   }

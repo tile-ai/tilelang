@@ -17,6 +17,7 @@
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "layout/layout.h"
 #include "op/copy.h"
@@ -101,3 +102,13 @@ Call RewriteWSCall(const CallObj *call, const Map<String, Any> &annotations,
 
 } // namespace tl
 } // namespace tvm
+
+namespace tvm::tl {
+// A marker labels the following statement without introducing a definition
+// scope.
+inline constexpr const char *kWSNextOpIdKey = "tl.ws_next_op_id";
+Optional<String> WSNextOpId(const Stmt &statement);
+Optional<Map<String, Any>> WSAttribute(const RegionStmtObj *region);
+PrimExpr WSPipelineIterationModulo(const std::vector<const ForObj *> &loops,
+                                   int stages);
+} // namespace tvm::tl

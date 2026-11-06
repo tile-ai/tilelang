@@ -7,7 +7,7 @@ import tvm_tirx
 from tvm_tirx import ir, tirx
 import tilelang.testing
 import tilelang.language as T
-from tilelang.language._native import dtype_of
+from tilelang.language._construction import dtype_of
 from tilelang.language.tir.entry import prim_func as native_prim_func
 from tilelang.testing.ir import collect_calls, collect_nodes
 

@@ -75,9 +75,6 @@ private:
   bool IsMlxLogicalBlockYExpr(const Expr &expr) const;
   bool TryPrintMlxLogicalYAffineExpr(const Expr &expr, std::ostream &os);
   bool TryPrintMlxSwizzleExpr(const Expr &expr, std::ostream &os);
-  bool TryPrintSimdgroupIndexExpr(const CallObj *op, std::ostream &os);
-  void PrintSimdgroupIndexExpr(int64_t group_mask, int64_t group_shift,
-                               std::ostream &os) const;
   void EnsureFragmentLaneVars();
   void EnsureCooperativeTensorBuffer(const Var &var);
 

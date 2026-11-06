@@ -1,26 +1,32 @@
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+import tvm_ffi as _ffi
+from tvm_tirx import tirx as _tirx
+
 
 from numbers import Integral
 from typing import Any
 
-from tilelang.language._native import PrimExpr
+from tvm_tirx.ir import Expr as PrimExpr
 from tvm_tirx import ir as _ir
 from tvm_tirx.ir import prim as _prim
 from tvm_tirx.tirx import op as _tirx_op
 from tvm_tirx.ir import Location as Span
 from tvm_tirx.ir import PrimType, PtrType, Type, const
-from tilelang.language._native import Buffer
-from tilelang.language._native import IntImm, Shuffle as Shuffle
-from tilelang.language import _native as _tvm_op
+from tvm_tirx.ir import IntImm
+from tvm_tirx.ir.prim import Shuffle
+
 
 from tilelang.language.dtypes import _is_any_dtype, get_tvm_dtype
 from tilelang.utils.deprecated import deprecated_warning
 
 
 def _buffer_data(value):
-    if isinstance(value, Buffer):
-        return _native.tensor_data_ptr(value)
+    if _tensor_spec.is_buffer_like(value):
+        return _tirx.tensor_data_ptr(value)
     return value
 
 
@@ -30,141 +36,133 @@ def _normalize_primexpr_args(args):
 
 # Re-export unchanged TVM operators without adding another Python call layer.
 # TileLang-specific adapters remain as functions below.
-def call_packed(*args, **kwargs):
-    return _tvm_op.call_packed(*args, **kwargs)
+from tvm_tirx.tirx import call_packed as call_packed
 
 
-def call_cpacked(*args, **kwargs):
-    return _tvm_op.call_cpacked(*args, **kwargs)
+from tvm_tirx.tirx import call_cpacked as call_cpacked
 
 
-def call_packed_lowered(*args, **kwargs):
-    return _tvm_op.call_packed_lowered(*args, **kwargs)
+from tvm_tirx.tirx import call_packed_lowered as call_packed_lowered
 
 
-def call_cpacked_lowered(*args, **kwargs):
-    return _tvm_op.call_cpacked_lowered(*args, **kwargs)
+from tvm_tirx.tirx import call_cpacked_lowered as call_cpacked_lowered
 
 
-def call_llvm_intrin(*args, **kwargs):
-    return _tvm_op.call_llvm_intrin(*args, **kwargs)
+from tvm_tirx.tirx import call_llvm_intrin as call_llvm_intrin
 
 
-def call_llvm_pure_intrin(*args, **kwargs):
-    return _tvm_op.call_llvm_pure_intrin(*args, **kwargs)
+from tvm_tirx.tirx import call_llvm_pure_intrin as call_llvm_pure_intrin
 
 
 def tvm_stack_alloca(dtype_str, num):
     """Allocate ABI stack storage with the native pointer type for ``dtype_str``."""
-    return _tvm_op.stack_alloca(dtype_str, num, loc=_native._loc())
+    return _tirx.stack_alloca(dtype_str, num, loc=_construction.current_location())
 
 
 def tvm_stack_make_shape(*args):
     """Build an int64 shape pointer whose storage lives through its packed call."""
-    return _tvm_op.stack_make_shape(*args, loc=_native._loc())
+    return _tirx.stack_make_shape(*args, loc=_construction.current_location())
 
 
 def tvm_stack_make_array(data, shape, strides, ndim, arr_dtype, elem_offset):
     """Build a borrowed DLTensor descriptor; ``elem_offset`` is in elements."""
-    return _tvm_op.stack_make_dltensor(_buffer_data(data), shape, strides, ndim, arr_dtype, elem_offset, loc=_native._loc())
+    return _tirx.stack_make_dltensor(_buffer_data(data), shape, strides, ndim, arr_dtype, elem_offset, loc=_construction.current_location())
 
 
-def assume(*args, **kwargs):
-    return _tvm_op.assume(*args, **kwargs)
+from tvm_tirx.ir.prim import assume as assume
 
 
-def undef(*args, **kwargs):
-    return _tvm_op.undef(*args, **kwargs)
+from tvm_tirx.tirx import undef as undef
 
 
 def start_profile_intrinsic(id):
     """Construct the legacy profiling marker for the native compiler boundary."""
-    return _ir.Call("tl.start_profile_intrinsic", [_native._expr(id)], loc=_native._loc())
+    return _ir.Call("tl.start_profile_intrinsic", [_construction.as_expr(id)], loc=_construction.current_location())
 
 
 def end_profile_intrinsic(id):
     """Construct the end marker paired with :func:`start_profile_intrinsic`."""
-    return _ir.Call("tl.end_profile_intrinsic", [_native._expr(id)], loc=_native._loc())
+    return _ir.Call("tl.end_profile_intrinsic", [_construction.as_expr(id)], loc=_construction.current_location())
 
 
-def tvm_tuple(*args, **kwargs):
-    return _tvm_op.tvm_tuple(*args, **kwargs)
+from tilelang.language._construction import tvm_tuple as tvm_tuple
 
 
-def tvm_struct_get(*args, **kwargs):
-    return _tvm_op.tvm_struct_get(*args, **kwargs)
+from tilelang.language._intrinsics import tvm_struct_get as tvm_struct_get
 
 
-def tvm_struct_set(*args, **kwargs):
-    return _tvm_op.tvm_struct_set(*args, **kwargs)
+from tilelang.language._intrinsics import tvm_struct_set as tvm_struct_set
 
 
-def address_of(*args, **kwargs):
-    return _tvm_op.address_of(*args, **kwargs)
+from tvm_tirx.tirx import address_of as address_of
 
 
 def lookup_param(param_name, span=None):
     """Refer to a named parameter supplied by the C source environment."""
-    result = _native.ir.Call("tl.lookup_param", [_native._expr(param_name)], loc=span if span is not None else _native._loc())
+    result = _ir.Call(
+        "tl.lookup_param", [_construction.as_expr(param_name)], loc=span if span is not None else _construction.current_location()
+    )
     result.validate()
     return result
 
 
-def tvm_thread_allreduce(*args, **kwargs):
-    return _tvm_op.tvm_thread_allreduce(*args, **kwargs)
+from tilelang.language._thread_reduction import tvm_thread_allreduce as tvm_thread_allreduce
 
 
 def tvm_thread_invariant(cond):
-    return _tirx_op.gpu_thread_invariant(cond, loc=_native._loc())
+    return _tirx_op.gpu_thread_invariant(cond, loc=_construction.current_location())
 
 
-def tvm_storage_sync(*args, **kwargs):
-    return _tvm_op.tvm_storage_sync(*args, **kwargs)
+from tilelang.language._intrinsics import tvm_storage_sync as tvm_storage_sync
 
 
 def tvm_warp_shuffle(mask, value, warp_id, width, warp_size):
-    return _tirx_op.gpu_warp_shuffle(mask, value, warp_id, width, warp_size, loc=_native._loc())
+    return _tirx_op.gpu_warp_shuffle(mask, value, warp_id, width, warp_size, loc=_construction.current_location())
 
 
 def tvm_warp_shuffle_up(mask, value, offset, width, warp_size):
-    return _tirx_op.gpu_warp_shuffle_up(mask, value, offset, width, warp_size, loc=_native._loc())
+    return _tirx_op.gpu_warp_shuffle_up(mask, value, offset, width, warp_size, loc=_construction.current_location())
 
 
 def tvm_warp_shuffle_down(mask, value, offset, width, warp_size):
-    return _tirx_op.gpu_warp_shuffle_down(mask, value, offset, width, warp_size, loc=_native._loc())
+    return _tirx_op.gpu_warp_shuffle_down(mask, value, offset, width, warp_size, loc=_construction.current_location())
 
 
 def tvm_warp_activemask():
-    return _tirx_op.gpu_warp_activemask(loc=_native._loc())
+    return _tirx_op.gpu_warp_activemask(loc=_construction.current_location())
 
 
 def tvm_throw_last_error():
     """Propagate the current FFI error and terminate the host function."""
-    return _tvm_op.throw_last_error(loc=_native._loc())
+    return _tirx.throw_last_error(loc=_construction.current_location())
 
 
 def tvm_load_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
     return _tirx_op.call_intrin(
-        "tl.wmma_load_matrix_sync", fragment, m, n, k, index, buffer_ptr, stride, layout, ty=None, loc=_native._loc()
+        "tl.wmma_load_matrix_sync", fragment, m, n, k, index, buffer_ptr, stride, layout, ty=None, loc=_construction.current_location()
     )
 
 
 def tvm_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c):
-    return _tirx_op.gpu_mma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c, loc=_native._loc())
+    return _tirx_op.gpu_mma_sync(
+        fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c, loc=_construction.current_location()
+    )
 
 
 def tvm_bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c):
     from tvm_tirx.backend.cuda import op as cuda_op
 
-    return cuda_op.bmma_sync(fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c, loc=_native._loc())
+    return cuda_op.bmma_sync(
+        fragment_d, index_d, fragment_a, index_a, fragment_b, index_b, fragment_c, index_c, loc=_construction.current_location()
+    )
 
 
 def tvm_fill_fragment(fragment, m, n, k, index, value):
-    return _tirx_op.gpu_fill_fragment(fragment, m, n, k, index, value, loc=_native._loc())
+    return _tirx_op.gpu_fill_fragment(fragment, m, n, k, index, value, loc=_construction.current_location())
 
 
 def tvm_store_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout):
-    return _tirx_op.gpu_store_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout, loc=_native._loc())
+    return _tirx_op.gpu_store_matrix_sync(fragment, m, n, k, index, buffer_ptr, stride, layout, loc=_construction.current_location())
 
 
 def ptx_commit_group(*args, **kwargs):
@@ -192,7 +190,7 @@ def create_barriers(*args, **kwargs):
 
 
 def _vector_op(operator, dtype, *vectors):
-    result = operator(*[_native._expr(vector) for vector in vectors], ty=None, loc=_native._loc())
+    result = operator(*[_construction.as_expr(vector) for vector in vectors], ty=None, loc=_construction.current_location())
     result.validate()
     requested_type = PrimType(get_tvm_dtype(dtype))
     if result.ty != requested_type:
@@ -202,216 +200,170 @@ def _vector_op(operator, dtype, *vectors):
 
 def vectorlow(dtype, vec):
     """Return the low half of a vector with the requested result dtype."""
-    return _vector_op(_tvm_op.vector_low, dtype, vec)
+    return _vector_op(_tirx.vector_low, dtype, vec)
 
 
 def vectorhigh(dtype, vec):
     """Return the high half of a vector with the requested result dtype."""
-    return _vector_op(_tvm_op.vector_high, dtype, vec)
+    return _vector_op(_tirx.vector_high, dtype, vec)
 
 
 def vectorcombine(dtype, vec1, vec2):
     """Concatenate equal vector types with the requested result dtype."""
-    return _vector_op(_tvm_op.vector_combine, dtype, vec1, vec2)
+    return _vector_op(_tirx.vector_combine, dtype, vec1, vec2)
 
 
 def ret(val, span=None):
     """Construct a native return statement without emitting it."""
-    value = _native._expr(val)
+    value = _construction.as_expr(val)
     if not isinstance(value.ty, (PrimType, PtrType)):
         raise TypeError("ret requires a primitive value or pointer")
-    return _native.ir.Return(value, loc=span if span is not None else _native._loc())
+    return _ir.Return(value, loc=span if span is not None else _construction.current_location())
 
 
-def min_value(*args, **kwargs):
-    return _tvm_op.min_value(*args, **kwargs)
+from tvm_tirx.ir.prim import min_value as min_value
 
 
-def max_value(*args, **kwargs):
-    return _tvm_op.max_value(*args, **kwargs)
+from tvm_tirx.ir.prim import max_value as max_value
 
 
-def exp(*args, **kwargs):
-    return _tvm_op.exp(*args, **kwargs)
+from tvm_tirx.ir.prim import exp as exp
 
 
-def exp2(*args, **kwargs):
-    return _tvm_op.exp2(*args, **kwargs)
+from tvm_tirx.ir.prim import exp2 as exp2
 
 
-def exp10(*args, **kwargs):
-    return _tvm_op.exp10(*args, **kwargs)
+from tvm_tirx.ir.prim import exp10 as exp10
 
 
-def erf(*args, **kwargs):
-    return _tvm_op.erf(*args, **kwargs)
+from tvm_tirx.ir.prim import erf as erf
 
 
-def tanh(*args, **kwargs):
-    return _tvm_op.tanh(*args, **kwargs)
+from tvm_tirx.ir.prim import tanh as tanh
 
 
-def sigmoid(*args, **kwargs):
-    return _tvm_op.sigmoid(*args, **kwargs)
+from tvm_tirx.ir.prim import sigmoid as sigmoid
 
 
-def log(*args, **kwargs):
-    return _tvm_op.log(*args, **kwargs)
+from tvm_tirx.ir.prim import log as log
 
 
-def log2(*args, **kwargs):
-    return _tvm_op.log2(*args, **kwargs)
+from tvm_tirx.ir.prim import log2 as log2
 
 
-def log10(*args, **kwargs):
-    return _tvm_op.log10(*args, **kwargs)
+from tvm_tirx.ir.prim import log10 as log10
 
 
-def log1p(*args, **kwargs):
-    return _tvm_op.log1p(*args, **kwargs)
+from tvm_tirx.ir.prim import log1p as log1p
 
 
-def tan(*args, **kwargs):
-    return _tvm_op.tan(*args, **kwargs)
+from tvm_tirx.ir.prim import tan as tan
 
 
-def cos(*args, **kwargs):
-    return _tvm_op.cos(*args, **kwargs)
+from tvm_tirx.ir.prim import cos as cos
 
 
-def cosh(*args, **kwargs):
-    return _tvm_op.cosh(*args, **kwargs)
+from tvm_tirx.ir.prim import cosh as cosh
 
 
-def acos(*args, **kwargs):
-    return _tvm_op.acos(*args, **kwargs)
+from tvm_tirx.ir.prim import acos as acos
 
 
-def acosh(*args, **kwargs):
-    return _tvm_op.acosh(*args, **kwargs)
+from tvm_tirx.ir.prim import acosh as acosh
 
 
-def sin(*args, **kwargs):
-    return _tvm_op.sin(*args, **kwargs)
+from tvm_tirx.ir.prim import sin as sin
 
 
-def sinh(*args, **kwargs):
-    return _tvm_op.sinh(*args, **kwargs)
+from tvm_tirx.ir.prim import sinh as sinh
 
 
-def asin(*args, **kwargs):
-    return _tvm_op.asin(*args, **kwargs)
+from tvm_tirx.ir.prim import asin as asin
 
 
-def asinh(*args, **kwargs):
-    return _tvm_op.asinh(*args, **kwargs)
+from tvm_tirx.ir.prim import asinh as asinh
 
 
-def atan(*args, **kwargs):
-    return _tvm_op.atan(*args, **kwargs)
+from tvm_tirx.ir.prim import atan as atan
 
 
-def atanh(*args, **kwargs):
-    return _tvm_op.atanh(*args, **kwargs)
+from tvm_tirx.ir.prim import atanh as atanh
 
 
-def atan2(*args, **kwargs):
-    return _tvm_op.atan2(*args, **kwargs)
+from tvm_tirx.ir.prim import atan2 as atan2
 
 
-def sqrt(*args, **kwargs):
-    return _tvm_op.sqrt(*args, **kwargs)
+from tvm_tirx.ir.prim import sqrt as sqrt
 
 
-def rsqrt(*args, **kwargs):
-    return _tvm_op.rsqrt(*args, **kwargs)
+from tvm_tirx.ir.prim import rsqrt as rsqrt
 
 
-def clz(*args, **kwargs):
-    return _tvm_op.clz(*args, **kwargs)
+from tvm_tirx.ir.prim import clz as clz
 
 
-def floor(*args, **kwargs):
-    return _tvm_op.floor(*args, **kwargs)
+from tvm_tirx.ir.prim import floor as floor
 
 
-def ceil(*args, **kwargs):
-    return _tvm_op.ceil(*args, **kwargs)
+from tvm_tirx.ir.prim import ceil as ceil
 
 
-def trunc(*args, **kwargs):
-    return _tvm_op.trunc(*args, **kwargs)
+from tvm_tirx.ir.prim import trunc as trunc
 
 
-def abs(*args, **kwargs):
-    return _tvm_op.abs(*args, **kwargs)
+from tvm_tirx.ir.prim import abs as abs
 
 
-def bitwise_and(*args, **kwargs):
-    return _tvm_op.bitwise_and(*args, **kwargs)
+from tvm_tirx.ir.prim import bitwise_and as bitwise_and
 
 
-def bitwise_not(*args, **kwargs):
-    return _tvm_op.bitwise_not(*args, **kwargs)
+from tvm_tirx.ir.prim import bitwise_not as bitwise_not
 
 
-def bitwise_or(*args, **kwargs):
-    return _tvm_op.bitwise_or(*args, **kwargs)
+from tvm_tirx.ir.prim import bitwise_or as bitwise_or
 
 
-def bitwise_xor(*args, **kwargs):
-    return _tvm_op.bitwise_xor(*args, **kwargs)
+from tvm_tirx.ir.prim import bitwise_xor as bitwise_xor
 
 
-def nearbyint(*args, **kwargs):
-    return _tvm_op.nearbyint(*args, **kwargs)
+from tvm_tirx.ir.prim import nearbyint as nearbyint
 
 
-def nextafter(*args, **kwargs):
-    return _tvm_op.nextafter(*args, **kwargs)
+from tvm_tirx.ir.prim import nextafter as nextafter
 
 
-def hypot(*args, **kwargs):
-    return _tvm_op.hypot(*args, **kwargs)
+from tvm_tirx.ir.prim import hypot as hypot
 
 
-def copysign(*args, **kwargs):
-    return _tvm_op.copysign(*args, **kwargs)
+from tvm_tirx.ir.prim import copysign as copysign
 
 
-def ldexp(*args, **kwargs):
-    return _tvm_op.ldexp(*args, **kwargs)
+from tvm_tirx.ir.prim import ldexp as ldexp
 
 
-def likely(*args, **kwargs):
-    return _tvm_op.likely(*args, **kwargs)
+from tvm_tirx.ir.prim import likely as likely
 
 
-def isnan(*args, **kwargs):
-    return _tvm_op.isnan(*args, **kwargs)
+from tvm_tirx.ir.prim import isnan as isnan
 
 
-def isnullptr(*args, **kwargs):
-    return _tvm_op.isnullptr(*args, **kwargs)
+from tvm_tirx.tirx import isnullptr as isnullptr
 
 
-def isfinite(*args, **kwargs):
-    return _tvm_op.isfinite(*args, **kwargs)
+from tilelang.language._intrinsics import isfinite as isfinite
 
 
-def isinf(*args, **kwargs):
-    return _tvm_op.isinf(*args, **kwargs)
+from tvm_tirx.ir.prim import isinf as isinf
 
 
-def popcount(*args, **kwargs):
-    return _tvm_op.popcount(*args, **kwargs)
+from tvm_tirx.ir.prim import popcount as popcount
 
 
 # Quantized lowering is adapted from Apache TVM src/target/intrin_rule.cc
 # at 4211874e9e4b8770fd20ad0d98ab80afd1df5028 to native typed IR.
 # The Apache-2.0 license and attribution are retained in THIRDPARTYNOTICES.txt.
 def _q_expr(value):
-    value = _native._expr(value)
+    value = _construction.as_expr(value)
     if not isinstance(value.ty, _ir.PrimType):
         raise TypeError("Quantized multiplication expects primitive expressions")
     return value
@@ -447,7 +399,7 @@ def _q_multiply_shift_common(x, y, q, left_shift, right_shift, is_left_shift_req
     product = x * y
     total_right_shift = right_shift + q
     rounding = _q_const(1, hp_dtype) << (total_right_shift - 1)
-    return _prim.Cast(lp_dtype, (product + rounding) >> total_right_shift, loc=_native._loc())
+    return _prim.Cast(lp_dtype, (product + rounding) >> total_right_shift, loc=_construction.current_location())
 
 
 def q_multiply_shift(x, y, q, s):
@@ -466,7 +418,7 @@ def q_multiply_shift(x, y, q, s):
             raise TypeError("The power-of-two multiplier path requires a constant shift")
         exponent = shift - 1
         if exponent > 0:
-            return _prim.shift_left(x, s - 1, loc=_native._loc())
+            return _prim.shift_left(x, s - 1, loc=_construction.current_location())
         # Preserve the old int32 rounding path. Its signed overflow remains
         # outside the old C/LLVM defined domain; do not promise wraparound.
         # s=1 has no valid legacy lowering (it shifts 1 by -1).
@@ -474,7 +426,7 @@ def q_multiply_shift(x, y, q, s):
             raise ValueError("q_multiply_shift with multiplier 2**30 and shift 1 has a negative legacy rounding shift")
         exponent_expr = 1 - s
         one = _q_const(1, _q_dtype(32, x.ty.dtype.lanes))
-        return _prim.shift_right(x + (one << (exponent_expr - 1)), exponent_expr, loc=_native._loc())
+        return _prim.shift_right(x + (one << (exponent_expr - 1)), exponent_expr, loc=_construction.current_location())
     if s.ty.dtype.type_code != 0 or s.ty.dtype.bits != 32:
         raise TypeError("Quantized shift expression must be int32")
     zero = _q_const(0, s.ty)
@@ -490,80 +442,44 @@ def q_multiply_shift_per_axis(x, y, ls, rs, q, is_lshift_required, is_rshift_req
     return _q_multiply_shift_common(x, y, q, ls, rs, is_lshift_required)
 
 
-def shift_left(*args, **kwargs):
-    return _tvm_op.shift_left(*args, **kwargs)
+from tvm_tirx.ir.prim import shift_left as shift_left
 
 
-def shift_right(*args, **kwargs):
-    return _tvm_op.shift_right(*args, **kwargs)
+from tvm_tirx.ir.prim import shift_right as shift_right
 
 
-def fmod(*args, **kwargs):
-    return _tvm_op.fmod(*args, **kwargs)
+from tvm_tirx.ir.prim import fmod as fmod
 
 
-def if_then_else(*args, **kwargs):
-    return _tvm_op.if_then_else(*args, **kwargs)
+from tvm_tirx.ir.prim import if_then_else as if_then_else
 
 
-def truncdiv(*args, **kwargs):
-    return _tvm_op.truncdiv(*args, **kwargs)
+from tvm_tirx.ir.prim import truncdiv as truncdiv
 
 
-def truncmod(*args, **kwargs):
-    return _tvm_op.truncmod(*args, **kwargs)
+from tvm_tirx.ir.prim import truncmod as truncmod
 
 
-def floordiv(*args, **kwargs):
-    return _tvm_op.floordiv(*args, **kwargs)
+from tvm_tirx.ir.prim import floordiv as floordiv
 
 
-def floormod(*args, **kwargs):
-    return _tvm_op.floormod(*args, **kwargs)
+from tvm_tirx.ir.prim import floormod as floormod
 
 
-def ceildiv(*args, **kwargs):
-    return _tvm_op.ceildiv(*args, **kwargs)
+from tvm_tirx.ir.prim import ceildiv as ceildiv
 
 
 def TVMBackendAllocWorkspace(device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint):
     """Allocate temporary device workspace; the caller must free the returned pointer."""
-    return _tvm_op.alloc_workspace(device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint, loc=_native._loc())
+    return _tirx.alloc_workspace(device_type, device_id, nbytes, dtype_code_hint, dtype_bits_hint, loc=_construction.current_location())
 
 
 def TVMBackendFreeWorkspace(device_type, device_id, ptr):
     """Free temporary workspace and return the backend's int32 status."""
-    return _tvm_op.free_workspace(device_type, device_id, ptr, loc=_native._loc())
+    return _tirx.free_workspace(device_type, device_id, ptr, loc=_construction.current_location())
 
 
-def _anylist_call(name, args):
-    call = _ir.Call(name, [_native._expr(arg) for arg in args], loc=_native._loc())
-    call.validate()
-    return call
-
-
-def anylist_getitem(list_handle, index):
-    """Borrow a complete Any slot as a direct packed-call argument."""
-    return _anylist_call("tl.anylist_getitem", [list_handle, index])
-
-
-def anylist_resetitem(list_handle, index):
-    """Release the owned value in an Any slot and reset it to None."""
-    return _anylist_call("tl.anylist_resetitem", [list_handle, index])
-
-
-def anylist_setitem_call_packed(list_handle, index, func_name, *args):
-    """Move a packed function's complete owned result into an Any slot."""
-    return _anylist_call("tl.anylist_setitem_call_packed", [list_handle, index, func_name, *args])
-
-
-def anylist_setitem_call_cpacked(list_handle, index, func_name, *args):
-    """Move a C packed function's complete owned result into an Any slot."""
-    return _anylist_call("tl.anylist_setitem_call_cpacked", [list_handle, index, func_name, *args])
-
-
-def vscale(*args, **kwargs):
-    return _tvm_op.vscale(*args, **kwargs)
+from tvm_tirx.ir.prim import vscale as vscale
 
 
 def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None) -> PrimExpr:
@@ -585,12 +501,12 @@ def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None)
     result : PrimExpr
         A scalar expression with the vector's element dtype.
     """
-    if not isinstance(vector, PrimExpr):
+    if not _construction.is_scalar_expr(vector):
         raise TypeError(f"extract_lane expects a PrimExpr, but got {type(vector).__name__}")
 
-    lanes = _native.dtype_of(vector).lanes
+    lanes = _construction.dtype_of(vector).lanes
     if lanes <= 1:
-        raise ValueError(f"extract_lane expects a vector expression, but got dtype {_native.dtype_of(vector)}")
+        raise ValueError(f"extract_lane expects a vector expression, but got dtype {_construction.dtype_of(vector)}")
 
     if isinstance(lane, IntImm):
         lane = lane.value
@@ -599,9 +515,9 @@ def extract_lane(vector: PrimExpr, lane: int | IntImm, span: Span | None = None)
 
     lane = int(lane)
     if lane < 0 or lane >= lanes:
-        raise IndexError(f"Lane index {lane} is out of bounds for dtype {_native.dtype_of(vector)} with {lanes} lanes")
+        raise IndexError(f"Lane index {lane} is out of bounds for dtype {_construction.dtype_of(vector)} with {lanes} lanes")
 
-    return Shuffle([vector], [lane], span if span is not None else _native._loc())
+    return Shuffle([vector], [lane], span if span is not None else _construction.current_location())
 
 
 def call_intrin(dtype, func_name, *args, annotations=None, span=None):
@@ -630,7 +546,7 @@ def call_intrin(dtype, func_name, *args, annotations=None, span=None):
         The call expression.
     """
     args = _normalize_primexpr_args(args)
-    return _tvm_op.call_intrin(dtype, func_name, *args, annotations=annotations, span=span)
+    return _intrinsics.call_intrin(dtype, func_name, *args, annotations=annotations, span=span)
 
 
 def call_pure_extern(dtype, func_name, *args, span=None):
@@ -656,7 +572,7 @@ def call_pure_extern(dtype, func_name, *args, span=None):
         The call expression.
     """
     args = _normalize_primexpr_args(args)
-    return _tvm_op.call_pure_extern(dtype, func_name, *args, span=span)
+    return _intrinsics.call_pure_extern(dtype, func_name, *args, span=span)
 
 
 def call_extern(dtype, func_name, *args, span=None):
@@ -682,7 +598,7 @@ def call_extern(dtype, func_name, *args, span=None):
         The call expression.
     """
     args = _normalize_primexpr_args(args)
-    return _tvm_op.call_extern(dtype, func_name, *args, span=span)
+    return _intrinsics.call_extern(dtype, func_name, *args, span=span)
 
 
 def tvm_access_ptr(ptype, data, offset, extent, rw_mask):
@@ -711,7 +627,7 @@ def tvm_access_ptr(ptype, data, offset, extent, rw_mask):
         The call expression.
     """
     data = _buffer_data(data)
-    return _tvm_op.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
+    return _intrinsics.tvm_access_ptr(ptype, data, offset, extent, rw_mask)
 
 
 def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):
@@ -763,9 +679,9 @@ def ptx_cp_async(dst_access_ptr, src_access_ptr, num_elems, predicate=None):
     ... )
     """
     if predicate is None:
-        return call_intrin("", _tvm_op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems)
+        return call_intrin("", _ir.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems)
     else:
-        return call_intrin("", _tvm_op.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems, predicate)
+        return call_intrin("", _ir.Op.get("tl.ptx_cp_async"), dst_access_ptr, src_access_ptr, num_elems, predicate)
 
 
 def ptx_arrive_barrier_expect_tx(barrier_id, byte_count):
@@ -806,7 +722,7 @@ def infinity(dtype: str, span: Span | None = None) -> Any:
     value : tvm.Expr
         The infinity value of dtype.
     """
-    return call_intrin(dtype, _tvm_op.Op.get("tl.infinity"), _native.StringImm(str(dtype)), span=span)
+    return call_intrin(dtype, _ir.Op.get("tl.infinity"), _ir.StringImm(str(dtype)), span=span)
 
 
 # NOTE(chaofan): Here we use the argument order (value, dtype, ...) instead of (dtype, value, ...) in TVM
@@ -841,7 +757,9 @@ def reinterpret(value, dtype, span: Span | None = None) -> Any:
         target_type = PtrType("void")
     else:
         target_type = PrimType(get_tvm_dtype(dtype))
-    return _tvm_op.reinterpret(_native._expr(value), ty=target_type, loc=span if span is not None else _native._loc())
+    return _tirx.reinterpret(
+        _construction.as_expr(value), ty=target_type, loc=span if span is not None else _construction.current_location()
+    )
 
 
 def round(x, rounding_mode="ties-to-even", span=None):
@@ -874,10 +792,10 @@ def round(x, rounding_mode="ties-to-even", span=None):
         rounding_mode = "ties-to-even"
 
     if rounding_mode == "ties-to-even":
-        return _tvm_op.round(_native._expr(x), span if span is not None else _native._loc())
+        return _prim.round(_construction.as_expr(x), span if span is not None else _construction.current_location())
     if rounding_mode == "ties-away-from-zero":
-        x = _native.convert(x)
-        return call_intrin(_native.dtype_of(x), _tvm_op.Op.get("tl.round_ties_away_from_zero"), x, span=span)
+        x = _ffi.convert(x)
+        return call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.round_ties_away_from_zero"), x, span=span)
     raise ValueError(f"Unsupported T.round rounding_mode {rounding_mode!r}; expected 'ties-to-even' or 'ties-away-from-zero'.")
 
 
@@ -889,8 +807,8 @@ def pow_of_int(x: PrimExpr, y: int) -> PrimExpr:
         y (int): Exponent value
     """
     return call_intrin(
-        _native.dtype_of(x),
-        _native.Op.get("tl.pow_of_int"),
+        _construction.dtype_of(x),
+        _ir.Op.get("tl.pow_of_int"),
         x,
         y,
     )
@@ -919,11 +837,11 @@ def pow(x, y, span=None):
         # pow_of_int's `for (i = 1; i < y; ...)` loop only computes x**y for y >= 1.
         yv = int(y)
         if yv == 0:
-            return const(1, dtype=_native.dtype_of(x))
+            return const(1, dtype=_construction.dtype_of(x))
         if yv >= 1:
             return pow_of_int(x, yv)
-        return _tvm_op.pow(x, yv, span if span is not None else _native._loc())
-    return _tvm_op.pow(x, y, span if span is not None else _native._loc())
+        return _prim.pow(x, yv, span if span is not None else _construction.current_location())
+    return _prim.pow(x, y, span if span is not None else _construction.current_location())
 
 
 # pylint: disable=unnecessary-lambda

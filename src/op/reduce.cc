@@ -5,6 +5,7 @@
 
 #include "reduce.h"
 #include "ir/analyzer.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
 

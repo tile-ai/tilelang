@@ -55,7 +55,7 @@ def _prepare(value, name):
     result = tvm_ffi.get_global_func("tl.transform.VectorizeLoop")(True)(ir.IRModule({"main": result}))["main"]
     result = run_pass("LegalizeSafeMemoryAccess", result)
     result = run_pass("LowerAccessPtr", result)
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("webgpu")(ir.IRModule({"main": result}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": result}))
     assert tirx.analysis.check_well_formed(module)
     return module["main"]
 

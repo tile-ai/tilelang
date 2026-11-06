@@ -207,7 +207,7 @@ def test_retirement_preserves_other_metadata_and_lexical_scope(carrier):
     # definitions and side effects must survive; internal contracts still
     # require their owning pass (covered by test_native_unknown_annotations).
     before = ir.save_json(result)
-    finalized = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("ascend")(ir.IRModule({"main": result}))["main"]
+    finalized = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": result}))["main"]
     assert ir.save_json(result) == before
     assert "test_marker" not in ir.save_json(finalized)
     assert tirx.analysis.check_well_formed(finalized)

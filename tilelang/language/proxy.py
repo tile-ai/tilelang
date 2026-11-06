@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+from tvm_tirx import tirx as _tirx
+
 from typing import Any, TYPE_CHECKING, Generic, TypeVar
 from tilelang._typing import DType, ShapeType
 from typing_extensions import Self
 
 from tvm_ffi import dtype as DataType
 from tvm_tirx import ir as tvm_ir
-from tilelang.language import _native as tirx
-from tilelang.language._native import Var, PrimExpr
-from tilelang.language._native import bind, buffer, handle, match_buffer
+
+from tvm_tirx.ir import Var
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._construction import bind
+from tilelang.language._tensor_spec import buffer
+from tilelang.language._construction import handle
+from tilelang.language._tensor_spec import match_buffer
 from tilelang.utils import deprecated
 from tilelang.jit.exceptions import JITNoBuilderError
 
@@ -34,7 +42,7 @@ class BufferProxy:
         offset_factor=0,
         buffer_type="",
         axis_separators=None,
-    ) -> tirx.Buffer:
+    ) -> _tensor_spec.TensorValue:
         return buffer(
             shape,
             dtype=dtype,
@@ -50,7 +58,7 @@ class BufferProxy:
 
     # Index via T.Buffer[...]
     @deprecated("T.Buffer[...]", "T.Tensor(...)")
-    def __getitem__(self, keys) -> tirx.Buffer:
+    def __getitem__(self, keys) -> _tensor_spec.TensorValue:
         if not isinstance(keys, tuple):
             return self(keys)
         if len(keys) >= 2 and not isinstance(keys[1], str):
@@ -59,7 +67,7 @@ class BufferProxy:
 
     def from_ptr(
         self, pointer_var: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
-    ) -> tirx.Buffer:
+    ) -> _tensor_spec.TensorValue:
         """Create a buffer from a pointer, shape, and data type.
 
         Args:
@@ -106,7 +114,7 @@ class BaseTensorProxy:
         offset_factor=None,
         buffer_type="",
         axis_separators=None,
-    ) -> tirx.Buffer:
+    ) -> _tensor_spec.TensorValue:
         # Use class defaults if not specified
         dtype = _normalize_tensor_dtype(dtype)
         scope = scope or self.default_scope
@@ -125,7 +133,7 @@ class BaseTensorProxy:
             axis_separators=axis_separators,
         )
 
-    def __getitem__(self, keys) -> tirx.Buffer:
+    def __getitem__(self, keys) -> _tensor_spec.TensorValue:
         assert isinstance(keys, tuple)
         # Single argument (the shape)
         if all([not isinstance(s, (tuple, list, str)) for s in keys]):
@@ -134,7 +142,7 @@ class BaseTensorProxy:
 
     def from_ptr(
         self, pointer_var: Var, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
-    ) -> tirx.Buffer:
+    ) -> _tensor_spec.TensorValue:
         """Create a buffer from a pointer, shape, and data type.
 
         Args:
@@ -156,8 +164,8 @@ class TensorProxy(BaseTensorProxy):
     the tensor should be by default contiguous.
     """
 
-    def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> tirx.Buffer:
-        if isinstance(shape, (int, PrimExpr)):
+    def __call__(self, shape: ShapeType | PrimExpr | int, dtype: DType = "float32", data=None, scope=None) -> _tensor_spec.TensorValue:
+        if isinstance(shape, int) or _construction.is_scalar_expr(shape):
             shape = (shape,)
         return super().__call__(shape, dtype=dtype, data=data, scope=scope)
 
@@ -168,7 +176,9 @@ class StridedTensorProxy(BaseTensorProxy):
     This class implements the default tensor proxy with global memory scope, with the stride information required.
     """
 
-    def __call__(self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None, *, data=None) -> tirx.Buffer:
+    def __call__(
+        self, shape: ShapeType, strides: tuple[Any], dtype: DType = "float32", scope=None, *, data=None
+    ) -> _tensor_spec.TensorValue:
         if len(shape) != len(strides):
             raise ValueError("Invalid shape/strides' dimensions")
         return super().__call__(shape, dtype=dtype, data=data, strides=strides, scope=scope)
@@ -249,7 +259,7 @@ if TYPE_CHECKING:
 
     _T = TypeVar("_T")
 
-    class Ref(Generic[_T], tirx.Var): ...
+    class Ref(Generic[_T], tvm_ir.Var): ...
 else:
     Tensor = TensorProxy()  # pylint: disable=invalid-name
     StridedTensor = StridedTensorProxy()  # pylint: disable=invalid-name
@@ -298,7 +308,7 @@ def _materialize_pointer_from_addr(addr: PrimExpr, dtype: DType, storage_scope: 
         raise JITNoBuilderError("T.make_tensor() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
     ptr_type = tvm_ir.PtrType(tvm_ir.PrimType(DataType(dtype)), storage_scope)
-    value = addr if getattr(addr, "ty", None) == ptr_type else tirx.reinterpret(addr, ty=ptr_type)
+    value = addr if getattr(addr, "ty", None) == ptr_type else _tirx.reinterpret(addr, ty=ptr_type)
     return bind(value, type_annotation=ptr_type)
 
 
@@ -308,7 +318,7 @@ def make_tensor_from_addr(
     dtype: DType = "float32",
     strides: tuple[PrimExpr, ...] | None = None,
     storage_scope: str = "global",
-) -> tirx.Buffer:
+) -> _tensor_spec.TensorValue:
     from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:
@@ -323,7 +333,7 @@ def make_tensor_from_addr(
 
 def make_tensor(
     ptr: Var | PrimExpr, shape: ShapeType, dtype: DType = "float32", strides: tuple[PrimExpr, ...] | None = None
-) -> tirx.Buffer:
+) -> _tensor_spec.TensorValue:
     from tilelang.language.eager.builder import Builder
 
     if Builder.current() is None:

@@ -4,6 +4,7 @@
  */
 
 #include "backend/common/op/fill.h"
+#include "ir/tensor_utils.h"
 
 #include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"

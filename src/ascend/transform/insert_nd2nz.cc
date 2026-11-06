@@ -3,7 +3,10 @@
  * \brief Rewrite layout-driven Ascend ND-to-NZ copies before AutoSchedule.
  */
 
+#include "ascend/transform/source_scopes.h"
+#include "ir/annotations.h"
 #include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/op/memory.h>
@@ -16,13 +19,13 @@
 #include <utility>
 #include <vector>
 
+#include "ascend/analysis/storage.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/nd2nz.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
-#include "ascend/transform/auto_schedule/native_storage.h"
 #include "ir/analyzer.h"
 #include "ir/tensor_utils.h"
 #include "op/copy.h"
@@ -610,7 +613,7 @@ private:
       return Parent::Mutate_(op, mode);
     const auto *call = op->value.as<CallObj>();
     if (call && call->op.same_as(ascend_nd2nz_post_copy())) {
-      const auto args = NativeIntrinsicOperands(call);
+      const auto args = DecodeCallOperands(call);
       auto geometry = ParseNd2NzGeometry(call, false);
       if (geometry.Empty())
         return Evaluate(IntImm::Int32(0));
@@ -626,6 +629,10 @@ private:
           call->attrs.value().as_or_throw<DictAttrs>()->dict.count(
               "annotation_schema"))
         metadata = DecodeTileOpArguments(call).annotations;
+      else if (call->attrs) {
+        metadata = call->attrs.value().as_or_throw<DictAttrs>()->dict;
+        metadata.erase("tl.source_annotation_keys");
+      }
       int logical_regions =
           HasLogicalPostCopyRegion(args[0], geometry, false) ? 1 : 0;
       // A source pointer carries a physical span, not a logical region
@@ -659,14 +666,19 @@ private:
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     LayoutMap saved = layout_map_;
     bool simt = inside_simt_vf_;
-    auto attribute = ReadTaskAttribute(op);
+    auto attribute = ReadSourceAttribute(op);
     // Kernel normalization may already have removed its ordinary root
     // sblock. The remaining kernel body retains that allocation boundary.
-    bool block = attribute && (attribute->key == "tl.sblock" ||
-                               attribute->key == "tl.kernel");
+    bool block =
+        IsAscendBlock(op) || (attribute && (attribute->key == "tl.sblock" ||
+                                            attribute->key == "tl.kernel"));
     if (block)
       pending_allocs_.emplace_back();
-    if (attribute && attribute->key == "tl.sblock") {
+    if (IsAscendBlock(op)) {
+      ReadLayouts(AscendBlockAnnotations(op));
+      if (AscendBlockName(op) == "SIMT_VF")
+        inside_simt_vf_ = true;
+    } else if (attribute && attribute->key == "tl.sblock") {
       auto fields = attribute->value.cast<ScheduleUnitMetadata>();
       if (auto annotations = fields.Get("annotations"))
         ReadLayouts(annotations->cast<ScheduleUnitMetadata>());
@@ -707,9 +719,8 @@ private:
     for (const Stmt &stmt : op->seq) {
       if (const auto *evaluate = stmt.as<EvaluateObj>()) {
         if (const auto *call = evaluate->value.as<CallObj>();
-            call && call->op.as<OpObj>() &&
-            call->op.as<OpObj>()->name == "tl.annotation")
-          ReadLayouts(ReadNativeAnnotations(call));
+            IsAnnotationCall(call))
+          ReadLayouts(ReadAnnotations(call));
       }
       body.push_back(Mutate(stmt).ValueOrUnchanged(stmt));
     }
@@ -718,7 +729,7 @@ private:
   }
 
   LayoutMap layout_map_;
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   std::vector<std::vector<Bind>> pending_allocs_;
   bool inside_simt_vf_{false};
 };

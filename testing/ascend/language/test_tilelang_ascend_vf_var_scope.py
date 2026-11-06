@@ -2,6 +2,16 @@ from unittest.mock import patch
 
 import tilelang.ascend.language as T
 from tilelang.language.eager import builder as eager_builder
+from tilelang.testing.ir import collect_nodes
+from tvm_tirx import ir
+
+
+def _execution_blocks(function):
+    blocks = [node for node in collect_nodes(function, ir.RegionStmt) if node.op.name == "tl.ascend_block"]
+    for block in blocks:
+        assert not block.args
+        assert set(block.attrs.keys()) == {"name", "annotations"}
+    return blocks
 
 
 def test_sibling_simtvf_blocks_allow_same_immutable_name():
@@ -21,6 +31,9 @@ def test_sibling_simtvf_blocks_allow_same_immutable_name():
 
     assert main is not None
     warning.assert_not_called()
+    blocks = _execution_blocks(main)
+    assert [block.attrs["name"] for block in blocks] == ["SIMT_VF", "SIMT_VF"]
+    assert [int(block.attrs["annotations"]["tl.vf_source_index"]) for block in blocks] == [0, 1]
 
 
 def test_cube_and_vector_blocks_allow_same_immutable_name():
@@ -41,3 +54,6 @@ def test_cube_and_vector_blocks_allow_same_immutable_name():
 
     assert main is not None
     warning.assert_not_called()
+    blocks = _execution_blocks(main)
+    assert [block.attrs["name"] for block in blocks] == ["CUBE", "VECTOR"]
+    assert int(blocks[1].attrs["annotations"]["vector_count"]) == 2

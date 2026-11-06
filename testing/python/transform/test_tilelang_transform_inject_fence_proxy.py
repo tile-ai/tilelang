@@ -25,7 +25,7 @@ def _check(original, transformed):
     # This test observes the fence pass before shared-memory planning and
     # synchronization consume warp-specialization scopes. Preserve those
     # regions on both sides while normalizing already-consumed annotations.
-    finalize = tl.transform.FinalizeAnnotations(allowed_pending_regions=("kWarpSpecializationScope", "kCustomWarpSpecialization"))
+    finalize = tl.transform.LowerSourceAnnotations()
     mod = finalize(mod)
     transformed = tvm_tirx.IRModule.from_expr(transformed.with_attr("global_symbol", "main"))
     transformed = tvm_tirx.tirx.transform.BindTarget(auto_target)(transformed)

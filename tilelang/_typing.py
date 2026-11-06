@@ -1,32 +1,28 @@
-"""Type annotations for TileLang."""
+"""Type annotations and value predicates for TileLang."""
 
-# NOTE(chaofan): We should name it "_typing.py" to avoid module shadowing with standard library "typing"
-# NOTE: `from __future__ import annotations` does not affect value expressions used for type aliases.
-
+# NOTE: Future annotations do not defer the expressions used for type aliases.
 from typing import TypeAlias
 
 from tvm_tirx import ir
-from tilelang.language import _native as tirx
 
-from tilelang.language._native import BufferLoad, BufferRegion
+from tilelang.language._tensor_spec import TensorValue, is_buffer_like
 from tilelang.dtypes import dtype
 
-# Barrier can only be a Buffer, a BufferLoad
-BarrierType: TypeAlias = tirx.Buffer | BufferLoad
+BarrierType: TypeAlias = TensorValue | ir.TensorLoad
+BufferLikeType: TypeAlias = TensorValue | ir.TensorLoad | ir.TensorRegion
 
-# BufferLikeType can be a Buffer, a BufferLoad, a BufferRegion
-BufferLikeType: TypeAlias = tirx.Buffer | BufferLoad | BufferRegion
 
-# Runtime checks use tuple form for compatibility with isinstance().
-BufferLikeTypeTuple = (tirx.Buffer, BufferLoad, BufferRegion)
+def is_buffer_value(value):
+    """Accept source tensors, native tensor variables, loads, and regions.
 
-# Difference between "AnyDType" and "DType":
-# - AnyDType is a union of all possible types that can represent a data type, including torch.dtype
-# - DType is a more specific type alias that represents a data type in the context of TileLang, and must be
-#   adapted to string.
+    A native Var alone is insufficient: scalar Vars are expressions, not tensor
+    storage. Keep this runtime check separate from the static annotation union.
+    """
+    return is_buffer_like(value) or isinstance(value, (ir.TensorLoad, ir.TensorRegion))
+
+
+# AnyDType also accepts framework dtype objects; DType is the source annotation
+# accepted at the DSL boundary and is normalized before native construction.
 DType: TypeAlias = dtype | ir.Type | str | type
-ShapeType: TypeAlias = list[tirx.PrimExpr | int] | tuple[tirx.PrimExpr | int, ...]
-
-# PrimExpr with adaptation to Python basic data types
-# IntImm, FloatImm, Bool: IntImm, Integer: IntImm
-PyPrimExpr: TypeAlias = tirx.PrimExpr | int | float | bool
+ShapeType: TypeAlias = list[ir.Expr | int] | tuple[ir.Expr | int, ...]
+PyPrimExpr: TypeAlias = ir.Expr | int | float | bool

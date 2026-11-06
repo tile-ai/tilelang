@@ -30,96 +30,18 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(*args, **kwargs):
-    """
-    Generate a list of configuration dictionaries that will be used for tuning.
-
-    Parameters
-    ----------
-    with_roller : bool
-        Whether to enable bitblas roller to deduce search spaces
-
-    Returns
-    -------
-    list of dict
-        Each configuration dict includes various block sizes, pipeline stages,
-        thread numbers, and other parameters to explore during autotuning.
-    """
-    # Support both the current autotuner calling convention
-    #   get_configs(M, N, K, with_roller, ...)
-    # and the historical/manual helper style
-    #   get_configs((M, N, K, with_roller), kwargs)
-    if len(args) == 2 and isinstance(args[0], (tuple, list)) and isinstance(args[1], dict):
-        M, N, K, with_roller = args[0][:4]
-    else:
-        M, N, K, with_roller = args[:4]
-
-    if with_roller:
-        from tilelang.carver.template import MatmulTemplate
-        from tilelang.carver.arch import CUDA, auto_infer_current_arch
-        from tilelang.carver.roller.rasterization import NoRasterization
-        import torch
-
-        arch = CUDA("cuda") if torch.version.hip is None else auto_infer_current_arch()
-        topk = 10
-
-        carve_template = MatmulTemplate(
-            M=M,
-            N=N,
-            K=K,
-            in_dtype=T.float16,
-            out_dtype=T.float16,
-            accum_dtype=T.float32,
-        ).with_arch(arch)
-
-        func = carve_template.equivalent_function()
-        assert func is not None, "Function is None"
-
-        roller_hints = carve_template.recommend_hints(topk=topk)
-
-        if roller_hints is None:
-            raise ValueError("No Roller Hints Found for TensorCore Scheduling")
-
-        configs = []
-        for hint in roller_hints:
-            config = {}
-            block_m, block_n = hint.block
-            config["block_M"] = block_m
-            config["block_N"] = block_n
-            config["block_K"] = hint.rstep[0]
-            config["num_stages"] = hint.pipeline_stage
-            if hint.warp:
-                warp_m, warp_n = hint.warp
-                # block_rows, block_cols represents warp partitioning
-                block_rows, block_cols = block_m // warp_m, block_n // warp_n
-                config["thread_num"] = block_rows * block_cols * arch.warp_size
-                config["policy"] = T.GemmWarpPolicy.from_warp_partition(block_rows, block_cols)
-            else:
-                # Some HIP/RDNA targets currently fall back to non-tensorcore Roller
-                # hints.  Keep these usable for benchmarking by deriving the thread
-                # count from the thread tiling and letting TileLang choose a square
-                # WMMA warp partition at T.gemm lowering time.
-                thread_num = 1
-                for extent in hint.thread:
-                    thread_num *= extent
-                config["thread_num"] = thread_num
-                config["policy"] = T.GemmWarpPolicy.Square
-            config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-            configs.append(config)
-        for config in configs:
-            print(config)
-    else:
-        iter_params = dict(
-            block_M=[64, 128, 256],
-            block_N=[64, 128, 256],
-            block_K=[32, 64],
-            num_stages=[0, 1, 2, 3],
-            thread_num=[128, 256],
-            policy=[T.GemmWarpPolicy.Square],
-            enable_rasteration=[True, False],
-        )
-        return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
-    return configs
+def get_configs(*_args, **_kwargs):
+    """Return the fixed tuning grid, independent of kernel arguments."""
+    iter_params = dict(
+        block_M=[64, 128, 256],
+        block_N=[64, 128, 256],
+        block_K=[32, 64],
+        num_stages=[0, 1, 2, 3],
+        thread_num=[128, 256],
+        policy=[T.GemmWarpPolicy.Square],
+        enable_rasteration=[True, False],
+    )
+    return [{k: v for k, v in zip(iter_params, values)} for values in itertools.product(*iter_params.values())]
 
 
 @autotune(
@@ -134,7 +56,6 @@ def matmul(
     M,
     N,
     K,
-    with_roller,
     block_M=None,
     block_N=None,
     block_K=None,
@@ -236,21 +157,15 @@ if __name__ == "__main__":
     parser.add_argument("--m", type=int, default=16384, help="Matrix dimension M")
     parser.add_argument("--n", type=int, default=16384, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=16384, help="Matrix dimension K")
-    parser.add_argument(
-        "--with_roller",
-        action="store_true",
-        help="Whether to enable BitBLAS roller for search space",
-    )
     args = parser.parse_args()
 
     M, N, K = args.m, args.n, args.k
-    with_roller = args.with_roller
 
     # Compute total floating-point operations to measure throughput
     total_flops = 2 * M * N * K
 
     # matmul(...) returns (best_latency, best_config, ref_latency)
-    best_result = matmul(M, N, K, with_roller)
+    best_result = matmul(M, N, K)
     best_latency = best_result.latency
     best_config = best_result.config
     ref_latency = best_result.ref_latency

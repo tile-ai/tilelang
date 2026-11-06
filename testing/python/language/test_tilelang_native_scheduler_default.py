@@ -6,7 +6,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.carver.arch import driver
+from tilelang import driver
 
 
 @pytest.mark.parametrize("stateful", [False, True])

@@ -4,6 +4,7 @@
  */
 
 #include "gemm.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/stmt.h>

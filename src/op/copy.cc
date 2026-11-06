@@ -12,6 +12,7 @@
 #include "span_utils.h"
 #include "support/check.h"
 #include "utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/runtime/logging.h>
 
 #include "builtin.h"
@@ -53,15 +54,23 @@ Stmt LowerNormalCopy(const CopyNode &op, const LowerArgs &lower_args,
       // uses by identity (the real threadIdx.x Var on GPU; none when it is a
       // constant, e.g. 0 on CPU).
       std::unordered_set<const VarObj *> thread_index_vars;
-      UsesAnyVar(lower_args.thread_index, [&](const VarObj *v) {
-        thread_index_vars.insert(v);
-        return false;
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+          lower_args.thread_index,
+          [&](const VarObj *v) -> ffi::Expected<ffi::WalkResult> {
+            thread_index_vars.insert(v);
+            return ffi::WalkResult::Skip();
+          });
       bool dst_depends_on_thread = false;
       for (const auto &range : op.dst_range) {
-        if (UsesAnyVar(range->begin, [&](const VarObj *v) {
-              return thread_index_vars.count(v) != 0;
-            })) {
+        if (ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+                range->begin,
+                [&](const VarObj *v) -> ffi::Expected<ffi::WalkResult> {
+                  return (thread_index_vars.count(v) != 0)
+                             ? ffi::WalkResult::Interrupt(
+                                   ffi::VisitInterrupt(ffi::GetRef<Var>(v)))
+                             : ffi::WalkResult::Skip();
+                })
+                .has_value()) {
           dst_depends_on_thread = true;
           break;
         }

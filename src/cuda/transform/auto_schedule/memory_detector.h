@@ -4,15 +4,19 @@
  */
 #pragma once
 
+#include "ir/annotations.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
 #include <tvm/ir/analysis.h>
 #include <tvm/sym/int_set.h>
 #include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <memory>
 #include <vector>
 
-#include "op/native_utils.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/pipeline_access.h"
@@ -277,8 +281,7 @@ class MemoryAccessDetector {
     }
 
     Result Visit_(const CallObj *op) final {
-      const auto *name = op->op.as<OpObj>();
-      if (name && name->name == "tl.annotation")
+      if (IsAnnotationCall(op))
         return std::nullopt;
       if (op->op.same_as(tirx::alloc_tensor_op()) ||
           op->op.same_as(tirx::decl_tensor_op())) {
@@ -305,7 +308,8 @@ class MemoryAccessDetector {
         }
         return std::nullopt;
       }
-      if (name && name->name == "tl.access_ptr") {
+      const auto *name = op->op.as<OpObj>();
+      if (name && name == tl::access_ptr().get()) {
         auto mask =
             GetConservativeAccessMask(op->args[2].as_or_throw<PrimExpr>());
         auto tensor = PointerTensor(op->args[0]);
@@ -328,7 +332,7 @@ class MemoryAccessDetector {
         Visit(op->args[2]);
         return std::nullopt;
       }
-      if (name && name->name == "tl.ptr_access") {
+      if (name && name == tl::ptr_access().get()) {
         RawAccess(op->args[0], GetConservativeAccessMask(
                                    op->args[3].as_or_throw<PrimExpr>()));
         for (size_t i = 1; i < op->args.size(); ++i)
@@ -355,8 +359,8 @@ class MemoryAccessDetector {
           const auto *descriptor = argument.as<CallObj>();
           const auto *desc_name =
               descriptor ? descriptor->op.as<OpObj>() : nullptr;
-          if (desc_name && (desc_name->name == "tl.access_ptr" ||
-                            desc_name->name == "tl.ptr_access"))
+          if (desc_name && (desc_name == tl::access_ptr().get() ||
+                            desc_name == tl::ptr_access().get()))
             continue;
           RawAccess(argument, effect == CallEffectKind::kReadState
                                   ? kAccessRead

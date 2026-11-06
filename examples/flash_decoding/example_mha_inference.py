@@ -2,12 +2,14 @@ import torch
 import torch.nn.functional as F
 import tilelang
 from tilelang.autotuner import *
-from tilelang.carver.arch import get_arch
+from tilelang import driver
 import tilelang.language as T
 from functools import partial
 
 num_split = 4
 _KERNEL_THREADS = 128
+# Keep the existing HIP resource filter's conservative VGPR budget.
+_HIP_REGISTER_CAPACITY = 32768
 _TILE_CANDIDATES = ((128, 64), (64, 64))
 
 
@@ -166,13 +168,13 @@ def _max_dynamic_shared_memory(kernel):
 
 def _fits_current_hip_device(kernel):
     """Check generated HIP resources before attempting a potentially invalid launch."""
-    arch = get_arch(kernel.target)
+    smem_cap = driver.get_hip_shared_memory_per_block(str(kernel.target.attrs.get("mcpu", "")))
     dynamic_smem = _max_dynamic_shared_memory(kernel)
-    if dynamic_smem > arch.smem_cap:
-        return False, f"dynamic shared memory {dynamic_smem} exceeds device limit {arch.smem_cap}"
+    if dynamic_smem > smem_cap:
+        return False, f"dynamic shared memory {dynamic_smem} exceeds device limit {smem_cap}"
 
     for name, usage in kernel.resource_usage.items():
-        if usage.n_regs and usage.n_regs * _KERNEL_THREADS >= arch.reg_cap:
+        if usage.n_regs and usage.n_regs * _KERNEL_THREADS >= _HIP_REGISTER_CAPACITY:
             return False, f"{name} uses {usage.n_regs} VGPRs per thread at the device register-file limit"
 
     return True, ""

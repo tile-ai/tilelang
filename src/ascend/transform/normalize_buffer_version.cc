@@ -22,8 +22,12 @@
  * \brief Normalize staged version metadata at its native definition site.
  */
 #include "buffer_version.h"
+#include "ir/annotations.h"
+#include "layout/expr_utils.h"
+#include <tvm/tirx/stmt_functor.h>
 
-#include "auto_schedule/native_task_ir.h"
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
 #include <limits>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
@@ -76,22 +80,30 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!loop_annotation_detail::IsAnnotation(call))
+    if (!IsAnnotationCall(call))
       return StmtExprMutator::Mutate_(op, mode);
     // Keep the native carrier in place. Wrapping the suffix in a zero-result
     // RegionStmt would hide definitions which can be used after this sequence.
-    auto fields = ReadNativeAnnotations(call);
+    auto fields = ReadAnnotations(call);
     auto result = Normalize(fields);
     if (StructuralEqual()(fields, result))
       return Unchanged();
-    return MakeNativeAnnotation(result, op->loc);
+    return MakeAnnotation(result, op->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     RegionStmt region = StmtExprMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(GetRef<RegionStmt>(op))
                             .as_or_throw<RegionStmt>();
-    auto attribute = ReadTaskAttribute(region.get());
+    if (IsAscendBlock(region.get())) {
+      auto fields = AscendBlockAnnotations(region.get());
+      auto result = Normalize(fields);
+      if (StructuralEqual()(fields, result))
+        return region;
+      return MakeAscendBlock(AscendBlockName(region.get()), result,
+                             region->body, region->loc);
+    }
+    auto attribute = ReadSourceAttribute(region.get());
     if (!attribute)
       return region;
     TVM_FFI_CHECK(attribute->key != kPhysicalBufferVersion, ValueError)
@@ -107,8 +119,8 @@ public:
     }
     if (StructuralEqual()(fields, result))
       return region;
-    return MakeNativeAttribute(attribute->node, attribute->key, result,
-                               region->body, region->loc);
+    return MakeAttribute(attribute->node, attribute->key, result, region->body,
+                         region->loc);
   }
 };
 } // namespace

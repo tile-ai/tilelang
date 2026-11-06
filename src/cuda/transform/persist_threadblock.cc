@@ -3,7 +3,7 @@
  * \brief Persist thread blocks with cooperative groups.
  */
 
-#include "op/native_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
 
@@ -23,10 +23,12 @@ tvm::transform::Pass PersistThreadblock() {
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return function;
     bool has_sync_grid = false;
-    VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
-      if (const auto *call = object.as<CallObj>())
-        has_sync_grid |= call->op.same_as(sync_grid());
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          has_sync_grid |= call->op.same_as(sync_grid());
+          return ffi::WalkResult::Advance();
+        });
     // The instruction is emitted by TileLang CUDA codegen. This pass records
     // its launch requirement; run it before the host launch ABI is fixed.
     if (has_sync_grid)

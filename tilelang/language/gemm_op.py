@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from tilelang._typing import BufferLikeType, BarrierType
 from tilelang.tileop.base import GemmWarpPolicy
 import tilelang.language as T
-from tilelang.language import _native as tirx
+
 from tilelang._analyzer import create_analyzer
 from tilelang.utils.language import (
     to_buffer_region,
@@ -18,7 +23,7 @@ from tilelang.language.utils import (
 )
 
 
-def _legalize_buffer_arg(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
+def _legalize_buffer_arg(arg: BufferLikeType | _ir.Var) -> BufferLikeType:
     """Convert let-bound variables to their corresponding buffers.
 
     Args:
@@ -27,7 +32,7 @@ def _legalize_buffer_arg(arg: BufferLikeType | tirx.Var) -> BufferLikeType:
     Returns:
         Union[tirx.Buffer, tirx.Var]: The legalized argument
     """
-    if isinstance(arg, tirx.Var) and not isinstance(arg, tirx.Buffer) and T.has_let_value(arg):
+    if isinstance(arg, _ir.Var) and not _tensor_spec.is_buffer_like(arg) and T.has_let_value(arg):
         return T.get_let_value(arg).source
     return arg
 
@@ -89,13 +94,13 @@ def _gemm_dense_slots(
         assert _prove_equal(N_B, N), f"{api_name} N shape check failed: N_B = {N_B}, N_C = {N}"
 
     for name, dim in (("M", M), ("N", N), ("K", K)):
-        if not isinstance(dim, tirx.IntImm):
+        if not isinstance(dim, _ir.IntImm):
             raise ValueError(f"{api_name} requires static tile dimensions, but {name} is symbolic: {dim}")
 
     if mbar is not None:
         from tilelang.language.builtin import _mbar_to_buffer_load
 
-        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
+        assert _tensor_spec.is_buffer_like(mbar) or isinstance(mbar, _ir.TensorLoad), (
             f"mbar for {api_name} must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
         )
         # The dense GEMM protocol names one completion-barrier slot, not a
@@ -110,7 +115,7 @@ def _gemm_dense_slots(
     # When mbar is None, pass a placeholder constant (0). The C++ side only
     # accepts the mbar slot when it is a BufferLoadNode, so the placeholder is
     # correctly ignored.
-    mbar_arg = mbar if mbar is not None else tirx.const(0, dtype="int32")
+    mbar_arg = mbar if mbar is not None else _ir.const(0, dtype="int32")
     return [
         A_arg,
         B_arg,
@@ -139,7 +144,7 @@ def _gemm_impl(
     clear_accum: bool = False,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Shared GEMM implementation.
 
     Returns a call_intrin handle for the given op key. Backend lowering knobs
@@ -160,7 +165,7 @@ def _gemm_impl(
         mbar,
         use_2cta=bool(annotations.get("use_2cta", 0)),
     )
-    return tirx.call_intrin("handle", tirx.Op.get(op_key), *slots, annotations=annotations)
+    return _intrinsics.call_intrin("handle", _ir.Op.get(op_key), *slots, annotations=annotations)
 
 
 def gemm(
@@ -172,7 +177,7 @@ def gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """TileLang GEMM operator.
 
     This is the default synchronous GEMM interface. On Hopper, if the compiler
@@ -229,11 +234,11 @@ def _gemm_blockscaled_impl(
     clear_accum: bool,
     mbar: BarrierType | None,
     *,
-    k_start: int | tirx.PrimExpr,
+    k_start: int | _ir.Expr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     annotations: dict | None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Shared block-scaled GEMM implementation.
 
     Emits a 16-slot block-scaled GEMM call: the 13 dense GEMM
@@ -264,12 +269,12 @@ def _gemm_blockscaled_impl(
     SFB_region = to_buffer_region(_legalize_buffer_arg(SFB))
     SFA_arg = buffer_region_to_tile_region(SFA_region, "r", list(retrieve_shape(SFA_region)))
     SFB_arg = buffer_region_to_tile_region(SFB_region, "r", list(retrieve_shape(SFB_region)))
-    if not isinstance(k_start, tirx.PrimExpr):
-        k_start = tirx.const(k_start, dtype="int32")
+    if not _construction.is_scalar_expr(k_start):
+        k_start = _ir.const(k_start, dtype="int32")
 
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get(op_key),
+        _ir.Op.get(op_key),
         *slots,
         SFA_arg,
         SFB_arg,
@@ -289,11 +294,11 @@ def gemm_blockscaled(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     *,
-    k_start: int | tirx.PrimExpr,
+    k_start: int | _ir.Expr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Target-neutral block-scaled GEMM: ``C (+)= (A * SFA) @ (B * SFB)``.
 
     Scale factors apply to blocks along the reduction axis: ``k_start`` is

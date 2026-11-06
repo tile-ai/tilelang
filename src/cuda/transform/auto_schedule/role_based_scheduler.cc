@@ -36,6 +36,8 @@
  */
 
 #include "./role_based_scheduler.h"
+#include "ir/annotations.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -92,18 +94,19 @@ constexpr int kTmemBytesPerSM = 256 * 1024; // 512 b32 columns of 128 rows
 // wrapper, 0 when absent.
 int AnnotatedMinBlocksPerSM(const Stmt &body) {
   int min_blocks = 0;
-  VisitNativePostOrder(body, [&](const ObjectRef &node) {
-    if (const auto *region = node.as<RegionStmtObj>()) {
-      if (auto attr = WSAttribute(region)) {
-        if (attr.value().at("key").cast<String>() == attr::kMinBlocksPerSM) {
-          int64_t count = GetIntegerAnnotation(attr.value().at("value"));
-          TVM_FFI_CHECK_GT(count, 0, ValueError)
-              << "min_blocks_per_sm must be positive";
-          min_blocks = static_cast<int>(count);
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const RegionStmtObj *region) -> ffi::Expected<ffi::WalkResult> {
+        if (auto attr = WSAttribute(region)) {
+          if (attr.value().at("key").cast<String>() == attr::kMinBlocksPerSM) {
+            int64_t count = GetIntegerAnnotation(attr.value().at("value"));
+            TVM_FFI_CHECK_GT(count, 0, ValueError)
+                << "min_blocks_per_sm must be positive";
+            min_blocks = static_cast<int>(count);
+          }
         }
-      }
-    }
-  });
+
+        return ffi::WalkResult::Advance();
+      });
   return min_blocks;
 }
 
@@ -415,7 +418,7 @@ private:
       return std::nullopt;
     }
     if (const auto *call = op->value.as<CallObj>()) {
-      if (call->op.same_as(Op::Get("tl.annotation")))
+      if (IsAnnotationCall(call))
         return std::nullopt;
       if (auto id = ReadWSCall(call).annotations.Get(kWSOpIdKey)) {
         MakeOp(ExtractOpId(*id), GetRef<Stmt>(op));
@@ -459,7 +462,7 @@ public:
   RoleBasedScheduler(Target target, int worker_threads)
       : target_(std::move(target)), worker_threads_(worker_threads) {}
 
-  Optional<WSSchedule> Run(const NativeWSKernel &kernel, const Stmt &body) {
+  Optional<WSSchedule> Run(const WSKernelAnalysis &kernel, const Stmt &body) {
     if (!TargetHasBulkCopy(target_)) {
       LOG(WARNING)
           << "AutoWarpSpecialization skipped: target has no bulk-copy (TMA) "
@@ -472,7 +475,7 @@ public:
                       "of 128 so issuer warps start a fresh warpgroup";
       return std::nullopt;
     }
-    CollectAnnotatedLayouts(RebuildNativeWSKernel(kernel, body), layout_map_);
+    CollectAnnotatedLayouts(RebuildWSKernel(kernel, body), layout_map_);
     memory_ = kernel.memory;
     annotated_min_blocks_ = AnnotatedMinBlocksPerSM(body);
     alloc_buffers_ = kernel.allocations;
@@ -983,7 +986,7 @@ private:
     return true;
   }
 
-  bool BuildPipelines(const NativeWSKernel &kernel) {
+  bool BuildPipelines(const WSKernelAnalysis &kernel) {
     // A global buffer written by one role must not be touched by another;
     // globals have no cross-role synchronization mechanism.
     for (const auto &writer : ops_) {
@@ -1270,7 +1273,7 @@ private:
 
 } // namespace
 
-ffi::Optional<WSSchedule> RoleBasedSchedule(const NativeWSKernel &kernel,
+ffi::Optional<WSSchedule> RoleBasedSchedule(const WSKernelAnalysis &kernel,
                                             const Stmt &body,
                                             int worker_threads,
                                             const Target &target) {

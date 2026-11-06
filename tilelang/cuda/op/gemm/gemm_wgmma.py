@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
@@ -14,7 +17,7 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
 from tilelang.utils.language import is_shared, is_fragment
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
+
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from collections.abc import Callable
@@ -24,7 +27,7 @@ GEMM_INST_WGMMA = "cuda.wgmma"
 
 
 class GemmWGMMA(GemmBase):
-    def infer_shared_layout(self, continuity: int) -> Callable[[tirx.Buffer], Layout]:
+    def infer_shared_layout(self, continuity: int) -> Callable[[_tensor_spec.TensorValue], Layout]:
         """Infer the swizzle layout for shared memory based on continuity.
 
         WGMMA can directly use shared memory as input, so the swizzle layout must
@@ -88,8 +91,8 @@ class GemmWGMMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.

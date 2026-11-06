@@ -14,7 +14,7 @@ namespace cuda {
 // Store / Worker), pull warp-private def-use chains into their consumers'
 // roles, and pipeline every shared / tensor-memory storage handed across
 // roles. See role_based_scheduler.cc for the full model.
-ffi::Optional<WSSchedule> RoleBasedSchedule(const NativeWSKernel &kernel,
+ffi::Optional<WSSchedule> RoleBasedSchedule(const WSKernelAnalysis &kernel,
                                             const Stmt &body,
                                             int worker_threads,
                                             const Target &target);

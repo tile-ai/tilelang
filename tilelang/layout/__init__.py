@@ -27,6 +27,7 @@ from . import cute  # noqa: F401  (registers tl.cute.* FFI objects on import)
 # Device-specific object registration belongs to the selected backend. Importing
 # the common layout algebra must not require an Ascend-enabled provider.
 _ASCEND_EXPORTS = {
+    "ascend",
     "make_ascend_nz_layout",
     "make_ascend_compact_nz_layout",
     "make_ascend_major_k_layout",
@@ -43,7 +44,8 @@ def __getattr__(name):
     if name in _ASCEND_EXPORTS:
         from importlib import import_module
 
-        value = getattr(import_module(".ascend", __name__), name)
+        module = import_module(".ascend", __name__)
+        value = module if name == "ascend" else getattr(module, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

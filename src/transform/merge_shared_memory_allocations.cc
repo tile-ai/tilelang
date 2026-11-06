@@ -3,14 +3,15 @@
  * \brief Plan native shared arenas while retaining typed tensor/view
  * identities.
  */
-#include "common/native_layout_utils.h"
 #include "common/storage_size.h"
+#include "cuda/op/builtin.h"
 #include "ir/alias_analysis.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "ir/lexical_scope.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
-#include "op/native_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
@@ -46,23 +47,25 @@ struct Allocation {
 
 bool CanHoistSharedShape(AnyView object) {
   bool safe = true;
-  VisitNativePostOrder(object, [&](const ObjectRef &node) {
-    if (node.as<TensorLoadObj>() || node.as<CallObj>())
-      safe = false;
-    auto check_divisor = [&](const PrimExpr &divisor) {
-      const auto *constant = divisor.as<IntImmObj>();
-      if (!constant || constant->value == 0 || constant->value == -1)
-        safe = false;
-    };
-    if (const auto *value = node.as<DivObj>())
-      check_divisor(value->b);
-    if (const auto *value = node.as<ModObj>())
-      check_divisor(value->b);
-    if (const auto *value = node.as<FloorDivObj>())
-      check_divisor(value->b);
-    if (const auto *value = node.as<FloorModObj>())
-      check_divisor(value->b);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      object, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (node.as<TensorLoadObj>() || node.as<CallObj>())
+          safe = false;
+        auto check_divisor = [&](const PrimExpr &divisor) {
+          const auto *constant = divisor.as<IntImmObj>();
+          if (!constant || constant->value == 0 || constant->value == -1)
+            safe = false;
+        };
+        if (const auto *value = node.as<DivObj>())
+          check_divisor(value->b);
+        if (const auto *value = node.as<ModObj>())
+          check_divisor(value->b);
+        if (const auto *value = node.as<FloorDivObj>())
+          check_divisor(value->b);
+        if (const auto *value = node.as<FloorModObj>())
+          check_divisor(value->b);
+        return ffi::WalkResult::Advance();
+      });
   return safe;
 }
 
@@ -106,36 +109,37 @@ public:
       : physical_(function) {
     for (size_t i = 0; i < allocations.size(); ++i)
       indices_.emplace(allocations[i].tensor.get(), i);
-    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-      if (const auto *binding = object.as<BindObj>()) {
-        // A pointer may pass through an integer/handle representation before
-        // becoming a typed view again. Keep those SSA edges as well.
-        definitions_.Set(binding->var, binding->value);
-      }
-      if (const auto *region = object.as<RegionStmtObj>()) {
-        for (const Var &parameter : region->body_params) {
-          definitions_.Set(parameter, tvm::Tuple(region->args));
-        }
-      }
-      const auto *call = object.as<CallObj>();
-      if (!call)
-        return;
-      const auto *operation = call->op.as<OpObj>();
-      const std::string name =
-          operation ? std::string(operation->name) : std::string();
-      if (name != "tl.initialize_wgmma_descriptor" &&
-          name != "tl.initialize_tcgen05_descriptor")
-        return;
-      auto args = NativeIntrinsicOperands(call);
-      if (args.empty())
-        return;
-      auto root = physical_.Root(args[0]);
-      if (root) {
-        auto inputs = descriptor_inputs_.Get(*root).value_or(Array<Expr>{});
-        inputs.insert(inputs.end(), args.begin(), args.end());
-        descriptor_inputs_.Set(*root, inputs);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *binding = object.as<BindObj>()) {
+            // A pointer may pass through an integer/handle representation
+            // before becoming a typed view again. Keep those SSA edges as well.
+            definitions_.Set(binding->var, binding->value);
+          }
+          if (const auto *region = object.as<RegionStmtObj>()) {
+            for (const Var &parameter : region->body_params) {
+              definitions_.Set(parameter, tvm::Tuple(region->args));
+            }
+          }
+          const auto *call = object.as<CallObj>();
+          if (!call)
+            return ffi::WalkResult::Advance();
+          const auto *operation = call->op.as<OpObj>();
+          if (operation != tl::initialize_wgmma_descriptor().get() &&
+              operation != tl::initialize_tcgen05_descriptor().get())
+            return ffi::WalkResult::Advance();
+          auto args = DecodeCallOperands(call);
+          if (args.empty())
+            return ffi::WalkResult::Advance();
+          auto root = physical_.Root(args[0]);
+          if (root) {
+            auto inputs = descriptor_inputs_.Get(*root).value_or(Array<Expr>{});
+            inputs.insert(inputs.end(), args.begin(), args.end());
+            descriptor_inputs_.Set(*root, inputs);
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
   Indices Get(AnyView object) const {
@@ -212,23 +216,25 @@ private:
                 const CallObj *tracked_tma_store = nullptr) {
     Indices touched = uses_.Get(object);
     bool asynchronous = false;
-    VisitNativePostOrder(object, [&](const ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>()) {
-        const auto *operation = call->op.as<OpObj>();
-        const std::string name =
-            operation ? std::string(operation->name) : std::string();
-        asynchronous |=
-            call != tracked_tma_store &&
-            (name.find("cp_async") != std::string::npos ||
-             name.find("tma_load") != std::string::npos ||
-             name.find("tma_store") != std::string::npos ||
-             name.find("wgmma") != std::string::npos ||
-             name.find("tcgen05") != std::string::npos ||
-             tvm::SideEffect(GetRef<Call>(call)) == CallEffectKind::kOpaque);
-      }
-      if (node.as<ReturnObj>())
-        asynchronous = true;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        object, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *call = node.as<CallObj>()) {
+            const auto *operation = call->op.as<OpObj>();
+            const std::string name =
+                operation ? std::string(operation->name) : std::string();
+            asynchronous |= call != tracked_tma_store &&
+                            (name.find("cp_async") != std::string::npos ||
+                             name.find("tma_load") != std::string::npos ||
+                             name.find("tma_store") != std::string::npos ||
+                             name.find("wgmma") != std::string::npos ||
+                             name.find("tcgen05") != std::string::npos ||
+                             tvm::SideEffect(GetRef<Call>(call)) ==
+                                 CallEffectKind::kOpaque);
+          }
+          if (node.as<ReturnObj>())
+            asynchronous = true;
+          return ffi::WalkResult::Advance();
+        });
     for (size_t index : touched) {
       auto &allocation = allocations_[index];
       allocation.first = std::min(allocation.first, point);
@@ -263,18 +269,17 @@ private:
       const auto *evaluate = child.as<EvaluateObj>();
       const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
       const auto *operation = call ? call->op.as<OpObj>() : nullptr;
-      const std::string name = operation ? std::string(operation->name) : "";
-      if (name == "tl.tma_store") {
+      if (operation == tl::tma_store().get()) {
         Indices inputs = Touch(child, tick_++, call);
         Append(&touched, inputs);
         Append(&uncommitted, inputs);
-      } else if (name == "tl.tma_store_arrive") {
+      } else if (operation == tl::tma_store_arrive().get()) {
         Append(&touched, Visit(child));
         Append(&committed, uncommitted);
         uncommitted.clear();
-      } else if (name == "tl.tma_store_wait") {
+      } else if (operation == tl::tma_store_wait().get()) {
         Append(&touched, Visit(child));
-        auto args = NativeIntrinsicOperands(call);
+        auto args = DecodeCallOperands(call);
         const auto *count = args.empty() ? nullptr : args[0].as<IntImmObj>();
         if (count && count->value == 0) {
           // Both wait_group 0 and wait_group.read 0 finish reading the shared
@@ -329,7 +334,7 @@ private:
       bool sequential = region->op.same_as(launch_thread_op()) ||
                         IsLexicalScope(region) || name == "tl.attr";
       if (name == "tl.attr") {
-        auto metadata = ReadNativeAnnotations(region);
+        auto metadata = ReadAnnotations(region);
         auto key = metadata.find("key");
         if (key != metadata.end() &&
             (*key).second.cast<String>() == "kWarpSpecializationScope")
@@ -468,20 +473,20 @@ tirx::Function Merge(tirx::Function function, bool merge_static,
       << "Shared arena alignment must be a power of two in [1, 2^27]";
   std::vector<Allocation> all;
   Map<Var, Expr> definitions;
-  VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-    const auto *binding = object.as<BindObj>();
-    if (!binding)
-      return;
-    definitions.Set(binding->var, binding->value);
-    auto tensor = binding->var.as<TensorVar>();
-    const auto *call = binding->value.as<CallObj>();
-    if (!tensor || !call || !call->op.same_as(alloc_tensor_op()))
-      return;
-    const std::string scope = tensor->scope().name();
-    if (scope != "shared.dyn" && !(merge_static && scope == "shared"))
-      return;
-    all.push_back({GetRef<Bind>(binding), *tensor});
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      function->body,
+      [&](const BindObj *binding) -> ffi::Expected<ffi::WalkResult> {
+        definitions.Set(binding->var, binding->value);
+        auto tensor = binding->var.as<TensorVar>();
+        const auto *call = binding->value.as<CallObj>();
+        if (!tensor || !call || !call->op.same_as(alloc_tensor_op()))
+          return ffi::WalkResult::Advance();
+        const std::string scope = tensor->scope().name();
+        if (scope != "shared.dyn" && !(merge_static && scope == "shared"))
+          return ffi::WalkResult::Advance();
+        all.push_back({GetRef<Bind>(binding), *tensor});
+        return ffi::WalkResult::Advance();
+      });
   if (all.empty())
     return function;
   SharedLiveness liveness(function, &all, aggressive);
@@ -509,19 +514,20 @@ tirx::Function Merge(tirx::Function function, bool merge_static,
   }
   SharedUses uses(function, all);
   std::unordered_set<size_t> swizzle_sensitive;
-  VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-    if (const auto *call = object.as<CallObj>()) {
-      const auto *operation = call->op.as<OpObj>();
-      const std::string name =
-          operation ? std::string(operation->name) : std::string();
-      if (name == "tl.tma_load" || name == "tl.tma_store" ||
-          name == "tl.initialize_wgmma_descriptor" ||
-          name == "tl.initialize_tcgen05_descriptor") {
-        auto touched = uses.Get(GetRef<Call>(call));
-        swizzle_sensitive.insert(touched.begin(), touched.end());
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      function->body,
+      [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        const auto *operation = call->op.as<OpObj>();
+        if (operation == tl::tma_load().get() ||
+            operation == tl::tma_store().get() ||
+            operation == tl::initialize_wgmma_descriptor().get() ||
+            operation == tl::initialize_tcgen05_descriptor().get()) {
+          auto touched = uses.Get(GetRef<Call>(call));
+          swizzle_sensitive.insert(touched.begin(), touched.end());
+        }
+
+        return ffi::WalkResult::Advance();
+      });
   auto rewriter = make_object<ArenaRewriter>();
   Array<Stmt> prefix;
   for (const std::string &scope :

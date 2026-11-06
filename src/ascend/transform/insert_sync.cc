@@ -1,4 +1,8 @@
+#include "ascend/transform/source_scopes.h"
 #include "ir/loop_math.h"
+#include "layout/expr_utils.h"
+#include "transform/common/constr_visitor.h"
+#include <tvm/ffi/extra/structural_visit.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -91,7 +95,7 @@ bool IsTransparentScope(const IRStructure *node) {
   if (!node || !node->IsScope() || node->HasConditions())
     return false;
   auto attribute =
-      ReadTaskAttribute(static_cast<const ScopeNode *>(node)->shell);
+      ReadSourceAttribute(static_cast<const ScopeNode *>(node)->shell);
   return attribute && attribute->key == "tl.loop.annotations";
 }
 
@@ -1022,9 +1026,15 @@ private:
       return std::nullopt;
     const EpochDomain &domain = site_registry_.Domain(sites[src]);
     if (domain.IsCounter() || domain.owner != scope ||
-        UsesAnyVar(domain.active_guard, [&](const VarObj *var) {
-          return scope->control->var.same_as(GetRef<Var>(var));
-        }))
+        ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+            domain.active_guard,
+            [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+              return (scope->control->var.same_as(GetRef<Var>(var)))
+                         ? ffi::WalkResult::Interrupt(
+                               ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                         : ffi::WalkResult::Skip();
+            })
+            .has_value())
       return std::nullopt;
     auto order = lifetime_orders_.find(scope);
     if (order == lifetime_orders_.end())
@@ -2408,9 +2418,12 @@ public:
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
     for (SyncInsertionMap *insertions : {&before_, &after_})
       for (auto &[_, statements] : *insertions)
-        for (SyncInsertion &insertion : statements)
-          insertion.statement = RemapTaskStatement(insertion.statement,
-                                                   {{old_var, Expr(new_var)}});
+        for (SyncInsertion &insertion : statements) {
+          auto mutator = ffi::make_object<tirx::StmtExprMutator>();
+          mutator->VarRemapSet(old_var, new_var);
+          insertion.statement = mutator->Mutate(insertion.statement)
+                                    .ValueOrUnchanged(insertion.statement);
+        }
   }
 
 private:
@@ -2460,13 +2473,11 @@ public:
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    auto attribute = ReadTaskAttribute(op);
-    if (!attribute || attribute->key != attr::kAscendTask)
+    if (!IsTask(op))
       return StmtExprMutator::Mutate_(op, mode);
     SeqStmt candidate_body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
-    Stmt candidate =
-        MakeNativeAttribute(attribute->node, attribute->key, attribute->value,
-                            candidate_body, op->loc);
+    RegionStmt candidate = GetRef<RegionStmt>(op);
+    candidate.CopyOnWrite()->body = candidate_body;
     if (!HasTaskBufferAccess(candidate_body))
       return candidate;
     ++num_candidates_;

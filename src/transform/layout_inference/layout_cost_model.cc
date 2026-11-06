@@ -5,7 +5,8 @@
  */
 
 #include "layout_cost_model.h"
-#include "../common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include "layout/expr_utils.h"
 
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
@@ -799,7 +800,8 @@ std::optional<StatementProbe> BuildLoopProbe(const ParallelOp &loop,
       extents.push_back(*value);
       nest_vars.push_back(cur->var);
       domain *= *value;
-      cur = SingleNestedFor(cur->body);
+      cur = (cur->body->seq.size() == 1 ? cur->body->seq[0].as<ForObj>()
+                                        : nullptr);
     }
   }
   probe.worst_elements = domain;

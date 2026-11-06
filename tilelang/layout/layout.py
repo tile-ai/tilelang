@@ -2,14 +2,23 @@
 
 # pylint: disable=invalid-name, unsupported-binary-operation
 import tvm_ffi
-from tvm_tirx.ir import Node, Range, Var, Expr, is_prim_expr
+from tvm_tirx.ir import Node, Range, Var, Expr, Scriptable, is_prim_expr
 from tilelang import _ffi_api
 from ._iter_var import LayoutIterVar
 
 
 # Register the Layout class as a TVM object under the name "tl.Layout"
 @tvm_ffi.register_object("tl.Layout")
-class Layout(Node):
+class Layout(Node, Scriptable):
+    @staticmethod
+    def from_mapping(shape, mapping):
+        """Construct from an IR lambda binding replica and input coordinates.
+
+        The lambda returns ``(Tuple(indices), thread)``; a plain Layout requires
+        a zero thread coordinate. This spelling supports script round trips.
+        """
+        return _ffi_api.Layout_from_mapping(shape, mapping)
+
     def __init__(self, shape, forward_fn):
         """
         Initialize a Layout object.

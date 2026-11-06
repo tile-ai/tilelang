@@ -3,6 +3,8 @@
  * \brief Distribute guards while preserving native definitions and effects.
  */
 
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -17,10 +19,10 @@ namespace {
 
 using namespace tirx;
 
-class IfStmtBindingRewriter : public StmtExprMutator {
+class IfStmtBindingRewriter : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   IfStmtBindingRewriter(const tirx::Function &function,
                         bool inline_replayable_binds)
@@ -29,7 +31,7 @@ public:
         inline_replayable_binds_(inline_replayable_binds) {}
 
   ffi::UnchangedOr<Stmt> Mutate_(const IfObj *op, InplaceMode mode) final {
-    auto rewritten = StmtExprMutator::Mutate_(op, mode)
+    auto rewritten = LayoutMapMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                          .as_or_throw<If>();
     // An else branch is one control-flow choice, not two independent guards.
@@ -57,13 +59,15 @@ private:
     // Calls may change state not represented by a tensor operand (e.g. an
     // external callback). Never infer disjointness solely from absent writes.
     // Pure scalar values remain replayable across these calls.
-    VisitNativePostOrder(statement, [&](const ffi::ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>()) {
-        if (SideEffect(ffi::GetRef<Call>(call)) >= CallEffectKind::kReadState &&
-            !ParseOperator(ffi::GetRef<Call>(call)).defined())
-          result.unknown = true;
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        statement, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          if (SideEffect(ffi::GetRef<Call>(call)) >=
+                  CallEffectKind::kReadState &&
+              !ParseOperator(ffi::GetRef<Call>(call)).defined())
+            result.unknown = true;
+
+          return ffi::WalkResult::Advance();
+        });
     return result;
   }
 
@@ -117,7 +121,7 @@ private:
     // One mutator owns all remappings for this sequence. Rewriting each
     // statement independently loses fresh tensor identities when a substituted
     // scalar occurs only in a definition's type, shape, stride, or layout.
-    auto inliner = ffi::make_object<StmtExprMutator>();
+    auto inliner = ffi::make_object<LayoutMapMutator>();
     ffi::Array<Stmt> groups, tail;
     bool in_definition_scope = false;
     for (const Stmt &statement : statements) {

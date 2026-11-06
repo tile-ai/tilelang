@@ -74,31 +74,15 @@ def test_explicit_noalias_opt_out_is_scoped_to_each_host_and_preserves_existing_
     ir.assert_structural_equal(tilelang.transform.OutlineDeviceRegions()(result), result)
 
 
-def test_tile_op_stage_follows_its_own_source_without_promoting_other_functions():
-    key = "tl.tile_ops_lowered"
-    existing = _device("lowered_kernel", True).with_attr(key, False)
+def test_outlining_preserves_source_locations_without_copying_lowering_flags():
     location = ir.SourceLoc(ir.SourceName("outline.py"), 27, 0, 30, 12)
-    module = ir.IRModule(
-        {
-            "lowered": _host("lowered", True, 2, loc=location).with_attr(key, True),
-            "pending": _host("pending", False, 1).with_attr(key, False),
-            "unspecified": _host("unspecified", None, 1),
-            "lowered_kernel": existing,
-        }
-    )
+    module = ir.IRModule({"main": _host("main", True, 2, loc=location)})
     before = ir.save_json(module)
     result = tilelang.transform.OutlineDeviceRegions()(module)
     assert ir.save_json(module) == before
     assert tirx.analysis.check_well_formed(result)
-    for name, expected, count in [("lowered", True, 2), ("pending", False, 1), ("unspecified", None, 1)]:
-        calls = _calls(result[name])
-        assert len(calls) == count
-        for call in calls:
-            attrs = result[call.op].attrs
-            assert result[call.op].loc.same_as(module[name].loc)
-            if expected is None:
-                assert key not in attrs
-            else:
-                assert bool(attrs[key]) is expected
-    ir.assert_structural_equal(result["lowered_kernel"], existing)
+    calls = _calls(result["main"])
+    assert len(calls) == 2
+    for call in calls:
+        assert result[call.op].loc.same_as(location)
     ir.assert_structural_equal(tilelang.transform.OutlineDeviceRegions()(result), result)

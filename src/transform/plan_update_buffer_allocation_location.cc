@@ -2,11 +2,12 @@
  * \file plan_update_buffer_allocation_location.cc
  * \brief Place native allocation definitions before their first scoped use.
  */
-#include "../op/native_utils.h"
 
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <vector>
@@ -102,12 +103,15 @@ private:
 
   static bool HasControlBoundary(const Stmt &statement) {
     bool found = false;
-    VisitNativePostOrder(statement, [&](const ffi::ObjectRef &node) {
-      if (node.as<ReturnObj>() || node.as<BreakObj>() ||
-          node.as<ContinueObj>() || node.as<AssertStmtObj>() ||
-          node.as<WhileObj>() || node.as<RegionStmtObj>())
-        found = true;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        statement,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (node.as<ReturnObj>() || node.as<BreakObj>() ||
+              node.as<ContinueObj>() || node.as<AssertStmtObj>() ||
+              node.as<WhileObj>() || node.as<RegionStmtObj>())
+            found = true;
+          return ffi::WalkResult::Advance();
+        });
     return found;
   }
 };

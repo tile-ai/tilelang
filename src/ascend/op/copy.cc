@@ -7,19 +7,19 @@
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
 #include "ir/analyzer.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
 #include "ascend_mte_plan.h"
 #include "backend/common/target_utils.h"
+#include "ir/annotations.h"
 #include "ir/tensor_utils.h"
 #include "layout/layout.h"
 #include "oob_padding.h"
-#include "op/native_intrinsic.h"
 #include "op/utils.h"
 #include "support/check.h"
 #include "transform/common/loop_fusion_utils.h"
-#include "transform/common/native_layout_utils.h"
 #include "transform/loop_partition.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
@@ -58,23 +58,25 @@ void CollectFragmentLayouts(const Expr &expr,
                             const LayoutMap &existing_layouts,
                             PrimExpr thread_extent, Range thread_bounds,
                             Map<TensorVar, Layout> &result_map) {
-  VisitNativePostOrder(expr, [&](const ObjectRef &node) {
-    if (auto bl = node.as<TensorLoadObj>()) {
-      const auto tensor = bl->source.as_or_throw<TensorVar>();
-      if (IsFragmentBuffer(tensor) && !existing_layouts.count(tensor) &&
-          !result_map.count(tensor)) {
-        auto f = Fragment::FullyReplicated(tensor.shape(), thread_extent);
-        result_map.Set(tensor, f->BindThreadRange(thread_bounds));
-      }
-    } else if (auto var_node = node.as<VarObj>()) {
-      auto var = GetRef<Var>(var_node);
-      if (bind_var_to_expr.count(var)) {
-        CollectFragmentLayouts(bind_var_to_expr[var], bind_var_to_expr,
-                               existing_layouts, thread_extent, thread_bounds,
-                               result_map);
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      expr, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (auto bl = node.as<TensorLoadObj>()) {
+          const auto tensor = bl->source.as_or_throw<TensorVar>();
+          if (IsFragmentBuffer(tensor) && !existing_layouts.count(tensor) &&
+              !result_map.count(tensor)) {
+            auto f = Fragment::FullyReplicated(tensor.shape(), thread_extent);
+            result_map.Set(tensor, f->BindThreadRange(thread_bounds));
+          }
+        } else if (auto var_node = node.as<VarObj>()) {
+          auto var = GetRef<Var>(var_node);
+          if (bind_var_to_expr.count(var)) {
+            CollectFragmentLayouts(bind_var_to_expr[var], bind_var_to_expr,
+                                   existing_layouts, thread_extent,
+                                   thread_bounds, result_map);
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
 }
 
 PrimExpr Float4StorageBytes(const PrimExpr &elements, PrimType dtype) {
@@ -1422,40 +1424,41 @@ L0SFBindings GetL0SFBindings(const BlockAnnotations &annotations) {
 
 L0SFBindings CollectL0SFBindings(const Stmt &body) {
   L0SFBindings bindings, data_to_sf;
-  VisitNativePostOrder(body, [&](const ObjectRef &obj) {
-    Map<String, Any> metadata;
-    if (const auto *call = obj.as<CallObj>();
-        call && call->op.same_as(Op::Get("tl.annotation"))) {
-      metadata = ReadNativeAnnotations(call);
-    } else if (const auto *region = obj.as<RegionStmtObj>();
-               region && region->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(region);
-      String key = fields.at("key").cast<String>();
-      if (key == "tl.kernel")
-        metadata = fields.at("value").cast<Map<String, Any>>();
-      else
-        metadata.Set(key, fields.at("value"));
-    }
-    if (auto annotation = metadata.Get(kL0SFBindings)) {
-      for (const auto &[sf, data] :
-           GetL0SFBindings({{kL0SFBindings, annotation.value()}})) {
-        if (auto existing = bindings.Get(sf)) {
-          ICHECK(existing.value().same_as(data))
-              << "Conflicting allocation bindings for L0 SF " << sf->name;
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+        Map<String, Any> metadata;
+        if (const auto *call = obj.as<CallObj>(); IsAnnotationCall(call)) {
+          metadata = ReadAnnotations(call);
+        } else if (const auto *region = obj.as<RegionStmtObj>();
+                   region && region->op->name == "tl.attr") {
+          auto fields = ReadAnnotations(region);
+          String key = fields.at("key").cast<String>();
+          if (key == "tl.kernel")
+            metadata = fields.at("value").cast<Map<String, Any>>();
+          else
+            metadata.Set(key, fields.at("value"));
         }
-        ICHECK(!sf.same_as(data))
-            << "L0 SF and data must have distinct storage";
-        if (auto existing = data_to_sf.Get(data)) {
-          ICHECK(existing.value().same_as(sf))
-              << "L0 data " << data->name
-              << " has multiple SF handles; reuse the handle returned by "
-                 "alloc_l0a_sf/alloc_l0b_sf";
+        if (auto annotation = metadata.Get(kL0SFBindings)) {
+          for (const auto &[sf, data] :
+               GetL0SFBindings({{kL0SFBindings, annotation.value()}})) {
+            if (auto existing = bindings.Get(sf)) {
+              ICHECK(existing.value().same_as(data))
+                  << "Conflicting allocation bindings for L0 SF " << sf->name;
+            }
+            ICHECK(!sf.same_as(data))
+                << "L0 SF and data must have distinct storage";
+            if (auto existing = data_to_sf.Get(data)) {
+              ICHECK(existing.value().same_as(sf))
+                  << "L0 data " << data->name
+                  << " has multiple SF handles; reuse the handle returned by "
+                     "alloc_l0a_sf/alloc_l0b_sf";
+            }
+            bindings.Set(sf, data);
+            data_to_sf.Set(data, sf);
+          }
         }
-        bindings.Set(sf, data);
-        data_to_sf.Set(data, sf);
-      }
-    }
-  });
+        return ffi::WalkResult::Advance();
+      });
   return bindings;
 }
 

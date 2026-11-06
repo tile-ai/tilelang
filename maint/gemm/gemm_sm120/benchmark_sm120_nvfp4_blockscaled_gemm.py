@@ -30,7 +30,7 @@ from examples.dequantize_gemm.quantize.nvfp4 import (
     decode_ue4m3_scale_bytes,
 )
 from maint.gemm.gemm_sm120.tilelang_nvfp4_quantizer import tilelang_quantize_bf16_to_nvfp4_blockscaled
-from tilelang.carver.arch import driver
+from tilelang import driver
 from tilelang.profiler import do_bench
 
 

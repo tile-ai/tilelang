@@ -29,6 +29,9 @@ TVM_TIRX_DLL const Op &ptx_wait_group();
 TVM_TIRX_DLL const Op &ptx_cp_async_bytes();
 TVM_TIRX_DLL const Op &ptx_ldg32();
 
+/*! \brief Load a WMMA fragment from a typed source pointer. */
+TVM_TIRX_DLL const Op &wmma_load_matrix_sync();
+
 namespace attr {
 
 // Warp-specialization annotations consumed only by CUDA lowering.

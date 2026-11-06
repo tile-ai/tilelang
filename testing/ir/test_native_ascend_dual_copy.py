@@ -15,6 +15,7 @@ import tilelang.ascend.op  # noqa: F401 -- use the real Ascend GEMM callbacks.
 from tilelang.ascend import language as T
 from tilelang.layout import Layout
 from testing.ascend._ir import substitute
+from testing.ascend._block import attribute_fields, has_attribute
 
 from test_native_ascend_ops import function, strided_tensor, subregion
 from test_native_cuda_copy import calls
@@ -55,14 +56,7 @@ def _subcores(value):
 
 
 def _attributes(value, key):
-    result = []
-    for node in objects(value, ir.RegionStmt):
-        if node.op.name != "tl.attr":
-            continue
-        fields = tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
-        if fields["key"] == key:
-            result.append(fields["value"])
-    return result
+    return [attribute_fields(node)["value"] for node in objects(value, ir.RegionStmt) if has_attribute(node, key)]
 
 
 def _copy(src_scope, dst_scope, src_shape, dst_shape, *, split=1, double=False):

@@ -19,7 +19,7 @@ def _apply(func, target=sm100_target):
     mod = tvm_tirx.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     mod = tvm_tirx.tirx.transform.BindTarget(target)(mod)
     mod = tl.cuda.transform.InjectTcgen05Fence()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     return mod
 
 
@@ -27,7 +27,7 @@ def _check(original, expected, target=sm100_target):
     mod = _apply(original, target)
     expected_mod = tvm_tirx.IRModule.from_expr(expected.with_attr("global_symbol", "main"))
     expected_mod = tvm_tirx.tirx.transform.BindTarget(target)(expected_mod)
-    expected_mod = tl.transform.LowerOpaqueBlock()(expected_mod)
+    expected_mod = tl.transform.LowerSourceAnnotations()(expected_mod)
     tvm_tirx.ir.assert_structural_equal(mod["main"], expected_mod["main"], True)
 
 

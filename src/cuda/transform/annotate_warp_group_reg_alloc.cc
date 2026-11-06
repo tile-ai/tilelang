@@ -4,9 +4,11 @@
  */
 
 #include "cuda/op/builtin.h"
+#include "ir/annotations.h"
+#include "ir/lexical_scope.h"
 #include "op/builtin.h"
-#include "transform/common/native_layout_utils.h"
 #include "transform/common/warp_specialize.h"
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
@@ -80,7 +82,7 @@ private:
 
   Optional<VisitInterrupt> Visit_(const RegionStmtObj *region) final {
     if (region->op->name == "tl.attr" &&
-        ReadNativeAnnotations(region).at("key").cast<String>() ==
+        ReadAnnotations(region).at("key").cast<String>() ==
             attr::kCustomWarpSpecialization)
       explicit_schedule = true;
     return StmtExprVisitor::Visit_(region);
@@ -145,7 +147,7 @@ private:
                                .as_or_throw<RegionStmt>();
     String key;
     if (region->op->name == "tl.attr")
-      key = ReadNativeAnnotations(region).at("key").cast<String>();
+      key = ReadAnnotations(region).at("key").cast<String>();
     if (key == attr::kWarpSpecializationScope && !preserve_explicit_) {
       bool found = false;
       auto body = RewriteWarpSpecializationBody(
@@ -159,13 +161,13 @@ private:
     }
     thread_extent_ = saved_threads;
     // Shared-memory planning, synchronization and register annotation are
-    // the last consumers of these metadata scopes. Native finalization must
-    // not receive a stale compiler marker as a runtime region.
+    // the last consumers of these metadata scopes, even when register
+    // inference is disabled. Keep the original definition boundary.
     if (key == attr::kWarpSpecializationScope ||
         key == attr::kCustomWarpSpecialization) {
       TVM_FFI_CHECK(region->body_params.empty() && region->result_vars.empty(),
                     ValueError);
-      return rewritten->body;
+      return MakeLexicalScope(rewritten->body, region->loc);
     }
     return rewritten;
   }
@@ -234,9 +236,10 @@ private:
 };
 } // namespace
 
-tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
-  auto pass = [](tirx::Function function, IRModule,
-                 tvm::transform::PassContext) {
+tvm::transform::Pass
+AnnotateWarpGroupRegAlloc(bool enable_register_inference = true) {
+  auto pass = [enable_register_inference](tirx::Function function, IRModule,
+                                          tvm::transform::PassContext) {
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return function;
     auto collector = make_object<SetMaxNRegCollector>();
@@ -244,7 +247,8 @@ tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
     // An explicit WSSchedule already emitted register operations inside its
     // role scopes; the legacy inference pass must preserve those operations.
     auto injector = make_object<SetMaxNRegInjector>(
-        collector->producer, collector->consumer, collector->disabled,
+        collector->producer, collector->consumer,
+        collector->disabled || !enable_register_inference,
         collector->explicit_schedule);
     auto body = function->body;
     auto result = injector->Mutate(body).ValueOrUnchanged(body);
@@ -257,7 +261,14 @@ tvm::transform::Pass AnnotateWarpGroupRegAlloc() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  reflection::GlobalDef().def("tl.cuda.transform.AnnotateWarpGroupRegAlloc",
-                              AnnotateWarpGroupRegAlloc);
+  reflection::GlobalDef().def_packed(
+      "tl.cuda.transform.AnnotateWarpGroupRegAlloc",
+      [](PackedArgs args, Any *result) {
+        TVM_FFI_CHECK(args.size() <= 1, TypeError)
+            << "AnnotateWarpGroupRegAlloc accepts optional "
+               "enable_register_inference";
+        *result = AnnotateWarpGroupRegAlloc(
+            args.size() == 0 ? true : args[0].cast<bool>());
+      });
 }
 } // namespace tvm::tl

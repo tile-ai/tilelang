@@ -2,14 +2,19 @@
  * \file lower_tile_op.cc
  * \brief Lower TileLang operators and logical layouts into native typed IR.
  */
+#include "ascend/ir/block.h"
 #include "ir/analyzer.h"
 #include "ir/lexical_scope.h"
 #include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <algorithm>
@@ -22,17 +27,19 @@
 #include "../config.h"
 #include "../ir/tensor_utils.h"
 #include "../op/builtin.h"
-#include "../op/native_intrinsic.h"
 #include "../op/operator.h"
 #include "../op/reducer.h"
 #include "../op/utils.h"
 #include "../span_utils.h"
 #include "common/mbarrier.h"
-#include "common/native_layout_utils.h"
 #include "common/pipeline_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
+#include "ir/alias_analysis.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
+#include "ir/tensor_utils.h"
 #include "loop_partition.h"
 #include "loop_vectorize.h"
 
@@ -48,10 +55,13 @@ String OpName(const CallObj *call) {
   return op ? op.value()->name : String();
 }
 
-bool IsTensorMapCall(const String &name) {
-  return name == "tl.tma_load" || name == "tl.tma_load_im2col" ||
-         name == "tl.tma_load_multicast" || name == "tl.tma_store" ||
-         name == "tl.tma_load_gather4" || name == "tl.tma_store_scatter4";
+bool IsTensorMapCall(const CallObj *call) {
+  return call->op.same_as(tl::tma_load()) ||
+         call->op.same_as(tl::tma_load_im2col()) ||
+         call->op.same_as(tl::tma_load_multicast()) ||
+         call->op.same_as(tl::tma_store()) ||
+         call->op.same_as(tl::tma_load_gather4()) ||
+         call->op.same_as(tl::tma_store_scatter4());
 }
 
 int64_t ConstantProduct(const Array<PrimExpr> &shape, const TensorVar &tensor) {
@@ -131,13 +141,25 @@ Bind AllocateTensor(const TensorVar &tensor, Location loc) {
               loc);
 }
 
+void RetireLoweredLoopHints(Map<String, Any> *metadata) {
+  // These directives describe tile/parallel lowering, which is complete at
+  // this boundary. Scheduling directives with later owners remain intact.
+  for (const char *key :
+       {attr::kLoopPreferAsync, attr::kParallelAsyncWithoutAsyncCommitWait,
+        attr::kParallelLoopPredicate, attr::kParallelLoopRequiresPaddingGuard,
+        "prefer_async", "async_scope", "disable_tma", "disable_async",
+        "coalesced_width", "vectorize", "parallel_loop_layout", "predicate",
+        "padding_guard", "loop_layout", "tl.ws_op_id"})
+    metadata->erase(key);
+}
+
 // Layouts have become physical tensor types and rewritten accesses by the
 // end of LowerTileOp, including layouts introduced by parallel-loop lowering.
-// Retire their metadata here rather than requiring a Function marker to
-// survive later host/device outlining. Keep other annotations and scopes.
-class ConsumedLayoutRetirer : public StmtExprMutator {
+// Retire consumed directives at their original carriers, keeping unrelated
+// annotations and definition scopes. No Function completion marker is needed.
+class ConsumedTileMetadataRetirer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   static void CheckConsumed(const Any &layouts) {
     for (const auto &[tensor, layout] : layouts.cast<LayoutMap>()) {
       TVM_FFI_CHECK(!IsReducerV2Buffer(tensor) &&
@@ -150,25 +172,38 @@ public:
   }
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!call || OpName(call) != "tl.annotation")
-      return StmtExprMutator::Mutate_(op, mode);
-    auto metadata = ReadNativeAnnotations(call);
+    if (!call || !IsAnnotationCall(call))
+      return LayoutMapMutator::Mutate_(op, mode);
+    auto metadata = ReadAnnotations(call);
+    if (metadata.empty())
+      return SeqStmt(Array<Stmt>{}, op->loc);
     if (!metadata.count(attr::kLayoutMap))
       return ffi::Unchanged();
     CheckConsumed(metadata.at(attr::kLayoutMap));
     metadata.erase(attr::kLayoutMap);
     if (metadata.empty())
       return SeqStmt(Array<Stmt>{}, op->loc);
-    return MakeNativeAnnotation(metadata, op->loc);
+    return MakeAnnotation(metadata, op->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    auto rewritten = StmtExprMutator::Mutate_(op, mode)
+    auto rewritten = LayoutMapMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(GetRef<Stmt>(op))
                          .as_or_throw<RegionStmt>();
+    if (ascend::IsAscendBlock(rewritten.get())) {
+      auto metadata = ascend::AscendBlockAnnotations(rewritten.get());
+      if (metadata.count(attr::kLayoutMap)) {
+        CheckConsumed(metadata.at(attr::kLayoutMap));
+        metadata.erase(attr::kLayoutMap);
+        return ascend::MakeAscendBlock(ascend::AscendBlockName(rewritten.get()),
+                                       metadata, rewritten->body,
+                                       rewritten->loc);
+      }
+      return rewritten;
+    }
     if (op->op->name != "tl.attr")
       return rewritten;
-    auto fields = ReadNativeAnnotations(op);
+    auto fields = ReadAnnotations(rewritten.get());
     const String key = fields.at("key").cast<String>();
     if (key == attr::kLayoutMap) {
       CheckConsumed(fields.at("value"));
@@ -180,38 +215,81 @@ public:
       if (metadata.count(attr::kLayoutMap)) {
         CheckConsumed(metadata.at(attr::kLayoutMap));
         metadata.erase(attr::kLayoutMap);
-        return MakeNativeAttribute(fields.at("node"), key, metadata,
-                                   rewritten->body, op->loc);
+        return MakeAttribute(fields.at("node"), key, metadata, rewritten->body,
+                             op->loc);
       }
     }
+    if (key == "tl.sblock") {
+      auto values = fields.at("value").cast<Map<String, Any>>();
+      if (auto metadata = values.Get("annotations")) {
+        auto annotations = metadata->cast<Map<String, Any>>();
+        if (annotations.count(attr::kLayoutMap)) {
+          CheckConsumed(annotations.at(attr::kLayoutMap));
+          annotations.erase(attr::kLayoutMap);
+          values.Set("annotations", annotations);
+          return MakeAttribute(fields.at("node"), key, values, rewritten->body,
+                               op->loc);
+        }
+      }
+    }
+    if (key == "tl.loop.annotations") {
+      auto metadata = fields.at("value").cast<Map<String, Any>>();
+      const auto old_size = metadata.size();
+      RetireLoweredLoopHints(&metadata);
+      if (metadata.empty())
+        return MakeLexicalScope(rewritten->body, op->loc);
+      if (metadata.size() != old_size)
+        return MakeAttribute(fields.at("node"), key, metadata, rewritten->body,
+                             op->loc);
+    }
     return rewritten;
+  }
+
+  UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
+    auto rewritten = GetRef<For>(op);
+    auto annotations = rewritten->annotations;
+    RetireLoweredLoopHints(&annotations);
+    if (annotations.size() != rewritten->annotations.size())
+      rewritten.CopyOnWrite()->annotations = annotations;
+    // Dynamic loop directives can be declared after body-local definitions.
+    // Rewrite each carrier in place, never aggregate them into the For header.
+    rewritten = RewriteLoopAnnotationCarriers(
+        rewritten, [](const Map<String, Any> &fields) {
+          auto remaining = fields;
+          RetireLoweredLoopHints(&remaining);
+          return remaining;
+        });
+    // Traverse after rewriting so empty statements/wrappers are retired by
+    // the normal annotation visitors without flattening definition scopes.
+    return LayoutMapMutator::Mutate_(rewritten.get(), mode)
+        .ValueOrUnchanged(Stmt(rewritten));
   }
 };
 
 // Barrier cardinality is known only after all op lowerings have requested
 // their slots. Replace the temporary definition and its uses atomically, then
 // place the final allocation inside the kernel's real thread scope.
-class BarrierInjector : public StmtExprMutator {
+class BarrierInjector : public LayoutMapMutator {
 public:
   BarrierInjector(TensorVar tensor, Array<PrimExpr> counts)
       : tensor_(std::move(tensor)), counts_(std::move(counts)) {}
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     if (!injected_ && op->op.same_as(launch_thread_op()) &&
         op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x") {
       injected_ = true;
-      SeqStmt body({AllocateTensor(tensor_, op->loc),
-                    MakeNativeAnnotation(
-                        {{"barrier_init",
-                          Map<Var, Array<PrimExpr>>{{tensor_, counts_}}}},
-                        op->loc),
-                    op->body},
-                   op->loc);
+      SeqStmt body(
+          {AllocateTensor(tensor_, op->loc),
+           MakeAnnotation({{"barrier_init",
+                            Map<Var, Array<PrimExpr>>{{tensor_, counts_}}}},
+                          op->loc),
+           op->body},
+          op->loc);
       auto copy = make_object<RegionStmtObj>(*op);
       copy->body = body;
       return Stmt(copy);
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
   bool injected_{false};
 
@@ -270,7 +348,7 @@ public:
                                  old.dtype(), old.ty()->scope,
                                  old.ty()->data_alignment),
                       old->loc);
-      auto replacer = make_object<StmtExprMutator>();
+      auto replacer = make_object<LayoutMapMutator>();
       replacer->VarRemapSet(old, final);
       body = replacer->Mutate(body).ValueOrUnchanged(body);
       Array<PrimExpr> counts;
@@ -281,13 +359,12 @@ public:
       TVM_FFI_CHECK(injector->injected_, ValueError)
           << "Compiler-generated mbarrier requires a threadIdx.x kernel scope";
     }
-    auto retire_layouts = make_object<ConsumedLayoutRetirer>();
-    body = retire_layouts->Mutate(body).ValueOrUnchanged(body);
+    auto retire_metadata = make_object<ConsumedTileMetadataRetirer>();
+    body = retire_metadata->Mutate(body).ValueOrUnchanged(body);
     auto node = function.CopyOnWrite();
     node->body = body;
     auto attributes = node->attrs->dict;
     attributes.Set(kHasTMA, lowerer->has_tma_);
-    attributes.Set("tl.tile_ops_lowered", true);
     if (!lowerer->smem_alignment_map_.empty())
       attributes.Set(kSmemAlignmentMap, lowerer->smem_alignment_map_);
     node->attrs = DictAttrs(attributes);
@@ -404,7 +481,7 @@ public:
 
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
     String name = OpName(op);
-    if (IsTensorMapCall(name)) {
+    if (IsTensorMapCall(op)) {
       has_tma_ = true;
       bool previous = in_tma_context_;
       in_tma_context_ = true;
@@ -412,9 +489,9 @@ public:
       in_tma_context_ = previous;
       return result;
     }
-    if (name == "tl.access_ptr" || name == "tl.ptr_access")
+    if (op->op.same_as(tl::access_ptr()) || op->op.same_as(tl::ptr_access()))
       return RewriteAccess(op, std::nullopt, mode);
-    auto operands = NativeIntrinsicOperands(op);
+    auto operands = DecodeCallOperands(op);
     // The legacy seven-slot target intrinsic carries a separate element
     // offset. Fold it through the logical layout exactly once before emission.
     if ((name == "tirx.ptx_ldmatrix" || name == "tir.ptx_ldmatrix") &&
@@ -437,8 +514,8 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (call && OpName(call) == "tl.annotation") {
-      auto metadata = ReadNativeAnnotations(call);
+    if (call && IsAnnotationCall(call)) {
+      auto metadata = ReadAnnotations(call);
       if (!metadata.count("tl.source_block_annotation"))
         RecordMetadata(metadata);
       return RewriteAnnotation(metadata, op->loc);
@@ -501,7 +578,7 @@ public:
     auto previous_loop = loop_annotations_;
     auto previous_block = block_annotations_;
     int previous_cluster = cluster_size_;
-    bool workspace_scope = op->op->name == "tl.lexical_scope";
+    bool workspace_scope = op->op.same_as(tl::lexical_scope_op());
     bool loop_region = false;
     Optional<Map<String, Any>> attr_fields;
     if (op->op.same_as(launch_thread_op()) &&
@@ -512,8 +589,12 @@ public:
       // inside the device region, not in the host function before splitting.
       workspace_scope = true;
     }
+    if (ascend::IsAscendBlock(op)) {
+      RecordMetadata(ascend::AscendBlockAnnotations(op));
+      RecordMetadata(CollectSourceBlockAnnotations(op->body));
+    }
     if (op->op->name == "tl.attr") {
-      attr_fields = ReadNativeAnnotations(op);
+      attr_fields = ReadAnnotations(op);
       String key = attr_fields.value().at("key").cast<String>();
       if (key == "tl.loop.annotations") {
         // LayoutInference adds a nested wrapper around the same loop. Merge
@@ -527,6 +608,10 @@ public:
         RecordMetadata(
             attr_fields.value().at("value").cast<Map<String, Any>>());
         workspace_scope = true;
+      } else if (key == "tl.sblock") {
+        auto values = attr_fields.value().at("value").cast<Map<String, Any>>();
+        if (auto annotations = values.Get("annotations"))
+          RecordMetadata(annotations->cast<Map<String, Any>>());
       } else if (key == attr::kLexicalAllocScope) {
         // InlineTileOpFunction carries this scope as a tl.attr region.
         // Workspaces requested inside the helper belong to this lexical body.
@@ -553,19 +638,16 @@ public:
     loop_annotations_ = previous_loop;
     block_annotations_ = previous_block;
     cluster_size_ = previous_cluster;
-    // Inferred per-loop layouts have been consumed. Other annotations remain
-    // explicit operands for their own consumers; preserve them as a region.
+    // Tile and parallel-loop directives have now been consumed. Other
+    // annotations remain explicit operands for their own consumers.
     if (loop_region) {
-      auto fields = ReadNativeAnnotations(rewritten.get());
+      auto fields = ReadAnnotations(rewritten.get());
       auto metadata = fields.at("value").cast<Map<String, Any>>();
-      for (const char *key :
-           {attr::kParallelLoopLayout, attr::kParallelLoopPredicate,
-            attr::kParallelLoopRequiresPaddingGuard})
-        metadata.erase(key);
+      RetireLoweredLoopHints(&metadata);
       if (metadata.empty())
-        return rewritten->body;
-      return MakeNativeAttribute(fields.at("node"), "tl.loop.annotations",
-                                 metadata, rewritten->body, op->loc);
+        return MakeLexicalScope(rewritten->body, op->loc);
+      return MakeAttribute(fields.at("node"), "tl.loop.annotations", metadata,
+                           rewritten->body, op->loc);
     }
     return rewritten;
   }
@@ -596,22 +678,25 @@ public:
     if (auto value = metadata.Get(attr::kParallelLoopPredicate))
       predicate = value->cast<PrimExpr>();
     bool partition = false;
-    VisitNativePostOrder(GetRef<For>(op), [&](const ObjectRef &node) {
-      if (const auto *load = node.as<TensorLoadObj>()) {
-        if (IsFragmentBuffer(load->source.as_or_throw<TensorVar>()))
-          partition = true;
-      } else if (const auto *store = node.as<TensorStoreObj>()) {
-        auto tensor = store->dest.as_or_throw<TensorVar>();
-        if (IsFragmentBuffer(tensor) || !IsLocalBuffer(tensor))
-          partition = true;
-      } else if (auto expr = node.as<Expr>();
-                 expr && expr.value()->ty.as<PtrTypeObj>()) {
-        // Opaque calls can write through native addresses, including a
-        // pointer bound outside the loop. Those accesses need the same
-        // ownership as an explicit nonlocal TensorStore.
-        partition |= PointerRequiresPartition(*expr);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        GetRef<For>(op),
+        [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *load = node.as<TensorLoadObj>()) {
+            if (IsFragmentBuffer(load->source.as_or_throw<TensorVar>()))
+              partition = true;
+          } else if (const auto *store = node.as<TensorStoreObj>()) {
+            auto tensor = store->dest.as_or_throw<TensorVar>();
+            if (IsFragmentBuffer(tensor) || !IsLocalBuffer(tensor))
+              partition = true;
+          } else if (auto expr = node.as<Expr>();
+                     expr && expr.value()->ty.as<PtrTypeObj>()) {
+            // Opaque calls can write through native addresses, including a
+            // pointer bound outside the loop. Those accesses need the same
+            // ownership as an explicit nonlocal TensorStore.
+            partition |= PointerRequiresPartition(*expr);
+          }
+          return ffi::WalkResult::Advance();
+        });
     Stmt lowered = LowerParallelLoop(
         rewritten, layout, CurrentThreadIndex(), enclosing.get(), layout_map_,
         predicate, partition,
@@ -659,51 +744,59 @@ private:
         }
       }
     };
-    VisitNativePostOrder(body, [&](const ObjectRef &object) {
-      if (const auto *call = object.as<CallObj>();
-          call && OpName(call) == "tl.annotation")
-        collect(ReadNativeAnnotations(call));
-      if (const auto *region = object.as<RegionStmtObj>();
-          region && region->op->name == "tl.attr") {
-        auto data = ReadNativeAnnotations(region);
-        const String key = data.at("key").cast<String>();
-        if (key == attr::kLayoutMap)
-          collect({{attr::kLayoutMap, data.at("value")}});
-        else if (key == "tl.kernel")
-          collect(data.at("value").cast<Map<String, Any>>());
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *call = object.as<CallObj>();
+              call && IsAnnotationCall(call))
+            collect(ReadAnnotations(call));
+          if (const auto *region = object.as<RegionStmtObj>();
+              ascend::IsAscendBlock(region)) {
+            collect(ascend::AscendBlockAnnotations(region));
+          } else if (region && region->op->name == "tl.attr") {
+            auto data = ReadAnnotations(region);
+            const String key = data.at("key").cast<String>();
+            if (key == attr::kLayoutMap)
+              collect({{attr::kLayoutMap, data.at("value")}});
+            else if (key == "tl.kernel")
+              collect(data.at("value").cast<Map<String, Any>>());
+            else if (key == "tl.sblock") {
+              auto values = data.at("value").cast<Map<String, Any>>();
+              if (auto annotations = values.Get("annotations"))
+                collect(annotations->cast<Map<String, Any>>());
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
     for (const auto &[tensor, layout] : layout_map_)
       buffer_remap_.Set(tensor, MakePhysicalTensor(tensor, layout));
     // Metal SIMD-group matrices are opaque per-warp values. Their original
     // tensor shape remains logical through GEMM/copy parsing; only the lowered
     // definitions and uses carry the actual per-warp register capacity.
-    VisitNativePostOrder(body, [&](const ObjectRef &object) {
-      const auto *binding = object.as<BindObj>();
-      if (!binding)
-        return;
-      const auto *call = binding->value.as<CallObj>();
-      auto tensor = binding->var.as<TensorVar>();
-      if (!tensor || !call || !call->attrs)
-        return;
-      auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
-      auto elements =
-          attrs.GetAttr<int64_t>("tl.metal_simdgroup_physical_elements");
-      if (!elements)
-        return;
-      TVM_FFI_CHECK_EQ(tensor.value().scope().name(), "metal.simdgroup",
-                       ValueError);
-      TVM_FFI_CHECK(*elements > 0 && *elements % 64 == 0, ValueError);
-      TVM_FFI_CHECK(!layout_map_.count(*tensor), ValueError)
-          << "Opaque Metal accumulators cannot also carry a scalar memory "
-             "layout";
-      auto type = make_object<TensorTypeObj>(*tensor.value().ty().get());
-      type->shape = {IntImm::Int64(*elements)};
-      type->layout = std::nullopt;
-      buffer_remap_.Set(*tensor,
-                        TensorVar(tensor.value()->name, TensorType(type),
-                                  tensor.value()->loc));
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const BindObj *binding) -> ffi::Expected<ffi::WalkResult> {
+          const auto *call = binding->value.as<CallObj>();
+          auto tensor = binding->var.as<TensorVar>();
+          if (!tensor || !call || !call->attrs)
+            return ffi::WalkResult::Advance();
+          auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
+          auto elements =
+              attrs.GetAttr<int64_t>("tl.metal_simdgroup_physical_elements");
+          if (!elements)
+            return ffi::WalkResult::Advance();
+          TVM_FFI_CHECK_EQ(tensor.value().scope().name(), "metal.simdgroup",
+                           ValueError);
+          TVM_FFI_CHECK(*elements > 0 && *elements % 64 == 0, ValueError);
+          TVM_FFI_CHECK(!layout_map_.count(*tensor), ValueError)
+              << "Opaque Metal accumulators cannot also carry a scalar memory "
+                 "layout";
+          auto type = make_object<TensorTypeObj>(*tensor.value().ty().get());
+          type->shape = {IntImm::Int64(*elements)};
+          type->layout = std::nullopt;
+          buffer_remap_.Set(*tensor,
+                            TensorVar(tensor.value()->name, TensorType(type),
+                                      tensor.value()->loc));
+          return ffi::WalkResult::Advance();
+        });
     for (const auto &[identity, tensors] : aliases_.groups)
       for (const auto &tensor : tensors)
         if (IsFragmentBuffer(tensor) && !buffer_remap_.count(tensor))
@@ -758,29 +851,39 @@ private:
   Stmt RewriteAnnotation(Map<String, Any> metadata, Location loc) {
     if (auto values = metadata.Get(attr::kSafeValueMap))
       metadata.Set(attr::kSafeValueMap, NormalizeSafeValueMap(*values));
-    Stmt original = MakeNativeAnnotation(metadata, loc);
-    // Deliberately bypass Evaluate's metadata consumer to avoid recursion.
-    auto evaluated = original.as_or_throw<Evaluate>();
-    auto value =
-        StmtExprMutatorWithAnalyzer::Mutate_(
-            evaluated->value.as_or_throw<Call>().get(), InplaceMode::kDisallow)
-            .ValueOrUnchanged(evaluated->value);
-    return Evaluate(value, loc);
+    Stmt original = MakeAnnotation(metadata, loc);
+    // Mixed metadata can produce two declarations. Bypass Evaluate's metadata
+    // consumer for each leaf to avoid recursively re-consuming this annotation.
+    auto rewrite = [&](const Stmt &statement) -> Stmt {
+      auto evaluated = statement.as_or_throw<Evaluate>();
+      auto value = StmtExprMutatorWithAnalyzer::Mutate_(
+                       evaluated->value.as_or_throw<Call>().get(),
+                       InplaceMode::kDisallow)
+                       .ValueOrUnchanged(evaluated->value);
+      return Evaluate(value, evaluated->loc);
+    };
+    if (auto sequence = original.as<SeqStmt>()) {
+      Array<Stmt> declarations;
+      for (const Stmt &statement : (*sequence)->seq)
+        declarations.push_back(rewrite(statement));
+      return SeqStmt(declarations, loc);
+    }
+    return rewrite(original);
   }
 
   SeqStmt RewriteBarrierMetadata(const SeqStmt &body) {
     if (barrier_arrive_updates_.empty())
       return body;
-    class Rewriter : public StmtExprMutator {
+    class Rewriter : public LayoutMapMutator {
     public:
       explicit Rewriter(Map<TensorVar, PrimExpr> updates)
           : updates_(std::move(updates)) {}
-      using StmtExprMutator::Mutate_;
+      using LayoutMapMutator::Mutate_;
       UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
         const auto *call = op->value.as<CallObj>();
-        if (!call || OpName(call) != "tl.annotation")
-          return StmtExprMutator::Mutate_(op, mode);
-        auto metadata = ReadNativeAnnotations(call);
+        if (!call || !IsAnnotationCall(call))
+          return LayoutMapMutator::Mutate_(op, mode);
+        auto metadata = ReadAnnotations(call);
         if (auto value = metadata.Get("barrier_init")) {
           auto counts = value->cast<Map<Var, Array<PrimExpr>>>();
           for (const auto &[tensor, count] : updates_)
@@ -788,9 +891,9 @@ private:
               counts.Set(tensor, previous->Map(
                                      [&](const PrimExpr &) { return count; }));
           metadata.Set("barrier_init", counts);
-          return MakeNativeAnnotation(metadata, op->loc);
+          return MakeAnnotation(metadata, op->loc);
         }
-        return StmtExprMutator::Mutate_(op, mode);
+        return LayoutMapMutator::Mutate_(op, mode);
       }
 
     private:
@@ -851,7 +954,6 @@ private:
         }
       }
       if (const auto *call = value.as<CallObj>()) {
-        String name = OpName(call);
         Optional<TensorLoad> load;
         if (call->op.same_as(address_of_op())) {
           // address_of(Var) is the address of that local scalar, even when
@@ -860,7 +962,7 @@ private:
           load = call->args[0].as<TensorLoad>();
           if (!load)
             return false;
-        } else if (name == "tl.access_ptr") {
+        } else if (call->op.same_as(tl::access_ptr())) {
           load = ResolveAddressLoad(call->args[0]);
         }
         if (load) {
@@ -873,7 +975,8 @@ private:
           return IsFragmentBuffer(tensor) ||
                  !IsLocalBuffer(tensor, /*allow_var=*/true);
         }
-        if (name == "tl.ptr_access" || call->op.same_as(ptr_byte_offset_op()) ||
+        if (call->op.same_as(tl::ptr_access()) ||
+            call->op.same_as(ptr_byte_offset_op()) ||
             (call->op.same_as(reinterpret_op()) && call->ty.as<PtrTypeObj>())) {
           value = call->args[0];
           continue;
@@ -893,8 +996,7 @@ private:
 
   Expr RewriteAccess(const CallObj *call, Optional<PrimExpr> extra,
                      InplaceMode mode) {
-    String name = OpName(call);
-    if (name == "tl.access_ptr") {
+    if (call->op.same_as(tl::access_ptr())) {
       auto resolved = ResolveAddressLoad(call->args[0]);
       TVM_FFI_CHECK(resolved.has_value(), ValueError)
           << "tl.access_ptr needs a tensor address";
@@ -933,7 +1035,7 @@ private:
                   {TensorLoad(physical, indices, load->loc), extent, mask},
                   call->attrs, {}, call->loc);
     }
-    if (name == "tl.ptr_access") {
+    if (call->op.same_as(tl::ptr_access())) {
       Expr identity = aliases_.Identity(call->args[0]);
       auto tensor = identity.as<TensorVar>();
       Array<Expr> args = call->args;
@@ -975,7 +1077,7 @@ private:
   }
 
   Target target_{UnsafeInit{}};
-  NativeTensorAliases aliases_;
+  TensorAliasGroups aliases_;
   LayoutMap layout_map_;
   Map<TensorVar, TensorVar> buffer_remap_;
   Map<Var, Expr> bind_var_to_expr_;

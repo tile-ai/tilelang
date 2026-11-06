@@ -9,12 +9,12 @@ Auto-Tuning Techniques for Performance Optimization
 Auto-tuning a Tile Language program involves three main steps:
 
 1. Implement the target program using Tile Language with reserved optimization parameters
-2. ​Provide candidate configurations through manual search or [auto-generation using Carver](#using-carver-to-auto-generate-candidate-configurations)
+2. Provide candidate configurations as a manual list or a Cartesian product of parameter values
 3. Parallel compile and benchmark candidate configurations to identify the best performance
 
 ## Matrix Multiplication Example
 
-The following example demonstrates auto-tuning matrix multiplication. Code has been simplified for readability - see `examples/gemm/example_gemm.py` for complete implementation.
+The following example demonstrates auto-tuning matrix multiplication. Code has been simplified for readability - see `examples/gemm/example_gemm_autotune.py` for complete implementation.
 
 ### Step 1: Implement with Reserved Parameters
 Users can implement matrix multiplication in Tile Language while reserving parameters for optimization:
@@ -80,47 +80,19 @@ configs = [
 ### Step 3: Compile and Benchmark
 Configure JIT compilation and benchmarking settings:
 ```python
-autotuner = AutoTuner.from_kernel(kernel=kernel, configs=get_configs(M, N, K, with_roller)).set_compile_args(
-    out_idx=[-1],
-    supply_type=tl.TensorSupplyType.Integer,
-    ref_prog=ref_program,
-    skip_check=False,
-    target="auto",
+autotuner = (
+    AutoTuner.from_kernel(kernel=kernel, configs=configs)
+    .set_compile_args(
+        out_idx=[-1],
+        target="auto",
+    )
+    .set_profile_args(
+        supply_type=tl.TensorSupplyType.Integer,
+        ref_prog=ref_program,
+        skip_check=False,
+    )
 )
 result = autotuner.run(warmup=3, rep=20)
 out_c = result.kernel(a, b)
 ```
 The result object contains optimized kernel implementation which can be used by users directly
-
-## Using Carver to Auto-Generate Candidate Configurations
-
-Carver is a lightweight framework for generating and ranking tile configurations (also known as tiling strategies, blocking schemes, or scheduling hints) for common GPU, CPU, and accelerator backends. It helps you explore efficient mappings of loops for operations such as matrix multiplication, elementwise transforms, and other reduction-oriented kernels.
-
-or common operators, Carver provides pre-built templates (e.g., `MatmulTemplate`):
-
-```python
-# Configure Matmul template
-arch = CUDA("cuda")
-carve_template = MatmulTemplate(
-    M=M,
-    N=N,
-    K=K,
-    in_dtype="float16",
-    out_dtype="float16",
-    accum_dtype="float",
-).with_arch(arch)
-
-# Generate top-k optimization hints (topk=10 recommended)
-roller_hints = carve_template.recommend_hints(topk=10)
-
-# Configure candidate parameters
-for hint in roller_hints:
-    # ...existing code...
-
-    config["block_M"] = block_m
-    config["block_N"] = block_n
-    config["block_K"] = hint.rstep[0]
-    config["num_stages"] = hint.pipeline_stage
-    config["thread_num"] = block_rows * block_cols * 32
-    config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-```

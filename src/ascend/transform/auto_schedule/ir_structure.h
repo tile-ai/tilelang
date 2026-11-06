@@ -1,11 +1,17 @@
 #pragma once
 
 #include "../buffer_version.h"
-#include "../core_mask.h"
+#include "ascend/analysis/storage.h"
+#include "ascend/ir/core_mask.h"
 #include "ascend/op/utils.h"
+#include "ascend/transform/source_scopes.h"
+#include "ir/loop_annotations.h"
 #include "ir/loop_math.h"
-#include "native_storage.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
 #include "task_resource.h"
+#include "transform/common/constr_visitor.h"
+#include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -179,8 +185,7 @@ public:
         condition, {{old_var, new_var.as_or_throw<PrimExpr>()}});
   }
   Stmt Wrap(Stmt body) const final {
-    return If(condition, NativeTaskAttribute::AsSequence(body), std::nullopt,
-              body->loc);
+    return If(condition, SeqStmt(body), std::nullopt, body->loc);
   }
 
   PrimExpr condition;
@@ -196,16 +201,17 @@ public:
     return std::make_unique<AttributeGuard>(node, key, value, loc);
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    auto attribute = MakeNativeAttribute(node, key, value, SeqStmt({}), loc);
-    auto remapped =
-        ReadTaskAttribute(RemapTaskStatement(attribute, {{old_var, new_var}}))
-            .value();
+    auto attribute = MakeAttribute(node, key, value, SeqStmt({}), loc);
+    auto mutator = ffi::make_object<tirx::StmtExprMutator>();
+    mutator->VarRemapSet(old_var, new_var);
+    auto remapped = ReadSourceAttribute(
+                        mutator->Mutate(attribute).ValueOrUnchanged(attribute))
+                        .value();
     node = remapped.node;
     value = remapped.value;
   }
   Stmt Wrap(Stmt body) const final {
-    return MakeNativeAttribute(node, key, value,
-                               NativeTaskAttribute::AsSequence(body), loc);
+    return MakeAttribute(node, key, value, SeqStmt(body), loc);
   }
   Any node;
   String key;
@@ -333,11 +339,11 @@ public:
   virtual TaskNode *HeaderTask() { return nullptr; }
   virtual const TaskNode *HeaderTask() const { return nullptr; }
 
-  void SetStorageContext(std::shared_ptr<const NativeStorageContext> value) {
+  void SetStorageContext(std::shared_ptr<const StorageProvenance> value) {
     storage_context_ = std::move(value);
   }
-  const NativeStorageContext &StorageContext() const {
-    static const NativeStorageContext empty;
+  const StorageProvenance &StorageContext() const {
+    static const StorageProvenance empty = MakeAscendStorageProvenance();
     return storage_context_ ? *storage_context_ : empty;
   }
   Var StorageIdentity(const TensorVar &tensor) const {
@@ -355,7 +361,7 @@ public:
     // changes. Keep pointer origins consistent with the rewritten statements
     // without changing provenance in sibling tasks or the original tree.
     if (storage_context_)
-      storage_context_ = std::make_shared<NativeStorageContext>(
+      storage_context_ = std::make_shared<StorageProvenance>(
           storage_context_->Substitute(old_var, new_var));
   }
 
@@ -489,7 +495,7 @@ protected:
   }
 
 private:
-  std::shared_ptr<const NativeStorageContext> storage_context_;
+  std::shared_ptr<const StorageProvenance> storage_context_;
   IRStructure *parent_{nullptr};
   std::unique_ptr<IRExtraInfo> extra_info_;
   GuardList guards_;
@@ -592,7 +598,6 @@ public:
       opaque_access_vars_.push_back(var);
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) override {
-    ffi::Map<Var, Expr> substitution{{old_var, new_var}};
     auto substitute_vars = [&](std::vector<Var> &vars) {
       for (auto &var : vars)
         if (var.same_as(old_var))
@@ -601,10 +606,18 @@ public:
     substitute_vars(read_vars_);
     substitute_vars(write_vars_);
     substitute_vars(opaque_access_vars_);
-    for (auto &region : read_regions_)
-      region = RemapTaskRegion(region, substitution);
-    for (auto &region : write_regions_)
-      region = RemapTaskRegion(region, substitution);
+    auto remap_regions = [&](std::vector<TensorRegion> &regions) {
+      for (auto &region : regions) {
+        auto mutator = ffi::make_object<tvm::ExprMutator>();
+        mutator->VarRemapSet(old_var, new_var);
+        Expr expression = region;
+        region = mutator->Mutate(expression)
+                     .ValueOrUnchanged(expression)
+                     .as_or_throw<TensorRegion>();
+      }
+    };
+    remap_regions(read_regions_);
+    remap_regions(write_regions_);
     if (auto primitive = new_var.as<PrimExpr>()) {
       ffi::Map<Var, PrimExpr> values{{old_var, primitive.value()}};
       Map<Var, Optional<PrimExpr>> pitches;
@@ -616,7 +629,9 @@ public:
       l0_pitches_ = std::move(pitches);
       outer_ctx = outer_ctx.Substitute(values);
     }
-    stmt = RemapTaskStatement(stmt, substitution);
+    auto mutator = ffi::make_object<LayoutMapMutator>();
+    mutator->VarRemapSet(old_var, new_var);
+    stmt = mutator->Mutate(stmt).ValueOrUnchanged(stmt);
     SubstituteVarInGuards(old_var, new_var);
     SubstituteVarInExtraInfo(old_var, new_var);
   }
@@ -1013,7 +1028,9 @@ public:
     return result;
   }
   void SubstituteVar(const Var &old_var, const Var &new_var) final {
-    shell = RemapTaskStatement(shell, {{old_var, new_var}});
+    auto mutator = ffi::make_object<LayoutMapMutator>();
+    mutator->VarRemapSet(old_var, new_var);
+    shell = mutator->Mutate(shell).ValueOrUnchanged(shell);
     if (auto primitive = new_var.as<PrimExpr>()) {
       outer_ctx = outer_ctx.Substitute({{old_var, primitive.value()}});
       if (condition_snapshot)

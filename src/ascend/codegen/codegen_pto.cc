@@ -11,9 +11,13 @@
 #include "op/builtin.h"
 #include "support/check.h"
 
-#include "ascend/codegen/native_ascend_ir.h"
+#include "ascend/codegen/vector_index.h"
+#include "ascend/ir/block.h"
+#include "ascend/target_utils.h"
+#include "ir/analyzer.h"
 #include <algorithm>
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/expr_functor.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/ir/transform.h>
@@ -71,10 +75,10 @@ bool IsSimdOp(const CallObj *op, std::string *op_name = nullptr) {
 bool IsSimdMergingCall(const CallObj *op,
                        std::string *intrinsic_name = nullptr) {
   const auto type = op->ty.as<PrimType>();
-  if (!type || !type.value().IsVoid() || CodegenOperands(op).empty()) {
+  if (!type || !type.value().IsVoid() || op->args.empty()) {
     return false;
   }
-  const auto *mode = CodegenOperands(op).back().as<StringImmObj>();
+  const auto *mode = op->args.back().as<StringImmObj>();
   if (mode == nullptr || mode->value != kModeMerging) {
     return false;
   }
@@ -101,10 +105,10 @@ void ValidateSharedScope(const std::string &scope) {
 bool RequiresStatementControlFlow(const Expr &expr) {
   if (const auto *call = expr.as<CallObj>()) {
     if (call->op.same_as(prim::if_then_else_op())) {
-      ICHECK_EQ(CodegenOperands(call).size(), 3U);
-      return RequiresStatementControlFlow(CodegenOperands(call)[0]) ||
-             RequiresStatementControlFlow(CodegenOperands(call)[1]) ||
-             RequiresStatementControlFlow(CodegenOperands(call)[2]);
+      ICHECK_EQ(call->args.size(), 3U);
+      return RequiresStatementControlFlow(call->args[0]) ||
+             RequiresStatementControlFlow(call->args[1]) ||
+             RequiresStatementControlFlow(call->args[2]);
     }
   }
   // Read-only expressions can remain inside a lazy PTODSL branch. Only an
@@ -234,7 +238,8 @@ std::string ScalarCastExpr(const std::string &expr, PrimType dtype,
 PrimExpr PeelScalarCasts(const Expr &value) {
   PrimExpr cur = value.as_or_throw<PrimExpr>();
   while (const auto *cast = cur.as<prim::CastObj>()) {
-    if (!CodegenDType(cast).IsScalar() || !cast->value.ty().IsScalar()) {
+    if (!cast->ty.as_or_throw<PrimType>().IsScalar() ||
+        !cast->value.ty().IsScalar()) {
       break;
     }
     cur = cast->value;
@@ -501,9 +506,8 @@ int64_t ConstShapeDim(const Expr &expr, const char *name) {
 }
 
 int64_t ConstArgDim(const CallObj *call, size_t index, const char *name) {
-  ICHECK_GT(CodegenOperands(call).size(), index)
-      << name << " argument is missing";
-  return ConstShapeDim(CodegenOperands(call)[index], name);
+  ICHECK_GT(call->args.size(), index) << name << " argument is missing";
+  return ConstShapeDim(call->args[index], name);
 }
 
 // SIMD register temps (T.simd.alloc_var): lanes >= 32.
@@ -622,9 +626,9 @@ void CheckLocalVarBuffer(const VarObj *buffer) {
 }
 
 void CheckAllReduceDtype(const CallObj *call) {
-  ICHECK_GE(CodegenOperands(call).size(), 2U)
+  ICHECK_GE(call->args.size(), 2U)
       << "tl::AscendAllReduce call expects a value argument";
-  PrimType dtype = CodegenDType(CodegenOperands(call)[1]);
+  PrimType dtype = call->args[1]->ty.as_or_throw<PrimType>();
   ICHECK(IsSupportedSIMTAllReduceType(dtype))
       << "PTO cross-thread allreduce currently supports float16, float32, "
          "int32, and uint32 only, got "
@@ -646,54 +650,56 @@ void ValidateKernelCapabilities(const tirx::Function &func) {
   bool has_supported_cube_mte = false;
   (void)0; // has_unsupported_cube_op removed: nd2nz ops are emitted below
 
-  VisitAscendIR(func->body, [&](const ffi::ObjectRef &node) {
-    if (const auto *block = node.as<RegionStmtObj>()) {
-      if (PTOBlockName(block) == "CUBE") {
-        has_cube_block = true;
-      } else if (PTOBlockName(block) == "VECTOR") {
-        has_vector_block = true;
-      }
-    }
-
-    if (const auto *call = node.as<CallObj>()) {
-      if ((call->op.same_as(tirx::call_extern_op()) ||
-           call->op.same_as(tirx::call_pure_extern_op())) &&
-          !CodegenOperands(call).empty()) {
-        const auto *func_name = CodegenOperands(call)[0].as<StringImmObj>();
-        if (func_name != nullptr &&
-            func_name->value.find("tl::AscendAllReduce") != std::string::npos) {
-          CheckAllReduceDtype(call);
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body,
+      [&](const RegionStmtObj *block) -> ffi::Expected<ffi::WalkResult> {
+        if (PTOBlockName(block) == "CUBE") {
+          has_cube_block = true;
+        } else if (PTOBlockName(block) == "VECTOR") {
+          has_vector_block = true;
         }
-      }
-      if (IsCodegenOp(call, "tl.ascend_gemm_l1")) {
-        has_gemm_l1 = true;
-      } else if (IsCodegenOp(call, "tl.ascend_blockscaled_gemm_l1")) {
-        has_blockscaled_gemm_l1 = true;
-      } else if (IsCodegenOp(call, "tl.ascend_copy_gm_to_ubuf")) {
-        has_gm_to_ub_mte = true;
-      } else if (IsCodegenOp(call, "tl.ascend_copy_ubuf_to_gm")) {
-        has_ub_to_gm_mte = true;
-      } else if (IsCodegenOp(call, "tl.ascend_set_copy_pad_value")) {
-        has_copy_pad_setter = true;
-      } else if (IsCodegenOp(call, "tl.ascend_copy_matrix_cc_to_ub")) {
-        has_l0c_to_ub_mte = true;
-      } else if (IsCodegenOp(call, "tl.ascend_copy_gm_to_cbuf") ||
-                 IsCodegenOp(call, "tl.ascend_fill_l1") ||
-                 IsCodegenOp(call, "tl.ascend_load_cbuf_to_ca") ||
-                 IsCodegenOp(call, "tl.ascend_load_cbuf_to_cb") ||
-                 IsCodegenOp(call, "tl.ascend_load_ca_sf") ||
-                 IsCodegenOp(call, "tl.ascend_load_cb_sf") ||
-                 IsCodegenOp(call, "tl.ascend_copy_ubuf_to_cbuf")) {
-        has_supported_cube_mte = true;
-      } else if (IsCodegenOp(call, "tl.ascend_mad") ||
-                 IsCodegenOp(call, "tl.ascend_mad_mx")) {
-        has_mad = true;
-      }
-      // ascend_nd2nz_scatter / ascend_nd2nz_post_copy are emitted by
-      // EmitAscendNd2NzScatter / the post-copy emitter below; they are
-      // supported and must not trip the unsupported-op guard.
-    }
-  });
+        return ffi::WalkResult::Advance();
+      },
+      [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if ((call->op.same_as(tirx::call_extern_op()) ||
+             call->op.same_as(tirx::call_pure_extern_op())) &&
+            !call->args.empty()) {
+          const auto *func_name = call->args[0].as<StringImmObj>();
+          if (func_name != nullptr &&
+              func_name->value.find("tl::AscendAllReduce") !=
+                  std::string::npos) {
+            CheckAllReduceDtype(call);
+          }
+        }
+        if (call->op.same_as(tl::ascend_gemm_l1())) {
+          has_gemm_l1 = true;
+        } else if (call->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
+          has_blockscaled_gemm_l1 = true;
+        } else if (call->op.same_as(tl::ascend_copy_gm_to_ubuf())) {
+          has_gm_to_ub_mte = true;
+        } else if (call->op.same_as(tl::ascend_copy_ubuf_to_gm())) {
+          has_ub_to_gm_mte = true;
+        } else if (call->op.same_as(tl::ascend_set_copy_pad_value())) {
+          has_copy_pad_setter = true;
+        } else if (call->op.same_as(tl::ascend_copy_matrix_cc_to_ub())) {
+          has_l0c_to_ub_mte = true;
+        } else if (call->op.same_as(tl::ascend_copy_gm_to_cbuf()) ||
+                   call->op.same_as(tl::ascend_fill_l1()) ||
+                   call->op.same_as(tl::ascend_load_cbuf_to_ca()) ||
+                   call->op.same_as(tl::ascend_load_cbuf_to_cb()) ||
+                   call->op.same_as(tl::ascend_load_ca_sf()) ||
+                   call->op.same_as(tl::ascend_load_cb_sf()) ||
+                   call->op.same_as(tl::ascend_copy_ubuf_to_cbuf())) {
+          has_supported_cube_mte = true;
+        } else if (call->op.same_as(tl::ascend_mad()) ||
+                   call->op.same_as(tl::ascend_mad_mx())) {
+          has_mad = true;
+        }
+        // ascend_nd2nz_scatter / ascend_nd2nz_post_copy are emitted by
+        // EmitAscendNd2NzScatter / the post-copy emitter below; they are
+        // supported and must not trip the unsupported-op guard.
+        return ffi::WalkResult::Advance();
+      });
 
   ICHECK(!has_cube_block || has_gemm_l1 || has_blockscaled_gemm_l1 ||
          has_supported_cube_mte || has_mad)
@@ -812,8 +818,8 @@ PrimType GetAnnotatedPointerDtype(const Expr &expr, PrimType fallback_dtype) {
   if (const auto *tensor = expr->ty.as<TensorTypeObj>())
     return tensor->dtype;
   if (const auto *call = expr.as<CallObj>();
-      call && IsCodegenOp(call, "tl.access_ptr")) {
-    const auto args = CodegenOperands(call);
+      call && call->op.same_as(tl::access_ptr())) {
+    const auto args = call->args;
     if (!args.empty())
       if (const auto *load = args[0].as<TensorLoadObj>())
         return PTOTensor(load).dtype();
@@ -844,7 +850,7 @@ std::string PTOAddressSpace(const std::string &scope) {
 // the scalar element index from such a Ramp.
 PrimExpr VectorBufferElemIndex(const PrimExpr &index) {
   if (const auto *ramp = index.as<prim::RampObj>()) {
-    int lanes = CodegenDType(ramp).lanes();
+    int lanes = ramp->ty.as_or_throw<PrimType>().lanes();
     if (lanes > 0) {
       return tl::CreateTileLangAnalyzer()->Simplify(
           floordiv(ramp->base, MakeConst(ramp->base.ty(), lanes)));
@@ -868,18 +874,18 @@ bool GetNativeByteOffset(const Expr &expr, PrimExpr *bytes,
   const auto *call = expr.as<CallObj>();
   if (!call)
     return false;
-  const auto args = CodegenOperands(call);
-  if (IsCodegenOp(call, "tirx.tensor_data_ptr") ||
-      IsCodegenOp(call, "tirx.reinterpret")) {
+  const auto args = call->args;
+  if (call->op.same_as(tirx::tensor_data_ptr_op()) ||
+      call->op.same_as(tirx::reinterpret_op())) {
     return args.size() == 1 && GetNativeByteOffset(args[0], bytes, base);
   }
-  if (IsCodegenOp(call, "tirx.ptr_byte_offset") ||
-      IsCodegenOp(call, "tirx.handle_add_byte_offset") ||
-      IsCodegenOp(call, "tl.ptr_access")) {
+  if (call->op.same_as(tirx::ptr_byte_offset_op()) ||
+      call->op.same_as(tirx::handle_add_byte_offset_op()) ||
+      call->op.same_as(tl::ptr_access())) {
     if (args.size() < 2 || !GetNativeByteOffset(args[0], bytes, base))
       return false;
     PrimExpr offset = args[1].as_or_throw<PrimExpr>();
-    if (IsCodegenOp(call, "tl.ptr_access")) {
+    if (call->op.same_as(tl::ptr_access())) {
       offset = ElementIndexToByteOffsetExpr(
           offset, GetAnnotatedPointerDtype(args[0], PrimType::Void()),
           "PTO pointer access", tl::CreateTileLangAnalyzer());
@@ -888,8 +894,8 @@ bool GetNativeByteOffset(const Expr &expr, PrimExpr *bytes,
         *bytes + prim::Cast(PrimType::Int(64), offset));
     return true;
   }
-  if ((IsCodegenOp(call, "tl.access_ptr") ||
-       IsCodegenOp(call, "tirx.address_of")) &&
+  if ((call->op.same_as(tl::access_ptr()) ||
+       call->op.same_as(tirx::address_of_op())) &&
       !args.empty()) {
     const auto *load = args[0].as<TensorLoadObj>();
     if (!load || load->indices.size() != 1)
@@ -897,7 +903,7 @@ bool GetNativeByteOffset(const Expr &expr, PrimExpr *bytes,
     *base = PTOTensor(load).get();
     auto analyzer = tl::CreateTileLangAnalyzer();
     *bytes = ElementIndexToByteOffsetExpr(
-        NormalizeAscendVectorIndex(load->indices[0], analyzer),
+        ascend::NormalizeVectorIndex(load->indices[0], analyzer),
         PTOTensor(load).dtype(), "PTO tensor access", analyzer);
     return true;
   }
@@ -930,8 +936,9 @@ bool GetAddressOfIndex(const Expr &expr, PrimExpr *index,
 }
 
 std::string PTOBlockName(const RegionStmtObj *region) {
-  auto info = DecodeAscendBlock(region);
-  return info ? std::string(info->name) : std::string();
+  return tl::ascend::IsAscendBlock(region)
+             ? std::string(region->attrs.GetAttr<ffi::String>("name").value())
+             : std::string();
 }
 
 bool PTOIsTensorBind(const BindObj *bind) {
@@ -1047,30 +1054,29 @@ private:
     if (call == nullptr)
       return state;
 
-    if (IsCodegenOp(call, "tl.ascend_set_hf32_mode")) {
-      ICHECK_EQ(CodegenOperands(call).size(), 1U)
+    if (call->op.same_as(tl::ascend_set_hf32_mode())) {
+      ICHECK_EQ(call->args.size(), 1U)
           << "tl.ascend_set_hf32_mode expects exactly 1 argument";
       int64_t mode = 0;
-      ICHECK(TryGetConstInt(CodegenOperands(call)[0], &mode) && mode >= 0 &&
-             mode <= 2)
+      ICHECK(TryGetConstInt(call->args[0], &mode) && mode >= 0 && mode <= 2)
           << "PTO HF32 mode must be a constant in {0, 1, 2}, got "
-          << CodegenOperands(call)[0];
+          << call->args[0];
       return MaskFromMode(mode);
     }
 
-    if (IsCodegenOp(call, "tl.ascend_gemm_l1")) {
-      ICHECK_GT(CodegenOperands(call).size(), 9U);
-      const auto *dtype_name = CodegenOperands(call)[9].as<StringImmObj>();
+    if (call->op.same_as(tl::ascend_gemm_l1())) {
+      ICHECK_GT(call->args.size(), 9U);
+      const auto *dtype_name = call->args[9].as<StringImmObj>();
       ICHECK(dtype_name) << "PTO GEMM requires a constant input dtype string";
       if (IsFloat32(ParseDataType(dtype_name->value))) {
         gemm_modes_[GetRef<Call>(call)] |= state;
       }
-    } else if (IsCodegenOp(call, "tl.ascend_mad") ||
-               IsCodegenOp(call, "tl.ascend_mad_mx")) {
+    } else if (call->op.same_as(tl::ascend_mad()) ||
+               call->op.same_as(tl::ascend_mad_mx())) {
       // HF32 mode applies to subsequent Cube MADs. Preserve the reaching mode
       // for FP32 L0 operations as well as L1 GEMMs so PTOAS can encode it as
       // a per-MAD tf32_mode attribute.
-      ICHECK_GT(CodegenOperands(call).size(), 2U);
+      ICHECK_GT(call->args.size(), 2U);
       // Keep the reaching state for every MAD.  The emitter decides whether
       // the operand tuple is FP32 and therefore needs a PTOAS tf32_mode.
       gemm_modes_[GetRef<Call>(call)] |= state;
@@ -1106,11 +1112,11 @@ public:
 
   static DirectionMap Analyze(const tirx::Function &func) {
     bool has_mad = false;
-    VisitAscendIR(func->body, [&](const ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>()) {
-        has_mad |= IsMad(call);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        func->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          has_mad |= IsMad(call);
+          return ffi::WalkResult::Advance();
+        });
     if (!has_mad) {
       return {};
     }
@@ -1144,10 +1150,10 @@ private:
   }
 
   static bool IsMad(const CallObj *call) {
-    return IsCodegenOp(call, "tl.ascend_mad") ||
-           IsCodegenOp(call, "tl.ascend_mad_mx") ||
-           IsCodegenOp(call, "tl.ascend_gemm_l1") ||
-           IsCodegenOp(call, "tl.ascend_blockscaled_gemm_l1");
+    return call->op.same_as(tl::ascend_mad()) ||
+           call->op.same_as(tl::ascend_mad_mx()) ||
+           call->op.same_as(tl::ascend_gemm_l1()) ||
+           call->op.same_as(tl::ascend_blockscaled_gemm_l1());
   }
 
   PrimExpr MergePredicate(const PrimExpr &a, const PrimExpr &b) {
@@ -1288,12 +1294,12 @@ private:
     const auto *call = op->value.as<CallObj>();
     if (call == nullptr)
       return {state, {}};
-    if (IsCodegenOp(call, "tl.loop_break")) {
+    if (call->op.same_as(tl::loop_break())) {
       return {{}, state};
     }
-    if (IsCodegenOp(call, "tl.ascend_set_mmad_direction")) {
-      ICHECK_EQ(CodegenOperands(call).size(), 1U);
-      const auto *direction = CodegenOperands(call)[0].as<StringImmObj>();
+    if (call->op.same_as(tl::ascend_set_mmad_direction())) {
+      ICHECK_EQ(call->args.size(), 1U);
+      const auto *direction = call->args[0].as<StringImmObj>();
       ICHECK(direction && (direction->value == "m" || direction->value == "n"))
           << "PTO MAD direction expects 'm' or 'n'";
       // An unreachable setter must not revive the path after a break.
@@ -1330,12 +1336,16 @@ private:
 class PTOIRVisitor : public StmtFunctor<void(const Stmt &)> {
 public:
   void VisitExpression(const Expr &expression) {
-    VisitAscendIR(expression, [&](const ffi::ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>())
-        ObserveCall(call);
-      if (const auto *load = node.as<TensorLoadObj>())
-        ObserveLoad(load);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expression,
+        [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          ObserveCall(call);
+          return ffi::WalkResult::Advance();
+        },
+        [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
+          ObserveLoad(load);
+          return ffi::WalkResult::Advance();
+        });
   }
 
 protected:
@@ -1387,7 +1397,7 @@ public:
 
 private:
   void ObserveCall(const CallObj *op) override {
-    found |= IsCodegenOp(op, "tl.loop_break");
+    found |= op->op.same_as(tl::loop_break());
   }
   void Dispatch_(const BreakObj *) override { found = true; }
   void Dispatch_(const ForObj *) override {}
@@ -1502,10 +1512,12 @@ class MixedSectionLocalVarAnalyzer {
   protected:
     virtual void Read(const VarObj *, const VarSet &) {}
     void ReadExpression(const Expr &expr, const VarSet &defined) {
-      VisitAscendIR(expr, [&](const ffi::ObjectRef &node) {
-        if (const auto *load = node.as<TensorLoadObj>())
-          Read(PTOTensor(load).get(), defined);
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          expr,
+          [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
+            Read(PTOTensor(load).get(), defined);
+            return ffi::WalkResult::Advance();
+          });
     }
     VarSet Dispatch_(const BindObj *op, VarSet defined) override {
       ReadExpression(op->value, defined);
@@ -1645,11 +1657,13 @@ public:
 
 bool UsesVar(ffi::AnyView body, const VarObj *target) {
   bool found = false;
-  VisitAscendIR(body, [&](const ObjectRef &node) {
-    if (node.get() == target) {
-      found = true;
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const VarObj *node) -> ffi::Expected<ffi::WalkResult> {
+        if (node == target) {
+          found = true;
+        }
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -1671,9 +1685,10 @@ public:
   CopyPadState state() const { return state_; }
 
   void ObserveCall(const CallObj *op) override {
-    if (IsCodegenOp(op, "tl.ascend_set_copy_pad_value")) {
-      ICHECK_EQ(CodegenOperands(op).size(), 1U);
-      state_ = CopyPadState{true, true, CodegenDType(CodegenOperands(op)[0])};
+    if (op->op.same_as(tl::ascend_set_copy_pad_value())) {
+      ICHECK_EQ(op->args.size(), 1U);
+      state_ =
+          CopyPadState{true, true, op->args[0]->ty.as_or_throw<PrimType>()};
       return;
     }
   }
@@ -1772,10 +1787,9 @@ CodeGenTileLangPTO::CodeGenTileLangPTO() {
 
 void CodeGenTileLangPTO::ValidateVecMode_(const CallObj *op, size_t mode_idx,
                                           const char *expected) {
-  ICHECK_LT(mode_idx, CodegenOperands(op).size())
+  ICHECK_LT(mode_idx, op->args.size())
       << "PTO SIMD op has no mode argument at index " << mode_idx;
-  auto mode_str =
-      (CodegenOperands(op)[mode_idx]).as_or_throw<StringImm>()->value;
+  auto mode_str = (op->args[mode_idx]).as_or_throw<StringImm>()->value;
   ICHECK_EQ(mode_str, expected)
       << "PTO codegen currently only supports " << expected
       << " for this SIMD op, got " << mode_str;
@@ -1788,43 +1802,42 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallObj *op,
     return false;
   }
 
-  ICHECK_GE(CodegenOperands(op).size(), 4U)
-      << "Legalized PTO MODE_MERGING call must "
-         "contain a destination, operands, "
-         "mask, and mode";
+  ICHECK_GE(op->args.size(), 4U) << "Legalized PTO MODE_MERGING call must "
+                                    "contain a destination, operands, "
+                                    "mask, and mode";
   // The native destination carries the vector element type in PtrType.
   // GetMutableVectorRef resolves tensor_data_ptr/byte offsets and the retained
   // TileLang access marker to the owning local register slot.
   const PrimType result_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[0], PrimType::Void());
+      GetAnnotatedPointerDtype(op->args[0], PrimType::Void());
 
-  const bool is_rmw = IsCodegenOp(op, "tl.simd.vmula") ||
-                      IsCodegenOp(op, "tl.simd.vmadd") ||
-                      IsCodegenOp(op, "tl.simd.vaxpy");
+  const bool is_rmw = op->op.same_as(tl::simd_vmula()) ||
+                      op->op.same_as(tl::simd_vmadd()) ||
+                      op->op.same_as(tl::simd_vaxpy());
   const bool is_binary =
-      IsCodegenOp(op, "tl.simd.vadd") || IsCodegenOp(op, "tl.simd.vsub") ||
-      IsCodegenOp(op, "tl.simd.vmul") || IsCodegenOp(op, "tl.simd.vdiv") ||
-      IsCodegenOp(op, "tl.simd.vabsdif") || IsCodegenOp(op, "tl.simd.vmax") ||
-      IsCodegenOp(op, "tl.simd.vmin") || IsCodegenOp(op, "tl.simd.vand") ||
-      IsCodegenOp(op, "tl.simd.vor") || IsCodegenOp(op, "tl.simd.vxor") ||
-      IsCodegenOp(op, "tl.simd.vshl") || IsCodegenOp(op, "tl.simd.vshr");
+      op->op.same_as(tl::simd_vadd()) || op->op.same_as(tl::simd_vsub()) ||
+      op->op.same_as(tl::simd_vmul()) || op->op.same_as(tl::simd_vdiv()) ||
+      op->op.same_as(tl::simd_vabsdif()) || op->op.same_as(tl::simd_vmax()) ||
+      op->op.same_as(tl::simd_vmin()) || op->op.same_as(tl::simd_vand()) ||
+      op->op.same_as(tl::simd_vor()) || op->op.same_as(tl::simd_vxor()) ||
+      op->op.same_as(tl::simd_vshl()) || op->op.same_as(tl::simd_vshr());
   const bool is_vector_scalar =
-      IsCodegenOp(op, "tl.simd.vadds") || IsCodegenOp(op, "tl.simd.vmuls") ||
-      IsCodegenOp(op, "tl.simd.vmaxs") || IsCodegenOp(op, "tl.simd.vmins") ||
-      IsCodegenOp(op, "tl.simd.vshls") || IsCodegenOp(op, "tl.simd.vshrs");
+      op->op.same_as(tl::simd_vadds()) || op->op.same_as(tl::simd_vmuls()) ||
+      op->op.same_as(tl::simd_vmaxs()) || op->op.same_as(tl::simd_vmins()) ||
+      op->op.same_as(tl::simd_vshls()) || op->op.same_as(tl::simd_vshrs());
   const bool is_unary =
-      IsCodegenOp(op, "tl.simd.vabs") || IsCodegenOp(op, "tl.simd.vexp") ||
-      IsCodegenOp(op, "tl.simd.vln") || IsCodegenOp(op, "tl.simd.vsqrt") ||
-      IsCodegenOp(op, "tl.simd.vneg") || IsCodegenOp(op, "tl.simd.vrelu") ||
-      IsCodegenOp(op, "tl.simd.vnot");
+      op->op.same_as(tl::simd_vabs()) || op->op.same_as(tl::simd_vexp()) ||
+      op->op.same_as(tl::simd_vln()) || op->op.same_as(tl::simd_vsqrt()) ||
+      op->op.same_as(tl::simd_vneg()) || op->op.same_as(tl::simd_vrelu()) ||
+      op->op.same_as(tl::simd_vnot());
   const bool is_broadcast =
-      IsCodegenOp(op, "tl.simd.vdup") || IsCodegenOp(op, "tl.simd.vdupv");
+      op->op.same_as(tl::simd_vdup()) || op->op.same_as(tl::simd_vdupv());
   const bool is_reduction =
-      IsCodegenOp(op, "tl.simd.vcpadd") || IsCodegenOp(op, "tl.simd.vcadd") ||
-      IsCodegenOp(op, "tl.simd.vcmax") || IsCodegenOp(op, "tl.simd.vcmin") ||
-      IsCodegenOp(op, "tl.simd.vcgadd") || IsCodegenOp(op, "tl.simd.vcgmax") ||
-      IsCodegenOp(op, "tl.simd.vcgmin");
-  const bool is_vcvt = IsCodegenOp(op, "tl.simd.vcvt");
+      op->op.same_as(tl::simd_vcpadd()) || op->op.same_as(tl::simd_vcadd()) ||
+      op->op.same_as(tl::simd_vcmax()) || op->op.same_as(tl::simd_vcmin()) ||
+      op->op.same_as(tl::simd_vcgadd()) || op->op.same_as(tl::simd_vcgmax()) ||
+      op->op.same_as(tl::simd_vcgmin());
+  const bool is_vcvt = op->op.same_as(tl::simd_vcvt());
   ICHECK(is_rmw || is_binary || is_vector_scalar || is_unary || is_broadcast ||
          is_reduction || is_vcvt)
       << "PTO codegen does not support software MODE_MERGING for tl.simd."
@@ -1839,44 +1852,42 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallObj *op,
     // prepended by LegalizeSimdMerging.
     mask_idx = 2;
   }
-  ICHECK_LT(mask_idx, CodegenOperands(op).size() - 1)
+  ICHECK_LT(mask_idx, op->args.size() - 1)
       << "PTO MODE_MERGING call has no predicate operand";
 
   ICHECK_GT(result_dtype.lanes(), 1)
       << "PTO MODE_MERGING destination must be vector-typed, got "
       << result_dtype;
-  std::string dst_ref =
-      GetMutableVectorRef(CodegenOperands(op)[0], intrinsic_name);
-  std::string mask = PrintExpr_(CodegenOperands(op)[mask_idx]);
+  std::string dst_ref = GetMutableVectorRef(op->args[0], intrinsic_name);
+  std::string mask = PrintExpr_(op->args[mask_idx]);
   std::string result;
 
   if (is_rmw) {
-    ICHECK_EQ(CodegenOperands(op).size(), 5U)
+    ICHECK_EQ(op->args.size(), 5U)
         << "PTO SIMD read-modify-write merging op expects 5 arguments "
            "(dst, src0, src1/scalar, mask, mode)";
     std::ostringstream result_os;
     result_os << "pto." << intrinsic_name << "(";
-    if (IsCodegenOp(op, "tl.simd.vaxpy")) {
+    if (op->op.same_as(tl::simd_vaxpy())) {
       // PTODSL spells vaxpy as alpha * x + y; the mutable destination is y.
-      result_os << PrintExpr_(CodegenOperands(op)[2]) << ", "
-                << PrintExpr_(CodegenOperands(op)[1]) << ", " << dst_ref;
+      result_os << PrintExpr_(op->args[2]) << ", " << PrintExpr_(op->args[1])
+                << ", " << dst_ref;
     } else {
-      result_os << dst_ref << ", " << PrintExpr_(CodegenOperands(op)[1]) << ", "
-                << PrintExpr_(CodegenOperands(op)[2]);
+      result_os << dst_ref << ", " << PrintExpr_(op->args[1]) << ", "
+                << PrintExpr_(op->args[2]);
     }
     result_os << ", " << mask << ")";
     result = result_os.str();
   } else {
     ffi::Array<Expr> zeroing_args;
-    zeroing_args.reserve(CodegenOperands(op).size() - 1);
-    for (size_t i = 1; i < CodegenOperands(op).size(); ++i) {
-      zeroing_args.push_back(i + 1 == CodegenOperands(op).size()
+    zeroing_args.reserve(op->args.size() - 1);
+    for (size_t i = 1; i < op->args.size(); ++i) {
+      zeroing_args.push_back(i + 1 == op->args.size()
                                  ? Expr(StringImm(kModeZeroing))
-                                 : CodegenOperands(op)[i]);
+                                 : op->args[i]);
     }
-    Call zeroing_call = tl::MakeAnnotatedCall(
-        result_dtype, op->op.as_or_throw<Op>(), std::move(zeroing_args),
-        CodegenCallAnnotations(op), op->loc);
+    Call zeroing_call(result_dtype, op->op, std::move(zeroing_args), op->attrs,
+                      {result_dtype}, op->loc);
     result = PrintExpr_(zeroing_call);
     ICHECK(!result.empty()) << "PTO zeroing form for tl.simd." << intrinsic_name
                             << " did not produce a vector result";
@@ -1890,16 +1901,16 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallObj *op,
   const std::string input_mask = mask;
   // Reduction predicates select source lanes. Their results occupy a fixed
   // low-lane layout, so merge those result lanes rather than the source mask.
-  if (IsCodegenOp(op, "tl.simd.vcadd")) {
+  if (op->op.same_as(tl::simd_vcadd())) {
     mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL1\")";
-  } else if (IsCodegenOp(op, "tl.simd.vcmax") ||
-             IsCodegenOp(op, "tl.simd.vcmin")) {
+  } else if (op->op.same_as(tl::simd_vcmax()) ||
+             op->op.same_as(tl::simd_vcmin())) {
     mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL2\")";
-  } else if (IsCodegenOp(op, "tl.simd.vcgadd") ||
-             IsCodegenOp(op, "tl.simd.vcgmax") ||
-             IsCodegenOp(op, "tl.simd.vcgmin")) {
+  } else if (op->op.same_as(tl::simd_vcgadd()) ||
+             op->op.same_as(tl::simd_vcgmax()) ||
+             op->op.same_as(tl::simd_vcgmin())) {
     mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL8\")";
-  } else if (IsCodegenOp(op, "tl.simd.vcpadd")) {
+  } else if (op->op.same_as(tl::simd_vcpadd())) {
     // Pairwise adjacent-lane sums pack into the low half of the result
     // register. Write that result region unconditionally (pairs with no
     // active lanes contribute 0) and preserve the old high half.
@@ -1990,25 +2001,26 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   n_direction_by_mad_ = PTOMmadDirectionAnalyzer::Analyze(func);
   bool saw_copy_pad_value = false;
   bool has_uniform_const_copy_pad_value = true;
-  VisitAscendIR(func->body, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallObj>();
-    if (call == nullptr || !IsCodegenOp(call, "tl.ascend_set_copy_pad_value")) {
-      return;
-    }
-    ICHECK_EQ(CodegenOperands(call).size(), 1U);
-    PrimExpr value = CodegenOperands(call)[0].as_or_throw<PrimExpr>();
-    bool is_const =
-        value.as<IntImmObj>() != nullptr || value.as<FloatImmObj>() != nullptr;
-    if (!is_const) {
-      has_uniform_const_copy_pad_value = false;
-    } else if (!saw_copy_pad_value) {
-      uniform_const_copy_pad_value_ = value;
-    } else if (!ffi::StructuralEqual()(uniform_const_copy_pad_value_.value(),
-                                       value)) {
-      has_uniform_const_copy_pad_value = false;
-    }
-    saw_copy_pad_value = true;
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (!call->op.same_as(tl::ascend_set_copy_pad_value())) {
+          return ffi::WalkResult::Advance();
+        }
+        ICHECK_EQ(call->args.size(), 1U);
+        PrimExpr value = call->args[0].as_or_throw<PrimExpr>();
+        bool is_const = value.as<IntImmObj>() != nullptr ||
+                        value.as<FloatImmObj>() != nullptr;
+        if (!is_const) {
+          has_uniform_const_copy_pad_value = false;
+        } else if (!saw_copy_pad_value) {
+          uniform_const_copy_pad_value_ = value;
+        } else if (!ffi::StructuralEqual()(
+                       uniform_const_copy_pad_value_.value(), value)) {
+          has_uniform_const_copy_pad_value = false;
+        }
+        saw_copy_pad_value = true;
+        return ffi::WalkResult::Advance();
+      });
   if (!saw_copy_pad_value || !has_uniform_const_copy_pad_value) {
     uniform_const_copy_pad_value_ = std::nullopt;
   }
@@ -2036,19 +2048,19 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   }
   if (func_has_gemm_l1 || func_has_blockscaled_gemm_l1) {
     std::vector<Call> gemm_calls;
-    VisitAscendIR(func->body, [&](const ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>()) {
-        if (IsCodegenOp(call, "tl.ascend_gemm_l1") ||
-            IsCodegenOp(call, "tl.ascend_blockscaled_gemm_l1")) {
-          gemm_calls.push_back(GetRef<Call>(call));
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        func->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          if (call->op.same_as(tl::ascend_gemm_l1()) ||
+              call->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
+            gemm_calls.push_back(GetRef<Call>(call));
+          }
+          return ffi::WalkResult::Advance();
+        });
     ICHECK(!gemm_calls.empty());
     // Emit every helper while still at function scope. A configuration first
     // encountered inside control flow must not construct its helper there.
     for (const Call &call : gemm_calls) {
-      if (IsCodegenOp(call, "tl.ascend_gemm_l1")) {
+      if (call->op.same_as(tl::ascend_gemm_l1())) {
         EnsureGemmHelper(call.get());
       } else {
         EnsureBlockscaledGemmHelper(call.get());
@@ -2098,10 +2110,14 @@ void CodeGenTileLangPTO::PrintFunctionSignature_(
     if (index)
       os << ", ";
     os << AllocVarID(var.get()) << ": ";
-    if (var->ty.as<PtrTypeObj>() || var->ty.as<tirx::TensorTypeObj>()) {
-      const PtrType pointer = AscendPointerType(var);
-      const PrimType element = pointer->element_type.as_or_throw<PrimType>();
-      std::string scope = pointer->scope.name();
+    const auto *pointer = var->ty.as<PtrTypeObj>();
+    const auto tensor = var.as<tirx::TensorVar>();
+    if (pointer || tensor) {
+      const PrimType element =
+          tensor ? tensor->dtype()
+                 : pointer->element_type.as_or_throw<PrimType>();
+      std::string scope =
+          tensor ? tensor->scope().name() : pointer->scope.name();
       if (scope == "global")
         scope = "gm";
       else if (scope == "shared" || scope == "shared.dyn")
@@ -2195,79 +2211,88 @@ CodeGenTileLangPTO::ParseHardEventPair(const std::string &hard_event) const {
 
 bool CodeGenTileLangPTO::HasAscendGemmL1(const tirx::Function &func) const {
   bool found = false;
-  VisitAscendIR(func->body, [&](const ObjectRef &node) {
-    if (found)
-      return;
-    if (const auto *call = node.as<CallObj>()) {
-      found = IsCodegenOp(call, "tl.ascend_gemm_l1");
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (found)
+          return ffi::WalkResult::Advance();
+
+        found = call->op.same_as(tl::ascend_gemm_l1());
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
 bool CodeGenTileLangPTO::HasAscendBlockscaledGemmL1(
     const tirx::Function &func) const {
   bool found = false;
-  VisitAscendIR(func->body, [&](const ObjectRef &node) {
-    if (found)
-      return;
-    if (const auto *call = node.as<CallObj>()) {
-      found = IsCodegenOp(call, "tl.ascend_blockscaled_gemm_l1");
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (found)
+          return ffi::WalkResult::Advance();
+
+        found = call->op.same_as(tl::ascend_blockscaled_gemm_l1());
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
 bool CodeGenTileLangPTO::IsAscendCubeKernel(const tirx::Function &func) const {
   bool found = false;
-  VisitAscendIR(func->body, [&](const ObjectRef &node) {
-    if (found) {
-      return;
-    }
-    if (const auto *block = node.as<RegionStmtObj>()) {
-      found = PTOBlockName(block) == "CUBE";
-    }
-    if (const auto *call = node.as<CallObj>()) {
-      found = IsCodegenOp(call, "tl.ascend_gemm_l1") ||
-              IsCodegenOp(call, "tl.ascend_blockscaled_gemm_l1") ||
-              IsCodegenOp(call, "tl.ascend_mad") ||
-              IsCodegenOp(call, "tl.ascend_mad_mx") ||
-              IsCodegenOp(call, "tl.ascend_copy_gm_to_cbuf") ||
-              IsCodegenOp(call, "tl.ascend_fill_l1") ||
-              IsCodegenOp(call, "tl.ascend_load_cbuf_to_ca") ||
-              IsCodegenOp(call, "tl.ascend_load_cbuf_to_cb") ||
-              IsCodegenOp(call, "tl.ascend_load_ca_sf") ||
-              IsCodegenOp(call, "tl.ascend_load_cb_sf") ||
-              IsCodegenOp(call, "tl.ascend_copy_ubuf_to_cbuf") ||
-              IsCodegenOp(call, "tl.ascend_copy_matrix_cc_to_ub") ||
-              IsCodegenOp(call, "tl.ascend_copy_matrix_cc_to_gm");
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body,
+      [&](const RegionStmtObj *block) -> ffi::Expected<ffi::WalkResult> {
+        if (found)
+          return ffi::WalkResult::Advance();
+
+        found = PTOBlockName(block) == "CUBE";
+        return ffi::WalkResult::Advance();
+      },
+      [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (found)
+          return ffi::WalkResult::Advance();
+
+        found = call->op.same_as(tl::ascend_gemm_l1()) ||
+                call->op.same_as(tl::ascend_blockscaled_gemm_l1()) ||
+                call->op.same_as(tl::ascend_mad()) ||
+                call->op.same_as(tl::ascend_mad_mx()) ||
+                call->op.same_as(tl::ascend_copy_gm_to_cbuf()) ||
+                call->op.same_as(tl::ascend_fill_l1()) ||
+                call->op.same_as(tl::ascend_load_cbuf_to_ca()) ||
+                call->op.same_as(tl::ascend_load_cbuf_to_cb()) ||
+                call->op.same_as(tl::ascend_load_ca_sf()) ||
+                call->op.same_as(tl::ascend_load_cb_sf()) ||
+                call->op.same_as(tl::ascend_copy_ubuf_to_cbuf()) ||
+                call->op.same_as(tl::ascend_copy_matrix_cc_to_ub()) ||
+                call->op.same_as(tl::ascend_copy_matrix_cc_to_gm());
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
 bool CodeGenTileLangPTO::HasAscendMad(const tirx::Function &func) const {
   bool found = false;
-  VisitAscendIR(func->body, [&](const ObjectRef &node) {
-    if (found)
-      return;
-    if (const auto *call = node.as<CallObj>()) {
-      found = IsCodegenOp(call, "tl.ascend_mad") ||
-              IsCodegenOp(call, "tl.ascend_mad_mx");
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (found)
+          return ffi::WalkResult::Advance();
+
+        found = call->op.same_as(tl::ascend_mad()) ||
+                call->op.same_as(tl::ascend_mad_mx());
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
 bool CodeGenTileLangPTO::IsAscendMixedKernel(const tirx::Function &func) const {
   bool has_cube = false;
   bool has_vector = false;
-  VisitAscendIR(func->body, [&](const ObjectRef &node) {
-    if (const auto *block = node.as<RegionStmtObj>()) {
-      has_cube = has_cube || PTOBlockName(block) == "CUBE";
-      has_vector = has_vector || PTOBlockName(block) == "VECTOR";
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      func->body,
+      [&](const RegionStmtObj *block) -> ffi::Expected<ffi::WalkResult> {
+        has_cube = has_cube || PTOBlockName(block) == "CUBE";
+        has_vector = has_vector || PTOBlockName(block) == "VECTOR";
+        return ffi::WalkResult::Advance();
+      });
   return has_cube && has_vector;
 }
 
@@ -2279,18 +2304,18 @@ bool CodeGenTileLangPTO::IsInlineableInvariantSimdBind(
   }
   // Predicate masks are pure; inlining avoids mask SSA escaping across
   // range()/scf.for (e.g. SwiGLU backward one_mask used after the reduce loop).
-  if (IsCodegenOp(call, "tl.simd.pset")) {
+  if (call->op.same_as(tl::simd_pset())) {
     return true;
   }
   // Broadcasts of immediates are rematerializable.
-  if (!(IsCodegenOp(call, "tl.simd.vdup") ||
-        IsCodegenOp(call, "tl.simd.vdupv"))) {
+  if (!(call->op.same_as(tl::simd_vdup()) ||
+        call->op.same_as(tl::simd_vdupv()))) {
     return false;
   }
-  if (CodegenOperands(call).empty()) {
+  if (call->args.empty()) {
     return false;
   }
-  PrimExpr scalar = PeelScalarCasts(CodegenOperands(call)[0]);
+  PrimExpr scalar = PeelScalarCasts(call->args[0]);
   if (IsImmediateScalar(scalar)) {
     return true;
   }
@@ -2315,32 +2340,35 @@ void CodeGenTileLangPTO::ExtractSimtThreadExtents(const RegionStmtObj *region,
                                                   int64_t *thread_z) const {
   *thread_x = *thread_y = *thread_z = 1;
   std::unordered_map<std::string, int64_t> seen;
-  VisitAscendIR(region->body, [&](const ffi::ObjectRef &node) {
-    const auto *launch = node.as<RegionStmtObj>();
-    if (!launch || !launch->op.same_as(tirx::launch_thread_op()))
-      return;
-    TVM_FFI_CHECK(launch->args.size() == 2 && launch->body_params.size() == 1 &&
-                      launch->result_vars.empty(),
-                  ValueError)
-        << "Malformed native PTO thread launch";
-    const std::string tag = launch->args[0].as_or_throw<StringImm>()->value;
-    int64_t *dimension = nullptr;
-    if (tag == "threadIdx.x")
-      dimension = thread_x;
-    else if (tag == "threadIdx.y")
-      dimension = thread_y;
-    else if (tag == "threadIdx.z")
-      dimension = thread_z;
-    else
-      return;
-    const int64_t extent = CodegenInt(launch->args[1]);
-    TVM_FFI_CHECK_GT(extent, 0, ValueError)
-        << "PTO inline SIMT launch dimensions must be positive";
-    auto [it, inserted] = seen.emplace(tag, extent);
-    TVM_FFI_CHECK(inserted || it->second == extent, ValueError)
-        << "Conflicting PTO SIMT extents for " << tag;
-    *dimension = extent;
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      region->body,
+      [&](const RegionStmtObj *launch) -> ffi::Expected<ffi::WalkResult> {
+        if (!launch->op.same_as(tirx::launch_thread_op()))
+          return ffi::WalkResult::Advance();
+        TVM_FFI_CHECK(launch->args.size() == 2 &&
+                          launch->body_params.size() == 1 &&
+                          launch->result_vars.empty(),
+                      ValueError)
+            << "Malformed native PTO thread launch";
+        const std::string tag = launch->args[0].as_or_throw<StringImm>()->value;
+        int64_t *dimension = nullptr;
+        if (tag == "threadIdx.x")
+          dimension = thread_x;
+        else if (tag == "threadIdx.y")
+          dimension = thread_y;
+        else if (tag == "threadIdx.z")
+          dimension = thread_z;
+        else
+          return ffi::WalkResult::Advance();
+        const int64_t extent = CodegenInt(launch->args[1]);
+        TVM_FFI_CHECK_GT(extent, 0, ValueError)
+            << "PTO inline SIMT launch dimensions must be positive";
+        auto [it, inserted] = seen.emplace(tag, extent);
+        TVM_FFI_CHECK(inserted || it->second == extent, ValueError)
+            << "Conflicting PTO SIMT extents for " << tag;
+        *dimension = extent;
+        return ffi::WalkResult::Advance();
+      });
 }
 
 void CodeGenTileLangPTO::EmitInlineSimtVF(const RegionStmtObj *op,
@@ -2394,7 +2422,7 @@ std::string CodeGenTileLangPTO::GetPointerExpr(const VarObj *buffer_var,
     return base;
   }
 
-  PrimExpr ptr_index = NormalizeAscendVectorIndex(index, index_analyzer_);
+  PrimExpr ptr_index = ascend::NormalizeVectorIndex(index, index_analyzer_);
   if (const auto *ramp = ptr_index.as<prim::RampObj>()) {
     CheckContiguousRampStride(ptr_index, "pointer address");
     ptr_index = tl::CreateTileLangAnalyzer()->Simplify(ramp->base);
@@ -2478,7 +2506,7 @@ CodeGenTileLangPTO::GetMutableVectorRef(const Expr &address,
 }
 
 std::string CodeGenTileLangPTO::PrintCondition(const Expr &condition) {
-  PrimType dtype = CodegenDType(condition);
+  PrimType dtype = condition->ty.as_or_throw<PrimType>();
   ICHECK(dtype.IsScalar() &&
          (dtype.MatchesCode(kDLBool) || dtype.MatchesCode(kDLInt) ||
           dtype.MatchesCode(kDLUInt)))
@@ -2746,11 +2774,11 @@ void CodeGenTileLangPTO::EmitBufferAllocation(const VarObj *buffer) {
 }
 
 std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 11U)
+  ICHECK_EQ(op->args.size(), 11U)
       << "tl.ascend_copy_gm_to_ubuf expects exactly 11 arguments";
   int64_t sid = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[2], &sid) && sid == 0)
-      << "PTO GM->UB MTE requires sid == 0, got " << CodegenOperands(op)[2];
+  ICHECK(TryGetConstInt(op->args[2], &sid) && sid == 0)
+      << "PTO GM->UB MTE requires sid == 0, got " << op->args[2];
 
   const VarObj *dst_var = nullptr;
   const VarObj *src_var = nullptr;
@@ -2760,10 +2788,10 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
   std::string src_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO GM->UB MTE destination",
-                   &dst_var, &dst_index, &dst_dtype, &dst_scope);
-  GetCopyEndpoint_(CodegenOperands(op)[1], "PTO GM->UB MTE source", &src_var,
-                   &src_index, &src_dtype, &src_scope);
+  GetCopyEndpoint_(op->args[0], "PTO GM->UB MTE destination", &dst_var,
+                   &dst_index, &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO GM->UB MTE source", &src_var, &src_index,
+                   &src_dtype, &src_scope);
   ICHECK(dst_scope == "shared" || dst_scope == "shared.dyn")
       << "PTO GM->UB MTE destination must use shared/shared.dyn (UB) "
          "storage, got scope `"
@@ -2776,28 +2804,27 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
       << src_dtype << ", destination is " << dst_dtype;
 
   int64_t data_select = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[7], &data_select) &&
+  ICHECK(TryGetConstInt(op->args[7], &data_select) &&
          (data_select == 0 || data_select == 1))
       << "PTO GM->UB MTE requires dataSelect to be the constant 0 or 1, got "
-      << CodegenOperands(op)[7];
+      << op->args[7];
   std::string left_padding =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[5]));
+      RemoveOutermostParentheses(PrintExpr_(op->args[5]));
   std::string right_padding =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[6]));
+      RemoveOutermostParentheses(PrintExpr_(op->args[6]));
   if (data_select == 0) {
     sym::Analyzer padding_analyzer;
     ICHECK(padding_analyzer->CanProveEqual(
-               CodegenOperands(op)[5].as_or_throw<PrimExpr>(),
-               PTOZero(CodegenDType(CodegenOperands(op)[5]))) &&
+               op->args[5].as_or_throw<PrimExpr>(),
+               PTOZero(op->args[5]->ty.as_or_throw<PrimType>())) &&
            padding_analyzer->CanProveEqual(
-               CodegenOperands(op)[6].as_or_throw<PrimExpr>(),
-               PTOZero(CodegenDType(CodegenOperands(op)[6]))))
+               op->args[6].as_or_throw<PrimExpr>(),
+               PTOZero(op->args[6]->ty.as_or_throw<PrimType>())))
         << "PTO GM->UB MTE cannot use left/right padding when dataSelect == 0";
   }
   int64_t l2_cache_ctrl = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[8], &l2_cache_ctrl))
-      << "PTO GM->UB MTE requires constant l2_cache_ctl, got "
-      << CodegenOperands(op)[8];
+  ICHECK(TryGetConstInt(op->args[8], &l2_cache_ctrl))
+      << "PTO GM->UB MTE requires constant l2_cache_ctl, got " << op->args[8];
   ICHECK_GE(l2_cache_ctrl, 0)
       << "PTO GM->UB MTE l2_cache_ctl must be in [0, 15], got "
       << l2_cache_ctrl;
@@ -2805,12 +2832,10 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
       << "PTO GM->UB MTE l2_cache_ctl must be in [0, 15], got "
       << l2_cache_ctrl;
 
-  std::string dst =
-      current_function_is_cube_
-          ? GetLocalPtrExpr(CodegenOperands(op)[0], "ub", dst_dtype)
-          : RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[0]));
-  std::string src =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
+  std::string dst = current_function_is_cube_
+                        ? GetLocalPtrExpr(op->args[0], "ub", dst_dtype)
+                        : RemoveOutermostParentheses(PrintExpr_(op->args[0]));
+  std::string src = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
   // Match the Ascend target's no-padding GM->UB behavior, which emits uint8_t
   // pointers when no padding is requested
   if (data_select == 0) {
@@ -2821,14 +2846,10 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
       dst = "pto.castptr(" + dst + ", pto.ptr(pto.ui8, \"ub\"))";
     }
   }
-  std::string burst_num =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
-  std::string burst_len =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[4]));
-  std::string src_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[9]));
-  std::string dst_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[10]));
+  std::string burst_num = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string burst_len = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
+  std::string src_stride = RemoveOutermostParentheses(PrintExpr_(op->args[9]));
+  std::string dst_stride = RemoveOutermostParentheses(PrintExpr_(op->args[10]));
 
   std::ostringstream os;
   os << "pto.mte_gm_ub(" << src << ", " << dst << ", " << l2_cache_ctrl << ", "
@@ -2857,11 +2878,11 @@ std::string CodeGenTileLangPTO::GetAscendCopyGmUbExpr_(const CallObj *op) {
 }
 
 std::string CodeGenTileLangPTO::GetAscendCopyUbGmExpr_(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 8U)
+  ICHECK_EQ(op->args.size(), 8U)
       << "tl.ascend_copy_ubuf_to_gm expects exactly 8 arguments";
   int64_t sid = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[2], &sid) && sid == 0)
-      << "PTO UB->GM MTE requires sid == 0, got " << CodegenOperands(op)[2];
+  ICHECK(TryGetConstInt(op->args[2], &sid) && sid == 0)
+      << "PTO UB->GM MTE requires sid == 0, got " << op->args[2];
 
   const VarObj *dst_var = nullptr;
   const VarObj *src_var = nullptr;
@@ -2871,10 +2892,10 @@ std::string CodeGenTileLangPTO::GetAscendCopyUbGmExpr_(const CallObj *op) {
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
   std::string src_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO UB->GM MTE destination",
-                   &dst_var, &dst_index, &dst_dtype, &dst_scope);
-  GetCopyEndpoint_(CodegenOperands(op)[1], "PTO UB->GM MTE source", &src_var,
-                   &src_index, &src_dtype, &src_scope);
+  GetCopyEndpoint_(op->args[0], "PTO UB->GM MTE destination", &dst_var,
+                   &dst_index, &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO UB->GM MTE source", &src_var, &src_index,
+                   &src_dtype, &src_scope);
   ICHECK(dst_scope.empty() || dst_scope == "global")
       << "PTO UB->GM MTE destination must use global (GM) storage, got scope `"
       << dst_scope << "`";
@@ -2885,27 +2906,20 @@ std::string CodeGenTileLangPTO::GetAscendCopyUbGmExpr_(const CallObj *op) {
   ICHECK(IsStorageDtypeCompatible(dst_dtype, src_dtype))
       << "PTO UB->GM MTE does not support dtype conversion: source is "
       << src_dtype << ", destination is " << dst_dtype;
-  ValidateUBCopyLayout_(src_index, src_dtype,
-                        CodegenOperands(op)[3].as_or_throw<PrimExpr>(),
-                        CodegenOperands(op)[4].as_or_throw<PrimExpr>(),
-                        CodegenOperands(op)[7].as_or_throw<PrimExpr>(),
-                        PTOZero(PrimType::Int(32)), PTOZero(PrimType::Int(32)),
-                        false, "PTO UB->GM MTE source");
-  std::string dst =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[0]));
-  std::string src =
-      current_function_is_cube_
-          ? GetLocalPtrExpr(CodegenOperands(op)[1], "ub", src_dtype)
-          : RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
-  std::string burst_num =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
-  std::string burst_len =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[4]));
-  std::string l2_cache = StoreL2CacheName(CodegenOperands(op)[5]);
-  std::string dst_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[6]));
-  std::string src_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[7]));
+  ValidateUBCopyLayout_(
+      src_index, src_dtype, op->args[3].as_or_throw<PrimExpr>(),
+      op->args[4].as_or_throw<PrimExpr>(), op->args[7].as_or_throw<PrimExpr>(),
+      PTOZero(PrimType::Int(32)), PTOZero(PrimType::Int(32)), false,
+      "PTO UB->GM MTE source");
+  std::string dst = RemoveOutermostParentheses(PrintExpr_(op->args[0]));
+  std::string src = current_function_is_cube_
+                        ? GetLocalPtrExpr(op->args[1], "ub", src_dtype)
+                        : RemoveOutermostParentheses(PrintExpr_(op->args[1]));
+  std::string burst_num = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string burst_len = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
+  std::string l2_cache = StoreL2CacheName(op->args[5]);
+  std::string dst_stride = RemoveOutermostParentheses(PrintExpr_(op->args[6]));
+  std::string src_stride = RemoveOutermostParentheses(PrintExpr_(op->args[7]));
 
   std::ostringstream os;
   os << "pto.mte_ub_gm(" << src << ", " << dst << ", " << burst_len
@@ -2915,9 +2929,9 @@ std::string CodeGenTileLangPTO::GetAscendCopyUbGmExpr_(const CallObj *op) {
 }
 
 void CodeGenTileLangPTO::RecordAscendCopyPadValue_(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 1U)
+  ICHECK_EQ(op->args.size(), 1U)
       << "tl.ascend_set_copy_pad_value expects exactly 1 argument";
-  PrimType dtype = CodegenDType(CodegenOperands(op)[0]);
+  PrimType dtype = op->args[0]->ty.as_or_throw<PrimType>();
   int bits = dtype.bits();
   bool supported =
       dtype.IsScalar() &&
@@ -2933,13 +2947,13 @@ void CodeGenTileLangPTO::RecordAscendCopyPadValue_(const CallObj *op) {
   current_copy_pad_value_dtype_ = dtype;
   PrintIndent();
   stream << "tl_copy_pad_" << current_copy_pad_value_id_ << " = "
-         << GetCopyPadValueExpr_(CodegenOperands(op)[0]) << "\n";
+         << GetCopyPadValueExpr_(op->args[0]) << "\n";
 }
 
 void CodeGenTileLangPTO::EmitAscendSetAtomic(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  ICHECK_EQ(op->args.size(), 2U)
       << "tl.ascend_set_atomic expects exactly 2 arguments (op, typed_zero)";
-  const auto *atomic_op = CodegenOperands(op)[0].as<StringImmObj>();
+  const auto *atomic_op = op->args[0].as<StringImmObj>();
   ICHECK(atomic_op)
       << "tl.ascend_set_atomic operation must be a compile-time string";
   ICHECK(atomic_op->value == "add" || atomic_op->value == "max" ||
@@ -2947,7 +2961,7 @@ void CodeGenTileLangPTO::EmitAscendSetAtomic(const CallObj *op) {
       << "PTO store atomic operation must be add, max, or min, got "
       << atomic_op->value;
 
-  PrimType dtype = CodegenDType(CodegenOperands(op)[1]);
+  PrimType dtype = op->args[1]->ty.as_or_throw<PrimType>();
   std::string type_suffix = AtomicTypeSuffix(dtype);
   auto emit_type = [&]() {
     PrintIndent();
@@ -2983,7 +2997,7 @@ std::string CodeGenTileLangPTO::GetCopyPadValueExpr_(const Expr &value) {
     std::ostringstream literal;
     literal << imm->value;
     return "pto.const(" + literal.str() +
-           ", dtype=" + ScalarType(CodegenDType(value)) + ")";
+           ", dtype=" + ScalarType(value->ty.as_or_throw<PrimType>()) + ")";
   }
   if (const auto *imm = value.as<FloatImmObj>()) {
     std::ostringstream literal;
@@ -2998,7 +3012,7 @@ std::string CodeGenTileLangPTO::GetCopyPadValueExpr_(const Expr &value) {
               << imm->value;
     }
     return "pto.const(" + literal.str() +
-           ", dtype=" + ScalarType(CodegenDType(value)) + ")";
+           ", dtype=" + ScalarType(value->ty.as_or_throw<PrimType>()) + ")";
   }
   return RemoveOutermostParentheses(PrintExpr_(value));
 }
@@ -3105,14 +3119,14 @@ void CodeGenTileLangPTO::ValidateUBCopyLayout_(
 }
 
 void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 26U)
+  ICHECK_EQ(op->args.size(), 26U)
       << "tl.ascend_copy_matrix_cc_to_ub expects exactly 26 arguments";
 
   auto require_const = [&](size_t index, const char *name) {
     int64_t value = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[index], &value))
+    ICHECK(TryGetConstInt(op->args[index], &value))
         << "PTO L0C->UB MTE requires constant " << name << ", got "
-        << CodegenOperands(op)[index];
+        << op->args[index];
     return value;
   };
   auto require_zero = [&](size_t index, const char *name) {
@@ -3125,24 +3139,18 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallObj *op) {
   ICHECK_EQ(sid, 0) << "PTO L0C->UB MTE requires sid == 0, got " << sid;
   int64_t n_size_const = 0;
   int64_t m_size_const = 0;
-  const bool has_const_n_size =
-      TryGetConstInt(CodegenOperands(op)[3], &n_size_const);
-  const bool has_const_m_size =
-      TryGetConstInt(CodegenOperands(op)[4], &m_size_const);
-  std::string n_size =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
-  std::string m_size =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[4]));
+  const bool has_const_n_size = TryGetConstInt(op->args[3], &n_size_const);
+  const bool has_const_m_size = TryGetConstInt(op->args[4], &m_size_const);
+  std::string n_size = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string m_size = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
   int64_t dst_stride_const = 0;
   int64_t src_stride_const = 0;
   const bool has_const_dst_stride =
-      TryGetConstInt(CodegenOperands(op)[5], &dst_stride_const);
+      TryGetConstInt(op->args[5], &dst_stride_const);
   const bool has_const_src_stride =
-      TryGetConstInt(CodegenOperands(op)[6], &src_stride_const);
-  std::string dst_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[5]));
-  std::string src_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[6]));
+      TryGetConstInt(op->args[6], &src_stride_const);
+  std::string dst_stride = RemoveOutermostParentheses(PrintExpr_(op->args[5]));
+  std::string src_stride = RemoveOutermostParentheses(PrintExpr_(op->args[6]));
   ICHECK(!has_const_m_size || m_size_const > 0)
       << "PTO L0C->UB MTE requires m_size > 0";
   ICHECK(!has_const_n_size || n_size_const > 0)
@@ -3203,10 +3211,10 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallObj *op) {
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
   std::string src_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO L0C->UB MTE destination",
-                   &dst_var, &dst_index, &dst_dtype, &dst_scope);
-  GetCopyEndpoint_(CodegenOperands(op)[1], "PTO L0C->UB MTE source", &src_var,
-                   &src_index, &src_dtype, &src_scope);
+  GetCopyEndpoint_(op->args[0], "PTO L0C->UB MTE destination", &dst_var,
+                   &dst_index, &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO L0C->UB MTE source", &src_var, &src_index,
+                   &src_dtype, &src_scope);
   ICHECK(dst_scope == "shared" || dst_scope == "shared.dyn")
       << "PTO L0C->UB MTE destination must use shared/shared.dyn (UB) "
          "storage, got scope `"
@@ -3225,11 +3233,11 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallObj *op) {
       MakeConst(PrimType::Int(32), 0), MakeConst(PrimType::Int(32), 0), false,
       "PTO L0C->UB MTE destination");
 
-  std::string src = GetAccPtrExpr(CodegenOperands(op)[1], src_dtype);
+  std::string src = GetAccPtrExpr(op->args[1], src_dtype);
   // Cube-local L1/L0C/UB allocations are represented as byte addresses in the
   // generated PTODSL. Materialize the UB address as a typed pointer instead of
   // forwarding the i64 allocation alias directly to mte_l0c_ub.
-  std::string dst = GetLocalPtrExpr(CodegenOperands(op)[0], "ub", dst_dtype);
+  std::string dst = GetLocalPtrExpr(op->args[0], "ub", dst_dtype);
   PrintIndent();
   stream << "pto.mte_l0c_ub(" << src << ", " << dst << ", " << m_size << ", "
          << n_size << ", " << src_stride << ", " << dst_stride;
@@ -3373,7 +3381,7 @@ void CodeGenTileLangPTO::RestoreMixedSectionVariables(
 
 const CodeGenTileLangPTO::PTOGemmEmitContext &
 CodeGenTileLangPTO::EnsureGemmHelper(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 12U)
+  ICHECK_EQ(op->args.size(), 12U)
       << "tl.ascend_gemm_l1 expects exactly 12 arguments";
   int64_t tile_m = ConstArgDim(op, 3, "tl.ascend_gemm_l1 M");
   int64_t tile_k = ConstArgDim(op, 4, "tl.ascend_gemm_l1 K");
@@ -3383,7 +3391,7 @@ CodeGenTileLangPTO::EnsureGemmHelper(const CallObj *op) {
   ICHECK_EQ(trans_b, 1) << "PTO GEMM L1 helper currently requires trans_b=1";
   ICHECK_EQ(tile_k % base_k, 0);
 
-  const auto *dtype_name = CodegenOperands(op)[9].as<StringImmObj>();
+  const auto *dtype_name = op->args[9].as<StringImmObj>();
   ICHECK(dtype_name) << "PTO GEMM L1 helper requires a constant input dtype "
                         "string at tl.ascend_gemm_l1 arg 9";
   PrimType input_dtype = ParseDataType(dtype_name->value);
@@ -3392,10 +3400,8 @@ CodeGenTileLangPTO::EnsureGemmHelper(const CallObj *op) {
          "float8_e4m3fn, and float8_e5m2 inputs, got "
       << input_dtype;
 
-  PrimType a_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[1], input_dtype);
-  PrimType b_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[2], input_dtype);
+  PrimType a_dtype = GetAnnotatedPointerDtype(op->args[1], input_dtype);
+  PrimType b_dtype = GetAnnotatedPointerDtype(op->args[2], input_dtype);
   ICHECK(a_dtype == input_dtype)
       << "PTO GEMM L1 A pointer dtype must match input dtype " << input_dtype
       << ", got " << a_dtype;
@@ -3404,7 +3410,7 @@ CodeGenTileLangPTO::EnsureGemmHelper(const CallObj *op) {
       << ", got " << b_dtype;
 
   PrimType accum_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[0], PrimType::Float(32));
+      GetAnnotatedPointerDtype(op->args[0], PrimType::Float(32));
   ICHECK(accum_dtype.MatchesCode(kDLFloat) && accum_dtype.bits() == 32)
       << "PTO GEMM L1 helper currently only supports float32 accum/output, got "
       << accum_dtype;
@@ -3473,7 +3479,7 @@ CodeGenTileLangPTO::EnsureGemmHelper(const CallObj *op) {
 
 const CodeGenTileLangPTO::PTOGemmEmitContext &
 CodeGenTileLangPTO::EnsureBlockscaledGemmHelper(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 18U)
+  ICHECK_EQ(op->args.size(), 18U)
       << "tl.ascend_blockscaled_gemm_l1 expects exactly 18 arguments";
   int64_t tile_m = ConstArgDim(op, 5, "tl.ascend_blockscaled_gemm_l1 M");
   int64_t tile_k = ConstArgDim(op, 6, "tl.ascend_blockscaled_gemm_l1 K");
@@ -3488,7 +3494,7 @@ CodeGenTileLangPTO::EnsureBlockscaledGemmHelper(const CallObj *op) {
       << "PTO blockscaled GEMM requires tile_k_sub multiple of 64, got "
       << base_k;
 
-  const auto *dtype_name = CodegenOperands(op)[11].as<StringImmObj>();
+  const auto *dtype_name = op->args[11].as<StringImmObj>();
   ICHECK(dtype_name) << "PTO blockscaled GEMM L1 helper requires a constant "
                         "input dtype string at arg 11";
   PrimType input_dtype = ParseDataType(dtype_name->value);
@@ -3497,10 +3503,8 @@ CodeGenTileLangPTO::EnsureBlockscaledGemmHelper(const CallObj *op) {
          "float8_e4m3fn inputs, got "
       << input_dtype;
 
-  PrimType a_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[1], input_dtype);
-  PrimType b_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[2], input_dtype);
+  PrimType a_dtype = GetAnnotatedPointerDtype(op->args[1], input_dtype);
+  PrimType b_dtype = GetAnnotatedPointerDtype(op->args[2], input_dtype);
   ICHECK(a_dtype == input_dtype)
       << "PTO blockscaled GEMM L1 A pointer dtype must match input dtype "
       << input_dtype << ", got " << a_dtype;
@@ -3509,7 +3513,7 @@ CodeGenTileLangPTO::EnsureBlockscaledGemmHelper(const CallObj *op) {
       << input_dtype << ", got " << b_dtype;
 
   PrimType accum_dtype =
-      GetAnnotatedPointerDtype(CodegenOperands(op)[0], PrimType::Float(32));
+      GetAnnotatedPointerDtype(op->args[0], PrimType::Float(32));
   ICHECK(accum_dtype.MatchesCode(kDLFloat) && accum_dtype.bits() == 32)
       << "PTO blockscaled GEMM L1 helper currently only supports float32 "
          "accum/output, got "
@@ -3522,7 +3526,7 @@ CodeGenTileLangPTO::EnsureBlockscaledGemmHelper(const CallObj *op) {
          "sf_nz_stride="
       << sf_nz_stride << ", tile_k_sub=" << base_k;
 
-  CheckConstZero(CodegenOperands(op)[14].as_or_throw<PrimExpr>(),
+  CheckConstZero(op->args[14].as_or_throw<PrimExpr>(),
                  "blockscaled GEMM buf_offset");
 
   Call call = GetRef<Call>(op);
@@ -3614,39 +3618,38 @@ void CodeGenTileLangPTO::ValidateFractalAddressAlignment_(
 }
 
 void CodeGenTileLangPTO::EmitAscendCopyGmToCbuf(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 12U)
+  ICHECK_EQ(op->args.size(), 12U)
       << "tl.ascend_copy_gm_to_cbuf expects exactly 12 arguments";
   auto require_const = [&](size_t index, const char *name) {
     int64_t value = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[index], &value))
+    ICHECK(TryGetConstInt(op->args[index], &value))
         << "PTO GM->L1 MTE requires constant " << name << ", got "
-        << CodegenOperands(op)[index];
+        << op->args[index];
     return value;
   };
 
   int64_t sid = require_const(2, "sid");
   int64_t src_inner_stride = 0;
   bool has_const_src_inner_stride =
-      TryGetConstInt(CodegenOperands(op)[3], &src_inner_stride);
+      TryGetConstInt(op->args[3], &src_inner_stride);
 
   int64_t l2_cache_ctrl = require_const(4, "l2_cache_ctrl");
 
   int64_t n_value = 0;
-  bool has_const_n_value = TryGetConstInt(CodegenOperands(op)[5], &n_value);
+  bool has_const_n_value = TryGetConstInt(op->args[5], &n_value);
 
   int64_t d_value = 0;
-  bool has_const_d_value = TryGetConstInt(CodegenOperands(op)[6], &d_value);
+  bool has_const_d_value = TryGetConstInt(op->args[6], &d_value);
 
   int64_t src_outer_stride = 0;
   bool has_const_src_outer_stride =
-      TryGetConstInt(CodegenOperands(op)[7], &src_outer_stride);
+      TryGetConstInt(op->args[7], &src_outer_stride);
 
   int64_t smallc0_en = require_const(8, "smallc0_en");
   int64_t transpose = require_const(9, "transpose");
 
   int64_t dst_n_value = 0;
-  bool has_const_dst_n_value =
-      TryGetConstInt(CodegenOperands(op)[10], &dst_n_value);
+  bool has_const_dst_n_value = TryGetConstInt(op->args[10], &dst_n_value);
 
   ICHECK_EQ(sid, 0) << "PTO GM->L1 MTE requires sid == 0, got " << sid;
   ICHECK(!has_const_src_inner_stride || src_inner_stride > 0)
@@ -3687,7 +3690,7 @@ void CodeGenTileLangPTO::EmitAscendCopyGmToCbuf(const CallObj *op) {
   // Packed scale factors are logically stored as 8-bit values but transferred
   // as uint16 pairs. Mirror AscendC's physical pointer casts while retaining
   // the common argument, scope, alignment, and stride validation.
-  const auto *physical_dtype_imm = CodegenOperands(op)[11].as<StringImmObj>();
+  const auto *physical_dtype_imm = op->args[11].as<StringImmObj>();
   ICHECK(physical_dtype_imm)
       << "PTO GM->L1 MTE requires a constant physical_dtype string";
   bool has_physical = !physical_dtype_imm->value.empty();
@@ -3714,10 +3717,10 @@ void CodeGenTileLangPTO::EmitAscendCopyGmToCbuf(const CallObj *op) {
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
   std::string src_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO GM->L1 MTE destination",
-                   &dst_var, &dst_index, &dst_dtype, &dst_scope);
-  GetCopyEndpoint_(CodegenOperands(op)[1], "PTO GM->L1 MTE source", &src_var,
-                   &src_index, &src_dtype, &src_scope);
+  GetCopyEndpoint_(op->args[0], "PTO GM->L1 MTE destination", &dst_var,
+                   &dst_index, &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO GM->L1 MTE source", &src_var, &src_index,
+                   &src_dtype, &src_scope);
   ICHECK(dst_scope == "shared.l1" || dst_scope == "shared.l1.dyn")
       << "PTO GM->L1 MTE destination must use shared.l1 storage, got scope `"
       << dst_scope << "`";
@@ -3763,96 +3766,90 @@ void CodeGenTileLangPTO::EmitAscendCopyGmToCbuf(const CallObj *op) {
       << " physical elements of " << transfer_dtype;
 
   std::string dst;
-  std::string src =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
+  std::string src = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
   if (has_physical) {
     // Reinterpreting packed elements changes the pointee type, not the
     // complete arena/view address carried by the native pointer.
-    dst = "pto.castptr(" + PrintExpr_(CodegenOperands(op)[0]) + ", " +
+    dst = "pto.castptr(" + PrintExpr_(op->args[0]) + ", " +
           PointerTypeName(transfer_dtype, "mat") + ")";
     if (src_dtype != transfer_dtype) {
       src = "pto.castptr(" + src + ", " +
             PointerTypeName(transfer_dtype, "gm") + ")";
     }
   } else {
-    dst = GetLocalPtrExpr(CodegenOperands(op)[0], "mat", dst_dtype);
+    dst = GetLocalPtrExpr(op->args[0], "mat", dst_dtype);
   }
 
   PrintIndent();
   stream << "pto.mte_gm_l1_frac(" << src << ", " << dst << ", "
          << (transpose == 0 ? "pto.FractalMode.ND2NZ" : "pto.FractalMode.DN2NZ")
-         << ", shape=(" << PrintExpr_(CodegenOperands(op)[5]) << ", "
-         << PrintExpr_(CodegenOperands(op)[6]) << "), src_layout=("
-         << PrintExpr_(CodegenOperands(op)[3]);
-  if (!IsZero(CodegenOperands(op)[7].as_or_throw<PrimExpr>())) {
-    stream << ", " << PrintExpr_(CodegenOperands(op)[7]);
+         << ", shape=(" << PrintExpr_(op->args[5]) << ", "
+         << PrintExpr_(op->args[6]) << "), src_layout=("
+         << PrintExpr_(op->args[3]);
+  if (!IsZero(op->args[7].as_or_throw<PrimExpr>())) {
+    stream << ", " << PrintExpr_(op->args[7]);
   }
-  stream << ",), dst_group=(1, 1, " << PrintExpr_(CodegenOperands(op)[10])
+  stream << ",), dst_group=(1, 1, " << PrintExpr_(op->args[10])
          << ", 0), ctrl=(" << l2_cache_ctrl << ", "
          << (smallc0_en == 0 ? "False" : "True") << "))\n";
 }
 
 void CodeGenTileLangPTO::EmitAscendFillL1(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 7U)
+  ICHECK_EQ(op->args.size(), 7U)
       << "tl.ascend_fill_l1 expects exactly 7 arguments";
 
   const VarObj *dst_var = nullptr;
   PrimExpr dst_index = MakeConst(PrimType::Int(32), 0);
   PrimType dst_dtype = PrimType::Void();
   std::string dst_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO L1 fill destination", &dst_var,
-                   &dst_index, &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[0], "PTO L1 fill destination", &dst_var, &dst_index,
+                   &dst_dtype, &dst_scope);
   ICHECK(dst_scope == "shared.l1" || dst_scope == "shared.l1.dyn")
       << "PTO L1 fill destination must use shared.l1 storage, got scope `"
       << dst_scope << "`";
 
   int64_t fill_word_bits = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[6], &fill_word_bits) &&
+  ICHECK(TryGetConstInt(op->args[6], &fill_word_bits) &&
          (fill_word_bits == 16 || fill_word_bits == 32))
       << "PTO L1 fill requires fill_word_bits to be constant 16 or 32";
 
   PrintIndent();
-  stream << "pto.raw_fill_l1("
-         << GetLocalPtrExpr(CodegenOperands(op)[0], "mat", dst_dtype)
-         << ", byte_offset=" << PrintExpr_(CodegenOperands(op)[1])
-         << ", raw_value=" << PrintExpr_(CodegenOperands(op)[2])
-         << ", repeat_times=" << PrintExpr_(CodegenOperands(op)[3])
-         << ", block_num_32b=" << PrintExpr_(CodegenOperands(op)[4])
-         << ", dst_gap_32b=" << PrintExpr_(CodegenOperands(op)[5])
+  stream << "pto.raw_fill_l1(" << GetLocalPtrExpr(op->args[0], "mat", dst_dtype)
+         << ", byte_offset=" << PrintExpr_(op->args[1])
+         << ", raw_value=" << PrintExpr_(op->args[2])
+         << ", repeat_times=" << PrintExpr_(op->args[3])
+         << ", block_num_32b=" << PrintExpr_(op->args[4])
+         << ", dst_gap_32b=" << PrintExpr_(op->args[5])
          << ", fill_word_bits=" << fill_word_bits << ")\n";
 }
 
 void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
   const char *name =
       is_ca ? "tl.ascend_load_cbuf_to_ca" : "tl.ascend_load_cbuf_to_cb";
-  ICHECK(CodegenOperands(op).size() == 9U || CodegenOperands(op).size() == 16U)
-      << name << " expects 9 or 16 arguments, got "
-      << CodegenOperands(op).size();
-  bool has_mx_scale = CodegenOperands(op).size() == 16U;
+  ICHECK(op->args.size() == 9U || op->args.size() == 16U)
+      << name << " expects 9 or 16 arguments, got " << op->args.size();
+  bool has_mx_scale = op->args.size() == 16U;
 
   auto require_const = [&](size_t index, const char *arg_name) {
     int64_t value = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[index], &value))
+    ICHECK(TryGetConstInt(op->args[index], &value))
         << "PTO " << (is_ca ? "L1->L0A" : "L1->L0B")
-        << " MTE requires constant " << arg_name << ", got "
-        << CodegenOperands(op)[index];
+        << " MTE requires constant " << arg_name << ", got " << op->args[index];
     return value;
   };
   auto control_expr = [&](size_t index, const char *arg_name) {
     int64_t value = 0;
-    if (TryGetConstInt(CodegenOperands(op)[index], &value)) {
+    if (TryGetConstInt(op->args[index], &value)) {
       ICHECK_GT(value, 0) << "PTO " << (is_ca ? "L1->L0A" : "L1->L0B")
                           << " MTE requires positive " << arg_name << ", got "
                           << value;
     }
-    return RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[index]));
+    return RemoveOutermostParentheses(PrintExpr_(op->args[index]));
   };
   int64_t row_start_const = 0;
   int64_t col_start_const = 0;
-  bool has_const_row_start =
-      TryGetConstInt(CodegenOperands(op)[2], &row_start_const);
-  bool has_const_col_start =
-      TryGetConstInt(CodegenOperands(op)[3], &col_start_const);
+  bool has_const_row_start = TryGetConstInt(op->args[2], &row_start_const);
+  bool has_const_col_start = TryGetConstInt(op->args[3], &col_start_const);
   if (has_const_row_start) {
     ICHECK_GE(row_start_const, 0)
         << "PTO L1->L0 MTE requires mStartPosition >= 0";
@@ -3861,10 +3858,8 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
     ICHECK_GE(col_start_const, 0)
         << "PTO L1->L0 MTE requires kStartPosition >= 0";
   }
-  std::string row_start =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
-  std::string col_start =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
+  std::string row_start = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
+  std::string col_start = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
   // PTOAS accepts runtime scalar controls for the full-control form. Keep
   // dynamic values emitted by TileLang (notably mhc_norm_fn's tail mStep),
   // while validating positive literals here and letting PTOAS check ranges.
@@ -3884,10 +3879,10 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
   PrimType src_dtype = PrimType::Void();
   std::string dst_scope;
   std::string src_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO L1->L0 MTE destination",
-                   &dst_var, &dst_index, &dst_dtype, &dst_scope);
-  GetCopyEndpoint_(CodegenOperands(op)[1], "PTO L1->L0 MTE source", &src_var,
-                   &src_index, &src_dtype, &src_scope);
+  GetCopyEndpoint_(op->args[0], "PTO L1->L0 MTE destination", &dst_var,
+                   &dst_index, &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO L1->L0 MTE source", &src_var, &src_index,
+                   &src_dtype, &src_scope);
   const char *expected_scope = is_ca ? "shared.l0a" : "shared.l0b";
   ICHECK(dst_scope == expected_scope ||
          dst_scope == expected_scope + std::string(".dyn"))
@@ -3909,9 +3904,9 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
   ValidateFractalAddressAlignment_(src_index, src_dtype,
                                    "PTO L1->L0 MTE source");
 
-  std::string src = GetLocalPtrExpr(CodegenOperands(op)[1], "mat", src_dtype);
-  std::string dst = GetLocalPtrExpr(CodegenOperands(op)[0],
-                                    is_ca ? "left" : "right", dst_dtype);
+  std::string src = GetLocalPtrExpr(op->args[1], "mat", src_dtype);
+  std::string dst =
+      GetLocalPtrExpr(op->args[0], is_ca ? "left" : "right", dst_dtype);
   // Preserve the controls produced by TileLang's canonical fractal-layout
   // lowering.  Reconstructing a shape and asking PTOAS to derive the controls
   // is not equivalent for every dtype: float32 uses an 8-element physical C0,
@@ -3932,8 +3927,8 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
   PrimExpr sf_index = MakeConst(PrimType::Int(32), 0);
   PrimType sf_dtype = PrimType::Void();
   std::string sf_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[9], "PTO MX scale-factor L1 source",
-                   &sf_var, &sf_index, &sf_dtype, &sf_scope);
+  GetCopyEndpoint_(op->args[9], "PTO MX scale-factor L1 source", &sf_var,
+                   &sf_index, &sf_dtype, &sf_scope);
   ICHECK(sf_scope == "shared.l1" || sf_scope == "shared.l1.dyn")
       << "PTO MX scale-factor source must use shared.l1 storage, got `"
       << sf_scope << "`";
@@ -3949,7 +3944,7 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
                                 "y_step",  "src_stride", "dst_stride"};
   for (size_t i = 0; i < 6U; ++i) {
     int64_t value = 0;
-    if (TryGetConstInt(CodegenOperands(op)[10 + i], &value)) {
+    if (TryGetConstInt(op->args[10 + i], &value)) {
       if (i < 2U) {
         ICHECK_GE(value, 0)
             << "PTO MX " << sf_arg_names[i] << " must be non-negative";
@@ -3960,27 +3955,25 @@ void CodeGenTileLangPTO::EmitAscendLoadCbufToL0(const CallObj *op, bool is_ca) {
     }
   }
 
-  std::string sf_src = GetE8M0ScalePtrExpr(CodegenOperands(op)[9]);
+  std::string sf_src = GetE8M0ScalePtrExpr(op->args[9]);
   PrintIndent();
   stream << (is_ca ? "pto.mte_l1_l0a_mx" : "pto.mte_l1_l0b_mx") << "(" << sf_src
          << ", " << dst;
   for (size_t i = 0; i < 6U; ++i) {
     stream << ", " << sf_arg_names[i] << "="
-           << RemoveOutermostParentheses(
-                  PrintExpr_(CodegenOperands(op)[10 + i]));
+           << RemoveOutermostParentheses(PrintExpr_(op->args[10 + i]));
   }
   stream << ")\n";
 }
 
 void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallObj *op, bool is_ca) {
   const char *name = is_ca ? "tl.ascend_load_ca_sf" : "tl.ascend_load_cb_sf";
-  ICHECK_EQ(CodegenOperands(op).size(), 8U)
-      << name << " expects exactly 8 arguments, got "
-      << CodegenOperands(op).size();
+  ICHECK_EQ(op->args.size(), 8U)
+      << name << " expects exactly 8 arguments, got " << op->args.size();
 
   auto control_expr = [&](size_t index, const char *arg_name) {
     int64_t value = 0;
-    if (TryGetConstInt(CodegenOperands(op)[index], &value)) {
+    if (TryGetConstInt(op->args[index], &value)) {
       if (index < 4U) {
         ICHECK_GE(value, 0)
             << "PTO " << (is_ca ? "L1->L0A" : "L1->L0B") << " MX " << arg_name
@@ -3991,7 +3984,7 @@ void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallObj *op, bool is_ca) {
             << " must be positive, got " << value;
       }
     }
-    return RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[index]));
+    return RemoveOutermostParentheses(PrintExpr_(op->args[index]));
   };
 
   const VarObj *dst_var = nullptr;
@@ -4002,10 +3995,10 @@ void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallObj *op, bool is_ca) {
   PrimType sf_dtype = PrimType::Void();
   std::string dst_scope;
   std::string sf_scope;
-  GetCopyEndpoint_(CodegenOperands(op)[0], "PTO MX L0 destination", &dst_var,
-                   &dst_index, &dst_dtype, &dst_scope);
-  GetCopyEndpoint_(CodegenOperands(op)[1], "PTO MX scale-factor source",
-                   &sf_var, &sf_index, &sf_dtype, &sf_scope);
+  GetCopyEndpoint_(op->args[0], "PTO MX L0 destination", &dst_var, &dst_index,
+                   &dst_dtype, &dst_scope);
+  GetCopyEndpoint_(op->args[1], "PTO MX scale-factor source", &sf_var,
+                   &sf_index, &sf_dtype, &sf_scope);
 
   const char *expected_scope = is_ca ? "shared.l0a" : "shared.l0b";
   ICHECK(IsBufferInScope(dst_scope, expected_scope))
@@ -4031,9 +4024,9 @@ void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallObj *op, bool is_ca) {
   ValidateFractalAddressAlignment_(sf_index, sf_dtype,
                                    "PTO MX scale-factor source");
 
-  std::string sf_src = GetE8M0ScalePtrExpr(CodegenOperands(op)[1]);
-  std::string dst = GetLocalPtrExpr(CodegenOperands(op)[0],
-                                    is_ca ? "left" : "right", dst_dtype);
+  std::string sf_src = GetE8M0ScalePtrExpr(op->args[1]);
+  std::string dst =
+      GetLocalPtrExpr(op->args[0], is_ca ? "left" : "right", dst_dtype);
   const char *arg_names[] = {"x_start", "y_start",    "x_step",
                              "y_step",  "src_stride", "dst_stride"};
   PrintIndent();
@@ -4047,24 +4040,23 @@ void CodeGenTileLangPTO::EmitAscendLoadMxSf(const CallObj *op, bool is_ca) {
 
 void CodeGenTileLangPTO::EmitAscendCrossCoreFlag(const CallObj *op,
                                                  bool is_set) {
-  ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  ICHECK_EQ(op->args.size(), 3U)
       << "tl.ascend_cross_core_" << (is_set ? "set" : "wait")
       << "_flag expects exactly 3 arguments (mode_id, pipe, flag_id)";
   int64_t mode_id = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[0], &mode_id))
+  ICHECK(TryGetConstInt(op->args[0], &mode_id))
       << "PTO cross-core flag requires a constant mode_id";
   ICHECK(mode_id == 0 || mode_id == 1 || mode_id == 2 || mode_id == 4)
       << "PTO cross-core flag mode_id must be one of 0/1/2/4, got " << mode_id;
 
-  const auto *pipe_imm = CodegenOperands(op)[1].as<StringImmObj>();
+  const auto *pipe_imm = op->args[1].as<StringImmObj>();
   ICHECK(pipe_imm) << "PTO cross-core flag requires a constant pipe string";
-  PrimType event_dtype = CodegenDType(CodegenOperands(op)[2]);
+  PrimType event_dtype = op->args[2]->ty.as_or_throw<PrimType>();
   ICHECK(event_dtype.IsScalar() &&
          (event_dtype.MatchesCode(kDLInt) || event_dtype.MatchesCode(kDLUInt)))
       << "PTO cross-core flag_id must be a scalar integer, got " << event_dtype;
 
-  std::string event_id =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
+  std::string event_id = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
   PrintIndent();
   stream << "tl.ascend_cross_core_" << (is_set ? "set" : "wait") << "_flag("
          << mode_id << ", \"" << pipe_imm->value << "\", " << event_id << ")\n";
@@ -4111,11 +4103,9 @@ void CodeGenTileLangPTO::EmitAscendGemmL1(const CallObj *op) {
       << "PTO L1 GEMM does not support N MAD direction; use L0 inputs "
          "for N-directed GEMM";
   const PTOGemmEmitContext &ctx = EnsureGemmHelper(op);
-  std::string acc = GetAccPtrExpr(CodegenOperands(op)[0], PrimType::Float(32));
-  std::string a_mat =
-      GetLocalPtrExpr(CodegenOperands(op)[1], "mat", ctx.input_dtype);
-  std::string b_mat =
-      GetLocalPtrExpr(CodegenOperands(op)[2], "mat", ctx.input_dtype);
+  std::string acc = GetAccPtrExpr(op->args[0], PrimType::Float(32));
+  std::string a_mat = GetLocalPtrExpr(op->args[1], "mat", ctx.input_dtype);
+  std::string b_mat = GetLocalPtrExpr(op->args[2], "mat", ctx.input_dtype);
 
   int64_t hf32_mode = 0;
   if (IsFloat32(ctx.input_dtype)) {
@@ -4125,36 +4115,32 @@ void CodeGenTileLangPTO::EmitAscendGemmL1(const CallObj *op) {
     hf32_mode = it->second;
   }
   EmitGemmRun(ctx, a_mat, b_mat, acc,
-              RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[8])),
-              RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[11])),
-              hf32_mode);
+              RemoveOutermostParentheses(PrintExpr_(op->args[8])),
+              RemoveOutermostParentheses(PrintExpr_(op->args[11])), hf32_mode);
 }
 
 void CodeGenTileLangPTO::EmitAscendBlockscaledGemmL1(const CallObj *op) {
   ICHECK(!n_direction_by_mad_.at(GetRef<Call>(op)))
       << "PTO blockscaled L1 GEMM does not support N MAD direction";
   const PTOGemmEmitContext &ctx = EnsureBlockscaledGemmHelper(op);
-  std::string acc = GetAccPtrExpr(CodegenOperands(op)[0], PrimType::Float(32));
-  std::string a_mat =
-      GetLocalPtrExpr(CodegenOperands(op)[1], "mat", ctx.input_dtype);
-  std::string b_mat =
-      GetLocalPtrExpr(CodegenOperands(op)[2], "mat", ctx.input_dtype);
+  std::string acc = GetAccPtrExpr(op->args[0], PrimType::Float(32));
+  std::string a_mat = GetLocalPtrExpr(op->args[1], "mat", ctx.input_dtype);
+  std::string b_mat = GetLocalPtrExpr(op->args[2], "mat", ctx.input_dtype);
 
-  std::string sfa_mat = GetE8M0ScalePtrExpr(CodegenOperands(op)[3]);
-  std::string sfb_mat = GetE8M0ScalePtrExpr(CodegenOperands(op)[4]);
+  std::string sfa_mat = GetE8M0ScalePtrExpr(op->args[3]);
+  std::string sfb_mat = GetE8M0ScalePtrExpr(op->args[4]);
 
-  EmitBlockscaledGemmRun(
-      ctx, a_mat, b_mat, sfa_mat, sfb_mat, acc,
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[10])),
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[15])),
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[17])));
+  EmitBlockscaledGemmRun(ctx, a_mat, b_mat, sfa_mat, sfb_mat, acc,
+                         RemoveOutermostParentheses(PrintExpr_(op->args[10])),
+                         RemoveOutermostParentheses(PrintExpr_(op->args[15])),
+                         RemoveOutermostParentheses(PrintExpr_(op->args[17])));
 }
 
 void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
-  const bool is_mx = IsCodegenOp(op, "tl.ascend_mad_mx");
-  ICHECK(IsCodegenOp(op, "tl.ascend_mad") || is_mx);
+  const bool is_mx = op->op.same_as(tl::ascend_mad_mx());
+  ICHECK(op->op.same_as(tl::ascend_mad()) || is_mx);
   const char *op_name = is_mx ? "mad_mx" : "mad";
-  ICHECK_EQ(CodegenOperands(op).size(), 10U)
+  ICHECK_EQ(op->args.size(), 10U)
       << "tl.ascend_" << op_name << " expects exactly 10 arguments";
 
   auto get_endpoint = [&](size_t arg_index, const char *context) {
@@ -4162,8 +4148,8 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
     PrimExpr index = MakeConst(PrimType::Int(32), 0);
     PrimType dtype = PrimType::Void();
     std::string scope;
-    GetCopyEndpoint_(CodegenOperands(op)[arg_index], context, &buffer_var,
-                     &index, &dtype, &scope);
+    GetCopyEndpoint_(op->args[arg_index], context, &buffer_var, &index, &dtype,
+                     &scope);
     return std::make_pair(dtype, scope);
   };
 
@@ -4201,9 +4187,9 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
         << ", accumulator=" << acc_dtype;
   }
 
-  std::string acc = GetAccPtrExpr(CodegenOperands(op)[0], acc_dtype);
-  std::string lhs = GetLocalPtrExpr(CodegenOperands(op)[1], "left", lhs_dtype);
-  std::string rhs = GetLocalPtrExpr(CodegenOperands(op)[2], "right", rhs_dtype);
+  std::string acc = GetAccPtrExpr(op->args[0], acc_dtype);
+  std::string lhs = GetLocalPtrExpr(op->args[1], "left", lhs_dtype);
+  std::string rhs = GetLocalPtrExpr(op->args[2], "right", rhs_dtype);
   auto direction_it = n_direction_by_mad_.find(GetRef<Call>(op));
   ICHECK(direction_it != n_direction_by_mad_.end())
       << "PTO codegen did not analyze MAD direction";
@@ -4217,23 +4203,20 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
     hf32_mode = it->second;
   }
 
-  std::string m =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
-  std::string k =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[4]));
-  std::string n =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[5]));
+  std::string m = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string k = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
+  std::string n = RemoveOutermostParentheses(PrintExpr_(op->args[5]));
 
   int64_t gemv_ctrl = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[7], &gemv_ctrl) &&
+  ICHECK(TryGetConstInt(op->args[7], &gemv_ctrl) &&
          (gemv_ctrl == 0 || gemv_ctrl == 1))
       << "PTO " << op_name << " requires constant gemv_ctrl 0 or 1, got "
-      << CodegenOperands(op)[7];
+      << op->args[7];
 
   int64_t btbuf_ctrl = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[8], &btbuf_ctrl) && btbuf_ctrl == 0)
+  ICHECK(TryGetConstInt(op->args[8], &btbuf_ctrl) && btbuf_ctrl == 0)
       << "PTO " << op_name << " currently only supports BTbuf_ctrl=0, got "
-      << CodegenOperands(op)[8];
+      << op->args[8];
 
   auto emit_mad_call = [&](bool clear_accumulator, int64_t unit_flag_ctrl) {
     ICHECK(unit_flag_ctrl == 0 || unit_flag_ctrl == 2 || unit_flag_ctrl == 3)
@@ -4271,13 +4254,13 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
 
   auto emit_for_clear_accum = [&](int64_t unit_flag_ctrl) {
     int64_t zero_cmatrix = 0;
-    if (TryGetConstInt(CodegenOperands(op)[9], &zero_cmatrix)) {
+    if (TryGetConstInt(op->args[9], &zero_cmatrix)) {
       emit_mad_call(zero_cmatrix != 0, unit_flag_ctrl);
       return;
     }
 
     PrintIndent();
-    stream << "if " << PrintCondition(CodegenOperands(op)[9]) << ":\n";
+    stream << "if " << PrintCondition(op->args[9]) << ":\n";
     int clear_scope = BeginScope();
     emit_mad_call(true, unit_flag_ctrl);
     EndScope(clear_scope);
@@ -4307,10 +4290,10 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
                call != nullptr &&
                (call->op.same_as(prim::if_then_else_op()) ||
                 call->op.same_as(prim::if_then_else_op())) &&
-               CodegenOperands(call).size() == 3U) {
-      condition = CodegenOperands(call)[0].as_or_throw<PrimExpr>();
-      true_value = CodegenOperands(call)[1].as_or_throw<PrimExpr>();
-      false_value = CodegenOperands(call)[2].as_or_throw<PrimExpr>();
+               call->args.size() == 3U) {
+      condition = call->args[0].as_or_throw<PrimExpr>();
+      true_value = call->args[1].as_or_throw<PrimExpr>();
+      false_value = call->args[2].as_or_throw<PrimExpr>();
     } else {
       TVM_FFI_THROW(InternalError)
           << "PTO " << op_name
@@ -4333,46 +4316,38 @@ void CodeGenTileLangPTO::EmitAscendMad(const CallObj *op) {
   };
 
   sym::Analyzer analyzer = tl::CreateTileLangAnalyzer();
-  emit_for_unit_flag(
-      emit_for_unit_flag,
-      analyzer->Simplify(CodegenOperands(op)[6].as_or_throw<PrimExpr>()));
+  emit_for_unit_flag(emit_for_unit_flag,
+                     analyzer->Simplify(op->args[6].as_or_throw<PrimExpr>()));
 }
 
 void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToGm(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 25U)
+  ICHECK_EQ(op->args.size(), 25U)
       << "tl.ascend_copy_matrix_cc_to_gm expects exactly 25 arguments";
-  std::string dst =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[0]));
-  std::string src = GetAccPtrExpr(CodegenOperands(op)[1], PrimType::Float(32));
-  std::string sid =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
-  std::string n_size =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
-  std::string m_size =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[4]));
-  std::string dst_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[5]));
-  std::string src_stride =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[6]));
+  std::string dst = RemoveOutermostParentheses(PrintExpr_(op->args[0]));
+  std::string src = GetAccPtrExpr(op->args[1], PrimType::Float(32));
+  std::string sid = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
+  std::string n_size = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string m_size = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
+  std::string dst_stride = RemoveOutermostParentheses(PrintExpr_(op->args[5]));
+  std::string src_stride = RemoveOutermostParentheses(PrintExpr_(op->args[6]));
   std::string l2_cache_ctrl =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[7]));
+      RemoveOutermostParentheses(PrintExpr_(op->args[7]));
 
   int64_t unit_flag_ctrl = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[9], &unit_flag_ctrl))
+  ICHECK(TryGetConstInt(op->args[9], &unit_flag_ctrl))
       << "PTO L0C-to-GM expects constant unit_flag_ctrl";
   int64_t quant_pre = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[10], &quant_pre) &&
+  ICHECK(TryGetConstInt(op->args[10], &quant_pre) &&
          (quant_pre == 0 || quant_pre == 16))
       << "PTO L0C-to-GM currently supports quant_pre 0 (no conversion) or "
          "16 (float32-to-bfloat16), got "
-      << CodegenOperands(op)[10];
+      << op->args[10];
 
   auto check_const = [&](size_t index, int64_t expected, const char *name) {
     int64_t value = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[index], &value) &&
-           value == expected)
+    ICHECK(TryGetConstInt(op->args[index], &value) && value == expected)
         << "PTO L0C-to-GM currently requires " << name << " == " << expected
-        << ", got " << CodegenOperands(op)[index];
+        << ", got " << op->args[index];
   };
   check_const(8, 0, "clip_relu_pre");
   check_const(11, 0, "relu_pre");
@@ -4404,25 +4379,19 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToGm(const CallObj *op) {
 }
 
 void CodeGenTileLangPTO::EmitAscendCopyUbufToCbuf(const CallObj *op) {
-  ICHECK_EQ(CodegenOperands(op).size(), 7U)
+  ICHECK_EQ(op->args.size(), 7U)
       << "tl.ascend_copy_ubuf_to_cbuf expects exactly 7 arguments";
   int64_t sid = 0;
-  ICHECK(TryGetConstInt(CodegenOperands(op)[2], &sid) && sid == 0)
+  ICHECK(TryGetConstInt(op->args[2], &sid) && sid == 0)
       << "PTO UB->L1 copy currently only supports sub_blockid == 0, got "
-      << CodegenOperands(op)[2];
+      << op->args[2];
 
-  std::string dst =
-      GetLocalPtrExpr(CodegenOperands(op)[0], "mat", PrimType::BFloat(16));
-  std::string src =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
-  std::string burst_num =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[3]));
-  std::string burst_len =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[4]));
-  std::string src_gap =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[5]));
-  std::string dst_gap =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[6]));
+  std::string dst = GetLocalPtrExpr(op->args[0], "mat", PrimType::BFloat(16));
+  std::string src = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
+  std::string burst_num = RemoveOutermostParentheses(PrintExpr_(op->args[3]));
+  std::string burst_len = RemoveOutermostParentheses(PrintExpr_(op->args[4]));
+  std::string src_gap = RemoveOutermostParentheses(PrintExpr_(op->args[5]));
+  std::string dst_gap = RemoveOutermostParentheses(PrintExpr_(op->args[6]));
 
   PrintIndent();
   stream << "pto.mte_ub_l1(" << src << ", " << dst << ", " << burst_len
@@ -4434,10 +4403,8 @@ void CodeGenTileLangPTO::EmitAscendNd2NzPostCopy(const CallObj *op) {
   auto geometry = tl::ParseNd2NzGeometry(op, false);
   if (geometry.Empty())
     return;
-  std::string dst =
-      GetLocalPtrExpr(CodegenOperands(op)[0], "mat", PrimType::BFloat(16));
-  std::string src =
-      GetLocalPtrExpr(CodegenOperands(op)[1], "ub", PrimType::BFloat(16));
+  std::string dst = GetLocalPtrExpr(op->args[0], "mat", PrimType::BFloat(16));
+  std::string src = GetLocalPtrExpr(op->args[1], "ub", PrimType::BFloat(16));
   int64_t burst_num = geometry.Bursts();
   int64_t burst_len = geometry.rows;
   int64_t src_gap = geometry.src_pitch - geometry.rows;
@@ -4454,18 +4421,16 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallObj *op) {
   if (geometry.Empty())
     return;
   int64_t rows = geometry.rows, cols = geometry.cols;
-  std::string src_dtype =
-      (CodegenOperands(op)[5]).as_or_throw<StringImm>()->value;
-  std::string dst_dtype =
-      (CodegenOperands(op)[6]).as_or_throw<StringImm>()->value;
+  std::string src_dtype = (op->args[5]).as_or_throw<StringImm>()->value;
+  std::string dst_dtype = (op->args[6]).as_or_throw<StringImm>()->value;
 
   ICHECK(rows % 16 == 0) << "PTO nd2nz_scatter requires ROWS % 16 == 0, got "
                          << rows;
 
   std::string src_ptr =
-      GetLocalPtrExpr(CodegenOperands(op)[0], "ub", PrimType::BFloat(16));
+      GetLocalPtrExpr(op->args[0], "ub", PrimType::BFloat(16));
   std::string dst_ptr =
-      GetLocalPtrExpr(CodegenOperands(op)[1], "ub", PrimType::BFloat(16));
+      GetLocalPtrExpr(op->args[1], "ub", PrimType::BFloat(16));
 
   // Currently support same-type scatter only (the common case for dual_copy,
   // which rejects dtype mismatch on L0C->UB at the frontend level).
@@ -4573,11 +4538,10 @@ std::string CodeGenTileLangPTO::EmitAllReduceExpr_(const std::string &func_name,
   const int64_t scale = parsed >= 2 ? parsed_scale : 1;
   const int64_t thread_offset = parsed >= 3 ? parsed_thread_offset : 0;
 
-  std::string value =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
+  std::string value = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
   std::string scratch = "None";
-  if (CodegenOperands(op).size() >= 3U) {
-    scratch = RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
+  if (op->args.size() >= 3U) {
+    scratch = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
   } else {
     const bool warp_fast_path =
         threads <= 32 && IsPowerOfTwo(threads) && IsPowerOfTwo(scale);
@@ -4595,8 +4559,8 @@ std::string CodeGenTileLangPTO::EmitAllReduceExpr_(const std::string &func_name,
 
 void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  const auto args = CodegenOperands(op);
-  if (IsCodegenOp(op, "tirx.address_of")) {
+  const auto args = op->args;
+  if (op->op.same_as(tirx::address_of_op())) {
     TVM_FFI_CHECK_EQ(args.size(), 1, ValueError);
     const auto *load = args[0].as<TensorLoadObj>();
     TVM_FFI_CHECK(load && load->indices.size() == 1, ValueError)
@@ -4607,7 +4571,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     os << GetPointerExpr(PTOTensor(load).get(), load->indices[0]);
     return;
   }
-  if (IsCodegenOp(op, "tirx.tensor_data_ptr")) {
+  if (op->op.same_as(tirx::tensor_data_ptr_op())) {
     TVM_FFI_CHECK_EQ(args.size(), 1, ValueError);
     const auto tensor = args[0].as_or_throw<TensorVar>();
     const std::string base = GetVarID(tensor.get());
@@ -4621,15 +4585,15 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     }
     return;
   }
-  if (IsCodegenOp(op, "tirx.ptr_byte_offset") ||
-      IsCodegenOp(op, "tirx.handle_add_byte_offset") ||
-      IsCodegenOp(op, "tl.ptr_access")) {
+  if (op->op.same_as(tirx::ptr_byte_offset_op()) ||
+      op->op.same_as(tirx::handle_add_byte_offset_op()) ||
+      op->op.same_as(tl::ptr_access())) {
     TVM_FFI_CHECK(args.size() >= 2 && op->ty.as<PtrTypeObj>(), TypeError);
     const PtrType type = op->ty.as_or_throw<PtrType>();
     const PrimType element = type->element_type.as_or_throw<PrimType>();
     const std::string space = PTOAddressSpace(type->scope.name());
     PrimExpr bytes = args[1].as_or_throw<PrimExpr>();
-    if (IsCodegenOp(op, "tl.ptr_access")) {
+    if (op->op.same_as(tl::ptr_access())) {
       bytes = ElementIndexToByteOffsetExpr(
           bytes, GetAnnotatedPointerDtype(args[0], PrimType::Void()),
           "PTO pointer access", tl::CreateTileLangAnalyzer());
@@ -4639,7 +4603,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
        << PrintExpr_(bytes) << "), " << PointerTypeName(element, space) << ")";
     return;
   }
-  if (IsCodegenOp(op, "tirx.reinterpret") && op->ty.as<PtrTypeObj>()) {
+  if (op->op.same_as(tirx::reinterpret_op()) && op->ty.as<PtrTypeObj>()) {
     TVM_FFI_CHECK_EQ(args.size(), 1, ValueError);
     const PtrType type = op->ty.as_or_throw<PtrType>();
     os << "pto.castptr(" << PrintExpr_(args[0]) << ", "
@@ -4654,14 +4618,14 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
   }
   if (op->op.same_as(prim::if_then_else_op()) ||
       op->op.same_as(prim::if_then_else_op())) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+    ICHECK_EQ(op->args.size(), 3U)
         << "if_then_else expects <condition, true_value, false_value>";
     const bool requires_statement_control_flow =
-        RequiresStatementControlFlow(CodegenOperands(op)[1]) ||
-        RequiresStatementControlFlow(CodegenOperands(op)[2]);
+        RequiresStatementControlFlow(op->args[1]) ||
+        RequiresStatementControlFlow(op->args[2]);
     auto branch_value = [&](const Expr &expr) {
       std::string value = PrintExpr_(expr);
-      if (CodegenDType(expr).MatchesCode(kDLBool)) {
+      if (expr->ty.as_or_throw<PrimType>().MatchesCode(kDLBool)) {
         // PTODSL typed constants require numeric bool literals.
         if (value == "True") {
           value = "1";
@@ -4669,19 +4633,17 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
           value = "0";
         }
       }
+      const PrimType dtype = op->ty.as_or_throw<PrimType>();
       if (expr.as<IntImmObj>() != nullptr ||
           expr.as<FloatImmObj>() != nullptr) {
-        return "pto.const(" + value +
-               ", dtype=" + DataTypeName(CodegenDType(op)) + ")";
+        return "pto.const(" + value + ", dtype=" + DataTypeName(dtype) + ")";
       }
-      if (CodegenDType(op).MatchesCode(kDLBool)) {
+      if (dtype.MatchesCode(kDLBool)) {
         return "tl.as_logical_bool(" + value + ")";
       }
-      if (CodegenDType(op).IsScalar() &&
-          (CodegenDType(op).MatchesCode(kDLInt) ||
-           CodegenDType(op).MatchesCode(kDLUInt))) {
-        return ScalarCastExpr(value, CodegenDType(op),
-                              "PTO if_then_else branch");
+      if (dtype.IsScalar() &&
+          (dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt))) {
+        return ScalarCastExpr(value, dtype, "PTO if_then_else branch");
       }
       return value;
     };
@@ -4690,14 +4652,14 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
       // Stateful branch expressions may emit statements while being printed.
       // Keep those statements in the selected Python branch so PTODSL merges
       // the expression result and any live-out SSA state through the scf.if.
-      std::string condition = PrintCondition(CodegenOperands(op)[0]);
+      std::string condition = PrintCondition(op->args[0]);
       std::string result_var =
           "_tl_if_result_" + std::to_string(pto_if_result_counter_++);
 
       PrintIndent();
       stream << "if " << condition << ":\n";
       int true_scope = BeginScope();
-      std::string true_value = branch_value(CodegenOperands(op)[1]);
+      std::string true_value = branch_value(op->args[1]);
       PrintIndent();
       stream << result_var << " = " << true_value << "\n";
       EndScope(true_scope);
@@ -4705,7 +4667,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
       PrintIndent();
       stream << "else:\n";
       int false_scope = BeginScope();
-      std::string false_value = branch_value(CodegenOperands(op)[2]);
+      std::string false_value = branch_value(op->args[2]);
       PrintIndent();
       stream << result_var << " = " << false_value << "\n";
       EndScope(false_scope);
@@ -4718,21 +4680,20 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     // the branch expressions in lambdas so the helper traces each one inside
     // the matching scf.if region.  Unlike injecting statements into `stream`,
     // this remains composable wherever an expression is printed.
-    os << "tl.if_then_else(" << PrintCondition(CodegenOperands(op)[0]);
-    os << ", lambda: " << branch_value(CodegenOperands(op)[1])
-       << ", lambda: " << branch_value(CodegenOperands(op)[2]) << ")";
+    os << "tl.if_then_else(" << PrintCondition(op->args[0]);
+    os << ", lambda: " << branch_value(op->args[1])
+       << ", lambda: " << branch_value(op->args[2]) << ")";
     return;
   }
 
   if (op->op.same_as(builtin_call_extern_) ||
       op->op.same_as(builtin_call_pure_extern_)) {
-    ICHECK_GE(CodegenOperands(op).size(), 1U);
+    ICHECK_GE(op->args.size(), 1U);
     // TODO: Support more scalar ops, ref:
     // src/ascend/codegen/intrin_rule_ascend.cc
-    std::string func_name =
-        (CodegenOperands(op)[0]).as_or_throw<StringImm>()->value;
-    if (CodegenOperands(op).size() == 2U &&
-        TryEmitUnaryMath_(func_name, CodegenOperands(op)[1], os)) {
+    std::string func_name = (op->args[0]).as_or_throw<StringImm>()->value;
+    if (op->args.size() == 2U &&
+        TryEmitUnaryMath_(func_name, op->args[1], os)) {
       return;
     }
     if (func_name.find("tl::AscendAllReduce") != std::string::npos) {
@@ -4741,39 +4702,39 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     }
   }
 
-  if (IsCodegenOp(op, "tl.warp_reduce_sum") ||
-      IsCodegenOp(op, "tl.warp_reduce_max") ||
-      IsCodegenOp(op, "tl.warp_reduce_min")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 1U)
+  if (op->op.same_as(tl::warp_reduce_sum()) ||
+      op->op.same_as(tl::warp_reduce_max()) ||
+      op->op.same_as(tl::warp_reduce_min())) {
+    ICHECK_EQ(op->args.size(), 1U)
         << "PTO warp reduction expects exactly one argument";
-    PrimType dtype = CodegenDType(CodegenOperands(op)[0]);
+    PrimType dtype = op->args[0]->ty.as_or_throw<PrimType>();
     ICHECK(IsSupportedSIMTAllReduceType(dtype))
         << "PTO warp reduction currently supports float16, float32, int32, "
            "and uint32 only, got "
         << dtype
         << ". Use a supported reducer dtype, such as float32, and cast the "
            "result afterward.";
-    const char *name = IsCodegenOp(op, "tl.warp_reduce_sum")   ? "redux_add"
-                       : IsCodegenOp(op, "tl.warp_reduce_max") ? "redux_max"
+    const char *name = op->op.same_as(tl::warp_reduce_sum())   ? "redux_add"
+                       : op->op.same_as(tl::warp_reduce_max()) ? "redux_max"
                                                                : "redux_min";
-    os << "tl." << name << "(" << PrintExpr_(CodegenOperands(op)[0]) << ")";
+    os << "tl." << name << "(" << PrintExpr_(op->args[0]) << ")";
     return;
   }
 
-  bool is_atomic_add = IsCodegenOp(op, "tl.atomic_add_elem_op") ||
-                       IsCodegenOp(op, "tl.atomic_add_ret_elem_op");
-  bool is_atomic_max = IsCodegenOp(op, "tl.atomic_max_elem_op") ||
-                       IsCodegenOp(op, "tl.atomic_max_ret_elem_op");
-  bool is_atomic_min = IsCodegenOp(op, "tl.atomic_min_elem_op") ||
-                       IsCodegenOp(op, "tl.atomic_min_ret_elem_op");
+  bool is_atomic_add = op->op.same_as(tl::atomic_add_elem_op()) ||
+                       op->op.same_as(tl::atomic_add_ret_elem_op());
+  bool is_atomic_max = op->op.same_as(tl::atomic_max_elem_op()) ||
+                       op->op.same_as(tl::atomic_max_ret_elem_op());
+  bool is_atomic_min = op->op.same_as(tl::atomic_min_elem_op()) ||
+                       op->op.same_as(tl::atomic_min_ret_elem_op());
   if (is_atomic_add || is_atomic_max || is_atomic_min) {
     ICHECK(inside_simtvf_body_)
         << "PTO atomic operations must be used inside T.SimtVF";
-    ICHECK(CodegenOperands(op).size() == 2U || CodegenOperands(op).size() == 3U)
+    ICHECK(op->args.size() == 2U || op->args.size() == 3U)
         << "PTO atomic operations expect dst_ptr, value[, memory_order]";
 
-    if (CodegenOperands(op).size() == 3U) {
-      const auto *memory_order = CodegenOperands(op)[2].as<IntImmObj>();
+    if (op->args.size() == 3U) {
+      const auto *memory_order = op->args[2].as<IntImmObj>();
       ICHECK(memory_order)
           << "PTO atomic memory_order must be a compile-time integer constant";
       ICHECK_EQ(memory_order->value, 0)
@@ -4784,7 +4745,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     }
 
     PrimType dtype = GetAnnotatedPointerDtype(
-        CodegenOperands(op)[0], CodegenDType(CodegenOperands(op)[1]));
+        op->args[0], op->args[1]->ty.as_or_throw<PrimType>());
     ICHECK(dtype.IsScalar())
         << "PTO atomic operations support scalar values only";
     // PTOAS supports 64-bit integer atomics for GM pointers.  Keep UB-space
@@ -4801,8 +4762,8 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     const char *pto_atomic_op =
         is_atomic_add ? "atomic_add"
                       : (is_atomic_max ? "atomic_max" : "atomic_min");
-    os << "pto." << pto_atomic_op << "(" << PrintExpr_(CodegenOperands(op)[0])
-       << ", " << PrintExpr_(CodegenOperands(op)[1]);
+    os << "pto." << pto_atomic_op << "(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]);
     // Only integer atomic_min/atomic_max need signedness
     if (!is_atomic_add &&
         (dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt))) {
@@ -4813,10 +4774,9 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tirx.gpu_storage_sync")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 1);
-    const auto sync_scope =
-        CodegenOperands(op)[0].as_or_throw<StringImm>()->value;
+  if (op->op.same_as(tirx::gpu_storage_sync_op())) {
+    ICHECK_EQ(op->args.size(), 1);
+    const auto sync_scope = op->args[0].as_or_throw<StringImm>()->value;
     if (sync_scope == "warp") {
       return;
     }
@@ -4830,86 +4790,86 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
         << "Unsupported PTO storage sync scope: " << sync_scope;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_copy_gm_to_ubuf")) {
+  if (op->op.same_as(tl::ascend_copy_gm_to_ubuf())) {
     PrintIndent();
     stream << GetAscendCopyGmUbExpr_(op) << "\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_set_copy_pad_value")) {
+  if (op->op.same_as(tl::ascend_set_copy_pad_value())) {
     RecordAscendCopyPadValue_(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_set_atomic")) {
+  if (op->op.same_as(tl::ascend_set_atomic())) {
     EmitAscendSetAtomic(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_set_atomic_none")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 0U)
+  if (op->op.same_as(tl::ascend_set_atomic_none())) {
+    ICHECK_EQ(op->args.size(), 0U)
         << "tl.ascend_set_atomic_none expects no arguments";
     PrintIndent();
     stream << "pto.set_atomic_none()\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_copy_ubuf_to_gm")) {
+  if (op->op.same_as(tl::ascend_copy_ubuf_to_gm())) {
     PrintIndent();
     stream << GetAscendCopyUbGmExpr_(op) << "\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_copy_gm_to_cbuf")) {
+  if (op->op.same_as(tl::ascend_copy_gm_to_cbuf())) {
     EmitAscendCopyGmToCbuf(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_fill_l1")) {
+  if (op->op.same_as(tl::ascend_fill_l1())) {
     EmitAscendFillL1(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_load_cbuf_to_ca")) {
+  if (op->op.same_as(tl::ascend_load_cbuf_to_ca())) {
     EmitAscendLoadCbufToL0(op, true);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_load_cbuf_to_cb")) {
+  if (op->op.same_as(tl::ascend_load_cbuf_to_cb())) {
     EmitAscendLoadCbufToL0(op, false);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_load_ca_sf")) {
+  if (op->op.same_as(tl::ascend_load_ca_sf())) {
     EmitAscendLoadMxSf(op, true);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_load_cb_sf")) {
+  if (op->op.same_as(tl::ascend_load_cb_sf())) {
     EmitAscendLoadMxSf(op, false);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_cross_core_set_flag")) {
+  if (op->op.same_as(tl::ascend_cross_core_set_flag())) {
     EmitAscendCrossCoreFlag(op, true);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_cross_core_wait_flag")) {
+  if (op->op.same_as(tl::ascend_cross_core_wait_flag())) {
     EmitAscendCrossCoreFlag(op, false);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_mad") || IsCodegenOp(op, "tl.ascend_mad_mx")) {
+  if (op->op.same_as(tl::ascend_mad()) || op->op.same_as(tl::ascend_mad_mx())) {
     EmitAscendMad(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_gemm_l1")) {
+  if (op->op.same_as(tl::ascend_gemm_l1())) {
     EmitAscendGemmL1(op);
     return;
   }
-  if (IsCodegenOp(op, "tl.ascend_blockscaled_gemm_l1")) {
+  if (op->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
     EmitAscendBlockscaledGemmL1(op);
     return;
   }
@@ -4918,9 +4878,9 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
   // BufferLoad/Store into these Calls. Map to PTODSL cache-bypass helpers,
   // which lower to pto.ld_dev/st_dev.
 
-  if (IsCodegenOp(op, "tl.ascend_read_gm_bypass_dcache") ||
-      IsCodegenOp(op, "tl.ascend_write_gm_bypass_dcache")) {
-    const bool load = IsCodegenOp(op, "tl.ascend_read_gm_bypass_dcache");
+  if (op->op.same_as(tl::ascend_read_gm_bypass_dcache()) ||
+      op->op.same_as(tl::ascend_write_gm_bypass_dcache())) {
+    const bool load = op->op.same_as(tl::ascend_read_gm_bypass_dcache());
     TVM_FFI_CHECK_EQ(args.size(), load ? 1 : 2, ValueError);
     const PtrType pointer = args[0]->ty.as_or_throw<PtrType>();
     TVM_FFI_CHECK(PTOAddressSpace(pointer->scope.name()) == "gm", ValueError)
@@ -4928,11 +4888,11 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     const PrimType element = pointer->element_type.as_or_throw<PrimType>();
     ValidateGmBypassDtype(element);
     if (load) {
-      TVM_FFI_CHECK(CodegenDType(op) == element, TypeError);
+      TVM_FFI_CHECK(op->ty.as_or_throw<PrimType>() == element, TypeError);
       os << "tl.read_gm_bypass_dcache(" << PrintExpr_(args[0]) << ", 0, "
          << ScalarType(element) << ")";
     } else {
-      TVM_FFI_CHECK(CodegenDType(args[1]) == element, TypeError);
+      TVM_FFI_CHECK(args[1]->ty.as_or_throw<PrimType>() == element, TypeError);
       PrintIndent();
       stream << "tl.write_gm_bypass_dcache(" << PrintExpr_(args[0]) << ", 0, "
              << PrintExpr_(args[1]) << ", " << ScalarType(element) << ")\n";
@@ -4940,53 +4900,53 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_set_hf32_mode")) {
+  if (op->op.same_as(tl::ascend_set_hf32_mode())) {
     // PTO represents HF32 as a per-MAD attribute. The mode analysis binds
     // each stateful TileLang setting to the GEMMs it reaches.
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_set_mmad_direction")) {
+  if (op->op.same_as(tl::ascend_set_mmad_direction())) {
     // The reaching direction is encoded as the per-MAD n_dir attribute.
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_copy_matrix_cc_to_ub")) {
+  if (op->op.same_as(tl::ascend_copy_matrix_cc_to_ub())) {
     EmitAscendCopyMatrixCcToUb(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_copy_matrix_cc_to_gm")) {
+  if (op->op.same_as(tl::ascend_copy_matrix_cc_to_gm())) {
     EmitAscendCopyMatrixCcToGm(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_copy_ubuf_to_cbuf")) {
+  if (op->op.same_as(tl::ascend_copy_ubuf_to_cbuf())) {
     EmitAscendCopyUbufToCbuf(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_nd2nz_post_copy")) {
+  if (op->op.same_as(tl::ascend_nd2nz_post_copy())) {
     EmitAscendNd2NzPostCopy(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_nd2nz_scatter")) {
+  if (op->op.same_as(tl::ascend_nd2nz_scatter())) {
     EmitAscendNd2NzScatter(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tirx.reinterpret")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 1U)
+  if (op->op.same_as(tirx::reinterpret_op())) {
+    ICHECK_EQ(op->args.size(), 1U)
         << "tirx.reinterpret expects 1 argument (value)";
-    std::string value = PrintExpr_(CodegenOperands(op)[0]);
-    PrimType target_dtype = CodegenDType(op);
+    std::string value = PrintExpr_(op->args[0]);
+    PrimType target_dtype = op->ty.as_or_throw<PrimType>();
     if (target_dtype.lanes() > 1) {
       // Vector reinterpret: lower to pto.vbitcast(vec, elem_type).
       os << "pto.vbitcast(" << value << ", "
          << ScalarType(target_dtype.WithLanes(1)) << ")";
     } else {
-      PrimType source_dtype = CodegenDType(CodegenOperands(op)[0]);
+      PrimType source_dtype = op->args[0]->ty.as_or_throw<PrimType>();
       ICHECK(source_dtype.IsScalar())
           << "PTO scalar reinterpret expects scalar source, got "
           << source_dtype;
@@ -4998,90 +4958,86 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.access_ptr")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::access_ptr())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
-    const auto *load = CodegenOperands(op)[0].as<TensorLoadObj>();
+    const auto *load = op->args[0].as<TensorLoadObj>();
     ICHECK(load) << "tl.access_ptr arg0 must be BufferLoad";
     os << GetPointerExpr(PTOTensor(load).get(), load->indices[0]);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_pipe_barrier")) {
-    auto pipe_name = (CodegenOperands(op)[0]).as_or_throw<StringImm>()->value;
+  if (op->op.same_as(tl::ascend_pipe_barrier())) {
+    auto pipe_name = (op->args[0]).as_or_throw<StringImm>()->value;
     PrintIndent();
     stream << "pto.pipe_barrier(\"" << StripPipePrefix(pipe_name) << "\")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_set_flag") ||
-      IsCodegenOp(op, "tl.ascend_wait_flag")) {
-    auto hard_event = (CodegenOperands(op)[0]).as_or_throw<StringImm>()->value;
+  if (op->op.same_as(tl::ascend_set_flag()) ||
+      op->op.same_as(tl::ascend_wait_flag())) {
+    auto hard_event = (op->args[0]).as_or_throw<StringImm>()->value;
     auto [src_pipe, dst_pipe] = ParseHardEventPair(hard_event);
-    std::string eid =
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
+    std::string eid = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
     PrintIndent();
-    stream << (IsCodegenOp(op, "tl.ascend_set_flag") ? "pto.set_flag("
+    stream << (op->op.same_as(tl::ascend_set_flag()) ? "pto.set_flag("
                                                      : "pto.wait_flag(")
            << "\"" << src_pipe << "\", \"" << dst_pipe << "\", event_id=" << eid
            << ")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_threadfence")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 0)
+  if (op->op.same_as(tl::ascend_threadfence())) {
+    ICHECK_EQ(op->args.size(), 0)
         << "tl.ascend_threadfence expects 0 arguments";
     PrintIndent();
     stream << "pto.threadfence();\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.ascend_get_buf") ||
-      IsCodegenOp(op, "tl.ascend_rls_buf")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::ascend_get_buf()) ||
+      op->op.same_as(tl::ascend_rls_buf())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.ascend_get_buf/rls_buf expects exactly 3 arguments "
            "(pipe string, buf_id, mode)";
-    std::string pipe_str =
-        (CodegenOperands(op)[0]).as_or_throw<StringImm>()->value;
-    std::string buf_id =
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
-    std::string mode =
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
+    std::string pipe_str = (op->args[0]).as_or_throw<StringImm>()->value;
+    std::string buf_id = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
+    std::string mode = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
     PrintIndent();
-    stream << (IsCodegenOp(op, "tl.ascend_get_buf") ? "pto.get_buf("
+    stream << (op->op.same_as(tl::ascend_get_buf()) ? "pto.get_buf("
                                                     : "pto.rls_buf(")
            << "\"" << StripPipePrefix(pipe_str) << "\", " << buf_id
            << ", mode=" << mode << ")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.pset")) {
-    ICHECK_GE(CodegenOperands(op).size(), 1U)
+  if (op->op.same_as(tl::simd_pset())) {
+    ICHECK_GE(op->args.size(), 1U)
         << "tl.simd.pset expects at least 1 argument (element width)";
     int64_t elem_width = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[0], &elem_width))
+    ICHECK(TryGetConstInt(op->args[0], &elem_width))
         << "tl.simd.pset element width must be constant for PTO codegen";
     std::string dist = "PAT_ALL";
-    if (CodegenOperands(op).size() >= 2U) {
-      dist = (CodegenOperands(op)[1]).as_or_throw<StringImm>()->value;
+    if (op->args.size() >= 2U) {
+      dist = (op->args[1]).as_or_throw<StringImm>()->value;
     }
     os << "pto.pset_b" << elem_width << "(\"" << dist << "\")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.pge")) {
-    ICHECK(CodegenOperands(op).size() >= 1U && CodegenOperands(op).size() <= 2U)
+  if (op->op.same_as(tl::simd_pge())) {
+    ICHECK(op->args.size() >= 1U && op->args.size() <= 2U)
         << "tl.simd.pge expects 1 or 2 arguments (element width[, "
            "distribution])";
     int64_t elem_width = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[0], &elem_width))
+    ICHECK(TryGetConstInt(op->args[0], &elem_width))
         << "tl.simd.pge element width must be constant for PTO codegen";
     ICHECK(elem_width == 8 || elem_width == 16 || elem_width == 32)
         << "PTO tl.simd.pge only supports element widths 8, 16, and 32, got "
         << elem_width;
     std::string dist = "PAT_ALL";
-    if (CodegenOperands(op).size() == 2U) {
-      const auto *dist_imm = CodegenOperands(op)[1].as<StringImmObj>();
+    if (op->args.size() == 2U) {
+      const auto *dist_imm = op->args[1].as<StringImmObj>();
       ICHECK(dist_imm)
           << "tl.simd.pge distribution must be a constant string for PTO "
              "codegen";
@@ -5101,10 +5057,10 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
   }
 
   // Predicate load/store: (addr, dist) and (addr, src, dist).
-  if (IsCodegenOp(op, "tl.simd.pld")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_pld())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.pld expects 2 arguments (addr, dist)";
-    const auto *dist_imm = CodegenOperands(op)[1].as<StringImmObj>();
+    const auto *dist_imm = op->args[1].as<StringImmObj>();
     ICHECK(dist_imm)
         << "tl.simd.pld distribution must be a constant string for PTO "
            "codegen";
@@ -5113,8 +5069,8 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     ICHECK(kSupportedPldDist.count(dist_imm->value) != 0U)
         << "PTO tl.simd.pld does not support distribution " << dist_imm->value
         << "; expected NORM, US, or DS";
-    std::string addr = PrintExpr_(CodegenOperands(op)[0]);
-    if (GetAnnotatedPointerDtype(CodegenOperands(op)[0], PrimType::UInt(32)) !=
+    std::string addr = PrintExpr_(op->args[0]);
+    if (GetAnnotatedPointerDtype(op->args[0], PrimType::UInt(32)) !=
         PrimType::UInt(32)) {
       addr = "pto.castptr(" + addr + ", " +
              PointerTypeName(PrimType::UInt(32), "ub") + ")";
@@ -5124,10 +5080,10 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.pst")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_pst())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd.pst expects 3 arguments (addr, src, dist)";
-    const auto *dist_imm = CodegenOperands(op)[2].as<StringImmObj>();
+    const auto *dist_imm = op->args[2].as<StringImmObj>();
     ICHECK(dist_imm)
         << "tl.simd.pst distribution must be a constant string for PTO "
            "codegen";
@@ -5136,38 +5092,39 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     ICHECK(kSupportedPstDist.count(dist_imm->value) != 0U)
         << "PTO tl.simd.pst does not support distribution " << dist_imm->value
         << "; expected NORM or PK";
-    std::string addr = PrintExpr_(CodegenOperands(op)[0]);
-    if (GetAnnotatedPointerDtype(CodegenOperands(op)[0], PrimType::UInt(32)) !=
+    std::string addr = PrintExpr_(op->args[0]);
+    if (GetAnnotatedPointerDtype(op->args[0], PrimType::UInt(32)) !=
         PrimType::UInt(32)) {
       addr = "pto.castptr(" + addr + ", " +
              PointerTypeName(PrimType::UInt(32), "ub") + ")";
     }
     PrintIndent();
-    stream << "pto.psts(" << PrintExpr_(CodegenOperands(op)[1]) << ", " << addr
+    stream << "pto.psts(" << PrintExpr_(op->args[1]) << ", " << addr
            << ", pto.const(0), dist=\"" << dist_imm->value << "\")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vld")) {
-    ICHECK(CodegenOperands(op).size() >= 2U && CodegenOperands(op).size() <= 3U)
+  if (op->op.same_as(tl::simd_vld())) {
+    ICHECK(op->args.size() >= 2U && op->args.size() <= 3U)
         << "tl.simd.vld expects 2 or 3 arguments (addr, dist[, offset])";
-    PrimType elem_dtype = CodegenDType(op).WithLanes(1);
-    ICHECK_GT(CodegenDType(op).lanes(), 1)
-        << "tl.simd.vld should return a vector type, got " << CodegenDType(op);
-    std::string dist = NormalizeVldDistribution(
-        (CodegenOperands(op)[1]).as_or_throw<StringImm>()->value);
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    PrimType elem_dtype = dtype.WithLanes(1);
+    ICHECK_GT(dtype.lanes(), 1)
+        << "tl.simd.vld should return a vector type, got " << dtype;
+    std::string dist =
+        NormalizeVldDistribution((op->args[1]).as_or_throw<StringImm>()->value);
     std::string offset =
-        CodegenOperands(op).size() == 3U
-            ? RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]))
+        op->args.size() == 3U
+            ? RemoveOutermostParentheses(PrintExpr_(op->args[2]))
             : "pto.const(0)";
-    int pto_lanes = CodegenDType(op).lanes();
+    int pto_lanes = dtype.lanes();
     if (elem_dtype.bits() < 8) {
       ICHECK_EQ((pto_lanes * elem_dtype.bits()) % 8, 0)
           << "PTO vld sub-byte vector lanes must form whole bytes, got "
-          << CodegenDType(op);
+          << dtype;
       pto_lanes = (pto_lanes * elem_dtype.bits()) / 8;
     }
-    os << "pto.vlds(" << PrintExpr_(CodegenOperands(op)[0]) << ", " << offset
+    os << "pto.vlds(" << PrintExpr_(op->args[0]) << ", " << offset
        << ", pto.vreg_type(" << pto_lanes << ", " << ScalarType(elem_dtype)
        << ")";
     if (!dist.empty() && dist != "NORM") {
@@ -5177,39 +5134,39 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vabsdif")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_vabsdif())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vabsdif expects 4 arguments (src0, src1, mask, mode)";
-    PrimType elem_dtype = CodegenDType(op).WithLanes(1);
+    PrimType elem_dtype = op->ty.as_or_throw<PrimType>().WithLanes(1);
     ICHECK(elem_dtype.MatchesCode(kDLFloat) &&
            (elem_dtype.bits() == 16 || elem_dtype.bits() == 32))
         << "PTO tl.simd.vabsdif only supports float16 and float32, got "
         << elem_dtype;
     ValidateVecMode_(op, 3);
-    std::string mask = PrintExpr_(CodegenOperands(op)[2]);
-    os << "pto.vabs(pto.vsub(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ", " << mask << "), " << mask
-       << ")";
+    std::string mask = PrintExpr_(op->args[2]);
+    os << "pto.vabs(pto.vsub(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << mask << "), " << mask << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vadd") || IsCodegenOp(op, "tl.simd.vsub") ||
-      IsCodegenOp(op, "tl.simd.vmul") || IsCodegenOp(op, "tl.simd.vdiv") ||
-      IsCodegenOp(op, "tl.simd.vmax") || IsCodegenOp(op, "tl.simd.vmin") ||
-      IsCodegenOp(op, "tl.simd.vand") || IsCodegenOp(op, "tl.simd.vor") ||
-      IsCodegenOp(op, "tl.simd.vxor") || IsCodegenOp(op, "tl.simd.vshl") ||
-      IsCodegenOp(op, "tl.simd.vshr")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_vadd()) || op->op.same_as(tl::simd_vsub()) ||
+      op->op.same_as(tl::simd_vmul()) || op->op.same_as(tl::simd_vdiv()) ||
+      op->op.same_as(tl::simd_vmax()) || op->op.same_as(tl::simd_vmin()) ||
+      op->op.same_as(tl::simd_vand()) || op->op.same_as(tl::simd_vor()) ||
+      op->op.same_as(tl::simd_vxor()) || op->op.same_as(tl::simd_vshl()) ||
+      op->op.same_as(tl::simd_vshr())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd binary vector op expects 4 arguments (src0, src1, mask, "
            "mode)";
-    if (IsCodegenOp(op, "tl.simd.vdiv")) {
+    if (op->op.same_as(tl::simd_vdiv())) {
       // Per-op "precision" annotation (0=hw, 1=exact) wins over the global
       // fast-math default via the shared SFU precision resolver. Non-fp32
       // always uses the hardware instruction regardless of annotations.
-      const bool is_f32 = CodegenDType(op).WithLanes(1).MatchesCode(kDLFloat) &&
-                          CodegenDType(op).WithLanes(1).bits() == 32;
+      const PrimType dtype = op->ty.as_or_throw<PrimType>();
+      const bool is_f32 = dtype.WithLanes(1).MatchesCode(kDLFloat) &&
+                          dtype.WithLanes(1).bits() == 32;
       const SfuPrecision prec = ResolveSfuPrecision(
-          GetRef<Call>(op), CodegenDType(op),
+          GetRef<Call>(op), dtype,
           (is_f32 && !enable_fast_math_) ? SfuPrecision::kExact
                                          : SfuPrecision::kHw);
       ICHECK_NE(static_cast<int>(prec),
@@ -5218,91 +5175,87 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
              "precision=\"ftz_true\" or \"exact\"";
       if (prec == SfuPrecision::kExact) {
         ValidateVecMode_(op, 3);
-        os << "tl.vdiv_precise_f32(" << PrintExpr_(CodegenOperands(op)[0])
-           << ", " << PrintExpr_(CodegenOperands(op)[1]) << ", "
-           << PrintExpr_(CodegenOperands(op)[2]) << ")";
+        os << "tl.vdiv_precise_f32(" << PrintExpr_(op->args[0]) << ", "
+           << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
         return;
       }
     }
     const char *name = nullptr;
-    if (IsCodegenOp(op, "tl.simd.vadd"))
+    if (op->op.same_as(tl::simd_vadd()))
       name = "vadd";
-    else if (IsCodegenOp(op, "tl.simd.vsub"))
+    else if (op->op.same_as(tl::simd_vsub()))
       name = "vsub";
-    else if (IsCodegenOp(op, "tl.simd.vmul"))
+    else if (op->op.same_as(tl::simd_vmul()))
       name = "vmul";
-    else if (IsCodegenOp(op, "tl.simd.vdiv"))
+    else if (op->op.same_as(tl::simd_vdiv()))
       name = "vdiv";
-    else if (IsCodegenOp(op, "tl.simd.vmax"))
+    else if (op->op.same_as(tl::simd_vmax()))
       name = "vmax";
-    else if (IsCodegenOp(op, "tl.simd.vmin"))
+    else if (op->op.same_as(tl::simd_vmin()))
       name = "vmin";
-    else if (IsCodegenOp(op, "tl.simd.vand"))
+    else if (op->op.same_as(tl::simd_vand()))
       name = "vand";
-    else if (IsCodegenOp(op, "tl.simd.vor"))
+    else if (op->op.same_as(tl::simd_vor()))
       name = "vor";
-    else if (IsCodegenOp(op, "tl.simd.vxor"))
+    else if (op->op.same_as(tl::simd_vxor()))
       name = "vxor";
-    else if (IsCodegenOp(op, "tl.simd.vshl"))
+    else if (op->op.same_as(tl::simd_vshl()))
       name = "vshl";
     else
       name = "vshr";
     ValidateVecMode_(op, 3);
-    os << "pto." << name << "(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ", "
-       << PrintExpr_(CodegenOperands(op)[2]) << ")";
+    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
     return;
   }
 
   // --- SIMD unary: (src, mask, mode) → pto.<op>(src, mask) ---
-  if (IsCodegenOp(op, "tl.simd.vabs") || IsCodegenOp(op, "tl.simd.vexp") ||
-      IsCodegenOp(op, "tl.simd.vln") || IsCodegenOp(op, "tl.simd.vsqrt") ||
-      IsCodegenOp(op, "tl.simd.vneg") || IsCodegenOp(op, "tl.simd.vrelu") ||
-      IsCodegenOp(op, "tl.simd.vnot")) {
+  if (op->op.same_as(tl::simd_vabs()) || op->op.same_as(tl::simd_vexp()) ||
+      op->op.same_as(tl::simd_vln()) || op->op.same_as(tl::simd_vsqrt()) ||
+      op->op.same_as(tl::simd_vneg()) || op->op.same_as(tl::simd_vrelu()) ||
+      op->op.same_as(tl::simd_vnot())) {
     // LegalizeSimdMerging rewrites `dst[0] = op(src, mask, MODE_MERGING)` into
     // a void call carrying dst as an explicit read-write first argument.
-    const bool has_explicit_dst = CodegenOperands(op).size() == 4U;
-    ICHECK(CodegenOperands(op).size() == 3U || has_explicit_dst)
+    const bool has_explicit_dst = op->args.size() == 4U;
+    ICHECK(op->args.size() == 3U || has_explicit_dst)
         << "tl.simd unary op expects 3 arguments (src, mask, mode) or the "
            "legalized MODE_MERGING form (dst, src, mask, mode), got "
-        << CodegenOperands(op).size() << " arguments";
+        << op->args.size() << " arguments";
     if (has_explicit_dst) {
       TVM_FFI_THROW(InternalError)
           << "PTO codegen does not support MODE_MERGING for "
           << (op->op).as_or_throw<Op>()->name << " yet";
     }
     ValidateVecMode_(op, 2);
-    const char *name = IsCodegenOp(op, "tl.simd.vabs")    ? "vabs"
-                       : IsCodegenOp(op, "tl.simd.vexp")  ? "vexp"
-                       : IsCodegenOp(op, "tl.simd.vln")   ? "vln"
-                       : IsCodegenOp(op, "tl.simd.vsqrt") ? "vsqrt"
-                       : IsCodegenOp(op, "tl.simd.vneg")  ? "vneg"
-                       : IsCodegenOp(op, "tl.simd.vrelu") ? "vrelu"
+    const char *name = op->op.same_as(tl::simd_vabs())    ? "vabs"
+                       : op->op.same_as(tl::simd_vexp())  ? "vexp"
+                       : op->op.same_as(tl::simd_vln())   ? "vln"
+                       : op->op.same_as(tl::simd_vsqrt()) ? "vsqrt"
+                       : op->op.same_as(tl::simd_vneg())  ? "vneg"
+                       : op->op.same_as(tl::simd_vrelu()) ? "vrelu"
                                                           : "vnot";
-    PrimType input_elem = CodegenDType(CodegenOperands(op)[0]).WithLanes(1);
+    PrimType input_elem = op->args[0]->ty.as_or_throw<PrimType>().WithLanes(1);
     int input_bits = input_elem.bits();
     if (input_bits < 8) {
       input_bits = 8;
     }
     std::string mask =
-        "pto.pbitcast(" +
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1])) +
+        "pto.pbitcast(" + RemoveOutermostParentheses(PrintExpr_(op->args[1])) +
         ", pto.mask_type(\"b" + std::to_string(input_bits) + "\"))";
     // Per-op SFU precision annotation (vexp/vln/vsqrt only; vabs/vneg/vrelu
     // have no precision tiers). 0 (hw) keeps the bare SFU call; 2 (ftz_false)
     // routes to the subnormal-preserving software wrapper. The shared
     // resolver guarantees ftz_false only applies to float32 operands.
-    if (IsCodegenOp(op, "tl.simd.vexp") || IsCodegenOp(op, "tl.simd.vln") ||
-        IsCodegenOp(op, "tl.simd.vsqrt")) {
+    if (op->op.same_as(tl::simd_vexp()) || op->op.same_as(tl::simd_vln()) ||
+        op->op.same_as(tl::simd_vsqrt())) {
       const SfuPrecision prec = ResolveSfuPrecision(
-          GetRef<Call>(op), CodegenDType(op), SfuPrecision::kHw);
+          GetRef<Call>(op), op->ty.as_or_throw<PrimType>(), SfuPrecision::kHw);
       if (prec == SfuPrecision::kKeepSub) {
         const char *helper =
-            IsCodegenOp(op, "tl.simd.vexp")  ? "tl.vexp_1ulp_ftz_false"
-            : IsCodegenOp(op, "tl.simd.vln") ? "tl.vln_1ulp_ftz_false"
+            op->op.same_as(tl::simd_vexp())  ? "tl.vexp_1ulp_ftz_false"
+            : op->op.same_as(tl::simd_vln()) ? "tl.vln_1ulp_ftz_false"
                                              : "tl.vsqrt_0ulp_ftz_false";
-        os << helper << "(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-           << mask << ")";
+        os << helper << "(" << PrintExpr_(op->args[0]) << ", " << mask << ")";
         return;
       }
       ICHECK_EQ(static_cast<int>(prec), static_cast<int>(SfuPrecision::kHw))
@@ -5310,69 +5263,69 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
           << " only supports precision 0 (hw) and 2 (ftz_false), got "
           << static_cast<int>(prec);
     }
-    os << "pto." << name << "(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << mask << ")";
+    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ", " << mask
+       << ")";
     return;
   }
 
   // --- SIMD predicate ops: pand/por/pxor/psel (src0, src1, mask);
   //     pnot (src, mask) → pto.<op>(...) ---
-  if (IsCodegenOp(op, "tl.simd.pand") || IsCodegenOp(op, "tl.simd.por") ||
-      IsCodegenOp(op, "tl.simd.pxor") || IsCodegenOp(op, "tl.simd.pnot") ||
-      IsCodegenOp(op, "tl.simd.psel")) {
-    bool is_pnot = IsCodegenOp(op, "tl.simd.pnot");
-    ICHECK_EQ(CodegenOperands(op).size(), is_pnot ? 2U : 3U)
+  if (op->op.same_as(tl::simd_pand()) || op->op.same_as(tl::simd_por()) ||
+      op->op.same_as(tl::simd_pxor()) || op->op.same_as(tl::simd_pnot()) ||
+      op->op.same_as(tl::simd_psel())) {
+    bool is_pnot = op->op.same_as(tl::simd_pnot());
+    ICHECK_EQ(op->args.size(), is_pnot ? 2U : 3U)
         << "tl.simd predicate op expects " << (is_pnot ? 2 : 3) << " arguments";
     const char *name = is_pnot                           ? "pnot"
-                       : IsCodegenOp(op, "tl.simd.pand") ? "pand"
-                       : IsCodegenOp(op, "tl.simd.por")  ? "por"
-                       : IsCodegenOp(op, "tl.simd.pxor") ? "pxor"
+                       : op->op.same_as(tl::simd_pand()) ? "pand"
+                       : op->op.same_as(tl::simd_por())  ? "por"
+                       : op->op.same_as(tl::simd_pxor()) ? "pxor"
                                                          : "psel";
-    os << "pto." << name << "(" << PrintExpr_(CodegenOperands(op)[0]);
-    for (int i = 1; i < static_cast<int>(CodegenOperands(op).size()); ++i) {
-      os << ", " << PrintExpr_(CodegenOperands(op)[i]);
+    os << "pto." << name << "(" << PrintExpr_(op->args[0]);
+    for (int i = 1; i < static_cast<int>(op->args.size()); ++i) {
+      os << ", " << PrintExpr_(op->args[i]);
     }
     os << ")";
     return;
   }
 
   // Runtime tail predicate and predicate pack/unpack.
-  if (IsCodegenOp(op, "tl.simd.update_mask")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_update_mask())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.update_mask expects 2 arguments (value, width)";
     int64_t width = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[1], &width))
+    ICHECK(TryGetConstInt(op->args[1], &width))
         << "tl.simd.update_mask width must be constant for PTO codegen";
     ICHECK(width == 8 || width == 16 || width == 32)
         << "PTO tl.simd.update_mask only supports widths 8, 16, and 32, got "
         << width;
     os << "pto.make_mask(" << DataTypeName(PrimType::UInt(width)) << ", "
-       << PrintExpr_(CodegenOperands(op)[0]) << ")";
+       << PrintExpr_(op->args[0]) << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.ppack") || IsCodegenOp(op, "tl.simd.punpack")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_ppack()) || op->op.same_as(tl::simd_punpack())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd predicate pack/unpack expects 2 arguments (src, part)";
-    const auto *part_imm = CodegenOperands(op)[1].as<StringImmObj>();
+    const auto *part_imm = op->args[1].as<StringImmObj>();
     ICHECK(part_imm)
         << "tl.simd predicate pack/unpack part must be a constant string for "
            "PTO codegen";
     ICHECK(part_imm->value == "LOWER" || part_imm->value == "HIGHER")
         << "PTO predicate pack/unpack part must be LOWER or HIGHER, got "
         << part_imm->value;
-    const char *name = IsCodegenOp(op, "tl.simd.ppack") ? "ppack" : "punpack";
-    os << "pto." << name << "(" << PrintExpr_(CodegenOperands(op)[0]) << ", \""
+    const char *name = op->op.same_as(tl::simd_ppack()) ? "ppack" : "punpack";
+    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ", \""
        << part_imm->value << "\")";
     return;
   }
 
   // Carry and predicate-pair operations are emitted at their T.bind site so
   // each multi-result instruction is evaluated exactly once.
-  if (IsCodegenOp(op, "tl.simd.vaddc") || IsCodegenOp(op, "tl.simd.vsubc") ||
-      IsCodegenOp(op, "tl.simd.vaddcs") || IsCodegenOp(op, "tl.simd.vsubcs") ||
-      IsCodegenOp(op, "tl.simd.vmull") || IsCodegenOp(op, "tl.simd.pintlv") ||
-      IsCodegenOp(op, "tl.simd.pdintlv")) {
+  if (op->op.same_as(tl::simd_vaddc()) || op->op.same_as(tl::simd_vsubc()) ||
+      op->op.same_as(tl::simd_vaddcs()) || op->op.same_as(tl::simd_vsubcs()) ||
+      op->op.same_as(tl::simd_vmull()) || op->op.same_as(tl::simd_pintlv()) ||
+      op->op.same_as(tl::simd_pdintlv())) {
     TVM_FFI_THROW(InternalError)
         << op->op
         << " must be bound via T.bind for PTO codegen before its pair "
@@ -5381,118 +5334,113 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
   }
 
   // Leaky/parametric ReLU.
-  if (IsCodegenOp(op, "tl.simd.vlrelu") || IsCodegenOp(op, "tl.simd.vprelu")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_vlrelu()) || op->op.same_as(tl::simd_vprelu())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd vlrelu/vprelu expects 3 arguments";
-    if (IsCodegenOp(op, "tl.simd.vlrelu")) {
-      PrimType vector_dtype = CodegenDType(CodegenOperands(op)[0]);
+    if (op->op.same_as(tl::simd_vlrelu())) {
+      PrimType vector_dtype = op->args[0]->ty.as_or_throw<PrimType>();
       std::string alpha = WrapTypedConst(
-          RemoveOutermostParentheses(
-              PrintExpr_(PeelScalarCasts(CodegenOperands(op)[1]))),
-          vector_dtype, IsImmediateScalar(CodegenOperands(op)[1]));
-      os << "pto.vlrelu(" << PrintExpr_(CodegenOperands(op)[0]) << ", " << alpha
-         << ", " << PrintExpr_(CodegenOperands(op)[2]) << ")";
+          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
+          vector_dtype, IsImmediateScalar(op->args[1]));
+      os << "pto.vlrelu(" << PrintExpr_(op->args[0]) << ", " << alpha << ", "
+         << PrintExpr_(op->args[2]) << ")";
     } else {
-      os << "pto.vprelu(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-         << PrintExpr_(CodegenOperands(op)[1]) << ", "
-         << PrintExpr_(CodegenOperands(op)[2]) << ")";
+      os << "pto.vprelu(" << PrintExpr_(op->args[0]) << ", "
+         << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
     }
     return;
   }
 
   // Histogram updates a mutable vector destination.
-  if (IsCodegenOp(op, "tl.simd.chistv2") ||
-      IsCodegenOp(op, "tl.simd.dhistv2")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_chistv2()) ||
+      op->op.same_as(tl::simd_dhistv2())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd histogram expects 4 arguments (dst, src, mask, bin)";
-    const bool is_dhistv2 = IsCodegenOp(op, "tl.simd.dhistv2");
+    const bool is_dhistv2 = op->op.same_as(tl::simd_dhistv2());
     const char *name = is_dhistv2 ? "dhistv2" : "chistv2";
     int64_t bin = 0;
-    ICHECK(TryGetConstInt(CodegenOperands(op)[3], &bin))
+    ICHECK(TryGetConstInt(op->args[3], &bin))
         << "tl.simd." << name << " bin must be a constant integer";
     ICHECK(bin == 0 || bin == 1)
         << "tl.simd." << name << " only supports bin 0 or 1, got " << bin;
-    std::string dst_ref = GetMutableVectorRef(CodegenOperands(op)[0], name);
+    std::string dst_ref = GetMutableVectorRef(op->args[0], name);
     PrintIndent();
     stream << dst_ref << " = pto." << name << "(" << dst_ref << ", "
-           << PrintExpr_(CodegenOperands(op)[1]) << ", "
-           << PrintExpr_(CodegenOperands(op)[2]) << ", pto.const(" << bin
-           << ", dtype=pto.int32))\n";
+           << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2])
+           << ", pto.const(" << bin << ", dtype=pto.int32))\n";
     return;
   }
 
   // --- SIMD vector-scalar ops: (src, scalar, mask, mode) → pto.<op>(src,
   // scalar, mask) ---
-  if (IsCodegenOp(op, "tl.simd.vadds") || IsCodegenOp(op, "tl.simd.vmuls") ||
-      IsCodegenOp(op, "tl.simd.vmaxs") || IsCodegenOp(op, "tl.simd.vmins") ||
-      IsCodegenOp(op, "tl.simd.vshls") || IsCodegenOp(op, "tl.simd.vshrs")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_vadds()) || op->op.same_as(tl::simd_vmuls()) ||
+      op->op.same_as(tl::simd_vmaxs()) || op->op.same_as(tl::simd_vmins()) ||
+      op->op.same_as(tl::simd_vshls()) || op->op.same_as(tl::simd_vshrs())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd vector-scalar op expects (src, scalar, mask, mode), got "
-        << CodegenOperands(op).size() << " arguments";
+        << op->args.size() << " arguments";
     ValidateVecMode_(op, 3);
-    const char *name = IsCodegenOp(op, "tl.simd.vadds")   ? "vadds"
-                       : IsCodegenOp(op, "tl.simd.vmuls") ? "vmuls"
-                       : IsCodegenOp(op, "tl.simd.vmaxs") ? "vmaxs"
-                       : IsCodegenOp(op, "tl.simd.vmins") ? "vmins"
-                       : IsCodegenOp(op, "tl.simd.vshls") ? "vshls"
+    const char *name = op->op.same_as(tl::simd_vadds())   ? "vadds"
+                       : op->op.same_as(tl::simd_vmuls()) ? "vmuls"
+                       : op->op.same_as(tl::simd_vmaxs()) ? "vmaxs"
+                       : op->op.same_as(tl::simd_vmins()) ? "vmins"
+                       : op->op.same_as(tl::simd_vshls()) ? "vshls"
                                                           : "vshrs";
-    std::string src = PrintExpr_(CodegenOperands(op)[0]);
-    PrimType result_dtype = CodegenDType(CodegenOperands(op)[0]);
-    std::string scalar =
-        WrapTypedConst(RemoveOutermostParentheses(
-                           PrintExpr_(PeelScalarCasts(CodegenOperands(op)[1]))),
-                       result_dtype, IsImmediateScalar(CodegenOperands(op)[1]));
-    std::string mask = PrintExpr_(CodegenOperands(op)[2]);
+    std::string src = PrintExpr_(op->args[0]);
+    PrimType result_dtype = op->args[0]->ty.as_or_throw<PrimType>();
+    std::string scalar = WrapTypedConst(
+        RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[1]))),
+        result_dtype, IsImmediateScalar(op->args[1]));
+    std::string mask = PrintExpr_(op->args[2]);
     os << "pto." << name << "(" << src << ", " << scalar << ", " << mask << ")";
     return;
   }
 
   // Cross-lane reductions / lane squeeze: (src, mask, mode) -> pto.<op>(src,
   // mask)
-  if (IsCodegenOp(op, "tl.simd.vcpadd") || IsCodegenOp(op, "tl.simd.vcadd") ||
-      IsCodegenOp(op, "tl.simd.vcmax") || IsCodegenOp(op, "tl.simd.vcmin") ||
-      IsCodegenOp(op, "tl.simd.vcgadd") || IsCodegenOp(op, "tl.simd.vcgmax") ||
-      IsCodegenOp(op, "tl.simd.vcgmin") || IsCodegenOp(op, "tl.simd.vsqz")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_vcpadd()) || op->op.same_as(tl::simd_vcadd()) ||
+      op->op.same_as(tl::simd_vcmax()) || op->op.same_as(tl::simd_vcmin()) ||
+      op->op.same_as(tl::simd_vcgadd()) || op->op.same_as(tl::simd_vcgmax()) ||
+      op->op.same_as(tl::simd_vcgmin()) || op->op.same_as(tl::simd_vsqz())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd cross-lane op expects 3 arguments (src, mask, mode)";
     ValidateVecMode_(op, 2,
-                     IsCodegenOp(op, "tl.simd.vsqz") ? "MODE_STORED"
+                     op->op.same_as(tl::simd_vsqz()) ? "MODE_STORED"
                                                      : "MODE_ZEROING");
-    const char *name = IsCodegenOp(op, "tl.simd.vcpadd")   ? "vcpadd"
-                       : IsCodegenOp(op, "tl.simd.vcadd")  ? "vcadd"
-                       : IsCodegenOp(op, "tl.simd.vcmax")  ? "vcmax"
-                       : IsCodegenOp(op, "tl.simd.vcmin")  ? "vcmin"
-                       : IsCodegenOp(op, "tl.simd.vcgadd") ? "vcgadd"
-                       : IsCodegenOp(op, "tl.simd.vcgmax") ? "vcgmax"
-                       : IsCodegenOp(op, "tl.simd.vcgmin") ? "vcgmin"
+    const char *name = op->op.same_as(tl::simd_vcpadd())   ? "vcpadd"
+                       : op->op.same_as(tl::simd_vcadd())  ? "vcadd"
+                       : op->op.same_as(tl::simd_vcmax())  ? "vcmax"
+                       : op->op.same_as(tl::simd_vcmin())  ? "vcmin"
+                       : op->op.same_as(tl::simd_vcgadd()) ? "vcgadd"
+                       : op->op.same_as(tl::simd_vcgmax()) ? "vcgmax"
+                       : op->op.same_as(tl::simd_vcgmin()) ? "vcgmin"
                                                            : "vsqz";
-    PrimType input_elem = CodegenDType(CodegenOperands(op)[0]).WithLanes(1);
+    PrimType input_elem = op->args[0]->ty.as_or_throw<PrimType>().WithLanes(1);
     int input_bits = input_elem.bits();
     if (input_bits < 8) {
       input_bits = 8;
     }
     std::string mask =
-        "pto.pbitcast(" +
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1])) +
+        "pto.pbitcast(" + RemoveOutermostParentheses(PrintExpr_(op->args[1])) +
         ", pto.mask_type(\"b" + std::to_string(input_bits) + "\"))";
-    os << "pto." << name << "(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << mask << ")";
+    os << "pto." << name << "(" << PrintExpr_(op->args[0]) << ", " << mask
+       << ")";
     return;
   }
 
   // Unsqueeze mask bits into an integer prefix-count vector. PTOAS keeps a
   // vector carrier operand for this operation, while TileLang only exposes the
   // predicate; use a zero-initialized carrier of the result type.
-  if (IsCodegenOp(op, "tl.simd.vusqz")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 1U)
-        << "tl.simd.vusqz expects 1 argument (mask)";
-    PrimType elem = CodegenDType(op).WithLanes(1);
+  if (op->op.same_as(tl::simd_vusqz())) {
+    ICHECK_EQ(op->args.size(), 1U) << "tl.simd.vusqz expects 1 argument (mask)";
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    PrimType elem = dtype.WithLanes(1);
     ICHECK((elem.MatchesCode(kDLInt) || elem.MatchesCode(kDLUInt)) &&
            (elem.bits() == 8 || elem.bits() == 16 || elem.bits() == 32))
         << "tl.simd.vusqz result must be an 8-, 16-, or 32-bit integer vector, "
            "got "
-        << CodegenDType(op);
-    std::string mask = PrintExpr_(CodegenOperands(op)[0]);
+        << dtype;
+    std::string mask = PrintExpr_(op->args[0]);
     std::string carrier = "pto.vdup(pto.const(0, dtype=" + DataTypeName(elem) +
                           "), " + mask + ")";
     os << "pto.vusqz(" << carrier << ", " << mask << ")";
@@ -5500,24 +5448,22 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
   }
 
   // Elementwise compare -> predicate: (src0, src1, mask, op)
-  if (IsCodegenOp(op, "tl.simd.vcmp")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_vcmp())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vcmp expects 4 arguments (src0, src1, mask, op)";
-    std::string cmp_op =
-        (CodegenOperands(op)[3]).as_or_throw<StringImm>()->value;
-    os << "pto.vcmp(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ", "
-       << PrintExpr_(CodegenOperands(op)[2]) << ", \"" << cmp_op << "\")";
+    std::string cmp_op = (op->args[3]).as_or_throw<StringImm>()->value;
+    os << "pto.vcmp(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ", \""
+       << cmp_op << "\")";
     return;
   }
 
   // --- SIMD vector-scalar compare: (src, scalar, mask, op) → pto.vcmps(src,
   // scalar, mask, pto.CmpMode.<OP>) ---
-  if (IsCodegenOp(op, "tl.simd.vcmps")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_vcmps())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vcmps expects 4 arguments (src, scalar, mask, op)";
-    std::string cmp_op =
-        (CodegenOperands(op)[3]).as_or_throw<StringImm>()->value;
+    std::string cmp_op = (op->args[3]).as_or_throw<StringImm>()->value;
     static const std::unordered_map<std::string, const char *> kCmpModeEnum = {
         {"eq", "EQ"}, {"ne", "NE"}, {"gt", "GT"},
         {"ge", "GE"}, {"lt", "LT"}, {"le", "LE"},
@@ -5526,18 +5472,16 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     ICHECK(it != kCmpModeEnum.end())
         << "Unsupported cmp op '" << cmp_op
         << "' for tl.simd.vcmps; expected one of eq/ne/gt/ge/lt/le";
-    os << "pto.vcmps(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ", "
-       << PrintExpr_(CodegenOperands(op)[2]) << ", pto.CmpMode." << it->second
-       << ")";
+    os << "pto.vcmps(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2])
+       << ", pto.CmpMode." << it->second << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vci")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_vci())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.vci expects 2 arguments (index, order)";
-    std::string order =
-        (CodegenOperands(op)[1]).as_or_throw<StringImm>()->value;
+    std::string order = (op->args[1]).as_or_throw<StringImm>()->value;
     // VPTO's parseOrderImmediate only accepts "ASC" / "DESC";
     // TileLang's simd layer uses "INC_ORDER" / "DEC_ORDER".
     if (order == "INC_ORDER")
@@ -5549,123 +5493,117 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
         << "'; expected INC_ORDER/DEC_ORDER (or ASC/DESC)";
     // Match the authored vector element dtype (i16 for packed-ue8m0 lane math,
     // i32 for f32 gather paths). Always-i32 coercion breaks i16 vci users.
-    PrimType elem = CodegenDType(op).WithLanes(1);
+    PrimType elem = op->ty.as_or_throw<PrimType>().WithLanes(1);
     std::string index;
-    if (IsImmediateScalar(CodegenOperands(op)[0])) {
-      index = "pto.const(" +
-              RemoveOutermostParentheses(
-                  PrintExpr_(PeelScalarCasts(CodegenOperands(op)[0]))) +
-              ", dtype=" + ScalarType(elem) + ")";
+    if (IsImmediateScalar(op->args[0])) {
+      index =
+          "pto.const(" +
+          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))) +
+          ", dtype=" + ScalarType(elem) + ")";
     } else {
-      index = ScalarCastExpr(PrintExpr_(CodegenOperands(op)[0]), elem,
-                             "tl.simd.vci index");
+      index =
+          ScalarCastExpr(PrintExpr_(op->args[0]), elem, "tl.simd.vci index");
     }
     os << "pto.vci(" << index << ", order=\"" << order << "\")";
     return;
   }
 
   // Scalar broadcast: (scalar, mask, mode) -> pto.vdup(scalar, mask)
-  if (IsCodegenOp(op, "tl.simd.vdup")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_vdup())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd.vdup expects 3 arguments (src, mask, mode)";
     ValidateVecMode_(op, 2);
-    PrimType elem = CodegenDType(op).WithLanes(1);
+    PrimType elem = op->ty.as_or_throw<PrimType>().WithLanes(1);
     std::string scalar;
-    if (IsImmediateScalar(CodegenOperands(op)[0])) {
-      scalar = "pto.const(" +
-               RemoveOutermostParentheses(
-                   PrintExpr_(PeelScalarCasts(CodegenOperands(op)[0]))) +
-               ", dtype=" + DataTypeName(elem) + ")";
+    if (IsImmediateScalar(op->args[0])) {
+      scalar =
+          "pto.const(" +
+          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))) +
+          ", dtype=" + DataTypeName(elem) + ")";
     } else if (elem.MatchesCode(kDLInt) || elem.MatchesCode(kDLUInt) ||
                elem.MatchesCode(kDLBool)) {
-      scalar = ScalarCastExpr(RemoveOutermostParentheses(PrintExpr_(
-                                  PeelScalarCasts(CodegenOperands(op)[0]))),
-                              elem, "tl.simd.vdup scalar");
+      scalar = ScalarCastExpr(
+          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))),
+          elem, "tl.simd.vdup scalar");
     } else {
-      scalar = RemoveOutermostParentheses(
-          PrintExpr_(PeelScalarCasts(CodegenOperands(op)[0])));
+      scalar =
+          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0])));
     }
-    os << "pto.vdup(" << scalar << ", " << PrintExpr_(CodegenOperands(op)[1])
-       << ")";
+    os << "pto.vdup(" << scalar << ", " << PrintExpr_(op->args[1]) << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vdupv")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  if (op->op.same_as(tl::simd_vdupv())) {
+    ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vdupv expects 4 arguments (src, mask, pos, mode)";
     ValidateVecMode_(op, 3);
-    std::string pos_str =
-        (CodegenOperands(op)[2]).as_or_throw<StringImm>()->value;
+    std::string pos_str = (op->args[2]).as_or_throw<StringImm>()->value;
     std::string position = (pos_str == "POS_LOWEST") ? "LOWEST" : "HIGHEST";
     std::string scalar = WrapTypedConst(
-        RemoveOutermostParentheses(
-            PrintExpr_(PeelScalarCasts(CodegenOperands(op)[0]))),
-        CodegenDType(op), IsImmediateScalar(CodegenOperands(op)[0]));
-    os << "pto.vdup(" << scalar << ", " << PrintExpr_(CodegenOperands(op)[1])
+        RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))),
+        op->ty.as_or_throw<PrimType>(), IsImmediateScalar(op->args[0]));
+    os << "pto.vdup(" << scalar << ", " << PrintExpr_(op->args[1])
        << ", position=\"" << position << "\")";
     return;
   }
 
   // Select: mask ? src0 : src1
-  if (IsCodegenOp(op, "tl.simd.vsel")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_vsel())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd.vsel expects 3 arguments (src0, src1, mask)";
-    os << "pto.vsel(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ", "
-       << PrintExpr_(CodegenOperands(op)[2]) << ")";
+    os << "pto.vsel(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << PrintExpr_(op->args[2]) << ")";
     return;
   }
 
   // Lane select/reorder: (src, index)
-  if (IsCodegenOp(op, "tl.simd.vselr")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_vselr())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.vselr expects 2 arguments (src, index)";
-    os << "pto.vselr(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ")";
+    os << "pto.vselr(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vmula") || IsCodegenOp(op, "tl.simd.vmadd") ||
-      IsCodegenOp(op, "tl.simd.vaxpy")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 5U)
+  if (op->op.same_as(tl::simd_vmula()) || op->op.same_as(tl::simd_vmadd()) ||
+      op->op.same_as(tl::simd_vaxpy())) {
+    ICHECK_EQ(op->args.size(), 5U)
         << "PTO SIMD read-modify-write op expects 5 arguments "
            "(dst, src0, src1/scalar, mask, mode)";
     ValidateVecMode_(op, 4);
-    const bool is_vmula = IsCodegenOp(op, "tl.simd.vmula");
-    const bool is_vmadd = IsCodegenOp(op, "tl.simd.vmadd");
+    const bool is_vmula = op->op.same_as(tl::simd_vmula());
+    const bool is_vmadd = op->op.same_as(tl::simd_vmadd());
     std::string op_name = is_vmula ? "vmula" : (is_vmadd ? "vmadd" : "vaxpy");
-    std::string dst_ref = GetMutableVectorRef(CodegenOperands(op)[0], op_name);
+    std::string dst_ref = GetMutableVectorRef(op->args[0], op_name);
     PrintIndent();
     stream << dst_ref << " = pto." << op_name << "(";
     if (is_vmula || is_vmadd) {
-      stream << dst_ref << ", " << PrintExpr_(CodegenOperands(op)[1]) << ", "
-             << PrintExpr_(CodegenOperands(op)[2]);
+      stream << dst_ref << ", " << PrintExpr_(op->args[1]) << ", "
+             << PrintExpr_(op->args[2]);
     } else {
       // PTODSL spells vaxpy as alpha * x + y; TileLang's destination is y.
-      stream << PrintExpr_(CodegenOperands(op)[2]) << ", "
-             << PrintExpr_(CodegenOperands(op)[1]) << ", " << dst_ref;
+      stream << PrintExpr_(op->args[2]) << ", " << PrintExpr_(op->args[1])
+             << ", " << dst_ref;
     }
-    stream << ", " << PrintExpr_(CodegenOperands(op)[3]) << ")\n";
+    stream << ", " << PrintExpr_(op->args[3]) << ")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vpack")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_vpack())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.vpack expects 2 arguments (src, part)";
-    std::string part = (CodegenOperands(op)[1]).as_or_throw<StringImm>()->value;
-    os << "pto.vpack(" << PrintExpr_(CodegenOperands(op)[0]) << ", \"" << part
-       << "\")";
+    std::string part = (op->args[1]).as_or_throw<StringImm>()->value;
+    os << "pto.vpack(" << PrintExpr_(op->args[0]) << ", \"" << part << "\")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vunpack")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_vunpack())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.vunpack expects 2 arguments (src, part)";
     int64_t part = -1;
-    if (const auto *part_imm = CodegenOperands(op)[1].as<IntImmObj>()) {
+    if (const auto *part_imm = op->args[1].as<IntImmObj>()) {
       part = CodegenInt(part_imm);
-    } else if (const auto *part_str =
-                   CodegenOperands(op)[1].as<StringImmObj>()) {
+    } else if (const auto *part_str = op->args[1].as<StringImmObj>()) {
       if (part_str->value == "LOWER") {
         part = 0;
       } else if (part_str->value == "HIGHER") {
@@ -5674,20 +5612,20 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     }
     ICHECK(part == 0 || part == 1)
         << "tl.simd.vunpack part must be LOWER/HIGHER or 0/1, got "
-        << CodegenOperands(op)[1];
+        << op->args[1];
     // PTOAS selects signed versus zero extension from the source vector type.
-    os << "pto.vunpack(" << PrintExpr_(CodegenOperands(op)[0]) << ", " << part
-       << ")";
+    os << "pto.vunpack(" << PrintExpr_(op->args[0]) << ", " << part << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vgatherb")) {
-    ICHECK(CodegenOperands(op).size() == 2U || CodegenOperands(op).size() == 3U)
+  if (op->op.same_as(tl::simd_vgatherb())) {
+    ICHECK(op->args.size() == 2U || op->args.size() == 3U)
         << "tl.simd.vgatherb expects 2 or 3 arguments (base, index[, mask])";
-    PrimType elem = CodegenDType(op).WithLanes(1);
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    PrimType elem = dtype.WithLanes(1);
     std::string mask;
-    if (CodegenOperands(op).size() == 3U) {
-      mask = PrintExpr_(CodegenOperands(op)[2]);
+    if (op->args.size() == 3U) {
+      mask = PrintExpr_(op->args[2]);
     } else {
       int elem_bits = elem.bits();
       if (elem_bits <= 8)
@@ -5698,22 +5636,21 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
         elem_bits = 32;
       mask = "pto.pset_b" + std::to_string(elem_bits) + "(\"PAT_ALL\")";
     }
-    os << "pto.vgatherb(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-       << PrintExpr_(CodegenOperands(op)[1]) << ", " << mask
-       << ", result_vreg_type=pto.vreg_type(" << CodegenDType(op).lanes()
-       << ", " << ScalarType(elem) << "))";
+    os << "pto.vgatherb(" << PrintExpr_(op->args[0]) << ", "
+       << PrintExpr_(op->args[1]) << ", " << mask
+       << ", result_vreg_type=pto.vreg_type(" << dtype.lanes() << ", "
+       << ScalarType(elem) << "))";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vcvt")) {
-    ICHECK(CodegenOperands(op).size() >= 4U && CodegenOperands(op).size() <= 6U)
+  if (op->op.same_as(tl::simd_vcvt())) {
+    ICHECK(op->args.size() >= 4U && op->args.size() <= 6U)
         << "tl.simd.vcvt expects 4 to 6 arguments (src, mask, ...extra)";
-    PrimType elem_dtype = CodegenDType(op).WithLanes(1);
+    PrimType elem_dtype = op->ty.as_or_throw<PrimType>().WithLanes(1);
     // Parse trailing StringImm args: ROUND_*, SAT/NOSAT, PART_*, MODE_*
     std::string rnd, sat, part;
-    for (size_t i = 2; i < CodegenOperands(op).size(); ++i) {
-      std::string val =
-          (CodegenOperands(op)[i]).as_or_throw<StringImm>()->value;
+    for (size_t i = 2; i < op->args.size(); ++i) {
+      std::string val = (op->args[i]).as_or_throw<StringImm>()->value;
       if (val.rfind("ROUND_", 0) == 0) {
         rnd = val.substr(6); // "ROUND_R" -> "R"
       } else if (val == "RS_ENABLE" || val == "RS_DISABLE") {
@@ -5730,16 +5667,16 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
             << "PTO codegen: unrecognized vcvt argument: " << val;
       }
     }
-    PrimType src_elem_dtype = CodegenDType(CodegenOperands(op)[0]).WithLanes(1);
+    PrimType src_elem_dtype =
+        op->args[0]->ty.as_or_throw<PrimType>().WithLanes(1);
     int src_bits = src_elem_dtype.bits();
     if (src_bits < 8) {
       src_bits = 8; // CCE has no pset_b4
     }
     std::string mask =
-        "pto.pbitcast(" +
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1])) +
+        "pto.pbitcast(" + RemoveOutermostParentheses(PrintExpr_(op->args[1])) +
         ", pto.mask_type(\"b" + std::to_string(src_bits) + "\"))";
-    os << "pto.vcvt(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
+    os << "pto.vcvt(" << PrintExpr_(op->args[0]) << ", "
        << ScalarType(elem_dtype) << ", " << mask;
     if (!rnd.empty()) {
       os << ", rnd=\"" << rnd << "\"";
@@ -5754,40 +5691,37 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vsts")) {
-    ICHECK(CodegenOperands(op).size() >= 3U && CodegenOperands(op).size() <= 5U)
+  if (op->op.same_as(tl::simd_vsts())) {
+    ICHECK(op->args.size() >= 3U && op->args.size() <= 5U)
         << "tl.simd.vsts expects 3 to 5 arguments "
            "(addr, src, mask[, dist][, offset])";
     std::string dist;
     int offset_index = -1;
-    if (CodegenOperands(op).size() >= 4U &&
-        CodegenOperands(op)[3].as<StringImmObj>()) {
-      dist = (CodegenOperands(op)[3]).as_or_throw<StringImm>()->value;
+    if (op->args.size() >= 4U && op->args[3].as<StringImmObj>()) {
+      dist = (op->args[3]).as_or_throw<StringImm>()->value;
       if (dist.rfind("ONEPT_", 0) == 0) {
         dist = "1PT_" + dist.substr(6);
       }
-      if (CodegenOperands(op).size() == 5U) {
+      if (op->args.size() == 5U) {
         offset_index = 4;
       }
-    } else if (CodegenOperands(op).size() == 4U) {
+    } else if (op->args.size() == 4U) {
       offset_index = 3;
     }
     std::string offset =
-        offset_index >= 0 ? RemoveOutermostParentheses(
-                                PrintExpr_(CodegenOperands(op)[offset_index]))
-                          : "pto.const(0)";
-    std::string vsts_mask =
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
+        offset_index >= 0
+            ? RemoveOutermostParentheses(PrintExpr_(op->args[offset_index]))
+            : "pto.const(0)";
+    std::string vsts_mask = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
     const int mask_granularity = VstsMaskGranularityOverride(
-        dist, CodegenDType(CodegenOperands(op)[1]).WithLanes(1));
+        dist, op->args[1]->ty.as_or_throw<PrimType>().WithLanes(1));
     if (mask_granularity != 0) {
       vsts_mask = "pto.pbitcast(" + vsts_mask + ", pto.mask_b" +
                   std::to_string(mask_granularity) + ")";
     }
     PrintIndent();
-    stream << "pto.vsts(" << PrintExpr_(CodegenOperands(op)[1]) << ", "
-           << PrintExpr_(CodegenOperands(op)[0]) << ", " << offset << ", "
-           << vsts_mask;
+    stream << "pto.vsts(" << PrintExpr_(op->args[1]) << ", "
+           << PrintExpr_(op->args[0]) << ", " << offset << ", " << vsts_mask;
     if (!dist.empty()) {
       // Normalize legacy AscendC dist naming (ONEPT_ → 1PT_)
       // so ptodsl accepts it.
@@ -5800,14 +5734,14 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vsstb")) {
-    ICHECK(CodegenOperands(op).size() == 4U || CodegenOperands(op).size() == 5U)
+  if (op->op.same_as(tl::simd_vsstb())) {
+    ICHECK(op->args.size() == 4U || op->args.size() == 5U)
         << "tl.simd.vsstb expects 4 or 5 arguments "
            "(src, base, packed_stride, mask[, POST_UPDATE])";
-    const bool post_update = CodegenOperands(op).size() == 5U;
+    const bool post_update = op->args.size() == 5U;
     ICHECK_EQ(op->ty.as<PtrTypeObj>() != nullptr, post_update)
         << "tl.simd.vsstb post-update form must return a handle";
-    PrimType stride_dtype = CodegenDType(CodegenOperands(op)[2]);
+    PrimType stride_dtype = op->args[2]->ty.as_or_throw<PrimType>();
     ICHECK(stride_dtype.IsScalar() &&
            (stride_dtype.MatchesCode(kDLInt) ||
             stride_dtype.MatchesCode(kDLUInt)) &&
@@ -5824,13 +5758,12 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     std::string block_stride;
     std::string repeat_stride;
     int64_t packed_stride = 0;
-    if (TryGetConstInt(CodegenOperands(op)[2], &packed_stride)) {
+    if (TryGetConstInt(op->args[2], &packed_stride)) {
       uint32_t packed_bits = static_cast<uint32_t>(packed_stride);
       block_stride = std::to_string((packed_bits >> 16) & 0xffffU);
       repeat_stride = std::to_string(packed_bits & 0xffffU);
     } else {
-      std::string stride =
-          RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
+      std::string stride = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
       // RuntimeValue implements integer floor division and bitwise-and, but
       // not Python's shift operators. Dividing by 2^16 and masking is
       // equivalent to extracting bits [31:16] for a 32-bit packed value,
@@ -5839,11 +5772,11 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
       repeat_stride = "((" + stride + ") & 0xffff)";
     }
 
-    std::string src = PrintExpr_(CodegenOperands(op)[0]);
-    std::string base = PrintExpr_(CodegenOperands(op)[1]);
-    std::string mask = PrintExpr_(CodegenOperands(op)[3]);
+    std::string src = PrintExpr_(op->args[0]);
+    std::string base = PrintExpr_(op->args[1]);
+    std::string mask = PrintExpr_(op->args[3]);
     if (post_update) {
-      const auto *post = CodegenOperands(op)[4].as<StringImmObj>();
+      const auto *post = op->args[4].as<StringImmObj>();
       ICHECK(post && post->value == "POST_UPDATE")
           << "tl.simd.vsstb POST_UPDATE argument must be POST_UPDATE";
       os << "pto.vsstb(" << src << ", " << base << ", " << block_stride << ", "
@@ -5856,41 +5789,38 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vscatter")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 4U)
-        << "tl.simd.vscatter expects 4 arguments "
-           "(src, base, offsets, mask)";
+  if (op->op.same_as(tl::simd_vscatter())) {
+    ICHECK_EQ(op->args.size(), 4U) << "tl.simd.vscatter expects 4 arguments "
+                                      "(src, base, offsets, mask)";
     // The TileLang surface accepts a byte-addressed buffer for packed
     // storage, while PTO's vscatter requires the destination pointer element
     // type to match the value register element type. Keep the authored byte
     // offsets intact and only refine the pointer type for the verifier (the
     // base expression is already an UB address produced by access_ptr).
-    PrimType value_dtype = CodegenDType(CodegenOperands(op)[0]).WithLanes(1);
-    std::string base = PrintExpr_(CodegenOperands(op)[1]);
-    PrimType base_dtype =
-        GetAnnotatedPointerDtype(CodegenOperands(op)[1], value_dtype);
+    PrimType value_dtype = op->args[0]->ty.as_or_throw<PrimType>().WithLanes(1);
+    std::string base = PrintExpr_(op->args[1]);
+    PrimType base_dtype = GetAnnotatedPointerDtype(op->args[1], value_dtype);
     if (base_dtype != value_dtype) {
       base = "pto.castptr(" + base + ", " + PointerTypeName(value_dtype, "ub") +
              ")";
     }
     PrintIndent();
-    stream << "pto.vscatter(" << PrintExpr_(CodegenOperands(op)[0]) << ", "
-           << base << ", " << PrintExpr_(CodegenOperands(op)[2]) << ", "
-           << PrintExpr_(CodegenOperands(op)[3]) << ")\n";
+    stream << "pto.vscatter(" << PrintExpr_(op->args[0]) << ", " << base << ", "
+           << PrintExpr_(op->args[2]) << ", " << PrintExpr_(op->args[3])
+           << ")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.mem_bar")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 1U)
+  if (op->op.same_as(tl::simd_mem_bar())) {
+    ICHECK_EQ(op->args.size(), 1U)
         << "tl.simd.mem_bar expects 1 argument (barrier type string)";
-    std::string barrier_type =
-        (CodegenOperands(op)[0]).as_or_throw<StringImm>()->value;
+    std::string barrier_type = (op->args[0]).as_or_throw<StringImm>()->value;
     PrintIndent();
     stream << "pto.mem_bar(\"" << barrier_type << "\")\n";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.loop_break")) {
+  if (op->op.same_as(tl::loop_break())) {
     ICHECK_GT(native_loop_depth_, 0)
         << "tl.loop_break encountered outside a native Python loop";
     PrintIndent();
@@ -5898,24 +5828,25 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vexpdif")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_vexpdif())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd.vexpdif expects 3 arguments (src0, src1, mask)";
-    std::string src0 = PrintExpr_(CodegenOperands(op)[0]);
-    std::string src1 = PrintExpr_(CodegenOperands(op)[1]);
-    std::string mask = PrintExpr_(CodegenOperands(op)[2]);
+    std::string src0 = PrintExpr_(op->args[0]);
+    std::string src1 = PrintExpr_(op->args[1]);
+    std::string mask = PrintExpr_(op->args[2]);
     os << "pto.vexpdif(" << src0 << ", " << src1 << ", " << mask << ", \""
        << "EVEN"
        << "\")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vgather2")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 3U)
+  if (op->op.same_as(tl::simd_vgather2())) {
+    ICHECK_EQ(op->args.size(), 3U)
         << "tl.simd.vgather2 expects 3 arguments (base, index, mask)";
-    std::string base = PrintExpr_(CodegenOperands(op)[0]);
-    std::string index = PrintExpr_(CodegenOperands(op)[1]);
-    PrimType elem_dtype = CodegenDType(op).WithLanes(1);
+    std::string base = PrintExpr_(op->args[0]);
+    std::string index = PrintExpr_(op->args[1]);
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    PrimType elem_dtype = dtype.WithLanes(1);
     // vgather2 widens byte sources to 16-bit result lanes. Its PTO predicate
     // is defined at the result element width, whereas the TileLang intrinsic
     // carries the source-byte mask (b8). Reinterpret the predicate at the
@@ -5926,18 +5857,16 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
       mask_bits = 8;
     }
     std::string mask =
-        "pto.pbitcast(" +
-        RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2])) +
+        "pto.pbitcast(" + RemoveOutermostParentheses(PrintExpr_(op->args[2])) +
         ", pto.mask_type(\"b" + std::to_string(mask_bits) + "\"))";
-    std::string result_type = "pto.vreg_type(" +
-                              std::to_string(CodegenDType(op).lanes()) + ", " +
-                              ScalarType(elem_dtype) + ")";
+    std::string result_type = "pto.vreg_type(" + std::to_string(dtype.lanes()) +
+                              ", " + ScalarType(elem_dtype) + ")";
     os << "pto.vgather2(" << base << ", " << index << ", " << mask << ", "
        << result_type << ")";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vintlv") || IsCodegenOp(op, "tl.simd.vdintlv")) {
+  if (op->op.same_as(tl::simd_vintlv()) || op->op.same_as(tl::simd_vdintlv())) {
     // Pair-producing ops are handled in VisitStmt_(BindObj) where the tuple
     // result is unpacked into two SSA names. Reaching here means the call was
     // not bound (e.g. inlined), which is unsupported for PTO codegen.
@@ -5947,41 +5876,41 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.vld2")) {
+  if (op->op.same_as(tl::simd_vld2())) {
     TVM_FFI_THROW(InternalError)
         << "tl.simd.vld2 must be bound via T.bind for PTO codegen "
         << "(use `a, b = T.simd.vld2(addr, dist=...)`)";
     return;
   }
 
-  if (IsCodegenOp(op, "tl.simd.pair_get")) {
-    ICHECK_EQ(CodegenOperands(op).size(), 2U)
+  if (op->op.same_as(tl::simd_pair_get())) {
+    ICHECK_EQ(op->args.size(), 2U)
         << "tl.simd.pair_get expects 2 arguments (pair, index)";
-    const auto *var = CodegenOperands(op)[0].as<VarObj>();
+    const auto *var = op->args[0].as<VarObj>();
     ICHECK(var != nullptr)
         << "tl.simd.pair_get expects a bound pair variable as arg0";
     auto it = simd_pair_vars_.find(var);
     ICHECK(it != simd_pair_vars_.end())
         << "tl.simd.pair_get references an unknown pair variable " << var->name
         << " in " << GetRef<Call>(op);
-    int64_t index = CodegenInt(CodegenOperands(op)[1]);
+    int64_t index = CodegenInt(op->args[1]);
     TVM_FFI_CHECK(index == 0 || index == 1, ValueError)
         << "PTO SIMD pair_get index must be 0 or 1";
     os << (index == 0 ? it->second.first : it->second.second);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.rng_init")) {
+  if (op->op.same_as(tl::rng_init())) {
     EmitRngInit(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.rng_rand")) {
+  if (op->op.same_as(tl::rng_rand())) {
     os << EmitRngRand(op);
     return;
   }
 
-  if (IsCodegenOp(op, "tl.rng_rand_float")) {
+  if (op->op.same_as(tl::rng_rand_float())) {
     os << EmitRngRandFloat(op);
     return;
   }
@@ -5989,8 +5918,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
   if (auto opt_call_op = op->op.as<Op>()) {
     const auto &call_op = opt_call_op.value();
     std::string op_name = call_op->name;
-    if (CodegenOperands(op).size() == 1U &&
-        TryEmitUnaryMath_(op_name, CodegenOperands(op)[0], os)) {
+    if (op->args.size() == 1U && TryEmitUnaryMath_(op_name, op->args[0], os)) {
       return;
     }
     if (StartsWith(op_name, "tl.")) {
@@ -6006,7 +5934,7 @@ void CodeGenTileLangPTO::Dispatch_(const CallObj *op,
 
 void CodeGenTileLangPTO::Dispatch_(const FloatImmObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  if (!CodegenDType(op).MatchesElementType(kDLBfloat, 16)) {
+  if (!op->ty.as_or_throw<PrimType>().MatchesElementType(kDLBfloat, 16)) {
     CodeGenTileLangPY::Dispatch_(op, os);
     return;
   }
@@ -6023,7 +5951,7 @@ void CodeGenTileLangPTO::Dispatch_(const FloatImmObj *op,
 void CodeGenTileLangPTO::Dispatch_(const prim::CastObj *op,
                                    std::ostream &os) { // NOLINT(*)
   PrimType from = op->value.ty();
-  PrimType to = CodegenDType(op);
+  PrimType to = op->ty.as_or_throw<PrimType>();
   ICHECK_EQ(to.lanes(), from.lanes())
       << "PTO cast expects source and target to have the same lane count, got "
       << from << " -> " << to;
@@ -6216,8 +6144,8 @@ void CodeGenTileLangPTO::Dispatch_(const prim::ShuffleObj *op,
         << " lanes";
   }
 
-  os << "tl.shuffle_vec(" << DataTypeName(CodegenDType(op).WithLanes(1))
-     << ", (";
+  os << "tl.shuffle_vec("
+     << DataTypeName(op->ty.as_or_throw<PrimType>().WithLanes(1)) << ", (";
   for (size_t i = 0; i < op->vectors.size(); ++i) {
     if (i != 0) {
       os << ", ";
@@ -6257,25 +6185,25 @@ void ValidatePTOShift(const PrimExpr &value, const PrimExpr &amount) {
 void CodeGenTileLangPTO::Dispatch_(const prim::LShiftObj *op,
                                    std::ostream &os) {
   ValidatePTOShift(op->a, op->b);
-  PrintBinaryExpr_("<<", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("<<", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPTO::Dispatch_(const prim::RShiftObj *op,
                                    std::ostream &os) {
   ValidatePTOShift(op->a, op->b);
-  PrintBinaryExpr_(">>", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_(">>", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 
 void CodeGenTileLangPTO::Dispatch_(const prim::MinObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(CodegenDType(op))) {
+  const PrimType result_type = op->ty.as_or_throw<PrimType>();
+  if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(result_type)) {
     TVM_FFI_THROW(InternalError)
         << "PTO SIMT scalar FP8 min is not supported; only +, -, and * "
            "between non-immediate operands of the same FP8 dtype are "
            "currently supported, got "
         << op->a.ty() << " and " << op->b.ty();
   }
-  if (CodegenDType(op).MatchesCode(kDLInt) ||
-      CodegenDType(op).MatchesCode(kDLUInt)) {
+  if (result_type.MatchesCode(kDLInt) || result_type.MatchesCode(kDLUInt)) {
     os << "pto.min(";
     PrintExpr_(op->a, os);
     os << ", ";
@@ -6283,20 +6211,20 @@ void CodeGenTileLangPTO::Dispatch_(const prim::MinObj *op,
     os << ")";
     return;
   }
-  PrintFloatMinMax_("minimum", CodegenDType(op), op->a, op->b, os);
+  PrintFloatMinMax_("minimum", result_type, op->a, op->b, os);
 }
 
 void CodeGenTileLangPTO::Dispatch_(const prim::MaxObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(CodegenDType(op))) {
+  const PrimType result_type = op->ty.as_or_throw<PrimType>();
+  if (inside_simtvf_body_ && tl::IsAscendVectorizableFP8(result_type)) {
     TVM_FFI_THROW(InternalError)
         << "PTO SIMT scalar FP8 max is not supported; only +, -, and * "
            "between non-immediate operands of the same FP8 dtype are "
            "currently supported, got "
         << op->a.ty() << " and " << op->b.ty();
   }
-  if (CodegenDType(op).MatchesCode(kDLInt) ||
-      CodegenDType(op).MatchesCode(kDLUInt)) {
+  if (result_type.MatchesCode(kDLInt) || result_type.MatchesCode(kDLUInt)) {
     os << "pto.max(";
     PrintExpr_(op->a, os);
     os << ", ";
@@ -6304,7 +6232,7 @@ void CodeGenTileLangPTO::Dispatch_(const prim::MaxObj *op,
     os << ")";
     return;
   }
-  PrintFloatMinMax_("maximum", CodegenDType(op), op->a, op->b, os);
+  PrintFloatMinMax_("maximum", result_type, op->a, op->b, os);
 }
 
 void CodeGenTileLangPTO::PrintFloatMinMax_(const char *op_name, PrimType dtype,
@@ -6366,7 +6294,7 @@ bool CodeGenTileLangPTO::TryEmitUnaryMath_(const std::string &name,
   if (it == kForms.end()) {
     return false;
   }
-  PrimType dtype = CodegenDType(arg);
+  PrimType dtype = arg->ty.as_or_throw<PrimType>();
   if (inside_simtvf_body_) {
     ICHECK(IsSupportedSIMTUnaryMathType(dtype))
         << "PTO SIMT " << name
@@ -6403,7 +6331,8 @@ bool CodeGenTileLangPTO::TryEmitUnaryMath_(const std::string &name,
 
 void CodeGenTileLangPTO::Dispatch_(const prim::NotObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  ICHECK(CodegenDType(op).IsScalar() && op->a.ty().MatchesCode(kDLBool))
+  ICHECK(op->ty.as_or_throw<PrimType>().IsScalar() &&
+         op->a.ty().MatchesCode(kDLBool))
       << "PTO logical-not currently supports scalar bool predicates only, got "
       << op->a.ty();
   // tl.logical_not(value) implements logical negation as value == 0.
@@ -6414,22 +6343,22 @@ void CodeGenTileLangPTO::Dispatch_(const prim::NotObj *op,
 
 void CodeGenTileLangPTO::Dispatch_(const prim::SelectObj *op,
                                    std::ostream &os) { // NOLINT(*)
+  const PrimType result_type = op->ty.as_or_throw<PrimType>();
   const bool coerce_integer_branches =
-      CodegenDType(op).IsScalar() && (CodegenDType(op).MatchesCode(kDLInt) ||
-                                      CodegenDType(op).MatchesCode(kDLUInt));
+      result_type.IsScalar() &&
+      (result_type.MatchesCode(kDLInt) || result_type.MatchesCode(kDLUInt));
   auto print_select_value = [&](const PrimExpr &expr) {
     if (expr.as<IntImmObj>() != nullptr || expr.as<FloatImmObj>() != nullptr) {
       os << "pto.const(" << PrintExpr_(expr)
-         << ", dtype=" << DataTypeName(CodegenDType(op)) << ")";
+         << ", dtype=" << DataTypeName(result_type) << ")";
       return;
     }
-    if (CodegenDType(op).IsScalar() && CodegenDType(op).MatchesCode(kDLBool)) {
+    if (result_type.IsScalar() && result_type.MatchesCode(kDLBool)) {
       os << "tl.as_logical_bool(" << PrintExpr_(expr) << ")";
       return;
     }
     if (coerce_integer_branches) {
-      os << ScalarCastExpr(PrintExpr_(expr), CodegenDType(op),
-                           "PTO select branch");
+      os << ScalarCastExpr(PrintExpr_(expr), result_type, "PTO select branch");
       return;
     }
     PrintExpr_(expr, os);
@@ -6445,8 +6374,9 @@ void CodeGenTileLangPTO::Dispatch_(const prim::SelectObj *op,
 
 void CodeGenTileLangPTO::Dispatch_(const prim::ModObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  if (CodegenDType(op).IsScalar() && (CodegenDType(op).MatchesCode(kDLInt) ||
-                                      CodegenDType(op).MatchesCode(kDLUInt))) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
+  if (dtype.IsScalar() &&
+      (dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt))) {
     os << "(" << PrintExpr_(op->a) << " % " << PrintExpr_(op->b) << ")";
     return;
   }
@@ -6455,7 +6385,8 @@ void CodeGenTileLangPTO::Dispatch_(const prim::ModObj *op,
 
 void CodeGenTileLangPTO::Dispatch_(const prim::DivObj *op,
                                    std::ostream &os) { // NOLINT(*)
-  if (CodegenDType(op).IsScalar() && CodegenDType(op).MatchesCode(kDLInt)) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
+  if (dtype.IsScalar() && dtype.MatchesCode(kDLInt)) {
     os << "pto.div(" << PrintExpr_(op->a) << ", " << PrintExpr_(op->b) << ")";
     return;
   }
@@ -6529,11 +6460,12 @@ void CodeGenTileLangPTO::PrintBinaryExpr_(const std::string &opstr,
 
 void CodeGenTileLangPTO::Dispatch_(const prim::RampObj *op,
                                    std::ostream &os) { // NOLINT(*)
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
   // Keep operands expression-local and evaluate each once, even for effectful
   // calls. A Ramp used as a value must remain a typed vector.
   os << "(lambda _ramp_base, _ramp_stride: tl.vector_from_list("
-     << DataTypeName(CodegenDType(op).WithLanes(1)) << ", (";
-  for (int lane = 0; lane < CodegenDType(op).lanes(); ++lane) {
+     << DataTypeName(dtype.WithLanes(1)) << ", (";
+  for (int lane = 0; lane < dtype.lanes(); ++lane) {
     if (lane != 0) {
       os << ", ";
     }
@@ -6551,11 +6483,11 @@ void CodeGenTileLangPTO::Dispatch_(const prim::BroadcastObj *op,
       << elem_dtype;
   std::string value = PrintExpr_(op->value);
   os << "pto.Vec(" << DataTypeName(elem_dtype) << ", "
-     << CodegenDType(op).lanes() << ", init=" << value << ")";
+     << op->ty.as_or_throw<PrimType>().lanes() << ", init=" << value << ")";
 }
 
 void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
-  BindAscendIndexConstant(op, index_analyzer_);
+  ascend::BindIndexConstant(op, index_analyzer_);
   if (const auto *call = op->value.as<CallObj>()) {
     if (call->op.same_as(tirx::alloc_tensor_op()))
       return EmitTensorAllocation_(op, call);
@@ -6565,21 +6497,21 @@ void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
   if (const auto *call = op->value.as<CallObj>()) {
     if (IsOpName(call->op, "tl.simd.alloc")) {
       AllocVarID(op->var.get());
-      ICHECK_GT(CodegenDType(op->var).lanes(), 1)
+      ICHECK_GT(op->var->ty.as_or_throw<PrimType>().lanes(), 1)
           << "tl.simd.alloc should bind a vector-typed Var, got "
-          << CodegenDType(op->var);
+          << op->var->ty.as_or_throw<PrimType>();
       return;
     }
 
     // Pair-producing simd ops unpack into (low, high) SSA names. The bound var
     // is recorded so that subsequent pair_get(var, 0/1) calls resolve to the
     // correct element.
-    if (IsCodegenOp(call, "tl.simd.vintlv") ||
-        IsCodegenOp(call, "tl.simd.vdintlv")) {
-      std::string lhs = PrintExpr_(CodegenOperands(call)[0]);
-      std::string rhs = PrintExpr_(CodegenOperands(call)[1]);
+    if (call->op.same_as(tl::simd_vintlv()) ||
+        call->op.same_as(tl::simd_vdintlv())) {
+      std::string lhs = PrintExpr_(call->args[0]);
+      std::string rhs = PrintExpr_(call->args[1]);
       std::string name =
-          IsCodegenOp(call, "tl.simd.vintlv") ? "vintlv" : "vdintlv";
+          call->op.same_as(tl::simd_vintlv()) ? "vintlv" : "vdintlv";
       std::string pair_name = AllocVarID(op->var.get());
       std::string low = pair_name + "_low";
       std::string high = pair_name + "_high";
@@ -6589,13 +6521,13 @@ void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
       simd_pair_vars_[op->var.get()] = {low, high};
       return;
     }
-    if (IsCodegenOp(call, "tl.simd.pintlv") ||
-        IsCodegenOp(call, "tl.simd.pdintlv")) {
-      ICHECK_EQ(CodegenOperands(call).size(), 3U)
+    if (call->op.same_as(tl::simd_pintlv()) ||
+        call->op.same_as(tl::simd_pdintlv())) {
+      ICHECK_EQ(call->args.size(), 3U)
           << "tl.simd predicate interleave/deinterleave expects 3 arguments "
              "(src0, src1, width)";
       int64_t width = 0;
-      ICHECK(TryGetConstInt(CodegenOperands(call)[2], &width))
+      ICHECK(TryGetConstInt(call->args[2], &width))
           << "tl.simd predicate interleave/deinterleave width must be "
              "constant for PTO codegen";
       ICHECK(width == 8 || width == 16 || width == 32)
@@ -6603,65 +6535,62 @@ void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
              "16, and 32, got "
           << width;
       std::string name =
-          IsCodegenOp(call, "tl.simd.pintlv") ? "pintlv" : "pdintlv";
+          call->op.same_as(tl::simd_pintlv()) ? "pintlv" : "pdintlv";
       std::string pair_name = AllocVarID(op->var.get());
       std::string low = pair_name + "_low";
       std::string high = pair_name + "_high";
       PrintIndent();
       stream << low << ", " << high << " = pto." << name << "_b" << width << "("
-             << PrintExpr_(CodegenOperands(call)[0]) << ", "
-             << PrintExpr_(CodegenOperands(call)[1]) << ")\n";
+             << PrintExpr_(call->args[0]) << ", " << PrintExpr_(call->args[1])
+             << ")\n";
       simd_pair_vars_[op->var.get()] = {low, high};
       return;
     }
-    if (IsCodegenOp(call, "tl.simd.vaddc") ||
-        IsCodegenOp(call, "tl.simd.vsubc") ||
-        IsCodegenOp(call, "tl.simd.vaddcs") ||
-        IsCodegenOp(call, "tl.simd.vsubcs")) {
-      const bool has_carry_in = IsCodegenOp(call, "tl.simd.vaddcs") ||
-                                IsCodegenOp(call, "tl.simd.vsubcs");
-      ICHECK_EQ(CodegenOperands(call).size(), has_carry_in ? 4U : 3U)
+    if (call->op.same_as(tl::simd_vaddc()) ||
+        call->op.same_as(tl::simd_vsubc()) ||
+        call->op.same_as(tl::simd_vaddcs()) ||
+        call->op.same_as(tl::simd_vsubcs())) {
+      const bool has_carry_in = call->op.same_as(tl::simd_vaddcs()) ||
+                                call->op.same_as(tl::simd_vsubcs());
+      ICHECK_EQ(call->args.size(), has_carry_in ? 4U : 3U)
           << "tl.simd carry operation has an invalid argument count";
-      const char *name = IsCodegenOp(call, "tl.simd.vaddc")    ? "vaddc"
-                         : IsCodegenOp(call, "tl.simd.vsubc")  ? "vsubc"
-                         : IsCodegenOp(call, "tl.simd.vaddcs") ? "vaddcs"
+      const char *name = call->op.same_as(tl::simd_vaddc())    ? "vaddc"
+                         : call->op.same_as(tl::simd_vsubc())  ? "vsubc"
+                         : call->op.same_as(tl::simd_vaddcs()) ? "vaddcs"
                                                                : "vsubcs";
       std::string pair_name = AllocVarID(op->var.get());
       std::string result = pair_name + "_result";
       std::string carry = pair_name + "_carry";
       PrintIndent();
       stream << result << ", " << carry << " = pto." << name << "("
-             << PrintExpr_(CodegenOperands(call)[0]) << ", "
-             << PrintExpr_(CodegenOperands(call)[1]);
-      for (size_t i = 2; i < CodegenOperands(call).size(); ++i) {
-        stream << ", " << PrintExpr_(CodegenOperands(call)[i]);
+             << PrintExpr_(call->args[0]) << ", " << PrintExpr_(call->args[1]);
+      for (size_t i = 2; i < call->args.size(); ++i) {
+        stream << ", " << PrintExpr_(call->args[i]);
       }
       stream << ")\n";
       // PTODSL returns (result, carry); TileLang exposes (carry, result).
       simd_pair_vars_[op->var.get()] = {carry, result};
       return;
     }
-    if (IsCodegenOp(call, "tl.simd.vmull")) {
-      ICHECK_EQ(CodegenOperands(call).size(), 3U)
+    if (call->op.same_as(tl::simd_vmull())) {
+      ICHECK_EQ(call->args.size(), 3U)
           << "tl.simd.vmull expects 3 arguments (src0, src1, mask)";
       std::string pair_name = AllocVarID(op->var.get());
       std::string low = pair_name + "_low";
       std::string high = pair_name + "_high";
       PrintIndent();
       stream << low << ", " << high << " = pto.vmull("
-             << PrintExpr_(CodegenOperands(call)[0]) << ", "
-             << PrintExpr_(CodegenOperands(call)[1]) << ", "
-             << PrintExpr_(CodegenOperands(call)[2]) << ")\n";
+             << PrintExpr_(call->args[0]) << ", " << PrintExpr_(call->args[1])
+             << ", " << PrintExpr_(call->args[2]) << ")\n";
       simd_pair_vars_[op->var.get()] = {low, high};
       return;
     }
-    if (IsCodegenOp(call, "tl.simd.vld2")) {
-      std::string ptr = PrintExpr_(CodegenOperands(call)[0]);
-      std::string dist =
-          (CodegenOperands(call)[1]).as_or_throw<StringImm>()->value;
+    if (call->op.same_as(tl::simd_vld2())) {
+      std::string ptr = PrintExpr_(call->args[0]);
+      std::string dist = (call->args[1]).as_or_throw<StringImm>()->value;
       std::string offset =
-          CodegenOperands(call).size() > 2U
-              ? RemoveOutermostParentheses(PrintExpr_(CodegenOperands(call)[2]))
+          call->args.size() > 2U
+              ? RemoveOutermostParentheses(PrintExpr_(call->args[2]))
               : "pto.const(0)";
       std::string pair_name = AllocVarID(op->var.get());
       std::string low = pair_name + "_low";
@@ -6672,21 +6601,20 @@ void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
       simd_pair_vars_[op->var.get()] = {low, high};
       return;
     }
-    if (IsCodegenOp(call, "tl.simd.vld") &&
-        CodegenOperands(call).size() == 3U) {
-      std::string ptr = PrintExpr_(CodegenOperands(call)[0]);
+    if (call->op.same_as(tl::simd_vld()) && call->args.size() == 3U) {
+      std::string ptr = PrintExpr_(call->args[0]);
       std::string dist = NormalizeVldDistribution(
-          (CodegenOperands(call)[1]).as_or_throw<StringImm>()->value);
-      std::string step =
-          RemoveOutermostParentheses(PrintExpr_(CodegenOperands(call)[2]));
-      PrimType elem_dtype = CodegenDType(call).WithLanes(1);
+          (call->args[1]).as_or_throw<StringImm>()->value);
+      std::string step = RemoveOutermostParentheses(PrintExpr_(call->args[2]));
+      PrimType elem_dtype = call->ty.as_or_throw<PrimType>().WithLanes(1);
       std::string pair_name = AllocVarID(op->var.get());
       std::string value = pair_name + "_value";
       std::string next_ptr = pair_name + "_next_ptr";
       PrintIndent();
       stream << value << " = pto.vlds(" << ptr
-             << ", pto.const(0), pto.vreg_type(" << CodegenDType(call).lanes()
-             << ", " << ScalarType(elem_dtype) << ")";
+             << ", pto.const(0), pto.vreg_type("
+             << call->ty.as_or_throw<PrimType>().lanes() << ", "
+             << ScalarType(elem_dtype) << ")";
       if (!dist.empty() && dist != "NORM") {
         stream << ", dist=\"" << dist << "\"";
       }
@@ -6698,8 +6626,7 @@ void CodeGenTileLangPTO::Dispatch_(const BindObj *op) {
     }
   }
 
-  if (op->var->ty.as<PtrTypeObj>()) {
-    const auto pointer = AscendPointerType(op->var);
+  if (const auto *pointer = op->var->ty.as<PtrTypeObj>()) {
     const auto element = pointer->element_type.as_or_throw<PrimType>();
     RegisterHandleType_(op->var.get(), element);
     alloc_storage_scope_[op->var.get()] = pointer->scope.name();
@@ -6790,7 +6717,7 @@ void CodeGenTileLangPTO::EmitTensorDeclaration_(const BindObj *op,
 }
 
 void CodeGenTileLangPTO::Dispatch_(const RegionStmtObj *op) {
-  if (DecodeAscendBlock(op))
+  if (tl::ascend::IsAscendBlock(op))
     return EmitBlockRegion_(op);
   if (op->op.same_as(tirx::launch_thread_op())) {
     TVM_FFI_CHECK(op->args.size() == 2 && op->body_params.size() == 1 &&
@@ -6842,7 +6769,8 @@ void CodeGenTileLangPTO::Dispatch_(const RegionStmtObj *op) {
         << "PTO attribute regions cannot carry hidden bindings";
     if (attribute.key == "pragma_unroll_factor") {
       const auto var = attribute.node.cast<PrimVar>();
-      const int64_t factor = AscendAnnotationInt(attribute.value);
+      const int64_t factor =
+          attribute.value.cast<IntImm>()->value.as<int64_t>().value();
       TVM_FFI_CHECK(factor > 0 && factor <= std::numeric_limits<int32_t>::max(),
                     ValueError)
           << "PTO pragma_unroll_factor requires a positive signless i32 value";
@@ -6971,20 +6899,7 @@ void CodeGenTileLangPTO::Dispatch_(const ForObj *op) {
   if (TryGetConstInt(start, &start_value) &&
       TryGetConstInt(extent, &extent_value) &&
       TryGetConstInt(step, &step_value)) {
-    VisitAscendIR(op->body, [&](const ObjectRef &node) {
-      const VarObj *buffer = nullptr;
-      PrimExpr index = MakeConst(PrimType::Int(32), 0);
-      if (const auto *load = node.as<TensorLoadObj>()) {
-        if (load->indices.size() == 1) {
-          buffer = PTOTensor(load).get();
-          index = load->indices[0];
-        }
-      } else if (const auto *store = node.as<TensorStoreObj>()) {
-        if (store->indices.size() == 1) {
-          buffer = PTOTensor(store).get();
-          index = store->indices[0];
-        }
-      }
+    auto check_local_index = [&](const VarObj *buffer, const PrimExpr &index) {
       // Keep non-explicit kUnrolled loops on the device so PTOAS can honor
       // pto.range unroll hints. Vector local slots also require a constant
       // TIR index; static_range alone does not substitute that index.
@@ -6993,9 +6908,8 @@ void CodeGenTileLangPTO::Dispatch_(const ForObj *op) {
       // persistent fragment must always expand at trace time (this mirrors
       // the ascend branch, which maps kUnrolled loops to static_range).
       const bool persistent_fragment =
-          buffer != nullptr && persistent_buffer_vars_.count(buffer) != 0;
-      if (buffer == nullptr ||
-          (CodegenTensorDType(buffer).lanes() != 1 && !persistent_fragment) ||
+          persistent_buffer_vars_.count(buffer) != 0;
+      if ((CodegenTensorDType(buffer).lanes() != 1 && !persistent_fragment) ||
           (inside_simtvf_body_ && !persistent_fragment) ||
           (op->kind == ForKind::kUnrolled && !explicit_unroll_requested &&
            !persistent_fragment)) {
@@ -7006,7 +6920,19 @@ void CodeGenTileLangPTO::Dispatch_(const ForObj *op) {
           UsesVar(index, op->var.get())) {
         static_local_index_loop = true;
       }
-    });
+    };
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        op->body,
+        [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
+          if (load->indices.size() == 1)
+            check_local_index(PTOTensor(load).get(), load->indices[0]);
+          return ffi::WalkResult::Advance();
+        },
+        [&](const TensorStoreObj *store) -> ffi::Expected<ffi::WalkResult> {
+          if (store->indices.size() == 1)
+            check_local_index(PTOTensor(store).get(), store->indices[0]);
+          return ffi::WalkResult::Advance();
+        });
   }
   const bool emit_static_range = (explicit_unroll || static_local_index_loop) &&
                                  !ContainsLoopBreak(op->body);
@@ -7043,7 +6969,7 @@ void CodeGenTileLangPTO::Dispatch_(const ForObj *op) {
   if (!emit_static_range) {
     PrintIndent();
     stream << vid << " = pto.cast(" << range_vid << ", "
-           << ScalarType(CodegenDType(op->var)) << ")\n";
+           << ScalarType(op->var->ty.as_or_throw<PrimType>()) << ")\n";
   }
   ++native_loop_depth_;
   PrintStmt_(op->body);
@@ -7070,40 +6996,37 @@ void CodeGenTileLangPTO::Dispatch_(const WhileObj *op) {
   // any break; the authored Bind still takes the actual snapshot at its use.
   // Nested while loops reuse these names instead of resetting them again.
   std::vector<Var> initialized_conditions;
-  VisitAscendIR(op->body, [&](const ObjectRef &node) {
-    const auto *bind = node.as<BindObj>();
-    if (bind == nullptr) {
-      return;
-    }
-    std::string name_hint = bind->var->name;
-    if (name_hint.rfind("__cond_", 0) != 0 ||
-        SideEffect(bind->value) == CallEffectKind::kPure ||
-        loop_condition_snapshot_ids_.count(bind->var)) {
-      return;
-    }
-    std::string name =
-        name_supply_->FreshName("tl_cond_" + name_hint.substr(7), false);
-    loop_condition_snapshot_ids_.emplace(bind->var, name);
-    initialized_conditions.push_back(bind->var);
-    PrintIndent();
-    stream << name
-           << " = pto.const(0, dtype=" << DataTypeName(CodegenDType(bind->var))
-           << ")\n";
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      op->body, [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+        std::string name_hint = bind->var->name;
+        if (name_hint.rfind("__cond_", 0) != 0 ||
+            SideEffect(bind->value) == CallEffectKind::kPure ||
+            loop_condition_snapshot_ids_.count(bind->var)) {
+          return ffi::WalkResult::Advance();
+        }
+        std::string name =
+            name_supply_->FreshName("tl_cond_" + name_hint.substr(7), false);
+        loop_condition_snapshot_ids_.emplace(bind->var, name);
+        initialized_conditions.push_back(bind->var);
+        PrintIndent();
+        stream << name << " = pto.const(0, dtype="
+               << DataTypeName(bind->var->ty.as_or_throw<PrimType>()) << ")\n";
+        return ffi::WalkResult::Advance();
+      });
   // PTODSL's native-while rewrite needs a value to be carried when it is
   // assigned on some iterations and read after the loop. Materialize a
   // read/write on every iteration for local.var values already in scope.
   std::set<std::string> carried_locals;
-  VisitAscendIR(op->body, [&](const ObjectRef &node) {
-    const auto *store = node.as<TensorStoreObj>();
-    if (store == nullptr)
-      return;
-    const VarObj *var = PTOTensor(store).get();
-    if (local_var_buffers_.count(var) && var_idmap_.count(var) &&
-        !(!CodegenTensorDType(PTOTensor(store).get()).IsScalar())) {
-      carried_locals.insert(GetVarID(var));
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      op->body,
+      [&](const TensorStoreObj *store) -> ffi::Expected<ffi::WalkResult> {
+        const VarObj *var = PTOTensor(store).get();
+        if (local_var_buffers_.count(var) && var_idmap_.count(var) &&
+            !(!CodegenTensorDType(PTOTensor(store).get()).IsScalar())) {
+          carried_locals.insert(GetVarID(var));
+        }
+        return ffi::WalkResult::Advance();
+      });
   for (const std::string &name : carried_locals) {
     PrintIndent();
     stream << name << " = " << name << "\n";
@@ -7127,14 +7050,17 @@ void CodeGenTileLangPTO::Dispatch_(const WhileObj *op) {
 }
 
 void CodeGenTileLangPTO::EmitBlockRegion_(const RegionStmtObj *op) {
-  const auto block = DecodeAscendBlock(op).value();
-  if (current_function_is_mixed_ &&
-      (block.name == "CUBE" || block.name == "VECTOR")) {
-    bool is_vector_section = block.name == "VECTOR";
+  TVM_FFI_CHECK(op->args.empty(), ValueError)
+      << "Ascend block dynamic annotations must be consumed before codegen";
+  const auto annotations =
+      op->attrs.GetAttr<ffi::Map<ffi::String, ffi::Any>>("annotations").value();
+  const auto name = op->attrs.GetAttr<ffi::String>("name").value();
+  if (current_function_is_mixed_ && (name == "CUBE" || name == "VECTOR")) {
+    bool is_vector_section = name == "VECTOR";
     int64_t vector_count = 2;
     if (is_vector_section) {
-      if (auto opt = block.annotations.Get("vector_count")) {
-        vector_count = AscendAnnotationInt(opt.value());
+      if (auto opt = annotations.Get("vector_count")) {
+        vector_count = opt.value().cast<IntImm>()->value.as<int64_t>().value();
         ICHECK(vector_count == 1 || vector_count == 2)
             << "Mixed-kernel vector_count must be the constant integer 1 or "
                "2, got "
@@ -7174,7 +7100,7 @@ void CodeGenTileLangPTO::EmitBlockRegion_(const RegionStmtObj *op) {
     return;
   }
 
-  if (block.name == "SIMT_VF") {
+  if (name == "SIMT_VF") {
     int64_t thread_x = 1;
     int64_t thread_y = 1;
     int64_t thread_z = 1;
@@ -7183,7 +7109,7 @@ void CodeGenTileLangPTO::EmitBlockRegion_(const RegionStmtObj *op) {
     return;
   }
 
-  if (block.name == "SIMD_VF") {
+  if (name == "SIMD_VF") {
     PrintStmt_(op->body);
     return;
   }
@@ -7292,16 +7218,16 @@ void CodeGenTileLangPTO::Dispatch_(const EvaluateObj *op) {
   if (op->value.as<IntImmObj>())
     return;
   if (const auto *call = op->value.as<CallObj>();
-      call != nullptr && (IsCodegenOp(call, "tl.device_assert") ||
-                          IsCodegenOp(call, "tl.device_assert_with_msg"))) {
-    const bool has_message = IsCodegenOp(call, "tl.device_assert_with_msg");
-    ICHECK_EQ(CodegenOperands(call).size(), has_message ? 2U : 1U)
+      call != nullptr && (call->op.same_as(tl::device_assert()) ||
+                          call->op.same_as(tl::device_assert_with_msg()))) {
+    const bool has_message = call->op.same_as(tl::device_assert_with_msg());
+    ICHECK_EQ(call->args.size(), has_message ? 2U : 1U)
         << (has_message ? "tl.device_assert_with_msg expects exactly 2 "
                           "arguments (condition, msg)"
                         : "tl.device_assert expects exactly 1 argument "
                           "(condition)");
     // TODO(PTOAS): 等pto支持打印后放开msg传递
-    std::string condition = PrintCondition(CodegenOperands(call)[0]);
+    std::string condition = PrintCondition(call->args[0]);
     PrintIndent();
     stream << "if (" << condition << ") == 0:\n";
     int trap_scope = BeginScope();
@@ -7321,7 +7247,7 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
                                    std::ostream &os) { // NOLINT(*)
   if (op->indices.size() == 1) {
     PrimExpr index =
-        NormalizeAscendVectorIndex(op->indices[0], index_analyzer_);
+        ascend::NormalizeVectorIndex(op->indices[0], index_analyzer_);
     if (!index.same_as(op->indices[0])) {
       Dispatch_(TensorLoad(op->source, {index}, op->loc).get(), os);
       return;
@@ -7373,7 +7299,7 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
   ICHECK_EQ(op->indices.size(), 1)
       << "CodeGenTileLangPTO only supports flat buffer loads";
 
-  PrimType value_dtype = CodegenDType(op);
+  PrimType value_dtype = op->ty.as_or_throw<PrimType>();
   PrimType element_dtype = CodegenTensorDType(PTOTensor(op).get());
   if (value_dtype.lanes() > 1) {
     EmitScalarizedLoad(op, os);
@@ -7395,7 +7321,7 @@ void CodeGenTileLangPTO::Dispatch_(const TensorLoadObj *op,
 
 void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
                                             std::ostream &os) {
-  PrimType value_dtype = CodegenDType(op);
+  PrimType value_dtype = op->ty.as_or_throw<PrimType>();
   PrimType element_dtype = CodegenTensorDType(PTOTensor(op).get());
   std::string scope = ScopeOfBuffer(PTOTensor(op).get());
   PrimExpr index = op->indices[0];
@@ -7532,7 +7458,7 @@ void CodeGenTileLangPTO::EmitScalarizedLoad(const TensorLoadObj *op,
 void CodeGenTileLangPTO::Dispatch_(const TensorStoreObj *op) {
   if (op->indices.size() == 1) {
     PrimExpr index =
-        NormalizeAscendVectorIndex(op->indices[0], index_analyzer_);
+        ascend::NormalizeVectorIndex(op->indices[0], index_analyzer_);
     if (!index.same_as(op->indices[0])) {
       Dispatch_(TensorStore(op->dest, {index}, op->value, op->loc).get());
       return;
@@ -7747,22 +7673,24 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const TensorStoreObj *op,
     return false;
   }
   bool contains_rng_draw = false;
-  VisitAscendIR(broadcast->value, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallObj>();
-    if (call != nullptr && (IsCodegenOp(call, "tl.rng_rand") ||
-                            IsCodegenOp(call, "tl.rng_rand_float"))) {
-      contains_rng_draw = true;
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      broadcast->value,
+      [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if ((call->op.same_as(tl::rng_rand()) ||
+             call->op.same_as(tl::rng_rand_float()))) {
+          contains_rng_draw = true;
+        }
+        return ffi::WalkResult::Advance();
+      });
   if (!contains_rng_draw) {
     return false;
   }
   // Each lane must evaluate the complete scalar expression independently so
   // that every RNG call advances the stream. Reusing one evaluated value for
   // both stores would incorrectly duplicate the same random output.
-  ICHECK_EQ(CodegenDType(broadcast).lanes(), 2)
+  ICHECK_EQ(broadcast->ty.as_or_throw<PrimType>().lanes(), 2)
       << "PTO RNG broadcast store currently supports exactly 2 lanes, got "
-      << CodegenDType(broadcast);
+      << broadcast->ty.as_or_throw<PrimType>();
 
   PrimExpr base_index = index;
   if (const auto *ramp = base_index.as<prim::RampObj>()) {
@@ -7788,19 +7716,16 @@ bool CodeGenTileLangPTO::TryEmitRngBroadcastStore(const TensorStoreObj *op,
 void CodeGenTileLangPTO::EmitRngInit(const CallObj *op) {
   ICHECK(inside_simtvf_body_)
       << "tl.rng_init on PTO must be used inside a T.SimtVF(...) block";
-  ICHECK_EQ(CodegenOperands(op).size(), 4U)
+  ICHECK_EQ(op->args.size(), 4U)
       << "tl.rng_init expects exactly 4 arguments (seed, seq, off, generator)";
   pto_rng_initialized_ = true;
   pto_rng_state_var_ = "_tl_rng_state";
   pto_rng_counter_var_ = "_tl_rng_counter";
   pto_rng_normal_cache_var_ = "_tl_rng_normal_cache";
   pto_rng_has_normal_var_ = "_tl_rng_has_normal";
-  std::string seed =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[0]));
-  std::string seq =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[1]));
-  std::string off =
-      RemoveOutermostParentheses(PrintExpr_(CodegenOperands(op)[2]));
+  std::string seed = RemoveOutermostParentheses(PrintExpr_(op->args[0]));
+  std::string seq = RemoveOutermostParentheses(PrintExpr_(op->args[1]));
+  std::string off = RemoveOutermostParentheses(PrintExpr_(op->args[2]));
   PrintIndent();
   stream << pto_rng_state_var_ << " = tl.PhiloxRNG(" << seed << ", " << seq
          << ", " << off << ")\n";
@@ -7815,25 +7740,25 @@ void CodeGenTileLangPTO::EmitRngInit(const CallObj *op) {
 std::string CodeGenTileLangPTO::EmitRngRand(const CallObj *op) {
   ICHECK(pto_rng_initialized_)
       << "tl.rng_rand called without prior tl.rng_init";
-  ICHECK(CodegenDType(op).MatchesCode(kDLUInt) &&
-         CodegenDType(op).bits() == 32 && CodegenDType(op).IsScalar())
-      << "tl.rng_rand expects a scalar uint32 result, got " << CodegenDType(op);
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
+  ICHECK(dtype.MatchesCode(kDLUInt) && dtype.bits() == 32 && dtype.IsScalar())
+      << "tl.rng_rand expects a scalar uint32 result, got " << dtype;
   std::string result_var =
       "_tl_rng_result_" + std::to_string(pto_rng_result_counter_++);
   PrintIndent();
   stream << result_var << ", " << pto_rng_counter_var_ << " = "
          << pto_rng_state_var_ << ".rand(" << pto_rng_counter_var_ << ")\n";
-  return ScalarCastExpr(result_var, CodegenDType(op), "PTO rng_rand result");
+  return ScalarCastExpr(result_var, dtype, "PTO rng_rand result");
 }
 
 std::string CodeGenTileLangPTO::EmitRngRandFloat(const CallObj *op) {
   ICHECK(pto_rng_initialized_)
       << "tl.rng_rand_float called without prior tl.rng_init";
-  ICHECK_NE(CodegenDType(op).bits(), 64)
+  ICHECK_NE(op->ty.as_or_throw<PrimType>().bits(), 64)
       << "float64 RNG (tl.rng_rand_float bit=64) is not supported on PTO";
-  ICHECK_EQ(CodegenOperands(op).size(), 1U)
+  ICHECK_EQ(op->args.size(), 1U)
       << "tl.rng_rand_float expects 1 argument (distribution)";
-  std::string dist = (CodegenOperands(op)[0]).as_or_throw<StringImm>()->value;
+  std::string dist = (op->args[0]).as_or_throw<StringImm>()->value;
   ICHECK(dist == "uniform" || dist == "normal")
       << "Unsupported RNG distribution on PTO: " << dist;
   std::string result_var =

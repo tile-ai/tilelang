@@ -2,6 +2,7 @@
  * \file codegen_c_host.cc
  */
 #include "codegen_c_host.h"
+#include "op/builtin.h"
 #include "support/check.h"
 
 #include <tvm/codegen/codegen.h>
@@ -365,14 +366,6 @@ void CodeGenCHost::Dispatch_(const tvm::prim::BroadcastObj *op,
   os << "))";
 }
 
-void CodeGenCHost::PrintPackedFailureReturn() {
-  for (auto it = anylist_error_cleanups_.rbegin();
-       it != anylist_error_cleanups_.rend(); ++it) {
-    PrintLine(*it);
-  }
-  PrintLine("return -1;");
-}
-
 void CodeGenCHost::PrintGetFuncFromBackend(
     const std::string &func_name, const std::string &packed_func_name) {
   this->PrintIndent();
@@ -383,7 +376,7 @@ void CodeGenCHost::PrintGetFuncFromBackend(
                << func_name << "\""
                << ", &" << packed_func_name << ") != 0) {\n";
   int get_func_env_scope = this->BeginScope();
-  PrintPackedFailureReturn();
+  PrintLine("return -1;");
   this->EndScope(get_func_env_scope);
   this->PrintIndent();
   this->stream << "}\n";
@@ -392,8 +385,7 @@ void CodeGenCHost::PrintGetFuncFromBackend(
   this->stream << "}\n";
 }
 
-void CodeGenCHost::PrintCallPacked(const tvm::CallObj *op, std::ostream &os,
-                                   bool discard_result) {
+void CodeGenCHost::PrintCallPacked(const tvm::CallObj *op, std::ostream &os) {
   using namespace tvm::tirx;
   const StringImmObj *func_name = op->args[0].as<StringImmObj>();
   ICHECK(func_name != nullptr)
@@ -457,7 +449,7 @@ void CodeGenCHost::PrintCallPacked(const tvm::CallObj *op, std::ostream &os,
   if (is_in_metal_context) {
     this->PrintLine(metal_result, " = -1;");
   } else {
-    PrintPackedFailureReturn();
+    PrintLine("return -1;");
   }
   this->EndScope(func_call_scope);
 
@@ -468,14 +460,13 @@ void CodeGenCHost::PrintCallPacked(const tvm::CallObj *op, std::ostream &os,
     this->PrintLine("});");
     this->PrintLine("if (", metal_result, " != 0) {");
     int error_scope = this->BeginScope();
-    PrintPackedFailureReturn();
+    PrintLine("return -1;");
     this->EndScope(error_scope);
     this->PrintLine("}");
   }
 
   const auto primitive_result = op->ty.as<PrimType>();
-  if (discard_result || IsVoidType(op->ty) ||
-      (primitive_result && primitive_result->IsVoid()))
+  if (IsVoidType(op->ty) || (primitive_result && primitive_result->IsVoid()))
     return;
 
   const char *field = "v_ptr";
@@ -501,200 +492,6 @@ void CodeGenCHost::PrintCallPacked(const tvm::CallObj *op, std::ostream &os,
   os << value;
 }
 
-void CodeGenCHost::PrintAnyListShape(const CallObj *op, std::ostream &os) {
-  ffi::GetRef<Call>(op).Validate();
-  const std::string shape = name_supply_->FreshName("anylist_shape");
-  PrintLine("int64_t ", shape, "[", std::max<size_t>(1, op->args.size()),
-            "] = {0};");
-  for (size_t i = 0; i < op->args.size(); ++i) {
-    const std::string value = PrintExpr(op->args[i]);
-    PrintLine(shape, "[", i, "] = (int64_t)(", value, ");");
-  }
-  os << "((void*)" << shape << ')';
-}
-
-void CodeGenCHost::PrintAnyListDescriptor(const CallObj *op, std::ostream &os) {
-  ffi::GetRef<Call>(op).Validate();
-  const std::string descriptor = name_supply_->FreshName("anylist_tensor");
-  PrintLine("DLTensor ", descriptor, " = {0};");
-  // Value operands are evaluated once, in argument order. The dtype witness
-  // supplies its type, matching native stack_make_dltensor. Shape and stride
-  // arrays live in the same lexical C scope as this descriptor.
-  const char *fields[] = {"data", "shape", "strides", "ndim"};
-  const char *types[] = {"void*", "int64_t*", "int64_t*", "int32_t"};
-  for (size_t i = 0; i < 4; ++i) {
-    const std::string value = PrintExpr(op->args[i]);
-    PrintLine(descriptor, ".", fields[i], " = (", types[i], ")(", value, ");");
-  }
-  PrimType dtype = op->args[4]->ty.as_or_throw<PrimType>();
-  PrintLine(descriptor, ".dtype.code = ", static_cast<int>(dtype.code()), ";");
-  PrintLine(descriptor, ".dtype.bits = ", dtype.bits(), ";");
-  PrintLine(descriptor, ".dtype.lanes = ", dtype.lanes(), ";");
-  PrimExpr offset = op->args[5].as_or_throw<PrimExpr>();
-  PrimExpr bytes = prim::Mul(offset, IntImm(offset.ty(), dtype.StorageBytes()));
-  const std::string byte_offset =
-      PrintExpr(prim::Cast(PrimType::UInt(64), bytes));
-  PrintLine(descriptor, ".byte_offset = ", byte_offset, ";");
-  const std::string device_type = PrintExpr(op->args[6]);
-  PrintLine(descriptor, ".device.device_type = (DLDeviceType)(", device_type,
-            ");");
-  const std::string device_id = PrintExpr(op->args[7]);
-  PrintLine(descriptor, ".device.device_id = (int32_t)(", device_id, ");");
-  os << "((void*)&" << descriptor << ')';
-}
-
-void CodeGenCHost::PrintAnyListInvoke(const tvm::CallObj *op,
-                                      std::ostream &os) {
-  ffi::GetRef<Call>(op).Validate();
-  auto attrs = op->attrs.value().as_or_throw<DictAttrs>();
-  const std::string mode = attrs.GetAttr<String>("mode").value();
-  const std::string pattern = attrs.GetAttr<String>("pattern").value();
-  const bool cpacked = attrs.GetAttr<bool>("cpacked").value();
-  if (!anylist_helpers_emitted_) {
-    decl_stream << "#include <tl_templates/cpp/anylist.h>\n";
-    anylist_helpers_emitted_ = true;
-  }
-  auto checked = [&](const std::string &expression) {
-    PrintLine("if (", expression, " != 0) {");
-    int scope = BeginScope();
-    PrintPackedFailureReturn();
-    EndScope(scope);
-    PrintLine("}");
-  };
-  std::string destination;
-  std::string index;
-  if (mode != "value") {
-    destination = name_supply_->FreshName("anylist_destination");
-    index = name_supply_->FreshName("anylist_index");
-    const std::string pointer = PrintExpr(op->args[1]);
-    PrintLine("void* ", destination, " = (void*)(", pointer, ");");
-    const std::string offset = PrintExpr(op->args[2]);
-    PrintLine("int64_t ", index, " = (int64_t)(", offset, ");");
-    checked("TLAnyListCheck(" + destination + ", " + index + ")");
-  }
-  if (mode == "reset") {
-    checked("TLAnyListResetItem(" + destination + ", " + index + ")");
-    os << '0';
-    return;
-  }
-  const std::string arguments = name_supply_->FreshName("anylist_arguments");
-  PrintLine("TVMFFIAny ", arguments, "[", pattern.size() + 1, "] = {{0}};");
-  const std::string cleanup = "TLAnyListClearArguments(" + arguments + ", " +
-                              std::to_string(pattern.size() + 1) + ");";
-  anylist_error_cleanups_.push_back(cleanup);
-  size_t cursor = mode == "set" ? 3 : 1;
-  for (size_t i = 0; i < pattern.size(); ++i) {
-    const std::string slot = arguments + "[" + std::to_string(i) + "]";
-    if (pattern[i] == 'g') {
-      const std::string pointer =
-          name_supply_->FreshName("anylist_getter_storage");
-      const std::string pointer_value = PrintExpr(op->args[cursor++]);
-      PrintLine("void* ", pointer, " = (void*)(", pointer_value, ");");
-      const std::string offset =
-          name_supply_->FreshName("anylist_getter_index");
-      const std::string index_value = PrintExpr(op->args[cursor++]);
-      PrintLine("int64_t ", offset, " = (int64_t)(", index_value, ");");
-      checked("TLAnyListAcquire(" + pointer + ", " + offset + ", &" + slot +
-              ")");
-      continue;
-    }
-    const Expr &argument = op->args[cursor++];
-    std::string value = PrintExpr(argument);
-    std::string type_index;
-    std::string field;
-    if (argument.as<StringImmObj>()) {
-      type_index = "kTVMFFIRawStr";
-      field = "v_ptr";
-      value = "(void*)(" + value + ")";
-    } else if (argument->ty.as<PtrTypeObj>()) {
-      const std::string pointer = name_supply_->FreshName("anylist_pointer");
-      PrintLine("void* ", pointer, " = (void*)(", value, ");");
-      value = pointer;
-      field = "v_ptr";
-      // Native LowerTVMBuiltin identifies a live stack tensor descriptor
-      // through this existing ABI field operation, independently of names.
-      auto descriptor = argument.as<CallObj>();
-      bool tensor =
-          descriptor &&
-          (descriptor->op.same_as(Op::Get("tl.anylist_tensor_descriptor")) ||
-           (descriptor->op.same_as(tirx::abi_field_get_op()) &&
-            descriptor->args.size() == 3 &&
-            descriptor->args[2].as<IntImmObj>() &&
-            descriptor->args[2].as<IntImmObj>()->value == tirx::kDLTensorAddr));
-      type_index =
-          tensor ? "kTVMFFIDLTensorPtr"
-                 : "(" + value + " == NULL ? kTVMFFINone : kTVMFFIOpaquePtr)";
-    } else {
-      PrimType type = argument->ty.as_or_throw<PrimType>();
-      if (type.MatchesCode(kDLFloat)) {
-        type_index = "kTVMFFIFloat";
-        field = "v_float64";
-        value = "(double)(" + value + ")";
-      } else {
-        TVM_FFI_CHECK(type.MatchesCode(kDLInt, kDLUInt, kDLBool), TypeError)
-            << "Unsupported packed Any-list argument type " << type;
-        type_index = type.MatchesCode(kDLBool) ? "kTVMFFIBool" : "kTVMFFIInt";
-        field = "v_int64";
-        value = "(int64_t)(" + value + ")";
-      }
-    }
-    PrintLine(slot, ".type_index = ", type_index, ";");
-    PrintLine(slot, ".zero_padding = 0;");
-    PrintLine(slot, ".", field, " = ", value, ";");
-  }
-  Var argument_var("anylist_arguments", PtrType::VoidPtrType());
-  var_idmap_[argument_var.get()] = arguments;
-  Call invoke(op->ty,
-              cpacked ? tirx::call_cpacked_lowered_op()
-                      : tirx::call_packed_lowered_op(),
-              {op->args[0], argument_var, IntImm::Int32(0),
-               IntImm::Int32(static_cast<int32_t>(pattern.size()))});
-  std::ostringstream result;
-  // The owning envelope validates a used result before any union read.
-  PrintCallPacked(invoke.get(), result, true);
-  var_idmap_.erase(argument_var.get());
-  if (mode == "set") {
-    checked("TLAnyListMoveResult(" + destination + ", " + index + ", &" +
-            arguments + "[" + std::to_string(pattern.size()) + "])");
-    os << '0';
-  } else {
-    const auto primitive_result = op->ty.as<PrimType>();
-    if (!IsVoidType(op->ty) &&
-        !(primitive_result && primitive_result->IsVoid())) {
-      std::string expected;
-      std::string field;
-      if (op->ty.as<PtrTypeObj>()) {
-        expected = "kTVMFFIOpaquePtr";
-        field = "v_ptr";
-      } else {
-        PrimType type = op->ty.as_or_throw<PrimType>();
-        TVM_FFI_CHECK(type.IsScalar(), TypeError)
-            << "Packed calls require a scalar or pointer result";
-        if (type.MatchesCode(kDLFloat)) {
-          expected = "kTVMFFIFloat";
-          field = "v_float64";
-        } else {
-          TVM_FFI_CHECK(type.MatchesCode(kDLInt, kDLUInt, kDLBool), TypeError)
-              << "Unsupported packed Any-list result type " << type;
-          expected = "kTVMFFIInt";
-          field = "v_int64";
-        }
-      }
-      const std::string result_slot =
-          arguments + "[" + std::to_string(pattern.size()) + "]";
-      checked("TLAnyListCheckResult(&" + result_slot + ", " + expected + ")");
-      std::ostringstream result_type;
-      PrintType(op->ty, result_type);
-      const std::string value = name_supply_->FreshName("anylist_result");
-      PrintLine(result_type.str(), " ", value, " = (", result_type.str(), ")",
-                result_slot, ".", field, ";");
-      os << value;
-    }
-  }
-  PrintLine(cleanup);
-  anylist_error_cleanups_.pop_back();
-}
-
 std::string CodeGenCHost::GetPackedName(const tvm::CallObj *op) {
   using namespace tvm::tirx;
   const StringImmObj *s = op->args[0].as<StringImmObj>();
@@ -717,17 +514,7 @@ std::string CodeGenCHost::GetPackedName(const tvm::CallObj *op) {
 void CodeGenCHost::Dispatch_(const tvm::CallObj *op,
                              std::ostream &os) { // NOLINT(*)
   using namespace tvm::tirx;
-  if (const auto *callee = op->op.as<OpObj>();
-      callee && callee->name == "tl.anylist_invoke") {
-    PrintAnyListInvoke(op, os);
-  } else if (callee && callee->name == "tl.anylist_shape") {
-    PrintAnyListShape(op, os);
-  } else if (callee && callee->name == "tl.anylist_tensor_descriptor") {
-    PrintAnyListDescriptor(op, os);
-  } else if (callee && callee->name == "tl.anylist_getitem") {
-    TVM_FFI_THROW(ValueError)
-        << "anylist_getitem is only valid as a direct packed-call argument";
-  } else if (callee && callee->name == "tl.lookup_param") {
+  if (op->op.same_as(tl::lookup_param())) {
     ffi::GetRef<Call>(op).Validate();
     os << "__tvm_param__" << op->args[0].as_or_throw<StringImm>()->value;
   } else if (op->op.same_as(tirx::reinterpret_op()) &&
@@ -764,8 +551,7 @@ void CodeGenCHost::Dispatch_(const tvm::CallObj *op,
              IsOpaqueHostPointer(op->ty)) {
     os << "((void*)((char*)" << PrintExpr(op->args[0]) << " + "
        << PrintExpr(op->args[1]) << "))";
-  } else if (op->op.as<OpObj>() &&
-             op->op.as<OpObj>()->name == "tl.tvm_ffi_call_with_result") {
+  } else if (op->op.same_as(tl::tvm_ffi_call_with_result())) {
     ICHECK_EQ(op->args.size(), 4U);
     const auto *func_name = op->args[0].as<StringImmObj>();
     const auto *num_args = op->args[2].as<IntImmObj>();

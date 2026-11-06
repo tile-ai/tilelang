@@ -1,5 +1,7 @@
 """Only parameter stride provenance needs a separate source ABI annotation."""
 
+from tilelang.language import _tensor_spec
+
 import numpy as np
 import pytest
 import torch
@@ -7,7 +9,7 @@ from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.language as T
-from tilelang.language import _native
+
 from tilelang.testing.ir import collect_calls, collect_nodes
 from tilelang.testing.packed import compile_packed_function
 
@@ -29,8 +31,8 @@ def test_local_views_retain_physical_layout_without_a_source_abi_marker(construc
     assert not collect_calls(kernel, op="tl.annotation")
     (declaration,) = collect_calls(kernel, op="tirx.decl_tensor")
     view = next(binding.var for binding in collect_nodes(kernel, ir.Bind) if binding.value.same_as(declaration))
-    assert [int(stride) for stride in _native.tensor_strides(view)] == [3]
-    assert int(_native.tensor_offset(view)) == origin
+    assert [int(stride) for stride in _tensor_spec.tensor_strides(view)] == [3]
+    assert int(_tensor_spec.tensor_offset(view)) == origin
     for function in (kernel, ir.load_json(ir.save_json(kernel)), tirx.renew_def(kernel)):
         assert tirx.analysis.check_well_formed(function)
         assert not collect_calls(function, op="tl.annotation")

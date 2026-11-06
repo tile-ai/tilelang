@@ -214,10 +214,8 @@ def test_clamp_vectorized_operands(dtype):
     else:
         assert "tl::clamp(" in source
     if dtype == T.float32:
-        # The native emitter uses alignment-aware helpers for the same
-        # four-lane accesses. Require all three input vectors and the store.
-        assert source.count("tl::load_vector<float4, 16, false>") == 3
-        assert source.count("tl::store_vector<float4, 16, false>") == 1
+        # Require all three input vectors and the four-lane store.
+        assert source.count("*(float4*)") == 4
 
     a = torch.linspace(-2.0, 2.0, N, dtype=torch.float64, device="cuda")
     lo = torch.full_like(a, -1.0)

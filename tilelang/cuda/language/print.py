@@ -3,9 +3,13 @@ This module provides macros and utilities for debugging TileLang (tl) programs.
 It includes functionality to print variables, print values in buffers, conditionally execute debug prints and assert.
 """
 
-from tilelang.language import _native
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+from tvm_tirx.ir import prim as _prim
 
-from tilelang.language import _native as tirx
+
 from typing import Any
 from tilelang.language.kernel import get_thread_bindings
 from tilelang.language.common import alloc_shared, copy, macro, serial
@@ -20,7 +24,7 @@ __all__ = ["device_assert", "print"]
 
 
 @macro
-def print_var(var: tirx.PrimExpr, msg: str = "") -> None:
+def print_var(var: _ir.Expr, msg: str = "") -> None:
     """
     Prints the value of a TIR primitive expression (PrimExpr) for debugging purposes.
 
@@ -30,11 +34,11 @@ def print_var(var: tirx.PrimExpr, msg: str = "") -> None:
     Returns:
         tirx.PrimExpr: The TIR expression for the debug print operation.
     """
-    tirx.call_extern("handle", "debug_print_var", msg, var)
+    _intrinsics.call_extern("handle", "debug_print_var", msg, var)
 
 
 @macro
-def print_var_with_condition(condition: tirx.PrimExpr, var: tirx.PrimExpr, msg: str = "") -> None:
+def print_var_with_condition(condition: _ir.Expr, var: _ir.Expr, msg: str = "") -> None:
     """
     Conditionally prints a TIR primitive expression (PrimExpr) if a given condition is True.
 
@@ -46,11 +50,11 @@ def print_var_with_condition(condition: tirx.PrimExpr, var: tirx.PrimExpr, msg: 
         tirx.PrimExpr: The TIR expression for the debug print operation, if the condition is True.
     """
     if condition:
-        tirx.call_extern("handle", "debug_print_var", msg, var)
+        _intrinsics.call_extern("handle", "debug_print_var", msg, var)
 
 
 @macro
-def print_global_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buffer, elems: int, msg: str = "") -> tirx.PrimExpr:
+def print_global_buffer_with_condition(condition: _ir.Expr, buffer: _tensor_spec.TensorValue, elems: int, msg: str = "") -> _ir.Expr:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
     """
@@ -58,11 +62,11 @@ def print_global_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Bu
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.ty.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            _intrinsics.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
-def print_shared_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buffer, elems: int, msg: str = "") -> None:
+def print_shared_buffer_with_condition(condition: _ir.Expr, buffer: _tensor_spec.TensorValue, elems: int, msg: str = "") -> None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -78,11 +82,11 @@ def print_shared_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Bu
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.ty.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            _intrinsics.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 @macro
-def print_fragment_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buffer, elems: int, msg: str = "") -> None:
+def print_fragment_buffer_with_condition(condition: _ir.Expr, buffer: _tensor_spec.TensorValue, elems: int, msg: str = "") -> None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -94,13 +98,13 @@ def print_fragment_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.
     Returns:
         tirx.PrimExpr: The TIR expression for the debug print operation.
     """
-    smem = alloc_shared(buffer.ty.shape, _native.dtype_of(buffer), "shared")
+    smem = alloc_shared(buffer.ty.shape, _construction.dtype_of(buffer), "shared")
     copy(buffer, smem)
     if condition:
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.ty.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
+            _intrinsics.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, smem[coords])
 
 
 @macro
@@ -110,11 +114,11 @@ def print_msg(msg: str) -> None:
     """
     assert isinstance(msg, str), "msg must be a string"
     assert msg != "", "msg must not be empty"
-    tirx.call_extern("handle", "debug_print_msg", msg)
+    _intrinsics.call_extern("handle", "debug_print_msg", msg)
 
 
 @macro
-def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buffer, elems: int, msg: str = "") -> None:
+def print_local_buffer_with_condition(condition: _ir.Expr, buffer: _tensor_spec.TensorValue, elems: int, msg: str = "") -> None:
     """
     Conditionally prints the values of a flattened TIR buffer if the condition is True.
 
@@ -127,7 +131,7 @@ def print_local_buffer_with_condition(condition: tirx.PrimExpr, buffer: tirx.Buf
         # Iterate through the buffer elements and print each one.
         for i in serial(elems):
             coords = index_to_coordinates(i, buffer.ty.shape)
-            tirx.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
+            _intrinsics.call_extern("handle", "debug_print_buffer_value", msg, buffer.name, i, buffer[coords])
 
 
 # NOTE(chaofan): T.print is implemented as a macro, so no return
@@ -148,7 +152,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
     Raises:
         ValueError: If the input object type is unsupported.
     """
-    if isinstance(obj, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(obj):
         # Buffers must be printed in just one thread to avoid duplicate outputs.
         # Retrieve the thread bindings for thread x, y, and z.
         tx, ty, tz = get_thread_bindings()
@@ -165,7 +169,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
                 elems *= dim
             condition = True
             if not msg:
-                msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
+                msg = f"buffer<{buffer.name}, {_construction.dtype_of(buffer)}>"
             print_local_buffer_with_condition(condition, buffer, elems, msg)
         elif str(buffer.ty.scope) == "local.fragment":
             # Get the number of elements in the buffer.
@@ -174,9 +178,9 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
+            condition = _prim.all(tx == main_lane, ty == 0, tz == 0)
             if not msg:
-                msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
+                msg = f"buffer<{buffer.name}, {_construction.dtype_of(buffer)}>"
             print_fragment_buffer_with_condition(condition, buffer, elems, msg)
         elif str(buffer.ty.scope) in {"shared", "shared.dyn"}:
             # Get the number of elements in the buffer.
@@ -185,9 +189,9 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
+            condition = _prim.all(tx == main_lane, ty == 0, tz == 0)
             if not msg:
-                msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
+                msg = f"buffer<{buffer.name}, {_construction.dtype_of(buffer)}>"
             print_shared_buffer_with_condition(condition, buffer, elems, msg)
         elif str(buffer.ty.scope) == "global":
             # Get the number of elements in the buffer.
@@ -199,7 +203,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
         else:
             raise ValueError(f"Unsupported buffer scope: {str(buffer.ty.scope)}")
 
-    elif isinstance(obj, tirx.PrimExpr):
+    elif _construction.is_scalar_expr(obj):
         if not msg:
             msg = f"expr<{obj}>"
         # Directly print primitive expressions.

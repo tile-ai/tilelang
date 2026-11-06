@@ -21,8 +21,10 @@
 
 #include "../buffer_alias.h"
 #include "../buffer_version.h"
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
 #include "ir_structure.h"
-#include "native_task_ir.h"
+#include "transform/common/constr_visitor.h"
 
 #include <memory>
 #include <optional>
@@ -72,7 +74,7 @@ ScheduledTIR
 DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer_ctx,
                    ScheduledExtraInfoFactory make_extra_info = nullptr,
                    const ScheduleUnitMetadata &kernel_annotations = {},
-                   NativeParameterAliasContract parameter_alias_contract = {});
+                   ParameterAliasContract parameter_alias_contract = {});
 
 std::optional<CoreMask> GetScheduledCoreMask(const Stmt &schedule_unit);
 CoreMask RequireScheduledCoreMask(const Stmt &schedule_unit);

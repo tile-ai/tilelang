@@ -546,10 +546,8 @@ def test_pure_tma_consumer_local_init_does_not_leak_into_producer():
     assert "acc_o" not in producer_src
     assert "logsum" not in producer_src
     assert "scores_max" not in producer_src
-    acc_init = (
-        r"tl::store_vector<float4, 16, false>\([^;]*acc_o[^;]*make_float4\(broadcast_var, broadcast_var, broadcast_var, broadcast_var\)"
-    )
-    logsum_init = r"tl::store_vector<float2, 8, false>\([^;]*logsum[^;]*make_float2\(broadcast_var_1, broadcast_var_1\)"
+    acc_init = r"\*\(float4\*\)\(acc_o[^;]*= make_float4\(broadcast_var, broadcast_var, broadcast_var, broadcast_var\)"
+    logsum_init = r"\*\(float2\*\)\(logsum[^;]*= make_float2\(broadcast_var_1, broadcast_var_1\)"
     assert not re.search(acc_init, prelude_src)
     assert re.search(acc_init, consumer_src)
     assert not re.search(logsum_init, prelude_src)

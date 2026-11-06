@@ -66,7 +66,8 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tr.LegalizeSafeMemoryAccess()(mod)
     mod = tr.LowerAccessPtr()(mod)
     mod = tr.Simplify()(mod)
-    mod = tr.FinalizeAnnotations(target.kind.name)(mod)
+    mod = tr.LowerSourceAllocations()(mod)
+    mod = tr.LowerSourceAnnotations()(mod)
 
     # SSA Binds and lexical regions express the old block/let scope directly.
     # Native tensor layout/flattening retains the original public signature;
@@ -98,4 +99,5 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # Only now are these indices in the final native pointer signature.
     mod = tr.HoistNonRestrictParams(finalize=True)(mod)
     mod = tr.AnnotateReadOnlyParams()(mod)
+    mod = tr.VerifyLoweredAnnotations()(mod)
     return mod

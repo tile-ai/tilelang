@@ -9,6 +9,8 @@ import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from tilelang.ascend import language as T
+from testing.ascend._block import SEMANTIC_SCOPE_OPS, attribute_fields, has_attribute
+from testing.ascend._ir import scheduled_fields
 
 from test_native_ascend_dual_copy import _materialize
 from test_native_ascend_ops import function, strided_tensor
@@ -17,7 +19,6 @@ from test_native_reducer_contracts import (
     allocate,
     annotation,
     attribute,
-    decoded,
     integer,
     objects,
     region,
@@ -30,11 +31,15 @@ SCHEDULED_BIND = "tl.ascend.scheduled_bind"
 
 
 def _fields(node):
+    if isinstance(node, ir.RegionStmt) and node.op.name in SEMANTIC_SCOPE_OPS:
+        return attribute_fields(node)
+    # This shared fixture also reads tl.annotation Calls, including direct
+    # conflict-hint carriers that are not lexical regions.
     return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
 
 
 def _attributes(value, key):
-    return [node for node in objects(value, ir.RegionStmt) if node.op.name == "tl.attr" and _fields(node)["key"] == key]
+    return [node for node in objects(value, ir.RegionStmt) if has_attribute(node, key)]
 
 
 def _root(body):
@@ -103,8 +108,8 @@ def _stages(body):
     result = []
     for statement in body.seq:
         if isinstance(statement, ir.Bind) and isinstance(statement.value, ir.Call) and statement.value.op.name == SCHEDULED_BIND:
-            result.append(int(decoded(statement.value)[1]["stage"]))
-        elif isinstance(statement, ir.RegionStmt) and statement.op.name == "tl.attr":
+            result.append(int(scheduled_fields(statement)["stage"]))
+        elif isinstance(statement, ir.RegionStmt) and statement.op.name in SEMANTIC_SCOPE_OPS:
             fields = _fields(statement)
             if fields["key"] == "tl.schedule_unit":
                 result.append(int(fields["node"]["stage"]))
@@ -142,8 +147,8 @@ def test_flat_bind_keeps_scalar_shape_stride_origin_and_metadata_def_use():
     assert len(calls(result, SCHEDULED_BIND)) == 4
     for variable in (length, scratch, index, loaded):
         original, rewritten = _binding(value, variable), _binding(result, variable)
-        operands, fields = decoded(rewritten.value)
-        assert operands[0].same_as(original.value)
+        fields = scheduled_fields(rewritten)
+        assert rewritten.value.args[0].same_as(original.value)
         assert rewritten.var.same_as(original.var)
         ir.assert_structural_equal(rewritten.value.ty, original.value.ty)
         assert int(fields["stage"]) == -1 and len(fields["task"]) == 0
@@ -233,7 +238,7 @@ def test_scheduled_binding_infers_its_real_value_type(kind):
     value = ir.Var("value", ty)
     wrapped = _scheduled_bind(value)
     ir.assert_structural_equal(wrapped.ty, value.ty)
-    assert decoded(wrapped)[0][0].same_as(value)
+    assert wrapped.args[0].same_as(value)
     assert tvm_ffi.get_global_func("tl.SideEffect")(wrapped) > tvm_ffi.get_global_func("tl.SideEffect")(value)
 
 
@@ -247,7 +252,7 @@ def test_scheduled_binding_preserves_effect_count_locations_and_unused_tasks():
     binding = _binding(result, value)
     assert binding.loc.same_as(statement_loc)
     assert binding.value.loc.same_as(expression_loc)
-    assert decoded(binding.value)[0][0].same_as(effect)
+    assert binding.value.args[0].same_as(effect)
     simplified = tirx.transform.StmtSimplify()(ir.IRModule({"main": result}))["main"]
     assert len(calls(simplified, "tirx.call_extern")) == 1
     assert len(calls(simplified, SCHEDULED_BIND)) == 1

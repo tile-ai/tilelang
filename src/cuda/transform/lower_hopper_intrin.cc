@@ -3,6 +3,7 @@
  * \brief Materialize host TMA descriptors and CUDA L2 stream policy calls.
  */
 
+#include "op/builtin.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_hash.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -21,8 +22,8 @@
 #include "cuda/op/builtin.h"
 #include "cuda/runtime.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "ir/tensor_utils.h"
-#include "op/native_intrinsic.h"
 
 namespace tvm::tl {
 using namespace tirx;
@@ -55,8 +56,8 @@ public:
       pure = false;
       return VisitInterrupt();
     }
-    bool address = call->op.same_as(address_of_op()) ||
-                   call->op.same_as(Op::Get("tl.access_ptr"));
+    bool address =
+        call->op.same_as(address_of_op()) || call->op.same_as(tl::access_ptr());
     for (size_t i = 0; i < call->args.size(); ++i) {
       if (address && i == 0) {
         if (auto load = call->args[i].as<TensorLoadObj>()) {
@@ -229,7 +230,7 @@ public:
     Call rewritten = StmtExprMutator::Mutate_(call, mode)
                          .ValueOrUnchanged(GetRef<Expr>(call))
                          .as_or_throw<Call>();
-    Array<Expr> arguments = NativeIntrinsicOperands(rewritten.get());
+    Array<Expr> arguments = DecodeCallOperands(rewritten.get());
     TVM_FFI_CHECK_GE(arguments.size(), 3U, ValueError)
         << "TMA descriptor needs dtype, rank and a global address";
     TVM_FFI_CHECK(arguments[2]->ty.as<PtrTypeObj>(), TypeError)

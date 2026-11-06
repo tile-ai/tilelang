@@ -9,8 +9,11 @@
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
 #include "ir/analyzer.h"
-#include "op/native_intrinsic.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include "op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/reflection/registry.h>
@@ -124,7 +127,7 @@ public:
         if (call->op.same_as(gpu_thread_return_op()))
           return {{}, false};
         if (call->op.same_as(deallocate_tmem())) {
-          auto args = NativeIntrinsicOperands(call);
+          auto args = DecodeCallOperands(call);
           TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
           auto tensor = Root(args[0]);
           TVM_FFI_CHECK(tensor, ValueError)
@@ -138,17 +141,20 @@ public:
 
   VarSet Explicit(const Stmt &statement) const {
     VarSet result;
-    VisitNativePostOrder(statement, [&](const ObjectRef &object) {
-      if (const auto *call = object.as<CallObj>();
-          call && call->op.same_as(deallocate_tmem())) {
-        auto args = NativeIntrinsicOperands(call);
-        TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
-        auto tensor = Root(args[0]);
-        TVM_FFI_CHECK(tensor, ValueError)
-            << "tl.deallocate_tmem requires native TMEM backing";
-        result.insert(tensor.value().get());
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        statement,
+        [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *call = object.as<CallObj>();
+              call && call->op.same_as(deallocate_tmem())) {
+            auto args = DecodeCallOperands(call);
+            TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
+            auto tensor = Root(args[0]);
+            TVM_FFI_CHECK(tensor, ValueError)
+                << "tl.deallocate_tmem requires native TMEM backing";
+            result.insert(tensor.value().get());
+          }
+          return ffi::WalkResult::Advance();
+        });
     return result;
   }
 
@@ -180,8 +186,8 @@ private:
           call->op.same_as(reinterpret_op()) ||
           call->op.same_as(ptr_byte_offset_op()) ||
           call->op.same_as(address_of_op()) ||
-          call->op.same_as(Op::Get("tl.access_ptr")) ||
-          call->op.same_as(Op::Get("tl.ptr_access")))
+          call->op.same_as(tl::access_ptr()) ||
+          call->op.same_as(tl::ptr_access()))
         return Root(call->args[0], seen);
     }
     return std::nullopt;
@@ -360,7 +366,7 @@ public:
         region->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
       thread_ = region->body_params[0].as_or_throw<PrimVar>();
     if (region->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(region);
+      auto fields = ReadAnnotations(region);
       const String key = fields.at("key").cast<String>();
       if (key == "layout_map" || key == "safe_value_map") {
         bool removed = false;
@@ -370,8 +376,8 @@ public:
               Mutate(region->body, mode).ValueOrUnchanged(region->body);
           if (remaining.empty())
             return body;
-          return MakeNativeAttribute(fields.at("node"), key, remaining, body,
-                                     region->loc);
+          return MakeAttribute(fields.at("node"), key, remaining, body,
+                               region->loc);
         }
       }
       if (key == "tl.kernel") {
@@ -382,8 +388,8 @@ public:
               Mutate(region->body, mode).ValueOrUnchanged(region->body);
           thread_ = saved_thread;
           two_cta_ = saved_two_cta;
-          return MakeNativeAttribute(fields.at("node"), key, metadata, body,
-                                     region->loc);
+          return MakeAttribute(fields.at("node"), key, metadata, body,
+                               region->loc);
         }
       } else if (key == "use_2cta") {
         two_cta_ = ReadFlag(fields.at("value"));
@@ -483,9 +489,9 @@ public:
     std::stable_sort(
         initializers.begin(), initializers.end(),
         [](const Stmt &a, const Stmt &b) {
-          const auto aa = NativeIntrinsicOperands(
+          const auto aa = DecodeCallOperands(
               a.as_or_throw<Evaluate>()->value.as_or_throw<Call>().get());
-          const auto bb = NativeIntrinsicOperands(
+          const auto bb = DecodeCallOperands(
               b.as_or_throw<Evaluate>()->value.as_or_throw<Call>().get());
           return aa[1].as_or_throw<IntImm>()->value >
                  bb[1].as_or_throw<IntImm>()->value;
@@ -520,15 +526,13 @@ public:
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *evaluate,
                             InplaceMode mode) final {
     const auto *call = evaluate->value.as<CallObj>();
-    if (call && call->op.same_as(Op::Get("tl.annotation"))) {
-      auto metadata = ReadNativeAnnotations(call);
+    if (IsAnnotationCall(call)) {
+      auto metadata = ReadAnnotations(call);
       if (ConsumeTmemMetadata(&metadata)) {
         if (metadata.empty())
           return SeqStmt({}, evaluate->loc);
-        auto replacement = MakeNativeAnnotation(metadata, evaluate->loc)
-                               .as_or_throw<Evaluate>();
-        return StmtExprMutatorWithAnalyzer::Mutate_(replacement.get(), mode)
-            .ValueOrUnchanged(replacement);
+        Stmt replacement = MakeAnnotation(metadata, evaluate->loc);
+        return Mutate(replacement, mode).ValueOrUnchanged(replacement);
       }
     }
     return StmtExprMutatorWithAnalyzer::Mutate_(evaluate, mode);
@@ -585,7 +589,7 @@ public:
 
   UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
     if (call->op.same_as(deallocate_tmem())) {
-      auto args = NativeIntrinsicOperands(call);
+      auto args = DecodeCallOperands(call);
       TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
       auto reference = ResolvePointer(args[0]);
       TVM_FFI_CHECK(reference, ValueError)
@@ -596,7 +600,7 @@ public:
     }
     auto op = call->op.as<Op>();
     if (op && op.value()->name.find("tl.ptx_tcgen05_") == 0) {
-      auto operands = NativeIntrinsicOperands(call);
+      auto operands = DecodeCallOperands(call);
       Array<Expr> rewritten;
       bool changed = false;
       for (size_t i = 0; i < operands.size(); ++i) {
@@ -762,7 +766,7 @@ private:
     if (call->op.same_as(decl_tensor_op()))
       return ResolvePointer(call->args[0], seen);
     if (call->op.same_as(address_of_op()) ||
-        call->op.same_as(Op::Get("tl.access_ptr"))) {
+        call->op.same_as(tl::access_ptr())) {
       const auto *load = call->args[0].as<TensorLoadObj>();
       if (!load)
         return std::nullopt;
@@ -774,7 +778,7 @@ private:
       return reference;
     }
     if (call->op.same_as(ptr_byte_offset_op()) ||
-        call->op.same_as(Op::Get("tl.ptr_access"))) {
+        call->op.same_as(tl::ptr_access())) {
       auto reference = ResolvePointer(call->args[0], seen);
       if (!reference)
         return std::nullopt;

@@ -28,6 +28,10 @@
  *  T.annotate_buffer_versions({buf: 1}) removes the storage from eligibility;
  *  (1, mode) retains eligibility.
  */
+#include "ascend/transform/source_scopes.h"
+#include "ir/loop_annotations.h"
+#include "ir/stmt_functor.h"
+#include "transform/common/constr_visitor.h"
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
@@ -49,8 +53,8 @@
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/buffer_version.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
 
 namespace tvm {
 namespace tl {
@@ -66,7 +70,7 @@ using StorageSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 using ControlStorageClaims =
     std::unordered_map<ControlNode *, std::vector<Var>>;
 
-Var CanonicalStorage(const Var &storage, const NativeStorageContext &context) {
+Var CanonicalStorage(const Var &storage, const StorageProvenance &context) {
   auto address = context.Address(storage);
   return address.exact && address.root.as<VarObj>()
              ? address.root.as_or_throw<Var>()
@@ -75,7 +79,7 @@ Var CanonicalStorage(const Var &storage, const NativeStorageContext &context) {
 
 template <typename T>
 Map<Var, T> CanonicalVersions(const Map<Var, T> &versions,
-                              const NativeStorageContext &context) {
+                              const StorageProvenance &context) {
   Map<Var, T> result;
   for (const auto &[storage, value] : versions) {
     Var root = CanonicalStorage(storage, context);
@@ -89,7 +93,7 @@ Map<Var, T> CanonicalVersions(const Map<Var, T> &versions,
 }
 
 Array<Var> NormalizeEligibleStorages(const Any &annotation,
-                                     const NativeStorageContext &context) {
+                                     const StorageProvenance &context) {
   Array<Var> result;
   StorageSet seen;
   for (const Any &item : annotation.cast<Array<Any>>()) {
@@ -196,7 +200,7 @@ AccessOrder AssumeForExecutes(AccessOrder body) {
 class WriteFirstClassifier : public StmtExprVisitor {
 public:
   using Result = Optional<VisitInterrupt>;
-  explicit WriteFirstClassifier(NativeStorageContext storage)
+  explicit WriteFirstClassifier(StorageProvenance storage)
       : storage_(std::move(storage)) {}
   AccessOrder Classify(const Stmt &stmt, const Var &storage) {
     target_ = storage;
@@ -212,7 +216,7 @@ public:
   }
 
 private:
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   Var target_{UnsafeInit{}};
   AccessOrder result_{AccessOrder::kUntouched};
   template <typename F> AccessOrder Local(F function) {
@@ -334,7 +338,10 @@ private:
   Result Visit_(const RegionStmtObj *op) final {
     if (IsTerminal(result_))
       return std::nullopt;
-    if (auto attr = ReadTaskAttribute(op)) {
+    if (IsAscendBlock(op) || IsSemanticTask(op) || IsScheduleUnit(op) ||
+        IsStageScope(op))
+      return Visit(op->body);
+    if (auto attr = ReadSourceAttribute(op)) {
       if (CanRewriteMultiBufferAttrNode(attr->key, attr->node))
         Visit(attr->node.cast<Expr>());
       if (!IsTerminal(result_))
@@ -368,11 +375,11 @@ private:
     Visit(value);
   }
   Result Visit_(const CallObj *op) final {
-    if (IsTerminal(result_) || loop_annotation_detail::IsAnnotation(op))
+    if (IsTerminal(result_) || IsAnnotationCall(op))
       return std::nullopt;
     if (IsScheduledBind(op))
       return Visit(ReadScheduledBinding(op).value);
-    if (op->op.same_as(Op::Get("tl.access_ptr"))) {
+    if (op->op.same_as(tl::access_ptr())) {
       const auto *load = op->args[0].as<TensorLoadObj>();
       TVM_FFI_CHECK(load && op->args.size() == 3, ValueError);
       for (const auto &index : load->indices)
@@ -384,7 +391,7 @@ private:
              GetConservativeAccessMask(op->args[2].as_or_throw<PrimExpr>()));
       return std::nullopt;
     }
-    if (op->op.same_as(Op::Get("tl.ptr_access"))) {
+    if (op->op.same_as(tl::ptr_access())) {
       TVM_FFI_CHECK_EQ(op->args.size(), 4U, ValueError);
       AddressOperands(op->args[0]);
       for (size_t i = 1; i < op->args.size(); ++i)
@@ -851,8 +858,7 @@ public:
   using StmtExprMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (loop_annotation_detail::IsAnnotation(call) &&
-        ReadNativeAnnotations(call).empty())
+    if (IsAnnotationCall(call) && ReadAnnotations(call).empty())
       return SeqStmt({});
     return StmtExprMutator::Mutate_(op, mode);
   }
@@ -891,12 +897,10 @@ private:
   size_t cursor_{0};
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    auto attr = ReadTaskAttribute(op);
-    if (attr && IsSemanticTaskKey(attr->key))
+    if (IsSemanticTask(op))
       return Unchanged();
-    const auto *loop = attr && attr->key == attr::kScheduleUnit
-                           ? SingleStatement(op->body).as<ForObj>()
-                           : nullptr;
+    const auto *loop =
+        IsScheduleUnit(op) ? SingleStatement(op->body).as<ForObj>() : nullptr;
     if (!loop)
       return StmtExprMutator::Mutate_(op, mode);
     TVM_FFI_ICHECK_LT(cursor_, plans_.size());
@@ -918,7 +922,8 @@ private:
         remover->Mutate(body, mode).ValueOrUnchanged(body);
     updated = AppendLoopAnnotation(
         updated, {{kMultiBufferEligible, plans_[index].eligible}});
-    return ReadTaskAttribute(region)->WithBody(updated);
+    region.CopyOnWrite()->body = SeqStmt(updated);
+    return region;
   }
 };
 
@@ -935,7 +940,7 @@ tvm::transform::Pass AnnotateMultiBufferEligible() {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
               context.root, context.outer_ctx, nullptr,
               context.kernel_annotations, context.parameter_alias_contract);
-          NativeStorageContext storage;
+          StorageProvenance storage = MakeAscendStorageProvenance();
           storage.Collect(context.root->body);
           L0SFBindings bindings;
           for (const auto &[sf, data] : CollectL0SFBindings(context.root)) {

@@ -3,7 +3,8 @@
  * \brief Carry two-CTA GEMM requirements in their native kernel scope.
  */
 #include "cuda/target_utils.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
@@ -46,7 +47,7 @@ public:
     const bool launch = region->op->name == "tl.launch_kernel";
     Map<String, Any> fields;
     if (region->op->name == "tl.attr") {
-      fields = ReadNativeAnnotations(region);
+      fields = ReadAnnotations(region);
       if (fields.at("key").cast<String>() != "tl.kernel")
         return StmtExprMutator::Mutate_(region, mode);
     } else if (!launch) {
@@ -78,8 +79,8 @@ public:
                         DictAttrs(attrs), body, region->result_vars,
                         region->loc);
     }
-    return MakeNativeAttribute(fields.at("node"), "tl.kernel", metadata, body,
-                               region->loc);
+    return MakeAttribute(fields.at("node"), "tl.kernel", metadata, body,
+                         region->loc);
   }
 
   UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {

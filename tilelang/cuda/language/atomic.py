@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language._native import Buffer, PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import Expr as PrimExpr
 
 from tilelang.language.atomic import atomic_add as _common_atomic_add
 

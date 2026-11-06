@@ -3,8 +3,8 @@
  * \brief Fuse a local expect_tx / TMA issue / arrive sequence in native IR.
  */
 #include "cuda/op/builtin.h"
+#include "ir/annotations.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
 #include "transform/merge_if_stmt.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
@@ -32,7 +32,7 @@ bool HasAnnotations(const Call &call) {
 }
 
 Optional<Expr> TmaBarrier(const Call &call) {
-  auto args = NativeIntrinsicOperands(call.get());
+  auto args = DecodeCallOperands(call.get());
   if (call->op.same_as(tma_load())) {
     if (args.size() < 3)
       return std::nullopt;
@@ -53,7 +53,7 @@ bool MatchExpectTx(const Stmt &statement, Expr *barrier, Expr *bytes) {
   if (!call || !call.value()->op.same_as(mbarrier_expect_tx()) ||
       HasAnnotations(*call))
     return false;
-  auto args = NativeIntrinsicOperands(call.value().get());
+  auto args = DecodeCallOperands(call.value().get());
   if (args.size() != 2)
     return false;
   *barrier = args[0];
@@ -69,7 +69,7 @@ bool MatchLocalArrive(const Stmt &statement, const Expr &barrier) {
   if (!call || !call.value()->op.same_as(ptx_arrive_barrier()) ||
       HasAnnotations(*call))
     return false;
-  auto args = NativeIntrinsicOperands(call.value().get());
+  auto args = DecodeCallOperands(call.value().get());
   return args.size() == 1 && StructuralEqual()(args[0], barrier);
 }
 

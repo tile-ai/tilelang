@@ -9,12 +9,10 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/op/memory.h>
 
-#include <string_view>
 #include <vector>
 
 #include "ir/annotations.h"
 #include "ir/dtype.h"
-#include "op/native_intrinsic.h"
 
 namespace tvm::codegen {
 
@@ -44,69 +42,10 @@ inline ffi::String CodegenAnnotationString(const ffi::Any &value) {
   return value.cast<ffi::String>();
 }
 
-inline bool IsCodegenOp(const CallObj *call, std::string_view name) {
-  const auto *op = call->op.as<OpObj>();
-  return op && std::string_view(op->name.data(), op->name.size()) == name;
-}
-inline bool IsCodegenOp(const Call &call, std::string_view name) {
-  return IsCodegenOp(call.get(), name);
-}
-// Metadata referencing IR values lives in an explicit final Tuple operand.
-// Keep that tuple visible to passes, while the terminal emitter consumes only
-// the runtime operands. Target ops without this TL schema are unchanged.
-inline ffi::Array<Expr> CodegenOperands(const CallObj *call) {
-  return tl::NativeIntrinsicOperands(call);
-}
-inline ffi::Array<Expr> CodegenOperands(const Call &call) {
-  return CodegenOperands(call.get());
-}
-inline std::vector<PrimExpr> CodegenPrimOperands(const CallObj *call) {
-  std::vector<PrimExpr> result;
-  for (const auto &arg : CodegenOperands(call))
-    result.push_back(arg.as_or_throw<PrimExpr>());
-  return result;
-}
-inline ffi::Map<ffi::String, ffi::Any>
-CodegenCallAnnotations(const CallObj *call) {
-  if (!call->attrs.has_value())
-    return {};
-  auto attrs = call->attrs.value().as<DictAttrs>();
-  if (!attrs)
-    return {};
-  auto schema =
-      attrs.value().GetAttr<ffi::Array<ffi::Any>>("annotation_schema");
-  if (!schema)
-    return attrs.value()->dict;
-  auto decoded =
-      tl::DecodeAnnotations(call->args.back().as_or_throw<tvm::Tuple>(),
-                            schema.value())
-          .cast<ffi::Map<ffi::Any, ffi::Any>>();
-  ffi::Map<ffi::String, ffi::Any> result;
-  for (const auto &[key, value] : attrs.value()->dict) {
-    if (key != "annotation_schema" && key != "schema_version" &&
-        key != "operand_count")
-      result.Set(key, value);
-  }
-  for (const auto &[key, value] : decoded) {
-    const auto name = key.cast<ffi::String>();
-    TVM_FFI_CHECK(!result.count(name), ValueError)
-        << "Annotation appears in both native attributes and metadata "
-           "operands: "
-        << name;
-    result.Set(name, value);
-  }
-  return result;
-}
 inline bool CodegenBool(const ffi::Any &value) {
   if (const auto *literal = value.as<IntImmObj>())
     return literal->value != 0;
   return value.cast<bool>();
-}
-inline PrimType CodegenDType(const ExprObj *expr) {
-  return expr->ty.as_or_throw<PrimType>();
-}
-inline PrimType CodegenDType(const Expr &expr) {
-  return CodegenDType(expr.get());
 }
 inline tirx::TensorVar CodegenTensor(const VarObj *tensor) {
   return ffi::GetRef<Var>(tensor).as_or_throw<tirx::TensorVar>();

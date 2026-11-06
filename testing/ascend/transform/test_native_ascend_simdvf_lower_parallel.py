@@ -13,6 +13,7 @@ import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import Axis
+from testing.ascend._block import attribute as _scope_attribute, attribute_fields as _scope_fields
 
 
 def integer(value, dtype="int32"):
@@ -30,8 +31,7 @@ def region(value, starts=None, extents=None):
 
 
 def attribute(key, value, body):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": integer(0), "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(integer(0), key, value, body)
 
 
 def vf(body, simd=True):
@@ -186,10 +186,20 @@ class InstructionOracle:
             unary = {"vabs": np.abs, "vneg": np.negative, "vexp": np.exp, "vln": np.log, "vsqrt": np.sqrt}
             if op in unary:
                 return unary[op](args[0])
+            if op == "vpack":
+                source = args[0]
+                dtype = np.dtype(str(value.ty).split("x")[0])
+                assert args[1] == "LOWER" and source.dtype.kind in "iu" and dtype.kind in "iu"
+                assert source.dtype.itemsize == 2 * dtype.itemsize
+                # LOWER packs truncated source lanes into the low half. Only
+                # lane zero is observed by the horizontal reduction store.
+                output = np.zeros(value.ty.dtype.lanes, dtype=dtype)
+                output[: source.size] = source.astype(dtype)
+                return output
             if op in ("vcadd", "vcmax", "vcmin"):
                 source = args[0]
-                output = np.zeros_like(source)
-                output[0] = np.sum(source, dtype=source.dtype) if op == "vcadd" else np.max(source) if op == "vcmax" else np.min(source)
+                output = np.zeros(value.ty.dtype.lanes, dtype=str(value.ty).split("x")[0])
+                output[0] = np.sum(source, dtype=output.dtype) if op == "vcadd" else np.max(source) if op == "vcmax" else np.min(source)
                 return output
         raise AssertionError(f"Unmodeled instruction expression: {value}")
 
@@ -360,6 +370,30 @@ def test_dim1_halfwidth_accumulate_broadcasts_one_element(dtype, tmp_path):
     assert any(call.args[1].value == "BRC_B16" for call in calls(function, "tl.simd.vld"))
 
 
+@pytest.mark.parametrize("dtype", ["int16", "uint16"])
+@pytest.mark.parametrize("clear", [True, False])
+def test_dim1_halfwidth_integer_reduce_preserves_wrap(dtype, clear, tmp_path):
+    src, dst = tensor("src", (3, 256), dtype), tensor("dst", (3,), dtype)
+    function = apply(
+        [src, dst], [vf([tileop("reduce", region(src), region(dst), ir.StringImm("sum"), integer(1), ir.const(clear, "bool"))])], tmp_path
+    )
+    limits = np.iinfo(dtype)
+    values = [limits.max, limits.min, -129 if limits.min < 0 else 257]
+    data = np.array([[value] * 256 for value in values], dtype=dtype)
+    result = np.array([limits.max, limits.min, 127], dtype=dtype)
+    expected = []
+    for index, row in enumerate(data):
+        total = sum(int(value) for value in row)
+        if not clear:
+            total += int(result[index])
+        wrapped = total % (1 << 16)
+        if limits.min < 0 and wrapped >= 1 << 15:
+            wrapped -= 1 << 16
+        expected.append(wrapped)
+    execute(function, {src: data, dst: result}, tmp_path)
+    np.testing.assert_array_equal(result, np.array(expected, dtype=dtype))
+
+
 def test_parallel_metadata_inside_leaf_is_preserved(tmp_path):
     src, dst = tensor("src", (128,)), tensor("dst", (128,))
     i = ir.Var("i", "int32")
@@ -368,7 +402,7 @@ def test_parallel_metadata_inside_leaf_is_preserved(tmp_path):
     )
     trace_regions = []
     for node in objects(function, ir.RegionStmt):
-        metadata = tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
+        metadata = _scope_fields(node)
         if metadata["key"] == "trace":
             trace_regions.append(metadata)
     assert len(trace_regions) == 1
@@ -497,10 +531,7 @@ def test_parallel_between_loop_metadata_and_annotations_survive(tmp_path):
         row, integer(0), integer(2), integer(1), ir.ForKind.PARALLEL, [attribute("trace_between", row, [inner])], {"serial_contract": 17}
     )
     function = apply([src, dst], [vf([outer])], tmp_path)
-    metadata = [
-        tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
-        for node in objects(function, ir.RegionStmt)
-    ]
+    metadata = [_scope_fields(node) for node in objects(function, ir.RegionStmt)]
     (between,) = [item for item in metadata if item["key"] == "trace_between"]
     assert tvm_tirx.sym.Analyzer().simplify(between["value"]).name == "vserial"
     assert sorted(int(value) for node in objects(function, ir.For) for value in node.annotations.values()) == [17, 23]

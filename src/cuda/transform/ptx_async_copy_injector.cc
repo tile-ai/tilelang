@@ -2,7 +2,10 @@
  * \brief Inject eligible global->shared copies into PTX cp.async intrinsics.
  * \file cuda/transform/ptx_async_copy_injector.cc
  */
+#include "ir/lexical_scope.h"
+#include "ir/loop_math.h"
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/expr.h>
@@ -17,10 +20,9 @@
 
 #include "cuda/op/builtin.h"
 #include "cuda/transform/ptx_async_copy_injector.h"
+#include "ir/annotations.h"
 #include "ir/tensor_utils.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
-#include "op/native_utils.h"
 #include "op/utils.h"
 #include <tvm/ir/prim/op.h>
 
@@ -350,7 +352,7 @@ private:
     }
 
     const auto *call = value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("prim.if_then_else")) ||
+    if (!call || !call->op.same_as(prim::if_then_else_op()) ||
         !IsZeroBitPattern(call->args[2].as_or_throw<PrimExpr>())) {
       return nullptr;
     }
@@ -432,28 +434,31 @@ private:
 
   static bool CanSpeculateAddress(const PrimExpr &expression) {
     bool safe = true;
-    VisitNativePostOrder(expression, [&](const ObjectRef &node) {
-      // Pure calls can still trap or fail to terminate. Tensor reads may
-      // fault and cannot be moved outside the original conditional.
-      if (node.as<TensorLoadObj>() || node.as<CallObj>())
-        safe = false;
-      auto check_divisor = [&](const PrimExpr &divisor) {
-        const auto *constant = divisor.as<IntImmObj>();
-        // Reject division by zero and signed min/-1 overflow. This matches
-        // the local shape-hoisting safety rule; no global analyzer policy
-        // or predicate-dependent assumption is introduced.
-        if (!constant || constant->value == 0 || constant->value == -1)
-          safe = false;
-      };
-      if (const auto *value = node.as<DivObj>())
-        check_divisor(value->b);
-      if (const auto *value = node.as<ModObj>())
-        check_divisor(value->b);
-      if (const auto *value = node.as<FloorDivObj>())
-        check_divisor(value->b);
-      if (const auto *value = node.as<FloorModObj>())
-        check_divisor(value->b);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expression,
+        [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          // Pure calls can still trap or fail to terminate. Tensor reads may
+          // fault and cannot be moved outside the original conditional.
+          if (node.as<TensorLoadObj>() || node.as<CallObj>())
+            safe = false;
+          auto check_divisor = [&](const PrimExpr &divisor) {
+            const auto *constant = divisor.as<IntImmObj>();
+            // Reject division by zero and signed min/-1 overflow. This matches
+            // the local shape-hoisting safety rule; no global analyzer policy
+            // or predicate-dependent assumption is introduced.
+            if (!constant || constant->value == 0 || constant->value == -1)
+              safe = false;
+          };
+          if (const auto *value = node.as<DivObj>())
+            check_divisor(value->b);
+          if (const auto *value = node.as<ModObj>())
+            check_divisor(value->b);
+          if (const auto *value = node.as<FloorDivObj>())
+            check_divisor(value->b);
+          if (const auto *value = node.as<FloorModObj>())
+            check_divisor(value->b);
+          return ffi::WalkResult::Advance();
+        });
     return safe;
   }
 
@@ -489,20 +494,59 @@ private:
         src.dtype() != dst.dtype())
       return std::nullopt;
     auto uses_lane = [&](const VarObj *var) { return var == loop->var.get(); };
-    if (UsesAnyVar(src, uses_lane) || UsesAnyVar(dst, uses_lane) ||
+    if (ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+            src,
+            [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+              return uses_lane(var)
+                         ? ffi::WalkResult::Interrupt(
+                               ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                         : ffi::WalkResult::Skip();
+            })
+            .has_value() ||
+        ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+            dst,
+            [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+              return uses_lane(var)
+                         ? ffi::WalkResult::Interrupt(
+                               ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                         : ffi::WalkResult::Skip();
+            })
+            .has_value() ||
         (predicate && SideEffect(*predicate) > CallEffectKind::kPure))
       return std::nullopt;
-    if (predicate && UsesAnyVar(*predicate, uses_lane)) {
+    if (predicate &&
+        ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+            *predicate,
+            [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+              return uses_lane(var)
+                         ? ffi::WalkResult::Interrupt(
+                               ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                         : ffi::WalkResult::Skip();
+            })
+            .has_value()) {
       // Explicit async copies need a legal instruction even when a row mask
       // still mentions the lane syntactically. Prove the same predicate on
       // every lane of this bounded group; partial-lane masks stay scalar.
       if (!UseExplicitAsyncSemantics() || !CanSpeculateAddress(*predicate))
         return std::nullopt;
-      PrimExpr first = analyzer_->Simplify(SubstituteLoopVars(
-          *predicate, {{loop->var, IntImm(loop->var.ty(), 0)}}));
+      PrimExpr first =
+          analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+              *predicate,
+              [values = ffi::Map<Var, PrimExpr>{{loop->var,
+                                                 IntImm(loop->var.ty(), 0)}}](
+                  const Var &var) -> ffi::Optional<PrimExpr> {
+                return values.Get(var);
+              }));
       for (int value = 1; value < lanes; ++value) {
-        PrimExpr current = analyzer_->Simplify(SubstituteLoopVars(
-            *predicate, {{loop->var, IntImm(loop->var.ty(), value)}}));
+        PrimExpr current =
+            analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+                *predicate,
+                [values =
+                     ffi::Map<Var, PrimExpr>{
+                         {loop->var, IntImm(loop->var.ty(), value)}}](
+                    const Var &var) -> ffi::Optional<PrimExpr> {
+                  return values.Get(var);
+                }));
         if (!analyzer_->CanProveEqual(first, current))
           return std::nullopt;
       }
@@ -520,8 +564,13 @@ private:
           !CanSpeculateAddress(index) ||
           !HasUnitStrideForVectorizedLoop(index, domain))
         return false;
-      PrimExpr base =
-          SubstituteLoopVars(index, {{loop->var, IntImm(loop->var.ty(), 0)}});
+      PrimExpr base = tirx::SubstituteWithDataTypeLegalization(
+          index,
+          [values =
+               ffi::Map<Var, PrimExpr>{{loop->var, IntImm(loop->var.ty(), 0)}}](
+              const Var &var) -> ffi::Optional<PrimExpr> {
+            return values.Get(var);
+          });
       PrimType offset_type = PrimType::Int(64);
       PrimExpr base_bits = cast(base, offset_type) * IntImm(offset_type, bits);
       bool offset_aligned = analyzer_->CanProveEqual(
@@ -545,10 +594,20 @@ private:
     if (!aligned(src, info->src_index) || !aligned(dst, info->dst_index))
       return std::nullopt;
     ffi::Map<Var, PrimExpr> first_lane{{loop->var, IntImm(loop->var.ty(), 0)}};
-    const TensorLoad dst_base(dst,
-                              SubstituteLoopVars(store->indices, first_lane));
-    const TensorLoad src_base(src,
-                              SubstituteLoopVars(load->indices, first_lane));
+    const TensorLoad dst_base(
+        dst, store->indices.Map([&](const PrimExpr &index) {
+          return tirx::SubstituteWithDataTypeLegalization(
+              index, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+                return first_lane.Get(var);
+              });
+        }));
+    const TensorLoad src_base(
+        src, load->indices.Map([&](const PrimExpr &index) {
+          return tirx::SubstituteWithDataTypeLegalization(
+              index, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+                return first_lane.Get(var);
+              });
+        }));
     auto result = MakeCPAsyncStmtFromLoads(
         store, dst_base, src_base, static_cast<int>(lanes),
         predicate.has_value(),
@@ -676,13 +735,26 @@ private:
 
   bool HasUnitStrideForVectorizedLoop(const PrimExpr &expr,
                                       const ActiveVectorizedLoop &loop) {
-    PrimExpr prev = analyzer_->Simplify(SubstituteLoopVars(
-        expr, {{loop.loop_var, IntImm(loop.loop_var.ty(), 0)}}));
+    PrimExpr prev =
+        analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+            expr,
+            [values = ffi::Map<Var, PrimExpr>{{loop.loop_var,
+                                               IntImm(loop.loop_var.ty(), 0)}}](
+                const Var &var) -> ffi::Optional<PrimExpr> {
+              return values.Get(var);
+            }));
 
     int64_t stride = 0;
     for (int value = 1; value < loop.extent; ++value) {
-      PrimExpr curr = analyzer_->Simplify(SubstituteLoopVars(
-          expr, {{loop.loop_var, IntImm(loop.loop_var.ty(), value)}}));
+      PrimExpr curr =
+          analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+              expr,
+              [values =
+                   ffi::Map<Var, PrimExpr>{
+                       {loop.loop_var, IntImm(loop.loop_var.ty(), value)}}](
+                  const Var &var) -> ffi::Optional<PrimExpr> {
+                return values.Get(var);
+              }));
       PrimExpr delta = analyzer_->Simplify(curr - prev);
       int64_t delta_value = 0;
       if (!TryGetConstInt64(delta, &delta_value)) {
@@ -798,7 +870,7 @@ private:
       // Scope wrappers are transparent only when their explicit operands are
       // pure. An operator region can read memory itself before its body.
       if (region->op->name != "tl.attr" &&
-          region->op->name != "tl.lexical_scope" &&
+          !region->op.same_as(tl::lexical_scope_op()) &&
           region->op->name != "tirx.launch_thread") {
         out.is_pure_copy_region = false;
         return out;

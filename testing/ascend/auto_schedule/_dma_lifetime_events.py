@@ -3,7 +3,7 @@
 from itertools import product
 
 from tvm_tirx import ir, sym
-from testing.ascend._ir import allocated_tensors, attribute_fields, nodes, scheduled_fields, substitute
+from testing.ascend._ir import is_annotation, allocated_tensors, attribute_fields, nodes, scheduled_fields, substitute
 
 
 def extract(module):
@@ -54,7 +54,7 @@ def extract(module):
                 assert len(statement.body_params) == 1 and concrete(statement.args[1], environment) == 1
                 visit(statement.body, {**environment, statement.body_params[0]: 0}, loops, core, stage)
                 return
-            assert statement.op.name == "tl.attr", statement.op.name
+            assert statement.op.name in {"tl.attr", "tl.ascend.task", "tl.ascend.schedule_unit"}, statement.op.name
             fields = attribute_fields(statement)
             if fields["key"] == "tl.ascend_task":
                 core = int(fields["node"]["core_mask"])
@@ -86,7 +86,7 @@ def extract(module):
         elif isinstance(statement, ir.Evaluate):
             call = statement.value
             assert isinstance(call, ir.Call) and isinstance(call.op, ir.Op), statement
-            if call.op.name == "tl.annotation":
+            if is_annotation(call):
                 assert not nodes(call, ir.TensorLoad)
                 return
             if call.op.name in ("tl.ascend_set_flag", "tl.ascend_wait_flag"):

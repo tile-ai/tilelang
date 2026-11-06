@@ -1,9 +1,9 @@
 """Ascend auto-schedule annotations: multi-buffer version control and memory
 capacity overrides consumed by the Z3 scheduler."""
 
-from tilelang.language._native import IntImm
-from tilelang.language._native import sblock_attr
-from tilelang.language._native import tensor_storage_source
+from tvm_tirx.ir import IntImm
+from tilelang.language._source_scope import sblock_attr
+from tilelang.language._tensor_spec import tensor_storage_source
 
 _VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b")
 

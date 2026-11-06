@@ -66,7 +66,7 @@ def test_structure_tree_decodes_tensor_annotations_and_native_tileop_operands():
 
     text = "\n".join(capture_structure(ir.IRModule({"main": kernel})))
     assert "RegionStmt(tl.launch_kernel)" in text
-    assert "Evaluate: tl.annotation" in text
+    assert "Evaluate: tl.layout_map" in text
     assert "Bind(Tensor(shared" in text
     assert "layout_map" in text and "shared" in text
     assert "coalesced_width" in text

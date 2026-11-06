@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 
 def __getattr__(name):
-    # Imports such as `from tilelang.language import _native` must resolve
+    # Imports of DSL implementation modules must resolve
     # the real child module without initializing the default backend first.
     # The same rule permits helper modules to be imported directly.
     if name.isidentifier() and name != "__all__" and importlib.util.find_spec(f"{__name__}.{name}") is not None:
@@ -46,7 +46,7 @@ __tilelang_dialect__ = "cuda"
 # Importing that helper here creates a cycle through _typing when a layout or
 # type consumer imports language first. Keep the helper lazy and reserve the
 # public spelling when importlib later publishes the real child module.
-from ._native import alloc_buffer as allocate  # noqa: E402,F401
+from tilelang.language._allocation import alloc_buffer as allocate  # noqa: E402,F401
 
 
 class _LanguageNamespace(ModuleType):

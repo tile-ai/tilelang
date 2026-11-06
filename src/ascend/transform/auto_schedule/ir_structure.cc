@@ -1,4 +1,8 @@
+#include "ascend/transform/source_scopes.h"
 #include "ir/loop_math.h"
+#include "layout/expr_utils.h"
+#include "transform/common/constr_visitor.h"
+#include <tvm/ffi/extra/structural_visit.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -117,8 +121,7 @@ bool IRStructure::GuardsTouchStorage(const Var &storage) const {
 Stmt WrapWithGuard(Stmt stmt, const PrimExpr &guard) {
   ICHECK(guard.defined());
   return IsOne(guard) ? stmt
-                      : If(guard, NativeTaskAttribute::AsSequence(stmt),
-                           std::nullopt, stmt->loc);
+                      : If(guard, SeqStmt(stmt), std::nullopt, stmt->loc);
 }
 
 ConstrSet TaskNode::GetContextBeforeConditionGuards() const {
@@ -297,18 +300,21 @@ Optional<Stmt> SerialTail(Stmt statement) {
       statement = *tail;
       continue;
     }
-    if (auto attribute = ReadTaskAttribute(statement);
-        attribute && (attribute->key == attr::kScheduleUnit ||
-                      IsSemanticTaskKey(attribute->key) ||
-                      attribute->key == "tl.loop.annotations")) {
-      if (IsSemanticTaskKey(attribute->key)) {
-        auto metadata = ParseTaskMetadata(attribute->node);
-        if (attribute->key == attr::kAscendPerCoreTask ||
+    const auto *region = statement.as<RegionStmtObj>();
+    if (IsSemanticTask(region) || IsScheduleUnit(region)) {
+      if (IsSemanticTask(region)) {
+        auto metadata = ParseTaskMetadata(TaskAnnotations(region));
+        if (IsPerCoreTask(region) ||
             (metadata.core_mask && *metadata.core_mask != kCoreUnassigned &&
              *metadata.core_mask != kCoreAll))
           return std::nullopt;
       }
-      statement = attribute->region->body;
+      statement = region->body;
+      continue;
+    }
+    if (auto source = ReadSourceAttribute(statement);
+        source && source->key == "tl.loop.annotations") {
+      statement = source->region->body;
       continue;
     }
     return statement;
@@ -329,7 +335,7 @@ const IRStructure *ActiveSerialTail(const IRStructure::ChildList &children) {
       const auto *scope = static_cast<const ScopeNode *>(node);
       if (IsTaskMetadataStatement(scope->shell) && scope->children.empty())
         continue;
-      if (auto attribute = ReadTaskAttribute(scope->shell);
+      if (auto attribute = ReadSourceAttribute(scope->shell);
           attribute && attribute->key == "tl.loop.annotations")
         return ActiveSerialTail(scope->children);
     }
@@ -375,9 +381,12 @@ bool HasInductionContinue(const IRStructure::ChildList &children) {
     CollectTaskNodesAndHeaders(child.get(), tasks);
   bool found = false;
   for (const TaskNode *task : tasks)
-    VisitNativePostOrder(task->stmt, [&](const ObjectRef &object) {
-      found |= object.as<ContinueObj>() != nullptr;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        task->stmt,
+        [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          found |= object.as<ContinueObj>() != nullptr;
+          return ffi::WalkResult::Advance();
+        });
   // An inner-loop continue could be handled separately; declining that case
   // keeps the current proof independent of implicit jump targets.
   return found;

@@ -5,7 +5,7 @@ import threading
 
 import pytest
 import tilelang
-from tilelang.language._native import encode_annotations
+from tilelang.language._annotation_codec import encode_annotations
 from tilelang.testing.ir import collect_nodes
 from tvm_tirx import ir, tirx
 from tvm_tirx.target import Target

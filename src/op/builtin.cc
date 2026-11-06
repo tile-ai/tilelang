@@ -1,4 +1,5 @@
 #include "ir/vectorize.h"
+#include <tvm/ffi/extra/structural_visit.h>
 /*!
  * \file tl/op/builtin.cc
  * \brief Native registration of TileLang intrinsic contracts.
@@ -7,12 +8,15 @@
 #include "../ir/tensor_utils.h"
 #include "builtin.h"
 #include "builtin_registry.h"
-#include "native_intrinsic.h"
-#include "native_utils.h"
+#include "ir/annotations.h"
+#include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ir/transform.h>
+#include <tvm/tirx/op/attr.h>
 #include <tvm/tirx/stmt_functor.h>
 
 namespace tvm::tl {
+
+TIR_DEFINE_TL_BUILTIN(lookup_param)
 
 namespace {
 Type InferAccessPointer(const CallObj *call) {
@@ -66,83 +70,127 @@ Type InferSamePrimitive(const CallObj *call) {
   return call->args[0].as_or_throw<PrimExpr>().ty();
 }
 
-void ValidateWarpReduce(Call call) {
-  const auto operands = NativeIntrinsicOperands(call.get());
-  TVM_FFI_CHECK_EQ(call->ty, operands[0].as_or_throw<PrimExpr>().ty(),
-                   TypeError)
-      << "Warp reduction must preserve its operand type";
+// Result hints are optional on typed native rewrites, but cannot change an
+// operation's semantic result type.
+void ValidatePrimitiveResult(const CallObj *call, PrimType result) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  if (!call->ty_args.empty())
+    TVM_FFI_CHECK_EQ(call->ty_args[0].as_or_throw<PrimType>(), result,
+                     TypeError)
+        << "Intrinsic result type disagrees with its type argument";
+  TVM_FFI_CHECK_EQ(call->ty.as_or_throw<PrimType>(), result, TypeError)
+      << "Intrinsic result type disagrees with its operands";
+}
+
+Type InferWarpReduce(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError)
+      << "Warp reduction expects one runtime operand";
+  const auto result = args[0].as_or_throw<PrimExpr>().ty();
+  TVM_FFI_CHECK(!result.IsVoid(), TypeError);
+  return result;
+}
+
+void ValidateWarpReduce(const CallObj *call) {
+  ValidatePrimitiveResult(call, InferWarpReduce(call).as_or_throw<PrimType>());
 }
 
 void DefineWarpReduce(const char *name) {
   OpDef def(name);
-  DefineNativeIntrinsic(def, 1, 1, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kPrimitive);
-  def.set_native_fn_attr<&InferSamePrimitive>(tvm::op_attr::kInferType, true)
-      .set_attr(kNativeIntrinsicExtraValidator,
-                NativeIntrinsicExtraValidator(ValidateWarpReduce));
+  def.set_validator(ffi::reflection::NativeFunctionView<void(
+                        const CallObj *)>::FromNative<&ValidateWarpReduce>())
+      .signature(sig::arg<PrimExpr>("value"),
+                 sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false)
+      .set_native_fn_attr<&InferWarpReduce>(tvm::op_attr::kInferType);
 }
 
 Type InferShuffleResult(const CallObj *call) {
-  const auto operands = NativeIntrinsicOperands(call);
-  TVM_FFI_CHECK_EQ(operands.size(), 4U, ValueError)
-      << "Warp shuffle expects mask, value, lane selector, and width";
-  return operands[1].as_or_throw<PrimExpr>().ty();
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 4U, ValueError)
+      << "Warp shuffle expects four runtime operands: mask, value, lane "
+         "selector, width";
+  const auto result = args[1].as_or_throw<PrimExpr>().ty();
+  TVM_FFI_CHECK(!result.IsVoid(), TypeError);
+  return result;
 }
 
-void ValidateShuffle(Call call) {
-  TVM_FFI_CHECK_EQ(call->ty, InferShuffleResult(call.get()), TypeError)
-      << "Warp shuffle must preserve the shuffled value type";
+void ValidateShuffle(const CallObj *call) {
+  ValidatePrimitiveResult(call,
+                          InferShuffleResult(call).as_or_throw<PrimType>());
+  const auto args = DecodeCallOperands(call);
+  for (int i : {0, 2, 3})
+    TVM_FFI_CHECK(args[i].as_or_throw<IntExpr>().ty().IsScalar(), TypeError)
+        << "Warp shuffle mask, selector, and width must be scalar integers";
 }
 
 void DefineShuffle(const char *name) {
   OpDef def(name);
-  DefineNativeIntrinsic(def, 4, 4, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kPrimitive);
-  def.set_native_fn_attr<&InferShuffleResult>(tvm::op_attr::kInferType, true)
-      .set_attr(kNativeIntrinsicExtraValidator,
-                NativeIntrinsicExtraValidator(ValidateShuffle));
+  def.set_validator(ffi::reflection::NativeFunctionView<void(
+                        const CallObj *)>::FromNative<&ValidateShuffle>())
+      .signature(sig::arg<IntExpr>("mask"), sig::arg<PrimExpr>("value"),
+                 sig::arg<IntExpr>("lane"), sig::arg<IntExpr>("width"),
+                 sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false)
+      .set_native_fn_attr<&InferShuffleResult>(tvm::op_attr::kInferType);
 }
 
-void DefineCollective(const char *name, int num_args, PrimType result,
-                      bool has_mask = false, bool has_predicate = false) {
+template <int N, bool HasMask, bool HasPredicate>
+void ValidateCollective(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), N, ValueError)
+      << "Collective has the wrong number of runtime operands";
+  const auto result =
+      Op::GetAttrMap(tvm::op_attr::kFixedReturnType)[call->op.as_or_throw<Op>()]
+          .as_or_throw<PrimType>();
+  ValidatePrimitiveResult(call, result);
+  for (const Expr &arg : args) {
+    const auto dtype = arg.as_or_throw<PrimExpr>().ty();
+    TVM_FFI_CHECK(dtype.IsScalar() && !dtype.IsVoid(), TypeError)
+        << "Collective operands must be scalar values";
+  }
+  if constexpr (HasMask) {
+    const auto dtype = args[0].as_or_throw<PrimExpr>().ty();
+    TVM_FFI_CHECK(dtype.MatchesCode(kDLInt, kDLUInt) && dtype.bits() == 32,
+                  TypeError)
+        << "Collective mask must be a 32-bit integer";
+  }
+  if constexpr (HasPredicate)
+    TVM_FFI_CHECK(args.back().as_or_throw<PrimExpr>().ty().MatchesCode(
+                      kDLInt, kDLUInt, kDLBool),
+                  TypeError)
+        << "Collective requires an integer or boolean predicate";
+}
+
+template <int N, bool HasMask = false, bool HasPredicate = false>
+void DefineCollective(const char *name, PrimType result) {
   OpDef def(name);
-  DefineNativeIntrinsic(def, num_args, num_args, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kPrimitive);
-  // Return types are part of the collective's contract, independent of the
-  // optional dtype spelling supplied by frontend or reconstructed native calls.
-  // A fixed type also survives ordinary binding and type reinference.
-  def.set_attr(tvm::op_attr::kFixedReturnType, result)
-      .set_attr(
-          kNativeIntrinsicExtraValidator,
-          NativeIntrinsicExtraValidator([result, has_mask,
-                                         has_predicate](Call call) {
-            TVM_FFI_CHECK_EQ(call->ty, result, TypeError)
-                << "Collective result type is fixed by its operation";
-            const auto args = NativeIntrinsicOperands(call.get());
-            for (const Expr &arg : args) {
-              const PrimType dtype = arg.as_or_throw<PrimExpr>().ty();
-              TVM_FFI_CHECK(dtype.IsScalar() && !dtype.IsVoid(), TypeError)
-                  << "Collective operands must be scalar values";
-            }
-            if (has_mask) {
-              const PrimType dtype = args[0].as_or_throw<PrimExpr>().ty();
-              TVM_FFI_CHECK(dtype.MatchesCode(kDLInt, kDLUInt) &&
-                                dtype.bits() == 32,
-                            TypeError)
-                  << "Collective mask must be a 32-bit integer";
-            }
-            if (has_predicate) {
-              const PrimType dtype = args.back().as_or_throw<PrimExpr>().ty();
-              TVM_FFI_CHECK(dtype.MatchesCode(kDLInt, kDLUInt, kDLBool),
-                            TypeError)
-                  << "Collective requires an integer or boolean "
-                     "predicate";
-            }
-          }));
+  def.set_validator(
+         ffi::reflection::NativeFunctionView<void(const CallObj *)>::FromNative<
+             &ValidateCollective<N, HasMask, HasPredicate>>())
+      .set_attr(tvm::op_attr::kFixedReturnType, result)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
+  if constexpr (N == 0)
+    def.signature(sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else if constexpr (N == 1)
+    def.signature(sig::arg<PrimExpr>("predicate"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
+  else
+    def.signature(sig::arg<IntExpr>("mask"),
+                  sig::arg<PrimExpr>(HasPredicate ? "predicate" : "value"),
+                  sig::var_args<tvm::Tuple>("annotation_payload"),
+                  sig::var_ty_args<PrimType>("result_type"));
 }
 
 void ValidateClamp(const CallObj *call) {
-  auto args = NativeIntrinsicOperands(call);
+  auto args = DecodeCallOperands(call);
   TVM_FFI_CHECK_EQ(args.size(), 3U, ValueError)
       << "tl.clamp requires x, minimum and maximum";
   const PrimType dtype = args[0].as_or_throw<PrimExpr>().ty();
@@ -229,7 +277,15 @@ ffi::Optional<PrimExpr> UniformCastRandomBits(PrimExpr bits, const Var &lane) {
     bits = TensorLoad(load.value()->source, indices, load.value()->loc);
   }
   if (!bits.ty().IsScalar() ||
-      UsesAnyVar(bits, [&](const VarObj *var) { return var == lane.get(); }))
+      ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+          bits,
+          [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+            return (var == lane.get())
+                       ? ffi::WalkResult::Interrupt(
+                             ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                       : ffi::WalkResult::Skip();
+          })
+          .has_value())
     return std::nullopt;
   return bits;
 }
@@ -259,7 +315,15 @@ ffi::Optional<Expr> VectorizeCast(Call call, Var lane, PrimExpr,
       call->ty.as_or_throw<PrimType>().WithLanes(value.ty().lanes());
   auto result = Call(destination, call->op, operands, call->attrs,
                      {destination}, call->loc);
-  if (UsesAnyVar(result, [&](const VarObj *var) { return var == lane.get(); }))
+  if (ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+          result,
+          [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+            return (var == lane.get())
+                       ? ffi::WalkResult::Interrupt(
+                             ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                       : ffi::WalkResult::Skip();
+          })
+          .has_value())
     return std::nullopt;
   result.Validate();
   return result;
@@ -272,7 +336,7 @@ enum class AtomicContract { kReadModifyWrite, kLoad, kStore, kBitwiseOr };
 
 template <int Lanes, bool ReturnsValue, AtomicContract Kind>
 Type InferAtomicResult(const CallObj *call) {
-  auto args = NativeIntrinsicOperands(call);
+  auto args = DecodeCallOperands(call);
   const size_t minimum = Kind == AtomicContract::kStore ? 3 : 2;
   const size_t maximum = Kind != AtomicContract::kLoad ? 3 : 2;
   TVM_FFI_CHECK(args.size() >= minimum && args.size() <= maximum, ValueError)
@@ -295,7 +359,7 @@ void ValidateAtomic(const CallObj *call) {
   if (!call->ty_args.empty())
     TVM_FFI_CHECK(ffi::StructuralEqual()(call->ty_args[0], expected), TypeError)
         << "Atomic explicit result type disagrees with its destination";
-  const auto args = NativeIntrinsicOperands(call);
+  const auto args = DecodeCallOperands(call);
   const auto destination = args[0]->ty.as_or_throw<PtrType>();
   const auto element = destination->element_type.as_or_throw<PrimType>();
   if constexpr (Lanes > 1) {
@@ -361,8 +425,11 @@ void DefineAtomic(const char *name) {
           tvm::op_attr::kInferType);
 }
 
-void ValidateElementCPAsync(Call call) {
-  auto args = NativeIntrinsicOperands(call.get());
+void ValidateElementCPAsync(const CallObj *call) {
+  auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK(args.size() == 3 || args.size() == 4, ValueError)
+      << "tl.ptx_cp_async expects three or four runtime operands";
+  ValidatePrimitiveResult(call, PrimType::Void());
   // Counts remain in logical elements until vectorization chooses a final
   // byte transfer width.  In particular, this is not the bytes-form CUDA op.
   auto destination = args[0]->ty.as_or_throw<PtrType>();
@@ -382,6 +449,43 @@ void ValidateElementCPAsync(Call call) {
         << "tl.ptx_cp_async predicate must be boolean";
   }
 }
+Type InferRandomFloat(const CallObj *call) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  const auto result = (call->ty_args.empty() ? call->ty : call->ty_args[0])
+                          .as_or_throw<PrimType>();
+  TVM_FFI_CHECK(result == PrimType::Float(32) || result == PrimType::Float(64),
+                TypeError)
+      << "Floating RNG requires float32 or float64";
+  return result;
+}
+
+void ValidateRandomInit(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 4U, ValueError)
+      << "RNG initialization expects four runtime operands";
+  for (int i = 0; i < 3; ++i)
+    TVM_FFI_CHECK(args[i].as_or_throw<IntExpr>().ty().IsScalar(), TypeError);
+  args[3].as_or_throw<StringImm>();
+  ValidatePrimitiveResult(call, PrimType::Void());
+}
+
+void ValidateRandomUInt(const CallObj *call) {
+  TVM_FFI_CHECK(DecodeCallOperands(call).empty(), ValueError)
+      << "Integer RNG expects no runtime operands";
+  ValidatePrimitiveResult(call, PrimType::UInt(32));
+}
+
+void ValidateRandomFloat(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError)
+      << "Floating RNG expects one runtime operand";
+  const auto distribution = args[0].as_or_throw<StringImm>()->value;
+  TVM_FFI_CHECK(distribution == "uniform" || distribution == "normal",
+                ValueError)
+      << "Floating RNG distribution must be uniform or normal";
+  ValidatePrimitiveResult(call, InferRandomFloat(call).as_or_throw<PrimType>());
+}
+
 } // namespace
 
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -462,6 +566,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 }
 
 TIR_DEFINE_TL_BUILTIN(clamp)
+TIR_DEFINE_TL_BUILTIN(storage_sync)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef("tl.clamp")
@@ -472,6 +577,11 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kPure)
       .set_attr(tirx::op_attr::kVectorizable, true)
       .set_native_fn_attr<&InferSamePrimitive>(tvm::op_attr::kInferType);
+}
+
+const Op &cast_op() {
+  static const Op op = Op::Get("tl.cast");
+  return op;
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
@@ -598,10 +708,16 @@ TIR_DEFINE_TL_BUILTIN(ptx_cp_async)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
   OpDef def("tl.ptx_cp_async");
-  DefineNativeIntrinsic(def, 3, 4, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kVoid);
-  def.set_attr(kNativeIntrinsicExtraValidator,
-               NativeIntrinsicExtraValidator(ValidateElementCPAsync));
+  def.set_validator(
+         ffi::reflection::NativeFunctionView<void(
+             const CallObj *)>::FromNative<&ValidateElementCPAsync>())
+      .signature(sig::arg<Expr>("destination"), sig::arg<Expr>("source"),
+                 sig::arg<IntExpr>("element_count"),
+                 sig::var_args<Expr>("predicate_and_annotations"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
 }
 
 TIR_DEFINE_TL_BUILTIN(annotate_producer_reg_dealloc)
@@ -663,49 +779,49 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 TIR_DEFINE_TL_BUILTIN(any_sync)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.any_sync", 2, PrimType::Int(32), true, true);
+  DefineCollective<2, true, true>("tl.any_sync", PrimType::Int(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(all_sync)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.all_sync", 2, PrimType::Int(32), true, true);
+  DefineCollective<2, true, true>("tl.all_sync", PrimType::Int(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(ballot_sync)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.ballot_sync", 2, PrimType::UInt(64), true, true);
+  DefineCollective<2, true, true>("tl.ballot_sync", PrimType::UInt(64));
 }
 
 TIR_DEFINE_TL_BUILTIN(ballot)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.ballot", 1, PrimType::UInt(64), false, true);
+  DefineCollective<1, false, true>("tl.ballot", PrimType::UInt(64));
 }
 
 TIR_DEFINE_TL_BUILTIN(activemask)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.activemask", 0, PrimType::UInt(64));
+  DefineCollective<0, false, false>("tl.activemask", PrimType::UInt(64));
 }
 
 TIR_DEFINE_TL_BUILTIN(syncthreads_count)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.syncthreads_count", 1, PrimType::Int(32), false, true);
+  DefineCollective<1, false, true>("tl.syncthreads_count", PrimType::Int(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(syncthreads_and)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.syncthreads_and", 1, PrimType::Int(32), false, true);
+  DefineCollective<1, false, true>("tl.syncthreads_and", PrimType::Int(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(syncthreads_or)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.syncthreads_or", 1, PrimType::Int(32), false, true);
+  DefineCollective<1, false, true>("tl.syncthreads_or", PrimType::Int(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(shfl_sync)
@@ -727,13 +843,13 @@ TVM_FFI_STATIC_INIT_BLOCK() { DefineShuffle("tl.shfl_up_sync"); }
 TIR_DEFINE_TL_BUILTIN(match_any_sync)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.match_any_sync", 2, PrimType::UInt(32), true);
+  DefineCollective<2, true, false>("tl.match_any_sync", PrimType::UInt(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(match_all_sync)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineCollective("tl.match_all_sync", 2, PrimType::UInt(32), true);
+  DefineCollective<2, true, false>("tl.match_all_sync", PrimType::UInt(32));
 }
 
 TIR_DEFINE_TL_BUILTIN(loop_break)
@@ -847,23 +963,43 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 TIR_DEFINE_TL_BUILTIN(rng_init)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineNativeIntrinsic(OpDef("tl.rng_init"), 4, 4, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kVoid);
+  OpDef("tl.rng_init")
+      .set_validator(ffi::reflection::NativeFunctionView<void(
+                         const CallObj *)>::FromNative<&ValidateRandomInit>())
+      .signature(sig::arg<IntExpr>("seed"), sig::arg<IntExpr>("sequence"),
+                 sig::arg<IntExpr>("offset"), sig::arg<StringImm>("generator"),
+                 sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::Void())
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
 }
 
 TIR_DEFINE_TL_BUILTIN(rng_rand)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineNativeIntrinsic(OpDef("tl.rng_rand"), 0, 0, CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kPrimitive);
+  OpDef("tl.rng_rand")
+      .set_validator(ffi::reflection::NativeFunctionView<void(
+                         const CallObj *)>::FromNative<&ValidateRandomUInt>())
+      .signature(sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_attr(tvm::op_attr::kFixedReturnType, PrimType::UInt(32))
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
 }
 
 TIR_DEFINE_TL_BUILTIN(rng_rand_float)
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  DefineNativeIntrinsic(OpDef("tl.rng_rand_float"), 1, 1,
-                        CallEffectKind::kOpaque,
-                        NativeIntrinsicResult::kPrimitive);
+  OpDef("tl.rng_rand_float")
+      .set_validator(ffi::reflection::NativeFunctionView<void(
+                         const CallObj *)>::FromNative<&ValidateRandomFloat>())
+      .signature(sig::arg<StringImm>("distribution"),
+                 sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<PrimType>("result_type"))
+      .set_native_fn_attr<&InferRandomFloat>(tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
 }
 
 TIR_DEFINE_TL_BUILTIN(device_assert)

@@ -145,9 +145,18 @@ static constexpr const char *kPassProfileThresholdMs =
  */
 TVM_TIRX_DLL const Op &tvm_ffi_call_with_result();
 
+// Internal packed-call operands and host storage lookup.
+TVM_TIRX_DLL const Op &lookup_param();
+
 /*! \brief Elementwise clamp with NaN propagation and single-evaluation
  * operands. */
 TVM_TIRX_DLL const Op &clamp();
+
+/*! \brief Conversion with explicit rounding and saturation attributes. */
+TVM_TIRX_DLL const Op &cast_op();
+
+/*! \brief Named shared-memory barrier with an optional thread count. */
+TVM_TIRX_DLL const Op &storage_sync();
 
 /*! \brief Shared clamp expansion for backends without a device helper. */
 TVM_TIRX_DLL PrimExpr LowerClamp(PrimExpr expr);

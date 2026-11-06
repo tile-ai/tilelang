@@ -1,5 +1,7 @@
 """A declaration owns one allocation or one pointer view at its source position."""
 
+from tilelang.language import _tensor_spec
+
 import inspect
 
 import numpy as np
@@ -12,7 +14,6 @@ from tvm_tirx.script.ir_builder import IRBuilder
 import tilelang
 import tilelang.ir as tl_ir
 import tilelang.language as T
-from tilelang.language import _native
 
 
 def _nodes(value, node_type):
@@ -96,8 +97,8 @@ def test_decl_buffer_explicit_pointer_emits_one_view_with_stride_and_offset():
     assert isinstance(view.value.args[0], ir.Call)
     assert view.value.args[0].op.name == "tirx.tensor_data_ptr"
     assert view.value.args[0].args[0].same_as(function.params[0])
-    assert int(_native.tensor_strides(view.var)[0]) == 2
-    assert int(_native.tensor_offset(view.var)) == 1
+    assert int(_tensor_spec.tensor_strides(view.var)[0]) == 2
+    assert int(_tensor_spec.tensor_offset(view.var)) == 1
     clone = ir.load_json(ir.save_json(function))
     ir.assert_structural_equal(function, clone, map_free_vars=True)
     assert tirx.analysis.check_well_formed(clone)
@@ -162,7 +163,7 @@ def test_decl_buffer_is_emitted_in_its_lexical_branch():
 
 def test_decl_buffer_requires_a_builder_while_tensor_stays_an_annotation():
     annotation = T.Tensor((4,), "float32")
-    assert isinstance(annotation, _native.TensorSpec)
+    assert isinstance(annotation, _tensor_spec.TensorSpec)
     assert not IRBuilder.is_in_scope()
     with pytest.raises(ValueError, match="No builder in current scope"):
         T.decl_buffer((4,), "float32")

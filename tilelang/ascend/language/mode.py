@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tilelang.language import _intrinsics
+from tvm_tirx import ir as _ir
 
 
 def set_mmad_direction(direction: str):
@@ -14,10 +15,10 @@ def set_mmad_direction(direction: str):
     """
     if direction not in ("m", "n"):
         raise ValueError(f"mmad direction must be 'm' or 'n', got {direction!r}")
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "void",
-        tirx.Op.get("tl.ascend_set_mmad_direction"),
-        tirx.StringImm(direction),
+        _ir.Op.get("tl.ascend_set_mmad_direction"),
+        _ir.StringImm(direction),
     )
 
 
@@ -46,10 +47,10 @@ def set_hf32_mode(mode=None):
     _HF32_MODE_INT = {None: 0, "nearest_zero": 1, "nearest_even": 2}
     if mode not in _HF32_MODE_INT:
         raise ValueError(f"hf32 mode must be None, 'nearest_zero', or 'nearest_even', got {mode!r}")
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "void",
-        tirx.Op.get("tl.ascend_set_hf32_mode"),
-        tirx.IntImm("int32", _HF32_MODE_INT[mode]),
+        _ir.Op.get("tl.ascend_set_hf32_mode"),
+        _ir.IntImm("int32", _HF32_MODE_INT[mode]),
     )
 
 
@@ -89,11 +90,11 @@ def set_atomic(op="add", dtype="float32"):
     if dtype not in _ATOMIC_DTYPES:
         raise ValueError(f"set_atomic dtype must be one of {_ATOMIC_DTYPES}, got {dtype!r}")
     # Pass a typed zero so codegen reads its dtype to instantiate SetAtomic*<T>().
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "void",
-        tirx.Op.get("tl.ascend_set_atomic"),
-        tirx.StringImm(op),
-        tirx.const(0, dtype),
+        _ir.Op.get("tl.ascend_set_atomic"),
+        _ir.StringImm(op),
+        _ir.const(0, dtype),
     )
 
 
@@ -102,7 +103,7 @@ def set_atomic_none():
 
     Call once to undo :func:`set_atomic`.
     """
-    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_set_atomic_none"))
+    return _intrinsics.call_intrin("void", _ir.Op.get("tl.ascend_set_atomic_none"))
 
 
 __all__ = [

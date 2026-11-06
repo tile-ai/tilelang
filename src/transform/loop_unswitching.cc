@@ -6,6 +6,9 @@
 #include "../ir/analyzer.h"
 #include "../op/builtin.h"
 #include "common/pipeline_access.h"
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/op/region.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
@@ -76,16 +79,16 @@ private:
   PrimExpr guard_;
 };
 
-class BranchReplacer : public StmtExprMutator {
+class BranchReplacer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   BranchReplacer(PrimExpr guard, bool take_then, VarSet hoisted)
       : guard_(std::move(guard)), take_then_(take_then),
         hoisted_(std::move(hoisted)) {}
 
   ffi::UnchangedOr<Stmt> Mutate_(const IfObj *op, InplaceMode mode) final {
     if (!SameGuard(op->condition, guard_))
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     if (take_then_)
       return Mutate(op->then_case).ValueOrUnchanged(op->then_case);
     if (op->else_case)
@@ -95,7 +98,7 @@ public:
   ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
     if (hoisted_.count(op->var.get()))
       return SeqStmt({}, op->loc);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
 private:
@@ -104,9 +107,9 @@ private:
   VarSet hoisted_;
 };
 
-class LoopUnswitcher : public StmtExprMutator {
+class LoopUnswitcher : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   LoopUnswitcher(const tirx::Function &function, bool allow_non_trivial_else)
       : memory_(function),
         target_(function->GetAttr<Target>("target").value_or(Target("llvm"))),
@@ -127,13 +130,13 @@ public:
         for (size_t i = (*ends)->fields.size(); i < op->body_params.size(); ++i)
           thread_vars_.insert(op->body_params[i].get());
     }
-    auto result = StmtExprMutator::Mutate_(op, mode);
+    auto result = LayoutMapMutator::Mutate_(op, mode);
     thread_vars_ = std::move(saved);
     return result;
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
-    auto loop = StmtExprMutator::Mutate_(op, mode)
+    auto loop = LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                     .as_or_throw<For>();
     // Evaluate the original range unchanged. An effectful/dynamic step needs a
@@ -182,7 +185,7 @@ public:
       // Each branch gets a separate definition traversal. Renewing the whole
       // result after duplication would map both copies of a Bind to one Var.
       tirx::Function wrapper({}, SeqStmt({copy}), VoidType());
-      return RenewDef(std::move(wrapper))->body;
+      return tl::RenewDef(std::move(wrapper))->body;
     };
     ffi::Array<Stmt> statements = candidate.hoisted;
     statements.push_back(If(guard, version(std::move(then_body)),
@@ -228,10 +231,13 @@ private:
     if (SideEffect(expression) > CallEffectKind::kReadState)
       return false;
     bool call = false;
-    VisitNativePostOrder(expression, [&](const ffi::ObjectRef &node) {
-      if (node.as<CallObj>())
-        call = true;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expression,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (node.as<CallObj>())
+            call = true;
+          return ffi::WalkResult::Advance();
+        });
     if (call)
       return false;
     VarSet thread_seen;
@@ -288,12 +294,15 @@ private:
       // the original predicate from being reached. Do not move its loads
       // ahead of that boundary, even with the aggressive option enabled.
       bool may_exit = false;
-      VisitNativePostOrder(statement, [&](const ffi::ObjectRef &node) {
-        if (node.as<BreakObj>() || node.as<ContinueObj>() ||
-            node.as<ReturnObj>() || node.as<AssertStmtObj>() ||
-            node.as<ForObj>() || node.as<WhileObj>())
-          may_exit = true;
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          statement,
+          [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (node.as<BreakObj>() || node.as<ContinueObj>() ||
+                node.as<ReturnObj>() || node.as<AssertStmtObj>() ||
+                node.as<ForObj>() || node.as<WhileObj>())
+              may_exit = true;
+            return ffi::WalkResult::Advance();
+          });
       if (may_exit)
         return;
     }

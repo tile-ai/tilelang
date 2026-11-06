@@ -7,13 +7,15 @@ BindTarget and MaterializeKernelLaunch. The target is pinned so the tests
 are independent of the machine and of the production pipeline.
 """
 
+from tilelang.language import _tensor_spec
+
 import pytest
 
 import tilelang
 import tilelang.testing
 import tilelang.cuda.op  # noqa: F401  # Register the implementations used by direct lowering below.
 from tilelang import language as T
-from tilelang.language import _native
+
 from tilelang.tileop import Gemm, GemmBlockScaled
 import tvm_tirx
 from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
@@ -1589,7 +1591,7 @@ def test_versions_reshape_and_view_aliases_by_storage():
         assert alias_bind.value.args[0].op.name == "tirx.tensor_data_ptr"
         assert alias_bind.value.args[0].args[0].same_as(shared)
         assert tvm_ffi.structural_equal(view_bind.var.ty, alias.ty)
-        assert [int(value) for value in _native.tensor_strides(alias)] == [8, 1]
+        assert [int(value) for value in _tensor_spec.tensor_strides(alias)] == [8, 1]
         regions = [region for region in collect_nodes(consumer_loop.body, ir.TensorRegion) if region.source.same_as(view_bind.var)]
         assert len(regions) == 1 and [int(dim.extent) for dim in regions[0].region] == [8, 8]
         # Enumerate the physical byte address, including the version offset,

@@ -13,9 +13,12 @@ dispatch.
 """
 
 from __future__ import annotations
-from tilelang.language import _native
 
-from tilelang.language import _native as tirx
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 
 from tilelang.language.common import evaluate
 from tilelang.language.reduce_op import (
@@ -42,8 +45,8 @@ __all__ = [
 
 
 def reduce(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     reduce_type: str,
     dim: int,
     clear: bool,
@@ -60,11 +63,11 @@ def reduce(
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_buffer = to_buffer_region(out).source
     if reduce_type in ("bitand", "bitor", "bitxor"):
-        buf_dtype = _native.dtype_of(_get_buffer(buffer))
+        buf_dtype = _construction.dtype_of(_get_buffer(buffer))
         if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (_native.dtype_of(out_buffer).startswith(("int", "uint")) or _native.dtype_of(out_buffer) == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {_native.dtype_of(out_buffer)}")
+        if not (_construction.dtype_of(out_buffer).startswith(("int", "uint")) or _construction.dtype_of(out_buffer) == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {_construction.dtype_of(out_buffer)}")
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out)
     expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
@@ -80,9 +83,9 @@ def reduce(
         annotations["batch"] = batch
 
     return evaluate(
-        tirx.call_intrin(
+        _intrinsics.call_intrin(
             "handle",
-            tirx.Op.get(_REDUCE_OP_KEY),
+            _ir.Op.get(_REDUCE_OP_KEY),
             to_tile_region(buffer, access_type="r"),
             to_tile_region(out, access_type="w"),
             reduce_type,
@@ -94,7 +97,12 @@ def reduce(
 
 
 def reduce_max(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_max`."""
     dim = _legalize_dim(buffer, dim)
@@ -102,7 +110,12 @@ def reduce_max(
 
 
 def reduce_min(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_min`."""
     dim = _legalize_dim(buffer, dim)
@@ -110,21 +123,33 @@ def reduce_min(
 
 
 def reduce_sum(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_sum`."""
     dim = _legalize_dim(buffer, dim)
     reduce(buffer, out, "sum", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict | None = None) -> None:
+def reduce_abssum(
+    buffer: _tensor_spec.TensorValue, out: _tensor_spec.TensorValue, dim: int = -1, batch: int = 1, annotations: dict | None = None
+) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_abssum`."""
     dim = _legalize_dim(buffer, dim)
     reduce(buffer, out, "abssum", dim, True, batch=batch, annotations=annotations)
 
 
 def reduce_absmax(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_absmax`."""
     dim = _legalize_dim(buffer, dim)
@@ -132,7 +157,12 @@ def reduce_absmax(
 
 
 def reduce_bitand(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_bitand`."""
     dim = _legalize_dim(buffer, dim)
@@ -140,7 +170,12 @@ def reduce_bitand(
 
 
 def reduce_bitor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_bitor`."""
     dim = _legalize_dim(buffer, dim)
@@ -148,7 +183,12 @@ def reduce_bitor(
 
 
 def reduce_bitxor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """See :func:`tilelang.language.reduce_op.reduce_bitxor`."""
     dim = _legalize_dim(buffer, dim)

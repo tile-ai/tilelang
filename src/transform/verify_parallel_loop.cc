@@ -4,6 +4,7 @@
  */
 
 #include "common/constr_visitor.h"
+#include "ir/annotations.h"
 #include "op/builtin.h"
 #include "op/reducer.h"
 #include "span_utils.h"
@@ -65,15 +66,8 @@ struct ParallelLoopVerifier : public ConstrVisitor {
   }
 
   Result Visit_(const CallObj *op) override {
-    if (auto callee = op->op.as<Op>();
-        callee.has_value() && callee.value()->name == "tl.annotation") {
-      RecordReducers(
-          DecodeAnnotations(op->args[0].as_or_throw<tvm::Tuple>(),
-                            op->attrs.value()
-                                .as_or_throw<DictAttrs>()
-                                .GetAttr<Array<Any>>("annotation_schema")
-                                .value())
-              .cast<Map<Any, Any>>());
+    if (IsAnnotationCall(op)) {
+      RecordReducers(Any(ReadAnnotations(op)).cast<Map<Any, Any>>());
       return std::nullopt;
     }
     return ConstrVisitor::Visit_(op);

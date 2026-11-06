@@ -8,6 +8,8 @@ docstring for the details.
 
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+
 import ast
 import contextlib
 import inspect
@@ -127,9 +129,8 @@ def _emits_store(func: Callable) -> bool:
 def _name_buffer(meta_name: str, attr: str, value: Any) -> None:
     """Give a state buffer a readable name ``{meta_name}_{attr}`` in the IR."""
     from tvm_tirx.script.ir_builder import IRBuilder
-    from tilelang.language._native import Buffer
 
-    if not isinstance(value, Buffer):
+    if not _tensor_spec.is_buffer_like(value):
         return
     with contextlib.suppress(Exception):  # naming is best-effort, never fatal
         IRBuilder.name(f"{meta_name}_{attr}", value)

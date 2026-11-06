@@ -231,7 +231,7 @@ class PersistentTileScheduler(BaseTileScheduler):
         super().__init__(stateful=stateful, name=name)
         self.cluster_size = cluster_size
         if num_workers is None:
-            from tilelang.carver.arch import driver
+            from tilelang import driver
 
             num_workers = driver.get_num_sms() // cluster_size
         self.num_workers = num_workers

@@ -21,8 +21,13 @@
  *  \brief Prepare logical storage epochs and physical multi-buffer protocols.
  */
 
+#include "ascend/transform/source_scopes.h"
 #include "ir/analyzer.h"
+#include "ir/loop_annotations.h"
+#include "layout/expr_utils.h"
+#include "transform/common/constr_visitor.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/sym/analyzer.h>
@@ -51,7 +56,6 @@
 #include "./auto_schedule/task_annotations.h"
 #include "ascend/transform/attr.h"
 #include "ascend/transform/buffer_version.h"
-#include "op/native_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -64,7 +68,7 @@ namespace {
 
 using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 
-String NativeStorageScope(const Var &storage) {
+String StorageScopeName(const Var &storage) {
   if (auto tensor = storage.as<TensorVar>())
     return tensor->scope().name();
   return storage->ty.as_or_throw<PtrType>()->scope.name();
@@ -311,7 +315,7 @@ EpochBody GetEpochBody(ControlNode *loop) {
     if (!node->IsScope())
       break;
     auto *scope = static_cast<ScopeNode *>(node);
-    auto attribute = ReadTaskAttribute(scope->shell);
+    auto attribute = ReadSourceAttribute(scope->shell);
     if (!attribute || attribute->key != "tl.loop.annotations")
       break;
     result = {scope, &scope->children};
@@ -365,34 +369,36 @@ std::set<int> StorageAccessStages(const IRStructure *node, const Var &storage,
 // and arithmetic that can overflow are deliberately not expanded here.
 bool CanReplayEpochPredicate(const PrimExpr &value) {
   bool safe = true;
-  VisitNativePostOrder(value, [&](const ffi::ObjectRef &node) {
-    auto expression = node.as<PrimExpr>();
-    if (!expression)
-      return;
-    const PrimType &type = expression->ty();
-    if (!type.IsScalar() ||
-        !(type.MatchesCode(kDLInt) || type.MatchesCode(kDLUInt) ||
-          type.MatchesCode(kDLBool))) {
-      safe = false;
-      return;
-    }
-    if (node.as<IntImmObj>() || node.as<VarObj>() || node.as<EQObj>() ||
-        node.as<NEObj>() || node.as<LTObj>() || node.as<LEObj>() ||
-        node.as<GTObj>() || node.as<GEObj>() || node.as<AndObj>() ||
-        node.as<OrObj>() || node.as<NotObj>())
-      return;
-    PrimExpr divisor{ffi::UnsafeInit{}};
-    if (const auto *op = node.as<FloorDivObj>())
-      divisor = op->b;
-    else if (const auto *op = node.as<FloorModObj>())
-      divisor = op->b;
-    if (divisor.defined()) {
-      auto constant = TryConstInt(divisor);
-      safe &= constant && *constant > 0;
-    } else {
-      safe = false;
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      value, [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        auto expression = node.as<PrimExpr>();
+        if (!expression)
+          return ffi::WalkResult::Advance();
+        const PrimType &type = expression->ty();
+        if (!type.IsScalar() ||
+            !(type.MatchesCode(kDLInt) || type.MatchesCode(kDLUInt) ||
+              type.MatchesCode(kDLBool))) {
+          safe = false;
+          return ffi::WalkResult::Advance();
+        }
+        if (node.as<IntImmObj>() || node.as<VarObj>() || node.as<EQObj>() ||
+            node.as<NEObj>() || node.as<LTObj>() || node.as<LEObj>() ||
+            node.as<GTObj>() || node.as<GEObj>() || node.as<AndObj>() ||
+            node.as<OrObj>() || node.as<NotObj>())
+          return ffi::WalkResult::Advance();
+        PrimExpr divisor{ffi::UnsafeInit{}};
+        if (const auto *op = node.as<FloorDivObj>())
+          divisor = op->b;
+        else if (const auto *op = node.as<FloorModObj>())
+          divisor = op->b;
+        if (divisor.defined()) {
+          auto constant = TryConstInt(divisor);
+          safe &= constant && *constant > 0;
+        } else {
+          safe = false;
+        }
+        return ffi::WalkResult::Advance();
+      });
   return safe;
 }
 
@@ -970,7 +976,7 @@ private:
   }
 
   static bool IsL1Storage(const Var &storage) {
-    ffi::String scope = NativeStorageScope(storage);
+    ffi::String scope = StorageScopeName(storage);
     return scope == "shared.l1" || scope == "shared.l1.dyn";
   }
 
@@ -1105,7 +1111,7 @@ Stmt MakeCompilerTask(const Stmt &body) {
   auto fields = MergeTaskMetadata(metadata, IntImm::Int32(0));
   if (auto bind = body.as<Bind>())
     return MakeScheduledBinding(*bind, 0, fields.cast<ScheduleUnitMetadata>());
-  return MakeNativeAttribute(fields, attr::kAscendTask, 1, body, body->loc);
+  return MakeTask(body, fields.cast<ScheduleUnitMetadata>());
 }
 
 std::shared_ptr<TaskNode> MakeCounterTask(const Stmt &body, int stage) {
@@ -1208,7 +1214,7 @@ void AnnotateStorageEpochs(
       if (manual_buffer_versions.count(storage)) {
         continue;
       }
-      std::string storage_scope = NativeStorageScope(storage);
+      std::string storage_scope = StorageScopeName(storage);
       if (storage_scope == "local" || storage_scope == "local.var" ||
           storage_scope == "local.fragment") {
         continue;
@@ -1291,10 +1297,10 @@ void AnnotateStorageEpochs(
     // metadata is emitted once after the definitions it references.
     loop->control = AppendLoopAnnotation(loop->control, fields);
     auto carrier = std::make_shared<ScopeNode>();
-    carrier->shell = MakeNativeAnnotation(fields, loop->control->loc);
+    carrier->shell = MakeAnnotation(fields, loop->control->loc);
     carrier->outer_ctx = loop->GetLoopBodyContext();
     carrier->SetStorageContext(
-        std::make_shared<NativeStorageContext>(loop->StorageContext()));
+        std::make_shared<StorageProvenance>(loop->StorageContext()));
     auto body = GetEpochBody(loop);
     carrier->SetParent(body.parent);
     carrier->SetIndex(body.children->size());

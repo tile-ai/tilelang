@@ -1,4 +1,10 @@
+#include "ascend/transform/source_scopes.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
 #include "ir/loop_math.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -65,7 +71,7 @@ using CoveredDependencyMap =
 // hint names one tensor and one exact logical footprint, not every view.
 static bool HintOperandMatches(const Any &hint, const Var &storage,
                                const Optional<TensorRegion> &query,
-                               const NativeStorageContext &context) {
+                               const StorageProvenance &context) {
   if (auto var = hint.try_cast<Var>()) {
     if (var->same_as(storage) || (query && var->same_as(RegionTensor(*query))))
       return true;
@@ -142,14 +148,17 @@ bool HintStatementMayAbandon(const Stmt &statement, const ConstrSet &context) {
   bool result = false;
   auto analyzer = CreateTileLangAnalyzer();
   auto scope = context.Populate(analyzer);
-  VisitNativePostOrder(statement, [&](const ObjectRef &object) {
-    if (object.as<BreakObj>() || object.as<ContinueObj>() ||
-        object.as<ReturnObj>() || object.as<WhileObj>())
-      result = true;
-    if (const auto *loop = object.as<ForObj>())
-      result |=
-          !CanUseLoopBounds(loop->begin, loop->end, loop->step, analyzer.get());
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      statement,
+      [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+        if (object.as<BreakObj>() || object.as<ContinueObj>() ||
+            object.as<ReturnObj>() || object.as<WhileObj>())
+          result = true;
+        if (const auto *loop = object.as<ForObj>())
+          result |= !CanUseLoopBounds(loop->begin, loop->end, loop->step,
+                                      analyzer.get());
+        return ffi::WalkResult::Advance();
+      });
   return result;
 }
 
@@ -197,11 +206,9 @@ private:
 
   Result Visit_(const EvaluateObj *op) final {
     const auto *call = op->value.as<CallObj>();
-    const auto *callee = call ? call->op.as<OpObj>() : nullptr;
-    if (callee && callee->name == "tl.annotation") {
-      collect_(ReadNativeAnnotations(call),
-               HintSource{task_, task_, GetConstrSet(), raw_loops_,
-                          known_execution_});
+    if (IsAnnotationCall(call)) {
+      collect_(ReadAnnotations(call), HintSource{task_, task_, GetConstrSet(),
+                                                 raw_loops_, known_execution_});
       return std::nullopt;
     }
     return TaskAwareConstrVisitor::Visit_(op);
@@ -251,7 +258,7 @@ struct ScopedConflictHintIndex::Impl {
     const IRStructure *node;
     const IRStructure *parent;
     const TaskNode *header;
-    const NativeStorageContext *storage;
+    const StorageProvenance *storage;
     Stmt statement;
     Stmt guards;
     ConstrSet context;
@@ -459,7 +466,7 @@ struct ScopedConflictHintIndex::Impl {
                           known_execution};
         if (const auto *evaluate = scope->shell.as<EvaluateObj>()) {
           if (const auto *call = evaluate->value.as<CallObj>())
-            Add(ReadNativeAnnotations(call), source);
+            Add(ReadAnnotations(call), source);
         } else if (const auto *branch = scope->shell.as<IfObj>()) {
           ConstrSet body = active;
           PrimExpr gate = CaptureGate(branch->condition, &body);
@@ -477,7 +484,7 @@ struct ScopedConflictHintIndex::Impl {
             CollectList(scope->else_children, body, inner_captures,
                         known_execution);
           }
-        } else if (auto attribute = ReadTaskAttribute(scope->shell)) {
+        } else if (auto attribute = ReadSourceAttribute(scope->shell)) {
           ConstrSet body = active;
           auto inner_captures = captures;
           if (attribute->key == "tl.loop.annotations")
@@ -770,8 +777,7 @@ static std::optional<bool> DeclaredConflict(
     ControlNode *loop, int offset, const ConflictHintList &root_hints,
     const Var &a_storage, const Optional<TensorRegion> &a_region,
     const Var &b_storage, const Optional<TensorRegion> &b_region,
-    const NativeStorageContext &a_context,
-    const NativeStorageContext &b_context,
+    const StorageProvenance &a_context, const StorageProvenance &b_context,
     const ScopedConflictHintIndex *scoped_hints = nullptr,
     const TaskNode *a_task = nullptr, const TaskNode *b_task = nullptr) {
   bool declared_no_conflict = false;
@@ -822,24 +828,26 @@ static std::optional<bool> DeclaredConflict(
 static std::vector<Expr> UnresolvedOpaquePointers(const TaskNode *task) {
   std::vector<Expr> unresolved;
   const auto &storage = task->StorageContext();
-  auto inspect = [&](const ffi::ObjectRef &object) {
+  auto inspect =
+      [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
     auto expression = object.as<Expr>();
     if (!expression || !expression.value()->ty.as<PtrTypeObj>())
-      return;
+      return ffi::WalkResult::Advance();
     Expr value = expression.value();
     if (const auto *call = value.as<CallObj>()) {
       if (call->op.same_as(tl::ptr_access())) {
         value = call->args[0];
-      } else if (call->op.same_as(Op::Get("tl.access_ptr"))) {
+      } else if (call->op.same_as(tl::access_ptr())) {
         value = call->args[0].as_or_throw<TensorLoad>()->source;
       } else if (IsScheduledBind(call)) {
         value = ReadScheduledBinding(call).value;
       }
     }
     auto address = storage.Address(value);
-    if (!address.exact || !CompatibleNativeStorageScopes(
-                              address.root->ty, expression.value()->ty))
+    if (!address.exact ||
+        !CompatibleStorageScopes(address.root->ty, expression.value()->ty))
       unresolved.push_back(value);
+    return ffi::WalkResult::Advance();
   };
   auto definition = GetFlatTaskBind(task->stmt);
   if (definition && (definition->var->ty.as<PtrTypeObj>() ||
@@ -866,14 +874,15 @@ static std::vector<Expr> UnresolvedOpaquePointers(const TaskNode *task) {
           first = 1;
         }
         for (size_t i = first; i < call->args.size(); ++i)
-          VisitNativePostOrder(call->args[i], inspect);
+          ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(call->args[i],
+                                                          inspect);
         return;
       }
-      VisitNativePostOrder(value, inspect);
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(value, inspect);
     };
     visit_inputs(definition->value);
   } else {
-    VisitNativePostOrder(task->stmt, inspect);
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(task->stmt, inspect);
   }
   return unresolved;
 }
@@ -882,7 +891,7 @@ static std::vector<Expr> UnresolvedOpaquePointers(const TaskNode *task) {
 // If, assume or annotation scope can sit between those loops, and its other
 // child lists/header can access the storage too.
 static std::vector<const ControlNode *>
-StorageIterationNest(ControlNode *loop, const NativeStorageAddress &address) {
+StorageIterationNest(ControlNode *loop, const StorageAddress &address) {
   auto controls = loop->GetAncestorControls();
   auto storage = address.exact ? address.root.as<Var>() : Optional<Var>();
   if (!storage)
@@ -918,7 +927,7 @@ struct ConflictProof {
 
   ConflictProof(const ConstrSet &a_ctx, const ConstrSet &b_ctx,
                 ControlNode *loop, int offset, size_t num_storage_owners,
-                const NativeStorageAddress &storage) {
+                const StorageAddress &storage) {
     analyzer->z3_prover.SetRLimit(50000);
     ConstrSet a_local = a_ctx, b_local = b_ctx, combined;
     std::unordered_map<const ControlNode *, SerialInductionInfo> inductions;
@@ -1030,8 +1039,8 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
                         size_t num_storage_owners,
                         const ConflictHintList &root_conflicts,
                         Optional<PrimExpr> a_pitch, Optional<PrimExpr> b_pitch,
-                        const NativeStorageContext &a_storage,
-                        const NativeStorageContext &b_storage,
+                        const StorageProvenance &a_storage,
+                        const StorageProvenance &b_storage,
                         const ScopedConflictHintIndex *scoped_hints,
                         const TaskNode *a_task, const TaskNode *b_task) {
   if (offset != 0 && loop == nullptr)
@@ -1046,7 +1055,7 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
     return *declared;
   auto a_address = a_storage.Address(a_tensor),
        b_address = b_storage.Address(b_tensor);
-  if (ProvenDisjointNativeStorage(a_address, b_address))
+  if (ProvenDisjointAscendStorage(a_address, b_address))
     return false;
 
   ConflictProof proof(a_ctx, b_ctx, loop, offset, num_storage_owners,
@@ -1092,9 +1101,9 @@ bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
   // Compare arbitrary points in the two logical rectangles after applying
   // their real native layouts and byte-pointer offsets. This handles aliases
   // with different ranks, strides and element widths, including packed FP4.
-  auto address_bits =
-      [&](const TensorRegion &region, const NativeStorageContext &storage,
-          const auto &value, const char *prefix) -> Optional<PrimExpr> {
+  auto address_bits = [&](const TensorRegion &region,
+                          const StorageProvenance &storage, const auto &value,
+                          const char *prefix) -> Optional<PrimExpr> {
     TensorVar tensor = RegionTensor(region);
     Array<PrimExpr> indices;
     for (size_t axis = 0; axis < region->region.size(); ++axis) {
@@ -1165,7 +1174,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
     TaskNode *task;
     Optional<TensorRegion> region;
     Optional<Var> storage;
-    NativeStorageAddress address;
+    StorageAddress address;
   };
   struct NodeAccesses {
     std::vector<RegionAccess> reads;
@@ -1364,7 +1373,7 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes, ControlNode *loop,
                         lhs.task->StorageContext(), rhs.task->StorageContext(),
                         scoped_hints, lhs.task, rhs.task))
                   return *declared;
-              if (ProvenDisjointNativeStorage(lhs.address, rhs.address))
+              if (ProvenDisjointAscendStorage(lhs.address, rhs.address))
                 return false;
               ConflictProof proof(lhs.task->outer_ctx, rhs.task->outer_ctx,
                                   loop, distance, owners, lhs.address);

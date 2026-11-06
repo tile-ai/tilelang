@@ -5,9 +5,11 @@
 #include "codegen_cuda.h"
 #include "backend/common/codegen/codegen_ir_utils.h"
 #include "backend/common/codegen/codegen_utils.h"
+#include "cuda/op/builtin.h"
 #include "ir/lexical_scope.h"
 #include "ir/stmt_functor.h"
 #include "layout/layout.h"
+#include "op/builtin.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_mutate.h>
 #include <tvm/ir/prim/op.h>
@@ -15,13 +17,13 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/sym/analyzer.h>
 #include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op/gpu.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <cmath>
 #include <cstdint>
-#include <numeric>
 #include <optional>
 #include <string>
 #include <utility>
@@ -93,15 +95,6 @@ bool IsProvablyDivisible(const PrimExpr &expr, int64_t divisor) {
   sym::Analyzer analyzer;
   sym::ModularSet modular_set = analyzer->modular_set(expr);
   return modular_set->coeff % divisor == 0 && modular_set->base % divisor == 0;
-}
-
-int VectorStorageBits(const PrimType &type) {
-  // Bool tensors use one byte per scalar. CUDA's FP6 storage types likewise
-  // hold each six-bit value in a byte; neither is bit-packed like int4/FP4.
-  if (type.WithLanes(1) == PrimType::Bool() || CodegenIsFloat6(type)) {
-    return 8 * type.lanes();
-  }
-  return type.bits() * type.lanes();
 }
 
 // A memory transaction can carry more 64-bit indices than CUDA has vector
@@ -424,12 +417,12 @@ std::optional<PrimType> GetAccessPtrElementType(const Expr &expr) {
   if (ptr_call == nullptr) {
     return std::nullopt;
   }
-  if (IsCodegenOp(ptr_call, "tirx.address_of")) {
+  if (ptr_call->op.same_as(tirx::address_of_op())) {
     const auto *buffer_load = ptr_call->args[0].as<TensorLoadObj>();
     ICHECK(buffer_load) << "address_of arg must be BufferLoad";
     return buffer_load->source->ty.as_or_throw<TensorType>()->dtype;
   }
-  if (IsCodegenOp(ptr_call, "tl.access_ptr")) {
+  if (ptr_call->op.same_as(tl::access_ptr())) {
     ICHECK_EQ(ptr_call->args.size(), 3U)
         << "tl.access_ptr expects 3 args: (BufferLoad, extent, rw_mask)";
     const auto *buffer_load = ptr_call->args[0].as<TensorLoadObj>();
@@ -523,14 +516,14 @@ const char *GetPackedComparisonSuffix(const std::string &op) {
 }
 
 const char *GetPackedMathIntrinsicName(const Call &call) {
-  static const std::pair<const char *, const char *> kNames[] = {
-      {"tl.add2", "add2"},         {"tl.sub2", "sub2"},
-      {"tl.mul2", "mul2"},         {"tl.fma2", "fma2"},
-      {"tl.max2", "max2"},         {"tl.min2", "min2"},
-      {"tl.max2_nan", "max2_nan"}, {"tl.min2_nan", "min2_nan"},
-      {"tl.abs2", "abs2"}};
+  static const std::pair<Op, const char *> kNames[] = {
+      {tl::add2(), "add2"},         {tl::sub2(), "sub2"},
+      {tl::mul2(), "mul2"},         {tl::fma2(), "fma2"},
+      {tl::max2(), "max2"},         {tl::min2(), "min2"},
+      {tl::max2_nan(), "max2_nan"}, {tl::min2_nan(), "min2_nan"},
+      {tl::abs2(), "abs2"}};
   for (const auto &[intrinsic, name] : kNames) {
-    if (IsCodegenOp(call, intrinsic)) {
+    if (call->op.same_as(intrinsic)) {
       return name;
     }
   }
@@ -1138,9 +1131,6 @@ void CodeGenTileLangCUDA::EmitPreamble_(std::ostream &os) const {
   if (need_copy_sm100_h_) {
     os << "#include <tl_templates/cuda/copy_sm100.h>\n";
   }
-  if (need_vector_memory_h_) {
-    os << "#include <tl_templates/cuda/vector_memory.h>\n";
-  }
   if (enable_fp8_) {
     os << "#include <tl_templates/cuda/cuda_fp8.h>\n";
   }
@@ -1698,7 +1688,8 @@ void CodeGenTileLangCUDA::EmitPerLaneScalarCall(
         if (j != 0) {
           value_temp << ", ";
         }
-        PrintVecElemLoad(vec_ids[j], CodegenDType(args[j]), i, value_temp);
+        PrintVecElemLoad(vec_ids[j], args[j]->ty.as_or_throw<PrimType>(), i,
+                         value_temp);
       }
       value_temp << ")";
       PrintVecElemStore(sret, t, i, value_temp.str());
@@ -1768,7 +1759,7 @@ bool CodeGenTileLangCUDA::TryEmitPackedBinaryOp_(const std::string &op,
     auto try_fuse_mul_add = [&](const PrimExpr &maybe_mul,
                                 const PrimExpr &addend) -> bool {
       const prim::MulObj *mul = maybe_mul.as<prim::MulObj>();
-      if (mul == nullptr || CodegenDType(mul) != result_type ||
+      if (mul == nullptr || mul->ty.as_or_throw<PrimType>() != result_type ||
           mul->a.ty() != result_type || mul->b.ty() != result_type ||
           addend.ty() != result_type) {
         return false;
@@ -2095,18 +2086,18 @@ void CodeGenTileLangCUDA::PrintStorageSync(const CallObj *op) {
     if (args.size() == 1) {
       this->stream << "__syncthreads();\n";
     } else if (args.size() == 2) {
-      ICHECK(CodegenDType(args[1]).MatchesCode(kDLInt))
+      ICHECK(args[1]->ty.as_or_throw<PrimType>().MatchesCode(kDLInt))
           << "storage_sync barrier_id must be integer type, got "
-          << CodegenDType(args[1]);
+          << args[1]->ty.as_or_throw<PrimType>();
       this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1])
                    << ");\n";
     } else if (args.size() == 3) {
-      ICHECK(CodegenDType(args[1]).MatchesCode(kDLInt))
+      ICHECK(args[1]->ty.as_or_throw<PrimType>().MatchesCode(kDLInt))
           << "storage_sync barrier_id must be integer type, got "
-          << CodegenDType(args[1]);
-      ICHECK(CodegenDType(args[2]).MatchesCode(kDLInt))
+          << args[1]->ty.as_or_throw<PrimType>();
+      ICHECK(args[2]->ty.as_or_throw<PrimType>().MatchesCode(kDLInt))
           << "storage_sync thread_count must be integer type, got "
-          << CodegenDType(args[2]);
+          << args[2]->ty.as_or_throw<PrimType>();
       this->stream << "tl::__sync_thread_partial(" << PrintExpr(args[1]) << ", "
                    << PrintExpr(args[2]) << ");\n";
     } else {
@@ -2166,7 +2157,7 @@ std::string CodeGenTileLangCUDA::CastFromTo(std::string value,
 }
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::CastObj *op, std::ostream &os) {
-  const PrimType target_ty = CodegenDType(op);
+  const PrimType target_ty = op->ty.as_or_throw<PrimType>();
   // Only plain casts may discard this exact f32 detour. An explicit tl.cast
   // carries an annotation boundary even when its sat flag equals the default.
   if (const auto *inner = op->value.as<prim::CastObj>();
@@ -2177,7 +2168,7 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::CastObj *op, std::ostream &os) {
     os << PrintExpr(prim::Cast(target_ty, inner->value));
     return;
   }
-  PrintCast(op->value, CodegenDType(op), "", true, std::nullopt, os);
+  PrintCast(op->value, target_ty, "", true, std::nullopt, os);
 }
 
 void CodeGenTileLangCUDA::PrintCast(const PrimExpr &value,
@@ -2827,7 +2818,7 @@ void CodeGenTileLangCUDA::PrintCast(const PrimExpr &value,
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::MinObj *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
-  PrimType t = CodegenDType(op);
+  PrimType t = op->ty.as_or_throw<PrimType>();
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.MatchesElementType(kDLBfloat, 16) && t.IsScalar()) {
@@ -2857,7 +2848,7 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::MinObj *op, std::ostream &os) {
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::MaxObj *op, std::ostream &os) {
   // TODO(wt): Consider vectorized reduction and impl for other dtypes
-  PrimType t = CodegenDType(op);
+  PrimType t = op->ty.as_or_throw<PrimType>();
 
   // Standard min/max functions don't support bfloat16 or float16
   if (t.MatchesElementType(kDLBfloat, 16) && t.IsScalar()) {
@@ -2925,7 +2916,7 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
       size_t arg_begin = static_cast<size_t>(skip_first_arg);
       for (size_t i = arg_begin; i < args.size(); ++i) {
         std::string val =
-            SSAGetID(PrintExpr(args[i]), CodegenDType(args[i]),
+            SSAGetID(PrintExpr(args[i]), args[i]->ty.as_or_throw<PrimType>(),
                      tvm::SideEffect(args[i]) == CallEffectKind::kPure);
         sargs.push_back(std::move(val));
       }
@@ -2937,7 +2928,8 @@ void CodeGenTileLangCUDA::PrintCallExtern(Type ret_type, String global_symbol,
         for (size_t j = 0; j < sargs.size(); ++j) {
           if (j > 0)
             scall << ", ";
-          PrintVecElemLoad(sargs[j], CodegenDType(args[arg_begin + j]), i,
+          PrintVecElemLoad(sargs[j],
+                           args[arg_begin + j]->ty.as_or_throw<PrimType>(), i,
                            scall);
         }
         scall << ")";
@@ -3044,78 +3036,6 @@ std::string CodeGenTileLangCUDA::GetBufferRef(const PrimType &t,
   return os.str();
 }
 
-std::string CodeGenTileLangCUDA::GetVectorByteAddress_(const VarObj *buffer,
-                                                       PrimExpr base,
-                                                       bool read_only) {
-  std::string vid = GetVarID(buffer);
-  if (auto it = fp4_packed_buffers_.find(ffi::GetRef<Var>(buffer));
-      it != fp4_packed_buffers_.end()) {
-    vid = it->second;
-  }
-  std::string scope = CodegenStorageScope(ffi::GetRef<Var>(buffer));
-  if (auto it = alloc_storage_scope_.find(buffer);
-      it != alloc_storage_scope_.end()) {
-    scope = it->second.name();
-  }
-  if (scope == "local.var") {
-    vid = "&(" + vid + ")";
-  }
-  const int element_bits = VectorStorageBits(CodegenTensorDType(buffer));
-  std::ostringstream os;
-  os << "((";
-  if (read_only) {
-    os << "const ";
-  }
-  if (IsVolatile(buffer)) {
-    os << "volatile ";
-  }
-  os << "unsigned char*)" << vid << " + (static_cast<ptrdiff_t>("
-     << PrintExpr(base) << ")";
-  if (element_bits < 8) {
-    ICHECK_EQ(8 % element_bits, 0);
-    os << " / " << 8 / element_bits;
-  } else {
-    ICHECK_EQ(element_bits % 8, 0);
-    os << " * " << element_bits / 8;
-  }
-  os << "))";
-  return os.str();
-}
-
-bool CodeGenTileLangCUDA::CanUseAlignedVectorAccess_(const PrimType &type,
-                                                     const VarObj *buffer,
-                                                     const PrimExpr &base) {
-  if (IsVolatile(buffer) || CodegenIsVectorBool(type)) {
-    return false;
-  }
-  const int storage_bits = VectorStorageBits(type);
-  ICHECK_EQ(storage_bits % 8, 0);
-  const int bytes = storage_bits / 8;
-  if (bytes == 1) {
-    return true;
-  }
-  // For three-lane carriers the natural CUDA alignment is smaller than their
-  // size. Keep the actual-address check instead of guessing its ABI here.
-  if ((bytes & (bytes - 1)) != 0) {
-    return false;
-  }
-  const auto tensor = CodegenTensor(buffer);
-  const std::string scope = tensor.scope().name();
-  // Local arrays are not currently declared with their TensorType alignment.
-  // Only global argument contracts and shared allocation declarations establish
-  // the alignment represented by that type.
-  if (scope != "global" && scope != "shared" && scope != "shared.dyn") {
-    return false;
-  }
-  if (tensor.ty()->data_alignment <= 0 ||
-      tensor.ty()->data_alignment % bytes != 0) {
-    return false;
-  }
-  const int element_bits = VectorStorageBits(tensor.dtype());
-  const int divisor = (bytes * 8) / std::gcd(bytes * 8, element_bits);
-  return IsProvablyDivisible(base, divisor);
-}
-
 std::string CodeGenTileLangCUDA::GetVecLoad(const PrimType &t,
                                             const VarObj *buffer,
                                             PrimExpr base) {
@@ -3124,26 +3044,14 @@ std::string CodeGenTileLangCUDA::GetVecLoad(const PrimType &t,
       it != alloc_storage_scope_.end()) {
     scope = it->second.name();
   }
-  const int bytes = VectorStorageBits(t) / 8;
-  const bool global_256 = scope == "global" && bytes == 32;
-  if (CanUseAlignedVectorAccess_(t, buffer, base)) {
-    if (!global_256) {
-      return CodeGenC::GetVecLoad(t, buffer, base);
-    }
-    need_copy_sm100_h_ = true;
-    return "tl::load_global_256(&(" + GetBufferRef(t, buffer, base) + "))";
+  const int bits = t.bits() * t.lanes();
+  // As in the original CUDA emitter, vector accesses require aligned storage.
+  if (scope != "global" || bits <= 128) {
+    return CodeGenC::GetVecLoad(t, buffer, base);
   }
-  need_vector_memory_h_ = true;
-  std::ostringstream os;
-  os << (CodegenIsVectorBool(t) ? "tl::load_bool_vector<" : "tl::load_vector<");
-  PrintType(t, os);
-  if (CodegenIsVectorBool(t)) {
-    os << ", " << t.lanes();
-  } else {
-    os << ", " << bytes << ", " << (global_256 ? "true" : "false");
-  }
-  os << ">(" << GetVectorByteAddress_(buffer, base, true) << ")";
-  return os.str();
+  ICHECK_EQ(bits, 256) << "Unsupported vector load size: " << bits;
+  need_copy_sm100_h_ = true;
+  return "tl::load_global_256(&(" + GetBufferRef(t, buffer, base) + "))";
 }
 
 void CodeGenTileLangCUDA::PrintVecStore(const VarObj *buffer, const PrimType &t,
@@ -3154,34 +3062,16 @@ void CodeGenTileLangCUDA::PrintVecStore(const VarObj *buffer, const PrimType &t,
       it != alloc_storage_scope_.end()) {
     scope = it->second.name();
   }
-  const int bytes = VectorStorageBits(t) / 8;
-  const bool global_256 = scope == "global" && bytes == 32;
-  if (CanUseAlignedVectorAccess_(t, buffer, base)) {
-    if (!global_256) {
-      CodeGenC::PrintVecStore(buffer, t, base, value);
-      return;
-    }
-    need_copy_sm100_h_ = true;
-    auto buffer_ref = GetBufferRef(t, buffer, base);
-    PrintIndent();
-    stream << "tl::store_global_256(&(" << buffer_ref << "), " << value
-           << ");\n";
+  const int bits = t.bits() * t.lanes();
+  if (scope != "global" || bits <= 128) {
+    CodeGenC::PrintVecStore(buffer, t, base, value);
     return;
   }
-  need_vector_memory_h_ = true;
-  std::ostringstream call;
-  call << (CodegenIsVectorBool(t) ? "tl::store_bool_vector<"
-                                  : "tl::store_vector<");
-  PrintType(t, call);
-  if (CodegenIsVectorBool(t)) {
-    call << ", " << t.lanes();
-  } else {
-    call << ", " << bytes << ", " << (global_256 ? "true" : "false");
-  }
-  call << ">(" << GetVectorByteAddress_(buffer, base, false) << ", " << value
-       << ");\n";
+  ICHECK_EQ(bits, 256) << "Unsupported vector store size: " << bits;
+  need_copy_sm100_h_ = true;
+  const std::string ref = GetBufferRef(t, buffer, base);
   PrintIndent();
-  stream << call.str();
+  stream << "tl::store_global_256(&(" << ref << "), " << value << ");\n";
 }
 
 /**
@@ -3246,7 +3136,18 @@ std::string CodeGenTileLangCUDA::BarrierReference(const Expr &barrier) {
 }
 
 void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
-  const auto args = CodegenOperands(op);
+  static const Op cuda_bmma_sync_op = Op::Get("tirx.cuda.bmma_sync");
+  static const Op cuda_mma_fill_op = Op::Get("tirx.cuda.mma_fill");
+  static const Op cuda_mma_store_op = Op::Get("tirx.cuda.mma_store");
+  static const Op gpu_fill_fragment_op = Op::Get("tirx.gpu_fill_fragment");
+  static const Op gpu_load_matrix_sync_op =
+      Op::Get("tirx.gpu_load_matrix_sync");
+  static const Op gpu_mma_sync_op = Op::Get("tirx.gpu_mma_sync");
+  static const Op gpu_store_matrix_sync_op =
+      Op::Get("tirx.gpu_store_matrix_sync");
+  static const Op ptx_legacy_ldmatrix_op = Op::Get("tirx.ptx_legacy.ldmatrix");
+  static const Op ptx_legacy_mma_op = Op::Get("tirx.ptx_legacy.mma");
+  const auto args = op->args;
   if (IsUnpackedFP4SharedPointer(op->ty)) {
     if (op->op.same_as(tirx::ptr_byte_offset_op())) {
       TVM_FFI_CHECK_EQ(args.size(), 2U, ValueError);
@@ -3262,49 +3163,26 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       return;
     }
   }
-  if (IsCodegenOp(op, "tl.ptr_access")) {
+  if (op->op.same_as(tl::ptr_access())) {
     TVM_FFI_CHECK_EQ(args.size(), 4, ValueError);
     TVM_FFI_CHECK(args[0]->ty.as<PtrTypeObj>(), TypeError);
     os << "(" << PrintExpr(args[0]) << " + " << PrintExpr(args[1]) << ")";
     return;
   }
 
-  const auto annotations = CodegenCallAnnotations(op);
-  if (IsCodegenOp(op, "tl.cast")) {
+  const auto *attrs = op->attrs.as<DictAttrsObj>();
+  if (op->op.same_as(tl::cast_op())) {
     auto attrs = op->attrs.value().as_or_throw<DictAttrs>();
     auto rounding = attrs.GetAttr<String>("round").value_or("");
     auto saturate = attrs.GetAttr<bool>("sat").value_or(true);
     Optional<PrimExpr> random_bits =
         args.size() == 2 ? Optional<PrimExpr>(args[1].as_or_throw<PrimExpr>())
                          : std::nullopt;
-    PrintCast(args[0].as_or_throw<PrimExpr>(), CodegenDType(op), rounding,
-              saturate, random_bits, os);
+    PrintCast(args[0].as_or_throw<PrimExpr>(), op->ty.as_or_throw<PrimType>(),
+              rounding, saturate, random_bits, os);
     return;
   }
 
-  if (IsCodegenOp(op, "prim.bitwise_not") &&
-      CodegenDType(op).MatchesCode(kDLBool)) {
-    ICHECK_EQ(args.size(), 1U);
-    // C++ promotes bool to int for ~, producing -1/-2 instead of a bool.
-    // Reuse logical negation, including its elementwise vector handling.
-    PrintExpr(prim::Not(args[0].as_or_throw<PrimExpr>()), os);
-    return;
-  }
-  if (IsCodegenOp(op, "prim.bitwise_not") &&
-      CodegenDType(op).IsFixedLengthVector() &&
-      (CodegenDType(op).MatchesCode(kDLInt) ||
-       CodegenDType(op).MatchesCode(kDLUInt))) {
-    ICHECK_EQ(args.size(), 1U);
-    // CUDA vector carriers have no operator~. Reuse lane-wise XOR with
-    // an all-ones mask, including the existing packed integer handling.
-    PrimType scalar_type = CodegenDType(op).WithLanes(1);
-    PrimExpr mask = scalar_type.MatchesCode(kDLUInt)
-                        ? prim::max_value(scalar_type)
-                        : prim::MakeConst(scalar_type, -1);
-    PrintVecBinaryOp("^", CodegenDType(op), args[0].as_or_throw<PrimExpr>(),
-                     prim::Broadcast(mask, CodegenDType(op).lanes()), os);
-    return;
-  }
   auto print_extern_call_stmt = [&](std::string name, size_t start = 0,
                                     size_t end = 0) {
     // Cache context into a private ss, otherwise the let node may generate
@@ -3332,10 +3210,10 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     }
     os << ")";
   };
-  if (IsCodegenOp(op, "tl.max_nan") || IsCodegenOp(op, "tl.min_nan")) {
+  if (op->op.same_as(tl::max_nan()) || op->op.same_as(tl::min_nan())) {
     ICHECK_EQ(args.size(), 2);
-    const bool is_max = IsCodegenOp(op, "tl.max_nan");
-    const PrimType t = CodegenDType(op);
+    const bool is_max = op->op.same_as(tl::max_nan());
+    const PrimType t = op->ty.as_or_throw<PrimType>();
     const char *f16_intrin = is_max ? "__hmax_nan" : "__hmin_nan";
     const char *fallback = is_max ? "tl::fast_max" : "tl::fast_min";
 
@@ -3354,7 +3232,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
        << ")";
     return;
   }
-  if (IsCodegenOp(op, "tl.ptx_cp_async_bytes")) {
+  if (op->op.same_as(tl::ptx_cp_async_bytes())) {
     need_copy_h_ = true;
     // args[0] = dst_access_ptr, args[1] = src_access_ptr, args[2] = bytes,
     // args[3] = predicate (optional)
@@ -3377,7 +3255,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
     }
-  } else if (IsCodegenOp(op, "tl.ptx_cp_async")) {
+  } else if (op->op.same_as(tl::ptx_cp_async())) {
     need_copy_h_ = true;
     // TileLang version: args[0] = dst_access_ptr, args[1] = src_access_ptr,
     // args[2] = num_elems, args[3] = predicate (optional)
@@ -3398,15 +3276,15 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->stream << "tl::cp_async_gs_conditional<" << size << ">(" << dst
                    << ", " << src << ", " << condition << ");\n";
     }
-  } else if (IsCodegenOp(op, "tl.ptx_commit_group")) {
+  } else if (op->op.same_as(tl::ptx_commit_group())) {
     need_copy_h_ = true;
     print_extern_call_stmt("tl::cp_async_commit");
-  } else if (IsCodegenOp(op, "tl.ptx_wait_group")) {
+  } else if (op->op.same_as(tl::ptx_wait_group())) {
     need_copy_h_ = true;
     int n = CodegenInt(args[0]);
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
-  } else if (IsCodegenOp(op, "tl.create_barriers")) {
+  } else if (op->op.same_as(tl::create_barriers())) {
     need_barrier_h_ = true;
     this->PrintIndent();
     TVM_FFI_CHECK_EQ(barrier_count_, -1, ValueError)
@@ -3422,13 +3300,13 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "auto " << legacy_barrier_name_ << " = reinterpret_cast<"
                  << mbarrier_dtype_ << "*>(" << mbarrier_storage_name << ");\n";
-  } else if (IsCodegenOp(op, "tl.ptx_arrive_barrier")) {
+  } else if (op->op.same_as(tl::ptx_arrive_barrier())) {
     need_barrier_h_ = true;
     ICHECK_EQ(args.size(), 1);
     this->PrintIndent();
     auto mbarrier_obj = BarrierReference(args[0]);
     this->stream << mbarrier_obj << ".arrive();\n";
-  } else if (IsCodegenOp(op, "tl.ptx_arrive_cluster_barrier")) {
+  } else if (op->op.same_as(tl::ptx_arrive_cluster_barrier())) {
     need_barrier_h_ = true;
     ICHECK_EQ(args.size(), 2);
     this->PrintIndent();
@@ -3438,14 +3316,14 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       cta_id += "u"; // Ensure cta_id as u32
     }
     this->stream << mbarrier_obj << ".arrive(" << cta_id << ");\n";
-  } else if (IsCodegenOp(op, "tl.ptx_init_barrier_thread_count")) {
+  } else if (op->op.same_as(tl::ptx_init_barrier_thread_count())) {
     need_barrier_h_ = true;
     ICHECK_EQ(args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = BarrierReference(args[0]);
     auto arrive_count = this->PrintExpr(args[1]);
     this->stream << mbarrier_obj << ".init(" << arrive_count << ");\n";
-  } else if (IsCodegenOp(op, "tl.ptx_arrive_barrier_expect_tx")) {
+  } else if (op->op.same_as(tl::ptx_arrive_barrier_expect_tx())) {
     need_barrier_h_ = true;
     if (args.size() == 2) {
       this->PrintIndent();
@@ -3467,20 +3345,20 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
           << "Invalid parameter  for tl::arrive_barrier_expect_tx "
           << args.size();
     }
-  } else if (IsCodegenOp(op, "tl.ptx_cp_async_barrier")) {
+  } else if (op->op.same_as(tl::ptx_cp_async_barrier())) {
     need_barrier_h_ = true;
     PrintIndent();
     stream << "tl::mbarrier_cp_async_arrive(" << BarrierReference(args[0])
            << ");\n";
-  } else if (IsCodegenOp(op, "tl.ptx_fence_barrier_init")) {
+  } else if (op->op.same_as(tl::ptx_fence_barrier_init())) {
     need_barrier_h_ = true;
     print_extern_call_stmt("tl::fence_barrier_init");
-  } else if (IsCodegenOp(op, "tl.ptx_cp_async_barrier_noinc")) {
+  } else if (op->op.same_as(tl::ptx_cp_async_barrier_noinc())) {
     need_barrier_h_ = true;
     PrintIndent();
     stream << "tl::mbarrier_cp_async_arrive_noinc(" << BarrierReference(args[0])
            << ");\n";
-  } else if (IsCodegenOp(op, "tl.mbarrier_expect_tx")) {
+  } else if (op->op.same_as(tl::mbarrier_expect_tx())) {
     need_barrier_h_ = true;
     ICHECK_EQ(args.size(), 2);
     this->PrintIndent();
@@ -3488,44 +3366,41 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     auto transaction_bytes = this->PrintExpr(args[1]);
     this->stream << mbarrier_obj << ".expect_transaction(" << transaction_bytes
                  << ");\n";
-  } else if (IsCodegenOp(op, "tl.mbarrier_wait_parity")) {
+  } else if (op->op.same_as(tl::mbarrier_wait_parity())) {
     need_barrier_h_ = true;
     ICHECK_EQ(args.size(), 2);
     this->PrintIndent();
     auto mbarrier_obj = BarrierReference(args[0]);
     auto phase = this->PrintExpr(args[1]);
     this->stream << mbarrier_obj << ".wait(" << phase << ");\n";
-  } else if (IsCodegenOp(op, "tl.ptx_init_tensor_memory")) {
+  } else if (op->op.same_as(tl::ptx_init_tensor_memory())) {
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tmem_allocate";
-    if (annotations.find("use_2cta") != annotations.end() &&
-        CodegenBool(annotations["use_2cta"])) {
+    if (attrs && CodegenBool(attrs->dict.Get("use_2cta").value_or(false))) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
-  } else if (IsCodegenOp(op, "tl.ptx_deallocate_tensor_memory")) {
+  } else if (op->op.same_as(tl::ptx_deallocate_tensor_memory())) {
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tmem_deallocate";
-    if (annotations.find("use_2cta") != annotations.end() &&
-        CodegenBool(annotations["use_2cta"])) {
+    if (attrs && CodegenBool(attrs->dict.Get("use_2cta").value_or(false))) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
-  } else if (IsCodegenOp(op, "tl.no_set_max_nreg")) {
+  } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
-  } else if (IsCodegenOp(op, "tl.prefetch_tma_descriptor")) {
+  } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
     need_copy_sm90_h_ = true;
     print_extern_call_stmt("tl::prefetch_tma_descriptor");
-  } else if (IsCodegenOp(op, "tl.tma_load")) {
+  } else if (op->op.same_as(tl::tma_load())) {
     std::ostringstream ss;
     ICHECK_GE(args.size(), 2);
     auto eviction_policy =
         this->eviction_policy_names_[CodegenInt(args[args.size() - 1])];
     // Simplify the code by using the default eviction policy
-    if (annotations.find("use_2cta") != annotations.end() &&
-        CodegenBool(annotations["use_2cta"])) {
+    if (attrs && CodegenBool(attrs->dict.Get("use_2cta").value_or(false))) {
       need_copy_sm100_h_ = true;
       if (eviction_policy != "EVICT_NORMAL") {
         ss << "tl::tma_load_2sm<tl::CacheHintSm100::" << eviction_policy
@@ -3552,7 +3427,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     ss << ");\n";
     this->PrintIndent();
     this->stream << ss.str();
-  } else if (IsCodegenOp(op, "tl.tma_load_multicast")) {
+  } else if (op->op.same_as(tl::tma_load_multicast())) {
     need_copy_sm90_h_ = true;
     std::ostringstream ss;
     ICHECK_GE(args.size(), 5) << "tma_load_multicast requires at least 5 args";
@@ -3574,7 +3449,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     ss << ");\n";
     this->PrintIndent();
     this->stream << ss.str();
-  } else if (IsCodegenOp(op, "tl.tma_load_im2col")) {
+  } else if (op->op.same_as(tl::tma_load_im2col())) {
     need_copy_sm90_h_ = true;
     std::stringstream ss;
     auto eviction_policy =
@@ -3585,7 +3460,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       ss << "tl::tma_load_im2col";
     }
     print_extern_call_stmt(ss.str(), 0, 1);
-  } else if (IsCodegenOp(op, "tl.tma_store")) {
+  } else if (op->op.same_as(tl::tma_store())) {
     need_copy_sm90_h_ = true;
     std::stringstream ss;
     auto need_reduce = CodegenInt(args[args.size() - 2]);
@@ -3601,7 +3476,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       ss << "tl::tma_store";
     }
     print_extern_call_stmt(ss.str(), 0, 2);
-  } else if (IsCodegenOp(op, "tl.tma_load_gather4")) {
+  } else if (op->op.same_as(tl::tma_load_gather4())) {
     need_copy_sm100_h_ = true;
     std::ostringstream ss;
     ICHECK_EQ(args.size(), 9u)
@@ -3617,7 +3492,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       ss << "tl::tma_load_gather4";
     }
     print_extern_call_stmt(ss.str(), 0, 1);
-  } else if (IsCodegenOp(op, "tl.tma_store_scatter4")) {
+  } else if (op->op.same_as(tl::tma_store_scatter4())) {
     need_copy_sm100_h_ = true;
     std::ostringstream ss;
     ICHECK_EQ(args.size(), 8u)
@@ -3633,7 +3508,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       ss << "tl::tma_store_scatter4";
     }
     print_extern_call_stmt(ss.str(), 0, 1);
-  } else if (IsCodegenOp(op, "tl.ptx_ldmatrix")) {
+  } else if (op->op.same_as(tl::ptx_ldmatrix())) {
     ICHECK_EQ(args.size(), 4U);
     int trans = CodegenInt(args[0]);
     int num = CodegenInt(args[1]);
@@ -3641,7 +3516,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2);
-  } else if (IsCodegenOp(op, "tl.ptx_stmatrix")) {
+  } else if (op->op.same_as(tl::ptx_stmatrix())) {
     int trans = CodegenInt(args[0]);
     int num = CodegenInt(args[1]);
     std::string shape = "m8n8";
@@ -3654,32 +3529,32 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     if (trans == 1)
       func_name += "_trans";
     print_extern_call_stmt(func_name, 2, is_shape_encoded ? 1 : 0);
-  } else if (IsCodegenOp(op, "tl.fence_proxy_async")) {
+  } else if (op->op.same_as(tl::fence_proxy_async())) {
     need_barrier_h_ = true;
     print_extern_call_stmt("tl::fence_proxy_async");
-  } else if (IsCodegenOp(op, "tl.tma_store_arrive")) {
+  } else if (op->op.same_as(tl::tma_store_arrive())) {
     need_barrier_h_ = true;
     print_extern_call_stmt("tl::tma_store_arrive");
-  } else if (IsCodegenOp(op, "tl.tma_store_wait")) {
+  } else if (op->op.same_as(tl::tma_store_wait())) {
     need_barrier_h_ = true;
     int count = CodegenInt(args[0]);
     bool read = args.size() == 1 || CodegenInt(args[1]) != 0;
     this->PrintIndent();
     this->stream << "tl::tma_store_wait<" << count << ", "
                  << (read ? "true" : "false") << ">();\n";
-  } else if (IsCodegenOp(op, "tl.warpgroup_arrive")) {
+  } else if (op->op.same_as(tl::warpgroup_arrive())) {
     need_intrin_h_ = true;
     print_extern_call_stmt("tl::warpgroup_arrive");
-  } else if (IsCodegenOp(op, "tl.warpgroup_commit_batch")) {
+  } else if (op->op.same_as(tl::warpgroup_commit_batch())) {
     need_intrin_h_ = true;
     print_extern_call_stmt("tl::warpgroup_commit_batch");
-  } else if (IsCodegenOp(op, "tl.warpgroup_wait")) {
+  } else if (op->op.same_as(tl::warpgroup_wait())) {
     need_intrin_h_ = true;
     this->PrintIndent();
     int num_mma = CodegenInt(args[0]);
     this->stream << "tl::warpgroup_wait<" << std::to_string(num_mma)
                  << ">();\n";
-  } else if (IsCodegenOp(op, "tl.warpgroup_fence_operand")) {
+  } else if (op->op.same_as(tl::warpgroup_fence_operand())) {
     need_intrin_h_ = true;
     ICHECK_EQ(args.size(), 4U);
     std::string dtype = (args[0]).as_or_throw<StringImm>()->value;
@@ -3696,7 +3571,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     this->stream << "tl::warpgroup_fence_operand(reinterpret_cast<" << cast_type
                  << "*>(" << data_ptr << " + " << offset << "), " << num_regs
                  << ");\n";
-  } else if (IsCodegenOp(op, "tl.set_max_nreg")) {
+  } else if (op->op.same_as(tl::set_max_nreg())) {
     need_intrin_h_ = true;
     this->PrintIndent();
     int nreg = CodegenInt(args[0]);
@@ -3704,83 +3579,83 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     std::string func_name =
         is_inc ? "tl::warpgroup_reg_alloc" : "tl::warpgroup_reg_dealloc";
     this->stream << func_name << "<" << std::to_string(nreg) << ">();\n";
-  } else if (IsCodegenOp(op, "tl.annotate_producer_reg_dealloc") ||
-             IsCodegenOp(op, "tl.annotate_consumer_reg_alloc")) {
+  } else if (op->op.same_as(tl::annotate_producer_reg_dealloc()) ||
+             op->op.same_as(tl::annotate_consumer_reg_alloc())) {
     return;
-  } else if (IsCodegenOp(op, "tl.wait_wgmma")) {
+  } else if (op->op.same_as(tl::wait_wgmma())) {
     need_intrin_h_ = true;
     this->PrintIndent();
     int num_mma = CodegenInt(args[0]);
     this->stream << "tl::wait_wgmma<" << std::to_string(num_mma) << ">();\n";
-  } else if (IsCodegenOp(op, "tl.pack_b16")) {
+  } else if (op->op.same_as(tl::pack_b16())) {
     os << "__pack_half2(" << this->PrintExpr(args[0]) << ", "
        << this->PrintExpr(args[1]) << ")";
-  } else if (IsCodegenOp(op, "tl.pack_b8x4")) {
+  } else if (op->op.same_as(tl::pack_b8x4())) {
     print_extern_call_expr(os, "pack_b8x4");
-  } else if (IsCodegenOp(op, "tl.sync_grid")) {
+  } else if (op->op.same_as(tl::sync_grid())) {
     this->need_cooperative_groups_ = true;
     this->PrintIndent();
     this->stream << "cooperative_groups::this_grid().sync();\n";
-  } else if (IsCodegenOp(op, "tl.sync_warp")) {
+  } else if (op->op.same_as(tl::sync_warp())) {
     this->PrintIndent();
     this->stream << "__syncwarp(";
     if (!args.empty()) {
       this->stream << this->PrintExpr(args[0]);
     }
     this->stream << ");\n";
-  } else if (IsCodegenOp(op, "tl.named_barrier_arrive")) {
+  } else if (op->op.same_as(tl::named_barrier_arrive())) {
     ICHECK_EQ(args.size(), 2U)
         << "tl.named_barrier_arrive expects <barrier_id, thread_count>.";
     this->PrintIndent();
     this->stream << "tl::__named_barrier_arrive(" << this->PrintExpr(args[0])
                  << ", " << this->PrintExpr(args[1]) << ");\n";
-  } else if (IsCodegenOp(op, "tl.pdl_trigger")) {
+  } else if (op->op.same_as(tl::pdl_trigger())) {
     this->PrintIndent();
     this->stream << "cudaTriggerProgrammaticLaunchCompletion();\n";
-  } else if (IsCodegenOp(op, "tl.pdl_sync")) {
+  } else if (op->op.same_as(tl::pdl_sync())) {
     this->PrintIndent();
     this->stream << "cudaGridDependencySynchronize();\n";
-  } else if (IsCodegenOp(op, "tl.cluster_arrive_relaxed")) {
+  } else if (op->op.same_as(tl::cluster_arrive_relaxed())) {
     need_cluster_h_ = true;
     this->PrintIndent();
     this->stream << "tl::cluster_arrive_relaxed();\n";
-  } else if (IsCodegenOp(op, "tl.cluster_arrive")) {
+  } else if (op->op.same_as(tl::cluster_arrive())) {
     need_cluster_h_ = true;
     this->PrintIndent();
     this->stream << "tl::cluster_arrive();\n";
-  } else if (IsCodegenOp(op, "tl.cluster_wait")) {
+  } else if (op->op.same_as(tl::cluster_wait())) {
     need_cluster_h_ = true;
     this->PrintIndent();
     this->stream << "tl::cluster_wait();\n";
-  } else if (IsCodegenOp(op, "tl.cluster_sync")) {
+  } else if (op->op.same_as(tl::cluster_sync())) {
     need_cluster_h_ = true;
     this->PrintIndent();
     this->stream << "tl::cluster_sync();\n";
-  } else if (IsCodegenOp(op, "tl.block_rank_in_cluster")) {
+  } else if (op->op.same_as(tl::block_rank_in_cluster())) {
     need_cluster_h_ = true;
     os << "tl::block_rank_in_cluster()";
-  } else if (IsCodegenOp(op, "tl.clc_try_cancel")) {
+  } else if (op->op.same_as(tl::clc_try_cancel())) {
     need_cluster_h_ = true;
     print_extern_call_stmt("tl::clc_try_cancel");
-  } else if (IsCodegenOp(op, "tl.clc_try_cancel_multicast")) {
+  } else if (op->op.same_as(tl::clc_try_cancel_multicast())) {
     need_cluster_h_ = true;
     print_extern_call_stmt("tl::clc_try_cancel_multicast");
-  } else if (IsCodegenOp(op, "tl.clc_is_canceled")) {
+  } else if (op->op.same_as(tl::clc_is_canceled())) {
     need_cluster_h_ = true;
     os << "tl::clc_is_canceled(" << this->PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.clc_get_first_ctaid_x")) {
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_x())) {
     need_cluster_h_ = true;
     os << "tl::clc_get_first_ctaid_x(" << this->PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.clc_get_first_ctaid_y")) {
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_y())) {
     need_cluster_h_ = true;
     os << "tl::clc_get_first_ctaid_y(" << this->PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.clc_get_first_ctaid_z")) {
+  } else if (op->op.same_as(tl::clc_get_first_ctaid_z())) {
     need_cluster_h_ = true;
     os << "tl::clc_get_first_ctaid_z(" << this->PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.loop_break")) {
+  } else if (op->op.same_as(tl::loop_break())) {
     this->PrintIndent();
     this->stream << "break;\n";
-  } else if (IsCodegenOp(op, "tirx.gpu_fill_fragment")) {
+  } else if (op->op.same_as(gpu_fill_fragment_op)) {
     need_mma_h_ = true;
     ICHECK_EQ(args.size(), 6U);
     os << "nvcuda::wmma::fill_fragment(";
@@ -3790,8 +3665,8 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << "], ";
     this->PrintExpr(args[5], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.wmma_load_matrix_sync") ||
-             IsCodegenOp(op, "tirx.gpu_load_matrix_sync")) {
+  } else if (op->op.same_as(tl::wmma_load_matrix_sync()) ||
+             op->op.same_as(gpu_load_matrix_sync_op)) {
     need_mma_h_ = true;
     ICHECK_EQ(args.size(), 8U);
     os << "nvcuda::wmma::load_matrix_sync(";
@@ -3803,7 +3678,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << ", ";
     this->PrintExpr(args[6], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tirx.gpu_store_matrix_sync")) {
+  } else if (op->op.same_as(gpu_store_matrix_sync_op)) {
     need_mma_h_ = true;
     ICHECK_EQ(args.size(), 8U);
     os << "nvcuda::wmma::store_matrix_sync(";
@@ -3820,7 +3695,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       TVM_FFI_THROW(InternalError) << "Invalid parameters";
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tirx.gpu_mma_sync")) {
+  } else if (op->op.same_as(gpu_mma_sync_op)) {
     need_mma_h_ = true;
     ICHECK_EQ(args.size(), 8U);
     os << "nvcuda::wmma::mma_sync(";
@@ -3830,7 +3705,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[i * 2 + 1], os);
       os << "]" << ((i < 3) ? ", " : ")");
     }
-  } else if (IsCodegenOp(op, "tirx.cuda.bmma_sync")) {
+  } else if (op->op.same_as(cuda_bmma_sync_op)) {
     need_mma_h_ = true;
     ICHECK_EQ(args.size(), 8U);
     os << "nvcuda::wmma::bmma_sync(";
@@ -3840,7 +3715,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[i * 2 + 1], os);
       os << "]" << ((i < 3) ? ", " : ")");
     }
-  } else if (IsCodegenOp(op, "tirx.ptx_legacy.mma")) {
+  } else if (op->op.same_as(ptx_legacy_mma_op)) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
     // arg 2: B layout: row/col
@@ -3922,7 +3797,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
-  } else if (IsCodegenOp(op, "tl.tma_store_cluster")) {
+  } else if (op->op.same_as(tl::tma_store_cluster())) {
     need_copy_sm90_h_ = true;
     ICHECK_EQ(args.size(), 5U) << "tma_store_cluster requires 5 args";
     PrimExpr size_arg = args[3].as_or_throw<PrimExpr>();
@@ -3943,7 +3818,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     this->stream << "(uint32_t)(" << this->PrintExpr(args[3]) << "), ";
     this->stream << this->PrintExpr(args[4]) << ");\n";
 
-  } else if (IsCodegenOp(op, "tl.ptx_cluster_store")) {
+  } else if (op->op.same_as(tl::ptx_cluster_store())) {
     ICHECK_EQ(args.size(), 4U);
     std::string buffer_var = this->PrintExpr(args[0]);
     std::string value = this->PrintExpr(args[1]);
@@ -3967,7 +3842,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "}\n";
 
-  } else if (IsCodegenOp(op, "tl.ptx_mma_sm70")) {
+  } else if (op->op.same_as(tl::ptx_mma_sm70())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
     // arg 2: B layout: row/col
@@ -4032,7 +3907,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(C_ptr)", c_ref);
     replacer.register_rule("(C_offset)", c_bias);
     this->stream << replacer.rewrite(mma_call);
-  } else if (IsCodegenOp(op, "tl.ptx_mma_block_scale")) {
+  } else if (op->op.same_as(tl::ptx_mma_block_scale())) {
     need_mma_block_scale_instruction_h_ = true;
     // arg 0: accum_dtype
     // arg 1: shape: mXnXkX
@@ -4095,7 +3970,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
                                          std::string &offset) {
       const VarObj *var = var_expr.as<VarObj>();
       if (const auto *data = var_expr.as<CallObj>();
-          data && IsCodegenOp(data, "tirx.tensor_data_ptr")) {
+          data && data->op.same_as(tirx::tensor_data_ptr_op())) {
         // Native Tensor.data projects a pointer instead of returning the
         // tensor Var itself. Keep the allocation's identity when selecting
         // its packed backing and converting FP4 element offsets to bytes.
@@ -4148,7 +4023,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(scale_b_byte_id)", scale_b_byte_id);
     replacer.register_rule("(scale_b_thread_id)", scale_b_thread_id);
     this->stream << replacer.rewrite(mma_call);
-  } else if (IsCodegenOp(op, "tl.ptx_mma_sp")) {
+  } else if (op->op.same_as(tl::ptx_mma_sp())) {
     // arg 0: shape: mXnXkX
     // arg 1: A layout: row/col
     // arg 2: B layout: row/col
@@ -4242,7 +4117,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(E_ptr)", e_ref);
     replacer.register_rule("(E_offset)", e_offset);
     this->stream << replacer.rewrite(mma_call);
-  } else if (IsCodegenOp(op, "tl.ptx_wgmma_ss")) {
+  } else if (op->op.same_as(tl::ptx_wgmma_ss())) {
     // arg 0: dtype
     // arg 1: shape
     // arg 2: A_layout
@@ -4304,7 +4179,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(scale_out)", scale_out);
     wgmma_asm_code = replacer.rewrite(wgmma_asm_code);
     this->stream << wgmma_asm_code;
-  } else if (IsCodegenOp(op, "tl.ptx_wgmma_rs")) {
+  } else if (op->op.same_as(tl::ptx_wgmma_rs())) {
     // arg 0: shape
     // arg 1: B_layout
     // arg 2: A_dtype
@@ -4374,7 +4249,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(scale_out)", scale_out);
     wgmma_call = replacer.rewrite(wgmma_call);
     this->stream << wgmma_call;
-  } else if (IsCodegenOp(op, "tl.ptx_wgmma_sp_ss")) {
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_ss())) {
     ICHECK_EQ(args.size(), 18U) << "ptx_wgmma_sp_ss args is " << args;
     std::string wgmma_prefix = (args[0]).as_or_throw<StringImm>()->value;
     bool a_is_k_major = CodegenBool(args[1]);
@@ -4444,7 +4319,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(scale_out)", scale_out);
     wgmma_sp_asm_code = replacer.rewrite(wgmma_sp_asm_code);
     this->stream << wgmma_sp_asm_code;
-  } else if (IsCodegenOp(op, "tl.ptx_wgmma_sp_rs")) {
+  } else if (op->op.same_as(tl::ptx_wgmma_sp_rs())) {
     ICHECK_EQ(args.size(), 17U) << "ptx_wgmma_sp_rs args is " << args;
     std::string wgmma_prefix = (args[0]).as_or_throw<StringImm>()->value;
     bool b_is_k_major = CodegenBool(args[1]);
@@ -4511,7 +4386,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(scale_out)", scale_out);
     wgmma_sp_rs_asm_code = replacer.rewrite(wgmma_sp_rs_asm_code);
     this->stream << wgmma_sp_rs_asm_code;
-  } else if (IsCodegenOp(op, "tl.ptx_tcgen05_mma_ss")) {
+  } else if (op->op.same_as(tl::ptx_tcgen05_mma_ss())) {
     ICHECK_EQ(args.size(), 15U) << "ptx_tcgen05_mma_ss args is " << args;
     std::string kind_dtype = (args[0]).as_or_throw<StringImm>()->value;
     std::string a_desc = this->PrintExpr(args[1]);
@@ -4567,7 +4442,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(mask3)", mask3);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
-  } else if (IsCodegenOp(op, "tl.ptx_tcgen05_mma_ts")) {
+  } else if (op->op.same_as(tl::ptx_tcgen05_mma_ts())) {
     // TS: A from TMEM, B from SMEM (desc)
     ICHECK_EQ(args.size(), 14U) << "ptx_tcgen05_mma_ts args is " << args;
     std::string kind_dtype = (args[0]).as_or_throw<StringImm>()->value;
@@ -4617,7 +4492,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(mask3)", mask3);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
-  } else if (IsCodegenOp(op, "tl.ptx_tcgen05_mma_blockscaled_ss")) {
+  } else if (op->op.same_as(tl::ptx_tcgen05_mma_blockscaled_ss())) {
     ICHECK_EQ(args.size(), 16U)
         << "ptx_tcgen05_mma_blockscaled_ss expects 16 arguments";
     std::string kind_dtype = (args[0]).as_or_throw<StringImm>()->value;
@@ -4667,7 +4542,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     replacer.register_rule("(SFB_offset)", sfb_offset);
     tcgen05_call = replacer.rewrite(tcgen05_call);
     this->stream << tcgen05_call;
-  } else if (IsCodegenOp(op, "tl.ptx_tcgen05_cp_warpx4")) {
+  } else if (op->op.same_as(tl::ptx_tcgen05_cp_warpx4())) {
     ICHECK_EQ(args.size(), 3U) << "ptx_tcgen05_cp_warpx4 expects 3 arguments";
     need_tcgen05_common_h_ = true;
     // arg[0] = smem pointer, arg[1] = tmem data pointer, arg[2] = tmem column
@@ -4675,16 +4550,14 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     std::string smem_ptr = this->PrintExpr(args[0]);
     std::string tmem_ptr = this->PrintExpr(args[1]);
     std::string tmem_col_offset = this->PrintExpr(args[2]);
-    bool use_2cta = false;
-    if (annotations.find("use_2cta") != annotations.end()) {
-      use_2cta = CodegenBool(annotations["use_2cta"]);
-    }
+    bool use_2cta =
+        attrs && CodegenBool(attrs->dict.Get("use_2cta").value_or(false));
     this->PrintIndent();
     this->stream << "tl::tcgen05_cp<" << (use_2cta ? "true" : "false") << ">("
                  << "tl::make_sf_smem_desc(reinterpret_cast<void*>(" << smem_ptr
                  << ")), " << "(*reinterpret_cast<uint32_t*>(" << tmem_ptr
                  << ")) + " << tmem_col_offset << ");\n";
-  } else if (IsCodegenOp(op, "tl.ptx_tcgen05_sf_warp_transpose")) {
+  } else if (op->op.same_as(tl::ptx_tcgen05_sf_warp_transpose())) {
     ICHECK_EQ(args.size(), 1U)
         << "ptx_tcgen05_sf_warp_transpose expects 1 argument";
     need_tcgen05_common_h_ = true;
@@ -4692,7 +4565,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     this->PrintIndent();
     this->stream << "tl::tcgen05_sf_warp_transpose(reinterpret_cast<uint32_t*>("
                  << smem_ptr << "));\n";
-  } else if (IsCodegenOp(op, "tl.tcgen05_ld")) {
+  } else if (op->op.same_as(tl::tcgen05_ld())) {
     ICHECK(args.size() == 6U || args.size() == 7U)
         << "tcgen05_ld expects 6 or 7 arguments";
     need_copy_sm100_h_ = true;
@@ -4711,7 +4584,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
                  << "bNx<" << chunks << ", " << (pack16 ? "true" : "false")
                  << ">(" << tmem_start_col << ", " << col_offset << ", "
                  << dst_ptr << ");\n";
-  } else if (IsCodegenOp(op, "tl.tcgen05_st")) {
+  } else if (op->op.same_as(tl::tcgen05_st())) {
     ICHECK(args.size() == 6U || args.size() == 7U)
         << "tcgen05_st expects 6 or 7 arguments";
     need_copy_sm100_h_ = true;
@@ -4730,27 +4603,26 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
                  << "bNx<" << chunks << ", " << (unpack16 ? "true" : "false")
                  << ">(" << tmem_start_col << ", " << col_offset << ", "
                  << src_ptr << ");\n";
-  } else if (IsCodegenOp(op, "tl.tcgen05_mma_arrive")) {
+  } else if (op->op.same_as(tl::tcgen05_mma_arrive())) {
     ICHECK_EQ(args.size(), 1U) << "tcgen05_mma_arrive expects 1 argument";
     need_tcgen05_common_h_ = true;
     std::ostringstream ss;
     ss << "tl::tcgen05_mma_arrive";
-    if (annotations.find("use_2cta") != annotations.end() &&
-        CodegenBool(annotations["use_2cta"])) {
+    if (attrs && CodegenBool(attrs->dict.Get("use_2cta").value_or(false))) {
       ss << "<true>";
     }
     print_extern_call_stmt(ss.str());
-  } else if (IsCodegenOp(op, "tl.tcgen05_before_thread_sync")) {
+  } else if (op->op.same_as(tl::tcgen05_before_thread_sync())) {
     ICHECK_EQ(args.size(), 0U)
         << "tcgen05_before_thread_sync expects no arguments";
     need_tcgen05_common_h_ = true;
     print_extern_call_stmt("tl::tcgen05_before_thread_sync");
-  } else if (IsCodegenOp(op, "tl.tcgen05_after_thread_sync")) {
+  } else if (op->op.same_as(tl::tcgen05_after_thread_sync())) {
     ICHECK_EQ(args.size(), 0U)
         << "tcgen05_after_thread_sync expects no arguments";
     need_tcgen05_common_h_ = true;
     print_extern_call_stmt("tl::tcgen05_after_thread_sync");
-  } else if (IsCodegenOp(op, "tirx.ptx_legacy.ldmatrix")) {
+  } else if (op->op.same_as(ptx_legacy_ldmatrix_op)) {
     // arg 0: whether the matrix is loaded in column major format or not.
     // arg 1: number of matrices to load.
     // arg 2: The data type in the matrix, .b16 is the only accepted data type.
@@ -4764,9 +4636,9 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     int num = CodegenInt(args[1]);
     std::string type = (args[2]).as_or_throw<StringImm>()->value;
     std::string local_ptr = this->PrintExpr(args[3]);
-    bool is_packed_int4 =
-        CodegenDType(op).bits() == 4 && (CodegenDType(op).MatchesCode(kDLInt) ||
-                                         CodegenDType(op).MatchesCode(kDLUInt));
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    bool is_packed_int4 = dtype.bits() == 4 && (dtype.MatchesCode(kDLInt) ||
+                                                dtype.MatchesCode(kDLUInt));
     PrimExpr local_elem_offset_expr = args[4].as_or_throw<PrimExpr>();
     if (is_packed_int4) {
       local_elem_offset_expr =
@@ -4775,7 +4647,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     std::string local_elem_offset = this->PrintExpr(local_elem_offset_expr);
     std::string smem_ptr = this->PrintExpr(args[5]);
 
-    if (trans && CodegenDType(op).bits() == 8) {
+    if (trans && dtype.bits() == 8) {
       // Since ldmatrix assumes that a matrix element is 16 bit, it cannot
       // properly transpose an int8 matrix.
       std::string smem_stride = this->PrintExpr(args[6]);
@@ -4801,7 +4673,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->stream << func_name << "(" << smem_ptr << " + " << smem_elem_offset
                    << ", " << local_ptr << " + " << local_elem_offset << ");\n";
     }
-  } else if (IsCodegenOp(op, "tirx.cuda.mma_store")) {
+  } else if (op->op.same_as(cuda_mma_store_op)) {
     int m = CodegenInt(args[0]);
     int n = CodegenInt(args[1]);
     std::string dst = this->PrintExpr(args[2]);
@@ -4852,7 +4724,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     auto coordinates = inverse->GetForwardVars();
     var_idmap_[coordinates[0].as_or_throw<PrimVar>().get()] = "threadIdx.x";
     var_idmap_[coordinates[1].as_or_throw<PrimVar>().get()] = "local_id";
-    if (CodegenDType(op).bits() == 16) {
+    if (op->ty.as_or_throw<PrimType>().bits() == 16) {
       os << "for (int local_id = 0; local_id < 8; local_id+=2) {\n";
       os << "*((uint *)&" << dst << "[" + this->PrintExpr(dst_ind) + "])"
          << " = " << "*((uint *)&" << src << "[" << src_offset
@@ -4865,7 +4737,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       os << "}\n";
     }
 
-  } else if (IsCodegenOp(op, "tirx.cuda.mma_fill")) {
+  } else if (op->op.same_as(cuda_mma_fill_op)) {
     std::string num_elem = this->PrintExpr(args[0]);
     std::string dst = this->PrintExpr(args[1]);
     std::string dst_offset = this->PrintExpr(args[2]);
@@ -4873,7 +4745,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << "for (int i = 0; i < " << num_elem << "; ++i) {\n";
     os << dst << "[" << dst_offset << " + i] = 0.0;";
     os << "}\n";
-  } else if (IsCodegenOp(op, "tl.ptx_cp_async_bulk")) {
+  } else if (op->op.same_as(tl::ptx_cp_async_bulk())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string dst = this->PrintExpr(args[0]);
     std::string dst_offset = this->PrintExpr(args[1]);
@@ -4885,18 +4757,18 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     std::string barrier = BarrierReference(args[5]);
     this->stream << PrintCpAsyncBulkAsm(dst, dst_offset, src, src_offset, size,
                                         barrier);
-  } else if (IsCodegenOp(op, "tl.ptx_st_bulk_shared")) {
+  } else if (op->op.same_as(tl::ptx_st_bulk_shared())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string smem = this->PrintExpr(args[0]);
     int64_t bytes = CodegenInt(args[1]);
     int64_t init_val = CodegenInt(args[2]);
     this->stream << "tl::st_bulk_shared<" << bytes << ", " << init_val
                  << ">((void*)(" << smem << "));\n";
-  } else if (IsCodegenOp(op, "tl.ptx_wait_barrier")) {
+  } else if (op->op.same_as(tl::ptx_wait_barrier())) {
     need_cast_smem_ptr_to_int_ = true;
     std::string barrier = BarrierReference(args[0]);
     this->stream << PrintWaitBarrierAsm(barrier);
-  } else if (IsCodegenOp(op, "tl.ptx_ldg32")) {
+  } else if (op->op.same_as(tl::ptx_ldg32())) {
     /*
     asm volatile (
         "{.reg .pred p;\n"
@@ -4926,7 +4798,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     stream << ": \"l\"((void*)(" << global_buffer << "+" << global_addr
            << ")), \"r\"((int)" << guard << ")\n";
     stream << ");\n";
-  } else if (IsCodegenOp(op, "tl.__ldg")) {
+  } else if (op->op.same_as(tl::__ldg())) {
     // Explicit read-only cached load. Preferred form: __ldg(BufferLoad(...)).
     // Fallback form: __ldg(buffer, index)
     const TensorLoadObj *bl = nullptr;
@@ -4942,11 +4814,12 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
         << "T.__ldg currently supports flattened 1D buffer accesses.";
     PrimExpr base = bl->indices[0];
     // Emit __ldg(&buffer_ref)
-    auto buffer_ref = this->GetBufferRef(CodegenDType(op), buffer, base);
+    auto buffer_ref =
+        this->GetBufferRef(op->ty.as_or_throw<PrimType>(), buffer, base);
     os << "__ldg(&(" << buffer_ref << "))";
-  } else if (IsCodegenOp(op, "tl.__ffs")) {
+  } else if (op->op.same_as(tl::__ffs())) {
     ICHECK_EQ(args.size(), 1U) << "T.__ffs expects one argument.";
-    PrimType arg_dtype = CodegenDType(args[0]);
+    PrimType arg_dtype = args[0]->ty.as_or_throw<PrimType>();
     ICHECK(arg_dtype.MatchesCode(kDLInt) || arg_dtype.MatchesCode(kDLUInt))
         << "T.__ffs expects an integer argument, but got " << arg_dtype;
     ICHECK(arg_dtype.bits() == 32 || arg_dtype.bits() == 64)
@@ -4954,10 +4827,10 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
         << arg_dtype;
     os << (arg_dtype.bits() == 64 ? "__ffsll(" : "__ffs(") << PrintExpr(args[0])
        << ")";
-  } else if (IsCodegenOp(op, "tl.__fns")) {
+  } else if (op->op.same_as(tl::__fns())) {
     ICHECK_EQ(args.size(), 3U)
         << "T.__fns expects three arguments: mask, base, offset.";
-    PrimType mask_dtype = CodegenDType(args[0]);
+    PrimType mask_dtype = args[0]->ty.as_or_throw<PrimType>();
     ICHECK(mask_dtype.MatchesCode(kDLInt) || mask_dtype.MatchesCode(kDLUInt))
         << "T.__fns expects an integer mask argument, but got " << mask_dtype;
     ICHECK(mask_dtype.bits() == 32)
@@ -4965,7 +4838,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
         << mask_dtype;
     os << "__fns(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1]) << ", "
        << PrintExpr(args[2]) << ")";
-  } else if (IsCodegenOp(op, "tl.ldg32")) {
+  } else if (op->op.same_as(tl::ldg32())) {
     need_copy_h_ = true;
     // Explicit 32-bit global memory load: load_global_32(ptr) or
     // load_global_32_conditional(ptr, pred)
@@ -4980,7 +4853,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[0], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.ldg64")) {
+  } else if (op->op.same_as(tl::ldg64())) {
     need_copy_h_ = true;
     // Explicit 64-bit global memory load: load_global_64(ptr) or
     // load_global_64_conditional(ptr, pred)
@@ -4995,7 +4868,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[0], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.ldg128")) {
+  } else if (op->op.same_as(tl::ldg128())) {
     need_copy_h_ = true;
     // Explicit 128-bit global memory load: load_global_128(ptr) or
     // load_global_128_conditional(ptr, pred)
@@ -5010,25 +4883,25 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[0], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.lds32")) {
+  } else if (op->op.same_as(tl::lds32())) {
     need_copy_h_ = true;
     ICHECK_EQ(args.size(), 1U) << "T.lds32 expects a pointer argument.";
     os << "tl::load_shared_32(";
     this->PrintExpr(args[0], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.lds64")) {
+  } else if (op->op.same_as(tl::lds64())) {
     need_copy_h_ = true;
     ICHECK_EQ(args.size(), 1U) << "T.lds64 expects a pointer argument.";
     os << "tl::load_shared_64(";
     this->PrintExpr(args[0], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.lds128")) {
+  } else if (op->op.same_as(tl::lds128())) {
     need_copy_h_ = true;
     ICHECK_EQ(args.size(), 1U) << "T.lds128 expects a pointer argument.";
     os << "tl::load_shared_128(";
     this->PrintExpr(args[0], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.ldg256")) {
+  } else if (op->op.same_as(tl::ldg256())) {
     need_copy_sm100_h_ = true;
     // Explicit 256-bit global memory load: load_global_256(ptr) or
     // load_global_256_conditional(ptr, pred). The builtin's result dtype is
@@ -5047,7 +4920,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       os << ")";
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.stg32")) {
+  } else if (op->op.same_as(tl::stg32())) {
     need_copy_h_ = true;
     // Explicit 32-bit global memory store: store_global_32(ptr, value) or
     // store_global_32_conditional(ptr, value, pred)
@@ -5066,7 +4939,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[1], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.stg64")) {
+  } else if (op->op.same_as(tl::stg64())) {
     need_copy_h_ = true;
     // Explicit 64-bit global memory store: store_global_64(ptr, value) or
     // store_global_64_conditional(ptr, value, pred)
@@ -5085,7 +4958,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[1], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.stg128")) {
+  } else if (op->op.same_as(tl::stg128())) {
     need_copy_h_ = true;
     // Explicit 128-bit global memory store: store_global_128(ptr, value) or
     // store_global_128_conditional(ptr, value, pred)
@@ -5104,7 +4977,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[1], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.sts32")) {
+  } else if (op->op.same_as(tl::sts32())) {
     need_copy_h_ = true;
     ICHECK_EQ(args.size(), 2U)
         << "T.sts32 expects pointer and value arguments.";
@@ -5113,7 +4986,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << ", ";
     this->PrintExpr(args[1], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.sts64")) {
+  } else if (op->op.same_as(tl::sts64())) {
     need_copy_h_ = true;
     ICHECK_EQ(args.size(), 2U)
         << "T.sts64 expects pointer and value arguments.";
@@ -5122,7 +4995,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << ", ";
     this->PrintExpr(args[1], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.sts128")) {
+  } else if (op->op.same_as(tl::sts128())) {
     need_copy_h_ = true;
     ICHECK_EQ(args.size(), 2U)
         << "T.sts128 expects pointer and value arguments.";
@@ -5131,7 +5004,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << ", ";
     this->PrintExpr(args[1], os);
     os << ")";
-  } else if (IsCodegenOp(op, "tl.stg256")) {
+  } else if (op->op.same_as(tl::stg256())) {
     need_copy_sm100_h_ = true;
     // Explicit 256-bit global memory store: store_global_256(ptr, value) or
     // store_global_256_conditional(ptr, value, pred)
@@ -5150,14 +5023,14 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       this->PrintExpr(args[1], os);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tirx.reinterpret")) {
+  } else if (op->op.same_as(tirx::reinterpret_op())) {
     TVM_FFI_ICHECK_EQ(args.size(), 1U);
     if (op->ty.as<PtrTypeObj>() || args[0]->ty.as<PtrTypeObj>()) {
       CodeGenC::Dispatch_(op, os);
       return;
     }
-    PrimType tgt_dtype = CodegenDType(op);
-    PrimType src_dtype = CodegenDType(args[0]);
+    PrimType tgt_dtype = op->ty.as_or_throw<PrimType>();
+    PrimType src_dtype = args[0]->ty.as_or_throw<PrimType>();
     PrimExpr value = args[0].as_or_throw<PrimExpr>();
 
     // Handle packed float4_e2m1fn reinterpret. The unpacked SMEM dtype is not a
@@ -5274,63 +5147,63 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
           << "Invalid number of lanes for float4_e2m1fn reinterpret: " << lanes;
     }
     EndScope(ssa_scope);
-  } else if (IsCodegenOp(op, "tirx.gpu_thread_return")) {
+  } else if (op->op.same_as(tirx::gpu_thread_return_op())) {
     os << "return";
-  } else if (IsCodegenOp(op, "tl.any_sync")) {
+  } else if (op->op.same_as(tl::any_sync())) {
     ICHECK_EQ(args.size(), 2U) << "tl.any_sync expects <mask, predicate>.";
     os << "__any_sync(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
        << ")";
-  } else if (IsCodegenOp(op, "tl.all_sync")) {
+  } else if (op->op.same_as(tl::all_sync())) {
     ICHECK_EQ(args.size(), 2U) << "tl.all_sync expects <mask, predicate>.";
     os << "__all_sync(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
        << ")";
-  } else if (IsCodegenOp(op, "tl.ballot_sync")) {
+  } else if (op->op.same_as(tl::ballot_sync())) {
     ICHECK_EQ(args.size(), 2U) << "tl.ballot_sync expects <mask, predicate>.";
     // __ballot_sync returns unsigned int (32 bits); zero-extend to uint64.
     os << "((unsigned long long)__ballot_sync(" << PrintExpr(args[0]) << ", "
        << PrintExpr(args[1]) << "))";
-  } else if (IsCodegenOp(op, "tl.ballot")) {
+  } else if (op->op.same_as(tl::ballot())) {
     ICHECK_EQ(args.size(), 1U) << "tl.ballot expects <predicate>.";
     os << "((unsigned long long)__ballot_sync(0xFFFFFFFFu, "
        << PrintExpr(args[0]) << "))";
-  } else if (IsCodegenOp(op, "tl.activemask")) {
+  } else if (op->op.same_as(tl::activemask())) {
     ICHECK(args.empty()) << "tl.activemask takes no arguments.";
     os << "((unsigned long long)__activemask())";
-  } else if (IsCodegenOp(op, "tl.syncthreads_count")) {
+  } else if (op->op.same_as(tl::syncthreads_count())) {
     ICHECK_EQ(args.size(), 1U) << "tl.syncthreads_count expects <predicate>.";
     os << "__syncthreads_count(" << PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.syncthreads_and")) {
+  } else if (op->op.same_as(tl::syncthreads_and())) {
     ICHECK_EQ(args.size(), 1U) << "tl.syncthreads_and expects <predicate>.";
     os << "__syncthreads_and(" << PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.syncthreads_or")) {
+  } else if (op->op.same_as(tl::syncthreads_or())) {
     ICHECK_EQ(args.size(), 1U) << "tl.syncthreads_or expects <predicate>.";
     os << "__syncthreads_or(" << PrintExpr(args[0]) << ")";
-  } else if (IsCodegenOp(op, "tl.shfl_sync")) {
+  } else if (op->op.same_as(tl::shfl_sync())) {
     ICHECK_EQ(args.size(), 4U)
         << "tl.shfl_sync expects <mask, value, src_lane, width>.";
     os << "__shfl_sync(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
        << ", " << PrintExpr(args[2]) << ", " << PrintExpr(args[3]) << ")";
-  } else if (IsCodegenOp(op, "tl.shfl_xor_sync")) {
+  } else if (op->op.same_as(tl::shfl_xor_sync())) {
     ICHECK_EQ(args.size(), 4U)
         << "tl.shfl_xor_sync expects <mask, value, lane_mask, width>.";
     os << "__shfl_xor_sync(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
        << ", " << PrintExpr(args[2]) << ", " << PrintExpr(args[3]) << ")";
-  } else if (IsCodegenOp(op, "tl.shfl_down_sync")) {
+  } else if (op->op.same_as(tl::shfl_down_sync())) {
     ICHECK_EQ(args.size(), 4U)
         << "tl.shfl_down_sync expects <mask, value, delta, width>.";
     os << "__shfl_down_sync(" << PrintExpr(args[0]) << ", "
        << PrintExpr(args[1]) << ", " << PrintExpr(args[2]) << ", "
        << PrintExpr(args[3]) << ")";
-  } else if (IsCodegenOp(op, "tl.shfl_up_sync")) {
+  } else if (op->op.same_as(tl::shfl_up_sync())) {
     ICHECK_EQ(args.size(), 4U)
         << "tl.shfl_up_sync expects <mask, value, delta, width>.";
     os << "__shfl_up_sync(" << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
        << ", " << PrintExpr(args[2]) << ", " << PrintExpr(args[3]) << ")";
-  } else if (IsCodegenOp(op, "tl.match_any_sync")) {
+  } else if (op->op.same_as(tl::match_any_sync())) {
     ICHECK_EQ(args.size(), 2U) << "tl.match_any_sync expects <mask, value>.";
     os << "__match_any_sync(" << PrintExpr(args[0]) << ", "
        << PrintExpr(args[1]) << ")";
-  } else if (IsCodegenOp(op, "tl.match_all_sync")) {
+  } else if (op->op.same_as(tl::match_all_sync())) {
     ICHECK_EQ(args.size(), 2U) << "tl.match_all_sync expects <mask, value>.";
     // __match_all_sync writes a `pred` flag through its third argument. We
     // hide the out-parameter behind an immediately-invoked lambda and
@@ -5339,7 +5212,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
     os << "([&]() -> unsigned { int _tl_pred = 0; return __match_all_sync("
        << PrintExpr(args[0]) << ", " << PrintExpr(args[1])
        << ", &_tl_pred); }())";
-  } else if (IsCodegenOp(op, "tl.get_lane_idx")) {
+  } else if (op->op.same_as(tl::get_lane_idx())) {
     need_intrin_h_ = true;
     ICHECK_LE(args.size(), 1)
         << "tl.get_lane_idx expects at most one argument <warp_size>.";
@@ -5348,7 +5221,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       os << PrintExpr(args[0]);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.get_warp_idx_sync")) {
+  } else if (op->op.same_as(tl::get_warp_idx_sync())) {
     need_intrin_h_ = true;
     ICHECK_LE(args.size(), 1)
         << "tl.get_warp_idx_sync expects at most one argument <warp_size>.";
@@ -5357,7 +5230,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       os << PrintExpr(args[0]);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.get_warp_idx")) {
+  } else if (op->op.same_as(tl::get_warp_idx())) {
     need_intrin_h_ = true;
     ICHECK_LE(args.size(), 1)
         << "tl.get_warp_idx expects at most one argument <warp_size>.";
@@ -5366,7 +5239,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       os << PrintExpr(args[0]);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.get_warp_group_idx")) {
+  } else if (op->op.same_as(tl::get_warp_group_idx())) {
     need_intrin_h_ = true;
     ICHECK_LE(args.size(), 2)
         << "tl.get_warp_group_idx expects <warp_size, warps_per_group>.";
@@ -5378,10 +5251,10 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
       os << PrintExpr(args[i]);
     }
     os << ")";
-  } else if (IsCodegenOp(op, "tl.tl_shuffle_elect")) {
+  } else if (op->op.same_as(tl::tl_shuffle_elect())) {
     need_intrin_h_ = true;
     os << "tl::tl_shuffle_elect<" << PrintExpr(args[0]) << ">()";
-  } else if (IsCodegenOp(op, "tl.initialize_wgmma_descriptor")) {
+  } else if (op->op.same_as(tl::initialize_wgmma_descriptor())) {
     ICHECK(args.size() == 5)
         << "tl_initialize_wgmma_descriptor expects 5 arguments but got "
         << args.size();
@@ -5394,7 +5267,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
        << PrintExpr(leading_byte_offset) << ", "
        << PrintExpr(stride_byte_offset) << ">(" << PrintExpr(descriptor) << ", "
        << PrintExpr(start_address) << ")";
-  } else if (IsCodegenOp(op, "tl.initialize_tcgen05_descriptor")) {
+  } else if (op->op.same_as(tl::initialize_tcgen05_descriptor())) {
     ICHECK(args.size() == 7)
         << "tl_initialize_tcgen05_descriptor expects 7 arguments but got "
         << args.size();
@@ -5410,7 +5283,7 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
        << ", " << PrintExpr(stride_byte_offset) << ", "
        << PrintExpr(base_offset) << ", " << PrintExpr(leading_abs) << ", "
        << PrintExpr(swizzle_mode) << ")";
-  } else if (IsCodegenOp(op, "tl.increase_descriptor_offset")) {
+  } else if (op->op.same_as(tl::increase_descriptor_offset())) {
     ICHECK(args.size() == 2)
         << "tl_increase_descriptor_offset expects 2 arguments but got "
         << args.size();
@@ -5428,19 +5301,20 @@ void CodeGenTileLangCUDA::Dispatch_(const CallObj *op, std::ostream &os) {
 bool CodeGenTileLangCUDA::TryEmitFastMathCall_(const Call &call,
                                                std::ostream &os) {
   struct FastMathIntrinsic {
-    const char *op;
+    Op op;
     const char *name;
     bool needs_math_header;
   };
   static const FastMathIntrinsic kIntrinsics[] = {
-      {"tl.__exp", "exp", true},      {"tl.__exp10", "exp10", false},
-      {"tl.__log", "log", true},      {"tl.__log2", "log2", false},
-      {"tl.__log10", "log10", false}, {"tl.__tan", "tan", false},
-      {"tl.__cos", "cos", true},      {"tl.__sin", "sin", true}};
+      {tl::__exp(), "exp", true},      {tl::__exp10(), "exp10", false},
+      {tl::__log(), "log", true},      {tl::__log2(), "log2", false},
+      {tl::__log10(), "log10", false}, {tl::__tan(), "tan", false},
+      {tl::__cos(), "cos", true},      {tl::__sin(), "sin", true}};
   for (const auto &intrinsic : kIntrinsics) {
-    if (IsCodegenOp(call, intrinsic.op)) {
+    if (call->op.same_as(intrinsic.op)) {
       CUDAFastMath math_func;
-      std::string func_name = math_func(CodegenDType(call), intrinsic.name);
+      std::string func_name =
+          math_func(call->ty.as_or_throw<PrimType>(), intrinsic.name);
       need_math_h_ = need_math_h_ || intrinsic.needs_math_header;
       os << func_name << "(" << PrintExpr(call->args[0]) << ")";
       return true;
@@ -5451,30 +5325,31 @@ bool CodeGenTileLangCUDA::TryEmitFastMathCall_(const Call &call,
 
 bool CodeGenTileLangCUDA::TryEmitIEEEMathCall_(const Call &call,
                                                std::ostream &os) {
-  if (IsCodegenOp(call, "tl.ieee_frsqrt")) {
+  if (call->op.same_as(tl::ieee_frsqrt())) {
     CUDAIEEEMath math_func;
-    std::string func_name = math_func(CodegenDType(call), "frsqrt", "rn");
+    std::string func_name =
+        math_func(call->ty.as_or_throw<PrimType>(), "frsqrt", "rn");
     os << func_name << "(" << PrintExpr(call->args[0]) << ")";
     return true;
   }
 
   struct IEEEMathIntrinsic {
-    const char *op;
+    Op op;
     const char *name;
     int operand_count;
   };
   static const IEEEMathIntrinsic kIntrinsics[] = {
-      {"tl.ieee_add", "fadd", 2},  {"tl.ieee_sub", "fsub", 2},
-      {"tl.ieee_mul", "fmul", 2},  {"tl.ieee_fmaf", "fmaf", 3},
-      {"tl.ieee_frcp", "frcp", 1}, {"tl.ieee_fsqrt", "fsqrt", 1},
-      {"tl.ieee_fdiv", "fdiv", 2}};
+      {tl::ieee_add(), "fadd", 2},  {tl::ieee_sub(), "fsub", 2},
+      {tl::ieee_mul(), "fmul", 2},  {tl::ieee_fmaf(), "fmaf", 3},
+      {tl::ieee_frcp(), "frcp", 1}, {tl::ieee_fsqrt(), "fsqrt", 1},
+      {tl::ieee_fdiv(), "fdiv", 2}};
   for (const auto &intrinsic : kIntrinsics) {
-    if (IsCodegenOp(call, intrinsic.op)) {
+    if (call->op.same_as(intrinsic.op)) {
       CUDAIEEEMath math_func;
       std::string rounding_mode =
           (call->args[intrinsic.operand_count]).as_or_throw<StringImm>()->value;
-      std::string func_name =
-          math_func(CodegenDType(call), intrinsic.name, rounding_mode);
+      std::string func_name = math_func(call->ty.as_or_throw<PrimType>(),
+                                        intrinsic.name, rounding_mode);
       os << func_name << "(";
       for (int index = 0; index < intrinsic.operand_count; ++index) {
         if (index != 0) {
@@ -5503,19 +5378,21 @@ bool CodeGenTileLangCUDA::TryEmitPackedMathCall_(const Call &call,
   // (both map to the same 32-bit struct), so we must cast arguments to
   // the correct native type (__nv_bfloat162 or __half2) and cast the
   // result back to uint1 to avoid the ambiguous uint1 bridge overload.
+  const PrimType dtype = call->ty.as_or_throw<PrimType>();
   std::string op_name = packed_name;
-  std::vector<PrimExpr> packed_args = CodegenPrimOperands(call.get());
-  if (IsCodegenOp(call, "tl.add2") && call->args.size() == 2) {
+  std::vector<PrimExpr> packed_args;
+  for (const auto &arg : call->args)
+    packed_args.push_back(arg.as_or_throw<PrimExpr>());
+  if (call->op.same_as(tl::add2()) && call->args.size() == 2) {
     // Keep explicit packed helper trees on the same fused path for the
     // same reason as PrintVecBinaryOp: NVCC will not reliably rewrite
     // tl::mul2(...) + tl::add2(...) back into packed fma2 on its own.
     auto try_fuse_mul_add = [&](const PrimExpr &mul_expr,
                                 const PrimExpr &addend) -> bool {
       const CallObj *mul_call = mul_expr.as<CallObj>();
-      if (mul_call == nullptr || !IsCodegenOp(mul_call, "tl.mul2") ||
-          mul_call->args.size() != 2 ||
-          CodegenDType(mul_call) != CodegenDType(call) ||
-          addend.ty() != CodegenDType(call)) {
+      if (mul_call == nullptr || !mul_call->op.same_as(tl::mul2()) ||
+          mul_call->args.size() != 2 || mul_expr.ty() != dtype ||
+          addend.ty() != dtype) {
         return false;
       }
       op_name = "fma2";
@@ -5530,7 +5407,6 @@ bool CodeGenTileLangCUDA::TryEmitPackedMathCall_(const Call &call,
     }
   }
 
-  PrimType dtype = CodegenDType(call);
   bool need_cast = dtype.MatchesElementType(kDLBfloat, 16) ||
                    dtype.MatchesElementType(kDLFloat, 16);
   std::string native_type;
@@ -5570,16 +5446,18 @@ bool CodeGenTileLangCUDA::TryEmitPackedMathCall_(const Call &call,
 bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
                                                   std::ostream &os) {
   Call call = GetRef<Call>(op);
-  const auto operands = CodegenOperands(op);
+  const auto operands = op->args;
   if (TryEmitFastMathCall_(call, os) || TryEmitIEEEMathCall_(call, os) ||
       TryEmitPackedMathCall_(call, os)) {
     return true;
   }
-  if (IsCodegenOp(op, "tl.clamp")) {
+  if (op->op.same_as(tl::clamp())) {
     ICHECK_EQ(operands.size(), 3);
     need_math_h_ = true;
-    PrimType dtype = CodegenDType(op);
-    std::vector<PrimExpr> args = CodegenPrimOperands(op);
+    PrimType dtype = op->ty.as_or_throw<PrimType>();
+    std::vector<PrimExpr> args;
+    for (const auto &arg : op->args)
+      args.push_back(arg.as_or_throw<PrimExpr>());
     for (const PrimExpr &arg : args) {
       ICHECK_EQ(arg.ty(), dtype)
           << "tl.clamp operands must have matching types";
@@ -5606,16 +5484,18 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
       EmitPerLaneScalarCall("tl::clamp", dtype, args, os);
     }
     return true;
-  } else if (IsCodegenOp(op, "tl.fma") || IsCodegenOp(op, "tl.fmul")) {
+  } else if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
     // Round-to-nearest multiply / fused multiply-add with a guaranteed
     // instruction boundary (never re-contracted or split by NVCC). Scalar
     // forms reuse the IEEE intrinsic names with the fixed "rn" mode; even
     // vector widths lower to packed x2 helpers where the target supports
     // them (see CanEmitPackedX2Math) and fall back to per-lane scalar
     // calls elsewhere.
-    bool is_fma = IsCodegenOp(op, "tl.fma");
-    std::vector<PrimExpr> args = CodegenPrimOperands(op);
-    PrimType t = CodegenDType(op);
+    bool is_fma = op->op.same_as(tl::fma());
+    std::vector<PrimExpr> args;
+    for (const auto &arg : op->args)
+      args.push_back(arg.as_or_throw<PrimExpr>());
+    PrimType t = op->ty.as_or_throw<PrimType>();
     if (!t.IsScalar() && CanEmitPackedX2Math(t)) {
       EmitPackedX2Call(is_fma ? "fma2" : "mul2", t, args, os);
       return true;
@@ -5634,14 +5514,15 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
       EmitPerLaneScalarCall(func_name, t, args, os);
     }
     return true;
-  } else if (IsCodegenOp(op, "tl.fast_rcp")) {
+  } else if (op->op.same_as(tl::fast_rcp())) {
     need_math_h_ = true;
-    ICHECK(CodegenDType(op).MatchesCode(kDLFloat) &&
-           CodegenDType(op).bits() == 32 && CodegenDType(op).lanes() == 1)
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    ICHECK(dtype.MatchesCode(kDLFloat) && dtype.bits() == 32 &&
+           dtype.lanes() == 1)
         << "tl.fast_rcp currently supports scalar float32 only";
     os << "tl::fast_rcp(" << PrintExpr(operands[0]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.rng_init")) {
+  } else if (op->op.same_as(tl::rng_init())) {
     this->need_curand_kernel_h_ = true;
     auto it = rng_state_name_map_.find(op);
     ICHECK(it != rng_state_name_map_.end())
@@ -5657,34 +5538,34 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     // stays visible to rng_rand / rng_rand_float even when passes split the
     // enclosing block across __syncthreads() barriers.
     return true;
-  } else if (IsCodegenOp(op, "tl.rng_rand")) {
+  } else if (op->op.same_as(tl::rng_rand())) {
     this->need_curand_kernel_h_ = true;
     os << "curand(&" << this->curand_random_generator_state << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.rng_rand_float")) {
+  } else if (op->op.same_as(tl::rng_rand_float())) {
     this->need_curand_kernel_h_ = true;
     os << "curand_" << operands[0].as<StringImmObj>()->value;
-    if (CodegenDType(op).bits() == 64) {
+    if (op->ty.as_or_throw<PrimType>().bits() == 64) {
       os << "_double";
     }
     os << "(&" << this->curand_random_generator_state << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.warp_reduce_sum")) {
+  } else if (op->op.same_as(tl::warp_reduce_sum())) {
     os << "tl::warp_reduce_sum(" << PrintExpr(operands[0]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.warp_reduce_max")) {
+  } else if (op->op.same_as(tl::warp_reduce_max())) {
     os << "tl::warp_reduce_max(" << PrintExpr(operands[0]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.warp_reduce_min")) {
+  } else if (op->op.same_as(tl::warp_reduce_min())) {
     os << "tl::warp_reduce_min(" << PrintExpr(operands[0]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.warp_reduce_bitand")) {
+  } else if (op->op.same_as(tl::warp_reduce_bitand())) {
     os << "tl::warp_reduce_bitand(" << PrintExpr(operands[0]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.warp_reduce_bitor")) {
+  } else if (op->op.same_as(tl::warp_reduce_bitor())) {
     os << "tl::warp_reduce_bitor(" << PrintExpr(operands[0]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_add_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_add_elem_op())) {
     need_atomic_h_ = true;
     // atomic_add_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5696,7 +5577,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     this->stream << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_add_ret_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
     need_atomic_h_ = true;
     // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
@@ -5707,7 +5588,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     os << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_addx2_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
     need_atomic_h_ = true;
     // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5719,12 +5600,13 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     this->stream << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_addx2_ret_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_addx2_ret_elem_op())) {
     need_atomic_h_ = true;
     // fp16/bf16 x2 is stored as uint1 but AtomicAddx2Ret returns half2/bf162;
     // bridge with to_uint1. float32 is native float2, emitted bare.
-    bool need_cast = CodegenDType(op).MatchesElementType(kDLFloat, 16) ||
-                     CodegenDType(op).MatchesElementType(kDLBfloat, 16);
+    const PrimType dtype = op->ty.as_or_throw<PrimType>();
+    bool need_cast = dtype.MatchesElementType(kDLFloat, 16) ||
+                     dtype.MatchesElementType(kDLBfloat, 16);
     if (need_cast) {
       os << "tl::to_uint1(";
     }
@@ -5738,7 +5620,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
       os << ")";
     }
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_addx4_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_addx4_elem_op())) {
     need_atomic_h_ = true;
     // atomic_addx4_elem_op(dst_ptr, src_ptr[, memory_order])
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5750,7 +5632,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     this->stream << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_addx4_ret_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_addx4_ret_elem_op())) {
     need_atomic_h_ = true;
     // AtomicAddx4Ret already returns the store type (float4 / uint2), so bare.
     os << "AtomicAddx4Ret(" << PrintExpr(operands[0]) << ", "
@@ -5760,13 +5642,13 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     os << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_load_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_load_elem_op())) {
     need_atomic_h_ = true;
     // atomic_load_elem_op(src_ptr, memory_order) -> returns loaded value
     os << "AtomicLoad(" << PrintExpr(operands[0]) << ", "
        << PrintExpr(operands[1]) << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_store_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_store_elem_op())) {
     need_atomic_h_ = true;
     // atomic_store_elem_op(dst_ptr, value, memory_order)
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5776,7 +5658,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     this->stream << "AtomicStore(" << dst_ptr << ", " << value << ", "
                  << memory_order << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_or_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_or_elem_op())) {
     need_atomic_h_ = true;
     // atomic_or_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5788,7 +5670,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     this->stream << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_max_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_max_elem_op())) {
     need_atomic_h_ = true;
     // atomic_max_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5800,7 +5682,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     this->stream << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_max_ret_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
     need_atomic_h_ = true;
     // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
@@ -5811,7 +5693,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     os << ")";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_min_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_min_elem_op())) {
     need_atomic_h_ = true;
     // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr(operands[0]);
@@ -5823,7 +5705,7 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallObj *op,
     }
     this->stream << ");\n";
     return true;
-  } else if (IsCodegenOp(op, "tl.atomic_min_ret_elem_op")) {
+  } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
     need_atomic_h_ = true;
     // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
@@ -5915,7 +5797,7 @@ void CodeGenTileLangCUDA::Dispatch_(const BindObj *op) {
   }
   auto tensor = op->var.as_or_throw<TensorVar>();
   const VarObj *buffer = tensor.get();
-  const auto annotations = CodegenCallAnnotations(allocation);
+  const auto *attrs = allocation->attrs.as<DictAttrsObj>();
   std::string vid = AllocVarID(buffer);
   PrintIndent();
   std::string scope = tensor.scope().name();
@@ -5925,9 +5807,9 @@ void CodeGenTileLangCUDA::Dispatch_(const BindObj *op) {
   bool is_float4_unpacked_shared = tl::IsFloat4E2M1Unpacked(alloc_dtype) &&
                                    (scope == "shared" || scope == "shared.dyn");
   if (scope.find("wmma.") == 0) {
-    if (auto shape = annotations.Get("tl.wmma_shape"))
+    if (auto shape = attrs ? attrs->dict.Get("tl.wmma_shape") : std::nullopt)
       fragment_shapes[buffer] = CodegenAnnotationString(*shape);
-    if (auto layout = annotations.Get("tl.wmma_layout"))
+    if (auto layout = attrs ? attrs->dict.Get("tl.wmma_layout") : std::nullopt)
       fragment_layouts[buffer] = CodegenAnnotationString(*layout);
     if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
       ICHECK(
@@ -6024,9 +5906,9 @@ void CodeGenTileLangCUDA::Dispatch_(const BindObj *op) {
       }
     } else if (scope == "local.var") {
       PrimExpr init = prim::MakeConst(alloc_dtype, 0);
-      auto init_it = annotations.find("tl.local_var_init");
-      if (init_it != annotations.end()) {
-        PrimExpr user_init = (*init_it).second.cast<PrimExpr>();
+      if (auto initializer =
+              attrs ? attrs->dict.Get("tl.local_var_init") : std::nullopt) {
+        PrimExpr user_init = initializer->cast<PrimExpr>();
         if (!user_init.ty().IsVoid() && user_init.ty() != alloc_dtype) {
           user_init = prim::Cast(alloc_dtype, user_init);
         }
@@ -6040,8 +5922,8 @@ void CodeGenTileLangCUDA::Dispatch_(const BindObj *op) {
   }
 
   RegisterHandleType(buffer, alloc_dtype);
-  if (auto flag = annotations.Get(tirx::attr::kVolatile.name);
-      flag && CodegenBool(*flag))
+  if (attrs &&
+      CodegenBool(attrs->dict.Get(tirx::attr::kVolatile.name).value_or(false)))
     MarkVolatile(buffer);
 }
 
@@ -6069,11 +5951,11 @@ void CodeGenTileLangCUDA::Dispatch_(const EvaluateObj *op) {
   if (op->value.as<IntImmObj>())
     return;
   const CallObj *call = op->value.as<CallObj>();
-  if (call && (IsCodegenOp(call, "tl.device_assert"))) {
+  if (call && (call->op.same_as(tl::device_assert()))) {
     std::string cond = PrintExpr(call->args[0]);
     this->PrintIndent();
     stream << "device_assert(" << cond << ");\n";
-  } else if (call && IsCodegenOp(call, "tl.device_assert_with_msg")) {
+  } else if (call && call->op.same_as(tl::device_assert_with_msg())) {
     std::string cond = PrintExpr(call->args[0]);
     std::string msg_expr = PrintExpr(call->args[1]);
     this->PrintIndent();
@@ -6093,6 +5975,7 @@ void CodeGenTileLangCUDA::Dispatch_(const ReturnObj *op) {
 }
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::RampObj *op, std::ostream &os) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
   int lanes = static_cast<int>(CodegenInt(op->lanes));
   // TODO(chaofan): Comment the ramp lanes limit for now since we have
   // LegalizeVectorizedLoop to automatically legalize vectorized loop whose
@@ -6102,16 +5985,15 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::RampObj *op, std::ostream &os) {
 
   // ICHECK_LE(lanes, 8) << "Translate Ramp Node " << GetRef<Ramp>(op)
   //                    << "error: " << lanes << " exceeds max ramp lanes 8.";
-  bool is_packed_int4x2 = (CodegenDType(op).MatchesCode(kDLInt) ||
-                           CodegenDType(op).MatchesCode(kDLUInt)) &&
-                          CodegenDType(op).bits() == 4 &&
-                          CodegenDType(op).lanes() == 2;
+  bool is_packed_int4x2 =
+      (dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
+      dtype.bits() == 4 && dtype.lanes() == 2;
   os << "(";
   if (is_packed_int4x2) {
-    PrintVecConstructor(CodegenDType(op), os);
+    PrintVecConstructor(dtype, os);
   } else {
     os << "make_";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
   }
   os << "(";
   for (int i = 0; i < lanes; i++) {
@@ -6128,7 +6010,7 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorLoadObj *op,
   ICHECK_EQ(op->indices.size(), 1)
       << "Load from non-flat memory not supported.";
 
-  PrimType value_dtype = CodegenDType(op);
+  PrimType value_dtype = op->ty.as_or_throw<PrimType>();
   PrimExpr index = op->indices[0];
   Var buffer_var = op->source.as_or_throw<TensorVar>();
   PrimType element_dtype = op->source.as_or_throw<TensorVar>().dtype();
@@ -6166,14 +6048,9 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorLoadObj *op,
     os << "tl_fp4_packed_load(" << packed_it->second << ", " << idx_str << ")";
     return;
   }
-  int lanes = CodegenDType(op).lanes();
+  int lanes = value_dtype.lanes();
   // declare type.
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    if (value_dtype.lanes() > 1) {
-      HandleVolatileLoads(GetVecLoad(value_dtype, buffer_var.get(), index), op,
-                          os);
-      return;
-    }
     // For scalar fp4 loads from non-packed buffers, use tl_fp4_packed_load
     // to correctly extract the nibble at the given index (the /2 in
     // GetBufferRef maps two consecutive fp4 elements to the same byte, but
@@ -6185,7 +6062,7 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorLoadObj *op,
       std::string vid = GetVarID(buffer_var.get());
       os << "tl_fp4_packed_load((fp4_e2_2_t*)" << vid << ", " << idx_str << ")";
     } else {
-      std::string ref = GetBufferRef(CodegenDType(op), buffer_var.get(), index);
+      std::string ref = GetBufferRef(value_dtype, buffer_var.get(), index);
       HandleVolatileLoads(ref, op, os);
     }
   } else {
@@ -6204,8 +6081,7 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorLoadObj *op,
     }
 
     if (can_vector_load) {
-      std::string ref =
-          GetVecLoad(CodegenDType(op), buffer_var.get(), base.Eval());
+      std::string ref = GetVecLoad(value_dtype, buffer_var.get(), base.Eval());
       HandleVolatileLoads(ref, op, os);
     } else {
       std::vector<std::string> scalar_indices;
@@ -6253,7 +6129,7 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorLoadObj *op,
       if (scalar_indices.empty())
         sindex = SSAGetID(PrintExpr(index), index.ty(),
                           tvm::SideEffect(index) == CallEffectKind::kPure);
-      PrimType elem_type = CodegenDType(op).WithLanes(1);
+      PrimType elem_type = value_dtype.WithLanes(1);
       for (int i = 0; i < lanes; ++i) {
         std::ostringstream value_temp;
 
@@ -6293,8 +6169,7 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorLoadObj *op,
           }
         }
 
-        PrintVecElemLoadExpr(CodegenDType(op), i, value_temp.str(),
-                             svalue_expr);
+        PrintVecElemLoadExpr(value_dtype, i, value_temp.str(), svalue_expr);
       }
       os << svalue_expr.str();
     }
@@ -6342,11 +6217,6 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorStoreObj *op) {
     return;
   }
   if (value_dtype.lanes() == element_dtype.lanes()) {
-    if (value_dtype.lanes() > 1) {
-      std::string value = PrintExpr(op->value);
-      PrintVecStore(buffer_var.get(), value_dtype, index_expr, value);
-      return;
-    }
     // For scalar fp4 stores to non-packed buffers, use tl_fp4_packed_store
     // to correctly handle nibble-level writes. The /2 in GetBufferRef maps two
     // consecutive fp4 elements to the same byte, and a plain assignment
@@ -6458,6 +6328,7 @@ void CodeGenTileLangCUDA::Dispatch_(const TensorStoreObj *op) {
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::SelectObj *op,
                                     std::ostream &os) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
   // Non-vector cases.
   if (!op->condition.ty().IsFixedLengthVector()) {
     CodeGenC::Dispatch_(op, os);
@@ -6465,27 +6336,27 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::SelectObj *op,
   }
 
   // Codegen vector condition case by serializing the select op.
-  TVM_FFI_ICHECK(op->false_value.ty() == CodegenDType(op) &&
-                 op->true_value.ty() == CodegenDType(op) &&
-                 CodegenDType(op).lanes() == op->condition.ty().lanes());
+  TVM_FFI_ICHECK(op->false_value.ty() == dtype &&
+                 op->true_value.ty() == dtype &&
+                 dtype.lanes() == op->condition.ty().lanes());
 
   std::string r_var = name_supply_->FreshName("_");
   this->PrintIndent();
-  this->PrintType(CodegenDType(op), stream);
+  this->PrintType(dtype, stream);
   stream << ' ' << r_var << ";\n";
   {
     std::string c_var =
         SSAGetID(PrintExpr(op->condition), op->condition.ty(),
                  tvm::SideEffect(op->condition) == CallEffectKind::kPure);
     std::string t_var =
-        SSAGetID(PrintExpr(op->true_value), CodegenDType(op),
+        SSAGetID(PrintExpr(op->true_value), dtype,
                  tvm::SideEffect(op->true_value) == CallEffectKind::kPure);
     std::string f_var =
-        SSAGetID(PrintExpr(op->false_value), CodegenDType(op),
+        SSAGetID(PrintExpr(op->false_value), dtype,
                  tvm::SideEffect(op->false_value) == CallEffectKind::kPure);
 
     // The condition is stored as an ushort vector.
-    int lanes = CodegenDType(op).lanes();
+    int lanes = dtype.lanes();
     PrimType memory_ty(kDLUInt, 16, lanes);
 
     for (int i = 0; i < lanes; ++i) {
@@ -6493,37 +6364,38 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::SelectObj *op,
       item << "(bool(";
       PrintVecElemLoad(c_var, memory_ty, i, item);
       item << ")?";
-      PrintVecElemLoad(t_var, CodegenDType(op), i, item);
+      PrintVecElemLoad(t_var, dtype, i, item);
       item << ':';
-      PrintVecElemLoad(f_var, CodegenDType(op), i, item);
+      PrintVecElemLoad(f_var, dtype, i, item);
       item << ')';
-      PrintVecElemStore(r_var, CodegenDType(op), i, item.str());
+      PrintVecElemStore(r_var, dtype, i, item.str());
     }
   }
   os << r_var;
 }
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::NotObj *op, std::ostream &os) {
-  if (!CodegenDType(op).IsFixedLengthVector()) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
+  if (!dtype.IsFixedLengthVector()) {
     CodeGenC::Dispatch_(op, os);
     return;
   }
 
   std::string result = name_supply_->FreshName("_");
   this->PrintIndent();
-  this->PrintType(CodegenDType(op), stream);
+  this->PrintType(dtype, stream);
   stream << ' ' << result << ";\n";
   int ssa_scope = BeginScope();
   {
     std::string value =
         SSAGetID(PrintExpr(op->a), op->a.ty(),
                  tvm::SideEffect(op->a) == CallEffectKind::kPure);
-    for (int i = 0; i < CodegenDType(op).lanes(); ++i) {
+    for (int i = 0; i < dtype.lanes(); ++i) {
       std::ostringstream lane;
       lane << "!bool(";
       PrintVecElemLoad(value, op->a.ty(), i, lane);
       lane << ')';
-      PrintVecElemStore(result, CodegenDType(op), i, lane.str());
+      PrintVecElemStore(result, dtype, i, lane.str());
     }
   }
   EndScope(ssa_scope);
@@ -6532,14 +6404,13 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::NotObj *op, std::ostream &os) {
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::BitwiseNotObj *op,
                                     std::ostream &os) {
-  PrimType dtype = CodegenDType(op);
+  PrimType dtype = op->ty.as_or_throw<PrimType>();
   if (!dtype.IsFixedLengthVector() ||
       !(dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt))) {
     CodeGenC::Dispatch_(op, os);
     return;
   }
-  // Native BitwiseNot is a primitive node, so it does not visit the legacy
-  // Call handler. CUDA integer vector carriers have no operator~; XOR with
+  // CUDA integer vector carriers have no operator~; XOR with
   // a lane-width all-ones mask preserves both signed and unsigned bits.
   // PrintVecBinaryOp snapshots the operand once before extracting its lanes.
   PrimType scalar_type = dtype.WithLanes(1);
@@ -6554,7 +6425,7 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::ShuffleObj *op,
   // For bfloat16x2 / float16x2 construction from two scalar lanes, emit a
   // proper pack intrinsic instead of the generic `uint1(a, b)` produced by
   // the base CodeGenC which is not valid CUDA.
-  PrimType t = CodegenDType(op);
+  PrimType t = op->ty.as_or_throw<PrimType>();
   bool is_bf16x2 = t.MatchesElementType(kDLBfloat, 16) && t.lanes() == 2;
   bool is_fp16x2 = t.MatchesElementType(kDLFloat, 16) && t.lanes() == 2;
   if ((is_bf16x2 || is_fp16x2) && op->vectors.size() == 2 &&
@@ -6669,24 +6540,23 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::ShuffleObj *op,
 
 void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
                                     std::ostream &os) { // NOLINT(*)
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
   int lanes = static_cast<int>(CodegenInt(op->lanes));
-  if ((CodegenDType(op).MatchesCode(kDLInt) ||
-       CodegenDType(op).MatchesCode(kDLUInt)) &&
-      CodegenDType(op).bits() == 4 && lanes == 2) {
+  if ((dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
+      dtype.bits() == 4 && lanes == 2) {
     std::string value = PrintExpr(op->value);
-    PrintVecConstructor(CodegenDType(op), os);
+    PrintVecConstructor(dtype, os);
     os << '(' << value << ", " << value << ')';
     return;
   }
-  if ((CodegenDType(op).MatchesCode(kDLInt) ||
-       CodegenDType(op).MatchesCode(kDLUInt)) &&
-      CodegenDType(op).bits() == 8) {
+  if ((dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
+      dtype.bits() == 8) {
     const auto *p = op->value.as<IntImmObj>();
     if (p && lanes == 4) {
       // make_int8x4
       int64_t v = CodegenInt(p) & 0xFF;
       v = (v << 24) | (v << 16) | (v << 8) | v;
-      if (CodegenDType(op).MatchesCode(kDLUInt)) {
+      if (dtype.MatchesCode(kDLUInt)) {
         os << "(uint)" << v;
       } else {
         os << "(int)" << v;
@@ -6703,16 +6573,16 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
           SSAGetID(PrintExpr(op->value), op->value.ty(),
                    tvm::SideEffect(op->value) == CallEffectKind::kPure);
       os << "tl::broadcast<";
-      PrintType(CodegenDType(op), os);
+      PrintType(dtype, os);
       os << ">(" << sval << ")";
       return;
     }
   }
 
-  if (CodegenDType(op).MatchesElementType(kDLFloat, 16)) {
+  if (dtype.MatchesElementType(kDLFloat, 16)) {
     std::string v = PrintExpr(op->value);
     os << "make_";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
     os << '(';
     if (lanes <= 8) {
       for (int i = 0; i < lanes / 2; ++i) {
@@ -6732,10 +6602,10 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
     return;
   }
 
-  if (CodegenDType(op).MatchesElementType(kDLBfloat, 16)) {
+  if (dtype.MatchesElementType(kDLBfloat, 16)) {
     std::string v = PrintExpr(op->value);
     os << "make_";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
     os << '(';
     if (lanes <= 8) {
       for (int i = 0; i < lanes / 2; ++i) {
@@ -6755,8 +6625,7 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
     return;
   }
 
-  if (CodegenDType(op).MatchesCode(kDLFloat) && CodegenDType(op).bits() == 32 &&
-      CodegenDType(op).lanes() == 8) {
+  if (dtype.MatchesCode(kDLFloat) && dtype.bits() == 32 && dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
     os << "make_ulonglong4(";
     for (int i = 0; i < 4; ++i) {
@@ -6777,17 +6646,14 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
   // store. PrintExpr is invoked twice per packed slot so the underlying
   // side-effecting call (curand) executes once per uint32 lane, matching
   // the lane count.
-  if ((CodegenDType(op).MatchesCode(kDLInt) ||
-       CodegenDType(op).MatchesCode(kDLUInt)) &&
-      CodegenDType(op).bits() == 32 && CodegenDType(op).lanes() > 4 &&
-      CodegenDType(op).lanes() % 2 == 0) {
-    int lanes = CodegenDType(op).lanes();
+  if ((dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
+      dtype.bits() == 32 && dtype.lanes() > 4 && dtype.lanes() % 2 == 0) {
+    int lanes = dtype.lanes();
     std::string v = PrintExpr(op->value);
-    const char *u64 = CodegenDType(op).MatchesCode(kDLUInt)
-                          ? "unsigned long long"
-                          : "long long";
+    const char *u64 =
+        dtype.MatchesCode(kDLUInt) ? "unsigned long long" : "long long";
     os << "make_";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
     os << '(';
     for (int i = 0; i < lanes / 2; ++i) {
       if (i != 0)
@@ -6804,8 +6670,7 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
   // it, which covers every lane count uniformly (including 64 lanes for
   // 256-bit vectorization on sm_100+). Side-effecting values fall through to
   // the generic path, which re-evaluates the expression once per lane.
-  if (CodegenDType(op).MatchesElementType(kDLFloat4_e2m1fn, 4) &&
-      lanes % 2 == 0 &&
+  if (dtype.MatchesElementType(kDLFloat4_e2m1fn, 4) && lanes % 2 == 0 &&
       tvm::SideEffect(op->value) <= CallEffectKind::kReadState) {
     std::string sval =
         SSAGetID(PrintExpr(op->value), op->value.ty(),
@@ -6814,7 +6679,7 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
       os << "tl::make_fp4_vec<fp4_e2_2_t>(" << sval << ", " << sval << ")";
     } else {
       os << "tl::broadcast<";
-      PrintType(CodegenDType(op), os);
+      PrintType(dtype, os);
       os << ">(tl::make_fp4_vec<fp4_e2_2_t>(" << sval << ", " << sval << "))";
     }
     return;
@@ -6824,13 +6689,13 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
   // Restricted to side-effect-free values -- an impure value (e.g. an rng
   // call) must be re-evaluated per lane, which the generic fallback below
   // preserves by passing one argument per lane to tl::make_vec.
-  if (CodegenIsFloat8(CodegenDType(op)) && lanes >= 2 &&
+  if (CodegenIsFloat8(dtype) && lanes >= 2 &&
       tvm::SideEffect(op->value) <= CallEffectKind::kReadState) {
     std::string sval =
         SSAGetID(PrintExpr(op->value), op->value.ty(),
                  tvm::SideEffect(op->value) == CallEffectKind::kPure);
     os << "tl::broadcast<";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
     os << ">(" << sval << ")";
     return;
   }
@@ -6838,9 +6703,8 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
   // Note that packed 4-bit broadcast cannot trivially fallback to the
   // generic make_<Type>(v, ...) path, as it can emit malformed make_int16_t()
   // calls that cause nvcc compilation errors when lanes==4.
-  if ((CodegenDType(op).MatchesCode(kDLInt) ||
-       CodegenDType(op).MatchesCode(kDLUInt)) &&
-      CodegenDType(op).bits() == 4) {
+  if ((dtype.MatchesCode(kDLInt) || dtype.MatchesCode(kDLUInt)) &&
+      dtype.bits() == 4) {
     const auto *p = op->value.as<IntImmObj>();
 
     // Materialize for reuse to avoid side-effects.
@@ -6871,21 +6735,19 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
     };
 
     if (lanes == 4) {
-      os << (CodegenDType(op).MatchesCode(kDLUInt) ? "(uint16_t)"
-                                                   : "(int16_t)");
+      os << (dtype.MatchesCode(kDLUInt) ? "(uint16_t)" : "(int16_t)");
       emit_packed_field(4);
       return;
     } else if (lanes == 8) {
-      os << (CodegenDType(op).MatchesCode(kDLUInt) ? "(uint)" : "(int)");
+      os << (dtype.MatchesCode(kDLUInt) ? "(uint)" : "(int)");
       emit_packed_field(8);
       return;
     } else if (lanes == 16 || lanes == 32 || lanes == 64) {
       // Carrier types are (u)int2/(u)int4/(u)longlong4: replicate one packed
       // 32-bit field (8 nibbles) across the vector.
       os << "tl::broadcast<";
-      PrintType(CodegenDType(op), os);
-      os << ">("
-         << (CodegenDType(op).MatchesCode(kDLUInt) ? "(uint)" : "(int)");
+      PrintType(dtype, os);
+      os << ">(" << (dtype.MatchesCode(kDLUInt) ? "(uint)" : "(int)");
       emit_packed_field(8);
       os << ")";
       return;
@@ -6895,12 +6757,12 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
   if (auto call = op->value.as<CallObj>()) {
     if (this->curand_random_generator_state_type ==
         "curandStatePhilox4_32_10_t") {
-      if (IsCodegenOp(call, "tl.rng_rand") && lanes == 4) {
+      if (call->op.same_as(tl::rng_rand()) && lanes == 4) {
         os << "curand4(&" << this->curand_random_generator_state << ")";
         return;
       }
-      if (IsCodegenOp(call, "tl.rng_rand_float")) {
-        int bits = CodegenDType(call).bits();
+      if (call->op.same_as(tl::rng_rand_float())) {
+        int bits = call->ty.as_or_throw<PrimType>().bits();
         std::string dist = call->args[0].as<StringImmObj>()->value;
         if (bits == 32) {
           if (lanes == 4) {
@@ -6925,8 +6787,8 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
                    "curandStateMRG32k3a_t" ||
                this->curand_random_generator_state_type ==
                    "curandStateXORWOW_t") {
-      if (IsCodegenOp(call, "tl.rng_rand_float")) {
-        int bits = CodegenDType(call).bits();
+      if (call->op.same_as(tl::rng_rand_float())) {
+        int bits = call->ty.as_or_throw<PrimType>().bits();
         std::string dist = call->args[0].as<StringImmObj>()->value;
         if (bits == 32) {
           if (lanes == 2 && dist == "normal") {
@@ -6946,15 +6808,14 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
   }
 
   std::string v = PrintExpr(op->value);
-  if (CodegenDType(op).MatchesElementType(kDLFloat4_e2m1fn, 4) ||
-      CodegenIsFloat8(CodegenDType(op))) {
+  if (dtype.MatchesElementType(kDLFloat4_e2m1fn, 4) || CodegenIsFloat8(dtype)) {
     // Only side-effecting fp4/fp8 values reach here (pure ones take the
     // tl::broadcast branches above); the variadic packer takes one argument
     // per lane, so the expression is re-evaluated per lane as required.
-    PrintVecConstructor(CodegenDType(op), os);
+    PrintVecConstructor(dtype, os);
   } else {
     os << "make_";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
   }
   os << '(';
   for (int i = 0; i < lanes; ++i) {
@@ -6967,24 +6828,25 @@ void CodeGenTileLangCUDA::Dispatch_(const prim::BroadcastObj *op,
 
 inline void PrintConst(const FloatImmObj *op, std::ostream &os,
                        CodeGenTileLangCUDA *p) { // NOLINT(*)
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
   // Type code is kBFloat/kFloat16
   // which is indeed CUTLASS supported types currently
-  if (CodegenDType(op).MatchesElementType(kDLBfloat, 16) ||
-      CodegenDType(op).MatchesElementType(kDLFloat, 16)) {
+  if (dtype.MatchesElementType(kDLBfloat, 16) ||
+      dtype.MatchesElementType(kDLFloat, 16)) {
     std::ostringstream temp;
     if (std::isinf(op->value)) {
       if (op->value < 0) {
         temp << "-";
       }
       temp << "std::numeric_limits<";
-      p->PrintType(CodegenDType(op), temp);
+      p->PrintType(dtype, temp);
       temp << ">::infinity()";
     } else if (std::isnan(op->value)) {
       temp << "std::numeric_limits<";
-      p->PrintType(CodegenDType(op), temp);
+      p->PrintType(dtype, temp);
       temp << ">::quiet_NaN()";
     } else {
-      p->PrintType(CodegenDType(op), temp);
+      p->PrintType(dtype, temp);
       temp << '(' << FlexibleHexFormat(op->value) << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
@@ -6996,7 +6858,7 @@ inline void PrintConst(const FloatImmObj *op, std::ostream &os,
   // Type code is kTensorFloat32
   // infinity() and quiet_NaN() for tfloat32_t are not inlined in CUTLASS
   // currently
-  if (tl::IsTensorFloat32(CodegenDType(op))) {
+  if (tl::IsTensorFloat32(dtype)) {
     std::ostringstream temp;
     if (std::isinf(op->value)) {
       if (op->value < 0) {
@@ -7006,7 +6868,7 @@ inline void PrintConst(const FloatImmObj *op, std::ostream &os,
     } else if (std::isnan(op->value)) {
       temp << "tfloat32_t::bitcast(0x7fffffff)";
     } else {
-      p->PrintType(CodegenDType(op), temp);
+      p->PrintType(dtype, temp);
       temp << '(' << std::hexfloat << op->value << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
       temp << ')';
@@ -7016,28 +6878,26 @@ inline void PrintConst(const FloatImmObj *op, std::ostream &os,
     return;
   }
   // Type code is kFloat8_e5m2 or kE4M4Float
-  if (CodegenIsFloat8(CodegenDType(op)) || CodegenIsFloat4(CodegenDType(op))) {
+  if (CodegenIsFloat8(dtype) || CodegenIsFloat4(dtype)) {
     // e5m2 inf/NaN have no float-literal spelling; emit the bit pattern.
-    if (CodegenDType(op).MatchesElementType(kDLFloat8_e5m2, 8) &&
-        std::isinf(op->value)) {
-      p->PrintType(CodegenDType(op), os);
+    if (dtype.MatchesElementType(kDLFloat8_e5m2, 8) && std::isinf(op->value)) {
+      p->PrintType(dtype, os);
       os << "::bitcast(" << (op->value < 0 ? "0xfc" : "0x7c") << ")";
       return;
     }
-    if (CodegenDType(op).MatchesElementType(kDLFloat8_e5m2, 8) &&
-        std::isnan(op->value)) {
-      p->PrintType(CodegenDType(op), os);
+    if (dtype.MatchesElementType(kDLFloat8_e5m2, 8) && std::isnan(op->value)) {
+      p->PrintType(dtype, os);
       os << "::bitcast(0x7e)";
       return;
     }
-    p->PrintType(CodegenDType(op), os);
+    p->PrintType(dtype, os);
     os << '(' << FlexibleHexFormat(op->value) << 'f';
     os << "/*" << std::scientific << op->value << "*/";
     os << ')';
     return;
   }
   // Type code is kFloat64/kFloat32 (kFloat16 is handled above)
-  switch (CodegenDType(op).bits()) {
+  switch (dtype.bits()) {
   case 64:
   case 32: {
     std::ostringstream temp;
@@ -7045,14 +6905,14 @@ inline void PrintConst(const FloatImmObj *op, std::ostream &os,
       if (op->value < 0) {
         temp << "-";
       }
-      temp << ((CodegenDType(op).bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
+      temp << ((dtype.bits() == 32) ? "CUDART_INF_F" : "CUDART_INF");
       p->need_math_constants_h_ = true;
     } else if (std::isnan(op->value)) {
-      temp << ((CodegenDType(op).bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
+      temp << ((dtype.bits() == 32) ? "CUDART_NAN_F" : "CUDART_NAN");
       p->need_math_constants_h_ = true;
     } else {
       temp << FlexibleHexFormat(op->value);
-      if (CodegenDType(op).bits() == 32)
+      if (dtype.bits() == 32)
         temp << 'f';
       temp << "/*" << std::scientific << op->value << "*/";
     }
@@ -7062,7 +6922,7 @@ inline void PrintConst(const FloatImmObj *op, std::ostream &os,
   }
   default:
     TVM_FFI_THROW(InternalError)
-        << "Bad bit-width for float: " << CodegenDType(op) << "\n";
+        << "Bad bit-width for float: " << dtype << "\n";
   }
 }
 
@@ -7140,18 +7000,18 @@ int32_t CodeGenTileLangCUDA::GetWmmaFragmentSize(const std::string &scope,
 void CodeGenTileLangCUDA::HandleVolatileLoads(const std::string &value,
                                               const TensorLoadObj *op,
                                               std::ostream &os) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
   // Only the physical access is volatile, not the resulting register value.
   // CUTLASS BF16 cannot copy a volatile object: load its integer storage member
   // once and construct the same BF16 bits in a non-volatile temporary.
-  if (CodegenDType(op).IsScalar() &&
-      CodegenDType(op).MatchesElementType(kDLBfloat, 16) &&
+  if (dtype.IsScalar() && dtype.MatchesElementType(kDLBfloat, 16) &&
       IsVolatile(op->source.as_or_throw<TensorVar>().get())) {
     os << "bfloat16_t::bitcast((" << value << ").storage)";
-  } else if ((CodegenDType(op).MatchesElementType(kDLFloat, 16) ||
-              CodegenDType(op).MatchesElementType(kDLBfloat, 16)) &&
+  } else if ((dtype.MatchesElementType(kDLFloat, 16) ||
+              dtype.MatchesElementType(kDLBfloat, 16)) &&
              IsVolatile(op->source.as_or_throw<TensorVar>().get())) {
     os << "(";
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
     os << ")(" << value << ")";
   } else {
     os << value;
@@ -7357,7 +7217,7 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
       body,
       [this](const CallObj *call, ffi::StructuralVisitorObj *visitor)
           -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
-        if (IsCodegenOp(call, "tl.rng_init") &&
+        if (call->op.same_as(tl::rng_init()) &&
             !rng_state_name_map_.count(call)) {
           TVM_FFI_CHECK_GE(call->args.size(), 4, ValueError);
           need_curand_kernel_h_ = true;

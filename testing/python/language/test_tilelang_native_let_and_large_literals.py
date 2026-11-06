@@ -1,5 +1,7 @@
 """Source Bind spelling and signed-width literals stay native and executable."""
 
+from tilelang.language import _construction
+
 import numpy as np
 import pytest
 import tvm_ffi
@@ -7,7 +9,6 @@ from tvm_tirx import ir, sym, tirx
 
 import tilelang
 import tilelang.language as T
-from tilelang.language import _native
 
 
 @pytest.mark.parametrize(
@@ -23,7 +24,7 @@ def test_tensor_shape_literals_choose_the_source_signed_width(value, dtype):
 
 @pytest.mark.parametrize("value,dtype", [(-(1 << 31), "int32"), (-(1 << 31) - 1, "int64"), (-(1 << 63), "int64"), (True, "bool")])
 def test_loop_literal_conversion_does_not_narrow_or_retype_bool(value, dtype):
-    expression = _native._expr(value)
+    expression = _construction.as_expr(value)
     assert expression.ty == ir.PrimType(dtype)
     assert int(expression.value) == int(value)
 

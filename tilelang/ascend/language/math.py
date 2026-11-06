@@ -1,8 +1,8 @@
 """Ascend scalar math expressed with common TIR operations."""
 
-from tilelang.language import _native
+from tilelang.language import _construction
+from tvm_tirx import ir as _ir
 
-from tilelang.language import _native as tirx
 
 from tilelang.language.common import rsqrt as _common_rsqrt, sqrt as _common_sqrt
 from tilelang.language.kernel import KernelLaunchFrame
@@ -13,7 +13,7 @@ from .kernel import _get_current_simtvf
 __all__ = ["rsqrt"]
 
 
-def rsqrt(x, *, dtype=None) -> tirx.PrimExpr:
+def rsqrt(x, *, dtype=None) -> _ir.Expr:
     """Compose scalar float32 reciprocal sqrt, preserving existing VF intrinsics.
 
     As with the common math wrappers, the input determines the result dtype.
@@ -23,6 +23,6 @@ def rsqrt(x, *, dtype=None) -> tirx.PrimExpr:
         return _common_rsqrt(x, dtype=dtype)
 
     root = _common_sqrt(x, dtype=dtype)
-    if _native.dtype_of(root) != "float32":
+    if _construction.dtype_of(root) != "float32":
         return _common_rsqrt(x, dtype=dtype)
-    return tirx.const(1, _native.dtype_of(root)) / root
+    return _ir.const(1, _construction.dtype_of(root)) / root

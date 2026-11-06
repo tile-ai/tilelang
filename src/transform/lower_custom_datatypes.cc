@@ -27,6 +27,7 @@
  * rewriting use the native shared IR, without an old Buffer/object registry.
  */
 #include <tvm/ffi/dtype.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/function.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/expr.h>
@@ -35,8 +36,6 @@
 #include <tvm/tirx/transform.h>
 
 #include <string>
-
-#include "op/native_utils.h"
 
 namespace tvm::tl {
 namespace {
@@ -249,10 +248,12 @@ tirx::Function Lower(tirx::Function function) {
   if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
     return function;
   bool needed = false;
-  VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &node) {
-    if (const auto *type = node.as<PrimTypeObj>())
-      needed |= Registered(ffi::GetRef<PrimType>(type));
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      function->body,
+      [&](const PrimTypeObj *type) -> ffi::Expected<ffi::WalkResult> {
+        needed |= Registered(ffi::GetRef<PrimType>(type));
+        return ffi::WalkResult::Advance();
+      });
   if (!needed)
     return function;
   auto lowerer = ffi::make_object<CustomDatatypeLowerer>(
@@ -267,14 +268,15 @@ tirx::Function Lower(tirx::Function function) {
   auto attrs = lowerer->Mutate(function->attrs)
                    .as_or_throw<ffi::UnchangedOr<DictAttrs>>()
                    .ValueOrUnchanged(function->attrs);
-  VisitNativePostOrder(body, [&](const ffi::ObjectRef &node) {
-    if (const auto *expression = node.as<ExprObj>()) {
-      if (const auto *type = expression->ty.as<PrimTypeObj>())
-        TVM_FFI_CHECK(!Registered(ffi::GetRef<PrimType>(type)), TypeError)
-            << "Unlowered custom datatype expression before host codegen: "
-            << expression->GetTypeKey();
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const ExprObj *expression) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *type = expression->ty.as<PrimTypeObj>())
+          TVM_FFI_CHECK(!Registered(ffi::GetRef<PrimType>(type)), TypeError)
+              << "Unlowered custom datatype expression before host codegen: "
+              << expression->GetTypeKey();
+
+        return ffi::WalkResult::Advance();
+      });
   return tirx::Function(params, body, function->ret_type, attrs, function->loc);
 }
 } // namespace

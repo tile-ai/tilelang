@@ -23,7 +23,9 @@
 #include "ascend/transform/auto_schedule/multi_buffer.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/auto_schedule/task_analysis.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
+#include "ir/tensor_utils.h"
 
 #include <tvm/ffi/reflection/registry.h>
 
@@ -96,7 +98,7 @@ ffi::Map<ffi::String, ffi::Any> AnalyzeSchedule(RegionStmt root,
 
 ffi::Map<ffi::String, ffi::Any> AnalyzeMemory(Stmt body, Stmt definitions,
                                               bool physical) {
-  NativeStorageContext storage;
+  auto storage = MakeAscendStorageProvenance();
   storage.Collect(definitions);
   auto detector = ffi::make_object<MemoryAccessDetector>(
       physical ? MemoryAccessDetector::AccessMode::kPhysical
@@ -115,7 +117,7 @@ ffi::Array<ffi::Any> InspectStorage(Stmt definitions,
                                     ffi::Array<TensorVar> tensors,
                                     ffi::Array<ffi::Array<PrimExpr>> indices) {
   TVM_FFI_CHECK_EQ(tensors.size(), indices.size(), ValueError);
-  NativeStorageContext context;
+  auto context = MakeAscendStorageProvenance();
   context.Collect(definitions);
   auto analyzer = CreateTileLangAnalyzer();
   ffi::Array<ffi::Any> results;
@@ -299,7 +301,7 @@ bool InspectRegionConflict(Stmt definitions, TensorRegion lhs, TensorRegion rhs,
                            ffi::Array<PrimExpr> rhs_conditions,
                            Optional<PrimExpr> lhs_pitch,
                            Optional<PrimExpr> rhs_pitch) {
-  NativeStorageContext storage;
+  auto storage = MakeAscendStorageProvenance();
   storage.Collect(definitions);
   ConstrSet a_context, b_context;
   for (const auto &condition : lhs_conditions)
@@ -457,7 +459,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
       .def("tl.testing.InspectAscendMultiBufferPlan", InspectMultiBufferPlan)
       .def("tl.testing.CanBroadcastAscendFill",
            [](Stmt stmt, Var storage, Stmt definitions) {
-             NativeStorageContext context;
+             auto context = MakeAscendStorageProvenance();
              context.Collect(definitions);
              return CanBroadcastFillToStorage(stmt, storage, context);
            })
@@ -473,11 +475,12 @@ TVM_FFI_STATIC_INIT_BLOCK() {
            })
       .def("tl.testing.CompareAscendStorage",
            [](Stmt definitions, TensorVar lhs, TensorVar rhs) {
-             NativeStorageContext context;
+             auto context = MakeAscendStorageProvenance();
              context.Collect(definitions);
              return ffi::Map<ffi::String, ffi::Any>{
                  {"same_storage", context.SameStorage(lhs, rhs)},
-                 {"disjoint", context.ProvenDisjoint(lhs, rhs)}};
+                 {"disjoint", ProvenDisjointAscendStorage(
+                                  context.Address(lhs), context.Address(rhs))}};
            })
       .def("tl.testing.RoundTripAscendSchedule",
            [](RegionStmt root, bool clone) {
@@ -550,8 +553,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                      if (!changed && node->IsScope()) {
                        auto *scope = static_cast<ScopeNode *>(node);
                        if (IsTaskMetadataStatement(scope->shell)) {
-                         scope->shell =
-                             MakeNativeAnnotation({}, scope->shell->loc);
+                         scope->shell = MakeAnnotation({}, scope->shell->loc);
                          changed = true;
                        }
                      }

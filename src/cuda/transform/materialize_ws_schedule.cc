@@ -56,14 +56,20 @@
  * pipeline protection.
  */
 
+#include "ir/loop_math.h"
+#include "ir/stmt_functor.h"
+#include "ir/tensor_utils.h"
+#include "transform/common/pipeline_tensor.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_mutate.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -96,7 +102,8 @@
 
 #include "./auto_schedule/memory_detector.h"
 #include "./ws_analysis.h"
-#include "./ws_native.h"
+#include "cuda/transform/ws_analysis.h"
+#include "cuda/transform/ws_kernel_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -335,8 +342,15 @@ struct Scope : Operation {
       if (!s->orig_loop.defined())
         continue; // the root
       auto uses_outer = [&outer](const PrimExpr &e) {
-        return UsesAnyVar(
-            e, [&outer](const VarObj *v) { return outer.count(v) != 0; });
+        return ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+                   e,
+                   [&outer](const VarObj *v) -> ffi::Expected<ffi::WalkResult> {
+                     return (outer.count(v) != 0)
+                                ? ffi::WalkResult::Interrupt(
+                                      ffi::VisitInterrupt(ffi::GetRef<Var>(v)))
+                                : ffi::WalkResult::Skip();
+                   })
+            .has_value();
       };
       if (uses_outer(s->orig_loop->begin) ||
           uses_outer(LoopExtent(s->orig_loop.get())))
@@ -499,7 +513,7 @@ bool UsesAsyncProxy(const Call &call, const Target &target) {
 // ---------------------------------------------------------------------------
 class WSScheduleMaterializer {
 public:
-  WSScheduleMaterializer(NativeWSKernel kernel, PrimVar thread_var,
+  WSScheduleMaterializer(WSKernelAnalysis kernel, PrimVar thread_var,
                          Target target)
       : kernel_(std::move(kernel)), thread_var_(std::move(thread_var)),
         target_(std::move(target)) {}
@@ -1200,24 +1214,26 @@ private:
       const auto *ev = op.stmt.as<EvaluateObj>();
       const CallObj *direct = ev ? ev->value.as<CallObj>() : nullptr;
       const String &op_id = id;
-      VisitNativePostOrder(op.stmt, [&](const ObjectRef &node) {
-        const auto *call = node.as<CallObj>();
-        if (!call || call->op.same_as(region()))
-          return;
-        TileOperator tile_op = ParseOperator(GetRef<Call>(call));
-        OpAtom atom = ClassifyTileOp(tile_op, target_);
-        if (call == direct) {
-          op.atom = atom;
-        } else {
-          ICHECK(atom == OpAtom::kSync)
-              << "ws_schedule: op '" << op_id << "' nests an asynchronous "
-              << "instruction inside a compound statement; make it a "
-              << "directly scheduled op so its barrier can be wired:\n"
-              << op.stmt;
-        }
-        op.uses_async_proxy =
-            op.uses_async_proxy || UsesAsyncProxy(GetRef<Call>(call), target_);
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          op.stmt, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+            if (call->op.same_as(region()))
+              return ffi::WalkResult::Advance();
+
+            TileOperator tile_op = ParseOperator(GetRef<Call>(call));
+            OpAtom atom = ClassifyTileOp(tile_op, target_);
+            if (call == direct) {
+              op.atom = atom;
+            } else {
+              ICHECK(atom == OpAtom::kSync)
+                  << "ws_schedule: op '" << op_id << "' nests an asynchronous "
+                  << "instruction inside a compound statement; make it a "
+                  << "directly scheduled op so its barrier can be wired:\n"
+                  << op.stmt;
+            }
+            op.uses_async_proxy = op.uses_async_proxy ||
+                                  UsesAsyncProxy(GetRef<Call>(call), target_);
+            return ffi::WalkResult::Advance();
+          });
     }
     // Fold the scope summaries, children first.
     std::vector<Scope *> by_depth;
@@ -1740,15 +1756,16 @@ private:
         def_op;
     for (const auto &[id, op] : ops_) {
       const Operation *op_ptr = op.get();
-      VisitNativePostOrder(op->stmt, [&](const ObjectRef &node) {
-        if (const auto *bind = node.as<BindObj>()) {
-          auto [it, inserted] = def_op.emplace(bind->var, op_ptr);
-          ICHECK(inserted || it->second == op_ptr)
-              << "ws_schedule: var '" << bind->var->name
-              << "' is bound by ops '" << it->second->id << "' and '"
-              << op_ptr->id << "'";
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          op->stmt, [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+            auto [it, inserted] = def_op.emplace(bind->var, op_ptr);
+            ICHECK(inserted || it->second == op_ptr)
+                << "ws_schedule: var '" << bind->var->name
+                << "' is bound by ops '" << it->second->id << "' and '"
+                << op_ptr->id << "'";
+
+            return ffi::WalkResult::Advance();
+          });
     }
     if (def_op.empty())
       return;
@@ -1756,19 +1773,20 @@ private:
     // The vars an op (or a guard expression) uses that other ops define.
     auto scan_uses = [&](const ObjectRef &root, const Operation *self,
                          std::vector<Var> *uses) {
-      VisitNativePostOrder(root, [&](const ObjectRef &node) {
-        if (const auto *v = node.as<VarObj>()) {
-          Var var = GetRef<Var>(v);
-          auto it = def_op.find(var);
-          if (it == def_op.end() || it->second == self)
-            return;
-          auto seen =
-              std::find_if(uses->begin(), uses->end(),
-                           [&](const Var &u) { return u.same_as(var); });
-          if (seen == uses->end())
-            uses->push_back(var);
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          root, [&](const VarObj *v) -> ffi::Expected<ffi::WalkResult> {
+            Var var = GetRef<Var>(v);
+            auto it = def_op.find(var);
+            if (it == def_op.end() || it->second == self)
+              return ffi::WalkResult::Advance();
+            auto seen =
+                std::find_if(uses->begin(), uses->end(),
+                             [&](const Var &u) { return u.same_as(var); });
+            if (seen == uses->end())
+              uses->push_back(var);
+
+            return ffi::WalkResult::Advance();
+          });
     };
 
     for (const auto &role_ptr : roles_) {
@@ -1837,10 +1855,12 @@ private:
                   << "definition from this use";
             }
           }
-          VisitNativePostOrder(op.stmt, [&](const ObjectRef &node) {
-            if (const auto *bind = node.as<BindObj>())
-              defined.insert(bind->var);
-          });
+          ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+              op.stmt,
+              [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+                defined.insert(bind->var);
+                return ffi::WalkResult::Advance();
+              });
         }
       };
       walk(*root_scope_, {});
@@ -2187,15 +2207,16 @@ private:
     std::map<std::pair<const VarObj *, bool>, TensorVar> alias_cache;
 
     Stmt Rewrite(const Stmt &stmt) {
-      VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-        if (const auto *bind = node.as<BindObj>())
-          local_defs.insert(bind->var);
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          stmt, [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+            local_defs.insert(bind->var);
+            return ffi::WalkResult::Advance();
+          });
       auto body = Mutate(stmt).ValueOrUnchanged(stmt);
       if (aliases.empty())
         return body;
       aliases.push_back(body);
-      return WSSequence(aliases, stmt->loc);
+      return SeqStmt(aliases, stmt->loc);
     }
 
     Optional<TensorVar> VersionedRoot(const TensorVar &tensor) const {
@@ -2292,11 +2313,11 @@ private:
       }
       const auto *name = op->op.as<OpObj>();
       bool saved = region_write_;
-      if (name && name->name == "tl.access_ptr" && op->args.size() >= 3)
+      if (name && name == tl::access_ptr().get() && op->args.size() >= 3)
         region_write_ =
             GetConservativeAccessMask(op->args[2].as_or_throw<PrimExpr>()) &
             kAccessWrite;
-      else if (name && name->name == "tl.ptr_access" && op->args.size() >= 4)
+      else if (name && name == tl::ptr_access().get() && op->args.size() >= 4)
         region_write_ =
             GetConservativeAccessMask(op->args[3].as_or_throw<PrimExpr>()) &
             kAccessWrite;
@@ -2428,7 +2449,10 @@ private:
   // The op's source guard is NOT applied here: EmitScopeBody folds it
   // into the entry's guard.
   Stmt EmitOp(const RoleCtx &ctx, const Operation &op) const {
-    Stmt body = WSSubstitute(op.stmt, ctx.subs);
+    auto remapper = make_object<LayoutMapMutator>();
+    for (const auto &[var, value] : ctx.subs)
+      remapper->VarRemapSet(var, value);
+    Stmt body = remapper->Mutate(op.stmt).ValueOrUnchanged(op.stmt);
     if (op.atom != OpAtom::kSync)
       body = ConvertAtomCall(ctx, op, std::move(body));
     // Versioning may need a Bind prelude for a captured alias. Convert the
@@ -2441,31 +2465,65 @@ private:
   // ops in the same slice see the fresh scalar/pointer/tensor Bind identities.
   Stmt FreshenBindDefs(RoleCtx &ctx, Stmt stmt) {
     Map<Var, Var> remap;
-    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
-        stmt, [&](const Var &var, TVMFFIDefRegionKind kind) {
-          if (kind != kTVMFFIDefRegionKindNone)
+    ffi::StructuralVisit(
+        stmt,
+        [](const Call &call, ffi::StructuralVisitorObj *visitor) {
+          return call->op.same_as(layout_map_op())
+                     ? VisitLayoutMapCall(call.get(), visitor)
+                     : visitor->DefaultVisitExpected(call);
+        },
+        [&](const Var &var, ffi::StructuralVisitorObj *visitor) {
+          if (visitor->def_region_kind() != kTVMFFIDefRegionKindNone)
             remap.Set(var, var);
-          return ffi::WalkResult::Advance();
+          return visitor->DefaultVisitExpected(var);
         });
     if (remap.empty())
       return stmt;
     Stmt result =
-        ffi::StructuralMap<ffi::WalkOrder::kPostOrder>(
+        ffi::StructuralMutate(
             stmt,
-            [&](const Var &var, TVMFFIDefRegionKind kind) -> Var {
-              auto mapped = remap.Get(var);
-              if (!mapped)
-                return var;
-              if (!mapped->same_as(var))
-                return *mapped;
-              if (kind == kTVMFFIDefRegionKindNone)
-                return var;
-              Var fresh(var->name + "_ws" + std::to_string(fresh_bind_count_++),
-                        var->ty, var->loc);
-              remap.Set(var, fresh);
-              return fresh;
+            [](const Call &call, ffi::StructuralMutatorObj *mutator,
+               InplaceMode mode) {
+              return call->op.same_as(layout_map_op())
+                         ? MutateLayoutMapCall(call.get(), mutator, mode)
+                         : mutator->DefaultMutateExpected(call, mode);
+            },
+            [&](const Var &var, ffi::StructuralMutatorObj *mutator,
+                InplaceMode mode) -> ffi::Expected<ffi::UnchangedOr<ffi::Any>> {
+              TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(
+                  ffi::Any, existing, mutator->VarRemapGetExpected(var));
+              if (existing != nullptr) {
+                if (remap.count(var))
+                  remap.Set(var, existing.cast<Var>());
+                return existing;
+              }
+              TVM_FFI_S_MUTATE_ASSIGN_OR_RETURN(
+                  ffi::UnchangedOr<ffi::Any>, rewritten,
+                  mutator->DefaultMutateExpected(var, mode));
+              if (!remap.count(var))
+                return rewritten;
+              Var mapped = std::move(rewritten)
+                               .ValueOrUnchanged(ffi::Any(var))
+                               .cast<Var>();
+              if (mapped.same_as(var) &&
+                  mutator->def_region_kind() != kTVMFFIDefRegionKindNone) {
+                Var fresh(var->name + "_ws" +
+                              std::to_string(fresh_bind_count_++),
+                          mapped->ty, var->loc);
+                auto status = mutator->VarRemapSetExpected(var, fresh);
+                if (status.is_err())
+                  return ffi::Unexpected(std::move(status).error());
+                remap.Set(var, fresh);
+                return ffi::Any(fresh);
+              }
+              // Type rebuilding can already have created a fresh definition.
+              // Export that identity too, so later scheduled ops reuse it.
+              remap.Set(var, mapped);
+              if (mapped.same_as(var))
+                return ffi::Unchanged();
+              return ffi::Any(mapped);
             })
-            .as_or_throw<Stmt>();
+            .cast<Stmt>();
     for (const auto &[old, fresh] : remap)
       ctx.subs.Set(old, fresh);
     kernel_.memory->ObserveDefinitions(result);
@@ -2512,8 +2570,13 @@ private:
       const Operation *op =
           entries[i]->AsScope() ? nullptr : entries[i]->AsOperation();
       if (op != nullptr && op->guard.has_value()) {
+        auto remapper = make_object<StmtExprMutator>();
+        for (const auto &[var, value] : ctx.subs)
+          remapper->VarRemapSet(var, value);
+        PrimExpr source_guard = op->guard.value();
         PrimExpr src = RewriteOpExpr(
-            ctx, WSSubstitute(op->guard.value(), ctx.subs), op->sched_scope);
+            ctx, remapper->Mutate(source_guard).ValueOrUnchanged(source_guard),
+            op->sched_scope);
         guard = guard.has_value() ? guard.value() && src : src;
       }
       return guard;
@@ -2565,7 +2628,7 @@ private:
     return stmts;
   }
 
-  static SeqStmt SeqOrSingle(Array<Stmt> stmts) { return WSSequence(stmts); }
+  static SeqStmt SeqOrSingle(Array<Stmt> stmts) { return SeqStmt(stmts); }
 
   // A Bind must stay in scope for later entries, including their source
   // guards. Independent per-entry iteration guards would hide a prologue
@@ -2623,8 +2686,15 @@ private:
     // The uniform source guard: false skips the scope in all roles
     // together.
     if (scope.guard.has_value()) {
-      out = If(RewriteOpExpr(ctx, WSSubstitute(scope.guard.value(), ctx.subs)),
-               SeqStmt(std::move(out)));
+      auto remapper = make_object<StmtExprMutator>();
+      for (const auto &[var, value] : ctx.subs)
+        remapper->VarRemapSet(var, value);
+      PrimExpr source_guard = scope.guard.value();
+      out =
+          If(RewriteOpExpr(
+                 ctx,
+                 remapper->Mutate(source_guard).ValueOrUnchanged(source_guard)),
+             SeqStmt(std::move(out)));
     }
     return out;
   }
@@ -2643,8 +2713,12 @@ private:
     const PrimVar &orig_var = orig->var;
     PrimVar fresh(orig_var->name, orig_var.ty(), orig_var->loc);
     ctx.subs.Set(orig_var, fresh);
-    PrimExpr extent = WSSubstitute(LoopExtent(orig.get()), ctx.subs);
-    PrimExpr min = WSSubstitute(orig->begin, ctx.subs);
+    auto remapper = make_object<StmtExprMutator>();
+    for (const auto &[var, value] : ctx.subs)
+      remapper->VarRemapSet(var, value);
+    PrimExpr extent = LoopExtent(orig.get());
+    extent = remapper->Mutate(extent).ValueOrUnchanged(extent);
+    PrimExpr min = remapper->Mutate(orig->begin).ValueOrUnchanged(orig->begin);
     if (plan.shift > 0) {
       ICHECK(IsZero(min)) << "ws_schedule: stage offsets require 0-based loops";
     }
@@ -2654,9 +2728,11 @@ private:
     for (const auto &entry : scope.bodies[ctx.role->index]) {
       if (entry->AsScope() || entry->AsSync())
         continue;
-      VisitNativePostOrder(
-          entry->AsOperation()->stmt, [&](const ObjectRef &node) {
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          entry->AsOperation()->stmt,
+          [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
             has_definitions = has_definitions || node.as<BindObj>() != nullptr;
+            return ffi::WalkResult::Advance();
           });
     }
     Array<Stmt> result;
@@ -2718,16 +2794,25 @@ private:
     PrimExpr zero = IntImm(PrimType::Int(32), 0);
     // The condition is re-evaluated at every use.
     auto cond = [&]() {
-      return RewriteOpExpr(ctx,
-                           WSSubstitute(scope.orig_while->condition, ctx.subs));
+      auto remapper = make_object<StmtExprMutator>();
+      for (const auto &[var, value] : ctx.subs)
+        remapper->VarRemapSet(var, value);
+      const PrimExpr &condition = scope.orig_while->condition;
+      return RewriteOpExpr(
+          ctx, remapper->Mutate(condition).ValueOrUnchanged(condition));
     };
 
     Array<Stmt> result;
     TensorVar trips{ffi::UnsafeInit{}};
     if (plan.shift > 0) {
-      trips = WSLocalTensor({IntImm(PrimType::Int(32), 1)}, PrimType::Int(32),
-                            scope.id + "_trips", "local");
-      result.push_back(WSAllocate(trips));
+      trips = TensorVar(scope.id + "_trips",
+                        TensorType({IntImm(PrimType::Int(32), 1)},
+                                   PrimType::Int(32),
+                                   runtime::MemoryScope::Get("local")));
+      result.push_back(Bind(trips,
+                            Call((trips).ty(), alloc_tensor_op(), {},
+                                 std::nullopt, {(trips).ty()}, (trips)->loc),
+                            (trips)->loc));
       result.push_back(TensorStore(trips, {zero}, zero));
     }
     auto bump_trips = [&]() {
@@ -2772,11 +2857,15 @@ private:
     // Runtime phase counters where linearization is unsound.
     for (const auto &pipeline : pipelines_) {
       if (NeedsCounter(role, *pipeline)) {
-        TensorVar cnt =
-            WSLocalTensor({IntImm(PrimType::Int(32), 1)}, PrimType::Int(32),
-                          pipeline->name + "_phase", "local");
+        TensorVar cnt = TensorVar(
+            pipeline->name + "_phase",
+            TensorType({IntImm(PrimType::Int(32), 1)}, PrimType::Int(32),
+                       runtime::MemoryScope::Get("local")));
         ctx.counters.insert_or_assign(pipeline.get(), cnt);
-        stmts.push_back(WSAllocate(cnt));
+        stmts.push_back(Bind(cnt,
+                             Call((cnt).ty(), alloc_tensor_op(), {},
+                                  std::nullopt, {(cnt).ty()}, (cnt)->loc),
+                             (cnt)->loc));
         stmts.push_back(TensorStore(cnt, {IntImm(PrimType::Int(32), 0)},
                                     IntImm(PrimType::Int(32), 0)));
       }
@@ -2842,9 +2931,9 @@ private:
   // The roles carry their own setmaxnreg calls: mark the kernel as
   // custom warp specialization so AnnotateWarpGroupRegAlloc stays out.
   Stmt MarkCustomWS(Stmt body) const {
-    return MakeNativeAttribute(IntImm(PrimType::Int(32), 0),
-                               attr::kCustomWarpSpecialization, 1,
-                               SeqStmt(body), body->loc);
+    return MakeAttribute(IntImm(PrimType::Int(32), 0),
+                         attr::kCustomWarpSpecialization, 1, SeqStmt(body),
+                         body->loc);
   }
 
   // Rebuild explicit allocation definitions and operands. Type-carrying
@@ -2902,12 +2991,12 @@ private:
       ann.Set(attr::kLayoutMap, layouts);
     }
     kernel_.annotations = ann;
-    return RebuildNativeWSKernel(kernel_, body, replacements, extra);
+    return RebuildWSKernel(kernel_, body, replacements, extra);
   }
 
   // ---- state ---------------------------------------------------------------
 
-  NativeWSKernel kernel_;
+  WSKernelAnalysis kernel_;
   PrimVar thread_var_;
   Target target_;
   int num_warps_ = 0;
@@ -2929,10 +3018,10 @@ private:
 
 // Each native x-thread region carries its own closed schedule payload.
 tirx::Function MaterializeWSScheduleImpl(tirx::Function f) {
-  return RewriteNativeWSKernels(
+  return RewriteWSKernels(
       f,
-      [](NativeWSKernel kernel, PrimVar thread,
-         Target target) -> Optional<NativeWSResult> {
+      [](WSKernelAnalysis kernel, PrimVar thread,
+         Target target) -> Optional<WSKernelRewriteResult> {
         if (!kernel.annotations.count(kWSScheduleKey))
           return std::nullopt;
         for (const auto &region : kernel.wrappers)
@@ -2945,7 +3034,7 @@ tirx::Function MaterializeWSScheduleImpl(tirx::Function f) {
                    "threadIdx.x";
         WSScheduleMaterializer materializer(std::move(kernel), thread, target);
         auto body = materializer.Run();
-        return NativeWSResult{body, materializer.NumThreads()};
+        return WSKernelRewriteResult{body, materializer.NumThreads()};
       });
 }
 

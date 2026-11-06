@@ -4,8 +4,9 @@
  * views.
  */
 #include "../ir/alias_analysis.h"
-#include "../op/native_intrinsic.h"
-#include "../op/native_utils.h"
+#include "ir/annotations.h"
+#include "metal/op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -39,52 +40,56 @@ tirx::Function MarkReadOnly(tirx::Function function) {
     else if (parameters.count(root.value().get()))
       written.insert(root.value().get());
   };
-  VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
-    if (const auto *store = object.as<TensorStoreObj>())
-      mark(store->dest);
-    if (const auto *call = object.as<CallObj>()) {
-      // Creating local storage or an explicit alias does not modify inputs.
-      if (call->op.same_as(tirx::alloc_tensor_op()) ||
-          call->op.same_as(tirx::decl_tensor_op()))
-        return;
-      if (tvm::SideEffect(ffi::GetRef<Expr>(call)) <=
-          CallEffectKind::kReadState)
-        return;
-      if (const auto *op = call->op.as<OpObj>()) {
-        // These cooperative operations have explicit write operands. A load
-        // updates its fragment, a store updates its memory pointer, and MMA
-        // updates only its first fragment. Their other operands stay
-        // readable through const input pointers in Metal source. Nested
-        // operand calls are visited separately, so this cannot hide an
-        // opaque producer.
-        int destination = -1;
-        if (op->name == "tl.cooperative_tensor_load" ||
-            op->name == "tl.cooperative_tensor_fill" ||
-            op->name == "tl.cooperative_tensor_multiply_accumulate")
-          destination = 0;
-        else if (op->name == "tl.cooperative_tensor_store")
-          destination = 2;
-        if (destination >= 0) {
-          const auto operands = NativeIntrinsicOperands(call);
-          TVM_FFI_ICHECK_LT(static_cast<size_t>(destination), operands.size());
-          mark(operands[destination]);
-          return;
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      function->body,
+      [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *store = object.as<TensorStoreObj>())
+          mark(store->dest);
+        if (const auto *call = object.as<CallObj>()) {
+          // Creating local storage or an explicit alias does not modify inputs.
+          if (call->op.same_as(tirx::alloc_tensor_op()) ||
+              call->op.same_as(tirx::decl_tensor_op()))
+            return ffi::WalkResult::Advance();
+          if (tvm::SideEffect(ffi::GetRef<Expr>(call)) <=
+              CallEffectKind::kReadState)
+            return ffi::WalkResult::Advance();
+          if (const auto *op = call->op.as<OpObj>()) {
+            // These cooperative operations have explicit write operands. A load
+            // updates its fragment, a store updates its memory pointer, and MMA
+            // updates only its first fragment. Their other operands stay
+            // readable through const input pointers in Metal source. Nested
+            // operand calls are visited separately, so this cannot hide an
+            // opaque producer.
+            int destination = -1;
+            if (op == tl::cooperative_tensor_load().get() ||
+                op == tl::cooperative_tensor_fill().get() ||
+                op == tl::cooperative_tensor_multiply_accumulate().get())
+              destination = 0;
+            else if (op == tl::cooperative_tensor_store().get())
+              destination = 2;
+            if (destination >= 0) {
+              const auto operands = DecodeCallOperands(call);
+              TVM_FFI_ICHECK_LT(static_cast<size_t>(destination),
+                                operands.size());
+              mark(operands[destination]);
+              return ffi::WalkResult::Advance();
+            }
+          }
+          bool pointer_operand = false;
+          for (const Expr &operand : call->args) {
+            if (operand->ty.as<PtrTypeObj>() ||
+                operand->ty.as<tirx::TensorTypeObj>()) {
+              pointer_operand = true;
+              mark(operand);
+            }
+          }
+          // An opaque call can write through a previously escaped pointer even
+          // when its current signature has no direct pointer operand.
+          if (!pointer_operand)
+            written.insert(parameters.begin(), parameters.end());
         }
-      }
-      bool pointer_operand = false;
-      for (const Expr &operand : call->args) {
-        if (operand->ty.as<PtrTypeObj>() ||
-            operand->ty.as<tirx::TensorTypeObj>()) {
-          pointer_operand = true;
-          mark(operand);
-        }
-      }
-      // An opaque call can write through a previously escaped pointer even
-      // when its current signature has no direct pointer operand.
-      if (!pointer_operand)
-        written.insert(parameters.begin(), parameters.end());
-    }
-  });
+        return ffi::WalkResult::Advance();
+      });
   const bool noalias = function->GetAttr(tirx::attr::kNoAlias).value_or(false);
   if (!noalias && !written.empty())
     written.insert(parameters.begin(), parameters.end());

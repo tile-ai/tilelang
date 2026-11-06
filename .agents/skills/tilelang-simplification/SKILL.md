@@ -93,7 +93,7 @@ practical:
    integration;
 4. layouts, intrinsics, MMA/TMA paths, vectorization, and architecture-specific
    lowering;
-5. autotuning, profiler, carver, diagnostics, instrumentation, and developer
+5. autotuning, profiler, diagnostics, instrumentation, and developer
    tooling;
 6. CMake, packaging, tests, examples, benchmarks, maintenance scripts, and
    documentation.

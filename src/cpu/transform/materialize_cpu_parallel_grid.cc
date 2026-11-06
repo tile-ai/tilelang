@@ -9,6 +9,8 @@
 
 #include "cpu/op/builtin.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
+#include "ir/lexical_scope.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -69,7 +71,7 @@ bool IsTransparent(const RegionStmtObj *op) {
   // when rebuilding the grid. Other operators need their own analysis.
   return op->body_params.empty() && op->result_vars.empty() &&
          (op->op->name == "tl.attr" || op->op->name == "ir.scope" ||
-          op->op->name == "tl.lexical_scope");
+          op->op.same_as(tl::lexical_scope_op()));
 }
 
 bool IsDefinitionCall(const CallObj *op) {
@@ -77,9 +79,7 @@ bool IsDefinitionCall(const CallObj *op) {
                 op->op.same_as(tirx::decl_tensor_op()));
 }
 
-bool IsAnnotationCall(const CallObj *op) {
-  return op->op.same_as(Op::Get("tl.annotation"));
-}
+bool IsAnnotationCall(const CallObj *op) { return IsAnnotationCall(op); }
 
 struct StorageRef {
   Var root;

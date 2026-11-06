@@ -1,5 +1,9 @@
 """Concrete view, SIMD, and inline contracts found during frontend review."""
 
+from tilelang.language import _annotation_codec
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+
 import json
 
 import numpy as np
@@ -13,7 +17,6 @@ from tvm_tirx.script.ir_builder import IRBuilder
 
 import tilelang.ascend.language as A
 import tilelang.language as T
-from tilelang.language import _native
 
 
 @pytest.mark.parametrize("signed_index", [False, True])
@@ -67,7 +70,7 @@ def test_nested_views_and_explicit_bind_keep_the_original_storage():
     captured = []
 
     def check_storage(tile, view, nested, bound):
-        assert all(_native.tensor_storage_source(value).same_as(tile) for value in [view, nested, bound])
+        assert all(_tensor_spec.tensor_storage_source(value).same_as(tile) for value in [view, nested, bound])
         captured.extend([tile, view, nested, bound])
 
     @A.prim_func
@@ -77,7 +80,7 @@ def test_nested_views_and_explicit_bind_keep_the_original_storage():
             view = A.view(tile, shape=(16,))
             nested = A.view(view, shape=(4, 4))
             bound = T.bind(nested)
-            with _native.attr(0, "test_view_scope", 1):
+            with _annotation_codec.attr(0, "test_view_scope", 1):
                 check_storage(tile, view, nested, bound)
                 A.annotate_buffer_versions({tile: (2, "counter"), bound: (2, "counter")})
             check_storage(tile, view, nested, bound)
@@ -118,8 +121,8 @@ def test_unknown_pointer_call_does_not_prove_a_view_storage_alias():
     captured = []
 
     def check_storage(tile, unknown, view):
-        assert _native.tensor_storage_source(view).same_as(unknown)
-        assert not _native.tensor_storage_source(view).same_as(tile)
+        assert _tensor_spec.tensor_storage_source(view).same_as(unknown)
+        assert not _tensor_spec.tensor_storage_source(view).same_as(tile)
         captured.append(True)
 
     @A.prim_func
@@ -136,18 +139,18 @@ def test_unknown_pointer_call_does_not_prove_a_view_storage_alias():
 
 
 def test_view_alias_query_reads_the_active_native_builder_and_clears_with_it():
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("view_scope")
         tile = A.alloc_shared((16,), "float32")
         view = A.view(tile, shape=(4, 4))
-        assert _native.tensor_storage_source(view).same_as(tile)
+        assert _tensor_spec.tensor_storage_source(view).same_as(tile)
     assert tirx.analysis.check_well_formed(builder.get())
-    assert _native.tensor_storage_source(view).same_as(view)
-    with IRBuilder(), _native.prim_func():
+    assert _tensor_spec.tensor_storage_source(view).same_as(view)
+    with IRBuilder(), _construction.prim_func():
         T.func_name("different_builder")
         other = A.alloc_shared((16,), "float32")
-        assert _native.tensor_storage_source(view).same_as(view)
-        assert not _native.tensor_storage_source(view).same_as(other)
+        assert _tensor_spec.tensor_storage_source(view).same_as(view)
+        assert not _tensor_spec.tensor_storage_source(view).same_as(other)
 
 
 @pytest.mark.parametrize("frontend", ["tilelang", "native"])
@@ -290,7 +293,7 @@ def test_view_conflict_inside_nested_frame_does_not_leak_into_next_builder():
         def invalid():
             with T.sblock("metadata_owner"):
                 tile = A.alloc_shared((16,), "float32")
-                with _native.attr(0, "test_view_scope", 1):
+                with _annotation_codec.attr(0, "test_view_scope", 1):
                     view = A.view(tile, shape=(4, 4))
                     A.annotate_buffer_versions({tile: 2, view: 3})
 

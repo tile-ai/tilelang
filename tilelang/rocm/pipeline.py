@@ -59,7 +59,8 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.PlanAndUpdateBufferAllocationLocation()(mod)
     mod = tilelang.transform.HoistGlobalBufferAllocations()(mod)
-    mod = tilelang.transform.FinalizeAnnotations(target.kind.name)(mod)
+    mod = tilelang.transform.LowerSourceAllocations()(mod)
+    mod = tilelang.transform.LowerSourceAnnotations()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerTensorLayouts()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -105,4 +106,5 @@ def ROCMPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tirx.transform.BF16StorageLegalize()(mod)
     mod = tilelang.transform.HoistNonRestrictParams(finalize=True)(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
+    mod = tilelang.transform.VerifyLoweredAnnotations()(mod)
     return mod

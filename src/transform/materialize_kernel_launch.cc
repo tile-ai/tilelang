@@ -134,7 +134,7 @@ public:
     // Keep the source annotation owner even when the launch has no hints.
     // Later consumers need it to distinguish whole-block sblock_attr from
     // ordinary sequence metadata. Payloads remain explicit native uses, and
-    // FinalizeAnnotations replaces the owner with an ordinary lexical scope.
+    // LowerSourceAnnotations replaces the owner with an ordinary lexical scope.
     {
       Array<Any> scope_schema{
           "map", Array<Any>{Array<Any>{"str", "node"}, Array<Any>{"none"}},

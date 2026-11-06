@@ -61,7 +61,7 @@ def address_offset(access):
 
 def emit_source(value, tmp_path):
     value = run_pass("LowerAccessPtr", value)
-    value = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("ascend")(ir.IRModule({"main": value}))["main"]
+    value = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": value}))["main"]
     params, declarations = [], []
     for var in value.params:
         if isinstance(var.ty, tirx.TensorType):

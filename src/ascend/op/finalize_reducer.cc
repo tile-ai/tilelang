@@ -6,6 +6,7 @@
 #include "ascend/op/reduce.h"
 #include "backend/common/op/reduce.h"
 #include "backend/common/target_utils.h"
+#include "layout/expr_utils.h"
 #include "op/reducer.h"
 #include "support/check.h"
 

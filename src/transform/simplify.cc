@@ -3,8 +3,10 @@
  * \brief TileLang simplification policy over native statements and types.
  */
 #include "../ir/analyzer.h"
-#include "../op/native_utils.h"
+#include "ir/annotations.h"
 #include "tensor_descriptor.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/extra/structural_mutate.h>
@@ -106,6 +108,8 @@ BindingUsage CollectBindingUsage(const tirx::Function &function) {
       },
       [&](const Call &call, ffi::StructuralVisitorObj *visitor)
           -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
+        if (call->op.same_as(layout_map_op()))
+          return VisitLayoutMapCall(call.get(), visitor);
         TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(visitor->VisitExpected(call->attrs));
         return visitor->DefaultVisitExpected(call);
       },
@@ -121,7 +125,7 @@ BindingUsage CollectBindingUsage(const tirx::Function &function) {
       [&](const RegionStmt &region, ffi::StructuralVisitorObj *visitor)
           -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
         if (region->op->name == "tl.attr") {
-          auto fields = DecodeAttributeRegion(region.get());
+          auto fields = ReadAnnotations(region.get());
           result.has_volatile_memory |=
               fields.at("key").cast<ffi::String>() == "volatile_scope";
         }
@@ -137,10 +141,10 @@ BindingUsage CollectBindingUsage(const tirx::Function &function) {
   return result;
 }
 
-class UnusedBindRemover : public tirx::StmtExprMutator {
+class UnusedBindRemover : public tl::LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   explicit UnusedBindRemover(BindingUsage usage) : usage_(std::move(usage)) {}
 
@@ -157,7 +161,7 @@ public:
         return SeqStmt({}, op->loc);
       }
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   bool removed() const { return removed_; }
@@ -428,7 +432,7 @@ public:
     known_.reset();
     bool volatile_scope = false;
     if (op->op->name == "tl.attr") {
-      auto fields = DecodeAttributeRegion(op);
+      auto fields = ReadAnnotations(op);
       volatile_scope = fields.at("key").cast<ffi::String>() == "volatile_scope";
     }
     volatile_depth_ += volatile_scope;
@@ -536,10 +540,13 @@ private:
         SideEffect(value) > CallEffectKind::kReadState)
       return false;
     bool stable = true;
-    VisitNativePostOrder(value, [&](const ffi::ObjectRef &object) {
-      if (auto call = object.as<Call>())
-        stable &= SideEffect(*call) <= CallEffectKind::kPure;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        value,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (auto call = object.as<Call>())
+            stable &= SideEffect(*call) <= CallEffectKind::kPure;
+          return ffi::WalkResult::Advance();
+        });
     return stable;
   }
 
@@ -671,10 +678,12 @@ tirx::Function PruneUnusedParameters(tirx::Function function) {
     // pointer parameters retain their public positional ABI.
     bool used =
         !parameter->ty.as<tirx::TensorTypeObj>() || live.count(parameter.get());
-    VisitNativePostOrder(parameter->ty, [&](const ffi::ObjectRef &node) {
-      if (const auto *variable = node.as<VarObj>())
-        used |= live.count(variable) != 0;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        parameter->ty,
+        [&](const VarObj *variable) -> ffi::Expected<ffi::WalkResult> {
+          used |= live.count(variable) != 0;
+          return ffi::WalkResult::Advance();
+        });
     if (used)
       kept.push_back(parameter);
   }

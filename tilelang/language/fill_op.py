@@ -1,14 +1,18 @@
 """Fill operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
+
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
 from tilelang._typing import BufferLikeType
-from tilelang.language import _native as tirx
+
 from tilelang.language.common import has_let_value, get_let_value
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import get_buffer_region_from_load, to_buffer_region
 
 
-def fill(buffer: BufferLikeType, value: tirx.PrimExpr, annotations: dict | None = None) -> tirx.PrimExpr:
+def fill(buffer: BufferLikeType, value: _ir.Expr, annotations: dict | None = None) -> _ir.Expr:
     """Fill a buffer or buffer region with a specified value.
 
     Args:
@@ -20,32 +24,32 @@ def fill(buffer: BufferLikeType, value: tirx.PrimExpr, annotations: dict | None 
         A TVM intrinsic call that performs the fill operation
     """
     # Resolve scalar/slice aliases, preserving a native tensor definition.
-    if isinstance(buffer, tirx.Var) and not isinstance(buffer, tirx.Buffer) and has_let_value(buffer):
+    if isinstance(buffer, _ir.Var) and not _tensor_spec.is_buffer_like(buffer) and has_let_value(buffer):
         buffer = get_let_value(buffer)
 
     # Build tl.region as argument
-    if isinstance(buffer, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(buffer):
         extents = list(buffer.shape)
-    elif isinstance(buffer, tirx.BufferRegion):
+    elif isinstance(buffer, _ir.TensorRegion):
         extents = [r.extent for r in buffer.region]
-    elif isinstance(buffer, tirx.BufferLoad):
+    elif isinstance(buffer, _ir.TensorLoad):
         region = get_buffer_region_from_load(buffer)
         if region is not None:
             extents = [r.extent for r in region.region]
         else:
-            extents = [tirx.IntImm("int32", 1) for _ in buffer.indices]
+            extents = [_ir.IntImm("int32", 1) for _ in buffer.indices]
     else:
         extents = []
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.fill"),
+        _ir.Op.get("tl.tileop.fill"),
         to_buffer_region(buffer, access_type="w", extents=extents),
         value,
         annotations=_normalize_annotations(annotations),
     )
 
 
-def clear(buffer: BufferLikeType, annotations: dict | None = None) -> tirx.PrimExpr:
+def clear(buffer: BufferLikeType, annotations: dict | None = None) -> _ir.Expr:
     """Clear a buffer by filling it with zeros.
 
     Args:
@@ -58,11 +62,11 @@ def clear(buffer: BufferLikeType, annotations: dict | None = None) -> tirx.PrimE
     Raises:
         ValueError: If the buffer variable contains an invalid buffer region
     """
-    if isinstance(buffer, tirx.Var) and not isinstance(buffer, tirx.Buffer) and has_let_value(buffer):
+    if isinstance(buffer, _ir.Var) and not _tensor_spec.is_buffer_like(buffer) and has_let_value(buffer):
         buffer_region = get_let_value(buffer)  # Get the actual buffer region from variable
-        if isinstance(buffer_region, tirx.BufferRegion):
+        if isinstance(buffer_region, _ir.TensorRegion):
             return fill(buffer_region, 0, annotations=annotations)
-        elif isinstance(buffer_region, tirx.BufferLoad):
+        elif isinstance(buffer_region, _ir.TensorLoad):
             region = get_buffer_region_from_load(buffer_region)
             if region is None:
                 raise ValueError(f"Invalid buffer region: {buffer_region}, type: {type(buffer_region)}")

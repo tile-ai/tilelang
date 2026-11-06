@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from tilelang.tileop.gemm_sp.gemm_sp_base import GemmSPBase
 from tilelang.layout import (
     make_full_bank_swizzled_layout,
@@ -12,7 +15,7 @@ from tilelang.cuda.intrinsics.macro.wgmma_sp_macro_generator import WGSparseTens
 from tilelang.utils.language import is_shared, is_fragment
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
+
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from collections.abc import Callable
@@ -21,7 +24,7 @@ GEMM_SP_INST_WGMMA_SP = "cuda.wgmma.sp"
 
 
 class GemmSPWGMMA(GemmSPBase):
-    def infer_shared_layout(self, continuity: int) -> Callable[[tirx.Buffer], Layout]:
+    def infer_shared_layout(self, continuity: int) -> Callable[[_tensor_spec.TensorValue], Layout]:
         vectorized_size = 128 // self.a_dtype.bits
         if continuity % (vectorized_size * 8) == 0:
             return make_full_bank_swizzled_layout
@@ -75,8 +78,8 @@ class GemmSPWGMMA(GemmSPBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.

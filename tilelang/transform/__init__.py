@@ -67,16 +67,6 @@ def HoistIf():
     return Sequential([*stages[:-1], RemoveNoOp()], opt_level=pipeline.info.opt_level, name="tl.HoistIf")
 
 
-def PrepareAnyList():
-    """Prepare boxed Any-list operands for TileLang's owned call envelope.
-
-    Run before native LowerTVMBuiltin. TileLang's host emitter owns each
-    invocation's arguments, result, and inline tensor descriptors through the
-    public TVM FFI C ABI. Ordinary packed calls retain native lowering.
-    """
-    return _ffi_api.PrepareAnyList()
-
-
 def LowerCustomDatatypes():
     """Lower host custom storage after packed ABI checks have been emitted.
 
@@ -518,24 +508,33 @@ def StorageRewrite():
     return _ffi_api.StorageRewrite()  # type: ignore
 
 
-def LowerOpaqueBlock():
-    """Finish materialized TileLang annotations and preserve native scopes."""
-    return _ffi_api.LowerOpaqueBlock()  # type: ignore
+def LowerSourceAnnotations():
+    """Lower source scopes and hints, preserving metadata for its owning pass.
 
-
-def FinalizeAnnotations(target_kind: str = "", *, allowed_pending_regions=()):
-    """Consume finished layout hints; retain metadata with later consumers.
-
-    LayoutInference and LowerTileOp must precede this pass. Safety and barrier
-    metadata require their dedicated lowering passes, and unknown structural
-    annotations are reported instead of being silently removed.
-
-    Early CUDA finalization may explicitly retain ``kWarpSpecializationScope``
-    and ``kCustomWarpSpecialization`` for shared-memory planning, synchronization,
-    and register allocation. These are the only supported pending region keys.
-    Run this pass again with the default empty list after those consumers.
+    Source blocks become lexical scopes. Codegen annotations retain their
+    operands and suffix scope; compiler annotations remain for their consumers.
+    Intrinsic metadata is normalized into native operands and static options.
     """
-    return _ffi_api.FinalizeAnnotations(target_kind, list(allowed_pending_regions))
+    return _ffi_api.LowerSourceAnnotations()
+
+
+def LowerSourceAllocations():
+    """Retire source allocation origins after backend lifetime preparation.
+
+    CPU source pools must first be planned by ``LowerCPUKernelLaunch``.
+    Other targets keep their native allocation scope and consume only the
+    source-origin marker.
+    """
+    return _ffi_api.LowerSourceAllocations()
+
+
+def VerifyLoweredAnnotations():
+    """Reject unconsumed body metadata without rewriting the IR.
+
+    Run after the packed ABI and alias consumers. Final Function attributes
+    and archived source modules are outside this body-only verification.
+    """
+    return _ffi_api.VerifyLoweredAnnotations()
 
 
 def InferWmmaFragmentMetadata():

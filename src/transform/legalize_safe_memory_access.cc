@@ -5,11 +5,15 @@
 
 #include "../ir/analyzer.h"
 #include "../ir/annotations.h"
-#include "../op/native_intrinsic.h"
-#include "../op/native_utils.h"
 #include "../op/utils.h"
+#include "ascend/ir/block.h"
 #include "common/constr_visitor.h"
+#include "cuda/op/builtin.h"
+#include "ir/annotations.h"
 #include "ir/lexical_scope.h"
+#include "op/builtin.h"
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/extra/structural_visit.h>
@@ -102,7 +106,8 @@ bool IsAtomic(const CallObj *call) {
 
 bool IsAsyncCopy(const CallObj *call) {
   const std::string name = OpName(call);
-  return name == "tl.ptx_cp_async" || name == "tl.ptx_cp_async_bytes" ||
+  return call->op.same_as(tl::ptx_cp_async()) ||
+         call->op.same_as(tl::ptx_cp_async_bytes()) ||
          name == "tirx.ptx_cp_async" || name == "cuda.ptx_cp_async";
 }
 
@@ -113,7 +118,7 @@ struct Access {
 
 std::optional<Access> TensorAccess(const Expr &expression) {
   const auto *call = expression.as<CallObj>();
-  if (!call || OpName(call) != "tl.access_ptr")
+  if (!call || !call->op.same_as(tl::access_ptr()))
     return std::nullopt;
   TVM_FFI_CHECK_EQ(call->args.size(), 3U, ValueError);
   auto load = call->args[0].as_or_throw<TensorLoad>();
@@ -122,6 +127,71 @@ std::optional<Access> TensorAccess(const Expr &expression) {
   TVM_FFI_CHECK(mask->value >= 0 && mask->value <= 3, ValueError);
   return Access{load, static_cast<int>(static_cast<int64_t>(mask->value))};
 }
+
+// Disabling bounds legalization still consumes this pass's metadata. Keep
+// this structural path separate from access rewriting: it must not generate
+// guards, evaluate padding values, or change loads/stores and their indices.
+class SafeValueMetadataRetirer : public tirx::StmtExprMutator {
+public:
+  using StmtExprMutator::Mutate_;
+
+  ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
+                                 InplaceMode mode) final {
+    const auto *call = op->value.as<CallObj>();
+    if (!call || !IsAnnotationCall(call))
+      return StmtExprMutator::Mutate_(op, mode);
+    auto values = ReadAnnotations(call);
+    if (!values.count("safe_value_map"))
+      return ffi::Unchanged{};
+    values.erase("safe_value_map");
+    if (values.empty())
+      return SeqStmt(Array<Stmt>{}, op->loc);
+    return MakeAnnotation(values, op->loc);
+  }
+
+  ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
+                                 InplaceMode mode) final {
+    auto rewritten = StmtExprMutator::Mutate_(op, mode)
+                         .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
+                         .as_or_throw<RegionStmt>();
+    if (ascend::IsAscendBlock(rewritten.get())) {
+      auto annotations = ascend::AscendBlockAnnotations(rewritten.get());
+      if (!annotations.count("safe_value_map"))
+        return rewritten;
+      annotations.erase("safe_value_map");
+      return ascend::MakeAscendBlock(ascend::AscendBlockName(rewritten.get()),
+                                     annotations, rewritten->body,
+                                     rewritten->loc);
+    }
+    if (op->op->name != "tl.attr")
+      return rewritten;
+    auto fields = ReadAnnotations(rewritten.get());
+    const String key = fields.at("key").cast<String>();
+    if (key == "safe_value_map")
+      return MakeLexicalScope(rewritten->body, op->loc);
+    if (key == "tl.kernel") {
+      auto values = fields.at("value").cast<Map<String, Any>>();
+      if (!values.count("safe_value_map"))
+        return rewritten;
+      values.erase("safe_value_map");
+      return MakeAttribute(fields.at("node"), key, values, rewritten->body,
+                           op->loc);
+    }
+    if (key == "tl.sblock") {
+      auto values = fields.at("value").cast<Map<String, Any>>();
+      if (auto metadata = values.Get("annotations")) {
+        auto annotations = metadata->cast<Map<String, Any>>();
+        if (annotations.count("safe_value_map")) {
+          annotations.erase("safe_value_map");
+          values.Set("annotations", annotations);
+          return MakeAttribute(fields.at("node"), key, values, rewritten->body,
+                               op->loc);
+        }
+      }
+    }
+    return rewritten;
+  }
+};
 
 class SafeMemoryRewriter : public tl::StmtExprMutatorWithAnalyzer {
 public:
@@ -135,20 +205,23 @@ public:
     // A volatile load is a new observation even in the absence of a store.
     // Conservatively disable memory facts for the whole function when any
     // supported volatile annotation is present, including aliases of storage.
-    VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
-      if (const auto *region = object.as<RegionStmtObj>();
-          region && OpNameForRegion(region) == "tl.attr") {
-        auto fields = DecodeAttributeRegion(region);
-        has_volatile_memory_ |=
-            fields.at("key").cast<String>() == "volatile_scope";
-      }
-      if (const auto *call = object.as<CallObj>(); call && call->attrs) {
-        if (auto attrs = call->attrs.value().as<DictAttrs>()) {
-          has_volatile_memory_ |= (*attrs)->dict.count("tirx.volatile") ||
-                                  (*attrs)->dict.count("volatile_scope");
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *region = object.as<RegionStmtObj>();
+              region && OpNameForRegion(region) == "tl.attr") {
+            auto fields = ReadAnnotations(region);
+            has_volatile_memory_ |=
+                fields.at("key").cast<String>() == "volatile_scope";
+          }
+          if (const auto *call = object.as<CallObj>(); call && call->attrs) {
+            if (auto attrs = call->attrs.value().as<DictAttrs>()) {
+              has_volatile_memory_ |= (*attrs)->dict.count("tirx.volatile") ||
+                                      (*attrs)->dict.count("volatile_scope");
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
     return Mutate(function->body).ValueOrUnchanged(function->body);
   }
 
@@ -200,22 +273,52 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
+    if (ascend::IsAscendBlock(op)) {
+      memory_assumptions_.clear();
+      const auto saved = safe_values_;
+      auto annotations = ascend::AscendBlockAnnotations(op);
+      if (auto values = annotations.Get("safe_value_map")) {
+        ReadSafeMap(*values);
+        annotations.erase("safe_value_map");
+      }
+      if (auto values =
+              CollectSourceBlockAnnotations(op->body).Get("safe_value_map"))
+        ReadSafeMap(*values);
+      SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+      safe_values_ = saved;
+      memory_assumptions_.clear();
+      return ascend::MakeAscendBlock(ascend::AscendBlockName(op), annotations,
+                                     body, op->loc);
+    }
     if (OpNameForRegion(op) != "tl.attr") {
       memory_assumptions_.clear();
       auto result = StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
       memory_assumptions_.clear();
       return result;
     }
-    auto fields = DecodeAttributeRegion(op);
+    auto fields = ReadAnnotations(op);
     const auto saved = safe_values_;
     const String key = fields.at("key").cast<String>();
+    bool updated_metadata = false;
+    if (key == "tl.sblock") {
+      auto values = fields.at("value").cast<Map<String, Any>>();
+      if (auto metadata = values.Get("annotations")) {
+        auto annotations = metadata->cast<Map<String, Any>>();
+        if (auto safe_values = annotations.Get("safe_value_map")) {
+          ReadSafeMap(*safe_values);
+          annotations.erase("safe_value_map");
+          values.Set("annotations", annotations);
+          fields.Set("value", values);
+          updated_metadata = true;
+        }
+      }
+    }
     if (key == "tl.kernel" || key == "tl.sblock") {
       const auto metadata = CollectSourceBlockAnnotations(op->body);
       if (auto values = metadata.Get("safe_value_map"))
         ReadSafeMap(*values);
     }
     bool consumed = false;
-    bool updated_kernel = false;
     if (key == "safe_value_map") {
       ReadSafeMap(fields.at("value"));
       consumed = true;
@@ -225,7 +328,7 @@ public:
         ReadSafeMap(values.at(String("safe_value_map")));
         values.erase(String("safe_value_map"));
         fields.Set("value", values);
-        updated_kernel = true;
+        updated_metadata = true;
       }
     }
     SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
@@ -233,7 +336,7 @@ public:
     if (consumed)
       return RegionStmt(tl::lexical_scope_op(), {}, {}, DictAttrs(), body, {},
                         op->loc);
-    if (updated_kernel) {
+    if (updated_metadata) {
       auto encoded = EncodeAnnotations(fields);
       return RegionStmt(op->op, {encoded.payload}, op->body_params,
                         DictAttrs({{"schema_version", 1},
@@ -251,7 +354,7 @@ public:
     if (!op->op.same_as(prim::assume_op()) &&
         SideEffect(ffi::GetRef<Expr>(op)) > CallEffectKind::kPure)
       memory_assumptions_.clear();
-    if (OpName(op) == "tl.access_ptr") {
+    if (op->op.same_as(tl::access_ptr())) {
       // This TensorLoad denotes an address: do not turn it into a conditional
       // value load. Only its index expressions are evaluated by the caller.
       const auto base = op->args[0].as_or_throw<TensorLoad>();
@@ -323,17 +426,21 @@ public:
         PrimExpr condition = fact->args[0].as_or_throw<PrimExpr>();
         bool memory_read = false;
         bool stable_reads = true;
-        VisitNativePostOrder(condition, [&](const ffi::ObjectRef &object) {
-          memory_read |= object.as<TensorLoadObj>() != nullptr;
-          if (auto nested = object.as<Call>())
-            stable_reads &= SideEffect(*nested) <= CallEffectKind::kPure;
-        });
+        ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+            condition,
+            [&](const ffi::ObjectRef &object)
+                -> ffi::Expected<ffi::WalkResult> {
+              memory_read |= object.as<TensorLoadObj>() != nullptr;
+              if (auto nested = object.as<Call>())
+                stable_reads &= SideEffect(*nested) <= CallEffectKind::kPure;
+              return ffi::WalkResult::Advance();
+            });
         if (memory_read && stable_reads && condition.ty().IsScalar())
           memory_assumptions_.push_back(condition);
       }
       return statement;
     }
-    if (OpName(call) == "tl.annotation") {
+    if (IsAnnotationCall(call)) {
       auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
       auto values = DecodeAnnotations(
                         call->args[0].as_or_throw<tvm::Tuple>(),
@@ -358,7 +465,7 @@ public:
       return RewriteAsyncCopy(op, call);
     }
     const std::string name = OpName(call);
-    if (IsAtomic(call) || name == "tirx.call_extern" ||
+    if (IsAtomic(call) || call->op.same_as(tirx::call_extern_op()) ||
         name == "ir.call_extern" || name == "prim.call_extern") {
       // These statement paths deliberately bypass Mutate_(CallObj). They
       // still invalidate observations, including through raw pointer aliases.
@@ -437,7 +544,7 @@ private:
   }
 
   Stmt RewriteAsyncCopy(const EvaluateObj *statement, const CallObj *call) {
-    const auto operands = NativeIntrinsicOperands(call);
+    const auto operands = DecodeCallOperands(call);
     TVM_FFI_CHECK(operands.size() == 3 || operands.size() == 4, ValueError);
     const auto src = TensorAccess(operands[1]);
     const auto dst = TensorAccess(operands[0]);
@@ -460,7 +567,7 @@ private:
     TVM_FFI_CHECK_EQ(source_bits, dest_bits, TypeError)
         << "cp.async tensor access needs equally sized source and destination "
            "elements";
-    if (OpName(call) != "tl.ptx_cp_async") {
+    if (!call->op.same_as(tl::ptx_cp_async())) {
       TVM_FFI_CHECK(source_bits > 0 && count > 0 && count <= 16 &&
                         count * 8 % source_bits == 0,
                     ValueError)
@@ -648,10 +755,13 @@ private:
       // Preserve the baseline policy for explicitly constant indices. TileLang
       // automatic guards target symbolic accesses, not hand-written constants.
       bool symbolic = false;
-      VisitNativePostOrder(index, [&](const ffi::ObjectRef &node) {
-        if (node.as<VarObj>() || node.as<TensorLoadObj>())
-          symbolic = true;
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          index,
+          [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (node.as<VarObj>() || node.as<TensorLoadObj>())
+              symbolic = true;
+            return ffi::WalkResult::Advance();
+          });
       if (!symbolic && !transfer)
         continue;
       TVM_FFI_CHECK(index.ty().IsScalar() || index.ty().IsFixedLengthVector(),
@@ -676,7 +786,7 @@ private:
 
   Array<PrimExpr> CallConditions(const CallObj *call) {
     Array<PrimExpr> result;
-    for (const Expr &arg : NativeIntrinsicOperands(call)) {
+    for (const Expr &arg : DecodeCallOperands(call)) {
       if (auto access = TensorAccess(arg)) {
         if (access->mask & 3) {
           for (const auto &cond :
@@ -686,12 +796,14 @@ private:
         }
         continue;
       }
-      VisitNativePostOrder(arg, [&](const ffi::ObjectRef &node) {
-        if (const auto *load = node.as<TensorLoadObj>())
-          for (const auto &cond :
-               Bounds(load->source.as_or_throw<TensorVar>(), load->indices))
-            result.push_back(cond);
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          arg,
+          [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
+            for (const auto &cond :
+                 Bounds(load->source.as_or_throw<TensorVar>(), load->indices))
+              result.push_back(cond);
+            return ffi::WalkResult::Advance();
+          });
     }
     return result;
   }
@@ -701,12 +813,15 @@ private:
       if (SideEffect(condition) > CallEffectKind::kPure)
         return false;
       bool total = true;
-      VisitNativePostOrder(condition, [&](const ffi::ObjectRef &node) {
-        if (node.as<CallObj>() || node.as<TensorLoadObj>() ||
-            node.as<prim::DivObj>() || node.as<prim::ModObj>() ||
-            node.as<prim::FloorDivObj>() || node.as<prim::FloorModObj>())
-          total = false;
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          condition,
+          [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (node.as<CallObj>() || node.as<TensorLoadObj>() ||
+                node.as<prim::DivObj>() || node.as<prim::ModObj>() ||
+                node.as<prim::FloorDivObj>() || node.as<prim::FloorModObj>())
+              total = false;
+            return ffi::WalkResult::Advance();
+          });
       if (!total)
         return false;
     }
@@ -753,10 +868,16 @@ private:
 tvm::transform::Pass LegalizeSafeMemoryAccess() {
   auto pass = [](tirx::Function function, IRModule,
                  tvm::transform::PassContext context) {
-    if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)) ||
-        context->GetConfig<bool>("tl.disable_safe_memory_legalize")
-            .value_or(false))
+    if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return function;
+    if (context->GetConfig<bool>("tl.disable_safe_memory_legalize")
+            .value_or(false)) {
+      auto retirer = ffi::make_object<SafeValueMetadataRetirer>();
+      auto body = function->body;
+      function.CopyOnWrite()->body =
+          retirer->Mutate(body).ValueOrUnchanged(body);
+      return function;
+    }
     auto analyzer = CreateTileLangAnalyzer();
     auto mutator = ffi::make_object<SafeMemoryRewriter>(analyzer);
     function.CopyOnWrite()->body = mutator->Rewrite(function);

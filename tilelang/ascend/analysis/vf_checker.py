@@ -211,8 +211,8 @@ class _VFCheckVisitor(NativeStmtVisitor):
         elif name == "tl.access_ptr":
             load, _, access_mask = node.args
             self._check_access(load.source, write=bool(int(access_mask) & 2))
-        elif name == "tl.annotation":
-            self.block_annotations.update(tilelang_metadata(node))
+        elif (metadata := tilelang_metadata(node)) is not None:
+            self.block_annotations.update(metadata)
         super().visit_call(node, visitor)
 
     def visit_tensor_store(self, node, visitor):

@@ -117,12 +117,12 @@ def test_nested_manual_scopes_preserve_raw_calls_and_bind_definitions():
     assert len([bind for bind in collect_nodes(result, ir.Bind) if isinstance(bind.value, ir.TensorLoad)]) == 2
     # This small kernel has no remaining barrier/layout/launch metadata, so
     # finalization verifies that the register pass consumed its own markers.
-    final = tilelang.transform.LowerOpaqueBlock()(ir.IRModule.from_expr(result))["main"]
+    final = tilelang.transform.LowerSourceAnnotations()(ir.IRModule.from_expr(result))["main"]
     assert tirx.analysis.check_well_formed(final)
 
 
 @pytest.mark.parametrize("arch,disabled", [("sm_80", False), ("sm_90", True)])
-def test_pipeline_gate_preserves_unconsumed_schedule_when_ws_is_disabled(arch, disabled):
+def test_pipeline_gate_disables_register_inference_but_consumes_its_hints(arch, disabled):
     from tilelang.cuda.pipeline import allow_warp_specialized
 
     function = _register_kernel(128, 128, hints=(40, 232))
@@ -130,12 +130,11 @@ def test_pipeline_gate_preserves_unconsumed_schedule_when_ws_is_disabled(arch, d
     context = PassContext(config={"tl.disable_warp_specialized": disabled})
     enabled = allow_warp_specialized(pass_ctx=context, target=Target({"kind": "cuda", "arch": arch}))
     assert not enabled
-    if enabled:
-        module = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc()(module)
-    # The pipeline did not run the owner, so neither metadata nor hints may
-    # be silently stripped as though the specialization had been applied.
-    assert tvm_ffi.structural_equal(module["main"], function.with_attr("global_symbol", "main"))
-    assert collect_calls(module["main"], op="tl.annotate_producer_reg_dealloc")
+    module = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc(enable_register_inference=enabled)(module)
+    assert not collect_calls(module["main"], op="tl.set_max_nreg")
+    assert not collect_calls(module["main"], op="tl.annotate_producer_reg_dealloc")
+    assert not collect_calls(module["main"], op="tl.annotate_consumer_reg_alloc")
+    assert tirx.analysis.check_well_formed(module)
 
 
 def test_register_pass_does_not_complete_an_unprocessed_pipeline():

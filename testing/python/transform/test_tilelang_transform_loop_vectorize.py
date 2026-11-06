@@ -1,10 +1,11 @@
+from tilelang.language import _tensor_spec
 import pytest
 
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
 import tvm_tirx
-from tilelang.language import _native
+
 from tilelang.testing.ir import collect_nodes
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
@@ -18,7 +19,7 @@ _SM90_TARGET = tvm_tirx.target.Target({"kind": "cuda", "arch": "sm_90"})
 def _tensor(shape, dtype, name, *, scope="global", strides=None, elem_offset=0):
     # These native IR observers retain the 64-byte data guarantee of the
     # original Buffer fixtures. Unknown external alignment is tested separately.
-    spec = _native.buffer(shape, dtype, scope=scope or "global", strides=strides, elem_offset=elem_offset, align=64)
+    spec = _tensor_spec.buffer(shape, dtype, scope=scope or "global", strides=strides, elem_offset=elem_offset, align=64)
     return ir.Var(name, spec.as_type())
 
 

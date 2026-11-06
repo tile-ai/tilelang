@@ -4,6 +4,7 @@
  */
 
 #include "fill.h"
+#include "layout/expr_utils.h"
 #include "utils.h"
 
 namespace tvm::tl {

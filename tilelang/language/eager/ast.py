@@ -705,7 +705,7 @@ class DSLMutator(ast.NodeTransformer):
 
             native_type = any(eval_res is constructor for constructor in (ir.PrimType, ir.PtrType, tirx.TensorType))
             if isinstance(eval_res, (TensorProxy, StridedTensorProxy)) or eval_res is ptr or native_type:
-                from tilelang.language._native import deferred_arg
+                from tilelang.language._tensor_spec import deferred_arg
 
                 self.extra_type_hints[name] = deferred_arg
                 return

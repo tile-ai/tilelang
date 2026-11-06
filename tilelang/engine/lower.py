@@ -97,7 +97,6 @@ def host_codegen(
     # BF16/FP8 instruction types and must not inherit a host storage rewrite.
     host_mod = tirx.transform.FP8StorageLegalize()(host_mod)
     host_mod = tirx.transform.BF16StorageLegalize()(host_mod)
-    host_mod = tilelang.transform.PrepareAnyList()(host_mod)
     host_mod = tirx.transform.LowerTVMBuiltin()(host_mod)
     host_mod = tilelang.transform.LowerCustomDatatypes()(host_mod)
     host_mod = tilelang.transform.LowerIntrin()(host_mod)

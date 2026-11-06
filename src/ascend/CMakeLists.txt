@@ -6,11 +6,13 @@
 # tl.AscendFractalLayout object type at import time). Compile them regardless
 # of USE_ASCEND.
 # The language frames construct native regions in Python. Their common
-# launch/annotation operators are registered by src/ir/*.cc, with no legacy
-# builder object types or backend-specific compiler dependency.
+# launch/annotation operators and Ascend execution-region metadata have no
+# backend SDK dependency and remain available for IR construction in all builds.
 file(GLOB TILE_LANG_ASCEND_ALWAYS_SRCS
   src/ascend/target_utils.cc
   src/ascend/layout/ascend_layouts.cc
+  src/ascend/ir/block.cc
+  src/ascend/ir/task.cc
 )
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ASCEND_ALWAYS_SRCS})
 
@@ -95,6 +97,7 @@ unset(_suffix)
 # non-Windows host.
 file(GLOB TILE_LANG_ASCEND_ACTIVE_SRCS
   src/ascend/*.cc
+  src/ascend/analysis/*.cc
   src/ascend/codegen/*.cc
   src/ascend/layout/*.cc
   src/ascend/op/*.cc

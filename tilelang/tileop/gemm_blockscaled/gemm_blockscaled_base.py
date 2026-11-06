@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
-from tilelang.language._native import PrimExpr
+from tvm_tirx import ir as _ir
+
+
+from tvm_tirx.ir import Expr as PrimExpr
 
 
 class GemmBlockScaledMixin:
@@ -19,11 +21,11 @@ class GemmBlockScaledMixin:
     gemm_node: object
 
     @property
-    def SFARegion(self) -> tirx.BufferRegion:
+    def SFARegion(self) -> _ir.TensorRegion:
         return self.gemm_node.sfaRegion
 
     @property
-    def SFBRegion(self) -> tirx.BufferRegion:
+    def SFBRegion(self) -> _ir.TensorRegion:
         return self.gemm_node.sfbRegion
 
     @property
@@ -42,7 +44,7 @@ class GemmBlockScaledMixin:
     def sf_layout(self) -> str:
         """Scale-factor layout name from the annotations; ``"rowmajor"`` by default."""
         layout = self.gemm_node.annotations.get("sf_layout", "rowmajor")
-        if isinstance(layout, tirx.StringImm):
+        if isinstance(layout, _ir.StringImm):
             layout = layout.value
         return str(layout)
 

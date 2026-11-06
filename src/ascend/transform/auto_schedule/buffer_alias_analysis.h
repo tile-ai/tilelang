@@ -1,4 +1,7 @@
+#include "ascend/transform/source_scopes.h"
 #include "ir/loop_math.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -339,7 +342,7 @@ public:
     CollectTaskNodesAndHeaders(root, tasks);
     std::unordered_map<const TaskNode *, PhysicalTaskAccesses>
         physical_accesses;
-    std::unordered_map<Var, NativeStorageAddress, ObjectPtrHash, ObjectPtrEqual>
+    std::unordered_map<Var, StorageAddress, ObjectPtrHash, ObjectPtrEqual>
         storage_addresses;
     for (TaskNode *task : tasks) {
       const PhysicalTaskAccesses &physical =
@@ -404,8 +407,8 @@ public:
       }
     }
 
-    auto proven_disjoint = [](const NativeStorageAddress &lhs,
-                              const NativeStorageAddress &rhs) {
+    auto proven_disjoint = [](const StorageAddress &lhs,
+                              const StorageAddress &rhs) {
       return lhs.exact && rhs.exact && lhs.fresh_allocation &&
              rhs.fresh_allocation && !lhs.root.same_as(rhs.root);
     };
@@ -711,40 +714,42 @@ private:
                                     const VarSet &variant_vars,
                                     VarSet *visiting) const {
     bool varies = false;
-    VisitNativePostOrder(expr, [&](const ObjectRef &node) {
-      if (varies)
-        return;
-      if (node.as<TensorLoadObj>()) {
-        varies = true;
-        return;
-      }
-      if (const auto *call = node.as<CallObj>()) {
-        if (SideEffect(GetRef<Expr>(call)) > CallEffectKind::kPure)
-          varies = true;
-        return;
-      }
-      const auto *var_node = node.as<VarObj>();
-      if (var_node == nullptr)
-        return;
-      Var var = GetRef<Var>(var_node);
-      auto binding = bindings.find(var);
-      if (binding != bindings.end()) {
-        // A native SSA snapshot defined outside the repeated tree is stable,
-        // even when its original value was a mutable load.
-        if (!variant_vars.count(var))
-          return;
-        if (!visiting->insert(var).second) {
-          varies = true;
-          return;
-        }
-        varies = ExpressionDependsOnIteration(binding->second, bindings,
-                                              variant_vars, visiting);
-        visiting->erase(var);
-        return;
-      }
-      if (variant_vars.count(var))
-        varies = true;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expr, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (varies)
+            return ffi::WalkResult::Advance();
+          if (node.as<TensorLoadObj>()) {
+            varies = true;
+            return ffi::WalkResult::Advance();
+          }
+          if (const auto *call = node.as<CallObj>()) {
+            if (SideEffect(GetRef<Expr>(call)) > CallEffectKind::kPure)
+              varies = true;
+            return ffi::WalkResult::Advance();
+          }
+          const auto *var_node = node.as<VarObj>();
+          if (var_node == nullptr)
+            return ffi::WalkResult::Advance();
+          Var var = GetRef<Var>(var_node);
+          auto binding = bindings.find(var);
+          if (binding != bindings.end()) {
+            // A native SSA snapshot defined outside the repeated tree is
+            // stable, even when its original value was a mutable load.
+            if (!variant_vars.count(var))
+              return ffi::WalkResult::Advance();
+            if (!visiting->insert(var).second) {
+              varies = true;
+              return ffi::WalkResult::Advance();
+            }
+            varies = ExpressionDependsOnIteration(binding->second, bindings,
+                                                  variant_vars, visiting);
+            visiting->erase(var);
+            return ffi::WalkResult::Advance();
+          }
+          if (variant_vars.count(var))
+            varies = true;
+          return ffi::WalkResult::Advance();
+        });
     return varies;
   }
 
@@ -778,7 +783,7 @@ private:
       if (const auto *branch = shell.as<IfObj>()) {
         if (depends(branch->condition))
           return false;
-      } else if (auto attribute = ReadTaskAttribute(shell)) {
+      } else if (auto attribute = ReadSourceAttribute(shell)) {
         if (auto expr = attribute->node.try_cast<PrimExpr>();
             expr && depends(*expr))
           return false;
@@ -1060,10 +1065,15 @@ private:
       ffi::Map<Var, PrimExpr> substitution{
           {loop->var, loop->var + MakeConst(loop->var.ty(), distance) * step}};
       std::vector<TensorRegion> shifted;
-      for (const TensorRegion &region : regions)
-        shifted.emplace_back(RegionTensor(region),
-                             SubstituteTaskRanges(region->region, substitution),
-                             TensorRegionType(), region->loc);
+      for (const TensorRegion &region : regions) {
+        ffi::Array<Range> ranges;
+        for (const Range &range : region->region)
+          ranges.push_back(Range::FromMinExtent(
+              SubstituteConstraintExpr(range->begin, substitution),
+              SubstituteConstraintExpr(range->extent, substitution)));
+        shifted.emplace_back(RegionTensor(region), ranges, TensorRegionType(),
+                             region->loc);
+      }
       return shifted;
     };
     int64_t max_offset = 0;

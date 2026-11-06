@@ -10,7 +10,7 @@ from tvm_tirx import ir, tirx
 
 from tilelang import transform
 from tilelang.testing.packed import compile_packed_function
-from tilelang.language._native import buffer
+from tilelang.language._tensor_spec import buffer
 
 
 def _tensor(name, shape, scope="global"):
@@ -66,7 +66,7 @@ def _compile(function):
     module = tirx.transform.LowerTensorLayouts()(module)
     module = tirx.transform.FlattenTensor()(module)
     module = transform.LowerAccessPtr()(module)
-    module = transform.FinalizeAnnotations("c")(module)
+    module = transform.LowerSourceAnnotations()(module)
     assert tirx.analysis.check_well_formed(module)
     return compile_packed_function(module, tilelang_owned=False, target=target)
 

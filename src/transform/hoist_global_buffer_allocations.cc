@@ -2,13 +2,14 @@
  * \file hoist_global_buffer_allocations.cc
  * \brief Stage native global workspaces in the host scope of each launch.
  */
-#include "../op/native_utils.h"
 
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
 #include <unordered_map>
@@ -150,22 +151,26 @@ private:
       if (!constant || constant->value == 0 || constant->value == -1)
         safe = false;
     };
-    VisitNativePostOrder(object, [&](const ffi::ObjectRef &node) {
-      if (node.as<TensorLoadObj>())
-        safe = false;
-      // Purity alone does not prove that an opaque call terminates or cannot
-      // trap. Host shape algebra is represented by native arithmetic nodes.
-      if (node.as<CallObj>())
-        safe = false;
-      if (const auto *value = node.as<prim::DivObj>())
-        divisor(value->b);
-      if (const auto *value = node.as<prim::ModObj>())
-        divisor(value->b);
-      if (const auto *value = node.as<prim::FloorDivObj>())
-        divisor(value->b);
-      if (const auto *value = node.as<prim::FloorModObj>())
-        divisor(value->b);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        object,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (node.as<TensorLoadObj>())
+            safe = false;
+          // Purity alone does not prove that an opaque call terminates or
+          // cannot trap. Host shape algebra is represented by native arithmetic
+          // nodes.
+          if (node.as<CallObj>())
+            safe = false;
+          if (const auto *value = node.as<prim::DivObj>())
+            divisor(value->b);
+          if (const auto *value = node.as<prim::ModObj>())
+            divisor(value->b);
+          if (const auto *value = node.as<prim::FloorDivObj>())
+            divisor(value->b);
+          if (const auto *value = node.as<prim::FloorModObj>())
+            divisor(value->b);
+          return ffi::WalkResult::Advance();
+        });
     return safe;
   }
 

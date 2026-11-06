@@ -11,7 +11,7 @@ from tvm_tirx import ir, tirx
 
 from tilelang._analyzer import create_analyzer
 from tilelang.analysis._visitor import tensor_scope
-from tilelang.language._native import dtype_of
+from tilelang.language._construction import dtype_of
 
 
 # (cores per SM, default clock in GHz, FLOPs per cycle, maximum SM count).

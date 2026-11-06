@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+from tilelang.language import _allocation
+
 from tilelang._analyzer import create_analyzer
 
 from tilelang._typing import DType, ShapeType
 from tilelang.language.allocate import _with_span
 from tvm_ffi import dtype as DataType
-from tilelang.language import _native as T
-from tilelang.language._native import IntImm
-from tilelang.language._native import Buffer
-from tilelang.language._native import _allocation_annotation
+
+from tvm_tirx.ir import IntImm
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tilelang.language._source_scope import _allocation_annotation
 
 
 def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
@@ -21,7 +23,7 @@ def alloc_shared(shape: ShapeType, dtype: DType, scope="shared.dyn") -> Buffer:
     because the smem-merge pass cannot handle bool): Ascend UB handles bool
     buffers in the requested scope directly.
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_l1(shape: ShapeType, dtype: DType, scope="shared.l1") -> Buffer:
@@ -32,7 +34,7 @@ def alloc_l1(shape: ShapeType, dtype: DType, scope="shared.l1") -> Buffer:
         dtype: Data type
         scope: Memory scope. Defaults to "shared.l1"
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
@@ -67,7 +69,7 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
         elements *= int(extent)
     if elements * dtype.bits // 8 > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
-    return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss", align=32))
+    return _with_span(_allocation.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss", align=32))
 
 
 def alloc_l0a(shape: ShapeType, dtype: DType, scope="shared.l0a") -> Buffer:
@@ -76,7 +78,7 @@ def alloc_l0a(shape: ShapeType, dtype: DType, scope="shared.l0a") -> Buffer:
     Layout is deferred to the consuming gemm operation, which infers K-major
     or MN-major from its transpose flags.
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_l0b(shape: ShapeType, dtype: DType, scope="shared.l0b") -> Buffer:
@@ -85,7 +87,7 @@ def alloc_l0b(shape: ShapeType, dtype: DType, scope="shared.l0b") -> Buffer:
     Layout is deferred to the consuming gemm operation, which infers K-major
     or MN-major from its transpose flags.
     """
-    return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    return _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
 def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool = True) -> Buffer:
@@ -97,7 +99,7 @@ def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool =
         scope: Memory scope. Defaults to "shared.l0c"
         layout: Whether to annotate the fixed Ascend L0C accumulator layout.
     """
-    buf = _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
+    buf = _with_span(_allocation.sblock_alloc_buffer(shape, dtype, scope=scope))
     if layout:
         from tilelang.layout import make_ascend_l0c_layout
 
@@ -132,7 +134,7 @@ def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: Sh
     analyzer = create_analyzer()
     if len(sf_shape) != len(shape) or any(not analyzer.can_prove_equal(a, b) for a, b in zip(sf_shape[:-2], shape[:-2])):
         raise ValueError(f"L0 SF shape {sf_shape} must preserve the data buffer's leading dimensions {shape[:-2]}")
-    sf = _with_span(T.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
+    sf = _with_span(_allocation.sblock_alloc_buffer(sf_shape, sf_dtype, scope=expected_scope + ".sf"))
     _allocation_annotation({"tl.l0_sf_bindings": {sf: buf}})
     return sf
 

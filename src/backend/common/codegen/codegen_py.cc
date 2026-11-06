@@ -3,8 +3,10 @@
  */
 #include "codegen_py.h"
 #include "backend/common/codegen/codegen_utils.h"
+#include "ir/lexical_scope.h"
 #include "support/check.h"
 #include <tvm/ir/prim/expr.h>
+#include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
 
 #include <tvm/ir/unique_name_supply.h>
@@ -219,7 +221,7 @@ void CodeGenTileLangPY::Dispatch_(const VarObj *op,
 
 void CodeGenTileLangPY::Dispatch_(const IntImmObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  if (CodegenDType(op) == PrimType::Bool()) {
+  if (op->ty.as_or_throw<PrimType>() == PrimType::Bool()) {
     os << (op->value ? "True" : "False");
   } else {
     std::ostringstream temp;
@@ -231,7 +233,8 @@ void CodeGenTileLangPY::Dispatch_(const IntImmObj *op,
 
 void CodeGenTileLangPY::Dispatch_(const FloatImmObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  switch (CodegenDType(op).bits()) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
+  switch (dtype.bits()) {
   case 64:
   case 32: {
     std::ostringstream temp;
@@ -241,12 +244,12 @@ void CodeGenTileLangPY::Dispatch_(const FloatImmObj *op,
     break;
   }
   case 16: {
-    PrintType(CodegenDType(op), os);
+    PrintType(dtype, os);
     os << "(float.fromhex('" << FlexibleHexFormat(op->value) << "'))";
     break;
   }
   default:
-    LOG(FATAL) << "Bad bit-width for float: " << CodegenDType(op) << "\n";
+    LOG(FATAL) << "Bad bit-width for float: " << dtype << "\n";
   }
 }
 
@@ -259,32 +262,35 @@ void CodeGenTileLangPY::Dispatch_(const CastObj *op,
                                   std::ostream &os) { // NOLINT(*)
   std::stringstream value;
   PrintExpr_(op->value, value);
-  os << CastFromTo_(value.str(), CodegenDType(op->value), CodegenDType(op));
+  os << CastFromTo_(value.str(), op->value.ty(),
+                    op->ty.as_or_throw<PrimType>());
 }
 
 void CodeGenTileLangPY::Dispatch_(const AddObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("+", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("+", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const SubObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("-", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("-", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const MulObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("*", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("*", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const DivObj *op, std::ostream &os) {
-  if (CodegenDType(op).MatchesCode(kDLInt, kDLUInt)) {
+  const PrimType dtype = op->ty.as_or_throw<PrimType>();
+  if (dtype.MatchesCode(kDLInt, kDLUInt)) {
     os << "(lambda a, b: -(abs(a) // abs(b)) if (a < 0) != (b < 0) else abs(a) "
           "// abs(b))("
        << PrintExpr_(op->a) << ", " << PrintExpr_(op->b) << ")";
   } else {
-    PrintBinaryExpr_("/", CodegenDType(op), op->a, op->b, os);
+    PrintBinaryExpr_("/", dtype, op->a, op->b, os);
   }
 }
 void CodeGenTileLangPY::Dispatch_(const ModObj *op, std::ostream &os) {
-  TVM_FFI_CHECK(CodegenDType(op).MatchesCode(kDLInt, kDLUInt), TypeError);
+  TVM_FFI_CHECK(op->ty.as_or_throw<PrimType>().MatchesCode(kDLInt, kDLUInt),
+                TypeError);
   os << "(lambda a, b: a - (-(abs(a) // abs(b)) if (a < 0) != (b < 0) else "
         "abs(a) // abs(b)) * b)("
      << PrintExpr_(op->a) << ", " << PrintExpr_(op->b) << ")";
@@ -292,43 +298,43 @@ void CodeGenTileLangPY::Dispatch_(const ModObj *op, std::ostream &os) {
 
 void CodeGenTileLangPY::Dispatch_(const MinObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("min", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("min", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const MaxObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("max", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("max", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const EQObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("==", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("==", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const NEObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("!=", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("!=", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const LTObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("<", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("<", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const LEObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("<=", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("<=", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const GTObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_(">", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_(">", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const GEObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_(">=", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_(">=", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const AndObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("and", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("and", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const OrObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  PrintBinaryExpr_("or", CodegenDType(op), op->a, op->b, os);
+  PrintBinaryExpr_("or", op->ty.as_or_throw<PrimType>(), op->a, op->b, os);
 }
 void CodeGenTileLangPY::Dispatch_(const NotObj *op,
                                   std::ostream &os) { // NOLINT(*)
@@ -350,7 +356,7 @@ void CodeGenTileLangPY::Dispatch_(const SelectObj *op,
 
 void CodeGenTileLangPY::Dispatch_(const RampObj *op,
                                   std::ostream &os) { // NOLINT(*)
-  int lanes = CodegenDType(op).lanes();
+  int lanes = op->ty.as_or_throw<PrimType>().lanes();
   os << "(";
   for (int i = 0; i < lanes; i++) {
     os << "(" << PrintExpr_(op->base) << ")" << "+(" << PrintExpr_(op->stride)
@@ -400,7 +406,7 @@ void CodeGenTileLangPY::Dispatch_(const TensorLoadObj *op, std::ostream &os) {
   TVM_FFI_CHECK_EQ(op->indices.size(), 1, ValueError)
       << "Python source load requires flat memory";
   TensorVar tensor = op->source.as_or_throw<TensorVar>();
-  TVM_FFI_CHECK(CodegenDType(op) == tensor.dtype(), TypeError)
+  TVM_FFI_CHECK(op->ty.as_or_throw<PrimType>() == tensor.dtype(), TypeError)
       << "Scalar Python source load requires the tensor element type";
   os << GetBufferRef_(tensor.dtype(), tensor.get(), op->indices[0]);
 }
@@ -451,7 +457,7 @@ void CodeGenTileLangPY::EmitTensorAllocation_(const BindObj *op,
 }
 
 void CodeGenTileLangPY::Dispatch_(const RegionStmtObj *op) {
-  bool lexical = op->op->name == "tl.lexical_scope";
+  bool lexical = op->op.same_as(tl::lexical_scope_op());
   if (lexical)
     TVM_FFI_CHECK(op->args.empty(), ValueError)
         << "A TileLang lexical scope cannot take operands";
@@ -513,7 +519,7 @@ void CodeGenTileLangPY::Dispatch_(const EvaluateObj *op) {
   if (op->value.as<IntImmObj>())
     return;
   if (const auto *call = op->value.as<CallObj>();
-      call && IsCodegenOp(call, "prim.assume")) {
+      call && call->op.same_as(prim::assume_op())) {
     TVM_FFI_CHECK_EQ(call->args.size(), 1, TypeError);
     auto condition_type = call->args[0]->ty.as<PrimType>();
     TVM_FFI_CHECK(condition_type && *condition_type == PrimType::Bool(),
@@ -577,7 +583,7 @@ void CodeGenTileLangPY::PrintBinaryExpr_(const std::string &opstr,
 void CodeGenTileLangPY::PrintBinaryIntrinsic_(const CallObj *op,
                                               const char *opstr,
                                               std::ostream &os) { // NOLINT(*)
-  ICHECK_EQ(CodegenDType(op).lanes(), 1);
+  ICHECK_EQ(op->ty.as_or_throw<PrimType>().lanes(), 1);
   ICHECK_EQ(op->args.size(), 2U);
   os << '(';
   PrintExpr_(op->args[0], os);
@@ -681,7 +687,8 @@ void CodeGenTileLangPY::PrintSuite_(const Stmt &body) {
 
 #define TILELANG_PY_BINARY(Node, Symbol)                                       \
   void CodeGenTileLangPY::Dispatch_(const Node *op, std::ostream &os) {        \
-    PrintBinaryExpr_(Symbol, CodegenDType(op), op->a, op->b, os);              \
+    PrintBinaryExpr_(Symbol, op->ty.as_or_throw<PrimType>(), op->a, op->b,     \
+                     os);                                                      \
   }
 TILELANG_PY_BINARY(FloorDivObj, "//")
 TILELANG_PY_BINARY(FloorModObj, "%")

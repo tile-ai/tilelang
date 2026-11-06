@@ -21,8 +21,9 @@
  * \file thread_storage_sync.cc
  */
 #include "transform/thread_storage_sync.h"
+#include "ascend/ir/task.h"
 #include "ascend/target_utils.h"
-#include "auto_schedule/native_task_ir.h"
+#include "ascend/transform/source_scopes.h"
 #include "op/builtin.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -45,7 +46,7 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    auto name = ascend::NativeBlockName(op);
+    auto name = ascend::BlockNameAtSourceBoundary(op);
     if (!name || *name != "SIMT_VF")
       return StmtExprMutator::Mutate_(op, mode);
     auto body = PlanThreadStorageSync(function_, op->body, scope_, warp_size_,

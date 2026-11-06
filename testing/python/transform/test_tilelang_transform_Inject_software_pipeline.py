@@ -6,7 +6,7 @@ import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
 from tilelang.analysis._visitor import tilelang_metadata
-from tilelang.language._native import dtype_of
+from tilelang.language._construction import dtype_of
 import tilelang as tl
 import tilelang.language as T
 from tilelang.layout import Layout
@@ -115,7 +115,9 @@ def _count_copy_calls_with_annotation(func, annotation_key):
 
 def _find_layout_map(func):
     layouts = [
-        metadata["layout_map"] for call in collect_calls(func, op="tl.annotation") if "layout_map" in (metadata := tilelang_metadata(call))
+        call.attrs["layout_map"]
+        for call in collect_nodes(func, ir.Call)
+        if isinstance(call.op, ir.Op) and call.op.same_as(ir.Op.get("tl.layout_map"))
     ]
     assert len(layouts) == 1, "Expected exactly one typed layout annotation"
     return layouts[0]

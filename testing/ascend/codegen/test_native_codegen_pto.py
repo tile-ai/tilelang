@@ -6,6 +6,7 @@ import re
 import pytest
 import tvm_ffi
 import tvm_tirx
+from testing.ascend._block import ascend_block as _native_ascend_block
 
 I = tvm_tirx.ir
 
@@ -32,9 +33,7 @@ def _call(name, *args, dtype="void"):
 
 
 def _block(name, body, **annotations):
-    fields = {"name": name, "no_realize": True, "annotations": annotations}
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": I.const(0), "key": "tl.sblock", "value": fields})
-    return I.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _native_ascend_block(name, body, annotations)
 
 
 def _thread(var, size, body, tag="threadIdx.x"):
@@ -318,14 +317,20 @@ def test_native_pto_dma_retains_declared_arena_view(tmp_path):
     assert isinstance(copy.args[0], ast.Name) and copy.args[0].id == "view"
 
 
-def test_native_pto_merging_uses_typed_vector_destination(tmp_path):
+@pytest.mark.parametrize(
+    "operation,precision,emitted",
+    [("vadd", None, "pto.vadd("), ("vdiv", 0, "pto.vdiv("), ("vdiv", 1, "tl.vdiv_precise_f32(")],
+)
+def test_native_pto_merging_uses_typed_vector_destination(operation, precision, emitted, tmp_path):
     destination = _tensor("result", "float32x64", "local.fragment", (1,))
     mask = _call("tl.simd.pset", 32, "PAT_ALL", dtype="boolx64")
     lhs = _call("tl.simd.vdup", I.const(1, "float32"), mask, "MODE_ZEROING", dtype="float32x64")
     rhs = _call("tl.simd.vdup", I.const(2, "float32"), mask, "MODE_ZEROING", dtype="float32x64")
-    merge = _call("tl.simd.vadd", _data(destination), lhs, rhs, mask, "MODE_MERGING")
+    merge = _call("tl.simd." + operation, _data(destination), lhs, rhs, mask, "MODE_MERGING")
+    if precision is not None:
+        merge = I.Call(merge.op, merge.args, attrs={"precision": I.const(precision)}, ty_args=merge.ty_args)
     code = _source([], [_alloc(destination), I.TensorStore(destination, [0], lhs), I.Evaluate(merge)], tmp_path)
-    assert "pto.vsel(" in code and "pto.vadd(" in code
+    assert "pto.vsel(" in code and emitted in code
     assert "result_tl_slot_0 = " in code
 
 

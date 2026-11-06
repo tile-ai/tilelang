@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tvm_tirx import ir as _ir
+
 from tilelang._analyzer import create_analyzer
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
@@ -11,7 +15,7 @@ from tilelang.layout import (
 )
 from tilelang.transform.simplify import _Simplify
 from tvm_ffi import dtype as DataType
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
 
@@ -20,7 +24,7 @@ GEMM_INST_MAD = "ascend.mad"
 
 
 def _to_int32(value):
-    return tirx.IntImm("int32", value) if isinstance(value, int) else value
+    return _ir.IntImm("int32", value) if isinstance(value, int) else value
 
 
 def _make_access_ptr(buf, region, rw_mask, ignore_last_ndim=0):
@@ -62,9 +66,9 @@ class GemmMAD(GemmBase):
         return False
 
     @property
-    def unit_flag_ctrl(self) -> tirx.PrimExpr:
+    def unit_flag_ctrl(self) -> _ir.Expr:
         ann = getattr(self.gemm_node, "annotations", {})
-        return ann.get("unit_flag_ctrl", tirx.const(0, "int32"))
+        return ann.get("unit_flag_ctrl", _ir.const(0, "int32"))
 
     def _check_blockscaled_k_alignment(self):
         if not self.is_blockscaled:
@@ -74,7 +78,7 @@ class GemmMAD(GemmBase):
             aligned = remainder == 0
         else:
             analyzer = create_analyzer()
-            aligned = analyzer.can_prove_equal(remainder, tirx.const(0, tirx.dtype_of(remainder)))
+            aligned = analyzer.can_prove_equal(remainder, _ir.const(0, _construction.dtype_of(remainder)))
         assert aligned, (
             f"Ascend blockscaled GEMM requires operation K to be divisible by 64, got K={self.K}. "
             "Pad the participating L1/L0 buffers and invoke GEMM with the padded K extent."
@@ -117,8 +121,8 @@ class GemmMAD(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         self._prepare_lower(layout_map)
 
@@ -142,7 +146,7 @@ class GemmMAD(GemmBase):
 
         def require_zero_origin(name, region) -> None:
             for axis, rng in enumerate(region.region[-2:], start=-2):
-                assert prove_equal(rng.begin, tirx.const(0, tirx.dtype_of(rng.begin))), (
+                assert prove_equal(rng.begin, _ir.const(0, _construction.dtype_of(rng.begin))), (
                     f"Ascend compact L0 region {name} requires zero origin on "
                     f"trailing axis {axis}, got min={rng.begin}. Split/non-zero-"
                     "origin L0 tiles are not supported."
@@ -190,9 +194,9 @@ class GemmMAD(GemmBase):
         c_ptr = _make_access_ptr(self.CRegion.source, self.CRegion, 2)
         a_ptr = _make_access_ptr(self.ARegion.source, self.ARegion, 1)
         b_ptr = _make_access_ptr(self.BRegion.source, self.BRegion, 1)
-        call = tirx.call_intrin(
+        call = _intrinsics.call_intrin(
             "void",
-            tirx.Op.get("tl.ascend_mad"),
+            _ir.Op.get("tl.ascend_mad"),
             c_ptr,
             a_ptr,
             b_ptr,
@@ -224,9 +228,9 @@ class GemmMAD(GemmBase):
         dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)
         assert dtype_str is not None, f"Unsupported dtype for Ascend GEMM: {input_dtype}"
 
-        call = tirx.call_intrin(
+        call = _intrinsics.call_intrin(
             "void",
-            tirx.Op.get("tl.ascend_gemm_l1"),
+            _ir.Op.get("tl.ascend_gemm_l1"),
             c_ptr,
             a_ptr,
             b_ptr,
@@ -236,7 +240,7 @@ class GemmMAD(GemmBase):
             _to_int32(tile_k_sub),
             _to_int32(1 if self.trans_B else 0),
             self.clear_accum,
-            tirx.StringImm(dtype_str),
+            _ir.StringImm(dtype_str),
             _to_int32(0),  # buf_offset
             _to_int32(self.unit_flag_ctrl),
         )

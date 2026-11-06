@@ -7,12 +7,18 @@
 
 #include "backend/common/target_utils.h"
 #include "ir/alias_analysis.h"
+#include "ir/annotations.h"
+#include "ir/tensor_utils.h"
+#include "op/builtin.h"
 #include "op/copy.h"
-#include "op/native_utils.h"
 #include "op/utils.h"
 #include "pipeline_utils.h"
 #include <optional>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
+#include <tvm/ir/prim/op.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <unordered_set>
 #include <utility>
 
@@ -43,36 +49,39 @@ public:
       }
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return;
-    VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &obj) {
-      if (const auto *bind = obj.as<BindObj>()) {
-        definitions_.Set(bind->var, bind->value);
-        if (const auto *call = bind->value.as<CallObj>();
-            call && call->op.same_as(tirx::alloc_tensor_op()))
-          allocations_.insert(bind->var);
-      }
-      if (const auto *call = obj.as<CallObj>();
-          call && call->op.same_as(Op::Get("tl.annotation"))) {
-        auto values = ReadNativeAnnotations(call);
-        if (auto marked = values.Get("tl.non_restrict_params"))
-          AddNonRestrict(*marked);
-      }
-      if (const auto *region = obj.as<RegionStmtObj>();
-          region && region->op->name == "tl.attr") {
-        auto fields = ReadNativeAnnotations(region);
-        auto encoded_key = fields.Get("key");
-        if (!encoded_key || !encoded_key->as<ffi::String>())
-          return;
-        auto key = encoded_key->cast<ffi::String>();
-        if (key == "tl.non_restrict_params")
-          AddNonRestrict(fields.at("value"));
-        else if (key == "tl.kernel") {
-          auto values =
-              fields.at("value").cast<ffi::Map<ffi::String, ffi::Any>>();
-          if (auto marked = values.Get("tl.non_restrict_params"))
-            AddNonRestrict(*marked);
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const ffi::ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *bind = obj.as<BindObj>()) {
+            definitions_.Set(bind->var, bind->value);
+            if (const auto *call = bind->value.as<CallObj>();
+                call && call->op.same_as(tirx::alloc_tensor_op()))
+              allocations_.insert(bind->var);
+          }
+          if (const auto *call = obj.as<CallObj>();
+              call && IsAnnotationCall(call)) {
+            auto values = ReadAnnotations(call);
+            if (auto marked = values.Get("tl.non_restrict_params"))
+              AddNonRestrict(*marked);
+          }
+          if (const auto *region = obj.as<RegionStmtObj>();
+              region && region->op->name == "tl.attr") {
+            auto fields = ReadAnnotations(region);
+            auto encoded_key = fields.Get("key");
+            if (!encoded_key || !encoded_key->as<ffi::String>())
+              return ffi::WalkResult::Advance();
+            auto key = encoded_key->cast<ffi::String>();
+            if (key == "tl.non_restrict_params")
+              AddNonRestrict(fields.at("value"));
+            else if (key == "tl.kernel") {
+              auto values =
+                  fields.at("value").cast<ffi::Map<ffi::String, ffi::Any>>();
+              if (auto marked = values.Get("tl.non_restrict_params"))
+                AddNonRestrict(*marked);
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
   ffi::Optional<tirx::TensorVar> Tensor(const Expr &expression) const {
@@ -89,11 +98,14 @@ public:
   // value definitions alongside the immutable input facts so access regions
   // continue to refer to their backing allocation after versioning.
   void ObserveDefinitions(const Stmt &statement) const {
-    VisitNativePostOrder(statement, [&](const ffi::ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>();
-          bind && !definitions_.count(bind->var))
-        generated_definitions_.Set(bind->var, bind->value);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        statement,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *bind = object.as<BindObj>();
+              bind && !definitions_.count(bind->var))
+            generated_definitions_.Set(bind->var, bind->value);
+          return ffi::WalkResult::Advance();
+        });
   }
 
   void RecordGeneratedDefinition(const Var &var, const Expr &value) const {
@@ -194,12 +206,13 @@ private:
     if (const auto *call = expression.as<CallObj>()) {
       const auto *op = call->op.as<OpObj>();
       if (op && !call->args.empty() &&
-          (op->name == "tirx.decl_tensor" ||
-           op->name == "tirx.tensor_data_ptr" ||
-           op->name == "tirx.address_of" || op->name == "tirx.reinterpret" ||
-           op->name == "tirx.ptr_byte_offset" ||
-           op->name == "tirx.handle_add_byte_offset" ||
-           op->name == "tl.access_ptr" || op->name == "tl.ptr_access"))
+          (op == tirx::decl_tensor_op().get() ||
+           op == tirx::tensor_data_ptr_op().get() ||
+           op == tirx::address_of_op().get() ||
+           op == tirx::reinterpret_op().get() ||
+           op == tirx::ptr_byte_offset_op().get() ||
+           op == tirx::handle_add_byte_offset_op().get() ||
+           op == tl::access_ptr().get() || op == tl::ptr_access().get()))
         return Root(call->args[0], active);
     }
     return std::nullopt;
@@ -236,12 +249,13 @@ private:
     if (const auto *call = expression.as<CallObj>()) {
       const auto *op = call->op.as<OpObj>();
       if (op && !call->args.empty() &&
-          (op->name == "tirx.decl_tensor" ||
-           op->name == "tirx.tensor_data_ptr" ||
-           op->name == "tirx.address_of" || op->name == "tirx.reinterpret" ||
-           op->name == "tirx.ptr_byte_offset" ||
-           op->name == "tirx.handle_add_byte_offset" ||
-           op->name == "tl.access_ptr" || op->name == "tl.ptr_access"))
+          (op == tirx::decl_tensor_op().get() ||
+           op == tirx::tensor_data_ptr_op().get() ||
+           op == tirx::address_of_op().get() ||
+           op == tirx::reinterpret_op().get() ||
+           op == tirx::ptr_byte_offset_op().get() ||
+           op == tirx::handle_add_byte_offset_op().get() ||
+           op == tl::access_ptr().get() || op == tl::ptr_access().get()))
         return Tensor(call->args[0], active);
     }
     return std::nullopt;
@@ -467,8 +481,8 @@ private:
 
   Result Visit_(const CallObj *op) final {
     const auto *named_op = op->op.as<OpObj>();
-    if (named_op && (named_op->name == "tl.annotation" ||
-                     named_op->name == "tirx.alloc_tensor"))
+    if (named_op &&
+        (IsAnnotationCall(op) || named_op == tirx::alloc_tensor_op().get()))
       return std::nullopt;
     if (auto tile = ParseOperator(ffi::GetRef<Call>(op)); tile.defined()) {
       AccessRegions access = tile->GetAccessRegions();
@@ -488,7 +502,7 @@ private:
       }
       return tirx::StmtExprVisitor::Visit_(op);
     }
-    if (named_op && named_op->name == "tl.access_ptr") {
+    if (named_op && named_op == tl::access_ptr().get()) {
       AccessPointer(op->args[0], GetConservativeAccessMask(
                                      op->args[2].as_or_throw<PrimExpr>()));
       VisitAddress(op->args[0]);
@@ -496,7 +510,7 @@ private:
       Visit(op->args[2]);
       return std::nullopt;
     }
-    if (named_op && named_op->name == "tl.ptr_access") {
+    if (named_op && named_op == tl::ptr_access().get()) {
       AccessPointer(op->args[0], GetConservativeAccessMask(
                                      op->args[3].as_or_throw<PrimExpr>()));
       VisitAddress(op->args[0]);
@@ -504,12 +518,12 @@ private:
         Visit(op->args[i]);
       return std::nullopt;
     }
-    if (named_op && named_op->name == "tirx.address_of") {
+    if (named_op && named_op == tirx::address_of_op().get()) {
       AccessPointer(op->args[0], kAccessReadWrite);
       VisitAddress(op->args[0]);
       return std::nullopt;
     }
-    if (named_op && named_op->name == "prim.if_then_else") {
+    if (named_op && named_op == prim::if_then_else_op().get()) {
       const bool previous = condition_;
       condition_ = true;
       Visit(op->args[0]);
@@ -533,7 +547,7 @@ private:
         const auto *descriptor = arg.as<CallObj>();
         const auto *name = descriptor ? descriptor->op.as<OpObj>() : nullptr;
         if (name &&
-            (name->name == "tl.access_ptr" || name->name == "tl.ptr_access"))
+            (name == tl::access_ptr().get() || name == tl::ptr_access().get()))
           continue;
         AccessPointer(arg,
                       effect == CallEffectKind::kReadState ? kAccessRead

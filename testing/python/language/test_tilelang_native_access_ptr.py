@@ -1,16 +1,18 @@
 """Pointer contracts retain tensor coordinates, element intervals and scope."""
 
+from tilelang.language import _tensor_spec
+
 import pytest
 import tvm_ffi
 from tvm_tirx import ir, sym, tirx
 
 import tilelang.language as T
-from tilelang.language import _native
+
 from tilelang.utils.language import retrieve_ptr, retrive_ptr_from_buffer_region
 
 
 def _tensor(name="a", *, shape=(4, 8), strides=None, elem_offset=0, scope="shared"):
-    spec = _native.buffer(shape, "float32", strides=strides, elem_offset=elem_offset, scope=scope)
+    spec = _tensor_spec.buffer(shape, "float32", strides=strides, elem_offset=elem_offset, scope=scope)
     return ir.Var(name, spec.as_type())
 
 
@@ -32,8 +34,8 @@ def test_tensor_access_keeps_logical_indices_and_layout_offset():
     load, extent, mask = pointer.args
     assert load.source.same_as(tensor)
     assert [_constant(index) for index in load.indices] == [1, 2]
-    assert _constant(_native.tensor_offset(load.source)) == 5
-    assert [_constant(x) for x in _native.tensor_strides(load.source)] == [16, 1]
+    assert _constant(_tensor_spec.tensor_offset(load.source)) == 5
+    assert [_constant(x) for x in _tensor_spec.tensor_strides(load.source)] == [16, 1]
     assert _constant(extent) == 6 and int(mask.value) == 3
 
 

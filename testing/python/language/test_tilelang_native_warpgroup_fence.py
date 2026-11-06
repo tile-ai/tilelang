@@ -1,5 +1,8 @@
 """Native tensor and pointer contracts for the public accumulator fence."""
 
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+
 import pytest
 import tvm_ffi
 import tvm_tirx
@@ -7,7 +10,6 @@ from tvm_tirx import ir, sym, tirx
 from tvm_tirx.script.ir_builder import IRBuilder
 
 import tilelang.language as T
-from tilelang.language import _native
 
 
 def _fence_call(function):
@@ -30,9 +32,9 @@ def _integer(expression):
 @pytest.mark.parametrize("kind", ["tensor", "load", "region"])
 @pytest.mark.parametrize("strides, element_offset", [(None, 10), ((10, 1), 12)])
 def test_tensor_paths_preserve_element_offsets_and_register_counts(dtype, kind, strides, element_offset):
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("fence_" + kind)
-        tensor = _native.arg("fragment", _native.buffer((4, 8), dtype, strides=strides))
+        tensor = _tensor_spec.arg("fragment", _tensor_spec.buffer((4, 8), dtype, strides=strides))
         if kind == "tensor":
             T.warpgroup_fence_operand(tensor, offset=3)
             expected_offset, element_count = 3, 32
@@ -56,9 +58,9 @@ def test_tensor_paths_preserve_element_offsets_and_register_counts(dtype, kind, 
 
 @pytest.mark.parametrize("dtype, registers", [("float16", 5), ("int8", 3)])
 def test_inferred_count_rounds_partial_registers_up(dtype, registers):
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("partial_register")
-        tensor = _native.arg("fragment", _native.buffer((3, 3), dtype))
+        tensor = _tensor_spec.arg("fragment", _tensor_spec.buffer((3, 3), dtype))
         T.warpgroup_fence_operand(tensor)
     assert _integer(_fence_call(builder.get()).args[3]) == registers
 
@@ -66,12 +68,12 @@ def test_inferred_count_rounds_partial_registers_up(dtype, registers):
 @pytest.mark.parametrize("dtype", ["float32", "int32", "float16", "int8"])
 @pytest.mark.parametrize("kind", ["typed_pointer", "access_ptr", "address_of"])
 def test_pointer_paths_infer_native_element_type_and_keep_operand_identity(dtype, kind):
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("fence_" + kind)
         if kind == "typed_pointer":
-            pointer = _native.arg("fragment", ir.PtrType(dtype, "local"))
+            pointer = _tensor_spec.arg("fragment", ir.PtrType(dtype, "local"))
         else:
-            tensor = _native.arg("fragment", _native.buffer((4, 8), dtype, strides=(10, 1), scope="local"))
+            tensor = _tensor_spec.arg("fragment", _tensor_spec.buffer((4, 8), dtype, strides=(10, 1), scope="local"))
             pointer = T.access_ptr(tensor[1, 2], "rw", extent=8) if kind == "access_ptr" else T.address_of(tensor[1, 2])
         before = ir.save_json(pointer)
         T.warpgroup_fence_operand(pointer, offset=3, num_regs=7)
@@ -87,8 +89,8 @@ def test_pointer_paths_infer_native_element_type_and_keep_operand_identity(dtype
 
 @pytest.mark.parametrize("kind", ["tensor", "load", "region"])
 def test_tensor_dtype_mismatch_still_rejects_before_emission(kind):
-    with IRBuilder(), _native.prim_func():
-        tensor = _native.arg("fragment", _native.buffer((4, 8), "float32"))
+    with IRBuilder(), _construction.prim_func():
+        tensor = _tensor_spec.arg("fragment", _tensor_spec.buffer((4, 8), "float32"))
         operand = tensor if kind == "tensor" else tensor[1, 2] if kind == "load" else tensor[1:3, 2:6]
         with pytest.raises(ValueError, match="dtype mismatch"):
             T.warpgroup_fence_operand(operand, num_regs=1, dtype="int32")
@@ -96,10 +98,10 @@ def test_tensor_dtype_mismatch_still_rejects_before_emission(kind):
 
 @pytest.mark.parametrize("kind", ["load", "pointer", "symbolic_tensor", "symbolic_region"])
 def test_ambiguous_register_counts_still_require_the_caller(kind):
-    with IRBuilder(), _native.prim_func():
-        n = _native.arg("n", ir.PrimType("int32"))
-        tensor = _native.arg("fragment", _native.buffer((n, 8), "float32"))
-        pointer = _native.arg("pointer", ir.PtrType("float32"))
+    with IRBuilder(), _construction.prim_func():
+        n = _tensor_spec.arg("n", ir.PrimType("int32"))
+        tensor = _tensor_spec.arg("fragment", _tensor_spec.buffer((n, 8), "float32"))
+        pointer = _tensor_spec.arg("pointer", ir.PtrType("float32"))
         operand = (
             tensor[0, 0] if kind == "load" else pointer if kind == "pointer" else tensor if kind == "symbolic_tensor" else tensor[0:n, 0:4]
         )
@@ -108,9 +110,9 @@ def test_ambiguous_register_counts_still_require_the_caller(kind):
 
 
 def test_void_pointer_requires_explicit_dtype_and_preserves_it_when_supplied():
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("untyped_pointer")
-        pointer = _native.arg("pointer", ir.PtrType("void"))
+        pointer = _tensor_spec.arg("pointer", ir.PtrType("void"))
         with pytest.raises(ValueError, match="dtype must be provided"):
             T.warpgroup_fence_operand(pointer, num_regs=3)
         T.warpgroup_fence_operand(pointer, num_regs=3, dtype="int32")
@@ -129,9 +131,9 @@ def test_void_pointer_requires_explicit_dtype_and_preserves_it_when_supplied():
     ],
 )
 def test_typed_pointer_reaches_real_cuda_source_emitter(dtype, ctype, cast, tmp_path):
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("native_fence")
-        pointer = _native.arg("fragment", ir.PtrType(dtype))
+        pointer = _tensor_spec.arg("fragment", ir.PtrType(dtype))
         T.warpgroup_fence_operand(pointer, offset=3, num_regs=7)
     function = builder.get()
     _fence_call(function)

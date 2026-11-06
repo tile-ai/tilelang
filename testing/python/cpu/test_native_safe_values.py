@@ -45,7 +45,7 @@ def test_native_safe_value_numbers_merge_and_restore_after_nested_scope(outer, i
     assert fallback_values == [float(outer), float(inner), float(outer)]
 
     module = tvm_ffi.get_global_func("tl.transform.LegalizeSafeMemoryAccess")()(module)
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(module)
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(module)
     module = ir.IRModule({"main": module["main"].with_attr("global_symbol", "main")})
     executable = compile_packed_function(module, c_codegen="compute")
     source = tvm_tirx.runtime.tensor(np.arange(3, dtype="float32"))

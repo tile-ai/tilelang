@@ -54,7 +54,7 @@ def test_unmerged_allocation_retains_origin_until_finalization():
     marked = transform.MergeUBAllocations()(_module({"tl.source_block_alloc": ir.IntImm("int32", 1)}, count=1))
     (original,) = allocations(marked)
     assert int(original.value.attrs["tl.source_block_alloc"]) == 1
-    finalized = tilelang.transform.FinalizeAnnotations()(marked)
+    finalized = tilelang.transform.LowerSourceAllocations()(marked)
     (result,) = allocations(finalized)
     assert "tl.source_block_alloc" not in result.value.attrs
     assert tvm_ffi.structural_equal(original.var.ty, result.var.ty)

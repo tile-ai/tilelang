@@ -5,7 +5,7 @@ Two new behaviours introduced in commit dfa63b10:
      (128-bit direct-to-LDS, bypassing VGPRs) instead of a plain uint4
      scalar store.  coalesced_width=8 (8 fp16 = 16 bytes) is required to
      trigger the 16-byte path.
-  2. CDNA arch helper reports smem_cap = 160 KB for gfx950, even when
+  2. HIP device queries report 160 KB LDS for gfx950, even when
      an older driver reports the conservative 64 KB default.
 """
 
@@ -153,20 +153,22 @@ def test_gfx950_cp_async_gs_16_in_codegen():
 
 @tilelang.testing.requires_rocm
 def test_gfx950_smem_cap_160kb():
-    """CDNA arch helper must report 160 KB LDS for gfx950."""
+    """HIP device queries must report at least 160 KB LDS for gfx950."""
     from tvm_tirx import runtime
-    from tvm_tirx.target import Target
-    from tilelang.carver.arch.cdna import CDNA, _GFX950_LDS_SIZE
+    from tilelang import driver
+    from tilelang.backend.target import determine_target
 
-    target = Target("rocm")
-    arch = CDNA(target)
+    target = determine_target("hip", return_object=True)
+    mcpu = str(target.attrs.get("mcpu", ""))
+    smem_cap = driver.get_hip_shared_memory_per_block(mcpu)
+    reported = runtime.rocm(0).max_shared_memory_per_block
 
     if _is_gfx950():
-        assert arch.smem_cap == _GFX950_LDS_SIZE, f"Expected smem_cap={_GFX950_LDS_SIZE} for gfx950, got {arch.smem_cap}"
+        assert smem_cap == max(reported, 160 * 1024)
+    elif mcpu.startswith(("gfx11", "gfx12")) and reported <= 0:
+        assert smem_cap == 64 * 1024
     else:
-        # On non-gfx950 devices the override must NOT kick in
-        dev = runtime.rocm(0)
-        assert arch.smem_cap == dev.max_shared_memory_per_block
+        assert smem_cap == reported
 
 
 # ---------------------------------------------------------------------------

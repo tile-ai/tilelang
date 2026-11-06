@@ -2,6 +2,9 @@
  * \brief Inject eligible global->shared copies into ROCm async-copy intrinsics.
  * \file rocm/transform/async_copy_injector.cc
  */
+#include "cuda/op/builtin.h"
+#include "ir/lexical_scope.h"
+#include "ir/loop_math.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
@@ -15,10 +18,9 @@
 #include <optional>
 #include <vector>
 
+#include "ir/annotations.h"
 #include "ir/tensor_utils.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
-#include "op/native_utils.h"
 #include "op/utils.h"
 #include "rocm/op/builtin.h"
 #include "rocm/transform/async_copy_injector.h"
@@ -342,7 +344,7 @@ private:
     }
 
     const auto *call = value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("prim.if_then_else")) ||
+    if (!call || !call->op.same_as(prim::if_then_else_op()) ||
         !IsZeroBitPattern(call->args[2].as_or_throw<PrimExpr>())) {
       return nullptr;
     }
@@ -528,13 +530,26 @@ private:
 
   bool HasUnitStrideForVectorizedLoop(const PrimExpr &expr,
                                       const ActiveVectorizedLoop &loop) {
-    PrimExpr prev = analyzer_->Simplify(SubstituteLoopVars(
-        expr, {{loop.loop_var, IntImm(loop.loop_var.ty(), 0)}}));
+    PrimExpr prev =
+        analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+            expr,
+            [values = ffi::Map<Var, PrimExpr>{{loop.loop_var,
+                                               IntImm(loop.loop_var.ty(), 0)}}](
+                const Var &var) -> ffi::Optional<PrimExpr> {
+              return values.Get(var);
+            }));
 
     int64_t stride = 0;
     for (int value = 1; value < loop.extent; ++value) {
-      PrimExpr curr = analyzer_->Simplify(SubstituteLoopVars(
-          expr, {{loop.loop_var, IntImm(loop.loop_var.ty(), value)}}));
+      PrimExpr curr =
+          analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+              expr,
+              [values =
+                   ffi::Map<Var, PrimExpr>{
+                       {loop.loop_var, IntImm(loop.loop_var.ty(), value)}}](
+                  const Var &var) -> ffi::Optional<PrimExpr> {
+                return values.Get(var);
+              }));
       PrimExpr delta = analyzer_->Simplify(curr - prev);
       int64_t delta_value = 0;
       if (!TryGetConstInt64(delta, &delta_value)) {
@@ -623,15 +638,15 @@ private:
         out.is_pure_copy_region = false;
         return out;
       }
-      if (call->op.same_as(Op::Get("tl.ptx_cp_async_bytes")) ||
+      if (call->op.same_as(tl::ptx_cp_async_bytes()) ||
           call->op.same_as(tl::ptx_cp_async())) {
         return out;
       }
-      if (call->op.same_as(Op::Get("tl.ptx_commit_group"))) {
+      if (call->op.same_as(tl::ptx_commit_group())) {
         out.guarantees_commit = true;
         return out;
       }
-      if (call->op.same_as(Op::Get("tl.ptx_wait_group"))) {
+      if (call->op.same_as(tl::ptx_wait_group())) {
         out.may_wait = true;
         // wait_group(n > 0) may leave the newest injected copies pending.
         out.guarantees_wait_all =
@@ -650,7 +665,7 @@ private:
       // Scope wrappers are transparent only when their explicit operands are
       // pure. An operator region can read memory itself before its body.
       if (region->op->name != "tl.attr" &&
-          region->op->name != "tl.lexical_scope" &&
+          !region->op.same_as(tl::lexical_scope_op()) &&
           region->op->name != "tirx.launch_thread") {
         out.is_pure_copy_region = false;
         return out;

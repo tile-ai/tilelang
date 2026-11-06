@@ -1,4 +1,8 @@
+#include "cuda/op/builtin.h"
+#include "ir/stmt_functor.h"
 #include "ir/vectorize.h"
+#include "op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -29,9 +33,8 @@
 #include "../ir/stmt_functor.h"
 #include "../ir/vectorize.h"
 #include "../op/builtin.h"
-#include "../op/native_intrinsic.h"
-#include "../op/native_utils.h"
 #include "common/pipeline_access.h"
+#include "ir/annotations.h"
 #include "loop_vectorize.h"
 #include <optional>
 #include <tvm/ffi/reflection/registry.h>
@@ -54,8 +57,15 @@ bool IsElementwisePrimOp(const Op &op) {
 }
 
 bool UsesLane(ffi::AnyView value, const Var &lane) {
-  return UsesAnyVar(value,
-                    [&](const VarObj *var) { return var == lane.get(); });
+  return ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+             value,
+             [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+               return (var == lane.get())
+                          ? ffi::WalkResult::Interrupt(
+                                ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                          : ffi::WalkResult::Skip();
+             })
+      .has_value();
 }
 
 // Only an owning intrinsic rule may discard the lane from a pointer, after
@@ -94,19 +104,20 @@ std::optional<Address> MemoryAddress(const Expr &value) {
     const auto op = call->op.as<Op>();
     if (!op)
       return std::nullopt;
-    const auto name = op.value()->name;
-    if (name == "tl.access_ptr" || name == "tirx.address_of")
+    if (call->op.same_as(tl::access_ptr()) ||
+        call->op.same_as(tirx::address_of_op()))
       return MemoryAddress(call->args[0]);
-    if (name == "tirx.tensor_data_ptr")
+    if (call->op.same_as(tirx::tensor_data_ptr_op()))
       return Address{call->args[0], IntImm(PrimType::Int(64), 0)};
-    if (name == "tirx.reinterpret" && call->args.size() == 1) {
+    if (call->op.same_as(tirx::reinterpret_op()) && call->args.size() == 1) {
       const auto source = call->args[0]->ty.as<PtrType>();
       const auto target = call->ty.as<PtrType>();
       if (source && target && (*source)->scope == (*target)->scope)
         return MemoryAddress(call->args[0]);
       return std::nullopt;
     }
-    if (name == "tl.ptr_access" || name == "tirx.ptr_byte_offset") {
+    if (call->op.same_as(tl::ptr_access()) ||
+        call->op.same_as(tirx::ptr_byte_offset_op())) {
       auto base = MemoryAddress(call->args[0]);
       if (!base)
         return std::nullopt;
@@ -114,7 +125,7 @@ std::optional<Address> MemoryAddress(const Expr &value) {
       if (!IsStableVectorizeIndex(offset))
         return std::nullopt;
       int bits = 8;
-      if (name == "tl.ptr_access") {
+      if (call->op.same_as(tl::ptr_access())) {
         const auto type = call->ty.as_or_throw<PtrType>();
         const PrimType element = type->element_type.as_or_throw<PrimType>();
         if (!element.IsScalar() || element.bits() <= 0)
@@ -143,9 +154,9 @@ bool AtomicAccessContract(const Expr &pointer, const Var &lane,
   const auto *call = pointer.as<CallObj>();
   if (!call || !call->op.as<Op>())
     return false;
-  const String name = call->op.as_or_throw<Op>()->name;
-  if (name == "tl.access_ptr" || name == "tl.ptr_access") {
-    const size_t extent_index = name == "tl.access_ptr" ? 1 : 2;
+  if (call->op.same_as(tl::access_ptr()) ||
+      call->op.same_as(tl::ptr_access())) {
+    const size_t extent_index = call->op.same_as(tl::access_ptr()) ? 1 : 2;
     if (call->args.size() != extent_index + 2)
       return false;
     const auto extent = call->args[extent_index].as<PrimExpr>();
@@ -156,10 +167,11 @@ bool AtomicAccessContract(const Expr &pointer, const Var &lane,
       return false;
     return AtomicAccessContract(call->args[0], lane, analyzer);
   }
-  if (name == "tirx.tensor_data_ptr")
+  if (call->op.same_as(tirx::tensor_data_ptr_op()))
     return call->args.size() == 1 && call->args[0]->ty.as<TensorTypeObj>();
-  if (name == "tirx.address_of" || name == "tirx.ptr_byte_offset" ||
-      name == "tirx.reinterpret")
+  if (call->op.same_as(tirx::address_of_op()) ||
+      call->op.same_as(tirx::ptr_byte_offset_op()) ||
+      call->op.same_as(tirx::reinterpret_op()))
     return !call->args.empty() &&
            AtomicAccessContract(call->args[0], lane, analyzer);
   return false;
@@ -179,8 +191,11 @@ bool IsContiguous(const Expr &pointer, const Var &lane, int lanes,
     return false;
   const PrimExpr first =
       begin.value_or(IntImm(lane->ty.as_or_throw<PrimType>(), 0));
-  const PrimExpr base = analyzer->Simplify(
-      SubstituteLoopVars(address->bit_offset, {{lane, first}}));
+  const PrimExpr base =
+      analyzer->Simplify(tirx::SubstituteWithDataTypeLegalization(
+          address->bit_offset,
+          [values = ffi::Map<Var, PrimExpr>{{lane, first}}](const Var &var)
+              -> ffi::Optional<PrimExpr> { return values.Get(var); }));
   const PrimType index_type = base.ty();
   // The native tensor type guarantees base-allocation alignment. Preserve the
   // layout/view offset and require the access to start on its vector boundary.
@@ -189,9 +204,14 @@ bool IsContiguous(const Expr &pointer, const Var &lane, int lanes,
           floormod(base, IntImm(index_type, bits_per_lane * lanes)), 0))
     return false;
   for (int i = 1; i < lanes; ++i) {
-    auto offset = SubstituteLoopVars(
+    auto offset = tirx::SubstituteWithDataTypeLegalization(
         address->bit_offset,
-        {{lane, first + IntImm(lane->ty.as_or_throw<PrimType>(), i)}});
+        [values =
+             ffi::Map<Var, PrimExpr>{
+                 {lane, first + IntImm(lane->ty.as_or_throw<PrimType>(), i)}}](
+            const Var &var) -> ffi::Optional<PrimExpr> {
+          return values.Get(var);
+        });
     if (!analyzer->CanProveEqual(offset,
                                  base + IntImm(index_type, i * bits_per_lane)))
       return false;
@@ -203,10 +223,10 @@ Expr BasePointer(const Expr &pointer, const Var &lane, int elements) {
   Expr result = AtLaneZero(pointer, lane);
   if (const auto *call = result.as<CallObj>()) {
     auto op = call->op.as<Op>();
-    if (op && (op.value()->name == "tl.access_ptr" ||
-               op.value()->name == "tl.ptr_access")) {
+    if (op && (op.value().same_as(tl::access_ptr()) ||
+               op.value().same_as(tl::ptr_access()))) {
       auto args = call->args;
-      const size_t extent_index = op.value()->name == "tl.access_ptr" ? 1 : 2;
+      const size_t extent_index = op.value().same_as(tl::access_ptr()) ? 1 : 2;
       PrimType index_type = args[extent_index].as_or_throw<PrimExpr>().ty();
       args.Set(extent_index, IntImm(index_type, elements));
       return Call(call->ty, call->op, args, call->attrs, call->ty_args,
@@ -223,7 +243,7 @@ Optional<Expr> VectorizeCPAsync(Call call, Var lane, PrimExpr lane_count,
   if (!width || width.value()->value <= 1 || width.value()->value > 128)
     return std::nullopt;
   const int lanes = width.value()->value.as<int>().value();
-  const auto operands = NativeIntrinsicOperands(call.get());
+  const auto operands = DecodeCallOperands(call.get());
   if (operands.size() != 3 && operands.size() != 4)
     return std::nullopt;
   const auto count = operands[2].as<IntImm>();
@@ -231,7 +251,7 @@ Optional<Expr> VectorizeCPAsync(Call call, Var lane, PrimExpr lane_count,
     return std::nullopt;
   const int per_lane = count.value()->value.as<int>().value();
   const bool bytes_form =
-      call->op.as_or_throw<Op>()->name == "tl.ptx_cp_async_bytes";
+      call->op.as_or_throw<Op>().same_as(tl::ptx_cp_async_bytes());
   const auto dst = operands[0]->ty.as_or_throw<PtrType>();
   const auto src = operands[1]->ty.as_or_throw<PtrType>();
   const PrimType dst_element = dst->element_type.as_or_throw<PrimType>();
@@ -283,7 +303,7 @@ Optional<Expr> VectorizeAtomicAdd(Call call, Var lane, PrimExpr lane_count,
       !target)
     return std::nullopt;
   const int lanes = width.value()->value.as<int>().value();
-  const auto operands = NativeIntrinsicOperands(call.get());
+  const auto operands = DecodeCallOperands(call.get());
   const auto destination = operands[0]->ty.as_or_throw<PtrType>();
   const auto element = destination->element_type.as_or_throw<PrimType>();
   if (lanes >
@@ -372,19 +392,22 @@ bool SafePackingPredicate(const PrimExpr &condition,
   if (condition.ty() != PrimType::Bool() || !IsStableVectorizeIndex(condition))
     return false;
   bool safe = true;
-  VisitNativePostOrder(condition, [&](const ObjectRef &object) {
-    const PrimExpr *divisor = nullptr;
-    if (const auto *op = object.as<DivObj>())
-      divisor = &op->b;
-    else if (const auto *op = object.as<ModObj>())
-      divisor = &op->b;
-    else if (const auto *op = object.as<FloorDivObj>())
-      divisor = &op->b;
-    else if (const auto *op = object.as<FloorModObj>())
-      divisor = &op->b;
-    if (divisor)
-      safe &= analyzer->CanProve(*divisor > IntImm(divisor->ty(), 0));
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      condition,
+      [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+        const PrimExpr *divisor = nullptr;
+        if (const auto *op = object.as<DivObj>())
+          divisor = &op->b;
+        else if (const auto *op = object.as<ModObj>())
+          divisor = &op->b;
+        else if (const auto *op = object.as<FloorDivObj>())
+          divisor = &op->b;
+        else if (const auto *op = object.as<FloorModObj>())
+          divisor = &op->b;
+        if (divisor)
+          safe &= analyzer->CanProve(*divisor > IntImm(divisor->ty(), 0));
+        return ffi::WalkResult::Advance();
+      });
   return safe;
 }
 
@@ -469,7 +492,11 @@ public:
       return std::nullopt;
     }
     Visit(*value);
-    bindings_.Set(node->var, SubstituteLoopVars(*value, bindings_));
+    bindings_.Set(node->var,
+                  tirx::SubstituteWithDataTypeLegalization(
+                      *value, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+                        return bindings_.Get(var);
+                      }));
     return std::nullopt;
   }
 
@@ -524,7 +551,7 @@ public:
       allowed_ = false;
       return std::nullopt;
     }
-    auto fields = ReadNativeAnnotations(node);
+    auto fields = ReadAnnotations(node);
     if (auto key = fields.Get("key");
         key && key->as<String>() && key->cast<String>() == "volatile_scope") {
       allowed_ = false;
@@ -599,21 +626,21 @@ public:
       return std::nullopt;
     }
     owning_call_ = true;
-    if ((*op)->name == "tl.cast" || (*op)->name == "tl.clamp") {
+    if ((*op).same_as(tl::cast_op()) || (*op).same_as(tl::clamp())) {
       for (const auto &arg : node->args)
         Visit(arg);
       return std::nullopt;
     }
     ++effectful_calls_;
-    auto operands = NativeIntrinsicOperands(node);
-    if ((*op)->name == "tl.ptx_cp_async" ||
-        (*op)->name == "tl.ptx_cp_async_bytes") {
+    auto operands = DecodeCallOperands(node);
+    if ((*op).same_as(tl::ptx_cp_async()) ||
+        (*op).same_as(tl::ptx_cp_async_bytes())) {
       const auto count = operands[2].as<IntImm>();
       if (!count || count.value()->value <= 0 || count.value()->value > 16) {
         allowed_ = false;
         return std::nullopt;
       }
-      int unit = (*op)->name == "tl.ptx_cp_async_bytes"
+      int unit = (*op).same_as(tl::ptx_cp_async_bytes())
                      ? 8
                      : operands[0]
                            ->ty.as_or_throw<PtrType>()
@@ -625,7 +652,7 @@ public:
       for (size_t i = 3; i < node->args.size(); ++i)
         allowed_ &= !UsesLane(node->args[i], lane_) &&
                     SideEffect(node->args[i]) <= CallEffectKind::kPure;
-    } else if ((*op)->name == "tl.atomic_add_elem_op") {
+    } else if ((*op).same_as(tl::atomic_add_elem_op())) {
       AddAccess(operands[0],
                 operands[0]
                     ->ty.as_or_throw<PtrType>()
@@ -662,10 +689,14 @@ private:
     auto left = MemoryAddress(lhs), right = MemoryAddress(rhs);
     if (!left || !right)
       return false;
-    PrimExpr a = analyzer_->Simplify(
-        SubstituteLoopVars(left->bit_offset, {{lane_, begin_}}));
-    PrimExpr b = analyzer_->Simplify(
-        SubstituteLoopVars(right->bit_offset, {{lane_, begin_}}));
+    PrimExpr a = analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+        left->bit_offset,
+        [values = ffi::Map<Var, PrimExpr>{{lane_, begin_}}](const Var &var)
+            -> ffi::Optional<PrimExpr> { return values.Get(var); }));
+    PrimExpr b = analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+        right->bit_offset,
+        [values = ffi::Map<Var, PrimExpr>{{lane_, begin_}}](const Var &var)
+            -> ffi::Optional<PrimExpr> { return values.Get(var); }));
     auto safe_end = [&](const PrimExpr &base, int span) {
       auto bound = analyzer_->const_int_bound(base);
       return bound->min_value != sym::ConstIntBound::kNegInf &&
@@ -680,7 +711,10 @@ private:
   }
 
   PrimExpr Expand(const PrimExpr &value) {
-    return SubstituteLoopVars(value, bindings_);
+    return tirx::SubstituteWithDataTypeLegalization(
+        value, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+          return bindings_.Get(var);
+        });
   }
   void CheckLeadingIndices(const Array<PrimExpr> &indices) {
     if (indices.empty()) {
@@ -694,10 +728,21 @@ private:
         return;
       }
       PrimExpr base =
-          analyzer_->Simplify(SubstituteLoopVars(index, {{lane_, begin_}}));
+          analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+              index,
+              [values = ffi::Map<Var, PrimExpr>{{lane_, begin_}}](
+                  const Var &var) -> ffi::Optional<PrimExpr> {
+                return values.Get(var);
+              }));
       for (int lane = 1; lane < lanes_; ++lane) {
-        PrimExpr other = SubstituteLoopVars(
-            index, {{lane_, begin_ + IntImm(begin_.ty(), lane)}});
+        PrimExpr other = tirx::SubstituteWithDataTypeLegalization(
+            index,
+            [values =
+                 ffi::Map<Var, PrimExpr>{
+                     {lane_, begin_ + IntImm(begin_.ty(), lane)}}](
+                const Var &var) -> ffi::Optional<PrimExpr> {
+              return values.Get(var);
+            });
         if (!analyzer_->CanProveEqual(base, other)) {
           allowed_ = false;
           return;
@@ -711,16 +756,20 @@ private:
     for (const auto &[var, value] : bindings_)
       remap->VarRemapSet(var, value);
     expression = remap->Mutate(expression).ValueOrUnchanged(expression);
-    VisitNativePostOrder(expression, [&](const ObjectRef &object) {
-      const auto *call = object.as<CallObj>();
-      const auto *op = call ? call->op.as<OpObj>() : nullptr;
-      if (!op || (op->name != "tl.access_ptr" && op->name != "tl.ptr_access"))
-        return;
-      const size_t extent = op->name == "tl.access_ptr" ? 1 : 2;
-      for (size_t i = extent; i < call->args.size(); ++i)
-        allowed_ &= !UsesLane(call->args[i], lane_) &&
-                    SideEffect(call->args[i]) <= CallEffectKind::kPure;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expression,
+        [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          const auto *call = object.as<CallObj>();
+          const auto *op = call ? call->op.as<OpObj>() : nullptr;
+          if (!op ||
+              (op != tl::access_ptr().get() && op != tl::ptr_access().get()))
+            return ffi::WalkResult::Advance();
+          const size_t extent = op == tl::access_ptr().get() ? 1 : 2;
+          for (size_t i = extent; i < call->args.size(); ++i)
+            allowed_ &= !UsesLane(call->args[i], lane_) &&
+                        SideEffect(call->args[i]) <= CallEffectKind::kPure;
+          return ffi::WalkResult::Advance();
+        });
     const auto address = MemoryAddress(expression);
     auto tensor =
         address ? address->root.as<TensorVar>() : Optional<TensorVar>();
@@ -956,7 +1005,7 @@ public:
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *node, InplaceMode mode) final {
     if (node->op->name != "tl.attr")
       return DataTypeLegalizer::Mutate_(node, mode);
-    auto fields = ReadNativeAnnotations(node);
+    auto fields = ReadAnnotations(node);
     auto key = fields.Get("key");
     if (!key || !key->as<String>() ||
         key->cast<String>() != "tl.assume_requires_runtime_check")
@@ -976,8 +1025,12 @@ private:
     PrimExpr result = IntImm(PrimType::Bool(), 1);
     const int lanes = lanes_.as_or_throw<IntImm>()->value.as<int>().value();
     for (int i = 0; i < lanes; ++i) {
-      PrimExpr scalar = SubstituteLoopVars(RenewExpressionDefs(condition),
-                                           {{lane_, IntImm(lane_.ty(), i)}});
+      PrimExpr scalar = tirx::SubstituteWithDataTypeLegalization(
+          RenewExpressionDefs(condition),
+          [values = ffi::Map<Var, PrimExpr>{{lane_, IntImm(lane_.ty(), i)}}](
+              const Var &var) -> ffi::Optional<PrimExpr> {
+            return values.Get(var);
+          });
       scalar = Mutate(scalar, InplaceMode::kDisallow).ValueOrUnchanged(scalar);
       if (scalar.ty() != PrimType::Bool()) {
         valid_ = false;
@@ -1046,7 +1099,12 @@ public:
         make_object<UniformLeadingIndexRewriter>(plan->UniformLeadingIndices())
             ->Mutate(node->body, InplaceMode::kDisallow)
             .ValueOrUnchanged(node->body);
-    body = SubstituteLoopVars(body, {{node->var, node->begin + lane}});
+    body = tl::SubstituteWithDataTypeLegalization(
+        body,
+        [values = ffi::Map<Var, PrimExpr>{{node->var, node->begin + lane}}](
+            const Var &var) -> ffi::Optional<PrimExpr> {
+          return values.Get(var);
+        });
     auto rewriter =
         make_object<PackingRewriter>(lane, width, target_, analyzer_);
     Stmt rewritten =

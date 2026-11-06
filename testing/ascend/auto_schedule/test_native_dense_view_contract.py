@@ -1,9 +1,11 @@
 """Dense views retain an explicit layout and the actual backing pointer."""
 
+from tilelang.language import _tensor_spec
+
 import pytest
 import tilelang.language as T
 import tvm_ffi
-from tilelang.language import _native
+
 from tvm_tirx import ir, tirx, sym
 
 
@@ -28,8 +30,8 @@ def test_dense_view_keeps_explicit_layout_and_scope(scope, shape, dtype, view_sh
     # layout. Ranked views retain their explicit dense strides.
     assert (view_type.layout is not None) == bool(view_shape)
     assert str(view_type.scope.name) == scope
-    assert [int(value) for value in _native.tensor_strides(view)] == list(strides)
-    assert int(_native.tensor_offset(view)) == 0
+    assert [int(value) for value in _tensor_spec.tensor_strides(view)] == list(strides)
+    assert int(_tensor_spec.tensor_offset(view)) == 0
     assert tvm_ffi.structural_equal(view.data, src.data)
 
 
@@ -38,7 +40,7 @@ def test_dense_view_keeps_symbolic_destination_strides():
     src = ir.Var("src", tirx.TensorType((2, extent), "float32", scope="shared.dyn", layout=None))
     view = T.view(src, (1, 2, extent))
     assert view.as_type().layout is not None
-    actual = _native.tensor_strides(view)
+    actual = _tensor_spec.tensor_strides(view)
     assert len(actual) == 3
     analyzer = sym.Analyzer()
     assert analyzer.can_prove_equal(actual[0], 2 * extent)

@@ -8,13 +8,14 @@ tile using ordinary CUDA-core fused multiply-add instructions.
 
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.utils.language import is_fragment, is_full_region
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
 
 
 GEMM_INST_FMA = "cuda.fma"
@@ -62,8 +63,8 @@ class GemmFMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_var: tirx.Var,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_var: _ir.Var,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         """Emit the FMA-fallback GEMM prim_func.
 

@@ -21,15 +21,21 @@
  * \file rewrite_buffer_version_layout.cc
  * \brief Align physical Ascend UB slots while rebuilding every typed alias.
  */
-#include "auto_schedule/native_storage.h"
+#include "ascend/analysis/storage.h"
+#include "ascend/transform/source_scopes.h"
 #include "buffer_version.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "ir/stmt_functor.h"
-#include "op/native_intrinsic.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
 #include "op/utils.h"
 #include "transform/common/storage_size.h"
 #include <limits>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_map>
 #include <vector>
@@ -57,49 +63,54 @@ using Layouts =
 class VersionMetadata {
 public:
   BufferVersionMap versions;
-  NativeStorageContext storage;
+  StorageProvenance storage = MakeAscendStorageProvenance();
   std::unordered_map<Var, TensorVar, ObjectPtrHash, ObjectPtrEqual> owners;
   std::unordered_map<Var, std::vector<TensorVar>, ObjectPtrHash, ObjectPtrEqual>
       views;
   explicit VersionMetadata(const Stmt &stmt) {
     storage.Collect(stmt);
-    VisitNativePostOrder(stmt, [&](const ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>()) {
-        Expr value = bind->value;
-        if (const auto *c = value.as<CallObj>(); IsScheduledBind(c))
-          value = ReadScheduledBinding(c).value;
-        const auto *call = value.as<CallObj>();
-        if (auto tensor = bind->var.as<TensorVar>()) {
-          Var root = storage.Identity(*tensor);
-          views[root].push_back(*tensor);
-          if (call && call->op.same_as(alloc_tensor_op()))
-            owners.emplace(root, *tensor);
-        }
-      }
-      if (const auto *call = object.as<CallObj>();
-          loop_annotation_detail::IsAnnotation(call)) {
-        auto fields = ReadNativeAnnotations(call);
-        if (auto value = fields.Get(kPhysicalVersion))
-          Add(*value);
-      }
-      if (const auto *region = object.as<RegionStmtObj>()) {
-        if (auto attr = ReadTaskAttribute(region)) {
-          if (attr->key == kPhysicalVersion)
-            Add(attr->node);
-          else if (attr->key == "tl.sblock" ||
-                   attr->key == "tl.loop.annotations") {
-            auto fields = attr->value.cast<Fields>();
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *bind = object.as<BindObj>()) {
+            Expr value = bind->value;
+            if (const auto *c = value.as<CallObj>(); IsScheduledBind(c))
+              value = ReadScheduledBinding(c).value;
+            const auto *call = value.as<CallObj>();
+            if (auto tensor = bind->var.as<TensorVar>()) {
+              Var root = storage.Identity(*tensor);
+              views[root].push_back(*tensor);
+              if (call && call->op.same_as(alloc_tensor_op()))
+                owners.emplace(root, *tensor);
+            }
+          }
+          if (const auto *call = object.as<CallObj>(); IsAnnotationCall(call)) {
+            auto fields = ReadAnnotations(call);
             if (auto value = fields.Get(kPhysicalVersion))
               Add(*value);
-            if (attr->key == "tl.sblock")
-              if (auto annotations = fields.Get("annotations"))
-                if (auto value =
-                        annotations->cast<Fields>().Get(kPhysicalVersion))
-                  Add(*value);
           }
-        }
-      }
-    });
+          if (const auto *region = object.as<RegionStmtObj>()) {
+            if (IsAscendBlock(region))
+              if (auto value =
+                      AscendBlockAnnotations(region).Get(kPhysicalVersion))
+                Add(*value);
+            if (auto attr = ReadSourceAttribute(region)) {
+              if (attr->key == kPhysicalVersion)
+                Add(attr->node);
+              else if (attr->key == "tl.sblock" ||
+                       attr->key == "tl.loop.annotations") {
+                auto fields = attr->value.cast<Fields>();
+                if (auto value = fields.Get(kPhysicalVersion))
+                  Add(*value);
+                if (attr->key == "tl.sblock")
+                  if (auto annotations = fields.Get("annotations"))
+                    if (auto value =
+                            annotations->cast<Fields>().Get(kPhysicalVersion))
+                      Add(*value);
+              }
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
 private:
@@ -130,7 +141,7 @@ class BufferVersionLayoutRewriter : public StmtExprMutatorWithAnalyzer {
 public:
   using StmtExprMutatorWithAnalyzer::Mutate_;
   BufferVersionLayoutRewriter(const tirx::Function &function,
-                              NativeStorageContext storage, Layouts layouts,
+                              StorageProvenance storage, Layouts layouts,
                               sym::Analyzer analyzer)
       : StmtExprMutatorWithAnalyzer(analyzer), storage_(std::move(storage)),
         layouts_(std::move(layouts)), analyzer_owner_(std::move(analyzer)) {
@@ -138,7 +149,7 @@ public:
   }
 
 private:
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   Layouts layouts_;
   Map<TensorVar, TensorVar> tensors_;
   // The native analyzer mutator retains a pointer, so own its lifetime here.
@@ -286,18 +297,27 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!loop_annotation_detail::IsAnnotation(call))
+    if (!IsAnnotationCall(call))
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
-    auto fields = ReadNativeAnnotations(call);
+    auto fields = ReadAnnotations(call);
     if (!fields.count(kPhysicalVersion))
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
     fields = Strip(fields);
-    Stmt result = fields.empty() ? Stmt(SeqStmt({}))
-                                 : MakeNativeAnnotation(fields, op->loc);
+    Stmt result =
+        fields.empty() ? Stmt(SeqStmt({})) : MakeAnnotation(fields, op->loc);
     return Mutate(result, mode).ValueOrUnchanged(result);
   }
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (auto attr = ReadTaskAttribute(op)) {
+    if (IsAscendBlock(op)) {
+      auto fields = AscendBlockAnnotations(op);
+      auto updated = Strip(fields);
+      if (!StructuralEqual()(fields, updated)) {
+        RegionStmt next =
+            MakeAscendBlock(AscendBlockName(op), updated, op->body, op->loc);
+        return Mutate(next, mode).ValueOrUnchanged(next);
+      }
+    }
+    if (auto attr = ReadSourceAttribute(op)) {
       if (attr->key == kPhysicalVersion)
         return Mutate(op->body, mode).ValueOrUnchanged(op->body);
       if (attr->key == "tl.sblock" || attr->key == "tl.loop.annotations") {
@@ -307,8 +327,8 @@ private:
           if (auto annotations = updated.Get("annotations"))
             updated.Set("annotations", Strip(annotations->cast<Fields>()));
         if (!StructuralEqual()(fields, updated)) {
-          RegionStmt next = MakeNativeAttribute(attr->node, attr->key, updated,
-                                                op->body, op->loc);
+          RegionStmt next =
+              MakeAttribute(attr->node, attr->key, updated, op->body, op->loc);
           return Mutate(next, mode).ValueOrUnchanged(next);
         }
       }
@@ -366,7 +386,7 @@ private:
     return TensorStore(Physical(tensor), {index}, value, op->loc);
   }
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-    if (op->op.same_as(Op::Get("tl.access_ptr"))) {
+    if (op->op.same_as(tl::access_ptr())) {
       TVM_FFI_CHECK_EQ(op->args.size(), 3U, ValueError);
       const auto *load = op->args[0].as<TensorLoadObj>();
       TVM_FFI_CHECK(load, ValueError);
@@ -378,7 +398,7 @@ private:
       }
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
     }
-    if (op->op.same_as(Op::Get("tl.ptr_access"))) {
+    if (op->op.same_as(tl::ptr_access())) {
       TVM_FFI_CHECK_EQ(op->args.size(), 4U, ValueError);
       if (const auto *layout = Layout(op->args[0])) {
         auto address = storage_.Address(op->args[0]);

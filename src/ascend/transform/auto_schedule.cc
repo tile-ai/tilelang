@@ -22,6 +22,10 @@
  * \brief AutoSchedule pass and schedule builder.
  */
 
+#include "ascend/transform/source_scopes.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
+#include "layout/expr_utils.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -33,6 +37,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -84,11 +89,12 @@ namespace {
 // thread context, so the usable shared memory depends on its presence.
 inline bool HasSimtVF(const Stmt &stmt) {
   bool found = false;
-  VisitNativePostOrder(stmt, [&](const ObjectRef &object) {
-    if (const auto *region = object.as<RegionStmtObj>())
-      if (auto name = NativeBlockName(region))
-        found |= *name == "SIMT_VF";
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const RegionStmtObj *region) -> ffi::Expected<ffi::WalkResult> {
+        if (auto name = BlockNameAtSourceBoundary(region))
+          found |= *name == "SIMT_VF";
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -295,7 +301,7 @@ private:
   L0StorageGroups storage_groups_;
   IRStructure::ChildList &tree_;
   ConstrSet outer_;
-  NativeStorageFootprints storage_footprints_;
+  StorageFootprints storage_footprints_;
   std::unique_ptr<ScopedConflictHintIndex> scoped_hints_;
 
   const ScopedConflictHintIndex *RefreshScopedHints() {
@@ -509,7 +515,7 @@ void ScheduleBuilder::ScheduleRecursive(std::shared_ptr<IRStructure> &node) {
     // changing any definition/hint domain.
     while (body->size() == 1 && body->front()->IsScope()) {
       auto *scope = static_cast<ScopeNode *>(body->front().get());
-      auto attribute = ReadTaskAttribute(scope->shell);
+      auto attribute = ReadSourceAttribute(scope->shell);
       if (!attribute || attribute->key != "tl.loop.annotations")
         break;
       body_owner = scope;
@@ -537,7 +543,7 @@ void ScheduleBuilder::ScheduleRecursive(std::shared_ptr<IRStructure> &node) {
       if (!IsTaskMetadataStatement(shell))
         break;
       auto fields =
-          ReadNativeAnnotations(shell.as<EvaluateObj>()->value.as<CallObj>());
+          ReadAnnotations(shell.as<EvaluateObj>()->value.as<CallObj>());
       if (fields.size() != 1 || !fields.Get("multi_buffer_eligible"))
         break;
       --executable_end;
@@ -1551,14 +1557,16 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   int64_t shared_mem_limit = GetSharedMemoryLimit(kernel_body);
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
   AivStorageMap aiv_storages;
-  VisitNativePostOrder(metadata.kernel_root, [&](const ObjectRef &object) {
-    const auto *call = object.as<CallObj>();
-    const auto *callee = call ? call->op.as<OpObj>() : nullptr;
-    if (callee && callee->name == "tl.annotation")
-      if (auto value = ReadNativeAnnotations(call).Get(kAivStorageMap))
-        for (const auto &[storage, sid] : value->cast<AivStorageMap>())
-          aiv_storages.Set(storage, sid);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      metadata.kernel_root,
+      [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+        const auto *call = object.as<CallObj>();
+        if (IsAnnotationCall(call))
+          if (auto value = ReadAnnotations(call).Get(kAivStorageMap))
+            for (const auto &[storage, sid] : value->cast<AivStorageMap>())
+              aiv_storages.Set(storage, sid);
+        return ffi::WalkResult::Advance();
+      });
   if (!aiv_storages.empty()) {
     unit_builder.SetAivStorages(aiv_storages);
     unit_builder.SetMemoryLimit("shared.aiv0", shared_mem_limit);

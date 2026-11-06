@@ -1,3 +1,5 @@
+from tilelang.language import _construction
+
 # ruff: noqa
 import tvm_tirx
 import tilelang as tl
@@ -9,14 +11,14 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 from tvm_tirx.ir import prim
 from tvm_tirx.tirx.layout import Iter
-from tilelang.language import _native
-from tilelang.language._native import encode_annotations
+
+from tilelang.language._annotation_codec import encode_annotations
 from tilelang.testing.ir import collect_nodes
 import pytest
 
 
 def bind_then(var, value, body):
-    return ir.SeqStmt([ir.Bind(var, _native._expr(value)), body])
+    return ir.SeqStmt([ir.Bind(var, _construction.as_expr(value)), body])
 
 
 def tensor(name, shape, dtype="float32", scope="global", **kwargs):
@@ -24,7 +26,7 @@ def tensor(name, shape, dtype="float32", scope="global", **kwargs):
 
 
 def thread_scope(variable, tag, extent, body):
-    return ir.RegionStmt("tirx.launch_thread", [ir.StringImm(tag), _native._expr(extent)], [variable], None, body)
+    return ir.RegionStmt("tirx.launch_thread", [ir.StringImm(tag), _construction.as_expr(extent)], [variable], None, body)
 
 
 def attribute(node, key, value, body):

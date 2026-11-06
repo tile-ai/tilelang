@@ -22,6 +22,7 @@
  * \brief Legalize the program from frontend
  */
 
+#include "ir/stmt_functor.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/expr.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -30,10 +31,10 @@
 namespace tvm::tl {
 namespace {
 
-class LetInliner : public tirx::StmtExprMutator {
+class LetInliner : public tl::LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
     Expr value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
@@ -44,14 +45,14 @@ public:
       VarRemapSet(op->var, value);
       return SeqStmt(ffi::Array<Stmt>{}, op->loc);
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const prim::LetObj *op,
                                      InplaceMode mode) final {
     PrimExpr value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
     if (SideEffect(value) > CallEffectKind::kPure) {
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     }
     VarRemapSet(op->var, value);
     return Mutate(op->body, mode).ValueOrUnchanged(op->body);

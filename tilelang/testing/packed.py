@@ -29,7 +29,7 @@ def build_packed_module(function, *, tilelang_owned=True, target="c", c_codegen=
     module = tirx.transform.BindTarget(target.with_host(target))(module)
     module = LowerCPUKernelLaunch()(module)
     module = tilelang.transform.LowerTensorSpec()(module)
-    module = tilelang.transform.LowerOpaqueBlock()(module)
+    module = tilelang.transform.LowerSourceAnnotations()(module)
     if tilelang_owned:
         module = tilelang.transform.LowerTensorDescriptors()(module)
     module = ir.transform.Sequential(
@@ -48,7 +48,6 @@ def build_packed_module(function, *, tilelang_owned=True, target="c", c_codegen=
     packed_pass = tilelang.transform.MakePackedAPI if tilelang_owned else tirx.transform.MakePackedAPI
     module = packed_pass()(module)
     module = ir.transform.Sequential([tirx.transform.FP8StorageLegalize(), tirx.transform.BF16StorageLegalize()])(module)
-    module = tilelang.transform.PrepareAnyList()(module)
     module = finalize_host_passes()(module)
     build = "target.build.tilelang_c_host" if target.kind.name == "c" else "target.build.llvm"
     if c_codegen == "compute":

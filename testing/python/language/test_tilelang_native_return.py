@@ -1,5 +1,8 @@
 """Explicit T.ret constructs native control flow and evaluates exactly once."""
 
+from tilelang.language import _construction
+from tvm_tirx.script.ir_builder import base as _builder_base
+
 import pytest
 import tvm_ffi
 from tvm_tirx import ir, tirx
@@ -7,7 +10,6 @@ from tilelang.testing.packed import compile_packed_function
 from tvm_tirx.script.ir_builder import IRBuilder
 
 import tilelang.language as T
-from tilelang.language import _native
 
 
 def returns(function):
@@ -28,7 +30,7 @@ def test_ret_constructs_native_statement_with_exact_operand_and_location(value_t
 
 
 def test_ret_construction_does_not_emit_in_active_builder():
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("construct_only")
         pending = T.ret(17)
         T.evaluate(0)
@@ -37,12 +39,12 @@ def test_ret_construction_does_not_emit_in_active_builder():
 
 
 def test_evaluate_return_receipt_emits_one_statement():
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("emit_once")
         T.func_ret(ir.PrimType("int32"))
         pending = T.ret(17)
         receipt = T.evaluate(pending)
-        assert isinstance(receipt, _native.AlreadyEmitted)
+        assert isinstance(receipt, _builder_base.AlreadyEmitted)
         assert receipt.value.same_as(pending)
         assert T.evaluate(receipt) is receipt
     function = builder.get()

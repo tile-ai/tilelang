@@ -12,9 +12,8 @@ def _assert_vector_copy(kernel, shape, element_index, iterations, replicated=Fal
     loop = re.search(r"for \(int (\w+) = 0; \1 < " + str(iterations) + r"; \+\+\1\)", code)
     assert loop is not None, code
     index = element_index(loop.group(1))
-    address = f"(static_cast<ptrdiff_t>({index}) * 4)"
-    load = f"tl::load_vector<float4, 16, false>(((const unsigned char*)A_ptr + {address}))"
-    store = f"tl::store_vector<float4, 16, false>(((unsigned char*)B_ptr + {address}), {load});"
+    load = f"*(float4*)(A_ptr + {index})"
+    store = f"*(float4*)(B_ptr + {index}) = {load};"
     assert store in code
     if replicated:
         # Only the canonical owner writes. Under this guard, the former

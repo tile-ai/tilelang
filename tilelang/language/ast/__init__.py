@@ -22,4 +22,4 @@ from .ir import *  # noqa: F401
 from .ir import boolean as bool  # noqa: F401
 from .ir import buffer as Buffer  # noqa: F401
 
-from tilelang.language._native import frame  # noqa: F401
+pass  # noqa: F401

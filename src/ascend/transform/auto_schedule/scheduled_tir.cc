@@ -18,7 +18,13 @@
  */
 
 #include "scheduled_tir.h"
+#include "ascend/transform/source_scopes.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
 #include "task_analysis.h"
+#include "transform/common/constr_visitor.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/tirx/analysis.h>
@@ -166,11 +172,12 @@ ScheduleUnitMetadata WriteMetadata(const ScheduledTIRMetadata &metadata) {
   return fields;
 }
 
-NativeTaskAttribute RequireSemanticTaskMarker(const Stmt &stmt) {
-  auto task = ReadTaskAttribute(stmt);
-  TVM_FFI_CHECK(task && IsSemanticTaskKey(task->key), ValueError)
+RegionStmt RequireSemanticTaskMarker(const Stmt &stmt) {
+  const auto *task = SingleStatement(stmt).as<RegionStmtObj>();
+  TVM_FFI_CHECK(IsSemanticTask(task), ValueError)
       << "Scheduled leaf must contain exactly one native T.Task/T.PerCoreTask";
-  return *task;
+  TaskAnnotations(task);
+  return GetRef<RegionStmt>(task);
 }
 
 // New storage entries may refer to definitions inside a loop or branch. Keep
@@ -206,7 +213,7 @@ public:
         }
       }
       if (!local.empty())
-        statements.push_back(MakeNativeAnnotation(local, bind->loc));
+        statements.push_back(MakeAnnotation(local, bind->loc));
     }
     return SeqStmt(statements, op->loc);
   }
@@ -277,7 +284,7 @@ public:
       body = emitter->Mutate(body).ValueOrUnchanged(body);
       if (!emitter->remaining.empty()) {
         auto statements = body->seq;
-        statements.push_back(MakeNativeAnnotation(emitter->remaining, loc));
+        statements.push_back(MakeAnnotation(emitter->remaining, loc));
         body = SeqStmt(statements, loc);
       }
     }
@@ -316,7 +323,8 @@ private:
             TaskMetadataFor(task, original.task));
       }
       auto semantic = RequireSemanticTaskMarker(task->stmt);
-      Stmt body = semantic.WithNode(TaskMetadataFor(task, semantic.node));
+      Stmt body = WithTaskAnnotations(
+          semantic, TaskMetadataFor(task, TaskAnnotations(semantic.get())));
       body = WrapScheduledGuards(body, task->GetGuards());
       return MakeScheduleUnit(body, task->GetStage());
     }
@@ -337,17 +345,17 @@ private:
             EncodeList(scope->else_children, branch->else_case.value()->loc);
       return result;
     }
-    if (auto attribute = ReadTaskAttribute(scope->shell))
+    if (auto attribute = ReadSourceAttribute(scope->shell))
       return attribute->WithBody(
           EncodeList(scope->children, attribute->region->body->loc));
     TVM_FFI_CHECK(IsTaskMetadataStatement(scope->shell), ValueError)
         << "Unknown lexical schedule node";
     const auto *call = scope->shell.as<EvaluateObj>()->value.as<CallObj>();
-    auto original = ReadNativeAnnotations(call);
+    auto original = ReadAnnotations(call);
     auto fields = RewriteFields(original);
     if (ffi::StructuralEqual()(fields, original))
       return scope->shell;
-    return MakeNativeAnnotation(fields, scope->shell->loc);
+    return MakeAnnotation(fields, scope->shell->loc);
   }
 
   ScheduleUnitMetadata metadata_;
@@ -363,7 +371,7 @@ public:
   using TaskAwareConstrVisitor::Visit_;
   ScheduledTIRDecoder(const ConstrSet &outer, ScheduledExtraInfoFactory factory,
                       LayoutMap layouts,
-                      std::shared_ptr<NativeStorageContext> storage)
+                      std::shared_ptr<StorageProvenance> storage)
       : factory_(factory), layouts_(std::move(layouts)),
         storage_(std::move(storage)) {
     constr_stack_ = outer.constrs_;
@@ -469,7 +477,7 @@ private:
   Result Visit_(const EvaluateObj *op) final {
     TVM_FFI_CHECK(IsTaskMetadataStatement(GetRef<Stmt>(op)), ValueError)
         << "DecodeScheduledTIR found an unmarked Evaluate";
-    auto fields = ReadNativeAnnotations(op->value.as<CallObj>());
+    auto fields = ReadAnnotations(op->value.as<CallObj>());
     if (auto layout = fields.Get("layout_map"))
       for (const auto &[tensor, value] : layout->cast<LayoutMap>())
         layouts_.Set(tensor, value);
@@ -481,10 +489,7 @@ private:
   }
 
   Result Visit_(const RegionStmtObj *op) final {
-    auto attribute = ReadTaskAttribute(op);
-    TVM_FFI_CHECK(attribute.has_value(), ValueError)
-        << "Unexpected native region in scheduled TIR: " << op->op->name;
-    if (attribute->key == attr::kScheduleUnit) {
+    if (IsScheduleUnit(op)) {
       int stage = GetScheduleUnitStage(op);
       Stmt body = SingleStatement(op->body);
       if (const auto *loop = body.as<ForObj>()) {
@@ -509,12 +514,14 @@ private:
         result_.push_back(control);
       } else {
         auto task = RequireSemanticTaskMarker(body);
-        result_.push_back(DecodeTask(
-            body, stage, task_metadata_detail::CopyTaskMetadata(task.node),
-            task.key == attr::kAscendPerCoreTask));
+        result_.push_back(DecodeTask(body, stage, TaskAnnotations(task.get()),
+                                     IsPerCoreTask(task.get())));
       }
       return std::nullopt;
     }
+    auto attribute = ReadSourceAttribute(op);
+    TVM_FFI_CHECK(attribute.has_value(), ValueError)
+        << "Unexpected region in scheduled TIR: " << op->op->name;
     TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
                       attribute->key == "tl.loop.annotations",
                   ValueError)
@@ -561,7 +568,7 @@ private:
   IRStructure::ChildList result_;
   ScheduledExtraInfoFactory factory_;
   LayoutMap layouts_;
-  std::shared_ptr<NativeStorageContext> storage_;
+  std::shared_ptr<StorageProvenance> storage_;
 };
 
 } // namespace
@@ -572,13 +579,15 @@ std::optional<CoreMask> GetScheduledCoreMask(const Stmt &statement) {
     return ParseTaskMetadata(
                ReadScheduledBinding(bind->value.as<CallObj>()).task)
         .core_mask;
-  auto marker = ReadTaskAttribute(unit);
-  TVM_FFI_CHECK(marker && marker->key == attr::kScheduleUnit, ValueError)
+  const auto *marker = unit.as<RegionStmtObj>();
+  TVM_FFI_CHECK(IsScheduleUnit(marker), ValueError)
       << "Expected a native schedule unit";
-  Stmt body = SingleStatement(marker->region->body);
+  Stmt body = SingleStatement(marker->body);
   if (body.as<ForObj>())
     return std::nullopt;
-  return ParseTaskMetadata(RequireSemanticTaskMarker(body).node).core_mask;
+  return ParseTaskMetadata(
+             TaskAnnotations(RequireSemanticTaskMarker(body).get()))
+      .core_mask;
 }
 
 CoreMask RequireScheduledCoreMask(const Stmt &statement) {
@@ -589,7 +598,7 @@ CoreMask RequireScheduledCoreMask(const Stmt &statement) {
 }
 
 RegionStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
-  auto root = ReadTaskAttribute(scheduled_tir.metadata.kernel_root);
+  auto root = ReadSourceAttribute(scheduled_tir.metadata.kernel_root);
   TVM_FFI_CHECK(root && root->key == "tl.sblock", ValueError);
   auto shell = root->value.cast<ScheduleUnitMetadata>();
   bool preserve_root_hints = ffi::StructuralEqual()(
@@ -606,18 +615,17 @@ RegionStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
     shell.Set("annotations",
               encoder.RewriteFields(original->cast<ScheduleUnitMetadata>()));
   auto body = encoder.Encode(scheduled_tir.tree, root->region->body->loc);
-  return MakeNativeAttribute(root->node, root->key, shell, body,
-                             root->region->loc);
+  return MakeAttribute(root->node, root->key, shell, body, root->region->loc);
 }
 
 ScheduledTIR
 DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer,
                    ScheduledExtraInfoFactory factory,
                    const ScheduleUnitMetadata &kernel_annotations,
-                   NativeParameterAliasContract parameter_alias_contract) {
-  auto attribute = ReadTaskAttribute(root);
+                   ParameterAliasContract parameter_alias_contract) {
+  auto attribute = ReadSourceAttribute(root);
   TVM_FFI_CHECK(attribute && attribute->key == "tl.sblock" &&
-                    NativeBlockName(root.get()).value() == "tilelang_root",
+                    SourceBlockName(root.get()).value() == "tilelang_root",
                 ValueError)
       << "Scheduled codec requires a native tilelang_root region";
   ScheduledTIR scheduled;
@@ -635,27 +643,30 @@ DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer,
   for (const Stmt &stmt : root->body->seq) {
     if (!IsTaskMetadataStatement(stmt))
       continue;
-    auto fields =
-        ReadNativeAnnotations(stmt.as<EvaluateObj>()->value.as<CallObj>());
+    auto fields = ReadAnnotations(stmt.as<EvaluateObj>()->value.as<CallObj>());
     ReadMetadata(fields, &scheduled.metadata);
   }
   // Storage identities defined in nested sequences have carriers there. The
   // analysis map is kernel-wide, but its serialized operands stay lexical.
-  VisitNativePostOrder(root->body, [&](const ObjectRef &node) {
-    const auto *evaluate = node.as<EvaluateObj>();
-    if (!evaluate || !IsTaskMetadataStatement(GetRef<Stmt>(evaluate)))
-      return;
-    auto fields = ReadNativeAnnotations(evaluate->value.as<CallObj>());
-    ScheduleUnitMetadata storage;
-    for (const auto &[key, value] : fields)
-      if (IsStorageMapMetadataKey(key))
-        storage.Set(key, value);
-    if (!storage.empty())
-      ReadMetadata(storage, &scheduled.metadata);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      root->body,
+      [&](const EvaluateObj *evaluate) -> ffi::Expected<ffi::WalkResult> {
+        if (!IsTaskMetadataStatement(GetRef<Stmt>(evaluate)))
+          return ffi::WalkResult::Advance();
+
+        auto fields = ReadAnnotations(evaluate->value.as<CallObj>());
+        ScheduleUnitMetadata storage;
+        for (const auto &[key, value] : fields)
+          if (IsStorageMapMetadataKey(key))
+            storage.Set(key, value);
+        if (!storage.empty())
+          ReadMetadata(storage, &scheduled.metadata);
+        return ffi::WalkResult::Advance();
+      });
   scheduled.metadata.original_root_conflict_hints =
       scheduled.metadata.root_conflict_hints;
-  auto storage = std::make_shared<NativeStorageContext>();
+  auto storage =
+      std::make_shared<StorageProvenance>(MakeAscendStorageProvenance());
   storage->SetParameterAliasContract(std::move(parameter_alias_contract));
   storage->Collect(root->body);
   auto decoder =

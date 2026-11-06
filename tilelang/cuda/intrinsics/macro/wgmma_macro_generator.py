@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from .mma_macro_generator import TensorCoreIntrinEmitter as MMAIntrinEmitter
 from tvm_ffi import dtype as DataType
-from tilelang.language._native import PrimExpr, Buffer, Var, BufferRegion
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import Var
+from tvm_tirx.ir import TensorRegion as BufferRegion
 from tvm_tirx.tirx import IndexMap, handle_add_byte_offset
 from tilelang.utils import is_fragment, is_full_region
 from math import gcd

@@ -5,6 +5,7 @@
 
 #include "cuda/op/builtin.h"
 #include "ir/annotations.h"
+#include "op/builtin.h"
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
@@ -86,7 +87,7 @@ public:
       return VisitInterrupt();
     }
     bool address = call->op.same_as(address_of_op()) ||
-                   op.value()->name == "tl.access_ptr";
+                   op.value().same_as(tl::access_ptr());
     for (size_t i = 0; i < call->args.size(); ++i) {
       if (address && i == 0) {
         if (const auto *load = call->args[i].as<TensorLoadObj>()) {

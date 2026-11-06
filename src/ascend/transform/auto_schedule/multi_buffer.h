@@ -21,6 +21,8 @@
 
 #pragma once
 
+#include "ir/loop_annotations.h"
+#include "transform/common/constr_visitor.h"
 #include <tvm/ffi/any.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/container/map.h>
@@ -43,9 +45,10 @@
 
 #include "../buffer_version.h"
 #include "./ir_structure.h"
-#include "./native_task_ir.h"
 #include "./task_annotations.h"
+#include "ascend/ir/task.h"
 #include "ascend/transform/attr.h"
+#include "ascend/transform/source_scopes.h"
 #include "op/builtin.h"
 #include "op/utils.h"
 
@@ -89,13 +92,13 @@ inline bool CanRewriteMultiBufferAttrNode(const ffi::String &attr_key,
 // Keep this predicate shared by the early owner planner and PrepareMultiBuffer
 // so automatic annotation never accepts a task that coverage validation later
 // rejects.
-inline bool
-CanBroadcastFillToStorage(const Stmt &stmt, const Var &storage,
-                          const NativeStorageContext &context = {}) {
+inline bool CanBroadcastFillToStorage(
+    const Stmt &stmt, const Var &storage,
+    const StorageProvenance &context = MakeAscendStorageProvenance()) {
   class Detector : public StmtExprVisitor {
   public:
     using Result = ffi::Optional<ffi::VisitInterrupt>;
-    Detector(Var storage, NativeStorageContext context)
+    Detector(Var storage, StorageProvenance context)
         : storage_(std::move(storage)), context_(std::move(context)) {}
 
     bool found{false};
@@ -114,7 +117,10 @@ CanBroadcastFillToStorage(const Stmt &stmt, const Var &storage,
     }
 
     Result Visit_(const RegionStmtObj *op) final {
-      if (auto attribute = ReadTaskAttribute(op)) {
+      if (IsAscendBlock(op) || IsSemanticTask(op) || IsScheduleUnit(op) ||
+          IsStageScope(op))
+        return Visit(op->body);
+      if (auto attribute = ReadSourceAttribute(op)) {
         if (CanRewriteMultiBufferAttrNode(attribute->key, attribute->node))
           Visit(attribute->node.cast<PrimExpr>());
         return Visit(op->body);
@@ -161,9 +167,9 @@ CanBroadcastFillToStorage(const Stmt &stmt, const Var &storage,
     }
 
     Var storage_;
-    NativeStorageContext context_;
+    StorageProvenance context_ = MakeAscendStorageProvenance();
   };
-  NativeStorageContext definitions = context;
+  StorageProvenance definitions = context;
   definitions.Collect(stmt);
   auto detector = ffi::make_object<Detector>(storage, std::move(definitions));
   detector->Visit(stmt);
@@ -241,7 +247,7 @@ public:
   }
 
   const MultiBufferInfo *Find(const TensorVar &tensor,
-                              const NativeStorageContext &storage) const {
+                              const StorageProvenance &storage) const {
     return Find(storage.Identity(tensor));
   }
 
@@ -295,15 +301,14 @@ private:
 
 namespace multi_buffer_detail {
 
-inline std::optional<NativeTaskAttribute> AsSemanticTask(const Stmt &stmt) {
-  auto task = ReadTaskAttribute(stmt);
-  if (!task || !IsSemanticTaskKey(task->key)) {
+inline ffi::Optional<RegionStmt> AsSemanticTask(const Stmt &stmt) {
+  const auto *task = SingleStatement(stmt).as<RegionStmtObj>();
+  if (!IsSemanticTask(task))
     return std::nullopt;
-  }
-  return task;
+  return ffi::GetRef<RegionStmt>(task);
 }
 
-inline NativeTaskAttribute RequireSemanticTask(const Stmt &stmt) {
+inline RegionStmt RequireSemanticTask(const Stmt &stmt) {
   auto task = AsSemanticTask(stmt);
   ICHECK(task.has_value())
       << "Multi-buffer task annotation requires T.Task/T.PerCoreTask";
@@ -320,13 +325,9 @@ GetMultiBufferBroadcastFills(const TaskNode *task) {
   auto semantic_task = multi_buffer_detail::AsSemanticTask(task->stmt);
   if (!semantic_task.has_value())
     return MultiBufferBroadcastFill();
-  const auto *metadata = semantic_task->node.as<ffi::MapObj>();
-  if (metadata == nullptr)
-    return {};
-  for (const auto &[key, value] : *metadata) {
-    if (key.cast<ffi::String>() == kMultiBufferBroadcastFill)
-      return value.cast<MultiBufferBroadcastFill>();
-  }
+  auto annotations = TaskAnnotations(semantic_task.value().get());
+  if (auto value = annotations.Get(kMultiBufferBroadcastFill))
+    return value->cast<MultiBufferBroadcastFill>();
   return {};
 }
 
@@ -348,17 +349,17 @@ inline void AddMultiBufferBroadcastFill(TaskNode *task, const Var &storage) {
   storages.push_back(storage);
   auto semantic_task = multi_buffer_detail::RequireSemanticTask(task->stmt);
   ffi::Map<ffi::String, ffi::Any> metadata =
-      task_metadata_detail::CopyTaskMetadata(semantic_task.node);
+      TaskAnnotations(semantic_task.get());
   metadata.Set(kMultiBufferBroadcastFill, std::move(storages));
-  task->stmt = semantic_task.WithNode(std::move(metadata));
+  task->stmt = WithTaskAnnotations(semantic_task, std::move(metadata));
 }
 
 inline void ClearMultiBufferBroadcastFills(TaskNode *task) {
   auto semantic_task = multi_buffer_detail::RequireSemanticTask(task->stmt);
   ffi::Map<ffi::String, ffi::Any> metadata =
-      task_metadata_detail::CopyTaskMetadata(semantic_task.node);
+      TaskAnnotations(semantic_task.get());
   metadata.erase(kMultiBufferBroadcastFill);
-  task->stmt = semantic_task.WithNode(std::move(metadata));
+  task->stmt = WithTaskAnnotations(semantic_task, std::move(metadata));
 }
 
 inline MultiBufferOwnerMap

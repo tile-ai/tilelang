@@ -12,10 +12,12 @@ the kernel-level ``tx/ty/tz`` placeholders are dropped by the Ascend pipeline.
 
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 import threading
 
-from tilelang.language import _native as tirx
-from tilelang.language._native import Var
+
+from tvm_tirx.ir import Var
 
 from tilelang.jit.exceptions import JITNoBuilderError
 from tilelang.language.kernel import (
@@ -136,7 +138,7 @@ def get_thread_extents() -> list[int]:
 
 @kernel_launch_factory
 def Kernel(
-    *blocks: int | tirx.PrimExpr,
+    *blocks: int | _ir.Expr,
     prelude: str | None = None,
 ) -> KernelLaunchFrame:
     """Construct a kernel launch frame for Ascend: a 1-D grid of AI cores.
@@ -173,7 +175,7 @@ def Kernel(
 
 @kernel_launch_factory
 def MixedKernel(
-    *blocks: int | tirx.PrimExpr,
+    *blocks: int | _ir.Expr,
     sids: int = 2,
     prelude: str | None = None,
 ):

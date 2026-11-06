@@ -25,8 +25,9 @@
  * 4211874e9e4b8770fd20ad0d98ab80afd1df5028. This is a whole-function
  * consistency check, not an initialization or dominance analysis.
  */
+#include "cuda/op/builtin.h"
 #include "ir/alias_analysis.h"
-#include "op/native_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op/memory.h>
@@ -48,14 +49,18 @@ struct WmmaInfo {
 class WmmaMetadata {
 public:
   explicit WmmaMetadata(const tirx::Function &function) : roots_(function) {
-    VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
-      if (const auto *call = object.as<CallObj>())
-        Gather(call);
-    });
-    VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
-      if (const auto *call = object.as<CallObj>())
-        CheckMma(call);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          Gather(call);
+          return ffi::WalkResult::Advance();
+        });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          CheckMma(call);
+          return ffi::WalkResult::Advance();
+        });
   }
 
   ffi::Optional<Var> Subject(const Expr &expression) const {
@@ -85,7 +90,7 @@ private:
   void Gather(const CallObj *call) {
     const auto name = Name(call);
     const bool fill = name == "tirx.gpu_fill_fragment";
-    const bool memory = name == "tl.wmma_load_matrix_sync" ||
+    const bool memory = call->op.same_as(tl::wmma_load_matrix_sync()) ||
                         name == "tirx.gpu_load_matrix_sync" ||
                         name == "tirx.gpu_store_matrix_sync";
     if (!fill && !memory)

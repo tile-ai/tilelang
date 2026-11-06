@@ -1,8 +1,10 @@
+#include "ir/loop_annotations.h"
 #include "support/check.h"
 #include <algorithm>
 #include <deque>
 #include <map>
 #include <numeric>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
@@ -245,15 +247,17 @@ public:
 
   bool MayBeConditionallyExecuted(const Stmt &stmt) const {
     bool conditional = false;
-    VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-      if (conditional) {
-        return;
-      }
-      if (const auto *if_then_else = node.as<IfObj>()) {
-        conditional = true;
-        return;
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (conditional) {
+            return ffi::WalkResult::Advance();
+          }
+          if (const auto *if_then_else = node.as<IfObj>()) {
+            conditional = true;
+            return ffi::WalkResult::Advance();
+          }
+          return ffi::WalkResult::Advance();
+        });
     return conditional;
   }
 
@@ -286,42 +290,44 @@ public:
     bool saw_copy = false;
     bool saw_non_copy_tile_op = false;
     bool saw_non_copy_buffer_store = false;
-    VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op || saw_non_copy_buffer_store) {
-        return;
-      }
-      if (const auto *store = node.as<TensorStoreObj>()) {
-        saw_copy = true;
-        if ((!IsSharedBuffer(store->dest.as_or_throw<TensorVar>()) &&
-             !IsLocalBuffer(store->dest.as_or_throw<TensorVar>(),
-                            /*allow_var=*/true)) ||
-            !is_pure_raw_copy_value(store->value, is_pure_raw_copy_value)) {
-          saw_non_copy_buffer_store = true;
-        }
-        return;
-      }
-      const auto *call = node.as<CallObj>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
-        if (IsPureCopyStmt(parallel->GetRoot())) {
-          saw_copy = true;
-        } else {
-          saw_non_copy_tile_op = true;
-        }
-        return;
-      }
-      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
-        saw_copy = true;
-      } else {
-        saw_non_copy_tile_op = true;
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (saw_non_copy_tile_op || saw_non_copy_buffer_store) {
+            return ffi::WalkResult::Advance();
+          }
+          if (const auto *store = node.as<TensorStoreObj>()) {
+            saw_copy = true;
+            if ((!IsSharedBuffer(store->dest.as_or_throw<TensorVar>()) &&
+                 !IsLocalBuffer(store->dest.as_or_throw<TensorVar>(),
+                                /*allow_var=*/true)) ||
+                !is_pure_raw_copy_value(store->value, is_pure_raw_copy_value)) {
+              saw_non_copy_buffer_store = true;
+            }
+            return ffi::WalkResult::Advance();
+          }
+          const auto *call = node.as<CallObj>();
+          if (call == nullptr) {
+            return ffi::WalkResult::Advance();
+          }
+          auto tile_op = ParseOperator(GetRef<Call>(call));
+          if (!tile_op.defined()) {
+            return ffi::WalkResult::Advance();
+          }
+          if (const auto *parallel = tile_op.as<ParallelOpNode>()) {
+            if (IsPureCopyStmt(parallel->GetRoot())) {
+              saw_copy = true;
+            } else {
+              saw_non_copy_tile_op = true;
+            }
+            return ffi::WalkResult::Advance();
+          }
+          if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
+            saw_copy = true;
+          } else {
+            saw_non_copy_tile_op = true;
+          }
+          return ffi::WalkResult::Advance();
+        });
     return saw_copy && !saw_non_copy_tile_op && !saw_non_copy_buffer_store;
   }
 
@@ -329,30 +335,32 @@ public:
     Optional<TileOperator> copy_tile_op;
     bool saw_non_copy_tile_op = false;
     bool saw_multiple_copy_ops = false;
-    VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-      if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
-        return;
-      }
-      const auto *call = node.as<CallObj>();
-      if (call == nullptr) {
-        return;
-      }
-      auto tile_op = ParseOperator(GetRef<Call>(call));
-      if (!tile_op.defined()) {
-        return;
-      }
-      if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
-        if (copy_tile_op.has_value()) {
-          saw_multiple_copy_ops = true;
-          copy_tile_op = Optional<TileOperator>();
-        } else {
-          copy_tile_op = tile_op;
-        }
-      } else {
-        saw_non_copy_tile_op = true;
-        copy_tile_op = Optional<TileOperator>();
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
+            return ffi::WalkResult::Advance();
+          }
+          const auto *call = node.as<CallObj>();
+          if (call == nullptr) {
+            return ffi::WalkResult::Advance();
+          }
+          auto tile_op = ParseOperator(GetRef<Call>(call));
+          if (!tile_op.defined()) {
+            return ffi::WalkResult::Advance();
+          }
+          if (tile_op.as<CopyNode>() || tile_op.as<Im2ColOpNode>()) {
+            if (copy_tile_op.has_value()) {
+              saw_multiple_copy_ops = true;
+              copy_tile_op = Optional<TileOperator>();
+            } else {
+              copy_tile_op = tile_op;
+            }
+          } else {
+            saw_non_copy_tile_op = true;
+            copy_tile_op = Optional<TileOperator>();
+          }
+          return ffi::WalkResult::Advance();
+        });
     if (saw_non_copy_tile_op || saw_multiple_copy_ops) {
       return Optional<TileOperator>();
     }
@@ -757,21 +765,23 @@ public:
       // Attribute imprecision to the affected storage. A store's value may
       // read other tensors; its address must be inspected independently so a
       // known shared-memory write is not tainted by an unrelated index load.
-      VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-        auto inspect = [&](const TensorLoad &access, TensorSet *tensors) {
-          auto address =
-              ffi::make_object<PipelineAccessCollector>(memory_, target_);
-          address->Visit(access);
-          if (address->HasUnknownAccess())
-            tensors->insert(access->source.as_or_throw<TensorVar>());
-        };
-        if (const auto *store = node.as<TensorStoreObj>()) {
-          inspect(TensorLoad(store->dest, store->indices, store->loc),
-                  &pinfo.imprecise_writes);
-        } else if (const auto *load = node.as<TensorLoadObj>()) {
-          inspect(GetRef<TensorLoad>(load), &pinfo.imprecise_reads);
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            auto inspect = [&](const TensorLoad &access, TensorSet *tensors) {
+              auto address =
+                  ffi::make_object<PipelineAccessCollector>(memory_, target_);
+              address->Visit(access);
+              if (address->HasUnknownAccess())
+                tensors->insert(access->source.as_or_throw<TensorVar>());
+            };
+            if (const auto *store = node.as<TensorStoreObj>()) {
+              inspect(TensorLoad(store->dest, store->indices, store->loc),
+                      &pinfo.imprecise_writes);
+            } else if (const auto *load = node.as<TensorLoadObj>()) {
+              inspect(GetRef<TensorLoad>(load), &pinfo.imprecise_reads);
+            }
+            return ffi::WalkResult::Advance();
+          });
     }
     ClassifyCopyLikeStage(stmt, &pinfo);
     return pinfo;

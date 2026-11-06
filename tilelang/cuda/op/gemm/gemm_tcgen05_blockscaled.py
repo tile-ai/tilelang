@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from tilelang._analyzer import create_analyzer
 
 from tilelang import language as T
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import retrieve_ptr
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
 
@@ -48,8 +50,8 @@ class GemmTCGEN5BlockScaled(GemmBlockScaledMixin, GemmTCGEN5):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         """Lower to TIR containing block-scaled TCGEN5MMA calls.
 

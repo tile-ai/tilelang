@@ -22,7 +22,7 @@ import tilelang.language as T
         "tilelang.cuda.language",
         "tilelang.layout.ascend",
         "tilelang._typing",
-        "tilelang.language._native",
+        "tilelang.language._allocation",
         "tilelang.language.proxy",
         "tilelang.language.eager.builder",
         "tilelang.engine.param",

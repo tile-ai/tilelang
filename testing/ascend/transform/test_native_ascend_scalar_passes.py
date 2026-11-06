@@ -5,6 +5,7 @@ import pytest
 import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
+from testing.ascend._block import attribute as _scope_attribute
 
 
 def integer(value, dtype="int32"):
@@ -32,8 +33,7 @@ def call(name, *args, dtype="void", metadata=None):
 
 
 def attribute(key, value, body):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": integer(0), "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(integer(0), key, value, body)
 
 
 def vf(body, kind="SIMD_VF", form="named"):

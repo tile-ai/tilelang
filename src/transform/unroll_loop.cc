@@ -3,6 +3,9 @@
  * \brief Expand native loops while retaining TileLang's explicit-unroll policy.
  */
 
+#include "ir/annotations.h"
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/memory_scope.h>
@@ -17,7 +20,6 @@
 #include "../ir/analyzer.h"
 #include "../ir/annotations.h"
 #include "../op/builtin.h"
-#include "../op/native_utils.h"
 #include "ir/loop_math.h"
 
 namespace tvm::tl {
@@ -92,10 +94,10 @@ int64_t AnnotationInteger(ffi::AnyView value) {
   return value.cast<int64_t>();
 }
 
-class LoopUnroller : public StmtExprMutator {
+class LoopUnroller : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   explicit LoopUnroller(UnrollLoopConfig config)
       : config_(std::move(config)), max_step_(config_->auto_max_step),
@@ -104,11 +106,11 @@ public:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
     if (op->op->name != "tl.attr")
-      return StmtExprMutator::Mutate_(op, mode);
-    auto fields = DecodeAttributeRegion(op);
+      return LayoutMapMutator::Mutate_(op, mode);
+    auto fields = ReadAnnotations(op);
     auto key = fields.at("key").cast<ffi::String>();
     if (key != "pragma_auto_unroll_max_step" && key != "pragma_unroll_explicit")
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     int64_t previous_max = max_step_;
     bool previous_explicit = explicit_;
     auto value = AnnotationInteger(fields.at("value"));
@@ -129,7 +131,7 @@ public:
     // A For annotation controls this loop only. A surrounding pragma region
     // controls its lexical body. In particular, an explicit outer unroll must
     // not turn a nested dynamic T.unroll into a forced constant expansion.
-    auto rewritten = StmtExprMutator::Mutate_(op, mode)
+    auto rewritten = LayoutMapMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                          .as_or_throw<For>();
     op = rewritten.get();
@@ -151,25 +153,25 @@ public:
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
                                      InplaceMode mode) final {
     MarkLocal(op->source, op->indices);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
                                  InplaceMode mode) final {
     AddSteps(1);
     MarkLocal(op->dest, op->indices);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
                                  InplaceMode mode) final {
     AddSteps(1);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
     AddSteps(1);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const BreakObj *, InplaceMode) final {
@@ -226,10 +228,11 @@ private:
         scope != runtime::MemoryScope::Get("warp"))
       return;
     for (const PrimExpr &index : indices)
-      VisitNativePostOrder(index, [&](const ffi::ObjectRef &node) {
-        if (const auto *var = node.as<VarObj>())
-          local_indices_.insert(var);
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          index, [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+            local_indices_.insert(var);
+            return ffi::WalkResult::Advance();
+          });
   }
 
   Stmt Expand(const ForObj *loop, int count) {
@@ -245,8 +248,8 @@ private:
       // Only local definitions are renewed; free parameters keep their
       // identity. Native hooks rebuild types and uses, including
       // shape/layout/region vars.
-      auto copy = tirx::RenewDef(tirx::Function({}, loop->body));
-      auto substitution = ffi::make_object<StmtExprMutator>();
+      auto copy = tl::RenewDef(tirx::Function({}, loop->body));
+      auto substitution = ffi::make_object<LayoutMapMutator>();
       PrimExpr iteration = UnrolledLoopValue(loop, index, analyzer_);
       substitution->VarRemapSet(loop->var, analyzer_->Simplify(iteration));
       SeqStmt body =

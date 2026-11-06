@@ -5,6 +5,10 @@
 
 #include "./ws_analysis.h"
 #include "ir/lexical_scope.h"
+#include "ir/stmt_functor.h"
+#include "op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/op/gpu.h>
 
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/op/region.h>
@@ -13,13 +17,13 @@
 #include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
 #include "cuda/target_utils.h"
+#include "ir/annotations.h"
+#include "ir/tensor_utils.h"
 #include "layout/cute_layout.h"
 #include "op/gemm.h"
 #include "op/gemm_sp.h"
-#include "op/native_utils.h"
 #include "op/operator.h"
 #include "op/utils.h"
-#include "transform/common/native_layout_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -58,8 +62,7 @@ private:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (const auto *name = op->op.as<OpObj>();
-        name && name->name == "tl.annotation")
+    if (IsAnnotationCall(op))
       return std::nullopt;
     // Address-of TensorLoad denotes no memory read. Its index expressions can
     // themselves load memory, so visit those, but never the addressed element.
@@ -98,7 +101,7 @@ Optional<Call> EvaluateCall(const Stmt &stmt) {
   return std::nullopt;
 }
 
-class BufferRemapper : public StmtExprMutator {
+class BufferRemapper : public LayoutMapMutator {
 public:
   explicit BufferRemapper(const BufferRemap &remap) {
     for (const auto &[old_tensor, new_tensor] : remap)
@@ -114,17 +117,19 @@ Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt) {
 
 static bool ContainsPtxCpAsync(const Stmt &stmt) {
   bool found = false;
-  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-    if (found) {
-      return;
-    }
-    if (const auto *call = node.as<CallObj>()) {
-      if (call->op.same_as(tl::ptx_cp_async_bytes()) ||
-          call->op.same_as(tl::ptx_cp_async())) {
-        found = true;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (found) {
+          return ffi::WalkResult::Advance();
+        }
+        if (const auto *call = node.as<CallObj>()) {
+          if (call->op.same_as(tl::ptx_cp_async_bytes()) ||
+              call->op.same_as(tl::ptx_cp_async())) {
+            found = true;
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -158,8 +163,8 @@ bool IsBarrierOrTmaControlCall(const CallObj *call) {
          call->op.same_as(tma_store_cluster()) ||
          call->op.same_as(tma_store_arrive()) ||
          call->op.same_as(tma_store_wait()) ||
-         call->op.same_as(Op::Get("tirx.gpu_storage_sync")) ||
-         call->op.same_as(Op::Get("tl.storage_sync")) ||
+         call->op.same_as(tirx::gpu_storage_sync_op()) ||
+         call->op.same_as(tl::storage_sync()) ||
          call->op.same_as(tl::sync_grid()) ||
          call->op.same_as(tl::syncthreads_count()) ||
          call->op.same_as(tl::syncthreads_and()) ||
@@ -241,15 +246,17 @@ bool IsProducer(TileStmtKind kind) {
 
 bool HasManualWarpSpecialization(const Stmt &stmt) {
   bool found = false;
-  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-    if (const auto *region = node.as<RegionStmtObj>();
-        region && region->op->name == "tl.attr") {
-      const auto data = ReadNativeAnnotations(region);
-      const auto key = data.at("key").cast<String>();
-      found |=
-          key == "warp_specialize" || key == attr::kWarpSpecializationScope;
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *region = node.as<RegionStmtObj>();
+            region && region->op->name == "tl.attr") {
+          const auto data = ReadAnnotations(region);
+          const auto key = data.at("key").cast<String>();
+          found |=
+              key == "warp_specialize" || key == attr::kWarpSpecializationScope;
+        }
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -284,18 +291,19 @@ void CollectAnnotatedLayouts(const Stmt &body, BufferLayoutMap &layouts) {
       layouts.insert_or_assign(tensor, std::make_pair(tensor, layout));
     }
   };
-  VisitNativePostOrder(body, [&](const ObjectRef &node) {
-    if (const auto *call = node.as<CallObj>()) {
-      if (const auto *name = call->op.as<OpObj>();
-          name && name->name == "tl.annotation")
-        collect(ReadNativeAnnotations(call));
-    } else if (const auto *region = node.as<RegionStmtObj>();
-               region && region->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(region);
-      if (fields.at("key").cast<String>() == "tl.kernel")
-        collect(fields.at("value").cast<Map<String, Any>>());
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *call = node.as<CallObj>()) {
+          if (IsAnnotationCall(call))
+            collect(ReadAnnotations(call));
+        } else if (const auto *region = node.as<RegionStmtObj>();
+                   region && region->op->name == "tl.attr") {
+          auto fields = ReadAnnotations(region);
+          if (fields.at("key").cast<String>() == "tl.kernel")
+            collect(fields.at("value").cast<Map<String, Any>>());
+        }
+        return ffi::WalkResult::Advance();
+      });
 }
 
 TileOpArguments ReadWSCall(const CallObj *call) {
@@ -325,3 +333,44 @@ Call RewriteWSCall(const CallObj *call, const Map<String, Any> &annotations,
 
 } // namespace tl
 } // namespace tvm
+
+namespace tvm::tl {
+// Buffer slots and barrier parity only observe the iteration number modulo
+// 2 * stages. Widen before subtracting loop origins, including narrow signed
+// loops, then keep each mixed-radix step bounded. Unsigned 64-bit subtraction
+// represents every nonnegative distance between two same-type loop endpoints;
+// the reduced multiply/add cannot overflow for positive int32 stage counts.
+PrimExpr WSPipelineIterationModulo(const std::vector<const ForObj *> &loops,
+                                   int stages) {
+  TVM_FFI_CHECK_GT(stages, 0, ValueError);
+  PrimType type = PrimType::UInt(64);
+  PrimExpr period = IntImm(type, int64_t{2} * stages);
+  PrimExpr linear = IntImm(type, 0);
+  for (const auto *loop : loops) {
+    TVM_FFI_CHECK(IsOne(loop->step), ValueError)
+        << "ProducerConsumerWarpSpecialized requires unit-step loop bounds";
+    PrimExpr extent = cast(loop->end, type) - cast(loop->begin, type);
+    PrimExpr index = cast(loop->var, type) - cast(loop->begin, type);
+    linear = floormod(
+        linear * floormod(extent, period) + floormod(index, period), period);
+  }
+  return linear;
+}
+
+Optional<Map<String, Any>> WSAttribute(const RegionStmtObj *region) {
+  if (region->op->name != "tl.attr")
+    return std::nullopt;
+  return ReadAnnotations(region);
+}
+
+Optional<String> WSNextOpId(const Stmt &statement) {
+  const auto *evaluate = statement.as<EvaluateObj>();
+  const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
+  if (!IsAnnotationCall(call))
+    return std::nullopt;
+  auto annotations = ReadAnnotations(call);
+  auto id = annotations.Get(kWSNextOpIdKey);
+  return id ? Optional<String>(id->cast<String>()) : std::nullopt;
+}
+
+} // namespace tvm::tl

@@ -5,7 +5,7 @@ import tilelang.ascend.language as T
 import tilelang
 from tilelang.backend.target import determine_target
 from tvm_tirx import ir, tirx
-from testing.ascend._ir import attribute_fields, scheduled_fields, statements
+from testing.ascend._ir import attribute_fields, attribute_key, scheduled_fields, statements
 
 
 def _make_program(latency=None, ii=None):
@@ -52,10 +52,8 @@ def _collect_task_metadata(mod, *, include_allocations=True):
     metadata = {"latency": [], "ii": [], "core_mask": []}
     for node, _ in statements(mod):
         fields = None
-        if isinstance(node, ir.RegionStmt) and node.op.name == "tl.attr":
-            values = attribute_fields(node)
-            if values["key"] == "tl.ascend_task":
-                fields = values["node"]
+        if attribute_key(node) == "tl.ascend_task":
+            fields = attribute_fields(node)["node"]
         elif (values := scheduled_fields(node)) is not None:
             fields = values["task"]
         if fields is not None and (include_allocations or not _is_allocation_task(node)):
@@ -68,8 +66,6 @@ def _collect_task_metadata(mod, *, include_allocations=True):
 def _collect_schedule_units(mod):
     units = []
     for node, _ in statements(mod):
-        if (
-            isinstance(node, ir.RegionStmt) and node.op.name == "tl.attr" and attribute_fields(node)["key"] == "tl.schedule_unit"
-        ) or scheduled_fields(node) is not None:
+        if (attribute_key(node) == "tl.schedule_unit") or scheduled_fields(node) is not None:
             units.append(node)
     return units

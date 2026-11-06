@@ -1,8 +1,15 @@
-from tilelang.language import _native as _ir
-from tilelang.language._native import frame
-from tilelang.language._native import PrimExpr, IntImm, StringImm
+from tilelang.language import _construction
+from tilelang.language import frame as _loop_frame
+from tvm_tirx.ir import prim as _prim
+from tvm_tirx.script.ir_builder import frame as _stmt_frame
+from tvm_tirx.tirx.script import ir_builder as _builder
+
+pass
+from tilelang.language.tir._constructors import PrimExpr
+from tvm_tirx.ir import IntImm
+from tvm_tirx.ir import StringImm
 from tvm_tirx import ir as _native_ir
-from tilelang.language._native import Select as _Select
+from tvm_tirx.ir.prim import Select as _Select
 from typing import Any
 import tilelang.language.tir.op as _tir_op
 import functools
@@ -10,7 +17,7 @@ import functools
 PyPrimExpr = PrimExpr | int | float | bool
 
 
-def serial(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> frame.ForFrame:
+def serial(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> _stmt_frame.ForFrame:
     """The serial For statement.
 
     Parameters
@@ -29,10 +36,10 @@ def serial(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.serial(start=start, stop=stop, annotations=annotations)
+    return _loop_frame.serial(start=start, stop=stop, annotations=annotations)
 
 
-def parallel(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> frame.ForFrame:
+def parallel(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> _stmt_frame.ForFrame:
     """The parallel For statement.
 
     Parameters
@@ -51,10 +58,10 @@ def parallel(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, A
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.parallel(start=start, stop=stop, annotations=annotations)
+    return _loop_frame.parallel(start=start, stop=stop, annotations=annotations)
 
 
-def vectorized(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> frame.ForFrame:
+def vectorized(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> _stmt_frame.ForFrame:
     """The vectorized For statement.
 
     Parameters
@@ -73,10 +80,10 @@ def vectorized(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str,
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.vectorized(start=start, stop=stop, annotations=annotations)
+    return _loop_frame.vectorized(start=start, stop=stop, annotations=annotations)
 
 
-def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> frame.ForFrame:
+def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any] = None) -> _stmt_frame.ForFrame:
     """The unrolled For statement.
 
     Parameters
@@ -99,7 +106,7 @@ def unroll(start: PrimExpr, stop: PrimExpr = None, *, annotations: dict[str, Any
         annotations = dict()
     else:
         annotations = dict(annotations)
-    return _ir.unroll(start=start, stop=stop, annotations=annotations)
+    return _loop_frame.unroll(start=start, stop=stop, annotations=annotations)
 
 
 def thread_binding(
@@ -108,7 +115,7 @@ def thread_binding(
     thread: str = None,
     *,
     annotations: dict[str, Any] = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """The thread-binding For statement.
 
     Parameters
@@ -130,10 +137,10 @@ def thread_binding(
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.thread_binding(start=start, stop=stop, thread=thread, annotations=annotations)
+    return _loop_frame.thread_binding(start=start, stop=stop, thread=thread, annotations=annotations)
 
 
-def grid(*extents: PrimExpr) -> frame.ForFrame:
+def grid(*extents: PrimExpr) -> _stmt_frame.ForFrame:
     """The grid For statement.
 
     Parameters
@@ -146,7 +153,7 @@ def grid(*extents: PrimExpr) -> frame.ForFrame:
     res : frame.ForFrame
         The ForFrame.
     """
-    return _ir.grid(*extents)
+    return _builder.grid(*extents)
 
 
 def _dtype_forward(func):
@@ -175,17 +182,17 @@ def Select(condition: PrimExpr | bool, true_value: PyPrimExpr, false_value: PyPr
     ``Select`` evaluates both value expressions. Use ``if_then_else`` when a
     branch must guard side effects or out-of-bounds memory accesses.
     """
-    return _Select(condition, true_value, false_value, _ir._loc() if span is None else span)
+    return _Select(condition, true_value, false_value, _construction.current_location() if span is None else span)
 
 
 def min(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-builtin
     """Construct a binary TIR minimum expression."""
-    return _ir.min(a, b)
+    return _prim.min(a, b)
 
 
 def max(a: PrimExpr, b: PrimExpr) -> PrimExpr:  # pylint: disable=redefined-builtin
     """Construct a binary TIR maximum expression."""
-    return _ir.max(a, b)
+    return _prim.max(a, b)
 
 
 Shuffle = _tir_op.Shuffle
@@ -297,10 +304,6 @@ TVMBackendAllocWorkspace = _op_wrapper(_tir_op.TVMBackendAllocWorkspace)
 TVMBackendFreeWorkspace = _op_wrapper(_tir_op.TVMBackendFreeWorkspace)
 start_profile_intrinsic = _op_wrapper(_tir_op.start_profile_intrinsic)
 end_profile_intrinsic = _op_wrapper(_tir_op.end_profile_intrinsic)
-anylist_getitem = _op_wrapper(_tir_op.anylist_getitem)
-anylist_resetitem = _op_wrapper(_tir_op.anylist_resetitem)
-anylist_setitem_call_packed = _op_wrapper(_tir_op.anylist_setitem_call_packed)
-anylist_setitem_call_cpacked = _op_wrapper(_tir_op.anylist_setitem_call_cpacked)
 vscale = _op_wrapper(_tir_op.vscale)
 
 # reinterpret = _dtype_forward(_tir_op.reinterpret)
@@ -361,14 +364,18 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
     if round != "rs" and rbits is not None:
         raise ValueError("rbits is only valid with round='rs' (stochastic rounding)")
 
-    value = _ir._expr(value)
+    value = _construction.as_expr(value)
     target_type = _native_ir.PrimType(dtype)
-    location = span or _ir._loc()
+    location = span or _construction.current_location()
     if not round and sat:
-        return _ir.Cast(target_type, value, location)
+        return _prim.Cast(
+            target_type,
+            _construction.scalar_value(value, (location or _construction.current_location())),
+            (location or _construction.current_location()),
+        )
     operands = [value]
     if rbits is not None:
-        operands.append(_ir._expr(rbits))
+        operands.append(_construction.as_expr(rbits))
     return _native_ir.Call(
         "tl.cast",
         operands,
@@ -394,10 +401,6 @@ __all__ = (
     "acosh",
     "address_of",
     "align_up",
-    "anylist_getitem",
-    "anylist_resetitem",
-    "anylist_setitem_call_cpacked",
-    "anylist_setitem_call_packed",
     "asin",
     "asinh",
     "assume",

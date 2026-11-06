@@ -1,9 +1,11 @@
 """Auto-schedule semantic hints, including buffer conflict declarations."""
 
 from tilelang.utils.language import to_tile_region
-from tilelang.language import _native as tirx
-from tilelang.language._native import Buffer, IntImm, StringImm, call_intrin
-from tilelang.language._native import attr
+from tvm_tirx.ir import IntImm, StringImm
+from tilelang.language._intrinsics import call_intrin
+from tilelang.language._tensor_spec import is_buffer_like
+import tvm_ffi
+from tvm_tirx.tirx.script import ir_builder as _builder
 
 __all__ = ["assume_conflict", "assume_no_conflict", "PerCoreTask", "Stage", "Task"]
 
@@ -59,7 +61,8 @@ def PerCoreTask():
     ...         with T.Task():
     ...             T.copy(res, C[...])
     """
-    return attr(tirx.const(0, "int32"), "tl.ascend_per_core_task", tirx.const(1, "int32"))
+    args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendTask")({})
+    return _builder.region("tl.ascend.per_core_task", args, attrs=attrs)
 
 
 def Task(latency: int | None = None, ii: int | None = None):
@@ -112,7 +115,8 @@ def Task(latency: int | None = None, ii: int | None = None):
         annotations["latency"] = IntImm("int64", latency)
     if ii is not None:
         annotations["ii"] = IntImm("int64", ii)
-    return attr(annotations, "tl.ascend_task", tirx.const(1, "int32"))
+    args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendTask")(annotations)
+    return _builder.region("tl.ascend.task", args, attrs=attrs)
 
 
 def Stage(stage: int):
@@ -155,7 +159,7 @@ def Stage(stage: int):
     """
     if isinstance(stage, bool) or not isinstance(stage, int) or stage < 0:
         raise ValueError(f"Stage must be a non-negative integer, got {stage!r}")
-    return attr(IntImm("int64", stage), "tl.ascend_stage", tirx.const(1, "int32"))
+    return _builder.region("tl.ascend.stage", [], attrs={"stage": IntImm("int64", stage)})
 
 
 def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
@@ -177,7 +181,7 @@ def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
     # `tl.region` Call so Simplify rewrites its bounds in lockstep with the real
     # access rather than freezing symbolic vars inside a BufferRegion object.
     def operand(x):
-        return x.data if isinstance(x, Buffer) else to_tile_region(x, "rw")
+        return x.data if is_buffer_like(x) else to_tile_region(x, "rw")
 
     a_op = operand(a)
     b_op = operand(b) if b is not None else a_op

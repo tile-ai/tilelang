@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from tilelang.language import _intrinsics
+from tvm_tirx import ir as _ir
+
 from tilelang.layout import make_ascend_sf_layout, try_extract_fractal_layout
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
 
@@ -54,8 +57,8 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         self._prepare_lower(layout_map)
 
@@ -75,9 +78,9 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         c_ptr = _make_access_ptr(self.CRegion.source, self.CRegion, 2)
         a_ptr = _make_access_ptr(self.ARegion.source, self.ARegion, 1)
         b_ptr = _make_access_ptr(self.BRegion.source, self.BRegion, 1)
-        call = tirx.call_intrin(
+        call = _intrinsics.call_intrin(
             "void",
-            tirx.Op.get("tl.ascend_mad_mx"),
+            _ir.Op.get("tl.ascend_mad_mx"),
             c_ptr,
             a_ptr,
             b_ptr,
@@ -138,9 +141,9 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         sf_nz_stride = sfa_info.outer1
         sf_k_offset = _to_int32(sfa_region.region[-1].begin // sfa_info.c0)
 
-        call = tirx.call_intrin(
+        call = _intrinsics.call_intrin(
             "void",
-            tirx.Op.get("tl.ascend_blockscaled_gemm_l1"),
+            _ir.Op.get("tl.ascend_blockscaled_gemm_l1"),
             c_ptr,
             a_ptr,
             b_ptr,
@@ -152,9 +155,9 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
             _to_int32(tile_k_sub),
             _to_int32(1 if self.trans_B else 0),
             self.clear_accum,
-            tirx.StringImm(in_dtype_str),
-            tirx.StringImm(sf_dtype_str),
-            tirx.StringImm("float"),
+            _ir.StringImm(in_dtype_str),
+            _ir.StringImm(sf_dtype_str),
+            _ir.StringImm("float"),
             _to_int32(0),  # buf_offset
             sf_k_offset,  # sf_k_offset (auto from region slice)
             _to_int32(sf_nz_stride),

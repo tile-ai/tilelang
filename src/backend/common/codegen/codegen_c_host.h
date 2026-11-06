@@ -105,14 +105,7 @@ private:
   std::string GetPackedName(const tvm::CallObj *op);
   void PrintGetFuncFromBackend(const std::string &func_name,
                                const std::string &packed_func_name);
-  void PrintCallPacked(const tvm::CallObj *op, std::ostream &os,
-                       bool discard_result = false);
-  void PrintAnyListInvoke(const tvm::CallObj *op, std::ostream &os);
-  void PrintAnyListShape(const tvm::CallObj *op, std::ostream &os);
-  void PrintAnyListDescriptor(const tvm::CallObj *op, std::ostream &os);
-  void PrintPackedFailureReturn();
-  bool anylist_helpers_emitted_ = false;
-  std::vector<std::string> anylist_error_cleanups_;
+  void PrintCallPacked(const tvm::CallObj *op, std::ostream &os);
   /*!
    * \brief Print ternary conditional operator implementing binary `op`
    * Forces the operands to be in SSA form.

@@ -297,7 +297,7 @@ def test_cross_dtype_view_preserves_bits():
     np.testing.assert_array_equal(actual, values.view("uint32"))
 
 
-def test_layout_annotation_retains_tensor_and_symbol_operands():
+def test_layout_annotation_retains_tensor_and_symbol_identities():
     n = T.dynamic("n")
 
     @T.prim_func
@@ -307,11 +307,11 @@ def test_layout_annotation_retains_tensor_and_symbol_operands():
             for i in T.serial(n):
                 A[i] = A[i] + 1.0
 
-    annotations = [node for node in nodes(annotated, ir.Call) if node.op.name == "tl.annotation"]
+    annotations = [node for node in nodes(annotated, ir.Call) if node.op.same_as(ir.Op.get("tl.layout_map"))]
     assert len(annotations) == 1
     annotation = annotations[0]
-    decoded = tvm_ffi.get_global_func("tl.DecodeAnnotations")(annotation.args[0], annotation.attrs["annotation_schema"])
-    assert decoded["layout_map"][annotated.params[0]].get_input_shape()[0].same_as(n)
+    assert not annotation.args and "annotation_schema" not in annotation.attrs
+    assert annotation.attrs["layout_map"][annotated.params[0]].get_input_shape()[0].same_as(n)
     assert tirx.analysis.check_well_formed(annotated)
 
 

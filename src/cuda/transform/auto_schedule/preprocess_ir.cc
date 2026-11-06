@@ -18,6 +18,8 @@
  */
 
 #include "./preprocess_ir.h"
+#include "ir/annotations.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/ir/op.h>
 #include <tvm/runtime/logging.h>
@@ -59,35 +61,37 @@ std::string CallKind(const CallObj *call) {
 // false on the first violation.
 bool CheckCalls(const Stmt &body) {
   bool ok = true;
-  VisitNativePostOrder(body, [&ok](const ObjectRef &node) {
-    const auto *call = node.as<CallObj>();
-    if (call == nullptr || !ok)
-      return;
-    if (call->op.same_as(tl::loop_break())) {
-      LOG(WARNING)
-          << "AutoWarpSpecialization skipped: cannot schedule loop_break";
-      ok = false;
-      return;
-    }
-    if (IsBarrierOrTmaControlCall(call)) {
-      LOG(WARNING)
-          << "AutoWarpSpecialization skipped: cannot schedule hand-written "
-             "synchronization or TMA control ('"
-          << call->op << "'): block-wide syncs cannot be duplicated "
-          << "into roles, and hand-managed barrier protocols are "
-          << "invisible to the schedule";
-      ok = false;
-      return;
-    }
-    if (const auto *op = call->op.as<OpObj>()) {
-      if (std::string(op->name).find("atomic") != std::string::npos) {
-        LOG(WARNING)
-            << "AutoWarpSpecialization skipped: cannot schedule atomic op '"
-            << op->name << "'";
-        ok = false;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&ok](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        const auto *call = node.as<CallObj>();
+        if (call == nullptr || !ok)
+          return ffi::WalkResult::Advance();
+        if (call->op.same_as(tl::loop_break())) {
+          LOG(WARNING)
+              << "AutoWarpSpecialization skipped: cannot schedule loop_break";
+          ok = false;
+          return ffi::WalkResult::Advance();
+        }
+        if (IsBarrierOrTmaControlCall(call)) {
+          LOG(WARNING)
+              << "AutoWarpSpecialization skipped: cannot schedule hand-written "
+                 "synchronization or TMA control ('"
+              << call->op << "'): block-wide syncs cannot be duplicated "
+              << "into roles, and hand-managed barrier protocols are "
+              << "invisible to the schedule";
+          ok = false;
+          return ffi::WalkResult::Advance();
+        }
+        if (const auto *op = call->op.as<OpObj>()) {
+          if (std::string(op->name).find("atomic") != std::string::npos) {
+            LOG(WARNING)
+                << "AutoWarpSpecialization skipped: cannot schedule atomic op '"
+                << op->name << "'";
+            ok = false;
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
   return ok;
 }
 
@@ -97,33 +101,35 @@ bool CheckCalls(const Stmt &body) {
 // commit-group machinery.
 bool CheckHostsNoAsync(const Stmt &stmt, const Target &target) {
   bool ok = true;
-  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallObj>();
-    if (call == nullptr || !ok)
-      return;
-    TileOperator tile_op = ParseOperator(GetRef<Call>(call));
-    if (!tile_op.defined())
-      return;
-    if (const auto *copy = tile_op.as<CopyNode>()) {
-      if (ClassifyCopy(copy, target) == TileStmtKind::kTmaProducer) {
-        LOG(WARNING) << "AutoWarpSpecialization skipped: an asynchronous "
-                        "global->shared copy is nested inside a compound "
-                        "statement; write it as its own statement so its "
-                        "completion barrier can be wired";
-        ok = false;
-      }
-      return;
-    }
-    if (auto gemm = GetGemmInfo(tile_op)) {
-      if (IsTmemBuffer(gemm->accumulator) || gemm->wg_wait != 0) {
-        LOG(WARNING)
-            << "AutoWarpSpecialization skipped: an asynchronous gemm is "
-               "nested inside a compound statement; write it as "
-               "its own statement";
-        ok = false;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        const auto *call = node.as<CallObj>();
+        if (call == nullptr || !ok)
+          return ffi::WalkResult::Advance();
+        TileOperator tile_op = ParseOperator(GetRef<Call>(call));
+        if (!tile_op.defined())
+          return ffi::WalkResult::Advance();
+        if (const auto *copy = tile_op.as<CopyNode>()) {
+          if (ClassifyCopy(copy, target) == TileStmtKind::kTmaProducer) {
+            LOG(WARNING) << "AutoWarpSpecialization skipped: an asynchronous "
+                            "global->shared copy is nested inside a compound "
+                            "statement; write it as its own statement so its "
+                            "completion barrier can be wired";
+            ok = false;
+          }
+          return ffi::WalkResult::Advance();
+        }
+        if (auto gemm = GetGemmInfo(tile_op)) {
+          if (IsTmemBuffer(gemm->accumulator) || gemm->wg_wait != 0) {
+            LOG(WARNING)
+                << "AutoWarpSpecialization skipped: an asynchronous gemm is "
+                   "nested inside a compound statement; write it as "
+                   "its own statement";
+            ok = false;
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
   return ok;
 }
 
@@ -147,24 +153,26 @@ private:
   }
 
   void CollectIds(const Stmt &stmt) {
-    VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-      if (const auto *region = node.as<RegionStmtObj>()) {
-        if (auto attr = WSAttribute(region))
-          if (attr.value().at("key").cast<String>() == kWSOpIdKey)
-            used_ids_.insert(ExtractOpId(attr.value().at("value")));
-      } else if (const auto *loop = node.as<ForObj>()) {
-        if (auto value = loop->annotations.Get(kWSOpIdKey))
-          used_ids_.insert(ExtractOpId(*value));
-      } else if (const auto *evaluate = node.as<EvaluateObj>()) {
-        if (auto id = WSNextOpId(GetRef<Stmt>(evaluate)))
-          used_ids_.insert(*id);
-      } else if (const auto *call = node.as<CallObj>()) {
-        if (call->op.same_as(Op::Get("tl.annotation")))
-          return;
-        if (auto value = ReadWSCall(call).annotations.Get(kWSOpIdKey))
-          used_ids_.insert(ExtractOpId(*value));
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *region = node.as<RegionStmtObj>()) {
+            if (auto attr = WSAttribute(region))
+              if (attr.value().at("key").cast<String>() == kWSOpIdKey)
+                used_ids_.insert(ExtractOpId(attr.value().at("value")));
+          } else if (const auto *loop = node.as<ForObj>()) {
+            if (auto value = loop->annotations.Get(kWSOpIdKey))
+              used_ids_.insert(ExtractOpId(*value));
+          } else if (const auto *evaluate = node.as<EvaluateObj>()) {
+            if (auto id = WSNextOpId(GetRef<Stmt>(evaluate)))
+              used_ids_.insert(*id);
+          } else if (const auto *call = node.as<CallObj>()) {
+            if (IsAnnotationCall(call))
+              return ffi::WalkResult::Advance();
+            if (auto value = ReadWSCall(call).annotations.Get(kWSOpIdKey))
+              used_ids_.insert(ExtractOpId(*value));
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
   String FreshId(const std::string &kind) {
@@ -176,8 +184,8 @@ private:
   }
 
   Stmt WrapWithId(const Stmt &stmt, const std::string &kind) {
-    return MakeNativeAttribute(nullptr, kWSOpIdKey, FreshId(kind),
-                               SeqStmt(stmt), stmt->loc);
+    return MakeAttribute(nullptr, kWSOpIdKey, FreshId(kind), SeqStmt(stmt),
+                         stmt->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode mode) final {
@@ -194,8 +202,9 @@ private:
         statements.push_back(statement);
         pending = false;
       } else if (const auto *bind = statement.as<BindObj>()) {
-        statements.push_back(
-            WSMarkNext(FreshId(std::string(bind->var->name)), bind->loc));
+        statements.push_back(MakeAnnotation(
+            {{kWSNextOpIdKey, FreshId(std::string(bind->var->name))}},
+            bind->loc));
         statements.push_back(statement);
       } else {
         statements.push_back(
@@ -203,7 +212,7 @@ private:
       }
     }
     TVM_FFI_CHECK(!pending, ValueError) << "Dangling WS Bind marker";
-    return WSSequence(statements, op->loc);
+    return SeqStmt(statements, op->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
@@ -233,7 +242,7 @@ private:
     if (!call)
       return WrapWithId(GetRef<Stmt>(op), "op");
     // Layout/schedule metadata is not a schedulable runtime operation.
-    if (call->op.same_as(Op::Get("tl.annotation")))
+    if (IsAnnotationCall(call))
       return Unchanged();
     auto annotations = ReadWSCall(call).annotations;
     if (annotations.count(kWSOpIdKey))
@@ -255,9 +264,11 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode) final {
     // Normally handled by SeqStmt so the definition remains in its scope.
-    return SeqStmt({WSMarkNext(FreshId(std::string(op->var->name)), op->loc),
-                    GetRef<Stmt>(op)},
-                   op->loc);
+    return SeqStmt(
+        {MakeAnnotation({{kWSNextOpIdKey, FreshId(std::string(op->var->name))}},
+                        op->loc),
+         GetRef<Stmt>(op)},
+        op->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const AssertStmtObj *op, InplaceMode) final {

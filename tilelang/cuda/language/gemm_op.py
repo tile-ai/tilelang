@@ -7,9 +7,10 @@ variants (``wgmma_gemm``, ``tcgen05_gemm``, ``tcgen05_gemm_blockscaled``,
 """
 
 from __future__ import annotations
-from tilelang.language import _native
 
-from tilelang.language import _native as tirx
+from tilelang.language import _construction
+from tvm_tirx import ir as _ir
+
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.experimental.gemm_sp_op import _gemm_sp_impl
@@ -40,7 +41,7 @@ def gemm(
     clear_accum: bool = False,
     mbar: BarrierType | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """TileLang GEMM operator for CUDA.
 
     Same semantics as the common :func:`tilelang.language.gemm_op.gemm`: the
@@ -93,14 +94,14 @@ def gemm_blockscaled(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     *,
-    k_start: int | tirx.PrimExpr,
+    k_start: int | _ir.Expr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     mbar: BarrierType | None = None,
     use_2cta: bool = False,
     sf_layout: str | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Block-scaled GEMM for CUDA: ``C (+)= (A * SFA) @ (B * SFB)``.
 
     Extends :func:`tilelang.language.gemm_op.gemm_blockscaled` with CUDA
@@ -171,10 +172,10 @@ def gemm_blockscaled(
 
 
 def gemm_sp(
-    A_sparse: BufferLikeType | tirx.Var,
-    E: BufferLikeType | tirx.Var,
-    B: BufferLikeType | tirx.Var,
-    C: BufferLikeType | tirx.Var,
+    A_sparse: BufferLikeType | _ir.Var,
+    E: BufferLikeType | _ir.Var,
+    B: BufferLikeType | _ir.Var,
+    C: BufferLikeType | _ir.Var,
     transpose_A: bool = False,
     transpose_E: bool = False,
     transpose_B: bool = False,
@@ -182,7 +183,7 @@ def gemm_sp(
     clear_accum: bool = False,
     wg_wait: int = 0,
     annotations: dict | None = None,
-) -> tirx.Call:
+) -> _ir.Call:
     """Sparse GEMM (2:4 structured sparsity) for CUDA.
 
     Same semantics as the common :func:`tilelang.language.experimental.gemm_sp_op.gemm_sp`.
@@ -233,7 +234,7 @@ def wgmma_gemm(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Explicit Hopper WGMMA GEMM without an implicit wait.
 
     This is the explicit asynchronous Hopper WGMMA counterpart to the default
@@ -274,7 +275,7 @@ def tcgen05_gemm(
     mbar: BarrierType | None,
     use_2cta: bool = False,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Explicit Blackwell TCGEN05 GEMM without an implicit wait.
 
     This is the explicit asynchronous Blackwell TCGEN5MMA counterpart to the
@@ -323,11 +324,11 @@ def tcgen05_gemm_blockscaled(
     wg_wait: int = 0,
     mbar: BarrierType | None = None,
     *,
-    k_start: int | tirx.PrimExpr,
+    k_start: int | _ir.Expr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     use_2cta: bool = False,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Explicit Blackwell TCGEN05 block-scaled GEMM without an implicit wait.
 
     This is the explicit counterpart of `T.gemm_blockscaled(...)` for
@@ -407,11 +408,11 @@ def mma_gemm_blockscaled(
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     *,
-    k_start: int | tirx.PrimExpr,
+    k_start: int | _ir.Expr,
     sf_a_granularity_k: int,
     sf_b_granularity_k: int,
     sf_layout: str | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Explicit SM120 warp-level block-scaled MMA GEMM.
 
     This is the explicit counterpart of `T.gemm_blockscaled(...)` for the
@@ -476,8 +477,8 @@ def make_blockscaled_gemm_layout(
 
     M, N = int(C_shape[0]), int(C_shape[1])
     K = int(A_shape[-2] if transpose_A else A_shape[-1])
-    a_dtype = str(_native.dtype_of(A_region.source))
-    accum_dtype = str(_native.dtype_of(C_region.source))
+    a_dtype = str(_construction.dtype_of(A_region.source))
+    accum_dtype = str(_construction.dtype_of(C_region.source))
 
     emitter = TensorCoreIntrinEmitter(
         a_dtype=a_dtype,
@@ -494,5 +495,5 @@ def make_blockscaled_gemm_layout(
     # Block-scaled GEMM is 1CTA dense (no .ws), matching GemmTCGEN5BlockScaled.
     emitter.get_tcgen5_mma_meta(M, N, K, disable_2cta=True, disable_ws=True)
 
-    c_buf = C_region.source if isinstance(C_region, tirx.BufferRegion) else C
+    c_buf = C_region.source if isinstance(C_region, _ir.TensorRegion) else C
     return emitter.make_mma_store_layout(c_buf)

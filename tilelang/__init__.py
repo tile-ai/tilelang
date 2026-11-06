@@ -152,7 +152,9 @@ _PUBLIC_ATTRIBUTES = {
     "dtypes": ("language", "dtypes"),
 }
 _PUBLIC_MODULES = {
+    "layout",
     "analysis",
+    "driver",
     "transform",
     "language",
     "engine",

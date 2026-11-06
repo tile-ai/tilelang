@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+from tvm_tirx.ir import prim as _prim
+
 from tvm_tirx import ir
-from tilelang.language import _native as tirx
-from tilelang.language._native import PrimExpr, BufferLoad
+
+from tvm_tirx.ir import Expr as PrimExpr
+from tvm_tirx.ir import TensorLoad as BufferLoad
 from tilelang import language as T
 from tilelang._typing import BufferLikeType, ShapeType
 
@@ -15,7 +20,7 @@ def _normalize_annotations(annotations: dict | None) -> dict:
     Other values pass through unchanged. The native call codec handles
     the resulting annotations' representation.
     """
-    return {k: tirx.StringImm(v) if isinstance(v, str) else v for k, v in (annotations or {}).items()}
+    return {k: ir.StringImm(v) if isinstance(v, str) else v for k, v in (annotations or {}).items()}
 
 
 def region(buffer: BufferLoad, access_type: str, *args: PrimExpr) -> PrimExpr:
@@ -24,21 +29,25 @@ def region(buffer: BufferLoad, access_type: str, *args: PrimExpr) -> PrimExpr:
         raise ValueError(f"Unknown tensor access mode {access_type!r}")
     if len(buffer.indices) != len(args):
         raise ValueError("Region extent count must match the tensor rank")
-    return tirx.BufferRegion(
+    return ir.TensorRegion(
         buffer.source,
         [ir.Range.from_min_extent(begin, extent) for begin, extent in zip(buffer.indices, args)],
+        ir.TensorRegionType(),
+        _construction.current_location(),
     )
 
 
-def buffer_region_to_tile_region(buffer_region: tirx.BufferRegion, access_type: str, extents: list[tirx.PrimExpr]) -> PrimExpr:
+def buffer_region_to_tile_region(buffer_region: ir.TensorRegion, access_type: str, extents: list[ir.Expr]) -> PrimExpr:
     """Clamp extents and return a native TensorRegion."""
     mins = [r.begin for r in buffer_region.region]
     region_extents = [r.extent for r in buffer_region.region]
     assert len(region_extents) >= len(extents), f"region_extents must be >= extents, region_extents = {region_extents}, extents = {extents}"
     clamped_extents = [
-        tirx.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i] for i in range(len(region_extents))
+        _prim.min(region_extents[i], extents[i]) if i < len(extents) else region_extents[i] for i in range(len(region_extents))
     ]
-    return region(tirx.BufferLoad(buffer_region.source, mins), access_type, *clamped_extents)
+    return region(
+        ir.TensorLoad(buffer_region.source, _construction.as_indices(mins), _construction.current_location()), access_type, *clamped_extents
+    )
 
 
 def index_to_coordinates(index, shape) -> list[PrimExpr]:
@@ -112,7 +121,7 @@ def linear_index(*args: PrimExpr) -> PrimExpr:
     return linear
 
 
-def get_buffer_region_from_load(buffer_load: tirx.BufferLoad, extents: list[PrimExpr] | None = None) -> tirx.BufferRegion | None:
+def get_buffer_region_from_load(buffer_load: ir.TensorLoad, extents: list[PrimExpr] | None = None) -> ir.TensorRegion | None:
     """
     Get the buffer region from a buffer load.
 
@@ -130,11 +139,11 @@ def get_buffer_region_from_load(buffer_load: tirx.BufferLoad, extents: list[Prim
     if extents is not None:
         assert len(extents) == len(indices), "extents should have the same length as indices"
     for i, indice in enumerate(indices):
-        if isinstance(indice, tirx.Ramp):
+        if isinstance(indice, _prim.Ramp):
             assert extents is None, "extents should be provided for BufferLoad with Ramp indices"
             regions.append(ir.Range.from_min_extent(indice.base, indice.lanes))
             found_ramp = True
-        elif isinstance(indice, tirx.PrimExpr):
+        elif _construction.is_scalar_expr(indice):
             if extents is not None:
                 regions.append(ir.Range.from_min_extent(indice, extents[i]))
                 found_ramp = True
@@ -143,7 +152,7 @@ def get_buffer_region_from_load(buffer_load: tirx.BufferLoad, extents: list[Prim
         else:
             raise ValueError(f"Unsupported type: {type(indice)} for index {i}")
     if found_ramp:
-        return tirx.BufferRegion(buffer, regions)
+        return ir.TensorRegion(buffer, regions, ir.TensorRegionType(), _construction.current_location())
     else:
         # NOTE(chaofan): Or we can return a region with extent 1?
         return None
@@ -161,13 +170,13 @@ def get_extent(data: BufferLikeType) -> ShapeType | None:
         The shape/extents as a list-like of PrimExpr (Buffer.shape or list of region item extents), or None if the extent cannot be determined.
     """
 
-    if isinstance(data, tirx.Var) and not isinstance(data, tirx.Buffer) and T.has_let_value(data):
+    if isinstance(data, ir.Var) and not _tensor_spec.is_buffer_like(data) and T.has_let_value(data):
         data = T.get_let_value(data)
-    if isinstance(data, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(data):
         return data.shape
-    elif isinstance(data, tirx.BufferRegion):
+    elif isinstance(data, ir.TensorRegion):
         return [x.extent for x in data.region]
-    elif isinstance(data, tirx.BufferLoad):
+    elif isinstance(data, ir.TensorLoad):
         region = get_buffer_region_from_load(data)
         if region is None:
             return None

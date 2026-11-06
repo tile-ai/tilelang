@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from typing import Any, Literal
 
-from tilelang.language import _native as tirx
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.copy_op import (
@@ -26,7 +27,7 @@ def copy(
     prefer_instruction: str | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> _ir.Expr | _ir.Stmt:
     """Copy data between memory regions, with CUDA lowering hints.
 
     Same semantics as the common :func:`tilelang.language.copy_op.copy`; the
@@ -63,7 +64,7 @@ def copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
     if "prefer_instruction" not in ann and prefer_instruction is not None:
-        ann["prefer_instruction"] = tirx.StringImm(prefer_instruction)
+        ann["prefer_instruction"] = _ir.StringImm(prefer_instruction)
     return _common_copy(
         src,
         dst,
@@ -76,15 +77,15 @@ def copy(
 def im2col(
     img: BufferLikeType,
     col: BufferLikeType,
-    nhw_step: tirx.PrimExpr,
-    c_step: tirx.PrimExpr,
+    nhw_step: _ir.Expr,
+    c_step: _ir.Expr,
     kernel: int,
     stride: int,
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """Perform im2col transformation for 2D convolution, with CUDA hints.
 
     Same semantics as the common :func:`tilelang.language.copy_op.im2col`;

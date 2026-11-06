@@ -1,12 +1,17 @@
 """The language interface for tl programs."""
 
-from tilelang.language import _native
+from tilelang.language import _annotation_codec
+from tilelang.language import frame as _loop_frame
+from tvm_tirx.ir import prim as _prim
+from tvm_tirx.tirx.script import ir_builder as _builder
+
+
 from tilelang.language.kernel import get_thread_bindings, get_thread_extents
 
 __all__ = ["WarpSpecialize", "WarpSpecializeFrame", "ws"]
 
 
-class WarpSpecializeFrame(_native.LoopFrame):
+class WarpSpecializeFrame(_loop_frame.LoopFrame):
     """
     WarpSpecializeFrame is a custom TIRFrame that manages warp group indices
     and handles the entry and exit of the kernel launch scope.
@@ -24,15 +29,15 @@ class WarpSpecializeFrame(_native.LoopFrame):
                 merged.append((group, group + 1))
         condition = None
         for start, end in merged:
-            bounded = _native.And(
+            bounded = _prim.And(
                 thread_idx >= start * warp_group_size,
                 thread_idx < end * warp_group_size,
             )
-            condition = bounded if condition is None else _native.Or(condition, bounded)
+            condition = bounded if condition is None else _prim.Or(condition, bounded)
         self.frames = [
-            _native.If(condition),
-            _native.Then(),
-            _native.attr(0, "warp_specialize", 1),
+            _builder.if_(condition),
+            _builder.then_(),
+            _annotation_codec.attr(0, "warp_specialize", 1),
         ]
         self.vars = []
         self.annotations = None

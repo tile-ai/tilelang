@@ -591,8 +591,7 @@ public:
       return VisitIfThenElseExpr(op->args[0].as_or_throw<PrimExpr>(),
                                  op->args[1].as_or_throw<PrimExpr>(),
                                  op->args[2].as_or_throw<PrimExpr>());
-    if (auto callee = op->op.as<Op>();
-        callee.has_value() && callee.value()->name == "tl.annotation")
+    if (auto callee = op->op.as<Op>(); IsAnnotationCall(op))
       return std::nullopt;
     return Base::Visit_(op);
   }

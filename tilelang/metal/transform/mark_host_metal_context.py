@@ -4,7 +4,7 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 
 from tilelang.analysis._visitor import tilelang_metadata
-from tilelang.language._native import encode_annotations
+from tilelang.language._annotation_codec import encode_annotations
 
 
 class _MarkHostMetalContextMutator:

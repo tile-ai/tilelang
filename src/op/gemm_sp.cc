@@ -5,6 +5,7 @@
  */
 
 #include "gemm_sp.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include "utils.h"
 

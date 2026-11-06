@@ -115,8 +115,7 @@ def test_two_cta_tmem_instructions_survive_cluster_hint_consumption():
     result = _cluster(source)
     for name in ("tl.ptx_init_tensor_memory", "tl.ptx_deallocate_tensor_memory"):
         (instruction,) = _nodes(result, ir.Call, name)
-        hints = tvm_ffi.get_global_func("tl.DecodeAnnotations")(instruction.args[-1], instruction.attrs["annotation_schema"])
-        assert int(hints["use_2cta"]) == 1
+        assert int(instruction.attrs["use_2cta"]) == 1
     (scope,) = _nodes(result, ir.RegionStmt, "tirx.device_scope")
     assert tuple(map(int, scope.args)) == (2, 1, 1)
 
@@ -212,7 +211,7 @@ def test_dynamic_cluster_metadata_is_not_hoisted_as_a_host_expression():
 
 def test_geometry_is_collected_after_outlining_and_late_thread_rewrite(tmp_path):
     result = _cluster(_owners(_source()))
-    result = tilelang.transform.FinalizeAnnotations("cuda")(result)
+    result = tilelang.transform.LowerSourceAnnotations()(result)
     result = tilelang.transform.OutlineDeviceRegions()(result)
 
     # Model an intervening device preparation pass changing physical threads.
@@ -417,7 +416,7 @@ def test_annotation_statement_clusters_reach_each_native_launch():
         assert values["pragma_cluster_test"] == 7
     ir.assert_structural_equal(_cluster(result), result)
     ir.assert_structural_equal(ir.load_json(ir.save_json(result)), result)
-    result = _launch(tilelang.transform.OutlineDeviceRegions()(tilelang.transform.FinalizeAnnotations("cuda")(result)))
+    result = _launch(tilelang.transform.OutlineDeviceRegions()(tilelang.transform.LowerSourceAnnotations()(result)))
     assert tirx.analysis.check_well_formed(result)
     assert not tirx.analysis.undefined_vars(result["main"])
     calls = _nodes(result["main"], ir.Call, "tirx.call_ffi_kernel")
@@ -457,7 +456,7 @@ def test_annotation_statement_keeps_dynamic_operands_and_lexical_scope():
     assert set(values) == {"pragma_cluster_test"}
     assert values["pragma_cluster_test"].same_as(local)
     assert scope.body.seq[2].value.same_as(local)
-    result = tilelang.transform.FinalizeAnnotations("cuda")(result)
+    result = tilelang.transform.LowerSourceAnnotations()(result)
     assert tirx.analysis.check_well_formed(result)
     assert not tirx.analysis.undefined_vars(result["main"])
 
@@ -473,7 +472,7 @@ def test_mixed_cluster_metadata_forms_agree_or_reject_conflicts(conflict):
     result = _cluster(source)
     (scope,) = _nodes(result, ir.RegionStmt, "tirx.device_scope")
     assert tuple(map(int, scope.args)) == (2, 1, 1)
-    assert tirx.analysis.check_well_formed(tilelang.transform.FinalizeAnnotations("cuda")(result))
+    assert tirx.analysis.check_well_formed(tilelang.transform.LowerSourceAnnotations()(result))
 
 
 @pytest.mark.parametrize("inside_kernel", [False, True])
@@ -515,5 +514,6 @@ def test_annotation_statement_keeps_unknown_metadata_for_its_owner():
     # user hints are intentionally ignored once all owning passes have run.
     source = _as_annotation_statements(_owners(_source(((2, 1, 1),))), {"cluster_dims": [2, 1, 1], "tl.unconsumed_cluster_neighbor": 7})
     result = _cluster(source)
-    with pytest.raises(ValueError, match="Unconsumed TileLang annotation `tl.unconsumed_cluster_neighbor`"):
-        tilelang.transform.FinalizeAnnotations("cuda")(result)
+    result = tilelang.transform.LowerSourceAnnotations()(result)
+    with pytest.raises(ValueError, match="Unconsumed TileLang call `tl.annotation`"):
+        tilelang.transform.VerifyLoweredAnnotations()(result)

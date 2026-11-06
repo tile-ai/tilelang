@@ -146,7 +146,7 @@ def test_lower_shared_barrier():
     mod = tvm_tirx.tirx.transform.BindTarget(auto_target)(mod)
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = cuda_transform.LowerSharedBarrier()(mod)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
 
     _assert_shared_barrier_init(mod["main"])
 

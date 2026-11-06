@@ -170,7 +170,7 @@ def test_materialization_checks_dtype_and_rank_without_layout_inference(problem)
 
 def compile_cpu(value):
     result, stages = lower_sequential_cpu(value.with_attr("target", tvm_tirx.target.Target("c")))
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(ir.IRModule({"main": result}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": result}))
     executable = compile_packed_function(module, tilelang_owned=False)
     return executable, stages
 

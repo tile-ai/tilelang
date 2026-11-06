@@ -4,8 +4,9 @@
  */
 #include "../ir/alias_analysis.h"
 #include "../ir/annotations.h"
-#include "../op/native_utils.h"
+#include "ir/annotations.h"
 #include "ir/lexical_scope.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/tirx/analysis.h>
@@ -22,26 +23,10 @@ using ffi::Map;
 using ffi::String;
 constexpr const char *kNonRestrict = "tl.non_restrict_params";
 
-Map<String, Any> Metadata(const CallObj *call) {
-  auto decoded = DecodeAnnotations(call->args[0].as_or_throw<tvm::Tuple>(),
-                                   call->attrs.value()
-                                       .as_or_throw<DictAttrs>()
-                                       .GetAttr<Array<Any>>("annotation_schema")
-                                       .value());
-  Map<String, Any> values;
-  for (const auto &[key, value] : decoded.cast<Map<Any, Any>>())
-    values.Set(key.cast<String>(), value);
-  return values;
-}
+Map<String, Any> Metadata(const CallObj *call) { return ReadAnnotations(call); }
 
 Stmt Annotation(const Map<String, Any> &values, Location loc) {
-  auto encoded = EncodeAnnotations(values);
-  return Evaluate(Call(PrimType::Void(), Op::Get("tl.annotation"),
-                       {encoded.payload},
-                       DictAttrs({{"schema_version", 1},
-                                  {"annotation_schema", encoded.schema}}),
-                       {}, loc),
-                  loc);
+  return MakeAnnotation(values, loc);
 }
 
 class AliasExceptions {
@@ -51,25 +36,28 @@ public:
       Add(direct.value());
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return;
-    VisitNativePostOrder(function->body, [&](const ffi::ObjectRef &object) {
-      if (const auto *call = object.as<CallObj>();
-          call && call->op.same_as(Op::Get("tl.annotation"))) {
-        auto values = Metadata(call);
-        if (auto marked = values.Get(kNonRestrict))
-          Add(marked.value());
-      } else if (const auto *region = object.as<RegionStmtObj>();
-                 region && region->op->name == "tl.attr") {
-        auto fields = DecodeAttributeRegion(region);
-        auto key = fields.at("key").cast<String>();
-        if (key == kNonRestrict)
-          Add(fields.at("value"));
-        else if (key == "tl.kernel") {
-          auto values = fields.at("value").cast<Map<String, Any>>();
-          if (auto marked = values.Get(kNonRestrict))
-            Add(marked.value());
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *call = object.as<CallObj>();
+              call && IsAnnotationCall(call)) {
+            auto values = Metadata(call);
+            if (auto marked = values.Get(kNonRestrict))
+              Add(marked.value());
+          } else if (const auto *region = object.as<RegionStmtObj>();
+                     region && region->op->name == "tl.attr") {
+            auto fields = ReadAnnotations(region);
+            auto key = fields.at("key").cast<String>();
+            if (key == kNonRestrict)
+              Add(fields.at("value"));
+            else if (key == "tl.kernel") {
+              auto values = fields.at("value").cast<Map<String, Any>>();
+              if (auto marked = values.Get(kNonRestrict))
+                Add(marked.value());
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
   Array<Var> Select(const Array<Var> &candidates) const {
@@ -113,7 +101,7 @@ public:
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
                                  InplaceMode mode) override {
     const auto *call = op->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!call || !IsAnnotationCall(call))
       return StmtExprMutator::Mutate_(op, mode);
     auto values = Metadata(call);
     if (!values.count(kNonRestrict))
@@ -128,7 +116,7 @@ public:
                                  InplaceMode mode) override {
     if (op->op->name != "tl.attr")
       return StmtExprMutator::Mutate_(op, mode);
-    auto fields = DecodeAttributeRegion(op);
+    auto fields = ReadAnnotations(op);
     auto key = fields.at("key").cast<String>();
     if (key == kNonRestrict) {
       auto body = Mutate(op->body, mode).ValueOrUnchanged(op->body);

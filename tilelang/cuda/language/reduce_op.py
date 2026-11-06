@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tilelang.language import _tensor_spec
+
 
 from tilelang.language.reduce_op import (
     reduce_absmax as _common_reduce_absmax,
@@ -22,8 +23,8 @@ def _with_nan_propagate(annotations: dict | None, nan_propagate: bool) -> dict |
 
 
 def reduce_max(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -43,8 +44,8 @@ def reduce_max(
 
 
 def reduce_min(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -59,8 +60,8 @@ def reduce_min(
 
 
 def reduce_absmax(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,

@@ -22,9 +22,12 @@
  * \brief Narrow scheduled-task core candidates from their actual consumers.
  */
 
+#include "ir/annotations.h"
+#include "ir/tensor_utils.h"
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -185,23 +188,25 @@ private:
     // consumers' domains. In particular, an unused binding placed on Cube as
     // a fallback and a break's own condition must not seed shared Cube work.
     bool external_effect = false;
-    VisitNativePostOrder(task->stmt, [&](const ObjectRef &node) {
-      if (const auto *store = node.as<TensorStoreObj>())
-        external_effect |= !IsRegisterRegion(
-            FullTensorRegion(store->dest.as_or_throw<TensorVar>()));
-      if (const auto *call = node.as<CallObj>()) {
-        if (IsScheduledBind(call) || call->op.same_as(alloc_tensor_op()) ||
-            call->op.same_as(decl_tensor_op()) ||
-            call->op.same_as(Op::Get("tl.annotation")))
-          return;
-        Call expression = ffi::GetRef<Call>(call);
-        Stmt statement = Evaluate(expression);
-        external_effect |=
-            SideEffect(expression) > CallEffectKind::kReadState &&
-            (AnalyzeSpecialRegisterWrites(statement) == 0 ||
-             HasCrossCoreSync(statement));
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        task->stmt,
+        [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *store = node.as<TensorStoreObj>())
+            external_effect |= !IsRegisterRegion(
+                FullTensorRegion(store->dest.as_or_throw<TensorVar>()));
+          if (const auto *call = node.as<CallObj>()) {
+            if (IsScheduledBind(call) || call->op.same_as(alloc_tensor_op()) ||
+                call->op.same_as(decl_tensor_op()) || IsAnnotationCall(call))
+              return ffi::WalkResult::Advance();
+            Call expression = ffi::GetRef<Call>(call);
+            Stmt statement = Evaluate(expression);
+            external_effect |=
+                SideEffect(expression) > CallEffectKind::kReadState &&
+                (AnalyzeSpecialRegisterWrites(statement) == 0 ||
+                 HasCrossCoreSync(statement));
+          }
+          return ffi::WalkResult::Advance();
+        });
     if (external_effect) {
       auto sid = GetTaskSubcore(task->stmt);
       demand.cube_domains = sid ? SubcoreCubeDomain(*sid) : kSharedCubeDomain;
@@ -291,8 +296,7 @@ private:
   }
 
   bool AddRegisterDemand(const TensorVar &tensor,
-                         const NativeStorageContext &storage,
-                         CoreDemand demand) {
+                         const StorageProvenance &storage, CoreDemand demand) {
     Var identity = storage.Identity(tensor);
     register_tensors_.emplace(identity, tensor);
     return AddDemand(&register_demand_, identity, demand);
@@ -365,8 +369,9 @@ private:
       if (!IsRegisterRegion(region))
         continue;
       for (const auto &[storage, readers] : register_demand_) {
-        if (!task->StorageContext().ProvenDisjoint(
-                RegionTensor(region), register_tensors_.at(storage)))
+        if (!ProvenDisjointAscendStorage(
+                task->StorageContext().Address(RegionTensor(region)),
+                task->StorageContext().Address(register_tensors_.at(storage))))
           demand.Merge(readers);
       }
     }

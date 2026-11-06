@@ -3,6 +3,7 @@
  * \brief Mark native device functions that use CUDA PDL operations.
  */
 
+#include "op/builtin.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -20,7 +21,7 @@ public:
     has_trigger_launch |= call->op.same_as(pdl_trigger());
     has_grid_sync |= call->op.same_as(pdl_sync());
     if (auto op = call->op.as<OpObj>())
-      has_ldg |= op->name == "tl.__ldg";
+      has_ldg |= op == tl::__ldg().get();
     return StmtExprVisitor::Visit_(call);
   }
 

@@ -4,7 +4,7 @@
  */
 
 #include "../ir/annotations.h"
-#include "../op/native_utils.h"
+#include "ir/annotations.h"
 #include "ir/lexical_scope.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -24,7 +24,7 @@ public:
                                  InplaceMode mode) final {
     if (op->op->name != "tl.attr")
       return StmtExprMutator::Mutate_(op, mode);
-    const auto fields = DecodeAttributeRegion(op);
+    const auto fields = ReadAnnotations(op);
     if (fields.at("key").cast<ffi::String>() != "lexical_alloc_scope")
       return StmtExprMutator::Mutate_(op, mode);
     TVM_FFI_CHECK(op->body_params.empty() && op->result_vars.empty(),

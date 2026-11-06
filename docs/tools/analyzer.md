@@ -10,10 +10,10 @@ it. The result is a static estimate, not a measurement from the GPU.
 The analyzer and its NumPy dependency are included in the standard TileLang
 installation. No optional package is required.
 
-The device model passed to the analyzer supplies architecture and bandwidth
-information. For example, constructing `CUDA("cuda")` queries CUDA device 0, so
-that workflow requires a working CUDA runtime and a visible GPU even though the
-analyzer does not execute the kernel.
+The device model passed to the analyzer supplies a `compute_capability` string
+and a `bandwidth` sequence in MB/s. The analyzer uses `bandwidth[1]` for its
+estimate. These are explicit model inputs; supplying them does not require a
+GPU or query device hardware.
 
 ## Quick Start
 
@@ -22,7 +22,7 @@ Create specialized TIR with `get_tir()`, then analyze the resulting `Function`:
 ```python
 import tilelang
 import tilelang.language as T
-from tilelang.carver.arch import CUDA
+from types import SimpleNamespace
 from tilelang.tools import Analyzer
 
 M = N = K = 1024
@@ -54,7 +54,8 @@ def matmul(A, B, block_M, block_N, block_K):
 
 
 tir = matmul.get_tir(block_M=128, block_N=128, block_K=32)
-device = CUDA("cuda")
+# Example model assumptions, not measured device bandwidth.
+device = SimpleNamespace(compute_capability="80", bandwidth=[750, 12080])
 result = Analyzer.analysis(tir, device)
 
 print(f"FLOPs: {result.total_flops}")
@@ -76,8 +77,8 @@ result = Analyzer.analysis(fn, device)
 ```
 
 - `fn` is a `tvm_tirx.ir.IRModule` or `tvm_tirx.tirx.Function` containing TileLang TIR.
-- `device` is a TileLang device description such as
-  `tilelang.carver.arch.CUDA("cuda")`.
+- `device` supplies `compute_capability` and `bandwidth`, as in the
+  `SimpleNamespace` above. Only the second bandwidth entry is consumed.
 - The method returns an immutable `AnalysisResult`.
 
 `AnalysisResult` exposes these fields:

@@ -26,21 +26,24 @@
  * count, a branch outcome, or an event-id value: such a scope retains distinct
  * allocations. No memory reuse decision depends on a variable's printed name.
  */
+#include "ascend/ir/core_mask.h"
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
 #include "ascend_pipe.h"
 #include "auto_schedule/multi_buffer.h"
-#include "auto_schedule/native_task_ir.h"
 #include "buffer_alias.h"
-#include "core_mask.h"
+#include "ir/annotations.h"
 #include "ir/loop_math.h"
+#include "layout/expr_utils.h"
 #include "merge_ub_common.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
 #include <algorithm>
 #include <map>
 #include <numeric>
 #include <sstream>
 #include <tuple>
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -93,7 +96,7 @@ public:
 private:
   static constexpr size_t kMaxEvents = 8000;
   AllocationMap allocations_;
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   sym::Analyzer analyzer_;
   Map<Var, PrimExpr> values_;
   CoreMask core_{kCoreUnassigned};
@@ -102,7 +105,10 @@ private:
   int next_loop_{0};
 
   PrimExpr Evaluate(const PrimExpr &expr) {
-    return analyzer_->Simplify(SubstituteLoopVars(expr, values_));
+    return analyzer_->Simplify(tirx::SubstituteWithDataTypeLegalization(
+        expr, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+          return values_.Get(var);
+        }));
   }
   void Emit(LinearEvent event) {
     if (linear_events.size() == kMaxEvents) {
@@ -262,7 +268,7 @@ private:
     auto old_core = core_;
     auto old_pipe = pipe_;
     auto old_values = values_;
-    if (auto name = NativeBlockName(op)) {
+    if (auto name = BlockNameAtSourceBoundary(op)) {
       if (*name == "VECTOR")
         core_ = kCoreVector;
       if (*name == "CUBE")
@@ -271,7 +277,11 @@ private:
       if (block != ResourcePipe::kUnknown)
         pipe_ = block;
     }
-    if (auto attribute = ReadTaskAttribute(op)) {
+    if (IsAscendBlock(op) || IsSemanticTask(op) || IsScheduleUnit(op) ||
+        IsStageScope(op)) {
+      // Annotation operands describe compiler metadata, not executed accesses.
+      Visit(op->body);
+    } else if (auto attribute = ReadSourceAttribute(op)) {
       if (CanRewriteMultiBufferAttrNode(attribute->key, attribute->node))
         Visit(attribute->node.cast<Expr>());
       Visit(op->body);
@@ -307,7 +317,7 @@ private:
   }
   bool RecordSync(const CallObj *call) {
     LinearEvent event;
-    auto args = NativeIntrinsicOperands(call);
+    auto args = DecodeCallOperands(call);
     if (call->op.same_as(ascend_set_flag()) ||
         call->op.same_as(ascend_wait_flag())) {
       TVM_FFI_CHECK_GE(args.size(), 2U, ValueError);
@@ -344,13 +354,13 @@ private:
     return true;
   }
   Result Visit_(const CallObj *op) final {
-    if (loop_annotation_detail::IsAnnotation(op))
+    if (IsAnnotationCall(op))
       return std::nullopt;
     if (IsScheduledBind(op))
       return Visit(ReadScheduledBinding(op).value);
     if (RecordSync(op))
       return std::nullopt;
-    if (op->op.same_as(Op::Get("tl.access_ptr"))) {
+    if (op->op.same_as(tl::access_ptr())) {
       TVM_FFI_CHECK_EQ(op->args.size(), 3U, ValueError);
       auto load = op->args[0].as_or_throw<TensorLoad>();
       for (const auto &index : load->indices)
@@ -362,7 +372,7 @@ private:
       Touch(load->source, (mask & kAccessWrite) != 0);
       return std::nullopt;
     }
-    if (op->op.same_as(Op::Get("tl.ptr_access"))) {
+    if (op->op.same_as(tl::ptr_access())) {
       TVM_FFI_CHECK_EQ(op->args.size(), 4U, ValueError);
       AddressOperands(op->args[0]);
       for (size_t i = 1; i < op->args.size(); ++i)
@@ -374,7 +384,7 @@ private:
     }
     Call call = GetRef<Call>(op);
     auto old = pipe_;
-    auto arguments = NativeIntrinsicOperands(op);
+    auto arguments = DecodeCallOperands(op);
     for (size_t index = 0; index < arguments.size(); ++index) {
       auto pipe = GetAscendCallArgumentPipe(call, index);
       if (pipe != ResourcePipe::kUnknown)
@@ -1106,18 +1116,27 @@ public:
   }
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (loop_annotation_detail::IsAnnotation(call)) {
-      auto fields = ReadNativeAnnotations(call);
+    if (IsAnnotationCall(call)) {
+      auto fields = ReadAnnotations(call);
       if (fields.count(kBufferAliasMap)) {
         fields.erase(kBufferAliasMap);
         return fields.empty() ? Stmt(SeqStmt({}))
-                              : MakeNativeAnnotation(fields, op->loc);
+                              : MakeAnnotation(fields, op->loc);
       }
     }
     return StmtExprMutator::Mutate_(op, mode);
   }
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (auto attr = ReadTaskAttribute(op)) {
+    if (IsAscendBlock(op)) {
+      auto fields = AscendBlockAnnotations(op);
+      if (fields.count(kBufferAliasMap)) {
+        fields.erase(kBufferAliasMap);
+        RegionStmt next =
+            MakeAscendBlock(AscendBlockName(op), fields, op->body, op->loc);
+        return Mutate(next, mode).ValueOrUnchanged(next);
+      }
+    }
+    if (auto attr = ReadSourceAttribute(op)) {
       if (attr->key == kBufferAliasMap)
         return Mutate(op->body, mode).ValueOrUnchanged(op->body);
       if (attr->key == "tl.sblock" || attr->key == "tl.loop.annotations") {
@@ -1132,8 +1151,8 @@ public:
           }
         }
         if (!StructuralEqual()(fields, updated)) {
-          Stmt next = MakeNativeAttribute(attr->node, attr->key, updated,
-                                          op->body, op->loc);
+          Stmt next =
+              MakeAttribute(attr->node, attr->key, updated, op->body, op->loc);
           return Mutate(next, mode).ValueOrUnchanged(next);
         }
       }
@@ -1172,7 +1191,7 @@ public:
           AddBufferAlias(&contract, local[a], local[b]);
     auto body = sequence->seq;
     body.push_back(
-        MakeNativeAnnotation({{kBufferAliasMap, contract}}, sequence->loc));
+        MakeAnnotation({{kBufferAliasMap, contract}}, sequence->loc));
     return SeqStmt(body, sequence->loc);
   }
 
@@ -1217,8 +1236,8 @@ tvm::transform::Pass InferBufferAliases() {
     bool disabled =
         context->GetConfig<bool>(kDisableSharedMemoryReuse).value_or(false);
     auto body = function->body;
-    function.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
-        tl::InferBufferAliases(body, verbose, disabled));
+    function.CopyOnWrite()->body =
+        SeqStmt(tl::InferBufferAliases(body, verbose, disabled));
     return function;
   };
   return tirx::transform::CreateFunctionPass(pass, 0, "tl.InferBufferAliases");

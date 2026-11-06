@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as _tvm_op
+from tvm_tirx import ir as _ir
+
 
 from tilelang.language.tir.exports import ROCM_ONLY_TIR_EXPORTS, SHARED_LEGACY_TIR_EXPORTS
 from tilelang.language.tir.ir import _dtype_forward
@@ -85,7 +86,7 @@ def tvm_mfma(
     """
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.tvm_mfma"),
+        _ir.Op.get("tl.tvm_mfma"),
         shape,
         A_layout,
         B_layout,
@@ -135,7 +136,7 @@ def tvm_mfma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.tvm_mfma_store"),
+        _ir.Op.get("tl.tvm_mfma_store"),
         m,
         n,
         dst_ptr,
@@ -212,7 +213,7 @@ def tvm_rdna_wmma(
     """
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.tvm_rdna_wmma"),
+        _ir.Op.get("tl.tvm_rdna_wmma"),
         shape,
         A_layout,
         B_layout,
@@ -262,7 +263,7 @@ def tvm_rdna_wmma_store(dtype, m, n, dst_ptr, src_ptr, src_offset, dst_stride):
     """
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.tvm_rdna_wmma_store"),
+        _ir.Op.get("tl.tvm_rdna_wmma_store"),
         m,
         n,
         dst_ptr,

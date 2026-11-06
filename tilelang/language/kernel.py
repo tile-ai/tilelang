@@ -1,15 +1,21 @@
 """Kernel launching language interface in TileLang."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _annotation_codec
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx.ir import prim as _prim
+
 from collections import deque
 import os
 from typing import Any
-from tilelang.language import _native as tirx
-from tilelang.language._native import Var
+
+from tvm_tirx.ir import Var
 from tvm_tirx import ir
 from tvm_tirx.tirx.script import ir_builder as _builder
-from tilelang.language._native import evaluate as T_evaluate
+from tilelang.language._construction import evaluate as T_evaluate
 from tilelang.jit.exceptions import JITNoBuilderError
 import threading
 
@@ -151,13 +157,13 @@ class KernelLaunchFrame:
     """
 
     def __init__(self, blocks, threads, annotations, *, grid_tags=None):
-        self.grid_extents = [tirx._expr(value) for value in blocks]
-        self.thread_extents = None if threads is None else [tirx._expr(value) for value in threads]
+        self.grid_extents = [_construction.as_expr(value) for value in blocks]
+        self.thread_extents = None if threads is None else [_construction.as_expr(value) for value in threads]
         self.annotations = dict(annotations)
-        hint_schema, hint_values = tirx.encode_annotations(self.annotations)
-        begin = ir.Tuple([ir.const(0, _native.dtype_of(value.ty)) for value in self.grid_extents])
+        hint_schema, hint_values = _annotation_codec.encode_annotations(self.annotations)
+        begin = ir.Tuple([ir.const(0, _construction.dtype_of(value.ty)) for value in self.grid_extents])
         end = ir.Tuple(self.grid_extents)
-        step = ir.Tuple([ir.const(1, _native.dtype_of(value.ty)) for value in self.grid_extents])
+        step = ir.Tuple([ir.const(1, _construction.dtype_of(value.ty)) for value in self.grid_extents])
         self._frame = _builder.region(
             "tl.launch_kernel",
             [begin, end, step, ir.Tuple(self.thread_extents or []), hint_values],
@@ -299,7 +305,7 @@ class KernelLaunchFrame:
             size *= dim
         return size
 
-    def get_cluster_id(self, dim: int = 0) -> Var | tirx.PrimExpr:
+    def get_cluster_id(self, dim: int = 0) -> Var | ir.Expr:
         """
         Returns the index of the cluster the current program belongs to along
         ``dim``, in program-space arithmetic: ``block_id // cluster_dims[dim]``.
@@ -310,14 +316,14 @@ class KernelLaunchFrame:
         which permutes the grid at cluster granularity.
         """
         if dim >= len(self.grid_vars):
-            return tirx.IntImm("int32", 0)
+            return ir.IntImm("int32", 0)
         block = self.grid_vars[dim]
         cluster_dim = self.get_cluster_dims()[dim]
         if cluster_dim == 1:
             return block
-        return tirx.floordiv(block, tirx.IntImm(tirx.dtype_of(block), cluster_dim))
+        return _prim.floordiv(block, ir.IntImm(_construction.dtype_of(block), cluster_dim))
 
-    def get_cluster_ids(self) -> list[Var | tirx.PrimExpr]:
+    def get_cluster_ids(self) -> list[Var | ir.Expr]:
         """
         Returns the cluster index along every launched grid axis.
         """
@@ -389,7 +395,7 @@ def is_kernel_launch_factory(obj) -> bool:
 
 
 def launch_kernel(
-    blocks: tuple[int | tirx.PrimExpr, ...],
+    blocks: tuple[int | ir.Expr, ...],
     *,
     threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
@@ -427,7 +433,7 @@ def launch_kernel(
 
 
 @kernel_launch_factory
-def Kernel(*blocks: int | tirx.PrimExpr) -> KernelLaunchFrame:
+def Kernel(*blocks: int | ir.Expr) -> KernelLaunchFrame:
     """Construct a kernel launch frame: a grid of tile programs.
 
     This is the target-neutral launch: the part every backend shares. Backend
@@ -455,7 +461,7 @@ def Kernel(*blocks: int | tirx.PrimExpr) -> KernelLaunchFrame:
 
 @kernel_launch_factory
 def ClusterKernel(
-    *blocks: int | tirx.PrimExpr,
+    *blocks: int | ir.Expr,
     cluster_dims: int | tuple[int, int, int] | list[int],
     threads: int | list[int] | tuple | None = None,
     prelude: str | None = None,
@@ -517,7 +523,7 @@ def _load_cuda_source(source_code_or_path: str | os.PathLike[str]) -> str:
 
 
 def CUDASourceCodeKernel(
-    *blocks: int | tirx.PrimExpr,
+    *blocks: int | ir.Expr,
     threads: int | list[int] | tuple | None = None,
     source_code_or_path: str | os.PathLike[str],
     entry_name: str = "main_kernel",
@@ -571,7 +577,7 @@ def CUDASourceCodeKernel(
     # simplification cannot discard a tensor that the CUDA entry consumes.
     # The host/device bridge completes this list from the finalized Function
     # before outlining (including parameters declared later by eager mode).
-    source_parameters = [parameter for parameter in Builder.current()._parameter_order.values() if _native.is_tensor(parameter)]
+    source_parameters = [parameter for parameter in Builder.current()._parameter_order.values() if _tensor_spec.is_buffer_like(parameter)]
     attrs: dict = {"code_block_source": source, "code_block_signature": source_parameters}
     if not isinstance(entry_name, str) or not entry_name.strip():
         raise ValueError("entry_name must be a non-empty string when provided")
@@ -586,7 +592,7 @@ def CUDASourceCodeKernel(
     with KernelLaunchFrame(blocks, threads, attrs):
         # Keep the launch frame alive until SplitHostDevice can lift the
         # external CUDA source metadata onto the device Function.
-        T_evaluate(tirx.call_extern("int32", entry_name))
+        T_evaluate(_intrinsics.call_extern("int32", entry_name))
 
 
 def get_thread_binding(dim: int = 0) -> Var:
@@ -649,14 +655,14 @@ def get_cluster_size() -> int:
     return KernelLaunchFrame.Current().get_cluster_size()
 
 
-def get_cluster_id(dim: int = 0) -> Var | tirx.PrimExpr:
+def get_cluster_id(dim: int = 0) -> Var | ir.Expr:
     """Returns the cluster index of the current program along ``dim``
     (``block_id // cluster_dims[dim]``). See :meth:`KernelLaunchFrame.get_cluster_id`."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_cluster_id(dim)
 
 
-def get_cluster_ids() -> list[Var | tirx.PrimExpr]:
+def get_cluster_ids() -> list[Var | ir.Expr]:
     """Returns the cluster index along every launched grid axis."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_cluster_ids()

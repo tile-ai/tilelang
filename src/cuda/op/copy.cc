@@ -5,8 +5,11 @@
 
 #include "op/copy.h"
 #include "ir/analyzer.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/runtime/logging.h>
 
 #include "cuda/op/builtin.h"
@@ -16,7 +19,6 @@
 #include "cuda/transform/ptx_async_copy_injector.h"
 #include "layout/cute_layout.h"
 #include "layout/tcgen05_layout.h"
-#include "op/native_utils.h"
 #include "op/utils.h"
 #include "span_utils.h"
 #include "transform/common/loop_fusion_utils.h"
@@ -536,25 +538,27 @@ void Copy::CollectFragmentLayouts(const Expr &expr,
                                   const LayoutMap &existing_layouts,
                                   PrimExpr thread_extent, Range thread_bounds,
                                   Map<TensorVar, Layout> &result_map) {
-  VisitNativePostOrder(expr, [&](const ObjectRef &node) {
-    if (auto bl = node.as<TensorLoadObj>()) {
-      if (IsFragmentBuffer(bl->source.as_or_throw<TensorVar>()) &&
-          !existing_layouts.count(bl->source.as_or_throw<TensorVar>()) &&
-          !result_map.count(bl->source.as_or_throw<TensorVar>())) {
-        auto f = Fragment::FullyReplicated(
-            bl->source.as_or_throw<TensorVar>().shape(), thread_extent);
-        result_map.Set(bl->source.as_or_throw<TensorVar>(),
-                       f->BindThreadRange(thread_bounds));
-      }
-    } else if (auto var_node = node.as<VarObj>()) {
-      auto var = GetRef<Var>(var_node);
-      if (bind_var_to_expr.count(var)) {
-        CollectFragmentLayouts(bind_var_to_expr[var], bind_var_to_expr,
-                               existing_layouts, thread_extent, thread_bounds,
-                               result_map);
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      expr, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (auto bl = node.as<TensorLoadObj>()) {
+          if (IsFragmentBuffer(bl->source.as_or_throw<TensorVar>()) &&
+              !existing_layouts.count(bl->source.as_or_throw<TensorVar>()) &&
+              !result_map.count(bl->source.as_or_throw<TensorVar>())) {
+            auto f = Fragment::FullyReplicated(
+                bl->source.as_or_throw<TensorVar>().shape(), thread_extent);
+            result_map.Set(bl->source.as_or_throw<TensorVar>(),
+                           f->BindThreadRange(thread_bounds));
+          }
+        } else if (auto var_node = node.as<VarObj>()) {
+          auto var = GetRef<Var>(var_node);
+          if (bind_var_to_expr.count(var)) {
+            CollectFragmentLayouts(bind_var_to_expr[var], bind_var_to_expr,
+                                   existing_layouts, thread_extent,
+                                   thread_bounds, result_map);
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
 }
 
 LayoutMap Copy::InferLayout(const CopyNode &op,

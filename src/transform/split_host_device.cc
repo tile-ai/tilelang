@@ -24,11 +24,13 @@
 #include "../ir/alias_analysis.h"
 #include "../ir/annotations.h"
 #include "../ir/lexical_scope.h"
-#include "../op/native_utils.h"
 #include "common/unused_tensor_alias.h"
+#include "ir/annotations.h"
+#include "op/builtin.h"
 #include "tensor_descriptor.h"
 #include "upstream_pass_bridge.h"
 #include <string>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
@@ -67,7 +69,7 @@ public:
                                  InplaceMode mode) final {
     if (region->op->name != "tl.attr")
       return StmtExprMutator::Mutate_(region, mode);
-    auto fields = DecodeAttributeRegion(region);
+    auto fields = ReadAnnotations(region);
     auto key = fields.at("key").cast<ffi::String>();
     auto body = Mutate(region->body, mode).ValueOrUnchanged(region->body);
     // Replace the frontend's possibly partial list with the finalized native
@@ -106,7 +108,7 @@ public:
                                  InplaceMode mode) final {
     if (region->op->name != "tl.attr")
       return StmtExprMutator::Mutate_(region, mode);
-    auto fields = DecodeAttributeRegion(region);
+    auto fields = ReadAnnotations(region);
     auto key = fields.at("key").cast<ffi::String>();
     if (key != "code_block_source" && key != "code_block_entry_name" &&
         key != "code_block_signature")
@@ -265,11 +267,14 @@ public:
     for (const Var &parameter : function->params) {
       if (parameter.as<PrimVar>())
         host_vars_.insert(parameter.get());
-      VisitNativePostOrder(parameter->ty, [&](const ffi::ObjectRef &node) {
-        if (const auto *variable = node.as<VarObj>();
-            variable && variable->ty.as<PrimTypeObj>())
-          host_vars_.insert(variable);
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          parameter->ty,
+          [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (const auto *variable = node.as<VarObj>();
+                variable && variable->ty.as<PrimTypeObj>())
+              host_vars_.insert(variable);
+            return ffi::WalkResult::Advance();
+          });
     }
   }
 
@@ -360,12 +365,15 @@ public:
     }
     if (op->op->name != "tl.attr")
       return StmtExprMutator::Mutate_(op, mode);
-    auto fields = DecodeAttributeRegion(op);
+    auto fields = ReadAnnotations(op);
     if (fields.at("key").cast<ffi::String>() !=
         "tl.assume_requires_runtime_check")
       return StmtExprMutator::Mutate_(op, mode);
-    PrimExpr condition = SubstituteLoopVars(fields.at("node").cast<PrimExpr>(),
-                                            constant_iterations_);
+    PrimExpr condition = tirx::SubstituteWithDataTypeLegalization(
+        fields.at("node").cast<PrimExpr>(),
+        [&](const Var &var) -> ffi::Optional<PrimExpr> {
+          return constant_iterations_.Get(var);
+        });
     ffi::Array<Stmt> prefix;
     if (conditional_depth_ == 0 && HostEvaluable(condition)) {
       auto message = fields.at("value").cast<ffi::String>();
@@ -408,15 +416,19 @@ private:
     if (next < end->value || next > maximum)
       return false;
     bool early_exit = false;
-    VisitNativePostOrder(loop->body, [&](const ffi::ObjectRef &node) {
-      if (node.as<BreakObj>() || node.as<ContinueObj>() || node.as<ReturnObj>())
-        early_exit = true;
-      if (const auto *call = node.as<CallObj>()) {
-        if (const auto *op = call->op.as<OpObj>();
-            op && op->name == "tl.loop_break")
-          early_exit = true;
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        loop->body,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (node.as<BreakObj>() || node.as<ContinueObj>() ||
+              node.as<ReturnObj>())
+            early_exit = true;
+          if (const auto *call = node.as<CallObj>()) {
+            if (const auto *op = call->op.as<OpObj>();
+                op && op == tl::loop_break().get())
+              early_exit = true;
+          }
+          return ffi::WalkResult::Advance();
+        });
     return !early_exit;
   }
 
@@ -429,8 +441,11 @@ private:
     const auto *evaluate = statement.as<EvaluateObj>();
     const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
     if (call && call->op.same_as(prim::assume_op())) {
-      PrimExpr condition = SubstituteLoopVars(
-          call->args[0].as_or_throw<PrimExpr>(), constant_iterations_);
+      PrimExpr condition = tirx::SubstituteWithDataTypeLegalization(
+          call->args[0].as_or_throw<PrimExpr>(),
+          [&](const Var &var) -> ffi::Optional<PrimExpr> {
+            return constant_iterations_.Get(var);
+          });
       if (HostEvaluable(condition))
         host_assumptions_.push_back(condition);
     }
@@ -440,12 +455,16 @@ private:
     if (!condition.ty().MatchesCode(kDLBool) || !condition.ty().IsScalar())
       return false;
     bool valid = true;
-    VisitNativePostOrder(condition, [&](const ffi::ObjectRef &node) {
-      if (node.as<CallObj>() || node.as<TensorLoadObj>())
-        valid = false;
-      if (const auto *var = node.as<VarObj>(); var && !host_vars_.count(var))
-        valid = false;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        condition,
+        [&](const ffi::ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (node.as<CallObj>() || node.as<TensorLoadObj>())
+            valid = false;
+          if (const auto *var = node.as<VarObj>();
+              var && !host_vars_.count(var))
+            valid = false;
+          return ffi::WalkResult::Advance();
+        });
     return valid;
   }
   std::unordered_set<const VarObj *> host_vars_;

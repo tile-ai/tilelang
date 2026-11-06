@@ -32,10 +32,11 @@ def address_bits(program, expression):
         value = binding.value
         fields = scheduled_fields(binding)
         if fields is not None:
-            # This temporary task marker evaluates exactly one typed value;
-            # the surrounding Bind still owns the allocation/view identity.
+            # The marker has one value operand. Static stage/task metadata is
+            # in attrs; dynamic metadata adds a validated trailing Tuple.
+            # The surrounding Bind still owns the allocation/view identity.
             assert set(fields) == {"stage", "task"}
-            assert len(value.args) == 2
+            value.validate()
             tvm_tirx.ir.assert_structural_equal(value.ty, value.args[0].ty)
             value = value.args[0]
         bindings[binding.var] = value

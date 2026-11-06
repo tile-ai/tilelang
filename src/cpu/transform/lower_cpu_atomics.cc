@@ -9,6 +9,7 @@
  * effect on this serial execution route.
  */
 
+#include "ir/annotations.h"
 #include "op/builtin.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -92,8 +93,7 @@ public:
       found = true;
       return ffi::VisitInterrupt();
     }
-    if (const auto *op = call->op.as<OpObj>();
-        op && op->name == "tl.annotation")
+    if (IsAnnotationCall(call))
       return std::nullopt;
     return StmtExprVisitor::Visit_(call);
   }
@@ -186,7 +186,7 @@ public:
           << " with return_prev=True is not supported on CPU";
       return LowerAtomic(*op, *atomic, true).value();
     }
-    if (op->op.same_as(Op::Get("prim.if_then_else"))) {
+    if (op->op.same_as(prim::if_then_else_op())) {
       PrimExpr condition = Mutate(op->args[0], mode)
                                .ValueOrUnchanged(op->args[0])
                                .as_or_throw<PrimExpr>();
@@ -215,10 +215,10 @@ public:
       return TensorLoad(slot, {}, op->loc);
     }
     if (const auto *primitive = op->op.as<OpObj>()) {
-      if (primitive->name == "tl.annotation")
+      if (IsAnnotationCall(op))
         return ffi::Unchanged();
-      if (primitive->name == "tl.access_ptr" ||
-          primitive->name == "tirx.address_of") {
+      if (primitive == tl::access_ptr().get() ||
+          primitive == tirx::address_of_op().get()) {
         // A TensorLoad inside an address operator denotes an address, not a
         // read.
         if (const auto *load = op->args[0].as<TensorLoadObj>()) {

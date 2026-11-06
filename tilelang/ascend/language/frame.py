@@ -6,9 +6,13 @@ never need the old SBlock allocation hoisting/stealing protocol.
 
 from __future__ import annotations
 
+from tilelang.language import _annotation_codec
+from tilelang.language import _source_scope
+from tilelang.language import frame as _loop_frame
+
 from contextvars import ContextVar
 
-from tilelang.language import _native as ir
+
 from tvm_tirx.tirx.script import ir_builder
 
 __all__ = [
@@ -25,18 +29,10 @@ __all__ = [
 
 
 def _block(name, annotations=None):
-    return ir.attr(
-        None,
-        "tl.sblock",
-        {
-            "name": name,
-            "no_realize": True,
-            "annotations": annotations or {},
-        },
-    )
+    return _source_scope._ascend_block(name, annotations)
 
 
-class CubeFrame(ir.LoopFrame):
+class CubeFrame(_loop_frame.LoopFrame):
     """Lexical AIC scope, represented by an ordinary native region."""
 
     def __init__(self):
@@ -52,7 +48,7 @@ def Cube() -> CubeFrame:
     return CubeFrame()
 
 
-class VectorFrame(ir.LoopFrame):
+class VectorFrame(_loop_frame.LoopFrame):
     """Lexical AIV scope with a native cthread body parameter."""
 
     def __init__(self, vector_count):
@@ -92,7 +88,7 @@ def _vf_annotations(kind, latency):
     return annotations
 
 
-class SimtVFFrame(ir.LoopFrame):
+class SimtVFFrame(_loop_frame.LoopFrame):
     """A SIMT helper region containing three native launch_thread scopes."""
 
     def __init__(self, thread_extents, latency=0):
@@ -103,7 +99,7 @@ class SimtVFFrame(ir.LoopFrame):
             [
                 _block("SIMT_VF", _vf_annotations("simtvf", latency)),
                 *threads,
-                ir.attr("simtvf", "tl.simtvf_scope", 1),
+                _annotation_codec.attr("simtvf", "tl.simtvf_scope", 1),
             ]
         )
 
@@ -141,14 +137,14 @@ def SimtVF(threads: int | list[int] | tuple = 128, latency: int = 0) -> SimtVFFr
 _inside_simdvf = ContextVar("tilelang_inside_simdvf", default=0)
 
 
-class SimdVFFrame(ir.LoopFrame):
+class SimdVFFrame(_loop_frame.LoopFrame):
     """Register-level SIMD helper scope, without any synthetic thread axes."""
 
     def __init__(self, latency=0):
         super().__init__(
             [
                 _block("SIMD_VF", _vf_annotations("simdvf", latency)),
-                ir.attr("simdvf", "tl.simdvf_scope", 1),
+                _annotation_codec.attr("simdvf", "tl.simdvf_scope", 1),
             ]
         )
         self._token = None

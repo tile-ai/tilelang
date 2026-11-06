@@ -19,10 +19,16 @@
 
 #pragma once
 
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
+#include "ir/stmt_functor.h"
 #include "ir_structure.h"
+#include "layout/expr_utils.h"
 #include "memory_detector.h"
-#include "native_task_ir.h"
 #include "task_resource.h"
+#include "transform/common/constr_visitor.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
 #include <limits>
@@ -43,10 +49,9 @@ inline ffi::Optional<Bind> GetFlatTaskBind(const Stmt &statement) {
                   bind->loc);
     return ffi::GetRef<Bind>(bind);
   }
-  if (auto attribute = ReadTaskAttribute(stmt);
-      attribute && (attribute->key == attr::kAscendTask ||
-                    attribute->key == attr::kScheduleUnit))
-    return GetFlatTaskBind(attribute->region->body);
+  if (const auto *region = stmt.as<RegionStmtObj>();
+      IsTask(region) || IsScheduleUnit(region))
+    return GetFlatTaskBind(region->body);
   return std::nullopt;
 }
 
@@ -64,13 +69,13 @@ inline Stmt ReplaceFlatTaskBind(const Stmt &statement,
     }
     return replacement;
   }
-  auto attribute = ReadTaskAttribute(statement);
-  TVM_FFI_CHECK(attribute && (attribute->key == attr::kAscendTask ||
-                              attribute->key == attr::kScheduleUnit),
-                ValueError)
-      << "Expected a flat native scheduled binding";
-  return attribute->WithBody(
-      ReplaceFlatTaskBind(attribute->region->body, replacement));
+  const auto *region = statement.as<RegionStmtObj>();
+  TVM_FFI_CHECK(IsTask(region) || IsScheduleUnit(region), ValueError)
+      << "Expected a flat scheduled binding";
+  RegionStmt result = ffi::GetRef<RegionStmt>(region);
+  result.CopyOnWrite()->body =
+      SeqStmt(ReplaceFlatTaskBind(region->body, replacement));
+  return result;
 }
 
 inline ffi::Optional<PrimExpr> GetFlatTaskAssumption(const Stmt &statement) {
@@ -86,10 +91,9 @@ inline ffi::Optional<PrimExpr> GetFlatTaskAssumption(const Stmt &statement) {
         return condition;
     }
   }
-  if (auto attribute = ReadTaskAttribute(stmt);
-      attribute && (attribute->key == attr::kAscendTask ||
-                    attribute->key == attr::kScheduleUnit))
-    return GetFlatTaskAssumption(attribute->region->body);
+  if (const auto *region = stmt.as<RegionStmtObj>();
+      IsTask(region) || IsScheduleUnit(region))
+    return GetFlatTaskAssumption(region->body);
   return std::nullopt;
 }
 
@@ -128,7 +132,7 @@ protected:
   }
 
   Result Visit_(const RegionStmtObj *op) override {
-    auto attribute = ReadTaskAttribute(op);
+    auto attribute = ReadSourceAttribute(op);
     if (attribute && IsScheduleGuardAttribute(attribute->key)) {
       for (const Expr &arg : op->args)
         TVM_FFI_S_VISIT_MAYBE_EARLY_RETURN(Visit(arg));
@@ -211,7 +215,7 @@ struct TaskAccessInfo {
   std::vector<Var> read_vars;
   std::vector<Var> write_vars;
   std::vector<Var> opaque_access_vars;
-  NativeStorageContext storage;
+  StorageProvenance storage = MakeAscendStorageProvenance();
 };
 
 namespace task_analysis_detail {
@@ -260,15 +264,13 @@ private:
       if (call && IsCrossCoreSyncCall(call))
         Add(call->args[2]);
     } else if (const auto *region = stmt.as<RegionStmtObj>()) {
-      if (auto attribute = ReadTaskAttribute(region)) {
-        if (!IsSemanticTaskKey(attribute->key) &&
-            attribute->key != attr::kScheduleUnit) {
-          if (auto value = attribute->node.try_cast<Expr>())
-            Add(*value);
-          if (auto value = attribute->value.try_cast<Expr>())
-            Add(*value);
-        }
-      } else
+      if (auto attribute = ReadSourceAttribute(region)) {
+        if (auto value = attribute->node.try_cast<Expr>())
+          Add(*value);
+        if (auto value = attribute->value.try_cast<Expr>())
+          Add(*value);
+      } else if (!IsAscendBlock(region) && !IsSemanticTask(region) &&
+                 !IsScheduleUnit(region))
         for (const Expr &arg : region->args)
           Add(arg);
       Visit(region->body);
@@ -278,10 +280,10 @@ private:
 };
 } // namespace task_analysis_detail
 
-inline TaskAccessInfo
-AnalyzeTaskAccesses(const Stmt &stmt, const LayoutMap &layouts = {},
-                    const NativeStorageContext &storage = {},
-                    const ConstrSet &context = {}) {
+inline TaskAccessInfo AnalyzeTaskAccesses(
+    const Stmt &stmt, const LayoutMap &layouts = {},
+    const StorageProvenance &storage = MakeAscendStorageProvenance(),
+    const ConstrSet &context = {}) {
   auto detector = ffi::make_object<MemoryAccessDetector>(
       MemoryAccessDetector::AccessMode::kLogical, layouts, storage, context);
   detector->Analyze(stmt);
@@ -317,10 +319,11 @@ inline bool TaskAccessesStorage(const TaskAccessInfo &accesses,
 
 inline bool HasCrossCoreSync(const Stmt &stmt) {
   bool found = false;
-  VisitNativePostOrder(stmt, [&](const ffi::ObjectRef &object) {
-    if (const auto *call = object.as<CallObj>())
-      found |= task_analysis_detail::IsCrossCoreSyncCall(call);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        found |= task_analysis_detail::IsCrossCoreSyncCall(call);
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -379,11 +382,11 @@ public:
                                  const TaskNode *reader = nullptr) const {
     if (!expr.defined())
       return kCoreAll;
-    return GetAccessCoreMask(AnalyzeTaskAccesses(Evaluate(expr), {},
-                                                 reader
-                                                     ? reader->StorageContext()
-                                                     : NativeStorageContext{}),
-                             reader);
+    return GetAccessCoreMask(
+        AnalyzeTaskAccesses(Evaluate(expr), {},
+                            reader ? reader->StorageContext()
+                                   : MakeAscendStorageProvenance()),
+        reader);
   }
 
   CoreMask GetAccessCoreMask(const TaskAccessInfo &accesses,
@@ -453,11 +456,13 @@ public:
 
 private:
   CoreMask GetRegisterCoreMask(const TensorVar &tensor,
-                               const NativeStorageContext &storage,
+                               const StorageProvenance &storage,
                                const TaskNode *reader) const {
     CoreMask result = GetValueCoreMask(storage.Identity(tensor), reader);
     for (const auto &[written_tensor, writer] : register_writers_) {
-      if (writer == reader || storage.ProvenDisjoint(tensor, written_tensor))
+      if (writer == reader ||
+          ProvenDisjointAscendStorage(storage.Address(tensor),
+                                      storage.Address(written_tensor)))
         continue;
       // External and integer-derived roots may alias. Only independent
       // alloc_tensor results prove that a writer cannot supply this value.

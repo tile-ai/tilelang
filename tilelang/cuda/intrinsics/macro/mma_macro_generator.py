@@ -1,12 +1,20 @@
 from __future__ import annotations
+
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
 from enum import IntEnum
 import tilelang.language as T
 from typing import Literal
 from collections.abc import Callable
 from tvm_ffi import dtype as DataType
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
-from tilelang.language._native import PrimExpr, Buffer, Var, BufferRegion, BufferLoad
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import Var
+from tvm_tirx.ir import TensorRegion as BufferRegion
+from tvm_tirx.ir import TensorLoad as BufferLoad
 from tvm_tirx.tirx import IndexMap
 from tvm_ffi import convert
 from ..layout.utils import (
@@ -905,19 +913,19 @@ class TensorCoreIntrinEmitter:
         """
         if isinstance(obj, BufferRegion):
             return obj
-        if isinstance(obj, Buffer):
-            mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
+        if _tensor_spec.is_buffer_like(obj):
+            mins = [_ir.IntImm("int32", 0) for _ in obj.shape]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
-            return BufferRegion(obj, ranges)
+            return _ir.TensorRegion(obj, ranges, _ir.TensorRegionType(), _construction.current_location())
         if isinstance(obj, BufferLoad):
             region = get_buffer_region_from_load(obj)
             if region is not None:
                 return region
             # Fallback: scalar load -> 1-sized ranges at indices
             mins = [idx for idx in obj.indices]
-            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
+            ones = [_ir.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.source, ranges)
+            return _ir.TensorRegion(obj.source, ranges, _ir.TensorRegionType(), _construction.current_location())
         raise ValueError(f"Unsupported argument type for BufferRegion: {type(obj)}")
 
 

@@ -22,6 +22,7 @@
  * \brief Ascend no-op elimination over native tensor definitions and regions.
  */
 
+#include "ir/annotations.h"
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -35,7 +36,8 @@
 #include <unordered_set>
 #include <utility>
 
-#include "ascend/transform/auto_schedule/native_task_ir.h"
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
 #include "ir/analyzer.h"
 
 namespace tvm::tl {
@@ -108,7 +110,7 @@ public:
     return StmtExprVisitor::Visit_(op);
   }
   Result Visit_(const RegionStmtObj *op) final {
-    if (auto attr = ReadTaskAttribute(op))
+    if (auto attr = ReadSourceAttribute(op))
       has_volatile |= attr->key == "volatile_scope";
     return StmtExprVisitor::Visit_(op);
   }
@@ -163,9 +165,7 @@ private:
   }
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode) final {
-    if (const auto *call = op->value.as<CallObj>();
-        call && call->op.as<OpObj>() &&
-        call->op.as<OpObj>()->name == "tl.annotation")
+    if (const auto *call = op->value.as<CallObj>(); IsAnnotationCall(call))
       return Unchanged();
     return MakeEvaluate(op->value);
   }
@@ -226,11 +226,11 @@ private:
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    auto attribute = ReadTaskAttribute(op);
+    auto attribute = ReadSourceAttribute(op);
     if (attribute && attribute->key == "pragma_debug_skip_region")
       return Evaluate(0);
     if (attribute && attribute->key == "async_wait_queue_scope") {
-      auto inner = ReadTaskAttribute(attribute->region->body);
+      auto inner = ReadSourceAttribute(attribute->region->body);
       TVM_FFI_CHECK(inner && inner->key == "async_wait_inflight_count",
                     ValueError)
           << "async wait requires the inflight-count region";

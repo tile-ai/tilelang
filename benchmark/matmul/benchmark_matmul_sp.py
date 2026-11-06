@@ -41,11 +41,6 @@ def get_configs(M, N, K):
     """
     Generate a list of configuration dictionaries that will be used for tuning.
 
-    Parameters
-    ----------
-    with_roller : bool
-        Whether to enable bitblas roller to deduce search spaces
-
     Returns
     -------
     list of dict

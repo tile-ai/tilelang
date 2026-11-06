@@ -7,6 +7,7 @@
 #define TVM_TL_BACKEND_COMMON_OP_FINALIZE_REDUCER_H_
 
 #include "backend/common/op/reduce.h"
+#include "layout/expr_utils.h"
 #include "op/reducer.h"
 #include "support/check.h"
 

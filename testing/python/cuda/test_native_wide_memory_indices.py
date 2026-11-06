@@ -185,22 +185,22 @@ def test_literal_four_lane_indices_keep_vector_access_and_finite_cast_values(nar
     index = prim.Cast("int64x4", index)
     zero, one = ir.Var("zero", "int64"), ir.Var("one", "int64")
     index = prim.Add(prim.Broadcast(zero, 4), prim.Mul(index, prim.Broadcast(one, 4)))
-    store = ir.TensorStore(output, [prim.Ramp(ir.const(9, "int64"), ir.const(1, "int64"), 4)], source[index])
+    store = ir.TensorStore(output, [prim.Ramp(ir.const(11, "int64"), ir.const(1, "int64"), 4)], source[index])
     function = function.with_body([*function.body.seq[:2], ir.Bind(zero, ir.const(0, "int64")), ir.Bind(one, ir.const(1, "int64")), store])
     before = ir.save_json(function)
     module = _build(function, compile_device=True)
     code = module.inspect_source("cuda")
-    assert ("tl::load_vector<float4, 16," in code) != narrow_wrap
-    assert "tl::store_vector<float4, 16," in code
+    assert code.count("*(float4*)") == (1 if narrow_wrap else 2)
     assert ir.save_json(function) == before
-    # Byte-alignment is the native argument contract. Exercise a sliced
-    # allocation instead of assuming an aligned vector address at either end.
+    # The source slice plus index 3 and destination slice plus index 11
+    # both give 16-byte-aligned vector addresses. The wrapping case remains
+    # a scalar gather and must preserve the uint8 cast values.
     data = torch.arange(257, device="cuda", dtype=torch.float32)[1:]
     actual_storage = torch.full((257,), -999, device="cuda", dtype=torch.float32)
     actual = actual_storage[1:]
     module["wide_address"](ctypes.c_void_p(data.data_ptr()), ctypes.c_void_p(actual.data_ptr()), 0)
     torch.cuda.synchronize()
     expected = torch.full_like(actual, -999)
-    expected[9:13] = data[torch.tensor([value & 255 for value in values], device="cuda")]
+    expected[11:15] = data[torch.tensor([value & 255 for value in values], device="cuda")]
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     assert actual_storage[0].item() == -999

@@ -1,7 +1,10 @@
 """Ascend dialect of the copy operators: the common ops plus Ascend copy hints."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+
 
 from math import prod
 from typing import Any
@@ -14,34 +17,34 @@ from tilelang.language.copy_op import (
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region
 from tilelang._analyzer import create_analyzer
-from tilelang.language import _native as tirx
+
 
 __all__ = ["copy", "dual_copy"]
 
 
 def _get_shape(buf: BufferLikeType) -> list:
     """Extract shape list from Buffer, BufferLoad, or BufferRegion."""
-    if isinstance(buf, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(buf):
         return list(buf.ty.shape)
-    if isinstance(buf, tirx.BufferLoad):
+    if isinstance(buf, ir.TensorLoad):
         return list(buf.source.ty.shape)
-    if isinstance(buf, tirx.BufferRegion):
+    if isinstance(buf, ir.TensorRegion):
         return [r.extent for r in buf.region]
     raise TypeError(f"Cannot get shape from {type(buf)}")
 
 
 def _get_allocation_shape(buf: BufferLikeType) -> list:
     """Extract the underlying allocation shape rather than region extents."""
-    if isinstance(buf, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(buf):
         return list(buf.ty.shape)
-    if isinstance(buf, (tirx.BufferLoad, tirx.BufferRegion)):
+    if isinstance(buf, (ir.TensorLoad, ir.TensorRegion)):
         return list(buf.source.ty.shape)
     raise TypeError(f"Cannot get allocation shape from {type(buf)}")
 
 
 def _is_half(full_dim, half_dim) -> bool:
     """Check whether full_dim is exactly twice half_dim."""
-    if isinstance(full_dim, (int, tirx.IntImm)) and isinstance(half_dim, (int, tirx.IntImm)):
+    if isinstance(full_dim, (int, ir.IntImm)) and isinstance(half_dim, (int, ir.IntImm)):
         full_val = full_dim if isinstance(full_dim, int) else full_dim.value
         half_val = half_dim if isinstance(half_dim, int) else half_dim.value
         return half_val * 2 == full_val
@@ -57,9 +60,9 @@ def dual_copy(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
-    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
+    unit_flag_ctrl: int | ir.Expr | None = None,
     l2_cache_ctrl: int | str = 0,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> ir.Expr | ir.Stmt:
     """Copy a region using an M- or N-split across the two AIVs.
 
     ``dual_copy`` is a mixed-kernel operation: the user must also provide the
@@ -144,8 +147,8 @@ def dual_copy(
     # WARNING: dav-950 does NOT support quant_pre (type conversion) with
     # fixpipe (cc->ub) dual-destination copies. If src and dst dtypes differ, the hardware may
     # silently produce incorrect results.
-    src_dtype = _native.dtype_of(src_region.source)
-    dst_dtype = _native.dtype_of(dst_region.source)
+    src_dtype = _construction.dtype_of(src_region.source)
+    dst_dtype = _construction.dtype_of(dst_region.source)
     if src_dtype != dst_dtype and str(src_region.source.ty.scope) == "shared.l0c":
         raise ValueError(
             f"dual_copy: src dtype ({src_dtype}) != dst dtype ({dst_dtype}). "
@@ -202,7 +205,7 @@ _L2_CACHE_CTRL_MAP = {
 }
 
 
-def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | None) -> int | None:
+def _normalize_l2_cache_ctrl(value: int | str | ir.IntImm | ir.StringImm | None) -> int | None:
     """Convert a string l2_cache_ctrl name to its integer value.
 
     Matching is case-insensitive and suffix-based:
@@ -211,9 +214,9 @@ def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | N
     """
     if value is None:
         return None
-    if isinstance(value, tirx.IntImm):
+    if isinstance(value, ir.IntImm):
         value = int(value)
-    elif isinstance(value, tirx.StringImm):
+    elif isinstance(value, ir.StringImm):
         value = value.value
     if isinstance(value, int):
         return value
@@ -236,15 +239,15 @@ def copy(  # noqa: A001
     *,
     coalesced_width: int | None = None,
     transpose: bool = False,
-    l0_pitch: int | tirx.PrimExpr | None = None,
+    l0_pitch: int | ir.Expr | None = None,
     l2_cache_ctrl: int | str | None = None,
-    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
-    sub_blockid: int | tirx.PrimExpr | None = None,
-    pad_value: int | float | tirx.PrimExpr | None = None,
+    unit_flag_ctrl: int | ir.Expr | None = None,
+    sub_blockid: int | ir.Expr | None = None,
+    pad_value: int | float | ir.Expr | None = None,
     data_select: bool = False,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> ir.Expr | ir.Stmt:
     """Copy data between memory regions, with Ascend DMA lowering hints.
 
     Uses the common region handling with Ascend-specific whole-buffer checks.
@@ -312,7 +315,7 @@ def copy(  # noqa: A001
     Returns:
         tirx.PrimExpr | tirx.Stmt: A handle to the copy operation.
     """
-    if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(src) and _tensor_spec.is_buffer_like(dst):
         src_elems = prod(src.ty.shape)
         dst_elems = prod(dst.ty.shape)
         if not create_analyzer().can_prove_equal(src_elems, dst_elems):
@@ -332,14 +335,14 @@ def copy(  # noqa: A001
         ann["l0_pitch"] = l0_pitch
     if "l0_pitch" in ann:
         value = ann["l0_pitch"]
-        if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
+        if isinstance(value, bool) or not (isinstance(value, int) or _construction.is_scalar_expr(value)):
             raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
-        if isinstance(value, tirx.PrimExpr) and not str(_native.dtype_of(value)).startswith(("int", "uint")):
+        if _construction.is_scalar_expr(value) and not str(_construction.dtype_of(value)).startswith(("int", "uint")):
             raise TypeError("Ascend T.copy l0_pitch must be an integer or integer PrimExpr")
-        if isinstance(value, (int, tirx.IntImm)) and int(value) <= 0:
+        if isinstance(value, (int, ir.IntImm)) and int(value) <= 0:
             raise ValueError("Ascend T.copy l0_pitch must be positive")
-        src_buf = src if isinstance(src, tirx.Buffer) else src.source
-        dst_buf = dst if isinstance(dst, tirx.Buffer) else dst.source
+        src_buf = src if _tensor_spec.is_buffer_like(src) else src.source
+        dst_buf = dst if _tensor_spec.is_buffer_like(dst) else dst.source
         src_scope, dst_scope = str(src_buf.ty.scope), str(dst_buf.ty.scope)
         if not (
             src_scope in ("shared.l1", "shared.l1.dyn")
@@ -351,7 +354,7 @@ def copy(  # noqa: A001
 
     # Ascend GM→L1: use dn2nz (transpose N/D mapping) instead of nd2nz
     if transpose and "transpose" not in ann:
-        ann["transpose"] = tirx.IntImm("int32", 1)
+        ann["transpose"] = ir.IntImm("int32", 1)
 
     # Ascend DMA: L2 cache control for GM↔L1 and UB↔GM paths.
     if l2_cache_ctrl is not None and "l2_cache_ctrl" not in ann:
@@ -380,16 +383,16 @@ def copy(  # noqa: A001
         # the copy would read a stale pad register. The copy itself then just
         # reuses the register via data_select. dst is a
         # Buffer/BufferRegion/BufferLoad; all but a raw Buffer expose .source.
-        if not isinstance(dst, (tirx.Buffer, tirx.BufferRegion, tirx.BufferLoad)):
+        if not (_tensor_spec.is_buffer_like(dst) or isinstance(dst, (ir.TensorRegion, ir.TensorLoad))):
             raise TypeError(
                 "T.copy: pad_value requires dst to be a Buffer, BufferRegion, or "
                 f"BufferLoad so the pad fill dtype can be derived, got {type(dst)}."
             )
-        dst_buf = dst.source if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
-        tirx.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(_native.dtype_of(dst_buf))))
-        ann["data_select"] = tirx.IntImm("int32", 1)
+        dst_buf = dst.source if isinstance(dst, (ir.TensorRegion, ir.TensorLoad)) else dst
+        _construction.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(_construction.dtype_of(dst_buf))))
+        ann["data_select"] = ir.IntImm("int32", 1)
     if data_select and "data_select" not in ann:
-        ann["data_select"] = tirx.IntImm("int32", 1)
+        ann["data_select"] = ir.IntImm("int32", 1)
 
     ret = _common_copy(
         src,
@@ -401,11 +404,11 @@ def copy(  # noqa: A001
     # Respell the common tile op as the Ascend dialect op so the C++ side
     # parses it into the typed AscendCopyNode. Scalar copies come back as a
     # plain BufferStore and stay untouched.
-    if isinstance(ret, tirx.Call) and ret.op.same_as(tirx.Op.get("tl.tileop.copy")):
+    if isinstance(ret, ir.Call) and ret.op.same_as(ir.Op.get("tl.tileop.copy")):
         # The common operation already carries its typed annotation payload
         # as the final argument. Reuse that schema and tuple exactly once.
         return ir.Call(
-            tirx.Op.get("tl.tileop.ascend_copy"),
+            ir.Op.get("tl.tileop.ascend_copy"),
             ret.args,
             attrs=ret.attrs,
             ty_args=ret.ty_args,

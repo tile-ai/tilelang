@@ -19,13 +19,19 @@
  * selected per kernel; explicit WS regions retain their separate scheduler.
  */
 
+#include "ir/loop_math.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
 #include "support/check.h"
 #include <algorithm>
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
+#include <tvm/tirx/op/gpu.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <utility>
@@ -33,6 +39,8 @@
 #include "backend/common/target_utils.h"
 #include "cuda/op/builtin.h"
 #include "cuda/op/copy.h"
+#include "cuda/transform/ws_analysis.h"
+#include "cuda/transform/ws_kernel_analysis.h"
 #include "layout/cute_layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/copy.h"
@@ -43,7 +51,6 @@
 #include "op/utils.h"
 #include "transform/common/mbarrier.h"
 #include "ws_analysis.h"
-#include "ws_native.h"
 
 namespace tvm {
 namespace tl {
@@ -53,7 +60,7 @@ using namespace prim;
 using namespace ffi;
 
 namespace {
-SeqStmt PCSequence(const Stmt &stmt) { return WSSequence({stmt}, stmt->loc); }
+SeqStmt PCSequence(const Stmt &stmt) { return SeqStmt({stmt}, stmt->loc); }
 
 If PCIf(PrimExpr condition, Stmt then_case,
         Optional<Stmt> else_case = std::nullopt, Location loc = UnknownLoc()) {
@@ -86,8 +93,8 @@ static constexpr const char *kTiledWSApplied = "tl_tiled_ws_applied";
 struct PhaseCounter {
   TensorVar buf;
   static PhaseCounter Create(const std::string &name) {
-    return {
-        WSLocalTensor({IntImm::Int32(1)}, PrimType::Int(32), name, "local")};
+    return {TensorVar(name, TensorType({IntImm::Int32(1)}, PrimType::Int(32),
+                                       runtime::MemoryScope::Get("local")))};
   }
   PrimExpr Load() const { return TensorLoad(buf, {IntImm::Int32(0)}); }
   Stmt Init() const {
@@ -97,9 +104,18 @@ struct PhaseCounter {
     return TensorStore(buf, {IntImm::Int32(0)}, Load() + 1);
   }
   Stmt WrapLoopWithAlloc(Stmt loop) const {
-    return WSSequence({WSAllocate(buf), Init(), std::move(loop)});
+    return SeqStmt({Bind(buf,
+                         Call((buf).ty(), alloc_tensor_op(), {}, std::nullopt,
+                              {(buf).ty()}, (buf)->loc),
+                         (buf)->loc),
+                    Init(), std::move(loop)});
   }
-  Stmt AllocOnly() const { return WSAllocate(buf); }
+  Stmt AllocOnly() const {
+    return Bind(buf,
+                Call((buf).ty(), alloc_tensor_op(), {}, std::nullopt,
+                     {(buf).ty()}, (buf)->loc),
+                (buf)->loc);
+  }
   Stmt InitStmt() const { return Init(); }
   PrimExpr StageExpr(int stages) const { return floormod(Load(), stages); }
   PrimExpr ParityExpr(int stages) const {
@@ -110,10 +126,10 @@ struct PhaseCounter {
 // ---------------------------------------------------------------------------
 // MVBStageIndexReplacer: rewrite compiler-generated version indices
 // ---------------------------------------------------------------------------
-class MVBStageIndexReplacer : public StmtExprMutator {
+class MVBStageIndexReplacer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   explicit MVBStageIndexReplacer(Optional<PrimExpr> replacement)
       : replacement_(std::move(replacement)) {}
   static Stmt Replace(const Stmt &stmt, Optional<PrimExpr> replacement) {
@@ -124,7 +140,7 @@ public:
 private:
   UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
     if (!call->op.same_as(mvb_stage_index()))
-      return StmtExprMutator::Mutate_(call, mode);
+      return LayoutMapMutator::Mutate_(call, mode);
     ICHECK_EQ(call->args.size(), 1U);
     if (replacement_)
       return cast(*replacement_, call->ty.as_or_throw<PrimType>());
@@ -352,45 +368,47 @@ static bool IsProducerMovableLoopPrefixStmt(const Stmt &stmt, Target target) {
 
   bool has_allowed_work = false;
   bool has_disallowed = false;
-  VisitNativePostOrder(stmt, [&](const ObjectRef &node) {
-    if (has_disallowed) {
-      return;
-    }
-    if (const auto *call = node.as<CallObj>()) {
-      if ((call->op.same_as(Op::Get("tirx.gpu_storage_sync")) ||
-           call->op.same_as(Op::Get("tl.storage_sync")))) {
-        const auto *scope = call->args[0].as<StringImmObj>();
-        if (!scope ||
-            (scope->value != "shared" && scope->value != "shared.dyn")) {
-          has_disallowed = true;
-          return;
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        if (has_disallowed) {
+          return ffi::WalkResult::Advance();
         }
-        has_allowed_work = true;
-        return;
-      }
-      if (IsBarrierOrTmaControlCall(call)) {
-        has_disallowed = true;
-        return;
-      }
-    }
-    if (const auto *ld = node.as<TensorLoadObj>()) {
-      if (IsSharedBuffer(ld->source.as_or_throw<TensorVar>()) ||
-          IsLocalBuffer(ld->source.as_or_throw<TensorVar>(), true)) {
-        has_disallowed = true;
-        return;
-      }
-      if (IsGlobalBuffer(ld->source.as_or_throw<TensorVar>())) {
-        has_allowed_work = true;
-      }
-    }
-    if (const auto *st = node.as<TensorStoreObj>()) {
-      if (IsSharedBuffer(st->dest.as_or_throw<TensorVar>())) {
-        has_allowed_work = true;
-        return;
-      }
-      has_disallowed = true;
-    }
-  });
+        if (const auto *call = node.as<CallObj>()) {
+          if ((call->op.same_as(tirx::gpu_storage_sync_op()) ||
+               call->op.same_as(tl::storage_sync()))) {
+            const auto *scope = call->args[0].as<StringImmObj>();
+            if (!scope ||
+                (scope->value != "shared" && scope->value != "shared.dyn")) {
+              has_disallowed = true;
+              return ffi::WalkResult::Advance();
+            }
+            has_allowed_work = true;
+            return ffi::WalkResult::Advance();
+          }
+          if (IsBarrierOrTmaControlCall(call)) {
+            has_disallowed = true;
+            return ffi::WalkResult::Advance();
+          }
+        }
+        if (const auto *ld = node.as<TensorLoadObj>()) {
+          if (IsSharedBuffer(ld->source.as_or_throw<TensorVar>()) ||
+              IsLocalBuffer(ld->source.as_or_throw<TensorVar>(), true)) {
+            has_disallowed = true;
+            return ffi::WalkResult::Advance();
+          }
+          if (IsGlobalBuffer(ld->source.as_or_throw<TensorVar>())) {
+            has_allowed_work = true;
+          }
+        }
+        if (const auto *st = node.as<TensorStoreObj>()) {
+          if (IsSharedBuffer(st->dest.as_or_throw<TensorVar>())) {
+            has_allowed_work = true;
+            return ffi::WalkResult::Advance();
+          }
+          has_disallowed = true;
+        }
+        return ffi::WalkResult::Advance();
+      });
   return has_allowed_work && !has_disallowed;
 }
 
@@ -436,10 +454,10 @@ static Expr RewriteCopyToTmaCopy(const Call &copy_call,
 ///   not emit its own implicit commit/wait either.
 /// This allows the WS pass to emit its own commit_group +
 /// async arrival, tying cp.async completion to the forward mbarrier.
-class SimtProducerAnnotator : public StmtExprMutator {
+class SimtProducerAnnotator : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   explicit SimtProducerAnnotator(Target target) : target_(std::move(target)) {}
   static Stmt Annotate(const Stmt &stmt, Target target) {
     auto mutator = make_object<SimtProducerAnnotator>(std::move(target));
@@ -448,7 +466,7 @@ public:
 
 private:
   UnchangedOr<Stmt> Mutate_(const ForObj *loop, InplaceMode mode) final {
-    auto rewritten = StmtExprMutator::Mutate_(loop, mode)
+    auto rewritten = LayoutMapMutator::Mutate_(loop, mode)
                          .ValueOrUnchanged(GetRef<For>(loop))
                          .as_or_throw<For>();
     auto annotations = rewritten->annotations;
@@ -458,7 +476,7 @@ private:
                rewritten->loc);
   }
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-    Call call = StmtExprMutator::Mutate_(op, mode)
+    Call call = LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(GetRef<Call>(op))
                     .as_or_throw<Call>();
     if (!call->op.same_as(Op::Get("tl.tileop.copy")))
@@ -474,10 +492,10 @@ private:
   Target target_;
 };
 
-class TileOpMbarPhaseAnnotator : public StmtExprMutator {
+class TileOpMbarPhaseAnnotator : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   explicit TileOpMbarPhaseAnnotator(PrimExpr phase)
       : phase_(std::move(phase)) {}
   static Stmt Annotate(const Stmt &stmt, PrimExpr phase) {
@@ -487,7 +505,7 @@ public:
 
 private:
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-    Call call = StmtExprMutator::Mutate_(op, mode)
+    Call call = LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(GetRef<Call>(op))
                     .as_or_throw<Call>();
     auto operation = ParseOperator(call);
@@ -654,14 +672,14 @@ static int FindFirstAsyncProducerConsumerRead(const Stmt &producer,
 static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
                                           const TensorVar &barrier,
                                           PrimExpr slot) {
-  class Rewriter : public StmtExprMutator {
+  class Rewriter : public LayoutMapMutator {
   public:
-    using StmtExprMutator::Mutate;
-    using StmtExprMutator::Mutate_;
+    using LayoutMapMutator::Mutate;
+    using LayoutMapMutator::Mutate_;
     Rewriter(TensorVar barrier, PrimExpr slot)
         : barrier_(std::move(barrier)), slot_(std::move(slot)) {}
     UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-      Call call = StmtExprMutator::Mutate_(op, mode)
+      Call call = LayoutMapMutator::Mutate_(op, mode)
                       .ValueOrUnchanged(GetRef<Call>(op))
                       .as_or_throw<Call>();
       if (rewritten_)
@@ -695,10 +713,10 @@ class ProducerConsumerWSRewriter {
 public:
   static tirx::Function Substitute(tirx::Function function) {
     bool changed = false;
-    auto result = RewriteNativeWSKernels(
+    auto result = RewriteWSKernels(
         function,
-        [&](NativeWSKernel kernel, PrimVar thread,
-            Target target) -> Optional<NativeWSResult> {
+        [&](WSKernelAnalysis kernel, PrimVar thread,
+            Target target) -> Optional<WSKernelRewriteResult> {
           ProducerConsumerWSRewriter rewriter(target, thread, kernel.threads,
                                               kernel.memory);
           auto output = rewriter.RewriteKernel(std::move(kernel));
@@ -709,7 +727,7 @@ public:
       auto attrs = result->attrs->dict;
       attrs.Set(kTiledWSApplied, int64_t{1});
       result.CopyOnWrite()->attrs = DictAttrs(attrs);
-      result = tirx::RenewDef(result);
+      result = tl::RenewDef(result);
     }
     return result;
   }
@@ -720,7 +738,7 @@ private:
       : target_(target), thread_var_(thread), thread_extent_(extent),
         buffer_data_to_buffer_{memory, target} {}
 
-  Optional<NativeWSResult> RewriteKernel(NativeWSKernel kernel) {
+  Optional<WSKernelRewriteResult> RewriteKernel(WSKernelAnalysis kernel) {
     auto loop_result = FindPipelineLoopWithNesting(kernel.body);
     if (!loop_result.pipeline_loop)
       return std::nullopt;
@@ -815,9 +833,9 @@ private:
                         loop_body_condition, pipeline_under_outer_for);
   }
 
-  NativeWSResult
-  BuildWSBlock(NativeWSKernel kernel, const For &pipeline_loop, int num_stages,
-               const Array<Stmt> &flat_stmts,
+  WSKernelRewriteResult
+  BuildWSBlock(WSKernelAnalysis kernel, const For &pipeline_loop,
+               int num_stages, const Array<Stmt> &flat_stmts,
                const std::vector<TileStmtKind> &kinds,
                const std::vector<std::pair<Var, Expr>> &outer_leading_bindings,
                const std::vector<std::pair<Var, Expr>> &inner_leading_bindings,
@@ -1463,8 +1481,8 @@ private:
     const Stmt &dummy_consumer = rewritten_consumer;
     Stmt dummy_ws =
         PCIf(LT(thread_var_, producer_extent), dummy_producer, dummy_consumer);
-    dummy_ws = MakeNativeAttribute(ws_partition, attr::kWarpSpecializationScope,
-                                   0, PCSequence(dummy_ws));
+    dummy_ws = MakeAttribute(ws_partition, attr::kWarpSpecializationScope, 0,
+                             PCSequence(dummy_ws));
     Optional<Stmt> replaced = ReplacePipelineLoopInStmt(
         kernel.body, pipeline_loop, dummy_ws, producer_extent, consumer_extent);
     ICHECK(replaced.has_value())
@@ -1508,12 +1526,18 @@ private:
       }
     }
     if (!producer_buffer_remap.empty()) {
-      rewritten_producer =
-          WSSubstitute(rewritten_producer, producer_buffer_remap);
+      auto remapper = make_object<LayoutMapMutator>();
+      for (const auto &[var, value] : producer_buffer_remap)
+        remapper->VarRemapSet(var, value);
+      rewritten_producer = remapper->Mutate(rewritten_producer)
+                               .ValueOrUnchanged(rewritten_producer);
       Array<Stmt> remapped_producer_init;
       for (const auto &stmt : extracted_producer_init_) {
+        auto init_remapper = make_object<LayoutMapMutator>();
+        for (const auto &[var, value] : producer_buffer_remap)
+          init_remapper->VarRemapSet(var, value);
         remapped_producer_init.push_back(
-            WSSubstitute(stmt, producer_buffer_remap));
+            init_remapper->Mutate(stmt).ValueOrUnchanged(stmt));
       }
       extracted_producer_init_ = remapped_producer_init;
     }
@@ -1548,8 +1572,8 @@ private:
       const Stmt &scoped_consumer = enriched_consumer;
       Stmt ws_body = PCIf(LT(thread_var_, producer_extent), scoped_producer,
                           scoped_consumer);
-      ws_body = MakeNativeAttribute(
-          ws_partition, attr::kWarpSpecializationScope, 0, PCSequence(ws_body));
+      ws_body = MakeAttribute(ws_partition, attr::kWarpSpecializationScope, 0,
+                              PCSequence(ws_body));
       // Second pass: replace again with the enriched WS body.
       // extracted_consumer_init_ is already empty (stmts were removed
       // from the prelude in the first pass result).
@@ -1558,16 +1582,16 @@ private:
       // tree, so do a direct substitution of the placeholder WS body.
       // Since dummy_ws appears exactly once in replaced.stmt, do a
       // simple statement replacement on the full placeholder stmt.
-      class SubstWsBody : public StmtExprMutator {
+      class SubstWsBody : public LayoutMapMutator {
       public:
-        using StmtExprMutator::Mutate;
-        using StmtExprMutator::Mutate_;
+        using LayoutMapMutator::Mutate;
+        using LayoutMapMutator::Mutate_;
         SubstWsBody(Stmt old_body, Stmt new_body)
             : old_(old_body), new_(new_body) {}
         UnchangedOr<Any> Mutate(AnyView value, InplaceMode mode) final {
           if (auto stmt = value.as<Stmt>(); stmt && stmt->same_as(old_))
             return Any(new_);
-          return StmtExprMutator::Mutate(value, mode);
+          return LayoutMapMutator::Mutate(value, mode);
         }
         Stmt old_, new_;
       };
@@ -1608,9 +1632,8 @@ private:
     auto total_threads = TryConstInt(total);
     TVM_FFI_CHECK(total_threads, ValueError)
         << "PC warp specialization requires a static thread count";
-    return {
-        RebuildNativeWSKernel(kernel, new_block_body, {}, extra_allocations),
-        static_cast<int>(*total_threads)};
+    return {RebuildWSKernel(kernel, new_block_body, {}, extra_allocations),
+            static_cast<int>(*total_threads)};
   }
 
   class PipelineLoopFinder : public StmtExprVisitor {
@@ -1654,10 +1677,10 @@ private:
     return PipelineLoopFinder::Find(stmt);
   }
 
-  class SinkGuardedConsumerPostlude : public StmtExprMutator {
+  class SinkGuardedConsumerPostlude : public LayoutMapMutator {
   public:
-    using StmtExprMutator::Mutate;
-    using StmtExprMutator::Mutate_;
+    using LayoutMapMutator::Mutate;
+    using LayoutMapMutator::Mutate_;
     SinkGuardedConsumerPostlude(PrimVar thread, PrimExpr producer_extent)
         : thread_(std::move(thread)),
           producer_extent_(std::move(producer_extent)) {}
@@ -1704,7 +1727,7 @@ private:
                         const Array<Stmt> &postlude) const {
       Array<Stmt> parts{branch->else_case.value()};
       parts.insert(parts.end(), postlude.begin(), postlude.end());
-      If next(branch->condition, branch->then_case, WSSequence(parts),
+      If next(branch->condition, branch->then_case, SeqStmt(parts),
               branch->loc);
       const auto *region = SingleStatement(container).as<RegionStmtObj>();
       if (!region)
@@ -1738,7 +1761,7 @@ private:
                              : AppendConsumer(visited[i], *branch, postlude));
         i = end - 1;
       }
-      return WSSequence(result, sequence->loc);
+      return SeqStmt(result, sequence->loc);
     }
 
     PrimVar thread_;
@@ -1752,10 +1775,10 @@ private:
   // follow the role's fresh definitions, while captured shared tensors remain
   // shared. RenewDef over the combined function cannot split one old identity
   // into distinct producer and consumer definitions.
-  class FreshenWSBranchDefinitions : public StmtExprMutator {
+  class FreshenWSBranchDefinitions : public LayoutMapMutator {
   public:
-    using StmtExprMutator::Mutate;
-    using StmtExprMutator::Mutate_;
+    using LayoutMapMutator::Mutate;
+    using LayoutMapMutator::Mutate_;
 
     static Stmt Rewrite(const Stmt &stmt) {
       auto rewriter = make_object<FreshenWSBranchDefinitions>();
@@ -1767,11 +1790,11 @@ private:
       auto attributes = WSAttribute(region);
       if (!attributes || attributes->at("key").cast<String>() !=
                              attr::kWarpSpecializationScope) {
-        return StmtExprMutator::Mutate_(region, mode);
+        return LayoutMapMutator::Mutate_(region, mode);
       }
       auto branch = SingleStatement(region->body).as_or_throw<If>();
       auto freshen = [](SeqStmt body) {
-        return tirx::RenewDef(tirx::Function({}, std::move(body)))->body;
+        return tl::RenewDef(tirx::Function({}, std::move(body)))->body;
       };
       If fresh(branch->condition, freshen(branch->then_case),
                freshen(branch->else_case.value()), branch->loc);
@@ -1837,7 +1860,7 @@ private:
         result.push_back(*child);
         for (size_t i = position + 1; i < sequence->seq.size(); ++i)
           result.push_back(GuardConsumerOnly(sequence->seq[i]));
-        return WSSequence(result, sequence->loc);
+        return SeqStmt(result, sequence->loc);
       }
       if (const auto *region = stmt.as<RegionStmtObj>()) {
         auto body = Rewrite(region->body);
@@ -1980,7 +2003,9 @@ private:
   public:
     static Stmt Rewrite(Stmt stmt, PrimVar thread, PrimExpr value,
                         PrimExpr extent, bool shuffle) {
-      return WSSubstitute(stmt, Map<Var, Expr>{{thread, value}});
+      auto remapper = make_object<LayoutMapMutator>();
+      remapper->VarRemapSet(thread, value);
+      return remapper->Mutate(stmt).ValueOrUnchanged(stmt);
     }
   };
 
@@ -2062,12 +2087,12 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     auto rewritten = ProducerConsumerWSRewriter::Substitute(
         ApplyMultiVersionBufferRewriter(function));
     if (!rewritten->GetAttr<int64_t>(kTiledWSApplied).value_or(0)) {
-      class Stripper : public StmtExprMutator {
+      class Stripper : public LayoutMapMutator {
       public:
-        using StmtExprMutator::Mutate;
-        using StmtExprMutator::Mutate_;
+        using LayoutMapMutator::Mutate;
+        using LayoutMapMutator::Mutate_;
         UnchangedOr<Stmt> Mutate_(const ForObj *loop, InplaceMode mode) final {
-          auto result = StmtExprMutator::Mutate_(loop, mode)
+          auto result = LayoutMapMutator::Mutate_(loop, mode)
                             .ValueOrUnchanged(GetRef<For>(loop))
                             .as_or_throw<For>();
           auto annotations = result->annotations;

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from tvm_ffi import dtype as DataType
 from tilelang.layout import Layout
 from tilelang.metal import language as T
@@ -15,7 +17,7 @@ from tilelang.utils.language import (
     is_global,
     is_shared,
 )
-from tilelang.language import _native as tir
+
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
 
@@ -47,8 +49,8 @@ class GemmMetalSimdGroup(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tir.PrimExpr,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         thread_nums = thread_bounds.extent
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
@@ -218,8 +220,8 @@ class GemmMetal(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tir.PrimExpr,
-        mbar_phase_expr: tir.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         thread_nums = thread_bounds.extent
         _, m_warp, n_warp = self._make_mps_emitter(target, int(thread_nums))

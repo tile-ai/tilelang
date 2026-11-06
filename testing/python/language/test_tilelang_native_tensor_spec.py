@@ -5,7 +5,9 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 
 import tilelang.language as T
-from tilelang.language._native import buffer, tensor_offset, tensor_strides
+from tilelang.language._tensor_spec import buffer
+from tilelang.language._tensor_spec import tensor_offset
+from tilelang.language._tensor_spec import tensor_strides
 
 
 def decode(node):

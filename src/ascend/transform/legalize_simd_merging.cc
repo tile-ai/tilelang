@@ -21,8 +21,8 @@
  * \file legalize_simd_merging.cc
  * \brief Make the inactive-lane destination of SIMD merging explicit.
  */
+#include "ir/annotations.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -36,7 +36,7 @@ bool IsSimdMergingCall(const CallObj *call) {
   const auto *op = call->op.as<OpObj>();
   if (!op || !std::string(op->name).starts_with("tl.simd."))
     return false;
-  auto args = NativeIntrinsicOperands(call);
+  auto args = DecodeCallOperands(call);
   const auto *mode = args.empty() ? nullptr : args.back().as<StringImmObj>();
   return mode && mode->value == "MODE_MERGING";
 }
@@ -52,7 +52,7 @@ public:
           << "MODE_MERGING is a read-modify-write operation and requires "
              "assignment to a mutable SIMD register, for example "
              "`dst[i] = T.simd.vadds(...)`.";
-      auto args = NativeIntrinsicOperands(call);
+      auto args = DecodeCallOperands(call);
       const auto *destination = args[0].as<CallObj>();
       TVM_FFI_CHECK(destination && destination->op.same_as(tl::access_ptr()) &&
                         destination->args.size() == 3 &&

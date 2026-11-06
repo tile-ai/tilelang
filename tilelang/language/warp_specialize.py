@@ -9,11 +9,13 @@ directly), attached with ``T.annotate_ws_schedule``, and consumed by the
 
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+
 from typing import ClassVar
 
 import tvm_ffi
 from tvm_tirx.ir import Node
-from tilelang.language import _native as tirx
+
 from tvm_ffi.dataclasses import Enum
 
 from tilelang import _ffi_api
@@ -86,7 +88,7 @@ class WSPipeline(Node):
         The number of versions this pipeline contributes to each buffer.
     """
 
-    def __init__(self, name: str, buffers: list[tirx.Buffer], depth: int):
+    def __init__(self, name: str, buffers: list[_tensor_spec.TensorValue], depth: int):
         self.__init_handle_by_constructor__(_ffi_api.WSPipeline, name, list(buffers), depth)
 
 

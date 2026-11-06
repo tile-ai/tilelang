@@ -9,7 +9,7 @@ from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_compact_nz_layout
 from tvm_tirx import tirx
 from testing.ascend._ir import calls
-from tilelang.language._native import buffer as tensor_spec
+from tilelang.language._tensor_spec import buffer as tensor_spec
 
 
 def _strided_tensor(shape, dtype, *, name="buffer", scope="global", strides=None, elem_offset=0):

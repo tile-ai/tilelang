@@ -16,6 +16,11 @@ from .swizzle import _get_buffer_info
 class _AscendFractalLayout(Layout):
     """Internal tagged representation of a canonical Ascend layout."""
 
+    @staticmethod
+    def from_mapping(shape, mapping, kind):
+        """Reconstruct the exact tagged mapping emitted by the IR printer."""
+        return _ffi_api.AscendFractalLayout_from_mapping(shape, mapping, kind)
+
 
 def make_ascend_nz_layout(buffer: BufferLikeType):
     """
@@ -128,7 +133,7 @@ def make_strided_slice(phys_buf, layout, logical_region):
 
     value = _ffi_api.make_strided_slice(phys_buf, layout, logical_region)
     if IRBuilder.is_in_scope():
-        from tilelang.language._native import bind
+        from tilelang.language._construction import bind
 
         return bind(value)
     return value

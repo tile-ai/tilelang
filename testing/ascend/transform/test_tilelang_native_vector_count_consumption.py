@@ -50,7 +50,9 @@ def lower(before):
 
 def finish(after):
     saved = ir.save_json(after)
-    result = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("ascend")(after)
+    result = transform.LowerAscendAnnotations()(after)
+    result = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(result)
+    result = tvm_ffi.get_global_func("tl.transform.VerifyLoweredAnnotations")()(result)
     assert ir.save_json(after) == saved
     assert tirx.analysis.check_well_formed(result)
     return result
@@ -58,12 +60,15 @@ def finish(after):
 
 def generated_count(module, count):
     (vector,) = sblocks(module, "VECTOR")
+    assert vector.op.name == "tl.ascend_block" and not vector.args
+    assert set(vector.attrs.keys()) == {"name", "annotations"}
     assert int(sblock_metadata(vector)["annotations"]["vector_count"]) == count
     launches = [
         node for node in nodes(vector, ir.RegionStmt) if node.op.name == "tirx.launch_thread" and str(node.args[0].value) == "cthread"
     ]
     assert len(launches) == 1 and int(launches[0].args[1]) == count
     (cube,) = sblocks(module, "CUBE")
+    assert cube.op.name == "tl.ascend_block" and not cube.args
     assert not any(node.op.name == "tirx.launch_thread" and str(node.args[0].value) == "cthread" for node in nodes(cube, ir.RegionStmt))
     assert [int(store.value) for store in nodes(cube, ir.TensorStore)] == [31]
     assert [int(store.value) for store in nodes(vector, ir.TensorStore)] == [47]

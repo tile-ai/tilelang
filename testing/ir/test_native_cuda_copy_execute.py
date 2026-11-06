@@ -26,7 +26,7 @@ def build_cuda_copy(value, output):
     output.mkdir(parents=True, exist_ok=True)
     target = value.attrs["target"].with_host(tvm_tirx.target.Target("c"))
     value = run_pass("LowerAccessPtr", value)
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("cuda")(ir.IRModule({"main": value}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": value}))
     lowering, finalize_host, finalize_device = tirx_pipeline(target=target)
     lowered = lowering(module)
     host, devices = _split_host_device_modules(lowered)

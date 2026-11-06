@@ -215,7 +215,7 @@ def test_fragment_owner_slot_and_guard_match_full_finite_domain(kind, shape, lay
 
     # LLVM runs these per-thread operations with serialized launch dimensions.
     # This validates values and does not claim execution on the named GPU.
-    finalized = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")(kind)(ir.IRModule({"main": lowered}))["main"]
+    finalized = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": lowered}))["main"]
     serial = _serialize_launches(finalized)
     executable = tirx.compile(ir.IRModule({"main": serial}), target=serial.attrs["target"])
     source_array = np.arange(np.prod(shape), dtype="float32").reshape(shape) + 10

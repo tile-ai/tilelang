@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from tilelang.language import _tensor_spec
 from tilelang._analyzer import create_analyzer
 
 from tvm_tirx import ir
@@ -12,7 +14,11 @@ from ..layout.mma_sm100_layout import (
     make_tmem_frg_c,
     validate_tcgen05_ts_instruction,
 )
-from tilelang.language._native import PrimExpr, Buffer, Var, BufferLoad, BufferRegion
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import Var
+from tvm_tirx.ir import TensorLoad as BufferLoad
+from tvm_tirx.ir import TensorRegion as BufferRegion
 from tvm_tirx.tirx import handle_add_byte_offset, tensor_data_ptr
 from tilelang import _ffi_api
 from tilelang.language.dtypes import get_tvm_dtype
@@ -763,7 +769,7 @@ class TensorCoreIntrinEmitter(MMAIntrinEmitter):
         forms retain their coordinate origin and access interval through the
         common TileLang access-pointer constructor.
         """
-        if not isinstance(buffer_or_load_or_region, (Buffer, BufferLoad, BufferRegion)):
+        if not (_tensor_spec.is_buffer_like(buffer_or_load_or_region) or isinstance(buffer_or_load_or_region, (BufferLoad, BufferRegion))):
             raise ValueError(f"Unsupported buffer type: {type(buffer_or_load_or_region)}")
         return T.access_ptr(buffer_or_load_or_region, access_type)
 

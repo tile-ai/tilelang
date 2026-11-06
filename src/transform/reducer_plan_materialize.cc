@@ -52,12 +52,18 @@
 
 #include "backend/common/op/reduce.h"
 #include "backend/common/target_utils.h"
-#include "common/native_reducer_utils.h"
 #include "common/pipeline_utils.h"
 #include "config.h"
 #include "ir/analyzer.h"
+#include "ir/loop_annotations.h"
+#include "ir/loop_math.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
 #include "op/copy.h"
 #include "op/fill.h"
+#include "reducer_metadata.h"
+#include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/tirx/transform.h>
@@ -73,7 +79,7 @@ namespace {
 using namespace tirx;
 using namespace prim;
 using namespace ffi;
-using namespace reducer_native;
+using namespace reducer;
 
 struct UpdateSite {
   Fragment loop_layout;
@@ -125,7 +131,7 @@ public:
         op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
       thread_ = op->body_params[0].as_or_throw<PrimVar>();
     if (op->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(op);
+      auto fields = ReadAnnotations(op);
       if (fields.at("key").as_or_throw<String>() == "tl.loop.annotations") {
         auto values = StringMap(fields.at("value"));
         if (auto layout = values.Get(attr::kParallelLoopLayout))
@@ -158,7 +164,9 @@ public:
       loop_vars_.clear();
       for (const ForObj *current = op; current != nullptr;) {
         loop_vars_.push_back(current->var);
-        const auto *inner = SingleNestedFor(current->body);
+        const auto *inner =
+            (current->body->seq.size() == 1 ? current->body->seq[0].as<ForObj>()
+                                            : nullptr);
         current = inner && inner->kind == ForKind::kParallel ? inner : nullptr;
       }
       serial_vars_.clear();
@@ -222,7 +230,8 @@ public:
     if (op->op.same_as(FinalizeReducerV2Op::Get())) {
       auto decoded = DecodeTileOpArguments(op);
       auto &epoch = Find(decoded.operands[0]);
-      epoch.dst = reducer_native::RegionTensor(decoded.operands[1]);
+      epoch.dst =
+          tl::RegionTensor(NormalizeToTensorRegion(decoded.operands[1]));
       if (auto batch = decoded.annotations.Get("batch"))
         epoch.batch = GetIntegerAnnotation(*batch);
       return std::nullopt;
@@ -232,7 +241,7 @@ public:
 
 private:
   EpochInfo &Find(const Expr &region) {
-    auto tensor = reducer_native::RegionTensor(region);
+    auto tensor = tl::RegionTensor(NormalizeToTensorRegion(region));
     auto found = epochs.find(tensor.get());
     TVM_FFI_CHECK(found != epochs.end(), ValueError)
         << "Unknown reducer " << tensor;
@@ -695,8 +704,11 @@ public:
       plan.op = epoch.op;
       plan.cpu = collector->cpu;
       plan.narrow = decision.has_value();
-      plan.storage =
-          WithScope(epoch.buffer, plan.cpu ? "local" : "local.fragment");
+      auto storage_type = make_object<TensorTypeObj>(*epoch.buffer.ty().get());
+      storage_type->scope =
+          runtime::MemoryScope::Get(plan.cpu ? "local" : "local.fragment");
+      plan.storage = TensorVar(epoch.buffer->name, TensorType(storage_type),
+                               epoch.buffer->loc);
       if (epoch.seed) {
         plan.seed_storage =
             TensorVar(epoch.buffer->name + "_seed",
@@ -790,20 +802,31 @@ public:
       TVM_FFI_CHECK(call && call->op.same_as(alloc_tensor_op()), ValueError)
           << "A reducer must be an allocation, not an aliased tensor";
       const Plan &plan = found->second;
-      Array<Stmt> statements{Allocate(plan.storage, op->loc, call->attrs)};
+      Array<Stmt> statements{
+          Bind(plan.storage,
+               Call((plan.storage).ty(), tirx::alloc_tensor_op(), {},
+                    call->attrs, {(plan.storage).ty()}, op->loc),
+               op->loc)};
       Map<TensorVar, Layout> layouts;
       if (!plan.cpu)
         layouts.Set(plan.storage, plan.layout);
       if (plan.packed_storage) {
         statements.push_back(
-            Allocate(*plan.packed_storage, op->loc, call->attrs));
+            Bind(*plan.packed_storage,
+                 Call((*plan.packed_storage).ty(), tirx::alloc_tensor_op(), {},
+                      call->attrs, {(*plan.packed_storage).ty()}, op->loc),
+                 op->loc));
         layouts.Set(*plan.packed_storage, plan.packed_layout);
       }
       if (plan.seed_storage)
-        statements.push_back(Allocate(*plan.seed_storage, op->loc));
+        statements.push_back(
+            Bind(*plan.seed_storage,
+                 Call((*plan.seed_storage).ty(), tirx::alloc_tensor_op(), {},
+                      std::nullopt, {(*plan.seed_storage).ty()}, op->loc),
+                 op->loc));
       if (!layouts.empty())
         statements.push_back(
-            MakeNativeAnnotation({{attr::kLayoutMap, layouts}}, op->loc));
+            MakeAnnotation({{attr::kLayoutMap, layouts}}, op->loc));
       return SeqStmt(statements, op->loc);
     }
     auto result =
@@ -813,9 +836,9 @@ public:
       if (auto extra = extra_layouts_.Get(*tensor))
         return SeqStmt(
             {result,
-             MakeNativeAnnotation({{attr::kLayoutMap,
-                                    Map<TensorVar, Layout>{{*tensor, *extra}}}},
-                                  op->loc)},
+             MakeAnnotation({{attr::kLayoutMap,
+                              Map<TensorVar, Layout>{{*tensor, *extra}}}},
+                            op->loc)},
             op->loc);
     return result;
   }
@@ -846,7 +869,7 @@ public:
 
 private:
   const Plan &FindPlan(const Expr &region) const {
-    auto tensor = reducer_native::RegionTensor(region);
+    auto tensor = tl::RegionTensor(NormalizeToTensorRegion(region));
     auto found = plans_.find(tensor.get());
     TVM_FFI_CHECK(found != plans_.end(), ValueError)
         << "Unknown reducer " << tensor;
@@ -857,10 +880,12 @@ private:
     auto args = DecodeTileOpArguments(call).operands;
     const Plan &plan = FindPlan(args[0]);
     const TensorVar target = plan.packed_storage.value_or(plan.storage);
-    Stmt fill = TileCall(
-        Fill::Get(),
-        {FullRegion(target), ReducerV2Identity(plan.op, target.dtype())}, {},
-        call->loc);
+    Stmt fill =
+        Evaluate(MakeAnnotatedCall(PrimType::Void(), Fill::Get(),
+                                   {FullTensorRegion(target),
+                                    ReducerV2Identity(plan.op, target.dtype())},
+                                   {}, call->loc),
+                 call->loc);
     if (plan.seed_storage) {
       TVM_FFI_CHECK_EQ(args.size(), 2U, ValueError)
           << "Duplicated epoch sites disagree about the seed";
@@ -891,8 +916,8 @@ private:
                     call->loc);
     if (plan.narrow || plan.cpu)
       return store;
-    return MakeNativeAttribute(plan.storage, attr::kParallelMultiplicity,
-                               IntImm::Int32(1), SeqStmt(store), call->loc);
+    return MakeAttribute(plan.storage, attr::kParallelMultiplicity,
+                         IntImm::Int32(1), SeqStmt(store), call->loc);
   }
 
   // All generated loops use the new begin/end/step contract and their dynamic
@@ -917,16 +942,17 @@ private:
               {}, loc);
     }
     if (layout)
-      body = MakeNativeAttribute(nullptr, "tl.loop.annotations",
-                                 Metadata{{attr::kParallelLoopLayout, *layout}},
-                                 SeqStmt(body), loc);
+      body = MakeAttribute(nullptr, "tl.loop.annotations",
+                           Metadata{{attr::kParallelLoopLayout, *layout}},
+                           SeqStmt(body), loc);
     return body;
   }
 
   Stmt MaterializeFinalize(const CallObj *call, InplaceMode mode) {
     auto decoded = DecodeTileOpArguments(call);
     const Plan &plan = FindPlan(decoded.operands[0]);
-    auto destination = reducer_native::RegionTensor(decoded.operands[1]);
+    auto destination =
+        tl::RegionTensor(NormalizeToTensorRegion(decoded.operands[1]));
     Array<Stmt> statements;
     // Finalize consumes whole logical tensors, including when the operands
     // were written as regions. Layout steering is optional, so its shape
@@ -989,7 +1015,7 @@ private:
           true, call->loc, plan.layout));
     }
     if (!plan.narrow || !plan.steps.empty() || plan.seed) {
-      Array<Expr> args{FullRegion(plan.storage),
+      Array<Expr> args{FullTensorRegion(plan.storage),
                        IntImm::Int32(static_cast<int>(plan.op))};
       Metadata metadata = decoded.annotations;
       if (plan.narrow) {
@@ -1002,7 +1028,9 @@ private:
       if (plan.seed)
         metadata.Set("seed", *plan.seed);
       statements.push_back(
-          TileCall(FinalizeReducerOp::Get(), args, metadata, call->loc));
+          Evaluate(MakeAnnotatedCall(PrimType::Void(), FinalizeReducerOp::Get(),
+                                     args, metadata, call->loc),
+                   call->loc));
     }
     if (!plan.narrow && assigned_destinations_.count(destination.get())) {
       statements.push_back(ElementLoop(
@@ -1014,9 +1042,12 @@ private:
           },
           false, call->loc));
     } else {
-      statements.push_back(TileCall(
-          Copy::Get(), {FullRegion(plan.storage), FullRegion(destination)}, {},
-          call->loc));
+      statements.push_back(
+          Evaluate(MakeAnnotatedCall(PrimType::Void(), Copy::Get(),
+                                     {FullTensorRegion(plan.storage),
+                                      FullTensorRegion(destination)},
+                                     {}, call->loc),
+                   call->loc));
     }
     return SeqStmt(statements, call->loc);
   }

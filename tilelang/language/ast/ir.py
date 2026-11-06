@@ -23,26 +23,32 @@ The old parser-specific FFI constructors are replaced by the shared typed
 builder. User code keeps the language spelling; returned nodes are native IR.
 """
 
-from tilelang.language import _native
-from tilelang.language._native import *  # noqa: F401,F403
+from tilelang.language import _construction
+from tilelang.language import _source_scope
+from tilelang.language import _tensor_spec
+from tilelang.language.tir import common as _common
+from tvm_tirx import ir as _ir
+
+
+from tilelang.language.tir.common import *  # noqa: F401,F403
 from tilelang.language.dtypes import bool as boolean
 from tilelang.language.dtypes import dtype
 from tvm_tirx.target import Target as target
 
-buffer_decl = _native.buffer
-block_attr = _native.sblock_attr
-ptr = _native.handle
-buffer_var = _native.handle
+buffer_decl = _tensor_spec.buffer
+block_attr = _source_scope.sblock_attr
+ptr = _construction.handle
+buffer_var = _construction.handle
 
 
 def var(dtype, name=""):
-    return _native.Var(name, dtype)
+    return _ir.Var(name, dtype)
 
 
 __all__ = list(
     dict.fromkeys(
         [
-            *_native.__all__,
+            *_common.__all__,
             "boolean",
             "dtype",
             "ptr",

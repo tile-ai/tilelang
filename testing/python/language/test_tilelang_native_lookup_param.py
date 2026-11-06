@@ -1,5 +1,9 @@
 """Named parameter lookups retain the old C storage-reference contract."""
 
+from tilelang.language import _annotation_codec
+from tilelang.language import _construction
+from tvm_tirx.tirx.script import ir_builder as _builder
+
 import ctypes
 import json
 import subprocess
@@ -11,7 +15,6 @@ from tvm_tirx import ir, tirx
 from tvm_tirx.script.ir_builder import IRBuilder
 
 import tilelang.language as T
-from tilelang.language import _native
 
 
 @pytest.mark.parametrize("as_expression", [False, True])
@@ -70,11 +73,11 @@ def test_lookup_param_uses_the_active_source_location():
 
 def lookup_function(name, values):
     storage = "int32_t __tvm_param__" + name + "[] = {" + ", ".join(map(str, values)) + "};"
-    with IRBuilder() as builder, _native.prim_func():
+    with IRBuilder() as builder, _construction.prim_func():
         T.func_name("lookup_" + name)
         T.func_ret(ir.PtrType("void"))
-        with _native.attr(0, "pragma_import_c", storage):
-            _native._builder.emit_(ir.Return(T.lookup_param(name)))
+        with _annotation_codec.attr(0, "pragma_import_c", storage):
+            _builder.emit_(ir.Return(T.lookup_param(name)))
     function = builder.get()
     assert tirx.analysis.check_well_formed(function)
     return function

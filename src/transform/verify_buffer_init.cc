@@ -86,12 +86,15 @@ public:
     if (const auto *region = expr.as<TensorRegionObj>())
       return Resolve(region->source);
     if (const auto *call = expr.as<CallObj>()) {
-      const String name = OpName(call);
       if (!call->args.empty() &&
-          (name == "tirx.tensor_data_ptr" || name == "tirx.decl_tensor" ||
-           name == "tirx.reinterpret" || name == "tirx.ptr_byte_offset" ||
-           name == "tirx.handle_add_byte_offset" || name == "tirx.address_of" ||
-           name == "tl.access_ptr" || name == "tl.ptr_access"))
+          (call->op.same_as(tirx::tensor_data_ptr_op()) ||
+           call->op.same_as(tirx::decl_tensor_op()) ||
+           call->op.same_as(tirx::reinterpret_op()) ||
+           call->op.same_as(tirx::ptr_byte_offset_op()) ||
+           call->op.same_as(tirx::handle_add_byte_offset_op()) ||
+           call->op.same_as(tirx::address_of_op()) ||
+           call->op.same_as(tl::access_ptr()) ||
+           call->op.same_as(tl::ptr_access())))
         return Resolve(call->args[0]);
     }
     return std::nullopt;
@@ -106,7 +109,7 @@ public:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (OpName(op) == "tl.annotation")
+    if (IsAnnotationCall(op))
       return std::nullopt;
     return StmtExprVisitor::Visit_(op);
   }
@@ -117,11 +120,12 @@ private:
 
 bool EscapesThroughArgs(const CallObj *call) {
   const String name = OpName(call);
-  if (name == "tl.annotation" || name == "tirx.alloc_tensor" ||
-      name == "tirx.decl_tensor")
+  if (IsAnnotationCall(call) || call->op.same_as(tirx::alloc_tensor_op()) ||
+      call->op.same_as(tirx::decl_tensor_op()))
     return false;
-  if (name == "tl.access_ptr" || name == "tl.ptr_access" ||
-      name == "tirx.address_of" || name.find("tl.tileop.") == 0)
+  if (call->op.same_as(tl::access_ptr()) ||
+      call->op.same_as(tl::ptr_access()) ||
+      call->op.same_as(tirx::address_of_op()) || name.find("tl.tileop.") == 0)
     return true;
   auto op = call->op.as<Op>();
   if (!op.has_value())
@@ -134,10 +138,10 @@ bool EscapesThroughArgs(const CallObj *call) {
 template <typename F>
 void ForEachOpaqueWrite(const CallObj *call, const StorageAliases &aliases,
                         const F &record) {
-  const String name = OpName(call);
   // Explicit read-only pointer intervals are not writes, even inside extern.
-  if (name == "tl.access_ptr" || name == "tl.ptr_access") {
-    const size_t mask_index = name == "tl.access_ptr" ? 2 : 3;
+  if (call->op.same_as(tl::access_ptr()) ||
+      call->op.same_as(tl::ptr_access())) {
+    const size_t mask_index = call->op.same_as(tl::access_ptr()) ? 2 : 3;
     if (call->args.size() > mask_index &&
         (GetConservativeAccessMask(
              call->args[mask_index].as_or_throw<PrimExpr>()) &
@@ -180,8 +184,8 @@ public:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (OpName(op) == "tl.annotation" || OpName(op) == "tirx.decl_tensor" ||
-        OpName(op) == "tirx.alloc_tensor")
+    if (IsAnnotationCall(op) || op->op.same_as(tirx::decl_tensor_op()) ||
+        op->op.same_as(tirx::alloc_tensor_op()))
       return std::nullopt;
     if (auto tile_op = TryParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       for (const TensorRegion &region : tile_op->GetAccessRegions().writes)
@@ -283,8 +287,8 @@ public:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (OpName(op) == "tl.annotation" || OpName(op) == "tirx.decl_tensor" ||
-        OpName(op) == "tirx.alloc_tensor")
+    if (IsAnnotationCall(op) || op->op.same_as(tirx::decl_tensor_op()) ||
+        op->op.same_as(tirx::alloc_tensor_op()))
       return std::nullopt;
     if (auto tile_op = TryParseOperator(GetRef<Call>(op)); tile_op.defined()) {
       Optional<Expr> accum;

@@ -995,10 +995,12 @@ DetectInjectiveMapping(const Array<PrimExpr> &forward_indices,
 LayoutNode::LayoutNode(Array<PrimExpr> input_size,
                        Array<PrimExpr> forward_index) {
   input_size_ = input_size;
+  InitCoordinates();
   sym::Analyzer analyzer = CreateTileLangAnalyzer();
   UpdateAnalyzer(analyzer.get());
-  forward_index_ = forward_index.Map(
-      [&](const PrimExpr &e) { return analyzer->Simplify(e); });
+  forward_index_ = forward_index.Map([&](const PrimExpr &e) {
+    return BindCoordinates(analyzer->Simplify(e));
+  });
 }
 
 Layout::Layout(Array<LayoutIterVar> forward_var,
@@ -1021,10 +1023,73 @@ Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
   data_ = std::move(n);
 }
 
+void LayoutNode::InitCoordinates() {
+  coordinate_vars_.push_back(PrimVar("rep", ReplicationPlaceholder().ty()));
+  for (size_t i = 0; i < InputDim(); ++i)
+    coordinate_vars_.push_back(
+        PrimVar("i" + std::to_string(i), InputPlaceholder(i).ty()));
+}
+
+PrimExpr LayoutNode::BindCoordinates(const PrimExpr &expr) const {
+  Map<PrimVar, PrimExpr> remap;
+  remap.Set(ReplicationPlaceholder(),
+            coordinate_vars_[0].as_or_throw<PrimVar>());
+  for (size_t i = 0; i < InputDim(); ++i)
+    remap.Set(InputPlaceholder(i),
+              coordinate_vars_[i + 1].as_or_throw<PrimVar>());
+  return SubstituteLayoutVars(expr, remap);
+}
+
+PrimExpr LayoutNode::CanonicalCoordinates(const PrimExpr &expr) const {
+  ICHECK_EQ(coordinate_vars_.size(), InputDim() + 1);
+  Map<PrimVar, PrimExpr> remap;
+  remap.Set(coordinate_vars_[0].as_or_throw<PrimVar>(),
+            ReplicationPlaceholder());
+  for (size_t i = 0; i < InputDim(); ++i)
+    remap.Set(coordinate_vars_[i + 1].as_or_throw<PrimVar>(),
+              InputPlaceholder(i));
+  return SubstituteLayoutVars(expr, remap);
+}
+
+Array<PrimExpr> LayoutNode::GetForwardIndex() const {
+  ICHECK_EQ(coordinate_vars_.size(), InputDim() + 1);
+  Map<PrimVar, PrimExpr> remap;
+  remap.Set(coordinate_vars_[0].as_or_throw<PrimVar>(),
+            ReplicationPlaceholder());
+  for (size_t i = 0; i < InputDim(); ++i)
+    remap.Set(coordinate_vars_[i + 1].as_or_throw<PrimVar>(),
+              InputPlaceholder(i));
+  return SubstituteLayoutVars(forward_index_, remap);
+}
+
+LambdaExpr LayoutNode::CoordinateMapping() const {
+  // Bind canonical projections to fresh local definitions, so the returned
+  // Lambda remains independent of this object's own definition region.
+  Array<Var> vars;
+  Map<PrimVar, PrimExpr> remap;
+  for (size_t i = 0; i <= InputDim(); ++i) {
+    PrimVar original =
+        i == 0 ? ReplicationPlaceholder() : InputPlaceholder(i - 1);
+    PrimVar var(i == 0 ? "rep" : "i" + std::to_string(i - 1), original.ty());
+    vars.push_back(var);
+    remap.Set(original, var);
+  }
+  auto indices = GetForwardIndex().Map([&](const PrimExpr &expr) -> Expr {
+    return SubstituteLayoutVars(expr, remap);
+  });
+  PrimExpr thread = PrimExpr(0);
+  if (IsInstance<FragmentNode>())
+    thread = SubstituteLayoutVars(
+        static_cast<const FragmentNode *>(this)->GetForwardThread(), remap);
+  return LambdaExpr(vars, tvm::Tuple({tvm::Tuple(indices), thread}));
+}
+
 void LayoutNode::RegisterReflection() {
   namespace refl = reflection;
   refl::ObjectDef<LayoutNode>()
       .def_ro("input_size", &LayoutNode::input_size_)
+      .def_ro("coordinate_vars", &LayoutNode::coordinate_vars_,
+              refl::AttachFieldFlag::SEqHashDefSimple())
       .def_ro("forward_index", &LayoutNode::forward_index_)
       .def("_DebugOutput", &LayoutNode::DebugOutput);
 }
@@ -1044,6 +1109,7 @@ Array<PrimExpr> LayoutNode::GetForwardVars() const {
 }
 
 Array<PrimExpr> LayoutNode::OutputShape() const {
+  const auto forward_index = GetForwardIndex();
   Array<PrimExpr> ret(OutputDim(), 1);
   sym::Analyzer analyzer = CreateTileLangAnalyzer();
   UpdateAnalyzer(analyzer.get());
@@ -1057,12 +1123,12 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
     // Bound the coordinate before adding one. Adding one in a narrow integer
     // type can wrap at its maximum even though the allocation extent is valid.
     auto [coordinate, relaxed] =
-        RelaxLayoutCoordinate(forward_index_[i], analyzer);
+        RelaxLayoutCoordinate(forward_index[i], analyzer);
     PrimExpr maximum = relaxed ? prim::pos_inf()
                                : analyzer->int_set(coordinate, domains).max();
     // A declared wide shape also determines the width of subsequent address
     // arithmetic. Keep that contract even when one bound fits in int32.
-    int bound_bits = LayoutBoundBits(forward_index_[i]);
+    int bound_bits = LayoutBoundBits(forward_index[i]);
     for (const PrimExpr &input : input_size_)
       bound_bits = std::max(bound_bits, LayoutBoundBits(input));
     if (prim::is_pos_inf(maximum) || prim::is_neg_inf(maximum)) {
@@ -1073,7 +1139,7 @@ Array<PrimExpr> LayoutNode::OutputShape() const {
                         cib->max_value != sym::ConstIntBound::kPosInf,
                     ValueError)
           << "Cannot infer a safe output extent for layout coordinate "
-          << forward_index_[i];
+          << forward_index[i];
       // Physical coordinates keep their origin: max-min+1 would discard
       // leading storage. An input extent (or 1 for a new axis) is not a bound
       // on an arbitrary output coordinate.
@@ -1119,11 +1185,12 @@ Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
     domains.Set(InputPlaceholder(i), sym::IntSet::FromRange(range));
   }
 
+  const auto forward_index = GetForwardIndex();
   Array<Range> result;
   result.reserve(OutputDim());
   for (size_t i = 0; i < OutputDim(); i++) {
     auto [coordinate, relaxed] =
-        RelaxLayoutCoordinate(forward_index_[i], analyzer);
+        RelaxLayoutCoordinate(forward_index[i], analyzer);
     PrimExpr lo = prim::neg_inf();
     PrimExpr hi = prim::pos_inf();
     if (!relaxed) {
@@ -1137,7 +1204,7 @@ Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
       auto cib = LayoutCoordinateBound(coordinate, analyzer);
       if (cib->min_value != sym::ConstIntBound::kNegInf &&
           cib->max_value != sym::ConstIntBound::kPosInf) {
-        int bits = LayoutBoundBits(forward_index_[i]);
+        int bits = LayoutBoundBits(forward_index[i]);
         for (const Range &input : region)
           bits = std::max({bits, LayoutBoundBits(input->begin),
                            LayoutBoundBits(input->extent)});
@@ -1211,19 +1278,20 @@ Array<Range> LayoutNode::MapRegionBounds(const Array<Range> &region) const {
 }
 
 PrimExpr LayoutNode::GetLinearizedForwardIndex() const {
+  const auto forward_index = GetForwardIndex();
   Array<PrimExpr> output_shape = OutputShape();
-  ICHECK_EQ(output_shape.size(), forward_index_.size());
+  ICHECK_EQ(output_shape.size(), forward_index.size());
 
   PrimExpr linearized_index = IntImm::Int32(0);
-  for (size_t i = 0; i < forward_index_.size(); ++i) {
-    linearized_index = linearized_index * output_shape[i] + forward_index_[i];
+  for (size_t i = 0; i < forward_index.size(); ++i) {
+    linearized_index = linearized_index * output_shape[i] + forward_index[i];
   }
   return linearized_index;
 }
 
 Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
   if (vars.empty())
-    return forward_index_;
+    return GetForwardIndex();
   ICHECK_GE(vars.size(), InputDim());
 
   // Take the last InputDim() elements for transformation
@@ -1237,7 +1305,7 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
     vmap.Set(InputPlaceholder(i), transform_vars[i]);
   }
 
-  Array<PrimExpr> transformed = forward_index_.Map(
+  Array<PrimExpr> transformed = GetForwardIndex().Map(
       [&](const PrimExpr &e) { return SubstituteLayoutVars(e, vmap); });
   // Concatenate with the remaining elements from vars
   Array<PrimExpr> result;
@@ -1284,7 +1352,7 @@ Layout LayoutNode::Repeat(int dim, int factor) const {
   new_forward_index.reserve(OutputDim() + 1);
   new_forward_index.push_back(
       FloorDiv(InputPlaceholder(normalized_dim), extent_dim));
-  for (const auto &e : forward_index_) {
+  for (const auto &e : GetForwardIndex()) {
     new_forward_index.push_back(SubstituteLayoutVars(e, vmap));
   }
 
@@ -1326,7 +1394,7 @@ Layout LayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
   for (size_t i = 0; i < offset; ++i) {
     new_forward_index.push_back(InputPlaceholder(i));
   }
-  for (const auto &e : forward_index_) {
+  for (const auto &e : GetForwardIndex()) {
     new_forward_index.push_back(SubstituteLayoutVars(e, vmap));
   }
 
@@ -1362,9 +1430,9 @@ Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
 
   if (repeat_on_thread) {
     PrimExpr thread_size = ThreadExtent();
-    auto new_forward_index = forward_index_.Map(
+    auto new_forward_index = GetForwardIndex().Map(
         [&](const PrimExpr &e) { return SubstituteLayoutVars(e, vmap); });
-    auto new_forward_thread = SubstituteLayoutVars(forward_thread_, vmap) +
+    auto new_forward_thread = SubstituteLayoutVars(GetForwardThread(), vmap) +
                               thread_size * repeats_index;
     return Fragment(new_input_size, new_forward_index, new_forward_thread,
                     replicate_size_, std::nullopt);
@@ -1372,9 +1440,10 @@ Fragment FragmentNode::Repeat(const Array<PrimExpr> &repeats,
     ICHECK(OutputDim() == 1);
     PrimExpr frag_len = OutputShape()[0];
     Array<PrimExpr> new_forward_index = {
-        SubstituteLayoutVars(forward_index_[0], vmap) +
+        SubstituteLayoutVars(GetForwardIndex()[0], vmap) +
         frag_len * repeats_index};
-    PrimExpr new_forward_thread = SubstituteLayoutVars(forward_thread_, vmap);
+    PrimExpr new_forward_thread =
+        SubstituteLayoutVars(GetForwardThread(), vmap);
     return Fragment(new_input_size, new_forward_index, new_forward_thread,
                     replicate_size_, std::nullopt);
   }
@@ -1386,9 +1455,9 @@ Fragment FragmentNode::Replicate(int repeats) const {
   vmap.Set(ReplicationPlaceholder(),
            FloorMod(ReplicationPlaceholder(), ReplicateExtent()));
   PrimExpr new_forward_thread =
-      SubstituteLayoutVars(forward_thread_, vmap) +
+      SubstituteLayoutVars(GetForwardThread(), vmap) +
       ThreadExtent() * FloorDiv(ReplicationPlaceholder(), ReplicateExtent());
-  return Fragment(input_size_, forward_index_, new_forward_thread,
+  return Fragment(input_size_, GetForwardIndex(), new_forward_thread,
                   ReplicateExtent() * repeats, std::nullopt);
 }
 
@@ -1406,10 +1475,11 @@ Fragment FragmentNode::DeReplicate() const {
     return GetRef<Fragment>(this);
 
   Map<PrimVar, PrimExpr> vmap;
-  vmap.Set(ReplicationPlaceholder(), ReplicationPlaceholder() * factor +
-                                         FloorMod(forward_index_[0], factor));
-  PrimExpr new_forward_thread = SubstituteLayoutVars(forward_thread_, vmap);
-  Array<PrimExpr> new_forward_index = {FloorDiv(forward_index_[0], factor)};
+  vmap.Set(ReplicationPlaceholder(),
+           ReplicationPlaceholder() * factor +
+               FloorMod(GetForwardIndex()[0], factor));
+  PrimExpr new_forward_thread = SubstituteLayoutVars(GetForwardThread(), vmap);
+  Array<PrimExpr> new_forward_index = {FloorDiv(GetForwardIndex()[0], factor)};
   return Fragment(input_size_, new_forward_index, new_forward_thread,
                   int(*rep_size) / factor, std::nullopt)
       ->BindThreadRange(Range(0, ThreadExtent()));
@@ -1450,13 +1520,13 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
                      "NoCheck; symbolic dims: "
                   << symbolic_dims;
   }
-  auto iter_map_view = MakeLayoutIterMapView(forward_index_, GetVarMap());
+  auto iter_map_view = MakeLayoutIterMapView(GetForwardIndex(), GetVarMap());
   sym::IterMapResult res = sym::DetectIterMap(
       iter_map_view.indices, iter_map_view.ranges, 1, level, analyzer);
   if (!res->errors.empty()) {
     if (is_static_shape) {
       if (auto inverse = TryCompactStaticInverse(input_size_, output_shape,
-                                                 forward_index_))
+                                                 GetForwardIndex()))
         return {*inverse, sym::IterMapLevel::Bijective};
     }
     std::ostringstream msg;
@@ -1486,7 +1556,7 @@ LayoutNode::InverseWithLevel(bool require_padding_guard) const {
 
   if (level == sym::IterMapLevel::Bijective) {
     InverseRoundTripResult round_trip = CheckStaticInverseRoundTrip(
-        input_size_, outputs_shape, forward_index_, backward_index);
+        input_size_, outputs_shape, GetForwardIndex(), backward_index);
     if (round_trip.status == InverseRoundTripStatus::kInvalid) {
       std::ostringstream msg;
       msg << "Layout " << DebugOutput()
@@ -1549,9 +1619,9 @@ Layout LayoutNode::Reshape(const Array<PrimExpr> &shape,
   PrimExpr old_flat_index = floordiv(flat_index * rescale_den, rescale_num);
   Array<PrimExpr> original_indices =
       RecoverOriginalIndices(InputShape(), old_flat_index);
-  // Step 5. Substitute original indices into forward_index_
+  // Step 5. Substitute original indices into GetForwardIndex()
   Array<PrimExpr> new_forward_index = SubstituteForwardIndex(
-      forward_index_, InputShape(), original_indices, az);
+      GetForwardIndex(), InputShape(), original_indices, az);
   new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
   return Layout(shape, new_forward_index);
 }
@@ -1600,9 +1670,9 @@ Layout FragmentNode::Reshape(const Array<PrimExpr> &shape,
   Array<PrimExpr> orig_indices = RecoverOriginalIndices(InputShape(), old_flat);
   // 4) Substitute old placeholders with expressions of new indices
   Array<PrimExpr> new_forward_index =
-      SubstituteForwardIndex(forward_index_, InputShape(), orig_indices, az);
-  PrimExpr new_forward_thread =
-      SubstituteReshapedExpr(forward_thread_, InputShape(), orig_indices, az);
+      SubstituteForwardIndex(GetForwardIndex(), InputShape(), orig_indices, az);
+  PrimExpr new_forward_thread = SubstituteReshapedExpr(
+      GetForwardThread(), InputShape(), orig_indices, az);
   new_forward_index = RestoreInputPlaceholders(new_forward_index, new_vars);
   new_forward_thread = RestoreInputPlaceholders(new_forward_thread, new_vars);
   Fragment reshaped(shape, new_forward_index, new_forward_thread,
@@ -1649,15 +1719,17 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size,
                            Array<PrimExpr> forward_index,
                            PrimExpr forward_thread, PrimExpr replicate_size) {
   input_size_ = input_size;
+  InitCoordinates();
   replicate_size_ = replicate_size;
   sym::Analyzer analyzer = CreateTileLangAnalyzer();
   UpdateAnalyzer(analyzer.get());
-  forward_thread_ = analyzer->Simplify(forward_thread);
+  forward_thread_ = BindCoordinates(analyzer->Simplify(forward_thread));
   if (forward_index.empty()) {
-    forward_index = {infer_fragment_index(GetVarMap(), forward_thread_)};
+    forward_index = {infer_fragment_index(GetVarMap(), GetForwardThread())};
   }
-  forward_index_ = forward_index.Map(
-      [&](const PrimExpr &e) { return analyzer->Simplify(e); });
+  forward_index_ = forward_index.Map([&](const PrimExpr &e) {
+    return BindCoordinates(analyzer->Simplify(e));
+  });
 }
 
 Fragment::Fragment(Array<LayoutIterVar> forward_var,
@@ -1797,7 +1869,7 @@ std::string PartialFragmentNode::DebugOutput() const {
      << " x copy "
      << analyzer->Simplify(FloorDiv(ReplicateExtent(), combine_size_)) << ")"
      << ", thread: " << ThreadExtent()
-     << ", forward_thread: " << forward_thread_
+     << ", forward_thread: " << GetForwardThread()
      << ", forward_index: " << GetForwardIndex();
   if (thread_range_.has_value()) {
     ss << ", thread_range: " << thread_range_;
@@ -1834,7 +1906,8 @@ std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
   PrimVar lo("_rep_lo", ReplicationPlaceholder().ty());
   PrimVar hi("_rep_hi", ReplicationPlaceholder().ty());
   PrimExpr thread = SubstituteLayoutVars(
-      forward_thread_, {{ReplicationPlaceholder(), lo + combine_size_ * hi}});
+      GetForwardThread(),
+      {{ReplicationPlaceholder(), lo + combine_size_ * hi}});
   Map<PrimVar, Range> vmap;
   for (size_t i = 0; i < InputDim(); ++i) {
     vmap.Set(
@@ -1871,13 +1944,13 @@ std::vector<std::pair<int, int>> PartialFragmentNode::CombineSteps() const {
 // which means the forward_thread is rep_var -> lambda i, rep: rep
 bool FragmentNode::IsCompletedReplicated() const {
   sym::Analyzer analyzer = CreateTileLangAnalyzer();
-  return ExprDeepEqual()(analyzer->Simplify(forward_thread_),
+  return ExprDeepEqual()(analyzer->Simplify(GetForwardThread()),
                          ReplicationPlaceholder());
 }
 
 sym::IterMapResult
 LayoutNode::DetectInjective(bool require_padding_guard) const {
-  return DetectInjectiveMapping(forward_index_, GetVarMap(),
+  return DetectInjectiveMapping(GetForwardIndex(), GetVarMap(),
                                 require_padding_guard);
 }
 
@@ -1885,8 +1958,9 @@ sym::IterMapResult
 FragmentNode::DetectInjective(bool require_padding_guard) const {
   // A fragment's physical identity includes its owning thread as well as its
   // per-thread indices. The replication coordinate is part of GetVarMap().
-  Array<PrimExpr> indices{forward_thread_};
-  indices.insert(indices.end(), forward_index_.begin(), forward_index_.end());
+  Array<PrimExpr> indices{GetForwardThread()};
+  auto storage_indices = GetForwardIndex();
+  indices.insert(indices.end(), storage_indices.begin(), storage_indices.end());
   return DetectInjectiveMapping(indices, GetVarMap(), require_padding_guard);
 }
 
@@ -1897,7 +1971,7 @@ PrimExpr FragmentNode::ThreadExtent() const {
   Map<Var, sym::IntSet> domains;
   for (const auto &[var, range] : GetVarMap())
     domains.Set(var, sym::IntSet::FromRange(range));
-  auto ist = analyzer->int_set(forward_thread_ + 1, domains);
+  auto ist = analyzer->int_set(GetForwardThread() + 1, domains);
   return ist.max();
 }
 
@@ -1922,7 +1996,7 @@ PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
   if (rep_var.has_value())
     vmap.Set(ReplicationPlaceholder(), rep_var.value());
 
-  return SubstituteLayoutVars(forward_thread_, vmap);
+  return SubstituteLayoutVars(GetForwardThread(), vmap);
 }
 
 Layout FragmentNode::Inverse() const {
@@ -1934,9 +2008,9 @@ std::pair<Layout, sym::IterMapLevel>
 FragmentNode::InverseWithLevel(bool require_padding_guard) const {
   auto input_size_copy = input_size_;
   input_size_copy.push_back(ReplicateExtent());
-  auto forward_index_copy = forward_index_;
+  auto forward_index_copy = GetForwardIndex();
   forward_index_copy.push_back(SubstituteLayoutVars(
-      forward_thread_,
+      GetForwardThread(),
       {{ReplicationPlaceholder(), InputPlaceholder(InputDim())}}));
   auto fwd = Layout(input_size_copy, forward_index_copy);
   return fwd->InverseWithLevel(require_padding_guard);
@@ -1949,9 +2023,9 @@ Fragment FragmentNode::CondenseReplicateVar() const {
   PrimExpr new_forward_thread{0};
   LayoutIterVar new_thread_replicate;
   std::tie(new_forward_thread, new_thread_replicate) =
-      CompressIterator(forward_thread_, ToIterVars(input_iters),
+      CompressIterator(GetForwardThread(), ToIterVars(input_iters),
                        ReplicationPlaceholder(), analyzer.get());
-  return Fragment(input_size_, forward_index_, new_forward_thread,
+  return Fragment(input_size_, GetForwardIndex(), new_forward_thread,
                   new_thread_replicate->dom->extent, new_thread_replicate->var);
 }
 
@@ -2021,7 +2095,7 @@ std::string FragmentNode::DebugOutput() const {
   std::stringstream ss;
   ss << "Fragment(" << InputShape() << " -> " << OutputShape()
      << ", replicate: " << ReplicateExtent() << ", thread: " << ThreadExtent()
-     << ", forward_thread: " << forward_thread_
+     << ", forward_thread: " << GetForwardThread()
      << ", forward_index: " << GetForwardIndex();
   if (thread_range_.has_value()) {
     ss << ", thread_range: " << thread_range_;
@@ -2140,6 +2214,48 @@ void PartialFragmentNode::RegisterReflection() {
   // reflection (DebugOutput dispatches virtually).
   refl::ObjectDef<PartialFragmentNode>().def_ro(
       "combine_size", &PartialFragmentNode::combine_size_);
+}
+
+namespace {
+std::pair<Array<PrimExpr>, PrimExpr>
+ReadCoordinateMapping(const Array<PrimExpr> &shape, const LambdaExpr &mapping) {
+  TVM_FFI_CHECK_EQ(mapping->vars.size(), shape.size() + 1, ValueError)
+      << "A Layout mapping binds replication followed by its input coordinates";
+  Array<Expr> vars{ReplicationPlaceholder()};
+  for (size_t i = 0; i < shape.size(); ++i)
+    vars.push_back(InputPlaceholder(i));
+  auto body = mapping->Apply(vars).as_or_throw<tvm::Tuple>();
+  TVM_FFI_CHECK_EQ(body->fields.size(), 2U, ValueError)
+      << "A Layout mapping returns (Tuple(indices), thread)";
+  return {body->fields[0].as_or_throw<tvm::Tuple>()->fields.Map(
+              [](const Expr &expr) { return expr.as_or_throw<PrimExpr>(); }),
+          body->fields[1].as_or_throw<PrimExpr>()};
+}
+} // namespace
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  ffi::reflection::GlobalDef()
+      .def("tl.Layout_from_mapping",
+           [](Array<PrimExpr> shape, LambdaExpr mapping) {
+             auto [indices, thread] = ReadCoordinateMapping(shape, mapping);
+             TVM_FFI_CHECK(IsZero(thread), ValueError)
+                 << "A plain Layout mapping cannot carry a thread coordinate";
+             return Layout(shape, indices);
+           })
+      .def("tl.Fragment_from_mapping",
+           [](Array<PrimExpr> shape, LambdaExpr mapping, PrimExpr replicate,
+              Optional<Range> thread_range) {
+             auto [indices, thread] = ReadCoordinateMapping(shape, mapping);
+             return Fragment(shape, indices, thread, replicate, std::nullopt)
+                 ->BindThreadRange(thread_range);
+           })
+      .def("tl.PartialFragment_from_mapping",
+           [](Array<PrimExpr> shape, LambdaExpr mapping, PrimExpr replicate,
+              PrimExpr combine, Optional<Range> thread_range) {
+             auto [indices, thread] = ReadCoordinateMapping(shape, mapping);
+             return PartialFragment(shape, indices, thread, replicate, combine,
+                                    std::nullopt, thread_range);
+           });
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {

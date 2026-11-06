@@ -213,10 +213,8 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.cuda.transform.LowerClusterLaunch()(mod)
     # WS role scopes still describe shared-memory lifetimes and synchronization
     # domains. Keep them until their last consumer, AnnotateWarpGroupRegAlloc.
-    mod = tilelang.transform.FinalizeAnnotations(
-        target.kind.name,
-        allowed_pending_regions=("kWarpSpecializationScope", "kCustomWarpSpecialization"),
-    )(mod)
+    mod = tilelang.transform.LowerSourceAllocations()(mod)
+    mod = tilelang.transform.LowerSourceAnnotations()(mod)
     mod = tilelang.transform.Simplify()(mod)
     mod = tilelang.transform.LowerTensorLayouts()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
@@ -285,12 +283,11 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.MergeIfStmt()(mod)
 
-    if allow_warp_specialized(pass_ctx=pass_ctx, target=target):
-        mod = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc()(mod)
-
-    # Outlining has split host/device targets. Finalize every function strictly
-    # and reject leftover WS markers if their owner did not run.
-    mod = tilelang.transform.FinalizeAnnotations()(mod)
+    # Always retire role scopes after storage and synchronization. Inferring
+    # register budgets remains conditional; explicit setmaxnreg calls survive.
+    mod = tilelang.cuda.transform.AnnotateWarpGroupRegAlloc(
+        enable_register_inference=allow_warp_specialized(pass_ctx=pass_ctx, target=target)
+    )(mod)
 
     # Cooperative-grid requirements must reach both the emitter and runtime.
     mod = tilelang.cuda.transform.PersistThreadblock()(mod)
@@ -310,6 +307,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.HoistNonRestrictParams(finalize=True)(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
+    mod = tilelang.transform.VerifyLoweredAnnotations()(mod)
     return mod
 
 

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tvm_tirx import ir as _ir
+from tvm_tirx.ir import prim as _prim
 
 
 def _to_int32(v):
-    return tirx.IntImm("int32", v) if isinstance(v, int) else v
+    return _ir.IntImm("int32", v) if isinstance(v, int) else v
 
 
 _PAD_VALUE_SUPPORTED_DTYPES = frozenset(
@@ -47,16 +50,20 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     -------
     >>> T.ascend_set_copy_pad_value(0.0, dtype="float32")
     """
-    if dtype is None and isinstance(value, tirx.PrimExpr):
-        dtype = str(tirx.dtype_of(value))
+    if dtype is None and _construction.is_scalar_expr(value):
+        dtype = str(_construction.dtype_of(value))
     if dtype is None:
         raise ValueError('ascend_set_copy_pad_value requires dtype for Python literals; use dtype="float32" or pass a typed PrimExpr.')
     if dtype not in _PAD_VALUE_SUPPORTED_DTYPES:
         raise ValueError(
             f"ascend_set_copy_pad_value does not support dtype {dtype!r}; supported dtypes are {sorted(_PAD_VALUE_SUPPORTED_DTYPES)}."
         )
-    value = tirx.const(value, dtype) if isinstance(value, (int, float)) else tirx.Cast(dtype, value)
-    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_set_copy_pad_value"), value)
+    value = (
+        _ir.const(value, dtype)
+        if isinstance(value, (int, float))
+        else _prim.Cast(dtype, _construction.scalar_value(value, _construction.current_location()), _construction.current_location())
+    )
+    return _intrinsics.call_intrin("void", _ir.Op.get("tl.ascend_set_copy_pad_value"), value)
 
 
 def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype: str) -> None:
@@ -67,7 +74,7 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
     Both pointers must include the region origin and be 32-byte aligned.
     This operation does not initialize gaps or convert element types.
     """
-    from tilelang.language._native import BufferLoad
+    from tvm_tirx.ir import TensorLoad as BufferLoad
     from tilelang.language.builtin import access_ptr
 
     names = {"float16": "half", "bfloat16": "bfloat16_t", "float32": "float"}
@@ -79,7 +86,7 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
     if isinstance(src, BufferLoad):
         src = access_ptr(src, "r")
     args = [dst, src, _to_int32(rows), _to_int32(cols), _to_int32(src_pitch), _to_int32(dst_pitch), dtype]
-    return tirx.call_intrin("void", tirx.Op.get("tl.ascend_nd2nz_post_copy"), *args)
+    return _intrinsics.call_intrin("void", _ir.Op.get("tl.ascend_nd2nz_post_copy"), *args)
 
 
 __all__ = [

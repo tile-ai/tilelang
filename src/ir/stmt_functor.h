@@ -6,11 +6,67 @@
 #define TILELANG_IR_STMT_FUNCTOR_H_
 
 #include "analyzer.h"
+#include "annotations.h"
 #include "loop_math.h"
+#include <tvm/tirx/function.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/tirx/stmt_functor_with_constraint_context.h>
 
 namespace tvm::tl {
+
+// TileLang layout declarations carry tensor identities and coordinate captures
+// in attrs. Native Call traversal deliberately leaves attrs to their dialect.
+TVM_TIRX_DLL ffi::Expected<ffi::Optional<ffi::VisitInterrupt>>
+VisitLayoutMapCall(const CallObj *call, ffi::StructuralVisitorObj *visitor);
+TVM_TIRX_DLL ffi::Expected<ffi::UnchangedOr<ffi::Any>>
+MutateLayoutMapCall(const CallObj *call, ffi::StructuralMutatorObj *mutator,
+                    ffi::InplaceMode mode);
+
+class LayoutMapMutator : public tirx::StmtExprMutator {
+public:
+  using tirx::StmtExprMutator::Mutate;
+  using tirx::StmtExprMutator::Mutate_;
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) override {
+    if (!op->op.same_as(layout_map_op()))
+      return tirx::StmtExprMutator::Mutate_(op, mode);
+    auto result = MutateLayoutMapCall(op, this, mode).value();
+    if (result.IsUnchanged())
+      return ffi::Unchanged();
+    return std::move(result).ValueUnchecked().cast<Expr>();
+  }
+};
+
+class LayoutMapVisitor : public tirx::StmtExprVisitor {
+public:
+  using tirx::StmtExprVisitor::Visit;
+  using tirx::StmtExprVisitor::Visit_;
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallObj *op) override {
+    if (op->op.same_as(layout_map_op()))
+      return VisitLayoutMapCall(op, this).value();
+    return tirx::StmtExprVisitor::Visit_(op);
+  }
+};
+
+// Validate attrs-only uses at the declaration's lexical position. This builds
+// a validation-only view for the native scope checker, never production IR.
+TVM_TIRX_DLL void CheckLayoutMapScopes(const tirx::Function &function);
+
+// Preserve native definition/type semantics while visiting TileLang layouts.
+// Each call owns a fresh remap environment; free captures retain their
+// identity.
+TVM_TIRX_DLL tirx::Function RenewDef(tirx::Function function);
+TVM_TIRX_DLL Stmt SubstituteWithDataTypeLegalization(
+    Stmt statement,
+    ffi::TypedFunction<ffi::Optional<PrimExpr>(const Var &)> mapping);
+
+// Inspection may look through a singleton sequence. Reconstruction must still
+// use SeqStmt for native scope bodies; empty and multi-statement bodies stay
+// intact, and this does not cross a RegionStmt definition scope.
+inline Stmt SingleStatement(const Stmt &stmt) {
+  const auto *seq = stmt.as<SeqStmtObj>();
+  return seq && seq->seq.size() == 1 ? seq->seq[0] : stmt;
+}
 
 // The native collector treats every positive constant step as a range. Keep
 // TileLang's machine-integer no-wrap contract at the For consumer boundary.
@@ -72,6 +128,15 @@ public:
       : StmtExprMutatorWithAnalyzer(ffi::GetRef<sym::Analyzer>(analyzer)) {}
 
 protected:
+  ffi::UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) override {
+    if (!op->op.same_as(layout_map_op()))
+      return tirx::StmtExprMutatorWithConstraintContext::Mutate_(op, mode);
+    auto result = MutateLayoutMapCall(op, this, mode).value();
+    if (result.IsUnchanged())
+      return ffi::Unchanged();
+    return std::move(result).ValueUnchecked().cast<Expr>();
+  }
+
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
                                  InplaceMode mode) override {
     auto result = tirx::StmtExprMutatorWithConstraintContext::Mutate_(op, mode);
@@ -148,6 +213,12 @@ public:
   }
 
 protected:
+  ffi::Optional<ffi::VisitInterrupt> Visit_(const CallObj *op) override {
+    if (op->op.same_as(layout_map_op()))
+      return VisitLayoutMapCall(op, this).value();
+    return tirx::StmtExprVisitorWithConstraintContext::Visit_(op);
+  }
+
   ffi::Optional<ffi::VisitInterrupt> Visit_(const EvaluateObj *op) override {
     auto result = tirx::StmtExprVisitorWithConstraintContext::Visit_(op);
     if (!result)

@@ -24,10 +24,13 @@
  */
 #ifndef TILELANG_LOOP_FUSION_UTILS_H_
 #define TILELANG_LOOP_FUSION_UTILS_H_
-#include "../../op/native_utils.h"
 #include "../../op/utils.h"
-#include "../layout_inference/native_policy.h"
+#include "../layout_inference/policy.h"
+#include "ir/annotations.h"
+#include "ir/loop_math.h"
 #include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm::tl {
 using namespace tirx;
@@ -58,10 +61,9 @@ private:
 class ParallelLoopFuser : public StmtExprMutatorWithAnalyzer {
 public:
   explicit ParallelLoopFuser(sym::AnalyzerObj *analyzer,
-                             NativeLayoutInferenceOptions options = {})
+                             LayoutInferenceOptions options = {})
       : StmtExprMutatorWithAnalyzer(analyzer), options_(std::move(options)) {}
-  static Stmt Fuse(const Stmt &stmt,
-                   NativeLayoutInferenceOptions options = {}) {
+  static Stmt Fuse(const Stmt &stmt, LayoutInferenceOptions options = {}) {
     auto analyzer = CreateTileLangAnalyzer();
     auto fuser =
         ffi::make_object<ParallelLoopFuser>(analyzer.get(), std::move(options));
@@ -76,7 +78,7 @@ protected:
     for (const auto &region : regions_) {
       if (region->op->name != "tl.attr")
         continue;
-      auto fields = DecodeAttributeRegion(region.get());
+      auto fields = ReadAnnotations(region.get());
       if (fields.at("key").cast<ffi::String>() != "tl.loop.annotations" ||
           !fields.at("value").cast<ffi::Map<ffi::String, ffi::Any>>().count(
               attr::kParallelLoopLayout))
@@ -140,7 +142,10 @@ protected:
                          floormod(floordiv(fused, stride), LoopExtent(loop))));
       stride = stride * LoopExtent(loop);
     }
-    auto body = SubstituteLoopVars(chain.back()->body, replacements);
+    auto body = tl::SubstituteWithDataTypeLegalization(
+        chain.back()->body, [&](const Var &var) -> ffi::Optional<PrimExpr> {
+          return replacements.Get(var);
+        });
     For result(fused, IntImm(index_type, 0), total, IntImm(index_type, 1),
                ForKind::kParallel, SeqStmt(body), op->annotations, op->loc);
     // Only static hints live in For.annotations. A caller retaining dynamic
@@ -158,7 +163,7 @@ protected:
   }
 
 private:
-  NativeLayoutInferenceOptions options_;
+  LayoutInferenceOptions options_;
   ffi::Array<RegionStmt> regions_;
 };
 } // namespace tvm::tl

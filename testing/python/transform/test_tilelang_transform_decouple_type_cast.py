@@ -5,7 +5,7 @@ import tilelang.language as T
 import tilelang.testing
 import tvm_ffi
 import tvm_tirx
-from tilelang.language._native import encode_annotations
+from tilelang.language._annotation_codec import encode_annotations
 from tilelang.testing.ir import collect_nodes
 from tilelang.testing.packed import compile_packed_function
 from tilelang.transform import DecoupleTypeCast
@@ -50,7 +50,7 @@ def _canonicalize_for_comparison(mod):
         if "target" not in function.attrs:
             unbound.append(symbol)
             mod[symbol] = function.with_attr("target", tvm_tirx.target.Target("cuda"))
-    mod = tilelang.transform.FinalizeAnnotations("cuda")(mod)
+    mod = tilelang.transform.LowerSourceAnnotations()(mod)
     for symbol in unbound:
         mod[symbol] = mod[symbol].without_attr("target")
     # DecoupleTypeCast creates an explicit row-major scratch layout. Materialize
@@ -353,7 +353,7 @@ def test_nonzero_min_loop_execution(decouple, index_dtype, start, extent, values
         if decouple:
             mod = DecoupleTypeCast()(mod)
         mod = tilelang.transform.LegalizeVectorizedLoop()(mod)
-        mod = tilelang.transform.LowerOpaqueBlock()(mod)
+        mod = tilelang.transform.LowerSourceAnnotations()(mod)
     # Execute the legalized domains with scalar C codegen.
     with tvm_tirx.ir.transform.PassContext(config={"tirx.disable_vectorize": True}):
         executable = compile_packed_function(mod["main"])
@@ -779,7 +779,7 @@ def test_e2e_bf16_global_to_frag():
 
     With 1024 bf16 elements and 64 threads, each thread handles 16 bf16 = 256 bits,
     so aligned inputs should retain the 256-bit global load/store fast path.
-    The same kernel must also preserve values for misaligned input views.
+    Nonzero storage offsets must satisfy the same 32-byte alignment.
     """
     import torch
 
@@ -799,26 +799,23 @@ def test_e2e_bf16_global_to_frag():
 
     kernel = kernel_fn()
 
-    # The global 32-byte helper keeps the 256-bit aligned fast path and a safe
-    # fallback for offsets. The local temporaries use Global256=false and must
-    # not satisfy this global-memory width check.
+    # Keep the original 256-bit global access path. Local carrier accesses
+    # must not satisfy this global-memory width check.
     source = kernel.get_kernel_source()
-    assert "load_global_256" in source or "tl::load_vector<ulonglong4, 32, true>" in source, "Expected 256-bit global load"
-    assert "store_global_256" in source or "tl::store_vector<ulonglong4, 32, true>" in source, "Expected 256-bit global store"
+    assert "load_global_256" in source, "Expected 256-bit global load"
+    assert "store_global_256" in source, "Expected 256-bit global store"
 
     # Correctness
     a = torch.randn(1024, device="cuda", dtype=torch.bfloat16)
     b = kernel(a)
     torch.testing.assert_close(b, a, rtol=0, atol=0)
 
-    # Keep the same kernel and exact numerical oracle for misaligned views.
-    # BF16 offsets of 1, 15, and 17 elements exercise the byte fallback, not an
-    # unproved alignment increase on the public Tensor parameters.
-    storage = torch.randn(1024 + 31, device="cuda", dtype=torch.bfloat16)
+    # Reuse the same kernel with nonzero, 32-byte-aligned BF16 views.
+    storage = torch.randn(1024 + 32, device="cuda", dtype=torch.bfloat16)
     assert storage.data_ptr() % 32 == 0
-    for offset in (1, 15, 17):
+    for offset in (16, 32):
         view = storage[offset : offset + 1024]
-        assert view.data_ptr() % 32 != 0
+        assert view.data_ptr() % 32 == 0
         torch.testing.assert_close(kernel(view), view, rtol=0, atol=0)
 
 

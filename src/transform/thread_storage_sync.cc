@@ -1,4 +1,7 @@
+#include "cuda/op/builtin.h"
+#include "ir/annotations.h"
 #include "ir/loop_math.h"
+#include <tvm/tirx/stmt_functor.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements. See the NOTICE file
@@ -65,7 +68,7 @@ bool IsShared(const String &scope) {
 
 bool IsStorageSync(const CallObj *call) {
   return call && (call->op.same_as(gpu_storage_sync_op()) ||
-                  OpName(call) == "tl.storage_sync");
+                  call->op.same_as(tl::storage_sync()));
 }
 
 bool IsFullSharedStorageSync(const CallObj *call) {
@@ -187,7 +190,7 @@ public:
       result.push_back(visited[i]);
       const auto *evaluate = visited[i].as<EvaluateObj>();
       const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
-      if (!call || (OpName(call) != "tl.ptx_wait_group" &&
+      if (!call || (!call->op.same_as(tl::ptx_wait_group()) &&
                     OpName(call) != "ptx.cp_async_wait_group"))
         continue;
       const auto *next =
@@ -253,7 +256,7 @@ public:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (OpName(op) == "tl.annotation")
+    if (IsAnnotationCall(op))
       return std::nullopt;
     if (SideEffect(GetRef<Expr>(op)) > CallEffectKind::kPure)
       property.runtime = true;
@@ -400,7 +403,7 @@ std::optional<PrimExpr> ScalarLaneValue(const PrimExpr &value,
     return std::nullopt;
   }
   if (const auto *op = value.as<CallObj>();
-      op && OpName(op) == "prim.if_then_else" && op->args.size() == 3) {
+      op && op->op.same_as(prim::if_then_else_op()) && op->args.size() == 3) {
     auto condition =
         ScalarLaneValue(op->args[0].as_or_throw<PrimExpr>(), lane, lanes);
     auto on_true =
@@ -530,8 +533,7 @@ public:
     return StmtExprVisitor::Visit_(op);
   }
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    return OpName(op) == "tl.annotation" ? std::nullopt
-                                         : StmtExprVisitor::Visit_(op);
+    return IsAnnotationCall(op) ? std::nullopt : StmtExprVisitor::Visit_(op);
   }
 
   bool Independent(const StorageAddress &left,
@@ -598,17 +600,19 @@ private:
       return result;
     }
     if (const auto *call = expr.as<CallObj>()) {
-      String name = OpName(call);
-      if (name == "tirx.decl_tensor" || name == "tirx.tensor_data_ptr" ||
-          name == "tirx.address_of" || name == "tirx.reinterpret" ||
-          name == "tl.access_ptr")
+      if (call->op.same_as(tirx::decl_tensor_op()) ||
+          call->op.same_as(tirx::tensor_data_ptr_op()) ||
+          call->op.same_as(tirx::address_of_op()) ||
+          call->op.same_as(tirx::reinterpret_op()) ||
+          call->op.same_as(tl::access_ptr()))
         return Resolve(call->args[0], active);
-      if (name == "tirx.ptr_byte_offset" ||
-          name == "tirx.handle_add_byte_offset" || name == "tl.ptr_access") {
+      if (call->op.same_as(tirx::ptr_byte_offset_op()) ||
+          call->op.same_as(tirx::handle_add_byte_offset_op()) ||
+          call->op.same_as(tl::ptr_access())) {
         auto result = Resolve(call->args[0], active);
         auto offset = WidenIndex(call->args[1].as_or_throw<PrimExpr>());
         int bits = 8;
-        if (name == "tl.ptr_access") {
+        if (call->op.same_as(tl::ptr_access())) {
           auto element = call->args[0]
                              ->ty.as_or_throw<PtrType>()
                              ->element_type.as<PrimType>();
@@ -900,10 +904,12 @@ void ThreadSyncPlanner::VisitPointer(const Expr &pointer,
       for (const PrimExpr &index : load->indices)
         Visit(index);
     } else if (const auto *call = expr.as<CallObj>()) {
-      const auto name = OpName(call);
-      if (name == "tl.access_ptr" || name == "tl.ptr_access" ||
-          name == "tirx.address_of" || name == "tirx.tensor_data_ptr" ||
-          name == "tirx.ptr_byte_offset" || name == "tirx.reinterpret") {
+      if (call->op.same_as(tl::access_ptr()) ||
+          call->op.same_as(tl::ptr_access()) ||
+          call->op.same_as(tirx::address_of_op()) ||
+          call->op.same_as(tirx::tensor_data_ptr_op()) ||
+          call->op.same_as(tirx::ptr_byte_offset_op()) ||
+          call->op.same_as(tirx::reinterpret_op())) {
         visit_address(call->args[0]);
         for (size_t i = 1; i < call->args.size(); ++i)
           Visit(call->args[i]);
@@ -918,7 +924,7 @@ void ThreadSyncPlanner::VisitPointer(const Expr &pointer,
 
 ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const CallObj *op) {
   String name = OpName(op);
-  if (name == "tl.annotation" || name == "tirx.alloc_tensor")
+  if (IsAnnotationCall(op) || op->op.same_as(tirx::alloc_tensor_op()))
     return std::nullopt;
   if (IsStorageSync(op)) {
     RecordSync(op->args[0].as_or_throw<StringImm>()->value);
@@ -926,8 +932,10 @@ ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const CallObj *op) {
       Visit(op->args[i]);
     return std::nullopt;
   }
-  if (name == "tl.sync_grid" || name == "tl.syncthreads_count" ||
-      name == "tl.syncthreads_and" || name == "tl.syncthreads_or") {
+  if (op->op.same_as(tl::sync_grid()) ||
+      op->op.same_as(tl::syncthreads_count()) ||
+      op->op.same_as(tl::syncthreads_and()) ||
+      op->op.same_as(tl::syncthreads_or())) {
     for (const Expr &arg : op->args)
       Visit(arg);
     RecordSync(scope_name_);
@@ -947,8 +955,8 @@ ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const CallObj *op) {
     return count.value() * (element.value().bits() * element.value().lanes());
   };
 
-  if (name == "tl.access_ptr" || name == "tl.ptr_access") {
-    size_t extent_index = name == "tl.access_ptr" ? 1 : 2;
+  if (op->op.same_as(tl::access_ptr()) || op->op.same_as(tl::ptr_access())) {
+    size_t extent_index = op->op.same_as(tl::access_ptr()) ? 1 : 2;
     int mask = GetConservativeAccessMask(
         op->args[extent_index + 1].as_or_throw<PrimExpr>());
     auto width = pointer_width(GetRef<Expr>(op),
@@ -956,20 +964,22 @@ ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const CallObj *op) {
     VisitPointer(GetRef<Expr>(op), width, mask);
     return std::nullopt;
   }
-  if (name == "tirx.address_of" || name == "tirx.tensor_data_ptr" ||
-      name == "tirx.ptr_byte_offset" || name == "tirx.decl_tensor" ||
-      (name == "tirx.reinterpret" && op->ty.as<PtrTypeObj>())) {
+  if (op->op.same_as(tirx::address_of_op()) ||
+      op->op.same_as(tirx::tensor_data_ptr_op()) ||
+      op->op.same_as(tirx::ptr_byte_offset_op()) ||
+      op->op.same_as(tirx::decl_tensor_op()) ||
+      (op->op.same_as(tirx::reinterpret_op()) && op->ty.as<PtrTypeObj>())) {
     // Pointer creation carries no read/write effect. Opaque consumers of an
     // unannotated pointer are handled below with a conservative access mask.
     VisitPointer(GetRef<Expr>(op), std::nullopt, 0);
     return std::nullopt;
   }
-  if (name.find("tl.atomic_") == 0 || name == "tirx.atomic_add") {
+  if (name.find("tl.atomic_") == 0 || op->op.same_as(tirx::atomic_add_op())) {
     if (op->args.empty())
       return std::nullopt;
-    int mask = name == "tl.atomic_load_elem_op"    ? 1
-               : name == "tl.atomic_store_elem_op" ? 2
-                                                   : 3;
+    int mask = op->op.same_as(tl::atomic_load_elem_op())    ? 1
+               : op->op.same_as(tl::atomic_store_elem_op()) ? 2
+                                                            : 3;
     int count = name.find("addx4") != String::npos   ? 4
                 : name.find("addx2") != String::npos ? 2
                                                      : 1;
@@ -982,10 +992,11 @@ ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const CallObj *op) {
       Visit(op->args[i]);
     return std::nullopt;
   }
-  if (name == "tl.ptx_cp_async" || name == "tl.ptx_cp_async_bytes") {
+  if (op->op.same_as(tl::ptx_cp_async()) ||
+      op->op.same_as(tl::ptx_cp_async_bytes())) {
     auto count = op->args[2].as_or_throw<PrimExpr>();
     Optional<PrimExpr> width;
-    if (name == "tl.ptx_cp_async_bytes") {
+    if (op->op.same_as(tl::ptx_cp_async_bytes())) {
       if (auto bytes = WidenIndex(count))
         width = bytes.value() * 8;
     } else {
@@ -999,16 +1010,18 @@ ThreadSyncPlanner::Result ThreadSyncPlanner::Visit_(const CallObj *op) {
       Visit(op->args[i]);
     return std::nullopt;
   }
-  bool async = name == "tl.tma_load" || name == "tl.tma_load_im2col" ||
-               name == "tl.tma_load_multicast" || name == "tl.tma_load_gather4";
+  bool async = op->op.same_as(tl::tma_load()) ||
+               op->op.same_as(tl::tma_load_im2col()) ||
+               op->op.same_as(tl::tma_load_multicast()) ||
+               op->op.same_as(tl::tma_load_gather4());
   if (async)
     ++async_depth_;
   bool opaque = SideEffect(GetRef<Expr>(op)) > CallEffectKind::kPure;
   for (const Expr &arg : op->args) {
     const auto *nested = arg.as<CallObj>();
     if (opaque && (arg->ty.as<PtrTypeObj>() || arg->ty.as<TensorTypeObj>()) &&
-        !(nested && (OpName(nested) == "tl.access_ptr" ||
-                     OpName(nested) == "tl.ptr_access"))) {
+        !(nested && (nested->op.same_as(tl::access_ptr()) ||
+                     nested->op.same_as(tl::ptr_access())))) {
       VisitPointer(arg, std::nullopt, 3);
     } else {
       Visit(arg);

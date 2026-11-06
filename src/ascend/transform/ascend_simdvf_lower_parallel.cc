@@ -5,16 +5,16 @@
  * \file ascend_simdvf_lower_parallel.cc
  * \brief Lower native SIMD_VF parallel loops and tile ops to register SSA.
  */
+#include "ascend/ir/block.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "ir/loop_math.h"
 #include "ir/tensor_utils.h"
-#include "native_vf_utils.h"
-#include "op/native_intrinsic.h"
-#include "op/native_utils.h"
 #include "op/reducer.h"
 #include "op/utils.h"
 #include <cmath>
 #include <limits>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -34,18 +34,20 @@ public:
   using StmtExprMutator::Mutate;
   using StmtExprMutator::Mutate_;
   explicit SimdVFLowerer(const tirx::Function &function) {
-    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>())
-        definitions_.Set(bind->var, bind->value);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+          definitions_.Set(bind->var, bind->value);
+          return ffi::WalkResult::Advance();
+        });
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *region,
                             InplaceMode mode) final {
-    auto kind = GetAscendVFKind(region);
+    auto kind = ascend::GetVFKind(region);
     bool previous = inside_;
-    if (kind != AscendVFKind::kNone)
-      inside_ = kind == AscendVFKind::kSimd;
+    if (kind != ascend::VFKind::kNone)
+      inside_ = kind == ascend::VFKind::kSimd;
     auto result = StmtExprMutator::Mutate_(region, mode);
     inside_ = previous;
     return result;
@@ -143,9 +145,10 @@ private:
         continue;
       }
       if (const auto *region = stmt.as<RegionStmtObj>();
-          region && region->op->name == "tl.attr" &&
+          region &&
+          (region->op->name == "tl.attr" || ascend::IsAscendBlock(region)) &&
           region->body_params.empty() && region->result_vars.empty() &&
-          GetAscendVFKind(region) == AscendVFKind::kNone) {
+          ascend::GetVFKind(region) == ascend::VFKind::kNone) {
         stmt = region->body;
         continue;
       }
@@ -177,9 +180,9 @@ private:
       return true;
     }
     if (const auto *region = stmt.as<RegionStmtObj>())
-      return region->op->name == "tl.attr" && region->body_params.empty() &&
-             region->result_vars.empty() &&
-             GetAscendVFKind(region) == AscendVFKind::kNone &&
+      return (region->op->name == "tl.attr" || ascend::IsAscendBlock(region)) &&
+             region->body_params.empty() && region->result_vars.empty() &&
+             ascend::GetVFKind(region) == ascend::VFKind::kNone &&
              StoreBody(region->body);
     return false;
   }
@@ -198,8 +201,15 @@ private:
     return analyzer_->Simplify(mutator->Mutate(expr).ValueOrUnchanged(expr));
   }
   bool Uses(const PrimExpr &expr, const PrimVar &variable) {
-    return UsesAnyVar(expr,
-                      [&](const VarObj *var) { return var == variable.get(); });
+    return ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+               expr,
+               [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+                 return (var == variable.get())
+                            ? ffi::WalkResult::Interrupt(
+                                  ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                            : ffi::WalkResult::Skip();
+               })
+        .has_value();
   }
   void RecordNarrowRange(const ForObj *loop) {
     if (loop->var.ty().bits() > 16 || !prim::IsOne(loop->step))
@@ -337,7 +347,7 @@ private:
                                 : name == "prim.sqrt" ? "vsqrt"
                                 : name == "prim.fabs" ? "vabs"
                                                       : nullptr;
-      auto arguments = NativeIntrinsicOperands(call);
+      auto arguments = DecodeCallOperands(call);
       if (instruction && arguments.size() == 1) {
         auto input = Decompose(arguments[0].as_or_throw<PrimExpr>(), dtype,
                                mask, statements);
@@ -345,6 +355,12 @@ private:
         Map<String, Any> annotations;
         if (arguments.size() != call->args.size())
           annotations = DecodeTileOpArguments(call).annotations;
+        else if (call->attrs) {
+          if (auto attrs = call->attrs.value().as<DictAttrs>()) {
+            annotations = attrs.value()->dict;
+            annotations.erase("tl.source_annotation_keys");
+          }
+        }
         statements->push_back(
             Bind(output,
                  Intrinsic(instruction, output->ty,
@@ -358,12 +374,23 @@ private:
                   expression.as<VarObj>();
     if (const auto *cast = expression.as<prim::CastObj>()) {
       bool has_load = false;
-      VisitNativePostOrder(Evaluate(cast->value), [&](const ObjectRef &node) {
-        has_load |= node.as<TensorLoadObj>() != nullptr;
-      });
-      scalar = !UsesAnyVar(cast->value, [&](const VarObj *var) {
-        return vector_var_ && var == vector_var_.value().get();
-      }) && !has_load;
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          Evaluate(cast->value),
+          [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            has_load |= node.as<TensorLoadObj>() != nullptr;
+            return ffi::WalkResult::Advance();
+          });
+      scalar =
+          !ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+               cast->value,
+               [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+                 return (vector_var_ && var == vector_var_.value().get())
+                            ? ffi::WalkResult::Interrupt(
+                                  ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                            : ffi::WalkResult::Skip();
+               })
+               .has_value() &&
+          !has_load;
     }
     if (scalar && !Uses(expression, *vector_var_)) {
       auto value = Substitute(expression);
@@ -646,7 +673,7 @@ private:
     for (const char *key :
          {"transpose", "nd2nz", "dual_dst_ctl", "data_select"})
       if (auto value = decoded.annotations.Get(key))
-        TVM_FFI_CHECK(!AscendVFBoolean(*value), ValueError)
+        TVM_FFI_CHECK(!AnnotationAsBool(*value), ValueError)
             << "SIMD_VF copy does not accept DMA transform " << key;
     int64_t src_total, dst_total;
     auto src_extents = Extents(source, &src_total);
@@ -727,7 +754,7 @@ private:
       TVM_FFI_CHECK(dst_shape[dim] == 1 &&
                         dst_shape[1 - dim] == src_shape[1 - dim],
                     ValueError);
-    auto operation = AscendVFString(decoded.operands[2]);
+    auto operation = decoded.operands[2].as_or_throw<StringImm>()->value;
     bool absolute = operation == "abssum" || operation == "absmax";
     bool sum = operation == "sum" || operation == "abssum";
     bool maximum = operation == "max" || operation == "absmax";
@@ -738,7 +765,10 @@ private:
         << "Unsupported SIMD_VF reduction " << operation;
     TVM_FFI_CHECK(!bitwise || type.MatchesCode(kDLInt, kDLUInt), TypeError)
         << "Bitwise SIMD_VF reduction requires integer data";
-    bool clear = AscendVFBoolean(decoded.operands[4]);
+    auto clear_flag = decoded.operands[4].as_or_throw<IntImm>();
+    TVM_FFI_CHECK(clear_flag->value == 0 || clear_flag->value == 1, ValueError)
+        << "SIMD_VF reduce clear must be a boolean literal";
+    bool clear = clear_flag->value == 1;
     const char *element_op = sum                     ? "vadd"
                              : maximum               ? "vmax"
                              : minimum               ? "vmin"
@@ -803,12 +833,11 @@ private:
       return value;
     };
     auto unary = [&](Var input, const char *op) {
-      Var output = Register(type);
-      body.push_back(
-          Bind(output,
-               Intrinsic(op, output->ty, {input, mask, Text("MODE_ZEROING")},
-                         call->loc),
-               call->loc));
+      Call operation(std::nullopt, Op::Get(String("tl.simd.") + op),
+                     {input, mask, Text("MODE_ZEROING")}, std::nullopt, {},
+                     call->loc);
+      Var output = Register(operation->ty.as_or_throw<PrimType>().WithLanes(1));
+      body.push_back(Bind(output, operation, call->loc));
       return output;
     };
     auto combine = [&](Var left, Var right) {
@@ -835,8 +864,19 @@ private:
         Var value = load(src, {repeat, I32(column)}, bitwise);
         if (absolute)
           value = unary(value, "vabs");
-        if (!bitwise)
+        if (!bitwise) {
           value = unary(value, horizontal_op);
+          if (sum && type.bits() == 16 && type.MatchesCode(kDLInt, kDLUInt)) {
+            // Integer vcadd returns 32-bit lanes. Pack their low halves before
+            // the existing 16-bit fold/store to retain modulo arithmetic.
+            Var packed = Register(type);
+            body.push_back(Bind(packed,
+                                Intrinsic("vpack", packed->ty,
+                                          {value, Text("LOWER")}, call->loc),
+                                call->loc));
+            value = packed;
+          }
+        }
         accumulator = accumulator ? combine(*accumulator, value) : value;
       }
     } else {

@@ -3,10 +3,14 @@
  * \brief infer the fragment/shared memory layout
  */
 
+#include "ascend/ir/block.h"
 #include "ir/analyzer.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/op/region.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
@@ -29,15 +33,18 @@
 #include "../../op/utils.h"
 #include "../../span_utils.h"
 #include "../common/loop_fusion_utils.h"
-#include "../common/native_layout_utils.h"
 #include "../common/pipeline_utils.h"
 #include "../common/union_find.h"
 #include "../loop_vectorize.h"
 #include "backend/common/target_utils.h"
+#include "ir/alias_analysis.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
 #include "ir/stmt_functor.h"
+#include "ir/tensor_utils.h"
 #include "layout_cost_model.h"
-#include "native_policy.h"
 #include "parallel_loop_layout_validator.h"
+#include "policy.h"
 
 namespace tvm {
 namespace tl {
@@ -109,13 +116,14 @@ bool FragmentReferencesForeignVars(const Fragment &fragment) {
   }
   bool foreign = false;
   auto scan = [&](const PrimExpr &expr) {
-    VisitNativePostOrder(expr, [&](const ObjectRef &obj) {
-      if (const auto *var = obj.as<VarObj>()) {
-        if (!allowed.count(var)) {
-          foreign = true;
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expr, [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+          if (!allowed.count(var)) {
+            foreign = true;
+          }
+
+          return ffi::WalkResult::Advance();
+        });
   };
   for (const auto &expr : fragment->GetForwardIndex()) {
     scan(expr);
@@ -246,7 +254,7 @@ private:
 
 class TensorUseDefCollector : public StmtExprVisitorWithAnalyzer {
 public:
-  explicit TensorUseDefCollector(NativeLayoutInferenceOptions options = {})
+  explicit TensorUseDefCollector(LayoutInferenceOptions options = {})
       : options_(std::move(options)) {}
 
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
@@ -789,9 +797,8 @@ private:
   }
 
   ffi::Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (op->op.as<OpObj>() &&
-        op->op.as_or_throw<Op>()->name == "tl.annotation") {
-      auto metadata = ReadNativeAnnotations(op);
+    if (op->op.as<OpObj>() && IsAnnotationCall(op)) {
+      auto metadata = ReadAnnotations(op);
       // The enclosing source owner already supplied the complete merged map,
       // including declarations later in this sequence. Do not replace it with
       // one earlier declaration's partial map while visiting its payload.
@@ -854,16 +861,17 @@ private:
     for (const TensorVar &tensor : infer->GetAccessOrder())
       addToUseList(tensor);
     const int index = static_cast<int>(infer_list_.size());
-    VisitNativePostOrder(op->body, [&](const ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>()) {
-        if (call->op.same_as(reducer_update())) {
-          auto update = ParseReducerUpdate(call);
-          reducer_update_sites_[update.reducer.get()].push_back(
-              ReducerUpdateSiteRecord{index, update.indices, update.value});
-          addToUseList(update.reducer);
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        op->body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          if (call->op.same_as(reducer_update())) {
+            auto update = ParseReducerUpdate(call);
+            reducer_update_sites_[update.reducer.get()].push_back(
+                ReducerUpdateSiteRecord{index, update.indices, update.value});
+            addToUseList(update.reducer);
+          }
+
+          return ffi::WalkResult::Advance();
+        });
     infer_list_stmt_.push_back(GetRef<For>(op));
     infer_list_.push_back(std::move(infer));
     thread_index_vec_.push_back(CurrentThreadIndex());
@@ -941,8 +949,17 @@ private:
     if (op->op.same_as(launch_thread_op()) &&
         op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
       thread_binding_ = op->body_params[0].as_or_throw<PrimVar>();
+    if (ascend::IsAscendBlock(op)) {
+      auto metadata = ascend::AscendBlockAnnotations(op);
+      for (const auto &[name, value] : CollectSourceBlockAnnotations(op->body))
+        metadata.Set(name, value);
+      for (const auto &[name, value] : metadata)
+        block_annotations_.Set(name, value);
+      if (auto value = metadata.Get(attr::kLayoutMap))
+        RecordLayoutMap(*value);
+    }
     if (op->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(op);
+      auto fields = ReadAnnotations(op);
       String key = fields.at("key").cast<String>();
       if (key == "tl.loop.annotations")
         loop_annotations_ = fields.at("value").cast<Map<String, Any>>();
@@ -977,16 +994,18 @@ private:
   void CollectFragmentBuffersFromExpr(const Expr &expr) {
     std::unordered_set<const VarObj *> expanded;
     std::function<void(const Expr &)> collect = [&](const Expr &value) {
-      VisitNativePostOrder(value, [&](const ObjectRef &node) {
-        if (const auto *load = node.as<TensorLoadObj>())
-          addToUseList(load->source.as_or_throw<TensorVar>());
-        else if (const auto *variable = node.as<VarObj>()) {
-          if (!expanded.insert(variable).second)
-            return;
-          if (auto bound = bind_var_to_expr_.Get(GetRef<Var>(variable)))
-            collect(*bound);
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          value, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (const auto *load = node.as<TensorLoadObj>())
+              addToUseList(load->source.as_or_throw<TensorVar>());
+            else if (const auto *variable = node.as<VarObj>()) {
+              if (!expanded.insert(variable).second)
+                return ffi::WalkResult::Advance();
+              if (auto bound = bind_var_to_expr_.Get(GetRef<Var>(variable)))
+                collect(*bound);
+            }
+            return ffi::WalkResult::Advance();
+          });
     };
     collect(expr);
   }
@@ -1002,14 +1021,17 @@ private:
   void ComputeFloatingFragmentBuffers(const Stmt &body) {
     std::unordered_set<const Object *> contained;
     for (const auto &op : infer_list_stmt_)
-      VisitNativePostOrder(
-          op, [&](const ObjectRef &node) { contained.insert(node.get()); });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          op, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            contained.insert(node.get());
+            return ffi::WalkResult::Advance();
+          });
     class Collector : public StmtExprVisitorWithAnalyzer {
     public:
       Collector(const std::unordered_set<const Object *> &contained,
                 std::unordered_map<TensorVar, Range, ObjectPtrHash,
                                    ObjectPtrEqual> &result,
-                const NativeLayoutInferenceOptions &options)
+                const LayoutInferenceOptions &options)
           : contained_(contained), result_(result), options_(options) {}
       ffi::Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
         if (options_.IsOpaque(op))
@@ -1031,8 +1053,7 @@ private:
         return StmtExprVisitorWithAnalyzer::Visit_(op);
       }
       ffi::Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-        if (op->op.as<OpObj>() &&
-            op->op.as_or_throw<Op>()->name == "tl.annotation")
+        if (op->op.as<OpObj>() && IsAnnotationCall(op))
           return std::nullopt;
         return StmtExprVisitorWithAnalyzer::Visit_(op);
       }
@@ -1057,15 +1078,15 @@ private:
       std::unordered_map<TensorVar, Range, ObjectPtrHash, ObjectPtrEqual>
           &result_;
       ffi::Optional<PrimVar> thread_;
-      const NativeLayoutInferenceOptions &options_;
+      const LayoutInferenceOptions &options_;
     };
     auto collector =
         make_object<Collector>(contained, floating_fragment_buffers_, options_);
     collector->Visit(body);
   }
 
-  NativeLayoutInferenceOptions options_;
-  NativeTensorAliases aliases_;
+  LayoutInferenceOptions options_;
+  TensorAliasGroups aliases_;
   Map<Expr, Array<TensorVar>> buffer_data_to_buffers_;
   Map<Expr, Layout> source_layouts_;
   Map<Var, Expr> bind_var_to_expr_;
@@ -1379,13 +1400,13 @@ private:
 class LayoutInferencer : public StmtExprMutatorWithAnalyzer {
 public:
   LayoutInferencer(LayoutInferenceResult result, sym::AnalyzerObj *analyzer,
-                   NativeLayoutInferenceOptions options)
+                   LayoutInferenceOptions options)
       : StmtExprMutatorWithAnalyzer(analyzer), result_(std::move(result)),
         options_(std::move(options)) {}
   using StmtExprMutatorWithAnalyzer::Mutate_;
 
   static tirx::Function Apply(tirx::Function function,
-                              const NativeLayoutInferenceOptions &options) {
+                              const LayoutInferenceOptions &options) {
     if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
       return function;
     function.CopyOnWrite()->body =
@@ -1404,9 +1425,9 @@ public:
         if (auto layout = result.layout_map.Get(*tensor))
           param_layouts.Set(*tensor, *layout);
     if (!param_layouts.empty())
-      body = SeqStmt({MakeNativeAnnotation({{attr::kLayoutMap, param_layouts}},
-                                           function->loc),
-                      body});
+      body = SeqStmt(
+          {MakeAnnotation({{attr::kLayoutMap, param_layouts}}, function->loc),
+           body});
     function.CopyOnWrite()->body = body;
     ParallelLoopLayoutValidator::Validate(body, options);
     return function;
@@ -1425,21 +1446,20 @@ public:
     if (auto tensor = op->var.as<TensorVar>()) {
       if (auto layout = result_.layout_map.Get(*tensor))
         return SeqStmt(
-            {result, MakeNativeAnnotation(
-                         {{attr::kLayoutMap, LayoutMap{{*tensor, *layout}}}},
-                         op->loc)});
+            {result,
+             MakeAnnotation({{attr::kLayoutMap, LayoutMap{{*tensor, *layout}}}},
+                            op->loc)});
     }
     return result;
   }
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     if (const auto *call = op->value.as<CallObj>()) {
-      if (call->op.as<OpObj>() &&
-          call->op.as_or_throw<Op>()->name == "tl.annotation") {
-        auto metadata = ReadNativeAnnotations(call);
+      if (call->op.as<OpObj>() && IsAnnotationCall(call)) {
+        auto metadata = ReadAnnotations(call);
         metadata.erase(attr::kLayoutMap);
         return metadata.empty() ? Stmt(SeqStmt(ffi::Array<Stmt>{}))
-                                : MakeNativeAnnotation(metadata, op->loc);
+                                : MakeAnnotation(metadata, op->loc);
       }
     }
     return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
@@ -1461,17 +1481,16 @@ public:
       if (!IsConstInt(value, 1))
         metadata.Set(attr::kParallelLoopPredicate, value);
     }
-    return MakeNativeAttribute(nullptr, "tl.loop.annotations", metadata,
-                               SeqStmt(result), op->loc);
+    return MakeAttribute(nullptr, "tl.loop.annotations", metadata,
+                         SeqStmt(result), op->loc);
   }
 
 private:
   LayoutInferenceResult result_;
-  NativeLayoutInferenceOptions options_;
+  LayoutInferenceOptions options_;
 };
 
-tvm::transform::Pass
-LayoutInferenceWithPolicy(NativeLayoutInferenceOptions options) {
+tvm::transform::Pass LayoutInferenceWithPolicy(LayoutInferenceOptions options) {
   auto pass = [options = std::move(options)](tirx::Function function, IRModule,
                                              tvm::transform::PassContext) {
     VectorizeMemoryScope memory_scope(function);

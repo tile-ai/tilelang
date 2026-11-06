@@ -6,6 +6,7 @@
 #include "../ir/analyzer.h"
 #include "../op/builtin.h"
 #include "common/int64_promoter.h"
+#include "op/builtin.h"
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/reflection/registry.h>
@@ -59,7 +60,7 @@ public:
     // tl.ptr_access still counts logical elements. Its offset must be wide
     // before LowerAccessPtr scales it to bytes, just like a native byte offset.
     if (call->op.same_as(tirx::ptr_byte_offset_op()) ||
-        call->op.same_as(Op::Get("tl.ptr_access"))) {
+        call->op.same_as(tl::ptr_access())) {
       auto args = call->args;
       args.Set(1, RewriteIndex(args[1].as_or_throw<PrimExpr>()));
       return Call(call->ty, call->op, args, call->attrs, call->ty_args,

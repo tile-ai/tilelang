@@ -1,5 +1,7 @@
 """Preserve source allocation lifetimes before proving CPU grid privacy."""
 
+from tilelang.language import _annotation_codec
+
 # These regressions require distinct nested IR regions and conditional scopes.
 # ruff: noqa: SIM102, SIM117
 
@@ -14,7 +16,7 @@ from tvm_tirx.tirx.layout import Iter
 import tilelang
 import tilelang.cpu.language as T
 import tilelang.cpu.transform
-from tilelang.language import _native
+
 from tilelang.transform import PassConfigKey
 
 
@@ -322,7 +324,7 @@ def test_source_allocation_never_leaves_its_type_dependencies(dependency):
 def test_explicit_source_lexical_scope_only_restricts_local_like_storage(scope):
     bx = ir.Var("bx", "int32")
     tensor = ir.Var("scratch", tirx.TensorType((4,), "int32", scope=scope, layout="default"))
-    schema, payload = _native.encode_annotations({"node": None, "key": "lexical_alloc_scope", "value": 1})
+    schema, payload = _annotation_codec.encode_annotations({"node": None, "key": "lexical_alloc_scope", "value": 1})
     region = ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, _allocate(tensor, source=True))
     module = _prepare(_function(ir.For(bx, 0, 4, 1, ir.ForKind.DEFAULT, region)))
     ((_, parents),) = _allocations(module)
@@ -369,7 +371,7 @@ def test_view_of_source_allocation_keeps_the_same_persistent_storage(target):
 
 
 def _source_attr(key, body):
-    schema, payload = _native.encode_annotations({"node": None, "key": key, "value": 1})
+    schema, payload = _annotation_codec.encode_annotations({"node": None, "key": key, "value": 1})
     return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
 
 
@@ -426,7 +428,7 @@ def test_non_cpu_finalizer_consumes_only_source_origin(kind, target):
     call = ir.Call("tirx.alloc_tensor", [], attrs=annotations, ty_args=[tensor.ty], loc=location)
     function = _function(ir.Bind(tensor, call)).with_attr("target", Target(target))
     before = to_json_graph_str(function)
-    module = tilelang.transform.FinalizeAnnotations(kind)(ir.IRModule.from_expr(function))
+    module = tilelang.transform.LowerSourceAllocations()(ir.IRModule.from_expr(function))
     ((allocation, parents),) = _allocations(module)
     assert not parents and allocation.var.same_as(tensor)
     result = allocation.value
@@ -445,11 +447,11 @@ def test_cpu_finalization_rejects_unplanned_source_allocation(target):
     function = _function(_allocate(tensor, source=True)).with_attr("target", Target(target))
     module = ir.IRModule.from_expr(function)
     before = to_json_graph_str(function)
-    with pytest.raises(ValueError, match="LowerCPUKernelLaunch.*before FinalizeAnnotations"):
-        tilelang.transform.FinalizeAnnotations(target)(module)
+    with pytest.raises(ValueError, match="LowerCPUKernelLaunch.*before LowerSourceAllocations"):
+        tilelang.transform.LowerSourceAllocations()(module)
     assert to_json_graph_str(function) == before
     module = tilelang.cpu.transform.LowerCPUKernelLaunch()(module)
-    module = tilelang.transform.FinalizeAnnotations(target)(module)
+    module = tilelang.transform.LowerSourceAllocations()(module)
     ((allocation, _),) = _allocations(module)
     assert "tl.source_block_alloc" not in allocation.value.attrs
 
@@ -457,14 +459,14 @@ def test_cpu_finalization_rejects_unplanned_source_allocation(target):
 def test_finalizing_source_allocation_requires_a_bound_target():
     tensor = _tensor("scratch", (4,))
     module = ir.IRModule.from_expr(_function(_allocate(tensor, source=True)))
-    with pytest.raises(ValueError, match="source allocation origins requires a bound target"):
-        tilelang.transform.FinalizeAnnotations()(module)
+    with pytest.raises(ValueError, match="requires a bound target for source allocation origins"):
+        tilelang.transform.LowerSourceAllocations()(module)
 
 
 def test_finalizer_keeps_unmarked_native_allocation_without_a_target():
     tensor = _tensor("scratch", (4,))
     module = ir.IRModule.from_expr(_function(_allocate(tensor, source=False)))
-    result = tilelang.transform.FinalizeAnnotations()(module)
+    result = tilelang.transform.LowerSourceAllocations()(module)
     assert tvm_ffi.structural_equal(result, module)
 
 
@@ -484,7 +486,7 @@ def test_consuming_source_origin_does_not_relax_shared_arena_annotation_checks()
             )
         )
     function = _function(allocations).with_attr("target", Target({"kind": "cuda", "arch": "sm_100a"}))
-    module = tilelang.transform.FinalizeAnnotations("cuda")(ir.IRModule.from_expr(function))
+    module = tilelang.transform.LowerSourceAllocations()(ir.IRModule.from_expr(function))
     with pytest.raises(ValueError, match="allocation annotations to be consumed first"):
         tilelang.transform.MergeSharedMemoryAllocations()(module)
 
@@ -494,4 +496,4 @@ def test_non_cpu_finalizer_rejects_an_invalid_source_origin_marker():
     call = ir.Call("tirx.alloc_tensor", [], attrs={"tl.source_block_alloc": ir.const(False, "bool")}, ty_args=[tensor.ty])
     function = _function(ir.Bind(tensor, call)).with_attr("target", Target({"kind": "cuda", "arch": "sm_100a"}))
     with pytest.raises(ValueError, match="must be the source allocation marker"):
-        tilelang.transform.FinalizeAnnotations("cuda")(ir.IRModule.from_expr(function))
+        tilelang.transform.LowerSourceAllocations()(ir.IRModule.from_expr(function))

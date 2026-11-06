@@ -55,7 +55,7 @@ def test_expand_preserves_sf_tag():
 )
 @pytest.mark.parametrize("python_encoder", [False, True])
 def test_annotation_json_and_renew_def_preserve_fractal_kind_and_captures(factory, dtype, kind, python_encoder):
-    from tilelang.language._native import encode_annotations
+    from tilelang.language._annotation_codec import encode_annotations
 
     n = ir.Var("planes", "int32")
     buf = ir.Var("A", tirx.TensorType((n, 16, 32), dtype, scope="shared.l1"))

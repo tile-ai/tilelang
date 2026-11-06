@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "backend/common/codegen/codegen_py.h"
-#include "native_ascend_ir.h"
+#include "ir/analyzer.h"
 
 namespace tvm {
 namespace codegen {

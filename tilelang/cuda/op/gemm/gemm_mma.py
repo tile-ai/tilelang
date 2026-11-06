@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
@@ -8,7 +10,7 @@ from tilelang.cuda.intrinsics.macro.mma_macro_generator import (
 from tilelang.utils.language import is_shared, is_fragment, is_full_region
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
+
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -19,7 +21,7 @@ GEMM_INST_MMA = "cuda.mma"
 class GemmMMA(GemmBase):
     intrin_emitter_cls = TensorCoreIntrinEmitter
 
-    def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
+    def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: _ir.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_MMA)
         warp_row_tiles = int(self.M // m_warp)
         warp_col_tiles = int(self.N // n_warp)
@@ -72,8 +74,8 @@ class GemmMMA(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.

@@ -6,7 +6,8 @@ from tvm_tirx import ir, tirx
 
 import tilelang.ascend.language as T
 from tilelang.ascend.analysis import VFChecker
-from tilelang.language._native import encode_annotations
+from testing.ascend._block import attribute as _scope_attribute
+from tilelang.testing.ir import collect_nodes
 
 
 def _tensor(name, dtype="float32", scope="global", size=64):
@@ -18,8 +19,7 @@ def _allocate(tensor):
 
 
 def _attribute(key, value, body):
-    schema, payload = encode_annotations({"node": None, "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(None, key, value, body)
 
 
 def _vf(name, body, buffers=()):
@@ -156,9 +156,11 @@ def test_registered_operator_effects_and_lexical_handlers_do_not_depend_on_spell
     operation.set_signature(var_args="operands_and_annotations")
     operation.set_attr("TLOpBuilder", fill.get_attr("TLOpBuilder"))
     observed = []
+    observed_layouts = []
 
     def lexical_handler(op, annotations):
         observed.append(int(annotations.get("testing.lexical", -1)))
+        observed_layouts.append(annotations.get("layout_map", {}).get(value))
         return op
 
     operation.set_attr("TLOpBlockAnnotationHandler", lexical_handler)
@@ -168,14 +170,32 @@ def test_registered_operator_effects_and_lexical_handlers_do_not_depend_on_spell
         return ir.Evaluate(ir.Call(operation, original.args, attrs=original.attrs, ty=original.ty))
 
     value = _tensor("value", "int32", "local.var", 1)
-    nested = _attribute("tl.sblock", {"name": "inner", "annotations": {"testing.lexical": 29}}, call(value))
+    outer_layout = T.Layout((1,), lambda i: i)
+    inner_layout = T.Layout((1,), lambda i: i + 1)
+
+    def layout_note(layout):
+        return ir.Evaluate(ir.Call("tl.layout_map", [], attrs={"layout_map": {value: layout}}))
+
+    nested = _attribute(
+        "tl.sblock",
+        {"name": "inner", "annotations": {"testing.lexical": 29}},
+        [layout_note(inner_layout), call(value)],
+    )
     body = _attribute(
         "tl.sblock",
         {"name": "SIMT_VF", "annotations": {"testing.lexical": 17}},
-        [_allocate(value), call(value), nested, call(value)],
+        [_allocate(value), layout_note(outer_layout), call(value), nested, call(value)],
     )
     _check(_kernel(body))
     assert observed == [17, 29, 17]
+    assert all(
+        actual.same_as(expected)
+        for actual, expected in zip(
+            observed_layouts,
+            [outer_layout, inner_layout, outer_layout],
+            strict=True,
+        )
+    )
     _check(_kernel(_vf("SIMT_VF", call(value)), buffers=[value]), "pointer-type capture")
 
 
@@ -193,4 +213,7 @@ def test_source_dsl_vf_regions_are_accepted_without_rewriting():
                 local = local + 1
             T.copy(ub, A)
 
+    blocks = [node for node in collect_nodes(before, ir.RegionStmt) if node.op.name == "tl.ascend_block"]
+    assert [block.attrs["name"] for block in blocks] == ["SIMD_VF", "SIMT_VF"]
+    assert all(not block.args and set(block.attrs.keys()) == {"name", "annotations"} for block in blocks)
     _check(ir.IRModule({"main": before}))

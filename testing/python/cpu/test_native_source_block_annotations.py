@@ -8,7 +8,8 @@ from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.language as T
-from tilelang.language._native import _emit_annotation, encode_annotations
+from tilelang.language._annotation_codec import emit_annotation as _emit_annotation
+from tilelang.language._annotation_codec import encode_annotations
 
 
 def _execute(function, padding, *extra):
@@ -118,13 +119,13 @@ def test_invalid_source_origin_marker_is_rejected(marker):
         tvm_ffi.get_global_func("tl.CollectSourceBlockAnnotations")(body)
     function = _function(_scope("tl.kernel", body))
     with pytest.raises(ValueError, match="source annotation marker"):
-        tilelang.transform.FinalizeAnnotations("llvm")(ir.IRModule({"main": function}))
+        tilelang.transform.LowerSourceAnnotations()(ir.IRModule({"main": function}))
 
 
 def test_finalizer_consumes_only_the_internal_origin_marker():
     body = _scope("tl.kernel", _annotation({"tl.source_block_annotation": True}))
     function = _function(body)
-    finalized = tilelang.transform.FinalizeAnnotations("llvm")(ir.IRModule({"main": function}))["main"]
+    finalized = tilelang.transform.LowerSourceAnnotations()(ir.IRModule({"main": function}))["main"]
     assert tirx.analysis.check_well_formed(finalized)
     assert len(finalized.body.seq) == 1
     assert finalized.body.seq[0].op.name == "tl.lexical_scope"
@@ -132,5 +133,6 @@ def test_finalizer_consumes_only_the_internal_origin_marker():
     # Ordinary user hints have no consumer; a reserved internal contract must
     # still fail after the source-origin marker itself has been consumed.
     unknown = _scope("tl.kernel", _annotation({"tl.source_block_annotation": True, "tl.unconsumed_source_block_contract": 1}))
-    with pytest.raises(ValueError, match="Unconsumed TileLang annotation"):
-        tilelang.transform.FinalizeAnnotations("llvm")(ir.IRModule({"main": _function(unknown)}))
+    pending = tilelang.transform.LowerSourceAnnotations()(ir.IRModule({"main": _function(unknown)}))
+    with pytest.raises(ValueError, match="Unconsumed TileLang call"):
+        tilelang.transform.VerifyLoweredAnnotations()(pending)

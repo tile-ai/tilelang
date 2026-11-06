@@ -7,7 +7,7 @@
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
-#include "op/native_intrinsic.h"
+#include "ir/annotations.h"
 #include "op/utils.h"
 #include "rocm/op/builtin.h"
 #include "rocm/target_utils.h"

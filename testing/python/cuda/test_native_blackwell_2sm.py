@@ -31,7 +31,7 @@ def hints(region):
 
 
 def gemm(enabled=1, blockscaled=False, name="gemm"):
-    from tilelang.language._native import call_intrin
+    from tilelang.language._intrinsics import call_intrin
 
     tensors = [
         ir.Var("A", tirx.TensorType((128, 32), "float16", scope="shared")),
@@ -59,9 +59,9 @@ def gemm(enabled=1, blockscaled=False, name="gemm"):
         args.append(integer(0))
     attributes = {} if enabled is None else {"use_2cta": enabled if isinstance(enabled, ir.Expr) else integer(enabled)}
     call = call_intrin("handle", "tl.tileop.gemm_blockscaled" if blockscaled else "tl.tileop." + name, *args, annotations=attributes)
-    # Verify these are actual native TileOperator objects, rather than a test
-    # registration that happens to have the expected operation name.
-    assert tvm_ffi.get_global_func("tl.testing.ParseNativeOperator")(call) is not None
+    # The registered validator invokes the actual TLOpBuilder and checks its
+    # result, without depending on a private research-only testing hook.
+    call.validate()
     return [*(ir.Bind(tensor, ir.Call("tirx.alloc_tensor", [], ty_args=[tensor.ty])) for tensor in tensors), ir.Evaluate(call)]
 
 

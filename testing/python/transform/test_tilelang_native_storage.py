@@ -26,7 +26,8 @@ def physical_module(function):
     module = tirx.transform.BindTarget(Target({"kind": "cuda", "arch": "sm_80"}))(module)
     # Follow the production preparation boundary: source-allocation ownership
     # metadata is consumed before either storage planner receives physical IR.
-    module = tilelang.transform.FinalizeAnnotations("cuda")(module)
+    module = tilelang.transform.LowerSourceAllocations()(module)
+    module = tilelang.transform.LowerSourceAnnotations()(module)
     module = tilelang.transform.PrepareTensorLayouts()(module)
     module = tirx.transform.LowerTensorLayouts()(module)
     return tirx.transform.FlattenTensor()(module)

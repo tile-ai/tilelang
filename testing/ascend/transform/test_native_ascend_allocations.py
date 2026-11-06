@@ -8,6 +8,7 @@ from tvm_tirx import ir, sym, tirx
 
 from tilelang.testing.packed import compile_packed_function
 from tvm_tirx.tirx.layout import S, TileLayout
+from testing.ascend._block import attribute as _scope_attribute, attribute_fields as _scope_fields, has_attribute
 
 
 def integer(value, dtype="int32"):
@@ -32,8 +33,7 @@ def annotation(fields):
 
 
 def attribute(key, value, body, node=None):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": node, "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(node, key, value, body)
 
 
 def objects(value, kind):
@@ -173,7 +173,7 @@ def test_cross_core_handshake_releases_only_its_local_pipe(release_pipe):
     l0a = tensor("l0a", scope="shared.l0a")
 
     def cube_copy(destination):
-        return intrinsic("copy_gm_to_cbuf", pointer(destination, mask=2), pointer(gm), 0, 16, 0, 4, 16, 0, 0, 0, 4)
+        return intrinsic("copy_gm_to_cbuf", pointer(destination, mask=2), pointer(gm), 0, 16, 0, 4, 16, 0, 0, 0, 4, "")
 
     first = attribute(
         "tl.sblock",
@@ -577,7 +577,7 @@ def test_single_version_opt_out_is_distinct_from_an_explicit_mode(mode, expected
 def compile_cpu(function, tmp_path):
     target = tvm_tirx.target.Target("c")
     function = function.with_attr("global_symbol", "main").with_attr("target", target)
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(ir.IRModule({"main": function}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": function}))
     (tmp_path / "lowered.json").write_text(ir.save_json(module))
     return compile_packed_function(module)
 
@@ -614,13 +614,7 @@ def test_padded_versions_and_flat_alias_execute_values_on_cpu(tmp_path):
 
 
 def block_fields(value):
-    result = []
-    for region in objects(value, ir.RegionStmt):
-        if region.op.name == "tl.attr":
-            decoded = tvm_ffi.get_global_func("tl.DecodeAnnotations")(region.args[0], region.attrs["annotation_schema"])
-            if decoded["key"] == "tl.sblock":
-                result.append(decoded["value"])
-    return result
+    return [_scope_fields(region)["value"] for region in objects(value, ir.RegionStmt) if has_attribute(region, "tl.sblock")]
 
 
 def test_manual_version_reads_the_real_sblock_annotation_envelope():

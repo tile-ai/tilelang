@@ -33,8 +33,8 @@ def print_fragment_format(layout: T.Fragment) -> None:
         rep_suffix = " (partials)" if isinstance(layout, PartialFragment) else ""
         lines = [
             f"  Shape: {input_shape} -> {output_shape}",
-            f"  Thread: {layout.forward_thread}",
-            f"  Index:  {layout.forward_index}",
+            f"  Thread: {layout.thread}",
+            f"  Index:  {layout.get_forward_index()}",
             f"  Replicate:  {layout.replicate_size}{rep_suffix}",
         ]
         print("\n".join(lines))
@@ -125,8 +125,8 @@ def LayoutVisual(formats: str | Sequence[str] = ""):
     """Print/plot the native lexical layout_map published by layout inference.
 
     TensorVar keys stay bound at the publication site, including annotations
-    following local allocation Bind statements. The layout objects are the
-    explicit TileLang inference representation decoded from schema version 1.
+    following local allocation Bind statements. The layout objects are read
+    directly from the layout declaration's typed attributes.
     """
 
     def pass_fn(func, _mod, _ctx):

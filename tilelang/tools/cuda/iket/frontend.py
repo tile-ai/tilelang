@@ -9,7 +9,8 @@ from typing import Any
 
 from tvm_tirx import ir
 
-from tilelang.language._native import call_extern, evaluate as T_evaluate
+from tilelang.language._intrinsics import call_extern
+from tilelang.language._construction import evaluate as T_evaluate
 
 from .metadata import MAX_EVENT_NAME_BYTES, Event, encode_event
 

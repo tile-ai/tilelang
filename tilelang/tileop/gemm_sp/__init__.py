@@ -1,5 +1,7 @@
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
 from tilelang.tileop.gemm_sp.registry import resolve_gemm_sp_impl
-from tilelang.language import _native as tirx
+
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Node
 from tvm_tirx.ir import Range
@@ -13,15 +15,15 @@ from tilelang.tileop import _register_default_callback
 
 @tvm_ffi.register_object("tl.GemmSP")
 class GemmSP(Node, Scriptable):
-    A: tirx.Buffer
-    E: tirx.Buffer
-    B: tirx.Buffer
-    C: tirx.Buffer
+    A: _tensor_spec.TensorValue
+    E: _tensor_spec.TensorValue
+    B: _tensor_spec.TensorValue
+    C: _tensor_spec.TensorValue
 
-    aRegion: tirx.BufferRegion
-    eRegion: tirx.BufferRegion
-    bRegion: tirx.BufferRegion
-    cRegion: tirx.BufferRegion
+    aRegion: _ir.TensorRegion
+    eRegion: _ir.TensorRegion
+    bRegion: _ir.TensorRegion
+    cRegion: _ir.TensorRegion
 
     M: int
     N: int
@@ -41,7 +43,7 @@ class GemmSP(Node, Scriptable):
         return self.infer_layout(target, thread_nums)
 
     @_register_default_callback("tl.gemm_sp.lower")
-    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: tirx.PrimExpr):
+    def gemm_sp_lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: _ir.Expr):
         function = self.lower(target, layout_map, thread_bounds, thread_index)
         return close_lowered_function(function)
 
@@ -50,7 +52,7 @@ class GemmSP(Node, Scriptable):
         impl_class = self._get_implementation_class(gemm_inst, target)
         return impl_class(self).infer_layout(target, thread_nums)
 
-    def lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: tirx.PrimExpr):
+    def lower(self, target: Target, layout_map: dict, thread_bounds: Range, thread_index: _ir.Expr):
         thread_nums = thread_bounds.extent
         gemm_inst = self._select_gemm_instruction(thread_nums, target)
         impl_class = self._get_implementation_class(gemm_inst, target)

@@ -4,7 +4,7 @@
  */
 #include "common/storage_size.h"
 #include "ir/analyzer.h"
-#include "op/native_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/backend/cuda/attr.h>
 #include <tvm/ffi/extra/structural_mutate.h>
@@ -164,12 +164,14 @@ public:
     target_ = function->GetAttr<Target>(tvm::attr::kTarget).value();
     for (const Var &parameter : function->params)
       parameters_.insert(parameter.get());
-    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>()) {
-        if (auto value = bind->value.as<PrimExpr>())
-          definitions_.Set(bind->var, value.value());
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+          if (auto value = bind->value.as<PrimExpr>())
+            definitions_.Set(bind->var, value.value());
+
+          return ffi::WalkResult::Advance();
+        });
   }
 
   Optional<VisitInterrupt> Visit_(const RegionStmtObj *region) final {
@@ -231,16 +233,19 @@ public:
       TVM_FFI_CHECK(parameters_.count(variable.get()), ValueError)
           << "Launch metadata refers to a device-local variable: " << variable;
     }
-    VisitNativePostOrder(expression, [](const ObjectRef &object) {
-      TVM_FFI_CHECK(!object.as<TensorLoadObj>(), ValueError)
-          << "Launch metadata cannot read device memory";
-      if (const auto *call = object.as<CallObj>()) {
-        TVM_FFI_CHECK(tvm::SideEffect(GetRef<Call>(call)) <=
-                          CallEffectKind::kPure,
-                      ValueError)
-            << "Launch metadata cannot evaluate device-dependent calls";
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        expression,
+        [](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          TVM_FFI_CHECK(!object.as<TensorLoadObj>(), ValueError)
+              << "Launch metadata cannot read device memory";
+          if (const auto *call = object.as<CallObj>()) {
+            TVM_FFI_CHECK(tvm::SideEffect(GetRef<Call>(call)) <=
+                              CallEffectKind::kPure,
+                          ValueError)
+                << "Launch metadata cannot evaluate device-dependent calls";
+          }
+          return ffi::WalkResult::Advance();
+        });
     return analyzer_->Simplify(expression);
   }
 

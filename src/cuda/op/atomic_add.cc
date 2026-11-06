@@ -4,6 +4,8 @@
  */
 
 #include "op/atomic_add.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/runtime/logging.h>

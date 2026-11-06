@@ -11,10 +11,6 @@ import itertools
 import tilelang as tl
 import tilelang.language as T
 from tilelang.autotuner import AutoTuner
-from tilelang.carver.template import MatmulTemplate
-from tilelang.carver.arch import CUDA
-from tilelang.carver.arch import CDNA
-from tilelang.carver.roller.rasterization import NoRasterization
 import torch
 
 
@@ -27,91 +23,36 @@ def ref_program(A, B):
     return A @ B.T
 
 
-def get_configs(M, N, K, with_roller=False, topk=20):
-    """
-    Generate a list of kernel tuning configuration dictionaries for a tiled matrix-multiply.
-
-    When with_roller is True this queries the MatmulTemplate roller to produce up to `topk` recommended
-    configurations (device-specific TensorCore-friendly tilings). Each returned dict contains:
-      - block_M, block_N, block_K: tile sizes
-      - num_stages: pipeline staging (0 means no explicit staging)
-      - thread_num: total threads used for the block
-      - enable_rasteration: whether a rasterization/swizzle layout was recommended (note spelling)
-
-    When with_roller is False this returns the Cartesian product of a fixed set of candidate
-    parameters; the returned dicts use the backward-compatible key name "enable_rasteration" for that flag.
-
-    Parameters:
-        M, N, K (int): GEMM dimensions used to generate valid tile sizes.
-        with_roller (bool): If True, use MatmulTemplate's roller to generate device-aware hints;
-            otherwise use a predefined candidate grid.
-        topk (int): Maximum number of roller hints to request when with_roller is True.
-
-    Returns:
-        List[dict]: A list of configuration dictionaries as described above.
-
-    Raises:
-        ValueError: if with_roller is True but the roller returns no hints.
-    """
-    if with_roller:
-        arch = CUDA("cuda") if torch.version.hip is None else CDNA("hip")
-        carve_template = MatmulTemplate(
-            M=M,
-            N=N,
-            K=K,
-            in_dtype=T.float16,
-            out_dtype=T.float16,
-            accum_dtype=T.float32,
-        ).with_arch(arch)
-
-        func = carve_template.equivalent_function()
-        assert func is not None, "Function is None"
-        roller_hints = carve_template.recommend_hints(topk=topk)
-        if roller_hints is None:
-            raise ValueError("No Roller Hints Found for TensorCore Scheduling")
-        configs = []
-        for hint in roller_hints:
-            config = {}
-            block_m, block_n = hint.block
-            warp_m, warp_n = hint.warp
-            # block_rows, block_cols represents warp partitioning
-            block_rows, block_cols = block_m // warp_m, block_n // warp_n
-            config["block_M"] = block_m
-            config["block_N"] = block_n
-            config["block_K"] = hint.rstep[0]
-            config["num_stages"] = hint.pipeline_stage if hint.pipeline_stage > 1 else 0
-            config["thread_num"] = block_rows * block_cols * 32
-            config["enable_rasteration"] = hint.rasterization_plan is not NoRasterization
-            configs.append(config)
-    else:
-        block_M = [64, 128, 256]
-        block_N = [64, 128, 256]
-        block_K = [32, 64]
-        num_stages = [0, 1, 2, 3]
-        thread_num = [128, 256]
-        enable_rasterization = [True, False]
-        _configs = list(
-            itertools.product(
-                block_M,
-                block_N,
-                block_K,
-                num_stages,
-                thread_num,
-                enable_rasterization,
-            )
+def get_configs():
+    """Return the Cartesian product of the predefined tuning parameters."""
+    block_M = [64, 128, 256]
+    block_N = [64, 128, 256]
+    block_K = [32, 64]
+    num_stages = [0, 1, 2, 3]
+    thread_num = [128, 256]
+    enable_rasterization = [True, False]
+    _configs = list(
+        itertools.product(
+            block_M,
+            block_N,
+            block_K,
+            num_stages,
+            thread_num,
+            enable_rasterization,
         )
+    )
 
-        configs = [
-            {
-                "block_M": c[0],
-                "block_N": c[1],
-                "block_K": c[2],
-                "num_stages": c[3],
-                "thread_num": c[4],
-                "enable_rasteration": c[5],  # keep param name for backward-compat
-            }
-            for c in _configs
-        ]
+    configs = [
+        {
+            "block_M": c[0],
+            "block_N": c[1],
+            "block_K": c[2],
+            "num_stages": c[3],
+            "thread_num": c[4],
+            "enable_rasteration": c[5],  # keep param name for backward-compat
+        }
+        for c in _configs
+    ]
     return configs
 
 
@@ -119,7 +60,6 @@ def get_best_config(
     M,
     N,
     K,
-    with_roller: bool = False,
     profile_backend: str = "event",
     execution_backend: str = "auto",
     warmup: int = 3,
@@ -127,7 +67,6 @@ def get_best_config(
     timeout: int = 30,
     skip_check: bool = False,
     cache_input_tensors: bool = False,
-    topk: int = 20,
     use_pipeline: bool = False,
     enable_grouped_compile: bool = False,
     group_compile_size: int = 2,
@@ -138,12 +77,10 @@ def get_best_config(
         M=M,
         N=N,
         K=K,
-        with_roller=with_roller,
         profile_backend=profile_backend,
         execution_backend=execution_backend,
         skip_check=skip_check,
         cache_input_tensors=cache_input_tensors,
-        topk=topk,
     )
     autotuner_result = autotuner.run(
         warmup=warmup,
@@ -162,12 +99,10 @@ def _build_autotuner(
     M: int,
     N: int,
     K: int,
-    with_roller: bool,
     profile_backend: str,
     execution_backend: str,
     skip_check: bool,
     cache_input_tensors: bool,
-    topk: int,
 ):
     def kernel(
         block_M=None,
@@ -207,7 +142,7 @@ def _build_autotuner(
 
         return main
 
-    configs = get_configs(M, N, K, with_roller, topk=topk)
+    configs = get_configs()
     autotuner = (
         AutoTuner.from_kernel(kernel=kernel, configs=configs)
         .set_compile_args(
@@ -277,7 +212,6 @@ def main(
     N: int = 4096,
     K: int = 4096,
     use_autotune: bool = False,
-    with_roller: bool = False,
     profile_backend: str = "event",
     use_pipeline: bool = False,
     enable_grouped_compile: bool = False,
@@ -292,7 +226,6 @@ def main(
             M,
             N,
             K,
-            with_roller=with_roller,
             profile_backend=profile_backend,
             use_pipeline=use_pipeline,
             enable_grouped_compile=enable_grouped_compile,
@@ -335,7 +268,6 @@ if __name__ == "__main__":
     parser.add_argument("--n", type=int, default=4096, help="Matrix dimension N")
     parser.add_argument("--k", type=int, default=4096, help="Matrix dimension K")
     parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune for matmul configs")
-    parser.add_argument("--with_roller", action="store_true", default=False, help="Whether to enable BitBLAS roller for search space")
     parser.add_argument("--profile_backend", type=str, default="event", help="Profiler backend")
     parser.add_argument("--use_pipeline", action="store_true", default=False, help="Enable compile/benchmark pipeline in autotune")
     parser.add_argument("--enable_grouped_compile", action="store_true", default=False, help="Enable grouped compilation in autotune")
@@ -356,7 +288,6 @@ if __name__ == "__main__":
         N=args.n,
         K=args.k,
         use_autotune=args.use_autotune,
-        with_roller=args.with_roller,
         profile_backend=args.profile_backend,
         use_pipeline=args.use_pipeline,
         enable_grouped_compile=args.enable_grouped_compile,

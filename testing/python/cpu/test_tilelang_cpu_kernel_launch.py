@@ -65,7 +65,7 @@ def test_cpu_launch_thread_count_is_per_kernel(parallel):
     with tvm_tirx.transform.PassContext(config={"tl.cpu_parallel": parallel}):
         materialized = _materialize(mod)
         prepared = tilelang.cpu.transform.LowerCPUKernelLaunch()(materialized)
-        lowered = tilelang.transform.LowerOpaqueBlock()(prepared)
+        lowered = tilelang.transform.LowerSourceAnnotations()(prepared)
     result = prepared["main"]
     loops = _nodes(result, ir.For)
     assert len(loops) == 4 and all(loop.kind == ir.ForKind.DEFAULT for loop in loops)

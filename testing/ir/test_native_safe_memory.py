@@ -1,5 +1,8 @@
 """Native TileLang bounds/padding passes executed through its packed C host."""
 
+from tilelang.language import _annotation_codec
+from tilelang.language import _intrinsics
+
 import numpy as np
 import pytest
 import tvm_ffi
@@ -7,7 +10,7 @@ import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang.cpu.language as T
-from tilelang.language import _native
+
 from tilelang.testing.packed import compile_packed_function
 
 
@@ -54,7 +57,7 @@ def test_safe_value_scope_restores_enclosing_annotation():
         with T.Kernel(1):
             T.annotate_safe_value({A: -2.0})
             B[0] = A[n]
-            with _native.attr(None, "safe_value_map", {A: -5.0}):
+            with _annotation_codec.attr(None, "safe_value_map", {A: -5.0}):
                 B[1] = A[n]
             B[2] = A[n]
             B[3] = A[0]
@@ -108,7 +111,7 @@ def test_async_copy_padding_retains_metadata_and_zero_bit_pattern(padding):
             scratch = T.alloc_shared((8,), "float32")
             T.annotate_safe_value({A: padding})
             for i in T.serial(8):
-                _native.call_intrin(
+                _intrinsics.call_intrin(
                     "void",
                     "tl.ptx_cp_async",
                     T.access_ptr(scratch[i], "w", 1),

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang import language as T
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
 
 
 GEMM_INST_SCALAR = "cpu.scalar"
@@ -21,8 +22,8 @@ class GemmScalar(GemmBase):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         M, N, K = self.M, self.N, self.K
         A_buf = self.ARegion.source

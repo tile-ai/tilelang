@@ -77,7 +77,7 @@ def LowerSharedTmem():
 def LowerClusterLaunch():
     """Convert per-kernel cluster requirements to native CUDA launch operands.
 
-    Run after LowerTileOp and LowerSharedTmem and before FinalizeAnnotations.
+    Run after LowerTileOp and LowerSharedTmem and before LowerSourceAnnotations.
     Final grid/block extents, dynamic shared bytes and launch flags are resolved
     later by LowerDeviceKernelLaunch, after device preparation.
     """
@@ -150,19 +150,26 @@ def InjectTcgen05Fence():
     return _ffi_api.InjectTcgen05Fence()  # type: ignore
 
 
-def AnnotateWarpGroupRegAlloc():
-    """Inject set_max_nreg calls into warp-specialized functions.
+def AnnotateWarpGroupRegAlloc(enable_register_inference: bool = True):
+    """Consume warp-specialization scopes and optionally infer register calls.
 
     This pass analyzes the function to collect register hints from set_max_nreg
     and no_set_max_nreg calls, then injects appropriate set_max_nreg calls into
     producer and consumer branches of warp-specialized code.
+
+    Parameters
+    ----------
+    enable_register_inference : bool
+        Whether to insert inferred set_max_nreg calls. Explicit runtime calls
+        are preserved, and consumed register hints and WS scopes are retired
+        in both modes after shared-memory planning and synchronization.
 
     Returns
     -------
     fpass : tvm_tirx.transform.Pass
         The result pass
     """
-    return _ffi_api.AnnotateWarpGroupRegAlloc()  # type: ignore
+    return _ffi_api.AnnotateWarpGroupRegAlloc(enable_register_inference)  # type: ignore
 
 
 def MaterializeWSSchedule():

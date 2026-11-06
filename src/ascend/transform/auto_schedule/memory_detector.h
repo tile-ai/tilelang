@@ -1,4 +1,11 @@
+#include "ascend/transform/source_scopes.h"
+#include "ir/annotations.h"
 #include "ir/loop_math.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
+#include "transform/common/constr_visitor.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/op/region.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,6 +27,7 @@
 
 #pragma once
 
+#include "ascend/analysis/storage.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
@@ -27,7 +35,6 @@
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
 #include "ir_structure.h"
-#include "native_storage.h"
 #include "op/gemm.h"
 #include "op/gemm_blockscaled.h"
 #include "op/operator.h"
@@ -63,7 +70,8 @@ inline ScheduleUnitMetadata TaskCallAnnotations(const CallObj *call) {
     return DecodeTileOpArguments(call).annotations;
   ScheduleUnitMetadata values;
   for (const auto &[key, value] : attrs->dict)
-    values.Set(key, value);
+    if (key != "tl.source_annotation_keys")
+      values.Set(key, value);
   return values;
 }
 
@@ -88,9 +96,9 @@ inline void MergeL0Pitch(Map<Var, Optional<PrimExpr>> *pitches,
   pitches->Set(storage, pitch);
 }
 
-inline Map<Var, PrimExpr>
-GetCallL0Pitches(const Call &call, const LayoutMap &layouts,
-                 const NativeStorageContext &storage) {
+inline Map<Var, PrimExpr> GetCallL0Pitches(const Call &call,
+                                           const LayoutMap &layouts,
+                                           const StorageProvenance &storage) {
   Map<Var, PrimExpr> result;
   auto record = [&](const TensorRegion &region, size_t mn_axis,
                     Optional<PrimExpr> l0_pitch = std::nullopt) {
@@ -133,10 +141,10 @@ public:
   using StmtExprVisitor::Visit_;
   using Result = ffi::Optional<ffi::VisitInterrupt>;
   enum class AccessMode { kLogical, kPhysical };
-  explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical,
-                                LayoutMap layouts = {},
-                                NativeStorageContext storage = {},
-                                ConstrSet context = {})
+  explicit MemoryAccessDetector(
+      AccessMode mode = AccessMode::kLogical, LayoutMap layouts = {},
+      StorageProvenance storage = MakeAscendStorageProvenance(),
+      ConstrSet context = {})
       : layouts_(std::move(layouts)), mode_(mode), storage_(std::move(storage)),
         context_(std::move(context)) {}
 
@@ -218,7 +226,7 @@ private:
   AccessMode mode_;
   /*!\ brief Internal analyzer. */
   sym::Analyzer ana_{CreateTileLangAnalyzer()};
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   ConstrSet context_;
   std::unique_ptr<ConstrAnalyzerContext> proof_context_;
   /*! \brief let bindings inside the block */
@@ -304,9 +312,15 @@ private:
       if (pitch.has_value()) {
         PrimExpr value = ana_->Simplify(ResolveLets(pitch.value()));
         if (SideEffect(value) > CallEffectKind::kPure ||
-            UsesAnyVar(value, [&](const VarObj *var) {
-              return dom_map_.count(ffi::GetRef<Var>(var)) != 0;
-            }))
+            ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+                value,
+                [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+                  return (dom_map_.count(ffi::GetRef<Var>(var)) != 0)
+                             ? ffi::WalkResult::Interrupt(
+                                   ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                             : ffi::WalkResult::Skip();
+                })
+                .has_value())
           pitch = std::nullopt;
         else
           pitch = value;
@@ -385,14 +399,20 @@ private:
       return false;
 
     auto uses_active_loop = [&](const PrimExpr &expr) {
-      return UsesAnyVar(expr, [&](const VarObj *node) {
-        Var var = ffi::GetRef<Var>(node);
-        for (const auto &[loop_var, _] : loop_domains_) {
-          if (var.same_as(loop_var))
-            return true;
-        }
-        return false;
-      });
+      return ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+                 expr,
+                 [&](const VarObj *node) -> ffi::Expected<ffi::WalkResult> {
+                   Var var = ffi::GetRef<Var>(node);
+                   for (const auto &[loop_var, _] : loop_domains_) {
+                     if (var.same_as(loop_var))
+                       return (true) ? ffi::WalkResult::Interrupt(
+                                           ffi::VisitInterrupt(
+                                               ffi::GetRef<Var>(node)))
+                                     : ffi::WalkResult::Skip();
+                   }
+                   return ffi::WalkResult::Skip();
+                 })
+          .has_value();
     };
 
     ffi::Map<PrimVar, Range> input_iters;
@@ -747,7 +767,10 @@ private:
   }
 
   Result Visit_(const RegionStmtObj *op) final {
-    if (auto attribute = ReadTaskAttribute(op)) {
+    if (IsAscendBlock(op) || IsSemanticTask(op) || IsScheduleUnit(op) ||
+        IsStageScope(op))
+      return Visit(op->body);
+    if (auto attribute = ReadSourceAttribute(op)) {
       if (IsScheduleGuardAttribute(attribute->key)) {
         if (auto value = attribute->node.try_cast<PrimExpr>())
           Visit(*value);
@@ -1132,8 +1155,7 @@ private:
   Result Visit_(const CallObj *op) final {
     if (IsScheduledBind(op))
       return Visit(ReadScheduledBinding(op).value);
-    if (auto callee = op->op.as<Op>();
-        callee && callee.value()->name == "tl.annotation")
+    if (IsAnnotationCall(op))
       return std::nullopt;
     if (op->op.same_as(tl::loop_break()))
       has_loop_break_ = true;
@@ -1276,7 +1298,7 @@ private:
       VisitLogicalNd2NzCall(op);
       return std::nullopt;
     }
-    if (op->op.same_as(Op::Get("tl.access_ptr"))) {
+    if (op->op.same_as(tl::access_ptr())) {
       TVM_FFI_CHECK_EQ(op->args.size(), 3U, ValueError);
       auto load = op->args[0].as_or_throw<TensorLoad>();
       TensorVar tensor = load->source.as_or_throw<TensorVar>();
@@ -1355,11 +1377,10 @@ private:
     bool scatter = op->op.same_as(tl::ascend_nd2nz_scatter());
     for (size_t arg = 0; arg < arguments.size(); ++arg) {
       const auto *pointer = arg < 2 ? arguments[arg].as<CallObj>() : nullptr;
-      const auto *load =
-          pointer && pointer->op.same_as(Op::Get("tl.access_ptr")) &&
-                  pointer->args.size() == 3
-              ? pointer->args[0].as<TensorLoadObj>()
-              : nullptr;
+      const auto *load = pointer && pointer->op.same_as(tl::access_ptr()) &&
+                                 pointer->args.size() == 3
+                             ? pointer->args[0].as<TensorLoadObj>()
+                             : nullptr;
       if (!load) {
         Visit(arguments[arg]);
         continue;

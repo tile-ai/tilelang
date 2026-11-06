@@ -14,14 +14,22 @@ Thread-data mapping (per AMDGPU ISA):
 
 from __future__ import annotations
 
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from typing import Literal
 
 import tilelang.language as T
 from tilelang import _ffi_api
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
-from tilelang.language._native import Buffer, BufferLoad, BufferRegion, PrimExpr, Var
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import TensorLoad as BufferLoad
+from tvm_tirx.ir import TensorRegion as BufferRegion
+from tvm_tirx.ir import Expr as PrimExpr
+from tvm_tirx.ir import Var
 from tvm_tirx.tirx import IndexMap
 from tvm_ffi import convert
 
@@ -499,16 +507,16 @@ class WMMAIntrinEmitter:
     def _legalize_to_buffer_region(obj) -> BufferRegion:
         if isinstance(obj, BufferRegion):
             return obj
-        if isinstance(obj, Buffer):
-            mins = [tirx.IntImm("int32", 0) for _ in obj.shape]
+        if _tensor_spec.is_buffer_like(obj):
+            mins = [_ir.IntImm("int32", 0) for _ in obj.shape]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, obj.shape)]
-            return BufferRegion(obj, ranges)
+            return _ir.TensorRegion(obj, ranges, _ir.TensorRegionType(), _construction.current_location())
         if isinstance(obj, BufferLoad):
             region = get_buffer_region_from_load(obj)
             if region is not None:
                 return region
             mins = list(obj.indices)
-            ones = [tirx.IntImm("int32", 1) for _ in obj.indices]
+            ones = [_ir.IntImm("int32", 1) for _ in obj.indices]
             ranges = [Range.from_min_extent(m, e) for m, e in zip(mins, ones)]
-            return BufferRegion(obj.source, ranges)
+            return _ir.TensorRegion(obj.source, ranges, _ir.TensorRegionType(), _construction.current_location())
         raise ValueError(f"Unsupported argument type: {type(obj)}")

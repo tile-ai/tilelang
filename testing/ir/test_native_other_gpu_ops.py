@@ -40,7 +40,7 @@ def emit_source(value, backend, output):
     value = tvm_ffi.get_global_func("tl.transform.VectorizeLoop")(True)(ir.IRModule({"main": value}))["main"]
     value = run_pass("LegalizeSafeMemoryAccess", value)
     value = run_pass("LowerAccessPtr", value)
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")(value.attrs["target"].kind.name)(ir.IRModule({"main": value}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": value}))
     target = value.attrs["target"].with_host(tvm_tirx.target.Target("c"))
     lowering, _, finalize_device = tirx_pipeline(target=target)
     lowered = lowering(module)

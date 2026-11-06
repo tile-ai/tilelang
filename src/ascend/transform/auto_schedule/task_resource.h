@@ -26,7 +26,8 @@
 #pragma once
 
 #include "../ascend_pipe.h"
-#include "native_task_ir.h"
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
 
 #include <tvm/tirx/stmt_functor.h>
 
@@ -183,7 +184,7 @@ public:
   }
 
   ffi::Optional<ffi::VisitInterrupt> Visit_(const RegionStmtObj *op) final {
-    if (auto name = NativeBlockName(op)) {
+    if (auto name = BlockNameAtSourceBoundary(op)) {
       // A VF body is one task on its own hardware pipe. Its scalar internals
       // must not turn it into a multi-pipe task during boundary validation.
       usage.pipe_mask |= PipeMask(GetAscendBlockPipe(name.value()));

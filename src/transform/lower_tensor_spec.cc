@@ -24,6 +24,7 @@
 
 #include "../ir/analyzer.h"
 #include "../ir/annotations.h"
+#include "ir/stmt_functor.h"
 #include "tensor_descriptor.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -62,13 +63,8 @@ public:
 
   ffi::Optional<VisitInterrupt> Visit_(const EvaluateObj *op) final {
     const auto *call = op->value.as<CallObj>();
-    if (call && call->op.same_as(Op::Get("tl.annotation"))) {
-      auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
-      auto fields = DecodeAnnotations(
-                        call->args[0].as_or_throw<tvm::Tuple>(),
-                        attrs.GetAttr<Array<Any>>("annotation_schema").value())
-                        .cast<Map<Any, Any>>();
-      RecordFields(fields);
+    if (call && IsAnnotationCall(call)) {
+      RecordFields(ffi::Any(ReadAnnotations(call)).cast<Map<Any, Any>>());
     }
     return StmtExprVisitor::Visit_(op);
   }
@@ -133,7 +129,7 @@ private:
   }
 };
 
-class TensorSpecLowerer : public tirx::StmtExprMutator {
+class TensorSpecLowerer : public tl::LayoutMapMutator {
 public:
   explicit TensorSpecLowerer(const TensorSpecCollector &collector)
       : specs_(collector.specs), definitions_(collector.definitions) {
@@ -141,11 +137,11 @@ public:
       annotated_storage_.insert(SourceDataIdentity(tensor).get());
     }
   }
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
-    auto value = StmtExprMutator::Mutate_(op, mode)
+    auto value = LayoutMapMutator::Mutate_(op, mode)
                      .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                      .as_or_throw<Bind>();
     const auto *call = value->value.as<CallObj>();
@@ -197,7 +193,7 @@ public:
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
                                      InplaceMode mode) final {
-    auto value = StmtExprMutator::Mutate_(op, mode)
+    auto value = LayoutMapMutator::Mutate_(op, mode)
                      .ValueOrUnchanged(ffi::GetRef<TensorLoad>(op))
                      .as_or_throw<TensorLoad>();
     if (auto tensor = value->source.as<TensorVar>();
@@ -211,7 +207,7 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
                                  InplaceMode mode) final {
-    auto value = StmtExprMutator::Mutate_(op, mode)
+    auto value = LayoutMapMutator::Mutate_(op, mode)
                      .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                      .as_or_throw<TensorStore>();
     if (auto tensor = value->dest.as<TensorVar>();
@@ -226,7 +222,7 @@ public:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
     if (!op->op.same_as(Op::Get("tl.attr"))) {
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     }
     auto fields =
         DecodeAnnotations(
@@ -235,7 +231,7 @@ public:
             .cast<Map<Any, Any>>();
     if (!fields.count(String("key")) ||
         fields.at(String("key")).cast<String>() != "tl.tensor_spec") {
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     }
     Array<Stmt> prefix = LowerSpecs(fields.at(String("value")), op->loc);
     prefix.push_back(Mutate(op->body, mode).ValueOrUnchanged(op->body));
@@ -245,16 +241,18 @@ public:
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
                                  InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation"))) {
-      return StmtExprMutator::Mutate_(op, mode);
+    if (!call || !IsAnnotationCall(call)) {
+      return LayoutMapMutator::Mutate_(op, mode);
     }
+    if (call->op.same_as(layout_map_op()))
+      return LayoutMapMutator::Mutate_(op, mode);
     DictAttrs attrs = call->attrs.value().as_or_throw<DictAttrs>();
     auto schema = attrs.GetAttr<Array<Any>>("annotation_schema").value();
     auto fields =
         DecodeAnnotations(call->args[0].as_or_throw<tvm::Tuple>(), schema)
             .cast<Map<Any, Any>>();
     if (!fields.count(String("tl.tensor_spec"))) {
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     }
     Array<Stmt> prefix =
         LowerSpecs(fields.at(String("tl.tensor_spec")), op->loc);
@@ -276,7 +274,7 @@ public:
       Call retained(call->ty, call->op, call->args, DictAttrs(dict),
                     call->ty_args, call->loc);
       prefix.push_back(
-          StmtExprMutator::Mutate_(Evaluate(retained, op->loc).get(), mode)
+          LayoutMapMutator::Mutate_(Evaluate(retained, op->loc).get(), mode)
               .ValueOrUnchanged(Evaluate(retained, op->loc)));
     }
     return SeqStmt(prefix, op->loc);
@@ -533,6 +531,7 @@ private:
 tvm::transform::Pass LowerTensorSpec() {
   auto pass = [](tirx::Function function, IRModule,
                  tvm::transform::PassContext) {
+    CheckLayoutMapScopes(function);
     if (!(!function->GetAttr(tvm::attr::kDeclaration).value_or(false)))
       return function;
     function = LowerTensorDescriptorParameters(std::move(function));

@@ -2,7 +2,8 @@
  * \file lower_l2_persistent_annotation.cc
  * \brief Consume native L2 metadata without hiding tensor uses in attributes.
  */
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
@@ -21,9 +22,9 @@ public:
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *statement,
                             InplaceMode mode) final {
     const auto *call = statement->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!IsAnnotationCall(call))
       return StmtExprMutator::Mutate_(statement, mode);
-    auto annotations = ReadNativeAnnotations(call);
+    auto annotations = ReadAnnotations(call);
     auto hints = annotations.Get("l2_hit_ratio_map");
     if (!hints)
       return StmtExprMutator::Mutate_(statement, mode);
@@ -51,7 +52,7 @@ public:
     changed = true;
     if (annotations.empty())
       return SeqStmt({}, statement->loc);
-    return MakeNativeAnnotation(annotations, statement->loc);
+    return MakeAnnotation(annotations, statement->loc);
   }
 
   Map<String, Array<Expr>> entries;

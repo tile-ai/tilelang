@@ -1,10 +1,11 @@
+from tvm_tirx import ir as _ir
 from tilelang.tileop.gemm_sp.gemm_sp_base import GemmSPBase
 from tilelang.layout import make_swizzled_layout
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 from tilelang.utils.language import is_shared, is_fragment
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
+
 from tilelang import language as T
 from tilelang.transform.simplify import _Simplify
 
@@ -58,7 +59,7 @@ class GemmSPMMA(GemmSPBase):
         else:
             raise ValueError(f"Unsupported gemm combination, A: {str(self.A.scope())}, B: {str(self.B.scope())}")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_index: tirx.PrimExpr):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_index: _ir.Expr):
         thread_nums = thread_bounds.extent
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.
         local_thread_var = thread_index - thread_bounds.begin

@@ -47,7 +47,7 @@
 #include <vector>
 
 #include "ascend/op/builtin.h"
-#include "op/native_intrinsic.h"
+#include "ir/annotations.h"
 #include "transform/common/constr_visitor.h"
 
 namespace tvm {
@@ -88,7 +88,7 @@ std::optional<std::string> GetFlagHardEvent(const CallObj *call) {
   if (!call->op.same_as(ascend_set_flag()) &&
       !call->op.same_as(ascend_wait_flag()))
     return std::nullopt;
-  ICHECK_EQ(NativeIntrinsicOperands(call).size(), 2u)
+  ICHECK_EQ(DecodeCallOperands(call).size(), 2u)
       << "RewriteFlagToBuf: set_flag/wait_flag expects 2 args";
   const auto *he = call->args[0].as<StringImmObj>();
   ICHECK(he) << "RewriteFlagToBuf: hard_event arg must be a StringImm";

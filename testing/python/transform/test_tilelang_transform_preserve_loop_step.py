@@ -25,7 +25,7 @@ def test_lower_opaque_block_preserves_non_unit_loop_step():
         [loop],
     ).with_attr("global_symbol", "main")
 
-    mod = tl.transform.LowerOpaqueBlock()(tvm_tirx.IRModule.from_expr(before))
+    mod = tl.transform.LowerSourceAnnotations()(tvm_tirx.IRModule.from_expr(before))
     executable = compile_packed_function(mod["main"])
 
     output = tvm_tirx.runtime.tensor(np.zeros(6, dtype="int32"))
@@ -137,7 +137,7 @@ def _build_loop_source(backend, start, stop, step, kind, unroll_factor=None, lex
     # loop while applying only the annotation and tensor-address boundaries.
     target = tvm_tirx.target.Target(target_config)
     with target:
-        mod = tl.transform.LowerOpaqueBlock()(mod)
+        mod = tl.transform.LowerSourceAnnotations()(mod)
         mod = tirx.transform.LowerTensorLayouts()(mod)
         mod = tirx.transform.FlattenTensor()(mod)
         return build(mod, target).inspect_source()

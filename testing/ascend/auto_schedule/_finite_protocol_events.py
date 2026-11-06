@@ -10,7 +10,7 @@ from itertools import product
 
 import tvm_ffi
 from tvm_tirx import ir, sym
-from testing.ascend._ir import allocated_tensors, annotations, attribute_fields, nodes, scheduled_fields, substitute
+from testing.ascend._ir import is_annotation, allocated_tensors, annotations, attribute_fields, nodes, scheduled_fields, substitute
 
 
 def extract(module, parameters=None):
@@ -117,7 +117,10 @@ def extract(module, parameters=None):
             for child in statement.seq:
                 visit(child, environment, loops, core, stage, vector, guards)
         elif isinstance(statement, ir.RegionStmt):
-            assert statement.op.name == "tl.attr", ("unsupported region", statement.op.name)
+            assert statement.op.name in {"tl.attr", "tl.ascend_block", "tl.ascend.task", "tl.ascend.schedule_unit"}, (
+                "unsupported region",
+                statement.op.name,
+            )
             fields = attribute_fields(statement)
             key = fields["key"]
             if key == "tl.ascend_task":
@@ -190,7 +193,7 @@ def extract(module, parameters=None):
             call = statement.value
             assert isinstance(call, ir.Call) and isinstance(call.op, ir.Op)
             name = call.op.name
-            if name == "tl.annotation":
+            if is_annotation(call):
                 return
             if name == "tl.tileop.ascend_copy":
                 source, destination = call.args[:2]

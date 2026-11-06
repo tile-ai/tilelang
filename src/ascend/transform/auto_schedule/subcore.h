@@ -19,7 +19,13 @@
 
 #pragma once
 
+#include "ascend/transform/source_scopes.h"
+#include "ir/annotations.h"
+#include "ir/tensor_utils.h"
+#include "transform/common/constr_visitor.h"
 #include <array>
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -42,7 +48,7 @@ public:
   Rewrite(const RegionStmt &root, const ConstrSet &outer_ctx,
           const PrimVar &sid,
           const ScheduleUnitMetadata &kernel_annotations = {}) {
-    auto shell = ReadTaskAttribute(root).value();
+    auto shell = ReadSourceAttribute(root).value();
     auto values = shell.value.cast<ScheduleUnitMetadata>();
     auto annotations = values.Get("annotations")
                            .value_or(ScheduleUnitMetadata{})
@@ -50,9 +56,8 @@ public:
     ICHECK(!annotations.count(kSplitSubcores));
     for (const Stmt &stmt : root->body->seq)
       if (IsTaskMetadataStatement(stmt))
-        ICHECK(
-            !ReadNativeAnnotations(stmt.as<EvaluateObj>()->value.as<CallObj>())
-                 .count(kSplitSubcores));
+        ICHECK(!ReadAnnotations(stmt.as<EvaluateObj>()->value.as<CallObj>())
+                    .count(kSplitSubcores));
     ScheduledTIR scheduled =
         DecodeScheduledTIR(root, outer_ctx, nullptr, kernel_annotations);
     SubcoreProjector projector(sid,
@@ -66,10 +71,9 @@ public:
     annotations = projector.ExpandFields(annotations);
     values.Set("annotations", annotations);
     auto statements = body->seq;
-    statements.push_back(
-        MakeNativeAnnotation({{kSplitSubcores, true}}, root->loc));
-    return MakeNativeAttribute(shell.node, shell.key, values,
-                               SeqStmt(statements, body->loc), root->loc);
+    statements.push_back(MakeAnnotation({{kSplitSubcores, true}}, root->loc));
+    return MakeAttribute(shell.node, shell.key, values,
+                         SeqStmt(statements, body->loc), root->loc);
   }
 
 private:
@@ -90,10 +94,12 @@ private:
 
   bool Varies(ffi::AnyView value) const {
     bool result = false;
-    VisitNativePostOrder(value, [&](const ObjectRef &node) {
-      if (auto var = node.as<Var>())
-        result |= varying_.count(*var) != 0;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        value, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (auto var = node.as<Var>())
+            result |= varying_.count(*var) != 0;
+          return ffi::WalkResult::Advance();
+        });
     return result;
   }
 
@@ -129,15 +135,16 @@ private:
         if (!node->IsTask() && Varies(task))
           return true;
         bool varying_control = false;
-        VisitNativePostOrder(WrapScheduledGuards(task->stmt, node->GetGuards()),
-                             [&](const ObjectRef &stmt) {
-                               if (const auto *branch = stmt.as<IfObj>())
-                                 varying_control |= Varies(branch->condition);
-                               if (const auto *loop = stmt.as<ForObj>())
-                                 varying_control |= Varies(loop->begin) ||
-                                                    Varies(loop->end) ||
-                                                    Varies(loop->step);
-                             });
+        ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+            WrapScheduledGuards(task->stmt, node->GetGuards()),
+            [&](const ObjectRef &stmt) -> ffi::Expected<ffi::WalkResult> {
+              if (const auto *branch = stmt.as<IfObj>())
+                varying_control |= Varies(branch->condition);
+              if (const auto *loop = stmt.as<ForObj>())
+                varying_control |= Varies(loop->begin) || Varies(loop->end) ||
+                                   Varies(loop->step);
+              return ffi::WalkResult::Advance();
+            });
         if (varying_control)
           return true;
         if (Varies(task) && !task->UsesPipe(ResourcePipe::kVector) &&
@@ -170,18 +177,21 @@ private:
     std::vector<TaskNode *> tasks;
     CollectAllTaskNodes(tree, tasks);
     for (TaskNode *task : tasks)
-      VisitNativePostOrder(task->stmt, [&](const ObjectRef &node) {
-        const auto *call = node.as<CallObj>();
-        if (!call || !IsAscendCopyCall(call))
-          return;
-        auto decoded = DecodeTileOpArguments(call);
-        AscendCopy copy(decoded.operands, decoded.annotations);
-        if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
-            copy->dual_dst_ctl != 0) {
-          dual_storages_.insert(storage_.Identity(copy->dst));
-          dual_tasks_.insert(task);
-        }
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          task->stmt,
+          [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+            if (!IsAscendCopyCall(call))
+              return ffi::WalkResult::Advance();
+
+            auto decoded = DecodeTileOpArguments(call);
+            AscendCopy copy(decoded.operands, decoded.annotations);
+            if (IsL0CBuffer(copy->src) && IsSharedBuffer(copy->dst) &&
+                copy->dual_dst_ctl != 0) {
+              dual_storages_.insert(storage_.Identity(copy->dst));
+              dual_tasks_.insert(task);
+            }
+            return ffi::WalkResult::Advance();
+          });
     for (TaskNode *task : tasks)
       for (const auto &regions :
            {task->GetReadRegions(), task->GetWriteRegions()})
@@ -245,23 +255,25 @@ private:
 
   static void VerifyReplayableFixpipeTask(const Stmt &body) {
     bool external_effect = false;
-    VisitNativePostOrder(body, [&](const ObjectRef &node) {
-      if (const auto *store = node.as<TensorStoreObj>())
-        external_effect |= !IsRegisterRegion(
-            FullTensorRegion(store->dest.as_or_throw<TensorVar>()));
-      if (const auto *call = node.as<CallObj>()) {
-        if (IsAscendCopyCall(call)) {
-          auto decoded = DecodeTileOpArguments(call);
-          AscendCopy copy(decoded.operands, decoded.annotations);
-          external_effect |=
-              !IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst);
-        } else if (!IsScheduledBind(call) && call->op.as<OpObj>() &&
-                   call->op.as<OpObj>()->name != "tl.annotation") {
-          external_effect |=
-              SideEffect(ffi::GetRef<Expr>(call)) > CallEffectKind::kReadState;
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *store = node.as<TensorStoreObj>())
+            external_effect |= !IsRegisterRegion(
+                FullTensorRegion(store->dest.as_or_throw<TensorVar>()));
+          if (const auto *call = node.as<CallObj>()) {
+            if (IsAscendCopyCall(call)) {
+              auto decoded = DecodeTileOpArguments(call);
+              AscendCopy copy(decoded.operands, decoded.annotations);
+              external_effect |=
+                  !IsL0CBuffer(copy->src) || !IsSharedBuffer(copy->dst);
+            } else if (!IsScheduledBind(call) && call->op.as<OpObj>() &&
+                       !IsAnnotationCall(call)) {
+              external_effect |= SideEffect(ffi::GetRef<Expr>(call)) >
+                                 CallEffectKind::kReadState;
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
     ICHECK(!external_effect)
         << "Fixpipe routing in a projected T.Task with external side effects "
            "is not supported: projection may repeat those effects. Move the "
@@ -271,17 +283,19 @@ private:
 
   void VerifyProjectedFixpipeTasks(const Stmt &body) const {
     std::unordered_map<int, std::vector<RegionStmt>> projections;
-    VisitNativePostOrder(body, [&](const ObjectRef &node) {
-      auto attr = ReadTaskAttribute(node.as<RegionStmtObj>());
-      if (!attr || !IsSemanticTaskKey(attr->key))
-        return;
-      auto metadata = task_metadata_detail::CopyTaskMetadata(attr->node);
-      if (auto origin = metadata.Get("subcore_origin")) {
-        int id = MetadataInteger(*origin, "subcore_origin");
-        if (replay_check_origins_.count(id))
-          projections[id].push_back(attr->region);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          const auto *task = node.as<RegionStmtObj>();
+          if (!IsSemanticTask(task))
+            return ffi::WalkResult::Advance();
+          auto metadata = TaskAnnotations(task);
+          if (auto origin = metadata.Get("subcore_origin")) {
+            int id = MetadataInteger(*origin, "subcore_origin");
+            if (replay_check_origins_.count(id))
+              projections[id].push_back(ffi::GetRef<RegionStmt>(task));
+          }
+          return ffi::WalkResult::Advance();
+        });
     // Count copies after all enclosing guards have selected surviving paths.
     for (const auto &[_, tasks] : projections)
       if (tasks.size() > 1)
@@ -333,37 +347,49 @@ private:
     PrimExpr GetPerCoreActiveGuard(const RegionStmt &task, PrimExpr active) {
       Map<Var, PrimExpr> bindings;
       VarSet locals;
-      VisitNativePostOrder(task->body, [&](const ObjectRef &node) {
-        if (const auto *loop = node.as<ForObj>())
-          locals.insert(loop->var);
-        if (const auto *region = node.as<RegionStmtObj>()) {
-          locals.insert(region->body_params.begin(), region->body_params.end());
-          locals.insert(region->result_vars.begin(), region->result_vars.end());
-        }
-        if (const auto *bind = node.as<BindObj>()) {
-          locals.insert(bind->var);
-          Expr source = bind->value;
-          if (const auto *call = source.as<CallObj>(); IsScheduledBind(call))
-            source = ReadScheduledBinding(call).value;
-          auto primitive = source.as<PrimExpr>();
-          if (!primitive)
-            return;
-          PrimExpr value = SubstituteConstraintExpr(*primitive, bindings);
-          bool immutable = SideEffect(value) <= CallEffectKind::kReadState;
-          VisitNativePostOrder(value, [&](const ObjectRef &input) {
-            immutable &= input.as<TensorLoadObj>() == nullptr;
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          task->body,
+          [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (const auto *loop = node.as<ForObj>())
+              locals.insert(loop->var);
+            if (const auto *region = node.as<RegionStmtObj>()) {
+              locals.insert(region->body_params.begin(),
+                            region->body_params.end());
+              locals.insert(region->result_vars.begin(),
+                            region->result_vars.end());
+            }
+            if (const auto *bind = node.as<BindObj>()) {
+              locals.insert(bind->var);
+              Expr source = bind->value;
+              if (const auto *call = source.as<CallObj>();
+                  IsScheduledBind(call))
+                source = ReadScheduledBinding(call).value;
+              auto primitive = source.as<PrimExpr>();
+              if (!primitive)
+                return ffi::WalkResult::Advance();
+              PrimExpr value = SubstituteConstraintExpr(*primitive, bindings);
+              bool immutable = SideEffect(value) <= CallEffectKind::kReadState;
+              ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+                  value,
+                  [&](const ObjectRef &input)
+                      -> ffi::Expected<ffi::WalkResult> {
+                    immutable &= input.as<TensorLoadObj>() == nullptr;
+                    return ffi::WalkResult::Advance();
+                  });
+              if (immutable)
+                bindings.Set(bind->var, value);
+            }
+            return ffi::WalkResult::Advance();
           });
-          if (immutable)
-            bindings.Set(bind->var, value);
-        }
-      });
       active = analyzer_->Simplify(SubstituteConstraintExpr(active, bindings));
       bool available = SideEffect(active) <= CallEffectKind::kReadState;
-      VisitNativePostOrder(active, [&](const ObjectRef &node) {
-        if (auto var = node.as<Var>())
-          available &= !locals.count(*var);
-        available &= node.as<TensorLoadObj>() == nullptr;
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          active, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (auto var = node.as<Var>())
+              available &= !locals.count(*var);
+            available &= node.as<TensorLoadObj>() == nullptr;
+            return ffi::WalkResult::Advance();
+          });
       ICHECK(available)
           << "Cannot project PerCoreTask Fixpipe routing: candidate dispatch "
              "must use immutable values available before PerCoreTask. Move "
@@ -371,15 +397,15 @@ private:
       return active;
     }
 
-    Stmt RewritePerCoreCandidate(const NativeTaskAttribute &task) {
-      auto metadata = task_metadata_detail::CopyTaskMetadata(task.node);
+    Stmt RewritePerCoreCandidate(const RegionStmt &task) {
+      auto metadata = TaskAnnotations(task.get());
       auto origin = metadata.Get("subcore_origin");
       int origin_id;
       if (origin) {
         origin_id = MetadataInteger(*origin, "subcore_origin");
       } else {
-        auto [it, inserted] = owner_->candidate_origins_.emplace(
-            task.region, owner_->next_origin_);
+        auto [it, inserted] =
+            owner_->candidate_origins_.emplace(task, owner_->next_origin_);
         if (inserted)
           ++owner_->next_origin_;
         origin_id = it->second;
@@ -388,11 +414,11 @@ private:
       auto rewriter =
           ffi::make_object<Rewriter>(owner_, p_, conditional_depth_ == 0);
       rewriter->local_vars_ = local_vars_;
-      Stmt body = rewriter->Rewrite(task.WithNode(metadata));
+      Stmt body = rewriter->Rewrite(WithTaskAnnotations(task, metadata));
       local_vars_.insert(rewriter->local_vars_.begin(),
                          rewriter->local_vars_.end());
       PrimExpr active = analyzer_->Simplify(rewriter->active_);
-      if (HasTaskBufferAccess(task.region->body)) {
+      if (HasTaskBufferAccess(task->body)) {
         per_core_->active = per_core_->active || (per_core_->path && active);
         per_core_->routed |= !IsOne(active);
       }
@@ -402,10 +428,9 @@ private:
           (!origin && rewriter->copy_target_.has_value() && IsOne(active)))
         owner_->replay_check_origins_.insert(origin_id);
       if (IsZero(active))
-        return SeqStmt({}, task.region->loc);
+        return SeqStmt({}, task->loc);
       return IsOne(active) ? body
-                           : If(active, NativeTaskAttribute::AsSequence(body),
-                                std::nullopt, body->loc);
+                           : If(active, SeqStmt(body), std::nullopt, body->loc);
     }
 
     ffi::UnchangedOr<Expr> Mutate_(const VarObj *op, InplaceMode) final {
@@ -422,7 +447,7 @@ private:
       owner_->definitions_.insert(op->var);
       owner_->varying_.insert(op->var);
       Expr value = op->value;
-      std::optional<NativeScheduledBinding> schedule;
+      std::optional<ScheduledBinding> schedule;
       if (const auto *call = value.as<CallObj>(); IsScheduledBind(call)) {
         schedule = ReadScheduledBinding(call);
         value = schedule->value;
@@ -448,11 +473,10 @@ private:
       // emitted after its Bind; it cannot be hoisted to root arguments.
       if (owner_->shared_roots_.count(op->var) &&
           !owner_->projected_.count(op->var))
-        return SeqStmt(
-            {result,
-             MakeNativeAnnotation({{kAivStorageMap, AivStorageMap{{var, p_}}}},
-                                  op->loc)},
-            op->loc);
+        return SeqStmt({result, MakeAnnotation({{kAivStorageMap,
+                                                 AivStorageMap{{var, p_}}}},
+                                               op->loc)},
+                       op->loc);
       return result;
     }
 
@@ -472,7 +496,7 @@ private:
       writer->begin = begin;
       writer->end = end;
       writer->step = step;
-      writer->body = NativeTaskAttribute::AsSequence(body);
+      writer->body = SeqStmt(body);
       // Static annotations remain static; dynamic loop fields already live in
       // the native tl.loop.annotations region and are rewritten with its body.
       return result;
@@ -480,52 +504,68 @@ private:
 
     ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                    InplaceMode mode) final {
-      auto source = ReadTaskAttribute(op);
-      if (!source) {
-        // Native regions also define SSA values. Their body parameters and
-        // exported results must use the same projection as their body uses.
-        for (const auto &variables : {op->body_params, op->result_vars})
-          for (const Var &var : variables) {
-            owner_->definitions_.insert(var);
-            owner_->varying_.insert(var);
-            local_vars_.insert(owner_->VarFor(var, p_));
+      if (IsAscendBlock(op)) {
+        Stmt body = Rewrite(op->body);
+        if (Empty(body))
+          return SeqStmt({}, op->loc);
+        return MakeAscendBlock(AscendBlockName(op),
+                               RewriteMetadata(AscendBlockAnnotations(op))
+                                   .cast<ScheduleUnitMetadata>(),
+                               SeqStmt(body), op->loc);
+      }
+      if (per_core_ && IsTask(op))
+        return RewritePerCoreCandidate(ffi::GetRef<RegionStmt>(op));
+      if (IsSemanticTask(op)) {
+        Stmt body{ffi::UnsafeInit{}};
+        if (IsPerCoreTask(op)) {
+          ICHECK(per_core_ == nullptr);
+          PerCoreRouting routing;
+          per_core_ = &routing;
+          body = Rewrite(op->body);
+          per_core_ = nullptr;
+          ICHECK(owner_->count_ == 1 || !routing.replays_fixpipe ||
+                 !HasCrossCoreSync(body))
+              << "Subcore projection of T.PerCoreTask with explicit "
+                 "synchronization and subcore-dependent or task-local Fixpipe "
+                 "routing is not supported: projection may change the "
+                 "synchronization participation or execution counts. Move it "
+                 "outside T.PerCoreTask, or compute each explicit sub_blockid "
+                 "before T.PerCoreTask using subcore-uniform values";
+          if (routing.routed) {
+            RegionStmt routed = ffi::GetRef<RegionStmt>(op);
+            routed.CopyOnWrite()->body = SeqStmt(body);
+            active_ = active_ && GetPerCoreActiveGuard(routed, routing.active);
           }
-        return StmtExprMutator::Mutate_(op, mode);
-      }
-      if (per_core_ && source->key == attr::kAscendTask)
-        return RewritePerCoreCandidate(*source);
-      Stmt body{ffi::UnsafeInit{}};
-      if (source->key == attr::kAscendPerCoreTask) {
-        ICHECK(per_core_ == nullptr);
-        PerCoreRouting routing;
-        per_core_ = &routing;
-        body = Rewrite(op->body);
-        per_core_ = nullptr;
-        ICHECK(owner_->count_ == 1 || !routing.replays_fixpipe ||
-               !HasCrossCoreSync(body))
-            << "Subcore projection of T.PerCoreTask with explicit "
-               "synchronization and subcore-dependent or task-local Fixpipe "
-               "routing is not supported: projection may change the "
-               "synchronization participation or execution counts. Move it "
-               "outside T.PerCoreTask, or compute each explicit sub_blockid "
-               "before T.PerCoreTask using subcore-uniform values";
-        if (routing.routed)
-          active_ = active_ && GetPerCoreActiveGuard(source->WithBody(body),
-                                                     routing.active);
-      } else {
-        body = Rewrite(op->body);
-      }
-      if (Empty(body))
-        return SeqStmt({}, op->loc);
-      Any node = RewriteMetadata(source->node);
-      if (IsSemanticTaskKey(source->key)) {
-        auto metadata = task_metadata_detail::CopyTaskMetadata(node);
+        } else {
+          body = Rewrite(op->body);
+        }
+        if (Empty(body))
+          return SeqStmt({}, op->loc);
+        auto metadata =
+            RewriteMetadata(TaskAnnotations(op)).cast<ScheduleUnitMetadata>();
         metadata.Set("subcore", IntImm::Int32(p_));
-        node = metadata;
+        RegionStmt result =
+            WithTaskAnnotations(ffi::GetRef<RegionStmt>(op), metadata);
+        result.CopyOnWrite()->body = SeqStmt(body);
+        return result;
       }
-      return MakeNativeAttribute(
-          node, source->key, RewriteMetadata(source->value),
-          NativeTaskAttribute::AsSequence(body), op->loc);
+      if (auto source = ReadSourceAttribute(op)) {
+        Stmt body = Rewrite(op->body);
+        if (Empty(body))
+          return SeqStmt({}, op->loc);
+        return MakeAttribute(RewriteMetadata(source->node), source->key,
+                             RewriteMetadata(source->value), SeqStmt(body),
+                             op->loc);
+      }
+      // Native region body parameters and exported results use the same
+      // projection as their body uses.
+      for (const auto &variables : {op->body_params, op->result_vars})
+        for (const Var &var : variables) {
+          owner_->definitions_.insert(var);
+          owner_->varying_.insert(var);
+          local_vars_.insert(owner_->VarFor(var, p_));
+        }
+      return StmtExprMutator::Mutate_(op, mode);
     }
 
     ffi::UnchangedOr<Stmt> Mutate_(const SeqStmtObj *op, InplaceMode) final {
@@ -550,7 +590,7 @@ private:
         per_core_->path = path && !condition;
       Optional<SeqStmt> else_case;
       if (op->else_case)
-        else_case = NativeTaskAttribute::AsSequence(Rewrite(*op->else_case));
+        else_case = SeqStmt(Rewrite(*op->else_case));
       --conditional_depth_;
       if (per_core_)
         per_core_->path = path;
@@ -560,8 +600,7 @@ private:
         return If(!condition, *else_case, std::nullopt, op->loc);
       if (else_case && Empty(*else_case))
         else_case = std::nullopt;
-      return If(condition, NativeTaskAttribute::AsSequence(then_case),
-                else_case, op->loc);
+      return If(condition, SeqStmt(then_case), else_case, op->loc);
     }
 
     ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
@@ -602,11 +641,14 @@ private:
       owner_->copy_origins_.emplace(replacement, source);
       PrimExpr condition = analyzer_->Simplify(target == p_);
       bool task_local = SideEffect(condition) > CallEffectKind::kReadState;
-      VisitNativePostOrder(condition, [&](const ObjectRef &node) {
-        if (auto var = node.as<Var>())
-          task_local |= local_vars_.count(*var) != 0;
-        task_local |= node.as<TensorLoadObj>() != nullptr;
-      });
+      ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+          condition,
+          [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+            if (auto var = node.as<Var>())
+              task_local |= local_vars_.count(*var) != 0;
+            task_local |= node.as<TensorLoadObj>() != nullptr;
+            return ffi::WalkResult::Advance();
+          });
       if (task_local) {
         has_local_copy_guard_ = true;
         return If(condition, SeqStmt({result}, op->loc), std::nullopt, op->loc);
@@ -648,11 +690,13 @@ private:
   // maps/lists over projected definitions, without inventing undeclared keys.
   bool Available(const Any &value, int p) const {
     bool available = true;
-    VisitNativePostOrder(value, [&](const ObjectRef &node) {
-      if (auto var = node.as<Var>();
-          var && definitions_.count(*var) && varying_.count(*var))
-        available &= vars_[p].count(*var) != 0;
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        value, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (auto var = node.as<Var>();
+              var && definitions_.count(*var) && varying_.count(*var))
+            available &= vars_[p].count(*var) != 0;
+          return ffi::WalkResult::Advance();
+        });
     return available;
   }
 
@@ -727,13 +771,13 @@ private:
             body = WithScheduledBindingMetadata(ffi::GetRef<Bind>(bind),
                                                 node->GetStage(), marker.task);
           } else {
-            auto marker = ReadTaskAttribute(task->stmt).value();
-            auto metadata = task_metadata_detail::CopyTaskMetadata(marker.node);
+            auto marker = SingleStatement(task->stmt).as_or_throw<RegionStmt>();
+            auto metadata = TaskAnnotations(marker.get());
             if (project) {
               metadata.Set("subcore", IntImm::Int32(p));
               metadata.Set("subcore_origin", IntImm::Int32(origin_it->second));
             }
-            body = marker.WithNode(metadata);
+            body = WithTaskAnnotations(marker, metadata);
           }
         } else if (node->IsControl()) {
           const auto *control = static_cast<const ControlNode *>(node.get());
@@ -757,20 +801,20 @@ private:
               otherwise = RewriteList(scope->else_children, project ? p : -1,
                                       branch->else_case.value()->loc, true);
             body = If(branch->condition, children, otherwise, branch->loc);
-          } else if (auto attribute = ReadTaskAttribute(scope->shell)) {
+          } else if (auto attribute = ReadSourceAttribute(scope->shell)) {
             body = attribute->WithBody(
                 RewriteList(scope->children, project ? p : -1,
                             attribute->region->body->loc, conditional_parent));
             if (!project)
-              body = MakeNativeAttribute(
+              body = MakeAttribute(
                   attribute->node, attribute->key,
                   ExpandAnnotation(attribute->key, attribute->value),
                   body.as_or_throw<RegionStmt>()->body, body->loc);
           } else {
-            auto fields = ReadNativeAnnotations(
+            auto fields = ReadAnnotations(
                 scope->shell.as<EvaluateObj>()->value.as<CallObj>());
-            body = MakeNativeAnnotation(project ? fields : ExpandFields(fields),
-                                        scope->shell->loc);
+            body = MakeAnnotation(project ? fields : ExpandFields(fields),
+                                  scope->shell->loc);
           }
         }
         body = WrapScheduledGuards(body, node->GetGuards());
@@ -785,8 +829,7 @@ private:
           if (node->IsTask() && rewriter->CanReplayFixpipe())
             replay_check_origins_.insert(origin_it->second);
           if (!IsOne(active))
-            body = If(active, NativeTaskAttribute::AsSequence(body),
-                      std::nullopt, body->loc);
+            body = If(active, SeqStmt(body), std::nullopt, body->loc);
         }
         if (Empty(body))
           continue;
@@ -813,7 +856,7 @@ private:
   PrimVar sid_;
   int count_;
   int next_origin_{0};
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   std::unordered_map<const IRStructure *, int> origins_;
   std::unordered_map<RegionStmt, int, ObjectPtrHash, ObjectPtrEqual>
       candidate_origins_;

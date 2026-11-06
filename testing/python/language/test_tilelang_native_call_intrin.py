@@ -5,7 +5,7 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 
 import tilelang.language as T
-from tilelang.language._native import BufferRegion, Range
+from tilelang.language.tir._constructors import BufferRegion
 from tilelang.utils.language import _strip_source_call_annotations, is_full_region, prim_expr_equal
 
 
@@ -73,7 +73,9 @@ def test_unencoded_native_attributes_are_not_source_annotations():
 
 @pytest.mark.parametrize("malformation", ["schema", "count", "payload", "version"])
 def test_malformed_annotation_codec_is_not_discarded(malformation):
-    call = annotated(T.int32(), 1)
+    # Static annotations now live directly in attrs. Exercise the remaining
+    # pre-lowering codec with a real variable use in the source metadata.
+    call = annotated(T.int32(), T.int32())
     attrs, operands = dict(call.attrs), list(call.args)
     if malformation == "schema":
         attrs["annotation_schema"] = ["unknown"]
@@ -109,7 +111,7 @@ def test_full_region_uses_the_same_source_annotation_comparison():
     extent = annotated(n, 1)
     other = annotated(n, 2)
     tensor = ir.Var("A", tirx.TensorType((extent,), "int32"))
-    region = BufferRegion(tensor, [Range.from_min_extent(0, other)])
+    region = BufferRegion(tensor, [ir.Range.from_min_extent(0, other)])
     assert is_full_region(region)
-    assert not is_full_region(BufferRegion(tensor, [Range.from_min_extent(1, other)]))
-    assert not is_full_region(BufferRegion(tensor, [Range.from_min_extent(0, other + 1)]))
+    assert not is_full_region(BufferRegion(tensor, [ir.Range.from_min_extent(1, other)]))
+    assert not is_full_region(BufferRegion(tensor, [ir.Range.from_min_extent(0, other + 1)]))

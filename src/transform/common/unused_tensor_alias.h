@@ -20,9 +20,10 @@
 #ifndef TVM_TL_TRANSFORM_COMMON_UNUSED_TENSOR_ALIAS_H_
 #define TVM_TL_TRANSFORM_COMMON_UNUSED_TENSOR_ALIAS_H_
 
-#include "../../op/native_utils.h"
-
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
+#include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -47,12 +48,14 @@ public:
           if (!IsPureAlias(bind))
             return ffi::WalkResult::Advance();
           auto &dependencies = aliases_[bind->var.get()];
-          auto collect = [&](const ffi::ObjectRef &object) {
-            if (const auto *variable = object.as<VarObj>())
-              dependencies.insert(variable);
+          auto collect =
+              [&](const VarObj *variable) -> ffi::Expected<ffi::WalkResult> {
+            dependencies.insert(variable);
+            return ffi::WalkResult::Advance();
           };
-          VisitNativePostOrder(bind->value, collect);
-          VisitNativePostOrder(bind->var->ty, collect);
+          ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(bind->value, collect);
+          ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(bind->var->ty,
+                                                          collect);
           return ffi::WalkResult::Skip();
         },
         [&](const VarObj *variable) -> ffi::Expected<ffi::WalkResult> {
@@ -87,11 +90,11 @@ private:
     const auto *call = bind->value.as<CallObj>();
     if (!call || !call->op.as<OpObj>())
       return false;
-    const auto &name = call->op.as<OpObj>()->name;
-    bool is_alias =
-        name == "tirx.decl_tensor" || name == "tirx.tensor_data_ptr" ||
-        name == "tirx.reinterpret" || name == "tirx.ptr_byte_offset" ||
-        name == "tirx.handle_add_byte_offset";
+    bool is_alias = call->op.same_as(tirx::decl_tensor_op()) ||
+                    call->op.same_as(tirx::tensor_data_ptr_op()) ||
+                    call->op.same_as(tirx::reinterpret_op()) ||
+                    call->op.same_as(tirx::ptr_byte_offset_op()) ||
+                    call->op.same_as(tirx::handle_add_byte_offset_op());
     return is_alias && tvm::SideEffect(bind->value) == CallEffectKind::kPure;
   }
   std::unordered_map<const VarObj *, std::unordered_set<const VarObj *>>

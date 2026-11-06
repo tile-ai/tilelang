@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+from tvm_tirx.script.ir_builder import frame as _stmt_frame
+
 from typing import Any
 
-from tilelang.language import _native as tirx
-from tilelang.language._native import frame
+
+pass
 
 from tilelang.language.loop import unroll as _common_unroll
 
@@ -13,14 +16,14 @@ __all__ = ["unroll"]
 
 
 def unroll(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     explicit: bool = False,
     unroll_factor: int | None = None,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """The unrolled For statement, with the Ascend unroll-factor pragma.
 
     Same semantics as the common :func:`tilelang.language.loop.unroll`.

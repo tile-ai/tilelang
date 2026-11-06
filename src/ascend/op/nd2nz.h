@@ -5,7 +5,7 @@
 #ifndef TVM_TL_ASCEND_OP_ND2NZ_H_
 #define TVM_TL_ASCEND_OP_ND2NZ_H_
 
-#include "op/native_intrinsic.h"
+#include "ir/annotations.h"
 #include <cstdint>
 #include <string>
 #include <tvm/tirx/expr.h>
@@ -34,7 +34,7 @@ struct Nd2NzGeometry {
 };
 
 inline Nd2NzGeometry ParseNd2NzGeometry(const CallObj *op, bool scatter) {
-  const auto args = NativeIntrinsicOperands(op);
+  const auto args = DecodeCallOperands(op);
   if (args.size() != 7)
     TVM_FFI_THROW(ValueError)
         << "ND2NZ expects 7 arguments with explicit pitches";

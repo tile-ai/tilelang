@@ -1,5 +1,7 @@
 """Mutable assumptions justify bounds only while their observed values survive."""
 
+from tilelang.language import _annotation_codec
+
 import numpy as np
 import pytest
 import tvm_ffi
@@ -100,11 +102,11 @@ def test_mutation_after_assume_preserves_padding_for_the_new_index(kind):
 
 
 def test_volatile_scope_does_not_turn_a_previous_load_into_a_stable_fact():
-    from tilelang.language import _native
+    pass
 
     @T.prim_func
     def main(data: T.Tensor((4,), "int32"), index: T.Tensor((1,), "int32"), output: T.Tensor((1,), "int32")):
-        with _native.attr(index, "volatile_scope", 1):
+        with _annotation_codec.attr(index, "volatile_scope", 1):
             T.assume(index[0] >= 0 and index[0] < 4)
             output[0] = data[index[0]]
 

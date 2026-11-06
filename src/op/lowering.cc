@@ -4,6 +4,7 @@
  */
 #include "lowering.h"
 #include "builtin.h"
+#include "ir/stmt_functor.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -58,9 +59,10 @@ Stmt InlineTileOpFunction(const ffi::Any &lowered, const ffi::String &name) {
   TVM_FFI_CHECK(UndefinedVars(function).empty(), ValueError)
       << "Tile-op lowering Function has unbound variables";
   tirx::CheckWellFormed(function);
-  function = tirx::RenewDef(std::move(function));
+  CheckLayoutMapScopes(function);
+  function = tl::RenewDef(std::move(function));
 
-  auto substitute = ffi::make_object<tirx::StmtExprMutator>();
+  auto substitute = ffi::make_object<tl::LayoutMapMutator>();
   for (size_t i = 0; i < arguments.size(); ++i) {
     // Restrict capture evaluation to pure references/expressions: substituting
     // a stateful call at several uses would duplicate its execution.

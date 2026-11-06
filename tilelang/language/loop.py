@@ -1,21 +1,27 @@
 """Loop related language interfaces in TileLang."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import frame as _loop_frame
+from tvm_tirx import ir as _ir
+from tvm_tirx.script.ir_builder import frame as _stmt_frame
+
 from typing import Any
-from tilelang.language import _native as tirx
-from tilelang.language._native import IntImm
-from tilelang.language import _native as tb_tir
+
+from tvm_tirx.ir import IntImm
+
 from .eager.builder import SerialForWithStep, UnrollForWithStep
-from tilelang.language._native import frame
+
+pass
 
 
 def Parallel(
-    *extents: int | tirx.PrimExpr,
+    *extents: int | _ir.Expr,
     coalesced_width: int | None = None,
     loop_layout: Any | None = None,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Tools to construct nested parallel for loop.
        This can be used to create element-wise tensor expression.
 
@@ -76,18 +82,18 @@ def Parallel(
         # Pass through to C++ as the standard parallel loop layout key.
         # The builder will attach it only on the outermost parallel loop.
         merged_annotations["parallel_loop_layout"] = loop_layout
-    return tirx.parallel_nest(*extents, annotations=merged_annotations)
+    return _loop_frame.parallel_nest(*extents, annotations=merged_annotations)
 
 
 def Persistent(
-    domain: list[tirx.PrimExpr],
-    wave_size: tirx.PrimExpr,
-    index: tirx.PrimExpr,
-    group_size: tirx.PrimExpr | int | None = 8,
+    domain: list[_ir.Expr],
+    wave_size: _ir.Expr,
+    index: _ir.Expr,
+    group_size: _ir.Expr | int | None = 8,
     num_stages: int = 0,
     *,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Tools to construct persistent for loop.
 
     Parameters
@@ -104,17 +110,17 @@ def Persistent(
         The number of pipeline stages for double buffering.
         If 0, pipeline is disabled.
     """
-    return tirx.PersistentLoopFrame(domain, wave_size, index, group_size, num_stages, annotations)
+    return _loop_frame.PersistentLoopFrame(domain, wave_size, index, group_size, num_stages, annotations)
 
 
 def Pipelined(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
     num_stages: int = 0,
     order: list[int] | None = None,
     stage: list[int] | None = None,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Tools to construct pipelined for loop.
 
     Parameters
@@ -173,7 +179,7 @@ def Pipelined(
     """
     if stop is None:
         stop = start
-        start = IntImm(_native.dtype_of(start), 0) if hasattr(start, "dtype") else 0
+        start = IntImm(_construction.dtype_of(start), 0) if hasattr(start, "dtype") else 0
     if order is None:
         order = []
     if stage is None:
@@ -187,16 +193,16 @@ def Pipelined(
         annotations["tl_pipeline_order"] = list(order)
     if stage:
         annotations["tl_pipeline_stage"] = list(stage)
-    return tirx.serial(start, stop, annotations=annotations)
+    return _loop_frame.serial(start, stop, annotations=annotations)
 
 
 def serial(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """The serial For statement.
 
     Parameters
@@ -223,22 +229,22 @@ def serial(
     step_is_one |= isinstance(step, int) and step == 1
     step_is_one |= isinstance(step, IntImm) and step.value == 1
     if step is None or step_is_one:
-        return tb_tir.serial(start, stop, annotations=annotations)
+        return _loop_frame.serial(start, stop, annotations=annotations)
     else:
         if stop is None:
             stop = start
-            start = IntImm(_native.dtype_of(start), 0) if hasattr(start, "dtype") else 0
+            start = IntImm(_construction.dtype_of(start), 0) if hasattr(start, "dtype") else 0
         return SerialForWithStep(start, stop, step, annotations=annotations)
 
 
 def unroll(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     explicit: bool = False,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """The unrolled For statement.
 
     Parameters
@@ -270,7 +276,7 @@ def unroll(
     if stop is None:
         stop = start
         if hasattr(start, "dtype"):
-            start = IntImm(_native.dtype_of(start), 0)
+            start = IntImm(_construction.dtype_of(start), 0)
         else:
             start = 0
 
@@ -290,7 +296,7 @@ def unroll(
         raise ValueError("T.unroll's explicit and unroll_factor params are mutually exclusive.")
 
     if step is None or step_is_one:
-        return tb_tir.unroll(start, stop, annotations=annotations)
+        return _loop_frame.unroll(start, stop, annotations=annotations)
     else:
         return UnrollForWithStep(start, stop, step, annotations=annotations)
 
@@ -299,36 +305,36 @@ def unroll(
 
 
 def Serial(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Alias of T.serial."""
 
     return serial(start, stop, step, annotations=annotations)
 
 
 def Unroll(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
-    step: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
+    step: _ir.Expr | None = None,
     *,
     explicit: bool = False,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Alias of T.unroll."""
 
     return unroll(start, stop, step, explicit=explicit, annotations=annotations)
 
 
 def vectorized(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """The vectorized For statement.
 
     Parameters
@@ -347,15 +353,15 @@ def vectorized(
     res : frame.ForFrame
         The ForFrame.
     """
-    return tb_tir.vectorized(start, stop, annotations=annotations)
+    return _loop_frame.vectorized(start, stop, annotations=annotations)
 
 
 def Vectorized(
-    start: tirx.PrimExpr,
-    stop: tirx.PrimExpr | None = None,
+    start: _ir.Expr,
+    stop: _ir.Expr | None = None,
     *,
     annotations: dict[str, Any] | None = None,
-) -> frame.ForFrame:
+) -> _stmt_frame.ForFrame:
     """Alias of T.vectorized."""
 
     return vectorized(start, stop, annotations=annotations)

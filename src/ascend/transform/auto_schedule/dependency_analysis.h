@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include "transform/common/constr_visitor.h"
 #include <tvm/ffi/container/array.h>
 #include <tvm/ffi/optional.h>
 
@@ -170,18 +171,17 @@ AnalyzeDependencies(std::vector<IRStructure *> nodes,
 // and the scheduled-TIR synchronization pass. Copy normalization makes
 // instruction transfer regions explicit before scheduling. Compare those
 // regions directly, including for conflict hints.
-bool RegionsMayConflict(const ConstrSet &a_ctx, const TensorRegion &a_region,
-                        const ConstrSet &b_ctx, const TensorRegion &b_region,
-                        ControlNode *loop, int offset,
-                        size_t num_storage_owners = 0,
-                        const ConflictHintList &root_conflicts = {},
-                        Optional<PrimExpr> a_pitch = std::nullopt,
-                        Optional<PrimExpr> b_pitch = std::nullopt,
-                        const NativeStorageContext &a_storage = {},
-                        const NativeStorageContext &b_storage = {},
-                        const ScopedConflictHintIndex *scoped_hints = nullptr,
-                        const TaskNode *a_task = nullptr,
-                        const TaskNode *b_task = nullptr);
+bool RegionsMayConflict(
+    const ConstrSet &a_ctx, const TensorRegion &a_region,
+    const ConstrSet &b_ctx, const TensorRegion &b_region, ControlNode *loop,
+    int offset, size_t num_storage_owners = 0,
+    const ConflictHintList &root_conflicts = {},
+    Optional<PrimExpr> a_pitch = std::nullopt,
+    Optional<PrimExpr> b_pitch = std::nullopt,
+    const StorageProvenance &a_storage = MakeAscendStorageProvenance(),
+    const StorageProvenance &b_storage = MakeAscendStorageProvenance(),
+    const ScopedConflictHintIndex *scoped_hints = nullptr,
+    const TaskNode *a_task = nullptr, const TaskNode *b_task = nullptr);
 
 } // namespace ascend
 } // namespace tl

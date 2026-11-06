@@ -5,6 +5,7 @@ import re
 import pytest
 import tvm_ffi
 import tvm_tirx
+from testing.ascend._block import ascend_block as _native_ascend_block
 
 I = tvm_tirx.ir
 
@@ -31,9 +32,7 @@ def _call(name, *args, dtype="void"):
 
 
 def _block(name, body, **annotations):
-    fields = {"name": name, "no_realize": True, "annotations": annotations}
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": I.const(0), "key": "tl.sblock", "value": fields})
-    return I.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _native_ascend_block(name, body, annotations)
 
 
 def _thread(var, size, body, tag="threadIdx.x"):

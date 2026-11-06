@@ -6,12 +6,16 @@
  * acquire predicates here; DMA lowering derives copy guards from the final
  * possibly-empty regions after scheduling.
  */
+#include "ascend/ir/block.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
+#include "ir/alias_analysis.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "op/gemm_blockscaled.h"
-#include "transform/common/native_layout_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/reflection/registry.h>
@@ -67,7 +71,7 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode &copy,
 using AxisMap =
     std::unordered_map<Expr, LogicalAxis, ObjectPtrHash, ObjectPtrEqual>;
 
-void SetKAxis(AxisMap *axes, const NativeTensorAliases &aliases,
+void SetKAxis(AxisMap *axes, const TensorAliasGroups &aliases,
               const TensorVar &tensor, LogicalAxis axis) {
   auto [it, inserted] = axes->emplace(aliases.Identity(tensor), axis);
   TVM_FFI_CHECK(inserted || it->second == axis, ValueError)
@@ -85,45 +89,43 @@ std::optional<Gemm> ParseGemm(const CallObj *op) {
 
 // Recover K from the GEMM semantics, not from a physical layout tag. Then
 // propagate it back through L1->L0 data copies, accounting for transpose.
-AxisMap CollectMxL1Axes(const Stmt &body, const NativeTensorAliases &aliases) {
+AxisMap CollectMxL1Axes(const Stmt &body, const TensorAliasGroups &aliases) {
   AxisMap operands, result;
-  VisitNativePostOrder(body, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallObj>();
-    if (!call)
-      return;
-    auto gemm = ParseGemm(call);
-    if (gemm && (*gemm)->IsInstance<GemmBlockScaledNode>()) {
-      SetKAxis(&operands, aliases, (*gemm)->a_,
-               (*gemm)->transA_ ? LogicalAxis::kRow : LogicalAxis::kCol);
-      SetKAxis(&operands, aliases, (*gemm)->b_,
-               (*gemm)->transB_ ? LogicalAxis::kCol : LogicalAxis::kRow);
-    }
-  });
-  VisitNativePostOrder(body, [&](const ObjectRef &node) {
-    const auto *call = node.as<CallObj>();
-    if (!call)
-      return;
-    if (IsAscendCopyCall(call)) {
-      auto decoded = DecodeTileOpArguments(call);
-      AscendCopy copy(decoded.operands, decoded.annotations);
-      auto found = operands.find(aliases.Identity(copy->dst));
-      if (IsL1Buffer(copy->src) &&
-          (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)) &&
-          found != operands.end()) {
-        LogicalAxis axis = found->second;
-        if (copy->transpose != 0)
-          axis =
-              axis == LogicalAxis::kRow ? LogicalAxis::kCol : LogicalAxis::kRow;
-        SetKAxis(&result, aliases, copy->src, axis);
-      }
-    } else if (auto gemm = ParseGemm(call)) {
-      for (const TensorVar &operand : {(*gemm)->a_, (*gemm)->b_}) {
-        auto found = operands.find(aliases.Identity(operand));
-        if (IsL1Buffer(operand) && found != operands.end())
-          SetKAxis(&result, aliases, operand, found->second);
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        auto gemm = ParseGemm(call);
+        if (gemm && (*gemm)->IsInstance<GemmBlockScaledNode>()) {
+          SetKAxis(&operands, aliases, (*gemm)->a_,
+                   (*gemm)->transA_ ? LogicalAxis::kRow : LogicalAxis::kCol);
+          SetKAxis(&operands, aliases, (*gemm)->b_,
+                   (*gemm)->transB_ ? LogicalAxis::kCol : LogicalAxis::kRow);
+        }
+        return ffi::WalkResult::Advance();
+      });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        if (IsAscendCopyCall(call)) {
+          auto decoded = DecodeTileOpArguments(call);
+          AscendCopy copy(decoded.operands, decoded.annotations);
+          auto found = operands.find(aliases.Identity(copy->dst));
+          if (IsL1Buffer(copy->src) &&
+              (IsL0ABuffer(copy->dst) || IsL0BBuffer(copy->dst)) &&
+              found != operands.end()) {
+            LogicalAxis axis = found->second;
+            if (copy->transpose != 0)
+              axis = axis == LogicalAxis::kRow ? LogicalAxis::kCol
+                                               : LogicalAxis::kRow;
+            SetKAxis(&result, aliases, copy->src, axis);
+          }
+        } else if (auto gemm = ParseGemm(call)) {
+          for (const TensorVar &operand : {(*gemm)->a_, (*gemm)->b_}) {
+            auto found = operands.find(aliases.Identity(operand));
+            if (IsL1Buffer(operand) && found != operands.end())
+              SetKAxis(&result, aliases, operand, found->second);
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
   return result;
 }
 
@@ -199,7 +201,7 @@ std::optional<MxKTailFill> MakeMxKTailFill(const Copy &copy, LogicalAxis k_axis,
 class OOBPaddingInserter : public StmtExprMutatorWithAnalyzer {
 public:
   OOBPaddingInserter(sym::AnalyzerObj *analyzer,
-                     const NativeTensorAliases &aliases, AxisMap axes)
+                     const TensorAliasGroups &aliases, AxisMap axes)
       : StmtExprMutatorWithAnalyzer(analyzer), aliases_(aliases),
         mx_axes_(std::move(axes)) {}
   using StmtExprMutatorWithAnalyzer::Mutate_;
@@ -238,8 +240,10 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     auto saved = layouts_;
-    if (op->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(op);
+    if (ascend::IsAscendBlock(op)) {
+      RecordMetadata(ascend::AscendBlockAnnotations(op));
+    } else if (op->op->name == "tl.attr") {
+      auto fields = ReadAnnotations(op);
       String key = fields.at("key").cast<String>();
       if (key == "tl.kernel")
         RecordMetadata(fields.at("value").cast<Map<String, Any>>());
@@ -253,8 +257,8 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (call && call->op.same_as(Op::Get("tl.annotation"))) {
-      RecordMetadata(ReadNativeAnnotations(call));
+    if (IsAnnotationCall(call)) {
+      RecordMetadata(ReadAnnotations(call));
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
     }
     if (!call || !IsAscendCopyCall(call))
@@ -345,7 +349,7 @@ private:
     pending->clear();
   }
 
-  const NativeTensorAliases &aliases_;
+  const TensorAliasGroups &aliases_;
   AxisMap mx_axes_;
   LayoutMap layouts_;
   bool defer_mx_fill_{false};
@@ -359,7 +363,7 @@ tvm::transform::Pass AscendInsertOOBPadding() {
         if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
           return function;
         auto analyzer = CreateTileLangAnalyzer();
-        NativeTensorAliases aliases;
+        TensorAliasGroups aliases;
         aliases.Collect(function);
         auto rewriter = ffi::make_object<OOBPaddingInserter>(
             analyzer.get(), aliases, CollectMxL1Axes(function->body, aliases));

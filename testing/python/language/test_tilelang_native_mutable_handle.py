@@ -1,5 +1,8 @@
 """Mutable pointer cells retain native pointer types and actual address state."""
 
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+
 import numpy as np
 import pytest
 import tvm_ffi
@@ -9,7 +12,7 @@ from tvm_tirx.tirx.script import ir_builder as I
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang.language import _native
+
 from tilelang.language.eager.builder import PointerRef
 
 
@@ -63,11 +66,11 @@ def test_two_frontend_aliases_update_the_same_pointer_cell():
         output = I.arg_("B", tirx.TensorType([2], "int32"))
         pointer = T.alloc_var("handle", T.access_ptr(source[1], "r", extent=1))
         alias = pointer
-        first = _native.bind(_native.match_buffer(pointer[0], (1,), "int32"))
-        _native.buffer_store(output, first[0], 0)
+        first = _construction.bind(_tensor_spec.match_buffer(pointer[0], (1,), "int32"))
+        _construction.buffer_store(output, first[0], 0)
         alias[0] = T.access_ptr(source[3], "r", extent=1)
-        second = _native.bind(_native.match_buffer(pointer[0], (1,), "int32"))
-        _native.buffer_store(output, second[0], 1)
+        second = _construction.bind(_tensor_spec.match_buffer(pointer[0], (1,), "int32"))
+        _construction.buffer_store(output, second[0], 1)
         assert alias.buffer.same_as(pointer.buffer)
     function = builder.get()
     source = np.arange(5, dtype="int32") * 13

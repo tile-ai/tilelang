@@ -19,9 +19,12 @@
 
 #pragma once
 
+#include "ascend/analysis/storage.h"
+#include "ascend/ir/task.h"
 #include "ir/analyzer.h"
-#include "native_storage.h"
+#include "ir/tensor_utils.h"
 #include "transform/common/storage_size.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <algorithm>
 #include <limits>
@@ -36,31 +39,34 @@ namespace tvm::tl::ascend {
 // Keep scheduling costs and materialized version strides on the same native
 // allocation/alias model. Layout coordinates and pitches are in dtype bits;
 // allocation byte sizes additionally follow the native packed-storage rules.
-class NativeStorageFootprints {
+class StorageFootprints {
 public:
-  explicit NativeStorageFootprints(const Stmt &body) {
+  explicit StorageFootprints(const Stmt &body) {
     storage_.Collect(body);
     std::unordered_set<TensorVar, ObjectPtrHash, ObjectPtrEqual> seen;
-    VisitNativePostOrder(body, [&](const ffi::ObjectRef &object) {
-      if (auto variable = object.as<Var>()) {
-        if (auto tensor = variable->as<TensorVar>())
-          if (seen.insert(*tensor).second)
-            views_[storage_.Identity(*tensor)].push_back(*tensor);
-      }
-      const auto *bind = object.as<BindObj>();
-      if (!bind)
-        return;
-      auto tensor = bind->var.as<TensorVar>();
-      Expr value = bind->value;
-      if (const auto *call = value.as<CallObj>(); IsScheduledBind(call))
-        value = ReadScheduledBinding(call).value;
-      const auto *call = value.as<CallObj>();
-      if (tensor && call && call->op.same_as(tirx::alloc_tensor_op()))
-        owners_.emplace(storage_.Identity(*tensor), *tensor);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (auto variable = object.as<Var>()) {
+            if (auto tensor = variable->as<TensorVar>())
+              if (seen.insert(*tensor).second)
+                views_[storage_.Identity(*tensor)].push_back(*tensor);
+          }
+          const auto *bind = object.as<BindObj>();
+          if (!bind)
+            return ffi::WalkResult::Advance();
+          auto tensor = bind->var.as<TensorVar>();
+          Expr value = bind->value;
+          if (const auto *call = value.as<CallObj>(); IsScheduledBind(call))
+            value = ReadScheduledBinding(call).value;
+          const auto *call = value.as<CallObj>();
+          if (tensor && call && call->op.same_as(tirx::alloc_tensor_op()))
+            owners_.emplace(storage_.Identity(*tensor), *tensor);
+          return ffi::WalkResult::Advance();
+        });
   }
 
-  const NativeStorageContext &Storage() const { return storage_; }
+  const StorageProvenance &Storage() const { return storage_; }
 
   const TensorVar &Allocation(const Var &storage) const {
     auto found = owners_.find(storage);
@@ -258,7 +264,7 @@ public:
   }
 
 private:
-  NativeStorageContext storage_;
+  StorageProvenance storage_ = MakeAscendStorageProvenance();
   std::unordered_map<Var, TensorVar, ObjectPtrHash, ObjectPtrEqual> owners_;
   std::unordered_map<Var, std::vector<TensorVar>, ObjectPtrHash, ObjectPtrEqual>
       views_;

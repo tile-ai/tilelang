@@ -7,7 +7,7 @@
 
 #include "backend/common/codegen/codegen_c_base.h"
 #include "codegen/c/codegen_c.h"
-#include "native_ascend_ir.h"
+#include "ir/analyzer.h"
 #include <tvm/sym/analyzer.h>
 
 namespace tvm {

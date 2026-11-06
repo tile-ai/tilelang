@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tvm_tirx import ir as _ir
+
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.gemm_op import GemmWarpPolicy, _gemm_impl
@@ -21,7 +22,7 @@ def gemm(
     clear_accum: bool = False,
     k_pack: int = 1,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """TileLang GEMM operator for ROCm.
 
     Same semantics as the common :func:`tilelang.language.gemm_op.gemm`.

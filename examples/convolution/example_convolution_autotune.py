@@ -124,7 +124,6 @@ def main(
     d: int = 1,
     p: int = 1,
     use_autotune: bool = False,
-    with_roller: bool = True,
 ):
     N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
     ref_prog = ref_program(S, P, D)
@@ -154,7 +153,6 @@ def run_regression_perf(
     d: int = 1,
     p: int = 1,
     use_autotune: bool = False,
-    with_roller: bool = True,
 ):
     N, C, H, W, F, K, S, D, P = n, c, h, w, f, k, s, d, p
     config = get_heuristic_config()
@@ -175,6 +173,5 @@ if __name__ == "__main__":
     parser.add_argument("--d", type=int, default=1, help="d")
     parser.add_argument("--p", type=int, default=1, help="p")
     parser.add_argument("--use_autotune", action="store_true", default=False, help="Whether to use autotune for matmul configs")
-    parser.add_argument("--with_roller", action="store_true", default=True, help="Whether to enable BitBLAS roller for search space")
     args = parser.parse_args()
-    main(args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p, args.use_autotune, args.with_roller)
+    main(args.n, args.c, args.h, args.w, args.f, args.k, args.s, args.d, args.p, args.use_autotune)

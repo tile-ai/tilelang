@@ -7,7 +7,7 @@ import tvm_ffi
 from tvm_tirx import ir, target, tirx
 
 import tilelang.testing
-from tilelang.language._native import call_intrin
+from tilelang.language._intrinsics import call_intrin
 
 
 CUDA = target.Target({"kind": "cuda", "arch": "sm_120"})

@@ -6,9 +6,12 @@
 #ifndef TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_
 #define TVM_TL_BACKEND_COMMON_CODEGEN_CODEGEN_C_BASE_H_
 
+#include "op/builtin.h"
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/location.h>
 #include <tvm/ir/transform.h>
+#include <tvm/tirx/op/abi.h>
+#include <tvm/tirx/op/memory.h>
 
 #include <sstream>
 #include <string>
@@ -62,8 +65,8 @@ public:
     if (const auto *evaluate = stmt.as<EvaluateObj>()) {
       if (const auto *call = evaluate->value.as<CallObj>()) {
         if (call->ty.as<PtrTypeObj>() &&
-            (IsCodegenOp(call, "tirx.call_extern") ||
-             IsCodegenOp(call, "tirx.call_pure_extern"))) {
+            (call->op.same_as(tirx::call_extern_op()) ||
+             call->op.same_as(tirx::call_pure_extern_op()))) {
           // Legacy TileLang programs use a handle return annotation for
           // statement-only C helpers, including helpers that return void.
           // Discard this call's result without converting it to a pointer.
@@ -86,14 +89,13 @@ public:
           stream << expression.str() << ";\n";
           return;
         }
-        if (IsCodegenOp(call, "tl.storage_sync")) {
+        if (call->op.same_as(tl::storage_sync())) {
           // Named/partial barriers are a TileLang operation. The target's
           // gpu_storage_sync only represents the full-group variant.
           PrintStorageSync(call);
           return;
         }
-        if (const auto *callee = call->op.as<OpObj>();
-            callee && callee->name == "prim.assume") {
+        if (call->op.same_as(prim::assume_op())) {
           TVM_FFI_CHECK_EQ(call->args.size(), 1, TypeError);
           auto condition_type = call->args[0]->ty.as<PrimType>();
           TVM_FFI_CHECK(condition_type && *condition_type == PrimType::Bool(),
@@ -149,8 +151,8 @@ public:
             -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
           if (auto op = call->op.as<Op>()) {
             ffi::String symbol;
-            if ((op.value()->name == "tirx.call_extern" ||
-                 op.value()->name == "tirx.call_pure_extern") &&
+            if ((call->op.same_as(tirx::call_extern_op()) ||
+                 call->op.same_as(tirx::call_pure_extern_op())) &&
                 !call->args.empty()) {
               if (const auto *name = call->args[0].as<StringImmObj>())
                 symbol = name->value;
@@ -229,7 +231,7 @@ protected:
   }
 
   void PrintStorageSync(const CallObj *call) override {
-    TVM_FFI_CHECK(!IsCodegenOp(call, "tl.storage_sync"), ValueError)
+    TVM_FFI_CHECK(!call->op.same_as(tl::storage_sync()), ValueError)
         << "This source backend does not support named/partial barriers";
     CodeGenC::PrintStorageSync(call);
   }
@@ -246,24 +248,25 @@ private:
     const auto *call = expression.as<CallObj>();
     if (!call)
       return false;
-    if (IsCodegenOp(call, "tirx.decl_tensor")) {
+    if (call->op.same_as(tirx::decl_tensor_op())) {
       // Shared arena merging preserves allocation qualifiers on each view,
       // rather than qualifying the arena and its unrelated ordinary views.
-      if (auto flag =
-              CodegenCallAnnotations(call).Get(tirx::attr::kVolatile.name);
-          flag && CodegenBool(*flag))
+      if (const auto *attrs = call->attrs.as<DictAttrsObj>();
+          attrs &&
+          CodegenBool(
+              attrs->dict.Get(tirx::attr::kVolatile.name).value_or(false)))
         return true;
     }
     if (call->args.empty())
       return false;
-    if (IsCodegenOp(call, "tirx.address_of")) {
+    if (call->op.same_as(tirx::address_of_op())) {
       const auto *load = call->args[0].as<TensorLoadObj>();
       return load && HasVolatilePointerSource(load->source);
     }
-    if (IsCodegenOp(call, "tirx.decl_tensor") ||
-        IsCodegenOp(call, "tirx.tensor_data_ptr") ||
-        IsCodegenOp(call, "tirx.ptr_byte_offset") ||
-        IsCodegenOp(call, "tirx.reinterpret"))
+    if (call->op.same_as(tirx::decl_tensor_op()) ||
+        call->op.same_as(tirx::tensor_data_ptr_op()) ||
+        call->op.same_as(tirx::ptr_byte_offset_op()) ||
+        call->op.same_as(tirx::reinterpret_op()))
       return HasVolatilePointerSource(call->args[0]);
     return false;
   }

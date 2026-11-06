@@ -22,10 +22,12 @@
  * \brief Split native software dual copies using the lexical AIV subcore.
  */
 
+#include "ascend/ir/block.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include <tvm/tirx/op/region.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
@@ -119,9 +121,11 @@ void ValidateStaticSplitConstraints(const AscendCopy &copy, DualCopyPath path,
 }
 
 bool BlockIs(const RegionStmtObj *region, const char *name) {
+  if (ascend::IsAscendBlock(region))
+    return ascend::AscendBlockName(region) == name;
   if (region->op->name != "tl.attr")
     return false;
-  auto fields = ReadNativeAnnotations(region);
+  auto fields = ReadAnnotations(region);
   if (fields.at("key").cast<String>() != "tl.sblock")
     return false;
   auto block = fields.at("value").cast<Map<String, Any>>();
@@ -137,7 +141,7 @@ bool IsKernel(const RegionStmtObj *region) {
   // it did inside the frontend launch region. The finder must also stop
   // here so the enclosing grid does not acquire the same subcore twice.
   if (region->op->name == "tl.attr" &&
-      ReadNativeAnnotations(region).at("key").cast<String>() == "tl.kernel")
+      ReadAnnotations(region).at("key").cast<String>() == "tl.kernel")
     return true;
   return region->op.same_as(launch_thread_op()) &&
          region->args[0].as_or_throw<StringImm>()->value == "blockIdx.x";

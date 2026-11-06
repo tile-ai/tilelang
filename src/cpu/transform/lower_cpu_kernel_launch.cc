@@ -91,14 +91,9 @@ private:
   static bool IsLexicalAnnotation(const Stmt &stmt) {
     const auto *evaluate = stmt.as<EvaluateObj>();
     const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!call || !IsAnnotationCall(call))
       return false;
-    auto attributes = call->attrs.value().as_or_throw<DictAttrs>();
-    auto fields =
-        DecodeAnnotations(
-            call->args[0].as_or_throw<tvm::Tuple>(),
-            attributes.GetAttr<Array<Any>>("annotation_schema").value())
-            .cast<Map<Any, Any>>();
+    auto fields = ReadAnnotations(call);
     return fields.count(attr::kLexicalAllocScope);
   }
 
@@ -113,7 +108,7 @@ private:
       const Stmt &element = op->seq[i];
       if (IsLexicalAnnotation(element)) {
         // sblock_attr annotates this sequence's suffix. Keep the statement
-        // for FinalizeAnnotations, and place its local pool after it. The
+        // for LowerSourceAnnotations, and place its local pool after it. The
         // lexical depth must already be active while visiting nested parallel
         // scopes so that they do not claim this local pool first.
         Array<Stmt> suffix;

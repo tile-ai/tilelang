@@ -22,7 +22,10 @@
  * \brief Merge Ascend on-chip allocations from a buffer-alias contract.
  */
 
+#include "ascend/transform/source_scopes.h"
 #include "buffer_alias.h"
+#include "ir/annotations.h"
+#include "layout/expr_utils.h"
 #include "merge_ub_common.h"
 #include "op/builtin.h"
 
@@ -435,20 +438,27 @@ public:
   }
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!loop_annotation_detail::IsAnnotation(call))
+    if (!IsAnnotationCall(call))
       return StmtExprMutator::Mutate_(op, mode);
-    auto fields = ReadNativeAnnotations(call);
+    auto fields = ReadAnnotations(call);
     auto result = ExtractFields(fields);
     if (StructuralEqual()(fields, result))
       return Unchanged();
-    return result.empty() ? Stmt(SeqStmt({}))
-                          : MakeNativeAnnotation(result, op->loc);
+    return result.empty() ? Stmt(SeqStmt({})) : MakeAnnotation(result, op->loc);
   }
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     RegionStmt region = StmtExprMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(GetRef<RegionStmt>(op))
                             .as_or_throw<RegionStmt>();
-    auto attr = ReadTaskAttribute(region.get());
+    if (IsAscendBlock(region.get())) {
+      auto fields = AscendBlockAnnotations(region.get());
+      auto result = ExtractFields(fields);
+      if (!StructuralEqual()(fields, result))
+        return MakeAscendBlock(AscendBlockName(region.get()), result,
+                               region->body, region->loc);
+      return region;
+    }
+    auto attr = ReadSourceAttribute(region.get());
     if (!attr)
       return region;
     if (attr->key == kBufferAliasMap || attr->key == kAivStorageMap) {
@@ -466,8 +476,8 @@ public:
           result.Set("annotations",
                      ExtractFields(annotations->cast<Map<String, Any>>()));
       if (!StructuralEqual()(fields, result))
-        return MakeNativeAttribute(attr->node, attr->key, result, region->body,
-                                   region->loc);
+        return MakeAttribute(attr->node, attr->key, result, region->body,
+                             region->loc);
     }
     return region;
   }
@@ -535,7 +545,7 @@ tvm::transform::Pass MergeUBAllocations(int align_bytes = 16,
     bool verbose = context->GetConfig<bool>(kDebugMergeSharedMemoryAllocations)
                        .value_or(false);
     const auto body = function->body;
-    function.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
+    function.CopyOnWrite()->body = SeqStmt(
         tl::MergeUBAllocations(body, align_bytes, verbose, disable_reuse));
     return function;
   };

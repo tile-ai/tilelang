@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from dataclasses import dataclass
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Range
-from tilelang.language import _native as tirx
+
 from tilelang import language as T
 from tilelang.utils.language import is_shared, is_fragment, is_tensor_memory
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.language.dtypes import validate_gemm_ab_dtypes
 from tvm_tirx.ir import Node
-from tilelang.language._native import PrimExpr
+from tvm_tirx.ir import Expr as PrimExpr
 
 
 @dataclass
@@ -44,8 +47,8 @@ class GemmBase:
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         raise NotImplementedError("lower is not implemented")
 
@@ -108,15 +111,15 @@ class GemmBase:
         return self.K
 
     @property
-    def A(self) -> tirx.Buffer:
+    def A(self) -> _tensor_spec.TensorValue:
         return getattr(self.gemm_node, "a", None)
 
     @property
-    def B(self) -> tirx.Buffer:
+    def B(self) -> _tensor_spec.TensorValue:
         return getattr(self.gemm_node, "b", None)
 
     @property
-    def C(self) -> tirx.Buffer:
+    def C(self) -> _tensor_spec.TensorValue:
         return getattr(self.gemm_node, "c", None)
 
     @property
@@ -153,17 +156,17 @@ class GemmBase:
 
     @property
     def mbarptr(self) -> PrimExpr:
-        return getattr(self.gemm_node, "mbarPtr", tirx.const(0, T.uint32))
+        return getattr(self.gemm_node, "mbarPtr", _ir.const(0, T.uint32))
 
     @property
-    def mbar(self) -> tirx.BufferLoad | None:
+    def mbar(self) -> _ir.TensorLoad | None:
         return getattr(self.gemm_node, "mbar", None)
 
     @property
     def C_coords(self):
         coords = getattr(self.gemm_node, "cCoords", None)
         if coords is None or len(coords) == 0:
-            zero = tirx.const(0, T.int32)
+            zero = _ir.const(0, T.int32)
             return [zero, zero]
         return [coords[i] for i in range(len(coords))]
 

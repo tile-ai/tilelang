@@ -7,7 +7,7 @@ import tvm_tirx
 from tvm_tirx import ir, tirx
 
 import tilelang.language as T
-from tilelang.language._native import buffer
+from tilelang.language._tensor_spec import buffer
 from tilelang.testing.packed import compile_packed_function
 
 

@@ -1,4 +1,5 @@
-from tilelang.language import _native as tirx
+from tvm_tirx import ir as _ir
+
 from tvm_tirx.target import Target
 from tvm_tirx.ir import Node
 from tvm_tirx.ir import Range
@@ -23,8 +24,8 @@ def gemm_lower(
     layout_map,
     target: Target,
     thread_bounds: Range,
-    thread_index: tirx.PrimExpr,
-    mbar_phase_expr: tirx.PrimExpr,
+    thread_index: _ir.Expr,
+    mbar_phase_expr: _ir.Expr,
 ):
     # We pass thread_bounds rather than thread_extents because tcgen5mma need to check this
     function = gemm.lower(layout_map, target, thread_bounds, thread_index, mbar_phase_expr)
@@ -112,8 +113,8 @@ class Gemm(Node, Scriptable):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr,
     ):
         """Lower the GEMM operation to TIR statements based on target architecture."""
         thread_nums = thread_bounds.extent

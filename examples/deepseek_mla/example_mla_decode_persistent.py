@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
-from tilelang.carver.arch import driver
+from tilelang import driver
 from einops import rearrange, einsum
 import argparse
 

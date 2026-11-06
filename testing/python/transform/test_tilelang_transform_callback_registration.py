@@ -129,7 +129,7 @@ def test_generic_pass_lowers_gemm_without_backend_import(first, backend):
                                  if isinstance(node.op, ir.Op) else None))
         assert not any(name.startswith("tl.tileop.") for name in calls)
         if backend == "llvm":
-            lowered = transform.FinalizeAnnotations("llvm")(lowered)
+            lowered = transform.LowerSourceAnnotations()(lowered)
             executable = tirx.compile(lowered, target=target)
             av = np.arange(12, dtype="float32").reshape(3, 4) / 8
             bv = np.arange(20, dtype="float32").reshape(4, 5) / 4

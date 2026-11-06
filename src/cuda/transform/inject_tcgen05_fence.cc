@@ -9,8 +9,9 @@
  */
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
+#include "ir/annotations.h"
 #include "op/builtin.h"
-#include "transform/common/native_layout_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op/gpu.h>
@@ -66,10 +67,11 @@ bool Tcgen05OrTmem(const CallObj *call) {
 
 bool UsesTmem(const Stmt &statement) {
   bool found = false;
-  VisitNativePostOrder(statement, [&](const ObjectRef &object) {
-    if (const auto *call = object.as<CallObj>())
-      found |= Tcgen05OrTmem(call);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      statement, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+        found |= Tcgen05OrTmem(call);
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 

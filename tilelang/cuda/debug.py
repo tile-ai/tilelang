@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 import warnings
 
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Op
 
 import tilelang.language as T
@@ -21,7 +23,7 @@ def get_stack_str(msg, stacklevel=1):
 
 
 @macro
-def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
+def device_assert(condition: _ir.Expr, msg: str = "", no_stack_info=False):
     """
     Device-side assert emulation for CUDA targets.
     """

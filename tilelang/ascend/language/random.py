@@ -9,7 +9,8 @@ consults.
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tvm_tirx import ir as _ir
+
 
 from tilelang.cuda.language.random import (
     rng_init as _common_rng_init,
@@ -22,7 +23,7 @@ from .kernel import get_block_binding, get_thread_binding, get_thread_extent
 __all__ = ["rng_init", "rng_rand", "rng_rand_float"]
 
 
-def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> tirx.PrimExpr:
+def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> _ir.Expr:
     """Initialize the random number generator state.
 
     See :func:`tilelang.cuda.language.random.rng_init`; the only difference is

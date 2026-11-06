@@ -40,8 +40,12 @@
  * once legacy syntax is removed, this file is deleted with it.
  */
 
-#include "common/native_reducer_utils.h"
+#include "ir/stmt_functor.h"
+#include "ir/tensor_utils.h"
 #include "op/fill.h"
+#include "reducer_metadata.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/tirx/transform.h>
 
@@ -54,7 +58,7 @@ namespace {
 using namespace tirx;
 using namespace prim;
 using namespace ffi;
-using namespace reducer_native;
+using namespace reducer;
 
 std::optional<double> TryConstValue(PrimExpr value) {
   while (const auto *cast = value.as<CastObj>())
@@ -68,28 +72,31 @@ std::optional<double> TryConstValue(PrimExpr value) {
   return std::nullopt;
 }
 
-class LegacyReducerCanonicalizer : public StmtExprMutator {
+class LegacyReducerCanonicalizer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   tirx::Function Run(tirx::Function function) {
     if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
       return function;
     auto metadata = MetadataIndex::Collect(function);
     std::unordered_set<const VarObj *> used_v2;
-    VisitNativePostOrder(function->body, [&](const ObjectRef &node) {
-      if (const auto *call = node.as<CallObj>()) {
-        if (call->op.same_as(ReducerInitOp::Get()) ||
-            call->op.same_as(FinalizeReducerV2Op::Get())) {
-          auto args = DecodeTileOpArguments(call).operands;
-          TVM_FFI_CHECK(!args.empty(), ValueError);
-          used_v2.insert(reducer_native::RegionTensor(args[0]).get());
-        } else if (call->op.same_as(reducer_update())) {
-          used_v2.insert(ParseReducerUpdate(call).reducer.get());
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          if (call->op.same_as(ReducerInitOp::Get()) ||
+              call->op.same_as(FinalizeReducerV2Op::Get())) {
+            auto args = DecodeTileOpArguments(call).operands;
+            TVM_FFI_CHECK(!args.empty(), ValueError);
+            used_v2.insert(
+                tl::RegionTensor(NormalizeToTensorRegion(args[0])).get());
+          } else if (call->op.same_as(reducer_update())) {
+            used_v2.insert(ParseReducerUpdate(call).reducer.get());
+          }
+
+          return ffi::WalkResult::Advance();
+        });
     for (const auto &[tensor, allocation] : metadata.allocations) {
       auto info = metadata.legacy.Get(tensor);
       const bool already_v2 = !info.has_value();
@@ -105,8 +112,16 @@ public:
           << "reducer metadata for " << tensor << " is missing the combine op";
       LegacyReducer entry;
       entry.old_tensor = tensor;
-      entry.acc = already_v2 ? tensor : WithScope(tensor, "local.reducer");
-      entry.dst = WithScope(tensor, "local.fragment", "_result");
+      entry.acc = tensor;
+      if (!already_v2) {
+        auto type = make_object<TensorTypeObj>(*tensor.ty().get());
+        type->scope = runtime::MemoryScope::Get("local.reducer");
+        entry.acc = TensorVar(tensor->name, TensorType(type), tensor->loc);
+      }
+      auto result_type = make_object<TensorTypeObj>(*tensor.ty().get());
+      result_type->scope = runtime::MemoryScope::Get("local.fragment");
+      entry.dst = TensorVar(tensor->name + "_result", TensorType(result_type),
+                            tensor->loc);
       entry.op_name = op->as_or_throw<String>();
       entry.op = ParseReducerV2OpType(entry.op_name);
       TVM_FFI_CHECK(entry.op == ReducerV2OpType::kSum ||
@@ -158,20 +173,26 @@ public:
   UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
     auto found = reducers_.find(op->var.get());
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     const auto *call = op->value.as<CallObj>();
     TVM_FFI_CHECK(call && call->op.same_as(alloc_tensor_op()), ValueError)
         << "legacy reducer handle must come from an allocation";
     const auto &entry = found->second;
-    return SeqStmt({Allocate(entry.acc, op->loc, call->attrs),
-                    Allocate(entry.dst, op->loc, call->attrs)},
+    return SeqStmt({Bind(entry.acc,
+                         Call((entry.acc).ty(), tirx::alloc_tensor_op(), {},
+                              call->attrs, {(entry.acc).ty()}, op->loc),
+                         op->loc),
+                    Bind(entry.dst,
+                         Call((entry.dst).ty(), tirx::alloc_tensor_op(), {},
+                              call->attrs, {(entry.dst).ty()}, op->loc),
+                         op->loc)},
                    op->loc);
   }
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
     if (!call)
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     // Metadata keys are remapped after statement processing, not interpreted
     // as executable reads of an opaque reducer handle.
     if (IsMetadataCall(call))
@@ -188,7 +209,7 @@ public:
         auto fill = TryConstValue(value);
         auto identity = TryConstValue(ReducerV2Identity(entry->op, dtype));
         const bool is_identity = fill && identity && *fill == *identity;
-        Array<Expr> args{FullRegion(entry->acc)};
+        Array<Expr> args{FullTensorRegion(entry->acc)};
         if (!is_identity) {
           TVM_FFI_CHECK(entry->op != ReducerV2OpType::kSum, ValueError)
               << "legacy sum reducer is filled with a non-zero value; its v1 "
@@ -199,7 +220,10 @@ public:
                                              : prim::cast(value, dtype));
         }
         entry->phase = Phase::kActive;
-        return TileCall(ReducerInitOp::Get(), args, {}, op->loc);
+        return Evaluate(MakeAnnotatedCall(PrimType::Void(),
+                                          ReducerInitOp::Get(), args, {},
+                                          op->loc),
+                        op->loc);
       }
     }
     if (call->op.same_as(FinalizeReducerOp::Get())) {
@@ -210,18 +234,21 @@ public:
               << "T.finalize_reducer on legacy reducer without a preceding "
                  "T.clear/T.fill";
           entry->phase = Phase::kFinalized;
-          return TileCall(FinalizeReducerV2Op::Get(),
-                          {FullRegion(entry->acc), FullRegion(entry->dst)},
-                          decoded.annotations, op->loc);
+          return Evaluate(MakeAnnotatedCall(PrimType::Void(),
+                                            FinalizeReducerV2Op::Get(),
+                                            {FullTensorRegion(entry->acc),
+                                             FullTensorRegion(entry->dst)},
+                                            decoded.annotations, op->loc),
+                          op->loc);
         }
       }
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     if (op->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(op);
+      auto fields = ReadAnnotations(op);
       const auto key = fields.at("key").as_or_throw<String>();
       if (key == "tl.kernel" || IsReducerMetadataKey(key)) {
         auto copy = make_object<RegionStmtObj>(*op);
@@ -229,14 +256,14 @@ public:
         return Stmt(copy);
       }
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op, InplaceMode mode) final {
     auto tensor = op->dest.as_or_throw<TensorVar>();
     auto found = reducers_.find(tensor.get());
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     auto &entry = found->second;
     TVM_FFI_CHECK(entry.phase == Phase::kActive, ValueError)
         << "store to legacy reducer " << tensor
@@ -264,7 +291,7 @@ public:
     auto tensor = op->source.as_or_throw<TensorVar>();
     auto found = reducers_.find(tensor.get());
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     TVM_FFI_CHECK(found->second.phase == Phase::kFinalized, ValueError)
         << "read of legacy reducer before T.finalize_reducer; partial values "
            "are not readable";
@@ -277,7 +304,7 @@ public:
   UnchangedOr<Expr> Mutate_(const VarObj *op, InplaceMode mode) final {
     auto found = reducers_.find(op);
     if (found == reducers_.end())
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     TVM_FFI_CHECK(found->second.phase == Phase::kFinalized, ValueError)
         << "unsupported use of legacy reducer handle " << op->name
         << " inside its reduction epoch";
@@ -295,7 +322,7 @@ private:
     Phase phase{Phase::kAllocated};
   };
   LegacyReducer *FindReducer(const Expr &region) {
-    auto tensor = reducer_native::RegionTensor(region);
+    auto tensor = tl::RegionTensor(NormalizeToTensorRegion(region));
     auto found = reducers_.find(tensor.get());
     return found == reducers_.end() ? nullptr : &found->second;
   }

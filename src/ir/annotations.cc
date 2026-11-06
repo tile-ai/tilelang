@@ -1,17 +1,184 @@
 /*!
  * \file tl/ir/annotations.cc
- * \brief Explicit dynamic operands for TileLang compile-time metadata.
+ * \brief Typed layout declarations and operand-based TileLang metadata.
  */
 
 #include "annotations.h"
+#include "ascend/ir/block.h"
 #include "layout/payload.h"
 #include "transform/common/warp_specialize.h"
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/op.h>
 #include <tvm/ir/stmt.h>
+#include <tvm/script/printer/support.h>
+
+#include <algorithm>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace tvm::tl {
+
+const Op &layout_map_op() {
+  static const Op op = Op::Get("tl.layout_map");
+  return op;
+}
+
+bool IsAnnotationCall(const CallObj *call) {
+  static const Op annotation = Op::Get("tl.annotation");
+  return call &&
+         (call->op.same_as(layout_map_op()) || call->op.same_as(annotation));
+}
+
+ffi::Map<tirx::TensorVar, Layout> ReadLayoutMapAnnotation(const CallObj *call) {
+  TVM_FFI_CHECK(call && call->op.same_as(layout_map_op()), ValueError)
+      << "Expected a tl.layout_map declaration";
+  TVM_FFI_CHECK(call->args.empty() && call->ty_args.empty(), ValueError)
+      << "tl.layout_map has no value or type arguments";
+  TVM_FFI_CHECK(call->ty.as<PrimType>().has_value() &&
+                    call->ty.as_or_throw<PrimType>().IsVoid(),
+                TypeError)
+      << "tl.layout_map must return void";
+  TVM_FFI_CHECK(call->attrs.has_value() &&
+                    call->attrs.value().as<DictAttrs>().has_value(),
+                TypeError)
+      << "tl.layout_map requires DictAttrs";
+  const auto attrs = call->attrs.value().as_or_throw<DictAttrs>();
+  for (const auto &[key, value] : attrs->dict) {
+    TVM_FFI_CHECK(key == "layout_map" || key == "tl.source_block_annotation",
+                  ValueError)
+        << "Unknown tl.layout_map attribute: " << key;
+    if (key == "tl.source_block_annotation") {
+      TVM_FFI_CHECK(value.as<bool>().value_or(false), ValueError)
+          << "tl.source_block_annotation must be the source annotation marker";
+    }
+  }
+  TVM_FFI_CHECK(attrs->dict.count("layout_map"), ValueError)
+      << "tl.layout_map requires its layout_map attribute";
+  return attrs->dict.at("layout_map").cast<ffi::Map<tirx::TensorVar, Layout>>();
+}
+
+Stmt MakeLayoutMapAnnotation(const ffi::Map<tirx::TensorVar, Layout> &layouts,
+                             bool source_block, Location loc) {
+  ffi::Map<ffi::String, ffi::Any> attrs{{"layout_map", layouts}};
+  if (source_block)
+    attrs.Set("tl.source_block_annotation", true);
+  return Evaluate(
+      Call(PrimType::Void(), layout_map_op(), {}, DictAttrs(attrs), {}, loc),
+      loc);
+}
+
+ffi::Array<Expr> DecodeCallOperands(const CallObj *call) {
+  if (!call->attrs)
+    return call->args;
+  const auto *dict = call->attrs.value().as<DictAttrsObj>();
+  if (!dict)
+    return call->args;
+  const auto attrs = ffi::GetRef<DictAttrs>(dict);
+  const auto count = attrs.GetAttr<int64_t>("operand_count");
+  const auto schema = attrs.GetAttr<ffi::Array<ffi::Any>>("annotation_schema");
+  if (!count && !schema)
+    return call->args;
+  TVM_FFI_CHECK(count && schema, ValueError)
+      << "Intrinsic metadata requires operand_count and annotation_schema "
+         "together";
+  TVM_FFI_CHECK_EQ(attrs.GetAttr<int64_t>("schema_version").value_or(0), 1,
+                   ValueError);
+  TVM_FFI_CHECK_GE(count.value(), 0, ValueError);
+  TVM_FFI_CHECK_EQ(static_cast<size_t>(count.value()) + 1, call->args.size(),
+                   ValueError)
+      << "Intrinsic metadata must occupy exactly one final Tuple operand";
+  const auto payload = call->args.back().as_or_throw<tvm::Tuple>();
+  // Resolve the schema as well: a valid Tuple with an out-of-range variable
+  // reference must not slip through and disappear at code generation.
+  DecodeAnnotations(payload, schema.value());
+  ffi::Array<Expr> result;
+  result.reserve(count.value());
+  for (int64_t i = 0; i < count.value(); ++i)
+    result.push_back(call->args[i]);
+  return result;
+}
+
+ffi::Map<ffi::String, ffi::Any> ReadAnnotations(const ffi::Array<Expr> &args,
+                                                const DictAttrs &attrs) {
+  TVM_FFI_CHECK_EQ(args.size(), 1U, ValueError);
+  TVM_FFI_CHECK_EQ(attrs.GetAttr<int64_t>("schema_version", 0).value(), 1,
+                   ValueError);
+  auto decoded = DecodeAnnotations(
+      args[0].as_or_throw<tvm::Tuple>(),
+      attrs.GetAttr<ffi::Array<ffi::Any>>("annotation_schema").value());
+  ffi::Map<ffi::String, ffi::Any> result;
+  for (const auto &[key, value] : decoded.cast<ffi::Map<ffi::Any, ffi::Any>>())
+    result.Set(key.cast<ffi::String>(), value);
+  return result;
+}
+
+ffi::Map<ffi::String, ffi::Any> ReadAnnotations(const CallObj *call) {
+  if (call->op.same_as(layout_map_op())) {
+    ReadLayoutMapAnnotation(call);
+    return call->attrs.value().as_or_throw<DictAttrs>()->dict;
+  }
+  return ReadAnnotations(call->args,
+                         call->attrs.value().as_or_throw<DictAttrs>());
+}
+
+ffi::Map<ffi::String, ffi::Any> ReadAnnotations(const RegionStmtObj *region) {
+  return ReadAnnotations(region->args, region->attrs);
+}
+
+Stmt MakeAnnotation(const ffi::Map<ffi::String, ffi::Any> &annotations,
+                    Location loc) {
+  if (auto layouts = annotations.Get("layout_map")) {
+    const auto marker = annotations.Get("tl.source_block_annotation");
+    if (marker) {
+      TVM_FFI_CHECK(marker->as<bool>().value_or(false), ValueError)
+          << "tl.source_block_annotation must be the source annotation marker";
+    }
+    Stmt layout = MakeLayoutMapAnnotation(
+        layouts->cast<ffi::Map<tirx::TensorVar, Layout>>(), marker.has_value(),
+        loc);
+    auto remaining = annotations;
+    remaining.erase("layout_map");
+    // Do not emit a marker-only second statement for a pure layout declaration.
+    if (remaining.empty() || (remaining.size() == 1 &&
+                              remaining.count("tl.source_block_annotation")))
+      return layout;
+    return SeqStmt({layout, MakeAnnotation(remaining, loc)}, loc);
+  }
+  auto encoded = EncodeAnnotations(annotations);
+  return Evaluate(Call(PrimType::Void(), Op::Get("tl.annotation"),
+                       {encoded.payload},
+                       DictAttrs({{"schema_version", 1},
+                                  {"annotation_schema", encoded.schema}}),
+                       {}, loc),
+                  loc);
+}
+
+RegionStmt MakeAttribute(ffi::Any node, ffi::String key, ffi::Any value,
+                         SeqStmt body, Location loc) {
+  auto encoded = EncodeAnnotations(ffi::Map<ffi::String, ffi::Any>{
+      {"node", node}, {"key", key}, {"value", value}});
+  return RegionStmt(
+      Op::Get("tl.attr"), {encoded.payload}, {},
+      DictAttrs({{"schema_version", 1}, {"annotation_schema", encoded.schema}}),
+      std::move(body), {}, loc);
+}
+
+bool AnnotationAsBool(ffi::AnyView value) {
+  if (auto boolean = value.as<bool>())
+    return *boolean;
+  if (const auto *literal = value.as<IntImmObj>()) {
+    TVM_FFI_CHECK(literal->value == 0 || literal->value == 1, ValueError)
+        << "Boolean annotation must be a boolean";
+    return literal->value == 1;
+  }
+  auto integer = value.cast<int64_t>();
+  TVM_FFI_CHECK(integer == 0 || integer == 1, ValueError)
+      << "Boolean annotation must be a boolean";
+  return integer != 0;
+}
+
 namespace {
 
 using ffi::Any;
@@ -310,7 +477,7 @@ void CollectSourceAnnotations(const Stmt &statement, Map<Any, Any> *values) {
     for (const Stmt &child : sequence->seq)
       CollectSourceAnnotations(child, values);
   } else if (const auto *region = statement.as<RegionStmtObj>()) {
-    if (region->op->name == "tl.launch_kernel")
+    if (region->op->name == "tl.launch_kernel" || ascend::IsAscendBlock(region))
       return;
     if (region->op->name == "tl.attr") {
       ValidateSchema(region->attrs);
@@ -333,13 +500,11 @@ void CollectSourceAnnotations(const Stmt &statement, Map<Any, Any> *values) {
       CollectSourceAnnotations(*branch->else_case, values);
   } else if (const auto *evaluate = statement.as<EvaluateObj>()) {
     const auto *call = evaluate->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!IsAnnotationCall(call))
       return;
-    auto attrs = GetSchemaAttrs(call);
-    auto annotations =
-        Decode(call->args[0].as_or_throw<Tuple>(),
-               attrs.GetAttr<Array<Any>>("annotation_schema").value())
-            .cast<Map<Any, Any>>();
+    Map<Any, Any> annotations;
+    for (const auto &[key, value] : ReadAnnotations(call))
+      annotations.Set(key, value);
     auto source = annotations.Get(String("tl.source_block_annotation"));
     if (!source)
       return;
@@ -365,6 +530,124 @@ EncodedAnnotations EncodeAnnotations(const ffi::Any &annotations) {
   return {Tuple(std::move(encoder.values)), std::move(schema)};
 }
 
+bool IsStaticAnnotationValue(const Any &value) {
+  if (value == nullptr || value.as<bool>() || value.as<ffi::BigInt>() ||
+      value.as<double>() || value.as<String>() || value.as<IntImmObj>() ||
+      value.as<FloatImmObj>() || value.as<StringImmObj>())
+    return true;
+  if (auto array = value.as<Array<Any>>()) {
+    for (const Any &item : *array)
+      if (!IsStaticAnnotationValue(item))
+        return false;
+    return true;
+  }
+  if (auto map = value.as<Map<Any, Any>>()) {
+    for (const auto &[key, item] : *map)
+      if (!IsStaticAnnotationValue(key) || !IsStaticAnnotationValue(item))
+        return false;
+    return true;
+  }
+  return false;
+}
+
+bool IsCodegenAnnotation(const String &key) {
+  // Only keys with concrete codegen or outlined-source consumers belong here.
+  // Target-specific validation remains with the corresponding backend.
+  return key == "pragma_import_c" || key == "pragma_unroll_factor" ||
+         key == "code_block_source" || key == "code_block_signature" ||
+         key == "code_block_entry_name" || key == "volatile_scope" ||
+         key == "fragment_shape" || key == "fragment_layout" ||
+         key == "threadblock_swizzle_pattern" ||
+         key == "tl.min_blocks_per_sm" || key == "tl.simtvf_scope" ||
+         key == "tl.simdvf_scope";
+}
+
+bool IsCompilerAnnotation(const String &key) {
+  // Reserved namespaces are compiler contracts even when a new owner has not
+  // yet been added. The remaining names are legacy source grammar and known
+  // execution options, not a list of owning passes or pipeline stages.
+  if (key.find("tl.") == 0 || key.find("tirx.") == 0)
+    return true;
+  static const std::unordered_set<std::string> contracts{
+      "barrier_init",
+      "l2_hit_ratio_map",
+      "metal_context",
+      "cluster_dims",
+      "use_2cta",
+      "warp_specialize",
+      "kWarpSpecializationScope",
+      "kCustomWarpSpecialization",
+      "thread_extent",
+      "virtual_thread",
+      "coproc_scope",
+      "pipeline_exec_scope",
+      "reduce_scope",
+      "vector_count",
+      "tilelang_assume",
+      "pragma_auto_unroll_max_step",
+      "pragma_unroll_explicit",
+      "pragma_debug_skip_region",
+      "layout_map",
+      "safe_value_map",
+      "precision",
+      "round",
+      "sat"};
+  return contracts.count(key);
+}
+
+Call NormalizeCallAnnotations(Call call) {
+  if (const auto *intrinsic = call->op.as<OpObj>()) {
+    TVM_FFI_CHECK(intrinsic->name.find("tl.tileop.") != 0, ValueError)
+        << "LowerSourceAnnotations cannot run before LowerTileOp: "
+        << intrinsic->name;
+  }
+  if (!call->attrs)
+    return call;
+  auto attrs = call->attrs.value().as<DictAttrs>();
+  if (!attrs || !attrs.value()->dict.count("operand_count"))
+    return call;
+
+  // Keep runtime operands separate from source metadata. The shared intrinsic
+  // decoder validates the complete envelope before any payload is discarded.
+  auto operands = DecodeCallOperands(call.get());
+  auto decoded =
+      DecodeAnnotations(
+          call->args.back().as_or_throw<Tuple>(),
+          attrs.value().GetAttr<Array<Any>>("annotation_schema").value())
+          .cast<Map<String, Any>>();
+  auto attributes = attrs.value()->dict;
+  attributes.erase("schema_version");
+  attributes.erase("operand_count");
+  attributes.erase("annotation_schema");
+  std::vector<String> source_keys;
+  for (const auto &[key, value] : decoded) {
+    TVM_FFI_CHECK(!attributes.count(key), ValueError)
+        << "Annotation appears in both native attributes and metadata "
+           "operands: "
+        << key;
+    if (IsStaticAnnotationValue(value)) {
+      attributes.Set(key, value);
+      source_keys.push_back(key);
+    } else {
+      TVM_FFI_CHECK(!IsCodegenAnnotation(key) && !IsCompilerAnnotation(key),
+                    ValueError)
+          << "Unconsumed intrinsic annotation `" << key
+          << "` at LowerSourceAnnotations; lower its value to an explicit "
+             "operand or a compile-time option first";
+      // Unknown descriptive hints are not runtime arguments. Removing their
+      // payload must not introduce an evaluation of the discarded expression.
+    }
+  }
+  if (!source_keys.empty()) {
+    std::sort(source_keys.begin(), source_keys.end());
+    attributes.Set("tl.source_annotation_keys", Array<String>(source_keys));
+  }
+  return Call(call->ty, call->op, std::move(operands),
+              attributes.empty() ? ffi::Optional<Attrs>()
+                                 : ffi::Optional<Attrs>(DictAttrs(attributes)),
+              call->ty_args, call->loc);
+}
+
 Map<String, Any> CollectSourceBlockAnnotations(const SeqStmt &body) {
   Map<Any, Any> collected;
   CollectSourceAnnotations(body, &collected);
@@ -376,6 +659,31 @@ Map<String, Any> CollectSourceBlockAnnotations(const SeqStmt &body) {
 
 Call MakeAnnotatedCall(Type ty, Op op, Array<Expr> operands,
                        const Map<String, Any> &annotations, Location loc) {
+  if (op->name.find("tl.tileop.") != 0 &&
+      IsStaticAnnotationValue(annotations)) {
+    Map<String, Any> attributes = annotations;
+    if (!annotations.empty()) {
+      std::vector<String> keys;
+      for (const auto &[key, value] : annotations) {
+        TVM_FFI_CHECK(key != "schema_version" && key != "operand_count" &&
+                          key != "annotation_schema" &&
+                          key != "tl.source_annotation_keys",
+                      ValueError)
+            << "Reserved intrinsic annotation key: " << key;
+        keys.push_back(key);
+      }
+      // Shape comparison ignores source annotations, but must retain attributes
+      // supplied directly through the native IR API. Keep that provenance
+      // without adding an expression operand or a metadata payload.
+      std::sort(keys.begin(), keys.end());
+      attributes.Set("tl.source_annotation_keys", Array<String>(keys));
+    }
+    return Call(std::move(ty), std::move(op), std::move(operands),
+                annotations.empty()
+                    ? ffi::Optional<Attrs>()
+                    : ffi::Optional<Attrs>(DictAttrs(attributes)),
+                {}, std::move(loc));
+  }
   auto encoded = EncodeAnnotations(annotations);
   const int64_t count = static_cast<int64_t>(operands.size());
   operands.push_back(encoded.payload);
@@ -406,10 +714,31 @@ TileOpArguments DecodeTileOpArguments(const CallObj *call) {
   return result;
 }
 
+namespace {
+void ValidateLayoutMapCall(const CallObj *call) {
+  ReadLayoutMapAnnotation(call);
+}
+
+ffi::Optional<script::printer::ExprDoc>
+LayoutMapCallDoc(script::printer::DocTranslatorObj *translator,
+                 ffi::AnyView value, const ffi::Object *) {
+  // This dialect has no global `tl` script namespace. The native constructor
+  // preserves the typed attrs and works with the standard TIRx parser.
+  return script::printer::RawCallDocTranslate(translator,
+                                              value.cast<Call>().get());
+}
+} // namespace
+
 TVM_FFI_STATIC_INIT_BLOCK() {
   ffi::reflection::GlobalDef()
       .def("tl.MergeSourceAnnotations", MergeSourceAnnotations)
       .def("tl.CollectSourceBlockAnnotations", CollectSourceBlockAnnotations)
+      .def("tl.MakeAnnotation", MakeAnnotation)
+      .def("tl.ReadAnnotations",
+           [](const Call &call) { return ReadAnnotations(call.get()); })
+      .def("tl.MakeLayoutMapAnnotation", MakeLayoutMapAnnotation)
+      .def("tl.ReadLayoutMapAnnotation",
+           [](const Call &call) { return ReadLayoutMapAnnotation(call.get()); })
       .def("tl.DecodeAnnotations", DecodeAnnotations)
       .def("tl.EncodeAnnotations",
            [](Any value) {
@@ -417,6 +746,15 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return Array<Any>{encoded.schema, encoded.payload};
            })
       .def("tl.MakeAnnotatedCall", MakeAnnotatedCall);
+  OpDef("tl.layout_map", "Typed TileLang layout declarations.")
+      .set_attr(script::printer::op_attr::kDocTranslateOpCall,
+                script::printer::FDocTranslate::FromNative<&LayoutMapCallDoc>())
+      .set_validator(
+          ffi::reflection::NativeFunctionView<void(
+              const CallObj *)>::FromNative<&ValidateLayoutMapCall>())
+      .signature(sig::call_attrs<DictAttrsObj>())
+      .set_attr(op_attr::kFixedReturnType, PrimType::Void())
+      .set_attr(op_attr::kCallEffectKind, CallEffectKind::kOpaque);
   OpDef("tl.annotation", "Metadata for the enclosing TileLang lexical scope.")
       .set_validator(
           ffi::reflection::NativeFunctionView<void(

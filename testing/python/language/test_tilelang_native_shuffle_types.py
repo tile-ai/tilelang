@@ -1,10 +1,11 @@
 """Native warp shuffle types remain valid across inference and serialization."""
 
+from tilelang.language import _construction
+
 import pytest
 from tvm_tirx import ir
 
 import tilelang.language as T
-from tilelang.language import _native
 
 
 SHUFFLES = [
@@ -23,7 +24,7 @@ def test_shuffle_native_value_type_roundtrip(shuffle, op_name, dtype):
     assert result.op.name == op_name
     ir.assert_structural_equal(result.ty, value.ty)
     result.validate()
-    assert _native.side_effect(result) == ir.CallEffectKind.Opaque
+    assert _construction.side_effect(result) == ir.CallEffectKind.Opaque
     assert result.args[1].same_as(value)
     assert int(result.args[0]) == 0xFF
     assert str(result.args[0].ty.dtype) == "uint32"

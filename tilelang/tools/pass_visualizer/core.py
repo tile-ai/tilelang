@@ -25,6 +25,7 @@ from tvm_tirx import ir, tirx
 from tvm_tirx.target import Target
 
 from tilelang.analysis._visitor import tilelang_metadata
+from tilelang.layout import Fragment, Layout, PartialFragment
 
 from tilelang.backend import create_backend_context
 from tilelang.jit import JITImpl
@@ -112,14 +113,17 @@ def _fmt_tensor(tensor) -> str:
 def _layout_fields(obj) -> list[tuple[str, object]] | None:
     """If obj is a Layout/Fragment/Target, return its (field, value) pairs, else None."""
     cls = type(obj).__name__
-    if cls == "Layout":
-        return [("input_size", obj.input_size), ("forward_index", obj.forward_index)]
-    if cls in ("Fragment", "PartialFragment"):
-        rep_field = "replicate_size (partials)" if cls == "PartialFragment" else "replicate_size"
+    if isinstance(obj, Layout) and not isinstance(obj, Fragment):
+        fields = [("input_size", obj.input_size), ("forward_index", obj.get_forward_index())]
+        if hasattr(obj, "kind"):
+            fields.append(("kind", obj.kind))
+        return fields
+    if isinstance(obj, Fragment):
+        rep_field = "replicate_size (partials)" if isinstance(obj, PartialFragment) else "replicate_size"
         return [
             ("input_size", obj.input_size),
-            ("forward_index", obj.forward_index),
-            ("forward_thread", obj.forward_thread),
+            ("forward_index", obj.get_forward_index()),
+            ("forward_thread", obj.thread),
             (rep_field, obj.replicate_size),
             ("thread_range", obj.thread_range),
         ]
@@ -274,7 +278,7 @@ def _walk_stmt(node, indent: str) -> None:
         elif isinstance(call, ir.Call):
             metadata = tilelang_metadata(call)
             if metadata is not None:
-                print(f"{indent}Evaluate: tl.annotation")
+                print(f"{indent}Evaluate: {call.op.name}")
                 _print_annotation_value(metadata, indent + "    ")
                 return
             name = call.op.name if isinstance(call.op, ir.Op) else str(call.op)

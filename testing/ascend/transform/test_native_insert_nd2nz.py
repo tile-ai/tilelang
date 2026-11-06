@@ -11,6 +11,7 @@ import pytest
 import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
+from testing.ascend._block import attribute as _scope_attribute
 
 
 def integer(value, dtype="int32"):
@@ -60,8 +61,7 @@ def copy(src, dst, src_starts=None, dst_starts=None, src_shape=None, dst_shape=N
 
 
 def attribute(key, value, body):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": None, "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(None, key, value, body)
 
 
 def annotation(fields):
@@ -88,7 +88,7 @@ def operands(call):
 
 
 def metadata(call):
-    return tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[-1], call.attrs["annotation_schema"])
+    return call.attrs
 
 
 def constant(expr):
@@ -364,7 +364,7 @@ def test_inserted_intrinsics_reach_real_layout_lowering_and_ascend_codegen(case,
             value = tvm_ffi.get_global_func("tl.transform." + name)()(ir.IRModule({"main": value}))["main"]
         assert tirx.analysis.check_well_formed(value), name
         (tmp_path / (name + ".json")).write_text(ir.save_json(value))
-    value = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("ascend")(ir.IRModule({"main": value}))["main"]
+    value = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": value}))["main"]
     module = ir.IRModule({"main": value})
     for transform in [tirx.transform.LowerTensorLayouts, tirx.transform.FlattenTensor, tirx.transform.StmtSimplify]:
         module = transform()(module)

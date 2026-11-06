@@ -4,7 +4,9 @@
  * scope.
  */
 #include "cuda/op/builtin.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include <tvm/tirx/op/region.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op/gpu.h>
@@ -120,8 +122,8 @@ public:
       }
       const auto *evaluate = statement.as<EvaluateObj>();
       const auto *call = evaluate ? evaluate->value.as<CallObj>() : nullptr;
-      if (call && call->op.same_as(Op::Get("tl.annotation"))) {
-        auto fields = ReadNativeAnnotations(call);
+      if (IsAnnotationCall(call)) {
+        auto fields = ReadAnnotations(call);
         if (auto values = fields.Get("barrier_init")) {
           for (const auto &[key, value] : values->cast<Map<Any, Any>>()) {
             TensorVar tensor = key.cast<TensorVar>();
@@ -155,9 +157,14 @@ public:
           }
           fields.erase("barrier_init");
           if (!fields.empty())
-            output.push_back(MakeNativeAnnotation(fields, statement->loc));
+            output.push_back(MakeAnnotation(fields, statement->loc));
           continue;
         }
+        // Splitting layout_map from mixed metadata leaves an adjacent layout
+        // declaration before barrier_init. Metadata executes no runtime work;
+        // keep it in order without flushing an uninitialized barrier group.
+        output.push_back(statement);
+        continue;
       }
       // Preserve allocation and initialization order across every executable
       // statement. Consecutive declarations are initialized together, while a

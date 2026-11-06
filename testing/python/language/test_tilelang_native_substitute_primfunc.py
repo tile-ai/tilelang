@@ -10,7 +10,8 @@ from tvm_tirx.tirx.layout import Iter
 import tilelang
 import tilelang.language as T
 from tilelang.language.eager.builder import substitute_primfunc
-from tilelang.language._native import tensor_offset, tensor_strides
+from tilelang.language._tensor_spec import tensor_offset
+from tilelang.language._tensor_spec import tensor_strides
 from tilelang.testing.packed import compile_packed_function
 
 

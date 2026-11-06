@@ -1,18 +1,22 @@
 """Common math intrinsics exposed on the TileLang language surface."""
 
-from tilelang.language import _native
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+import tvm_ffi as _ffi
+from tvm_tirx import ir as _ir
+
 
 from tvm_ffi import dtype as DataType
 from tvm_ffi._dtype import DataTypeCode
-from tilelang.language import _native as tirx
-from tilelang.language._native import PrimExpr
+
+from tvm_tirx.ir import Expr as PrimExpr
 
 
 def _validate_fast_math_arg(x: PrimExpr, intrinsic: str) -> PrimExpr:
     """Normalize a fast-math argument and reject unsupported dtypes."""
-    x = tirx.convert(x)
-    if DataType(_native.dtype_of(x)).type_code not in (DataTypeCode.FLOAT, DataTypeCode.BFLOAT):
-        raise TypeError(f"T.{intrinsic} only supports floating-point inputs, but got {_native.dtype_of(x)}")
+    x = _ffi.convert(x)
+    if DataType(_construction.dtype_of(x)).type_code not in (DataTypeCode.FLOAT, DataTypeCode.BFLOAT):
+        raise TypeError(f"T.{intrinsic} only supports floating-point inputs, but got {_construction.dtype_of(x)}")
     return x
 
 
@@ -38,7 +42,7 @@ def __log(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__log")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__log"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__log"), x)
 
 
 def __log2(x: PrimExpr) -> PrimExpr:
@@ -55,7 +59,7 @@ def __log2(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__log2")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__log2"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__log2"), x)
 
 
 def __log10(x: PrimExpr) -> PrimExpr:
@@ -72,7 +76,7 @@ def __log10(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__log10")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__log10"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__log10"), x)
 
 
 def __tan(x: PrimExpr) -> PrimExpr:
@@ -89,7 +93,7 @@ def __tan(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__tan")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__tan"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__tan"), x)
 
 
 def __cos(x: PrimExpr) -> PrimExpr:
@@ -106,7 +110,7 @@ def __cos(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__cos")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__cos"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__cos"), x)
 
 
 def __sin(x: PrimExpr) -> PrimExpr:
@@ -123,7 +127,7 @@ def __sin(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__sin")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__sin"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__sin"), x)
 
 
 def __exp10(x: PrimExpr) -> PrimExpr:
@@ -140,7 +144,7 @@ def __exp10(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__exp10")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__exp10"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__exp10"), x)
 
 
 def __exp(x: PrimExpr) -> PrimExpr:
@@ -157,13 +161,13 @@ def __exp(x: PrimExpr) -> PrimExpr:
         The result.
     """
     x = _validate_fast_math_arg(x, "__exp")
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.__exp"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.__exp"), x)
 
 
 def fast_rcp(x: PrimExpr) -> PrimExpr:
     """Approximate reciprocal using CUDA fast reciprocal."""
-    x = tirx.convert(x)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.fast_rcp"), x)
+    x = _ffi.convert(x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.fast_rcp"), x)
 
 
 # IEEE-compliant operations
@@ -187,10 +191,10 @@ def ieee_add(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    y = tirx.convert(y)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_add"), x, y, rounding_mode)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_add"), x, y, rounding_mode)
 
 
 def ieee_sub(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -211,10 +215,10 @@ def ieee_sub(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    y = tirx.convert(y)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_sub"), x, y, rounding_mode)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_sub"), x, y, rounding_mode)
 
 
 def ieee_mul(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -235,10 +239,10 @@ def ieee_mul(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    y = tirx.convert(y)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_mul"), x, y, rounding_mode)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_mul"), x, y, rounding_mode)
 
 
 def ieee_fmaf(x: PrimExpr, y: PrimExpr, z: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -261,11 +265,11 @@ def ieee_fmaf(x: PrimExpr, y: PrimExpr, z: PrimExpr, rounding_mode="rn") -> Prim
         The result of x * y + z.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    y = tirx.convert(y)
-    z = tirx.convert(z)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_fmaf"), x, y, z, rounding_mode)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
+    z = _ffi.convert(z)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_fmaf"), x, y, z, rounding_mode)
 
 
 def ieee_frcp(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -284,9 +288,9 @@ def ieee_frcp(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result of 1/x.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_frcp"), x, rounding_mode)
+    x = _ffi.convert(x)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_frcp"), x, rounding_mode)
 
 
 def ieee_fsqrt(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -305,9 +309,9 @@ def ieee_fsqrt(x: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result of sqrt(x).
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_fsqrt"), x, rounding_mode)
+    x = _ffi.convert(x)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_fsqrt"), x, rounding_mode)
 
 
 def ieee_frsqrt(x: PrimExpr) -> PrimExpr:
@@ -323,8 +327,8 @@ def ieee_frsqrt(x: PrimExpr) -> PrimExpr:
     result : PrimExpr
         The result of 1/sqrt(x).
     """
-    x = tirx.convert(x)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_frsqrt"), x)
+    x = _ffi.convert(x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_frsqrt"), x)
 
 
 def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
@@ -345,10 +349,10 @@ def ieee_fdiv(x: PrimExpr, y: PrimExpr, rounding_mode="rn") -> PrimExpr:
         The result of x/y.
     """
     _validate_rounding_mode(rounding_mode)
-    x = tirx.convert(x)
-    y = tirx.convert(y)
-    rounding_mode = tirx.convert(rounding_mode)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
+    rounding_mode = _ffi.convert(rounding_mode)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.ieee_fdiv"), x, y, rounding_mode)
 
 
 _PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
@@ -357,12 +361,12 @@ _PACKED_X2_DTYPES = frozenset({"float32x2", "bfloat16x2", "float16x2"})
 def _validate_packed_x2_args(*args: PrimExpr) -> None:
     """Validate that all arguments have the same supported packed x2 dtype."""
     for arg in args:
-        if not isinstance(arg, PrimExpr):
+        if not _construction.is_scalar_expr(arg):
             raise TypeError(f"Expected PrimExpr, got {type(arg)}: {arg}")
-        if _native.dtype_of(arg) not in _PACKED_X2_DTYPES:
-            raise ValueError(f"Expected dtype in {sorted(_PACKED_X2_DTYPES)}, got '{_native.dtype_of(arg)}'")
-    if len({_native.dtype_of(arg) for arg in args}) > 1:
-        raise ValueError(f"Expected all packed x2 arguments to have the same dtype, got {[_native.dtype_of(arg) for arg in args]}")
+        if _construction.dtype_of(arg) not in _PACKED_X2_DTYPES:
+            raise ValueError(f"Expected dtype in {sorted(_PACKED_X2_DTYPES)}, got '{_construction.dtype_of(arg)}'")
+    if len({_construction.dtype_of(arg) for arg in args}) > 1:
+        raise ValueError(f"Expected all packed x2 arguments to have the same dtype, got {[_construction.dtype_of(arg) for arg in args]}")
 
 
 # ---------------------------------------------------------------------------
@@ -377,58 +381,58 @@ def _validate_packed_x2_args(*args: PrimExpr) -> None:
 
 def add2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise add (x + y)."""
-    x = tirx.convert(x)
-    y = tirx.convert(y)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
     _validate_packed_x2_args(x, y)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.add2"), x, y)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.add2"), x, y)
 
 
 def sub2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise subtract (x - y)."""
-    x = tirx.convert(x)
-    y = tirx.convert(y)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
     _validate_packed_x2_args(x, y)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.sub2"), x, y)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.sub2"), x, y)
 
 
 def mul2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise multiply (x * y)."""
-    x = tirx.convert(x)
-    y = tirx.convert(y)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
     _validate_packed_x2_args(x, y)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.mul2"), x, y)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.mul2"), x, y)
 
 
 def fma2(x: PrimExpr, y: PrimExpr, z: PrimExpr) -> PrimExpr:
     """Packed fused multiply-add (x * y + z)."""
-    x = tirx.convert(x)
-    y = tirx.convert(y)
-    z = tirx.convert(z)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
+    z = _ffi.convert(z)
     _validate_packed_x2_args(x, y, z)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.fma2"), x, y, z)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.fma2"), x, y, z)
 
 
 def max2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise maximum."""
-    x = tirx.convert(x)
-    y = tirx.convert(y)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
     _validate_packed_x2_args(x, y)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.max2"), x, y)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.max2"), x, y)
 
 
 def min2(x: PrimExpr, y: PrimExpr) -> PrimExpr:
     """Packed element-wise minimum."""
-    x = tirx.convert(x)
-    y = tirx.convert(y)
+    x = _ffi.convert(x)
+    y = _ffi.convert(y)
     _validate_packed_x2_args(x, y)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.min2"), x, y)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.min2"), x, y)
 
 
 def abs2(x: PrimExpr) -> PrimExpr:
     """Packed element-wise absolute value."""
-    x = tirx.convert(x)
+    x = _ffi.convert(x)
     _validate_packed_x2_args(x)
-    return tirx.call_intrin(_native.dtype_of(x), tirx.Op.get("tl.abs2"), x)
+    return _intrinsics.call_intrin(_construction.dtype_of(x), _ir.Op.get("tl.abs2"), x)
 
 
 # Packed x2 element-wise math: registered target-neutrally and lowered on

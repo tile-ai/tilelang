@@ -5,13 +5,18 @@
  * Added storage is not initialized here. Semantic copy regions and the padding
  * pass still determine which elements are valid and which tails need fills.
  */
+#include "ascend/ir/task.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/copy.h"
 #include "ascend/op/utils.h"
-#include "ascend/transform/auto_schedule/native_task_ir.h"
+#include "ascend/transform/source_scopes.h"
+#include "ir/alias_analysis.h"
 #include "ir/analyzer.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include "op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/reflection/registry.h>
@@ -100,7 +105,7 @@ public:
     if (auto tensor = op->var.as<TensorVar>()) {
       if (auto replacement = replacements_.Get(*tensor)) {
         Expr value = op->value;
-        std::optional<ascend::NativeScheduledBinding> scheduled;
+        std::optional<ascend::ScheduledBinding> scheduled;
         if (ascend::IsScheduledBind(value.as<CallObj>())) {
           scheduled = ascend::ReadScheduledBinding(value.as<CallObj>());
           value = scheduled->value;
@@ -179,10 +184,13 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!IsAnnotationCall(call))
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
-    auto statement = MakeNativeAnnotation(
-        RewriteMetadata(ReadNativeAnnotations(call)), op->loc);
+    auto statement =
+        MakeAnnotation(RewriteMetadata(ReadAnnotations(call)), op->loc);
+    if (auto sequence = statement.as<SeqStmt>())
+      return StmtExprMutatorWithAnalyzer::Mutate_(sequence->get(), mode)
+          .ValueOrUnchanged(*sequence);
     auto value = statement.as_or_throw<Evaluate>()->value;
     value = StmtExprMutatorWithAnalyzer::Mutate_(
                 value.as_or_throw<Call>().get(), mode)
@@ -191,9 +199,17 @@ public:
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    if (ascend::IsAscendBlock(op)) {
+      auto prepared = ascend::MakeAscendBlock(
+          ascend::AscendBlockName(op),
+          RewriteMetadata(ascend::AscendBlockAnnotations(op)), op->body,
+          op->loc);
+      return StmtExprMutatorWithAnalyzer::Mutate_(prepared.get(), mode)
+          .ValueOrUnchanged(Stmt(prepared));
+    }
     if (op->op->name != "tl.attr")
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
-    auto fields = ReadNativeAnnotations(op);
+    auto fields = ReadAnnotations(op);
     String key = fields.at("key").cast<String>();
     if (key == "layout_map")
       fields.Set("value", RewriteMetadata({{"layout_map", fields.at("value")}})
@@ -218,7 +234,7 @@ public:
           return tirx::reinterpret(op->ty, replacement->data(), op->loc);
       }
     }
-    if (op->op.same_as(Op::Get("tl.ptr_access"))) {
+    if (op->op.same_as(tl::ptr_access())) {
       auto identity = aliases_.Identity(op->args[0]);
       if (auto anchor = anchors_.Get(identity)) {
         auto dtype = op->args[0]
@@ -293,21 +309,26 @@ private:
     // A scheduled_bind evaluates its first operand and defines the same
     // native Var. Its scheduling metadata must not hide allocation or view
     // provenance from a pass run on already scheduled input.
-    VisitNativePostOrder(function->body, [&](const ObjectRef &node) {
-      if (const auto *binding = node.as<BindObj>()) {
-        Expr value = binding->value;
-        if (ascend::IsScheduledBind(value.as<CallObj>()))
-          value = ascend::ReadScheduledBinding(value.as<CallObj>()).value;
-        aliases_.bindings.Set(binding->var, value);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const BindObj *binding) -> ffi::Expected<ffi::WalkResult> {
+          Expr value = binding->value;
+          if (ascend::IsScheduledBind(value.as<CallObj>()))
+            value = ascend::ReadScheduledBinding(value.as<CallObj>()).value;
+          aliases_.bindings.Set(binding->var, value);
+
+          return ffi::WalkResult::Advance();
+        });
     for (const Var &param : function->params)
       if (auto tensor = param.as<TensorVar>())
         aliases_.Record(*tensor);
-    VisitNativePostOrder(function->body, [&](const ObjectRef &node) {
-      if (auto tensor = node.as<TensorVar>())
-        aliases_.Record(*tensor);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (auto tensor = node.as<TensorVar>())
+            aliases_.Record(*tensor);
+          return ffi::WalkResult::Advance();
+        });
   }
 
   void Collect(const Stmt &body) {
@@ -321,36 +342,39 @@ private:
         }
       }
     };
-    VisitNativePostOrder(body, [&](const ObjectRef &node) {
-      if (const auto *bind = node.as<BindObj>()) {
-        Expr value = bind->value;
-        if (ascend::IsScheduledBind(value.as<CallObj>()))
-          value = ascend::ReadScheduledBinding(value.as<CallObj>()).value;
-        const auto *call = value.as<CallObj>();
-        if (call && call->op.same_as(alloc_tensor_op())) {
-          if (auto tensor = bind->var.as<TensorVar>())
-            owners_.Set(*tensor, *tensor);
-        }
-      }
-      if (const auto *load = node.as<TensorLoadObj>())
-        used_.insert(load->source.as_or_throw<TensorVar>());
-      if (const auto *store = node.as<TensorStoreObj>())
-        used_.insert(store->dest.as_or_throw<TensorVar>());
-      if (const auto *region = node.as<TensorRegionObj>())
-        used_.insert(region->source.as_or_throw<TensorVar>());
-      if (const auto *call = node.as<CallObj>();
-          call && call->op.same_as(Op::Get("tl.annotation")))
-        record(ReadNativeAnnotations(call));
-      if (const auto *region = node.as<RegionStmtObj>();
-          region && region->op->name == "tl.attr") {
-        auto fields = ReadNativeAnnotations(region);
-        String key = fields.at("key").cast<String>();
-        if (key == "tl.kernel")
-          record(fields.at("value").cast<Map<String, Any>>());
-        else
-          record({{key, fields.at("value")}});
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *bind = node.as<BindObj>()) {
+            Expr value = bind->value;
+            if (ascend::IsScheduledBind(value.as<CallObj>()))
+              value = ascend::ReadScheduledBinding(value.as<CallObj>()).value;
+            const auto *call = value.as<CallObj>();
+            if (call && call->op.same_as(alloc_tensor_op())) {
+              if (auto tensor = bind->var.as<TensorVar>())
+                owners_.Set(*tensor, *tensor);
+            }
+          }
+          if (const auto *load = node.as<TensorLoadObj>())
+            used_.insert(load->source.as_or_throw<TensorVar>());
+          if (const auto *store = node.as<TensorStoreObj>())
+            used_.insert(store->dest.as_or_throw<TensorVar>());
+          if (const auto *region = node.as<TensorRegionObj>())
+            used_.insert(region->source.as_or_throw<TensorVar>());
+          if (const auto *call = node.as<CallObj>(); IsAnnotationCall(call))
+            record(ReadAnnotations(call));
+          if (const auto *region = node.as<RegionStmtObj>();
+              ascend::IsAscendBlock(region)) {
+            record(ascend::AscendBlockAnnotations(region));
+          } else if (region && region->op->name == "tl.attr") {
+            auto fields = ReadAnnotations(region);
+            String key = fields.at("key").cast<String>();
+            if (key == "tl.kernel")
+              record(fields.at("value").cast<Map<String, Any>>());
+            else
+              record({{key, fields.at("value")}});
+          }
+          return ffi::WalkResult::Advance();
+        });
     canonical_layouts_ = layouts_;
   }
 
@@ -654,7 +678,7 @@ private:
                              decoded.operands, decoded.annotations, call->loc);
   }
 
-  NativeTensorAliases aliases_;
+  TensorAliasGroups aliases_;
   Map<Expr, TensorVar> owners_, anchors_;
   Map<TensorVar, TensorVar> replacements_;
   LayoutMap layouts_, canonical_layouts_, logical_maps_;

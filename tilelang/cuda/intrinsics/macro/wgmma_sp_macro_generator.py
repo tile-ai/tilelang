@@ -7,7 +7,10 @@ from tilelang.cuda.intrinsics.macro.wgmma_macro_generator import (
 from tilelang.cuda.intrinsics.macro.mma_sp_macro_generator import SparseTensorCoreIntrinEmitter
 import tilelang.cuda.language as T
 from tvm_ffi import dtype as DataType
-from tilelang.language._native import PrimExpr, Buffer, Var, BufferRegion
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import Var
+from tvm_tirx.ir import TensorRegion as BufferRegion
 from tvm_tirx.tirx import IndexMap, handle_add_byte_offset
 from tilelang.utils import is_fragment, is_shared, is_full_region
 from tilelang.cuda.intrinsics.layout.mma_layout import (

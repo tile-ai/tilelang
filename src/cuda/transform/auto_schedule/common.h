@@ -15,7 +15,8 @@
 #include <tvm/target/target.h>
 #include <tvm/tirx/stmt.h>
 
-#include "cuda/transform/ws_native.h"
+#include "cuda/transform/ws_analysis.h"
+#include "cuda/transform/ws_kernel_analysis.h"
 #include "support/check.h"
 #include "transform/common/warp_specialize.h"
 
@@ -23,10 +24,9 @@ namespace tvm {
 namespace tl {
 namespace cuda {
 
-using SchedulerFn = ffi::Optional<WSSchedule> (*)(const NativeWSKernel &kernel,
-                                                  const Stmt &body,
-                                                  int worker_threads,
-                                                  const Target &target);
+using SchedulerFn = ffi::Optional<WSSchedule> (*)(
+    const WSKernelAnalysis &kernel, const Stmt &body, int worker_threads,
+    const Target &target);
 
 // An id value arrives as an ffi String (loop annotations) or as a
 // StringImm (call annotations, whose values must be objects).

@@ -45,7 +45,7 @@ def test_dynamic_strided_parallel_layout_lowering_and_cpu_values(size, stride, i
     assert ir.save_json(value) == before
     assert tirx.analysis.check_well_formed(lowered)
     assert not tirx.analysis.undefined_vars(lowered["main"])
-    lowered = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(lowered)
+    lowered = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(lowered)
     compiled = compile_packed_function(lowered, target="c")
     storage = np.arange((size + 2) * stride, dtype="float32")
     source = tvm_tirx.runtime.tensor(storage)
@@ -102,7 +102,7 @@ def test_dynamic_host_control_cuda_static_compilation(tmp_path):
         module = tvm_ffi.get_global_func("tl.transform." + name)()(module)
         assert tirx.analysis.check_well_formed(module)
     assert ir.save_json(value) == original
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("cuda")(module)
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(module)
     lowering, _, finalize_device = tirx_pipeline(target=target)
     lowered = lowering(module)
     _, devices = _split_host_device_modules(lowered)

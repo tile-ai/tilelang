@@ -4,7 +4,7 @@ import pytest
 import tvm_ffi
 from tvm_tirx import ir, tirx
 
-from tilelang.language._native import encode_annotations
+from tilelang.language._annotation_codec import encode_annotations
 from tilelang.language.warp_specialize import (
     WSOpRef,
     WSPipeline,
@@ -119,3 +119,61 @@ def test_encoder_rejects_unsupported_objects_instead_of_hiding_them_in_attrs():
 def test_decoder_rejects_malformed_or_unsupported_metadata(schema):
     with pytest.raises((TypeError, ValueError)):
         _decode(schema, ir.Tuple([ir.Tuple([])]))
+
+
+@pytest.mark.parametrize("cpp_factory", [False, True])
+def test_scalar_intrinsic_static_options_do_not_add_operands(cpp_factory):
+    from tilelang.language._intrinsics import call_intrin
+
+    barrier = ir.Var("barrier", "uint32")
+    annotations = {"use_2cta": ir.IntImm("int32", 1)}
+    if cpp_factory:
+        call = tvm_ffi.get_global_func("tl.MakeAnnotatedCall")(
+            ir.PrimType("void"), ir.Op.get("tl.tcgen05_mma_arrive"), [barrier], annotations, ir.UnknownLoc()
+        )
+    else:
+        call = call_intrin("void", "tl.tcgen05_mma_arrive", barrier, annotations=annotations)
+    call.validate()
+    assert len(call.args) == 1
+    assert call.args[0].same_as(barrier)
+    assert call.attrs["use_2cta"].value == 1
+    assert "operand_count" not in call.attrs
+    assert "annotation_schema" not in call.attrs
+    function = tirx.Function([barrier], [ir.Evaluate(call)], ir.NoneType())
+    ir.assert_structural_equal(function, ir.load_json(ir.save_json(function)))
+
+
+def test_finalizer_consumes_dynamic_call_hints_without_evaluating_them():
+    import tilelang.transform as transform
+    from tilelang.language._intrinsics import call_intrin
+
+    value, debug = ir.Var("value", "int32"), ir.Var("debug", "int32")
+    call = call_intrin("int32", "tirx.call_pure_extern", "identity", value, annotations={"source_tag": "tag", "debug_value": debug + 1})
+    call = ir.Call(call.op, call.args, attrs={**dict(call.attrs), "native_semantics": 3}, ty_args=call.ty_args, ty=call.ty)
+    function = tirx.Function([value, debug], [ir.Evaluate(call)], ir.NoneType())
+    before = ir.save_json(function)
+    module = transform.LowerSourceAnnotations()(ir.IRModule({"main": function}))
+    lowered = module["main"].body[0].value
+    assert len(lowered.args) == 2
+    assert lowered.args[1].same_as(value)
+    assert lowered.attrs["source_tag"] == "tag"
+    assert lowered.attrs["native_semantics"] == 3
+    assert "debug_value" not in lowered.attrs
+    assert "annotation_schema" not in lowered.attrs
+    assert "operand_count" not in lowered.attrs
+    assert len(module["main"].body) == 1
+    assert ir.save_json(function) == before
+    assert tirx.analysis.check_well_formed(module["main"])
+    ir.assert_structural_equal(module, transform.LowerSourceAnnotations()(module))
+
+
+@pytest.mark.parametrize("key", ["use_2cta", "precision"])
+def test_finalizer_rejects_dynamic_codegen_options(key):
+    import tilelang.transform as transform
+    from tilelang.language._intrinsics import call_intrin
+
+    value = ir.Var("value", "int32")
+    call = call_intrin("void", "tl.tcgen05_mma_arrive", value, annotations={key: value})
+    function = tirx.Function([value], [ir.Evaluate(call)], ir.NoneType())
+    with pytest.raises(ValueError, match="Unconsumed intrinsic annotation"):
+        transform.LowerSourceAnnotations()(ir.IRModule({"main": function}))

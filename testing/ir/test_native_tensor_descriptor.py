@@ -1,5 +1,7 @@
 """Input descriptor identity survives native IR, flattening, and packed lowering."""
 
+from tilelang.language import _intrinsics
+
 import ctypes
 
 import numpy as np
@@ -9,7 +11,7 @@ from tvm_tirx import ir, tirx
 from tvm_tirx.tirx.layout import S
 
 import tilelang
-from tilelang.language import _native
+
 from tilelang.testing.packed import compile_packed_function
 from tilelang.testing.ir import collect_calls, collect_nodes
 
@@ -89,7 +91,7 @@ def _pointer(value):
 @pytest.mark.parametrize("round_trip", [False, True])
 def test_borrowed_descriptor_is_the_callers_exact_pointer(shape, strides, offset, round_trip):
     tensor = _tensor("input", shape, strides, offset)
-    function = _function([tensor], ir.Return(_native.tensor_descriptor_ptr(tensor)), ir.PtrType("void"))
+    function = _function([tensor], ir.Return(_intrinsics.tensor_descriptor_ptr(tensor)), ir.PtrType("void"))
     if round_trip:
         function = tirx.renew_def(ir.load_json(ir.save_json(function)))
     compiled = _compile(function)
@@ -104,7 +106,7 @@ def test_borrowed_descriptor_is_the_callers_exact_pointer(shape, strides, offset
 )
 def test_original_descriptor_fields_are_observed(field, ty, expected):
     tensor = _tensor("input", (2, 3), (5, 1), 2)
-    result = tirx.abi_field_get(_native.tensor_descriptor_ptr(tensor), 0, field, ty=ty)
+    result = tirx.abi_field_get(_intrinsics.tensor_descriptor_ptr(tensor), 0, field, ty=ty)
     compiled = _compile(_function([tensor], ir.Return(result), ty))
     descriptor = _descriptor((2, 3), (5, 1), 2)
     assert compiled(ctypes.c_void_p(ctypes.addressof(descriptor))) == expected
@@ -114,7 +116,7 @@ def test_original_descriptor_fields_are_observed(field, ty, expected):
 @pytest.mark.parametrize("field", [2, 3])
 def test_shape_and_nullable_stride_pointer_identity(strides, field):
     tensor = _tensor("input", (2, 3), strides)
-    pointer = tirx.abi_field_get(_native.tensor_descriptor_ptr(tensor), 0, field, ty=ir.PtrType("int64"))
+    pointer = tirx.abi_field_get(_intrinsics.tensor_descriptor_ptr(tensor), 0, field, ty=ir.PtrType("int64"))
     compiled = _compile(_function([tensor], ir.Return(pointer), ir.PtrType("int64")))
     descriptor = _descriptor((2, 3), strides)
     expected = ctypes.cast(descriptor.shape if field == 2 else descriptor.strides, ctypes.c_void_p).value or 0
@@ -123,7 +125,7 @@ def test_shape_and_nullable_stride_pointer_identity(strides, field):
 
 def test_descriptor_field_write_is_visible_to_caller_and_following_read():
     tensor = _tensor("input", (2, 3))
-    descriptor_pointer = _native.tensor_descriptor_ptr(tensor)
+    descriptor_pointer = _intrinsics.tensor_descriptor_ptr(tensor)
     previous = ir.Var("previous_ndim", "int32")
     function = _function(
         [tensor],
@@ -142,7 +144,7 @@ def test_descriptor_field_write_is_visible_to_caller_and_following_read():
 def test_later_scalar_shape_and_flattened_data_use_keep_parameter_identity():
     extent = ir.Var("extent", "int64")
     tensor = _tensor("input", (extent, 3))
-    ndim = tirx.abi_field_get(_native.tensor_descriptor_ptr(tensor), 0, 4, ty="int32")
+    ndim = tirx.abi_field_get(_intrinsics.tensor_descriptor_ptr(tensor), 0, 4, ty="int32")
     function = _function([tensor, extent], ir.Return(tensor[1, 2] + ndim))
     module = tilelang.transform.LowerTensorDescriptors()(ir.IRModule.from_expr(function))
     module = tirx.transform.FlattenTensor()(module)
@@ -163,7 +165,7 @@ def test_later_scalar_shape_and_flattened_data_use_keep_parameter_identity():
 @pytest.mark.parametrize("round_trip", [False, True])
 def test_inlined_getters_are_pinned_on_host_before_device_outlining(target, round_trip):
     tensor = _tensor("input", (2, 3))
-    getter = _native.tensor_descriptor_ptr(tensor)
+    getter = _intrinsics.tensor_descriptor_ptr(tensor)
     region = ir.RegionStmt(
         "tirx.device_scope",
         [],
@@ -204,7 +206,7 @@ def test_local_tensors_do_not_acquire_a_fabricated_descriptor(kind, boundary):
         if kind == "allocation"
         else ir.Call("tirx.decl_tensor", [source.data], ty_args=[local.ty])
     )
-    function = _function([source], [ir.Bind(local, value), ir.Return(_native.tensor_descriptor_ptr(local))], ir.PtrType("void"))
+    function = _function([source], [ir.Bind(local, value), ir.Return(_intrinsics.tensor_descriptor_ptr(local))], ir.PtrType("void"))
     transform = {
         "packed": tilelang.transform.MakePackedAPI,
         "outline": tilelang.transform.OutlineDeviceRegions,
@@ -219,7 +221,7 @@ def test_local_tensors_do_not_acquire_a_fabricated_descriptor(kind, boundary):
 @pytest.mark.parametrize("argument", [lambda: ir.Var("pointer", ir.PtrType("void")), lambda: ir.const(3, "int32")])
 def test_descriptor_getter_rejects_non_tensor_operands(argument):
     with pytest.raises((TypeError, ValueError)):
-        call = _native.tensor_descriptor_ptr(argument())
+        call = _intrinsics.tensor_descriptor_ptr(argument())
         call.validate()
 
 
@@ -227,7 +229,7 @@ def test_descriptor_slot_is_remapped_when_an_earlier_parameter_is_pruned():
     # Names cannot identify inputs: these two parameters intentionally share one.
     unused = _tensor("input", (2, 3))
     used = _tensor("input", (2, 3))
-    function = _function([unused, used], ir.Return(_native.tensor_descriptor_ptr(used)), ir.PtrType("void"))
+    function = _function([unused, used], ir.Return(_intrinsics.tensor_descriptor_ptr(used)), ir.PtrType("void"))
     module = tilelang.transform.LowerTensorDescriptors()(ir.IRModule.from_expr(function))
     module = ir.load_json(ir.save_json(module))
     module = tilelang.transform.Simplify(simplify_arguments=True)(module)
@@ -244,7 +246,7 @@ def test_descriptor_slot_is_remapped_when_an_earlier_parameter_is_pruned():
 
 def test_descriptor_only_parameter_is_required_even_without_data_accesses():
     tensor = _tensor("input", (2, 3))
-    ndim = tirx.abi_field_get(_native.tensor_descriptor_ptr(tensor), 0, 4, ty="int32")
+    ndim = tirx.abi_field_get(_intrinsics.tensor_descriptor_ptr(tensor), 0, 4, ty="int32")
     compiled = _compile(_function([tensor], ir.Return(ndim)))
     # The Python FFI normalizes both forms of null to None. The required tensor
     # type check must reject both, even though the body only reads metadata.

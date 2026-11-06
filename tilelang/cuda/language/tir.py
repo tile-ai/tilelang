@@ -1,10 +1,12 @@
 """CUDA-specific low-level TIR language operators."""
 
 from __future__ import annotations
-from tilelang.language import _native
 
-from tilelang.language import _native as _tvm_op
-from tilelang.language._native import IntImm
+from tilelang.language import _intrinsics
+from tvm_tirx import ir as _ir
+
+
+from tvm_tirx.ir import IntImm
 
 from tilelang.language.tir.exports import CUDA_ONLY_TIR_EXPORTS, SHARED_LEGACY_TIR_EXPORTS
 from tilelang.language.tir.ir import (
@@ -190,16 +192,16 @@ def ptx_mma_block_scale(
 
     return _call_intrin(
         accum_dtype,
-        _tvm_op.Op.get("tl.ptx_mma_block_scale"),
-        _native.StringImm(str(accum_dtype)),
-        _native.StringImm(str(shape)),
-        _native.StringImm(str(A_layout)),
-        _native.StringImm(str(B_layout)),
-        _native.StringImm(str(kind)),
+        _ir.Op.get("tl.ptx_mma_block_scale"),
+        _ir.StringImm(str(accum_dtype)),
+        _ir.StringImm(str(shape)),
+        _ir.StringImm(str(A_layout)),
+        _ir.StringImm(str(B_layout)),
+        _ir.StringImm(str(kind)),
         IntImm("int32", scale_vec_size),
-        _native.StringImm(str(A_dtype)),
-        _native.StringImm(str(B_dtype)),
-        _native.StringImm(str(scale_type)),
+        _ir.StringImm(str(A_dtype)),
+        _ir.StringImm(str(B_dtype)),
+        _ir.StringImm(str(scale_type)),
         multiplicand_a,
         a_index,
         multiplicand_b,
@@ -239,7 +241,7 @@ def ptx_wgmma_ss(
     """
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.ptx_wgmma_ss"),
+        _ir.Op.get("tl.ptx_wgmma_ss"),
         wgmma_prefix,
         a_is_k_major,
         b_is_k_major,
@@ -278,7 +280,7 @@ def ptx_wgmma_rs(
 ):
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.ptx_wgmma_rs"),
+        _ir.Op.get("tl.ptx_wgmma_rs"),
         wgmma_prefix,
         b_is_k_major,
         a_dtype_abbrv,
@@ -320,7 +322,7 @@ def ptx_wgmma_sp_ss(
 ):
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.ptx_wgmma_sp_ss"),
+        _ir.Op.get("tl.ptx_wgmma_sp_ss"),
         wgmma_prefix,
         a_is_k_major,
         b_is_k_major,
@@ -365,7 +367,7 @@ def ptx_wgmma_sp_rs(
 ):
     return _call_intrin(
         dtype,
-        _tvm_op.Op.get("tl.ptx_wgmma_sp_rs"),
+        _ir.Op.get("tl.ptx_wgmma_sp_rs"),
         wgmma_prefix,
         b_is_k_major,
         a_dtype_abbrv,
@@ -437,7 +439,7 @@ def ptx_tcgen05_mma_ss(
 
     return _call_intrin(
         "handle",
-        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ss"),
+        _ir.Op.get("tl.ptx_tcgen05_mma_ss"),
         kind_dtype,
         desc_a,
         A_offset,
@@ -483,7 +485,7 @@ def ptx_tcgen05_mma_ts(
     """
     return _call_intrin(
         "handle",
-        _tvm_op.Op.get("tl.ptx_tcgen05_mma_ts"),
+        _ir.Op.get("tl.ptx_tcgen05_mma_ts"),
         kind_dtype,
         A_ptr,
         A_offset,
@@ -534,7 +536,7 @@ def ptx_tcgen05_mma_blockscaled_ss(
 
     return _call_intrin(
         "handle",
-        _tvm_op.Op.get("tl.ptx_tcgen05_mma_blockscaled_ss"),
+        _ir.Op.get("tl.ptx_tcgen05_mma_blockscaled_ss"),
         kind_dtype,
         desc_a,
         A_offset,
@@ -610,9 +612,9 @@ def ptx_ldmatrix(trans, num, src_access_ptr, dst_access_ptr):
     call : PrimExpr
         The call expression (handle-typed).
     """
-    return _native.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        _native.Op.get("tl.ptx_ldmatrix"),
+        _ir.Op.get("tl.ptx_ldmatrix"),
         trans,
         num,
         src_access_ptr,
@@ -629,7 +631,7 @@ def ptx_fence_barrier_init():
     call : PrimExpr
         The call expression.
     """
-    return _call_intrin("handle", _tvm_op.Op.get("tl.ptx_fence_barrier_init"))
+    return _call_intrin("handle", _ir.Op.get("tl.ptx_fence_barrier_init"))
 
 
 __all__ = tuple(sorted(CUDA_ONLY_TIR_EXPORTS | SHARED_LEGACY_TIR_EXPORTS))

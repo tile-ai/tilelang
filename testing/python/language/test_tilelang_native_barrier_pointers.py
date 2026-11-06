@@ -1,10 +1,12 @@
 """Barrier macro parameters denote the selected slot, not its loaded value."""
 
+from tilelang.language import _tensor_spec
+
 import pytest
 from tvm_tirx import ir, tirx
 
 import tilelang.language as T
-from tilelang.language import _native
+
 from tilelang.testing.ir import collect_nodes
 
 
@@ -48,8 +50,8 @@ def test_tcgen05_arrive_preserves_macro_slot_pointer(macro_depth, arrive_2cta):
     load, _, mask = pointer.args
     assert isinstance(load, ir.TensorLoad)
     assert int(load.indices[0]) == 1
-    assert int(_native.tensor_offset(load.source)) == 5
-    assert [int(stride) for stride in _native.tensor_strides(load.source)] == [2]
+    assert int(_tensor_spec.tensor_offset(load.source)) == 5
+    assert [int(stride) for stride in _tensor_spec.tensor_strides(load.source)] == [2]
     assert int(mask) == 3
     assert tirx.analysis.check_well_formed(kernel)
 

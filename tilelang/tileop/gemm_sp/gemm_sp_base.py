@@ -1,6 +1,8 @@
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
 from dataclasses import dataclass
 from tvm_tirx.target import Target
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
 from tilelang.utils.language import is_shared, is_fragment
 from tilelang.ir import GemmSPWarpPolicy
@@ -14,7 +16,7 @@ class GemmSPBase:
     def infer_layout(self, target: Target, thread_nums: int):
         raise NotImplementedError("infer_layout is not implemented")
 
-    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_index: tirx.PrimExpr):
+    def lower(self, layout_map: dict, target: Target, thread_bounds: Range, thread_index: _ir.Expr):
         raise NotImplementedError("lower is not implemented")
 
     def is_gemm_ss(self) -> bool:
@@ -72,35 +74,35 @@ class GemmSPBase:
         return self.C.dtype
 
     @property
-    def A(self) -> tirx.Buffer:
+    def A(self) -> _tensor_spec.TensorValue:
         return self.gemm_sp_node.A
 
     @property
-    def E(self) -> tirx.Buffer:
+    def E(self) -> _tensor_spec.TensorValue:
         return self.gemm_sp_node.E
 
     @property
-    def B(self) -> tirx.Buffer:
+    def B(self) -> _tensor_spec.TensorValue:
         return self.gemm_sp_node.B
 
     @property
-    def C(self) -> tirx.Buffer:
+    def C(self) -> _tensor_spec.TensorValue:
         return self.gemm_sp_node.C
 
     @property
-    def ARegion(self) -> tirx.PrimExpr:
+    def ARegion(self) -> _ir.Expr:
         return self.gemm_sp_node.aRegion
 
     @property
-    def ERegion(self) -> tirx.PrimExpr:
+    def ERegion(self) -> _ir.Expr:
         return self.gemm_sp_node.eRegion
 
     @property
-    def BRegion(self) -> tirx.PrimExpr:
+    def BRegion(self) -> _ir.Expr:
         return self.gemm_sp_node.bRegion
 
     @property
-    def CRegion(self) -> tirx.PrimExpr:
+    def CRegion(self) -> _ir.Expr:
         return self.gemm_sp_node.cRegion
 
     @property

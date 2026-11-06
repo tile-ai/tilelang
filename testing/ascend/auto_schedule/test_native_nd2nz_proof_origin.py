@@ -59,9 +59,6 @@ def test_nd2nz_source_proof_requires_producer_contract(origin, expected):
     second = transform.InsertNd2Nz()(first)
     for program in (first, second):
         (post,) = calls(program, "tl.ascend_nd2nz_post_copy")
-        metadata = tvm_ffi.get_global_func("tl.DecodeAnnotations")(
-            post.args[-1],
-            post.attrs["annotation_schema"],
-        )
-        assert int(metadata["nd2nz_logical_regions"]) == expected
+        assert len(post.args) == 7
+        assert int(post.attrs["nd2nz_logical_regions"]) == expected
     ir.assert_structural_equal(first, second)

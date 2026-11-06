@@ -1,5 +1,7 @@
 """Fixed vector slices remain loads when consumed by the public Cast facade."""
 
+from tilelang.language.tir import _constructors
+
 import numpy as np
 import pytest
 import torch
@@ -8,14 +10,13 @@ from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.language as T
-from tilelang.language import _native
 
 
 def test_cast_preserves_native_node_identity():
     value = ir.Var("value", "int32")
     cast = T.Cast("float32", value)
     assert isinstance(cast, ir.prim.Cast)
-    assert isinstance(cast, _native.Cast)
+    assert isinstance(cast, _constructors.Cast)
     assert cast.value.same_as(value)
     assert cast.ty == ir.PrimType("float32")
 
@@ -79,7 +80,7 @@ def test_region_cast_rejects_multiple_vector_dimensions():
 def test_raw_buffer_store_realizes_a_region_as_one_vector_load():
     source = ir.Var("source", tirx.TensorType((8,), "int32"))
     dest = ir.Var("dest", tirx.TensorType((8,), "int32"))
-    store = _native.BufferStore(dest, source[2:4], [ir.prim.Ramp(4, 1, 2)])
+    store = _constructors.BufferStore(dest, source[2:4], [ir.prim.Ramp(4, 1, 2)])
     assert isinstance(store, ir.TensorStore)
     assert isinstance(store.value, ir.TensorLoad)
     assert store.value.source.same_as(source)

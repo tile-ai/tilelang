@@ -22,12 +22,17 @@
  *         versions after synchronization insertion.
  */
 
+#include "ascend/transform/source_scopes.h"
 #include "auto_schedule/kernel_rewriter.h"
 #include "auto_schedule/multi_buffer.h"
 #include "auto_schedule/scheduled_tir.h"
 #include "auto_schedule/storage_footprint.h"
 #include "auto_schedule/task_analysis.h"
+#include "ir/annotations.h"
+#include "ir/stmt_functor.h"
+#include "op/builtin.h"
 #include "op/operator.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
@@ -59,13 +64,16 @@ public:
   VersionedTensorRegistry(const MultiBufferPlan &plan, const RegionStmt &root)
       : plan_(plan), footprints_(root) {
     std::vector<TensorVar> tensors;
-    VisitNativePostOrder(root, [&](const ffi::ObjectRef &object) {
-      if (auto variable = object.as<Var>()) {
-        if (auto tensor = variable->as<TensorVar>())
-          if (Info(*tensor))
-            tensors.push_back(*tensor);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        root,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (auto variable = object.as<Var>()) {
+            if (auto tensor = variable->as<TensorVar>())
+              if (Info(*tensor))
+                tensors.push_back(*tensor);
+          }
+          return ffi::WalkResult::Advance();
+        });
     for (const auto &info : plan.Infos()) {
       if (info.NeedsVersionDimension())
         footprints_.PitchBits(info.storage);
@@ -79,7 +87,7 @@ public:
     return info && info->NeedsVersionDimension() ? info : nullptr;
   }
 
-  const NativeStorageContext &Storage() const { return footprints_.Storage(); }
+  const StorageProvenance &Storage() const { return footprints_.Storage(); }
   PrimExpr PitchBytes(const Var &storage) const {
     return FloorDiv(footprints_.PitchBits(storage), IntImm::Int64(8));
   }
@@ -99,14 +107,14 @@ public:
 
 private:
   const MultiBufferPlan &plan_;
-  NativeStorageFootprints footprints_;
+  StorageFootprints footprints_;
   std::unordered_map<TensorVar, TensorVar, ObjectPtrHash, ObjectPtrEqual>
       replacements_;
 };
 
-class MultiBufferRewriter : public StmtExprMutator {
+class MultiBufferRewriter : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   MultiBufferRewriter(const MultiBufferPlan &plan,
                       VersionedTensorRegistry *tensors)
       : plan_(plan), tensors_(tensors) {}
@@ -117,16 +125,16 @@ public:
       if (!result.same_as(*tensor))
         return result;
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
     auto tensor = op->var.as<TensorVar>();
     if (!tensor || !tensors_->Info(*tensor))
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     TensorVar replacement = tensors_->Resolve(*tensor);
     Expr value = op->value;
-    std::optional<NativeScheduledBinding> scheduled;
+    std::optional<ScheduledBinding> scheduled;
     if (const auto *call = value.as<CallObj>(); IsScheduledBind(call)) {
       scheduled = ReadScheduledBinding(call);
       value = scheduled->value;
@@ -162,7 +170,7 @@ public:
     if (const auto *info = tensors_->Info(tensor))
       return TensorLoad(tensors_->Resolve(tensor),
                         Indices(*info, op->indices, mode), op->loc);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const TensorStoreObj *op,
@@ -172,7 +180,7 @@ public:
       return TensorStore(
           tensors_->Resolve(tensor), Indices(*info, op->indices, mode),
           Mutate(op->value, mode).ValueOrUnchanged(op->value), op->loc);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Expr> Mutate_(const TensorRegionObj *op,
@@ -180,7 +188,7 @@ public:
     auto tensor = op->source.as_or_throw<TensorVar>();
     const auto *info = tensors_->Info(tensor);
     if (!info)
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     PrimExpr version = Version(*info);
     Array<Range> ranges{Range::FromMinExtent(
         version,
@@ -212,7 +220,7 @@ public:
       }
     }
     if (const auto *callee = op->op.as<OpObj>();
-        callee && callee->name == "tl.ptr_access") {
+        callee && callee == tl::ptr_access().get()) {
       auto address = tensors_->Storage().Address(op->args[0]);
       if (auto root = address.root.as<Var>())
         if (const auto *info = plan_.Find(*root);
@@ -227,22 +235,25 @@ public:
           return Call(op->ty, op->op, args, op->attrs, op->ty_args, op->loc);
         }
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
                                  InplaceMode mode) final {
     if (!IsTaskMetadataStatement(ffi::GetRef<Stmt>(op)))
-      return StmtExprMutator::Mutate_(op, mode);
-    auto rewritten = MakeNativeAnnotation(
-        RewriteFields(ReadNativeAnnotations(op->value.as<CallObj>())), op->loc);
-    return StmtExprMutator::Mutate_(rewritten.as_or_throw<Evaluate>().get(),
-                                    mode)
+      return LayoutMapMutator::Mutate_(op, mode);
+    auto rewritten = MakeAnnotation(
+        RewriteFields(ReadAnnotations(op->value.as<CallObj>())), op->loc);
+    if (auto sequence = rewritten.as<SeqStmt>())
+      return LayoutMapMutator::Mutate_(sequence->get(), mode)
+          .ValueOrUnchanged(*sequence);
+    return LayoutMapMutator::Mutate_(rewritten.as_or_throw<Evaluate>().get(),
+                                     mode)
         .ValueOrUnchanged(rewritten);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
-    For loop = StmtExprMutator::Mutate_(op, mode)
+    For loop = LayoutMapMutator::Mutate_(op, mode)
                    .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                    .as_or_throw<For>();
     // Older native producers can still attach storage references directly to
@@ -259,20 +270,34 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    auto attribute = ReadTaskAttribute(op);
-    if (!attribute)
-      return StmtExprMutator::Mutate_(op, mode);
-    auto old_broadcast = broadcast_;
-    Any node = attribute->node;
-    Any value = attribute->value;
-    if (IsSemanticTaskKey(attribute->key)) {
-      auto fields = task_metadata_detail::CopyTaskMetadata(node);
+    if (IsAscendBlock(op)) {
+      auto rewritten = MakeAscendBlock(
+          AscendBlockName(op), RewriteFields(AscendBlockAnnotations(op)),
+          op->body, op->loc);
+      return LayoutMapMutator::Mutate_(rewritten.get(), mode)
+          .ValueOrUnchanged(Stmt(rewritten));
+    }
+    if (IsSemanticTask(op)) {
+      auto old_broadcast = broadcast_;
+      auto fields = TaskAnnotations(op);
       if (auto fill = fields.Get(kMultiBufferBroadcastFill))
         for (const auto &storage : fill->cast<MultiBufferBroadcastFill>())
           broadcast_.insert(storage);
-      node = RewriteFields(fields);
-    } else if (attribute->key == "tl.loop.annotations" ||
-               attribute->key == "tl.kernel") {
+      auto rewritten = WithTaskAnnotations(ffi::GetRef<RegionStmt>(op),
+                                           RewriteFields(fields));
+      auto result = LayoutMapMutator::Mutate_(rewritten.get(), mode)
+                        .ValueOrUnchanged(Stmt(rewritten));
+      broadcast_ = std::move(old_broadcast);
+      return result;
+    }
+    auto attribute = ReadSourceAttribute(op);
+    if (!attribute)
+      return LayoutMapMutator::Mutate_(op, mode);
+    auto old_broadcast = broadcast_;
+    Any node = attribute->node;
+    Any value = attribute->value;
+    if (attribute->key == "tl.loop.annotations" ||
+        attribute->key == "tl.kernel") {
       value = RewriteFields(value.cast<ScheduleUnitMetadata>());
     } else if (attribute->key == "tl.sblock") {
       auto fields = value.cast<ScheduleUnitMetadata>();
@@ -284,8 +309,8 @@ public:
       value = RewriteFields({{"layout_map", value}}).at("layout_map");
     }
     auto rewritten =
-        MakeNativeAttribute(node, attribute->key, value, op->body, op->loc);
-    auto result = StmtExprMutator::Mutate_(rewritten.get(), mode)
+        MakeAttribute(node, attribute->key, value, op->body, op->loc);
+    auto result = LayoutMapMutator::Mutate_(rewritten.get(), mode)
                       .ValueOrUnchanged(Stmt(rewritten));
     broadcast_ = std::move(old_broadcast);
     return result;
@@ -350,9 +375,9 @@ void RemoveCounterTasks(IRStructure::ChildList *nodes, IRStructure *parent,
         touches |= task->TouchesStorage(counter);
       if (touches) {
         Stmt body = SingleStatement(task->stmt);
-        if (auto marker = ReadTaskAttribute(body);
-            marker && IsSemanticTaskKey(marker->key))
-          body = SingleStatement(marker->region->body);
+        if (const auto *marker = body.as<RegionStmtObj>();
+            IsSemanticTask(marker))
+          body = SingleStatement(marker->body);
         while (const auto *guard = body.as<IfObj>()) {
           if (guard->else_case)
             break;

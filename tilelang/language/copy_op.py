@@ -1,7 +1,12 @@
 """Copy operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx.ir import prim as _prim
+
 from typing import Literal, Any
 
 from tilelang._typing import BufferLikeType
@@ -12,24 +17,23 @@ from tilelang.utils.language import (
 from tilelang.utils.deprecated import deprecated
 from tilelang.language.utils import get_extent, buffer_region_to_tile_region, _normalize_annotations
 from tvm_tirx import ir
-from tilelang.language import _native as tirx
 
 
 def _normalize_copy_regions(
     src: BufferLikeType, dst: BufferLikeType
 ) -> tuple[
-    tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
-    tirx.BufferRegion | tirx.BufferLoad | tirx.Buffer,
+    ir.TensorRegion | ir.TensorLoad | _tensor_spec.TensorValue,
+    ir.TensorRegion | ir.TensorLoad | _tensor_spec.TensorValue,
 ]:
     # If both side are buffers, we should make sure their shapes are equal
-    if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(src) and _tensor_spec.is_buffer_like(dst):
         ir.assert_structural_equal(src.shape, dst.shape)
 
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
-    src_is_scalar_load = src_extent is None and isinstance(src, tirx.BufferLoad)
-    dst_is_scalar_load = dst_extent is None and isinstance(dst, tirx.BufferLoad)
+    src_is_scalar_load = src_extent is None and isinstance(src, ir.TensorLoad)
+    dst_is_scalar_load = dst_extent is None and isinstance(dst, ir.TensorLoad)
 
     # copy(buffer_a[i], buffer_b[i]) where both are BufferLoad nodes
     # In this case, lower it to a simple BufferStore: buffer_b[i] = buffer_a[i]
@@ -64,7 +68,7 @@ def copy(
     coalesced_width: int | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> ir.Expr | ir.Stmt:
     """Copy data between memory regions.
 
     Args:
@@ -119,30 +123,39 @@ def copy(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
+    if isinstance(src, ir.TensorLoad) and isinstance(dst, ir.TensorLoad) and not ann:
         # Scalar fast path. Mirror the dtype conversion the region path applies
         # in copy.cc; cast to the load dtype, which is what BufferStore checks
         # once index lanes are folded in.
         value = src
-        if _native.dtype_of(src) != _native.dtype_of(dst):
-            value = tirx.Cast(_native.dtype_of(dst), src)
-        return tirx.BufferStore(dst.source, value, dst.indices)
+        if _construction.dtype_of(src) != _construction.dtype_of(dst):
+            value = _prim.Cast(
+                _construction.dtype_of(dst),
+                _construction.scalar_value(src, _construction.current_location()),
+                _construction.current_location(),
+            )
+        return ir.TensorStore(
+            dst.source,
+            _construction.as_indices(dst.indices),
+            _construction.scalar_value(value, _construction.current_location()),
+            _construction.current_location(),
+        )
 
-    return tirx.call_intrin("handle", tirx.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return _intrinsics.call_intrin("handle", ir.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def copy_cluster(
     src: BufferLikeType,
     dst: BufferLikeType,
     *,
-    dst_block: int | tirx.PrimExpr | None = None,
+    dst_block: int | ir.Expr | None = None,
     cluster_mask: int | None = None,
-    remote_barrier: tirx.BufferLoad | None = None,
+    remote_barrier: ir.TensorLoad | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     coalesced_width: int | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> ir.Expr | ir.Stmt:
     """Cluster-aware copy for TMA multicast or SM-to-SM shared-memory copy.
 
     Args:
@@ -183,7 +196,7 @@ def copy_cluster(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    return tirx.call_intrin("handle", tirx.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
+    return _intrinsics.call_intrin("handle", ir.Op.get("tl.tileop.copy"), src, dst, annotations=ann)
 
 
 def async_copy(
@@ -193,7 +206,7 @@ def async_copy(
     coalesced_width: int | None = None,
     annotations: dict | None = None,
     loop_layout: Any | None = None,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> ir.Expr | ir.Stmt:
     """Asynchronous copy primitive lowered through cp.async.
 
     This operator is intended for explicitly asynchronous global->shared copy.
@@ -218,12 +231,17 @@ def async_copy(
     if loop_layout is not None and "parallel_loop_layout" not in ann:
         ann["parallel_loop_layout"] = loop_layout
 
-    if isinstance(src, tirx.BufferLoad) and isinstance(dst, tirx.BufferLoad) and not ann:
-        return tirx.BufferStore(dst.source, src, dst.indices)
+    if isinstance(src, ir.TensorLoad) and isinstance(dst, ir.TensorLoad) and not ann:
+        return ir.TensorStore(
+            dst.source,
+            _construction.as_indices(dst.indices),
+            _construction.scalar_value(src, _construction.current_location()),
+            _construction.current_location(),
+        )
 
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.async_copy"),
+        ir.Op.get("tl.tileop.async_copy"),
         src,
         dst,
         annotations=ann,
@@ -239,7 +257,7 @@ def tma_copy(
     leader_scope_threads: int | None = None,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr | tirx.Stmt:
+) -> ir.Expr | ir.Stmt:
     """TMA copy with user-managed synchronization.
 
     For **loads** (global -> shared): issues expect_tx + tma_load (no wait).
@@ -283,7 +301,7 @@ def tma_copy(
         tirx.Call: A handle to the tma_copy operation
     """
     # If both side are buffers, we should make sure their shapes are equal
-    if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(src) and _tensor_spec.is_buffer_like(dst):
         ir.assert_structural_equal(src.shape, dst.shape)
 
     src_extent = get_extent(src)
@@ -322,7 +340,7 @@ def tma_copy(
     if "eviction_policy" not in ann and eviction_policy is not None:
         ann["eviction_policy"] = EVICTION_POLICY_IDS[eviction_policy]
 
-    return tirx.call_intrin("handle", tirx.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann)
+    return _intrinsics.call_intrin("handle", ir.Op.get("tl.tileop.tma_copy"), src, dst, annotations=ann)
 
 
 _TMA_SUPPORTED_DTYPES = frozenset(
@@ -342,9 +360,9 @@ _TMA_SUPPORTED_DTYPES = frozenset(
 
 
 def tma_gather4(
-    src: tirx.Buffer,
-    dst: tirx.Buffer,
-    col: tirx.PrimExpr,
+    src: _tensor_spec.TensorValue,
+    dst: _tensor_spec.TensorValue,
+    col: ir.Expr,
     rows,
     *,
     barrier,
@@ -368,9 +386,9 @@ def tma_gather4(
     ``annotations`` is an additional annotations dict, merged before the
     internal gather4 encoding keys.
     """
-    if not isinstance(src, tirx.Buffer):
+    if not _tensor_spec.is_buffer_like(src):
         raise TypeError("tma_gather4 src must be a tirx.Buffer (global)")
-    if not isinstance(dst, tirx.Buffer):
+    if not _tensor_spec.is_buffer_like(dst):
         raise TypeError("tma_gather4 dst must be a tirx.Buffer (shared)")
     if str(src.scope()) != "global":
         raise ValueError(f"tma_gather4 src must be a global buffer, got scope={src.scope()}")
@@ -380,12 +398,12 @@ def tma_gather4(
         raise ValueError(f"tma_gather4 expects rank-2 global buffer, got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_gather4 expects rank-2 shared buffer (4 x K_box), got {len(dst.shape)}")
-    if _native.dtype_of(src) != _native.dtype_of(dst):
-        raise ValueError(f"tma_gather4 dtype mismatch: src={_native.dtype_of(src)}, dst={_native.dtype_of(dst)}")
+    if _construction.dtype_of(src) != _construction.dtype_of(dst):
+        raise ValueError(f"tma_gather4 dtype mismatch: src={_construction.dtype_of(src)}, dst={_construction.dtype_of(dst)}")
     if not (isinstance(dst.shape[0], int) and dst.shape[0] == 4) and not (hasattr(dst.shape[0], "value") and int(dst.shape[0].value) == 4):
         raise ValueError(f"tma_gather4 shared tile leading dim must be 4, got {dst.shape[0]}")
-    if tirx.tensor_strides(src):
-        inner = tirx.tensor_strides(src)[1]
+    if _tensor_spec.tensor_strides(src):
+        inner = _tensor_spec.tensor_strides(src)[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_gather4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
@@ -417,15 +435,15 @@ def tma_gather4(
     ann.update(
         {
             "is_gather4": True,
-            "gather4_rows": [_native._expr(row) for row in rows],
-            "gather4_col": _native._expr(col),
+            "gather4_rows": [_construction.as_expr(row) for row in rows],
+            "gather4_col": _construction.as_expr(col),
             "barrier": bar_load,
             "eviction_policy": ep,
         }
     )
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.copy"),
+        ir.Op.get("tl.tileop.copy"),
         src_region,
         dst_region,
         annotations=ann,
@@ -449,9 +467,9 @@ def tma_gather4_bytes(K_box, dtype: str) -> int:
 
 
 def tma_scatter4(
-    src: tirx.Buffer,
-    dst: tirx.Buffer,
-    col: tirx.PrimExpr,
+    src: _tensor_spec.TensorValue,
+    dst: _tensor_spec.TensorValue,
+    col: ir.Expr,
     rows,
     *,
     swizzle=None,
@@ -468,9 +486,9 @@ def tma_scatter4(
     ``annotations`` is an additional annotations dict, merged before the
     internal scatter4 encoding keys.
     """
-    if not isinstance(src, tirx.Buffer):
+    if not _tensor_spec.is_buffer_like(src):
         raise TypeError("tma_scatter4 src must be a tirx.Buffer (shared)")
-    if not isinstance(dst, tirx.Buffer):
+    if not _tensor_spec.is_buffer_like(dst):
         raise TypeError("tma_scatter4 dst must be a tirx.Buffer (global)")
     if str(src.scope()) not in ("shared", "shared.dyn"):
         raise ValueError(f"tma_scatter4 src must be a shared buffer, got scope={src.scope()}")
@@ -480,12 +498,12 @@ def tma_scatter4(
         raise ValueError(f"tma_scatter4 expects rank-2 shared buffer (4 x K_box), got {len(src.shape)}")
     if len(dst.shape) != 2:
         raise ValueError(f"tma_scatter4 expects rank-2 global buffer, got {len(dst.shape)}")
-    if _native.dtype_of(src) != _native.dtype_of(dst):
-        raise ValueError(f"tma_scatter4 dtype mismatch: src={_native.dtype_of(src)}, dst={_native.dtype_of(dst)}")
+    if _construction.dtype_of(src) != _construction.dtype_of(dst):
+        raise ValueError(f"tma_scatter4 dtype mismatch: src={_construction.dtype_of(src)}, dst={_construction.dtype_of(dst)}")
     if not (isinstance(src.shape[0], int) and src.shape[0] == 4) and not (hasattr(src.shape[0], "value") and int(src.shape[0].value) == 4):
         raise ValueError(f"tma_scatter4 shared tile leading dim must be 4, got {src.shape[0]}")
-    if tirx.tensor_strides(dst):
-        inner = tirx.tensor_strides(dst)[1]
+    if _tensor_spec.tensor_strides(dst):
+        inner = _tensor_spec.tensor_strides(dst)[1]
         if not ((isinstance(inner, int) and inner == 1) or (hasattr(inner, "value") and int(inner.value) == 1)):
             raise ValueError(f"tma_scatter4 requires unit innermost global stride, got {inner}")
     rows = list(rows)
@@ -511,14 +529,14 @@ def tma_scatter4(
     ann.update(
         {
             "is_scatter4": True,
-            "gather4_rows": [_native._expr(row) for row in rows],
-            "gather4_col": _native._expr(col),
+            "gather4_rows": [_construction.as_expr(row) for row in rows],
+            "gather4_col": _construction.as_expr(col),
             "eviction_policy": ep,
         }
     )
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.copy"),
+        ir.Op.get("tl.tileop.copy"),
         src_region,
         dst_region,
         annotations=ann,
@@ -529,7 +547,7 @@ def transpose(
     src: BufferLikeType,
     dst: BufferLikeType,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> ir.Expr:
     """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
 
     Both src and dst should be shared memory buffers.
@@ -556,9 +574,9 @@ def transpose(
     src = buffer_region_to_tile_region(src_region, "r", list(src_extent))
     dst = buffer_region_to_tile_region(dst_region, "w", list(dst_extent))
 
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.transpose"),
+        ir.Op.get("tl.tileop.transpose"),
         src,
         dst,
         annotations=_normalize_annotations(annotations),
@@ -568,15 +586,15 @@ def transpose(
 def im2col_impl(
     img: BufferLikeType,
     col: BufferLikeType,
-    nhw_step: tirx.PrimExpr,
-    c_step: tirx.PrimExpr,
+    nhw_step: ir.Expr,
+    c_step: ir.Expr,
     kernel: int,
     stride: int,
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> ir.Expr:
     """Shared im2col implementation behind the common and dialect wrappers.
 
     ``eviction_policy`` rides in the tile-op annotations; only the CUDA TMA
@@ -591,9 +609,9 @@ def im2col_impl(
     col_extents = [r.extent for r in col_region.region]
     img_region = buffer_region_to_tile_region(img_region, "r", img_extents)
     col_region = buffer_region_to_tile_region(col_region, "w", col_extents)
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.im2col"),
+        ir.Op.get("tl.tileop.im2col"),
         img_region,
         col_region,
         nhw_step,
@@ -609,14 +627,14 @@ def im2col_impl(
 def im2col(
     img: BufferLikeType,
     col: BufferLikeType,
-    nhw_step: tirx.PrimExpr,
-    c_step: tirx.PrimExpr,
+    nhw_step: ir.Expr,
+    c_step: ir.Expr,
     kernel: int,
     stride: int,
     dilation: int,
     pad: int,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> ir.Expr:
     """Perform im2col transformation for 2D convolution.
 
     Args:
@@ -643,15 +661,15 @@ def im2col(
 def c2d_im2col(
     img: BufferLikeType,
     col: BufferLikeType,
-    nhw_step: tirx.PrimExpr,
-    c_step: tirx.PrimExpr,
+    nhw_step: ir.Expr,
+    c_step: ir.Expr,
     kernel: int,
     stride: int,
     dilation: int,
     pad: int,
     eviction_policy: Literal["evict_normal", "evict_first", "evict_last"] | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> ir.Expr:
     """Deprecated alias for :func:`im2col`.
 
     Deprecated:

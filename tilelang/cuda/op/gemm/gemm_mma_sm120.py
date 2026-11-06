@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tvm_tirx import ir as _ir
+
 from tilelang import language as T
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import (
     TensorCoreIntrinEmitterSM120 as TensorCoreIntrinEmitterBlockScaled,
@@ -8,7 +10,7 @@ from tilelang.cuda.target import target_is_cuda, target_is_sm120
 from tilelang.tileop.gemm_blockscaled.gemm_blockscaled_base import GemmBlockScaledMixin
 from tilelang.transform.simplify import _Simplify
 from tilelang.utils.language import is_fragment, is_full_region
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import Range
 from tvm_tirx.target import Target
 
@@ -53,7 +55,7 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
             if self.sf_layout != "rowmajor":
                 raise ValueError("SM120 block-scaled fragment A currently requires sf_layout='rowmajor'")
 
-    def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: tirx.Var | None = None):
+    def _make_mma_emitter(self, target: Target, thread_nums: int, thread_var: _ir.Var | None = None):
         m_warp, n_warp = self.policy.compute_warp_partition(
             self.M,
             self.N,
@@ -104,8 +106,8 @@ class GemmMMASm120BlockScaled(GemmBlockScaledMixin, GemmMMA):
         layout_map: dict,
         target: Target,
         thread_bounds: Range,
-        thread_index: tirx.PrimExpr,
-        mbar_phase_expr: tirx.PrimExpr | None = None,
+        thread_index: _ir.Expr,
+        mbar_phase_expr: _ir.Expr | None = None,
     ):
         self._validate_target(target)
         self._validate_operands()

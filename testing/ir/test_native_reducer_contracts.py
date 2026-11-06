@@ -9,6 +9,8 @@ import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
 
+from testing.ascend._block import attribute as _scope_attribute
+
 
 def integer(value, dtype="int32"):
     return ir.IntImm(dtype, value)
@@ -40,8 +42,7 @@ def annotation(values):
 
 
 def attribute(node, key, value, body):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": node, "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(node, key, value, body)
 
 
 def decoded(call):
@@ -86,7 +87,7 @@ def lower(value):
     stages = {}
     if value.attrs["target"].kind.name in {"llvm", "c"}:
         # Match the CPU pipeline: consume source allocation origins before
-        # the reducer passes and the eventual FinalizeAnnotations boundary.
+        # the reducer passes and the eventual LowerSourceAnnotations boundary.
         with value.attrs["target"]:
             value = tvm_ffi.get_global_func("tl.cpu.transform.LowerCPUKernelLaunch")()(ir.IRModule({"main": value}))["main"]
         stages["LowerCPUKernelLaunch"] = value
@@ -118,7 +119,7 @@ def execute(value, arrays, name):
     # BindTarget preserves an existing target. Retarget this execution-only
     # copy explicitly; the original lowered IR and its assertions are kept.
     module = ir.IRModule({"main": value.with_attr("target", tvm_tirx.target.Target("c"))})
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(module)
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(module)
     executable = compile_packed_function(module)
     tensors = [tvm_tirx.runtime.tensor(a) for a in arrays]
     executable(*tensors)

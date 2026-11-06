@@ -69,8 +69,7 @@ def test_clamp_backend_codegen(target_config, build_func):
     if target_config["kind"] in ("cuda", "c"):
         assert "tl::clamp(" in source
         if target_config["kind"] == "cuda":
-            assert source.count("tl::load_vector<float4, 16, false>") == 3
-            assert source.count("tl::store_vector<float4, 16, false>") == 1
+            assert source.count("*(float4*)") == 4
             assert source.count("tl::clamp(") == 4
     else:
         assert "!=" in source  # NaN checks must survive simplification.

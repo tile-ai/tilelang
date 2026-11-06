@@ -12,7 +12,7 @@ Contents: [components](#measurement-and-tuning-components),
 |---|---|
 | `tilelang/profiler/` | Prepared kernel benchmarking, input/reference checks, timing backend dispatch, msprof capture and interpretation |
 | `tilelang/autotuner/` | Candidate elaboration/compilation, correctness and benchmark work, selection and persisted tuning results |
-| `tilelang/carver/` | Template/architecture-based configuration hints; inspect supported architecture policies before assuming Ascend applicability |
+| `tilelang/driver/` | Device property queries; CUDA/HIP and Ascend availability must be checked before querying hardware |
 | `tilelang/ascend/transform/z3_scheduler.py` | In-kernel task scheduling model; solved II is not measured device latency |
 | `tilelang/ascend/language/tile_schedule.py` | Persistent core-to-tensor-tile mapping; affects work distribution and locality |
 | `maint/scripts/ascend_perf_regression.py` | Ascend benchmark case inventory and execution |

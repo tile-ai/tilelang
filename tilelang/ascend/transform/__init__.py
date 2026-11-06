@@ -6,6 +6,15 @@ from tilelang.transform import _ffi_api
 from . import z3_scheduler  # noqa: F401
 
 
+def LowerAscendAnnotations():
+    """Finish execution-region metadata after scheduling and synchronization.
+
+    Retain codegen core/VF annotations and retire VF latency hints, including
+    when automatic scheduling is disabled.
+    """
+    return _ffi_api.LowerAscendAnnotations()
+
+
 def InsertNd2Nz():
     """Rewrite layout-driven UB ND->UB NZ and UB->L1 ND->NZ copies."""
     return _ffi_api.InsertNd2Nz()  # type: ignore

@@ -2,12 +2,12 @@
  * \file mark_scalar_dcache_bypass.cc
  * \brief Bypass scalar GM dcache for physical storage that is written.
  */
+#include "ascend/ir/block.h"
 #include "ascend/op/builtin.h"
 #include "ir/alias_analysis.h"
-#include "native_vf_utils.h"
+#include "ir/annotations.h"
 #include "op/builtin.h"
-#include "op/native_intrinsic.h"
-#include "op/native_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -32,25 +32,28 @@ public:
   using StmtExprMutator::Mutate_;
   explicit ScalarDcacheBypassRewriter(const tirx::Function &function)
       : roots_(function) {
-    VisitNativePostOrder(function->body, [&](const ObjectRef &object) {
-      if (const auto *store = object.as<TensorStoreObj>())
-        RecordWrite(store->dest);
-      if (const auto *call = object.as<CallObj>()) {
-        if (call->op.same_as(ascend_copy_ubuf_to_gm()) ||
-            call->op.same_as(ascend_copy_matrix_cc_to_gm()) ||
-            call->op.same_as(ascend_write_gm_bypass_dcache())) {
-          auto operands = NativeIntrinsicOperands(call);
-          if (!operands.empty())
-            RecordWrite(operands[0]);
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        function->body,
+        [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *store = object.as<TensorStoreObj>())
+            RecordWrite(store->dest);
+          if (const auto *call = object.as<CallObj>()) {
+            if (call->op.same_as(ascend_copy_ubuf_to_gm()) ||
+                call->op.same_as(ascend_copy_matrix_cc_to_gm()) ||
+                call->op.same_as(ascend_write_gm_bypass_dcache())) {
+              auto operands = DecodeCallOperands(call);
+              if (!operands.empty())
+                RecordWrite(operands[0]);
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     // Skipping the whole VF also handles nested scopes without leaking a
     // boolean state into later siblings. VF memory has its dedicated path.
-    if (GetAscendVFKind(op) != AscendVFKind::kNone)
+    if (ascend::GetVFKind(op) != ascend::VFKind::kNone)
       return Unchanged();
     return StmtExprMutator::Mutate_(op, mode);
   }

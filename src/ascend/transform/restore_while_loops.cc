@@ -8,6 +8,7 @@
  * Break exits immediately and never needs a synthetic intrinsic marker.
  */
 
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/tirx/op/memory.h>
@@ -17,7 +18,7 @@
 #include <utility>
 
 #include "ir/analyzer.h"
-#include "op/native_utils.h"
+#include "ir/stmt_functor.h"
 
 namespace tvm::tl {
 using namespace tirx;
@@ -25,13 +26,13 @@ using namespace ffi;
 using namespace prim;
 
 namespace {
-class ExpressionSimplifier : public StmtExprMutator {
+class ExpressionSimplifier : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   UnchangedOr<Any> Mutate(AnyView value, InplaceMode mode) final {
-    auto result = StmtExprMutator::Mutate(value, mode);
+    auto result = LayoutMapMutator::Mutate(value, mode);
     bool unchanged = result.IsUnchanged();
     Any rewritten = unchanged ? Any(value) : std::move(result).ValueUnchecked();
     if (auto expr = rewritten.try_cast<PrimExpr>()) {
@@ -48,13 +49,13 @@ private:
   sym::Analyzer analyzer_{CreateTileLangAnalyzer()};
 };
 
-class WhileLoopRestorer : public StmtExprMutator {
+class WhileLoopRestorer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
-    For loop = StmtExprMutator::Mutate_(op, mode)
+    For loop = LayoutMapMutator::Mutate_(op, mode)
                    .ValueOrUnchanged(GetRef<Stmt>(op))
                    .as_or_throw<For>();
     if (!loop->annotations.count("synthetic_while"))
@@ -62,8 +63,20 @@ public:
     TVM_FFI_CHECK(IsOne(loop->step), ValueError)
         << "Synthetic while restoration requires a unit-step analysis loop";
     auto uses_index = [&](const Stmt &body) {
-      return UsesAnyVar(
-          body, [&](const VarObj *var) { return var == loop->var.get(); });
+      return ffi::StructuralVisit(
+                 body,
+                 [](const Call &call, ffi::StructuralVisitorObj *visitor) {
+                   return call->op.same_as(layout_map_op())
+                              ? VisitLayoutMapCall(call.get(), visitor)
+                              : visitor->DefaultVisitExpected(call);
+                 },
+                 [&](const Var &var, ffi::StructuralVisitorObj *visitor)
+                     -> ffi::Expected<ffi::Optional<ffi::VisitInterrupt>> {
+                   if (var.same_as(loop->var))
+                     return ffi::VisitInterrupt(var);
+                   return visitor->DefaultVisitExpected(var);
+                 })
+          .has_value();
     };
     SeqStmt body = loop->body;
     if (uses_index(body)) {
@@ -78,7 +91,7 @@ public:
                             runtime::MemoryScope("local.var"));
     TensorVar counter(loop->var->name + "_counter", counter_type, loop->loc);
     PrimVar snapshot(loop->var->name + "_iteration", index_type, loop->loc);
-    auto replace = make_object<StmtExprMutator>();
+    auto replace = make_object<LayoutMapMutator>();
     replace->VarRemapSet(loop->var, snapshot);
     body = replace->Mutate(body).ValueOrUnchanged(body);
     Array<Stmt> iteration{

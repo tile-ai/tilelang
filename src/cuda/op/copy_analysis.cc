@@ -4,6 +4,7 @@
  */
 
 #include "cuda/op/copy.h"
+#include "layout/expr_utils.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 

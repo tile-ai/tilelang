@@ -8,6 +8,8 @@ import pytest
 import tvm_ffi
 import tvm_tirx
 from tvm_tirx import ir, tirx
+from testing.ascend._block import SEMANTIC_SCOPE_OPS, attribute as _scope_attribute, attribute_fields as _scope_fields
+from testing.ascend._ir import scheduled_fields
 
 
 def integer(value, dtype="int32"):
@@ -31,8 +33,7 @@ def tilecall(name, *operands, metadata=None):
 
 
 def attribute(node, key, value, body):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": node, "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(node, key, value, body)
 
 
 def task(body, metadata=None):
@@ -46,7 +47,7 @@ def objects(value, kind):
 
 
 def fields(reg):
-    return tvm_ffi.get_global_func("tl.DecodeAnnotations")(reg.args[0], reg.attrs["annotation_schema"])
+    return _scope_fields(reg)
 
 
 def estimate(params, body):
@@ -68,7 +69,7 @@ def costs(result, kind="tl.ascend_task"):
     return [
         (int(f["node"]["latency"]), int(f["node"]["ii"]))
         for reg in objects(result, ir.RegionStmt)
-        if reg.op.name == "tl.attr" and (f := fields(reg))["key"] == kind
+        if reg.op.name in SEMANTIC_SCOPE_OPS and (f := fields(reg))["key"] == kind
     ]
 
 
@@ -218,14 +219,15 @@ def test_flat_scheduled_scalar_bind_metadata_is_rewritten_without_scoping_away_v
     result = estimate([a], [bind, task([ir.TensorStore(a, [0], x)])])
     (out_bind,) = objects(result, ir.Bind)
     assert out_bind.var.same_as(x)
-    metadata = tvm_ffi.get_global_func("tl.DecodeAnnotations")(out_bind.value.args[1], out_bind.value.attrs["annotation_schema"])
+    metadata = scheduled_fields(out_bind)
     assert metadata["task"]["trace"] == "x"
     assert int(metadata["task"]["latency"]) == int(metadata["task"]["ii"]) == 1
 
 
-def test_vector_block_user_latency_is_consumed_from_native_payload():
+def test_vector_block_user_latency_is_read_from_native_attrs():
     a = tensor("a", [64], "int32", "shared.dyn")
     i = ir.Var("i", "int32")
     loop = ir.For(i, integer(0), integer(64), integer(1), ir.ForKind.PARALLEL, [ir.TensorStore(a, [i], i + 1)])
     block = attribute(None, "tl.sblock", {"name": "SIMT_VF", "no_realize": True, "annotations": {"tl.vf_latency": integer(77)}}, [loop])
+    assert block.op.name == "tl.ascend_block" and not block.args
     assert costs(estimate([a], [task([block])])) == [(77, 77)]

@@ -5,8 +5,14 @@
 #ifndef TILELANG_TRANSFORM_COMMON_PIPELINE_TENSOR_H_
 #define TILELANG_TRANSFORM_COMMON_PIPELINE_TENSOR_H_
 
+#include "ir/stmt_functor.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
+#include "op/builtin.h"
 #include "pipeline_access.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm::tl {
 
@@ -52,10 +58,10 @@ inline Bind AllocatePipelineTensor(const tirx::TensorVar &tensor,
 // slot indices in one flat barrier tensor; mode=kReconcile keeps a pipeline's
 // own indices while reconciling sibling capacity, using slot zero outside any
 // expanded pipeline. This class never mutates a TensorVar's type in place.
-class PipelineTensorRewriter : public tirx::StmtExprMutator {
+class PipelineTensorRewriter : public tl::LayoutMapMutator {
 public:
-  using tirx::StmtExprMutator::Mutate;
-  using tirx::StmtExprMutator::Mutate_;
+  using tl::LayoutMapMutator::Mutate;
+  using tl::LayoutMapMutator::Mutate_;
   enum class Mode { kVersion, kBarrier, kReconcile };
 
   PipelineTensorRewriter(
@@ -73,10 +79,11 @@ public:
         original_begin_(std::move(original_begin)), memory_(memory) {}
 
   Stmt Rewrite(const Stmt &statement) {
-    VisitNativePostOrder(statement, [&](const ffi::ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>())
-        local_definitions_.insert(bind->var);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        statement, [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+          local_definitions_.insert(bind->var);
+          return ffi::WalkResult::Advance();
+        });
     Stmt body = Mutate(statement).ValueOrUnchanged(statement);
     if (external_aliases_.empty())
       return body;
@@ -147,7 +154,7 @@ private:
         return alias;
       }
     }
-    return tirx::StmtExprMutator::Mutate_(op, mode);
+    return tl::LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<PrimExpr> Mutate_(const TensorLoadObj *op,
@@ -155,7 +162,7 @@ private:
     auto old_tensor = op->source.as<tirx::TensorVar>();
     auto tensor = old_tensor ? replacements_.Get(*old_tensor) : std::nullopt;
     if (!tensor)
-      return tirx::StmtExprMutator::Mutate_(op, mode);
+      return tl::LayoutMapMutator::Mutate_(op, mode);
     return TensorLoad(
         *tensor, RewriteIndices(*old_tensor, *tensor, op->indices), op->loc);
   }
@@ -165,7 +172,7 @@ private:
     auto old_tensor = op->dest.as<tirx::TensorVar>();
     auto tensor = old_tensor ? replacements_.Get(*old_tensor) : std::nullopt;
     if (!tensor)
-      return tirx::StmtExprMutator::Mutate_(op, mode);
+      return tl::LayoutMapMutator::Mutate_(op, mode);
     auto value = Mutate(op->value, mode).ValueOrUnchanged(op->value);
     return TensorStore(*tensor,
                        RewriteIndices(*old_tensor, *tensor, op->indices), value,
@@ -177,7 +184,7 @@ private:
     auto old_tensor = op->source.as<tirx::TensorVar>();
     auto tensor = old_tensor ? replacements_.Get(*old_tensor) : std::nullopt;
     if (!tensor)
-      return tirx::StmtExprMutator::Mutate_(op, mode);
+      return tl::LayoutMapMutator::Mutate_(op, mode);
     ffi::Array<Range> bounds;
     for (const Range &range : op->region)
       bounds.push_back(Range::FromMinExtent(
@@ -283,23 +290,30 @@ private:
         if (auto tensor = replacements_.Get(*old))
           return VersionedPointer(*old, *tensor, op->loc);
     }
+    if (op->op.same_as(layout_map_op())) {
+      auto declaration =
+          MakeAnnotation(RewriteAnnotations(ReadAnnotations(op)), op->loc)
+              .as_or_throw<Evaluate>();
+      auto call = declaration->value.as_or_throw<Call>();
+      auto result = MutateLayoutMapCall(call.get(), this, mode).value();
+      return std::move(result).ValueOrUnchanged(ffi::Any(call)).cast<Expr>();
+    }
     if (const auto *name = op->op.as<OpObj>();
         name && name->name == "tl.annotation") {
-      auto encoded =
-          EncodeAnnotations(RewriteAnnotations(ReadNativeAnnotations(op)));
+      auto encoded = EncodeAnnotations(RewriteAnnotations(ReadAnnotations(op)));
       auto payload = Mutate(encoded.payload).ValueOrUnchanged(encoded.payload);
       return Call(op->ty, op->op, {payload},
                   DictAttrs({{"schema_version", 1},
                              {"annotation_schema", encoded.schema}}),
                   {}, op->loc);
     }
-    Call call = tirx::StmtExprMutator::Mutate_(op, mode)
+    Call call = tl::LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(ffi::GetRef<Call>(op))
                     .as_or_throw<Call>();
     if (mode_ == Mode::kBarrier && parity_cycle_ && original_loop_ &&
         original_begin_) {
       if (call->op->IsInstance<OpObj>() &&
-          call->op.as_or_throw<Op>()->name == "tl.mbarrier_wait_parity" &&
+          call->op.as_or_throw<Op>().same_as(tl::mbarrier_wait_parity()) &&
           call->args.size() >= 2) {
         const auto *load = call->args[0].as<TensorLoadObj>();
         bool expanded = false;
@@ -307,9 +321,14 @@ private:
           expanded |= load && load->source.same_as(tensor);
         if (expanded) {
           auto analyzer = CreateTileLangAnalyzer();
-          auto at_min = analyzer->Simplify(SubstituteLoopVars(
-              call->args[1].as_or_throw<PrimExpr>(),
-              {{original_loop_.value(), original_begin_.value()}}));
+          auto at_min =
+              analyzer->Simplify(tirx::SubstituteWithDataTypeLegalization(
+                  call->args[1].as_or_throw<PrimExpr>(),
+                  [values = ffi::Map<Var, PrimExpr>{{original_loop_.value(),
+                                                     original_begin_.value()}}](
+                      const Var &var) -> ffi::Optional<PrimExpr> {
+                    return values.Get(var);
+                  }));
           auto initial = TryConstInt(at_min);
           TVM_FFI_CHECK(initial.has_value(), ValueError)
               << "Pipeline barrier initial parity must be constant at the loop "
@@ -349,7 +368,7 @@ private:
         memory_->RecordGeneratedDefinition(alias, value);
       return Bind(alias, value, op->loc);
     }
-    return tirx::StmtExprMutator::Mutate_(op, mode);
+    return tl::LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::Map<tirx::TensorVar, tirx::TensorVar> replacements_;

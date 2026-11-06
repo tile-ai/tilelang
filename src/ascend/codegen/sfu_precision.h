@@ -55,12 +55,14 @@ inline SfuPrecision ResolveSfuPrecision(const Call &op, PrimType result_dtype,
   // Per-op "precision" annotation (int code from the Python side, normalized
   // from the string aliases in tilelang/ascend/language/simd.py -- no alias
   // table here, mirroring the l2_cache_ctrl pattern).
-  if (auto p = CodegenCallAnnotations(op.get()).Get("precision")) {
-    const auto *code = p.value().as<IntImmObj>();
-    TVM_FFI_CHECK(code != nullptr, TypeError)
-        << "SFU precision annotation must be an integer code, got "
-        << p.value();
-    return PrecisionFromCode(static_cast<int>(CodegenInt(code)));
+  if (const auto *attrs = op->attrs.as<DictAttrsObj>()) {
+    if (auto p = attrs->dict.Get("precision")) {
+      const auto *code = p.value().as<IntImmObj>();
+      TVM_FFI_CHECK(code != nullptr, TypeError)
+          << "SFU precision annotation must be an integer code, got "
+          << p.value();
+      return PrecisionFromCode(static_cast<int>(CodegenInt(code)));
+    }
   }
   return fallback;
 }

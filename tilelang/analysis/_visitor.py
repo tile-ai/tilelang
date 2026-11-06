@@ -14,11 +14,21 @@ def tensor_scope(tensor):
 
 
 def tilelang_metadata(node):
-    """Decode a native lexical annotation while keeping its IR operands explicit."""
+    """Read lexical metadata while retaining native TensorVar/Layout identities."""
+    if isinstance(node, ir.RegionStmt) and node.op.name == "tl.ascend_block":
+        annotations = dict(node.attrs["annotations"])
+        if "annotation_schema" in node.attrs:
+            dynamic = tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
+            annotations.update(dynamic)
+        return {"node": None, "key": "tl.sblock", "value": {"name": node.attrs["name"], "annotations": annotations}}
     if isinstance(node, ir.RegionStmt) and node.op.name == "tl.attr":
         return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
-    if isinstance(node, ir.Call) and isinstance(node.op, ir.Op) and node.op.name == "tl.annotation":
-        return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
+    if (
+        isinstance(node, ir.Call)
+        and isinstance(node.op, ir.Op)
+        and (node.op.same_as(ir.Op.get("tl.layout_map")) or node.op.same_as(ir.Op.get("tl.annotation")))
+    ):
+        return tvm_ffi.get_global_func("tl.ReadAnnotations")(node)
     return None
 
 

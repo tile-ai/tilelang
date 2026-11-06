@@ -10,11 +10,13 @@ each dialect self-contained.
 """
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+
 
 from typing import Any
 
-from tilelang.language import _native as tirx
 
 # The @macro helpers are target-neutral mechanism: they only emit the
 # debug_print_* externs that every backend's codegen implements.
@@ -38,7 +40,7 @@ def print(obj: Any = None, msg: str = "") -> None:  # noqa: A001
             message-only print.
         msg: Optional message prefix.
     """
-    if isinstance(obj, tirx.Buffer):
+    if _tensor_spec.is_buffer_like(obj):
         buffer = obj
 
         elems = 1
@@ -46,7 +48,7 @@ def print(obj: Any = None, msg: str = "") -> None:  # noqa: A001
             elems *= dim
 
         if not msg:
-            msg = f"buffer<{buffer.name}, {_native.dtype_of(buffer)}>"
+            msg = f"buffer<{buffer.name}, {_construction.dtype_of(buffer)}>"
 
         if str(buffer.ty.scope) == "local":
             print_local_buffer_with_condition(True, buffer, elems, msg)
@@ -59,7 +61,7 @@ def print(obj: Any = None, msg: str = "") -> None:  # noqa: A001
                 f"T.print: unsupported buffer scope on Ascend: {str(buffer.ty.scope)}. Copy the buffer to UB (shared) or GM (global) first."
             )
 
-    elif isinstance(obj, tirx.PrimExpr):
+    elif _construction.is_scalar_expr(obj):
         if not msg:
             msg = f"expr<{obj}>"
         print_var(obj, msg)

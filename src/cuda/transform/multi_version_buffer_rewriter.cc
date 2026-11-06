@@ -6,13 +6,16 @@
 
 #include "multi_version_buffer_rewriter.h"
 #include "cuda/op/builtin.h"
+#include "cuda/transform/ws_analysis.h"
+#include "cuda/transform/ws_kernel_analysis.h"
+#include "ir/annotations.h"
 #include "transform/common/pipeline_access.h"
 #include "transform/common/pipeline_tensor.h"
 #include "ws_analysis.h"
-#include "ws_native.h"
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <tvm/tirx/stmt_functor.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -276,7 +279,7 @@ private:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *call) final {
-    if (call->op.same_as(Op::Get("tl.annotation")))
+    if (IsAnnotationCall(call))
       return std::nullopt;
     return StmtExprVisitor::Visit_(call);
   }

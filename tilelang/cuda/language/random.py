@@ -1,11 +1,14 @@
-from tilelang.language import _native as tirx
+from tilelang.language import _intrinsics
+import tvm_ffi as _ffi
+from tvm_tirx import ir as _ir
+
 import tilelang.language.common as T
 
 __all__ = ["rng_init", "rng_rand", "rng_rand_float"]
 
 
 # https://docs.nvidia.com/cuda/curand/device-api-overview.html#device-api-overview
-def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> tirx.PrimExpr:
+def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> _ir.Expr:
     """Initialize CUDA curand random number generator state
 
     Parameters
@@ -26,20 +29,20 @@ def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> t
         The random number generator state handle.
     """
     assert generator in ["curandStateMRG32k3a_t", "curandStatePhilox4_32_10_t", "curandStateXORWOW_t"]
-    seed = tirx.convert(seed)
+    seed = _ffi.convert(seed)
     if seq is None:
         bx = T.get_block_binding()
         ex = T.get_thread_extent()
         tx = T.get_thread_binding()
         id = tx + bx * ex
-        seq = tirx.convert(id)
+        seq = _ffi.convert(id)
     else:
-        seq = tirx.convert(seq)
-    off = tirx.convert(off)
-    return tirx.call_intrin("void", tirx.Op.get("tl.rng_init"), seed, seq, off, generator)
+        seq = _ffi.convert(seq)
+    off = _ffi.convert(off)
+    return _intrinsics.call_intrin("void", _ir.Op.get("tl.rng_init"), seed, seq, off, generator)
 
 
-def rng_rand() -> tirx.PrimExpr:
+def rng_rand() -> _ir.Expr:
     """Generate a 32-bit unsigned random integer
 
     Returns
@@ -47,10 +50,10 @@ def rng_rand() -> tirx.PrimExpr:
     random_value : PrimExpr
         A 32-bit unsigned random integer.
     """
-    return tirx.call_intrin("uint32", tirx.Op.get("tl.rng_rand"))
+    return _intrinsics.call_intrin("uint32", _ir.Op.get("tl.rng_rand"))
 
 
-def rng_rand_float(bit=32, dist="uniform") -> tirx.PrimExpr:
+def rng_rand_float(bit=32, dist="uniform") -> _ir.Expr:
     """Generate a random float
 
     Parameters
@@ -67,4 +70,4 @@ def rng_rand_float(bit=32, dist="uniform") -> tirx.PrimExpr:
     """
     assert bit in [32, 64]
     assert dist in ["uniform", "normal"]
-    return tirx.call_intrin("float" + str(bit), tirx.Op.get("tl.rng_rand_float"), dist)
+    return _intrinsics.call_intrin("float" + str(bit), _ir.Op.get("tl.rng_rand_float"), dist)

@@ -21,6 +21,11 @@ class PartialFragment(Fragment):
     """
 
     # pylint: disable=super-init-not-called
+    @staticmethod
+    def from_mapping(shape, mapping, replicate=1, combine=1, thread_range=None):
+        """Construct a partial layout without losing its combine lanes."""
+        return _ffi_api.PartialFragment_from_mapping(shape, mapping, replicate, combine, thread_range)
+
     def __init__(self, shape, forward_fn=None, forward_thread_fn=None, replicate=1, forward_index_fn=None, combine=None):
         """
         Mirror of :class:`Fragment`'s constructor, with partial semantics.

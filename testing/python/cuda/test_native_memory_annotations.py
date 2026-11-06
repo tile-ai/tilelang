@@ -24,7 +24,7 @@ def annotation(values):
 
 
 def copy(source, destination, name="copy", fields=None):
-    from tilelang.language._native import call_intrin
+    from tilelang.language._intrinsics import call_intrin
 
     return ir.Evaluate(call_intrin("handle", "tl.tileop." + name, source, destination, annotations=fields))
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 from tilelang._analyzer import create_analyzer
 
 import tilelang.metal.language as T
-from tilelang.language import _native as tir
-from tilelang.language._native import Buffer, BufferRegion
+
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import TensorRegion as BufferRegion
 
 OPERAND_LEFT = 0
 OPERAND_RIGHT = 1
@@ -28,7 +32,7 @@ class MPSIntrinEmitter:
         warp_row_tiles: int = 8,
         warp_col_tiles: int = 8,
         chunk: int = 32,
-        thread_var: tir.PrimExpr | None = None,
+        thread_var: _ir.Expr | None = None,
         a_stride_override: int | None = None,
         b_stride_override: int | None = None,
         inner_k_steps: int = 1,
@@ -98,7 +102,7 @@ class MPSIntrinEmitter:
             extra = ()
             off_row = 0
             off_col = 0
-        strides = tir.tensor_strides(buffer)
+        strides = _tensor_spec.tensor_strides(buffer)
         if strides:
             inner_stride = strides[-1]
             if not create_analyzer().can_prove_equal(inner_stride, 1):

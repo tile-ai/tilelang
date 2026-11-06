@@ -17,7 +17,7 @@ from benchmark_matmul import matmul
 M = 8192
 N = 8192
 for K in [256, 512, 1024, 2048, 4096, 8192, 16384]:
-    res = matmul(M, N, K, False)
+    res = matmul(M, N, K)
     tflops = 2 * M * N * K / res.latency * 1e-12
     print(f"K={K:5d}  latency={res.latency:.6f}s  TFlops={tflops:.3f}")
 PY

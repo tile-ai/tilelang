@@ -92,10 +92,6 @@ protected:
                        std::ostream &os) final; // NOLINT(*)
 
 private:
-  std::string GetVectorByteAddress_(const VarObj *buffer, PrimExpr base,
-                                    bool read_only);
-  bool CanUseAlignedVectorAccess_(const PrimType &type, const VarObj *buffer,
-                                  const PrimExpr &base);
   void PrintCast(const PrimExpr &value, const PrimType &target_type,
                  const std::string &rounding, bool saturate,
                  ffi::Optional<PrimExpr> random_bits, std::ostream &os);
@@ -170,7 +166,6 @@ private:
   // whether need tl SM100 TMA/tensor-memory copy helpers
   bool need_copy_sm100_h_{false};
   // whether need guarded ordinary vector memory helpers
-  bool need_vector_memory_h_{false};
   // whether need tl mbarrier helpers
   bool need_barrier_h_{false};
   // whether need mma.h

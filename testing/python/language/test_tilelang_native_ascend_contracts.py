@@ -13,6 +13,8 @@ def calls(function, name):
 
 
 def annotations(call):
+    if call.op.same_as(ir.Op.get("tl.layout_map")):
+        return call.attrs
     operand_count = int(call.attrs.get("operand_count", 0))
     return tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[operand_count], call.attrs["annotation_schema"])
 
@@ -136,10 +138,14 @@ def test_ascend_root_allocation_metadata_keeps_native_tensor_identity(roundtrip)
     if roundtrip == "json":
         kernel = ir.load_json(ir.save_json(kernel))
     elif roundtrip == "renew":
-        kernel = tirx.renew_def(kernel)
+        kernel = tvm_ffi.get_global_func("tl.RenewDef")(kernel)
     assert tirx.analysis.check_well_formed(kernel)
     tensors = {bind.var for bind in collect_nodes(kernel, ir.Bind) if isinstance(bind.var.ty, tirx.TensorType)}
-    records = [annotations(call) for call in calls(kernel, "tl.annotation")]
+    records = [
+        annotations(call)
+        for call in collect_nodes(kernel, ir.Call)
+        if call.op.same_as(ir.Op.get("tl.layout_map")) or call.op.same_as(ir.Op.get("tl.annotation"))
+    ]
     assert len(records) == 2
     assert all("tl.source_block_annotation" not in record for record in records)
     (scales,) = [record["tl.l0_sf_bindings"] for record in records if "tl.l0_sf_bindings" in record]

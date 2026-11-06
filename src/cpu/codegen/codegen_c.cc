@@ -2,6 +2,7 @@
  * \file cpu/codegen/codegen_c.cc
  */
 #include "codegen_c.h"
+#include "op/builtin.h"
 
 #include <cmath>
 #include <sstream>
@@ -18,12 +19,11 @@ void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
 }
 
 void CodeGenTileLangC::Dispatch_(const CallObj *op, std::ostream &os) {
-  const auto *callee = op->op.as<OpObj>();
-  if (callee && callee->name == "tl.clamp") {
+  if (op->op.same_as(tl::clamp())) {
     TVM_FFI_ICHECK_EQ(op->args.size(), 3);
     os << "tl::clamp(" << PrintExpr(op->args[0]) << ", "
        << PrintExpr(op->args[1]) << ", " << PrintExpr(op->args[2]) << ")";
-  } else if (callee && callee->name == "prim.fma") {
+  } else if (op->op.same_as(prim::fma_op())) {
     // Explicit FMA is fused. Do not install an FLowerIntrinsic entry for it:
     // LowerIntrin would then also start contracting ordinary a*b+c on CPUs.
     PrimType type = op->ty.as_or_throw<PrimType>();

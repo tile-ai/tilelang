@@ -59,7 +59,11 @@ public:
 
   ffi::Array<PrimExpr> OutputShape() const;
 
-  ffi::Array<PrimExpr> GetForwardIndex() const { return forward_index_; }
+  ffi::Array<PrimExpr> GetForwardIndex() const;
+
+  // Coordinate Vars are local definitions, serialized with the expressions
+  // that use them. The public algebra projects them onto InputPlaceholder.
+  tvm::LambdaExpr CoordinateMapping() const;
 
   /*!
    * \brief Convert the physical output coordinates to a row-major linear
@@ -151,6 +155,10 @@ public:
 protected:
   virtual ffi::Map<PrimVar, Range> GetVarMap() const;
   void UpdateAnalyzer(sym::AnalyzerObj *analyzer) const;
+  void InitCoordinates();
+  PrimExpr BindCoordinates(const PrimExpr &expr) const;
+  PrimExpr CanonicalCoordinates(const PrimExpr &expr) const;
+  ffi::Array<Var> coordinate_vars_;
   ffi::Array<PrimExpr> forward_index_;
   ffi::Array<PrimExpr> input_size_;
 };
@@ -176,7 +184,9 @@ public:
                ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
                PrimExpr replicate_size);
 
-  PrimExpr GetForwardThread() const { return forward_thread_; }
+  PrimExpr GetForwardThread() const {
+    return CanonicalCoordinates(forward_thread_);
+  }
 
   ffi::Array<PrimExpr> GetForwardVars() const final;
 

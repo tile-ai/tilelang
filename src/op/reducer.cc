@@ -6,6 +6,9 @@
  */
 
 #include "reducer.h"
+#include "ir/tensor_utils.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <cmath>
 #include <limits>
@@ -21,7 +24,6 @@
 
 #include "backend/common/op/reduction_ownership.h"
 #include "builtin_registry.h"
-#include "native_utils.h"
 #include "utils.h"
 
 namespace tvm {
@@ -36,15 +38,16 @@ bool ValueIsReplicaSafe(const PrimExpr &value) {
     return false;
   }
   bool safe = true;
-  VisitNativePostOrder(value, [&](const ObjectRef &obj) {
-    if (const auto *load = obj.as<TensorLoadObj>()) {
-      auto buffer = load->source.as_or_throw<TensorVar>();
-      if (!IsFragmentBuffer(buffer) && !IsSharedBuffer(buffer) &&
-          !IsGlobalBuffer(buffer)) {
-        safe = false;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      value, [&](const TensorLoadObj *load) -> ffi::Expected<ffi::WalkResult> {
+        auto buffer = load->source.as_or_throw<TensorVar>();
+        if (!IsFragmentBuffer(buffer) && !IsSharedBuffer(buffer) &&
+            !IsGlobalBuffer(buffer)) {
+          safe = false;
+        }
+
+        return ffi::WalkResult::Advance();
+      });
   return safe;
 }
 

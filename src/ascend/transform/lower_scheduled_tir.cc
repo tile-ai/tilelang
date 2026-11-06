@@ -1,4 +1,10 @@
+#include "ascend/transform/source_scopes.h"
+#include "ir/annotations.h"
 #include "ir/loop_math.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/op/region.h>
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -64,18 +70,21 @@ void Append(ffi::Array<Stmt> *out, const Stmt &statement) {
 }
 
 void CollectDefinitions(const Stmt &statement, VarSet *out) {
-  VisitNativePostOrder(statement, [&](const ffi::ObjectRef &object) {
-    if (const auto *bind = object.as<BindObj>())
-      out->insert(bind->var.get());
-    if (const auto *loop = object.as<ForObj>())
-      out->insert(loop->var.get());
-    if (const auto *region = object.as<RegionStmtObj>()) {
-      for (const auto &var : region->body_params)
-        out->insert(var.get());
-      for (const auto &var : region->result_vars)
-        out->insert(var.get());
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      statement,
+      [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+        if (const auto *bind = object.as<BindObj>())
+          out->insert(bind->var.get());
+        if (const auto *loop = object.as<ForObj>())
+          out->insert(loop->var.get());
+        if (const auto *region = object.as<RegionStmtObj>()) {
+          for (const auto &var : region->body_params)
+            out->insert(var.get());
+          for (const auto &var : region->result_vars)
+            out->insert(var.get());
+        }
+        return ffi::WalkResult::Advance();
+      });
 }
 
 bool ConsumedSchedulingKey(const ffi::String &key) {
@@ -104,18 +113,18 @@ For PromoteDynamicLoopAnnotations(For loop) {
   auto body = loop->body;
   auto *node = loop.CopyOnWrite();
   node->annotations = std::move(constant);
-  node->body = SeqStmt({MakeNativeAttribute(nullptr, "tl.loop.annotations",
-                                            dynamic, body, loop->loc)},
-                       body->loc);
+  node->body = SeqStmt(
+      {MakeAttribute(nullptr, "tl.loop.annotations", dynamic, body, loop->loc)},
+      body->loc);
   return loop;
 }
 
 // Filter storage maps before renewing definitions. Each core retains only
 // references whose actual definitions survive extraction. Empty alias maps
 // remain present: their presence disables unproved physical storage reuse.
-class MetadataCleaner : public StmtExprMutator {
+class MetadataCleaner : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   MetadataCleaner(VarSet all, VarSet kept)
       : all_(std::move(all)), kept_(std::move(kept)) {}
 
@@ -139,11 +148,12 @@ private:
   bool UsesRemoved(const ffi::Any &value) const {
     bool removed = false;
     auto encoded = EncodeAnnotations(value);
-    VisitNativePostOrder(Evaluate(encoded.payload),
-                         [&](const ffi::ObjectRef &object) {
-                           if (const auto *var = object.as<VarObj>())
-                             removed |= all_.count(var) && !kept_.count(var);
-                         });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        Evaluate(encoded.payload),
+        [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+          removed |= all_.count(var) && !kept_.count(var);
+          return ffi::WalkResult::Advance();
+        });
     return removed;
   }
 
@@ -173,29 +183,34 @@ private:
       Expr value = ReadScheduledBinding(op).value;
       return Mutate(value, mode).ValueOrUnchanged(value);
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const EvaluateObj *op,
                                  InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (call && call->op.same_as(Op::Get("tl.annotation"))) {
-      auto fields = Fields(ReadNativeAnnotations(call));
+    if (IsAnnotationCall(call)) {
+      auto fields = Fields(ReadAnnotations(call));
       return fields.empty() ? Stmt(SeqStmt({}, op->loc))
-                            : MakeNativeAnnotation(fields, op->loc);
+                            : MakeAnnotation(fields, op->loc);
     }
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    auto attribute = ReadTaskAttribute(op);
+    if (IsAscendBlock(op)) {
+      SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
+      return MakeAscendBlock(AscendBlockName(op),
+                             Fields(AscendBlockAnnotations(op)), body, op->loc);
+    }
+    if (IsSemanticTask(op) || IsScheduleUnit(op))
+      return Mutate(op->body, mode).ValueOrUnchanged(op->body);
+    auto attribute = ReadSourceAttribute(op);
     if (!attribute)
-      return StmtExprMutator::Mutate_(op, mode);
+      return LayoutMapMutator::Mutate_(op, mode);
     SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
-    if (IsSemanticTaskKey(attribute->key) ||
-        attribute->key == attr::kScheduleUnit ||
-        ConsumedSchedulingKey(attribute->key))
+    if (ConsumedSchedulingKey(attribute->key))
       return body;
     ffi::Any node = attribute->node, value = attribute->value;
     if (attribute->key == "tl.loop.annotations" ||
@@ -210,11 +225,11 @@ private:
       if (attribute->key == kBufferAliasMap)
         ValidateBufferAliasMap(node.cast<BufferAliasMap>());
     }
-    return MakeNativeAttribute(node, attribute->key, value, body, op->loc);
+    return MakeAttribute(node, attribute->key, value, body, op->loc);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
-    For loop = StmtExprMutator::Mutate_(op, mode)
+    For loop = LayoutMapMutator::Mutate_(op, mode)
                    .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                    .as_or_throw<For>();
     loop.CopyOnWrite()->annotations = Fields(loop->annotations);
@@ -231,9 +246,9 @@ private:
   VarSet all_, kept_;
 };
 
-class MetadataRemapper : public StmtExprMutator {
+class MetadataRemapper : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
 
   ScheduleUnitMetadata Fields(const ScheduleUnitMetadata &fields) {
     auto encoded = EncodeAnnotations(fields);
@@ -245,7 +260,7 @@ public:
 
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
-    For loop = StmtExprMutator::Mutate_(op, mode)
+    For loop = LayoutMapMutator::Mutate_(op, mode)
                    .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                    .as_or_throw<For>();
     // Native For mutation leaves its static map untouched. Older producers
@@ -278,7 +293,7 @@ bool IsTransparentMetadata(const IRStructure *node) {
   if (!node->IsScope())
     return false;
   auto attribute =
-      ReadTaskAttribute(static_cast<const ScopeNode *>(node)->shell);
+      ReadSourceAttribute(static_cast<const ScopeNode *>(node)->shell);
   return attribute && attribute->key == "tl.loop.annotations";
 }
 
@@ -378,10 +393,10 @@ private:
   }
 };
 
-class SharedSSDefinitionRetirer : public StmtExprMutator {
+class SharedSSDefinitionRetirer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   explicit SharedSSDefinitionRetirer(VarSet variables)
       : variables_(std::move(variables)) {}
 
@@ -390,7 +405,7 @@ private:
                                     InplaceMode mode) final {
     if (value.as<Expr>())
       return ffi::Unchanged();
-    return StmtExprMutator::Mutate(value, mode);
+    return LayoutMapMutator::Mutate(value, mode);
   }
 
   ffi::UnchangedOr<Stmt> Mutate_(const BindObj *op, InplaceMode mode) final {
@@ -434,7 +449,7 @@ public:
     SeqStmt body = LowerList(scheduled_.tree, nullptr, kCoreUnassigned);
     // Renew a whole native definition region in one operation: types,
     // metadata operands, aliases and uses follow the corresponding fresh Var.
-    return RenewDef(tirx::Function({}, body))->body;
+    return tl::RenewDef(tirx::Function({}, body))->body;
   }
 
 private:
@@ -532,8 +547,7 @@ private:
       }
       return Bind(bind->var, value, bind->loc);
     }
-    return If(guard, NativeTaskAttribute::AsSequence(statement), std::nullopt,
-              statement->loc);
+    return If(guard, SeqStmt(statement), std::nullopt, statement->loc);
   }
 
   Stmt ApplyNodeGuards(const IRStructure *node, Stmt body) {
@@ -545,10 +559,10 @@ private:
       } else {
         const auto *attribute = static_cast<const AttributeGuard *>(it->get());
         Stmt header =
-            MakeNativeAttribute(attribute->node, attribute->key,
-                                attribute->value, SeqStmt({}), attribute->loc);
+            MakeAttribute(attribute->node, attribute->key, attribute->value,
+                          SeqStmt({}), attribute->loc);
         header = Remap(cleaner_->Mutate(header).ValueOrUnchanged(header));
-        if (auto retained = ReadTaskAttribute(header))
+        if (auto retained = ReadSourceAttribute(header))
           body = retained->WithBody(body);
       }
     }
@@ -628,14 +642,14 @@ private:
         else_case = LowerList(scope->else_children, nullptr, enclosed);
       return If(condition, then_case, else_case, branch->loc);
     }
-    auto attribute = ReadTaskAttribute(scope->shell);
+    auto attribute = ReadSourceAttribute(scope->shell);
     TVM_FFI_CHECK(attribute.has_value(), ValueError)
         << "Unknown scheduled lexical scope";
     Stmt header = attribute->WithBody(SeqStmt({}));
     header = cleaner_->Mutate(header).ValueOrUnchanged(header);
     header = Remap(header);
     SeqStmt body = LowerList(scope->children, clock, enclosed);
-    if (auto retained = ReadTaskAttribute(header))
+    if (auto retained = ReadSourceAttribute(header))
       return retained->WithBody(body);
     return body;
   }
@@ -699,8 +713,7 @@ private:
         For(physical, IntImm::Int64(0), trips + IntImm::Int64(span),
             IntImm::Int64(1), source->kind, body, annotations, source->loc));
     // A zero-trip source cannot execute speculative definitions in fill/drain.
-    return If(begin < end, NativeTaskAttribute::AsSequence(expanded),
-              std::nullopt, source->loc);
+    return If(begin < end, SeqStmt(expanded), std::nullopt, source->loc);
   }
 
   const ScheduledTIR &scheduled_;
@@ -723,18 +736,14 @@ bool HasCoreStream(const ScheduledTIR &scheduled, CoreMask target) {
 
 RegionStmt CoreBlock(ffi::String name, SeqStmt body,
                      ScheduleUnitMetadata annotations = {}) {
-  return MakeNativeAttribute(nullptr, "tl.sblock",
-                             ScheduleUnitMetadata{{"name", name},
-                                                  {"no_realize", true},
-                                                  {"annotations", annotations}},
-                             body, body->loc);
+  return MakeAscendBlock(name, annotations, body, body->loc);
 }
 
 // cthread names an AIV. An externally declared launch must enclose only the
 // VECTOR body; retaining it around CUBE would duplicate the cube stream.
-class SidRelocator : public StmtExprMutator {
+class SidRelocator : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
 
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
@@ -747,10 +756,10 @@ private:
       launches_.pop_back();
       return body;
     }
-    bool vector = NativeBlockName(op).value_or("") == "VECTOR";
+    bool vector = BlockNameAtSourceBoundary(op).value_or("") == "VECTOR";
     bool previous = inside_vector_;
     inside_vector_ |= vector;
-    RegionStmt region = StmtExprMutator::Mutate_(op, mode)
+    RegionStmt region = LayoutMapMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                             .as_or_throw<RegionStmt>();
     inside_vector_ = previous;
@@ -763,7 +772,7 @@ private:
       }
       // One outer launch may have enclosed several kernels. Their new launch
       // definitions must be fresh independently, including every sid use.
-      region.CopyOnWrite()->body = RenewDef(tirx::Function({}, body))->body;
+      region.CopyOnWrite()->body = tl::RenewDef(tirx::Function({}, body))->body;
     }
     return region;
   }
@@ -775,9 +784,9 @@ private:
 // Consume only tl.kernel carriers read by the shared kernel collector. A
 // nested launch starts its own metadata chain, and an already lowered root
 // ends the chain before the generated VECTOR execution annotation.
-class KernelVectorCountConsumer : public StmtExprMutator {
+class KernelVectorCountConsumer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
 
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
@@ -792,17 +801,17 @@ private:
     if (anchor)
       in_kernel_chain_ = true;
     reached_root_ = false;
-    RegionStmt region = StmtExprMutator::Mutate_(op, mode)
+    RegionStmt region = LayoutMapMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                             .as_or_throw<RegionStmt>();
     bool owns_root = reached_root_;
-    auto attribute = ReadTaskAttribute(region);
+    auto attribute = ReadSourceAttribute(region);
     if (in_kernel_chain_ && owns_root && attribute &&
         attribute->key == "tl.kernel") {
       auto fields = attribute->value.cast<ScheduleUnitMetadata>();
       fields.erase(kVectorCount);
-      region = MakeNativeAttribute(attribute->node, attribute->key, fields,
-                                   region->body, region->loc);
+      region = MakeAttribute(attribute->node, attribute->key, fields,
+                             region->body, region->loc);
     }
     in_kernel_chain_ = old_chain;
     reached_root_ = old_root || (!anchor && owns_root);
@@ -826,11 +835,11 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
     auto *scope = static_cast<ScopeNode *>(node.get());
     if (!IsTaskMetadataStatement(scope->shell))
       continue;
-    auto fields = ReadNativeAnnotations(
-        scope->shell.as<EvaluateObj>()->value.as<CallObj>());
+    auto fields =
+        ReadAnnotations(scope->shell.as<EvaluateObj>()->value.as<CallObj>());
     if (fields.count(kVectorCount)) {
       fields.erase(kVectorCount);
-      scope->shell = MakeNativeAnnotation(fields, scope->shell->loc);
+      scope->shell = MakeAnnotation(fields, scope->shell->loc);
     }
   }
   CoreMask vectors = VectorCoreMask(vector_count);
@@ -851,7 +860,15 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
                                    shared_ss.variables)
                        .Build();
     bool uses_sid =
-        UsesAnyVar(body, [&](const VarObj *var) { return var == sid.get(); });
+        ffi::StructuralWalk<ffi::WalkOrder::kPreOrder>(
+            body,
+            [&](const VarObj *var) -> ffi::Expected<ffi::WalkResult> {
+              return (var == sid.get())
+                         ? ffi::WalkResult::Interrupt(
+                               ffi::VisitInterrupt(ffi::GetRef<Var>(var)))
+                         : ffi::WalkResult::Skip();
+            })
+            .has_value();
     if (!context.outer_sid && (cube || uses_sid)) {
       auto launch =
           RegionStmt(launch_thread_op(),
@@ -864,7 +881,7 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
       annotations.Set(kVectorCount, IntImm::Int32(vector_count));
     streams.push_back(CoreBlock("VECTOR", body, annotations));
   }
-  auto root = ReadTaskAttribute(context.root).value();
+  auto root = ReadSourceAttribute(context.root).value();
   auto cleaner = ffi::make_object<MetadataCleaner>(VarSet(), VarSet());
   auto fields = cleaner->Fields(root.value.cast<ScheduleUnitMetadata>());
   if (auto annotations = fields.Get("annotations")) {
@@ -872,8 +889,8 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
     values.erase(kVectorCount);
     fields.Set("annotations", values);
   }
-  return MakeNativeAttribute(root.node, root.key, fields, SeqStmt(streams),
-                             context.root->loc);
+  return MakeAttribute(root.node, root.key, fields, SeqStmt(streams),
+                       context.root->loc);
 }
 
 } // namespace

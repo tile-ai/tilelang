@@ -9,7 +9,7 @@ import tilelang.ascend.language as T
 import tilelang.testing
 import tvm_tirx
 import tvm_ffi
-from tilelang.language._native import decl_buffer
+from tilelang.language._allocation import decl_buffer
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs, _make_cyclic_scalar_program
 
 

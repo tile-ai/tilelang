@@ -12,6 +12,15 @@
 
 namespace tvm::tl {
 
+// Layout and pipeline domains use end - begin only for unit-step loops.
+// Keep this precondition explicit rather than interpreting every native For
+// as a dense iteration domain.
+inline PrimExpr LoopExtent(const ForObj *loop) {
+  TVM_FFI_CHECK(prim::IsOne(loop->step), ValueError)
+      << "TileLang parallel layout lowering requires a unit-step loop";
+  return loop->end - loop->begin;
+}
+
 // Native For always tests var < end. An increasing update justifies a
 // half-open domain only when that update cannot wrap before reaching end.
 inline bool CanUseLoopBounds(const PrimExpr &begin, const PrimExpr &end,

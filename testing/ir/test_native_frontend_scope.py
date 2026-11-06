@@ -1,5 +1,7 @@
 """Lexical allocation scopes survive storage planning and real CPU codegen."""
 
+from tilelang.language import _annotation_codec
+
 import numpy as np
 import pytest
 import tvm_ffi
@@ -8,20 +10,20 @@ from tvm_tirx import ir, tirx
 
 import tilelang
 import tilelang.cpu.language as T
-from tilelang.language import _native
+
 from tilelang.testing.packed import compile_packed_function
 
 
 def scope_function():
     @T.prim_func
     def main(A: T.Tensor((8,), "float32"), B: T.Tensor((8,), "float32")):
-        with _native.attr(None, "lexical_alloc_scope", 1):
+        with _annotation_codec.attr(None, "lexical_alloc_scope", 1):
             scratch = T.alloc_local((8,), "float32")
             for i in T.serial(8):
                 scratch[i] = A[i] + 1.0
             for i in T.serial(8):
                 B[i] = scratch[i]
-        with _native.attr(None, "lexical_alloc_scope", 1):
+        with _annotation_codec.attr(None, "lexical_alloc_scope", 1):
             scratch = T.alloc_local((8,), "float32")
             for i in T.serial(8):
                 scratch[i] = B[i] * 2.0

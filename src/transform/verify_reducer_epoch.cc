@@ -8,8 +8,8 @@
  * target TensorLoad of reducer_update is a descriptor; every other reducer
  * load, store, pointer conversion, alias, or unsupported use is rejected.
  */
-#include "common/native_reducer_utils.h"
-#include "op/native_intrinsic.h"
+#include "ir/annotations.h"
+#include "reducer_metadata.h"
 
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -23,7 +23,7 @@ namespace {
 using namespace tirx;
 using namespace prim;
 using namespace ffi;
-using reducer_native::Metadata;
+using reducer::Metadata;
 
 enum class EpochState { kAllocated, kActive, kFinalized };
 
@@ -33,7 +33,7 @@ public:
   using StmtExprVisitor::Visit_;
 
   void Run(const tirx::Function &function) {
-    metadata_ = reducer_native::MetadataIndex::Collect(function);
+    metadata_ = reducer::MetadataIndex::Collect(function);
     for (const auto &[tensor, allocation] : metadata_.allocations) {
       if (!IsReducerV2Buffer(tensor))
         continue;
@@ -81,11 +81,11 @@ public:
 
   Optional<VisitInterrupt> Visit_(const RegionStmtObj *op) final {
     if (op->op->name == "tl.attr") {
-      auto fields = ReadNativeAnnotations(op);
+      auto fields = ReadAnnotations(op);
       auto key = fields.at("key").as_or_throw<String>();
       if (key == "tl.kernel")
-        VisitMetadata(reducer_native::StringMap(fields.at("value")));
-      else if (!reducer_native::IsReducerMetadataKey(key))
+        VisitMetadata(reducer::StringMap(fields.at("value")));
+      else if (!reducer::IsReducerMetadataKey(key))
         Visit(fields.at("value"));
       Visit(op->body);
       return std::nullopt;
@@ -128,14 +128,14 @@ public:
   }
 
   Optional<VisitInterrupt> Visit_(const CallObj *op) final {
-    if (reducer_native::IsMetadataCall(op)) {
-      VisitMetadata(ReadNativeAnnotations(op));
+    if (reducer::IsMetadataCall(op)) {
+      VisitMetadata(ReadAnnotations(op));
       return std::nullopt;
     }
     if (op->op.same_as(ReducerInitOp::Get())) {
       const auto args = DecodeTileOpArguments(op).operands;
       TVM_FFI_CHECK(args.size() == 1 || args.size() == 2, ValueError);
-      auto tensor = reducer_native::RegionTensor(args[0]);
+      auto tensor = tl::RegionTensor(NormalizeToTensorRegion(args[0]));
       auto &state = RequireReducer(tensor, "reducer_init");
       TVM_FFI_CHECK(parallel_depth_ == 0, ValueError)
           << "T.reducer_init may not appear inside a T.Parallel loop";
@@ -170,8 +170,8 @@ public:
     if (op->op.same_as(FinalizeReducerV2Op::Get())) {
       const auto args = DecodeTileOpArguments(op).operands;
       TVM_FFI_CHECK_EQ(args.size(), 2U, ValueError);
-      auto tensor = reducer_native::RegionTensor(args[0]);
-      auto destination = reducer_native::RegionTensor(args[1]);
+      auto tensor = tl::RegionTensor(NormalizeToTensorRegion(args[0]));
+      auto destination = tl::RegionTensor(NormalizeToTensorRegion(args[1]));
       auto &state = RequireReducer(tensor, "finalize_reducer");
       TVM_FFI_CHECK(parallel_depth_ == 0, ValueError)
           << "T.finalize_reducer may not appear inside a T.Parallel loop";
@@ -221,7 +221,7 @@ private:
 
   void VisitMetadata(const Metadata &metadata) {
     for (const auto &[key, value] : metadata)
-      if (!reducer_native::IsReducerMetadataKey(key))
+      if (!reducer::IsReducerMetadataKey(key))
         Visit(value);
   }
 
@@ -243,7 +243,7 @@ private:
            "close in the same loop iteration/branch or a nested conditional";
   }
 
-  reducer_native::MetadataIndex metadata_;
+  reducer::MetadataIndex metadata_;
   std::unordered_map<const VarObj *, EpochState> states_;
   std::unordered_map<const VarObj *, std::vector<Frame>> epoch_context_;
   std::vector<Frame> context_;

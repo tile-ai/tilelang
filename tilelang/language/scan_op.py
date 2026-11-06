@@ -1,13 +1,18 @@
 """Scan operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 
 from tilelang._typing import BufferLikeType
 from tilelang.language.common import alloc_shared, copy, macro
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import _get_buffer, is_fragment, prim_expr_equal, retrieve_shape, to_tile_region
-from tilelang.language import _native as tirx
+
 
 _CUMSUM_OP_KEY = "tl.tileop.cumsum"
 _CUMMAX_OP_KEY = "tl.tileop.cummax"
@@ -24,15 +29,15 @@ def _scan_fragment(
 ) -> None:
     src_shape = retrieve_shape(src)
     src_buffer = _get_buffer(src)
-    if isinstance(src, tirx.Buffer):
-        dtype = _native.dtype_of(src)
+    if _tensor_spec.is_buffer_like(src):
+        dtype = _construction.dtype_of(src)
     else:
-        dtype = _native.dtype_of(src_buffer)
+        dtype = _construction.dtype_of(src_buffer)
     scan_smem = alloc_shared(src_shape, dtype, "shared.dyn")
     copy(src, scan_smem)
-    tirx.call_intrin(
+    _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get(op_key),
+        _ir.Op.get(op_key),
         to_tile_region(scan_smem, access_type="r"),
         to_tile_region(scan_smem, access_type="w"),
         dim,
@@ -92,7 +97,7 @@ def cumsum(
     dim: int = 0,
     reverse: bool = False,
     annotations: dict | None = None,
-) -> tirx.PrimExpr | None:
+) -> _ir.Expr | None:
     """
     Compute the cumulative sum of `src` along `dim`, writing results to `dst`.
 
@@ -142,9 +147,9 @@ def cumsum(
         cumsum_fragment(src, dst, dim, reverse, annotations)
         return
 
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get(_CUMSUM_OP_KEY),
+        _ir.Op.get(_CUMSUM_OP_KEY),
         to_tile_region(src, access_type="r"),
         to_tile_region(dst, access_type="w"),
         dim,
@@ -179,7 +184,7 @@ def cummax(
     dim: int = 0,
     reverse: bool = False,
     annotations: dict | None = None,
-) -> tirx.PrimExpr | None:
+) -> _ir.Expr | None:
     """
     Compute the cumulative maximum of `src` along `dim`, writing results to `dst`.
 
@@ -195,9 +200,9 @@ def cummax(
         cummax_fragment(src, dst, dim, reverse, annotations)
         return
 
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get(_CUMMAX_OP_KEY),
+        _ir.Op.get(_CUMMAX_OP_KEY),
         to_tile_region(src, access_type="r"),
         to_tile_region(dst, access_type="w"),
         dim,

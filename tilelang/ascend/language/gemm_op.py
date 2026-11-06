@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+
 import tilelang.language as T
 import tvm_ffi
 from tilelang._typing import BufferLikeType
@@ -10,14 +14,14 @@ from tilelang.language.utils import _normalize_annotations, buffer_region_to_til
 from tilelang.tileop.base import GemmWarpPolicy
 from tilelang.utils.language import prim_expr_equal, retrieve_shape, to_buffer_region
 from tilelang._analyzer import create_analyzer
-from tilelang.language import _native as tirx
+
 
 __all__ = ["gemm", "gemm_blockscaled"]
 
 
 def _legalize_argument(arg):
     """Recover a macro operand while retaining its selected tensor region."""
-    while isinstance(arg, tirx.Var) and not isinstance(arg, tirx.Buffer) and T.has_let_value(arg):
+    while isinstance(arg, _ir.Var) and not _tensor_spec.is_buffer_like(arg) and T.has_let_value(arg):
         arg = T.get_let_value(arg)
     return arg
 
@@ -60,7 +64,7 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
     node_M, node_N = C_region.source.ty.shape[-2:]
     node_K = A_region.source.ty.shape[-2] if transpose_A else A_region.source.ty.shape[-1]
     for name, dim in (("M", node_M), ("N", node_N), ("K", node_K)):
-        if not isinstance(dim, tirx.IntImm):
+        if not isinstance(dim, _ir.IntImm):
             raise ValueError(f"T.gemm requires static tile dimensions, but {name} is symbolic: {dim}")
 
     C_coords = [r.begin for r in C_region.region[-2:]]
@@ -68,9 +72,9 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
     B_arg = buffer_region_to_tile_region(B_region, "r", list(B_shape))
     C_arg = buffer_region_to_tile_region(C_region, "w" if isinstance(clear_accum, bool) and clear_accum else "rw", list(C_shape))
 
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.gemm"),
+        _ir.Op.get("tl.tileop.gemm"),
         A_arg,
         B_arg,
         C_arg,
@@ -81,7 +85,7 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
         node_K,
         policy,
         clear_accum,
-        tirx.const(0, dtype="int32"),  # mbar placeholder, ignored unless BufferLoad
+        _ir.const(0, dtype="int32"),  # mbar placeholder, ignored unless BufferLoad
         C_coords[-2],
         C_coords[-1],
         annotations=annotations,
@@ -122,8 +126,8 @@ def gemm_blockscaled(
     transpose_A: bool = False,
     transpose_B: bool = False,
     clear_accum: bool = False,
-    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
-) -> tirx.PrimExpr:
+    unit_flag_ctrl: int | _ir.Expr | None = None,
+) -> _ir.Expr:
     """Ascend block-scaled MXFP8 GEMM, shadowing the common ``T.gemm_blockscaled``.
 
     ``SFA``/``SFB`` are required. For L1 A/B inputs they are the L1
@@ -161,13 +165,13 @@ def gemm_blockscaled(
     annotations = dict(tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[operand_count], call.attrs["annotation_schema"]))
     annotations["sf_a_granularity_k"] = 32
     annotations["sf_b_granularity_k"] = 32
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.gemm_blockscaled"),
+        _ir.Op.get("tl.tileop.gemm_blockscaled"),
         *call.args[:operand_count],
         sfa_arg,
         sfb_arg,
-        tirx.const(0, dtype="int32"),
+        _ir.const(0, dtype="int32"),
         annotations=annotations,
         span=call.loc,
     )
@@ -181,9 +185,9 @@ def gemm(
     transpose_B: bool = False,
     policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
-    unit_flag_ctrl: int | tirx.PrimExpr | None = None,
+    unit_flag_ctrl: int | _ir.Expr | None = None,
     annotations: dict | None = None,
-) -> tirx.PrimExpr:
+) -> _ir.Expr:
     """TileLang GEMM operator, with the Ascend unit-flag hint.
 
     Same semantics as the common :func:`tilelang.language.gemm_op.gemm`.

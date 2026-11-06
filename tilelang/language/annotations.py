@@ -4,10 +4,13 @@ from collections.abc import Callable
 
 from tilelang.layout import Fragment, Layout, PartialFragment
 from tilelang.utils.language import is_fragment, is_reducer
-from tilelang.language._native import FloatImm, IntImm, tvm_tuple
-from tilelang.language._native import attr
-from tilelang.language._native import sblock_attr
-from tilelang.language._native import _source_sblock_attr, tensor_storage_source
+from tvm_tirx.ir import FloatImm
+from tvm_tirx.ir import IntImm
+from tilelang.language._construction import tvm_tuple
+from tilelang.language._annotation_codec import attr
+from tilelang.language._source_scope import sblock_attr
+from tilelang.language._source_scope import _source_sblock_attr
+from tilelang.language._tensor_spec import tensor_storage_source
 from tvm_tirx.tirx import is_tensor_var
 
 __all__ = [
@@ -45,7 +48,11 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
 
 
 def annotate_layout(layout_map: dict):
-    """Annotate the layout of the buffer."""
+    """Declare tensor layouts for the nearest source block or Kernel.
+
+    The compiler retains TensorVar/Layout identities in a typed layout_map
+    declaration; declaration conflicts still follow source storage identity.
+    """
     values = []
     for buffer, layout in layout_map.items():
         if is_reducer(buffer):

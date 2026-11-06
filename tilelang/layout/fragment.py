@@ -20,6 +20,11 @@ class Fragment(Layout):
     # Disable the linter warning about not calling super().__init__()
     # because this object is created via TVM's FFI constructor mechanism.
     # pylint: disable=super-init-not-called
+    @staticmethod
+    def from_mapping(shape, mapping, replicate=1, thread_range=None):
+        """Construct from a bound IR coordinate mapping, retaining captures."""
+        return _ffi_api.Fragment_from_mapping(shape, mapping, replicate, thread_range)
+
     def __init__(self, shape, forward_fn=None, forward_thread_fn=None, replicate=1, forward_index_fn=None):
         """
         Initialize the Fragment with iteration variables and optional thread replication.

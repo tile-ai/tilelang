@@ -24,9 +24,11 @@
 
 #pragma once
 
-#include "native_storage.h"
-#include "native_task_ir.h"
+#include "ascend/analysis/storage.h"
+#include "ascend/ir/task.h"
+#include "ascend/transform/source_scopes.h"
 #include "transform/common/constr_visitor.h"
+#include <tvm/tirx/op/region.h>
 
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -45,7 +47,7 @@ struct TilelangKernelContext {
   // Raw launch hints and materialized tl.kernel fields describe the same
   // contract. They are read here and remain on their original native carrier.
   ScheduleUnitMetadata kernel_annotations;
-  NativeParameterAliasContract parameter_alias_contract;
+  ParameterAliasContract parameter_alias_contract;
 };
 
 using TilelangKernelRewrite =
@@ -54,7 +56,7 @@ using TilelangKernelRewrite =
 namespace kernel_rewriter_detail {
 
 inline bool IsRoot(const RegionStmtObj *op) {
-  auto name = NativeBlockName(op);
+  auto name = SourceBlockName(op);
   return name && name.value() == "tilelang_root";
 }
 
@@ -68,7 +70,7 @@ inline bool IsKernelBoundary(const RegionStmtObj *op) {
   if (op->op->name == "tl.launch_kernel" ||
       op->op.same_as(tirx::launch_thread_op()) || IsRoot(op))
     return true;
-  auto attribute = ReadTaskAttribute(op);
+  auto attribute = ReadSourceAttribute(op);
   return attribute && attribute->key == "tl.kernel";
 }
 
@@ -110,7 +112,7 @@ public:
           annotations_.Set(key.cast<ffi::String>(), value);
       }
     }
-    if (auto attribute = ReadTaskAttribute(op);
+    if (auto attribute = ReadSourceAttribute(op);
         in_kernel_chain_ && attribute && attribute->key == "tl.kernel") {
       for (const auto &[key, value] :
            attribute->value.cast<ScheduleUnitMetadata>())
@@ -149,7 +151,7 @@ public:
       RegionStmt root =
           pending_existing_
               ? ffi::GetRef<RegionStmt>(pending_)
-              : MakeNativeAttribute(
+              : MakeAttribute(
                     nullptr, "tl.sblock",
                     ScheduleUnitMetadata{{"name", ffi::String("tilelang_root")},
                                          {"no_realize", true}},
@@ -214,11 +216,14 @@ RewriteTilelangKernels(tirx::Function function, const char *pass_name,
   TVM_FFI_CHECK((!function->GetAttr(tvm::attr::kDeclaration).value_or(false)),
                 ValueError)
       << pass_name << " requires a function body";
+  SeqStmt normalized = NormalizeTaskScopes(function->body);
+  if (!normalized.same_as(function->body))
+    function.CopyOnWrite()->body = std::move(normalized);
   auto collector = ffi::make_object<kernel_rewriter_detail::ContextCollector>();
   collector->Visit(function->body);
   for (auto &kernel : collector->kernels)
     kernel.context.parameter_alias_contract =
-        CollectNativeParameterAliasContract(function,
+        CollectAscendParameterAliasContract(function,
                                             kernel.context.kernel_annotations);
   if (require_kernel)
     TVM_FFI_CHECK(!collector->kernels.empty(), ValueError)

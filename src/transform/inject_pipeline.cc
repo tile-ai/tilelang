@@ -3,18 +3,22 @@
  * \brief Transform annotated loops into pipelined one that parallelize
  * producers and consumers.
  */
+#include "ascend/ir/block.h"
 #include "backend/common/target_utils.h"
 #include "common/bind_utils.h"
 #include "common/pipeline_access.h"
 #include "common/pipeline_tensor.h"
 #include "common/pipeline_utils.h"
+#include "cuda/op/builtin.h"
 #include "ir/analyzer.h"
 #include "ir/lexical_scope.h"
+#include "ir/loop_math.h"
+#include "ir/stmt_functor.h"
+#include "layout/expr_utils.h"
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/copy.h"
 #include "op/gemm.h"
-#include "op/native_utils.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "span_utils.h"
@@ -24,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
 #include <tvm/ir/stmt.h>
@@ -71,24 +76,24 @@ namespace {
 String ScopeKey(const RegionStmtObj *region) {
   if (!region || region->op->name != "tl.attr")
     return "";
-  return ReadNativeAnnotations(region).at("key").cast<String>();
+  return ReadAnnotations(region).at("key").cast<String>();
 }
 Any ScopeNode(const RegionStmtObj *region) {
-  return ReadNativeAnnotations(region).at("node");
+  return ReadAnnotations(region).at("node");
 }
 PrimExpr ScopeValue(const RegionStmtObj *region) {
-  Any value = ReadNativeAnnotations(region).at("value");
+  Any value = ReadAnnotations(region).at("value");
   if (auto expr = value.as<PrimExpr>())
     return *expr;
   return IntImm::Int32(GetIntegerAnnotation(value));
 }
 RegionStmt ScopeStmt(Any node, String key, Any value, Stmt body,
                      Location loc = UnknownLoc()) {
-  return MakeNativeAttribute(node, key, value, SeqStmt(body), loc);
+  return MakeAttribute(node, key, value, SeqStmt(body), loc);
 }
 bool TransparentScope(const RegionStmtObj *region) {
   return region && region->body_params.empty() && region->result_vars.empty() &&
-         (region->op->name == "tl.attr" ||
+         (region->op->name == "tl.attr" || ascend::IsAscendBlock(region) ||
           region->op.same_as(tl::lexical_scope_op()));
 }
 Stmt WithScopeBody(const RegionStmtObj *region, Stmt body) {
@@ -225,10 +230,10 @@ ExpandAnnotatedLayoutForMultiVersionedBuffer(const Layout &layout,
   return layout->Expand(leading_shape);
 }
 
-class SimtProducerAnnotator : public StmtExprMutator {
+class SimtProducerAnnotator : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   explicit SimtProducerAnnotator(Optional<Target> target)
       : target_(std::move(target)) {}
   static Stmt Annotate(const Stmt &stmt,
@@ -244,7 +249,7 @@ public:
                annotations, op->loc);
   }
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-    auto call = StmtExprMutator::Mutate_(op, mode)
+    auto call = LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(GetRef<Call>(op))
                     .as_or_throw<Call>();
     if (!call->op.same_as(Op::Get("tl.tileop.copy")))
@@ -263,10 +268,10 @@ private:
   Optional<Target> target_;
 };
 
-class TileOpMbarPhaseAnnotator : public StmtExprMutator {
+class TileOpMbarPhaseAnnotator : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   explicit TileOpMbarPhaseAnnotator(PrimExpr phase)
       : phase_(std::move(phase)) {}
   static Stmt Annotate(const Stmt &stmt, PrimExpr phase) {
@@ -274,7 +279,7 @@ public:
     return mutator->Mutate(stmt).ValueOrUnchanged(stmt);
   }
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-    auto call = StmtExprMutator::Mutate_(op, mode)
+    auto call = LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(GetRef<Call>(op))
                     .as_or_throw<Call>();
     auto tile = ParseOperator(call);
@@ -297,10 +302,10 @@ private:
   PrimExpr phase_;
 };
 
-class AsyncCommitWaitAttrLowerer : public StmtExprMutator {
+class AsyncCommitWaitAttrLowerer : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   static Stmt Lower(const Stmt &stmt) {
     auto mutator = make_object<AsyncCommitWaitAttrLowerer>();
     return mutator->Mutate(stmt).ValueOrUnchanged(stmt);
@@ -331,7 +336,7 @@ public:
     }
     if (key == "async_wait_inflight_count")
       return Mutate(op->body, mode).ValueOrUnchanged(op->body);
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 };
 
@@ -363,11 +368,15 @@ PipelineStage MakeBlock(const Stmt &body, const PipelineMemoryAnalysis *memory,
   stage->body = body;
   stage->loc = body->loc;
   if (const auto *region = SingleStatement(body).as<RegionStmtObj>();
-      region && ScopeKey(region) == "tl.sblock") {
+      ascend::IsAscendBlock(region)) {
+    stage->scope = GetRef<RegionStmt>(region);
+    stage->body = SingleStatement(region->body);
+    stage->name_hint = ascend::AscendBlockName(region);
+  } else if (region && ScopeKey(region) == "tl.sblock") {
     stage->scope = GetRef<RegionStmt>(region);
     stage->body = SingleStatement(region->body);
     auto metadata =
-        ReadNativeAnnotations(region).at("value").cast<Map<String, Any>>();
+        ReadAnnotations(region).at("value").cast<Map<String, Any>>();
     stage->name_hint =
         metadata.Get("name").value_or(Any(String(""))).cast<String>();
   }
@@ -417,19 +426,21 @@ Array<TensorVar> CollectUsedPipelineBuffers(
 
 bool ContainsPipelineAsyncControlAttrs(const Stmt &stmt) {
   bool found = false;
-  VisitNativePostOrder(stmt, [&](const ObjectRef &obj) {
-    if (found) {
-      return;
-    }
-    if (const auto *attr = obj.as<RegionStmtObj>()) {
-      if (ScopeKey(attr) == "async_commit_queue_scope" ||
-          ScopeKey(attr) == "async_wait_queue_scope" ||
-          ScopeKey(attr) == "async_wait_inflight_count") {
-        found = true;
-        return;
-      }
-    }
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      stmt, [&](const ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+        if (found) {
+          return ffi::WalkResult::Advance();
+        }
+        if (const auto *attr = obj.as<RegionStmtObj>()) {
+          if (ScopeKey(attr) == "async_commit_queue_scope" ||
+              ScopeKey(attr) == "async_wait_queue_scope" ||
+              ScopeKey(attr) == "async_wait_inflight_count") {
+            found = true;
+            return ffi::WalkResult::Advance();
+          }
+        }
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -492,14 +503,14 @@ void BuildDependencyGraph(const Array<PipelineStage> &blocks,
  *        tl.tileop.tma_copy with barrier and emit_arrive annotations.
  */
 
-class CopyToTmaCopyRewriter : public StmtExprMutator {
+class CopyToTmaCopyRewriter : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
   CopyToTmaCopyRewriter(TensorVar barrier, PrimExpr id, bool arrive)
       : barrier_(std::move(barrier)), id_(std::move(id)), arrive_(arrive) {}
   UnchangedOr<Expr> Mutate_(const CallObj *op, InplaceMode mode) final {
-    auto call = StmtExprMutator::Mutate_(op, mode)
+    auto call = LayoutMapMutator::Mutate_(op, mode)
                     .ValueOrUnchanged(GetRef<Call>(op))
                     .as_or_throw<Call>();
     auto name = call->op.as<Op>();
@@ -537,17 +548,20 @@ ExpandPipelineBarriers(Array<PipelineStage> &stages, PipelineInfo &info,
   TensorSet local(local_allocs.begin(), local_allocs.end()), arrived,
       referenced;
   for (const auto &stage : stages) {
-    VisitNativePostOrder(stage->body, [&](const ObjectRef &obj) {
-      if (auto tensor = obj.as<TensorVar>();
-          tensor && (tensor->scope().name() == "shared.barrier" ||
-                     tensor->scope().name() == "shared.cluster_barrier"))
-        referenced.insert(*tensor);
-      if (const auto *call = obj.as<CallObj>();
-          call && call->op.same_as(Op::Get("tl.ptx_arrive_barrier")) &&
-          !call->args.empty())
-        if (const auto *load = call->args[0].as<TensorLoadObj>())
-          arrived.insert(load->source.as_or_throw<TensorVar>());
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stage->body,
+        [&](const ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+          if (auto tensor = obj.as<TensorVar>();
+              tensor && (tensor->scope().name() == "shared.barrier" ||
+                         tensor->scope().name() == "shared.cluster_barrier"))
+            referenced.insert(*tensor);
+          if (const auto *call = obj.as<CallObj>();
+              call && call->op.same_as(tl::ptx_arrive_barrier()) &&
+              !call->args.empty())
+            if (const auto *load = call->args[0].as<TensorLoadObj>())
+              arrived.insert(load->source.as_or_throw<TensorVar>());
+          return ffi::WalkResult::Advance();
+        });
   }
   Map<TensorVar, TensorVar> replacements;
   for (const auto &tensor : referenced) {
@@ -871,7 +885,12 @@ private:
     Stmt bind = Bind(binding.var, binding.value, binding.loc);
     bind = PipelineBodyRewriter(memory_, buffer_remap_, pipeline_loop_,
                                 max_stage_ != 1, target_)(bind);
-    bind = SubstituteLoopVars(bind, {{pipeline_loop_->var, access_index}});
+    bind = tirx::SubstituteWithDataTypeLegalization(
+        bind,
+        [values = ffi::Map<Var, PrimExpr>{{pipeline_loop_->var, access_index}}](
+            const Var &var) -> ffi::Optional<PrimExpr> {
+          return values.Get(var);
+        });
     return bind;
   }
 
@@ -1323,45 +1342,50 @@ private:
 
   bool ContainsAsyncSyncScopes(const Stmt &stmt) const {
     bool found = false;
-    VisitNativePostOrder(stmt, [&](const ObjectRef &obj) {
-      if (found) {
-        return;
-      }
-      if (const auto *attr = obj.as<RegionStmtObj>()) {
-        if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitQueueScope(attr)) {
-          found = true;
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+          if (found) {
+            return ffi::WalkResult::Advance();
+          }
+          if (const auto *attr = obj.as<RegionStmtObj>()) {
+            if (IsAsyncCommitQueueScope(attr) || IsAsyncWaitQueueScope(attr)) {
+              found = true;
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
     return found;
   }
 
   bool ContainsAsyncCommitScopes(const Stmt &stmt) const {
     bool found = false;
-    VisitNativePostOrder(stmt, [&](const ObjectRef &obj) {
-      if (found) {
-        return;
-      }
-      if (const auto *attr = obj.as<RegionStmtObj>()) {
-        if (IsAsyncCommitQueueScope(attr)) {
-          found = true;
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const ObjectRef &obj) -> ffi::Expected<ffi::WalkResult> {
+          if (found) {
+            return ffi::WalkResult::Advance();
+          }
+          if (const auto *attr = obj.as<RegionStmtObj>()) {
+            if (IsAsyncCommitQueueScope(attr)) {
+              found = true;
+            }
+          }
+          return ffi::WalkResult::Advance();
+        });
     return found;
   }
 
   AsyncSyncSummary SummarizeAsyncSyncScopes(const Stmt &stmt) const {
     AsyncSyncSummary summary;
-    VisitNativePostOrder(stmt, [&](const ObjectRef &obj) {
-      if (const auto *attr = obj.as<RegionStmtObj>()) {
-        if (IsAsyncCommitQueueScope(attr)) {
-          ++summary.commit;
-        } else if (IsAsyncWaitQueueScope(attr)) {
-          ++summary.wait;
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const RegionStmtObj *attr) -> ffi::Expected<ffi::WalkResult> {
+          if (IsAsyncCommitQueueScope(attr)) {
+            ++summary.commit;
+          } else if (IsAsyncWaitQueueScope(attr)) {
+            ++summary.wait;
+          }
+
+          return ffi::WalkResult::Advance();
+        });
     return summary;
   }
 
@@ -1762,7 +1786,7 @@ private:
                                                     pre_outstanding_lb);
   }
 
-  class AsyncPipelineLoopWaitRelaxer : public StmtExprMutator {
+  class AsyncPipelineLoopWaitRelaxer : public LayoutMapMutator {
   public:
     explicit AsyncPipelineLoopWaitRelaxer(const PipelineRewriter *rewriter)
         : rewriter_(rewriter) {}
@@ -2257,7 +2281,12 @@ private:
       //  [pipeline_loop_->begin, extent).
       if (!is_unit_loop) {
         PrimVar loop_iter = new_loop_var.as_or_throw<PrimVar>();
-        inbound = SubstituteLoopVars(inbound, {{loop_iter, loop_iter + delta}});
+        inbound = tirx::SubstituteWithDataTypeLegalization(
+            inbound,
+            [values = ffi::Map<Var, PrimExpr>{{loop_iter, loop_iter + delta}}](
+                const Var &var) -> ffi::Optional<PrimExpr> {
+              return values.Get(var);
+            });
       }
       inbound = ana_normalized->Simplify(inbound);
       if (IsZero(inbound)) {
@@ -2265,8 +2294,13 @@ private:
       }
       new_block = RemakeStage(
           new_block,
-          SubstituteLoopVars(new_block->body,
-                             {{pipeline_loop_->var, normalized_access_index}}),
+          tl::SubstituteWithDataTypeLegalization(
+              new_block->body,
+              [values = ffi::Map<Var, PrimExpr>{{pipeline_loop_->var,
+                                                 normalized_access_index}}](
+                  const Var &var) -> ffi::Optional<PrimExpr> {
+                return values.Get(var);
+              }),
           memory_, target_);
 
       Stmt rewritten_stmt = ReifyStage(new_block, inbound);
@@ -2437,10 +2471,10 @@ RewritePipeline(const PipelineMemoryAnalysis *memory,
  * accesses. Update buffer regions and annotated layouts to match the
  * allocation.
  */
-class PipelineInjector : public StmtExprMutator {
+class PipelineInjector : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate;
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate;
+  using LayoutMapMutator::Mutate_;
 
   explicit PipelineInjector(const tirx::Function &function)
       : memory_(function),
@@ -2670,7 +2704,7 @@ private:
 
   UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
     // Step 1: Recursively rewrite the children first.
-    For for_node = StmtExprMutator::Mutate_(op, mode)
+    For for_node = LayoutMapMutator::Mutate_(op, mode)
                        .ValueOrUnchanged(GetRef<For>(op))
                        .as_or_throw<For>();
     if (!HasPipelineAnnotation(op)) {
@@ -3012,7 +3046,7 @@ private:
       Array<PrimExpr> counts;
       for (int64_t i = 0; i < *slots; ++i)
         counts.push_back(IntImm::Int32(1));
-      Stmt annotation = MakeNativeAnnotation(Map<String, Any>{
+      Stmt annotation = MakeAnnotation(Map<String, Any>{
           {"barrier_init", Map<Var, Array<PrimExpr>>{{barrier, counts}}}});
       // The allocated barrier must be in scope before metadata uses it.
       auto insert = [&](const SeqStmt &body) {

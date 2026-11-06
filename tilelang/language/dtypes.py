@@ -1,11 +1,12 @@
-from tilelang.language import _native
+from tilelang.language import _construction
+
 import tvm_tirx
 from tvm_tirx import ir
 import functools
 import torch
 import tvm_ffi
 from typing import Generic, TypeVar, TYPE_CHECKING
-from tilelang.language import _native as tirx
+
 from tvm_tirx.ir import prim as _prim
 import numpy as np
 from tilelang import logger
@@ -152,7 +153,7 @@ _STR_TO_TVM_DTYPE_CALL = {
 int_ = int
 
 
-def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
+def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> ir.Var:
     """Construct a native scalar/vector value using the TileLang dtype spelling."""
     if len(args) > 1:
         return _prim.Shuffle(list(args), list(range(len(args))))
@@ -168,7 +169,7 @@ def __dtype_call__(self: dtype, *args, is_size_var: bool = False) -> tirx.Var:
     if isinstance(expr, int_):
         return tvm_tirx.ir.const(expr, self)
     expr = _prim.convert(expr)
-    if isinstance(expr, tvm_tirx.ir.Expr) and tirx.dtype_of(expr) == self:
+    if isinstance(expr, tvm_tirx.ir.Expr) and _construction.dtype_of(expr) == self:
         return expr
     if not ir.is_prim_expr(expr):
         raise TypeError(f"Convert to datatype `{self}` expects a primitive expression")
@@ -344,7 +345,7 @@ dtype.is_float4 = __dtype_is_float4__
 
 def get_tvm_dtype(value: AnyDType) -> dtype:
     if isinstance(value, ir.PrimType):
-        value = _native.dtype_of(value)
+        value = _construction.dtype_of(value)
     if isinstance(value, dtype):
         return value
     return dtype(value)

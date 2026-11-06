@@ -41,8 +41,7 @@ def tileop(name, *operands, metadata=None):
 
 
 def annotation(values):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")(values)
-    return ir.Evaluate(ir.Call("tl.annotation", [payload], attrs={"schema_version": 1, "annotation_schema": schema}))
+    return tvm_ffi.get_global_func("tl.MakeAnnotation")(values, ir.UnknownLoc())
 
 
 def native_function(params, body, target=None):
@@ -71,7 +70,7 @@ def run_numeric(function, arrays, name):
         directory = Path(artifact_dir)
         directory.mkdir(parents=True, exist_ok=True)
         (directory / (name + ".json")).write_text(ir.save_json(function))
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(ir.IRModule({"main": function}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": function}))
     executable = compile_packed_function(module, c_codegen="compute")
     args = [tvm_tirx.runtime.tensor(x) if isinstance(x, np.ndarray) else x for x in arrays]
     executable(*args)

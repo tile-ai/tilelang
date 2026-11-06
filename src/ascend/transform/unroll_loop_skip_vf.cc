@@ -21,11 +21,13 @@
  * \file unroll_loop_skip_vf.cc
  * \brief Expand explicit native loops while preserving Ascend VF bodies.
  */
+#include "ascend/ir/block.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
+#include "ir/loop_annotations.h"
 #include "ir/loop_math.h"
-#include "native_vf_utils.h"
+#include "ir/stmt_functor.h"
 #include "op/builtin.h"
-#include "transform/common/native_layout_utils.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -59,23 +61,24 @@ public:
   }
 };
 
-class ExplicitLoopUnroller : public StmtExprMutator {
+class ExplicitLoopUnroller : public LayoutMapMutator {
 public:
-  using StmtExprMutator::Mutate_;
+  using LayoutMapMutator::Mutate_;
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (GetAscendVFKind(op) != AscendVFKind::kNone)
+    if (ascend::GetVFKind(op) != ascend::VFKind::kNone)
       return Unchanged();
-    return StmtExprMutator::Mutate_(op, mode);
+    return LayoutMapMutator::Mutate_(op, mode);
   }
 
   UnchangedOr<Stmt> Mutate_(const ForObj *op, InplaceMode mode) final {
     auto original = GetRef<Stmt>(op);
-    auto result = StmtExprMutator::Mutate_(op, mode).ValueOrUnchanged(original);
+    auto result =
+        LayoutMapMutator::Mutate_(op, mode).ValueOrUnchanged(original);
     const auto *loop = result.as<ForObj>();
     auto annotations = ReadLoopAnnotations(loop);
     auto explicit_unroll = annotations.Get("pragma_unroll_explicit");
     if (loop->kind != ForKind::kUnrolled || !explicit_unroll ||
-        !AscendVFBoolean(*explicit_unroll))
+        !AnnotationAsBool(*explicit_unroll))
       return result;
     int count = ConstantUnrollTripCount(loop, analyzer_);
     TVM_FFI_CHECK_GE(count, 0, ValueError)
@@ -90,8 +93,8 @@ public:
     for (int index = 0; index < count; ++index) {
       // Native RenewDef renews local definitions, including tensor types,
       // region binders and dynamic metadata uses. Free captures keep identity.
-      auto copy = tirx::RenewDef(tirx::Function({}, loop->body));
-      auto substitution = ffi::make_object<StmtExprMutator>();
+      auto copy = tl::RenewDef(tirx::Function({}, loop->body));
+      auto substitution = ffi::make_object<LayoutMapMutator>();
       substitution->VarRemapSet(
           loop->var,
           analyzer_->Simplify(UnrolledLoopValue(loop, index, analyzer_)));

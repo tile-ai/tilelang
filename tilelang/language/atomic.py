@@ -1,13 +1,18 @@
 """Atomic operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _tensor_spec
+
 
 import tilelang.language as T
 from tilelang._typing import BufferLikeType
 from tvm_ffi import dtype as DataType
 from tvm_tirx import ir
-from tilelang.language._native import PrimExpr, Buffer, Var
+from tvm_tirx.ir import Expr as PrimExpr
+from tilelang.language._tensor_spec import TensorValue as Buffer
+from tvm_tirx.ir import Var
 from tilelang.language.utils import _normalize_annotations
 from tilelang.utils.language import to_buffer_region, legalize_pairwise_extents
 from tilelang.language.utils import get_extent
@@ -26,10 +31,10 @@ _ATOMIC_STORE_MEMORY_ORDERS = frozenset({"relaxed", "release", "seq_cst"})
 
 
 def _vector_atomic_return_dtype(dst: BufferLikeType | Var, lanes: int) -> DataType:
-    if isinstance(dst, Var) and not isinstance(dst, Buffer) and T.has_let_value(dst):
+    if isinstance(dst, Var) and not _tensor_spec.is_buffer_like(dst) and T.has_let_value(dst):
         dst = T.get_let_value(dst)
-    buffer = dst if isinstance(dst, Buffer) else dst.source
-    return _native.dtype_of(buffer).with_lanes(lanes)
+    buffer = dst if _tensor_spec.is_buffer_like(dst) else dst.source
+    return _construction.dtype_of(buffer).with_lanes(lanes)
 
 
 def _get_memory_order_id(operation: str, memory_order: str, valid_orders: frozenset[str]) -> int:
@@ -86,7 +91,7 @@ def atomic_max(
 
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmax_elem_op intrinsic
-        return_type = _native.dtype_of(dst) if return_prev else "void"
+        return_type = _construction.dtype_of(dst) if return_prev else "void"
         atomic_max_op = ir.Op.get("tl.atomic_max_ret_elem_op") if return_prev else ir.Op.get("tl.atomic_max_elem_op")
         memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
 
@@ -100,7 +105,7 @@ def atomic_max(
         )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
-    if isinstance(dst, Buffer) and isinstance(value, Buffer):
+    if _tensor_spec.is_buffer_like(dst) and _tensor_spec.is_buffer_like(value):
         ir.assert_structural_equal(dst.ty.shape, value.ty.shape)
 
     assert src_extent or dst_extent, "Can't deduce atomicmax extents from args"
@@ -172,7 +177,7 @@ def atomic_min(
 
     if dst_extent is None and src_extent is None:
         # Scalar path: use atomicmin_elem_op intrinsic
-        return_type = _native.dtype_of(dst) if return_prev else "void"
+        return_type = _construction.dtype_of(dst) if return_prev else "void"
         atomic_min_op = ir.Op.get("tl.atomic_min_ret_elem_op") if return_prev else ir.Op.get("tl.atomic_min_elem_op")
         memory_order_id = _MEMORY_ORDER_ID_MAP[memory_order] if memory_order else 0
 
@@ -186,7 +191,7 @@ def atomic_min(
         )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
-    if isinstance(dst, Buffer) and isinstance(value, Buffer):
+    if _tensor_spec.is_buffer_like(dst) and _tensor_spec.is_buffer_like(value):
         ir.assert_structural_equal(dst.ty.shape, value.ty.shape)
 
     assert src_extent or dst_extent, "Can't deduce atomicmin extents from args"
@@ -270,7 +275,7 @@ def atomic_add(
     # Thread-level atomic add, where both extent can't be inferred
     if dst_extent is None and src_extent is None:
         atomic_add_op = ir.Op.get("tl.atomic_add_ret_elem_op") if return_prev else ir.Op.get("tl.atomic_add_elem_op")
-        return_type = _native.dtype_of(dst) if return_prev else "void"
+        return_type = _construction.dtype_of(dst) if return_prev else "void"
 
         # Pass destination by pointer to match device signature
         if memory_order is None:
@@ -286,7 +291,7 @@ def atomic_add(
             )
 
     # When both arguments are Buffer, we can check whether they are structural equal.
-    if isinstance(dst, Buffer) and isinstance(value, Buffer):
+    if _tensor_spec.is_buffer_like(dst) and _tensor_spec.is_buffer_like(value):
         ir.assert_structural_equal(dst.ty.shape, value.ty.shape)
 
     assert src_extent or dst_extent, "Can't deduce atomicadd extents from args"
@@ -428,7 +433,7 @@ def atomic_load(src: Buffer, memory_order: str = "seq_cst") -> PrimExpr:
         >>> current_count = atomic_load(counter, memory_order="relaxed")
     """
     return T.call_intrin(
-        _native.dtype_of(src),
+        _construction.dtype_of(src),
         ir.Op.get("tl.atomic_load_elem_op"),
         T.access_ptr(src, "r"),
         _get_memory_order_id("atomic_load", memory_order, _ATOMIC_LOAD_MEMORY_ORDERS),

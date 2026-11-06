@@ -22,8 +22,12 @@
  * \brief Normalize native task boundaries without hiding SSA definitions.
  */
 
+#include "ascend/transform/source_scopes.h"
 #include "auto_schedule/kernel_rewriter.h"
 #include "auto_schedule/task_resource.h"
+#include "ir/stmt_functor.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
@@ -48,7 +52,7 @@ bool IsSerialLoop(const ForObj *loop) {
   return loop->kind == ForKind::kDefault || loop->kind == ForKind::kUnrolled;
 }
 
-bool IsMetadataScope(const NativeTaskAttribute &attribute) {
+bool IsMetadataScope(const SourceAttribute &attribute) {
   return attribute.key == "tl.loop.annotations";
 }
 
@@ -69,34 +73,36 @@ public:
         body.push_back(Rewrite(child, task_depth, per_core_depth));
       return SeqStmt(body, stmt->loc);
     }
-    if (auto attribute = ReadTaskAttribute(stmt)) {
-      const auto &key = attribute->key;
-      if (key == attr::kAscendStage) {
+    if (IsAscendBlock(stmt.as<RegionStmtObj>()) && task_depth == 0)
+      return MakeTask(stmt);
+    if (const auto *region = stmt.as<RegionStmtObj>()) {
+      if (IsStageScope(region))
         TVM_FFI_CHECK(task_depth == 0 && per_core_depth == 0, ValueError)
             << "T.Stage must wrap a complete scheduler task; it cannot appear "
                "inside T.Task, T.PerCoreTask or an atomic VF task boundary";
-      }
-      if (key == attr::kAscendPerCoreTask) {
+      if (IsPerCoreTask(region)) {
         TVM_FFI_CHECK_EQ(task_depth, 0, ValueError)
             << "T.PerCoreTask cannot be nested inside T.Task. Place T.Task "
                "candidate regions inside T.PerCoreTask instead.";
-        auto body =
-            Rewrite(attribute->region->body, task_depth, per_core_depth + 1);
-        return MakeNativeAttribute(
-            MergeTaskMetadata({}, attribute->node), key, attribute->value,
-            NativeTaskAttribute::AsSequence(body), stmt->loc);
+        TaskAnnotations(region);
+        RegionStmt result = GetRef<RegionStmt>(region);
+        result.CopyOnWrite()->body =
+            SeqStmt(Rewrite(region->body, task_depth, per_core_depth + 1));
+        return result;
       }
-      if (key == attr::kAscendTask) {
-        auto body =
-            Rewrite(attribute->region->body, task_depth + 1, per_core_depth);
-        return MakeNativeAttribute(
-            MergeTaskMetadata({}, attribute->node), key, attribute->value,
-            NativeTaskAttribute::AsSequence(body), stmt->loc);
+      if (IsTask(region)) {
+        TaskAnnotations(region);
+        RegionStmt result = GetRef<RegionStmt>(region);
+        result.CopyOnWrite()->body =
+            SeqStmt(Rewrite(region->body, task_depth + 1, per_core_depth));
+        return result;
       }
-      if (key == "tl.sblock" && task_depth == 0)
-        return MakeTask(stmt);
-      return attribute->WithBody(
-          Rewrite(attribute->region->body, task_depth, per_core_depth));
+      if (auto source = ReadSourceAttribute(region)) {
+        if (source->key == "tl.sblock" && task_depth == 0)
+          return MakeTask(stmt);
+        return source->WithBody(
+            Rewrite(region->body, task_depth, per_core_depth));
+      }
     }
     if (const auto *bind = stmt.as<BindObj>()) {
       if (task_depth == 0 && per_core_depth > 0)
@@ -122,30 +128,30 @@ public:
     }
     if (const auto *loop = stmt.as<ForObj>()) {
       For rewritten = GetRef<For>(loop);
-      rewritten.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
-          Rewrite(loop->body, task_depth, per_core_depth));
+      rewritten.CopyOnWrite()->body =
+          SeqStmt(Rewrite(loop->body, task_depth, per_core_depth));
       return rewritten;
     }
     if (const auto *branch = stmt.as<IfObj>()) {
       If rewritten = GetRef<If>(branch);
       auto *writer = rewritten.CopyOnWrite();
-      writer->then_case = NativeTaskAttribute::AsSequence(
-          Rewrite(branch->then_case, task_depth, per_core_depth));
+      writer->then_case =
+          SeqStmt(Rewrite(branch->then_case, task_depth, per_core_depth));
       if (branch->else_case)
-        writer->else_case = NativeTaskAttribute::AsSequence(
+        writer->else_case = SeqStmt(
             Rewrite(branch->else_case.value(), task_depth, per_core_depth));
       return rewritten;
     }
     if (const auto *loop = stmt.as<WhileObj>()) {
       While rewritten = GetRef<While>(loop);
-      rewritten.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
-          Rewrite(loop->body, task_depth, per_core_depth));
+      rewritten.CopyOnWrite()->body =
+          SeqStmt(Rewrite(loop->body, task_depth, per_core_depth));
       return rewritten;
     }
     if (const auto *region = stmt.as<RegionStmtObj>()) {
       RegionStmt rewritten = GetRef<RegionStmt>(region);
-      rewritten.CopyOnWrite()->body = NativeTaskAttribute::AsSequence(
-          Rewrite(region->body, task_depth, per_core_depth));
+      rewritten.CopyOnWrite()->body =
+          SeqStmt(Rewrite(region->body, task_depth, per_core_depth));
       return rewritten;
     }
     return stmt;
@@ -160,15 +166,13 @@ public:
         allow_cross_core_(allow_cross_core) {}
 
   Optional<ffi::VisitInterrupt> Visit_(const RegionStmtObj *op) final {
-    if (auto attribute = ReadTaskAttribute(op)) {
-      TVM_FFI_CHECK(attribute->key != attr::kAscendTask, ValueError)
-          << "Nested T.Task regions are not supported";
-      TVM_FFI_CHECK(attribute->key != attr::kAscendStage, ValueError)
-          << "T.Stage must wrap a complete scheduler task. Place it outside "
-             "T.Task, T.SimtVF, T.SimdVF, SBlock and parallel-loop boundaries.";
-      TVM_FFI_CHECK(attribute->key != attr::kAscendPerCoreTask, ValueError)
-          << "T.PerCoreTask cannot be nested inside T.Task";
-    }
+    TVM_FFI_CHECK(!IsTask(op), ValueError)
+        << "Nested T.Task regions are not supported";
+    TVM_FFI_CHECK(!IsStageScope(op), ValueError)
+        << "T.Stage must wrap a complete scheduler task. Place it outside "
+           "T.Task, T.SimtVF, T.SimdVF, SBlock and parallel-loop boundaries.";
+    TVM_FFI_CHECK(!IsPerCoreTask(op), ValueError)
+        << "T.PerCoreTask cannot be nested inside T.Task";
     return StmtExprVisitor::Visit_(op);
   }
 
@@ -198,30 +202,28 @@ struct ValidatedTask {
   bool has_buffer_access;
 };
 
-ValidatedTask ValidateTask(const NativeTaskAttribute &task,
-                           bool inside_per_core_task) {
-  TVM_FFI_CHECK_EQ(task.key, attr::kAscendTask, ValueError);
-  ParseTaskMetadata(task.node);
+ValidatedTask ValidateTask(const RegionStmt &task, bool inside_per_core_task) {
+  TVM_FFI_CHECK(IsTask(task.get()), ValueError);
+  ParseTaskMetadata(TaskAnnotations(task.get()));
   auto validator = ffi::make_object<TaskControlValidator>(
-      inside_per_core_task, IsStandaloneCrossCoreSync(task.region->body));
-  validator->Visit(task.region->body);
-  auto usage = AnalyzeTaskResourceUsage(task.region);
+      inside_per_core_task, IsStandaloneCrossCoreSync(task->body));
+  validator->Visit(task->body);
+  auto usage = AnalyzeTaskResourceUsage(task);
   uint16_t issue_pipe_mask = usage.pipe_mask;
-  if (AnalyzeSpecialRegisterWrites(task.region) != 0)
+  if (AnalyzeSpecialRegisterWrites(task) != 0)
     issue_pipe_mask |= PipeMask(ResourcePipe::kScalar);
   TVM_FFI_CHECK(IsSingleResourcePipe(issue_pipe_mask), ValueError)
       << "T.Task supports exactly one Ascend hardware pipe, but its body uses "
          "multiple pipes (mask="
       << issue_pipe_mask
-      << "). Split the statements into separate T.Task regions. Body="
-      << task.region;
+      << "). Split the statements into separate T.Task regions. Body=" << task;
   uint16_t affinity = usage.hbm_mask & kHbmCoreAffinityMask;
   TVM_FFI_CHECK((affinity & (affinity - 1)) == 0, ValueError)
       << "T.Task requires one Ascend core affinity, but its body uses both AIC "
          "and AIV HBM paths. Split GM-to-L1 and GM-to-UB operations into "
          "separate T.Task regions. Body="
-      << task.region;
-  return {usage.pipe_mask, HasTaskBufferAccess(task.region)};
+      << task;
+  return {usage.pipe_mask, HasTaskBufferAccess(task)};
 }
 
 bool IsPerCoreScalarControl(const Stmt &stmt) {
@@ -255,9 +257,9 @@ private:
   std::string expected_;
 };
 
-void ValidatePerCoreTask(const NativeTaskAttribute &task) {
-  ParseTaskMetadata(task.node);
-  auto usage = AnalyzeTaskResourceUsage(task.region->body);
+void ValidatePerCoreTask(const RegionStmt &task) {
+  ParseTaskMetadata(TaskAnnotations(task.get()));
+  auto usage = AnalyzeTaskResourceUsage(task->body);
   TVM_FFI_CHECK(IsSingleResourcePipe(usage.pipe_mask), ValueError)
       << "T.PerCoreTask requires exactly one inferred hardware pipe, but its "
          "mask is "
@@ -269,12 +271,11 @@ void ValidatePerCoreTask(const NativeTaskAttribute &task) {
         visit(child);
       return;
     }
-    if (auto attribute = ReadTaskAttribute(stmt)) {
-      if (attribute->key == attr::kAscendTask) {
-        auto candidate = ValidateTask(attribute.value(), true);
+    if (const auto *region = stmt.as<RegionStmtObj>()) {
+      if (IsTask(region)) {
+        auto candidate = ValidateTask(GetRef<RegionStmt>(region), true);
         if (!candidate.has_buffer_access) {
-          TVM_FFI_CHECK(IsPerCoreScalarControl(attribute->region->body),
-                        ValueError)
+          TVM_FFI_CHECK(IsPerCoreScalarControl(region->body), ValueError)
               << "T.PerCoreTask only permits scalar Bind/condition/loop "
                  "control and inter-core synchronization in addition to "
                  "operations on its inferred pipe";
@@ -285,13 +286,14 @@ void ValidatePerCoreTask(const NativeTaskAttribute &task) {
         has_dependency_task = true;
         return;
       }
-      TVM_FFI_CHECK(attribute->key != attr::kAscendPerCoreTask, ValueError)
+      TVM_FFI_CHECK(!IsPerCoreTask(region), ValueError)
           << "Nested T.PerCoreTask regions are not supported";
-      TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
-                        IsMetadataScope(attribute.value()),
+      auto source = ReadSourceAttribute(region);
+      TVM_FFI_CHECK(source && (IsScheduleGuardAttribute(source->key) ||
+                               IsMetadataScope(*source)),
                     ValueError)
-          << "Unsupported attribute inside T.PerCoreTask: " << attribute->key;
-      visit(attribute->region->body);
+          << "Unsupported region inside T.PerCoreTask: " << region->op->name;
+      visit(region->body);
       return;
     }
     if (const auto *loop = stmt.as<ForObj>()) {
@@ -316,12 +318,12 @@ void ValidatePerCoreTask(const NativeTaskAttribute &task) {
       return;
     FatalUnmarkedTask("MaterializeScheduleUnits", stmt->GetTypeKey());
   };
-  visit(task.region->body);
+  visit(task->body);
   TVM_FFI_CHECK(has_dependency_task, ValueError)
       << "T.PerCoreTask must contain at least one dependency-bearing task "
          "after task normalization";
   auto validator = ffi::make_object<PerCoreControlValidator>(usage.pipe_mask);
-  validator->Visit(task.region->body);
+  validator->Visit(task->body);
 }
 
 // Walk units belonging to one scheduling child list. Branches and assumption
@@ -341,14 +343,13 @@ Stmt MapChildUnits(const Stmt &stmt,
   if (const auto *branch = stmt.as<IfObj>()) {
     If rewritten = GetRef<If>(branch);
     auto *writer = rewritten.CopyOnWrite();
-    writer->then_case =
-        NativeTaskAttribute::AsSequence(MapChildUnits(branch->then_case, map));
+    writer->then_case = SeqStmt(MapChildUnits(branch->then_case, map));
     if (branch->else_case)
-      writer->else_case = NativeTaskAttribute::AsSequence(
-          MapChildUnits(branch->else_case.value(), map));
+      writer->else_case =
+          SeqStmt(MapChildUnits(branch->else_case.value(), map));
     return rewritten;
   }
-  if (auto attribute = ReadTaskAttribute(stmt)) {
+  if (auto attribute = ReadSourceAttribute(stmt)) {
     TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
                       IsMetadataScope(attribute.value()),
                   ValueError)
@@ -367,10 +368,7 @@ Stmt SetUnitStage(const Stmt &stmt, int stage) {
     return WithScheduledBindingMetadata(GetRef<Bind>(bind), stage,
                                         binding.task);
   }
-  auto attribute = ReadTaskAttribute(stmt).value();
-  auto metadata = attribute.node.cast<ScheduleUnitMetadata>();
-  metadata.Set(kScheduleUnitStage, IntImm(PrimType::Int(64), stage));
-  return attribute.WithNode(metadata);
+  return WithScheduleUnitStage(stmt.as_or_throw<RegionStmt>(), stage);
 }
 
 void ValidateScheduledList(const Stmt &body) {
@@ -380,20 +378,20 @@ void ValidateScheduledList(const Stmt &body) {
       ReadScheduledBinding(bind->value.as<CallObj>());
       return stmt;
     }
-    auto unit = ReadTaskAttribute(stmt).value();
-    Stmt payload = SingleStatement(unit.region->body);
+    auto unit = stmt.as_or_throw<RegionStmt>();
+    Stmt payload = SingleStatement(unit->body);
     if (const auto *loop = payload.as<ForObj>()) {
       TVM_FFI_CHECK(IsSerialLoop(loop), ValueError)
           << "Scheduled control must be a serial or unrolled loop";
       ValidateScheduledList(loop->body);
     } else {
-      auto task = ReadTaskAttribute(payload);
-      TVM_FFI_CHECK(task && IsSemanticTaskKey(task->key), ValueError)
+      const auto *task = payload.as<RegionStmtObj>();
+      TVM_FFI_CHECK(IsSemanticTask(task), ValueError)
           << "Scheduled leaf must contain exactly one T.Task/T.PerCoreTask";
-      if (task->key == attr::kAscendTask)
-        ValidateTask(task.value(), false);
+      if (IsTask(task))
+        ValidateTask(GetRef<RegionStmt>(task), false);
       else
-        ValidatePerCoreTask(task.value());
+        ValidatePerCoreTask(GetRef<RegionStmt>(task));
     }
     return stmt;
   });
@@ -403,12 +401,15 @@ class ScheduleUnitMaterializer {
 public:
   static SeqStmt Rewrite(const SeqStmt &body) {
     bool already_scheduled = false;
-    VisitNativePostOrder(body, [&](const ffi::ObjectRef &object) {
-      if (const auto *region = object.as<RegionStmtObj>())
-        already_scheduled |= IsScheduleUnit(region);
-      if (const auto *call = object.as<CallObj>())
-        already_scheduled |= IsScheduledBind(call);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body,
+        [&](const ffi::ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
+          if (const auto *region = object.as<RegionStmtObj>())
+            already_scheduled |= IsScheduleUnit(region);
+          if (const auto *call = object.as<CallObj>())
+            already_scheduled |= IsScheduledBind(call);
+          return ffi::WalkResult::Advance();
+        });
     if (already_scheduled) {
       ValidateScheduledList(body);
       return body;
@@ -446,7 +447,7 @@ private:
                    ? SetUnitStage(unit, 0)
                    : unit;
       });
-    return NativeTaskAttribute::AsSequence(result);
+    return SeqStmt(result);
   }
 
   Stmt Materialize(const Stmt &stmt) {
@@ -470,39 +471,36 @@ private:
     if (const auto *branch = stmt.as<IfObj>()) {
       If rewritten = GetRef<If>(branch);
       auto *writer = rewritten.CopyOnWrite();
-      writer->then_case =
-          NativeTaskAttribute::AsSequence(Materialize(branch->then_case));
+      writer->then_case = SeqStmt(Materialize(branch->then_case));
       if (branch->else_case)
-        writer->else_case = NativeTaskAttribute::AsSequence(
-            Materialize(branch->else_case.value()));
+        writer->else_case = SeqStmt(Materialize(branch->else_case.value()));
       return rewritten;
     }
-    auto attribute = ReadTaskAttribute(stmt);
-    TVM_FFI_CHECK(attribute.has_value(), ValueError)
+    const auto *region = stmt.as<RegionStmtObj>();
+    TVM_FFI_CHECK(region, ValueError)
         << "MaterializeScheduleUnits found an unmarked " << stmt->GetTypeKey();
-    if (attribute->key == attr::kAscendTask) {
-      ValidateTask(attribute.value(), false);
+    if (IsTask(region)) {
+      ValidateTask(GetRef<RegionStmt>(region), false);
       return MakeScheduleUnit(stmt, kUnscheduledStage);
     }
-    if (attribute->key == attr::kAscendPerCoreTask) {
-      ValidatePerCoreTask(attribute.value());
+    if (IsPerCoreTask(region)) {
+      ValidatePerCoreTask(GetRef<RegionStmt>(region));
       return MakeScheduleUnit(stmt, kUnscheduledStage);
     }
-    if (attribute->key == attr::kAscendStage) {
-      const auto *stage = task_metadata_detail::RequireConstantTaskMetadataInt(
-          attribute->node, "stage");
-      int64_t value = stage->value.as<int64_t>().value();
-      TVM_FFI_CHECK(value >= 0 && value <= std::numeric_limits<int>::max(),
-                    ValueError)
-          << "T.Stage requires a non-negative constant int32 value";
-      Stmt body = EnsureNonEmpty(Materialize(attribute->region->body));
+    if (IsStageScope(region)) {
+      int stage = GetStageScopeStage(region);
+      Stmt body = EnsureNonEmpty(Materialize(region->body));
       return MapChildUnits(body, [&](const Stmt &unit) {
         TVM_FFI_CHECK_EQ(GetScheduleUnitStage(unit), kUnscheduledStage,
                          ValueError)
             << "Nested T.Stage scopes are not supported";
-        return SetUnitStage(unit, static_cast<int>(value));
+        return SetUnitStage(unit, stage);
       });
     }
+    auto attribute = ReadSourceAttribute(region);
+    TVM_FFI_CHECK(attribute.has_value(), ValueError)
+        << "MaterializeScheduleUnits found an unsupported region "
+        << region->op->name;
     TVM_FFI_CHECK(IsScheduleGuardAttribute(attribute->key) ||
                       IsMetadataScope(attribute.value()),
                   ValueError)

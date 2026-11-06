@@ -7,6 +7,9 @@
  * the native For stores an exclusive end, not the former (min, extent) pair.
  */
 
+#include "ir/loop_annotations.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/ir/prim/op.h>
@@ -20,7 +23,6 @@
 #include <utility>
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
-#include "op/native_utils.h"
 
 namespace tvm::tl {
 using namespace tirx;
@@ -46,17 +48,18 @@ private:
 
   static int64_t MaxNumStages(const Stmt &body) {
     int64_t result = 1;
-    VisitNativePostOrder(body, [&](const ObjectRef &node) {
-      if (const auto *loop = node.as<ForObj>()) {
-        if (auto value = ReadLoopAnnotations(loop).Get("num_stages")) {
-          auto stages = value->try_cast<PrimExpr>();
-          auto integer = stages ? TryConstInt(*stages) : std::nullopt;
-          TVM_FFI_CHECK(integer && *integer > 0, ValueError)
-              << "num_stages must be a positive constant integer";
-          result = std::max(result, *integer);
-        }
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const ForObj *loop) -> ffi::Expected<ffi::WalkResult> {
+          if (auto value = ReadLoopAnnotations(loop).Get("num_stages")) {
+            auto stages = value->try_cast<PrimExpr>();
+            auto integer = stages ? TryConstInt(*stages) : std::nullopt;
+            TVM_FFI_CHECK(integer && *integer > 0, ValueError)
+                << "num_stages must be a positive constant integer";
+            result = std::max(result, *integer);
+          }
+
+          return ffi::WalkResult::Advance();
+        });
     return result;
   }
 
@@ -148,7 +151,7 @@ private:
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (NativeBlockName(op))
+    if (BlockNameAtSourceBoundary(op))
       return Unchanged();
     return StmtExprMutator::Mutate_(op, mode);
   }

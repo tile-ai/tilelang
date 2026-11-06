@@ -1,7 +1,7 @@
 """Tests for the lexical_alloc_scope feature.
 
 Verifies that:
-1. LowerOpaqueBlock creates native tl.lexical_scope with explicit_alloc_scope for blocks
+1. LowerSourceAnnotations creates native tl.lexical_scope with explicit_alloc_scope for blocks
    explicitly marked for lexical allocation scoping.
 2. Unmarked blocks do NOT receive the marker by heuristic inference.
 3. gemm_py-produced blocks are explicitly marked and survive as scopes.
@@ -53,12 +53,12 @@ def _apply_lower_opaque_pipeline(func, target, pass_configs=None):
         mod = tl.transform.PlanAndUpdateBufferAllocationLocation()(mod)
         mod = tl.cuda.transform.LowerSharedBarrier()(mod)
         mod = tl.transform.HoistGlobalBufferAllocations()(mod)
-        mod = tl.transform.LowerOpaqueBlock()(mod)
+        mod = tl.transform.LowerSourceAnnotations()(mod)
     return mod
 
 
 # ---------------------------------------------------------------------------
-# Test 1: LowerOpaqueBlock inserts the lexical_alloc_scope marker for an
+# Test 1: LowerSourceAnnotations inserts the lexical_alloc_scope marker for an
 #         explicitly annotated block.
 # ---------------------------------------------------------------------------
 def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
@@ -81,7 +81,7 @@ def test_lower_opaque_block_inserts_lexical_alloc_scope_for_explicit_block():
                 B[tx] = S[tx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     lowered = mod["main"]
 
     n = _count_attrs(lowered, "lexical_alloc_scope")
@@ -114,7 +114,7 @@ def test_lower_opaque_block_skips_unmarked_local_alloc():
                 B[tx] = S[tx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     lowered = mod["main"]
 
     n = _count_attrs(lowered, "lexical_alloc_scope")
@@ -141,7 +141,7 @@ def test_lower_opaque_block_skips_empty_alloc():
                 B[tx] = A[tx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     lowered = mod["main"]
 
     n = _count_attrs(lowered, "lexical_alloc_scope")
@@ -202,7 +202,7 @@ def test_lower_opaque_block_skips_local_var_only_alloc():
                 B[tx] = A[idx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     lowered = mod["main"]
 
     n = _count_attrs(lowered, "lexical_alloc_scope")
@@ -231,7 +231,7 @@ def test_lower_opaque_block_marks_explicit_top_level_local_alloc():
             B[tx] = S[tx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     lowered = mod["main"]
 
     n = _count_attrs(lowered, "lexical_alloc_scope")
@@ -259,7 +259,7 @@ def test_lower_opaque_block_skips_fragment_alloc():
             B[tx] = S[tx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     lowered = mod["main"]
 
     n = _count_attrs(lowered, "lexical_alloc_scope")
@@ -331,7 +331,7 @@ def test_storage_rewrite_preserves_scope():
                 B[tx] = S[tx]
 
     mod = tvm_tirx.IRModule.from_expr(func)
-    mod = tl.transform.LowerOpaqueBlock()(mod)
+    mod = tl.transform.LowerSourceAnnotations()(mod)
     mod = tl.transform.Simplify()(mod)
     mod = tl.transform.FlattenBuffer()(mod)
     mod = tl.transform.VectorizeLoop()(mod)

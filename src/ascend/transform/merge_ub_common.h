@@ -23,14 +23,18 @@
  */
 #pragma once
 
-#include "auto_schedule/native_storage.h"
+#include "ascend/analysis/storage.h"
+#include "ascend/ir/task.h"
 #include "ir/analyzer.h"
+#include "layout/expr_utils.h"
 #include "transform/common/storage_size.h"
 #include <algorithm>
 #include <limits>
 #include <string>
+#include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ir/analysis.h>
 #include <tvm/tirx/op/memory.h>
+#include <tvm/tirx/stmt_functor.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -110,27 +114,26 @@ inline PrimExpr GetBufferSizeBytes(const BindObj *binding,
 class AllocateCollector {
 public:
   void operator()(const Stmt &stmt) {
-    VisitNativePostOrder(stmt, [&](const ObjectRef &object) {
-      const auto *binding = object.as<BindObj>();
-      if (!binding)
-        return;
-      auto tensor = binding->var.as<TensorVar>();
-      auto value = AllocationValue(binding);
-      const auto *call = value.as<CallObj>();
-      if (!tensor || !call || !call->op.same_as(alloc_tensor_op()))
-        return;
-      const VarObj *key = tensor->get();
-      std::string scope = tensor->scope().name();
-      if (scope == "shared.dyn") {
-        if (dyn_shmem_allocs.emplace(key, binding).second)
-          dyn_shmem_order.push_back(key);
-      } else if (scope == "shared.l0a" || scope == "shared.l0b" ||
-                 scope == "shared.l0c" || scope == "shared.l1" ||
-                 scope == "shared.ss") {
-        if (ascend_scope_allocs[scope].emplace(key, binding).second)
-          ascend_scope_order[scope].push_back(key);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const BindObj *binding) -> ffi::Expected<ffi::WalkResult> {
+          auto tensor = binding->var.as<TensorVar>();
+          auto value = AllocationValue(binding);
+          const auto *call = value.as<CallObj>();
+          if (!tensor || !call || !call->op.same_as(alloc_tensor_op()))
+            return ffi::WalkResult::Advance();
+          const VarObj *key = tensor->get();
+          std::string scope = tensor->scope().name();
+          if (scope == "shared.dyn") {
+            if (dyn_shmem_allocs.emplace(key, binding).second)
+              dyn_shmem_order.push_back(key);
+          } else if (scope == "shared.l0a" || scope == "shared.l0b" ||
+                     scope == "shared.l0c" || scope == "shared.l1" ||
+                     scope == "shared.ss") {
+            if (ascend_scope_allocs[scope].emplace(key, binding).second)
+              ascend_scope_order[scope].push_back(key);
+          }
+          return ffi::WalkResult::Advance();
+        });
   }
   AllocationMap dyn_shmem_allocs;
   std::unordered_map<std::string, AllocationMap> ascend_scope_allocs;
@@ -185,13 +188,14 @@ public:
   explicit ArenaSizeExpander(const Stmt &stmt) {
     for (const Var &var : UndefinedVars(stmt))
       available_.insert(var.get());
-    VisitNativePostOrder(stmt, [&](const ObjectRef &object) {
-      if (const auto *bind = object.as<BindObj>()) {
-        if (definitions_.count(bind->var))
-          repeated_.insert(bind->var.get());
-        definitions_.Set(bind->var, AllocationValue(bind));
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        stmt, [&](const BindObj *bind) -> ffi::Expected<ffi::WalkResult> {
+          if (definitions_.count(bind->var))
+            repeated_.insert(bind->var.get());
+          definitions_.Set(bind->var, AllocationValue(bind));
+
+          return ffi::WalkResult::Advance();
+        });
   }
   UnchangedOr<Expr> Mutate_(const VarObj *op, InplaceMode mode) final {
     if (available_.count(op))
@@ -203,22 +207,24 @@ public:
         << "Ascend arena size depends on non-hoistable local variable "
         << op->name;
     bool safe = true;
-    VisitNativePostOrder(*value, [&](const ObjectRef &node) {
-      if (node.as<TensorLoadObj>() || node.as<CallObj>())
-        safe = false;
-      auto divisor = [&](const PrimExpr &d) {
-        auto c = TryConstInt(d);
-        safe &= c && *c != 0 && *c != -1;
-      };
-      if (const auto *n = node.as<DivObj>())
-        divisor(n->b);
-      if (const auto *n = node.as<ModObj>())
-        divisor(n->b);
-      if (const auto *n = node.as<FloorDivObj>())
-        divisor(n->b);
-      if (const auto *n = node.as<FloorModObj>())
-        divisor(n->b);
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        *value, [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+          if (node.as<TensorLoadObj>() || node.as<CallObj>())
+            safe = false;
+          auto divisor = [&](const PrimExpr &d) {
+            auto c = TryConstInt(d);
+            safe &= c && *c != 0 && *c != -1;
+          };
+          if (const auto *n = node.as<DivObj>())
+            divisor(n->b);
+          if (const auto *n = node.as<ModObj>())
+            divisor(n->b);
+          if (const auto *n = node.as<FloorDivObj>())
+            divisor(n->b);
+          if (const auto *n = node.as<FloorModObj>())
+            divisor(n->b);
+          return ffi::WalkResult::Advance();
+        });
     TVM_FFI_CHECK(safe, ValueError) << "Ascend arena size cannot hoist a "
                                        "memory read or trapping expression";
     Expr result = Mutate(*value, mode).ValueOrUnchanged(*value);
@@ -357,7 +363,7 @@ Stmt MergeAllocations(Stmt stmt, int align_bytes, bool verbose,
     return stmt;
   Stmt result =
       rewriter->Mutate(stmt, InplaceMode::kDisallow).ValueOrUnchanged(stmt);
-  for (const Stmt &child : ascend::NativeTaskAttribute::AsSequence(result)->seq)
+  for (const Stmt &child : SeqStmt(result)->seq)
     prefix.push_back(child);
   return SeqStmt(prefix, stmt->loc);
 }

@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from tilelang.language import _construction
 import ast
 import inspect
 import os
@@ -6,7 +8,7 @@ from typing import Any, Literal
 from collections.abc import Callable, Sequence
 from tilelang import env
 from hashlib import sha256
-from tilelang.language import _native as tirx
+
 import linecache
 
 
@@ -108,6 +110,6 @@ def construct_strides(shape: Sequence[Any], allow_prim_expr: bool = True) -> tup
     for s in reversed(shape):
         strides.append(stride)
         stride *= s
-        if not allow_prim_expr and isinstance(stride, tirx.PrimExpr):
+        if not allow_prim_expr and _construction.is_scalar_expr(stride):
             raise ValueError("Cannot construct strides with PrimExpr when allow_prim_expr is False.")
     return tuple(reversed(strides))

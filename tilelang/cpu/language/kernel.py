@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tvm_tirx import ir as _ir
+
 
 from tilelang.language.kernel import KernelLaunchFrame, kernel_launch_factory, launch_kernel
 
@@ -11,7 +12,7 @@ __all__ = ["Kernel"]
 
 @kernel_launch_factory
 def Kernel(
-    *blocks: int | tirx.PrimExpr,
+    *blocks: int | _ir.Expr,
     prelude: str | None = None,
     cpu_num_threads: int | None = None,
 ) -> KernelLaunchFrame:
@@ -51,5 +52,5 @@ def Kernel(
     if cpu_num_threads is not None:
         if isinstance(cpu_num_threads, bool) or not isinstance(cpu_num_threads, int) or cpu_num_threads <= 0:
             raise ValueError(f"cpu_num_threads must be a positive integer, got {cpu_num_threads}")
-        annotations["tl.cpu_num_threads"] = tirx.IntImm("int32", cpu_num_threads)
+        annotations["tl.cpu_num_threads"] = _ir.IntImm("int32", cpu_num_threads)
     return launch_kernel(blocks, prelude=prelude, **annotations)

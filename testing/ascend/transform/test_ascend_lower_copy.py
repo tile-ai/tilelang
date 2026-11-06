@@ -13,7 +13,7 @@ from testing.ascend._ir import (
     tensor as _compact_tensor,
 )
 from testing.ascend._memory_ir import element_offset, storage_owner
-from tilelang.language._native import buffer as tensor_spec
+from tilelang.language._tensor_spec import buffer as tensor_spec
 
 import math
 

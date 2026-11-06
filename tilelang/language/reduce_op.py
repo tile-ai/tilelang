@@ -1,9 +1,15 @@
 """Reduce operations exposed on the TileLang language surface."""
 
 from __future__ import annotations
-from tilelang.language import _native
+
+from tilelang.language import _construction
+from tilelang.language import _intrinsics
+from tilelang.language import _tensor_spec
+from tvm_tirx import ir as _ir
+from tvm_tirx.ir import prim as _prim
+
 from typing import Literal
-from tilelang.language import _native as tirx
+
 from tilelang.language.common import copy, macro, alloc_fragment, evaluate
 from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment, is_local
@@ -11,7 +17,7 @@ from tvm_tirx.script.ir_builder import IRBuilder
 from tilelang.language.utils import _normalize_annotations
 
 
-def _legalize_dim(buffer: tirx.Buffer, dim: int):
+def _legalize_dim(buffer: _tensor_spec.TensorValue, dim: int):
     if dim < 0:
         dim = len(retrieve_shape(buffer)) + dim
     return dim
@@ -24,8 +30,8 @@ ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor",
 
 # NOTE(chaofan): T.reduce is implemented as a macro, so no return
 def reduce(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     reduce_type: ReduceKind,
     dim: int,
     clear: bool,
@@ -61,11 +67,11 @@ def reduce(
     if reduce_type in ("bitand", "bitor", "bitxor"):
         # Both faces must be integral: a float source would otherwise be silently
         # value-cast to an integer before the bitwise reduction runs.
-        buf_dtype = _native.dtype_of(_get_buffer(buffer))
+        buf_dtype = _construction.dtype_of(_get_buffer(buffer))
         if not (buf_dtype.startswith(("int", "uint")) or buf_dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
-        if not (_native.dtype_of(out_buffer).startswith(("int", "uint")) or _native.dtype_of(out_buffer) == "bool"):
-            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {_native.dtype_of(out_buffer)}")
+        if not (_construction.dtype_of(out_buffer).startswith(("int", "uint")) or _construction.dtype_of(out_buffer) == "bool"):
+            raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {_construction.dtype_of(out_buffer)}")
     # input shape: [X, d, Y], expected output shape: [X, Y] or [X, 1, Y]
     buf_shape = retrieve_shape(buffer)
     out_shape = retrieve_shape(out_region)
@@ -85,9 +91,9 @@ def reduce(
     # underlying Buffer rather than becoming a scalar expression.
     if is_local(buffer) and str(out_buffer.scope()) in ("local", "local.var"):
         return evaluate(
-            tirx.call_intrin(
+            _intrinsics.call_intrin(
                 "handle",
-                tirx.Op.get(_REDUCE_OP_KEY),
+                _ir.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
                 to_tile_region(out_buffer, access_type="w"),
                 reduce_type,
@@ -98,11 +104,11 @@ def reduce(
         )
 
     @macro
-    def reduce_macro(buffer: tirx.Buffer, out: tirx.Buffer, reduce_type: str, dim: int, clear: bool) -> None:
+    def reduce_macro(buffer: _tensor_spec.TensorValue, out: _tensor_spec.TensorValue, reduce_type: str, dim: int, clear: bool) -> None:
         buf_shape = retrieve_shape(buffer)
         out_shape = retrieve_shape(out)
-        buf_dtype = _native.dtype_of(_get_buffer(buffer))
-        out_dtype = _native.dtype_of(_get_buffer(out))
+        buf_dtype = _construction.dtype_of(_get_buffer(buffer))
+        out_dtype = _construction.dtype_of(_get_buffer(out))
         buf_name = _get_buffer(buffer).name
         out_name = _get_buffer(out).name
         buf_scope = _get_buffer(buffer).scope()
@@ -119,9 +125,9 @@ def reduce(
                 copy(out, red_frag_out)
 
             copy(buffer, red_frag_in)
-            tirx.call_intrin(
+            _intrinsics.call_intrin(
                 "handle",
-                tirx.Op.get(_REDUCE_OP_KEY),
+                _ir.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(red_frag_in, access_type="r"),
                 to_tile_region(red_frag_out, access_type="w"),
                 reduce_type,
@@ -135,9 +141,9 @@ def reduce(
             IRBuilder.name(buf_name + "_frag", red_frag_in)
 
             copy(buffer, red_frag_in)
-            tirx.call_intrin(
+            _intrinsics.call_intrin(
                 "handle",
-                tirx.Op.get(_REDUCE_OP_KEY),
+                _ir.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(red_frag_in, access_type="r"),
                 to_tile_region(out, access_type="w"),
                 reduce_type,
@@ -152,9 +158,9 @@ def reduce(
             if not clear:
                 copy(out, red_frag_out)
 
-            tirx.call_intrin(
+            _intrinsics.call_intrin(
                 "handle",
-                tirx.Op.get(_REDUCE_OP_KEY),
+                _ir.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
                 to_tile_region(red_frag_out, access_type="w"),
                 reduce_type,
@@ -164,9 +170,9 @@ def reduce(
             )
             copy(red_frag_out, out)
         elif is_fragment(buffer) and is_fragment(out):
-            tirx.call_intrin(
+            _intrinsics.call_intrin(
                 "handle",
-                tirx.Op.get(_REDUCE_OP_KEY),
+                _ir.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
                 to_tile_region(out, access_type="w"),
                 reduce_type,
@@ -181,8 +187,8 @@ def reduce(
 
 
 def reduce_max(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -211,8 +217,8 @@ def reduce_max(
 
 
 def reduce_min(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -235,7 +241,12 @@ def reduce_min(
 
 
 def reduce_sum(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce sum on input buffer, store the result to output buffer.
 
@@ -266,7 +277,9 @@ def reduce_sum(
     reduce(buffer, out, "sum", dim, clear, batch=batch, annotations=annotations)
 
 
-def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: int = 1, annotations: dict | None = None) -> None:
+def reduce_abssum(
+    buffer: _tensor_spec.TensorValue, out: _tensor_spec.TensorValue, dim: int = -1, batch: int = 1, annotations: dict | None = None
+) -> None:
     """Perform reduce absolute sum on input buffer, store the result to output buffer.
 
     Args:
@@ -287,8 +300,8 @@ def reduce_abssum(buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, batch: i
 
 
 def reduce_absmax(
-    buffer: tirx.Buffer,
-    out: tirx.Buffer,
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
     dim: int = -1,
     clear: bool = True,
     batch: int = 1,
@@ -310,7 +323,12 @@ def reduce_absmax(
 
 
 def reduce_bitand(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce bitwise-and on input buffer, store the result to output buffer.
 
@@ -328,7 +346,12 @@ def reduce_bitand(
 
 
 def reduce_bitor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce bitwise-or on input buffer, store the result to output buffer.
 
@@ -346,7 +369,12 @@ def reduce_bitor(
 
 
 def reduce_bitxor(
-    buffer: tirx.Buffer, out: tirx.Buffer, dim: int = -1, clear: bool = True, batch: int = 1, annotations: dict | None = None
+    buffer: _tensor_spec.TensorValue,
+    out: _tensor_spec.TensorValue,
+    dim: int = -1,
+    clear: bool = True,
+    batch: int = 1,
+    annotations: dict | None = None,
 ) -> None:
     """Perform reduce bitwise-xor on input buffer, store the result to output buffer.
 
@@ -362,7 +390,7 @@ def reduce_bitxor(
     reduce(buffer, out, "bitxor", dim, clear, batch=batch, annotations=annotations)
 
 
-def reducer_init(reducer: tirx.Buffer, init=None) -> tirx.PrimExpr:
+def reducer_init(reducer: _tensor_spec.TensorValue, init=None) -> _ir.Expr:
     """Open a reducer epoch, optionally with a logical starting value.
 
     Must appear exactly once per `T.alloc_reducer` allocation, before any
@@ -393,16 +421,16 @@ def reducer_init(reducer: tirx.Buffer, init=None) -> tirx.PrimExpr:
     args = [to_tile_region(reducer, access_type="w")]
     if init is not None:
         if isinstance(init, (int, float)):
-            init = tirx.const(init, _native.dtype_of(reducer))
+            init = _ir.const(init, _construction.dtype_of(reducer))
         args.append(init)
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.reducer_init"),
+        _ir.Op.get("tl.tileop.reducer_init"),
         *args,
     )
 
 
-def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
+def reducer_update(target: _ir.TensorLoad, value) -> _ir.Expr:
     """Contribute `value` to one logical output of a reducer.
 
     `target` must be written as `acc[indices]` directly in the first argument
@@ -418,29 +446,29 @@ def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
     Returns:
         tirx.Call: Handle to the reducer_update intrinsic call.
     """
-    if not isinstance(target, tirx.BufferLoad):
+    if not isinstance(target, _ir.TensorLoad):
         raise ValueError(
             f"reducer_update expects `acc[indices]` as its first argument, got {type(target)}; the reducer cannot be read or aliased."
         )
-    dtype = _native.dtype_of(target.source)
+    dtype = _construction.dtype_of(target.source)
     if isinstance(value, (int, float)):
-        value = tirx.const(value, dtype)
-    elif isinstance(value, tirx.PrimExpr) and _native.dtype_of(value) != dtype:
-        value = tirx.Cast(dtype, value)
+        value = _ir.const(value, dtype)
+    elif _construction.is_scalar_expr(value) and _construction.dtype_of(value) != dtype:
+        value = _prim.Cast(dtype, _construction.scalar_value(value, _construction.current_location()), _construction.current_location())
     # A builtin intrinsic, not a tile op: the target rides as a plain
     # BufferLoad (an update descriptor keeping the multi-dim indices for the
     # planner), and the layout story belongs to the enclosing T.Parallel.
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "void",
-        tirx.Op.get("tl.reducer_update"),
+        _ir.Op.get("tl.reducer_update"),
         target,
         value,
     )
 
 
 def finalize_reducer(
-    reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1, annotations: dict | None = None
-) -> tirx.PrimExpr:
+    reducer: _tensor_spec.TensorValue, dst: _tensor_spec.TensorValue | None = None, batch: int = 1, annotations: dict | None = None
+) -> _ir.Expr:
     """Close a reducer epoch.
 
     v2 form (``dst`` given): complete the cross-participant communication the
@@ -468,22 +496,22 @@ def finalize_reducer(
     if batch > 1:
         annotations["batch"] = batch
     if dst is not None:
-        return tirx.call_intrin(
+        return _intrinsics.call_intrin(
             "handle",
-            tirx.Op.get("tl.tileop.finalize_reducer_v2"),
+            _ir.Op.get("tl.tileop.finalize_reducer_v2"),
             to_tile_region(reducer, access_type="rw"),
             to_tile_region(dst, access_type="w"),
             annotations=annotations,
         )
-    return tirx.call_intrin(
+    return _intrinsics.call_intrin(
         "handle",
-        tirx.Op.get("tl.tileop.finalize_reducer"),
+        _ir.Op.get("tl.tileop.finalize_reducer"),
         to_tile_region(reducer, access_type="w"),
         annotations=annotations,
     )
 
 
-def warp_reduce_sum(value: tirx.PrimExpr) -> tirx.PrimExpr:
+def warp_reduce_sum(value: _ir.Expr) -> _ir.Expr:
     """Perform warp reduction sum on a register value.
 
     This function reduces a value across all threads in a warp using shuffle operations.
@@ -496,10 +524,10 @@ def warp_reduce_sum(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced sum value (same on all threads in the warp)
     """
-    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_sum"), value)
+    return _intrinsics.call_intrin(_construction.dtype_of(value), _ir.Op.get("tl.warp_reduce_sum"), value)
 
 
-def warp_reduce_max(value: tirx.PrimExpr) -> tirx.PrimExpr:
+def warp_reduce_max(value: _ir.Expr) -> _ir.Expr:
     """Perform warp reduction max on a register value.
 
     This function reduces a value across all threads in a warp using shuffle operations.
@@ -512,10 +540,10 @@ def warp_reduce_max(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced max value (same on all threads in the warp)
     """
-    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_max"), value)
+    return _intrinsics.call_intrin(_construction.dtype_of(value), _ir.Op.get("tl.warp_reduce_max"), value)
 
 
-def warp_reduce_min(value: tirx.PrimExpr) -> tirx.PrimExpr:
+def warp_reduce_min(value: _ir.Expr) -> _ir.Expr:
     """Perform warp reduction min on a register value.
 
     This function reduces a value across all threads in a warp using shuffle operations.
@@ -528,10 +556,10 @@ def warp_reduce_min(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced min value (same on all threads in the warp)
     """
-    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_min"), value)
+    return _intrinsics.call_intrin(_construction.dtype_of(value), _ir.Op.get("tl.warp_reduce_min"), value)
 
 
-def warp_reduce_bitand(value: tirx.PrimExpr) -> tirx.PrimExpr:
+def warp_reduce_bitand(value: _ir.Expr) -> _ir.Expr:
     """Perform warp reduction bitwise-and on a register value.
 
     This function reduces a value across all threads in a warp using shuffle operations.
@@ -544,10 +572,10 @@ def warp_reduce_bitand(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced bitwise-and value (same on all threads in the warp)
     """
-    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_bitand"), value)
+    return _intrinsics.call_intrin(_construction.dtype_of(value), _ir.Op.get("tl.warp_reduce_bitand"), value)
 
 
-def warp_reduce_bitor(value: tirx.PrimExpr) -> tirx.PrimExpr:
+def warp_reduce_bitor(value: _ir.Expr) -> _ir.Expr:
     """Perform warp reduction bitwise-or on a register value.
 
     This function reduces a value across all threads in a warp using shuffle operations.
@@ -560,4 +588,4 @@ def warp_reduce_bitor(value: tirx.PrimExpr) -> tirx.PrimExpr:
     Returns:
         tirx.PrimExpr: The reduced bitwise-or value (same on all threads in the warp)
     """
-    return tirx.call_intrin(_native.dtype_of(value), tirx.Op.get("tl.warp_reduce_bitor"), value)
+    return _intrinsics.call_intrin(_construction.dtype_of(value), _ir.Op.get("tl.warp_reduce_bitor"), value)

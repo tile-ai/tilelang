@@ -22,7 +22,9 @@
  * \brief Ascend task latency and initiation-interval estimation pass.
  */
 
+#include "ascend/transform/source_scopes.h"
 #include "ir/analyzer.h"
+#include "layout/expr_utils.h"
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -59,7 +61,6 @@
 #include "op/copy.h"
 #include "op/gemm.h"
 #include "op/gemm_blockscaled.h"
-#include "op/native_intrinsic.h"
 
 #include "transform/common/constr_visitor.h"
 
@@ -130,7 +131,7 @@ private:
 
   Result Visit_(const CallObj *op) final {
     if (op->op.same_as(tl::ascend_set_hf32_mode())) {
-      const auto args = NativeIntrinsicOperands(op);
+      const auto args = DecodeCallOperands(op);
       ICHECK_EQ(args.size(), 1);
       const auto *mode = args[0].as<IntImmObj>();
       ICHECK(mode && mode->value.as<int64_t>().value() >= 0 &&
@@ -246,7 +247,8 @@ private:
   Result Visit_(const RegionStmtObj *op) final {
     // Block init/predicate logic is explicit native control flow in body.
     // The metadata payload is not an executed setter or GEMM.
-    if (!ReadTaskAttribute(op))
+    if (!IsAscendBlock(op) && !IsSemanticTask(op) && !IsScheduleUnit(op) &&
+        !IsStageScope(op) && !ReadSourceAttribute(op))
       for (const Expr &arg : op->args)
         Visit(arg);
     return Visit(op->body);
@@ -392,17 +394,23 @@ private:
       using StmtExprVisitor::Visit_;
       using Result = ffi::Optional<ffi::VisitInterrupt>;
       Result Visit_(const RegionStmtObj *op) override {
-        if (auto name = NativeBlockName(op);
+        if (auto name = BlockNameAtSourceBoundary(op);
             name && (*name == "SIMT_VF" || *name == "SIMD_VF")) {
-          auto fields =
-              ReadTaskAttribute(op)->value.cast<ScheduleUnitMetadata>();
-          if (auto annotations = fields.Get("annotations")) {
-            if (auto value = annotations->cast<ScheduleUnitMetadata>().Get(
-                    "tl.vf_latency")) {
-              auto integer = value->cast<PrimExpr>();
-              if (auto amount = TryConstInt(integer))
-                latency = std::max(latency, *amount);
-            }
+          ScheduleUnitMetadata annotations;
+          if (IsAscendBlock(op)) {
+            annotations = AscendBlockAnnotations(op);
+          } else {
+            auto fields =
+                ReadSourceAttribute(op)->value.cast<ScheduleUnitMetadata>();
+            if (auto value = fields.Get("annotations"))
+              annotations = value->cast<ScheduleUnitMetadata>();
+          }
+          if (auto value = annotations.Get("tl.vf_latency")) {
+            auto amount = value->try_cast<int64_t>();
+            if (!amount)
+              amount = TryConstInt(value->cast<PrimExpr>());
+            if (amount)
+              latency = std::max(latency, *amount);
           }
         }
         return Visit(op->body);
@@ -1259,7 +1267,7 @@ private:
 
     int64_t EstimateNd2NzScatterLatency(const CallObj *op) const {
       // InsertNd2Nz validates this template contract before EstimateLatency.
-      const auto args = NativeIntrinsicOperands(op);
+      const auto args = DecodeCallOperands(op);
       ICHECK_EQ(args.size(), 7U);
       auto rows = TryConstInt(args[2].as_or_throw<PrimExpr>());
       auto cols = TryConstInt(args[3].as_or_throw<PrimExpr>());
@@ -1305,7 +1313,7 @@ private:
     }
 
     Result Visit_(const CallObj *op) final {
-      if (op->op.as<OpObj>() && op->op.as<OpObj>()->name == "tl.annotation")
+      if (IsAnnotationCall(op))
         return std::nullopt;
       if (op->op.same_as(tl::ascend_nd2nz_scatter())) {
         // This opaque helper's loops, conversions and stores are absent from
@@ -1352,11 +1360,7 @@ private:
       const auto *callee = op->op.as<OpObj>();
       auto args = callee && callee->name.find("tl.tileop.") == 0
                       ? DecodeTileOpArguments(op).operands
-                      : (callee && Op::HasAttrMap(kNativeIntrinsicMinArgs) &&
-                                 Op::GetAttrMap(kNativeIntrinsicMinArgs)
-                                     .count(GetRef<Op>(callee))
-                             ? NativeIntrinsicOperands(op)
-                             : op->args);
+                      : DecodeCallOperands(op);
       for (const Expr &arg : args)
         Visit(arg);
       return std::nullopt;
@@ -1648,7 +1652,7 @@ public:
   }
 
   void RecordNd2NzPostCopy(const CallObj *op) {
-    const auto args = NativeIntrinsicOperands(op);
+    const auto args = DecodeCallOperands(op);
     ICHECK_EQ(args.size(), 7)
         << "tl.ascend_nd2nz_post_copy expects 7 arguments";
     int64_t element_bytes = Nd2NzElementBytes(args[6]);
@@ -1715,7 +1719,7 @@ public:
   // Resource analysis treats blocks as atomic scheduler operations. Preserve
   // the same boundary for cost features; VF cost is modeled from the block.
   Result Visit_(const RegionStmtObj *op) final {
-    if (NativeBlockName(op))
+    if (BlockNameAtSourceBoundary(op))
       return std::nullopt;
     return Visit(op->body);
 
@@ -1883,7 +1887,7 @@ private:
       Result Visit_(const CallObj *op) final {
         if (op->op.same_as(tl::ascend_cross_core_wait_flag()))
           ++count;
-        if (op->op.as<OpObj>() && op->op.as<OpObj>()->name == "tl.annotation")
+        if (IsAnnotationCall(op))
           return std::nullopt;
         return StmtExprVisitor::Visit_(op);
 
@@ -1965,7 +1969,7 @@ private:
 
 bool IsComposedLatencyStmt(const Stmt &stmt) {
   if (const auto *region = stmt.as<RegionStmtObj>();
-      region && NativeBlockName(region))
+      region && BlockNameAtSourceBoundary(region))
     return false;
   if (stmt.as<SeqStmtObj>() || stmt.as<RegionStmtObj>() || stmt.as<IfObj>() ||
       stmt.as<WhileObj>()) {
@@ -2046,10 +2050,10 @@ TaskCostEstimator::EstimateStmtCost(const Stmt &stmt,
     return result;
   }
   if (const auto *region = stmt.as<RegionStmtObj>()) {
-    if (NativeBlockName(region))
+    if (BlockNameAtSourceBoundary(region))
       return EstimateLeafTaskCost(stmt, outer_ctx);
     ConstrSet body_ctx = outer_ctx;
-    if (auto attr = ReadTaskAttribute(region);
+    if (auto attr = ReadSourceAttribute(region);
         attr && IsScheduleGuardAttribute(attr->key)) {
       if (auto condition = attr->node.try_cast<PrimExpr>();
           condition && SideEffect(*condition) <= CallEffectKind::kPure)
@@ -2180,7 +2184,7 @@ public:
   void EstimatePerCoreTask(const RegionStmtObj *op) {
     ICHECK_EQ(per_core_task_depth_, 0)
         << "Nested T.PerCoreTask regions are not supported";
-    TaskMetadata metadata = ParseTaskMetadata(ReadTaskAttribute(op)->node);
+    TaskMetadata metadata = ParseTaskMetadata(TaskAnnotations(op));
 
     std::vector<PerCoreTaskCandidate> saved_candidates;
     saved_candidates.swap(per_core_task_candidates_);
@@ -2276,18 +2280,18 @@ public:
   }
 
   Result Visit_(const RegionStmtObj *op) final {
-    if (auto attribute = ReadTaskAttribute(op)) {
-      if (attribute->key == tl::attr::kAscendTask) {
-        EstimateMarkedTask(GetRef<Stmt>(op), op->body, attribute->node);
-        return std::nullopt;
-      }
-      if (attribute->key == tl::attr::kAscendPerCoreTask) {
-        EstimatePerCoreTask(op);
-        return std::nullopt;
-      }
-      if (attribute->key == "tl.sblock")
-        FatalUnmarkedTask("EstimateLatency", "block");
+    if (IsAscendBlock(op))
+      FatalUnmarkedTask("EstimateLatency", "block");
+    if (IsTask(op)) {
+      EstimateMarkedTask(GetRef<Stmt>(op), op->body, TaskAnnotations(op));
+      return std::nullopt;
     }
+    if (IsPerCoreTask(op)) {
+      EstimatePerCoreTask(op);
+      return std::nullopt;
+    }
+    if (SourceBlockName(op))
+      FatalUnmarkedTask("EstimateLatency", "block");
     return ConstrVisitor::Visit_(op);
 
     return std::nullopt;
@@ -2321,16 +2325,15 @@ public:
     auto found = costs_.find(GetRef<Stmt>(op));
     if (found == costs_.end())
       return StmtExprMutator::Mutate_(op, mode);
-    auto attribute = ReadTaskAttribute(op);
-    ICHECK(attribute && IsSemanticTaskKey(attribute->key));
+    ICHECK(IsSemanticTask(op));
     RegionStmt result = GetRef<RegionStmt>(op);
-    if (attribute->key == attr::kAscendPerCoreTask)
+    if (IsPerCoreTask(op))
       result.CopyOnWrite()->body = Mutate(op->body).ValueOrUnchanged(op->body);
     TaskMetadata metadata;
     metadata.latency = found->second.latency;
     metadata.ii = found->second.ii;
-    return ReadTaskAttribute(result.get())
-        ->WithNode(MergeTaskMetadata(metadata, attribute->node));
+    return WithTaskAnnotations(
+        result, MergeTaskMetadata(metadata, TaskAnnotations(op)));
   }
 
 private:

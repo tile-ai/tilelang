@@ -10,6 +10,8 @@ import tvm_tirx
 from tilelang.ascend import transform as ascend
 from tvm_tirx import ir, tirx
 
+from testing.ascend._block import SEMANTIC_SCOPE_OPS, attribute as _scope_attribute, attribute_fields as _scope_fields, has_attribute
+
 SCHEDULED_BIND = "tl.ascend.scheduled_bind"
 
 
@@ -62,25 +64,21 @@ def fill(dst, value, *, indices=None, shape=None):
 
 
 def annotation(values):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")(values)
-    return ir.Evaluate(ir.Call("tl.annotation", [payload], attrs={"schema_version": 1, "annotation_schema": schema}))
+    return tvm_ffi.get_global_func("tl.MakeAnnotation")(values, ir.UnknownLoc())
 
 
 def attribute(node, key, value, body, *, loc=None):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": node, "key": key, "value": value})
     if not isinstance(body, ir.SeqStmt):
         body = ir.SeqStmt(body if isinstance(body, (list, tuple)) else [body])
-    return ir.RegionStmt(
-        "tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body, loc=ir.UnknownLoc() if loc is None else loc
-    )
+    return _scope_attribute(node, key, value, body, loc=loc)
 
 
 def attribute_fields(node):
-    return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.args[0], node.attrs["annotation_schema"])
+    return _scope_fields(node)
 
 
 def attributes(value, key):
-    return [node for node in nodes(value, ir.RegionStmt) if node.op.name == "tl.attr" and attribute_fields(node)["key"] == key]
+    return [node for node in nodes(value, ir.RegionStmt) if has_attribute(node, key)]
 
 
 def scheduled_fields(node):
@@ -91,7 +89,10 @@ def scheduled_fields(node):
         or node.value.op.name != SCHEDULED_BIND
     ):
         return None
-    return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.value.args[1], node.value.attrs["annotation_schema"])
+    attrs = node.value.attrs
+    if "annotation_schema" in attrs:
+        return tvm_ffi.get_global_func("tl.DecodeAnnotations")(node.value.args[1], attrs["annotation_schema"])
+    return {key: value for key, value in attrs.items() if key != "tl.source_annotation_keys"}
 
 
 def scheduled_bind(binding, stage, task):
@@ -120,9 +121,14 @@ def kernel(
     # variable operands are statements after those definitions.
     constants, operands = {}, {}
     for key, value in (annotations or {}).items():
+        # Layout declarations always follow allocation definitions. Their
+        # TensorVar keys are uses even when the layout itself is constant.
+        if key == "layout_map":
+            operands[key] = value
+            continue
         variables = []
-        # The annotation codec visits expression-valued map keys as operands;
-        # generic Map reflection does not expose those keys as SSA uses.
+        # Other source metadata still carries expression-valued map keys in
+        # explicit Tuple operands rather than static root attributes.
         _, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({key: value})
         tvm_ffi.structural_walk(payload, (ir.Var, variables.append))
         (operands if variables else constants)[key] = value
@@ -155,12 +161,20 @@ def calls(value, name):
     return [node for node in nodes(value, ir.Call) if isinstance(node.op, ir.Op) and node.op.name == name]
 
 
+def is_annotation(call):
+    return (
+        isinstance(call, ir.Call)
+        and isinstance(call.op, ir.Op)
+        and (call.op.same_as(ir.Op.get("tl.layout_map")) or call.op.same_as(ir.Op.get("tl.annotation")))
+    )
+
+
 def annotations(value):
     for call in nodes(value, ir.Call):
-        if isinstance(call.op, ir.Op) and call.op.name == "tl.annotation":
-            yield tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[0], call.attrs["annotation_schema"])
+        if is_annotation(call):
+            yield tvm_ffi.get_global_func("tl.ReadAnnotations")(call)
     for node in nodes(value, ir.RegionStmt):
-        if node.op.name != "tl.attr":
+        if node.op.name not in {"tl.attr", "tl.ascend_block"}:
             continue
         fields = attribute_fields(node)
         if fields["key"] == "tl.sblock":
@@ -191,8 +205,8 @@ def loop_annotations(loop):
                     read(statement.body)
             elif isinstance(statement, ir.Evaluate) and isinstance(statement.value, ir.Call):
                 call = statement.value
-                if isinstance(call.op, ir.Op) and call.op.name == "tl.annotation":
-                    merge(tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[0], call.attrs["annotation_schema"]))
+                if is_annotation(call):
+                    merge(tvm_ffi.get_global_func("tl.ReadAnnotations")(call))
 
     inner = loop
     while (
@@ -238,7 +252,7 @@ def schedule_snapshots(program, pass_names, *, auto_schedule=True, infer_layouts
 
     def use_source_order(mod):
         def assign_region(node):
-            if node.op.name != "tl.attr":
+            if node.op.name not in SEMANTIC_SCOPE_OPS:
                 return node
             fields = attribute_fields(node)
             if fields["key"] == "tl.schedule_unit" and int(fields["node"]["stage"]) < 0:
@@ -381,7 +395,7 @@ def single_statement(value):
 
 
 def attribute_key(value):
-    return attribute_fields(value)["key"] if isinstance(value, ir.RegionStmt) and value.op.name == "tl.attr" else None
+    return attribute_fields(value)["key"] if isinstance(value, ir.RegionStmt) and value.op.name in SEMANTIC_SCOPE_OPS else None
 
 
 def sblocks(value, name=None):
@@ -592,8 +606,8 @@ def sblock_annotations(block):
                 collect(statement)
             elif isinstance(statement, ir.Evaluate) and isinstance(statement.value, ir.Call):
                 call = statement.value
-                if isinstance(call.op, ir.Op) and call.op.name == "tl.annotation":
-                    merge(tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[0], call.attrs["annotation_schema"]))
+                if is_annotation(call):
+                    merge(tvm_ffi.get_global_func("tl.ReadAnnotations")(call))
 
     collect(block.body)
     return result

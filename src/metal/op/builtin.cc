@@ -4,13 +4,34 @@
  */
 #include "builtin.h"
 
+#include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/tirx/op/attr.h>
 #include <tvm/tirx/op/memory.h>
 #include <tvm/tirx/type.h>
 
-#include "op/native_intrinsic.h"
+#include "ir/annotations.h"
 
 namespace tvm::tl {
 namespace {
+
+// Cooperative instructions mutate fragment storage. Native rewrites use void;
+// source wrappers also carry an ignored primitive or handle result.
+Type InferCooperativeInstruction(const CallObj *call) {
+  TVM_FFI_CHECK_LE(call->ty_args.size(), 1U, TypeError);
+  const Type result = !call->ty_args.empty()           ? call->ty_args[0]
+                      : !call->ty.as<MissingTypeObj>() ? call->ty
+                                                       : Type(PrimType::Void());
+  TVM_FFI_CHECK(result.as<PrimType>() || result.as<PtrType>(), TypeError)
+      << "Metal cooperative instruction requires a primitive or pointer result";
+  return result;
+}
+
+void ValidateCooperativeResult(const CallObj *call) {
+  TVM_FFI_CHECK(
+      ffi::StructuralEqual()(InferCooperativeInstruction(call), call->ty),
+      TypeError)
+      << "Cooperative result type disagrees with its type argument";
+}
 
 void ValidateIndex(const Expr &expr) {
   const auto value = expr.as_or_throw<IntExpr>();
@@ -48,8 +69,12 @@ void ValidateFragment(const Expr &expr) {
   }
 }
 
-void ValidateFill(Call call) {
-  const auto args = NativeIntrinsicOperands(call.get());
+void ValidateFill(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 5U, ValueError)
+      << "Metal cooperative instruction has the wrong number of runtime "
+         "operands";
+  ValidateCooperativeResult(call);
   ValidateFragment(args[0]);
   ValidateIndex(args[1]);
   args[2].as_or_throw<PrimExpr>();
@@ -57,8 +82,12 @@ void ValidateFill(Call call) {
   ValidateDimension(args[4]);
 }
 
-void ValidateTransfer(Call call) {
-  const auto args = NativeIntrinsicOperands(call.get());
+void ValidateTransfer(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 11U, ValueError)
+      << "Metal cooperative instruction has the wrong number of runtime "
+         "operands";
+  ValidateCooperativeResult(call);
   ValidateFragment(args[0]);
   ValidateIndex(args[1]);
   const auto pointer = args[2]->ty.as_or_throw<PtrType>();
@@ -74,8 +103,12 @@ void ValidateTransfer(Call call) {
   ValidateIndex(args[10]);
 }
 
-void ValidateMMA(Call call) {
-  const auto args = NativeIntrinsicOperands(call.get());
+void ValidateMMA(const CallObj *call) {
+  const auto args = DecodeCallOperands(call);
+  TVM_FFI_CHECK_EQ(args.size(), 13U, ValueError)
+      << "Metal cooperative instruction has the wrong number of runtime "
+         "operands";
+  ValidateCooperativeResult(call);
   for (int i = 0; i < 8; i += 2) {
     ValidateFragment(args[i]);
     ValidateIndex(args[i + 1]);
@@ -107,24 +140,53 @@ const Op &cooperative_tensor_multiply_accumulate() {
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
-  {
-    OpDef def("tl.cooperative_tensor_fill");
-    DefineNativeIntrinsic(def, 5, 5, CallEffectKind::kOpaque);
-    def.set_attr(kNativeIntrinsicExtraValidator,
-                 NativeIntrinsicExtraValidator(ValidateFill));
-  }
+  OpDef("tl.cooperative_tensor_fill")
+      .set_validator(ffi::reflection::NativeFunctionView<void(
+                         const CallObj *)>::FromNative<&ValidateFill>())
+      .signature(sig::arg<Expr>("fragment"),
+                 sig::arg<IntExpr>("fragment_index"),
+                 sig::arg<PrimExpr>("value"), sig::arg<IntImm>("rows"),
+                 sig::arg<IntImm>("columns"),
+                 sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<Type>("statement_type"))
+      .set_native_fn_attr<&InferCooperativeInstruction>(
+          tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
   for (const char *name :
        {"tl.cooperative_tensor_load", "tl.cooperative_tensor_store"}) {
-    OpDef def(name);
-    DefineNativeIntrinsic(def, 11, 11, CallEffectKind::kOpaque);
-    def.set_attr(kNativeIntrinsicExtraValidator,
-                 NativeIntrinsicExtraValidator(ValidateTransfer));
+    OpDef(name)
+        .set_validator(ffi::reflection::NativeFunctionView<void(
+                           const CallObj *)>::FromNative<&ValidateTransfer>())
+        .signature(
+            sig::arg<Expr>("fragment"), sig::arg<IntExpr>("fragment_index"),
+            sig::arg<Expr>("pointer"), sig::arg<IntExpr>("stride"),
+            sig::arg<IntImm>("rows"), sig::arg<IntImm>("columns"),
+            sig::arg<PrimExpr>("transpose"), sig::arg<IntImm>("simd_groups"),
+            sig::arg<IntImm>("simd_rows"), sig::arg<IntImm>("simd_columns"),
+            sig::arg<IntExpr>("simd_group_index"),
+            sig::var_args<tvm::Tuple>("annotation_payload"),
+            sig::var_ty_args<Type>("statement_type"))
+        .set_native_fn_attr<&InferCooperativeInstruction>(
+            tvm::op_attr::kInferType)
+        .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+        .set_attr(tirx::op_attr::kVectorizable, false);
   }
-  {
-    OpDef def("tl.cooperative_tensor_multiply_accumulate");
-    DefineNativeIntrinsic(def, 13, 13, CallEffectKind::kOpaque);
-    def.set_attr(kNativeIntrinsicExtraValidator,
-                 NativeIntrinsicExtraValidator(ValidateMMA));
-  }
+  OpDef("tl.cooperative_tensor_multiply_accumulate")
+      .set_validator(ffi::reflection::NativeFunctionView<void(
+                         const CallObj *)>::FromNative<&ValidateMMA>())
+      .signature(sig::arg<Expr>("d"), sig::arg<IntExpr>("d_index"),
+                 sig::arg<Expr>("a"), sig::arg<IntExpr>("a_index"),
+                 sig::arg<Expr>("b"), sig::arg<IntExpr>("b_index"),
+                 sig::arg<Expr>("c"), sig::arg<IntExpr>("c_index"),
+                 sig::arg<IntImm>("m"), sig::arg<IntImm>("n"),
+                 sig::arg<IntImm>("k"), sig::arg<PrimExpr>("transpose_a"),
+                 sig::arg<PrimExpr>("transpose_b"),
+                 sig::var_args<tvm::Tuple>("annotation_payload"),
+                 sig::var_ty_args<Type>("statement_type"))
+      .set_native_fn_attr<&InferCooperativeInstruction>(
+          tvm::op_attr::kInferType)
+      .set_attr(tvm::op_attr::kCallEffectKind, CallEffectKind::kOpaque)
+      .set_attr(tirx::op_attr::kVectorizable, false);
 }
 } // namespace tvm::tl

@@ -4,8 +4,9 @@
  */
 #include "cuda/op/builtin.h"
 #include "cuda/target_utils.h"
-#include "op/native_intrinsic.h"
-#include "transform/common/native_layout_utils.h"
+#include "ir/annotations.h"
+#include "op/builtin.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/analysis.h>
@@ -56,10 +57,11 @@ bool IsShared(const Type &type) {
 
 bool ContainsShared(const Expr &expression) {
   bool found = IsShared(expression->ty);
-  VisitNativePostOrder(expression, [&](const ObjectRef &object) {
-    if (const auto *value = object.as<ExprObj>())
-      found |= IsShared(value->ty);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      expression, [&](const ExprObj *value) -> ffi::Expected<ffi::WalkResult> {
+        found |= IsShared(value->ty);
+        return ffi::WalkResult::Advance();
+      });
   return found;
 }
 
@@ -72,9 +74,9 @@ bool MayWriteThrough(const Expr &expression) {
   if (expression.as<TensorLoadObj>())
     return false;
   if (const auto *call = expression.as<CallObj>()) {
-    if (call->op.same_as(Op::Get("tl.access_ptr")) ||
-        call->op.same_as(Op::Get("tl.ptr_access"))) {
-      size_t mask_index = call->op.same_as(Op::Get("tl.access_ptr")) ? 2 : 3;
+    if (call->op.same_as(tl::access_ptr()) ||
+        call->op.same_as(tl::ptr_access())) {
+      size_t mask_index = call->op.same_as(tl::access_ptr()) ? 2 : 3;
       if (call->args.size() <= mask_index)
         return ContainsShared(expression);
       if (!ContainsShared(call->args[0]))
@@ -128,8 +130,8 @@ ProxyEvent ClassifyCall(const CallObj *call) {
   // do not execute. Decode intrinsic tails before querying pointer contracts.
   Array<Expr> arguments = call->args;
   if (const auto *op = call->op.as<OpObj>();
-      op && op->name.find("tl.") == 0 && op->name != "tl.annotation")
-    arguments = NativeIntrinsicOperands(call);
+      op && op->name.find("tl.") == 0 && !IsAnnotationCall(call))
+    arguments = DecodeCallOperands(call);
   for (const Expr &argument : arguments)
     if (MayWriteThrough(argument))
       return ProxyEvent::kGeneric;

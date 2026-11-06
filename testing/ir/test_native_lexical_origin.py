@@ -22,7 +22,7 @@ def test_explicit_allocation_origin_survives_each_carrier(carrier):
     else:
         body = [annotation({"lexical_alloc_scope": 1}), *body]
     original = function([], body)
-    lowered = transform.FinalizeAnnotations()(ir.IRModule({"main": original}))["main"]
+    lowered = transform.LowerSourceAnnotations()(ir.IRModule({"main": original}))["main"]
     assert tirx.analysis.check_well_formed(lowered)
     marked = [node for node in scopes(lowered) if node.attrs.get("explicit_alloc_scope", False)]
     assert len(marked) == 1
@@ -30,7 +30,7 @@ def test_explicit_allocation_origin_survives_each_carrier(carrier):
     restored = ir.load_json(ir.save_json(lowered))
     assert len([node for node in scopes(restored) if node.attrs.get("explicit_alloc_scope", False)]) == 1
     ir.assert_structural_equal(lowered, restored)
-    repeated = transform.FinalizeAnnotations()(ir.IRModule({"main": lowered}))["main"]
+    repeated = transform.LowerSourceAnnotations()(ir.IRModule({"main": lowered}))["main"]
     ir.assert_structural_equal(lowered, repeated)
 
 
@@ -38,7 +38,7 @@ def test_unmarked_block_keeps_definition_scope_without_inventing_explicit_origin
     scratch = tensor("scratch", [4])
     body = [attribute(None, "tl.sblock", {"name": "ordinary"}, [allocate(scratch)])]
     original = function([], body)
-    lowered = transform.FinalizeAnnotations()(ir.IRModule({"main": original}))["main"]
+    lowered = transform.LowerSourceAnnotations()(ir.IRModule({"main": original}))["main"]
     (scope,) = scopes(lowered)
     assert "explicit_alloc_scope" not in scope.attrs
     assert tirx.analysis.check_well_formed(lowered)

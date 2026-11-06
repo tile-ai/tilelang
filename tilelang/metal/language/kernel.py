@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from tilelang.language import _native as tirx
+from tvm_tirx import ir as _ir
+
 
 from tilelang.language.kernel import KernelLaunchFrame, kernel_launch_factory, launch_kernel
 
@@ -11,7 +12,7 @@ __all__ = ["Kernel"]
 
 @kernel_launch_factory
 def Kernel(
-    *blocks: int | tirx.PrimExpr,
+    *blocks: int | _ir.Expr,
     threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
 ) -> KernelLaunchFrame:

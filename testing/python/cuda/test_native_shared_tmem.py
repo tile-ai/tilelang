@@ -279,8 +279,9 @@ def test_two_cta_allocation_and_release_keep_matching_metadata(tmp_path):
     result = apply([allocate(value), *statements([value])], tmp_path, two_cta=True)
     for name in ("tl.ptx_init_tensor_memory", "tl.ptx_deallocate_tensor_memory"):
         (call,) = calls(result, name)
-        hints = tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[-1], call.attrs["annotation_schema"])
-        assert int(hints["use_2cta"]) == 1
+        assert len(call.args) == 2
+        assert int(call.attrs["use_2cta"]) == 1
+        assert "annotation_schema" not in call.attrs
     assert len(calls(result, "tl.cluster_sync")) == 1
 
 
@@ -383,6 +384,8 @@ def test_consumed_tmem_layout_metadata_does_not_retype_other_storage(placement, 
         body.extend(nested)
     result = apply(body, tmp_path)
     remaining = []
+    for call in calls(result, "tl.layout_map"):
+        remaining.append({"layout_map": call.attrs["layout_map"]})
     for call in calls(result, "tl.annotation"):
         remaining.append(tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[-1], call.attrs["annotation_schema"]))
     for region in objects(result, ir.RegionStmt):

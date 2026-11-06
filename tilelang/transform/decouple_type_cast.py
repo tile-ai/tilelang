@@ -14,7 +14,7 @@ from tvm_tirx.ir import prim
 
 from tilelang._analyzer import create_analyzer
 from tilelang.analysis._visitor import tensor_scope
-from tilelang.language._native import encode_annotations
+from tilelang.language._annotation_codec import encode_annotations
 
 
 _IF_THEN_ELSE_OP = ir.Op.get("prim.if_then_else")

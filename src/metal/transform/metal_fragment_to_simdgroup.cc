@@ -3,9 +3,10 @@
  * \brief Preserve logical GEMM regions until opaque per-warp storage lowering.
  */
 #include "ir/alias_analysis.h"
+#include "ir/annotations.h"
 #include "metal/target_utils.h"
-#include "op/native_utils.h"
-#include "transform/common/native_layout_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
+#include <tvm/tirx/stmt_functor.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/transform.h>
@@ -120,31 +121,35 @@ tirx::Function Promote(tirx::Function function) {
   if (collector->root_warps.empty())
     return function;
   auto promoter = make_object<AccumulatorPromoter>();
-  VisitNativePostOrder(function->body, [&](const ObjectRef &node) {
-    auto tensor = node.as<TensorVar>();
-    if (!tensor || tensor.value().scope().name() != "local.fragment")
-      return;
-    auto root = roots.Root(*tensor);
-    if (!root)
-      return;
-    auto warps = collector->root_warps.Get(*root);
-    if (!warps)
-      return;
-    BigInt elements = 1;
-    for (const PrimExpr &dim : tensor.value().shape()) {
-      const auto *extent = dim.as<IntImmObj>();
-      TVM_FFI_CHECK(extent && extent->value > 0, ValueError)
-          << "Metal SIMD-group accumulators require positive static shapes";
-      elements = elements * extent->value;
-    }
-    auto count = elements.as<int64_t>();
-    TVM_FFI_CHECK(count && *warps <= std::numeric_limits<int64_t>::max() / 64,
-                  ValueError)
-        << "Metal accumulator storage size exceeds int64";
-    TVM_FFI_CHECK_EQ(*count % (64 * *warps), 0, ValueError)
-        << "Each warp must own complete 8x8 Metal accumulator matrices";
-    promoter->physical_elements.Set(*tensor, *count / *warps);
-  });
+  ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+      function->body,
+      [&](const ObjectRef &node) -> ffi::Expected<ffi::WalkResult> {
+        auto tensor = node.as<TensorVar>();
+        if (!tensor || tensor.value().scope().name() != "local.fragment")
+          return ffi::WalkResult::Advance();
+        auto root = roots.Root(*tensor);
+        if (!root)
+          return ffi::WalkResult::Advance();
+        auto warps = collector->root_warps.Get(*root);
+        if (!warps)
+          return ffi::WalkResult::Advance();
+        BigInt elements = 1;
+        for (const PrimExpr &dim : tensor.value().shape()) {
+          const auto *extent = dim.as<IntImmObj>();
+          TVM_FFI_CHECK(extent && extent->value > 0, ValueError)
+              << "Metal SIMD-group accumulators require positive static shapes";
+          elements = elements * extent->value;
+        }
+        auto count = elements.as<int64_t>();
+        TVM_FFI_CHECK(count &&
+                          *warps <= std::numeric_limits<int64_t>::max() / 64,
+                      ValueError)
+            << "Metal accumulator storage size exceeds int64";
+        TVM_FFI_CHECK_EQ(*count % (64 * *warps), 0, ValueError)
+            << "Each warp must own complete 8x8 Metal accumulator matrices";
+        promoter->physical_elements.Set(*tensor, *count / *warps);
+        return ffi::WalkResult::Advance();
+      });
   SeqStmt body =
       promoter->Mutate(function->body).ValueOrUnchanged(function->body);
   function.CopyOnWrite()->body = std::move(body);

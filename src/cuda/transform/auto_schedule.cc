@@ -20,6 +20,7 @@
  * coverage).
  */
 
+#include "layout/expr_utils.h"
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/target/target.h>
@@ -72,10 +73,10 @@ SchedulerFn FindScheduler(const ffi::String &name) {
 
 tirx::Function AutoWarpSpecializationImpl(tirx::Function func,
                                           SchedulerFn scheduler) {
-  return RewriteNativeWSKernels(
+  return RewriteWSKernels(
       std::move(func),
-      [scheduler](NativeWSKernel kernel, PrimVar,
-                  Target target) -> Optional<NativeWSResult> {
+      [scheduler](WSKernelAnalysis kernel, PrimVar,
+                  Target target) -> Optional<WSKernelRewriteResult> {
         auto threads = TryConstInt(kernel.threads);
         if (!threads || *threads == 0 ||
             kernel.annotations.count(kWSScheduleKey) ||
@@ -89,8 +90,8 @@ tirx::Function AutoWarpSpecializationImpl(tirx::Function func,
         if (!schedule)
           return std::nullopt;
         kernel.annotations.Set(kWSScheduleKey, *schedule);
-        return NativeWSResult{RebuildNativeWSKernel(kernel, *body),
-                              std::nullopt};
+        return WSKernelRewriteResult{RebuildWSKernel(kernel, *body),
+                                     std::nullopt};
       });
 }
 

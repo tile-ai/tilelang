@@ -5,13 +5,14 @@ import tvm_ffi
 from tvm_tirx import ir, tirx
 
 from tilelang.ascend import language as T
+from testing.ascend._ir import scheduled_fields
 
 from test_native_ascend_core_placement import _assign, _copy, _kernel as _raw_kernel
 from test_native_ascend_dual_copy import _materialize
 from test_native_ascend_ops import function, strided_tensor, subregion
 from test_native_ascend_schedule_units import _attributes, _fields, _scheduled_bind, _task
 from test_native_cuda_copy import calls
-from test_native_reducer_contracts import allocate, annotation, attribute, decoded, integer, objects, region, run_pass, tensor, tileop
+from test_native_reducer_contracts import allocate, annotation, attribute, integer, objects, region, run_pass, tensor, tileop
 
 
 def _unit(body, core=7, *, stage=0, sid=None, guard=None, metadata=None):
@@ -59,7 +60,7 @@ def _resolve(value):
 
 def _binding_mask(value, var):
     (bind,) = [bind for bind in objects(value, ir.Bind) if bind.var.same_as(var)]
-    return int(decoded(bind.value)[1]["task"]["core_mask"])
+    return int(scheduled_fields(bind)["task"]["core_mask"])
 
 
 def _tasks(value):

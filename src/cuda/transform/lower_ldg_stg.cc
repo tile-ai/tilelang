@@ -7,6 +7,7 @@
  * is not proof that a strided or swizzled tensor is physically contiguous.
  */
 
+#include "op/builtin.h"
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/prim/op.h>
@@ -77,8 +78,7 @@ public:
   UnchangedOr<Expr> Mutate_(const CallObj *call, InplaceMode mode) final {
     // TensorLoad under these operators denotes an addressable element. It is
     // not a memory read, including on a second invocation of this pass.
-    if (call->op.same_as(address_of_op()) ||
-        call->op.same_as(Op::Get("tl.access_ptr")))
+    if (call->op.same_as(address_of_op()) || call->op.same_as(tl::access_ptr()))
       return ffi::Unchanged();
     if (predicated_ && call->op.same_as(if_then_else_op()) &&
         call->args.size() == 3 && PositiveZero(call->args[2])) {

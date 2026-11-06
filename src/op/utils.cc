@@ -4,6 +4,7 @@
  */
 
 #include "utils.h"
+#include "ir/tensor_utils.h"
 
 #include <cmath>
 

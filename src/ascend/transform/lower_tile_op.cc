@@ -2,11 +2,14 @@
  * \file ascend/transform/lower_tile_op.cc
  * \brief Native Ascend lowering and retirement of validated MX slot handles.
  */
+#include "ascend/ir/block.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
 #include "ir/analyzer.h"
+#include "ir/annotations.h"
 #include "ir/lexical_scope.h"
-#include "transform/common/native_layout_utils.h"
+#include "layout/expr_utils.h"
+#include <tvm/ffi/extra/structural_visit.h>
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/analysis.h>
@@ -151,38 +154,42 @@ public:
       members.insert(data.get());
     }
     Map<Var, int64_t> versions;
-    VisitNativePostOrder(body, [&](const ffi::ObjectRef &object) {
-      const auto *call = object.as<CallObj>();
-      if (!call || !call->op.same_as(Op::Get("tl.annotation")))
-        return;
-      auto fields = ReadNativeAnnotations(call);
-      auto value = fields.Get(kPhysicalVersion);
-      if (!value)
-        return;
-      for (const auto &[key, count_value] : value->cast<Map<Any, Any>>()) {
-        Var storage = key.cast<Var>();
-        if (!members.count(storage.get()))
-          continue;
-        auto count = count_value.try_cast<int64_t>();
-        if (!count) {
-          auto expression = count_value.try_cast<PrimExpr>();
-          if (expression && expression->ty().IsScalar() &&
-              !expression->ty().MatchesCode(kDLBool))
-            count = TryConstInt(*expression);
-        }
-        // The FFI integer conversion also accepts a bare boolean.
-        TVM_FFI_CHECK(count_value.type_index() != ffi::TypeIndex::kTVMFFIBool &&
-                          count && *count > 0 &&
-                          *count <= std::numeric_limits<int>::max(),
-                      ValueError)
-            << "L0 SF physical version count must be a positive int32 constant";
-        if (auto previous = versions.Get(storage))
-          TVM_FFI_CHECK_EQ(*previous, *count, ValueError)
-              << "Conflicting L0 SF physical version counts for "
-              << storage->name;
-        versions.Set(storage, *count);
-      }
-    });
+    ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
+        body, [&](const CallObj *call) -> ffi::Expected<ffi::WalkResult> {
+          if (!IsAnnotationCall(call))
+            return ffi::WalkResult::Advance();
+
+          auto fields = ReadAnnotations(call);
+          auto value = fields.Get(kPhysicalVersion);
+          if (!value)
+            return ffi::WalkResult::Advance();
+          for (const auto &[key, count_value] : value->cast<Map<Any, Any>>()) {
+            Var storage = key.cast<Var>();
+            if (!members.count(storage.get()))
+              continue;
+            auto count = count_value.try_cast<int64_t>();
+            if (!count) {
+              auto expression = count_value.try_cast<PrimExpr>();
+              if (expression && expression->ty().IsScalar() &&
+                  !expression->ty().MatchesCode(kDLBool))
+                count = TryConstInt(*expression);
+            }
+            // The FFI integer conversion also accepts a bare boolean.
+            TVM_FFI_CHECK(count_value.type_index() !=
+                                  ffi::TypeIndex::kTVMFFIBool &&
+                              count && *count > 0 &&
+                              *count <= std::numeric_limits<int>::max(),
+                          ValueError)
+                << "L0 SF physical version count must be a positive int32 "
+                   "constant";
+            if (auto previous = versions.Get(storage))
+              TVM_FFI_CHECK_EQ(*previous, *count, ValueError)
+                  << "Conflicting L0 SF physical version counts for "
+                  << storage->name;
+            versions.Set(storage, *count);
+          }
+          return ffi::WalkResult::Advance();
+        });
     auto analyzer = CreateTileLangAnalyzer();
     for (const auto &[sf, data] : bindings_) {
       auto count = versions.Get(sf);
@@ -205,9 +212,9 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const EvaluateObj *op, InplaceMode mode) final {
     const auto *call = op->value.as<CallObj>();
-    if (!call || !call->op.same_as(Op::Get("tl.annotation")))
+    if (!IsAnnotationCall(call))
       return StmtExprMutator::Mutate_(op, mode);
-    auto metadata = ReadNativeAnnotations(call);
+    auto metadata = ReadAnnotations(call);
     bool changed = metadata.count(kL0SFBindings);
     metadata.erase(kL0SFBindings);
     if (auto value = metadata.Get(kPhysicalVersion)) {
@@ -242,9 +249,17 @@ public:
     auto rewritten = StmtExprMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                          .as_or_throw<RegionStmt>();
+    if (IsAscendBlock(rewritten.get())) {
+      auto metadata = AscendBlockAnnotations(rewritten.get());
+      if (!metadata.count(kL0SFBindings))
+        return rewritten;
+      metadata.erase(kL0SFBindings);
+      return MakeAscendBlock(AscendBlockName(rewritten.get()), metadata,
+                             rewritten->body, rewritten->loc);
+    }
     if (op->op->name != "tl.attr")
       return rewritten;
-    auto fields = ReadNativeAnnotations(rewritten.get());
+    auto fields = ReadAnnotations(rewritten.get());
     String key = fields.at("key").cast<String>();
     if (key == kL0SFBindings) {
       TVM_FFI_CHECK(op->body_params.empty() && op->result_vars.empty(),
@@ -309,9 +324,6 @@ public:
 Function RetireSFHandles(Function function) {
   if (function->GetAttr(tvm::attr::kDeclaration).value_or(false))
     return function;
-  TVM_FFI_CHECK(function->GetAttr<bool>("tl.tile_ops_lowered").value_or(false),
-                ValueError)
-      << "SF retirement requires successful TileLang operation lowering";
   auto definitions = ffi::make_object<TensorDefinitions>();
   definitions->Visit(function->body);
   auto bindings = CollectL0SFBindings(function->body);

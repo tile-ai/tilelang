@@ -9,7 +9,7 @@ from itertools import product
 
 import tvm_ffi
 from tvm_tirx import ir, sym, tirx
-from testing.ascend._ir import allocated_tensors, annotations, attribute_fields, attributes, nodes, scheduled_fields
+from testing.ascend._ir import is_annotation, allocated_tensors, annotations, attribute_fields, attributes, nodes, scheduled_fields
 from testing.ascend.auto_schedule._finite_protocol_events import extract, memory_signature
 from testing.ascend.auto_schedule._finite_protocol_order import prove
 
@@ -49,7 +49,6 @@ _SCHEMAS = {
 _CALLS = {
     "tirx.alloc_tensor",
     "tl.ascend.scheduled_bind",
-    "tl.annotation",
     "tl.tileop.ascend_copy",
     "tl.ascend_pipe_barrier",
     "tl.ascend_set_flag",
@@ -129,7 +128,9 @@ def _domain(module, case):
             "Unmodeled runtime memory predicate"
         )
     calls = nodes(module, ir.Call)
-    assert all(isinstance(call.op, ir.Op) and call.op.name in _CALLS for call in calls), "Unmodeled call or alias view"
+    assert all(is_annotation(call) or (isinstance(call.op, ir.Op) and call.op.name in _CALLS) for call in calls), (
+        "Unmodeled call or alias view"
+    )
     for binding in nodes(module, ir.Bind):
         fields = scheduled_fields(binding)
         assert fields is not None, "Unmodeled unscheduled binding"

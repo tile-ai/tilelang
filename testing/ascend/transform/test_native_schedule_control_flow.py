@@ -7,6 +7,7 @@ import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from tilelang.testing.packed import compile_packed_function
+from testing.ascend._block import attribute as _scope_attribute
 
 
 def integer(value, dtype="int32"):
@@ -24,8 +25,7 @@ def objects(value, kind):
 
 
 def attribute(key, value, body):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"node": None, "key": key, "value": value})
-    return ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, body)
+    return _scope_attribute(None, key, value, body)
 
 
 def root(body):
@@ -45,7 +45,7 @@ def apply(name, function):
 
 def compile_native(function, tmp_path):
     function = function.with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("c"))
-    module = tvm_ffi.get_global_func("tl.transform.FinalizeAnnotations")("c")(ir.IRModule({"main": function}))
+    module = tvm_ffi.get_global_func("tl.transform.LowerSourceAnnotations")()(ir.IRModule({"main": function}))
     (tmp_path / "lowered.json").write_text(ir.save_json(module))
     return compile_packed_function(module)
 

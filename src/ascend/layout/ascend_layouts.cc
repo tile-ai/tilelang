@@ -18,6 +18,7 @@
 #include "layout/expr_utils.h"
 #include "layout/layout.h"
 #include "layout/payload.h"
+#include "layout/printer.h"
 
 namespace tvm {
 namespace tl {
@@ -79,6 +80,22 @@ public:
 private:
   int kind_{-1};
 };
+
+ffi::Optional<script::printer::ExprDoc>
+AscendLayoutDocTranslate(script::printer::DocTranslatorObj *translator,
+                         ffi::AnyView input, const ffi::Object *) {
+  using namespace script::printer;
+  auto layout = input.cast<Layout>();
+  auto tagged = layout.as<AscendFractalLayoutNode>();
+  return LayoutMappingDoc(
+      translator, layout,
+      NamespaceDoc("tilelang")
+          ->Attr("layout")
+          ->Attr("ascend")
+          ->Attr("_AscendFractalLayout"),
+      {"kind"},
+      {LiteralDoc::Int(static_cast<int>(tagged->Kind()), std::nullopt)});
+}
 
 Layout MakeTaggedAscendFractalLayout(Array<PrimExpr> input_size,
                                      Array<PrimExpr> forward_index,
@@ -479,6 +496,27 @@ Expr MakeStridedSlice(const TensorVar &phys_buf, const Layout &layout,
 TVM_FFI_STATIC_INIT_BLOCK() {
   namespace refl = reflection;
   AscendFractalLayoutNode::RegisterReflection();
+  ffi::reflection::TypeAttrDef<AscendFractalLayoutNode>().attr(
+      script::printer::type_attr::kDocTranslate.name,
+      script::printer::FDocTranslate::FromNative<&AscendLayoutDocTranslate>());
+  ffi::reflection::GlobalDef().def(
+      "tl.AscendFractalLayout_from_mapping",
+      [](Array<PrimExpr> shape, LambdaExpr mapping, int kind) {
+        TVM_FFI_CHECK(kind >= 0 && kind <= 3, ValueError)
+            << "Unknown Ascend fractal layout kind";
+        TVM_FFI_CHECK_EQ(mapping->vars.size(), shape.size() + 1, ValueError);
+        Array<Expr> coords{ReplicationPlaceholder()};
+        for (size_t i = 0; i < shape.size(); ++i)
+          coords.push_back(InputPlaceholder(i));
+        auto body = mapping->Apply(coords).as_or_throw<tvm::Tuple>();
+        TVM_FFI_CHECK_EQ(body->fields.size(), 2U, ValueError);
+        TVM_FFI_CHECK(prim::IsZero(body->fields[1].as_or_throw<PrimExpr>()),
+                      ValueError);
+        auto indices = body->fields[0].as_or_throw<tvm::Tuple>()->fields.Map(
+            [](const Expr &expr) { return expr.as_or_throw<PrimExpr>(); });
+        return MakeTaggedAscendFractalLayout(
+            shape, indices, static_cast<AscendFractalKind>(kind));
+      });
   RegisterLayoutPayloadCodec({"tl.AscendFractalLayout", "ascend.fractal",
                               EncodeAscendFractalPayload,
                               DecodeAscendFractalPayload});

@@ -4,6 +4,7 @@
  */
 
 #include "cpu/op/builtin.h"
+#include "ir/annotations.h"
 
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -24,7 +25,7 @@ public:
         found = true;
         return ffi::VisitInterrupt();
       }
-      if (name == "tl.annotation")
+      if (IsAnnotationCall(call))
         return std::nullopt;
     }
     return StmtExprVisitor::Visit_(call);

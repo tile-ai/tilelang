@@ -752,7 +752,8 @@ def test_nvf4_mma_block_scale_packed_smem_non_alias_offset_units(target_kind):
             tvm_tirx.target.Target(target_kind),
         )
     )
-    mod = tilelang.transform.LowerOpaqueBlock()(mod)
+    mod = tilelang.transform.LowerSourceAllocations()(mod)
+    mod = tilelang.transform.LowerSourceAnnotations()(mod)
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.Simplify()(mod)
     before_merge = mod
