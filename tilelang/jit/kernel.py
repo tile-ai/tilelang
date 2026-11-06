@@ -161,7 +161,7 @@ class JITKernel(Generic[_P, _T]):
         pass_configs: dict[str, Any] | None = None,
         compile_flags: list[str] | None = None,
         backend_context: BackendContext | None = None,
-    ):
+    ) -> JITKernel:
         """
         Alternative constructor to create a TorchFunction directly from a database.
         """

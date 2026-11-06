@@ -658,7 +658,10 @@ class KernelCache:
             verbose (bool): Enable verbose log messages.
 
         Returns:
-            JITKernel: The loaded kernel if found, None otherwise.
+            JITKernel: The loaded kernel, or None if the entry is absent from all roots.
+
+        Raises:
+            Exception: An existing entry is invalid or cannot be loaded.
         """
         for root in env.get_cache_read_dirs():
             cache_path = os.path.join(self._get_namespace_root(root), self.cache_root_dir, key)
@@ -702,7 +705,11 @@ class KernelCache:
         if verbose:
             self.logger.debug(f"Loading kernel parameters from file: {params_path}")
         with open(params_path) as f:
-            kernel_params = load_kernel_params(f.read())
+            params_text = f.read()
+        try:
+            kernel_params = load_kernel_params(params_text)
+        except Exception as exc:
+            raise ValueError(f"Invalid parameter metadata in kernel cache entry: {cache_path}") from exc
         kernel = self._build_kernel(
             func=func,
             host_kernel_source=CachedTextSource(path=host_kernel_path),
@@ -714,8 +721,6 @@ class KernelCache:
             pass_configs=pass_configs,
             compile_flags=compile_flags,
         )
-        if kernel is None:
-            raise ValueError(f"Cannot load kernel from cache entry: {cache_path}")
         # Optional resource usage is absent in older and non-HIP entries.
         ru_path = os.path.join(cache_path, self.resource_usage_path)
         if os.path.exists(ru_path):
@@ -858,21 +863,16 @@ class KernelCache:
         host_kernel_source: CachedTextSource,
         device_kernel_source: CachedTextSource,
         kernel_lib_path: str,
-        kernel_params: list[KernelParam] | None,
+        kernel_params: list[KernelParam],
         backend_context: BackendContext,
         out_idx: list[int] | None,
         pass_configs: dict | None,
         compile_flags: list[str] | str | None,
-    ) -> JITKernel | None:
-        # Check all required components and report specific failures
-        missing_components = []
-        if not kernel_params:
-            missing_components.append("kernel_params")
+    ) -> JITKernel:
+        """Build from parsed cache metadata, including an empty parameter list.
 
-        if missing_components:
-            self.logger.warning("Cannot build kernel from cache: missing required component(s): %s", ", ".join(missing_components))
-            return None
-
+        Loading failures propagate to the caller; only absent entries are misses.
+        """
         return JITKernel.from_database(
             func=func,
             host_kernel_source=host_kernel_source,
