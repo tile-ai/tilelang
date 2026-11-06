@@ -371,14 +371,10 @@ PipelineStage MakeBlock(const Stmt &body, const PipelineMemoryAnalysis *memory,
       ascend::IsAscendBlock(region)) {
     stage->scope = GetRef<RegionStmt>(region);
     stage->body = SingleStatement(region->body);
-    stage->name_hint = ascend::AscendBlockName(region);
-  } else if (region && ScopeKey(region) == "tl.sblock") {
+    stage->name_hint = region->attrs.GetAttr<ffi::String>("name").value();
+  } else if (IsLexicalScope(region)) {
     stage->scope = GetRef<RegionStmt>(region);
     stage->body = SingleStatement(region->body);
-    auto metadata =
-        ReadAnnotations(region).at("value").cast<Map<String, Any>>();
-    stage->name_hint =
-        metadata.Get("name").value_or(Any(String(""))).cast<String>();
   }
   auto collector = make_object<PipelineAccessCollector>(
       memory, target.value_or(Target("c")));

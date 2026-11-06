@@ -12,9 +12,9 @@ from testing.ascend._ir import (
     attribute_fields,
     attribute_key,
     loop_annotations,
-    sblock_annotations,
-    sblock_metadata,
-    sblocks,
+    scope_annotations,
+    kernel_bodies,
+    execution_blocks,
 )
 
 import pytest
@@ -610,8 +610,8 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
                 else:
                     assert int(attribute_fields(task)["node"]["core_mask"]) == vector_mask
     assert cube_banks == set(range(sids))
-    vectors = [block for block in sblocks(snapshots["tl.LowerScheduledTIR"]) if sblock_metadata(block)["name"] == "VECTOR"]
-    assert len(vectors) == 1 and int(sblock_annotations(vectors[0])["vector_count"]) == sids
+    vectors = execution_blocks(snapshots["tl.LowerScheduledTIR"], "VECTOR")
+    assert len(vectors) == 1 and int(scope_annotations(vectors[0])["vector_count"]) == sids
     assert "asc_sync_intra_arrive(" in artifact.kernel_source
     assert "asc_sync_intra_wait(" in artifact.kernel_source
     if sids == 1:
@@ -631,10 +631,10 @@ def test_every_kernel_is_scheduled_and_called_in_program_order():
     with tvm_tirx.transform.PassContext(instruments=[Capture()]):
         artifact = tilelang.lower(program, target="ascend")
     for name, mod in snapshots.items():
-        roots = [block for block in sblocks(mod) if sblock_metadata(block)["name"] == "tilelang_root"]
+        roots = kernel_bodies(mod)
         assert len(roots) == 2
         if name == "tl.InsertSync":
-            assert len([block for block in sblocks(mod) if "tl.buffer_alias_map" in sblock_annotations(block)]) == 2
+            assert len([body for body in roots if "tl.buffer_alias_map" in scope_annotations(body)]) == 2
         else:
             assert len([fields for fields in annotations(mod) if "tl.buffer_alias_map" in fields]) == 2
     lowered = snapshots["tl.LowerScheduledTIR"]
@@ -756,11 +756,9 @@ def test_single_version_sibling_protocol_survives_reuse_and_lowering():
         assert flags and all(isinstance(call.args[1], ir.IntImm) for call in flags)
     materialized = snapshots["tl.MaterializeMultiBuffer"]
     assert tuple(int(dim) for dim in allocated_buffer(materialized, "ub").ty.shape) == (64,)
-    assert not any(
-        buffer.same_as(counter) for block in sblocks(materialized) for buffer in allocated_tensors(block, include_scheduled=True)
-    )
+    assert not any(buffer.same_as(counter) for buffer in allocated_tensors(materialized, include_scheduled=True))
     assert not any(access_tensor(node).same_as(counter) for kind in (ir.TensorLoad, ir.TensorStore) for node in nodes(materialized, kind))
-    assert any("tl.buffer_alias_map" in sblock_annotations(block) for block in sblocks(materialized))
+    assert any("tl.buffer_alias_map" in fields for fields in annotations(materialized))
     assert any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.LowerScheduledTIR"]))
     assert not any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.MergeUBAllocations"]))
     assert artifact.kernel_source and artifact.device_mod

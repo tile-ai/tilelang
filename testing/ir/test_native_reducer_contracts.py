@@ -37,8 +37,7 @@ def tileop(name, *operands, metadata=None):
 
 
 def annotation(values):
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")(values)
-    return ir.Evaluate(ir.Call("tl.annotation", [payload], attrs={"schema_version": 1, "annotation_schema": schema}))
+    return tvm_ffi.get_global_func("tl.MakeAnnotation")(values, ir.UnknownLoc())
 
 
 def attribute(node, key, value, body):
@@ -53,8 +52,8 @@ def decoded(call):
 def annotations(value):
     result = []
     for call in objects(value, ir.Call):
-        if isinstance(call.op, ir.Op) and call.op.name == "tl.annotation":
-            result.append(tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[0], call.attrs["annotation_schema"]))
+        if isinstance(call.op, ir.Op) and call.op.name in {"tl.annotation", "tl.layout_map"}:
+            result.append(tvm_ffi.get_global_func("tl.ReadAnnotations")(call))
     return result
 
 

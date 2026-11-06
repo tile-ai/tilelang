@@ -216,7 +216,7 @@ def assume_no_conflict(a, b=None, *, level=None, cross=None, group=None):
             denotes only a 1-element region and will not match a wider copy.
         b: second region; defaults to ``a`` (a self-dependency).
         level: where the non-overlap is asserted. ``None`` applies it to the
-            outermost sequence represented by ``tilelang_root`` and independently
+            outermost native kernel body sequence and independently
             to every loop enclosing both operands. ``-1`` applies it only to the
             outermost sequence. Non-negative values select one common enclosing
             loop, counted from the outermost (``0`` = outermost, ``1`` = next
@@ -263,7 +263,7 @@ def assume_conflict(a, b=None, *, level=None, cross=None, group=None):
             of the access it refers to.
         b: second region; defaults to ``a`` (a forced self-conflict).
         level: where the conflict is asserted. ``None`` applies it to the
-            outermost sequence represented by ``tilelang_root`` and independently
+            outermost native kernel body sequence and independently
             to every loop enclosing both operands. ``-1`` applies it only to the
             outermost sequence. Non-negative values select one common enclosing
             loop, counted from the outermost.

@@ -212,7 +212,7 @@ def test_sblock_annotation_owns_the_source_pool_in_its_lexical_suffix(target):
     function = _annotated_sblock()
     ((allocation, parents),) = _allocations(_prepare(function, target))
     assert len(parents) == 2 and isinstance(parents[0], ir.For)
-    assert parents[0].var.name == "row" and parents[1].op.name == "tl.attr"
+    assert parents[0].var.name == "row" and parents[1].op.name == "tl.lexical_scope"
     sequence = parents[1].body.seq
     assert isinstance(sequence[0], ir.Evaluate) and sequence[0].value.op.name == "tl.annotation"
     assert sequence[1].same_as(allocation)

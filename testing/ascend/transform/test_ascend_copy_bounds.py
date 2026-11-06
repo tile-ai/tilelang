@@ -2,7 +2,7 @@
 
 from tvm_tirx import ir
 import tvm_ffi
-from testing.ascend._ir import access_tensor, sblock, sblocks, substitute, tensor
+from testing.ascend._ir import access_tensor, sblock, lexical_scopes, substitute, tensor
 
 import pytest
 import tvm_tirx
@@ -100,7 +100,7 @@ def test_dynamic_copy_clamps_extents_without_guarding_the_first_write():
     (copy,) = calls(after, "tl.tileop.ascend_copy")
     # Native allocation/metadata definitions precede the same unguarded first
     # write directly in the root; no intervening loop or region may guard it.
-    (root,) = sblocks(after, "root")
+    (root,) = lexical_scopes(after)
     assert isinstance(root.body, ir.SeqStmt)
     assert isinstance(root.body.seq[-1], ir.Evaluate) and root.body.seq[-1].value.same_as(copy)
     assert all(

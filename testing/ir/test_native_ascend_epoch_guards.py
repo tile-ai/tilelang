@@ -166,7 +166,7 @@ def test_sibling_metadata_scopes_do_not_prove_guard_equivalence(relation):
 
 def _observe_generated_counters(prepared, storages, output):
     clocks = _epoch_fields(prepared)["tl.multi_buffer_counter_map"]
-    (root,) = _attributes(prepared, "tl.sblock")
+    root = prepared.body
 
     def append_observers(node):
         if not node.same_as(root):
@@ -175,11 +175,11 @@ def _observe_generated_counters(prepared, storages, output):
             _unit(ir.TensorStore(output, [integer(8 + index)], ir.TensorLoad(clocks[storage], [integer(0)])), 1)
             for index, storage in enumerate(storages)
         ]
-        return ir.RegionStmt(node.op, node.args, node.body_params, node.attrs, [*node.body.seq, *observers], node.result_vars, node.loc)
+        return ir.SeqStmt([*node.seq, *observers], node.loc)
 
     # Observe the actual generated state after its owner loop; retain every
     # snapshot binding, protocol update and metadata consumer in the pipeline.
-    return tvm_ffi.structural_map(prepared, (ir.RegionStmt, append_observers), order="pre")
+    return tvm_ffi.structural_map(prepared, (ir.SeqStmt, append_observers), order="pre")
 
 
 @pytest.mark.parametrize("wrapper", ["flat", "sole", "nested"])

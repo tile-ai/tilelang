@@ -8,8 +8,7 @@ from testing.ascend._ir import (
     annotation,
     annotations,
     sblock,
-    sblock_metadata,
-    sblocks,
+    lexical_scopes,
     single_statement,
     substitute,
     tensor,
@@ -155,13 +154,13 @@ def _make_alias_region_module(view_shape, mins, extents):
     load = ir.TensorLoad(view, mins)
     region_call = ir.TensorRegion(view, ranges, ir.TensorRegionType())
     body = ir.SeqStmt([ir.TensorStore(view, mins, ir.const(7, "bfloat16")), ir.Evaluate(load), ir.Evaluate(region_call)])
-    # Definitions dominate the native region's explicit read/write operands.
+    # Definitions dominate the explicit TensorRegion operands in metadata.
     block = sblock(
         "root",
         [
             _view_binding(view, owner),
             annotation({"layout_map": {owner: layout, view: layout.reshape(view_shape)}}),
-            sblock("accesses", body, reads=[region], writes=[region]),
+            sblock("accesses", [annotation({"read_regions": [region], "write_regions": [region]}), body]),
         ],
         buffers=[owner],
     )
@@ -172,12 +171,13 @@ def test_alias_indices_and_access_regions_use_the_same_padded_storage():
     normalized = tilelang.ascend.transform.NormalizeAscendFractalStorage()(_make_alias_region_module((225,), (15,), (30,)))
     root = single_statement(normalized["main"].body)
     owner = allocated_tensors(root)[0]
-    metadata = sblock_metadata(sblocks(root, "accesses")[0])
-    alias = access_tensor(metadata["reads"][0])
+    (accesses,) = [scope for scope in lexical_scopes(root) if not lexical_scopes(scope.body)]
+    metadata = next(fields for fields in annotations(accesses) if "read_regions" in fields)
+    alias = access_tensor(metadata["read_regions"][0])
     assert owner.same_as(alias)
     assert tuple(int(x) for x in owner.ty.shape) == tuple(int(x) for x in alias.ty.shape) == (16, 16)
-    assert [(int(r.begin), int(r.extent)) for r in metadata["reads"][0].region] == [(1, 2), (0, 15)]
-    tvm_tirx.ir.assert_structural_equal(metadata["reads"][0], metadata["writes"][0])
+    assert [(int(r.begin), int(r.extent)) for r in metadata["read_regions"][0].region] == [(1, 2), (0, 15)]
+    tvm_tirx.ir.assert_structural_equal(metadata["read_regions"][0], metadata["write_regions"][0])
     for node in [*nodes(root, ir.TensorStore), *nodes(root, ir.TensorLoad)]:
         assert tuple(int(x) for x in node.indices) == (1, 0)
         assert tuple(int(x) for x in access_tensor(node).ty.shape) == (16, 16)

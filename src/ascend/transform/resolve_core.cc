@@ -722,12 +722,12 @@ tvm::transform::Pass ResolveCore() {
         std::move(func), "ResolveCore",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
-              context.root, context.outer_ctx, nullptr,
+              context.body, context.outer_ctx, nullptr,
               context.kernel_annotations, context.parameter_alias_contract);
           ResolveCoreMasks(scheduled_tir.tree,
                            scheduled_tir.metadata.buffer_versions,
                            context.outer_sid,
-                           L0StorageGroups(CollectL0SFBindings(context.root)),
+                           L0StorageGroups(CollectL0SFBindings(context.body)),
                            scheduled_tir.metadata.num_aiv_subcores.value_or(2));
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });

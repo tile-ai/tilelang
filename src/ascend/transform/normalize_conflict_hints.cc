@@ -72,15 +72,14 @@ public:
   using StmtExprMutator::Mutate;
   using StmtExprMutator::Mutate_;
 
-  static RegionStmt Rewrite(RegionStmt root) {
+  static SeqStmt Rewrite(SeqStmt root) {
     auto rewriter = make_object<ConflictHintNormalizer>();
-    rewriter->ReserveExistingIds(root->body);
-    rewriter->Scan(root->body, kRoot);
+    rewriter->ReserveExistingIds(root);
+    rewriter->Scan(root, kRoot);
     rewriter->ResolveGroups();
     if (rewriter->markers_.empty())
       return root;
-    root.CopyOnWrite()->body =
-        rewriter->Mutate(root->body).ValueOrUnchanged(root->body);
+    root = rewriter->Mutate(root).ValueOrUnchanged(root);
     TVM_FFI_ICHECK_EQ(rewriter->cursor_, rewriter->markers_.size());
     return root;
   }
@@ -386,7 +385,7 @@ tvm::transform::Pass NormalizeConflictHints() {
     return RewriteTilelangKernels(
         std::move(f), "NormalizeConflictHints",
         [](const TilelangKernelContext &context) {
-          return ConflictHintNormalizer::Rewrite(context.root);
+          return ConflictHintNormalizer::Rewrite(context.body);
         },
         false);
   };

@@ -110,6 +110,9 @@ inline const char *InferLevelToString(InferLevel level) {
 
 struct LowerArgs {
   Target target;
+  // Set from the enclosing Ascend execution domain, independently of thread
+  // names.
+  bool inside_simt_vf{false};
   Range thread_bounds{Range::FromMinExtent(0, 1)};
   // Logical thread index consumed by lowering helpers. This is an expression
   // rather than a Var: GPU lowering passes the real threadIdx.x Var (bound by

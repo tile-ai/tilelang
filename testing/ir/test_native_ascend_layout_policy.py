@@ -9,12 +9,15 @@ from tilelang.ascend import language as T
 
 from test_native_ascend_ops import function
 from test_native_ascend_sf_lowering import gemm_case
-from test_native_reducer_contracts import allocate, annotation, attribute, integer, loop, objects, region, run_pass, tensor, tileop, update
+from test_native_reducer_contracts import allocate, annotation, integer, loop, objects, region, run_pass, tensor, tileop, update
 
 
 def attributes(value, name):
     result = []
     for scope in objects(value, ir.RegionStmt):
+        vf = {"tl.simdvf_scope": "SIMD_VF", "tl.simtvf_scope": "SIMT_VF"}.get(name)
+        if vf and scope.op.name == "tl.ascend_block" and scope.attrs["name"] == vf:
+            result.append((scope, True))
         if scope.op.name == "tl.attr":
             data = tvm_ffi.get_global_func("tl.DecodeAnnotations")(scope.args[0], scope.attrs["annotation_schema"])
             if data["key"] == name:
@@ -87,7 +90,7 @@ def test_only_simt_reducer_nests_skip_fusion(marker):
         tileop("finalize_reducer_v2", region(acc), region(result)),
     ]
     tx = ir.Var("tx", "int32")
-    scope = attribute(None, "tl.simtvf_scope", int(marker), body)
+    scope = ir.RegionStmt("tl.ascend_block", [], [], {"name": "SIMT_VF"}, body) if marker else ir.SeqStmt(body)
     launch = ir.RegionStmt("tirx.launch_thread", [ir.StringImm("threadIdx.x"), integer(32)], [tx], {}, [scope])
     value = function([source], [launch])
     for name in ("CanonicalizeLegacyReducer", "VerifyReducerEpoch"):

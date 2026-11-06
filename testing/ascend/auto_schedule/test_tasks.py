@@ -125,7 +125,13 @@ def test_per_core_fixpipe_candidates_keep_separate_routes(routing, bound_guard, 
         body = unit(ir.For(ir.Var("i", "int32"), ir.const(0), ir.const(0) + (sid + 2), ir.const(1), ir.ForKind.DEFAULT, body), core=None)
     before = kernel(body, buffers=[accum, ub], params=[block, counter], allocation_stage=0, allocation_core=0)
     thread = sid
-    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule(
+        {
+            "main": before["main"].with_body(
+                launch_thread(ir.Var("block", "int32"), "blockIdx.x", 1, launch_thread(thread, "cthread", 2, before["main"].body))
+            )
+        }
+    )
     if side_effect and routing == "local":
         with pytest.raises((ValueError, RuntimeError), match="Fixpipe routing.*external side effects"):
             transform.AssignCore()(before)
@@ -185,7 +191,13 @@ def test_per_core_vector_candidates_project_to_distinct_aivs(direction):
     group = attribute({}, "tl.ascend_per_core_task", 1, seq(*candidates))
     before = kernel(unit(group, core=None), buffers=[ub], params=[gm, block], allocation_stage=0, allocation_core=0)
     thread = sid
-    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule(
+        {
+            "main": before["main"].with_body(
+                launch_thread(ir.Var("block", "int32"), "blockIdx.x", 1, launch_thread(thread, "cthread", 2, before["main"].body))
+            )
+        }
+    )
     after = transform.AssignCore()(before)
     groups = [node for node in nodes(after, ir.RegionStmt) if attribute_key(node) == "tl.ascend_per_core_task"]
     assert len(groups) == 2
@@ -261,7 +273,13 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
         allocation_core=0,
     )
     thread = sid
-    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", sids, before["main"].body))})
+    before = tvm_tirx.IRModule(
+        {
+            "main": before["main"].with_body(
+                launch_thread(ir.Var("block", "int32"), "blockIdx.x", 1, launch_thread(thread, "cthread", sids, before["main"].body))
+            )
+        }
+    )
     if sync_inside and sids == 2 and routing in ("mixed", "implicit", "local", "sid", "sid-expression"):
         with pytest.raises((ValueError, RuntimeError), match="PerCoreTask.*explicit synchronization.*Fixpipe.*outside"):
             transform.AssignCore()(before)

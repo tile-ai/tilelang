@@ -8,7 +8,8 @@ from tvm_tirx import ir, sym, tirx
 
 from tilelang.testing.packed import compile_packed_function
 from tvm_tirx.tirx.layout import S, TileLayout
-from testing.ascend._block import attribute as _scope_attribute, attribute_fields as _scope_fields, has_attribute
+from testing.ascend._block import attribute as _scope_attribute
+from testing.ascend._ir import scope_annotations
 
 
 def integer(value, dtype="int32"):
@@ -58,7 +59,7 @@ def constant(value):
 
 
 def apply(name, body, params=(), arguments=(), attrs=None, check_input=True):
-    before = tirx.Function(list(params), body, attrs=attrs)
+    before = tirx.Function(list(params), body, attrs=attrs).with_attr("target", tvm_tirx.target.Target("ascend"))
     if check_input:
         assert tirx.analysis.check_well_formed(before)
         for call in objects(before, ir.Call):
@@ -341,8 +342,12 @@ def test_manual_versions_normalize_at_native_metadata_site(placement):
     if placement == "marker":
         body.extend([annotation(fields), ir.TensorStore(storage, [1, 2], integer(7))])
     else:
-        key = "tl.sblock" if placement == "block" else "tl.loop.annotations"
-        body.append(attribute(key, fields, [ir.TensorStore(storage, [1, 2], integer(7))]))
+        store = ir.TensorStore(storage, [1, 2], integer(7))
+        body.append(
+            ir.RegionStmt("tl.lexical_scope", [], [], {}, [annotation(fields), store])
+            if placement == "block"
+            else attribute("tl.loop.annotations", fields, [store])
+        )
     result = apply("NormalizeBufferVersion", body)
     found = metadata(result)
     for region in objects(result, ir.RegionStmt):
@@ -464,7 +469,7 @@ def scheduled(body, buffers=(), fields=None):
     if fields:
         sequence.append(annotation(fields))
     sequence.extend(body)
-    return attribute("tl.sblock", {"name": "tilelang_root", "no_realize": True}, sequence)
+    return ir.SeqStmt(sequence)
 
 
 def loop_claims(loop):
@@ -614,24 +619,21 @@ def test_padded_versions_and_flat_alias_execute_values_on_cpu(tmp_path):
 
 
 def block_fields(value):
-    return [_scope_fields(region)["value"] for region in objects(value, ir.RegionStmt) if has_attribute(region, "tl.sblock")]
+    return [
+        scope_annotations(region) for region in objects(value, ir.RegionStmt) if region.op.name in {"tl.ascend_block", "tl.lexical_scope"}
+    ]
 
 
-def test_manual_version_reads_the_real_sblock_annotation_envelope():
+def test_manual_version_reads_independent_native_metadata_statements():
     storage = tensor("storage", (2, 3), "int32")
-    block = attribute(
-        "tl.sblock",
-        {"name": "tilelang_root", "no_realize": True, "annotations": {"tl.manual_multi_buffer": {storage: 2}, "retained": "tag"}},
-        [],
-    )
-    normalized = apply("NormalizeBufferVersion", [allocate(storage), block])
-    (fields,) = block_fields(normalized)
-    assert fields["name"] == "tilelang_root"
-    assert fields["annotations"]["retained"] == "tag"
-    assert int(fields["annotations"]["tl.buffer_version"][storage]) == 2
+    body = [allocate(storage), annotation({"tl.manual_multi_buffer": {storage: 2}, "retained": "tag"})]
+    normalized = apply("NormalizeBufferVersion", body)
+    fields = scope_annotations(normalized.body)
+    assert fields["retained"] == "tag"
+    assert int(fields["tl.buffer_version"][storage]) == 2
     rewritten = apply("RewriteAscendBufferVersionLayout", normalized.body)
     assert constant(objects(rewritten, ir.Bind)[0].var.ty.shape[0]) == 16
-    assert "tl.buffer_version" not in block_fields(rewritten)[0]["annotations"]
+    assert "tl.buffer_version" not in scope_annotations(rewritten.body)
 
 
 def test_nested_frontend_physical_version_is_rejected():
@@ -651,8 +653,8 @@ def test_alias_inference_replaces_nested_sblock_contract():
     result = apply("InferBufferAliases", [allocate(a), allocate(b), block])
     assert not may_alias(result, a, b)
     (fields,) = block_fields(result)
-    assert "tl.buffer_alias_map" not in fields["annotations"]
-    assert fields["annotations"]["retained"] == 7
+    assert "tl.buffer_alias_map" not in fields
+    assert fields["retained"] == 7
 
 
 def test_arena_consumes_nested_sblock_alias_contract():
@@ -664,7 +666,7 @@ def test_arena_consumes_nested_sblock_alias_contract():
     root_b, offset_b = address(b, bindings)
     assert root_a.same_as(root_b) and offset_a == offset_b
     (fields,) = block_fields(result)
-    assert fields["annotations"]["retained"] == "x" and "tl.buffer_alias_map" not in fields["annotations"]
+    assert fields["retained"] == "x" and "tl.buffer_alias_map" not in fields
 
 
 @pytest.mark.parametrize("extra_workspace", [False, True])

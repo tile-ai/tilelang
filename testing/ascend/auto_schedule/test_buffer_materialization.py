@@ -1,5 +1,7 @@
 """MaterializeMultiBuffer expands storage and all its views with one clock."""
 
+from testing.ascend._ir import kernel_body
+
 from tvm_tirx import ir
 import tvm_ffi
 from testing.ascend._ir import (
@@ -9,9 +11,7 @@ from testing.ascend._ir import (
     attribute_fields,
     attribute_key,
     loop_annotations,
-    sblock_annotations,
-    sblock_metadata,
-    sblocks,
+    scope_annotations,
     tensor,
 )
 
@@ -54,9 +54,9 @@ def test_physical_versions_use_the_prepared_clock(mode, owners, guarded, version
         "tl.multi_buffer_counter_map" not in loop_annotations(loop) and "tl.storage_epoch_guard_map" not in loop_annotations(loop)
         for loop in nodes(after, ir.For)
     )
-    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-    assert "tl.buffer_versions_map" not in sblock_annotations(root)
-    assert int(sblock_annotations(root).get("tl.manual_multi_buffer", {}).get(storage, 1)) == versions
+    root = kernel_body(after)
+    assert "tl.buffer_versions_map" not in scope_annotations(root)
+    assert int(scope_annotations(root).get("tl.manual_multi_buffer", {}).get(storage, 1)) == versions
 
 
 @pytest.mark.parametrize(
@@ -249,7 +249,7 @@ def test_counter_group_survives_only_for_physical_versions(versions):
 @pytest.mark.parametrize("use", ["read", "guard", "compound-task", "loop-bound"])
 def test_single_version_counter_elision_rejects_live_uses(use):
     before = copy_ring(versions=1, prepared=True)
-    root = next(block for block in sblocks(before) if sblock_metadata(block)["name"] == "tilelang_root")
+    root = kernel_body(before)
     epoch = allocated_buffer(before, "epoch")
     ub = allocated_buffer(before, "ub")
     write = ir.TensorStore(ub, [0], ir.const(1, "float32"))
@@ -263,8 +263,7 @@ def test_single_version_counter_elision_rejects_live_uses(use):
         unexpected = unit(
             ir.For(ir.Var("i", "int32"), ir.const(0), ir.const(0) + epoch[0], ir.const(1), ir.ForKind.DEFAULT, unit(write)), core=None
         )
-    fields = attribute_fields(root)
-    root = attribute(fields["node"], fields["key"], fields["value"], [*root.body.seq, unexpected], loc=root.loc)
+    root = ir.SeqStmt([*root.seq, unexpected], loc=root.loc)
     before = ir.IRModule({"main": before["main"].with_body([root])})
     message = (
         "Single-version counter is used by a control header"

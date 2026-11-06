@@ -267,7 +267,8 @@ private:
     auto old_core = core_;
     auto old_pipe = pipe_;
     auto old_values = values_;
-    if (auto name = BlockNameAtSourceBoundary(op)) {
+    if (IsAscendBlock(op)) {
+      auto name = op->attrs.GetAttr<ffi::String>("name");
       if (*name == "VECTOR")
         core_ = kCoreVector;
       if (*name == "CUBE")
@@ -1126,29 +1127,13 @@ public:
     return StmtExprMutator::Mutate_(op, mode);
   }
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (IsAscendBlock(op)) {
-      auto fields = AscendBlockAnnotations(op);
-      if (fields.count(kBufferAliasMap)) {
-        fields.erase(kBufferAliasMap);
-        RegionStmt next =
-            MakeAscendBlock(AscendBlockName(op), fields, op->body, op->loc);
-        return Mutate(next, mode).ValueOrUnchanged(next);
-      }
-    }
     if (auto attr = ReadSourceAttribute(op)) {
       if (attr->key == kBufferAliasMap)
         return Mutate(op->body, mode).ValueOrUnchanged(op->body);
-      if (attr->key == "tl.sblock" || attr->key == "tl.loop.annotations") {
+      if (attr->key == "tl.loop.annotations") {
         auto fields = attr->value.cast<Map<String, Any>>();
         auto updated = fields;
         updated.erase(kBufferAliasMap);
-        if (attr->key == "tl.sblock") {
-          if (auto annotations = updated.Get("annotations")) {
-            auto nested = annotations->cast<Map<String, Any>>();
-            nested.erase(kBufferAliasMap);
-            updated.Set("annotations", nested);
-          }
-        }
         if (!StructuralEqual()(fields, updated)) {
           Stmt next =
               MakeAttribute(attr->node, attr->key, updated, op->body, op->loc);

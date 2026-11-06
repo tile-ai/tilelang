@@ -5,7 +5,7 @@ import tilelang.ascend.language as T
 from tilelang.ascend.language import kernel as K
 import tvm_tirx
 from tvm_tirx import ir
-from testing.ascend._ir import attribute_fields, attributes, nodes
+from testing.ascend._ir import nodes
 
 
 @pytest.mark.parametrize("threads, expected", [(128, [128, 1, 1]), ([64, 2, 1], [64, 2, 1])], ids=["one-dimensional", "two-dimensional"])
@@ -28,7 +28,7 @@ def test_thread_queries_match_frame_bindings(threads, expected):
     assert queries["binding_x"].same_as(bindings[0])
     assert queries["extents"] == expected
     assert queries["extent_x"] == expected[0]
-    (vf,) = [block for block in attributes(program, "tl.sblock") if attribute_fields(block)["value"]["name"] == "SIMT_VF"]
+    (vf,) = [block for block in nodes(program, ir.RegionStmt) if block.op.name == "tl.ascend_block" and block.attrs["name"] == "SIMT_VF"]
     threads = [node for node in nodes(vf, ir.RegionStmt) if node.op.name == "tirx.launch_thread"]
     by_tag = {str(node.args[0].value): node for node in threads}
     assert "threadIdx.x" in by_tag

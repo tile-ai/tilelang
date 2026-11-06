@@ -7,12 +7,12 @@ from tvm_tirx import ir, tirx
 
 from testing.ascend._ir import (
     attribute,
-    attribute_key,
     calls,
     copy,
     kernel,
+    kernel_body,
+    lexical_scopes,
     nodes,
-    sblocks,
     statements,
     tensor,
 )
@@ -23,18 +23,18 @@ def block(name, body):
 
 
 def kernel_carrier(module, carrier):
-    if carrier == "kernel":
-        (root,) = sblocks(module, "tilelang_root")
-        return ir.IRModule({"main": module["main"].with_body([attribute(None, "tl.kernel", {}, root.body)])})
-    return module
+    body = kernel_body(module)
+    owner = attribute(None, "tl.kernel", {}, body) if carrier == "kernel" else block("owner", body)
+    return ir.IRModule({"main": module["main"].with_body([owner])})
 
 
-def owner_block(module, name, carrier):
-    if name == "tilelang_root" and carrier == "kernel":
-        (owner,) = [item for item in nodes(module, ir.RegionStmt) if attribute_key(item) == "tl.kernel"]
-        return owner
-    (owner,) = sblocks(module, name)
-    return owner
+def owner_body(module, nested=False):
+    if nested:
+        (scope,) = [scope for scope in lexical_scopes(module) if not lexical_scopes(scope.body)]
+        return scope.body
+    (scope,) = module["main"].body.seq
+    assert isinstance(scope, ir.RegionStmt)
+    return scope.body
 
 
 def rewrite(before):
@@ -47,7 +47,7 @@ def rewrite(before):
     return after
 
 
-@pytest.mark.parametrize("carrier", ["sblock", "kernel"])
+@pytest.mark.parametrize("carrier", ["lexical", "kernel"])
 @pytest.mark.parametrize("scope", ["root", "conditional-block", "iteration-block"])
 def test_scratch_definition_stays_at_the_nearest_block_boundary(scope, carrier):
     src = tensor((4, 16, 64), "bfloat16", name="src", scope="shared.dyn", layout=None)
@@ -72,8 +72,8 @@ def test_scratch_definition_stays_at_the_nearest_block_boundary(scope, carrier):
     assert post.args[1].args[0].source.same_as(scratch)
     assert tuple(int(extent) for extent in scratch.ty.shape) == (17 * 64,)
     (binding,) = [item for item in nodes(after, ir.Bind) if item.var.same_as(scratch)]
-    owner = owner_block(after, "tilelang_root" if scope == "root" else "inner", carrier)
-    assert any(item.same_as(binding) for item in owner.body.seq)
+    owner = owner_body(after, nested=scope != "root")
+    assert any(item.same_as(binding) for item in owner.seq)
     parents = next(parents for item, parents in statements(after) if item.same_as(binding))
     assert sum(isinstance(parent, ir.If) for parent in parents) == (scope == "conditional-block")
     assert sum(isinstance(parent, ir.For) for parent in parents) == (scope == "iteration-block")
@@ -89,7 +89,7 @@ def test_scratch_definition_stays_at_the_nearest_block_boundary(scope, carrier):
     assert any(parent.same_as(loop) for parent in scatter_parents)
 
 
-@pytest.mark.parametrize("carrier", ["sblock", "kernel"])
+@pytest.mark.parametrize("carrier", ["lexical", "kernel"])
 @pytest.mark.parametrize("nested_blocks", [False, True])
 def test_sibling_branches_keep_distinct_scratch_allocations(nested_blocks, carrier):
     src = tensor((16, 64), "bfloat16", name="src", scope="shared.dyn", layout=None)
@@ -120,10 +120,12 @@ def test_sibling_branches_keep_distinct_scratch_allocations(nested_blocks, carri
         binding, parents = next(
             (item, parents) for item, parents in statements(after) if isinstance(item, ir.Bind) and item.var.same_as(storage)
         )
-        owner = next(parent for parent in reversed(parents) if attribute_key(parent) in ("tl.sblock", "tl.kernel"))
-        expected = ("left", "right")[index] if nested_blocks else "tilelang_root"
-        assert owner.same_as(owner_block(after, expected, carrier))
-        assert any(item.same_as(binding) for item in owner.body.seq)
+        owner = next(parent for parent in reversed(parents) if isinstance(parent, ir.RegionStmt))
+        branch = nodes(after, ir.If)[0]
+        expected = (branch.then_case if index == 0 else branch.else_case).seq[0] if nested_blocks else after["main"].body.seq[0]
+        assert owner.same_as(expected)
+        owner = owner.body
+        assert any(item.same_as(binding) for item in owner.seq)
         assert any(isinstance(parent, ir.If) for parent in parents) == nested_blocks
 
 
@@ -138,8 +140,7 @@ def test_function_without_an_owner_keeps_its_local_scratch_lifetime(scope):
     body = ir.For(i, 0, 4, 1, ir.ForKind.DEFAULT, [operation]) if scope == "iteration" else ir.If(flag, [operation], None)
     layout = tvm_ffi.get_global_func("tl.make_ascend_nz_layout")(dst)
     module = kernel(body, buffers=[src, dst], params=[flag], annotations={"layout_map": {dst: layout}})
-    (root,) = sblocks(module, "tilelang_root")
-    before = ir.IRModule({"main": module["main"].with_body(root.body)})
+    before = module
     after = rewrite(before)
     assert not nodes(after, ir.RegionStmt)
     (scatter,) = calls(after, "tl.ascend_nd2nz_scatter")

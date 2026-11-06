@@ -1,7 +1,9 @@
 """Buffer lifetimes contracts."""
 
+from testing.ascend._ir import kernel_body
+
 from tvm_tirx import ir
-from testing.ascend._ir import sblock_annotations, sblock_metadata, sblocks, tensor
+from testing.ascend._ir import scope_annotations, tensor
 
 import pytest
 import tilelang
@@ -968,8 +970,8 @@ def test_l0_address_reuse_includes_the_bound_sf_lifetime(sticky):
         allocation_stage=0,
     )
     after = transform.InsertSync()(before)
-    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-    aliases = sblock_annotations(root).get("tl.buffer_alias_map", {})
+    root = kernel_body(after)
+    aliases = scope_annotations(root).get("tl.buffer_alias_map", {})
     compatible = any(other.same_as(b) for other in aliases.get(a, []))
     assert compatible == (not sticky)
     assert sa not in aliases and sb not in aliases

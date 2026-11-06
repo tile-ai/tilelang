@@ -12,12 +12,14 @@ from testing.ascend._ir import (
     attribute_fields,
     attributes,
     kernel,
+    kernel_body,
+    kernel_bodies,
     launch_thread,
     nodes,
     sblock,
-    sblock_annotations,
-    sblock_metadata,
-    sblocks,
+    scope_annotations,
+    execution_attrs,
+    execution_blocks,
     statements,
     tensor,
 )
@@ -59,15 +61,15 @@ def finish(after):
 
 
 def generated_count(module, count):
-    (vector,) = sblocks(module, "VECTOR")
+    (vector,) = execution_blocks(module, "VECTOR")
     assert vector.op.name == "tl.ascend_block" and not vector.args
-    assert set(vector.attrs.keys()) == {"name", "annotations"}
-    assert int(sblock_metadata(vector)["annotations"]["vector_count"]) == count
+    assert set(vector.attrs.keys()) == {"name", "vector_count"}
+    assert int(vector.attrs["vector_count"]) == count
     launches = [
         node for node in nodes(vector, ir.RegionStmt) if node.op.name == "tirx.launch_thread" and str(node.args[0].value) == "cthread"
     ]
     assert len(launches) == 1 and int(launches[0].args[1]) == count
-    (cube,) = sblocks(module, "CUBE")
+    (cube,) = execution_blocks(module, "CUBE")
     assert cube.op.name == "tl.ascend_block" and not cube.args
     assert not any(node.op.name == "tirx.launch_thread" and str(node.args[0].value) == "cthread" for node in nodes(cube, ir.RegionStmt))
     assert [int(store.value) for store in nodes(cube, ir.TensorStore)] == [31]
@@ -75,9 +77,9 @@ def generated_count(module, count):
 
 
 def only_generated_counts(module):
-    for block in sblocks(module):
-        if sblock_metadata(block)["name"] != "VECTOR":
-            assert "vector_count" not in sblock_metadata(block).get("annotations", {})
+    for block in execution_blocks(module):
+        if execution_attrs(block)["name"] != "VECTOR":
+            assert "vector_count" not in block.attrs
     for carrier in attributes(module, "tl.kernel"):
         assert "vector_count" not in attribute_fields(carrier)["value"]
     for call in nodes(module, ir.Call):
@@ -87,23 +89,23 @@ def only_generated_counts(module):
 
 
 @pytest.mark.parametrize("count", [1, 2])
-@pytest.mark.parametrize("carrier", ["root-fields", "prefix", "middle", "suffix"])
-def test_root_vector_count_is_consumed_independently_of_lexical_position(count, carrier):
+@pytest.mark.parametrize("carrier", ["kernel-helper", "prefix", "middle", "suffix"])
+def test_kernel_vector_count_is_consumed_independently_of_lexical_position(count, carrier):
     output = tensor((2,), "int32", name="output")
     body = tasks(output)
-    fields = {"vector_count": count} if carrier == "root-fields" else {}
-    if carrier != "root-fields":
+    fields = {"vector_count": count} if carrier == "kernel-helper" else {}
+    if carrier != "kernel-helper":
         position = {"prefix": 0, "middle": 1, "suffix": 2}[carrier]
         body.insert(position, annotation({"vector_count": ir.IntImm("int64", count), "pragma_count_owner": 19}))
     before = kernel(body, params=[output], annotations=fields)
     after = lower(before)
     generated_count(after, count)
     only_generated_counts(after)
-    if carrier != "root-fields":
+    if carrier != "kernel-helper":
         retained = [int(fields["pragma_count_owner"]) for fields in annotations(after) if "pragma_count_owner" in fields]
         assert retained == [19, 19]
         for name in ("CUBE", "VECTOR"):
-            (stream,) = sblocks(after, name)
+            (stream,) = execution_blocks(after, name)
             events = []
             for statement, _ in statements(stream):
                 if isinstance(statement, ir.TensorStore):
@@ -122,12 +124,12 @@ def test_root_vector_count_is_consumed_independently_of_lexical_position(count, 
 
 
 @pytest.mark.parametrize("count", [1, 2])
-@pytest.mark.parametrize("root_present", [False, True])
-def test_outer_kernel_count_is_consumed_after_lowering_its_root(count, root_present):
+@pytest.mark.parametrize("nested_sequence", [False, True])
+def test_outer_kernel_count_is_consumed_after_lowering_its_body(count, nested_sequence):
     output = tensor((2,), "int32", name="output")
     module = kernel(tasks(output), params=[output])
-    (root,) = sblocks(module, "tilelang_root")
-    carrier = attribute(None, "tl.kernel", {"vector_count": count, "pragma_count_owner": 23}, [root] if root_present else root.body)
+    root = kernel_body(module)
+    carrier = attribute(None, "tl.kernel", {"vector_count": count, "pragma_count_owner": 23}, [root] if nested_sequence else root)
     after = lower(replace_body(module, [anchor([carrier])]))
     generated_count(after, count)
     only_generated_counts(after)
@@ -141,23 +143,23 @@ def test_sibling_kernel_counts_and_execution_scopes_stay_independent():
     modules = [kernel(tasks(output), params=[output]) for _ in range(2)]
     launches = []
     for count, module in enumerate(modules, 1):
-        (root,) = sblocks(module, "tilelang_root")
+        root = kernel_body(module)
         launches.append(anchor([attribute(None, "tl.kernel", {"vector_count": count}, [root])], f"block{count}"))
     after = lower(replace_body(modules[0], launches))
     only_generated_counts(after)
-    roots = sblocks(after, "tilelang_root")
+    roots = kernel_bodies(after)
     assert len(roots) == 2
     for count, root in enumerate(roots, 1):
         generated_count(root, count)
     finalized = finish(after)
-    assert [int(sblock_annotations(block)["vector_count"]) for block in sblocks(finalized, "VECTOR")] == [1, 2]
+    assert [int(scope_annotations(block)["vector_count"]) for block in execution_blocks(finalized, "VECTOR")] == [1, 2]
 
 
 @pytest.mark.parametrize("count", [1, 2])
 def test_nested_kernel_input_carriers_are_consumed_in_the_same_launch_chain(count):
     output = tensor((2,), "int32", name="output")
     module = kernel(tasks(output), params=[output])
-    (root,) = sblocks(module, "tilelang_root")
+    root = kernel_body(module)
     inner = attribute(None, "tl.kernel", {"vector_count": count}, [root])
     outer = attribute(None, "tl.kernel", {"vector_count": 3 - count}, [inner])
     after = lower(replace_body(module, [anchor([outer])]))
@@ -167,19 +169,18 @@ def test_nested_kernel_input_carriers_are_consumed_in_the_same_launch_chain(coun
     generated_count(finish(after), count)
 
 
-@pytest.mark.parametrize("foreign", ["nested-block", "nested-root", "nested-kernel", "branch", "loop"])
+@pytest.mark.parametrize("foreign", ["nested-block", "nested-kernel", "branch", "loop"])
 def test_nested_foreign_counts_are_preserved_for_their_own_consumer(foreign):
     output = tensor((2,), "int32", name="output")
     body = tasks(output)
-    if foreign in ("nested-block", "nested-root", "nested-kernel"):
+    if foreign in ("nested-block", "nested-kernel"):
         body = []
         for index, core, value in ((0, 2, 31), (1, 1, 47)):
             store = ir.TensorStore(output, [index], ir.IntImm("int32", value))
             if foreign == "nested-kernel":
                 nested = attribute(None, "tl.kernel", {"vector_count": 13}, [store])
             else:
-                name = "tilelang_root" if foreign == "nested-root" else "other"
-                nested = sblock(name, [store], annotations={"vector_count": 13})
+                nested = sblock("other", [store], annotations={"vector_count": 13})
             body.append(unit(nested, core=core))
     else:
         nested = [annotation({"vector_count": 13}), *body]
@@ -204,11 +205,8 @@ def test_nested_foreign_counts_are_preserved_for_their_own_consumer(foreign):
 def test_unowned_outer_kernel_count_is_not_discarded(enclosure):
     output = tensor((2,), "int32", name="output")
     module = kernel(tasks(output), params=[output], annotations={"vector_count": 1})
-    (root,) = sblocks(module, "tilelang_root")
-    if enclosure == "shadowed-by-inner-anchor":
-        body = [anchor([attribute(None, "tl.kernel", {"vector_count": 1}, [root])], "inner_block")]
-    else:
-        body = [root]
+    root = kernel_body(module)
+    body = [anchor([attribute(None, "tl.kernel", {"vector_count": 1}, root)], "inner_block")]
     foreign = attribute(None, "tl.kernel", {"vector_count": 13}, body)
     body = [anchor([foreign], "outer_block")] if enclosure == "shadowed-by-inner-anchor" else [foreign]
     after = lower(replace_body(module, body))

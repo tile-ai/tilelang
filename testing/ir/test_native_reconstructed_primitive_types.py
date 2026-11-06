@@ -115,11 +115,7 @@ def _hint_function(polarity):
     a = ir.Var("A", tirx.TensorType([8], "int32"))
     b = ir.Var("B", tirx.TensorType([8], "int32"))
     marker = ir.Call("tl.conflict_hint", [a, b, ir.const(-2, "int32"), ir.const(-1, "int32"), ir.StringImm(""), polarity], ty="int32")
-    schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")(
-        {"node": None, "key": "tl.sblock", "value": {"name": "tilelang_root", "no_realize": True}}
-    )
-    region = ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, [ir.Evaluate(marker)])
-    return tirx.Function([a, b], [region])
+    return tirx.Function([a, b], [ir.Evaluate(marker)]).with_attr("target", Target("ascend"))
 
 
 @pytest.mark.parametrize("mode", ["direct", "json", "renew"])

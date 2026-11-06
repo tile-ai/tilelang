@@ -122,19 +122,12 @@ void ValidateStaticSplitConstraints(const AscendCopy &copy, DualCopyPath path,
 
 bool BlockIs(const RegionStmtObj *region, const char *name) {
   if (ascend::IsAscendBlock(region))
-    return ascend::AscendBlockName(region) == name;
-  if (region->op->name != "tl.attr")
-    return false;
-  auto fields = ReadAnnotations(region);
-  if (fields.at("key").cast<String>() != "tl.sblock")
-    return false;
-  auto block = fields.at("value").cast<Map<String, Any>>();
-  return block.at("name").cast<String>() == name;
+    return region->attrs.GetAttr<ffi::String>("name").value() == name;
+  return false;
 }
 
 bool IsKernel(const RegionStmtObj *region) {
-  if (region->op->name == "tl.launch_kernel" ||
-      BlockIs(region, "tilelang_root"))
+  if (region->op->name == "tl.launch_kernel")
     return true;
   // MaterializeKernelLaunch preserves a kernel's annotation owner even
   // when it has no hints. Its subcore belongs inside that owner, just as

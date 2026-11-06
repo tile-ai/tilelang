@@ -91,8 +91,7 @@ inline bool HasSimtVF(const Stmt &stmt) {
   bool found = false;
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
       stmt, [&](const RegionStmtObj *region) -> ffi::Expected<ffi::WalkResult> {
-        if (auto name = BlockNameAtSourceBoundary(region))
-          found |= *name == "SIMT_VF";
+        found |= GetVFKind(region) == VFKind::kSimt;
         return ffi::WalkResult::Advance();
       });
   return found;
@@ -1547,8 +1546,8 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
 
   // Schedule IRStructure in place with the Z3 scheduler.
   ScheduleBuilder unit_builder(ir_structure, metadata.outer_ctx,
-                               metadata.kernel_root);
-  L0StorageGroups groups(CollectL0SFBindings(metadata.kernel_root));
+                               metadata.kernel_body);
+  L0StorageGroups groups(CollectL0SFBindings(metadata.kernel_body));
   metadata.buffer_versions = ExpandL0StorageGroupValues(
       metadata.buffer_versions, groups, "version counts");
   metadata.manual_buffer_versions = ExpandL0StorageGroupValues(
@@ -1558,7 +1557,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
   unit_builder.SetMemoryLimit("shared", shared_mem_limit);
   AivStorageMap aiv_storages;
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
-      metadata.kernel_root,
+      metadata.kernel_body,
       [&](const ObjectRef &object) -> ffi::Expected<ffi::WalkResult> {
         const auto *call = object.as<CallObj>();
         if (IsAnnotationCall(call))
@@ -1620,11 +1619,11 @@ tvm::transform::Pass AutoSchedule() {
         std::move(func), "AutoSchedule",
         [&](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
-              context.root, context.outer_ctx, MakeAutoScheduleExtraInfo, {},
+              context.body, context.outer_ctx, MakeAutoScheduleExtraInfo, {},
               context.parameter_alias_contract);
           BufferVersionMap buffer_version_overrides =
               scheduled_tir.metadata.buffer_versions;
-          ScheduleSingleKernel(context.root->body, target, &scheduled_tir);
+          ScheduleSingleKernel(context.body, target, &scheduled_tir);
           WarnOnUnappliedBufferVersionOverrides(
               buffer_version_overrides, scheduled_tir.metadata.buffer_versions);
           return EncodeScheduledTIR(std::move(scheduled_tir));

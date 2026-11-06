@@ -117,22 +117,24 @@ def extract(module, parameters=None):
             for child in statement.seq:
                 visit(child, environment, loops, core, stage, vector, guards)
         elif isinstance(statement, ir.RegionStmt):
-            assert statement.op.name in {"tl.attr", "tl.ascend_block", "tl.ascend.task", "tl.ascend.schedule_unit"}, (
-                "unsupported region",
-                statement.op.name,
-            )
-            fields = attribute_fields(statement)
-            key = fields["key"]
-            if key == "tl.ascend_task":
-                core = int(fields["node"]["core_mask"])
-            elif key == "tl.schedule_unit":
-                stage = int(fields["node"]["stage"])
-            elif key == "tl.sblock":
-                name = fields["value"]["name"]
-                assert name in ("tilelang_root", "root", "SIMD_VF"), ("unsupported block", name)
-                vector = vector or name == "SIMD_VF"
+            if statement.op.name == "tl.lexical_scope":
+                assert not statement.args and not statement.attrs
+            elif statement.op.name == "tl.ascend_block":
+                assert statement.attrs["name"] == "SIMD_VF", ("unsupported execution domain", statement.attrs["name"])
+                vector = True
             else:
-                assert key == "tl.loop.annotations", ("unsupported attribute", key)
+                assert statement.op.name in {"tl.attr", "tl.ascend.task", "tl.ascend.schedule_unit"}, (
+                    "unsupported region",
+                    statement.op.name,
+                )
+                fields = attribute_fields(statement)
+                key = fields["key"]
+                if key == "tl.ascend_task":
+                    core = int(fields["node"]["core_mask"])
+                elif key == "tl.schedule_unit":
+                    stage = int(fields["node"]["stage"])
+                else:
+                    assert key == "tl.loop.annotations", ("unsupported attribute", key)
             visit(statement.body, environment, loops, core, stage, vector, guards)
         elif isinstance(statement, ir.For):
             assert statement.kind == ir.ForKind.DEFAULT

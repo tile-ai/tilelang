@@ -112,9 +112,7 @@ ParameterAliasContract CollectAscendParameterAliasContract(
           if (const auto *call = object.as<CallObj>(); IsAnnotationCall(call))
             read(ReadAnnotations(call));
           if (const auto *region = object.as<RegionStmtObj>()) {
-            if (IsAscendBlock(region)) {
-              read(AscendBlockAnnotations(region));
-            } else if (auto source = ReadSourceAttribute(region)) {
+            if (auto source = ReadSourceAttribute(region)) {
               if (source->key == "tl.non_restrict_params")
                 exclude(source->value);
               else if (source->key == "tl.kernel")

@@ -36,14 +36,8 @@ def attribute(key, value, body):
     return _scope_attribute(integer(0), key, value, body)
 
 
-def vf(body, kind="SIMD_VF", form="named"):
-    tag = "tl.simdvf_scope" if kind == "SIMD_VF" else "tl.simtvf_scope"
-    if form == "direct":
-        return attribute(tag, 1, body)
-    annotations = {tag: 1} if form == "annotation" else {}
-    return attribute(
-        "tl.sblock", {"name": "ordinary" if form == "annotation" else kind, "no_realize": True, "annotations": annotations}, body
-    )
+def vf(body, kind="SIMD_VF"):
+    return ir.RegionStmt("tl.ascend_block", [], [], {"name": kind}, body)
 
 
 def allocate(value):
@@ -179,10 +173,9 @@ def test_only_explicit_unrolled_loops_expand(explicit, kind, tmp_path):
 
 
 @pytest.mark.parametrize("kind", ["SIMD_VF", "SIMT_VF"])
-@pytest.mark.parametrize("form", ["named", "direct", "annotation"])
-def test_vf_scopes_preserve_nested_unrolls(kind, form, tmp_path):
+def test_vf_scopes_preserve_nested_unrolls(kind, tmp_path):
     i = ir.Var("i", "int32")
-    protected = vf([attribute("ordinary", "SIMD_VF", [loop(i, 0, 3, [ir.Evaluate(i)])])], kind, form)
+    protected = vf([attribute("ordinary", "SIMD_VF", [loop(i, 0, 3, [ir.Evaluate(i)])])], kind)
     result = apply("UnrollLoopSkipVF", [], [protected], tmp_path)
     ir.assert_structural_equal(result.body.seq[0], protected)
 
@@ -261,11 +254,10 @@ def test_dcache_tracks_writable_storage_and_keeps_readonly_gm(writer, alias, tmp
 
 
 @pytest.mark.parametrize("kind", ["SIMD_VF", "SIMT_VF"])
-@pytest.mark.parametrize("form", ["named", "direct", "annotation"])
-def test_vf_dcache_scope_restores_following_scalar_siblings(kind, form, tmp_path):
+def test_vf_dcache_scope_restores_following_scalar_siblings(kind, tmp_path):
     data = tensor("data")
     store = ir.TensorStore(data, [0], ir.TensorLoad(data, [0]) + ir.const(1, "float32"))
-    protected = vf([vf([store], kind, form), store], kind, form)
+    protected = vf([vf([store], kind), store], kind)
     result = apply("MarkScalarDcacheBypass", [data], [protected, store], tmp_path)
     ir.assert_structural_equal(result.body.seq[0], protected)
     assert len(calls(result, "tl.ascend_read_gm_bypass_dcache")) == 1

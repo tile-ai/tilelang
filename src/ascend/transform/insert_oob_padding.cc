@@ -240,9 +240,7 @@ public:
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
     auto saved = layouts_;
-    if (ascend::IsAscendBlock(op)) {
-      RecordMetadata(ascend::AscendBlockAnnotations(op));
-    } else if (op->op->name == "tl.attr") {
+    if (op->op->name == "tl.attr") {
       auto fields = ReadAnnotations(op);
       String key = fields.at("key").cast<String>();
       if (key == "tl.kernel")

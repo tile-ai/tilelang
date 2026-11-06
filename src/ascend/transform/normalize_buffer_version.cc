@@ -95,28 +95,15 @@ public:
     RegionStmt region = StmtExprMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(GetRef<RegionStmt>(op))
                             .as_or_throw<RegionStmt>();
-    if (IsAscendBlock(region.get())) {
-      auto fields = AscendBlockAnnotations(region.get());
-      auto result = Normalize(fields);
-      if (StructuralEqual()(fields, result))
-        return region;
-      return MakeAscendBlock(AscendBlockName(region.get()), result,
-                             region->body, region->loc);
-    }
     auto attribute = ReadSourceAttribute(region.get());
     if (!attribute)
       return region;
     TVM_FFI_CHECK(attribute->key != kPhysicalBufferVersion, ValueError)
         << "'" << kPhysicalBufferVersion << "' is compiler-internal";
-    if (attribute->key != "tl.sblock" &&
-        attribute->key != "tl.loop.annotations")
+    if (attribute->key != "tl.loop.annotations")
       return region;
     auto fields = attribute->value.cast<Fields>();
     auto result = Normalize(fields);
-    if (attribute->key == "tl.sblock") {
-      if (auto annotations = result.Get("annotations"))
-        result.Set("annotations", Normalize(annotations->cast<Fields>()));
-    }
     if (StructuralEqual()(fields, result))
       return region;
     return MakeAttribute(attribute->node, attribute->key, result, region->body,

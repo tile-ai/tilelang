@@ -3,7 +3,7 @@
 import pytest
 from tilelang.ascend import transform
 from tvm_tirx import ir, tirx
-from testing.ascend._ir import allocated_buffer, attributes, kernel, nodes, tensor
+from testing.ascend._ir import allocated_buffer, kernel, kernel_body, nodes, tensor
 
 
 @pytest.mark.parametrize("control", ["condition", "loop-bound"])
@@ -26,8 +26,7 @@ def test_control_read_is_snapshotted_before_body_mutates_it(control):
     else:
         (loop,) = nodes(after, ir.For)
         assert loop.end.same_as(snapshot.var)
-    (root,) = attributes(after, "tl.sblock")
-    allocation, before_snapshot, after_snapshot = root.body.seq
+    allocation, before_snapshot, after_snapshot = kernel_body(after).seq
     assert allocation.var.same_as(allocated_buffer(after, "pred"))
     assert before_snapshot.same_as(snapshot)
     ir.assert_structural_equal(nodes(after_snapshot, ir.TensorStore)[0], write)

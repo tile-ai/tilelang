@@ -46,8 +46,7 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    auto name = ascend::BlockNameAtSourceBoundary(op);
-    if (!name || *name != "SIMT_VF")
+    if (ascend::GetVFKind(op) != ascend::VFKind::kSimt)
       return StmtExprMutator::Mutate_(op, mode);
     auto body = PlanThreadStorageSync(function_, op->body, scope_, warp_size_,
                                       false, false);

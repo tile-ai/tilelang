@@ -190,17 +190,6 @@ public:
     auto rewritten = LayoutMapMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(GetRef<Stmt>(op))
                          .as_or_throw<RegionStmt>();
-    if (ascend::IsAscendBlock(rewritten.get())) {
-      auto metadata = ascend::AscendBlockAnnotations(rewritten.get());
-      if (metadata.count(attr::kLayoutMap)) {
-        CheckConsumed(metadata.at(attr::kLayoutMap));
-        metadata.erase(attr::kLayoutMap);
-        return ascend::MakeAscendBlock(ascend::AscendBlockName(rewritten.get()),
-                                       metadata, rewritten->body,
-                                       rewritten->loc);
-      }
-      return rewritten;
-    }
     if (op->op->name != "tl.attr")
       return rewritten;
     auto fields = ReadAnnotations(rewritten.get());
@@ -217,19 +206,6 @@ public:
         metadata.erase(attr::kLayoutMap);
         return MakeAttribute(fields.at("node"), key, metadata, rewritten->body,
                              op->loc);
-      }
-    }
-    if (key == "tl.sblock") {
-      auto values = fields.at("value").cast<Map<String, Any>>();
-      if (auto metadata = values.Get("annotations")) {
-        auto annotations = metadata->cast<Map<String, Any>>();
-        if (annotations.count(attr::kLayoutMap)) {
-          CheckConsumed(annotations.at(attr::kLayoutMap));
-          annotations.erase(attr::kLayoutMap);
-          values.Set("annotations", annotations);
-          return MakeAttribute(fields.at("node"), key, values, rewritten->body,
-                               op->loc);
-        }
       }
     }
     if (key == "tl.loop.annotations") {
@@ -523,7 +499,7 @@ public:
     TileOperator tile = ParseOperator(GetRef<Stmt>(op), block_annotations_);
     if (!tile.defined())
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
-    LowerArgs args{.target = target_};
+    LowerArgs args{.target = target_, .inside_simt_vf = inside_simt_vf_};
     args.thread_bounds = CurrentThreadBounds();
     args.thread_index = CurrentThreadIndex();
     args.layout_map = layout_map_;
@@ -574,6 +550,9 @@ public:
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
+    const bool previous_simt_vf = inside_simt_vf_;
+    if (ascend::GetVFKind(op) != ascend::VFKind::kNone)
+      inside_simt_vf_ = ascend::GetVFKind(op) == ascend::VFKind::kSimt;
     auto previous_thread = thread_binding_;
     auto previous_loop = loop_annotations_;
     auto previous_block = block_annotations_;
@@ -589,8 +568,8 @@ public:
       // inside the device region, not in the host function before splitting.
       workspace_scope = true;
     }
-    if (ascend::IsAscendBlock(op)) {
-      RecordMetadata(ascend::AscendBlockAnnotations(op));
+    if (ascend::IsAscendBlock(op) || IsLexicalScope(op)) {
+
       RecordMetadata(CollectSourceBlockAnnotations(op->body));
     }
     if (op->op->name == "tl.attr") {
@@ -608,17 +587,14 @@ public:
         RecordMetadata(
             attr_fields.value().at("value").cast<Map<String, Any>>());
         workspace_scope = true;
-      } else if (key == "tl.sblock") {
-        auto values = attr_fields.value().at("value").cast<Map<String, Any>>();
-        if (auto annotations = values.Get("annotations"))
-          RecordMetadata(annotations->cast<Map<String, Any>>());
-      } else if (key == attr::kLexicalAllocScope) {
+      }
+      if (key == attr::kLexicalAllocScope) {
         // InlineTileOpFunction carries this scope as a tl.attr region.
         // Workspaces requested inside the helper belong to this lexical body.
         workspace_scope = true;
       } else
         RecordMetadata({{key, attr_fields.value().at("value")}});
-      if (key == "tl.kernel" || key == "tl.sblock")
+      if (key == "tl.kernel")
         RecordMetadata(CollectSourceBlockAnnotations(op->body));
     }
     if (workspace_scope)
@@ -634,6 +610,7 @@ public:
       prefix.push_back(rewritten->body);
       rewritten.CopyOnWrite()->body = SeqStmt(prefix, op->loc);
     }
+    inside_simt_vf_ = previous_simt_vf;
     thread_binding_ = previous_thread;
     loop_annotations_ = previous_loop;
     block_annotations_ = previous_block;
@@ -750,20 +727,13 @@ private:
               call && IsAnnotationCall(call))
             collect(ReadAnnotations(call));
           if (const auto *region = object.as<RegionStmtObj>();
-              ascend::IsAscendBlock(region)) {
-            collect(ascend::AscendBlockAnnotations(region));
-          } else if (region && region->op->name == "tl.attr") {
+              region && region->op->name == "tl.attr") {
             auto data = ReadAnnotations(region);
             const String key = data.at("key").cast<String>();
             if (key == attr::kLayoutMap)
               collect({{attr::kLayoutMap, data.at("value")}});
             else if (key == "tl.kernel")
               collect(data.at("value").cast<Map<String, Any>>());
-            else if (key == "tl.sblock") {
-              auto values = data.at("value").cast<Map<String, Any>>();
-              if (auto annotations = values.Get("annotations"))
-                collect(annotations->cast<Map<String, Any>>());
-            }
           }
           return ffi::WalkResult::Advance();
         });
@@ -1081,6 +1051,7 @@ private:
   LayoutMap layout_map_;
   Map<TensorVar, TensorVar> buffer_remap_;
   Map<Var, Expr> bind_var_to_expr_;
+  bool inside_simt_vf_{false};
   Map<String, Any> block_annotations_;
   Map<String, Any> loop_annotations_;
   Optional<PrimVar> thread_binding_;

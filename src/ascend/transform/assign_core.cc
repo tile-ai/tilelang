@@ -416,7 +416,7 @@ tvm::transform::Pass AssignCore() {
     auto result = RewriteTilelangKernels(
         std::move(func), "AssignCore",
         [](const TilelangKernelContext &context) {
-          RegionStmt root = context.root;
+          SeqStmt root = context.body;
           if (context.outer_sid.has_value())
             root = SubcoreProjector::Rewrite(root, context.outer_ctx,
                                              context.outer_sid.value(),

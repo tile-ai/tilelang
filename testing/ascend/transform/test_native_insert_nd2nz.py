@@ -95,15 +95,13 @@ def constant(expr):
     return int(tvm_tirx.sym.Analyzer().simplify(expr))
 
 
-def function(body, buffers=(), definitions=(), layouts=None, params=(), carrier="sblock"):
+def function(body, buffers=(), definitions=(), layouts=None, params=(), carrier="lexical"):
     statements = [*(allocate(value) for value in buffers), *definitions]
+    metadata = annotation({"layout_map": layouts or {}})
     if carrier == "annotation":
-        statements += [annotation({"layout_map": layouts or {}}), *body]
-        statements = [attribute("tl.sblock", {"name": "tilelang_root", "no_realize": True}, statements)]
+        statements += [metadata, *body]
     else:
-        statements += [
-            attribute("tl.sblock", {"name": "tilelang_root", "no_realize": True, "annotations": {"layout_map": layouts or {}}}, list(body))
-        ]
+        statements += [ir.RegionStmt("tl.lexical_scope", [], [], {}, [metadata, *body])]
     return tirx.Function(list(params), statements).with_attr("target", tvm_tirx.target.Target("ascend")).with_attr("global_symbol", "main")
 
 
@@ -136,7 +134,7 @@ def scatter_program(*, staged=False, reshape=False, vf=None, padding=1, strides=
 
 
 @pytest.mark.parametrize("case", ["plain", "staged", "reshape", "simd", "simt"])
-@pytest.mark.parametrize("carrier", ["annotation", "sblock"])
+@pytest.mark.parametrize("carrier", ["annotation", "lexical"])
 def test_scatter_regions_and_vf_boundary(case, carrier):
     before = scatter_program(
         staged=case == "staged", reshape=case == "reshape", vf={"simd": "SIMD_VF", "simt": "SIMT_VF"}.get(case), carrier=carrier

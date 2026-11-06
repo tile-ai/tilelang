@@ -166,8 +166,8 @@ def _print_region(node: ir.RegionStmt, indent: str) -> None:
     label = node.op.name
     if metadata is not None:
         label += f" [{metadata.get('key', '')}]"
-        if metadata.get("key") == "tl.sblock":
-            label += f" ({metadata['value']['name']!r})"
+    if node.op.same_as(ir.Op.get("tl.ascend_block")):
+        label += f" ({node.attrs['name']!r})"
     print(f"{indent}RegionStmt({label})")
     inner = indent + "    "
     print(f"{inner}├─ args         → {list(node.args)}")

@@ -394,17 +394,8 @@ private:
       using StmtExprVisitor::Visit_;
       using Result = ffi::Optional<ffi::VisitInterrupt>;
       Result Visit_(const RegionStmtObj *op) override {
-        if (auto name = BlockNameAtSourceBoundary(op);
-            name && (*name == "SIMT_VF" || *name == "SIMD_VF")) {
-          ScheduleUnitMetadata annotations;
-          if (IsAscendBlock(op)) {
-            annotations = AscendBlockAnnotations(op);
-          } else {
-            auto fields =
-                ReadSourceAttribute(op)->value.cast<ScheduleUnitMetadata>();
-            if (auto value = fields.Get("annotations"))
-              annotations = value->cast<ScheduleUnitMetadata>();
-          }
+        if (GetVFKind(op) != VFKind::kNone) {
+          auto annotations = op->attrs->dict;
           if (auto value = annotations.Get("tl.vf_latency")) {
             auto amount = value->try_cast<int64_t>();
             if (!amount)
@@ -1719,7 +1710,7 @@ public:
   // Resource analysis treats blocks as atomic scheduler operations. Preserve
   // the same boundary for cost features; VF cost is modeled from the block.
   Result Visit_(const RegionStmtObj *op) final {
-    if (BlockNameAtSourceBoundary(op))
+    if (IsAscendBlock(op))
       return std::nullopt;
     return Visit(op->body);
 
@@ -1969,7 +1960,7 @@ private:
 
 bool IsComposedLatencyStmt(const Stmt &stmt) {
   if (const auto *region = stmt.as<RegionStmtObj>();
-      region && BlockNameAtSourceBoundary(region))
+      region && IsAscendBlock(region))
     return false;
   if (stmt.as<SeqStmtObj>() || stmt.as<RegionStmtObj>() || stmt.as<IfObj>() ||
       stmt.as<WhileObj>()) {
@@ -2050,7 +2041,7 @@ TaskCostEstimator::EstimateStmtCost(const Stmt &stmt,
     return result;
   }
   if (const auto *region = stmt.as<RegionStmtObj>()) {
-    if (BlockNameAtSourceBoundary(region))
+    if (IsAscendBlock(region))
       return EstimateLeafTaskCost(stmt, outer_ctx);
     ConstrSet body_ctx = outer_ctx;
     if (auto attr = ReadSourceAttribute(region);
@@ -2290,8 +2281,6 @@ public:
       EstimatePerCoreTask(op);
       return std::nullopt;
     }
-    if (SourceBlockName(op))
-      FatalUnmarkedTask("EstimateLatency", "block");
     return ConstrVisitor::Visit_(op);
 
     return std::nullopt;
@@ -2343,7 +2332,7 @@ private:
 SeqStmt RunEstimateLatency(const SeqStmt &body, const ConstrSet &outer_ctx) {
   TaskCostMap costs = TaskCostCollector::Collect(body, outer_ctx);
   ICHECK(!costs.empty())
-      << "EstimateLatency found no schedulable tasks inside tilelang_root";
+      << "EstimateLatency found no schedulable tasks in the kernel body";
   auto rewriter = make_object<TaskAnnotationRewriter>(costs);
   return rewriter->Mutate(body).ValueOrUnchanged(body);
 }
@@ -2356,10 +2345,7 @@ tvm::transform::Pass EstimateLatency() {
     return RewriteTilelangKernels(
         std::move(func), "EstimateLatency",
         [](const TilelangKernelContext &context) {
-          RegionStmt root = context.root;
-          root.CopyOnWrite()->body =
-              RunEstimateLatency(root->body, context.outer_ctx);
-          return root;
+          return RunEstimateLatency(context.body, context.outer_ctx);
         },
         /*require_kernel=*/false);
   };

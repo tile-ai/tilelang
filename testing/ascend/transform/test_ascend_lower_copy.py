@@ -7,8 +7,8 @@ from testing.ascend._ir import (
     call_annotations,
     launch_thread,
     sblock,
-    sblock_metadata,
-    sblocks,
+    execution_attrs,
+    execution_blocks,
     substitute,
     tensor as _compact_tensor,
 )
@@ -489,7 +489,7 @@ def test_simt_copy_is_lowered_per_thread_and_does_not_change_later_dma():
         return ir.SeqStmt([vf, copy])
 
     after = _lower(src, dst, wrap=wrap)
-    (vf,) = [block for block in sblocks(after) if sblock_metadata(block)["name"] == "SIMT_VF"]
+    (vf,) = [block for block in execution_blocks(after) if execution_attrs(block)["name"] == "SIMT_VF"]
     assert not calls(vf, "tl.ascend_copy_gm_to_ubuf")
     assert any(access_tensor(load).same_as(src) for load in nodes(vf, ir.TensorLoad))
     assert any(access_tensor(store).same_as(dst) for store in nodes(vf, ir.TensorStore))

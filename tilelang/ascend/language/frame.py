@@ -6,7 +6,6 @@ never need the old SBlock allocation hoisting/stealing protocol.
 
 from __future__ import annotations
 
-from tilelang.language import _annotation_codec
 from tilelang.language import _source_scope
 from tilelang.language import frame as _loop_frame
 
@@ -99,7 +98,6 @@ class SimtVFFrame(_loop_frame.LoopFrame):
             [
                 _block("SIMT_VF", _vf_annotations("simtvf", latency)),
                 *threads,
-                _annotation_codec.attr("simtvf", "tl.simtvf_scope", 1),
             ]
         )
 
@@ -144,7 +142,6 @@ class SimdVFFrame(_loop_frame.LoopFrame):
         super().__init__(
             [
                 _block("SIMD_VF", _vf_annotations("simdvf", latency)),
-                _annotation_codec.attr("simdvf", "tl.simdvf_scope", 1),
             ]
         )
         self._token = None

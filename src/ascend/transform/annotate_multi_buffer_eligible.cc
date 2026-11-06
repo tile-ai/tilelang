@@ -884,10 +884,10 @@ public:
   explicit EligibilityCarrierWriter(std::vector<LoopEligibilityPlan> plans)
       : plans_(std::move(plans)) {}
 
-  RegionStmt Run(const RegionStmt &root) {
-    RegionStmt result = Mutate(root, InplaceMode::kDisallow)
-                            .ValueOrUnchanged(root)
-                            .as_or_throw<RegionStmt>();
+  SeqStmt Run(const SeqStmt &root) {
+    SeqStmt result = Mutate(root, InplaceMode::kDisallow)
+                         .ValueOrUnchanged(root)
+                         .as_or_throw<SeqStmt>();
     TVM_FFI_ICHECK_EQ(cursor_, plans_.size());
     return result;
   }
@@ -938,12 +938,12 @@ tvm::transform::Pass AnnotateMultiBufferEligible() {
         std::move(f), "AnnotateMultiBufferEligible",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
-              context.root, context.outer_ctx, nullptr,
+              context.body, context.outer_ctx, nullptr,
               context.kernel_annotations, context.parameter_alias_contract);
           StorageProvenance storage = MakeAscendStorageProvenance();
-          storage.Collect(context.root->body);
+          storage.Collect(context.body);
           L0SFBindings bindings;
-          for (const auto &[sf, data] : CollectL0SFBindings(context.root)) {
+          for (const auto &[sf, data] : CollectL0SFBindings(context.body)) {
             Var scale_root = CanonicalStorage(sf, storage);
             Var data_root = CanonicalStorage(data, storage);
             if (auto previous = bindings.Get(scale_root))
@@ -969,7 +969,7 @@ tvm::transform::Pass AnnotateMultiBufferEligible() {
           }
           auto plans = MultiBufferAnnotator::Rewrite(
               &scheduled_tir, std::move(manual_buffers), groups);
-          RegionStmt encoded = EncodeScheduledTIR(std::move(scheduled_tir));
+          SeqStmt encoded = EncodeScheduledTIR(std::move(scheduled_tir));
           return make_object<EligibilityCarrierWriter>(std::move(plans))
               ->Run(encoded);
         },

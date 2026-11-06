@@ -4,7 +4,7 @@ import tilelang.testing
 import tvm_tirx
 from tilelang.ascend import transform as ascend_transform
 from tvm_tirx import ir, tirx
-from testing.ascend._ir import is_sblock, launch_thread, nodes, sblock, sblock_metadata, single_statement, tensor
+from testing.ascend._ir import is_execution_block, launch_thread, nodes, sblock, execution_attrs, single_statement, tensor
 
 
 def _thread_body(make_body, thread_count=32):
@@ -49,8 +49,8 @@ def _loop_body(index, start, stop, step, make_body, canonicalize):
 
 def _loop_in_vf(body):
     block = single_statement(body)
-    assert is_sblock(block)
-    assert sblock_metadata(block)["name"] == "SIMT_VF"
+    assert is_execution_block(block)
+    assert execution_attrs(block)["name"] == "SIMT_VF"
     body = block.body
     for dimension in "xyz":
         launch = single_statement(body)
@@ -90,8 +90,8 @@ def test_ascend_thread_sync_inserts_barrier_inside_vf(storage_scope, thread_coun
     after = ascend_transform.AscendThreadSync(storage_scope)(before)["main"]
 
     block = single_statement(after.body)
-    assert is_sblock(block)
-    assert sblock_metadata(block)["name"] == "SIMT_VF"
+    assert is_execution_block(block)
+    assert execution_attrs(block)["name"] == "SIMT_VF"
     syncs = _syncs(block.body)
     assert len(syncs) == 1
     assert len(syncs[0].args) == 1
@@ -211,8 +211,8 @@ def test_ascend_thread_sync_plans_each_vf_independently():
     assert isinstance(after.body, ir.SeqStmt)
     assert len(after.body.seq) == 2
     for block in after.body.seq:
-        assert is_sblock(block)
-        assert sblock_metadata(block)["name"] == "SIMT_VF"
+        assert is_execution_block(block)
+        assert execution_attrs(block)["name"] == "SIMT_VF"
         assert len(_syncs(block.body)) == 1
 
 

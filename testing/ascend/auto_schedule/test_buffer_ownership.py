@@ -1,7 +1,9 @@
 """AnnotateMultiBufferEligible selects complete, write-first storage owners."""
 
+from testing.ascend._ir import kernel_body
+
 from tvm_tirx import ir
-from testing.ascend._ir import annotation, attribute, loop_annotations, sblock, sblock_annotations, sblock_metadata, sblocks, tensor
+from testing.ascend._ir import annotation, attribute, loop_annotations, sblock, scope_annotations, tensor
 
 import pytest
 from tilelang.ascend import transform
@@ -280,5 +282,5 @@ def test_sf_version_override_applies_to_the_allocation_group(conflict):
             transform.AnnotateMultiBufferEligible()(before)
     else:
         after = transform.AnnotateMultiBufferEligible()(before)
-        root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-        assert int(sblock_annotations(root)["tl.buffer_versions_map"][data]) == 2
+        root = kernel_body(after)
+        assert int(scope_annotations(root)["tl.buffer_versions_map"][data]) == 2

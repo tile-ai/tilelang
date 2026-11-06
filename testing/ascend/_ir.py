@@ -116,22 +116,7 @@ def kernel(
     allocation_core=7,
     allocation_cost=None,
 ):
-    # Allocation definitions must dominate metadata operands that refer to
-    # them. Constant root attributes retain their original scope; maps with
-    # variable operands are statements after those definitions.
-    constants, operands = {}, {}
-    for key, value in (annotations or {}).items():
-        # Layout declarations always follow allocation definitions. Their
-        # TensorVar keys are uses even when the layout itself is constant.
-        if key == "layout_map":
-            operands[key] = value
-            continue
-        variables = []
-        # Other source metadata still carries expression-valued map keys in
-        # explicit Tuple operands rather than static root attributes.
-        _, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({key: value})
-        tvm_ffi.structural_walk(payload, (ir.Var, variables.append))
-        (operands if variables else constants)[key] = value
+    # Native definitions dominate the independent metadata statements that use them.
     statements = [allocate(buffer) for buffer in buffers]
     if allocation_stage is not None:
         task = {"core_mask": allocation_core} if allocation_core else {}
@@ -139,12 +124,55 @@ def kernel(
             latency, ii = allocation_cost
             task.update(latency=latency, ii=ii)
         statements = [scheduled_bind(binding, allocation_stage, task) for binding in statements]
-    if operands:
-        statements.append(annotation(operands))
+    if annotations:
+        statements.append(annotation(annotations))
     statements.extend(body.seq if isinstance(body, ir.SeqStmt) else body if isinstance(body, (list, tuple)) else [body])
-    root = attribute(None, "tl.sblock", {"name": "tilelang_root", "no_realize": True, "annotations": constants}, statements)
-    function = tirx.Function(list(params), [root]).with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("ascend"))
+    function = (
+        tirx.Function(list(params), statements).with_attr("global_symbol", "main").with_attr("target", tvm_tirx.target.Target("ascend"))
+    )
     return ir.IRModule({"main": function})
+
+
+def kernel_bodies(value):
+    """Return actual SeqStmt bodies at native kernel launch boundaries."""
+    function = value["main"] if isinstance(value, ir.IRModule) else value
+    found = []
+
+    def boundary(scope):
+        return isinstance(scope, ir.RegionStmt) and (
+            scope.op.name in {"tirx.launch_thread", "tl.launch_kernel"}
+            or scope.op.name == "tl.attr"
+            and attribute_fields(scope)["key"] == "tl.kernel"
+        )
+
+    def visit(statement):
+        if isinstance(statement, ir.RegionStmt) and (
+            statement.op.name == "tl.launch_kernel" or statement.op.name == "tirx.launch_thread" and statement.args[0].value == "blockIdx.x"
+        ):
+            body = statement.body
+            while len(body.seq) == 1 and boundary(body.seq[0]):
+                body = body.seq[0].body
+            found.append(body)
+            return
+        if isinstance(statement, ir.SeqStmt):
+            children = statement.seq
+        elif isinstance(statement, ir.If):
+            children = [statement.then_case] + ([statement.else_case] if statement.else_case is not None else [])
+        elif isinstance(statement, (ir.RegionStmt, ir.For, ir.While)):
+            children = [statement.body]
+        else:
+            children = []
+        for child in children:
+            visit(child)
+
+    visit(function.body)
+    return found or [function.body]
+
+
+def kernel_body(value):
+    """Return the sole native kernel body, rejecting ambiguous multi-kernel input."""
+    (body,) = kernel_bodies(value)
+    return body
 
 
 def nodes(value, kind):
@@ -174,13 +202,12 @@ def annotations(value):
         if is_annotation(call):
             yield tvm_ffi.get_global_func("tl.ReadAnnotations")(call)
     for node in nodes(value, ir.RegionStmt):
-        if node.op.name not in {"tl.attr", "tl.ascend_block"}:
-            continue
-        fields = attribute_fields(node)
-        if fields["key"] == "tl.sblock":
-            yield fields["value"].get("annotations", {})
-        elif fields["key"] == "tl.loop.annotations":
-            yield fields["value"]
+        if node.op.name == "tl.ascend_block":
+            yield {key: value for key, value in node.attrs.items() if key != "name"}
+        elif node.op.name == "tl.attr":
+            fields = attribute_fields(node)
+            if fields["key"] == "tl.loop.annotations":
+                yield fields["value"]
 
 
 def loop_annotations(loop):
@@ -338,19 +365,15 @@ def disjoint_argument_fixture(value, *pairs):
             loc=loop.loc,
         )
 
-    def mark_root(node):
-        if node.op.name != "tl.attr":
-            return node
-        fields = attribute_fields(node)
-        if fields["key"] != "tl.sblock" or fields["value"]["name"] != "tilelang_root":
-            return node
-        metadata = dict(fields["value"])
-        annotations = dict(metadata.get("annotations", {}))
-        annotations["conflict_hint"] = [*annotations.get("conflict_hint", []), *hints]
-        metadata["annotations"] = annotations
-        return attribute(fields["node"], fields["key"], metadata, node.body, loc=node.loc)
+    bodies = kernel_bodies(value)
 
-    return tvm_ffi.structural_map(value, [(ir.For, mark_loop), (ir.RegionStmt, mark_root)])
+    def mark_body(node):
+        if any(node.same_as(body) for body in bodies):
+            return ir.SeqStmt([annotation({"conflict_hint": hints}), *node.seq], loc=node.loc)
+        return node
+
+    value = tvm_ffi.structural_map(value, (ir.SeqStmt, mark_body))
+    return tvm_ffi.structural_map(value, (ir.For, mark_loop))
 
 
 def statements(value, ancestors=()):
@@ -398,20 +421,26 @@ def attribute_key(value):
     return attribute_fields(value)["key"] if isinstance(value, ir.RegionStmt) and value.op.name in SEMANTIC_SCOPE_OPS else None
 
 
-def sblocks(value, name=None):
-    return [node for node in attributes(value, "tl.sblock") if name is None or attribute_fields(node)["value"]["name"] == name]
+def execution_blocks(value, name=None):
+    return [
+        node for node in nodes(value, ir.RegionStmt) if node.op.name == "tl.ascend_block" and (name is None or node.attrs["name"] == name)
+    ]
 
 
-def is_sblock(value):
-    return attribute_key(value) == "tl.sblock"
+def lexical_scopes(value):
+    return [node for node in nodes(value, ir.RegionStmt) if node.op.name == "tl.lexical_scope"]
 
 
-def sblock_metadata(value):
-    assert is_sblock(value)
-    return attribute_fields(value)["value"]
+def is_execution_block(value):
+    return isinstance(value, ir.RegionStmt) and value.op.name == "tl.ascend_block"
 
 
-def sblock(name, body, *, buffers=(), annotations=None, reads=(), writes=()):
+def execution_attrs(value):
+    assert is_execution_block(value)
+    return value.attrs
+
+
+def sblock(name, body, *, buffers=(), annotations=None):
     """Construct the native lexical block with dominating allocation Binds."""
     constants, operands = {}, {}
     for key, value in (annotations or {}).items():
@@ -422,10 +451,6 @@ def sblock(name, body, *, buffers=(), annotations=None, reads=(), writes=()):
     body = list(body.seq) if isinstance(body, ir.SeqStmt) else list(body) if isinstance(body, (list, tuple)) else [body]
     body = [*[allocate(buffer) for buffer in buffers], *([annotation(operands)] if operands else []), *body]
     fields = {"name": name, "no_realize": True, "annotations": constants}
-    if reads:
-        fields["reads"] = list(reads)
-    if writes:
-        fields["writes"] = list(writes)
     return attribute(None, "tl.sblock", fields, body)
 
 
@@ -564,22 +589,21 @@ def call_annotations(call):
     return tvm_ffi.get_global_func("tl.DecodeAnnotations")(call.args[count], call.attrs["annotation_schema"])
 
 
-def sblock_annotations(block):
-    """Read constant and SSA annotations belonging to one lexical SBlock.
+def scope_annotations(block):
+    """Read direct metadata from a native sequence or scope.
 
-    A single-statement SeqStmt is an unambiguous wrapper; a general sequence is
-    not a block carrier. Only direct annotation statements (and transparent
-    nested sequences) belong here. Child blocks, loops, and regions keep their
-    own metadata, even when a child defines the same annotation key.
+    Nested sequences are transparent; lexical scopes, execution domains and
+    control flow keep their own annotation statements private.
     """
-    block = single_statement(block)
-    if not is_sblock(block):
-        raise TypeError("Expected one native tl.sblock RegionStmt")
+    if not isinstance(block, (ir.SeqStmt, ir.RegionStmt)):
+        raise TypeError("Expected a native sequence or execution domain")
     result = {}
     storage_maps = {"tl.buffer_versions_map", "tl.manual_multi_buffer", "tl.buffer_version_mode"}
 
     def merge(fields):
         for key, value in fields.items():
+            if key == "tl.source_block_annotation":
+                continue
             if key not in storage_maps:
                 result[key] = value
                 continue
@@ -598,7 +622,8 @@ def sblock_annotations(block):
                 entries[storage] = entry
             result[key] = entries
 
-    merge(sblock_metadata(block).get("annotations", {}))
+    if isinstance(block, ir.RegionStmt) and is_execution_block(block):
+        merge({key: value for key, value in block.attrs.items() if key != "name"})
 
     def collect(body):
         for statement in body.seq:
@@ -609,5 +634,5 @@ def sblock_annotations(block):
                 if is_annotation(call):
                     merge(tvm_ffi.get_global_func("tl.ReadAnnotations")(call))
 
-    collect(block.body)
+    collect(block if isinstance(block, ir.SeqStmt) else block.body)
     return result

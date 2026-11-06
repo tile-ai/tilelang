@@ -151,7 +151,7 @@ private:
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (BlockNameAtSourceBoundary(op))
+    if (IsAscendBlock(op))
       return Unchanged();
     return StmtExprMutator::Mutate_(op, mode);
   }
@@ -164,9 +164,7 @@ tvm::transform::Pass NormalizeControlFlowForSchedule() {
     return RewriteTilelangKernels(
         std::move(f), "NormalizeControlFlowForSchedule",
         [](const TilelangKernelContext &context) {
-          RegionStmt root = context.root;
-          root.CopyOnWrite()->body = ControlFlowNormalizer::Rewrite(root->body);
-          return root;
+          return ControlFlowNormalizer::Rewrite(context.body);
         },
         false);
   };

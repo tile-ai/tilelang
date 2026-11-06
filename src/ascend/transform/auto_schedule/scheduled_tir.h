@@ -47,7 +47,7 @@ inline Stmt WrapScheduledGuards(Stmt body, const GuardList &guards) {
 // storage entries follow their own definitions; other kernel metadata stays at
 // the root tail. Dynamic operands are never hoisted into the root arguments.
 struct ScheduledTIRMetadata {
-  RegionStmt kernel_root{ffi::UnsafeInit{}};
+  SeqStmt kernel_body{ffi::UnsafeInit{}};
   ConstrSet outer_ctx;
   BufferVersionMap buffer_versions;
   BufferVersionMap manual_buffer_versions;
@@ -69,9 +69,9 @@ struct ScheduledTIR {
 
 using ScheduledExtraInfoFactory = std::unique_ptr<IRExtraInfo> (*)();
 
-RegionStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir);
+SeqStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir);
 ScheduledTIR
-DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer_ctx,
+DecodeScheduledTIR(const SeqStmt &body, const ConstrSet &outer_ctx,
                    ScheduledExtraInfoFactory make_extra_info = nullptr,
                    const ScheduleUnitMetadata &kernel_annotations = {},
                    ParameterAliasContract parameter_alias_contract = {});

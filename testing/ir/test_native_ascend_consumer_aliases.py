@@ -1,18 +1,20 @@
 """Original Ascend fixtures retain real dependencies when arguments may alias."""
 
+from testing.ascend._ir import kernel_body
+
 import numpy as np
 import pytest
 import tvm_ffi
 from tvm_tirx import ir, sym, tirx
 
-from testing.ascend._ir import attribute_fields, attributes, calls, disjoint_argument_fixture, schedule
+from testing.ascend._ir import calls, disjoint_argument_fixture, schedule
 from testing.ascend.auto_schedule import test_conflict_hints as hints
 from testing.ascend.auto_schedule import test_flag_allocation as flags
 
 
 def _graph(before):
     assert tirx.analysis.check_well_formed(before["main"])
-    (root,) = [node for node in attributes(before, "tl.sblock") if attribute_fields(node)["value"]["name"] == "tilelang_root"]
+    root = kernel_body(before)
 
     def api(name):
         return tvm_ffi.get_global_func("tl.testing." + name)

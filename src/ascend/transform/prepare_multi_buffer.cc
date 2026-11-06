@@ -1457,7 +1457,7 @@ tvm::transform::Pass PrepareMultiBuffer() {
         std::move(func), "PrepareMultiBuffer",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir =
-              DecodeScheduledTIR(context.root, context.outer_ctx, nullptr, {},
+              DecodeScheduledTIR(context.body, context.outer_ctx, nullptr, {},
                                  context.parameter_alias_contract);
           std::vector<TaskNode *> tasks;
           CollectAllTaskNodes(scheduled_tir.tree, tasks);
@@ -1465,7 +1465,7 @@ tvm::transform::Pass PrepareMultiBuffer() {
             ICHECK_NE(task->GetCoreMask(), kCoreUnassigned)
                 << "PrepareMultiBuffer requires AssignCore to run first";
           }
-          L0StorageGroups groups(CollectL0SFBindings(context.root));
+          L0StorageGroups groups(CollectL0SFBindings(context.body));
           auto &metadata = scheduled_tir.metadata;
           metadata.buffer_versions = ExpandL0StorageGroupValues(
               metadata.buffer_versions, groups, "version counts");

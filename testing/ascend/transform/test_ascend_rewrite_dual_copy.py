@@ -73,7 +73,7 @@ def test_software_copy_splits_the_full_region(src_scope, dst_scope, src_shape, d
 
 def test_automatic_copy_synthesizes_one_subcore_scope():
     copy = _copy("global", "shared.dyn", (128,), (64,))
-    root = sblock("tilelang_root", ir.SeqStmt([copy, copy]))
+    root = launch_thread(ir.Var("block", "int32"), "blockIdx.x", 1, [copy, copy])
     after = transform.RewriteDualCopy()(_module(root))
     scopes = [node for node in nodes(after, ir.RegionStmt) if node.op.name == "tirx.launch_thread" and node.args[0].value == "cthread"]
     assert len(scopes) == 1 and int(scopes[0].args[1]) == 2

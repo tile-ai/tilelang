@@ -200,14 +200,6 @@ public:
   }
 
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (ascend::IsAscendBlock(op)) {
-      auto prepared = ascend::MakeAscendBlock(
-          ascend::AscendBlockName(op),
-          RewriteMetadata(ascend::AscendBlockAnnotations(op)), op->body,
-          op->loc);
-      return StmtExprMutatorWithAnalyzer::Mutate_(prepared.get(), mode)
-          .ValueOrUnchanged(Stmt(prepared));
-    }
     if (op->op->name != "tl.attr")
       return StmtExprMutatorWithAnalyzer::Mutate_(op, mode);
     auto fields = ReadAnnotations(op);
@@ -364,9 +356,7 @@ private:
           if (const auto *call = node.as<CallObj>(); IsAnnotationCall(call))
             record(ReadAnnotations(call));
           if (const auto *region = node.as<RegionStmtObj>();
-              ascend::IsAscendBlock(region)) {
-            record(ascend::AscendBlockAnnotations(region));
-          } else if (region && region->op->name == "tl.attr") {
+              region && region->op->name == "tl.attr") {
             auto fields = ReadAnnotations(region);
             String key = fields.at("key").cast<String>();
             if (key == "tl.kernel")

@@ -87,8 +87,11 @@ def test_indivisible_dynamic_blocks_use_knapsack():
 
 
 def test_gemm_reservation_is_respected_across_event_pairs():
-    gemm = ir.Evaluate(intrinsic("gemm_l1", *[integer(0)] * 10, integer(5)))
-    after = apply([gemm, *[flag("set", event, index) for event in ("MTE2_V", "V_MTE3") for index in range(9)]])
+    pointers = [ir.Var(name, ir.PtrType(ir.PrimType("float16"))) for name in ("c", "a", "b")]
+    gemm = ir.Evaluate(
+        intrinsic("gemm_l1", *pointers, *[integer(16)] * 4, integer(0), integer(1), ir.StringImm("float16"), integer(5), integer(0))
+    )
+    after = apply([gemm, *[flag("set", event, index) for event in ("MTE2_V", "V_MTE3") for index in range(9)]], pointers)
     assert [int(call.args[1].value) for call in calls(after, "tl.ascend_get_buf")] == [7, 8]
 
 

@@ -265,10 +265,8 @@ def test_native_simtvf_scope_selects_simt_copy_and_restores_dma_after_exit():
     result = lower(value, "ascend-native-simtvf-context")
     scopes = []
     for stmt in objects(result, ir.RegionStmt):
-        if stmt.op.name == "tl.attr":
-            fields = tvm_ffi.get_global_func("tl.DecodeAnnotations")(stmt.args[0], stmt.attrs["annotation_schema"])
-            if fields["key"] == "tl.simtvf_scope":
-                scopes.append(stmt)
+        if stmt.op.name == "tl.ascend_block" and stmt.attrs["name"] == "SIMT_VF":
+            scopes.append(stmt)
     (scope,) = scopes
     assert not calls(scope, "tl.ascend_copy_gm_to_ubuf")
     assert objects(scope, ir.TensorLoad) and objects(scope, ir.TensorStore)

@@ -4,7 +4,7 @@ import pytest
 import tvm_tirx
 from tilelang.ascend import transform
 from tvm_tirx import ir, tirx
-from testing.ascend._ir import nodes, sblock, sblocks, tensor
+from testing.ascend._ir import nodes, sblock, execution_blocks, tensor
 
 
 def _loop(body, *, kind=ir.ForKind.UNROLLED, explicit=True, trip_count=2, step=None):
@@ -73,7 +73,7 @@ def test_expansion_around_vf_preserves_its_inner_loop():
     inner = _loop(lambda i: ir.TensorStore(out, [i], i))
     vf = sblock("SIMD_VF", inner)
     after = _apply(_loop(lambda _: vf), out)
-    blocks = sblocks(after, "SIMD_VF")
+    blocks = execution_blocks(after, "SIMD_VF")
     assert len(blocks) == 2
     for block in blocks:
         tvm_tirx.ir.assert_structural_equal(block.body, ir.SeqStmt([inner]), map_free_vars=True)

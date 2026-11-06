@@ -253,7 +253,8 @@ private:
   bool gemm_zero_addr_emitted_{false};
   // Native Python break is valid only while emitting a Python for/while body.
   int native_loop_depth_{0};
-  // Nesting depth of tl.simdvf_scope; only the outermost emits pto.vecscope.
+  // Nesting depth of SIMD_VF execution domains; only the outermost emits
+  // pto.vecscope.
   int simdvf_nesting_depth_{0};
   // True when a Bind of simd_pset / rematerializable simd_vdup should be
   // inlined at each use (avoids vreg/mask SSA crossing scf.for / range).

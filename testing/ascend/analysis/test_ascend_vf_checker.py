@@ -215,5 +215,5 @@ def test_source_dsl_vf_regions_are_accepted_without_rewriting():
 
     blocks = [node for node in collect_nodes(before, ir.RegionStmt) if node.op.name == "tl.ascend_block"]
     assert [block.attrs["name"] for block in blocks] == ["SIMD_VF", "SIMT_VF"]
-    assert all(not block.args and set(block.attrs.keys()) == {"name", "annotations"} for block in blocks)
+    assert all(not block.args and set(block.attrs.keys()) == {"name", "tl.vf_source_index"} for block in blocks)
     _check(ir.IRModule({"main": before}))

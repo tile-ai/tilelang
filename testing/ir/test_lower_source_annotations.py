@@ -70,16 +70,16 @@ def test_pending_alias_and_size_metadata_keep_their_native_definition_scope():
     ir.assert_structural_equal(result, _lower(result))
 
 
-@pytest.mark.parametrize("name", ["CUBE", "VECTOR", "SIMT_VF", "SIMD_VF", "ordinary"])
-def test_legacy_source_name_never_creates_a_backend_execution_region(name):
-    # Construct raw source syntax, bypassing the public Ascend block factory.
-    source = _attribute(
-        "tl.sblock",
-        {"name": name, "no_realize": True, "annotations": {"lexical_alloc_scope": False, "pragma_import_c": "// prelude"}},
-        [ir.Evaluate(ir.const(7))],
+def test_explicit_allocation_and_codegen_metadata_keep_their_scope():
+    source = ir.RegionStmt(
+        "tl.lexical_scope",
+        [],
+        [],
+        {},
+        [_annotation({"lexical_alloc_scope": False, "pragma_import_c": "// prelude"}), ir.Evaluate(ir.const(7))],
     )
     result = _lower(tirx.Function([], [source], ir.NoneType()))
-    scope = result.body[0]
+    scope = result.body[0].body[0]
     assert scope.op.name == "tl.lexical_scope"
     assert scope.attrs["explicit_alloc_scope"] is True
     codegen = scope.body[0]
@@ -89,9 +89,9 @@ def test_legacy_source_name_never_creates_a_backend_execution_region(name):
 
 
 def test_native_backend_block_retains_header_and_lowers_only_source_body_syntax():
-    args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendBlock")("SIMD_VF", {"tl.vf_source_index": 7, "tl.vf_latency": 3})
+    attrs = {"name": "SIMD_VF", "tl.vf_source_index": 7, "tl.vf_latency": 3}
     source = _attribute("user_scope", 1, [ir.Evaluate(ir.const(9))])
-    block = ir.RegionStmt("tl.ascend_block", args, [], attrs, [source])
+    block = ir.RegionStmt("tl.ascend_block", [], [], attrs, [source])
     result = _lower(tirx.Function([], [block], ir.NoneType()))
     lowered = result.body[0]
     assert lowered.op.name == "tl.ascend_block"
@@ -168,7 +168,6 @@ def test_source_origin_marker_requires_the_actual_boolean(marker):
         _lower(function)
 
 
-def test_source_shell_rejects_unlowered_structured_execution_fields():
-    source = _attribute("tl.sblock", {"name": "ordinary", "init": 1}, [])
-    with pytest.raises(ValueError, match="Unconsumed structured block field `init`"):
-        _lower(tirx.Function([], [source], ir.NoneType()))
+def test_lexical_scope_rejects_old_structured_execution_fields():
+    with pytest.raises(ValueError, match="Unknown tl.lexical_scope attribute: init"):
+        ir.RegionStmt("tl.lexical_scope", [], [], {"init": 1}, [])

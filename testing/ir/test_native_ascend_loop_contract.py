@@ -401,7 +401,7 @@ def test_negative_induction_needs_the_correct_mandatory_break(case):
     else:
         body.append(stop)
     value = _kernel(params, [_loop(index, body, begin=3, end=5, step=-1)])
-    root = value.body.seq[0]
+    root = value.body
     _check(value)
     row = _api("AnalyzeAscendSchedule")(root, [])["loops"][0]
     assert not row["no_wrap"]

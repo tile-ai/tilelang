@@ -2760,13 +2760,12 @@ CoreMask InitializeHeaderTasks(IRStructure *node, CoreMask default_core) {
   return cores;
 }
 
-RegionStmt InsertKernelSync(const Stmt &kernel_body,
-                            ScheduledTIR scheduled_tir) {
+SeqStmt InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
   int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
   CoreMask vector_mask = VectorCoreMask(num_aiv_subcores);
   L0StorageGroups groups(
-      CollectL0SFBindings(scheduled_tir.metadata.kernel_root));
+      CollectL0SFBindings(scheduled_tir.metadata.kernel_body));
   MultiBufferPlan multi_buffer_plan =
       ReadMultiBufferPlan(root, scheduled_tir.metadata.buffer_versions, groups);
   for (const auto &node : root)
@@ -2857,9 +2856,9 @@ tvm::transform::Pass InsertSync() {
         std::move(func), "InsertSync",
         [](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
-              context.root, context.outer_ctx, MakeSyncInsertionExtraInfo, {},
+              context.body, context.outer_ctx, MakeSyncInsertionExtraInfo, {},
               context.parameter_alias_contract);
-          return InsertKernelSync(context.root->body, std::move(scheduled_tir));
+          return InsertKernelSync(context.body, std::move(scheduled_tir));
         });
   };
   return CreateFunctionPass(pass_func, 0, "tl.InsertSync");

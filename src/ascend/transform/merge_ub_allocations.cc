@@ -450,14 +450,6 @@ public:
     RegionStmt region = StmtExprMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(GetRef<RegionStmt>(op))
                             .as_or_throw<RegionStmt>();
-    if (IsAscendBlock(region.get())) {
-      auto fields = AscendBlockAnnotations(region.get());
-      auto result = ExtractFields(fields);
-      if (!StructuralEqual()(fields, result))
-        return MakeAscendBlock(AscendBlockName(region.get()), result,
-                               region->body, region->loc);
-      return region;
-    }
     auto attr = ReadSourceAttribute(region.get());
     if (!attr)
       return region;
@@ -468,13 +460,10 @@ public:
         AddAiv(attr->node);
       return region->body;
     }
-    if (attr->key == "tl.sblock" || attr->key == "tl.loop.annotations") {
+    if (attr->key == "tl.loop.annotations") {
       auto fields = attr->value.cast<Map<String, Any>>();
       auto result = ExtractFields(fields);
-      if (attr->key == "tl.sblock")
-        if (auto annotations = result.Get("annotations"))
-          result.Set("annotations",
-                     ExtractFields(annotations->cast<Map<String, Any>>()));
+
       if (!StructuralEqual()(fields, result))
         return MakeAttribute(attr->node, attr->key, result, region->body,
                              region->loc);

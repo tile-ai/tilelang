@@ -8,7 +8,7 @@ from tvm_tirx import ir, tirx
 
 from test_native_ascend_core_passes import _apply, _assert_schedule_consumed, _core, _metadata, _run
 from test_native_ascend_core_resolution import _kernel, _unit
-from test_native_ascend_schedule_units import _attributes, _bind_target
+from test_native_ascend_schedule_units import _bind_target
 from test_native_reducer_contracts import allocate, annotation, execute, function, integer, objects, tensor
 
 
@@ -95,15 +95,15 @@ def test_replayed_epochs_execute_with_the_original_snapshot_values(kind):
     value, storage, output, _, _, _ = _snapshot_program(kind)
     value = _run("PrepareMultiBuffer", value)
     clock = _prepared_fields(value)["tl.multi_buffer_counter_map"][storage]
-    (root,) = _attributes(value, "tl.sblock")
+    root = value.body
 
     def observe(node):
         if not node.same_as(root):
             return node
         observation = _unit(ir.TensorStore(output, [integer(12)], ir.TensorLoad(clock, [integer(0)])), 1)
-        return ir.RegionStmt(node.op, node.args, node.body_params, node.attrs, [*node.body.seq, observation], node.result_vars, node.loc)
+        return ir.SeqStmt([*node.seq, observation], node.loc)
 
-    value = tvm_ffi.structural_map(value, (ir.RegionStmt, observe), order="pre")
+    value = tvm_ffi.structural_map(value, (ir.SeqStmt, observe), order="pre")
     for name in ("ResolveCore", "InsertSync", "MaterializeMultiBuffer", "LowerScheduledTIR"):
         value = _run(name, value)
     _assert_schedule_consumed(value)

@@ -10,33 +10,13 @@ from tvm_tirx import ir, tirx
 from tilelang.analysis._visitor import NativeStmtVisitor, tensor_scope, tilelang_metadata
 
 _VF_BLOCK_NAMES = ("SIMD_VF", "SIMT_VF")
-_VF_MARKERS = {"tl.simdvf_scope": "SIMD_VF", "tl.simtvf_scope": "SIMT_VF"}
 
 
-def _vf_kind(node, metadata):
-    if metadata is None:
+def _vf_kind(node):
+    if not node.op.same_as(ir.Op.get("tl.ascend_block")):
         return None
-    key = metadata.get("key")
-    if key in _VF_MARKERS:
-        result = _VF_MARKERS[key]
-    elif key == "tl.sblock":
-        block = metadata["value"]
-        name = str(block["name"])
-        kinds = {name} if name in _VF_BLOCK_NAMES else set()
-        for annotation, kind in _VF_MARKERS.items():
-            value = block.get("annotations", {}).get(annotation, False)
-            if not isinstance(value, (bool, int, ir.IntImm)) or int(value) not in (0, 1):
-                raise ValueError("Ascend VF scope annotation must be a boolean")
-            if bool(value):
-                kinds.add(kind)
-        if len(kinds) > 1:
-            raise ValueError("An Ascend scope cannot be both SIMD_VF and SIMT_VF")
-        result = next(iter(kinds), None)
-    else:
-        return None
-    if result is not None and (node.body_params or node.result_vars):
-        raise ValueError("Ascend VF metadata cannot introduce hidden region bindings")
-    return result
+    name = str(node.attrs["name"])
+    return name if name in _VF_BLOCK_NAMES else None
 
 
 class _VFCheckVisitor(NativeStmtVisitor):
@@ -89,24 +69,17 @@ class _VFCheckVisitor(NativeStmtVisitor):
         return scopes
 
     def visit_region(self, node, visitor):
-        metadata = tilelang_metadata(node)
-        kind = _vf_kind(node, metadata)
+        kind = _vf_kind(node)
         # Region arguments are evaluated outside the region's lexical body.
         visitor.visit(node.args)
         visitor.visit(node.attrs)
-        # Source frames emit a named VF block and a matching normalized marker.
-        # They describe one helper scope, so the marker does not introduce a
-        # second capture boundary. A nested named VF block still does.
-        duplicate_marker = (
-            kind is not None and metadata.get("key") in _VF_MARKERS and self.vf_scope_stack and self.vf_scope_stack[-1][1] == kind
-        )
-        pushed = kind is not None and not duplicate_marker
+        pushed = kind is not None
         if pushed:
             self.vf_scope_stack.append((node, kind))
         try:
             with self.scope():
-                if metadata is not None and metadata.get("key") == "tl.sblock":
-                    self.block_annotations.update(metadata["value"].get("annotations", {}))
+                if node.op.same_as(ir.Op.get("tl.ascend_block")) or node.op.same_as(ir.Op.get("tl.lexical_scope")):
+                    self.block_annotations.update(tvm_ffi.get_global_func("tl.CollectSourceBlockAnnotations")(node.body))
                 for parameter in node.body_params:
                     self.bindings.pop(parameter, None)
                 visitor.visit(node.body)

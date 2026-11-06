@@ -90,23 +90,13 @@ public:
               Add(*value);
           }
           if (const auto *region = object.as<RegionStmtObj>()) {
-            if (IsAscendBlock(region))
-              if (auto value =
-                      AscendBlockAnnotations(region).Get(kPhysicalVersion))
-                Add(*value);
             if (auto attr = ReadSourceAttribute(region)) {
               if (attr->key == kPhysicalVersion)
                 Add(attr->node);
-              else if (attr->key == "tl.sblock" ||
-                       attr->key == "tl.loop.annotations") {
+              else if (attr->key == "tl.loop.annotations") {
                 auto fields = attr->value.cast<Fields>();
                 if (auto value = fields.Get(kPhysicalVersion))
                   Add(*value);
-                if (attr->key == "tl.sblock")
-                  if (auto annotations = fields.Get("annotations"))
-                    if (auto value =
-                            annotations->cast<Fields>().Get(kPhysicalVersion))
-                      Add(*value);
               }
             }
           }
@@ -309,24 +299,13 @@ private:
     return Mutate(result, mode).ValueOrUnchanged(result);
   }
   UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op, InplaceMode mode) final {
-    if (IsAscendBlock(op)) {
-      auto fields = AscendBlockAnnotations(op);
-      auto updated = Strip(fields);
-      if (!StructuralEqual()(fields, updated)) {
-        RegionStmt next =
-            MakeAscendBlock(AscendBlockName(op), updated, op->body, op->loc);
-        return Mutate(next, mode).ValueOrUnchanged(next);
-      }
-    }
     if (auto attr = ReadSourceAttribute(op)) {
       if (attr->key == kPhysicalVersion)
         return Mutate(op->body, mode).ValueOrUnchanged(op->body);
-      if (attr->key == "tl.sblock" || attr->key == "tl.loop.annotations") {
+      if (attr->key == "tl.loop.annotations") {
         auto fields = attr->value.cast<Fields>();
         auto updated = Strip(fields);
-        if (attr->key == "tl.sblock")
-          if (auto annotations = updated.Get("annotations"))
-            updated.Set("annotations", Strip(annotations->cast<Fields>()));
+
         if (!StructuralEqual()(fields, updated)) {
           RegionStmt next =
               MakeAttribute(attr->node, attr->key, updated, op->body, op->loc);

@@ -15,7 +15,7 @@ from tvm_tirx.script.ir_builder import frame as _shared_frame
 from tvm_tirx.tirx.script import ir_builder as _builder
 
 from ._construction import as_expr, current_location, unwrap
-from ._annotation_codec import attr, emit_annotation
+from ._annotation_codec import emit_annotation
 from .frame import LoopFrame
 
 
@@ -96,13 +96,12 @@ _ASCEND_BLOCK_NAMES = frozenset({"CUBE", "VECTOR", "SIMT_VF", "SIMD_VF"})
 
 
 def _ascend_block(name, annotations=None):
-    """Build an execution region with constants in attrs and IR uses in args.
+    """Build an Ascend execution domain using the native region builder.
 
-    The native encoder keeps referenced variables in the enclosing definition
-    scope. Body annotation declarations remain at their original source sites.
+    Only execution configuration belongs in the header. Tensor annotations
+    stay in the body, after their definitions, via their own annotation API.
     """
-    args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendBlock")(name, annotations or {})
-    return _builder.region("tl.ascend_block", args, attrs=attrs)
+    return _builder.region("tl.ascend_block", [], attrs={"name": name, **(annotations or {})})
 
 
 _sblock_stack = ContextVar("tilelang_sblock_stack", default=())
@@ -137,7 +136,7 @@ class BlockFrame:
                 # statements; no_realize is not an execution-region attribute.
                 self._frame = _ascend_block(self.name)
             else:
-                self._frame = attr(None, "tl.sblock", {"name": self.name, "no_realize": self.no_realize})
+                self._frame = _builder.region("tl.lexical_scope", [], attrs={})
             self._frame.__enter__()
         except BaseException:
             import sys

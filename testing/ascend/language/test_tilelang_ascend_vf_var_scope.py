@@ -10,7 +10,8 @@ def _execution_blocks(function):
     blocks = [node for node in collect_nodes(function, ir.RegionStmt) if node.op.name == "tl.ascend_block"]
     for block in blocks:
         assert not block.args
-        assert set(block.attrs.keys()) == {"name", "annotations"}
+        assert set(block.attrs.keys()) <= {"name", "vector_count", "tl.vf_source_index", "tl.vf_latency"}
+        assert "name" in block.attrs
     return blocks
 
 
@@ -33,7 +34,7 @@ def test_sibling_simtvf_blocks_allow_same_immutable_name():
     warning.assert_not_called()
     blocks = _execution_blocks(main)
     assert [block.attrs["name"] for block in blocks] == ["SIMT_VF", "SIMT_VF"]
-    assert [int(block.attrs["annotations"]["tl.vf_source_index"]) for block in blocks] == [0, 1]
+    assert [int(block.attrs["tl.vf_source_index"]) for block in blocks] == [0, 1]
 
 
 def test_cube_and_vector_blocks_allow_same_immutable_name():
@@ -56,4 +57,4 @@ def test_cube_and_vector_blocks_allow_same_immutable_name():
     warning.assert_not_called()
     blocks = _execution_blocks(main)
     assert [block.attrs["name"] for block in blocks] == ["CUBE", "VECTOR"]
-    assert int(blocks[1].attrs["annotations"]["vector_count"]) == 2
+    assert int(blocks[1].attrs["vector_count"]) == 2

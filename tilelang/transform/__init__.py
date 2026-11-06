@@ -316,14 +316,14 @@ def MaterializeKernelLaunch(
         without ``threads=``. Ignored when ``lower_thread_binding`` is False.
         None means the backend has no default and ``threads=`` is required.
     unsupported_annotations : list[str] | None
-        Launch annotations (keys on the ``tilelang_root`` block, e.g.
+        Launch annotations (keys in the native launch hints, e.g.
         ``cluster_dims``) that have no meaning on this backend. A launch
         carrying one is rejected here instead of being silently ignored by
         later passes.
     lower_grid_binding : bool | None
         Keyword-only. If True (targets with a real block/core-level launch,
         e.g. CUDA, Ascend), lower the launch loops (blockIdx.* grid axes and
-        any tag in ``launch_dim_tags``) into thread_extent AttrStmts carrying
+        any tag in ``launch_dim_tags``) into native ``tirx.launch_thread`` regions carrying
         each loop's own thread tag.
         If False (targets with no program-index space, e.g. CPU), lower those
         loops into plain serial For loops.

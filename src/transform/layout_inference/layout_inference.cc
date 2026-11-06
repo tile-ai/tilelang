@@ -39,6 +39,7 @@
 #include "backend/common/target_utils.h"
 #include "ir/alias_analysis.h"
 #include "ir/annotations.h"
+#include "ir/lexical_scope.h"
 #include "ir/loop_annotations.h"
 #include "ir/stmt_functor.h"
 #include "ir/tensor_utils.h"
@@ -949,10 +950,8 @@ private:
     if (op->op.same_as(launch_thread_op()) &&
         op->args[0].as_or_throw<StringImm>()->value == "threadIdx.x")
       thread_binding_ = op->body_params[0].as_or_throw<PrimVar>();
-    if (ascend::IsAscendBlock(op)) {
-      auto metadata = ascend::AscendBlockAnnotations(op);
-      for (const auto &[name, value] : CollectSourceBlockAnnotations(op->body))
-        metadata.Set(name, value);
+    if (ascend::IsAscendBlock(op) || IsLexicalScope(op)) {
+      auto metadata = CollectSourceBlockAnnotations(op->body);
       for (const auto &[name, value] : metadata)
         block_annotations_.Set(name, value);
       if (auto value = metadata.Get(attr::kLayoutMap))
@@ -971,7 +970,7 @@ private:
           block_annotations_.Set(name, value);
       else
         block_annotations_.Set(key, fields.at("value"));
-      if (key == "tl.kernel" || key == "tl.sblock") {
+      if (key == "tl.kernel") {
         const auto metadata = CollectSourceBlockAnnotations(op->body);
         for (const auto &[name, value] : metadata)
           block_annotations_.Set(name, value);

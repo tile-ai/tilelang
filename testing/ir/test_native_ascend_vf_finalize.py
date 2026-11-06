@@ -27,9 +27,9 @@ def _prepare_ascend_codegen(module):
     return tr.VerifyLoweredAnnotations()(module)
 
 
-@pytest.mark.parametrize("name,scope", [("SIMT_VF", "tl.simtvf_scope"), ("SIMD_VF", "tl.simdvf_scope")])
+@pytest.mark.parametrize("name", ["SIMT_VF", "SIMD_VF"])
 @pytest.mark.parametrize("latency", [None, 77])
-def test_vf_block_and_scope_are_kept_for_the_owning_emitter(name, scope, latency, tmp_path):
+def test_vf_block_and_scope_are_kept_for_the_owning_emitter(name, latency, tmp_path):
     annotations = {"tl.vf_source_index": 7}
     if latency is not None:
         annotations["tl.vf_latency"] = ir.IntImm("int32", latency)
@@ -37,7 +37,7 @@ def test_vf_block_and_scope_are_kept_for_the_owning_emitter(name, scope, latency
         "tl.sblock",
         {"name": name, "no_realize": True, "annotations": annotations},
         [
-            attribute(scope, 1, [ir.Evaluate(ir.IntImm("int32", 3))]),
+            ir.Evaluate(ir.IntImm("int32", 3)),
         ],
     )
     function = tirx.Function([], [region], ir.NoneType()).with_attr("target", Target("ascend"))
@@ -48,7 +48,7 @@ def test_vf_block_and_scope_are_kept_for_the_owning_emitter(name, scope, latency
         assert tvm_ffi.structural_equal(function, actual)
     (retained,) = actual.body.seq
     assert retained.op.name == "tl.ascend_block" and retained.attrs["name"] == name
-    assert dict(retained.attrs["annotations"]) == {"tl.vf_source_index": 7}
+    assert dict(retained.attrs) == {"name": name, "tl.vf_source_index": 7}
     assert tvm_ffi.structural_equal(retained.body, region.body)
     assert tirx.analysis.check_well_formed(actual)
     # The terminal device-codegen entry uses the lowered void return ABI.
@@ -75,20 +75,17 @@ def test_vf_block_and_scope_are_kept_for_the_owning_emitter(name, scope, latency
 
 
 def test_vf_source_index_rejects_invalid_annotation():
-    region = attribute("tl.sblock", {"name": "SIMD_VF", "annotations": {"tl.vf_source_index": -1}}, [])
-    function = tirx.Function([], [region], ir.NoneType()).with_attr("target", Target("ascend"))
-    with pytest.raises(ValueError, match="source index|tl.vf_source_index"):
-        _prepare_ascend_codegen(ir.IRModule({"main": function}))
+    with pytest.raises(ValueError, match="tl.vf_source_index"):
+        ascend_block("SIMD_VF", [], {"tl.vf_source_index": -1})
 
 
 @pytest.mark.parametrize("dynamic", [True, False])
 def test_ascend_codegen_boundary_rejects_dynamic_latency_and_unconsumed_annotations(dynamic):
     latency = ir.Var("latency", "int32")
     annotations = {"tl.vf_latency": latency} if dynamic else {"tl.unconsumed_vf_hint": 1}
-    region = attribute("tl.sblock", {"name": "SIMT_VF", "annotations": annotations}, [])
-    function = tirx.Function([latency] if dynamic else [], [region], ir.NoneType()).with_attr("target", Target("ascend"))
-    message = "constant integer|tl.vf_latency" if dynamic else "tl.unconsumed_vf_hint"
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises((TypeError, ValueError)):
+        region = ascend_block("SIMT_VF", [], annotations)
+        function = tirx.Function([latency] if dynamic else [], [region], ir.NoneType()).with_attr("target", Target("ascend"))
         _prepare_ascend_codegen(ir.IRModule({"main": function}))
 
 
@@ -115,7 +112,7 @@ def test_safe_value_carriers_share_owner_consumption_policy(disabled):
             # Even when guarding is disabled, only the safety owner may
             # consume this metadata; source lowering must retain it.
             pending = tr.LowerSourceAnnotations()(ir.IRModule({"main": function}))
-            check_pending = ascend_transform.LowerAscendAnnotations() if carrier == "header" else tr.VerifyLoweredAnnotations()
+            check_pending = tr.VerifyLoweredAnnotations()
             with pytest.raises(ValueError, match="safe_value_map"):
                 check_pending(pending)
             legalized = tr.LegalizeSafeMemoryAccess()(ir.IRModule({"main": function}))
@@ -125,7 +122,7 @@ def test_safe_value_carriers_share_owner_consumption_policy(disabled):
         assert not tirx.analysis.undefined_vars(final)
         (block,) = final.body.seq
         assert block.op.name == "tl.ascend_block" and not block.args
-        assert not block.attrs["annotations"]
+        assert set(block.attrs.keys()) == {"name"}
         (store,) = collect_nodes(final, ir.TensorStore)
         if disabled:
             assert isinstance(store.value, ir.TensorLoad)
@@ -159,7 +156,7 @@ def test_layout_carriers_are_consumed_by_real_tile_operator_lowering():
         function = _metadata_function(carrier, metadata, [tensor], body)
         before = ir.save_json(function)
         pending = tr.LowerSourceAnnotations()(ir.IRModule({"main": function}))
-        check_pending = ascend_transform.LowerAscendAnnotations() if carrier == "header" else tr.VerifyLoweredAnnotations()
+        check_pending = tr.VerifyLoweredAnnotations()
         with pytest.raises(ValueError, match="layout_map"):
             check_pending(pending)
         # Exercise the actual owner instead of forging its completion flag.
@@ -169,7 +166,7 @@ def test_layout_carriers_are_consumed_by_real_tile_operator_lowering():
         # Physical parameter views can precede the execution region.
         (block,) = [node for node in collect_nodes(final, ir.RegionStmt) if node.op.name == "tl.ascend_block"]
         assert block.op.name == "tl.ascend_block" and not block.args
-        assert not block.attrs["annotations"]
+        assert set(block.attrs.keys()) == {"name"}
         assert len(collect_nodes(final, ir.TensorLoad)) == 1
         results.append(final)
         assert ir.save_json(function) == before

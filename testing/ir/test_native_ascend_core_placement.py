@@ -1,5 +1,7 @@
 """Ascend placement preserves native SSA, lexical controls and routing effects."""
 
+from testing.ascend._ir import kernel_body
+
 import operator
 
 import pytest
@@ -27,9 +29,7 @@ from test_native_reducer_contracts import (
 
 
 def _kernel(params, body, sid=None, count=2):
-    root = attribute(
-        None, "tl.sblock", {"name": "tilelang_root", "no_realize": True, "annotations": {"vector_count": integer(count)}}, body
-    )
+    root = ir.SeqStmt([annotation({"vector_count": integer(count)}), *body])
     return function(params, [_launch([root], var=sid, extent=count) if sid is not None else root])
 
 
@@ -208,8 +208,8 @@ def test_projected_tensor_types_pointer_aliases_and_metadata_preserve_physical_o
     result = _assign(_kernel([output], body, sid))
     views = [bind.var for bind in objects(result, ir.Bind) if bind.var.name.startswith("view_aiv")]
     assert len(views) == 2 and not views[0].same_as(views[1])
-    root = _attributes(result, "tl.sblock")[0]
-    rows = tvm_ffi.get_global_func("tl.testing.InspectAscendStorage")(root.body, views, [[integer(1)], [integer(1)]])
+    root = kernel_body(result)
+    rows = tvm_ffi.get_global_func("tl.testing.InspectAscendStorage")(root, views, [[integer(1)], [integer(1)]])
     assert not rows[0]["root"].same_as(rows[1]["root"])
     for p, (view, row) in enumerate(zip(views, rows)):
         expected_offset = (p + 3 if field == "origin" else 3) + (p + 1 if field == "stride" else 2)
@@ -264,7 +264,7 @@ def _store_trace(body, values):
         elif isinstance(stmt, ir.Bind):
             value = stmt.value
             if isinstance(value, ir.Call) and value.op.name == SCHEDULED_BIND:
-                value = decoded(value)[0][0]
+                value = value.args[0]
             if isinstance(stmt.var.ty, ir.PrimType):
                 values[stmt.var] = _evaluate(value, values)
         elif isinstance(stmt, ir.If):
@@ -320,8 +320,8 @@ def test_nested_projected_loops_keep_fresh_binders_and_match_independent_executi
     assert len(loops) == 4
     assert len({loop.var for loop in loops}) == 4
     assert {loop.var.name for loop in loops} == {f"{var.name}_aiv{p}" for var in (i, j) for p in (0, 1)}
-    expected = [event for p in (0, 1) for event in _store_trace(_attributes(before, "tl.sblock")[0].body, {sid: p})]
-    actual = _store_trace(_attributes(result, "tl.sblock")[0].body, {})
+    expected = [event for p in (0, 1) for event in _store_trace(kernel_body(before), {sid: p})]
+    actual = _store_trace(kernel_body(result), {})
     assert actual == expected
 
 

@@ -64,21 +64,6 @@ inline std::optional<SourceAttribute> ReadSourceAttribute(const Stmt &stmt) {
 inline bool IsScheduleGuardAttribute(const ffi::String &key) {
   return key == "tilelang_assume" || key == "tl.assume_requires_runtime_check";
 }
-inline std::optional<ffi::String> SourceBlockName(const RegionStmtObj *region) {
-  auto source = ReadSourceAttribute(region);
-  if (!source || source->key != "tl.sblock")
-    return std::nullopt;
-  return source->value.cast<ScheduleUnitMetadata>()
-      .at("name")
-      .cast<ffi::String>();
-}
-inline std::optional<ffi::String>
-BlockNameAtSourceBoundary(const RegionStmtObj *region) {
-  return IsAscendBlock(region)
-             ? std::optional<ffi::String>(AscendBlockName(region))
-             : SourceBlockName(region);
-}
-
 // Normalize legacy task attribute spellings once, before schedule analysis.
 TVM_TIRX_DLL SeqStmt NormalizeTaskScopes(const SeqStmt &body);
 

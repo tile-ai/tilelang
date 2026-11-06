@@ -154,15 +154,6 @@ public:
     auto rewritten = StmtExprMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                          .as_or_throw<RegionStmt>();
-    if (ascend::IsAscendBlock(rewritten.get())) {
-      auto annotations = ascend::AscendBlockAnnotations(rewritten.get());
-      if (!annotations.count("safe_value_map"))
-        return rewritten;
-      annotations.erase("safe_value_map");
-      return ascend::MakeAscendBlock(ascend::AscendBlockName(rewritten.get()),
-                                     annotations, rewritten->body,
-                                     rewritten->loc);
-    }
     if (op->op->name != "tl.attr")
       return rewritten;
     auto fields = ReadAnnotations(rewritten.get());
@@ -176,18 +167,6 @@ public:
       values.erase("safe_value_map");
       return MakeAttribute(fields.at("node"), key, values, rewritten->body,
                            op->loc);
-    }
-    if (key == "tl.sblock") {
-      auto values = fields.at("value").cast<Map<String, Any>>();
-      if (auto metadata = values.Get("annotations")) {
-        auto annotations = metadata->cast<Map<String, Any>>();
-        if (annotations.count("safe_value_map")) {
-          annotations.erase("safe_value_map");
-          values.Set("annotations", annotations);
-          return MakeAttribute(fields.at("node"), key, values, rewritten->body,
-                               op->loc);
-        }
-      }
     }
     return rewritten;
   }
@@ -273,22 +252,18 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    if (ascend::IsAscendBlock(op)) {
+    if (ascend::IsAscendBlock(op) || IsLexicalScope(op)) {
       memory_assumptions_.clear();
       const auto saved = safe_values_;
-      auto annotations = ascend::AscendBlockAnnotations(op);
-      if (auto values = annotations.Get("safe_value_map")) {
-        ReadSafeMap(*values);
-        annotations.erase("safe_value_map");
-      }
       if (auto values =
               CollectSourceBlockAnnotations(op->body).Get("safe_value_map"))
         ReadSafeMap(*values);
       SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
       safe_values_ = saved;
       memory_assumptions_.clear();
-      return ascend::MakeAscendBlock(ascend::AscendBlockName(op), annotations,
-                                     body, op->loc);
+      auto result = ffi::GetRef<RegionStmt>(op);
+      result.CopyOnWrite()->body = body;
+      return result;
     }
     if (OpNameForRegion(op) != "tl.attr") {
       memory_assumptions_.clear();
@@ -300,20 +275,7 @@ public:
     const auto saved = safe_values_;
     const String key = fields.at("key").cast<String>();
     bool updated_metadata = false;
-    if (key == "tl.sblock") {
-      auto values = fields.at("value").cast<Map<String, Any>>();
-      if (auto metadata = values.Get("annotations")) {
-        auto annotations = metadata->cast<Map<String, Any>>();
-        if (auto safe_values = annotations.Get("safe_value_map")) {
-          ReadSafeMap(*safe_values);
-          annotations.erase("safe_value_map");
-          values.Set("annotations", annotations);
-          fields.Set("value", values);
-          updated_metadata = true;
-        }
-      }
-    }
-    if (key == "tl.kernel" || key == "tl.sblock") {
+    if (key == "tl.kernel") {
       const auto metadata = CollectSourceBlockAnnotations(op->body);
       if (auto values = metadata.Get("safe_value_map"))
         ReadSafeMap(*values);

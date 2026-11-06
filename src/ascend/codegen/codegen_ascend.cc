@@ -4,6 +4,7 @@
 #include "ascend/target_utils.h"
 #include "ir/analyzer.h"
 #include "op/builtin.h"
+#include "op/utils.h"
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_visit.h>
 
@@ -602,9 +603,7 @@ void CodeGenTileLangAscend::AddFunction(const GlobalVar &gvar,
         if (!tl::ascend::IsAscendBlock(block))
           return ffi::WalkResult::Advance();
         const auto name = block->attrs.GetAttr<ffi::String>("name").value();
-        const auto annotations =
-            block->attrs.GetAttr<ffi::Map<ffi::String, ffi::Any>>("annotations")
-                .value();
+        const auto annotations = block->attrs->dict;
 
         if (name == "CUBE")
           has_cube = true;
@@ -612,8 +611,7 @@ void CodeGenTileLangAscend::AddFunction(const GlobalVar &gvar,
           has_vector = true;
           if (auto opt = annotations.Get("vector_count")) {
             has_vector_subcores = true;
-            const auto count =
-                opt.value().cast<IntImm>()->value.as<int64_t>().value();
+            const auto count = tl::GetIntegerAnnotation(opt.value());
             ICHECK((count == 1 || count == 2))
                 << "Mixed-kernel vector_count must be the constant integer 1 "
                    "or "
@@ -851,8 +849,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const RegionStmtObj *op,
 void CodeGenTileLangAscend::EmitBlockRegion_(const RegionStmtObj *op) {
   TVM_FFI_CHECK(op->args.empty(), ValueError)
       << "Ascend block dynamic annotations must be consumed before codegen";
-  const auto annotations =
-      op->attrs.GetAttr<ffi::Map<ffi::String, ffi::Any>>("annotations").value();
+  const auto annotations = op->attrs->dict;
   const auto name = op->attrs.GetAttr<ffi::String>("name").value();
   if (name == "CUBE") {
     if (kernel_mode_ == AscendKernelMode::kMix) {
@@ -902,7 +899,7 @@ void CodeGenTileLangAscend::EmitBlockRegion_(const RegionStmtObj *op) {
     {
       auto it = annotations.find("tl.vf_source_index");
       if (it != annotations.end()) {
-        vf_idx = (*it).second.cast<IntImm>()->value.as<int64_t>().value();
+        vf_idx = tl::GetIntegerAnnotation((*it).second);
       }
     }
     // Unrolling can clone a VF region while preserving its source index.
@@ -955,7 +952,7 @@ void CodeGenTileLangAscend::EmitBlockRegion_(const RegionStmtObj *op) {
     {
       auto it = annotations.find("tl.vf_source_index");
       if (it != annotations.end()) {
-        vf_idx = (*it).second.cast<IntImm>()->value.as<int64_t>().value();
+        vf_idx = tl::GetIntegerAnnotation((*it).second);
       }
     }
     // Unrolling can clone a VF region while preserving its source index.
@@ -3140,10 +3137,6 @@ void CodeGenTileLangAscend::Dispatch_(const RegionStmtObj *op) {
     if (attr.key == "tilelang_assume" || attr.key == "tl.assume") {
       tl::ScopedAnalyzerConstraints context(analyzer_,
                                             attr.node.cast<PrimExpr>());
-      PrintStmt(op->body);
-      return;
-    }
-    if (attr.key == "tl.simtvf_scope" || attr.key == "tl.simdvf_scope") {
       PrintStmt(op->body);
       return;
     }

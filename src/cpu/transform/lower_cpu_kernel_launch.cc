@@ -229,10 +229,11 @@ private:
       if (IsLexicalScope(op)) {
         source_lexical = IsExplicitAllocationScope(op);
         // A pre-lowered explicit scope owns local storage; shared/global
-        // pools still belong to the surrounding execution scope. Ordinary
-        // regions retain their full definition boundary.
-        if (source_lexical)
-          barrier = AllocationBarrier::kLocal;
+        // pools still belong to the surrounding execution scope. A plain
+        // lexical scope does not anchor source-managed pools. Unmarked native
+        // allocations stay in place, and type dependencies still bound lifting.
+        barrier = source_lexical ? AllocationBarrier::kLocal
+                                 : AllocationBarrier::kNone;
       } else if (op->op->name == "tl.attr") {
         auto fields =
             DecodeAnnotations(

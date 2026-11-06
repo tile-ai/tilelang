@@ -116,10 +116,9 @@ def test_software_copy_splits_full_region_using_the_actual_subcore(src_scope, ds
     assert operands[0].source.same_as(src) and operands[1].source.same_as(dst)
 
 
-@pytest.mark.parametrize("anchor", ["block-grid", "root-region"])
-def test_automatic_copy_synthesizes_one_native_subcore_scope(anchor):
+def test_automatic_copy_synthesizes_one_native_subcore_scope():
     src, dst, operation = _copy("global", "shared.dyn", (128,), (64,))
-    body = _launch([operation, operation], "blockIdx.x", 1) if anchor == "block-grid" else _block("tilelang_root", [operation, operation])
+    body = _launch([operation, operation], "blockIdx.x", 1)
     result = _rewrite(function([src, dst], [body]))
     (scope,) = _subcores(result)
     assert int(scope[1]) == 2

@@ -6,6 +6,7 @@
 #include "annotations.h"
 #include "ascend/ir/block.h"
 #include "layout/payload.h"
+#include "lexical_scope.h"
 #include "transform/common/warp_specialize.h"
 
 #include <tvm/ffi/reflection/registry.h>
@@ -477,7 +478,8 @@ void CollectSourceAnnotations(const Stmt &statement, Map<Any, Any> *values) {
     for (const Stmt &child : sequence->seq)
       CollectSourceAnnotations(child, values);
   } else if (const auto *region = statement.as<RegionStmtObj>()) {
-    if (region->op->name == "tl.launch_kernel" || ascend::IsAscendBlock(region))
+    if (region->op->name == "tl.launch_kernel" ||
+        ascend::IsAscendBlock(region) || IsLexicalScope(region))
       return;
     if (region->op->name == "tl.attr") {
       ValidateSchema(region->attrs);
@@ -486,7 +488,7 @@ void CollectSourceAnnotations(const Stmt &statement, Map<Any, Any> *values) {
                  region->attrs.GetAttr<Array<Any>>("annotation_schema").value())
               .cast<Map<Any, Any>>();
       const auto key = fields.at(String("key")).cast<String>();
-      if (key == "tl.kernel" || key == "tl.sblock")
+      if (key == "tl.kernel")
         return;
     }
     CollectSourceAnnotations(region->body, values);
@@ -557,9 +559,7 @@ bool IsCodegenAnnotation(const String &key) {
          key == "code_block_source" || key == "code_block_signature" ||
          key == "code_block_entry_name" || key == "volatile_scope" ||
          key == "fragment_shape" || key == "fragment_layout" ||
-         key == "threadblock_swizzle_pattern" ||
-         key == "tl.min_blocks_per_sm" || key == "tl.simtvf_scope" ||
-         key == "tl.simdvf_scope";
+         key == "threadblock_swizzle_pattern" || key == "tl.min_blocks_per_sm";
 }
 
 bool IsCompilerAnnotation(const String &key) {

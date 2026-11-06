@@ -21,6 +21,7 @@
 
 #include "ascend/transform/source_scopes.h"
 #include "ir/annotations.h"
+#include "ir/lexical_scope.h"
 #include "ir/tensor_utils.h"
 #include "transform/common/constr_visitor.h"
 #include <array>
@@ -44,17 +45,10 @@ namespace tvm::tl::ascend {
 // origin metadata preserves correspondence through scheduling and sync.
 class SubcoreProjector {
 public:
-  static RegionStmt
-  Rewrite(const RegionStmt &root, const ConstrSet &outer_ctx,
-          const PrimVar &sid,
-          const ScheduleUnitMetadata &kernel_annotations = {}) {
-    auto shell = ReadSourceAttribute(root).value();
-    auto values = shell.value.cast<ScheduleUnitMetadata>();
-    auto annotations = values.Get("annotations")
-                           .value_or(ScheduleUnitMetadata{})
-                           .cast<ScheduleUnitMetadata>();
-    ICHECK(!annotations.count(kSplitSubcores));
-    for (const Stmt &stmt : root->body->seq)
+  static SeqStmt Rewrite(const SeqStmt &root, const ConstrSet &outer_ctx,
+                         const PrimVar &sid,
+                         const ScheduleUnitMetadata &kernel_annotations = {}) {
+    for (const Stmt &stmt : root->seq)
       if (IsTaskMetadataStatement(stmt))
         ICHECK(!ReadAnnotations(stmt.as<EvaluateObj>()->value.as<CallObj>())
                     .count(kSplitSubcores));
@@ -62,18 +56,15 @@ public:
         DecodeScheduledTIR(root, outer_ctx, nullptr, kernel_annotations);
     SubcoreProjector projector(sid,
                                scheduled.metadata.num_aiv_subcores.value_or(2));
-    projector.storage_.Collect(root->body);
+    projector.storage_.Collect(root);
     projector.FindVaryingValues(scheduled.tree);
     if (!projector.NeedsProjection(scheduled.tree))
       return root;
-    SeqStmt body = projector.RewriteList(scheduled.tree, -1, root->body->loc);
+    SeqStmt body = projector.RewriteList(scheduled.tree, -1, root->loc);
     projector.VerifyProjectedFixpipeTasks(body);
-    annotations = projector.ExpandFields(annotations);
-    values.Set("annotations", annotations);
     auto statements = body->seq;
     statements.push_back(MakeAnnotation({{kSplitSubcores, true}}, root->loc));
-    return MakeAttribute(shell.node, shell.key, values,
-                         SeqStmt(statements, body->loc), root->loc);
+    return SeqStmt(statements, body->loc);
   }
 
 private:
@@ -507,10 +498,9 @@ private:
         Stmt body = Rewrite(op->body);
         if (Empty(body))
           return SeqStmt({}, op->loc);
-        return MakeAscendBlock(AscendBlockName(op),
-                               RewriteMetadata(AscendBlockAnnotations(op))
-                                   .cast<ScheduleUnitMetadata>(),
-                               SeqStmt(body), op->loc);
+        auto result = ffi::GetRef<RegionStmt>(op);
+        result.CopyOnWrite()->body = SeqStmt(body);
+        return result;
       }
       if (per_core_ && IsTask(op))
         return RewritePerCoreCandidate(ffi::GetRef<RegionStmt>(op));
@@ -800,6 +790,13 @@ private:
               otherwise = RewriteList(scope->else_children, project ? p : -1,
                                       branch->else_case.value()->loc, true);
             body = If(branch->condition, children, otherwise, branch->loc);
+          } else if (const auto *region = scope->shell.as<RegionStmtObj>();
+                     IsLexicalScope(region)) {
+            auto result = ffi::GetRef<RegionStmt>(region);
+            result.CopyOnWrite()->body =
+                RewriteList(scope->children, project ? p : -1,
+                            region->body->loc, conditional_parent);
+            body = result;
           } else if (auto attribute = ReadSourceAttribute(scope->shell)) {
             body = attribute->WithBody(
                 RewriteList(scope->children, project ? p : -1,

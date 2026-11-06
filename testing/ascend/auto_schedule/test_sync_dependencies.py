@@ -1,8 +1,10 @@
 """InsertSync protects RAW and storage reuse independently of scheduling."""
 
+from testing.ascend._ir import kernel_body
+
 from tvm_tirx import ir
 import tvm_ffi
-from testing.ascend._ir import sblock, sblock_annotations, sblock_metadata, sblocks, substitute, tensor
+from testing.ascend._ir import sblock, scope_annotations, substitute, tensor
 
 import pytest
 import tvm_tirx
@@ -389,5 +391,5 @@ def test_equivalent_lexical_epoch_serializes_counter_ring():
         assert sorted(int(tvm_tirx.sym.Analyzer().simplify(event.args[1])) for event in released) == sorted(
             int(tvm_tirx.sym.Analyzer().simplify(event.args[1])) for event in acquired
         )
-    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-    assert int(sblock_annotations(root)["tl.buffer_versions_map"][ub]) == 2
+    root = kernel_body(after)
+    assert int(scope_annotations(root)["tl.buffer_versions_map"][ub]) == 2

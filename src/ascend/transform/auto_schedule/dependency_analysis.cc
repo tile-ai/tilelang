@@ -1,5 +1,6 @@
 #include "ascend/transform/source_scopes.h"
 #include "ir/annotations.h"
+#include "ir/lexical_scope.h"
 #include "ir/loop_annotations.h"
 #include "ir/loop_math.h"
 #include "layout/expr_utils.h"
@@ -484,6 +485,8 @@ struct ScopedConflictHintIndex::Impl {
             CollectList(scope->else_children, body, inner_captures,
                         known_execution);
           }
+        } else if (IsLexicalScope(scope->shell.as<RegionStmtObj>())) {
+          CollectList(scope->children, active, captures, known_execution);
         } else if (auto attribute = ReadSourceAttribute(scope->shell)) {
           ConstrSet body = active;
           auto inner_captures = captures;

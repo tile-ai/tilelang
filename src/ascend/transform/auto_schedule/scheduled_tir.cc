@@ -19,6 +19,7 @@
 
 #include "scheduled_tir.h"
 #include "ascend/transform/source_scopes.h"
+#include "ir/lexical_scope.h"
 #include "ir/stmt_functor.h"
 #include "layout/expr_utils.h"
 #include "task_analysis.h"
@@ -345,6 +346,13 @@ private:
             EncodeList(scope->else_children, branch->else_case.value()->loc);
       return result;
     }
+    if (const auto *region = scope->shell.as<RegionStmtObj>();
+        IsLexicalScope(region)) {
+      auto result = GetRef<RegionStmt>(region);
+      result.CopyOnWrite()->body =
+          EncodeList(scope->children, region->body->loc);
+      return result;
+    }
     if (auto attribute = ReadSourceAttribute(scope->shell))
       return attribute->WithBody(
           EncodeList(scope->children, attribute->region->body->loc));
@@ -519,6 +527,18 @@ private:
       }
       return std::nullopt;
     }
+    if (IsLexicalScope(op)) {
+      auto scope = MakeNode<ScopeNode>();
+      scope->shell = GetRef<RegionStmt>(op);
+      scope->outer_ctx = GetConstrSet();
+      scope->task = MakeNode<TaskNode>();
+      SetAccesses(scope->task.get(), SeqStmt({}));
+      scope->task->SetParent(scope.get());
+      auto context = Scope();
+      scope->children = DecodeList(op->body, scope.get());
+      result_.push_back(scope);
+      return std::nullopt;
+    }
     auto attribute = ReadSourceAttribute(op);
     TVM_FFI_CHECK(attribute.has_value(), ValueError)
         << "Unexpected region in scheduled TIR: " << op->op->name;
@@ -597,10 +617,7 @@ CoreMask RequireScheduledCoreMask(const Stmt &statement) {
   return *mask;
 }
 
-RegionStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
-  auto root = ReadSourceAttribute(scheduled_tir.metadata.kernel_root);
-  TVM_FFI_CHECK(root && root->key == "tl.sblock", ValueError);
-  auto shell = root->value.cast<ScheduleUnitMetadata>();
+SeqStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
   bool preserve_root_hints = ffi::StructuralEqual()(
       scheduled_tir.metadata.root_conflict_hints,
       scheduled_tir.metadata.original_root_conflict_hints);
@@ -611,36 +628,21 @@ RegionStmt EncodeScheduledTIR(ScheduledTIR scheduled_tir) {
          "be explicitly consumed";
   ScheduledTIREncoder encoder(WriteMetadata(scheduled_tir.metadata),
                               preserve_root_hints);
-  if (auto original = shell.Get("annotations"))
-    shell.Set("annotations",
-              encoder.RewriteFields(original->cast<ScheduleUnitMetadata>()));
-  auto body = encoder.Encode(scheduled_tir.tree, root->region->body->loc);
-  return MakeAttribute(root->node, root->key, shell, body, root->region->loc);
+  return encoder.Encode(scheduled_tir.tree,
+                        scheduled_tir.metadata.kernel_body->loc);
 }
 
 ScheduledTIR
-DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer,
+DecodeScheduledTIR(const SeqStmt &body, const ConstrSet &outer,
                    ScheduledExtraInfoFactory factory,
                    const ScheduleUnitMetadata &kernel_annotations,
                    ParameterAliasContract parameter_alias_contract) {
-  auto attribute = ReadSourceAttribute(root);
-  TVM_FFI_CHECK(attribute && attribute->key == "tl.sblock" &&
-                    SourceBlockName(root.get()).value() == "tilelang_root",
-                ValueError)
-      << "Scheduled codec requires a native tilelang_root region";
   ScheduledTIR scheduled;
-  scheduled.metadata.kernel_root = root;
+  scheduled.metadata.kernel_body = body;
   scheduled.metadata.outer_ctx = outer;
   ReadMetadata(kernel_annotations, &scheduled.metadata);
   LayoutMap layouts;
-  auto shell = attribute->value.cast<ScheduleUnitMetadata>();
-  if (auto annotations = shell.Get("annotations")) {
-    auto fields = annotations->cast<ScheduleUnitMetadata>();
-    ReadMetadata(fields, &scheduled.metadata);
-    if (auto layout = fields.Get("layout_map"))
-      layouts = layout->cast<LayoutMap>();
-  }
-  for (const Stmt &stmt : root->body->seq) {
+  for (const Stmt &stmt : body->seq) {
     if (!IsTaskMetadataStatement(stmt))
       continue;
     auto fields = ReadAnnotations(stmt.as<EvaluateObj>()->value.as<CallObj>());
@@ -649,8 +651,7 @@ DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer,
   // Storage identities defined in nested sequences have carriers there. The
   // analysis map is kernel-wide, but its serialized operands stay lexical.
   ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
-      root->body,
-      [&](const EvaluateObj *evaluate) -> ffi::Expected<ffi::WalkResult> {
+      body, [&](const EvaluateObj *evaluate) -> ffi::Expected<ffi::WalkResult> {
         if (!IsTaskMetadataStatement(GetRef<Stmt>(evaluate)))
           return ffi::WalkResult::Advance();
 
@@ -668,10 +669,10 @@ DecodeScheduledTIR(const RegionStmt &root, const ConstrSet &outer,
   auto storage =
       std::make_shared<StorageProvenance>(MakeAscendStorageProvenance());
   storage->SetParameterAliasContract(std::move(parameter_alias_contract));
-  storage->Collect(root->body);
+  storage->Collect(body);
   auto decoder =
       ffi::make_object<ScheduledTIRDecoder>(outer, factory, layouts, storage);
-  scheduled.tree = decoder->DecodeList(root->body);
+  scheduled.tree = decoder->DecodeList(body);
   return scheduled;
 }
 

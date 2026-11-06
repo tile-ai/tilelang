@@ -13,10 +13,15 @@ from testing.ascend._ir import (
     call_annotations,
     copy,
     kernel,
+    kernel_body,
+    kernel_bodies,
+    launch_thread,
+    disjoint_argument_fixture,
+    loop_annotations,
     nodes,
     region,
     sblock,
-    sblock_annotations,
+    scope_annotations,
     scheduled_bind,
     scheduled_fields,
     substitute,
@@ -137,26 +142,30 @@ def test_call_annotations_reject_malformed_metadata_shape():
         call_annotations(ir.Evaluate(call))
 
 
-def test_sblock_annotations_keep_nested_block_and_loop_metadata_private():
+def test_scope_annotations_keep_nested_block_and_loop_metadata_private():
     a = tensor((4,), "int32", name="a")
     i = ir.Var("i", "int32")
     child = sblock("child", [annotation({"child_only": a, "key": 99})], annotations={"constant_child_only": 7})
     loop = ir.For(i, 0, 4, 1, ir.ForKind.DEFAULT, [annotation({"loop_only": a, "key": 88})])
     parent = sblock("parent", [annotation({"key": 2, "direct_operand": a}), child, loop], annotations={"key": 1, "constant": 3})
-    fields = sblock_annotations(parent)
+    fields = scope_annotations(parent)
     assert set(fields) == {"key", "constant", "direct_operand"}
     assert int(fields["key"]) == 2
     assert fields["direct_operand"].same_as(a)
-    assert int(sblock_annotations(child)["key"]) == 99
-    assert sblock_annotations(ir.SeqStmt([parent]))["direct_operand"].same_as(a)
-    with pytest.raises(TypeError, match="one native"):
-        sblock_annotations(ir.SeqStmt([parent, child]))
+    assert int(scope_annotations(child)["key"]) == 99
+    assert scope_annotations(ir.SeqStmt([parent])) == {}
+    assert scope_annotations(ir.SeqStmt([parent, child])) == {}
+    direct = ir.SeqStmt([annotation({"direct_operand": a}), parent, child])
+    assert scope_annotations(direct)["direct_operand"].same_as(a)
 
 
 @pytest.mark.parametrize("core,cost", [(7, None), (0, None), (3, (1, 2))])
 def test_kernel_allocation_metadata_remains_explicit(core, cost):
     a = tensor((4,), "int32", name="a")
     mod = kernel(ir.TensorStore(a, [0], 1), buffers=[a], allocation_stage=0, allocation_core=core, allocation_cost=cost)
+    assert isinstance(mod["main"].body, ir.SeqStmt)
+    assert kernel_body(mod).same_as(mod["main"].body)
+    assert not nodes(mod, ir.RegionStmt)
     assert allocations(mod) == []
     (binding,) = allocations(mod, include_scheduled=True)
     fields = scheduled_fields(binding)
@@ -168,3 +177,25 @@ def test_kernel_allocation_metadata_remains_explicit(core, cost):
         assert "latency" not in fields["task"] and "ii" not in fields["task"]
     else:
         assert (int(fields["task"]["latency"]), int(fields["task"]["ii"])) == cost
+
+
+def test_kernel_bodies_keep_sibling_launches_and_alias_preconditions_independent():
+    a, b = [tensor((4,), "int32", name=name) for name in ("a", "b")]
+    bodies = []
+    for index in range(2):
+        i = ir.Var(f"i{index}", "int32")
+        body = ir.SeqStmt([ir.For(i, 0, 4, 1, ir.ForKind.DEFAULT, [ir.TensorStore(b, [i], a[i])])])
+        bodies.append(launch_thread(ir.Var(f"block{index}", "int32"), "blockIdx.x", 1, body))
+    before = kernel(bodies, params=[a, b])
+    actual = kernel_bodies(before)
+    assert len(actual) == 2 and all(body.same_as(scope.body) for body, scope in zip(actual, bodies, strict=True))
+    with pytest.raises(ValueError):
+        kernel_body(before)
+    marked = disjoint_argument_fixture(before, ("a", "b"))
+    assert all(not scope_annotations(body) for body in kernel_bodies(before))
+    for body in kernel_bodies(marked):
+        (pair,) = scope_annotations(body)["conflict_hint"]
+        assert pair[0].same_as(a) and pair[1].same_as(b)
+        (loop,) = nodes(body, ir.For)
+        (loop_pair,) = loop_annotations(loop)["conflict_hint"]
+        assert loop_pair[0].same_as(a) and loop_pair[1].same_as(b)

@@ -61,7 +61,7 @@ using Variables = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
 // native memory-axis origin. Aliases retain their own byte offsets and layouts.
 class VersionedTensorRegistry {
 public:
-  VersionedTensorRegistry(const MultiBufferPlan &plan, const RegionStmt &root)
+  VersionedTensorRegistry(const MultiBufferPlan &plan, const SeqStmt &root)
       : plan_(plan), footprints_(root) {
     std::vector<TensorVar> tensors;
     ffi::StructuralWalk<ffi::WalkOrder::kPostOrder>(
@@ -270,13 +270,6 @@ public:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    if (IsAscendBlock(op)) {
-      auto rewritten = MakeAscendBlock(
-          AscendBlockName(op), RewriteFields(AscendBlockAnnotations(op)),
-          op->body, op->loc);
-      return LayoutMapMutator::Mutate_(rewritten.get(), mode)
-          .ValueOrUnchanged(Stmt(rewritten));
-    }
     if (IsSemanticTask(op)) {
       auto old_broadcast = broadcast_;
       auto fields = TaskAnnotations(op);
@@ -299,13 +292,8 @@ public:
     if (attribute->key == "tl.loop.annotations" ||
         attribute->key == "tl.kernel") {
       value = RewriteFields(value.cast<ScheduleUnitMetadata>());
-    } else if (attribute->key == "tl.sblock") {
-      auto fields = value.cast<ScheduleUnitMetadata>();
-      if (auto annotations = fields.Get("annotations"))
-        fields.Set("annotations",
-                   RewriteFields(annotations->cast<ScheduleUnitMetadata>()));
-      value = fields;
-    } else if (attribute->key == "layout_map") {
+    }
+    if (attribute->key == "layout_map") {
       value = RewriteFields({{"layout_map", value}}).at("layout_map");
     }
     auto rewritten =
@@ -418,12 +406,12 @@ void ElideUnitVersionCounterGroups(ScheduledTIR *scheduled,
     RemoveCounterTasks(&scheduled->tree, nullptr, counters);
 }
 
-RegionStmt MaterializeKernel(ScheduledTIR scheduled) {
+SeqStmt MaterializeKernel(ScheduledTIR scheduled) {
   auto plan = ReadMultiBufferPlan(
       scheduled.tree, scheduled.metadata.buffer_versions,
-      L0StorageGroups(CollectL0SFBindings(scheduled.metadata.kernel_root)));
+      L0StorageGroups(CollectL0SFBindings(scheduled.metadata.kernel_body)));
   ElideUnitVersionCounterGroups(&scheduled, plan);
-  VersionedTensorRegistry tensors(plan, scheduled.metadata.kernel_root);
+  VersionedTensorRegistry tensors(plan, scheduled.metadata.kernel_body);
   auto physical = scheduled.metadata.manual_buffer_versions;
   for (const auto &info : plan.Infos()) {
     if (!info.NeedsVersionDimension())
@@ -438,11 +426,9 @@ RegionStmt MaterializeKernel(ScheduledTIR scheduled) {
   // The prepared plan refers to current loop nodes until all access clocks
   // have been materialized into native expressions.
   auto retained_tree = scheduled.tree;
-  Stmt root = EncodeScheduledTIR(std::move(scheduled));
+  SeqStmt body = EncodeScheduledTIR(std::move(scheduled));
   auto rewriter = ffi::make_object<MultiBufferRewriter>(plan, &tensors);
-  return rewriter->Mutate(root)
-      .ValueOrUnchanged(root)
-      .as_or_throw<RegionStmt>();
+  return rewriter->Mutate(body).ValueOrUnchanged(body);
 }
 
 } // namespace
@@ -454,7 +440,7 @@ tvm::transform::Pass MaterializeMultiBuffer() {
         std::move(function), "MaterializeMultiBuffer",
         [](const ascend::TilelangKernelContext &context) {
           return MaterializeKernel(ascend::DecodeScheduledTIR(
-              context.root, context.outer_ctx, nullptr, {},
+              context.body, context.outer_ctx, nullptr, {},
               context.parameter_alias_contract));
         });
   };

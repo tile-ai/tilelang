@@ -90,13 +90,13 @@ def test_collector_merges_maps_without_hoisting_or_crossing_source_owners():
     second = _annotation({"tl.source_block_annotation": True, "mapping": {"x": {"b": 2}}})
     inner = _annotation({"tl.source_block_annotation": True, "mapping": {"x": {"forbidden": 3}}})
     i = ir.Var("i", "int32")
-    helper = tirx.Function([], _scope("tl.sblock", inner), ir.PrimType("void"))
+    helper = tirx.Function([], ir.RegionStmt("tl.lexical_scope", [], [], {}, [inner]), ir.PrimType("void"))
     deferred = ir.LambdaExpr([], lambda: helper)
     body = ir.SeqStmt(
         [
             first,
             ir.For(i, 0, 1, 1, ir.ForKind.DEFAULT, second),
-            _scope("tl.sblock", inner),
+            ir.RegionStmt("tl.lexical_scope", [], [], {}, [inner]),
             _scope("tl.kernel", inner),
             ir.Bind(ir.Var("helper", helper.ty), helper),
             ir.Bind(ir.Var("deferred", deferred.ty), deferred),

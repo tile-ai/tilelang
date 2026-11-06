@@ -44,7 +44,7 @@ namespace tl {
 /*!
  * \brief Block annotation key carrying the WSSchedule object.
  *
- * Set on the tilelang_root block by T.annotate_ws_schedule.
+ * Declared in the native kernel body by T.annotate_ws_schedule.
  */
 static constexpr const char *kWSScheduleKey = "tl.ws_schedule";
 

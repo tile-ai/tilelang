@@ -1,5 +1,7 @@
 """Native core demand follows lexical control, storage epochs and scalar SSA."""
 
+from testing.ascend._ir import kernel_body
+
 import pytest
 import tvm_ffi
 from tvm_tirx import ir, tirx
@@ -40,9 +42,7 @@ def _kernel(params, body, versions=None, count=2):
         # Metadata operands follow the definitions they reference.
         index = next((i for i, stmt in enumerate(body) if not isinstance(stmt, ir.Bind)), len(body))
         body = [*body[:index], annotation({"tl.buffer_versions_map": versions}), *body[index:]]
-    root = attribute(
-        None, "tl.sblock", {"name": "tilelang_root", "no_realize": True, "annotations": {"vector_count": integer(count)}}, body
-    )
+    root = ir.SeqStmt([annotation({"vector_count": integer(count)}), *body])
     return function(params, [root])
 
 
@@ -82,7 +82,7 @@ def _view(storage, name, shape, dtype="int32", *, offset=0, origin=0):
 
 
 def _inspect(value, storages):
-    return tvm_ffi.get_global_func("tl.testing.InspectAscendMultiBufferPlan")(_attributes(value, "tl.sblock")[0], storages)
+    return tvm_ffi.get_global_func("tl.testing.InspectAscendMultiBufferPlan")(kernel_body(value), storages)
 
 
 @pytest.mark.parametrize("consumer", ["load", "store", "both"])
@@ -281,8 +281,8 @@ def test_counter_demand_includes_header_only_storage_accesses(header):
 @pytest.mark.parametrize("kind", ["iteration", "counter"])
 def test_broadcast_fill_outside_owner_preserves_marker_and_has_no_counter_demand(kind):
     before, storage, epoch, _ = _counter_ring(owners=1)
-    root = _attributes(before, "tl.sblock")[0]
-    body = list(root.body.seq)
+    root = kernel_body(before)
+    body = list(root.seq)
     fill = _unit(
         tileop("fill", subregion(storage, [0], [16]), ir.FloatImm("float32", 0)), 5, metadata={"tl.multi_buffer_broadcast_fill": [storage]}
     )

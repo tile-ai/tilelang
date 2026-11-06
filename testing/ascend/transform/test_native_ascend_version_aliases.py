@@ -7,7 +7,7 @@ import tvm_ffi
 from tvm_tirx import ir, sym, tirx
 from tvm_tirx.tirx.layout import S, TileLayout
 
-from testing.ascend._ir import substitute
+from testing.ascend._ir import scheduled_fields, substitute
 from testing.ascend.transform.test_native_ascend_allocations import (
     address,
     allocate,
@@ -43,7 +43,8 @@ def assert_addresses(result, expected_bits):
     # that value does not change the owner/byte-offset oracle below.
     for var, value in list(binds.items()):
         if isinstance(value, ir.Call) and value.op.name == "tl.ascend.scheduled_bind":
-            assert len(value.args) == 2 and value.attrs["operand_count"] == 1
+            fields = scheduled_fields(ir.Bind(var, value))
+            assert int(fields["stage"]) == 0 and int(fields["task"]["core_mask"]) == 5
             binds[var] = value.args[0]
     loads = objects(result, ir.TensorLoad)
     actual = []

@@ -1,7 +1,7 @@
 """The reuse contract survives scheduled lowering and is consumed by packing."""
 
 from tvm_tirx import ir
-from testing.ascend._ir import access_tensor, allocations, annotations, sblock_annotations, sblocks
+from testing.ascend._ir import access_tensor, allocations, annotations
 
 import tilelang
 import tilelang.ascend.language as T
@@ -26,7 +26,7 @@ def test_alias_contract_lifetime():
     with tvm_tirx.transform.PassContext(opt_level=3, instruments=[CapturePassIR()]):
         tilelang.lower(_make_cyclic_scalar_program(), target="ascend")
 
-    assert any("tl.buffer_alias_map" in sblock_annotations(block) for block in sblocks(snapshots["tl.InsertSync"]))
+    assert any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.InsertSync"]))
     assert any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.LowerScheduledTIR"]))
     assert not any("tl.buffer_alias_map" in fields for fields in annotations(snapshots["tl.MergeUBAllocations"]))
 

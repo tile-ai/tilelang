@@ -4,7 +4,7 @@
  *
  * The pass config "tl.enable_auto_warp_specialization" names the scheduler to
  * run (see SchedulerRegistry; currently "role_based"); when unset the pass is a
- * no-op. For each eligible kernel — a tilelang_root block with a known
+ * no-op. For each eligible kernel — a native launch region with a known
  * threadIdx.x extent, no existing schedule, and no manual warp specialization —
  * the entrypoint gives every schedulable statement a stable "tl.ws_op_id"
  * marker and checks the schedulability contract (preprocess_ir), then asks the

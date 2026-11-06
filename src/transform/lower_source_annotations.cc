@@ -107,21 +107,6 @@ public:
     const String key = fields.at("key").cast<String>();
     if (key == "lexical_alloc_scope")
       return Lexical(region->body, region->loc, true);
-    if (key == "tl.sblock") {
-      const auto block = ToStringMap(fields.at("value"));
-      for (const auto &[name, value] : block) {
-        TVM_FFI_CHECK(name == "name" || name == "no_realize" ||
-                          name == "annotations",
-                      ValueError)
-            << "Unconsumed structured block field `" << name << "`";
-      }
-      Map<String, Any> annotations;
-      if (auto values = block.Get("annotations"))
-        annotations = ToStringMap(*values);
-      // Axes, initialization and predicates are already native statements.
-      // A source block's name never selects a backend execution domain here.
-      return SourceScope(annotations, region->body, region->loc);
-    }
     if (key == "tl.kernel")
       return SourceScope(ToStringMap(fields.at("value")), region->body,
                          region->loc);

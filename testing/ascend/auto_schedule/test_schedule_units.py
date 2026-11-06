@@ -1,5 +1,7 @@
 """Schedule units contracts."""
 
+from testing.ascend._ir import kernel_body
+
 from tvm_tirx import ir
 from testing.ascend._ir import (
     attribute,
@@ -7,9 +9,7 @@ from testing.ascend._ir import (
     attribute_key,
     scheduled_fields,
     sblock,
-    sblock_annotations,
-    sblock_metadata,
-    sblocks,
+    scope_annotations,
     single_statement,
     tensor,
 )
@@ -226,8 +226,8 @@ def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second
     after = ascend_transform.AutoSchedule()(before)
     (scheduled_outer,) = [loop for loop in nodes(after, ir.For) if loop.var.same_as(outer.var)]
     assert _direct_schedule_unit_stages(scheduled_outer.body) == [0, second_stage]
-    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-    versions = sblock_annotations(root).get("tl.buffer_versions_map", {})
+    root = kernel_body(after)
+    versions = scope_annotations(root).get("tl.buffer_versions_map", {})
     assert (ub in versions) == eligible
     if eligible:
         assert int(versions[ub]) == 1
@@ -264,8 +264,8 @@ def test_ss_versions_share_capacity_across_aivs(fixed, size):
             ascend_transform.AutoSchedule()(before)
         return
     after = ascend_transform.AutoSchedule()(before)
-    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-    versions = sblock_annotations(root)["tl.buffer_versions_map"]
+    root = kernel_body(after)
+    versions = scope_annotations(root)["tl.buffer_versions_map"]
     # Both AIVs consume the same 3 KiB pool. Two versions of each fit exactly.
     assert all(int(versions[buffer]) == 2 for buffer in buffers)
 
@@ -305,8 +305,8 @@ def test_sf_hazard_uses_the_data_ring_variable_in_the_solver():
         allocation_cost=(1, 1),
     )
     after = ascend_transform.AutoSchedule()(before)
-    root = next(block for block in sblocks(after) if sblock_metadata(block)["name"] == "tilelang_root")
-    versions = sblock_annotations(root)["tl.buffer_versions_map"]
+    root = kernel_body(after)
+    versions = scope_annotations(root)["tl.buffer_versions_map"]
     assert int(versions[data]) == int(versions[sf]) == 3
 
 

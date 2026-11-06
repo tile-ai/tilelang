@@ -29,10 +29,11 @@ def attribute(key, value, body):
 
 
 def root(body):
-    return attribute("tl.sblock", {"name": "tilelang_root", "no_realize": True}, body)
+    return ir.SeqStmt(body)
 
 
 def apply(name, function):
+    function = function.with_attr("target", tvm_tirx.target.Target("ascend"))
     assert tirx.analysis.check_well_formed(function)
     saved = ir.save_json(function)
     result = tvm_ffi.get_global_func("tl.transform." + name)()(ir.IRModule({"main": function}))["main"]

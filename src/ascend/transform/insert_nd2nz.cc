@@ -26,6 +26,7 @@
 #include "ascend/op/nd2nz.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
+#include "ir/lexical_scope.h"
 #include "ir/tensor_utils.h"
 #include "op/copy.h"
 #include "op/utils.h"
@@ -669,20 +670,13 @@ private:
     auto attribute = ReadSourceAttribute(op);
     // Kernel normalization may already have removed its ordinary root
     // sblock. The remaining kernel body retains that allocation boundary.
-    bool block =
-        IsAscendBlock(op) || (attribute && (attribute->key == "tl.sblock" ||
-                                            attribute->key == "tl.kernel"));
+    bool block = IsAscendBlock(op) || IsLexicalScope(op) ||
+                 (attribute && attribute->key == "tl.kernel");
     if (block)
       pending_allocs_.emplace_back();
     if (IsAscendBlock(op)) {
-      ReadLayouts(AscendBlockAnnotations(op));
-      if (AscendBlockName(op) == "SIMT_VF")
-        inside_simt_vf_ = true;
-    } else if (attribute && attribute->key == "tl.sblock") {
-      auto fields = attribute->value.cast<ScheduleUnitMetadata>();
-      if (auto annotations = fields.Get("annotations"))
-        ReadLayouts(annotations->cast<ScheduleUnitMetadata>());
-      if (fields.at("name").cast<String>() == "SIMT_VF")
+
+      if (op->attrs.GetAttr<ffi::String>("name").value() == "SIMT_VF")
         inside_simt_vf_ = true;
     }
     auto result = Parent::Mutate_(op, mode);

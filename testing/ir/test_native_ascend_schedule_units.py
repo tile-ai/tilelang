@@ -1,5 +1,7 @@
 """Native Ascend task boundaries preserve lexical evaluation and SSA definitions."""
 
+from testing.ascend._ir import kernel_body
+
 import os
 from pathlib import Path
 
@@ -43,7 +45,7 @@ def _attributes(value, key):
 
 
 def _root(body):
-    return attribute(None, "tl.sblock", {"name": "tilelang_root", "no_realize": True}, body)
+    return ir.SeqStmt(body)
 
 
 def _kernel(params, body):
@@ -122,6 +124,28 @@ def _stages(body):
     return result
 
 
+def test_lexical_scope_preserves_local_definitions_through_scheduling():
+    output = tensor("output", [4], "int32", "shared.dyn")
+    local = ir.Var("local", "int32")
+    scope = ir.RegionStmt(
+        "tl.lexical_scope",
+        [],
+        [],
+        {},
+        [ir.Bind(local, integer(3)), ir.TensorStore(output, [integer(0)], local)],
+    )
+    result = _check(_kernel([output], [_stage(0, [scope])]))
+    for name in ("AssignCore", "ResolveCore", "InsertSync", "LowerScheduledTIR"):
+        result = run_pass(name, result)
+        assert tirx.analysis.check_well_formed(result)
+        assert not tirx.analysis.undefined_vars(result)
+    assert any(node.op.name == "tl.lexical_scope" for node in objects(result, ir.RegionStmt))
+    (store,) = objects(result, ir.TensorStore)
+    (binding,) = [node for node in objects(result, ir.Bind) if node.var.name == "local"]
+    assert store.value.same_as(binding.var)
+    assert int(binding.value) == 3
+
+
 def test_flat_bind_keeps_scalar_shape_stride_origin_and_metadata_def_use():
     incoming = ir.Var("extent", "int32")
     length = ir.Var("extent", "int32")
@@ -152,7 +176,7 @@ def test_flat_bind_keeps_scalar_shape_stride_origin_and_metadata_def_use():
         assert rewritten.var.same_as(original.var)
         ir.assert_structural_equal(rewritten.value.ty, original.value.ty)
         assert int(fields["stage"]) == -1 and len(fields["task"]) == 0
-    body = _attributes(result, "tl.sblock")[0].body
+    body = kernel_body(result)
     assert body.seq[2].same_as(metadata)
     assert scratch.ty.shape[0].same_as(length)
     assert not length.same_as(incoming)
@@ -506,7 +530,7 @@ def test_empty_stage_retains_its_explicit_stage_and_is_idempotent(wrapper):
     elif wrapper is not None:
         body = [attribute(enabled, wrapper, integer(1), [])]
     result = _check(_kernel([enabled], [_stage(2, body)]))
-    assert _stages(_attributes(result, "tl.sblock")[0].body) == [2]
+    assert _stages(kernel_body(result)) == [2]
 
 
 @pytest.mark.parametrize("stage", [-1, 1 << 32])
@@ -540,7 +564,7 @@ def test_multiple_kernel_siblings_keep_same_named_launch_definitions_distinct():
     )
     result = _check(value)
     roots = [node for node in _attributes(result, "tl.sblock") if _fields(node)["value"]["name"] == "tilelang_root"]
-    assert len(roots) == 2
+    assert not roots
     assert len(_attributes(result, "tl.schedule_unit")) == 2
     launches = [node for node in objects(result, ir.RegionStmt) if node.op.name == "tirx.launch_thread"]
     assert launches[0].body_params[0].same_as(left)

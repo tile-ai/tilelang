@@ -1,5 +1,7 @@
 """Production Ascend scheduler codec and memory proofs preserve native semantics."""
 
+from testing.ascend._ir import kernel_body
+
 import itertools
 
 import pytest
@@ -8,7 +10,7 @@ import tvm_tirx
 from tvm_tirx import ir, tirx
 
 from test_native_ascend_ops import function, strided_tensor, subregion
-from test_native_ascend_schedule_units import _attributes, _check, _fields, _kernel, _scheduled_bind
+from test_native_ascend_schedule_units import _check, _kernel, _scheduled_bind
 from test_native_reducer_contracts import allocate, annotation, annotations, attribute, integer, objects, region, tensor, tileop
 
 
@@ -18,7 +20,7 @@ def _api(name):
 
 def _schedule(params, body):
     value = _check(_kernel(params, body))
-    return value, _attributes(value, "tl.sblock")[0]
+    return value, kernel_body(value)
 
 
 def _has(values, value):
@@ -107,7 +109,7 @@ def test_generated_storage_metadata_stays_after_lexical_definitions(with_existin
     value, root = _schedule([], body)
     encoded = _api("SetAscendScheduleMetadata")(root, {a: 3}, {a: [b], b: [a]}, True)
     _assert_function(value, encoded)
-    assert not _fields(encoded)["value"].get("annotations")
+    assert isinstance(encoded, ir.SeqStmt)
     metadata = annotations(encoded)
     versions = [item["tl.buffer_versions_map"] for item in metadata if "tl.buffer_versions_map" in item]
     aliases = [item["tl.buffer_alias_map"] for item in metadata if "tl.buffer_alias_map" in item]
@@ -121,7 +123,7 @@ def test_generated_storage_metadata_stays_after_lexical_definitions(with_existin
     # carrier may retain the maps together. In either form every referenced
     # storage Var must already be defined at that carrier.
     visible = []
-    for statement in encoded.body.seq:
+    for statement in encoded.seq:
         if isinstance(statement, ir.Bind):
             visible.append(statement.var)
         for item in annotations(statement):
@@ -132,7 +134,7 @@ def test_generated_storage_metadata_stays_after_lexical_definitions(with_existin
                 assert all(_has(visible, peer) for peer in peers)
     if with_existing_carrier:
         assert _has(next(item["keep"] for item in metadata if "keep" in item), a)
-    assert isinstance(encoded.body.seq[-1], ir.Evaluate)
+    assert isinstance(encoded.seq[-1], ir.Evaluate)
     second = _api("RoundTripAscendSchedule")(encoded, True)
     ir.assert_structural_equal(second, encoded)
 
@@ -395,10 +397,7 @@ def test_scheduled_scalar_producer_core_is_required_by_a_later_index():
     value = function(
         [output],
         [
-            attribute(
-                None,
-                "tl.sblock",
-                {"name": "tilelang_root", "no_realize": True},
+            ir.SeqStmt(
                 [
                     ir.Bind(index, _scheduled_bind(integer(2), task={"core_mask": integer(2)})),
                     attribute(
@@ -414,6 +413,6 @@ def test_scheduled_scalar_producer_core_is_required_by_a_later_index():
         ],
     )
     assert tirx.analysis.check_well_formed(value)
-    result = _api("AnalyzeAscendSchedule")(_attributes(value, "tl.sblock")[0], [])
+    result = _api("AnalyzeAscendSchedule")(kernel_body(value), [])
     assert int(result["tasks"][0]["core"]) == 2
     assert int(result["tasks"][1]["input_core"]) == 2

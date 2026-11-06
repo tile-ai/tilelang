@@ -118,8 +118,7 @@ def test_source_collection_does_not_cross_nested_owner():
     second = Layout((16,), lambda i: 15 - i)
     outer_note = make_annotation({"layout_map": {a: first}, "tl.source_block_annotation": True})
     inner_note = make_annotation({"layout_map": {b: second}, "tl.source_block_annotation": True})
-    schema, payload = codec.encode_annotations({"node": None, "key": "tl.sblock", "value": {"name": "inner"}})
-    inner = ir.RegionStmt("tl.attr", [payload], [], {"schema_version": 1, "annotation_schema": schema}, [inner_note])
+    inner = ir.RegionStmt("tl.lexical_scope", [], [], {}, [inner_note])
     body = ir.SeqStmt([inner, outer_note])
     collected = tvm_ffi.get_global_func("tl.CollectSourceBlockAnnotations")(body)
     assert a in collected["layout_map"]

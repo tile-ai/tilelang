@@ -249,14 +249,6 @@ public:
     auto rewritten = StmtExprMutator::Mutate_(op, mode)
                          .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                          .as_or_throw<RegionStmt>();
-    if (IsAscendBlock(rewritten.get())) {
-      auto metadata = AscendBlockAnnotations(rewritten.get());
-      if (!metadata.count(kL0SFBindings))
-        return rewritten;
-      metadata.erase(kL0SFBindings);
-      return MakeAscendBlock(AscendBlockName(rewritten.get()), metadata,
-                             rewritten->body, rewritten->loc);
-    }
     if (op->op->name != "tl.attr")
       return rewritten;
     auto fields = ReadAnnotations(rewritten.get());

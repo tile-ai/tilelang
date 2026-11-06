@@ -21,20 +21,6 @@ namespace tvm::tl::ascend {
 namespace {
 using namespace tirx;
 
-bool ScopeIs(const RegionStmtObj *region, const char *name) {
-  if (IsAscendBlock(region)) {
-    const auto block = AscendBlockName(region);
-    return (std::string_view(name) == "tl.simdvf_scope" &&
-            block == "SIMD_VF") ||
-           (std::string_view(name) == "tl.simtvf_scope" && block == "SIMT_VF");
-  }
-  if (region->op->name != "tl.attr")
-    return false;
-  auto fields = ReadAnnotations(region);
-  return fields.at("key").cast<ffi::String>() == name &&
-         GetIntegerAnnotation(fields.at("value")) != 0;
-}
-
 class SFGemmValidator : public StmtExprVisitorWithAnalyzer {
 public:
   explicit SFGemmValidator(L0SFBindings bindings)
@@ -69,13 +55,13 @@ tvm::transform::Pass AscendLayoutInference() {
       0, "tl.ValidateAscendLayoutOperands");
   LayoutInferenceOptions options;
   options.opaque_region = [](const RegionStmtObj *region) {
-    return ScopeIs(region, "tl.simdvf_scope");
+    return GetVFKind(region) == VFKind::kSimd;
   };
   options.preserve_parallel_nest = [](const ForObj *loop,
                                       const ffi::Array<RegionStmt> &regions) {
     bool simt = false;
     for (const auto &region : regions)
-      simt |= ScopeIs(region.get(), "tl.simtvf_scope");
+      simt |= GetVFKind(region.get()) == VFKind::kSimt;
     if (!simt)
       return false;
     bool reducer = false;

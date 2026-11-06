@@ -79,8 +79,6 @@ bool IsDefinitionCall(const CallObj *op) {
                 op->op.same_as(tirx::decl_tensor_op()));
 }
 
-bool IsAnnotationCall(const CallObj *op) { return IsAnnotationCall(op); }
-
 struct StorageRef {
   Var root;
   // Constant physical byte offset from root. A dynamic/unknown offset may

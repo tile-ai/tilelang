@@ -13,6 +13,7 @@
 
 #include "ascend/ir/block.h"
 #include "ascend/target_utils.h"
+#include "op/utils.h"
 #include <algorithm>
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/extra/structural_visit.h>
@@ -6779,24 +6780,7 @@ void CodeGenTileLangPTO::Dispatch_(const RegionStmtObj *op) {
       current_unroll_factor_ = prior_factor;
       return;
     }
-    if (attribute.key == "tl.simdvf_scope") {
-      if (simdvf_nesting_depth_ == 0) {
-        PrintIndent();
-        stream << "with pto.vecscope():\n";
-        const int scope = BeginScope();
-        ++simdvf_nesting_depth_;
-        PrintSuite_(op->body);
-        --simdvf_nesting_depth_;
-        EndScope(scope);
-      } else {
-        PrintIndent();
-        stream << "pto.mem_bar(\"VST_VLD\")\n";
-        PrintStmt_(op->body);
-      }
-      return;
-    }
-    if (attribute.key == "tl.simtvf_scope" ||
-        attribute.key == "tilelang_assume" || attribute.key == "tl.assume") {
+    if (attribute.key == "tilelang_assume" || attribute.key == "tl.assume") {
       PrintStmt_(op->body);
       return;
     }
@@ -7051,15 +7035,14 @@ void CodeGenTileLangPTO::Dispatch_(const WhileObj *op) {
 void CodeGenTileLangPTO::EmitBlockRegion_(const RegionStmtObj *op) {
   TVM_FFI_CHECK(op->args.empty(), ValueError)
       << "Ascend block dynamic annotations must be consumed before codegen";
-  const auto annotations =
-      op->attrs.GetAttr<ffi::Map<ffi::String, ffi::Any>>("annotations").value();
+  const auto annotations = op->attrs->dict;
   const auto name = op->attrs.GetAttr<ffi::String>("name").value();
   if (current_function_is_mixed_ && (name == "CUBE" || name == "VECTOR")) {
     bool is_vector_section = name == "VECTOR";
     int64_t vector_count = 2;
     if (is_vector_section) {
       if (auto opt = annotations.Get("vector_count")) {
-        vector_count = opt.value().cast<IntImm>()->value.as<int64_t>().value();
+        vector_count = tl::GetIntegerAnnotation(opt.value());
         ICHECK(vector_count == 1 || vector_count == 2)
             << "Mixed-kernel vector_count must be the constant integer 1 or "
                "2, got "
@@ -7109,7 +7092,19 @@ void CodeGenTileLangPTO::EmitBlockRegion_(const RegionStmtObj *op) {
   }
 
   if (name == "SIMD_VF") {
-    PrintStmt_(op->body);
+    if (simdvf_nesting_depth_ == 0) {
+      PrintIndent();
+      stream << "with pto.vecscope():\n";
+      const int scope = BeginScope();
+      ++simdvf_nesting_depth_;
+      PrintSuite_(op->body);
+      --simdvf_nesting_depth_;
+      EndScope(scope);
+    } else {
+      PrintIndent();
+      stream << "pto.mem_bar(\"VST_VLD\")\n";
+      PrintStmt_(op->body);
+    }
     return;
   }
   PrintStmt_(op->body);

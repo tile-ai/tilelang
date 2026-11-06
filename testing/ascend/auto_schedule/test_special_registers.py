@@ -1,7 +1,7 @@
 """Special-register dependencies participate in scheduling and core placement."""
 
 from tvm_tirx import ir
-from testing.ascend._ir import attribute_fields, attribute_key, launch_thread, sblocks, single_statement, tensor
+from testing.ascend._ir import attribute_fields, attribute_key, launch_thread, single_statement, tensor
 
 from unittest.mock import patch
 
@@ -10,7 +10,7 @@ import tilelang.ascend.language as T
 import tvm_tirx
 from tilelang.ascend import transform
 from tilelang.ascend.transform import z3_scheduler
-from testing.ascend._ir import calls, copy, kernel, nodes, seq, task_core_masks
+from testing.ascend._ir import calls, copy, kernel, kernel_body, nodes, seq, task_core_masks
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -46,8 +46,8 @@ def test_nested_pipe_wait_orders_the_following_pipe_user():
     # This order is a dependency on the pipe register, not a scheduler tie-break.
     operations = [call.op.name for call in calls(after, "tl.ascend_cross_core_wait_flag") + calls(after, "tl.tileop.ascend_copy")]
     assert len(operations) == 2
-    (root,) = sblocks(after, "tilelang_root")
-    children = _direct_statement_units(root.body)
+    root = kernel_body(after)
+    children = _direct_statement_units(root)
     assert len(children) == 2
     assert calls(children[0], "tl.ascend_cross_core_wait_flag")
     assert calls(children[1], "tl.tileop.ascend_copy")
@@ -79,7 +79,13 @@ def test_projected_special_register_writers_keep_their_subcore(operation):
     body = seq(*(unit(ir.Evaluate(setter), core=0, guard=sid == index) for index, setter in enumerate(setters)), unit(reader, core=0))
     before = kernel(body, buffers=[ub], params=[a], allocation_stage=0, allocation_cost=(1, 1), allocation_core=0)
     thread = sid
-    before = tvm_tirx.IRModule({"main": before["main"].with_body(launch_thread(thread, "cthread", 2, before["main"].body))})
+    before = tvm_tirx.IRModule(
+        {
+            "main": before["main"].with_body(
+                launch_thread(ir.Var("block", "int32"), "blockIdx.x", 1, launch_thread(thread, "cthread", 2, before["main"].body))
+            )
+        }
+    )
     assigned = transform.AssignCore()(before)
     for mod, masks in ((assigned, {0: 3, 1: 6}), (transform.ResolveCore()(assigned), {0: 1, 1: 4})):
         writers = [
@@ -143,8 +149,8 @@ def _cube_mode_program(mode):
 def test_cube_mode_changes_order_nested_and_following_gemms(mode):
     before, setter = _cube_mode_program(mode)
     after = transform.AutoSchedule()(before)
-    (root,) = sblocks(after, "tilelang_root")
-    children = _direct_statement_units(root.body)
+    root = kernel_body(after)
+    children = _direct_statement_units(root)
     assert len(children) == 4
     assert calls(children[0], setter)
     assert calls(children[1], "tl.tileop.gemm")

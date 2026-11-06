@@ -16,22 +16,27 @@ ASCEND_BLOCK_NAMES = frozenset({"CUBE", "VECTOR", "SIMT_VF", "SIMD_VF"})
 
 
 def ascend_block(name, body, annotations=None, *, loc=None):
-    args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendBlock")(name, annotations or {})
-    return ir.RegionStmt("tl.ascend_block", args, [], attrs, body, loc=ir.UnknownLoc() if loc is None else loc)
+    """Build execution configuration and independent metadata statements."""
+    loc = ir.UnknownLoc() if loc is None else loc
+    metadata = dict(annotations or {})
+    attrs = {"name": name}
+    for key in ("vector_count", "tl.vf_source_index", "tl.vf_latency"):
+        if key in metadata:
+            attrs[key] = metadata.pop(key)
+    body = ir.SeqStmt(body)
+    if metadata:
+        note = tvm_ffi.get_global_func("tl.MakeAnnotation")({**metadata, "tl.source_block_annotation": True}, loc)
+        body = ir.SeqStmt([note, body])
+    return ir.RegionStmt("tl.ascend_block", [], [], attrs, body, loc=loc)
 
 
 def ascend_block_annotations(block):
-    """Read attrs directly, decoding only the optional IR-dependent payload."""
+    """Inspect configuration and source declarations without altering their IR."""
     assert isinstance(block, ir.RegionStmt) and block.op.name == "tl.ascend_block"
-    annotations = dict(block.attrs["annotations"])
-    if "annotation_schema" in block.attrs:
-        assert len(block.args) == 1 and isinstance(block.args[0], ir.Tuple)
-        dynamic = tvm_ffi.get_global_func("tl.DecodeAnnotations")(block.args[0], block.attrs["annotation_schema"])
-        assert not set(annotations).intersection(dynamic)
-        annotations.update(dynamic)
-    else:
-        assert not block.args
-    return annotations
+    result = dict(block.attrs)
+    del result["name"]
+    result.update(tvm_ffi.get_global_func("tl.CollectSourceBlockAnnotations")(block.body))
+    return result
 
 
 def attribute(node, key, value, body, *, loc=None):
@@ -40,10 +45,17 @@ def attribute(node, key, value, body, *, loc=None):
     Execution blocks and task/schedule scopes use their dedicated ops.
     Ordinary source annotations retain the source annotation codec.
     """
-    if key == "tl.sblock" and value.get("name") in ASCEND_BLOCK_NAMES:
+    if key == "tl.sblock":
         assert node is None or isinstance(node, ir.IntImm) and int(node) == 0
         assert not (set(value) - {"name", "no_realize", "annotations"})
-        return ascend_block(value["name"], body, value.get("annotations", {}), loc=loc)
+        if value.get("name") in ASCEND_BLOCK_NAMES:
+            return ascend_block(value["name"], body, value.get("annotations", {}), loc=loc)
+        body = ir.SeqStmt(body)
+        metadata = value.get("annotations", {})
+        if metadata:
+            note = tvm_ffi.get_global_func("tl.MakeAnnotation")({**metadata, "tl.source_block_annotation": True}, ir.UnknownLoc())
+            body = ir.SeqStmt([note, body])
+        return ir.RegionStmt("tl.lexical_scope", [], [], {}, body)
     if key in {"tl.ascend_task", "tl.ascend_per_core_task"}:
         annotations = dict(node) if isinstance(node, (dict, tvm_ffi.Map)) else {}
         args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendTask")(annotations)

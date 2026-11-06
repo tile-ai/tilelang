@@ -8,8 +8,8 @@ from testing.ascend._ir import (
     allocate,
     allocated_tensors,
     kernel,
+    kernel_body,
     nodes,
-    sblocks,
     tensor,
 )
 from testing.ascend.auto_schedule._scheduled_ir import unit
@@ -58,8 +58,8 @@ def test_native_region_retains_its_statement_template_exactly(scope, tmp_path):
     )
     before = kernel([unit(carried, core=1)], buffers=[live], allocation_stage=0)
     after = checked_lower(before, tmp_path)
-    (root,) = sblocks(after, "tilelang_root")
-    prefix = [stmt.var for stmt in root.body.seq if isinstance(stmt, ir.Bind)]
+    root = kernel_body(after)
+    prefix = [stmt.var for stmt in root.seq if isinstance(stmt, ir.Bind)]
     templates = [region.attrs["pragma_ss_template"] for region in nodes(root, ir.RegionStmt) if "pragma_ss_template" in region.attrs]
     (tmp_path / "observed.json").write_text(
         json.dumps(

@@ -324,9 +324,17 @@ def test_root_direct_lists_survive_two_codec_rounds_at_their_definition_sites():
         assert len(row["hints"]) == 2
         assert [bool(hint[3]) for hint in row["hints"]] == [False, True]
         root = row["root"]
+        assert isinstance(root, ir.SeqStmt)
         carriers = _carriers(root, ROOT)
         assert len(carriers) == 2 and all(len(entries) == 1 for entries in carriers)
-        assert ROOT not in _fields(root)["value"].get("annotations", {})
+        positions = [index for index, stmt in enumerate(root.seq) if _carriers(stmt, ROOT)]
+        assert len(positions) == 2 and positions[1] == positions[0] + 2
+        for index, original in zip(positions, (body[3], body[5])):
+            assert isinstance(root.seq[index], ir.Evaluate)
+            ir.assert_structural_equal(root.seq[index], original)
+        preceding = root.seq[positions[0] - 1]
+        assert isinstance(preceding, ir.Bind) and preceding.var.same_as(b)
+        ir.assert_structural_equal(root.seq[positions[0] + 1], body[4])
         _well_formed(function([extent], [root]))
     consumed = _api("AscendRootConflictHintCodec")(root, True)["root"]
     assert not _carriers(consumed, ROOT)

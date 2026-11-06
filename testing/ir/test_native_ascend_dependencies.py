@@ -6,9 +6,10 @@ import pytest
 import tvm_ffi
 from tvm_tirx import ir, tirx
 
+from testing.ascend._ir import kernel_body
+
 from test_native_ascend_core_resolution import _kernel, _loop, _unit
 from test_native_ascend_ops import function, strided_tensor, subregion
-from test_native_ascend_schedule_units import _attributes
 from test_native_reducer_contracts import allocate, annotation, attribute, integer, objects, region, tensor
 
 
@@ -20,7 +21,9 @@ def _root(value):
     assert tirx.analysis.check_well_formed(value)
     assert not tirx.analysis.undefined_vars(value)
     ir.assert_structural_equal(value, ir.load_json(ir.save_json(value)))
-    return _attributes(value, "tl.sblock")[0]
+    root = kernel_body(value)
+    assert isinstance(root, ir.SeqStmt)
+    return root
 
 
 def _inspect(value, manual=None, owners=None):

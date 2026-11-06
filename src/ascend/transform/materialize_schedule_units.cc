@@ -25,6 +25,7 @@
 #include "ascend/transform/source_scopes.h"
 #include "auto_schedule/kernel_rewriter.h"
 #include "auto_schedule/task_resource.h"
+#include "ir/lexical_scope.h"
 #include "ir/stmt_functor.h"
 #include <tvm/ffi/extra/structural_visit.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -98,8 +99,6 @@ public:
         return result;
       }
       if (auto source = ReadSourceAttribute(region)) {
-        if (source->key == "tl.sblock" && task_depth == 0)
-          return MakeTask(stmt);
         return source->WithBody(
             Rewrite(region->body, task_depth, per_core_depth));
       }
@@ -340,6 +339,11 @@ Stmt MapChildUnits(const Stmt &stmt,
     return map(stmt);
   if (const auto *region = stmt.as<RegionStmtObj>(); IsScheduleUnit(region))
     return map(stmt);
+  if (const auto *region = stmt.as<RegionStmtObj>(); IsLexicalScope(region)) {
+    auto rewritten = GetRef<RegionStmt>(region);
+    rewritten.CopyOnWrite()->body = SeqStmt(MapChildUnits(region->body, map));
+    return rewritten;
+  }
   if (const auto *branch = stmt.as<IfObj>()) {
     If rewritten = GetRef<If>(branch);
     auto *writer = rewritten.CopyOnWrite();
@@ -497,6 +501,11 @@ private:
         return SetUnitStage(unit, stage);
       });
     }
+    if (IsLexicalScope(region)) {
+      RegionStmt result = GetRef<RegionStmt>(region);
+      result.CopyOnWrite()->body = MaterializeChildList(region->body);
+      return result;
+    }
     auto attribute = ReadSourceAttribute(region);
     TVM_FFI_CHECK(attribute.has_value(), ValueError)
         << "MaterializeScheduleUnits found an unsupported region "
@@ -523,11 +532,7 @@ tvm::transform::Pass MaterializeScheduleUnits() {
     auto result = RewriteTilelangKernels(
         std::move(function), "MaterializeScheduleUnits",
         [](const TilelangKernelContext &context) {
-          RegionStmt root = context.root;
-          SeqStmt body = ScheduleUnitMaterializer::Rewrite(root->body);
-          if (!body.same_as(root->body))
-            root.CopyOnWrite()->body = std::move(body);
-          return root;
+          return ScheduleUnitMaterializer::Rewrite(context.body);
         },
         false);
     CheckWellFormed(result);

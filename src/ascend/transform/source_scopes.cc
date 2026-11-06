@@ -52,20 +52,6 @@ public:
       int stage =
           ReadScheduleStage(ScheduleUnitMetadata{{"stage", source->node}});
       result = MakeStageScope(region->body, stage);
-    } else if (auto name = SourceBlockName(region.get());
-               name && IsAscendBlockName(*name)) {
-      auto fields = source->value.cast<ScheduleUnitMetadata>();
-      for (const auto &[key, value] : fields)
-        TVM_FFI_CHECK(key == "name" || key == "no_realize" ||
-                          key == "annotations",
-                      ValueError)
-            << "Unsupported field on a source Ascend execution block: " << key;
-      auto annotations = fields.Get("annotations");
-      result = MakeAscendBlock(*name,
-                               annotations
-                                   ? annotations->cast<ScheduleUnitMetadata>()
-                                   : ScheduleUnitMetadata{},
-                               region->body, region->loc);
     }
     if (result.same_as(region)) {
       if (children_changed)

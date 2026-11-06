@@ -13,8 +13,6 @@ namespace tl {
 
 constexpr const char *HostMainBlockName = "root";
 
-constexpr const char *DeviceMainBlockName = "tilelang_root";
-
 // The kernel-launch frame no longer needs a per-backend marker annotation:
 // KernelLaunchFrame exposes its grid_vars/thread_vars explicitly and each
 // backend pipeline decides what the launch means (MaterializeKernelLaunch).

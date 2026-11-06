@@ -32,7 +32,7 @@ static constexpr const char *kLocalVarInit = "tl.local_var_init";
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
 
-// Annotation on the tilelang_root block recording the SIMT thread-block
+// Kernel launch annotation recording the SIMT thread-block
 // extents requested by T.Kernel(threads=...). It is a launch hint: SIMT
 // backends materialize it as threadIdx.* thread_extent scopes, other
 // backends ignore it.

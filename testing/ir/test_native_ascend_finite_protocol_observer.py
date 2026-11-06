@@ -64,20 +64,9 @@ def _reject(before, changed, case, directory, message):
 
 
 def _append_root(module, statement):
-    changed = False
-
-    def append(region):
-        nonlocal changed
-        fields = attribute_fields(region)
-        if fields["key"] == "tl.sblock" and fields["value"]["name"] == "tilelang_root":
-            assert not changed
-            changed = True
-            return attribute(fields["node"], fields["key"], fields["value"], [*region.body.seq, statement], loc=region.loc)
-        return region
-
-    result = tvm_ffi.structural_map(module, [(ir.RegionStmt, append)])
-    assert changed
-    return result
+    function = module["main"]
+    body = ir.SeqStmt([function.body, statement], loc=function.body.loc)
+    return ir.IRModule({"main": function.with_body(body)})
 
 
 @pytest.mark.parametrize("case", CASES)

@@ -1,5 +1,7 @@
 """Native core passes preserve definitions, clocks and synchronization domains."""
 
+from testing.ascend._ir import kernel_body, scheduled_fields
+
 import pytest
 import tvm_ffi
 import tvm_tirx
@@ -128,7 +130,7 @@ def test_prepare_multi_buffer_uses_real_native_counters(mode):
     counter = counters[0].var
     assert isinstance(counter.ty, tirx.TensorType)
     assert counter.ty.scope.name == "local.var"
-    allocation = decoded(counters[0].value)[0][0]
+    allocation = counters[0].value.args[0]
     assert allocation.op.name == "tirx.alloc_tensor"
     stores = [store for store in objects(result, ir.TensorStore) if store.dest.same_as(counter)]
     assert len(stores) == 2
@@ -188,7 +190,7 @@ def test_materialize_multi_buffer_rewrites_real_storage_and_accesses(mode):
     storage = binding.var
     assert not storage.same_as(old_storage)
     assert [int(extent) for extent in storage.ty.shape] == [2, 32]
-    assert decoded(binding.value)[0][0].ty.same_as(storage.ty)
+    assert binding.value.args[0].ty.same_as(storage.ty)
     stores = [store for store in objects(result, ir.TensorStore) if store.dest.same_as(storage)]
     loads = [load for load in objects(result, ir.TensorLoad) if load.source.same_as(storage)]
     assert len(stores) == len(loads) == 1
@@ -245,7 +247,7 @@ def test_materialize_multibuffer_preserves_alias_bytes_and_native_strides():
     new_storage, new_alias = bindings["storage"].var, bindings["alias"].var
     assert _physical_offset(new_storage, [1, 0]) == 12 + 2
     assert _physical_offset(new_alias, [1, 1]) == 24 + 2
-    alias_call = decoded(bindings["alias"].value)[0][0]
+    alias_call = bindings["alias"].value.args[0]
     assert alias_call.op.name == "tirx.decl_tensor"
     assert alias_call.args[0].op.name == "tirx.ptr_byte_offset"
     assert int(alias_call.args[0].args[1]) == 4
@@ -487,9 +489,9 @@ def test_insert_sync_waits_before_a_native_memory_condition_header():
     output = tensor("output", [16], "float32", "global")
     branch = ir.If(ir.TensorLoad(storage, [integer(0)]) > ir.const(0.0), [_copy_task(storage, output)], None)
     result = _run("InsertSync", _kernel([source, output], [_unit(allocate(storage), 1), _copy_task(source, storage), branch]))
-    (root,) = [marker for marker in _attributes(result, "tl.sblock") if _fields(marker)["value"]["name"] == "tilelang_root"]
+    root = kernel_body(result)
     before_branch = []
-    for statement in root.body.seq:
+    for statement in root.seq:
         if isinstance(statement, ir.If):
             break
         before_branch.extend(collect_calls(statement, op="tl.ascend_wait_flag"))
@@ -820,7 +822,7 @@ def test_auto_schedule_executes_chained_scalar_clones_in_each_consumer_stage(car
     for name in ("first", "second"):
         bindings = [bind for bind in objects(scheduled, ir.Bind) if bind.var.name == name]
         assert len(bindings) == 2 and not bindings[0].var.same_as(bindings[1].var)
-        assert sorted(int(decoded(bind.value)[1]["stage"]) for bind in bindings) == [0, 2]
+        assert sorted(int(scheduled_fields(bind)["stage"]) for bind in bindings) == [0, 2]
     result = _run("LowerScheduledTIR", scheduled)
     _assert_schedule_consumed(result)
     (observed,) = execute(
@@ -865,7 +867,7 @@ def test_native_core_pipeline_executes_with_autoschedule_on_and_off(autoschedule
         body += [annotation({"tl.buffer_version_mode": {left: mode, right: mode}}), _unit(loop, stage=-1)]
     else:
         body += [loop]
-    value = _bind_target(_kernel([output], body, {left: 2, right: 2} if autoschedule else None, count=1))
+    value = _bind_target(_kernel([output], body, {left: 2, right: 2}, count=1) if autoschedule else function([output], body))
     with tvm_tirx.transform.PassContext(config={"tl.enable_auto_schedule": autoschedule}) as context:
         assert bool(context.config["tl.enable_auto_schedule"]) == autoschedule
         if context.config["tl.enable_auto_schedule"]:
@@ -887,8 +889,8 @@ def test_native_core_pipeline_executes_with_autoschedule_on_and_off(autoschedule
             value = _run("NormalizeBufferVersion", value)
             value = _run("RewriteAscendBufferVersionLayout", value)
         else:
-            (root,) = _attributes(value, "tl.sblock")
-            value = _bind_target(function(list(value.params), root.body))
+            root = kernel_body(value)
+            value = _bind_target(function(list(value.params), root))
         value = _run("AscendThreadSync", value, "shared")
         value = _apply(tirx.transform.LowerTensorLayouts(), value)
         if not autoschedule:

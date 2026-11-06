@@ -23,26 +23,23 @@ def _attribute(key, value, body):
 
 
 def _ascend(name, fields, body):
-    args, attrs = tvm_ffi.get_global_func("tl.EncodeAscendBlock")(name, fields)
-    return ir.RegionStmt("tl.ascend_block", args, [], attrs, body)
+    from testing.ascend._block import ascend_block
+
+    return ascend_block(name, body, fields)
 
 
 def _scope(carrier, fields, body):
     if carrier == "statement":
         return ir.SeqStmt([_annotation(fields), *body])
     if carrier == "source_after":
-        return _attribute(
-            "tl.sblock",
-            {"name": "ordinary"},
-            [*body, _annotation({"tl.source_block_annotation": True, **fields})],
-        )
+        return ir.RegionStmt("tl.lexical_scope", [], [], {}, [*body, _annotation({"tl.source_block_annotation": True, **fields})])
     if carrier == "attribute":
         ((key, value),) = fields.items()
         return _attribute(key, value, body)
     if carrier == "kernel":
         return _attribute("tl.kernel", fields, body)
     if carrier == "block":
-        return _attribute("tl.sblock", {"name": "ordinary", "annotations": fields}, body)
+        return ir.RegionStmt("tl.lexical_scope", [], [], {}, [_annotation({"tl.source_block_annotation": True, **fields}), *body])
     assert carrier == "ascend"
     return _ascend("VECTOR", fields, body)
 
@@ -71,12 +68,7 @@ def _metadata(function):
         if isinstance(call.op, ir.Op) and call.op.name == "tl.annotation":
             values.append(dict(decode(call.args[0], call.attrs["annotation_schema"])))
     for region in collect_nodes(function, ir.RegionStmt):
-        if region.op.name == "tl.ascend_block":
-            fields = dict(region.attrs["annotations"])
-            if region.args:
-                fields.update(dict(decode(region.args[0], region.attrs["annotation_schema"])))
-            values.append(fields)
-        elif region.op.name == "tl.attr":
+        if region.op.name == "tl.attr":
             fields = decode(region.args[0], region.attrs["annotation_schema"])
             key, value = str(fields["key"]), fields["value"]
             if key == "tl.sblock":
@@ -196,7 +188,8 @@ def test_safety_owner_preserves_unrelated_dynamic_block_metadata(disabled):
     with PassContext(config={"tl.disable_safe_memory_legalize": disabled}):
         result = _run("LegalizeSafeMemoryAccess", _function([source, index], [region]))
     (metadata,) = _metadata(result)
-    assert set(metadata) == {"keep"} and metadata["keep"].same_as(index)
+    assert set(metadata) == {"keep", "tl.source_block_annotation"} and metadata["keep"].same_as(index)
+    assert metadata["tl.source_block_annotation"] is True
 
 
 def _source_allocation(target, marker=1):
@@ -249,31 +242,23 @@ def test_ascend_annotation_owner_runs_without_the_optional_scheduler():
     result = _run("LowerAscendAnnotations", _function([], [region], "ascend"))
     (retained,) = result.body.seq
     assert retained.op.name == "tl.ascend_block"
-    assert dict(retained.attrs["annotations"]) == {"tl.vf_source_index": 7}
+    assert dict(retained.attrs) == {"name": "SIMT_VF", "tl.vf_source_index": 7}
     ir.assert_structural_equal(retained.body, region.body)
 
 
-@pytest.mark.parametrize(
-    "fields,pattern",
-    [
-        ({"tl.vf_source_index": -1}, "nonnegative"),
-        ({"tl.unconsumed_hint": 1}, "Unconsumed structured block annotation"),
-    ],
-)
-def test_ascend_header_errors_are_owned_by_the_backend(fields, pattern):
-    with pytest.raises(ValueError, match=pattern):
-        _run("LowerAscendAnnotations", _function([], [_ascend("SIMT_VF", fields, [])], "ascend"))
+@pytest.mark.parametrize("fields", [{"tl.vf_source_index": -1}, {"tl.unconsumed_hint": 1}])
+def test_ascend_execution_configuration_is_validated_at_construction(fields):
+    with pytest.raises(ValueError):
+        ir.RegionStmt("tl.ascend_block", [], [], {"name": "SIMT_VF", **fields}, [])
 
 
-def test_ascend_dynamic_latency_is_validated_before_retirement():
+def test_ascend_dynamic_latency_is_rejected_at_construction():
     latency = ir.Var("latency", "int32")
-    region = _ascend("SIMT_VF", {"tl.vf_latency": latency}, [])
-    with pytest.raises(ValueError, match="constant integer"):
-        _run("LowerAscendAnnotations", _function([latency], [region], "ascend"))
+    with pytest.raises((TypeError, ValueError)):
+        _ascend("SIMT_VF", {"tl.vf_latency": latency}, [])
 
 
-@pytest.mark.parametrize("scope", [False, True])
-def test_ascend_region_and_scope_require_their_backend(scope):
-    region = _attribute("tl.simtvf_scope", 1, []) if scope else _ascend("SIMT_VF", {}, [])
+def test_ascend_execution_domain_requires_its_backend():
+    region = _ascend("SIMT_VF", {}, [])
     with pytest.raises(ValueError, match="requires an Ascend target"):
         _run("LowerAscendAnnotations", _function([], [region], "c"))

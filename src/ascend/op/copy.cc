@@ -46,13 +46,6 @@ bool IsDMACopy(const CopyNode &op) {
   return GetDMAPath(op.src, op.dst) != DMAPath::kNone;
 }
 
-bool IsInsideSimtVF(const LowerArgs &T) {
-  // Native SimtVF has ordinary launch_thread binders. Its explicit lexical
-  // marker carries the execution mode independently of variable names.
-  auto scope = T.block_annotations.Get("tl.simtvf_scope");
-  return scope && GetIntegerAnnotation(*scope) != 0;
-}
-
 void CollectFragmentLayouts(const Expr &expr,
                             const Map<Var, Expr> &bind_var_to_expr,
                             const LayoutMap &existing_layouts,
@@ -1082,7 +1075,7 @@ Stmt LowerMxSfLoad(const AscendCopyNode &op, const LowerArgs &T,
 
 Stmt LowerAscendNormalCopy(const CopyNode &op, const LowerArgs &T,
                            sym::AnalyzerObj *analyzer) {
-  if (!IsInsideSimtVF(T)) {
+  if (!T.inside_simt_vf) {
     return LowerNormalCopy(op, T, analyzer);
   }
 
@@ -1193,8 +1186,7 @@ struct AscendCopyImpl {
           << op.src.scope() << " -> " << op.dst.scope();
       return LowerMxSfLoad(op, T, analyzer, dma_path == DMAPath::kL1ToL0ASF);
     }
-    if (!IsInsideSimtVF(T) && !IsLocalBuffer(op.src) &&
-        !IsLocalBuffer(op.dst)) {
+    if (!T.inside_simt_vf && !IsLocalBuffer(op.src) && !IsLocalBuffer(op.dst)) {
       DMAPath dma_path = GetDMAPath(op.src, op.dst);
       if (dma_path != DMAPath::kNone) {
         return LowerDMACopy(op, T, analyzer, dma_path);

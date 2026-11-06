@@ -6,7 +6,9 @@ tested separately in its native dependency-analysis suite.
 
 import pytest
 import tvm_ffi
+import tvm_tirx
 from tvm_tirx import ir, tirx
+from testing.ascend._ir import launch_thread, scope_annotations
 
 
 DIRECT = "conflict_hint"
@@ -44,7 +46,7 @@ def attribute(key, value, body):
 
 
 def kernel(body):
-    return attribute("tl.sblock", {"name": "tilelang_root", "no_realize": True}, body)
+    return ir.SeqStmt(body)
 
 
 def loop(value, body):
@@ -74,7 +76,7 @@ def records(value):
 
 
 def apply(params, body, already_root=False):
-    before = tirx.Function(params, body if already_root else [kernel(body)])
+    before = tirx.Function(params, body if already_root else [kernel(body)]).with_attr("target", tvm_tirx.target.Target("ascend"))
     assert tirx.analysis.check_well_formed(before)
     saved = ir.save_json(before)
     transform = tvm_ffi.get_global_func("tl.transform.NormalizeConflictHints")()
@@ -142,7 +144,7 @@ def test_selected_ancestor_scopes_use_static_ids_without_escaping_inner_var(leve
         if level in {-2, -1}:
             assert "root" in targets
     assert DIRECT not in outer.annotations
-    assert all(key != ROOT for key in fields(objects(result, ir.RegionStmt)[0]).get("value", {}))
+    assert ROOT not in scope_annotations(result.body)
 
 
 @pytest.mark.parametrize("branch", ["then", "else"])
@@ -224,7 +226,7 @@ def test_invalid_group_contracts_reject_without_mutating_input(case, diagnostic)
         hints.append(marker(a, group="g", level=-1))
     if case == "out-of-range":
         hints = [loop(i, [marker(a, group="g", level=0)]), marker(b, group="g", level=0)]
-    before = tirx.Function([a, b], [kernel(hints)])
+    before = tirx.Function([a, b], [kernel(hints)]).with_attr("target", tvm_tirx.target.Target("ascend"))
     saved = ir.save_json(before)
     with pytest.raises(ValueError, match=diagnostic):
         tvm_ffi.get_global_func("tl.transform.NormalizeConflictHints")()(ir.IRModule({"main": before}))
@@ -254,6 +256,7 @@ def test_same_group_spelling_is_independent_in_distinct_kernels():
         kernel([marker(a, group="g", level=-1), marker(b, group="g", level=-1)]),
         kernel([marker(b, group="g", level=-1), marker(a, group="g", level=-1)]),
     ]
+    roots = [launch_thread(ir.Var(f"block{index}", "int32"), "blockIdx.x", 1, body) for index, body in enumerate(roots)]
     result = apply([a, b], roots, already_root=True)
     first, second = result.body.seq
     assert len(records(first)) == len(records(second)) == 2
@@ -356,7 +359,7 @@ def has_dependency(normalized, writer, reader):
     materialize = tvm_ffi.get_global_func("tl.transform.MaterializeScheduleUnits")()
     scheduled = materialize(ir.IRModule({"main": normalized}))["main"]
     assert tirx.analysis.check_well_formed(scheduled)
-    root = next(node for node in objects(scheduled, ir.RegionStmt) if node.op.name == "tl.attr" and fields(node)["key"] == "tl.sblock")
+    root = scheduled.body
     result = tvm_ffi.get_global_func("tl.testing.AnalyzeAscendDependencies")(root, {}, {})
 
     def task_id(anchor):

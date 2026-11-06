@@ -31,6 +31,7 @@
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/scheduled_tir.h"
 #include "buffer_alias.h"
+#include "ir/lexical_scope.h"
 
 #include <tvm/ffi/extra/structural_equal.h>
 #include <tvm/ffi/reflection/registry.h>
@@ -199,11 +200,6 @@ private:
 
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    if (IsAscendBlock(op)) {
-      SeqStmt body = Mutate(op->body, mode).ValueOrUnchanged(op->body);
-      return MakeAscendBlock(AscendBlockName(op),
-                             Fields(AscendBlockAnnotations(op)), body, op->loc);
-    }
     if (IsSemanticTask(op) || IsScheduleUnit(op))
       return Mutate(op->body, mode).ValueOrUnchanged(op->body);
     auto attribute = ReadSourceAttribute(op);
@@ -214,7 +210,7 @@ private:
       return body;
     ffi::Any node = attribute->node, value = attribute->value;
     if (attribute->key == "tl.loop.annotations" ||
-        attribute->key == "tl.kernel" || attribute->key == "tl.sblock") {
+        attribute->key == "tl.kernel") {
       auto fields = Fields(value.cast<ScheduleUnitMetadata>());
       if (attribute->key == "tl.loop.annotations" && fields.empty())
         return body;
@@ -437,7 +433,7 @@ public:
     if (!shared_ss.empty())
       ss_retirer_ = ffi::make_object<SharedSSDefinitionRetirer>(shared_ss);
     VarSet all, kept;
-    CollectDefinitions(scheduled.metadata.kernel_root->body, &all);
+    CollectDefinitions(scheduled.metadata.kernel_body, &all);
     for (const auto &node : scheduled.tree)
       CollectSelectedDefinitions(node.get(), &kept);
     kept.insert(shared_ss.begin(), shared_ss.end());
@@ -642,6 +638,12 @@ private:
         else_case = LowerList(scope->else_children, nullptr, enclosed);
       return If(condition, then_case, else_case, branch->loc);
     }
+    if (const auto *region = scope->shell.as<RegionStmtObj>();
+        IsLexicalScope(region)) {
+      auto result = GetRef<RegionStmt>(region);
+      result.CopyOnWrite()->body = LowerList(scope->children, clock, enclosed);
+      return result;
+    }
     auto attribute = ReadSourceAttribute(scope->shell);
     TVM_FFI_CHECK(attribute.has_value(), ValueError)
         << "Unknown scheduled lexical scope";
@@ -736,7 +738,9 @@ bool HasCoreStream(const ScheduledTIR &scheduled, CoreMask target) {
 
 RegionStmt CoreBlock(ffi::String name, SeqStmt body,
                      ScheduleUnitMetadata annotations = {}) {
-  return MakeAscendBlock(name, annotations, body, body->loc);
+  annotations.Set("name", name);
+  return RegionStmt(ascend_block_op(), {}, {}, DictAttrs(annotations), body, {},
+                    body->loc);
 }
 
 // cthread names an AIV. An externally declared launch must enclose only the
@@ -756,7 +760,8 @@ private:
       launches_.pop_back();
       return body;
     }
-    bool vector = BlockNameAtSourceBoundary(op).value_or("") == "VECTOR";
+    bool vector = IsAscendBlock(op) &&
+                  op->attrs.GetAttr<ffi::String>("name").value() == "VECTOR";
     bool previous = inside_vector_;
     inside_vector_ |= vector;
     RegionStmt region = LayoutMapMutator::Mutate_(op, mode)
@@ -782,8 +787,8 @@ private:
 };
 
 // Consume only tl.kernel carriers read by the shared kernel collector. A
-// nested launch starts its own metadata chain, and an already lowered root
-// ends the chain before the generated VECTOR execution annotation.
+// nested launch starts its own metadata chain; execution domains retain their
+// own static configuration independently of launch hints.
 class KernelVectorCountConsumer : public LayoutMapMutator {
 public:
   using LayoutMapMutator::Mutate_;
@@ -791,40 +796,34 @@ public:
 private:
   ffi::UnchangedOr<Stmt> Mutate_(const RegionStmtObj *op,
                                  InplaceMode mode) final {
-    if (kernel_rewriter_detail::IsRoot(op)) {
-      reached_root_ = true;
+    if (IsAscendBlock(op))
       return ffi::Unchanged();
-    }
     bool old_chain = in_kernel_chain_;
-    bool old_root = reached_root_;
     bool anchor = kernel_rewriter_detail::IsKernelAnchor(op);
-    if (anchor)
+    if (anchor || (!in_kernel_chain_ &&
+                   kernel_rewriter_detail::IsStandaloneSubcoreBoundary(op)))
       in_kernel_chain_ = true;
-    reached_root_ = false;
     RegionStmt region = LayoutMapMutator::Mutate_(op, mode)
                             .ValueOrUnchanged(ffi::GetRef<Stmt>(op))
                             .as_or_throw<RegionStmt>();
-    bool owns_root = reached_root_;
     auto attribute = ReadSourceAttribute(region);
-    if (in_kernel_chain_ && owns_root && attribute &&
-        attribute->key == "tl.kernel") {
+    if (in_kernel_chain_ && attribute && attribute->key == "tl.kernel" &&
+        !kernel_rewriter_detail::HasNestedKernelAnchor(region->body)) {
       auto fields = attribute->value.cast<ScheduleUnitMetadata>();
       fields.erase(kVectorCount);
       region = MakeAttribute(attribute->node, attribute->key, fields,
                              region->body, region->loc);
     }
     in_kernel_chain_ = old_chain;
-    reached_root_ = old_root || (!anchor && owns_root);
     return region;
   }
 
   bool in_kernel_chain_{false};
-  bool reached_root_{false};
 };
 
-RegionStmt LowerKernel(const TilelangKernelContext &context) {
+SeqStmt LowerKernel(const TilelangKernelContext &context) {
   ScheduledTIR scheduled = DecodeScheduledTIR(
-      context.root, context.outer_ctx, nullptr, context.kernel_annotations,
+      context.body, context.outer_ctx, nullptr, context.kernel_annotations,
       context.parameter_alias_contract);
   int vector_count = scheduled.metadata.num_aiv_subcores.value_or(2);
   // DecodeScheduledTIR reads metadata statements directly in the root body.
@@ -848,7 +847,7 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
   if (!cube && !vector)
     vector = true;
   PrimVar sid = context.outer_sid.value_or(PrimVar("sid", PrimType::Int(32)));
-  SharedSSStorage shared_ss(context.root->body);
+  SharedSSStorage shared_ss(context.body);
   ffi::Array<Stmt> streams = shared_ss.allocations;
   if (cube)
     streams.push_back(
@@ -881,16 +880,7 @@ RegionStmt LowerKernel(const TilelangKernelContext &context) {
       annotations.Set(kVectorCount, IntImm::Int32(vector_count));
     streams.push_back(CoreBlock("VECTOR", body, annotations));
   }
-  auto root = ReadSourceAttribute(context.root).value();
-  auto cleaner = ffi::make_object<MetadataCleaner>(VarSet(), VarSet());
-  auto fields = cleaner->Fields(root.value.cast<ScheduleUnitMetadata>());
-  if (auto annotations = fields.Get("annotations")) {
-    auto values = annotations->cast<ScheduleUnitMetadata>();
-    values.erase(kVectorCount);
-    fields.Set("annotations", values);
-  }
-  return MakeAttribute(root.node, root.key, fields, SeqStmt(streams),
-                       context.root->loc);
+  return SeqStmt(streams, context.body->loc);
 }
 
 } // namespace

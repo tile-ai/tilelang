@@ -1,4 +1,4 @@
-"""Ascend execution blocks keep constants in attrs and captures in IR operands."""
+"""Execution domains use native statements and independent tensor annotations."""
 
 import pytest
 import tvm_ffi
@@ -12,69 +12,49 @@ from testing.ascend._block import ASCEND_BLOCK_NAMES, ascend_block, ascend_block
 
 
 @pytest.mark.parametrize("name", sorted(ASCEND_BLOCK_NAMES))
-def test_static_execution_metadata_needs_no_tuple_or_schema(name):
-    typed = ir.IntImm("int16", 7)
-    block = ascend_block(name, [], {"hint": 17, "typed": typed, "nested": {"values": [True, "tag", 1.25, None]}})
-    assert block.op.name == "tl.ascend_block"
+def test_execution_metadata_is_native_static_configuration(name):
+    attrs = {"vector_count": 2} if name == "VECTOR" else {"tl.vf_source_index": 7} if name.endswith("_VF") else {}
+    block = ascend_block(name, [], attrs)
+    assert block.op.same_as(ir.Op.get("tl.ascend_block"))
     assert not block.args and not block.body_params and not block.result_vars
-    assert set(block.attrs.keys()) == {"name", "annotations"}
-    assert block.attrs["name"] == name
-    annotations = block.attrs["annotations"]
-    assert int(annotations["hint"]) == 17
-    assert annotations["typed"].same_as(typed)
-    assert str(annotations["typed"].ty.dtype) == "int16"
-    assert list(annotations["nested"]["values"]) == [True, "tag", 1.25, None]
+    assert set(block.attrs.keys()) == {"name", *attrs}
+    for key, value in attrs.items():
+        assert int(block.attrs[key]) == value
+    assert tilelang_metadata(block) is None
     function = tirx.Function([], [block])
     assert tirx.analysis.check_well_formed(function)
     ir.assert_structural_equal(function, ir.load_json(ir.save_json(function)))
 
 
-def test_tensor_map_keys_and_layout_captures_remain_substitutable_operands():
+def test_layout_declaration_uses_existing_attrs_rewrite_contract():
     offset = ir.Var("offset", "int32")
     tensor = ir.Var("tensor", tirx.TensorType((8,), "float32"))
     replacement = ir.Var("replacement", tensor.ty)
     layout = Layout([8], lambda i: i + offset)
-    block = ascend_block("VECTOR", [], {"vector_count": 2, "layout_map": {tensor: layout}, "aliases": {tensor: [tensor]}})
-    assert len(block.args) == 1 and isinstance(block.args[0], ir.Tuple)
-    assert set(block.attrs.keys()) == {"name", "annotations", "annotation_schema"}
-    assert set(block.attrs["annotations"]) == {"vector_count"}
-    metadata = tilelang_metadata(block)
-    assert metadata["key"] == "tl.sblock" and metadata["value"]["name"] == "VECTOR"
-    semantic_annotations = metadata["value"]["annotations"]
-    assert int(semantic_annotations["vector_count"]) == 2
-    assert semantic_annotations["aliases"][tensor][0].same_as(tensor)
-    ir.assert_structural_equal(semantic_annotations["layout_map"][tensor], layout)
-    variables = []
-    tvm_ffi.structural_walk(block.attrs, (ir.Var, variables.append))
-    assert not variables
+    block = ascend_block("VECTOR", [], {"vector_count": 2, "layout_map": {tensor: layout}})
+    assert not block.args and set(block.attrs.keys()) == {"name", "vector_count"}
+    (note,) = collect_nodes(block, ir.Call)
+    assert note.op.same_as(ir.Op.get("tl.layout_map")) and not note.args
     function = tirx.Function([offset, tensor], [block])
-    assert tirx.analysis.check_well_formed(function)
-    assert not tirx.analysis.undefined_vars(function)
-
-    replaced = tvm_ffi.structural_mutate(block, (ir.Var, lambda var, _mutator: replacement if var.same_as(tensor) else var))
-    annotations = ascend_block_annotations(replaced)
-    (layout_tensor,) = annotations["layout_map"]
-    (alias_tensor,) = annotations["aliases"]
-    assert layout_tensor.same_as(replacement) and alias_tensor.same_as(replacement)
-    assert annotations["aliases"][replacement][0].same_as(replacement)
-    assert not any(var.same_as(tensor) for var in collect_nodes(replaced, ir.Var))
+    tvm_ffi.get_global_func("tl.CheckLayoutMapScopes")(function)
+    replaced = tvm_ffi.get_global_func("tl.SubstituteLayoutMap")(block, {tensor: replacement})
+    (key,) = ascend_block_annotations(replaced)["layout_map"]
+    assert key.same_as(replacement)
     rewritten = tirx.Function([offset, replacement], [replaced])
-    assert tirx.analysis.check_well_formed(rewritten)
-    assert not tirx.analysis.undefined_vars(rewritten)
-    renewed = tirx.renew_def(rewritten)
+    renewed = tvm_ffi.get_global_func("tl.RenewDef")(rewritten)
+    tvm_ffi.get_global_func("tl.CheckLayoutMapScopes")(renewed)
     (renewed_block,) = collect_nodes(renewed, ir.RegionStmt)
-    (renewed_tensor,) = ascend_block_annotations(renewed_block)["layout_map"]
-    assert renewed_tensor.same_as(renewed.params[1]) and not renewed_tensor.same_as(replacement)
-    assert not tirx.analysis.undefined_vars(renewed)
+    (key,) = ascend_block_annotations(renewed_block)["layout_map"]
+    assert key.same_as(renewed.params[1]) and not key.same_as(replacement)
     ir.assert_structural_equal(renewed, ir.load_json(ir.save_json(renewed)))
 
 
-def test_header_capture_cannot_use_a_definition_from_the_region_body():
-    local = ir.Var("local", "int32")
-    block = ascend_block("SIMD_VF", [ir.Bind(local, ir.const(7))], {"capture": local})
-    function = tirx.Function([], [block])
-    assert any(var.same_as(local) for var in tirx.analysis.undefined_vars(function))
-    assert not tirx.analysis.check_well_formed(function, assert_mode=False)
+def test_layout_declaration_cannot_precede_its_tensor_definition():
+    local = ir.Var("local", tirx.TensorType((8,), "float32", scope="local"))
+    allocation = ir.Bind(local, ir.Call(ir.Op.get("tirx.alloc_tensor"), [], ty_args=[local.ty]))
+    block = ascend_block("SIMD_VF", [allocation], {"layout_map": {local: Layout([8], lambda i: i)}})
+    with pytest.raises(ValueError, match="layout_map"):
+        tvm_ffi.get_global_func("tl.CheckLayoutMapScopes")(tirx.Function([], [block]))
 
 
 def test_body_annotation_stays_after_its_definition_and_in_its_source_owner():
@@ -90,7 +70,7 @@ def test_body_annotation_stays_after_its_definition_and_in_its_source_owner():
     blocks = {node.attrs["name"]: node for node in collect_nodes(kernel, ir.RegionStmt) if node.op.name == "tl.ascend_block"}
     outer, inner = blocks["VECTOR"], blocks["SIMD_VF"]
     assert [outer.attrs["name"], inner.attrs["name"]] == ["VECTOR", "SIMD_VF"]
-    assert all(not block.args and not block.attrs["annotations"] for block in (outer, inner))
+    assert all(not block.args and set(block.attrs.keys()) == {"name"} for block in (outer, inner))
     snapshot = ir.save_json(kernel)
     collect_annotations = tvm_ffi.get_global_func("tl.CollectSourceBlockAnnotations")
     for block, name, key in [(outer, "local", "mapping"), (inner, "nested", "inner")]:
@@ -136,46 +116,38 @@ def test_generic_sblock_keeps_axes_predicate_and_public_arguments(name, no_reali
     assert tirx.analysis.check_well_formed(kernel)
 
 
-@pytest.mark.parametrize(
-    "case", ["missing_annotations", "unknown_name", "capture_in_attrs", "tuple_without_schema", "duplicate_annotation"]
-)
+@pytest.mark.parametrize("case", ["missing_name", "unknown_name", "capture_in_attrs", "operands", "old_annotations"])
 def test_malformed_execution_headers_are_rejected(case):
     captured = ir.Var("captured", "int32")
-    attrs = {"name": "VECTOR", "annotations": {}}
-    args = []
-    if case == "missing_annotations":
-        del attrs["annotations"]
-        message = "requires an annotations map"
+    attrs, args = {"name": "VECTOR"}, []
+    if case == "missing_name":
+        del attrs["name"]
     elif case == "unknown_name":
         attrs["name"] = "ordinary"
-        message = "name must be"
     elif case == "capture_in_attrs":
-        attrs["annotations"] = {"capture": captured}
-        message = "static metadata"
-    elif case == "tuple_without_schema":
+        attrs["vector_count"] = captured
+    elif case == "operands":
         args = [ir.Tuple([captured])]
-        message = "metadata Tuple"
     else:
-        schema, payload = tvm_ffi.get_global_func("tl.EncodeAnnotations")({"capture": captured})
-        args = [payload]
-        attrs.update(annotations={"capture": 1}, annotation_schema=schema)
-        message = "Duplicate static and dynamic"
-    with pytest.raises((TypeError, ValueError), match=message):
+        attrs["annotations"] = {"vector_count": 2}
+    with pytest.raises((TypeError, ValueError)):
         block = ir.RegionStmt("tl.ascend_block", args, [], attrs, [])
         tirx.analysis.check_well_formed(tirx.Function([captured], [block]))
 
 
-def test_ordinary_block_and_task_still_keep_the_general_operand_codec():
-    from testing.ascend._block import attribute, attribute_fields
+def test_ordinary_source_block_has_only_a_native_definition_scope():
+    @T.prim_func
+    def kernel(A: T.Tensor((4,), "int32")):
+        with T.sblock("ordinary"):
+            temporary = T.alloc_local((4,), "int32")
+            T.annotate_layout({temporary: Layout([4], lambda i: i)})
+            temporary[0] = A[0]
 
-    tensor = ir.Var("tensor", tirx.TensorType((8,), "float32"))
-    for node, key, value, op_name in [
-        (None, "tl.sblock", {"name": "tilelang_root", "annotations": {"mapping": {tensor: [tensor]}}}, "tl.attr"),
-        ({"capture": tensor}, "tl.ascend_task", ir.const(1), "tl.ascend.task"),
-    ]:
-        region = attribute(node, key, value, [])
-        assert region.op.name == op_name
-        assert len(region.args) == 1 and "annotation_schema" in region.attrs
-        assert any(var.same_as(tensor) for var in collect_nodes(region.args[0], ir.Var))
-        assert attribute_fields(region)["key"] == key
-        assert tirx.analysis.check_well_formed(tirx.Function([tensor], [region]))
+    (scope,) = collect_nodes(kernel, ir.RegionStmt)
+    assert scope.op.name == "tl.lexical_scope"
+    assert not scope.args and not scope.attrs.keys()
+    assert not scope.body_params and not scope.result_vars
+    (allocation,) = collect_nodes(kernel, ir.Bind)
+    assert allocation.value.op.name == "tirx.alloc_tensor"
+    tvm_ffi.get_global_func("tl.CheckLayoutMapScopes")(kernel)
+    assert tirx.analysis.check_well_formed(kernel)

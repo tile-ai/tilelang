@@ -29,6 +29,8 @@
 
 #include <tvm/ffi/reflection/registry.h>
 
+#include <algorithm>
+
 namespace tvm::tl::ascend {
 namespace {
 
@@ -46,7 +48,7 @@ ffi::Array<ffi::Any> Prove(const ConstrSet &context,
   return results;
 }
 
-ffi::Map<ffi::String, ffi::Any> AnalyzeSchedule(RegionStmt root,
+ffi::Map<ffi::String, ffi::Any> AnalyzeSchedule(SeqStmt root,
                                                 ffi::Array<PrimExpr> queries) {
   auto schedule = DecodeScheduledTIR(root, {});
   std::vector<TaskNode *> tasks;
@@ -137,7 +139,7 @@ ffi::Array<ffi::Any> InspectStorage(Stmt definitions,
 }
 
 ffi::Map<ffi::String, ffi::Any>
-InspectMultiBufferPlan(RegionStmt root, ffi::Array<Var> storages) {
+InspectMultiBufferPlan(SeqStmt root, ffi::Array<Var> storages) {
   auto schedule = DecodeScheduledTIR(root, {});
   auto plan =
       ReadMultiBufferPlan(schedule.tree, schedule.metadata.buffer_versions,
@@ -206,7 +208,7 @@ InspectMultiBufferPlan(RegionStmt root, ffi::Array<Var> storages) {
 }
 
 ffi::Map<ffi::String, ffi::Any>
-InspectDependencies(RegionStmt root, const BufferVersionMap &manual,
+InspectDependencies(SeqStmt root, const BufferVersionMap &manual,
                     const ffi::Map<Var, ffi::Array<Var>> &owner_vars) {
   auto schedule = DecodeScheduledTIR(root, {});
   std::vector<TaskNode *> tasks;
@@ -381,7 +383,7 @@ private:
   bool recurrence_;
 };
 
-BufferAliasMap InspectLifetimes(RegionStmt root, Optional<Var> clock_var,
+BufferAliasMap InspectLifetimes(SeqStmt root, Optional<Var> clock_var,
                                 ffi::Array<ffi::Array<int64_t>> edges,
                                 ffi::Map<Var, int64_t> periods,
                                 bool implicit_slots, bool recurrence) {
@@ -483,7 +485,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                                   context.Address(lhs), context.Address(rhs))}};
            })
       .def("tl.testing.RoundTripAscendSchedule",
-           [](RegionStmt root, bool clone) {
+           [](SeqStmt root, bool clone) {
              auto schedule = DecodeScheduledTIR(root, {});
              if (clone)
                for (auto &node : schedule.tree)
@@ -491,7 +493,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return EncodeScheduledTIR(std::move(schedule));
            })
       .def("tl.testing.AscendRootConflictHintCodec",
-           [](RegionStmt root, bool consume) {
+           [](SeqStmt root, bool consume) {
              auto schedule = DecodeScheduledTIR(root, {});
              auto hints = schedule.metadata.root_conflict_hints;
              if (consume)
@@ -501,7 +503,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                  {"root", EncodeScheduledTIR(std::move(schedule))}};
            })
       .def("tl.testing.AscendScopedIndexAfterMutation",
-           [](RegionStmt root, ffi::String mode, bool rebuild) {
+           [](SeqStmt root, ffi::String mode, bool rebuild) {
              auto schedule = DecodeScheduledTIR(root, {});
              auto hints = std::make_unique<ScopedConflictHintIndex>(
                  schedule.tree, schedule.metadata.outer_ctx);
@@ -525,11 +527,17 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                  schedule.tree = DecodeScheduledTIR(root, {}).tree;
              } else if (mode == "reparent") {
                ICHECK_GE(schedule.tree.size(), 2U);
-               auto moved = schedule.tree.front();
+               auto position = std::find_if(
+                   schedule.tree.begin(), schedule.tree.end(),
+                   [](const auto &node) { return node->IsTask(); });
+               ICHECK(position != schedule.tree.end());
+               auto moved = *position;
                auto *parent = schedule.tree.back().get();
                auto lists = parent->ChildLists();
                ICHECK(!lists.empty());
-               schedule.tree.erase(schedule.tree.begin());
+               schedule.tree.erase(position);
+               for (size_t i = 0; i < schedule.tree.size(); ++i)
+                 schedule.tree[i]->SetIndex(i);
                moved->SetParent(parent);
                moved->SetIndex(lists.front()->size());
                lists.front()->push_back(moved);
@@ -548,19 +556,27 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                }
              } else if (mode == "statement") {
                bool changed = false;
-               std::function<void(IRStructure *)> mutate =
-                   [&](IRStructure *node) {
-                     if (!changed && node->IsScope()) {
-                       auto *scope = static_cast<ScopeNode *>(node);
-                       if (IsTaskMetadataStatement(scope->shell)) {
-                         scope->shell = MakeAnnotation({}, scope->shell->loc);
-                         changed = true;
-                       }
+               std::function<void(IRStructure *)> mutate = [&](IRStructure
+                                                                   *node) {
+                 if (!changed && node->IsScope()) {
+                   auto *scope = static_cast<ScopeNode *>(node);
+                   if (IsTaskMetadataStatement(scope->shell)) {
+                     auto fields = ReadAnnotations(
+                         scope->shell.as<EvaluateObj>()->value.as<CallObj>());
+                     // Kernel configuration is also carried by annotations.
+                     // Remove the conflict declaration itself so rebuilding
+                     // the index must invalidate the cached no-conflict proof.
+                     if (fields.Get("tl.scoped_conflict_hints")) {
+                       fields.erase("tl.scoped_conflict_hints");
+                       scope->shell = MakeAnnotation(fields, scope->shell->loc);
+                       changed = true;
                      }
-                     for (auto *list : node->ChildLists())
-                       for (auto &child : *list)
-                         mutate(child.get());
-                   };
+                   }
+                 }
+                 for (auto *list : node->ChildLists())
+                   for (auto &child : *list)
+                     mutate(child.get());
+               };
                for (auto &node : schedule.tree)
                  mutate(node.get());
                ICHECK(changed);
@@ -590,7 +606,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                  {"after", static_cast<int64_t>(after)}};
            })
       .def("tl.testing.SubstituteAscendSchedule",
-           [](RegionStmt root, Var old_var, Var new_var) {
+           [](SeqStmt root, Var old_var, Var new_var) {
              auto schedule = DecodeScheduledTIR(root, {});
              for (auto &node : schedule.tree) {
                node = node->Clone();
@@ -609,8 +625,8 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                  {"read_byte_offsets", offsets}};
            })
       .def("tl.testing.SetAscendScheduleMetadata",
-           [](RegionStmt root, BufferVersionMap versions,
-              BufferAliasMap aliases, bool has_aliases) {
+           [](SeqStmt root, BufferVersionMap versions, BufferAliasMap aliases,
+              bool has_aliases) {
              auto schedule = DecodeScheduledTIR(root, {});
              schedule.metadata.buffer_versions = std::move(versions);
              schedule.metadata.buffer_aliases = std::move(aliases);
@@ -618,7 +634,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
              return EncodeScheduledTIR(std::move(schedule));
            })
       .def("tl.testing.AscendInductionAfterDroppingTail",
-           [](RegionStmt root) {
+           [](SeqStmt root) {
              auto schedule = DecodeScheduledTIR(root, {});
              ffi::Array<ffi::Any> results;
              std::function<void(IRStructure *)> visit = [&](IRStructure *node) {
@@ -640,7 +656,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
                visit(node.get());
              return results;
            })
-      .def("tl.testing.AscendLoopOrdinal", [](RegionStmt root) {
+      .def("tl.testing.AscendLoopOrdinal", [](SeqStmt root) {
         auto schedule = DecodeScheduledTIR(root, {});
         ffi::Array<PrimExpr> results;
         std::function<void(IRStructure *)> visit = [&](IRStructure *node) {

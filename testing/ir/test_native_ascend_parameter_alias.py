@@ -7,6 +7,7 @@ from tvm_tirx import ir
 from test_native_ascend_core_passes import _apply
 from test_native_ascend_core_resolution import _kernel, _unit
 from test_native_ascend_ops import function
+from test_native_ascend_dual_copy import _launch
 from test_native_ascend_schedule_units import _bind_target
 from test_native_cuda_copy import calls
 from test_native_reducer_contracts import allocate, annotation, attribute, integer, region, tensor, tileop
@@ -51,9 +52,11 @@ def _program(origin="tensor", contract=True, exception=None):
     ]
     value = _kernel(params, [*definitions, *tasks])
     if exception == "kernel":
-        value = function(params, [attribute(None, "tl.kernel", {"tl.non_restrict_params": [params[0]]}, value.body)])
+        value = function(
+            params, [_launch([attribute(None, "tl.kernel", {"tl.non_restrict_params": [params[0]]}, value.body)], "blockIdx.x", 1)]
+        )
     elif exception == "region":
-        value = function(params, [attribute(None, "tl.non_restrict_params", [params[0]], value.body)])
+        value = function(params, [attribute(None, "tl.non_restrict_params", [params[0]], [_launch(value.body, "blockIdx.x", 1)])])
     if contract is not None:
         value = value.with_attr("tirx.noalias", contract)
     if exception == "function":

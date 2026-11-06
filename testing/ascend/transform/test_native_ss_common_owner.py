@@ -7,9 +7,11 @@ from testing.ascend._ir import (
     annotation,
     annotations,
     kernel,
+    kernel_body,
+    kernel_bodies,
     launch_thread,
     nodes,
-    sblocks,
+    execution_blocks,
     substitute,
     tensor,
 )
@@ -39,10 +41,10 @@ def assert_common_owner(root, expected):
     allocations = ss_allocations(root)
     assert len(allocations) == len(expected)
     assert all(actual.same_as(original) for actual, original in zip(allocations, expected))
-    prefix = list(root.body.seq[: len(expected)])
+    prefix = list(root.seq[: len(expected)])
     assert all(isinstance(stmt, ir.Bind) and stmt.var.same_as(var) for stmt, var in zip(prefix, expected))
     for name in ("CUBE", "VECTOR"):
-        for core in sblocks(root, name):
+        for core in execution_blocks(root, name):
             assert not ss_allocations(core)
 
 
@@ -59,11 +61,11 @@ def test_common_owner_survives_typed_views_and_physical_version_metadata(scope):
         unit(ir.TensorStore(output, [1], ir.TensorLoad(packed, [1, 0])), core=1),
     ]
     after = lower(kernel(body, buffers=[words], params=[output], allocation_stage=0))
-    (root,) = sblocks(after, "tilelang_root")
+    root = kernel_body(after)
     assert_common_owner(root, [words])
     aliases = []
     for name in ("CUBE", "VECTOR"):
-        (core,) = sblocks(root, name)
+        (core,) = execution_blocks(root, name)
         (alias,) = [binding.var for binding in nodes(core, ir.Bind) if binding.var.name == "packed"]
         aliases.append(alias)
         assert not alias.same_as(packed)
@@ -90,10 +92,10 @@ def test_single_core_uses_one_common_ss_definition(core):
             allocation_core=core,
         )
     )
-    (root,) = sblocks(after, "tilelang_root")
+    root = kernel_body(after)
     assert_common_owner(root, [words])
-    assert len(sblocks(root, "CUBE")) == (core == 2)
-    assert len(sblocks(root, "VECTOR")) == (core != 2)
+    assert len(execution_blocks(root, "CUBE")) == (core == 2)
+    assert len(execution_blocks(root, "VECTOR")) == (core != 2)
     assert int(words.ty.data_alignment) == 64
     assert all(store.dest.same_as(words) for store in nodes(root, ir.TensorStore))
 
@@ -105,11 +107,11 @@ def test_distinct_same_named_ss_allocations_are_not_coalesced():
         unit(ir.TensorStore(output, [index], ir.TensorLoad(owner, [0])), core=core) for core in (2, 1) for index, owner in enumerate(owners)
     ]
     after = lower(kernel(body, buffers=owners, params=[output], allocation_stage=0))
-    (root,) = sblocks(after, "tilelang_root")
+    root = kernel_body(after)
     assert_common_owner(root, owners)
     assert not owners[0].same_as(owners[1])
     for name in ("CUBE", "VECTOR"):
-        (core,) = sblocks(root, name)
+        (core,) = execution_blocks(root, name)
         for index, load in enumerate(nodes(core, ir.TensorLoad)):
             assert storage_owner(after, load).same_as(owners[index])
 
@@ -128,12 +130,12 @@ def test_sibling_kernels_keep_distinct_group_owners_after_sid_relocation(outer_s
                 allocation_stage=0,
             )
         )
-    roots = [sblocks(module, "tilelang_root")[0] for module in modules]
+    roots = [launch_thread(ir.Var(f"block{i}", "int32"), "blockIdx.x", 1, kernel_body(module)) for i, module in enumerate(modules)]
     body = [launch_thread(ir.Var("sid", "int32"), "cthread", 2, roots)] if outer_sid else roots
     before = ir.IRModule({"main": modules[0]["main"].with_body(body)})
     after = lower(before)
     assert len(ss_allocations(after)) == 2
-    for root, owner in zip(sblocks(after, "tilelang_root"), owners):
+    for root, owner in zip(kernel_bodies(after), owners, strict=True):
         assert_common_owner(root, [owner])
         assert all(storage_owner(after, load).same_as(owner) for load in nodes(root, ir.TensorLoad))
 
@@ -205,11 +207,11 @@ def test_ss_hoisting_preserves_conditional_and_pipeline_accesses(placement, roun
     conditional = ir.If(enabled, [definition, loop] if placement == "branch" else [loop], None)
     body = [definition, conditional] if placement == "root" else [conditional]
     after = lower(kernel(body, params=[enabled]))
-    (root,) = sblocks(after, "tilelang_root")
+    root = kernel_body(after)
     assert_common_owner(root, [words])
     for enabled_value in (0, 1):
         for name, slot, increment in (("VECTOR", 0, 1), ("CUBE", 1, 11)):
-            (core,) = sblocks(root, name)
+            (core,) = execution_blocks(root, name)
             events = stores_in_execution_order(core, {enabled: enabled_value})
             expected = [(slot, i + increment) for i in range(rounds) if enabled_value and i % 2 == 0]
             assert [(indices[0], value) for _, indices, value in events] == expected
@@ -229,11 +231,11 @@ def test_non_ss_storage_remains_private_to_each_renewed_core(scope):
         for index, core in enumerate((2, 1))
     ]
     after = lower(kernel(body, buffers=[words, private], params=[output], allocation_stage=0))
-    (root,) = sblocks(after, "tilelang_root")
+    root = kernel_body(after)
     assert_common_owner(root, [words])
     private_owners = []
     for name in ("CUBE", "VECTOR"):
-        (core,) = sblocks(root, name)
+        (core,) = execution_blocks(root, name)
         (owner,) = allocated_tensors(core)
         private_owners.append(owner)
         assert owner.ty.scope.name == scope and not owner.same_as(private)

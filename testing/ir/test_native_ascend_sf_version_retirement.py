@@ -208,7 +208,7 @@ def test_sf_version_count_requires_the_same_physical_leading_axis(leading):
     )
 
 
-@pytest.mark.parametrize("carrier", ["attribute", "kernel", "sblock", "foreign_field"])
+@pytest.mark.parametrize("carrier", ["attribute", "kernel", "foreign_scope", "foreign_field"])
 def test_version_fields_on_foreign_carriers_still_fail_sf_use_verification(carrier):
     data, sf = group()
     versions = {sf: 2, data: 2}
@@ -216,11 +216,11 @@ def test_version_fields_on_foreign_carriers_still_fail_sf_use_verification(carri
         statement = attribute(None, VERSION, versions, [ir.Evaluate(integer(0))])
     elif carrier == "kernel":
         statement = attribute(None, "tl.kernel", {VERSION: versions}, [ir.Evaluate(integer(0))])
-    elif carrier == "sblock":
+    elif carrier == "foreign_scope":
         statement = attribute(
             None,
-            "tl.sblock",
-            {"name": "foreign", "no_realize": True, "annotations": {VERSION: versions}},
+            "foreign_scope",
+            {VERSION: versions},
             [ir.Evaluate(integer(0))],
         )
     else:

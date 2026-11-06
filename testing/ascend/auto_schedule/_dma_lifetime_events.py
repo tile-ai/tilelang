@@ -54,6 +54,10 @@ def extract(module):
                 assert len(statement.body_params) == 1 and concrete(statement.args[1], environment) == 1
                 visit(statement.body, {**environment, statement.body_params[0]: 0}, loops, core, stage)
                 return
+            if statement.op.name == "tl.lexical_scope":
+                assert not statement.args and not statement.attrs
+                visit(statement.body, environment, loops, core, stage)
+                return
             assert statement.op.name in {"tl.attr", "tl.ascend.task", "tl.ascend.schedule_unit"}, statement.op.name
             fields = attribute_fields(statement)
             if fields["key"] == "tl.ascend_task":
@@ -61,7 +65,7 @@ def extract(module):
             elif fields["key"] == "tl.schedule_unit":
                 stage = int(fields["node"]["stage"])
             else:
-                assert fields["key"] in ("tl.sblock", "tl.loop.annotations", "tl.kernel"), fields["key"]
+                assert fields["key"] in ("tl.loop.annotations", "tl.kernel"), fields["key"]
             visit(statement.body, environment, loops, core, stage)
         elif isinstance(statement, ir.For):
             begin, end, step = [concrete(value, environment) for value in (statement.begin, statement.end, statement.step)]
