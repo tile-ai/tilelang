@@ -33,6 +33,7 @@ PTO_EXECUTION_BACKENDS = [
         enable_device_compile=True,
         # Same capability as the plain-Ascend tvm_ffi spec above.
         supports_callee_allocated_outputs=True,
+        wrap_callable=maybe_wrap_host_profile,
     ),
     ExecutionBackendSpec("pto"),
 ]

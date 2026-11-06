@@ -7,6 +7,7 @@ host-controlled launches.
 
 import pytest
 import torch
+import torch.profiler
 
 import tilelang
 import tilelang.testing
@@ -204,6 +205,37 @@ def test_pto_auto_resolves_tvm_ffi():
 
     context = create_backend_context("pto", None, "auto")
     assert context.execution_backend.name == "tvm_ffi"
+
+
+@tilelang.testing.requires_ascend
+def test_pto_tvm_ffi_host_profile_range(monkeypatch):
+    seen = []
+
+    class FakeRange:
+        def __init__(self, name):
+            seen.append(name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(torch.profiler, "record_function", FakeRange)
+    monkeypatch.setenv("TILELANG_ASCEND_PROFILE", "1")
+
+    with tilelang.testing.without_kernel_cache():
+        kernel = tilelang.compile(vector_add(64, 32), target="pto", out_idx=-1, execution_backend="tvm_ffi")
+
+    assert hasattr(kernel.torch_function, "__wrapped__")
+
+    a = torch.randn(64, device="npu")
+    b = torch.randn(64, device="npu")
+    kernel(a, b)
+    torch.npu.synchronize()
+
+    assert len(seen) == 1
+    assert seen[0].startswith("tilelang::")
 
 
 @tilelang.testing.requires_ascend
