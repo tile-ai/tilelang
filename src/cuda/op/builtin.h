@@ -140,6 +140,30 @@ TVM_DLL const Op &create_tma_im2col_descriptor();
 TVM_DLL const Op &prefetch_tma_descriptor();
 
 /*!
+ * \brief Prefetch a global/local memory cache line into L1.
+ *
+ * prefetch_l1(addr, is_global)
+ *
+ */
+TVM_DLL const Op &prefetch_l1();
+
+/*!
+ * \brief Prefetch a memory cache line into uniform L1.
+ *
+ * prefetchu_l1(addr)
+ *
+ */
+TVM_DLL const Op &prefetchu_l1();
+
+/*!
+ * \brief Prefetch a global/local memory cache line into L2.
+ *
+ * prefetch_l2(addr, eviction_priority, is_global)
+ *
+ */
+TVM_DLL const Op &prefetch_l2();
+
+/*!
  * \brief tvm intrinsics for loading data from global tensor descriptor to
  * shared memory
  *
