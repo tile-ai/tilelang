@@ -42,7 +42,7 @@ def matmul_gemm_v2(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dt
     return main
 
 
-def matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32):
+def matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=T.float16, accum_dtype=T.float32, shared_scope="shared"):
     @T.prim_func
     def main(
         A: T.Tensor((M, K), dtype),
@@ -50,9 +50,9 @@ def matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=T.float16,
         C: T.Tensor((M, N), accum_dtype),
     ):
         with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
-            A_shared = T.alloc_shared((block_M, block_K), dtype, scope="shared")
-            B_shared = T.alloc_shared((block_K, block_N), dtype, scope="shared")
-            C_shared = T.alloc_shared((block_M, block_N), accum_dtype, scope="shared")
+            A_shared = T.alloc_shared((block_M, block_K), dtype, scope=shared_scope)
+            B_shared = T.alloc_shared((block_K, block_N), dtype, scope=shared_scope)
+            C_shared = T.alloc_shared((block_M, block_N), accum_dtype, scope=shared_scope)
 
             T.clear(C_shared)
 
@@ -153,8 +153,9 @@ def assert_metal_gemm_v2_cooperative_tensor_codegen(
     block_K,
     dtype=T.float16,
     accum_dtype=T.float32,
+    shared_scope="shared",
 ):
-    func = matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype)
+    func = matmul_gemm_v2_shared_c(M, N, K, block_M, block_N, block_K, dtype=dtype, accum_dtype=accum_dtype, shared_scope=shared_scope)
     with tvm.transform.PassContext(), METAL4_TARGET:
         artifact = tilelang.lower(func, target=METAL4_TARGET)
 
@@ -234,6 +235,12 @@ def test_metal_gemm_v2_larger():
 
 def test_metal_gemm_v2_cooperative_tensor_codegen():
     assert_metal_gemm_v2_cooperative_tensor_codegen(128, 128, 128, 32, 64, 32, dtype=T.float16)
+
+
+def test_metal_gemm_v2_cooperative_tensor_with_dynamic_shared_memory():
+    # metal.cooperative_tensor buffers must not trip MergeSharedMemoryAllocations
+    # when the kernel also uses shared.dyn (the default scope of T.alloc_shared).
+    assert_metal_gemm_v2_cooperative_tensor_codegen(128, 128, 128, 32, 64, 32, dtype=T.float16, shared_scope="shared.dyn")
 
 
 def test_metal_gemm_v2_without_metal4_uses_simdgroup():
