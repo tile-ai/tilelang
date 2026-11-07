@@ -14,17 +14,21 @@
 #include <tvm/tirx/stmt_functor.h>
 
 #include <functional>
+#include <numeric>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "cuda/op/builtin.h"
+#include "cuda/op/copy.h"
 #include "layout/layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/pipeline_utils.h"
+#include "transform/common/storage_size.h"
+#include "ws_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -320,17 +324,101 @@ class MultiVersionBufferRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
     auto rewriter = MultiVersionBufferRewriter();
+    rewriter.target_ = f->GetAttr<Target>(tvm::attr::kTarget);
     rewriter.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : rewriter.buffer_lca_) {
       Var buffer_var = buffer->data;
       rewriter.buffer_data_to_buffer_.Set(buffer_var, buffer);
     }
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      const auto *block = node.as<SBlockNode>();
+      if (block == nullptr || !block->annotations.count(attr::kLayoutMap)) {
+        return;
+      }
+      auto layout_map = block->annotations.Get(attr::kLayoutMap)
+                            .value()
+                            .as<Map<Var, Layout>>();
+      if (!layout_map.has_value()) {
+        return;
+      }
+      for (const auto &[var, _] : layout_map.value()) {
+        rewriter.annotated_layout_vars_.insert(var.get());
+      }
+    });
     f.CopyOnWrite()->body = rewriter(f->body);
     return f;
   }
 
 private:
   explicit MultiVersionBufferRewriter() = default;
+
+  // A bulk tensor copy (TMA) needs a shared memory destination aligned to 128
+  // bytes, so each version of a buffer starts at a multiple of this size.
+  static constexpr int64_t kVersionAlignBytes = 128;
+
+  // Returns the extent of the outermost dimension that makes one version of
+  // buffer a multiple of kVersionAlignBytes, or the extent itself when the
+  // version already is one or its size is not static. The size of a version
+  // is the size of its storage, which packs two 4-bit values into a byte.
+  static PrimExpr AlignedOuterExtent(const Buffer &buffer) {
+    const auto *outer = buffer->shape[0].as<IntImmNode>();
+    if (outer == nullptr) {
+      return buffer->shape[0];
+    }
+    int64_t element_bits = IsPacked4BitStorage(buffer->dtype)
+                               ? buffer->dtype.bits()
+                               : buffer->dtype.bytes() * 8;
+    int64_t row_bits = element_bits * buffer->dtype.lanes();
+    for (size_t i = 1; i < buffer->shape.size(); ++i) {
+      const auto *extent = buffer->shape[i].as<IntImmNode>();
+      if (extent == nullptr) {
+        return buffer->shape[0];
+      }
+      row_bits *= extent->value;
+    }
+    constexpr int64_t kVersionAlignBits = kVersionAlignBytes * 8;
+    if (row_bits <= 0 || (outer->value * row_bits) % kVersionAlignBits == 0) {
+      return buffer->shape[0];
+    }
+    int64_t step = kVersionAlignBits / std::gcd(row_bits, kVersionAlignBits);
+    int64_t rows = (outer->value + step - 1) / step * step;
+    return make_const(buffer->shape[0].dtype(), rows);
+  }
+
+  // Returns whether stmt is a copy that lowers to a 1-D bulk copy. The
+  // analyzer knows the ranges of the loops and threads around stmt.
+  static bool IsBulkCopy1D(const Stmt &stmt, const Target &target,
+                           arith::Analyzer *analyzer) {
+    const auto *eval = stmt.as<EvaluateNode>();
+    const auto *call = eval == nullptr ? nullptr : eval->value.as<CallNode>();
+    if (call == nullptr) {
+      return false;
+    }
+    auto tile_op = ParseOperator(GetRef<Call>(call));
+    const auto *copy = tile_op.defined() ? tile_op.as<CopyNode>() : nullptr;
+    return copy != nullptr &&
+           cuda::CanLowerToBulkCopy1D(*copy, target, analyzer);
+  }
+
+  // Binds the ranges of the loops and threads that enclose the visited
+  // statement, as the lowering of a copy knows them.
+  void BindEnclosingRanges(arith::Analyzer *analyzer) const {
+    for (const StmtNode *node : stmt_stack_) {
+      if (node->IsInstance<ForNode>()) {
+        const auto *loop = static_cast<const ForNode *>(node);
+        analyzer->Bind(loop->loop_var,
+                       Range::FromMinExtent(loop->min, loop->extent));
+      } else if (node->IsInstance<AttrStmtNode>()) {
+        const auto *attr = static_cast<const AttrStmtNode *>(node);
+        if (attr->attr_key == tirx::attr::thread_extent) {
+          IterVar iv = Downcast<IterVar>(attr->node);
+          analyzer->Bind(iv->var,
+                         Range::FromMinExtent(make_zero(attr->value.dtype()),
+                                              attr->value));
+        }
+      }
+    }
+  }
 
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
@@ -370,6 +458,8 @@ private:
     std::vector<Role> roles;
     Array<Array<BufferRegion>> reads, writes;
     auto marker = WarpSpecializedRoleMarker_(buffer_data_to_buffer_);
+    arith::Analyzer enclosing;
+    BindEnclosingRanges(&enclosing);
     for (const Stmt &stmt : pipeline_stmts) {
       marker(stmt);
       SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
@@ -406,6 +496,26 @@ private:
                 }
               }
             }
+          }
+        }
+      }
+
+      // A tensor TMA copy needs a shared address aligned to 128 bytes, so the
+      // versions of the buffers that a tensor TMA load writes or a tensor TMA
+      // store reads are padded. A 1-D bulk copy moves a multiple of 16 bytes,
+      // so its versions keep the 16-byte alignment that it needs. A cp.async
+      // or SIMT copy needs none.
+      TileStmtKind kind = target_.defined()
+                              ? ClassifyStmt(stmt, target_.value())
+                              : TileStmtKind::kConsumer;
+      if ((kind == TileStmtKind::kTmaProducer ||
+           kind == TileStmtKind::kTmaStore) &&
+          !IsBulkCopy1D(stmt, target_.value(), &enclosing)) {
+        const Array<BufferRegion> &regions =
+            kind == TileStmtKind::kTmaProducer ? stmt_writes : stmt_reads;
+        for (const BufferRegion &region : regions) {
+          if (IsSharedBuffer(region->buffer)) {
+            tensor_tma_buffers_.insert(region->buffer.get());
           }
         }
       }
@@ -483,7 +593,7 @@ private:
     return versioned_buffers;
   }
 
-  static Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) {
+  Buffer RewriteAllocBuffer(const Buffer &buffer, int num_versions) const {
     ObjectPtr<BufferNode> new_buffer = make_object<BufferNode>(*(buffer.get()));
     if (buffer.scope() == "shared.barrier") {
       // Barrier buffers: expand first dimension to keep 1D shape.
@@ -492,6 +602,14 @@ private:
       new_buffer->shape.Set(0, make_const(shape_dtype, num_versions) *
                                    new_buffer->shape[0]);
     } else {
+      // Pad the outermost dimension of a buffer of a tensor TMA copy so that
+      // every version starts on a TMA alignment. An annotated layout keeps the
+      // shape that it describes.
+      if (new_buffer->strides.empty() && !new_buffer->shape.empty() &&
+          tensor_tma_buffers_.count(buffer.get()) &&
+          !annotated_layout_vars_.count(buffer->data.get())) {
+        new_buffer->shape.Set(0, AlignedOuterExtent(buffer));
+      }
       new_buffer->shape.insert(new_buffer->shape.begin(),
                                PrimExpr(num_versions));
       if (!new_buffer->strides.empty()) {
@@ -900,8 +1018,13 @@ private:
         const Buffer &new_buffer = (*it).second;
         const PrimExpr &old_index = call->args[i + 1];
         PrimExpr offset;
-        if (new_buffer->strides.empty()) {
+        if (buffer.scope() == "shared.barrier") {
           offset = product(buffer->shape, old_index.dtype());
+        } else if (new_buffer->strides.empty()) {
+          // One version spans the padded shape after the version dimension.
+          Array<PrimExpr> version_shape(new_buffer->shape.begin() + 1,
+                                        new_buffer->shape.end());
+          offset = product(version_shape, old_index.dtype());
         } else {
           offset = tvm::cast(old_index.dtype(), new_buffer->strides[0]);
         }
@@ -927,6 +1050,13 @@ private:
   // Remember each block's alloc list so the loop can see buffers defined in
   // parents.
   std::unordered_map<const SBlockNode *, Array<Buffer>> block_alloc_buffers_;
+  // The data of the buffers that a block annotates with a layout.
+  std::unordered_set<const VarNode *> annotated_layout_vars_;
+  // The target of the function, which decides the copies that lower to TMA.
+  Optional<Target> target_;
+  // The shared buffers that a tensor TMA load of a pipeline writes or a tensor
+  // TMA store reads.
+  std::unordered_set<const BufferNode *> tensor_tma_buffers_;
 };
 
 PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
