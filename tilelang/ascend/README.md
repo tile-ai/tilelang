@@ -57,6 +57,11 @@ The AscendC `tvm_ffi` compilation callback caches linked `.aibin` files under
 source, NPU architecture, compilation and linker options, TileLang version, and
 a `compiler` string formed as `bisheng version=<version line>`.
 
+The PTO `tvm_ffi` path uses the same cache root but stores its binaries in a
+separate `pto-binaries` namespace. Its key includes the PTODSL source, PTO
+architecture, ptoas flags, bisheng link flags, TileLang version, and a
+toolchain stamp covering the ptoas and CANN identities.
+
 The version line is read from the selected `bisheng --version` once per process.
 It preserves the compiler build time, Clang version, and revisions; the build
 time distinguishes releases that share the same Clang version and revisions.
@@ -72,28 +77,35 @@ cache hit skips the device compilation callback.
 
 ### Selecting AscendC or PTO code generation
 
-The execution backend selects the Ascend target variant during JIT compilation:
-
-```python
-# Default AscendC code generation.
-kernel = tilelang.compile(func, target="ascend", execution_backend="auto")
-
-# PTO execution and PTO device code generation (codegen_pto.cc).
-kernel = tilelang.compile(func, target="ascend", execution_backend="pto")
-```
-
-The PTO form specializes the native `ascend` target with the `pto` target key,
-selects the `pto` backend module, and dispatches device code generation through
-`target.build.tilelang_pto_without_compile`. The existing `target="pto"` shorthand
-remains supported.
-
-The same selection can be made through defaults used by `@tilelang.jit` and
-`tilelang.compile(..., target=None, execution_backend=None)`:
+On Ascend NPUs the default target is `ascend`, which uses the AscendC code
+generator. Select a different device code generator with
+`TILELANG_DEFAULT_TARGET` or the `target` argument of `@tilelang.jit` and
+`tilelang.compile`:
 
 ```bash
-export TILELANG_DEFAULT_TARGET=ascend
-export TILELANG_EXECUTION_BACKEND=pto
+export TILELANG_DEFAULT_TARGET=ascend  # AscendC code generation
+export TILELANG_DEFAULT_TARGET=pto     # or PTO code generation
 ```
+
+```python
+kernel = tilelang.compile(func, target="ascend")
+kernel = tilelang.compile(func, target="pto")
+```
+
+The execution backend can be selected separately with
+`TILELANG_EXECUTION_BACKEND` or the `execution_backend` argument. Both targets
+default to `tvm_ffi`; `ascend` also accepts `cython`, and `pto` also accepts
+`pto`, the legacy Cython launcher:
+
+```bash
+export TILELANG_EXECUTION_BACKEND=tvm_ffi  # default for both targets
+export TILELANG_EXECUTION_BACKEND=cython   # or: ascend only
+export TILELANG_EXECUTION_BACKEND=pto      # or: pto only (legacy Cython launcher)
+```
+
+`target="ascend", execution_backend="pto"` also selects PTO with the legacy
+Cython launcher. It remains supported for compatibility, but new code should
+use `target="pto"`.
 
 The following example implements the same GEMM with a fused ReLU epilogue as
 the [main README](../../README.md#quick-start), while using Huawei Ascend 950
@@ -173,20 +185,20 @@ print("GEMM + ReLU passed.")
 
 ### Selecting PTO code generation
 
-Pass `target="pto"` to `@tilelang.jit` or `tilelang.compile` to generate
-PTODSL instead of Ascend C. The same Ascend lowering pipeline runs for both
-targets; the PTO target selects a different device code generator and the PTO
-execution adapter. For example, change the Quick Start decorator to
-`@tilelang.jit(target="pto")` to select PTO for that kernel. Leave
-`execution_backend` at its default `"auto"`: the PTO target selects the PTO
-execution backend automatically. Setting only `execution_backend="pto"` on an
-`"ascend"` target does not select PTO code generation and is rejected.
+`target="pto"` uses the same Ascend lowering pipeline as AscendC but selects
+PTODSL code generation and the PTO backend module. For example, use
+`@tilelang.jit(target="pto")` for a PTO kernel.
+
+The default `tvm_ffi` launcher compiles the host program with the shared host
+codegen and launches the PTODSL-compiled aibin through the Ascend runtime
+module, just like an Ascend C kernel. `execution_backend="pto"` selects the
+legacy Cython launcher.
 
 For source-only inspection, call `tilelang.lower(kernel, target="pto")` and
 read its `kernel_source`. PTO JIT compilation additionally requires PTODSL,
-`ptoas`, and `bisheng`; running the result requires the Ascend runtime and NPU.
-Automatic target detection selects the regular Ascend target, so specify
-`target="pto"` explicitly when PTO is required.
+`ptoas`, `bisheng`, and a host C compiler; running the result requires the
+Ascend runtime and NPU. Automatic target detection selects the regular Ascend
+target, so specify `target="pto"` explicitly when PTO is required.
 
 - Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
 - Ascend supports mixing SIMT and SIMD code within a single kernel, so
