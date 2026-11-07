@@ -2156,26 +2156,18 @@ private:
                       Range::FromMinExtent(loop->min, adjusted_extent));
           bound.insert(loop->loop_var.get());
         }
-        for (unsigned idx = 0; idx != 3; ++idx) {
-          for (const auto &[iv, sub] :
-               {std::make_pair(prev.threads[prev.threads.size() + idx - 3],
-                               &prev_sub),
-                std::make_pair(curr.threads[curr.threads.size() + idx - 3],
-                               &curr_sub)}) {
-            auto it = sub->find(iv->var);
-            const auto *var =
-                it == sub->end() ? nullptr : (*it).second.as<VarNode>();
-            if (var != nullptr && iv->dom.defined() &&
-                bound.insert(var).second) {
-              ranges.Bind(GetRef<Var>(var), iv->dom);
-            }
-          }
-        }
-        for (const ConstrSet *set : {&prev_cset, &curr_cset}) {
-          for (const Constr &c : set->constrs_) {
-            if (c.kind == Constr::kBindRange &&
-                bound.insert(c.var.get()).second) {
-              ranges.Bind(c.var, c.range);
+        // Bind the constant ranges of both sets first, such as those of the
+        // threads. The analyzer bounds a range when it binds it, so a range
+        // that reads another variable is bound after the constant ones.
+        for (bool constant : {true, false}) {
+          for (const ConstrSet *set : {&prev_cset, &curr_cset}) {
+            for (const Constr &c : set->constrs_) {
+              if (c.kind == Constr::kBindRange &&
+                  (as_const_int(c.range->min) != nullptr &&
+                   as_const_int(c.range->extent) != nullptr) == constant &&
+                  bound.insert(c.var.get()).second) {
+                ranges.Bind(c.var, c.range);
+              }
             }
           }
         }
