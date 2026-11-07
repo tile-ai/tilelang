@@ -931,6 +931,23 @@ def _versioned_multicast_copy_kernel(rows=2, width=8, iters=4):
     return main
 
 
+def _tensor_store_of_versions_kernel(rows=2, width=8, iters=16, num_stages=8):
+    """A pipeline that loads a contiguous (rows, width) float32 region and stores it to strided rows.
+
+    The rows of dst are twice as wide as the buffer, so the store is a tensor TMA store.
+    """
+
+    @T.prim_func
+    def main(src: T.Tensor((iters * rows, width), "float32"), dst: T.Tensor((iters * rows, 2 * width), "float32")):
+        with T.Kernel(1, threads=128) as _:
+            smem = T.alloc_shared((rows, width), "float32")
+            for k in T.Pipelined(iters, num_stages=num_stages):
+                T.copy(src[k * rows, 0], smem)
+                T.copy(smem, dst[k * rows, 0])
+
+    return main
+
+
 def _warp_specialized_script(func, arch="sm_90a"):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     target = determine_target({"kind": "cuda", "arch": arch}, return_object=True)
@@ -996,6 +1013,27 @@ def test_tiled_ws_pads_multicast_versions():
 
     assert "tl_tiled_ws_applied" in script
     assert 'smem = T.sblock_alloc_buffer((2, 4, 8), scope="shared.dyn")' in script
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_pads_tensor_tma_store_sources():
+    """A tensor TMA store reads a version at an address aligned to 128 bytes too, so its 64-byte versions are padded."""
+    script = _warp_specialized_script(_tensor_store_of_versions_kernel())
+
+    assert "tl_tiled_ws_applied" in script
+    assert 'smem = T.sblock_alloc_buffer((8, 4, 8), scope="shared.dyn")' in script
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_tensor_tma_store_from_small_versions():
+    """A tensor TMA store from versions of 64 bytes of data copies each row."""
+    import torch
+
+    kernel = tilelang.compile(_tensor_store_of_versions_kernel(), target="cuda", out_idx=[1])
+    src = torch.randn(32, 8, device="cuda", dtype=torch.float32)
+    dst = kernel(src)
+    torch.testing.assert_close(dst[:, :8], src)
 
 
 @tilelang.testing.requires_cuda

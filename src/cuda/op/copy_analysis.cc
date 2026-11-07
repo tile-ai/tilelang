@@ -807,18 +807,26 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   return Supported(SelectSyncLikeInst(facts));
 }
 
-bool CanLowerToBulkLoad1D(const CopyNode &op, Target target,
+bool CanLowerToBulkCopy1D(const CopyNode &op, Target target,
                           arith::Analyzer *analyzer) {
-  // As in SelectCopyInstForLowering, a gather4 copy and a multicast copy take
-  // their own paths before the 1-D bulk path.
+  // As in SelectCopyInstForLowering, a gather4, scatter4 or multicast copy
+  // takes its own path before the 1-D bulk path.
   if (!IsCudaLikeTarget(target) || TargetIsCuTeDSL(target) ||
-      GetBoolAnnotation(op, "is_gather4") || GetClusterMask(op) != 0) {
+      GetBoolAnnotation(op, "is_gather4") ||
+      GetBoolAnnotation(op, "is_scatter4") || GetClusterMask(op) != 0 ||
+      !CanProveCopyInBounds(op, analyzer)) {
     return false;
   }
   static const LayoutMap empty_layout_map;
-  return CanProveCopyInBounds(op, analyzer) &&
-         CheckBulkLoad1D(op, target, empty_layout_map, analyzer,
-                         /*emit_diagnostics=*/false);
+  if (IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst)) {
+    return CheckBulkLoad1D(op, target, empty_layout_map, analyzer,
+                           /*emit_diagnostics=*/false);
+  }
+  if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+    return CheckBulkStore1D(op, target, empty_layout_map, analyzer,
+                            /*emit_diagnostics=*/false);
+  }
+  return false;
 }
 
 CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,

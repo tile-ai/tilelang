@@ -387,7 +387,7 @@ private:
 
   // Returns whether stmt is a copy that lowers to a 1-D bulk copy. The
   // analyzer knows the ranges of the loops and threads around stmt.
-  static bool IsBulkLoad1D(const Stmt &stmt, const Target &target,
+  static bool IsBulkCopy1D(const Stmt &stmt, const Target &target,
                            arith::Analyzer *analyzer) {
     const auto *eval = stmt.as<EvaluateNode>();
     const auto *call = eval == nullptr ? nullptr : eval->value.as<CallNode>();
@@ -397,7 +397,7 @@ private:
     auto tile_op = ParseOperator(GetRef<Call>(call));
     const auto *copy = tile_op.defined() ? tile_op.as<CopyNode>() : nullptr;
     return copy != nullptr &&
-           cuda::CanLowerToBulkLoad1D(*copy, target, analyzer);
+           cuda::CanLowerToBulkCopy1D(*copy, target, analyzer);
   }
 
   // Binds the ranges of the loops and threads that enclose the visited
@@ -500,16 +500,22 @@ private:
         }
       }
 
-      // A tensor TMA copy needs a destination aligned to 128 bytes, so the
-      // versions of the buffers that it writes are padded. A 1-D bulk copy
-      // moves a multiple of 16 bytes, so its versions keep the 16-byte
-      // alignment that it needs. A cp.async or SIMT copy needs none.
-      if (target_.defined() &&
-          ClassifyStmt(stmt, target_.value()) == TileStmtKind::kTmaProducer &&
-          !IsBulkLoad1D(stmt, target_.value(), &enclosing)) {
-        for (const BufferRegion &region : stmt_writes) {
+      // A tensor TMA copy needs a shared address aligned to 128 bytes, so the
+      // versions of the buffers that a tensor TMA load writes or a tensor TMA
+      // store reads are padded. A 1-D bulk copy moves a multiple of 16 bytes,
+      // so its versions keep the 16-byte alignment that it needs. A cp.async
+      // or SIMT copy needs none.
+      TileStmtKind kind = target_.defined()
+                              ? ClassifyStmt(stmt, target_.value())
+                              : TileStmtKind::kConsumer;
+      if ((kind == TileStmtKind::kTmaProducer ||
+           kind == TileStmtKind::kTmaStore) &&
+          !IsBulkCopy1D(stmt, target_.value(), &enclosing)) {
+        const Array<BufferRegion> &regions =
+            kind == TileStmtKind::kTmaProducer ? stmt_writes : stmt_reads;
+        for (const BufferRegion &region : regions) {
           if (IsSharedBuffer(region->buffer)) {
-            tma_destinations_.insert(region->buffer.get());
+            tensor_tma_buffers_.insert(region->buffer.get());
           }
         }
       }
@@ -596,11 +602,11 @@ private:
       new_buffer->shape.Set(0, make_const(shape_dtype, num_versions) *
                                    new_buffer->shape[0]);
     } else {
-      // Pad the outermost dimension of a TMA destination so that every
-      // version starts on a TMA alignment. An annotated layout keeps the shape
-      // that it describes.
+      // Pad the outermost dimension of a buffer of a tensor TMA copy so that
+      // every version starts on a TMA alignment. An annotated layout keeps the
+      // shape that it describes.
       if (new_buffer->strides.empty() && !new_buffer->shape.empty() &&
-          tma_destinations_.count(buffer.get()) &&
+          tensor_tma_buffers_.count(buffer.get()) &&
           !annotated_layout_vars_.count(buffer->data.get())) {
         new_buffer->shape.Set(0, AlignedOuterExtent(buffer));
       }
@@ -1048,8 +1054,9 @@ private:
   std::unordered_set<const VarNode *> annotated_layout_vars_;
   // The target of the function, which decides the copies that lower to TMA.
   Optional<Target> target_;
-  // The shared buffers that a TMA copy of a pipeline writes.
-  std::unordered_set<const BufferNode *> tma_destinations_;
+  // The shared buffers that a tensor TMA load of a pipeline writes or a tensor
+  // TMA store reads.
+  std::unordered_set<const BufferNode *> tensor_tma_buffers_;
 };
 
 PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {
