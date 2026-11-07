@@ -4,7 +4,10 @@ allocated on that stream (#3648).
 The caching allocator orders reuse of a block only after earlier work on the
 stream it was allocated on. If the output were allocated on the current stream,
 it could be a block that still has queued work there, which then overwrites the
-kernel's result."""
+kernel's result.
+
+A kernel whose inputs are on a non-current device must also launch on that
+device (#3408)."""
 
 import pytest
 import torch
@@ -101,6 +104,24 @@ def test_output_on_explicit_default_stream_from_side_stream(backend):
         out = kernel(a, stream=0)
     torch.cuda.synchronize()
     torch.testing.assert_close(out, a, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_launch_on_non_current_input_device(backend):
+    """Inputs on a non-current device run on that device's current stream, and
+    the call leaves the current device unchanged (#3408)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    kernel = _compile(backend)
+    for device in ("cuda:1", "cuda:1", "cuda:0", "cuda:1"):
+        a = torch.randn(N, device=device)
+        with torch.cuda.device(0):
+            out = kernel(a)
+            assert torch.cuda.current_device() == 0
+        torch.cuda.synchronize(device)
+        assert out.device == a.device
+        torch.testing.assert_close(out, a, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
