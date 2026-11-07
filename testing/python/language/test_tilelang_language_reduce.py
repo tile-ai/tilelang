@@ -1681,3 +1681,69 @@ def test_reduce_batch_keeps_shared_memory_before_its_workspace():
     expected_canary = torch.full((512,), 123.0, device="cuda")
     torch.testing.assert_close(canary, expected_canary)
     assert torch.all(canary[256:] == 123.0), "the batched all-reduce wrote before its own workspace, into the canary"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("clear", [True, False])
+@pytest.mark.parametrize("slice_input", [True, False])
+def test_reduce_local_buffer_regions(dtype, clear, slice_input):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((3, 6), dtype), B: T.Tensor((4,), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((3, 6), dtype)
+                dst = T.alloc_local((4,), dtype)
+                for i in T.serial(3):
+                    for j in T.serial(6):
+                        src[i, j] = A[i, j]
+                for i in T.serial(4):
+                    dst[i] = -10
+                if slice_input:
+                    T.reduce_sum(src[1:3, 1:5], dst[2:4], dim=1, clear=clear)
+                else:
+                    T.reduce_sum(src[1:3, :], dst[2:4], dim=1, clear=clear)
+                for i in T.serial(4):
+                    B[i] = dst[i]
+
+        return main
+
+    x = torch.arange(18, dtype=getattr(torch, str(dtype)), device="cuda").reshape(3, 6)
+    result = kernel()(x)
+    expected = torch.full((4,), -10, dtype=x.dtype, device=x.device)
+    expected[2:4] = (x[1:3, 1:5] if slice_input else x[1:3, :]).sum(dim=1)
+    if not clear:
+        expected[2:4] -= 10
+    torch.testing.assert_close(result, expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("clear", [True, False])
+def test_reduce_local_regions_keep_dimension(dtype, clear):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((3, 6), dtype), B: T.Tensor((3, 6), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((3, 6), dtype)
+                dst = T.alloc_local((3, 6), dtype)
+                for i in T.serial(3):
+                    for j in T.serial(6):
+                        src[i, j] = A[i, j]
+                        dst[i, j] = -10
+                T.reduce_sum(src[1:3, 1:5], dst[1:2, 1:5], dim=0, clear=clear)
+                for i in T.serial(3):
+                    for j in T.serial(6):
+                        B[i, j] = dst[i, j]
+
+        return main
+
+    x = torch.arange(18, dtype=getattr(torch, str(dtype)), device="cuda").reshape(3, 6)
+    result = kernel()(x)
+    expected = torch.full_like(x, -10)
+    expected[1:2, 1:5] = x[1:3, 1:5].sum(dim=0, keepdim=True)
+    if not clear:
+        expected[1:2, 1:5] -= 10
+    torch.testing.assert_close(result, expected)
