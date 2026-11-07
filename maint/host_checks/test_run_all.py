@@ -46,6 +46,20 @@ class ClassifyResultTest(unittest.TestCase):
             with self.subTest(rc=rc, stderr=stderr):
                 self.assertEqual(run_all.classify_result(name, self.result(rc, stderr)), "FAIL")
 
+    def test_traceback_source_lines_cannot_fake_expected_error(self):
+        name = "10_scalar_type_mismatch.py"
+        traceback = (
+            'Traceback (most recent call last):\n'
+            '  File "10_scalar_type_mismatch.py", line 10, in main\n'
+            '    fn(1.0, True)  # Expect arg[0] to be int\n'
+            'ValueError: unrelated error\n'
+        )
+        self.assertEqual(run_all.classify_result(name, self.result(1, traceback)), "FAIL")
+        self.assertEqual(
+            run_all.classify_result(name, self.result(1, traceback.replace("unrelated error", "Expect arg[0] to be int"))),
+            "PASS",
+        )
+
     def test_cuda_skips_require_the_final_exception(self):
         name = "01_num_args_mismatch.py"
         for stderr in (

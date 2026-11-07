@@ -40,7 +40,7 @@ def classify_result(name, proc):
         "RuntimeError: CUDA is not available; cannot build CUDA kernel for host-check repros.",
     ):
         return "SKIP"
-    return "PASS" if re.search(EXPECTED_ERRORS[name], stderr) else "FAIL"
+    return "PASS" if re.search(EXPECTED_ERRORS[name], last_line) else "FAIL"
 
 
 def main():
