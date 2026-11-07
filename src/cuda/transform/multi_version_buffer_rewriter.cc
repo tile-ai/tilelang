@@ -26,6 +26,8 @@
 #include "op/operator.h"
 #include "op/utils.h"
 #include "transform/common/pipeline_utils.h"
+#include "transform/common/storage_size.h"
+#include "ws_analysis.h"
 
 namespace tvm {
 namespace tl {
@@ -321,6 +323,7 @@ class MultiVersionBufferRewriter : public StmtExprMutator {
 public:
   static PrimFunc Substitute(PrimFunc f) {
     auto rewriter = MultiVersionBufferRewriter();
+    rewriter.target_ = f->GetAttr<Target>(tvm::attr::kTarget);
     rewriter.buffer_lca_ = DetectBufferAccessLCA(f);
     for (auto [buffer, _] : rewriter.buffer_lca_) {
       Var buffer_var = buffer->data;
@@ -354,25 +357,29 @@ private:
 
   // Returns the extent of the outermost dimension that makes one version of
   // buffer a multiple of kVersionAlignBytes, or the extent itself when the
-  // version already is one or its size is not static.
+  // version already is one or its size is not static. The size of a version
+  // is the size of its storage, which packs two 4-bit values into a byte.
   static PrimExpr AlignedOuterExtent(const Buffer &buffer) {
     const auto *outer = buffer->shape[0].as<IntImmNode>();
     if (outer == nullptr) {
       return buffer->shape[0];
     }
-    int64_t row_bytes = buffer->dtype.bytes() * buffer->dtype.lanes();
+    int64_t element_bits = IsPacked4BitStorage(buffer->dtype)
+                               ? buffer->dtype.bits()
+                               : buffer->dtype.bytes() * 8;
+    int64_t row_bits = element_bits * buffer->dtype.lanes();
     for (size_t i = 1; i < buffer->shape.size(); ++i) {
       const auto *extent = buffer->shape[i].as<IntImmNode>();
       if (extent == nullptr) {
         return buffer->shape[0];
       }
-      row_bytes *= extent->value;
+      row_bits *= extent->value;
     }
-    if (row_bytes <= 0 ||
-        (outer->value * row_bytes) % kVersionAlignBytes == 0) {
+    constexpr int64_t kVersionAlignBits = kVersionAlignBytes * 8;
+    if (row_bits <= 0 || (outer->value * row_bits) % kVersionAlignBits == 0) {
       return buffer->shape[0];
     }
-    int64_t step = kVersionAlignBytes / std::gcd(row_bytes, kVersionAlignBytes);
+    int64_t step = kVersionAlignBits / std::gcd(row_bits, kVersionAlignBits);
     int64_t rows = (outer->value + step - 1) / step * step;
     return make_const(buffer->shape[0].dtype(), rows);
   }
@@ -451,6 +458,17 @@ private:
                 }
               }
             }
+          }
+        }
+      }
+
+      // A TMA copy needs an aligned destination, so the versions of the
+      // buffers that it writes are padded. A cp.async or SIMT copy needs none.
+      if (target_.defined() &&
+          ClassifyStmt(stmt, target_.value()) == TileStmtKind::kTmaProducer) {
+        for (const BufferRegion &region : stmt_writes) {
+          if (IsSharedBuffer(region->buffer)) {
+            tma_destinations_.insert(region->buffer.get());
           }
         }
       }
@@ -537,9 +555,11 @@ private:
       new_buffer->shape.Set(0, make_const(shape_dtype, num_versions) *
                                    new_buffer->shape[0]);
     } else {
-      // Pad the outermost dimension so that every version starts on a TMA
-      // alignment. An annotated layout keeps the shape that it describes.
+      // Pad the outermost dimension of a TMA destination so that every
+      // version starts on a TMA alignment. An annotated layout keeps the shape
+      // that it describes.
       if (new_buffer->strides.empty() && !new_buffer->shape.empty() &&
+          tma_destinations_.count(buffer.get()) &&
           !annotated_layout_vars_.count(buffer->data.get())) {
         new_buffer->shape.Set(0, AlignedOuterExtent(buffer));
       }
@@ -985,6 +1005,10 @@ private:
   std::unordered_map<const SBlockNode *, Array<Buffer>> block_alloc_buffers_;
   // The data of the buffers that a block annotates with a layout.
   std::unordered_set<const VarNode *> annotated_layout_vars_;
+  // The target of the function, which decides the copies that lower to TMA.
+  Optional<Target> target_;
+  // The shared buffers that a TMA copy of a pipeline writes.
+  std::unordered_set<const BufferNode *> tma_destinations_;
 };
 
 PrimFunc ApplyMultiVersionBufferRewriter(PrimFunc f) {

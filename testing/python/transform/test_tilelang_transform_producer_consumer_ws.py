@@ -862,6 +862,58 @@ def _wide_linear_reduce_kernel(rows, mids, width, batches, rows_per_batch, dtype
     return main
 
 
+def _versioned_fp4_copy_kernel(rows=2, width=64, iters=4):
+    """A pipeline whose TMA copy writes a (rows, width) buffer of packed FP4 values."""
+
+    @T.prim_func
+    def main(src: T.Tensor((iters * rows, width), "float4_e2m1fn"), out: T.Tensor((rows, width), "float32")):
+        with T.Kernel(1, threads=128) as _:
+            smem = T.alloc_shared((rows, width), "float4_e2m1fn")
+            acc = T.alloc_fragment((rows, width), "float32")
+            T.clear(acc)
+            for k in T.Pipelined(iters, num_stages=2):
+                T.copy(src[k * rows, 0], smem)
+                for i, j in T.Parallel(rows, width):
+                    acc[i, j] += T.cast(smem[i, j], "float32")
+            T.copy(acc, out)
+
+    return main
+
+
+def _tma_and_simt_copy_kernel(rows=2, width=8, iters=4):
+    """A pipeline whose TMA copy and SIMT copy each write a (rows, width) float32 buffer."""
+
+    @T.prim_func
+    def main(
+        src: T.Tensor((iters * rows, width), "float32"),
+        idx: T.Tensor((iters,), "int32"),
+        out: T.Tensor((rows, width), "float32"),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            tma_smem = T.alloc_shared((rows, width), "float32")
+            simt_smem = T.alloc_shared((rows, width), "float32")
+            acc = T.alloc_fragment((rows, width), "float32")
+            T.clear(acc)
+            for k in T.Pipelined(iters, num_stages=2):
+                T.copy(src[k * rows, 0], tma_smem)
+                for i, j in T.Parallel(rows, width):
+                    simt_smem[i, j] = src[idx[k] * rows + i, j]
+                for i, j in T.Parallel(rows, width):
+                    acc[i, j] += tma_smem[i, j] + simt_smem[i, j]
+            T.copy(acc, out)
+
+    return main
+
+
+def _warp_specialized_script(func, arch="sm_90a"):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    target = determine_target({"kind": "cuda", "arch": arch}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    return mod["main"].script()
+
+
 def _run_wide_linear_reduce(kernel, rows, mids, width, dtype):
     import torch
 
@@ -900,6 +952,25 @@ def test_tiled_ws_multi_versioned_small_smem_aligned_for_tma():
     assert "__launch_bounds__(256, 1)" in src
     assert "tl::tma_load(src_desc" in src
     _run_wide_linear_reduce(kernel, 8, 2, 8, "float32")
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_pads_packed_fp4_versions_by_storage():
+    """A version of 2 x 64 packed FP4 values has 64 bytes of storage, so it is padded to 4 rows."""
+    script = _warp_specialized_script(_versioned_fp4_copy_kernel())
+
+    assert "tl_tiled_ws_applied" in script
+    assert 'smem = T.sblock_alloc_buffer((2, 4, 64), "float4_e2m1fn", scope="shared.dyn")' in script
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_pads_only_tma_destinations():
+    """Only the buffer that a TMA copy writes is padded to the 128-byte alignment of TMA."""
+    script = _warp_specialized_script(_tma_and_simt_copy_kernel())
+
+    assert "tl_tiled_ws_applied" in script
+    assert 'tma_smem = T.sblock_alloc_buffer((2, 4, 8), scope="shared.dyn")' in script
+    assert 'simt_smem = T.sblock_alloc_buffer((2, 2, 8), scope="shared.dyn")' in script
 
 
 @tilelang.testing.requires_cuda
@@ -942,5 +1013,7 @@ if __name__ == "__main__":
     test_tiled_ws_does_not_clone_local_var_into_producer_branch()
     test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
     test_tiled_ws_multi_versioned_small_smem_aligned_for_tma()
+    test_tiled_ws_pads_packed_fp4_versions_by_storage()
+    test_tiled_ws_pads_only_tma_destinations()
     test_tiled_ws_wide_linear_smem_multi_way_box_split()
     test_tiled_ws_wide_linear_smem_three_stages()
