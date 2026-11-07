@@ -322,17 +322,15 @@ void CheckIterationRankMatch(const Array<Range> &src_range,
                              const Buffer &dst) {
   size_t src_rank = DropUnitExtentDims(src_range).size();
   size_t dst_rank = DropUnitExtentDims(dst_range).size();
-  if (src_rank == dst_rank) {
-    return;
-  }
-  LOG(FATAL) << "T.copy source and destination must iterate the same number "
-                "of dimensions (a dimension of extent 1 does not iterate), but "
-                "this copy iterates "
-             << src_rank << " dimension(s) of src '" << src->name << "' "
-             << src_range << " and " << dst_rank << " of dst '" << dst->name
-             << "' " << dst_range
-             << ". Slice both regions to matching iteration dimensions, "
-                "for example T.copy(s[:k], B[i:i+1, :k]).";
+  CHECK(src_rank == dst_rank, ValueError)
+      << "T.copy source and destination must iterate the same number "
+         "of dimensions (a dimension of extent 1 does not iterate), but "
+         "this copy iterates "
+      << src_rank << " dimension(s) of src '" << src->name << "' " << src_range
+      << " and " << dst_rank << " of dst '" << dst->name << "' " << dst_range
+      << ". Slice both regions to matching iteration dimensions, "
+         "for example T.copy(s[:k], B[i:i+1, :k])."
+      << SpanHintSuffix({dst->span, src->span});
 }
 
 // Constructs a Copy operator node from call arguments and annotations.

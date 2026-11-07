@@ -407,7 +407,7 @@ def test_tilelang_copy_iteration_rank_mismatch_writeback():
             T.copy(A[4, :], s)
             T.copy(s, B[4, 0:1])
 
-    with pytest.raises(Exception, match="iterate the same number of dimensions"):
+    with pytest.raises(ValueError, match="iterate the same number of dimensions"):
         tilelang.compile(main, target="cuda")
 
 
@@ -420,8 +420,24 @@ def test_tilelang_copy_iteration_rank_mismatch_reverse():
             T.copy(A[4, 0:1], s)
             T.copy(s, B)
 
-    with pytest.raises(Exception, match="iterate the same number of dimensions"):
+    with pytest.raises(ValueError, match="iterate the same number of dimensions"):
         tilelang.compile(main, target="cuda")
+
+
+@tilelang.testing.requires_cuda
+def test_tilelang_copy_iteration_rank_mismatch_span(monkeypatch):
+    monkeypatch.setenv("TILELANG_ENABLE_IR_SPAN", "1")
+
+    @T.prim_func
+    def main(A: T.Tensor((128, 128), T.float32), B: T.Tensor((128, 128), T.float32)):
+        with T.Kernel(1, threads=128):
+            s = T.alloc_shared((128,), T.float32)
+            T.copy(A[4, :], s)
+            T.copy(s, B[4, 0:1])
+
+    with pytest.raises(ValueError, match="iterate the same number of dimensions") as excinfo:
+        tilelang.compile(main, target="cuda")
+    assert f"--> {__file__}:" in str(excinfo.value)
 
 
 @tilelang.testing.requires_cuda
