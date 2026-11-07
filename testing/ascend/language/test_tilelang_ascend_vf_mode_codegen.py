@@ -193,6 +193,60 @@ def test_simd_intrinsic_accepts_scalar_operand():
     assert "simd_inst::vmuls(" in lower(main, target="ascend").kernel_source
 
 
+@pytest.mark.parametrize("elem_width", [4, 64])
+def test_simd_pset_rejects_unsupported_element_width(elem_width):
+    """``pset`` has no b4/b64 form, so the width is rejected before codegen."""
+
+    def build():
+        @T.prim_func
+        def main():
+            with T.Kernel(1), T.SimdVF():
+                mask = T.simd.pset(elem_width)
+                T.evaluate(T.simd.vdup(T.float32(1), "float32", mask))
+
+        return main
+
+    with pytest.raises(ValueError, match=r"pset: element width must be one of \(8, 16, 32\)"):
+        lower(build(), target="pto")
+
+
+def test_simd_pset_rejects_maskless_int64_vector_op():
+    """A maskless 64-bit vector op infers b64, which no CCE predicate provides."""
+
+    def build():
+        @T.prim_func
+        def main(Src: T.Tensor((32,), "int64")):
+            with T.Kernel(1):
+                src = T.alloc_shared((32,), "int64")
+                T.copy(Src, src)
+                with T.SimdVF():
+                    T.evaluate(T.simd.vadd(T.simd.vld(src[0]), T.simd.vld(src[0])))
+
+        return main
+
+    with pytest.raises(ValueError, match=r"pset: element width must be one of \(8, 16, 32\)"):
+        lower(build(), target="pto")
+
+
+@pytest.mark.parametrize(("bits", "dtype"), [(8, "int8"), (16, "bfloat16"), (32, "float32")])
+def test_simd_pset_keeps_supported_element_widths(bits, dtype):
+    """8/16/32-bit predicates still lower to the matching ``pto.pset_bXX``."""
+    lanes = 2048 // bits
+
+    @T.prim_func
+    def main(X: T.Tensor((lanes,), dtype), Y: T.Tensor((lanes,), dtype)):
+        with T.Kernel(1):
+            src = T.alloc_shared((lanes,), dtype)
+            dst = T.alloc_shared((lanes,), dtype)
+            T.copy(X, src)
+            with T.SimdVF():
+                mask = T.simd.pset(bits)
+                T.simd.vsts(dst[0], T.simd.vld(src[0]), mask)
+            T.copy(dst, Y)
+
+    assert f'pto.pset_b{bits}("PAT_ALL")' in lower(main, target="pto").kernel_source
+
+
 def test_nested_vf_blocks_are_rejected():
     @T.prim_func
     def main():
