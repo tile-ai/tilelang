@@ -54,4 +54,3 @@ class ComparePayloadTests(unittest.TestCase):
     def test_legacy_and_structured_latency(self):
         report = compare_payloads({"results": {"matmul": 6}}, {"results": {"matmul": {"latency": 3}}})
         self.assertEqual(report["results"][0]["speedup"], 2)
-
