@@ -55,7 +55,11 @@ private:
   std::vector<Stmt> scalar_loads_;
 
   static int64_t ComputeVRegSize(DataType dtype) {
-    return 8 * 32 / (dtype.bits() / 8);
+    // A vector register holds 256 bytes. Sub-byte element types (fp4) are
+    // stored packed, so their storage stride is one byte; `dtype.bits() / 8`
+    // truncates to zero for them and used to divide by zero here.
+    const int64_t elem_bits = dtype.bits() < 8 ? 8 : dtype.bits();
+    return 8 * 32 / (elem_bits / 8);
   }
 
   static PrimExpr MatchIndexDType(const PrimExpr &value, DataType dtype) {
@@ -596,7 +600,7 @@ private:
     }
 
     vreg_size_ = ComputeVRegSize(dtype);
-    elem_bits_ = dtype.bits();
+    elem_bits_ = dtype.bits() < 8 ? 8 : dtype.bits();
 
     // Fill the *region*, not the physical allocation. After
     // MaterializeMultiBuffer, an in-loop T.fill of a logical UB becomes a
@@ -763,7 +767,7 @@ private:
 
     DataType dtype = src->dtype;
     vreg_size_ = ComputeVRegSize(dtype);
-    elem_bits_ = dtype.bits();
+    elem_bits_ = dtype.bits() < 8 ? 8 : dtype.bits();
 
     ICHECK(sr.size() == 2 && dr.size() == 1 && (dim == 0 || dim == 1))
         << "T.reduce inside SimdVF requires 2D src -> 1D dst, dim=0 or 1";
@@ -918,7 +922,7 @@ private:
 
     DataType dtype = InferDType(vreg_for->body);
     vreg_size_ = ComputeVRegSize(dtype);
-    elem_bits_ = dtype.bits();
+    elem_bits_ = dtype.bits() < 8 ? 8 : dtype.bits();
     ICHECK_EQ(vreg_ext % vreg_size_, 0)
         << "T.Parallel inside SimdVF requires VReg extent divisible by VReg "
            "size ("
