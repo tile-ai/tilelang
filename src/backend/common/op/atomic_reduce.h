@@ -30,7 +30,9 @@ using namespace ffi;
 
 namespace atomic_reduce {
 
-inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
+inline Stmt MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer,
+                         const PrimExpr &thread_index,
+                         const Range &thread_bounds) {
   Optional<BufferRegion> src_region;
   if (!op.src_value.defined()) {
     src_region = BufferRegion(op.src, op.src_range);
@@ -69,6 +71,53 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
 
   Stmt body = tvm::tirx::Evaluate(atomic_call);
 
+  // A single-element destination consumes no real parallel dimension.  The
+  // dummy extent-1 loop would make the partitioner rewrite the source index
+  // to zero, so a per-thread scalar value such as data[i] would silently
+  // reduce lane 0 only.  Emit the atomic directly in that case.
+  bool all_unit = true;
+  for (const Range &range : op.dst_range) {
+    all_unit &= is_one(range->extent);
+  }
+  if (!op.src_value.defined()) {
+    for (const Range &range : op.src_range) {
+      all_unit &= is_one(range->extent);
+    }
+  }
+  if (all_unit) {
+    // A one-element destination at top level still has to be updated by one
+    // thread only; otherwise every CUDA thread applies the update.  If the
+    // source/destination indices contain the thread index, the atomic is
+    // already per-thread and must run on every lane.
+    const VarNode *thread_var = thread_index.as<VarNode>();
+    bool uses_thread = false;
+    if (thread_var != nullptr) {
+      auto uses = [&](const PrimExpr &expr) {
+        return UsesVar(expr, [&](const VarNode *v) { return v == thread_var; });
+      };
+      for (const Range &range : op.dst_range) {
+        uses_thread |= uses(range->min) || uses(range->extent);
+        uses_thread |= as_const_int(range->min) == nullptr;
+      }
+      if (!op.src_value.defined()) {
+        for (const Range &range : op.src_range) {
+          uses_thread |= uses(range->min) || uses(range->extent);
+          uses_thread |= as_const_int(range->min) == nullptr;
+        }
+      } else {
+        uses_thread |= uses(op.src_value);
+        uses_thread |= as_const_int(op.src_value) == nullptr;
+      }
+    }
+    if (uses_thread) {
+      return body;
+    }
+    if (thread_var != nullptr) {
+      return IfThenElse(thread_index == thread_bounds->min, body, Stmt());
+    }
+    return body;
+  }
+
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
     if (i == 0) {
@@ -81,7 +130,7 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
                ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
-  return Downcast<For>(body);
+  return body;
 }
 
 inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
@@ -114,7 +163,12 @@ struct AtomicReduce {
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    auto simt_loop = atomic_reduce::MakeSIMTLoop(op, analyzer);
+    Stmt simt_stmt = atomic_reduce::MakeSIMTLoop(
+        op, analyzer, lower_args.thread_index, lower_args.thread_bounds);
+    if (!simt_stmt.as<ForNode>()) {
+      return simt_stmt;
+    }
+    auto simt_loop = Downcast<For>(simt_stmt);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
     auto par_op = ParallelOp(fused_loop);
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
