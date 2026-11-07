@@ -17,9 +17,7 @@ EXPECTED_ERRORS = {
     ),
     "03_ndim_mismatch.py": r"ndim is expected|mismatched ndim|ndim mismatch, expected",
     "04_dtype_mismatch.py": r"dtype is expected|incompatible dtype|dtype mismatch, expected",
-    "05_shape_mismatch.py": (
-        r"shape\[\d+\].*(?:unsatisfied constraint|violates packed ABI constraint)"
-    ),
+    "05_shape_mismatch.py": (r"shape\[\d+\].*(?:unsatisfied constraint|violates packed ABI constraint)"),
     "06_strides_mismatch.py": (
         r"strides\[\d+\].*(?:unsatisfied constraint|violates packed ABI constraint)"
         r"|\S+\.strides: expected to be compact array, but got non-compact strides"

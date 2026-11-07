@@ -62,9 +62,7 @@ class ClassifyResultTest(unittest.TestCase):
         for name, messages in errors.items():
             for message in messages:
                 with self.subTest(name=name, message=message):
-                    self.assertEqual(
-                        run_all.classify_result(name, self.result(1, message)), "PASS"
-                    )
+                    self.assertEqual(run_all.classify_result(name, self.result(1, message)), "PASS")
 
     def test_unrelated_argument_count_error_is_not_accepted(self):
         self.assertEqual(
