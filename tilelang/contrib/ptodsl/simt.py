@@ -4,9 +4,22 @@ from __future__ import annotations
 
 import ptodsl._scalar as _scalar
 from ptodsl import pto
+from ptodsl._ops_common import _pointer_element_type
 from ptodsl._scalar import _emit_llvm_byte_pointer
-from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value, resolve_address_access
-from ptodsl._types import _DType, _restore_integer_signedness, _signless_integer_type
+from ptodsl._surface_values import (
+    _ADDRESS_SPACE_VALUE_TO_KEYWORD,
+    VecValue,
+    unwrap_surface_value,
+    wrap_surface_value,
+    resolve_address_access,
+)
+from ptodsl._types import (
+    _DType,
+    _integer_signedness,
+    _restore_integer_signedness,
+    _signless_integer_type,
+    _strip_integer_signedness,
+)
 from ptoas.mlir.dialects import llvm
 from ptoas.mlir.ir import IntegerType
 
@@ -160,3 +173,57 @@ def _scalar_select_compat(cond, true_val, false_val):
 
 
 _scalar.select = _scalar_select_compat
+
+
+def _atomic_signless_ptr(ptr, element_type):
+    """Re-author an integer pointer with its signless PTO element type."""
+    signless_element = _signless_integer_type(element_type)
+    if signless_element == element_type:
+        return ptr
+    raw_ptr = unwrap_surface_value(ptr)
+    memory_space = getattr(raw_ptr.type, "memory_space", None)
+    if memory_space is None:
+        space = "gm"
+    else:
+        space = _ADDRESS_SPACE_VALUE_TO_KEYWORD.get(getattr(memory_space, "value", None))
+        if space is None:
+            space = str(memory_space).rsplit("<", 1)[-1].rstrip(">")
+    return pto.castptr(ptr, pto.ptr(signless_element, space))
+
+
+def _atomic_integer_compat(op, ptr, value, *, l2cache, with_signedness):
+    # PTO atomics require signless i32/i64 operands. TileLang carries integer
+    # signedness in siXX/uiXX, so strip it at the call and restore it on the
+    # returned old value. The pointer element type defines the atomic's
+    # signedness; the value is only re-typed for the operand.
+    element_type = _pointer_element_type(ptr, context="atomic")
+    if not IntegerType.isinstance(element_type):
+        return op(ptr, value, l2cache=l2cache)
+    signedness = "unsigned" if _integer_signedness(element_type) == "unsigned" else "signed"
+    raw_value = unwrap_surface_value(value)
+    raw_type = getattr(raw_value, "type", None)
+    if raw_type is not None and IntegerType.isinstance(raw_type):
+        converted_value = wrap_surface_value(_strip_integer_signedness(raw_value))
+    else:
+        converted_value = value
+    signless_ptr = _atomic_signless_ptr(ptr, element_type)
+    if with_signedness:
+        result = op(signless_ptr, converted_value, l2cache=l2cache, signedness=signedness)
+    else:
+        result = op(signless_ptr, converted_value, l2cache=l2cache)
+    return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), element_type))
+
+
+def atomic_add(ptr, value, *, l2cache="nmfv"):
+    """Atomically add an integer value through PTO's signless atomic carrier."""
+    return _atomic_integer_compat(pto.atomic_add, ptr, value, l2cache=l2cache, with_signedness=False)
+
+
+def atomic_max(ptr, value, *, l2cache="nmfv"):
+    """Atomically max an integer value through PTO's signless atomic carrier."""
+    return _atomic_integer_compat(pto.atomic_max, ptr, value, l2cache=l2cache, with_signedness=True)
+
+
+def atomic_min(ptr, value, *, l2cache="nmfv"):
+    """Atomically min an integer value through PTO's signless atomic carrier."""
+    return _atomic_integer_compat(pto.atomic_min, ptr, value, l2cache=l2cache, with_signedness=True)
