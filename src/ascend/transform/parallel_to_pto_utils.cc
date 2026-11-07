@@ -678,12 +678,26 @@ public:
 // ---------------------------------------------------------------------------
 // Shared SIMD_VF region scan: one implementation for both passes.
 // ---------------------------------------------------------------------------
+bool UsesExplicitSIMD(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (const auto *call = node.as<CallNode>()) {
+      if (const auto *op = call->op.as<OpNode>()) {
+        found |= std::string(op->name).rfind("tl.simd.", 0) == 0;
+      }
+    }
+  });
+  return found;
+}
+
 namespace {
 
 void CollectAllParallelDeep(const Stmt &stmt,
                             std::vector<const ForNode *> &out) {
   if (const auto *for_node = stmt.as<ForNode>()) {
     if (for_node->kind == ForKind::kParallel) {
+      if (UsesExplicitSIMD(for_node->body))
+        return;
       out.push_back(for_node);
     }
     CollectAllParallelDeep(for_node->body, out);
@@ -723,6 +737,8 @@ void CollectAllParallelDeep(const Stmt &stmt,
 void DiscoverUnitsShared(const Stmt &stmt, PtoRegionScan *scan) {
   if (const auto *for_node = stmt.as<ForNode>()) {
     if (for_node->kind == ForKind::kParallel) {
+      if (UsesExplicitSIMD(for_node->body))
+        return;
       // A two-layer adjacent Parallel nest is one
       // 2D unit; the layout annotation lives on the outermost For. A
       // third Parallel layer (or a Parallel deeper inside) stays
