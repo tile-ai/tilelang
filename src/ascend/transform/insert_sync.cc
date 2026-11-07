@@ -44,6 +44,7 @@
 #include <tvm/ffi/reflection/registry.h>
 #include <tvm/ir/function.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/buffer.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/expr.h>
@@ -3003,9 +3004,10 @@ public:
   SyncMaterializer(const SyncSiteRegistry &site_registry,
                    const std::vector<SyncPoint> &sync_points,
                    const std::vector<FlagAllocation> &allocations,
-                   const SyncActionPlan &actions)
+                   const SyncActionPlan &actions, int cross_core_mode)
       : site_registry_(site_registry), sync_points_(sync_points),
-        allocations_(allocations), actions_(actions) {}
+        allocations_(allocations), actions_(actions),
+        cross_core_mode_(cross_core_mode) {}
 
   void Run(ScheduledTIR *scheduled) {
     InsertPlannedActions(scheduled);
@@ -3038,8 +3040,9 @@ private:
     auto append_bank = [&](int offset) {
       for (const PrimExpr &iteration : iterations) {
         PrimExpr id = MakeFlagEventId(iteration, num_versions, base + offset);
-        statements.push_back(set ? MakeAscendCrossCoreSetFlag(4, pipe, id)
-                                 : MakeAscendCrossCoreWaitFlag(4, pipe, id));
+        statements.push_back(
+            set ? MakeAscendCrossCoreSetFlag(cross_core_mode_, pipe, id)
+                : MakeAscendCrossCoreWaitFlag(cross_core_mode_, pipe, id));
       }
     };
     if (core != kCoreCube) {
@@ -3247,14 +3250,21 @@ private:
   const std::vector<SyncPoint> &sync_points_;
   const std::vector<FlagAllocation> &allocations_;
   const SyncActionPlan &actions_;
+  int cross_core_mode_;
 };
 
 // ============================================================================
 // Kernel-level validation and scheduled-TIR rewrite
 // ============================================================================
-SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
+
+SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir,
+                        bool pto_backend) {
   std::vector<std::shared_ptr<IRStructure>> &root = scheduled_tir.tree;
   int num_aiv_subcores = scheduled_tir.metadata.num_aiv_subcores.value_or(2);
+  // PTO retains the upstream mixed launch and uses mode 4 even when only
+  // AIV0 executes. Active task masks still use the requested count; changing
+  // the synchronization mode must not add an AIV1 participant.
+  int cross_core_mode = pto_backend ? 4 : (num_aiv_subcores == 1 ? 2 : 4);
   CoreMask vector_mask = VectorCoreMask(num_aiv_subcores);
   L0StorageGroups groups(
       CollectL0SFBindings(scheduled_tir.metadata.kernel_root));
@@ -3300,7 +3310,8 @@ SBlock InsertKernelSync(const Stmt &kernel_body, ScheduledTIR scheduled_tir) {
                                cross_core_flag_reservation);
   flag_allocator.Plan();
   SyncMaterializer(analyzer.SiteRegistry(), analyzer.SyncPoints(),
-                   flag_allocator.Allocations(), analyzer.Actions())
+                   flag_allocator.Allocations(), analyzer.Actions(),
+                   cross_core_mode)
       .Run(&scheduled_tir);
 
   return EncodeScheduledTIR(std::move(scheduled_tir));
@@ -3315,12 +3326,20 @@ tvm::transform::Pass InsertSync() {
   using namespace tirx::transform;
   auto pass_func = [](PrimFunc func, const IRModule &,
                       const tvm::transform::PassContext &) -> PrimFunc {
+    bool pto_backend = false;
+    if (auto target = func->GetAttr<Target>(tvm::attr::kTarget)) {
+      for (const auto &key : target.value()->keys) {
+        if (key == "pto")
+          pto_backend = true;
+      }
+    }
     return RewriteTilelangKernels(
         std::move(func), "InsertSync",
-        [](const TilelangKernelContext &context) {
+        [pto_backend](const TilelangKernelContext &context) {
           ScheduledTIR scheduled_tir = DecodeScheduledTIR(
               context.root, context.outer_ctx, MakeSyncInsertionExtraInfo);
-          return InsertKernelSync(context.root->body, std::move(scheduled_tir));
+          return InsertKernelSync(context.root->body, std::move(scheduled_tir),
+                                  pto_backend);
         });
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.InsertSync", {});

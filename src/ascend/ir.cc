@@ -21,6 +21,7 @@
 
 #include "ir.h"
 
+#include <algorithm>
 #include <tvm/ffi/reflection/creator.h>
 #include <tvm/script/ir_builder/tir/ir.h>
 #include <tvm/tirx/stmt.h>
@@ -43,9 +44,16 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   ICHECK_EQ(grid_size.size(), 1) << "MixedKernel only supports 1-D grid";
   const auto *vector_count = cthread_extent.as<IntImmNode>();
   ICHECK(vector_count != nullptr &&
-         (vector_count->value == 1 || vector_count->value == 2))
-      << "Mixed-kernel vector_count must be the constant integer 1 or 2, got "
+         (vector_count->value == -1 || vector_count->value == 1 ||
+          vector_count->value == 2))
+      << "Mixed-kernel vector_count must be -1 (unspecified), 1 or 2, got "
       << cthread_extent;
+  bool specified = vector_count->value != -1;
+  // Keep the unknown count symbolic so get_block_extent(1) and expressions
+  // derived from it are resolved together with the launch domain.
+  PrimExpr sid_extent =
+      specified ? cthread_extent
+                : PrimExpr(tirx::SizeVar("aiv_count", DataType::Int(32)));
 
   // Frame 0: bx = blockIdx.x. Emit a target-neutral thread_binding For loop;
   // tl.MaterializeKernelLaunch turns it into a thread_extent AttrStmt.
@@ -61,9 +69,9 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   // block-level launch dimension of the mixed kernel, so it is reported
   // alongside bx as one of the vars the launch yields
   // (`with T.MixedKernel(...) as (bx, sid)`).
-  ForFrame sid_frame = MakeThreadBindingFrame("sid", "cthread", cthread_extent);
+  ForFrame sid_frame = MakeThreadBindingFrame("sid", "cthread", sid_extent);
   n->grid_vars.push_back(sid_frame->vars[0]);
-  n->grid_extents.push_back(cthread_extent);
+  n->grid_extents.push_back(sid_extent);
   n->frames.push_back(sid_frame);
 
   // Frame 2: thread placeholders, dropped by the Ascend pipeline
@@ -79,7 +87,7 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   main_block->reads = Array<tvm::tirx::BufferRegion>();
   main_block->writes = Array<tvm::tirx::BufferRegion>();
   Map<String, Any> block_annotations = attrs;
-  block_annotations.Set("vector_count", cthread_extent);
+  block_annotations.Set("vector_count", sid_extent);
   main_block->annotations = block_annotations;
   n->frames.push_back(main_block);
 
@@ -435,13 +443,17 @@ public:
     Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
 
     DataType dtype = DataType::Int(32);
-    PrimExpr extent = IntImm(dtype, vector_count);
+    // An omitted count inherits the kernel group in ResolveAivGroup. Keep a
+    // wide placeholder domain until then, without recording an explicit
+    // request.
+    PrimExpr extent = IntImm(dtype, vector_count == -1 ? 2 : vector_count);
     IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), sid_var,
                IterVarType::kThreadIndex, "cthread");
     body = AttrStmt(iv, tirx::attr::thread_extent, extent, body);
 
     Map<String, ObjectRef> annotations;
-    annotations.Set("vector_count", IntImm(dtype, vector_count));
+    if (vector_count != -1)
+      annotations.Set("vector_count", IntImm(dtype, vector_count));
     Stmt stmt = SBlock({}, {}, {}, "VECTOR", body, std::nullopt, stolen_bufs,
                        {}, annotations);
 
@@ -473,8 +485,9 @@ public:
 };
 
 VectorFrame Vector(int vector_count) {
-  ICHECK(vector_count >= 1 && vector_count <= 2)
-      << "Vector core count must be 1 or 2, got " << vector_count;
+  ICHECK(vector_count == -1 || vector_count == 1 || vector_count == 2)
+      << "Vector core count must be -1 (unspecified), 1 or 2, got "
+      << vector_count;
   auto n = tvm::ffi::make_object<VectorFrameNode>();
   n->vector_count = vector_count;
   n->sid_var = tvm::tirx::Var("sid", DataType::Int(32));

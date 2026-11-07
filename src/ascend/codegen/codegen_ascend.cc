@@ -1,4 +1,5 @@
 #include "codegen_ascend.h"
+#include "../transform/aiv_group.h"
 #include "ascend/op/nd2nz.h"
 
 #include <algorithm>
@@ -356,15 +357,17 @@ void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
   os << "extern \"C\" ";
   switch (kernel_mode_) {
   case AscendKernelMode::kMix:
-    // dav-3510's direct AIC-to-AIV data paths require the physical 1:2 group.
-    // mix_aiv_count_ controls how many of those AIVs execute the vector body.
-    os << "__global__ __mix__(1, 2) ";
+    // The physical mixed-group shape follows the user-specified AIV count
+    // (1:1 or 1:2), matching AscendC's KERNEL_TYPE_MIX_AIC_1_N task types.
+    // Note: the L0C->UB dual-destination data path assumes a 1:2 group; do
+    // not combine dual_copy with a 1:1 group.
+    os << "__global__ __mix__(1, " << mix_aiv_count_ << ") ";
     break;
   case AscendKernelMode::kVector:
-    os << "__global__ __vector__ ";
+    os << "__global__ __mix__(0, 1) ";
     break;
   case AscendKernelMode::kCube:
-    os << "__global__ __cube__ ";
+    os << "__global__ __mix__(1, 0) ";
     break;
   }
 }
@@ -554,7 +557,8 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
   LOG(FATAL) << "Cannot convert scalar type " << t << " to Ascend type";
 }
 
-void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
+void CodeGenTileLangAscend::AddFunction(const PrimFunc &original) {
+  PrimFunc f = original;
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked across PrimFunc code generation";
   this->InitFuncState(f);
@@ -576,25 +580,16 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
   // Pre-scan body to determine kernel mode (Mix / Vector / Cube)
   bool has_cube = false, has_vector = false;
-  bool has_vector_subcores = false;
+  tl::ascend::AivGroupInfo aiv_group;
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
-  int vector_count = 2;
   tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &n) {
+    aiv_group.Observe(n);
     if (const auto *block = n.as<SBlockNode>()) {
       if (block->name_hint == "CUBE")
         has_cube = true;
       else if (block->name_hint == "VECTOR") {
         has_vector = true;
-        if (auto opt = block->annotations.Get("vector_count")) {
-          has_vector_subcores = true;
-          const auto *count = opt.value().as<IntImmNode>();
-          ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
-              << "Mixed-kernel vector_count must be the constant integer 1 or "
-                 "2, got "
-              << opt.value();
-          vector_count = count->value;
-        }
       }
     }
     if (const auto *call = n.as<CallNode>()) {
@@ -657,11 +652,15 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
     has_cooperative_groups_included_ = true;
   }
 
-  if (has_vector && (has_cube || has_vector_subcores)) {
-    // An explicit subcore group needs the 1C2V launch geometry even when
-    // its Cube stream is empty. A pure Vector launch exposes only sid 0.
+  if (has_vector && (has_cube || aiv_group.vector_count.has_value())) {
+    // Preserve the existing mixed classification, including explicit
+    // subcore groups whose Cube stream is empty. Only select their count.
     kernel_mode_ = AscendKernelMode::kMix;
-    mix_aiv_count_ = vector_count;
+    mix_aiv_count_ =
+        has_cube ? aiv_group.MixedCount() : aiv_group.vector_count.value();
+    if (has_cube && !aiv_group.resolved_count.has_value())
+      f.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(
+          mix_aiv_count_, std::nullopt, false)(f->body);
   } else if (has_cube) {
     kernel_mode_ = AscendKernelMode::kCube;
   } else if (has_vector) {
@@ -910,17 +909,9 @@ void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
       PrintIndent();
       stream << "if ASC_IS_AIV {\n";
       int scope = BeginScope();
-      if (mix_aiv_count_ == 1) {
-        PrintIndent();
-        stream << "if (asc_get_sub_block_id() == 0) {\n";
-        int active_aiv_scope = BeginScope();
-        PrintStmt(op->body);
-        EndScope(active_aiv_scope);
-        PrintIndent();
-        stream << "}\n";
-      } else {
-        PrintStmt(op->body);
-      }
+      // aiv=1 lowers to a physical __mix__(1, 1) group whose single AIV is
+      // always sub-block 0, so no sub-block guard is needed here.
+      PrintStmt(op->body);
       EndScope(scope);
       PrintIndent();
       stream << "}\n";
@@ -1399,6 +1390,10 @@ void CodeGenTileLangAscend::EmitCrossCoreSync_(const CallNode *op,
       << intrinsic
       << " expects exactly 3 arguments (mode_id int, pipe string, flag_id)";
   const int64_t mode_id = GetIntImmArg(op, 0, intrinsic, "mode_id");
+  ICHECK(!(kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 1 &&
+           mode_id == 4))
+      << "Cross-core synchronization mode 4 requires a 1:2 mixed group; use "
+         "mode 2 for aiv=1";
   const char *scope = GetCrossCoreSyncScope(mode_id);
   const std::string pipe = GetStringImmArg(op, 1, intrinsic, "pipe");
   const std::string flag_id = PrintExpr(op->args[2]);
@@ -1502,6 +1497,16 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
 void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 26)
       << "tl.ascend_copy_matrix_cc_to_ub expects exactly 26 arguments";
+
+  // Hardware constraint (dav-3510, verified on Ascend950DT): the L0C->UB
+  // fixpipe path (both dual-destination SPLIT modes and the
+  // single-destination DISABLE mode) only exists inside a physical 1:2
+  // mixed group. Executing any asc_copy_l0c2ub in a 1:1 group raises an
+  // aicore exception (ACL_ERROR_RT_AICORE_EXCEPTION, 507015).
+  if (kernel_mode_ == AscendKernelMode::kMix && mix_aiv_count_ == 1) {
+    LOG(FATAL) << "asc_copy_l0c2ub cannot execute inside a 1:1 mixed group "
+                  "on dav-3510; use aiv=2 or L0C->GM->UB";
+  }
 
   PrintIndent();
   stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";

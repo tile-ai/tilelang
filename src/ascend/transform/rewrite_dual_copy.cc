@@ -1,3 +1,4 @@
+#include "aiv_group.h"
 /*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -251,12 +252,26 @@ private:
   }
 
   Stmt VisitStmt_(const SBlockNode *op) final {
+    bool previous_single_aiv_group = single_aiv_group_;
+    bool previous_plain_kernel = plain_kernel_;
+    if (op->name_hint == "tilelang_root") {
+      // Consume the early request/default. Keep the existing lazy fallback
+      // only for callers that invoke RewriteDualCopy without ResolveAivGroup.
+      auto count = op->annotations.Get("vector_count");
+      if (!count.has_value())
+        count = op->annotations.Get(ascend::kDefaultAivCount);
+      single_aiv_group_ =
+          count.has_value() && is_one(count.value().cast<PrimExpr>());
+      plain_kernel_ = !count.has_value();
+    }
     bool is_vector_block = op->name_hint == "VECTOR";
     if (is_vector_block)
       ++vector_block_depth_;
     Stmt result = StmtMutator::VisitStmt_(op);
     if (is_vector_block)
       --vector_block_depth_;
+    single_aiv_group_ = previous_single_aiv_group;
+    plain_kernel_ = previous_plain_kernel;
     return result;
   }
 
@@ -306,6 +321,13 @@ private:
         << copy->src.scope() << " -> " << copy->dst.scope()
         << ". Operation: " << call;
 
+    TVM_FFI_CHECK(!(single_aiv_group_ ||
+                    (plain_kernel_ && ascend::ResolveAivCount() == 1)),
+                  ValueError)
+        << "dual_copy split requires a 1:2 AIC:AIV group; resolved kernel "
+           "aiv=1. Use ordinary per-AIV copy with appropriate regions, and "
+           "L0C->GM->UB for Cube-to-Vector transfer. Operation: "
+        << call;
     ValidateStaticSplitConstraints(copy, path, call);
     if (path == DualCopyPath::kHardwareL0CToUB)
       return rewritten;
@@ -361,6 +383,8 @@ private:
   int vector_block_depth_{0};
   int unscoped_cthread_depth_{0};
   bool allow_root_sid_synthesis_;
+  bool single_aiv_group_{false};
+  bool plain_kernel_{false};
 };
 
 } // namespace

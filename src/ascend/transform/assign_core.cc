@@ -43,6 +43,7 @@
 #include "./auto_schedule/scheduled_tir.h"
 #include "./auto_schedule/subcore.h"
 #include "./auto_schedule/task_analysis.h"
+#include "aiv_group.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
 #include "op/utils.h"
@@ -260,20 +261,23 @@ AssignCrossCoreTasks(const std::vector<std::shared_ptr<IRStructure>> &root,
 // PrepareMultiBuffer has made its guard/counter decisions.
 class CoreMaskAssigner {
 public:
-  static void Assign(const std::vector<std::shared_ptr<IRStructure>> &root,
+  static bool Assign(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const std::vector<TaskNode *> &all_tasks,
-                     const ffi::Optional<Var> &outer_sid,
-                     int num_aiv_subcores) {
-    CoreMaskAssigner assigner(root, all_tasks, outer_sid, num_aiv_subcores);
-    assigner.Run();
+                     const ffi::Optional<Var> &outer_sid, int num_aiv_subcores,
+                     int mixed_count) {
+    CoreMaskAssigner assigner(root, all_tasks, outer_sid, num_aiv_subcores,
+                              mixed_count);
+    return assigner.Run();
   }
 
 private:
   CoreMaskAssigner(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
-                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores)
+                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores,
+                   int mixed_count)
       : root_(root), all_tasks_(all_tasks), availability_(all_tasks),
-        vector_mask_(VectorCoreMask(num_aiv_subcores)) {
+        vector_mask_(VectorCoreMask(num_aiv_subcores)),
+        mixed_count_(mixed_count) {
     if (outer_sid.has_value())
       availability_.SetExternalVarCoreMask(outer_sid.value(), kCoreVector);
     for (TaskNode *task : all_tasks_) {
@@ -283,11 +287,12 @@ private:
     }
   }
 
-  void Run() {
-    AssignCandidateCoreMasks();
+  bool Run() {
+    bool mixed = AssignCandidateCoreMasks();
     PropagateCandidateCapabilities();
     AssignCrossCoreTasks(root_, all_tasks_, availability_, vector_mask_);
     PropagateCandidateCapabilities();
+    return mixed;
   }
 
   static CoreMask GetScalarMemoryMask(const TaskNode *task) {
@@ -355,9 +360,12 @@ private:
     return GetScalarMemoryMask(task);
   }
 
-  void AssignCandidateCoreMasks() {
+  bool AssignCandidateCoreMasks() {
+    bool cube = false, vector = false;
     for (TaskNode *task : all_tasks_) {
       CoreMask mask = GetCandidateCoreMask(task);
+      cube |= mask == kCoreCube;
+      vector |= mask != kCoreAll && (mask & kCoreVector) != 0;
       // Pure scalar values may be recomputed on other cores. Special-register
       // writes affect core-local state and must retain their projected AIV.
       // Keep Cube eligible for configuration consumed by Cube operations.
@@ -366,6 +374,15 @@ private:
         mask &= kCoreCube | VectorCore(*sid);
       task->SetCoreMask(mask & (kCoreCube | vector_mask_));
     }
+    bool mixed = cube && vector;
+    // Preserve pure-kernel masks. A mixed kernel consumes the prepared count
+    // before dependency propagation and synchronization placement.
+    if (mixed && vector_mask_ != VectorCoreMask(mixed_count_)) {
+      vector_mask_ = VectorCoreMask(mixed_count_);
+      for (TaskNode *task : all_tasks_)
+        task->SetCoreMask(task->GetCoreMask() & (kCoreCube | vector_mask_));
+    }
+    return mixed;
   }
 
   void PropagateCandidateCapabilities() {
@@ -392,14 +409,16 @@ private:
   const std::vector<TaskNode *> &all_tasks_;
   CoreMaskAvailability availability_;
   CoreMask vector_mask_;
+  int mixed_count_;
 };
 
-void AssignCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
-                     const ffi::Optional<Var> &outer_sid,
-                     int num_aiv_subcores) {
+bool AssignCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
+                     const ffi::Optional<Var> &outer_sid, int num_aiv_subcores,
+                     int mixed_count) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
-  CoreMaskAssigner::Assign(root, all_tasks, outer_sid, num_aiv_subcores);
+  return CoreMaskAssigner::Assign(root, all_tasks, outer_sid, num_aiv_subcores,
+                                  mixed_count);
 }
 
 } // namespace
@@ -417,9 +436,21 @@ tvm::transform::Pass AssignCore() {
                                              context.outer_sid.value());
           ScheduledTIR scheduled_tir =
               DecodeScheduledTIR(root, context.outer_ctx);
-          AssignCoreMasks(scheduled_tir.tree, context.outer_sid,
-                          scheduled_tir.metadata.num_aiv_subcores.value_or(2));
-          return EncodeScheduledTIR(std::move(scheduled_tir));
+          auto requested = scheduled_tir.metadata.num_aiv_subcores;
+          int count = requested.value_or(
+              ReadAivCount(root.get(), kDefaultAivCount).value_or(2));
+          bool mixed = AssignCoreMasks(scheduled_tir.tree, context.outer_sid,
+                                       requested.value_or(2), count);
+          if (mixed && !requested.has_value())
+            scheduled_tir.metadata.num_aiv_subcores = count;
+          root = EncodeScheduledTIR(std::move(scheduled_tir));
+          if (mixed && !requested.has_value()) {
+            auto *writer = root.CopyOnWrite();
+            writer->body = AivDomainNormalizer(count, context.outer_sid,
+                                               false)(root->body);
+            writer->annotations.Set("tl.resolved_aiv_count", Integer(count));
+          }
+          return root;
         });
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.AssignCore", {});
