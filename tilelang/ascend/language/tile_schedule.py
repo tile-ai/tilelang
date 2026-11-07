@@ -89,7 +89,8 @@ class AscendBaseTileScheduler(BaseTileScheduler):
         name: str | None = None,
     ):
         super().__init__(stateful=stateful, name=name)
-        assert group_m in (4, 8), "group_m must be 4 or 8"
+        if group_m not in (4, 8):
+            raise ValueError("group_m must be 4 or 8")
 
         self._block_m = block_m
         self._block_n = block_n
@@ -481,9 +482,8 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
         self._alignment = alignment
         # A group's K window starts on an ``alignment`` boundary; the SF range
         # contract below needs that boundary to be scale-pair aligned too.
-        assert alignment % self._MX_SF_DIVISOR == 0, (
-            f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}"
-        )
+        if alignment % self._MX_SF_DIVISOR != 0:
+            raise ValueError(f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}")
         super().__init__(
             block_m=block_m,
             block_n=block_n,
