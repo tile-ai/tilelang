@@ -791,6 +791,15 @@ Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
   }
 }
 
+Optional<PrimExpr>
+ParallelOpNode::GetReplicaWriteGuard(PrimExpr thread_index) const {
+  if (!replica_write_guard_.defined()) {
+    return std::nullopt;
+  }
+  return Substitute(replica_write_guard_.value(),
+                    {{InputPlaceholder(0), thread_index}});
+}
+
 Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
   ICHECK(loop_layout_.defined());
   if (IsCommonAccessIndice(buffer)) {
@@ -1076,7 +1085,17 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
   if (!has_cross_thread_access)
     return;
 
+  auto inv = loop_layout_->Inverse();
+  Array<PrimExpr> fwd;
+  for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
+    fwd.push_back(0);
+  fwd.push_back(InputPlaceholder(0) - layout_args.thread_bounds->min);
+  PrimExpr is_first_replica = EQ(inv->Forward(fwd).back(), 0);
+
   if (!store_fragment_buffers.empty()) {
+    // Every replica must write its copy of the fragments, so only the
+    // non-idempotent shared/global writes are restricted to one replica.
+    replica_write_guard_ = is_first_replica;
     bool replicate_is_from_dynamic_index_fragment = false;
     for (const auto &fragment : store_fragment_buffers) {
       if (!layout_args.layout_map.count(fragment)) {
@@ -1106,13 +1125,7 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
            "in replicated loop layout.";
     return;
   } else {
-    auto inv = loop_layout_->Inverse();
-    Array<PrimExpr> fwd;
-    for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
-      fwd.push_back(0);
-    fwd.push_back(InputPlaceholder(0) - layout_args.thread_bounds->min);
-    auto rep = inv->Forward(fwd).back();
-    AddPredicate(EQ(rep, 0));
+    AddPredicate(is_first_replica);
   }
 }
 Fragment

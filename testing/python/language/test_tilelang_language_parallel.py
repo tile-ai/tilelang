@@ -121,5 +121,35 @@ def test_parallel_vectorize_var():
     assert "float2" in source
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("update", ["atomic_add", "read_modify_write"])
+def test_replicated_parallel_writes_once(update):
+    """A replicated loop (64 iterations on 128 threads) that stores a fragment
+    runs its atomics and read-modify-writes on one replica only (#3870)."""
+    n = 64
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32), C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            L = T.alloc_fragment((n,), T.float32)
+            for i in T.Parallel(n):
+                L[i] = B[i]
+                if update == "atomic_add":
+                    T.atomic_add(A[i], L[i])
+                else:
+                    A[i] = A[i] + L[i]
+                C[i] = L[i]
+
+    kernel = tilelang.compile(main)
+    source = kernel.get_kernel_source()
+    assert "& 63" in source, "expected a replicated loop layout"
+    a = torch.zeros(n, device="cuda")
+    b = torch.arange(n, dtype=torch.float32, device="cuda")
+    c = torch.empty(n, device="cuda")
+    kernel(a, b, c)
+    torch.testing.assert_close(a, b, rtol=0, atol=0)
+    torch.testing.assert_close(c, b, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
