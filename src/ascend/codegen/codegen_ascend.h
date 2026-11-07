@@ -64,6 +64,10 @@ protected:
                         PrimExpr rhs, std::ostream &os) final;
 
 private:
+  friend class SuperKernelCodegen;
+  // Shared kernel-mode analysis, parameter scopes and per-function state.
+  void PrepareFunction(const PrimFunc &f);
+
   struct CApiArgument {
     PrimExpr value;
     std::string prefix{};

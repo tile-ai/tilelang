@@ -233,6 +233,31 @@ Matrix tails use the existing OOB clipping and L1 padding; padding is emitted
 separately for each valid batch. The destination must use a canonical matrix layout.
 This batched path is not supported by the PTO target.
 
+## SuperKernel
+
+SuperKernel fuses multiple adjacent tasks into a single hardware execution unit,
+to eliminate device scheduling overhead.
+The Ascend C backend can emit SuperKernel (SK) subfunctions alongside its
+ordinary kernels to enable operator fusion in conjunction with the SuperKernel module.
+
+emit `SuperKernel` subfunctions in JIT compilation:
+
+```python
+kernel = tilelang.compile(func, target="ascend", pass_configs={
+      "tl.ascend_enable_superkernel": True, },)
+```
+
+All keys below have the prefix `tl.ascend_` and corresponding
+`PassConfigKey.TL_ASCEND_*` enum members. Options apply to the kernels generated
+by one compilation. Supplying an SK-specific option without enabling SK is an
+error. The PTO backend rejects these options.
+
+| Key suffix | Default | Meaning |
+| --- | --- | --- |
+| `tl.ascend_enable_superkernel` | `False` | Emit SK entries and bindings |
+| `tl.ascend_superkernel_num_variants` | `1` | Bind 1 to 4 SK entry symbols |
+| `tl.ascend_superkernel_disable_dcci` | `False` | Suppress DCCI ALL around calls |
+
 ## Examples
 
 Start with the [persistent GEMM](../../examples/ascend/example_gemm.py), which

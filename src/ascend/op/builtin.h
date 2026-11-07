@@ -15,6 +15,13 @@ namespace tl {
 // because they are part of the Python PassContext interface.
 static constexpr const char *kEnableAutoSchedule = "tl.enable_auto_schedule";
 
+static constexpr const char *kEnableSuperKernel =
+    "tl.ascend_enable_superkernel";
+static constexpr const char *kSuperKernelNumVariants =
+    "tl.ascend_superkernel_num_variants";
+static constexpr const char *kSuperKernelDisableDcci =
+    "tl.ascend_superkernel_disable_dcci";
+
 /*!
  * \brief Marker op for user-declared auto-schedule conflict facts.
  *
