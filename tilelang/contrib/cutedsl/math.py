@@ -25,6 +25,7 @@ __all__ = [
     "fast_min",
     "copysignf",
     "divf",
+    "truncdiv",
     "isfinite",
     "__habs",
     "__float2half_rz",
@@ -45,6 +46,7 @@ from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm
 from cutlass.base_dsl.typing import BFloat16, Float16, Float32, Float64, Int16, Int32, Uint16, Uint32
 from cutlass.cutlass_dsl import dsl_user_op
+from cutlass._mlir.dialects import arith
 
 
 def _scalar_arg_type(arg):
@@ -323,6 +325,26 @@ def divf(
     fastmath: bool = False,
 ) -> Union[TensorSSA, Numeric]:
     return _tl_math_op(cute_math.div, fastmath, x, y)
+
+
+@dsl_user_op
+def truncdiv(x, y, *, loc=None, ip=None):
+    """Divide integers toward zero without a floating-point conversion."""
+    if isinstance(x, int) and isinstance(y, int):
+        q = abs(x) // abs(y)
+        return -q if (x < 0) != (y < 0) else q
+
+    if isinstance(x, TensorSSA) and isinstance(y, TensorSSA) and x.shape != y.shape:
+        raise ValueError(f"truncdiv expects tensors of the same shape, but got {x.shape} and {y.shape}")
+    if isinstance(x, TensorSSA) or isinstance(y, TensorSSA):
+        tensor = x if isinstance(x, TensorSSA) else y
+        x = x if isinstance(x, TensorSSA) else cute.full_like(tensor, x, loc=loc, ip=ip)
+        y = y if isinstance(y, TensorSSA) else cute.full_like(tensor, y, loc=loc, ip=ip)
+        return TensorSSA(arith.divsi(x, y, loc=loc, ip=ip), tensor.shape, tensor.dtype)
+
+    dtype = _scalar_result_type(x, y)
+    x, y = dtype(x).ir_value(loc=loc, ip=ip), dtype(y).ir_value(loc=loc, ip=ip)
+    return dtype(arith.divsi(x, y, loc=loc, ip=ip))
 
 
 def __habs(x: Numeric) -> Numeric:
