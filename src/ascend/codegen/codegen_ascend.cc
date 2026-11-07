@@ -46,6 +46,19 @@ bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   return false;
 }
 
+bool IsVmiOp(const CallNode *op, std::string *op_name = nullptr) {
+  if (auto opt_call_op = op->op.as<Op>()) {
+    const std::string &name = opt_call_op.value()->name;
+    if (name.rfind("tl.vmi.", 0) == 0) {
+      if (op_name != nullptr) {
+        *op_name = name;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
 bool IsSimdMergingCall(const CallNode *op,
                        std::string *intrinsic_name = nullptr) {
   if (!op->dtype.is_void() || op->args.empty()) {
@@ -1448,15 +1461,20 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
-  ICHECK_EQ(op->args.size(), 12)
-      << "tl.ascend_copy_gm_to_cbuf expects exactly 12 arguments";
+  ICHECK(op->args.size() == 12 || op->args.size() == 14)
+      << "tl.ascend_copy_gm_to_cbuf expects 12 or 14 arguments";
 
   const bool use_dn2nz =
       GetIntImmArg(op, 9, "tl.ascend_copy_gm_to_cbuf", "transpose") != 0;
   const std::string nz_c0_stride = PrintExpr(op->args[10]);
+  const std::string num_batches =
+      op->args.size() == 14 ? PrintExpr(op->args[12]) : "1";
+  const std::string batch_stride =
+      op->args.size() == 14 ? PrintExpr(op->args[13]) : "0";
   PrintIndent();
-  stream << "asc_set_gm2l1_nz_para(1, 1, static_cast<uint16_t>(" << nz_c0_stride
-         << "), 0);\n";
+  stream << "asc_set_gm2l1_nz_para(" << num_batches
+         << ", 1, static_cast<uint16_t>(" << nz_c0_stride << "), "
+         << batch_stride << ");\n";
 
   std::string destination_prefix;
   std::string source_prefix;
@@ -2590,6 +2608,13 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "Unsupported RNG distribution on Ascend: " << dist;
     os << "tl::philox_rand_" << dist << "(&" << ascend_rng_state_var_ << ")";
   } else {
+    std::string op_name;
+    // Evaluate statements print their value through this CallNode visitor, so
+    // statement-form VMI calls such as vstore are rejected here as well.
+    if (IsVmiOp(op, &op_name)) {
+      LOG(FATAL) << "Ascend CCE codegen does not support " << op_name
+                 << "; use target='pto' for T.vmi.*";
+    }
     CodeGenC::VisitExpr_(op, os);
   }
 }

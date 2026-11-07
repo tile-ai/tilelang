@@ -6,6 +6,7 @@ import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tirx
+from tilelang.jit.adapter.base import output_allocation_stream
 
 
 cdef class CythonKernelWrapper:
@@ -28,12 +29,18 @@ cdef class CythonKernelWrapper:
         list param_shapes              # Cache for parameter shapes as native Python lists
         object get_current_device
         object get_current_stream      # Raw-stream provider injected by the adapter (None = CUDA default)
+        object host_mapped_indices
+        object get_host_mapped_pointer
 
-    def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None):
+    def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None, host_mapped_indices=()):
         # Initialize wrapper with kernel configuration
         self.result_idx = result_idx
         self.params = params
         self.lib = lib
+        self.host_mapped_indices = frozenset(host_mapped_indices)
+        if self.host_mapped_indices:
+            from tvm import get_global_func
+            self.get_host_mapped_pointer = get_global_func("tl.cuda.get_host_mapped_pointer")
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         self.param_dtypes = [param.torch_dtype() for param in params]
@@ -100,6 +107,10 @@ cdef class CythonKernelWrapper:
                     device.index is None or
                     tensor_device.index == device.index
                 )
+                if self.host_mapped_indices and device.type == "cuda":
+                    current_device = self.get_current_device()
+                    device = current_device if isinstance(current_device, torch.device) else torch.device("cuda", current_device)
+                    device_index_match = tensor_device.index == device.index
                 if not (device_type_match and device_index_match):
                     raise ValueError(
                         f"Buffer device mismatch for parameter {param}: "
@@ -172,6 +183,8 @@ cdef class CythonKernelWrapper:
     cdef object _infer_output_device(self, list inputs):
         for tensor in inputs:
             if isinstance(tensor, torch.Tensor):
+                if self.host_mapped_indices and tensor.device.type == "cpu":
+                    continue
                 return tensor.device
         return self.get_current_device()
 
@@ -189,6 +202,7 @@ cdef class CythonKernelWrapper:
             )
 
         device = None
+        cdef bint caller_stream = stream != -1
         if stream == -1:
             if self.get_current_stream is not None:
                 device = self._infer_output_device(inputs)
@@ -211,6 +225,13 @@ cdef class CythonKernelWrapper:
             if i not in self.result_idx:
                 tensor_list[i] = inputs[ins_idx]
                 ins_idx += 1
+
+        # Outputs written on a caller-supplied stream are allocated on that stream.
+        alloc_stream = None
+        if caller_stream and total_result_idx > 0:
+            if device is None:
+                device = self._infer_output_device(inputs)
+            alloc_stream = output_allocation_stream(stream, device)
 
         # Prepare output tensors
         for i in range(len(self.params)):
@@ -243,7 +264,11 @@ cdef class CythonKernelWrapper:
                         f"Cannot create output tensor (name={param_name}) - 0-dimensional tensors are not supported. "
                         f"Expected shape: {shape}"
                     )
-                tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
+                if alloc_stream is None:
+                    tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
+                else:
+                    with torch.cuda.stream(alloc_stream):
+                        tensor_list[i] = torch.empty(*shape, dtype=dtype, device=device)
                 # TODO(chenggang): remove this check or rewrite by ourselves?
                 '''
                 if isinstance(tensor_list[i], torch.Tensor) and tensor_list[i]._base is not None and not tensor_list[i].is_contiguous():
@@ -267,8 +292,24 @@ cdef class CythonKernelWrapper:
             torch.bool: ctypes.c_bool,
         }
 
+        # Validate before querying mappings or constructing launch arguments.
+        if not skip_tensor_validation:
+            self._check_buffer_device(tensor_list)
+            self._check_buffer_dtype(tensor_list)
+            self._check_static_shape(tensor_list)
+            self._check_static_strides(tensor_list)
+            self._check_static_contiguous(tensor_list)
+
         call_args = []
         for i, tensor in enumerate(tensor_list):
+            if i in self.host_mapped_indices:
+                if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu":
+                    raise ValueError(f"Host-mapped parameter {i} must be a CPU tensor")
+                # Resolve on every eager call. A raw address cache could survive
+                # unregister/free/reallocation and incorrectly reuse a mapping.
+                pointer = self.get_host_mapped_pointer(ctypes.c_void_p(tensor.data_ptr()))
+                call_args.append(pointer)
+                continue
             if isinstance(tensor, torch.Tensor):
                 call_args.append(ctypes.c_void_p(tensor.data_ptr()))
             elif isinstance(tensor, (int, float, bool)):
@@ -283,14 +324,6 @@ cdef class CythonKernelWrapper:
                 call_args.append(ctypes.c_void_p(0))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
-
-        # Check buffer device
-        if not skip_tensor_validation:
-            self._check_buffer_device(tensor_list)
-            self._check_buffer_dtype(tensor_list)
-            self._check_static_shape(tensor_list)
-            self._check_static_strides(tensor_list)
-            self._check_static_contiguous(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
         for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():

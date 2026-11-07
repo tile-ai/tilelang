@@ -194,7 +194,7 @@ def run_atomic_addx4(M, N, block_M, block_N):
     import torch
 
     A = torch.randn(M, N, dtype=torch.float32).cuda()
-    B = torch.zeros(M, N, dtype=torch.float32).cuda()
+    B = torch.randn(M, N, dtype=torch.float32).cuda()
     ref_B = B.clone()
 
     for i in range(M):
@@ -341,6 +341,197 @@ def lower_tma_atomic_add(dtype, arch="sm_90", shape=(16, 16), explicit_layout=Fa
             tma_atomic_add_compile_program(dtype, shape=shape, explicit_layout=explicit_layout),
             target=target,
         )
+
+
+def region_atomic_program(operation, source_shape=(4, 8, 16), destination_shape=(8, 16)):
+    @T.prim_func
+    def main(
+        A: T.Tensor(source_shape, "float32"),
+        B: T.Tensor(destination_shape, "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared(source_shape, "float32")
+            B_shared = T.alloc_shared(destination_shape, "float32")
+            T.clear(A_shared)
+            T.clear(B_shared)
+            source_region = tuple(slice(None) for _ in source_shape)
+            destination_region = tuple(slice(None) for _ in destination_shape)
+            if operation == "add":
+                T.atomic_add(B_shared[destination_region], A_shared[source_region])
+            elif operation == "max":
+                T.atomic_max(B_shared[destination_region], A_shared[source_region])
+            else:
+                T.atomic_min(B_shared[destination_region], A_shared[source_region])
+
+    return main
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("cuda", marks=tilelang.testing.requires_cuda.marks(support_required="compile-only")),
+        pytest.param("hip", marks=tilelang.testing.requires_rocm.marks(support_required="compile-only")),
+    ]
+)
+def region_atomic_target(request):
+    kind = request.param
+    if tvm.get_global_func(f"target.build.tilelang_{kind}_without_compile", allow_missing=True) is None:
+        pytest.skip(f"TileLang {kind} codegen is not enabled")
+    config = {"kind": "cuda", "arch": "sm_89"} if kind == "cuda" else {"kind": "hip", "mcpu": "gfx942"}
+    return tvm.target.Target(config)
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize(
+    "source_shape,destination_shape",
+    [
+        ((4, 8, 16), (8, 16)),
+        ((2, 4, 8, 16), (8, 16)),
+        ((8, 16), (4, 8, 16)),
+        ((1, 8, 16), (4, 8, 16)),
+    ],
+)
+def test_region_atomic_rank_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
+    with region_atomic_target, pytest.raises(ValueError, match="Cannot map atomic region") as exc_info:
+        tilelang.lower(
+            region_atomic_program(operation, source_shape, destination_shape),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    message = str(exc_info.value)
+    for context in (f"tl.atomic_{operation}_elem_op", "src=A_shared", "dst=B_shared", "src_range=", "dst_range="):
+        assert context in message
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize(
+    "source_shape,destination_shape",
+    [
+        ((4, 16), (8, 8)),
+        ((8, 8), (4, 16)),
+        ((8, 4), (8, 8)),
+        ((8, 16), (8, 8)),
+        ((1, 4, 1, 16), (8, 1, 8)),
+        ((8, 1, 16), (1, 8, 8, 1)),
+        ((8,), (1,)),
+    ],
+)
+def test_region_atomic_extent_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
+    with region_atomic_target, pytest.raises(ValueError, match="Cannot map atomic region") as exc_info:
+        tilelang.lower(
+            region_atomic_program(operation, source_shape, destination_shape),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    message = str(exc_info.value)
+    for context in (f"tl.atomic_{operation}_elem_op", "extent", "src=A_shared", "dst=B_shared", "src_range=", "dst_range="):
+        assert context in message
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize(
+    "source_shape,destination_shape",
+    [
+        ((8, 16), (8, 16)),
+        ((1, 8, 16), (8, 16)),
+        ((8, 1, 16), (1, 8, 16, 1)),
+        ((1, 1), (1,)),
+    ],
+)
+def test_region_atomic_matching_rank_is_accepted(operation, source_shape, destination_shape, region_atomic_target):
+    with region_atomic_target:
+        tilelang.lower(
+            region_atomic_program(operation, source_shape, destination_shape),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+
+
+def region_atomic_offset_program(operation):
+    atomic_op = getattr(T, f"atomic_{operation}")
+
+    @T.prim_func
+    def main(A: T.Tensor((10, 12), "float32"), B: T.Tensor((12, 16), "float32")):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((10, 12), "float32")
+            T.copy(A, A_shared)
+            atomic_op(B[3:11, 4:12], A_shared[1:9, 2:10])
+
+    return main
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+def test_region_atomic_matching_extents_with_offsets_codegen(operation, region_atomic_target):
+    with region_atomic_target:
+        artifact = tilelang.lower(
+            region_atomic_offset_program(operation),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    assert f"Atomic{operation.title()}(" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+def test_region_atomic_matching_extents_with_offsets(operation):
+    kernel = tilelang.compile(region_atomic_offset_program(operation))
+    source = torch.arange(120, dtype=torch.float32, device="cuda").reshape(10, 12)
+    destination = torch.full((12, 16), 200.0 if operation == "min" else 1.0, device="cuda")
+    expected = destination.clone()
+    expected[3:11, 4:12] = source[1:9, 2:10] + (1.0 if operation == "add" else 0.0)
+
+    kernel(source, destination)
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
+def region_atomic_scalar_source_program(operation, source_form, source_index=1):
+    atomic_op = getattr(T, f"atomic_{operation}")
+
+    @T.prim_func
+    def main(A: T.Tensor((4,), "float32"), B: T.Tensor((20,), "float32")):
+        with T.Kernel(1, threads=128):
+            if source_form == "load":
+                atomic_op(B[2:18], A[source_index])
+            elif source_form == "region":
+                atomic_op(B[2:18], A[source_index : source_index + 1])
+            else:
+                atomic_op(B[2:18], A[source_index] + 1.0)
+
+    return main
+
+
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize("source_form", ["load", "region", "expression"])
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_region_atomic_scalar_source_codegen(operation, source_form, source_index, region_atomic_target):
+    with region_atomic_target:
+        artifact = tilelang.lower(
+            region_atomic_scalar_source_program(operation, source_form, source_index),
+            target=region_atomic_target,
+            enable_host_codegen=False,
+            enable_device_compile=False,
+        )
+    assert f"A[{source_index}]" in artifact.kernel_source
+    assert f"Atomic{operation.title()}(" in artifact.kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("operation", ["add", "max", "min"])
+@pytest.mark.parametrize("source_form", ["load", "region", "expression"])
+@pytest.mark.parametrize("source_index", [0, 1])
+def test_region_atomic_scalar_source(operation, source_form, source_index):
+    kernel = tilelang.compile(region_atomic_scalar_source_program(operation, source_form, source_index))
+    source = torch.tensor([99.0, 3.0, -77.0, 55.0], device="cuda")
+    value = (99.0 if source_index == 0 else 3.0) + (1.0 if source_form == "expression" else 0.0)
+    destination = torch.full((20,), value + 4.0 if operation == "min" else 1.0, device="cuda")
+    expected = destination.clone()
+    expected[2:18] = 1.0 + value if operation == "add" else value
+
+    kernel(source, destination)
+    torch.testing.assert_close(destination, expected, rtol=0, atol=0)
 
 
 def get_tma_atomic_add_descriptor_args(artifact):
@@ -500,8 +691,10 @@ def test_tma_atomic_add_rejects_unencodable_explicit_layout():
 
 
 def run_atomic_add_auto_vectorized(K, M, N, block_M, block_N, dtype=T.float32):
-    tilelang.disable_cache()
-    kernel = atomic_add_program(K, M, N, block_M, block_N, dtype=dtype)
+    # Compile through the JIT wrapper explicitly: a plain call may return a
+    # kernel the wrapper already built, bypassing the compile this asserts on.
+    with tilelang.testing.without_kernel_cache():
+        kernel = atomic_add_program.compile(K, M, N, block_M, block_N, dtype=dtype)
     assert "AtomicAddx4" in kernel.get_kernel_source()
 
 
@@ -534,12 +727,12 @@ def atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=T
 
 def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_order_id, dtype=T.float16):
     # A vectorized atomic add must carry the requested memory order, just like
-    # the scalar lowering of the same call does. Cache disabled because the key
-    # does not cover the native library by default, so a stale pre-fix kernel
-    # source would otherwise be served here.
-    tilelang.disable_cache()
-    try:
-        kernel = atomic_add_vectorized_memory_order_program(N, threads, memory_order, dtype=dtype)
+    # the scalar lowering of the same call does. Compile through the JIT wrapper
+    # inside a cache-bypass scope: the disk key does not cover the native library
+    # by default, and a plain call could also return the wrapper's cached kernel,
+    # so a stale pre-fix source would otherwise be served here.
+    with tilelang.testing.without_kernel_cache():
+        kernel = atomic_add_vectorized_memory_order_program.compile(N, threads, memory_order, dtype=dtype)
 
         wide_calls = re.findall(r"AtomicAddx\d\([^;]*\);", kernel.get_kernel_source())
         assert wide_calls, f"expected a vectorized atomic add, got:\n{kernel.get_kernel_source()}"
@@ -553,8 +746,6 @@ def run_atomic_add_vectorized_memory_order(N, threads, memory_order, memory_orde
         Out = torch.zeros(N, dtype=torch_dtype).cuda()
         kernel(X, Out)
         torch.testing.assert_close(Out, X, atol=1e-2, rtol=1e-2)
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.jit

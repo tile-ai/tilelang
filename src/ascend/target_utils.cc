@@ -10,8 +10,26 @@
 namespace tvm {
 namespace tl {
 
+using ffi::String;
+
 bool TargetIsAscend(Target target) {
   return target.defined() && target->kind->name == "ascend";
+}
+
+bool TargetIsPTO(Target target) {
+  // PTO shares the "ascend" target kind with AscendC; "pto" in target keys
+  // selects the PTO codegen (see tilelang/ascend/target.py). Keep this the
+  // single C++ decision point so LayoutInference, Verify/Vectorize passes
+  // and any later consumer cannot drift apart on the key spelling.
+  if (!TargetIsAscend(target)) {
+    return false;
+  }
+  for (const String &key : target->keys) {
+    if (key == "pto") {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool IsAscendVectorizableFP8(DataType dtype) {

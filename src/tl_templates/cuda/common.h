@@ -1256,6 +1256,29 @@ struct tfloat32_t : public cute::tfloat32_t {
       : cute::tfloat32_t(*reinterpret_cast<cute::tfloat32_t *>(&x)) {}
 };
 
+// Keep the PTX result bits: the ordinary tfloat32_t(float) constructor uses
+// different rounding and must not be applied to this result.
+template <bool kSat> TL_DEVICE tfloat32_t __tl_cvt_f32_to_tf32_rn(float src) {
+  unsigned int bits;
+  if constexpr (kSat) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+    asm("cvt.rn.satfinite.tf32.f32 %0, %1;" : "=r"(bits) : "f"(src));
+#else
+    static_assert(
+        !kSat, "round='rn' float32-to-tfloat32 with sat=true requires sm_100 "
+               "or newer; use sat=false on sm_90");
+#endif
+  } else {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm("cvt.rn.tf32.f32 %0, %1;" : "=r"(bits) : "f"(src));
+#else
+    static_assert(kSat,
+                  "round='rn' float32-to-tfloat32 requires sm_90 or newer");
+#endif
+  }
+  return tfloat32_t::bitcast(bits);
+}
+
 template <typename T> struct to_cute_type {
   using type = T;
 };

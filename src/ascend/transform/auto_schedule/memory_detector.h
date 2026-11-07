@@ -101,7 +101,6 @@ public:
   explicit MemoryAccessDetector(AccessMode mode = AccessMode::kLogical,
                                 LayoutMap layouts = {})
       : layouts_(std::move(layouts)), mode_(mode) {}
-
   // Analyze a statement and collect read/write regions
   void Analyze(const Stmt &stmt) {
     l0_pitches_.clear();
@@ -928,59 +927,17 @@ private:
     }
   }
 
-  std::vector<arith::IntSet> LogicalPointerRegion(const BufferLoad &load,
-                                                  const PrimExpr &extent) {
+  std::vector<arith::IntSet> PointerRegion(const BufferLoad &load,
+                                           const PrimExpr &extent) {
     const Buffer &buffer = load->buffer;
     size_t ndim = buffer->shape.size();
     std::vector<arith::IntSet> region(ndim);
 
-    const auto *ext_imm = extent.as<IntImmNode>();
-    if (ext_imm && load->indices.size() == ndim) {
-      // Distribute a known flat extent (in elements) across dims,
-      // innermost-first. `rem` is the number of elements still to be
-      // covered at the current dimension; each dim consumes as many of
-      // its `shape[i]` indices as the run spans, carrying the rounded-up
-      // remainder to the next (outer) dim.
-      int64_t rem = ext_imm->value;
-      for (size_t k = ndim; k-- > 0;) {
-        PrimExpr base = load->indices[k];
-        const auto *dim_imm = buffer->shape[k].as<IntImmNode>();
-        if (rem <= 1) {
-          region[k] = RelaxAccessIndex(base);
-        } else if (dim_imm) {
-          int64_t d = dim_imm->value;
-          if (rem >= d) {
-            // Run spills past this dim: cover it whole and carry up.
-            region[k] = arith::IntSet::FromRange(
-                Range::FromMinExtent(0, buffer->shape[k]));
-            rem = (rem + d - 1) / d;
-          } else {
-            region[k] = RelaxAccessIndex(base, IntImm(base.dtype(), rem));
-            rem = 1;
-          }
-        } else {
-          // Non-constant dim size: be conservative for this and any
-          // remaining outer dims.
-          region[k] = arith::IntSet::FromRange(
-              Range::FromMinExtent(0, buffer->shape[k]));
-          rem = 1;
-        }
-      }
-    } else {
-      // Non-constant extent or arity mismatch: fall back to whole buffer.
-      for (size_t k = 0; k < ndim; ++k) {
-        region[k] =
-            arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
-      }
-    }
-    return region;
-  }
-
-  std::vector<arith::IntSet> PhysicalPointerRegion(const BufferLoad &load,
-                                                   const PrimExpr &extent) {
-    const Buffer &buffer = load->buffer;
-    size_t ndim = buffer->shape.size();
-    std::vector<arith::IntSet> region(ndim);
+    // A positive stride can only shorten a 1-D run in logical coordinates.
+    if (mode_ == AccessMode::kLogical && ndim == 1 &&
+        load->indices.size() == 1 &&
+        (buffer->strides.empty() || ana_.CanProve(buffer->strides[0] > 0)))
+      return {RelaxAccessIndex(load->indices[0], extent)};
 
     bool reconstructed = false;
     const auto *ext_imm = extent.as<IntImmNode>();
@@ -1032,8 +989,8 @@ private:
     }
     if (!reconstructed) {
       UpdateOpaqueAccessVar(buffer->data);
-      // The storage is opaque: this placeholder cannot prove reuse and
-      // is never passed to synchronization dependency analysis.
+      // Logical accesses are assumed to stay within their Buffer. Physical
+      // lifetime proofs still require a representable footprint.
       for (size_t k = 0; k < ndim; ++k) {
         region[k] =
             arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
@@ -1188,12 +1145,32 @@ private:
     }
 
     if (mode_ == AccessMode::kPhysical && IsAscendCopyCall(op)) {
-      // Visit the original operands first so symbolic indices and the logical
-      // source/destination regions retain their normal access accounting.
-      StmtExprVisitor::VisitExpr_(op);
       AscendCopy copy(op->args, op->annotations);
+      bool exact = true;
+      if (IsGlobalBuffer(copy->src) && IsL1Buffer(copy->dst)) {
+        // GM->L1 lowering transfers the source geometry. A larger declared
+        // destination is a may-write bound, not a guaranteed initialization.
+        size_t src_rank = copy->src_range.size(),
+               dst_rank = copy->dst_range.size();
+        exact = src_rank >= 2 && dst_rank >= 2;
+        if (exact) {
+          for (size_t i = 0; i + 2 < src_rank; ++i)
+            exact &= ana_.CanProveEqual(copy->src_range[i]->extent, 1);
+          for (size_t i = 0; i + 2 < dst_rank; ++i)
+            exact &= ana_.CanProveEqual(copy->dst_range[i]->extent, 1);
+          for (size_t i = 0; i < 2; ++i)
+            exact &= ana_.CanProveEqual(
+                copy->src_range[src_rank - 2 + (copy->transpose ? 1 - i : i)]
+                    ->extent,
+                copy->dst_range[dst_rank - 2 + i]->extent);
+        }
+      }
+      size_t must_begin = unconditional_write_regions_.size();
+      StmtExprVisitor::VisitExpr_(op);
       for (const BufferRegion &write : copy->GetAccessRegions().writes)
         RecordBufferRegion(ExpandPaddedCopyWriteRegion(copy, write), false);
+      if (!exact)
+        unconditional_write_regions_.resize(must_begin);
       return;
     }
 
@@ -1348,11 +1325,8 @@ private:
     }
 
     // Handle TileLang `tl.access_ptr(BufferLoad(buf, mins), extent, rw_mask)`.
-    // The access is a contiguous run of `extent` elements in row-major layout
-    // starting at the base index `mins`. Reconstruct a conservative rectangular
-    // hull by carrying both the extent and each dimension's starting offset. If
-    // the physical footprint cannot be represented, exclude the storage from
-    // alias proofs. A whole logical view can omit physical storage elements.
+    // Reconstruct a conservative logical hull of the contiguous physical run.
+    // Unrepresentable footprints cannot establish storage reuse.
     if (op->op.same_as(tl_access_ptr_op)) {
       if (op->args.size() >= 3) {
         const auto *buffer_load = op->args[0].as<BufferLoadNode>();
@@ -1363,10 +1337,7 @@ private:
             UpdateOpaqueAccessVar(buffer->data);
           int rw_mask = mask_int->value;
           BufferLoad load = ffi::GetRef<BufferLoad>(buffer_load);
-          std::vector<arith::IntSet> region =
-              mode_ == AccessMode::kLogical
-                  ? LogicalPointerRegion(load, op->args[1])
-                  : PhysicalPointerRegion(load, op->args[1]);
+          std::vector<arith::IntSet> region = PointerRegion(load, op->args[1]);
 
           if (rw_mask & 1) {
             Update(&read_buffers_, &read_regions_, buffer, region);

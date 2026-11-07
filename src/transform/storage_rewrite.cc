@@ -1237,10 +1237,12 @@ struct BufferVarInfo {
   // packing in StorageRewrite) or in number of lanes (e.g. float16*
   // cast to float16x4*).
   std::unordered_set<DataType> access_dtype;
-  // Data types used for scalar reads. This is used to record vectorized read
-  // dtypes that can be shuffled for scalar reads when
+  // Data types used for scalar reads when
   // rewrite_scalar_read_to_vector_shuffle is enabled.
   std::unordered_set<DataType> scalar_read_dtype;
+  // The modular coefficient of each scalar read's index. DataType keeps lanes
+  // in 16 bits, so a coefficient past 32767 would read as a scalable vector.
+  std::unordered_set<int64_t> scalar_read_coeff;
 
   DataType get_preferred_dtype() const {
     std::unordered_set<DataType> base_access_dtype;
@@ -1273,8 +1275,8 @@ struct BufferVarInfo {
       int lanes = access_dtype.begin()->lanes();
       // Check the scalar read dtypes are compatible with the vectorized access
       // dtype.
-      for (auto dtype : scalar_read_dtype) {
-        if (dtype.lanes() % lanes != 0) {
+      for (int64_t coeff : scalar_read_coeff) {
+        if (coeff % lanes != 0) {
           return element_dtype;
         }
       }
@@ -1564,7 +1566,8 @@ public:
       const PrimExpr last_dim_index = indices[indices.size() - 1];
       if (last_dim_index.dtype().lanes() == 1) {
         arith::ModularSet me = analyzer_.modular_set(last_dim_index);
-        var_info.scalar_read_dtype.emplace(access_dtype.with_lanes(me->coeff));
+        var_info.scalar_read_dtype.emplace(access_dtype);
+        var_info.scalar_read_coeff.insert(me->coeff);
         return;
       }
     }

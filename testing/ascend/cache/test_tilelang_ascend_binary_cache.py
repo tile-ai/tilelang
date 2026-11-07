@@ -48,6 +48,7 @@ def test_ascend_binary_cache_hit_skips_bisheng_compile(monkeypatch, tmp_path):
 
     compile_calls = []
     monkeypatch.setattr(ascend_backend.bisheng, "compile_ascend", _fake_bisheng_compile(compile_calls))
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: "test clang version 15.0.5")
 
     target = Target({"kind": "ascend", "arch": "dav-3510"})
     source = "extern void kernel() {}"
@@ -77,7 +78,38 @@ def test_ascend_binary_cache_hit_skips_bisheng_compile(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
-def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
+def test_ascend_binary_cache_separates_bisheng_builds(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    from tilelang.ascend import backend as ascend_backend
+
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+
+    # Only the build time changes; the Clang version and revisions are equal.
+    version_suffix = "clang version 15.0.5 (clang-5c68a1cb1231 flang-5c68a1cb1231)"
+    first_version = f"2026-07-01T09:55:44+08:00 {version_suffix}"
+    second_version = f"2026-08-27T22:23:38+08:00 {version_suffix}"
+    current_version = first_version
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: current_version)
+    compiled_versions = []
+
+    def fake_compile(*args, **kwargs):
+        compiled_versions.append(current_version)
+        return bytearray(current_version.encode())
+
+    monkeypatch.setattr(ascend_backend.bisheng, "compile_ascend", fake_compile)
+    target = Target({"kind": "ascend", "arch": "dav-3510"})
+    source = "extern void kernel() {}"
+
+    for current_version in (first_version, first_version, second_version, second_version, first_version):
+        binary = ascend_backend.tilelang_callback_ascend_compile(source, target)
+        assert bytes(binary) == current_version.encode()
+
+    assert compiled_versions == [first_version, second_version]
+    cache_files = list((tmp_path / "cache").glob(f"*/ascend-binaries/*/kernel.{AIBIN}"))
+    assert len(cache_files) == 2
+
+
+def test_ascend_binary_cache_corrupted_entry_raises(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.ascend import backend as ascend_backend
 
@@ -85,6 +117,7 @@ def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
 
     compile_calls = []
     monkeypatch.setattr(ascend_backend.bisheng, "compile_ascend", _fake_bisheng_compile(compile_calls))
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: "test clang version 15.0.5")
 
     target = Target({"kind": "ascend", "arch": "dav-3510"})
     source = "extern void kernel() {}"
@@ -99,14 +132,9 @@ def test_ascend_binary_cache_corrupted_entry_recompiles(monkeypatch, tmp_path):
     metadata_path = cache_file.parent / "metadata.json"
     original_metadata = metadata_path.read_bytes()
 
-    recompiled = ascend_backend.tilelang_callback_ascend_compile(source, target)
-    assert bytes(recompiled) == b"fake-aibin"
-    assert len(compile_calls) == 2
-
-    # Shared entries stay immutable even after a miss. Recompilation is usable
-    # for this call, but repairing the on-disk entry needs offline cleanup.
-    assert bytes(ascend_backend.tilelang_callback_ascend_compile(source, target)) == b"fake-aibin"
-    assert len(compile_calls) == 3
+    with pytest.raises(ValueError, match="checksum"):
+        ascend_backend.tilelang_callback_ascend_compile(source, target)
+    assert len(compile_calls) == 1
     assert cache_file.read_bytes() == corrupted
     assert metadata_path.read_bytes() == original_metadata
 
@@ -115,7 +143,7 @@ def test_ascend_binary_cache_directory_coexists_with_legacy_flat_entry(monkeypat
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "legacy-key"
-    cache_root = AscendBinaryCache._get_cache_root()
+    cache_root = AscendBinaryCache._get_write_cache_root()
     legacy_path = os.path.join(cache_root, f"{key}.{AIBIN}")
     os.makedirs(cache_root, exist_ok=True)
     with open(legacy_path, "wb") as f:
@@ -136,13 +164,14 @@ def test_ascend_binary_cache_rejects_foreign_format_tag(monkeypatch, tmp_path, f
 
     key = "foreign-format-key"
     AscendBinaryCache.save(key, AIBIN, b"valid-aibin")
-    path = Path(AscendBinaryCache.get_path(key, AIBIN))
+    path = Path(AscendBinaryCache.get_write_path(key, AIBIN))
     metadata_path = path.parent / "metadata.json"
     metadata = json.loads(metadata_path.read_text())
     metadata["format"] = foreign_format
     metadata_path.write_text(json.dumps(metadata))
 
-    assert AscendBinaryCache.load(key, AIBIN) is None
+    with pytest.raises(ValueError, match="metadata"):
+        AscendBinaryCache.load(key, AIBIN)
     assert path.read_bytes() == b"valid-aibin"
     assert json.loads(metadata_path.read_text()) == metadata
 
@@ -151,7 +180,7 @@ def test_ascend_binary_cache_first_valid_writer_wins(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
 
     key = "first-writer-key"
-    path = Path(AscendBinaryCache.get_path(key, AIBIN))
+    path = Path(AscendBinaryCache.get_write_path(key, AIBIN))
     AscendBinaryCache.save(key, AIBIN, b"first-binary")
     first_inode = path.stat().st_ino
     with path.open("rb") as reader:
@@ -186,7 +215,7 @@ def test_ascend_binary_cache_concurrent_publishers_do_not_replace_winner(monkeyp
     assert len(winners) == 1
     assert winners[0] in payloads
     assert AscendBinaryCache.load("concurrent-key", AIBIN) == winners[0]
-    cache_entries = os.listdir(AscendBinaryCache._get_cache_root())
+    cache_entries = os.listdir(AscendBinaryCache._get_write_cache_root())
     assert cache_entries == ["concurrent-key"]
     assert not list(Path(AscendBinaryCache._get_staging_root()).iterdir())
 

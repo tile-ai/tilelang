@@ -95,9 +95,8 @@ def run_gemm(
         code = f"// {stramp}\n" + code
         return code
 
-    tilelang.disable_cache()
-    matmul_kernel = tilelang.compile(program, out_idx=-1)
-    tilelang.enable_cache()
+    with tilelang.testing.without_kernel_cache():
+        matmul_kernel = tilelang.compile(program, out_idx=-1)
 
     kernel_source = matmul_kernel.get_kernel_source()
 

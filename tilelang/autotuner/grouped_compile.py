@@ -27,6 +27,21 @@ from tilelang.tools.pass_timing import create_pass_timing_tool
 CompileUnitResult = tuple[int, dict[str, Any], JITKernel | None, Exception | None]
 
 
+def _with_device_compile_flags(
+    pass_configs: dict[str, Any],
+    compile_flags: list[str] | str | None,
+) -> dict[str, Any]:
+    """Append explicit flags after existing flags for grouped device compilation."""
+    if compile_flags is None:
+        return pass_configs
+
+    existing = pass_configs.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS) or []
+    existing = [existing] if isinstance(existing, str) else existing
+    flags = [compile_flags] if isinstance(compile_flags, str) else compile_flags
+    pass_configs[PassConfigKey.TL_DEVICE_COMPILE_FLAGS] = [*existing, *flags]
+    return pass_configs
+
+
 def compile_grouped_unit_tvm_ffi(
     unit_items: list[tuple[int, dict[str, Any]]],
     compile_args: CompileArgs,
@@ -45,6 +60,7 @@ def compile_grouped_unit_tvm_ffi(
     tools = [timing_tool] if timing_tool is not None else []
     with compile_pass_instrumentation(name="grouped-tvm-ffi", tools=tools):
         pass_configs = normalize_pass_configs(compile_args.pass_configs)
+        pass_configs = _with_device_compile_flags(pass_configs, compile_args.compile_flags)
         base_pass_instruments = []
         if pass_configs.get(PassConfigKey.TL_ENABLE_DUMP_IR):
             dump_ir_path = pass_configs.get(PassConfigKey.TL_DUMP_IR_DIR, "./dump_ir")

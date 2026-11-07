@@ -4,7 +4,7 @@ import pytest
 from tilelang import tvm
 from tilelang.ascend import transform
 from tvm import tirx
-from testing.ascend._ir import kernel, nodes, region, seq
+from testing.ascend._ir import copy, kernel, nodes, region, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
 
 
@@ -115,4 +115,62 @@ def test_bound_data_and_sf_cannot_have_different_owners():
         },
     )
     with pytest.raises(tvm.error.InternalError, match="same owner loops"):
+        transform.PrepareMultiBuffer()(before)
+
+
+@pytest.mark.parametrize("contract", ["initialization", "read-modify-write", "partial-region"])
+def test_explicit_write_owner_trusts_the_data_contract(contract):
+    a, c = [tirx.decl_buffer((64,), "float32", name=name) for name in ("A", "C")]
+    x = tirx.decl_buffer((64,), "float32", name="x", scope="shared.dyn")
+    i = tirx.Var("i", "int32")
+    write = copy(a, x)
+    if contract == "read-modify-write":
+        write = copy(x, x)
+    elif contract == "partial-region":
+        write = copy(a, x, src_shape=[16], dst_shape=[16])
+    body = seq(unit(write, guard=i > 0 if contract == "initialization" else None), unit(copy(x, c)))
+    before = kernel(
+        unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [x.data]}), core=None),
+        buffers=[x],
+        params=[a, c],
+        annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
+    )
+    # Deliberately invalid data contracts: test annotation trust only, never
+    # execute these or treat their acceptance as synchronization evidence.
+    after = transform.PrepareMultiBuffer()(before)
+    (owner,) = nodes(after, tirx.For)
+    assert owner.annotations["tl.multi_buffer_counter_map"][x.data].dtype == "int64"
+
+
+@pytest.mark.parametrize(
+    "case, message",
+    [
+        ("opaque", "opaque pointer"),
+        ("mutable-guard", "unsnapshotted guard"),
+        ("loop-break", "loop_break"),
+        ("cross-stage", "multiple schedule stages"),
+        ("changing-view", "loop-invariant buffer view geometry"),
+    ],
+)
+def test_unsupported_write_counter_structure(case, message):
+    a, c = [tirx.decl_buffer((64,), "float32", name=name) for name in ("A", "C")]
+    x = tirx.decl_buffer((256,), "float32", name="x", scope="shared.dyn")
+    i = tirx.Var("i", "int32")
+    view = tirx.decl_buffer((64,), "float32", data=x.data, scope="shared.dyn", elem_offset=i * 64 if case == "changing-view" else 0)
+    write = copy(a, view)
+    if case == "opaque":
+        write = seq(write, tirx.Evaluate(tirx.call_extern("int32", "opaque_write", x.data)))
+    elif case == "loop-break":
+        write = seq(write, tirx.Evaluate(tirx.call_intrin("handle", tvm.ir.Op.get("tl.loop_break"))))
+    body = seq(
+        unit(write, guard=x[0] > 0 if case == "mutable-guard" else i % 2 == 0),
+        unit(copy(view, c), stage=1 if case == "cross-stage" else 0),
+    )
+    before = kernel(
+        unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [x.data]}), core=None),
+        buffers=[x],
+        params=[a, c],
+        annotations={"tl.buffer_versions_map": {x.data: 2}, "tl.buffer_version_mode": {x.data: "write_counter"}},
+    )
+    with pytest.raises(tvm.error.InternalError, match=message):
         transform.PrepareMultiBuffer()(before)

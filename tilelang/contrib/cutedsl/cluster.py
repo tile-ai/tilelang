@@ -10,6 +10,7 @@ __all__ = [
     "cluster_wait",
     "cluster_sync",
     "block_rank_in_cluster",
+    "cluster_store",
     "clc_try_cancel",
     "clc_try_cancel_multicast",
     "clc_is_canceled",
@@ -27,6 +28,15 @@ def _smem_ptr(ptr: Pointer, dtype, *, loc=None, ip=None):
         loc=loc,
         ip=ip,
     )
+
+
+@dsl_user_op
+def cluster_store(ptr: Pointer, value, dst_cta: Int32, index: Int32, *, loc=None, ip=None) -> None:
+    """Store one value into a peer CTA's shared memory (``mapa`` + store)."""
+    if hasattr(ptr, "iterator"):
+        ptr = ptr.iterator
+    remote = prims.mapa(ptr + index, dst_cta, loc=loc, ip=ip)
+    remote.store(value, alignment=value.dtype.width // 8, loc=loc, ip=ip)
 
 
 @dsl_user_op

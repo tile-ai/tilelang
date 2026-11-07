@@ -1548,7 +1548,7 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
         type_name = "int";
       } else if (t.is_uint()) {
         type_name = "uint";
-      } else if (t.is_float()) {
+      } else if (t.is_float() || t.is_tfloat32()) {
         type_name = "float";
       }
     }
@@ -1646,7 +1646,7 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
         type_name = "int";
       } else if (t.is_uint()) {
         type_name = "uint";
-      } else if (t.is_float()) {
+      } else if (t.is_float() || t.is_tfloat32()) {
         type_name = "float";
       }
     }
@@ -1791,6 +1791,32 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
+  if (cast_round == "rn" && from_ty.is_float() && from_ty.bits() == 32 &&
+      target_ty.is_tfloat32()) {
+    ICHECK(!cast_rbits.defined())
+        << "rbits is only supported with stochastic rounding, not round='rn'";
+    std::string cast_func = std::string("tl::__tl_cvt_f32_to_tf32_rn<") +
+                            (cast_sat ? "true>" : "false>");
+    if (from_ty.is_scalar()) {
+      os << cast_func << "(" << PrintExpr(op->value) << ")";
+      return;
+    }
+    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string sret = name_supply_->FreshName("_");
+    PrintIndent();
+    PrintType(target_ty, stream);
+    stream << ' ' << sret << ";\n";
+    for (int i = 0; i < from_ty.lanes(); ++i) {
+      std::ostringstream val;
+      val << cast_func << "(";
+      PrintVecElemLoad(src, from_ty, i, val);
+      val << ")";
+      PrintVecElemStore(sret, target_ty, i, val.str());
+    }
+    os << sret;
+    return;
+  }
+
   // Scalar fp8 <-> half via the __tl_cvt helpers; the default cast detours
   // through fp32.
   if (from_ty.is_scalar() && cast_round.empty() && target_ty.is_float16() &&
@@ -1902,13 +1928,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
            tl::IsCudaVectorizableFP8(target_ty) || target_ty.is_float4_e2m1fn();
   };
   if (!round_is_supported()) {
-    LOG(FATAL) << "round '" << cast_round
-               << "' is not supported for a cast from " << from_ty << " to "
-               << target_ty
-               << ". Supported combinations: round='rs' with an rbits operand, "
-                  "from float32 to float16, bfloat16, float8_e4m3*, "
-                  "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
-                  "round annotation.";
+    LOG(FATAL)
+        << "round '" << cast_round << "' is not supported for a cast from "
+        << from_ty << " to " << target_ty
+        << ". Supported combinations: round='rn' from float32 to tfloat32; "
+           "round='rs' with an rbits operand, "
+           "from float32 to float16, bfloat16, float8_e4m3*, "
+           "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
+           "round annotation.";
   }
 
   // Handle conversion from float16 to float32
@@ -2792,7 +2819,16 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt("tl::cp_async_commit");
   } else if (op->op.same_as(builtin::ptx_wait_group())) {
     need_copy_h_ = true;
-    int n = Downcast<IntImm>(op->args[0])->value;
+    // The wait depth lowers to a `cp.async.wait_group N`, whose operand must be
+    // a compile-time immediate. A software pipeline over a dynamic trip count
+    // can emit a non-constant depth (e.g. `1 - ko`) in its drain phase. Since
+    // there is no runtime form of the wait, fall back to a full wait (N=0: wait
+    // for all outstanding async copies), which is always a safe
+    // over-synchronization.
+    int n = 0;
+    if (const auto *imm = op->args[0].as<IntImmNode>()) {
+      n = static_cast<int>(imm->value);
+    }
     std::string func_name = "tl::cp_async_wait<" + std::to_string(n) + ">";
     print_extern_call_stmt(func_name, 1);
   } else if (op->op.same_as(builtin::create_barriers())) {
@@ -6003,6 +6039,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // Each ulonglong4 component holds two float32 lanes. Bit-cast the float2
+  // temporary without taking its address, which NVRTC rejects.
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
@@ -6010,7 +6048,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "__builtin_bit_cast(uint64_t, make_float2(" << v << ", " << v
+         << "))";
     }
     os << ')';
     return;
@@ -6562,7 +6601,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
              "to match entry_name";
     }
+    // Raw user source: reset this function's anchors, emit one directive for
+    // the block, then pass its lines through untouched (a directive inside a
+    // macro continuation or string literal would corrupt it).
+    this->InitFuncState(f);
+    this->BeginRawSource();
     stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
+    this->EndRawSource();
     return;
   }
 
