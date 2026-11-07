@@ -20,6 +20,11 @@ namespace attr {
 // then expands synchronization back to its guarded candidate sites.
 constexpr const char *kAscendPerCoreTask = "tl.ascend_per_core_task";
 
+// Internal metadata on kAscendPerCoreTask. Preserve one external handshake
+// around the whole region even if explicit unrolling removes its loops before
+// scheduling and makes repeated candidates appear as a loop-free sequence.
+constexpr const char *kAscendPerCoreTaskBoundarySync = "boundary_sync";
+
 // Groups statements into one AutoSchedule TaskNode. Inside a
 // kAscendPerCoreTask region, each marker is one concrete candidate. This marker
 // carries task semantics and compiler-internal core ownership; stage metadata

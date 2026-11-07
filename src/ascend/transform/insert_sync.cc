@@ -2976,13 +2976,30 @@ void InsertStatement(IRStructure *node, Stmt stmt, bool at_beginning,
   if (node->IsTask()) {
     const auto *task = static_cast<const TaskNode *>(node);
     if (task->IsPerCoreTask() && task->GetCoreMask() == core) {
+      bool boundary_sync = false;
+      if (const auto *marker = task->stmt.as<AttrStmtNode>()) {
+        auto metadata = task_metadata_detail::CopyTaskMetadata(marker->node);
+        if (auto value = metadata.Get(attr::kAscendPerCoreTaskBoundarySync))
+          boundary_sync =
+              task_metadata_detail::RequireConstantTaskMetadataInt(
+                  value.value(), attr::kAscendPerCoreTaskBoundarySync)
+                  ->value != 0;
+      }
+      PostOrderVisit(task->stmt, [&](const ObjectRef &node) {
+        boundary_sync |=
+            node.as<ForNode>() != nullptr || node.as<WhileNode>() != nullptr;
+      });
       ConstrSet outer_ctx = task->GetContextBeforeConditionGuards();
       PrimExpr task_guard = task->GetConditionGuard();
       PrimExpr sync_guard = guard.defined() ? guard : Bool(true);
       // Projection can make a PerCoreTask optional on a block while its
       // storage protocol remains shared. Keep wider events outside the group
       // so candidate selection cannot suppress a required wait or set.
-      at_candidate = GuardImplies(sync_guard, task_guard, outer_ctx);
+      // Internal loops must also retain one event per logical task: migrating
+      // it to a candidate could consume a token repeatedly or skip it entirely.
+      // The metadata retains this rule when explicit unrolling removed loops.
+      at_candidate =
+          !boundary_sync && GuardImplies(sync_guard, task_guard, outer_ctx);
       elide_guard =
           at_candidate && GuardsEquivalent(sync_guard, task_guard, outer_ctx);
     }
