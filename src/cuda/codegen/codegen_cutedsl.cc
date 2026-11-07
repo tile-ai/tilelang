@@ -624,6 +624,22 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     }
   }
 
+  // CuTeDSL normalizes unsigned tensor elements to signed element types, so a
+  // plain widening cast such as `cutlass.Int32(x)` sign-extends a uint8 value
+  // >= 128.  Reinterpret the source through its unsigned type first so the
+  // widening conversion zero-extends.
+  const bool target_is_float = target_ty.is_float() || target_ty.is_bfloat16();
+  const bool target_is_wider_int =
+      (target_ty.is_int() || target_ty.is_uint()) &&
+      target_ty.bits() > from_ty.bits();
+  if (from_ty.is_scalar() && target_ty.is_scalar() && from_ty.is_uint() &&
+      (target_is_float || target_is_wider_int)) {
+    PrintType(target_ty, os);
+    os << "(cutlass.Uint" << from_ty.bits() << "(" << PrintExpr_(op->value)
+       << "))";
+    return;
+  }
+
   if (from_ty.is_scalar() && from_is_cutedsl_fp8 && target_is_fp8_widening) {
     // CuTeDSL/NVGPU widens FP8 through nvgpu.cvt_fpext, whose operand must be
     // a 32-bit aligned vector.  Pack the scalar into a four-lane FP8 vector,
@@ -694,6 +710,10 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     return CodeGenTileLangPY::VisitExpr_(op, os);
 
   int lanes = target_ty.lanes();
+  const bool unsigned_needs_zero_extend =
+      from_ty.is_uint() && ((target_ty.is_float() || target_ty.is_bfloat16()) ||
+                            ((target_ty.is_int() || target_ty.is_uint()) &&
+                             target_ty.bits() > from_ty.bits()));
 
   // CuTeDSL requires narrow precision (e.g. FP8) vector .to() casts to
   // operate on 32-bit aligned vectors.  For unaligned widths (e.g.
@@ -721,9 +741,17 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
            << ",), ";
     PrintType(target_ty.element_of(), stream);
     stream << ")\n";
+    std::string narrow_src = "tl.as_tensor_ssa(" + src + ")";
+    if (unsigned_needs_zero_extend) {
+      std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
+      PrintIndent();
+      stream << unsigned_src << " = tl.cast_tensor(" << narrow_src << ", ";
+      PrintType(DataType::UInt(from_ty.bits()), stream);
+      stream << ")\n";
+      narrow_src = unsigned_src;
+    }
     PrintIndent();
-    stream << aligned_dst << ".store(tl.cast_tensor(tl.as_tensor_ssa(" << src
-           << "), ";
+    stream << aligned_dst << ".store(tl.cast_tensor(" << narrow_src << ", ";
     PrintType(target_ty.element_of(), stream);
     stream << "))\n";
 
@@ -761,6 +789,21 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
         stream << "(0)\n";
       }
     }
+  }
+
+  // CuTeDSL normalizes unsigned tensor elements to signed; reinterpret the
+  // source as unsigned before a vector cast so widening zero-extends.
+  if (unsigned_needs_zero_extend) {
+    std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
+    PrintIndent();
+    stream << unsigned_src << " = tl.cast_tensor(" << cast_src;
+    if (cast_src_is_tensor)
+      stream << ".load()";
+    stream << ", ";
+    PrintType(DataType::UInt(from_ty.bits()), stream);
+    stream << ")\n";
+    cast_src = unsigned_src;
+    cast_src_is_tensor = false;
   }
 
   // Cast (always aligned now)
