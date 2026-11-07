@@ -726,9 +726,78 @@ public:
     return producer_indices;
   }
 
+  // A copy, or a scalar binding that feeds its operands, may read a buffer
+  // that a later statement in the body writes for the next iteration. Issuing
+  // the copy ahead of that write makes it observe the stale value. Without a
+  // schedule yet, any such write blocks pipelining; with an explicit schedule,
+  // a write kept in the reader's stage and ordered after it is still safe.
+  bool HasLoopCarriedCopyRead(
+      const std::vector<PipelineStageInfo> &pipeline_stage_infos,
+      const ScalarDefMap &scalar_def_to_stmt) const {
+    const int num_stmts = static_cast<int>(pipeline_stage_infos.size());
+    auto overwritten_later = [&](int reader_idx) {
+      const PipelineStageInfo &reader = pipeline_stage_infos[reader_idx];
+      for (int j = reader_idx + 1; j < num_stmts; ++j) {
+        const PipelineStageInfo &writer = pipeline_stage_infos[j];
+        if (reader.stage >= 0 && writer.stage == reader.stage &&
+            writer.order > reader.order) {
+          continue;
+        }
+        for (const BufferRegion &write : writer.writes) {
+          for (const BufferRegion &read : reader.reads) {
+            if (PipelineRegionsMayConflict(write, read, thread_domains_)) {
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    };
+    for (int i = 0; i < num_stmts; ++i) {
+      if (!pipeline_stage_infos[i].IsCopyStage()) {
+        continue;
+      }
+      std::vector<int> worklist{i};
+      std::unordered_set<int> visited{i};
+      while (!worklist.empty()) {
+        int idx = worklist.back();
+        worklist.pop_back();
+        if (overwritten_later(idx)) {
+          return true;
+        }
+        for (const Var &var : pipeline_stage_infos[idx].scalar_uses) {
+          auto it = scalar_def_to_stmt.find(var);
+          if (it != scalar_def_to_stmt.end() &&
+              visited.insert(it->second).second) {
+            worklist.push_back(it->second);
+          }
+        }
+      }
+    }
+    return false;
+  }
+
+  bool HasLoopCarriedCopyRead(const Array<Stmt> &scheduled_stmts,
+                              const Array<Integer> &order_array,
+                              const Array<Integer> &stage_array) const {
+    std::vector<PipelineStageInfo> infos;
+    infos.reserve(scheduled_stmts.size());
+    for (size_t i = 0; i < scheduled_stmts.size(); ++i) {
+      PipelineStageInfo pinfo =
+          MakePipelineStageInfo(scheduled_stmts[i], static_cast<int>(i));
+      pinfo.order = static_cast<int>(order_array[i]->value);
+      pinfo.stage = static_cast<int>(stage_array[i]->value);
+      infos.push_back(std::move(pinfo));
+    }
+    return HasLoopCarriedCopyRead(infos, BuildScalarDefMap(infos));
+  }
+
   bool PropagateProducersForCopy(
       std::vector<PipelineStageInfo> *pipeline_stage_infos) const {
     ScalarDefMap scalar_def_to_stmt = BuildScalarDefMap(*pipeline_stage_infos);
+    if (HasLoopCarriedCopyRead(*pipeline_stage_infos, scalar_def_to_stmt)) {
+      return false;
+    }
     std::vector<std::unordered_set<int>> anchor_candidates(
         pipeline_stage_infos->size());
     std::deque<std::pair<int, int>> worklist;
@@ -967,7 +1036,7 @@ public:
     EmitImplicitAsyncAnnotations(pipeline_stage_infos, annotations);
   }
 
-  PipelineStageInfo MakePipelineStageInfo(Stmt stmt, int idx) {
+  PipelineStageInfo MakePipelineStageInfo(Stmt stmt, int idx) const {
     SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
                  /*name_hint=*/"",
                  /*body*/ std::move(stmt));
@@ -1056,6 +1125,13 @@ private:
     return MakeStageAnalyzer().MakePipelineStageInfo(std::move(stmt), idx);
   }
 
+  bool HasLoopCarriedCopyRead(const Array<Stmt> &scheduled_stmts,
+                              const Array<Integer> &order_array,
+                              const Array<Integer> &stage_array) const {
+    return MakeStageAnalyzer().HasLoopCarriedCopyRead(scheduled_stmts,
+                                                      order_array, stage_array);
+  }
+
   using ScheduledStmtAnalysis =
       PipelinePlanningBodyAnalyzer::ScheduledStmtAnalysis;
   using SeqStmtFlattener = PipelinePlanningBodyAnalyzer::SeqStmtFlattener;
@@ -1108,6 +1184,13 @@ private:
           FilterAnnotationsForScheduledStmts(order_array, analysis);
       Array<Integer> filtered_stage_array =
           FilterAnnotationsForScheduledStmts(stage_array, analysis);
+      if (HasLoopCarriedCopyRead(analysis.scheduled_stmts, filtered_order_array,
+                                 filtered_stage_array)) {
+        LOG(FATAL) << "PipelinePlanning: explicit pipeline schedule issues a "
+                      "copy ahead of a loop-carried store into its operands; "
+                      "keep the store in the copy's stage or use the "
+                      "sequential loop";
+      }
       annotations.Set(s_tir::attr::software_pipeline_order,
                       filtered_order_array);
       annotations.Set(s_tir::attr::software_pipeline_stage,
