@@ -41,7 +41,9 @@ struct Gemm {
     return {1, 1};
   }
 
-  static bool ReuseExistingSharedLayout(String gemm_inst) {
+  static bool ReuseExistingSharedLayout(String gemm_inst, const tvm::tl::Gemm &,
+                                        const Buffer &, const Layout &,
+                                        const Target &) {
     (void)gemm_inst;
     return true;
   }
