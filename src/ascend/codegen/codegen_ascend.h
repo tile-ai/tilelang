@@ -103,6 +103,7 @@ private:
   };
 
   std::string current_function_name_;
+  bool batch_schedule_{false};
   int simtvf_helper_counter_{0};
   int simdvf_helper_counter_{0};
   VFMode vf_mode_{VFMode::kNone};
