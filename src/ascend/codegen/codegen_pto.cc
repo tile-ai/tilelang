@@ -369,6 +369,20 @@ bool StartsWith(const std::string &value, const std::string &prefix) {
   return value.rfind(prefix, 0) == 0;
 }
 
+// PTO register types count elements of the *PTO* element type, and PTO stores a
+// logical FP4 pair as one f4e2m1x2 byte (see DataTypeName). A TileLang sub-byte
+// vector counts logical lanes, so fold them into whole bytes before the count
+// is used as a register element count.
+int PtoVRegLanes(int lanes, DataType elem_dtype, const char *context) {
+  if (elem_dtype.bits() >= 8) {
+    return lanes;
+  }
+  ICHECK_EQ((lanes * elem_dtype.bits()) % 8, 0)
+      << context << " sub-byte vector lanes must form whole bytes, got "
+      << elem_dtype.with_lanes(lanes);
+  return (lanes * elem_dtype.bits()) / 8;
+}
+
 int VstsMaskGranularityOverride(const std::string &dist,
                                 DataType value_elem_dtype) {
   const int width = value_elem_dtype.bits();
@@ -6340,13 +6354,8 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
         op->args.size() == 3U
             ? RemoveOutermostParentheses(PrintExpr_(op->args[2]))
             : "pto.const(0)";
-    int pto_lanes = op->dtype.lanes();
-    if (elem_dtype.bits() < 8) {
-      ICHECK_EQ((pto_lanes * elem_dtype.bits()) % 8, 0)
-          << "PTO vld sub-byte vector lanes must form whole bytes, got "
-          << op->dtype;
-      pto_lanes = (pto_lanes * elem_dtype.bits()) / 8;
-    }
+    const int pto_lanes =
+        PtoVRegLanes(op->dtype.lanes(), elem_dtype, "PTO vld");
     os << "pto.vlds(" << PrintExpr_(op->args[0]) << ", " << offset
        << ", pto.vreg_type(" << pto_lanes << ", " << ScalarType(elem_dtype)
        << ")";
@@ -6845,22 +6854,28 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     ICHECK(op->args.size() == 2U || op->args.size() == 3U)
         << "tl.simd.vgatherb expects 2 or 3 arguments (base, index[, mask])";
     DataType elem = op->dtype.element_of();
+    // Same element-count contract as vlds: FP4 logical lanes are stored as
+    // one-byte f4e2m1x2 elements, so the result register counts packed bytes.
+    const int vreg_lanes =
+        PtoVRegLanes(op->dtype.lanes(), elem, "PTO vgatherb");
     std::string mask;
     if (op->args.size() == 3U) {
       mask = PrintExpr_(op->args[2]);
     } else {
       int elem_bits = elem.bits();
-      if (elem_bits <= 8)
-        elem_bits = 8;
-      else if (elem_bits <= 16)
-        elem_bits = 16;
-      else
-        elem_bits = 32;
+      // CCE provides pset_b8/b16/b32 only: FP4 elements mask at b8, and a
+      // 64-bit element has no predicate form at all, so it must not silently
+      // borrow the b32 default.
+      ICHECK_LE(elem_bits, 32)
+          << "PTO vgatherb cannot infer a default predicate for " << elem_bits
+          << "-bit elements: CCE provides pset_b8/b16/b32 only (no pset_b4 or "
+             "pset_b64); pass an explicit mask";
+      elem_bits = elem_bits <= 8 ? 8 : (elem_bits <= 16 ? 16 : 32);
       mask = "pto.pset_b" + std::to_string(elem_bits) + "(\"PAT_ALL\")";
     }
     os << "pto.vgatherb(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]) << ", " << mask
-       << ", result_vreg_type=pto.vreg_type(" << op->dtype.lanes() << ", "
+       << ", result_vreg_type=pto.vreg_type(" << vreg_lanes << ", "
        << ScalarType(elem) << "))";
     return;
   }
@@ -7070,14 +7085,21 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     // the selected lane bits.
     int mask_bits = elem_dtype.bits();
     if (mask_bits < 8) {
-      mask_bits = 8;
+      mask_bits = 8; // CCE has no pset_b4
     }
+    ICHECK(mask_bits == 8 || mask_bits == 16 || mask_bits == 32)
+        << "PTO vgather2 result predicate width must be b8/b16/b32, got "
+        << elem_dtype;
     std::string mask =
         "pto.pbitcast(" + RemoveOutermostParentheses(PrintExpr_(op->args[2])) +
         ", pto.mask_type(\"b" + std::to_string(mask_bits) + "\"))";
-    std::string result_type = "pto.vreg_type(" +
-                              std::to_string(op->dtype.lanes()) + ", " +
-                              ScalarType(elem_dtype) + ")";
+    // Same element-count contract as vlds (see PtoVRegLanes): an FP4 result
+    // covers 512 logical lanes in 256 one-byte f4e2m1x2 elements.
+    std::string result_type =
+        "pto.vreg_type(" +
+        std::to_string(
+            PtoVRegLanes(op->dtype.lanes(), elem_dtype, "PTO vgather2")) +
+        ", " + ScalarType(elem_dtype) + ")";
     os << "pto.vgather2(" << base << ", " << index << ", " << mask << ", "
        << result_type << ")";
     return;
@@ -7828,8 +7850,10 @@ void CodeGenTileLangPTO::VisitStmt_(const BindNode *op) {
       std::string next_ptr = pair_name + "_next_ptr";
       PrintIndent();
       stream << value << " = pto.vlds(" << ptr
-             << ", pto.const(0), pto.vreg_type(" << call->dtype.lanes() << ", "
-             << ScalarType(elem_dtype) << ")";
+             << ", pto.const(0), pto.vreg_type("
+             << PtoVRegLanes(call->dtype.lanes(), elem_dtype,
+                             "PTO vld post_inc")
+             << ", " << ScalarType(elem_dtype) << ")";
       if (!dist.empty() && dist != "NORM") {
         stream << ", dist=\"" << dist << "\"";
       }
