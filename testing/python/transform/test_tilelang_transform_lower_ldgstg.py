@@ -468,5 +468,156 @@ def test_e2e_load_global_store_global_predicated():
     )
 
 
+def _vector_element_copy(dtype, index_lanes, access_kind, index_kind="ramp"):
+    """Build accesses whose element dtype already contains vector lanes."""
+    a = tirx.Var("a", "handle")
+    b = tirx.Var("b", "handle")
+    pred = tirx.Var("pred", "int32")
+    A = tirx.decl_buffer((128,), dtype, name="A", elem_offset=4)
+    B = tirx.decl_buffer((128,), dtype, name="B", elem_offset=4)
+    index = tirx.const(4, "int32")
+    if index_lanes > 1:
+        if index_kind == "broadcast":
+            index = tirx.Broadcast(index, index_lanes)
+        else:
+            index = tirx.Ramp(index, 2 if index_kind == "strided" else 1, index_lanes)
+    value = tirx.BufferLoad(A, [index])
+    if access_kind == "conditional_load":
+        zero = tirx.Broadcast(tirx.const(0, dtype.split("x")[0]), tvm.DataType(value.dtype).lanes)
+        value = tirx.if_then_else(pred > 0, value, zero)
+    body = tirx.BufferStore(B, value, [index])
+    if access_kind == "guarded_copy":
+        body = tirx.IfThenElse(pred > 0, body, None)
+    return tirx.PrimFunc([a, b, pred], body, buffer_map={a: A, b: B}).with_attr("global_symbol", "main")
+
+
+def _lower_flat_vector_element_copy(func):
+    # These 1D accesses already have canonical scalar/Ramp indices. Running
+    # FlattenBuffer again would wrap a Ramp in extra vector index arithmetic.
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target("cuda"))(tvm.IRModule.from_expr(func))
+    with tvm.transform.PassContext(
+        config={
+            PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True,
+            PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True,
+        }
+    ):
+        return tl.cuda.transform.LowerLDGSTG()(mod)["main"]
+
+
+@requires_ldgstg
+@pytest.mark.parametrize(
+    "dtype,index_lanes,bits",
+    [
+        ("float16x2", 1, 32),
+        ("float32x2", 1, 64),
+        ("float32x4", 1, 128),
+        ("float32x8", 1, 256),
+        ("float32x2", 2, 128),
+        ("float32x4", 2, 256),
+    ],
+)
+@pytest.mark.parametrize("access_kind", ["copy", "guarded_copy", "conditional_load"])
+def test_vector_element_access_width(dtype, index_lanes, bits, access_kind):
+    """Count both element lanes and index lanes without changing pointer units."""
+    func = _vector_element_copy(dtype, index_lanes, access_kind)
+    lowered = _lower_flat_vector_element_copy(func)
+    predicate = lowered.params[-1] > 0
+    load = _assert_global_access(lowered, "ldg", bits, 0, predicate=None if access_kind == "copy" else predicate)
+    store = _assert_global_access(lowered, "stg", bits, 1, predicate=predicate if access_kind == "guarded_copy" else None)
+    for call in (load, store):
+        ptr = call.args[0]
+        assert ptr.args[0].dtype == dtype
+        # The index and elem_offset are measured in vector buffer elements.
+        assert tvm.arith.Analyzer().can_prove_equal(ptr.args[2], 8)
+    stored_loads = collect_calls(store.args[1], op=f"tl.ldg{bits}")
+    assert len(stored_loads) == 1 and stored_loads[0].same_as(load)
+
+
+@requires_ldgstg
+@pytest.mark.parametrize("dtype", ["uint8x2", "float32x3", "float32x16"])
+@pytest.mark.parametrize("access_kind", ["copy", "guarded_copy", "conditional_load"])
+def test_unsupported_vector_element_width_is_not_lowered(dtype, access_kind):
+    """Leave 16-, 96-, and 512-bit accesses to the ordinary lowering path."""
+    func = _vector_element_copy(dtype, 1, access_kind)
+    lowered = _lower_flat_vector_element_copy(func)
+    _assert_no_global_intrinsics(lowered)
+    assert len(collect_nodes(lowered, tirx.BufferLoad)) == 1
+    assert len(collect_nodes(lowered, tirx.BufferStore)) == 1
+
+
+@requires_ldgstg
+@pytest.mark.parametrize("index_kind", ["broadcast", "strided"])
+@pytest.mark.parametrize("access_kind", ["copy", "guarded_copy", "conditional_load"])
+def test_noncontiguous_vector_indices_are_not_lowered(access_kind, index_kind):
+    """A vector-valued index is not necessarily a contiguous memory access."""
+    func = _vector_element_copy("float32x2", 2, access_kind, index_kind=index_kind)
+    lowered = _lower_flat_vector_element_copy(func)
+    _assert_no_global_intrinsics(lowered)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("scalar,lanes", [("float16", 2), ("float32", 2), ("float32", 4), ("float32", 8), ("int32", 2)])
+@pytest.mark.parametrize("enable_ldgstg", [False, True])
+def test_e2e_vector_view_copy(scalar, lanes, enable_ldgstg):
+    """Preserve every lane when copying through a vector-valued T.view."""
+    import torch
+
+    n = 128 // lanes
+    vector = f"{scalar}x{lanes}"
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), scalar), O: T.Tensor((128,), scalar)):
+        with T.Kernel(1, threads=n):
+            a = T.view(A, (n,), vector)
+            o = T.view(O, (n,), vector)
+            for i in T.Parallel(n):
+                o[i] = a[i]
+
+    kernel = tl.compile(main, pass_configs={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: enable_ldgstg})
+    a = (torch.arange(128, device="cuda") - 63).to(getattr(torch, scalar))
+    o = torch.full_like(a, -1000)
+    kernel(a, o)
+    torch.testing.assert_close(o, a, rtol=0, atol=0)
+    if enable_ldgstg:
+        bits = tvm.DataType(vector).bits * lanes
+        source = kernel.get_kernel_source()
+        assert f"load_global_{bits}" in source
+        assert f"store_global_{bits}" in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("access_kind", ["guarded_copy", "conditional_load"])
+def test_e2e_predicated_vector_view_copy(access_kind):
+    """False predicates preserve the output or zero-fill the complete vector."""
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((128,), "float32"), O: T.Tensor((128,), "float32")):
+        with T.Kernel(1, threads=64):
+            a = T.view(A, (64,), "float32x2")
+            o = T.view(O, (64,), "float32x2")
+            for i in T.Parallel(64):
+                if access_kind == "guarded_copy":
+                    with T.If(i < 32), T.Then():
+                        o[i] = a[i]
+                else:
+                    o[i] = T.if_then_else(i < 32, a[i], T.Broadcast(T.float32(0), 2))
+
+    kernel = tl.compile(
+        main,
+        pass_configs={PassConfigKey.TL_ENABLE_LOWER_LDGSTG: True, PassConfigKey.TL_ENABLE_LOWER_LDGSTG_PREDICATED: True},
+    )
+    a = torch.arange(128, device="cuda", dtype=torch.float32) - 63
+    o = torch.full_like(a, -1000)
+    expected = torch.full_like(a, -1000 if access_kind == "guarded_copy" else 0)
+    expected[:64] = a[:64]
+    kernel(a, o)
+    torch.testing.assert_close(o, expected, rtol=0, atol=0)
+    source = kernel.get_kernel_source()
+    assert "load_global_64_conditional" in source
+    store_suffix = "_conditional" if access_kind == "guarded_copy" else ""
+    assert f"store_global_64{store_suffix}" in source
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
