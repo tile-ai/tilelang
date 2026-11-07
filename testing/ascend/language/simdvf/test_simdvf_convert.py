@@ -9,8 +9,7 @@ unsupported-conversion fallback.
 
 import pytest
 
-import tilelang
-import tilelang.ascend.language as T  # noqa: F401
+import tilelang.ascend.language as T
 
 
 def _build_convert(src_dtype: str, target_dtype: str):
