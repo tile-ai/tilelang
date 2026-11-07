@@ -192,6 +192,11 @@ def NormalizeAscendFractalStorage():
     return _ffi_api.NormalizeAscendFractalStorage()  # type: ignore
 
 
+def LowerSimdVFFill():
+    """Lower SIMD_VF fills without re-vectorizing PTO Parallel loops."""
+    return _ffi_api.LowerSimdVFFill()
+
+
 def AscendSimdVFLowerParallel():
     """Lower T.Parallel inside SIMD_VF blocks to MicroAPI register-level vector ops."""
     return _ffi_api.AscendSimdVFLowerParallel()  # type: ignore
@@ -335,6 +340,7 @@ __all__ = [
     "AscendRemoveNoOp",
     "AscendInsertOOBPadding",
     "AscendSimdVFLowerParallel",
+    "LowerSimdVFFill",
     "AscendThreadSync",
     "AscendLayoutInference",
     "AscendLowerTileOp",

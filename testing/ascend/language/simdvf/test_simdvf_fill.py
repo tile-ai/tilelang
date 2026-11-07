@@ -7,7 +7,8 @@ import tilelang.testing
 import torch
 
 
-def test_simdvf_fill_full_unversioned_ub_npu():
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+def test_simdvf_fill_full_unversioned_ub_npu(target):
     @T.prim_func
     def kernel(O: T.Buffer((64,), "float32")):
         with T.Kernel(1):
@@ -16,13 +17,14 @@ def test_simdvf_fill_full_unversioned_ub_npu():
                 T.fill(temp, 1.0)
             T.copy(temp, O)
 
-    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1)
+    compiled = tilelang.compile(kernel, target=target, out_idx=-1)
     out = compiled()
     torch.npu.synchronize()
     torch.testing.assert_close(out.cpu(), torch.full((64,), 1.0, dtype=torch.float32), rtol=0, atol=0)
 
 
-def test_simdvf_fill_2d_ub_npu():
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+def test_simdvf_fill_2d_ub_npu(target):
     @T.prim_func
     def kernel(O: T.Buffer((32, 64), "float32")):
         with T.Kernel(1):
@@ -31,13 +33,14 @@ def test_simdvf_fill_2d_ub_npu():
                 T.fill(temp, 0.0)
             T.copy(temp, O)
 
-    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1)
+    compiled = tilelang.compile(kernel, target=target, out_idx=-1)
     out = compiled()
     torch.npu.synchronize()
     torch.testing.assert_close(out.cpu(), torch.zeros((32, 64), dtype=torch.float32), rtol=0, atol=0)
 
 
-def test_simdvf_fill_multibuffered_ub_inside_pipeline_npu():
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+def test_simdvf_fill_multibuffered_ub_inside_pipeline_npu(target):
     tile = 64
 
     @T.prim_func
@@ -54,7 +57,7 @@ def test_simdvf_fill_multibuffered_ub_inside_pipeline_npu():
                         tmp[i] = tmp[i] + acc[i]
                 T.copy(tmp, C[w * tile : (w + 1) * tile])
 
-    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1)
+    compiled = tilelang.compile(kernel, target=target, out_idx=-1)
     device = torch.device("npu")
     torch.manual_seed(0)
     a = torch.randn(8 * tile, dtype=torch.float32, device=device)
@@ -63,7 +66,8 @@ def test_simdvf_fill_multibuffered_ub_inside_pipeline_npu():
     torch.testing.assert_close(c, a + 1.0, rtol=0, atol=1e-5)
 
 
-def test_simdvf_fill_aligned_subregion_ub_npu():
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+def test_simdvf_fill_aligned_subregion_ub_npu(target):
     @T.prim_func
     def kernel(O: T.Buffer((64,), "float32")):
         with T.Kernel(1):
@@ -72,14 +76,15 @@ def test_simdvf_fill_aligned_subregion_ub_npu():
                 T.fill(temp[8:72], 1.0)
             T.copy(temp[8:72], O)
 
-    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1)
+    compiled = tilelang.compile(kernel, target=target, out_idx=-1)
     out = compiled()
     torch.npu.synchronize()
     torch.testing.assert_close(out.cpu(), torch.full((64,), 1.0, dtype=torch.float32), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("start", [1, 4])
-def test_simdvf_fill_misaligned_subregion_rejected(start):
+@pytest.mark.parametrize("target", ["ascend", "pto"])
+def test_simdvf_fill_misaligned_subregion_rejected(start, target):
     @T.prim_func
     def kernel(O: T.Buffer((64,), "float32")):
         with T.Kernel(1):
@@ -89,8 +94,23 @@ def test_simdvf_fill_misaligned_subregion_rejected(start):
             T.copy(temp[start : start + 64], O)
 
     with pytest.raises(ValueError, match="32-byte-aligned"):
-        tilelang.compile(kernel, target="ascend", out_idx=-1)
+        tilelang.compile(kernel, target=target, out_idx=-1)
 
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+@pytest.mark.parametrize("value", [0, -7])
+@pytest.mark.parametrize("dtype", ["int32", "float32"])
+def test_pto_fill_integer_and_float(value, dtype):
+    @T.prim_func
+    def kernel(O: T.Buffer((128,), dtype)):
+        with T.Kernel(1):
+            temp = T.alloc_shared((128,), dtype)
+            with T.SimdVF():
+                T.fill(temp, value)
+            T.copy(temp, O)
+
+    result = tilelang.compile(kernel, target="pto", out_idx=-1)()
+    torch.testing.assert_close(result.cpu(), torch.full((128,), value, dtype=getattr(torch, dtype)), rtol=0, atol=0)
