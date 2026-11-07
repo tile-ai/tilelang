@@ -49,10 +49,10 @@ class ClassifyResultTest(unittest.TestCase):
     def test_traceback_source_lines_cannot_fake_expected_error(self):
         name = "10_scalar_type_mismatch.py"
         traceback = (
-            'Traceback (most recent call last):\n'
+            "Traceback (most recent call last):\n"
             '  File "10_scalar_type_mismatch.py", line 10, in main\n'
-            '    fn(1.0, True)  # Expect arg[0] to be int\n'
-            'ValueError: unrelated error\n'
+            "    fn(1.0, True)  # Expect arg[0] to be int\n"
+            "ValueError: unrelated error\n"
         )
         self.assertEqual(run_all.classify_result(name, self.result(1, traceback)), "FAIL")
         self.assertEqual(
