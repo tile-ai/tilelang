@@ -1,7 +1,11 @@
 import math
 
+import pytest
+import torch
+
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 
 
 def blocksparse_flashattn(batch, heads, seq_len, dim, downsample_len, is_causal):
@@ -163,5 +167,19 @@ def test_sta_attention():
     assert "int64_t" in cuda_source
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("index_bitwidth", [32, 64])
+def test_stored_narrowing_cast(index_bitwidth):
+    @T.prim_func
+    def main(X: T.Tensor((128,), T.int32), O: T.Tensor((128,), T.int32)):
+        with T.Kernel(1, threads=128):
+            for i in T.Parallel(128):
+                O[i] = T.int32(T.int8(X[i]))
+
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda", pass_configs={"tl.config_index_bitwidth": index_bitwidth})
+    x = torch.arange(-640, 640, 10, device="cuda", dtype=torch.int32)
+    torch.testing.assert_close(kernel(x), x.to(torch.int8).to(torch.int32), rtol=0, atol=0)
+
+
 if __name__ == "__main__":
-    test_sta_attention()
+    tilelang.testing.main()
