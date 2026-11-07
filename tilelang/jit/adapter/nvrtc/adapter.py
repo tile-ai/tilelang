@@ -330,7 +330,13 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
             else:
                 stream = 0
 
-        self._forward_from_prebuild_lib(*args, stream=stream)
+        # Execute the kernel on the inputs' device: the launcher works on the
+        # current device, and a NULL-stream launch runs there.
+        if first_tensor is not None and first_tensor.is_cuda and first_tensor.device.index != torch.cuda.current_device():
+            with torch.cuda.device(first_tensor.device):
+                self._forward_from_prebuild_lib(*args, stream=stream)
+        else:
+            self._forward_from_prebuild_lib(*args, stream=stream)
 
         if len(self.result_idx) == 1:
             return args[self.result_idx[0]]

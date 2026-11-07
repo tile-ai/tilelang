@@ -344,8 +344,16 @@ cdef class CythonKernelWrapper:
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
 
-        # Execute the kernel
-        result = self.lib.call(*call_args)
+        # Execute the kernel on the inputs' device: the launcher works on the
+        # current device, and a NULL-stream launch runs there.
+        if device is None:
+            device = self._infer_output_device(inputs)
+        if (isinstance(device, torch.device) and device.type == "cuda" and device.index is not None
+                and device.index != torch.cuda.current_device()):
+            with torch.cuda.device(device):
+                result = self.lib.call(*call_args)
+        else:
+            result = self.lib.call(*call_args)
         if result != 0:
             error_msg = self.lib.get_last_error().decode('utf-8')
             raise RuntimeError(f"Kernel call failed: {error_msg}")
