@@ -35,7 +35,6 @@ import tilelang.ascend.language as T
 from tilelang.ascend import transform as ascend_transform
 from tilelang.ascend.target import normalize_pto_target
 from tilelang.engine.lower import lower as _lower
-import tilelang
 import tvm
 
 
@@ -278,6 +277,48 @@ def _predicated_stores(stmt):
 
 def _stores(stmt):
     return _collect(stmt, lambda n: isinstance(n, tvm.tirx.BufferStore))
+
+
+def _store_literals(store):
+    """Float literals appearing in a store's value expression."""
+    found = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.FloatImm):
+            found.append(float(node.value))
+
+    tvm.tirx.stmt_functor.post_order_visit(store.value, visit)
+    return found
+
+
+def _assert_war_keeps_the_entry_value(stores, buffer="y"):
+    """The arm-local read of a row must be planned before the write that
+    overwrites that row with the clobbering literal.
+
+    A WAR inside an arm is only correct when the read is emitted first: the
+    read-back store then carries the entry value. Planning the overwrite first
+    feeds the clobbered value into the read instead, and that plan has the same
+    store count, the same value choices and no predicates -- only the emitted
+    order tells the two apart.
+
+    The clobbering literal identifies the write under test: both WAR kernels
+    overwrite the row with 1.0 in the arm that reads it first, while the arm
+    that writes it first uses 2.0 (and the initialization uses 7.0). The
+    read-back store writes the other row and reads the clobbered one."""
+
+    def row_of(store):
+        index = store.indices[0] if store.indices else None
+        return int(index) if isinstance(index, tvm.tirx.IntImm) else None
+
+    read_back = [i for i, st in enumerate(stores) if row_of(st) != 0 and buffer in _expr_loads(st.value)]
+    clobber = [i for i, st in enumerate(stores) if row_of(st) == 0 and 1.0 in _store_literals(st)]
+    assert read_back, f"no store reads {buffer}[0], so the WAR case is not exercised"
+    assert clobber, f"no store overwrites {buffer}[0] with the clobbering literal"
+
+    assert min(read_back) < min(clobber), (
+        f"the read of {buffer}[0] must be planned before the store that overwrites it, got rows "
+        f"{[row_of(st) for st in stores]} with the read-back at {read_back} and the overwrite at {clobber}"
+    )
 
 
 @pytest.mark.pto
@@ -745,6 +786,7 @@ def test_conditional_arm_with_read_then_write_keeps_arm_order():
     choices = [st for st in stores if isinstance(st.value, tvm.tirx.Select)]
     assert len(choices) == 3, f"expected three value choices, got {len(choices)}"
     assert all(st.predicate is None for st in stores), "no store may stay predicated"
+    _assert_war_keeps_the_entry_value(stores)
 
 
 @pytest.mark.pto
@@ -766,6 +808,7 @@ def test_war_with_unequal_arms_pairs_by_address():
     choices = [st for st in stores if isinstance(st.value, tvm.tirx.Select)]
     assert len(choices) == 2, f"expected two value choices, got {len(choices)}"
     assert all(st.predicate is None for st in stores), "no store may stay predicated"
+    _assert_war_keeps_the_entry_value(stores)
 
 
 @pytest.mark.pto
@@ -824,8 +867,7 @@ def test_boolean_mask_value_lowers_to_vand():
 
     # The boolean combine is the existing PTODSL bitwise vector op on mask
     # registers, so the emitted PTODSL name equals the TileLang op name.
-    kernel = tilelang.compile(_k_boolean_mask(E, lanes), target="pto", out_idx=-1)
-    source = kernel.get_kernel_source()
+    source = _lower(_k_boolean_mask(E, lanes), target="pto").kernel_source
     assert "pto.vmi.vand(" in source, "the boolean combine must emit pto.vmi.vand"
 
 
