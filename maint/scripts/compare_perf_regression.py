@@ -84,13 +84,16 @@ def compare_payloads(
         old_latency = old_results[name]
         new_latency = new_results[name]
         speedup = old_latency / new_latency
+        delta_pct = (speedup - 1.0) * 100.0
+        if not math.isfinite(speedup) or not math.isfinite(delta_pct):
+            raise ValueError(f"Nonfinite comparison for result {name!r}: speedup={speedup!r}, delta_pct={delta_pct!r}")
         rows.append(
             {
                 "name": name,
                 "old_latency": old_latency,
                 "new_latency": new_latency,
                 "speedup": speedup,
-                "delta_pct": (speedup - 1.0) * 100.0,
+                "delta_pct": delta_pct,
                 "status": "improved" if speedup >= 1.0 else "regressed",
             }
         )
@@ -280,7 +283,7 @@ def _write_text(path: str | Path, content: str) -> None:
 def _write_json(path: str | Path, content: Mapping[str, object]) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(content, indent=2, sort_keys=True) + "\n")
+    output.write_text(json.dumps(content, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -339,3 +342,4 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
