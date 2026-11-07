@@ -1119,6 +1119,38 @@ def test_reduce_sum_reshape_straddle_layout_regression():
     torch.testing.assert_close(B, ref, atol=1e-3, rtol=1e-3)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+def test_reduce_sum_dim0_gemm_accumulator_regression():
+    # Each thread holds accumulator rows from both lane and warp row splits
+    # (mma.sync and wgmma alike), so the column sum's thread-owned reduce
+    # segments are separated by local row bits.
+    M, N, K = 128, 64, 32
+
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((M, K), T.float16),
+        B: T.Tensor((N, K), T.float16),
+        Out: T.Tensor((N,), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((M, K), T.float16)
+            B_shared = T.alloc_shared((N, K), T.float16)
+            C_local = T.alloc_fragment((M, N), T.float32)
+            col_sum = T.alloc_fragment((N,), T.float32)
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
+            T.gemm(A_shared, B_shared, C_local, transpose_B=True, clear_accum=True)
+            T.reduce_sum(C_local, col_sum, dim=0)
+            T.copy(col_sum, Out)
+
+    # Small integers keep every product and partial sum exact in float32.
+    A = torch.randint(-2, 3, (M, K), device="cuda").half()
+    B = torch.randint(-2, 3, (N, K), device="cuda").half()
+    out = _compile(kernel)(A, B)
+    ref = (A.float() @ B.float().T).sum(dim=0)
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
 # ---------------------------------------------------------------------------
 # nan_propagate tests – packed (vsize=2) path for bf16/fp16
 # ---------------------------------------------------------------------------
