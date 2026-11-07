@@ -1,6 +1,46 @@
+import re
 import sys
 import subprocess
 from pathlib import Path
+
+
+# Signatures are the validation failures documented in tensor_checks.md. Other
+# failures (compiler errors, crashes, unrelated exceptions) must not count as PASS.
+EXPECTED_ERRORS = {
+    "01_num_args_mismatch.py": r"num_args should|expected \d+ (?:input )?arguments?",
+    "02_pointer_type_error.py": r"Expect (?:arg\[\d+\]|buffer \S+) to be (?:pointer|tensor)",
+    "03_ndim_mismatch.py": r"ndim is expected|mismatched ndim",
+    "04_dtype_mismatch.py": r"dtype is expected|incompatible dtype",
+    "05_shape_mismatch.py": r"shape\[\d+\].*unsatisfied constraint",
+    "06_strides_mismatch.py": r"strides\[\d+\].*unsatisfied constraint",
+    "07_device_type_mismatch.py": r"device_type mismatch",
+    "08_device_id_mismatch.py": r"device_id.*unsatisfied constraint",
+    "09_null_data_pointer.py": r"non-NULL (?:data )?pointer|Expect (?:arg\[\d+\]|buffer \S+) to be (?:pointer|tensor)",
+    "10_scalar_type_mismatch.py": r"Expect arg\[\d+\] to be (?:int|boolean)",
+}
+
+
+def classify_result(name, proc):
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode == 0:
+        return "SKIP" if any(line.startswith("[SKIP]") for line in output.splitlines()) else "FAIL"
+
+    # Windows NTSTATUS exception codes are sometimes returned as large positive
+    # integers instead of negative signal-style codes.
+    if proc.returncode < 0 or 0xC0000000 <= proc.returncode <= 0xFFFFFFFF:
+        return "FAIL"
+    stderr = proc.stderr or ""
+    if "ModuleNotFoundError:" in stderr or "ImportError:" in stderr:
+        return "FAIL"
+
+    # Check the final exception, not a warning or diagnostic earlier in stderr.
+    last_line = stderr.strip().splitlines()[-1] if stderr.strip() else ""
+    if last_line in (
+        "RuntimeError: CUDA is not available",
+        "RuntimeError: CUDA is not available; cannot build CUDA kernel for host-check repros.",
+    ):
+        return "SKIP"
+    return "PASS" if re.search(EXPECTED_ERRORS[name], stderr) else "FAIL"
 
 
 def main():
@@ -39,20 +79,10 @@ def main():
         )
 
         # Save logs
-        (logs_dir / f"{name}.out").write_text(proc.stdout)
-        (logs_dir / f"{name}.err").write_text(proc.stderr)
+        (logs_dir / f"{name}.out").write_text(proc.stdout, encoding="utf-8")
+        (logs_dir / f"{name}.err").write_text(proc.stderr, encoding="utf-8")
 
-        out = (proc.stdout or "") + (proc.stderr or "")
-        if proc.returncode == 0 and any(line.startswith("[SKIP]") for line in out.splitlines()):
-            status = "SKIP"
-        elif proc.returncode < 0 or "ModuleNotFoundError:" in proc.stderr or "ImportError:" in proc.stderr:
-            status = "FAIL"
-        elif "CUDA is not available" in proc.stderr:
-            status = "SKIP"
-        elif proc.returncode != 0:
-            status = "PASS"  # error reproduced as expected
-        else:
-            status = "FAIL"  # no error observed
+        status = classify_result(name, proc)
 
         results.append((name, status, proc.returncode))
         print(f"[{status}] {name} (rc={proc.returncode})")
