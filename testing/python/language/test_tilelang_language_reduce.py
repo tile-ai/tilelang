@@ -466,6 +466,32 @@ REDUCE_CASES = [
 ]
 
 
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+def test_reduce_batch_hint_larger_than_per_thread_outputs(dtype):
+    """A too-large batch hint must clamp to the layout instead of failing to compile."""
+    M, N, threads, batch = 64, 128, 256, 8
+
+    @tilelang.jit(out_idx=1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((M, N), dtype), B: T.Tensor((M,), dtype)):
+            with T.Kernel(1, threads=threads):
+                src = T.alloc_fragment((M, N), dtype)
+                dst = T.alloc_fragment((M,), dtype)
+                T.copy(A, src)
+                T.reduce_sum(src, dst, dim=1, batch=batch)
+                T.copy(dst, B)
+
+        return main
+
+    jit_kernel = kernel()
+    src = jit_kernel.get_kernel_source()
+    assert re.search(r"run_batch", src)
+    A = _make_input(M, N, dtype, _case_seed("reduce", "sum", dtype, M, N, "fragment", "fragment", threads, batch))
+    B = jit_kernel(A)
+    torch.testing.assert_close(B, _ref(A, "sum"), atol=1e-1, rtol=1e-1)
+
+
 @pytest.mark.parametrize(
     ("op", "dtype", "M", "N", "src_scope", "dst_scope", "threads", "batch"),
     REDUCE_CASES,

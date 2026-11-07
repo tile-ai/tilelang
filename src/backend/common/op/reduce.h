@@ -948,7 +948,7 @@ template <typename Impl> struct ReduceLowerer {
         stmts.push_back(reduce_local);
       }
 
-      const int batch = op.batch;
+      int batch = op.batch;
       if (batch > 1) {
         int64_t N_total = 1;
         for (const auto &s : clear_buffer->shape) {
@@ -957,11 +957,22 @@ template <typename Impl> struct ReduceLowerer {
                                   "constant output shape";
           N_total *= *p;
         }
-        ICHECK_LE(batch, N_total)
-            << "ReduceOp: batch=" << batch
-            << " exceeds per-thread output element count N=" << N_total;
-        ICHECK_EQ(N_total % batch, 0) << "ReduceOp: batch=" << batch
-                                      << " must evenly divide N=" << N_total;
+        // `batch` is a performance hint: how many per-thread outputs a single
+        // batched all-reduce folds together. The per-thread output count is
+        // decided by layout inference and depends on the target (for example
+        // sm_120 gives 2 elements per thread for a shape where sm_90 gives 4).
+        // Clamp the hint to the largest divisor that fits instead of rejecting
+        // an otherwise valid kernel.
+        if (batch > N_total || N_total % batch != 0) {
+          int fallback = 1;
+          for (int divisor = 2; divisor <= N_total && divisor <= batch;
+               ++divisor) {
+            if (N_total % divisor == 0) {
+              fallback = divisor;
+            }
+          }
+          batch = fallback;
+        }
       }
 
       bool use_batch = batch > 1;
