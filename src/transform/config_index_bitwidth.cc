@@ -28,6 +28,9 @@ protected:
   using Parent::VisitStmt_;
 
   PrimExpr VisitExpr_(const VarNode *op) final {
+    if (preserve_cast_operand_) {
+      return tvm::cast(op->dtype, Parent::VisitExpr_(op));
+    }
     if (op->dtype.is_int() && op->dtype.bits() < 64) {
       DataType new_dtype = DataType::Int(64);
       if (!var_remap_.count(op)) {
@@ -38,18 +41,43 @@ protected:
   }
 
   PrimExpr VisitExpr_(const IntImmNode *op) final {
-    if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
+    if (!preserve_cast_operand_ && is_enabled_ && op->dtype.is_int() &&
+        op->dtype.bits() < 64) {
       return IntImm(DataType::Int(_index_bitwidth_), op->value);
     }
     return GetRef<PrimExpr>(op);
   }
 
   PrimExpr VisitExpr_(const CastNode *op) final {
-    if (is_enabled_ && op->dtype.is_int() && op->dtype.bits() < 64) {
-      PrimExpr value = VisitExpr(op->value);
-      return Cast(DataType::Int(_index_bitwidth_), value);
+    // Preserve explicit conversions and the arithmetic enclosed by them.
+    bool preserve_cast_operand = preserve_cast_operand_;
+    preserve_cast_operand_ = true;
+    PrimExpr converted = Parent::VisitExpr_(op);
+    preserve_cast_operand_ = preserve_cast_operand;
+    if (!preserve_cast_operand && is_enabled_ && op->dtype.is_int() &&
+        op->dtype.bits() < 64) {
+      return tvm::cast(op->dtype.with_bits(_index_bitwidth_), converted);
     }
-    return Parent::VisitExpr_(op);
+    return converted;
+  }
+
+  PrimExpr VisitExpr_(const LetNode *op) final {
+    if (!preserve_cast_operand_) {
+      return Parent::VisitExpr_(op);
+    }
+    PrimExpr value = VisitExpr(op->value);
+    auto it = var_remap_.find(op->var.get());
+    Optional<Var> previous =
+        it == var_remap_.end() ? Optional<Var>() : Optional<Var>(it->second);
+    // Nested load indices must use this binder, not create an unbound var.
+    var_remap_[op->var.get()] = op->var;
+    PrimExpr body = VisitExpr(op->body);
+    if (previous.defined()) {
+      var_remap_[op->var.get()] = previous.value();
+    } else {
+      var_remap_.erase(op->var.get());
+    }
+    return Let(op->var, value, body, op->span);
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
@@ -64,13 +92,17 @@ protected:
   PrimExpr VisitExpr_(const BufferLoadNode *op) final {
     // Force indices to be int64
     bool is_enabled = is_enabled_;
+    bool preserve_cast_operand = preserve_cast_operand_;
     is_enabled_ = true;
+    preserve_cast_operand_ = false;
     auto node = Downcast<BufferLoad>(Parent::VisitExpr_(op));
+    preserve_cast_operand_ = preserve_cast_operand;
     is_enabled_ = is_enabled;
     return std::move(node);
   }
 
   int _index_bitwidth_;
+  bool preserve_cast_operand_{false};
 };
 
 class IndexLegalizer : public IRMutatorWithAnalyzer {
