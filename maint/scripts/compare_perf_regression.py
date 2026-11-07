@@ -30,19 +30,22 @@ def _extract_results(payload: Mapping[str, object]) -> dict[str, float]:
     for name, value in results.items():
         if isinstance(value, dict):
             value = value.get("latency")
+        if isinstance(value, bool):
+            raise ValueError(f"Invalid latency for result {name!r}: {value!r}")
         try:
             latency = float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"Invalid latency for result {name!r}: {value!r}") from exc
-        if math.isfinite(latency) and latency > 0.0:
-            parsed[str(name)] = latency
+        if not math.isfinite(latency) or latency <= 0.0:
+            raise ValueError(f"Invalid latency for result {name!r}: {value!r}")
+        parsed[str(name)] = latency
     return parsed
 
 
 def _extract_failures(payload: Mapping[str, object]) -> dict[str, object]:
     failures = payload.get("failures", {})
     if not isinstance(failures, dict):
-        return {}
+        raise ValueError("payload.failures must be an object")
     return {str(k): v for k, v in failures.items()}
 
 
@@ -297,7 +300,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--regression-threshold", type=float, default=1.0, help="Speedup threshold for regressions")
     parser.add_argument("--fail-on-failure", action="store_true", help="Exit non-zero if either payload has failures")
     parser.add_argument("--fail-on-missing", action="store_true", help="Exit non-zero if either payload has missing results")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.regression_threshold) or args.regression_threshold <= 0.0:
+        parser.error("--regression-threshold must be finite and positive")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
