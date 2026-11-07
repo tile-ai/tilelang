@@ -500,5 +500,32 @@ def test_match_all_sync():
     assert torch.all(b2 == 0), f"Expected all 0, got {b2}"
 
 
+@tilelang.testing.requires_cuda
+def test_any_sync_preserves_nonzero_wide_integer_predicate():
+    """A nonzero int64 predicate whose low 32 bits are zero must test true.
+
+    The CUDA vote builtin takes a 32-bit int; passing the raw int64 value
+    narrows 1 << 32 to 0 and silently flips the predicate to false.
+    """
+
+    @tilelang.jit
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((32,), "int64"), Out: T.Tensor((1,), "int32")):
+            with T.Kernel(1, threads=32):
+                tx = T.get_thread_binding()
+                result = T.any_sync(A[tx])
+                if tx == 0:
+                    Out[0] = result
+
+        return main
+
+    a = torch.zeros((32,), dtype=torch.int64, device="cuda")
+    a[5] = 1 << 32
+    out = torch.zeros((1,), dtype=torch.int32, device="cuda")
+    kernel()(a, out)
+    assert out.item() != 0, f"any_sync narrowed 1<<32 to zero: got {out.item()}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
