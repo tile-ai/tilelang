@@ -13,6 +13,7 @@ from tilelang.env import env
 from tilelang.transform import PassConfigKey
 
 from . import codegen, execution_backend, pipeline
+from .pass_config import PassConfigKey as CudaPassConfigKey
 
 _CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
 
@@ -59,7 +60,7 @@ def tilelang_callback_cuda_validate(device_mod):
 
 def _cuda_compiler_module(execution_backend: str = "tvm_ffi", pass_config: Mapping[str, object] | None = None):
     if execution_backend == "tvm_ffi":
-        compiler = str((pass_config or {}).get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
+        compiler = str((pass_config or {}).get(CudaPassConfigKey.TL_CUDA_COMPILER, "nvcc"))
     else:
         compiler = "nvcc" if execution_backend == "cython" else execution_backend
 
@@ -94,7 +95,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     options = compiler_module.default_compile_options(cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
-    ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+    ptxas_usage_level = cfg.get(CudaPassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     if ptxas_usage_level is not None:
         ptxas_usage_level = int(ptxas_usage_level)
 
