@@ -2056,7 +2056,12 @@ private:
                      "access address",
            span);
     }
-    if (!analyzer_->CanProve(instruction_offset >= 0)) {
+    // An unsigned offset is non-negative by construction; the simplifier does
+    // not always discharge `D >= 0` for an unsigned variable, which used to
+    // reject perfectly valid unsigned offsets.
+    bool offset_non_negative = instruction_offset.dtype().is_uint() ||
+                               analyzer_->CanProve(instruction_offset >= 0);
+    if (!offset_non_negative) {
       Fail(op_name +
                " requires the instruction base offset D = S - O + offset to be "
                "provably non-negative and inside the owner",
