@@ -293,6 +293,46 @@ void RegisterIm2ColImpl(Im2ColImpl impl) {
   Im2ColImplRegistry().push_back(impl);
 }
 
+// Drops the dimensions whose extent is exactly 1.
+//
+// The iteration space is built from whichever side sits in the lowest-level
+// memory scope, and a dimension of extent 1 carries no loop variable there.
+// `MakeIndices` then pairs the remaining loop variables with the non-unit
+// dimensions of *both* ranges, so the two sides must have the same number of
+// non-unit dimensions.
+Array<Range> DropUnitExtentDims(const Array<Range> &region) {
+  Array<Range> out;
+  for (const Range &r : region) {
+    if (!is_one(r->extent))
+      out.push_back(r);
+  }
+  return out;
+}
+
+// Rejects a copy whose two sides have different numbers of dimensions that
+// carry an iteration variable.
+//
+// `MakeIterVars` spends a loop variable on every extent that is not 1 in the
+// base range, and `MakeIndices` spends the same loop variables on the non-unit
+// dimensions of each side. A side with a different number of non-unit
+// dimensions cannot map all loop variables consistently. Report the mismatch
+// before the internal assertions or out-of-bounds indexing in lowering.
+void CheckIterationRankMatch(const Array<Range> &src_range,
+                             const Array<Range> &dst_range, const Buffer &src,
+                             const Buffer &dst) {
+  size_t src_rank = DropUnitExtentDims(src_range).size();
+  size_t dst_rank = DropUnitExtentDims(dst_range).size();
+  CHECK(src_rank == dst_rank, ValueError)
+      << "T.copy source and destination must iterate the same number "
+         "of dimensions (a dimension of extent 1 does not iterate), but "
+         "this copy iterates "
+      << src_rank << " dimension(s) of src '" << src->name << "' " << src_range
+      << " and " << dst_rank << " of dst '" << dst->name << "' " << dst_range
+      << ". Slice both regions to matching iteration dimensions, "
+         "for example T.copy(s[:k], B[i:i+1, :k])."
+      << SpanHintSuffix({dst->span, src->span});
+}
+
 // Constructs a Copy operator node from call arguments and annotations.
 // args[0]: source region, args[1]: destination region
 // annotations: Map containing common SIMT hints and backend-specific metadata.
@@ -330,6 +370,7 @@ TileOperator CopyNode::Clone() const {
 
 // Creates iterator variables for dimensions with extent > 1.
 Array<IterVar> CopyNode::MakeIterVars() const {
+  CheckIterationRankMatch(src_range, dst_range, src, dst);
   // Choose the range set from the lowest-level memory scope between src and
   // dst. Scope levels: global < shared/shared.dyn/shared.tmem < local.fragment
   // (fragment)
