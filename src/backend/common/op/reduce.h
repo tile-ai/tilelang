@@ -645,25 +645,27 @@ template <typename Impl> struct ReduceLowerer {
     for (int i = 0; i < dst_dim; ++i) {
       Var var("i" + std::to_string(i));
       dst_vars.push_back(var);
-      dst_indices.push_back(var);
+      dst_indices.push_back(op.dstRegion_->region[i]->min + var);
     }
 
     auto make_src_indices = [&](PrimExpr reduce_index) {
       Array<PrimExpr> indices;
       for (int i = 0; i < src_dim; ++i) {
         if (i == op.dim) {
-          indices.push_back(reduce_index);
+          indices.push_back(op.srcRegion_->region[i]->min + reduce_index);
         } else if (dst_dim == src_dim) {
-          indices.push_back(dst_vars[i]);
+          indices.push_back(op.srcRegion_->region[i]->min + dst_vars[i]);
         } else {
-          indices.push_back(dst_vars[i < op.dim ? i : i - 1]);
+          indices.push_back(op.srcRegion_->region[i]->min +
+                            dst_vars[i < op.dim ? i : i - 1]);
         }
       }
       return indices;
     };
 
     int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
-    const int64_t *reduce_extent = as_const_int(op.src->shape[op.dim]);
+    const int64_t *reduce_extent =
+        as_const_int(op.srcRegion_->region[op.dim]->extent);
     bool can_pack = op.clear && vsize == 2 && reduce_extent &&
                     *reduce_extent >= vsize && *reduce_extent % vsize == 0 &&
                     reduce::MakeCodegenReducer(op, vsize).has_value();
@@ -716,14 +718,14 @@ template <typename Impl> struct ReduceLowerer {
           reduce::MakeReduce(op, 1, BufferLoad(dst_buffer, dst_indices),
                              BufferLoad(src_buffer, make_src_indices(rv))),
           dst_indices);
-      stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kUnrolled,
-                          reduce_body, std::nullopt));
+      stmts.push_back(For(rv, 0, op.srcRegion_->region[op.dim]->extent,
+                          ForKind::kUnrolled, reduce_body, std::nullopt));
     }
 
-    Stmt body = SeqStmt(stmts);
+    Stmt body = SeqStmt::Flatten(stmts);
     for (int i = dst_dim - 1; i >= 0; --i) {
-      body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kUnrolled, body,
-                 std::nullopt);
+      body = For(dst_vars[i], 0, op.dstRegion_->region[i]->extent,
+                 ForKind::kUnrolled, body, std::nullopt);
     }
     if (can_pack) {
       body = SeqStmt({AllocBuffer(packed_buffer), body});
