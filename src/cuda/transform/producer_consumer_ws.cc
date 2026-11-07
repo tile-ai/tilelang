@@ -2114,12 +2114,30 @@ private:
       ICHECK(branch_ptr->else_case.defined());
       branch_ptr->else_case =
           AppendToStmt(branch_ptr->else_case.value(), consumer_postlude);
-      if (container.same_as(branch)) {
+      if (!container->IsInstance<AttrStmtNode>()) {
         return branch;
       }
       AttrStmt attr = Downcast<AttrStmt>(container);
       attr.CopyOnWrite()->body = branch;
       return attr;
+    }
+
+    // `if (cond) { <WS branch> }` with a side-effect-free `cond`. Every thread
+    // evaluates `cond` once whether it is tested around the WS branch or at
+    // the start of the partition it runs, so the `if` can be moved into both
+    // partitions.
+    bool IsWSBranchUnderIf(const Stmt &stmt, PrimExpr *cond, Stmt *container,
+                           IfThenElse *branch) const {
+      const auto *if_node = stmt.as<IfThenElseNode>();
+      if (!if_node || if_node->else_case.defined() ||
+          SideEffect(if_node->condition) > CallEffectKind::kReadState) {
+        return false;
+      }
+      if (!IsWSBranch(if_node->then_case, container, branch)) {
+        return false;
+      }
+      *cond = if_node->condition;
+      return true;
     }
 
     Stmt VisitStmt_(const SeqStmtNode *op) final {
@@ -2132,7 +2150,10 @@ private:
       for (int i = 0; i < static_cast<int>(visited.size()); ++i) {
         Stmt ws_container;
         IfThenElse ws_branch;
-        if (!IsWSBranch(visited[i], &ws_container, &ws_branch)) {
+        PrimExpr outer_cond;
+        if (!IsWSBranch(visited[i], &ws_container, &ws_branch) &&
+            !IsWSBranchUnderIf(visited[i], &outer_cond, &ws_container,
+                               &ws_branch)) {
           rebuilt.push_back(visited[i]);
           continue;
         }
@@ -2149,6 +2170,16 @@ private:
         if (consumer_postlude.empty()) {
           rebuilt.push_back(visited[i]);
           continue;
+        }
+        if (outer_cond.defined()) {
+          // Split the partitions outside the `if` so that the postlude joins
+          // the consumer partition: code after a join of the two partitions
+          // would run under neither partition's register budget.
+          ws_branch =
+              IfThenElse(ws_branch->condition,
+                         IfThenElse(outer_cond, ws_branch->then_case),
+                         IfThenElse(outer_cond, ws_branch->else_case.value()),
+                         ws_branch->span);
         }
 
         rebuilt.push_back(UpdateWSBranchContainer(ws_container, ws_branch,
