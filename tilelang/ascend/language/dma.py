@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-from tvm import tirx
+from tvm import DataType, tirx
 
 
 def _to_int32(v):
     return tirx.IntImm("int32", v) if isinstance(v, int) else v
 
 
-_PAD_VALUE_SUPPORTED_DTYPES = frozenset(
-    {
-        "int8",
-        "uint8",
-        "int16",
-        "uint16",
-        "float16",
-        "bfloat16",
-        "int32",
-        "uint32",
-        "float32",
-    }
-)
+# The pad-value register is typed by element width, mirroring the codegen
+# check in src/ascend/codegen/codegen_ascend.cc (`bit_width == 8 || 16 || 32`),
+# so the accepted set is expressed in bits rather than as a dtype list. That
+# keeps 8-bit fp8 element types on the same path as int8/uint8.
+_PAD_VALUE_SUPPORTED_BITS = (8, 16, 32)
 
 
 def ascend_set_copy_pad_value(value, dtype=None) -> None:
@@ -39,8 +31,9 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     value : int, float, or PrimExpr
         Padding fill value.
     dtype : str, optional
-        Copy element dtype (one of int8/uint8/int16/uint16/float16/bfloat16/
-        int32/uint32/float32). Required when ``value`` is a Python literal;
+        Copy element dtype. Any 8-, 16- or 32-bit element type is accepted
+        (for example int8/uint8/float8_e4m3/float16/bfloat16/float32).
+        Required when ``value`` is a Python literal;
         for a typed PrimExpr it defaults to ``value.dtype``.
 
     Example
@@ -53,10 +46,12 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
             dtype = inferred
     if dtype is None:
         raise ValueError('ascend_set_copy_pad_value requires dtype for Python literals; use dtype="float32" or pass a typed PrimExpr.')
-    if dtype not in _PAD_VALUE_SUPPORTED_DTYPES:
-        raise ValueError(
-            f"ascend_set_copy_pad_value does not support dtype {dtype!r}; supported dtypes are {sorted(_PAD_VALUE_SUPPORTED_DTYPES)}."
-        )
+    elem_dtype = DataType(dtype)
+    if elem_dtype.lanes != 1:
+        raise ValueError(f"ascend_set_copy_pad_value expects a scalar element type, got {dtype!r} with {elem_dtype.lanes} lanes.")
+    elem_bits = elem_dtype.bits
+    if elem_bits not in _PAD_VALUE_SUPPORTED_BITS:
+        raise ValueError(f"ascend_set_copy_pad_value only supports 8/16/32-bit element types, got {dtype!r} ({elem_bits} bit).")
     value = tirx.const(value, dtype) if isinstance(value, (int, float)) else tirx.Cast(dtype, value)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_copy_pad_value"), value)
 
