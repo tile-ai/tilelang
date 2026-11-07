@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "cuda/op/builtin.h"
+#include "cuda/op/copy.h"
 #include "layout/layout.h"
 #include "multi_version_buffer_rewriter.h"
 #include "op/builtin.h"
@@ -384,6 +385,41 @@ private:
     return make_const(buffer->shape[0].dtype(), rows);
   }
 
+  // Returns whether stmt is a copy that lowers to a 1-D bulk copy. The
+  // analyzer knows the ranges of the loops and threads around stmt.
+  static bool IsBulkLoad1D(const Stmt &stmt, const Target &target,
+                           arith::Analyzer *analyzer) {
+    const auto *eval = stmt.as<EvaluateNode>();
+    const auto *call = eval == nullptr ? nullptr : eval->value.as<CallNode>();
+    if (call == nullptr) {
+      return false;
+    }
+    auto tile_op = ParseOperator(GetRef<Call>(call));
+    const auto *copy = tile_op.defined() ? tile_op.as<CopyNode>() : nullptr;
+    return copy != nullptr &&
+           cuda::CanLowerToBulkLoad1D(*copy, target, analyzer);
+  }
+
+  // Binds the ranges of the loops and threads that enclose the visited
+  // statement, as the lowering of a copy knows them.
+  void BindEnclosingRanges(arith::Analyzer *analyzer) const {
+    for (const StmtNode *node : stmt_stack_) {
+      if (node->IsInstance<ForNode>()) {
+        const auto *loop = static_cast<const ForNode *>(node);
+        analyzer->Bind(loop->loop_var,
+                       Range::FromMinExtent(loop->min, loop->extent));
+      } else if (node->IsInstance<AttrStmtNode>()) {
+        const auto *attr = static_cast<const AttrStmtNode *>(node);
+        if (attr->attr_key == tirx::attr::thread_extent) {
+          IterVar iv = Downcast<IterVar>(attr->node);
+          analyzer->Bind(iv->var,
+                         Range::FromMinExtent(make_zero(attr->value.dtype()),
+                                              attr->value));
+        }
+      }
+    }
+  }
+
   Array<Buffer> GetVersionedBuffers(const Array<Stmt> &seq_stmt,
                                     const Array<Buffer> &scoped_buffers) {
     Array<Stmt> pipeline_stmts;
@@ -422,6 +458,8 @@ private:
     std::vector<Role> roles;
     Array<Array<BufferRegion>> reads, writes;
     auto marker = WarpSpecializedRoleMarker_(buffer_data_to_buffer_);
+    arith::Analyzer enclosing;
+    BindEnclosingRanges(&enclosing);
     for (const Stmt &stmt : pipeline_stmts) {
       marker(stmt);
       SBlock block(/*iter_vars=*/{}, /*reads=*/{}, /*writes=*/{},
@@ -462,10 +500,13 @@ private:
         }
       }
 
-      // A TMA copy needs an aligned destination, so the versions of the
-      // buffers that it writes are padded. A cp.async or SIMT copy needs none.
+      // A tensor TMA copy needs a destination aligned to 128 bytes, so the
+      // versions of the buffers that it writes are padded. A 1-D bulk copy
+      // moves a multiple of 16 bytes, so its versions keep the 16-byte
+      // alignment that it needs. A cp.async or SIMT copy needs none.
       if (target_.defined() &&
-          ClassifyStmt(stmt, target_.value()) == TileStmtKind::kTmaProducer) {
+          ClassifyStmt(stmt, target_.value()) == TileStmtKind::kTmaProducer &&
+          !IsBulkLoad1D(stmt, target_.value(), &enclosing)) {
         for (const BufferRegion &region : stmt_writes) {
           if (IsSharedBuffer(region->buffer)) {
             tma_destinations_.insert(region->buffer.get());

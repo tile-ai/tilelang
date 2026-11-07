@@ -357,7 +357,7 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
   // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
   bool total_16b_aligned = !analyzer->CanProve(
-      FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
+      floormod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
@@ -805,6 +805,17 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   }
 
   return Supported(SelectSyncLikeInst(facts));
+}
+
+bool CanLowerToBulkLoad1D(const CopyNode &op, Target target,
+                          arith::Analyzer *analyzer) {
+  if (!IsCudaLikeTarget(target) || TargetIsCuTeDSL(target)) {
+    return false;
+  }
+  static const LayoutMap empty_layout_map;
+  return CanProveCopyInBounds(op, analyzer) &&
+         CheckBulkLoad1D(op, target, empty_layout_map, analyzer,
+                         /*emit_diagnostics=*/false);
 }
 
 CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,

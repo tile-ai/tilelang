@@ -862,11 +862,16 @@ def _wide_linear_reduce_kernel(rows, mids, width, batches, rows_per_batch, dtype
     return main
 
 
-def _versioned_fp4_copy_kernel(rows=2, width=64, iters=4):
-    """A pipeline whose TMA copy writes a (rows, width) buffer of packed FP4 values."""
+def _versioned_fp4_copy_kernel(rows=2, width=64, iters=4, strided=True):
+    """A pipeline whose TMA copy writes a (rows, width) buffer of packed FP4 values.
+
+    With strided, the rows of src are twice as wide as the buffer, so the copy is a
+    tensor TMA copy. Otherwise the copy reads a contiguous region and is a 1-D bulk copy.
+    """
+    src_width = 2 * width if strided else width
 
     @T.prim_func
-    def main(src: T.Tensor((iters * rows, width), "float4_e2m1fn"), out: T.Tensor((rows, width), "float32")):
+    def main(src: T.Tensor((iters * rows, src_width), "float4_e2m1fn"), out: T.Tensor((rows, width), "float32")):
         with T.Kernel(1, threads=128) as _:
             smem = T.alloc_shared((rows, width), "float4_e2m1fn")
             acc = T.alloc_fragment((rows, width), "float32")
@@ -881,11 +886,14 @@ def _versioned_fp4_copy_kernel(rows=2, width=64, iters=4):
 
 
 def _tma_and_simt_copy_kernel(rows=2, width=8, iters=4):
-    """A pipeline whose TMA copy and SIMT copy each write a (rows, width) float32 buffer."""
+    """A pipeline whose tensor TMA copy and SIMT copy each write a (rows, width) float32 buffer.
+
+    The rows of src are twice as wide as the buffers, so the TMA copy reads strided rows.
+    """
 
     @T.prim_func
     def main(
-        src: T.Tensor((iters * rows, width), "float32"),
+        src: T.Tensor((iters * rows, 2 * width), "float32"),
         idx: T.Tensor((iters,), "int32"),
         out: T.Tensor((rows, width), "float32"),
     ):
@@ -961,6 +969,15 @@ def test_tiled_ws_pads_packed_fp4_versions_by_storage():
 
     assert "tl_tiled_ws_applied" in script
     assert 'smem = T.sblock_alloc_buffer((2, 4, 64), "float4_e2m1fn", scope="shared.dyn")' in script
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_keeps_bulk_copy_versions_unpadded():
+    """A 1-D bulk copy of 64 bytes needs a 16-byte alignment only, so its versions keep their size."""
+    script = _warp_specialized_script(_versioned_fp4_copy_kernel(strided=False))
+
+    assert "tl_tiled_ws_applied" in script
+    assert 'smem = T.sblock_alloc_buffer((2, 2, 64), "float4_e2m1fn", scope="shared.dyn")' in script
 
 
 @tilelang.testing.requires_cuda
