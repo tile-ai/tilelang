@@ -2158,7 +2158,9 @@ private:
         }
         // Bind the constant ranges of both sets first, such as those of the
         // threads. The analyzer bounds a range when it binds it, so a range
-        // that reads another variable is bound after the constant ones.
+        // that reads another variable is bound after the constant ones. As in
+        // the full proof, each read of mutable state in a range becomes a
+        // fresh variable, so the two threads never share a register value.
         for (bool constant : {true, false}) {
           for (const ConstrSet *set : {&prev_cset, &curr_cset}) {
             for (const Constr &c : set->constrs_) {
@@ -2166,7 +2168,8 @@ private:
                   (as_const_int(c.range->min) != nullptr &&
                    as_const_int(c.range->extent) != nullptr) == constant &&
                   bound.insert(c.var.get()).second) {
-                ranges.Bind(c.var, c.range);
+                Constr fresh = c.FreshenReads();
+                ranges.Bind(fresh.var, fresh.range);
               }
             }
           }
