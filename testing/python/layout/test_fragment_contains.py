@@ -110,6 +110,55 @@ def test_replication_cannot_cover_threads_outside_its_bound_range(prove_contains
     assert bool(prove_contains(replicated(small_count), replicated(128), 0, 0, 0, 0, False, 128, 96)) is expected
 
 
+def test_fully_replicated_respects_small_bound_range(prove_contains):
+    assert prove_contains(replicated(128), replicated(128), 0, 0, 0, 0, False, 96, 96)
+
+
+@pytest.mark.parametrize(
+    "stride,small_min,large_min,small_extent,large_extent,expected",
+    [
+        (1, 0, 0, 128, 96, False),
+        (1, 0, 0, 64, 96, True),
+        (2, 0, 0, 96, 96, True),
+        (2, 0, 0, 96, 64, False),
+        (1, 32, 0, 64, 96, True),
+        (1, 32, 0, 96, 96, False),
+        (1, 0, 32, 64, 96, False),
+        (2, 32, 32, 96, 96, True),
+    ],
+)
+def test_small_bound_range_thread_coverage(prove_contains, stride, small_min, large_min, small_extent, large_extent, expected):
+    assert (
+        bool(prove_contains(replicated(128, stride=stride), replicated(128), small_min, large_min, 0, 0, False, small_extent, large_extent))
+        is expected
+    )
+
+
+def test_bounded_thread_coverage_matches_enumerated_owners(prove_contains):
+    for stride in (1, 2, 3):
+        for small_min in (0, 16):
+            for large_min in (0, 16):
+                for small_extent in (32, 64):
+                    for large_extent in (32, 96):
+                        small_threads = {small_min + stride * r for r in range(32) if stride * r < small_extent}
+                        large_threads = set(range(large_min, large_min + large_extent))
+                        expected = small_threads.issubset(large_threads)
+                        actual = bool(
+                            prove_contains(
+                                replicated(32, stride=stride),
+                                replicated(128),
+                                small_min,
+                                large_min,
+                                0,
+                                0,
+                                False,
+                                small_extent,
+                                large_extent,
+                            )
+                        )
+                        assert actual is expected, (stride, small_min, large_min, small_extent, large_extent)
+
+
 @pytest.mark.parametrize(
     "small_min,large_min,small_count,large_count,expected",
     [(-1, -1, 96, 128, True), (-1, -1, 128, 96, False), (0, -1, 96, 128, True), (-1, 0, 96, 128, True)],

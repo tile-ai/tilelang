@@ -533,16 +533,25 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
     }
     large_thread = analyzer.Simplify(large_thread);
     // A fully replicated layout owns exactly [0, ReplicateExtent()) in its
-    // normalized range. Prove coverage for every small replica and index.
-    if (!analyzer.CanProve(large_thread >= 0) ||
-        !analyzer.CanProve(large_thread < large_frag->ReplicateExtent())) {
-      return false;
+    // normalized range. Only bound threads of the small fragment participate.
+    auto covered = [&]() {
+      if (!analyzer.CanProve(large_thread >= 0) ||
+          !analyzer.CanProve(large_thread < large_frag->ReplicateExtent())) {
+        return false;
+      }
+      if (large_frag->ThreadRange().defined()) {
+        return analyzer.CanProve(large_thread <
+                                 large_frag->ThreadRange()->extent);
+      }
+      return true;
+    };
+    if (small_frag->ThreadRange().defined()) {
+      With<arith::ConstraintContext> lower(&analyzer, thread >= 0);
+      With<arith::ConstraintContext> upper(
+          &analyzer, thread < small_frag->ThreadRange()->extent);
+      return covered();
     }
-    if (large_frag->ThreadRange().defined()) {
-      return analyzer.CanProve(large_thread <
-                               large_frag->ThreadRange()->extent);
-    }
-    return true;
+    return covered();
   }
 
   // Get physical index and thread for large_frag.
