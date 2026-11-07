@@ -63,7 +63,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
-                T.tcgen05_gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by // groups, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -76,7 +76,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
                 for i, j in T.Parallel(block_M, block_N):
                     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                 T.copy(acc_s, acc_s_cast)
-                T.tcgen05_gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -203,7 +203,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
             for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                 T.copy(Q[bz, k * block_N : (k + 1) * block_N, bx, :], q)
                 T.clear(qkT)
-                T.tcgen05_gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(lse[bz, bx, k * block_N : (k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
@@ -212,18 +212,18 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, group
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 T.copy(dO[bz, k * block_N : (k + 1) * block_N, bx, :], do)
                 T.clear(dsT)
-                T.tcgen05_gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(qkT, qkT_cast)
                 T.copy(qkT_cast, qkT_shared)
-                T.tcgen05_gemm(qkT_shared, do, dv, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(qkT_shared, do, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N : (k + 1) * block_N], delta)
                 for i, j in T.Parallel(block_M, block_N):
                     dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
                 T.copy(dsT_cast, dsT_shared)
-                T.tcgen05_gemm(dsT_shared, q, dk, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(dsT_shared, q, dk, policy=T.GemmWarpPolicy.FullRow)
                 T.clear(dq)
-                T.tcgen05_gemm(dsT_shared, K_shared, dq, transpose_A=True)
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim):
                     T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
             T.copy(dv, dv_shared)
@@ -264,22 +264,21 @@ def flashattn_bwd_warp(batch, heads, seq_len, dim, is_causal, block_M, block_N, 
     )
 
 
-def ref_program(Q, K, V, is_causal, groups=1):
-    """CPU reference for forward only; backward ref omitted for brevity."""
+def ref_program(Q, K, V, dO, is_causal, groups=1):
+    """fp32 autograd reference: returns O, dQ, dK, dV."""
     dim = Q.size(-1)
-    K_f = K.cpu().float().repeat_interleave(groups, dim=2)
-    V_f = V.cpu().float().repeat_interleave(groups, dim=2)
-    Q_f = Q.cpu().float()
-    scores = torch.einsum("bqhd,bkhd->bhqk", Q_f, K_f)
+    Q_f, K_f, V_f = (t.detach().float().requires_grad_() for t in (Q, K, V))
+    scores = torch.einsum("bqhd,bkhd->bhqk", Q_f, K_f.repeat_interleave(groups, dim=2))
     scores = scores / (dim**0.5)
     if is_causal:
         seq_len = Q_f.size(1)
-        mask = torch.tril(torch.ones(seq_len, seq_len))
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=Q.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float("-inf"))
     P = F.softmax(scores, dim=-1)
-    out_ref = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
-    return out_ref.to(Q.dtype)
+    O = torch.einsum("bhqk,bkhd->bqhd", P, V_f.repeat_interleave(groups, dim=2))
+    O.backward(dO.float())
+    return O.detach(), Q_f.grad, K_f.grad, V_f.grad
 
 
 def main(
@@ -315,8 +314,15 @@ def main(
     dK = torch.zeros(batch, seq_len, head_kv, dim, device="cuda", dtype=torch.float32)
     dV = torch.zeros(batch, seq_len, head_kv, dim, device="cuda", dtype=torch.float32)
     kernel_bwd(Q, K, V, dO, lse, Delta, dQ, dK, dV)
-    _ = kernel_post(dQ)  # dQ_out in output layout; not compared to ref (no backward ref)
-    print("Blackwell GQA bwd ({}): run OK (backward gradients not verified against ref).".format(variant))
+    dQ_out = kernel_post(dQ)
+
+    O_ref, dQ_ref, dK_ref, dV_ref = ref_program(Q, K, V, dO, is_causal, groups)
+    # bf16 outputs (eps 7.8e-3): an element-wise 1e-2 bound is about one ulp at |x| ~ 1.
+    torch.testing.assert_close(O.float(), O_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(dV, dV_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(dK, dK_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(dQ_out.float(), dQ_ref, rtol=2e-2, atol=2e-2)
+    print("Blackwell GQA bwd ({}): all checks passed.".format(variant))
 
 
 if __name__ == "__main__":
