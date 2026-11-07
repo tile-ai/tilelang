@@ -5,7 +5,7 @@ from tvm.tirx.script.builder.ir import sblock_attr
 
 from tilelang.language.annotations import _normalize_layout_map
 
-_VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b")
+_VALID_MEMORY_SCOPES = ("shared", "shared.l1", "shared.l0c", "shared.l0a", "shared.l0b", "shared.ss")
 
 __all__ = [
     "annotate_layout",
