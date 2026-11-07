@@ -4,6 +4,60 @@ import torch
 import tilelang.testing
 import re
 import pytest
+from tvm import arith, tirx
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype,precision", [("float16", 11), ("bfloat16", 8), ("float32", 24), ("float64", 53)])
+@pytest.mark.parametrize("name", ["floor", "ceil", "trunc", "round", "nearbyint"])
+def test_rounding_typed_constants(dtype, precision, name):
+    """Round the typed operand, not the double stored inside FloatImm."""
+    op = getattr(T, name)
+    # The first three formats have unrepresentable literals at these boundaries.
+    # float64 is a control: its stored double already has the declared precision.
+    if name == "ceil":
+        value = 2.0 ** (min(precision, 24) - 1) + 0.5
+    elif name == "floor":
+        value = -(2.0 ** (min(precision, 24) - 1) + 0.5)
+    elif name == "trunc":
+        value = 1.0 - 2.0 ** (-min(precision, 24) - 2)
+    else:
+        value = 0.5 + 2.0 ** (-min(precision, 24) - 2)
+    literal = tirx.FloatImm(dtype, value)
+    direct = op(literal)
+    simplified = arith.Analyzer().simplify(direct)
+    # Bind the literal only after constructing the operation, so simplification
+    # sees a newly exposed constant rather than just the Python API input.
+    var = tirx.Var("rounding_operand", dtype)
+    propagated = arith.Analyzer().simplify(tirx.Let(var, literal, op(var)))
+
+    @T.prim_func
+    def main(A: T.Tensor((1,), dtype), C: T.Tensor((6,), dtype)):
+        with T.Kernel(1, threads=32):
+            C[0] = direct
+            C[1] = simplified
+            C[2] = propagated
+            C[3] = op(A[0])
+            C[4] = op(T.cast(2.0 ** min(precision, 24) + 1.0, dtype))
+            C[5] = op(T.cast(-1.5, dtype))
+
+    main = tirx.transform.Simplify()(tilelang.tvm.IRModule({"main": main}))["main"]
+    kernel = tilelang.compile(main, out_idx=[1], target="cuda")
+    torch_dtype = getattr(torch, dtype)
+    a = torch.tensor([value], dtype=torch_dtype, device="cuda")
+    reference = getattr(torch, "round" if name == "nearbyint" else name)
+    expected = reference(a)
+    result = kernel(a)
+    torch.testing.assert_close(result[:4], expected.expand(4), rtol=0, atol=0)
+    controls = torch.tensor([2.0 ** min(precision, 24) + 1.0, -1.5], dtype=torch_dtype, device="cuda")
+    torch.testing.assert_close(result[4:], reference(controls), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("name", ["floor", "ceil", "trunc", "round", "nearbyint"])
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "bool"])
+def test_rounding_integer_identity(name, dtype):
+    value = tirx.Var("value", dtype)
+    assert getattr(T, name)(value).same_as(value)
 
 
 def get_mathop_lines(source, mathop_name):

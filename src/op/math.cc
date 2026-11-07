@@ -14,6 +14,35 @@ namespace tvm {
 namespace tl {
 using namespace tirx;
 
+// Do not use the TVM operator factories here: they fold the stored double in a
+// FloatImm before narrowing it to the operand dtype. Keep these calls opaque to
+// arithmetic simplification until the existing backend intrinsic rules run.
+PrimExpr LowerRounding(PrimExpr expr, const char *name) {
+  Call call = Downcast<Call>(expr);
+  ICHECK_EQ(call->args.size(), 1);
+  return Call(call->dtype, Op::Get(name), call->args, call->annotations,
+              call->span);
+}
+
+#define TL_REGISTER_ROUNDING(Name)                                             \
+  TVM_REGISTER_OP("tl." #Name)                                                 \
+      .set_num_inputs(1)                                                       \
+      .set_attr<TCallEffectKind>("TCallEffectKind",                            \
+                                 Integer(CallEffectKind::kPure))               \
+      .set_attr<TVectorizable>("TVectorizable", true)                          \
+      .set_attr<TScriptPrinterName>("TScriptPrinterName", #Name)               \
+      .set_attr<FLowerIntrinsic>(                                              \
+          "default.FLowerIntrinsic",                                           \
+          [](PrimExpr expr) { return LowerRounding(expr, "tirx." #Name); })
+
+TL_REGISTER_ROUNDING(floor);
+TL_REGISTER_ROUNDING(ceil);
+TL_REGISTER_ROUNDING(trunc);
+TL_REGISTER_ROUNDING(round);
+TL_REGISTER_ROUNDING(nearbyint);
+
+#undef TL_REGISTER_ROUNDING
+
 PrimExpr pow_of_int_op(PrimExpr args) {
   const CallNode *call = args.as<CallNode>();
   ICHECK(call != nullptr);
