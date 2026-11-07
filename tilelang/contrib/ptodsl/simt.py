@@ -7,7 +7,7 @@ from ptodsl import pto
 from ptodsl._scalar import _emit_llvm_byte_pointer
 from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value, resolve_address_access
 from ptodsl._types import _DType, _restore_integer_signedness, _signless_integer_type
-from ptoas.mlir.dialects import llvm
+from ptoas.mlir.dialects import llvm, pto as _pto
 from ptoas.mlir.ir import IntegerType
 
 
@@ -160,3 +160,20 @@ def _scalar_select_compat(cond, true_val, false_val):
 
 
 _scalar.select = _scalar_select_compat
+
+
+def integer_atomic(ptr, value, logical_dtype, operation):
+    """Adapt signed/unsigned TIR integers to PTOAS signless atomic carriers."""
+    from .common import wrap_const
+
+    logical_type = IntegerType(logical_dtype.resolve())
+    payload_dtype = {32: pto.i32, 64: pto.i64}[logical_type.width]
+    pointer_type = _pto.PtrType(unwrap_surface_value(ptr).type)
+    payload_ptr_type = _pto.PtrType.get(payload_dtype.resolve(), memory_space=pointer_type.memory_space)
+    payload_ptr = pto.castptr(ptr, payload_ptr_type)
+    payload_value = pto.cast(wrap_const(value, logical_dtype), payload_dtype)
+    kwargs = {}
+    if operation in ("atomic_min", "atomic_max"):
+        kwargs["signedness"] = "unsigned" if logical_type.is_unsigned else "signed"
+    previous = getattr(pto, operation)(payload_ptr, payload_value, **kwargs)
+    return pto.cast(previous, logical_dtype)

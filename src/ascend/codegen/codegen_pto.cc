@@ -5916,13 +5916,14 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     const char *pto_atomic_op =
         is_atomic_add ? "atomic_add"
                       : (is_atomic_max ? "atomic_max" : "atomic_min");
+    if (dtype.is_int() || dtype.is_uint()) {
+      os << "tl.integer_atomic(" << PrintExpr_(op->args[0]) << ", "
+         << PrintExpr_(op->args[1]) << ", " << DataTypeName(dtype) << ", "
+         << '"' << pto_atomic_op << "\")";
+      return;
+    }
     os << "pto." << pto_atomic_op << "(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]);
-    // Only integer atomic_min/atomic_max need signedness
-    if (!is_atomic_add && (dtype.is_int() || dtype.is_uint())) {
-      os << ", signedness=\"" << (dtype.is_uint() ? "unsigned" : "signed")
-         << "\"";
-    }
     os << ")";
     return;
   }
