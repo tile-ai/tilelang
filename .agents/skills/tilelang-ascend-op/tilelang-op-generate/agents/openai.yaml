@@ -1,0 +1,3 @@
+interface:
+  display_name: "TileLang A5 operator generation"
+  short_description: "Generate A5 TileLang kernel and test based on design and source code, and complete specified case accuracy verification"

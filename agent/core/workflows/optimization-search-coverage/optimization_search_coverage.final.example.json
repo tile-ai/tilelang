@@ -1,0 +1,155 @@
+{
+  "schema_version": 3,
+  "cases": [
+    {
+      "case_id": "representative_case",
+      "outer_items": 72,
+      "inner_independent_chunks_per_item": 1,
+      "inner_chunks_independent": false,
+      "available_cores": 72,
+      "outer_task_waves": 1.0,
+      "flattened_task_waves": 1.0,
+      "per_task_payload_bytes": 256,
+      "kernel_time_us": 20.0,
+      "lower_bounds_us": {"movement": 1.0, "compute": 2.0},
+      "lower_bound_evidence": "Values are placeholders for a real hardware-derived example.",
+      "main_pipes": ["vector"],
+      "performance_target": {
+        "logic": "ANY",
+        "conditions": [
+          {"metric": "kernel_time_us", "operator": "LE", "threshold": 10.0},
+          {"metric": "semantic_gm_util_pct", "operator": "GE", "threshold": 80.0}
+        ]
+      },
+      "best_metrics": {"kernel_time_us": 8.0, "semantic_gm_util_pct": 62.5},
+      "best_metric_evidence": ["Same-condition profiling resolves the exact target kernel at 8.0 us."],
+      "source_window": {
+        "access_pattern": "INDEXED_OR_REORDERED",
+        "bounded": true,
+        "span_bytes": 128,
+        "consumed_bytes": 96,
+        "density": 0.75,
+        "window_vregs": 2,
+        "register_window_feasible": true,
+        "window_scope": "smallest repeatable hot-loop source window for one vector output chunk",
+        "decomposition_checked": true,
+        "baseline_route_kind": "SCALAR_OR_SIMT",
+        "baseline_writeback_kind": "SCALAR",
+        "index_regularity": "periodic",
+        "evidence": "Values are placeholders for a real source-window derivation."
+      },
+      "obligation_ids": ["O_ROUTE", "O_TILE", "O_INTERACTION"]
+    }
+  ],
+  "obligations": [
+    {
+      "obligation_id": "O_ROUTE",
+      "kind": "physical_dataflow_routes",
+      "case_ids": ["representative_case"],
+      "status": "ACTIVE",
+      "candidate_ids": ["C1"],
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "TESTED_PATH", "candidate_ids": ["C1"]}
+      ],
+      "route_plan": [
+        {"plan_id": "R_SIMT", "route_kind": "SCALAR_OR_SIMT", "writeback_kind": "SCALAR", "case_ids": ["representative_case"], "status": "BASELINE_MEASURED", "candidate_ids": [], "evidence": ["Baseline kernel and matching profiling rows recorded."]},
+        {"plan_id": "R_INDEX", "route_kind": "MEMORY_INDEXED_VECTOR", "writeback_kind": "INDEXED_SCATTER", "case_ids": ["representative_case"], "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "R_DIRECT", "route_kind": "CONTIGUOUS_LOAD_REGISTER_REORDER", "writeback_kind": "INDEXED_SCATTER", "case_ids": ["representative_case"], "status": "TESTED_PATH", "candidate_ids": ["C1"]},
+        {"plan_id": "R_MATERIALIZED", "route_kind": "MATERIALIZED_TRANSFORM", "writeback_kind": "CONTIGUOUS", "case_ids": ["representative_case"], "status": "PENDING", "candidate_ids": []}
+      ]
+    },
+    {
+      "obligation_id": "O_TILE",
+      "kind": "work_granularity_search",
+      "case_ids": ["representative_case"],
+      "status": "ACTIVE",
+      "candidate_ids": ["C1"],
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "TESTED_PATH", "candidate_ids": ["C1"]}
+      ],
+      "boundary_plan": [
+        {"plan_id": "B_FULL", "boundary_kind": "FULL_CONTIGUOUS_UNIT", "case_values": {"representative_case": 128}, "status": "TESTED_PATH", "candidate_ids": ["C1"]},
+        {"plan_id": "B_SIMD", "boundary_kind": "SIMD", "case_values": {"representative_case": 4}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_DMA", "boundary_kind": "DMA", "case_values": {"representative_case": 16}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_CAPACITY", "boundary_kind": "CAPACITY", "case_values": {"representative_case": 128}, "status": "PENDING", "candidate_ids": []},
+        {"plan_id": "B_PARALLEL", "boundary_kind": "PARALLEL", "case_values": {"representative_case": 72}, "status": "PENDING", "candidate_ids": []}
+      ]
+    },
+    {
+      "obligation_id": "O_INTERACTION",
+      "kind": "granularity_dataflow_interaction",
+      "case_ids": ["representative_case"],
+      "status": "SATISFIED",
+      "candidate_ids": ["C1"],
+      "case_dispositions": [
+        {"case_id": "representative_case", "status": "TESTED_PATH", "candidate_ids": ["C1"]}
+      ],
+      "interaction_plan": [
+        {"plan_id": "I_FULL_DIRECT_SCATTER", "boundary_kind": "FULL_CONTIGUOUS_UNIT", "route_kind": "CONTIGUOUS_LOAD_REGISTER_REORDER", "writeback_kind": "INDEXED_SCATTER", "case_values": {"representative_case": 128}, "status": "TESTED_PATH", "candidate_ids": ["C1"]}
+      ]
+    }
+  ],
+  "candidate_events": [
+    {
+      "candidate_id": "C1",
+      "event": "CREATED",
+      "identity": {
+        "work_granularity": "one complete contiguous semantic unit",
+        "granularity_facts": {"unit": "logical elements", "boundary_kinds": ["FULL_CONTIGUOUS_UNIT"], "values_by_case": {"representative_case": 128}},
+        "task_mapping": "independent complete units across available vector cores",
+        "physical_dataflow": {
+          "description": "contiguous source load followed by register lane selection and indexed output",
+          "route_kind": "CONTIGUOUS_LOAD_REGISTER_REORDER",
+          "source_access": "CONTIGUOUS",
+          "writeback_kind": "INDEXED_SCATTER",
+          "full_payload_materialization": false,
+          "register_lane_reorder": true,
+          "indexed_lane_access": false,
+          "route_experiment": true
+        },
+        "precision": "reference-equivalent precision path",
+        "storage_pipeline": "single stage",
+        "pipeline_facts": {"stages": 1, "realization": "SINGLE_STAGE"},
+        "tail_strategy": "bounded semantic tail"
+      },
+      "applicable_cases": ["representative_case"]
+    },
+    {
+      "candidate_id": "C1",
+      "event": "RESULT",
+      "identity": {
+        "work_granularity": "one complete contiguous semantic unit",
+        "granularity_facts": {"unit": "logical elements", "boundary_kinds": ["FULL_CONTIGUOUS_UNIT"], "values_by_case": {"representative_case": 128}},
+        "task_mapping": "independent complete units across available vector cores",
+        "physical_dataflow": {
+          "description": "contiguous source load followed by register lane selection and indexed output",
+          "route_kind": "CONTIGUOUS_LOAD_REGISTER_REORDER",
+          "source_access": "CONTIGUOUS",
+          "writeback_kind": "INDEXED_SCATTER",
+          "full_payload_materialization": false,
+          "register_lane_reorder": true,
+          "indexed_lane_access": false,
+          "route_experiment": true
+        },
+        "precision": "reference-equivalent precision path",
+        "storage_pipeline": "single stage",
+        "pipeline_facts": {"stages": 1, "realization": "SINGLE_STAGE"},
+        "tail_strategy": "bounded semantic tail"
+      },
+      "applicable_cases": ["representative_case"],
+      "result_status": "PROMOTED",
+      "evidence": ["Compile, precision, generated-code and same-condition profiling evidence recorded."],
+      "case_results": [
+        {
+          "case_id": "representative_case",
+          "disposition": "TESTED_PATH",
+          "evidence": ["Generated code proves path activation and profiling resolves the target kernel."],
+          "performance_measurement": {
+            "kernel_time_us": 8.0,
+            "artifact": "same-condition profiling artifact for the exact target kernel"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang/PTO Performance Plans"
+  short_description: "Create verifiable optimization plans for TileLang PTO operators from per-case measurements"
+  default_prompt: "Use $tilelang-perf-optimize to analyze per-case evidence and produce implementable, validated optimization plans for a TileLang kernel targeting PTO."
