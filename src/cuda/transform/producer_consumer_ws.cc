@@ -1791,6 +1791,7 @@ private:
                                dummy_producer, dummy_consumer);
     dummy_ws =
         AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, dummy_ws);
+    guarded_postlude_stmts_ = {};
     Optional<Stmt> replaced =
         ReplacePipelineLoopInStmt(orig_block->body, pipeline_loop, dummy_ws,
                                   producer_extent, consumer_extent);
@@ -1805,6 +1806,11 @@ private:
     // LayoutInference can infer an independent producer-side thread range.
     BufferRemap producer_buffer_remap;
     Array<Buffer> producer_private_buffers;
+    // A statement after the pipeline is executed by the consumer only (and is
+    // later sunk into the consumer branch). If it writes a value that the
+    // producer reads, warp specialization would leave the producer with the
+    // value of the previous run, so decline the transformation.
+    bool declined_loop_carried_postlude = false;
     {
       BufferSet block_alloc_buffers;
       for (const auto &buffer : orig_block->alloc_buffers) {
@@ -1821,6 +1827,15 @@ private:
         MergeLocalAccessSummary(&producer_access,
                                 LocalAccessCollector::Collect(
                                     guard->then_case, buffer_data_to_buffer_));
+      }
+      LocalLiveSet producer_reads;
+      producer_reads.AddUses(producer_access);
+      for (const auto &postlude : guarded_postlude_stmts_) {
+        if (producer_reads.NeedsAnyDef(LocalAccessCollector::Collect(
+                postlude, buffer_data_to_buffer_))) {
+          declined_loop_carried_postlude = true;
+          break;
+        }
       }
       auto maybe_clone = [&](const Buffer &buffer) {
         if (!buffer.defined() ||
@@ -1840,6 +1855,14 @@ private:
       for (const auto &buffer : producer_access.write_buffers) {
         maybe_clone(buffer);
       }
+    }
+    if (declined_loop_carried_postlude) {
+      // The producer would read a stale value on the next run of the pipeline.
+      // Keep the regular (non-WS) pipeline instead.
+      DLOG(WARNING) << "[WS] declined: a post-pipeline statement writes a "
+                       "value the producer reads on the next run";
+      guarded_postlude_stmts_ = {};
+      return GetRef<Stmt>(orig_realize);
     }
     if (!producer_buffer_remap.empty()) {
       rewritten_producer =
@@ -2268,6 +2291,7 @@ private:
       new_seq.push_back(rewritten_loop.value());
 
       for (int i = loop_idx + 1; i < static_cast<int>(op->seq.size()); ++i) {
+        rewriter_->guarded_postlude_stmts_.push_back(op->seq[i]);
         new_seq.push_back(GuardConsumerOnly(op->seq[i]));
       }
       return new_seq.size() == 1 ? new_seq[0] : SeqStmt(new_seq);
@@ -2527,6 +2551,10 @@ private:
   Array<Stmt> extracted_producer_init_;
   Array<Stmt> extracted_consumer_init_;
   Array<IfThenElse> guarded_producer_prelude_;
+  // Statements after the pipeline loop that GuardConsumerOnly holds to the
+  // consumer partition. Checked against the producer's reads so a loop-carried
+  // scalar update cannot be sunk into the consumer alone.
+  Array<Stmt> guarded_postlude_stmts_;
   // Buffers touched by statements that stay in the shared prelude. They cannot
   // be cloned for the producer: the shared statement runs before the partition
   // split, so both branches must keep pointing at the same buffer.

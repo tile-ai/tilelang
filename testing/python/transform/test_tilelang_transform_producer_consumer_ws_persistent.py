@@ -1021,5 +1021,75 @@ def test_ws_producer_prelude_before_outer_loop():
     torch.testing.assert_close(kernel(A, B), ref.repeat(2, 1), rtol=1e-2, atol=1e-2)
 
 
+def cross_run_producer_scalar_update(
+    M=256,
+    N=256,
+    K=256,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    runs=2,
+    dtype="float16",
+    threads=128,
+):
+    """Issue #3842: the running K offset is updated after each pipeline run.
+
+    The producer reads ``start`` when it evaluates the copy indices of the next
+    run, so the update cannot be sunk into the consumer branch.
+    """
+    iterations = K // block_K
+    step = (iterations + runs - 1) // runs
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(N // block_N, M // block_M, threads=threads) as (bx, by):
+            A_s = T.alloc_shared((block_M, block_K), dtype)
+            B_s = T.alloc_shared((block_K, block_N), dtype)
+            C_l = T.alloc_fragment((block_M, block_N), "float32")
+            start = T.alloc_var(T.int32, init=0)
+            T.clear(C_l)
+            for _ in T.serial(runs):
+                k0 = T.alloc_var(T.int32, init=start)
+                k1 = T.alloc_var(T.int32, init=T.min(iterations, k0 + step))
+                for ko in T.Pipelined(k1 - k0, num_stages=num_stages):
+                    T.copy(A[by * block_M, (k0 + ko) * block_K], A_s)
+                    T.copy(B[(k0 + ko) * block_K, bx * block_N], B_s)
+                    T.gemm(A_s, B_s, C_l)
+                start = start + (k1 - k0)
+            T.copy(C_l, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ws_pass_declines_loop_carried_producer_scalar_update():
+    """A post-pipeline write read by the producer's next run must decline WS."""
+    script = _apply_ws_pass(cross_run_producer_scalar_update())["main"].script()
+    assert "tl_tiled_ws_applied" not in script, "WS must decline when a post-pipeline update feeds the producer's next run"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_declined_loop_carried_update_matches_reference():
+    import torch
+
+    kernel = tilelang.compile(
+        cross_run_producer_scalar_update(),
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
+    torch.manual_seed(0)
+    A = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    B = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
