@@ -809,7 +809,10 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
 
 bool CanLowerToBulkLoad1D(const CopyNode &op, Target target,
                           arith::Analyzer *analyzer) {
-  if (!IsCudaLikeTarget(target) || TargetIsCuTeDSL(target)) {
+  // As in SelectCopyInstForLowering, a gather4 copy and a multicast copy take
+  // their own paths before the 1-D bulk path.
+  if (!IsCudaLikeTarget(target) || TargetIsCuTeDSL(target) ||
+      GetBoolAnnotation(op, "is_gather4") || GetClusterMask(op) != 0) {
     return false;
   }
   static const LayoutMap empty_layout_map;

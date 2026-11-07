@@ -913,6 +913,24 @@ def _tma_and_simt_copy_kernel(rows=2, width=8, iters=4):
     return main
 
 
+def _versioned_multicast_copy_kernel(rows=2, width=8, iters=4):
+    """A pipeline whose multicast copy writes a (rows, width) float32 buffer from a contiguous region."""
+
+    @T.prim_func
+    def main(src: T.Tensor((iters * rows, width), "float32"), out: T.Tensor((rows, width), "float32")):
+        with T.ClusterKernel(2, threads=128, cluster_dims=(2, 1, 1)) as _:
+            smem = T.alloc_shared((rows, width), "float32")
+            acc = T.alloc_fragment((rows, width), "float32")
+            T.clear(acc)
+            for k in T.Pipelined(iters, num_stages=2):
+                T.copy_cluster(src[k * rows, 0], smem, cluster_mask=0b11)
+                for i, j in T.Parallel(rows, width):
+                    acc[i, j] += smem[i, j]
+            T.copy(acc, out)
+
+    return main
+
+
 def _warp_specialized_script(func, arch="sm_90a"):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     target = determine_target({"kind": "cuda", "arch": arch}, return_object=True)
@@ -969,6 +987,15 @@ def test_tiled_ws_pads_packed_fp4_versions_by_storage():
 
     assert "tl_tiled_ws_applied" in script
     assert 'smem = T.sblock_alloc_buffer((2, 4, 64), "float4_e2m1fn", scope="shared.dyn")' in script
+
+
+@tilelang.testing.requires_cuda
+def test_tiled_ws_pads_multicast_versions():
+    """A multicast copy lowers to a tensor TMA copy also from a contiguous region, so its versions are padded."""
+    script = _warp_specialized_script(_versioned_multicast_copy_kernel())
+
+    assert "tl_tiled_ws_applied" in script
+    assert 'smem = T.sblock_alloc_buffer((2, 4, 8), scope="shared.dyn")' in script
 
 
 @tilelang.testing.requires_cuda
