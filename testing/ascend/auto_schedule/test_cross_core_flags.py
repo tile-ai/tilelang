@@ -208,6 +208,67 @@ def test_cross_aiv_memory_dependencies_require_supported_ordering(hazard):
             transform.InsertSync()(before)
 
 
+@pytest.mark.parametrize(
+    "offset, overlap, force_conflict",
+    [
+        pytest.param(64, False, False, id="interleaved-disjoint"),
+        pytest.param(32, True, False, id="same-iteration-overlap"),
+        pytest.param(128, True, False, id="different-internal-iterations-overlap"),
+        pytest.param(64, False, True, id="declared-conflict"),
+    ],
+)
+def test_compound_aiv_tasks_preserve_strided_write_regions(offset, overlap, force_conflict):
+    num_tokens = tirx.Var("num_tokens", "int32")
+    out = tirx.decl_buffer((num_tokens,), "float32", name="out")
+    ub = [tirx.decl_buffer((256,), "float32", name=f"ub{sid}", scope="shared.dyn") for sid in range(2)]
+    tasks = []
+    for sid, core in enumerate((1, 4)):
+        # The two atomic tasks have independent internal iteration spaces.
+        stage = tirx.Var(f"stage{sid}", "int32")
+        begin = stage * 128 + sid * offset
+        extent = tirx.min(num_tokens - begin, 64)
+        store = copy(ub[sid], out, src_indices=[stage * 64], src_shape=[extent], dst_indices=[begin], dst_shape=[extent])
+        body = tirx.For(
+            stage,
+            0,
+            tirx.ceildiv(num_tokens - sid * offset, 128),
+            tirx.ForKind.SERIAL,
+            tirx.AttrStmt({}, "tl.ascend_task", 1, store),
+        )
+        tasks.append(unit(tirx.AttrStmt({"core_mask": tirx.IntImm("int64", core)}, "tl.ascend_per_core_task", 1, body), core=None))
+    annotations = {"tl.split_subcores": True}
+    if force_conflict:
+        annotations["tl.root_conflict_hints"] = [[out.data, out.data, tirx.IntImm("int32", 0), tirx.const(True, "bool")]]
+    before = kernel(seq(*tasks), buffers=ub, params=[out, num_tokens], annotations=annotations)
+    if overlap or force_conflict:
+        with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+            transform.InsertSync()(before)
+    else:
+        after = transform.InsertSync()(before)
+        assert len(calls(after, "tl.tileop.ascend_copy")) == 2
+        assert len(nodes(after, tirx.For)) == 2
+        assert not calls(after, "tl.ascend_cross_core_set_flag")
+
+
+def test_compound_aiv_loop_header_reads_keep_peer_dependencies():
+    out = tirx.decl_buffer((512,), "int32", name="out")
+    ub0 = tirx.decl_buffer((128,), "int32", name="ub0", scope="shared.dyn")
+    ub1 = tirx.decl_buffer((64,), "int32", name="ub1", scope="shared.dyn")
+    stage = tirx.Var("stage", "int32")
+    # The body reads out[64] and writes only the upper half of each 128-wide
+    # block. Both are disjoint from AIV1's store; only the loop header conflicts.
+    store = copy(ub0, out, src_indices=[out[64] % 64], src_shape=[64], dst_indices=[stage * 128 + 64], dst_shape=[64])
+    loop = tirx.For(stage, 0, tirx.max(tirx.min(out[0], 4), 0), tirx.ForKind.SERIAL, store)
+    before = kernel(
+        seq(unit(loop, core=1), unit(copy(ub1, out, dst_shape=[64]), core=4)),
+        buffers=[ub0, ub1],
+        params=[out],
+        annotations={"tl.split_subcores": True},
+    )
+    with pytest.raises(tvm.error.InternalError, match="does not support synchronization between AIV0 and AIV1"):
+        transform.InsertSync()(before)
+
+
 @pytest.mark.parametrize("orders_accesses", [False, True], ids=["unrelated-cube-task", "cube-data-dependency"])
 def test_only_actual_cube_dependencies_can_order_aiv_accesses(orders_accesses):
     shared = tirx.decl_buffer((64,), "float32", name="shared")
