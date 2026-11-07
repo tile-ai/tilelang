@@ -72,9 +72,9 @@ class ClassifyResultTest(unittest.TestCase):
                 mock.patch.object(run_all, "__file__", str(root / "run_all.py")),
                 mock.patch.object(run_all.subprocess, "run", return_value=proc),
                 contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaises(SystemExit) as exc,
             ):
-                with self.assertRaises(SystemExit) as exc:
-                    run_all.main()
+                run_all.main()
             self.assertEqual(exc.exception.code, 1)  # other scripts are missing
             self.assertEqual((root / "logs/01_num_args_mismatch.py.err").read_bytes(), proc.stderr.encode("utf-8"))
             self.assertEqual((root / "logs/01_num_args_mismatch.py.out").read_bytes(), proc.stdout.encode("utf-8"))
