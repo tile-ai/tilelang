@@ -4,11 +4,13 @@
  */
 
 #include "op/fill.h"
+#include <cstdint>
 #include <tvm/runtime/logging.h>
 
 #include "backend/common/target_utils.h"
 #include "metal/op/builtin.h"
 #include "metal/op/utils.h"
+#include "metal/target_utils.h"
 #include "op/utils.h"
 #include "transform/loop_partition.h"
 #include "transform/loop_vectorize.h"
@@ -21,6 +23,35 @@ namespace tl {
 using namespace tirx;
 
 namespace metal {
+
+namespace {
+
+constexpr int64_t kSIMDGroupTileSize = 8;
+
+Stmt LowerSIMDGroupPartialFill(const FillNode &op, const LowerArgs &lower_args,
+                               arith::Analyzer *analyzer) {
+  const SIMDGroupRegion tiles = GetSIMDGroupPartialRegion(
+      op.dst, op.region, lower_args, analyzer, "Metal partial fill");
+
+  Array<Stmt> stmts;
+  for (int64_t i = 0; i < tiles.extent[0]; ++i) {
+    for (int64_t j = 0; j < tiles.extent[1]; ++j) {
+      // Row stride comes from the full buffer, not the selected region.
+      const int64_t index = tiles.Index(i, j);
+      stmts.push_back(Evaluate(
+          Call(DataType::Handle(), builtin::make_filled_simdgroup_matrix(),
+               {op.dst->data, IntImm(DataType::Int(32), index), op.value,
+                IntImm(DataType::Int(32), kSIMDGroupTileSize),
+                IntImm(DataType::Int(32), kSIMDGroupTileSize)})));
+    }
+  }
+  if (stmts.size() == 1) {
+    return stmts[0];
+  }
+  return SeqStmt(stmts);
+}
+
+} // namespace
 
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
@@ -56,6 +87,10 @@ struct Fill {
     }
 
     if (IsSIMDGroupBuffer(op.dst)) {
+      if (op.dst->shape.size() == 2 &&
+          !IsWholeBufferRegion(op.dst, op.region, analyzer)) {
+        return LowerSIMDGroupPartialFill(op, lower_args, analyzer);
+      }
       int region_elements = 1;
       for (auto r : op.region) {
         auto imm = r->extent.as<IntImmNode>();
