@@ -95,6 +95,19 @@ TL_DEVICE bool IsAcqRelLikeMemoryOrder(int memory_order) {
          memory_order == int(cuda::memory_order_seq_cst);
 }
 
+TL_DEVICE bool IsSeqCstMemoryOrder(int memory_order) {
+  return memory_order == int(cuda::memory_order_seq_cst);
+}
+
+// atom.acq_rel provides the acquire/release pair but not the total order
+// required by seq_cst.  A seq_cst fence before the RMW is the sequence the
+// CUDA atomic_ref implementation emits for seq_cst fetch_add.
+TL_DEVICE void tl_atomic_fence_seq_cst(int memory_order) {
+  if (IsSeqCstMemoryOrder(memory_order)) {
+    asm volatile("fence.sc.gpu;" ::: "memory");
+  }
+}
+
 template <typename T> TL_DEVICE unsigned short PackBits16(const T &val) {
   return *reinterpret_cast<const unsigned short *>(&val);
 }
@@ -105,6 +118,7 @@ template <typename T> TL_DEVICE T UnpackBits16(unsigned short val) {
 
 TL_DEVICE void tl_atomic_add_f16(unsigned short &ret, unsigned long long addr,
                                  unsigned short val, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.noftz.f16 %0, [%1], %2;"
                  : "=h"(ret)
@@ -125,6 +139,7 @@ TL_DEVICE void tl_atomic_add_f16(unsigned short &ret, unsigned long long addr,
 
 TL_DEVICE void tl_atomic_add_bf16(unsigned short &ret, unsigned long long addr,
                                   unsigned short val, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.noftz.bf16 %0, [%1], %2;"
                  : "=h"(ret)
@@ -149,6 +164,7 @@ TL_DEVICE void tl_atomic_add_bf16(unsigned short &ret, unsigned long long addr,
 // every supported target.
 TL_DEVICE void tl_atomic_add_f16x2(unsigned int &ret, unsigned long long addr,
                                    unsigned int val, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.noftz.f16x2 %0, [%1], %2;"
                  : "=r"(ret)
@@ -172,6 +188,7 @@ TL_DEVICE void tl_atomic_add_v2_bf16(unsigned short &ret_x,
                                      unsigned long long addr,
                                      unsigned short val_x, unsigned short val_y,
                                      int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile(
         "atom.release.gpu.global.add.noftz.v2.bf16 {%0,%1}, [%2], {%3,%4};"
@@ -199,6 +216,7 @@ tl_atomic_add_v4_f16(unsigned short &ret_x, unsigned short &ret_y,
                      unsigned long long addr, unsigned short val_x,
                      unsigned short val_y, unsigned short val_z,
                      unsigned short val_w, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsRelaxedMemoryOrder(memory_order)) {
     asm volatile(
         "atom.global.v4.f16.add.noftz {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
@@ -232,6 +250,7 @@ tl_atomic_add_v4_bf16(unsigned short &ret_x, unsigned short &ret_y,
                       unsigned long long addr, unsigned short val_x,
                       unsigned short val_y, unsigned short val_z,
                       unsigned short val_w, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsRelaxedMemoryOrder(memory_order)) {
     asm volatile(
         "atom.global.v4.bf16.add.noftz {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
@@ -262,6 +281,7 @@ tl_atomic_add_v4_bf16(unsigned short &ret_x, unsigned short &ret_y,
 TL_DEVICE void tl_atomic_add_v2_f32(float &ret_x, float &ret_y,
                                     unsigned long long addr, float val_x,
                                     float val_y, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile("atom.release.gpu.global.add.v2.f32 {%0,%1}, [%2], {%3,%4};"
                  : "=f"(ret_x), "=f"(ret_y)
@@ -284,6 +304,7 @@ TL_DEVICE void tl_atomic_add_v4_f32(float &ret_x, float &ret_y, float &ret_z,
                                     float &ret_w, unsigned long long addr,
                                     float val_x, float val_y, float val_z,
                                     float val_w, int memory_order) {
+  tl_atomic_fence_seq_cst(memory_order);
   if (IsReleaseMemoryOrder(memory_order)) {
     asm volatile(
         "atom.release.gpu.global.add.v4.f32 {%0,%1,%2,%3}, [%4], {%5,%6,%7,%8};"
