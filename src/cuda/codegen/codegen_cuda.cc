@@ -1075,6 +1075,13 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         ICHECK_EQ(t.lanes() % 2, 0)
             << "only support even lane for shorT type with lanes > 4";
         os << "int" << t.lanes() / 2;
+      } else if (t.lanes() <= 16) {
+        // 256 bits: CUDA has no (u)short16 vector type, so pack four
+        // elements into each 64-bit field, like fp16/bf16 x16.
+        ICHECK_EQ(t.lanes() % 4, 0)
+            << "only support (mod 4 = 0) lanes for short type of more than 8 "
+               "lanes";
+        os << "longlong" << t.lanes() / 4;
       } else {
         fail = true;
       }
@@ -1535,6 +1542,11 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
       os << "." << access[(i % 4) / 2];
     // fp4_e2_2_t -> method call x() or y()
     os << "." << access[i % 2] << "()";
+  } else if (t.lanes() > 8 && t.lanes() <= 16 && t.bits() == 16 &&
+             (t.is_int() || t.is_uint())) {
+    std::string type_name = t.is_int() ? "short" : "ushort";
+    os << "(((" << type_name << "2*)(&(" << vec << "." << access[i / 4]
+       << "))) + " << (i / 2 % 2) << ")->" << access[i % 2];
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1653,6 +1665,12 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
     ICHECK(!type_name.empty());
     stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << " = " << value << ";\n";
+  } else if (t.lanes() > 8 && t.lanes() <= 16 && t.bits() == 16 &&
+             (t.is_int() || t.is_uint())) {
+    std::string type_name = t.is_int() ? "short" : "ushort";
+    stream << "(((" << type_name << "2*)(&(" << vec << "." << access[i / 4]
+           << "))) + " << (i / 2 % 2) << ")->" << access[i % 2] << " = "
+           << value << ";\n";
   } else if (t.is_float4_e2m1fn()) {
     stream << vec;
     // fp4_e2_64_t
