@@ -35,6 +35,7 @@ def main():
             cwd=str(root),
             capture_output=True,
             text=True,
+            errors="replace",
         )
 
         # Save logs
@@ -42,7 +43,11 @@ def main():
         (logs_dir / f"{name}.err").write_text(proc.stderr)
 
         out = (proc.stdout or "") + (proc.stderr or "")
-        if "[SKIP]" in out:
+        if proc.returncode == 0 and any(line.startswith("[SKIP]") for line in out.splitlines()):
+            status = "SKIP"
+        elif proc.returncode < 0 or "ModuleNotFoundError:" in proc.stderr or "ImportError:" in proc.stderr:
+            status = "FAIL"
+        elif "CUDA is not available" in proc.stderr:
             status = "SKIP"
         elif proc.returncode != 0:
             status = "PASS"  # error reproduced as expected
@@ -64,7 +69,7 @@ def main():
         print(f"  {k:7}: {counts.get(k, 0)}")
 
     # Exit non-zero if any FAIL
-    sys.exit(1 if counts.get("FAIL", 0) else 0)
+    sys.exit(1 if counts["FAIL"] or counts["MISSING"] else 0)
 
 
 if __name__ == "__main__":
