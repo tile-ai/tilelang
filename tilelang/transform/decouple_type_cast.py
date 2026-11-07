@@ -191,6 +191,9 @@ class MemoryAccessCollector(PyStmtExprVisitor):
         self.loop_var = loop_var
         self.stores: list[BufferStore] = []
         self.loads: list[BufferLoad] = []
+        # load_guards[k]: the T.if_then_else conditions under which loads[k] is evaluated
+        self.load_guards: list[tuple[tirx.PrimExpr, ...]] = []
+        self._guards: list[tirx.PrimExpr] = []
 
     def visit_buffer_store_(self, op: BufferStore) -> None:
         if is_global_or_shared_buffer(op.buffer):
@@ -204,6 +207,7 @@ class MemoryAccessCollector(PyStmtExprVisitor):
         # indices, e.g. a[i] and a[i+32]) so each gets its own cast buffer.
         if is_global_or_shared_buffer(op.buffer) and any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices):
             self.loads.append(op)
+            self.load_guards.append(tuple(self._guards))
         # Skip indices traversal
 
     def visit_if_then_else_(self, op: IfThenElse) -> None:
@@ -217,9 +221,13 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 
     def visit_call_(self, op: Call) -> None:
         if op.op.same_as(_IF_THEN_ELSE_OP):
-            # Skip condition (args[0]), only visit true/false values
+            # Skip condition (args[0]), only visit true/false values.
+            # Remember the condition so that a load moved into a copy loop keeps it.
+            self._guards.append(op.args[0])
             self.visit_expr(op.args[1])
+            self._guards[-1] = tirx.Not(op.args[0])
             self.visit_expr(op.args[2])
+            self._guards.pop()
         else:
             for arg in op.args:
                 self.visit_expr(arg)
@@ -458,6 +466,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         # buffer still get their own cast buffer.
         uncovered_loads = [ld for ld in collector.loads if _find_cast_entry(store_entries, ld.buffer, list(ld.indices)) is None]
         load_entries = self._create_cast_entries(uncovered_loads, extent)
+        load_guards = [_entry_guard(collector, entry) for entry in load_entries]
 
         # Build copy-from-memory loops (before compute)
         # For read-modify-write, reuse the store-side cast buffer for copy-from.
@@ -471,6 +480,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
             load_entries + rmw_entries,
             direction="from_memory",
             condition=condition,
+            guards=load_guards + [None] * len(rmw_entries),
         )
 
         # Build compute loop: replace stores and loads in the normalized body
@@ -482,6 +492,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         compute_body = normalized_body
         if store_entries or load_entries:
             compute_body = self._replace_access(compute_body, store_entries, load_replacement_entries, op.loop_var - op.min)
+            compute_body = _DropMovedGuard(load_entries, load_guards).visit_stmt(compute_body)
         compute_loop = self._make_vectorized_loop(op, compute_body)
 
         # Build copy-to-memory loops (after compute)
@@ -551,6 +562,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         entries: list[CastEntry],
         direction: str,
         condition: tirx.PrimExpr | None = None,
+        guards: list[tirx.PrimExpr | None] | None = None,
     ) -> list[For]:
         """Create vectorized copy loops between memory and cast buffers.
 
@@ -558,7 +570,8 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         """
         copy_loops: list[For] = []
 
-        for orig_buffer, orig_indices, cast_buffer in entries:
+        for k, (orig_buffer, orig_indices, cast_buffer) in enumerate(entries):
+            guard = guards[k] if guards is not None else None
             # vectorized loop only has one iteration variable,
             # so we use the same name for the copy variable
             copy_var = Var(f"{op.loop_var.name}_copy", op.loop_var.dtype)
@@ -574,9 +587,17 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
                     new_indices,
                 )
             else:
+                value: tirx.PrimExpr = BufferLoad(orig_buffer, new_indices)
+                if guard is not None:
+                    # The load was under T.if_then_else(guard, ...): keep it guarded.
+                    value = tirx.if_then_else(
+                        substitute(guard, {op.loop_var: copy_var}),
+                        value,
+                        tirx.const(0, orig_buffer.dtype),
+                    )
                 copy_store = BufferStore(
                     cast_buffer,
-                    BufferLoad(orig_buffer, new_indices),
+                    value,
                     [ordinal],
                 )
 
@@ -626,6 +647,50 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         """Replace memory accesses with cast buffer accesses."""
         replacer = AccessReplacer(store_entries, load_entries, ordinal)
         return replacer.visit_stmt(stmt)
+
+
+def _entry_guard(collector: MemoryAccessCollector, entry: CastEntry) -> tirx.PrimExpr | None:
+    """Return the T.if_then_else guard shared by every occurrence of ``entry``'s load, or None."""
+    buf, indices, _ = entry
+    guards = [g for ld, g in zip(collector.loads, collector.load_guards) if _buf_indices_match(ld.buffer, list(ld.indices), buf, indices)]
+    if not guards or not guards[0]:
+        return None
+    first = guards[0]
+    for g in guards[1:]:
+        if len(g) != len(first) or not all(tvm_ir.structural_equal(a, b) for a, b in zip(g, first)):
+            return None
+    cond = first[0]
+    for c in first[1:]:
+        cond = tirx.And(cond, c)
+    return cond
+
+
+def _is_zero(expr: tirx.PrimExpr) -> bool:
+    while isinstance(expr, (Cast, tirx.Broadcast)):
+        expr = expr.value
+    return isinstance(expr, (IntImm, tirx.FloatImm)) and expr.value == 0
+
+
+@tirx.functor.mutator
+class _DropMovedGuard(tirx.PyStmtExprMutator):
+    """Drop ``if_then_else(g, [cast](staged[v]), 0)`` when the staging copy loop already
+    stores ``0`` into ``staged[v]`` wherever ``g`` is false."""
+
+    def __init__(self, entries: list[CastEntry], guards: list[tirx.PrimExpr | None]):
+        super().__init__()
+        self.moved = [(entry[2], guard) for entry, guard in zip(entries, guards) if guard is not None]
+
+    def visit_call_(self, op: Call) -> tirx.PrimExpr:
+        if op.op.same_as(_IF_THEN_ELSE_OP) and _is_zero(op.args[2]):
+            then_expr = op.args[1]
+            inner = then_expr
+            while isinstance(inner, Cast):
+                inner = inner.value
+            if isinstance(inner, BufferLoad):
+                for cast_buf, guard in self.moved:
+                    if inner.buffer.same_as(cast_buf) and tvm_ir.structural_equal(guard, op.args[0]):
+                        return then_expr
+        return super().visit_call_(op)
 
 
 @tirx.functor.mutator
