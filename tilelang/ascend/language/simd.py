@@ -953,6 +953,9 @@ def vdupv(src, mask=None, pos="POS_LOWEST", mode="MODE_ZEROING"):
 
     pos: "POS_LOWEST" (lane 0) or "POS_HIGHEST" (lane N).
     """
+    positions = ("POS_LOWEST", "POS_HIGHEST")
+    if pos not in positions:
+        raise ValueError(f"Invalid pos '{pos}'. Must be one of {positions}")
     if mask is None:
         mask = _default_mask(src.dtype)
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vdupv"), src, mask, pos, mode)
@@ -1362,7 +1365,7 @@ def vcvt(
         if target_dtype in fp8_dtypes:
             return call(round, sat, part_x2[part], mode)
         if target_dtype == "float16":
-            return call(sat, round, mode)
+            return call(round, sat, mode)
         if target_dtype == "float32":
             return call(part_x2[part], mode)
         if target_dtype in fp4_dtypes:
