@@ -11,6 +11,9 @@
 namespace tvm {
 namespace tl {
 
+/*! \brief FP16/BF16/FP32 min.NaN.xorsign.abs with NaN propagation (SM86+). */
+TVM_DLL const Op &clamp_symmetric();
+
 namespace attr {
 
 // Warp-specialization annotations consumed only by CUDA lowering.
