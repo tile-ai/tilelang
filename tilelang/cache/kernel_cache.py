@@ -10,6 +10,7 @@ import errno
 import os
 import platform
 import shutil
+import stat
 import threading
 import uuid
 import sys
@@ -216,6 +217,24 @@ class KernelCache:
     @staticmethod
     def _get_staging_root() -> str:
         return os.path.join(KernelCache._get_namespace_root(env.get_cache_write_dir()), KernelCache.staging_root_dir)
+
+    @staticmethod
+    def _legalize_staged_entry(staging_path: str) -> None:
+        """Make a staged entry group/other readable before it is published.
+
+        Only a group-shared cache (SGID on the cache root) is adjusted. Cache
+        roots without SGID, including filesystems that do not support the bit
+        (e.g. Windows), are left untouched and keep the normal umask-derived
+        permissions. Only the entry directory carries the SGID bit: files get
+        0o644 while keeping executable bits.
+        """
+        if not os.stat(env.TILELANG_CACHE_DIR).st_mode & stat.S_ISGID:
+            return
+        os.chmod(staging_path, 0o2755)
+        for entry in os.scandir(staging_path):
+            if entry.is_file(follow_symlinks=False):
+                exec_bits = entry.stat(follow_symlinks=False).st_mode & 0o111
+                os.chmod(entry.path, 0o644 | exec_bits)
 
     @staticmethod
     def _cleanup_stale_staging_dirs(max_age_seconds: int = 3600):
@@ -612,6 +631,10 @@ class KernelCache:
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
                 raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
+            # Shared caches: give the staged entry group-readable permissions
+            # before it is published via rename.
+            KernelCache._legalize_staged_entry(staging_path)
 
             # Durability barrier: a node or filesystem-client crash may otherwise
             # persist the rename below before the staged file data, publishing a
