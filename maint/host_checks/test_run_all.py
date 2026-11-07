@@ -33,6 +33,48 @@ class ClassifyResultTest(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertEqual(run_all.classify_result(name, self.result(1, stderr)), "PASS")
 
+    def test_generated_abi_error_signatures(self):
+        errors = {
+            "01_num_args_mismatch.py": [
+                "ValueError: Kernel expected 2 inputs, but 1 are provided.",
+                "ValueError: expected 2 input arguments",
+            ],
+            "02_pointer_type_error.py": [
+                "ValueError: kernel my_kernel input A expected pointer or tensor handle",
+            ],
+            "03_ndim_mismatch.py": ["ValueError: ndim mismatch, expected 2"],
+            "04_dtype_mismatch.py": ["ValueError: dtype mismatch, expected float16"],
+            "05_shape_mismatch.py": [
+                "ValueError: Argument A_handle.shape[0] violates packed ABI constraint",
+            ],
+            "06_strides_mismatch.py": [
+                "ValueError: Argument A_handle.strides[1] violates packed ABI constraint",
+                "ValueError: A_handle.strides: expected to be compact array, but got non-compact strides",
+            ],
+            "08_device_id_mismatch.py": [
+                "ValueError: Argument A_handle.device_id violates packed ABI constraint",
+            ],
+            "10_scalar_type_mismatch.py": [
+                "ValueError: kernel my_kernel scalar x expected integer",
+                "ValueError: kernel my_kernel scalar flag expected boolean",
+            ],
+        }
+        for name, messages in errors.items():
+            for message in messages:
+                with self.subTest(name=name, message=message):
+                    self.assertEqual(
+                        run_all.classify_result(name, self.result(1, message)), "PASS"
+                    )
+
+    def test_unrelated_argument_count_error_is_not_accepted(self):
+        self.assertEqual(
+            run_all.classify_result(
+                "01_num_args_mismatch.py",
+                self.result(1, "TypeError: compiler expected 2 arguments, got 3"),
+            ),
+            "FAIL",
+        )
+
     def test_unrelated_failures_and_crashes_are_not_passes(self):
         name = "01_num_args_mismatch.py"
         for rc, stderr in (
