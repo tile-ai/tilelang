@@ -34,10 +34,10 @@ enum class TileStmtKind {
   kTmaProducer,     // TMA load (global->shared tile-op copy)
   kCpAsyncProducer, // tile-op copy selecting cp.async
   kCpAsyncRaw,      // raw ptx_cp_async / commit_group / wait_group statement
-  kSimtProducer, // Non-tile-op SIMT copy: For loop writing shared from global
-  kTmaStore,     // TMA bulk store (shared->global tile-op copy)
-  kTcgen05Mma,   // tcgen05 GEMM accumulating in tensor memory
-  kConsumer,     // Everything else (compute, wgmma, plain copies)
+  kSimtProducer,    // SIMT producer: non-tile-op copies and SIMT im2col
+  kTmaStore,        // TMA bulk store (shared->global tile-op copy)
+  kTcgen05Mma,      // tcgen05 GEMM accumulating in tensor memory
+  kConsumer,        // Everything else (compute, wgmma, plain copies)
 };
 
 /// The Evaluate(Call) inside else-less if / attribute / block wrappers, if
