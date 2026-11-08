@@ -1,5 +1,3 @@
-import re
-
 import pytest
 from tilelang import tvm
 
@@ -29,22 +27,22 @@ def _lower_vectorized_binary(op, lanes):
 
 
 @pytest.mark.parametrize(
-    ("op", "metal_op"),
+    ("op", "expected"),
     [
-        (lambda a, b: a + b, r"\+"),
-        (lambda a, b: a - b, r"-"),
-        (lambda a, b: a * b, r"\*"),
-        (lambda a, b: a / b, r"/"),
-        (T.min, r"min"),
-        (T.max, r"max"),
+        (lambda a, b: a + b, ") + as_type<half2>"),
+        (lambda a, b: a - b, ") - as_type<half2>"),
+        (lambda a, b: a * b, ") * as_type<half2>"),
+        (lambda a, b: a / b, ") / as_type<half2>"),
+        (T.min, "min(as_type<half2>"),
+        (T.max, "max(as_type<half2>"),
     ],
 )
-def test_packed_float16_binary_operations_use_half2(op, metal_op):
+def test_packed_float16_binary_operations_use_half2(op, expected):
     source = _lower_vectorized_binary(op, 8)
 
     assert "uint4" in source
     assert "as_type<half2>" in source
-    assert re.search(rf"as_type<half2>.*{metal_op}.*as_type<half2>", source)
+    assert expected in source
 
 
 def test_native_float16_vector_arithmetic_is_unchanged():
