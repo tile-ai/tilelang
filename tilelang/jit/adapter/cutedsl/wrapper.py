@@ -628,6 +628,7 @@ CUBIN_KERNEL_LAUNCH_TEMPLATE = """\
       min_blocks_per_mp=1,
       stream=stream,
       use_pdl={use_pdl},
+      cooperative={cooperative},
     )"""
 
 # Fake tensor creation template
@@ -1786,6 +1787,7 @@ class TLCuTeDSLSourceWrapper(TLCUDASourceWrapper):
                 cluster_arg=self._generate_cubin_cluster_arg(km["function_info"].get("cluster_dims")),
                 smem_size=km["function_info"]["dynamic_smem_buf"] or 0,
                 use_pdl=str(km["function_name"] in self.pdl_sync_map),
+                cooperative=str(self.use_cooperative_groups.get(km["function_name"], False)),
             )
             for km in kernel_metadata_list
         )
