@@ -955,7 +955,7 @@ bool CodeGenTileLangMetal::TryPrintPackedHalfBinary(const PrimExpr &a,
     }
     os << "as_type<half2>((" << lhs << ")." << kComponents[i] << ") " << op
        << " as_type<half2>((" << rhs << ")." << kComponents[i] << ")";
-    os << ")";
+    os << "))";
   }
   os << ")";
   return true;

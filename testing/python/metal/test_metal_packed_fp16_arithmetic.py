@@ -41,6 +41,7 @@ def test_packed_float16_binary_operations_use_half2(op, expected):
     source = _lower_vectorized_binary(op, 8)
 
     assert "uint4" in source
+    assert source.count("(") == source.count(")")
     assert "as_type<half2>" in source
     assert expected in source
 
