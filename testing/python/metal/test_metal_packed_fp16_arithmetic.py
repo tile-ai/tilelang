@@ -57,9 +57,10 @@ def test_packed_binary_operations_use_native_component_arithmetic(op, op_name, d
 def test_packed_min_max_accept_two_arguments(lanes, op, op_name):
     source = _lower_vectorized_binary(op, lanes)
 
-    assert f"return {op_name}(a, b);" in source
-    assert "return min(a b);" not in source
-    assert "return max(a b);" not in source
+    assert f"TILELANG_PACKED_BINARY_FUNCTOR({op_name}, {op_name}(a, b))" in source
+    assert f"{op_name}(a b)" not in source
+    if lanes == 8:
+        assert f"__tilelang_packed_half2_{op_name}()" in source
 
 
 def test_native_float16_vector_arithmetic_is_unchanged():
