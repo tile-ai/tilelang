@@ -2123,15 +2123,23 @@ private:
       return attr;
     }
 
-    // Buffers `stmt` may write: stored to, or passed by pointer.
+    // Buffers `stmt` may write: stored to, written by a tile op, or passed by
+    // pointer.
     static VarSet PossiblyWrittenBuffers(const Stmt &stmt) {
       VarSet written;
       PostOrderVisit(stmt, [&](const ObjectRef &obj) {
         if (const auto *store = obj.as<BufferStoreNode>()) {
           written.insert(store->buffer->data);
         } else if (const auto *call = obj.as<CallNode>()) {
-          if (call->op.same_as(builtin::tvm_access_ptr()) &&
-              call->args.size() > 1) {
+          if (auto tile_op = ParseOperator(GetRef<Call>(call));
+              tile_op.defined()) {
+            // Tile ops (e.g. a TMA copy) name their destination as a region.
+            for (const BufferRegion &region :
+                 tile_op->GetAccessRegions().writes) {
+              written.insert(region->buffer->data);
+            }
+          } else if (call->op.same_as(builtin::tvm_access_ptr()) &&
+                     call->args.size() > 1) {
             if (const auto *data = call->args[1].as<VarNode>()) {
               written.insert(GetRef<Var>(data));
             }
