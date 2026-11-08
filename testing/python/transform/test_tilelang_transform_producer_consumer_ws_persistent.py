@@ -1091,5 +1091,78 @@ def test_ws_declined_loop_carried_update_matches_reference():
     torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
 
 
+def cross_run_producer_shared_prelude_index(
+    M=256,
+    N=256,
+    K=256,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    runs=2,
+    dtype="float16",
+    threads=128,
+):
+    """Issue #3842, indirect variant: the producer index comes from the prelude.
+
+    Unlike ``cross_run_producer_scalar_update``, the K offsets are plain Bind
+    temporaries derived from ``start``, so they stay in the shared prelude
+    instead of being copied into the producer branch. The producer still reads
+    them for its copy indices, which makes ``start`` a producer input through
+    the prelude even though the producer never reads ``start`` directly.
+    """
+    iterations = K // block_K
+    step = (iterations + runs - 1) // runs
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(N // block_N, M // block_M, threads=threads) as (bx, by):
+            A_s = T.alloc_shared((block_M, block_K), dtype)
+            B_s = T.alloc_shared((block_K, block_N), dtype)
+            C_l = T.alloc_fragment((block_M, block_N), "float32")
+            start = T.alloc_var(T.int32, init=0)
+            T.clear(C_l)
+            for _ in T.serial(runs):
+                k_off = start
+                k1 = T.min(iterations, k_off + step)
+                for ko in T.Pipelined(k1 - k_off, num_stages=num_stages):
+                    T.copy(A[by * block_M, (k_off + ko) * block_K], A_s)
+                    T.copy(B[(k_off + ko) * block_K, bx * block_N], B_s)
+                    T.gemm(A_s, B_s, C_l)
+                start = start + (k1 - k_off)
+            T.copy(C_l, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ws_pass_declines_shared_prelude_producer_index_update():
+    """A post-pipeline update read through the shared prelude must decline WS."""
+    script = _apply_ws_pass(cross_run_producer_shared_prelude_index())["main"].script()
+    assert "tl_tiled_ws_applied" not in script, "WS must follow producer reads through the shared prelude"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_declined_shared_prelude_update_matches_reference():
+    import torch
+
+    kernel = tilelang.compile(
+        cross_run_producer_shared_prelude_index(),
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
+    torch.manual_seed(0)
+    A = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    B = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

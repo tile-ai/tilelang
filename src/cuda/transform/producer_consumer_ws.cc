@@ -192,9 +192,11 @@ struct LocalLiveSet {
     return false;
   }
 
-  void AddUses(const LocalAccessSummary &summary) {
+  bool AddUses(const LocalAccessSummary &summary) {
+    size_t num_values = buffers.size() + vars.size();
     buffers.insert(summary.read_buffers.begin(), summary.read_buffers.end());
     vars.insert(summary.read_vars.begin(), summary.read_vars.end());
+    return buffers.size() + vars.size() != num_values;
   }
 };
 
@@ -1792,6 +1794,7 @@ private:
     dummy_ws =
         AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, dummy_ws);
     guarded_postlude_stmts_ = {};
+    kept_shared_prelude_stmts_ = {};
     Optional<Stmt> replaced =
         ReplacePipelineLoopInStmt(orig_block->body, pipeline_loop, dummy_ws,
                                   producer_extent, consumer_extent);
@@ -1830,6 +1833,21 @@ private:
       }
       LocalLiveSet producer_reads;
       producer_reads.AddUses(producer_access);
+      // The producer may read a value that a statement kept in the shared
+      // prelude derives from a branch-private local. Follow those reads back
+      // through the shared prelude so a post-pipeline update of that local is
+      // not missed.
+      bool propagated = true;
+      while (propagated) {
+        propagated = false;
+        for (const auto &stmt : kept_shared_prelude_stmts_) {
+          LocalAccessSummary summary =
+              LocalAccessCollector::Collect(stmt, buffer_data_to_buffer_);
+          if (producer_reads.NeedsAnyDef(summary)) {
+            propagated |= producer_reads.AddUses(summary);
+          }
+        }
+      }
       for (const auto &postlude : guarded_postlude_stmts_) {
         if (producer_reads.NeedsAnyDef(LocalAccessCollector::Collect(
                 postlude, buffer_data_to_buffer_))) {
@@ -1858,10 +1876,12 @@ private:
     }
     if (declined_loop_carried_postlude) {
       // The producer would read a stale value on the next run of the pipeline.
-      // Keep the regular (non-WS) pipeline instead.
+      // Decline; the pass-level fallback drops the pipeline annotations, so
+      // this block runs as a plain serial loop.
       DLOG(WARNING) << "[WS] declined: a post-pipeline statement writes a "
                        "value the producer reads on the next run";
       guarded_postlude_stmts_ = {};
+      kept_shared_prelude_stmts_ = {};
       return GetRef<Stmt>(orig_realize);
     }
     if (!producer_buffer_remap.empty()) {
@@ -2448,6 +2468,7 @@ private:
         bool to_consumer = placement == PreludeStmtPlacement::kConsumerOnly ||
                            placement == PreludeStmtPlacement::kDuplicateToBoth;
         if (placement == PreludeStmtPlacement::kKeepSharedPrelude) {
+          rewriter_->kept_shared_prelude_stmts_.push_back(stmt);
           Stmt kept = stmt;
           if (auto it = rewriter_->common_prelude_rewrites_.find(stmt);
               it != rewriter_->common_prelude_rewrites_.end()) {
@@ -2555,6 +2576,10 @@ private:
   // consumer partition. Checked against the producer's reads so a loop-carried
   // scalar update cannot be sunk into the consumer alone.
   Array<Stmt> guarded_postlude_stmts_;
+  // Statements kept in the shared prelude. Their reads are followed when
+  // checking post-pipeline writes so an indirect producer dependency through a
+  // shared definition is not missed.
+  Array<Stmt> kept_shared_prelude_stmts_;
   // Buffers touched by statements that stay in the shared prelude. They cannot
   // be cloned for the producer: the shared statement runs before the partition
   // split, so both branches must keep pointing at the same buffer.
