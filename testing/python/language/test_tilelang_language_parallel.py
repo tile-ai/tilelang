@@ -3,6 +3,7 @@ import tilelang.language as T
 import torch
 import tilelang.testing
 import pytest
+from tilelang import tvm
 
 tilelang.testing.set_random_seed()
 
@@ -122,7 +123,7 @@ def test_parallel_vectorize_var():
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("update", ["atomic_add", "read_modify_write", "extern_access_ptr", "bound_access_ptr"])
+@pytest.mark.parametrize("update", ["atomic_add", "read_modify_write", "extern_access_ptr"])
 def test_replicated_parallel_writes_once(update):
     """A replicated loop (64 iterations on 128 threads) that stores a fragment
     runs its atomics and read-modify-writes on one replica only (#3870)."""
@@ -138,11 +139,8 @@ def test_replicated_parallel_writes_once(update):
                     T.atomic_add(A[i], L[i])
                 elif update == "read_modify_write":
                     A[i] = A[i] + L[i]
-                elif update == "extern_access_ptr":
-                    T.call_extern("float32", "atomicAdd", A.access_ptr("rw", offset=i), L[i])
                 else:
-                    ptr = T.bind(T.access_ptr(A[i], "rw"))
-                    T.call_extern("float32", "atomicAdd", ptr, L[i])
+                    T.call_extern("float32", "atomicAdd", A.access_ptr("rw", offset=i), L[i])
                 C[i] = L[i]
 
     kernel = tilelang.compile(main)
@@ -154,6 +152,30 @@ def test_replicated_parallel_writes_once(update):
     kernel(a, b, c)
     torch.testing.assert_close(a, b, rtol=0, atol=0)
     torch.testing.assert_close(c, b, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_replicated_parallel_guards_writes_through_bound_pointers():
+    """A write through a bound pointer runs on one replica, while binding the
+    pointer stays on every replica (#3870)."""
+    n = 64
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32), C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            L = T.alloc_fragment((n,), T.float32)
+            for i in T.Parallel(n):
+                L[i] = B[i]
+                ptr = T.bind(T.access_ptr(A[i], "rw"))
+                T.call_extern("float32", "extern_update", ptr, L[i])
+                C[i] = L[i]
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90a"})
+    with target:
+        source = tilelang.lower(main, target=target).kernel_source
+    guard = source.index("if ((((int)threadIdx.x) >> 6) == 0) {")
+    assert source.index("void* ptr = ") < guard < source.index("extern_update(ptr, L[0]);")
+    assert source.index("C[") > source.index("extern_update(")
 
 
 @tilelang.testing.requires_cuda

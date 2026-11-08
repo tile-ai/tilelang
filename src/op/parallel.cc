@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <set>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -816,10 +817,11 @@ namespace {
  * externs taking a writable `access_ptr`) and stores to a shared/global buffer
  * the loop also reads must happen once and are wrapped in `guard`.
  *
- * A value read from a buffer written once is only consistent on the replica
- * that writes it: another replica may read before or after that write. Stores
- * of such a value to shared/global memory are therefore guarded as well, and a
- * fragment store of it, which every replica needs, is rejected.
+ * A value read from a buffer written once, with no barrier between the read
+ * and the write, is only consistent on the replica that writes it: another
+ * replica may read before or after that write. Stores of such a value to
+ * shared/global memory are therefore guarded as well, and a fragment store of
+ * it, which every replica needs, is rejected.
  */
 class ReplicaWriteGuarder : public StmtMutator {
 public:
@@ -899,13 +901,14 @@ private:
     return writes;
   }
 
-  // Whether `expr` reads a buffer written once, so its value may differ
-  // between replicas.
+  // Whether `expr` reads a buffer written once between the same barriers, so
+  // its value may differ between replicas.
   bool Diverges(const PrimExpr &expr) const {
     bool diverges = false;
     PostOrderVisit(expr, [&](const ObjectRef &obj) {
       if (const auto *load = obj.as<BufferLoadNode>()) {
-        diverges = diverges || written_once_.count(load->buffer->data.get());
+        diverges = diverges || written_between_barriers_.count(
+                                   {load->buffer->data.get(), segment_});
       } else if (const auto *var = obj.as<VarNode>()) {
         diverges = diverges || divergent_vars_.count(var);
       }
@@ -921,31 +924,102 @@ private:
     return diverges;
   }
 
-  void Collect(const Stmt &body) {
+  // A barrier every replica passes: one outside any branch, so that the
+  // accesses before it are ordered against those after it across replicas.
+  bool IsBarrier(const EvaluateNode *op) const {
+    const auto *call = op->value.as<CallNode>();
+    if (conditional_ > 0 || !call) {
+      return false;
+    }
+    if (call->op.same_as(sync_grid())) {
+      return true;
+    }
+    if (call->op.same_as(builtin::tvm_storage_sync()) && !call->args.empty()) {
+      const auto *scope = call->args[0].as<StringImmNode>();
+      return scope && scope->value != "warp";
+    }
+    return false;
+  }
+
+  // A loop of a known positive trip count runs its barriers on every replica.
+  static bool RunsBody(const ForNode *op) {
+    const auto *extent = op->extent.as<IntImmNode>();
+    return extent && extent->value > 0;
+  }
+
+  // Records, in program order and per barrier-delimited segment, the
+  // shared/global accesses of the body.
+  class AccessCollector : public StmtExprVisitor {
+  public:
+    explicit AccessCollector(ReplicaWriteGuarder *guarder) : g_(guarder) {}
+
     std::unordered_set<const VarNode *> read;
-    PostOrderVisit(body, [&](const ObjectRef &obj) {
-      if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (IsSharedOrGlobal(load->buffer)) {
-          read.insert(load->buffer->data.get());
-        }
-      } else if (const auto *bind = obj.as<BindNode>()) {
-        if (const VarNode *target = WriteTarget(bind->value)) {
-          write_pointers_[bind->var.get()] = target;
-        }
+    std::vector<std::pair<const VarNode *, int>> stores;
+    std::vector<std::pair<const VarNode *, int>> pointer_writes;
+
+  private:
+    void VisitExpr_(const BufferLoadNode *op) final {
+      if (IsSharedOrGlobal(op->buffer)) {
+        read.insert(op->buffer->data.get());
       }
-    });
-    PostOrderVisit(body, [&](const ObjectRef &obj) {
-      if (const auto *store = obj.as<BufferStoreNode>()) {
-        if (IsSharedOrGlobal(store->buffer) &&
-            read.count(store->buffer->data.get())) {
-          written_once_.insert(store->buffer->data.get());
-        }
-      } else if (const auto *call = obj.as<CallNode>()) {
-        for (const VarNode *target : WriteTargets(call)) {
-          written_once_.insert(target);
-        }
+      StmtExprVisitor::VisitExpr_(op);
+    }
+    void VisitExpr_(const CallNode *op) final {
+      for (const VarNode *target : g_->WriteTargets(op)) {
+        pointer_writes.emplace_back(target, g_->segment_);
       }
-    });
+      StmtExprVisitor::VisitExpr_(op);
+    }
+    void VisitStmt_(const BufferStoreNode *op) final {
+      if (IsSharedOrGlobal(op->buffer)) {
+        stores.emplace_back(op->buffer->data.get(), g_->segment_);
+      }
+      StmtExprVisitor::VisitStmt_(op);
+    }
+    void VisitStmt_(const BindNode *op) final {
+      StmtExprVisitor::VisitStmt_(op);
+      if (const VarNode *target = g_->WriteTarget(op->value)) {
+        g_->write_pointers_[op->var.get()] = target;
+      }
+    }
+    void VisitStmt_(const EvaluateNode *op) final {
+      StmtExprVisitor::VisitStmt_(op);
+      if (g_->IsBarrier(op)) {
+        ++g_->segment_;
+      }
+    }
+    void VisitStmt_(const IfThenElseNode *op) final { Conditional(op); }
+    void VisitStmt_(const WhileNode *op) final { Conditional(op); }
+    void VisitStmt_(const ForNode *op) final {
+      if (RunsBody(op)) {
+        StmtExprVisitor::VisitStmt_(op);
+      } else {
+        Conditional(op);
+      }
+    }
+    template <typename Node> void Conditional(const Node *op) {
+      ++g_->conditional_;
+      StmtExprVisitor::VisitStmt_(op);
+      --g_->conditional_;
+    }
+
+    ReplicaWriteGuarder *g_;
+  };
+
+  void Collect(const Stmt &body) {
+    AccessCollector collector(this);
+    collector(body);
+    for (const auto &[data, segment] : collector.stores) {
+      if (collector.read.count(data)) {
+        written_once_.insert(data);
+        written_between_barriers_.insert({data, segment});
+      }
+    }
+    for (const auto &[data, segment] : collector.pointer_writes) {
+      written_once_.insert(data);
+      written_between_barriers_.insert({data, segment});
+    }
+    segment_ = 0;
   }
 
   void CheckNoWrite(const PrimExpr &expr, const char *what) const {
@@ -998,6 +1072,9 @@ private:
   }
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (IsBarrier(op)) {
+      ++segment_;
+    }
     if (Writes(op->value)) {
       return Guard(GetRef<Stmt>(op));
     }
@@ -1007,10 +1084,13 @@ private:
   // Control flow that may differ between replicas makes every store under it
   // divergent.
   template <typename Node>
-  Stmt VisitDivergentIf(const Node *op, bool diverges) {
+  Stmt VisitDivergentIf(const Node *op, bool diverges,
+                        bool conditional = true) {
     bool outer = divergent_control_;
     divergent_control_ = outer || diverges;
+    conditional_ += conditional;
     Stmt stmt = StmtMutator::VisitStmt_(op);
+    conditional_ -= conditional;
     divergent_control_ = outer;
     return stmt;
   }
@@ -1028,14 +1108,19 @@ private:
   Stmt VisitStmt_(const ForNode *op) final {
     CheckNoWrite(op->min, "a loop bound");
     CheckNoWrite(op->extent, "a loop bound");
-    return VisitDivergentIf(op, Diverges(op->min) || Diverges(op->extent));
+    return VisitDivergentIf(op, Diverges(op->min) || Diverges(op->extent),
+                            !RunsBody(op));
   }
 
   PrimExpr guard_;
   // Bound pointers to shared/global memory that may be written through.
   std::unordered_map<const VarNode *, const VarNode *> write_pointers_;
-  // Shared/global buffers whose writes run on one replica only.
+  // Shared/global buffers whose writes run on one replica only, and the
+  // barrier-delimited segments they are written in.
   std::unordered_set<const VarNode *> written_once_;
+  std::set<std::pair<const VarNode *, int>> written_between_barriers_;
+  int segment_ = 0;
+  int conditional_ = 0;
   // Bound values that may differ between replicas.
   std::unordered_set<const VarNode *> divergent_vars_;
   bool divergent_control_ = false;
