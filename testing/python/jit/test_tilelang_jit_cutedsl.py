@@ -415,5 +415,47 @@ def test_cutedsl_launch_follows_the_torch_stream():
     assert torch.equal(y, torch.full_like(y, 2.0))
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32"])
+@pytest.mark.parametrize("scope", ["global", "shared"])
+@pytest.mark.parametrize("threads", [256, 64], ids=["scalar", "vector"])
+def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
+    """Values read from an unsigned buffer keep their unsigned value.
+
+    See https://github.com/tile-ai/tilelang/issues/2974.
+    """
+    N = 256
+    bits = T.dtype(dtype).bits
+    half = (1 << (bits - 1)) - 1
+
+    @T.prim_func
+    def unsigned_reads(A: T.Tensor((N,), dtype), C: T.Tensor((4, N), "int64"), F: T.Tensor((N,), "float32")):
+        with T.Kernel(1, threads=threads):
+            if scope == "shared":
+                src = T.alloc_shared((N,), dtype)
+                T.copy(A, src)
+            else:
+                src = A
+            for i in T.Parallel(N):
+                C[0, i] = T.cast(src[i], "int64")
+                C[1, i] = T.cast(src[i] > half, "int64")
+                C[2, i] = T.cast(src[i] >> (bits - 1), "int64")
+                C[3, i] = T.cast(src[i] // 3, "int64")
+                F[i] = T.cast(src[i], "float32")
+
+    kernel = tilelang.compile(unsigned_reads, target="cutedsl")
+    i = torch.arange(N, dtype=torch.int64, device="cuda")
+    a = (i * ((1 << bits) // N) + i % 7) % (1 << bits)
+    c = torch.empty(4, N, dtype=torch.int64, device="cuda")
+    f = torch.empty(N, dtype=torch.float32, device="cuda")
+    kernel(a.to(T.dtype(dtype).as_torch()), c, f)
+
+    assert torch.equal(c[0], a)
+    assert torch.equal(c[1], (a > half).long())
+    assert torch.equal(c[2], a >> (bits - 1))
+    assert torch.equal(c[3], a // 3)
+    assert torch.equal(f, a.float())
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
