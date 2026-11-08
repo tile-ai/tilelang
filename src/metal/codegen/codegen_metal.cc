@@ -878,7 +878,85 @@ void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
   if (TryPrintMlxSwizzleExpr(ffi::GetRef<PrimExpr>(op), os)) {
     return;
   }
+  if (TryPrintPackedHalfBinary(op->a, op->b, "+", false, os)) {
+    return;
+  }
   CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const SubNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  if (TryPrintPackedHalfBinary(op->a, op->b, "-", false, os)) {
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const MulNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  if (TryPrintPackedHalfBinary(op->a, op->b, "*", false, os)) {
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const DivNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  if (TryPrintPackedHalfBinary(op->a, op->b, "/", false, os)) {
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const MinNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  if (TryPrintPackedHalfBinary(op->a, op->b, "min", true, os)) {
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+void CodeGenTileLangMetal::VisitExpr_(const MaxNode *op,
+                                      std::ostream &os) { // NOLINT(*)
+  if (TryPrintPackedHalfBinary(op->a, op->b, "max", true, os)) {
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
+bool CodeGenTileLangMetal::TryPrintPackedHalfBinary(const PrimExpr &a,
+                                                    const PrimExpr &b,
+                                                    const std::string &op,
+                                                    bool function_call,
+                                                    std::ostream &os) {
+  const DataType dtype = a.dtype();
+  const int lanes = dtype.lanes();
+  if (!dtype.is_float16() || lanes <= 4 || lanes > 8 || lanes % 2 != 0) {
+    return false;
+  }
+
+  const int words = lanes / 2;
+  const std::string lhs = PrintExpr(a);
+  const std::string rhs = PrintExpr(b);
+  static constexpr const char *kComponents[] = {"x", "y", "z", "w"};
+
+  os << "uint" << words << "(";
+  for (int i = 0; i < words; ++i) {
+    if (i != 0) {
+      os << ", ";
+    }
+    os << "as_type<uint>(";
+    if (function_call) {
+      os << op << "(";
+    } else {
+      os << "(";
+    }
+    os << "as_type<half2>((" << lhs << ")." << kComponents[i] << ") " << op
+       << " as_type<half2>((" << rhs << ")." << kComponents[i] << ")";
+    os << ")";
+  }
+  os << ")";
+  return true;
 }
 
 void CodeGenTileLangMetal::VisitExpr_(const CastNode *op,
