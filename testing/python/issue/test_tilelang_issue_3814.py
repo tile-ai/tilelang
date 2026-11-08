@@ -13,7 +13,9 @@ import torch
 import tilelang
 import tilelang.testing
 from tilelang import language as T, tvm
+from tilelang.contrib import nvcc
 from tilelang.engine.lower import lower as tilelang_lower
+from tvm import tirx
 
 
 def _elementwise_kernel(dtype):
@@ -26,7 +28,11 @@ def _elementwise_kernel(dtype):
     return main
 
 
-@tilelang.testing.requires_cuda
+def _vector_carrier(dtype):
+    return "ulonglong4" if dtype.startswith("uint") else "longlong4"
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("dtype", ["int16", "uint16"])
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_120a"])
 def test_16bit_integer_256bit_vector_codegen(dtype, arch):
@@ -35,10 +41,35 @@ def test_16bit_integer_256bit_vector_codegen(dtype, arch):
         artifact = tilelang_lower(_elementwise_kernel(dtype), target=target)
 
     source = artifact.kernel_source
-    vector_type = "ulonglong4" if dtype.startswith("uint") else "longlong4"
-    assert vector_type in source
+    assert _vector_carrier(dtype) in source
     assert "tl::load_global_256" in source
     assert "tl::store_global_256" in source
+
+
+def _12_lane_constructor_module(dtype):
+    # PrintType maps int16x12/uint16x12 to (u)longlong3, so both the Broadcast
+    # and the Ramp constructor must pack four lanes into each of the three
+    # fields instead of passing one argument per lane to a three-argument
+    # CUDA builtin.
+    name = f"vector_12_lane_{dtype}"
+    broadcast = tirx.Broadcast(tirx.const(1, dtype), 12)
+    ramp = tirx.Ramp(tirx.const(0, dtype), tirx.const(1, dtype), 12)
+    func = tirx.PrimFunc([], tirx.SeqStmt([tirx.Evaluate(broadcast), tirx.Evaluate(ramp)]))
+    func = func.with_attr("global_symbol", name)
+    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    return tvm.IRModule({name: func})
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("dtype, packer", [("int16", "make_longlong3"), ("uint16", "make_ulonglong3")])
+def test_12_lane_integer_vector_constructor_compiles(dtype, packer):
+    module = _12_lane_constructor_module(dtype)
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    build_source = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
+    source = build_source(module, target).inspect_source()
+    assert packer in source
+    # nvcc rejects the unpacked form with "too many arguments in function call".
+    tvm.get_global_func("target.build.tilelang_cuda")(module, target)
 
 
 @tilelang.testing.requires_cuda
@@ -51,6 +82,13 @@ def test_16bit_integer_256bit_vector_codegen(dtype, arch):
 )
 def test_16bit_integer_vector_add_numeric(dtype, torch_dtype, low, high):
     kernel = tilelang.compile(_elementwise_kernel(dtype), out_idx=[1])
+    if nvcc.parse_compute_version(nvcc.get_target_compute_version()) >= (10, 0):
+        # Below sm_100 the loop is only vectorized to 128 bits, which would
+        # not exercise the x16 accessors at all.
+        source = kernel.get_kernel_source()
+        assert _vector_carrier(dtype) in source
+        assert "tl::load_global_256" in source
+        assert "tl::store_global_256" in source
     x = torch.randint(low, high, (512,), dtype=torch_dtype, device="cuda")
     out = kernel(x)
     expected = (x.to(torch.int64) + x.to(torch.int64)).to(torch_dtype)

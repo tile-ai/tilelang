@@ -1076,8 +1076,8 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
             << "only support even lane for shorT type with lanes > 4";
         os << "int" << t.lanes() / 2;
       } else if (t.lanes() <= 16) {
-        // 256 bits: CUDA has no (u)short16 vector type, so pack four
-        // elements into each 64-bit field, like fp16/bf16 x16.
+        // 192/256 bits: CUDA has no (u)short12/short16 vector type, so pack
+        // four elements into each 64-bit field, like fp16/bf16 x12/x16.
         ICHECK_EQ(t.lanes() % 4, 0)
             << "only support (mod 4 = 0) lanes for short type of more than 8 "
                "lanes";

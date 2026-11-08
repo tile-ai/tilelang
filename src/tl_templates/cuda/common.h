@@ -808,6 +808,20 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
   return result;
 }
 
+// Pack twelve short values.
+TL_DEVICE longlong3 make_longlong3(short x0, short x1, short x2, short x3,
+                                   short y0, short y1, short y2, short y3,
+                                   short z0, short z1, short z2, short z3) {
+  longlong3 result;
+  *((short2 *)&result.x) = make_short2(x0, x1);
+  *(((short2 *)&result.x) + 1) = make_short2(x2, x3);
+  *((short2 *)&result.y) = make_short2(y0, y1);
+  *(((short2 *)&result.y) + 1) = make_short2(y2, y3);
+  *((short2 *)&result.z) = make_short2(z0, z1);
+  *(((short2 *)&result.z) + 1) = make_short2(z2, z3);
+  return result;
+}
+
 // Pack sixteen short values.
 TL_DEVICE longlong4 make_longlong4(short x0, short x1, short x2, short x3,
                                    short y0, short y1, short y2, short y3,
@@ -858,6 +872,23 @@ TL_DEVICE ulonglong4 make_ulonglong4(
   *((uint2 *)&result.y) = make_uint2(y0, y1, y2, y3, y4, y5, y6, y7);
   *((uint2 *)&result.z) = make_uint2(z0, z1, z2, z3, z4, z5, z6, z7);
   *((uint2 *)&result.w) = make_uint2(w0, w1, w2, w3, w4, w5, w6, w7);
+  return result;
+}
+
+// Pack twelve unsigned short values.
+TL_DEVICE ulonglong3 make_ulonglong3(unsigned short x0, unsigned short x1,
+                                     unsigned short x2, unsigned short x3,
+                                     unsigned short y0, unsigned short y1,
+                                     unsigned short y2, unsigned short y3,
+                                     unsigned short z0, unsigned short z1,
+                                     unsigned short z2, unsigned short z3) {
+  ulonglong3 result;
+  *((ushort2 *)&result.x) = make_ushort2(x0, x1);
+  *(((ushort2 *)&result.x) + 1) = make_ushort2(x2, x3);
+  *((ushort2 *)&result.y) = make_ushort2(y0, y1);
+  *(((ushort2 *)&result.y) + 1) = make_ushort2(y2, y3);
+  *((ushort2 *)&result.z) = make_ushort2(z0, z1);
+  *(((ushort2 *)&result.z) + 1) = make_ushort2(z2, z3);
   return result;
 }
 
