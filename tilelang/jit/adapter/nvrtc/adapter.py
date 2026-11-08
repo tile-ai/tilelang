@@ -323,17 +323,20 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 args.append(self._resolve_dynamic_symbolic_value(symbol, param_values))
 
         # if stream is not None, we need to pass the stream to the library
+        launch_device = None
         if stream is None:
             if self.target.kind.name == "cuda" and torch.cuda.is_available():
-                device = first_tensor.device if first_tensor is not None else None
-                stream = torch.cuda.current_stream(device).cuda_stream
+                if first_tensor is not None and first_tensor.is_cuda:
+                    launch_device = first_tensor.device
+                stream = torch.cuda.current_stream(launch_device).cuda_stream
             else:
                 stream = 0
 
-        # Execute the kernel on the inputs' device: the launcher works on the
-        # current device, and a NULL-stream launch runs there.
-        if first_tensor is not None and first_tensor.is_cuda and first_tensor.device.index != torch.cuda.current_device():
-            with torch.cuda.device(first_tensor.device):
+        # The launcher works on the current device. A stream picked here is the
+        # inputs' device's, so launch there; a caller-supplied stream runs on
+        # the current device, which must own it.
+        if launch_device is not None and launch_device.index != torch.cuda.current_device():
+            with torch.cuda.device(launch_device):
                 self._forward_from_prebuild_lib(*args, stream=stream)
         else:
             self._forward_from_prebuild_lib(*args, stream=stream)

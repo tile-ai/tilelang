@@ -9,6 +9,12 @@ from tvm import tirx
 from tilelang.jit.adapter.base import output_allocation_stream
 
 
+cdef object _cuda_index(object device):
+    if isinstance(device, torch.device) and device.type == "cuda":
+        return device.index
+    return None
+
+
 cdef class CythonKernelWrapper:
     # Class attributes to store kernel configuration and library reference
     cdef:
@@ -204,14 +210,17 @@ cdef class CythonKernelWrapper:
         device = None
         cdef bint caller_stream = stream != -1
         if stream == -1:
+            device = self._infer_output_device(inputs)
             if self.get_current_stream is not None:
-                device = self._infer_output_device(inputs)
                 stream = self.get_current_stream(device)
             elif torch.cuda.is_available():
+                index = _cuda_index(device)
+                if index is None:
+                    index = torch.cuda.current_device()
                 try:
-                    stream = torch._C._cuda_getCurrentRawStream(torch.cuda.current_device())
+                    stream = torch._C._cuda_getCurrentRawStream(index)
                 except (ImportError, AttributeError):
-                    stream = torch.cuda.current_stream().cuda_stream
+                    stream = torch.cuda.current_stream(index).cuda_stream
             else:
                 stream = 0
 
@@ -344,13 +353,12 @@ cdef class CythonKernelWrapper:
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
 
-        # Execute the kernel on the inputs' device: the launcher works on the
-        # current device, and a NULL-stream launch runs there.
-        if device is None:
-            device = self._infer_output_device(inputs)
-        if (isinstance(device, torch.device) and device.type == "cuda" and device.index is not None
-                and device.index != torch.cuda.current_device()):
-            with torch.cuda.device(device):
+        # The launcher works on the current device. A stream picked here is the
+        # inputs' device's, so launch there; a caller-supplied stream runs on
+        # the current device, which must own it.
+        launch_index = None if caller_stream else _cuda_index(device)
+        if launch_index is not None and launch_index != torch.cuda.current_device():
+            with torch.cuda.device(launch_index):
                 result = self.lib.call(*call_args)
         else:
             result = self.lib.call(*call_args)
