@@ -427,12 +427,15 @@ def test_cutedsl_unsigned_atomics(dtype):
     top = 1 << (bits - 1)
 
     @T.prim_func
-    def unsigned_atomics(A: T.Tensor((N,), dtype), Out: T.Tensor((3,), dtype), Prev: T.Tensor((N,), "int32")):
+    def unsigned_atomics(A: T.Tensor((N,), dtype), Out: T.Tensor((5,), dtype), Prev: T.Tensor((N,), "int32"), Ret: T.Tensor((2,), dtype)):
         with T.Kernel(1, threads=N):
             i = T.get_thread_binding()
             T.atomic_max(Out[0], A[i])
             T.atomic_min(Out[1], A[i])
             Prev[i] = T.cast(T.atomic_add(Out[2], T.cast(0, dtype), return_prev=True) > T.cast(1, dtype), "int32")
+            if i == 0:
+                Ret[0] = T.atomic_max(Out[3], A[N // 2], return_prev=True)
+                Ret[1] = T.atomic_min(Out[4], A[N // 2 - 1], return_prev=True)
 
     def bit_pattern(values):
         return torch.tensor([v - (1 << 64) if v >= 1 << 63 else v for v in values], dtype=torch.int64, device="cuda")
@@ -446,12 +449,17 @@ def test_cutedsl_unsigned_atomics(dtype):
     kernel = tilelang.compile(unsigned_atomics, target="cutedsl")
     values = [(i << (bits - 8)) + 1 for i in range(N)]
     a = as_unsigned(bit_pattern(values))
-    out = as_unsigned(bit_pattern([0, (1 << bits) - 1, top]))
+    hi, lo = values[N // 2], values[N // 2 - 1]
+    assert lo < top <= hi
+    out = as_unsigned(bit_pattern([0, (1 << bits) - 1, top, lo, hi]))
     prev = torch.empty(N, dtype=torch.int32, device="cuda")
-    kernel(a, out, prev)
+    ret = as_unsigned(bit_pattern([0, 0]))
+    kernel(a, out, prev, ret)
 
-    torch.testing.assert_close(from_unsigned(out), bit_pattern([max(values), min(values), top]), rtol=0, atol=0)
+    expected = [max(values), min(values), top, hi, lo]
+    torch.testing.assert_close(from_unsigned(out), bit_pattern(expected), rtol=0, atol=0)
     assert torch.equal(prev, torch.ones_like(prev))
+    torch.testing.assert_close(from_unsigned(ret), bit_pattern([lo, hi]), rtol=0, atol=0)
 
 
 if __name__ == "__main__":
