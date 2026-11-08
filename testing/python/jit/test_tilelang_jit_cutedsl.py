@@ -439,9 +439,12 @@ def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
         with T.Kernel(1, threads=threads):
             if scope == "shared":
                 src = T.alloc_shared((N,), dtype)
+                ssrc = T.alloc_shared((N,), signed)
                 T.copy(A, src)
+                T.copy(S, ssrc)
             else:
                 src = A
+                ssrc = S
             for i in T.Parallel(N):
                 C[0, i] = T.cast(src[i], "int64")
                 C[1, i] = T.cast(src[i] > half, "int64")
@@ -449,8 +452,8 @@ def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
                 C[3, i] = T.cast(src[i] // 3, "int64")
                 C[4, i] = T.cast(T.max(src[i], T.cast(half + 1, dtype)), "int64")
                 C[5, i] = T.cast(T.min(src[i], T.cast(half + 1, dtype)), "int64")
-                C[6, i] = T.cast(T.reinterpret(S[i], dtype), "int64")
-                C[7, i] = T.cast(S[i], "int64")
+                C[6, i] = T.cast(T.reinterpret(ssrc[i], dtype), "int64")
+                C[7, i] = T.cast(ssrc[i], "int64")
                 F[i] = T.cast(src[i], "float32")
 
     kernel = tilelang.compile(unsigned_reads, target="cutedsl")
