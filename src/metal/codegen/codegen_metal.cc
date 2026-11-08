@@ -113,6 +113,59 @@ void CodeGenTileLangMetal::EmitPreamble_(std::ostream &os) const {
   os << "#define TILELANG_PRAGMA_UNROLL _Pragma(\"clang loop "
         "unroll(full)\")\n";
   os << "using namespace metal;\n\n";
+  os << R"metal(
+#define TILELANG_PACKED_BINARY_FUNCTOR(NAME, EXPR)                    \
+  struct __tilelang_packed_half2_##NAME {                             \
+    half2 operator()(half2 a, half2 b) const { return EXPR; }         \
+    bfloat2 operator()(bfloat2 a, bfloat2 b) const { return EXPR; }   \
+  };
+
+TILELANG_PACKED_BINARY_FUNCTOR(add, a + b)
+TILELANG_PACKED_BINARY_FUNCTOR(sub, a - b)
+TILELANG_PACKED_BINARY_FUNCTOR(mul, a * b)
+TILELANG_PACKED_BINARY_FUNCTOR(div, a / b)
+TILELANG_PACKED_BINARY_FUNCTOR(min, min(a, b))
+TILELANG_PACKED_BINARY_FUNCTOR(max, max(a, b))
+#undef TILELANG_PACKED_BINARY_FUNCTOR
+
+#define TILELANG_PACKED_BINARY_DECODE(TYPE, VEC, MEMBERS)             \
+  template <typename F>                                               \
+  inline VEC __tilelang_packed_##TYPE##_binary(VEC a, VEC b, F op) {  \
+    return VEC(MEMBERS);                                              \
+  }
+
+#define TILELANG_PACKED_HALF2_WORD(MEMBER)                            \
+  as_type<uint>(op(as_type<half2>(a.MEMBER), as_type<half2>(b.MEMBER)))
+#define TILELANG_PACKED_BFLOAT2_WORD(MEMBER)                          \
+  as_type<uint>(op(as_type<bfloat2>(a.MEMBER), as_type<bfloat2>(b.MEMBER)))
+
+TILELANG_PACKED_BINARY_DECODE(
+    half2, uint2,
+    TILELANG_PACKED_HALF2_WORD(x), TILELANG_PACKED_HALF2_WORD(y))
+TILELANG_PACKED_BINARY_DECODE(
+    half2, uint3,
+    TILELANG_PACKED_HALF2_WORD(x), TILELANG_PACKED_HALF2_WORD(y),
+    TILELANG_PACKED_HALF2_WORD(z))
+TILELANG_PACKED_BINARY_DECODE(
+    half2, uint4,
+    TILELANG_PACKED_HALF2_WORD(x), TILELANG_PACKED_HALF2_WORD(y),
+    TILELANG_PACKED_HALF2_WORD(z), TILELANG_PACKED_HALF2_WORD(w))
+TILELANG_PACKED_BINARY_DECODE(
+    bfloat2, uint2,
+    TILELANG_PACKED_BFLOAT2_WORD(x), TILELANG_PACKED_BFLOAT2_WORD(y))
+TILELANG_PACKED_BINARY_DECODE(
+    bfloat2, uint3,
+    TILELANG_PACKED_BFLOAT2_WORD(x), TILELANG_PACKED_BFLOAT2_WORD(y),
+    TILELANG_PACKED_BFLOAT2_WORD(z))
+TILELANG_PACKED_BINARY_DECODE(
+    bfloat2, uint4,
+    TILELANG_PACKED_BFLOAT2_WORD(x), TILELANG_PACKED_BFLOAT2_WORD(y),
+    TILELANG_PACKED_BFLOAT2_WORD(z), TILELANG_PACKED_BFLOAT2_WORD(w))
+
+#undef TILELANG_PACKED_BFLOAT2_WORD
+#undef TILELANG_PACKED_HALF2_WORD
+#undef TILELANG_PACKED_BINARY_DECODE
+)metal";
 }
 
 void CodeGenTileLangMetal::AddFunction(const GlobalVar &gvar,
@@ -878,7 +931,7 @@ void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
   if (TryPrintMlxSwizzleExpr(ffi::GetRef<PrimExpr>(op), os)) {
     return;
   }
-  if (TryPrintPackedHalfBinary(op->a, op->b, "+", false, os)) {
+  if (TryPrintPackedBinary(op->a, op->b, "+", os)) {
     return;
   }
   CodeGenC::VisitExpr_(op, os);
@@ -886,7 +939,7 @@ void CodeGenTileLangMetal::VisitExpr_(const AddNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const SubNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  if (TryPrintPackedHalfBinary(op->a, op->b, "-", false, os)) {
+  if (TryPrintPackedBinary(op->a, op->b, "-", os)) {
     return;
   }
   CodeGenC::VisitExpr_(op, os);
@@ -894,7 +947,7 @@ void CodeGenTileLangMetal::VisitExpr_(const SubNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const MulNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  if (TryPrintPackedHalfBinary(op->a, op->b, "*", false, os)) {
+  if (TryPrintPackedBinary(op->a, op->b, "*", os)) {
     return;
   }
   CodeGenC::VisitExpr_(op, os);
@@ -902,7 +955,7 @@ void CodeGenTileLangMetal::VisitExpr_(const MulNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const DivNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  if (TryPrintPackedHalfBinary(op->a, op->b, "/", false, os)) {
+  if (TryPrintPackedBinary(op->a, op->b, "/", os)) {
     return;
   }
   CodeGenC::VisitExpr_(op, os);
@@ -910,7 +963,7 @@ void CodeGenTileLangMetal::VisitExpr_(const DivNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const MinNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  if (TryPrintPackedHalfBinary(op->a, op->b, "min", true, os)) {
+  if (TryPrintPackedBinary(op->a, op->b, "min", os)) {
     return;
   }
   CodeGenC::VisitExpr_(op, os);
@@ -918,46 +971,43 @@ void CodeGenTileLangMetal::VisitExpr_(const MinNode *op,
 
 void CodeGenTileLangMetal::VisitExpr_(const MaxNode *op,
                                       std::ostream &os) { // NOLINT(*)
-  if (TryPrintPackedHalfBinary(op->a, op->b, "max", true, os)) {
+  if (TryPrintPackedBinary(op->a, op->b, "max", os)) {
     return;
   }
   CodeGenC::VisitExpr_(op, os);
 }
 
-bool CodeGenTileLangMetal::TryPrintPackedHalfBinary(const PrimExpr &a,
-                                                    const PrimExpr &b,
-                                                    const std::string &op,
-                                                    bool function_call,
-                                                    std::ostream &os) {
+bool CodeGenTileLangMetal::TryPrintPackedBinary(const PrimExpr &a,
+                                                const PrimExpr &b,
+                                                const std::string &op,
+                                                std::ostream &os) {
   const DataType dtype = a.dtype();
   const int lanes = dtype.lanes();
-  if (!dtype.is_float16() || lanes <= 4 || lanes > 8 || lanes % 2 != 0) {
+  if ((!dtype.is_float16() && !dtype.is_bfloat16()) || lanes <= 4 ||
+      lanes > 8 || lanes % 2 != 0) {
     return false;
   }
 
-  // Wide FP16 vectors are stored as uint carriers. Apply arithmetic to each
-  // half2 payload rather than to the integer carrier.
-  const int words = lanes / 2;
-  const std::string lhs = PrintExpr(a);
-  const std::string rhs = PrintExpr(b);
-  static constexpr const char *kComponents[] = {"x", "y", "z", "w"};
-
-  os << "uint" << words << "(";
-  for (int i = 0; i < words; ++i) {
-    if (i != 0) {
-      os << ", ";
-    }
-    os << "as_type<uint>(";
-    if (function_call) {
-      os << op << "(";
-    } else {
-      os << "(";
-    }
-    os << "as_type<half2>((" << lhs << ")." << kComponents[i] << ") " << op
-       << " as_type<half2>((" << rhs << ")." << kComponents[i] << ")";
-    os << "))";
+  const char *op_name = nullptr;
+  if (op == "+") {
+    op_name = "add";
+  } else if (op == "-") {
+    op_name = "sub";
+  } else if (op == "*") {
+    op_name = "mul";
+  } else if (op == "/") {
+    op_name = "div";
+  } else if (op == "min") {
+    op_name = "min";
+  } else if (op == "max") {
+    op_name = "max";
   }
-  os << ")";
+  TVM_FFI_ICHECK(op_name != nullptr);
+
+  const std::string type = dtype.is_float16() ? "half2" : "bfloat2";
+  os << "__tilelang_packed_" << type << "_binary(" << PrintExpr(a) << ", "
+     << PrintExpr(b) << ", __tilelang_packed_" << type << "_" << op_name
+     << "())";
   return true;
 }
 
