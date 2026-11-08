@@ -223,6 +223,11 @@ cdef class CythonKernelWrapper:
                     stream = torch.cuda.current_stream(index).cuda_stream
             else:
                 stream = 0
+        # A caller-supplied stream runs the kernel on the device that owns it,
+        # so the outputs live there too.
+        stream_index = stream_device_index(stream) if caller_stream else None
+        if stream_index is not None:
+            device = torch.device("cuda", stream_index)
 
         cdef int ins_idx = 0
         cdef list tensor_list = [None] * len(self.params)
@@ -356,7 +361,7 @@ cdef class CythonKernelWrapper:
         # The launcher works on the current device, so make the stream's device
         # current: the inputs' device for a stream picked here, the owning
         # device for a caller-supplied one.
-        launch_index = stream_device_index(stream) if caller_stream else _cuda_index(device)
+        launch_index = stream_index if caller_stream else _cuda_index(device)
         if launch_index is not None and launch_index != torch.cuda.current_device():
             with torch.cuda.device(launch_index):
                 result = self.lib.call(*call_args)

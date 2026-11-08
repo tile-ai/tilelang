@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -45,15 +46,12 @@ _CU_STREAM_PER_THREAD = 2
 
 
 @functools.cache
-def _cu_stream_get_device():
-    """The driver's ``cuStreamGetDevice`` (CUDA 12.8+), or ``None``."""
+def _cuda_driver():
+    """The CUDA driver library, or ``None``."""
     try:
-        get_device = ctypes.CDLL("libcuda.so.1").cuStreamGetDevice
-    except (OSError, AttributeError):
+        return ctypes.CDLL("nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1")
+    except OSError:
         return None
-    get_device.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
-    get_device.restype = ctypes.c_int
-    return get_device
 
 
 def stream_device_index(stream: int) -> int | None:
@@ -64,13 +62,25 @@ def stream_device_index(stream: int) -> int | None:
     """
     if stream in (0, _CU_STREAM_LEGACY, _CU_STREAM_PER_THREAD):
         return None
-    get_device = _cu_stream_get_device()
-    if get_device is None:
+    driver = _cuda_driver()
+    if driver is None:
         return None
+    handle = ctypes.c_void_p(stream)
     device = ctypes.c_int()
-    if get_device(ctypes.c_void_p(stream), ctypes.byref(device)) != 0:
+    get_device = getattr(driver, "cuStreamGetDevice", None)
+    if get_device is not None:
+        return device.value if get_device(handle, ctypes.byref(device)) == 0 else None
+    # Drivers before CUDA 12.8: the device of the stream's context.
+    context = ctypes.c_void_p()
+    if driver.cuStreamGetCtx(handle, ctypes.byref(context)) != 0:
         return None
-    return device.value
+    if driver.cuCtxPushCurrent_v2(context) != 0:
+        return None
+    try:
+        found = driver.cuCtxGetDevice(ctypes.byref(device)) == 0
+    finally:
+        driver.cuCtxPopCurrent_v2(ctypes.byref(ctypes.c_void_p()))
+    return device.value if found else None
 
 
 class BaseKernelAdapter(ABC):

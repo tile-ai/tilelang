@@ -29,7 +29,17 @@ def copy_kernel(n):
     return main
 
 
-def _compile(backend):
+def fill_kernel(n):
+    @T.prim_func
+    def main(value: T.float32, B: T.Tensor((n,), "float32")):
+        with T.Kernel(T.ceildiv(n, 256), threads=256) as bx:
+            for i in T.Parallel(256):
+                B[bx * 256 + i] = value
+
+    return main
+
+
+def _compile(backend, program=None):
     if backend == "nvrtc":
         from tilelang.jit.adapter.nvrtc import is_nvrtc_available
 
@@ -43,7 +53,8 @@ def _compile(backend):
         except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
             pytest.skip(f"CuTeDSL is not available: {err}")
     target = "cutedsl" if backend == "cutedsl" else "cuda"
-    return tilelang.compile(copy_kernel(N), out_idx=[1], target=target, execution_backend=backend)
+    program = copy_kernel(N) if program is None else program
+    return tilelang.compile(program, out_idx=[len(program.params) - 1], target=target, execution_backend=backend)
 
 
 BACKENDS = ["cython", "nvrtc", "cutedsl"]
@@ -128,7 +139,7 @@ def test_launch_on_non_current_input_device(backend):
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_launch_on_the_explicit_streams_device(backend):
     """A caller-supplied stream launches on the device that owns it, also when
-    another device is current (#3408)."""
+    another device is current, and outputs are allocated there (#3408)."""
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two CUDA devices")
     from tilelang.jit.adapter.base import stream_device_index
@@ -145,6 +156,38 @@ def test_launch_on_the_explicit_streams_device(backend):
     side.synchronize()
     assert out.device == a.device
     torch.testing.assert_close(out, a, rtol=0, atol=0)
+
+    # With no tensor input to infer the device from, the output follows the stream.
+    fill = _compile(backend, fill_kernel(N))
+    with torch.cuda.device(0):
+        out = fill(1.0, stream=side.cuda_stream)
+    side.synchronize()
+    assert out.device == torch.device("cuda:1")
+    torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_stream_device_without_cu_stream_get_device(monkeypatch):
+    """Drivers before CUDA 12.8 lack cuStreamGetDevice; the stream's device is
+    then read from its context."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    from tilelang.jit.adapter import base
+
+    driver = base._cuda_driver()
+
+    class OldDriver:
+        def __getattr__(self, name):
+            if name == "cuStreamGetDevice":
+                raise AttributeError(name)
+            return getattr(driver, name)
+
+    monkeypatch.setattr(base, "_cuda_driver", OldDriver)
+    for index in (0, 1):
+        stream = torch.cuda.Stream(device=f"cuda:{index}")
+        with torch.cuda.device(1 - index):
+            assert base.stream_device_index(stream.cuda_stream) == index
+            assert torch.cuda.current_device() == 1 - index
 
 
 if __name__ == "__main__":

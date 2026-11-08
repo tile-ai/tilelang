@@ -446,10 +446,14 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             ins_idx += 1
 
         first_tensor = next((v for v in param_values if isinstance(v, torch.Tensor)), None)
-        # A kernel whose only tensors are out_idx outputs has no argument to
-        # infer the device from; allocate on the current device, as the CUDA
-        # adapters do.
-        if first_tensor is not None:
+        # A caller-supplied stream runs the kernel on the device that owns it,
+        # so the outputs live there too. A kernel whose only tensors are out_idx
+        # outputs has no argument to infer the device from; allocate on the
+        # current device, as the CUDA adapters do.
+        stream_index = stream_device_index(stream) if stream is not None else None
+        if stream_index is not None:
+            device = torch.device("cuda", stream_index)
+        elif first_tensor is not None:
             device = first_tensor.device
         elif torch.cuda.is_available():
             device = torch.device("cuda", torch.cuda.current_device())
@@ -501,7 +505,6 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             args.append(self._resolve_dynamic_symbolic_value(sym, param_values, require_live_shape=False))
 
         # if stream is not None, we need to pass the stream to the library
-        caller_stream = stream is not None
         if stream is None:
             if self.target.kind.name == "cuda" and torch.cuda.is_available():
                 stream = torch.cuda.current_stream(first_tensor.device).cuda_stream
@@ -513,9 +516,6 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if first_tensor is not None and not first_tensor.is_cuda:
             raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {device}")
         device_id = device.index or 0
-        # A caller-supplied stream launches on the device that owns it.
-        if caller_stream and (stream_index := stream_device_index(stream)) is not None:
-            device_id = stream_index
 
         self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 
