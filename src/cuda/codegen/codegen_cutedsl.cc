@@ -540,22 +540,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     }
   }
 
-  // CuTeDSL normalizes unsigned tensor elements to signed element types, so a
-  // plain widening cast such as `cutlass.Int32(x)` sign-extends a uint8 value
-  // >= 128.  Reinterpret the source through its unsigned type first so the
-  // widening conversion zero-extends.
-  const bool target_is_float = target_ty.is_float() || target_ty.is_bfloat16();
-  const bool target_is_wider_int =
-      (target_ty.is_int() || target_ty.is_uint()) &&
-      target_ty.bits() > from_ty.bits();
-  if (from_ty.is_scalar() && target_ty.is_scalar() && from_ty.is_uint() &&
-      (target_is_float || target_is_wider_int)) {
-    PrintType(target_ty, os);
-    os << "(cutlass.Uint" << from_ty.bits() << "(" << PrintExpr_(op->value)
-       << "))";
-    return;
-  }
-
   if (from_ty.is_scalar() && from_is_cutedsl_fp8 && target_is_fp8_widening) {
     // CuTeDSL/NVGPU widens FP8 through nvgpu.cvt_fpext, whose operand must be
     // a 32-bit aligned vector.  Pack the scalar into a four-lane FP8 vector,
@@ -626,10 +610,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     return CodeGenTileLangPY::VisitExpr_(op, os);
 
   int lanes = target_ty.lanes();
-  const bool unsigned_needs_zero_extend =
-      from_ty.is_uint() && ((target_ty.is_float() || target_ty.is_bfloat16()) ||
-                            ((target_ty.is_int() || target_ty.is_uint()) &&
-                             target_ty.bits() > from_ty.bits()));
 
   // CuTeDSL requires narrow precision (e.g. FP8) vector .to() casts to
   // operate on 32-bit aligned vectors.  For unaligned widths (e.g.
@@ -654,14 +634,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     PrintType(target_ty.element_of(), stream);
     stream << ")\n";
     std::string narrow_src = "tl.as_tensor_ssa(" + src + ")";
-    if (unsigned_needs_zero_extend) {
-      std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
-      PrintIndent();
-      stream << unsigned_src << " = tl.cast_tensor(" << narrow_src << ", ";
-      PrintType(DataType::UInt(from_ty.bits()), stream);
-      stream << ")\n";
-      narrow_src = unsigned_src;
-    }
     PrintIndent();
     stream << aligned_dst << ".store(tl.cast_tensor(" << narrow_src << ", ";
     PrintType(target_ty.element_of(), stream);
@@ -701,21 +673,6 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
         stream << "(0)\n";
       }
     }
-  }
-
-  // CuTeDSL normalizes unsigned tensor elements to signed; reinterpret the
-  // source as unsigned before a vector cast so widening zero-extends.
-  if (unsigned_needs_zero_extend) {
-    std::string unsigned_src = name_supply_->FreshName("_unsigned_src");
-    PrintIndent();
-    stream << unsigned_src << " = tl.cast_tensor(" << cast_src;
-    if (cast_src_is_tensor)
-      stream << ".load()";
-    stream << ", ";
-    PrintType(DataType::UInt(from_ty.bits()), stream);
-    stream << ")\n";
-    cast_src = unsigned_src;
-    cast_src_is_tensor = false;
   }
 
   // Cast (always aligned now)
@@ -2195,10 +2152,14 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
              << ",), ";
       PrintType(value_dtype.element_of(), stream);
       stream << ")\n";
+      const std::string unsigned_dtype_arg =
+          value_dtype.is_uint()
+              ? ", dtype=" + DTypeToString(value_dtype.element_of())
+              : "";
       PrintIndent();
       stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << ptr_str
              << ", " << PrintExpr_(scalar_base) << ", (" << value_lanes
-             << ",)).load())\n";
+             << ",)" << unsigned_dtype_arg << ").load())\n";
     }
 
     // Return the rmem tensor (not .load()) so downstream code uses
@@ -2679,8 +2640,13 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
                << PrintExpr_(scalar_base) << ", (" << value_lanes
                << ",), div_by=" << (8 / value_dtype.bits()) << ")\n";
       } else {
-        stream << view_var << " = tl.make_tensor(" << ptr_str << " + "
-               << PrintExpr_(scalar_base) << ", (" << value_lanes << ",))\n";
+        const std::string unsigned_dtype_arg =
+            value_dtype.is_uint()
+                ? ", dtype=" + DTypeToString(value_dtype.element_of())
+                : "";
+        stream << view_var << " = tl.make_tensor_at_offset(" << ptr_str << ", "
+               << PrintExpr_(scalar_base) << ", (" << value_lanes << ",)"
+               << unsigned_dtype_arg << ")\n";
       }
       if (value_dtype.bits() < 8) {
         const int packed_bits = value_lanes * value_dtype.bits();
@@ -3641,6 +3607,17 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
               ".iterator, dtype=" + DTypeToString(effective_dtype) + ")";
   }
 
+  // CuTeDSL pointers do not retain the unsigned element type (an unsigned
+  // buffer argument is exposed as the corresponding signed pointer). Pass the
+  // TIR element type explicitly whenever a view is built from a void/signed
+  // pointer so widening casts zero-extend instead of sign-extending.
+  const std::string dtype_arg =
+      effective_dtype.is_uint()
+          ? ", dtype=" + DTypeToString(effective_dtype.is_scalar()
+                                           ? effective_dtype
+                                           : effective_dtype.element_of())
+          : "";
+
   // CuTeDSL make_tensor_at_offset(ptr, offset, shape, div_by) expects a
   // single scalar offset. For a Ramp index, pass only the base to avoid
   // emitting a tuple (base+0, base+1, ...) that the runtime rejects.
@@ -3680,7 +3657,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << vid << ".iterator, "
          << scalarized_index_str << ", (" << buffer_element_dtype.lanes()
-         << ",), div_by=" << scalarized_div_by << ")";
+         << ",), div_by=" << scalarized_div_by << dtype_arg << ")";
       return os.str();
     } else if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
                (scope == "local" || scope == "shared")) {
@@ -3694,7 +3671,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     } else {
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str
-         << ", (1,), div_by=" << scalarized_div_by << ")";
+         << ", (1,), div_by=" << scalarized_div_by << dtype_arg << ")";
       // for vector data types, ".load()" (added by BufferLoadNode) is needed
       // instead of "[0]"
       if (buffer_element_dtype.is_scalar()) {
@@ -3718,7 +3695,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     std::ostringstream os;
     os << "tl.make_tensor_at_offset(" << ptr_str << ", "
        << (scalarized_local_vector_buffer ? scalarized_index_str : index_str)
-       << ", (" << buffer_size << ",), div_by=" << buffer_size << ")";
+       << ", (" << buffer_size << ",), div_by=" << buffer_size
+       << dtype_arg << ")";
     return os.str();
   }
 }

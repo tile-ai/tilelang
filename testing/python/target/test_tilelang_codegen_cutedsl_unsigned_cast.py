@@ -33,7 +33,8 @@ def test_cutedsl_unsigned_widening_cast_zero_extends():
 
     artifact = _lower_cutedsl(prog)
 
-    assert "cutlass.Int32(cutlass.Uint8(" in artifact.kernel_source
+    assert "dtype=cutlass.Uint8" in artifact.kernel_source
+    assert "cutlass.Int32(" in artifact.kernel_source
 
 
 def test_cutedsl_unsigned_to_float_cast_zero_extends():
@@ -44,7 +45,8 @@ def test_cutedsl_unsigned_to_float_cast_zero_extends():
 
     artifact = _lower_cutedsl(prog)
 
-    assert "cutlass.Float32(cutlass.Uint8(" in artifact.kernel_source
+    assert "dtype=cutlass.Uint8" in artifact.kernel_source
+    assert "cutlass.Float32(" in artifact.kernel_source
 
 
 def test_cutedsl_unsigned_to_bfloat16_cast_zero_extends():
@@ -55,7 +57,8 @@ def test_cutedsl_unsigned_to_bfloat16_cast_zero_extends():
 
     artifact = _lower_cutedsl(prog)
 
-    assert "cutlass.BFloat16(cutlass.Uint8(" in artifact.kernel_source
+    assert "dtype=cutlass.Uint8" in artifact.kernel_source
+    assert "cutlass.BFloat16(" in artifact.kernel_source
 
 
 def test_cutedsl_unsigned_to_float_cast_preserves_width():
@@ -69,7 +72,8 @@ def test_cutedsl_unsigned_to_float_cast_preserves_width():
 
     artifact = _lower_cutedsl(prog)
 
-    assert "cutlass.Float32(cutlass.Uint32(" in artifact.kernel_source
+    assert "dtype=cutlass.Uint32" in artifact.kernel_source
+    assert "cutlass.Float32(" in artifact.kernel_source
 
 
 def test_cutedsl_unsigned_vector_cast_zero_extends():
@@ -82,8 +86,42 @@ def test_cutedsl_unsigned_vector_cast_zero_extends():
     artifact = _lower_cutedsl(prog)
 
     source = artifact.kernel_source
-    assert "_unsigned_src = tl.cast_tensor(" in source
-    assert "cutlass.Uint8)" in source
+    assert "dtype=cutlass.Uint8" in source
+    assert "tl.cast_tensor(" in source
+
+
+def test_cutedsl_unsigned_view_keeps_tir_element_type():
+    """The pointer loses the unsigned type; the view must be re-wrapped with
+    the TIR element type so widening is a zero-extension."""
+
+    @T.prim_func
+    def prog(A: T.Tensor((1,), "uint8"), B: T.Tensor((1,), "int32")):
+        with T.Kernel(1, threads=1):
+            B[0] = T.cast(A[0], "int32")
+
+    artifact = _lower_cutedsl(prog)
+
+    assert "dtype=cutlass.Uint8" in artifact.kernel_source
+
+
+def test_cutedsl_unsigned_operations_keep_unsigned_view():
+    """Comparisons, shifts and division must not see a signed view either."""
+
+    @T.prim_func
+    def prog(A: T.Tensor((1,), "uint8"), B: T.Tensor((1,), "int32")):
+        with T.Kernel(1, threads=1):
+            B[0] = (
+                T.cast(A[0] > 127, "int32")
+                + T.cast(A[0] >> 7, "int32")
+                + T.cast(A[0] // 3, "int32")
+            )
+
+    artifact = _lower_cutedsl(prog)
+
+    source = artifact.kernel_source
+    assert "dtype=cutlass.Uint8" in source
+    assert ">>" in source
+    assert "//" in source
 
 
 def test_cutedsl_signed_widening_cast_is_unchanged():
@@ -96,7 +134,7 @@ def test_cutedsl_signed_widening_cast_is_unchanged():
 
     artifact = _lower_cutedsl(prog)
 
-    assert "cutlass.Int32(cutlass.Uint8(" not in artifact.kernel_source
+    assert "dtype=cutlass.Uint8" not in artifact.kernel_source
 
 
 if __name__ == "__main__":

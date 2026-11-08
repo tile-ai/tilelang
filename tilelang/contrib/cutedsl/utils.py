@@ -339,7 +339,7 @@ def make_filled_tensor(shape, value, dtype=None):
     return t
 
 
-def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
+def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1, dtype=None):
     from cutlass.cute.typing import is_integer as cute_is_integer
 
     # Ensure offset is a cute-compatible integer.  Complex arithmetic
@@ -349,7 +349,13 @@ def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
         offset = cutlass.Int64(offset)
     if div_by != 1:
         offset = cute.assume(cutlass.as_numeric(offset), divby=div_by)
-    return cute.make_tensor(ptr + offset, shape)
+    view = cute.make_tensor(ptr + offset, shape)
+    # A pointer does not retain the unsigned element type: an unsigned buffer
+    # argument is exposed as the corresponding signed pointer.  Re-wrap the
+    # view with the TIR element type so widening casts zero-extend.
+    if dtype is not None:
+        view = type(view)(view.value, dtype=dtype)
+    return view
 
 
 def handle_add_byte_offset(handle, byte_offset):
