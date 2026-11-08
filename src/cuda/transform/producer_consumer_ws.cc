@@ -2124,23 +2124,22 @@ private:
     }
 
     // Buffers `stmt` may write: stored to, or passed by pointer.
-    static std::unordered_set<const VarNode *>
-    PossiblyWrittenBuffers(const Stmt &stmt) {
-      std::unordered_set<const VarNode *> written;
+    static VarSet PossiblyWrittenBuffers(const Stmt &stmt) {
+      VarSet written;
       PostOrderVisit(stmt, [&](const ObjectRef &obj) {
         if (const auto *store = obj.as<BufferStoreNode>()) {
-          written.insert(store->buffer->data.get());
+          written.insert(store->buffer->data);
         } else if (const auto *call = obj.as<CallNode>()) {
           if (call->op.same_as(builtin::tvm_access_ptr()) &&
               call->args.size() > 1) {
             if (const auto *data = call->args[1].as<VarNode>()) {
-              written.insert(data);
+              written.insert(GetRef<Var>(data));
             }
           } else if ((call->op.same_as(tl::access_ptr()) ||
                       call->op.same_as(builtin::address_of())) &&
                      !call->args.empty()) {
             if (const auto *base = call->args[0].as<BufferLoadNode>()) {
-              written.insert(base->buffer->data.get());
+              written.insert(base->buffer->data);
             }
           }
         }
@@ -2166,13 +2165,11 @@ private:
       if (!IsWSBranch(if_node->then_case, container, branch)) {
         return false;
       }
-      std::unordered_set<const VarNode *> written =
-          PossiblyWrittenBuffers(if_node->then_case);
+      VarSet written = PossiblyWrittenBuffers(if_node->then_case);
       bool reads_written = false;
       PostOrderVisit(if_node->condition, [&](const ObjectRef &obj) {
         if (const auto *load = obj.as<BufferLoadNode>()) {
-          reads_written =
-              reads_written || written.count(load->buffer->data.get());
+          reads_written = reads_written || written.count(load->buffer->data);
         }
       });
       if (reads_written) {
