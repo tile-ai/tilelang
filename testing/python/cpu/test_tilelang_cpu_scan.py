@@ -185,3 +185,24 @@ def test_cpu_scan_rejects_non_identical_regions_on_same_buffer():
 
     with pytest.raises(Exception, match="non-identical source/destination regions"):
         _compile(main, "c", "cython")
+
+
+@pytest.mark.parametrize("target,execution_backend", _TARGETS)
+@pytest.mark.parametrize("op", ["cumsum", "cummax"])
+def test_cpu_scan_rejects_reshape_alias_with_different_physical_layout(target, execution_backend, op):
+    @T.prim_func
+    def main(A: T.Tensor((6, 2), T.float32), B: T.Tensor((6, 2), T.float32)):
+        with T.Kernel(1):
+            src = T.alloc_local((6, 2), T.float32)
+            dst = T.reshape(src, (3, 4))
+            for i, j in T.grid(6, 2):
+                src[i, j] = A[i, j]
+            if op == "cumsum":
+                T.cumsum(src[0:3, 0:2], dst[0:3, 0:2], dim=0)
+            else:
+                T.cummax(src[0:3, 0:2], dst[0:3, 0:2], dim=0)
+            for i, j in T.grid(6, 2):
+                B[i, j] = src[i, j]
+
+    with pytest.raises(Exception, match="non-identical source/destination regions"):
+        _compile(main, target, execution_backend)

@@ -48,7 +48,7 @@ Stmt LowerSerialScan(const ScanOpNode &op, const LowerArgs &lower_args,
   ICHECK_LT(op.dim, ndim) << "CPU " << op_name << " dim " << op.dim
                           << " is out of range for rank " << ndim;
 
-  bool identical_region = op.src->data.same_as(op.dst->data);
+  bool identical_region = op.src.same_as(op.dst);
   for (int i = 0; i < ndim; ++i) {
     ICHECK(StructuralEqual()(src_region[i]->extent, dst_region[i]->extent))
         << "CPU " << op_name
@@ -62,9 +62,9 @@ Stmt LowerSerialScan(const ScanOpNode &op, const LowerArgs &lower_args,
   }
   ICHECK(!op.src->data.same_as(op.dst->data) || identical_region)
       << "CPU " << op_name
-      << " does not support non-identical source/destination regions on the "
-         "same buffer yet; use distinct buffers or an identical in-place "
-         "region.";
+      << " does not support non-identical source/destination regions or "
+         "different physical layouts on the same buffer yet; use distinct "
+         "buffers or an identical in-place region.";
 
   (void)lower_args;
   Buffer src_buffer = op.src;
