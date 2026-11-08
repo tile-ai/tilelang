@@ -278,5 +278,36 @@ def test_cython_dynamic_shape_output_before_input():
     tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
 
 
+@tilelang.testing.requires_cuda
+def test_cython_dynamic_shared_memory_on_each_device():
+    """The dynamic shared memory limit is raised on every device a kernel
+    launches on, not only on the one current at load time.
+
+    See https://github.com/tile-ai/tilelang/issues/3881.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    n, smem = 1 << 16, 16384  # 64 KB, over the default 48 KB limit
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32)):
+        with T.Kernel(n // 256, threads=256) as bx:
+            S = T.alloc_shared((smem,), T.float32)
+            for i in T.Parallel(smem):
+                S[i] = A[bx * 256 + i % 256]
+            for i in T.Parallel(256):
+                B[bx * 256 + i] = S[i * (smem // 256)] + 1.0
+
+    with torch.cuda.device(0):
+        kernel = tilelang.compile(main, execution_backend="cython")
+    j = torch.arange(n)
+    for device in (1, 0):
+        with torch.cuda.device(device):
+            a = torch.randn(n, device=f"cuda:{device}")
+            b = torch.empty_like(a)
+            kernel(a, b)
+            torch.testing.assert_close(b, a[(j // 256 * 256 + j % 4 * 64).to(a.device)] + 1.0, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

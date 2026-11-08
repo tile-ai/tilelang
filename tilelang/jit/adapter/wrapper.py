@@ -23,10 +23,35 @@ import logging
 import textwrap
 from tvm.tirx.stmt_functor import post_order_visit
 
+# The dynamic shared memory limit is a per-device attribute of the kernel, so it
+# is raised on every device the kernel launches on: at init() for the current
+# device, and before a launch on any device not seen yet.
 PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY = """
-    cudaError_t result_{0} = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
-    if (result_{0} != cudaSuccess) {{
-        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result_{0}));
+static std::atomic<unsigned long long> {0}_smem_devices{{0}};
+
+static int {0}_set_dynamic_smem() {{
+    int device = 0;
+    cudaError_t query = cudaGetDevice(&device);
+    if (query != cudaSuccess) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to get the current device: %s", cudaGetErrorString(query));
+        return -1;
+    }}
+    unsigned long long bit = device < 64 ? 1ull << device : 0;
+    if (bit && ({0}_smem_devices.load(std::memory_order_relaxed) & bit)) {{
+        return 0;
+    }}
+    cudaError_t result = cudaFuncSetAttribute({0}, cudaFuncAttributeMaxDynamicSharedMemorySize, {1});
+    if (result != cudaSuccess) {{
+        snprintf(error_buf, ERROR_BUF_SIZE, "Failed to set the allowed dynamic shared memory size to %d with error: %s", {1}, cudaGetErrorString(result));
+        return -1;
+    }}
+    {0}_smem_devices.fetch_or(bit, std::memory_order_relaxed);
+    return 0;
+}}
+"""
+
+PREDEF_CALL_SET_DYNAMIC_MEMORY = """
+    if ({0}_set_dynamic_smem() != 0) {{
         return -1;
     }}
 """
@@ -57,7 +82,7 @@ PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY_HIP = """
     return 0;
 """
 
-PREDEF_INIT_FUNC = """
+PREDEF_ERROR_BUF = """
 #ifdef _WIN32
 #define TL_EXPORT __declspec(dllexport)
 #else
@@ -70,13 +95,17 @@ static char error_buf[ERROR_BUF_SIZE];
 extern "C" TL_EXPORT const char* get_last_error() {{
     return error_buf;
 }}
+"""
 
+PREDEF_INIT_BODY = """
 extern "C" TL_EXPORT int init() {{
     error_buf[0] = '\\0';
     {0}
     return 0;
 }}
 """
+
+PREDEF_INIT_FUNC = PREDEF_ERROR_BUF + PREDEF_INIT_BODY
 
 PREDEF_HOST_FUNC = """
 extern "C" TL_EXPORT int call({}) {{
@@ -353,6 +382,7 @@ class TLCUDASourceWrapper:
             smem_str = 0 if dynamic_smem_buf is None else dynamic_smem_buf
             init_l2_persistent_map = self.generate_l2_persistent_map(function_name)
             kernel_launch_code += init_l2_persistent_map
+            kernel_launch_code += self.get_dynamic_smem_call(function_name)
 
             if self.use_cooperative_groups[function_name]:
                 args_list = parse_function_call_args(declaration, function_args, function_params, desc_name_map, desc_name_var_map)
@@ -571,16 +601,19 @@ class TLCUDASourceWrapper:
             return KERNEL_CLUSTER_LAUNCH_FUNC_CODE.format(grid_str, block_str, smem_str, call_args, function_name, *cluster_dims)
 
     def get_init_func(self):
-        # Initialize an empty string for the CUDA function call
-        call_str = """"""
-        # If dynamic shared memory buffer is specified, prepare the cudaFuncSetAttribute call
+        setters = ""
+        call_str = ""
         for function_name, dynamic_smem_buf in self.dynamic_smem_buf.items():
             if dynamic_smem_buf is not None:
-                # Format the cudaFuncSetAttribute call for dynamic shared memory
-                call_str += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(function_name, dynamic_smem_buf)
-        # Format the initialization function using the call_str
-        init_funcs = PREDEF_INIT_FUNC.format(call_str)
-        return init_funcs
+                setters += PREDEF_ATTRIBUTE_SET_DYNAMIC_MEMORY.format(function_name, dynamic_smem_buf)
+                call_str += self.get_dynamic_smem_call(function_name)
+        return "#include <atomic>\n" + PREDEF_ERROR_BUF.format() + setters + PREDEF_INIT_BODY.format(call_str)
+
+    def get_dynamic_smem_call(self, function_name: str) -> str:
+        """Code raising `function_name`'s dynamic shared memory limit on the current device."""
+        if self.dynamic_smem_buf.get(function_name) is None:
+            return ""
+        return PREDEF_CALL_SET_DYNAMIC_MEMORY.format(function_name)
 
     def update_lib_code(self, code: str):
         # Update the library code with the given code string
@@ -733,6 +766,10 @@ class TLHIPSourceWrapper(TLCUDASourceWrapper):
         # Format the initialization function using the call_str
         init_funcs = PREDEF_INIT_FUNC.format(call_str)
         return init_funcs
+
+    def get_dynamic_smem_call(self, function_name: str) -> str:
+        # HIP has no per-device opt-in; init() checks the limit.
+        return ""
 
     def get_stream_type(self) -> dict[str, str]:
         return {"name": "stream=hipStreamDefault", "type": "hipStream_t"}
