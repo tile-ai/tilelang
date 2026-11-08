@@ -542,15 +542,15 @@ def test_tvm_ffi_restores_current_device(callee_allocated_output):
                 B[bx * 256 + i] = A[bx * 256 + i] + 1.0
 
     kernel = tilelang.compile(add_one, out_idx=[1] if callee_allocated_output else None, execution_backend="tvm_ffi")
-    for device in ("cuda:1", "cuda:0", "cuda:1"):
+    for caller, device in ((0, "cuda:1"), (0, "cuda:0"), (1, "cuda:0"), (1, "cuda:1")):
         a = torch.randn(n, device=device)
-        with torch.cuda.device(0):
+        with torch.cuda.device(caller):
             if callee_allocated_output:
                 b = kernel(a)
             else:
                 b = torch.empty_like(a)
                 kernel(a, b)
-            assert torch.cuda.current_device() == 0
+            assert torch.cuda.current_device() == caller
         torch.cuda.synchronize(device)
         assert b.device == a.device
         torch.testing.assert_close(b, a + 1.0, rtol=0, atol=0)
