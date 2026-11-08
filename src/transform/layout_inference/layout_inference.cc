@@ -128,97 +128,6 @@ bool IsOpenFragmentLayout(const Buffer &buffer, const Layout &layout) {
 // Free-mode attempt scoring (layout RFC, design B)
 // ---------------------------------------------------------------------------
 
-/*!
- * \brief Restrict the non-idempotent shared/global writes of a replicated
- *        parallel loop to one replica.
- *
- * Every replica runs the loop body, so each one writes its copy of the
- * fragments. Plain shared/global stores then write the same value from every
- * replica and stay as they are; atomics and other intrinsics writing through
- * `tl.access_ptr`, and stores to a shared/global buffer the loop also reads,
- * must happen once and are wrapped in `guard`.
- */
-class ReplicaWriteGuarder : public StmtMutator {
-public:
-  static Stmt Rewrite(const Stmt &body, PrimExpr guard) {
-    ReplicaWriteGuarder guarder(std::move(guard));
-    PostOrderVisit(body, [&](const ObjectRef &obj) {
-      if (const auto *load = obj.as<BufferLoadNode>()) {
-        if (IsSharedOrGlobal(load->buffer)) {
-          guarder.read_buffers_.insert(load->buffer->data.get());
-        }
-      }
-    });
-    return guarder(body);
-  }
-
-private:
-  explicit ReplicaWriteGuarder(PrimExpr guard) : guard_(std::move(guard)) {}
-
-  static bool IsSharedOrGlobal(const Buffer &buffer) {
-    return IsSharedBuffer(buffer) || IsGlobalBuffer(buffer);
-  }
-
-  static bool WritesSharedOrGlobal(const PrimExpr &expr) {
-    bool writes = false;
-    PostOrderVisit(expr, [&](const ObjectRef &obj) {
-      const auto *call = obj.as<CallNode>();
-      if (!call || !call->op.same_as(access_ptr()) || call->args.size() < 3) {
-        return;
-      }
-      const auto *base = call->args[0].as<BufferLoadNode>();
-      const auto *rw_mask = call->args[2].as<IntImmNode>();
-      if (base && IsSharedOrGlobal(base->buffer) &&
-          (!rw_mask || (rw_mask->value & 2))) {
-        writes = true;
-      }
-    });
-    return writes;
-  }
-
-  Stmt Guard(const Stmt &stmt) const { return IfThenElse(guard_, stmt); }
-
-  Stmt VisitStmt_(const BufferStoreNode *op) final {
-    bool writes = WritesSharedOrGlobal(op->value);
-    for (const PrimExpr &index : op->indices) {
-      writes = writes || WritesSharedOrGlobal(index);
-    }
-    if (IsSharedOrGlobal(op->buffer)) {
-      if (writes || read_buffers_.count(op->buffer->data.get())) {
-        return Guard(GetRef<Stmt>(op));
-      }
-      return GetRef<Stmt>(op);
-    }
-    ICHECK(!writes) << "A replicated parallel loop cannot store the result of "
-                       "a shared/global write (e.g. an atomic returning the "
-                       "previous value) into "
-                    << op->buffer
-                    << ": the write must run once, but every replica needs "
-                       "the result.";
-    return GetRef<Stmt>(op);
-  }
-
-  Stmt VisitStmt_(const BindNode *op) final {
-    ICHECK(!WritesSharedOrGlobal(op->value))
-        << "A replicated parallel loop cannot bind the result of a "
-           "shared/global write (e.g. an atomic returning the previous value) "
-           "to "
-        << op->var
-        << ": the write must run once, but every replica needs the result.";
-    return StmtMutator::VisitStmt_(op);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    if (WritesSharedOrGlobal(op->value)) {
-      return Guard(GetRef<Stmt>(op));
-    }
-    return GetRef<Stmt>(op);
-  }
-
-  PrimExpr guard_;
-  std::unordered_set<const VarNode *> read_buffers_;
-};
-
 } // namespace
 
 using namespace tirx;
@@ -1718,7 +1627,7 @@ private:
     }
 
     if (result_.replica_write_guard_map.count(root)) {
-      for_ptr->body = ReplicaWriteGuarder::Rewrite(
+      for_ptr->body = GuardReplicaWrites(
           for_ptr->body,
           analyzer_->Simplify(result_.replica_write_guard_map[root]));
     }

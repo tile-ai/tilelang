@@ -135,6 +135,7 @@ struct LayoutInferenceResult {
   Map<For, Fragment> for_map;
   Map<For, PrimExpr> predicate_map;
   Map<For, Bool> padding_guard_map;
+  Map<For, PrimExpr> replica_write_guard_map;
   // Parallel loops that live inside a PTO SIMD_VF block. Their for_map entry
   // is a lane Fragment that must be written back under the PTO-specific
   // annotation key instead of the SIMT parallel_loop_layout.
@@ -693,6 +694,7 @@ public:
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
     Map<For, Bool> padding_guard_map;
+    Map<For, PrimExpr> replica_write_guard_map;
     std::unordered_set<const ForNode *> pto_simd_parallel_roots;
     ICHECK(infer_list_.size() == thread_index_vec_.size())
         << "infer_list_ and thread_index_vec_ size mismatch";
@@ -719,6 +721,9 @@ public:
         if (auto predicate = for_infer->GetPredicate(thread_index)) {
           predicate_map.Set(for_infer->GetRoot(), predicate.value());
         }
+        if (auto guard = for_infer->GetReplicaWriteGuard(thread_index)) {
+          replica_write_guard_map.Set(for_infer->GetRoot(), guard.value());
+        }
       }
     }
 
@@ -734,7 +739,11 @@ public:
       pto_simd_parallel_roots.insert(root.get());
     }
 
-    return {layout_map, for_map, predicate_map, padding_guard_map,
+    return {layout_map,
+            for_map,
+            predicate_map,
+            padding_guard_map,
+            replica_write_guard_map,
             pto_simd_parallel_roots};
   }
 
@@ -1914,6 +1923,12 @@ private:
     if (result_.padding_guard_map.count(root)) {
       for_ptr->annotations.Set(attr::kParallelLoopRequiresPaddingGuard,
                                result_.padding_guard_map[root]);
+    }
+
+    if (result_.replica_write_guard_map.count(root)) {
+      for_ptr->body = GuardReplicaWrites(
+          for_ptr->body,
+          analyzer_->Simplify(result_.replica_write_guard_map[root]));
     }
 
     // Store the predicate as an annotation if it exists and is not trivially

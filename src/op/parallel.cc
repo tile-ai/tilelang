@@ -12,7 +12,10 @@
 #include <algorithm>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt_functor.h>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "../layout/layout.h"
 #include "../layout/utils.h"
@@ -23,6 +26,7 @@
 #include "builtin.h"
 #include "reducer.h"
 #include "span_utils.h"
+#include "tir/transforms/ir_utils.h"
 #include "utils.h"
 
 namespace tvm {
@@ -798,6 +802,249 @@ ParallelOpNode::GetReplicaWriteGuard(PrimExpr thread_index) const {
   }
   return Substitute(replica_write_guard_.value(),
                     {{InputPlaceholder(0), thread_index}});
+}
+
+namespace {
+
+/*!
+ * \brief Restrict the non-idempotent shared/global writes of a replicated
+ *        parallel loop to one replica.
+ *
+ * Every replica runs the loop body, so each one writes its copy of the
+ * fragments. Plain shared/global stores then write the same value from every
+ * replica and stay as they are. Calls writing through a pointer (atomics,
+ * externs taking a writable `access_ptr`) and stores to a shared/global buffer
+ * the loop also reads must happen once and are wrapped in `guard`.
+ *
+ * A value read from a buffer written once is only consistent on the replica
+ * that writes it: another replica may read before or after that write. Stores
+ * of such a value to shared/global memory are therefore guarded as well, and a
+ * fragment store of it, which every replica needs, is rejected.
+ */
+class ReplicaWriteGuarder : public StmtMutator {
+public:
+  static Stmt Rewrite(const Stmt &body, PrimExpr guard) {
+    ReplicaWriteGuarder guarder(std::move(guard));
+    guarder.Collect(body);
+    return guarder(body);
+  }
+
+private:
+  explicit ReplicaWriteGuarder(PrimExpr guard) : guard_(std::move(guard)) {}
+
+  static bool IsSharedOrGlobal(const Buffer &buffer) {
+    return IsSharedBuffer(buffer) || IsGlobalBuffer(buffer);
+  }
+
+  static bool IsPointerOp(const CallNode *call) {
+    return call->op.same_as(access_ptr()) ||
+           call->op.same_as(builtin::tvm_access_ptr()) ||
+           call->op.same_as(builtin::address_of());
+  }
+
+  static bool MayWrite(const PrimExpr &rw_mask) {
+    const auto *mask = rw_mask.as<IntImmNode>();
+    return !mask || (mask->value & 2);
+  }
+
+  // The shared/global buffer data `expr` points to for writing, if any.
+  const VarNode *WriteTarget(const PrimExpr &expr) const {
+    if (const auto *var = expr.as<VarNode>()) {
+      auto it = write_pointers_.find(var);
+      return it == write_pointers_.end() ? nullptr : it->second;
+    }
+    const auto *call = expr.as<CallNode>();
+    if (!call) {
+      return nullptr;
+    }
+    if (call->op.same_as(access_ptr()) && call->args.size() >= 3) {
+      const auto *base = call->args[0].as<BufferLoadNode>();
+      if (base && IsSharedOrGlobal(base->buffer) && MayWrite(call->args[2])) {
+        return base->buffer->data.get();
+      }
+    } else if (call->op.same_as(builtin::tvm_access_ptr()) &&
+               call->args.size() == 5) {
+      const auto *data = call->args[1].as<VarNode>();
+      if (data && MayWrite(call->args[4])) {
+        std::string scope = GetPtrStorageScope(GetRef<Var>(data));
+        if (scope.empty() || scope == "global" || scope == "shared" ||
+            scope == "shared.dyn") {
+          return data;
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  // The shared/global buffers `call` writes through its pointer arguments.
+  std::vector<const VarNode *> WriteTargets(const CallNode *call) const {
+    std::vector<const VarNode *> targets;
+    if (!IsPointerOp(call)) {
+      for (const PrimExpr &arg : call->args) {
+        if (const VarNode *target = WriteTarget(arg)) {
+          targets.push_back(target);
+        }
+      }
+    }
+    return targets;
+  }
+
+  bool Writes(const PrimExpr &expr) const {
+    bool writes = false;
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      if (const auto *call = obj.as<CallNode>()) {
+        writes = writes || !WriteTargets(call).empty();
+      }
+    });
+    return writes;
+  }
+
+  // Whether `expr` reads a buffer written once, so its value may differ
+  // between replicas.
+  bool Diverges(const PrimExpr &expr) const {
+    bool diverges = false;
+    PostOrderVisit(expr, [&](const ObjectRef &obj) {
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        diverges = diverges || written_once_.count(load->buffer->data.get());
+      } else if (const auto *var = obj.as<VarNode>()) {
+        diverges = diverges || divergent_vars_.count(var);
+      }
+    });
+    return diverges;
+  }
+
+  bool Diverges(const BufferStoreNode *op) const {
+    bool diverges = divergent_control_ || Diverges(op->value);
+    for (const PrimExpr &index : op->indices) {
+      diverges = diverges || Diverges(index);
+    }
+    return diverges;
+  }
+
+  void Collect(const Stmt &body) {
+    std::unordered_set<const VarNode *> read;
+    PostOrderVisit(body, [&](const ObjectRef &obj) {
+      if (const auto *load = obj.as<BufferLoadNode>()) {
+        if (IsSharedOrGlobal(load->buffer)) {
+          read.insert(load->buffer->data.get());
+        }
+      } else if (const auto *bind = obj.as<BindNode>()) {
+        if (const VarNode *target = WriteTarget(bind->value)) {
+          write_pointers_[bind->var.get()] = target;
+        }
+      }
+    });
+    PostOrderVisit(body, [&](const ObjectRef &obj) {
+      if (const auto *store = obj.as<BufferStoreNode>()) {
+        if (IsSharedOrGlobal(store->buffer) &&
+            read.count(store->buffer->data.get())) {
+          written_once_.insert(store->buffer->data.get());
+        }
+      } else if (const auto *call = obj.as<CallNode>()) {
+        for (const VarNode *target : WriteTargets(call)) {
+          written_once_.insert(target);
+        }
+      }
+    });
+  }
+
+  void CheckNoWrite(const PrimExpr &expr, const char *what) const {
+    ICHECK(!Writes(expr))
+        << "A replicated parallel loop cannot use the result of a "
+           "shared/global write (e.g. an atomic returning the previous value) "
+           "as "
+        << what
+        << ": the write must run once, but every replica needs the "
+           "result.";
+  }
+
+  Stmt Guard(const Stmt &stmt) const { return IfThenElse(guard_, stmt); }
+
+  Stmt VisitStmt_(const BufferStoreNode *op) final {
+    bool writes = Writes(op->value);
+    for (const PrimExpr &index : op->indices) {
+      writes = writes || Writes(index);
+    }
+    if (IsSharedOrGlobal(op->buffer)) {
+      if (writes || written_once_.count(op->buffer->data.get()) ||
+          Diverges(op)) {
+        return Guard(GetRef<Stmt>(op));
+      }
+      return GetRef<Stmt>(op);
+    }
+    ICHECK(!writes) << "A replicated parallel loop cannot store the result of "
+                       "a shared/global write (e.g. an atomic returning the "
+                       "previous value) into "
+                    << op->buffer
+                    << ": the write must run once, but every replica needs "
+                       "the result.";
+    ICHECK(!Diverges(op))
+        << "A replicated parallel loop cannot store into " << op->buffer
+        << " a value read from shared/global memory it also updates: every "
+           "replica needs the value, but the update runs once and may land "
+           "before another replica's read.";
+    return GetRef<Stmt>(op);
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    if (write_pointers_.count(op->var.get())) {
+      return GetRef<Stmt>(op);
+    }
+    CheckNoWrite(op->value, "a bound value");
+    if (divergent_control_ || Diverges(op->value)) {
+      divergent_vars_.insert(op->var.get());
+    }
+    return GetRef<Stmt>(op);
+  }
+
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    if (Writes(op->value)) {
+      return Guard(GetRef<Stmt>(op));
+    }
+    return GetRef<Stmt>(op);
+  }
+
+  // Control flow that may differ between replicas makes every store under it
+  // divergent.
+  template <typename Node>
+  Stmt VisitDivergentIf(const Node *op, bool diverges) {
+    bool outer = divergent_control_;
+    divergent_control_ = outer || diverges;
+    Stmt stmt = StmtMutator::VisitStmt_(op);
+    divergent_control_ = outer;
+    return stmt;
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    CheckNoWrite(op->condition, "a branch condition");
+    return VisitDivergentIf(op, Diverges(op->condition));
+  }
+
+  Stmt VisitStmt_(const WhileNode *op) final {
+    CheckNoWrite(op->condition, "a loop condition");
+    return VisitDivergentIf(op, Diverges(op->condition));
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    CheckNoWrite(op->min, "a loop bound");
+    CheckNoWrite(op->extent, "a loop bound");
+    return VisitDivergentIf(op, Diverges(op->min) || Diverges(op->extent));
+  }
+
+  PrimExpr guard_;
+  // Bound pointers to shared/global memory that may be written through.
+  std::unordered_map<const VarNode *, const VarNode *> write_pointers_;
+  // Shared/global buffers whose writes run on one replica only.
+  std::unordered_set<const VarNode *> written_once_;
+  // Bound values that may differ between replicas.
+  std::unordered_set<const VarNode *> divergent_vars_;
+  bool divergent_control_ = false;
+};
+
+} // namespace
+
+Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard) {
+  return ReplicaWriteGuarder::Rewrite(body, guard);
 }
 
 Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {

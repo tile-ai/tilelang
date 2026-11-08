@@ -289,6 +289,13 @@ private:
   std::vector<Buffer> store_fragment_buffers_;
 };
 
+/*!
+ * \brief Restrict the non-idempotent shared/global writes in the body of a
+ *        replicated parallel loop to the replica selected by `guard` (see
+ *        ParallelOpNode::GetReplicaWriteGuard).
+ */
+Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard);
+
 class ParallelOp : public TileOperator {
 public:
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(ParallelOp, TileOperator,

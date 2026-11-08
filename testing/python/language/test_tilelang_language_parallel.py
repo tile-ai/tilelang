@@ -122,7 +122,7 @@ def test_parallel_vectorize_var():
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("update", ["atomic_add", "read_modify_write"])
+@pytest.mark.parametrize("update", ["atomic_add", "read_modify_write", "extern_access_ptr", "bound_access_ptr"])
 def test_replicated_parallel_writes_once(update):
     """A replicated loop (64 iterations on 128 threads) that stores a fragment
     runs its atomics and read-modify-writes on one replica only (#3870)."""
@@ -136,8 +136,13 @@ def test_replicated_parallel_writes_once(update):
                 L[i] = B[i]
                 if update == "atomic_add":
                     T.atomic_add(A[i], L[i])
-                else:
+                elif update == "read_modify_write":
                     A[i] = A[i] + L[i]
+                elif update == "extern_access_ptr":
+                    T.call_extern("float32", "atomicAdd", A.access_ptr("rw", offset=i), L[i])
+                else:
+                    ptr = T.bind(T.access_ptr(A[i], "rw"))
+                    T.call_extern("float32", "atomicAdd", ptr, L[i])
                 C[i] = L[i]
 
     kernel = tilelang.compile(main)
@@ -149,6 +154,55 @@ def test_replicated_parallel_writes_once(update):
     kernel(a, b, c)
     torch.testing.assert_close(a, b, rtol=0, atol=0)
     torch.testing.assert_close(c, b, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_replicated_parallel_reads_before_its_update():
+    """A value read before the loop's single-replica update of the same buffer
+    is only consistent on that replica (#3870)."""
+    n = 64
+
+    @T.prim_func
+    def snapshot(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32), C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            L = T.alloc_fragment((n,), T.float32)
+            for i in T.Parallel(n):
+                L[i] = B[i]
+                C[i] = A[i]
+                A[i] = L[i]
+
+    kernel = tilelang.compile(snapshot)
+    a = torch.arange(n, dtype=torch.float32, device="cuda")
+    b = -torch.arange(n, dtype=torch.float32, device="cuda") - 1
+    c = torch.empty(n, device="cuda")
+    expected_c = a.clone()
+    kernel(a, b, c)
+    torch.testing.assert_close(c, expected_c, rtol=0, atol=0)
+    torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+    @T.prim_func
+    def into_fragment(A: T.Tensor((n,), T.float32), C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            L = T.alloc_fragment((n,), T.float32)
+            for i in T.Parallel(n):
+                L[i] = A[i]
+                A[i] = L[i] + 1.0
+                C[i] = L[i]
+
+    with pytest.raises(Exception, match="also updates"):
+        tilelang.compile(into_fragment)
+
+    @T.prim_func
+    def atomic_condition(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32), C: T.Tensor((n,), T.float32)):
+        with T.Kernel(1, threads=128):
+            L = T.alloc_fragment((n,), T.float32)
+            for i in T.Parallel(n):
+                L[i] = B[i]
+                if T.atomic_add(A[i], L[i], return_prev=True) > 0:
+                    C[i] = L[i]
+
+    with pytest.raises(Exception, match="every replica needs the result"):
+        tilelang.compile(atomic_condition)
 
 
 if __name__ == "__main__":
