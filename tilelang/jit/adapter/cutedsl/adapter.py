@@ -15,7 +15,7 @@ from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available, fp8_con
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream, stream_device_index
 
 logger = logging.getLogger(__name__)
 
@@ -501,6 +501,7 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             args.append(self._resolve_dynamic_symbolic_value(sym, param_values, require_live_shape=False))
 
         # if stream is not None, we need to pass the stream to the library
+        caller_stream = stream is not None
         if stream is None:
             if self.target.kind.name == "cuda" and torch.cuda.is_available():
                 stream = torch.cuda.current_stream(first_tensor.device).cuda_stream
@@ -512,6 +513,9 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
         if first_tensor is not None and not first_tensor.is_cuda:
             raise ValueError(f"CuTeDSL kernels require CUDA tensors, got tensor on device: {device}")
         device_id = device.index or 0
+        # A caller-supplied stream launches on the device that owns it.
+        if caller_stream and (stream_index := stream_device_index(stream)) is not None:
+            device_id = stream_index
 
         self._forward_from_prebuild_lib(*args, stream=stream, device_id=device_id)
 

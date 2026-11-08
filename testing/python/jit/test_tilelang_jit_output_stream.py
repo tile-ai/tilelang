@@ -124,5 +124,28 @@ def test_launch_on_non_current_input_device(backend):
         torch.testing.assert_close(out, a, rtol=0, atol=0)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_launch_on_the_explicit_streams_device(backend):
+    """A caller-supplied stream launches on the device that owns it, also when
+    another device is current (#3408)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    from tilelang.jit.adapter.base import stream_device_index
+
+    kernel = _compile(backend)
+    side = torch.cuda.Stream(device="cuda:1")
+    assert stream_device_index(side.cuda_stream) == 1
+    assert stream_device_index(0) is None
+    a = torch.randn(N, device="cuda:1")
+    side.wait_stream(torch.cuda.current_stream("cuda:1"))
+    with torch.cuda.device(0):
+        out = kernel(a, stream=side.cuda_stream)
+        assert torch.cuda.current_device() == 0
+    side.synchronize()
+    assert out.device == a.device
+    torch.testing.assert_close(out, a, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

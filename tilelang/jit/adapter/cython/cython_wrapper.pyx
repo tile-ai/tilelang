@@ -6,7 +6,7 @@ import ctypes
 from libc.stdint cimport int64_t, uintptr_t
 from libc.stdlib cimport malloc, free
 from tvm import tirx
-from tilelang.jit.adapter.base import output_allocation_stream
+from tilelang.jit.adapter.base import output_allocation_stream, stream_device_index
 
 
 cdef object _cuda_index(object device):
@@ -353,10 +353,10 @@ cdef class CythonKernelWrapper:
         # Add CUDA stream to kernel arguments
         call_args.append(ctypes.c_void_p(stream))
 
-        # The launcher works on the current device. A stream picked here is the
-        # inputs' device's, so launch there; a caller-supplied stream runs on
-        # the current device, which must own it.
-        launch_index = None if caller_stream else _cuda_index(device)
+        # The launcher works on the current device, so make the stream's device
+        # current: the inputs' device for a stream picked here, the owning
+        # device for a caller-supplied one.
+        launch_index = stream_device_index(stream) if caller_stream else _cuda_index(device)
         if launch_index is not None and launch_index != torch.cuda.current_device():
             with torch.cuda.device(launch_index):
                 result = self.lib.call(*call_args)

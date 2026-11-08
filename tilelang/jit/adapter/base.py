@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import functools
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +37,40 @@ def output_allocation_stream(stream: int, device: torch.device) -> torch.cuda.St
         # ExternalStream(0) yields a pooled stream on some PyTorch releases (2.4, 2.5).
         return torch.cuda.default_stream(device)
     return torch.cuda.ExternalStream(stream, device=device)
+
+
+# CUstream handles of the legacy and the per-thread default stream.
+_CU_STREAM_LEGACY = 1
+_CU_STREAM_PER_THREAD = 2
+
+
+@functools.cache
+def _cu_stream_get_device():
+    """The driver's ``cuStreamGetDevice`` (CUDA 12.8+), or ``None``."""
+    try:
+        get_device = ctypes.CDLL("libcuda.so.1").cuStreamGetDevice
+    except (OSError, AttributeError):
+        return None
+    get_device.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+    get_device.restype = ctypes.c_int
+    return get_device
+
+
+def stream_device_index(stream: int) -> int | None:
+    """The index of the device that owns the CUDA stream handle ``stream``.
+
+    ``None`` for the NULL, legacy and per-thread default stream handles, which
+    run on whichever device is current, and when the driver cannot tell.
+    """
+    if stream in (0, _CU_STREAM_LEGACY, _CU_STREAM_PER_THREAD):
+        return None
+    get_device = _cu_stream_get_device()
+    if get_device is None:
+        return None
+    device = ctypes.c_int()
+    if get_device(ctypes.c_void_p(stream), ctypes.byref(device)) != 0:
+        return None
+    return device.value
 
 
 class BaseKernelAdapter(ABC):

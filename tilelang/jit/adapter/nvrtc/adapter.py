@@ -12,7 +12,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream, stream_device_index
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
 
 from .libgen import NVRTCLibraryGenerator
@@ -331,10 +331,12 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 stream = torch.cuda.current_stream(launch_device).cuda_stream
             else:
                 stream = 0
+        elif (index := stream_device_index(stream)) is not None:
+            launch_device = torch.device("cuda", index)
 
-        # The launcher works on the current device. A stream picked here is the
-        # inputs' device's, so launch there; a caller-supplied stream runs on
-        # the current device, which must own it.
+        # The launcher works on the current device, so make the stream's device
+        # current: the inputs' device for a stream picked here, the owning
+        # device for a caller-supplied one.
         if launch_device is not None and launch_device.index != torch.cuda.current_device():
             with torch.cuda.device(launch_device):
                 self._forward_from_prebuild_lib(*args, stream=stream)
