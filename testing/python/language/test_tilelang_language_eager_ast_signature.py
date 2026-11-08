@@ -1,7 +1,6 @@
 from tilelang.language.eager.ast import BaseBuilder, mutate
 import importlib.util
 import pytest
-from pathlib import Path
 
 
 class _TestBuilder(BaseBuilder):
@@ -147,6 +146,7 @@ def test_generated_names_preserve_loop_control_iterator(tmp_path):
 
 def test_generated_names_preserve_source_spans():
     """Metadata names remain filenames/function names, not user argument values."""
+    from pathlib import Path
 
     class SpanBuilder(_TestBuilder):
         def __init__(self):
