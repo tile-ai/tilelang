@@ -48,9 +48,13 @@ def test_cutedsl_grid_sync_multidimensional_threads(threads):
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(7, 0)
-def test_cutedsl_grid_sync_concurrent_launches():
+@pytest.mark.parametrize("launcher", ["cpp", "cutlass"])
+def test_cutedsl_grid_sync_concurrent_launches(launcher, monkeypatch):
     """Each launch synchronizes only its own grid, also when another launch of
     the same kernel runs concurrently on another stream (#3386)."""
+    monkeypatch.setenv("TILELANG_CUTEDSL_HOST_LAUNCHER", launcher)
+    if launcher == "cutlass":
+        monkeypatch.setenv("TILELANG_CUTEDSL_REQUIRE_CUTLASS_HOST", "1")
 
     @T.prim_func
     def kernel(A: T.Tensor((2,), "int32"), B: T.Tensor((2,), "int32"), delay: T.int64):
