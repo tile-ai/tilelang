@@ -46,6 +46,18 @@ def test_nvrtc_is_integral(standard):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize("line_info", [True, False])
+def test_nvrtc_line_info(line_info):
+    pytest.importorskip("cuda.bindings.nvrtc")
+    from tilelang.contrib.nvrtc import compile_cuda
+    from tilelang.env import TILELANG_TEMPLATE_PATH
+
+    source = 'extern "C" __global__ void main_kernel(float* x) { x[threadIdx.x] += 1.0f; }'
+    cubin = compile_cuda(source, "cubin", arch=80, options=[f"-I{TILELANG_TEMPLATE_PATH}"], line_info=line_info)
+    assert (b".debug_line" in bytes(cubin)) == line_info
+
+
+@tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 @pytest.mark.parametrize("dtype", ["int16", "int32", "uint32", "float32"])
 @pytest.mark.parametrize("op", ["sum", "max", "min"])
