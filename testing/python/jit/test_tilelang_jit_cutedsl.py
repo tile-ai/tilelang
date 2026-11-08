@@ -433,7 +433,7 @@ def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
     def unsigned_reads(
         A: T.Tensor((N,), dtype),
         S: T.Tensor((N,), signed),
-        C: T.Tensor((7, N), "int64"),
+        C: T.Tensor((8, N), "int64"),
         F: T.Tensor((N,), "float32"),
     ):
         with T.Kernel(1, threads=threads):
@@ -450,13 +450,14 @@ def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
                 C[4, i] = T.cast(T.max(src[i], T.cast(half + 1, dtype)), "int64")
                 C[5, i] = T.cast(T.min(src[i], T.cast(half + 1, dtype)), "int64")
                 C[6, i] = T.cast(T.reinterpret(S[i], dtype), "int64")
+                C[7, i] = T.cast(S[i], "int64")
                 F[i] = T.cast(src[i], "float32")
 
     kernel = tilelang.compile(unsigned_reads, target="cutedsl")
     i = torch.arange(N, dtype=torch.int64, device="cuda")
     a = (i * ((1 << bits) // N) + i % 7) % (1 << bits)
     s = torch.where(a > half, a - (1 << bits), a)
-    c = torch.empty(7, N, dtype=torch.int64, device="cuda")
+    c = torch.empty(8, N, dtype=torch.int64, device="cuda")
     f = torch.empty(N, dtype=torch.float32, device="cuda")
     kernel(a.to(T.dtype(dtype).as_torch()), s.to(T.dtype(signed).as_torch()), c, f)
 
@@ -467,6 +468,7 @@ def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
     assert torch.equal(c[4], a.clamp(min=half + 1))
     assert torch.equal(c[5], a.clamp(max=half + 1))
     assert torch.equal(c[6], a)
+    assert torch.equal(c[7], s)
     assert torch.equal(f, a.float())
 
 
