@@ -935,6 +935,8 @@ bool CodeGenTileLangMetal::TryPrintPackedHalfBinary(const PrimExpr &a,
     return false;
   }
 
+  // Wide FP16 vectors are stored as uint carriers. Apply arithmetic to each
+  // half2 payload rather than to the integer carrier.
   const int words = lanes / 2;
   const std::string lhs = PrintExpr(a);
   const std::string rhs = PrintExpr(b);
