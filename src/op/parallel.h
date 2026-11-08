@@ -292,9 +292,11 @@ private:
 /*!
  * \brief Restrict the non-idempotent shared/global writes in the body of a
  *        replicated parallel loop to the replica selected by `guard` (see
- *        ParallelOpNode::GetReplicaWriteGuard).
+ *        ParallelOpNode::GetReplicaWriteGuard). `bindings` maps the variables
+ *        bound in the enclosing function to their values.
  */
-Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard);
+Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard,
+                        const Map<Var, PrimExpr> &bindings);
 
 class ParallelOp : public TileOperator {
 public:

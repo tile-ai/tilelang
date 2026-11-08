@@ -140,6 +140,8 @@ struct LayoutInferenceResult {
   Map<For, PrimExpr> predicate_map;
   Map<For, Bool> padding_guard_map;
   Map<For, PrimExpr> replica_write_guard_map;
+  // Values of the variables bound by `Bind` statements.
+  Map<Var, PrimExpr> bindings;
 };
 
 /*! \brief Everything the inference engine knows about reducer dst-steering,
@@ -714,8 +716,12 @@ public:
       }
     }
 
-    return {layout_map, for_map, predicate_map, padding_guard_map,
-            replica_write_guard_map};
+    return {layout_map,
+            for_map,
+            predicate_map,
+            padding_guard_map,
+            replica_write_guard_map,
+            bind_var_to_expr_};
   }
 
   void Collect(const PrimFunc &f) {
@@ -1629,7 +1635,8 @@ private:
     if (result_.replica_write_guard_map.count(root)) {
       for_ptr->body = GuardReplicaWrites(
           for_ptr->body,
-          analyzer_->Simplify(result_.replica_write_guard_map[root]));
+          analyzer_->Simplify(result_.replica_write_guard_map[root]),
+          result_.bindings);
     }
 
     // Store the predicate as an annotation if it exists and is not trivially

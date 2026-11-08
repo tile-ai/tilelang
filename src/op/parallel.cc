@@ -10,6 +10,7 @@
 #include <tvm/runtime/logging.h>
 
 #include <algorithm>
+#include <map>
 #include <set>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
@@ -210,6 +211,17 @@ ParallelOpNode::ParallelOpNode(For root) : root_(root), V(this) {
     } else if (const auto *load = obj.as<BufferLoadNode>()) {
       if (IsSharedBuffer(load->buffer) || IsGlobalBuffer(load->buffer)) {
         has_cross_thread_access_ = true;
+      }
+    } else if (const auto *var = obj.as<VarNode>()) {
+      // A pointer (e.g. the data of `tvm_access_ptr` or a bound access
+      // pointer) into memory other than this thread's own.
+      if (var->dtype.is_handle()) {
+        const auto *ptr = var->type_annotation.as<PointerTypeNode>();
+        std::string scope = ptr ? std::string(ptr->storage_scope) : "";
+        if (scope != "local" && scope != "local.fragment" &&
+            scope != "local.var") {
+          has_cross_thread_access_ = true;
+        }
       }
     }
   });
@@ -825,8 +837,15 @@ namespace {
  */
 class ReplicaWriteGuarder : public StmtMutator {
 public:
-  static Stmt Rewrite(const Stmt &body, PrimExpr guard) {
+  static Stmt Rewrite(const Stmt &body, PrimExpr guard,
+                      const Map<Var, PrimExpr> &bindings) {
     ReplicaWriteGuarder guarder(std::move(guard));
+    // Pointers bound outside the loop may be written through inside it.
+    for (const auto &[var, value] : bindings) {
+      if (const VarNode *target = guarder.WriteTarget(value)) {
+        guarder.write_pointers_[var.get()] = target;
+      }
+    }
     guarder.Collect(body);
     return guarder(body);
   }
@@ -862,6 +881,12 @@ private:
     if (call->op.same_as(access_ptr()) && call->args.size() >= 3) {
       const auto *base = call->args[0].as<BufferLoadNode>();
       if (base && IsSharedOrGlobal(base->buffer) && MayWrite(call->args[2])) {
+        return base->buffer->data.get();
+      }
+    } else if (call->op.same_as(builtin::address_of()) &&
+               call->args.size() == 1) {
+      const auto *base = call->args[0].as<BufferLoadNode>();
+      if (base && IsSharedOrGlobal(base->buffer)) {
         return base->buffer->data.get();
       }
     } else if (call->op.same_as(builtin::tvm_access_ptr()) &&
@@ -901,16 +926,32 @@ private:
     return writes;
   }
 
+  // The segment `segment` shares its accesses with: a loop's last segment
+  // runs on, without a barrier, into the first one of its next iteration.
+  int Segment(int segment) const {
+    for (auto it = loop_segments_.find(segment); it != loop_segments_.end();
+         it = loop_segments_.find(segment)) {
+      segment = it->second;
+    }
+    return segment;
+  }
+
+  bool WrittenInSegment(const VarNode *data) const {
+    return written_between_barriers_.count({data, Segment(segment_)});
+  }
+
   // Whether `expr` reads a buffer written once between the same barriers, so
-  // its value may differ between replicas.
+  // its value may differ between replicas. Reads through a pointer count too.
   bool Diverges(const PrimExpr &expr) const {
     bool diverges = false;
     PostOrderVisit(expr, [&](const ObjectRef &obj) {
       if (const auto *load = obj.as<BufferLoadNode>()) {
-        diverges = diverges || written_between_barriers_.count(
-                                   {load->buffer->data.get(), segment_});
+        diverges = diverges || WrittenInSegment(load->buffer->data.get());
       } else if (const auto *var = obj.as<VarNode>()) {
-        diverges = diverges || divergent_vars_.count(var);
+        auto it = write_pointers_.find(var);
+        diverges =
+            diverges || divergent_vars_.count(var) ||
+            WrittenInSegment(it == write_pointers_.end() ? var : it->second);
       }
     });
     return diverges;
@@ -991,10 +1032,16 @@ private:
     void VisitStmt_(const IfThenElseNode *op) final { Conditional(op); }
     void VisitStmt_(const WhileNode *op) final { Conditional(op); }
     void VisitStmt_(const ForNode *op) final {
-      if (RunsBody(op)) {
-        StmtExprVisitor::VisitStmt_(op);
-      } else {
+      if (!RunsBody(op)) {
         Conditional(op);
+        return;
+      }
+      int first = g_->segment_;
+      StmtExprVisitor::VisitStmt_(op);
+      int last = g_->Segment(g_->segment_);
+      first = g_->Segment(first);
+      if (last != first && !is_one(op->extent)) {
+        g_->loop_segments_[last] = first;
       }
     }
     template <typename Node> void Conditional(const Node *op) {
@@ -1012,12 +1059,12 @@ private:
     for (const auto &[data, segment] : collector.stores) {
       if (collector.read.count(data)) {
         written_once_.insert(data);
-        written_between_barriers_.insert({data, segment});
+        written_between_barriers_.insert({data, Segment(segment)});
       }
     }
     for (const auto &[data, segment] : collector.pointer_writes) {
       written_once_.insert(data);
-      written_between_barriers_.insert({data, segment});
+      written_between_barriers_.insert({data, Segment(segment)});
     }
     segment_ = 0;
   }
@@ -1061,10 +1108,10 @@ private:
   }
 
   Stmt VisitStmt_(const BindNode *op) final {
+    CheckNoWrite(op->value, "a bound value");
     if (write_pointers_.count(op->var.get())) {
       return GetRef<Stmt>(op);
     }
-    CheckNoWrite(op->value, "a bound value");
     if (divergent_control_ || Diverges(op->value)) {
       divergent_vars_.insert(op->var.get());
     }
@@ -1120,6 +1167,9 @@ private:
   std::unordered_set<const VarNode *> written_once_;
   std::set<std::pair<const VarNode *, int>> written_between_barriers_;
   int segment_ = 0;
+  // The last segment of a loop body mapped to the segment its next iteration
+  // starts in.
+  std::map<int, int> loop_segments_;
   int conditional_ = 0;
   // Bound values that may differ between replicas.
   std::unordered_set<const VarNode *> divergent_vars_;
@@ -1128,8 +1178,9 @@ private:
 
 } // namespace
 
-Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard) {
-  return ReplicaWriteGuarder::Rewrite(body, guard);
+Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard,
+                        const Map<Var, PrimExpr> &bindings) {
+  return ReplicaWriteGuarder::Rewrite(body, guard, bindings);
 }
 
 Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
