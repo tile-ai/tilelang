@@ -415,5 +415,44 @@ def test_cutedsl_launch_follows_the_torch_stream():
     assert torch.equal(y, torch.full_like(y, 2.0))
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["uint32", "uint64"])
+def test_cutedsl_unsigned_atomics(dtype):
+    """Atomics on unsigned integers compare unsigned and return unsigned values.
+
+    See https://github.com/tile-ai/tilelang/issues/3874.
+    """
+    N = 256
+    bits = T.dtype(dtype).bits
+    top = 1 << (bits - 1)
+
+    @T.prim_func
+    def unsigned_atomics(A: T.Tensor((N,), dtype), Out: T.Tensor((3,), dtype), Prev: T.Tensor((N,), "int32")):
+        with T.Kernel(1, threads=N):
+            i = T.get_thread_binding()
+            T.atomic_max(Out[0], A[i])
+            T.atomic_min(Out[1], A[i])
+            Prev[i] = T.cast(T.atomic_add(Out[2], T.cast(0, dtype), return_prev=True) > T.cast(1, dtype), "int32")
+
+    def bit_pattern(values):
+        return torch.tensor([v - (1 << 64) if v >= 1 << 63 else v for v in values], dtype=torch.int64, device="cuda")
+
+    def as_unsigned(t):
+        return t.view(torch.uint64) if bits == 64 else t.to(torch.uint32)
+
+    def from_unsigned(t):
+        return t.view(torch.int64) if bits == 64 else t.to(torch.int64)
+
+    kernel = tilelang.compile(unsigned_atomics, target="cutedsl")
+    values = [(i << (bits - 8)) + 1 for i in range(N)]
+    a = as_unsigned(bit_pattern(values))
+    out = as_unsigned(bit_pattern([0, (1 << bits) - 1, top]))
+    prev = torch.empty(N, dtype=torch.int32, device="cuda")
+    kernel(a, out, prev)
+
+    torch.testing.assert_close(from_unsigned(out), bit_pattern([max(values), min(values), top]), rtol=0, atol=0)
+    assert torch.equal(prev, torch.ones_like(prev))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

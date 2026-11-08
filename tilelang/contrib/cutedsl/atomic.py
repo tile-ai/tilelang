@@ -36,6 +36,19 @@ def _atomic_ptr(ptr):
     return ptr.llvm_ptr if hasattr(ptr, "llvm_ptr") else ptr
 
 
+_INTEGER_ATOMIC_TYPES = (cutlass.Int32, cutlass.Int64, cutlass.Uint32, cutlass.Uint64)
+
+
+def _element_type(ptr, dtype):
+    """The element type an atomic on *ptr* operates on.
+
+    MLIR integers are signless, so a pointer to unsigned integers comes back
+    typed as signed; the codegen names the unsigned type explicitly, which makes
+    min/max compare unsigned and the returned value unsigned.
+    """
+    return ptr.dtype if dtype is None else dtype
+
+
 def _fence_sc_gpu(*, loc=None, ip=None) -> None:
     prims.inline_ptx("fence.sc.gpu;", loc=loc, ip=ip)
 
@@ -45,13 +58,14 @@ def _fence_sc_gpu(*, loc=None, ip=None) -> None:
 # =============================================================================
 
 
-def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
+def AtomicAdd(ptr: cute.Pointer, value: Numeric, dtype=None, *, loc=None, ip=None):
     """Perform atomic addition on a pointer.
 
-    Supports float16, float32, int32, and int64 types.
+    Supports float16, float32, and 32/64-bit signed and unsigned integer types.
     Returns the old value before addition (atomicrmw semantics).
     """
-    if ptr.dtype == cutlass.Float32:
+    dtype = _element_type(ptr, dtype)
+    if dtype == cutlass.Float32:
         ret = prims.atomicrmw(
             prims.AtomicOp.ADD,
             _atomic_ptr(ptr),
@@ -62,7 +76,7 @@ def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
             ip=ip,
         )
         return ptr.dtype(ret)
-    elif ptr.dtype == cutlass.Float16:
+    elif dtype == cutlass.Float16:
         # For float16, use inline PTX: atom.add.noftz.f16 (no .global qualifier)
         # LLVM inline_asm doesn't support f16 directly, so we bitcast to i16
         # The PTX syntax is: atom.add.noftz.f16 result, [ptr], value
@@ -83,27 +97,27 @@ def AtomicAdd(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
         # Bitcast i16 -> f16 for return
         result = llvm.bitcast(T.f16(), res_i16, loc=loc, ip=ip)
         return cutlass.Float16(result)
-    elif ptr.dtype == cutlass.Int32 or ptr.dtype == cutlass.Int64:
+    elif dtype in _INTEGER_ATOMIC_TYPES:
         ret = prims.atomicrmw(
             prims.AtomicOp.ADD,
             _atomic_ptr(ptr),
-            ptr.dtype(value),
+            dtype(value),
             mem_order=prims.MemOrder.RELAXED,
             syncscope=prims.MemScope.GPU,
             loc=loc,
             ip=ip,
         )
-        return ptr.dtype(ret)
+        return dtype(ret)
     else:
-        raise ValueError(f"Unsupported dtype for AtomicAdd: {ptr.dtype}")
+        raise ValueError(f"Unsupported dtype for AtomicAdd: {dtype}")
 
 
-def AtomicAddRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
+def AtomicAddRet(ptr: cute.Pointer, value: Numeric, dtype=None, *, loc=None, ip=None):
     """Perform atomic addition and return the previous value.
 
     This is the same as AtomicAdd since prims.atomicrmw always returns old value.
     """
-    return AtomicAdd(ptr, value, loc=loc, ip=ip)
+    return AtomicAdd(ptr, value, dtype, loc=loc, ip=ip)
 
 
 # =============================================================================
@@ -363,24 +377,25 @@ def AtomicAddx4Ret(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
 # =============================================================================
 
 
-def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
+def AtomicMax(ptr: cute.Pointer, value: Numeric, dtype=None, *, loc=None, ip=None):
     """Perform atomic maximum operation.
 
     For integers, uses prims.atomicrmw with MAX.
     For floats, uses CAS loop since PTX doesn't have atomic max for float32.
     """
-    if ptr.dtype == cutlass.Int32:
+    dtype = _element_type(ptr, dtype)
+    if dtype in _INTEGER_ATOMIC_TYPES:
         ret = prims.atomicrmw(
             prims.AtomicOp.MAX,
             _atomic_ptr(ptr),
-            ptr.dtype(value),
+            dtype(value),
             mem_order=prims.MemOrder.RELAXED,
             syncscope=prims.MemScope.GPU,
             loc=loc,
             ip=ip,
         )
-        return ptr.dtype(ret)
-    elif ptr.dtype == cutlass.Float32:
+        return dtype(ret)
+    elif dtype == cutlass.Float32:
         # For float32, use atomicCAS loop via inline PTX
         # This implements: atomicMax for float using compare-and-swap
         # PTX doesn't have atom.max.f32, so we use atom.cas loop
@@ -419,24 +434,13 @@ def AtomicMax(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
             ip=ip,
         )
         return cutlass.Float32(result)
-    elif ptr.dtype == cutlass.Int64:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.MAX,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
-            loc=loc,
-            ip=ip,
-        )
-        return ptr.dtype(ret)
     else:
-        raise ValueError(f"Unsupported dtype for AtomicMax: {ptr.dtype}")
+        raise ValueError(f"Unsupported dtype for AtomicMax: {dtype}")
 
 
-def AtomicMaxRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
+def AtomicMaxRet(ptr: cute.Pointer, value: Numeric, dtype=None, *, loc=None, ip=None):
     """Perform atomic maximum and return the previous value."""
-    return AtomicMax(ptr, value, loc=loc, ip=ip)
+    return AtomicMax(ptr, value, dtype, loc=loc, ip=ip)
 
 
 # =============================================================================
@@ -444,24 +448,25 @@ def AtomicMaxRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
 # =============================================================================
 
 
-def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
+def AtomicMin(ptr: cute.Pointer, value: Numeric, dtype=None, *, loc=None, ip=None):
     """Perform atomic minimum operation.
 
     For integers, uses prims.atomicrmw with MIN.
     For floats, uses CAS loop since PTX doesn't have atomic min for float32.
     """
-    if ptr.dtype == cutlass.Int32:
+    dtype = _element_type(ptr, dtype)
+    if dtype in _INTEGER_ATOMIC_TYPES:
         ret = prims.atomicrmw(
             prims.AtomicOp.MIN,
             _atomic_ptr(ptr),
-            ptr.dtype(value),
+            dtype(value),
             mem_order=prims.MemOrder.RELAXED,
             syncscope=prims.MemScope.GPU,
             loc=loc,
             ip=ip,
         )
-        return ptr.dtype(ret)
-    elif ptr.dtype == cutlass.Float32:
+        return dtype(ret)
+    elif dtype == cutlass.Float32:
         # For float32, use atomicCAS loop via inline PTX
         # PTX doesn't have atom.min.f32, so we use atom.cas loop
         # NOTE: The retry comparison uses integer (b32) domain instead of
@@ -495,24 +500,13 @@ def AtomicMin(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
             ip=ip,
         )
         return cutlass.Float32(result)
-    elif ptr.dtype == cutlass.Int64:
-        ret = prims.atomicrmw(
-            prims.AtomicOp.MIN,
-            _atomic_ptr(ptr),
-            ptr.dtype(value),
-            mem_order=prims.MemOrder.RELAXED,
-            syncscope=prims.MemScope.GPU,
-            loc=loc,
-            ip=ip,
-        )
-        return ptr.dtype(ret)
     else:
-        raise ValueError(f"Unsupported dtype for AtomicMin: {ptr.dtype}")
+        raise ValueError(f"Unsupported dtype for AtomicMin: {dtype}")
 
 
-def AtomicMinRet(ptr: cute.Pointer, value: Numeric, *, loc=None, ip=None):
+def AtomicMinRet(ptr: cute.Pointer, value: Numeric, dtype=None, *, loc=None, ip=None):
     """Perform atomic minimum and return the previous value."""
-    return AtomicMin(ptr, value, loc=loc, ip=ip)
+    return AtomicMin(ptr, value, dtype, loc=loc, ip=ip)
 
 
 # =============================================================================
