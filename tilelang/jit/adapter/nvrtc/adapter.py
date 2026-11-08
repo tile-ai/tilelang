@@ -292,7 +292,8 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         first_tensor = next((value for value in param_values if isinstance(value, torch.Tensor)), None)
         device = first_tensor.device if first_tensor is not None else None
         # A caller-supplied stream runs the kernel on the device that owns it,
-        # so the outputs live there too.
+        # so the outputs live there too. A default-stream handle belongs to no
+        # device in particular and runs with the inputs.
         stream_index = stream_device_index(stream) if stream is not None else None
         if stream_index is not None:
             device = torch.device("cuda", stream_index)
@@ -336,8 +337,10 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 stream = torch.cuda.current_stream(launch_device).cuda_stream
             else:
                 stream = 0
-        elif stream_index is not None:
-            launch_device = device
+        else:
+            # The default stream runs with the inputs; a host tensor says
+            # nothing about the device, so it keeps the current one.
+            launch_device = device if device is not None and device.type == "cuda" else None
 
         # The launcher works on the current device, so make the stream's device
         # current: the inputs' device for a stream picked here, the owning

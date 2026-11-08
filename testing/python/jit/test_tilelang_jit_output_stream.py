@@ -30,16 +30,23 @@ def copy_kernel(n):
 
 
 def fill_kernel(n):
+    # 64 KB of shared memory, over the 48 KB a launch gets without opting in on
+    # its device.
+    smem = 16384
+
     @T.prim_func
     def main(value: T.float32, B: T.Tensor((n,), "float32")):
         with T.Kernel(T.ceildiv(n, 256), threads=256) as bx:
+            S = T.alloc_shared((smem,), "float32")
+            for i in T.Parallel(smem):
+                S[i] = value
             for i in T.Parallel(256):
-                B[bx * 256 + i] = value
+                B[bx * 256 + i] = S[i * (smem // 256)]
 
     return main
 
 
-def _compile(backend, program=None):
+def _compile(backend, program=None, in_place=False):
     if backend == "nvrtc":
         from tilelang.jit.adapter.nvrtc import is_nvrtc_available
 
@@ -54,7 +61,8 @@ def _compile(backend, program=None):
             pytest.skip(f"CuTeDSL is not available: {err}")
     target = "cutedsl" if backend == "cutedsl" else "cuda"
     program = copy_kernel(N) if program is None else program
-    return tilelang.compile(program, out_idx=[len(program.params) - 1], target=target, execution_backend=backend)
+    out_idx = None if in_place else [len(program.params) - 1]
+    return tilelang.compile(program, out_idx=out_idx, target=target, execution_backend=backend)
 
 
 BACKENDS = ["cython", "nvrtc", "cutedsl"]
@@ -157,10 +165,41 @@ def test_launch_on_the_explicit_streams_device(backend):
     assert out.device == a.device
     torch.testing.assert_close(out, a, rtol=0, atol=0)
 
-    # With no tensor input to infer the device from, the output follows the stream.
-    fill = _compile(backend, fill_kernel(N))
+    # A default-stream handle runs with the inputs, not on the current device.
+    a = torch.randn(N, device="cuda:1")
     with torch.cuda.device(0):
-        out = fill(1.0, stream=side.cuda_stream)
+        out = kernel(a, stream=0)
+    torch.cuda.synchronize("cuda:1")
+    assert out.device == a.device
+    torch.testing.assert_close(out, a, rtol=0, atol=0)
+
+    # An in-place call with a default-stream handle runs with the inputs too.
+    in_place = _compile(backend, in_place=True)
+    a = torch.randn(N, device="cuda:1")
+    b = torch.empty(N, device="cuda:1")
+    with torch.cuda.device(0):
+        in_place(a, b, stream=0)
+    torch.cuda.synchronize("cuda:1")
+    torch.testing.assert_close(b, a, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_launch_without_inputs_on_the_explicit_streams_device(backend):
+    """Without a tensor input to infer the device from, the output and the shared-memory
+    opt-in follow the stream (#3408). Skipped where the devices cannot opt in to
+    64 KB of dynamic shared memory."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    from tilelang.utils.device import get_max_dynamic_shared_memory
+
+    if min(get_max_dynamic_shared_memory(0), get_max_dynamic_shared_memory(1)) < 64 << 10:
+        pytest.skip("requires 64 KB of dynamic shared memory on both devices")
+
+    kernel = _compile(backend, fill_kernel(N))
+    side = torch.cuda.Stream(device="cuda:1")
+    with torch.cuda.device(0):
+        out = kernel(1.0, stream=side.cuda_stream)
     side.synchronize()
     assert out.device == torch.device("cuda:1")
     torch.testing.assert_close(out, torch.ones_like(out), rtol=0, atol=0)
