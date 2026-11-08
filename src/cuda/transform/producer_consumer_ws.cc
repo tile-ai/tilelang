@@ -32,6 +32,7 @@
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
+#include <unordered_set>
 #include <utility>
 
 #include "backend/common/target_utils.h"
@@ -2122,10 +2123,36 @@ private:
       return attr;
     }
 
-    // `if (cond) { <WS branch> }` with a side-effect-free `cond` that does not
-    // depend on the thread index. Every thread evaluates `cond` once, to the
-    // same value, whether it is tested around the WS branch or at the start of
-    // the partition it runs, so the `if` can be moved into both partitions.
+    // Buffers `stmt` may write: stored to, or passed by pointer.
+    static std::unordered_set<const VarNode *>
+    PossiblyWrittenBuffers(const Stmt &stmt) {
+      std::unordered_set<const VarNode *> written;
+      PostOrderVisit(stmt, [&](const ObjectRef &obj) {
+        if (const auto *store = obj.as<BufferStoreNode>()) {
+          written.insert(store->buffer->data.get());
+        } else if (const auto *call = obj.as<CallNode>()) {
+          if (call->op.same_as(builtin::tvm_access_ptr()) &&
+              call->args.size() > 1) {
+            if (const auto *data = call->args[1].as<VarNode>()) {
+              written.insert(data);
+            }
+          } else if ((call->op.same_as(tl::access_ptr()) ||
+                      call->op.same_as(builtin::address_of())) &&
+                     !call->args.empty()) {
+            if (const auto *base = call->args[0].as<BufferLoadNode>()) {
+              written.insert(base->buffer->data.get());
+            }
+          }
+        }
+      });
+      return written;
+    }
+
+    // `if (cond) { <WS branch> }` with a side-effect-free `cond` that neither
+    // depends on the thread index nor reads memory the branch writes. Every
+    // thread evaluates `cond` once, to the same value, whether it is tested
+    // around the WS branch or at the start of the partition it runs, so the
+    // `if` can be moved into both partitions.
     bool IsWSBranchUnderIf(const Stmt &stmt, PrimExpr *cond, Stmt *container,
                            IfThenElse *branch) const {
       const auto *if_node = stmt.as<IfThenElseNode>();
@@ -2137,6 +2164,18 @@ private:
         return false;
       }
       if (!IsWSBranch(if_node->then_case, container, branch)) {
+        return false;
+      }
+      std::unordered_set<const VarNode *> written =
+          PossiblyWrittenBuffers(if_node->then_case);
+      bool reads_written = false;
+      PostOrderVisit(if_node->condition, [&](const ObjectRef &obj) {
+        if (const auto *load = obj.as<BufferLoadNode>()) {
+          reads_written =
+              reads_written || written.count(load->buffer->data.get());
+        }
+      });
+      if (reads_written) {
         return false;
       }
       *cond = if_node->condition;
