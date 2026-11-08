@@ -2122,15 +2122,18 @@ private:
       return attr;
     }
 
-    // `if (cond) { <WS branch> }` with a side-effect-free `cond`. Every thread
-    // evaluates `cond` once whether it is tested around the WS branch or at
-    // the start of the partition it runs, so the `if` can be moved into both
-    // partitions.
+    // `if (cond) { <WS branch> }` with a side-effect-free `cond` that does not
+    // depend on the thread index. Every thread evaluates `cond` once, to the
+    // same value, whether it is tested around the WS branch or at the start of
+    // the partition it runs, so the `if` can be moved into both partitions.
     bool IsWSBranchUnderIf(const Stmt &stmt, PrimExpr *cond, Stmt *container,
                            IfThenElse *branch) const {
       const auto *if_node = stmt.as<IfThenElseNode>();
       if (!if_node || if_node->else_case.defined() ||
-          SideEffect(if_node->condition) > CallEffectKind::kReadState) {
+          SideEffect(if_node->condition) > CallEffectKind::kReadState ||
+          UsesVar(if_node->condition, [this](const VarNode *var) {
+            return var == thread_var_.get();
+          })) {
         return false;
       }
       if (!IsWSBranch(if_node->then_case, container, branch)) {
