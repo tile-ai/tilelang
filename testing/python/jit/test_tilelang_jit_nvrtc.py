@@ -296,7 +296,7 @@ def test_nvrtc_kernel_with_a_single_argument():
     kernel = tilelang.compile(fill, out_idx=[0], execution_backend="nvrtc")
     out = kernel()
     torch.cuda.synchronize()
-    torch.testing.assert_close(out, torch.ones(1024, device="cuda"), rtol=0, atol=0)
+    torch.testing.assert_close(out, torch.ones(1024, dtype=torch.float32, device="cuda"), rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
