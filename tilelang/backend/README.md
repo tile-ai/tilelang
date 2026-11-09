@@ -202,7 +202,9 @@ field of the current `BackendModule` manifest.
 
 Target-independent options live in `tilelang.transform.PassConfigKey`. A
 backend owns its remaining options in `tilelang/<backend>/pass_config.py` and
-re-exports the enum from the backend package:
+re-exports the enum from the backend package. The CUDA enum mirrors the
+CUDA-specific keys registered in `src/cuda/op/builtin.cc` plus the Python-level
+CUDA compiler options:
 
 ```python
 from tilelang import PassConfigKey

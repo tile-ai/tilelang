@@ -87,12 +87,14 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_PRELOWER_SEMANTIC_CHECK = "tl.disable_prelower_semantic_check"
     """Disable Python-side pre-lower semantic checks. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
     """Enable Ascend auto scheduling. Default: True."""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_AUTO_WARP_SPECIALIZATION = "tl.enable_auto_warp_specialization"
     """Name of the automatic warp-specialization scheduler to run (e.g.
     "role_based"). Default: unset (disabled)."""
@@ -185,6 +187,7 @@ class PassConfigKey(str, Enum):
     numerically), as a field escape hatch if a narrow plan ever miscompiles,
     and for plan-choice A/B measurement. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 
@@ -194,6 +197,7 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
 
@@ -229,11 +233,13 @@ class PassConfigKey(str, Enum):
     Default: True
     """
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
     """Enable non-predicated LDG/STG lowering for global memory access.
     When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.
     Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_LOWER_LDGSTG_PREDICATED = "tl.enable_lower_ldgstg_predicated"
     """Enable predicated LDG/STG lowering.
     When True, predicated loads (if_then_else with else=0) and
