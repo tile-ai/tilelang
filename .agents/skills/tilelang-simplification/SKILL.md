@@ -42,7 +42,7 @@ Load the relevant domain skill before judging a candidate in that area:
   [`../tilelang-semantic/SKILL.md`](../tilelang-semantic/SKILL.md);
 - C++ TIR/ObjectRef ownership:
   [`../tilelang-tvm-ir/SKILL.md`](../tilelang-tvm-ir/SKILL.md);
-- broad C++ cleanup: [`../tilelang-cpp-style/SKILL.md`](../tilelang-cpp-style/SKILL.md);
+- broad C++ cleanup: [`../tilelang-dev-guide/SKILL.md`](../tilelang-dev-guide/SKILL.md);
 - builds and tests: [`../tilelang-build/SKILL.md`](../tilelang-build/SKILL.md).
 
 Do not load every domain skill for a narrow audit.

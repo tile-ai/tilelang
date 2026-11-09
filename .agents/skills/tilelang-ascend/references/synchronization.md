@@ -5,6 +5,7 @@ Contents: [scheduling modes](#choose-the-scheduling-mode),
 [conditional epochs](#conditional-execution-and-epochs),
 [manual multibuffering](#manual-multibuffering-limited-support),
 [control flow](#control-flow-and-stage-shifting),
+[independent AIV execution](#independent-aiv-execution),
 [conflict hints](#dependency-analysis-and-conflict-hints),
 [storage protocol](#trace-the-complete-storage-protocol).
 
@@ -254,6 +255,41 @@ checks nested-loop exits across core splitting. Preserve
 buffer clocks. A one-trip loop can still be an owner or synchronization boundary;
 do not remove it solely because its extent is one.
 
+### Independent AIV execution
+
+With automatic scheduling or `T.Stage`, `T.MixedKernel(..., sids=2)` supports
+different AIV roles and loop bounds, including alternating roles through
+`sid == i % 2`. Keep common Cube work outside `sid` guards. UB and
+sub-core-dependent scalar state are local to each AIV; L1, L0, and GM storage
+remain common. A selected AIV may own a full output tile, so do not halve its
+UB allocation merely because the launch has two AIVs.
+
+L0C→UB copies execute on AIC/Fixpipe. Implicit `T.copy` routing targets the
+participating AIVs; `sub_blockid` further restricts the destination. Keep it
+consistent with the enclosing guard: `sid == 0` with `sub_blockid=1` can
+eliminate the copy without a dedicated diagnostic. Hardware `T.dual_copy`
+requires control flow uniform across sub-cores; use guarded `T.copy` for
+independently selected destinations.
+
+Put differently routed Fixpipe copies in separate `T.Task` scopes. Also
+separate external side effects, such as L0C→GM stores or atomic accumulation,
+from implicit or task-local routing that could repeat them during projection.
+For routed `T.PerCoreTask` candidates, dispatch must use immutable values
+available before the group. Explicit synchronization that could be replayed
+with Fixpipe routing is rejected; move it outside the group or give each
+candidate an explicit `sub_blockid` computed before the group.
+
+Direct AIV0↔AIV1 synchronization is unsupported. Conflicting GM/L1 accesses
+must be ordered by real AIC data dependencies; an unrelated Cube operation,
+alternating guards, or `T.Stage` order alone does not establish that ordering.
+Dependencies still requiring direct AIV synchronization are rejected.
+
+Independent loop exits must also reach Cube consumers of the corresponding
+sub-core's values, including uses after the loop. Ambiguous exits controlling
+common Cube work or Cube work from both sub-cores are rejected; use a common
+exit condition or separate loops. Complete examples are in
+`testing/ascend/auto_schedule/test_schedule_integration.py`.
+
 ## Dependency analysis and conflict hints
 
 Dependency analysis uses read/write regions with enclosing loop, guard, assume,
@@ -357,6 +393,11 @@ For kernels using UnitFlag synchronization between GEMM and output transfers,
 check the target SDK's pairing and reset requirements. Preserve the matching
 buffer slots, accessed regions, and guards when changing tile sizes or tails.
 Check zero-size operation behavior for each instruction involved.
+
+Sub-core projection preserves explicit `unit_flag_ctrl` without validating
+UnitFlag pairing or reset lifecycles. The caller is responsible for the protocol
+across GEMM and copies, including projected copies. To use automatic
+synchronization instead, omit the control on both GEMM and its drains.
 
 Validate tail handling across repeated launches and buffer reuse. Check that
 the declared access regions cover the generated instructions' physical

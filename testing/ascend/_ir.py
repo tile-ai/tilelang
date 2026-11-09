@@ -58,21 +58,21 @@ def calls(ir, name):
     return [node for node in nodes(ir, tirx.Call) if isinstance(node.op, tvm.ir.Op) and node.op.name == name]
 
 
-def schedule_snapshots(program, pass_names, *, auto_schedule=True):
+def schedule_snapshots(program, pass_names, *, auto_schedule=True, infer_layouts=False):
     """Run the scheduling prerequisites and stop at the last requested boundary.
 
     This helper accepts frontend programs, including explicit unrolls and dual
-    copies. It does not run layout inference: tests needing physical layouts
-    must prepare those themselves, or belong in the lowering integration suite.
+    copies. Tests needing physical layouts can opt into layout inference or
+    supply an input whose layouts are already canonical.
     """
     pipeline = (
         ascend.NormalizeControlFlowForSchedule,
         ascend.NormalizeConflictHints,
         ascend.MaterializeScheduleUnits,
+        ascend.AssignCore,
         ascend.AnnotateMultiBufferEligible,
         ascend.EstimateLatency,
         ascend.AutoSchedule,
-        ascend.AssignCore,
         ascend.PrepareMultiBuffer,
         ascend.ResolveCore,
         ascend.InsertSync,
@@ -116,6 +116,9 @@ def schedule_snapshots(program, pass_names, *, auto_schedule=True):
         mod = ascend.RewriteDualCopy()(mod)
         mod = ascend.UnrollLoopSkipVF()(mod)
         mod = tilelang.transform.Simplify()(mod)
+        if infer_layouts:
+            mod = ascend.AscendLayoutInference()(mod)
+            mod = ascend.NormalizeAscendFractalStorage()(mod)
         for factory in pipeline:
             if not auto_schedule and factory == ascend.AutoSchedule:
                 mod = use_source_order(mod)
@@ -128,9 +131,9 @@ def schedule_snapshots(program, pass_names, *, auto_schedule=True):
                     return snapshots
 
 
-def schedule(program, through="InsertSync", *, auto_schedule=True):
+def schedule(program, through="InsertSync", *, auto_schedule=True, infer_layouts=False):
     name = "tl." + through
-    return schedule_snapshots(program, {name}, auto_schedule=auto_schedule)[name]
+    return schedule_snapshots(program, {name}, auto_schedule=auto_schedule, infer_layouts=infer_layouts)[name]
 
 
 def statements(ir, ancestors=()):

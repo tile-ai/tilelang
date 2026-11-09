@@ -2,6 +2,7 @@
 
 import pytest
 import tilelang.ascend.transform as ascend_transform
+import tilelang.ascend.transform.z3_scheduler as z3_scheduler
 import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
@@ -100,6 +101,64 @@ def test_auto_schedule_preserves_explicit_stage_dependencies():
     assert _direct_schedule_unit_stages(loop_unit.body.body) == [0, 1]
 
 
+@pytest.mark.parametrize("block", [4, 8, 16])
+@pytest.mark.parametrize("overlap", [False, True], ids=["disjoint-tiles", "overlapping-tiles"])
+def test_dynamic_tail_regions_preserve_only_required_recurrences(monkeypatch, block, overlap):
+    batch, length, core, iteration = [tirx.Var(name, "int32") for name in ("batch", "length", "core", "iteration")]
+    gm = tirx.decl_buffer((batch, length, 64), "float32", name="gm")
+    ub = tirx.decl_buffer((block, 64), "float32", name="ub", scope="shared.dyn")
+    # The group_size=1 persistent traversal used by in-place tiled kernels.
+    # Both the batch and sequence dimensions remain dynamic during analysis.
+    linear = iteration * 64 + core
+    batch_index = tirx.truncmod(linear, batch)
+    tile_index = tirx.truncdiv(linear, batch)
+    start = 0 if overlap else tile_index * block
+    rows = tirx.min(block, length - start)
+    guard = tile_index < tirx.ceildiv(length, block)
+    body = seq(
+        unit(
+            copy(gm, ub, src_indices=[batch_index, start, 0], src_shape=[1, rows, 64], dst_shape=[rows, 64]),
+            core=0,
+            stage=-1,
+            guard=guard,
+            cost=(1, 1),
+        ),
+        unit(
+            copy(ub, gm, src_shape=[rows, 64], dst_indices=[batch_index, start, 0], dst_shape=[1, rows, 64]),
+            core=0,
+            stage=-1,
+            guard=guard,
+            cost=(1, 1),
+        ),
+    )
+    loop = tirx.For(
+        iteration,
+        0,
+        tirx.ceildiv(tirx.ceildiv(length, block) * batch, 64),
+        tirx.ForKind.SERIAL,
+        body,
+        annotations={"num_stages": 3, "multi_buffer_eligible": [ub.data]},
+    )
+    guarded_loop = tirx.AttrStmt(tirx.all(batch > 0, length > 0, core >= 0, core < 64), "tl.assume", "valid dimensions and core", loop)
+    before = kernel(unit(guarded_loop, core=None, stage=-1), buffers=[ub], params=[gm, core])
+    dependencies = []
+    solve = z3_scheduler.z3_schedule_loop_python
+
+    def capture(*args, **kwargs):
+        dependencies.extend(args[4])  # (producer, consumer, distance, latency)
+        return solve(*args, **kwargs)
+
+    monkeypatch.setattr(z3_scheduler, "z3_schedule_loop_python", capture)
+    ascend_transform.AutoSchedule()(before)
+    edges = {(src, dst, distance) for src, dst, distance, _ in dependencies}
+    # Keep the load-to-store dependency and the versioned UB reuse edge.
+    assert (0, 1, 0) in edges
+    assert any(src == 1 and dst == 0 and distance < 0 for src, dst, distance in edges)
+    # Disjoint GM tiles must not serialize a store against the next load/store.
+    assert ((1, 0, 1) in edges) == overlap
+    assert ((1, 1, 1) in edges) == overlap
+
+
 @pytest.mark.parametrize(
     "case, message",
     [
@@ -149,6 +208,40 @@ def test_single_version_sibling_owners_preserve_dependency_kind(eligible, second
     assert (ub.data in versions) == eligible
     if eligible:
         assert int(versions[ub.data]) == 1
+
+
+@pytest.mark.parametrize(
+    "fixed,size", [(False, 96), (True, 96), (False, 100)], ids=["inferred-fits", "fixed-fits", "inferred-exceeds-pool"]
+)
+def test_ss_versions_share_capacity_across_aivs(fixed, size):
+    buffers = [tirx.decl_buffer((size,), "uint64", name=f"ss{sid}", scope="shared.ss") for sid in range(2)]
+    out = tirx.decl_buffer((4, 2), "uint64", name="out")
+    i = tirx.Var("i", "int32")
+    tasks = []
+    for sid, (buffer, core) in enumerate(zip(buffers, (1, 4))):
+        tasks.append(unit(tirx.BufferStore(buffer, tirx.Cast("uint64", i), [0]), core=core, cost=(1, 1)))
+        tasks.append(unit(tirx.BufferStore(out, buffer[0], [i, sid]), core=2, stage=2, cost=(1, 1)))
+    loop = tirx.For(
+        i,
+        0,
+        4,
+        tirx.ForKind.SERIAL,
+        seq(*tasks),
+        annotations={"num_stages": 3, "enable_offset": True, "multi_buffer_eligible": [buffer.data for buffer in buffers]},
+    )
+    annotations = {"tl.split_subcores": True}
+    if fixed:
+        annotations["tl.buffer_versions_map"] = {buffer.data: 2 for buffer in buffers}
+    before = kernel(unit(loop, core=None), buffers=buffers, params=[out], annotations=annotations)
+    if size == 100:
+        with pytest.raises(RuntimeError, match="shared.ss|Manual schedule constraints are infeasible"):
+            ascend_transform.AutoSchedule()(before)
+        return
+    after = ascend_transform.AutoSchedule()(before)
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    versions = root.annotations["tl.buffer_versions_map"]
+    # Both AIVs consume the same 3 KiB pool. Two versions of each fit exactly.
+    assert all(int(versions[buffer.data]) == 2 for buffer in buffers)
 
 
 def test_sf_hazard_uses_the_data_ring_variable_in_the_solver():

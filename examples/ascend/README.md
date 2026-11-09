@@ -24,6 +24,9 @@ auxiliary outputs such as FP8 scales and RMSNorm RSTD.
 GEMM throughput uses `2 * M * N * K` operations, including for Split-K.
 Use `--no-bench` on a top-level example to run only correctness checks.
 
+Examples use the configured default target. Set `TILELANG_DEFAULT_TARGET=ascend`
+to select AscendC or `TILELANG_DEFAULT_TARGET=pto` to select PTO.
+
 GEMM runs FP8, BF16, FP32, HF32, BF16 output and both accumulation cases.
 It uses `M = K = N = 8192`.
 Vector addition and FP8 quantization run both SIMT and SIMD by default;

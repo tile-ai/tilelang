@@ -43,7 +43,7 @@ struct TaskCost {
 };
 
 // Metadata carried by T.Task between MaterializeScheduleUnits,
-// EstimateLatency, AutoSchedule, AssignCore, PrepareMultiBuffer, ResolveCore,
+// AssignCore, EstimateLatency, AutoSchedule, PrepareMultiBuffer, ResolveCore,
 // InsertSync, MaterializeMultiBuffer, and LowerScheduledTIR. The frontend
 // helper controls which fields users may provide; backend consumers share this
 // representation for user hints and compiler-produced fields.
@@ -77,6 +77,19 @@ RequireConstantTaskMetadataInt(const ffi::Any &value_any,
 
 } // namespace task_metadata_detail
 
+inline std::optional<int> GetTaskSubcore(const Stmt &stmt) {
+  const auto *marker = stmt.as<AttrStmtNode>();
+  if (!marker)
+    return std::nullopt;
+  auto metadata = task_metadata_detail::CopyTaskMetadata(marker->node);
+  if (auto value = metadata.Get("subcore")) {
+    int sid = static_cast<int>(value.value().cast<Integer>()->value);
+    ICHECK(sid == 0 || sid == 1);
+    return sid;
+  }
+  return std::nullopt;
+}
+
 // Parse recognized task metadata from the structured node payload. Legacy
 // scalar payloads carry no metadata.
 inline TaskMetadata ParseTaskMetadata(const ffi::Any &node) {
@@ -99,7 +112,7 @@ inline TaskMetadata ParseTaskMetadata(const ffi::Any &node) {
     } else {
       ICHECK_GT(value->value, 0)
           << "T.Task core_mask must select at least one Ascend core";
-      ICHECK_LE(value->value, static_cast<int64_t>(kCoreBroadcast))
+      ICHECK_LE(value->value, static_cast<int64_t>(kCoreAll))
           << "T.Task core_mask exceeds the supported AIV/AIC mask";
       CoreMask core_mask = static_cast<CoreMask>(value->value);
       ICHECK(IsValidCoreMask(core_mask))

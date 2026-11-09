@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from tvm.target import Target
 
-from tilelang.backend.target import TargetLike, register_target_detector, register_target_normalizer
+from tilelang.backend.target import (
+    TargetLike,
+    register_target_detector,
+    register_target_execution_normalizer,
+    register_target_normalizer,
+)
 
 
 def _target_ffi_api():
@@ -17,12 +22,16 @@ def _make_ascend_target(target_dict: dict | None = None) -> Target:
     return Target(target_dict)
 
 
-def _make_pto_target() -> Target:
-    target_dict = {"kind": "ascend"}
+def _with_pto_key(target: Target) -> Target:
+    target_dict = dict(target.export())
     # The native kind supplies Ascend semantics; "pto" selects PTO codegen,
     # while "ascend" preserves the target kind's default feature key.
-    target_dict["keys"] = ["pto", "ascend"]
+    target_dict["keys"] = list(dict.fromkeys(["pto", *target_dict.get("keys", ()), "ascend"]))
     return Target(target_dict)
+
+
+def _make_pto_target() -> Target:
+    return _with_pto_key(_make_ascend_target())
 
 
 def target_is_ascend(target: Target) -> bool:
@@ -75,6 +84,18 @@ def normalize_pto_target(target: TargetLike) -> Target | None:
         return None
 
 
+def normalize_pto_execution_target(target: Target, execution_backend: str | None) -> Target | None:
+    """Select the PTO target variant for an explicit PTO execution backend."""
+
+    if execution_backend is None or str(execution_backend).lower() != "pto":
+        return None
+    if not target_is_ascend(target):
+        return None
+    if target_is_pto(target):
+        return target
+    return _with_pto_key(target)
+
+
 def normalize_asc_target(target: TargetLike) -> Target | None:
     """Accept ``asc`` as the concise name for the AscendC backend."""
     if isinstance(target, str) and target.strip() == "asc":
@@ -86,3 +107,4 @@ register_target_detector("ascend", _detect_ascend_target, override=True)
 register_target_normalizer("ascend", normalize_ascend_target, override=True)
 register_target_normalizer("asc", normalize_asc_target, override=True)
 register_target_normalizer("pto", normalize_pto_target, override=True)
+register_target_execution_normalizer("pto", normalize_pto_execution_target, override=True)

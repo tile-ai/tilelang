@@ -158,14 +158,18 @@ def kernels_with_pdl_overlap_window(N, block_size=256, work_iters=8192, dtype=T.
 
 
 def _get_sm90_cuda_device():
-    """Return an SM90+ CUDA device for runtime PDL tests."""
+    """Return an SM90 CUDA device for runtime PDL tests.
+
+    The kernel is compiled for sm_90, and a cubin only runs on the
+    architecture it was compiled for, so a newer device is not a substitute.
+    """
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CuTeDSL PDL runtime test requires CUDA")
     for device_id in range(torch.cuda.device_count()):
-        if torch.cuda.get_device_capability(device_id) >= (9, 0):
+        if torch.cuda.get_device_capability(device_id) == (9, 0):
             return torch.device("cuda", device_id)
-    pytest.skip("CuTeDSL PDL runtime test requires an SM90+ CUDA device")
+    pytest.skip("CuTeDSL PDL runtime test requires an SM90 CUDA device")
 
 
 def _package_version(package_name: str) -> str:

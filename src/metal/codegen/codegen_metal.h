@@ -11,15 +11,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "target/source/codegen_c.h"
+#include "backend/common/codegen/codegen_c_base.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangMetal final : public CodeGenC {
+class CodeGenTileLangMetal final : public CodeGenTileLangCBase {
 public:
   explicit CodeGenTileLangMetal(Target target);
-  std::string Finish() final;
   // override print thread tag.
   void PrintArgUnionDecl();
   void AddFunction(const GlobalVar &gvar, const PrimFunc &func) final;
@@ -52,6 +51,9 @@ public:
 
   // reuse parent's function.
   using CodeGenC::PrintType;
+
+protected:
+  void EmitPreamble_(std::ostream &os) const final;
 
 private:
   std::string GetStorageScopeOf(const PrimExpr &ptr_expr) const;

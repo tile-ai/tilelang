@@ -15,11 +15,12 @@ COMPILE_FLAGS = [
 # Each group starts at a multiple of MK_ALIGNMENT.
 MK_ALIGNMENT = 256
 
-# AutoSchedule currently needs distinct cross-core flags for epilogue stages.
-MAX_EPILOGUE_STAGES = 8
-
 # Each packed int16 scale pair covers 64 FP8 K elements.
 MX_SF_DIVISOR = 64
+
+
+def align_up(value, alignment):
+    return T.ceildiv(value, alignment) * alignment
 
 
 def clamp(value, lower, upper):

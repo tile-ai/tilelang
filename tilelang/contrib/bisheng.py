@@ -9,8 +9,10 @@ import shlex
 import shutil
 import subprocess
 from collections.abc import Sequence
+from functools import cache
 from pathlib import Path
 
+from tilelang.env import env
 from tvm.base import py_str
 from tvm.contrib import utils
 from tvm.target import Target
@@ -44,6 +46,26 @@ def find_bisheng_path() -> str:
     raise RuntimeError(
         "Cannot find the bisheng compiler.Please install it and make sure it is in PATH, or set the BISHENG_HOME environment variable."
     )
+
+
+@cache
+def get_bisheng_version() -> str:
+    """Return the selected Bisheng's version line, cached for this process.
+
+    Keep the build time and revision: different Bisheng builds can report the
+    same Clang version. Ignore subsequent lines such as ``InstalledDir`` so
+    relocating an identical compiler does not change its cache identity.
+    """
+    command = [find_bisheng_path(), "--version"]
+    timeout = env.get_compile_timeout_seconds()
+    try:
+        output = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Bisheng version query timed out after {timeout} seconds.\nCommand: {shlex.join(command)}") from exc
+    lines = output.strip().splitlines()
+    if not lines or "clang version " not in lines[0]:
+        raise RuntimeError(f"Cannot determine Bisheng version from: {output}")
+    return lines[0].strip()
 
 
 def find_ld_lld_path() -> str:
@@ -170,7 +192,7 @@ def compile_ascend(
     if target_format not in {"o", "so", "aibin"}:
         raise ValueError(f"Unsupported Ascend target format: {target_format}")
 
-    temp = utils.tempdir()
+    temp = utils.tempdir(keep_for_debug=not env.should_cleanup_temp_files())
     # Use .asc suffix so bisheng auto-detects the language without ``-x asc``
     temp_code = temp.relpath("tl_kernel.asc")
     suffix = "so" if target_format == "so" else ("aibin" if target_format == "aibin" else "o")

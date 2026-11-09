@@ -83,16 +83,8 @@ def test_nested_predicated_load_preserves_store_guard(lanes, enable_non_predicat
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     lowered = _apply_passes(mod, enable_non_predicated=enable_non_predicated, enable_predicated=True)
-    loads, stores = [], []
-
-    def visitor(node):
-        if isinstance(node, tirx.Call) and hasattr(node.op, "name"):
-            if node.op.name == f"tl.ldg{32 * lanes}":
-                loads.append(node)
-            elif node.op.name == f"tl.stg{32 * lanes}":
-                stores.append(node)
-
-    tirx.stmt_functor.post_order_visit(lowered["main"].body, visitor)
+    loads = collect_calls(lowered, function="main", op=f"tl.ldg{32 * lanes}")
+    stores = collect_calls(lowered, function="main", op=f"tl.stg{32 * lanes}")
     assert len(loads) == 1
     outer, inner = func.params[2:]
     expected = tirx.And(outer > 0, inner > 0) if enclosing_store else inner > 0
@@ -115,13 +107,7 @@ def test_nested_predicated_load_does_not_leak_store_guard():
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     lowered = _apply_passes(mod, enable_predicated=True)
-    predicates = []
-
-    def visitor(node):
-        if isinstance(node, tirx.Call) and hasattr(node.op, "name") and node.op.name == "tl.ldg32":
-            predicates.append(node.args[-1])
-
-    tirx.stmt_functor.post_order_visit(lowered["main"].body, visitor)
+    predicates = [call.args[-1] for call in collect_calls(lowered, op="tl.ldg32", function="main")]
     assert len(predicates) == 2
     outer, inner = func.params[2:]
     tvm.ir.assert_structural_equal(predicates[0], tirx.And(outer > 0, inner > 0))

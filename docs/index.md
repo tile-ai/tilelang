@@ -80,6 +80,7 @@ compiler_internals/metal_tilelang_development
 :caption: DEVELOPER GUIDE
 
 developer_guide/cpp_style
+developer_guide/testing_style
 :::
 
 :::{toctree}

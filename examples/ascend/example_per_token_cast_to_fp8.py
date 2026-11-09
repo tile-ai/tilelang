@@ -14,7 +14,7 @@ from tilelang.utils.tensor import torch_assert_close
 from tilelang.transform import PassConfigKey
 
 
-@tilelang.jit(out_idx=[1, 2], target="ascend", pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
+@tilelang.jit(out_idx=[1, 2], pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
 def per_token_cast_simt(M, N):
     if M <= 0 or N <= 0 or M % 32 or N % 128:
         raise ValueError("SIMT quantization expects M % 32 == 0 and N % 128 == 0")
@@ -108,7 +108,7 @@ def per_token_cast_simd(M, N):
     if M % blk_m != 0 or N % group_size != 0:
         raise ValueError(f"optimized Ascend SimdVF path expects M % {blk_m} == 0 and N % {group_size} == 0, got M={M}, N={N}")
 
-    @tilelang.jit(out_idx=[1, 2], target="ascend", pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
+    @tilelang.jit(out_idx=[1, 2], pass_configs={PassConfigKey.TL_ENABLE_FAST_MATH: True})
     def _build():
         @T.prim_func
         def per_token_cast(

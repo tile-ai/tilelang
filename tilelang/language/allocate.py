@@ -175,9 +175,8 @@ def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
     it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
     recommend allocating workspace in Torch side and pass it to the kernel via arguments,
     which is managed under the hood by the framework. This API is mainly for testing
-    purposes and some specific purposes.
-
-    NOTE(chaofan): This API may not be available in all backends (e.g. CuteDSL).
+    purposes and some specific purposes. The CuTeDSL backend allocates it per call through
+    the Torch caching allocator instead.
 
     Args:
         shape (tuple): The shape of the buffer to allocate
@@ -314,7 +313,9 @@ def alloc_reducer(shape: ShapeType, dtype: DType, op: ReducerOp = "sum", replica
 
     Args:
         shape (tuple): Logical shape of the reduction result.
-        dtype (str): Element data type (e.g., 'float32', 'int32').
+        dtype (str): Accumulator data type (e.g., 'float32', 'int32'). Sub-byte
+            numeric dtypes (such as FP4/int4) are unsupported; use float16/float32
+            or an integer dtype of at least 8 bits. Boolean reductions are allowed.
         op (str): Combine op: "sum", "max", "min", "bitand", "bitor" or
             "bitxor" (the bitwise ops require an integer dtype).
         replication (str | None): Deprecated legacy (v1) knob. Passing "all"

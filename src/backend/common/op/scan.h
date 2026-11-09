@@ -37,6 +37,7 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
     ICHECK(IsSharedBuffer(op.dst));
     std::stringstream ss;
     auto threads = lower_args.thread_bounds->extent;
+    auto thread_offset = lower_args.thread_bounds->min;
     Array<PrimExpr> args;
 
     PrimExpr src_ptr = MakeAccessPtrFromRegion(op.srcRegion_, 1);
@@ -52,11 +53,13 @@ Stmt LowerSharedScan(const ScanOpNode &op, const LowerArgs &lower_args,
       ICHECK_EQ(op.dim, 0) << scan_noun
                            << " over a 1D buffer only supports dim = 0.";
       ss << "tl::" << symbol_prefix << "1D<" << threads << ", "
-         << (op.reverse ? "true" : "false") << ">::run";
+         << (op.reverse ? "true" : "false") << ", " << thread_offset
+         << ">::run";
       args = {StringImm(ss.str()), src_ptr, dst_ptr, src_extents[0]};
     } else if (ndim == 2) {
       ss << "tl::" << symbol_prefix << "2D<" << threads << ", " << op.dim
-         << ", " << (op.reverse ? "true" : "false") << ">::run";
+         << ", " << (op.reverse ? "true" : "false") << ", " << thread_offset
+         << ">::run";
       PrimExpr src_stride = op.src->shape[op.src->shape.size() - 1];
       PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
       args = {StringImm(ss.str()), src_ptr,    dst_ptr,   src_extents[0],

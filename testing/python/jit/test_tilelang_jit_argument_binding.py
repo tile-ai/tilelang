@@ -96,7 +96,7 @@ def test_lazy_jit_var_keyword_kwargs_are_flattened_and_hashable():
     key, kernel_args = _lazy_var_keyword_factory.func.parse_args(
         128,
         N=64,
-        opts={"axis": [1, 2]},
+        opts=(1, 2),
     )
     hash(key)
     assert kernel_args == {}
@@ -104,11 +104,11 @@ def test_lazy_jit_var_keyword_kwargs_are_flattened_and_hashable():
     p1_key, tensor_args, compile_kwargs = _lazy_var_keyword_factory.func._parse_phase1_key(
         128,
         N=64,
-        opts={"axis": [1, 2]},
+        opts=(1, 2),
     )
     hash(p1_key)
     assert tensor_args == {}
-    assert compile_kwargs == {"M": 128, "N": 64, "opts": {"axis": [1, 2]}}
+    assert compile_kwargs == {"M": 128, "N": 64, "opts": (1, 2)}
     assert "kwargs" not in compile_kwargs
 
 
@@ -148,47 +148,132 @@ def test_lazy_jit_varargs_and_kwargs_preserve_specializations():
     assert make_kernel.get_tir(1, 2, scale=3, offset=4) is first
 
 
-_UNHASHABLE_DEFAULT_OPTS = [1, 2]
-_UNHASHABLE_DEFAULT_CONFIG = {"axis": [0]}
-
-
 @dataclass
 class _UnhashableConfig:
     axis: int
 
 
-@tilelang.jit
-def _lazy_unhashable_default_factory(
-    M: int,
-    opts=_UNHASHABLE_DEFAULT_OPTS,
-    config=_UNHASHABLE_DEFAULT_CONFIG,
-):
-    @T.prim_func
-    def kernel():
-        T.evaluate(0)
-
-    return kernel
+_UNHASHABLE_VALUES = [
+    pytest.param({"value": 1}, id="dict"),
+    pytest.param([1, 2], id="list"),
+    pytest.param({1, 2}, id="set"),
+    pytest.param(({"value": 1},), id="nested-tuple"),
+    pytest.param(_UnhashableConfig(axis=0), id="dataclass"),
+]
 
 
-def test_lazy_jit_unhashable_defaults_are_normalized_in_cache_key():
-    omitted_key, kernel_args = _lazy_unhashable_default_factory.func.parse_args(128)
-    explicit_key, _ = _lazy_unhashable_default_factory.func.parse_args(
-        128,
-        opts=[1, 2],
-        config={"axis": [0]},
-    )
+@pytest.mark.parametrize("default", _UNHASHABLE_VALUES)
+@pytest.mark.parametrize("keyword_only", [False, True])
+def test_jit_rejects_unhashable_defaults(default, keyword_only):
+    if keyword_only:
 
-    hash(omitted_key)
-    assert kernel_args == {}
-    assert omitted_key == explicit_key
+        def make_kernel(*, options=default):
+            @T.prim_func
+            def kernel():
+                T.evaluate(0)
+
+            return kernel
+
+    else:
+
+        def make_kernel(options=default):
+            @T.prim_func
+            def kernel():
+                T.evaluate(0)
+
+            return kernel
+
+    with pytest.raises(TypeError, match="Default value for JIT compile-time parameter 'options' must be hashable"):
+        tilelang.jit(make_kernel)
 
 
-def test_lazy_jit_unsupported_unhashable_compile_time_value_errors():
-    with pytest.raises(TypeError, match="Unsupported unhashable JIT compile-time cache key value"):
-        _lazy_unhashable_default_factory.func.parse_args(
-            128,
-            config=_UnhashableConfig(axis=0),
-        )
+@pytest.mark.parametrize("value", _UNHASHABLE_VALUES)
+@pytest.mark.parametrize("call_form", ["positional", "keyword", "tuning", "parse_args", "get_tir"])
+def test_lazy_jit_rejects_unhashable_arguments(value, call_form):
+    @tilelang.jit
+    def make_kernel(options=None):
+        raise AssertionError("unhashable arguments must be rejected before calling the factory")
+
+    with pytest.raises(TypeError, match="JIT compile-time arguments must be hashable"):
+        if call_form == "positional":
+            make_kernel(value)
+        elif call_form == "keyword":
+            make_kernel(options=value)
+        elif call_form == "tuning":
+            make_kernel(__tune_params={"options": value})
+        elif call_form == "parse_args":
+            make_kernel.func.parse_args(value)
+        else:
+            make_kernel.get_tir(value)
+
+
+def test_lazy_jit_rejects_unhashable_varargs_and_kwargs():
+    @tilelang.jit
+    def make_kernel(*options):
+        @T.prim_func
+        def kernel():
+            T.evaluate(0)
+
+        return kernel
+
+    for parse in (make_kernel.func.parse_args, make_kernel.func._parse_phase1_key):
+        with pytest.raises(TypeError, match="JIT compile-time arguments must be hashable"):
+            parse([1, 2])
+
+    for parse in (_lazy_var_keyword_factory.func.parse_args, _lazy_var_keyword_factory.func._parse_phase1_key):
+        with pytest.raises(TypeError, match="JIT compile-time arguments must be hashable"):
+            parse(128, opts={"axis": [1, 2]})
+
+
+def test_lazy_jit_call_form_cache_checks_hashability_before_equality(monkeypatch):
+    class UnhashableInt(int):
+        __hash__ = None
+
+    @tilelang.jit
+    def make_kernel(value):
+        @T.prim_func
+        def kernel():
+            T.evaluate(value)
+
+        return kernel
+
+    monkeypatch.setattr(make_kernel, "compile", make_kernel.get_tir)
+    make_kernel(1)
+    with pytest.raises(TypeError, match="JIT compile-time arguments must be hashable"):
+        make_kernel(UnhashableInt(1))
+
+
+@dataclass(frozen=True)
+class _HashableConfig:
+    value: int
+
+
+@pytest.mark.parametrize("config_type", [tuple, _HashableConfig])
+def test_lazy_jit_hashable_defaults_reuse_specializations(monkeypatch, config_type):
+    first_options = (1,) if config_type is tuple else _HashableConfig(1)
+    second_options = (2,) if config_type is tuple else _HashableConfig(2)
+
+    @tilelang.jit
+    def make_kernel(options=first_options):
+        value = options[0] if config_type is tuple else options.value
+
+        @T.prim_func
+        def kernel():
+            T.evaluate(value)
+
+        return kernel
+
+    # Skip backend compilation to keep this test portable.
+    monkeypatch.setattr(make_kernel, "compile", make_kernel.get_tir)
+    first = make_kernel()
+    assert first.body.value.value == 1
+    assert make_kernel(first_options) is first
+    assert make_kernel(options=first_options) is first
+
+    second = make_kernel(second_options)
+    assert second.body.value.value == 2
+    assert make_kernel(options=second_options) is second
+    assert make_kernel() is first
 
 
 @tilelang.jit
@@ -229,10 +314,43 @@ def test_eager_jit_var_keyword_compile_kwargs_are_flattened():
     p1_key, tensor_args, compile_kwargs = _copy_kernel_with_var_keywords.func._parse_phase1_key(
         a,
         b,
-        opts={"axis": [1, 2]},
+        opts=(1, 2),
     )
 
     hash(p1_key)
     assert tensor_args == {"A": a, "B": b}
-    assert compile_kwargs == {"block": 64, "opts": {"axis": [1, 2]}}
+    assert compile_kwargs == {"block": 64, "opts": (1, 2)}
     assert "metadata" not in compile_kwargs
+
+
+@pytest.mark.parametrize("value", _UNHASHABLE_VALUES)
+def test_eager_jit_rejects_unhashable_compile_time_arguments(value):
+    a = torch.empty(8, 8)
+    b = torch.empty(8, 8)
+
+    with pytest.raises(TypeError, match="JIT compile-time arguments must be hashable"):
+        _copy_kernel(a, b, block=value)
+    with pytest.raises(TypeError, match="JIT compile-time arguments must be hashable"):
+        _copy_kernel_with_var_keywords(a, b, opts=value)
+
+
+def test_eager_jit_excludes_unhashable_runtime_tensor_defaults():
+    class UnhashableTensor(torch.Tensor):
+        __hash__ = None
+
+    default = torch.empty(8, 8).as_subclass(UnhashableTensor)
+
+    @tilelang.jit
+    def kernel(A=default, block=64):
+        A: T.Tensor[(8, 8), T.float32]
+        T.evaluate(0)
+
+    p1_key, tensor_args, compile_kwargs = kernel.func._parse_phase1_key()
+    assert p1_key == (64,)
+    assert tensor_args["A"] is default
+    assert compile_kwargs == {"block": 64}
+
+    explicit = torch.empty(8, 8).as_subclass(UnhashableTensor)
+    explicit_key, tensor_args, _ = kernel.func._parse_phase1_key(explicit)
+    assert explicit_key == p1_key
+    assert tensor_args["A"] is explicit

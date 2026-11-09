@@ -41,6 +41,7 @@
 #include "./auto_schedule/ir_structure.h"
 #include "./auto_schedule/kernel_rewriter.h"
 #include "./auto_schedule/scheduled_tir.h"
+#include "./auto_schedule/subcore.h"
 #include "./auto_schedule/task_analysis.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
@@ -106,7 +107,7 @@ static std::vector<Call> CollectCrossCoreCalls(const TaskNode *task) {
 using CrossCoreCallMap = std::unordered_map<TaskNode *, std::vector<Call>>;
 struct CrossCorePlacement {
   CoreMask pipe_core_mask{kCoreUnassigned};
-  CoreMask candidate_core_mask{kCoreBroadcast};
+  CoreMask candidate_core_mask{kCoreAll};
 };
 using CrossCorePlacementMap =
     std::unordered_map<PrimExpr, CrossCorePlacement, ffi::StructuralHash,
@@ -115,7 +116,7 @@ using CrossCorePlacementMap =
 static void AssignCrossCoreTasksInList(
     const std::vector<std::shared_ptr<IRStructure>> &nodes,
     const CrossCoreCallMap &cross_core_calls, CoreMask kernel_core_mask,
-    const CoreMaskAvailability &availability) {
+    const CoreMaskAvailability &availability, CoreMask vector_mask) {
   std::vector<TaskNode *> scoped_tasks;
   for (const auto &node : nodes) {
     if (!node->IsTask())
@@ -135,7 +136,11 @@ static void AssignCrossCoreTasksInList(
 
   // Cross-core flag IDs share one hardware domain across all modes, so mode is
   // deliberately not part of the placement key.
-  CrossCorePlacementMap placements;
+  std::array<CrossCorePlacementMap, 3> placements;
+  auto placement_for = [&](const TaskNode *task) -> CrossCorePlacementMap & {
+    auto sid = GetTaskSubcore(task->stmt);
+    return placements[sid.has_value() ? *sid + 1 : 0];
+  };
   for (TaskNode *task : scoped_tasks) {
     // A cross-core call can be nested under a scheduled control node rather
     // than carrying the condition as its own task guard. Include every
@@ -148,8 +153,14 @@ static void AssignCrossCoreTasksInList(
       task_capability &= availability.GetTaskReadCoreMask(control->task.get());
     }
     for (const Call &call : cross_core_calls.at(task)) {
-      CrossCorePlacement &placement = placements[call->args[2]];
-      placement.pipe_core_mask |= GetCrossCorePipeCoreMask(call->args[1]);
+      CrossCorePlacement &placement = placement_for(task)[call->args[2]];
+      CoreMask pipe_core = GetCrossCorePipeCoreMask(call->args[1]);
+      if (pipe_core == kCoreVector)
+        pipe_core = vector_mask;
+      if (auto sid = GetTaskSubcore(task->stmt);
+          sid && (pipe_core & kCoreVector))
+        pipe_core = VectorCore(*sid);
+      placement.pipe_core_mask |= pipe_core;
       placement.candidate_core_mask &= task_capability;
     }
   }
@@ -158,7 +169,7 @@ static void AssignCrossCoreTasksInList(
   for (TaskNode *task : scoped_tasks) {
     for (const Call &call : cross_core_calls.at(task)) {
       const PrimExpr &flag_id = call->args[2];
-      const CrossCorePlacement &placement = placements.at(flag_id);
+      const CrossCorePlacement &placement = placement_for(task).at(flag_id);
       CoreMask core_mask = placement.pipe_core_mask;
       CoreMask capability = placement.candidate_core_mask;
       if (capability == kCoreUnassigned) {
@@ -166,26 +177,26 @@ static void AssignCrossCoreTasksInList(
                    << " have incompatible scalar inputs or guards in one "
                       "control scope";
       }
-      if (core_mask == kCoreBroadcast) {
+      if ((core_mask & kCoreCube) && (core_mask & kCoreVector)) {
         LOG(FATAL) << "Cross-core set/wait calls with flag " << flag_id
                    << " in one control scope resolve to both Vector and Cube "
                       "cores; all matching calls must run on the same core";
       }
-      if (IsConcreteCore(core_mask) && (capability & core_mask) != core_mask) {
+      if (IsCoreLocalMask(core_mask) && (capability & core_mask) != core_mask) {
         LOG(FATAL) << "Cross-core set/wait calls with flag " << flag_id
                    << " require "
-                   << (core_mask == kCoreVector ? "Vector" : "Cube")
+                   << (core_mask == kCoreCube ? "Cube" : "Vector")
                    << ", but their scalar inputs and guards are unavailable "
                       "on that core";
       }
-      if (core_mask == kCoreUnassigned && IsConcreteCore(capability)) {
+      if (core_mask == kCoreUnassigned && IsCoreLocalMask(capability)) {
         core_mask = capability;
       } else if (core_mask == kCoreUnassigned &&
-                 IsConcreteCore(kernel_core_mask)) {
+                 IsCoreLocalMask(kernel_core_mask & capability)) {
         // PIPE_S and PIPE_MTE2 exist on both core types. A pure kernel supplies
         // the fallback when neither the pipe nor task inputs pin placement.
-        core_mask = kernel_core_mask;
-      } else if (!IsConcreteCore(core_mask)) {
+        core_mask = kernel_core_mask & capability;
+      } else if (!IsCoreLocalMask(core_mask)) {
         LOG(FATAL)
             << "Cannot infer the core for cross-core set/wait calls with flag "
             << flag_id << " in one control scope"
@@ -198,7 +209,7 @@ static void AssignCrossCoreTasksInList(
     }
   }
   for (const auto &[task, core_mask] : task_core_masks) {
-    if (core_mask == kCoreBroadcast) {
+    if (!IsCoreLocalMask(core_mask)) {
       LOG(FATAL) << "Cross-core synchronization calls in one task resolve to "
                     "both Vector and Cube cores: "
                  << task->stmt;
@@ -213,7 +224,7 @@ static void AssignCrossCoreTasksInList(
     if (node->IsControl()) {
       auto *control = static_cast<ControlNode *>(node.get());
       AssignCrossCoreTasksInList(control->children, cross_core_calls,
-                                 kernel_core_mask, availability);
+                                 kernel_core_mask, availability, vector_mask);
     }
   }
 }
@@ -221,13 +232,14 @@ static void AssignCrossCoreTasksInList(
 static void
 AssignCrossCoreTasks(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const std::vector<TaskNode *> &all_tasks,
-                     const CoreMaskAvailability &availability) {
+                     const CoreMaskAvailability &availability,
+                     CoreMask vector_mask) {
   CoreMask kernel_core_mask = kCoreUnassigned;
   CrossCoreCallMap cross_core_calls;
   for (TaskNode *task : all_tasks) {
     CoreMask core_mask = task->GetCoreMask();
     if (task->IsPerCoreTask()) {
-      if (IsConcreteCore(core_mask))
+      if (IsCoreLocalMask(core_mask))
         kernel_core_mask |= core_mask;
       continue;
     }
@@ -236,11 +248,11 @@ AssignCrossCoreTasks(const std::vector<std::shared_ptr<IRStructure>> &root,
       cross_core_calls.emplace(task, std::move(calls));
       continue;
     }
-    if (IsConcreteCore(core_mask))
+    if (IsCoreLocalMask(core_mask))
       kernel_core_mask |= core_mask;
   }
   AssignCrossCoreTasksInList(root, cross_core_calls, kernel_core_mask,
-                             availability);
+                             availability, vector_mask);
 }
 
 // Assign the widest legal candidate mask to each scheduled task. The
@@ -250,16 +262,18 @@ class CoreMaskAssigner {
 public:
   static void Assign(const std::vector<std::shared_ptr<IRStructure>> &root,
                      const std::vector<TaskNode *> &all_tasks,
-                     const ffi::Optional<Var> &outer_sid) {
-    CoreMaskAssigner assigner(root, all_tasks, outer_sid);
+                     const ffi::Optional<Var> &outer_sid,
+                     int num_aiv_subcores) {
+    CoreMaskAssigner assigner(root, all_tasks, outer_sid, num_aiv_subcores);
     assigner.Run();
   }
 
 private:
   CoreMaskAssigner(const std::vector<std::shared_ptr<IRStructure>> &root,
                    const std::vector<TaskNode *> &all_tasks,
-                   const ffi::Optional<Var> &outer_sid)
-      : root_(root), all_tasks_(all_tasks), availability_(all_tasks) {
+                   const ffi::Optional<Var> &outer_sid, int num_aiv_subcores)
+      : root_(root), all_tasks_(all_tasks), availability_(all_tasks),
+        vector_mask_(VectorCoreMask(num_aiv_subcores)) {
     if (outer_sid.has_value())
       availability_.SetExternalVarCoreMask(outer_sid.value(), kCoreVector);
     for (TaskNode *task : all_tasks_) {
@@ -272,7 +286,7 @@ private:
   void Run() {
     AssignCandidateCoreMasks();
     PropagateCandidateCapabilities();
-    AssignCrossCoreTasks(root_, all_tasks_, availability_);
+    AssignCrossCoreTasks(root_, all_tasks_, availability_, vector_mask_);
     PropagateCandidateCapabilities();
   }
 
@@ -301,7 +315,7 @@ private:
       return kCoreVector;
     if (touches_cube_memory)
       return kCoreCube;
-    return kCoreBroadcast;
+    return kCoreAll;
   }
 
   static CoreMask GetMte2Mask(const TaskNode *task) {
@@ -331,7 +345,7 @@ private:
     if (pipe_mask & static_cast<uint16_t>(ResourcePipe::kMTE2))
       result |= GetMte2Mask(task);
 
-    if (result == kCoreBroadcast) {
+    if (result == kCoreAll) {
       LOG(FATAL) << "Cannot assign one atomic task to incompatible Vector and "
                     "Cube execution resources: "
                  << task->stmt;
@@ -342,8 +356,16 @@ private:
   }
 
   void AssignCandidateCoreMasks() {
-    for (TaskNode *task : all_tasks_)
-      task->SetCoreMask(GetCandidateCoreMask(task));
+    for (TaskNode *task : all_tasks_) {
+      CoreMask mask = GetCandidateCoreMask(task);
+      // Pure scalar values may be recomputed on other cores. Special-register
+      // writes affect core-local state and must retain their projected AIV.
+      // Keep Cube eligible for configuration consumed by Cube operations.
+      if (auto sid = GetTaskSubcore(task->stmt);
+          sid && (mask == kCoreVector || task->GetSpecialWriteMask() != 0))
+        mask &= kCoreCube | VectorCore(*sid);
+      task->SetCoreMask(mask & (kCoreCube | vector_mask_));
+    }
   }
 
   void PropagateCandidateCapabilities() {
@@ -369,13 +391,15 @@ private:
   const std::vector<std::shared_ptr<IRStructure>> &root_;
   const std::vector<TaskNode *> &all_tasks_;
   CoreMaskAvailability availability_;
+  CoreMask vector_mask_;
 };
 
 void AssignCoreMasks(std::vector<std::shared_ptr<IRStructure>> &root,
-                     const ffi::Optional<Var> &outer_sid) {
+                     const ffi::Optional<Var> &outer_sid,
+                     int num_aiv_subcores) {
   std::vector<TaskNode *> all_tasks;
   CollectAllTaskNodes(root, all_tasks);
-  CoreMaskAssigner::Assign(root, all_tasks, outer_sid);
+  CoreMaskAssigner::Assign(root, all_tasks, outer_sid, num_aiv_subcores);
 }
 
 } // namespace
@@ -387,9 +411,14 @@ tvm::transform::Pass AssignCore() {
     return RewriteTilelangKernels(
         std::move(func), "AssignCore",
         [](const TilelangKernelContext &context) {
+          SBlock root = context.root;
+          if (context.outer_sid.has_value())
+            root = SubcoreProjector::Rewrite(root, context.outer_ctx,
+                                             context.outer_sid.value());
           ScheduledTIR scheduled_tir =
-              DecodeScheduledTIR(context.root, context.outer_ctx);
-          AssignCoreMasks(scheduled_tir.tree, context.outer_sid);
+              DecodeScheduledTIR(root, context.outer_ctx);
+          AssignCoreMasks(scheduled_tir.tree, context.outer_sid,
+                          scheduled_tir.metadata.num_aiv_subcores.value_or(2));
           return EncodeScheduledTIR(std::move(scheduled_tir));
         });
   };

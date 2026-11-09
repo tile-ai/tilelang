@@ -12,5 +12,5 @@ from example_vecadd import vector_add
 def test_vecadd(mode):
     n = 2**21  # Four iterations per core reuse both buffer versions.
     a, b = torch.randn(n), torch.randn(n)
-    kernel = tilelang.compile(vector_add(n, mode), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(vector_add(n, mode), out_idx=-1)
     torch.testing.assert_close(kernel(a.npu(), b.npu()).cpu(), a + b)

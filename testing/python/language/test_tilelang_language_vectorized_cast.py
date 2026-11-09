@@ -90,8 +90,8 @@ def run_vectorized_cast(src_dtype: T.dtype, dst_dtype: T.dtype, check_str: str, 
         (T.float16, T.float32, "__half22float2", 4),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 2),
         (T.float32, T.bfloat16, "__float22bfloat162_rn", 4),
-        (T.bfloat16, T.float32, "__bfloat1622float2", 2),
-        (T.bfloat16, T.float32, "__bfloat1622float2", 4),
+        (T.bfloat16, T.float32, "tl::__tl_cvt_bf16x2_to_f32x2", 2),
+        (T.bfloat16, T.float32, "tl::__tl_cvt_bf16x2_to_f32x2", 4),
     ],
 )
 def test_vectorized_cast(src_dtype, dst_dtype, check_str, lanes):

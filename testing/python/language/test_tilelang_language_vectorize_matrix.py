@@ -165,8 +165,8 @@ def test_fill_int4_nonzero_numeric(fill_value):
     assert (dst == expected).all()
 
 
-def _fill_var_kernel(dtype):
-    @tilelang.jit
+def _fill_var_kernel(dtype, execution_backend=None):
+    @tilelang.jit(execution_backend=execution_backend)
     def factory():
         @T.prim_func
         def kern(scalar: T.Tensor((2,), dtype), dst: T.Tensor((128, 128), dtype)):
@@ -177,6 +177,20 @@ def _fill_var_kernel(dtype):
         return kern
 
     return factory()
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("execution_backend", ["tvm_ffi", "nvrtc"])
+def test_fill_scalar_var_fp32_numeric(execution_backend):
+    """Preserve float32 bits when broadcasting into the 256-bit carrier."""
+    kernel = _fill_var_kernel("float32", execution_backend=execution_backend)
+    dst = torch.empty((128, 128), dtype=torch.float32, device="cuda")
+    # Include signed zero, subnormals, infinities, and a NaN payload.
+    for bits in [0, -2147483648, 1, 0x3FC00000, 0x7F800000, -8388608, 0x7FC01234]:
+        scalar_bits = torch.full((2,), bits, dtype=torch.int32, device="cuda")
+        kernel(scalar_bits.view(torch.float32), dst)
+        torch.cuda.synchronize()
+        assert (dst.view(torch.int32) == bits).all()
 
 
 @tilelang.testing.requires_cuda

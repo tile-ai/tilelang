@@ -1,7 +1,9 @@
 from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+from types import CodeType, FunctionType
 from typing import Generic, Any, Literal, ParamSpec, TypeVar, TypeAlias, cast
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager, contextmanager
@@ -30,7 +32,7 @@ def ast_get_span(ast: ast.AST) -> Span | None:
 
 
 def ast_set_span(ast: ast.AST, span: Span | None):
-    if span is None or not ast_has_span(ast):
+    if span is None or not all(attr in ast._attributes for attr in _span_attrs):
         return
     for attr, value in zip(_span_attrs, span):
         setattr(ast, attr, value)
@@ -40,7 +42,9 @@ class QuoteVisitor(ast.NodeTransformer):
     def __init__(self, names: dict[str, QuoteReplacement], passes: Sequence[QuoteReplacement] | None = None, span: Span | None = None):
         self.names = names
         self.passes = list(passes) if passes is not None else []
-        self.span = span
+        # Template scaffolding belongs to the statement's first line; keep
+        # substituted user nodes' full spans for expression diagnostics.
+        self.span = (span[0], span[1], span[0], span[1]) if span is not None else None
 
     def generic_visit(self, node: ast.AST) -> ast.AST | list[ast.AST] | None:
         if self.span is not None:
@@ -51,11 +55,11 @@ class QuoteVisitor(ast.NodeTransformer):
         if node.id in self.names:
             return self.names[node.id]
         else:
-            return node
+            return self.generic_visit(node)
 
     def visit_Pass(self, node: ast.Pass) -> QuoteReplacement:
         item = self.passes.pop(0)
-        return item if item else node
+        return item if item else self.generic_visit(node)
 
 
 def quote(
@@ -393,10 +397,11 @@ class DSLMutator(ast.NodeTransformer):
         node = self.generic_visit(node)
         if isinstance(node.iter, ast.Call):
             call = ast.Call(
-                func=quote_expr("__tb.iter_call"),
+                func=quote_expr("__tb.iter_call", span=node),
                 args=[node.iter.func, *node.iter.args],
                 keywords=node.iter.keywords,
             )
+            # Argument expansion belongs to the user's call, not the generated helper.
             ast.copy_location(call, node.iter)
             node.iter = call
         tmp = self.get_tmp()
@@ -592,6 +597,7 @@ class DSLMutator(ast.NodeTransformer):
         )
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
+        span = ast_get_span(node)
         stmts = []
         arg_names = set()
         all_args = node.args.posonlyargs + node.args.args
@@ -625,6 +631,7 @@ class DSLMutator(ast.NodeTransformer):
             f"    return {name}\n"
             f"  return {name}",
             passes=[node],
+            span=span,
         )
 
     def _try_eval(self, node: ast.expr) -> Any:
@@ -731,9 +738,9 @@ class DSLMutator(ast.NodeTransformer):
                     break
         node = self.generic_visit(node)
         for expr in node.items:
-            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=expr)
+            expr.context_expr = quote_expr("__tb.ctx_with(e)", e=expr.context_expr, span=node)
         if is_kernel_ctx:
-            return [quote1("if __tb.skip_kernel_ctx(): return"), node]
+            return [quote1("if __tb.skip_kernel_ctx(): return", span=node), node]
         return node
 
     def visit_Assert(self, node: ast.Assert):
@@ -789,7 +796,7 @@ class SpanAttacher(ast.NodeTransformer):
     def visit(self, node: ast.AST):
         node = self.generic_visit(node)
         if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
-            return quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})") + [node]
+            return quote(f"__tb.set_fileline({self.filename_var}, {node.lineno}, {self.func_name_var})", span=node) + [node]
         return node
 
 
@@ -816,6 +823,44 @@ def has_internal_prim_func(func: Callable[_P, _T]) -> bool:
                     if _try_eval(decor, nonlocals, func.__globals__) is prim_func:
                         return True
     return False
+
+
+class _ContextDependentMacro(Exception):
+    pass
+
+
+class _MacroTemplateMutator(DSLMutator):
+    def _try_eval(self, node: ast.expr) -> Any:
+        # These rewrites depend on live globals/closures, not just function code.
+        raise _ContextDependentMacro
+
+
+@lru_cache(maxsize=512)
+def _macro_template(code: CodeType, filename: str, nonlocal_names: tuple[str, ...]) -> tuple[CodeType, str] | None:
+    tree = utils.get_ast(code)
+    mut = _MacroTemplateMutator(dict.fromkeys(nonlocal_names), {}, filename)
+    try:
+        tree = mut.visit(tree)
+    except _ContextDependentMacro:
+        return None
+    make_closure = utils.get_compiled_object(tree, "make_closure", filename, {})
+    # Keep only unbound code: cached functions would retain their globals/closures.
+    return make_closure.__code__, ast.unparse(tree)
+
+
+def _mutate_macro(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:
+    if hasattr(func, "__wrapped__"):
+        return mutate(func)
+
+    filename = inspect.getsourcefile(func) or inspect.getfile(func)
+    nonlocals = utils.get_func_nonlocals(func)
+    template = _macro_template(func.__code__, str(Path(filename).absolute()), tuple(nonlocals))
+    if template is None:
+        return mutate(func)
+
+    code, source = template
+    make_closure = FunctionType(code, func.__globals__)
+    return IRGenerator(gen=make_closure(**nonlocals), source=source)
 
 
 def mutate(func: Callable[_P, _T]) -> IRGenerator[_P, _T]:

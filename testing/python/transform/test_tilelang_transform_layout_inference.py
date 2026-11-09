@@ -413,9 +413,9 @@ def test_reducer_update_nest_plans_vectorized_shape():
     )
     src = kern.get_kernel_source()
     # The shared->fragment copy must stay vectorized: packed bf16 pairs
-    # converted with __bfloat1622float2, never one scalar (float)(...) cast
+    # converted with tl::__tl_cvt_bf16x2_to_f32x2, never one scalar (float)(...) cast
     # per element off a mod-threads distribution.
-    assert "__bfloat1622float2" in src, src
+    assert "tl::__tl_cvt_bf16x2_to_f32x2" in src, src
 
     a = torch.randn(4, 256, dtype=torch.bfloat16, device="cuda")
     out = kern(a)

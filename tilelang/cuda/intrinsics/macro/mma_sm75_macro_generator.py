@@ -11,14 +11,10 @@ class TensorCoreIntrinEmitterSM75(TensorCoreIntrinEmitter):
     def _initialize_k_dim(self, a_dtype="float16"):
         if isinstance(a_dtype, str):
             a_dtype = DataType(a_dtype)
-        if a_dtype.bits == 4:
-            self.k_dim = min(32, self.chunk)
-        elif a_dtype.bits == 8:
-            self.k_dim = min(16, self.chunk)
-        elif a_dtype.bits == 16:
-            self.k_dim = min(8, self.chunk)
+        if a_dtype.bits in (4, 8, 16):
+            self.k_dim = 128 // a_dtype.bits
         else:
-            self.k_dim = min(256 // a_dtype.bits, self.chunk)
+            super()._initialize_k_dim(a_dtype)
 
     def _initialize_m_dim(self, a_dtype="float16"):
         super()._initialize_m_dim(a_dtype)

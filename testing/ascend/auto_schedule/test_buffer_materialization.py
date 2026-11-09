@@ -3,6 +3,7 @@
 import pytest
 from tilelang import tvm
 from tilelang.ascend import transform
+from tilelang.layout import Layout
 from tvm import tirx
 from testing.ascend._ir import allocated_buffer, calls, kernel, nodes, region, seq
 from testing.ascend.auto_schedule._scheduled_ir import copy_ring, unit
@@ -43,18 +44,26 @@ def test_physical_versions_use_the_prepared_clock(mode, owners, guarded, version
 
 
 @pytest.mark.parametrize(
-    "shape, dtype, pitch",
-    [((4, 4), "float32", 16), ((4,), "float32", 16), ((32,), "float16", 32)],
-    ids=["reshape", "subview", "reinterpret"],
+    "scope, base_dtype, shape, dtype, pitch, prefix",
+    [
+        ("shared.dyn", "float32", (4, 4), "float32", 16, 0),
+        ("shared.dyn", "float32", (4,), "float32", 16, 0),
+        ("shared.dyn", "float32", (32,), "float16", 32, 0),
+        ("shared.ss", "uint32", (8,), "uint64", 8, 0),
+        ("shared.dyn", "float32", (4, 4), "float32", 24, 8),
+        ("shared.dyn", "float32", (32,), "float16", 48, 8),
+        ("shared.dyn", "float16", (8,), "float32", 12, 8),
+    ],
+    ids=["reshape", "subview", "reinterpret", "ss-packed", "padded-reshape", "padded-narrow", "padded-widen"],
 )
-def test_aliases_use_allocation_pitch(shape, dtype, pitch):
-    base = tirx.decl_buffer((16,), "float32", name="base", scope="shared.dyn")
+def test_aliases_use_allocation_pitch(scope, base_dtype, shape, dtype, pitch, prefix):
+    base = tirx.decl_buffer((16,), base_dtype, name="base", scope=scope)
     alias = tirx.decl_buffer(shape, dtype, name="alias", data=base.data)
     counter = tirx.decl_buffer((1,), "int32", name="epoch", scope="local.var")
     i = tirx.Var("i", "int32")
     alias_index = [0] * len(shape)
     body = seq(
-        unit(tirx.BufferStore(base, tirx.const(1, "float32"), [0])), unit(tirx.BufferStore(alias, tirx.const(2, dtype), alias_index))
+        unit(tirx.BufferStore(base, tirx.const(1, base_dtype), [0])), unit(tirx.BufferStore(alias, tirx.const(2, dtype), alias_index))
     )
     loop = tirx.For(
         i,
@@ -68,15 +77,22 @@ def test_aliases_use_allocation_pitch(shape, dtype, pitch):
             "tl.storage_epoch_guard_map": {base.data: tirx.const(True, "bool")},
         },
     )
-    before = kernel(unit(loop, core=None), buffers=[base, counter], annotations={"tl.buffer_versions_map": {base.data: 2}})
+    annotations = {"tl.buffer_versions_map": {base.data: 2}}
+    if prefix:
+        annotations["layout_map"] = {base: Layout(base.shape, lambda i: i + prefix)}
+    before = kernel(unit(loop, core=None), buffers=[base, counter], annotations=annotations)
     after = transform.MaterializeMultiBuffer()(before)
     stores = nodes(after, tirx.BufferStore)
     base_store, alias_store = stores
     assert tuple(int(dim) for dim in alias_store.buffer.shape) == (2, *shape)
-    assert int(base_store.buffer.strides[0]) == 16
+    assert int(base_store.buffer.strides[0]) == 16 + prefix
     assert int(alias_store.buffer.strides[0]) == pitch
+    assert tuple(int(dim) for dim in allocated_buffer(after, "base").shape) == (2, 16)
     assert alias_store.buffer.data.same_as(base_store.buffer.data)
     tvm.ir.assert_structural_equal(alias_store.indices[0], base_store.indices[0])
+    if prefix:
+        root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+        assert alias_store.buffer not in root.annotations["layout_map"]
 
 
 @pytest.mark.parametrize("partial", [False, True], ids=["whole-tile", "partial-tile"])
@@ -87,7 +103,7 @@ def test_broadcast_fill_initializes_every_version(partial, versions):
     fill = tirx.Evaluate(
         tirx.Call("handle", tvm.ir.Op.get("tl.tileop.fill"), [region(ub, 2, shape=[32 if partial else 64]), tirx.const(0, "float32")])
     )
-    fill = tirx.AttrStmt({"core_mask": tirx.IntImm("int64", 1), "tl.multi_buffer_broadcast_fill": [ub.data]}, "tl.ascend_task", 1, fill)
+    fill = tirx.AttrStmt({"core_mask": tirx.IntImm("int64", 5), "tl.multi_buffer_broadcast_fill": [ub.data]}, "tl.ascend_task", 1, fill)
     owner = tirx.For(
         i,
         0,

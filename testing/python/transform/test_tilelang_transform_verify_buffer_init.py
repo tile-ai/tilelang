@@ -381,11 +381,8 @@ def no_kernel_cache():
     A cached kernel is returned without re-running the pass pipeline, which
     would make the warning silently disappear on the second compile.
     """
-    was_enabled = tilelang.is_cache_enabled()
-    tilelang.disable_cache()
-    yield
-    if was_enabled:
-        tilelang.enable_cache()
+    with tilelang.testing.without_kernel_cache():
+        yield
 
 
 def _reducer_kernel():

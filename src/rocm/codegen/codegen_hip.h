@@ -14,15 +14,14 @@
 #include <string>
 #include <unordered_map>
 
-#include "backend/common/codegen/codegen_c_line_directives.h"
+#include "backend/common/codegen/codegen_c_base.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangHIP final : public CodeGenCWithLineDirectives {
+class CodeGenTileLangHIP final : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangHIP();
-  std::string Finish();
   void SetTarget(Target target) { target_ = std::move(target); }
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
@@ -61,6 +60,7 @@ public:
   void AddFunction(const PrimFunc &f);
 
 protected:
+  void EmitPreamble_(std::ostream &os) const final;
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,

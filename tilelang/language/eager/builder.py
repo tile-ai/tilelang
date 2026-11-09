@@ -12,7 +12,7 @@ from tvm.ir.base import Span
 from tvm.ir.expr import Range
 from tvm.tirx.stmt import BufferRegion
 from tvm.tirx.stmt_functor import substitute
-from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
+from .ast import BaseBuilder, IRGenerator, _mutate_macro, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
 from tilelang.language.frame import clear_let_values, register_let_value
 from tilelang.utils import side_effect
@@ -252,6 +252,7 @@ class Builder(BaseBuilder):
         self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.func_pass_configs: dict[str, Any] | None = None
         self.func_compile_flags: list[str] | str | None = None
+        self.host_mapped_buffers: list[Buffer] = []
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -1106,7 +1107,7 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
 
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
         annotations = get_type_hints(func)
-        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations)
+        return Macro(name=func.__name__, orig_func=func, ir_gen=_mutate_macro(func), annotations=annotations)
 
     return impl(func) if func is not None else impl
 
@@ -1265,6 +1266,16 @@ def annotate_pass_configs(configs: dict[str, Any]) -> None:
 
 def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
     """Attach function-level out_idx, pass_configs and compile_flags as PrimFunc attrs."""
+    if builder.host_mapped_buffers:
+        from tilelang.engine.host_mapped import HOST_MAPPED_PARAMS_ATTR, get_host_mapped_params
+
+        indices = set(get_host_mapped_params(pf))
+        for buffer in builder.host_mapped_buffers:
+            matches = [i for i, param in enumerate(pf.params) if param in pf.buffer_map and pf.buffer_map[param].data.same_as(buffer.data)]
+            if not matches:
+                raise ValueError(f"Host-mapped buffer {buffer.name!r} must be a function parameter")
+            indices.update(matches)
+        pf = pf.with_attr(HOST_MAPPED_PARAMS_ATTR, sorted(indices))
     if builder.out_idx:
         pf = pf.with_attr("tilelang_out_idx", builder.out_idx)
     if builder.func_pass_configs is not None:
@@ -1368,33 +1379,16 @@ _MISSING_ARG = object()
 _ExtraJITKwargsKey = tuple[tuple[str, Any], ...]
 
 
-def _freeze_jit_key_part(value: Any) -> Any:
-    """Canonicalize supported compile-time values into hashable key parts."""
+def _make_jit_key(values: tuple[Any, ...], *, context: str = "JIT compile-time arguments") -> tuple[Any, ...]:
+    """Validate compile-time values without changing their cache-key semantics."""
 
-    if isinstance(value, dict):
-        return (
-            dict,
-            tuple(
-                (_freeze_jit_key_part(key), _freeze_jit_key_part(item_value))
-                for key, item_value in sorted(value.items(), key=lambda item: repr(item[0]))
-            ),
-        )
-    if isinstance(value, list):
-        return list, tuple(_freeze_jit_key_part(item) for item in value)
-    if isinstance(value, set):
-        return set, tuple(sorted((_freeze_jit_key_part(item) for item in value), key=repr))
-    if isinstance(value, tuple):
-        return tuple(_freeze_jit_key_part(item) for item in value)
-
-    if not isinstance(value, Hashable):
-        raise TypeError(f"Unsupported unhashable JIT compile-time cache key value of type {type(value).__qualname__}: {value!r}")
-    return value
-
-
-def _make_jit_key(values: tuple[Any, ...]) -> tuple[Any, ...]:
-    """Build the phase-1 cache key from already ordered compile-time values."""
-
-    return tuple(_freeze_jit_key_part(value) for value in values)
+    try:
+        hash(values)
+    except TypeError as exc:
+        raise TypeError(
+            f"{context} must be hashable: {exc}. Use immutable, hashable values such as tuples instead of lists or dicts."
+        ) from exc
+    return values
 
 
 @dataclass(frozen=True)
@@ -1428,6 +1422,9 @@ class _JITArgumentBinder:
         self.signature = signature
         self.tensor_arg_names = tensor_arg_names
         self.params = tuple(signature.parameters.values())
+        for param in self.params:
+            if param.name not in tensor_arg_names and param.default is not inspect.Parameter.empty:
+                _make_jit_key((param.default,), context=f"Default value for JIT compile-time parameter {param.name!r}")
         self.param_names = tuple(param.name for param in self.params)
         self.param_index = {name: i for i, name in enumerate(self.param_names)}
         self.defaults = tuple(param.default if param.default is not inspect.Parameter.empty else _MISSING_ARG for param in self.params)
@@ -1656,11 +1653,11 @@ class JITFunc(Generic[_P, _T]):
             inspect.signature(self.orig_func).bind(*args, **kwargs)
         except TypeError:
             return False
+        bound = self._argument_binder.bind(args, kwargs)
         try:
             prim_func = self.orig_func(*args, **kwargs)
             # lazy jit must return PrimFunc
             if isinstance(prim_func, PrimFunc):
-                bound = self._argument_binder.bind(args, kwargs)
                 self.p1_cache[bound.p1_key] = TirTemplate.from_lazy_style(self.orig_func.__name__, prim_func)
                 return True
             return False

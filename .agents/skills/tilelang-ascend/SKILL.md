@@ -2,9 +2,10 @@
 name: tilelang-ascend
 description: >
   Write, port, tune, and debug TileLang kernels for Huawei Ascend NPUs. Covers the
-  Ascend dialect, AIC/AIV work partitioning, SIMD/SIMT operations, memory and
-  data movement, T.Stage scheduling, synchronization, performance measurement,
-  profiling, operation cycle measurements, and VF latency annotations.
+  Ascend dialect, AIC/AIV work partitioning and independent AIV execution,
+  SIMD/SIMT operations, memory and data movement, T.Stage scheduling,
+  synchronization, performance measurement, profiling, operation cycle
+  measurements, and VF latency annotations.
   Explains how Ascend kernel programming differs from CUDA/GPU programming.
 ---
 
@@ -25,7 +26,7 @@ documentation and [tilelang-build](../tilelang-build/SKILL.md).
 
 - [Scheduling and synchronization](references/synchronization.md): automatic,
   T.Stage performance tuning, buffer ownership and version modes, conditional
-  execution, conflict hints, and fully manual protocols.
+  execution, independent AIV roles, conflict hints, and fully manual protocols.
 
 - [Profiling recipes](references/profiling.md): device timing, regression tools,
   generated-source experiments, and operation cycle measurements with npusim.
@@ -211,13 +212,22 @@ with T.Kernel(NUM_BLOCKS) as bx:
 
 Use `T.MixedKernel(NUM_BLOCKS, sids=2)` when the program needs the AIV sub-core
 ID returned with `bx`, or explicitly controls the active AIV count (`sids=1`
-or `2`). If neither is needed, use `T.Kernel`; the compiler handles core
-splitting and the appropriate `T.dual_copy` lowering.
+or `2`). With automatic scheduling enabled, `sids=1` activates only AIV0;
+`sids=2` preserves the two-AIV launch even when there is no Cube work.
+If neither the ID nor explicit count is needed, use `T.Kernel`; the compiler
+handles core splitting and the appropriate `T.dual_copy` lowering.
 
 ```python
 with T.MixedKernel(NUM_BLOCKS, sids=2) as (bx, sid):
-    ...  # Partition each AIV's accesses according to sid and buffer ownership.
+    ...  # Use sid to partition tiles or select distinct AIV roles.
 ```
+
+Under automatic scheduling or `T.Stage`, `sid`-dependent guards and loops can
+assign different work to AIV0 and AIV1, including roles that change between
+iterations. Common Cube work remains shared. Read
+[independent AIV execution](references/synchronization.md#independent-aiv-execution)
+before combining these patterns with Fixpipe copies, common GM/L1 storage, or
+loop exits.
 
 See the mixed-core epilogues in `examples/ascend/deepgemm/kernels/epilogue.py`.
 Follow the actual buffer extents when partitioning output; a local half-sized
@@ -268,6 +278,27 @@ buf_c = T.alloc_l0c((TILE_M, TILE_N), "float32")
 frag = T.alloc_fragment((TILE,), "float32")
 ```
 
+On dav-3510, `T.alloc_ss(shape, "uint32")` or `"uint64"` allocates
+scalar storage shared by one AIC and its two AIVs. For example,
+`words = T.alloc_ss((2,), "uint32")` can be read as one packed word through
+`T.view(words, shape=(1,), dtype="uint64")`. The group has a 3072-byte pool;
+allocation bases are aligned to 32 bytes and different allocations do not reuse
+storage. Shapes must be static and allocation does not initialize the contents.
+SS follows ordinary buffer optimization semantics; unused accesses may be
+removed. Publication and slot-reuse order come from synchronization.
+
+The two AIVs must write disjoint byte ranges. AIV/AIC dependencies use ordinary
+mode-4 synchronization, with each AIV tracked independently. Direct AIV peer
+dependencies require explicit synchronization, as with other shared storage.
+SS supports automatic multibuffering with the same owner and version annotations
+as L1. The uint32/uint64 views share a version clock and byte pitch, and all
+versions count toward the group's 3072-byte pool. Each epoch must write the
+data consumed in that epoch; disjoint AIV writes must still publish the same
+logical generation. SS accesses are scalar-only; VF, DMA and atomics are
+unsupported.
+With AutoSchedule disabled, supply the publication and reuse handshakes
+explicitly; see `testing/ascend/language/test_tilelang_ascend_ss.py`.
+
 For a deferred reduction inside `T.SimtVF`, use the reducer epoch API. Given
 float32 UB buffers `x_ub[TILE]` and `sum_ub[1]`:
 
@@ -315,6 +346,28 @@ allocation when their asynchronous lifetimes permit reuse. Follow the
 when changing manual kernels. For capacity or launch failures, record the
 generated allocation sizes, buffer versions, VF mode, and compiler options.
 Check SDK reservations as well as user buffers before changing tile sizes.
+
+For Cube storage (L1, L0A, L0B, L0C), `T.view` and `T.reshape` aliases can have
+different canonical layouts inferred from their operations or supplied with
+`T.annotate_layout`. For example, a `(64, 128)` L0B allocation can have a
+`(128, 64)` view filled with `T.copy(..., transpose=True)` and consumed with
+`T.gemm(..., transpose_B=True)`. A same-shape view can instead use a different
+`MajorK`/`MajorMN` layout. Each view keeps its own address mapping while the
+shared `.data` keeps one allocation and version clock; `T.assume_conflict` is
+unnecessary for these aliases.
+
+Memory layout annotations apply only to the named Buffer view. They do not
+propagate through `T.view`, `T.reshape`, or a shared `.data` Var. Annotate each
+view that needs a non-default interpretation; otherwise its own operations
+infer the layout or ordinary dense/strided addressing applies. Accessed Cube
+views require their own canonical layout from an annotation or a TileOp.
+Fragment aliases still share thread ownership.
+
+These views require dense logical strides, zero base offset, the same accessed
+dtype, and equal padded physical sizes. They reinterpret storage without moving
+existing values: the producer must write the representation its consumer uses.
+Use `T.access_ptr(view[...], ...)` when passing a view to an intrinsic, so layout
+lowering can select its address mapping.
 
 `T.annotate_unlimit_memory("shared", "shared.l1")` inside a kernel removes the
 scheduler's capacity constraint for those pools. Other supported scopes are
@@ -453,8 +506,12 @@ T.copy(A[:, :], a_ub[:, :30], data_select=True)
 ### 6.2 T.dual_copy (Ascend-Only)
 
 Distributes a logical tile across two AIV sub-cores in a mixed kernel. The
-kernel must also contain Cube-side work; `dual_copy` alone cannot turn a pure
-Vector kernel into a two-AIV launch.
+two AIVs cooperate on the tile; use `T.MixedKernel(..., sids=2)` to request
+that launch explicitly, or `T.Kernel` with Cube and Vector work to infer it.
+For L0C→UB, the hardware copy remains one dual-destination instruction and
+requires control flow that is uniform across sub-cores. For independently
+selected destinations, use guarded `T.copy`; see
+[independent AIV execution](references/synchronization.md#independent-aiv-execution).
 
 | Path | Implementation and constraints |
 |---|---|
@@ -713,9 +770,10 @@ and its original caller, with repeated-run checks when determinism is required.
    across two AIVs, the destination holds half the rows. Other copy directions
    have different ownership and shape relationships; inspect their lowering.
 
-10. **AIV sid indexing in output**: In `T.MixedKernel`, `T.copy` from
-    UB to GM uses `sid` to partition output rows. Forgetting the `sid`
-    offset causes both AIV sub-cores to write the same region.
+10. **AIV output ownership**: When both AIVs store parts of one tile, partition
+    GM regions explicitly with `sid` or use the matching `T.dual_copy`.
+    When a guard selects one AIV to drain a complete tile, keep the full tile
+    extent; that pattern does not require another half-tile split.
 
 11. **Hardware warp-reduce dtypes**: `T.warp_reduce_sum`,
     `T.warp_reduce_max`, and `T.warp_reduce_min` lower directly to the

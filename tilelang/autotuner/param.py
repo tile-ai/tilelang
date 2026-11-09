@@ -55,6 +55,8 @@ class CompileArgs:
         verbose: Whether to enable verbose output (default: False).
         pass_configs: Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.PassConfigKey` for supported options.
+        compile_flags: Extra flags forwarded to the device compiler. Different flags
+            build a different binary, so they take part in the cache identity.
     """
 
     out_idx: list[int] | int | None = None
@@ -63,6 +65,7 @@ class CompileArgs:
     target_host: TargetLike | None = None
     verbose: bool = False
     pass_configs: dict[str, Any] | None = None
+    compile_flags: list[str] | str | None = None
 
     def compile_program(self, program: PrimFunc):
         """Compile one candidate program using this compile configuration."""
@@ -74,6 +77,7 @@ class CompileArgs:
             target_host=self.target_host,
             verbose=self.verbose,
             pass_configs=self.pass_configs,
+            compile_flags=self.compile_flags,
         )
 
     def __hash__(self):
@@ -90,6 +94,7 @@ class CompileArgs:
             "target_host": str(self.target_host) if self.target_host else None,
             "verbose": self.verbose,
             "pass_configs": json.dumps(pass_configs, sort_keys=True) if pass_configs else None,
+            "compile_flags": [self.compile_flags] if isinstance(self.compile_flags, str) else self.compile_flags,
         }
         hash_obj = hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8"))
         return int.from_bytes(hash_obj.digest(), byteorder="big")
@@ -411,8 +416,8 @@ class AutotuneResult:
         atomically renamed to *path* so that concurrent readers never see a
         half-written result.
         """
-        # Already saved (e.g. another process won the race with a complete entry).
-        if self._is_complete_result_dir(path, self.kernel.execution_backend):
+        # Published entries are never repaired or overwritten automatically.
+        if os.path.lexists(path):
             return
 
         # Keep autotuner staging under the shared namespace staging root so stale cleanup
@@ -472,9 +477,6 @@ class AutotuneResult:
                 missing_names = ", ".join(path.name for path in missing_files)
                 raise RuntimeError(f"Incomplete autotune staging directory is missing required file(s): {missing_names}")
 
-            # Repair stale/incomplete entries before making the new directory visible.
-            self._remove_incomplete_result_dir(path, self.kernel.execution_backend)
-
             # Durability barrier: keep the staged data ahead of the rename so a
             # crash cannot publish a truncated cache entry.
             for entry in os.scandir(staging_path):
@@ -495,9 +497,9 @@ class AutotuneResult:
             logger.exception("Error during atomic autotune result save")
 
     @classmethod
-    def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult:
-        """Load a complete autotune result and its compiled kernel from disk."""
-        if not os.path.exists(path):
+    def load_from_disk(cls, path: Path, compile_args: CompileArgs) -> AutotuneResult | None:
+        """Load a result, returning None for an absent entry and raising for an invalid one."""
+        if not os.path.lexists(path):
             return None
 
         verbose = compile_args.verbose
@@ -543,11 +545,11 @@ class AutotuneResult:
             backend_context,
             out_idx_override if out_idx_override is not None else compile_args.out_idx,
             compile_args.pass_configs,
-            None,  # compile_flags not tracked here
+            compile_args.compile_flags,
             func,
         )
         if kernel is None:
-            return None
+            raise ValueError(f"Cannot load kernel from autotune cache entry: {path}")
         kernel.update_tuner_result(
             config=config,
             latency=latency,
@@ -603,19 +605,6 @@ class AutotuneResult:
     def _get_missing_complete_result_files(cls, path: Path, execution_backend: str) -> list[Path]:
         """Return complete-result files missing from a candidate cache path."""
         return [file for file in cls._get_complete_result_files(path, execution_backend) if not file.exists()]
-
-    @classmethod
-    def _is_complete_result_dir(cls, path: Path, execution_backend: str) -> bool:
-        """Return whether a cache directory contains all required files."""
-        return path.is_dir() and not cls._get_missing_complete_result_files(path, execution_backend)
-
-    @classmethod
-    def _remove_incomplete_result_dir(cls, path: Path, execution_backend: str) -> bool:
-        """Remove a stale incomplete result directory when present."""
-        if not path.is_dir() or cls._is_complete_result_dir(path, execution_backend):
-            return False
-        shutil.rmtree(path)
-        return True
 
     @staticmethod
     def _is_rename_collision(exc: OSError) -> bool:

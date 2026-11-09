@@ -3,7 +3,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang.testing.ir import assert_call_count, collect_calls
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 from tvm import tirx
 
@@ -127,13 +127,7 @@ def test_blockscaled_issue_without_arrive_gets_handoff_fences():
             T.ptx_arrive_barrier(barrier[0])
 
     body = _apply(before)["main"].body
-    calls = []
-
-    def visit(node):
-        if isinstance(node, tirx.Call):
-            calls.append(str(getattr(node.op, "name", "")))
-
-    tirx.stmt_functor.post_order_visit(body, visit)
+    calls = [str(getattr(call.op, "name", "")) for call in collect_nodes(body, tirx.Call)]
     assert_call_count(body, op="tl.tcgen05_after_thread_sync", count=1)
     assert_call_count(body, op="tl.tcgen05_before_thread_sync", count=1)
     assert_call_count(body, op="tl.tcgen05_mma_arrive", count=0)

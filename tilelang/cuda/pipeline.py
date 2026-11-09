@@ -255,8 +255,7 @@ def CUDAPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # programming model; the pass itself checks the PrimFunc's target.
     mod = tilelang.cuda.transform.InjectFenceProxy()(mod)
 
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    mod = tilelang.transform.ThreadSync(["shared", "shared.dyn"])(mod)
 
     # @CUDA-specific
     # Inject conservative tcgen05 fences on Blackwell (SM100+).

@@ -104,20 +104,22 @@ static TL_DEVICE void InclusiveScanLine(const T *__restrict__ src,
   }
 }
 
-template <class Reducer, int threads, bool reverse = false>
+template <class Reducer, int threads, bool reverse = false,
+          int thread_offset = 0>
 struct InclusiveScan1D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32);
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
-    if (threadIdx.x >= SEG)
+    if (threadIdx.x - thread_offset >= SEG)
       return;
     InclusiveScanLine<Reducer, reverse, T, SEG>(src, dst, N, 1, 1);
   }
 };
 
-template <class Reducer, int threads, int Axis = 0, bool reverse = false>
+template <class Reducer, int threads, int Axis = 0, bool reverse = false,
+          int thread_offset = 0>
 struct InclusiveScan2D {
   static_assert(threads == 1024 or threads == 512 or threads == 256 or
                 threads == 128 or threads == 64 or threads == 32);
@@ -129,7 +131,7 @@ struct InclusiveScan2D {
       return;
 
     constexpr int TILE = threads / SEG;
-    const int item = threadIdx.x / SEG;
+    const int item = (threadIdx.x - thread_offset) / SEG;
 
     if constexpr (Axis == 1) {
       const int num_blocks = (H + TILE - 1) / TILE;
@@ -153,39 +155,49 @@ struct InclusiveScan2D {
   }
 };
 
-template <int threads, bool reverse = false> struct CumSum1D {
+template <int threads, bool reverse = false, int thread_offset = 0>
+struct CumSum1D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
-    InclusiveScan1D<ScanSumOp, threads, reverse>::template run<T, SEG>(src, dst,
-                                                                       N);
+    InclusiveScan1D<ScanSumOp, threads, reverse,
+                    thread_offset>::template run<T, SEG>(src, dst, N);
   }
 };
 
-template <int threads, int Axis = 0, bool reverse = false> struct CumSum2D {
+template <int threads, int Axis = 0, bool reverse = false,
+          int thread_offset = 0>
+struct CumSum2D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W, int src_stride, int dst_stride) {
-    InclusiveScan2D<ScanSumOp, threads, Axis, reverse>::template run<T, SEG>(
-        src, dst, H, W, src_stride, dst_stride);
+    InclusiveScan2D<ScanSumOp, threads, Axis, reverse,
+                    thread_offset>::template run<T, SEG>(src, dst, H, W,
+                                                         src_stride,
+                                                         dst_stride);
   }
 };
 
-template <int threads, bool reverse = false> struct CumMax1D {
+template <int threads, bool reverse = false, int thread_offset = 0>
+struct CumMax1D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int N) {
-    InclusiveScan1D<ScanMaxOp, threads, reverse>::template run<T, SEG>(src, dst,
-                                                                       N);
+    InclusiveScan1D<ScanMaxOp, threads, reverse,
+                    thread_offset>::template run<T, SEG>(src, dst, N);
   }
 };
 
-template <int threads, int Axis = 0, bool reverse = false> struct CumMax2D {
+template <int threads, int Axis = 0, bool reverse = false,
+          int thread_offset = 0>
+struct CumMax2D {
   template <typename T, int SEG = 32>
   static TL_DEVICE void run(const T *__restrict__ src, T *__restrict__ dst,
                             int H, int W, int src_stride, int dst_stride) {
-    InclusiveScan2D<ScanMaxOp, threads, Axis, reverse>::template run<T, SEG>(
-        src, dst, H, W, src_stride, dst_stride);
+    InclusiveScan2D<ScanMaxOp, threads, Axis, reverse,
+                    thread_offset>::template run<T, SEG>(src, dst, H, W,
+                                                         src_stride,
+                                                         dst_stride);
   }
 };
 

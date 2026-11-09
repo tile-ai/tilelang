@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from tilelang.backend.execution_backend import ExecutionBackendSpec
 
+from .host_profile import maybe_wrap_host_profile
+
 # Plain Ascend prefers tvm_ffi -- it is listed first, so execution_backend="auto"
 # resolves to it -- and also accepts cython.
 ASCEND_EXECUTION_BACKENDS = [
@@ -16,6 +18,7 @@ ASCEND_EXECUTION_BACKENDS = [
         # the attribute it stamps, so the backend declares the capability here
         # instead of each side sniffing the target.
         supports_callee_allocated_outputs=True,
+        wrap_callable=maybe_wrap_host_profile,
     ),
     ExecutionBackendSpec("cython"),
 ]

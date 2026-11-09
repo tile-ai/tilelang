@@ -9,6 +9,16 @@ from tilelang.language.utils import region
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs, _make_cyclic_scalar_program
 
 
+def _infer_fractal_layouts(program):
+    """Prepare the physical layouts expected at the scheduling boundary."""
+    mod = tvm.IRModule({"main": program.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    with tvm.target.Target("ascend"):
+        mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
+        mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
+    return mod["main"]
+
+
 def _make_internal_conditional_write_program():
     @T.prim_func
     def main(
@@ -576,9 +586,82 @@ def test_nd2nz_post_copy_uses_its_dma_read_span():
                 b[16] = T.float32(200)
                 out[0] = b[16]
                 a[0] = T.float32(300)
-                T.ascend_nd2nz_post_copy(dst[0], a[0], 1, 16, 1, "float")
+                T.ascend_nd2nz_post_copy(dst[0], a[0], 1, 16, src_pitch=2, dst_pitch=1, dtype="float32")
 
     assert ("a", "b") not in _insert_sync_alias_pairs(main)
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["layout-copy", "physical-pointer"])
+@pytest.mark.parametrize("overwrite_rows", [16, 64])
+def test_nz_column_slice_keeps_unmodified_rows_live(explicit, overwrite_rows):
+    from tilelang.layout import make_ascend_compact_nz_layout, make_ascend_nz_layout
+
+    @T.prim_func
+    def main(out: T.Tensor((1,), "bfloat16")):
+        with T.Kernel(1):
+            a = T.alloc_shared((65, 128), "bfloat16")
+            b = T.alloc_shared((65, 128), "bfloat16")
+            dst = T.alloc_l1((64, 16), "bfloat16")
+            T.annotate_layout({a: make_ascend_compact_nz_layout(a), dst: make_ascend_nz_layout(dst)})
+            with T.Stage(0):
+                T.fill(a, T.bfloat16(100))
+                b[0, 0] = T.bfloat16(200)
+                out[0] = b[0, 0]
+                T.fill(a[:overwrite_rows, :], T.bfloat16(300))
+                if explicit:
+                    T.ascend_nd2nz_post_copy(
+                        T.access_ptr(dst[0, 0], "w", extent=1024),
+                        T.access_ptr(a[0, 16], "r", extent=1024),
+                        64,
+                        16,
+                        src_pitch=65,
+                        dst_pitch=64,
+                        dtype="bfloat16",
+                    )
+                else:
+                    T.copy(a[:64, 16:32], dst)
+
+    mod = tvm.IRModule({"main": main.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    with tvm.target.Target("ascend"):
+        mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
+        mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
+        mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
+    assert "ascend_nd2nz_post_copy" in mod.script()
+    pairs = _insert_sync_alias_pairs(mod["main"])
+    # The physical extent is 1024 elements, but it reads 64 NZ rows, not
+    # ceil((16 + 1024) / 128) == 9 row-major rows. Only a complete overwrite
+    # can kill the old generation; untagged physical pointers stay opaque.
+    assert (("a", "b") in pairs) == (overwrite_rows == 64 and not explicit)
+
+
+@pytest.mark.parametrize("cols", [16, 64])
+def test_nd2nz_scatter_keeps_partial_vector_tail_live(cols):
+    from tilelang.layout import make_ascend_compact_nz_layout
+
+    @T.prim_func
+    def main(out: T.Tensor((1,), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_shared((20, cols), "float32")
+            b = T.alloc_shared((20, cols), "float32")
+            dst = T.alloc_shared((17, cols), "float32")
+            T.annotate_layout({dst: make_ascend_compact_nz_layout(dst)})
+            with T.Stage(0):
+                T.fill(a, T.float32(100))
+                T.fill(b, T.float32(200))
+                out[0] = b[0, 0]
+                T.fill(a[:16, :], T.float32(300))
+                T.copy(a[:16, :], dst[:16, :])
+
+    mod = tvm.IRModule({"main": main.with_attr("target", tvm.target.Target("ascend"))})
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    with tvm.target.Target("ascend"):
+        mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
+        mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
+        mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
+    # The final 256-byte source load extends beyond the overwritten logical
+    # rows when cols == 16. NZ destination regions must not narrow ND reads.
+    assert (("a", "b") in _insert_sync_alias_pairs(mod["main"])) == (cols == 64)
 
 
 def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility():
@@ -598,11 +681,8 @@ def test_nd2nz_statement_intrinsics_keep_source_alias_eligibility():
                     T.simd.vsts(other[0, 0], T.simd.vdup(T.float32(200), "float32"))
                 out[0] = other[0, 0]
 
-    mod = tvm.IRModule({"main": main.with_attr("target", tvm.target.Target("ascend"))})
-    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tvm.IRModule({"main": _infer_fractal_layouts(main)})
     with tvm.target.Target("ascend"):
-        mod = tilelang.ascend.transform.AscendLayoutInference()(mod)
-        mod = tilelang.ascend.transform.NormalizeAscendFractalStorage()(mod)
         mod = tilelang.ascend.transform.InsertNd2Nz()(mod)
     assert ("dst", "src") in _insert_sync_alias_pairs(mod["main"])
 
@@ -624,26 +704,28 @@ def test_nd2nz_scatter_source_can_alias_a_later_ub_copy_destination():
                 T.copy(nz, other)
                 out[0] = other[0, 0]
 
-    assert ("other", "src") in _insert_sync_alias_pairs(main)
+    assert ("other", "src") in _insert_sync_alias_pairs(_infer_fractal_layouts(main))
 
 
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
 @pytest.mark.parametrize("footprint", ["base", "short", "exact", "padded"])
-def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint):
+@pytest.mark.parametrize("src_pitch", [2, 64])
+def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint, src_pitch):
     cols = 16 if dtype == "float32" else 32
-    required = 24 if dtype == "float32" else 48
-    extent = {"base": 1, "short": required - 1, "exact": required, "padded": 2 * cols}[footprint]
+    required = (src_pitch + 1) * (cols // 2)
+    capacity = (src_pitch + 2) * (cols // 2)
+    extent = {"base": 1, "short": required - 1, "exact": required, "padded": capacity}[footprint]
     dtype_name = "float" if dtype == "float32" else "half"
 
     @T.prim_func
     def main(out: T.Tensor((1,), dtype)):
         with T.Kernel(1):
-            a = T.alloc_shared((2 * cols,), dtype)
-            b = T.alloc_shared((2 * cols,), dtype)
+            a = T.alloc_shared((capacity,), dtype)
+            b = T.alloc_shared((capacity,), dtype)
             dst = T.alloc_l1((cols,), dtype)
             with T.Stage(0):
                 with T.Task():
-                    for i in T.serial(2 * cols):
+                    for i in T.serial(capacity):
                         a[i] = T.cast(100, dtype)
                 b[required - 1] = T.cast(200, dtype)
                 out[0] = b[required - 1]
@@ -655,8 +737,9 @@ def test_nd2nz_post_copy_keeps_the_last_required_element_live(dtype, footprint):
                     T.access_ptr(a[0], "r", extent=extent),
                     1,
                     cols,
-                    1,
-                    dtype_name,
+                    src_pitch=src_pitch,
+                    dst_pitch=1,
+                    dtype=dtype_name,
                 )
 
     assert ("a", "b") not in _insert_sync_alias_pairs(main)
@@ -685,8 +768,9 @@ def test_nd2nz_scatter_checks_the_full_vector_read_footprint():
                             T.access_ptr(dst[0], "w", extent=17 * 64),
                             T.int32(16),
                             T.int32(64),
-                            tvm.tirx.StringImm("bfloat16_t"),
+                            T.int32(17),
                             tvm.tirx.StringImm("float"),
+                            tvm.tirx.StringImm("bfloat16_t"),
                         ],
                     )
                 )
@@ -806,6 +890,35 @@ def test_padded_copy_coalesced_aligned_rows_allow_reuse():
     # The two logical four-element rows coalesce into one aligned 32B DMA
     # row: there is no physical padding outside the allocation.
     assert ("a", "b") in _insert_sync_alias_pairs(main)
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_compact_l0_drain_preserves_ub_write_coverage(compact):
+    l0_pitch = 1 if compact else None
+
+    @T.prim_func
+    def main(scratch: T.Tensor((16, 16), "float32"), out: T.Tensor((16, 16), "float32")):
+        with T.Kernel(1):
+            a = T.alloc_shared((16, 16), "float32")
+            b = T.alloc_shared((16, 16), "float32")
+            l1 = T.alloc_l1((16, 16), "float32")
+            lhs = T.alloc_l0a((16, 16), "float32")
+            rhs = T.alloc_l0b((16, 16), "float32")
+            acc = T.alloc_l0c((32 if compact else 16, 16), "float32")
+            with T.Stage(0):
+                T.fill(a, 100.0)
+                T.fill(b, 200.0)
+                # The round trip orders b's last read before a's new write.
+                T.copy(b, scratch)
+                T.copy(scratch, l1)
+                T.copy(l1, lhs)
+                T.copy(l1, rhs)
+                T.gemm(lhs, rhs, acc[:16, :], transpose_B=True, clear_accum=True)
+                # A compact source pitch must not hide the full UB write.
+                T.copy(acc[:16, :], a, l0_pitch=l0_pitch)
+                T.copy(a, out)
+
+    assert ("a", "b") in _insert_sync_alias_pairs(_infer_fractal_layouts(main))
 
 
 def test_padded_copy_overflow_excludes_storage_from_reuse():

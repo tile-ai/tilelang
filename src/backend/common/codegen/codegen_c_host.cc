@@ -2,6 +2,7 @@
  * \file codegen_c_host.cc
  */
 #include "codegen_c_host.h"
+#include "config.h"
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -35,32 +36,32 @@ void CodeGenCHost::Init(bool output_ssa, bool emit_asserts,
   emit_asserts_ = emit_asserts;
   emit_fwd_func_decl_ = emit_fwd_func_decl;
   declared_globals_.clear();
-  decl_stream << "// tilelang target: " << target_str << "\n";
-  decl_stream << "#define TVM_EXPORTS\n";
-  decl_stream << "#include \"tvm/runtime/base.h\"\n";
-  decl_stream << "#include \"tvm/runtime/c_backend_api.h\"\n";
-  decl_stream << "#include \"tvm/ffi/c_api.h\"\n";
-  decl_stream << "#include <math.h>\n";
+  preamble_stream_ << "// tilelang target: " << target_str << "\n";
+  preamble_stream_ << "#define TVM_EXPORTS\n";
+  preamble_stream_ << "#include \"tvm/runtime/base.h\"\n";
+  preamble_stream_ << "#include \"tvm/runtime/c_backend_api.h\"\n";
+  preamble_stream_ << "#include \"tvm/ffi/c_api.h\"\n";
+  preamble_stream_ << "#include <math.h>\n";
   // snprintf for richer assert messages with actual values
-  decl_stream << "#include <stdio.h>\n";
-  decl_stream << "#include <stdbool.h>\n";
+  preamble_stream_ << "#include <stdio.h>\n";
+  preamble_stream_ << "#include <stdbool.h>\n";
   // Portable alignment specifier: MSVC uses __declspec(align(N)), every other
   // compiler nvcc invokes (gcc/clang) accepts __attribute__((aligned(N))).
-  decl_stream << "#if defined(_MSC_VER)\n";
-  decl_stream << "#define TL_ALIGN(N) __declspec(align(N))\n";
-  decl_stream << "#else\n";
-  decl_stream << "#define TL_ALIGN(N) __attribute__((aligned(N)))\n";
-  decl_stream << "#endif\n";
+  preamble_stream_ << "#if defined(_MSC_VER)\n";
+  preamble_stream_ << "#define TL_ALIGN(N) __declspec(align(N))\n";
+  preamble_stream_ << "#else\n";
+  preamble_stream_ << "#define TL_ALIGN(N) __attribute__((aligned(N)))\n";
+  preamble_stream_ << "#endif\n";
 
-  decl_stream << "#ifdef __OBJC__\n";
-  decl_stream << "#include \"tvm/runtime/device_api.h\"\n";
-  decl_stream << "#include \"tvm/ffi/function.h\"\n";
+  preamble_stream_ << "#ifdef __OBJC__\n";
+  preamble_stream_ << "#include \"tvm/runtime/device_api.h\"\n";
+  preamble_stream_ << "#include \"tvm/ffi/function.h\"\n";
 
-  decl_stream << "#include <Metal/Metal.h>\n";
-  decl_stream << "#include <Foundation/Foundation.h>\n";
+  preamble_stream_ << "#include <Metal/Metal.h>\n";
+  preamble_stream_ << "#include <Foundation/Foundation.h>\n";
 
-  decl_stream << "#include <torch/mps.h>\n";
-  decl_stream << "#endif\n";
+  preamble_stream_ << "#include <torch/mps.h>\n";
+  preamble_stream_ << "#endif\n";
 
   CodeGenCHost::InitGlobalContext();
   tvm::codegen::CodeGenC::Init(output_ssa);
@@ -249,7 +250,7 @@ void CodeGenCHost::PrintGetFuncFromBackend(
   this->stream << "}\n";
 }
 
-void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
+std::string CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
   using namespace tvm::tirx;
   const StringImmNode *func_name = op->args[0].as<StringImmNode>();
   ICHECK(func_name != nullptr)
@@ -323,6 +324,7 @@ void CodeGenCHost::PrintCallPacked(const tvm::tirx::CallNode *op) {
     this->PrintLine("});");
     this->PrintLine("if (", metal_result, " != 0) return ", metal_result, ";");
   }
+  return result;
 }
 
 std::string CodeGenCHost::GetPackedName(const tvm::tirx::CallNode *op) {
@@ -387,10 +389,18 @@ void CodeGenCHost::VisitExpr_(const tvm::tirx::CallNode *op,
       this->stream << "TVMFFIAny " << stack_name << "[" << size << "];\n";
     }
     os << stack_name;
-  } else if (op->op.same_as(builtin::tvm_call_packed_lowered())) {
-    this->PrintCallPacked(op);
-  } else if (op->op.same_as(builtin::tvm_call_cpacked_lowered())) {
-    this->PrintCallPacked(op);
+  } else if (op->op.same_as(builtin::tvm_call_packed_lowered()) ||
+             op->op.same_as(builtin::tvm_call_cpacked_lowered())) {
+    // Runtime queries (for example, mapped host addresses) use the returned
+    // scalar or opaque pointer, unlike kernel launches with ignored results.
+    std::string result = this->PrintCallPacked(op);
+    os << "((";
+    PrintType(op->dtype, os);
+    os << ")" << result
+       << (op->dtype.is_handle()  ? ".v_ptr"
+           : op->dtype.is_float() ? ".v_float64"
+                                  : ".v_int64")
+       << ")";
   } else if (op->op.same_as(builtin::tvm_throw_last_error())) {
     this->PrintIndent();
     this->stream << "return -1;\n";
@@ -537,6 +547,7 @@ Module BuildTileLangCHost(IRModule mod, Target target) {
 
   CodeGenCHost cg;
   cg.Init(output_ssa, emit_asserts, emit_fwd_func_decl, target->str(), devices);
+  cg.SetEmitLineDirectives(tl_config::EmitLineDirectivesEnabled());
   cg.SetConstantsByteAlignment(
       target->GetAttr<::tvm::Integer>("constants-byte-alignment").value_or(16));
 

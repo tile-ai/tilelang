@@ -41,6 +41,11 @@ namespace tl {
 
 /*! \brief Kernel annotation and long-lived AttrStmt key. */
 constexpr const char *kBufferAliasMap = "tl.buffer_alias_map";
+// AIV-local storage identity, retained until physical allocation. L1/L0
+// storages deliberately have no entry: both AIVs access the same instance.
+constexpr const char *kAivStorageMap = "tl.aiv_storage_map";
+constexpr const char *kSplitSubcores = "tl.split_subcores";
+using AivStorageMap = ffi::Map<tirx::Var, Integer>;
 
 /*! \brief Storage data Var -> storages proven safe to alias with it. */
 using BufferAliasMap = ffi::Map<tirx::Var, ffi::Array<tirx::Var>>;

@@ -1,11 +1,11 @@
 /*!
  * \file tl/ascend/transform/attr.h
- * \brief Attributes owned by the Ascend scheduler and its scheduled-TIR
- * pipeline.
+ * \brief Attributes owned by the Ascend PTO pipeline.
  *
- * These annotate the IR only between MaterializeScheduleUnits and
- * LowerScheduledTIR, so they live with the passes that read them rather than in
- * transform/common/attr.h.
+ * Scheduler attributes annotate the IR only between MaterializeScheduleUnits
+ * and LowerScheduledTIR.  VMI allocation metadata travels from the frontend to
+ * PTO code generation through the early Ascend PTO passes.  These attributes
+ * live with the passes that read them rather than in transform/common/attr.h.
  */
 
 #ifndef TVM_TL_ASCEND_TRANSFORM_ATTR_H_
@@ -36,6 +36,17 @@ constexpr const char *kAscendStage = "tl.ascend_stage";
 // LowerScheduledTIR. It carries stage/guard metadata without introducing task
 // grouping or core-placement semantics.
 constexpr const char *kScheduleUnit = "tl.schedule_unit";
+
+// Allocation category of an explicit VMI register allocation.  Frontend blocks
+// carry a Var -> String map, NormalizePTOAllocMarkers turns it into scoped
+// AttrStmt carriers inside the owning SIMD_VF block, and
+// ImportPTOAllocMarkers transfers each kind to the matching AllocBuffer.
+// `data` marks a mutable single-register slot, `data_array` marks a statically
+// indexed array of registers.  Parsing and contract checks live in
+// ascend/transform/vmi_alloc.h.
+constexpr const char *kVmiAllocKind = "tl.vmi.alloc_kind";
+constexpr const char *kVmiAllocKindData = "data";
+constexpr const char *kVmiAllocKindDataArray = "data_array";
 
 } // namespace attr
 } // namespace tl

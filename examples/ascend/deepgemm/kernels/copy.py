@@ -28,16 +28,14 @@ def make_gm_to_l1_copy(major, l2_cache_ctrl):
 
 
 def make_l1_to_l0_copy(major):
-    """Load data and optional MX scales as separate copy operations."""
+    """Load an operand tile from L1 with its required transpose."""
 
     @T.macro
-    def copy_operand(l1, l0_tile, mn_idx, k_idx, actual_mn, actual_k, l1_scale=None, l0_scale=None):
+    def copy_operand(l1, l0_tile, mn_idx, k_idx, actual_mn, actual_k):
         if major == Major.K:
             T.copy(l1[mn_idx : mn_idx + actual_mn, k_idx : k_idx + actual_k], l0_tile)
         else:
             T.copy(l1[k_idx : k_idx + actual_k, mn_idx : mn_idx + actual_mn], l0_tile, transpose=True)
-        if l1_scale is not None:
-            T.copy(l1_scale, l0_scale)
 
     return copy_operand
 

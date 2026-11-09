@@ -251,7 +251,7 @@ Notes
 ## Caching
 
 The autotuner caches best artifacts both in‑memory (per process) and on disk under
-`$TILELANG_CACHE_DIR/autotuner`. The cache key includes:
+`<first-cache-root>/<version>/<host-platform>/autotuner`. The cache key includes:
 - TileLang version, function source, closure free‑vars
 - Config list, compile args, profile args
 
@@ -262,8 +262,27 @@ Disk cache contents (per key)
 
 Control via env vars (tilelang.env)
 - `TILELANG_CACHE_DIR` (default `~/.tilelang/cache`)
+  accepts an ordered path list, for example
+  `TILELANG_CACHE_DIR=/local/cache:/shared/cache/A:/shared/cache/B`.
+  Kernel, device-binary, and autotuning caches search all roots from left to right, using
+  the first existing entry. Missing entries fall through to the next root;
+  incomplete, corrupt, or unloadable entries raise an error and stop lookup.
+  Writes and explicit cache clearing use only the first root; published entries
+  are never automatically repaired or deleted. Generated Python sources use only the
+  first root. Use `;` as the separator
+  on Windows. Empty path components are rejected.
 - Disable all kernel caches: `TILELANG_DISABLE_CACHE=1`
 - Disable autotune disk cache only: `TILELANG_AUTO_TUNING_DISABLE_CACHE=1`
+
+To recover from an invalid cache entry, stop processes using that entry and
+remove its **entire per-key directory**, then retry compilation or autotuning.
+Do not delete or edit individual files inside a published entry: its metadata,
+sources, and compiled artifacts form one unit, and other processes may be reading
+it. The entry is rebuilt on the next cache miss. If the invalid entry is in a
+secondary root, its owner must remove it, or you must exclude that root from
+`TILELANG_CACHE_DIR`. Concurrent publishers for an absent key use separate staging
+directories; the first successful atomic rename wins and later writers leave it
+unchanged.
 
 CPU worker control
 - `TILELANG_AUTO_TUNING_CPU_UTILITIES` (fraction, default 0.9)

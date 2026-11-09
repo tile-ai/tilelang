@@ -59,8 +59,9 @@ using namespace tirx;
 //    checks found in the device body are attached to that host-side call.
 class HostDeviceSplitter : public tirx::StmtMutator {
 public:
-  explicit HostDeviceSplitter(IRModule *device_mod,
-                              std::function<GlobalVar()> var_supply)
+  explicit HostDeviceSplitter(
+      IRModule *device_mod,
+      std::function<GlobalVar(Optional<String>)> var_supply)
       : device_mod_(device_mod), var_supply_(std::move(var_supply)) {}
 
   void SetNonRestrictParams(const Array<tirx::Var> &params) {
@@ -294,22 +295,34 @@ private:
     return {Array<tirx::Var>(params.begin(), params.end()), buffers_to_declare};
   }
 
-  class SourceKernelAttrExtractor : public tirx::StmtMutator {
+  class DeviceKernelAttrExtractor : public tirx::StmtMutator {
   public:
     static Stmt Extract(Stmt body, Optional<String> *code_block_source,
-                        Optional<String> *code_block_entry_name) {
-      SourceKernelAttrExtractor extractor(code_block_source,
-                                          code_block_entry_name);
+                        Optional<String> *code_block_entry_name,
+                        Optional<String> *kernel_name) {
+      DeviceKernelAttrExtractor extractor(code_block_source,
+                                          code_block_entry_name, kernel_name);
       return extractor(std::move(body));
     }
 
   private:
-    explicit SourceKernelAttrExtractor(Optional<String> *code_block_source,
-                                       Optional<String> *code_block_entry_name)
+    explicit DeviceKernelAttrExtractor(Optional<String> *code_block_source,
+                                       Optional<String> *code_block_entry_name,
+                                       Optional<String> *kernel_name)
         : code_block_source_(code_block_source),
-          code_block_entry_name_(code_block_entry_name) {}
+          code_block_entry_name_(code_block_entry_name),
+          kernel_name_(kernel_name) {}
 
     Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
+      if (op->attr_key == tl::attr::kKernelName) {
+        auto str = op->value.as<StringImmNode>();
+        ICHECK(str) << "Expected `" << tl::attr::kKernelName
+                    << "` AttrStmt to carry a StringImm value";
+        ICHECK(!kernel_name_->has_value())
+            << "Multiple kernel names in a single device region";
+        *kernel_name_ = str->value;
+        return VisitStmt(op->body);
+      }
       if (op->attr_key == tl::attr::kCodeBlockSource) {
         if (auto str = op->value.as<StringImmNode>()) {
           *code_block_source_ = str->value;
@@ -337,6 +350,7 @@ private:
 
     Optional<String> *code_block_source_;
     Optional<String> *code_block_entry_name_;
+    Optional<String> *kernel_name_;
   };
 
   class BufferUseRemapper : public tirx::StmtExprMutator {
@@ -403,8 +417,10 @@ private:
   tirx::Stmt SplitDeviceFunc(tirx::Stmt body, tvm::Target device_target) {
     code_block_source_ = std::nullopt;
     code_block_entry_name_ = std::nullopt;
-    body = SourceKernelAttrExtractor::Extract(
-        std::move(body), &code_block_source_, &code_block_entry_name_);
+    Optional<String> kernel_name;
+    body = DeviceKernelAttrExtractor::Extract(
+        std::move(body), &code_block_source_, &code_block_entry_name_,
+        &kernel_name);
 
     // Normal kernels infer device parameters from use-def of the device body.
     // Source kernels have no meaningful DSL body, so their device signature
@@ -543,7 +559,7 @@ private:
     }
     device_func = WithAttrs(std::move(device_func), device_attrs);
 
-    GlobalVar kernel_symbol_global = var_supply_();
+    GlobalVar kernel_symbol_global = var_supply_(kernel_name);
     if (code_block_entry_name_) {
       kernel_symbol_global = GlobalVar(code_block_entry_name_.value());
     }
@@ -573,15 +589,16 @@ private:
   // target ir module
   IRModule *device_mod_;
   // Generate new GlobalVar for the kernel
-  std::function<GlobalVar()> var_supply_;
+  std::function<GlobalVar(Optional<String>)> var_supply_;
   // Source span of the host PrimFunc, carried onto split device kernels.
   Span source_span_;
   // Collect assumes in host side
   Array<tirx::AttrStmt> host_assumes_;
 };
 
-tirx::PrimFunc SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
-                               std::function<GlobalVar()> var_supply) {
+tirx::PrimFunc
+SplitHostDevice(tirx::PrimFunc func, IRModule *device_mod,
+                std::function<GlobalVar(Optional<String>)> var_supply) {
   HostDeviceSplitter splitter(device_mod, std::move(var_supply));
   splitter.SetHostFuncSignature(func);
   splitter.SetSourceSpan(func->span);
@@ -642,8 +659,10 @@ tvm::transform::Pass SplitHostDevice() {
         auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
         auto name_prefix = global_symbol.value_or(gvar->name_hint);
         auto kernel_name = name_prefix + "_kernel";
-        auto var_supply = [&global_var_supply, &kernel_name]() -> GlobalVar {
-          return global_var_supply->FreshGlobal(kernel_name, false);
+        auto var_supply = [&global_var_supply, &kernel_name](
+                              Optional<String> requested_name) -> GlobalVar {
+          return global_var_supply->FreshGlobal(
+              requested_name.value_or(kernel_name), false);
         };
 
         func = ::tvm::tl::SplitHostDevice(std::move(func), &device_mod,

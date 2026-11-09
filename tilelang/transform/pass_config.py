@@ -10,6 +10,16 @@ from typing import Any
 class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
 
+    ARITH_Z3_RLIMIT = "arith.z3_rlimit"
+    """Z3 resource budget for each solver check. Default: 100,000.
+
+    Accepts integers from 0 to 2**32 - 1; 0 means unlimited. This is a
+    resource budget, not a timeout or an exact count of search iterations.
+    Each new analyzer captures the active PassContext setting, without
+    forcing lazy Z3 initialization. Explicit analyzer overrides take priority.
+    Supported by pass_configs in tilelang.compile and both @tilelang.jit modes.
+    """
+
     # TileLang specific configs: TL_XX
 
     TL_SIMPLIFY = "tl.Simplify"
@@ -90,6 +100,14 @@ class PassConfigKey(str, Enum):
     """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
 
+    TL_CUDA_COMPILER = "tl.cuda_compiler"
+    """CUDA device compiler for the TVM-FFI execution backend: "nvcc" or "nvrtc".
+
+    Default: "nvcc". NVRTC requires cuda-python, CUDA headers, and the NVRTC
+    library. Host IR uses the selected host codegen; target_host="c" requires
+    a host C/C++ compiler, including on Windows.
+    """
+
     TL_DEVICE_COMPILE_FLAGS = "tl.device_compile_flags"
     """Additional device compiler flags passed to nvcc/NVRTC.
 
@@ -108,7 +126,26 @@ class PassConfigKey(str, Enum):
     """Emit ``#line`` directives in generated C-family source from TIR spans,
     mapping generated statements back to their Python source lines. For example,
     with the always-on ``-lineinfo`` for nvcc, PTX ``.loc`` entries point at
-    the Python source. Default: False
+    the Python source. Default: 0
+
+    The value is a level:
+
+    - 0 (or False): off.
+    - 1 (or True): one directive per statement that owns a TIR span.
+    - 2 or more: every emitted source line is re-anchored. Level 1 only anchors
+      a statement's first line, so a synthesized statement without a span keeps
+      the previous mapping (already advanced past its line), and a statement
+      that prints several source lines (for example a vectorized CUDA binary
+      op) still drifts inside the statement. Level 2 precedes every emitted
+      line, including closing braces, with a fresh directive: a span-less
+      statement inherits the nearest enclosing statement's span, then the
+      function's span, then the last statement's span, and a function whose
+      PrimFunc has no span is mapped to the ``<tilelang-generated>``
+      pseudo-source instead of inheriting the previous function's file.
+
+    ``TILELANG_EMIT_LINE_DIRECTIVES`` supplies the same default outside an
+    explicit pass config (for example in compile-only tools); it accepts the
+    same level values.
     """
 
     TL_CONFIG_INDEX_BITWIDTH = "tl.config_index_bitwidth"
@@ -243,6 +280,31 @@ class PassConfigKey(str, Enum):
     optimization in cases where manual synchronization is preferred or when
     synchronization is not needed. Default: False"""
 
+    TL_CPU_PARALLEL = "tl.cpu_parallel"
+    """Enable OpenMP parallelization of grid loops for CPU targets.
+
+    Opt-in; default False. When enabled, the grid (blockIdx) loops of a
+    T.Kernel launch are lowered to OpenMP parallel loops on the ``c`` target
+    (``#pragma omp parallel for [collapse(n)]``) or to
+    ``TVMBackendParallelLaunch`` on the ``llvm`` target, and OpenMP compiler
+    flags (plus ``-O2``) are injected into the kernel library build. When
+    disabled, no annotation is added, no extra pass runs and no extra compile
+    flags are injected — the compilation output matches the serial baseline.
+
+    The thread count is a per-kernel property instead: pass
+    ``cpu_num_threads`` to ``T.Kernel`` (default: omit the num_threads
+    clause and let the OpenMP runtime decide, e.g. via ``OMP_NUM_THREADS``).
+    """
+
+    TL_CPU_PARALLEL_MIN_TRIP = "tl.cpu_parallel_min_trip"
+    """Minimum total grid trip count for CPU OpenMP parallelization.
+
+    Grids whose total iteration count (product of grid extents) is below this
+    threshold stay serial. Default 0 (parallelize whenever ``tl.cpu_parallel``
+    is enabled — the master switch itself is the gate); raise it to keep very
+    small grids serial.
+    """
+
     TL_FORCE_LET_INLINE = "tl.force_let_inline"
     """Force TileLang to inline let bindings during simplification. Default: False"""
 
@@ -358,7 +420,7 @@ _DEPRECATED_PASS_CONFIG_MESSAGES = {
 def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) -> dict[str, Any]:
     """Canonicalize known pass-config keys, apply environment-variable
     defaults, and emit compatibility warnings."""
-    from tilelang.env import env
+    from tilelang.env import env, parse_int_level
 
     normalized: dict[str, Any] = {}
     warned_keys: set[str] = set()
@@ -376,5 +438,16 @@ def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) 
     layout_cost_model = env.get_default_layout_cost_model()
     if layout_cost_model is not None:
         normalized.setdefault(PassConfigKey.TL_LAYOUT_COST_MODEL.value, layout_cost_model)
+
+    line_directive_key = PassConfigKey.TL_EMIT_LINE_DIRECTIVES.value
+    if line_directive_key in normalized:
+        # Canonicalize bools to 0/1 so the level is stable in kernel cache keys.
+        # An explicit value wins, so a malformed environment default must not be
+        # parsed (and rejected) when this key is present.
+        normalized[line_directive_key] = parse_int_level(normalized[line_directive_key], line_directive_key)
+    else:
+        emit_line_directives = env.get_default_emit_line_directives()
+        if emit_line_directives is not None:
+            normalized[line_directive_key] = emit_line_directives
 
     return normalized

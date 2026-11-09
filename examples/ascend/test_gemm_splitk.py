@@ -11,7 +11,7 @@ from example_gemm_splitk import gemm_splitk, ref_program
 @pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "ordered"])
 def test_gemm_splitk(deterministic):
     m, k, n, split_k = 512, 4096, 512, 8
-    kernel = tilelang.compile(gemm_splitk(m, k, n, split_k, deterministic), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(gemm_splitk(m, k, n, split_k, deterministic), out_idx=-1)
     x = torch.randn(m, k, dtype=torch.bfloat16)
     w = torch.randn(n, k, dtype=torch.bfloat16)
     x_npu, w_npu = x.npu(), w.npu()

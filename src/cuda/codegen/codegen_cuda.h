@@ -15,15 +15,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "backend/common/codegen/codegen_c_line_directives.h"
+#include "backend/common/codegen/codegen_c_base.h"
 
 namespace tvm {
 namespace codegen {
 
-class CodeGenTileLangCUDA final : public CodeGenCWithLineDirectives {
+class CodeGenTileLangCUDA final : public CodeGenTileLangCBase {
 public:
   CodeGenTileLangCUDA();
-  std::string Finish();
   // override behavior
   void PrintFuncPrefix(std::ostream &os) final;
   void PrintExtraAttrs(const PrimFunc &f);
@@ -73,6 +72,7 @@ public:
                               const PrimFunc &func, std::ostream &os);
 
 protected:
+  void EmitPreamble_(std::ostream &os) const final;
   void ReserveKeywordsAsUnique_();
   virtual std::string GetBufferRef(DataType t, const BufferNode *buffer,
                                    PrimExpr index) final;

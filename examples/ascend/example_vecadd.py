@@ -45,7 +45,7 @@ def vector_add(N, mode="simt"):
 
 
 def run_regression_perf(N=2**30, mode="simt"):
-    kernel = tilelang.compile(vector_add(N, mode), target="ascend", out_idx=-1)
+    kernel = tilelang.compile(vector_add(N, mode), out_idx=-1)
     a, b = torch.randn(N, device="npu"), torch.randn(N, device="npu")
     latency = do_bench(lambda: kernel(a, b), backend="msprof", _n_warmup=30, _n_repeat=10)
     num_bytes = 3 * N * a.element_size()  # Two input reads and one output write.
@@ -62,7 +62,7 @@ if __name__ == "__main__":
     n = 2**20
     a, b = torch.randn(n, device="npu"), torch.randn(n, device="npu")
     for mode in ("simt", "simd") if args.mode == "all" else (args.mode,):
-        kernel = tilelang.compile(vector_add(n, mode), target="ascend", out_idx=-1)
+        kernel = tilelang.compile(vector_add(n, mode), out_idx=-1)
         torch.testing.assert_close(kernel(a, b), a + b)
         print(f"vecadd ({mode}): correctness passed")
         if args.bench:

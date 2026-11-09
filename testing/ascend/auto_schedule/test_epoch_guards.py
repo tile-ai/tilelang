@@ -22,8 +22,8 @@ def test_guard_equivalence_preserves_storage_epochs(relation, share_clock):
     prefix, middle = [], []
     if relation == "mutated-memory":
         first, second = tirx.Var("before_write", "bool"), tirx.Var("after_write", "bool")
-        prefix = [unit(tirx.Bind(first, pred[0] > 0), core=3)]
-        middle = [unit(tirx.BufferStore(pred, 1, [0]), core=3), unit(tirx.Bind(second, pred[0] > 0), core=3)]
+        prefix = [unit(tirx.Bind(first, pred[0] > 0), core=7)]
+        middle = [unit(tirx.BufferStore(pred, 1, [0]), core=7), unit(tirx.Bind(second, pred[0] > 0), core=7)]
     body = seq(
         *prefix,
         unit(copy(a, x), guard=first),
@@ -105,7 +105,7 @@ def test_lexical_epoch_guard_is_available_at_first_access(case):
     i = tirx.Var("i", "int32")
     body = [unit(copy(a, ub), guard=p)]
     if case == "late-definition":
-        body.append(unit(tirx.Bind(late, q), core=3))
+        body.append(unit(tirx.Bind(late, q), core=7))
     body.append(unit(copy(ub, c), guard=late if case == "late-definition" else q, stage=1 if case == "cross-stage" else 0))
     before = kernel(unit(tirx.For(i, 0, 4, tirx.ForKind.SERIAL, seq(*body)), core=None), buffers=[ub], params=[a, c, p, q])
     after = transform.PrepareMultiBuffer()(before)

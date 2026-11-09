@@ -4,6 +4,10 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
+from tilelang.ascend import transform
+from tvm import tirx
+from testing.ascend._ir import copy, kernel, nodes, seq
+from testing.ascend.auto_schedule._scheduled_ir import unit
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs
 
 
@@ -967,5 +971,107 @@ def test_l0_address_reuse_includes_the_bound_sf_lifetime(sticky):
     assert sa.data not in aliases and sb.data not in aliases
 
 
+@pytest.mark.parametrize("reader_depth", [1, 2])
+def test_preloaded_nested_reader_stays_live_across_parent_iterations(reader_depth):
+    @T.prim_func
+    def main(
+        x: T.Tensor((1,), "int32"),
+        y: T.Tensor((4,), "int32"),
+        out_x: T.Tensor((4, 2, 2), "int32"),
+        out_y: T.Tensor((4,), "int32"),
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((8,), "int32")
+            b = T.alloc_shared((8,), "int32")
+            a[0] = x[0]
+            for k in T.Pipelined(4, num_stages=1):
+                for j in T.serial(2):
+                    if reader_depth == 2:
+                        for i in T.serial(2):
+                            out_x[k, j, i] = a[0]
+                    else:
+                        out_x[k, j, 0] = a[0]
+                b[0] = y[k]
+                out_y[k] = b[0]
+
+    # b(k) must not overwrite the preload read again by a child of k + 1.
+    assert ("a", "b") not in _insert_sync_alias_pairs(main)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_write_contract_is_not_a_must_write_proof_for_allocation_reuse(complete):
+    a = tirx.decl_buffer((32, 16), "float16", name="A")
+    out = tirx.decl_buffer((16, 16), "float16", name="out", scope="shared.l0a")
+    buffers = [tirx.decl_buffer((32, 16), "float16", name=name, scope="shared.l1") for name in ("x", "y")]
+    loops = []
+    for index, buffer in enumerate(buffers):
+        i = tirx.Var(f"i{index}", "int32")
+        body = seq(
+            # This declares a larger destination when complete=False. DMA
+            # only defines the source's 16 rows; eligibility accepts the
+            # storage contract, while reuse needs independent physical proof.
+            unit(copy(a, buffer, src_shape=[32 if complete else 16, 16]), core=2),
+            unit(copy(buffer, out, src_shape=[16, 16]), core=2),
+        )
+        loops.append(unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [buffer.data]}), core=None))
+    before = kernel(
+        seq(*loops),
+        buffers=[*buffers, out],
+        params=[a],
+        annotations={
+            "tl.buffer_versions_map": {b.data: 2 for b in buffers},
+            "tl.buffer_version_mode": {b.data: "write_counter" for b in buffers},
+        },
+    )
+    prepared = transform.PrepareMultiBuffer()(before)
+    after = transform.InsertSync()(transform.ResolveCore()(prepared))
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    stored = {buffer.name: buffer.data for buffer in root.alloc_buffers}
+    aliases = root.annotations["tl.buffer_alias_map"]
+    assert any(member.same_as(stored["y"]) for member in aliases[stored["x"]]) == complete
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+def _make_parent_writer_nested_reader_program(versions: int, inner_extent: int, single_trip_writer: bool):
+    @T.prim_func
+    def main(
+        x: T.Tensor((8,), "int32"),
+        y: T.Tensor((8,), "int32"),
+        out_x: T.Tensor((8, inner_extent), "int32"),
+        out_y: T.Tensor((8,), "int32"),
+    ):
+        with T.Kernel(1):
+            a = T.alloc_shared((8,), "int32")
+            b = T.alloc_shared((8,), "int32")
+            T.annotate_buffer_versions({a: versions})
+            for k in T.Pipelined(8, num_stages=5, annotations={"enable_offset": True}):
+                with T.Stage(0):
+                    if single_trip_writer:
+                        for _ in T.serial(1):
+                            with T.Stage(0):
+                                a[0] = x[k]
+                    else:
+                        a[0] = x[k]
+                with T.Stage(1):
+                    for j in T.serial(inner_extent):
+                        with T.Stage(0):
+                            out_x[k, j] = a[0]
+                with T.Stage(4):
+                    b[0] = y[k]
+                    out_y[k] = b[0]
+
+    return main
+
+
+@pytest.mark.parametrize("single_trip_writer", [False, True], ids=["direct-writer", "single-trip-writer"])
+@pytest.mark.parametrize("versions", [2, 3])
+@pytest.mark.parametrize("inner_extent", [1, 2], ids=["single-trip", "multi-trip"])
+def test_parent_writer_and_nested_reader_keep_periodic_lifetime(versions, inner_extent, single_trip_writer):
+    # At physical step 6, a(6) is waiting for its stage-1 reader when b(2)
+    # writes. Whole-allocation reuse is unsafe even though a(k)'s last read
+    # precedes b(k)'s first write in the same logical iteration.
+    program = _make_parent_writer_nested_reader_program(versions, inner_extent, single_trip_writer)
+    assert ("a", "b") not in _insert_sync_alias_pairs(program)
