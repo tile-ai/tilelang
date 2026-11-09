@@ -50,13 +50,28 @@ def _assert_idle_cube(func):
     assert ast.unparse(cubes[0].body[0]) == "pto.init_core()"
 
 
-def _assert_vector_guard(section, sids):
+def _assert_vector_guard(section, sids, *, allow_subcore_dispatch=False):
     assert ast.unparse(section.body[0]) == "pto.init_core()"
     guards = [node for node in section.body if isinstance(node, ast.If)]
     if sids == 1:
         assert len(section.body) == 2
         assert len(guards) == 1
         assert ast.unparse(guards[0].test) == "pto.get_subblock_idx() == 0"
+    elif allow_subcore_dispatch and guards:
+        # Scheduling may split the two AIV streams into an if/else. Both
+        # branches must retain their copies, rather than exclude AIV1.
+        assert len(guards) == 1
+        dispatch = guards[0]
+        sid_bindings = [
+            node.targets[0] for node in section.body if isinstance(node, ast.Assign) and ast.unparse(node.value) == "pto.get_subblock_idx()"
+        ]
+        assert len(sid_bindings) == 1
+        assert ast.unparse(dispatch.test) == f"tl.as_logical_bool({ast.unparse(sid_bindings[0])} == 0)"
+        assert dispatch.orelse
+        for body in (dispatch.body, dispatch.orelse):
+            branch = ast.Module(body=body, type_ignores=[])
+            assert len(_calls(branch, "pto.mte_gm_ub")) == 1
+            assert len(_calls(branch, "pto.mte_ub_gm")) == 1
     else:
         assert guards == []
 
@@ -82,7 +97,7 @@ def test_vector_only_mixed_kernel_keeps_physical_launch_group(blocks, sids):
     _assert_idle_cube(func)
     vectors = _sections(func, "vector")
     assert len(vectors) == 1
-    _assert_vector_guard(vectors[0], sids)
+    _assert_vector_guard(vectors[0], sids, allow_subcore_dispatch=True)
     assert _calls(func, "pto.get_block_idx")
     assert _calls(func, "pto.get_subblock_idx")
     device_func = next(iter(artifact.device_mod.functions.values()))
