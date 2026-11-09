@@ -18,15 +18,19 @@ _CACHE_FLUSH_ID = "tilelang::cache_flush"
 def _get_npu_l2_cache_flush():
     import ctypes
 
-    return ctypes.CDLL("libascendcl.so").aclrtDeviceL2CacheFlush
+    flush = ctypes.CDLL("libascendcl.so").aclrtDeviceL2CacheFlush
+    flush.argtypes = [ctypes.c_void_p]
+    flush.restype = ctypes.c_int
+    return flush
 
 
 def _flush_cache(cache: torch.Tensor) -> None:
     if cache.device.type == "npu":
-        torch.npu.synchronize()
-        status = _get_npu_l2_cache_flush()(None)
-        if status:
-            raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
+        with torch.npu.device(cache.device):
+            torch.npu.synchronize()
+            status = _get_npu_l2_cache_flush()(None)
+            if status:
+                raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
     else:
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
 
@@ -86,7 +90,7 @@ def bench_with_cuda_events(
     return_mode: str,
     device_idx: int | torch.device | None,
 ) -> float | list[float]:
-    """Benchmark using CUDA/HIP or MPS events for timing."""
+    """Benchmark using CUDA/HIP, MPS, or NPU events for timing."""
     # Create timing events
     start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
     end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
@@ -134,7 +138,7 @@ def bench_with_cupti(
             for _ in range(2):
                 for _ in range(n_repeat):
                     with torch.profiler.record_function(_CACHE_FLUSH_ID):
-                        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
+                        _flush_cache(cache)
                     fn()
                 profiler.step()
 
@@ -192,7 +196,7 @@ def bench_with_cudagraph(
         start_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
         end_events = [torch.cuda.Event(enable_timing=True) for _ in range(n_retries)]
         for i in range(n_retries):
-            cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)  # Evict L2 without dirtying the flush buffer before replay
+            _flush_cache(cache)
             start_events[i].record()
             g.replay()
             end_events[i].record()

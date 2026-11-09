@@ -68,7 +68,7 @@ def do_bench(
             cache buffers, and synchronization are scoped to that device.
             Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
             Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
-        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
+        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall" and NPU timing
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified

@@ -72,6 +72,7 @@ def accelerator(monkeypatch):
 
             def native_flush(reserved):
                 assert reserved is None
+                assert state.synchronizations and state.synchronizations[-1] == (None, state.current)
                 state.flushes += 1
                 state.flush_order.append("flush")
                 return 0
@@ -152,7 +153,9 @@ def test_cuda_graph_stream_uses_explicit_device(monkeypatch, accelerator):
     monkeypatch.setattr(torch.cuda, "stream", stream_context)
     monkeypatch.setattr(torch.cuda, "CUDAGraph", lambda: SimpleNamespace(replay=lambda: replays.append(state.current)))
     monkeypatch.setattr(torch.cuda, "graph", capture)
-    cache = SimpleNamespace(dtype=torch.int32, view=lambda *shape: SimpleNamespace(sum=lambda **kwargs: None))
+    cache = SimpleNamespace(
+        device=torch.device("cuda", 2), dtype=torch.int32, view=lambda *shape: SimpleNamespace(sum=lambda **kwargs: None)
+    )
 
     result = torch_bench.bench_with_cudagraph(state.function, cache, 2, None, "mean", 2)
 
