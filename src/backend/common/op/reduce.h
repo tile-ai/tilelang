@@ -617,6 +617,34 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
   return PrimExpr();
 }
 
+// Validate local tile-op shapes here so direct IR calls follow the same
+// contract on CPU and GPU, even when the frontend shape check is bypassed.
+inline void ValidateLocalRegionShape(const ReduceOpNode &op,
+                                     arith::Analyzer *analyzer) {
+  int src_dim = static_cast<int>(op.src->shape.size());
+  int dst_dim = static_cast<int>(op.dst->shape.size());
+  CHECK(op.dim >= 0 && op.dim < src_dim, ValueError)
+      << "ReduceOp: invalid reduction axis " << op.dim << " for rank "
+      << src_dim;
+  CHECK(dst_dim == src_dim - 1 || dst_dim == src_dim, ValueError)
+      << "ReduceOp: invalid destination shape for local reduction";
+  for (int i = 0; i < dst_dim; ++i) {
+    PrimExpr dst_extent = op.dstRegion_->region[i]->extent;
+    if (dst_dim == src_dim && i == op.dim) {
+      CHECK(analyzer->CanProveEqual(dst_extent, 1), ValueError)
+          << "ReduceOp: invalid destination shape for local reduction: "
+             "the retained reduction axis must have extent 1";
+    } else {
+      int src_axis = dst_dim == src_dim ? i : (i < op.dim ? i : i + 1);
+      PrimExpr src_extent = op.srcRegion_->region[src_axis]->extent;
+      CHECK(analyzer->CanProveEqual(dst_extent, src_extent), ValueError)
+          << "ReduceOp: invalid destination shape for local reduction: "
+          << "destination extent " << dst_extent << " does not match source "
+          << "extent " << src_extent;
+    }
+  }
+}
+
 } // namespace reduce
 
 template <typename Impl> struct ReduceLowerer {
@@ -636,23 +664,7 @@ template <typename Impl> struct ReduceLowerer {
 
     int src_dim = static_cast<int>(op.src->shape.size());
     int dst_dim = static_cast<int>(op.dst->shape.size());
-    ICHECK(op.dim >= 0 && op.dim < src_dim);
-    ICHECK(dst_dim == src_dim - 1 || dst_dim == src_dim)
-        << "ReduceOp: local reduction dimension mismatch";
-
-    // Direct tile-op calls can bypass frontend shape validation.
-    for (int i = 0; i < dst_dim; ++i) {
-      PrimExpr dst_extent = op.dstRegion_->region[i]->extent;
-      if (dst_dim == src_dim && i == op.dim) {
-        ICHECK(analyzer->CanProveEqual(dst_extent, 1))
-            << "ReduceOp: invalid destination shape for local reduction";
-      } else {
-        int src_axis = dst_dim == src_dim ? i : (i < op.dim ? i : i + 1);
-        ICHECK(analyzer->CanProveEqual(dst_extent,
-                                       op.srcRegion_->region[src_axis]->extent))
-            << "ReduceOp: invalid destination shape for local reduction";
-      }
-    }
+    reduce::ValidateLocalRegionShape(op, analyzer);
 
     Array<Var> dst_vars;
     Array<PrimExpr> dst_indices;

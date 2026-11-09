@@ -1771,7 +1771,7 @@ def test_reduce_local_rejects_invalid_destination_region(out_shape):
                 B[0, 0] = dst[0, 0]
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    with target, pytest.raises(tvm.error.InternalError, match="ReduceOp: invalid destination shape"):
+    with target, pytest.raises(ValueError, match="ReduceOp: invalid destination shape"):
         tilelang.lower(kernel, target=target)
 
 

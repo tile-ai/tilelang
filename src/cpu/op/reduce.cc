@@ -33,8 +33,6 @@ namespace cpu {
 struct Reduce {
   static Stmt Lower(const ReduceOpNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    (void)analyzer;
-
     // 1. nan_propagate guard: CPU codegen has no __hmax_nan/__hmin_nan
     //    equivalent for fp16/bf16 max/min/absmax.
     if (op.nan_propagate &&
@@ -72,15 +70,7 @@ struct Reduce {
            "is not supported on CPU (no thread-level reduction).";
     int src_dim = static_cast<int>(op.src->shape.size());
     int dst_dim = static_cast<int>(op.dst->shape.size());
-    // dim should already be legalized to >= 0 by the frontend
-    // (_legalize_dim in reduce_op.py:12-15), but defend in depth.
-    ICHECK_GE(op.dim, 0) << "CPU reduce: dim must be non-negative";
-    ICHECK_LT(op.dim, src_dim) << "CPU reduce: dim " << op.dim
-                               << " out of range for src ndim " << src_dim;
-    ICHECK(dst_dim == src_dim - 1 || dst_dim == src_dim)
-        << "CPU reduce: dst ndim must be src_ndim-1 (no keepdim) or "
-           "src_ndim (keepdim), got src_ndim="
-        << src_dim << ", dst_ndim=" << dst_dim;
+    backend::reduce::ValidateLocalRegionShape(op, analyzer);
     ICHECK(src_buffer->dtype == dst_buffer->dtype)
         << "CPU reduce: src and dst dtypes must match, got "
         << src_buffer->dtype << " vs " << dst_buffer->dtype;
@@ -91,19 +81,20 @@ struct Reduce {
     for (int i = 0; i < dst_dim; ++i) {
       Var var("i" + std::to_string(i));
       dst_vars.push_back(var);
-      dst_indices.push_back(var);
+      dst_indices.push_back(op.dstRegion_->region[i]->min + var);
     }
 
     auto make_src_indices = [&](PrimExpr reduce_index) {
       Array<PrimExpr> indices;
       for (int i = 0; i < src_dim; ++i) {
         if (i == op.dim) {
-          indices.push_back(reduce_index);
+          indices.push_back(op.srcRegion_->region[i]->min + reduce_index);
         } else if (dst_dim == src_dim) {
           // keepdim: dst has a size-1 axis at op.dim
-          indices.push_back(dst_vars[i]);
+          indices.push_back(op.srcRegion_->region[i]->min + dst_vars[i]);
         } else {
-          indices.push_back(dst_vars[i < op.dim ? i : i - 1]);
+          indices.push_back(op.srcRegion_->region[i]->min +
+                            dst_vars[i < op.dim ? i : i - 1]);
         }
       }
       return indices;
@@ -129,8 +120,8 @@ struct Reduce {
                         op, /*vsize=*/1, BufferLoad(dst_buffer, dst_indices),
                         BufferLoad(src_buffer, make_src_indices(rv))),
                     dst_indices);
-    stmts.push_back(For(rv, 0, op.src->shape[op.dim], ForKind::kSerial,
-                        reduce_body, std::nullopt));
+    stmts.push_back(For(rv, 0, op.srcRegion_->region[op.dim]->extent,
+                        ForKind::kSerial, reduce_body, std::nullopt));
 
     // 8. Outer dst-dim loops. Built as kSerial then wrapped with
     //    PragmaUnrollLoop to match the fill.cc CPU op convention.
@@ -142,8 +133,8 @@ struct Reduce {
     //    the tag is an intent marker consistent with other CPU ops.
     Stmt body = SeqStmt::Flatten(stmts);
     for (int i = dst_dim - 1; i >= 0; --i) {
-      body = For(dst_vars[i], 0, op.dst->shape[i], ForKind::kSerial, body,
-                 std::nullopt);
+      body = For(dst_vars[i], 0, op.dstRegion_->region[i]->extent,
+                 ForKind::kSerial, body, std::nullopt);
     }
     if (dst_dim >= 1) {
       body = PragmaUnrollLoop(Downcast<For>(body));
