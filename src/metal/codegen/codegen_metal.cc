@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "backend/common/codegen/codegen_utils.h"
 #include "metal/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "target/build_common.h"
@@ -1722,11 +1723,14 @@ void CodeGenTileLangMetal::VisitExpr_(const FloatImmNode *op,
   } else if (std::isnan(op->value)) {
     temp << "NAN";
   } else {
-    temp << std::scientific << op->value;
+    // Hex float keeps every bit of the value. The 7 digits of
+    // std::scientific do not round-trip float32.
+    temp << FlexibleHexFormat(op->value);
     if (op->dtype.bits() == 32)
       temp << 'f';
     else if (op->dtype.bits() == 16)
       temp << 'h';
+    temp << "/*" << std::scientific << op->value << "*/";
   }
   MarkConst(temp.str());
   os << temp.str();
