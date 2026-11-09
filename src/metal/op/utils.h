@@ -28,7 +28,9 @@ inline bool IsCooperativeTensorBuffer(const Buffer &buffer) {
   return buffer.defined() && buffer.scope() == "metal.cooperative_tensor";
 }
 
-// Matrix numbering for a compact 2D buffer owned by one complete simdgroup.
+// Matrix numbering for a compact 1D or 2D buffer owned by one complete
+// simdgroup. A 1D buffer is represented as one row of consecutive 64-element
+// tiles.
 struct SIMDGroupRegion {
   int64_t min[2];
   int64_t extent[2];
@@ -56,7 +58,8 @@ inline SIMDGroupRegion
 GetSIMDGroupPartialRegion(const Buffer &buffer, const ffi::Array<Range> &region,
                           const LowerArgs &args, arith::Analyzer *analyzer,
                           const char *operation) {
-  TVM_FFI_ICHECK(buffer->shape.size() == 2 && region.size() == 2);
+  const size_t ndim = buffer->shape.size();
+  TVM_FFI_ICHECK((ndim == 1 || ndim == 2) && region.size() == ndim);
   CHECK(buffer->strides.empty() &&
             analyzer->CanProveEqual(buffer->elem_offset, 0),
         ValueError)
@@ -72,28 +75,29 @@ GetSIMDGroupPartialRegion(const Buffer &buffer, const ffi::Array<Range> &region,
       << operation << ": requires a complete simdgroup execution range [0, "
       << warp_size << "), got " << args.thread_bounds;
 
-  SIMDGroupRegion tiles;
-  for (size_t d = 0; d < 2; ++d) {
+  const int64_t alignment = ndim == 1 ? 64 : 8;
+  SIMDGroupRegion tiles{{0, 0}, {1, 1}, 0};
+  for (size_t d = 0; d < ndim; ++d) {
     const auto *shape = buffer->shape[d].as<IntImmNode>();
     const auto *min = region[d]->min.as<IntImmNode>();
     const auto *extent = region[d]->extent.as<IntImmNode>();
     CHECK(shape && min && extent, ValueError)
         << operation << ": requires constant shape, min and extent for "
         << buffer->name;
-    CHECK(shape->value % 8 == 0 && min->value % 8 == 0 &&
-              extent->value % 8 == 0 && extent->value > 0,
+    CHECK(shape->value % alignment == 0 && min->value % alignment == 0 &&
+              extent->value % alignment == 0 && extent->value > 0,
           ValueError)
-        << operation
-        << ": requires 8-aligned shape, min and positive extent for "
-        << buffer->name;
+        << operation << ": requires " << alignment
+        << "-aligned shape, min and positive extent for " << buffer->name;
     CHECK(min->value >= 0 && extent->value <= shape->value &&
               min->value <= shape->value - extent->value,
           ValueError)
         << operation << ": region exceeds buffer bounds for " << buffer->name;
-    tiles.min[d] = min->value / 8;
-    tiles.extent[d] = extent->value / 8;
+    const size_t tile_dim = 2 - ndim + d;
+    tiles.min[tile_dim] = min->value / alignment;
+    tiles.extent[tile_dim] = extent->value / alignment;
   }
-  tiles.col_tiles = buffer->shape[1].as<IntImmNode>()->value / 8;
+  tiles.col_tiles = buffer->shape[ndim - 1].as<IntImmNode>()->value / alignment;
   const int64_t last_row = tiles.min[0] + tiles.extent[0] - 1;
   const int64_t last_col = tiles.min[1] + tiles.extent[1] - 1;
   constexpr int64_t kMaxMatrixIndex = std::numeric_limits<int32_t>::max();

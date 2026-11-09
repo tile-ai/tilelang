@@ -250,3 +250,75 @@ def test_partial_fill_launch_size_does_not_leak_between_kernels():
 
     calls = _fill_calls(_lower(kernel))
     assert [call.args[1].value for call in calls if _fill_value(call) == 3.0] == [2]
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("ndim", [3, 4])
+@pytest.mark.parametrize("scope", ["metal.simdgroup", "metal.cooperative_tensor"])
+@pytest.mark.parametrize("begin,end", [(0, 1), (1, 2), (0, 2)], ids=["prefix", "offset", "whole"])
+def test_high_dimensional_fill_diagnostic(ndim, scope, begin, end):
+    shape = (2,) * (ndim - 1) + (256,)
+
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local(shape, T.float32, scope=scope)
+            if ndim == 3:
+                T.fill(buf[begin:end, :, :], T.float32(3))
+            else:
+                T.fill(buf[begin:end, :, :, :], T.float32(3))
+
+    if (begin, end) == (0, 2):
+        _lower(kernel)
+    else:
+        with pytest.raises(ValueError, match="Metal partial fill:.*3 or more dimensions"):
+            _lower(kernel)
+
+
+def _make_1d_fill_kernel(begin, end, threads=32, active_threads=32):
+    @T.prim_func
+    def kernel(output: T.Tensor((192,), T.float32)):
+        with T.Kernel(1, threads=threads):
+            buf = T.alloc_local((192,), T.float32, scope="metal.simdgroup")
+            T.fill(buf, T.float32(-7))
+            tx = T.get_thread_binding()
+            if tx < active_threads:
+                T.fill(buf[begin:end], T.float32(3))
+            # T.copy currently requires a 2D simdgroup source. Store each matrix
+            # directly so the readback does not depend on partial-copy indexing.
+            for i in T.unroll(3):
+                T.evaluate(tvm.tirx.simdgroup_store(buf.data, i, T.address_of(output[i * 64]), 8))
+
+    return kernel
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "begin,end",
+    [(0, 64), (64, 128), (64, 192), (0, 192)],
+    ids=["prefix", "middle", "suffix", "whole"],
+)
+def test_1d_fill_preserves_outside(begin, end):
+    func = _make_1d_fill_kernel(begin, end)
+    compiled = tilelang.compile(func, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    output = torch.empty((192,), dtype=torch.float32, device="mps")
+    compiled(output)
+    torch.mps.synchronize()
+    reference = torch.full((192,), -7.0, dtype=torch.float32)
+    reference[begin:end] = 3
+    torch.testing.assert_close(output.cpu(), reference, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "begin,end,threads,active_threads,reason",
+    [
+        pytest.param(1, 65, 32, 32, "64-aligned", id="unaligned-min"),
+        pytest.param(0, 63, 32, 32, "64-aligned", id="unaligned-extent"),
+        pytest.param(64, 128, 64, 32, "exactly one simdgroup", id="predicated-group"),
+        pytest.param(64, 128, 32, 16, "complete simdgroup execution range", id="incomplete-group"),
+    ],
+)
+def test_1d_partial_fill_diagnostic(begin, end, threads, active_threads, reason):
+    with pytest.raises(ValueError, match="Metal partial fill:.*" + reason):
+        _lower(_make_1d_fill_kernel(begin, end, threads, active_threads))

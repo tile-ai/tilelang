@@ -56,6 +56,14 @@ Stmt LowerSIMDGroupPartialFill(const FillNode &op, const LowerArgs &lower_args,
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
+    if ((IsSIMDGroupBuffer(op.dst) || IsCooperativeTensorBuffer(op.dst)) &&
+        op.dst->shape.size() >= 3) {
+      CHECK(IsWholeBufferRegion(op.dst, op.region, analyzer), ValueError)
+          << "Metal partial fill: buffers with 3 or more dimensions are not "
+             "supported for "
+          << op.dst.scope() << " buffer " << op.dst->name
+          << "; fill the whole buffer instead";
+    }
     if (IsCooperativeTensorBuffer(op.dst)) {
       int region_elements = 1;
       for (auto r : op.region) {
@@ -87,7 +95,7 @@ struct Fill {
     }
 
     if (IsSIMDGroupBuffer(op.dst)) {
-      if (op.dst->shape.size() == 2 &&
+      if ((op.dst->shape.size() == 1 || op.dst->shape.size() == 2) &&
           !IsWholeBufferRegion(op.dst, op.region, analyzer)) {
         return LowerSIMDGroupPartialFill(op, lower_args, analyzer);
       }
