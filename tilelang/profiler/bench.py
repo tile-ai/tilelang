@@ -203,9 +203,10 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    # Create an int32 L2 cache flush buffer (`cache_size` MB).
-    cache_numel = cache_size * 1024 * 1024 // 4
-    cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
+    # NPU needs only device metadata; other backends need a scratch buffer.
+    cache_device = _cache_device(device_idx)
+    cache_numel = 0 if torch.device(cache_device).type == "npu" else cache_size * 1024 * 1024 // 4
+    cache = torch.empty(cache_numel, dtype=torch.int32, device=cache_device)
 
     # Warm cache maintenance outside the estimate to exclude backend setup.
     _flush_cache(cache)

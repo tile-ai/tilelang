@@ -244,9 +244,9 @@ def bench_with_msprof(
             total += profile
         return total
 
-    torch.npu.synchronize()
+    with torch.npu.device(cache.device), _defer_signals(), _prof_work_path(), _suppress_output(True):
+        torch.npu.synchronize()
 
-    with _defer_signals(), _prof_work_path(), _suppress_output(True):
         with torch_npu.profiler.profile(
             activities=[torch_npu.profiler.ProfilerActivity.NPU],
             schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1, skip_first=0),
