@@ -133,6 +133,101 @@ def _assert_no_undefined_vars(func):
     assert not tvm.tirx.analysis.undefined_vars(func.body, bound)
 
 
+@pytest.mark.parametrize("implicit_wait", [False, True])
+def test_async_gemm_versions_include_all_completion_regions(implicit_wait):
+    # The explicit wait completes both slices. With wait_group(1), the second
+    # GEMM directly reads one slice while completing the first GEMM's other slice.
+    stages = [0, 1, 1, 1, 1] if implicit_wait else [1, 0, 1, 1, 1]
+    orders = [2, 0, 1, 3, 4] if implicit_wait else [0, 3, 1, 2, 4]
+
+    @T.prim_func
+    def before(A: T.Tensor((256, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C0 = T.alloc_fragment((64, 64), T.float32)
+            C1 = T.alloc_fragment((64, 64), T.float32)
+            T.copy(B, B_shared)
+            for k in T.Pipelined(4, order=orders, stage=stages):
+                T.copy(A[k * 64 : (k + 1) * 64, :], shared[0:64, :])
+                T.copy(A[k * 64 : (k + 1) * 64, :], shared[64:128, :])
+                T.wgmma_gemm(shared[0:64, :], B_shared, C0, clear_accum=True)
+                T.wgmma_gemm(shared[64:128, :], B_shared, C1, clear_accum=True, annotations={"wg_wait": 1 if implicit_wait else -1})
+                T.wait_wgmma(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    # The copies occupy different stages; keep their synchronization local.
+    with tvm.transform.PassContext(config={"tirx.use_async_copy": False}):
+        mod = tl.transform.PipelinePlanning()(mod)
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+    allocations = [node.buffer for node in collect_nodes(mod["main"], tvm.tirx.AllocBuffer)]
+    allocations += [buf for block in collect_nodes(mod["main"], tvm.tirx.SBlock) for buf in block.alloc_buffers]
+    (shared,) = [buf for buf in allocations if buf.name == "shared"]
+    assert [int(dim) for dim in shared.shape] == [2, 128, 16]
+    assert any("tl_pipelined_num_stages" in loop.annotations for loop in collect_nodes(mod["main"], tvm.tirx.For))
+    _assert_no_undefined_vars(tl.transform.LowerOpaqueBlock()(mod)["main"])
+
+
+@pytest.mark.parametrize("read_rows", [64, 128])
+def test_async_gemm_keeps_slices_initialized_outside_pipeline(read_rows):
+    @T.prim_func
+    def before(A: T.Tensor((128, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C0 = T.alloc_fragment((read_rows, 64), T.float32)
+            C1 = T.alloc_fragment((64, 64), T.float32)
+            T.copy(A, shared)
+            T.copy(B, B_shared)
+            for _k in T.Pipelined(4, order=[2, 0, 1, 3], stage=[0, 1, 1, 1], annotations={"review_test": 1}):
+                T.copy(A[64:128, :], shared[64:128, :])
+                T.wgmma_gemm(shared[0:read_rows, :], B_shared, C0, clear_accum=True)
+                T.wgmma_gemm(shared[64:128, :], B_shared, C1, clear_accum=True)
+                T.wait_wgmma(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    (original_loop,) = [loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if "review_test" in loop.annotations]
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    (loop,) = [loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if "review_test" in loop.annotations]
+    assert set(loop.annotations) == {"review_test"}
+    tvm.ir.assert_structural_equal(loop.body, original_loop.body)
+    _assert_no_undefined_vars(mod["main"])
+
+
+def test_async_gemm_explicit_pipeline_falls_back_on_conditional_completion():
+    @T.prim_func
+    def before(A: T.Tensor((128, 32), T.float16), B: T.Tensor((128, 32), T.float16), flag: T.int32):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128, 32), T.float16)
+            B_shared = T.alloc_shared((128, 32), T.float16)
+            C = T.alloc_tmem((128, 128), T.float32)
+            mbar = T.alloc_barrier(1)
+            T.copy(B, B_shared)
+            for k in T.Pipelined(4, order=[1, 0, 2], stage=[0, 1, 1], annotations={"review_test": 1}):
+                T.copy(A, shared)
+                if flag > 0:
+                    T.tcgen05_gemm(shared, B_shared, C, transpose_B=True, clear_accum=True, mbar=mbar)
+                if flag > 0:
+                    T.mbarrier_wait_parity(mbar, k % 2)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_100"}))(mod)
+    mod = tl.transform.IfStmtBinding()(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    (original_loop,) = [loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if "review_test" in loop.annotations]
+    assert "software_pipeline_stage" in original_loop.annotations
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    (loop,) = [loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if "review_test" in loop.annotations]
+    assert set(loop.annotations) == {"review_test"}
+    # Falling back must preserve issue/wait conditions and the original order.
+    tvm.ir.assert_structural_equal(loop.body, original_loop.body)
+    assert int(loop.extent) == 4
+    _assert_no_undefined_vars(mod["main"])
+
+
 def test_async_pipeline_groups_multiple_copy_producers():
     @T.prim_func
     def before(

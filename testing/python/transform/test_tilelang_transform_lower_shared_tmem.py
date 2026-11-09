@@ -93,6 +93,25 @@ def test_dealloc_before_thread_return_keeps_auto_dealloc():
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
+def test_auto_deallocate_tmem_inserts_storage_sync():
+    """Auto-dealloc at block end must synchronize threads before warp 0 frees TMEM."""
+
+    @T.prim_func
+    def func():
+        with T.Kernel(1, threads=128):
+            C_tmem = T.alloc_tmem([128, 128], T.float32)
+            T.evaluate(C_tmem[0, 0])
+
+    mod = _apply(func)
+    body = mod["main"].body
+    assert_call_count(body, op="tl.ptx_init_tensor_memory", count=1)
+    assert_call_count(body, op="tl.ptx_deallocate_tensor_memory", count=1)
+    assert_call_count(body, op="tirx.tvm_storage_sync", count=2)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_untyped_buffer_reports_internal_error():
     valid_buffer = tvm.tirx.decl_buffer((1,), name="malformed_buffer")
     untyped_data = tvm.tirx.Var("malformed_buffer", "handle")
