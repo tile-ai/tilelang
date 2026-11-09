@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
-from functools import lru_cache
+from functools import cache
 
 import torch
 
@@ -14,29 +14,21 @@ from tilelang.utils.device import Event, device_synchronize as _cuda_synchronize
 _CACHE_FLUSH_ID = "tilelang::cache_flush"
 
 
-@lru_cache(maxsize=1)
+@cache
 def _get_npu_l2_cache_flush():
     import ctypes
 
-    try:
-        flush = ctypes.CDLL("libascendcl.so").aclrtDeviceL2CacheFlush
-    except (OSError, AttributeError) as error:
-        raise RuntimeError("NPU benchmarking requires a CANN runtime providing aclrtDeviceL2CacheFlush") from error
-    flush.argtypes = [ctypes.c_void_p]
-    flush.restype = ctypes.c_int
-    return flush
+    return ctypes.CDLL("libascendcl.so").aclrtDeviceL2CacheFlush
 
 
 def _flush_cache(cache: torch.Tensor) -> None:
-    """Use the runtime L2 flush on NPU and scratch-buffer eviction elsewhere."""
-    if cache.device.type != "npu":
+    if cache.device.type == "npu":
+        torch.npu.synchronize()
+        status = _get_npu_l2_cache_flush()(None)
+        if status:
+            raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
+    else:
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
-        return
-    flush = _get_npu_l2_cache_flush()
-    torch.npu.synchronize()
-    status = flush(None)
-    if status != 0:
-        raise RuntimeError(f"aclrtDeviceL2CacheFlush failed with error code {status}; check device and runtime support")
 
 
 class suppress_stdout_stderr:
