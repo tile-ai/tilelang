@@ -808,6 +808,9 @@ def test_indexed_dtype_view_requires_exact_dynamic_capacity_conversion():
     base, pointer = _descriptor(out, 0)
     assert base.buffer.data.same_as(owner.data)
     assert str(base.buffer.dtype) == "uint16"
+    expected = tirx.FloorDiv(tirx.Cast("int64", n), _int(2, "int64"))
+    tvm.ir.assert_structural_equal(pointer.args[1], expected)
+    tvm.ir.assert_structural_equal(base.buffer.shape[0], expected)
 
 
 @pytest.mark.pto

@@ -2099,6 +2099,17 @@ def test_explicit_symbolic_extent_allows_cross_row_start(col):
     ptr = _resolve_binding(call.args[0], func)
     assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr")
     assert _const(call.args[1]) == 0
+    extent_vars = []
+
+    def collect_var(node):
+        if isinstance(node, tvm.tirx.Var):
+            extent_vars.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(ptr.args[3], collect_var)
+    (loop_var,) = extent_vars
+    for iteration, expected in enumerate((64, 128)):
+        extent = tvm.tirx.stmt_functor.substitute(ptr.args[3], {loop_var: tvm.tirx.IntImm(str(loop_var.dtype), iteration)})
+        assert _const(extent) == expected
     if col == 64:
         kernel = _compile_pto(_symbolic_extent_kernel(col))
         assert "pto.vmi.vload(" in kernel.get_kernel_source()

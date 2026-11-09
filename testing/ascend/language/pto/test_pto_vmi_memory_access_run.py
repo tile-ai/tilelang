@@ -911,8 +911,8 @@ def test_dtype_view_gather_versioned_numeric(npu):
         generator = torch.Generator().manual_seed(5000 + trial)
         a = torch.randint(0, 256, (2, 256), dtype=torch.uint8, generator=generator)
         offsets = torch.randint(0, 53, (64,), dtype=torch.uint16, generator=generator)
-        words = a.view(torch.uint16)
-        expected = torch.stack([words[w, 11 + offsets.to(torch.int64)] for w in range(2)])
+        words = a.view(torch.uint16).to(torch.int32)
+        expected = torch.stack([words[w, 11 + offsets.to(torch.int64)] for w in range(2)]).to(torch.uint16)
         return [a, offsets], expected
 
     _run_trials(kernel, make_case, npu, trials=3)
