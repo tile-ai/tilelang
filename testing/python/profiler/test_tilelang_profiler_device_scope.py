@@ -65,7 +65,6 @@ def accelerator(monkeypatch):
         monkeypatch.setattr(api, "Event", Event)
         monkeypatch.setattr(torch, "empty", empty)
         if device_type == "npu":
-            from tilelang.profiler import npu
 
             def flush(reserved):
                 assert reserved is None
@@ -73,7 +72,7 @@ def accelerator(monkeypatch):
                 state.flushes += 1
                 return 0
 
-            monkeypatch.setattr(npu, "_get_device_l2_cache_flush", lambda: flush)
+            monkeypatch.setattr(torch_bench, "_get_npu_l2_cache_flush", lambda: flush)
         monkeypatch.setattr(device_utils, "IS_CUDA", device_type == "cuda")
         monkeypatch.setattr(device_utils, "IS_NPU", device_type == "npu")
         monkeypatch.setattr(device_utils, "IS_MPS", False)
@@ -221,8 +220,6 @@ def test_npu_profiler_input_generation_is_scoped(monkeypatch, accelerator):
 
 
 def test_npu_estimate_excludes_flush_cost_for_early_stopping(monkeypatch, accelerator):
-    from tilelang.profiler import npu
-
     state = accelerator("npu")
     now = 0.0
 
@@ -233,13 +230,10 @@ def test_npu_estimate_excludes_flush_cost_for_early_stopping(monkeypatch, accele
         def record(self):
             self.time = now
 
-        def synchronize(self):
-            pass
-
         def elapsed_time(self, end):
             return end.time - self.time
 
-    def flush():
+    def flush(cache=None):
         nonlocal now
         now += 100.0
 
@@ -248,8 +242,8 @@ def test_npu_estimate_excludes_flush_cost_for_early_stopping(monkeypatch, accele
         state.function()
         now += 2.0
 
-    monkeypatch.setattr(npu, "flush_l2_cache", flush)
-    monkeypatch.setattr(bench, "Event", Event)
+    monkeypatch.setattr(bench, "_flush_cache", flush)
+    monkeypatch.setattr(torch_bench, "_flush_cache", flush)
     monkeypatch.setattr(torch_bench, "Event", Event)
     result = bench.do_bench(function, device=torch.device("npu:2"), _n_warmup=1, _n_repeat=2, early_stop_baseline=3.0)
     assert result == 2.0

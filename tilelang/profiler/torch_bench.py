@@ -5,12 +5,38 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable
+from functools import lru_cache
 
 import torch
 
 from tilelang.utils.device import Event, device_synchronize as _cuda_synchronize
 
 _CACHE_FLUSH_ID = "tilelang::cache_flush"
+
+
+@lru_cache(maxsize=1)
+def _get_npu_l2_cache_flush():
+    import ctypes
+
+    try:
+        flush = ctypes.CDLL("libascendcl.so").aclrtDeviceL2CacheFlush
+    except (OSError, AttributeError) as error:
+        raise RuntimeError("NPU benchmarking requires a CANN runtime providing aclrtDeviceL2CacheFlush") from error
+    flush.argtypes = [ctypes.c_void_p]
+    flush.restype = ctypes.c_int
+    return flush
+
+
+def _flush_cache(cache: torch.Tensor | None = None) -> None:
+    """Flush the current NPU's L2, or evict L2 with a supplied scratch buffer."""
+    if cache is not None:
+        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
+        return
+    flush = _get_npu_l2_cache_flush()
+    torch.npu.synchronize()
+    status = flush(None)
+    if status != 0:
+        raise RuntimeError(f"aclrtDeviceL2CacheFlush failed with error code {status}; check device and runtime support")
 
 
 class suppress_stdout_stderr:
@@ -69,20 +95,13 @@ def bench_with_cuda_events(
     device_idx: int | torch.device | None,
 ) -> float | list[float]:
     """Benchmark using CUDA/HIP, MPS, or NPU events for timing."""
-    if cache is None:
-        from .npu import flush_l2_cache as flush_cache
-    else:
-
-        def flush_cache():
-            cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
-
     # Create timing events
     start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
     end_events = [Event(enable_timing=True) for _ in range(n_repeat)]
 
     # Run benchmark iterations
     for i in range(n_repeat):
-        flush_cache()
+        _flush_cache(cache)
         start_events[i].record()
         fn()
         end_events[i].record()

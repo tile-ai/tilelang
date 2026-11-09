@@ -16,6 +16,7 @@ from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
     _cuda_synchronize as _cuda_synchronize,
+    _flush_cache,
     bench_with_cuda_events as _bench_with_cuda_events,
     bench_with_cudagraph as _bench_with_cudagraph,
     bench_with_cupti as _bench_with_cupti,
@@ -195,8 +196,8 @@ def _do_bench_impl(
     cache_size: int,
     early_stop_baseline: float | None = None,
 ) -> float | list[float]:
-    cache_device_type = torch.device(_cache_device(device_idx)).type
     if backend in ("cupti", "cudagraph"):
+        cache_device_type = torch.device(_cache_device(device_idx)).type
         if cache_device_type == "mps":
             raise ValueError(f'{backend} timing requires CUDA/HIP; use "event" or "wall" for MPS')
         if cache_device_type == "npu":
@@ -206,41 +207,26 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    if cache_device_type == "npu":
-        from .npu import flush_l2_cache as flush_cache
-
-        cache = None
-    else:
-        cache_numel = cache_size * 1024 * 1024 // 4
+    # NPU uses the runtime API; other devices use a scratch buffer.
+    cache = None
+    cache_numel = cache_size * 1024 * 1024 // 4
+    if torch.device(_cache_device(device_idx)).type != "npu":
         cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
 
-        def flush_cache():
-            # Read independent chunks without dirtying the flush buffer or
-            # allocating a full-buffer int64 cast.
-            cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
-
     # Warm cache maintenance outside the estimate to exclude backend setup.
-    flush_cache()
+    _flush_cache(cache)
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
-    start_event = Event(enable_timing=True)
-    end_event = Event(enable_timing=True)
-    if cache_device_type == "npu":
-        # The synchronous host flush must not inflate the kernel estimate or
-        # trigger early stopping solely because cache maintenance is expensive.
-        estimate_ms = 0.0
-        for _ in range(5):
-            flush_cache()
-            start_event.record()
-            fn()
-            end_event.record()
-            end_event.synchronize()
-            estimate_ms += start_event.elapsed_time(end_event) / 5
+    if cache is None:
+        # Keep synchronous NPU flushing outside the estimate and early-stop check.
+        estimate_ms = _bench_with_cuda_events(fn, cache, 5, None, "mean", device_idx)
     else:
+        start_event = Event(enable_timing=True)
+        end_event = Event(enable_timing=True)
         start_event.record()
         for _ in range(5):
-            flush_cache()
+            _flush_cache(cache)
             fn()
         end_event.record()
         start_event.synchronize()

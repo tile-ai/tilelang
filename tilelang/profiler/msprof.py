@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 import torch
 
-from .npu import flush_l2_cache
+from .torch_bench import _flush_cache
 
 
 def bench_with_msprof(
@@ -244,7 +244,7 @@ def bench_with_msprof(
             total += profile
         return total
 
-    flush_l2_cache()
+    _flush_cache()
 
     with _defer_signals(), _prof_work_path(), _suppress_output(True):
         with torch_npu.profiler.profile(
@@ -259,7 +259,7 @@ def bench_with_msprof(
             ),
         ) as prof:
             for _ in range(n_repeat):
-                flush_l2_cache()
+                _flush_cache()
                 fn()
             torch.npu.synchronize()
             prof.step()
