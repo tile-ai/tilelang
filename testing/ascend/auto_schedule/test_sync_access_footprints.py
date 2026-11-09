@@ -21,7 +21,7 @@ def _events(program, disable_reuse=False, auto_schedule=False):
 
 
 @pytest.mark.parametrize("auto_schedule", [False, True], ids=["sync", "schedule-and-sync"])
-@pytest.mark.parametrize("layout", ["cross_row", "short_cross_row", "transposed"])
+@pytest.mark.parametrize("layout", ["cross_row", "short_cross_row", "dense_cross_row", "transposed"])
 def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
     width = 256 if layout == "short_cross_row" else 128
     transposed = layout == "transposed"
@@ -36,6 +36,11 @@ def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
                 T.copy(A, view[:64, 1])
                 with T.SimdVF():
                     T.simd.vsts(out[0], T.simd.vld(view[width - 64, 0]), dist="NORM_B16")
+            elif layout == "dense_cross_row":
+                view = T.view(work, shape=(2, width), strides=(width, 1))
+                T.copy(A, view[1, :64])
+                with T.SimdVF():
+                    T.simd.vsts(out[0], T.simd.vld(view[0, width - 64]), dist="NORM_B16")
             else:
                 T.copy(A, work[1, :64])
                 with T.SimdVF():
@@ -56,6 +61,26 @@ def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
             events.append(call)
     assert trace == ["copy", "set", "wait", "load", "copy"]
     tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+
+
+@pytest.mark.parametrize("row", [0, 1], ids=["overlap", "adjacent-slot"])
+def test_dense_pointer_view_preserves_slot_dependency(row):
+    @T.prim_func
+    def main(A: T.Tensor((128,), "bfloat16"), Out: T.Tensor((128,), "bfloat16")):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 64), "float32")
+            view = T.view(work, (2, 128), "bfloat16")
+            out = T.alloc_shared((128,), "bfloat16")
+            with T.Stage(0):
+                T.copy(A, view[0, :])
+                with T.SimdVF():
+                    T.simd.vsts(out[0], T.simd.vld(view[0, 0]), dist="NORM_B16")
+                T.copy(A, view[row, :])
+                T.copy(out, Out)
+
+    events = _events(main)
+    assert (("set", "V_MTE2") in events) == (row == 0)
+    assert (("wait", "V_MTE2") in events) == (row == 0)
 
 
 @pytest.mark.parametrize("fill_first", [False, True], ids=["protect-source-reuse", "wait-for-source-padding"])

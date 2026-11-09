@@ -941,10 +941,24 @@ private:
 
     bool reconstructed = false;
     const auto *ext_imm = extent.as<IntImmNode>();
-    // Explicit strides, including dense T.view layouts, stay opaque
-    // for multi-element runs until their physical image is proved.
+    // A dense row-major view has the same logical footprint as an implicit
+    // layout. Keep physical lifetime analysis conservative until its storage
+    // image is proved independently.
+    bool dense = buffer->strides.empty();
+    if (!dense && mode_ == AccessMode::kLogical &&
+        buffer->strides.size() == ndim) {
+      dense = true;
+      PrimExpr stride = Integer(1);
+      for (size_t k = ndim; k-- > 0;) {
+        if (!ana_.CanProveEqual(buffer->strides[k], stride)) {
+          dense = false;
+          break;
+        }
+        stride = stride * buffer->shape[k];
+      }
+    }
     if (ext_imm && ext_imm->value > 0 && load->indices.size() == ndim &&
-        (ext_imm->value == 1 || buffer->strides.empty())) {
+        (ext_imm->value == 1 || dense)) {
       int64_t remaining = ext_imm->value;
       reconstructed = true;
       for (size_t k = ndim; k-- > 0;) {
