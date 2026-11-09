@@ -201,7 +201,7 @@ private:
   size_t non_unit_step_loop_depth_{0};
   /*! \brief Whether this task contains a loop_break intrinsic. */
   bool has_loop_break_{false};
-  // Pointer consumers whose physical footprint is not encoded by access_ptr.
+  // Pointer consumers whose addressing is not fully encoded by access_ptr.
   bool opaque_pointer_context_{false};
   /*! \brief The buffers that the current block reads */
   std::vector<Buffer> read_buffers_;
@@ -933,6 +933,16 @@ private:
     size_t ndim = buffer->shape.size();
     std::vector<arith::IntSet> region(ndim);
 
+    if (mode_ == AccessMode::kLogical && opaque_pointer_context_) {
+      // Gather/scatter indices and extra offsets can reach beyond the compact
+      // access_ptr span even in a dense view. Keep the whole logical buffer
+      // until the consumer's addressing operands have a proven footprint.
+      for (size_t k = 0; k < ndim; ++k)
+        region[k] =
+            arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
+      return region;
+    }
+
     // A positive stride can only shorten a 1-D run in logical coordinates.
     if (mode_ == AccessMode::kLogical && ndim == 1 &&
         load->indices.size() == 1 &&
@@ -941,10 +951,24 @@ private:
 
     bool reconstructed = false;
     const auto *ext_imm = extent.as<IntImmNode>();
-    // Explicit strides, including dense T.view layouts, stay opaque
-    // for multi-element runs until their physical image is proved.
+    // A dense row-major view has the same logical footprint as an implicit
+    // layout. Keep physical lifetime analysis conservative until its storage
+    // image is proved independently.
+    bool dense = buffer->strides.empty();
+    if (!dense && mode_ == AccessMode::kLogical &&
+        buffer->strides.size() == ndim) {
+      dense = true;
+      PrimExpr stride = Integer(1);
+      for (size_t k = ndim; k-- > 0;) {
+        if (!ana_.CanProveEqual(buffer->strides[k], stride)) {
+          dense = false;
+          break;
+        }
+        stride = stride * buffer->shape[k];
+      }
+    }
     if (ext_imm && ext_imm->value > 0 && load->indices.size() == ndim &&
-        (ext_imm->value == 1 || buffer->strides.empty())) {
+        (ext_imm->value == 1 || dense)) {
       int64_t remaining = ext_imm->value;
       reconstructed = true;
       for (size_t k = ndim; k-- > 0;) {
@@ -1076,8 +1100,8 @@ private:
           op->op.same_as(tl::simd_vsstb()) ||
           (op->op.same_as(tl::simd_vld2()) && op->args.size() >= 3)) {
         // SIMD gather/scatter and offset-bearing vld2 carry separate
-        // addressing operands outside access_ptr. The
-        // pointer's compact extent cannot establish physical lifetime coverage.
+        // addressing operands outside access_ptr. Its compact extent cannot
+        // establish logical dependencies or physical lifetime coverage.
         bool previous_context = opaque_pointer_context_;
         opaque_pointer_context_ = true;
         StmtExprVisitor::VisitExpr_(op);

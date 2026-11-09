@@ -21,7 +21,7 @@ def _events(program, disable_reuse=False, auto_schedule=False):
 
 
 @pytest.mark.parametrize("auto_schedule", [False, True], ids=["sync", "schedule-and-sync"])
-@pytest.mark.parametrize("layout", ["cross_row", "short_cross_row", "transposed"])
+@pytest.mark.parametrize("layout", ["cross_row", "short_cross_row", "dense_cross_row", "transposed"])
 def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
     width = 256 if layout == "short_cross_row" else 128
     transposed = layout == "transposed"
@@ -36,6 +36,11 @@ def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
                 T.copy(A, view[:64, 1])
                 with T.SimdVF():
                     T.simd.vsts(out[0], T.simd.vld(view[width - 64, 0]), dist="NORM_B16")
+            elif layout == "dense_cross_row":
+                view = T.view(work, shape=(2, width), strides=(width, 1))
+                T.copy(A, view[1, :64])
+                with T.SimdVF():
+                    T.simd.vsts(out[0], T.simd.vld(view[0, width - 64]), dist="NORM_B16")
             else:
                 T.copy(A, work[1, :64])
                 with T.SimdVF():
@@ -56,6 +61,82 @@ def test_contiguous_pointer_load_keeps_dma_dependency(layout, auto_schedule):
             events.append(call)
     assert trace == ["copy", "set", "wait", "load", "copy"]
     tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+
+
+@pytest.mark.parametrize("row", [0, 1], ids=["overlap", "adjacent-slot"])
+def test_dense_pointer_view_preserves_slot_dependency(row):
+    @T.prim_func
+    def main(A: T.Tensor((128,), "bfloat16"), Out: T.Tensor((128,), "bfloat16")):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 64), "float32")
+            view = T.view(work, (2, 128), "bfloat16")
+            out = T.alloc_shared((128,), "bfloat16")
+            with T.Stage(0):
+                T.copy(A, view[0, :])
+                with T.SimdVF():
+                    T.simd.vsts(out[0], T.simd.vld(view[0, 0]), dist="NORM_B16")
+                T.copy(A, view[row, :])
+                T.copy(out, Out)
+
+    events = _events(main)
+    assert (("set", "V_MTE2") in events) == (row == 0)
+    assert (("wait", "V_MTE2") in events) == (row == 0)
+
+
+@pytest.mark.parametrize("layout", ["dense-view", "implicit", "flat"])
+@pytest.mark.parametrize("access", ["gather", "gatherb", "scatter", "vld2-offset", "vld2", "contiguous"])
+def test_indirect_pointer_access_orders_dma_overwrite(layout, access):
+    shape = (512,) if layout == "flat" else (2, 256)
+    base = (0,) if layout == "flat" else (0, 0)
+
+    @T.prim_func
+    def main(A: T.Tensor(shape, "float32"), B: T.Tensor((256,), "float32")):
+        with T.Kernel(1):
+            work = T.alloc_shared(shape, "float32")
+            if layout == "dense-view":
+                view = T.view(work, shape=(2, 256), strides=(256, 1))
+            else:
+                view = work
+            with T.Stage(0):
+                T.copy(A, view)
+                with T.SimdVF():
+                    if access == "gather":
+                        T.evaluate(T.simd.vgather2(view[base], T.simd.vdup(T.uint32(256), "uint32")))
+                    elif access == "gatherb":
+                        T.evaluate(T.simd.vgatherb(view[base], T.simd.vdup(T.uint32(1024), "uint32")))
+                    elif access == "scatter":
+                        T.simd.vscatter(T.simd.vdup(T.float32(1), "float32"), view[base], T.simd.vdup(T.uint32(256), "uint32"))
+                    elif access == "vld2-offset":
+                        first, second = T.simd.vld2(view[base], dist="DINTLV_B32", off=T.int32(256))
+                        T.evaluate(first)
+                        T.evaluate(second)
+                    elif access == "vld2":
+                        first, second = T.simd.vld2(view[base], dist="DINTLV_B32")
+                        T.evaluate(first)
+                        T.evaluate(second)
+                    else:
+                        T.evaluate(T.simd.vld(view[base]))
+                if layout == "flat":
+                    T.copy(B, view[256:])
+                else:
+                    T.copy(B, view[1, :])
+
+    after = schedule(main, through="InsertSync", auto_schedule=False)
+    trace = []
+    events = []
+    for call in nodes(after, tirx.Call):
+        if call.op.name == "tl.tileop.ascend_copy":
+            trace.append("copy")
+        elif call.op.name in ("tl.simd.vgather2", "tl.simd.vgatherb", "tl.simd.vscatter", "tl.simd.vld2", "tl.simd.vld"):
+            trace.append("access")
+        elif call.op.name in ("tl.ascend_set_flag", "tl.ascend_wait_flag") and call.args[0].value == "V_MTE2":
+            trace.append("set" if call.op.name == "tl.ascend_set_flag" else "wait")
+            events.append(call)
+    if access in ("contiguous", "vld2"):
+        assert trace == ["copy", "access", "copy"]
+    else:
+        assert trace == ["copy", "access", "set", "wait", "copy"]
+        tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
 
 
 @pytest.mark.parametrize("fill_first", [False, True], ids=["protect-source-reuse", "wait-for-source-padding"])
