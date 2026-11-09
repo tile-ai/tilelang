@@ -24,7 +24,8 @@ def test_hip_vectorized_narrow_xor_codegen(dtype):
     target = {"kind": "hip", "mcpu": "gfx950"}
     with tvm.target.Target(target):
         artifact = tilelang.lower(_kernel(dtype), target=target)
-    assert artifact.kernel_source
+    # This marker is emitted only for the packed four-lane broadcast path.
+    assert "0x01010101u" in artifact.kernel_source
 
 
 @tilelang.testing.requires_rocm
@@ -39,16 +40,29 @@ def test_hip_vectorized_narrow_xor_runtime(dtype):
     torch.testing.assert_close(output, x.to(getattr(torch, dtype)) ^ 3, rtol=0, atol=0)
 
 
+def _broadcast_kernel(dtype):
+    @T.prim_func
+    def main(value: T.int32, out: T.Tensor((4,), dtype)):
+        with T.Kernel(1, threads=1):
+            for i in T.Parallel(4):
+                out[i] = T.cast(value, dtype)
+
+    return main
+
+
 @pytest.mark.parametrize("dtype", ["int8", "uint8"])
 def test_hip_dynamic_narrow_broadcast_codegen(dtype):
-    from tvm import tirx
+    target = {"kind": "hip", "mcpu": "gfx950"}
+    with tvm.target.Target(target):
+        artifact = tilelang.lower(_broadcast_kernel(dtype), target=target)
+    assert "0x01010101u" in artifact.kernel_source
 
-    value = tirx.Var("value", dtype)
-    func = tirx.PrimFunc([value], tirx.Evaluate(tirx.Broadcast(value, 4)))
-    func = func.with_attr("global_symbol", "broadcast")
-    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
-    build = tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True)
-    if build is None:
-        pytest.skip("TileLang was built without the ROCm code generator")
-    source = build(tvm.IRModule({"broadcast": func}), tvm.target.Target("rocm")).inspect_source()
-    assert "value" in source
+
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize("dtype,values", [("int8", [-128, -1, 0, 127]), ("uint8", [0, 127, 128, 255])])
+def test_hip_dynamic_narrow_broadcast_runtime(dtype, values):
+    kernel = tilelang.compile(_broadcast_kernel(dtype), target="hip")
+    for value in values:
+        output = torch.empty(4, device="cuda", dtype=getattr(torch, dtype))
+        kernel(value, output)
+        torch.testing.assert_close(output, torch.full_like(output, value), rtol=0, atol=0)
