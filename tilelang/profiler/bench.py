@@ -55,10 +55,6 @@ def do_bench(
     explicit CUDA/HIP, MPS, or NPU device enables synchronization before and after
     each wall-clock sample, including launch and synchronization overhead.
 
-    NPU event and msprof timing require a device and CANN runtime supporting
-    aclrtDeviceL2CacheFlush. Cache flushing is excluded from the returned kernel
-    timings, including any deferred output writeback performed by the next flush.
-
     Args:
         fn: Function to benchmark
         warmup: Target warmup time in milliseconds (default: 25)
@@ -72,7 +68,7 @@ def do_bench(
             cache buffers, and synchronization are scoped to that device.
             Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
             Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
-        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall" and NPU timing
+        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
@@ -207,18 +203,16 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    # NPU uses the runtime API; other devices use a scratch buffer.
-    cache = None
+    # Create an int32 L2 cache flush buffer (`cache_size` MB).
     cache_numel = cache_size * 1024 * 1024 // 4
-    if torch.device(_cache_device(device_idx)).type != "npu":
-        cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
+    cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
 
     # Warm cache maintenance outside the estimate to exclude backend setup.
     _flush_cache(cache)
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
-    if cache is None:
+    if cache.device.type == "npu":
         # Keep synchronous NPU flushing outside the estimate and early-stop check.
         estimate_ms = _bench_with_cuda_events(fn, cache, 5, None, "mean", device_idx)
     else:

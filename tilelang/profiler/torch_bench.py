@@ -27,9 +27,9 @@ def _get_npu_l2_cache_flush():
     return flush
 
 
-def _flush_cache(cache: torch.Tensor | None = None) -> None:
-    """Flush the current NPU's L2, or evict L2 with a supplied scratch buffer."""
-    if cache is not None:
+def _flush_cache(cache: torch.Tensor) -> None:
+    """Use the runtime L2 flush on NPU and scratch-buffer eviction elsewhere."""
+    if cache.device.type != "npu":
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
         return
     flush = _get_npu_l2_cache_flush()
@@ -88,13 +88,13 @@ class suppress_stdout_stderr:
 
 def bench_with_cuda_events(
     fn: Callable,
-    cache: torch.Tensor | None,
+    cache: torch.Tensor,
     n_repeat: int,
     quantiles: list[float] | None,
     return_mode: str,
     device_idx: int | torch.device | None,
 ) -> float | list[float]:
-    """Benchmark using CUDA/HIP, MPS, or NPU events for timing."""
+    """Benchmark using CUDA/HIP or MPS events for timing."""
     # Create timing events
     start_events = [Event(enable_timing=True) for _ in range(n_repeat)]
     end_events = [Event(enable_timing=True) for _ in range(n_repeat)]

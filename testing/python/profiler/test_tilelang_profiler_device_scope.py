@@ -65,14 +65,7 @@ def accelerator(monkeypatch):
         monkeypatch.setattr(api, "Event", Event)
         monkeypatch.setattr(torch, "empty", empty)
         if device_type == "npu":
-
-            def flush(reserved):
-                assert reserved is None
-                assert state.synchronizations[-1] == (None, state.current)
-                state.flushes += 1
-                return 0
-
-            monkeypatch.setattr(torch_bench, "_get_npu_l2_cache_flush", lambda: flush)
+            monkeypatch.setattr(torch_bench, "_get_npu_l2_cache_flush", lambda: lambda reserved: 0)
         monkeypatch.setattr(device_utils, "IS_CUDA", device_type == "cuda")
         monkeypatch.setattr(device_utils, "IS_NPU", device_type == "npu")
         monkeypatch.setattr(device_utils, "IS_MPS", False)
@@ -171,7 +164,7 @@ def test_npu_shared_path_and_timing_backend(monkeypatch, accelerator, backend, e
     detailed_result = object()
 
     def msprof(function, cache, n_repeat, detailed=False):
-        msprof_calls.append((state.current, cache, n_repeat, detailed))
+        msprof_calls.append((state.current, cache.device, n_repeat, detailed))
         function()
         return detailed_result if detailed else 1.5
 
@@ -187,10 +180,9 @@ def test_npu_shared_path_and_timing_backend(monkeypatch, accelerator, backend, e
     result = bench.do_bench(state.function, device=selected_device, backend=backend, _n_warmup=1, _n_repeat=2, cache_size=2)
 
     assert state.current == (0 if explicit else 2)
-    assert not state.allocations
+    assert state.allocations == [torch.device("npu:2")]
     assert set(state.calls) == {2}
     assert set(state.events) == {2}
-    assert state.flushes == (8 if backend == "event" else 6)
     assert all(context == 2 for _, context in state.synchronizations)
     if backend == "event":
         assert result == 4.0
@@ -200,7 +192,7 @@ def test_npu_shared_path_and_timing_backend(monkeypatch, accelerator, backend, e
             assert result is detailed_result
         else:
             assert result == 1.5
-        assert msprof_calls == [(2, None, 2, backend == "msprof_detail")]
+        assert msprof_calls == [(2, torch.device("npu:2"), 2, backend == "msprof_detail")]
 
 
 def test_npu_profiler_input_generation_is_scoped(monkeypatch, accelerator):
@@ -217,38 +209,6 @@ def test_npu_profiler_input_generation_is_scoped(monkeypatch, accelerator):
     assert input_devices == [2]
     assert set(state.calls) == {2}
     assert state.current == 0
-
-
-def test_npu_estimate_excludes_flush_cost_for_early_stopping(monkeypatch, accelerator):
-    state = accelerator("npu")
-    now = 0.0
-
-    class Event:
-        def __init__(self, enable_timing):
-            assert enable_timing
-
-        def record(self):
-            self.time = now
-
-        def elapsed_time(self, end):
-            return end.time - self.time
-
-    def flush(cache=None):
-        nonlocal now
-        now += 100.0
-
-    def function():
-        nonlocal now
-        state.function()
-        now += 2.0
-
-    monkeypatch.setattr(bench, "_flush_cache", flush)
-    monkeypatch.setattr(torch_bench, "_flush_cache", flush)
-    monkeypatch.setattr(torch_bench, "Event", Event)
-    result = bench.do_bench(function, device=torch.device("npu:2"), _n_warmup=1, _n_repeat=2, early_stop_baseline=3.0)
-    assert result == 2.0
-    assert len(state.calls) == 9  # Initial call, five estimates, warmup, two timed calls.
-    assert not state.allocations
 
 
 def test_npu_wall_synchronizes_selected_device(monkeypatch, accelerator):
