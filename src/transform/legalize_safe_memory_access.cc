@@ -670,8 +670,7 @@ private:
                     Cast(address_dtype, bound_buffer->shape[0]);
     } else {
       for (size_t i = 0; i < bound_buffer->shape.size(); ++i) {
-        flat_extent =
-            flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
+        flat_extent = flat_extent * Cast(address_dtype, bound_buffer->shape[i]);
       }
     }
     PrimExpr elem_offset = bound_buffer->elem_offset.defined()

@@ -1174,17 +1174,11 @@ def test_tvm_access_ptr_padded_strides_included_in_bound():
     # Padded span is 128 bytes: offsets 64/80/96/112 with extent 16 are in-bounds.
     for block_idx in (0, 1, 2, 3):
         substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
-        assert analyzer.can_prove(substituted), (
-            f"in-bounds padded block {block_idx} was predicated off; predicate={predicate}"
-        )
+        assert analyzer.can_prove(substituted), f"in-bounds padded block {block_idx} was predicated off; predicate={predicate}"
     # Offset 128 + extent 16 exceeds the 128-byte padded span.
     for block_idx in (4, 5):
         substituted = analyzer.simplify(tvm.tirx.stmt_functor.substitute(predicate, {b_var: tvm.tirx.const(block_idx, "int32")}))
-        assert analyzer.can_prove(tvm.tirx.Not(substituted)), (
-            f"OOB padded block {block_idx} should be false; predicate={predicate}"
-        )
-
-
+        assert analyzer.can_prove(tvm.tirx.Not(substituted)), f"OOB padded block {block_idx} should be false; predicate={predicate}"
 
 
 if __name__ == "__main__":
