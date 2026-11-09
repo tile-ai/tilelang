@@ -112,7 +112,16 @@ PrimExpr NormalizeFloat4ByteViewPtr(const Buffer &buf,
                make_const(DataType::Int(32), 1)});
 }
 
-// Map float32 source (L0C) + destination dtype → quant_pre hardware mode.
+// Map the L0C source dtype + destination dtype → quant_pre hardware mode.
+// The int32 rows use the same `QuantMode_t` / `asc_quant_mode` numbering as the
+// float32 rows; the a2a3 costmodel reuses these names with a different
+// numbering (DEQF16=5, QS322BF16_PRE=35, REQ8=3) and must not be used here.
+//
+// The int32 rows are scalar (per-tensor) quantisation modes that multiply the
+// accumulator by the fixpipe QUANT_PRE register, and there is no unscaled
+// int32→bf16/fp16 mode. EmitInt32L0CDequantScale_ writes a unit scale before
+// such a copy, which turns the mode into a plain cast; `asc_init()` does not
+// reset QUANT_PRE, so inheriting the previous kernel's scale is not safe.
 static int GetCCQuantPre(DataType src_dtype, DataType dst_dtype) {
   if (src_dtype.is_float() && src_dtype.bits() == 32) {
     if (dst_dtype.is_bfloat16())
@@ -127,8 +136,13 @@ static int GetCCQuantPre(DataType src_dtype, DataType dst_dtype) {
       return 22; // REQ4
     if (dst_dtype.is_int() && dst_dtype.bits() == 16)
       return 28; // DEQS16
+  } else if (src_dtype.is_int() && src_dtype.bits() == 32) {
+    if (dst_dtype.is_bfloat16())
+      return kQuantQS322BF16Pre;
+    if (dst_dtype.is_float16())
+      return kQuantDEQF16;
   }
-  return 0; // NoQuant
+  return kQuantNoQuant;
 }
 
 void CheckCompactL0Region(const Buffer &buffer, const Array<Range> &ranges,
