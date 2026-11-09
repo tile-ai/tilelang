@@ -1311,9 +1311,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         this->VisitStmt(op->body);
       }
       s.stmt = op;
-      LoopCarryInfo loop = uniform_condition
-                               ? LoopCarryInfo::FromWhile(op)
-                               : LoopCarryInfo::None();
+      LoopCarryInfo loop = uniform_condition ? LoopCarryInfo::FromWhile(op)
+                                             : LoopCarryInfo::None();
       s.access = Summarize(std::move(scope_.back()), loop);
       scope_.pop_back();
       if (!cond_access.empty()) {

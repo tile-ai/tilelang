@@ -577,20 +577,13 @@ def test_while_loop_carry_shared_reuse():
     syncs = _storage_syncs(loop)
     assert len(syncs) == 2
 
-    writes = [
-        store
-        for store in collect_nodes(loop, tirx.BufferStore)
-        if store.buffer.scope() == "shared"
-    ]
+    writes = [store for store in collect_nodes(loop, tirx.BufferStore) if store.buffer.scope() == "shared"]
     assert len(writes) == 1
     reads = [
         store
         for store in collect_nodes(loop, tirx.BufferStore)
         if store.buffer.scope() == "local"
-        and any(
-            load.buffer.data.same_as(writes[0].buffer.data)
-            for load in collect_nodes(store.value, tirx.BufferLoad)
-        )
+        and any(load.buffer.data.same_as(writes[0].buffer.data) for load in collect_nodes(store.value, tirx.BufferLoad))
     ]
     assert len(reads) == 1
     _assert_stmt_order(
