@@ -16,6 +16,37 @@ TILE = 16
 STEPS = 4
 
 
+@tilelang.testing.requires_ascend
+def test_dense_view_gather_finishes_before_dma_overwrite():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 256), "float32"), B: T.Tensor((256,), "float32"), Out: T.Tensor((64,), "float32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 256), "float32")
+            view = T.view(work, shape=(2, 256), strides=(256, 1))
+            out = T.alloc_shared((64,), "float32")
+            with T.Stage(0):
+                T.copy(A, view)
+                with T.SimdVF():
+                    index = T.simd.alloc_var("uint32")
+                    index = T.simd.vdup(T.uint32(0), "uint32")
+                    # Delay the indirect read so an unordered DMA can overtake
+                    # it. Index 256 reaches row 1 despite the row-0 base pointer.
+                    for _ in T.serial(256):
+                        index = T.simd.vadds(index, T.uint32(1))
+                    T.simd.vsts(out[0], T.simd.vgather2(view[0, 0], index))
+                T.copy(B, view[1, :])
+                T.copy(out, Out)
+
+    compiled = tilelang.compile(main, target="ascend", out_idx=-1)
+    a = torch.full((2, 256), 100.0, device="npu")
+    b = torch.full((256,), 200.0, device="npu")
+    expected = torch.full((64,), 100.0)
+    for _ in range(10):
+        torch.testing.assert_close(compiled(a, b).cpu(), expected, rtol=0, atol=0)
+
+
 def _make_padding_live_in_program(first_setter_stage, last_setter_stage, steps=4):
     @T.prim_func
     def main(A: T.Tensor((steps, 30), "float32"), O: T.Tensor((steps, 32), "float32")):
