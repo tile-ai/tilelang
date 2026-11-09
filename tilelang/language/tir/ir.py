@@ -1,6 +1,9 @@
 import tvm.tirx.script.builder.ir as _ir
 from tvm.tirx.script.builder import frame
 from tvm.tirx import PrimExpr, IntImm, StringImm
+from tvm.tirx import Cast as _Cast, const as _const
+from tvm.tirx import Call as _Call, Let as _Let, Var as _Var
+from tvm.tirx.stmt_functor import post_order_visit as _post_order_visit
 from tvm.tirx import _ffi_api as _tir_ffi
 from tvm.tirx.expr import Select as _Select
 from typing import Any
@@ -213,7 +216,47 @@ exp2 = _op_wrapper(_tir_op.exp2)
 exp10 = _op_wrapper(_tir_op.exp10)
 extract_lane = _tir_op.extract_lane
 floor = _op_wrapper(_tir_op.floor)
-ceildiv = _op_wrapper(_tir_op.ceildiv)
+
+
+@_op_wrapper
+def ceildiv(lhs: PyPrimExpr, rhs: PyPrimExpr, span=None) -> PrimExpr:
+    """Return the mathematical ceiling of integer division.
+
+    Unlike the usual ``(lhs + rhs - 1) // rhs`` identity, this also works
+    for negative divisors and avoids overflowing the biased numerator.
+    """
+    # The quotient and remainder each reference their operands. Bind any
+    # expression containing a call once so a stateful call is not repeated.
+    bindings = []
+
+    def bind_calls(value, name):
+        if not isinstance(value, PrimExpr):
+            return value
+        has_call = False
+
+        def visit(node):
+            nonlocal has_call
+            has_call = has_call or isinstance(node, _Call)
+
+        _post_order_visit(value, visit)
+        if not has_call:
+            return value
+        var = _Var(name, value.dtype)
+        bindings.append((var, value))
+        return var
+
+    lhs = bind_calls(lhs, "ceildiv_lhs")
+    rhs = bind_calls(rhs, "ceildiv_rhs")
+    quotient = _tir_op.floordiv(lhs, rhs, span)
+    if isinstance(lhs, (int, IntImm)) and isinstance(rhs, (int, IntImm)):
+        return _const(-(-int(lhs) // int(rhs)), quotient.dtype)
+    remainder = _tir_op.floormod(lhs, rhs, span)
+    result = quotient + _Cast(quotient.dtype, remainder != 0)
+    for var, value in reversed(bindings):
+        result = _Let(var, value, result, span)
+    return result
+
+
 cdiv = ceildiv
 
 
