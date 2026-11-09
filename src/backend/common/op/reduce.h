@@ -648,8 +648,8 @@ template <typename Impl> struct ReduceLowerer {
             << "ReduceOp: invalid destination shape for local reduction";
       } else {
         int src_axis = dst_dim == src_dim ? i : (i < op.dim ? i : i + 1);
-        ICHECK(analyzer->CanProve(dst_extent <=
-                                  op.srcRegion_->region[src_axis]->extent))
+        ICHECK(analyzer->CanProveEqual(dst_extent,
+                                       op.srcRegion_->region[src_axis]->extent))
             << "ReduceOp: invalid destination shape for local reduction";
       }
     }

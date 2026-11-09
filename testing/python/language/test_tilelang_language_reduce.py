@@ -1750,7 +1750,7 @@ def test_reduce_local_regions_keep_dimension(dtype, clear):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("out_shape", [(3,), (2, 2), (3, 1)])
+@pytest.mark.parametrize("out_shape", [(1,), (3,), (2, 2), (3, 1)])
 def test_reduce_local_rejects_invalid_destination_region(out_shape):
     @T.prim_func
     def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor(out_shape, T.float32)):
@@ -1776,12 +1776,12 @@ def test_reduce_local_rejects_invalid_destination_region(out_shape):
 
 
 @tilelang.testing.requires_cuda
-def test_reduce_local_direct_region_with_smaller_destination():
+def test_reduce_local_direct_region_with_matching_destination():
     @T.prim_func
-    def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor((1,), T.float32)):
+    def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor((2,), T.float32)):
         with T.Kernel(1, threads=1):
             src = T.alloc_local((2, 4), T.float32)
-            dst = T.alloc_local((1,), T.float32)
+            dst = T.alloc_local((2,), T.float32)
             for i in T.serial(2):
                 for j in T.serial(4):
                     src[i, j] = A[i, j]
@@ -1790,11 +1790,12 @@ def test_reduce_local_direct_region_with_smaller_destination():
                     "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
                 )
             )
-            B[0] = dst[0]
+            for i in T.serial(2):
+                B[i] = dst[i]
 
     a = torch.arange(8, device="cuda", dtype=torch.float32).reshape(2, 4)
     result = tilelang.compile(kernel, out_idx=-1)(a)
-    torch.testing.assert_close(result, a[:1].sum(dim=1))
+    torch.testing.assert_close(result, a.sum(dim=1))
 
 
 @tilelang.testing.requires_cuda
