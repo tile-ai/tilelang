@@ -32,8 +32,9 @@ cover one device-numerics representative per access form: block_stride, FP4
 raw packed bytes (buffer and explicit-pointer forms), a packed (PK) narrowing
 store, an explicit ``access_ptr`` plus extra offset, and gather/scatter with
 non-zero bases (direct and explicit-pointer forms).  Additional regressions
-cover ordinary and versioned single-element broadcasts, versioned
-dtype-changing gather, typed scatter canaries, and FP4 packed-pair order.
+cover direct cross-row and transposed-view loads, ordinary and versioned
+single-element broadcasts, versioned dtype-changing gather, typed scatter
+canaries, and FP4 packed-pair order.
 The device numerical reference is exact for copy-like kernels and an
 independent CPU computation (torch cast reference) for narrowing.
 
@@ -636,6 +637,62 @@ def test_padded_group_negative_stride_20_trials(npu):
         return [low, high], torch.cat([high, low])
 
     _run_trials(kernel, make_case, npu, trials=20)
+
+
+# ---------------------------------------------------------------------------
+# Direct cross-row and transposed-view loads with automatic descriptors
+# ---------------------------------------------------------------------------
+def _direct_pointer_view_kernel(layout):
+    transposed = layout == "transposed"
+
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            out = T.alloc_shared((128,), F32)
+            view = None
+            if transposed:
+                view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                seed = T.vmi.vbrc(T.float32(23), size=64)
+                mask = T.vmi.create_mask(64, size=64)
+                T.vmi.vstore(seed, work[0, 64], mask)
+            if transposed:
+                T.copy(A, view[:64, 1])
+            else:
+                T.copy(A, work[1, 0:64])
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                if transposed:
+                    value = T.vmi.vload(view[64, 0], size=128)
+                else:
+                    value = T.vmi.vload(work[0, 64], size=128)
+                T.vmi.vstore(value, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+@pytest.mark.parametrize("layout", ["cross_row", "transposed"])
+@pytest.mark.pto
+def test_direct_cross_row_and_transposed_load_numeric(npu, layout):
+    kernel, source = _compile(_direct_pointer_view_kernel(layout))
+    lines = source.splitlines()
+    seed = _line_index(lines, lambda line: "vmi.vstore" in line and ", 64)" in line, what="seed vstore")
+    _assert_mte2_to_v_then_load(
+        lines,
+        lambda line: "mte_gm_ub" in line and "addptr" in line and ", 128)" in line,
+        "size=128)",
+    )
+    vload = _line_index(lines, lambda line: "vmi.vload" in line, what="vmi.vload")
+    assert "pto.addptr(" in lines[vload] and ", 64), 0, size=128)" in lines[vload], lines[vload]
+    assert seed < vload, "row-0 seed store must precede the consumer load"
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], torch.cat([torch.full((64,), 23.0), a])
+
+    _run_trials(kernel, make_case, npu, trials=5)
 
 
 # ---------------------------------------------------------------------------

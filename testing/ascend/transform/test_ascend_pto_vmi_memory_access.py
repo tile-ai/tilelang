@@ -4,9 +4,8 @@ The pass consumes post-``LegalizeNegativeIndex`` IR: an automatic VMI address
 is the original scalar-origin ``BufferLoad`` and an explicit address is a
 ``tl.access_ptr`` call, either direct or reached through one direct handle
 ``Bind``/``Let``.  These cases pin descriptor construction, physical
-envelopes, negative-index/group candidates, explicit preservation and logical
-coverage of the C++ legalization pass that the frontend tests cannot
-inspect directly.
+envelopes, negative-index/group candidates and explicit preservation in the
+C++ legalization pass that the frontend tests cannot inspect directly.
 
 These are host-only IR tests covering the contracts that must remain in-tree.
 """
@@ -466,25 +465,27 @@ def test_single_element_explicit_descriptor_is_not_shrunk():
 
 
 # ---------------------------------------------------------------------------
-# Logical coverage, not only physical containment
+# Descriptor construction without a local logical-region proof
 # ---------------------------------------------------------------------------
 @pytest.mark.pto
-def test_logical_coverage_counterexamples():
+def test_descriptor_construction_without_logical_coverage():
     work = _buffer((2, 128))
     body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=64)))
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=64, e=64, d=0, rw=1)
 
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=128)))
+    body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=128)))
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=64, e=128, d=0, rw=1)
 
     body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=192)))
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=64, e=192, d=0, rw=1)
 
     padded = _buffer((2, 64), strides=(128, 1))
-    with pytest.raises(tvm.error.InternalError, match="tight row-major"):
-        _run(_evaluate(_vload(_load(padded, [_int(0), _int(0)]), size=64)))
+    body = _run(_evaluate(_vload(_load(padded, [_int(0), _int(0)]), size=64)))
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=0, e=64, d=0, rw=1)
 
     permuted = _buffer((2, 64), strides=(1, 2))
     pointer = _access_ptr(permuted, [_int(0), _int(0)], 128, 1)
@@ -494,8 +495,11 @@ def test_logical_coverage_counterexamples():
     assert _constant(pointer.args[1]) == 128
 
     broken = _buffer((2, 64), strides=(1, 3))
-    with pytest.raises(tvm.error.InternalError, match="dense permutation"):
-        _run(_evaluate(_vload(_access_ptr(broken, [_int(0), _int(0)], 128, 1), 0, size=128)))
+    pointer = _access_ptr(broken, [_int(0), _int(0)], 128, 1)
+    body = _run(_evaluate(_vload(pointer, 0, size=128)))
+    (out,) = _vmi_calls(body)
+    assert out.args[0].same_as(pointer)
+    assert _constant(pointer.args[1]) == 128
 
 
 # ---------------------------------------------------------------------------
@@ -573,12 +577,14 @@ def test_branch_for_and_while_context():
     assert tvm.ir.structural_equal(base.indices[1], k * 64) and _constant(pointer.args[1]) == 64
 
     k, body = _bounded_2d(lambda k: _evaluate(_access_k(k, work)), 0, 2)
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(body, params=[k])
+    after = _run(body, params=[k])
+    (out,) = _vmi_calls(after)
+    assert tvm.ir.structural_equal(_descriptor(out, 0)[0].indices[1], k * 64)
 
     k = tirx.Var("k", "int32")
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(_evaluate(_access_k(k, work)), params=[k])
+    after = _run(_evaluate(_access_k(k, work)), params=[k])
+    (out,) = _vmi_calls(after)
+    assert tvm.ir.structural_equal(_descriptor(out, 0)[0].indices[1], k * 64)
 
     i = tirx.Var("i", "int32")
     loop = tirx.For(i, 0, 2, tirx.ForKind.SERIAL, _evaluate(_access_k(i, work)))
@@ -588,12 +594,10 @@ def test_branch_for_and_while_context():
 
     i = tirx.Var("i2", "int32")
     loop = tirx.For(i, 0, 3, tirx.ForKind.SERIAL, _evaluate(_access_k(i, work)))
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(loop)
+    after = _run(loop)
+    (out,) = _vmi_calls(after)
+    assert tvm.ir.structural_equal(_descriptor(out, 0)[0].indices[1], i * 64)
 
-    # While uses only facts already visible to the default analyzer.  A
-    # constant access and facts from an enclosing If are accepted; the while
-    # condition itself is not injected as a new constraint.
     body = _run(
         tirx.While(
             tirx.IntImm("bool", 1),
@@ -616,8 +620,7 @@ def test_branch_for_and_while_context():
         tirx.And(k >= 0, k < 2),
         _evaluate(_access_k(k, work)),
     )
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(while_only, params=[k])
+    assert len(_vmi_calls(_run(while_only, params=[k]))) == 1
 
     k = tirx.Var("k_inner_if", "int32")
     inner_if = tirx.While(
@@ -632,20 +635,21 @@ def test_branch_for_and_while_context():
 
 
 # ---------------------------------------------------------------------------
-# Mutable-index default analyzer behavior
+# Mutable-index descriptor construction
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.pto
-def test_mutable_index_is_not_a_stable_context_fact():
+def test_mutable_index_keeps_dynamic_descriptor():
     work = _buffer((2, 128))
     index = tirx.decl_buffer((1,), "int32", name="index", scope="local")
     guard = tirx.And(index[0] >= 0, index[0] <= 1)
     body = tirx.IfThenElse(guard, _evaluate(_vload(_load(work, [_int(0), index[0] * 64]), size=64)), _evaluate(0))
-    # The default analyzer does not turn a mutable buffer read into a stable
-    # fact, so this access stays unproven; no write tracking is added here.
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(body)
+    after = _run(body)
+    (out,) = _vmi_calls(after)
+    base, pointer = _descriptor(out, 0)
+    assert tvm.ir.structural_equal(base.indices[1], index[0] * 64)
+    assert _constant(pointer.args[1]) == 64
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +976,7 @@ def test_indexed_owner_scope_and_order():
 
 
 @pytest.mark.pto
-def test_indexed_dynamic_owner_coverage():
+def test_indexed_dynamic_owner_capacity():
     n = tirx.Var("n", "int32")
     offsets = _vec("offsets", "uint32")
     mask = _mask("mask")
@@ -997,20 +1001,24 @@ def test_indexed_dynamic_owner_coverage():
     assert str(extent.dtype) == "int64"
     assert _constant(pointer.args[2]) == 1 and _constant(out.args[1]) == 0
 
-    # A dynamic outer axis is not skipped just because its node is a Var.  With
-    # (n, m) the consumer would cover the inner m axis and degrade the outer n
-    # axis to its origin when E later becomes constant, so n must be provably
-    # one.  An Analyzer context fact n == 1 is enough; a positive-but-unknown n
-    # is not.
+    # Dynamic outer dimensions no longer require a length-one coverage proof.
+    # The independent capacity representation checks still apply.
     m = tirx.Var("m", "int32")
     owner_nm = tirx.decl_buffer((n, m), "float32", name="owner_nm", scope="shared")
     call_nm = _vgather(_load(owner_nm, [_int(0), _int(0)]), offsets=offsets, mask=mask)
-    unknown_outer = tirx.IfThenElse(tirx.And(n == 2, m == 128), _evaluate(call_nm), _evaluate(0))
-    with pytest.raises(tvm.error.InternalError, match="stable whole-area logical coverage"):
-        _run(_sblock(unknown_outer, owner_nm), params=[n, m])
-    positive_outer = tirx.IfThenElse(tirx.And(n > 1, m > 0), _evaluate(call_nm), _evaluate(0))
-    with pytest.raises(tvm.error.InternalError, match="stable whole-area logical coverage"):
-        _run(_sblock(positive_outer, owner_nm), params=[n, m])
+    bounded_outer = tirx.IfThenElse(tirx.And(n == 2, m == 128), _evaluate(call_nm), _evaluate(0))
+    body = _run(_sblock(bounded_outer, owner_nm), params=[n, m])
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    base_nm, _ = _descriptor(out, 0)
+    assert base_nm.buffer.same_as(owner_nm)
+
+    dynamic_outer = tirx.IfThenElse(tirx.And(n > 1, m > 0), _evaluate(call_nm), _evaluate(0))
+    body = _run(_sblock(dynamic_outer, owner_nm), params=[n, m])
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    base_nm, pointer_nm = _descriptor(out, 0)
+    assert base_nm.buffer.same_as(owner_nm)
+    assert str(pointer_nm.args[1].dtype) == "int64"
+
     one_outer = tirx.IfThenElse(tirx.And(n == 1, m > 0), _evaluate(call_nm), _evaluate(0))
     body = _run(_sblock(one_outer, owner_nm), params=[n, m])
     (out,) = _vmi_calls(body, "tl.vmi.vgather")

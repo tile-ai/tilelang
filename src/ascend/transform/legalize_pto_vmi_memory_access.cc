@@ -25,17 +25,15 @@
  * Ordinary (automatic) VMI accesses carry a scalar-origin BufferLoad address
  * and an instruction scalar offset.  This pass replaces the address with the
  * formal ``tl.access_ptr(BufferLoad, extent, rw_mask)`` descriptor, proving in
- * one shared acceptance exit that the descriptor preserves the source address,
- * contains the complete physical access envelope and covers the declared
- * extent under the existing logical pointer-region analysis.  Indexed
- * gather/scatter accesses, whether automatic or caller-written through
- * one direct handle Bind/Let, are rebuilt at the unique active allocation
- * owner origin after the owner identity, layout, capacity and stable-coverage
- * proofs and the bound-address snapshot check.  A dtype-changing view uses an
- * internal typed owner Buffer with capacity converted in bit units; it shares
- * the allocation data Var and never creates another allocation.  An ordinary
- * caller-written
- * explicit descriptor is never rewritten: only its coverage is verified and
+ * one shared acceptance exit that the descriptor preserves the source address
+ * and contains the complete physical access envelope.  Indexed gather/scatter
+ * accesses, whether automatic or caller-written through one direct handle
+ * Bind/Let, are rebuilt at the unique active allocation owner origin after the
+ * owner identity, layout, capacity and bound-address snapshot checks.  A
+ * dtype-changing view uses an internal typed owner Buffer with capacity
+ * converted in bit units; it shares the allocation data Var and never creates
+ * another allocation.  An ordinary caller-written explicit descriptor is never
+ * rewritten: only its extent and access-envelope containment are verified, and
  * the instruction offset is kept.  There is no whole-allocation fallback for
  * an ordinary access.
  */
@@ -72,9 +70,6 @@ using namespace ffi;
 namespace {
 
 constexpr const char *kContext = "LegalizePTOVMIMemoryAccess";
-constexpr const char *kCoveragePrefix =
-    "the existing logical pointer-region analysis does not cover the complete "
-    "access";
 
 [[noreturn]] void Fail(const std::string &message, const Span &span) {
   LOG(FATAL) << kContext << ": " << message << SpanHintSuffix(span);
@@ -376,211 +371,6 @@ bool IsUnitStride1d(const Buffer &buffer) {
   return stride.has_value() && stride.value() == 1;
 }
 
-// ---------------------------------------------------------------------------
-// Logical coverage proofs, ported from the frontend's existing consumer
-// ---------------------------------------------------------------------------
-std::optional<std::string> LocalCoverageReason(arith::Analyzer *analyzer,
-                                               const Buffer &buffer,
-                                               const Array<PrimExpr> &starts,
-                                               const PrimExpr &extent) {
-  size_t ndim = buffer->shape.size();
-  if (ndim == 0) {
-    return std::string(kCoveragePrefix) + ": the buffer has no dimensions";
-  }
-  if (starts.size() != ndim) {
-    return std::string(kCoveragePrefix) +
-           ": the descriptor start arity does not match the buffer rank";
-  }
-  if (!IsTightBuffer(buffer)) {
-    return std::string(kCoveragePrefix) +
-           ": the address is a local coordinate of a buffer whose layout is "
-           "not "
-           "proven tight row-major, so no accepted local coverage proof "
-           "applies";
-  }
-  std::optional<int64_t> constant = ConstInt(extent);
-  if (!constant.has_value()) {
-    if (!analyzer->CanProve(extent > 0)) {
-      return std::string(kCoveragePrefix) +
-             ": cannot prove the descriptor extent is positive";
-    }
-    if (ndim > 1) {
-      size_t dim = ndim - 1;
-      PrimExpr start = starts[dim];
-      if (!analyzer->CanProve(start >= 0) ||
-          !analyzer->CanProve(start + extent <= buffer->shape[dim])) {
-        std::ostringstream oss;
-        oss << kCoveragePrefix
-            << ": a non-constant extent must stay inside the innermost "
-               "dimension "
-            << dim << " (length " << buffer->shape[dim] << ", start " << start
-            << "), but that inclusion cannot be proven";
-        return oss.str();
-      }
-    }
-    return std::nullopt;
-  }
-  int64_t rem = constant.value();
-  if (rem <= 0) {
-    return std::string(kCoveragePrefix) +
-           ": the descriptor extent must be positive, got " +
-           std::to_string(rem);
-  }
-  // Dim 0 is the outermost axis: there is no further outward carry to declare.
-  for (size_t dim = ndim - 1; dim > 0; --dim) {
-    if (rem <= 1) {
-      return std::nullopt;
-    }
-    PrimExpr start = starts[dim];
-    std::optional<int64_t> length = ConstInt(buffer->shape[dim]);
-    if (!length.has_value()) {
-      if (!analyzer->CanProve(start >= 0) ||
-          !analyzer->CanProve(start + IntConst(rem) <= buffer->shape[dim])) {
-        std::ostringstream oss;
-        oss << kCoveragePrefix << ": " << rem
-            << " remaining elements must stay inside the non-constant "
-               "dimension "
-            << dim << " (start " << start
-            << "), but that inclusion cannot be proven";
-        return oss.str();
-      }
-      return std::nullopt;
-    }
-    if (length.value() <= 0) {
-      return std::string(kCoveragePrefix) + ": dimension " +
-             std::to_string(dim) + " has non-positive length " +
-             std::to_string(length.value());
-    }
-    int64_t rnext = CeilDiv(rem, length.value(), kContext, Span());
-    __int128 bound = static_cast<__int128>(rnext) * length.value();
-    bool fits = true;
-    bool carries = false;
-    if (bound <= std::numeric_limits<int64_t>::max()) {
-      carries = analyzer->CanProve(start + IntConst(rem) <=
-                                   IntConst(static_cast<int64_t>(bound)));
-    } else {
-      std::optional<int64_t> start_const = ConstInt(start);
-      if (start_const.has_value()) {
-        carries = static_cast<__int128>(start_const.value()) + rem <= bound;
-      } else {
-        fits = false;
-      }
-    }
-    if (!analyzer->CanProve(start >= 0) ||
-        !analyzer->CanProve(start < IntConst(length.value())) || !carries) {
-      std::ostringstream oss;
-      oss << kCoveragePrefix << ": dimension " << dim << " (length "
-          << length.value() << ") starts at " << start << " and carries " << rem
-          << " elements, but the existing row-major carry only declares "
-          << rnext << " dimension(s) from the start";
-      if (!fits) {
-        oss << " (the static bound does not fit int64)";
-      }
-      return oss.str();
-    }
-    rem = rnext;
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string> OriginPrefixReason(arith::Analyzer *analyzer,
-                                              const Buffer &buffer,
-                                              const PrimExpr &extent,
-                                              bool require_static_shape) {
-  if (buffer->shape.empty()) {
-    return std::string(kCoveragePrefix) + ": the buffer has no dimensions";
-  }
-  for (size_t dim = 0; dim < buffer->shape.size(); ++dim) {
-    std::optional<int64_t> length = ConstInt(buffer->shape[dim]);
-    if (length.has_value() && length.value() <= 0) {
-      return std::string(kCoveragePrefix) + ": dimension " +
-             std::to_string(dim) + " has non-positive length " +
-             std::to_string(length.value());
-    }
-    if (require_static_shape && !length.has_value()) {
-      return std::string(kCoveragePrefix) +
-             ": the origin descriptor has a "
-             "non-constant dimension " +
-             std::to_string(dim) + ", so no stable dense-prefix proof applies";
-    }
-  }
-  std::optional<int64_t> constant = ConstInt(extent);
-  if (constant.has_value()) {
-    if (constant.value() <= 0) {
-      return std::string(kCoveragePrefix) +
-             ": the descriptor extent must be positive, got " +
-             std::to_string(constant.value());
-    }
-    return std::nullopt;
-  }
-  if (!analyzer->CanProve(extent > 0)) {
-    return std::string(kCoveragePrefix) +
-           ": cannot prove the descriptor extent is positive";
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string>
-WholeDensePermutationReason(const Buffer &buffer, const Array<PrimExpr> &starts,
-                            const PrimExpr &extent) {
-  if (buffer->strides.empty() ||
-      buffer->strides.size() != buffer->shape.size()) {
-    return std::string("the buffer has no explicit permutation strides");
-  }
-  for (const PrimExpr &start : starts) {
-    std::optional<int64_t> value = ConstInt(start);
-    if (!value.has_value() || value.value() != 0) {
-      return std::string("the descriptor start is not the origin");
-    }
-  }
-  std::vector<int64_t> dims;
-  int64_t total = 1;
-  for (const PrimExpr &shape : buffer->shape) {
-    std::optional<int64_t> length = ConstInt(shape);
-    if (!length.has_value() || length.value() <= 0) {
-      return std::string("the shape is not static and positive");
-    }
-    dims.push_back(length.value());
-    __int128 next = static_cast<__int128>(total) * length.value();
-    if (next > std::numeric_limits<int64_t>::max()) {
-      return std::string("the whole dense span does not fit int64");
-    }
-    total = static_cast<int64_t>(next);
-  }
-  std::optional<int64_t> constant = ConstInt(extent);
-  if (!constant.has_value() || constant.value() != total) {
-    return std::string(
-               "the descriptor extent is not exactly the whole dense span ") +
-           std::to_string(total);
-  }
-  std::vector<std::pair<int64_t, int64_t>> axes;
-  for (size_t dim = 0; dim < dims.size(); ++dim) {
-    std::optional<int64_t> stride = ConstInt(buffer->strides[dim]);
-    if (!stride.has_value() || stride.value() < 0) {
-      return std::string("a stride is not a static non-negative integer");
-    }
-    if (dims[dim] == 1) {
-      continue;
-    }
-    axes.emplace_back(stride.value(), dims[dim]);
-  }
-  std::sort(axes.begin(), axes.end());
-  int64_t expected = 1;
-  for (const auto &[stride, length] : axes) {
-    if (stride != expected) {
-      return std::string("stride ") + std::to_string(stride) +
-             " does not continue the dense permutation at " +
-             std::to_string(expected);
-    }
-    __int128 next = static_cast<__int128>(expected) * length;
-    if (next > std::numeric_limits<int64_t>::max()) {
-      return std::string("the whole dense span does not fit int64");
-    }
-    expected = static_cast<int64_t>(next);
-  }
-  return std::nullopt;
-}
-
 bool PaddedRowMajor(arith::Analyzer *analyzer, const Buffer &buffer) {
   size_t ndim = buffer->shape.size();
   if (ndim == 0 || buffer->strides.empty() || buffer->strides.size() != ndim) {
@@ -604,40 +394,6 @@ bool PaddedRowMajor(arith::Analyzer *analyzer, const Buffer &buffer) {
     }
   }
   return true;
-}
-
-std::optional<std::string> ExplicitCoverageReason(arith::Analyzer *analyzer,
-                                                  const Buffer &buffer,
-                                                  const Array<PrimExpr> &starts,
-                                                  const PrimExpr &extent) {
-  if (IsTightBuffer(buffer)) {
-    return LocalCoverageReason(analyzer, buffer, starts, extent);
-  }
-  bool origin = true;
-  for (const PrimExpr &start : starts) {
-    std::optional<int64_t> value = ConstInt(start);
-    if (!value.has_value() || value.value() != 0) {
-      origin = false;
-      break;
-    }
-  }
-  if (origin && !buffer->strides.empty() &&
-      buffer->strides.size() == buffer->shape.size() &&
-      PaddedRowMajor(analyzer, buffer)) {
-    return OriginPrefixReason(analyzer, buffer, extent,
-                              /*require_static_shape=*/true);
-  }
-  std::optional<std::string> permutation_reason =
-      WholeDensePermutationReason(buffer, starts, extent);
-  if (!permutation_reason.has_value()) {
-    return std::nullopt;
-  }
-  return std::string(kCoveragePrefix) +
-         ": the descriptor starts at a local coordinate of a buffer whose "
-         "layout "
-         "is not proven tight row-major, and neither an origin-prefix nor an "
-         "exact whole dense permutation proof applies (" +
-         permutation_reason.value() + ")";
 }
 
 std::optional<PrimExpr> WholeBufferSpan(arith::Analyzer *analyzer,
@@ -1041,7 +797,7 @@ ParseAddress(const PrimExpr &operand, bool is_load, const std::string &op_name,
 // ---------------------------------------------------------------------------
 // Descriptor plans and the shared acceptance exit
 // ---------------------------------------------------------------------------
-enum class RejectionKind { kNone, kExtent, kAddress, kLow, kHigh, kCoverage };
+enum class RejectionKind { kNone, kExtent, kAddress, kLow, kHigh };
 
 struct Rejection {
   RejectionKind kind{RejectionKind::kNone};
@@ -1057,9 +813,6 @@ struct DescriptorPlan {
   PrimExpr extent;
   PrimExpr offset;
   std::optional<PrimExpr> relative;
-  bool origin{false};
-  bool explicit_plan{false};
-  bool require_static_shape{false};
 };
 
 Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
@@ -1101,20 +854,6 @@ Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
             "proven"};
   }
 
-  std::optional<std::string> coverage;
-  if (plan.explicit_plan) {
-    coverage = ExplicitCoverageReason(analyzer, address.buffer, plan.starts,
-                                      plan.extent);
-  } else if (plan.origin) {
-    coverage = OriginPrefixReason(analyzer, address.buffer, plan.extent,
-                                  plan.require_static_shape);
-  } else {
-    coverage =
-        LocalCoverageReason(analyzer, address.buffer, plan.starts, plan.extent);
-  }
-  if (coverage.has_value()) {
-    return {RejectionKind::kCoverage, coverage.value()};
-  }
   return {};
 }
 
@@ -1178,7 +917,6 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
                                   int64_t high, bool is_load,
                                   const std::string &op_name,
                                   const Span &span) {
-  std::optional<std::string> coverage_reason;
   int64_t neg_low = CheckedNeg(low, op_name, span);
   int64_t width = CheckedAdd(high, neg_low, op_name, span);
 
@@ -1193,14 +931,9 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
       plan.extent = IntConst(width);
       plan.offset = IntConst(neg_low);
       plan.relative = RelativeOffset(address.buffer, plan.starts);
-      if (plan.relative.has_value()) {
-        Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
-        if (Accepted(rejection)) {
-          return plan;
-        }
-        if (rejection.kind == RejectionKind::kCoverage) {
-          coverage_reason = rejection.message;
-        }
+      if (plan.relative.has_value() &&
+          Accepted(AcceptPlan(analyzer, address, plan, low, high))) {
+        return plan;
       }
     }
   }
@@ -1216,15 +949,8 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
     plan.extent = analyzer->Simplify(source_relative.value() + IntConst(high));
     plan.offset = source_relative.value();
     plan.relative = IntConst(0);
-    plan.origin = true;
-    plan.require_static_shape = true;
-    Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
-    if (Accepted(rejection)) {
+    if (Accepted(AcceptPlan(analyzer, address, plan, low, high))) {
       return plan;
-    }
-    if (rejection.kind == RejectionKind::kCoverage &&
-        !coverage_reason.has_value()) {
-      coverage_reason = rejection.message;
     }
   }
 
@@ -1237,15 +963,8 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
       plan.extent = span.value();
       plan.offset = source_relative.value();
       plan.relative = IntConst(0);
-      plan.origin = true;
-      plan.require_static_shape = address.buffer->shape.size() > 1;
-      Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
-      if (Accepted(rejection)) {
+      if (Accepted(AcceptPlan(analyzer, address, plan, low, high))) {
         return plan;
-      }
-      if (rejection.kind == RejectionKind::kCoverage &&
-          !coverage_reason.has_value()) {
-        coverage_reason = rejection.message;
       }
     }
   }
@@ -1267,8 +986,7 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
     reason = "cannot prove that any constructible descriptor covers the finite "
              "access envelope";
   }
-  FailDescriptor(op_name, coverage_reason.value_or(reason), address.buffer,
-                 span);
+  FailDescriptor(op_name, reason, address.buffer, span);
 }
 
 DescriptorPlan ChooseLocalPlan(arith::Analyzer *analyzer,
@@ -1295,7 +1013,6 @@ PrimExpr ValidateExplicitDescriptor(arith::Analyzer *analyzer,
   plan.starts = address.starts;
   plan.extent = address.extent;
   plan.offset = delta;
-  plan.explicit_plan = true;
   Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
   if (!Accepted(rejection)) {
     std::ostringstream oss;
@@ -1331,7 +1048,7 @@ PrimExpr MakeDescriptor(const Buffer &buffer, const Array<PrimExpr> &starts,
 }
 
 // ---------------------------------------------------------------------------
-// Indexed owner identity, layout and stable whole-area coverage
+// Indexed owner identity, layout and capacity
 // ---------------------------------------------------------------------------
 Buffer FindAllocationOwner(const std::vector<Buffer> &active_allocations,
                            const Buffer &source, const std::string &op_name,
@@ -1420,47 +1137,6 @@ std::optional<std::string> OwnerTightReason(arith::Analyzer *analyzer,
         return oss.str();
       }
       expected = analyzer->Simplify(expected * WidenToInt64(factor));
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string> OwnerCoverageReason(arith::Analyzer *analyzer,
-                                               const Buffer &owner) {
-  size_t ndim = owner->shape.size();
-  if (ndim == 0) {
-    return std::string("the owner has no dimensions");
-  }
-  // With a constant extent, the existing logical pointer-region consumer
-  // distributes the extent innermost-first and treats the first non-constant
-  // dimension as the whole dimension (remaining=1).  A later constant extent
-  // is therefore stable only when every dimension outside that innermost
-  // non-constant dimension is provably length one; inner dimensions are
-  // consumed in full because E is exactly their product.  This applies to
-  // symbolic axes too: the consumer does not turn an Analyzer constant fact
-  // into an IntImm shape node, so a dynamic outer axis that is not provably
-  // one would degrade to its origin index after the extent becomes constant.
-  size_t innermost_dynamic = ndim;
-  for (size_t dim = ndim; dim-- > 0;) {
-    if (!ConstInt(owner->shape[dim]).has_value()) {
-      innermost_dynamic = dim;
-      break;
-    }
-  }
-  if (innermost_dynamic == ndim) {
-    return std::nullopt;
-  }
-  for (size_t dim = 0; dim < innermost_dynamic; ++dim) {
-    if (!analyzer->CanProveEqual(owner->shape[dim], IntConst(1))) {
-      std::ostringstream oss;
-      oss << "the owner does not have a stable whole-area logical coverage "
-             "proof: dimension "
-          << dim << " (length " << owner->shape[dim]
-          << ") is outside the innermost non-constant dimension "
-          << innermost_dynamic
-          << " and is not provably length one; a later constant descriptor "
-             "extent would cover only one index of that dimension";
-      return oss.str();
     }
   }
   return std::nullopt;
@@ -1856,10 +1532,6 @@ IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
   if (address.buffer->dtype == owner->dtype) {
     // Keep the original owner Buffer and symbolic capacity expression intact
     // on the existing same-dtype path.
-    if (std::optional<std::string> coverage =
-            OwnerCoverageReason(analyzer, owner)) {
-      Fail(op_name + " owner is not usable: " + coverage.value(), span);
-    }
     PrimExpr extent = OwnerExtent(analyzer, owner, op_name, span);
     return {owner, origin, extent};
   }
@@ -1872,10 +1544,6 @@ IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
                             span);
   Buffer typed_owner =
       MakeTypedOwnerView(owner, address.buffer->dtype, typed_extent);
-  if (std::optional<std::string> coverage =
-          OwnerCoverageReason(analyzer, typed_owner)) {
-    Fail(op_name + " typed owner is not usable: " + coverage.value(), span);
-  }
   return {typed_owner, IntImm(address.buffer->shape[0].dtype(), 0),
           typed_extent};
 }
