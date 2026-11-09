@@ -1747,3 +1747,78 @@ def test_reduce_local_regions_keep_dimension(dtype, clear):
     if not clear:
         expected[1:2, 1:5] -= 10
     torch.testing.assert_close(result, expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("out_shape", [(3,), (2, 2), (3, 1)])
+def test_reduce_local_rejects_invalid_destination_region(out_shape):
+    @T.prim_func
+    def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor(out_shape, T.float32)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((2, 4), T.float32)
+            dst = T.alloc_local(out_shape, T.float32)
+            for i in T.serial(2):
+                for j in T.serial(4):
+                    src[i, j] = A[i, j]
+            T.evaluate(
+                T.call_intrin(
+                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
+                )
+            )
+            if len(out_shape) == 1:
+                B[0] = dst[0]
+            else:
+                B[0, 0] = dst[0, 0]
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target, pytest.raises(tvm.error.InternalError, match="ReduceOp: invalid destination shape"):
+        tilelang.lower(kernel, target=target)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_local_direct_region_with_smaller_destination():
+    @T.prim_func
+    def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((2, 4), T.float32)
+            dst = T.alloc_local((1,), T.float32)
+            for i in T.serial(2):
+                for j in T.serial(4):
+                    src[i, j] = A[i, j]
+            T.evaluate(
+                T.call_intrin(
+                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
+                )
+            )
+            B[0] = dst[0]
+
+    a = torch.arange(8, device="cuda", dtype=torch.float32).reshape(2, 4)
+    result = tilelang.compile(kernel, out_idx=-1)(a)
+    torch.testing.assert_close(result, a[:1].sum(dim=1))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+@pytest.mark.parametrize(("offset", "width", "aligned"), [(0, 6, True), (1, 6, False), (0, 5, False)])
+def test_reduce_local_packed_load_alignment(dtype, offset, width, aligned):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((2, width), dtype), B: T.Tensor((2,), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((2, width), dtype)
+                dst = T.alloc_local((2,), dtype)
+                for i in T.serial(2):
+                    for j in T.serial(width):
+                        src[i, j] = A[i, j]
+                T.reduce_sum(src[:, offset : offset + 4], dst, dim=1)
+                for i in T.serial(2):
+                    B[i] = dst[i]
+
+        return main
+
+    compiled = kernel()
+    source = compiled.get_kernel_source()
+    assert ("*(uint1*)(src +" in source) == aligned
+    a = torch.arange(2 * width, dtype=getattr(torch, str(dtype)), device="cuda").reshape(2, width)
+    torch.testing.assert_close(compiled(a), a[:, offset : offset + 4].sum(dim=1))

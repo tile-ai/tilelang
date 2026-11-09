@@ -626,8 +626,8 @@ template <typename Impl> struct ReduceLowerer {
   }
 
   static Stmt LowerLocal(const ReduceOpNode &op, const Buffer &src_buffer,
-                         const Buffer &dst_buffer,
-                         const LowerArgs &lower_args) {
+                         const Buffer &dst_buffer, const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) {
     ICHECK_EQ(op.batch, 1)
         << "ReduceOp: local reduction does not support batch";
     ICHECK(op.src->dtype == op.dst->dtype)
@@ -639,6 +639,20 @@ template <typename Impl> struct ReduceLowerer {
     ICHECK(op.dim >= 0 && op.dim < src_dim);
     ICHECK(dst_dim == src_dim - 1 || dst_dim == src_dim)
         << "ReduceOp: local reduction dimension mismatch";
+
+    // Direct tile-op calls can bypass frontend shape validation.
+    for (int i = 0; i < dst_dim; ++i) {
+      PrimExpr dst_extent = op.dstRegion_->region[i]->extent;
+      if (dst_dim == src_dim && i == op.dim) {
+        ICHECK(analyzer->CanProveEqual(dst_extent, 1))
+            << "ReduceOp: invalid destination shape for local reduction";
+      } else {
+        int src_axis = dst_dim == src_dim ? i : (i < op.dim ? i : i + 1);
+        ICHECK(analyzer->CanProve(dst_extent <=
+                                  op.srcRegion_->region[src_axis]->extent))
+            << "ReduceOp: invalid destination shape for local reduction";
+      }
+    }
 
     Array<Var> dst_vars;
     Array<PrimExpr> dst_indices;
@@ -682,7 +696,26 @@ template <typename Impl> struct ReduceLowerer {
       Var rv("rv");
       PrimExpr base = rv * vsize;
       PrimExpr src_value;
-      if (op.dim == src_dim - 1) {
+      // A vector load requires every flattened row to be aligned. Otherwise
+      // gather scalar loads into the packed accumulator.
+      bool aligned_vector_load = false;
+      int alignment_bytes = vsize * src_buffer->dtype.bits() / 8;
+      if (op.dim == src_dim - 1 && alignment_bytes > 0 &&
+          src_buffer->data_alignment >= alignment_bytes &&
+          src_buffer->data_alignment % alignment_bytes == 0) {
+        arith::Analyzer alignment_analyzer;
+        for (int i = 0; i < dst_dim; ++i) {
+          alignment_analyzer.Bind(dst_vars[i],
+                                  Range(0, op.dstRegion_->region[i]->extent));
+        }
+        Var lane("local_reduce_lane");
+        Array<PrimExpr> offsets =
+            src_buffer->ElemOffset(make_src_indices(lane));
+        aligned_vector_load = offsets.size() == 1 &&
+                              reduce::CanUsePackedRamp(offsets[0], lane, vsize,
+                                                       &alignment_analyzer);
+      }
+      if (aligned_vector_load) {
         Array<PrimExpr> src_indices =
             make_src_indices(Ramp(base, Integer(1), vsize));
         BufferLoad src_load(src_buffer, src_indices);
@@ -749,7 +782,8 @@ template <typename Impl> struct ReduceLowerer {
     };
 
     if (IsLocalBuffer(op.src) && IsLocalBuffer(op.dst, /*allow_var*/ true)) {
-      return LowerLocal(op, get_buffer(op.src), get_buffer(op.dst), lower_args);
+      return LowerLocal(op, get_buffer(op.src), get_buffer(op.dst), lower_args,
+                        analyzer);
     }
 
     if (IsFragmentBuffer(op.src) && IsFragmentBuffer(op.dst)) {
