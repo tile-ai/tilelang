@@ -912,6 +912,57 @@ def test_tiled_ws_wide_linear_smem_three_stages():
     _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
 
 
+def _consumer_while_loop_kernel(rows, columns, block_columns):
+    """Each consumer thread sums the first counts[row] columns of each stage with a while loop."""
+
+    @T.prim_func
+    def main(
+        x: T.Tensor((rows, columns), "float32"),
+        counts: T.Tensor((rows,), "int32"),
+        y: T.Tensor((rows,), "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            x_shared = T.alloc_shared((rows, block_columns), "float32")
+            acc = T.alloc_local((1,), "float32")
+            step = T.alloc_local((1,), "int32")
+            tx = T.get_thread_binding()
+            acc[0] = T.float32(0)
+            for ko in T.Pipelined(columns // block_columns, num_stages=2):
+                T.copy(x[0, ko * block_columns], x_shared)
+                step[0] = 0
+                if tx < rows:
+                    while step[0] < counts[tx]:
+                        acc[0] += x_shared[tx, step[0]]
+                        step[0] += 1
+            if tx < rows:
+                y[tx] = acc[0]
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_consumer_while_loop():
+    """A while loop of the consumer takes the role of its body, so warp specialization applies."""
+    import torch
+
+    rows, columns, block_columns = 64, 256, 64
+    pass_configs = {tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False}
+    kernel = tilelang.compile(_consumer_while_loop_kernel(rows, columns, block_columns), target="cuda", pass_configs=pass_configs)
+    src = kernel.get_kernel_source()
+    assert "__launch_bounds__(256, 1)" in src
+    assert "tl::tma_load" in src
+
+    x = torch.randn(rows, columns, device="cuda", dtype=torch.float32)
+    counts = torch.randint(0, block_columns + 1, (rows,), device="cuda", dtype=torch.int32)
+    y = torch.empty(rows, device="cuda", dtype=torch.float32)
+    kernel(x, counts, y)
+    stages = x.view(rows, columns // block_columns, block_columns)
+    keep = torch.arange(block_columns, device="cuda") < counts[:, None, None]
+    ref = (stages * keep).sum(dim=(1, 2))
+    torch.testing.assert_close(y, ref, rtol=1e-4, atol=1e-4)
+
+
 if __name__ == "__main__":
     test_tiled_ws_skips_device_bound_tma_descriptor_base()
     test_tiled_ws_places_producer_in_first_warp_group()
@@ -930,3 +981,4 @@ if __name__ == "__main__":
     test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
     test_tiled_ws_wide_linear_smem_multi_way_box_split()
     test_tiled_ws_wide_linear_smem_three_stages()
+    test_tiled_ws_consumer_while_loop()

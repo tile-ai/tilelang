@@ -285,6 +285,7 @@ public:
   }
 
   void VisitStmt_(const ForNode *op) final { HandleBodyStmt(op); }
+  void VisitStmt_(const WhileNode *op) final { HandleBodyStmt(op); }
   void VisitStmt_(const BindNode *op) final {
     StmtVisitor::VisitStmt_(op);
     SetRole(op, Role::kNeutral);
