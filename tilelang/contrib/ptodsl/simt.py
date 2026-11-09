@@ -10,6 +10,8 @@ from ptodsl._types import _DType, _restore_integer_signedness, _signless_integer
 from ptoas.mlir.dialects import llvm
 from ptoas.mlir.ir import IntegerType
 
+from .common import coerce_i1
+
 
 def _vector_lane(value, index):
     raw_index = unwrap_surface_value(pto.const(index, dtype=pto.i32))
@@ -149,6 +151,12 @@ _scalar_select = _scalar.select
 
 
 def _scalar_select_compat(cond, true_val, false_val):
+    # Printing a constant floating-point comparison (e.g. isnan(0.0)) can
+    # produce a Python bool. Select is an IR operation, unlike Python control
+    # flow, and requires an i1 value even when its condition is static. Leave
+    # traced scalar/vector predicates unchanged.
+    if isinstance(cond, bool):
+        cond = coerce_i1(cond, context="TileLang PTO select condition")
     # PTOAS's select drops the authored signedness of integer operands, which
     # breaks e.g. uint32 allreduce branch merges; restore it.
     authored_type = unwrap_surface_value(true_val).type
@@ -160,3 +168,6 @@ def _scalar_select_compat(cond, true_val, false_val):
 
 
 _scalar.select = _scalar_select_compat
+# PTODSL exports a function alias, rather than looking up _scalar.select at
+# each call. Generated kernels call this public entry point.
+pto.select = _scalar_select_compat

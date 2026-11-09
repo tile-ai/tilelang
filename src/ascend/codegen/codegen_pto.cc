@@ -3409,9 +3409,11 @@ void CodeGenTileLangPTO::EmitAscendCopyMatrixCcToUb(const CallNode *op) {
   ICHECK(!has_const_n_size || !has_const_dst_stride ||
          dst_stride_const >= n_size_const)
       << "PTO L0C->UB MTE destination stride must be at least n_size";
-  ICHECK(!has_const_n_size || !has_const_src_stride ||
-         src_stride_const >= n_size_const)
-      << "PTO L0C->UB MTE source stride must be at least n_size";
+  // L0C uses NZ storage: its panel stride spans M rows, while the ND UB
+  // destination has a row stride spanning N columns.
+  ICHECK(!has_const_m_size || !has_const_src_stride ||
+         src_stride_const >= m_size_const)
+      << "PTO L0C->UB MTE source stride must be at least m_size";
 
   int64_t dual_dst_ctl = require_const(7, "dual_dst_ctl");
   ICHECK(dual_dst_ctl == 0 || dual_dst_ctl == 1 || dual_dst_ctl == 2)

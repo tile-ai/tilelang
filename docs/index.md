@@ -81,6 +81,7 @@ compiler_internals/metal_tilelang_development
 
 developer_guide/cpp_style
 developer_guide/testing_style
+developer_guide/ascend_graph_compile
 :::
 
 :::{toctree}

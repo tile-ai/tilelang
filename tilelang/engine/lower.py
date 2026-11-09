@@ -116,7 +116,10 @@ def lower_to_host_device_ir(
     has_session = current_compile_pass_instrumentation() is not None
     with compile_pass_instrumentation(name="lower-to-host-device-ir"):
         attach_instruments = nullcontext() if has_session else instrument_current_pass_context()
-        with attach_instruments:
+        # Direct source-only lowering has the same target-dependent analyses as
+        # JIT compilation. Do not require callers to establish a second target
+        # scope merely for vectorization or tile-op planning.
+        with attach_instruments, context.target:
             mod = func_or_mod
             params = None
             if isinstance(func_or_mod, tirx.PrimFunc):

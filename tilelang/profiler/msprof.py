@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import torch
 import tilelang
+from .errors import ProfileUnavailableError
 
 
 @tilelang.jit(out_idx=[], target="ascend")
@@ -291,7 +292,7 @@ def bench_with_msprof(
 
     kernel_profiles = {name: profile for name, profile in kernel_profiles.items() if "_tilelang_profiler_cache_flush_kernel" not in name}
     if not kernel_profiles:
-        raise RuntimeError("No profiled kernels remain after excluding the msprof flush kernel.")
+        raise ProfileUnavailableError("No profiled kernels remain after excluding the msprof flush kernel.")
 
     profile = _sum_profiles(list(kernel_profiles.values()))
     if detailed:

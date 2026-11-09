@@ -70,6 +70,27 @@ cache hit skips the device compilation callback.
 
 ## Quick Start
 
+For the experimental `torch.compile` graph frontend, see
+[Ascend graph compilation](../../docs/developer_guide/ascend_graph_compile.md).
+Import `tilelang.graph` and select `backend="tilelang_ascend"`; the graph frontend
+uses this backend's existing AscendC or PTO compiler and Torch NPU execution
+path. PTO uses the same graph backend with explicit options:
+
+```python
+import torch
+import tilelang.graph
+
+compiled = torch.compile(
+    model,
+    backend="tilelang_ascend",
+    options={"target": "pto", "execution_backend": "pto"},
+)
+```
+
+Graph configuration defaults to `execution_backend="auto"`: plain AscendC
+selects `tvm_ffi`, while a PTO target selects `pto`. Torch owns graph
+intermediates on both paths; neither requires the Relax VM.
+
 ### Selecting AscendC or PTO code generation
 
 The execution backend selects the Ascend target variant during JIT compilation:
@@ -177,16 +198,20 @@ Pass `target="pto"` to `@tilelang.jit` or `tilelang.compile` to generate
 PTODSL instead of Ascend C. The same Ascend lowering pipeline runs for both
 targets; the PTO target selects a different device code generator and the PTO
 execution adapter. For example, change the Quick Start decorator to
-`@tilelang.jit(target="pto")` to select PTO for that kernel. Leave
-`execution_backend` at its default `"auto"`: the PTO target selects the PTO
-execution backend automatically. Setting only `execution_backend="pto"` on an
-`"ascend"` target does not select PTO code generation and is rejected.
+`@tilelang.jit(target="pto")` to select PTO for that kernel. With
+`execution_backend="auto"`, the PTO target selects the PTO execution backend
+automatically. Explicit `execution_backend="pto"` on an `"ascend"` target also
+selects the PTO variant and preserves the target's architecture attributes.
+The incompatible combination `target="pto", execution_backend="tvm_ffi"` is
+rejected.
 
 For source-only inspection, call `tilelang.lower(kernel, target="pto")` and
 read its `kernel_source`. PTO JIT compilation additionally requires PTODSL,
 `ptoas`, and `bisheng`; running the result requires the Ascend runtime and NPU.
+Emitted PTODSL alone does not verify assembly, device compilation, numerical
+correctness, or performance.
 Automatic target detection selects the regular Ascend target, so specify
-`target="pto"` explicitly when PTO is required.
+`target="pto"` or `execution_backend="pto"` explicitly when PTO is required.
 
 - Use the ascend dialect `tilelang.ascend.language` for Ascend-specific operations.
 - Ascend supports mixing SIMT and SIMD code within a single kernel, so
