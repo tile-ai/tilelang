@@ -83,6 +83,8 @@ struct Reduce {
       dst_vars.push_back(var);
       dst_indices.push_back(op.dstRegion_->region[i]->min + var);
     }
+    dst_indices =
+        backend::reduce::MapLocalIndices(op.dst, dst_indices, lower_args);
 
     auto make_src_indices = [&](PrimExpr reduce_index) {
       Array<PrimExpr> indices;
@@ -97,7 +99,7 @@ struct Reduce {
                             dst_vars[i < op.dim ? i : i - 1]);
         }
       }
-      return indices;
+      return backend::reduce::MapLocalIndices(op.src, indices, lower_args);
     };
 
     Array<Stmt> stmts;

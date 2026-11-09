@@ -1823,3 +1823,50 @@ def test_reduce_local_packed_load_alignment(dtype, offset, width, aligned):
     assert ("*(uint1*)(src +" in source) == aligned
     a = torch.arange(2 * width, dtype=getattr(torch, str(dtype)), device="cuda").reshape(2, width)
     torch.testing.assert_close(compiled(a), a[:, offset : offset + 4].sum(dim=1))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("clear", [True, False])
+@pytest.mark.parametrize(
+    ("source_layout", "dest_layout"),
+    [
+        ("transpose", "none"),
+        ("none", "transpose"),
+        ("transpose", "transpose"),
+        ("flatten", "none"),
+        ("none", "flatten"),
+        ("flatten", "flatten"),
+    ],
+)
+def test_reduce_local_sliced_layouts(dtype, clear, source_layout, dest_layout):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((3, 4), dtype), B: T.Tensor((3, 1), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((3, 4), dtype)
+                dst = T.alloc_local((3, 1), dtype)
+                if source_layout == "transpose":
+                    T.annotate_layout({src: T.Layout((3, 4), lambda i, j: [j, i])})
+                elif source_layout == "flatten":
+                    T.annotate_layout({src: T.Layout((3, 4), lambda i, j: [i * 4 + j])})
+                if dest_layout == "transpose":
+                    T.annotate_layout({dst: T.Layout((3, 1), lambda i, j: [j, i])})
+                elif dest_layout == "flatten":
+                    T.annotate_layout({dst: T.Layout((3, 1), lambda i, j: [i])})
+                for i in T.serial(3):
+                    dst[i, 0] = -10
+                    for j in T.serial(4):
+                        src[i, j] = A[i, j]
+                T.reduce_sum(src[1:3, 1:3], dst[1:3, :], dim=1, clear=clear)
+                for i in T.serial(3):
+                    B[i, 0] = dst[i, 0]
+
+        return main
+
+    a = torch.arange(12, device="cuda", dtype=getattr(torch, str(dtype))).reshape(3, 4)
+    expected = torch.tensor([[-10], [11], [19]], device="cuda", dtype=a.dtype)
+    if not clear:
+        expected[1:3] -= 10
+    torch.testing.assert_close(kernel()(a), expected)

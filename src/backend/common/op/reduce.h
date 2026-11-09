@@ -617,6 +617,18 @@ inline PrimExpr MakeUpdate(const ReduceOpNode &op, PrimExpr dst_val,
   return PrimExpr();
 }
 
+// Local tile ops use logical indices, while remapped buffers are indexed in
+// layout coordinates. Match the ordinary buffer load/store remapping path.
+inline Array<PrimExpr> MapLocalIndices(const Buffer &buffer,
+                                       const Array<PrimExpr> &indices,
+                                       const LowerArgs &lower_args) {
+  if (lower_args.buffer_remap.count(buffer) &&
+      lower_args.layout_map.count(buffer)) {
+    return lower_args.layout_map[buffer]->Forward(indices);
+  }
+  return indices;
+}
+
 // Validate local tile-op shapes here so direct IR calls follow the same
 // contract on CPU and GPU, even when the frontend shape check is bypassed.
 inline void ValidateLocalRegionShape(const ReduceOpNode &op,
@@ -673,6 +685,7 @@ template <typename Impl> struct ReduceLowerer {
       dst_vars.push_back(var);
       dst_indices.push_back(op.dstRegion_->region[i]->min + var);
     }
+    dst_indices = reduce::MapLocalIndices(op.dst, dst_indices, lower_args);
 
     auto make_src_indices = [&](PrimExpr reduce_index) {
       Array<PrimExpr> indices;
@@ -686,7 +699,7 @@ template <typename Impl> struct ReduceLowerer {
                             dst_vars[i < op.dim ? i : i - 1]);
         }
       }
-      return indices;
+      return reduce::MapLocalIndices(op.src, indices, lower_args);
     };
 
     int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
