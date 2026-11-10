@@ -1274,6 +1274,29 @@ def test_wrapping_cast_condition_does_not_install_false_facts(context):
         _run(_sblock(body, work))
 
 
+@pytest.mark.parametrize("access_position", ["then", "else", "after"])
+def test_wrapping_condition_keeps_branch_assertions_scoped(access_position):
+    work = _buffer((1, 128))
+    i = tirx.Var("i", "int32")
+    condition = tirx.Cast("uint32", i - 1) < _int(2, "uint32")
+    assertion = tirx.AssertStmt(i < 2, tirx.StringImm("range"))
+    store = _evaluate(_vstore(_vec("value"), _load(work, [_int(0), 64 * i])))
+    # Only a store in the assertion's own branch may use its i < 2 fact.
+    # At i == 3 the assertion does not execute and an unguarded store is OOB.
+    if access_position == "then":
+        tail = tirx.IfThenElse(condition, tirx.SeqStmt([assertion, store]), None)
+    elif access_position == "else":
+        tail = tirx.IfThenElse(condition, assertion, store)
+    else:
+        tail = tirx.SeqStmt([tirx.IfThenElse(condition, assertion, None), store])
+    body = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, tail)
+    if access_position == "then":
+        _assert_no_raw_address(_run(_sblock(body, work)))
+        return
+    with pytest.raises(tvm.error.InternalError, match="cannot construct a descriptor"):
+        _run(_sblock(body, work))
+
+
 def test_cast_safe_in_guarded_scope_keeps_proof():
     work = _buffer((128,))
     i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")

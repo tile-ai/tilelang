@@ -1879,8 +1879,31 @@ private:
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
-    return CanAnalyze(op->condition) ? Parent::VisitStmt_(op)
-                                     : StmtExprMutator::VisitStmt_(op);
+    if (CanAnalyze(op->condition)) {
+      return Parent::VisitStmt_(op);
+    }
+    // Skip the unsafe condition's facts, but keep assertions in either
+    // branch from escaping into the other branch or subsequent statements.
+    return constraint_scope_.WithNewScope([&]() -> Stmt {
+      PrimExpr condition = VisitExpr(op->condition);
+      Stmt then_case = constraint_scope_.WithNewScope(
+          [&]() { return VisitStmt(op->then_case); });
+      ffi::Optional<Stmt> else_case;
+      if (op->else_case.defined()) {
+        else_case = constraint_scope_.WithNewScope(
+            [&]() { return VisitStmt(op->else_case.value()); });
+      }
+      if (condition.same_as(op->condition) &&
+          then_case.same_as(op->then_case) &&
+          else_case.same_as(op->else_case)) {
+        return GetRef<Stmt>(op);
+      }
+      auto node = CopyOnWrite(op);
+      node->condition = std::move(condition);
+      node->then_case = std::move(then_case);
+      node->else_case = std::move(else_case);
+      return Stmt(node);
+    });
   }
 
   Stmt VisitStmt_(const AssertStmtNode *op) final {
