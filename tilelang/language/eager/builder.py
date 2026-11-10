@@ -1149,6 +1149,11 @@ def get_type_hints(func):
     #   def bar(A: T.Tensor((n,), T.float32)):
     #     ... # empty function, do not use `n`
     localns = utils.get_func_nonlocals(func)
+    type_params = getattr(func, "__type_params__", ())
+    # Match typing.get_type_hints: PEP 695 type parameters are visible to
+    # string annotations even on Python versions whose _eval_type has no
+    # type_params argument.
+    localns = {**localns, **{param.__name__: param for param in type_params}}
     for name, value in annot.items():
         if name == "return":
             continue
@@ -1178,7 +1183,7 @@ def get_type_hints(func):
                     value,
                     globalns=globalns,
                     localns=localns,
-                    type_params=getattr(func, "__type_params__", ()),
+                    type_params=type_params,
                 )
             else:
                 hints[name] = _eval_type(value, globalns=globalns, localns=localns)
