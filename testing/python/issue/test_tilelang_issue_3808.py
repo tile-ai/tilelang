@@ -88,6 +88,7 @@ def polynomial_kernel(
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 def test_scalarized_epilogue_keeps_shared_memory_barrier():
     shape = 512
+    torch.manual_seed(0)
     x = torch.randn(shape, shape, device="cuda", dtype=torch.float32)
     x /= x.norm()
     gram = (x @ x.T).half()
