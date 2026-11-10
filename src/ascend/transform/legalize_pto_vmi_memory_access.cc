@@ -1866,16 +1866,23 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    if (!CanAnalyze(op->min) || !CanAnalyze(op->extent)) {
-      return StmtExprMutator::VisitStmt_(op);
-    }
     return constraint_scope_.WithNewScope([&]() -> Stmt {
-      Range dom = Range::FromMinExtent(op->min, op->extent);
-      BindRangeFacts(op->loop_var, dom);
-      iter_vars_.Set(op->loop_var, dom);
-      constraint_scope_.Current().Emplace(analyzer_, op->extent > 0);
+      // Unsafe bounds suppress loop facts, not the scope of body assertions.
+      if (CanAnalyze(op->min) && CanAnalyze(op->extent)) {
+        Range dom = Range::FromMinExtent(op->min, op->extent);
+        BindRangeFacts(op->loop_var, dom);
+        iter_vars_.Set(op->loop_var, dom);
+        constraint_scope_.Current().Emplace(analyzer_, op->extent > 0);
+      }
       return StmtExprMutator::VisitStmt_(op);
     });
+  }
+
+  Stmt VisitStmt_(const WhileNode *op) final {
+    // The loop may execute zero times. Keep body assertions local without
+    // using the condition as a fact, matching the existing While contract.
+    return constraint_scope_.WithNewScope(
+        [&]() { return StmtExprMutator::VisitStmt_(op); });
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {
@@ -1916,7 +1923,9 @@ private:
     if (op->attr_key == tirx::attr::tilelang_assume) {
       safe = safe && CanAnalyze(Downcast<PrimExpr>(op->node));
     }
-    return safe ? Parent::VisitStmt_(op) : StmtExprMutator::VisitStmt_(op);
+    return safe ? Parent::VisitStmt_(op)
+                : constraint_scope_.WithNewScope(
+                      [&]() { return StmtExprMutator::VisitStmt_(op); });
   }
 
   PrimExpr VisitExpr_(const SelectNode *op) final {
@@ -1966,8 +1975,8 @@ private:
   // Scope every statement reached through the default control-flow traversal.
   // The branches/loops of IRMutatorWithAnalyzer call the virtual VisitStmt for
   // their bodies, so bindings and active allocations declared inside them are
-  // restored on exit.  While deliberately gets no condition fact and no extra
-  // analyzer scope; only this side environment is restored.
+  // restored on exit. Analyzer constraints are scoped by the individual
+  // statement visitors; While deliberately gets no condition fact.
   Stmt VisitStmt(const Stmt &stmt) final {
     size_t bind_mark = bindings_.size();
     size_t allocation_mark = active_allocations_.size();
@@ -1987,7 +1996,9 @@ private:
       safe = safe && CanAnalyze(iv->dom->min) && CanAnalyze(iv->dom->extent);
     }
     Stmt visited =
-        safe ? Parent::VisitStmt_(op) : StmtExprMutator::VisitStmt_(op);
+        safe ? Parent::VisitStmt_(op) : constraint_scope_.WithNewScope([&]() {
+          return StmtExprMutator::VisitStmt_(op);
+        });
     active_allocations_.resize(mark);
     return visited;
   }
