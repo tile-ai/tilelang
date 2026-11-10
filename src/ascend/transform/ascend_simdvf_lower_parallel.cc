@@ -596,6 +596,11 @@ private:
     PrimExpr value = call->args[1];
     DataType dtype = buf->dtype;
 
+    if (dtype.bits() < 8) {
+      LOG(FATAL) << "T.fill inside SimdVF does not support sub-byte dtype "
+                 << dtype << " (buffer " << buf->name << ")";
+    }
+
     if (value->dtype != dtype) {
       value = Cast(dtype, value);
     }
