@@ -13,7 +13,7 @@ import sys
 import threading
 
 import torch
-from tvm_ffi import use_raw_stream
+from tvm_ffi import use_raw_stream, use_torch_stream
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -226,8 +226,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
 
         current_device_functor = None
         has_host_mapped_params = bool(get_host_mapped_params(self.prim_func))
-        if has_host_mapped_params:
-            current_device_functor = self.get_current_device_functor("npu" if self.target.kind.name == "ascend" else "cuda")
 
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
@@ -357,12 +355,16 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if has_host_mapped_params and out_device is None:
                 # CPU tensors do not propagate an accelerator stream through
                 # DLPack. All-host signatures still follow Torch's capture.
-                if current_device_functor is None:
-                    current_device_functor = self.get_current_device_functor()
-                device = current_device_functor()
-                self._prepare_torch_device(device)
-                stream = self.get_current_stream_functor(device)()
-                with use_raw_stream(runtime.device(self.target.get_target_device_type(), device.index), stream):
+                if self.target.kind.name == "ascend":
+                    if current_device_functor is None:
+                        current_device_functor = self.get_current_device_functor()
+                    device = current_device_functor()
+                    self._prepare_torch_device(device)
+                    stream = self.get_current_stream_functor(device)()
+                    stream_context = use_raw_stream(runtime.device(self.target.get_target_device_type(), device.index), stream)
+                else:
+                    stream_context = use_torch_stream()
+                with stream_context:
                     executable(*tensor_list)
             else:
                 executable(*tensor_list)
@@ -378,8 +380,6 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         """Create a Torch callable whose outputs are allocated by TVM-FFI."""
         current_device_functor = None
         has_host_mapped_params = bool(get_host_mapped_params(self.prim_func))
-        if has_host_mapped_params:
-            current_device_functor = self.get_current_device_functor("npu" if self.target.kind.name == "ascend" else "cuda")
         expected_inputs = len(self.params) - len(self.result_idx)
 
         def func(*inputs: torch.Tensor | Any):

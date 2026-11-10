@@ -120,17 +120,14 @@ class BaseKernelAdapter(ABC):
         return lambda: 0
 
     @staticmethod
-    def get_current_device_functor(device_type: str | None = None) -> Callable[[], torch.device]:
+    def get_current_device_functor() -> Callable[[], torch.device]:
         """Return a callable that yields Torch's current device.
 
         Similar to the stream functor, we capture a callable that, when called,
         fetches the current device according to PyTorch, independently of the
-        compilation target unless a device type is explicitly supplied.
-        If neither NPU nor CUDA is available, returns
+        compilation target. If neither NPU nor CUDA is available, returns
         ``torch.device('cpu')``.
         """
-        if device_type is not None:
-            return lambda: torch.device(device_type, getattr(torch, device_type).current_device())
         if hasattr(torch, "npu") and torch.npu.is_available():
             return lambda: torch.device("npu", torch.npu.current_device())
         elif torch.cuda.is_available():

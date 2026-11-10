@@ -36,7 +36,7 @@ except ImportError:
     raise
 
 
-def _device_providers(target=None):
+def _device_providers():
     """Resolve Torch devices and their current streams lazily at runtime."""
     current_device_functor = None
     current_stream_functors = {}
@@ -44,8 +44,7 @@ def _device_providers(target=None):
     def current_device():
         nonlocal current_device_functor
         if current_device_functor is None:
-            device_type = ("npu" if is_ascend_target(target) else "cuda") if target is not None else None
-            current_device_functor = BaseKernelAdapter.get_current_device_functor(device_type)
+            current_device_functor = BaseKernelAdapter.get_current_device_functor()
         return current_device_functor()
 
     def current_stream(device: torch.device):
@@ -177,7 +176,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             self.result_idx,
             self.params,
             self.lib,
-            *_device_providers(self.target if get_host_mapped_params(self.prim_func) else None),
+            *_device_providers(),
             host_mapped_indices=get_host_mapped_params(self.prim_func),
             get_host_mapped_pointer=self._get_host_mapped_pointer(),
         )
@@ -249,7 +248,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             adapter.result_idx,
             adapter.params,
             adapter.lib,
-            *_device_providers(adapter.target if get_host_mapped_params(adapter.prim_func) else None),
+            *_device_providers(),
             host_mapped_indices=get_host_mapped_params(adapter.prim_func),
             get_host_mapped_pointer=adapter._get_host_mapped_pointer(),
         )

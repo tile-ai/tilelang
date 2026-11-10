@@ -40,7 +40,8 @@ cdef class CythonKernelWrapper:
         self.host_mapped_indices = frozenset(host_mapped_indices)
         self.get_host_mapped_pointer = get_host_mapped_pointer
         if self.host_mapped_indices and get_host_mapped_pointer is None:
-            raise ValueError("Host-mapped parameters require a device pointer resolver")
+            from tvm import get_global_func
+            self.get_host_mapped_pointer = get_global_func("tl.cuda.get_host_mapped_pointer")
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         self.param_dtypes = [param.torch_dtype() for param in params]
@@ -107,7 +108,7 @@ cdef class CythonKernelWrapper:
                     device.index is None or
                     tensor_device.index == device.index
                 )
-                if self.host_mapped_indices and device.type != "cpu":
+                if self.host_mapped_indices and device.type in ("cuda", "npu"):
                     current_device = self.get_current_device()
                     device = current_device if isinstance(current_device, torch.device) else torch.device(device.type, current_device)
                     device_index_match = tensor_device.index == device.index
