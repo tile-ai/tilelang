@@ -39,6 +39,40 @@ def test_direct_negative_divisor_is_not_simplified(modulo):
     tvm.ir.assert_structural_equal(result, expr)
 
 
+def test_reverse_split_removes_the_outer_division():
+    x = tirx.Var("x", "int32")
+    # (16 - 2 * (x // 2)) // 2 * 16 == (8 - x // 2) * 16. The outer floor
+    # division must be folded into the iterator instead of surviving as a
+    # negative-scale division.
+    expr = ((16 - 2 * (x // 2)) // 2) * 16
+    result = tvm.arith.iter_map_simplify([expr], {x: tvm.ir.Range(0, 16)}, check_level="surjective")[0]
+    tvm.ir.assert_structural_equal(result, x // 2 * -16 + 128)
+
+
+def test_symbolic_divisor_is_only_rejected_when_provably_non_positive():
+    x = tirx.Var("x", "int32")
+    n = tirx.Var("n", "int32")
+    expr = (x + 1) // n * 16
+    result = tvm.arith.iter_map_simplify([expr], {x: tvm.ir.Range(0, 16)}, check_level="surjective")[0]
+
+    # An unknown-sign divisor is not provably non-positive, so the expression
+    # is left alone rather than rejected outright.
+    tvm.ir.assert_structural_equal(result, expr)
+
+    # Substituting a negative divisor afterwards must still produce the right
+    # floor-division result; this guards against assuming the divisor is
+    # positive when the sign cannot be proven.
+    for divisor in (-4, -2, -1, 1, 2, 4):
+        for value in range(16):
+            actual = tvm.arith.Analyzer().simplify(
+                tirx.stmt_functor.substitute(
+                    result,
+                    {x: tirx.IntImm("int32", value), n: tirx.IntImm("int32", divisor)},
+                )
+            )
+            assert int(actual) == ((value + 1) // divisor) * 16, (divisor, value, result)
+
+
 @pytest.mark.parametrize("base,scale,inner,outer", CASES)
 @pytest.mark.parametrize("modulo", [False, True])
 @pytest.mark.parametrize("dtype", ["int32", "int64"])
