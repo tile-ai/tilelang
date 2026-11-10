@@ -30,6 +30,21 @@ def is_torch_npu_stream_exchange_installed() -> bool:
     return bool(is_installed())
 
 
+def npu_output_importer_available() -> bool:
+    """Whether torch_npu can import a DLPack tensor with a proper NPU storage.
+
+    Without ``torch_npu._C._npu_from_dlpack`` the only available importer is
+    Torch's generic one, which rebuilds the tensor with ``at::from_blob`` and
+    drops the NPU storage descriptor. Callee-allocated NPU outputs must be
+    rejected in that case instead of returning a silently broken tensor.
+    """
+    try:
+        import torch_npu
+    except ModuleNotFoundError:
+        return False
+    return hasattr(torch_npu._C, "_npu_from_dlpack")
+
+
 def npu_current_device():
     """Torch device for the current NPU, for kernel output allocation."""
     import torch
@@ -58,6 +73,7 @@ def npu_current_raw_stream():
 __all__ = [
     "install_torch_npu_stream_exchange",
     "is_torch_npu_stream_exchange_installed",
+    "npu_output_importer_available",
     "npu_current_device",
     "npu_current_raw_stream",
 ]

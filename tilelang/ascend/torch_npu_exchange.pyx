@@ -168,6 +168,16 @@ cdef int torch_npu_managed_tensor_to_py_object(
         return torch_exchange_original_api.managed_tensor_to_py_object_no_sync(
             tensor, out_py_object)
 
+    if torch_npu_from_dlpack is None:
+        # The table only overrides this callback when the importer exists, so
+        # reaching here means the installation was bypassed. Raising is still
+        # the safe choice: Torch's own importer would rebuild the tensor with
+        # at::from_blob and silently lose the NPU storage descriptor.
+        raise RuntimeError(
+            "torch_npu._C._npu_from_dlpack is unavailable; cannot import an NPU "
+            "kernel output without losing its NPU storage descriptor"
+        )
+
     wrapper = <TorchNpuLegacyTensor*>malloc(sizeof(TorchNpuLegacyTensor))
     if wrapper == NULL:
         raise MemoryError("failed to allocate DLManagedTensor for the torch_npu import")
@@ -282,14 +292,18 @@ def install_torch_npu_stream_exchange():
         stream_getter = lambda device_id: current_stream(device_id).npu_stream
 
     from_dlpack = getattr(torch_npu._C, "_npu_from_dlpack", None)
-    if from_dlpack is None:
-        from_dlpack = torch.from_dlpack
 
     torch_exchange_patched_api = exchange_api[0]
     torch_exchange_patched_api.current_work_stream = torch_npu_current_work_stream
-    torch_exchange_patched_api.managed_tensor_to_py_object_no_sync = (
-        torch_npu_managed_tensor_to_py_object
-    )
+    if from_dlpack is not None:
+        # Only take over output import when torch_npu can build a proper NPU
+        # storage. Without it the callback would have to fall back to Torch's
+        # at::from_blob importer, which silently drops NPUStorageDesc. Leaving
+        # the original callback in place keeps stream-only kernels working;
+        # kernels with callee-allocated NPU outputs are rejected by the adapter.
+        torch_exchange_patched_api.managed_tensor_to_py_object_no_sync = (
+            torch_npu_managed_tensor_to_py_object
+        )
     patched_capsule = PyCapsule_New(
         &torch_exchange_patched_api,
         DLPACK_EXCHANGE_CAPSULE,

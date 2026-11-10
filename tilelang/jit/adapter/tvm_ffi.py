@@ -399,6 +399,19 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     "TVM-FFI callee-allocated outputs require Torch's DLPack allocator exchange API. "
                     "Install a compatible torch-c-dlpack-ext or use a supported PyTorch build."
                 )
+            if device.type == "npu":
+                # TVM-FFI swallows an importer failure and falls back to a plain
+                # TVM tensor, so reject the unsupported combination up front
+                # rather than returning a tensor without an NPU storage
+                # descriptor. Stream-only kernels never reach this path.
+                from tilelang.ascend.torch_exchange import npu_output_importer_available
+
+                if not npu_output_importer_available():
+                    raise RuntimeError(
+                        "Callee-allocated NPU outputs require torch_npu._C._npu_from_dlpack to "
+                        "preserve the NPU storage descriptor; this torch_npu build does not "
+                        "provide it. Use the cython execution backend or pass preallocated outputs."
+                    )
 
             if allocator_anchor is None:
                 # A Torch tensor argument installs the EnvTensorAllocator in
