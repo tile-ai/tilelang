@@ -760,7 +760,13 @@ void ValidateKernelCapabilities(const PrimFunc &func) {
     }
   });
 
-  ICHECK(!has_cube_block || has_gemm_l1 || has_blockscaled_gemm_l1 ||
+  // Manual regions were validated before lowering. An empty Cube participant
+  // or scalar-only Cube region need not contain a hardware Cube opcode.
+  bool manual_regions = !tvm::transform::PassContext::Current()
+                             ->GetConfig<Bool>("tl.enable_auto_schedule", Bool(true))
+                             .value();
+  ICHECK(manual_regions || !has_cube_block || has_gemm_l1 ||
+         has_blockscaled_gemm_l1 ||
          has_supported_cube_mte || has_mad)
       << "PTO codegen requires a supported Cube operation: GM->L1, L1 fill, "
          "L1->L0A/B, UB->L1, tl.ascend_gemm_l1, tl.ascend_blockscaled_gemm_l1, "

@@ -127,6 +127,9 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
 
     mod = tilelang.transform.Simplify()(mod)
 
+    if not auto_schedule_enabled:
+        # Validate and normalize manual regions on the same simplified IR.
+        mod = ascend_transform.LowerAscendCoreRegions()(mod)
     mod = ascend_transform.NormalizeBufferVersion()(mod)
     # The PTO target splits here: the formal PTO Parallel pipeline runs
     # Verify -> Legalize -> Vectorize (Legalize is currently a pass-through
