@@ -333,7 +333,8 @@ void TVMFFIABIBuilder::BindDLTensors(
     const std::string &func_name,
     const std::unordered_set<const VarNode *> &used_param_buffers,
     const std::unordered_set<const VarNode *> &used_shape_vars,
-    const std::unordered_set<const VarNode *> &host_mapped_buffers) {
+    const std::unordered_set<const VarNode *> &host_mapped_buffers,
+    const std::string &host_mapped_pointer_func) {
   Array<Buffer> buffers;
   Array<Var> handles;
 
@@ -981,7 +982,7 @@ void TVMFFIABIBuilder::BindDLTensors(
         TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
         make_zero(DataType::Int(32)));
 
-    // Host storage has no CUDA device id. Only device-resident parameters
+    // Host storage has no execution device id. Only device-resident parameters
     // participate in the execution-device consistency check.
     bool host_mapped = host_mapped_buffers.count(buffer->data.get());
     if (!host_mapped) {
@@ -1017,9 +1018,9 @@ void TVMFFIABIBuilder::BindDLTensors(
           TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorData),
           make_zero(DataType::Handle()));
       if (host_mapped) {
-        data_ptr =
-            Call(DataType::Handle(), builtin::tvm_call_packed(),
-                 {StringImm("tl.cuda.get_host_mapped_pointer"), data_ptr});
+        ICHECK(!host_mapped_pointer_func.empty());
+        data_ptr = Call(DataType::Handle(), builtin::tvm_call_packed(),
+                        {StringImm(host_mapped_pointer_func), data_ptr});
       }
       BindNullable(buffer->data, data_ptr, arg_name + ".data", true, is_null);
 

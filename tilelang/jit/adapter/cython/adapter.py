@@ -36,7 +36,7 @@ except ImportError:
     raise
 
 
-def _device_providers():
+def _device_providers(target=None):
     """Resolve Torch devices and their current streams lazily at runtime."""
     current_device_functor = None
     current_stream_functors = {}
@@ -44,7 +44,8 @@ def _device_providers():
     def current_device():
         nonlocal current_device_functor
         if current_device_functor is None:
-            current_device_functor = BaseKernelAdapter.get_current_device_functor()
+            device_type = ("npu" if is_ascend_target(target) else "cuda") if target is not None else None
+            current_device_functor = BaseKernelAdapter.get_current_device_functor(device_type)
         return current_device_functor()
 
     def current_stream(device: torch.device):
@@ -173,7 +174,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(
-            self.result_idx, self.params, self.lib, *_device_providers(), host_mapped_indices=get_host_mapped_params(self.prim_func)
+            self.result_idx,
+            self.params,
+            self.lib,
+            *_device_providers(self.target if get_host_mapped_params(self.prim_func) else None),
+            host_mapped_indices=get_host_mapped_params(self.prim_func),
+            get_host_mapped_pointer=self._get_host_mapped_pointer(),
         )
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
@@ -243,8 +249,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
             adapter.result_idx,
             adapter.params,
             adapter.lib,
-            *_device_providers(),
+            *_device_providers(adapter.target if get_host_mapped_params(adapter.prim_func) else None),
             host_mapped_indices=get_host_mapped_params(adapter.prim_func),
+            get_host_mapped_pointer=adapter._get_host_mapped_pointer(),
         )
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
@@ -417,6 +424,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 if is_contiguous:
                     static_contiguous_list.append((i, buffer.name))
         return static_shape_map, static_strides_map, static_contiguous_list
+
+    def _get_host_mapped_pointer(self):
+        if not get_host_mapped_params(self.prim_func):
+            return None
+        return tvm.get_global_func(f"tl.{self.target.kind.name}.get_host_mapped_pointer")
 
     def _process_buffer_device(self) -> dict[tirx.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.

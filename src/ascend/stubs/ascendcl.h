@@ -58,6 +58,9 @@ struct TILELANG_ASCENDCL_STUB_API AscendCLAPI {
                                             void *, size_t, void *, size_t);
   // Optional: absent on CANN versions that predate the API.
   const char *(*aclGetRecentErrMsg_)(void);
+  // Optional: only needed for explicitly mapped host parameters.
+  int32_t (*aclrtHostGetDevicePointer_)(void *, void **, uint32_t);
+  int32_t (*aclrtGetLastError_)(int32_t);
   // Optional: absent on CANN versions that predate the API. Used only by
   // Ascend native profiling (TILELANG_ASCEND_PROFILER).
   int32_t (*aclrtGetFunctionAttribute_)(void *, int32_t, int64_t *);
@@ -97,6 +100,12 @@ TILELANG_ASCENDCL_STUB_API int32_t aclrtLaunchKernelWithHostArgs(
 /// Returns nullptr (instead of throwing) when libascendcl.so or the symbol is
 /// unavailable, so error-reporting paths stay usable.
 TILELANG_ASCENDCL_STUB_API const char *aclGetRecentErrMsg(void);
+
+/// Returns a nonzero error when the mapping API is unavailable.
+TILELANG_ASCENDCL_STUB_API int32_t aclrtHostGetDevicePointer(void *hostPtr,
+                                                             void **devicePtr,
+                                                             uint32_t flags);
+TILELANG_ASCENDCL_STUB_API int32_t aclrtGetLastError(int32_t level);
 
 /// Returns a nonzero ACL error (instead of throwing) when libascendcl.so or
 /// the symbol is unavailable, so best-effort profiling paths can fall back.

@@ -121,10 +121,10 @@ Since `some_cond` is only known at runtime, static analysis cannot prove `A` is 
 Supported and referenced device codes in error messages: `1=CPU, 2=CUDA, 7=Vulkan, 8=Metal, 10=ROCM, 14=OneAPI, 15=WebGPU`.
 Kernels assert that `device_type` matches the target backend, and require `device_id` consistency across tensors.
 
-### Explicit mapped host parameters (CUDA)
+### Explicit mapped host parameters (CUDA and Ascend)
 
 `T.annotate_host_mapped_buffers(*buffers)` declares external tensor parameters
-whose storage is mapped host memory accessible to the executing GPU:
+whose storage is mapped host memory accessible to the executing device:
 
 ```python
 @T.prim_func
@@ -137,7 +137,8 @@ def affine(src: T.Tensor((N,), T.float32), dst: T.Tensor((N,), T.float32)):
                 dst[i] = src[i] * 2 + 1
 ```
 
-Compile with `target="cuda"` and `execution_backend="cython"` or `"tvm_ffi"`.
+Compile this CUDA example with `target="cuda"` and
+`execution_backend="cython"` or `"tvm_ffi"`.
 Pass a preallocated CPU tensor, for example
 `torch.empty(N, dtype=torch.float32, pin_memory=True)`, as `dst`. Its PyTorch
 device remains CPU. The launcher validates the CUDA registration and resolves
@@ -150,20 +151,38 @@ The annotation applies to the whole function. Multiple calls are merged into
 the `tl.host_mapped_params` function attribute, which records parameter indices
 and survives IR serialization and kernel cache restoration. It does not change
 the buffer's `global` scope. Only external buffer parameters may be annotated;
-annotated outputs cannot be allocated via `out_idx` or `T.empty`. Other targets
-and execution backends currently reject the annotation.
+annotated outputs cannot be allocated via `out_idx` or `T.empty`. Targets other
+than CUDA and Ascend, and other execution backends currently reject the annotation.
 
-Mapped parameters use the current CUDA execution context; CUDA tensor arguments
-must be on that device. Host tensors do not supply a CUDA device ID. Views use
+Mapped parameters use the current execution context; device tensor arguments
+must be on that device. Host tensors do not supply an execution device ID. Views use
 their actual data pointer and declared strides, including nonzero storage offsets.
 
 This feature supports direct global loads and stores without a D2H copy or a
 global `skip_tensor_validation`. It does not register memory or synchronize
-execution. Keep the tensor storage and its mapping alive until GPU work finishes,
+execution. Keep the tensor storage and its mapping alive until device work finishes,
 and synchronize the relevant stream or event before the CPU reads or reuses it.
-For CUDA Graphs, preallocate before capture and retain the same storage and
+For CUDA Graphs and NPU Graphs, preallocate before capture and retain the same storage and
 mapping throughout replay. Replays reuse captured pointers and do not rerun host
 validation. Concurrent steps need separate output storage or explicit ordering.
+
+Ascend uses the same annotation from `tilelang.ascend.language`, with
+`target="ascend"` and either `"cython"` or `"tvm_ffi"`. The launcher calls
+`aclrtHostGetDevicePointer` to validate the mapping and obtain the device-visible
+address, including for tensor views. `is_pinned()` alone does not establish that
+the storage is mapped. On a compatible torch_npu/CANN/driver stack, enable
+`PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True` before initializing torch_npu
+and allocate with `pin_memory=True`; alternatively, register the storage with
+`aclrtHostRegister` or `aclrtHostRegisterV2` and retain the registration until all
+device work completes. Unsupported runtimes/devices or unmapped storage raise
+an error; launches never register memory implicitly.
+
+The annotation describes the external buffer's memory contract and is independent
+of SIMT or SIMD execution. It leaves device operations and scheduling unchanged;
+the chosen device memory instructions must support accessing the mapped storage.
+All-host signatures use the current NPU device and Torch stream, including during
+NPU Graph capture. Host-mapped inputs may also feed automatically allocated NPU
+outputs; only the mapped parameters themselves must be explicitly supplied.
 
 ---
 
