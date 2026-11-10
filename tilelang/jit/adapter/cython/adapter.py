@@ -425,9 +425,9 @@ class CythonKernelAdapter(BaseKernelAdapter):
         return static_shape_map, static_strides_map, static_contiguous_list
 
     def _get_host_mapped_pointer(self):
-        if not get_host_mapped_params(self.prim_func):
-            return None
-        return tvm.get_global_func(f"tl.{self.target.kind.name}.get_host_mapped_pointer")
+        if is_ascend_target(self.target) and get_host_mapped_params(self.prim_func):
+            return tvm.get_global_func("tl.ascend.get_host_mapped_pointer")
+        return None
 
     def _process_buffer_device(self) -> dict[tirx.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.

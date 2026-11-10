@@ -362,8 +362,10 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                     self._prepare_torch_device(device)
                     stream = self.get_current_stream_functor(device)()
                     stream_context = use_raw_stream(runtime.device(self.target.get_target_device_type(), device.index), stream)
-                else:
+                elif self.target.kind.name == "cuda":
                     stream_context = use_torch_stream()
+                else:
+                    raise ValueError(f"Host-mapped buffers are not supported for target {self.target.kind.name!r}")
                 with stream_context:
                     executable(*tensor_list)
             else:

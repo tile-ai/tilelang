@@ -107,9 +107,7 @@ public:
       const std::string &func_name,
       const std::unordered_set<const VarNode *> &used_param_buffers,
       const std::unordered_set<const VarNode *> &used_shape_vars,
-      const std::unordered_set<const VarNode *> &host_mapped_buffers = {},
-      const std::string &host_mapped_pointer_func =
-          "tl.cuda.get_host_mapped_pointer");
+      const std::unordered_set<const VarNode *> &host_mapped_buffers = {});
 
   /*! \return The defs generated in binding. */
   const std::vector<Var> &Defs() const { return defs_; }

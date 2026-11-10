@@ -449,11 +449,9 @@ MakePackedAPI(PrimFunc func,
   TVMFFIABIBuilder output_binder(&vmap);
 
   std::unordered_set<const VarNode *> host_mapped_buffers;
-  std::string host_mapped_runtime;
   if (auto indices = func->GetAttr<Array<Integer>>("tl.host_mapped_params")) {
-    ICHECK(TargetIsCuda(target) || TargetIsAscend(target))
+    ICHECK(target_device_type == kDLCUDA || TargetIsAscend(target))
         << "Host-mapped buffers require a CUDA or Ascend target";
-    host_mapped_runtime = "tl." + std::string(target->kind->name) + ".";
     for (Integer index : indices.value()) {
       int i = index.IntValue();
       ICHECK(i >= 0 && i < static_cast<int>(func->params.size()));
@@ -468,7 +466,9 @@ MakePackedAPI(PrimFunc func,
     // first or with no device-resident tensor at all.
     binder.Bind(device_id,
                 Call(DataType::Int(32), builtin::tvm_call_packed(),
-                     {StringImm(host_mapped_runtime + "current_device")}),
+                     {StringImm(target_device_type == kDLCUDA
+                                    ? "tl.cuda.current_device"
+                                    : "tl.ascend.current_device")}),
                 name_hint + ".device_id", true);
   }
 
@@ -801,8 +801,7 @@ MakePackedAPI(PrimFunc func,
 
   binder.BindDLTensors(buffer_def, device_type, device_id, name_hint,
                        used_param_buffers, detector.used_shape_vars,
-                       host_mapped_buffers,
-                       host_mapped_runtime + "get_host_mapped_pointer");
+                       host_mapped_buffers);
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars

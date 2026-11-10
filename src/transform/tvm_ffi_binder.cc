@@ -333,8 +333,7 @@ void TVMFFIABIBuilder::BindDLTensors(
     const std::string &func_name,
     const std::unordered_set<const VarNode *> &used_param_buffers,
     const std::unordered_set<const VarNode *> &used_shape_vars,
-    const std::unordered_set<const VarNode *> &host_mapped_buffers,
-    const std::string &host_mapped_pointer_func) {
+    const std::unordered_set<const VarNode *> &host_mapped_buffers) {
   Array<Buffer> buffers;
   Array<Var> handles;
 
@@ -1018,7 +1017,12 @@ void TVMFFIABIBuilder::BindDLTensors(
           TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorData),
           make_zero(DataType::Handle()));
       if (host_mapped) {
-        ICHECK(!host_mapped_pointer_func.empty());
+        const auto *type = device_type.as<IntImmNode>();
+        ICHECK(type && (type->value == kDLCUDA || type->value == kDLExtDev))
+            << "Host-mapped buffers require a CUDA or Ascend device";
+        const char *host_mapped_pointer_func =
+            type->value == kDLCUDA ? "tl.cuda.get_host_mapped_pointer"
+                                   : "tl.ascend.get_host_mapped_pointer";
         data_ptr = Call(DataType::Handle(), builtin::tvm_call_packed(),
                         {StringImm(host_mapped_pointer_func), data_ptr});
       }
