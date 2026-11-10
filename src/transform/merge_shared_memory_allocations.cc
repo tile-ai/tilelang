@@ -371,16 +371,13 @@ private:
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
 
 public:
-  // explicit_alignments carries the per-buffer requirements recorded by op
-  // lowering (kSmemAlignmentMap); the scan below adds a conservative fallback
-  // for shared vars that reach swizzle-sensitive instructions without an
-  // explicit entry.
+  // Lowering's per-buffer map is a lower bound. Every instruction use must
+  // still contribute its own requirement, including unannotated raw calls.
   static std::unordered_map<const VarNode *, int>
   Plan(const Stmt &stmt,
        const std::unordered_map<const VarNode *, int> &explicit_alignments) {
     SharedMemoryAlignmentPlanner planner;
     planner.shmem_alignment_map_ = explicit_alignments;
-    planner.explicit_alignment_map_ = &explicit_alignments;
     planner(stmt);
     return planner.shmem_alignment_map_;
   }
@@ -389,36 +386,37 @@ private:
   // Helper to record alignment for a shared/shared.dyn Var under alignment
   // scope
   void MarkSharedVarIfNeeded(const VarNode *op) {
-    if (!op || !under_alignment_scope_)
+    if (!op || !alignment_scope_)
       return;
     auto ptr_type = op->type_annotation.as<PointerTypeNode>();
     if (!ptr_type)
       return;
     auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
-      // An explicit requirement recorded at lowering time is exact; keep it.
-      if (explicit_alignment_map_->count(op))
-        return;
-      // TMA bulk-copy and MMA-descriptor operands have stricter shared-memory
-      // alignment than ordinary shared accesses, and the exact requirement
-      // depends on the operand's swizzle mode (up to 1024B for 128B swizzle).
-      // Buffers without an explicit kSmemAlignmentMap entry get the worst
-      // case: a misaligned base is not a launch error but silent data
-      // corruption, so never under-align here.
       int &slot = shmem_alignment_map_[op];
-      slot = std::max(slot, 1024);
+      slot = std::max(slot, alignment_scope_);
     }
   }
 
   void VisitExpr_(const CallNode *op) {
     if (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+        op->op.same_as(tl::tma_load_multicast()) ||
+        op->op.same_as(tl::tma_load_im2col()) ||
+        op->op.same_as(tl::tma_load_gather4()) ||
+        op->op.same_as(tl::tma_store_scatter4()) ||
         op->op.same_as(tl::initialize_wgmma_descriptor()) ||
         op->op.same_as(tl::initialize_tcgen05_descriptor())) {
-      // These intrinsics introduce stricter SMEM alignment requirements; mark
-      // the subtree.
-      under_alignment_scope_ = true;
+      const int previous_alignment = alignment_scope_;
+      int alignment = 1024;
+      if (auto value = op->annotations.Get(attr::kSmemAlignment)) {
+        auto required = Downcast<IntImm>(value.value());
+        ICHECK(required->value >= 16 && required->value <= 1024 &&
+               (required->value & (required->value - 1)) == 0);
+        alignment = static_cast<int>(required->value);
+      }
+      alignment_scope_ = alignment;
       StmtExprVisitor::VisitExpr_(op);
-      under_alignment_scope_ = false;
+      alignment_scope_ = previous_alignment;
     } else {
       StmtExprVisitor::VisitExpr_(op);
     }
@@ -432,17 +430,14 @@ private:
   void VisitExpr_(const BufferLoadNode *op) {
     // If we encounter address_of(BufferLoad(...)) or any direct BufferLoad
     // within an alignment scope, make sure we mark the underlying shared var.
-    if (op && under_alignment_scope_) {
+    if (op && alignment_scope_) {
       const VarNode *data_var = op->buffer->data.get();
       MarkSharedVarIfNeeded(data_var);
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  bool under_alignment_scope_{false};
-
-  const std::unordered_map<const VarNode *, int> *explicit_alignment_map_{
-      nullptr};
+  int alignment_scope_{0};
   std::unordered_map<const VarNode *, int> shmem_alignment_map_;
 };
 
@@ -469,16 +464,15 @@ public:
    * \brief plan the memory reuse for all the buffer allocated in the statement
    * \param stmt the statement
    */
-  void PlanReuse(const Stmt &stmt, bool is_dynamic = true,
-                 bool enable_aggressive_merge = false, bool verbose = false,
-                 bool disable_reuse = false,
-                 const std::unordered_map<const VarNode *, int>
-                     &explicit_alignments = {}) {
+  void
+  PlanReuse(const Stmt &stmt, bool is_dynamic = true,
+            bool enable_aggressive_merge = false, bool verbose = false,
+            bool disable_reuse = false,
+            const std::unordered_map<const VarNode *, int> &alignments = {}) {
     SharedMemLinearAccessPatternFinder finder(is_dynamic,
                                               enable_aggressive_merge, verbose);
     finder(stmt);
-    shmem_alignment_map_ =
-        SharedMemoryAlignmentPlanner::Plan(stmt, explicit_alignments);
+    shmem_alignment_map_ = alignments;
     if (disable_reuse) {
       this->PlanSequentialLayout();
     } else {
@@ -1573,13 +1567,12 @@ private:
   bool preserve_aliases_{true};
 };
 
-Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
-                                  bool enable_aggressive_merge,
-                                  int align_bytes = 16, bool verbose = false,
-                                  bool preserve_aliases = true,
-                                  bool disable_reuse = false,
-                                  const std::unordered_map<std::string, int>
-                                      &explicit_alignments_by_name = {}) {
+std::pair<Stmt, int> MergeSharedMemoryAllocations(
+    Stmt stmt, bool merge_static_smem, bool enable_aggressive_merge,
+    int align_bytes = 16, bool verbose = false, bool preserve_aliases = true,
+    bool disable_reuse = false,
+    const std::unordered_map<std::string, int> &explicit_alignments_by_name =
+        {}) {
   AllocateCollector collector;
   collector(stmt);
   // The kSmemAlignmentMap attribute is keyed by buffer-var name (names are
@@ -1600,12 +1593,22 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
         }
         return resolved;
       };
+  auto dynamic_alignments = SharedMemoryAlignmentPlanner::Plan(
+      stmt, resolve(collector.dyn_shmem_allocs_));
+  // Offsets alone are insufficient: the arena base must satisfy every dynamic
+  // allocation's requirement, including when there is only one allocation.
+  int dynamic_alignment = std::max(16, align_bytes);
+  for (const auto &[var, alignment] : dynamic_alignments) {
+    if (collector.dyn_shmem_allocs_.count(var)) {
+      dynamic_alignment = std::max(dynamic_alignment, alignment);
+    }
+  }
   if (collector.dyn_shmem_allocs_.size() > 1) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs_, true, verbose,
                                   align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, true,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse, resolve(collector.dyn_shmem_allocs_));
+                       disable_reuse, dynamic_alignments);
     stmt = rewriter(std::move(stmt));
   }
   if (merge_static_smem && collector.static_shmem_allocs_.size() > 1) {
@@ -1613,10 +1616,12 @@ Stmt MergeSharedMemoryAllocations(Stmt stmt, bool merge_static_smem,
                                   verbose, align_bytes, preserve_aliases);
     rewriter.PlanReuse(stmt, false,
                        disable_reuse ? false : enable_aggressive_merge, false,
-                       disable_reuse, resolve(collector.static_shmem_allocs_));
+                       disable_reuse,
+                       SharedMemoryAlignmentPlanner::Plan(
+                           stmt, resolve(collector.static_shmem_allocs_)));
     stmt = rewriter(std::move(stmt));
   }
-  return stmt;
+  return {std::move(stmt), dynamic_alignment};
 }
 
 using namespace tirx::transform;
@@ -1647,11 +1652,13 @@ Pass MergeSharedMemoryAllocations(bool enable_aggressive_merge = false,
       }
     }
     auto *n = f.CopyOnWrite();
-    n->body = tl::MergeSharedMemoryAllocations(
+    auto [body, dynamic_alignment] = tl::MergeSharedMemoryAllocations(
         std::move(n->body), merge_static_smem, enable_aggressive_merge,
         align_bytes, debug_merge_shared_memory_allocations, preserve_aliases,
         disable_reuse, explicit_alignments);
-    return f;
+    n->body = std::move(body);
+    return WithAttr(std::move(f), kDynamicSmemAlignment,
+                    Integer(dynamic_alignment));
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeSharedMemoryAllocations",
                             {});
