@@ -9,6 +9,7 @@
 #include "metal/op/utils.h"
 #include "metal/target_utils.h"
 #include "op/utils.h"
+#include "support/check.h"
 
 #include <tvm/tirx/builtin.h>
 
@@ -33,7 +34,6 @@ bool CheckCooperativeTensorCopy(const CopyNode &op) {
 
 Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
-  (void)analyzer;
   TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
 
   int total_elements = 1;
@@ -94,6 +94,22 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
           dst_row_base + warp_m * (warp_row_tiles * kMPerWarp) + i * kMPerWarp;
       PrimExpr col =
           dst_col_base + warp_n * (warp_col_tiles * kNPerWarp) + j * kNPerWarp;
+      // simdgroup_store always writes a complete 8x8 matrix. A valid
+      // starting address alone does not make a destination tail safe.
+      Array<PrimExpr> start{row, col};
+      for (size_t d = 0; d < start.size(); ++d) {
+        PrimExpr relative = start[d] - op.dst_range[d]->min;
+        CHECK(analyzer->CanProve(start[d] >= 0) &&
+                  analyzer->CanProve(start[d] <= op.dst->shape[d] - 8) &&
+                  analyzer->CanProve(relative >= 0) &&
+                  analyzer->CanProve(relative <= op.dst_range[d]->extent - 8),
+              ValueError)
+            << "Metal SIMD-group copy: requires provably in-bounds 8x8 stores "
+               "within the destination buffer and region; cannot prove axis "
+            << d << " of " << op.dst->name
+            << ". Copy to a full shared tile first, then use T.copy to "
+               "handle destination tails.";
+      }
       PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
                           {BufferLoad(op.dst, {row, col})});
       stmts.push_back(Evaluate(
