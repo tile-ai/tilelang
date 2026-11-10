@@ -1,8 +1,8 @@
 """Regression test for issue #2682.
 
 T.vectorized with T.Select incorrectly generates scalar ternary expressions.
-CodeGenTileLangCUDA misses the handling of vectorized SelectNode, causing
-a fallback to CodeGenC in tvm that generates a scalar ternary expression.
+The CUDA and HIP code generators must lower vectorized SelectNode lane-wise;
+otherwise CodeGenC emits a scalar ternary expression for a vector condition.
 """
 
 import tilelang

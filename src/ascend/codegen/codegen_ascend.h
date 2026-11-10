@@ -116,6 +116,7 @@ private:
   bool has_simd_inst_included_{false};
   bool has_gm_bypass_dcache_{false};
   bool has_gm_bypass_dcache_included_{false};
+  bool has_ascend_std_math_included_{false};
   bool has_philox_rng_{false};
   bool has_philox_rng_included_{false};
   bool has_cooperative_groups_included_{false};

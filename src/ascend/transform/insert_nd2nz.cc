@@ -17,6 +17,7 @@
 #include "arith/ir_mutator_with_analyzer.h"
 #include "ascend/layout/ascend_layouts.h"
 #include "ascend/op/builtin.h"
+#include "ascend/op/nd2nz.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
 #include "op/copy.h"
@@ -94,8 +95,11 @@ bool IsCanonicalNZLayout(const Layout &layout, const Buffer &buffer) {
   int bits = buffer->dtype.bits();
   if (bits <= 0 || 256 % bits != 0)
     return false;
-  Layout expected = MakeAscendNZLayout(buffer);
-  return layout->IsEqual(expected.get());
+  if (!IsAscendFractalLayout(layout))
+    return false;
+  AscendFractalLayoutInfo info;
+  return TryExtractAscendFractalLayout(layout, buffer, &info) &&
+         info.kind == AscendFractalKind::kMajorK;
 }
 
 class Nd2NzInserter : public arith::IRMutatorWithAnalyzer {
@@ -224,45 +228,51 @@ private:
     return {std::move(src_dtype), std::move(dst_dtype)};
   }
 
-  Array<PrimExpr> ValidatePrepackedNZSource(const CopyNode &copy, PrimExpr rows,
-                                            PrimExpr cols,
-                                            PrimExpr full_rows) const {
-    RequireStaticInt(rows, "NZ post-copy rows");
-    RequireStaticInt(cols, "NZ post-copy cols");
-    RequireStaticInt(full_rows, "NZ post-copy full_rows");
-    ICHECK_EQ(copy.src_range.size(), copy.src->shape.size());
-    ICHECK_GE(copy.src_range.size(), 2U);
-    for (size_t i = 0; i + 2 < copy.src_range.size(); ++i) {
-      if (!analyzer_->CanProveEqual(copy.src_range[i]->extent, 1)) {
+  PrimExpr NZPitch(const Buffer &buffer, const Array<Range> &ranges) const {
+    auto layout = LayoutFor(buffer);
+    if (!layout.defined() || !IsNZBuffer(buffer))
+      TVM_FFI_THROW(ValueError)
+          << "NZ copy requires a compact NZ or MajorK layout: " << buffer->name;
+    ValidateRegionInBounds(buffer, ranges, "NZ");
+    for (size_t i = 0; i + 2 < ranges.size(); ++i)
+      if (!analyzer_->CanProveEqual(ranges[i]->extent, 1))
         TVM_FFI_THROW(ValueError)
-            << "NZ source " << copy.src->name
-            << " leading region extents must all be 1, got " << copy.src_range;
-      }
+            << "NZ copy leading region extents must all be 1";
+    int c0 = AscendC0(buffer->dtype.bits());
+    if (!analyzer_->CanProveEqual(floormod(ranges.back()->min, c0), 0) ||
+        !analyzer_->CanProveEqual(floormod(ranges.back()->extent, c0), 0) ||
+        !analyzer_->CanProveEqual(floormod(buffer->elem_offset, c0), 0))
+      TVM_FFI_THROW(ValueError) << "NZ copy requires C0-aligned column starts, "
+                                   "widths, and base offsets";
+    PrimExpr pitch = buffer->shape[buffer->shape.size() - 2];
+    if (IsCanonicalNZLayout(layout.value(), buffer)) {
+      const auto physical_shape = layout.value()->OutputShape();
+      pitch = analyzer_->Simplify(physical_shape[physical_shape.size() - 3] *
+                                  physical_shape[physical_shape.size() - 2]);
     }
-    size_t ndim = copy.src_range.size();
-    bool mins_are_zero =
-        analyzer_->CanProveEqual(copy.src_range[ndim - 2]->min, 0) &&
-        analyzer_->CanProveEqual(copy.src_range[ndim - 1]->min, 0);
-    bool extents_are_full =
-        analyzer_->CanProveEqual(copy.src->shape[ndim - 2],
-                                 copy.src_range[ndim - 2]->extent + 1) &&
-        analyzer_->CanProveEqual(copy.src->shape[ndim - 1],
-                                 copy.src_range[ndim - 1]->extent);
-    if (!mins_are_zero || !extents_are_full) {
-      TVM_FFI_THROW(ValueError)
-          << "NZ source " << copy.src->name
-          << " trailing region must cover the full padded matrix: ranges="
-          << copy.src_range << ", buffer shape=" << copy.src->shape;
-    }
-    if (!analyzer_->CanProveEqual(copy.src_range[ndim - 2]->extent, rows) ||
-        !analyzer_->CanProveEqual(copy.src_range[ndim - 1]->extent, cols)) {
-      TVM_FFI_THROW(ValueError)
-          << "NZ source " << copy.src->name
-          << " region must match post-copy geometry " << rows << "x" << cols;
-    }
-    Array<PrimExpr> pointer_extents = RegionExtents(copy.src_range);
-    pointer_extents.Set(ndim - 2, copy.src->shape[ndim - 2]);
-    return pointer_extents;
+    RequireStaticInt(pitch, "NZ storage pitch");
+    return pitch;
+  }
+
+  PrimExpr NZPointer(const Buffer &buffer, const Array<Range> &ranges,
+                     PrimExpr pitch, int mask) const {
+    PrimExpr rows = ranges[ranges.size() - 2]->extent;
+    PrimExpr cols = ranges.back()->extent;
+    int c0 = AscendC0(buffer->dtype.bits());
+    Array<PrimExpr> extents(ranges.size(), Integer(1));
+    extents.Set(
+        extents.size() - 1,
+        analyzer_->Simplify(((floordiv(cols, c0) - 1) * pitch + rows) * c0));
+    return MakeTLAccessPtr(buffer, ranges, extents, mask);
+  }
+
+  Stmt Intrinsic(const Op &op, Array<PrimExpr> args, bool scatter) const {
+    // Each bit proves that the corresponding pointer argument's logical
+    // rectangle maps to the NZ DMA blocks before LowerTileOp.
+    Call call(DataType::Void(), op, args,
+              {{"nd2nz_logical_regions", Integer(3)}});
+    auto geometry = ParseNd2NzGeometry(call.get(), scatter);
+    return geometry.Empty() ? Evaluate(Integer(0)) : Evaluate(call);
   }
 
   std::optional<Stmt> RewriteUBToUB(const CopyNode &copy) {
@@ -335,6 +345,9 @@ private:
       TVM_FFI_THROW(ValueError)
           << "UB ND->NZ source/destination logical regions must match.";
     }
+    if (is_zero(analyzer_->Simplify(rows)) ||
+        is_zero(analyzer_->Simplify(cols)))
+      return Evaluate(Integer(0));
     int64_t rows_i = RequireStaticInt(rows, "UB ND->NZ scatter rows");
     int64_t cols_i = RequireStaticInt(cols, "UB ND->NZ scatter cols");
     auto [src_dtype, dst_dtype] =
@@ -345,30 +358,14 @@ private:
       TVM_FFI_THROW(ValueError) << "UB ND->NZ source " << copy.src->name
                                 << " must cover a full contiguous row.";
     }
-    if (!analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 2]->min, 0) ||
-        !analyzer_->CanProveEqual(copy.dst_range[dst_ndim - 1]->min, 0)) {
-      TVM_FFI_THROW(ValueError) << "UB ND->NZ destination " << copy.dst->name
-                                << " must start at trailing offset [0, 0].";
-    }
-    if (!analyzer_->CanProveEqual(copy.dst->shape[dst_ndim - 2], rows + 1) ||
-        !analyzer_->CanProveEqual(copy.dst->shape[dst_ndim - 1], cols)) {
-      TVM_FFI_THROW(ValueError)
-          << "UB ND->NZ compact destination " << copy.dst->name
-          << " must reserve exactly one padding row.";
-    }
-
+    PrimExpr dst_pitch = NZPitch(copy.dst, copy.dst_range);
     PrimExpr src_ptr = MakeTLAccessPtr(copy.src, copy.src_range, kAccessRead);
-    Array<PrimExpr> dst_extents = RegionExtents(copy.dst_range);
-    dst_extents.Set(dst_ndim - 2, copy.dst->shape[dst_ndim - 2]);
     PrimExpr dst_ptr =
-        MakeTLAccessPtr(copy.dst, copy.dst_range, dst_extents, kAccessWrite);
-    Array<PrimExpr> args{src_ptr,
-                         dst_ptr,
-                         rows,
-                         cols,
-                         StringImm(dst_dtype),
-                         StringImm(src_dtype)};
-    return Evaluate(Call(DataType::Handle(), ascend_nd2nz_scatter(), args));
+        NZPointer(copy.dst, copy.dst_range, dst_pitch, kAccessWrite);
+    return Intrinsic(ascend_nd2nz_scatter(),
+                     {src_ptr, dst_ptr, rows, cols, dst_pitch,
+                      StringImm(src_dtype), StringImm(dst_dtype)},
+                     true);
   }
 
   std::optional<Stmt> RewriteUBToL1(const CopyNode &copy) {
@@ -376,66 +373,183 @@ private:
         copy.dst_range.size() < 2 || !LayoutFor(copy.dst).defined()) {
       return std::nullopt;
     }
-    bool src_is_nz = IsNZBuffer(copy.src);
-
+    if (!IsCanonicalNZLayout(LayoutFor(copy.dst).value(), copy.dst))
+      TVM_FFI_THROW(ValueError)
+          << "UB-to-L1 NZ post-copy requires a MajorK destination layout";
+    if (copy.src_range.size() < 2)
+      TVM_FFI_THROW(ValueError)
+          << "UB-to-L1 NZ copy requires rank >= 2 regions";
     size_t dst_ndim = copy.dst_range.size();
+    size_t src_ndim = copy.src_range.size();
     PrimExpr rows = copy.dst_range[dst_ndim - 2]->extent;
     PrimExpr cols = copy.dst_range[dst_ndim - 1]->extent;
-    PrimExpr full_rows = copy.dst->shape[copy.dst->shape.size() - 2];
-    std::string src_dtype = Nd2NzDTypeName(copy.src->dtype);
+    if (!analyzer_->CanProveEqual(copy.src_range[src_ndim - 2]->extent, rows) ||
+        !analyzer_->CanProveEqual(copy.src_range.back()->extent, cols))
+      TVM_FFI_THROW(ValueError)
+          << "NZ copy source/destination logical regions must match";
+    if (is_zero(analyzer_->Simplify(rows)) ||
+        is_zero(analyzer_->Simplify(cols)))
+      return Evaluate(Integer(0));
+    PrimExpr dst_pitch = NZPitch(copy.dst, copy.dst_range);
+    PrimExpr dst_ptr =
+        NZPointer(copy.dst, copy.dst_range, dst_pitch, kAccessWrite);
     std::string dst_dtype = Nd2NzDTypeName(copy.dst->dtype);
-
-    Array<PrimExpr> src_extents =
-        src_is_nz ? ValidatePrepackedNZSource(copy, rows, cols, full_rows)
-                  : RegionExtents(copy.src_range);
-    PrimExpr src_ptr =
-        MakeTLAccessPtr(copy.src, copy.src_range, src_extents, kAccessRead);
-    PrimExpr dst_ptr = MakeTLAccessPtr(copy.dst, copy.dst_range, kAccessWrite);
-    bool same_dtype = copy.src->dtype == copy.dst->dtype;
-
-    auto make_post_copy = [&](PrimExpr source_ptr) {
-      Array<PrimExpr> args{dst_ptr, source_ptr, rows,
-                           cols,    full_rows,  StringImm(dst_dtype)};
-      return Evaluate(Call(DataType::Handle(), ascend_nd2nz_post_copy(), args));
+    auto make_post_copy = [&](PrimExpr source_ptr, PrimExpr src_pitch) {
+      return Intrinsic(ascend_nd2nz_post_copy(),
+                       {dst_ptr, source_ptr, rows, cols, src_pitch, dst_pitch,
+                        StringImm(dst_dtype)},
+                       false);
     };
-
-    if (src_is_nz) {
-      if (!same_dtype) {
+    bool same_dtype = copy.src->dtype == copy.dst->dtype;
+    if (IsNZBuffer(copy.src)) {
+      if (!same_dtype)
         TVM_FFI_THROW(ValueError)
-            << "NZ source " << copy.src->name
-            << " cannot be post-copied with a dtype conversion ("
-            << copy.src->dtype << " -> " << copy.dst->dtype << ")";
-      }
-      return make_post_copy(src_ptr);
+            << "NZ post-copy cannot perform a dtype conversion";
+      PrimExpr src_pitch = NZPitch(copy.src, copy.src_range);
+      return make_post_copy(
+          NZPointer(copy.src, copy.src_range, src_pitch, kAccessRead),
+          src_pitch);
     }
-
-    const int64_t *cols_i = as_const_int(cols);
-    int elem_bytes = (copy.dst->dtype.bits() + 7) / 8;
-    if (cols_i != nullptr && *cols_i * elem_bytes == 32 && same_dtype) {
-      return make_post_copy(src_ptr);
-    }
-
-    PrimExpr scratch_extent = (rows + 1) * cols;
+    if (HasPhysicalLayout(copy.src) || !HasCompactTrailingMatrix(copy.src))
+      TVM_FFI_THROW(ValueError)
+          << "ND->NZ requires an unannotated dense ND source";
+    ValidateRegionInBounds(copy.src, copy.src_range, "source");
+    for (size_t i = 0; i + 2 < src_ndim; ++i)
+      if (!analyzer_->CanProveEqual(copy.src_range[i]->extent, 1))
+        TVM_FFI_THROW(ValueError)
+            << "ND->NZ source leading region extents must all be 1";
+    if (!HasAlignedScatterBase(copy.src, copy.src_range) ||
+        !analyzer_->CanProveEqual(copy.src_range.back()->min, 0) ||
+        !analyzer_->CanProveEqual(copy.src->shape.back(), cols))
+      TVM_FFI_THROW(ValueError) << "ND->NZ source must cover full contiguous "
+                                   "rows at a 32-byte-aligned address";
+    PrimExpr src_ptr = MakeTLAccessPtr(copy.src, copy.src_range, kAccessRead);
+    int64_t rows_i = RequireStaticInt(rows, "ND->NZ rows");
+    int64_t cols_i = RequireStaticInt(cols, "ND->NZ cols");
+    if (cols_i == AscendC0(copy.dst->dtype.bits()) && same_dtype)
+      return make_post_copy(src_ptr, rows);
+    auto [src_dtype, checked_dst_dtype] =
+        ValidateScatterTemplate(copy.src, copy.dst, rows_i, cols_i);
+    // A fresh scratch buffer uses one extra row per C0 group. Existing NZ
+    // buffers instead retain the pitch of their complete storage layout.
+    PrimExpr scratch_pitch = rows + 1;
+    PrimExpr scratch_extent = analyzer_->Simplify(scratch_pitch * cols);
     Buffer scratch = decl_buffer({scratch_extent}, copy.dst->dtype,
                                  "nz_scratch", "shared.dyn");
     ICHECK(!pending_allocs_.empty());
     pending_allocs_.back().push_back(scratch);
-    Array<Range> scratch_ranges{
-        Range::FromMinExtent(IntImm(DataType::Int(32), 0), scratch_extent)};
+    Array<Range> scratch_ranges{Range::FromMinExtent(0, scratch_extent)};
     PrimExpr scratch_write =
         MakeTLAccessPtr(scratch, scratch_ranges, kAccessWrite);
     PrimExpr scratch_read =
         MakeTLAccessPtr(scratch, scratch_ranges, kAccessRead);
-    Stmt scatter = Evaluate(Call(DataType::Handle(), ascend_nd2nz_scatter(),
-                                 {src_ptr, scratch_write, rows, cols,
-                                  StringImm(dst_dtype), StringImm(src_dtype)}));
-    return SeqStmt({scatter, make_post_copy(scratch_read)});
+    Stmt scatter = Intrinsic(
+        ascend_nd2nz_scatter(),
+        {src_ptr, scratch_write, rows, cols, analyzer_->Simplify(scratch_pitch),
+         StringImm(src_dtype), StringImm(checked_dst_dtype)},
+        true);
+    return SeqStmt({scatter, make_post_copy(scratch_read, analyzer_->Simplify(
+                                                              scratch_pitch))});
+  }
+
+  void ValidatePostCopyPointer(const PrimExpr &pointer, int64_t span_bytes,
+                               int64_t element_bytes, bool source) const {
+    const auto *access = pointer.as<CallNode>();
+    if (!access || !access->op.same_as(tl::access_ptr()))
+      return; // Raw pointer callers own the allocation/alignment contract.
+    const auto *load = access->args[0].as<BufferLoadNode>();
+    if (!load)
+      return;
+    const Buffer &buffer = load->buffer;
+    if ((source ? !IsSharedBuffer(buffer) : !IsL1Buffer(buffer)) ||
+        buffer->dtype.bytes() != element_bytes)
+      TVM_FFI_THROW(ValueError)
+          << "NZ post-copy requires matching UB/L1 pointer element widths";
+    Array<PrimExpr> indices = load->indices;
+    Array<PrimExpr> shape = buffer->shape;
+    Array<PrimExpr> strides = buffer->strides;
+    if (auto layout = LayoutFor(buffer)) {
+      indices = layout.value()->Forward(indices);
+      shape = layout.value()->OutputShape();
+      // LowerTileOp materializes dense physical storage. Logical strides
+      // neither describe those axes nor necessarily have the same rank.
+      strides = {};
+    }
+    PrimExpr offset = make_const(DataType::Int(64), 0);
+    PrimExpr capacity = Integer(1), stride = Integer(1);
+    for (size_t i = shape.size(); i-- > 0;) {
+      PrimExpr step = strides.empty() ? stride : strides[i];
+      offset = offset + cast(DataType::Int(64), indices[i]) * step;
+      capacity = capacity + (cast(DataType::Int(64), shape[i]) - 1) * step;
+      stride = stride * cast(DataType::Int(64), shape[i]);
+    }
+    // Alignment uses the absolute address; bounds are relative to this view.
+    PrimExpr address = offset + cast(DataType::Int(64), buffer->elem_offset);
+    if (!analyzer_->CanProveEqual(
+            floormod(address * Integer(element_bytes), 32), 0))
+      TVM_FFI_THROW(ValueError)
+          << "NZ post-copy requires a 32-byte-aligned pointer: "
+          << buffer->name;
+    if (!analyzer_->CanProve(address >= 0 && offset >= 0 &&
+                             offset + Integer(span_bytes / element_bytes) <=
+                                 capacity))
+      TVM_FFI_THROW(ValueError)
+          << "NZ post-copy physical span exceeds pointer buffer capacity: "
+          << buffer->name;
+  }
+
+  bool HasLogicalPostCopyDestination(const PrimExpr &pointer,
+                                     const Nd2NzGeometry &geometry) const {
+    const auto *access = pointer.as<CallNode>();
+    const auto *load = access && access->op.same_as(tl::access_ptr())
+                           ? access->args[0].as<BufferLoadNode>()
+                           : nullptr;
+    if (!load || !IsNZBuffer(load->buffer))
+      return false;
+    const Buffer &buffer = load->buffer;
+    size_t ndim = buffer->shape.size();
+    Array<Range> ranges;
+    for (size_t i = 0; i < ndim; ++i) {
+      PrimExpr extent = Integer(i + 2 == ndim   ? geometry.rows
+                                : i + 1 == ndim ? geometry.cols
+                                                : 1);
+      if (!analyzer_->CanProve(load->indices[i] >= 0 &&
+                               load->indices[i] + extent <= buffer->shape[i]))
+        return false;
+      ranges.push_back(Range::FromMinExtent(load->indices[i], extent));
+    }
+    int c0 = AscendC0(buffer->dtype.bits());
+    if (!analyzer_->CanProveEqual(floormod(load->indices.back(), c0), 0) ||
+        !analyzer_->CanProveEqual(floormod(buffer->elem_offset, c0), 0))
+      return false;
+    return analyzer_->CanProveEqual(NZPitch(buffer, ranges),
+                                    Integer(geometry.dst_pitch));
   }
 
   Stmt VisitStmt_(const EvaluateNode *op) final {
     if (inside_simt_vf_)
       return Parent::VisitStmt_(op);
     const auto *call = op->value.as<CallNode>();
+    if (call && call->op.same_as(ascend_nd2nz_post_copy())) {
+      auto geometry = ParseNd2NzGeometry(call, false);
+      if (geometry.Empty())
+        return Evaluate(Integer(0));
+      ValidatePostCopyPointer(call->args[0],
+                              geometry.SpanBytes(geometry.dst_pitch),
+                              geometry.dst_bytes, false);
+      ValidatePostCopyPointer(call->args[1],
+                              geometry.SpanBytes(geometry.src_pitch),
+                              geometry.src_bytes, true);
+      // Explicit pitches need not match a multidimensional view's layout.
+      // Prove the destination independently; an opaque source must not erase
+      // the disjoint AIV row slices of a valid NZ destination.
+      Call validated = GetRef<Call>(call);
+      validated.CopyOnWrite()->annotations.Set(
+          "nd2nz_logical_regions",
+          Integer(HasLogicalPostCopyDestination(call->args[0], geometry) ? 1
+                                                                         : 0));
+      return Evaluate(validated);
+    }
     if (call == nullptr || !IsAscendCopyCall(call))
       return Parent::VisitStmt_(op);
     AscendCopy copy(call->args, call->annotations);

@@ -62,7 +62,10 @@ jobs:
     strategy:
       matrix:
         runner:
-          - tags: [self-hosted, nvidia]
+          # Performance numbers are only comparable between identical GPUs.
+          # Pin this job to H100 runners so that other self-hosted GPUs
+          # (for example H20 capacity runners) never pick up benchmark work.
+          - tags: [self-hosted, nvidia, h100]
             name: self-hosted-nvidia
             toolkit: CUDA-auto
         python-version:
@@ -76,6 +79,17 @@ jobs:
           ref: refs/pull/${{ github.event.issue.number }}/merge
           fetch-depth: 0
           submodules: recursive
+
+      # Guard against a mislabelled runner slipping through: baselines are
+      # only meaningful on the same GPU model, so fail fast and loudly.
+      - name: Verify benchmark GPU is H100
+        run: |
+          GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)"
+          echo "Benchmark GPU: ${GPU_NAME}"
+          if [[ "${GPU_NAME}" != *"H100"* ]]; then
+            echo "::error::Performance regression tests must run on an H100 runner, but found '${GPU_NAME}'. Check the runner labels."
+            exit 1
+          fi
 
       - name: Set environment (self-hosted runners)
         if: startsWith(matrix.runner.name, 'self-hosted')

@@ -9,6 +9,8 @@ from tilelang import tvm
 from tilelang.ascend import language as T
 
 
+pytestmark = pytest.mark.pto
+
 tirx = tvm.tirx
 
 
@@ -239,3 +241,47 @@ def test_scheduled_l0_branches_preserve_direction():
     source = tilelang.lower(main, target="pto").kernel_source
     ast.parse(source)
     assert _mad_directions(source) == [True, False, False]
+
+
+def test_nz_post_copy_uses_independent_storage_pitches():
+    src = tirx.decl_buffer((4096,), "bfloat16", name="src", scope="shared.dyn")
+    dst = tirx.decl_buffer((4096,), "bfloat16", name="dst", scope="shared.l1")
+    call = tirx.Evaluate(
+        tirx.call_intrin(
+            "void",
+            tvm.ir.Op.get("tl.ascend_nd2nz_post_copy"),
+            tirx.address_of(dst[512]),
+            tirx.address_of(src[128]),
+            8,
+            64,
+            64,
+            64,
+            "bfloat16_t",
+        )
+    )
+    body = tirx.SeqStmt([tirx.AllocBuffer(src), tirx.AllocBuffer(dst), call])
+    target = tvm.target.Target({"kind": "ascend", "keys": ["pto"]})
+    func = tirx.PrimFunc([], body).with_attr({"global_symbol": "main", "target": target})
+    source = tvm.get_global_func("target.build.tilelang_pto")(tvm.IRModule({"main": func}), target).inspect_source()
+    ast.parse(source)
+    assert ", 8, nburst=(4, 56, 56))" in source
+
+
+@pytest.mark.parametrize("num_guards", [16, 32, 64])
+@pytest.mark.parametrize("with_mad", [False, True])
+def test_repeated_mutable_guards_do_not_expand_direction_state(num_guards, with_mad):
+    def body(flag, value, mad):
+        stores = [_if(value[0] > 0, tirx.BufferStore(value, i, [0])) for i in range(num_guards)]
+        # A pure outer guard makes the direction predicate nonconstant. The
+        # mutable inner guards preserve it on both paths, requiring idempotent
+        # merges even when MAD analysis cannot be skipped.
+        inner = [_set("n"), *stores]
+        if with_mad:
+            inner.append(mad())
+        inner.append(_set("m"))
+        result = [_if(flag > 0, tirx.SeqStmt(inner))]
+        if with_mad:
+            result.append(mad())
+        return result
+
+    assert _mad_directions(_codegen(body)) == ([True, False] if with_mad else [])

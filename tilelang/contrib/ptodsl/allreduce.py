@@ -92,17 +92,20 @@ def _redux_integer_compat(op, value, *, with_signedness):
     return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), raw_value.type))
 
 
-def _redux_add(value):
+def redux_add(value):
+    """Sum reduce across warp lanes."""
     # redux_add takes no signedness argument.
     return _redux_integer_compat(pto.redux_add, value, with_signedness=False)
 
 
-def _redux_max(value):
+def redux_max(value):
+    """Max reduce across warp lanes."""
     # redux_max/min require an explicit integer signedness.
     return _redux_integer_compat(pto.redux_max, value, with_signedness=True)
 
 
-def _redux_min(value):
+def redux_min(value):
+    """Min reduce across warp lanes."""
     return _redux_integer_compat(pto.redux_min, value, with_signedness=True)
 
 
@@ -140,19 +143,40 @@ _REDUCER_COMBINE = {
 }
 
 _REDUCER_REDUX = {
-    "sum": _redux_add,
-    "max": _redux_max,
-    "min": _redux_min,
+    "sum": redux_add,
+    "max": redux_max,
+    "min": redux_min,
 }
 
-# Run the si32 strategy on the signless carrier with identity constants typed
-# to match, instead of reinterpreting to si32 and back.
+# Default constant dtypes for the reduce initial values.  The si32 strategy
+# serves both signed and signless carriers; _identity_const retypes the
+# constant to the carrier's own signedness at creation time.
 _REDUCER_IDENTITY_DTYPE = {
     "f32": _f32_dtype,
     "f16": _f16_dtype,
     "si32": pto.i32,
     "ui32": _ui32_dtype,
 }
+
+
+def _identity_const(x, *, reducer: str, dtype: str):
+    """Reduce initial-value constant whose integer type follows the carrier.
+
+    TIR integer types are signed, so the PTO codegen emits them as pto.siN
+    values and the "si32" strategy normally serves an si32 carrier (a
+    signless i32 carrier remains accepted for hand-written PTODSL).  The
+    ``dtype`` strategy key selects the constant's numeric value, while its
+    integer type follows the carrier value ``x``: scalar.select/combine
+    must not mix signed with signless integers (current PTOAS rejects it).
+    Signed carriers get pto.si32; signless carriers keep pto.i32.
+    """
+    const_dtype = _REDUCER_IDENTITY_DTYPE[dtype]
+    if dtype == "si32" and _integer_signedness(unwrap_surface_value(x).type) == "signed":
+        const_dtype = pto.si32
+    return _const(
+        _REDUCER_IDENTITY[reducer][dtype],
+        dtype=_resolve(const_dtype),
+    )
 
 
 # ── butterfly  ──────────────────────────────────────────────────────────────────
@@ -180,10 +204,7 @@ def _emit_warp_hw_reduce(x, *, threads: int, lane_in_warp, dtype: str, reducer: 
     if groups == 1:
         return redux_fn(x)
 
-    c_identity = _const(
-        _REDUCER_IDENTITY[reducer][dtype],
-        dtype=_resolve(_REDUCER_IDENTITY_DTYPE[dtype]),
-    )
+    c_identity = _identity_const(x, reducer=reducer, dtype=dtype)
     my_group = lane_in_warp // threads
 
     for g in range(groups):
@@ -335,10 +356,7 @@ def _emit_cross_warp_reduce(x, scratch, *, dtype, threads, scale, thread_offset,
     One call can cover several consecutive groups of ``threads`` threads.
     """
     num_warps = threads // 32
-    c_identity = _const(
-        _REDUCER_IDENTITY[reducer][dtype],
-        dtype=_resolve(_REDUCER_IDENTITY_DTYPE[dtype]),
-    )
+    c_identity = _identity_const(x, reducer=reducer, dtype=dtype)
     tx, wid, lid = _simt_warp_indexing(thread_offset=thread_offset)
     warp_val = _warp_partial_reduce(x, scale=scale, reducer=reducer)
     _write_warp_partials(warp_val, scratch, wid=wid, lid=lid, scale=scale)
@@ -497,6 +515,9 @@ def simt_allreduce_min(value, *, threads, scale=1, thread_offset=0, scratch=None
 
 
 __all__ = [
+    "redux_add",
+    "redux_max",
+    "redux_min",
     "simt_allreduce_sum",
     "simt_allreduce_max",
     "simt_allreduce_min",

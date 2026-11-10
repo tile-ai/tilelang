@@ -1,9 +1,9 @@
-"""Host descriptors and kernel configuration shared by both loop orders."""
+"""Host descriptors and kernel configuration for DeepGEMM examples."""
 
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import tilelang  # noqa: F401  # Register the native library directory.
 from tilelang_deepgemm_heuristics import select_gemm_config as _select_gemm_config
@@ -47,9 +47,14 @@ class GemmDesc:
     expected_m: int = 0
     expected_k: int = 0
     num_cores: int = 32
-    with_alpha: bool = False
+    epilogue_kind: str = "identity"
     outer_stride_a: int = 0  # Zero means tightly packed.
     outer_stride_b: int = 0
+    outer_stride_d: int = 0
+    output_alignment: int = 0  # Address modulo 32 bytes.
+    compiled_dims: str = "nk"
+    stride_batch_a: int = 0
+    stride_batch_b: int = 0
 
 
 @dataclass(frozen=True)
@@ -74,11 +79,54 @@ class GemmConfig:
     l2_ctrl_b: int
     l2_ctrl_store_cd: int
     num_blocks: int
+    direct_store: bool = False
+    dual_aiv_dequant: bool = False
+    resident_a: bool = False
+    resident_b: bool = False
+    resident_sf: bool = False
 
 
 def select_gemm_config(d: GemmDesc) -> GemmConfig:
-    """Select a GEMM configuration using the Cython heuristic."""
+    """Return the DeepGEMM-Ascend heuristic result before applying execution limits."""
     return _select_gemm_config(d, GemmConfig)
+
+
+def execution_config(d: GemmDesc, config: GemmConfig) -> GemmConfig:
+    """Adapt the selected configuration to the supported kernel features."""
+    if (d.a_dtype, d.b_dtype) == ("float8_e4m3fn", "float4_e2m1fn_x2"):
+        # TODO: implement the FP8 x FP4 dequant kernel selected by the heuristic.
+        raise NotImplementedError("FP8 x FP4 (FP8 dequant) kernels are not implemented")
+    if d.a_dtype not in ("bfloat16", "float8_e4m3fn", "float4_e2m1fn_x2") or d.a_dtype != d.b_dtype:
+        raise NotImplementedError("Only BF16/BF16, FP8/FP8 and FP4/FP4 kernels are implemented")
+    num_blocks = config.num_blocks
+    if d.gemm_type in (GemmType.Normal, GemmType.Batched):
+        # Launch only cores that own an output tile.
+        num_batches = d.num_groups if d.gemm_type == GemmType.Batched else 1
+        num_tiles = ceil_div(d.m, config.block_m) * ceil_div(d.n, config.block_n) * num_batches
+        num_blocks = min(num_blocks, num_tiles)
+    if (
+        num_blocks == config.num_blocks
+        and not (config.resident_a or config.resident_b or config.resident_sf)
+        and config.num_epilogue_stages <= 8
+    ):
+        return config
+    num_l1_stages = config.num_l1_stages
+    if config.resident_a and d.a_dtype == "bfloat16":
+        # Resident-A can enlarge the B ring; streaming A and B must both fit.
+        tile_bytes = (config.block_m + config.block_n) * config.block_k * 2
+        num_l1_stages = min(num_l1_stages, 512 * 1024 // tile_bytes)
+    return replace(
+        config,
+        num_blocks=num_blocks,
+        # TODO: separate retained L1 operand/SF slots from advancing load/event rings.
+        resident_a=False,
+        resident_b=False,
+        resident_sf=False,
+        num_l1_stages=num_l1_stages,
+        # TODO: map 16 intra-block stages onto 8 reusable PIPE event IDs.
+        # Keep the unclamped value in select_gemm_config for parity checks.
+        num_epilogue_stages=min(config.num_epilogue_stages, 8),
+    )
 
 
 @dataclass(frozen=True)

@@ -200,6 +200,40 @@ def test_cumsum_fragment_1d():
     run_cumsum_1d(512, 64, reverse=True, scope="fragment")
 
 
+def cumsum_pipelined_smem_test(M, N, block_N, dim=0, dtype=T.float32):
+    # On sm_90 the pipelined loop is warp specialized, so the scan runs on the
+    # consumer threads, which do not start at thread 0.
+    @T.prim_func
+    def cumsum(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(M, threads=128) as bx:
+            A_shared = T.alloc_shared((block_N,), dtype)
+            S_shared = T.alloc_shared((block_N,) if dim == 0 else (1, block_N), dtype)
+            for k in T.Pipelined(N // block_N, num_stages=2):
+                T.copy(A[bx, k * block_N], A_shared)
+                for i in T.Parallel(block_N):
+                    if dim == 0:
+                        S_shared[i] = A_shared[i]
+                    else:
+                        S_shared[0, i] = A_shared[i]
+                T.cumsum(src=S_shared, dim=dim)
+                for i in T.Parallel(block_N):
+                    B[bx, k * block_N + i] = S_shared[i] if dim == 0 else S_shared[0, i]
+
+    return cumsum
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+def test_cumsum_smem_pipelined(dim):
+    M, N, block_N = 4, 256, 64
+    jit_kernel = tl.compile(cumsum_pipelined_smem_test(M, N, block_N, dim), out_idx=-1)
+    A = torch.randn(M, N).cuda()
+    ref = A.view(M, N // block_N, block_N).cumsum(dim=-1).view(M, N)
+    torch.testing.assert_close(jit_kernel(A), ref, atol=1e-3, rtol=1e-3)
+
+
 def cumsum_region_test_1d(N, chunk_size, reverse=False, dtype=T.float32):
     """Test cumsum with buffer region (slice) as input."""
     import tilelang.language as T

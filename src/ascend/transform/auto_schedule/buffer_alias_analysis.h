@@ -65,6 +65,12 @@ class BufferAliasAnalysisContext {
 public:
   virtual ~BufferAliasAnalysisContext() = default;
 
+  // Dynamic generations use a whole-allocation lifetime at kernel scope;
+  // reuse still requires must-write coverage and completion proofs.
+  virtual bool RequiresWholeAllocationLifetime(const tirx::Var &storage) const {
+    return false;
+  }
+
   virtual std::vector<size_t>
   ResolveLifetimeEndpoints(const tirx::Var &storage, TaskNode *task,
                            bool at_beginning, ControlNode *scope) const = 0;
@@ -494,6 +500,39 @@ private:
   std::optional<LifetimeSummary>
   BuildStorageLifetime(const StorageAccessInfo &info, ControlNode *loop,
                        const HappensBeforeQuery &happens_before) const {
+    if (context_->RequiresWholeAllocationLifetime(info.storage)) {
+      if (loop || info.opaque)
+        return std::nullopt;
+      // Write-counter eligibility is a storage-level promise, not a proof of
+      // initialization. Keep uncertain physical footprints out of allocation
+      // reuse. In particular, a may-write hull cannot kill incoming contents.
+      for (const TaskStorageAccess &writer : info.accesses) {
+        if (!writer.Writes())
+          continue;
+        for (const TaskStorageAccess &reader : info.accesses)
+          for (const BufferRegion &read : reader.read_regions)
+            if (!DenseRegionsCover(writer.must_write_regions, read))
+              return std::nullopt;
+      }
+      LifetimeSummary result;
+      result.storage = info.storage;
+      result.valid = true;
+      GenerationLifetime allocation;
+      allocation.guard = Bool(true);
+      allocation.guard_iteration_invariant = true;
+      for (const TaskStorageAccess &access : info.accesses) {
+        for (size_t site : context_->ResolveLifetimeEndpoints(
+                 info.storage, access.task, true, nullptr))
+          allocation.begin_sites.push_back({site, 0});
+        for (size_t site : context_->ResolveLifetimeEndpoints(
+                 info.storage, access.task, false, nullptr))
+          allocation.end_sites.push_back({site, 0});
+      }
+      SortUnique(&allocation.begin_sites);
+      SortUnique(&allocation.end_sites);
+      result.generations.push_back(std::move(allocation));
+      return result;
+    }
     LifetimeSummary direct = BuildGenerations(info, loop, loop, happens_before);
     if (direct.valid)
       return direct;
@@ -620,35 +659,6 @@ private:
   using VarExprMap =
       std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>;
   using VarSet = std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual>;
-
-  VarSet CollectIterationVariantVars(ControlNode *scope) const {
-    VarSet result;
-    if (scope == nullptr)
-      return result;
-
-    ControlNode *root = scope;
-    while (root->GetParentControl() != nullptr)
-      root = root->GetParentControl();
-    std::function<void(IRStructure *)> collect = [&](IRStructure *node) {
-      if (node == nullptr)
-        return;
-      if (node->IsTask()) {
-        for (const Var &var : node->GetWriteVars())
-          result.insert(var);
-        return;
-      }
-      auto *control = static_cast<ControlNode *>(node);
-      result.insert(control->control->loop_var);
-      if (control->task) {
-        for (const Var &var : control->task->GetWriteVars())
-          result.insert(var);
-      }
-      for (const std::shared_ptr<IRStructure> &child : control->children)
-        collect(child.get());
-    };
-    collect(root);
-    return result;
-  }
 
   bool ExpressionDependsOnIteration(const PrimExpr &expr,
                                     const VarExprMap &bindings,
@@ -1245,11 +1255,17 @@ private:
       IRStructure *child = access.task;
       while (child != nullptr && child->GetParent() != parent_scope)
         child = child->GetParent();
-      if (child == nullptr || !child->IsControl())
+      // An access outside this scope is a boundary of the child lifetime.
+      // Every access inside this scope, however, must be covered by the
+      // selected child. Dropping a direct or single-trip sibling access can
+      // hide the writer of a value that survives across parent iterations.
+      if (child == nullptr)
         continue;
+      if (!child->IsControl())
+        return nullptr;
       auto *candidate = static_cast<ControlNode *>(child);
       if (IsGuaranteedSingleTrip(candidate))
-        continue;
+        return nullptr;
       if (control == nullptr) {
         control = candidate;
       } else if (control != candidate) {
@@ -1297,11 +1313,12 @@ private:
     }
 
     bool parent_live_through = child_result.live_through;
-    if (child_result.promote_live_through_as_live_in) {
+    if (child_result.promote_live_through_as_live_in &&
+        parent_scope == nullptr) {
       // The storage spans the whole child control, so it cannot alias inside
-      // that child. At the parent level the same lifetime is a finite prefix
-      // ending at the child's last read and may alias a later sibling
-      // generation.
+      // that child. Only a non-periodic parent can reduce it to a finite
+      // prefix ending at the child's last read. A loop parent needs the
+      // incoming value again on its next iteration.
       parent_live_through = false;
       child_result.live_out = false;
     }
@@ -1368,7 +1385,7 @@ private:
       }
     }
     child_result.live_through = parent_live_through;
-    child_result.promote_live_through_as_live_in = false;
+    child_result.promote_live_through_as_live_in &= parent_scope != nullptr;
     child_result.generations = std::move(generations);
     child_result.summary_control = control;
     return child_result;

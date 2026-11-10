@@ -292,6 +292,42 @@ def test_vld2_loads_once_and_exposes_both_vectors(dtype, bits):
     assert ".v0" in source and ".v1" in source
 
 
+@pytest.mark.parametrize("dtype,bits", [("bfloat16", 16), ("float32", 32), ("uint8", 8), ("float8_e4m3", 8)])
+def test_vst2_covers_both_vectors_and_emits_one_store(dtype, bits):
+    lanes = 2048 // bits
+
+    @T.prim_func
+    def kernel(A: T.Tensor((lanes * 2,), dtype), B: T.Tensor((lanes * 2,), dtype)):
+        with T.Kernel(1):
+            src = T.alloc_shared((lanes * 2,), dtype)
+            dst = T.alloc_shared((lanes * 2,), dtype)
+            T.copy(A, src)
+            with T.SimdVF():
+                first = T.simd.vld(src[0])
+                second = T.simd.vld(src[lanes])
+                T.simd.vst2(dst[0], first, second)
+            T.copy(dst, B)
+
+    (store,) = calls(kernel, "tl.simd.vst2")
+    assert int(store.args[0].args[1]) == lanes * 2
+    assert int(store.args[0].args[2]) == 2
+    source = lower(kernel, target="ascend").kernel_source
+    assert source.count("simd_inst::vst_x2(") == 1
+
+
+@pytest.mark.parametrize("dtype0,dtype1", [("uint32x64", "int32x64"), ("uint64x32", "uint64x32"), ("uint32x32", "uint32x32")])
+def test_vst2_rejects_invalid_vectors(dtype0, dtype1):
+    dst = tirx.decl_buffer((128,), "uint32", scope="shared")
+    with pytest.raises(TypeError, match="matching full vectors"):
+        T.simd.vst2(dst[0], tirx.Var("a", dtype0), tirx.Var("b", dtype1))
+
+
+def test_vst2_rejects_mismatched_destination():
+    dst = tirx.decl_buffer((128,), "float32", scope="shared")
+    with pytest.raises(TypeError, match="destination element dtype"):
+        T.simd.vst2(dst[0], tirx.Var("a", "uint32x64"), tirx.Var("b", "uint32x64"))
+
+
 def test_vld_postupdate_rejects_invalid_pointer_and_increment():
     buf = tirx.decl_buffer((128,), "uint16", scope="shared")
     with pytest.raises(ValueError, match="mutable pointer"):

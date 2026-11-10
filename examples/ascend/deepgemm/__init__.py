@@ -1,7 +1,13 @@
-"""BF16/FP8 GEMM examples for Ascend. Set TILELANG_DEEPGEMM_LOOP_ORDER before import."""
+"""BF16/FP8 GEMM examples for Ascend."""
 
 from .api import (
-    LOOP_ORDER,
+    epilogue,
+    fp8_fp4_gemm_nt,
+    fp8_fp4_gemm_nn,
+    fp8_fp4_gemm_tn,
+    fp8_fp4_gemm_tt,
+    m_grouped_fp8_fp4_gemm_nt_contiguous,
+    m_grouped_fp8_fp4_gemm_nn_contiguous,
     bf16_bmm,
     bf16_gemm_nn,
     bf16_gemm_nt,
@@ -24,7 +30,13 @@ from .api import (
 )
 
 __all__ = [
-    "LOOP_ORDER",
+    "epilogue",
+    "fp8_fp4_gemm_nt",
+    "fp8_fp4_gemm_nn",
+    "fp8_fp4_gemm_tn",
+    "fp8_fp4_gemm_tt",
+    "m_grouped_fp8_fp4_gemm_nt_contiguous",
+    "m_grouped_fp8_fp4_gemm_nn_contiguous",
     "bf16_bmm",
     "bf16_gemm_nn",
     "bf16_gemm_nt",

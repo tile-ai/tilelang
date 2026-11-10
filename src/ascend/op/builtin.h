@@ -56,6 +56,7 @@ TVM_DLL const Op &simd_pst();
 TVM_DLL const Op &simd_vld();
 TVM_DLL const Op &simd_vld2(); // dual-dest load (e.g. DINTLV_B16) → vec_pair
 TVM_DLL const Op &simd_vsts();
+TVM_DLL const Op &simd_vst2();
 TVM_DLL const Op &simd_vsstb();
 
 // -- Binary arithmetic
@@ -142,6 +143,92 @@ TVM_DLL const Op &simd_vshrs();
 TVM_DLL const Op &simd_mem_bar();
 TVM_DLL const Op &simd_vexpdif();
 TVM_DLL const Op &simd_vabsdif();
+
+// Ascend VMI virtual vector intrinsics (T.vmi.* API).
+// TIR ops registered as tl.vmi.<name>. These mirror PTODSL's public pto.vmi
+// surface.
+//
+// ABI notes:
+// - The TIR positional operands only carry dataflow values such as
+//   ptr/offset/values/mask. Python keyword-only API parameters like size,
+//   to_dtype, group, pmode, and order are lowered as call annotations instead
+//   of extra positional operands.
+// - vload(ptr, offset) with annotations {size, stride?, block_stride?, group?}
+// - vstore(values, destination_ptr, offset, mask?) with annotations
+//   {stride?, block_stride?, group?}
+// - create_mask(active_lanes) with annotations {size, group?}
+// - vci(base) with annotations {size, order?}
+// - vbrc(value) with annotations {size, group?}
+// - vintlv(lhs, rhs, mask) / vdintlv(lhs, rhs, mask)
+// - pair_get(pair, index) is an internal pure helper for tuple-style unpacking
+//   of multi-result VMI calls.
+
+// -- Load / Store / Predicates
+TVM_DLL const Op &vmi_vload();
+TVM_DLL const Op &vmi_vstore();
+TVM_DLL const Op &vmi_create_mask();
+
+// -- Index / Broadcast / Rearrange
+TVM_DLL const Op &vmi_vci();
+TVM_DLL const Op &vmi_vbrc();
+TVM_DLL const Op &vmi_vintlv();
+TVM_DLL const Op &vmi_vdintlv();
+TVM_DLL const Op &vmi_vunzip();
+TVM_DLL const Op &vmi_vzip();
+TVM_DLL const Op &vmi_pair_get();
+
+// -- Binary arithmetic / bitwise / shifts
+TVM_DLL const Op &vmi_vadd();
+TVM_DLL const Op &vmi_vsub();
+TVM_DLL const Op &vmi_vmul();
+TVM_DLL const Op &vmi_vdiv();
+TVM_DLL const Op &vmi_vmax();
+TVM_DLL const Op &vmi_vmin();
+TVM_DLL const Op &vmi_vand();
+TVM_DLL const Op &vmi_vor();
+TVM_DLL const Op &vmi_vxor();
+TVM_DLL const Op &vmi_vshl();
+TVM_DLL const Op &vmi_vshr();
+
+// -- Unary / math
+TVM_DLL const Op &vmi_vabs();
+TVM_DLL const Op &vmi_vneg();
+TVM_DLL const Op &vmi_vrelu();
+TVM_DLL const Op &vmi_vexp();
+TVM_DLL const Op &vmi_vln();
+TVM_DLL const Op &vmi_vsqrt();
+TVM_DLL const Op &vmi_vnot();
+
+// -- Vector-scalar arithmetic / shifts
+TVM_DLL const Op &vmi_vadds();
+TVM_DLL const Op &vmi_vmuls();
+TVM_DLL const Op &vmi_vmaxs();
+TVM_DLL const Op &vmi_vmins();
+TVM_DLL const Op &vmi_vshls();
+TVM_DLL const Op &vmi_vshrs();
+
+// -- Compare / select / reduce / convert
+TVM_DLL const Op &vmi_vcmp();
+TVM_DLL const Op &vmi_vcmps();
+TVM_DLL const Op &vmi_vsel();
+TVM_DLL const Op &vmi_vselr();
+TVM_DLL const Op &vmi_vcadd();
+TVM_DLL const Op &vmi_vcmax();
+TVM_DLL const Op &vmi_vcmin();
+TVM_DLL const Op &vmi_vcvt();
+TVM_DLL const Op &vmi_vinterpret_cast();
+
+// -- SFU / irregular / histogram
+TVM_DLL const Op &vmi_vexpdif();
+TVM_DLL const Op &vmi_vaxpy();
+TVM_DLL const Op &vmi_vlrelu();
+TVM_DLL const Op &vmi_vprelu();
+TVM_DLL const Op &vmi_vmull();
+TVM_DLL const Op &vmi_vmula();
+TVM_DLL const Op &vmi_vdhist();
+TVM_DLL const Op &vmi_vchist();
+TVM_DLL const Op &vmi_vgather();
+TVM_DLL const Op &vmi_vscatter();
 
 /*!
  * \brief Ascend SetFlag intrinsic for pipeline synchronization.
@@ -303,7 +390,7 @@ TVM_DLL const Op &ascend_copy_ubuf_to_cbuf();
  * \brief Ascend ND→NZ scatter (SimdVF) from UB ND tile to UB NZ tile.
  *
  * ascend_nd2nz_scatter(src_ub, tmp_nz_ub, rows, cols,
- *                      dst_dtype_str, src_dtype_str)
+ *                      dst_pitch, src_dtype_str, dst_dtype_str)
  *
  */
 TVM_DLL const Op &ascend_nd2nz_scatter();
@@ -311,7 +398,8 @@ TVM_DLL const Op &ascend_nd2nz_scatter();
 /*!
  * \brief Ascend post-scatter UB→L1 raw DMA with NZ-fractal stride correction.
  *
- * ascend_nd2nz_post_copy(dst_l1, src_ub, rows, cols, full_rows, dst_dtype_str)
+ * ascend_nd2nz_post_copy(dst_l1, src_ub, rows, cols, src_pitch, dst_pitch,
+ * dtype_str)
  *
  */
 TVM_DLL const Op &ascend_nd2nz_post_copy();

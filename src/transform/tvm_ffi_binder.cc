@@ -332,7 +332,8 @@ void TVMFFIABIBuilder::BindDLTensors(
     const PrimExpr &device_type, const PrimExpr &device_id,
     const std::string &func_name,
     const std::unordered_set<const VarNode *> &used_param_buffers,
-    const std::unordered_set<const VarNode *> &used_shape_vars) {
+    const std::unordered_set<const VarNode *> &used_shape_vars,
+    const std::unordered_set<const VarNode *> &host_mapped_buffers) {
   Array<Buffer> buffers;
   Array<Var> handles;
 
@@ -980,17 +981,22 @@ void TVMFFIABIBuilder::BindDLTensors(
         TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
         make_zero(DataType::Int(32)));
 
-    // Bind device_id to a safe expression (0 when NULL handle)
-    BindNullable(device_id, actual_dev_id, arg_name + ".device_id", true,
-                 is_null);
+    // Host storage has no CUDA device id. Only device-resident parameters
+    // participate in the execution-device consistency check.
+    bool host_mapped = host_mapped_buffers.count(buffer->data.get());
+    if (!host_mapped) {
+      BindNullable(device_id, actual_dev_id, arg_name + ".device_id", true,
+                   is_null);
+    }
     // Check device_type consistency (device_id equality is implicitly ensured
     // by binding above)
     {
-      PrimExpr ok = (device_type == actual_dev_type);
+      PrimExpr expected_dev_type = host_mapped ? Integer(kDLCPU) : device_type;
+      PrimExpr ok = (expected_dev_type == actual_dev_type);
       std::ostringstream device_msg;
       device_msg << "kernel " << kernel_nm << " input " << buf_nm
                  << " device_type mismatch";
-      if (const auto *const_device_type = device_type.as<IntImmNode>()) {
+      if (const auto *const_device_type = expected_dev_type.as<IntImmNode>()) {
         device_msg << ", expected "
                    << runtime::DLDeviceType2Str(
                           static_cast<int>(const_device_type->value));
@@ -1010,6 +1016,11 @@ void TVMFFIABIBuilder::BindDLTensors(
           Not(is_null),
           TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorData),
           make_zero(DataType::Handle()));
+      if (host_mapped) {
+        data_ptr =
+            Call(DataType::Handle(), builtin::tvm_call_packed(),
+                 {StringImm("tl.cuda.get_host_mapped_pointer"), data_ptr});
+      }
       BindNullable(buffer->data, data_ptr, arg_name + ".data", true, is_null);
 
       // Check if the data pointer is NULL.  This check is skipped for

@@ -71,6 +71,7 @@ def test_native_ascend_kind_drives_backend_identity():
     assert get_backend("ascend").resolve_execution_backend("auto", target).name == "tvm_ffi"
 
 
+@pytest.mark.pto
 def test_pto_execution_backend_selects_pto_target_variant():
     context = create_backend_context("ascend", "c", "pto")
 
@@ -82,6 +83,7 @@ def test_pto_execution_backend_selects_pto_target_variant():
     assert tvm.ffi.get_global_func("target.build.tilelang_pto_without_compile", allow_missing=True) is not None
 
 
+@pytest.mark.pto
 def test_pto_execution_backend_preserves_ascend_target_options():
     context = create_backend_context({"kind": "ascend", "arch": "dav-3510"}, "c", "pto")
 

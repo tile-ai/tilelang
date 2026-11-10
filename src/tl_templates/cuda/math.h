@@ -48,51 +48,45 @@ bfloat16_t fast_tanh(bfloat16_t x) { return bfloat16_t(fast_tanh(float(x))); }
 
 namespace tl {
 
-// Pass operands by value: checking NaN must not re-evaluate the caller's
-// expression (which can, for example, be a returning atomic operation).
-TL_DEVICE float clamp(float x, float lo, float hi) {
-  if (isnan(x))
-    return x;
-  if (isnan(lo))
-    return lo;
-  if (isnan(hi))
-    return hi;
-  return fminf(fmaxf(x, lo), hi);
+TL_DEVICE float clamp_symmetric(float x, float limit) {
+  float result;
+  asm("min.NaN.xorsign.abs.f32 %0, %1, %2;"
+      : "=f"(result)
+      : "f"(x), "f"(limit));
+  return result;
 }
 
-TL_DEVICE double clamp(double x, double lo, double hi) {
-  if (isnan(x))
-    return x;
-  if (isnan(lo))
-    return lo;
-  if (isnan(hi))
-    return hi;
-  return fmin(fmax(x, lo), hi);
+TL_DEVICE half_t clamp_symmetric(half_t x, half_t limit) {
+  uint16_t result;
+  asm("min.NaN.xorsign.abs.f16 %0, %1, %2;"
+      : "=h"(result)
+      : "h"(x.raw()), "h"(limit.raw()));
+  return half_t::bitcast(result);
 }
 
-// Narrow formats, including FP8, are exactly representable in float.
-template <typename T> TL_DEVICE T clamp(T x, T lo, T hi) {
-  return T(clamp(float(x), float(lo), float(hi)));
+TL_DEVICE bfloat16_t clamp_symmetric(bfloat16_t x, bfloat16_t limit) {
+  uint16_t result;
+  asm("min.NaN.xorsign.abs.bf16 %0, %1, %2;"
+      : "=h"(result)
+      : "h"(x.raw()), "h"(limit.raw()));
+  return bfloat16_t::bitcast(result);
 }
 
-TL_DEVICE half_t clamp(half_t x, half_t lo, half_t hi) {
-  return half_t(
-      __hmin_nan(__hmax_nan(x.to_half(), lo.to_half()), hi.to_half()));
+TL_DEVICE __half2 clamp_symmetric2(__half2 x, __half2 limit) {
+  uint1 result;
+  asm("min.NaN.xorsign.abs.f16x2 %0, %1, %2;"
+      : "=r"(result.x)
+      : "r"(to_uint1(x).x), "r"(to_uint1(limit).x));
+  return from_uint1<__half2>(result);
 }
 
-TL_DEVICE bfloat16_t clamp(bfloat16_t x, bfloat16_t lo, bfloat16_t hi) {
-  return bfloat16_t(
-      __hmin_nan(__hmax_nan(x.to_nv_bfloat16(), lo.to_nv_bfloat16()),
-                 hi.to_nv_bfloat16()));
-}
-
-TL_DEVICE __half2 clamp2(__half2 x, __half2 lo, __half2 hi) {
-  return min2_nan(max2_nan(x, lo), hi);
-}
-
-TL_DEVICE __nv_bfloat162 clamp2(__nv_bfloat162 x, __nv_bfloat162 lo,
-                                __nv_bfloat162 hi) {
-  return min2_nan(max2_nan(x, lo), hi);
+TL_DEVICE __nv_bfloat162 clamp_symmetric2(__nv_bfloat162 x,
+                                          __nv_bfloat162 limit) {
+  uint1 result;
+  asm("min.NaN.xorsign.abs.bf16x2 %0, %1, %2;"
+      : "=r"(result.x)
+      : "r"(to_uint1(x).x), "r"(to_uint1(limit).x));
+  return from_uint1<__nv_bfloat162>(result);
 }
 
 } // namespace tl

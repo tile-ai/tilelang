@@ -5,6 +5,7 @@ import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 
 from ..config import GemmType, Major
+from .common import align_up
 
 
 @T.macro
@@ -60,10 +61,10 @@ def build_transform_sf(is_float, major, config, gemm_type=GemmType.Normal, align
     tile_bytes = source_bytes + packed_bytes_per_tile + block_pairs * converted_stride * 2
     if gran_mn != 1:
         tile_bytes += block_pairs * block_mn * 2
-    mask_bytes = ((group_extent + lanes - 1) // lanes) * lanes * (bits // 8) if grouped else 0
+    mask_bytes = align_up(group_extent, lanes) * (bits // 8) if grouped else 0
     preferred_stages = 2 if major == Major.K and is_float and gran_mn == 1 or major == Major.MN and gran_mn == 128 else 3
-    range_bytes = ((max_group_ranges * 8 + 31) // 32) * 32 if grouped and not (clear_rows or scalar_k_mask) else 0
-    capacity = (248 * 1024 - mask_bytes - range_bytes) // tile_bytes
+    range_bytes = align_up(max_group_ranges * 8, 32) if grouped and not (clear_rows or scalar_k_mask) else 0
+    capacity = int((248 * 1024 - mask_bytes - range_bytes) // tile_bytes)
     num_stages = min(preferred_stages, capacity)
     assert num_stages > 0, "transform_sf tile exceeds UB capacity"
     versions = (num_stages, "counter")
@@ -90,7 +91,7 @@ def build_transform_sf(is_float, major, config, gemm_type=GemmType.Normal, align
                 output_ub = T.alloc_shared((block_pairs, block_mn), "int16")
             output_bits = T.view(output_ub, dtype="uint16")
             validation_ub = T.alloc_shared((64,), "uint32")
-            group_mask_ub = T.alloc_shared((T.ceildiv(group_extent, lanes) * lanes,), raw_dtype)
+            group_mask_ub = T.alloc_shared((align_up(group_extent, lanes),), raw_dtype)
             group_ranges_ub = T.alloc_shared((max_group_ranges, 2), "int32")
             T.annotate_buffer_versions(
                 {
@@ -156,16 +157,14 @@ def build_transform_sf(is_float, major, config, gemm_type=GemmType.Normal, align
                         upper = T.alloc_var("int32", init=0)
                         if lo < num_groups:
                             if lo > 0:
-                                lower = T.max(
-                                    0, T.min(group_actual, T.ceildiv(groups[lo - 1], alignment) * (alignment // group_divisor) - group_base)
-                                )
+                                lower = T.max(0, T.min(group_actual, align_up(groups[lo - 1], alignment) // group_divisor - group_base))
                             upper = T.max(0, T.min(group_actual, T.ceildiv(groups[lo], group_divisor) - group_base))
                     if grouped and not (clear_rows or scalar_k_mask):
                         num_ranges = T.alloc_var("int32", init=0)
                         lo = T.alloc_var("int32", init=first)
                         group_start = T.alloc_var("int32", init=0)
                         if lo > 0:
-                            group_start = T.ceildiv(groups[lo - 1], alignment) * alignment
+                            group_start = align_up(groups[lo - 1], alignment)
                         while lo < num_groups and group_start < (base + group_extent) * group_divisor:
                             end = groups[lo]
                             lower = T.max(0, T.min(group_extent, group_start // group_divisor - base))
@@ -174,7 +173,7 @@ def build_transform_sf(is_float, major, config, gemm_type=GemmType.Normal, align
                                 group_ranges_ub[num_ranges, 0] = lower
                                 group_ranges_ub[num_ranges, 1] = upper
                                 num_ranges = num_ranges + 1
-                            group_start = T.ceildiv(end, alignment) * alignment
+                            group_start = align_up(end, alignment)
                             lo = lo + 1
                     if major != Major.K or is_float or grouped:
                         with T.SimdVF():

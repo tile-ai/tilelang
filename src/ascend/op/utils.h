@@ -13,6 +13,7 @@
 
 #include <algorithm>
 
+#include "op/builtin.h"
 #include "op/utils.h"
 
 namespace tvm {
@@ -75,7 +76,7 @@ inline bool IsAscendOnChipBuffer(const Buffer &buffer) {
 }
 
 /*!
- * \brief tvm_access_ptr for a region whose innermost 2-D position travels as
+ * \brief A view-preserving pointer whose innermost 2-D position travels as
  *        separate intrinsic arguments.
  *
  * The Ascend L1->L0 loads pass the M/K start positions as their own arguments
@@ -85,13 +86,8 @@ inline bool IsAscendOnChipBuffer(const Buffer &buffer) {
  * example -- and counting the last two dims into the offset as well would place
  * that position twice.
  *
- * This builds exactly that pointer, on top of the neutral
- * MakeAccessPtrFromRegion: the innermost two dims are re-based to zero before
- * delegating, which leaves their extents (and hence the reported extent) alone
- * and drops them from the offset.
- *
- * The buffer keeps ``require_2d == false`` semantics, so 1-D regions still take
- * the neutral function's dedicated path and are unaffected.
+ * Keep the Buffer identity until layout lowering: a data Var alone cannot
+ * identify which canonical matrix view supplies the physical addresses.
  */
 inline PrimExpr MakeAscendLeadingDimAccessPtr(const BufferRegion &region,
                                               int rw_mask) {
@@ -104,8 +100,15 @@ inline PrimExpr MakeAscendLeadingDimAccessPtr(const BufferRegion &region,
     const auto &r = leading[i];
     leading.Set(i, Range::FromMinExtent(make_zero(r->min.dtype()), r->extent));
   }
-  return MakeAccessPtrFromRegion(BufferRegion(region->buffer, leading),
-                                 rw_mask);
+  ffi::Array<PrimExpr> indices;
+  for (const Range &range : leading)
+    indices.push_back(range->min);
+  PrimExpr extent = leading.back()->extent;
+  if (n >= 2)
+    extent = extent * leading[n - 2]->extent;
+  return Call(DataType::Handle(), tl::access_ptr(),
+              {BufferLoad(region->buffer, indices), extent,
+               IntImm(DataType::Int(32), rw_mask)});
 }
 
 } // namespace tl

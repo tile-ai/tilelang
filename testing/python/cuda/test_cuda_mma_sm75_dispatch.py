@@ -202,5 +202,11 @@ def test_ladder_transform_int8_micro_size_uses_actual_k_dim():
     assert emitter.local_size_out == 8
 
 
+def test_ladder_transform_emitter_rejects_partial_k_atom():
+    with pytest.raises(ValueError, match="tile K=8 must be divisible by 16") as error:
+        TensorCoreIntrinEmitterWithLadderTransform(warp_row_tiles=32, warp_col_tiles=32, chunk=8)
+    assert "zero-fill the extra K elements of both A and B" in str(error.value)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

@@ -82,6 +82,14 @@ Map<Var, Range> ToVMap(const Array<IterVar> &ivs);
 Array<IterVar> ToIterVars(const Map<Var, Range> &vmap);
 
 /*!
+ * \brief Compute the fragment layout of a reduction with its axis removed.
+ *
+ * A one-dimensional input produces shape {1}. Callers can reshape this
+ * canonical layout to a keep-dim destination without changing ownership.
+ */
+Fragment ComputeReducerLayout(const Fragment &src_layout, int dim);
+
+/*!
  * \brief Check whether the threads that access elements of a smaller fragment
  *        are a subset of the threads that access elements of a larger fragment.
  *
