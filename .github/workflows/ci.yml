@@ -1,9 +1,9 @@
 name: CI
 on:
   pull_request:
+    # CodeRabbit can apply several labels to one PR. Label events must not
+    # restart and cancel the full CI run through the concurrency group below.
     types:
-      - labeled
-      - unlabeled
       - opened
       - synchronize
       - reopened
