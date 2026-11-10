@@ -64,7 +64,7 @@ def test_host_mapped_output_must_be_explicit():
         T.evaluate(0)
 
     with pytest.raises(ValueError, match="preallocated"):
-        tilelang.compile(kernel, target={"kind": "cuda", "arch": "sm_80"}, execution_backend="cython", out_idx=[0])
+        tilelang.compile(kernel, target="cuda", execution_backend="cython", out_idx=[0])
 
 
 def test_annotation_requires_builder():
