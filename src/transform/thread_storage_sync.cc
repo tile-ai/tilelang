@@ -1259,6 +1259,18 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
     }
 
+    if (op->else_case) {
+      // A sync in only one branch is not a common fence for the if statement.
+      // Expose both branches' accesses without path-local sync markers so that
+      // the enclosing scope still sees dependencies on statements before the
+      // if. The barriers themselves remain in their original branches.
+      s.access.erase(std::remove_if(s.access.begin(), s.access.end(),
+                                    [](const AccessEntry &access) {
+                                      return access.type == kSync;
+                                    }),
+                     s.access.end());
+    }
+
     scope_.back().emplace_back(std::move(s));
   }
 
