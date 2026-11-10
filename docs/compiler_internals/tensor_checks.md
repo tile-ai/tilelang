@@ -166,24 +166,6 @@ For CUDA Graphs and NPU Graphs, preallocate before capture and retain the same s
 mapping throughout replay. Replays reuse captured pointers and do not rerun host
 validation. Concurrent steps need separate output storage or explicit ordering.
 
-Ascend uses the same annotation from `tilelang.ascend.language`, with
-`target="ascend"` and either `"cython"` or `"tvm_ffi"`. The launcher calls
-`aclrtHostGetDevicePointer` to validate the mapping and obtain the device-visible
-address, including for tensor views. `is_pinned()` alone does not establish that
-the storage is mapped. On a compatible torch_npu/CANN/driver stack, enable
-`PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True` before initializing torch_npu
-and allocate with `pin_memory=True`; alternatively, register the storage with
-`aclrtHostRegister` or `aclrtHostRegisterV2` and retain the registration until all
-device work completes. Unsupported runtimes/devices or unmapped storage raise
-an error; launches never register memory implicitly.
-
-The annotation describes the external buffer's memory contract and is independent
-of SIMT or SIMD execution. It leaves device operations and scheduling unchanged;
-the chosen device memory instructions must support accessing the mapped storage.
-All-host signatures use the current NPU device and Torch stream, including during
-NPU Graph capture. Host-mapped inputs may also feed automatically allocated NPU
-outputs; only the mapped parameters themselves must be explicitly supplied.
-
 ---
 
 ## Common Error Examples (What you’ll see)
