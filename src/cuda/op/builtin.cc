@@ -14,6 +14,12 @@ namespace tl {
 
 using namespace tirx;
 
+TIR_DEFINE_TL_BUILTIN(clamp_symmetric)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TVectorizable>("TVectorizable", true);
+
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoWarpSpecialization, ffi::String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
