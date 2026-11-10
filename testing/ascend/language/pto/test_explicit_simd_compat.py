@@ -34,7 +34,8 @@ def _kernel(mixed=False, automatic=False):
     return main
 
 
-def test_explicit_simd_layout_preserves_loop_kind():
+@pytest.mark.parametrize("with_lanes", [False, True])
+def test_explicit_simd_layout_preserves_loop_kind(with_lanes):
     from tilelang.ascend import transform as ascend
     from tilelang.ascend.target import normalize_pto_target
 
@@ -48,13 +49,63 @@ def test_explicit_simd_layout_preserves_loop_kind():
         launch_dim_tags=["cthread"],
     )(mod)
     lowered = tilelang.transform.AddWrapperForSingleBufStore()(lowered)
+    if not with_lanes:
+
+        def strip_lanes(node):
+            if isinstance(node, tvm.tirx.SBlock) and node.name_hint == "SIMD_VF":
+                return tvm.tirx.SBlock(
+                    node.iter_vars,
+                    node.reads,
+                    node.writes,
+                    node.name_hint,
+                    node.body,
+                    init=node.init,
+                    alloc_buffers=node.alloc_buffers,
+                    match_buffers=node.match_buffers,
+                    annotations={key: value for key, value in node.annotations.items() if key != "tl.simdvf_lanes"},
+                )
+
+        lowered = tvm.IRModule(
+            {
+                "main": lowered["main"].with_body(
+                    tvm.tirx.stmt_functor.ir_transform(lowered["main"].body, None, strip_lanes, ["tirx.SBlock"])
+                )
+            }
+        )
     with normalize_pto_target("pto"):
         result = ascend.AscendLayoutInference()(lowered)
+        ascend.VerifyParallelToPTO()(result)
     loops = []
     tvm.tirx.stmt_functor.post_order_visit(
         result["main"].body, lambda n: loops.append(n) if isinstance(n, tvm.tirx.For) and n.kind == tvm.tirx.ForKind.PARALLEL else None
     )
     assert len(loops) == 2
+
+
+@pytest.mark.parametrize("automatic_sibling", [False, True])
+def test_automatic_parallel_inside_explicit_simd_parallel_rejected(automatic_sibling):
+    from tilelang.ascend import transform as ascend
+    from tilelang.ascend.target import normalize_pto_target
+
+    @T.prim_func
+    def kernel():
+        temp = T.alloc_shared((128,), "float32")
+        with T.SimdVF():
+            value = S.vdup(1.0, "float32")
+            for block in T.Parallel(2):
+                S.vsts(temp[block * 64], value)
+                for j in T.Parallel(128):
+                    temp[j] = T.float32(2.0)
+            if automatic_sibling:
+                for k in T.Parallel(128):
+                    temp[k] = T.float32(3.0)
+
+    with normalize_pto_target("pto") as target:
+        mod = tvm.tirx.transform.BindTarget(target)(tvm.IRModule({"main": kernel}))
+        with pytest.raises(
+            tvm.error.InternalError, match="automatic T.Parallel nested inside an explicit SIMD T.Parallel.*not yet supported"
+        ):
+            ascend.VerifyParallelToPTO()(mod)
 
 
 @tilelang.testing.requires_ascend

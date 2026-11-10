@@ -777,18 +777,10 @@ private:
   // comes from the loop layout's own inverse fragment, and the vectorize
   // pass recovers real addresses from that same fragment.
   // Returns true when the lane context was pushed. A PTO SIMD_VF block
-  // without any T.Parallel is a pure hand-written VMI region: it needs no
-  // lanes annotation and gets no lane context.
+  // without a Parallel requiring lane conversion needs no lanes annotation
+  // and gets no lane context, including explicit SIMD nests.
   bool PushPtoSimdVFContext(const SBlockNode *op) {
-    bool has_parallel = false;
-    PostOrderVisit(op->body, [&](const ObjectRef &node) {
-      if (auto *for_node = node.as<ForNode>()) {
-        if (for_node->kind == ForKind::kParallel) {
-          has_parallel = true;
-        }
-      }
-    });
-    if (!has_parallel) {
+    if (!pto::ScanPtoRegion(op->body).has_any_parallel) {
       return false;
     }
     auto lanes_anno = op->annotations.Get("tl.simdvf_lanes");
