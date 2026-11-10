@@ -268,7 +268,7 @@ def test_high_dimensional_fill_diagnostic(ndim, scope, begin, end):
             else:
                 T.fill(buf[begin:end, :, :, :], T.float32(3))
 
-    if (begin, end) == (0, 2):
+    if (begin, end) == (0, 2) or (scope == "metal.cooperative_tensor" and ndim == 3 and (begin, end) == (0, 1)):
         _lower(kernel)
     else:
         with pytest.raises(ValueError, match="Metal partial fill:.*3 or more dimensions"):
@@ -322,3 +322,82 @@ def test_1d_fill_preserves_outside(begin, end):
 def test_1d_partial_fill_diagnostic(begin, end, threads, active_threads, reason):
     with pytest.raises(ValueError, match="Metal partial fill:.*" + reason):
         _lower(_make_1d_fill_kernel(begin, end, threads, active_threads))
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("shape", [(2, 2, 256), (2, 1, 2, 256)])
+def test_cooperative_tensor_prefix_fill(shape):
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local(shape, T.float32, scope="metal.cooperative_tensor")
+            if len(shape) == 3:
+                T.fill(buf[0:1, :, :], T.float32(3))
+            else:
+                T.fill(buf[0:1, :, :, :], T.float32(3))
+
+    artifact = _lower(kernel)
+    calls = []
+    fill_op = tvm.ir.Op.get("tl.cooperative_tensor_fill")
+    for func in artifact.device_mod.functions.values():
+        tvm.tirx.stmt_functor.post_order_visit(
+            func.body,
+            lambda node: calls.append(node) if isinstance(node, tvm.tirx.Call) and node.op.same_as(fill_op) else None,
+        )
+    assert len(calls) == 1
+    assert calls[0].args[1].value == 0
+    assert _fill_value(calls[0]) == 3.0
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("use_else", [False, True])
+def test_partial_fill_rejects_divergent_lanes(use_else):
+    @T.prim_func
+    def kernel(output: T.Tensor((16, 16), T.float32)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((16, 16), T.float32, scope="metal.simdgroup")
+            T.clear(buf)
+            tx = T.get_thread_binding()
+            if use_else:
+                if tx == 16:
+                    T.evaluate(0)
+                else:
+                    T.fill(buf[8:16, 0:8], T.float32(3))
+            else:
+                if tx != 16:
+                    T.fill(buf[8:16, 0:8], T.float32(3))
+            T.copy(buf, output)
+
+    with pytest.raises(ValueError, match="thread-uniform control flow"):
+        _lower(kernel)
+
+
+@tilelang.testing.requires_metal
+def test_cooperative_tensor_rejects_noncontiguous_prefix():
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((2, 4, 256), T.float32, scope="metal.cooperative_tensor")
+            # 512 elements at zero minima, but with gaps between rows.
+            T.fill(buf[0:1, 0:4, 0:128], T.float32(3))
+
+    with pytest.raises(ValueError, match="Metal partial fill:.*3 or more dimensions"):
+        _lower(kernel)
+
+
+@tilelang.testing.requires_metal
+def test_partial_fill_accepts_uniform_branch_and_restores_state():
+    @T.prim_func
+    def kernel(output: T.Tensor((16, 16), T.float32)):
+        with T.Kernel(2, threads=32) as bx:
+            buf = T.alloc_local((16, 16), T.float32, scope="metal.simdgroup")
+            T.clear(buf)
+            tx = T.get_thread_binding()
+            if tx != 16:
+                output[tx // 16, tx % 16] = T.float32(0)
+            if bx == 0:
+                T.fill(buf[8:16, 0:8], T.float32(3))
+            T.copy(buf, output)
+
+    calls = _fill_calls(_lower(kernel))
+    assert [call.args[1].value for call in calls if _fill_value(call) == 3.0] == [2]

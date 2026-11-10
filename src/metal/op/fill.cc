@@ -51,6 +51,29 @@ Stmt LowerSIMDGroupPartialFill(const FillNode &op, const LowerArgs &lower_args,
   return SeqStmt(stmts);
 }
 
+// The existing cooperative-tensor lowering can fill tile zero directly.
+bool IsCooperativeTensorPrefixTile(const FillNode &op,
+                                   arith::Analyzer *analyzer) {
+  if (!IsCooperativeTensorBuffer(op.dst) || !op.dst->strides.empty() ||
+      !analyzer->CanProveEqual(op.dst->elem_offset, 0)) {
+    return false;
+  }
+  PrimExpr elements = IntImm(DataType::Int(64), 1);
+  bool full_suffix = true;
+  for (size_t d = op.region.size(); d-- > 0;) {
+    const Range &range = op.region[d];
+    if (!analyzer->CanProveEqual(range->min, 0) ||
+        !analyzer->CanProve(range->extent > 0) ||
+        !analyzer->CanProve(range->extent <= op.dst->shape[d]) ||
+        (!full_suffix && !analyzer->CanProveEqual(range->extent, 1))) {
+      return false;
+    }
+    full_suffix &= analyzer->CanProveEqual(range->extent, op.dst->shape[d]);
+    elements = elements * cast(DataType::Int(64), range->extent);
+  }
+  return analyzer->CanProveEqual(elements, 512);
+}
+
 } // namespace
 
 struct Fill {
@@ -58,7 +81,9 @@ struct Fill {
                     arith::Analyzer *analyzer) {
     if ((IsSIMDGroupBuffer(op.dst) || IsCooperativeTensorBuffer(op.dst)) &&
         op.dst->shape.size() >= 3) {
-      CHECK(IsWholeBufferRegion(op.dst, op.region, analyzer), ValueError)
+      CHECK(IsWholeBufferRegion(op.dst, op.region, analyzer) ||
+                IsCooperativeTensorPrefixTile(op, analyzer),
+            ValueError)
           << "Metal partial fill: buffers with 3 or more dimensions are not "
              "supported for "
           << op.dst.scope() << " buffer " << op.dst->name

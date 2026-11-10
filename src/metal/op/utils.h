@@ -75,6 +75,9 @@ GetSIMDGroupPartialRegion(const Buffer &buffer, const ffi::Array<Range> &region,
       << operation << ": requires a complete simdgroup execution range [0, "
       << warp_size << "), got " << args.thread_bounds;
 
+  CHECK(!args.has_thread_dependent_branch, ValueError)
+      << operation << ": requires thread-uniform control flow";
+
   const int64_t alignment = ndim == 1 ? 64 : 8;
   SIMDGroupRegion tiles{{0, 0}, {1, 1}, 0};
   for (size_t d = 0; d < ndim; ++d) {

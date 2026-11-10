@@ -1150,6 +1150,7 @@ private:
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
     lower_args.block_num_threads = block_num_threads_;
+    lower_args.has_thread_dependent_branch = has_thread_dependent_branch_;
     lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
@@ -1170,6 +1171,22 @@ private:
     StampSubtreeSpans(lowered, op->span);
 
     return IRMutatorWithAnalyzer::VisitStmt(lowered);
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    bool previous = has_thread_dependent_branch_;
+    // Simplify before entering the branch: its own constraint would make the
+    // condition trivially true and conceal divergent lanes.
+    PrimExpr condition = analyzer_->Simplify(op->condition);
+    if (thread_binding_.defined()) {
+      has_thread_dependent_branch_ |=
+          tirx::UsesVar(condition, [&](const VarNode *var) {
+            return GetRef<Var>(var).same_as(thread_binding_->var);
+          });
+    }
+    Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    has_thread_dependent_branch_ = previous;
+    return stmt;
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
@@ -1447,6 +1464,7 @@ private:
   IterVar thread_binding_;
   size_t thread_block_size_ = 0;
   PrimExpr block_num_threads_ = IntImm(DataType::Int(64), 1);
+  bool has_thread_dependent_branch_ = false;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
   // Stack of per-Block workspace buffers gathered while visiting children
