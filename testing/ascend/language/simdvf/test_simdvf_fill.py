@@ -7,6 +7,21 @@ import tilelang.testing
 import torch
 
 
+@pytest.mark.parametrize("pass_name", ["LowerSimdVFFill", "AscendSimdVFLowerParallel"])
+def test_simdvf_fill_fp4_rejected(pass_name):
+    from tilelang import tvm
+    from tilelang.ascend import transform as ascend
+
+    @T.prim_func
+    def kernel():
+        temp = T.alloc_shared((64,), "float4_e2m1fn")
+        with T.SimdVF():
+            T.fill(temp, 0.0)
+
+    with pytest.raises(tvm.error.InternalError, match="T.fill inside SimdVF.*float4_e2m1fn"):
+        getattr(ascend, pass_name)()(tvm.IRModule({"main": kernel}))
+
+
 @pytest.mark.parametrize("target", ["ascend", "pto"])
 def test_simdvf_fill_full_unversioned_ub_npu(target):
     @T.prim_func
