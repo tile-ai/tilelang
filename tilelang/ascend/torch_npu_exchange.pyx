@@ -73,6 +73,15 @@ ctypedef struct DLManagedTensorVersioned:
     DLTensor dl_tensor
 
 
+ctypedef struct TorchNpuLegacyTensor:
+    # Legacy wrapper handed to torch_npu, plus the versioned tensor it may
+    # eventually own. The forward flag is separate from the pointer so the
+    # wrapper never has to be mutated after torch_npu could have freed it.
+    DLManagedTensor legacy
+    DLManagedTensorVersioned* source
+    int forward_source
+
+
 ctypedef int (*DLPackManagedTensorToPyObjectNoSync)(
     DLManagedTensorVersioned* tensor,
     void** out_py_object,
@@ -106,15 +115,28 @@ cdef object torch_npu_stream_getter = None
 cdef object torch_npu_from_dlpack = None
 
 
+cdef void _torch_npu_legacy_release(TorchNpuLegacyTensor* wrapper) noexcept:
+    """Drop the wrapper, forwarding the versioned tensor only when armed.
+
+    ``forward_source`` is set after the import succeeds, so a failed import
+    leaves the versioned tensor owned by TVM-FFI, which frees it exactly once.
+    """
+    cdef DLManagedTensorVersioned* source
+    cdef int forward
+    if wrapper == NULL:
+        return
+    source = wrapper.source
+    forward = wrapper.forward_source
+    free(wrapper)
+    if forward and source != NULL and source.deleter != NULL:
+        source.deleter(source)
+
+
 cdef void _torch_npu_legacy_deleter(DLManagedTensor* self) noexcept:
     """Release a legacy wrapper and forward ownership to the versioned tensor."""
-    cdef DLManagedTensorVersioned* source
     if self == NULL:
         return
-    source = <DLManagedTensorVersioned*>self.manager_ctx
-    free(self)
-    if source != NULL and source.deleter != NULL:
-        source.deleter(source)
+    _torch_npu_legacy_release(<TorchNpuLegacyTensor*>self.manager_ctx)
 
 
 cdef void _torch_npu_legacy_capsule_destructor(object pycaps) noexcept:
@@ -138,7 +160,7 @@ cdef int torch_npu_managed_tensor_to_py_object(
     dereferences the missing descriptor and segfaults. torch_npu's own
     importer builds a proper NPU storage, so route NPU results through it.
     """
-    cdef DLManagedTensor* legacy = NULL
+    cdef TorchNpuLegacyTensor* wrapper = NULL
     cdef object capsule
     cdef object py_tensor
 
@@ -146,33 +168,38 @@ cdef int torch_npu_managed_tensor_to_py_object(
         return torch_exchange_original_api.managed_tensor_to_py_object_no_sync(
             tensor, out_py_object)
 
-    legacy = <DLManagedTensor*>malloc(sizeof(DLManagedTensor))
-    if legacy == NULL:
+    wrapper = <TorchNpuLegacyTensor*>malloc(sizeof(TorchNpuLegacyTensor))
+    if wrapper == NULL:
         raise MemoryError("failed to allocate DLManagedTensor for the torch_npu import")
-    legacy.dl_tensor = tensor.dl_tensor
-    legacy.manager_ctx = <void*>tensor
-    legacy.deleter = _torch_npu_legacy_deleter
+    wrapper.legacy.dl_tensor = tensor.dl_tensor
+    wrapper.legacy.manager_ctx = <void*>wrapper
+    wrapper.legacy.deleter = _torch_npu_legacy_deleter
+    wrapper.source = tensor
+    wrapper.forward_source = 0
 
     capsule = PyCapsule_New(
-        <void*>legacy,
+        <void*>&wrapper.legacy,
         DLPACK_LEGACY_CAPSULE,
         <PyCapsule_Destructor>_torch_npu_legacy_capsule_destructor,
     )
     if capsule is None:
-        free(legacy)
+        free(wrapper)
         raise MemoryError("failed to create the DLPack capsule for torch_npu")
 
     try:
         py_tensor = torch_npu_from_dlpack(capsule)
     except BaseException:
-        # torch_npu did not consume the capsule; TVM-FFI frees the versioned
-        # tensor on error, so drop our wrapper without forwarding to it. The
-        # capsule destructor frees the wrapper once the capsule is collected.
-        legacy.manager_ctx = NULL
+        # The import failed, so TVM-FFI still owns the versioned tensor and
+        # frees it on error. Drop the wrapper without forwarding. Do not touch
+        # it afterwards: torch_npu may already have freed it through the
+        # capsule, and the capsule destructor releases it otherwise.
         raise
 
-    # torch_npu consumed the capsule and renamed it, so our capsule destructor
-    # no longer matches and the imported tensor owns the wrapper from here on.
+    # The import succeeded. From here the wrapper belongs to the imported
+    # tensor, so arm the forward and let its deleter release the versioned
+    # tensor once the tensor dies.
+    wrapper.forward_source = 1
+
     Py_INCREF(py_tensor)
     out_py_object[0] = <void*>(<PyObject*>py_tensor)
     return 0
