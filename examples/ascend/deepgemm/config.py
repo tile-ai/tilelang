@@ -55,6 +55,7 @@ class GemmDesc:
     compiled_dims: str = "nk"
     stride_batch_a: int = 0
     stride_batch_b: int = 0
+    with_alpha: bool = False  # Read by the deepgemm heuristics shipped in the 0.1.15 wheel.
 
 
 @dataclass(frozen=True)
