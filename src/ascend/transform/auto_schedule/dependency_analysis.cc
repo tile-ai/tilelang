@@ -313,31 +313,31 @@ public:
     for (const IRStructure *node = task; node; node = node->GetParent()) {
       for (const auto &guard : node->GetGuards()) {
         if (guard->IsCondition()) {
-          collector.CheckPure(
+          collector.CheckProofInput(
               static_cast<const ConditionGuard *>(guard.get())->condition);
         } else {
           const auto *attribute =
               static_cast<const AttributeGuard *>(guard.get());
           if (auto expr = attribute->node.as<PrimExpr>())
-            collector.CheckPure(expr.value());
+            collector.CheckProofInput(expr.value());
           if (attribute->value.defined())
             collector.CheckAttributeValue(attribute->value);
         }
       }
       if (node->IsControl()) {
         const auto &control = static_cast<const ControlNode *>(node)->control;
-        collector.CheckPure(control->min);
-        collector.CheckPure(control->extent);
+        collector.CheckProofInput(control->min);
+        collector.CheckProofInput(control->extent);
         if (control->step.has_value())
-          collector.CheckPure(control->step.value());
+          collector.CheckProofInput(control->step.value());
       }
     }
     for (const Constr &constraint : task->outer_ctx.constrs_) {
       if (constraint.kind == Constr::kBindRange) {
-        collector.CheckPure(constraint.range->min);
-        collector.CheckPure(constraint.range->extent);
+        collector.CheckProofInput(constraint.range->min);
+        collector.CheckProofInput(constraint.range->extent);
       } else {
-        collector.CheckPure(constraint.value);
+        collector.CheckProofInput(constraint.value);
       }
     }
     collector(task->stmt);
@@ -353,6 +353,13 @@ public:
           collector.RecordControl(GetRef<PrimExpr>(expr));
       }
     }
+    // The overlap query uses the regions returned by the memory detector.
+    // Check their relaxed endpoints as well as the original copy expressions.
+    for (const auto *regions :
+         {&collector.result_.reads, &collector.result_.writes}) {
+      for (const BufferRegion &region : *regions)
+        collector.CheckRanges(region->region);
+    }
     return std::move(collector.result_);
   }
 
@@ -361,18 +368,44 @@ private:
     // Assumption guards carry a constant diagnostic string in their value;
     // their predicate is the node and still requires the strict pure check.
     if (!expr.as<StringImmNode>())
-      CheckPure(expr);
+      CheckProofInput(expr);
   }
 
-  void CheckPure(const PrimExpr &expr) {
-    result_.complete &= expr.dtype().is_scalar() &&
-                        (expr.dtype().is_int() || expr.dtype().is_uint() ||
-                         expr.dtype().is_bool()) &&
-                        SideEffect(expr) <= CallEffectKind::kPure;
+  void CheckProofInput(const PrimExpr &expr) {
+    if (!result_.complete)
+      return;
+    result_.complete = expr.dtype().is_scalar() &&
+                       (expr.dtype().is_int() || expr.dtype().is_uint() ||
+                        expr.dtype().is_bool()) &&
+                       SideEffect(expr) <= CallEffectKind::kPure;
+    PostOrderVisit(expr, [&](const ObjectRef &node) {
+      if (const auto *div = node.as<DivNode>())
+        CheckTruncation(div->a, div->b);
+      else if (const auto *mod = node.as<ModNode>())
+        CheckTruncation(mod->a, mod->b);
+    });
+  }
+
+  void CheckTruncation(const PrimExpr &dividend, const PrimExpr &divisor) {
+    if (!result_.complete || !dividend.dtype().is_int())
+      return;
+    // TIR truncates toward zero; Z3 integer div/mod use Euclidean division.
+    // Only refine in a shared domain established independently of the proof
+    // context, which may itself contain a truncating division or remainder.
+    arith::Analyzer bounds;
+    result_.complete = bounds.const_int_bound(dividend)->min_value >= 0 &&
+                       bounds.const_int_bound(divisor)->min_value > 0;
+  }
+
+  void CheckRanges(const Region &ranges) {
+    for (const Range &range : ranges) {
+      CheckProofInput(range->min);
+      CheckProofInput(range->extent);
+    }
   }
 
   void CheckLayout(const PrimExpr &expr) {
-    CheckPure(expr);
+    CheckProofInput(expr);
     // Function parameters describe one shared layout. Internal or enclosing
     // loop/Bind values can differ between the compared access instances.
     for (const Var &var : result_.local_vars) {
@@ -411,10 +444,7 @@ private:
       dense_stride = dense_stride *
                      cast(DataType::Int(64), promoter(buffer->shape[i - 1]));
     }
-    for (const Range &range : ranges) {
-      CheckPure(range->min);
-      CheckPure(range->extent);
-    }
+    CheckRanges(ranges);
   }
 
   void CheckCopy(const CallNode *call) {
@@ -431,7 +461,7 @@ private:
     }
     for (const auto &[key, value] : call->annotations) {
       if (auto expr = value.as<PrimExpr>())
-        CheckPure(expr.value());
+        CheckProofInput(expr.value());
       else
         result_.complete = false;
     }
@@ -451,7 +481,7 @@ private:
   }
 
   void RecordControl(const PrimExpr &expr) {
-    CheckPure(expr);
+    CheckProofInput(expr);
     Record(Evaluate(expr));
   }
 
@@ -462,7 +492,7 @@ private:
     } else {
       Record(stmt);
       if (const auto *bind = stmt.as<BindNode>()) {
-        CheckPure(bind->value);
+        CheckProofInput(bind->value);
         return;
       }
       if (const auto *eval = stmt.as<EvaluateNode>()) {
@@ -480,7 +510,7 @@ private:
           // Keep the calls and their resource effects intact; only their scalar
           // flag operand contributes accesses to this footprint analysis. A
           // mutable flag expression still prevents refinement.
-          CheckPure(call->args[2]);
+          CheckProofInput(call->args[2]);
           return;
         }
       }
