@@ -1,6 +1,7 @@
 name: CI
 on:
   pull_request:
+    branches-ignore: ['**']  # auto-trigger off; see ascend950-ci.yml
     types:
       - labeled
       - unlabeled

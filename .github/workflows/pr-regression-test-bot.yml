@@ -1,9 +1,8 @@
 name: Performance Regression Bot
 
 on:
-  issue_comment:
-    types:
-      - created
+  # `issue_comment` auto-trigger is off for now; see ascend950-ci.yml.
+  workflow_dispatch:
 
 permissions:
   contents: read

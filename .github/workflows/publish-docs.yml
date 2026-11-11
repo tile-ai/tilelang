@@ -2,6 +2,7 @@ name: Documentation
 
 on:
   pull_request_target:
+    branches-ignore: ['**']  # auto-trigger off; see ascend950-ci.yml
     types:
       - closed
   workflow_dispatch:

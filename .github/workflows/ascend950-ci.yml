@@ -1,0 +1,227 @@
+# Ascend 950 (A5) AscendC-only CI.
+#
+# Scope: pull requests only, AscendC execution backend only. The PTO backend is
+# deliberately not exercised here.
+#
+# The runner label, the container image and the environment/bootstrap recipe are
+# copied from the `ascend` job of ci.yml so that both pipelines share one
+# toolchain: Ascend 950 hardware on the `linux-amd64-a5-4` self-hosted runner,
+# inside the CANN 9.3.0 weekly container.
+#
+# This is the single PR gate: it runs the clean-code lint checks (pre-commit,
+# AST compile, C++ API style) and then the Ascend 950 AscendC suite. It is the
+# only workflow in this directory that still triggers automatically; the other
+# workflows have their automatic triggers disabled.
+
+name: PR CI (Ascend 950 AscendC)
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  PYTHONPATH: "" # explicit cleanup
+  PIP_USER: "" # explicit cleanup
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+  PRE_COMMIT_HOME: "${{ github.workspace }}/.cache/pip/.pre-commit" # to be updated
+
+jobs:
+  lint:
+    name: Quick Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      run_tests: ${{ steps.changes.outputs.run_tests }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Detect documentation-only changes
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Keep the AscendC suite enabled if the diff cannot be resolved.
+          run_tests=true
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]] &&
+            git diff --quiet --no-renames "${BASE_SHA}...${HEAD_SHA}" -- \
+              . \
+              ':(exclude,glob)**/*.md' \
+              ':(exclude,glob)**/*.rst' \
+              ':(exclude,glob)docs/_static/**'; then
+            run_tests=false
+          fi
+          echo "run_tests=${run_tests}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Python 3.10
+        id: setup-pylowest
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          update-environment: true
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+            .pre-commit-config.yaml
+
+      - name: Check AST with Python 3.10
+        run: |
+          "${{ steps.setup-pylowest.outputs.python-path }}" -m compileall -q -f tilelang
+
+      - name: C++ API Style Audit (warning only)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          "${{ steps.setup-pylowest.outputs.python-path }}" maint/scripts/audit_cpp_api_style.py --github-warnings --limit 20
+
+      - name: Pre-commit Lint
+        run: |
+          if ! pipx run pre-commit run --all-files --color=always --show-diff-on-failure; then
+            echo "::error::Pre-commit checks failed. Please run 'pre-commit install' and 'pre-commit run --all-files' locally to see the issues."
+            exit 1
+          fi
+
+  ascend950-ascendc:
+    name: Ascend 950 / CCEC
+    # Documented gate order: clean-code lint first, hardware second.
+    # Documentation-only PRs skip the hardware run (lint still reports).
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      needs.lint.outputs.run_tests == 'true' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    needs: [lint]
+    runs-on: linux-amd64-a5-4
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
+    timeout-minutes: 120
+    env:
+      PIP_USER: "0"
+      USE_CUDA: "OFF"
+      USE_ASCEND: "ON"
+      CMAKE_BUILD_PARALLEL_LEVEL: "64"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Trust the mounted workspace for git
+        run: |
+          # The container runs as root over the host-mounted workspace, so git
+          # rejects it as "dubious ownership"; CMake's submodule check needs it.
+          git config --global --add safe.directory '*'
+
+      - name: Set up environment and build Ascend
+        id: ascend-build
+        shell: bash
+        run: |
+          # Keep the runner's preinstalled Torch/Torch-NPU stack.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          for CANN_SET_ENV in \
+            "${ASCEND_HOME_PATH:-}/set_env.sh" \
+            "${ASCEND_TOOLKIT_HOME:-}/set_env.sh" \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/cann-*/set_env.sh; do
+            if [[ -f "${CANN_SET_ENV}" ]]; then
+              source "${CANN_SET_ENV}"
+              break
+            fi
+          done
+          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
+
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+          import torch
+          import torch_npu
+
+          assert torch.npu.is_available(), "Ascend CI requires an available NPU"
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(requirement)
+          PY
+
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -v -r requirements-test.txt pybind11==2.12.0
+          python -m pip install -v .
+
+      - name: Run AscendC examples
+        id: ascendc-examples
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          # AscendC backend only (PTO would use TILELANG_DEFAULT_TARGET=pto).
+          TILELANG_DEFAULT_TARGET: ascend
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run AscendC unit tests
+        id: ascendc-unit-tests
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        env:
+          # `pto` marks the PTO-backend tests, so deselect them for AscendC.
+          TEST_MARKERS: not pto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
+
+      - name: Summarize AscendC results
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BUILD_RESULT: ${{ steps.ascend-build.outcome }}
+          EXAMPLES_RESULT: ${{ steps.ascendc-examples.outcome }}
+          UNIT_RESULT: ${{ steps.ascendc-unit-tests.outcome }}
+        run: |
+          {
+            echo "### Ascend 950 / AscendC"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Build | ${BUILD_RESULT} |"
+            echo "| AscendC examples | ${EXAMPLES_RESULT} |"
+            echo "| AscendC unit tests (not pto) | ${UNIT_RESULT} |"
+          } >> "${GITHUB_STEP_SUMMARY}"

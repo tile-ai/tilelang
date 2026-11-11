@@ -1,10 +1,9 @@
 name: Dist
 on:
+  # schedule / release triggers removed; pull_request gated. Manual runs only.
   workflow_dispatch:
-  schedule:
-    # gemini said this is 6:00 china time
-    - cron: "0 22 * * *"
   pull_request:
+    branches-ignore: ['**']  # auto-trigger off; see ascend950-ci.yml
     types:
       - opened
       - synchronize
@@ -25,9 +24,6 @@ on:
       - maint/scripts/smoke_test_wheel.py
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
-  release:
-    types:
-      - published
 
 permissions:
   contents: read
