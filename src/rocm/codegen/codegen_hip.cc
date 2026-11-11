@@ -1406,6 +1406,46 @@ void CodeGenTileLangHIP::PrintCallExtern(Type ret_type, String global_symbol,
 }
 
 // Print a reference expression to a buffer.
+namespace {
+
+// uint2 and uint4 are structs in HIP, so copying one is a memcpy, and SROA
+// leaves a local array that is only ever copied to and from memory on the
+// stack: a tile of loads held across a loop lands in scratch memory. Accessed
+// as extended vectors, the same array is promoted to registers. Not for an
+// array that GEMM reads: see CollectMfmaOperands.
+const char *RegisterVectorType(DataType t) {
+  if (!t.is_float16()) {
+    return nullptr;
+  }
+  if (t.lanes() == 4)
+    return "tl::RegVec<uint2>";
+  if (t.lanes() == 8)
+    return "tl::RegVec<uint4>";
+  return nullptr;
+}
+
+// Arrays read as matrix core operands keep plain accesses. They are read with
+// GEMM's K loop index: when clang 22 promotes such an array, the K loop is no
+// longer unrolled and every read of the array becomes a chain of selects.
+class CollectMfmaOperands : public tirx::StmtExprVisitor {
+public:
+  std::unordered_set<const VarNode *> operands;
+
+private:
+  void VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(tl::tvm_mfma())) {
+      for (int i : {6, 8}) {
+        if (const auto *v = op->args[i].as<VarNode>()) {
+          operands.insert(v);
+        }
+      }
+    }
+    StmtExprVisitor::VisitExpr_(op);
+  }
+};
+
+} // namespace
+
 std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
                                              const BufferNode *buffer,
                                              PrimExpr index) {
@@ -1485,6 +1525,10 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
        << " / " << div_factor << ")";
   } else if (t == buffer_element_dtype) {
     os << buffer_str << "[" << index_str << "]";
+  } else if (const char *reg_vec = mfma_operands_.count(buffer_var_node)
+                                       ? nullptr
+                                       : RegisterVectorType(t)) {
+    os << "*(" << reg_vec << "*)(" << buffer_str << " + " << index_str << ")";
   } else {
     os << "*" << ptr_cast(t) << "(" << buffer_str << " + " << index_str << ")";
   }
@@ -2568,6 +2612,10 @@ void CodeGenTileLangHIP::AddFunction(const PrimFunc &f) {
   this->InitFuncState(f);
   // reserve keywords
   ReserveKeywordsAsUnique();
+
+  CollectMfmaOperands mfma_operands;
+  mfma_operands(f->body);
+  mfma_operands_ = std::move(mfma_operands.operands);
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol.has_value())
