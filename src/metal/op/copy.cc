@@ -54,6 +54,32 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr dst_col_base = op.dst_range[1]->min;
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
 
+  if (lower_args.buffer_remap.count(op.dst)) {
+    // LowerTileOp remaps address_of after this lowering, but the intrinsic
+    // keeps dst_stride. Only accept layouts preserving that row-major address
+    // mapping; proving the logical bounds alone does not bound a remapped
+    // store.
+    Layout layout = lower_args.layout_map.at(op.dst);
+    Array<PrimExpr> vars = layout->GetForwardVars();
+    Buffer physical = lower_args.buffer_remap.at(op.dst);
+    PrimExpr capacity = IntImm(DataType::Int(64), 1);
+    for (const PrimExpr &extent : physical->shape) {
+      capacity = capacity * cast(DataType::Int(64), extent);
+    }
+    CHECK(vars.size() == 2 && layout->OutputDim() == physical->shape.size() &&
+              analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
+                                      vars[0] * dst_stride + vars[1]) &&
+              analyzer->CanProve(cast(DataType::Int(64), op.dst->shape[0]) *
+                                     cast(DataType::Int(64), dst_stride) <=
+                                 capacity),
+          ValueError)
+        << "Metal SIMD-group copy: destination layout must preserve row-major "
+           "addresses and fit the physical allocation for "
+        << op.dst->name
+        << ". Copy to a full shared tile with a row-major layout first, then "
+           "use T.copy to the destination.";
+  }
+
   int warp_size = TargetMetalGetWarpSize(lower_args.target);
   const auto *block_size_imm =
       lower_args.thread_bounds->extent.as<IntImmNode>();

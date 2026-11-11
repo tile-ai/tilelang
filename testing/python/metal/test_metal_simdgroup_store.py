@@ -228,6 +228,53 @@ def test_simdgroup_copy_preserves_destination_guard(m, n, block, threads, dtype,
     assert torch.all(backing[m * n :].cpu() == -9).item()
 
 
+def _make_layout_store_kernel(layout_kind, column):
+    layouts = {
+        "transpose": tilelang.Layout((8, 16), lambda i, j: (j, i)),
+        "identity": tilelang.Layout((8, 16), lambda i, j: (i, j)),
+        "flatten": tilelang.Layout((8, 16), lambda i, j: i * 16 + j),
+        "reshape": tilelang.Layout((8, 16), lambda i, j: ((i * 16 + j) // 32, (i * 16 + j) % 32)),
+    }
+    layout = layouts[layout_kind]
+
+    @T.prim_func
+    def kernel(output: T.Tensor((8, 16), T.float32)):
+        with T.Kernel(1, threads=32):
+            tile = T.alloc_local((8, 8), T.float32, scope="metal.simdgroup")
+            shared = T.alloc_shared((8, 16), T.float32)
+            T.annotate_layout({shared: layout})
+            T.clear(shared)
+            T.fill(tile, T.float32(3))
+            T.copy(tile, shared[0, column])
+            T.copy(shared, output)
+
+    return kernel
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("column", [0, 8])
+def test_simdgroup_copy_rejects_transposed_destination(column):
+    # Column 8 writes beyond the allocation; column 0 stays in the allocation
+    # but the row-major store still disagrees with the transposed mapping.
+    with pytest.raises(ValueError, match="Metal SIMD-group copy:.*row-major"):
+        _lower_copy_bounds(_make_layout_store_kernel("transpose", column))
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("layout_kind", ["identity", "flatten", "reshape"])
+def test_simdgroup_copy_accepts_equivalent_destination_layout(layout_kind):
+    func = _make_layout_store_kernel(layout_kind, 8)
+    kernel = tilelang.compile(func, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    backing = torch.full((8 * 16 + 64,), -9.0, dtype=torch.float32, device="mps")
+    output = backing[: 8 * 16].view(8, 16)
+    kernel(output)
+    torch.mps.synchronize()
+    expected = torch.zeros((8, 16))
+    expected[:, 8:] = 3
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+    assert torch.all(backing[8 * 16 :].cpu() == -9).item()
+
+
 if __name__ == "__main__":
     if torch.mps.is_available():
         tilelang.testing.main()
