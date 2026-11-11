@@ -9,6 +9,9 @@
 #include "target/source/codegen_c.h"
 #include <tvm/arith/analyzer.h>
 
+#include "runtime/metadata.h"
+#include <tvm/ffi/extra/module.h>
+
 namespace tvm {
 namespace codegen {
 
@@ -184,6 +187,12 @@ private:
   bool EmitScalarizedStore(const BufferStoreNode *op);
   bool EmitOutOfVFBroadcastStore(const BufferStoreNode *op);
 };
+
+// Build the per-kernel FunctionInfo table shared by the Ascend and PTO
+// runtime modules (mirrors CUDA's ExtractFuncInfo,
+// src/cuda/codegen/rt_mod_cuda.cc).
+ffi::Map<ffi::String, runtime::FunctionInfo>
+ExtractAscendFuncInfo(const IRModule &mod);
 
 } // namespace codegen
 } // namespace tvm

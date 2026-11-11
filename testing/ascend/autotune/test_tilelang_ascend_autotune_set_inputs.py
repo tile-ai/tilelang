@@ -103,6 +103,9 @@ def test_set_inputs_supplies_captured_inputs_on_current_device(capture, monkeypa
         try:
             # The alignment copy is cross-device, which some runtimes reject.
             torch.empty(1, device=f"npu:{other}").to("npu")
+            # Force async copy failures to surface inside this try so the except below can catch and skip them.
+            torch.npu.synchronize()
+            torch.npu.synchronize(other)
         except RuntimeError:
             pytest.skip("cross-device copy is not available on this host")
         device = f"npu:{other}"

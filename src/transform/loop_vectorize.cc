@@ -270,6 +270,9 @@ public:
 
     // Clear previous buffer info and collect new ones
     buffer_vector_infos_.clear();
+    bind_map_.clear();
+    visited_binds_.clear();
+    skip_cast_width_constraints_ = false;
     this->operator()(node);
 
     if (verbose) {
@@ -556,12 +559,12 @@ private:
       // constant buffer that tl hack to use as local register.
       auto boundary_check = node->buffer->shape[0].as<IntImmNode>();
       if (boundary_check && boundary_check->value == 1) {
-        VisitIndexExprs(node->indices);
+        VisitWithoutCastWidthConstraints_(node->indices);
         return GetRef<PrimExpr>(node);
       }
     }
     UpdateVectorSize(node->indices, node->buffer, false);
-    VisitIndexExprs(node->indices);
+    VisitWithoutCastWidthConstraints_(node->indices);
     return GetRef<PrimExpr>(node);
   }
 
@@ -570,22 +573,80 @@ private:
       has_nonlocal_memory_access_ = true;
     UpdateVectorSize(node->indices, node->buffer, true);
     this->VisitExpr(node->value);
-    VisitIndexExprs(node->indices);
+    VisitWithoutCastWidthConstraints_(node->indices);
     return GetRef<Stmt>(node);
   }
 
-  void VisitIndexExprs(const Array<PrimExpr> &indices) {
-    bool was_in_index_expr = in_index_expr_;
-    in_index_expr_ = true;
-    for (const PrimExpr &index : indices) {
-      this->VisitExpr(index);
+  void VisitWithoutCastWidthConstraints_(const Array<PrimExpr> &exprs) {
+    bool was_skipping_cast_width_constraints = skip_cast_width_constraints_;
+    skip_cast_width_constraints_ = true;
+    for (const PrimExpr &expr : exprs) {
+      this->VisitExpr(expr);
     }
-    in_index_expr_ = was_in_index_expr;
+    skip_cast_width_constraints_ = was_skipping_cast_width_constraints;
+  }
+
+  PrimExpr ExpandBoundVars_(const PrimExpr &expr) const {
+    if (bind_map_.empty()) {
+      return expr;
+    }
+    PrimExpr current = expr;
+    for (int depth = 0; depth < 16; ++depth) {
+      bool has_bound_var = false;
+      PostOrderVisit(current, [&](const ObjectRef &obj) {
+        if (const auto *v = obj.as<VarNode>()) {
+          if (bind_map_.count(GetRef<Var>(v))) {
+            has_bound_var = true;
+          }
+        }
+      });
+      if (!has_bound_var) {
+        break;
+      }
+      current = Substitute(current, bind_map_);
+    }
+    return current;
+  }
+
+  PrimExpr VisitExpr_(const VarNode *node) final {
+    Var var = GetRef<Var>(node);
+    auto it = bind_map_.find(var);
+    if (it != bind_map_.end()) {
+      uint8_t mask = skip_cast_width_constraints_ ? 2U : 1U;
+      if ((visited_binds_[var] & mask) == 0) {
+        visited_binds_[var] |= mask;
+        this->VisitExpr((*it).second);
+      }
+      return (*it).second;
+    }
+    return var;
+  }
+
+  template <typename FVisit>
+  void WithBranchCondition_(const PrimExpr &condition, FVisit visit) {
+    // Preserve the base visitor's branch-local facts while visiting condition
+    // casts separately from the branch's data casts.
+    constraint_scope_.WithNewScope([&]() {
+      constraint_scope_.Current().Emplace(analyzer_, condition);
+      WithRecordIterPredicate(condition, visit);
+    });
   }
 
   Stmt VisitStmt_(const IfThenElseNode *node) final {
     CheckConditionVectorized(node->condition);
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(node);
+    VisitWithoutCastWidthConstraints_({node->condition});
+    PrimExpr condition = ExpandBoundVars_(node->condition);
+    if (const auto *call = condition.as<CallNode>();
+        call && call->op.same_as(builtin::likely())) {
+      condition = call->args[0];
+    }
+    WithBranchCondition_(condition,
+                         [&]() { this->VisitStmt(node->then_case); });
+    if (node->else_case.defined()) {
+      WithBranchCondition_(analyzer_->rewrite_simplify(Not(condition)),
+                           [&]() { this->VisitStmt(node->else_case.value()); });
+    }
+    return GetRef<Stmt>(node);
   }
 
   PrimExpr VisitExpr_(const SelectNode *node) final {
@@ -597,10 +658,20 @@ private:
     bool vector_predicate =
         target.defined() &&
         target->GetAttr<Bool>("supports_vector_predicate", Bool(false)).value();
-    if (!vector_predicate) {
-      CheckConditionVectorized(node->condition);
+    if (vector_predicate) {
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
-    return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    CheckConditionVectorized(node->condition);
+    if (!node->condition.dtype().is_scalar()) {
+      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+    }
+    VisitWithoutCastWidthConstraints_({node->condition});
+    PrimExpr condition = ExpandBoundVars_(node->condition);
+    WithBranchCondition_(condition,
+                         [&]() { this->VisitExpr(node->true_value); });
+    WithBranchCondition_(analyzer_->rewrite_simplify(Not(condition)),
+                         [&]() { this->VisitExpr(node->false_value); });
+    return GetRef<PrimExpr>(node);
   }
 
   static std::optional<int> GetAccessPtrElementBits(const PrimExpr &expr) {
@@ -669,10 +740,16 @@ private:
   PrimExpr VisitExpr_(const CallNode *node) final {
     if (node->op == builtin::if_then_else()) {
       CheckConditionVectorized(node->args[0]);
-      return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
+      VisitWithoutCastWidthConstraints_({node->args[0]});
+      PrimExpr condition = ExpandBoundVars_(node->args[0]);
+      WithBranchCondition_(condition,
+                           [&]() { this->VisitExpr(node->args[1]); });
+      WithBranchCondition_(Not(condition),
+                           [&]() { this->VisitExpr(node->args[2]); });
+      return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(builtin::tvm_access_ptr())) {
       HandleTvmAccessPtr(node);
-      VisitIndexExprs(node->args);
+      VisitWithoutCastWidthConstraints_(node->args);
       return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(tl::rng_rand_float())) {
       // Stateful RNG calls produce scalar values before any destination cast.
@@ -710,7 +787,7 @@ private:
                node->op == tl::access_ptr()) {
       // address_of and tl.access_ptr have buffer load value so we should
       // analysis the buffer load node to update vector_size_.
-      VisitIndexExprs(node->args);
+      VisitWithoutCastWidthConstraints_(node->args);
       return GetRef<PrimExpr>(node);
     } else if (node->op.same_as(tl::reducer_update())) {
       // The accumulate itself never loop-vectorizes: by the time execution
@@ -834,6 +911,7 @@ private:
       offset = ptr->args[2];
     }
 
+    offset = ExpandBoundVars_(offset);
     int vector_size = arith::ZeroAwareGCD(
         loop_extent_vector_size_,
         GetMaxAtomicVectorSize(dtype, storage_scope, Target::Current(false)));
@@ -854,10 +932,10 @@ private:
       return;
     }
     int condition_vector_size = loop_extent_vector_size_;
-    PrimExpr condition = cond;
+    PrimExpr condition = ExpandBoundVars_(cond);
     if (condition_vector_size > 1) {
       condition =
-          SimplifyExprForAnalyzer(cond, condition_vector_size, analyzer_);
+          SimplifyExprForAnalyzer(condition, condition_vector_size, analyzer_);
     }
     while (condition_vector_size > 1 &&
            !IsExprInvariantInVectorBoundary(
@@ -885,7 +963,7 @@ private:
       data_var = Downcast<Var>(node->args[1]);
     }
     ICHECK(data_var.defined()) << "tvm_access_ptr second arg must be a var";
-    PrimExpr offset = node->args[2];
+    PrimExpr offset = ExpandBoundVars_(node->args[2]);
 
     Optional<Buffer> buffer_opt;
     Optional<Layout> layout_opt;
@@ -985,24 +1063,29 @@ private:
   }
 
   PrimExpr VisitExpr_(const CastNode *node) final {
-    // Address casts do not produce data vectors: contiguous accesses lower
-    // their indices to a scalar base and stride. Their legality is already
-    // checked by the buffer/access_ptr alignment analysis.
-    if (in_index_expr_) {
+    // Address and uniform-condition casts do not constrain data vector types.
+    // Indices may still vectorize into Ramp expressions; this flag only skips
+    // dtype-based cast limits. Access alignment and condition uniformity are
+    // checked separately. Stochastic rounding still requires rbits to agree
+    // within each vector group.
+    if (skip_cast_width_constraints_ && !node->annotations.count("rbits")) {
       return arith::IRMutatorWithAnalyzer::VisitExpr_(node);
     }
     // Consider both source and target types to ensure all intermediate
     // vector types can be represented. For example, casting int32 to
     // float8_e4m3fn: target allows 128/8=16 lanes but int32 only supports
     // up to 128/32=4 lanes in CUDA vector types.
-    int target_lanes = vector_load_bits_max_ / node->dtype.bits();
-    int source_bits = node->value.dtype().bits();
-    int max_lanes = target_lanes;
-    if (source_bits > 0) {
-      int source_lanes = vector_load_bits_max_ / source_bits;
-      max_lanes = std::min(target_lanes, source_lanes);
+    int cast_vector_size = initial_vector_size_;
+    if (!skip_cast_width_constraints_) {
+      int target_lanes = vector_load_bits_max_ / node->dtype.bits();
+      int source_bits = node->value.dtype().bits();
+      int max_lanes = target_lanes;
+      if (source_bits > 0) {
+        int source_lanes = vector_load_bits_max_ / source_bits;
+        max_lanes = std::min(target_lanes, source_lanes);
+      }
+      cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
     }
-    int cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
     // For casts that carry a "rbits" annotation (stochastic rounding), the
     // rbits operand must be invariant within the vectorized boundary so the
     // same value can be shared across the lanes of each PTX cvt.rs.*
@@ -1011,7 +1094,7 @@ private:
     if (inner_for_.defined()) {
       auto it = node->annotations.find("rbits");
       if (it != node->annotations.end()) {
-        PrimExpr rbits = Downcast<PrimExpr>((*it).second);
+        PrimExpr rbits = ExpandBoundVars_(Downcast<PrimExpr>((*it).second));
         while (cast_vector_size > 1 &&
                !IsExprInvariantInVectorBoundary(
                    rbits, inner_for_->loop_var, inner_for_->extent,
@@ -1100,10 +1183,15 @@ private:
 
   void UpdateVectorSize(const Array<PrimExpr> &indices, const Buffer &buffer,
                         bool is_store) {
+    Array<PrimExpr> expanded_indices;
+    expanded_indices.reserve(indices.size());
+    for (const PrimExpr &index : indices) {
+      expanded_indices.push_back(ExpandBoundVars_(index));
+    }
     VectorSizeConstraint constraint =
-        ComputeBufferVectorSize(indices, buffer, is_store);
+        ComputeBufferVectorSize(expanded_indices, buffer, is_store);
     buffer_vector_infos_.push_back({buffer, constraint.vector_size, is_store,
-                                    indices, /*is_cast=*/false,
+                                    expanded_indices, /*is_cast=*/false,
                                     constraint.requires_scalarization});
   }
 
@@ -1115,11 +1203,18 @@ private:
   // IRMutatorWithAnalyzer::VisitStmt_(BindNode*) in:
   // tvm/src/arith/ir_mutator_with_analyzer.cc
   Stmt VisitStmt_(const BindNode *op) final {
-    PrimExpr value = this->VisitExpr(op->value);
-    if (SideEffect(value) <= CallEffectKind::kPure) {
-      // Allow override to handle duplicated loop bodies in pipelined loops
-      analyzer_->Bind(op->var, value, /*allow_override=*/true);
+    if (SideEffect(op->value) <= CallEffectKind::kPure) {
+      // Defer visiting pure SSA bindings to their use sites so index and
+      // condition casts are evaluated in the context where the bound variable
+      // is consumed. Allow override to handle duplicated loop bodies in
+      // pipelined loops.
+      bind_map_.Set(op->var, op->value);
+      visited_binds_.erase(op->var);
+      analyzer_->Bind(op->var, ExpandBoundVars_(op->value),
+                      /*allow_override=*/true);
+      return GetRef<Stmt>(op);
     }
+    PrimExpr value = this->VisitExpr(op->value);
     if (value.same_as(op->value)) {
       return GetRef<Stmt>(op);
     } else {
@@ -1134,7 +1229,10 @@ private:
   int loop_extent_vector_size_ = 128;
 
   For inner_for_;
-  bool in_index_expr_ = false;
+  Map<Var, PrimExpr> bind_map_;
+  std::unordered_map<Var, uint8_t, ObjectPtrHash, ObjectPtrEqual>
+      visited_binds_;
+  bool skip_cast_width_constraints_ = false;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;

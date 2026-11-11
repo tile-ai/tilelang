@@ -201,7 +201,7 @@ private:
   size_t non_unit_step_loop_depth_{0};
   /*! \brief Whether this task contains a loop_break intrinsic. */
   bool has_loop_break_{false};
-  // Pointer consumers whose physical footprint is not encoded by access_ptr.
+  // Pointer consumers whose addressing is not fully encoded by access_ptr.
   bool opaque_pointer_context_{false};
   /*! \brief The buffers that the current block reads */
   std::vector<Buffer> read_buffers_;
@@ -927,66 +927,48 @@ private:
     }
   }
 
-  std::vector<arith::IntSet> LogicalPointerRegion(const BufferLoad &load,
-                                                  const PrimExpr &extent) {
+  std::vector<arith::IntSet> PointerRegion(const BufferLoad &load,
+                                           const PrimExpr &extent) {
     const Buffer &buffer = load->buffer;
     size_t ndim = buffer->shape.size();
     std::vector<arith::IntSet> region(ndim);
 
-    const auto *ext_imm = extent.as<IntImmNode>();
-    if (ext_imm && load->indices.size() == ndim) {
-      // Distribute a known flat extent (in elements) across dims,
-      // innermost-first. `rem` is the number of elements still to be
-      // covered at the current dimension; each dim consumes as many of
-      // its `shape[i]` indices as the run spans, carrying the rounded-up
-      // remainder to the next (outer) dim.
-      int64_t rem = ext_imm->value;
-      for (size_t k = ndim; k-- > 0;) {
-        PrimExpr base = load->indices[k];
-        const auto *dim_imm = buffer->shape[k].as<IntImmNode>();
-        if (rem <= 1) {
-          region[k] = RelaxAccessIndex(base);
-        } else if (dim_imm) {
-          int64_t d = dim_imm->value;
-          if (rem >= d) {
-            // Run spills past this dim: cover it whole and carry up.
-            region[k] = arith::IntSet::FromRange(
-                Range::FromMinExtent(0, buffer->shape[k]));
-            rem = (rem + d - 1) / d;
-          } else {
-            region[k] = RelaxAccessIndex(base, IntImm(base.dtype(), rem));
-            rem = 1;
-          }
-        } else {
-          // Non-constant dim size: be conservative for this and any
-          // remaining outer dims.
-          region[k] = arith::IntSet::FromRange(
-              Range::FromMinExtent(0, buffer->shape[k]));
-          rem = 1;
-        }
-      }
-    } else {
-      // Non-constant extent or arity mismatch: fall back to whole buffer.
-      for (size_t k = 0; k < ndim; ++k) {
+    if (mode_ == AccessMode::kLogical && opaque_pointer_context_) {
+      // Gather/scatter indices and extra offsets can reach beyond the compact
+      // access_ptr span even in a dense view. Keep the whole logical buffer
+      // until the consumer's addressing operands have a proven footprint.
+      for (size_t k = 0; k < ndim; ++k)
         region[k] =
             arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
-      }
+      return region;
     }
-    return region;
-  }
 
-  std::vector<arith::IntSet> PhysicalPointerRegion(const BufferLoad &load,
-                                                   const PrimExpr &extent) {
-    const Buffer &buffer = load->buffer;
-    size_t ndim = buffer->shape.size();
-    std::vector<arith::IntSet> region(ndim);
+    // A positive stride can only shorten a 1-D run in logical coordinates.
+    if (mode_ == AccessMode::kLogical && ndim == 1 &&
+        load->indices.size() == 1 &&
+        (buffer->strides.empty() || ana_.CanProve(buffer->strides[0] > 0)))
+      return {RelaxAccessIndex(load->indices[0], extent)};
 
     bool reconstructed = false;
     const auto *ext_imm = extent.as<IntImmNode>();
-    // Explicit strides, including dense T.view layouts, stay opaque
-    // for multi-element runs until their physical image is proved.
+    // A dense row-major view has the same logical footprint as an implicit
+    // layout. Keep physical lifetime analysis conservative until its storage
+    // image is proved independently.
+    bool dense = buffer->strides.empty();
+    if (!dense && mode_ == AccessMode::kLogical &&
+        buffer->strides.size() == ndim) {
+      dense = true;
+      PrimExpr stride = Integer(1);
+      for (size_t k = ndim; k-- > 0;) {
+        if (!ana_.CanProveEqual(buffer->strides[k], stride)) {
+          dense = false;
+          break;
+        }
+        stride = stride * buffer->shape[k];
+      }
+    }
     if (ext_imm && ext_imm->value > 0 && load->indices.size() == ndim &&
-        (ext_imm->value == 1 || buffer->strides.empty())) {
+        (ext_imm->value == 1 || dense)) {
       int64_t remaining = ext_imm->value;
       reconstructed = true;
       for (size_t k = ndim; k-- > 0;) {
@@ -1031,8 +1013,8 @@ private:
     }
     if (!reconstructed) {
       UpdateOpaqueAccessVar(buffer->data);
-      // The storage is opaque: this placeholder cannot prove reuse and
-      // is never passed to synchronization dependency analysis.
+      // Logical accesses are assumed to stay within their Buffer. Physical
+      // lifetime proofs still require a representable footprint.
       for (size_t k = 0; k < ndim; ++k) {
         region[k] =
             arith::IntSet::FromRange(Range::FromMinExtent(0, buffer->shape[k]));
@@ -1118,8 +1100,8 @@ private:
           op->op.same_as(tl::simd_vsstb()) ||
           (op->op.same_as(tl::simd_vld2()) && op->args.size() >= 3)) {
         // SIMD gather/scatter and offset-bearing vld2 carry separate
-        // addressing operands outside access_ptr. The
-        // pointer's compact extent cannot establish physical lifetime coverage.
+        // addressing operands outside access_ptr. Its compact extent cannot
+        // establish logical dependencies or physical lifetime coverage.
         bool previous_context = opaque_pointer_context_;
         opaque_pointer_context_ = true;
         StmtExprVisitor::VisitExpr_(op);
@@ -1367,11 +1349,8 @@ private:
     }
 
     // Handle TileLang `tl.access_ptr(BufferLoad(buf, mins), extent, rw_mask)`.
-    // The access is a contiguous run of `extent` elements in row-major layout
-    // starting at the base index `mins`. Reconstruct a conservative rectangular
-    // hull by carrying both the extent and each dimension's starting offset. If
-    // the physical footprint cannot be represented, exclude the storage from
-    // alias proofs. A whole logical view can omit physical storage elements.
+    // Reconstruct a conservative logical hull of the contiguous physical run.
+    // Unrepresentable footprints cannot establish storage reuse.
     if (op->op.same_as(tl_access_ptr_op)) {
       if (op->args.size() >= 3) {
         const auto *buffer_load = op->args[0].as<BufferLoadNode>();
@@ -1382,10 +1361,7 @@ private:
             UpdateOpaqueAccessVar(buffer->data);
           int rw_mask = mask_int->value;
           BufferLoad load = ffi::GetRef<BufferLoad>(buffer_load);
-          std::vector<arith::IntSet> region =
-              mode_ == AccessMode::kLogical
-                  ? LogicalPointerRegion(load, op->args[1])
-                  : PhysicalPointerRegion(load, op->args[1]);
+          std::vector<arith::IntSet> region = PointerRegion(load, op->args[1]);
 
           if (rw_mask & 1) {
             Update(&read_buffers_, &read_regions_, buffer, region);

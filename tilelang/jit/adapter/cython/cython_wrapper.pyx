@@ -29,12 +29,18 @@ cdef class CythonKernelWrapper:
         list param_shapes              # Cache for parameter shapes as native Python lists
         object get_current_device
         object get_current_stream      # Raw-stream provider injected by the adapter (None = CUDA default)
+        object host_mapped_indices
+        object get_host_mapped_pointer
 
-    def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None):
+    def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None, host_mapped_indices=()):
         # Initialize wrapper with kernel configuration
         self.result_idx = result_idx
         self.params = params
         self.lib = lib
+        self.host_mapped_indices = frozenset(host_mapped_indices)
+        if self.host_mapped_indices:
+            from tvm import get_global_func
+            self.get_host_mapped_pointer = get_global_func("tl.cuda.get_host_mapped_pointer")
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
         self.param_dtypes = [param.torch_dtype() for param in params]
@@ -101,6 +107,10 @@ cdef class CythonKernelWrapper:
                     device.index is None or
                     tensor_device.index == device.index
                 )
+                if self.host_mapped_indices and device.type == "cuda":
+                    current_device = self.get_current_device()
+                    device = current_device if isinstance(current_device, torch.device) else torch.device("cuda", current_device)
+                    device_index_match = tensor_device.index == device.index
                 if not (device_type_match and device_index_match):
                     raise ValueError(
                         f"Buffer device mismatch for parameter {param}: "
@@ -173,6 +183,8 @@ cdef class CythonKernelWrapper:
     cdef object _infer_output_device(self, list inputs):
         for tensor in inputs:
             if isinstance(tensor, torch.Tensor):
+                if self.host_mapped_indices and tensor.device.type == "cpu":
+                    continue
                 return tensor.device
         return self.get_current_device()
 
@@ -280,8 +292,24 @@ cdef class CythonKernelWrapper:
             torch.bool: ctypes.c_bool,
         }
 
+        # Validate before querying mappings or constructing launch arguments.
+        if not skip_tensor_validation:
+            self._check_buffer_device(tensor_list)
+            self._check_buffer_dtype(tensor_list)
+            self._check_static_shape(tensor_list)
+            self._check_static_strides(tensor_list)
+            self._check_static_contiguous(tensor_list)
+
         call_args = []
         for i, tensor in enumerate(tensor_list):
+            if i in self.host_mapped_indices:
+                if not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu":
+                    raise ValueError(f"Host-mapped parameter {i} must be a CPU tensor")
+                # Resolve on every eager call. A raw address cache could survive
+                # unregister/free/reallocation and incorrectly reuse a mapping.
+                pointer = self.get_host_mapped_pointer(ctypes.c_void_p(tensor.data_ptr()))
+                call_args.append(pointer)
+                continue
             if isinstance(tensor, torch.Tensor):
                 call_args.append(ctypes.c_void_p(tensor.data_ptr()))
             elif isinstance(tensor, (int, float, bool)):
@@ -296,14 +324,6 @@ cdef class CythonKernelWrapper:
                 call_args.append(ctypes.c_void_p(0))
             else:
                 raise ValueError(f"Unsupported tensor type: {type(tensor)}")
-
-        # Check buffer device
-        if not skip_tensor_validation:
-            self._check_buffer_device(tensor_list)
-            self._check_buffer_dtype(tensor_list)
-            self._check_static_shape(tensor_list)
-            self._check_static_strides(tensor_list)
-            self._check_static_contiguous(tensor_list)
 
         # Add dynamic dimension values to kernel arguments
         for var, (ref_id, buffer_idx, shape_idx, stride_scale) in self.dynamic_symbolic_map.items():

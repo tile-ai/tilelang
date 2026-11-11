@@ -192,7 +192,7 @@ def _launch_annotations(kernel) -> set[str]:
 def test_each_dialect_declares_its_own_launch_annotations():
     expected = {
         "tilelang.language.common": set(),
-        "tilelang.cuda.language": {"threads", "prelude", "cluster_dims"},
+        "tilelang.cuda.language": {"threads", "prelude", "cluster_dims", "name"},
         "tilelang.rocm.language": {"threads", "prelude"},
         "tilelang.metal.language": {"threads", "prelude"},
         "tilelang.webgpu.language": {"threads"},
