@@ -18,6 +18,10 @@ namespace attr {
 
 static constexpr const char *kSafeValueMap = "safe_value_map";
 
+// Minimum thread blocks per SM (CUDA) or compute unit (ROCm) for
+// __launch_bounds__ emission.
+static constexpr const char *kMinBlocksPerSM = "tl.min_blocks_per_sm";
+
 // Async-copy annotations shared by CUDA and ROCm lowering.
 static constexpr const char *kLoopPreferAsync = "parallel_prefer_async";
 static constexpr const char *kParallelAsyncWithoutAsyncCommitWait =

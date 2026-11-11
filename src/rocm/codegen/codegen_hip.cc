@@ -20,6 +20,7 @@
 
 #include "backend/common/target_utils.h"
 #include "rocm/op/builtin.h"
+#include "rocm/target_utils.h"
 
 namespace tvm {
 namespace codegen {
@@ -370,6 +371,10 @@ private:
                  iv->thread_tag == "threadIdx.z") {
         threadIdx_z_ext = op->value;
       }
+    } else if (op->attr_key == tl::attr::kMinBlocksPerSM) {
+      if (const IntImmNode *v = op->value.as<IntImmNode>()) {
+        min_blocks_per_cu = v->value;
+      }
     }
     StmtVisitor::VisitStmt_(op);
   }
@@ -378,6 +383,7 @@ public:
   PrimExpr threadIdx_x_ext = Integer(1);
   PrimExpr threadIdx_y_ext = Integer(1);
   PrimExpr threadIdx_z_ext = Integer(1);
+  int64_t min_blocks_per_cu = 0; // 0: not annotated
 };
 
 void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
@@ -399,7 +405,22 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
     // shuffle operations when combined with #pragma unroll.  Only emit
     // launch_bounds when we have at least a full wavefront.
     if (threadIdx_ext_int->value >= 64) {
-      stream << " __launch_bounds__(" << threadIdx_ext_int->value << ")";
+      stream << " __launch_bounds__(" << threadIdx_ext_int->value;
+      if (extractor.min_blocks_per_cu > 0) {
+        // HIP's second argument is amdgpu_waves_per_eu, not CUDA's blocks per
+        // SM. A block needs ceil(threads / wave size) wavefronts and they
+        // share the 4 SIMDs of a compute unit, so N blocks per compute unit
+        // need ceil(N * waves_per_block / 4) waves per SIMD.
+        constexpr int64_t kSimdsPerCU = 4;
+        const int64_t wave_size = tl::TargetRocmGetWarpSize(target_);
+        const int64_t waves_per_block =
+            (threadIdx_ext_int->value + wave_size - 1) / wave_size;
+        stream << ", "
+               << (extractor.min_blocks_per_cu * waves_per_block + kSimdsPerCU -
+                   1) /
+                      kSimdsPerCU;
+      }
+      stream << ")";
     }
   }
 }
