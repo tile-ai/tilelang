@@ -436,6 +436,17 @@ void CodeGenCHost::VisitStmt_(
     stream << "if (!(" << cond << ")) {\n";
     int assert_if_scope = this->BeginScope();
     {
+      // The error kind reaches the caller as the raised exception's type, so an
+      // authored assertion reports the kind it asked for. Compiler-generated
+      // assertions all carry "RuntimeError", which is also the fallback for an
+      // assertion that left the kind empty.
+      const std::string &kind_value = op->error_kind->value;
+      std::string esc_kind =
+          kind_value.empty() ? "RuntimeError"
+                             : tvm::support::StrEscape(
+                                   kind_value.c_str(), kind_value.length(),
+                                   /*use_octal_escape=*/true,
+                                   /*escape_whitespace_special_chars=*/true);
       // Join message_parts into a single string
       std::string joined_msg;
       bool all_literal = true;
@@ -459,17 +470,17 @@ void CodeGenCHost::VisitStmt_(
                  << esc_msg << "\", (long long)(" << lhs << "), (long long)("
                  << rhs << "));\n";
           PrintIndent();
-          stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", "
-                    "__tvm_assert_msg_buf);\n";
+          stream << "TVMFFIErrorSetRaisedFromCStr(\"" << esc_kind
+                 << "\", __tvm_assert_msg_buf);\n";
         } else {
           PrintIndent();
-          stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", \""
+          stream << "TVMFFIErrorSetRaisedFromCStr(\"" << esc_kind << "\", \""
                  << esc_msg << "\");\n";
         }
       } else {
         PrintIndent();
-        stream << "TVMFFIErrorSetRaisedFromCStr(\"RuntimeError\", "
-                  "\"assertion failed\");\n";
+        stream << "TVMFFIErrorSetRaisedFromCStr(\"" << esc_kind
+               << "\", \"assertion failed\");\n";
       }
     }
     PrintIndent();
