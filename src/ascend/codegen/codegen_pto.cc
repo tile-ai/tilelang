@@ -5917,7 +5917,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
                                 ? "atomic_add"
                                 : (is_atomic_max ? "atomic_max" : "atomic_min");
     os << "tl." << atomic_op << "(" << PrintExpr_(op->args[0]) << ", "
-       << PrintExpr_(op->args[1]) << ")";
+       << PrintExpr_(op->args[1]) << ", " << DataTypeName(dtype) << ")";
     return;
   }
 
