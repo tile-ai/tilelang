@@ -149,6 +149,17 @@ CUresult CUDAAPI cuCtxGetDevice(CUdevice *device) {
   return CUDADriverAPI::get()->cuCtxGetDevice_(device);
 }
 
+CUresult CUDAAPI cuMemHostGetFlags(unsigned int *flags, void *ptr) {
+  return CUDADriverAPI::get()->cuMemHostGetFlags_(flags, ptr);
+}
+
+CUresult CUDAAPI cuMemHostGetDevicePointer_v2(CUdeviceptr *device_ptr,
+                                              void *host_ptr,
+                                              unsigned int flags) {
+  return CUDADriverAPI::get()->cuMemHostGetDevicePointer_v2_(device_ptr,
+                                                             host_ptr, flags);
+}
+
 CUresult CUDAAPI cuCtxGetLimit(size_t *pvalue, CUlimit limit) {
   return CUDADriverAPI::get()->cuCtxGetLimit_(pvalue, limit);
 }

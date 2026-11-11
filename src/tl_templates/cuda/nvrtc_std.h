@@ -216,4 +216,19 @@ template <class T, unsigned I = 0>
 inline constexpr size_t extent_v = extent<T, I>::value;
 } // namespace std
 
+// Programmatic dependent launch. CUDA 13's cuda_device_runtime_api.h cannot be
+// compiled by NVRTC: it needs types from driver_types.h, whose body is skipped
+// when NVRTC defines __CUDACC_RTC_MINIMAL__. Both entry points are a single PTX
+// instruction, so provide them here (matching the header's definitions).
+#if !defined(__CUDA_DEVICE_RUNTIME_API_H__)
+static __inline__ __device__ void cudaGridDependencySynchronize(void) {
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+}
+
+static __inline__ __device__ void
+cudaTriggerProgrammaticLaunchCompletion(void) {
+  asm volatile("griddepcontrol.launch_dependents;" :::);
+}
+#endif
+
 #endif // __CUDACC_RTC__

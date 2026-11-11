@@ -10,11 +10,7 @@ import tvm_ffi
 import os
 import json
 import time
-import threading
 from pathlib import Path
-
-# Global lock to serialize Z3 calls — Z3 is not thread-safe
-_z3_lock = threading.Lock()
 
 # Try to import z3, but handle missing installation gracefully
 try:
@@ -249,20 +245,37 @@ def z3_schedule_ffi(
     pipe_order_deps_list = _convert_int_tuples(pipe_order_deps, 2)
     owner_exclusion_deps_list = _convert_int_tuples(owner_exclusion_deps, 4)
 
-    # Call the actual scheduler (Z3 is not thread-safe, serialize access)
-    with _z3_lock:
-        start_times, _ = z3_schedule_python(
-            latencies_list,
-            iis_list,
-            resource_flags_list,
-            data_deps_list,
-            resource_deps_list,
-            owner_exclusion_deps=owner_exclusion_deps_list,
-            pipe_order_deps=pipe_order_deps_list,
-        )
+    start_times, _ = z3_schedule_python(
+        latencies_list,
+        iis_list,
+        resource_flags_list,
+        data_deps_list,
+        resource_deps_list,
+        owner_exclusion_deps=owner_exclusion_deps_list,
+        pipe_order_deps=pipe_order_deps_list,
+    )
 
     # Return only start_times, C++ side will sort by start_time
     return start_times
+
+
+def _period_lower_bound(num_stages, iis, data_deps, resource_deps):
+    """Necessary period bounds from resource cliques and self dependencies."""
+    bound = max(iis)
+    edges = {(u, v) for u, v in resource_deps if u < v}
+    order = sorted(range(len(iis)), key=lambda i: (-iis[i], i))
+    for seed in order:
+        clique = [seed]
+        for task in order:
+            if task != seed and all(tuple(sorted((task, other))) in edges for other in clique):
+                clique.append(task)
+        bound = max(bound, sum(iis[task] for task in clique))
+    for u, v, distance, latency in data_deps:
+        if distance < 0:
+            distance = num_stages
+        if u == v and distance > 0:
+            bound = max(bound, -(-latency // distance))
+    return bound
 
 
 def z3_schedule_loop_python(
@@ -411,7 +424,7 @@ def z3_schedule_loop_python(
     # Lower bound: 1 cycle
     # A sequential schedule must cover both dependency latency and the issue
     # intervals of tasks sharing a resource.
-    ii_lower = max(iis)
+    ii_lower = _period_lower_bound(num_stages, iis, data_deps, resource_deps)
     ii_upper = max(sum(latencies), sum(iis)) + 1
     best_ii = ii_upper
     best_model = None
@@ -856,26 +869,24 @@ def z3_schedule_loop_ffi(
     pipe_order_deps_list = _convert_int_tuples(pipe_order_deps, 2)
     owner_exclusion_deps_list = _convert_int_tuples(owner_exclusion_deps, 4)
 
-    # Call the actual scheduler (Z3 is not thread-safe, serialize access)
-    with _z3_lock:
-        start_times, buffer_versions, best_ii = z3_schedule_loop_python(
-            num_stages,
-            latencies_list,
-            iis_list,
-            resource_flags_list,
-            data_deps_list,
-            resource_deps_list,
-            owner_exclusion_deps_list,
-            pipe_order_deps_list,
-            buffer_sizes_list,
-            memory_groups_list,
-            stage_order_deps=stage_order_deps_list,
-            enable_offset=bool(enable_offset),
-            manual_stages=manual_stages_list,
-            manual_schedule=bool(manual_schedule),
-            register_phase_deps=register_phase_deps_list,
-            seed=42,
-        )
+    start_times, buffer_versions, best_ii = z3_schedule_loop_python(
+        num_stages,
+        latencies_list,
+        iis_list,
+        resource_flags_list,
+        data_deps_list,
+        resource_deps_list,
+        owner_exclusion_deps_list,
+        pipe_order_deps_list,
+        buffer_sizes_list,
+        memory_groups_list,
+        stage_order_deps=stage_order_deps_list,
+        enable_offset=bool(enable_offset),
+        manual_stages=manual_stages_list,
+        manual_schedule=bool(manual_schedule),
+        register_phase_deps=register_phase_deps_list,
+        seed=42,
+    )
 
     # Return start_times and buffer_versions as separate arrays for easier FFI handling
     # C++ side expects a tuple of (start_times_array, buffer_versions_array, best_ii)

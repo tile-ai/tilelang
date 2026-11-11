@@ -8,6 +8,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 from tilelang import tvm
+from tilelang.cuda.target import normalize_cutedsl_target
 from tilelang.cuda.intrinsics.layout.mma_layout import mma_load_a_32x32_to_shared_16x64_layout
 from tilelang.cuda.intrinsics.macro.mma_sm120_macro_generator import SM120BlockScaleTile
 from tilelang.cuda.language.intrinsics import TensorCoreIntrinEmitterSM120, get_swizzle_layout
@@ -659,6 +660,17 @@ def test_nvf4_mma_block_scale_codegen(K):
     assert f"void* B_shared = ((void*)((char*)buf_dyn_shmem + {fp4_tile_bytes}));" in src
     assert f"void* SFA_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes}));" in src
     assert f"void* SFB_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes + sf_tile_bytes}));" in src
+
+
+@pytest.mark.parametrize("K", [64, 256])
+def test_nvf4_mma_block_scale_cutedsl_codegen(K):
+    if tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True) is None:
+        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
+    target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_120a"})
+    with target:
+        src = tilelang.lower(_make_nvf4_matmul_codegen_kernel(128, 128, K), target=target).kernel_source
+    assert 'tl.ptx_mma_block_scale("float32", "m16n8k64", "row", "col", "mxf4nvf4", 4, "e2m1", "e2m1", "ue4m3", ' in src
+    assert "tl.ptx_ldmatrix_x4" in src
 
 
 @tilelang.testing.requires_cuda

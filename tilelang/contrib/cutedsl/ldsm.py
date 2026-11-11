@@ -31,6 +31,9 @@ __all__ = [
     "ptx_stmatrix_x1_trans",
     "ptx_stmatrix_x2_trans",
     "ptx_stmatrix_x4_trans",
+    "ptx_stmatrix_m16n8_x1_trans",
+    "ptx_stmatrix_m16n8_x2_trans",
+    "ptx_stmatrix_m16n8_x4_trans",
 ]
 
 from cutlass.cutlass_dsl import dsl_user_op
@@ -39,11 +42,14 @@ from cutlass._mlir import ir  # noqa: F401
 from cutlass.cute.typing import Pointer, Int32  # noqa: F401
 import cutlass.cute as cute
 
+from .utils import as_byte_ptr
+
 
 def _ldmatrix(smem_ptr, local_ptr, num, transpose, loc=None, ip=None):
     """Internal helper for ldmatrix operations"""
     layout = prims.MMALayout.COL if transpose else prims.MMALayout.ROW
     assert num in [1, 2, 4]
+    smem_ptr = as_byte_ptr(smem_ptr)
     ptr = smem_ptr.llvm_ptr if hasattr(smem_ptr, "llvm_ptr") else smem_ptr
     out_i32 = prims.ldmatrix(ptr, num=num, layout=layout, loc=loc, ip=ip)
     out = cute.make_tensor(cute.recast_ptr(local_ptr, dtype=cute.Int32), num)
@@ -54,13 +60,14 @@ def _ldmatrix(smem_ptr, local_ptr, num, transpose, loc=None, ip=None):
             out[i] = cute.Int32(out_i32[i])
 
 
-def _stmatrix(smem_ptr, values, transpose, loc=None, ip=None):
+def _stmatrix(smem_ptr, values, transpose, loc=None, ip=None, shape=None):
     """Internal helper for stmatrix operations"""
     layout = prims.MMALayout.COL if transpose else prims.MMALayout.ROW
+    smem_ptr = as_byte_ptr(smem_ptr)
     ptr = smem_ptr.llvm_ptr if hasattr(smem_ptr, "llvm_ptr") else smem_ptr
     num = len(values)
     assert num in [1, 2, 4]
-    prims.stmatrix(ptr, values, layout, loc=loc, ip=ip)
+    prims.stmatrix(ptr, values, layout, shape=shape, loc=loc, ip=ip)
 
 
 # ============================================================================
@@ -143,6 +150,29 @@ def stmatrix_x2_trans(smem_ptr: Pointer, value0, value1, *, loc=None, ip=None) -
 def stmatrix_x4_trans(smem_ptr: Pointer, value0, value1, value2, value3, *, loc=None, ip=None) -> None:
     """Store 4 matrices (8x8 each) with transpose to shared memory"""
     _stmatrix(smem_ptr, [value0, value1, value2, value3], True, loc, ip)
+
+
+# ============================================================================
+# STMATRIX m16n8 operations (8-bit elements, sm_100+ / sm_120+)
+# ============================================================================
+
+
+@dsl_user_op
+def ptx_stmatrix_m16n8_x1_trans(smem_ptr: Pointer, value0, *, loc=None, ip=None) -> None:
+    """Store 1 transposed 16x8 b8 matrix: stmatrix.sync.aligned.m16n8.x1.trans.shared.b8"""
+    _stmatrix(smem_ptr, [value0], True, loc, ip, shape=prims.StoreShape.M16N8)
+
+
+@dsl_user_op
+def ptx_stmatrix_m16n8_x2_trans(smem_ptr: Pointer, value0, value1, *, loc=None, ip=None) -> None:
+    """Store 2 transposed 16x8 b8 matrices: stmatrix.sync.aligned.m16n8.x2.trans.shared.b8"""
+    _stmatrix(smem_ptr, [value0, value1], True, loc, ip, shape=prims.StoreShape.M16N8)
+
+
+@dsl_user_op
+def ptx_stmatrix_m16n8_x4_trans(smem_ptr: Pointer, value0, value1, value2, value3, *, loc=None, ip=None) -> None:
+    """Store 4 transposed 16x8 b8 matrices: stmatrix.sync.aligned.m16n8.x4.trans.shared.b8"""
+    _stmatrix(smem_ptr, [value0, value1, value2, value3], True, loc, ip, shape=prims.StoreShape.M16N8)
 
 
 ptx_ldmatrix_x1 = ldmatrix_x1

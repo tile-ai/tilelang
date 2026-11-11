@@ -46,5 +46,47 @@ def test_cutedsl_grid_sync_multidimensional_threads(threads):
         torch.testing.assert_close(B, torch.full_like(B, 3))
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(7, 0)
+@pytest.mark.parametrize("launcher", ["cpp", "cutlass"])
+def test_cutedsl_grid_sync_concurrent_launches(launcher, monkeypatch):
+    """Each launch synchronizes only its own grid, also when another launch of
+    the same kernel runs concurrently on another stream (#3386)."""
+    monkeypatch.setenv("TILELANG_CUTEDSL_HOST_LAUNCHER", launcher)
+    if launcher == "cutlass":
+        monkeypatch.setenv("TILELANG_CUTEDSL_REQUIRE_CUTLASS_HOST", "1")
+
+    @T.prim_func
+    def kernel(A: T.Tensor((2,), "int32"), B: T.Tensor((2,), "int32"), delay: T.int64):
+        with T.Kernel(2, threads=32) as bx:
+            tx = T.get_thread_binding()
+            if bx == 1:
+                start = T.call_extern("int64", "cute::arch::clock64")
+                while T.call_extern("int64", "cute::arch::clock64") - start < delay:
+                    T.evaluate(T.call_extern("int64", "cute::arch::clock64"))
+            if tx == 0:
+                A[bx] = bx + 1
+            T.sync_grid()
+            if tx == 0:
+                B[bx] = A[0] + A[1]
+
+    compiled = tilelang.compile(kernel, target="cutedsl")
+    slow, fast = torch.cuda.Stream(), torch.cuda.Stream()
+    bufs = [torch.zeros(2, dtype=torch.int32, device="cuda") for _ in range(4)]
+    for _ in range(4):
+        for buf in bufs:
+            buf.zero_()
+        torch.cuda.synchronize()
+        # While the slow launch's block 0 waits at the barrier for its block 1,
+        # the fast launch's blocks arrive at the same barrier.
+        with torch.cuda.stream(slow):
+            compiled(bufs[0], bufs[1], 20_000_000)
+        with torch.cuda.stream(fast):
+            compiled(bufs[2], bufs[3], 0)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(bufs[1], torch.full_like(bufs[1], 3))
+        torch.testing.assert_close(bufs[3], torch.full_like(bufs[3], 3))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
