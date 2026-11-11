@@ -282,9 +282,21 @@ private:
       }
       return;
     }
-    // Synchronization does not itself establish a compute stream. Its endpoint
-    // is placed separately, after the surrounding kernel's streams are known.
+    // Check only the local endpoint's placement, not the synchronization
+    // protocol. Shared/full pipes do not constrain placement, and
+    // synchronization must not establish an additional compute stream.
     if (IsAscendCoreSync(op)) {
+      uint16_t pipes = GetAscendCallPipeMask(call);
+      CoreMask endpoint = pipes == kAllResourcePipes ? kCoreUnassigned
+                                                     : AscendPipeIssuers(pipes);
+      ICHECK(placement_ == kCoreAll || (endpoint & placement_) == endpoint)
+          << "Synchronization pipe conflicts with explicit "
+          << (placement_ == kCoreCube ? "T.Cube" : "T.Vector")
+          << " placement: " << call
+          << ". Move this synchronization endpoint into the "
+             "T.Cube()/T.Vector(G) "
+             "region that owns its pipe; keep each cross-core endpoint on its "
+             "respective core.";
       StmtExprVisitor::VisitExpr_(op);
       return;
     }

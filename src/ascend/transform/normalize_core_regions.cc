@@ -68,7 +68,7 @@ tvm::transform::Pass LowerAscendCoreRegions() {
           bool grouped = usage.vector_count.has_value();
           int count = grouped ? usage.vector_count.value()->value : 2;
           bool mixed = usage.requires_mix || streams == kCoreAll ||
-                       (grouped && (streams & kCoreVector));
+                       (!pto && grouped && (streams & kCoreVector));
           Stmt body = input;
           if (usage.requires_mix || streams == kCoreAll || has_cube ||
               has_vector) {
