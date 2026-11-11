@@ -3,6 +3,7 @@
 from __future__ import annotations
 from collections import deque
 import os
+import re
 from typing import Any
 from tvm import tirx
 from tvm.tirx import Var
@@ -395,6 +396,7 @@ def launch_kernel(
     threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+    name: str | None = None,
     **annotations: Any,
 ) -> KernelLaunchFrame:
     """Shared implementation behind every dialect's ``T.Kernel``.
@@ -415,6 +417,12 @@ def launch_kernel(
         raise JITNoBuilderError("T.Kernel() can only be used inside @tilelang.jit or @T.prim_func context. No Builder is available.")
 
     attrs: dict = {}
+    if name is not None:
+        if not isinstance(name, str):
+            raise TypeError("Kernel name must be a string")
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+            raise ValueError("Kernel name must be a non-empty ASCII identifier: [A-Za-z_][A-Za-z0-9_]*")
+        attrs["tl.kernel_name"] = name
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
     cluster_dims = _normalize_cluster_dims(cluster_dims)
@@ -460,6 +468,7 @@ def ClusterKernel(
     cluster_dims: int | tuple[int, int, int] | list[int],
     threads: int | list[int] | tuple | None = None,
     prelude: str | None = None,
+    name: str | None = None,
 ):
     """Construct a kernel launch frame with a CUDA thread block cluster
     (SM90+ only).
@@ -482,6 +491,9 @@ def ClusterKernel(
     prelude : str
         The import c code of the kernel,
         will be injected before the generated kernel code.
+    name : str, optional
+        Device kernel name, with the same naming and collision rules as
+        ``tilelang.cuda.language.Kernel``.
 
     Examples
     --------
@@ -490,7 +502,7 @@ def ClusterKernel(
         with T.ClusterKernel(grid_x, grid_y, cluster_dims=2, threads=128) as (bx, by):
             ...
     """
-    return launch_kernel(blocks, threads=threads, prelude=prelude, cluster_dims=cluster_dims)
+    return launch_kernel(blocks, threads=threads, prelude=prelude, cluster_dims=cluster_dims, name=name)
 
 
 # For CUDA source kernels, we need to load the source code from a file or string.

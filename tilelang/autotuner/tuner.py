@@ -157,15 +157,15 @@ class AutoTuner:
         self.jit_compile = None
         self.jit_elaborate = None
 
-    @classmethod
-    def _get_cache_dir(cls) -> Path:
+    @staticmethod
+    def _get_cache_dir(root: str) -> Path:
         from tilelang.cache.kernel_cache import KernelCache
 
-        return Path(KernelCache._get_namespace_root()) / "autotuner"
+        return Path(KernelCache._get_namespace_root(root)) / "autotuner"
 
     @property
-    def cache_dir(self) -> Path:
-        return self._get_cache_dir()
+    def write_cache_dir(self) -> Path:
+        return self._get_cache_dir(env.get_cache_write_dir())
 
     @classmethod
     def from_kernel(cls, kernel: Callable, configs):
@@ -387,11 +387,15 @@ class AutoTuner:
         return hashlib.sha256(key_string.encode()).hexdigest()
 
     def _save_result_to_disk(self, key, result: AutotuneResult):
-        result.save_to_disk(self.cache_dir / key, self.compile_args.verbose)
+        result.save_to_disk(self.write_cache_dir / key, self.compile_args.verbose)
 
-    def _load_result_from_disk(self, key) -> AutotuneResult:
-        result = AutotuneResult.load_from_disk(self.cache_dir / key, self.compile_args)
-        return result
+    def _load_result_from_disk(self, key) -> AutotuneResult | None:
+        for root in env.get_cache_read_dirs():
+            path = self._get_cache_dir(root) / key
+            result = AutotuneResult.load_from_disk(path, self.compile_args)
+            if result is not None:
+                return result
+        return None
 
     # Compile-related helpers
     def _merge_pass_configs_into_compile_args(

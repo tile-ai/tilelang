@@ -294,7 +294,8 @@ private:
     pragma_attrs->clear();
     for (const auto &kv : annotations) {
       const String &key = kv.first;
-      if (tirx::attr::IsPragmaKey(key) || tl::attr::IsCodeBlockKey(key)) {
+      if (tirx::attr::IsPragmaKey(key) || tl::attr::IsCodeBlockKey(key) ||
+          key == tl::attr::kKernelName) {
         pragma_attrs->emplace_back(key, ConvertAttrValue(key, kv.second));
       } else if (key == tl::attr::kLocalVarInit) {
         if (auto local_init_map = kv.second.try_cast<Map<Var, PrimExpr>>()) {

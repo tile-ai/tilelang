@@ -70,7 +70,7 @@ def _make_result(tmp_path, execution_backend: str = "cython"):
     )
 
 
-def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
+def test_autotune_save_preserves_incomplete_cache_dir(cache_dirs, tmp_path):
     result = _make_result(tmp_path)
     path = cache_dirs / "test-namespace" / "autotuner" / "autotune-entry"
     path.mkdir(parents=True)
@@ -78,17 +78,8 @@ def test_autotune_save_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
 
     result.save_to_disk(path)
 
-    for filename in (
-        BEST_CONFIG_PATH,
-        FUNCTION_PATH,
-        LATENCY_PATH,
-        DEVICE_KERNEL_PATH,
-        HOST_KERNEL_PATH,
-        KERNEL_LIB_PATH,
-        PARAMS_PATH,
-    ):
-        assert (path / filename).exists()
-    assert not (path / "stale.txt").exists()
+    assert [p.name for p in path.iterdir()] == ["stale.txt"]
+    assert (path / "stale.txt").read_text() == "partial"
 
 
 def test_autotune_save_logs_write_oserror_instead_of_treating_it_as_race(cache_dirs, tmp_path, monkeypatch):
@@ -132,7 +123,7 @@ def test_autotune_save_does_not_publish_incomplete_dir_when_device_source_is_mis
     assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
-def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path):
+def test_autotune_save_preserves_nvrtc_dir_missing_launcher(cache_dirs, tmp_path):
     result = _make_result(tmp_path, execution_backend="nvrtc")
     path = cache_dirs / "test-namespace" / "autotuner" / "autotune-nvrtc-entry"
     path.mkdir(parents=True)
@@ -147,5 +138,144 @@ def test_autotune_save_rewrites_nvrtc_dir_missing_launcher(cache_dirs, tmp_path)
 
     result.save_to_disk(path)
 
-    assert (path / KERNEL_PY_PATH).exists()
-    assert not (path / "legacy.txt").exists()
+    assert not (path / KERNEL_PY_PATH).exists()
+    assert (path / "legacy.txt").exists()
+
+
+@pytest.mark.parametrize("invalid", ["absent", "missing_metadata", "corrupt_metadata", "missing_binary", "load_failure"])
+def test_autotune_cache_multiple_roots(tmp_path, monkeypatch, invalid):
+    import os
+    from pathlib import Path
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from tilelang.autotuner import AutoTuner
+    from tilelang.autotuner.param import CompileArgs
+
+    roots = [tmp_path / name for name in ("local", "shared", "other")]
+    tuner = AutoTuner(_fake_func, configs=[])
+    tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
+    result = _make_result(tmp_path)
+    paths = []
+    for index, root in enumerate(roots):
+        monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(root))
+        result = replace(result, config={"threads": 128 * (index + 1)})
+        tuner._save_result_to_disk("key", result)
+        paths.append(tuner.write_cache_dir / "key")
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, roots)))
+    fail_load = False
+
+    def from_database(cls, **kwargs):
+        if fail_load and not Path(kwargs["kernel_lib_path"]).is_relative_to(roots[2]):
+            raise RuntimeError("unloadable kernel")
+        return SimpleNamespace(update_tuner_result=lambda **kwargs: None, get_kernel_source=lambda: "// device kernel")
+
+    monkeypatch.setattr(autotune_param.JITKernel, "from_database", classmethod(from_database))
+    assert tuner._load_result_from_disk("key").config == {"threads": 128}
+    for path in paths[:2]:
+        if invalid == "absent":
+            path.rename(path.with_name("unused"))
+        elif invalid == "missing_metadata":
+            (path / BEST_CONFIG_PATH).unlink()
+        elif invalid == "corrupt_metadata":
+            (path / BEST_CONFIG_PATH).write_text("invalid json")
+        elif invalid == "missing_binary":
+            (path / KERNEL_LIB_PATH).unlink()
+        else:
+            fail_load = True
+    # Snapshot secondary roots after injecting failures: lookup must not mutate them.
+    before = {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
+    if invalid == "absent":
+        assert tuner._load_result_from_disk("key").config == {"threads": 384}
+    else:
+        with pytest.raises((OSError, ValueError, RuntimeError)):
+            tuner._load_result_from_disk("key")
+        assert paths[0].exists()
+        import shutil
+
+        shutil.rmtree(paths[0])
+        with pytest.raises((OSError, ValueError, RuntimeError)):
+            tuner._load_result_from_disk("key")
+    assert tuner._load_result_from_disk("missing") is None
+    assert before == {p: p.read_bytes() for root in roots[1:] for p in root.rglob("*") if p.is_file()}
+    tuner._save_result_to_disk("new", result)
+    assert (tuner.write_cache_dir / "new" / BEST_CONFIG_PATH).is_file()
+    assert not (paths[1].parent / "new").exists()
+    assert not (paths[2].parent / "new").exists()
+
+
+@pytest.mark.parametrize("invalid", ["metadata", "params", "load_failure"])
+def test_autotune_cache_requires_whole_entry_removal(cache_dirs, tmp_path, monkeypatch, invalid):
+    from types import SimpleNamespace
+    from tilelang.autotuner import AutoTuner
+    from tilelang.autotuner.param import CompileArgs
+
+    tuner = AutoTuner(_fake_func, configs=[])
+    tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
+    result = _make_result(tmp_path)
+    tuner._save_result_to_disk("key", result)
+    path = tuner.write_cache_dir / "key"
+    fail_load = invalid == "load_failure"
+
+    def from_database(cls, **kwargs):
+        if fail_load:
+            raise RuntimeError("unloadable kernel")
+        return SimpleNamespace(update_tuner_result=lambda **kwargs: None, get_kernel_source=lambda: "// device kernel")
+
+    monkeypatch.setattr(autotune_param.JITKernel, "from_database", classmethod(from_database))
+    if invalid != "load_failure":
+        (path / (BEST_CONFIG_PATH if invalid == "metadata" else PARAMS_PATH)).write_text("invalid json")
+    with pytest.raises((ValueError, RuntimeError)):
+        tuner._load_result_from_disk("key")
+    assert path.is_dir()
+    import shutil
+
+    shutil.rmtree(path)
+    fail_load = False
+    tuner._save_result_to_disk("key", result)
+    assert tuner._load_result_from_disk("key").config == result.config
+    assert path.is_dir()
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_autotune_cache_read_preserves_concurrent_publication(cache_dirs, tmp_path, monkeypatch, invalid):
+    from types import SimpleNamespace
+    from tilelang.autotuner import AutoTuner
+    from tilelang.autotuner.param import CompileArgs
+
+    tuner = AutoTuner(_fake_func, configs=[])
+    tuner.compile_args = CompileArgs(target="cuda", execution_backend="cython")
+    monkeypatch.setattr(
+        autotune_param.JITKernel,
+        "from_database",
+        classmethod(
+            lambda cls, **kwargs: SimpleNamespace(update_tuner_result=lambda **kwargs: None, get_kernel_source=lambda: "// kernel")
+        ),
+    )
+    result = _make_result(tmp_path)
+    path = tuner.write_cache_dir / "key"
+    original_load = AutotuneResult.load_from_disk
+    if invalid:
+        result.save_to_disk(path)
+        (path / BEST_CONFIG_PATH).write_text("invalid json")
+
+    def load_then_publish(cls, path, compile_args):
+        import shutil
+
+        try:
+            loaded = original_load(path, compile_args)
+        except ValueError:
+            # Another process replaces the entry after this reader's load fails.
+            shutil.rmtree(path)
+            result.save_to_disk(path)
+            raise
+        assert loaded is None
+        result.save_to_disk(path)
+        return loaded
+
+    monkeypatch.setattr(AutotuneResult, "load_from_disk", classmethod(load_then_publish))
+    if invalid:
+        with pytest.raises(ValueError):
+            tuner._load_result_from_disk("key")
+    else:
+        assert tuner._load_result_from_disk("key") is None
+    assert original_load(path, tuner.compile_args).config == result.config

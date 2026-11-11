@@ -25,7 +25,7 @@ class BinaryCache:
     and published with a single directory rename, so concurrent writers cannot
     observe partial entries and the first publication wins. Published entries
     are never modified or deleted: on 3FS, unlinking a binary can invalidate
-    another reader's open fd, so corruption is handled as a plain cache miss.
+    another reader's open fd, so corruption is reported as an error.
 
     Subclasses set ``cache_root_dir`` (directory under the version namespace),
     ``cache_format`` (metadata format tag) and ``binary_kind`` (backend name
@@ -53,17 +53,18 @@ class BinaryCache:
         return f"{public}_{local}" if local else public
 
     @classmethod
-    def _get_namespace_root(cls) -> str:
+    def _get_namespace_root(cls, root: str) -> str:
+        """Append the version namespace to a cache root."""
         version = cls._format_version_namespace(__version__)
-        return os.path.join(env.TILELANG_CACHE_DIR, version)
+        return os.path.join(root, version)
 
     @classmethod
-    def _get_cache_root(cls) -> str:
-        return os.path.join(cls._get_namespace_root(), cls.cache_root_dir)
+    def _get_write_cache_root(cls) -> str:
+        return os.path.join(cls._get_namespace_root(env.get_cache_write_dir()), cls.cache_root_dir)
 
     @classmethod
     def _get_staging_root(cls) -> str:
-        return os.path.join(cls._get_namespace_root(), ".staging", cls.cache_root_dir)
+        return os.path.join(cls._get_namespace_root(env.get_cache_write_dir()), ".staging", cls.cache_root_dir)
 
     @staticmethod
     @functools.cache
@@ -118,32 +119,36 @@ class BinaryCache:
         return sha256(key_string.encode()).hexdigest()
 
     @classmethod
-    def get_path(cls, key: str, compile_format: str) -> str:
-        return os.path.join(cls._get_cache_root(), key, f"kernel.{compile_format}")
+    def get_write_path(cls, key: str, compile_format: str) -> str:
+        return os.path.join(cls._get_write_cache_root(), key, f"kernel.{compile_format}")
 
     @classmethod
     def load(cls, key: str, compile_format: str) -> bytes | None:
         if not env.is_cache_enabled():
             return None
-        path = cls.get_path(key, compile_format)
-        try:
-            with open(path, "rb") as f:
-                data = f.read()
-            with open(os.path.join(os.path.dirname(path), "metadata.json"), encoding="utf-8") as f:
-                metadata = json.load(f)
-        except (OSError, ValueError):
-            return None
-        if not isinstance(metadata, dict) or metadata.get("format") != cls.cache_format:
-            return None
+        for root in env.get_cache_read_dirs():
+            path = os.path.join(cls._get_namespace_root(root), cls.cache_root_dir, key, f"kernel.{compile_format}")
+            data = cls._load_path(path)
+            if data is not None:
+                return data
+        return None
 
-        # Empty/short reads and missing metadata are always misses. Never delete
-        # shared cache entries: on 3FS, unlinking a binary can invalidate another
-        # reader's open fd.
+    @classmethod
+    def _load_path(cls, path: str) -> bytes | None:
+        if not os.path.lexists(os.path.dirname(path)):
+            return None
+        with open(path, "rb") as f:
+            data = f.read()
+        with open(os.path.join(os.path.dirname(path), "metadata.json"), encoding="utf-8") as f:
+            metadata = json.load(f)
+        if not isinstance(metadata, dict) or metadata.get("format") != cls.cache_format:
+            raise ValueError(f"Invalid binary cache metadata at {path}")
+
         payload_size = metadata.get("size")
         if type(payload_size) is not int or payload_size <= 0 or len(data) != payload_size:
-            return None
+            raise ValueError(f"Binary cache entry at {path} failed size verification")
         if sha256(data).hexdigest() != metadata.get("sha256"):
-            return None
+            raise ValueError(f"Binary cache entry at {path} failed checksum verification")
         return data
 
     @classmethod
@@ -153,13 +158,12 @@ class BinaryCache:
         if not env.is_cache_enabled():
             return
 
-        cache_root = cls._get_cache_root()
+        cache_root = cls._get_write_cache_root()
         os.makedirs(cache_root, exist_ok=True)
-        path = cls.get_path(key, compile_format)
+        path = cls.get_write_path(key, compile_format)
         cache_path = os.path.dirname(path)
-        # Published directories are immutable, even if a load found corruption.
-        # The caller can use its fresh compilation; repairing shared entries
-        # requires offline cleanup to avoid invalidating concurrent readers.
+        # Published directories are immutable. Invalid entries require offline
+        # cleanup of the whole entry to avoid invalidating concurrent readers.
         if os.path.lexists(cache_path):
             return
 

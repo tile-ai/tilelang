@@ -58,21 +58,25 @@ def _write_complete_kernel_cache_entry(
     key: str,
     device_source: str = "// device kernel",
     host_source: str = "// host kernel",
+    params: list[KernelParam] | None = None,
 ) -> Path:
-    cache_path = Path(cache._get_cache_path(key))
+    if params is None:
+        params = [KernelParam(tvm.DataType("float32"), [4])]
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.device_kernel_path).write_text(device_source)
     (cache_path / cache.host_kernel_path).write_text(host_source)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
-    (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
+    (cache_path / cache.params_path).write_text(dump_kernel_params(params))
     cache._write_manifest(str(cache_path))
     return cache_path
 
 
-def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
+@pytest.mark.parametrize("params", [[], [KernelParam(tvm.DataType("float32"), [4])]], ids=["no-params", "tensor-param"])
+def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch, params):
     cache = KernelCache()
     key = "lazy-source-load"
-    cache_path = _write_complete_kernel_cache_entry(cache, key)
+    cache_path = _write_complete_kernel_cache_entry(cache, key, params=params)
 
     sentinel = object()
     captured = {}
@@ -91,7 +95,7 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     loaded = cache._load_kernel_from_disk(
         key,
         backend_context=backend_context,
-        out_idx=[0],
+        out_idx=None,
         pass_configs=None,
         compile_flags=None,
         func=None,
@@ -101,8 +105,29 @@ def test_kernel_cache_disk_hit_defers_source_loading(cache_dirs, monkeypatch):
     assert captured["host_kernel_source"] == CachedTextSource(path=str(cache_path / cache.host_kernel_path))
     assert captured["device_kernel_source"] == CachedTextSource(path=str(cache_path / cache.device_kernel_path))
     assert captured["kernel_lib_path"] == str(cache_path / cache.kernel_lib_path)
-    assert captured["params"] == [KernelParam(tvm.DataType("float32"), [4])]
+    assert captured["params"] == params
     assert captured["backend_context"] is backend_context
+
+
+def test_kernel_cache_disk_hit_rejects_invalid_parameter_metadata(cache_dirs, monkeypatch):
+    cache = KernelCache()
+    key = "invalid-params"
+    cache_path = _write_complete_kernel_cache_entry(cache, key)
+    params_path = cache_path / cache.params_path
+    params_path.write_text("invalid json")
+    # Keep the manifest consistent so this exercises parsing, not integrity checks.
+    cache._write_manifest(str(cache_path))
+    before = {path.name: path.read_bytes() for path in cache_path.iterdir()}
+
+    def fail_from_database(cls, **kwargs):
+        raise AssertionError("invalid parameter metadata must fail before constructing a kernel")
+
+    monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fail_from_database))
+    with pytest.raises(ValueError, match="Invalid parameter metadata") as error:
+        cache._load_kernel_from_disk(key, create_backend_context("cuda", execution_backend="tvm_ffi"))
+
+    assert error.value.__cause__ is not None
+    assert {path.name: path.read_bytes() for path in cache_path.iterdir()} == before
 
 
 def test_kernel_cache_disk_hit_perf_skips_large_source_file_reads(cache_dirs, monkeypatch):
@@ -199,7 +224,7 @@ def test_lazy_jit_closure_specialization_re_elaborates_before_kernel_cache(cache
 def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monkeypatch):
     cache = KernelCache()
     key = "missing-source-entry"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.kernel_lib_path).write_bytes(b"fake-so")
     (cache_path / cache.params_path).write_text(dump_kernel_params([KernelParam(tvm.DataType("float32"), [4])]))
@@ -209,16 +234,15 @@ def test_kernel_cache_disk_hit_rejects_entries_missing_sources(cache_dirs, monke
 
     monkeypatch.setattr(kernel_cache_mod.JITKernel, "from_database", classmethod(fail_from_database))
 
-    loaded = cache._load_kernel_from_disk(
-        key,
-        backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
-        out_idx=[0],
-        pass_configs=None,
-        compile_flags=None,
-        func=None,
-    )
-
-    assert loaded is None
+    with pytest.raises(ValueError, match="Incomplete kernel cache entry"):
+        cache._load_kernel_from_disk(
+            key,
+            backend_context=create_backend_context("cuda", execution_backend="tvm_ffi"),
+            out_idx=[0],
+            pass_configs=None,
+            compile_flags=None,
+            func=None,
+        )
 
 
 def test_nvrtc_adapter_host_source_lazy_loads(tmp_path):
@@ -265,27 +289,24 @@ def test_tvm_ffi_source_fallback_handles_missing_runtime_module():
     assert adapter.get_kernel_source(kernel_only=False) == ""
 
 
-def test_kernel_cache_rewrites_incomplete_cache_dir(cache_dirs, tmp_path):
+def test_kernel_cache_preserves_incomplete_cache_dir(cache_dirs, tmp_path):
     cache = KernelCache()
     key = "atomic-repair"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / "stale.txt").write_text("partial")
 
     cache._save_kernel_to_disk(key, _make_fake_kernel(tmp_path))
 
-    assert (cache_path / cache.device_kernel_path).exists()
-    assert (cache_path / cache.host_kernel_path).exists()
-    assert (cache_path / cache.kernel_lib_path).exists()
-    assert (cache_path / cache.params_path).exists()
-    assert not (cache_path / "stale.txt").exists()
+    assert [p.name for p in cache_path.iterdir()] == ["stale.txt"]
+    assert (cache_path / "stale.txt").read_text() == "partial"
 
 
 def test_kernel_cache_logs_write_oserror_instead_of_treating_it_as_race(cache_dirs, tmp_path, monkeypatch):
     cache = KernelCache()
     key = "atomic-write-error"
     logged = []
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     staging_root = Path(cache._get_staging_root())
 
     def raise_write_error(*args, **kwargs):
@@ -310,7 +331,7 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
     kernel = _make_fake_kernel(tmp_path)
     kernel.kernel_source = None
     logged = []
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     staging_root = Path(cache._get_staging_root())
 
     def record_exception(message, *args, **kwargs):
@@ -325,10 +346,10 @@ def test_kernel_cache_does_not_publish_incomplete_dir_when_device_source_is_miss
     assert not staging_root.exists() or not any(staging_root.iterdir())
 
 
-def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
+def test_nvrtc_kernel_cache_preserves_dir_missing_launcher(cache_dirs, tmp_path):
     cache = NVRTCKernelCache()
     key = "nvrtc-atomic-repair"
-    cache_path = Path(cache._get_cache_path(key))
+    cache_path = Path(cache._get_write_cache_path(key))
     cache_path.mkdir(parents=True)
     (cache_path / cache.device_kernel_path).write_text("// device kernel")
     (cache_path / cache.host_kernel_path).write_text("// host kernel")
@@ -338,8 +359,8 @@ def test_nvrtc_kernel_cache_rewrites_dir_missing_launcher(cache_dirs, tmp_path):
 
     cache._save_kernel_to_disk(key, _make_fake_nvrtc_kernel(tmp_path))
 
-    assert (cache_path / cache.kernel_py_path).exists()
-    assert not (cache_path / "legacy.txt").exists()
+    assert not (cache_path / cache.kernel_py_path).exists()
+    assert (cache_path / "legacy.txt").exists()
 
 
 def test_safe_write_executable_uses_explicit_export_kwargs(cache_dirs, tmp_path):
