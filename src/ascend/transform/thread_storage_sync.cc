@@ -1591,6 +1591,14 @@ private:
     if (lhs.buffer_indices.size() > 1 || rhs.buffer_indices.size() > 1) {
       return false;
     }
+    // The touched intervals are element offsets into each side's own view of
+    // the buffer (the `tvm_access_ptr` ptype), so they are only comparable when
+    // both views use equally wide elements.  An `int4` and a `uint8` view of
+    // the same alias can start at the same byte while their element offsets
+    // differ, which must stay conservative.
+    if (GetElemStorageBits(lhs.dtype) != GetElemStorageBits(rhs.dtype)) {
+      return false;
+    }
     ConstrSet prev_cset{lhs.cset};
     ConstrSet curr_cset{rhs.cset};
     arith::Analyzer analyzer;

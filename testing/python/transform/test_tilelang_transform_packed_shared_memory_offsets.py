@@ -20,6 +20,7 @@ import tilelang as tl
 import tilelang.testing
 from tilelang.testing.ir import collect_calls, collect_nodes
 from tvm import tirx
+from tvm.script import tirx as T
 
 # Arena alignment the pass applies to every merged allocation.
 ALIGN = 16
@@ -157,6 +158,90 @@ def test_dtype_that_neither_packs_nor_fills_a_byte(dtype_name):
     mod = _merge(_two_live_buffers(dtype_name, 16, target=WEBGPU))
 
     assert _store_index(mod, "B_shared") == ALIGN
+
+
+@pytest.mark.parametrize("dtype_name", ["float6_e3m2fnx4", "float6_e2m3fnx4"])
+def test_vector_six_bit_dtype_reserves_whole_bytes(dtype_name):
+    """Vectors that are sub-byte but not packed keep one byte per lane."""
+    # 16 elements x 4 lanes x 1 byte = 64 bytes, so the second buffer starts at
+    # byte 64 and element 16 -- not element 21, which is what dividing by the
+    # tight 24-bit element size would give.
+    mod = _merge(_two_live_buffers(dtype_name, 16), disable_reuse=True)
+    assert _alias_byte_offsets(mod)["B_shared"] == 64
+
+    mod = _merge(_two_live_buffers(dtype_name, 16, target=WEBGPU))
+    assert _store_index(mod, "B_shared") == 16
+    assert _access_ptr_offset(mod) == 16
+
+
+def _mixed_width_alias_func():
+    """Two live shared buffers, the second read through two pointer widths."""
+
+    @T.prim_func(private=True)
+    def func():
+        A_shared = T.alloc_buffer((16,), "int4", scope="shared.dyn")
+        B_shared = T.alloc_buffer((16,), "uint8", scope="shared.dyn")
+        T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 32)
+        T.launch_thread("threadIdx.y", 1)
+        T.launch_thread("threadIdx.z", 1)
+        # A_shared is laid out first, so B_shared starts at byte 16.
+        T.evaluate(T.call_extern("void", "consume", T.address_of(A_shared[1])))
+        T.evaluate(
+            T.call_extern(
+                "void",
+                "writer",
+                T.tvm_access_ptr(T.type_annotation("int4"), B_shared.data, 0, 1, 2),
+            )
+        )
+        T.evaluate(
+            T.call_extern(
+                "void",
+                "reader",
+                T.tvm_access_ptr(T.type_annotation("uint8"), B_shared.data, 0, 1, 1),
+                tx,
+            )
+        )
+
+    return func
+
+
+_CALL_EXTERN = tirx.op.Op.get("tirx.call_extern")
+_TVM_STORAGE_SYNC = tirx.op.Op.get("tirx.tvm_storage_sync")
+
+
+def _label(stmt):
+    if isinstance(stmt, tirx.Evaluate) and isinstance(stmt.value, tirx.Call):
+        call = stmt.value
+        if call.op.same_as(_TVM_STORAGE_SYNC):
+            return "sync"
+        if call.op.same_as(_CALL_EXTERN):
+            return str(call.args[0].value)
+    return type(stmt).__name__
+
+
+def _labels_around_writer(mod):
+    for seq in collect_nodes(mod, tirx.SeqStmt):
+        labels = [_label(child) for child in seq.seq]
+        if "writer" in labels and "reader" in labels:
+            return labels
+    raise AssertionError("expected the writer and reader in one SeqStmt")
+
+
+def test_mixed_width_alias_keeps_barrier():
+    """An `int4` and a `uint8` view of the same alias must not look disjoint.
+
+    Both pointer accesses start at byte 16 of the arena, so another thread can
+    read the half-byte this thread wrote and a barrier is required. The two
+    views report element offsets 32 and 16; comparing those numbers directly
+    proves a disjointness that does not exist.
+    """
+    mod = tvm.IRModule({"main": _mixed_width_alias_func()})
+    mod = tl.transform.MergeSharedMemoryAllocations(disable_reuse=True)(mod)
+    assert _alias_byte_offsets(mod) == {"A_shared": 0, "B_shared": ALIGN}
+
+    mod = tl.transform.ThreadSync(["shared", "shared.dyn"])(mod)
+    assert _labels_around_writer(mod) == ["consume", "writer", "sync", "reader"]
 
 
 if __name__ == "__main__":
