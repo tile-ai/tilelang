@@ -617,7 +617,14 @@ private:
     // is a multiple of the VReg byte width).
     int64_t total = 0;
     std::vector<int64_t> extents;
-    ICHECK(CanLowerFillRegion(buf, ranges, vreg_size_, &total, &extents))
+    bool can_lower =
+        CanLowerFillRegion(buf, ranges, vreg_size_, &total, &extents);
+    if (fill_only_ && !can_lower) {
+      // Keep the legacy PTO path for tails and non-contiguous regions.
+      frag_counter_ = saved_frag_counter;
+      return Evaluate(GetRef<Call>(call));
+    }
+    ICHECK(can_lower)
         << "T.fill inside SimdVF requires a contiguous region whose element "
            "count is divisible by VReg size ("
         << vreg_size_ << "), got region " << buf_region << " of buffer " << buf;

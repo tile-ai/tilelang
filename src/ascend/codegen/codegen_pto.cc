@@ -6749,8 +6749,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
           RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))),
           elem, "tl.simd.vdup scalar");
     } else {
-      scalar =
-          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0])));
+      scalar = RemoveOutermostParentheses(PrintExpr_(op->args[0]));
     }
     os << "pto.vdup(" << scalar << ", " << PrintExpr_(op->args[1]) << ")";
     return;
