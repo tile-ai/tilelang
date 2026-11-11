@@ -61,12 +61,16 @@ def _12_lane_constructor_module(dtype):
 
 
 @tilelang.testing.requires_cuda(support_required="compile-only")
-@pytest.mark.parametrize("dtype, packer", [("int16", "make_longlong3"), ("uint16", "make_ulonglong3")])
-def test_12_lane_integer_vector_constructor_compiles(dtype, packer):
+@pytest.mark.parametrize(
+    "dtype, constructor, packer",
+    [("int16", "make_longlong3", "tl::pack_int16x4"), ("uint16", "make_ulonglong3", "tl::pack_uint16x4")],
+)
+def test_12_lane_integer_vector_constructor_compiles(dtype, constructor, packer):
     module = _12_lane_constructor_module(dtype)
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
     build_source = tvm.get_global_func("target.build.tilelang_cuda_without_compile")
     source = build_source(module, target).inspect_source()
+    assert constructor in source
     assert packer in source
     # nvcc rejects the unpacked form with "too many arguments in function call".
     tvm.get_global_func("target.build.tilelang_cuda")(module, target)

@@ -809,71 +809,26 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
 }
 
 namespace tl {
-// NVRTC has no <type_traits>, so keep the exact-type test local.
-template <typename A, typename B> struct same_type {
-  static constexpr bool value = false;
-};
-template <typename A> struct same_type<A, A> {
-  static constexpr bool value = true;
-};
+// Pack four 16-bit integer lanes into one 64-bit field, lane 0 in the low
+// bits. Codegen builds (u)int16x12/x16 vectors from these, the same way it
+// uses pack_float16x4/pack_bfloat16x4 for fp16/bf16 x12/x16.
+TL_DEVICE long long pack_int16x4(short x, short y, short z, short w) {
+  unsigned long long v0 = static_cast<unsigned short>(x);
+  unsigned long long v1 = static_cast<unsigned short>(y);
+  unsigned long long v2 = static_cast<unsigned short>(z);
+  unsigned long long v3 = static_cast<unsigned short>(w);
+  return static_cast<long long>(v0 | (v1 << 16) | (v2 << 32) | (v3 << 48));
+}
 
-// True when every lane argument is the expected integer element type or its
-// promoted `int`. Codegen passes one argument per lane: a Broadcast prints the
-// element itself, while a Ramp prints `(short)base + (short)stride * i`, which
-// integral promotion turns into `int`. Anything else -- notably half_t and
-// bfloat16_t, which convert implicitly to float and then to short -- is
-// rejected below instead of being silently truncated.
-template <typename E, typename... Ts> struct integer_lanes {
-  static constexpr bool value =
-      ((same_type<Ts, E>::value || same_type<Ts, int>::value) && ...);
-};
+TL_DEVICE unsigned long long pack_uint16x4(unsigned short x, unsigned short y,
+                                           unsigned short z, unsigned short w) {
+  unsigned long long v0 = x;
+  unsigned long long v1 = y;
+  unsigned long long v2 = z;
+  unsigned long long v3 = w;
+  return v0 | (v1 << 16) | (v2 << 32) | (v3 << 48);
+}
 } // namespace tl
-
-// Pack twelve short values.
-template <typename T0, typename T1, typename T2, typename T3, typename T4,
-          typename T5, typename T6, typename T7, typename T8, typename T9,
-          typename T10, typename T11>
-TL_DEVICE longlong3 make_longlong3(T0 x0, T1 x1, T2 x2, T3 x3, T4 y0, T5 y1,
-                                   T6 y2, T7 y3, T8 z0, T9 z1, T10 z2, T11 z3) {
-  static_assert(tl::integer_lanes<short, T0, T1, T2, T3, T4, T5, T6, T7, T8, T9,
-                                  T10, T11>::value,
-                "make_longlong3 requires int16 lanes; float16/bfloat16 lanes "
-                "must be packed before calling instead of being truncated to "
-                "short");
-  longlong3 result;
-  *((short2 *)&result.x) = make_short2(x0, x1);
-  *(((short2 *)&result.x) + 1) = make_short2(x2, x3);
-  *((short2 *)&result.y) = make_short2(y0, y1);
-  *(((short2 *)&result.y) + 1) = make_short2(y2, y3);
-  *((short2 *)&result.z) = make_short2(z0, z1);
-  *(((short2 *)&result.z) + 1) = make_short2(z2, z3);
-  return result;
-}
-
-// Pack sixteen short values.
-template <typename T0, typename T1, typename T2, typename T3, typename T4,
-          typename T5, typename T6, typename T7, typename T8, typename T9,
-          typename T10, typename T11, typename T12, typename T13, typename T14,
-          typename T15>
-TL_DEVICE longlong4 make_longlong4(T0 x0, T1 x1, T2 x2, T3 x3, T4 y0, T5 y1,
-                                   T6 y2, T7 y3, T8 z0, T9 z1, T10 z2, T11 z3,
-                                   T12 w0, T13 w1, T14 w2, T15 w3) {
-  static_assert(tl::integer_lanes<short, T0, T1, T2, T3, T4, T5, T6, T7, T8, T9,
-                                  T10, T11, T12, T13, T14, T15>::value,
-                "make_longlong4 requires int16 lanes; float16/bfloat16 lanes "
-                "must be packed before calling instead of being truncated to "
-                "short");
-  longlong4 result;
-  *((short2 *)&result.x) = make_short2(x0, x1);
-  *(((short2 *)&result.x) + 1) = make_short2(x2, x3);
-  *((short2 *)&result.y) = make_short2(y0, y1);
-  *(((short2 *)&result.y) + 1) = make_short2(y2, y3);
-  *((short2 *)&result.z) = make_short2(z0, z1);
-  *(((short2 *)&result.z) + 1) = make_short2(z2, z3);
-  *((short2 *)&result.w) = make_short2(w0, w1);
-  *(((short2 *)&result.w) + 1) = make_short2(w2, w3);
-  return result;
-}
 
 // Pack thirty-two char values.
 TL_DEVICE longlong4
@@ -908,54 +863,6 @@ TL_DEVICE ulonglong4 make_ulonglong4(
   *((uint2 *)&result.y) = make_uint2(y0, y1, y2, y3, y4, y5, y6, y7);
   *((uint2 *)&result.z) = make_uint2(z0, z1, z2, z3, z4, z5, z6, z7);
   *((uint2 *)&result.w) = make_uint2(w0, w1, w2, w3, w4, w5, w6, w7);
-  return result;
-}
-
-// Pack twelve unsigned short values.
-template <typename T0, typename T1, typename T2, typename T3, typename T4,
-          typename T5, typename T6, typename T7, typename T8, typename T9,
-          typename T10, typename T11>
-TL_DEVICE ulonglong3 make_ulonglong3(T0 x0, T1 x1, T2 x2, T3 x3, T4 y0, T5 y1,
-                                     T6 y2, T7 y3, T8 z0, T9 z1, T10 z2,
-                                     T11 z3) {
-  static_assert(tl::integer_lanes<unsigned short, T0, T1, T2, T3, T4, T5, T6,
-                                  T7, T8, T9, T10, T11>::value,
-                "make_ulonglong3 requires uint16 lanes; float16/bfloat16 "
-                "lanes must be packed before calling instead of being "
-                "truncated to unsigned short");
-  ulonglong3 result;
-  *((ushort2 *)&result.x) = make_ushort2(x0, x1);
-  *(((ushort2 *)&result.x) + 1) = make_ushort2(x2, x3);
-  *((ushort2 *)&result.y) = make_ushort2(y0, y1);
-  *(((ushort2 *)&result.y) + 1) = make_ushort2(y2, y3);
-  *((ushort2 *)&result.z) = make_ushort2(z0, z1);
-  *(((ushort2 *)&result.z) + 1) = make_ushort2(z2, z3);
-  return result;
-}
-
-// Pack sixteen unsigned short values.
-template <typename T0, typename T1, typename T2, typename T3, typename T4,
-          typename T5, typename T6, typename T7, typename T8, typename T9,
-          typename T10, typename T11, typename T12, typename T13, typename T14,
-          typename T15>
-TL_DEVICE ulonglong4 make_ulonglong4(T0 x0, T1 x1, T2 x2, T3 x3, T4 y0, T5 y1,
-                                     T6 y2, T7 y3, T8 z0, T9 z1, T10 z2, T11 z3,
-                                     T12 w0, T13 w1, T14 w2, T15 w3) {
-  static_assert(
-      tl::integer_lanes<unsigned short, T0, T1, T2, T3, T4, T5, T6, T7, T8, T9,
-                        T10, T11, T12, T13, T14, T15>::value,
-      "make_ulonglong4 requires uint16 lanes; float16/bfloat16 "
-      "lanes must be packed before calling instead of being "
-      "truncated to unsigned short");
-  ulonglong4 result;
-  *((ushort2 *)&result.x) = make_ushort2(x0, x1);
-  *(((ushort2 *)&result.x) + 1) = make_ushort2(x2, x3);
-  *((ushort2 *)&result.y) = make_ushort2(y0, y1);
-  *(((ushort2 *)&result.y) + 1) = make_ushort2(y2, y3);
-  *((ushort2 *)&result.z) = make_ushort2(z0, z1);
-  *(((ushort2 *)&result.z) + 1) = make_ushort2(z2, z3);
-  *((ushort2 *)&result.w) = make_ushort2(w0, w1);
-  *(((ushort2 *)&result.w) + 1) = make_ushort2(w2, w3);
   return result;
 }
 
