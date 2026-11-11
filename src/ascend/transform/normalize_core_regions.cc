@@ -113,23 +113,6 @@ tvm::transform::Pass LowerAscendCoreRegions() {
             body = SeqStmt::Flatten(
                 body, SBlock({}, {}, {}, "VECTOR", Evaluate(0), std::nullopt,
                              {}, {}, {{"vector_count", Integer(count)}}));
-          if (pto && mixed) {
-            // Deferred PTO multi-section limitation; independent of core
-            // demand.
-            int cube_sections = 0, vector_sections = 0;
-            PostOrderVisit(body, [&](const ffi::ObjectRef &node) {
-              if (const auto *block = node.as<SBlockNode>()) {
-                cube_sections += block->name_hint == "CUBE";
-                vector_sections += block->name_hint == "VECTOR";
-              }
-            });
-            ICHECK(cube_sections <= 1 && vector_sections <= 1)
-                << "PTO supports at most one physical section per core kind; "
-                   "combine same-core work into one T.Cube() and one "
-                   "T.Vector(G) "
-                   "region while preserving dependencies, or set "
-                   "tl.enable_auto_schedule=True";
-          }
           auto *writer = root.CopyOnWrite();
           writer->body = body;
           if (usage.vector_count.has_value())
