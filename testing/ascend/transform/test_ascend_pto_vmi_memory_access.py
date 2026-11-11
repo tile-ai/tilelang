@@ -1140,6 +1140,24 @@ def test_passes_through_non_target_and_non_vmi():
     assert after["main"].body.same_as(mod["main"].body)
 
 
+def test_shared_scalar_definitions_with_fixed_vmi_addresses():
+    work = _buffer((128,))
+    i = tirx.Var("i", "int64")
+    scalars = [tirx.Var(f"a{level}", "int64") for level in range(65)]
+    seq = [tirx.Bind(scalars[0], i), tirx.Bind(scalars[1], i + _int(1, "int64"))]
+    for level in range(2, len(scalars)):
+        seq.append(tirx.Bind(scalars[level], scalars[level - 1] + scalars[level - 2]))
+    value = _vec("value")
+    seq.extend([tirx.Bind(value, _vload(_load(work, [_int(0)]))), _evaluate(_vstore(value, _load(work, [_int(64)])))])
+    body = tirx.For(i, _int(0, "int64"), _int(2, "int64"), tirx.ForKind.SERIAL, tirx.SeqStmt(seq))
+
+    result = _run(_sblock(body, work))
+    load = _vmi_calls(result)[0]
+    store = _vmi_calls(result, "tl.vmi.vstore")[0]
+    _assert_plan(load, address_index=0, b=0, e=64, d=0, rw=1)
+    _assert_plan(store, address_index=1, b=64, e=64, d=0, rw=2)
+
+
 def test_non_vmi_unsigned_cast_is_not_analyzed():
     i = tirx.Var("i", "int32")
     signed = tirx.Var("signed", "int32")

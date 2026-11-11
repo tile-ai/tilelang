@@ -1765,24 +1765,31 @@ private:
   // after other facts have already been installed. Check before any update,
   // including casts hidden behind lexical definitions.
   bool CanAnalyze(const PrimExpr &expr) {
-    std::unordered_set<const VarNode *> active;
+    // Reuse checked definitions within this lexical/analyzer context only.
+    // Shared scalar DAGs must not be recursively expanded on every reference.
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> active, checked;
     std::function<bool(const PrimExpr &)> check = [&](const PrimExpr &value) {
       bool safe = true;
       PostOrderVisit(value, [&](const ObjectRef &node) {
         if (!safe)
           return;
         if (const auto *var = node.as<VarNode>()) {
+          Var var_ref = GetRef<Var>(var);
+          if (checked.count(var_ref))
+            return;
           for (auto it = bindings_.rbegin(); it != bindings_.rend(); ++it) {
             if (it->first.get() == var) {
-              if (!active.insert(var).second) {
+              if (!active.insert(var_ref).second) {
                 safe = false;
                 return;
               }
               safe = check(it->second);
-              active.erase(var);
+              active.erase(var_ref);
               break;
             }
           }
+          if (safe)
+            checked.insert(var_ref);
         }
         const auto *cast = node.as<CastNode>();
         if (!safe || !cast || !cast->dtype.is_scalar())
