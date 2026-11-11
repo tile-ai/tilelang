@@ -4,6 +4,9 @@ import pytest
 
 import tilelang
 import tilelang.ascend.language as T
+from tilelang import tvm
+
+tirx = tvm.tirx
 
 
 def _kernel_with_blocks(blocks):
@@ -34,3 +37,8 @@ def test_kernel_rejects_non_positive_blocks(blocks):
 def test_pipelined_rejects_negative_num_stages():
     with pytest.raises(ValueError, match="num_stages must be >= 0"):
         tilelang.compile(_kernel_with_stages(-2), target="ascend")
+
+
+def test_kernel_rejects_negative_constant_prim_expr():
+    with pytest.raises(ValueError, match="block counts must be positive"):
+        tilelang.compile(_kernel_with_blocks(tirx.IntImm("int32", -1)), target="ascend")
