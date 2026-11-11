@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+from tilelang.metal.language import cooperative_tensor_store
 
 import tilelang
 import tilelang.language as T
@@ -325,7 +326,7 @@ def test_1d_partial_fill_diagnostic(begin, end, threads, active_threads, reason)
 
 
 @tilelang.testing.requires_metal
-@pytest.mark.parametrize("shape", [(1024,), (32, 32), (2, 2, 256), (2, 1, 2, 256)])
+@pytest.mark.parametrize("shape", [(1024,), (32, 32), (4, 256), (2, 2, 256), (2, 1, 2, 256)])
 @pytest.mark.parametrize("whole", [False, True])
 def test_cooperative_tensor_prefix_fill(shape, whole):
     @T.prim_func
@@ -337,7 +338,7 @@ def test_cooperative_tensor_prefix_fill(shape, whole):
             elif len(shape) == 1:
                 T.fill(buf[0:512], T.float32(3))
             elif len(shape) == 2:
-                T.fill(buf[0:16, :], T.float32(3))
+                T.fill(buf[0 : 512 // shape[1], :], T.float32(3))
             elif len(shape) == 3:
                 T.fill(buf[0:1, :, :], T.float32(3))
             else:
@@ -437,17 +438,189 @@ def test_partial_region_buffer_bound_branch(kind, operation):
             _lower(kernel)
 
 
-@tilelang.testing.requires_metal
-@pytest.mark.parametrize("shape,col_begin", [((1024,), 0), ((32, 64), 32), ((32, 64), 0)])
-def test_cooperative_tensor_rejects_offset_partial_fill(shape, col_begin):
+def _make_cooperative_region_kernel(shape, begin, end, dtype=T.float32, threads=32, initialize=True):
     @T.prim_func
     def kernel():
-        with T.Kernel(1, threads=32):
-            buf = T.alloc_local(shape, T.float32, scope="metal.cooperative_tensor")
+        with T.Kernel(1, threads=threads):
+            buf = T.alloc_local(shape, dtype, scope="metal.cooperative_tensor")
+            if initialize:
+                T.fill(buf, T.cast(-7, dtype))
             if len(shape) == 1:
-                T.fill(buf[512:1024], T.float32(3))
+                T.fill(buf[begin[0] : end[0]], T.cast(3, dtype))
             else:
-                T.fill(buf[0:16, col_begin : col_begin + 32], T.float32(3))
+                T.fill(buf[begin[0] : end[0], begin[1] : end[1]], T.cast(3, dtype))
 
-    with pytest.raises(ValueError, match="Metal partial fill:.*cooperative_tensor"):
+    return kernel
+
+
+def _interpret_cooperative_fills(artifact, slots):
+    """Execute lowered fill predicates for each lane, leaving stores untouched."""
+    tir = tvm.tirx
+    state = [[None] * slots for _ in range(32)]
+    analyzer = tvm.arith.Analyzer()
+
+    def evaluate(expr, env):
+        result = analyzer.simplify(tir.stmt_functor.substitute(expr, env))
+        assert isinstance(result, (tir.IntImm, tir.FloatImm)), result
+        return result.value
+
+    def walk(stmt, env, lane):
+        if isinstance(stmt, tir.SeqStmt):
+            for child in stmt.seq:
+                walk(child, env, lane)
+        elif isinstance(stmt, tir.AttrStmt):
+            if stmt.attr_key == "thread_extent":
+                env = {**env, stmt.node.var: lane if stmt.node.thread_tag == "threadIdx.x" else 0}
+            walk(stmt.body, env, lane)
+        elif isinstance(stmt, tir.IfThenElse):
+            branch = stmt.then_case if evaluate(stmt.condition, env) else stmt.else_case
+            if branch is not None:
+                walk(branch, env, lane)
+        elif isinstance(stmt, tir.For):
+            start = evaluate(stmt.min, env)
+            for i in range(start, start + evaluate(stmt.extent, env)):
+                walk(stmt.body, {**env, stmt.loop_var: i}, lane)
+        elif isinstance(stmt, tir.SBlockRealize):
+            walk(stmt.block, env, lane)
+        elif isinstance(stmt, tir.SBlock):
+            walk(stmt.body, env, lane)
+        elif isinstance(stmt, tir.Evaluate) and isinstance(stmt.value, tir.Call):
+            call = stmt.value
+            name = call.op.name
+            if name == "tl.cooperative_tensor_fill":
+                tile = evaluate(call.args[1], env)
+                for element in range(16):
+                    state[lane][tile * 16 + element] = evaluate(call.args[2], env)
+            elif name == "tl.cooperative_tensor_set_element":
+                tile = evaluate(call.args[1], env)
+                element = evaluate(call.args[2], env)
+                state[lane][tile * 16 + element] = evaluate(call.args[3], env)
+        elif isinstance(stmt, tir.Bind):
+            env[stmt.var] = evaluate(stmt.value, env)
+        elif hasattr(stmt, "body"):
+            walk(stmt.body, env, lane)
+
+    for func in artifact.device_mod.functions.values():
+        for lane in range(32):
+            walk(func.body, {}, lane)
+    return state
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize(
+    "shape,begin,end",
+    [
+        ((1024,), (512,), (1024,)),
+        ((1024,), (7,), (519,)),
+        ((32, 64), (0, 32), (16, 64)),
+        ((32, 64), (0, 0), (16, 32)),
+        ((32, 64), (0, 0), (8, 64)),
+        ((32, 64), (7, 13), (25, 49)),
+        ((32, 64), (31, 63), (32, 64)),
+    ],
+)
+def test_cooperative_tensor_arbitrary_region(shape, begin, end, dtype):
+    artifact = _lower(_make_cooperative_region_kernel(shape, begin, end, dtype))
+    rows, cols = (shape[0] // 32, 32) if len(shape) == 1 else shape
+    state = _interpret_cooperative_fills(artifact, rows * cols // 32)
+    # Inverse of the existing cooperative-tensor store mapping: inspect every
+    # logical coordinate, including values outside the selected rectangle.
+    for row in range(rows):
+        for col in range(cols):
+            lane = (col % 16 // 4 % 2) + (row % 4) * 2 + (col % 16 // 8) * 8 + (row % 8 // 4) * 16
+            slot = (row // 16) * (cols // 16) * 8 + (col // 16) * 8 + (row % 16 // 8) * 4 + col % 4
+            selected = begin[0] <= row * cols + col < end[0] if len(shape) == 1 else begin[0] <= row < end[0] and begin[1] <= col < end[1]
+            assert state[lane][slot] == (3 if selected else -7), (row, col, lane, slot)
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "shape,begin,end,threads,reason",
+    [
+        ((16, 48), (0, 0), (1, 1), 32, "16x32-aligned buffer shape"),
+        ((32, 64), (31, 0), (33, 1), 32, "exceeds"),
+        ((1024,), (1024,), (1025,), 32, "exceeds"),
+        ((1024,), (7,), (519,), 64, "exactly one simdgroup"),
+    ],
+)
+def test_cooperative_tensor_partial_region_diagnostic(shape, begin, end, threads, reason):
+    with pytest.raises(ValueError, match=reason):
+        _lower(_make_cooperative_region_kernel(shape, begin, end, threads=threads, initialize=False))
+
+
+@tilelang.testing.requires_metal
+def test_cooperative_tensor_partial_fill_rejects_bound_branch():
+    @T.prim_func
+    def kernel(flags: T.Tensor((32,), T.int32)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((1024,), T.float32, scope="metal.cooperative_tensor")
+            T.clear(buf)
+            flag = flags[T.get_thread_binding()]
+            if flag != 0:
+                T.fill(buf[7:519], T.float32(3))
+
+    with pytest.raises(ValueError, match="thread-uniform control flow"):
         _lower(kernel)
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("begin,end", [((0, 32), (16, 64)), ((0, 0), (8, 64)), ((7, 13), (25, 49)), ((31, 63), (32, 64))])
+def test_cooperative_tensor_partial_fill_preserves_outside(dtype, begin, end):
+    @T.prim_func
+    def kernel(output: T.Tensor((32, 64), dtype)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((32, 64), dtype, scope="metal.cooperative_tensor")
+            T.fill(buf, T.cast(-7, dtype))
+            T.fill(buf[begin[0] : end[0], begin[1] : end[1]], T.cast(3, dtype))
+            T.copy(buf, output)
+
+    compiled = tilelang.compile(kernel, target="metal", target_host="c", execution_backend="tvm_ffi")
+    output = torch.empty((32, 64), dtype=dtype.as_torch(), device="mps")
+    compiled(output)
+    torch.mps.synchronize()
+    expected = torch.full((32, 64), -7, dtype=dtype.as_torch())
+    expected[begin[0] : end[0], begin[1] : end[1]] = 3
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+def test_cooperative_tensor_1d_unaligned_fill_preserves_outside(dtype):
+    @T.prim_func
+    def kernel(output: T.Tensor((1024,), dtype)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((1024,), dtype, scope="metal.cooperative_tensor")
+            T.fill(buf, T.cast(-7, dtype))
+            T.fill(buf[7:519], T.cast(3, dtype))
+            # The 1D storage is a sequence of 16x32 destination tiles.
+            for i in T.unroll(2):
+                cooperative_tensor_store(buf.data, i, T.address_of(output[i * 512]), 32, 16, 32, False, 16, 32, 16, 2)
+
+    compiled = tilelang.compile(kernel, target="metal", target_host="c", execution_backend="tvm_ffi")
+    output = torch.empty((1024,), dtype=dtype.as_torch(), device="mps")
+    compiled(output)
+    torch.mps.synchronize()
+    expected = torch.full((1024,), -7, dtype=dtype.as_torch())
+    expected[7:519] = 3
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_metal
+def test_cooperative_tensor_partial_fill_after_gemm_codegen():
+    @T.prim_func
+    def kernel(A: T.Tensor((32, 16), T.float16), B: T.Tensor((16, 64), T.float16), output: T.Tensor((32, 64), T.float32)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((32, 64), T.float32, scope="metal.cooperative_tensor")
+            T.gemm(A, B, buf, clear_accum=True)
+            T.fill(buf[31:32, 63:64], T.float32(3))
+            T.copy(buf, output)
+
+    target = tvm.target.Target({"kind": "metal", "keys": ["metal", "gpu", "metal4"]})
+    with target:
+        artifact = tilelang.lower(kernel, target=target)
+    # Matmul destinations retain native tensor objects; the one selected
+    # coordinate belongs to the final lane-local element of destination tile 3.
+    assert "__pct_c3[15] = " in artifact.kernel_source
+    assert "mpp::tensor_ops::matmul2d" in artifact.kernel_source

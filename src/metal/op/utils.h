@@ -54,17 +54,9 @@ inline bool IsWholeBufferRegion(const Buffer &buffer,
   return true;
 }
 
-inline SIMDGroupRegion
-GetSIMDGroupPartialRegion(const Buffer &buffer, const ffi::Array<Range> &region,
-                          const LowerArgs &args, arith::Analyzer *analyzer,
-                          const char *operation) {
-  const size_t ndim = buffer->shape.size();
-  TVM_FFI_ICHECK((ndim == 1 || ndim == 2) && region.size() == ndim);
-  CHECK(buffer->strides.empty() &&
-            analyzer->CanProveEqual(buffer->elem_offset, 0),
-        ValueError)
-      << operation << ": requires a compact buffer with zero elem_offset for "
-      << buffer->name;
+inline void CheckSIMDGroupExecution(const LowerArgs &args,
+                                    arith::Analyzer *analyzer,
+                                    const char *operation) {
   const int warp_size = TargetMetalGetWarpSize(args.target);
   CHECK(analyzer->CanProveEqual(args.block_num_threads, warp_size), ValueError)
       << operation << ": requires exactly one simdgroup (" << warp_size
@@ -77,6 +69,20 @@ GetSIMDGroupPartialRegion(const Buffer &buffer, const ffi::Array<Range> &region,
 
   CHECK(!args.has_thread_dependent_branch, ValueError)
       << operation << ": requires thread-uniform control flow";
+}
+
+inline SIMDGroupRegion
+GetSIMDGroupPartialRegion(const Buffer &buffer, const ffi::Array<Range> &region,
+                          const LowerArgs &args, arith::Analyzer *analyzer,
+                          const char *operation) {
+  const size_t ndim = buffer->shape.size();
+  TVM_FFI_ICHECK((ndim == 1 || ndim == 2) && region.size() == ndim);
+  CHECK(buffer->strides.empty() &&
+            analyzer->CanProveEqual(buffer->elem_offset, 0),
+        ValueError)
+      << operation << ": requires a compact buffer with zero elem_offset for "
+      << buffer->name;
+  CheckSIMDGroupExecution(args, analyzer, operation);
 
   const int64_t alignment = ndim == 1 ? 64 : 8;
   SIMDGroupRegion tiles{{0, 0}, {1, 1}, 0};

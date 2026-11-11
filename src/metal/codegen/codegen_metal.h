@@ -82,6 +82,8 @@ private:
   std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       ct_c_inlined_;
   std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      ct_matmul_destinations_;
+  std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
       ct_c_storage_elided_;
   Var thread_idx_x_var_;
   Var block_idx_x_var_;
