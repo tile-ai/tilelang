@@ -348,7 +348,7 @@ def test_ascend_thread_sync_keeps_mixed_physical_width_alias_barrier():
     after = ascend_transform.AscendThreadSync("shared.dyn")(before)["main"]
 
     labels = _labels_between(after.body, "writer", "reader")
-    assert "sync" in labels, labels
+    assert "sync" in labels[labels.index("writer") + 1 : labels.index("reader")], labels
 
 
 if __name__ == "__main__":
