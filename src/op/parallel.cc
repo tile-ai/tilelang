@@ -903,7 +903,12 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'
             << "    loop " << candidate->DebugOutput() << '\n'
-            << "    fragment " << fragment->DebugOutput() << '\n';
+            << "    fragment " << fragment->DebugOutput() << '\n'
+            << "    Loop threads read elements that " << buffer
+            << " holds on other threads, and fragments cannot exchange data "
+               "between threads. This happens, for example, between T.gemm "
+               "operands on tiles with fewer than 16 rows per wavefront. "
+               "Write the data to T.alloc_shared memory instead.\n";
       }
       success = false;
     }
