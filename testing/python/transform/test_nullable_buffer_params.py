@@ -1,4 +1,5 @@
 import torch
+import pytest
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -100,7 +101,75 @@ def test_nullable_single_source_shape():
     kernel(None)
 
 
+def _get_nullable_shared_shape_kernel():
+    """Build the TVM-FFI kernel used by nullable-first device-ID tests."""
+
+    @tilelang.jit(execution_backend="tvm_ffi")
+    def get_kernel():
+        m = T.dynamic("m")
+
+        @T.prim_func
+        def test_kernel(
+            a: T.Tensor[(m,), T.float16],
+            b: T.Tensor[(m,), T.float16],
+            out: T.Tensor[(1,), T.float16],
+        ):
+            with T.Kernel(1, threads=32):
+                fragment = T.alloc_fragment((1,), T.float32)
+                T.copy(out[0], fragment)
+                T.copy(fragment, out[0])
+
+        return test_kernel
+
+    return get_kernel()
+
+
 def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present():
+    """Test nullable unused buffers with a non-null tensor on the default device."""
+
+    kernel = _get_nullable_shared_shape_kernel()
+
+    out = torch.randn((1,), device="cuda", dtype=torch.float16)
+    out_ref = out.clone()
+
+    # Both `a` and `b` are None; they also share the symbolic shape var `m`.
+    # This should run because `a`/`b` are unused by the kernel body.
+    kernel(None, None, out)
+    torch.testing.assert_close(out, out_ref)
+
+
+def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present_on_cuda1():
+    """Test nullable-first device-ID binding on cuda:1 with a compatible GPU target."""
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+
+    cuda0_capability = torch.cuda.get_device_capability(0)
+    cuda1_capability = torch.cuda.get_device_capability(1)
+    if cuda0_capability != cuda1_capability:
+        pytest.skip(
+            "reuses one JIT kernel compiled for cuda:0, so both devices must have "
+            "the same compute capability; "
+            f"cuda:0={cuda0_capability}, cuda:1={cuda1_capability}"
+        )
+
+    kernel = _get_nullable_shared_shape_kernel()
+
+    # Compile the JIT kernel on cuda:0 first. TileLang's auto-detected CUDA
+    # target is derived from the current device's compute capability.
+    with torch.cuda.device(0):
+        out_cuda0 = torch.randn((1,), device="cuda:0", dtype=torch.float16)
+        out_cuda0_ref = out_cuda0.clone()
+        kernel(None, None, out_cuda0)
+        torch.testing.assert_close(out_cuda0, out_cuda0_ref)
+
+    # Run the same compiled kernel on cuda:1. The device context restores the
+    # previous current CUDA device after the call.
+    with torch.cuda.device(1):
+        out_cuda1 = torch.randn((1,), device="cuda:1", dtype=torch.float16)
+        out_cuda1_ref = out_cuda1.clone()
+        kernel(None, None, out_cuda1)
+        torch.testing.assert_close(out_cuda1, out_cuda1_ref)
     """Test that unused buffers sharing a symbolic shape var can both be None.
 
     Repro for:
