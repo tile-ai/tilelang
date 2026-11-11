@@ -1,0 +1,320 @@
+name: Dist (Ascend Nightly)
+on:
+  workflow_dispatch:
+  schedule:
+    # 20:00 UTC == 4:00 China time, offset from the main Dist workflow (22:00 UTC).
+    - cron: "0 20 * * *"
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - pyproject.toml
+      - CMakeLists.txt
+      - cmake/**
+      - VERSION
+      - version_provider.py
+      - .github/workflows/dist-ascend.yml
+      # Exercised by the NPU wheel-test job below.
+      - maint/scripts/smoke_test_wheel_ascend.py
+      # Type aliases can affect package import/build behavior.
+      - tilelang/_typing.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+env:
+  PYTHONDEVMODE: "1"
+  PYTHONUNBUFFERED: "1"
+  COLUMNS: "100"
+  FORCE_COLOR: "1"
+  CLICOLOR_FORCE: "1"
+  UV_INDEX_STRATEGY: "unsafe-best-match"
+  UV_HTTP_TIMEOUT: "600"
+  XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
+  PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
+  UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
+  # Same image as the Ascend job in ci.yml.
+  ASCEND_CI_IMAGE: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12"
+
+jobs:
+  build-wheel-ascend:
+    name: Build Ascend wheel (cp310-abi3, Linux X64)
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      NO_VERSION_LABEL: "OFF"
+      CIBW_BUILD: "cp310-*"
+      # Host-side import test only; CPU torch is enough and much smaller.
+      UV_TORCH_BACKEND: "cpu"
+      # Ascend-only build; these override the fat-wheel defaults from
+      # [tool.cibuildwheel.linux].environment in pyproject.toml. CANN is not
+      # needed at build time: Ascend uses the vendored ACL declarations and
+      # the dlopen-based ascendcl stub (TILELANG_USE_ASCEND_STUBS), so the
+      # wheel stays importable on machines without CANN. The date stamp makes
+      # each nightly build distinguishable: X.Y.Z+ascend.dYYYYMMDD.gitHASH.
+      CIBW_ENVIRONMENT: "USE_CUDA=OFF USE_ROCM=OFF USE_ASCEND=ON TILELANG_BUILD_WHEEL_WITH_DATE=ON"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup Python and uv with caching
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.10"
+          activate-environment: true
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          max-size: "2GB"
+          create-symlink: true
+          evict-old-files: "7d"
+          append-timestamp: false
+          # A commit key covers source, headers, submodules and build settings.
+          key: wheel-ascend-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          restore-keys: |
+            wheel-ascend-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Set CIBW_BEFORE_BUILD_LINUX
+        run: |
+          # Fixed dependency paths allow ccache direct hits across runner
+          # instances (same approach as dist.yml).
+          HOST_CCACHE_DIR="$(ccache --get-config cache_dir)"
+          echo "CIBW_BEFORE_BUILD_LINUX=dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.3
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+          config-file: "{package}/pyproject.toml"
+
+      - name: Test built wheels
+        run: |
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            case "${WHEEL}" in
+              *+ascend.*) ;;
+              *) echo "::error::wheel $(basename "${WHEEL}") is missing the +ascend version label"; exit 1 ;;
+            esac
+            if [[ "${WHEEL}" == *"abi3"* ]]; then
+              uvx abi3audit --verbose --strict "${WHEEL}"
+            fi
+            (
+              set -e
+              uv venv test-venv
+              source test-venv/bin/activate
+
+              uv pip install -v "${WHEEL}"
+              (
+                set -e
+                cd /
+                uv run --no-project -- python -c "import tilelang; print(tilelang.__version__); assert '+ascend' in tilelang.__version__, tilelang.__version__"
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
+
+      - name: Upload wheels
+        # Not PR to save artifact storage; the NPU test and nightly release
+        # jobs below consume this artifact and are gated the same way.
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-ascend-${{ runner.os }}-${{ runner.arch }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  test-wheel-ascend:
+    name: Test Ascend wheel on NPU (self-hosted)
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
+    needs: [build-wheel-ascend]
+    runs-on: linux-amd64-a5-4
+    # Same image as the Ascend job in ci.yml (the env context is not available
+    # here; ASCEND_CI_IMAGE above must be kept in sync with it).
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
+    timeout-minutes: 60
+    env:
+      PIP_USER: "0"
+
+    steps:
+      - name: Checkout repository
+        # Only needed for maint/scripts/smoke_test_wheel_ascend.py; the wheel
+        # under test comes from the build-wheel-ascend artifact.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Trust the mounted workspace for git
+        run: |
+          # The container runs as root over the host-mounted workspace, so git
+          # rejects it as "dubious ownership" (same as the Ascend job in ci.yml).
+          git config --global --add safe.directory '*'
+
+      - name: Set environment (self-hosted runner)
+        run: |
+          # Hide sensitive data in logs for self-hosted runners
+          if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
+            echo "::add-mask::${{ secrets.SECRET_PATH_PREFIXES }}"
+            # Colon separated list of secrets to mask
+            for secret in $(echo "${{ secrets.SECRET_PATH_PREFIXES }}" | tr ':' '\n'); do
+              echo "::add-mask::${secret}"
+            done
+          fi
+
+      - name: Set up CANN environment
+        run: |
+          # Same environment setup as the Ascend job in ci.yml.
+          for CANN_SET_ENV in \
+            "${ASCEND_HOME_PATH:-}/set_env.sh" \
+            "${ASCEND_TOOLKIT_HOME:-}/set_env.sh" \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/cann-*/set_env.sh; do
+            if [[ -f "${CANN_SET_ENV}" ]]; then
+              source "${CANN_SET_ENV}"
+              break
+            fi
+          done
+          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-ascend-Linux-X64
+          path: wheelhouse
+
+      - name: Test built wheel on NPU
+        run: |
+          # Always exercise real kernel compilation: a warm kernel cache on a
+          # persistent self-hosted runner must not mask a broken wheel.
+          export TILELANG_DISABLE_CACHE=1
+
+          ls -lh wheelhouse/
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          # Pin torch/torch_npu to the container's preinstalled stack so the
+          # resolver cannot substitute a mismatched build from PyPI.
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+          import torch
+          import torch_npu
+
+          assert torch.npu.is_available(), "Ascend wheel test requires an available NPU"
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(requirement)
+          PY
+
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            (
+              set -e
+              # --system-site-packages keeps the container's torch/torch_npu.
+              uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" test-venv
+              source test-venv/bin/activate
+
+              # pip (not uv) honors PIP_CONSTRAINT, keeping the container's
+              # preinstalled torch/torch_npu stack.
+              python -m pip install -v "${WHEEL}"
+              # Run from RUNNER_TEMP so `import tilelang` resolves to the
+              # installed wheel rather than the repository source tree.
+              cp maint/scripts/smoke_test_wheel_ascend.py "${RUNNER_TEMP}/"
+              (
+                set -e
+                cd "${RUNNER_TEMP}"
+                python smoke_test_wheel_ascend.py
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
+
+  publish-nightly-release:
+    name: Update nightly-ascend release
+    # Daily wheels go to a rolling prerelease so users have a stable download
+    # link: https://github.com/tile-ai/tilelang/releases/tag/nightly-ascend
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      github.event_name != 'pull_request'
+    needs: [build-wheel-ascend, test-wheel-ascend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        # gh infers the target repository from the git remote.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-ascend-Linux-X64
+          path: wheelhouse
+
+      - name: Update rolling nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          TAG="nightly-ascend"
+          NOTES="Daily Ascend wheel built from \`${GITHUB_SHA}\` (\`${GITHUB_REF_NAME}\`).
+
+          NPU test container: \`${ASCEND_CI_IMAGE}\`
+
+          Wheels:
+          $(ls -1 wheelhouse/*.whl | sed 's|^|- |')"
+
+          if gh release view "${TAG}" --json assets >/dev/null 2>&1; then
+            # Drop the previous build's wheels so the release only serves the
+            # latest nightly.
+            gh release view "${TAG}" --json assets --jq '.assets[].name' |
+              while read -r ASSET; do
+                gh release delete-asset "${TAG}" "${ASSET}" --yes
+              done
+            gh release edit "${TAG}" --notes "${NOTES}"
+          else
+            gh release create "${TAG}" \
+              --prerelease --title "Ascend nightly wheels" --notes "${NOTES}"
+          fi
+          gh release upload "${TAG}" wheelhouse/*.whl --clobber
+
+      - name: Summary
+        run: |
+          {
+            echo "### Ascend nightly release updated"
+            echo
+            echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly-ascend"
+          } >> "${GITHUB_STEP_SUMMARY}"

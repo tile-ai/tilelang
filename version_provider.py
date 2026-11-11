@@ -65,6 +65,9 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
         elif _read_cmake_bool(os.environ.get("USE_ROCM", "")) and not _read_cmake_bool(os.environ.get("USE_CUDA", "")):
             # ROCm-only build. When USE_CUDA is also on (fat wheel), fall through and label as the CUDA backend so the wheel keeps using cuda naming
             backend = "rocm"
+        elif _read_cmake_bool(os.environ.get("USE_ASCEND", "")) and not _read_cmake_bool(os.environ.get("USE_CUDA", "")):
+            # Ascend-only build. As with ROCm, a fat wheel (USE_CUDA also on) keeps the cuda naming.
+            backend = "ascend"
         elif "USE_CUDA" in os.environ and not _read_cmake_bool(os.environ.get("USE_CUDA")):
             backend = "cpu"
         else:  # cuda

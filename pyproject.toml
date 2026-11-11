@@ -314,6 +314,13 @@ set -eux
 cat /etc/*-release
 uname -a
 
+# Ascend-only wheels (see .github/workflows/dist-ascend.yml) override
+# USE_CUDA=OFF via CIBW_ENVIRONMENT and do not need the CUDA toolkit.
+if [[ "${USE_CUDA:-ON}" == "OFF" ]]; then
+    echo "USE_CUDA=OFF: skipping CUDA toolkit install"
+    exit 0
+fi
+
 case "$(uname -m)" in
     "x86_64")
         DEFAULT_CUDA_VERSION="13.0"
