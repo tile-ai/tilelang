@@ -129,3 +129,51 @@ def test_pto_fill_integer_and_float(value, dtype):
 
     result = tilelang.compile(kernel, target="pto", out_idx=-1)()
     torch.testing.assert_close(result.cpu(), torch.full((128,), value, dtype=getattr(torch, dtype)), rtol=0, atol=0)
+
+
+@pytest.mark.pto
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("src_dtype,dst_dtype,size", [("int32", "float32", 64), ("float32", "float16", 128)])
+def test_pto_fill_runtime_scalar_cast(src_dtype, dst_dtype, size):
+    scalar_type = getattr(T, src_dtype)
+
+    @T.prim_func
+    def kernel(value: scalar_type, O: T.Tensor((size,), dst_dtype)):
+        with T.Kernel(1):
+            temp = T.alloc_shared((size,), dst_dtype)
+            with T.SimdVF():
+                T.fill(temp, value)
+            T.copy(temp, O)
+
+    compiled = tilelang.compile(kernel, target="pto", out_idx=-1)
+    for value in (7, -7):
+        scalar = float(value) if src_dtype.startswith("float") else value
+        output = compiled(scalar)
+        expected = torch.full((size,), value, dtype=getattr(torch, dst_dtype))
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.pto
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("strided", [False, True], ids=["short", "non-contiguous"])
+def test_pto_fill_legacy_regions(strided):
+    shape = (2, 64) if strided else (32,)
+
+    @T.prim_func
+    def kernel(O: T.Tensor(shape, "float32")):
+        with T.Kernel(1):
+            temp = T.alloc_shared(shape, "float32")
+            if strided:
+                T.fill(temp, 123.0)
+            with T.SimdVF():
+                if strided:
+                    T.fill(temp[:, :32], -7.0)
+                else:
+                    T.fill(temp, -7.0)
+            T.copy(temp, O)
+
+    output = tilelang.compile(kernel, target="pto", out_idx=-1)()
+    expected = torch.full(shape, -7.0)
+    if strided:
+        expected[:, 32:] = 123.0
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
