@@ -1,3 +1,4 @@
+import pytest
 import tilelang.testing
 
 import example_gqa_bwd
@@ -55,10 +56,11 @@ def test_example_mha_fwd_bhsd():
 
 
 @tilelang.testing.requires_cuda
-def test_example_mha_fwd_bhsd_tune():
-    kernel = example_mha_fwd_bhsd.flashattn(batch=1, heads=1, seq_q=256, seq_kv=256, dim=128, is_causal=False)
+@pytest.mark.parametrize("is_causal", [False, True])
+def test_example_mha_fwd_bhsd_tune(is_causal):
+    kernel = example_mha_fwd_bhsd.flashattn(batch=1, heads=1, seq_q=256, seq_kv=256, dim=128, is_causal=is_causal)
     kernel.get_profiler().assert_allclose(
-        lambda Q, K, V: example_mha_fwd_bhsd.ref_program(Q, K, V, is_causal=False),
+        lambda Q, K, V: example_mha_fwd_bhsd.ref_program(Q, K, V, is_causal=is_causal),
         rtol=0.01,
         atol=0.01,
     )
