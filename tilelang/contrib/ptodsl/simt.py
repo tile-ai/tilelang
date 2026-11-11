@@ -6,12 +6,7 @@ import ptodsl._scalar as _scalar
 from ptodsl import pto
 from ptodsl._scalar import _emit_llvm_byte_pointer
 from ptodsl._surface_values import VecValue, unwrap_surface_value, wrap_surface_value, resolve_address_access
-from ptodsl._types import (
-    _DType,
-    _restore_integer_signedness,
-    _signless_integer_type,
-    _strip_integer_signedness,
-)
+from ptodsl._types import _DType, _restore_integer_signedness, _signless_integer_type
 from ptoas.mlir.dialects import llvm, pto as _pto
 from ptoas.mlir.ir import IntegerType
 
@@ -167,34 +162,31 @@ def _scalar_select_compat(cond, true_val, false_val):
 _scalar.select = _scalar_select_compat
 
 
-def _atomic_signless_ptr(ptr, logical_type):
+def _atomic_signless_ptr(ptr, payload_dtype):
     """Re-author an integer pointer with its signless PTO element type."""
-    signless_element = _signless_integer_type(logical_type)
-    if signless_element == logical_type:
-        return ptr
-    payload_dtype = {32: pto.i32, 64: pto.i64}[logical_type.width]
+    payload_type = payload_dtype.resolve()
     pointer_type = _pto.PtrType(unwrap_surface_value(ptr).type)
-    payload_ptr_type = _pto.PtrType.get(payload_dtype.resolve(), memory_space=pointer_type.memory_space)
+    if pointer_type.element_type == payload_type:
+        return ptr
+    payload_ptr_type = _pto.PtrType.get(payload_type, memory_space=pointer_type.memory_space)
     return pto.castptr(ptr, payload_ptr_type)
 
 
 def _atomic_integer_compat(op, ptr, value, logical_dtype, *, l2cache, with_signedness):
     # PTO atomics require signless i32/i64 operands. TileLang carries integer
-    # signedness in siXX/uiXX, so strip it at the call and restore it on the
-    # returned old value. The logical dtype defines the atomic's signedness;
-    # the value is only re-typed for the operand.
+    # signedness in siXX/uiXX, so convert the operand to the destination width
+    # through the signless carrier and restore signedness on the returned old
+    # value. The logical dtype defines the atomic's signedness.
+    from .common import wrap_const
+
     resolved_type = logical_dtype.resolve()
     if not IntegerType.isinstance(resolved_type):
         return op(ptr, value, l2cache=l2cache)
     logical_type = IntegerType(resolved_type)
+    payload_dtype = {32: pto.i32, 64: pto.i64}[logical_type.width]
     signedness = "unsigned" if logical_type.is_unsigned else "signed"
-    raw_value = unwrap_surface_value(value)
-    raw_type = getattr(raw_value, "type", None)
-    if raw_type is not None and IntegerType.isinstance(raw_type):
-        converted_value = wrap_surface_value(_strip_integer_signedness(raw_value))
-    else:
-        converted_value = value
-    signless_ptr = _atomic_signless_ptr(ptr, logical_type)
+    converted_value = pto.cast(wrap_const(value, logical_dtype), payload_dtype)
+    signless_ptr = _atomic_signless_ptr(ptr, payload_dtype)
     if with_signedness:
         result = op(signless_ptr, converted_value, l2cache=l2cache, signedness=signedness)
     else:
