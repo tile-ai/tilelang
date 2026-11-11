@@ -18,7 +18,7 @@ def test_simdvf_fill_fp4_rejected(pass_name):
         with T.SimdVF():
             T.fill(temp, 0.0)
 
-    with pytest.raises(tvm.error.InternalError, match="T.fill inside SimdVF.*float4_e2m1fn"):
+    with pytest.raises(ValueError, match="T.fill inside SimdVF.*float4_e2m1fn"):
         getattr(ascend, pass_name)()(tvm.IRModule({"main": kernel}))
 
 

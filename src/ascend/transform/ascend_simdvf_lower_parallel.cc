@@ -597,8 +597,9 @@ private:
     DataType dtype = buf->dtype;
 
     if (dtype.bits() < 8) {
-      LOG(FATAL) << "T.fill inside SimdVF does not support sub-byte dtype "
-                 << dtype << " (buffer " << buf->name << ")";
+      TVM_FFI_THROW(ValueError)
+          << "T.fill inside SimdVF does not support sub-byte dtype " << dtype
+          << " (buffer " << buf->name << ")";
     }
 
     if (value->dtype != dtype) {
