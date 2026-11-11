@@ -132,7 +132,7 @@ def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present()
     kernel = _get_nullable_shared_shape_kernel()
 
     out = torch.randn((1,), device="cuda", dtype=torch.float16)
-    out_ref = out.clone()
+    out_ref = out + 1.0
 
     # Both `a` and `b` are None; they also share the symbolic shape var `m`.
     # This should run because `a`/`b` are unused by the kernel body.
