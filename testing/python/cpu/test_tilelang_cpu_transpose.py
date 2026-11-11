@@ -78,16 +78,23 @@ def test_cpu_transpose_aligns_axes_from_the_right(src_shape, dst_shape):
     torch.testing.assert_close(actual, expected)
 
 
-def test_cpu_transpose_rejects_unmatched_leading_axis():
+@pytest.mark.parametrize(
+    ("src_shape", "dst_shape", "error"),
+    [
+        ((2, 3, 4), (4, 3), "has no destination axis"),
+        ((3, 4), (2, 4, 3), "has no source axis"),
+    ],
+)
+def test_cpu_transpose_rejects_unmatched_leading_axis(src_shape, dst_shape, error):
     @T.prim_func
     def main(
-        src: T.Tensor((2, 3, 4), T.float32),
-        dst: T.Tensor((4, 3), T.float32),
+        src: T.Tensor(src_shape, T.float32),
+        dst: T.Tensor(dst_shape, T.float32),
     ):
         with T.Kernel(1):
             T.transpose(src, dst)
 
-    with pytest.raises(Exception, match="has no destination axis"), tvm.target.Target("c"):
+    with pytest.raises(Exception, match=error), tvm.target.Target("c"):
         tilelang.compile(main, out_idx=[1], target="c", target_host="c", execution_backend="cython")
 
 

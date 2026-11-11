@@ -325,6 +325,8 @@ private:
     }
     for (auto buffer : op->alloc_buffers) {
       buffer_data_to_buffer_.Set(buffer->data, buffer);
+      if (IsSharedBuffer(buffer))
+        allocated_shared_buffers_.Set(buffer->data, buffer);
     }
     RecordSafeValueAnnotations(op);
     if (!safe_value_map_.empty()) {
@@ -1057,6 +1059,8 @@ private:
    */
   Stmt VisitStmt_(const AllocBufferNode *op) final {
     auto buffer = op->buffer;
+    if (IsSharedBuffer(buffer))
+      allocated_shared_buffers_.Set(buffer->data, buffer);
     if (buffer_remap_.count(buffer)) {
       auto node = Downcast<AllocBuffer>(IRMutatorWithAnalyzer::VisitStmt_(op));
       node.CopyOnWrite()->buffer = buffer_remap_[buffer];
@@ -1153,6 +1157,7 @@ private:
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
+    lower_args.allocated_shared_buffers = allocated_shared_buffers_;
     lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
                                      ? PrimExpr(IntImm(DataType::Int(32), 0))
                                      : loop_mbar_phase_stack_.back();
@@ -1429,6 +1434,7 @@ private:
   Target target_;
   Map<String, Any> block_annotations_;
   Map<Var, Buffer> buffer_data_to_buffer_;
+  BufferMap allocated_shared_buffers_;
   Map<Var, PrimExpr> safe_value_map_;
   Map<Buffer, Layout> layout_map_;
   Map<Buffer, Layout> layout_remap_;

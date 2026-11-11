@@ -168,7 +168,7 @@ def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=512, block_M=128)
 
 
-def tilelang_transpose_matrix_case(M, N, dtype, src_offset=0, swizzle=False, dst_col=0, consumer=False):
+def tilelang_transpose_matrix_case(M, N, dtype, src_offset=0, swizzle=False, dst_col=0, consumer=False, address_view=False):
     """Transpose one stage of a multi-buffered source, as T.Pipelined produces:
     the source region has a leading extent-1 axis that the destination lacks.
 
@@ -188,14 +188,20 @@ def tilelang_transpose_matrix_case(M, N, dtype, src_offset=0, swizzle=False, dst
             tile_T = T.alloc_shared((N, M), dtype)
             if swizzle:
                 T.annotate_layout({tile: make_swizzled_layout(tile), tile_T: make_swizzled_layout(tile_T)})
-            T.copy(A, tile[stages - 1, :, :])
-            if dst_col:
-                T.fill(tile_T, 0)
-            if consumer:
-                if T.get_thread_binding() >= 128:
-                    T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
+            if address_view:
+                view = T.make_tensor_from_addr(T.address_of(tile[stages - 1, 0, src_offset]), (M, N), dtype, storage_scope="shared.dyn")
+                for i, j in T.Parallel(M, N):
+                    view[i, j] = A[i, src_offset + j]
+                T.transpose(view, tile_T)
             else:
-                T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T[:, dst_col : dst_col + M])
+                T.copy(A, tile[stages - 1, :, :])
+                if dst_col:
+                    T.fill(tile_T, 0)
+                if consumer:
+                    if T.get_thread_binding() >= 128:
+                        T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
+                else:
+                    T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T[:, dst_col : dst_col + M])
             T.copy(tile_T, B)
 
     return main
@@ -220,6 +226,8 @@ def test_tilelang_transpose_matrix_instructions():
         (T.float8_e4m3fn, 16, 16, {"src_offset": 8}, False),
         # a destination region past the buffer edge keeps the predicated loop
         (T.float16, 16, 16, {"dst_col": 8}, False),
+        # Contiguous rows in a view whose base address is offset by one byte.
+        (T.uint8, 16, 16, {"src_offset": 1, "address_view": True}, False),
         (T.float32, 32, 64, {}, False),
     ]
     for dtype, M, N, kwargs, matrix in cases:

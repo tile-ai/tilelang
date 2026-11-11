@@ -115,6 +115,8 @@ struct LowerArgs {
   // Map from Bind variable to its bound expression, for resolving
   // fragment buffer accesses through Bind values
   ffi::Map<tirx::Var, PrimExpr> bind_var_to_expr;
+  // Shared allocation bases owned by this function, excluding pointer views.
+  BufferMap allocated_shared_buffers;
   // Fallback mbarrier parity for ops that do not carry an explicit
   // tl.pipeline_mbar_phase_expr annotation. LowerTileOp derives this from the
   // zero-based epoch of the nearest enclosing serial loop.

@@ -56,10 +56,10 @@ Array<PrimExpr> RegionIndices(const Array<Range> &range, const PrimExpr &row,
 
 // Every `width`-element row segment of the region must be one 16-byte-aligned
 // run in the physical allocation, which is what ldmatrix and stmatrix address.
-bool RowSegmentsAreAlignedRuns(const Buffer &buffer, const Array<Range> &range,
-                               int64_t rows, int64_t cols, int width,
-                               const LayoutMap &layout_map,
-                               arith::Analyzer *analyzer) {
+bool HasAlignedRowSegments(const Buffer &buffer, const Array<Range> &range,
+                           int64_t rows, int64_t cols, int width,
+                           const LayoutMap &layout_map,
+                           arith::Analyzer *analyzer) {
   if (!buffer->strides.empty())
     return false;
   Var row("transpose_row"), segment("transpose_segment"),
@@ -102,7 +102,10 @@ Stmt LowerWarpMatrixTranspose(const TransposeNode &op,
   if (!TargetHasStmatrix(lower_args.target) ||
       TargetIsCuTeDSL(lower_args.target))
     return Stmt();
-  if (!IsSharedBuffer(src) || !IsSharedBuffer(dst) || src.same_as(dst) ||
+  // A view made from an address can start partway into an allocation, even
+  // when its own element offset is zero.
+  if (!lower_args.allocated_shared_buffers.count(src->data) ||
+      !lower_args.allocated_shared_buffers.count(dst->data) ||
       src->data.same_as(dst->data))
     return Stmt();
   if (src->dtype != dst->dtype || src->dtype.lanes() != 1)
@@ -162,10 +165,10 @@ Stmt LowerWarpMatrixTranspose(const TransposeNode &op,
       *thread_min % 32 != 0 || *thread_extent % 32 != 0 || *thread_extent == 0)
     return Stmt();
 
-  if (!RowSegmentsAreAlignedRuns(src, op.src_range, rows, cols, tile,
-                                 lower_args.layout_map, analyzer) ||
-      !RowSegmentsAreAlignedRuns(dst, op.dst_range, cols, rows, tile,
-                                 lower_args.layout_map, analyzer))
+  if (!HasAlignedRowSegments(src, op.src_range, rows, cols, tile,
+                             lower_args.layout_map, analyzer) ||
+      !HasAlignedRowSegments(dst, op.dst_range, cols, rows, tile,
+                             lower_args.layout_map, analyzer))
     return Stmt();
 
   const int64_t tile_cols = cols / tile;
