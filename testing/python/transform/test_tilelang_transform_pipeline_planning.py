@@ -328,6 +328,7 @@ def test_pipeline_planning_before_after_tma_copy_plan():
     _check(before, after, target=sm90_target)
 
 
+@tilelang.testing.requires_cuda
 def test_pipeline_planning_before_after_wgmma_gemm_plan():
     @T.prim_func
     def before(
@@ -377,10 +378,10 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
                     ],
                     "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [
-                        T.int32(1),
                         T.int32(2),
-                        T.int32(0),
                         T.int32(3),
+                        T.int32(0),
+                        T.int32(1),
                         T.int32(4),
                     ],
                     "software_pipeline_stage": [
@@ -402,6 +403,36 @@ def test_pipeline_planning_before_after_wgmma_gemm_plan():
     _check(before, after, target=sm90_target)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("preceding_async", [False, True])
+@pytest.mark.parametrize("conditional_wait", [False, True])
+def test_pipeline_planning_wgmma_implicit_wait_zero(preceding_async, conditional_wait):
+    @T.prim_func
+    def before(A: T.Tensor((64, 16), T.float16), B: T.Tensor((16, 64), T.float16), flag: T.int32):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((64, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C0 = T.alloc_fragment((64, 64), T.float32)
+            C1 = T.alloc_fragment((64, 64), T.float32)
+            for _k in T.Pipelined(4, num_stages=2):
+                T.copy(A, A_shared)
+                T.copy(B, B_shared)
+                if preceding_async:
+                    T.wgmma_gemm(A_shared, B_shared, C0, clear_accum=True)
+                if conditional_wait:
+                    if flag > 0:
+                        T.wgmma_gemm(A_shared, B_shared, C1, clear_accum=True, annotations={"wg_wait": 0})
+                else:
+                    T.wgmma_gemm(A_shared, B_shared, C1, clear_accum=True, annotations={"wg_wait": 0})
+
+    mod = _run_pipeline_planning(before, sm90_target)
+    (annotations,) = _collect_pipeline_loop_annotations(mod["main"])
+    assert int(annotations["tl_pipelined_num_stages"]) == 2
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    assert any("tl_pipelined_num_stages" in loop.annotations for loop in collect_nodes(mod["main"], tvm.tirx.For))
+
+
+@tilelang.testing.requires_cuda
 def test_pipeline_planning_before_after_tcgen05_gemm_plan():
     @T.prim_func
     def before(
@@ -465,16 +496,16 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
                     ],
                     "software_pipeline_async_stages": [T.int32(0)],
                     "software_pipeline_order": [
+                        T.int32(0),
                         T.int32(1),
                         T.int32(2),
-                        T.int32(0),
                         T.int32(3),
                     ],
                     "software_pipeline_stage": [
                         T.int32(0),
                         T.int32(0),
-                        T.int32(2),
-                        T.int32(2),
+                        T.int32(1),
+                        T.int32(1),
                     ],
                     "tl_pipelined_num_stages": T.int32(2),
                 },
@@ -496,6 +527,24 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
             T.copy(C_shared, D[0:128, 0:128])
 
     _check(before, after, target=sm100_target)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(sm100_target)(mod)
+    mod = tl.transform.IfStmtBinding()(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    annotations = _collect_pipeline_loop_annotations(mod["main"])[0]
+    stages = [int(x) for x in annotations["software_pipeline_stage"]]
+    order = [int(x) for x in annotations["software_pipeline_order"]]
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    versions = {}
+    for block in collect_nodes(mod["main"].body, tvm.tirx.SBlock):
+        for buffer in block.alloc_buffers:
+            if buffer.name in ("A_shared", "B_shared"):
+                versions[buffer.name] = int(buffer.shape[0]) if len(buffer.shape) == 3 else 1
+    assert versions == {"A_shared": 2, "B_shared": 2}
+    for copy, name in enumerate(("A_shared", "B_shared")):
+        # Compare wait(i) with copy(i + versions) after stage/order normalization.
+        assert (stages[3], order[3]) < (versions[name] + stages[copy], order[copy])
 
 
 def test_pipeline_planning_before_after_explicit_plan_drops_replayable_bind_slot():

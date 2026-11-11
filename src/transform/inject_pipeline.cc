@@ -34,6 +34,7 @@
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/copy.h"
+#include "op/fill.h"
 #include "op/gemm.h"
 #include "op/operator.h"
 #include "op/utils.h"
@@ -73,6 +74,9 @@ struct PipelineAnnotation {
 
 using PipelineInfo = std::unordered_map<SBlock, PipelineAnnotation,
                                         ObjectPtrHash, ObjectPtrEqual>;
+using BlockCompletedReadsMap =
+    std::unordered_map<SBlock, Array<BufferRegion>, ObjectPtrHash,
+                       ObjectPtrEqual>;
 
 struct BufferAccessInfo {
   int def = -1; // the defining stage of the buffer
@@ -790,6 +794,7 @@ private:
 /// update.
 Map<Buffer, Buffer> ExpandPipelineBarriers(
     Array<SBlock> &original_order, PipelineInfo &pipeline_info,
+    BlockCompletedReadsMap *completed_reads,
     Map<Var, Buffer> &buffer_data_to_buffer, BufferSet &allocated_buffers,
     Array<Buffer> &block_local_allocs, Array<Buffer> &pipeline_allocs,
     Var loop_var, PrimExpr loop_min, int num_stages) {
@@ -893,6 +898,14 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
       PipelineAnnotation anno = pipeline_info.at(old_block);
       pipeline_info.erase(old_block);
       pipeline_info.emplace(new_block, anno);
+      if (completed_reads != nullptr) {
+        if (auto it = completed_reads->find(old_block);
+            it != completed_reads->end()) {
+          Array<BufferRegion> regions = std::move(it->second);
+          completed_reads->erase(it);
+          completed_reads->emplace(new_block, std::move(regions));
+        }
+      }
       original_order.Set(i, new_block);
     }
   }
@@ -927,9 +940,10 @@ Map<Buffer, Buffer> ExpandPipelineBarriers(
  */
 Buffer RewritePipelineTmaBarriers(
     Array<SBlock> &original_order, PipelineInfo &pipeline_info,
-    const Array<Integer> &tma_copies, Map<Var, Buffer> &buffer_data_to_buffer,
-    BufferSet &allocated_buffers, Array<Buffer> &block_local_allocs,
-    Var loop_var, PrimExpr loop_min, int num_stages) {
+    BlockCompletedReadsMap *completed_reads, const Array<Integer> &tma_copies,
+    Map<Var, Buffer> &buffer_data_to_buffer, BufferSet &allocated_buffers,
+    Array<Buffer> &block_local_allocs, Var loop_var, PrimExpr loop_min,
+    int num_stages) {
   if (!std::any_of(tma_copies.begin(), tma_copies.end(),
                    [](const Integer &tc) { return !is_zero(tc); })) {
     return Buffer();
@@ -972,6 +986,14 @@ Buffer RewritePipelineTmaBarriers(
     PipelineAnnotation anno = pipeline_info.at(old_block);
     pipeline_info.erase(old_block);
     pipeline_info.emplace(new_block, anno);
+    if (completed_reads != nullptr) {
+      if (auto it = completed_reads->find(old_block);
+          it != completed_reads->end()) {
+        Array<BufferRegion> regions = std::move(it->second);
+        completed_reads->erase(it);
+        completed_reads->emplace(new_block, std::move(regions));
+      }
+    }
     original_order.Set(i, new_block);
   }
 
@@ -1008,6 +1030,14 @@ Buffer RewritePipelineTmaBarriers(
     PipelineAnnotation anno = pipeline_info.at(old_block);
     pipeline_info.erase(old_block);
     pipeline_info.emplace(new_block, anno);
+    if (completed_reads != nullptr) {
+      if (auto it = completed_reads->find(old_block);
+          it != completed_reads->end()) {
+        Array<BufferRegion> regions = std::move(it->second);
+        completed_reads->erase(it);
+        completed_reads->emplace(new_block, std::move(regions));
+      }
+    }
     original_order.Set(i, new_block);
     waits_inserted = true;
   }
@@ -1205,12 +1235,14 @@ public:
                    const Array<Buffer> &pipeline_allocs,
                    const Array<Buffer> &local_allocs, const For &pipeline_loop,
                    const PipelineInfo &pipeline_info,
+                   const BlockCompletedReadsMap &completed_reads,
                    const Array<SBlock> &scalar_binding_blocks,
                    Optional<Target> target,
                    Map<Var, arith::IntSet> thread_domains)
       : buffer_data_to_buffer_(std::move(buffer_data_to_buffer)),
         pipeline_allocs_(pipeline_allocs), local_allocs_(local_allocs),
         pipeline_loop_(pipeline_loop), pipeline_info_(pipeline_info),
+        completed_reads_(completed_reads),
         scalar_binding_blocks_(scalar_binding_blocks),
         target_(std::move(target)), thread_domains_(std::move(thread_domains)) {
   }
@@ -1456,6 +1488,16 @@ private:
         auto &info = infos.at(read->buffer);
         info.use = std::max(info.use, stage);
       }
+      if (auto it = completed_reads_.find(block);
+          it != completed_reads_.end()) {
+        for (const BufferRegion &read : it->second) {
+          if (!infos.count(read->buffer)) {
+            infos.emplace(read->buffer, BufferAccessInfo{});
+          }
+          auto &info = infos.at(read->buffer);
+          info.use = std::max(info.use, stage);
+        }
+      }
     }
     return infos;
   }
@@ -1496,30 +1538,34 @@ private:
       for (const auto &pair1 : pipeline_info_) {
         const SBlock &writer_block = pair1.first;
         const auto &writer_info = pair1.second;
-
-        auto it1 = std::find_if(writer_block->writes.begin(),
-                                writer_block->writes.end(),
-                                [&](const BufferRegion &buffer_region) {
-                                  return buffer_region->buffer.same_as(buffer);
-                                });
-        if (it1 == writer_block->writes.end()) {
-          continue;
-        }
+        auto conflicts_with_reads = [&](const Array<BufferRegion> &reads) {
+          for (const BufferRegion &write : writer_block->writes) {
+            if (!write->buffer.same_as(buffer)) {
+              continue;
+            }
+            for (const BufferRegion &read : reads) {
+              if (read->buffer.same_as(buffer) &&
+                  PipelineRegionsMayConflict(write, read, thread_domains_)) {
+                return true;
+              }
+            }
+          }
+          return false;
+        };
 
         for (const auto &pair2 : pipeline_info_) {
           const SBlock &reader_block = pair2.first;
           const auto &reader_info = pair2.second;
-          auto it2 = std::find_if(
-              reader_block->reads.begin(), reader_block->reads.end(),
-              [&](const BufferRegion &buffer_region) {
-                return buffer_region->buffer.same_as(buffer);
-              });
-          if (it2 == reader_block->reads.end()) {
+          if (writer_info.order >= reader_info.order ||
+              writer_info.stage >= reader_info.stage) {
             continue;
           }
-          if (writer_info.order < reader_info.order &&
-              writer_info.stage < reader_info.stage &&
-              PipelineRegionsMayConflict(*it1, *it2, thread_domains_)) {
+          // A wait may complete several disjoint slices of the same buffer,
+          // even when the statement also directly reads another slice.
+          auto completed = completed_reads_.find(reader_block);
+          if (conflicts_with_reads(reader_block->reads) ||
+              (completed != completed_reads_.end() &&
+               conflicts_with_reads(completed->second))) {
             need_multi_version = true;
             break;
           }
@@ -3053,6 +3099,7 @@ private:
   Array<Buffer> local_allocs_;
   For pipeline_loop_;
   PipelineInfo pipeline_info_;
+  BlockCompletedReadsMap completed_reads_;
   Array<SBlock> scalar_binding_blocks_;
   int max_stage_ = -1;
   Map<Buffer, Buffer> buffer_remap_;
@@ -3068,12 +3115,13 @@ PipelineRewriteResult RewritePipeline(
     Map<Var, Buffer> buffer_data_to_buffer,
     const Array<Buffer> &pipeline_allocs, const Array<Buffer> &local_allocs,
     const For &pipeline_loop, const PipelineInfo &pipeline_info,
+    const BlockCompletedReadsMap &completed_reads,
     const Array<SBlock> &scalar_binding_blocks, Optional<Target> target,
     Map<Var, arith::IntSet> thread_domains) {
   PipelineRewriter rewriter(std::move(buffer_data_to_buffer), pipeline_allocs,
                             local_allocs, pipeline_loop, pipeline_info,
-                            scalar_binding_blocks, std::move(target),
-                            std::move(thread_domains));
+                            completed_reads, scalar_binding_blocks,
+                            std::move(target), std::move(thread_domains));
   PipelineRewriteResult result;
   result.pipeline = rewriter.BuildPipeline();
   result.buffer_remap = rewriter.GetBufferRemap();
@@ -3098,6 +3146,53 @@ public:
   }
 
 private:
+  // An unversioned write initializes slot zero. Copy the written region to
+  // the other slots so loop-invariant slices remain initialized after rotation.
+  // Already-versioned pipeline writes are deliberately left alone.
+  Stmt ReplicateInitialization(const Stmt &stmt,
+                               const Array<BufferRegion> &writes) const {
+    Array<Stmt> seq{stmt};
+    for (const BufferRegion &write : writes) {
+      auto replacement = replacements_.Get(write->buffer);
+      if (!replacement || !IsSharedBuffer(write->buffer) ||
+          write->buffer->shape.size() == replacement.value()->shape.size()) {
+        continue;
+      }
+      Buffer buffer = replacement.value();
+      auto region_at = [&](int64_t version, int mask) {
+        Array<PrimExpr> indices{Integer(version)};
+        Array<PrimExpr> args;
+        for (const Range &range : write->region) {
+          indices.push_back(range->min);
+        }
+        args.push_back(BufferLoad(buffer, indices));
+        args.push_back(Integer(mask));
+        args.push_back(Integer(1));
+        for (const Range &range : write->region) {
+          args.push_back(range->extent);
+        }
+        return Call(DataType::Handle(), region(), args);
+      };
+      int64_t versions = Downcast<IntImm>(buffer->shape[0])->value;
+      for (int64_t version = 1; version < versions; ++version) {
+        seq.push_back(Evaluate(Call(
+            DataType::Handle(), Copy::Get(),
+            {region_at(0, kAccessRead), region_at(version, kAccessWrite)})));
+      }
+    }
+    return seq.size() == 1 ? stmt : SeqStmt(seq);
+  }
+
+  Stmt VisitStmt_(const EvaluateNode *op) final {
+    Array<BufferRegion> writes;
+    if (const auto *call = op->value.as<CallNode>();
+        call &&
+        (call->op.same_as(Copy::Get()) || call->op.same_as(Fill::Get()))) {
+      writes = ParseOperator(GetRef<Call>(call))->GetAccessRegions().writes;
+    }
+    return ReplicateInitialization(StmtExprMutator::VisitStmt_(op), writes);
+  }
+
   BufferRegion RewriteBufferRegion(const BufferRegion &region) const {
     if (auto new_buffer = replacements_.Get(region->buffer)) {
       Region bounds = region->region;
@@ -3132,7 +3227,11 @@ private:
         n->indices.insert(n->indices.begin(), Integer(0));
       }
     }
-    return node;
+    Region written;
+    for (const PrimExpr &index : op->indices) {
+      written.push_back(Range::FromMinExtent(index, 1));
+    }
+    return ReplicateInitialization(node, {BufferRegion(op->buffer, written)});
   }
   PrimExpr VisitExpr_(const CallNode *op) final {
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
@@ -3332,6 +3431,7 @@ private:
   struct PipelineSchedule {
     Array<SBlock> original_order;
     Array<Buffer> nested_local_allocs;
+    BlockCompletedReadsMap completed_reads;
   };
 
   PipelineScheduleUnit MakePipelineScheduleUnit(const Stmt &stmt) {
@@ -3355,9 +3455,13 @@ private:
   }
 
   PipelineSchedule BuildPipelineSchedule(const Array<Stmt> &stmts) {
+    auto completed_reads = CollectAsyncGemmCompletionReads(stmts);
     PipelineSchedule schedule;
-    for (const Stmt &stmt : stmts) {
-      PipelineScheduleUnit unit = MakePipelineScheduleUnit(stmt);
+    for (size_t i = 0; i < stmts.size(); ++i) {
+      PipelineScheduleUnit unit = MakePipelineScheduleUnit(stmts[i]);
+      if (!completed_reads[i].empty()) {
+        schedule.completed_reads.emplace(unit.block, completed_reads[i]);
+      }
       schedule.original_order.push_back(unit.block);
       schedule.nested_local_allocs.insert(schedule.nested_local_allocs.end(),
                                           unit.nested_local_allocs.begin(),
@@ -3816,8 +3920,8 @@ private:
                             [](const Integer &tc) { return !is_zero(tc); });
             if (has_tma_copy) {
               pipeline_barrier_buf = RewritePipelineTmaBarriers(
-                  scheduled_order, pipeline_info, tma_copies,
-                  buffer_data_to_buffer_, allocated_buffers_,
+                  scheduled_order, pipeline_info, &schedule.completed_reads,
+                  tma_copies, buffer_data_to_buffer_, allocated_buffers_,
                   block_local_allocs, for_node->loop_var, for_node->min,
                   pipeline_depth);
             }
@@ -3845,9 +3949,9 @@ private:
                 .IntValue());
       }
       Map<Buffer, Buffer> barrier_remap = ExpandPipelineBarriers(
-          scheduled_order, pipeline_info, buffer_data_to_buffer_,
-          allocated_buffers_, block_local_allocs, pipeline_allocs,
-          for_node->loop_var, for_node->min, barrier_depth);
+          scheduled_order, pipeline_info, &schedule.completed_reads,
+          buffer_data_to_buffer_, allocated_buffers_, block_local_allocs,
+          pipeline_allocs, for_node->loop_var, for_node->min, barrier_depth);
       // Register expanded barriers for outer block alloc_buffers update.
       for (const auto &[old_buf, new_buf] : barrier_remap) {
         pending_buffer_remap_.Set(old_buf, new_buf);
@@ -3859,9 +3963,10 @@ private:
                         schedule.nested_local_allocs.begin(),
                         schedule.nested_local_allocs.end());
 
-    PipelineRewriteResult rewrite_result = RewritePipeline(
-        buffer_data_to_buffer_, pipeline_allocs, local_allocs, for_node,
-        pipeline_info, scalar_binding_blocks, target_, thread_domains_);
+    PipelineRewriteResult rewrite_result =
+        RewritePipeline(buffer_data_to_buffer_, pipeline_allocs, local_allocs,
+                        for_node, pipeline_info, schedule.completed_reads,
+                        scalar_binding_blocks, target_, thread_domains_);
     Stmt pipeline = rewrite_result.pipeline;
 
     subtree_modified_ = true;

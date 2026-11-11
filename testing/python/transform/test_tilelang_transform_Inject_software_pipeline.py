@@ -920,5 +920,89 @@ def test_inject_software_pipeline_versions_thread_regions(offset, versions):
     assert [int(dim) for dim in shared.shape] == ([2, 64] if versions == 2 else [64])
 
 
+@pytest.mark.parametrize("implicit_wait", [False, True])
+@tilelang.testing.requires_cuda
+def test_async_gemm_versions_include_all_completion_regions(implicit_wait):
+    # The explicit wait completes both slices. With wait_group(1), the second
+    # GEMM directly reads one slice while completing the first GEMM's other slice.
+    stages = [0, 1, 1, 1, 1] if implicit_wait else [1, 0, 1, 1, 1]
+    orders = [2, 0, 1, 3, 4] if implicit_wait else [0, 3, 1, 2, 4]
+
+    @T.prim_func
+    def before(A: T.Tensor((256, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C0 = T.alloc_fragment((64, 64), T.float32)
+            C1 = T.alloc_fragment((64, 64), T.float32)
+            T.copy(B, B_shared)
+            for k in T.Pipelined(4, order=orders, stage=stages):
+                T.copy(A[k * 64 : (k + 1) * 64, :], shared[0:64, :])
+                T.copy(A[k * 64 : (k + 1) * 64, :], shared[64:128, :])
+                T.wgmma_gemm(shared[0:64, :], B_shared, C0, clear_accum=True)
+                T.wgmma_gemm(shared[64:128, :], B_shared, C1, clear_accum=True, annotations={"wg_wait": 1 if implicit_wait else -1})
+                T.wait_wgmma(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    # The copies occupy different stages; keep their synchronization local.
+    with tvm.transform.PassContext(config={"tirx.use_async_copy": False}):
+        mod = tl.transform.PipelinePlanning()(mod)
+        mod = tl.transform.InjectSoftwarePipeline()(mod)
+    allocations = [node.buffer for node in collect_nodes(mod["main"], tvm.tirx.AllocBuffer)]
+    allocations += [buf for block in collect_nodes(mod["main"], tvm.tirx.SBlock) for buf in block.alloc_buffers]
+    (shared,) = [buf for buf in allocations if buf.name == "shared"]
+    assert [int(dim) for dim in shared.shape] == [2, 128, 16]
+    assert any("tl_pipelined_num_stages" in loop.annotations for loop in collect_nodes(mod["main"], tvm.tirx.For))
+    _assert_no_undefined_vars(tl.transform.LowerOpaqueBlock()(mod)["main"])
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("read_rows,init", [(64, "copy"), (128, "copy"), (128, "fill"), (128, "store")])
+def test_async_gemm_keeps_slices_initialized_outside_pipeline(read_rows, init):
+    @T.prim_func
+    def before(A: T.Tensor((128, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C0 = T.alloc_fragment((read_rows, 64), T.float32)
+            C1 = T.alloc_fragment((64, 64), T.float32)
+            if init == "copy":
+                T.copy(A, shared)
+            elif init == "fill":
+                T.fill(shared, 1)
+            else:
+                for i, j in T.Parallel(128, 16):
+                    shared[i, j] = A[i, j]
+            T.copy(B, B_shared)
+            for _k in T.Pipelined(4, order=[2, 0, 1, 3], stage=[0, 1, 1, 1], annotations={"review_test": 1}):
+                T.copy(A[64:128, :], shared[64:128, :])
+                T.wgmma_gemm(shared[0:read_rows, :], B_shared, C0, clear_accum=True)
+                T.wgmma_gemm(shared[64:128, :], B_shared, C1, clear_accum=True)
+                T.wait_wgmma(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    (original_loop,) = [loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if "review_test" in loop.annotations]
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    (loop,) = [loop for loop in collect_nodes(mod["main"], tvm.tirx.For) if "review_test" in loop.annotations]
+    assert "tl_pipelined_num_stages" in loop.annotations
+    # The upper slice is never written in the loop. Slot one must inherit
+    # its initialization from slot zero before any pipelined GEMM uses it.
+    initialized_slots = set()
+    for node in collect_nodes(mod["main"], tvm.tirx.Call):
+        if node.op.name not in ("tl.tileop.copy", "tl.tileop.fill"):
+            continue
+        dst = node.args[1 if node.op.name == "tl.tileop.copy" else 0].args[0]
+        if dst.buffer.name == "shared" and len(dst.indices) == 3 and isinstance(dst.indices[0], tvm.tirx.IntImm):
+            initialized_slots.add(int(dst.indices[0]))
+    for node in collect_nodes(mod["main"], tvm.tirx.BufferStore):
+        if node.buffer.name == "shared" and isinstance(node.indices[0], tvm.tirx.IntImm):
+            initialized_slots.add(int(node.indices[0]))
+    assert initialized_slots == {0, 1}
+    _assert_no_undefined_vars(tl.transform.LowerOpaqueBlock()(mod)["main"])
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
