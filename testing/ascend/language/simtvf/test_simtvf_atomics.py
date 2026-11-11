@@ -81,3 +81,27 @@ def test_pto_atomic_max_uses_pointer_signedness():
     value = torch.tensor([-1], dtype=torch.int32, device="npu")
     tilelang.compile(main, target="pto")(counter, value)
     assert counter.item() == 2**32 - 1
+
+
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize(
+    "target",
+    ["ascend", pytest.param("pto", marks=pytest.mark.pto)],
+)
+@pytest.mark.parametrize(
+    "value_dtype,value,expected",
+    [("uint32", 0xFFFFFFFF, 7 + 0xFFFFFFFF), ("float32", 3.5, 10)],
+)
+def test_atomic_add_converts_operand(value_dtype, value, expected, target):
+    @T.prim_func
+    def main(C: T.Tensor((1,), "int64"), V: T.Tensor((1,), value_dtype)):
+        with T.Kernel(1):
+            value_ub = T.alloc_shared((1,), value_dtype)
+            T.copy(V, value_ub)
+            with T.SimtVF(threads=1):
+                T.atomic_add(C[0], value_ub[0])
+
+    counter = torch.tensor([7], dtype=torch.int64, device="npu")
+    operand = torch.tensor([value], dtype=getattr(torch, value_dtype), device="npu")
+    tilelang.compile(main, target=target)(counter, operand)
+    assert counter.cpu().item() == expected
