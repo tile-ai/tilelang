@@ -438,8 +438,10 @@ void TVMFFIABIBuilder::BindDLTensors(
     }
     std::string arg_name = func_name + "." + buffer->data->name_hint;
     const PrimExpr &is_null = is_null_expr_map[arg_name];
-    PrimExpr actual_dev_id =
-        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId);
+    PrimExpr actual_dev_id = tvm::if_then_else(
+        Not(is_null),
+        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
+        make_zero(DataType::Int(32)));
     first_device_id =
         tvm::if_then_else(Not(is_null), actual_dev_id, first_device_id);
     all_device_tensors_null = all_device_tensors_null && is_null;
