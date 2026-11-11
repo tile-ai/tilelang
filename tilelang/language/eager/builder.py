@@ -12,7 +12,7 @@ from tvm.ir.base import Span
 from tvm.ir.expr import Range
 from tvm.tirx.stmt import BufferRegion
 from tvm.tirx.stmt_functor import substitute
-from .ast import BaseBuilder, IRGenerator, eval_op, has_internal_prim_func, mutate
+from .ast import BaseBuilder, IRGenerator, _mutate_macro, eval_op, has_internal_prim_func, mutate
 from .utils import construct_strides
 from tilelang.language.frame import clear_let_values, register_let_value
 from tilelang.utils import side_effect
@@ -252,6 +252,7 @@ class Builder(BaseBuilder):
         self.eager_jit_subs: dict[str, PrimExpr] = {}
         self.func_pass_configs: dict[str, Any] | None = None
         self.func_compile_flags: list[str] | str | None = None
+        self.host_mapped_buffers: list[Buffer] = []
         self.current_file = "<unknown>"
         self.current_line = 0
         self.current_macro_name = "<unknown-macro>"
@@ -1106,7 +1107,7 @@ def macro(func: Callable[_P, _T] = None) -> Macro[_P, _T]:
 
     def impl(func: Callable[_P, _T]) -> Macro[_P, _T]:
         annotations = get_type_hints(func)
-        return Macro(name=func.__name__, orig_func=func, ir_gen=mutate(func), annotations=annotations)
+        return Macro(name=func.__name__, orig_func=func, ir_gen=_mutate_macro(func), annotations=annotations)
 
     return impl(func) if func is not None else impl
 
@@ -1265,6 +1266,16 @@ def annotate_pass_configs(configs: dict[str, Any]) -> None:
 
 def _patch_prim_func_attrs(pf: PrimFunc, builder: Builder) -> PrimFunc:
     """Attach function-level out_idx, pass_configs and compile_flags as PrimFunc attrs."""
+    if builder.host_mapped_buffers:
+        from tilelang.engine.host_mapped import HOST_MAPPED_PARAMS_ATTR, get_host_mapped_params
+
+        indices = set(get_host_mapped_params(pf))
+        for buffer in builder.host_mapped_buffers:
+            matches = [i for i, param in enumerate(pf.params) if param in pf.buffer_map and pf.buffer_map[param].data.same_as(buffer.data)]
+            if not matches:
+                raise ValueError(f"Host-mapped buffer {buffer.name!r} must be a function parameter")
+            indices.update(matches)
+        pf = pf.with_attr(HOST_MAPPED_PARAMS_ATTR, sorted(indices))
     if builder.out_idx:
         pf = pf.with_attr("tilelang_out_idx", builder.out_idx)
     if builder.func_pass_configs is not None:

@@ -96,6 +96,8 @@ from .math import *  # noqa: F401,F403
 from .math import __all__ as _MATH_ALL
 from .pdl import *  # noqa: F401,F403
 from .pdl import __all__ as _PDL_ALL
+from .prefetch import *  # noqa: F401,F403
+from .prefetch import __all__ as _PREFETCH_ALL
 from .print import *  # noqa: F401,F403
 from .print import __all__ as _PRINT_ALL
 from .random import *  # noqa: F401,F403
@@ -205,6 +207,7 @@ __all__ = tuple(
             *_INTRINSICS_ALL,
             *_MATH_ALL,
             *_PDL_ALL,
+            *_PREFETCH_ALL,
             *_PRINT_ALL,
             *_RANDOM_ALL,
             *_TIR_ALL,
@@ -213,4 +216,16 @@ __all__ = tuple(
     )
 )
 
-del _CLUSTER_ALL, _COMMON_ALL, _CUDA_API_ALL, _INTRINSICS_ALL, _MATH_ALL, _PDL_ALL, _PRINT_ALL, _RANDOM_ALL, _TIR_ALL, _WARPGROUP_ALL
+del (
+    _CLUSTER_ALL,
+    _COMMON_ALL,
+    _CUDA_API_ALL,
+    _INTRINSICS_ALL,
+    _MATH_ALL,
+    _PDL_ALL,
+    _PREFETCH_ALL,
+    _PRINT_ALL,
+    _RANDOM_ALL,
+    _TIR_ALL,
+    _WARPGROUP_ALL,
+)

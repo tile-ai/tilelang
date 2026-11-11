@@ -1433,6 +1433,70 @@ private:
   std::unordered_set<const VarNode *> simt_accesses_;
 };
 
+std::optional<int64_t> GetVectorCount(const SBlockNode *block) {
+  if (auto value = block->annotations.Get("vector_count")) {
+    const auto *count = value.value().as<IntImmNode>();
+    ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
+        << "Mixed-kernel vector_count must be the constant integer 1 or 2, got "
+        << value.value();
+    return count->value;
+  }
+  return std::nullopt;
+}
+
+// LowerScheduledTIR can wrap an explicit T.Vector() in another VECTOR.
+// PTODSL needs one physical section; preserve nested work at its original
+// position within that section, including any narrower AIV selection.
+class NestedVectorSectionLowerer : public StmtMutator {
+  Stmt VisitStmt_(const SBlockRealizeNode *op) final {
+    if (!outer_ || op->block->name_hint != "VECTOR") {
+      return StmtMutator::VisitStmt_(op);
+    }
+    ICHECK(op->iter_values.empty() && op->block->iter_vars.empty())
+        << "Nested VECTOR sections must have lowered block iterators";
+    Stmt scope = VisitStmt(op->block);
+    return is_one(op->predicate) ? scope : IfThenElse(op->predicate, scope);
+  }
+
+  Stmt VisitStmt_(const SBlockNode *op) final {
+    if (op->name_hint != "VECTOR") {
+      return StmtMutator::VisitStmt_(op);
+    }
+    if (outer_ == nullptr) {
+      outer_ = op;
+      Stmt block = StmtMutator::VisitStmt_(op);
+      outer_ = nullptr;
+      return block;
+    }
+    SBlock scope = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
+    Array<Stmt> statements;
+    for (const Buffer &buffer : scope->alloc_buffers) {
+      statements.push_back(AllocBuffer(buffer));
+    }
+    if (scope->init.defined()) {
+      statements.push_back(scope->init.value());
+    }
+    statements.push_back(scope->body);
+    Stmt body = SeqStmt::Flatten(statements);
+    if (GetVectorCount(op) == 1 && GetVectorCount(outer_) != 1) {
+      IterVar sid(Range(0, 2), Var("sid", DataType::Int(32)),
+                  IterVarType::kThreadIndex, "cthread");
+      body = AttrStmt(sid, tirx::attr::thread_extent, Integer(2),
+                      IfThenElse(sid->var == 0, body));
+    }
+    // Retain the lexical block and its metadata as an ordinary scope.
+    auto *block = scope.CopyOnWrite();
+    block->name_hint = "";
+    block->annotations.erase("vector_count");
+    block->alloc_buffers = {};
+    block->init = std::nullopt;
+    block->body = std::move(body);
+    return scope;
+  }
+
+  const SBlockNode *outer_{nullptr};
+};
+
 struct MixedSectionVariableInfo {
   using VarSet = std::unordered_set<const VarNode *>;
 
@@ -2163,7 +2227,15 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
 }
 
 void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
-                                     const PrimFunc &func) {
+                                     const PrimFunc &input) {
+  const auto sections = GetAscendKernelSections(input);
+  PrimFunc func = input;
+  if (!sections.has_cube && sections.has_vector_subcores) {
+    Stmt body = NestedVectorSectionLowerer()(func->body);
+    if (!body.same_as(func->body)) {
+      func.CopyOnWrite()->body = std::move(body);
+    }
+  }
   RegisterFunction_(gvar, func);
   current_function_name_ = GetFunctionName_(gvar);
   InitFuncState_(func);
@@ -2204,7 +2276,6 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_has_gemm_ =
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
-  const auto sections = GetAscendKernelSections(func);
   current_function_is_mixed_ =
       sections.has_vector &&
       (sections.has_cube || sections.has_vector_subcores);
@@ -2479,14 +2550,7 @@ CodeGenTileLangPTO::GetAscendKernelSections(const PrimFunc &func) const {
       sections.has_cube = sections.has_cube || block->name_hint == "CUBE";
       if (block->name_hint == "VECTOR") {
         sections.has_vector = true;
-        if (auto opt = block->annotations.Get("vector_count")) {
-          const auto *count = opt.value().as<IntImmNode>();
-          ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
-              << "Mixed-kernel vector_count must be the constant integer 1 or "
-                 "2, got "
-              << opt.value();
-          sections.has_vector_subcores = true;
-        }
+        sections.has_vector_subcores |= GetVectorCount(block).has_value();
       }
     }
   });
@@ -5939,13 +6003,14 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     const char *pto_atomic_op =
         is_atomic_add ? "atomic_add"
                       : (is_atomic_max ? "atomic_max" : "atomic_min");
+    if (dtype.is_int() || dtype.is_uint()) {
+      os << "tl.integer_atomic(" << PrintExpr_(op->args[0]) << ", "
+         << PrintExpr_(op->args[1]) << ", " << DataTypeName(dtype) << ", "
+         << '"' << pto_atomic_op << "\")";
+      return;
+    }
     os << "pto." << pto_atomic_op << "(" << PrintExpr_(op->args[0]) << ", "
        << PrintExpr_(op->args[1]);
-    // Only integer atomic_min/atomic_max need signedness
-    if (!is_atomic_add && (dtype.is_int() || dtype.is_uint())) {
-      os << ", signedness=\"" << (dtype.is_uint() ? "unsigned" : "signed")
-         << "\"";
-    }
     os << ")";
     return;
   }
@@ -8319,17 +8384,6 @@ void CodeGenTileLangPTO::VisitStmt_(const SBlockNode *op) {
   if (current_function_is_mixed_ &&
       (op->name_hint == "CUBE" || op->name_hint == "VECTOR")) {
     bool is_vector_section = op->name_hint == "VECTOR";
-    int64_t vector_count = 2;
-    if (is_vector_section) {
-      if (auto opt = op->annotations.Get("vector_count")) {
-        const auto *count = opt.value().as<IntImmNode>();
-        ICHECK(count != nullptr && (count->value == 1 || count->value == 2))
-            << "Mixed-kernel vector_count must be the constant integer 1 or "
-               "2, got "
-            << opt.value();
-        vector_count = count->value;
-      }
-    }
     // Physical sections are independent SSA regions.  Restore all captured
     // outer local.var bindings both before and after a section so neither a
     // sibling section nor ordinary outer code can observe section-local SSA.
@@ -8345,7 +8399,7 @@ void CodeGenTileLangPTO::VisitStmt_(const SBlockNode *op) {
     PrintIndent();
     stream << "pto.init_core()\n";
     int active_aiv_scope = -1;
-    if (is_vector_section && vector_count == 1) {
+    if (is_vector_section && GetVectorCount(op) == 1) {
       // The physical mixed group still has two AIVs; only AIV0 executes this
       // section's body, including its cross-core synchronization.
       PrintIndent();

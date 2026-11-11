@@ -239,11 +239,26 @@ def test_reduce_redux_integer_runtime(operation, dtype, width, batch, clear, exe
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize(("width", "scale", "thread_offset"), [(16, 1, 0), (32, 2, 0), (64, 1, 32)])
+@pytest.mark.parametrize(
+    ("width", "scale", "thread_offset"),
+    [(16, 1, 0), (32, 2, 0), (64, 1, 32), (256, 1, 0), (128, 2, 0), (64, 4, 0), (32, 8, 0), (16, 16, 0), (8, 32, 0)],
+)
 def test_reduce_redux_layout_runtime(width, scale, thread_offset):
     inputs = torch.arange(4 * width * scale, dtype=torch.int32).reshape(4, width, scale).cuda()
     compiled = tilelang.compile(_make_kernel("sum", "int32", width, scale=scale, thread_offset=thread_offset), out_idx=-1)
     torch.testing.assert_close(compiled(inputs).cpu().to(torch.int64), _reference(inputs, "sum", True), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("width", "scale", "batch"),
+    [(64, 1, 1), (128, 1, 1), (256, 1, 1), (64, 4, 1), (16, 16, 1), (8, 32, 1), (128, 1, 2), (64, 4, 2)],
+)
+def test_reduce_single_round_cross_warp_ptx(width, scale, batch):
+    _, ptx_64 = _compile_ptx(_make_kernel("max", "float32", 64, scale=1, batch=batch), "sm_80")
+    _, ptx = _compile_ptx(_make_kernel("max", "float32", width, scale=scale, batch=batch), "sm_80")
+    assert ptx.count("bar.sync") == ptx_64.count("bar.sync")
+    assert ptx.count("st.shared") == ptx_64.count("st.shared")
 
 
 @tilelang.testing.requires_cuda

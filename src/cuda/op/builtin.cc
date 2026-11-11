@@ -14,6 +14,12 @@ namespace tl {
 
 using namespace tirx;
 
+TIR_DEFINE_TL_BUILTIN(clamp_symmetric)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kPure))
+    .set_attr<TVectorizable>("TVectorizable", true);
+
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableWarpSpecialized, Bool);
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoWarpSpecialization, ffi::String);
 TVM_REGISTER_PASS_CONFIG_OPTION(kDisableTMALower, Bool);
@@ -118,6 +124,21 @@ TIR_DEFINE_TL_BUILTIN(create_tma_im2col_descriptor)
 
 TIR_DEFINE_TL_BUILTIN(prefetch_tma_descriptor)
     .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(prefetch_l1)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(prefetchu_l1)
+    .set_num_inputs(1)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(prefetch_l2)
+    .set_num_inputs(3)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));
 

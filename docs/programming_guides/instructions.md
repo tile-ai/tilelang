@@ -197,7 +197,9 @@ Compute primitives
   of larger reductions and unpacked batched reductions. Sub-warp, strided,
   packed, FP64, and unsupported dtype/operator combinations retain the shuffle
   implementation, as do targets without the required instructions. Cross-warp
-  shared-memory exchanges and barriers are unchanged.
+  reductions perform the in-warp stage first and collapse the cross-warp levels
+  into a single shared-memory exchange (two barriers per reduction regardless
+  of the number of warps).
 - Scans: `T.cumsum`, `T.cummax`, finalize: `T.finalize_reducer`.
 - Warp reducers: `T.warp_reduce_sum/max/min/bitand/bitor`.
 - Elementwise math: TIR ops (`T.exp`, `T.log`, `T.max`, `T.min`, `T.rsqrt`, ...).

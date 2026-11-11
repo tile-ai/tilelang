@@ -14,12 +14,11 @@ def PerCoreTask():
     """Represent one logical per-core task with guarded candidate sites.
 
     AutoSchedule treats the enclosed control flow as one logical task when it
-    analyzes dependencies, estimates cost, and allocates flags. When
-    synchronization is emitted for a loop-free dispatch, the same logical
-    wait/set pair can be placed next to every candidate access under its
-    original control-flow guard. If the region contains internal loops,
-    external synchronization stays at the region boundary: one wait/set pair
-    per logical task, including when an internal loop executes zero times.
+    analyzes dependencies, estimates cost, and allocates flags. For a loop-free
+    dispatch, the compiler may place an external wait or set next to each
+    candidate under its original control-flow guard. If the region contains an
+    internal loop, each external wait or set stays at the region boundary under
+    its synchronization guard, including when the loop has zero trips.
 
     The compiler preserves explicit ``T.Task()`` candidates and infers markers
     for the remaining supported dependency-bearing candidate boundaries.
@@ -135,10 +134,12 @@ def Stage(stage: int):
     ``T.Stage`` annotation, AutoSchedule treats that child list as manual. One
     scope may contain several consecutive statements; every scheduler task
     materialized from those statements receives the same stage. Unannotated
-    siblings default to stage 0. Within each hardware pipe, source order is the
-    manual issue order; tasks on different pipes remain freely reorderable, so
-    no separate order annotation is required. Nested child lists select
-    automatic or manual scheduling independently.
+    siblings default to stage 0. On each shared core and hardware pipe, source
+    order is the manual issue order. The scheduler separates issue phases when
+    a stage tie-break would reverse this order. Data and register dependencies
+    remain in force; an incompatible manual order fails scheduling. Tasks on
+    different pipes remain freely reorderable subject to those dependencies.
+    Nested child lists select automatic or manual scheduling independently.
 
     ``T.Stage`` must wrap complete scheduler tasks. It must not appear inside
     ``T.Task``, ``T.SimtVF``, ``T.SimdVF``, an SBlock, or a parallel loop. In

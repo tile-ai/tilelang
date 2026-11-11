@@ -86,3 +86,32 @@ def check_cutedsl_available() -> None:
     if not has_cute:
         req = _requirement_spec()
         raise ImportError(f"CuTeDSL backend requires the CUTLASS Python DSL with CuTe support (install via `pip install -U '{req}'`).")
+
+
+# nvidia-cutlass-dsl < 4.8.0 emits FP8 conversions that libNVVM rejects for
+# sm_89; no released version lowers them below sm_89 (no FP8 cvt instructions).
+_CUTEDSL_SM89_FP8_MIN_VERSION = (4, 8, 0)
+_SM_ARCH_RE = re.compile(r"sm_(\d+)")
+
+
+def fp8_conversion_compile_hint(arch: str | None, kernel_source: str | None) -> str | None:
+    """Explain a libNVVM failure of an FP8 kernel on a pre-sm_90 target, if it is the known one."""
+    m = _SM_ARCH_RE.match(str(arch or ""))
+    if m is None or "Float8E" not in (kernel_source or ""):
+        return None
+    sm = int(m.group(1))
+    if sm < 89:
+        return f"CuTeDSL cannot lower FP8 conversions for {arch}: FP8 conversion instructions require sm_89 or newer."
+    if sm >= 90:
+        return None
+    try:
+        version = _parse_version_triple(_importlib_metadata.version(_CUTEDSL_PUBLIC_DIST))
+    except Exception:
+        return None
+    if version is None or version >= _CUTEDSL_SM89_FP8_MIN_VERSION:
+        return None
+    required = ".".join(map(str, _CUTEDSL_SM89_FP8_MIN_VERSION))
+    return (
+        f"nvidia-cutlass-dsl {'.'.join(map(str, version))} cannot lower FP8 conversions for {arch} "
+        f"(libNVVM rejects the generated IR); upgrade to `{_CUTEDSL_PUBLIC_DIST}>={required}`."
+    )

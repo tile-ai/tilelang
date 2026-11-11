@@ -1548,7 +1548,7 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
         type_name = "int";
       } else if (t.is_uint()) {
         type_name = "uint";
-      } else if (t.is_float()) {
+      } else if (t.is_float() || t.is_tfloat32()) {
         type_name = "float";
       }
     }
@@ -1646,7 +1646,7 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
         type_name = "int";
       } else if (t.is_uint()) {
         type_name = "uint";
-      } else if (t.is_float()) {
+      } else if (t.is_float() || t.is_tfloat32()) {
         type_name = "float";
       }
     }
@@ -1791,6 +1791,32 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   bool cast_sat = get_bool_anno("sat", true);
   Optional<PrimExpr> cast_rbits = get_expr_anno("rbits");
 
+  if (cast_round == "rn" && from_ty.is_float() && from_ty.bits() == 32 &&
+      target_ty.is_tfloat32()) {
+    ICHECK(!cast_rbits.defined())
+        << "rbits is only supported with stochastic rounding, not round='rn'";
+    std::string cast_func = std::string("tl::__tl_cvt_f32_to_tf32_rn<") +
+                            (cast_sat ? "true>" : "false>");
+    if (from_ty.is_scalar()) {
+      os << cast_func << "(" << PrintExpr(op->value) << ")";
+      return;
+    }
+    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string sret = name_supply_->FreshName("_");
+    PrintIndent();
+    PrintType(target_ty, stream);
+    stream << ' ' << sret << ";\n";
+    for (int i = 0; i < from_ty.lanes(); ++i) {
+      std::ostringstream val;
+      val << cast_func << "(";
+      PrintVecElemLoad(src, from_ty, i, val);
+      val << ")";
+      PrintVecElemStore(sret, target_ty, i, val.str());
+    }
+    os << sret;
+    return;
+  }
+
   // Scalar fp8 <-> half via the __tl_cvt helpers; the default cast detours
   // through fp32.
   if (from_ty.is_scalar() && cast_round.empty() && target_ty.is_float16() &&
@@ -1902,13 +1928,14 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
            tl::IsCudaVectorizableFP8(target_ty) || target_ty.is_float4_e2m1fn();
   };
   if (!round_is_supported()) {
-    LOG(FATAL) << "round '" << cast_round
-               << "' is not supported for a cast from " << from_ty << " to "
-               << target_ty
-               << ". Supported combinations: round='rs' with an rbits operand, "
-                  "from float32 to float16, bfloat16, float8_e4m3*, "
-                  "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
-                  "round annotation.";
+    LOG(FATAL)
+        << "round '" << cast_round << "' is not supported for a cast from "
+        << from_ty << " to " << target_ty
+        << ". Supported combinations: round='rn' from float32 to tfloat32; "
+           "round='rs' with an rbits operand, "
+           "from float32 to float16, bfloat16, float8_e4m3*, "
+           "float8_e5m2 or float4_e2m1fn; or any dtype pair without a "
+           "round annotation.";
   }
 
   // Handle conversion from float16 to float32
@@ -2903,6 +2930,23 @@ void CodeGenTileLangCUDA::VisitExpr_(const CallNode *op, std::ostream &os) {
     print_extern_call_stmt(ss.str());
   } else if (op->op.same_as(tl::no_set_max_nreg())) {
     return;
+  } else if (op->op.same_as(tl::prefetch_l1())) {
+    need_copy_h_ = true;
+    std::ostringstream ss;
+    bool is_global = Downcast<IntImm>(op->args[1])->value != 0;
+    ss << "tl::prefetch_l1<" << (is_global ? "true" : "false") << ">";
+    print_extern_call_stmt(ss.str(), 0, 1);
+  } else if (op->op.same_as(tl::prefetchu_l1())) {
+    need_copy_h_ = true;
+    print_extern_call_stmt("tl::prefetchu_l1");
+  } else if (op->op.same_as(tl::prefetch_l2())) {
+    need_copy_h_ = true;
+    std::ostringstream ss;
+    auto priority = Downcast<IntImm>(op->args[1])->value;
+    bool is_global = Downcast<IntImm>(op->args[2])->value != 0;
+    ss << "tl::prefetch_l2<" << priority << ", "
+       << (is_global ? "true" : "false") << ">";
+    print_extern_call_stmt(ss.str(), 0, 2);
   } else if (op->op.same_as(tl::prefetch_tma_descriptor())) {
     need_copy_sm90_h_ = true;
     print_extern_call_stmt("tl::prefetch_tma_descriptor");
@@ -5009,6 +5053,35 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
       TryEmitPackedMathCall_(call, os)) {
     return true;
   }
+  if (op->op.same_as(tl::clamp_symmetric())) {
+    ICHECK_EQ(op->args.size(), 2);
+    DataType dtype = op->dtype;
+    ICHECK(dtype.element_of() == DataType::Float(32) || dtype.is_float16() ||
+           dtype.is_bfloat16())
+        << "tl.clamp_symmetric requires float16, bfloat16, or float32 operands";
+    Target target = Target::Current(/*allow_not_defined=*/true);
+    ICHECK(target.defined() && tl::TargetHasSMVersionGE(target, 86))
+        << "tl.clamp_symmetric requires CUDA SM86 or newer";
+    need_math_h_ = true;
+    std::vector<PrimExpr> args(op->args.begin(), op->args.end());
+    for (PrimExpr &arg : args) {
+      ICHECK_EQ(arg.dtype(), dtype);
+      if (!dtype.is_scalar() && SideEffect(arg) > CallEffectKind::kPure) {
+        Var value("clamp_symmetric_arg", dtype);
+        arg = Let(value, arg, value);
+      }
+    }
+    if (dtype.is_scalar()) {
+      os << "tl::clamp_symmetric(" << PrintExpr(args[0]) << ", "
+         << PrintExpr(args[1]) << ")";
+    } else if ((dtype.is_float16() || dtype.is_bfloat16()) &&
+               CanEmitPackedX2Math(dtype)) {
+      EmitPackedX2Call("clamp_symmetric2", dtype, args, os);
+    } else {
+      EmitPerLaneScalarCall("tl::clamp_symmetric", dtype, args, os);
+    }
+    return true;
+  }
   if (op->op.same_as(tl::fma()) || op->op.same_as(tl::fmul())) {
     // Round-to-nearest multiply / fused multiply-add with a guaranteed
     // instruction boundary (never re-contracted or split by NVCC). Scalar
@@ -6012,6 +6085,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     return;
   }
 
+  // Each ulonglong4 component holds two float32 lanes. Bit-cast the float2
+  // temporary without taking its address, which NVRTC rejects.
   if (op->dtype.is_float() && op->dtype.bits() == 32 &&
       op->dtype.lanes() == 8) {
     std::string v = PrintExpr(op->value);
@@ -6019,7 +6094,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
     for (int i = 0; i < 4; ++i) {
       if (i != 0)
         os << ", ";
-      os << "*(unsigned long long*)&make_float2(" << v << ", " << v << ")";
+      os << "__builtin_bit_cast(uint64_t, make_float2(" << v << ", " << v
+         << "))";
     }
     os << ')';
     return;
@@ -6571,7 +6647,13 @@ void CodeGenTileLangCUDA::AddFunction(const GlobalVar &gvar,
           << "T.CUDASourceCodeKernel expects the lowered device global_symbol "
              "to match entry_name";
     }
+    // Raw user source: reset this function's anchors, emit one directive for
+    // the block, then pass its lines through untouched (a directive inside a
+    // macro continuation or string literal would corrupt it).
+    this->InitFuncState(f);
+    this->BeginRawSource();
     stream << static_cast<std::string>(code_block_source.value()) << "\n\n";
+    this->EndRawSource();
     return;
   }
 

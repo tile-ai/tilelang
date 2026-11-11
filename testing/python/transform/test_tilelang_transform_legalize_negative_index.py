@@ -482,7 +482,10 @@ def test_buffer_store_nested_in_condition():
     @T.prim_func
     def before(A: T.Tensor((1024,), T.float32), flag: T.int32):
         if flag > 0:
-            A[-1] = 42.0
+            if flag <= 0:
+                A[-1025] = 0.0
+            else:
+                A[-1] = 42.0
         else:
             A[-2] = 24.0
 
@@ -494,6 +497,94 @@ def test_buffer_store_nested_in_condition():
             A[1022] = 24.0
 
     _check(before, after)
+
+
+@pytest.mark.parametrize("dead_branch", ["then", "else", "then_without_else"])
+@pytest.mark.parametrize("access", ["load", "store"])
+def test_out_of_range_negative_index_in_unreachable_branch(dead_branch, access):
+    """A zero-width buffer may appear in a branch excluded by the loop bounds."""
+    tir = tvm.tirx
+    empty = tir.decl_buffer((0,), "int32", name="empty")
+    values = tir.decl_buffer((8,), "int32", name="values")
+    out = tir.decl_buffer((1,), "int32", name="out")
+    j = tir.Var("j", "int32")
+    live = tir.BufferStore(out, values[-1], [0])
+    if access == "load":
+        dead = tir.BufferStore(out, empty[j - 1], [0])
+    else:
+        dead = tir.BufferStore(empty, 42, [j - 1])
+
+    if dead_branch == "else":
+        body = tir.IfThenElse(j == 0, live, dead)
+    else:
+        body = tir.IfThenElse(j != 0, dead, live if dead_branch == "then" else None)
+    expected = tir.Evaluate(0) if dead_branch == "then_without_else" else tir.BufferStore(out, values[7], [0])
+    buffers = [empty, values, out]
+    params = [buffer.data for buffer in buffers]
+    buffer_map = {buffer.data: buffer for buffer in buffers}
+    before = tir.PrimFunc(params, tir.For(j, 0, 1, tir.ForKind.PARALLEL, body), buffer_map=buffer_map)
+    after = tir.PrimFunc(params, tir.For(j, 0, 1, tir.ForKind.PARALLEL, expected), buffer_map=buffer_map)
+    _check(before, after)
+
+
+@pytest.mark.parametrize("dead_branch", ["true", "false"])
+def test_out_of_range_negative_index_in_unreachable_if_then_else(dead_branch):
+    @T.prim_func
+    def before(empty: T.Tensor((0,), "int32"), values: T.Tensor((8,), "int32"), out: T.Tensor((1,), "int32")):
+        for j in T.Parallel(1):
+            if dead_branch == "true":
+                out[j] = T.if_then_else(j != 0, empty[j - 1], values[-1])
+            else:
+                out[j] = T.if_then_else(j == 0, values[-1], empty[j - 1])
+
+    @T.prim_func
+    def after(empty: T.Tensor((0,), "int32"), values: T.Tensor((8,), "int32"), out: T.Tensor((1,), "int32")):
+        for j in T.Parallel(1):
+            out[j] = values[7]
+
+    _check(before, after)
+
+
+@pytest.mark.parametrize("branch_kind", ["then", "else", "if_then_else"])
+def test_out_of_range_negative_index_in_runtime_branch_is_rejected(branch_kind):
+    """An unknown condition must not exempt a potentially executed access."""
+
+    @T.prim_func
+    def before(A: T.Tensor((8,), "int32"), B: T.Tensor((1,), "int32"), flag: T.int32):
+        if branch_kind == "if_then_else":
+            B[0] = T.if_then_else(flag > 0, A[-10], A[-1])
+        elif branch_kind == "then":
+            if flag > 0:
+                B[0] = A[-10]
+            else:
+                B[0] = A[-1]
+        else:
+            if flag > 0:
+                B[0] = A[-1]
+            else:
+                B[0] = A[-10]
+
+    with pytest.raises(ValueError, match="out of range"):
+        tl.transform.LegalizeNegativeIndex()(tvm.IRModule.from_expr(before))
+
+
+@pytest.mark.parametrize("use_if_then_else", [False, True])
+def test_out_of_range_negative_index_in_provable_condition_is_rejected(use_if_then_else):
+    """A condition that is always true can still contain an evaluated access."""
+
+    @T.prim_func
+    def before(A: T.Tensor((8,), "int32"), B: T.Tensor((1,), "int32")):
+        for j in T.Parallel(1):
+            if use_if_then_else:
+                B[j] = T.if_then_else(T.Or(A[-10] > 0, j == 0), A[-1], A[-2])
+            else:
+                if T.Or(A[-10] > 0, j == 0):
+                    B[j] = A[-1]
+                else:
+                    B[j] = A[-2]
+
+    with pytest.raises(ValueError, match="out of range"):
+        tl.transform.LegalizeNegativeIndex()(tvm.IRModule.from_expr(before))
 
 
 def test_out_of_range_constant_negative_index_is_rejected():

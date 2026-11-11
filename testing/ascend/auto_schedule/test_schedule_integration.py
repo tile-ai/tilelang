@@ -11,9 +11,41 @@ import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
 from testing.ascend._ir import nodes, calls, allocated_buffer, schedule, statements
+from testing.ascend.auto_schedule._task_utils import _make_per_core_strided_store_program
 
 TILE = 16
 STEPS = 4
+
+
+@tilelang.testing.requires_ascend
+def test_dense_view_gather_finishes_before_dma_overwrite():
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 256), "float32"), B: T.Tensor((256,), "float32"), Out: T.Tensor((64,), "float32")):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 256), "float32")
+            view = T.view(work, shape=(2, 256), strides=(256, 1))
+            out = T.alloc_shared((64,), "float32")
+            with T.Stage(0):
+                T.copy(A, view)
+                with T.SimdVF():
+                    index = T.simd.alloc_var("uint32")
+                    index = T.simd.vdup(T.uint32(0), "uint32")
+                    # Delay the indirect read so an unordered DMA can overtake
+                    # it. Index 256 reaches row 1 despite the row-0 base pointer.
+                    for _ in T.serial(256):
+                        index = T.simd.vadds(index, T.uint32(1))
+                    T.simd.vsts(out[0], T.simd.vgather2(view[0, 0], index))
+                T.copy(B, view[1, :])
+                T.copy(out, Out)
+
+    compiled = tilelang.compile(main, target="ascend", out_idx=-1)
+    a = torch.full((2, 256), 100.0, device="npu")
+    b = torch.full((256,), 200.0, device="npu")
+    expected = torch.full((64,), 100.0)
+    for _ in range(10):
+        torch.testing.assert_close(compiled(a, b).cpu(), expected, rtol=0, atol=0)
 
 
 def _make_padding_live_in_program(first_setter_stage, last_setter_stage, steps=4):
@@ -158,25 +190,6 @@ def make_multi_kernel_program():
             ub1 = T.alloc_shared((64,), "float32")
             T.copy(c, ub1)
             T.copy(ub1, b)
-
-    return main
-
-
-def _make_per_core_strided_store_program():
-    num_tokens = T.dynamic("num_tokens")
-
-    @T.prim_func
-    def main(src: T.Tensor((512,), "float32"), out: T.Tensor((num_tokens,), "float32")):
-        with T.MixedKernel(1) as (_, sid):
-            ub = T.alloc_shared((256,), "float32")
-            T.assume(num_tokens <= 512)
-            T.copy(src[sid * 256 : sid * 256 + 256], ub)
-            num_stages = T.ceildiv(num_tokens - sid * 64, 128)
-            with T.PerCoreTask():
-                for stage in T.Serial(num_stages):
-                    begin = stage * 128 + sid * 64
-                    extent = T.min(num_tokens - begin, 64)
-                    T.copy(ub[stage * 64 : stage * 64 + extent], out[begin : begin + extent])
 
     return main
 

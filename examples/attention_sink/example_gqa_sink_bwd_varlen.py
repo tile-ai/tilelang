@@ -9,15 +9,18 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "../flash_attention"))
 from varlen_utils import generate_random_padding_mask, generate_qkv
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
-    if sm_version == 80:
-        return 64, 32, 1, 128
-    else:
-        return 128, 32, 2, 256
+    # The 128x32 two-stage backward needs ~160 KiB of dynamic shared memory;
+    # sm_86/89/120 allow about 99 KiB per block.
+    optin_smem = get_max_dynamic_shared_memory()
+    if sm_version == 80 or optin_smem < 160 * 1024:
+        return dict(block_M=64, block_N=32, num_stages=1, threads=128)
+    return dict(block_M=128, block_N=32, num_stages=2, threads=256)
 
 
 @tilelang.jit(
@@ -311,6 +314,11 @@ def flashattn_bwd(
     window_size=None,
     sm_scale=None,
     dtype=T.float16,
+    *,
+    block_M,
+    block_N,
+    num_stages,
+    threads,
 ):
     if sm_scale is None:
         sm_scale = (1.0 / dim) ** 0.5
@@ -320,8 +328,6 @@ def flashattn_bwd(
     q_shape = [UQ, heads, dim]
     kv_shape = [UKV, head_kv, dim]
     accum_dtype = T.float32
-
-    block_M, block_N, num_stages, threads = get_bwd_configs()
 
     if window_size is not None:
         assert window_size % block_N == 0, "window_size must be divisible by block_N"
@@ -568,6 +574,7 @@ class _attention(torch.autograd.Function):
             ctx.is_causal,
             window_size=ctx.window_size,
             dtype=dtype,
+            **get_bwd_configs(),
         )
 
         head_kv = H // groups
