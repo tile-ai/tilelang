@@ -9,6 +9,8 @@
 #include <type_traits>
 #endif
 
+#include "../common/arg_reduce.h"
+
 namespace tl {
 
 template <typename T, typename ReduceOp>
@@ -205,6 +207,39 @@ struct SyncThreadsBarrier {
 template <int all_threads> struct NamedBarrier {
   template <int phase = 1> static TL_DEVICE void sync() {
     asm volatile("bar.sync %0, %1;" : : "r"(phase), "r"(all_threads));
+  }
+};
+
+template <bool IsMax, int Width, int Scale, int Offset, int Threads>
+struct ArgAllReduce {
+  static TL_DEVICE void sync() {
+    asm volatile("bar.sync 1, %0;" : : "r"(Threads) : "memory");
+  }
+  template <typename T, typename I>
+  static TL_DEVICE void run(T *value, I *index, T *values = nullptr,
+                            I *indices = nullptr) {
+    static_assert(Width > 0 && (Width & (Width - 1)) == 0);
+    static_assert(Scale > 0 && (Scale & (Scale - 1)) == 0);
+    const int tid = threadIdx.x - Offset;
+    // Each cross-warp exchange has a read-completion barrier before reuse.
+#pragma unroll
+    for (int delta = Width / 2; delta >= Scale; delta /= 2) {
+      T peer_value;
+      I peer_index;
+      if (delta >= 32) {
+        values[tid] = *value;
+        indices[tid] = *index;
+        sync();
+        peer_value = values[tid ^ delta];
+        peer_index = indices[tid ^ delta];
+        sync();
+      } else {
+        unsigned mask = __activemask();
+        peer_value = tl::shfl_xor_sync(mask, *value, delta);
+        peer_index = tl::shfl_xor_sync(mask, *index, delta);
+      }
+      arg_reduce_update<IsMax>(value, index, peer_value, peer_index);
+    }
   }
 };
 
