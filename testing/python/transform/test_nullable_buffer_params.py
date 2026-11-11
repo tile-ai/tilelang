@@ -155,64 +155,18 @@ def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present_o
 
     kernel = _get_nullable_shared_shape_kernel()
 
-    # Compile the JIT kernel on cuda:0 first. TileLang's auto-detected CUDA
-    # target is derived from the current device's compute capability.
+    # Compile and run on cuda:0 first. The same-architecture cuda:1 device can
+    # then execute the generated kernel without an architecture mismatch.
     with torch.cuda.device(0):
         out_cuda0 = torch.randn((1,), device="cuda:0", dtype=torch.float16)
         out_cuda0_ref = out_cuda0.clone()
         kernel(None, None, out_cuda0)
         torch.testing.assert_close(out_cuda0, out_cuda0_ref)
 
-    # Run the same compiled kernel on cuda:1. The device context restores the
-    # previous current CUDA device after the call.
+    # This context restores the previously-current CUDA device on exit.
     with torch.cuda.device(1):
         out_cuda1 = torch.randn((1,), device="cuda:1", dtype=torch.float16)
         out_cuda1_ref = out_cuda1.clone()
-        kernel(None, None, out_cuda1)
-        torch.testing.assert_close(out_cuda1, out_cuda1_ref)
-    """Test that unused buffers sharing a symbolic shape var can both be None.
-
-    Repro for:
-      - Two (or more) unused buffers have shape (m,)
-      - All buffers that mention `m` are passed as None
-      - Another (non-null) tensor argument exists, but does not mention `m`
-
-    TVM requires at least one non-null buffer to bind `m` when it appears in multiple
-    buffers. TileLang should handle this gracefully for truly-unused nullable buffers.
-    """
-
-    @tilelang.jit(execution_backend="tvm_ffi")
-    def get_kernel():
-        m = T.dynamic("m")
-
-        @T.prim_func
-        def test_kernel(
-            a: T.Tensor[(m,), T.float16],
-            b: T.Tensor[(m,), T.float16],
-            out: T.Tensor[(1,), T.float16],
-        ):
-            with T.Kernel(1, threads=32):
-                fragment = T.alloc_fragment((1,), T.float32)
-                T.copy(out[0], fragment)
-                T.copy(fragment, out[0])
-
-        return test_kernel
-
-    kernel = get_kernel()
-
-    out = torch.randn((1,), device="cuda", dtype=torch.float16)
-    out_ref = out.clone()
-
-    # Both `a` and `b` are None; they also share the symbolic shape var `m`.
-    # This should run because `a`/`b` are unused by the kernel body.
-    kernel(None, None, out)
-    torch.testing.assert_close(out, out_ref)
-
-    # Exercise device-ID binding on a non-default CUDA device when available.
-    if torch.cuda.device_count() >= 2:
-        out_cuda1 = torch.randn((1,), device="cuda:1", dtype=torch.float16)
-        out_cuda1_ref = out_cuda1.clone()
-
         kernel(None, None, out_cuda1)
         torch.testing.assert_close(out_cuda1, out_cuda1_ref)
 
