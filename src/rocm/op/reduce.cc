@@ -6,6 +6,7 @@
 #include "backend/common/op/reduce.h"
 
 #include "backend/common/target_utils.h"
+#include "rocm/target_utils.h"
 
 #include <sstream>
 
@@ -17,8 +18,13 @@ using namespace tirx;
 namespace rocm {
 
 struct Reduce : backend::ReduceLowerer<Reduce> {
-  static bool AllReduceNeedsWorkspace(int reducing_threads, int, Target) {
-    return reducing_threads > 32;
+  static bool AllReduceNeedsWorkspace(int reducing_threads, int,
+                                      Target target) {
+    // tl::AllReduce exchanges through shared memory only when the step crosses
+    // a wavefront (offset = threads / 2 >= wave size). Within a wavefront it
+    // uses shfl_xor and never touches the workspace, but a workspace in the IR
+    // still costs LDS and makes ThreadSync add barriers around the reduce.
+    return reducing_threads > TargetRocmGetWarpSize(target);
   }
 
   static bool SupportsFp16Bf16NanReduce(Target) { return false; }
