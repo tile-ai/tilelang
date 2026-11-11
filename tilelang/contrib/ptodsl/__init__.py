@@ -27,6 +27,7 @@ from .simd_inst import (
     vsqrt_0ulp_ftz_false,
 )
 from .simt import (
+    integer_atomic,
     fp8_byte_load,
     fp8_byte_store,
     scalar_binary_fp8,
@@ -54,6 +55,7 @@ __all__ = [
     "finalize_mixed_kernel",
     "if_then_else",
     "logical_not",
+    "integer_atomic",
     "mixed_kernel_section",
     "read_gm_bypass_dcache",
     "redux_add",
