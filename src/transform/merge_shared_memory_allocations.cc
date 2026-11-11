@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <sstream>
@@ -559,11 +560,17 @@ private:
       if (align_it != shmem_alignment_map_.end()) {
         alignment = std::max(alignment, align_it->second);
       }
+      // Keep every arena byte offset convertible to an element index: a dtype
+      // whose element footprint is not a divisor of `align_bytes_` (e.g. the
+      // odd-lane `int4x3`, whose element spans 1.5 bytes) needs a start and a
+      // slice size on its own footprint boundary.
+      alignment = AlignForElemStorage(alignment, alloc->buffer->dtype);
 
       cursor = AlignPrimExpr(cursor, alignment);
       if (size_expr.dtype() != offset_dtype) {
         size_expr = cast(offset_dtype, size_expr);
       }
+      size_expr = RoundSizeForElemStorage(size_expr, alloc->buffer->dtype);
       buffer_byte_offsets_[var] = cursor;
       PrimExpr buf_end = cursor + size_expr;
       total_size = max(total_size, buf_end);
@@ -1036,6 +1043,32 @@ private:
     return indexdiv(value + adjust, align_expr) * align_expr;
   }
 
+  /*!
+   * \brief Round a byte size up to the dtype's element footprint.
+   *
+   * The non-alias lowering shifts a buffer's indices by whole elements, so the
+   * next buffer may only start on an element boundary.  A no-op for every
+   * dtype whose element footprint divides the tight byte size; an odd-lane
+   * packed dtype such as `int4x3` (1.5 bytes per element) is padded instead.
+   */
+  PrimExpr RoundSizeForElemStorage(const PrimExpr &size_bytes,
+                                   DataType dtype) const {
+    return AlignPrimExpr(size_bytes,
+                         static_cast<int>(GetElemStorageAlignmentBytes(dtype)));
+  }
+
+  /*!
+   * \brief Raise an alignment to a multiple of the dtype's element footprint.
+   *
+   * `ByteOffsetToElemOffset` divides the arena byte offset by the element
+   * footprint, so the offset has to be an exact multiple of it.
+   */
+  static int AlignForElemStorage(int alignment, DataType dtype) {
+    int64_t elem_alignment = GetElemStorageAlignmentBytes(dtype);
+    int64_t base = std::max<int64_t>(alignment, 1);
+    return static_cast<int>(std::lcm(base, elem_alignment));
+  }
+
   // Event entry in liveness analysis
   struct EventEntry {
     // variables we generate
@@ -1374,14 +1407,20 @@ private:
       }
 
       const AllocBufferNode *alloc = shmem_allocs_.at(var);
+      info.alignment =
+          AlignForElemStorage(info.alignment, alloc->buffer->dtype);
       PrimExpr size_expr = GetBufferStorageSizeBytes(alloc->buffer);
       info.size_dtype = size_expr.dtype();
-      info.size_expr = size_expr;
+      info.size_expr = RoundSizeForElemStorage(size_expr, alloc->buffer->dtype);
 
       auto const_size = GetRef<AllocBuffer>(alloc).ConstantAllocationSize();
       if (const_size.has_value()) {
-        info.const_size_bytes = GetBufferStorageSizeBytes(
+        int64_t const_bytes = GetBufferStorageSizeBytes(
             static_cast<int64_t>(const_size.value()), alloc->buffer->dtype);
+        int64_t elem_alignment =
+            GetElemStorageAlignmentBytes(alloc->buffer->dtype);
+        info.const_size_bytes = (const_bytes + elem_alignment - 1) /
+                                elem_alignment * elem_alignment;
       }
 
       buf_infos.push_back(std::move(info));

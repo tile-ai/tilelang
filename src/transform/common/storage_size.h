@@ -6,6 +6,7 @@
 #include <tvm/tirx/op.h>
 
 #include <cstdint>
+#include <numeric>
 
 namespace tvm {
 namespace tl {
@@ -19,49 +20,61 @@ inline bool IsPacked4BitStorage(DataType dtype) {
 /*!
  * \brief Return the physical storage bits of one element of \p dtype.
  *
- * One element is a single scalar for scalar dtypes and a whole vector for
- * vector dtypes, e.g. 32 for `int32`, 4 for `float4_e2m1fn`, 128 for
- * `float16x8`.
+ * This is the width the merged shared-memory arena reserves per element: 32
+ * for `int32`, 4 for `float4_e2m1fn`, 128 for `float16x8`.  Only four-bit
+ * dtypes pack two values into a byte; every other dtype -- including sub-byte
+ * vectors such as `float6_e3m2fnx4`, which is four bytes wide rather than its
+ * 24 declared bits -- is stored as `DataType::bytes() * lanes()` whole bytes,
+ * which is what `GetBufferStorageSizeBytes` reserves.
  */
 inline int64_t GetElemStorageBits(DataType dtype) {
-  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+  if (IsPacked4BitStorage(dtype)) {
+    return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+  }
+  return static_cast<int64_t>(dtype.bytes()) * dtype.lanes() * 8;
+}
+
+/*!
+ * \brief Return the byte granularity at which an element of \p dtype starts.
+ *
+ * Elements can only start on byte offsets that are multiples of
+ * `GetElemStorageBits(dtype) / gcd(GetElemStorageBits(dtype), 8)`: two-per-byte
+ * elements start anywhere (1), `float16x8` on a multiple of 16, and elements
+ * spanning an odd number of bytes -- `int8x3`, or the odd-lane packed
+ * `int4x3` -- only on a multiple of 3.
+ */
+inline int64_t GetElemStorageAlignmentBytes(DataType dtype) {
+  int64_t elem_bits = GetElemStorageBits(dtype);
+  ICHECK_GT(elem_bits, 0) << "dtype " << dtype << " has no storage footprint";
+  return elem_bits / std::gcd<int64_t>(elem_bits, 8);
 }
 
 /*!
  * \brief Convert a byte offset into the merged shared-memory arena to the
  *        matching element offset of \p dtype.
  *
- * Packed four-bit dtypes are stored two logical elements per byte, so their
- * element offsets are not a whole number of bytes: `float4_e2m1fn` and `int4`
- * hold `8 / GetElemStorageBits(dtype)` logical elements per byte.
- * `DataType::bytes() * lanes()` rounds such an element up to a byte and would
- * halve the offset.
+ * An element starts every `GetElemStorageBits(dtype)` bits whether or not it
+ * packs, so the offset is simply `byte_offset * 8 / GetElemStorageBits(dtype)`.
+ * Dividing by `dtype.bytes() * dtype.lanes()` instead rounds a four-bit element
+ * up to a whole byte and halves the offset, and would also ignore that a tight
+ * sub-byte vector such as `float6_e3m2fnx4` occupies four bytes.
  *
- * Every other dtype -- including sub-byte ones that are not packed, such as
- * `float6_e3m2fnx4` -- is sized as `dtype.bytes() * lanes()` bytes per element
- * by `GetBufferStorageSizeBytes`, and is converted the same way so that sizing
- * and offsetting agree.
+ * Callers must place the buffer on a `GetElemStorageAlignmentBytes(dtype)`
+ * boundary; a constant \p byte_offset is then exactly representable and the
+ * division has no remainder.
  */
 inline PrimExpr ByteOffsetToElemOffset(const PrimExpr &byte_offset,
                                        DataType dtype) {
   DataType index_dtype = byte_offset.dtype();
-  if (IsPacked4BitStorage(dtype)) {
-    int64_t elem_bits = GetElemStorageBits(dtype);
-    if (elem_bits < 8) {
-      // float4_e2m1fn / int4: two logical elements per byte.
-      return byte_offset * tirx::make_const(index_dtype, 8 / elem_bits);
-    }
-    if (elem_bits % 8 == 0) {
-      return indexdiv(byte_offset,
-                      tirx::make_const(index_dtype, elem_bits / 8));
-    }
-    // An odd lane count is not a whole number of elements per byte but still
-    // packs: a logical element spans lanes() / 2 bytes.
-    return indexdiv(byte_offset * tirx::make_const(index_dtype, 2),
-                    tirx::make_const(index_dtype, dtype.lanes()));
+  int64_t elem_bits = GetElemStorageBits(dtype);
+  ICHECK_GT(elem_bits, 0) << "dtype " << dtype << " has no storage footprint";
+  if (const auto *imm = byte_offset.as<IntImmNode>()) {
+    ICHECK_EQ(imm->value * 8 % elem_bits, 0)
+        << "Shared-memory arena byte offset " << imm->value
+        << " is not representable as an element index of " << dtype;
   }
-  return indexdiv(byte_offset,
-                  tirx::make_const(index_dtype, dtype.bytes() * dtype.lanes()));
+  return indexdiv(byte_offset * tirx::make_const(index_dtype, 8),
+                  tirx::make_const(index_dtype, elem_bits));
 }
 
 /*! \brief Return the physical storage bytes for a constant element count. */

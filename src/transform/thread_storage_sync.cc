@@ -1753,9 +1753,10 @@ private:
     }
     // The touched intervals are element offsets into each side's own view of
     // the buffer (the `tvm_access_ptr` ptype), so they are only comparable when
-    // both views use equally wide elements.  An `int4` and a `uint8` view of
-    // the same alias can start at the same byte while their element offsets
-    // differ, which must stay conservative.
+    // both views use equally wide physical elements.  An `int4`/`uint8` pair,
+    // or a `float6_e3m2fnx4`/`int8x3` pair (24 declared bits each, but 16 and 3
+    // stored bytes), can start at the same alias byte while their element
+    // offsets differ, which must stay conservative.
     if (GetElemStorageBits(lhs.dtype) != GetElemStorageBits(rhs.dtype)) {
       return false;
     }
