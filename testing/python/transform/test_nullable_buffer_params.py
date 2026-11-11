@@ -139,6 +139,14 @@ def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present()
     kernel(None, None, out)
     torch.testing.assert_close(out, out_ref)
 
+    # Exercise device-ID binding on a non-default CUDA device when available.
+    if torch.cuda.device_count() >= 2:
+        out_cuda1 = torch.randn((1,), device="cuda:1", dtype=torch.float16)
+        out_cuda1_ref = out_cuda1.clone()
+
+        kernel(None, None, out_cuda1)
+        torch.testing.assert_close(out_cuda1, out_cuda1_ref)
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
