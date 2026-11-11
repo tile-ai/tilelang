@@ -9,6 +9,8 @@ import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 from tilelang import tvm
 
+pytestmark = pytest.mark.pto
+
 
 def _kernel(mixed=False, automatic=False):
     dtype, vec, width = "float32", 64, 2048
@@ -34,12 +36,14 @@ def _kernel(mixed=False, automatic=False):
     return main
 
 
-@pytest.mark.parametrize("with_lanes", [False, True])
-def test_explicit_simd_layout_preserves_loop_kind(with_lanes):
+@pytest.mark.parametrize(
+    "with_lanes,automatic,serial_wrapper", [(False, False, False), (True, False, False), (True, True, False), (True, True, True)]
+)
+def test_explicit_simd_layout_preserves_loop_kind(with_lanes, automatic, serial_wrapper):
     from tilelang.ascend import transform as ascend
     from tilelang.ascend.target import normalize_pto_target
 
-    mod = tvm.IRModule({"main": _kernel(mixed=True)})
+    mod = tvm.IRModule({"main": _kernel(mixed=True, automatic=automatic)})
     mod = tvm.tirx.transform.BindTarget(normalize_pto_target("pto"))(mod)
     lowered = tilelang.transform.MaterializeKernelLaunch(
         lower_grid_binding=True,
@@ -49,28 +53,27 @@ def test_explicit_simd_layout_preserves_loop_kind(with_lanes):
         launch_dim_tags=["cthread"],
     )(mod)
     lowered = tilelang.transform.AddWrapperForSingleBufStore()(lowered)
-    if not with_lanes:
+    if not with_lanes or serial_wrapper:
 
-        def strip_lanes(node):
+        def prepare_vf(node):
             if isinstance(node, tvm.tirx.SBlock) and node.name_hint == "SIMD_VF":
+                body = node.body
+                if serial_wrapper:
+                    body = tvm.tirx.For(tvm.tirx.Var("repeat", "int32"), 0, 2, tvm.tirx.ForKind.SERIAL, body)
                 return tvm.tirx.SBlock(
                     node.iter_vars,
                     node.reads,
                     node.writes,
                     node.name_hint,
-                    node.body,
+                    body,
                     init=node.init,
                     alloc_buffers=node.alloc_buffers,
                     match_buffers=node.match_buffers,
-                    annotations={key: value for key, value in node.annotations.items() if key != "tl.simdvf_lanes"},
+                    annotations={key: value for key, value in node.annotations.items() if with_lanes or key != "tl.simdvf_lanes"},
                 )
 
         lowered = tvm.IRModule(
-            {
-                "main": lowered["main"].with_body(
-                    tvm.tirx.stmt_functor.ir_transform(lowered["main"].body, None, strip_lanes, ["tirx.SBlock"])
-                )
-            }
+            {"main": lowered["main"].with_body(tvm.tirx.stmt_functor.ir_transform(lowered["main"].body, None, prepare_vf, ["tirx.SBlock"]))}
         )
     with normalize_pto_target("pto"):
         result = ascend.AscendLayoutInference()(lowered)
@@ -79,7 +82,10 @@ def test_explicit_simd_layout_preserves_loop_kind(with_lanes):
     tvm.tirx.stmt_functor.post_order_visit(
         result["main"].body, lambda n: loops.append(n) if isinstance(n, tvm.tirx.For) and n.kind == tvm.tirx.ForKind.PARALLEL else None
     )
-    assert len(loops) == 2
+    assert len(loops) == (3 if automatic else 2)
+    for loop in loops:
+        if "pto_parallel_loop_layout" not in loop.annotations:
+            assert "parallel_loop_layout" not in loop.annotations
 
 
 @pytest.mark.parametrize("automatic_sibling", [False, True])
@@ -110,18 +116,19 @@ def test_automatic_parallel_inside_explicit_simd_parallel_rejected(automatic_sib
 
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("mixed", [False, True], ids=["explicit", "mixed"])
-def test_explicit_simd_blocks_execute_once(mixed):
-    output = tilelang.compile(_kernel(mixed), target="pto", out_idx=-1)()
+@pytest.mark.parametrize("automatic", [False, True], ids=["alone", "automatic-sibling"])
+def test_explicit_simd_blocks_execute_once(mixed, automatic):
+    output = tilelang.compile(_kernel(mixed, automatic), target="pto", out_idx=-1)()
     expected = torch.full((2, 4096), 123.0)
     expected[:, :2048] = 124.0
     if mixed:
         expected[:, 2048:2080] = 1.0
+    if automatic:
+        expected[0, :128] = 125.0
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 def test_fp32_explicit_and_automatic_units_keep_both_codegen_paths():
-    # Keep this a lowering check: this combined FP32/128-lane example exceeds
-    # the current PTOAS/Bisheng VF stack budget during device compilation.
     from tilelang.ascend.target import normalize_pto_target
     from tilelang.engine.lower import lower
 

@@ -1838,7 +1838,10 @@ private:
       }
       // Descend for the lane annotations; only the kLayoutMap writeback is
       // skipped for the block itself.
+      bool saved_inside_pto_simd_vf = inside_pto_simd_vf_;
+      inside_pto_simd_vf_ = true;
       SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      inside_pto_simd_vf_ = saved_inside_pto_simd_vf;
       if (block.same_as(GetRef<SBlock>(op))) {
         return ffi::GetRef<Stmt>(op);
       }
@@ -1888,6 +1891,12 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
+    if (inside_pto_simd_vf_ && op->kind == ForKind::kParallel &&
+        pto::UsesExplicitSIMD(op->body)) {
+      // Explicit SIMD loops already iterate vector blocks. Generic layout
+      // annotations would flatten and unroll them as scalar lane loops.
+      return GetRef<Stmt>(op);
+    }
     if (!result_.for_map.count(GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
@@ -1933,6 +1942,7 @@ private:
 
 private:
   const LayoutInferenceResult result_;
+  bool inside_pto_simd_vf_ = false;
 };
 
 tvm::transform::Pass AscendLayoutInference() {
