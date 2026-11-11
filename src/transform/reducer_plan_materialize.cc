@@ -130,6 +130,8 @@ struct EpochInfo {
   int64_t thread_extent{-1}; // participant extent at the init site
   int64_t thread_min{0};
   std::vector<UpdateSite> updates;
+  std::vector<UpdateSite>
+      scales; // tl.reducer_scale sites; never propose a plan
   Buffer dst;
   int64_t batch{1};
   // False when some structural prerequisite for plan analysis is missing
@@ -232,7 +234,7 @@ private:
       }
       return;
     }
-    if (op->op.same_as(reducer_update())) {
+    if (op->op.same_as(reducer_update()) || op->op.same_as(reducer_scale())) {
       const auto *load = op->args[0].as<BufferLoadNode>();
       auto it = load != nullptr ? epochs_.find(load->buffer->data.get())
                                 : epochs_.end();
@@ -240,9 +242,10 @@ private:
         EpochInfo *epoch = &it->second;
         if (cur_loop_layout_.defined()) {
           ReducerUpdateArgs update = ParseReducerUpdate(op);
-          epoch->updates.push_back(UpdateSite{
-              cur_loop_layout_.value(), cur_loop_vars_, update.indices,
-              update.value, cur_serial_vars_, cur_serial_extents_});
+          (op->op.same_as(reducer_scale()) ? epoch->scales : epoch->updates)
+              .push_back(UpdateSite{cur_loop_layout_.value(), cur_loop_vars_,
+                                    update.indices, update.value,
+                                    cur_serial_vars_, cur_serial_extents_});
         } else {
           epoch->analyzable = false;
         }
@@ -597,6 +600,65 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
 // Phase C: materialization
 // ---------------------------------------------------------------------------
 
+/*! \brief Every thread holding a partial of logical output i must run the
+ *  tl.reducer_scale for i, or part of the sum would not be scaled. The storage
+ *  layout says which threads hold it, the scale site's loop layout which
+ * threads run it. Both are enumerated: tiles are small and these are constants.
+ */
+void CheckScaleSites(const EpochInfo &epoch, const Fragment &storage) {
+  arith::Analyzer analyzer;
+  auto thread_of = [&](const Fragment &layout, const Array<PrimExpr> &vars,
+                       int64_t rep) -> int64_t {
+    PrimExpr thread = analyzer.Simplify(layout->ForwardThread(
+        vars, Optional<PrimExpr>(IntImm(DataType::Int(32), rep))));
+    const int64_t *value = as_const_int(thread);
+    ICHECK(value) << "T.reducer_scale needs constant thread mappings, got "
+                  << thread;
+    return *value;
+  };
+  for (const UpdateSite &site : epoch.scales) {
+    ICHECK_EQ(site.indices.size(), site.loop_vars.size())
+        << "T.reducer_scale indices must be the enclosing T.Parallel loop "
+           "variables, in order.";
+    for (size_t i = 0; i < site.indices.size(); ++i) {
+      ICHECK(site.indices[i].same_as(site.loop_vars[i]))
+          << "T.reducer_scale indices must be the enclosing T.Parallel loop "
+             "variables, in order.";
+    }
+    const int64_t *n_storage_rep = as_const_int(storage->ReplicateExtent());
+    const int64_t *n_site_rep =
+        as_const_int(site.loop_layout->ReplicateExtent());
+    ICHECK(n_storage_rep && n_site_rep)
+        << "T.reducer_scale needs constant replication";
+    std::vector<int64_t> index(site.indices.size(), 0);
+    Array<PrimExpr> shape = storage->InputShape();
+    while (true) {
+      Array<PrimExpr> vars;
+      for (int64_t v : index) {
+        vars.push_back(IntImm(DataType::Int(32), v));
+      }
+      std::unordered_set<int64_t> runs;
+      for (int64_t rep = 0; rep < *n_site_rep; ++rep) {
+        runs.insert(thread_of(site.loop_layout, vars, rep));
+      }
+      for (int64_t rep = 0; rep < *n_storage_rep; ++rep) {
+        ICHECK(runs.count(thread_of(storage, vars, rep)))
+            << "T.reducer_scale on `" << epoch.buffer
+            << "` does not run on every thread holding a partial of the "
+               "scaled output; thread "
+            << thread_of(storage, vars, rep) << " would keep its unscaled.";
+      }
+      int d = static_cast<int>(index.size()) - 1;
+      while (d >= 0 && ++index[d] == *as_const_int(shape[d])) {
+        index[d--] = 0;
+      }
+      if (d < 0) {
+        break;
+      }
+    }
+  }
+}
+
 class ReducerPlanAndMaterializeRewriter : public IRMutatorWithAnalyzer {
 public:
   static PrimFunc Substitute(PrimFunc f) {
@@ -753,6 +815,7 @@ public:
         } else {
           DLOG(INFO) << msg;
         }
+        CheckScaleSites(epoch, decision->storage_layout);
         rewriter.narrow_decisions_.emplace(var, *decision);
         // Destination-layout overrides must be registered BEFORE traversal:
         // LayoutInference publishes the stale entry on every block, and the
@@ -953,6 +1016,9 @@ private:
     if (call->op.same_as(reducer_update())) {
       return MaterializeUpdate(call);
     }
+    if (call->op.same_as(reducer_scale())) {
+      return MaterializeScale(call);
+    }
     if (call->op.same_as(FinalizeReducerV2Op::Get())) {
       return MaterializeFinalize(call);
     }
@@ -1112,6 +1178,34 @@ private:
     // once, no matter how the loop layout replicates iterations over threads.
     return AttrStmt(plan.new_buffer->data, attr::kParallelMultiplicity,
                     IntImm(DataType::Int(32), 1), store);
+  }
+
+  Stmt MaterializeScale(const CallNode *call) {
+    ReducerUpdateArgs scale = ParseReducerUpdate(call);
+    auto it = plans_.find(scale.reducer->data.get());
+    ICHECK(it != plans_.end())
+        << "reducer_scale on `" << scale.reducer
+        << "` before reducer_init (should have been rejected by "
+           "VerifyReducerEpoch)";
+    const Plan &plan = it->second;
+    ICHECK(plan.narrow) << "T.reducer_scale on `" << scale.reducer
+                        << "` needs per-thread partials, but this reducer "
+                           "fell back to the wide plan.";
+    // Every replica multiplies its own partial: no multiplicity guard.
+    PrimExpr factor = VisitExpr(scale.value);
+    auto scale_one = [&](const Buffer &target, const Array<PrimExpr> &indices) {
+      return BufferStore(target, BufferLoad(target, indices) * factor, indices);
+    };
+    if (!plan.packed) {
+      return scale_one(plan.new_buffer, scale.indices);
+    }
+    Array<Stmt> seq;
+    for (int lane = 0; lane < 2; ++lane) {
+      Array<PrimExpr> indices = scale.indices;
+      indices.push_back(IntImm(DataType::Int(32), lane));
+      seq.push_back(scale_one(plan.packed_buffer, indices));
+    }
+    return SeqStmt(seq);
   }
 
   Stmt MaterializeFinalize(const CallNode *call) {

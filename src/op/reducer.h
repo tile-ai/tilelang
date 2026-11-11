@@ -168,14 +168,23 @@ public:
 /// straight-line code, so no cross-statement write ordering is lost).
 TVM_DLL const Op &reducer_update();
 
-/*! \brief Parsed form of a tl.reducer_update call. */
+/// tl.reducer_scale(acc[indices], factor): multiply the accumulated sum of the
+/// logical output selected by `indices` by `factor`, as if every contribution
+/// so far had been scaled, without communicating. Same argument shape as
+/// tl.reducer_update. Valid on "sum" reducers only, since multiplication
+/// distributes over the sum, and only in a T.Parallel nest that runs on every
+/// thread holding a partial of that output, with a factor those threads agree
+/// on; ReducerPlanAndMaterialize checks the thread sets.
+TVM_DLL const Op &reducer_scale();
+
+/*! \brief Parsed form of a tl.reducer_update or tl.reducer_scale call. */
 struct ReducerUpdateArgs {
   Buffer reducer;
   ffi::Array<PrimExpr> indices; ///< logical output indices
   PrimExpr value;               ///< contribution expression
 };
 
-/*! \brief Parse and validate a tl.reducer_update call. */
+/*! \brief Parse and validate a tl.reducer_update or tl.reducer_scale call. */
 ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call);
 
 /// T.finalize_reducer(acc, dst): complete the epoch's cross-participant

@@ -440,6 +440,50 @@ def reducer_update(target: tirx.BufferLoad, value) -> tirx.PrimExpr:
     )
 
 
+def reducer_scale(target: tirx.BufferLoad, factor) -> tirx.PrimExpr:
+    """Multiply the sum accumulated so far for one logical output by `factor`.
+
+    The result is what scaling every earlier contribution would have given, so
+    no thread has to communicate. It lets a running sum that is rescaled at each
+    step, as in online softmax, be reduced once at the end::
+
+        for k in T.serial(n):
+            for i in T.Parallel(M):
+                T.reducer_scale(acc[i], scale[i])
+            for i, j in T.Parallel(M, N):
+                T.reducer_update(acc[i], x[i, j])
+        T.finalize_reducer(acc, dst)
+
+    Only "sum" reducers can be scaled. The enclosing `T.Parallel` must run on
+    every thread holding a partial of `acc[indices]`, with its loop variables as
+    `indices`; the compiler rejects anything else. Each replica applies the
+    factor to its own partial, so `factor` must be equal on all of them, which a
+    fragment read with the same indices gives.
+
+    Args:
+        target (tirx.BufferLoad): `acc[indices]` selecting the logical output.
+        factor: Scale expression (cast to the reducer dtype if needed).
+
+    Returns:
+        tirx.Call: Handle to the reducer_scale intrinsic call.
+    """
+    if not isinstance(target, tirx.BufferLoad):
+        raise ValueError(
+            f"reducer_scale expects `acc[indices]` as its first argument, got {type(target)}; the reducer cannot be read or aliased."
+        )
+    dtype = target.buffer.dtype
+    if isinstance(factor, (int, float)):
+        factor = tirx.const(factor, dtype)
+    elif isinstance(factor, tirx.PrimExpr) and factor.dtype != dtype:
+        factor = tirx.Cast(dtype, factor)
+    return tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.reducer_scale"),
+        target,
+        factor,
+    )
+
+
 def finalize_reducer(
     reducer: tirx.Buffer, dst: tirx.Buffer | None = None, batch: int = 1, annotations: dict | None = None
 ) -> tirx.PrimExpr:

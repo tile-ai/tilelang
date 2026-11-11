@@ -423,7 +423,8 @@ TIR_REGISTER_TL_TILE_OP(ReducerInitOp, reducer_init)
 // ---------------------------------------------------------------------------
 
 ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call) {
-  ICHECK(call->op.same_as(reducer_update()));
+  ICHECK(call->op.same_as(reducer_update()) ||
+         call->op.same_as(reducer_scale()));
   ICHECK_EQ(call->args.size(), 2)
       << "reducer_update expects (acc[indices], contribution value)";
   const auto *load = call->args[0].as<BufferLoadNode>();
@@ -441,6 +442,11 @@ ReducerUpdateArgs ParseReducerUpdate(const tirx::CallNode *call) {
 }
 
 TIR_DEFINE_TL_BUILTIN(reducer_update)
+    .set_num_inputs(2)
+    .set_attr<TCallEffectKind>("TCallEffectKind",
+                               Integer(CallEffectKind::kOpaque));
+
+TIR_DEFINE_TL_BUILTIN(reducer_scale)
     .set_num_inputs(2)
     .set_attr<TCallEffectKind>("TCallEffectKind",
                                Integer(CallEffectKind::kOpaque));

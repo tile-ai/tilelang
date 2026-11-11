@@ -96,6 +96,7 @@ from .reduce_op import (
     reduce_bitxor,  # noqa: F401
     reducer_init,  # noqa: F401
     reducer_update,  # noqa: F401
+    reducer_scale,  # noqa: F401
     finalize_reducer,  # noqa: F401
     warp_reduce_sum,  # noqa: F401
     warp_reduce_max,  # noqa: F401
@@ -268,6 +269,7 @@ _LOCAL_EXPORTS = (
     "fill",
     "reducer_init",
     "reducer_update",
+    "reducer_scale",
     "finalize_reducer",
     "gemm",
     "gemm_blockscaled",

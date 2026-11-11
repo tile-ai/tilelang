@@ -172,6 +172,33 @@ private:
       }
       return;
     }
+    if (op->op.same_as(reducer_scale())) {
+      const auto *load = op->args[0].as<BufferLoadNode>();
+      ICHECK(load) << "reducer_scale target must be written as "
+                      "`acc[indices]` in the first argument position, got "
+                   << op->args[0];
+      Var var = load->buffer->data;
+      RequireReducer(var, "reducer_scale");
+      auto op_str = info_.at(var.get()).Get("op");
+      if (!op_str || op_str.value().cast<String>() != "sum") {
+        LOG(FATAL) << "T.reducer_scale on reducer `" << var
+                   << "`: only a sum reducer can be scaled.";
+      }
+      if (state_.at(var) != EpochState::kActive) {
+        LOG(FATAL) << "T.reducer_scale on reducer `" << var
+                   << "` outside its epoch: call it after T.reducer_init and "
+                      "before T.finalize_reducer.";
+      }
+      if (parallel_depth_ == 0) {
+        LOG(FATAL) << "T.reducer_scale on reducer `" << var
+                   << "` outside any T.Parallel loop is not supported.";
+      }
+      for (const auto &index : load->indices) {
+        VisitExpr(index);
+      }
+      VisitExpr(op->args[1]);
+      return;
+    }
     if (op->op.same_as(reducer_update())) {
       const auto *load = op->args[0].as<BufferLoadNode>();
       ICHECK(load) << "reducer_update target must be written as "
