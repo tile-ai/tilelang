@@ -174,6 +174,8 @@ def Pipelined(
     res : frame.ForFrame
         The ForFrame.
     """
+    if num_stages < 0:
+        raise ValueError(f"Pipelined num_stages must be >= 0, got {num_stages}")
     if stop is None:
         stop = start
         start = IntImm(start.dtype, 0) if hasattr(start, "dtype") else 0
