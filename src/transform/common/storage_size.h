@@ -16,6 +16,45 @@ inline bool IsPacked4BitStorage(DataType dtype) {
          (dtype.bits() == 4 && (dtype.is_int() || dtype.is_uint()));
 }
 
+/*!
+ * \brief Return the physical storage bits of one element of \p dtype.
+ *
+ * One element is a single scalar for scalar dtypes and a whole vector for
+ * vector dtypes, e.g. 32 for `int32`, 4 for `float4_e2m1fn`, 128 for
+ * `float16x8`.
+ */
+inline int64_t GetElemStorageBits(DataType dtype) {
+  return static_cast<int64_t>(dtype.bits()) * dtype.lanes();
+}
+
+/*!
+ * \brief Convert a byte offset into the merged shared-memory arena to the
+ *        matching element offset of \p dtype.
+ *
+ * Sub-byte dtypes are packed, so an element offset is not a whole number of
+ * bytes: one byte holds `8 / GetElemStorageBits(dtype)` logical elements for
+ * `float4_e2m1fn`, `int4` and `uint4`.  `DataType::bytes() * lanes()` rounds
+ * such an element up to a byte and would halve the offset.
+ *
+ * Dtypes that fit neither a fractional nor a whole number of elements per byte
+ * (e.g. `float6_*`) are sized as one element per byte by
+ * `GetBufferStorageSizeBytes`, so they are converted the same way, keeping the
+ * two views consistent.
+ */
+inline PrimExpr ByteOffsetToElemOffset(const PrimExpr &byte_offset,
+                                       DataType dtype) {
+  DataType index_dtype = byte_offset.dtype();
+  int64_t elem_bits = GetElemStorageBits(dtype);
+  if (elem_bits % 8 == 0) {
+    return indexdiv(byte_offset, tirx::make_const(index_dtype, elem_bits / 8));
+  }
+  if (8 % elem_bits == 0) {
+    return byte_offset * tirx::make_const(index_dtype, 8 / elem_bits);
+  }
+  return indexdiv(byte_offset,
+                  tirx::make_const(index_dtype, dtype.bytes() * dtype.lanes()));
+}
+
 /*! \brief Return the physical storage bytes for a constant element count. */
 inline int64_t GetBufferStorageSizeBytes(int64_t num_elements, DataType dtype) {
   if (IsPacked4BitStorage(dtype)) {

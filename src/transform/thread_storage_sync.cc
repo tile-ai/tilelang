@@ -24,6 +24,7 @@
 #include "./common/thread_sync_types.h"
 #include "arith/ir_mutator_with_analyzer.h"
 #include "common/attr.h"
+#include "common/storage_size.h"
 #include "cuda/op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
@@ -833,13 +834,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (it == shared_memory_alias_byte_offsets_.end()) {
       return make_const(index_dtype, 0);
     }
-    int elem_bytes = dtype.bytes() * dtype.lanes();
-    ICHECK_GT(elem_bytes, 0);
     PrimExpr byte_offset = it->second;
     if (byte_offset.dtype() != index_dtype) {
       byte_offset = Cast(index_dtype, byte_offset);
     }
-    return indexdiv(byte_offset, make_const(index_dtype, elem_bytes));
+    return ByteOffsetToElemOffset(byte_offset, dtype);
   }
   PrimExpr AddAliasElemOffset(Var buffer_var, DataType dtype,
                               PrimExpr index) const {

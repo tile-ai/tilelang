@@ -28,6 +28,7 @@
 #include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 #include "transform/common/constr_visitor.h"
+#include "transform/common/storage_size.h"
 #include "transform/common/thread_sync_types.h"
 #include <algorithm>
 #include <string>
@@ -676,13 +677,11 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     if (it == shared_memory_alias_byte_offsets_.end()) {
       return make_const(index_dtype, 0);
     }
-    int elem_bytes = dtype.bytes() * dtype.lanes();
-    ICHECK_GT(elem_bytes, 0);
     PrimExpr byte_offset = it->second;
     if (byte_offset.dtype() != index_dtype) {
       byte_offset = Cast(index_dtype, byte_offset);
     }
-    return indexdiv(byte_offset, make_const(index_dtype, elem_bytes));
+    return ByteOffsetToElemOffset(byte_offset, dtype);
   }
   PrimExpr AddAliasElemOffset(Var buffer_var, DataType dtype,
                               PrimExpr index) const {
