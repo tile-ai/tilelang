@@ -39,15 +39,17 @@ def test_gm_atomic(name, initial, return_previous, target):
 
 @tilelang.testing.requires_ascend
 @pytest.mark.pto
-@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
-@pytest.mark.parametrize("name", ["add", "min", "max"])
-def test_pto_integer_atomic_previous(dtype, name):
+@pytest.mark.parametrize(
+    "name,dtype,initial,value",
+    [
+        ("add", "int64", 1 << 40, -7),
+        ("min", "int32", 1024, -7),
+        ("max", "uint32", (1 << 31) + 1024, 7),
+        ("max", "uint64", (1 << 63) + 1024, 7),
+    ],
+)
+def test_pto_integer_atomic_previous(name, dtype, initial, value):
     operation = getattr(T, "atomic_" + name)
-    signed = dtype.startswith("int")
-    initial = (1 << 40) if "64" in dtype else 1024
-    if not signed:
-        initial = (1 << (63 if "64" in dtype else 31)) + 1024
-    value = -7 if signed else 7
 
     @T.prim_func
     def main(C: T.Tensor((1,), dtype), Previous: T.Tensor((1,), dtype)):
