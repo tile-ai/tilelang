@@ -46,6 +46,31 @@ def test_internal_candidate_condition_includes_both_access_branches(target, over
             assert artifact.kernel_source
 
 
+@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
+@pytest.mark.parametrize("use_div", [False, True], ids=["truncmod", "truncdiv"])
+def test_signed_truncation_keeps_overlapping_subcore_writes(target, use_div):
+    @T.prim_func
+    def main(src: T.Tensor((128,), "int32"), dst: T.Tensor((512,), "int32")):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((64,), "int32")
+            T.copy(src[sid * 64 : (sid + 1) * 64], ub)
+            with T.PerCoreTask():
+                if sid == 0:
+                    with T.Task():
+                        for i in T.serial(4):
+                            start = 63 + T.truncdiv(2 * i - 1, 2) - i if use_div else 64 + T.truncmod(i - 1, 2)
+                            T.copy(ub[0:1], dst[start : start + 1])
+                else:
+                    with T.Task():
+                        for j in T.serial(3):
+                            T.copy(ub[0:1], dst[63 + 64 * j : 64 + 64 * j])
+
+    # At i=0, truncdiv(-1, 2) is 0 and truncmod(-1, 2) is -1.
+    # Either expression gives 63, the same destination AIV1 writes at j=0.
+    with determine_target(target, return_object=True), pytest.raises(tvm.error.InternalError, match=_CROSS_AIV_ERROR):
+        tilelang.lower(main, target=target, enable_device_compile=False)
+
+
 def _writers(*, stride=None, extra=None, hint=None, copies=1, sync=False):
     params = []
     if stride == "dynamic":
