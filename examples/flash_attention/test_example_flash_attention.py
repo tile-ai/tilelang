@@ -55,6 +55,16 @@ def test_example_mha_fwd_bhsd():
 
 
 @tilelang.testing.requires_cuda
+def test_example_mha_fwd_bhsd_tune():
+    kernel = example_mha_fwd_bhsd.flashattn(batch=1, heads=1, seq_q=256, seq_kv=256, dim=128, is_causal=False)
+    kernel.get_profiler().assert_allclose(
+        lambda Q, K, V: example_mha_fwd_bhsd.ref_program(Q, K, V, is_causal=False),
+        rtol=0.01,
+        atol=0.01,
+    )
+
+
+@tilelang.testing.requires_cuda
 def test_example_mha_fwd_bshd():
     example_mha_fwd_bshd.main(batch=1, seq_len=256)
 
