@@ -238,6 +238,7 @@ def _get_gemm_desc(
         expected_k=expected_k,
         num_cores=_num_cores(d.device),
         epilogue_kind=epilogue.kind,
+        with_alpha=epilogue.kind == "alpha",
         outer_stride_a=_get_outer_stride(a, major_a),
         outer_stride_b=_get_outer_stride(b, major_b),
         outer_stride_d=d.stride(-2),
