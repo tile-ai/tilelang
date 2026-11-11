@@ -117,6 +117,8 @@ def _get_nullable_shared_shape_kernel():
             with T.Kernel(1, threads=32):
                 fragment = T.alloc_fragment((1,), T.float32)
                 T.copy(out[0], fragment)
+                for i in T.Parallel(1):
+                    fragment[i] = fragment[i] + 1.0
                 T.copy(fragment, out[0])
 
         return test_kernel
@@ -139,7 +141,7 @@ def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present()
 
 
 def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present_on_cuda1():
-    """Test nullable-first device-ID binding on cuda:1 with a compatible GPU target."""
+    """Test device-ID binding when cuda:0 is current but the tensor is on cuda:1."""
 
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two CUDA devices")
@@ -154,21 +156,27 @@ def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present_o
         )
 
     kernel = _get_nullable_shared_shape_kernel()
+    original_device = torch.cuda.current_device()
 
-    # Compile and run on cuda:0 first. The same-architecture cuda:1 device can
-    # then execute the generated kernel without an architecture mismatch.
+    # Compile the kernel on cuda:0, then invoke it on a cuda:1 tensor while
+    # cuda:0 remains the current device. This exercises the FFI device switch.
     with torch.cuda.device(0):
-        out_cuda0 = torch.randn((1,), device="cuda:0", dtype=torch.float16)
-        out_cuda0_ref = out_cuda0.clone()
+        out_cuda0 = torch.full((1,), 1.0, device="cuda:0", dtype=torch.float16)
         kernel(None, None, out_cuda0)
-        torch.testing.assert_close(out_cuda0, out_cuda0_ref)
+        torch.testing.assert_close(out_cuda0, torch.full_like(out_cuda0, 2.0))
 
-    # This context restores the previously-current CUDA device on exit.
-    with torch.cuda.device(1):
-        out_cuda1 = torch.randn((1,), device="cuda:1", dtype=torch.float16)
-        out_cuda1_ref = out_cuda1.clone()
+        out_cuda1 = torch.full((1,), 3.0, device="cuda:1", dtype=torch.float16)
+        expected_cuda1 = torch.full_like(out_cuda1, 4.0)
+        assert torch.cuda.current_device() == 0
+
+        # The tensor's device must drive the packed FFI device binding, even
+        # though cuda:0 is current. The output change proves the kernel ran.
         kernel(None, None, out_cuda1)
-        torch.testing.assert_close(out_cuda1, out_cuda1_ref)
+        torch.testing.assert_close(out_cuda1, expected_cuda1)
+        assert torch.cuda.current_device() == 0
+
+    # The context manager must restore the device that was current on entry.
+    assert torch.cuda.current_device() == original_device
 
 
 if __name__ == "__main__":
