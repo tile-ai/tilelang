@@ -915,8 +915,8 @@ def test_tiled_ws_wide_linear_smem_three_stages():
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("mma_repeats", [1, 8])
-def test_tiled_ws_async_gemm_releases_stage_after_completion_wait(mma_repeats):
+@pytest.mark.parametrize("deferred_commit", [False, True])
+def test_tiled_ws_async_gemm_releases_stage_after_completion_wait(deferred_commit):
     """Back-pressure barrier arrive must follow the async GEMM's completion wait."""
 
     @T.prim_func
@@ -934,9 +934,9 @@ def test_tiled_ws_async_gemm_releases_stage_after_completion_wait(mma_repeats):
             for k in T.Pipelined(2, num_stages=2):
                 T.copy(A[0, k * 128], A_shared)
                 T.copy(B[0, k * 128], B_shared)
-                for r in T.serial(mma_repeats - 1):
-                    T.tcgen05_gemm(A_shared, B_shared, C_tmem, False, True, mbar=None, clear_accum=(k == 0) & (r == 0))
-                T.tcgen05_gemm(A_shared, B_shared, C_tmem, False, True, mbar=mbar, clear_accum=(k == 0) & (mma_repeats == 1))
+                if deferred_commit:
+                    T.tcgen05_gemm(A_shared, B_shared, C_tmem, False, True, mbar=None, clear_accum=k == 0)
+                T.tcgen05_gemm(A_shared, B_shared, C_tmem, False, True, mbar=mbar, clear_accum=(k == 0) & (not deferred_commit))
                 T.mbarrier_wait_parity(mbar, k % 2)
             T.copy(C_tmem, C_local)
             T.copy(C_local, C)

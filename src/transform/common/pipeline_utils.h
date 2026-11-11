@@ -240,30 +240,25 @@ inline Range ComputeThreadBounds(const IterVar &thread_var,
   return Range::FromMinExtent(0, 1);
 }
 
-/*! \brief Shared GEMM operands kept live by completion waits in a statement
- * list.
+/*! \brief Keep shared GEMM operands live through their completion waits.
  *
- * GEMM issue reads and completion reads have different purposes: the former
- * anchor async-copy waits, the latter prevent reuse while Tensor Cores still
- * read the operands. Keep the two separate. The source must obey the existing
- * GEMM/barrier contract; this analysis does not validate barrier phases.
+ * Only straight-line, iteration-local async GEMM protocols are supported.
+ * The source must obey the GEMM/barrier contract (including barrier phases).
+ * Issue reads still anchor copy waits; completion reads only prevent reuse.
  */
 inline std::vector<ffi::Array<BufferRegion>>
-CollectAsyncGemmCompletionReads(const ffi::Array<Stmt> &stmts) {
+CollectAsyncGemmCompletionReads(const ffi::Array<Stmt> &stmts,
+                                std::vector<size_t> *events = nullptr) {
   std::vector<ffi::Array<BufferRegion>> reads(stmts.size());
-  struct Tcgen05Group {
-    BufferLoad barrier;
-    ffi::Array<BufferRegion> operands;
-  };
-  struct WgmmaGroup {
-    ffi::Array<BufferRegion> operands;
-    bool conditional;
-  };
-  std::vector<Tcgen05Group> tcgen05;
-  ffi::Array<BufferRegion> uncommitted;
-  std::deque<WgmmaGroup> wgmma;
+  std::deque<ffi::Array<BufferRegion>> wgmma;
+  ffi::Array<BufferRegion> uncommitted, committed;
+  ffi::Optional<BufferLoad> commit_barrier;
+  bool has_async = false, nested_event = false;
   arith::Analyzer analyzer;
-
+  auto append = [](ffi::Array<BufferRegion> *dst,
+                   const ffi::Array<BufferRegion> &src) {
+    dst->insert(dst->end(), src.begin(), src.end());
+  };
   auto barrier_load = [](const PrimExpr &expr) -> ffi::Optional<BufferLoad> {
     if (auto load = expr.as<BufferLoad>()) {
       return load;
@@ -274,103 +269,89 @@ CollectAsyncGemmCompletionReads(const ffi::Array<Stmt> &stmts) {
     }
     return std::nullopt;
   };
-  auto same_barrier = [&](const BufferLoad &a, const BufferLoad &b) {
-    if (!a->buffer.same_as(b->buffer) ||
-        a->indices.size() != b->indices.size()) {
-      return false;
+  auto commit = [&](const BufferLoad &barrier) {
+    if (commit_barrier) {
+      LOG(FATAL) << "Async GEMM pipeline requires a completion wait before "
+                    "the next TCGEN05 commit";
     }
-    for (size_t j = 0; j < a->indices.size(); ++j) {
-      bool mutable_index = false;
-      for (const PrimExpr &index : {a->indices[j], b->indices[j]}) {
-        PostOrderVisit(index, [&](const ffi::ObjectRef &node) {
-          mutable_index |= node.as<BufferLoadNode>() != nullptr;
-        });
-      }
-      if (mutable_index ||
-          !analyzer.CanProveEqual(a->indices[j], b->indices[j])) {
-        return false;
-      }
-    }
-    return true;
+    commit_barrier = barrier;
+    committed = uncommitted;
+    uncommitted = {};
   };
-  auto append = [](ffi::Array<BufferRegion> *dst,
-                   const ffi::Array<BufferRegion> &src) {
-    dst->insert(dst->end(), src.begin(), src.end());
-  };
-  auto retire_wgmma = [&](size_t i, int64_t retain, bool conditional) {
-    // Conditional groups need not have been committed. Only definitely
-    // executed newer groups count towards a partial wait's retained suffix.
-    int64_t newer = 0;
-    size_t first_retained = wgmma.size();
-    for (size_t j = wgmma.size(); j > 0; --j) {
-      if (newer < retain) {
-        first_retained = j - 1;
-      }
-      newer += !wgmma[j - 1].conditional;
-    }
-    for (size_t j = 0; j < first_retained; ++j) {
-      append(&reads[i], wgmma[j].operands);
-    }
-    if (!conditional) {
-      wgmma.erase(wgmma.begin(), wgmma.begin() + first_retained);
-    }
-  };
-
   for (size_t i = 0; i < stmts.size(); ++i) {
-    bool conditional = false;
-    ffi::Map<Var, arith::IntSet> local_domains;
+    bool control_flow = false;
     PostOrderVisit(stmts[i], [&](const ffi::ObjectRef &node) {
-      conditional |= node.as<IfThenElseNode>() || node.as<ForNode>() ||
-                     node.as<WhileNode>();
-      if (const auto *loop = node.as<ForNode>()) {
-        local_domains.Set(loop->loop_var,
-                          arith::IntSet::FromRange(
-                              Range::FromMinExtent(loop->min, loop->extent)));
-      }
+      control_flow |= node.as<IfThenElseNode>() || node.as<ForNode>() ||
+                      node.as<WhileNode>();
       if (const auto *block = node.as<SBlockRealizeNode>()) {
-        conditional |= !is_one(block->predicate);
+        control_flow |= !is_one(block->predicate);
       }
     });
+    auto record_event = [&]() {
+      nested_event |= control_flow;
+      if (events && (events->empty() || events->back() != i)) {
+        events->push_back(i);
+      }
+    };
+    auto wait_wgmma_groups = [&](int64_t retain) {
+      // Even an initially empty wait must not move into a later MMA group.
+      record_event();
+      while (wgmma.size() > static_cast<size_t>(retain)) {
+        append(&reads[i], wgmma.front());
+        wgmma.pop_front();
+      }
+    };
     PostOrderVisit(stmts[i], [&](const ffi::ObjectRef &node) {
       const auto *call = node.as<CallNode>();
       if (!call || !call->op.as<OpNode>()) {
         return;
       }
       if (call->op.same_as(mbarrier_wait_parity())) {
-        if (auto barrier = barrier_load(call->args[0])) {
-          for (auto it = tcgen05.begin(); it != tcgen05.end();) {
-            if (same_barrier(it->barrier, barrier.value())) {
-              append(&reads[i], it->operands);
-              if (!conditional) {
-                it = tcgen05.erase(it);
-                continue;
-              }
+        auto barrier = barrier_load(call->args[0]);
+        if (commit_barrier && barrier &&
+            commit_barrier.value()->buffer.same_as(barrier.value()->buffer)) {
+          const auto &a = commit_barrier.value()->indices;
+          const auto &b = barrier.value()->indices;
+          bool matches = a.size() == b.size();
+          for (size_t j = 0; matches && j < a.size(); ++j) {
+            for (const PrimExpr &index : {a[j], b[j]}) {
+              PostOrderVisit(index, [&](const ffi::ObjectRef &n) {
+                matches &= n.as<BufferLoadNode>() == nullptr;
+              });
             }
-            ++it;
+            matches &= analyzer.CanProveEqual(a[j], b[j]);
+          }
+          if (matches) {
+            record_event();
+            append(&reads[i], committed);
+            committed = {};
+            commit_barrier = std::nullopt;
           }
         }
         return;
       }
       if (call->op.as<OpNode>()->name == "tl.tcgen05_mma_arrive") {
-        if (auto barrier = barrier_load(call->args[0])) {
-          tcgen05.push_back({barrier.value(), uncommitted});
-          uncommitted = {};
+        if (!uncommitted.empty()) {
+          record_event();
+          auto barrier = barrier_load(call->args[0]);
+          ICHECK(barrier) << "Async GEMM commit requires a known barrier";
+          commit(barrier.value());
         }
         return;
       }
       if (call->op.same_as(wait_wgmma()) ||
           call->op.as<OpNode>()->name == "tl.warpgroup_wait") {
         const int64_t *retain = as_const_int(call->args[0]);
-        ICHECK(retain && *retain >= 0) << "WGMMA wait count must be constant";
-        retire_wgmma(i, *retain, conditional);
+        ICHECK(retain && *retain >= 0 && *retain <= 7)
+            << "WGMMA wait count must be a constant in [0, 7]";
+        wait_wgmma_groups(*retain);
         return;
       }
       TileOperator op = ParseOperator(ffi::GetRef<Call>(call));
       if (!op.defined()) {
         return;
       }
-      bool is_tcgen05 = false;
-      bool is_wgmma = false;
+      bool is_tcgen05 = false, is_wgmma = false;
       int wait = 0;
       ffi::Optional<BufferLoad> barrier;
       if (const auto *gemm = op.as<GemmNode>()) {
@@ -388,44 +369,41 @@ CollectAsyncGemmCompletionReads(const ffi::Array<Stmt> &stmts) {
       if (!is_tcgen05 && !is_wgmma) {
         return;
       }
+      if (is_wgmma && wait == 0) {
+        wait_wgmma_groups(0);
+        return;
+      }
+      has_async = true;
+      record_event();
       ffi::Array<BufferRegion> operands;
       for (const BufferRegion &region : op->GetAccessRegions().reads) {
         if (IsSharedBuffer(region->buffer)) {
-          Region bounds;
-          auto sets = arith::EvalSet(region->region, local_domains);
-          for (size_t j = 0; j < sets.size(); ++j) {
-            bounds.push_back(sets[j].CoverRange(
-                Range::FromMinExtent(0, region->buffer->shape[j])));
-          }
-          operands.push_back(BufferRegion(region->buffer, bounds));
+          operands.push_back(region);
         }
       }
       if (is_tcgen05) {
         append(&uncommitted, operands);
         if (barrier) {
-          tcgen05.push_back({barrier.value(), uncommitted});
-          uncommitted = {};
+          commit(barrier.value());
         }
-      } else if (wait == 0) {
-        retire_wgmma(i, 0, conditional);
       } else {
-        wgmma.push_back({operands, conditional});
+        wgmma.push_back(operands);
         if (wait > 0) {
-          retire_wgmma(i, wait, conditional);
+          wait_wgmma_groups(wait);
         }
       }
     });
   }
-  // An operation not completed in this list remains live at its boundary.
-  // In particular a conditional wait cannot shorten an unconditional issue.
-  if (!reads.empty()) {
-    append(&reads.back(), uncommitted);
-    for (const auto &group : tcgen05) {
-      append(&reads.back(), group.operands);
-    }
-    for (const auto &group : wgmma) {
-      append(&reads.back(), group.operands);
-    }
+  if (has_async && nested_event) {
+    LOG(FATAL) << "Async GEMM pipeline requires straight-line MMA and "
+                  "completion waits; nested control flow is not supported";
+  }
+  if (!has_async && events) {
+    events->clear();
+  }
+  if (!wgmma.empty() || !uncommitted.empty() || commit_barrier) {
+    LOG(FATAL) << "Async GEMM pipeline requires every MMA to complete within "
+                  "the iteration; no matching completion wait was found";
   }
   return reads;
 }

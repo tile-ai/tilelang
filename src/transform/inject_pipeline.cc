@@ -34,7 +34,6 @@
 #include "layout/layout.h"
 #include "op/builtin.h"
 #include "op/copy.h"
-#include "op/fill.h"
 #include "op/gemm.h"
 #include "op/operator.h"
 #include "op/utils.h"
@@ -1573,6 +1572,31 @@ private:
       }
       if (!need_multi_version) {
         num_versions--;
+      }
+    }
+    for (const auto &[completion, reads] : completed_reads_) {
+      for (const BufferRegion &read : reads) {
+        if (!read->buffer.same_as(buffer)) {
+          continue;
+        }
+        const auto &done = pipeline_info_.at(completion);
+        for (const auto &[writer, anno] : pipeline_info_) {
+          bool writes_buffer = false;
+          for (const BufferRegion &write : writer->writes) {
+            writes_buffer |=
+                PipelineRegionsMayConflict(write, read, thread_domains_);
+          }
+          if (!writes_buffer) {
+            continue;
+          }
+          // wait(i) must precede write(i + versions) in the emitted schedule.
+          if (done.stage > anno.stage + num_versions ||
+              (done.stage == anno.stage + num_versions &&
+               done.order >= anno.order)) {
+            LOG(FATAL) << "Async GEMM pipeline would overwrite shared buffer "
+                       << buffer->name << " before MMA completion";
+          }
+        }
       }
     }
     return num_versions;
@@ -3146,53 +3170,6 @@ public:
   }
 
 private:
-  // An unversioned write initializes slot zero. Copy the written region to
-  // the other slots so loop-invariant slices remain initialized after rotation.
-  // Already-versioned pipeline writes are deliberately left alone.
-  Stmt ReplicateInitialization(const Stmt &stmt,
-                               const Array<BufferRegion> &writes) const {
-    Array<Stmt> seq{stmt};
-    for (const BufferRegion &write : writes) {
-      auto replacement = replacements_.Get(write->buffer);
-      if (!replacement || !IsSharedBuffer(write->buffer) ||
-          write->buffer->shape.size() == replacement.value()->shape.size()) {
-        continue;
-      }
-      Buffer buffer = replacement.value();
-      auto region_at = [&](int64_t version, int mask) {
-        Array<PrimExpr> indices{Integer(version)};
-        Array<PrimExpr> args;
-        for (const Range &range : write->region) {
-          indices.push_back(range->min);
-        }
-        args.push_back(BufferLoad(buffer, indices));
-        args.push_back(Integer(mask));
-        args.push_back(Integer(1));
-        for (const Range &range : write->region) {
-          args.push_back(range->extent);
-        }
-        return Call(DataType::Handle(), region(), args);
-      };
-      int64_t versions = Downcast<IntImm>(buffer->shape[0])->value;
-      for (int64_t version = 1; version < versions; ++version) {
-        seq.push_back(Evaluate(Call(
-            DataType::Handle(), Copy::Get(),
-            {region_at(0, kAccessRead), region_at(version, kAccessWrite)})));
-      }
-    }
-    return seq.size() == 1 ? stmt : SeqStmt(seq);
-  }
-
-  Stmt VisitStmt_(const EvaluateNode *op) final {
-    Array<BufferRegion> writes;
-    if (const auto *call = op->value.as<CallNode>();
-        call &&
-        (call->op.same_as(Copy::Get()) || call->op.same_as(Fill::Get()))) {
-      writes = ParseOperator(GetRef<Call>(call))->GetAccessRegions().writes;
-    }
-    return ReplicateInitialization(StmtExprMutator::VisitStmt_(op), writes);
-  }
-
   BufferRegion RewriteBufferRegion(const BufferRegion &region) const {
     if (auto new_buffer = replacements_.Get(region->buffer)) {
       Region bounds = region->region;
@@ -3227,11 +3204,7 @@ private:
         n->indices.insert(n->indices.begin(), Integer(0));
       }
     }
-    Region written;
-    for (const PrimExpr &index : op->indices) {
-      written.push_back(Range::FromMinExtent(index, 1));
-    }
-    return ReplicateInitialization(node, {BufferRegion(op->buffer, written)});
+    return node;
   }
   PrimExpr VisitExpr_(const CallNode *op) final {
     Call call = Downcast<Call>(StmtExprMutator::VisitExpr_(op));
@@ -3432,6 +3405,7 @@ private:
     Array<SBlock> original_order;
     Array<Buffer> nested_local_allocs;
     BlockCompletedReadsMap completed_reads;
+    Array<SBlock> mma_events;
   };
 
   PipelineScheduleUnit MakePipelineScheduleUnit(const Stmt &stmt) {
@@ -3455,12 +3429,16 @@ private:
   }
 
   PipelineSchedule BuildPipelineSchedule(const Array<Stmt> &stmts) {
-    auto completed_reads = CollectAsyncGemmCompletionReads(stmts);
+    std::vector<size_t> events;
+    auto completed_reads = CollectAsyncGemmCompletionReads(stmts, &events);
     PipelineSchedule schedule;
     for (size_t i = 0; i < stmts.size(); ++i) {
       PipelineScheduleUnit unit = MakePipelineScheduleUnit(stmts[i]);
       if (!completed_reads[i].empty()) {
         schedule.completed_reads.emplace(unit.block, completed_reads[i]);
+      }
+      if (std::find(events.begin(), events.end(), i) != events.end()) {
+        schedule.mma_events.push_back(unit.block);
       }
       schedule.original_order.push_back(unit.block);
       schedule.nested_local_allocs.insert(schedule.nested_local_allocs.end(),
@@ -3867,6 +3845,58 @@ private:
 
     ValidateScheduledBindDependencies(pipeline_info, scheduled_order);
     ValidatePipelineBody(pipeline_info, scheduled_order);
+    // This local analysis accepts producers before the MMA stream. Writes
+    // after issue require a different intra-iteration dependence analysis.
+    bool after_mma = false;
+    for (const SBlock &block : scheduled_order) {
+      if (std::find(schedule.mma_events.begin(), schedule.mma_events.end(),
+                    block) != schedule.mma_events.end()) {
+        after_mma = true;
+      }
+      for (const auto &[completion, reads] : schedule.completed_reads) {
+        for (const BufferRegion &read : reads) {
+          for (const BufferRegion &write : block->writes) {
+            if (!PipelineRegionsMayConflict(write, read, thread_domains_)) {
+              continue;
+            }
+            if (after_mma) {
+              LOG(FATAL) << "Async GEMM pipeline requires shared input writes "
+                            "before the MMA/commit/wait sequence";
+            }
+            // Whole-tile copies initialize every rotated slot. Supporting
+            // partial updates or aliased views needs separate analysis.
+            const auto *eval = block->body.as<EvaluateNode>();
+            const auto *call = eval ? eval->value.as<CallNode>() : nullptr;
+            TileOperator op =
+                call ? ParseOperator(GetRef<Call>(call)) : TileOperator();
+            const auto *copy = op.as<CopyNode>();
+            bool full = copy && copy->dst.same_as(read->buffer) &&
+                        copy->dst_range.size() == read->buffer->shape.size();
+            arith::Analyzer analyzer;
+            for (size_t j = 0; full && j < copy->dst_range.size(); ++j) {
+              full &= analyzer.CanProveEqual(copy->dst_range[j]->min, 0) &&
+                      analyzer.CanProveEqual(copy->dst_range[j]->extent,
+                                             read->buffer->shape[j]);
+            }
+            if (!full) {
+              LOG(FATAL) << "Async GEMM pipeline requires a full-tile copy for "
+                            "shared buffer "
+                         << read->buffer->name;
+            }
+          }
+        }
+      }
+    }
+    // Keep the hardware commit/wait stream in source order, including across
+    // iterations. Partial WGMMA waits are meaningful only in that stream.
+    for (size_t i = 1; i < schedule.mma_events.size(); ++i) {
+      const auto &a = pipeline_info.at(schedule.mma_events[i - 1]);
+      const auto &b = pipeline_info.at(schedule.mma_events[i]);
+      if (a.stage != b.stage || a.order >= b.order) {
+        LOG(FATAL) << "Async GEMM pipeline must preserve MMA/commit/wait order "
+                      "in one stage";
+      }
+    }
 
     if (!HasOverlappableStages(pipeline_info)) {
       for (const auto &buffer : flat_local_allocs) {

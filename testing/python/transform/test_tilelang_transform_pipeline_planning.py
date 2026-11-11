@@ -425,6 +425,10 @@ def test_pipeline_planning_wgmma_implicit_wait_zero(preceding_async, conditional
                 else:
                     T.wgmma_gemm(A_shared, B_shared, C1, clear_accum=True, annotations={"wg_wait": 0})
 
+    if preceding_async and conditional_wait:
+        with pytest.raises(tvm.error.InternalError, match="straight-line"):
+            _run_pipeline_planning(before, sm90_target)
+        return
     mod = _run_pipeline_planning(before, sm90_target)
     (annotations,) = _collect_pipeline_loop_annotations(mod["main"])
     assert int(annotations["tl_pipelined_num_stages"]) == 2
@@ -545,6 +549,29 @@ def test_pipeline_planning_before_after_tcgen05_gemm_plan():
     for copy, name in enumerate(("A_shared", "B_shared")):
         # Compare wait(i) with copy(i + versions) after stage/order normalization.
         assert (stages[3], order[3]) < (versions[name] + stages[copy], order[copy])
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("kind", ["wrong_barrier", "uncommitted", "second_commit"])
+def test_pipeline_planning_rejects_unproved_tcgen05_completion(kind):
+    @T.prim_func
+    def before(A: T.Tensor((128, 128), T.bfloat16), B: T.Tensor((128, 128), T.bfloat16)):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((128, 128), T.bfloat16)
+            B_shared = T.alloc_shared((128, 128), T.bfloat16)
+            C = T.alloc_tmem((128, 128), T.float32)
+            mbar = T.alloc_barrier([1, 1])
+            for k in T.Pipelined(4, num_stages=2):
+                T.copy(A, A_shared)
+                T.copy(B, B_shared)
+                T.tcgen05_gemm(A_shared, B_shared, C, transpose_B=True, mbar=None if kind == "uncommitted" else mbar[0], clear_accum=True)
+                if kind == "second_commit":
+                    T.tcgen05_gemm(A_shared, B_shared, C, transpose_B=True, mbar=mbar[1])
+                T.mbarrier_wait_parity(mbar[1] if kind == "wrong_barrier" else mbar[0], k % 2)
+
+    message = "next TCGEN05 commit" if kind == "second_commit" else "within the iteration"
+    with pytest.raises(tvm.error.InternalError, match=message):
+        _run_pipeline_planning(before, sm100_target)
 
 
 def test_pipeline_planning_before_after_explicit_plan_drops_replayable_bind_slot():
