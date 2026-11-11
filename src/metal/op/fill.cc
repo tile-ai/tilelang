@@ -90,6 +90,12 @@ struct Fill {
           << "; fill the whole buffer instead";
     }
     if (IsCooperativeTensorBuffer(op.dst)) {
+      CHECK(IsWholeBufferRegion(op.dst, op.region, analyzer) ||
+                IsCooperativeTensorPrefixTile(op, analyzer),
+            ValueError)
+          << "Metal partial fill: metal.cooperative_tensor supports only "
+             "whole-buffer fills or a contiguous zero-origin prefix of exactly "
+             "one 512-element tile; fill the whole buffer instead";
       int region_elements = 1;
       for (auto r : op.region) {
         auto imm = r->extent.as<IntImmNode>();

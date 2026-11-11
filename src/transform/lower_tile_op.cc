@@ -15,6 +15,7 @@
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../layout/layout.h"
@@ -1010,8 +1011,21 @@ private:
     return var;
   }
 
+  bool UsesThreadDependentValue(const PrimExpr &expr) const {
+    return tirx::UsesVar(expr, [&](const VarNode *node) {
+      Var var = GetRef<Var>(node);
+      return (thread_binding_.defined() && var.same_as(thread_binding_->var)) ||
+             thread_dependent_vars_.count(var);
+    });
+  }
+
   Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
+    // Keep provenance separately from analyzer substitutions: buffer reads
+    // cannot be re-evaluated or substituted as if they were pure expressions.
+    if (UsesThreadDependentValue(analyzer_->Simplify(value))) {
+      thread_dependent_vars_.insert(op->var);
+    }
     bool recorded = false;
     if (value->IsInstance<BufferLoadNode>()) {
       bind_var_to_expr_[op->var] = value;
@@ -1178,12 +1192,7 @@ private:
     // Simplify before entering the branch: its own constraint would make the
     // condition trivially true and conceal divergent lanes.
     PrimExpr condition = analyzer_->Simplify(op->condition);
-    if (thread_binding_.defined()) {
-      has_thread_dependent_branch_ |=
-          tirx::UsesVar(condition, [&](const VarNode *var) {
-            return GetRef<Var>(var).same_as(thread_binding_->var);
-          });
-    }
+    has_thread_dependent_branch_ |= UsesThreadDependentValue(condition);
     Stmt stmt = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
     has_thread_dependent_branch_ = previous;
     return stmt;
@@ -1483,6 +1492,9 @@ private:
   bool is_ptx_{false};
   std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual>
       bind_var_to_expr_;
+  // Bind variables have SSA identity, so provenance remains valid across
+  // visits.
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> thread_dependent_vars_;
   // Mapping from data Var of a Buffer to Buffer, for lookup
   std::unordered_map<Var, Buffer, ObjectPtrHash, ObjectPtrEqual> buffer_map_;
   Map<Var, Var> var_remap_;

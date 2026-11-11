@@ -325,13 +325,20 @@ def test_1d_partial_fill_diagnostic(begin, end, threads, active_threads, reason)
 
 
 @tilelang.testing.requires_metal
-@pytest.mark.parametrize("shape", [(2, 2, 256), (2, 1, 2, 256)])
-def test_cooperative_tensor_prefix_fill(shape):
+@pytest.mark.parametrize("shape", [(1024,), (32, 32), (2, 2, 256), (2, 1, 2, 256)])
+@pytest.mark.parametrize("whole", [False, True])
+def test_cooperative_tensor_prefix_fill(shape, whole):
     @T.prim_func
     def kernel():
         with T.Kernel(1, threads=32):
             buf = T.alloc_local(shape, T.float32, scope="metal.cooperative_tensor")
-            if len(shape) == 3:
+            if whole:
+                T.fill(buf, T.float32(3))
+            elif len(shape) == 1:
+                T.fill(buf[0:512], T.float32(3))
+            elif len(shape) == 2:
+                T.fill(buf[0:16, :], T.float32(3))
+            elif len(shape) == 3:
                 T.fill(buf[0:1, :, :], T.float32(3))
             else:
                 T.fill(buf[0:1, :, :, :], T.float32(3))
@@ -344,9 +351,8 @@ def test_cooperative_tensor_prefix_fill(shape):
             func.body,
             lambda node: calls.append(node) if isinstance(node, tvm.tirx.Call) and node.op.same_as(fill_op) else None,
         )
-    assert len(calls) == 1
-    assert calls[0].args[1].value == 0
-    assert _fill_value(calls[0]) == 3.0
+    assert [call.args[1].value for call in calls] == ([0, 1] if whole else [0])
+    assert all(_fill_value(call) == 3.0 for call in calls)
 
 
 @tilelang.testing.requires_metal
@@ -401,3 +407,47 @@ def test_partial_fill_accepts_uniform_branch_and_restores_state():
 
     calls = _fill_calls(_lower(kernel))
     assert [call.args[1].value for call in calls if _fill_value(call) == 3.0] == [2]
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("kind", ["direct", "arithmetic", "alias", "uniform"])
+@pytest.mark.parametrize("operation", ["fill", "copy"])
+def test_partial_region_buffer_bound_branch(kind, operation):
+    @T.prim_func
+    def kernel(flags: T.Tensor((32,), T.int32), output: T.Tensor((16, 16), T.float32)):
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local((16, 16), T.float32, scope="metal.simdgroup")
+            T.clear(buf)
+            tx = T.get_thread_binding()
+            index = 0 if kind == "uniform" else tx
+            flag = flags[index] + (1 if kind == "arithmetic" else 0)
+            alias = flag * 2 if kind == "alias" else flag
+            if alias != 0:
+                if operation == "fill":
+                    T.fill(buf[8:16, 0:8], T.float32(3))
+                else:
+                    T.copy(buf[8:16, 0:8], output[8:16, 0:8])
+            # A preceding branch must not taint later unconditional operations.
+            T.fill(buf[0:8, 0:8], T.float32(4))
+
+    if kind == "uniform":
+        _lower(kernel)
+    else:
+        with pytest.raises(ValueError, match="thread-uniform control flow"):
+            _lower(kernel)
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("shape,col_begin", [((1024,), 0), ((32, 64), 32), ((32, 64), 0)])
+def test_cooperative_tensor_rejects_offset_partial_fill(shape, col_begin):
+    @T.prim_func
+    def kernel():
+        with T.Kernel(1, threads=32):
+            buf = T.alloc_local(shape, T.float32, scope="metal.cooperative_tensor")
+            if len(shape) == 1:
+                T.fill(buf[512:1024], T.float32(3))
+            else:
+                T.fill(buf[0:16, col_begin : col_begin + 32], T.float32(3))
+
+    with pytest.raises(ValueError, match="Metal partial fill:.*cooperative_tensor"):
+        _lower(kernel)
