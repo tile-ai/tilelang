@@ -344,6 +344,11 @@ class KernelCache:
         target = backend_context.target
         target_host = backend_context.target_host
         execution_backend = backend_context.execution_backend.name
+        # Reject unsupported modes before either memory or disk cache can return an old kernel.
+        if pass_configs.get("tl.ascend_exception_dump", False) and (
+            backend_context.module.name != "ascend" or execution_backend != "tvm_ffi"
+        ):
+            raise ValueError("tl.ascend_exception_dump supports only the Ascend backend with execution_backend='tvm_ffi'")
 
         if not env.is_cache_enabled():
             if verbose:

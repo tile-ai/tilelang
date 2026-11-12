@@ -126,6 +126,10 @@ def lower_to_host_device_ir(
 
             target = context.target
             target_host = context.target_host
+            if tilelang.transform.get_pass_context().config.get("tl.ascend_exception_dump", False) and (
+                context.module.name != "ascend" or context.execution_backend.name != "tvm_ffi"
+            ):
+                raise ValueError("tl.ascend_exception_dump supports only the Ascend backend with execution_backend='tvm_ffi'")
 
             from tilelang.engine.host_mapped import validate_host_mapped_params
 

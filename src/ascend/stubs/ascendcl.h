@@ -39,6 +39,26 @@
 
 namespace tvm::tl::ascendcl {
 
+// ABI of acldumpTensorInfo from CANN 9.2+ acl/acl_dump.h. Keep the enums as
+// int32_t and the fixed-size shape arrays intact; no SDK headers are needed.
+struct DumpTensorInfo {
+  int32_t type;
+  size_t tensor_size;
+  int32_t format;
+  int32_t data_type;
+  int64_t *tensor_addr;
+  int32_t addr_type;
+  int32_t placement;
+  uint32_t args_offset;
+  uint32_t shape_num;
+  uint32_t origin_shape_num;
+  uint64_t shape[25];
+  uint64_t origin_shape[25];
+};
+static_assert(sizeof(DumpTensorInfo) == 456, "CANN dump tensor ABI");
+static_assert(offsetof(DumpTensorInfo, shape) == 56, "CANN dump shape ABI");
+using ExceptionInfoCallback = void (*)(void *);
+
 /**
  * \brief ACL API accessor struct with lazy loading support.
  *
@@ -63,10 +83,19 @@ struct TILELANG_ASCENDCL_STUB_API AscendCLAPI {
   int32_t (*aclrtGetFunctionAttribute_)(void *, int32_t, int64_t *);
   int32_t (*aclrtGetLogicDevIdByUserDevId_)(int32_t, int32_t *);
 
+  // Optional: used directly by the native exception-dump runtime through this
+  // table. No exported ACL forwarding functions are needed for these entries.
+  int32_t (*aclrtExceptionInfoCallbackRegister_)(ExceptionInfoCallback);
+  int32_t (*aclrtGetArgsFromExceptionInfo_)(const void *, void **, uint32_t *);
+  int32_t (*aclrtMemcpy_)(void *, size_t, const void *, size_t, int32_t);
+  int32_t (*acldumpSaveExceptionInfo_)(const char *, const char *,
+                                       const DumpTensorInfo *, size_t);
+
   /// Throws std::runtime_error when libascendcl.so (or a required symbol
   /// within it) is unavailable.
   static AscendCLAPI *get();
-  /// Never throws; returns nullptr when the library could not be loaded.
+  /// Return an API table with null function pointers if loading/resolution
+  /// fails, without the required-symbol errors reported by get().
   static AscendCLAPI *get_or_null();
   static bool is_available();
   static void *get_handle();

@@ -699,6 +699,11 @@ void CheckAllReduceDtype(const CallNode *call) {
 }
 
 void ValidateKernelCapabilities(const PrimFunc &func) {
+  // Shared FunctionInfo would append a record absent from the PTODSL ABI.
+  TVM_FFI_CHECK(!(func->attrs.defined() &&
+                  func->attrs->dict.count("tl.ascend_exception_dump_tensors")),
+                ValueError)
+      << "PTO does not support exception dump metadata";
   bool has_cube_block = false;
   bool has_vector_block = false;
   bool has_gemm_l1 = false;

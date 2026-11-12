@@ -565,6 +565,12 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
   name_supply_->ReserveName("block_idx");
+  const bool exception_dump_enabled =
+      f->attrs.defined() &&
+      f->attrs->dict.count("tl.ascend_exception_dump_tensors");
+  if (exception_dump_enabled) {
+    name_supply_->ReserveName("__tl_exception_dump_info");
+  }
 
   // Register function parameters with their storage scope for codegen
   for (const auto &param : f->params) {
@@ -720,6 +726,16 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       CodeGenC::PrintType(GetType(v), stream);
     }
     stream << ' ' << vid;
+  }
+  if (exception_dump_enabled) {
+    if (!has_exception_dump_included_) {
+      preamble_stream_ << "#include <tl_templates/ascend/exception_dump.h>\n";
+      has_exception_dump_included_ = true;
+    }
+    if (!f->params.empty()) {
+      stream << ", ";
+    }
+    stream << "tl::ascend::ExceptionDumpInfo __tl_exception_dump_info";
   }
   stream << ") {\n";
   this->PreFunctionBody(f);
