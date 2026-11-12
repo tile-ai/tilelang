@@ -1991,13 +1991,20 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallNode *op,
   const bool is_rmw = op->op.same_as(tl::simd_vmula()) ||
                       op->op.same_as(tl::simd_vmadd()) ||
                       op->op.same_as(tl::simd_vaxpy());
+  // Keep the binary family exactly in sync with the dispatch condition in
+  // VisitExpr_: `vabsdif` deliberately is not a member of it, because PTO has
+  // no single-instruction form and the operator is lowered to
+  // `pto.vabs(pto.vsub(...))` on its own branch. It still carries two sources
+  // and a predicate at index 3, so it is tracked separately here rather than
+  // being folded back into the list.
   const bool is_binary =
       op->op.same_as(tl::simd_vadd()) || op->op.same_as(tl::simd_vsub()) ||
       op->op.same_as(tl::simd_vmul()) || op->op.same_as(tl::simd_vdiv()) ||
-      op->op.same_as(tl::simd_vabsdif()) || op->op.same_as(tl::simd_vmax()) ||
-      op->op.same_as(tl::simd_vmin()) || op->op.same_as(tl::simd_vand()) ||
-      op->op.same_as(tl::simd_vor()) || op->op.same_as(tl::simd_vxor()) ||
-      op->op.same_as(tl::simd_vshl()) || op->op.same_as(tl::simd_vshr());
+      op->op.same_as(tl::simd_vmax()) || op->op.same_as(tl::simd_vmin()) ||
+      op->op.same_as(tl::simd_vand()) || op->op.same_as(tl::simd_vor()) ||
+      op->op.same_as(tl::simd_vxor()) || op->op.same_as(tl::simd_vshl()) ||
+      op->op.same_as(tl::simd_vshr());
+  const bool is_absdiff = op->op.same_as(tl::simd_vabsdif());
   const bool is_vector_scalar =
       op->op.same_as(tl::simd_vadds()) || op->op.same_as(tl::simd_vmuls()) ||
       op->op.same_as(tl::simd_vmaxs()) || op->op.same_as(tl::simd_vmins()) ||
@@ -2015,13 +2022,13 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallNode *op,
       op->op.same_as(tl::simd_vcgadd()) || op->op.same_as(tl::simd_vcgmax()) ||
       op->op.same_as(tl::simd_vcgmin());
   const bool is_vcvt = op->op.same_as(tl::simd_vcvt());
-  ICHECK(is_rmw || is_binary || is_vector_scalar || is_unary || is_broadcast ||
-         is_reduction || is_vcvt)
+  ICHECK(is_rmw || is_binary || is_absdiff || is_vector_scalar || is_unary ||
+         is_broadcast || is_reduction || is_vcvt)
       << "PTO codegen does not support software MODE_MERGING for tl.simd."
       << intrinsic_name;
 
   size_t mask_idx = 0;
-  if (is_rmw || is_binary || is_vector_scalar) {
+  if (is_rmw || is_binary || is_absdiff || is_vector_scalar) {
     mask_idx = 3;
   } else {
     // Unary, reduction, vdup/vdupv, and vcvt calls all carry the predicate
@@ -6351,6 +6358,8 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     return;
   }
 
+  // Separate family: no single PTODSL instruction, expanded into two ops.
+  // `EmitSimdMergingCall_` classifies it as `is_absdiff` for the same reason.
   if (op->op.same_as(tl::simd_vabsdif())) {
     ICHECK_EQ(op->args.size(), 4U)
         << "tl.simd.vabsdif expects 4 arguments (src0, src1, mask, mode)";
