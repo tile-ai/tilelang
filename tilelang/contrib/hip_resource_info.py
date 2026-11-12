@@ -124,9 +124,11 @@ def filter_and_record(output: str) -> str:
 class OccupancyReport:
     """How many blocks of a kernel fit on one compute unit, and what limits it."""
 
-    occupancy: int  # waves per SIMD the register allocation allows
+    # Waves per SIMD as the compiler reports it: the least of what the registers,
+    # the work-group size and the LDS declared statically in the kernel allow.
+    occupancy: int
     waves_per_block: int
-    blocks_by_registers: int
+    blocks_by_occupancy: int
     blocks_by_lds: int | None  # None when the LDS size per block is not given
     blocks_per_cu: int
     warnings: list[str] = field(default_factory=list)
@@ -139,29 +141,37 @@ def occupancy_report(
     wave_size: int = 64,
     simds_per_cu: int = 4,
     lds_bytes_per_cu: int = 65536,
+    lds_granularity: int = 512,
 ) -> OccupancyReport:
     """Blocks per compute unit from the compiler's occupancy and the LDS size.
 
     A block needs ``ceil(threads / wave_size)`` wavefronts, a compute unit holds
-    ``occupancy * simds_per_cu`` of them, and the blocks on it share the LDS.
-    The defaults describe CDNA, including MI200's 64 KB of LDS per compute unit.
+    ``occupancy * simds_per_cu`` of them, and the blocks on it share the LDS,
+    which is allocated in units of ``lds_granularity`` bytes. The compiler's
+    occupancy already accounts for LDS it can see, but not for dynamic shared
+    memory, so pass the full size per block as ``lds_bytes``.
+    The defaults describe CDNA, including MI200's 64 KB of LDS per compute unit
+    in units of 128 dwords.
     """
     occupancy = int(usage.extra["Occupancy [waves/SIMD]"])
     waves_per_block = (threads + wave_size - 1) // wave_size
-    by_registers = occupancy * simds_per_cu // waves_per_block
-    by_lds = lds_bytes_per_cu // lds_bytes if lds_bytes > 0 else None
-    blocks = by_registers if by_lds is None else min(by_registers, by_lds)
+    by_occupancy = occupancy * simds_per_cu // waves_per_block
+    by_lds = None
+    if lds_bytes > 0:
+        lds_allocated = (lds_bytes + lds_granularity - 1) // lds_granularity * lds_granularity
+        by_lds = lds_bytes_per_cu // lds_allocated
+    blocks = by_occupancy if by_lds is None else min(by_occupancy, by_lds)
     warnings = []
     if usage.scratch_bytes > 0:
         warnings.append(f"kernel spills to scratch ({usage.scratch_bytes} bytes/lane), which is usually slow")
-    if by_registers == 0:
+    if by_occupancy == 0:
         warnings.append(f"occupancy {occupancy} does not fit a block of {waves_per_block} wavefronts on one compute unit")
-    elif by_lds is not None and by_registers < by_lds:
+    elif by_lds is not None and by_occupancy < by_lds:
         warnings.append(
-            f"registers limit this kernel to {by_registers} blocks per compute unit while LDS allows {by_lds}; "
-            "see T.annotate_min_blocks_per_sm"
+            f"the compiler's occupancy limits this kernel to {by_occupancy} blocks per compute unit while LDS allows {by_lds}; "
+            "if registers set that occupancy, see T.annotate_min_blocks_per_sm"
         )
-    return OccupancyReport(occupancy, waves_per_block, by_registers, by_lds, blocks, warnings)
+    return OccupancyReport(occupancy, waves_per_block, by_occupancy, by_lds, blocks, warnings)
 
 
 def dump_to_file(usage: dict[str, KernelResourceUsage], path: str) -> None:
