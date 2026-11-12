@@ -619,19 +619,19 @@ Stmt LowerDMACopy(const AscendCopyNode &op, const LowerArgs &T,
           return analyzer->CanProveEqual(floormod(value, two),
                                          make_zero(value.dtype()));
         };
-        ICHECK(is_even(src_region.offset))
+        TVM_FFI_CHECK(is_even(src_region.offset), ValueError)
             << "Ascend GM->L1 copy of a byte-backed float4_e2m1fn view "
                "requires an even logical source offset (two FP4 values per "
                "byte), got "
             << src_region.offset << ".";
         if (!analyzer->CanProveEqual(valid_n_rows, I(1))) {
-          ICHECK(is_even(src_row.stride))
+          TVM_FFI_CHECK(is_even(src_row.stride), ValueError)
               << "Ascend GM->L1 copy of a byte-backed float4_e2m1fn view "
                  "requires an even logical row stride (two FP4 values per "
                  "byte), got "
               << src_row.stride << ".";
         }
-        ICHECK(is_even(valid_inner_elems))
+        TVM_FFI_CHECK(is_even(valid_inner_elems), ValueError)
             << "Ascend GM->L1 copy of a byte-backed float4_e2m1fn view "
                "requires an even logical inner extent (two FP4 values per "
                "byte), got "

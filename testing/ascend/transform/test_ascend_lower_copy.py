@@ -161,7 +161,7 @@ def test_byte_backed_float4_view_requires_an_even_source_offset():
     """An odd logical offset cannot be addressed by the int8 DMA that packs it."""
     storage, src = _byte_backed_float4_view((8, 64), "src")
     dst = tirx.decl_buffer((8, 2), "float4_e2m1fn", name="dst", scope="shared.l1")
-    with pytest.raises(tvm.error.InternalError, match="even logical source offset"):
+    with pytest.raises(ValueError, match="even logical source offset"):
         _lower(src, dst, _region(src, [8, 2], [0, 1]), layouts={dst: make_ascend_nz_layout(dst)})
 
 
@@ -178,7 +178,7 @@ def test_byte_backed_float4_view_allows_an_odd_stride_for_a_single_row():
 def test_byte_backed_float4_view_requires_an_even_inner_extent():
     storage, src = _byte_backed_float4_view((8, 64), "src")
     dst = tirx.decl_buffer((8, 3), "float4_e2m1fn", name="dst", scope="shared.l1")
-    with pytest.raises(tvm.error.InternalError, match="even logical inner extent"):
+    with pytest.raises(ValueError, match="even logical inner extent"):
         _lower(src, dst, _region(src, [8, 3]), layouts={dst: make_ascend_nz_layout(dst)})
 
 
@@ -186,7 +186,7 @@ def test_byte_backed_float4_view_requires_an_even_row_stride():
     storage = tirx.decl_buffer((8, 16), "int8", name="src")
     src = tirx.decl_buffer((8, 31), "float4_e2m1fn", name="src_view", data=storage.data, strides=(31, 1))
     dst = tirx.decl_buffer((8, 2), "float4_e2m1fn", name="dst", scope="shared.l1")
-    with pytest.raises(tvm.error.InternalError, match="even logical row stride"):
+    with pytest.raises(ValueError, match="even logical row stride"):
         _lower(src, dst, _region(src, [8, 2]), layouts={dst: make_ascend_nz_layout(dst)})
 
 
