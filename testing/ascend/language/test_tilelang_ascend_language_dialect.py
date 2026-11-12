@@ -69,3 +69,14 @@ def test_allocation_records_binding_without_a_consumer(leading):
     assert tuple(int(x) for x in sf.shape) == (*leading, 32, 2)
     bindings = [block.annotations["tl.l0_sf_bindings"] for block in nodes(main, tirx.SBlock) if "tl.l0_sf_bindings" in block.annotations]
     assert len(bindings) == 1 and bindings[0][sf.data].same_as(a.data)
+
+
+def test_gemm_blockscaled_policy_precedes_clear_accum():
+    """The positional order must match the common gemm surface."""
+    import inspect
+
+    from tilelang.ascend.language.gemm_op import gemm_blockscaled
+
+    params = list(inspect.signature(gemm_blockscaled).parameters)
+    assert "policy" in params
+    assert params.index("policy") < params.index("clear_accum")
