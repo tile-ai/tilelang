@@ -1,12 +1,13 @@
-# Shifted mHC Pre on Ascend
+# Shifted mHC Pre and Post on Ascend
 
 Forward kernels for BF16 shifted manifold-constrained hyper-connections (mHC)
-on Ascend 950. One mixed Cube/Vector launch computes the projected mixing
+on Ascend 950. One mixed Cube/Vector Pre launch computes the projected mixing
 coefficients, RMS statistics and weighted layer input. The weighted layer input
 uses the **incoming** pre-mix coefficients; the newly computed coefficients are
-returned for the next layer.
+returned for the next layer. Post uses a separate pure Vector launch to combine
+the layer output with the residual streams.
 
-The operator has one public entry module and two implementations:
+Pre has one public entry module and two implementations; Post is self-contained:
 
 | File | Purpose |
 | --- | --- |
@@ -14,8 +15,10 @@ The operator has one public entry module and two implementations:
 | `mhc_pre_mk.py` | M/K partitioning and the shared SIMD preparation/Sinkhorn macros |
 | `mhc_pre_large.py` | Whole-M ownership with a full K reduction in each core pair |
 | `test_mhc_pre.py` | CPU routing checks and four-output device regressions |
+| `mhc_post.py` | TileKernels Post forward, input validation and cached compilation |
+| `test_mhc_post.py` | Post reference checks, stream handling and Pre/Post integration |
 
-## Inputs and outputs
+## Pre inputs and outputs
 
 All inputs must be contiguous and on the same NPU. `H` is 4096, 5120 or 7168;
 the serving range covered by the original hardware tests is `N=1..8192`.
@@ -59,7 +62,7 @@ This example implements forward execution without an autograd backward.
 Build this repository with Ascend support; see the
 [Ascend backend guide](../../../tilelang/ascend/README.md). The runtime requires
 matching PyTorch/`torch_npu`, CANN/Bisheng, Ninja and a C++ compiler. The first
-call compiles the selected kernel and a small host allocation helper. No vLLM
+Pre call compiles the selected kernel and a small host allocation helper. No vLLM
 installation or external operator package is needed.
 
 From the repository root:
@@ -69,6 +72,7 @@ import torch
 import torch_npu
 
 from examples.ascend.mhc.mhc_pre import bind_mhc_pre, mhc_pre
+from examples.ascend.mhc.mhc_post import mhc_post
 
 device = torch.device("npu:0")
 n, h = 33, 4096
@@ -84,6 +88,10 @@ with torch.inference_mode():
     # Bind stable tensor objects once for repeated execution.
     run = bind_mhc_pre(x, prev_pre, phi, alpha, bias)
     layer_input, next_pre_mix, post_mix, comb_mix = run()
+
+    # Replace this with the attention/MLP output in a model.
+    layer_output = layer_input
+    next_residual = mhc_post(layer_output, x, post_mix, comb_mix)
 ```
 
 `mhc_pre` caches compiled executors by shape, core capacity and device, and
@@ -100,7 +108,40 @@ The capacity defaults are `num_aic_cores=28, num_vec_cores=56`. Pass the actual
 available counts when using another capacity; this example assumes two AIVs
 per active AIC and a 256 KiB UB.
 
-## Dispatch and dataflow
+## Post inputs and dataflow
+
+`mhc_post(x, residual, post_layer_mix, comb_res_mix, *, num_vec_cores=56)`
+accepts the layer's BF16 output and the FP32 coefficients returned by Pre:
+
+| Input | Shape | Dtype |
+| --- | --- | --- |
+| `x` | `[..., H]` | BF16 |
+| `residual` | `[..., 4, H]` | BF16 |
+| `post_layer_mix` | `[..., 4, 1]` or `[..., 4]` | FP32 |
+| `comb_res_mix` | `[..., 4, 4]` | FP32 |
+
+Leading batch dimensions must match, with at least one batch dimension. Both
+the Pre-compatible `[N, ...]` form and TileKernels' `[B, N, ...]` form work.
+Inputs must be contiguous on the same NPU; `H` is 4096, 5120 or 7168.
+The result is fresh BF16 storage with the same shape as `residual`:
+
+```text
+out[..., j, h] = BF16(post_layer_mix[..., j] * FP32(x[..., h])
+                      + sum_i comb_res_mix[..., i, j] * FP32(residual[..., i, h]))
+```
+
+The combination matrix is indexed as **input stream, output stream**. Post
+uses FP32 accumulation and a final BF16 conversion. It directly reuses the
+TileKernels forward algorithm: persistent token/hidden-tile assignment,
+three buffer versions, 64-lane SIMD loads and register-resident mixing weights.
+The hidden tile is 4096 for H=4096, 2560 for H=5120 and 3584 for H=7168.
+Compilation is cached by H and Vector core count; N stays dynamic. Each call
+uses the current NPU stream and allocates a fresh output. Pass the actual
+available Vector core count through `num_vec_cores` when it differs from 56.
+
+Only the forward path is included. No TileKernels installation is required.
+
+## Pre dispatch and dataflow
 
 On 28 AIC / 56 AIV, dispatch uses:
 
@@ -136,7 +177,7 @@ read residuals once.
 Run the focused suite from a built checkout:
 
 ```bash
-python -m pytest examples/ascend/mhc/test_mhc_pre.py -q
+python -m pytest examples/ascend/mhc -q
 ```
 
 CPU tests check route transitions, complete-MK returns and other capacities.
@@ -146,11 +187,22 @@ multiple jobs per core. They also check fresh allocations, in-place parameter
 updates, current-stream execution and replacing functional inputs at the same
 shape. Device tests skip when an Ascend NPU is unavailable.
 
-Development tolerances are `atol=0.03125, rtol=1e-3` for the BF16 layer output
+Post tests compare against an independent CPU matrix multiplication reference
+with nonsymmetric combination weights. They cover all three hidden sizes,
+persistent-loop tails, repeated pipeline stages, batched inputs, both post-mix
+shapes, fresh allocations, new input objects and current-stream execution.
+A Pre/Post integration test passes the generated coefficients directly to Post
+without a host synchronization between the two operators.
+
+Development tolerances are `atol=0.03125, rtol=1e-3` for the BF16 outputs
 and `atol=5e-5, rtol=1e-3` for the FP32 outputs. These checks and the original
 hardware measurements do not certify the performance of this repackaged API;
 remeasure the callable boundary used by an application, including allocations
 and any per-call validation.
 
-The implementation retains its DeepSeek and Q4Kernels contributor notices and
-is distributed under the repository's [MIT license](../../../LICENSE).
+Post is adapted from TileKernels at commit
+[`66258df6175d2f630ffecb04c5ab66bff8a2ae6a`](https://github.com/deepseek-ai/TileKernels/blob/66258df6175d2f630ffecb04c5ab66bff8a2ae6a/tile_kernels/mhc/post_asc.py),
+with its original forward math and tiling retained. The wrapper flattens the
+leading batch dimensions and accepts Pre's coefficient shapes. The examples
+retain their DeepSeek and Q4Kernels contributor notices and are distributed
+under the repository's [MIT license](../../../LICENSE).
