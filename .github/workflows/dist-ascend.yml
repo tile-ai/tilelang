@@ -287,29 +287,51 @@ jobs:
       - name: Update rolling nightly release
         env:
           GH_TOKEN: ${{ github.token }}
+          # Nightly wheels stay downloadable on the release for this many
+          # days; older assets are pruned after each successful publication.
+          RETENTION_DAYS: "30"
         run: |
-          set -eux
+          set -euxo pipefail
           TAG="nightly-ascend"
           NOTES="Daily Ascend wheel built from \`${GITHUB_SHA}\` (\`${GITHUB_REF_NAME}\`).
 
           NPU test container: \`${ASCEND_CI_IMAGE}\`
 
-          Wheels:
-          $(ls -1 wheelhouse/*.whl | sed 's|^|- |')"
+          Latest wheels:
+          $(ls -1 wheelhouse/*.whl | sed 's|^|- |')
 
-          if gh release view "${TAG}" --json assets >/dev/null 2>&1; then
-            # Drop the previous build's wheels so the release only serves the
-            # latest nightly.
-            gh release view "${TAG}" --json assets --jq '.assets[].name' |
-              while read -r ASSET; do
-                gh release delete-asset "${TAG}" "${ASSET}" --yes
-              done
-            gh release edit "${TAG}" --notes "${NOTES}"
-          else
+          This release keeps the last ${RETENTION_DAYS} days of nightly wheels; older assets are removed automatically."
+
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
             gh release create "${TAG}" \
               --prerelease --title "Ascend nightly wheels" --notes "${NOTES}"
           fi
+
+          # Upload the new wheels before touching the old ones, so a failed
+          # or cancelled run leaves the previous nightlies downloadable.
+          # --clobber replaces same-named assets on a same-day rerun.
           gh release upload "${TAG}" wheelhouse/*.whl --clobber
+
+          # Fail the job if any new wheel did not make it onto the release.
+          REMOTE_ASSETS="$(gh release view "${TAG}" --json assets --jq '.assets[].name')"
+          for WHEEL in wheelhouse/*.whl; do
+            grep -qxF "$(basename "${WHEEL}")" <<< "${REMOTE_ASSETS}"
+          done
+
+          # Prune assets past the retention window, keyed by upload time
+          # rather than name so manual reruns age out the same way. ISO-8601
+          # timestamps compare lexicographically; pipefail surfaces listing
+          # or deletion failures instead of silently keeping stale wheels.
+          CUTOFF="$(date -u -d "-${RETENTION_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
+          gh release view "${TAG}" --json assets --jq '.assets[] | "\(.createdAt) \(.name)"' |
+            while read -r CREATED_AT ASSET; do
+              if [[ "${CREATED_AT}" < "${CUTOFF}" ]]; then
+                gh release delete-asset "${TAG}" "${ASSET}" --yes
+              fi
+            done
+
+          # Refresh the notes only once the new assets are verified.
+          gh release edit "${TAG}" --notes "${NOTES}"
 
       - name: Summary
         run: |
