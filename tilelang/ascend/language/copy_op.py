@@ -383,6 +383,18 @@ def copy(  # noqa: A001
                 f"BufferLoad so the pad fill dtype can be derived, got {type(dst)}."
             )
         dst_buf = dst.buffer if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
+        # pad_value is the MTE2 pad register, and only the GM->UB path reads it.
+        # Every other destination sends the value to the L1 row/column padding
+        # fill, which accepts zero only (src/ascend/op/fill.cc:86-88) and aborts
+        # the compiler with an internal check. Enforce the documented
+        # restriction here instead of letting it reach that fill.
+        if dst_buf.scope() not in ("shared", "shared.dyn"):
+            raise ValueError(
+                "T.copy: pad_value is only supported when the destination is a UB buffer "
+                f"(scope 'shared.dyn' or 'shared'), got scope {dst_buf.scope()!r} for "
+                f"buffer {dst_buf.name!r}. The padding fill for L1 destinations only "
+                "accepts zero."
+            )
         tb_tir.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(dst_buf.dtype)))
         ann["data_select"] = tirx.IntImm("int32", 1)
     if data_select and "data_select" not in ann:
