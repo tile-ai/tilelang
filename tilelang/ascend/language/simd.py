@@ -91,6 +91,9 @@ _ELEM_BITS = {
 # Broadcast loads replicate one element whose width the dist suffix names.
 _BRC_DIST_BITS = {"BRC_B8": 8, "BRC_B16": 16, "BRC_B32": 32}
 _UNSIGNED_OF_BITS = {8: "uint8", 16: "uint16", 32: "uint32", 64: "uint64"}
+# CCE offers pset/pge only for 8-, 16-, and 32-bit elements: there is no
+# pset_b4 (float4 elements mask as b8) and no pset_b64.
+_PREDICATE_ELEM_BITS = (8, 16, 32)
 
 
 def _vreg_lanes(dtype_str: DType) -> int:
@@ -112,8 +115,17 @@ def pset(elem_width: int, dist: str = "PAT_ALL"):
     """Create a predicate mask: pset_bXX(dist).
 
     Returns a vector_bool (boolx256).
+    elem_width: predicate width in bits; only 8, 16, and 32 exist.
     dist: "PAT_ALL", "PAT_VL1".."PAT_VL128", "PAT_M3", "PAT_M4", "PAT_H", "PAT_Q", etc.
     """
+    if isinstance(elem_width, tirx.IntImm):
+        elem_width = int(elem_width.value)
+    if isinstance(elem_width, int) and elem_width not in _PREDICATE_ELEM_BITS:
+        raise ValueError(
+            f"pset: element width must be one of {_PREDICATE_ELEM_BITS}, got {elem_width}. "
+            "CCE has no pset_b4 or pset_b64 predicate: float4 elements are masked at 8 bits and "
+            "64-bit element vectors have no predicate form."
+        )
     return tirx.call_intrin("boolx256", _Op("tl.simd.pset"), elem_width, dist)
 
 
@@ -128,7 +140,12 @@ def update_mask(value, width=32):
 
 
 def _mask_bits(dtype_like) -> int:
-    """CCE predicate width (b8/b16/b32/b64) for a dtype's element type."""
+    """CCE predicate width (b8/b16/b32) for a dtype's element type.
+
+    int64/uint64 elements resolve to 64 so callers that combine two widths keep
+    working (``vcvt`` takes the narrower one); ``pset`` rejects 64 because no b64
+    predicate exists.
+    """
     elem = str(dtype_like).split("x", 1)[0]
     if elem not in _ELEM_BITS:
         raise ValueError(f"Cannot infer default mask width for dtype '{dtype_like}'")
@@ -155,7 +172,7 @@ def _frame_on_stack(frame) -> bool:
 
 def _default_mask_bits(bits: int):
     """Bind (once per scope) and return an all-lanes pset mask of the given predicate
-    width (b8/b16/b32/b64).
+    width (b8/b16/b32).
 
     Emits ``vector_bool v = pset_bXX(PAT_ALL);`` into the current SimdVF frame so the
     Ascend codegen BindNode path renders it correctly (an inline pset is not handled in
