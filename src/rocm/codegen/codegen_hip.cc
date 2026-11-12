@@ -409,8 +409,12 @@ void CodeGenTileLangHIP::PrintExtraAttrs(const PrimFunc &f, std::ostream &os) {
       if (extractor.min_blocks_per_cu > 0) {
         // HIP's second argument is amdgpu_waves_per_eu, not CUDA's blocks per
         // SM. A block needs ceil(threads / wave size) wavefronts and they
-        // share the 4 SIMDs of a compute unit, so N blocks per compute unit
-        // need ceil(N * waves_per_block / 4) waves per SIMD.
+        // share the 4 SIMDs of the scheduling unit, so N blocks per unit need
+        // ceil(N * waves_per_block / 4) waves per SIMD. The unit is the CDNA
+        // compute unit, or the RDNA workgroup processor: hipcc compiles RDNA
+        // in WGP mode (4 SIMDs) with wave32 by default, and neither
+        // -mcumode nor -mwavefrontsize64 is passed. The result is only a
+        // register-allocation hint; LDS and other limits still cap occupancy.
         constexpr int64_t kSimdsPerCU = 4;
         const int64_t wave_size = tl::TargetRocmGetWarpSize(target_);
         const int64_t waves_per_block =

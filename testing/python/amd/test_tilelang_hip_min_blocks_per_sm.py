@@ -4,6 +4,8 @@ import pytest
 import tilelang as tl
 import tilelang.rocm.language as T
 import tilelang.testing
+from tilelang.backend.target import determine_target
+from tilelang.rocm.target import target_get_warp_size
 
 
 @tl.jit(out_idx=[-1], target="hip")
@@ -37,24 +39,40 @@ def _plain(threads):
     return main
 
 
+def _wave_size():
+    # The wave size the codegen uses, not an arch-name prefix: gfx1250/gfx1251
+    # (CDNA5) share the gfx12 prefix with RDNA.
+    return target_get_warp_size(determine_target("auto", return_object=True))
+
+
+# Expected waves per EU by wave size. Both divide by 4 SIMDs: a CDNA compute unit
+# (wave64) or an RDNA workgroup processor (wave32, the default WGP mode).
+_WAVE64_CASES = [
+    (64, 4, 1),
+    (128, 2, 1),
+    (128, 4, 2),
+    (256, 1, 1),
+    (256, 2, 2),
+    (256, 3, 3),
+    (512, 1, 2),
+    (512, 2, 4),
+    (768, 1, 3),
+]
+_WAVE32_CASES = [
+    (64, 2, 1),
+    (64, 4, 2),
+    (128, 1, 1),
+    (128, 2, 2),
+    (256, 1, 2),
+    (512, 1, 4),
+]
+
+
 @tilelang.testing.requires_rocm
-@pytest.mark.parametrize(
-    ("threads", "blocks", "waves_per_eu"),
-    [
-        (64, 4, 1),
-        (128, 2, 1),
-        (128, 4, 2),
-        (256, 1, 1),
-        (256, 2, 2),
-        (256, 3, 3),
-        (512, 1, 2),
-        (512, 2, 4),
-        (768, 1, 3),
-    ],
-)
-def test_annotation_maps_blocks_per_cu_to_waves_per_eu(threads, blocks, waves_per_eu):
-    src = _annotated(threads, blocks).get_kernel_source()
-    assert f"__launch_bounds__({threads}, {waves_per_eu})" in src
+def test_annotation_maps_blocks_per_cu_to_waves_per_eu():
+    for threads, blocks, waves_per_eu in _WAVE64_CASES if _wave_size() == 64 else _WAVE32_CASES:
+        src = _annotated(threads, blocks).get_kernel_source()
+        assert f"__launch_bounds__({threads}, {waves_per_eu})" in src, (threads, blocks)
 
 
 @tilelang.testing.requires_rocm
