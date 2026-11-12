@@ -385,8 +385,9 @@ def _is_stable_integer_arithmetic(expr) -> bool:
     """Whether *expr* is a stable scalar integer extent declaration.
 
     This is a frontend API/type check on the caller-declared extent, not a
-    range proof: containment and logical coverage are decided by
-    ``LegalizePTOVMIMemoryAccess``.
+    range proof: ``LegalizePTOVMIMemoryAccess`` verifies descriptor extent and
+    physical-envelope containment without requiring logical pointer-region
+    coverage.
     """
     if not isinstance(expr, tirx.PrimExpr) or not _is_integer_scalar(expr):
         return False
