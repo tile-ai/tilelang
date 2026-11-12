@@ -2431,6 +2431,17 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     auto it = kVstFn.find(dist);
     ICHECK(it != kVstFn.end())
         << "Unsupported SimdVF store distribution: " << dist;
+    if (dist == "PK4_B32") {
+      // vsts_pack_quarter only specialises 32-bit, 8-bit and packed-FP4
+      // elements. A 16-bit vector would instantiate an empty body and the
+      // store would silently disappear; the PTO path rejects this
+      // distribution for those widths as well.
+      const int bits = dtype.bits();
+      ICHECK(bits == 4 || bits == 8 || bits == 32)
+          << "SimdVF store distribution PK4_B32 supports 4-, 8- and 32-bit "
+             "elements only, got "
+          << dtype;
+    }
     // Capture operands first so SSA temporaries (e.g. from reinterpret) are
     // emitted on their own lines before the call statement.
     std::string src = this->PrintExpr(op->args[1]);
