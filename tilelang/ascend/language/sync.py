@@ -142,6 +142,8 @@ def ascend_cross_core_set_flag(mode_id: int, pipe: str, flag_id) -> None:
     if not isinstance(pipe, str):
         raise TypeError(f"pipe must be a string, got {type(pipe)}")
     if isinstance(mode_id, int):
+        if mode_id not in (0, 1, 2, 4):
+            raise ValueError(f"mode_id must be one of 0, 1, 2, 4, got {mode_id}")
         mode_id = tirx.IntImm("int32", mode_id)
     if isinstance(flag_id, int):
         flag_id = tirx.IntImm("int32", flag_id)
@@ -169,6 +171,8 @@ def ascend_cross_core_wait_flag(mode_id: int, pipe: str, flag_id) -> None:
     if not isinstance(pipe, str):
         raise TypeError(f"pipe must be a string, got {type(pipe)}")
     if isinstance(mode_id, int):
+        if mode_id not in (0, 1, 2, 4):
+            raise ValueError(f"mode_id must be one of 0, 1, 2, 4, got {mode_id}")
         mode_id = tirx.IntImm("int32", mode_id)
     if isinstance(flag_id, int):
         flag_id = tirx.IntImm("int32", flag_id)

@@ -42,6 +42,10 @@ using ffi::Optional;
 
 namespace pto {
 
+/*! Explicit legacy SIMD instructions already operate on vector blocks.
+ * Their containing Parallel nest retains its pre-VMI treatment. */
+bool UsesExplicitSIMD(const Stmt &stmt);
+
 /*!
  * \brief Classification of one buffer access against the lane mapping.
  *
@@ -368,9 +372,9 @@ struct PtoRegionScan {
    * rejects with \p issue; Vectorize treats it as an internal error. */
   bool has_unsupported_wrapper = false;
   std::string issue;
-  /*! True when the region contains any T.Parallel at all (directly or
-   * under wrappers). A region with none is a pure hand-written VMI
-   * region: both passes skip it entirely. */
+  /*! True when the region contains a Parallel requiring lane conversion
+   * (directly or under wrappers). Explicit legacy SIMD nests are excluded;
+   * regions with no converting Parallel retain their hand-written behavior. */
   bool has_any_parallel = false;
 };
 
