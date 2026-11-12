@@ -84,14 +84,19 @@ class CompileArgs:
         """Return a stable hash for cache key construction."""
         from tilelang.transform.pass_config import normalize_pass_configs
 
+        def target_cache_key(target):
+            if isinstance(target, dict):
+                return json.dumps(target, sort_keys=True, default=str)
+            return str(target)
+
         # Resolve env-var-derived pass-config defaults so a changed environment
         # does not silently reuse tuning results produced under another one.
         pass_configs = normalize_pass_configs(self.pass_configs)
         data = {
             "out_idx": self.out_idx,
             "execution_backend": self.execution_backend,
-            "target": str(self.target),
-            "target_host": str(self.target_host) if self.target_host else None,
+            "target": target_cache_key(self.target),
+            "target_host": target_cache_key(self.target_host) if self.target_host else None,
             "verbose": self.verbose,
             "pass_configs": json.dumps(pass_configs, sort_keys=True) if pass_configs else None,
             "compile_flags": [self.compile_flags] if isinstance(self.compile_flags, str) else self.compile_flags,
