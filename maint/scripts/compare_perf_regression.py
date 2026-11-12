@@ -30,19 +30,22 @@ def _extract_results(payload: Mapping[str, object]) -> dict[str, float]:
     for name, value in results.items():
         if isinstance(value, dict):
             value = value.get("latency")
+        if isinstance(value, bool):
+            raise ValueError(f"Invalid latency for result {name!r}: {value!r}")
         try:
             latency = float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError(f"Invalid latency for result {name!r}: {value!r}") from exc
-        if math.isfinite(latency) and latency > 0.0:
-            parsed[str(name)] = latency
+        if not math.isfinite(latency) or latency <= 0.0:
+            raise ValueError(f"Invalid latency for result {name!r}: {value!r}")
+        parsed[str(name)] = latency
     return parsed
 
 
 def _extract_failures(payload: Mapping[str, object]) -> dict[str, object]:
     failures = payload.get("failures", {})
     if not isinstance(failures, dict):
-        return {}
+        raise ValueError("payload.failures must be an object")
     return {str(k): v for k, v in failures.items()}
 
 
@@ -81,13 +84,16 @@ def compare_payloads(
         old_latency = old_results[name]
         new_latency = new_results[name]
         speedup = old_latency / new_latency
+        delta_pct = (speedup - 1.0) * 100.0
+        if not math.isfinite(speedup) or not math.isfinite(delta_pct):
+            raise ValueError(f"Nonfinite comparison for result {name!r}: speedup={speedup!r}, delta_pct={delta_pct!r}")
         rows.append(
             {
                 "name": name,
                 "old_latency": old_latency,
                 "new_latency": new_latency,
                 "speedup": speedup,
-                "delta_pct": (speedup - 1.0) * 100.0,
+                "delta_pct": delta_pct,
                 "status": "improved" if speedup >= 1.0 else "regressed",
             }
         )
@@ -277,7 +283,7 @@ def _write_text(path: str | Path, content: str) -> None:
 def _write_json(path: str | Path, content: Mapping[str, object]) -> None:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(content, indent=2, sort_keys=True) + "\n")
+    output.write_text(json.dumps(content, indent=2, sort_keys=True, allow_nan=False) + "\n")
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -297,7 +303,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--regression-threshold", type=float, default=1.0, help="Speedup threshold for regressions")
     parser.add_argument("--fail-on-failure", action="store_true", help="Exit non-zero if either payload has failures")
     parser.add_argument("--fail-on-missing", action="store_true", help="Exit non-zero if either payload has missing results")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.regression_threshold) or args.regression_threshold <= 0.0:
+        parser.error("--regression-threshold must be finite and positive")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
