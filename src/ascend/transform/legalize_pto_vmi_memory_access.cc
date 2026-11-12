@@ -49,10 +49,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -102,6 +104,11 @@ const Op &VscatterOp() {
 const Op &AccessPtrOp() {
   static const Op &op = Op::Get("tl.access_ptr");
   return op;
+}
+
+bool IsVmiMemoryAccess(const CallNode *call) {
+  return call->op.same_as(VloadOp()) || call->op.same_as(VstoreOp()) ||
+         call->op.same_as(VgatherOp()) || call->op.same_as(VscatterOp());
 }
 
 std::optional<int64_t> ConstInt(const PrimExpr &expr) {
@@ -1752,11 +1759,231 @@ private:
   explicit VmiMemoryAccessLegalizer(arith::Analyzer *analyzer)
       : Parent(analyzer) {}
 
+  // Analyzer::Bind eagerly updates several sub-analyzers. In particular,
+  // an integer Cast that can wrap is not safe to evaluate as an interval:
+  // casting the endpoints can both under-approximate the range and throw
+  // after other facts have already been installed. Check before any update,
+  // including casts hidden behind lexical definitions.
+  bool CanAnalyze(const PrimExpr &expr) {
+    // Reuse checked definitions within this lexical/analyzer context only.
+    // Shared scalar DAGs must not be recursively expanded on every reference.
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> active, checked;
+    std::function<bool(const PrimExpr &)> check = [&](const PrimExpr &value) {
+      bool safe = true;
+      PostOrderVisit(value, [&](const ObjectRef &node) {
+        if (!safe)
+          return;
+        if (const auto *var = node.as<VarNode>()) {
+          Var var_ref = GetRef<Var>(var);
+          if (checked.count(var_ref))
+            return;
+          for (auto it = bindings_.rbegin(); it != bindings_.rend(); ++it) {
+            if (it->first.get() == var) {
+              if (!active.insert(var_ref).second) {
+                safe = false;
+                return;
+              }
+              safe = check(it->second);
+              active.erase(var_ref);
+              break;
+            }
+          }
+          if (safe)
+            checked.insert(var_ref);
+        }
+        const auto *cast = node.as<CastNode>();
+        if (!safe || !cast || !cast->dtype.is_scalar())
+          return;
+        DataType from = cast->value.dtype(), to = cast->dtype;
+        if (!(from.is_int() || from.is_uint()) ||
+            !(to.is_int() || to.is_uint()))
+          return;
+        if (from == to ||
+            (from.is_uint() && to.is_uint() && to.bits() >= from.bits()) ||
+            (from.is_int() && to.is_int() && to.bits() >= from.bits()) ||
+            (from.is_uint() && to.is_int() && to.bits() > from.bits()))
+          return;
+        if (from.bits() > 64 || to.bits() > 64) {
+          safe = false;
+          return;
+        }
+        // Children and their definitions have been checked before asking for
+        // source bounds. Never use the bound of the cast itself here.
+        auto bound = analyzer_->const_int_bound(cast->value);
+        __int128 lo = to.is_uint() ? 0 : -(__int128(1) << (to.bits() - 1));
+        __int128 hi = (__int128(1) << (to.bits() - (to.is_int() ? 1 : 0))) - 1;
+        safe = bound->min_value != arith::ConstIntBoundNode::kNegInf &&
+               bound->max_value != arith::ConstIntBoundNode::kPosInf &&
+               bound->min_value >= lo && bound->max_value <= hi;
+      });
+      return safe;
+    };
+    return check(expr);
+  }
+
+  void BindScalarFacts(const Var &var, const PrimExpr &value) {
+    if (!value.dtype().is_scalar() || value.dtype().bits() > 64 ||
+        var.dtype().bits() > 64 ||
+        !(value.dtype().is_int() || value.dtype().is_uint()) ||
+        SideEffect(value) > CallEffectKind::kPure || !CanAnalyze(value)) {
+      return;
+    }
+    PrimExpr simplified =
+        analyzer_->rewrite_simplify(analyzer_->canonical_simplify(value));
+    auto bound = analyzer_->const_int_bound(simplified);
+    // Keep the definition and the other proof engines, but supply IntSet a
+    // conservative numeric interval instead of re-evaluating Cast endpoints.
+    // Its symbolic interval can be less precise than the bounds that proved
+    // the cast safe, even when the source is guarded by an enclosing branch.
+    arith::IntSet interval = arith::IntSet::Everything();
+    const DataType dtype = var.dtype();
+    __int128 lo = dtype.is_uint() ? 0 : -(__int128(1) << (dtype.bits() - 1));
+    __int128 hi =
+        (__int128(1) << (dtype.bits() - (dtype.is_int() ? 1 : 0))) - 1;
+    if (bound->min_value != arith::ConstIntBoundNode::kNegInf &&
+        bound->max_value != arith::ConstIntBoundNode::kPosInf &&
+        bound->min_value >= lo && bound->max_value <= hi) {
+      interval =
+          arith::IntSet::Interval(make_const(var.dtype(), bound->min_value),
+                                  make_const(var.dtype(), bound->max_value));
+    }
+    analyzer_->const_int_bound.Update(var, bound);
+    analyzer_->modular_set.Update(var, analyzer_->modular_set(simplified));
+    analyzer_->rewrite_simplify.Update(var, simplified);
+    analyzer_->canonical_simplify.Update(var, simplified);
+    analyzer_->int_set.Update(var, interval);
+    analyzer_->transitive_comparisons.Bind(var, value);
+    analyzer_->z3_prover.Bind(var, value);
+  }
+
+  void BindRangeFacts(const Var &var, const Range &range) {
+    if (is_one(range->extent)) {
+      BindScalarFacts(var, range->min);
+    } else {
+      analyzer_->Bind(var, range);
+    }
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    PrimExpr value = VisitExpr(op->value);
+    BindScalarFacts(op->var, value);
+    if (value.same_as(op->value))
+      return GetRef<Stmt>(op);
+    return tirx::Bind(op->var, value, op->span);
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    return constraint_scope_.WithNewScope([&]() -> Stmt {
+      // Unsafe bounds suppress loop facts, not the scope of body assertions.
+      if (CanAnalyze(op->min) && CanAnalyze(op->extent)) {
+        Range dom = Range::FromMinExtent(op->min, op->extent);
+        BindRangeFacts(op->loop_var, dom);
+        iter_vars_.Set(op->loop_var, dom);
+        constraint_scope_.Current().Emplace(analyzer_, op->extent > 0);
+      }
+      return StmtExprMutator::VisitStmt_(op);
+    });
+  }
+
+  Stmt VisitStmt_(const WhileNode *op) final {
+    // The loop may execute zero times. Keep body assertions local without
+    // using the condition as a fact, matching the existing While contract.
+    return constraint_scope_.WithNewScope(
+        [&]() { return StmtExprMutator::VisitStmt_(op); });
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    if (CanAnalyze(op->condition)) {
+      return Parent::VisitStmt_(op);
+    }
+    // Skip the unsafe condition's facts, but keep assertions in either
+    // branch from escaping into the other branch or subsequent statements.
+    return constraint_scope_.WithNewScope([&]() -> Stmt {
+      PrimExpr condition = VisitExpr(op->condition);
+      Stmt then_case = constraint_scope_.WithNewScope(
+          [&]() { return VisitStmt(op->then_case); });
+      ffi::Optional<Stmt> else_case;
+      if (op->else_case.defined()) {
+        else_case = constraint_scope_.WithNewScope(
+            [&]() { return VisitStmt(op->else_case.value()); });
+      }
+      if (condition.same_as(op->condition) &&
+          then_case.same_as(op->then_case) &&
+          else_case.same_as(op->else_case)) {
+        return GetRef<Stmt>(op);
+      }
+      auto node = CopyOnWrite(op);
+      node->condition = std::move(condition);
+      node->then_case = std::move(then_case);
+      node->else_case = std::move(else_case);
+      return Stmt(node);
+    });
+  }
+
+  Stmt VisitStmt_(const AssertStmtNode *op) final {
+    return CanAnalyze(op->condition) ? Parent::VisitStmt_(op)
+                                     : StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    bool safe = CanAnalyze(op->value);
+    if (op->attr_key == tirx::attr::tilelang_assume) {
+      safe = safe && CanAnalyze(Downcast<PrimExpr>(op->node));
+    }
+    return safe ? Parent::VisitStmt_(op)
+                : constraint_scope_.WithNewScope(
+                      [&]() { return StmtExprMutator::VisitStmt_(op); });
+  }
+
+  PrimExpr VisitExpr_(const SelectNode *op) final {
+    return CanAnalyze(op->condition) ? Parent::VisitExpr_(op)
+                                     : StmtExprMutator::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const ReduceNode *op) final {
+    for (const auto &iv : op->axis) {
+      if (!CanAnalyze(iv->dom->min) || !CanAnalyze(iv->dom->extent)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+    }
+    for (const auto &iv : op->axis)
+      BindRangeFacts(iv->var, iv->dom);
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  void CheckProofExpr(const PrimExpr &value, const std::string &op_name,
+                      const Span &span) {
+    if (!CanAnalyze(value)) {
+      Fail(op_name + " cannot prove memory access safety through a "
+                     "potentially wrapping integer cast",
+           span);
+    }
+  }
+
+  void CheckProofBuffer(const Buffer &buffer, const std::string &op_name,
+                        const Span &span) {
+    for (const auto &dim : buffer->shape)
+      CheckProofExpr(dim, op_name, span);
+    for (const auto &stride : buffer->strides)
+      CheckProofExpr(stride, op_name, span);
+    CheckProofExpr(buffer->elem_offset, op_name, span);
+  }
+
+  void CheckProofInputs(const AccessAddress &address, const PrimExpr &offset,
+                        const std::string &op_name, const Span &span) {
+    for (const auto &start : address.starts)
+      CheckProofExpr(start, op_name, span);
+    if (address.extent.defined())
+      CheckProofExpr(address.extent, op_name, span);
+    CheckProofExpr(offset, op_name, span);
+    CheckProofBuffer(address.buffer, op_name, span);
+  }
+
   // Scope every statement reached through the default control-flow traversal.
   // The branches/loops of IRMutatorWithAnalyzer call the virtual VisitStmt for
   // their bodies, so bindings and active allocations declared inside them are
-  // restored on exit.  While deliberately gets no condition fact and no extra
-  // analyzer scope; only this side environment is restored.
+  // restored on exit. Analyzer constraints are scoped by the individual
+  // statement visitors; While deliberately gets no condition fact.
   Stmt VisitStmt(const Stmt &stmt) final {
     size_t bind_mark = bindings_.size();
     size_t allocation_mark = active_allocations_.size();
@@ -1771,7 +1998,14 @@ private:
     for (const Buffer &buffer : op->alloc_buffers) {
       RegisterAllocation(buffer);
     }
-    Stmt visited = Parent::VisitStmt_(op);
+    bool safe = true;
+    for (const auto &iv : op->iter_vars) {
+      safe = safe && CanAnalyze(iv->dom->min) && CanAnalyze(iv->dom->extent);
+    }
+    Stmt visited =
+        safe ? Parent::VisitStmt_(op) : constraint_scope_.WithNewScope([&]() {
+          return StmtExprMutator::VisitStmt_(op);
+        });
     active_allocations_.resize(mark);
     return visited;
   }
@@ -1819,9 +2053,7 @@ private:
     // that is not pure is still recorded for address lookup (the variable is
     // bound regardless of purity); only the analyzer fact is conditional.
     PrimExpr value = this->VisitExpr(op->value);
-    if (SideEffect(value) <= CallEffectKind::kPure) {
-      analyzer_->Bind(op->var, value);
-    }
+    BindScalarFacts(op->var, value);
     size_t mark = bindings_.size();
     bindings_.emplace_back(op->var, value);
     PrimExpr body = this->VisitExpr(op->body);
@@ -1833,9 +2065,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
-    PrimExpr visited = Parent::VisitExpr_(op);
+    bool safe_condition =
+        !op->op.same_as(builtin::if_then_else()) || CanAnalyze(op->args[0]);
+    PrimExpr visited = safe_condition ? Parent::VisitExpr_(op)
+                                      : StmtExprMutator::VisitExpr_(op);
     const auto *call = visited.as<CallNode>();
-    if (call == nullptr) {
+    if (call == nullptr || !IsVmiMemoryAccess(call)) {
       return visited;
     }
     if (call->op.same_as(VloadOp())) {
@@ -1907,6 +2142,7 @@ private:
     PrimExpr input_offset = call->args[address_index + 1];
     AccessAddress address = ParseAddress(call->args[address_index], is_load,
                                          op_name, span, bindings_);
+    CheckProofInputs(address, input_offset, op_name, span);
 
     if (!IsIntegerScalar(input_offset)) {
       Fail(op_name + " requires a scalar integer instruction offset", span);
@@ -2015,6 +2251,10 @@ private:
     }
     AccessAddress address = ParseAddress(call->args[address_index], is_gather,
                                          op_name, span, bindings_);
+    CheckProofInputs(address, input_offset, op_name, span);
+    CheckProofBuffer(
+        FindAllocationOwner(active_allocations_, address.buffer, op_name, span),
+        op_name, span);
     IndexedOwner owner = ValidateIndexedOwner(
         analyzer_, address, active_allocations_, op_name, span);
 
@@ -2122,16 +2362,12 @@ private:
 void ScanResidualAutomaticAddresses(const Stmt &stmt) {
   PostOrderVisit(stmt, [&](const ObjectRef &node) {
     const auto *call = node.as<CallNode>();
-    if (call == nullptr) {
+    if (call == nullptr || !IsVmiMemoryAccess(call)) {
       return;
     }
     bool is_load = call->op.same_as(VloadOp());
     bool is_store = call->op.same_as(VstoreOp());
-    bool is_gather = call->op.same_as(VgatherOp());
     bool is_scatter = call->op.same_as(VscatterOp());
-    if (!is_load && !is_store && !is_gather && !is_scatter) {
-      return;
-    }
     std::string op_name;
     int address_index = 0;
     if (is_load) {
@@ -2173,6 +2409,17 @@ Pass LegalizePTOVMIMemoryAccess() {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
     Optional<Target> target = func->GetAttr<Target>(tvm::attr::kTarget);
     if (!target.defined() || !TargetIsPTO(target.value())) {
+      return func;
+    }
+    // Do not bind unrelated scalar expressions in the arithmetic analyzer.
+    // This pass only constructs/verifies descriptors for VMI memory calls.
+    bool has_vmi_memory = false;
+    PostOrderVisit(func->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        has_vmi_memory |= IsVmiMemoryAccess(call);
+      }
+    });
+    if (!has_vmi_memory) {
       return func;
     }
     arith::Analyzer analyzer;
