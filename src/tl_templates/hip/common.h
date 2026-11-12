@@ -42,10 +42,6 @@ template <int N> struct RegVecBase {
       v = __builtin_bit_cast(Vec, x);                                          \
       return *this;                                                            \
     }                                                                          \
-    TL_DEVICE RegVec &operator=(const RegVec &x) {                             \
-      v = x.v;                                                                 \
-      return *this;                                                            \
-    }                                                                          \
   };
 TL_DEFINE_REG_VEC(uint2, 2)
 TL_DEFINE_REG_VEC(uint4, 4)

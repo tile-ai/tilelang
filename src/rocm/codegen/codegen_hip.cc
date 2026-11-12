@@ -1429,14 +1429,14 @@ const char *RegisterVectorType(DataType t) {
 // longer unrolled and every read of the array becomes a chain of selects.
 class CollectMfmaOperands : public tirx::StmtExprVisitor {
 public:
-  std::unordered_set<const VarNode *> operands;
+  std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual> operands;
 
 private:
   void VisitExpr_(const CallNode *op) final {
     if (op->op.same_as(tl::tvm_mfma())) {
       for (int i : {6, 8}) {
-        if (const auto *v = op->args[i].as<VarNode>()) {
-          operands.insert(v);
+        if (auto v = op->args[i].as<Var>()) {
+          operands.insert(v.value());
         }
       }
     }
@@ -1525,7 +1525,7 @@ std::string CodeGenTileLangHIP::GetBufferRef(DataType t,
        << " / " << div_factor << ")";
   } else if (t == buffer_element_dtype) {
     os << buffer_str << "[" << index_str << "]";
-  } else if (const char *reg_vec = mfma_operands_.count(buffer_var_node)
+  } else if (const char *reg_vec = mfma_operands_.count(buffer_var)
                                        ? nullptr
                                        : RegisterVectorType(t)) {
     os << "*(" << reg_vec << "*)(" << buffer_str << " + " << index_str << ")";
