@@ -247,8 +247,6 @@ def torch_assert_close(
     tensor_a, tensor_b = _equalize_attributes(tensor_a, tensor_b)
 
     mismatched = ~torch.isclose(tensor_a, tensor_b, rtol=rtol, atol=atol, equal_nan=equal_nan)
-    # Compute the absolute difference between the two tensors
-    diff = torch.abs(tensor_a - tensor_b)
     # Count the number of mismatched elements
     num_mismatched = mismatched.sum().item()
 
@@ -280,12 +278,19 @@ def torch_assert_close(
 
     # Modify the exception information
     if num_mismatched > max_allowed_mismatched:
+        # Bool subtraction is unsupported, and uint8 subtraction can wrap.
+        # Widen only diagnostic values; comparisons and displayed inputs keep their dtype.
+        if tensor_a.dtype in (torch.bool, torch.uint8):
+            diff_a, diff_b = tensor_a.to(torch.int16), tensor_b.to(torch.int16)
+        else:
+            diff_a, diff_b = tensor_a, tensor_b
+        diff = torch.abs(diff_a - diff_b)
         raise AssertionError(
             f"Too many mismatched elements: {num_mismatched} > {max_allowed_mismatched} "
             f"({max_mismatched_ratio * 100:.2f}% allowed, but get {num_mismatched / total_elements * 100:.2f}%)."
             f"{mismatch_info}"
             f"\nGreatest absolute difference: {diff.max().item()}, "
-            f"Greatest relative difference: {(diff / (torch.abs(tensor_b) + 1e-12)).max().item()}"
+            f"Greatest relative difference: {(diff / (torch.abs(diff_b) + 1e-12)).max().item()}"
             f"\n{base_name}: {tensor_a}"
             f"\n{ref_name}: {tensor_b}"
         )
