@@ -286,6 +286,11 @@ def unroll(
     if explicit and unroll_factor is not None:
         raise ValueError("T.unroll's explicit and unroll_factor params are mutually exclusive.")
 
+    if unroll_factor is not None:
+        factor = int(unroll_factor) if isinstance(unroll_factor, (int, tirx.IntImm)) else None
+        if factor is not None and factor <= 0:
+            raise ValueError(f"unroll_factor must be a positive integer, got {unroll_factor}")
+
     if step is None or step_is_one:
         return tb_tir.unroll(start, stop, annotations=annotations)
     else:
