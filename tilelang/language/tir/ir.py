@@ -345,8 +345,10 @@ def cast(value, dtype, round: str = "", sat: bool = True, rbits=None, span=None)
     round : str, optional
         PTX rounding modifier (e.g. ``"rn"``, ``"rz"``, ``"rp"``, ``"rm"``,
         ``"rs"``). Empty string means use the backend default. Currently
-        only ``""`` and ``"rs"`` are lowered by the CUDA backend; the other
-        modifiers are reserved.
+        the CUDA backend supports ``"rn"`` for float32 to tfloat32 and
+        ``"rs"`` for supported low-precision conversions. Other explicit
+        modes are reserved. TF32 ``"rn"`` requires SM90+ with ``sat=False``
+        or SM100+ with ``sat=True``.
     sat : bool, optional
         Saturate to finite (``True`` = PTX ``.satfinite``, default).
     rbits : PrimExpr, optional

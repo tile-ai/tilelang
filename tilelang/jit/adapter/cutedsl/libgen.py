@@ -31,7 +31,10 @@ class CuTeDSLLibraryGenerator(LibraryGenerator):
     def import_from_file(module_name, file_path):
         spec = importlib.util.spec_from_file_location(module_name, file_path)
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Cached modules may live in a read-only secondary cache root.
+        # Compile source directly to avoid importlib writing __pycache__ there.
+        source = spec.loader.get_source(module_name)
+        exec(compile(source, file_path, "exec", dont_inherit=True), module.__dict__)
         return module
 
     def update_host_func(self, host_func: str):

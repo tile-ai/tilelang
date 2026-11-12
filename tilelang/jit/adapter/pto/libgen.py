@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import shlex
 import subprocess
-import sys
-import textwrap
-from pathlib import Path
 
 from tvm.contrib import utils
 from tvm.target import Target
@@ -40,112 +35,6 @@ class PTOLibraryGenerator(LibraryGenerator):
         self.pto_kernel_source = pto_kernel_source
         self.pto_kernel_names = list(pto_kernel_names)
 
-    @staticmethod
-    def _compile_ptodsl_source_to_pto(
-        ptodsl_source: str,
-        kernel_names: list[str],
-        src_path: str | Path,
-        out_path: str | Path,
-    ) -> None:
-        src_path = Path(src_path)
-        out_path = Path(out_path)
-        src_path.write_text(ptodsl_source, encoding="utf-8")
-
-        script = textwrap.dedent(
-            """
-            import importlib.util
-            import json
-            import pathlib
-            import re
-            import sys
-            import traceback
-
-            src_path = pathlib.Path(sys.argv[1])
-            kernel_names = json.loads(sys.argv[2])
-            out_path = pathlib.Path(sys.argv[3])
-            module_name = "_tilelang_ptodsl_compile"
-
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, src_path)
-                module = importlib.util.module_from_spec(spec)
-                assert spec.loader is not None
-                spec.loader.exec_module(module)
-            except Exception:
-                traceback.print_exc()
-                sys.exit(2)
-
-            try:
-                kernels = []
-                for kernel_name in kernel_names:
-                    kernel = getattr(module, kernel_name)
-                    if not callable(getattr(kernel, "build", None)) or not callable(getattr(kernel, "compile", None)):
-                        raise TypeError(f"PTODSL entry `{kernel_name}` is not a compilable PTO kernel handle")
-                    kernels.append(kernel)
-
-                if len(kernels) == 1:
-                    pto_text = kernels[0].compile().mlir_text()
-                else:
-                    from ptodsl import pto
-
-                    merge_jit_modules = getattr(pto, "merge_jit_modules", None)
-                    if not callable(merge_jit_modules):
-                        raise RuntimeError(
-                            "PTO multi-kernel JIT requires ptodsl.pto.merge_jit_modules "
-                            "from ptoas-vmi 0.1.4 or newer"
-                        )
-                    pto_text = str(merge_jit_modules(*kernels))
-
-                    # TODO: Remove this temporary workaround once the duplicate helper
-                    # symbol issue is fixed in PTOAS. PTOAS may emit identical global
-                    # symbols for helpers (notably ``pto.init_core``) in each nested kernel
-                    # module. Give duplicate module-local helpers distinct symbols so the
-                    # fatobj linker can combine the entries without changing semantics.
-                    modules = re.split(r"(?m)(?=^  module attributes \\{pto\\.backend = )", pto_text)
-                    seen_helpers = set()
-                    rewritten = [modules[0]]
-                    for module_index, module_text in enumerate(modules[1:], 1):
-                        helper_names = re.findall(
-                            r"func\\.func @([A-Za-z_][A-Za-z0-9_]*)\\([^\\n]*\\)"
-                            r' attributes \\{pto\\.ptodsl\\.callable_kind = "func"',
-                            module_text,
-                        )
-                        for helper_name in helper_names:
-                            if helper_name in seen_helpers:
-                                unique_name = f"{helper_name}__module_{module_index}"
-                                module_text = re.sub(
-                                    rf"(?<![A-Za-z0-9_]){re.escape(helper_name)}(?![A-Za-z0-9_])",
-                                    unique_name,
-                                    module_text,
-                                )
-                            seen_helpers.add(helper_name)
-                        rewritten.append(module_text)
-                    pto_text = "".join(rewritten)
-                out_path.write_text(pto_text, encoding="utf-8")
-            except Exception:
-                traceback.print_exc()
-                sys.exit(3)
-            """
-        )
-
-        python_bin = sys.executable
-        result = subprocess.run(
-            [python_bin, "-c", script, str(src_path), json.dumps(kernel_names), str(out_path)],
-            text=True,
-            capture_output=True,
-        )
-        if result.returncode == 2:
-            raise RuntimeError(
-                f"PTODSL compiler frontend is unavailable in the current environment.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-            )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "PTODSL compile-only lowering failed.\n"
-                f"Kernels: {kernel_names}\n"
-                f"Command: {python_bin} -c <ptodsl-compile-script> {src_path} <kernel-names-json> {out_path}\n"
-                f"stdout:\n{result.stdout}\n"
-                f"stderr:\n{result.stderr}"
-            )
-
     def compile_lib(self, timeout: float = None):
         try:
             self._compile_pto_lib()
@@ -174,26 +63,14 @@ class PTOLibraryGenerator(LibraryGenerator):
         launch_obj = os.path.join(out_dir, "launch.o")
         libpath = os.path.join(out_dir, "lib_kernel.so")
 
-        self._compile_ptodsl_source_to_pto(self.pto_kernel_source, self.pto_kernel_names, ptodsl_path, pto_path)
+        from tilelang.contrib.pto_toolchain import compile_ptodsl_to_pto, resolve_pto_options, run_ptoas
+
+        compile_ptodsl_to_pto(self.pto_kernel_source, self.pto_kernel_names, ptodsl_path, pto_path, self.verbose)
         with open(launch_cpp, "w", encoding="utf-8") as file:
             file.write(self.lib_code)
 
-        pto_arch = os.environ.get("PTO_ARCH", "a5").strip().lower()
-        if pto_arch != "a5":
-            raise RuntimeError(f"Unsupported PTO_ARCH for PTO JIT: {pto_arch}")
-        pto_flags = shlex.split(os.environ.get("PTO_FLAGS", ""))
-        if not any(flag == "--pto-backend" or flag.startswith("--pto-backend=") for flag in pto_flags):
-            pto_flags.append("--pto-backend=vpto")
-
-        pto_cmd = ["ptoas", f"--pto-arch={pto_arch}", *pto_flags, pto_path, "-o", fatobj_path]
-        if self.verbose:
-            print(f"PTO compile command: {' '.join(pto_cmd)}")
-        result = subprocess.run(pto_cmd, text=True, capture_output=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"PTO lowering failed for kernels {self.pto_kernel_names}.\n"
-                f"Command: {' '.join(pto_cmd)}\nstderr:\n{result.stderr}\nstdout:\n{result.stdout}"
-            )
+        pto_arch, pto_flags = resolve_pto_options()
+        run_ptoas(pto_path, fatobj_path, pto_arch, pto_flags, self.verbose)
 
         from tilelang.contrib.bisheng import find_bisheng_path
 

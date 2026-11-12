@@ -579,7 +579,7 @@ def test_cast_rs_rejected_for_f32_to_e8m0():
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("round_mode", ["rn", "rz", "rp", "rm"])
 def test_cast_rejected_for_a_mode_without_a_lowering(round_mode):
-    """Only 'rs' has a lowering today; the other accepted modes are refused.
+    """FP8 conversions reject deterministic rounding modes without a lowering.
 
     The frontend accepts rn/rz/rp/rm (without `rbits`), so the backend has to say which
     combinations it can actually lower -- adding one later means listing it in the
@@ -605,6 +605,85 @@ def test_vectorized_cast_without_round_still_lowers():
         artifact = tilelang.lower(_vectorized_cast_kernel("float16", "float8_e4m3fn", round_mode=None), target=_RS_TARGET)
 
     assert "__tl_cvt_half2_to_fp8x2" in artifact.kernel_source, artifact.kernel_source
+
+
+def _tf32_rn_kernel(lanes, sat):
+    @T.prim_func
+    def main(A: T.Tensor((lanes,), T.float32), B: T.Tensor((lanes,), T.float32)):
+        with T.Kernel(1, threads=1):
+            for i in T.vectorized(lanes):
+                B[i] = T.cast(T.cast(A[i], T.tfloat32, round="rn", sat=sat), T.float32)
+
+    return main
+
+
+@pytest.mark.parametrize("lanes", [1, 8])
+@pytest.mark.parametrize("arch,sat", [("sm_90", False), ("sm_100", True)])
+def test_tf32_rn_cast_lowers(arch, sat, lanes):
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    if build is None:
+        pytest.skip("TileLang was built without the CUDA code generator")
+    value = tvm.tirx.Var("value", "float32" if lanes == 1 else f"float32x{lanes}")
+    dtype = T.tfloat32 if lanes == 1 else T.tfloat32x8
+    converted = cast(cast(value, dtype, round="rn", sat=sat), value.dtype)
+    func = tvm.tirx.PrimFunc([value], tvm.tirx.Evaluate(converted))
+    func = func.with_attr("global_symbol", "tf32_rn")
+    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    source = build(tvm.IRModule({"tf32_rn": func}), tvm.target.Target({"kind": "cuda", "arch": arch})).inspect_source()
+    assert source.count(f"__tl_cvt_f32_to_tf32_rn<{str(sat).lower()}>") == lanes
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("sat", [False, True])
+def test_tf32_rn_cast(sat):
+    import torch
+
+    if sat and torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("Saturating TF32 rn conversion requires SM100")
+    # Ties with even/odd retained significands, signs, zeros and overflow.
+    bits = [
+        0x3F801000,
+        0x3F803000,
+        0xBF801000,
+        0xBF803000,
+        0x3F800FFF,
+        0x3F801001,
+        0,
+        0x80000000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+        0x7F800000,
+        0xFF800000,
+        0x3F800000,
+        0xBF800000,
+        0x7F7FE000,
+        0xFF7FE000,
+    ]
+    largest = 0x7F7FE000 if sat else 0x7F800000
+    expected = [
+        0x3F800000,
+        0x3F804000,
+        0xBF800000,
+        0xBF804000,
+        0x3F800000,
+        0x3F802000,
+        0,
+        0x80000000,
+        largest,
+        largest | 0x80000000,
+        largest,
+        largest | 0x80000000,
+        0x3F800000,
+        0xBF800000,
+        0x7F7FE000,
+        0xFF7FE000,
+    ]
+    a = torch.tensor(bits, dtype=torch.uint32, device="cuda").view(torch.float32)
+    b = torch.empty_like(a)
+    kernel = tilelang.compile(_tf32_rn_kernel(len(bits), sat), target="cuda")
+    kernel(a, b)
+    assert torch.equal(b.view(torch.uint32), torch.tensor(expected, dtype=torch.uint32, device="cuda"))
 
 
 if __name__ == "__main__":

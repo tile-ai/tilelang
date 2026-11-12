@@ -68,3 +68,35 @@ def test_pass_profile_threshold_explicit_zero_overrides_environment():
     key = tilelang.PassConfigKey.TL_PASS_PROFILE_THRESHOLD_MS
 
     assert resolve_pass_profile_threshold_ms({key: 0}, key, lambda: 10.0) == 0.0
+
+
+@pytest.mark.parametrize("roots", [["/cache/local"], ["/cache/local", "/cache/shared", "/cache/other"]])
+def test_cache_directories(monkeypatch, roots):
+    import os
+
+    monkeypatch.setattr(tilelang.env, "TILELANG_CACHE_DIR", os.pathsep.join(roots))
+    assert tilelang.env.get_cache_write_dir() == roots[0]
+    assert tilelang.env.get_cache_read_dirs() == roots
+
+
+@pytest.mark.parametrize("value", ["", ":/cache", "/cache:", "/cache::/other"])
+def test_cache_directories_reject_empty_components(monkeypatch, value):
+    import os
+
+    monkeypatch.setattr(tilelang.env, "TILELANG_CACHE_DIR", value.replace(":", os.pathsep))
+    with pytest.raises(ValueError, match="non-empty paths"):
+        tilelang.env.get_cache_read_dirs()
+
+
+def test_eager_source_cache_uses_first_root(monkeypatch, tmp_path):
+    import os
+    from tilelang.language.eager.utils import disk_compile
+
+    local, shared = tmp_path / "local", tmp_path / "shared"
+    monkeypatch.setattr(tilelang.env, "TILELANG_CACHE_DIR", os.pathsep.join(map(str, [local, shared])))
+    code = disk_compile("value = 42", "example")
+    namespace = {}
+    exec(code, namespace)
+    assert namespace["value"] == 42
+    assert list((local / "py-cache").glob("example.*.py"))
+    assert not shared.exists()

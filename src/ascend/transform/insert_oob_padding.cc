@@ -108,8 +108,8 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   // not receive a row fill.
   if (!bounded.clamped)
     return stmts;
-  StridedLayout src_layout = NormalizeMTE2DLayout(
-      copy->src, copy->src_range, analyzer, "Ascend GM->L1 padding");
+  auto [src_layout, dst_region_layout] = NormalizeGMToL1Copy(
+      copy->src, copy->src_range, copy->dst, copy->dst_range, analyzer);
   size_t src_inner_axis = static_cast<size_t>(src_layout.modes[0].axis);
   size_t src_row_axis = static_cast<size_t>(src_layout.modes[1].axis);
   PrimExpr valid_src_rows = bounded.src[src_row_axis]->extent;
@@ -119,13 +119,24 @@ std::vector<Stmt> MakeL1PaddingStmts(const AscendCopyNode *copy,
   PrimExpr valid_rows = needs_transpose ? valid_src_cols : valid_src_rows;
   PrimExpr valid_cols = needs_transpose ? valid_src_rows : valid_src_cols;
 
-  Optional<Stmt> col_padding =
-      ascend::MakeL1ColPadding(*copy, dst_layout, analyzer, valid_cols);
+  AscendCopy matrix_copy(*copy);
+  if (dst_region_layout.modes.size() == 3) {
+    int batch_axis = dst_region_layout.modes[2].axis;
+    PrimExpr valid_batches = bounded.dst[batch_axis]->extent;
+    if (analyzer->CanProve(valid_batches == 0))
+      return stmts;
+    // Only valid batches need M/N tail fills; skipped batches stay untouched.
+    matrix_copy.CopyOnWrite()->dst_range.Set(batch_axis,
+                                             bounded.dst[batch_axis]);
+  }
+
+  Optional<Stmt> col_padding = ascend::MakeL1ColPadding(
+      *matrix_copy.get(), dst_layout, analyzer, valid_cols);
   if (col_padding.defined())
     stmts.push_back(col_padding.value());
 
-  Optional<Stmt> row_padding =
-      ascend::MakeL1RowPadding(*copy, dst_layout, analyzer, valid_rows);
+  Optional<Stmt> row_padding = ascend::MakeL1RowPadding(
+      *matrix_copy.get(), dst_layout, analyzer, valid_rows);
   if (row_padding.defined())
     stmts.push_back(row_padding.value());
 

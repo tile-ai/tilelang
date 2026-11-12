@@ -3,6 +3,7 @@ import itertools
 import torch
 import tilelang
 import tilelang.language as T
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 from block_causal_attention import (
     LOG2_E,
@@ -501,6 +502,11 @@ def test_block_causal_attention_varlen():
     print(f"[varlen] {block_size=} {dllm_block=} OK")
 
     block_size, dllm_block = 128, 64
+    # 128x128 tiles need ~192 KiB of dynamic shared memory (the dK/dV kernel is
+    # the largest); sm_86/89/120 cap at ~99 KiB, so fall back to 64x128, which
+    # needs ~96 KiB. block_size must stay divisible by dllm_block.
+    if get_max_dynamic_shared_memory() < 200 * 1024:
+        block_size = 64
     _run_varlen_case([512, 1024], heads=2, dim=128, dllm_block=dllm_block, block_size=block_size)
     print(f"[varlen] {block_size=} {dllm_block=} OK")
 

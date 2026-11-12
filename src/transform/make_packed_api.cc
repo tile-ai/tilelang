@@ -447,6 +447,28 @@ MakePackedAPI(PrimFunc func,
   TVMFFIABIBuilder binder(&vmap);
   TVMFFIABIBuilder output_binder(&vmap);
 
+  std::unordered_set<const VarNode *> host_mapped_buffers;
+  if (auto indices = func->GetAttr<Array<Integer>>("tl.host_mapped_params")) {
+    ICHECK_EQ(target_device_type, kDLCUDA)
+        << "Host-mapped buffers require a CUDA target";
+    for (Integer index : indices.value()) {
+      int i = index.IntValue();
+      ICHECK(i >= 0 && i < static_cast<int>(func->params.size()));
+      Var param = func->params[i];
+      ICHECK(func->buffer_map.count(param));
+      host_mapped_buffers.insert(func->buffer_map[param]->data.get());
+    }
+  }
+  if (!host_mapped_buffers.empty()) {
+    // The current context owns the launch stream and the host mappings. Bind
+    // it before processing tensors, including signatures with host buffers
+    // first or with no device-resident tensor at all.
+    binder.Bind(device_id,
+                Call(DataType::Int(32), builtin::tvm_call_packed(),
+                     {StringImm("tl.cuda.current_device")}),
+                name_hint + ".device_id", true);
+  }
+
   // ---------------------------
   // local function definitions
   // load i-th argument as type t
@@ -775,7 +797,8 @@ MakePackedAPI(PrimFunc func,
   }
 
   binder.BindDLTensors(buffer_def, device_type, device_id, name_hint,
-                       used_param_buffers, detector.used_shape_vars);
+                       used_param_buffers, detector.used_shape_vars,
+                       host_mapped_buffers);
   for (const auto &[var, buffer] : buffer_def) {
     // Prefer buffer data var name in diagnostics to avoid exposing low-level
     // handle vars

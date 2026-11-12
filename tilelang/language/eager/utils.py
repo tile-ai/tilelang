@@ -2,6 +2,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+from types import CodeType
 from typing import Any, Literal
 from collections.abc import Callable, Sequence
 from tilelang import env
@@ -11,16 +12,13 @@ import linecache
 
 
 def disk_compile(source, name):
-    cache_dir = env.TILELANG_CACHE_DIR
-    if cache_dir is not None:
-        import os
-
-        save_dir = os.path.join(cache_dir, "py-cache")
-        os.makedirs(save_dir, exist_ok=True)
-        hash_sfx = sha256(source.encode("utf-8")).hexdigest()[:8]
-        path = os.path.join(save_dir, f"{name}.{hash_sfx}.py")
-        with open(path, "w") as f:
-            f.write(source)
+    cache_dir = env.get_cache_write_dir()
+    save_dir = os.path.join(cache_dir, "py-cache")
+    os.makedirs(save_dir, exist_ok=True)
+    hash_sfx = sha256(source.encode("utf-8")).hexdigest()[:8]
+    path = os.path.join(save_dir, f"{name}.{hash_sfx}.py")
+    with open(path, "w") as f:
+        f.write(source)
     linecache.cache[path] = (len(source), None, source.splitlines(), path)
     return compile(source, path, "exec")
 
@@ -57,7 +55,7 @@ def get_func_nonlocals(func):
     return nonlocal_vars
 
 
-def get_ast(func: Callable):
+def get_ast(func: Callable | CodeType):
     _, start = inspect.getsourcelines(func)
     filename = inspect.getsourcefile(func) or inspect.getfile(func)
     # Normalize to an absolute path so that source spans and remapped
