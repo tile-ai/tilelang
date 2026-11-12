@@ -24,3 +24,14 @@ def test_ascend_copy_l2_cache_ctrl_string_annotation_matches_keyword():
     for func in (annotation_path, keyword_path):
         (copy,) = calls(func, "tl.tileop.ascend_copy")
         assert int(copy.annotations["l2_cache_ctrl"]) == 0
+
+
+def test_pad_value_accepts_fp8_destination():
+    """The pad register is typed by element width, so 8-bit fp8 must be accepted."""
+
+    @T.prim_func
+    def main(A: T.Tensor((8, 64), "float8_e4m3"), B: T.Tensor((8, 64), "float8_e4m3")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((8, 64), "float8_e4m3")
+            T.copy(A, ub, pad_value=0.0)
+            T.copy(ub, B)
