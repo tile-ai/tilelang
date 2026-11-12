@@ -38,6 +38,7 @@ void CodeGenTileLangC::Init(bool output_ssa, bool emit_asserts,
   declared_globals_.clear();
   preamble_stream_ << "// tilelang target: " << target_str << "\n";
   preamble_stream_ << "#include <tl_templates/cpp/common.h>\n";
+  preamble_stream_ << "#include <tl_templates/cpu/gemm.h>\n";
   preamble_stream_ << "\n";
   CodeGenC::Init(output_ssa);
 }
@@ -117,6 +118,16 @@ void CodeGenTileLangC::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
       os << lanes;
       return;
     }
+  } else if (t.is_bfloat16()) {
+    os << "uint16_t";
+    if (lanes == 1) {
+      return;
+    }
+    if (lanes >= 2 && lanes <= 16) {
+      os << lanes;
+      return;
+    }
+    fail = true;
   } else if (t.is_uint() || t.is_int()) {
     if (t.is_uint()) {
       os << 'u';
