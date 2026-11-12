@@ -7,7 +7,9 @@ kernel adapter using TVM.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 import inspect
+import multiprocessing
 import threading
 from typing import (
     Any,
@@ -177,6 +179,17 @@ def compile(
     )
 
 
+def _compile_in_process(compile_func, func):
+    try:
+        kernel = compile_func(func)
+        cache_path = getattr(kernel, "_tilelang_cache_path", None)
+        if not cache_path or not path.isfile(path.join(cache_path, "manifest.json")):
+            raise RuntimeError("Process compilation requires a published disk cache entry.")
+    except Exception as e:
+        # TVM exceptions can contain FFI objects that cannot be pickled.
+        raise RuntimeError(str(e)) from None
+
+
 def par_compile(
     funcs: Iterable[PrimFunc[_KP, _T]],
     out_idx: list[int] | int | None = None,
@@ -188,6 +201,7 @@ def par_compile(
     compile_flags: list[str] | str | None = None,
     num_workers: int | None = None,
     ignore_error: bool = False,
+    parallel_backend: Literal["thread", "process"] = "thread",
 ) -> list[JITKernel[_KP, _T]]:
     """
     Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
@@ -213,6 +227,11 @@ def par_compile(
     pass_configs : dict, optional
         Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.transform.PassConfigKey` for supported options.
+    parallel_backend : Literal["thread", "process"], optional
+        Defaults to threads. Processes use spawn and require disk caching;
+        the parent loads compiled kernels through the same cache. Script callers
+        must use ``if __name__ == "__main__":``. Parent-only FFI registrations
+        are not inherited by spawned workers.
 
     Environment Variables
     ---------------------
@@ -225,6 +244,8 @@ def par_compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
 
+    if parallel_backend not in ("thread", "process"):
+        raise ValueError(f"Invalid parallel backend: {parallel_backend!r}")
     # funcs may be a one-shot iterable; materialize to size the pool and reuse below.
     funcs = list(funcs)
 
@@ -234,21 +255,32 @@ def par_compile(
         # nvcc is a subprocess, so threads parallelize.
         num_workers = min(len(funcs), get_available_cpu_count())
 
-    with concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp") as executor:
+    compile_func = partial(
+        compile,
+        out_idx=out_idx,
+        execution_backend=execution_backend,
+        target=target,
+        target_host=target_host,
+        verbose=verbose,
+        pass_configs=pass_configs,
+        compile_flags=compile_flags,
+    )
+    worker = compile_func
+    if parallel_backend == "process":
+        from tilelang import env
+
+        if not env.is_cache_enabled():
+            raise ValueError('parallel_backend="process" requires disk caching to be enabled')
+        executor = concurrent.futures.ProcessPoolExecutor(num_workers, mp_context=multiprocessing.get_context("spawn"))
+        worker = partial(_compile_in_process, compile_func)
+    else:
+        executor = concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp")
+
+    with executor:
         futures = []
         future_map = {}
         for i, func in enumerate(funcs):
-            future = executor.submit(
-                compile,
-                func=func,
-                out_idx=out_idx,
-                execution_backend=execution_backend,
-                target=target,
-                target_host=target_host,
-                verbose=verbose,
-                pass_configs=pass_configs,
-                compile_flags=compile_flags,
-            )
+            future = executor.submit(worker, func)
             future_map[future] = i
             futures.append(future)
         results = [... for _ in futures]
@@ -258,14 +290,14 @@ def par_compile(
             desc="Parallel Compiling",
         ):
             idx = future_map[future]
-            if ignore_error:
-                try:
-                    results[idx] = future.result()
-                except Exception as e:
-                    logger.warning(f"Error compiling function at index {idx}: {e}")
-                    results[idx] = None
-            else:
-                results[idx] = future.result()
+            try:
+                result = future.result()
+                results[idx] = compile_func(funcs[idx]) if parallel_backend == "process" else result
+            except Exception as e:
+                if not ignore_error:
+                    raise
+                logger.warning(f"Error compiling function at index {idx}: {e}")
+                results[idx] = None
         return results
     return results
 
@@ -423,6 +455,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         configs: Iterable[dict[str, Any] | tuple[str, Any]],
         num_workers: int = None,
         ignore_error: bool = False,
+        parallel_backend: Literal["thread", "process"] = "thread",
     ) -> list[JITKernel[_KP, _T]]:
         """
         Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
@@ -439,6 +472,9 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             If True, compilation errors for individual configs will be logged
             as warnings and the corresponding result will be None. If False,
             any compilation error will raise an exception. Defaults to False.
+        parallel_backend : Literal["thread", "process"], optional
+            Compilation workers; see :func:`tilelang.par_compile`. IR construction
+            remains serial in the calling process.
         Returns
         -------
         List[JITKernel]
@@ -465,6 +501,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             compile_flags=self.compile_flags,
             num_workers=num_workers,
             ignore_error=ignore_error,
+            parallel_backend=parallel_backend,
         )
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
