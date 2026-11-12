@@ -6,7 +6,7 @@ Both MHA and GQA reduce to the same per-tile computation::
     K/V: [kv_len, D]
     O:   [q_len, D]
 
-MHA uses ``q_len == kv_len``; GQA flattens the query groups into
+MHA uses the query and KV lengths directly. GQA flattens the query groups into
 ``q_len = S1 * G`` while K/V stay ``[S2, D]``. Group structure only affects how
 the caller reshapes Q/O — the row-wise online-softmax attention is identical.
 
@@ -63,16 +63,23 @@ def flash_attention_fwd(
     assert head_dim == 128, "The SIMD packing path requires head_dim == 128."
     assert BR % 2 == 0
     assert BC == 2 * VL
-    assert q_len % BR == 0
-    assert kv_len % BC == 0
+    if isinstance(q_len, int):
+        assert q_len > 0 and q_len % BR == 0
+    if isinstance(kv_len, int):
+        assert kv_len > 0 and kv_len % BC == 0
 
-    NUM_M_TILES = q_len // BR
+    # Ascend copies clamp GM tails and zero-pad partial L1 tiles.
+    NUM_M_TILES = (q_len + BR - 1) // BR
     NUM_KV_BLOCKS = kv_len // BC
-    NUM_BLOCKS = NUM_M_TILES if num_blocks is None else num_blocks
-    assert NUM_BLOCKS > 0
-    assert NUM_KV_BLOCKS > 0
-    assert NUM_M_TILES % NUM_BLOCKS == 0, "M tiles must divide evenly across cores."
-    M_TILES_PER_BLOCK = NUM_M_TILES // NUM_BLOCKS
+    if num_blocks is None:
+        NUM_BLOCKS = NUM_M_TILES
+        M_TILES_PER_BLOCK = 1
+    else:
+        assert isinstance(q_len, int), "Explicit num_blocks requires a static q_len."
+        NUM_BLOCKS = num_blocks
+        assert NUM_BLOCKS > 0
+        assert NUM_M_TILES % NUM_BLOCKS == 0, "M tiles must divide evenly across cores."
+        M_TILES_PER_BLOCK = NUM_M_TILES // NUM_BLOCKS
 
     is_cast_out = out_dtype != accum_dtype
     assert out_dtype in (accum_dtype, "bfloat16", "float16"), (
