@@ -802,9 +802,11 @@ void CodeGenTileLangMetal::VisitStmt_(const BufferStoreNode *op) {
         << "Store to non-flat local.var not supported.";
     TVM_FFI_ICHECK(!op->predicate.defined())
         << "Predicated local.var store is not supported.";
+    // Print the value first: if_then_else / Let hoist statements (condval,
+    // rmod) into `stream`, which must come before the assignment itself.
+    std::string value = PrintExpr(op->value);
     PrintIndent();
-    stream << GetVarID(op->buffer->data.get()) << " = " << PrintExpr(op->value)
-           << ";\n";
+    stream << GetVarID(op->buffer->data.get()) << " = " << value << ";\n";
     return;
   }
   CodeGenC::VisitStmt_(op);
