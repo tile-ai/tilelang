@@ -84,38 +84,38 @@ inline Stmt MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer,
       all_unit &= is_one(range->extent);
     }
   }
-  if (all_unit) {
+  // The shortcut needs a real thread Var to decide whether the atomic is
+  // already per-thread.  Without a thread binding the lowering helper sees
+  // the logical index as constant zero, while materialization may still
+  // launch several CUDA threads; fall through to the dummy-loop path so its
+  // existing one-lane predicate is preserved.
+  const VarNode *thread_var = thread_index.as<VarNode>();
+  if (all_unit && thread_var != nullptr) {
     // A one-element destination at top level still has to be updated by one
     // thread only; otherwise every CUDA thread applies the update.  If the
     // source/destination indices contain the thread index, the atomic is
     // already per-thread and must run on every lane.
-    const VarNode *thread_var = thread_index.as<VarNode>();
+    auto uses = [&](const PrimExpr &expr) {
+      return UsesVar(expr, [&](const VarNode *v) { return v == thread_var; });
+    };
     bool uses_thread = false;
-    if (thread_var != nullptr) {
-      auto uses = [&](const PrimExpr &expr) {
-        return UsesVar(expr, [&](const VarNode *v) { return v == thread_var; });
-      };
-      for (const Range &range : op.dst_range) {
+    for (const Range &range : op.dst_range) {
+      uses_thread |= uses(range->min) || uses(range->extent);
+      uses_thread |= as_const_int(range->min) == nullptr;
+    }
+    if (!op.src_value.defined()) {
+      for (const Range &range : op.src_range) {
         uses_thread |= uses(range->min) || uses(range->extent);
         uses_thread |= as_const_int(range->min) == nullptr;
       }
-      if (!op.src_value.defined()) {
-        for (const Range &range : op.src_range) {
-          uses_thread |= uses(range->min) || uses(range->extent);
-          uses_thread |= as_const_int(range->min) == nullptr;
-        }
-      } else {
-        uses_thread |= uses(op.src_value);
-        uses_thread |= as_const_int(op.src_value) == nullptr;
-      }
+    } else {
+      uses_thread |= uses(op.src_value);
+      uses_thread |= as_const_int(op.src_value) == nullptr;
     }
     if (uses_thread) {
       return body;
     }
-    if (thread_var != nullptr) {
-      return IfThenElse(thread_index == thread_bounds->min, body, Stmt());
-    }
-    return body;
+    return IfThenElse(thread_index == thread_bounds->min, body, Stmt());
   }
 
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
