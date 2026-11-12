@@ -500,5 +500,153 @@ def test_match_all_sync():
     assert torch.all(b2 == 0), f"Expected all 0, got {b2}"
 
 
+# ---------------------------------------------------------------------------
+# Predicate width
+#
+# The predicate parameter follows the native CUDA/HIP 32-bit `int` semantics:
+# a wider integer is narrowed before being tested for non-zero. These tests pin
+# that contract (see docs/programming_guides/instructions.md) so that callers
+# who pass a wide integer keep seeing the documented behaviour, and they cover
+# the recommended `value != 0` spelling for testing every bit of the value.
+#
+# Every intrinsic named in the documentation is exercised. Each one is
+# normalised to a 0/1 verdict so that a single family covers "any"-style
+# intrinsics (non-zero as soon as one lane votes) and "all"-style intrinsics
+# (non-zero only when every lane votes).
+# ---------------------------------------------------------------------------
+
+# 2**32 has all-zero low 32 bits, so it narrows to 0 and must vote false.
+_WIDE_ONLY_VALUE = 1 << 32
+
+#: Intrinsics that report non-zero only when every lane's predicate is set.
+_ALL_INTRINSICS = ["all_sync", "syncthreads_and"]
+#: Intrinsics that report non-zero as soon as a single lane's predicate is set.
+_ANY_INTRINSICS = ["any_sync", "syncthreads_count", "syncthreads_or"]
+#: Intrinsics that return the whole lane bitmask instead of a single verdict.
+_BALLOT_INTRINSICS = ["ballot_sync", "ballot"]
+_WIDE_PREDICATE_INTRINSICS = _ANY_INTRINSICS + _ALL_INTRINSICS
+
+#: The "all" intrinsics need every lane to vote; the "any" ones need only lane 0.
+_ALL_LANES_VOTE = {name: (name in _ALL_INTRINSICS) for name in _WIDE_PREDICATE_INTRINSICS}
+
+
+def _wide_predicate_verdict(intrinsic: str, predicate):
+    """Evaluate ``intrinsic(predicate)`` as a 0/1 verdict."""
+    if intrinsic == "any_sync":
+        return T.cast(T.any_sync(predicate) != 0, "int32")
+    if intrinsic == "all_sync":
+        return T.cast(T.all_sync(predicate) != 0, "int32")
+    if intrinsic == "syncthreads_count":
+        return T.syncthreads_count(predicate)
+    if intrinsic == "syncthreads_and":
+        return T.cast(T.syncthreads_and(predicate) != 0, "int32")
+    if intrinsic == "syncthreads_or":
+        return T.cast(T.syncthreads_or(predicate) != 0, "int32")
+    raise ValueError(f"{intrinsic!r} returns a lane bitmask, not a 0/1 verdict")
+
+
+def _ballot_mask(intrinsic: str, predicate):
+    """Raw ``uint64`` lane bitmask of a ballot intrinsic."""
+    if intrinsic == "ballot_sync":
+        return T.ballot_sync(predicate)
+    if intrinsic == "ballot":
+        return T.ballot(predicate)
+    raise ValueError(f"{intrinsic!r} does not return a mask")
+
+
+def _wide_predicate_mask_kernel(intrinsic: str, compare_explicitly: bool):
+    """Evaluate a ballot intrinsic over an int64 predicate of ``2**32``.
+
+    Only lane 0 carries ``2**32``, so the correct mask keeps exactly bit 0.
+    The mask is written to an ``int64`` buffer: for a 32-lane warp the mask has
+    no bit above 31, so the sign bit stays clear and the value round-trips
+    exactly without relying on an unsigned torch dtype.
+    """
+    assert intrinsic in _BALLOT_INTRINSICS
+
+    @tilelang.jit
+    def build():
+        @T.prim_func
+        def main(B: T.Tensor((1,), "int64")):
+            with T.Kernel(1, threads=32):
+                tx = T.get_thread_binding()
+                wide = T.int64(_WIDE_ONLY_VALUE) if tx == 0 else T.int64(0)
+                predicate = (wide != T.int64(0)) if compare_explicitly else wide
+                mask = _ballot_mask(intrinsic, predicate)
+                if tx == 0:
+                    B[0] = T.cast(mask, "int64")
+
+        return main
+
+    return build
+
+
+def _run_wide_predicate_mask(intrinsic: str, compare_explicitly: bool) -> int:
+    b = torch.zeros((1,), device="cuda", dtype=torch.int64)
+    _wide_predicate_mask_kernel(intrinsic, compare_explicitly)()(b)
+    return int(b[0].item())
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("intrinsic", _BALLOT_INTRINSICS)
+def test_wide_predicate_ballot_mask_is_exact(intrinsic):
+    """Ballot must return exactly lane 0's bit, not merely "some" bit."""
+    # 2**32 narrows to 0, so no lane votes and the mask must be empty.
+    narrowed = _run_wide_predicate_mask(intrinsic, compare_explicitly=False)
+    assert narrowed == 0, f"{intrinsic}: expected mask 0x0 (2**32 narrows to 0), got 0x{narrowed:x}"
+
+    # Comparing with 0 first restores the only voting lane, which is lane 0.
+    explicit = _run_wide_predicate_mask(intrinsic, compare_explicitly=True)
+    assert explicit == 0x1, f"{intrinsic}: expected mask 0x1, got 0x{explicit:x}"
+
+
+def _wide_predicate_kernel(intrinsic: str, compare_explicitly: bool):
+    """Evaluate one intrinsic over an int64 predicate of ``2**32``.
+
+    Lanes that should vote carry ``2**32``; the remaining lanes carry 0.
+    ``compare_explicitly`` selects the documented ``value != 0`` spelling.
+    """
+    vote_every_lane = _ALL_LANES_VOTE[intrinsic]
+
+    @tilelang.jit
+    def build():
+        @T.prim_func
+        def main(B: T.Tensor((32,), "int32")):
+            with T.Kernel(1, threads=32):
+                tx = T.get_thread_binding()
+                if vote_every_lane:
+                    wide = T.int64(_WIDE_ONLY_VALUE)
+                else:
+                    wide = T.int64(_WIDE_ONLY_VALUE) if tx == 0 else T.int64(0)
+                predicate = (wide != T.int64(0)) if compare_explicitly else wide
+                B[tx] = _wide_predicate_verdict(intrinsic, predicate)
+
+        return main
+
+    return build
+
+
+def _run_wide_predicate(intrinsic: str, compare_explicitly: bool) -> torch.Tensor:
+    b = torch.full((32,), -1, device="cuda", dtype=torch.int32)
+    _wide_predicate_kernel(intrinsic, compare_explicitly)()(b)
+    return b
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("intrinsic", _WIDE_PREDICATE_INTRINSICS)
+def test_wide_predicate_narrows_to_low_32_bits(intrinsic):
+    """A 2**32 int64 predicate narrows to 0, so no lane votes."""
+    b = _run_wide_predicate(intrinsic, compare_explicitly=False)
+    assert torch.all(b == 0), f"{intrinsic}: expected every lane to report 0 (2**32 narrows to 0), got {b}"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("intrinsic", _WIDE_PREDICATE_INTRINSICS)
+def test_wide_predicate_with_explicit_zero_compare(intrinsic):
+    """Comparing with 0 first makes every bit of the value participate."""
+    b = _run_wide_predicate(intrinsic, compare_explicitly=True)
+    assert torch.all(b == 1), f"{intrinsic}: expected every lane to report 1, got {b}"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
