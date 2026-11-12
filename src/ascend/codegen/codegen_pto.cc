@@ -6745,11 +6745,14 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
           RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))) +
           ", dtype=" + DataTypeName(elem) + ")";
     } else if (elem.is_int() || elem.is_uint() || elem.is_bool()) {
-      scalar = ScalarCastExpr(
-          RemoveOutermostParentheses(PrintExpr_(PeelScalarCasts(op->args[0]))),
-          elem, "tl.simd.vdup scalar");
+      scalar =
+          ScalarCastExpr(RemoveOutermostParentheses(PrintExpr_(op->args[0])),
+                         elem, "tl.simd.vdup scalar");
     } else {
       scalar = RemoveOutermostParentheses(PrintExpr_(op->args[0]));
+      if (op->args[0].dtype() != elem) {
+        scalar = ScalarCastExpr(scalar, elem, "tl.simd.vdup scalar");
+      }
     }
     os << "pto.vdup(" << scalar << ", " << PrintExpr_(op->args[1]) << ")";
     return;

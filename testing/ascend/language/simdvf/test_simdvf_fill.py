@@ -133,23 +133,52 @@ def test_pto_fill_integer_and_float(value, dtype):
 
 @pytest.mark.pto
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("src_dtype,dst_dtype,size", [("int32", "float32", 64), ("float32", "float16", 128)])
-def test_pto_fill_runtime_scalar_cast(src_dtype, dst_dtype, size):
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype,size,narrow_dtype",
+    [("int32", "float32", 64, None), ("float32", "float16", 128, None), ("int32", "int32", 64, "int8")],
+)
+def test_pto_fill_runtime_scalar_cast(src_dtype, dst_dtype, size, narrow_dtype):
     scalar_type = getattr(T, src_dtype)
+    narrow = narrow_dtype is not None
 
     @T.prim_func
     def kernel(value: scalar_type, O: T.Tensor((size,), dst_dtype)):
         with T.Kernel(1):
             temp = T.alloc_shared((size,), dst_dtype)
             with T.SimdVF():
-                T.fill(temp, value)
+                if narrow:
+                    T.fill(temp, T.Cast(dst_dtype, T.Cast(narrow_dtype, value)))
+                else:
+                    T.fill(temp, value)
             T.copy(temp, O)
 
     compiled = tilelang.compile(kernel, target="pto", out_idx=-1)
-    for value in (7, -7):
+    for value in (257, -257, 127, 128) if narrow else (7, -7):
         scalar = float(value) if src_dtype.startswith("float") else value
         output = compiled(scalar)
-        expected = torch.full((size,), value, dtype=getattr(torch, dst_dtype))
+        converted = torch.tensor(scalar, dtype=getattr(torch, src_dtype))
+        if narrow:
+            converted = converted.to(getattr(torch, narrow_dtype))
+        expected = converted.to(getattr(torch, dst_dtype)).expand(size)
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.pto
+@tilelang.testing.requires_ascend
+def test_pto_vdup_runtime_narrowing_cast():
+    @T.prim_func
+    def kernel(value: T.float32, O: T.Tensor((64,), "float32")):
+        with T.Kernel(1):
+            temp = T.alloc_shared((64,), "float32")
+            with T.SimdVF():
+                vector = T.simd.vdup(T.Cast("float16", value), "float32")
+                T.simd.vsts(temp[0], vector)
+            T.copy(temp, O)
+
+    compiled = tilelang.compile(kernel, target="pto", out_idx=-1)
+    for value in (1.0003, 1.0007, -1.0003):
+        output = compiled(value)
+        expected = torch.tensor(value, dtype=torch.float32).half().float().expand(64)
         torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
