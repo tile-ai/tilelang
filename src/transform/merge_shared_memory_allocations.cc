@@ -137,15 +137,26 @@ public:
   };
 
   struct StmtAttr {
-    // the level in the scope stack
+    // The nesting depth of enclosing loops (For/While), i.e.
+    // loop_chain.size(). Only consumed by verbose logging.
     size_t level{0};
+    // The chain of enclosing loop nodes (outermost first) recorded where
+    // the statement's events are attributed. Loop bodies carry back edges,
+    // so a buffer's linear liveness interval is only reliable per loop
+    // region; this chain identifies the true region of every gen/kill event.
+    std::vector<const Object *> loop_chain;
   };
 
   void UpdateStmtAttr(const Object *stmt, size_t level) {
     if (stmt_attrs_.find(stmt) == stmt_attrs_.end()) {
-      stmt_attrs_[stmt] = StmtAttr{level};
+      StmtAttr attr;
+      attr.level = level;
+      attr.loop_chain = loop_stack_;
+      stmt_attrs_[stmt] = std::move(attr);
     } else {
-      stmt_attrs_[stmt].level = level;
+      auto &attr = stmt_attrs_[stmt];
+      attr.level = level;
+      attr.loop_chain = loop_stack_;
     }
   }
 
@@ -181,7 +192,7 @@ public:
     scope_.pop_back();
     if (!e.touched.empty()) {
       e.stmt = op;
-      UpdateStmtAttr(op, scope_level_);
+      UpdateStmtAttr(op, loop_stack_.size());
       linear_seq_.push_back(e);
     }
   }
@@ -194,7 +205,7 @@ public:
     scope_.pop_back();
     if (!e.touched.empty()) {
       e.stmt = op;
-      UpdateStmtAttr(op, scope_level_);
+      UpdateStmtAttr(op, loop_stack_.size());
       linear_seq_.push_back(e);
     }
   }
@@ -256,7 +267,7 @@ public:
     scope_.push_back(StmtEntry());
     StmtEntry e;
     e.stmt = op;
-    UpdateStmtAttr(op, scope_level_);
+    UpdateStmtAttr(op, loop_stack_.size());
     int64_t begin_index = static_cast<int64_t>(linear_seq_.size());
     // before scope.
     linear_seq_.push_back(e);
@@ -294,29 +305,27 @@ public:
 
   void VisitStmt_(const IfThenElseNode *op) final { VisitNewScope(op); }
 
-  bool ContainsSeqStmt(const Stmt &stmt) {
-    if (stmt->IsInstance<SeqStmtNode>()) {
-      return true;
-    }
-    if (const auto *if_node = stmt.as<IfThenElseNode>()) {
-      return ContainsSeqStmt(if_node->then_case) ||
-             (if_node->else_case.defined() &&
-              ContainsSeqStmt(if_node->else_case.value()));
-    }
-    return false;
-  }
-
   void VisitStmt_(const ForNode *op) final {
-    if (ContainsSeqStmt(op->body)) {
-      scope_level_++;
-      VisitNewScope(op);
-      scope_level_--;
-    } else {
-      VisitNewScope(op);
-    }
+    // Track the true enclosing-loop chain for every event inside the body,
+    // plus the loop's contiguous region in linear_seq_. Whether a loop's
+    // body happens to contain a SeqStmt is codegen shape, not semantics,
+    // and must not decide liveness reasoning.
+    loop_stack_.push_back(op);
+    size_t span_begin = linear_seq_.size();
+    VisitNewScope(op);
+    loop_spans_[op] = {span_begin, linear_seq_.size() - 1};
+    loop_stack_.pop_back();
   }
 
-  void VisitStmt_(const WhileNode *op) final { VisitNewScope(op); }
+  void VisitStmt_(const WhileNode *op) final {
+    // Same treatment as For: while bodies also have back edges and must be
+    // visible to the region-based kill reorder.
+    loop_stack_.push_back(op);
+    size_t span_begin = linear_seq_.size();
+    VisitNewScope(op);
+    loop_spans_[op] = {span_begin, linear_seq_.size() - 1};
+    loop_stack_.pop_back();
+  }
 
   void VisitStmt_(const AssertStmtNode *op) final { VisitNewScope(op); }
 
@@ -326,6 +335,10 @@ public:
   std::unordered_map<const VarNode *, AllocEntry> alloc_info_;
   // The attribute of each statement
   std::unordered_map<const Object *, StmtAttr> stmt_attrs_;
+  // The contiguous span [begin, end] (inclusive indices into linear_seq_)
+  // of each For/While loop's region: begin/end are the loop's scope
+  // sentinel entries. DFS order guarantees the region is contiguous.
+  std::unordered_map<const Object *, std::pair<size_t, size_t>> loop_spans_;
 
 private:
   void VisitWarpSpecializationBody(const Stmt &stmt) {
@@ -364,8 +377,8 @@ private:
   bool in_thread_env_{false};
   // The scope stack.
   std::vector<StmtEntry> scope_;
-  // The size of the scope.
-  size_t scope_level_{0};
+  // The stack of enclosing loop nodes (For/While), outermost first.
+  std::vector<const Object *> loop_stack_;
 };
 
 class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
@@ -484,7 +497,8 @@ public:
     } else {
       // First compute liveness over the flattened schedule, then feed it into
       // the arena packer.
-      this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_);
+      this->LivenessAnalysis(finder.linear_seq_, finder.stmt_attrs_,
+                             finder.loop_spans_);
       this->PlanMemory(finder.linear_seq_, finder.stmt_attrs_);
     }
     // Post-condition: every buffer with an alignment requirement must have
@@ -1065,7 +1079,9 @@ private:
    */
   void LivenessAnalysis(
       const std::vector<StmtEntry> &seq,
-      const std::unordered_map<const Object *, StmtAttr> &stmt_attrs) {
+      const std::unordered_map<const Object *, StmtAttr> &stmt_attrs,
+      const std::unordered_map<const Object *, std::pair<size_t, size_t>>
+          &loop_spans) {
     // find kill point, do a reverse linear scan.
     std::unordered_set<const VarNode *> touched;
     for (size_t i = seq.size(); i != 0; --i) {
@@ -1152,22 +1168,30 @@ private:
       LOG(DEBUG) << "End of Liveness Analysis Results.";
     }
 
-    // Reorder kill points:
-    // For each buffer, if its kill statement is at a deeper scope level than
-    // its gen statement, we need to move the kill point to the end of the gen
-    // statement's scope level. This ensures proper memory deallocation at the
-    // right scope boundary.
-    std::vector<StmtEntry> gen_kill_seq;
-    for (const auto &stmt_entry : seq) {
-      // if has gen and kill, add to gen_kill_seq
-      if (!event_map_[stmt_entry.stmt].gen.empty() ||
-          !event_map_[stmt_entry.stmt].kill.empty()) {
-        gen_kill_seq.push_back(stmt_entry);
-      }
-    }
+    // Reorder kill points across loop back edges:
+    //
+    // The linear sequence flattens each loop body to a single copy, so
+    // "linearly disjoint" does not imply "dynamically disjoint" once back
+    // edges are involved. A buffer whose gen lies outside a loop while its
+    // kill lies inside it is live across the loop's back edge (written
+    // once, read every iteration); its linear interval must be extended to
+    // the loop's dynamic exit instead of trusting the raw in-body position.
+    //
+    // Rule: let L* be the outermost loop that encloses the kill statement
+    // but not the gen statement. If no such loop exists, gen and kill live
+    // in the same loop region and the raw linear interval is already
+    // reliable (the buffer is re-defined every iteration). Otherwise, move
+    // the kill to the last event-bearing statement inside L*'s span, i.e.
+    // the buffer stays live up to L*'s exit.
+    //
+    // Note: a For/While node counts itself as part of its own loop chain
+    // (its scope sentinels carry the loop in their chain), so a kill
+    // recorded on a loop's after-scope sentinel is treated as "inside" that
+    // loop and L* may be the loop itself; the reorder then lands on the
+    // loop's own end sentinel and is idempotent.
 
     // Pending kill insertions are deferred until after the per-event loop
-    // below: ``event_map_[last_stmt_at_level].kill.push_back(...)`` may
+    // below: ``event_map_[target_stmt].kill.push_back(...)`` may
     // target the very same vector we are currently iterating, in which case
     // the push_back can reallocate the underlying storage and invalidate
     // ``it``. MSVC's debug iterator verification catches this on the next
@@ -1185,67 +1209,90 @@ private:
       if (event.kill.empty())
         continue;
 
-      // Get scope level of current statement
+      // The kill statement's true enclosing loop chain (outermost first).
       ICHECK(stmt_attrs.count(stmt));
-      int kill_level = stmt_attrs.at(stmt).level;
+      const std::vector<const Object *> &kill_chain =
+          stmt_attrs.at(stmt).loop_chain;
 
       std::unordered_set<const VarNode *> visited_buffers;
 
-      // For each killed buffer, find its gen statement and check scope levels
+      // For each killed buffer, find its gen statement and locate the
+      // outermost loop that encloses the kill but not the gen.
       for (auto it = event.kill.begin(); it != event.kill.end();) {
         const VarNode *buffer = *it;
-        bool found_gen = false;
-        int gen_level = 0;
+        const Object *gen_stmt = nullptr;
 
         // Find the gen statement for this buffer
         for (const auto &gen_pair : event_map_) {
           const auto &gen_event = gen_pair.second;
           if (std::find(gen_event.gen.begin(), gen_event.gen.end(), buffer) !=
               gen_event.gen.end()) {
-            found_gen = true;
-            gen_level = stmt_attrs.at(gen_pair.first).level;
+            gen_stmt = gen_pair.first;
             break;
           }
         }
 
-        if (found_gen && kill_level > gen_level) {
-          if (visited_buffers.count(buffer)) {
-            ++it;
-            continue;
-          }
-          // Need to move kill point - remove from current event
-          it = event.kill.erase(it);
-
-          // Find the last statement at gen_level and add kill point there
-          // Find the last statement at gen_level in the sequence
-          const Object *last_stmt_at_level = nullptr;
-          auto stmt_it = gen_kill_seq.begin();
-          for (; stmt_it != gen_kill_seq.end(); ++stmt_it) {
-            if (stmt_it->stmt == stmt) {
+        // L*: the first loop in kill_chain (outermost first) that does not
+        // appear in the gen statement's chain.
+        const Object *target_loop = nullptr;
+        if (gen_stmt != nullptr) {
+          const std::vector<const Object *> &gen_chain =
+              stmt_attrs.at(gen_stmt).loop_chain;
+          for (const Object *loop : kill_chain) {
+            if (std::find(gen_chain.begin(), gen_chain.end(), loop) ==
+                gen_chain.end()) {
+              target_loop = loop;
               break;
             }
           }
-          // start from current statement and find the last statement at
-          // gen_level
-
-          for (; stmt_it != gen_kill_seq.end(); ++stmt_it) {
-            auto next_it = stmt_it + 1;
-            if (next_it == gen_kill_seq.end() ||
-                stmt_attrs.at(next_it->stmt).level == gen_level) {
-              last_stmt_at_level = stmt_it->stmt;
-              break;
-            }
-          }
-          if (last_stmt_at_level) {
-            // Defer: pushing into event.kill (the vector ``it`` iterates) or
-            // into any other event.kill while the outer ``event_map_`` range
-            // loop is live can invalidate iterators / dangling references.
-            pending_kill_inserts.emplace_back(last_stmt_at_level, buffer);
-            visited_buffers.insert(buffer);
-          }
-        } else {
-          ++it;
         }
+
+        if (target_loop == nullptr) {
+          // Gen and kill live in the same loop region (or the buffer has no
+          // gen event): the buffer is re-defined every iteration, so the
+          // raw linear interval is reliable. Keep the kill where it is.
+          ++it;
+          continue;
+        }
+
+        if (visited_buffers.count(buffer)) {
+          ++it;
+          continue;
+        }
+
+        // Extend the buffer's liveness to the loop's dynamic exit: move the
+        // kill to the last event-bearing statement inside the loop's span.
+        // Scan BEFORE erasing the kill from the current event: the kill
+        // statement itself still carries this event, so it is guaranteed to
+        // be found even when it is the only event-bearing statement inside
+        // the span (the reorder then degenerates to keeping the kill on the
+        // same statement).
+        auto span_it = loop_spans.find(target_loop);
+        ICHECK(span_it != loop_spans.end())
+            << "missing loop span for " << target_loop->GetTypeKey();
+        size_t span_begin = span_it->second.first;
+        size_t span_end = span_it->second.second;
+        const Object *target_stmt = nullptr;
+        for (size_t j = span_end; j + 1 > span_begin; --j) {
+          auto ev_it = event_map_.find(seq[j].stmt);
+          if (ev_it != event_map_.end() &&
+              (!ev_it->second.gen.empty() || !ev_it->second.kill.empty())) {
+            target_stmt = seq[j].stmt;
+            break;
+          }
+        }
+        // The kill statement itself is inside the span, so at least one
+        // event-bearing statement must exist.
+        ICHECK(target_stmt != nullptr);
+
+        // Need to move kill point - remove from current event
+        it = event.kill.erase(it);
+
+        // Defer: pushing into event.kill (the vector ``it`` iterates) or
+        // into any other event.kill while the outer ``event_map_`` range
+        // loop is live can invalidate iterators / dangling references.
+        pending_kill_inserts.emplace_back(target_stmt, buffer);
+        visited_buffers.insert(buffer);
       }
     }
 
