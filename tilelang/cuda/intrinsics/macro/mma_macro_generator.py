@@ -14,6 +14,7 @@ from ..layout.utils import (
     mma_store_index_map_fp64,
     get_ldmatrix_offset,
 )
+from tilelang.layout import Layout, cute
 from tilelang.utils import is_fragment, get_buffer_region_from_load
 from tilelang.cuda.intrinsics.layout.mma_layout import (
     shared_16x8_to_mma_32x4_layout_sr_a,
@@ -78,6 +79,8 @@ class TensorCoreIntrinEmitter:
     is_m_first: bool = False
     warp_rows: int = 1
     warp_cols: int = 1
+    a_shared_layout: Layout | None = None
+    b_shared_layout: Layout | None = None
 
     def __init__(
         self,
@@ -131,6 +134,14 @@ class TensorCoreIntrinEmitter:
             raise ValueError(
                 f"Invalid threads configuration for this tile shape, {self.warp_rows} x {self.warp_cols} with threads {self.threads}"
             )
+
+    def _assign_a_shared_layout(self, layout: Layout):
+        self.a_shared_layout = layout
+        return self
+
+    def _assign_b_shared_layout(self, layout: Layout):
+        self.b_shared_layout = layout
+        return self
 
     def _initialize_k_dim(self, a_dtype="float16"):
         # The generic operand lane maps use a 256-bit K atom. Shorter hardware
@@ -285,6 +296,41 @@ class TensorCoreIntrinEmitter:
             )
             return lane_id, warp_n, warp_m
 
+    def _is_ldmatrix_compatible(self, layout: Layout | None, dtype: str | DataType) -> bool:
+        if layout is None:
+            return True
+        composed = cute.ComposedLayout.from_tilelang(layout)
+        if composed is None:
+            return False
+
+        bits = DataType(dtype).bits
+
+        # 1. Check linear layout L: innermost sub-mode of the last dim must be
+        # contiguous (stride == 1) and a multiple of 16 bytes (128 bits).
+        r = cute.rank(composed.layout)
+        if r < 2:
+            return False
+        last_dim_layout = cute.coalesce(composed.layout[r - 1])
+        last_dim_stride_flatten = cute.flatten_to_tuple(last_dim_layout.stride)
+        last_dim_shape_flatten = cute.flatten_to_tuple(last_dim_layout.shape)
+        if last_dim_stride_flatten[0] != 1 or (last_dim_shape_flatten[0] * bits) % 128 != 0:
+            return False
+
+        # All other strides (leading dims + multi-panel outer sub-modes) must stay 16B-aligned.
+        flatten_stride = cute.flatten_to_tuple(composed.layout.stride[:-1]) + last_dim_stride_flatten[1:]
+        for stride in flatten_stride:
+            if (stride * bits) % 128 != 0:
+                return False
+
+        # 2. Check constant offset O: base offset must be 16B-aligned.
+        if (composed.offset * bits) % 128 != 0:
+            return False
+
+        # 3. Check swizzle S: unchanged low address chunk must be at least 16 bytes (128 bits).
+        if composed.swizzle is None or not composed.swizzle.is_swizzled:
+            return True
+        return (1 << composed.swizzle.m_base) * bits >= 128
+
     def ldmatrix_a(self, A_local_buf: Buffer, A_shared_buf: Buffer | BufferRegion, ki: PrimExpr, rk: PrimExpr | None = 0):
         # Fast path for fp64: no ldmatrix support, do direct per-lane loads
         a_dtype = self.a_dtype
@@ -333,8 +379,10 @@ class TensorCoreIntrinEmitter:
         micro_size_k = self.micro_size_k
         local_size_a = self.local_size_a
         a_transposed = self.a_transposed
-        # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed)
+        # ldmatrix cannot be used for int8 + trans case, or when the shared layout breaks 16B contiguity/alignment.
+        ldmatrix_available = not (DataType(a_dtype).bits != 16 and a_transposed) and self._is_ldmatrix_compatible(
+            self.a_shared_layout, a_dtype
+        )
 
         def mma_load_layout(i, j):
             return i, j
@@ -460,8 +508,10 @@ class TensorCoreIntrinEmitter:
         B_ext1 = B_region.region[-1].extent
         B_stride_last = B_buf.shape[-1]
         replicate_b = self.n_dim == 16
-        # ldmatrix cannot be used for int8 + trans case.
-        ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed)
+        # ldmatrix cannot be used for int8 + trans case, or when the shared layout breaks 16B contiguity/alignment.
+        ldmatrix_available = not (DataType(b_dtype).bits != 16 and not b_transposed) and self._is_ldmatrix_compatible(
+            self.b_shared_layout, b_dtype
+        )
 
         def mma_load_layout(i, j):
             return i, j
