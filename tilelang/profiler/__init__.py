@@ -151,13 +151,6 @@ class Profiler:
         lib_outs = self.func(*ins)
         _synchronize_tensor_devices(ins, lib_outs)
 
-        if isinstance(lib_outs, torch.Tensor):
-            lib_outs = [lib_outs]
-        elif isinstance(lib_outs, tuple):
-            lib_outs = list(lib_outs)
-        elif lib_outs is None:
-            lib_outs = []
-
         if isinstance(ref_outs, torch.Tensor):
             ref_outs = [ref_outs]
         elif isinstance(ref_outs, tuple):
@@ -165,19 +158,29 @@ class Profiler:
         elif ref_outs is None:
             ref_outs = []
 
+        if isinstance(lib_outs, torch.Tensor):
+            lib_outs = [lib_outs]
+        elif isinstance(lib_outs, tuple):
+            lib_outs = list(lib_outs)
+        elif lib_outs is None:
+            for output_idx, rhs in enumerate(ref_outs):
+                assert rhs is None, f"Kernel output {output_idx} is None for a non-None reference output"
+            lib_outs = []
+
         # only compare outputs
         assert len(lib_outs) == len(ref_outs), "len(lib_outs) not equals to len(ref_outs) !"
         # torch.set_printoptions(edgeitems=torch.inf)
-        for lhs, rhs in zip(lib_outs, ref_outs):
+        for output_idx, (lhs, rhs) in enumerate(zip(lib_outs, ref_outs)):
             # close_mask = torch.isclose(lhs, rhs, rtol=rtol, atol=atol)
             # total_elements = lhs.numel()
             # num_not_close = (~close_mask).sum().item()
             # percentage_not_close = (num_not_close / total_elements) * 100
             # print(f"{percentage_not_close:.2f}% of the elements are not close.")
             # print(f"Total elements: {total_elements}, Not close elements: {num_not_close}")
-            if lhs is not None and rhs is not None:
+            if rhs is not None:
                 # in case of numsplit template, the ref output may be None
                 # which means the value is invalid, so we skip the comparison
+                assert lhs is not None, f"Kernel output {output_idx} is None for a non-None reference output"
                 torch_assert_close(
                     lhs if not is_float8_dtype(lhs.dtype) else lhs.to(torch.float32),
                     rhs if not is_float8_dtype(rhs.dtype) else rhs.to(torch.float32),
