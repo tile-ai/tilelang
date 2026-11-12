@@ -1,4 +1,6 @@
 import builtins
+from collections import namedtuple
+from typing import NamedTuple
 
 import pytest
 import torch
@@ -13,6 +15,55 @@ def stores(func):
     result = []
     tirx.stmt_functor.post_order_visit(func.body, lambda node: result.append(node) if isinstance(node, tirx.BufferStore) else None)
     return result
+
+
+def test_macro_namedtuple_return(check_kernel):
+    class Pair(NamedTuple):
+        x: object
+        y: object
+
+    allocations = []
+
+    class AllocatedPair(namedtuple("PairStorage", "x y")):
+        __slots__ = ()
+
+        def __new__(cls, x, y):
+            allocations.append(None)
+            return super().__new__(cls, T.alloc_var("int32", init=x), T.alloc_var("int32", init=y))
+
+    @T.macro
+    def make_pair():
+        return Pair(3, 4)
+
+    @T.macro
+    def make_allocated_pair():
+        return AllocatedPair(7, 8)
+
+    @T.macro
+    def forward_pair():
+        return make_allocated_pair()
+
+    def check_types(pair, allocated):
+        assert type(pair) is Pair
+        assert type(allocated) is AllocatedPair
+        assert isinstance(allocated.x, tirx.BufferLoad)
+        assert isinstance(allocated.y, tirx.BufferLoad)
+
+    @T.prim_func
+    def main(B: T.Tensor((6,), "int32")):
+        with T.Kernel(1, threads=1):
+            pair = make_pair()
+            allocated = forward_pair()
+            check_types(pair, allocated)
+            B[0] = pair.x
+            B[1] = pair.y
+            for index, value in enumerate(pair):
+                B[2 + index] = value
+            B[4] = allocated.x
+            B[5] = allocated.y
+
+    assert len(allocations) == 1
+    check_kernel(main, [3, 4, 3, 4, 7, 8])
 
 
 @pytest.fixture(params=["ir", pytest.param("cuda", marks=tilelang.testing.requires_cuda.marks())])
