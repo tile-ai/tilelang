@@ -7,6 +7,7 @@
 #include <tvm/arith/analyzer.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -2243,7 +2244,14 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
       lanes == 4) {
     // make_int8x4
     const int64_t *p = as_const_int(op->value);
-    ICHECK(p);
+    if (!p) {
+      ICHECK(tirx::SideEffect(op->value) <= tirx::CallEffectKind::kReadState)
+          << "Cannot broadcast an effectful 8-bit value";
+      std::string value = SSAGetID(PrintExpr(op->value), op->value.dtype());
+      // Replicate the low byte in an unsigned carrier without signed shifts.
+      os << "(int)((((unsigned int)(" << value << ")) & 255u) * 0x01010101u)";
+      return;
+    }
     int64_t v = *p & 0xFF;
     v = (v << 24) | (v << 16) | (v << 8) | v;
     if (op->dtype.is_uint()) {
