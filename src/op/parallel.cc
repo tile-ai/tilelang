@@ -906,8 +906,9 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
             << "    fragment " << fragment->DebugOutput() << '\n'
             << "    Loop threads read elements that " << buffer
             << " holds on other threads, and fragments cannot exchange data "
-               "between threads. This happens, for example, between T.gemm "
-               "operands on tiles with fewer than 16 rows per wavefront. "
+               "between threads. This happens, for example, when a T.gemm "
+               "output that is split among wavefronts by columns feeds the A "
+               "operand of the next T.gemm. "
                "Write the data to T.alloc_shared memory instead.\n";
       }
       success = false;

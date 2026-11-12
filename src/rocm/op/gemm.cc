@@ -44,7 +44,7 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
   // small tile reaches the macro generator with zero rows or columns per warp
   // and fails there with "Divide by zero".
   const int max_warps = (M / kMPerWarp) * (N / kNPerWarp);
-  ICHECK_LE(num_warps, max_warps)
+  CHECK_LE(num_warps, max_warps, ValueError)
       << "T.gemm cannot split a " << M << "x" << N << " tile among "
       << num_warps << " wavefronts: every wavefront needs at least "
       << kMPerWarp << "x" << kNPerWarp << ", so this tile allows at most "

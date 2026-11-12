@@ -58,19 +58,20 @@ def _chain(M, P, D, threads, shared):
     return main
 
 
-@tilelang.testing.requires_rocm
+# The thread counts below are wavefront counts on CDNA, where a wavefront has 64 lanes.
+@tilelang.testing.requires_cdna
 def test_too_many_wavefronts_reports_tile_limit():
-    with pytest.raises(Exception, match=r"cannot split a 16x32 tile among 4 wavefronts"):
+    with pytest.raises(ValueError, match=r"cannot split a 16x32 tile among 4 wavefronts"):
         _single(16, 32, 32, 256).get_kernel_source()
 
 
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_cdna
 def test_fragment_chain_on_16_rows_explains_conflict():
-    with pytest.raises(Exception, match=r"T\.alloc_shared memory"):
+    with pytest.raises(Exception, match=r"split among wavefronts by columns.*T\.alloc_shared memory"):
         _chain(16, 64, 128, 128, False).get_kernel_source()
 
 
-@tilelang.testing.requires_rocm
+@tilelang.testing.requires_cdna
 @pytest.mark.parametrize("threads", [64, 128, 256])
 def test_chain_through_shared_memory(threads):
     M, P, D = 16, 64, 128
