@@ -265,7 +265,7 @@ TVM_DLL const Op &ascend_cross_core_set_flag();
 /*!
  * \brief Ascend CrossCoreWaitFlag intrinsic for cross-core synchronization.
  *
- * ascend_cross_core_wait_flag(flag_id)
+ * ascend_cross_core_wait_flag(mode_id, pipe_string, flag_id)
  *
  */
 TVM_DLL const Op &ascend_cross_core_wait_flag();
