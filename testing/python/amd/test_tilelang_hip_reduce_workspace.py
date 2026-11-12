@@ -32,11 +32,7 @@ def _row_sum(M, N, threads):
     return main
 
 
-# FullRow: one wavefront holds a row, so with several wavefronts the reduce stays inside one.
-# (threads, rows): 256 threads and 64 rows give one wavefront per 16 rows. A single 64-thread block is also in-wave.
-@tilelang.testing.requires_rocm
-@pytest.mark.parametrize(("threads", "M", "N"), [(64, 64, 64), (256, 128, 64), (256, 64, 64)])
-def test_in_wave_reduce_has_no_workspace(threads, M, N):
+def _check_no_workspace(threads, M, N):
     kernel = _row_sum(M, N, threads)
     assert "workspace" not in kernel.get_kernel_source()
     A = torch.randn(M, 32, dtype=torch.float16, device="cuda")
@@ -44,6 +40,21 @@ def test_in_wave_reduce_has_no_workspace(threads, M, N):
     out = kernel(A, B)
     ref = (A.float() @ B.float().T).sum(dim=1)
     assert (out - ref).abs().max() <= 1e-2 * ref.abs().max()
+
+
+# FullRow: one wavefront holds a row, so with several wavefronts the reduce stays inside one.
+# A single 64-thread block is also in-wave.
+@tilelang.testing.requires_rocm
+@pytest.mark.parametrize(("threads", "M", "N"), [(64, 64, 64), (256, 128, 64)])
+def test_in_wave_reduce_has_no_workspace(threads, M, N):
+    _check_no_workspace(threads, M, N)
+
+
+# 256 threads and 64 rows give one wavefront per 16 rows only with 64 lanes per wavefront.
+# With 32 lanes a row spans two wavefronts and the reduce needs the workspace.
+@tilelang.testing.requires_cdna
+def test_in_wave_reduce_has_no_workspace_wave64():
+    _check_no_workspace(256, 64, 64)
 
 
 if __name__ == "__main__":
