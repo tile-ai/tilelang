@@ -10,8 +10,10 @@
 #include "cuda/stubs/cuda.h"
 #include "support/check.h"
 #include "tvm/runtime/base.h"
+#include <optional>
 #include <tvm/tirx/buffer.h>
 #include <tvm/tirx/op.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -20,6 +22,21 @@ using namespace tirx;
 
 /*! \brief Whether a constant has an all-zero bit pattern, excluding -0.0. */
 TVM_DLL bool IsZeroBitPattern(const PrimExpr &expr);
+
+/*! \brief A buffer transfer, optionally guarded with a same-destination fill.
+ *
+ * Describes direct loads and nested if_then_else expressions, as well as an
+ * if/else pair of stores to the same location. This is semantic information,
+ * not a decision about scheduling or hardware instruction eligibility.
+ */
+struct BufferCopy {
+  BufferLoad load;
+  BufferStore store;
+  ffi::Optional<PrimExpr> predicate;
+  ffi::Optional<PrimExpr> fallback;
+};
+
+TVM_DLL std::optional<BufferCopy> AnalyzeBufferCopy(const Stmt &stmt);
 
 // Maps TVM DataType to CUDA's CUtensorMapDataType enum value.
 TVM_DLL int to_CUtensorMapDataType(DataType dtype);
