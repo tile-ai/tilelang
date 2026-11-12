@@ -216,7 +216,6 @@ class Profiler:
         elif ref_outs is None:
             ref_outs = []
         assert len(lib_outs) == len(ref_outs), f"{len(lib_outs)=} not equals to {len(ref_outs)=} !"
-        torch.set_printoptions(edgeitems=torch.inf)
         manual_check_prog(lib_outs, ref_outs)
 
     def assert_consistent(self, repeat=10):
