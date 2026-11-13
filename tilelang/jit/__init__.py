@@ -28,6 +28,7 @@ from contextlib import nullcontext
 
 from tilelang.jit.kernel import JITKernel
 from tilelang.cache import cached
+from tilelang.env import CacheState
 from tilelang.utils.device import get_available_cpu_count
 from os import path, makedirs
 from logging import getLogger
@@ -44,7 +45,7 @@ _KP = ParamSpec("_KP")
 _T = TypeVar("_T")
 _Ret = TypeVar("_Ret")
 TargetLike = str | dict[str, object] | Target
-_CallFormKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...]]
+_CallFormKey = tuple[tuple[Any, ...], tuple[tuple[str, Any], ...], int]
 _CALL_FORM_CACHE_MISS = object()
 _DEBUG_COMPILE_LOCK = threading.RLock()
 
@@ -56,33 +57,36 @@ class _CallFormCache:
     entries: dict[_CallFormKey, Kernel] = field(default_factory=dict)
     last_args: tuple[Any, ...] | None = None
     last_kwargs: dict[str, Any] | None = None
+    last_salt: int = 0
     last_kernel: Kernel | object = _CALL_FORM_CACHE_MISS
 
     def clear(self) -> None:
         self.entries.clear()
         self.last_args = None
         self.last_kwargs = None
+        self.last_salt = 0
         self.last_kernel = _CALL_FORM_CACHE_MISS
 
     def __len__(self) -> int:
         return len(self.entries)
 
-    def _matches_last(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    def _matches_last(self, args: tuple[Any, ...], kwargs: dict[str, Any], salt: int) -> bool:
         if self.last_args is None or self.last_kwargs is None:
             return False
-        return args == self.last_args and kwargs == self.last_kwargs
+        return args == self.last_args and kwargs == self.last_kwargs and salt == self.last_salt
 
     def _remember(self, call_form_key: _CallFormKey, kernel: Kernel) -> None:
-        args, kwargs_items = call_form_key
+        args, kwargs_items, salt = call_form_key
         self.last_args = args
         self.last_kwargs = dict(kwargs_items)
+        self.last_salt = salt
         self.last_kernel = kernel
 
-    def lookup(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Kernel | object, _CallFormKey | None]:
+    def lookup(self, args: tuple[Any, ...], kwargs: dict[str, Any], salt: int = 0) -> tuple[Kernel | object, _CallFormKey | None]:
         # Validate even on a last-call hit: an unhashable value can compare equal
         # to a previously cached hashable argument.
-        call_form_key = _make_jit_key((args, tuple(kwargs.items())))
-        if self._matches_last(args, kwargs):
+        call_form_key = _make_jit_key((args, tuple(kwargs.items()), salt))
+        if self._matches_last(args, kwargs, salt):
             return self.last_kernel, None
 
         kernel = self.entries.get(call_form_key, _CALL_FORM_CACHE_MISS)
@@ -554,17 +558,24 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             self.mode = self._infer_jit_mode(*args, **kwargs)
             self.func.set_mode(self.mode)
 
+        # `without_kernel_cache()` opens a fresh scope. Salt the wrapper keys
+        # with its id so the first call inside the block compiles, while a plain
+        # disable_cache() (Metal, env var) leaves these in-process caches alone.
+        scope = CacheState.current_scope()
+        scope_salt = scope if scope is not None else 0
+
         call_form_key = None
         if self.is_lazy_mode() and self._can_use_call_form_cache(has_tune_params):
-            kernel, call_form_key = self._call_form_cache.lookup(args, kwargs)
+            kernel, call_form_key = self._call_form_cache.lookup(args, kwargs, scope_salt)
             if kernel is not _CALL_FORM_CACHE_MISS:
                 return kernel
 
         key, kernel_args = self.func.parse_args(*args, **kwargs)
-        kernel = self._kernel_cache.get(key, None)
+        kernel_key = (scope, key) if scope is not None else key
+        kernel = self._kernel_cache.get(kernel_key, None)
         if kernel is None:
             kernel = self.compile(*args, **kwargs)
-            self._kernel_cache[key] = kernel
+            self._kernel_cache[kernel_key] = kernel
 
         if call_form_key is not None and self.is_lazy_mode() and not kernel_args:
             self._call_form_cache.store(call_form_key, kernel)
