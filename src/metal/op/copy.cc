@@ -9,6 +9,7 @@
 #include "metal/op/utils.h"
 #include "metal/target_utils.h"
 #include "op/utils.h"
+#include "support/check.h"
 
 #include <tvm/tirx/builtin.h>
 
@@ -33,7 +34,6 @@ bool CheckCooperativeTensorCopy(const CopyNode &op) {
 
 Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
-  (void)analyzer;
   TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
 
   int total_elements = 1;
@@ -53,6 +53,32 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr dst_row_base = op.dst_range[0]->min;
   PrimExpr dst_col_base = op.dst_range[1]->min;
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
+
+  if (lower_args.buffer_remap.count(op.dst)) {
+    // LowerTileOp remaps address_of after this lowering, but the intrinsic
+    // keeps dst_stride. Only accept layouts preserving that row-major address
+    // mapping; proving the logical bounds alone does not bound a remapped
+    // store.
+    Layout layout = lower_args.layout_map.at(op.dst);
+    Array<PrimExpr> vars = layout->GetForwardVars();
+    Buffer physical = lower_args.buffer_remap.at(op.dst);
+    PrimExpr capacity = IntImm(DataType::Int(64), 1);
+    for (const PrimExpr &extent : physical->shape) {
+      capacity = capacity * cast(DataType::Int(64), extent);
+    }
+    CHECK(vars.size() == 2 && layout->OutputDim() == physical->shape.size() &&
+              analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
+                                      vars[0] * dst_stride + vars[1]) &&
+              analyzer->CanProve(cast(DataType::Int(64), op.dst->shape[0]) *
+                                     cast(DataType::Int(64), dst_stride) <=
+                                 capacity),
+          ValueError)
+        << "Metal SIMD-group copy: destination layout must preserve row-major "
+           "addresses and fit the physical allocation for "
+        << op.dst->name
+        << ". Copy to a full shared tile with a row-major layout first, then "
+           "use T.copy to the destination.";
+  }
 
   int warp_size = TargetMetalGetWarpSize(lower_args.target);
   const auto *block_size_imm =
@@ -94,6 +120,22 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
           dst_row_base + warp_m * (warp_row_tiles * kMPerWarp) + i * kMPerWarp;
       PrimExpr col =
           dst_col_base + warp_n * (warp_col_tiles * kNPerWarp) + j * kNPerWarp;
+      // simdgroup_store always writes a complete 8x8 matrix. A valid
+      // starting address alone does not make a destination tail safe.
+      Array<PrimExpr> start{row, col};
+      for (size_t d = 0; d < start.size(); ++d) {
+        PrimExpr relative = start[d] - op.dst_range[d]->min;
+        CHECK(analyzer->CanProve(start[d] >= 0) &&
+                  analyzer->CanProve(start[d] <= op.dst->shape[d] - 8) &&
+                  analyzer->CanProve(relative >= 0) &&
+                  analyzer->CanProve(relative <= op.dst_range[d]->extent - 8),
+              ValueError)
+            << "Metal SIMD-group copy: requires provably in-bounds 8x8 stores "
+               "within the destination buffer and region; cannot prove axis "
+            << d << " of " << op.dst->name
+            << ". Copy to a full shared tile first, then use T.copy to "
+               "handle destination tails.";
+      }
       PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
                           {BufferLoad(op.dst, {row, col})});
       stmts.push_back(Evaluate(
