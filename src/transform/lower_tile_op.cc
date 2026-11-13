@@ -1149,6 +1149,15 @@ private:
     LowerArgs lower_args;
     lower_args.target = target_;
     lower_args.thread_bounds = thread_bounds;
+    if (thread_binding_.defined()) {
+      lower_args.thread_bindings.push_back(thread_binding_);
+    }
+    if (thread_binding_y_.defined()) {
+      lower_args.thread_bindings.push_back(thread_binding_y_);
+    }
+    if (thread_binding_z_.defined()) {
+      lower_args.thread_bindings.push_back(thread_binding_z_);
+    }
     lower_args.thread_index = CurrentThreadIndex();
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
@@ -1175,11 +1184,23 @@ private:
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
+      IterVar previous_thread_binding_y = thread_binding_y_;
+      IterVar previous_thread_binding_z = thread_binding_z_;
       if (iv->thread_tag == "threadIdx.x") {
         thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
+      } else if (iv->thread_tag == "threadIdx.y") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_binding_y_ = iv;
+      } else if (iv->thread_tag == "threadIdx.z") {
+        ICHECK(iv->dom->extent.as<IntImmNode>());
+        thread_binding_z_ = iv;
       }
+      Stmt result = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+      thread_binding_y_ = previous_thread_binding_y;
+      thread_binding_z_ = previous_thread_binding_z;
+      return result;
     }
     return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
   }
@@ -1436,6 +1457,8 @@ private:
   // Real threadIdx.x binding of the enclosing thread_extent scope, when one
   // exists. Stays undefined for targets without thread bindings (e.g. CPU).
   IterVar thread_binding_;
+  IterVar thread_binding_y_;
+  IterVar thread_binding_z_;
   size_t thread_block_size_ = 0;
   // Product of cluster_dims from block annotation (default 1).
   int cluster_size_ = 1;
