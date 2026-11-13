@@ -128,6 +128,12 @@ struct LowerArgs {
   // barriers.
   int cluster_size = 1;
 
+  // Enclosing conditional predicates (then: condition, else: !condition) at
+  // the tile-op site. Lowerings that validate symbolic bounds must consider
+  // these guards; the IRMutator's analyzer constraint scope does not always
+  // reach the operator's own analyzer.
+  ffi::Array<PrimExpr> predicates;
+
   // Callbacks used by op lowerings to request pass-owned resources or report
   // metadata that later passes need.
   AddWorkspaceCallback add_workspace = nullptr;
