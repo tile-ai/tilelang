@@ -896,5 +896,109 @@ def test_producer_load_index_guard_preserves_lazy_evaluation():
     assert collect_nodes(guarded.indices[0], tvm.tirx.ProducerLoad)
 
 
+_DIV_OPS = {
+    "truncdiv": T.truncdiv,
+    "truncmod": T.truncmod,
+    "floordiv": T.floordiv,
+    "floormod": T.floormod,
+}
+
+
+def _make_division_index_load(op_name, divisor, symbolic=False):
+    div_op = _DIV_OPS[op_name]
+
+    if symbolic:
+
+        @T.prim_func
+        def main(
+            A: T.Tensor((8, 8), T.float32),
+            out: T.Tensor((1,), T.float32),
+            index: T.int32,
+            divisor: T.int32,
+        ):
+            out[0] = A[div_op(index, divisor), index]
+    else:
+
+        @T.prim_func
+        def main(
+            A: T.Tensor((8, 8), T.float32),
+            out: T.Tensor((1,), T.float32),
+            index: T.int32,
+        ):
+            out[0] = A[div_op(index, divisor), index]
+
+    return main
+
+
+def _division_load_guards(func):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    transformed = tl.transform.LegalizeSafeMemoryAccess()(mod)
+    return collect_calls(transformed["main"].body, op="tirx.if_then_else")
+
+
+def _assert_guard_values(predicate, index, *, allowed, rejected):
+    analyzer = tvm.arith.Analyzer()
+    for value in (*allowed, *rejected):
+        bound = tvm.tirx.stmt_functor.substitute(predicate, {index: tvm.tirx.const(value, index.dtype)})
+        assert bool(analyzer.simplify(bound).value) == (value in allowed), (value, predicate)
+
+
+@pytest.mark.parametrize("op_name", list(_DIV_OPS))
+def test_positive_constant_divisors_flatten_safe_load_guards(op_name):
+    guards = _division_load_guards(_make_division_index_load(op_name, 16))
+
+    assert len(guards) == 1
+    assert isinstance(guards[0].args[0], tvm.tirx.And)
+    assert isinstance(guards[0].args[1], tvm.tirx.BufferLoad)
+    assert not collect_calls(guards[0].args[0], op="tirx.if_then_else")
+
+
+@pytest.mark.parametrize("access", ["load", "store"])
+def test_truncdiv_guard_preserves_second_index_lower_bound(access):
+    @T.prim_func
+    def main(A: T.Tensor((8, 8), T.float32), out: T.Tensor((1,), T.float32), i: T.int32):
+        out[0] = A[T.truncdiv(i, 16), i]
+        A[T.truncdiv(i, 16), i] = 1.0
+
+    mod = tvm.IRModule.from_expr(main.with_attr("global_symbol", "main"))
+    func = tl.transform.LegalizeSafeMemoryAccess()(mod)["main"]
+    if access == "load":
+        (guard,) = collect_calls(func.body, op="tirx.if_then_else")
+        assert isinstance(guard.args[1], tvm.tirx.BufferLoad)
+        predicate = guard.args[0]
+    else:
+        (guard,) = collect_nodes(func.body, tvm.tirx.IfThenElse)
+        assert isinstance(guard.then_case, tvm.tirx.BufferStore)
+        predicate = guard.condition
+
+    assert isinstance(predicate, tvm.tirx.And)
+    _assert_guard_values(predicate, func.params[-1], allowed=(0, 7), rejected=(-1, -15, -16, 8))
+
+
+def test_truncmod_guard_rejects_negative_remainders():
+    @T.prim_func
+    def main(A: T.Tensor((8,), T.float32), out: T.Tensor((1,), T.float32), i: T.int32):
+        out[0] = A[T.truncmod(i, 16)]
+
+    (guard,) = _division_load_guards(main)
+    assert isinstance(guard.args[1], tvm.tirx.BufferLoad)
+    _assert_guard_values(guard.args[0], main.params[-1], allowed=(-16, 0, 7, 16), rejected=(-1, -15, 8, 15))
+
+
+@pytest.mark.parametrize("op_name", list(_DIV_OPS))
+def test_negative_constant_divisors_keep_safe_load_guards_nested(op_name):
+    guards = _division_load_guards(_make_division_index_load(op_name, -16))
+
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+
+
+def test_symbolic_divisor_keeps_safe_load_guards_nested():
+    guards = _division_load_guards(_make_division_index_load("truncdiv", None, symbolic=True))
+
+    assert len(guards) > 1
+    assert all(not isinstance(guard.args[0], tvm.tirx.And) for guard in guards)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
