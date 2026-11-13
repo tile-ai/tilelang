@@ -16,6 +16,7 @@ from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
     _cuda_synchronize as _cuda_synchronize,
+    _flush_cache,
     bench_with_cuda_events as _bench_with_cuda_events,
     bench_with_cudagraph as _bench_with_cudagraph,
     bench_with_cupti as _bench_with_cupti,
@@ -67,7 +68,7 @@ def do_bench(
             cache buffers, and synchronization are scoped to that device.
             Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
             Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
-        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall"
+        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall" and NPU timing
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
@@ -202,29 +203,30 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    # Create an int32 L2 cache flush buffer (`cache_size` MB).
-    cache_numel = cache_size * 1024 * 1024 // 4
-    cache = torch.empty(cache_numel, dtype=torch.int32, device=_cache_device(device_idx))
+    # NPU needs only device metadata; other backends need a scratch buffer.
+    cache_device = _cache_device(device_idx)
+    cache_numel = 0 if torch.device(cache_device).type == "npu" else cache_size * 1024 * 1024 // 4
+    cache = torch.empty(cache_numel, dtype=torch.int32, device=cache_device)
 
-    # Warm the flush buffer once outside the timed estimate: the first
-    # kernel launch may pay one-time backend init (e.g. ~250 ms on torch_npu).
-    # Read the buffer to evict L2 without dirty cache lines requiring writeback.
-    # Reduce independent chunks to avoid global reduction synchronization.
-    # Preserve the dtype to avoid a full-buffer int64 cast.
-    cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
+    # Warm cache maintenance outside the estimate to exclude backend setup.
+    _flush_cache(cache)
     _cuda_synchronize(device_idx)
 
     # Estimate kernel runtime with 5 iterations
-    start_event = Event(enable_timing=True)
-    end_event = Event(enable_timing=True)
-    start_event.record()
-    for _ in range(5):
-        cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
-        fn()
-    end_event.record()
-    start_event.synchronize()
-    end_event.synchronize()
-    estimate_ms = start_event.elapsed_time(end_event) / 5
+    if cache.device.type == "npu":
+        # Keep synchronous NPU flushing outside the estimate and early-stop check.
+        estimate_ms = _bench_with_cuda_events(fn, cache, 5, None, "mean", device_idx)
+    else:
+        start_event = Event(enable_timing=True)
+        end_event = Event(enable_timing=True)
+        start_event.record()
+        for _ in range(5):
+            _flush_cache(cache)
+            fn()
+        end_event.record()
+        start_event.synchronize()
+        end_event.synchronize()
+        estimate_ms = start_event.elapsed_time(end_event) / 5
 
     # Early stop: skip full benchmark if estimate exceeds baseline
     if early_stop_baseline is not None and estimate_ms > early_stop_baseline:
