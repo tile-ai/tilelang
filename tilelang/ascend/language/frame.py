@@ -136,6 +136,13 @@ def SimtVF(threads: int | list[int] | tuple = 128, latency: int = 0) -> SimtVFFr
     if any(t <= 0 for t in normalized):
         raise ValueError("SimtVF requires all thread dimensions > 0")
 
+    total_threads = normalized[0] * normalized[1] * normalized[2]
+    if total_threads > 2048:
+        raise ValueError(
+            f"SimtVF requires at most 2048 total threads on Ascend (hardware launch bound), "
+            f"got {total_threads} from threads={threads}"
+        )
+
     source_index = _next_vf_source_index("simtvf")
     return _ffi_api.SimtVF(  # type: ignore[attr-defined] # pylint: disable=no-member
         normalized, int(latency), source_index
