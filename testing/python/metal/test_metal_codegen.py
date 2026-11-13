@@ -2,6 +2,7 @@ import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
 import tilelang.language as T
+import pytest
 import torch
 
 
@@ -76,6 +77,36 @@ def test_gemm_float16():
 @tilelang.testing.requires_metal
 def test_gemm_int32():
     assert_gemm(1024, 1024, 1024, 16, 16, 16, dtype=T.int32, atol=1)
+
+
+@tilelang.jit
+def scale(a, N, dtype):
+    @T.prim_func
+    def main(x: T.Tensor((N,), dtype), y: T.Tensor((N,), dtype)):
+        with T.Kernel(1, threads=N):
+            for i in T.Parallel(N):
+                y[i] = a * x[i]
+
+    return main
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "a, dtype",
+    [
+        # 7 significant digits round to the float32 one ulp below float32(a).
+        (2.1066291, T.float32),
+        # 7 significant digits fall below the half midpoint 1 + 2**-11.
+        (1.00048838125, T.float16),
+    ],
+)
+def test_float_literal_round_trip(a, dtype):
+    N = 128
+    torch_dtype = dtype.as_torch()
+    x = torch.ones(N, dtype=torch_dtype, device="mps")
+    y = torch.zeros(N, dtype=torch_dtype, device="mps")
+    scale(a, N, dtype)(x, y)
+    torch.testing.assert_close(y, torch.full_like(y, a), atol=0, rtol=0)
 
 
 if __name__ == "__main__":
