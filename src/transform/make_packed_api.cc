@@ -259,14 +259,20 @@ private:
       message_parts.push_back(StringImm(os.str()));
     }
 
+    Stmt body = VisitStmt(op->body);
     if (conditional_scope_depth_ != 0) {
-      // Conditional checks cannot be moved to the packed-function entry
-      // without changing their execution semantics. Keep only the paired
-      // tl.assume, matching SplitHostDevice's conservative lifting policy.
-      return VisitStmt(op->body);
+      // A conditional check cannot move to the packed-function entry without
+      // changing when it runs: it only constrains the paths that reach it, and
+      // inside a loop its condition may depend on the loop variable. Assert in
+      // place instead, which keeps the guard that the author wrote. Dropping
+      // the check here would silently lose it, because the marker is also the
+      // only remaining record of it.
+      return SeqStmt::Flatten(AssertStmt(condition, StringImm("RuntimeError"),
+                                         std::move(message_parts), op->span),
+                              std::move(body));
     }
     runtime_checks_->push_back({condition, std::move(message_parts), op->span});
-    return VisitStmt(op->body);
+    return body;
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {

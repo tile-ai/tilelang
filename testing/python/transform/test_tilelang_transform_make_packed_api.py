@@ -197,6 +197,63 @@ def test_optimizer_only_assume_is_not_lowered_to_assert():
     assert not [stmt for stmt in _collect_nodes(after.body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)]
 
 
+def test_conditional_assume_requires_runtime_check_is_asserted_in_place():
+    """A check written under a host guard keeps that guard.
+
+    Hoisting it to the packed-function entry would evaluate it on paths the
+    author excluded, and dropping it loses the check altogether, because the
+    marker is its only remaining record.
+    """
+    n = tirx.Var("n", "int32")
+    condition = n % 4 == 0
+    message = "n must be divisible by 4"
+    guard = n > 0
+
+    body = tirx.AttrStmt(condition, "tl.assume", tirx.StringImm(message), tirx.Evaluate(0))
+    body = tirx.AttrStmt(condition, "tl.assume_requires_runtime_check", tirx.StringImm(message), body)
+    before = tirx.PrimFunc([n], tirx.IfThenElse(guard, body, None)).with_attr("global_symbol", "main")
+    before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
+
+    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
+    assert not [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume_requires_runtime_check"]
+    assert [stmt for stmt in _collect_nodes(after.body, tirx.AttrStmt) if stmt.attr_key == "tl.assume"]
+
+    guarded = [stmt for stmt in _collect_nodes(after.body, tirx.IfThenElse) if tvm.ir.structural_equal(stmt.condition, guard)]
+    assert len(guarded) == 1
+    matching_asserts = [
+        stmt for stmt in _collect_nodes(guarded[0].then_case, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
+    ]
+    assert len(matching_asserts) == 1
+    tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
+
+
+def test_loop_dependent_assume_requires_runtime_check_stays_in_loop():
+    """A check on a loop variable can only be asserted inside its loop.
+
+    This is the case that rules out hoisting with an implication guard: the
+    condition is not even well-formed outside the loop.
+    """
+    n = tirx.Var("n", "int32")
+    i = tirx.Var("i", "int32")
+    condition = i < n
+    message = "i must stay below n"
+
+    body = tirx.AttrStmt(condition, "tl.assume", tirx.StringImm(message), tirx.Evaluate(0))
+    body = tirx.AttrStmt(condition, "tl.assume_requires_runtime_check", tirx.StringImm(message), body)
+    loop = tvm.tirx.For(i, 0, n, tvm.tirx.ForKind.SERIAL, body)
+    before = tirx.PrimFunc([n], loop).with_attr("global_symbol", "main")
+    before = before.with_attr("target", tvm.target.Target("cuda", host="llvm"))
+
+    after = tilelang.transform.MakePackedAPI()(tvm.IRModule.from_expr(before))["main"]
+    loops = _collect_nodes(after.body, tirx.For)
+    assert len(loops) == 1
+    matching_asserts = [
+        stmt for stmt in _collect_nodes(loops[0].body, tirx.AssertStmt) if any(part.value == message for part in stmt.message_parts)
+    ]
+    assert len(matching_asserts) == 1
+    tvm.ir.assert_structural_equal(matching_asserts[0].condition, condition, map_free_vars=True)
+
+
 def test_subroutine_call_to_externally_visible_subroutine():
     """Externally-visible subroutines should use the PackedFunc API
 
