@@ -1,5 +1,8 @@
 import pytest
 
+import tilelang
+import tilelang.ascend.language as T
+import tilelang.testing
 from tilelang import tvm
 from tilelang.ascend.codegen import PTO_CODEGEN
 from tilelang.backend import create_backend_context, get_backend
@@ -10,6 +13,28 @@ from tilelang.ascend.target import (
     target_is_pto,
 )
 from tvm.target import Target
+
+
+@tilelang.testing.requires_ascend(support_required="compile-only")
+def test_ascend_lower_owns_target_context():
+    @T.prim_func
+    def main(A: T.Tensor((64,), T.float32), B: T.Tensor((1,), T.float32)):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((64,), T.float32)
+            b_ub = T.alloc_shared((1,), T.float32)
+            T.copy(A, a_ub)
+            with T.SimtVF(threads=64):
+                T.reduce_sum(a_ub, b_ub, dim=0)
+            T.copy(b_ub, B)
+
+    assert Target.current(allow_none=True) is None
+    tilelang.lower(main, target="ascend")
+    assert Target.current(allow_none=True) is None
+
+    with Target("llvm") as ambient:
+        tilelang.lower(main, target="ascend")
+        assert Target.current().same_as(ambient)
+    assert Target.current(allow_none=True) is None
 
 
 def test_native_ascend_target_kind():
