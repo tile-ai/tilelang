@@ -1381,9 +1381,6 @@ void CodeGenTileLangAscend::EmitPipeBarrier_(const CallNode *op) {
   ICHECK(kValidPipes.count(pipe))
       << "Unsupported Ascend pipeline barrier: " << pipe;
 
-  if (pipe == "PIPE_V") {
-    return;
-  }
   PrintIndent();
   if (pipe == "PIPE_ALL" || pipe == "PIPE_S") {
     stream << "asc_sync();\n";
