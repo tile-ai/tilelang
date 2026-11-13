@@ -9,6 +9,7 @@ to simdgroup_store directly to device memory via LowerSIMDGroupStore.
 import tilelang
 from tilelang import tvm as tvm
 import tilelang.testing
+from tilelang.testing.ir import collect_calls, collect_nodes
 import tilelang.language as T
 import torch
 import pytest
@@ -165,6 +166,65 @@ def _make_copy_bounds_kernel(m, n, block, threads, dtype, shared=False, staged=F
 
 
 @tilelang.testing.requires_metal
+@pytest.mark.parametrize(
+    "m,n,threads,dispatch_count",
+    [(32, 33, 128, 1), (33, 32, 128, 1), (33, 33, 128, 1), (32, 33, (128, 2), 0)],
+)
+def test_simdgroup_copy_interior_direct_branch(m, n, threads, dispatch_count):
+    # Multidimensional threadgroups are outside the new fast-path contract;
+    # inspect their lowering without executing the existing fallback.
+    func = _make_copy_bounds_kernel(m, n, 32, threads, "float32")
+    with tvm.target.Target("metal"):
+        artifact = tilelang.lower(func, target="metal")
+    tir = tvm.tirx
+    thread_vars = {
+        node.node.var
+        for node in collect_nodes(artifact.device_mod, tir.AttrStmt)
+        if node.attr_key == "thread_extent" and node.node.thread_tag.startswith("threadIdx")
+    }
+    dispatches = []
+    for branch in collect_nodes(artifact.device_mod, tir.IfThenElse):
+        if branch.else_case is None:
+            continue
+        direct_scopes = [call.args[2].args[0].buffer.scope() for call in collect_calls(branch.then_case, op="tirx.simdgroup_store")]
+        staged_scopes = [call.args[2].args[0].buffer.scope() for call in collect_calls(branch.else_case, op="tirx.simdgroup_store")]
+        if direct_scopes and set(direct_scopes) == {"global"} and "shared.dyn" in staged_scopes:
+            assert not collect_calls(branch.then_case, op="tirx.tvm_storage_sync")
+            assert not set(collect_nodes(branch.condition, tir.Var)).intersection(thread_vars)
+            dispatches.append(branch)
+    assert len(dispatches) == dispatch_count, "Unexpected direct-store/staging dispatch"
+
+
+@tilelang.testing.requires_metal
+@pytest.mark.parametrize("indirect", [False, True])
+def test_simdgroup_copy_warp_dependent_destination(indirect):
+    @T.prim_func
+    def kernel(output: T.Tensor((32, 113), T.float32)):
+        with T.Kernel(1, threads=128):
+            tile = T.alloc_local((32, 32), T.float32, scope="metal.simdgroup")
+            T.fill(tile, T.float32(3))
+            offset = (T.get_thread_binding(0) // 32) * 32
+            if indirect:
+                for column in T.serial(offset, offset + 2):
+                    T.copy(tile, output[0, column])
+            else:
+                T.copy(tile, output[0, offset])
+
+    compiled = tilelang.compile(kernel, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    # A per-warp full-tile condition must not dispatch around group barriers.
+    # The masked scatter has no else arm, so this also detects a new dispatch.
+    assert "} else {" not in compiled.get_kernel_source()
+    backing = torch.full((32 * 113 + 64,), -9.0, device="mps")
+    output = backing[: 32 * 113].view(32, 113)
+    compiled(output)
+    expected = torch.full((32, 113), -9.0)
+    for row, col in ((0, 0), (16, 32), (0, 80), (16, 112)):
+        expected[row : row + 16, col : min(col + 16 + int(indirect), 113)] = 3
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+    assert torch.all(backing[32 * 113 :].cpu() == -9).item()
+
+
+@tilelang.testing.requires_metal
 def test_simdgroup_copy_short_destination_region():
     @T.prim_func
     def kernel(output: T.Tensor((16, 16), T.float32)):
@@ -222,6 +282,8 @@ def test_simdgroup_copy_symbolic_destination(guarded):
         (16, 18, 16, 128, "float32", False, False),
         (8, 1, 8, 32, "float32", True, False),
         (32, 33, 32, 128, "float32", False, False),  # scratch reuse within a group
+        (33, 32, 32, 128, "float32", False, False),  # full interior and row tail
+        (33, 33, 32, 128, "float32", False, False),  # full interior and both tails
         (8, 1, 8, 32, "float32", False, True),  # supported tail workaround
     ],
 )

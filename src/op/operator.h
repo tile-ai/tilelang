@@ -139,6 +139,11 @@ struct LowerArgs {
   // alignment implied by the chosen swizzle mode here; LowerTileOp collects
   // the results into the kSmemAlignmentMap PrimFunc attribute.
   RequireSmemAlignmentCallback require_smem_alignment = nullptr;
+  // Lexically enclosing loop domains, for checking indirect thread dependence
+  // before lowerings introduce control flow containing group synchronization.
+  ffi::Map<tirx::Var, tirx::For> enclosing_loops;
+  // Whether an enclosing threadIdx.y/z axis can contain more than one thread.
+  bool has_multidimensional_threads = false;
 };
 
 /*! \brief One reducer_update site, as seen by layout analysis: the update

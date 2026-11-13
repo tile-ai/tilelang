@@ -11,7 +11,9 @@
 #include "op/utils.h"
 #include "support/check.h"
 
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
+#include <tvm/tirx/stmt_functor.h>
 
 namespace tvm {
 namespace tl {
@@ -30,6 +32,37 @@ bool CheckSIMDGroupCopy(const CopyNode &op) {
 bool CheckCooperativeTensorCopy(const CopyNode &op) {
   return IsCooperativeTensorBuffer(op.src) &&
          (IsSharedBuffer(op.dst) || IsGlobalBuffer(op.dst));
+}
+
+// Runtime dispatch encloses shared-memory barriers, so all threads must take
+// the same branch. Follow Bind aliases and loop domains; reject memory reads
+// and calls rather than assuming their results are uniform.
+bool IsThreadgroupUniform(const PrimExpr &expr, const LowerArgs &lower_args) {
+  bool uniform = true;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (node.as<BufferLoadNode>() || node.as<CallNode>()) {
+      uniform = false;
+    } else if (const auto *var_node = node.as<VarNode>()) {
+      Var var = GetRef<Var>(var_node);
+      if (UsesVar(lower_args.thread_index, [&](const VarNode *thread_var) {
+            return var.same_as(GetRef<Var>(thread_var));
+          })) {
+        uniform = false;
+      } else if (lower_args.bind_var_to_expr.count(var)) {
+        uniform &= IsThreadgroupUniform(lower_args.bind_var_to_expr.at(var),
+                                        lower_args);
+      } else if (lower_args.enclosing_loops.count(var)) {
+        For loop = lower_args.enclosing_loops.at(var);
+        uniform &= (loop->kind == ForKind::kSerial ||
+                    loop->kind == ForKind::kUnrolled) &&
+                   IsThreadgroupUniform(loop->min, lower_args) &&
+                   IsThreadgroupUniform(loop->extent, lower_args) &&
+                   (!loop->step.defined() ||
+                    IsThreadgroupUniform(loop->step.value(), lower_args));
+      }
+    }
+  });
+  return uniform;
 }
 
 Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
@@ -108,8 +141,26 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr warp_m = FloorMod(warp_id, m_warp);
   PrimExpr warp_n = FloorDiv(warp_id, m_warp);
 
+  // Test the entire logical tile, not each SIMD group's footprint: a group
+  // taking the staging path may execute threadgroup barriers inserted later.
+  PrimExpr full_tile = const_true();
+  for (size_t d = 0; d < 2; ++d) {
+    PrimExpr extent = op.src_range[d]->extent;
+    PrimExpr base = op.dst_range[d]->min;
+    full_tile = full_tile && base >= 0 && base <= op.dst->shape[d] - extent &&
+                op.dst_range[d]->extent >= extent;
+  }
+  full_tile = analyzer->Simplify(full_tile);
+  bool runtime_dispatch =
+      row_major_destination && !lower_args.has_multidimensional_threads &&
+      analyzer->CanProveEqual(lower_args.thread_bounds->min, 0) &&
+      block_size % warp_size == 0 && !analyzer->CanProve(full_tile) &&
+      !analyzer->CanProve(!full_tile) &&
+      IsThreadgroupUniform(full_tile, lower_args);
+
   Buffer scratch;
   Array<Stmt> stmts;
+  Array<Stmt> direct_stmts;
   for (int i = 0; i < warp_row_tiles; i++) {
     for (int j = 0; j < warp_col_tiles; j++) {
       int tile_idx = i * warp_col_tiles + j;
@@ -128,6 +179,16 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
             analyzer->CanProve(start[d] <= op.dst->shape[d] - 8) &&
             analyzer->CanProve(relative >= 0) &&
             analyzer->CanProve(relative <= op.dst_range[d]->extent - 8);
+      }
+      if (runtime_dispatch) {
+        PrimExpr direct_ptr = Call(DataType::Handle(), builtin::address_of(),
+                                   {BufferLoad(op.dst, {row, col})});
+        direct_stmts.push_back(Evaluate(
+            Call(DataType::Handle(), builtin::simdgroup_store(),
+                 {op.src->data, IntImm(DataType::Int(32), tile_idx), direct_ptr,
+                  dst_stride, IntImm(DataType::Int(32), kMPerWarp),
+                  IntImm(DataType::Int(32), kNPerWarp),
+                  Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
       }
       Buffer destination = op.dst;
       Array<PrimExpr> indices{row, col};
@@ -182,10 +243,13 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
       }
     }
   }
-  if (stmts.size() == 1) {
-    return stmts[0];
+  Stmt body = stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
+  if (runtime_dispatch && scratch.defined()) {
+    Stmt direct =
+        direct_stmts.size() == 1 ? direct_stmts[0] : SeqStmt(direct_stmts);
+    return IfThenElse(full_tile, direct, body);
   }
-  return SeqStmt(stmts);
+  return body;
 }
 
 Stmt LowerCooperativeTensorCopy(const CopyNode &op, const LowerArgs &lower_args,
