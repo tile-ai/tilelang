@@ -526,6 +526,12 @@ def test_any_sync_preserves_nonzero_wide_integer_predicate():
     kernel()(a, out)
     assert out.item() != 0, f"any_sync narrowed 1<<32 to zero: got {out.item()}"
 
+    # A normalization that treats every wide predicate as true must not pass.
+    a.zero_()
+    out.zero_()
+    kernel()(a, out)
+    assert out.item() == 0, f"any_sync returned nonzero for an all-zero int64 predicate: got {out.item()}"
+
 
 if __name__ == "__main__":
     tilelang.testing.main()
