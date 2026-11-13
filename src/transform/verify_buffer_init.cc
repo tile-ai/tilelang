@@ -293,12 +293,19 @@ struct BufferInitVerifier : public StmtExprVisitor {
     reports_.push_back({buffer, current_span_, kind});
   }
 
-  void VisitStmt_(const EvaluateNode *op) final {
+  /*! \brief Attribute each read to the innermost statement with a span.
+   *
+   * Every statement, not only the Evaluate a tile op lowers to: a read in a
+   * plain store, a condition or a loop extent must point at its source line
+   * too. The span is restored on the way out, so a statement without one
+   * inherits its parent's.
+   */
+  void VisitStmt(const Stmt &stmt) final {
     Span saved = current_span_;
-    if (op->span.defined()) {
-      current_span_ = op->span;
+    if (stmt->span.defined()) {
+      current_span_ = stmt->span;
     }
-    StmtExprVisitor::VisitStmt_(op);
+    StmtExprVisitor::VisitStmt(stmt);
     current_span_ = saved;
   }
 
