@@ -173,7 +173,12 @@ class CythonKernelAdapter(BaseKernelAdapter):
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
         self.cython_wrapper = CythonKernelWrapper(
-            self.result_idx, self.params, self.lib, *_device_providers(), host_mapped_indices=get_host_mapped_params(self.prim_func)
+            self.result_idx,
+            self.params,
+            self.lib,
+            *_device_providers(),
+            host_mapped_indices=get_host_mapped_params(self.prim_func),
+            get_host_mapped_pointer=self._get_host_mapped_pointer(),
         )
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
@@ -245,6 +250,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             adapter.lib,
             *_device_providers(),
             host_mapped_indices=get_host_mapped_params(adapter.prim_func),
+            get_host_mapped_pointer=adapter._get_host_mapped_pointer(),
         )
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
@@ -417,6 +423,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
                 if is_contiguous:
                     static_contiguous_list.append((i, buffer.name))
         return static_shape_map, static_strides_map, static_contiguous_list
+
+    def _get_host_mapped_pointer(self):
+        if is_ascend_target(self.target) and get_host_mapped_params(self.prim_func):
+            return tvm.get_global_func("tl.ascend.get_host_mapped_pointer")
+        return None
 
     def _process_buffer_device(self) -> dict[tirx.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.

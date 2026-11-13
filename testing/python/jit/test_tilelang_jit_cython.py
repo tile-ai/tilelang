@@ -197,6 +197,37 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     assert lib.symbol == (4 if any(present) else 0)
 
 
+def test_host_mapped_wrapper_keeps_default_cuda_resolver(monkeypatch):
+    """Existing wrapper callers may omit the newly injectable resolver."""
+    import ctypes
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from tilelang.engine.param import KernelParam
+    from tilelang.jit.adapter.cython.adapter import CythonKernelWrapper
+
+    buffer = tvm.tirx.decl_buffer((1,), "float32")
+    params = [KernelParam.from_buffer(buffer)]
+    lookup = Mock(return_value=lambda pointer: ctypes.c_void_p(pointer.value + 128))
+    monkeypatch.setattr(tvm, "get_global_func", lookup)
+    lib = SimpleNamespace(call=Mock(return_value=0))
+    wrapper = CythonKernelWrapper([], params, lib, host_mapped_indices=[0])
+    wrapper.set_dynamic_symbolic_map({})
+    wrapper.set_dynamic_symbolic_sources({})
+    wrapper.set_ptr_map({})
+    wrapper.set_buffer_device_map({"buffer": (0, torch.device("cpu"))})
+    wrapper.set_buffer_dtype_map({"buffer": (0, torch.float32)})
+    wrapper.set_static_shape_map({"buffer": (0, [(0, 1)])})
+    wrapper.set_static_strides_map({})
+    wrapper.set_static_contiguous_list([(0, "buffer")])
+
+    tensor = torch.empty(1)
+    wrapper.forward([tensor], stream=0)
+
+    lookup.assert_called_once_with("tl.cuda.get_host_mapped_pointer")
+    assert lib.call.call_args.args[0].value == tensor.data_ptr() + 128
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_cython_pdl():

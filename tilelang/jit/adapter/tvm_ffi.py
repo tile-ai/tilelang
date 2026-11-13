@@ -13,7 +13,7 @@ import sys
 import threading
 
 import torch
-from tvm_ffi import use_torch_stream
+from tvm_ffi import use_raw_stream, use_torch_stream
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -353,9 +353,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 self._prepare_torch_device(out_device)
             executable = self._get_executable()
             if has_host_mapped_params and out_device is None:
-                # CPU tensors do not propagate a CUDA stream through DLPack.
-                # All-host signatures still follow Torch's stream/capture.
-                with use_torch_stream():
+                # CPU tensors do not propagate an accelerator stream through
+                # DLPack. All-host signatures still follow Torch's capture.
+                if self.target.kind.name == "ascend":
+                    if current_device_functor is None:
+                        current_device_functor = self.get_current_device_functor()
+                    device = current_device_functor()
+                    self._prepare_torch_device(device)
+                    stream = self.get_current_stream_functor(device)()
+                    stream_context = use_raw_stream(runtime.device(self.target.get_target_device_type(), device.index), stream)
+                elif self.target.kind.name == "cuda":
+                    stream_context = use_torch_stream()
+                else:
+                    raise ValueError(f"Host-mapped buffers are not supported for target {self.target.kind.name!r}")
+                with stream_context:
                     executable(*tensor_list)
             else:
                 executable(*tensor_list)

@@ -32,13 +32,14 @@ cdef class CythonKernelWrapper:
         object host_mapped_indices
         object get_host_mapped_pointer
 
-    def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None, host_mapped_indices=()):
+    def __cinit__(self, result_idx, params, lib, get_current_device=None, get_current_stream=None, host_mapped_indices=(), get_host_mapped_pointer=None):
         # Initialize wrapper with kernel configuration
         self.result_idx = result_idx
         self.params = params
         self.lib = lib
         self.host_mapped_indices = frozenset(host_mapped_indices)
-        if self.host_mapped_indices:
+        self.get_host_mapped_pointer = get_host_mapped_pointer
+        if self.host_mapped_indices and get_host_mapped_pointer is None:
             from tvm import get_global_func
             self.get_host_mapped_pointer = get_global_func("tl.cuda.get_host_mapped_pointer")
         # Convert TVM types to native Python types during initialization
@@ -107,9 +108,9 @@ cdef class CythonKernelWrapper:
                     device.index is None or
                     tensor_device.index == device.index
                 )
-                if self.host_mapped_indices and device.type == "cuda":
+                if self.host_mapped_indices and device.type in ("cuda", "npu"):
                     current_device = self.get_current_device()
-                    device = current_device if isinstance(current_device, torch.device) else torch.device("cuda", current_device)
+                    device = current_device if isinstance(current_device, torch.device) else torch.device(device.type, current_device)
                     device_index_match = tensor_device.index == device.index
                 if not (device_type_match and device_index_match):
                     raise ValueError(

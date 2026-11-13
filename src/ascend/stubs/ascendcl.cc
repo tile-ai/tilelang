@@ -124,6 +124,11 @@ AscendCLAPI CreateAscendCLAPI() {
   // Optional: wrappers return nullptr / nonzero errors when absent.
   api.aclGetRecentErrMsg_ = GetSymbol<decltype(api.aclGetRecentErrMsg_)>(
       handle, "aclGetRecentErrMsg");
+  api.aclrtHostGetDevicePointer_ =
+      GetSymbol<decltype(api.aclrtHostGetDevicePointer_)>(
+          handle, "aclrtHostGetDevicePointer");
+  api.aclrtGetLastError_ =
+      GetSymbol<decltype(api.aclrtGetLastError_)>(handle, "aclrtGetLastError");
   api.aclrtGetFunctionAttribute_ =
       GetSymbol<decltype(api.aclrtGetFunctionAttribute_)>(
           handle, "aclrtGetFunctionAttribute");
@@ -209,6 +214,24 @@ const char *aclGetRecentErrMsg(void) {
     return nullptr;
   }
   return api->aclGetRecentErrMsg_();
+}
+
+int32_t aclrtHostGetDevicePointer(void *hostPtr, void **devicePtr,
+                                  uint32_t flags) {
+  AscendCLAPI *api = AscendCLAPI::get_or_null();
+  if (!AscendCLAPI::is_available() ||
+      api->aclrtHostGetDevicePointer_ == nullptr) {
+    return 1;
+  }
+  return api->aclrtHostGetDevicePointer_(hostPtr, devicePtr, flags);
+}
+
+int32_t aclrtGetLastError(int32_t level) {
+  AscendCLAPI *api = AscendCLAPI::get_or_null();
+  if (!AscendCLAPI::is_available() || api->aclrtGetLastError_ == nullptr) {
+    return 1;
+  }
+  return api->aclrtGetLastError_(level);
 }
 
 int32_t aclrtGetFunctionAttribute(void *func, int32_t attrType,
