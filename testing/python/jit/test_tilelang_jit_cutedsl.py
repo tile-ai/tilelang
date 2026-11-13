@@ -415,5 +415,65 @@ def test_cutedsl_launch_follows_the_torch_stream():
     assert torch.equal(y, torch.full_like(y, 2.0))
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32"])
+@pytest.mark.parametrize("scope", ["global", "shared"])
+@pytest.mark.parametrize("threads", [256, 64], ids=["scalar", "vector"])
+def test_cutedsl_unsigned_reads_stay_unsigned(dtype, scope, threads):
+    """Values read from an unsigned buffer keep their unsigned value.
+
+    See https://github.com/tile-ai/tilelang/issues/2974.
+    """
+    N = 256
+    bits = T.dtype(dtype).bits
+    half = (1 << (bits - 1)) - 1
+    signed = f"int{bits}"
+
+    @T.prim_func
+    def unsigned_reads(
+        A: T.Tensor((N,), dtype),
+        S: T.Tensor((N,), signed),
+        C: T.Tensor((8, N), "int64"),
+        F: T.Tensor((N,), "float32"),
+    ):
+        with T.Kernel(1, threads=threads):
+            if scope == "shared":
+                src = T.alloc_shared((N,), dtype)
+                ssrc = T.alloc_shared((N,), signed)
+                T.copy(A, src)
+                T.copy(S, ssrc)
+            else:
+                src = A
+                ssrc = S
+            for i in T.Parallel(N):
+                C[0, i] = T.cast(src[i], "int64")
+                C[1, i] = T.cast(src[i] > half, "int64")
+                C[2, i] = T.cast(src[i] >> (bits - 1), "int64")
+                C[3, i] = T.cast(src[i] // 3, "int64")
+                C[4, i] = T.cast(T.max(src[i], T.cast(half + 1, dtype)), "int64")
+                C[5, i] = T.cast(T.min(src[i], T.cast(half + 1, dtype)), "int64")
+                C[6, i] = T.cast(T.reinterpret(ssrc[i], dtype), "int64")
+                C[7, i] = T.cast(ssrc[i], "int64")
+                F[i] = T.cast(src[i], "float32")
+
+    kernel = tilelang.compile(unsigned_reads, target="cutedsl")
+    i = torch.arange(N, dtype=torch.int64, device="cuda")
+    a = (i * ((1 << bits) // N) + i % 7) % (1 << bits)
+    s = torch.where(a > half, a - (1 << bits), a)
+    c = torch.empty(8, N, dtype=torch.int64, device="cuda")
+    f = torch.empty(N, dtype=torch.float32, device="cuda")
+    kernel(a.to(T.dtype(dtype).as_torch()), s.to(T.dtype(signed).as_torch()), c, f)
+
+    assert torch.equal(c[0], a)
+    assert torch.equal(c[1], (a > half).long())
+    assert torch.equal(c[2], a >> (bits - 1))
+    assert torch.equal(c[3], a // 3)
+    assert torch.equal(c[4], a.clamp(min=half + 1))
+    assert torch.equal(c[5], a.clamp(max=half + 1))
+    assert torch.equal(c[6], a)
+    assert torch.equal(c[7], s)
+    assert torch.equal(f, a.float())
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
