@@ -24,3 +24,19 @@ def test_ascend_copy_l2_cache_ctrl_string_annotation_matches_keyword():
     for func in (annotation_path, keyword_path):
         (copy,) = calls(func, "tl.tileop.ascend_copy")
         assert int(copy.annotations["l2_cache_ctrl"]) == 0
+
+
+def test_l0c_dyn_scope_survives_copy_check():
+    """`shared.l0c` and `shared.l0c.dyn` name the same hardware scope."""
+    from tilelang.engine.lower import lower
+
+    @T.prim_func
+    def main(A: T.Tensor((64, 64), "float32"), C: T.Tensor((64, 64), "float16")):
+        with T.Kernel(1):
+            res = T.alloc_l0c((64, 64), "float32", scope="shared.l0c.dyn")
+            a = T.alloc_l1((64, 64), "float32")
+            T.copy(A, a)
+            T.gemm(a, a, res, transpose_B=True, clear_accum=True)
+            T.copy(res, C)
+
+    lower(main, target="ascend")

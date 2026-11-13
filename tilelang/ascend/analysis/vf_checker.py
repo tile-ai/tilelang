@@ -97,7 +97,14 @@ class _VFCheckVisitor(PyStmtExprVisitor):
         self._check_vf_allocation_scope(src_buf)
         self._check_vf_allocation_scope(dst_buf)
 
-        if not self.inside_vf and src_buf.dtype != dst_buf.dtype and src_buf.scope() != "shared.l0c":
+        # An L0C accumulator may be declared with either spelling; the rest of the
+        # compiler treats "shared.l0c" and "shared.l0c.dyn" as the same scope
+        # (src/ascend/op/utils.h:68, codegen_pto.cc:864, copy_op.py:343).
+        if (
+            not self.inside_vf
+            and src_buf.dtype != dst_buf.dtype
+            and src_buf.scope() not in ("shared.l0c", "shared.l0c.dyn")
+        ):
             raise ValueError(
                 "[TileLang Semantic Check] "
                 f"T.copy() from dtype '{src_buf.dtype}' to dtype '{dst_buf.dtype}' "

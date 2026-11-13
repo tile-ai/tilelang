@@ -112,7 +112,10 @@ _MX_SF_K_PER_SCALE_BYTE = 32
 
 
 def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: ShapeType | None) -> Buffer:
-    if buf.scope() != expected_scope:
+    # "shared.l0a" and "shared.l0a.dyn" name the same hardware scope; the codegen
+    # matchers treat them as equal (codegen_pto.cc:864, op/utils.h:68), and
+    # alloc_l0a/alloc_l0b expose the scope spelling as a public parameter.
+    if buf.scope() not in (expected_scope, f"{expected_scope}.dyn"):
         raise ValueError(f"expected a {expected_scope} data tile, got scope {buf.scope()} for {buf.name}")
     if len(buf.shape) < 2:
         raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
