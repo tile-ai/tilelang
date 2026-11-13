@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
+import functools
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -35,6 +38,49 @@ def output_allocation_stream(stream: int, device: torch.device) -> torch.cuda.St
         # ExternalStream(0) yields a pooled stream on some PyTorch releases (2.4, 2.5).
         return torch.cuda.default_stream(device)
     return torch.cuda.ExternalStream(stream, device=device)
+
+
+# CUstream handles of the legacy and the per-thread default stream.
+_CU_STREAM_LEGACY = 1
+_CU_STREAM_PER_THREAD = 2
+
+
+@functools.cache
+def _cuda_driver():
+    """The CUDA driver library, or ``None``."""
+    try:
+        return ctypes.CDLL("nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1")
+    except OSError:
+        return None
+
+
+def stream_device_index(stream: int) -> int | None:
+    """The index of the device that owns the CUDA stream handle ``stream``.
+
+    ``None`` for the NULL, legacy and per-thread default stream handles, which
+    run on whichever device is current, and when the driver cannot tell.
+    """
+    if stream in (0, _CU_STREAM_LEGACY, _CU_STREAM_PER_THREAD):
+        return None
+    driver = _cuda_driver()
+    if driver is None:
+        return None
+    handle = ctypes.c_void_p(stream)
+    device = ctypes.c_int()
+    get_device = getattr(driver, "cuStreamGetDevice", None)
+    if get_device is not None:
+        return device.value if get_device(handle, ctypes.byref(device)) == 0 else None
+    # Drivers before CUDA 12.8: the device of the stream's context.
+    context = ctypes.c_void_p()
+    if driver.cuStreamGetCtx(handle, ctypes.byref(context)) != 0:
+        return None
+    if driver.cuCtxPushCurrent_v2(context) != 0:
+        return None
+    try:
+        found = driver.cuCtxGetDevice(ctypes.byref(device)) == 0
+    finally:
+        driver.cuCtxPopCurrent_v2(ctypes.byref(ctypes.c_void_p()))
+    return device.value if found else None
 
 
 class BaseKernelAdapter(ABC):

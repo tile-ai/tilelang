@@ -46,6 +46,7 @@ from cuda.bindings.driver import (
     CUlaunchAttributeID,
 )
 import ctypes
+import torch
 
 _function_names = {}
 
@@ -186,7 +187,7 @@ KERNEL_LAUNCH_FUNC_PY = """
         CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
         {7},
         kernels["{0}"],
-        CUdevice({10})
+        CUdevice(torch.cuda.current_device())
     )[0]
     if res != CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"Failed to set max dynamic shared memory size to {7} for kernel {0}: {{res}}")
@@ -200,7 +201,7 @@ KERNEL_LAUNCH_FUNC_PY = """
     config.blockDimZ = {6}
     config.sharedMemBytes = {7}
     config.hStream = stream
-    {11}
+    {10}
 
     arg_values = {8}
     arg_types = {9}
@@ -386,7 +387,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
 
         desc_name_map: dict[str, str] = {}
         desc_name_var_map: dict[str, tvm.tirx.Var] = {}
-        device_index = 0
         kernel_launch_code = """"""
         if has_l2_persistent_map:
             kernel_launch_code += L2_PERSISTENT_MAP_CREATE_HANDLE_PY
@@ -406,11 +406,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 if str(device_param.dtype) != "handle":
                     self._argument_names[device_param] = f"({self._pythonic_expr(host_param)})"
 
-            for arg_name, arg_type in call_args:
-                if arg_type == "ctypes.c_void_p":
-                    device_index = f"{arg_name.replace('.data_ptr()', '')}.device.index"
-                    break
-
             # Store kernel info for second pass
             kernel_info_list.append(
                 {
@@ -419,7 +414,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                     "grid_info": grid_info,
                     "dynamic_smem_buf": dynamic_smem_buf,
                     "call_args": call_args,
-                    "device_index": device_index,
                 }
             )
 
@@ -433,7 +427,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
             grid_info = kernel_info["grid_info"]
             dynamic_smem_buf = kernel_info["dynamic_smem_buf"]
             call_args = kernel_info["call_args"]
-            device_index = kernel_info["device_index"]
 
             arg_names = ", ".join([arg[0] for arg in call_args])
             arg_types = ", ".join([arg[1] for arg in call_args])
@@ -457,7 +450,6 @@ class TLNVRTCSourceWrapper(TLCUDASourceWrapper):
                 smem_str,
                 arg_names,
                 arg_types,
-                device_index,
                 pdl_sync_code,
             )
 

@@ -12,7 +12,7 @@ from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream, stream_device_index
 from tilelang.jit.adapter.nvrtc import is_nvrtc_available, check_nvrtc_available
 
 from .libgen import NVRTCLibraryGenerator
@@ -291,6 +291,12 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
 
         first_tensor = next((value for value in param_values if isinstance(value, torch.Tensor)), None)
         device = first_tensor.device if first_tensor is not None else None
+        # A caller-supplied stream runs the kernel on the device that owns it,
+        # so the outputs live there too. A default-stream handle belongs to no
+        # device in particular and runs with the inputs.
+        stream_index = stream_device_index(stream) if stream is not None else None
+        if stream_index is not None:
+            device = torch.device("cuda", stream_index)
 
         # Outputs written on a caller-supplied stream are allocated on that stream.
         alloc_stream = None
@@ -323,14 +329,27 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
                 args.append(self._resolve_dynamic_symbolic_value(symbol, param_values))
 
         # if stream is not None, we need to pass the stream to the library
+        launch_device = None
         if stream is None:
             if self.target.kind.name == "cuda" and torch.cuda.is_available():
-                device = first_tensor.device if first_tensor is not None else None
-                stream = torch.cuda.current_stream(device).cuda_stream
+                if first_tensor is not None and first_tensor.is_cuda:
+                    launch_device = first_tensor.device
+                stream = torch.cuda.current_stream(launch_device).cuda_stream
             else:
                 stream = 0
+        else:
+            # The default stream runs with the inputs; a host tensor says
+            # nothing about the device, so it keeps the current one.
+            launch_device = device if device is not None and device.type == "cuda" else None
 
-        self._forward_from_prebuild_lib(*args, stream=stream)
+        # The launcher works on the current device, so make the stream's device
+        # current: the inputs' device for a stream picked here, the owning
+        # device for a caller-supplied one.
+        if launch_device is not None and launch_device.index != torch.cuda.current_device():
+            with torch.cuda.device(launch_device):
+                self._forward_from_prebuild_lib(*args, stream=stream)
+        else:
+            self._forward_from_prebuild_lib(*args, stream=stream)
 
         if len(self.result_idx) == 1:
             return args[self.result_idx[0]]
