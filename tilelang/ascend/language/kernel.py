@@ -167,6 +167,12 @@ def Kernel(
                 for i in T.Parallel(128):
                     out[bx * 128 + i] = x[bx * 128 + i] * 2.0
     """
+    for _b in blocks:
+        if isinstance(_b, int):
+            if _b <= 0:
+                raise ValueError(f"T.Kernel block counts must be positive, got {_b}")
+        elif isinstance(_b, tirx.IntImm) and _b.value <= 0:
+            raise ValueError(f"T.Kernel block counts must be positive, got {_b.value}")
     if len(blocks) != 1:
         raise ValueError(f"Ascend targets a 1-D core grid: T.Kernel(N) takes exactly one grid extent. Got {len(blocks)}-D: {blocks}.")
     return launch_kernel(blocks, prelude=prelude)
