@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.26)
+project(tilelang_mlx_runtime LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+execute_process(COMMAND "${Python_EXECUTABLE}" -m nanobind --cmake_dir
+  OUTPUT_VARIABLE nanobind_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND "${Python_EXECUTABLE}" -c "import mlx.core, pathlib; print(pathlib.Path(mlx.core.__file__).parent)"
+  OUTPUT_VARIABLE MLX_ROOT OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+find_package(nanobind CONFIG REQUIRED)
+find_package(MLX 0.32.4 EXACT CONFIG REQUIRED)
+if(NOT MLX_BUILD_METAL)
+  message(FATAL_ERROR "TileLang MLX runtime requires Metal-enabled MLX")
+endif()
+nanobind_add_module(_tilelang_mlx NB_STATIC NB_DOMAIN mlx runtime.cc)
+target_link_libraries(_tilelang_mlx PRIVATE mlx)
+target_compile_definitions(_tilelang_mlx PRIVATE _METAL_)
