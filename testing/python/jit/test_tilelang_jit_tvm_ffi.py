@@ -526,5 +526,35 @@ def test_tvm_ffi_dynamic_shape_output_before_input():
     tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("callee_allocated_output", [False, True])
+def test_tvm_ffi_restores_current_device(callee_allocated_output):
+    """Inputs on a non-current device run there, and the call restores the
+    caller's current device (#3871)."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    n = 1 << 16
+
+    @T.prim_func
+    def add_one(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32)):
+        with T.Kernel(n // 256, threads=256) as bx:
+            for i in T.Parallel(256):
+                B[bx * 256 + i] = A[bx * 256 + i] + 1.0
+
+    kernel = tilelang.compile(add_one, out_idx=[1] if callee_allocated_output else None, execution_backend="tvm_ffi")
+    for caller, device in ((0, "cuda:1"), (0, "cuda:0"), (1, "cuda:0"), (1, "cuda:1")):
+        a = torch.randn(n, device=device)
+        with torch.cuda.device(caller):
+            if callee_allocated_output:
+                b = kernel(a)
+            else:
+                b = torch.empty_like(a)
+                kernel(a, b)
+            assert torch.cuda.current_device() == caller
+        torch.cuda.synchronize(device)
+        assert b.device == a.device
+        torch.testing.assert_close(b, a + 1.0, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
