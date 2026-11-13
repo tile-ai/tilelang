@@ -817,6 +817,46 @@ def test_sync_inside_uniform_if_blockidx():
 
 
 @tilelang.testing.requires_cuda
+def test_sync_in_skippable_then_branch_is_not_a_common_fence():
+    """A then-only branch sync only orders accesses when that branch executes.
+
+    The condition is block-uniform, so the barrier may remain in the branch.
+    It must not clear the enclosing scope's pending shared write: blocks that
+    skip the branch still need a common fence before reading another thread's
+    slot.
+    """
+
+    @T.prim_func(private=True)
+    def func():
+        shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result = T.alloc_buffer([1], dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 4)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        shared[tx] = T.float32(tx)
+        if bx < 2:
+            T.tvm_storage_sync("shared")
+        result[0] = shared[(tx + 64) % 128]
+
+    lowered = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))["main"]
+    guard = _guard(lowered, _thread_var(lowered, "blockIdx.x") < 2)
+    branch_syncs = _storage_syncs(guard)
+    assert len(branch_syncs) == 1
+    common_syncs = [call for call in _storage_syncs(lowered) if not any(call.same_as(branch_sync) for branch_sync in branch_syncs)]
+    assert len(common_syncs) == 1
+    writes = [store for store in collect_nodes(lowered, tirx.BufferStore) if store.buffer.scope() == "shared"]
+    reads = [
+        store
+        for store in collect_nodes(lowered, tirx.BufferStore)
+        if store.buffer.scope() == "local"
+        and any(load.buffer.data.same_as(writes[0].buffer.data) for load in collect_nodes(store.value, tirx.BufferLoad))
+    ]
+    assert len(writes) == 1 and len(reads) == 1
+    _assert_stmt_order(lowered, writes[0], _sync_stmt(lowered, common_syncs[0]), reads[0])
+
+
+@tilelang.testing.requires_cuda
 def test_sync_inside_uniform_if_runtime_block_uniform_condition():
     """Runtime-loaded but block-uniform conditions should keep syncs in the if."""
 
