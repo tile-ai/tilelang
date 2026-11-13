@@ -354,6 +354,18 @@ std::string DTypeToString(DataType t) {
   }
   return "cutlass." + elem_type;
 }
+
+// MLIR integers are signless, so CuTeDSL types a pointer to unsigned integers
+// as signed. Returns the `dtype=` argument naming the unsigned element type of
+// an atomic's destination, which makes min/max compare unsigned and the
+// returned value unsigned, or "" if none is needed.
+std::string AtomicDTypeArg(const PrimExpr &dst) {
+  std::optional<DataType> dtype = GetAccessPtrElementType(dst);
+  if (!dtype || !dtype->is_uint() || dtype->bits() < 32) {
+    return "";
+  }
+  return ", dtype=" + DTypeToString(dtype->element_of());
+}
 } // namespace
 
 void CodeGenTileLangCuTeDSL::PrintType(DataType t,
@@ -2349,12 +2361,13 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string dst_ptr = PrintExpr_(op->args[0]);
     std::string src_value = PrintExpr_(op->args[1]);
     this->PrintIndent();
-    this->stream << "tl.AtomicAdd(" << dst_ptr << ", " << src_value << ")\n";
+    this->stream << "tl.AtomicAdd(" << dst_ptr << ", " << src_value
+                 << AtomicDTypeArg(op->args[0]) << ")\n";
   } else if (op->op.same_as(tl::atomic_add_ret_elem_op())) {
     // atomic_add_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
     os << "tl.AtomicAdd(" << PrintExpr_(op->args[0]) << ", "
-       << PrintExpr_(op->args[1]) << ")";
+       << PrintExpr_(op->args[1]) << AtomicDTypeArg(op->args[0]) << ")";
   } else if (op->op.same_as(tl::atomic_addx2_elem_op())) {
     // atomic_addx2_elem_op(dst_ptr, src_ptr[, memory_order]) -> may return prev
     // value
@@ -2406,23 +2419,25 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
     std::string dst_ptr = PrintExpr_(op->args[0]);
     std::string src_value = PrintExpr_(op->args[1]);
     this->PrintIndent();
-    this->stream << "tl.AtomicMax(" << dst_ptr << ", " << src_value << ")\n";
+    this->stream << "tl.AtomicMax(" << dst_ptr << ", " << src_value
+                 << AtomicDTypeArg(op->args[0]) << ")\n";
   } else if (op->op.same_as(tl::atomic_max_ret_elem_op())) {
     // atomic_max_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
     os << "tl.AtomicMaxRet(" << PrintExpr_(op->args[0]) << ", "
-       << PrintExpr_(op->args[1]) << ")";
+       << PrintExpr_(op->args[1]) << AtomicDTypeArg(op->args[0]) << ")";
   } else if (op->op.same_as(tl::atomic_min_elem_op())) {
     // atomic_min_elem_op(dst_ptr, src_value[, memory_order])
     std::string dst_ptr = PrintExpr_(op->args[0]);
     std::string src_value = PrintExpr_(op->args[1]);
     this->PrintIndent();
-    this->stream << "tl.AtomicMin(" << dst_ptr << ", " << src_value << ")\n";
+    this->stream << "tl.AtomicMin(" << dst_ptr << ", " << src_value
+                 << AtomicDTypeArg(op->args[0]) << ")\n";
   } else if (op->op.same_as(tl::atomic_min_ret_elem_op())) {
     // atomic_min_ret_elem_op(dst_ptr, src_value[, memory_order]) -> returns
     // prev value
     os << "tl.AtomicMinRet(" << PrintExpr_(op->args[0]) << ", "
-       << PrintExpr_(op->args[1]) << ")";
+       << PrintExpr_(op->args[1]) << AtomicDTypeArg(op->args[0]) << ")";
   } else if (op->op.same_as(builtin::shift_right())) {
     // CuTeDSL type promotion fix: Int8 >> 4 returns Int32 in CuTeDSL,
     // but TIR expects result type to match operand type. Wrap in explicit
