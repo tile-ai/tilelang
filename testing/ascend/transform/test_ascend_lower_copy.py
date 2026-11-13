@@ -188,6 +188,25 @@ def test_fixed_outer_axis_affects_the_pointer_but_not_the_l1_row_pitch():
     _equal([copy.args[1].args[2]], [group * 2000])
 
 
+@pytest.mark.parametrize(
+    "src_dtype,dst_dtype,expected",
+    [
+        ("float32", "bfloat16", 16),  # F322BF16
+        ("float32", "float16", 1),  # F322F16
+        ("int32", "bfloat16", 36),  # QS322BF16_PRE
+        ("int32", "float16", 11),  # DEQF16
+        ("int32", "int32", 0),  # NoQuant: no unscaled reinterpreting copy
+    ],
+    ids=["f32-bf16", "f32-f16", "s32-bf16", "s32-f16", "s32-s32"],
+)
+def test_fix_quant_pre_follows_l0c_source_dtype(src_dtype, dst_dtype, expected):
+    src = tirx.decl_buffer((32, 64), src_dtype, name="src", scope="shared.l0c")
+    dst = tirx.decl_buffer((32, 64), dst_dtype, name="dst")
+    after = _lower(src, dst, layouts={src: make_ascend_l0c_layout(src)})
+    (copy,) = calls(after, "tl.ascend_copy_matrix_cc_to_gm")
+    assert int(copy.args[10]) == expected
+
+
 @pytest.mark.parametrize("case", ["grouped", "tail"])
 def test_fix_uses_destination_extent_and_preserves_source_pitch(case):
     rows = 16 if case == "grouped" else 128

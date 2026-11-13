@@ -22,6 +22,31 @@ namespace tl {
 constexpr const char *kL0SFBindings = "tl.l0_sf_bindings";
 using L0SFBindings = ffi::Map<tirx::Var, tirx::Var>;
 
+namespace ascend {
+
+// `asc_quant_mode` (fixpipe ``QuantMode_t``) values for the ``quant_pre``
+// argument of the L0C copy C APIs. The compiler header declares this enum per
+// target, and the a2a3 costmodel uses a different numbering under the same
+// names (DEQF16=5, QS322BF16_PRE=35, REQ8=3). These come from the AscendC enum
+// instead — the same one the float32 rows in ``GetCCQuantPre`` were taken from,
+// which agrees with this numbering on every name it uses.
+constexpr int kQuantNoQuant = 0;
+constexpr int kQuantDEQF16 = 11;       // int32 -> half,     scalar quant
+constexpr int kQuantQS322BF16Pre = 36; // int32 -> bfloat16, scalar quant
+
+/*!
+ * \brief True for the int32-source dequantisation modes.
+ *
+ * Unlike the plain casts, these multiply the accumulator by the scalar in the
+ * fixpipe QUANT_PRE register, so the producer has to write that register before
+ * the copy for the result to be well defined.
+ */
+inline bool IsInt32L0CDequantMode(int quant_pre) {
+  return quant_pre == kQuantDEQF16 || quant_pre == kQuantQS322BF16Pre;
+}
+
+} // namespace ascend
+
 // The annotation is emitted by alloc_l0*_sf, never inferred from consumers.
 L0SFBindings CollectL0SFBindings(const tirx::Stmt &body);
 class GemmBlockScaled;
