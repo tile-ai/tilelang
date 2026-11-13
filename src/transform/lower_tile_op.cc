@@ -690,7 +690,8 @@ private:
     if (const auto *var_node = expr.as<VarNode>()) {
       Var var = GetRef<Var>(var_node);
       auto it = bind_var_to_expr_.find(var);
-      if (it != bind_var_to_expr_.end()) {
+      if (it != bind_var_to_expr_.end() &&
+          it->second->IsInstance<BufferLoadNode>()) {
         return it->second;
       }
     }
@@ -1012,11 +1013,9 @@ private:
 
   Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-    bool recorded = false;
-    if (value->IsInstance<BufferLoadNode>()) {
-      bind_var_to_expr_[op->var] = value;
-      recorded = true;
-    }
+    // Preserve compound values as well as direct loads: a memory-derived
+    // alias must retain its dependencies for group-uniformity checks.
+    bind_var_to_expr_[op->var] = value;
     if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
     }
@@ -1153,6 +1152,8 @@ private:
     lower_args.layout_map = layout_map_;
     lower_args.buffer_remap = buffer_remap_;
     lower_args.bind_var_to_expr = bind_var_to_expr;
+    lower_args.enclosing_loops = enclosing_loops_;
+    lower_args.has_multidimensional_threads = has_multidimensional_threads_;
     lower_args.mbar_phase_expr = loop_mbar_phase_stack_.empty()
                                      ? PrimExpr(IntImm(DataType::Int(32), 0))
                                      : loop_mbar_phase_stack_.back();
@@ -1172,6 +1173,7 @@ private:
   }
 
   Stmt VisitStmt_(const AttrStmtNode *op) final {
+    bool saved_multidimensional_threads = has_multidimensional_threads_;
     if (op->attr_key == tirx::attr::thread_extent) {
       IterVar iv = Downcast<IterVar>(op->node);
       ICHECK_NE(iv->thread_tag.length(), 0U);
@@ -1179,9 +1181,15 @@ private:
         thread_binding_ = iv;
         ICHECK(iv->dom->extent.as<IntImmNode>());
         thread_block_size_ = iv->dom->extent.as<IntImmNode>()->value;
+      } else if ((iv->thread_tag == "threadIdx.y" ||
+                  iv->thread_tag == "threadIdx.z") &&
+                 !analyzer_->CanProveEqual(op->value, 1)) {
+        has_multidimensional_threads_ = true;
       }
     }
-    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    Stmt result = arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+    has_multidimensional_threads_ = saved_multidimensional_threads;
+    return result;
   }
 
   /**
@@ -1225,7 +1233,10 @@ private:
     // substitutes logical indices in nested loop ranges without changing their
     // Var identities, so lowering must not reuse the original body's bindings.
     auto lowering_analyzer = analyzer_->Clone();
+    Map<Var, For> saved_loops = enclosing_loops_;
+    enclosing_loops_.Set(op->loop_var, GetRef<For>(op));
     For for_node = Downcast<For>(arith::IRMutatorWithAnalyzer::VisitStmt_(op));
+    enclosing_loops_ = std::move(saved_loops);
     if (pushed_loop_mbar_phase) {
       loop_mbar_phase_stack_.pop_back();
     }
@@ -1450,6 +1461,8 @@ private:
   Optional<Buffer> mbarrier_buffer_;
   // Fallback phase for a tile-op barrier local to the nearest serial loop.
   std::vector<PrimExpr> loop_mbar_phase_stack_;
+  Map<Var, For> enclosing_loops_;
+  bool has_multidimensional_threads_ = false;
   // For ptx Node, we need to remap the buffer and indices
   // By access CallNode instead of BufferLoad Node.
   bool is_ptx_{false};
