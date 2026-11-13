@@ -27,6 +27,28 @@
 #define TL_DEVICE __forceinline__ __device__
 #define TL_DEVICE_NOINLINE __noinline__ __device__
 
+namespace tl {
+
+// See RegisterVectorType in codegen_hip.cc.
+template <class S> struct RegVec;
+template <int N> struct RegVecBase {
+  typedef uint Vec __attribute__((ext_vector_type(N)));
+  Vec v;
+};
+#define TL_DEFINE_REG_VEC(S, N)                                                \
+  template <> struct RegVec<S> : RegVecBase<N> {                               \
+    TL_DEVICE operator S() const { return __builtin_bit_cast(S, v); }          \
+    TL_DEVICE RegVec &operator=(const S &x) {                                  \
+      v = __builtin_bit_cast(Vec, x);                                          \
+      return *this;                                                            \
+    }                                                                          \
+  };
+TL_DEFINE_REG_VEC(uint2, 2)
+TL_DEFINE_REG_VEC(uint4, 4)
+#undef TL_DEFINE_REG_VEC
+
+} // namespace tl
+
 #define TILELANG_CHECK(stmt)                                                   \
   do {                                                                         \
     hipError_t __err = (stmt);                                                 \
