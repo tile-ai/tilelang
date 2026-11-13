@@ -297,3 +297,7 @@ By carefully examining intermediate representations (IR) before final code gener
 For complex programs where manual debugging is tedious, **AutoDD** provides automated delta debugging to quickly isolate the minimal code that reproduces a bug.
 
 For advanced performance tuning (e.g., analyzing memory bandwidth or occupancy), more specialized profiling tools such as **Nsight Compute**, **rocProf**, or vendor-specific profilers may be required. Those aspects will be covered in future documents.
+
+## Optional static hazard checking
+
+See [PipeGuard](pipeguard.md) for opt-in selected-CTA checks of lowered SM90 kernels.
