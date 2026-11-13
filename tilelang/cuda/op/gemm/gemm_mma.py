@@ -39,6 +39,12 @@ class GemmMMA(GemmBase):
         )
         return emitter
 
+    def _assign_layouts(self, mma_emitter: TensorCoreIntrinEmitter, layout_map: dict) -> None:
+        if self.A in layout_map and is_shared(self.A):
+            mma_emitter._assign_a_shared_layout(layout_map[self.A])
+        if self.B in layout_map and is_shared(self.B):
+            mma_emitter._assign_b_shared_layout(layout_map[self.B])
+
     def infer_layout(self, target: Target, thread_nums: int):
         mma_emitter = self._make_mma_emitter(target, thread_nums)
         if self.is_gemm_ss():
@@ -80,6 +86,7 @@ class GemmMMA(GemmBase):
         # Emitter lane/warp math uses zero-based ids within the current thread bounds.
         local_thread_var = thread_index - thread_bounds.min
         mma_emitter = self._make_mma_emitter(target, thread_nums, thread_var=local_thread_var)
+        self._assign_layouts(mma_emitter, layout_map)
 
         a_dtype = self.a_dtype
         b_dtype = self.b_dtype

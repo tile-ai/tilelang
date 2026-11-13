@@ -6,7 +6,7 @@ import tilelang.testing
 from tilelang import tvm
 
 
-def _make_gemm_kernel(dtype, accum_dtype, K=64):
+def _make_gemm_kernel(dtype, accum_dtype, K=64, operand=None, layout=None, transposed=False):
     M = N = 64
 
     @T.prim_func
@@ -15,13 +15,65 @@ def _make_gemm_kernel(dtype, accum_dtype, K=64):
             As = T.alloc_shared((M, K), dtype)
             Bs = T.alloc_shared((K, N), dtype)
             Cl = T.alloc_fragment((M, N), accum_dtype)
+            if operand == "A":
+                T.annotate_layout({As: layout})
+            elif operand == "B":
+                T.annotate_layout({Bs: layout})
             T.clear(Cl)
             T.copy(A, As)
             T.copy(B, Bs)
-            T.gemm(As, Bs, Cl)
+            T.gemm(As, Bs, Cl, transpose_A=operand == "A" and transposed, transpose_B=operand == "B" and transposed)
             T.copy(Cl, C)
 
     return main
+
+
+def _annotated_shared_layout(kind):
+    if kind == "xor_small":
+        return T.Layout((64, 64), lambda i, j: [i, j ^ (i % 2)])
+    if kind == "transpose":
+        return T.Layout((64, 64), lambda i, j: [j, i])
+    return T.Layout((64, 64), lambda i, j: [i, j ^ ((i % 8) * 8)])
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("operand", ["A", "B"])
+@pytest.mark.parametrize("kind", ["xor_small", "transpose", "xor8"])
+def test_gemm_mma_annotated_shared_layout_lowering(operand, kind):
+    # #2642: incompatible layouts need scalar loads; the other operand and
+    # compatible 16-byte swizzles should retain ldmatrix.
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        lowered = tilelang.lower(
+            _make_gemm_kernel("float16", "float32", operand=operand, layout=_annotated_shared_layout(kind)), target=target
+        )
+    source = lowered.kernel_source
+    assert "tl::mma_sync" in source
+    assert source.count("tl::ptx_ldmatrix") == (2 if kind == "xor8" else 1)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(8)
+@tilelang.testing.requires_cuda_compute_version_lt(9)
+@pytest.mark.parametrize("operand", ["A", "B"])
+@pytest.mark.parametrize("kind", ["xor_small", "transpose", "xor8"])
+@pytest.mark.parametrize("transposed", [False, True])
+def test_gemm_mma_annotated_shared_layout_runs(operand, kind, transposed):
+    import torch
+
+    # Run the default MMA path on SM8x, where the issue was reported. Newer
+    # architectures select other GEMM implementations for this input.
+    kernel = tilelang.compile(
+        _make_gemm_kernel("float16", "float32", operand=operand, layout=_annotated_shared_layout(kind), transposed=transposed),
+        out_idx=[2],
+        target="cuda",
+    )
+    torch.manual_seed(0)
+    a = torch.randint(-2, 3, (64, 64), device="cuda", dtype=torch.float16)
+    b = torch.randint(-2, 3, (64, 64), device="cuda", dtype=torch.float16)
+    ref_a = a.T if operand == "A" and transposed else a
+    ref_b = b.T if operand == "B" and transposed else b
+    torch.testing.assert_close(kernel(a, b), ref_a.float() @ ref_b.float(), rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
