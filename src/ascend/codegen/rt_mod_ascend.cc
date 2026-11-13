@@ -1,4 +1,5 @@
 #include "codegen_ascend.h"
+#include "codegen_superkernel.h"
 #include "config.h"
 
 #include "runtime/metadata.h"
@@ -44,6 +45,7 @@ std::string AscendCodeGen(IRModule mod) {
     cg.AddFunction(f);
   }
 
+  EmitSuperKernel(mod, &cg);
   return cg.Finish();
 }
 
