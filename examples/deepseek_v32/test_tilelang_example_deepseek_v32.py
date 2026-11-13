@@ -61,7 +61,7 @@ def test_example_sparse_mla_fwd_rocm():
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_sparse_mla_fwd_fp8():
     # small shapes for testing
-    sparse_mla_fwd_fp8.test_sparse_mla_fwd_fp8(S=256, SKV=1024, H=64, HKV=1, DQK=576, DV=512, topk=256, check_correctness=False)
+    sparse_mla_fwd_fp8.test_sparse_mla_fwd_fp8(S=128, SKV=256, H=64, HKV=1, DQK=576, DV=512, topk=128, check_correctness=True)
 
 
 @tilelang.testing.requires_cuda
