@@ -44,6 +44,37 @@ constexpr const char *kModeMerging = "MODE_MERGING";
 constexpr const char *kModeZeroing = "MODE_ZEROING";
 constexpr const char *kSimdOpPrefix = "tl.simd.";
 
+// Lane counts that PTO exposes as predefined mask patterns (PAT_VL<N>), i.e.
+// the subset accepted for tl.simd.pge. Every other partial pass has to use a
+// runtime tail mask instead of a pattern name that the assembler cannot
+// resolve.
+bool IsPredefinedMaskLaneCount(int64_t lanes) {
+  switch (lanes) {
+    case 1:
+    case 2:
+    case 3:
+    case 4:
+    case 8:
+    case 16:
+    case 32:
+    case 64:
+    case 128:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Mask predicate for the first `lanes` elements of a register of `bits`-wide
+// elements, as a runtime tail predicate.
+std::string MakeRuntimeMask(int64_t lanes, int bits) {
+  ICHECK(bits == 8 || bits == 16 || bits == 32)
+      << "PTO runtime masks only support element widths 8, 16, and 32, got "
+      << bits;
+  return "pto.make_mask(pto.ui" + std::to_string(bits) + ", " +
+         std::to_string(lanes) + ")";
+}
+
 bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   if (auto call_op = op->op.as<Op>()) {
     const std::string &name = call_op.value()->name;
@@ -2099,8 +2130,12 @@ bool CodeGenTileLangPTO::EmitSimdMergingCall_(const CallNode *op,
     ICHECK_LE(half_lanes, 128)
         << "PTO vcpadd merging expects at most 256 result lanes, got "
         << result_dtype;
-    mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL" +
-           std::to_string(half_lanes) + "\")";
+    if (IsPredefinedMaskLaneCount(half_lanes)) {
+      mask = "pto.pset_b" + std::to_string(result_bits) + "(\"PAT_VL" +
+             std::to_string(half_lanes) + "\")";
+    } else {
+      mask = MakeRuntimeMask(half_lanes, result_bits);
+    }
   }
   std::string selection_mask = mask;
   if (is_vcvt) {
@@ -4852,16 +4887,21 @@ void CodeGenTileLangPTO::EmitAscendNd2NzScatter(const CallNode *op) {
     int remaining = static_cast<int>(cols - pass * vl_elems);
     int elems_this_pass = std::min(remaining, vl_elems);
 
-    // Determine mask: PAT_ALL for full-VL passes, PAT_VL{N} for partial.
+    // Determine mask: PAT_ALL for full-VL passes, PAT_VL{N} when N is a
+    // predefined pattern, and a runtime tail mask otherwise. PTO only defines
+    // PAT_VL1/2/3/4/8/16/32/64/128, so a partial pass of e.g. 24 elements has
+    // no static pattern name and used to emit an unresolvable token.
     std::string mask_fn;
     if (elems_this_pass >= vl_elems) {
       mask_fn = (elem_bytes == 4) ? "pto.pset_b32(\"PAT_ALL\")"
                                   : "pto.pset_b16(\"PAT_ALL\")";
-    } else {
+    } else if (IsPredefinedMaskLaneCount(elems_this_pass)) {
       mask_fn = (elem_bytes == 4) ? "pto.pset_b32(\"PAT_VL" +
                                         std::to_string(elems_this_pass) + "\")"
                                   : "pto.pset_b16(\"PAT_VL" +
                                         std::to_string(elems_this_pass) + "\")";
+    } else {
+      mask_fn = MakeRuntimeMask(elems_this_pass, elem_bytes * 8);
     }
 
     int src_offset = pass * vl_elems;
