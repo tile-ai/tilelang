@@ -495,11 +495,6 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
   // (forward index) of both fragments are equal. This is required when
   // validating loop layout against buffer fragment, as code generation
   // needs to correctly derive buffer physical indices from loop layout.
-  bool large_physical_is_fully_replicated = large_frag->IsCompletedReplicated();
-  if (large_physical_is_fully_replicated) {
-    return true; // fully replicated fragments are always compatible
-  }
-
   if (check_forward_index) {
     auto small_physical = small_frag->Forward(small_frag_indices);
     auto large_physical = large_frag->Forward(large_frag_indices);
@@ -523,6 +518,41 @@ bool ProveFragmentContains(Fragment small_frag, Fragment large_frag,
                 true); // Bind the replicate extent of small_frag.
   // Derive thread for small_frag.
   auto thread = small_frag->ForwardThread(small_frag_indices, rep_small);
+
+  if (large_frag->IsCompletedReplicated()) {
+    // ForwardThread is relative to each fragment's bound thread range. Compare
+    // in the large fragment's coordinates, including warp-specialized offsets.
+    PrimExpr large_thread = thread;
+    if (small_frag->ThreadRange().defined()) {
+      large_thread = large_thread +
+                     cast(large_thread.dtype(), small_frag->ThreadRange()->min);
+    }
+    if (large_frag->ThreadRange().defined()) {
+      large_thread = large_thread -
+                     cast(large_thread.dtype(), large_frag->ThreadRange()->min);
+    }
+    large_thread = analyzer.Simplify(large_thread);
+    // A fully replicated layout owns exactly [0, ReplicateExtent()) in its
+    // normalized range. Only bound threads of the small fragment participate.
+    auto covered = [&]() {
+      if (!analyzer.CanProve(large_thread >= 0) ||
+          !analyzer.CanProve(large_thread < large_frag->ReplicateExtent())) {
+        return false;
+      }
+      if (large_frag->ThreadRange().defined()) {
+        return analyzer.CanProve(large_thread <
+                                 large_frag->ThreadRange()->extent);
+      }
+      return true;
+    };
+    if (small_frag->ThreadRange().defined()) {
+      With<arith::ConstraintContext> lower(&analyzer, thread >= 0);
+      With<arith::ConstraintContext> upper(
+          &analyzer, thread < small_frag->ThreadRange()->extent);
+      return covered();
+    }
+    return covered();
+  }
 
   // Get physical index and thread for large_frag.
   auto large_frag_physical_and_thread = large_frag->Forward(large_frag_indices);
