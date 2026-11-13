@@ -88,6 +88,9 @@ def alloc_l0b(shape: ShapeType, dtype: DType, scope="shared.l0b") -> Buffer:
     return _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
 
 
+_L0C_DTYPES = ("float32", "float", "int32")
+
+
 def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool = True) -> Buffer:
     """Allocate an L0C buffer (__cc__) on Ascend NPU.
 
@@ -97,6 +100,11 @@ def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool =
         scope: Memory scope. Defaults to "shared.l0c"
         layout: Whether to annotate the fixed Ascend L0C accumulator layout.
     """
+    if str(dtype) not in _L0C_DTYPES:
+        raise ValueError(
+            f"alloc_l0c requires a float32 or int32 accumulator dtype: the dav-3510 L0C store only "
+            f"accepts __cc__ float* or __cc__ int32_t*, got {dtype}"
+        )
     buf = _with_span(T.sblock_alloc_buffer(shape, dtype, scope=scope))
     if layout:
         from tilelang.layout import make_ascend_l0c_layout
