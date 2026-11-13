@@ -11,6 +11,7 @@ import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
 from testing.ascend._ir import nodes, calls, allocated_buffer, schedule, statements
+from testing.ascend.auto_schedule._task_utils import _make_per_core_strided_store_program
 
 TILE = 16
 STEPS = 4
@@ -191,6 +192,37 @@ def make_multi_kernel_program():
             T.copy(ub1, b)
 
     return main
+
+
+def test_per_core_strided_stores_lower_with_independent_subcore_loops():
+    snapshots = {}
+
+    @tvm.ir.instrument.pass_instrument
+    class Capture:
+        def run_after_pass(self, mod, info):
+            if info.name == "tl.InsertSync":
+                snapshots[info.name] = mod
+
+    with tvm.target.Target("ascend"), tvm.transform.PassContext(instruments=[Capture()]):
+        artifact = tilelang.lower(_make_per_core_strided_store_program(), target="ascend", enable_device_compile=False)
+    synced = snapshots["tl.InsertSync"]
+    cores = {int(task.node["core_mask"]) for task in nodes(synced, tirx.AttrStmt) if task.attr_key == "tl.ascend_per_core_task"}
+    assert cores == {1, 4}
+    assert not calls(synced, "tl.ascend_cross_core_set_flag")
+    assert artifact.kernel_source
+
+
+@tilelang.testing.requires_ascend
+def test_per_core_strided_stores_cover_dynamic_tails():
+    import torch
+
+    src = torch.arange(512, dtype=torch.float32).npu()
+    expected = src.cpu().reshape(2, 4, 64).permute(1, 0, 2).flatten()
+    compiled = tilelang.compile(_make_per_core_strided_store_program(), target="ascend")
+    for num_tokens in (0, 1, 65, 129, 512):
+        out = torch.full((num_tokens,), -1.0, dtype=torch.float32, device="npu")
+        compiled(src, out)
+        torch.testing.assert_close(out.cpu(), expected[:num_tokens], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("k_tiles", [1, 2], ids=["single-k-tile", "pipelined-k"])

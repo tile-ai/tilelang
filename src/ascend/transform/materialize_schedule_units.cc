@@ -125,11 +125,8 @@ private:
     if (per_core_task_depth_ > 0 && stmt.as<BindNode>()) {
       ICHECK(!HasTaskBufferAccess(stmt))
           << "An unmarked scalar Bind inside T.PerCoreTask may not access "
-             "buffers: synchronization with statements outside the "
-             "PerCoreTask is emitted only at T.Task candidate sites, so an "
-             "external buffer dependency could not be synchronized at this "
-             "Bind. Dependency-free scalar Bind control is allowed. Move the "
-             "buffer access into a supported same-pipe T.Task candidate. Bind="
+             "buffers. Move the buffer access into a supported same-pipe "
+             "T.Task candidate. Bind="
           << stmt;
     }
 

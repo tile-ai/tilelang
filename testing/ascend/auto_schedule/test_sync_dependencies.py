@@ -87,6 +87,22 @@ def test_dma_issue_order_is_not_completion_order():
     assert len(_events(after, "wait", "MTE3_MTE2")) == 1
 
 
+def test_repeated_compound_task_keeps_internal_iterations_independent():
+    out = tirx.decl_buffer((384,), "float32", name="out")
+    ub = tirx.decl_buffer((128,), "float32", name="ub", scope="shared.dyn")
+    epoch = tirx.Var("epoch", "int32")
+    stage = tirx.Var("stage", "int32")
+    store = copy(ub, out, src_indices=[stage * 64], src_shape=[64], dst_indices=[(epoch + stage) * 128], dst_shape=[64])
+    task = unit(tirx.For(stage, 0, 2, tirx.ForKind.SERIAL, store), core=1)
+    before = kernel(unit(tirx.For(epoch, 0, 2, tirx.ForKind.SERIAL, task), core=None), buffers=[ub], params=[out])
+    after = transform.InsertSync()(before)
+    # The last internal store in epoch 0 overlaps the first one in epoch 1.
+    # Sharing `stage` between those invocations would incorrectly prove that
+    # the stores are always 128 elements apart.
+    barriers = [call for call in calls(after, "tl.ascend_pipe_barrier") if call.args[0].value == "PIPE_MTE3"]
+    assert barriers
+
+
 @pytest.mark.parametrize(
     "write_start, write_extent, overlap",
     [(0, 1, True), (-1, 1, False), (-1, 2, True)],
