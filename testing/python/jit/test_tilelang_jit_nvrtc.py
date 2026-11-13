@@ -281,6 +281,25 @@ def test_nvrtc_kernel_multi_stream():
 
 
 @tilelang.testing.requires_cuda
+def test_nvrtc_kernel_with_a_single_argument():
+    """The launch arguments are tuples also for a single argument.
+
+    See https://github.com/tile-ai/tilelang/issues/3877.
+    """
+
+    @T.prim_func
+    def fill(B: T.Tensor((1024,), T.float32)):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                B[bx * 128 + i] = 1.0
+
+    kernel = tilelang.compile(fill, out_idx=[0], execution_backend="nvrtc")
+    out = kernel()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(out, torch.ones(1024, dtype=torch.float32, device="cuda"), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
 def test_nvrtc_kernel_launch_follows_the_torch_stream():
     """The launch must land on the stream torch is recording.
 
