@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -2240,17 +2241,31 @@ void CodeGenTileLangHIP::VisitExpr_(const BroadcastNode *op,
                                     std::ostream &os) { // NOLINT(*)
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8 &&
-      lanes == 4) {
-    // make_int8x4
-    const int64_t *p = as_const_int(op->value);
-    ICHECK(p);
-    int64_t v = *p & 0xFF;
-    v = (v << 24) | (v << 16) | (v << 8) | v;
-    if (op->dtype.is_uint()) {
-      os << "(uint)" << v;
+      (lanes == 4 || lanes == 8 || lanes == 16)) {
+    // Vectors of 8-bit integers are stored as 32-bit words (see PrintType), so
+    // broadcast one packed word per 4 lanes. The value is not always constant:
+    // LegalizeSafeMemoryAccess binds it to a variable.
+    std::ostringstream word;
+    word << (op->dtype.is_uint() ? "(uint)" : "(int)");
+    if (const int64_t *p = as_const_int(op->value)) {
+      int64_t v = *p & 0xFF;
+      word << ((v << 24) | (v << 16) | (v << 8) | v);
     } else {
-      os << "(int)" << v;
+      word << "((uint)(uchar)(" << PrintExpr(op->value) << ") * 0x01010101u)";
     }
+    if (lanes == 4) {
+      os << word.str();
+      return;
+    }
+    os << "make_";
+    PrintType(op->dtype, os);
+    os << '(';
+    for (int i = 0; i < lanes / 4; ++i) {
+      if (i != 0)
+        os << ", ";
+      os << word.str();
+    }
+    os << ')';
     return;
   }
 
