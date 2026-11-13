@@ -820,7 +820,7 @@ def _unary_same_dtype(name):
         _reject_packed_fp4(source, context=f"T.vmi.{name}(...)")
         args = [source]
         if mask is not None:
-            args.append(mask)
+            args.append(_require_compatible_mask(mask, _lanes_of(source), context=f"T.vmi.{name}(...)"))
         return _call_vmi(name, _dtype_of(source), *args, pmode=pmode, loc=loc, ip=ip)
 
     return wrapper
@@ -835,7 +835,7 @@ def _vec_scalar_same_dtype(name):
             _dtype_of(source),
             source,
             scalar,
-            _require_mask(mask, context=f"T.vmi.{name}(...)"),
+            _require_compatible_mask(mask, _lanes_of(source), context=f"T.vmi.{name}(...)"),
             pmode=pmode,
             loc=loc,
             ip=ip,

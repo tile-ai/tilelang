@@ -2273,3 +2273,22 @@ def _vmi_body_kernel(body):
 def test_removed_vmi_parameters_fail_in_legal_scope(case_id, body, message):
     with pytest.raises(TypeError, match=message):
         _vmi_body_kernel(body)
+
+
+def test_vmi_mask_lane_count_must_match():
+    """A 32-lane mask cannot select lanes of a 128-lane source."""
+    import pytest
+
+    with pytest.raises((TypeError, ValueError), match="lane counts to match"):
+
+        @T.prim_func
+        def main(A: T.Tensor((128,), "float16"), B: T.Tensor((128,), "float16")):
+            with T.Kernel(1):
+                a = T.alloc_shared((128,), "float16")
+                b = T.alloc_shared((128,), "float16")
+                T.copy(A, a)
+                with T.SimdVF():
+                    v = T.vmi.vload(a[0], size=128)
+                    r = T.vmi.vabs(v, T.vmi.create_mask(32, size=32))
+                    T.vmi.vstore(r, b[0], T.vmi.create_mask(32, size=32))
+                T.copy(b, B)
