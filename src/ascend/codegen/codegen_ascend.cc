@@ -388,9 +388,11 @@ static std::string GetAscendFP8Type(DataType type) {
     vec = "_4";
   } else if (lanes == 8) {
     vec = "_8";
+  } else if (lanes == 16) {
+    vec = "_16";
   } else {
-    LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8) for "
-                  "Ascend fp8";
+    LOG(FATAL) << "Only support scalar and vector types of width (2, 4, 8, 16) "
+                  "for Ascend fp8";
   }
   if (type.is_float8_e4m3() || type.is_float8_e4m3fn()) {
     stream << "fp8_e4" << vec << "_t";
@@ -506,7 +508,8 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
         return;
       }
     }
-    if (t.is_float8() && (lanes == 2 || lanes == 4 || lanes == 8)) {
+    if (t.is_float8() &&
+        (lanes == 2 || lanes == 4 || lanes == 8 || lanes == 16)) {
       os << GetAscendFP8Type(t);
       return;
     }
@@ -3662,9 +3665,12 @@ void CodeGenTileLangAscend::PrintVecElemLoad(const std::string &vec, DataType t,
       << " is not addressable through SIMT per-lane codegen";
   ValidateGenericVectorType("per-lane load", t);
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < t.lanes() && i < 8)
-      << "Ascend " << t << " small-vector lanes max 8" << ": i=" << i
-      << " t.bits()=" << t.bits() << " t.lanes()=" << t.lanes();
+  // FP8 lanes are packed one byte each inside an integer carrier, so the
+  // generic small-vector bound (named-field access) does not apply.
+  const int lane_bound = tl::IsAscendVectorizableFP8(t) ? t.lanes() : 8;
+  ICHECK(i >= 0 && i < t.lanes() && i < lane_bound)
+      << "Ascend " << t << " small-vector lanes max " << lane_bound
+      << ": i=" << i << " t.bits()=" << t.bits() << " t.lanes()=" << t.lanes();
   if (t.is_float16()) {
     os << "((half2*)(&(" << vec << ")))[" << (i / 2) << "]." << access[i % 2];
   } else if (t.is_bfloat16()) {
@@ -3697,9 +3703,12 @@ void CodeGenTileLangAscend::PrintVecElemStore(const std::string &vec,
   ValidateGenericVectorType("per-lane store", t);
   this->PrintIndent();
   static const char access[] = {'x', 'y', 'z', 'w'};
-  ICHECK(i >= 0 && i < t.lanes() && i < 8)
-      << "Ascend " << t << " small-vector lanes max 8" << ": i=" << i
-      << " t.bits()=" << t.bits() << " t.lanes()=" << t.lanes();
+  // FP8 lanes are packed one byte each inside an integer carrier, so the
+  // generic small-vector bound (named-field access) does not apply.
+  const int lane_bound = tl::IsAscendVectorizableFP8(t) ? t.lanes() : 8;
+  ICHECK(i >= 0 && i < t.lanes() && i < lane_bound)
+      << "Ascend " << t << " small-vector lanes max " << lane_bound
+      << ": i=" << i << " t.bits()=" << t.bits() << " t.lanes()=" << t.lanes();
   if (t.is_float16()) {
     stream << "((half2*)(&(" << vec << ")))[" << (i / 2) << "]."
            << access[i % 2] << " = " << value << ";\n";

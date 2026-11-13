@@ -49,7 +49,13 @@ def test_parallel_rng_is_implicitly_fused_and_bitwise_equal_up_to_layout(dtype, 
     kernel = tilelang.compile(_rng_fill(groups, dtype, distribution), target="ascend")
     source = kernel.get_kernel_source()
 
-    vector_name = f"philox_rand_{distribution}2"
+    # The fusion width follows the vectorizer's lane cap for the RNG dtype
+    # (max_vector_bits / element bits), so derive it from the emitted call
+    # instead of pinning one width.
+    fused = re.search(rf"tl::philox_rand_{distribution}(\d+)\(", source)
+    assert fused is not None, f"no fused philox_rand_{distribution}<N> call in source"
+    width = int(fused.group(1))
+    vector_name = f"philox_rand_{distribution}{width}"
     assert source.count(f"tl::{vector_name}(&") == 1
     assert f"{vector_name}_bfloat16" not in source
     assert ("__float22bfloat162_rn" in source) == (dtype == "bfloat16")
@@ -61,7 +67,20 @@ def test_parallel_rng_is_implicitly_fused_and_bitwise_equal_up_to_layout(dtype, 
     torch.npu.synchronize()
 
     integer_dtype = torch.int32 if dtype == "float32" else torch.int16
-    scalar_bits = scalar.cpu().view(integer_dtype).view(groups, 2, threads).permute(0, 2, 1).contiguous().view(n)
+    # Serial: draw j of thread t lands at element j * threads + t.
+    # Fused: one philox_rand_<width> call serves `width` consecutive draws of a
+    # thread, which the vectorizer lays out as `width` consecutive elements
+    # (blocks of threads*width). Compare through the shared draw ordering.
+    draws = groups * 2
+    assert draws % width == 0
+    scalar_bits = (
+        scalar.cpu()
+        .view(integer_dtype)
+        .view(draws // width, width, threads)
+        .permute(0, 2, 1)
+        .contiguous()
+        .view(n)
+    )
     assert torch.equal(
         scalar_bits,
         parallel.cpu().view(integer_dtype),
