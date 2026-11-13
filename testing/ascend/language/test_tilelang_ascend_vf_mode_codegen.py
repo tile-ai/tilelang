@@ -267,5 +267,39 @@ def test_imported_helper_precedes_vf_definitions():
         assert f"imported_helper({argument})" in helper.group(1), source
 
 
+def test_vcvt_bf16_to_f16_keeps_round_before_sat():
+    @T.prim_func
+    def main(X: T.Tensor((128,), "bfloat16"), Y: T.Tensor((128,), "float16")):
+        with T.Kernel(1):
+            x_ub = T.alloc_shared((128,), "bfloat16")
+            y_ub = T.alloc_shared((128,), "float16")
+            T.copy(X, x_ub)
+            with T.SimdVF():
+                converted = T.simd.vcvt(T.simd.vld(x_ub[0]), "float16")
+                T.simd.vsts(y_ub[0], converted, dist="PK_B32")
+            T.copy(y_ub, Y)
+
+    source = lower(main, target="ascend").kernel_source
+    calls = [line.strip() for line in source.splitlines() if "simd_inst::vcvt" in line]
+    assert calls, source
+    # `simd_inst::vcvt` forwards its trailing controls positionally to `::vcvt`,
+    # so the rounding mode has to come before the saturation flag.
+    assert "ROUND_R, RS_ENABLE" in calls[0], calls
+
+
+def test_vdupv_rejects_unknown_position():
+    def build():
+        @T.prim_func
+        def main():
+            with T.Kernel(1), T.SimdVF():
+                src = T.simd.alloc_var("float32")
+                T.evaluate(T.simd.vdupv(src, pos="POS_LOW"))
+
+        return main
+
+    with pytest.raises(ValueError, match="POS_LOWEST"):
+        lower(build(), target="ascend")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
