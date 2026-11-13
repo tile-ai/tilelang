@@ -700,9 +700,10 @@ def shuffle_elect(thread_extent: int) -> PrimExpr:
     Implementation Notes
     --------------------
     Lowered to the CUDA helper `tl::tl_shuffle_elect<thread_extent>()` defined in
-    `src/tl_templates/cuda/intrin.h`, which relies on
-    `cutlass::canonical_warp_idx()` and `cute::elect_one_sync()`
-    to pick one lane per group.
+    `src/tl_templates/cuda/intrin.h`.  A positive extent elects the lane whose
+    linear thread id is a multiple of ``thread_extent``; extent 0 uses
+    `cutlass::canonical_warp_idx()` and `cute::elect_one_sync()` to pick the
+    block leader.
     """
     return tirx.call_intrin("bool", tirx.op.Op.get("tl.tl_shuffle_elect"), thread_extent)
 
