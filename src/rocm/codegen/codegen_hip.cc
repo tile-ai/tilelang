@@ -1424,7 +1424,7 @@ const char *RegisterVectorType(DataType t) {
   return nullptr;
 }
 
-// Arrays read as matrix core operands keep plain accesses. They are read with
+// Arrays read as matrix core operands (MFMA or WMMA) keep plain accesses. They are read with
 // GEMM's K loop index: when clang 22 promotes such an array, the K loop is no
 // longer unrolled and every read of the array becomes a chain of selects.
 class CollectMfmaOperands : public tirx::StmtExprVisitor {
@@ -1433,7 +1433,10 @@ public:
 
 private:
   void VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(tl::tvm_mfma())) {
+    // CDNA lowers T.gemm to tvm_mfma and RDNA to tvm_rdna_wmma. Both take the
+    // multiplicands at arguments 6 and 8.
+    if (op->op.same_as(tl::tvm_mfma()) ||
+        op->op.same_as(tl::tvm_rdna_wmma())) {
       for (int i : {6, 8}) {
         if (auto v = op->args[i].as<Var>()) {
           operands.insert(v.value());
