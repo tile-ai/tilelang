@@ -701,6 +701,11 @@ def vload(
     if is_packed_fp4:
         if size % 2:
             raise ValueError("T.vmi.vload(...) requires an even FP4 lane count for packed FP4 storage")
+        if size // 2 not in _VMI_LANE_COUNTS:
+            raise ValueError(
+                f"T.vmi.vload(...) stores packed FP4 in half as many lanes, so size // 2 must be one of "
+                f"{_VMI_LANE_COUNTS}; got size={size}, which becomes {size // 2} after packing"
+            )
         if group is not None or block_stride is not None:
             raise TypeError("T.vmi.vload(...) only supports contiguous packed FP4 loads")
 
@@ -750,6 +755,11 @@ def vstore(
     if str(value_dtype) == "float4_e2m1fn":
         if store_lanes % 2:
             raise ValueError("T.vmi.vstore(...) requires an even FP4 lane count for packed FP4 storage")
+        if store_lanes // 2 not in _VMI_LANE_COUNTS:
+            raise ValueError(
+                f"T.vmi.vstore(...) stores packed FP4 in half as many lanes, so lanes // 2 must be one of "
+                f"{_VMI_LANE_COUNTS}; got {store_lanes} lanes, which become {store_lanes // 2} after packing"
+            )
         if group is not None or block_stride is not None:
             raise TypeError("T.vmi.vstore(...) only supports contiguous packed FP4 stores")
     elif mask is not None:

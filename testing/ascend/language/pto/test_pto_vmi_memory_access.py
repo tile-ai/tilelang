@@ -2273,3 +2273,21 @@ def _vmi_body_kernel(body):
 def test_removed_vmi_parameters_fail_in_legal_scope(case_id, body, message):
     with pytest.raises(TypeError, match=message):
         _vmi_body_kernel(body)
+
+
+def test_vload_rejects_unpackable_fp4_lane_count():
+    """`size=64` passes the frontend but halves to 32, not a packed-FP4 lane count."""
+    import pytest
+
+    with pytest.raises(ValueError, match="half as many lanes"):
+
+        @T.prim_func
+        def main(A: T.Tensor((64,), "float4_e2m1fn"), B: T.Tensor((64,), "float4_e2m1fn")):
+            with T.Kernel(1):
+                a = T.alloc_shared((64,), "float4_e2m1fn")
+                b = T.alloc_shared((64,), "float4_e2m1fn")
+                T.copy(A, a)
+                with T.SimdVF():
+                    v = T.vmi.vload(a[0], size=64)
+                    T.vmi.vstore(v, b[0], T.vmi.create_mask(32, size=32))
+                T.copy(b, B)
