@@ -115,6 +115,7 @@ def gemm_blockscaled(
     SFB: BufferLikeType,
     transpose_A: bool = False,
     transpose_B: bool = False,
+    policy: GemmWarpPolicy = GemmWarpPolicy.Square,
     clear_accum: bool = False,
     unit_flag_ctrl: int | tirx.PrimExpr | None = None,
 ) -> tirx.PrimExpr:
@@ -135,13 +136,19 @@ def gemm_blockscaled(
     Unlike the common surface, ``k_start`` and the ``sf_*_granularity_k``
     knobs are implicit: the Ascend lowering derives the scale K offset from
     the SFA region slice, and MX scales cover 32 K elements per factor.
+
+    The positional order of ``policy`` and ``clear_accum`` matches the common
+    surface on purpose. They used to be swapped here, so a call written against
+    the common signature bound the warp policy to ``clear_accum``; ``policy`` is
+    an int enum, and any value other than ``Square`` stopped ``C`` from being
+    read as an accumulator.
     """
 
     ann: dict = {}
     if unit_flag_ctrl is not None:
         ann["unit_flag_ctrl"] = unit_flag_ctrl
     assert SFA is not None and SFB is not None, "block-scaled GEMM requires both SFA and SFB"
-    call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann or None)
+    call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, ann or None)
     # Re-emit the dense slots under the dedicated tl.tileop.gemm_blockscaled
     # op with the SFA/SFB regions and k_start appended (the 16-slot protocol
     # parsed by GemmBlockScaled). k_start stays 0: the Ascend lowering derives
