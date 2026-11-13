@@ -86,6 +86,28 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
     )
 
 
+def _reject_nonzero_k_origin(A_region, B_region, transpose_A, transpose_B):
+    """Reject L1 operand regions whose K tile does not start at zero.
+
+    The lowering addresses an L1 tile from its allocation base and only reads
+    the region extent, so a sliced K tile silently computes with the first K
+    columns of the allocation instead of the requested slice.
+    """
+    analyzer = arith.Analyzer()
+    for region, name, transpose in ((A_region, "A", transpose_A), (B_region, "B", transpose_B)):
+        if region.buffer.scope() != "shared.l1":
+            continue
+        k_axis = -2 if transpose else -1
+        origin = region.region[k_axis].min
+        if not analyzer.can_prove_equal(origin, 0):
+            raise ValueError(
+                f"T.gemm ignores a non-zero K origin on {name} regions: the Ascend lowering reads "
+                f"the tile from its allocation base, so {name} {region.buffer.name} with K origin "
+                f"{origin} would silently compute the first K columns instead. Copy the K slice "
+                f"into its own L1 buffer, or slice from index 0."
+            )
+
+
 def _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, annotations):
     """Route an Ascend gemm: L0 MAD tiles get their own assembly."""
     A_region = to_buffer_region(_legalize_argument(A))
@@ -93,6 +115,7 @@ def _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, a
     C_region = to_buffer_region(_legalize_argument(C))
     if A_region.buffer.scope() == "shared.l0a" and B_region.buffer.scope() == "shared.l0b" and C_region.buffer.scope() == "shared.l0c":
         return _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy, clear_accum, annotations)
+    _reject_nonzero_k_origin(A_region, B_region, transpose_A, transpose_B)
     return _gemm_impl(
         "tl.tileop.gemm",
         A,
