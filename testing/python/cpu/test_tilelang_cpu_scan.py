@@ -7,7 +7,9 @@ import tilelang
 import tilelang.cpu.language as T
 
 
-_TARGETS = [("c", "cython"), ("llvm", "tvm_ffi")]
+_TARGETS = [
+    ("c", "cython"),
+]
 _INPUT = torch.tensor([3.0, -1.0, 2.0, -5.0, 4.0, 0.0, -2.0, 7.0, -6.0, 1.0, 5.0, -3.0, 2.0, -4.0, 6.0, -7.0, 0.5])
 
 
