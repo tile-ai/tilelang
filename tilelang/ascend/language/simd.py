@@ -1387,11 +1387,20 @@ def vcvt(
         if target_dtype == "float32":
             return call(part_x2[part], mode)
 
-    if src_dtype == "int32" and target_dtype == "float32":
-        return call(round, mode)
+    if src_dtype == "int32":
+        if target_dtype == "float16":
+            # 32->16, same 2:1 shape as f32->s16 without the float->int
+            # saturation control (#3833; documented in the pairs list above).
+            return call(round, part_x2[part], mode)
+        if target_dtype == "float32":
+            return call(round, mode)
 
-    if src_dtype == "int64" and target_dtype == "float32":
-        return call(round, part_x2[part], mode)
+    if src_dtype == "int64":
+        if target_dtype == "float16":
+            # 64->16, a 4:1 conversion like f32->fp8 without saturation.
+            return call(round, part_x4[part], mode)
+        if target_dtype == "float32":
+            return call(round, part_x2[part], mode)
 
     # =========================================================================
     # 4. Int to Int
