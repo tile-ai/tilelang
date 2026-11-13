@@ -615,6 +615,8 @@ std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
 // ---------------------------------------------------------------------------
 struct AccessAddress {
   bool explicit_address{false};
+  bool is_load{false};
+  std::optional<int64_t> logical_extent;
   // True when the source operand is a handle Var resolved through a direct
   // Bind/Let to tl.access_ptr.  Indexed descriptors copied from such a binding
   // must not re-read memory or execute calls at the use point.
@@ -692,6 +694,7 @@ AccessAddress ParseAccessPtrCall(const CallNode *call,
   ValidateLinearAddress(buffer, starts, op_name, span);
   AccessAddress address;
   address.explicit_address = true;
+  address.is_load = is_load;
   address.source_operand = source_operand;
   address.buffer = buffer;
   address.starts = starts;
@@ -700,7 +703,7 @@ AccessAddress ParseAccessPtrCall(const CallNode *call,
   return address;
 }
 
-AccessAddress ParseAutoAddress(const PrimExpr &operand,
+AccessAddress ParseAutoAddress(const PrimExpr &operand, bool is_load,
                                const std::string &op_name, const Span &span) {
   if (const auto *load = operand.as<BufferLoadNode>()) {
     Buffer buffer = load->buffer;
@@ -710,6 +713,7 @@ AccessAddress ParseAutoAddress(const PrimExpr &operand,
     ValidateLinearAddress(buffer, starts, op_name, span);
     AccessAddress address;
     address.explicit_address = false;
+    address.is_load = is_load;
     address.source_operand = BufferLoad(buffer, starts);
     address.buffer = buffer;
     address.starts = starts;
@@ -721,6 +725,7 @@ AccessAddress ParseAutoAddress(const PrimExpr &operand,
     ValidateLinearAddress(buffer.value(), starts, op_name, span);
     AccessAddress address;
     address.explicit_address = false;
+    address.is_load = is_load;
     address.source_operand = BufferLoad(buffer.value(), starts);
     address.buffer = buffer.value();
     address.starts = starts;
@@ -798,7 +803,7 @@ ParseAddress(const PrimExpr &operand, bool is_load, const std::string &op_name,
     }
     return ParseAccessPtrCall(call, operand, is_load, op_name, span);
   }
-  return ParseAutoAddress(operand, op_name, span);
+  return ParseAutoAddress(operand, is_load, op_name, span);
 }
 
 // ---------------------------------------------------------------------------
@@ -824,6 +829,35 @@ struct DescriptorPlan {
 
 Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
                      const DescriptorPlan &plan, int64_t low, int64_t high) {
+  // The descriptor extent is not enough: its physical envelope must also stay
+  // inside the buffer.  Without this, an assertion from a narrower branch can
+  // prove the descriptor positive while the unguarded access is out of bounds.
+  bool nonnegative_starts = true;
+  for (const PrimExpr &start : address.starts) {
+    if (!IsIntegerScalar(start) || !analyzer->CanProve(start >= 0)) {
+      nonnegative_starts = false;
+      break;
+    }
+  }
+  if (nonnegative_starts) {
+    std::optional<PrimExpr> source_relative =
+        RelativeOffset(address.buffer, address.starts);
+    std::optional<PrimExpr> buffer_span =
+        WholeBufferSpan(analyzer, address.buffer);
+    // A load descriptor extent is rounded up to the hardware vector width;
+    // its logical size is the value actually consumed by the instruction.
+    int64_t bound_low = address.is_load ? 0 : low;
+    int64_t bound_high =
+        address.is_load ? address.logical_extent.value_or(high) : high;
+    if (source_relative.has_value() && buffer_span.has_value() &&
+        (!analyzer->CanProve(source_relative.value() + IntConst(bound_low) >= 0) ||
+         !analyzer->CanProve(source_relative.value() + IntConst(bound_high) <=
+                             buffer_span.value()))) {
+      return {RejectionKind::kHigh,
+              "the logical access exceeds the buffer's physical span"};
+    }
+  }
+
   std::optional<int64_t> constant = ConstInt(plan.extent);
   if (constant.has_value()) {
     if (constant.value() <= 0) {
@@ -1954,6 +1988,7 @@ private:
     PrimExpr input_offset = call->args[address_index + 1];
     AccessAddress address = ParseAddress(call->args[address_index], is_load,
                                          op_name, span, bindings_);
+    if (is_load) address.logical_extent = lanes;
     CheckProofInputs(address, input_offset, op_name, span);
 
     if (!IsIntegerScalar(input_offset)) {
