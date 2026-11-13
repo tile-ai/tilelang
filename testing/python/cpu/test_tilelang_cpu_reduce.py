@@ -233,3 +233,117 @@ def test_cpu_reduce_non_divisible_extent():
     out = kernel(A, Init)
     expected = _ref_reduce(A, "sum", dim=1)
     torch.testing.assert_close(out, expected, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("out_shape", [(1,), (3,), (2, 2), (3, 1)])
+def test_cpu_reduce_direct_rejects_invalid_destination(out_shape):
+    from tilelang.utils.language import to_tile_region
+
+    @T.prim_func
+    def main(A: T.Tensor((2, 4), "float32"), B: T.Tensor(out_shape, "float32")):
+        with T.Kernel(1):
+            src = T.alloc_local((2, 4), "float32")
+            dst = T.alloc_local(out_shape, "float32")
+            for i, j in T.grid(2, 4):
+                src[i, j] = A[i, j]
+            T.evaluate(
+                T.call_intrin(
+                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
+                )
+            )
+            if len(out_shape) == 1:
+                B[0] = dst[0]
+            else:
+                B[0, 0] = dst[0, 0]
+
+    with pytest.raises(ValueError, match="ReduceOp: invalid destination shape"):
+        tilelang.compile(main, out_idx=[1], target="c", target_host="c", execution_backend="cython")
+
+
+@pytest.mark.parametrize("clear", [True, False])
+def test_cpu_reduce_local_buffer_regions(clear):
+    @T.prim_func
+    def main(A: T.Tensor((3, 6), "float32"), B: T.Tensor((3,), "float32")):
+        with T.Kernel(1):
+            src = T.alloc_local((3, 6), "float32")
+            dst = T.alloc_local((3,), "float32")
+            for i, j in T.grid(3, 6):
+                src[i, j] = A[i, j]
+            for i in T.grid(3):
+                dst[i] = -10
+            T.reduce_sum(src[1:3, 1:5], dst[1:3], dim=1, clear=clear)
+            for i in T.grid(3):
+                B[i] = dst[i]
+
+    a = torch.arange(18, dtype=torch.float32).reshape(3, 6)
+    kernel = tilelang.compile(main, out_idx=[1], target="c", target_host="c", execution_backend="cython")
+    expected = torch.full((3,), -10.0)
+    expected[1:3] = a[1:3, 1:5].sum(dim=1)
+    if not clear:
+        expected[1:3] -= 10
+    torch.testing.assert_close(kernel(a), expected)
+
+
+@pytest.mark.parametrize("clear", [True, False])
+def test_cpu_reduce_local_buffer_regions_keepdim(clear):
+    @T.prim_func
+    def main(A: T.Tensor((3, 6), "float32"), B: T.Tensor((3, 6), "float32")):
+        with T.Kernel(1):
+            src = T.alloc_local((3, 6), "float32")
+            dst = T.alloc_local((3, 6), "float32")
+            for i, j in T.grid(3, 6):
+                src[i, j] = A[i, j]
+                dst[i, j] = -10
+            T.reduce_sum(src[1:3, 1:5], dst[1:2, 1:5], dim=0, clear=clear)
+            for i, j in T.grid(3, 6):
+                B[i, j] = dst[i, j]
+
+    a = torch.arange(18, dtype=torch.float32).reshape(3, 6)
+    kernel = tilelang.compile(main, out_idx=[1], target="c", target_host="c", execution_backend="cython")
+    expected = torch.full_like(a, -10)
+    expected[1:2, 1:5] = a[1:3, 1:5].sum(dim=0, keepdim=True)
+    if not clear:
+        expected[1:2, 1:5] -= 10
+    torch.testing.assert_close(kernel(a), expected)
+
+
+@pytest.mark.parametrize("clear", [True, False])
+@pytest.mark.parametrize(
+    ("source_layout", "dest_layout"),
+    [
+        ("transpose", "none"),
+        ("none", "transpose"),
+        ("transpose", "transpose"),
+        ("flatten", "none"),
+        ("none", "flatten"),
+        ("flatten", "flatten"),
+    ],
+)
+def test_cpu_reduce_local_sliced_layouts(clear, source_layout, dest_layout):
+    @T.prim_func
+    def main(A: T.Tensor((3, 4), "float32"), B: T.Tensor((3, 1), "float32")):
+        with T.Kernel(1):
+            src = T.alloc_local((3, 4), "float32")
+            dst = T.alloc_local((3, 1), "float32")
+            if source_layout == "transpose":
+                T.annotate_layout({src: T.Layout((3, 4), lambda i, j: [j, i])})
+            elif source_layout == "flatten":
+                T.annotate_layout({src: T.Layout((3, 4), lambda i, j: [i * 4 + j])})
+            if dest_layout == "transpose":
+                T.annotate_layout({dst: T.Layout((3, 1), lambda i, j: [j, i])})
+            elif dest_layout == "flatten":
+                T.annotate_layout({dst: T.Layout((3, 1), lambda i, j: [i])})
+            for i in T.serial(3):
+                dst[i, 0] = -10
+                for j in T.serial(4):
+                    src[i, j] = A[i, j]
+            T.reduce_sum(src[1:3, 1:3], dst[1:3, :], dim=1, clear=clear)
+            for i in T.serial(3):
+                B[i, 0] = dst[i, 0]
+
+    a = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    expected = torch.tensor([[-10.0], [11.0], [19.0]])
+    if not clear:
+        expected[1:3] -= 10
+    compiled = tilelang.compile(main, out_idx=[1], target="c", target_host="c", execution_backend="cython")
+    torch.testing.assert_close(compiled(a), expected)

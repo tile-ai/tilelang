@@ -1681,3 +1681,192 @@ def test_reduce_batch_keeps_shared_memory_before_its_workspace():
     expected_canary = torch.full((512,), 123.0, device="cuda")
     torch.testing.assert_close(canary, expected_canary)
     assert torch.all(canary[256:] == 123.0), "the batched all-reduce wrote before its own workspace, into the canary"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("clear", [True, False])
+@pytest.mark.parametrize("slice_input", [True, False])
+def test_reduce_local_buffer_regions(dtype, clear, slice_input):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((3, 6), dtype), B: T.Tensor((4,), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((3, 6), dtype)
+                dst = T.alloc_local((4,), dtype)
+                for i in T.serial(3):
+                    for j in T.serial(6):
+                        src[i, j] = A[i, j]
+                for i in T.serial(4):
+                    dst[i] = -10
+                if slice_input:
+                    T.reduce_sum(src[1:3, 1:5], dst[2:4], dim=1, clear=clear)
+                else:
+                    T.reduce_sum(src[1:3, :], dst[2:4], dim=1, clear=clear)
+                for i in T.serial(4):
+                    B[i] = dst[i]
+
+        return main
+
+    x = torch.arange(18, dtype=getattr(torch, str(dtype)), device="cuda").reshape(3, 6)
+    result = kernel()(x)
+    expected = torch.full((4,), -10, dtype=x.dtype, device=x.device)
+    expected[2:4] = (x[1:3, 1:5] if slice_input else x[1:3, :]).sum(dim=1)
+    if not clear:
+        expected[2:4] -= 10
+    torch.testing.assert_close(result, expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("clear", [True, False])
+def test_reduce_local_regions_keep_dimension(dtype, clear):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((3, 6), dtype), B: T.Tensor((3, 6), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((3, 6), dtype)
+                dst = T.alloc_local((3, 6), dtype)
+                for i in T.serial(3):
+                    for j in T.serial(6):
+                        src[i, j] = A[i, j]
+                        dst[i, j] = -10
+                T.reduce_sum(src[1:3, 1:5], dst[1:2, 1:5], dim=0, clear=clear)
+                for i in T.serial(3):
+                    for j in T.serial(6):
+                        B[i, j] = dst[i, j]
+
+        return main
+
+    x = torch.arange(18, dtype=getattr(torch, str(dtype)), device="cuda").reshape(3, 6)
+    result = kernel()(x)
+    expected = torch.full_like(x, -10)
+    expected[1:2, 1:5] = x[1:3, 1:5].sum(dim=0, keepdim=True)
+    if not clear:
+        expected[1:2, 1:5] -= 10
+    torch.testing.assert_close(result, expected)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("out_shape", [(1,), (3,), (2, 2), (3, 1)])
+def test_reduce_local_rejects_invalid_destination_region(out_shape):
+    @T.prim_func
+    def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor(out_shape, T.float32)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((2, 4), T.float32)
+            dst = T.alloc_local(out_shape, T.float32)
+            for i in T.serial(2):
+                for j in T.serial(4):
+                    src[i, j] = A[i, j]
+            T.evaluate(
+                T.call_intrin(
+                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
+                )
+            )
+            if len(out_shape) == 1:
+                B[0] = dst[0]
+            else:
+                B[0, 0] = dst[0, 0]
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target, pytest.raises(ValueError, match="ReduceOp: invalid destination shape"):
+        tilelang.lower(kernel, target=target)
+
+
+@tilelang.testing.requires_cuda
+def test_reduce_local_direct_region_with_matching_destination():
+    @T.prim_func
+    def kernel(A: T.Tensor((2, 4), T.float32), B: T.Tensor((2,), T.float32)):
+        with T.Kernel(1, threads=1):
+            src = T.alloc_local((2, 4), T.float32)
+            dst = T.alloc_local((2,), T.float32)
+            for i in T.serial(2):
+                for j in T.serial(4):
+                    src[i, j] = A[i, j]
+            T.evaluate(
+                T.call_intrin(
+                    "handle", tvm.ir.Op.get("tl.tileop.reduce"), to_tile_region(src, "r"), to_tile_region(dst, "w"), "sum", 1, True
+                )
+            )
+            for i in T.serial(2):
+                B[i] = dst[i]
+
+    a = torch.arange(8, device="cuda", dtype=torch.float32).reshape(2, 4)
+    result = tilelang.compile(kernel, out_idx=-1)(a)
+    torch.testing.assert_close(result, a.sum(dim=1))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+@pytest.mark.parametrize(("offset", "width", "aligned"), [(0, 6, True), (1, 6, False), (0, 5, False)])
+def test_reduce_local_packed_load_alignment(dtype, offset, width, aligned):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((2, width), dtype), B: T.Tensor((2,), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((2, width), dtype)
+                dst = T.alloc_local((2,), dtype)
+                for i in T.serial(2):
+                    for j in T.serial(width):
+                        src[i, j] = A[i, j]
+                T.reduce_sum(src[:, offset : offset + 4], dst, dim=1)
+                for i in T.serial(2):
+                    B[i] = dst[i]
+
+        return main
+
+    compiled = kernel()
+    source = compiled.get_kernel_source()
+    assert ("*(uint1*)(src +" in source) == aligned
+    a = torch.arange(2 * width, dtype=getattr(torch, str(dtype)), device="cuda").reshape(2, width)
+    torch.testing.assert_close(compiled(a), a[:, offset : offset + 4].sum(dim=1))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.float32])
+@pytest.mark.parametrize("clear", [True, False])
+@pytest.mark.parametrize(
+    ("source_layout", "dest_layout"),
+    [
+        ("transpose", "none"),
+        ("none", "transpose"),
+        ("transpose", "transpose"),
+        ("flatten", "none"),
+        ("none", "flatten"),
+        ("flatten", "flatten"),
+    ],
+)
+def test_reduce_local_sliced_layouts(dtype, clear, source_layout, dest_layout):
+    @tilelang.jit(out_idx=-1)
+    def kernel():
+        @T.prim_func
+        def main(A: T.Tensor((3, 4), dtype), B: T.Tensor((3, 1), dtype)):
+            with T.Kernel(1, threads=1):
+                src = T.alloc_local((3, 4), dtype)
+                dst = T.alloc_local((3, 1), dtype)
+                if source_layout == "transpose":
+                    T.annotate_layout({src: T.Layout((3, 4), lambda i, j: [j, i])})
+                elif source_layout == "flatten":
+                    T.annotate_layout({src: T.Layout((3, 4), lambda i, j: [i * 4 + j])})
+                if dest_layout == "transpose":
+                    T.annotate_layout({dst: T.Layout((3, 1), lambda i, j: [j, i])})
+                elif dest_layout == "flatten":
+                    T.annotate_layout({dst: T.Layout((3, 1), lambda i, j: [i])})
+                for i in T.serial(3):
+                    dst[i, 0] = -10
+                    for j in T.serial(4):
+                        src[i, j] = A[i, j]
+                T.reduce_sum(src[1:3, 1:3], dst[1:3, :], dim=1, clear=clear)
+                for i in T.serial(3):
+                    B[i, 0] = dst[i, 0]
+
+        return main
+
+    a = torch.arange(12, device="cuda", dtype=getattr(torch, str(dtype))).reshape(3, 4)
+    expected = torch.tensor([[-10], [11], [19]], device="cuda", dtype=a.dtype)
+    if not clear:
+        expected[1:3] -= 10
+    torch.testing.assert_close(kernel()(a), expected)
