@@ -920,5 +920,92 @@ def test_inject_software_pipeline_versions_thread_regions(offset, versions):
     assert [int(dim) for dim in shared.shape] == ([2, 64] if versions == 2 else [64])
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("wait", [-1, 0, 1])
+def test_async_gemm_keeps_inputs_until_all_groups_complete(wait):
+    @T.prim_func
+    def before(A: T.Tensor((64, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((64, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C0 = T.alloc_fragment((64, 64), T.float32)
+            C1 = T.alloc_fragment((64, 64), T.float32)
+            for _k in T.Pipelined(4, order=[0, 1, 2, 3, 4], stage=[0, 0, 1, 1, 1]):
+                T.copy(A, A_shared)
+                T.copy(B, B_shared)
+                T.wgmma_gemm(A_shared, B_shared, C0, clear_accum=True)
+                T.wgmma_gemm(A_shared, B_shared, C1, clear_accum=True, annotations={"wg_wait": wait})
+                T.wait_wgmma(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    allocations = [node.buffer for node in collect_nodes(mod["main"], tvm.tirx.AllocBuffer)]
+    allocations += [buf for block in collect_nodes(mod["main"], tvm.tirx.SBlock) for buf in block.alloc_buffers]
+    for name in ("A_shared", "B_shared"):
+        (shared,) = [buf for buf in allocations if buf.name == name]
+        # wait(i), at stage 1/order 4, must precede copy(i + versions).
+        assert int(shared.shape[0]) == 2
+    _assert_no_undefined_vars(tl.transform.LowerOpaqueBlock()(mod)["main"])
+
+
+@tilelang.testing.requires_cuda
+def test_async_gemm_rejects_partial_updates_of_rotated_inputs():
+    @T.prim_func
+    def before(A: T.Tensor((128, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C = T.alloc_fragment((128, 64), T.float32)
+            T.copy(A, shared)
+            T.copy(B, B_shared)
+            for _k in T.Pipelined(4, order=[0, 1, 2], stage=[0, 1, 1]):
+                T.copy(A[64:128, :], shared[64:128, :])
+                T.wgmma_gemm(shared, B_shared, C, clear_accum=True)
+                T.wait_wgmma(0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    with pytest.raises(tvm.error.InternalError, match="full-tile copy"):
+        tl.transform.InjectSoftwarePipeline()(mod)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("kind", ["missing", "partial", "reordered", "split_stage", "leading_wait"])
+def test_async_gemm_rejects_unproved_completion(kind):
+    orders = [0, 1, 3, 2] if kind == "reordered" else [0, 1, 2, 3]
+    stages = [0, 0, 2, 1] if kind == "split_stage" else [0, 0, 1, 1]
+    if kind == "missing":
+        orders, stages = orders[:3], stages[:3]
+    elif kind == "leading_wait":
+        orders, stages = [0, 1, 3, 2, 4], [0, 0, 1, 1, 1]
+
+    @T.prim_func
+    def before(A: T.Tensor((64, 16), T.float16), B: T.Tensor((16, 64), T.float16)):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((64, 16), T.float16)
+            B_shared = T.alloc_shared((16, 64), T.float16)
+            C = T.alloc_fragment((64, 64), T.float32)
+            for _k in T.Pipelined(4, order=orders, stage=stages):
+                T.copy(A, A_shared)
+                T.copy(B, B_shared)
+                if kind == "leading_wait":
+                    T.wait_wgmma(0)
+                T.wgmma_gemm(A_shared, B_shared, C, clear_accum=True)
+                if kind == "missing":
+                    T.evaluate(0)
+                else:
+                    T.wait_wgmma(1 if kind == "partial" else 0)
+
+    mod = tvm.IRModule.from_expr(before.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(tvm.target.Target({"kind": "cuda", "arch": "sm_90a"}))(mod)
+    message = "within the iteration" if kind in ("missing", "partial") else "MMA/commit/wait order"
+    with pytest.raises(tvm.error.InternalError, match=message):
+        mod = tl.transform.PipelinePlanning()(mod)
+        tl.transform.InjectSoftwarePipeline()(mod)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
