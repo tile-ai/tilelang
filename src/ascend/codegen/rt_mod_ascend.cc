@@ -52,7 +52,8 @@ std::string AscendCodeGen(IRModule mod) {
 // Build the per-kernel FunctionInfo table the runtime module needs to recover
 // the launch grid (via LaunchParamConfig) and pack arguments. Mirrors the CUDA
 // ExtractFuncInfo (src/cuda/codegen/rt_mod_cuda.cc) but only carries what the
-// Ascend launch ABI uses: arg types + kernel launch params (thread extents).
+// Ascend launch ABI uses: arg types, grid/UB launch tags and an optional dump
+// metadata suffix. The suffix contains no additional launch-dimension values.
 // Shared with the PTO runtime module (rt_mod_pto.cc); declared in
 // codegen_ascend.h.
 ffi::Map<ffi::String, runtime::FunctionInfo>
@@ -78,6 +79,24 @@ ExtractAscendFuncInfo(const IRModule &mod) {
     if (auto opt = f->GetAttr<ffi::Array<ffi::String>>(
             tirx::attr::kKernelLaunchParams)) {
       for (const auto &tag : opt.value()) {
+        launch_param_tags.push_back(tag);
+      }
+    }
+
+    if (auto tensors = f->GetAttr<ffi::Array<ffi::Array<Integer>>>(
+            "tl.ascend_exception_dump_tensors")) {
+      // FunctionInfo serializes these strings across module export/cache load.
+      // arg_extra_tags is an enum array in TVM, so it cannot carry this schema.
+      // The runtime removes the suffix before interpreting grid and UB tags.
+      launch_param_tags.push_back("tl.ascend_exception_dump.v1");
+      for (const auto &tensor : tensors.value()) {
+        ICHECK_EQ(tensor.size(), 4U);
+        std::string tag;
+        for (size_t i = 0; i < tensor.size(); ++i) {
+          if (i != 0)
+            tag += ":";
+          tag += std::to_string(tensor[i].IntValue());
+        }
         launch_param_tags.push_back(tag);
       }
     }

@@ -51,6 +51,10 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
         launch_dim_tags=["cthread"],
     )(mod)
     pass_ctx = tilelang.transform.get_pass_context()
+    # This backend-specific switch is owned by the Ascend pass pipeline.
+    exception_dump_enabled = pass_ctx.config.get("tl.ascend_exception_dump", False)
+    if exception_dump_enabled and target_is_pto(target):
+        raise ValueError("tl.ascend_exception_dump supports only the Ascend backend, not PTO")
     auto_schedule_enabled = allow_autoschedule(pass_ctx=pass_ctx)
     disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
 
@@ -188,6 +192,12 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.AnnotateDeviceRegions()(mod)
     mod = ascend_transform.MarkScalarDcacheBypass()(mod)
     mod = tilelang.transform.SplitHostDevice()(mod)
+    if exception_dump_enabled:
+        # Both split callees and host buffer maps are available at this boundary;
+        # append ordinary size arguments before MakePackedAPI/launch lowering.
+        from .exception_dump import annotate_exception_dump
+
+        mod = annotate_exception_dump(mod)
     mod = tilelang.transform.AnnotateReadOnlyParams()(mod)
 
     if not auto_schedule_enabled:

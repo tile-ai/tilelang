@@ -110,6 +110,15 @@ file(GLOB TILE_LANG_ASCEND_ACTIVE_SRCS
 list(REMOVE_ITEM TILE_LANG_ASCEND_ACTIVE_SRCS ${TILE_LANG_ASCEND_ALWAYS_SRCS})
 list(APPEND TILE_LANG_SRCS ${TILE_LANG_ASCEND_ACTIVE_SRCS})
 
+# Exception APIs remain optional in both stub and direct-link builds. The latter
+# resolves them with dlsym when a dump-enabled kernel is first launched.
+set_property(
+  SOURCE src/ascend/runtime/ascend_exception_dump.cc
+  APPEND PROPERTY
+  COMPILE_DEFINITIONS
+    TILELANG_ASCEND_USE_STUBS=$<BOOL:${TILELANG_USE_ASCEND_STUBS}>
+)
+
 if(TILELANG_USE_ASCEND_STUBS)
   # ==========================================================================
   # ascendcl Stub Library (libstub_ascendcl.so)
@@ -146,5 +155,6 @@ elseif(NOT WIN32)
       "ASCEND_TOOLKIT_HOME), or keep TILELANG_USE_ASCEND_STUBS=ON.")
   endif()
   message(STATUS "Linking Ascend runtime against ${TILELANG_ASCENDCL_LIBRARY}")
-  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK ${TILELANG_ASCENDCL_LIBRARY})
+  list(APPEND TILELANG_ACTIVE_BACKEND_STUB_LINK ${TILELANG_ASCENDCL_LIBRARY}
+    ${CMAKE_DL_LIBS})
 endif()
