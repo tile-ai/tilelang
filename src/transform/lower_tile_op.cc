@@ -690,7 +690,8 @@ private:
     if (const auto *var_node = expr.as<VarNode>()) {
       Var var = GetRef<Var>(var_node);
       auto it = bind_var_to_expr_.find(var);
-      if (it != bind_var_to_expr_.end()) {
+      if (it != bind_var_to_expr_.end() &&
+          it->second->IsInstance<BufferLoadNode>()) {
         return it->second;
       }
     }
@@ -1012,11 +1013,9 @@ private:
 
   Stmt VisitStmt_(const BindNode *op) final {
     PrimExpr value = this->VisitExpr(op->value);
-    bool recorded = false;
-    if (value->IsInstance<BufferLoadNode>()) {
-      bind_var_to_expr_[op->var] = value;
-      recorded = true;
-    }
+    // Preserve compound values as well as direct loads: a memory-derived
+    // alias must retain its dependencies for group-uniformity checks.
+    bind_var_to_expr_[op->var] = value;
     if (SideEffect(value) <= CallEffectKind::kPure) {
       analyzer_->Bind(op->var, value);
     }

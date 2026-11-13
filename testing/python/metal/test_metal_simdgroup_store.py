@@ -196,15 +196,18 @@ def test_simdgroup_copy_interior_direct_branch(m, n, threads, dispatch_count):
 
 
 @tilelang.testing.requires_metal
-@pytest.mark.parametrize("indirect", [False, True])
-def test_simdgroup_copy_warp_dependent_destination(indirect):
+@pytest.mark.parametrize("offset_kind", ["thread", "loop", "memory"])
+def test_simdgroup_copy_warp_dependent_destination(offset_kind):
     @T.prim_func
-    def kernel(output: T.Tensor((32, 113), T.float32)):
+    def kernel(output: T.Tensor((32, 113), T.float32), offsets: T.Tensor((4,), T.int32)):
         with T.Kernel(1, threads=128):
             tile = T.alloc_local((32, 32), T.float32, scope="metal.simdgroup")
             T.fill(tile, T.float32(3))
-            offset = (T.get_thread_binding(0) // 32) * 32
-            if indirect:
+            if offset_kind == "memory":
+                offset = offsets[T.get_thread_binding(0) // 32] + 1
+            else:
+                offset = (T.get_thread_binding(0) // 32) * 32
+            if offset_kind == "loop":
                 for column in T.serial(offset, offset + 2):
                     T.copy(tile, output[0, column])
             else:
@@ -216,10 +219,11 @@ def test_simdgroup_copy_warp_dependent_destination(indirect):
     assert "} else {" not in compiled.get_kernel_source()
     backing = torch.full((32 * 113 + 64,), -9.0, device="mps")
     output = backing[: 32 * 113].view(32, 113)
-    compiled(output)
+    offsets = torch.tensor([-1, 31, 63, 95], dtype=torch.int32, device="mps")
+    compiled(output, offsets)
     expected = torch.full((32, 113), -9.0)
     for row, col in ((0, 0), (16, 32), (0, 80), (16, 112)):
-        expected[row : row + 16, col : min(col + 16 + int(indirect), 113)] = 3
+        expected[row : row + 16, col : min(col + 16 + int(offset_kind == "loop"), 113)] = 3
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     assert torch.all(backing[32 * 113 :].cpu() == -9).item()
 
@@ -256,6 +260,8 @@ def test_simdgroup_copy_symbolic_destination(guarded):
                 T.copy(tile, output[0, offset])
 
     compiled = tilelang.compile(kernel, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    if not guarded:
+        assert "} else {" in compiled.get_kernel_source(), "Scalar kernel parameters must retain runtime dispatch"
     for offset in (0, 8, 12, 20):
         backing = torch.full((8 * 16 + 64,), -9.0, device="mps")
         output = backing[: 8 * 16].view(8, 16)
