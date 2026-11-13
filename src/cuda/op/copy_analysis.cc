@@ -357,7 +357,7 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
   // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
   // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
   bool total_16b_aligned = !analyzer->CanProve(
-      FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
+      floormod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
@@ -805,6 +805,28 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   }
 
   return Supported(SelectSyncLikeInst(facts));
+}
+
+bool CanLowerToBulkCopy1D(const CopyNode &op, Target target,
+                          arith::Analyzer *analyzer) {
+  // As in SelectCopyInstForLowering, a gather4, scatter4 or multicast copy
+  // takes its own path before the 1-D bulk path.
+  if (!IsCudaLikeTarget(target) || TargetIsCuTeDSL(target) ||
+      GetBoolAnnotation(op, "is_gather4") ||
+      GetBoolAnnotation(op, "is_scatter4") || GetClusterMask(op) != 0 ||
+      !CanProveCopyInBounds(op, analyzer)) {
+    return false;
+  }
+  static const LayoutMap empty_layout_map;
+  if (IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst)) {
+    return CheckBulkLoad1D(op, target, empty_layout_map, analyzer,
+                           /*emit_diagnostics=*/false);
+  }
+  if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst)) {
+    return CheckBulkStore1D(op, target, empty_layout_map, analyzer,
+                            /*emit_diagnostics=*/false);
+  }
+  return false;
 }
 
 CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,

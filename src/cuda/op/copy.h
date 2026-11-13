@@ -146,6 +146,14 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
 CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
                                               Target target);
 
+// Pre-layout check whether a TMA load or store lowers to a 1-D bulk copy, which
+// needs a shared address aligned to 16 bytes instead of the 128 bytes of a
+// tensor TMA copy. The analyzer knows the ranges of the loops around the copy.
+// The lowering also requires a linear layout of the shared buffer, which this
+// check assumes.
+bool CanLowerToBulkCopy1D(const CopyNode &op, Target target,
+                          arith::Analyzer *analyzer);
+
 // Semantic queries used by transform passes that need copy shape/capability
 // information without knowing the CUDA lowering policy knobs.
 bool IsPipelineManagedCPAsyncCopy(const CopyNode &op, Target target);
