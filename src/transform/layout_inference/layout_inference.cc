@@ -139,6 +139,9 @@ struct LayoutInferenceResult {
   Map<For, Fragment> for_map;
   Map<For, PrimExpr> predicate_map;
   Map<For, Bool> padding_guard_map;
+  Map<For, PrimExpr> replica_write_guard_map;
+  // Values of the variables bound by `Bind` statements.
+  Map<Var, PrimExpr> bindings;
 };
 
 /*! \brief Everything the inference engine knows about reducer dst-steering,
@@ -681,6 +684,7 @@ public:
     Map<For, Fragment> for_map;
     Map<For, PrimExpr> predicate_map;
     Map<For, Bool> padding_guard_map;
+    Map<For, PrimExpr> replica_write_guard_map;
     ICHECK(infer_list_.size() == thread_index_vec_.size())
         << "infer_list_ and thread_index_vec_ size mismatch";
     for (int i = 0; i < infer_list_.size(); i++) {
@@ -706,10 +710,18 @@ public:
         if (auto predicate = for_infer->GetPredicate(thread_index)) {
           predicate_map.Set(for_infer->GetRoot(), predicate.value());
         }
+        if (auto guard = for_infer->GetReplicaWriteGuard(thread_index)) {
+          replica_write_guard_map.Set(for_infer->GetRoot(), guard.value());
+        }
       }
     }
 
-    return {layout_map, for_map, predicate_map, padding_guard_map};
+    return {layout_map,
+            for_map,
+            predicate_map,
+            padding_guard_map,
+            replica_write_guard_map,
+            bind_var_to_expr_};
   }
 
   void Collect(const PrimFunc &f) {
@@ -1618,6 +1630,13 @@ private:
     if (result_.padding_guard_map.count(root)) {
       for_ptr->annotations.Set(attr::kParallelLoopRequiresPaddingGuard,
                                result_.padding_guard_map[root]);
+    }
+
+    if (result_.replica_write_guard_map.count(root)) {
+      for_ptr->body = GuardReplicaWrites(
+          for_ptr->body,
+          analyzer_->Simplify(result_.replica_write_guard_map[root]),
+          result_.bindings);
     }
 
     // Store the predicate as an annotation if it exists and is not trivially
