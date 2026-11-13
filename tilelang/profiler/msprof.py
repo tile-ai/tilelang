@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable
 
 import torch
@@ -139,6 +140,16 @@ def bench_with_msprof(
 
     @contextmanager
     def _defer_signals():
+        # signal.signal() raises ValueError outside the main thread. Autotuning
+        # benchmarks from a worker thread (tuner.py starts one per device, and
+        # wraps the call in a second thread when a timeout is set), so installing
+        # the handlers there made every configuration fail with
+        # "signal only works in main thread of the main interpreter". Without
+        # handlers the timed region is simply not interruptible.
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+
         pending_signal = None
 
         def _handler(signum, frame):
