@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from tilelang.tileop.gemm.gemm_base import GemmBase
 from tilelang.ascend import language as T
+from tilelang.ascend.target import target_is_pto
 from tilelang.layout import (
     make_ascend_major_k_layout,
     make_ascend_major_mn_layout,
@@ -53,8 +54,13 @@ _ASCEND_DTYPE_MAP = {
     "int32": "int32_t",
     "float8_e4m3": "float8_e4m3_t",
     "float8_e4m3fn": "float8_e4m3_t",
+    "float8_e5m2": "float8_e5m2_t",
     "float4_e2m1fn": "float4_e2m1x2_t",
 }
+
+# The AscendC (MAD) path lowers integer GEMM; the PTO GEMM helper has no integer
+# input path (IsSupportedGemmInputDtype in src/ascend/codegen/codegen_pto.cc).
+_PTO_UNSUPPORTED_GEMM_DTYPES = ("int8", "int16", "int32")
 
 
 class GemmMAD(GemmBase):
@@ -128,7 +134,7 @@ class GemmMAD(GemmBase):
 
         if self._is_l1_input():
             assert not self.trans_A and self.trans_B, "Ascend L1 GEMM currently only supports trans_A=False, trans_B=True (NT)."
-            return self._lower_l1()
+            return self._lower_l1(target)
         return self._lower_l0()
 
     def _is_l1_input(self):
@@ -215,7 +221,7 @@ class GemmMAD(GemmBase):
 
         return _Simplify(_gemm_mad, inline_let=True)
 
-    def _lower_l1(self):
+    def _lower_l1(self, target: Target):
         tile_k_sub = self._compute_tile_k_sub()
         c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
 
@@ -224,7 +230,17 @@ class GemmMAD(GemmBase):
 
         input_dtype = self._input_dtype()
         dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)
-        assert dtype_str is not None, f"Unsupported dtype for Ascend GEMM: {input_dtype}"
+        if dtype_str is None:
+            raise ValueError(
+                f"Unsupported dtype for Ascend GEMM: {input_dtype}. "
+                f"Expected one of {', '.join(sorted(_ASCEND_DTYPE_MAP))}."
+            )
+        if target_is_pto(target) and input_dtype in _PTO_UNSUPPORTED_GEMM_DTYPES:
+            raise ValueError(
+                f"The PTO GEMM helper does not accept {input_dtype} inputs; use "
+                "bfloat16, float16, float32, float8_e4m3fn, float8_e5m2 or "
+                "float4_e2m1fn, or build for the AscendC backend."
+            )
 
         call = tirx.call_intrin(
             "void",
