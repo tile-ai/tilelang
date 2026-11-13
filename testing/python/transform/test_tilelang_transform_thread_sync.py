@@ -304,6 +304,27 @@ def test_sync_read_thread_id_independent_location():
 
 
 @tilelang.testing.requires_cuda
+def test_sync_loop_starting_at_local_value():
+    """Thread t writes S[t] in a loop that starts at a local value and reads S[t + 1], so the read needs a barrier."""
+
+    @T.prim_func(private=True)
+    def func(A: T.Buffer((64,), "float32"), E: T.Buffer((64,), "float32")):
+        blockIdx_x = T.launch_thread("blockIdx.x", 1)
+        S = T.alloc_buffer((65,), "float32", scope="shared")
+        L = T.alloc_buffer((1,), "int32", scope="local")
+        threadIdx_x = T.launch_thread("threadIdx.x", 64)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        L[0] = threadIdx_x
+        for i in T.serial(L[0], L[0] + 1):
+            S[i] = A[threadIdx_x]
+        E[threadIdx_x] = S[L[0] + 1]
+
+    mod = tilelang.transform.ThreadSync("shared")(tvm.IRModule({"main": func}))
+    assert len(_storage_syncs(mod["main"])) == 1
+
+
+@tilelang.testing.requires_cuda
 def test_sync_shared():
     @T.prim_func(private=True)
     def func(A: T.Buffer((4, 4), "float32"), E: T.Buffer((4, 4), "float32")):
