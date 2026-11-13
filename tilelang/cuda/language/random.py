@@ -63,7 +63,8 @@ def rng_rand_float(bit=32, dist="uniform") -> tirx.PrimExpr:
     Returns
     -------
     random_value : PrimExpr
-        A random float.
+        A random float. For ``dist="uniform"``, the range is (0, 1]:
+        zero is excluded and one may be returned.
     """
     assert bit in [32, 64]
     assert dist in ["uniform", "normal"]
