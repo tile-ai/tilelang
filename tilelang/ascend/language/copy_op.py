@@ -164,8 +164,14 @@ def dual_copy(
 
 
 # Short-name → int mapping for L2 cache control.
-_L2_CACHE_CTRL_MAP = {
-    # ── LD_L2CacheType (Load / GM→L1) ──
+#
+# Ascend has two L2 cache-control enums that reuse the same integers for
+# different policies: LD_L2CacheType for GM→UB/GM→L1 loads and ST_L2CacheType
+# for UB→GM stores. One flat table would translate, for example,
+# "NOTALLOC_KEEP" (LD 4) into store policy 4, which codegen spells "naci".
+# The tables are kept apart and the copy direction selects one of them.
+_L2_CACHE_CTRL_LD = {
+    # ── LD_L2CacheType (Load / GM→UB, GM→L1) ──
     "NORMAL_FV": 0,
     "NORMAL_LV": 1,
     "NORMAL_PERS": 2,
@@ -181,8 +187,13 @@ _L2_CACHE_CTRL_MAP = {
     "EXCLUSIV_LV": 13,
     "EXCLUSIV_PERS": 14,
     "EXCLUSIV_PREF": 15,
-    "INVALID": 16,
-    # ── ST_L2CacheType (Store / UB→GM) — names that differ from LD ──
+}
+
+_L2_CACHE_CTRL_ST = {
+    # ── ST_L2CacheType (Store / UB→GM) ──
+    "NORMAL_FV": 0,
+    "NORMAL_LV": 1,
+    "NORMAL_PERS": 2,
     "NORMAL_RED": 3,
     "NOTALLOC_CI": 4,
     "NOTALLOC_PW": 5,
@@ -197,14 +208,64 @@ _L2_CACHE_CTRL_MAP = {
     "WTS_PERS": 14,
     "WTS_RED": 15,
 }
+# "INVALID" (16) is deliberately absent: codegen requires a code in [0, 15], so
+# a name for it would only turn a clear trace-time error into a codegen abort.
+
+# Scopes that separate the two L2 cache-control directions; they mirror
+# GetDMAPath() in src/ascend/op/oob_padding.cc.
+_GM_SCOPES = frozenset({"global"})
+_UB_SCOPES = frozenset({"shared", "shared.dyn"})
+_L1_SCOPES = frozenset({"shared.l1", "shared.l1.dyn"})
 
 
-def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | None) -> int | None:
+def _scope_of(operand: BufferLikeType | None) -> str | None:
+    """Memory scope of a Buffer, BufferLoad, or BufferRegion; None if unknown."""
+    buf = operand if isinstance(operand, tirx.Buffer) else getattr(operand, "buffer", None)
+    return buf.scope() if isinstance(buf, tirx.Buffer) else None
+
+
+def _l2_cache_ctrl_direction(src: BufferLikeType | None, dst: BufferLikeType | None) -> str | None:
+    """Classify a copy as an L2-cache load, a store, or neither.
+
+    GM→UB and GM→L1 loads consume LD_L2CacheType; UB→GM stores consume
+    ST_L2CacheType. Every other path (GM→GM, L0C→GM, UB→L1, ...) carries no L2
+    cache policy of either enum.
+    """
+    src_scope = _scope_of(src)
+    dst_scope = _scope_of(dst)
+    if src_scope in _GM_SCOPES and (dst_scope in _UB_SCOPES or dst_scope in _L1_SCOPES):
+        return "load"
+    if src_scope in _UB_SCOPES and dst_scope in _GM_SCOPES:
+        return "store"
+    return None
+
+
+def _match_l2_cache_ctrl_name(key: str, table: dict[str, int]) -> int | None:
+    """Resolve one upper-cased policy name against a single enum table."""
+    if key in table:
+        return table[key]
+    # Suffix match (e.g. "L2_CACHE_HINT_NORMAL_FV" or "_NORMAL_FV")
+    for name, code in table.items():
+        if key.endswith(name):
+            return code
+    return None
+
+
+def _normalize_l2_cache_ctrl(
+    value: int | str | tirx.IntImm | tirx.StringImm | None,
+    src: BufferLikeType | None = None,
+    dst: BufferLikeType | None = None,
+) -> int | None:
     """Convert a string l2_cache_ctrl name to its integer value.
 
     Matching is case-insensitive and suffix-based:
     ``"NORMAL_FV"``, ``"normal_fv"``, and ``"L2_CACHE_HINT_NORMAL_FV"``
     all map to ``0``.  Integers pass through unchanged.
+
+    ``LD_L2CacheType`` and ``ST_L2CacheType`` reuse the same integers for
+    different policies, so the accepted names follow the copy direction
+    inferred from ``src``/``dst``. A name that only exists for the opposite
+    direction raises instead of quietly selecting the wrong policy.
     """
     if value is None:
         return None
@@ -216,14 +277,25 @@ def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | N
         return value
     if isinstance(value, str):
         key = value.upper()
-        # Exact match
-        if key in _L2_CACHE_CTRL_MAP:
-            return _L2_CACHE_CTRL_MAP[key]
-        # Suffix match (e.g. "L2_CACHE_HINT_NORMAL_FV" or "_NORMAL_FV")
-        for map_key, map_val in _L2_CACHE_CTRL_MAP.items():
-            if key.endswith(map_key):
-                return map_val
-        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid suffixes: {sorted(_L2_CACHE_CTRL_MAP.keys())}")
+        direction = _l2_cache_ctrl_direction(src, dst)
+        if direction == "load":
+            accepted = (_L2_CACHE_CTRL_LD,)
+        elif direction == "store":
+            accepted = (_L2_CACHE_CTRL_ST,)
+        else:
+            # No L2 cache enum on this path: keep accepting either table. The
+            # NORMAL_* entries they share carry the same code on both sides.
+            accepted = (_L2_CACHE_CTRL_LD, _L2_CACHE_CTRL_ST)
+        for table in accepted:
+            code = _match_l2_cache_ctrl_name(key, table)
+            if code is not None:
+                return code
+        if direction == "load" and _match_l2_cache_ctrl_name(key, _L2_CACHE_CTRL_ST) is not None:
+            raise ValueError(f"l2_cache_ctrl {value!r} is a store (UB->GM) policy; load names: {sorted(_L2_CACHE_CTRL_LD)}")
+        if direction == "store" and _match_l2_cache_ctrl_name(key, _L2_CACHE_CTRL_LD) is not None:
+            raise ValueError(f"l2_cache_ctrl {value!r} is a load (GM->UB/GM->L1) policy; store names: {sorted(_L2_CACHE_CTRL_ST)}")
+        valid = sorted(set(_L2_CACHE_CTRL_LD) | set(_L2_CACHE_CTRL_ST))
+        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid suffixes: {valid}")
     raise TypeError(f"l2_cache_ctrl must be int, str, or None, got {type(value)}")
 
 
@@ -353,7 +425,7 @@ def copy(  # noqa: A001
     if l2_cache_ctrl is not None and "l2_cache_ctrl" not in ann:
         ann["l2_cache_ctrl"] = l2_cache_ctrl
     if "l2_cache_ctrl" in ann:
-        ann["l2_cache_ctrl"] = _normalize_l2_cache_ctrl(ann["l2_cache_ctrl"])
+        ann["l2_cache_ctrl"] = _normalize_l2_cache_ctrl(ann["l2_cache_ctrl"], src, dst)
     if unit_flag_ctrl is not None and "unit_flag_ctrl" not in ann:
         ann["unit_flag_ctrl"] = unit_flag_ctrl
     if sub_blockid is not None and "sub_blockid" not in ann:
