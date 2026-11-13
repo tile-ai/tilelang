@@ -14,6 +14,8 @@ namespace tl {
 // Metal cooperative tensor operations.
 
 TVM_DLL const Op &cooperative_tensor_fill();
+// Assign one lane-local element of a 16x32 destination tensor tile.
+TVM_DLL const Op &cooperative_tensor_set_element();
 TVM_DLL const Op &cooperative_tensor_load();
 TVM_DLL const Op &cooperative_tensor_store();
 TVM_DLL const Op &cooperative_tensor_multiply_accumulate();

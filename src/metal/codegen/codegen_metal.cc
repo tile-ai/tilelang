@@ -44,12 +44,18 @@ public:
       uses_cooperative_tensor = true;
       needs_fragment_lane_vars = true;
     } else if (op->op.same_as(tl::cooperative_tensor_fill()) ||
+               op->op.same_as(tl::cooperative_tensor_set_element()) ||
                op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
       uses_cooperative_tensor = true;
+    }
+    if (op->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
+      matmul_destinations.insert(Downcast<Var>(op->args[0]));
     }
     StmtExprVisitor::VisitExpr_(op);
   }
 
+  std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      matmul_destinations;
   bool uses_cooperative_tensor{false};
   bool needs_fragment_lane_vars{false};
 };
@@ -87,6 +93,7 @@ void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
   CooperativeTensorUseCollector ct_collector;
   ct_collector(f->body);
   uses_cooperative_tensor_ = ct_collector.uses_cooperative_tensor;
+  ct_matmul_destinations_ = std::move(ct_collector.matmul_destinations);
   needs_fragment_lane_vars_ = ct_collector.needs_fragment_lane_vars;
   // analyze the data;
   for (Var arg : f->params) {
@@ -614,6 +621,7 @@ void CodeGenTileLangMetal::VisitStmt_(const ForNode *op) {
     }
     if (auto *call = node.as<tirx::CallNode>()) {
       if (call->op.same_as(tl::cooperative_tensor_fill()) ||
+          call->op.same_as(tl::cooperative_tensor_set_element()) ||
           call->op.same_as(tl::cooperative_tensor_load()) ||
           call->op.same_as(tl::cooperative_tensor_store()) ||
           call->op.same_as(tl::cooperative_tensor_multiply_accumulate())) {
@@ -705,7 +713,10 @@ void CodeGenTileLangMetal::VisitStmt_(const AllocBufferNode *op) {
     std::string dtype_str = dtype_os.str();
     cooperative_tensor_dtype_[op->buffer->data] = dtype_str;
     int elems_per_thread = constant_size / 32;
-    bool can_inline_c = dtype_str == "float" && elems_per_thread >= 16 &&
+    // Fill/copy-only buffers use ordinary lane-local storage. Native tensor
+    // objects are needed only for actual matmul destinations.
+    bool can_inline_c = ct_matmul_destinations_.count(op->buffer->data) &&
+                        dtype_str == "float" && elems_per_thread >= 16 &&
                         elems_per_thread % 16 == 0;
     int num_c_tiles = can_inline_c ? elems_per_thread / 16 : 0;
     bool elide_c_storage = can_inline_c && num_c_tiles <= 4;
@@ -1389,6 +1400,21 @@ void CodeGenTileLangMetal::VisitExpr_(const CallNode *op,
          << elems_per_tile << "; __i++) " << var << "[" << idx << " * "
          << elems_per_tile << " + __i] = " << val;
     }
+  } else if (op->op.same_as(tl::cooperative_tensor_set_element())) {
+    TVM_FFI_ICHECK_EQ(op->args.size(), 4);
+    Var buffer = Downcast<Var>(op->args[0]);
+    EnsureCooperativeTensorBuffer(buffer);
+    const auto *tile = op->args[1].as<IntImmNode>();
+    const auto *element = op->args[2].as<IntImmNode>();
+    TVM_FFI_ICHECK(tile && element && tile->value >= 0 && element->value >= 0 &&
+                   element->value < 16);
+    if (ct_c_inlined_.count(buffer)) {
+      os << "__pct_c" << tile->value << "[" << element->value << "]";
+    } else {
+      os << PrintExpr(buffer) << "[" << tile->value * 16 + element->value
+         << "]";
+    }
+    os << " = " << PrintExpr(op->args[3]);
   } else if (op->op.same_as(tl::cooperative_tensor_load())) {
     uses_cooperative_tensor_ = true;
     TVM_FFI_ICHECK_GE(op->args.size(), 11);
