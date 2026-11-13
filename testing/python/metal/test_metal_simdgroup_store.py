@@ -130,9 +130,18 @@ def test_correctness_non_square_matrix():
     assert_simdgroup_store_correctness(256, 512, 128, 32, 32, 16)
 
 
-def _lower_copy_bounds(func):
-    with tvm.transform.PassContext(), tvm.target.Target("metal"):
-        return tilelang.lower(func, target="metal")
+@tilelang.testing.requires_metal
+def test_correctness_destination_tail():
+    func = _make_simdgroup_gemm_func(19, 21, 16, 16, 16, 16)
+    kernel = tilelang.compile(func, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    a = torch.randn((19, 16), dtype=torch.float16, device="mps")
+    b = torch.randn((16, 21), dtype=torch.float16, device="mps")
+    backing = torch.full((19 * 21 + 64,), -9.0, device="mps")
+    output = backing[: 19 * 21].view(19, 21)
+    kernel(a, b, output)
+    expected = a.cpu().float() @ b.cpu().float()
+    torch.testing.assert_close(output.cpu(), expected, rtol=1e-3, atol=1e-3)
+    assert torch.all(backing[19 * 21 :].cpu() == -9).item()
 
 
 def _make_copy_bounds_kernel(m, n, block, threads, dtype, shared=False, staged=False):
@@ -156,24 +165,7 @@ def _make_copy_bounds_kernel(m, n, block, threads, dtype, shared=False, staged=F
 
 
 @tilelang.testing.requires_metal
-@pytest.mark.parametrize(
-    "m,n,block,threads,dtype,shared",
-    [
-        (8, 1, 8, 32, "float32", False),  # #3907: seven guard elements overwritten
-        (8, 1, 8, 32, "float16", False),
-        (1, 8, 8, 32, "float32", False),  # row tail
-        (16, 17, 16, 128, "float32", False),  # multi-group, block-dependent offset
-        (16, 18, 16, 128, "float32", False),  # not specific to odd strides
-        (8, 1, 8, 32, "float32", True),  # shared destination uses the same store
-    ],
-)
-def test_simdgroup_copy_rejects_destination_tail(m, n, block, threads, dtype, shared):
-    with pytest.raises(ValueError, match="Metal SIMD-group copy:.*in-bounds"):
-        _lower_copy_bounds(_make_copy_bounds_kernel(m, n, block, threads, dtype, shared))
-
-
-@tilelang.testing.requires_metal
-def test_simdgroup_copy_rejects_short_destination_region():
+def test_simdgroup_copy_short_destination_region():
     @T.prim_func
     def kernel(output: T.Tensor((16, 16), T.float32)):
         with T.Kernel(1, threads=32):
@@ -181,8 +173,12 @@ def test_simdgroup_copy_rejects_short_destination_region():
             T.fill(tile, T.float32(3))
             T.copy(tile, output[0:8, 0:4])
 
-    with pytest.raises(ValueError, match="Metal SIMD-group copy:.*in-bounds"):
-        _lower_copy_bounds(kernel)
+    compiled = tilelang.compile(kernel, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    output = torch.full((16, 16), -9.0, device="mps")
+    compiled(output)
+    expected = torch.full((16, 16), -9.0)
+    expected[:8, :4] = 3
+    torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_metal
@@ -199,11 +195,16 @@ def test_simdgroup_copy_symbolic_destination(guarded):
             else:
                 T.copy(tile, output[0, offset])
 
-    if guarded:
-        _lower_copy_bounds(kernel)
-    else:
-        with pytest.raises(ValueError, match="Metal SIMD-group copy:.*in-bounds"):
-            _lower_copy_bounds(kernel)
+    compiled = tilelang.compile(kernel, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
+    for offset in (0, 8, 12, 20):
+        backing = torch.full((8 * 16 + 64,), -9.0, device="mps")
+        output = backing[: 8 * 16].view(8, 16)
+        compiled(output, offset)
+        expected = torch.full((8, 16), -9.0)
+        if not guarded or offset <= 8:
+            expected[:, offset : min(offset + 8, 16)] = 3
+        torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
+        assert torch.all(backing[8 * 16 :].cpu() == -9).item()
 
 
 @tilelang.testing.requires_metal
@@ -214,6 +215,13 @@ def test_simdgroup_copy_symbolic_destination(guarded):
         (8, 8, 8, 32, "float16", False, False),
         (16, 32, 16, 128, "float32", False, False),
         (8, 8, 8, 32, "float32", True, False),
+        (8, 1, 8, 32, "float32", False, False),
+        (8, 1, 8, 32, "float16", False, False),
+        (1, 8, 8, 32, "float32", False, False),
+        (16, 17, 16, 128, "float32", False, False),
+        (16, 18, 16, 128, "float32", False, False),
+        (8, 1, 8, 32, "float32", True, False),
+        (32, 33, 32, 128, "float32", False, False),  # scratch reuse within a group
         (8, 1, 8, 32, "float32", False, True),  # supported tail workaround
     ],
 )
@@ -253,24 +261,16 @@ def _make_layout_store_kernel(layout_kind, column):
 
 @tilelang.testing.requires_metal
 @pytest.mark.parametrize("column", [0, 8])
-def test_simdgroup_copy_rejects_transposed_destination(column):
-    # Column 8 writes beyond the allocation; column 0 stays in the allocation
-    # but the row-major store still disagrees with the transposed mapping.
-    with pytest.raises(ValueError, match="Metal SIMD-group copy:.*row-major"):
-        _lower_copy_bounds(_make_layout_store_kernel("transpose", column))
-
-
-@tilelang.testing.requires_metal
-@pytest.mark.parametrize("layout_kind", ["identity", "flatten", "reshape"])
-def test_simdgroup_copy_accepts_equivalent_destination_layout(layout_kind):
-    func = _make_layout_store_kernel(layout_kind, 8)
+@pytest.mark.parametrize("layout_kind", ["identity", "flatten", "reshape", "transpose"])
+def test_simdgroup_copy_destination_layout(layout_kind, column):
+    func = _make_layout_store_kernel(layout_kind, column)
     kernel = tilelang.compile(func, out_idx=[], target="metal", target_host="c", execution_backend="tvm_ffi")
     backing = torch.full((8 * 16 + 64,), -9.0, dtype=torch.float32, device="mps")
     output = backing[: 8 * 16].view(8, 16)
     kernel(output)
     torch.mps.synchronize()
     expected = torch.zeros((8, 16))
-    expected[:, 8:] = 3
+    expected[:, column : column + 8] = 3
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
     assert torch.all(backing[8 * 16 :].cpu() == -9).item()
 

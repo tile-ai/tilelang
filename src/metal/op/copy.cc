@@ -54,9 +54,10 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr dst_col_base = op.dst_range[1]->min;
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
 
+  bool row_major_destination = true;
   if (lower_args.buffer_remap.count(op.dst)) {
     // LowerTileOp remaps address_of after this lowering, but the intrinsic
-    // keeps dst_stride. Only accept layouts preserving that row-major address
+    // keeps dst_stride. Direct stores require the same row-major address
     // mapping; proving the logical bounds alone does not bound a remapped
     // store.
     Layout layout = lower_args.layout_map.at(op.dst);
@@ -66,18 +67,13 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
     for (const PrimExpr &extent : physical->shape) {
       capacity = capacity * cast(DataType::Int(64), extent);
     }
-    CHECK(vars.size() == 2 && layout->OutputDim() == physical->shape.size() &&
-              analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
-                                      vars[0] * dst_stride + vars[1]) &&
-              analyzer->CanProve(cast(DataType::Int(64), op.dst->shape[0]) *
-                                     cast(DataType::Int(64), dst_stride) <=
-                                 capacity),
-          ValueError)
-        << "Metal SIMD-group copy: destination layout must preserve row-major "
-           "addresses and fit the physical allocation for "
-        << op.dst->name
-        << ". Copy to a full shared tile with a row-major layout first, then "
-           "use T.copy to the destination.";
+    row_major_destination =
+        vars.size() == 2 && layout->OutputDim() == physical->shape.size() &&
+        analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
+                                vars[0] * dst_stride + vars[1]) &&
+        analyzer->CanProve(cast(DataType::Int(64), op.dst->shape[0]) *
+                               cast(DataType::Int(64), dst_stride) <=
+                           capacity);
   }
 
   int warp_size = TargetMetalGetWarpSize(lower_args.target);
@@ -112,6 +108,7 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr warp_m = FloorMod(warp_id, m_warp);
   PrimExpr warp_n = FloorDiv(warp_id, m_warp);
 
+  Buffer scratch;
   Array<Stmt> stmts;
   for (int i = 0; i < warp_row_tiles; i++) {
     for (int j = 0; j < warp_col_tiles; j++) {
@@ -123,27 +120,66 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
       // simdgroup_store always writes a complete 8x8 matrix. A valid
       // starting address alone does not make a destination tail safe.
       Array<PrimExpr> start{row, col};
+      bool direct_store = row_major_destination;
       for (size_t d = 0; d < start.size(); ++d) {
         PrimExpr relative = start[d] - op.dst_range[d]->min;
-        CHECK(analyzer->CanProve(start[d] >= 0) &&
-                  analyzer->CanProve(start[d] <= op.dst->shape[d] - 8) &&
-                  analyzer->CanProve(relative >= 0) &&
-                  analyzer->CanProve(relative <= op.dst_range[d]->extent - 8),
-              ValueError)
-            << "Metal SIMD-group copy: requires provably in-bounds 8x8 stores "
-               "within the destination buffer and region; cannot prove axis "
-            << d << " of " << op.dst->name
-            << ". Copy to a full shared tile first, then use T.copy to "
-               "handle destination tails.";
+        direct_store &=
+            analyzer->CanProve(start[d] >= 0) &&
+            analyzer->CanProve(start[d] <= op.dst->shape[d] - 8) &&
+            analyzer->CanProve(relative >= 0) &&
+            analyzer->CanProve(relative <= op.dst_range[d]->extent - 8);
+      }
+      Buffer destination = op.dst;
+      Array<PrimExpr> indices{row, col};
+      PrimExpr stride = dst_stride;
+      if (!direct_store) {
+        if (!scratch.defined()) {
+          // Each SIMD group owns one complete tile. Reuse it only after all
+          // lanes have finished the previous masked scatter.
+          PrimExpr workspace =
+              lower_args.add_workspace(num_warps * 64, op.dst->dtype);
+          const auto *access = workspace.as<CallNode>();
+          TVM_FFI_ICHECK(access &&
+                         access->op.same_as(builtin::tvm_access_ptr()));
+          scratch = Buffer(Downcast<Var>(access->args[1]), op.dst->dtype,
+                           {PrimExpr(num_warps * 64)}, {}, PrimExpr(0),
+                           "simdgroup_staging", 0, 0, kDefault);
+        }
+        destination = scratch;
+        indices = {warp_id * 64};
+        stride = PrimExpr(8);
       }
       PrimExpr ptr = Call(DataType::Handle(), builtin::address_of(),
-                          {BufferLoad(op.dst, {row, col})});
+                          {BufferLoad(destination, indices)});
       stmts.push_back(Evaluate(
           Call(DataType::Handle(), builtin::simdgroup_store(),
-               {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr,
-                dst_stride, IntImm(DataType::Int(32), kMPerWarp),
+               {op.src->data, IntImm(DataType::Int(32), tile_idx), ptr, stride,
+                IntImm(DataType::Int(32), kMPerWarp),
                 IntImm(DataType::Int(32), kNPerWarp),
                 Cast(DataType::Bool(), IntImm(DataType::Int(32), 0))})));
+      if (!direct_store) {
+        Stmt sync =
+            Evaluate(Call(DataType::Int(32), builtin::tvm_storage_sync(),
+                          {StringImm("warp")}));
+        stmts.push_back(sync);
+        PrimExpr lane = FloorMod(lower_args.thread_index, warp_size);
+        for (int element = 0; element < 64; element += warp_size) {
+          PrimExpr index = lane + element;
+          PrimExpr dst_row = row + FloorDiv(index, 8);
+          PrimExpr dst_col = col + FloorMod(index, 8);
+          PrimExpr in_bounds =
+              dst_row >= 0 && dst_row < op.dst->shape[0] && dst_col >= 0 &&
+              dst_col < op.dst->shape[1] && dst_row >= op.dst_range[0]->min &&
+              dst_row < op.dst_range[0]->min + op.dst_range[0]->extent &&
+              dst_col >= op.dst_range[1]->min &&
+              dst_col < op.dst_range[1]->min + op.dst_range[1]->extent;
+          stmts.push_back(IfThenElse(
+              in_bounds,
+              BufferStore(op.dst, BufferLoad(scratch, {warp_id * 64 + index}),
+                          {dst_row, dst_col})));
+        }
+        stmts.push_back(sync);
+      }
     }
   }
   if (stmts.size() == 1) {
