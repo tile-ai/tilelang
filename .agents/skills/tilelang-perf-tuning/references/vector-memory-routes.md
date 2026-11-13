@@ -55,9 +55,9 @@ tile/group 候选从五类真实边界产生：最大完整连续语义单元；
 
 ## 流水资格与实现
 
-只有同时满足以下条件才建立流水候选：profiling 显示 MTE 与 Compute 都有可重叠时间；每核有足够独立完整迭代；UB/L1 能容纳所有跨迭代存活 buffer 的版本；依赖允许下一轮 CopyIn 与上一轮 Compute/CopyOut 重叠。
+只有同时满足以下条件才建立流水候选：profiling 显示 MTE 与 Compute 都有可重叠时间；每核有足够独立完整迭代；UB/L1 能容纳所有跨迭代存活 buffer 的版本；依赖允许下一轮 copy in 与上一轮 Compute/copy out 重叠。
 
-先画每个 buffer 的 `CopyIn → Compute → CopyOut` 生命周期。输入、输出、索引和临时量只要跨迭代仍存活都要版本化；只读常驻量保持单版本。full-wave 使用固定 extent，尾部单独处理。
+先画每个 buffer 的 `copy in → compute → copy out` 生命周期。输入、输出、索引和临时量只要跨迭代仍存活都要版本化；只读常驻量保持单版本。full-wave 使用固定 extent，尾部单独处理。
 
 自动版本化要求单份逻辑 tile、唯一生产者/消费者、固定 rank/extent、无隐藏别名、全部活跃 buffer 被识别。`num_stages > 1`、两个 buffer、编译成功或运行正确都不能证明流水生效。
 
