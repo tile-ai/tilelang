@@ -849,12 +849,17 @@ Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
     int64_t bound_low = address.is_load ? 0 : low;
     int64_t bound_high =
         address.is_load ? address.logical_extent.value_or(high) : high;
-    if (source_relative.has_value() && buffer_span.has_value() &&
-        (!analyzer->CanProve(source_relative.value() + IntConst(bound_low) >= 0) ||
-         !analyzer->CanProve(source_relative.value() + IntConst(bound_high) <=
-                             buffer_span.value()))) {
-      return {RejectionKind::kHigh,
-              "the logical access exceeds the buffer's physical span"};
+    if (source_relative.has_value() && buffer_span.has_value()) {
+      PrimExpr access_start = source_relative.value();
+      // Explicit descriptors carry the instruction offset in plan.offset; the
+      // physical access starts at descriptor base plus that offset.
+      if (address.explicit_address) access_start = access_start + plan.offset;
+      if (!analyzer->CanProve(access_start + IntConst(bound_low) >= 0) ||
+          !analyzer->CanProve(access_start + IntConst(bound_high) <=
+                              buffer_span.value())) {
+        return {RejectionKind::kHigh,
+                "the logical access exceeds the buffer's physical span"};
+      }
     }
   }
 

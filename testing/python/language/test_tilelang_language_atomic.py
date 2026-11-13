@@ -1839,3 +1839,32 @@ def test_atomic_reduce_scalar_destination_keeps_thread_value(op, init):
     torch.cuda.synchronize()
     expected = data.max() if op is T.atomic_max else data.min()
     assert result.item() == expected.item(), f"{op.__name__} lost per-thread values: got {result.item()}, expected {expected.item()}"
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "op,init",
+    [(T.atomic_max, -10000), (T.atomic_min, 10000)],
+    ids=["max", "min"],
+)
+def test_atomic_reduce_fragment_scalar_source_keeps_each_lane(op, init):
+    """A constant-index local source is still per-lane storage."""
+    n = 256
+
+    @T.prim_func
+    def main(data: T.Tensor((n,), "int32"), result: T.Tensor((1,), "int32")):
+        with T.Kernel(1, threads=n):
+            local = T.alloc_local([1], "int32")
+            for i in T.thread_binding(n, "threadIdx.x"):
+                local[0] = data[i]
+                op(result, local[0])
+
+    kernel = tilelang.compile(main, target="cuda")
+    data = torch.arange(n, dtype=torch.int32, device="cuda")
+    data[0] = 0
+    data[123] = 999 if op is T.atomic_max else -999
+    result = torch.tensor([init], dtype=torch.int32, device="cuda")
+    kernel(data, result)
+    torch.cuda.synchronize()
+    expected = data.max() if op is T.atomic_max else data.min()
+    assert result.item() == expected.item(), f"{op.__name__} lost fragment values: got {result.item()}, expected {expected.item()}"

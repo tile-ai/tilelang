@@ -99,18 +99,39 @@ inline Stmt MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer,
       return UsesVar(expr, [&](const VarNode *v) { return v == thread_var; });
     };
     bool uses_thread = false;
+    // A fragment/local buffer is per-thread storage even when its index is a
+    // constant: local[0] holds a different value in every lane.
+    if (op.src_value.defined()) {
+      bool src_is_local = false;
+      PostOrderVisit(op.src_value, [&](const ObjectRef &node) {
+        if (const auto *load = node.as<BufferLoadNode>()) {
+          src_is_local |= IsFragmentBuffer(load->buffer) ||
+                          load->buffer.scope() == "local";
+        }
+      });
+      // A fragment/local buffer is per-thread storage even when its index is
+      // a constant: local[0] holds a different value in every lane.
+      if (src_is_local) uses_thread = true;
+    }
     for (const Range &range : op.dst_range) {
       uses_thread |= uses(range->min) || uses(range->extent);
       uses_thread |= as_const_int(range->min) == nullptr;
     }
     if (!op.src_value.defined()) {
+      // Buffer-backed source: the value lives in op.src, and a fragment/local
+      // source is per-thread even when its index is constant.
+      if (IsFragmentBuffer(op.src) || op.src.scope() == "local") {
+        uses_thread = true;
+      }
       for (const Range &range : op.src_range) {
         uses_thread |= uses(range->min) || uses(range->extent);
         uses_thread |= as_const_int(range->min) == nullptr;
       }
     } else {
       uses_thread |= uses(op.src_value);
-      uses_thread |= as_const_int(op.src_value) == nullptr;
+      // A source that does not use the thread index is uniform across lanes.
+      // This includes integer/float literals and casts of them; do not treat
+      // an arbitrary non-IntImm expression as lane-dependent.
     }
     if (uses_thread) {
       return body;
