@@ -40,8 +40,6 @@ env:
   XDG_CACHE_HOME: "${{ github.workspace }}/.cache" # to be updated
   PIP_CACHE_DIR: "${{ github.workspace }}/.cache/pip" # to be updated
   UV_CACHE_DIR: "${{ github.workspace }}/.cache/uv" # to be updated
-  # Same image as the Ascend job in ci.yml.
-  ASCEND_CI_IMAGE: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12"
 
 jobs:
   build-wheel-ascend:
@@ -147,8 +145,7 @@ jobs:
       (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
     needs: [build-wheel-ascend]
     runs-on: linux-amd64-a5-4
-    # Same image as the Ascend job in ci.yml (the env context is not available
-    # here; ASCEND_CI_IMAGE above must be kept in sync with it).
+    # Same image as the Ascend job in ci.yml.
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
     timeout-minutes: 60
@@ -258,85 +255,72 @@ jobs:
             )
           done
 
-  publish-nightly-release:
-    name: Update nightly-ascend release
-    # Daily wheels go to a rolling prerelease so users have a stable download
-    # link: https://github.com/tile-ai/tilelang/releases/tag/nightly-ascend
+  publish-obs:
+    name: Publish wheels to OBS nightly repo
+    # Nightly wheels go to the Ascend community OBS pypi repo, mirroring
+    # triton-ascend's Publish-Wheels job. Gated on the NPU smoke test: if
+    # test-wheel-ascend fails, this job never starts, so a broken wheel is
+    # never published.
     if: |
       github.repository_owner == 'tile-ai' &&
       github.event_name != 'pull_request'
     needs: [build-wheel-ascend, test-wheel-ascend]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
-        # gh infers the target repository from the git remote.
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-
       - name: Download built wheels
         uses: actions/download-artifact@v8
         with:
           name: wheels-ascend-Linux-X64
           path: wheelhouse
 
-      - name: Update rolling nightly release
+      - name: Setup obsutil and upload to OBS
         env:
-          GH_TOKEN: ${{ github.token }}
-          # Nightly wheels stay downloadable on the release for this many
-          # days; older assets are pruned after each successful publication.
-          RETENTION_DAYS: "30"
+          AK: ${{ secrets.NIGHTLY_OBS_AK }}
+          SK: ${{ secrets.NIGHTLY_OBS_SK }}
         run: |
-          set -euxo pipefail
-          TAG="nightly-ascend"
-          NOTES="Daily Ascend wheel built from \`${GITHUB_SHA}\` (\`${GITHUB_REF_NAME}\`).
-
-          NPU test container: \`${ASCEND_CI_IMAGE}\`
-
-          Latest wheels:
-          $(ls -1 wheelhouse/*.whl | sed 's|^|- |')
-
-          This release keeps the last ${RETENTION_DAYS} days of nightly wheels; older assets are removed automatically."
-
-          if ! gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release create "${TAG}" \
-              --prerelease --title "Ascend nightly wheels" --notes "${NOTES}"
+          # No -x: keep the expanded obsutil config command out of the trace.
+          set -euo pipefail
+          WHL_COUNT=$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)
+          if [ "${WHL_COUNT}" -eq 0 ]; then
+            echo "No wheel artifact; skipping publish"
+            exit 0
           fi
+          if [ -z "${AK}" ] || [ -z "${SK}" ]; then
+            echo "::error::OBS credentials are empty (NIGHTLY_OBS_AK / NIGHTLY_OBS_SK)."
+            exit 1
+          fi
+          curl -fL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz" -o obsutil.tar.gz
+          gzip -t obsutil.tar.gz || { echo "obsutil.tar.gz is not a valid gzip"; exit 1; }
+          tar xzf obsutil.tar.gz
+          rm -f obsutil.tar.gz
+          mv obsutil_linux_* obsutil
 
-          # Upload the new wheels before touching the old ones, so a failed
-          # or cancelled run leaves the previous nightlies downloadable.
-          # --clobber replaces same-named assets on a same-day rerun.
-          gh release upload "${TAG}" wheelhouse/*.whl --clobber
+          obsutil/obsutil config -i="${AK}" -k="${SK}" -e=https://obs.cn-north-4.myhuaweicloud.com
+          OBS_DIR="obs://ascend-artifcat-packages/pypi/packages/ascend/repos/pypi/nightly/tilelang/"
+          # -u: skip files already present unchanged, so a same-day rerun does
+          # not rewrite identical wheels. Older dailies stay downloadable
+          # until the bucket's lifecycle policy removes them.
+          obsutil/obsutil cp -u wheelhouse/*.whl "${OBS_DIR}"
 
-          # Fail the job if any new wheel did not make it onto the release.
-          REMOTE_ASSETS="$(gh release view "${TAG}" --json assets --jq '.assets[].name')"
-          for WHEEL in wheelhouse/*.whl; do
-            grep -qxF "$(basename "${WHEEL}")" <<< "${REMOTE_ASSETS}"
-          done
-
-          # Prune assets past the retention window, keyed by upload time
-          # rather than name so manual reruns age out the same way. ISO-8601
-          # timestamps compare lexicographically; pipefail surfaces listing
-          # or deletion failures instead of silently keeping stale wheels.
-          CUTOFF="$(date -u -d "-${RETENTION_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
-          gh release view "${TAG}" --json assets --jq '.assets[] | "\(.createdAt) \(.name)"' |
-            while read -r CREATED_AT ASSET; do
-              if [[ "${CREATED_AT}" < "${CUTOFF}" ]]; then
-                gh release delete-asset "${TAG}" "${ASSET}" --yes
-              fi
-            done
-
-          # Refresh the notes only once the new assets are verified.
-          gh release edit "${TAG}" --notes "${NOTES}"
+          # Regenerate index.html from every .whl currently in the directory
+          # (non-recursive, short format), keeping only the basenames.
+          obsutil/obsutil ls "${OBS_DIR}" -d -s -limit=0 \
+            | grep -oE '[^/]+\.whl$' \
+            | sort -u > files.txt
+          while IFS= read -r f; do
+            printf "<a href='%s'>%s</a><br />\n" "$f" "$f"
+          done < files.txt > index.html
+          obsutil/obsutil cp index.html "${OBS_DIR}"
+          echo "Published ${WHL_COUNT} wheel(s); index lists $(wc -l < files.txt) file(s)."
 
       - name: Summary
         run: |
           {
-            echo "### Ascend nightly release updated"
+            echo "### Ascend nightly wheels published to OBS"
             echo
-            echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/nightly-ascend"
+            echo 'Directory: `obs://ascend-artifcat-packages/pypi/packages/ascend/repos/pypi/nightly/tilelang/`'
+            echo
+            ls -1 wheelhouse/*.whl | sed 's|^|- |'
           } >> "${GITHUB_STEP_SUMMARY}"
