@@ -105,13 +105,14 @@ inline Stmt MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer,
       bool src_is_local = false;
       PostOrderVisit(op.src_value, [&](const ObjectRef &node) {
         if (const auto *load = node.as<BufferLoadNode>()) {
-          src_is_local |= IsFragmentBuffer(load->buffer) ||
-                          load->buffer.scope() == "local";
+          src_is_local |=
+              IsFragmentBuffer(load->buffer) || load->buffer.scope() == "local";
         }
       });
       // A fragment/local buffer is per-thread storage even when its index is
       // a constant: local[0] holds a different value in every lane.
-      if (src_is_local) uses_thread = true;
+      if (src_is_local)
+        uses_thread = true;
     }
     for (const Range &range : op.dst_range) {
       uses_thread |= uses(range->min) || uses(range->extent);

@@ -853,7 +853,8 @@ Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
       PrimExpr access_start = source_relative.value();
       // Explicit descriptors carry the instruction offset in plan.offset; the
       // physical access starts at descriptor base plus that offset.
-      if (address.explicit_address) access_start = access_start + plan.offset;
+      if (address.explicit_address)
+        access_start = access_start + plan.offset;
       if (!analyzer->CanProve(access_start + IntConst(bound_low) >= 0) ||
           !analyzer->CanProve(access_start + IntConst(bound_high) <=
                               buffer_span.value())) {
@@ -1993,7 +1994,8 @@ private:
     PrimExpr input_offset = call->args[address_index + 1];
     AccessAddress address = ParseAddress(call->args[address_index], is_load,
                                          op_name, span, bindings_);
-    if (is_load) address.logical_extent = lanes;
+    if (is_load)
+      address.logical_extent = lanes;
     CheckProofInputs(address, input_offset, op_name, span);
 
     if (!IsIntegerScalar(input_offset)) {
