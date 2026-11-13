@@ -488,12 +488,16 @@ public:
   ffi::Optional<ffi::Function> GetFunction(const ffi::String &name) final;
 
   ffi::Bytes SaveToBytes() const final {
-    // Keep the same payload shape as CUDA: [fmt][fmap][device code].
+    // Keep the same payload shape as CUDA -- [fmt][fmap][device code] -- and
+    // append the source map, which InspectSource and the launch-error path read
+    // back. Entries written before it was serialized end after the device code;
+    // the loader treats that as an empty source map.
     std::string buffer;
     support::BytesOutStream stream(&buffer);
     stream.Write(fmt_);
     stream.Write(fmap_);
     stream.Write(code_);
+    stream.Write(source_);
     return ffi::Bytes(std::move(buffer));
   }
 
@@ -747,12 +751,18 @@ static ffi::Module AscendModuleLoadFromBytes(const ffi::Bytes &bytes) {
   stream.Read(&fmt);
   TVM_FFI_ICHECK(stream.Read(&fmap));
   stream.Read(&code);
+  // The source map is a trailing field; entries written before it was
+  // serialized end after the device code, so a failed read means "empty".
+  ffi::Map<ffi::String, ffi::String> source;
+  if (!stream.Read(&source)) {
+    source = ffi::Map<ffi::String, ffi::String>();
+  }
   TVM_FFI_CHECK(fmt == "aibin", RuntimeError)
       << "Unsupported Ascend module format `" << fmt
       << "`. This is likely a legacy source-only cache entry; remove it and "
          "recompile.";
   return AscendModuleCreate(std::move(code), std::move(fmt), std::move(fmap),
-                            ffi::Map<ffi::String, ffi::String>());
+                            std::move(source));
 }
 
 TVM_FFI_STATIC_INIT_BLOCK() {
