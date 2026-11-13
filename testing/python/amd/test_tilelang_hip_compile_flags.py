@@ -47,5 +47,27 @@ def test_pass_config_flags_reach_hipcc():
     assert kernel is not None
 
 
+@tilelang.testing.requires_rocm
+def test_nvcc_only_flag_is_dropped_with_warning():
+    with pytest.warns(UserWarning, match="--use_fast_math"):
+        kernel = tilelang.compile(
+            _make(),
+            out_idx=[0],
+            target="hip",
+            compile_flags=["--use_fast_math", "-DTL_TEST_FLAG_VALUE=1"],
+        )
+    assert kernel is not None
+
+
+def test_hip_compile_flags_split_and_filter():
+    from tilelang.rocm.backend import hip_compile_flags
+
+    assert hip_compile_flags(None) == []
+    assert hip_compile_flags("-O3 -DX=1") == ["-O3", "-DX=1"]
+    assert hip_compile_flags(["-mllvm -some-option", "-DX=1"]) == ["-mllvm", "-some-option", "-DX=1"]
+    with pytest.warns(UserWarning):
+        assert hip_compile_flags(["--use_fast_math", "-DX=1"]) == ["-DX=1"]
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
