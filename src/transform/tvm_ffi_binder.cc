@@ -424,6 +424,34 @@ void TVMFFIABIBuilder::BindDLTensors(
     shape_buffer_map[arg_name] = buf_shape;
   }
 
+  // Bind device_id from the first non-null device-resident tensor.
+  // A nullable buffer that appears first must not bind device_id to the
+  // zero fallback, otherwise a later tensor on another device is rejected.
+  PrimExpr first_device_id = make_zero(DataType::Int(32));
+  PrimExpr all_device_tensors_null = const_true();
+  bool has_device_tensor = false;
+  // Build the conditional chain in reverse so the first non-null buffer wins.
+  for (auto it = buffer_def.rbegin(); it != buffer_def.rend(); ++it) {
+    const auto &[handle, buffer] = *it;
+    if (host_mapped_buffers.count(buffer->data.get())) {
+      continue;
+    }
+    std::string arg_name = func_name + "." + buffer->data->name_hint;
+    const PrimExpr &is_null = is_null_expr_map[arg_name];
+    PrimExpr actual_dev_id = tvm::if_then_else(
+        Not(is_null),
+        TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
+        make_zero(DataType::Int(32)));
+    first_device_id =
+        tvm::if_then_else(Not(is_null), actual_dev_id, first_device_id);
+    all_device_tensors_null = all_device_tensors_null && is_null;
+    has_device_tensor = true;
+  }
+  if (has_device_tensor) {
+    BindNullable(device_id, first_device_id, func_name + ".device_id", true,
+                 all_device_tensors_null);
+  }
+
   // Now process each buffer fully
   for (const auto &[handle, buffer] : buffer_def) {
     bool is_used = used_param_buffers.count(handle.get());
