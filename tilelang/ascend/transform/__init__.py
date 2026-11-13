@@ -372,3 +372,8 @@ __all__ = [
     "VerifyParallelToPTO",
     "VerifyPTOCodegenLegality",
 ]
+
+
+def LowerAscendCoreRegions():
+    """Validate manual core placement and normalize single-core bodies."""
+    return _ffi_api.LowerAscendCoreRegions()
