@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 from tilelang import _ffi_api
 from tvm.ffi import register_object
 from tvm.tirx.script.builder.frame import TIRFrame
@@ -151,29 +153,32 @@ class SimdVFFrame(TIRFrame):
     """
 
     def __enter__(self):
-        if _inside_simdvf[0] == 0:
+        depth = getattr(_simdvf_context, "depth", 0)
+        if depth == 0:
             from .simd import _reset_default_mask_cache
 
             _reset_default_mask_cache()
-        _inside_simdvf[0] += 1
         super().__enter__()
+        _simdvf_context.depth = depth + 1
         return self
 
     def __exit__(self, ptype, value, trace):
-        super().__exit__(ptype, value, trace)
-        _inside_simdvf[0] -= 1
-        if _inside_simdvf[0] == 0:
-            from .simd import _reset_default_mask_cache
+        try:
+            super().__exit__(ptype, value, trace)
+        finally:
+            _simdvf_context.depth -= 1
+            if _simdvf_context.depth == 0:
+                from .simd import _reset_default_mask_cache
 
-            _reset_default_mask_cache()
+                _reset_default_mask_cache()
 
 
-_inside_simdvf = [0]
+_simdvf_context = threading.local()
 
 
 def inside_simdvf() -> bool:
     """Return whether the current builder is inside a SimdVF region."""
-    return _inside_simdvf[0] > 0
+    return getattr(_simdvf_context, "depth", 0) > 0
 
 
 _SIMDVF_VALID_LANES = (64, 128, 256)
