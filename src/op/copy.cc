@@ -178,8 +178,8 @@ Stmt LowerIm2ColForTarget(const Im2ColOpNode &op, const LowerArgs &lower_args,
 
 bool MatchAnyIm2ColTarget(Target /*target*/) { return true; }
 
-Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
-                     arith::Analyzer *analyzer) {
+Stmt LowerIm2ColSIMTImpl(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                         arith::Analyzer *analyzer) {
   const Buffer &src = op.src_;
   const Buffer &dst = op.dst_;
   const BufferRegion &dst_region = op.dstRegion_;
@@ -269,7 +269,8 @@ bool RegisterDefaultIm2Col() {
       "default.Im2Col",
       MatchAnyIm2ColTarget,
       0,
-      LowerIm2ColSIMT,
+      Im2ColImplKind::kSimt,
+      LowerIm2ColSIMTImpl,
   });
   return true;
 }
@@ -291,6 +292,15 @@ void RegisterIm2ColImpl(Im2ColImpl impl) {
   ICHECK(impl.match_target != nullptr);
   ICHECK(impl.lower != nullptr);
   Im2ColImplRegistry().push_back(impl);
+}
+
+Im2ColImplKind GetIm2ColImplKind(Target target) {
+  return ResolveIm2ColImpl(target).kind;
+}
+
+Stmt LowerIm2ColSIMT(const Im2ColOpNode &op, const LowerArgs &lower_args,
+                     arith::Analyzer *analyzer) {
+  return LowerIm2ColSIMTImpl(op, lower_args, analyzer);
 }
 
 // Constructs a Copy operator node from call arguments and annotations.

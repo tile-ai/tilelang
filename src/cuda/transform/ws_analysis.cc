@@ -271,12 +271,11 @@ TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
         if (auto *copy = tile_op.as<CopyNode>()) {
           return ClassifyCopy(copy, target);
         }
-        // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
-        // producer so it goes to the producer warp group.
         if (tile_op.as<Im2ColOpNode>()) {
-          if (TargetIsHopper(target)) {
+          if (GetIm2ColImplKind(target) == Im2ColImplKind::kTma) {
             return TileStmtKind::kTmaProducer;
           }
+          return TileStmtKind::kSimtProducer;
         }
         if (auto gemm = GetGemmInfo(tile_op)) {
           if (IsTmemBuffer(gemm->accumulator)) {
