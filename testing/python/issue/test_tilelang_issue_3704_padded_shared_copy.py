@@ -7,6 +7,8 @@ selection now rejects incompatible extents so the copy lowers through the
 element-wise/`cp.async` path; only lowering is exercised here.
 """
 
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -63,3 +65,21 @@ def test_padded_shared_copy_lowers():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+@tilelang.testing.requires_cuda
+def test_explicit_tma_copy_reports_extent_mismatch():
+    """Explicit T.tma_copy names the padded shared extent mismatch."""
+
+    @T.prim_func
+    def main(A: T.Tensor((BT, K), "float32")):
+        with T.Kernel(1, threads=128):
+            s = T.alloc_shared((BT, BK), "float32")
+            mbar = T.alloc_barrier(128)
+            T.tma_copy(A[0:BT, 0:K], s, barrier=mbar)
+            T.barrier_arrive(mbar)
+            T.barrier_wait(mbar, 0)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    with target, pytest.raises(Exception, match="shared tile extent 112 does not match global tile extent 100"):
+        tilelang.lower(main, target=target, enable_device_compile=False)

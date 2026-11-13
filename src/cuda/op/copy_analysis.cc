@@ -236,6 +236,58 @@ bool AreBulkCopyExtentsCompatible(const Array<Range> &shared_range,
   return true;
 }
 
+std::string BulkCopyExtentMismatchReason(const Array<Range> &shared_range,
+                                         const Array<Range> &global_range) {
+  size_t shared_cur = 0;
+  size_t global_cur = 0;
+  while (shared_cur < shared_range.size() && global_cur < global_range.size()) {
+    const int64_t *s_extent = as_const_int(shared_range[shared_cur]->extent);
+    const int64_t *g_extent = as_const_int(global_range[global_cur]->extent);
+    if (s_extent == nullptr || g_extent == nullptr) {
+      return "";
+    }
+    if (*s_extent <= 1) {
+      shared_cur++;
+      continue;
+    }
+    if (*g_extent <= 1) {
+      global_cur++;
+      continue;
+    }
+    if (*s_extent != *g_extent) {
+      std::ostringstream oss;
+      oss << "shared tile extent " << *s_extent
+          << " does not match global tile extent " << *g_extent;
+      return oss.str();
+    }
+    shared_cur++;
+    global_cur++;
+  }
+  for (; shared_cur < shared_range.size(); shared_cur++) {
+    const int64_t *extent = as_const_int(shared_range[shared_cur]->extent);
+    if (extent == nullptr) {
+      return "";
+    }
+    if (*extent != 1) {
+      std::ostringstream oss;
+      oss << "shared tile has a non-unit trailing extent " << *extent;
+      return oss.str();
+    }
+  }
+  for (; global_cur < global_range.size(); global_cur++) {
+    const int64_t *extent = as_const_int(global_range[global_cur]->extent);
+    if (extent == nullptr) {
+      return "";
+    }
+    if (*extent != 1) {
+      std::ostringstream oss;
+      oss << "global tile has a non-unit trailing extent " << *extent;
+      return oss.str();
+    }
+  }
+  return "";
+}
+
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
                    bool check_last_dim, bool emit_diagnostics,
                    bool check_tile_extents = true) {
@@ -578,6 +630,7 @@ struct CopyFacts {
   bool can_tmem_load = false;
   bool can_tmem_store = false;
   std::string tma_unavailable_reason;
+  std::string bulk_extent_reason;
   std::string async_unavailable_reason;
 };
 
@@ -773,6 +826,15 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
     facts.can_bulk_load_ignore_last_dim = false;
     facts.can_bulk_store_ignore_last_dim = false;
   }
+  if (IsSharedBuffer(op.dst) && IsGlobalBuffer(op.src) &&
+      !facts.can_bulk_load) {
+    facts.bulk_extent_reason =
+        BulkCopyExtentMismatchReason(op.dst_range, op.src_range);
+  } else if (IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst) &&
+             !facts.can_bulk_store) {
+    facts.bulk_extent_reason =
+        BulkCopyExtentMismatchReason(op.src_range, op.dst_range);
+  }
   return facts;
 }
 
@@ -814,9 +876,12 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/true,
                       /*check_last_dim=*/true);
-    return inst == CopyInst::kInvalid
-               ? Unsupported(facts.tma_unavailable_reason)
-               : Supported(inst);
+    if (inst != CopyInst::kInvalid) {
+      return Supported(inst);
+    }
+    return Unsupported(facts.bulk_extent_reason.empty()
+                           ? facts.tma_unavailable_reason
+                           : facts.bulk_extent_reason);
   }
 
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
@@ -895,9 +960,12 @@ CopyInstSelection ClassifyWarpSpecializedCopy(const CopyNode &op,
     CopyInst inst =
         SelectTmaInst(facts, /*allow_load=*/true, /*allow_store=*/false,
                       /*check_last_dim=*/false);
-    return inst == CopyInst::kInvalid
-               ? Unsupported(facts.tma_unavailable_reason)
-               : Supported(inst);
+    if (inst != CopyInst::kInvalid) {
+      return Supported(inst);
+    }
+    return Unsupported(facts.bulk_extent_reason.empty()
+                           ? facts.tma_unavailable_reason
+                           : facts.bulk_extent_reason);
   }
 
   if (facts.explicit_cp_async || facts.no_implicit_async_commit_wait) {
