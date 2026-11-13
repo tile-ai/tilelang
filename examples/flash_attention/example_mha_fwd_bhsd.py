@@ -3,14 +3,18 @@ import torch.nn.functional as F
 import tilelang
 from tilelang.autotuner import *
 import tilelang.language as T
-import itertools
 import argparse
 from functools import partial
 
 
 def get_configs():
-    iter_params = dict(block_M=[128], block_N=[128], num_stages=[2], threads=[256])
-    return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+    # At dim 128 the 128x128 two-stage tile needs 160 KiB of dynamic shared
+    # memory, more than the ~99 KiB cap on sm_86/89/120; the 64x64 tiles fit.
+    return [
+        dict(block_M=128, block_N=128, num_stages=2, threads=256),
+        dict(block_M=64, block_N=64, num_stages=1, threads=128),
+        dict(block_M=64, block_N=64, num_stages=2, threads=128),
+    ]
 
 
 @autotune(configs=get_configs(), warmup=10, rep=10)
