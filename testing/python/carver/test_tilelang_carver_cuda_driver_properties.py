@@ -1,4 +1,9 @@
+import ctypes
+import sys
+
+import pytest
 import tilelang.testing
+from tilelang.carver.arch.driver import cuda_driver
 from tilelang.carver.arch.driver.cuda_driver import (
     get_cuda_device_properties,
     get_device_name,
@@ -73,6 +78,32 @@ def test_device_get_max_dynamic_shared_size_bytes():
     tl_dynamic_smem = get_max_dynamic_shared_size_bytes()
     driver_dynamic_smem = get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMaxSharedMemoryPerMultiprocessor)
     assert tl_dynamic_smem == driver_dynamic_smem, "Max dynamic shared size bytes values do not match"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux soname lookup")
+def test_load_cudart_falls_back_to_versioned_soname(monkeypatch):
+    # pip-only CUDA installs (e.g. torch cu13 wheels) provide libcudart.so.13 but no libcudart.so.
+    tried = []
+
+    def fake_load_library(name):
+        tried.append(name)
+        if name == "libcudart.so":
+            raise OSError(name)
+        return name
+
+    monkeypatch.setattr(ctypes.cdll, "LoadLibrary", fake_load_library)
+    assert cuda_driver._load_cudart().startswith("libcudart.so.")
+    if torch.version.cuda:
+        assert tried[0] == f"libcudart.so.{torch.version.cuda.split('.')[0]}"
+
+
+@tilelang.testing.requires_cuda
+def test_device_attribute_is_available():
+    # The comparisons above pass trivially when get_device_attribute() returns None on both sides.
+    assert (
+        get_device_attribute(_cudaDeviceAttrNames.cudaDevAttrMultiProcessorCount)
+        == torch.cuda.get_device_properties(0).multi_processor_count
+    )
 
 
 if __name__ == "__main__":
