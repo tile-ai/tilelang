@@ -68,6 +68,36 @@ def test_conflicting_alias_annotations(first, second, message):
                 T.annotate_buffer_versions({ub: first, alias: second})
 
 
+def test_manual_multi_buffer_accepts_positive_integer_counts():
+    @T.prim_func
+    def main():
+        with T.Kernel(1):
+            inferred = T.alloc_shared((2, 64), "float32")
+            explicit = T.alloc_shared((64,), "float32")
+            constant = T.alloc_shared((64,), "float32")
+            T.annotate_manual_multi_buffer(inferred, {explicit: 3, constant: tirx.IntImm("int32", 4)})
+
+    root = next(block for block in nodes(main, tirx.SBlock) if block.name_hint == "tilelang_root")
+    versions = root.annotations["tl.manual_multi_buffer"]
+    storages = {buffer.data: buffer.name for buffer in root.alloc_buffers}
+    assert {storages[storage]: int(count) for storage, count in versions.items()} == {
+        "inferred": 2,
+        "explicit": 3,
+        "constant": 4,
+    }
+
+
+@pytest.mark.parametrize("num_versions", [2.9, 3.01, "4", True, False, 0, -2, None])
+def test_manual_multi_buffer_rejects_invalid_counts(num_versions):
+    with pytest.raises(ValueError, match="positive integer"):
+
+        @T.prim_func
+        def main():
+            with T.Kernel(1):
+                ub = T.alloc_shared((64,), "float32")
+                T.annotate_manual_multi_buffer({ub: num_versions})
+
+
 @pytest.mark.parametrize("specification", [None, "auto", "iteration", "counter", "manual"])
 def test_placement_requires_an_explicit_version_count(specification):
     from tilelang import tvm
