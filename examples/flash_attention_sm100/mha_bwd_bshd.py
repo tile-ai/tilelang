@@ -58,7 +58,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                 else:
                     for i, j in T.Parallel(block_M, block_N):
                         acc_s[i, j] = T.if_then_else(k * block_N + j >= seq_len, -T.infinity(acc_s.dtype), 0)
-                T.tcgen05_gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(Q_shared, K_shared, acc_s, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(V[bz, k * block_N : (k + 1) * block_N, by, :], V_shared)
                 T.copy(scores_max, scores_max_prev)
                 T.reduce_max(acc_s, scores_max, dim=1, clear=False)
@@ -71,7 +71,7 @@ def flashattn_fwd(batch, heads, seq_len, dim, is_causal, block_M, block_N):
                 for i, j in T.Parallel(block_M, block_N):
                     acc_s[i, j] = T.exp2(acc_s[i, j] * scale - scores_max[i] * scale)
                 T.copy(acc_s, acc_s_cast)
-                T.tcgen05_gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(acc_s_cast, V_shared, acc_o, policy=T.GemmWarpPolicy.FullRow)
                 T.reduce_sum(acc_s, scores_sum, dim=1)
                 for i in T.Parallel(block_M):
                     logsum[i] = logsum[i] * scores_scale[i] + scores_sum[i]
@@ -168,6 +168,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threa
         with T.Kernel(heads, T.ceildiv(seq_len, block_M), batch, threads=threads) as (bx, by, bz):
             K_shared = T.alloc_shared([block_M, dim], dtype)
             dsT_shared = T.alloc_shared([block_M, block_N], dtype)
+            qkT_shared = T.alloc_shared([block_M, block_N], dtype)
             q = T.alloc_shared([block_N, dim], dtype)
             V_shared = T.alloc_shared([block_M, dim], dtype)
             qkT = T.alloc_fragment([block_M, block_N], accum_dtype)
@@ -193,7 +194,7 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threa
             for k in T.Pipelined(loop_st, loop_ed, num_stages=num_stages):
                 T.copy(Q[bz, k * block_N : (k + 1) * block_N, bx, :], q)
                 T.clear(qkT)
-                T.tcgen05_gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(K_shared, q, qkT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(lse[bz, bx, k * block_N : (k + 1) * block_N], lse_shared)
                 for i, j in T.Parallel(block_M, block_N):
                     qkT[i, j] = T.exp2(qkT[i, j] * scale - lse_shared[j])
@@ -202,18 +203,19 @@ def flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threa
                         qkT[i, j] = T.if_then_else(by * block_M + i <= k * block_N + j, qkT[i, j], 0)
                 T.copy(dO[bz, k * block_N : (k + 1) * block_N, bx, :], do)
                 T.clear(dsT)
-                T.tcgen05_gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
+                T.gemm(V_shared, do, dsT, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
                 T.copy(qkT, qkT_cast)
-                T.tcgen05_gemm(qkT_cast, do, dv, policy=T.GemmWarpPolicy.FullRow)
+                T.copy(qkT_cast, qkT_shared)
+                T.gemm(qkT_shared, do, dv, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(Delta[bz, bx, k * block_N : (k + 1) * block_N], delta)
                 for i, j in T.Parallel(block_M, block_N):
                     dsT_cast[i, j] = qkT[i, j] * (dsT[i, j] - delta[j]) * sm_scale
-                T.tcgen05_gemm(dsT_cast, q, dk, policy=T.GemmWarpPolicy.FullRow)
 
                 T.copy(dsT_cast, dsT_shared)
+                T.gemm(dsT_shared, q, dk, policy=T.GemmWarpPolicy.FullRow)
                 T.clear(dq)
-                T.tcgen05_gemm(dsT_shared, K_shared, dq, transpose_A=True)
+                T.gemm(dsT_shared, K_shared, dq, transpose_A=True)
                 for i, j in T.Parallel(block_N, dim):
                     T.atomic_add(dQ[bz, k * block_N + i, bx, j], dq[i, j])
             T.copy(dv, dv_shared)
@@ -234,22 +236,21 @@ def flashattn_bwd_warp(batch, heads, seq_len, dim, is_causal, block_M, block_N):
     return flashattn_bwd(batch, heads, seq_len, dim, is_causal, block_M, block_N, threads=256, num_stages=2)
 
 
-def ref_program(Q, K, V, is_causal):
-    """CPU reference forward (for validation); backward ref not implemented."""
+def ref_program(Q, K, V, dO, is_causal):
+    """fp32 autograd reference: returns O, dQ, dK, dV."""
     dim = Q.size(-1)
-    Q_f = Q.cpu().float()
-    K_f = K.cpu().float()
-    V_f = V.cpu().float()
+    Q_f, K_f, V_f = (t.detach().float().requires_grad_() for t in (Q, K, V))
     scores = torch.einsum("bqhd,bkhd->bhqk", Q_f, K_f)
     scores = scores / (dim**0.5)
     if is_causal:
         seq_len = Q_f.size(1)
-        mask = torch.tril(torch.ones(seq_len, seq_len))
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=Q.device))
         mask = mask.unsqueeze(0).unsqueeze(0)
         scores = scores.masked_fill(mask == 0, float("-inf"))
     P = F.softmax(scores, dim=-1)
-    out_ref = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
-    return out_ref.to(Q.dtype)
+    O = torch.einsum("bhqk,bkhd->bqhd", P, V_f)
+    O.backward(dO.float())
+    return O.detach(), Q_f.grad, K_f.grad, V_f.grad
 
 
 def main(
@@ -281,8 +282,15 @@ def main(
     dK = torch.empty_like(K, device="cuda")
     dV = torch.empty_like(V, device="cuda")
     kernel_bwd(Q, K, V, dO, lse, Delta, dQ, dK, dV)
-    _ = kernel_post(dQ)  # dQ_out in output layout; not compared to ref (no backward ref)
-    print("Blackwell MHA bwd ({}): run OK (backward gradients not verified against ref).".format(variant))
+    dQ_out = kernel_post(dQ)
+
+    O_ref, dQ_ref, dK_ref, dV_ref = ref_program(Q, K, V, dO, is_causal)
+    # bf16 outputs (eps 7.8e-3): an element-wise 1e-2 bound is about one ulp at |x| ~ 1.
+    torch.testing.assert_close(O.float(), O_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(dV.float(), dV_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(dK.float(), dK_ref, rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(dQ_out.float(), dQ_ref, rtol=2e-2, atol=2e-2)
+    print("Blackwell MHA bwd ({}): all checks passed.".format(variant))
 
 
 if __name__ == "__main__":
