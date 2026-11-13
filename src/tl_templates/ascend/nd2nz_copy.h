@@ -77,6 +77,11 @@ struct ascend_nd2nz_scatter_impl<
         auto reg = V::vlds_norm(srcBase + r * COLS, 0);
         dstPtr = V::vsstb(reg, dstPtr, STRIDE, mask, POST_UPDATE);
       }
+      // asc_update_mask_b16/b32 return a predicate, they do not decrement the
+      // count they are given, so the loop condition has to be advanced here.
+      count = count > static_cast<uint32_t>(VL_T)
+                  ? count - static_cast<uint32_t>(VL_T)
+                  : 0U;
       ++pass;
     }
   }
