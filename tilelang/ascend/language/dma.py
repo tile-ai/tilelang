@@ -61,6 +61,20 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_copy_pad_value"), value)
 
 
+_ND2NZ_DST_BYTES = {"half": 2, "bfloat16_t": 2, "float": 4}
+
+
+def _validate_nd2nz_geometry(name, value):
+    """Validate one ND2NZ geometry scalar against the C++ ParseNd2NzGeometry contract."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative static int32, got {value}")
+    if value > 0x7FFFFFFF:
+        raise ValueError(f"{name} must fit int32, got {value}")
+    return value
+
+
 def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype: str) -> None:
     """Copy a prepacked NZ region from UB to L1 using explicit storage pitches.
 
@@ -76,6 +90,18 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
     dtype = names.get(dtype, dtype)
     if dtype not in names.values():
         raise ValueError("NZ post-copy dtype must be float16, bfloat16, or float32")
+    rows = _validate_nd2nz_geometry("rows", rows)
+    cols = _validate_nd2nz_geometry("cols", cols)
+    src_pitch = _validate_nd2nz_geometry("src_pitch", src_pitch)
+    dst_pitch = _validate_nd2nz_geometry("dst_pitch", dst_pitch)
+    if rows and cols:
+        dst_bytes = _ND2NZ_DST_BYTES[dtype]
+        if cols % (32 // dst_bytes) != 0:
+            raise ValueError(f"cols must be C0-aligned (multiple of {32 // dst_bytes}) for {dtype}, got {cols}")
+        if dst_pitch < rows or src_pitch < rows:
+            raise ValueError(f"src_pitch ({src_pitch}) and dst_pitch ({dst_pitch}) must be >= rows ({rows})")
+        if rows > 0xFFFF or dst_pitch - rows > 0xFFFF or src_pitch - rows > 0xFFFF:
+            raise ValueError("ND2NZ geometry exceeds the 16-bit instruction field range")
     if isinstance(dst, BufferLoad):
         dst = access_ptr(dst, "w")
     if isinstance(src, BufferLoad):
