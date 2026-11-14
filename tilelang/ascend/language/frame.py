@@ -57,8 +57,7 @@ def Vector(vector: int | None = None) -> VectorFrame:
     """
     if vector is not None:
         raise ValueError(
-            "T.Vector no longer accepts an AIV count. Use T.Vector() and "
-            "configure the kernel with T.MixedKernel(..., sids=1 or 2)."
+            "T.Vector no longer accepts an AIV count. Use T.Vector() and configure the kernel with T.MixedKernel(..., sids=1 or 2)."
         )
     from tilelang.language.kernel import KernelLaunchFrame
 
