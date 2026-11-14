@@ -150,9 +150,7 @@ def z3_schedule_python(
     # We create ordering variable O_i,j (True means i before j, False means j before i)
     # resource_deps is documented as unordered. Normalize each pair to
     # (min, max) instead of dropping descending pairs at the `i < j` guard.
-    normalized_resource_deps = sorted({
-        (u, v) for u, v in ((min(a, b), max(a, b)) for a, b in resource_deps) if u != v
-    })
+    normalized_resource_deps = sorted({(u, v) for u, v in ((min(a, b), max(a, b)) for a, b in resource_deps) if u != v})
     for i, j in normalized_resource_deps:
         if i < j:  # Only consider each pair once
             ii_i = iis[i]
@@ -502,9 +500,7 @@ def z3_schedule_loop_python(
         # Add resource dependency constraints
         # For tasks i and j that use same resource, they cannot execute simultaneously
         # We create ordering variable O_i,j (True means i before j, False means j before i)
-        normalized_resource_deps = sorted({
-            (u, v) for u, v in ((min(a, b), max(a, b)) for a, b in resource_deps) if u != v
-        })
+        normalized_resource_deps = sorted({(u, v) for u, v in ((min(a, b), max(a, b)) for a, b in resource_deps) if u != v})
         for i, j in normalized_resource_deps:
             if i < j:  # Only consider each pair once
                 ii_i = iis[i]
@@ -596,6 +592,14 @@ def z3_schedule_loop_python(
         for i in range(1, n):
             start_times[i] = start_times[i - 1] + latencies[i - 1]
         best_ii = max(sum(latencies), 1, ii_lower)
+        # A one-version fallback must still honour the dependence latencies.
+        # With buf = 1 the solver constraint is
+        # start[v] - start[u] >= latency - II, i.e. II >= latency + s[u] - s[v].
+        for u, v, distance, latency in data_deps:
+            if distance < 0:
+                needed = latency + start_times[u] - start_times[v]
+                if needed > best_ii:
+                    best_ii = needed
         buffer_versions = [1] * len(buffer_sizes)
     else:
         if verbose:
@@ -622,27 +626,24 @@ def z3_schedule_loop_python(
                     buffer_versions[buffer_var_id] = max(
                         buffer_versions[buffer_var_id], ceil((latency + start_times[u] - start_times[v]) / best_ii)
                     )
-            # The solver bounds buffer_vars to [1, num_stages] and to every
-            # memory group's capacity. Re-derived versions must obey the same
-            # limits, otherwise the emitted schedule can exceed on-chip memory.
-            for idx in range(len(buffer_versions)):
-                buffer_versions[idx] = min(max(buffer_versions[idx], 1), num_stages)
-            for group in memory_groups:
-                cap = group[0]
-                idxs = group[1:]
-                if not idxs:
-                    continue
-                total = sum(buffer_versions[i] * buffer_sizes[i] for i in idxs)
-                if total > cap:
-                    raise ValueError(
-                        f"recalculated buffer versions exceed memory group capacity "
-                        f"({total} > {cap}); increase num_stages or reduce buffer sizes"
-                    )
         else:
             buffer_versions = []
             for i in range(len(buffer_sizes)):
                 buffer_var = best_model.eval(best_buffer_vars[i]).as_long()
                 buffer_versions.append(buffer_var)
+
+    # Both the solver result and the sequential fallback must respect the
+    # solver's buffer-version bounds and every memory group's capacity.
+    for idx in range(len(buffer_versions)):
+        buffer_versions[idx] = min(max(buffer_versions[idx], 1), num_stages)
+    for group in memory_groups:
+        cap = group[0]
+        idxs = group[1:]
+        if not idxs:
+            continue
+        total = sum(buffer_versions[i] * buffer_sizes[i] for i in idxs)
+        if total > cap:
+            raise ValueError(f"buffer versions exceed memory group capacity ({total} > {cap}); increase num_stages or reduce buffer sizes")
 
     # Sort tasks by start time (and by index as tie-breaker)
     task_indices = list(range(n))

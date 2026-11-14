@@ -33,19 +33,21 @@ def _validate_grouped_layout(grouped_layout, num_groups, *, context: str) -> Non
     """
     from tvm.tirx import Buffer
 
+    if isinstance(num_groups, bool) or not isinstance(num_groups, int) or num_groups <= 0:
+        raise ValueError(f"{context}: num_groups must be a positive integer, got {num_groups!r}")
     if not isinstance(grouped_layout, Buffer):
         raise TypeError(f"{context}: grouped_layout must be a tirx.Buffer, got {type(grouped_layout).__name__}")
     if grouped_layout.scope() != "global":
-        raise ValueError(
-            f"{context}: grouped_layout must live in global memory (GM), got scope {grouped_layout.scope()!r}"
-        )
+        raise ValueError(f"{context}: grouped_layout must live in global memory (GM), got scope {grouped_layout.scope()!r}")
     if str(grouped_layout.dtype) != "int32":
         raise ValueError(f"{context}: grouped_layout must have dtype int32, got {grouped_layout.dtype}")
     if len(grouped_layout.shape) < 1:
         raise ValueError(f"{context}: grouped_layout must have rank >= 1, got shape {grouped_layout.shape}")
     extent = grouped_layout.shape[0]
     extent_value = extent.value if hasattr(extent, "value") else extent
-    if isinstance(extent_value, int) and isinstance(num_groups, int) and extent_value < num_groups:
+    if not isinstance(extent_value, int):
+        raise ValueError(f"{context}: grouped_layout must have a static first extent, got {extent!r}")
+    if extent_value < num_groups:
         raise ValueError(
             f"{context}: grouped_layout has {extent_value} entries but num_groups={num_groups}; "
             "the scheduler indexes grouped_layout[group] for every group"
@@ -78,7 +80,7 @@ class AscendBaseTileScheduler(BaseTileScheduler):
     ----------
     block_m, block_n : int
         Tile sizes along M and N.
-    num_cores : int | PrimExpr
+    num_cores : int
         Persistent stride = number of resident cores (grid dim).
     shape_m, shape_n : int | PrimExpr
         Problem M and N.
@@ -123,9 +125,7 @@ class AscendBaseTileScheduler(BaseTileScheduler):
         self._block_n = block_n
         self._num_cores = num_cores
         if isinstance(num_cores, bool) or not isinstance(num_cores, int) or num_cores <= 0:
-            raise ValueError(
-                f"num_cores must be a positive integer (the persistent core-grid stride), got {num_cores!r}"
-            )
+            raise ValueError(f"num_cores must be a positive integer (the persistent core-grid stride), got {num_cores!r}")
         self._shape_m = shape_m
         self._shape_n = shape_n
         self._group_m = group_m
@@ -529,9 +529,7 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
         if isinstance(alignment, bool) or not isinstance(alignment, int) or alignment <= 0:
             raise ValueError(f"k-grouped alignment must be a positive integer, got {alignment!r}")
         if alignment % self._MX_SF_DIVISOR != 0:
-            raise ValueError(
-                f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}"
-            )
+            raise ValueError(f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}")
         super().__init__(
             block_m=block_m,
             block_n=block_n,
