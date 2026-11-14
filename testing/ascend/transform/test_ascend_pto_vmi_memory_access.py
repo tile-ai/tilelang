@@ -1338,6 +1338,7 @@ def test_passes_through_non_target_and_non_vmi():
     assert after["main"].body.same_as(mod["main"].body)
 
 
+@pytest.mark.pto
 def test_shared_scalar_definitions_with_fixed_vmi_addresses():
     work = _buffer((128,))
     i = tirx.Var("i", "int64")
@@ -1356,6 +1357,7 @@ def test_shared_scalar_definitions_with_fixed_vmi_addresses():
     _assert_plan(store, address_index=1, b=64, e=64, d=0, rw=2)
 
 
+@pytest.mark.pto
 def test_non_vmi_unsigned_cast_is_not_analyzed():
     i = tirx.Var("i", "int32")
     signed = tirx.Var("signed", "int32")
@@ -1379,6 +1381,7 @@ def test_non_vmi_unsigned_cast_is_not_analyzed():
 
 @pytest.mark.parametrize("binding", ["bind", "let", "alias"])
 @pytest.mark.parametrize("memory_uses_cast", [False, True])
+@pytest.mark.pto
 def test_wrapping_cast_with_vmi(binding, memory_uses_cast):
     work = _buffer((64,))
     i, signed = tirx.Var("i", "int32"), tirx.Var("signed", "int32")
@@ -1405,6 +1408,7 @@ def test_wrapping_cast_with_vmi(binding, memory_uses_cast):
         _assert_no_raw_address(result)
 
 
+@pytest.mark.pto
 def test_nonwrapping_cast_keeps_descriptor_proof():
     work = _buffer((128,))
     i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")
@@ -1424,6 +1428,7 @@ def test_nonwrapping_cast_keeps_descriptor_proof():
 
 
 @pytest.mark.parametrize("field", ["offset", "extent", "shape", "stride", "elem_offset"])
+@pytest.mark.pto
 def test_wrapping_cast_in_descriptor_metadata_rejected(field):
     i = tirx.Var("i", "int32")
     unsigned = tirx.Var("unsigned", "uint32")
@@ -1453,6 +1458,7 @@ def test_wrapping_cast_in_descriptor_metadata_rejected(field):
 
 
 @pytest.mark.parametrize("context", ["if", "assert", "assume", "select", "call"])
+@pytest.mark.pto
 def test_wrapping_cast_condition_does_not_install_false_facts(context):
     i = tirx.Var("i", "int32")
     unsigned = tirx.Var("unsigned", "uint32")
@@ -1491,6 +1497,7 @@ def test_wrapping_cast_condition_does_not_install_false_facts(context):
 
 
 @pytest.mark.parametrize("access_position", ["then", "else", "after"])
+@pytest.mark.pto
 def test_wrapping_condition_keeps_branch_assertions_scoped(access_position):
     work = _buffer((1, 128))
     i = tirx.Var("i", "int32")
@@ -1515,6 +1522,7 @@ def test_wrapping_condition_keeps_branch_assertions_scoped(access_position):
 
 @pytest.mark.parametrize("scope", ["for_min", "for_extent", "block_min", "block_extent", "attr", "assume", "while"])
 @pytest.mark.parametrize("access_position", ["inside", "after"])
+@pytest.mark.pto
 def test_body_assertions_stay_in_their_statement_scope(scope, access_position):
     work = _buffer((1, 128))
     i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
@@ -1555,6 +1563,7 @@ def test_body_assertions_stay_in_their_statement_scope(scope, access_position):
             _run(_sblock(body, work), params=[execute_body])
 
 
+@pytest.mark.pto
 def test_cast_safe_in_guarded_scope_keeps_proof():
     work = _buffer((128,))
     i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")
@@ -1578,6 +1587,7 @@ def test_cast_safe_in_guarded_scope_keeps_proof():
 
 
 @pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32", "uint64", "int8", "int16"])
+@pytest.mark.pto
 def test_narrowing_and_signedness_cast_cannot_prove_small_access(dtype):
     work = _buffer((64,))
     i, small = tirx.Var("i", "int32"), tirx.Var("small", dtype)
@@ -1598,6 +1608,7 @@ def test_narrowing_and_signedness_cast_cannot_prove_small_access(dtype):
         _run(_sblock(body, work))
 
 
+@pytest.mark.pto
 def test_wrapping_let_does_not_pollute_outer_scalar_proof():
     work = _buffer((64,))
     i = tirx.Var("i", "int32")
@@ -1621,6 +1632,7 @@ def test_wrapping_let_does_not_pollute_outer_scalar_proof():
     _assert_no_raw_address(result)
 
 
+@pytest.mark.pto
 def test_cast_guarded_through_scalar_alias_keeps_proof():
     work = _buffer((128,))
     i, signed = tirx.Var("i", "int32"), tirx.Var("signed", "int32")
