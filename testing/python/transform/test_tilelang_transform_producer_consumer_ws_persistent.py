@@ -407,7 +407,6 @@ def test_ws_pass_applies_under_t_persistent_primitive():
     assert "tl_tiled_ws_applied" in script
 
 
-@tilelang.testing.requires_cuda
 def test_ws_pass_applies_under_persistent_serial():
     """Same coverage gap exercised via a hand-written ``T.serial`` scheduler."""
     func = persistent_matmul_serial()
@@ -1019,6 +1018,179 @@ def test_ws_producer_prelude_before_outer_loop():
     A, B, _ = _prelude_inputs(K=160)
     ref = A[:, 32:].float() @ B[:, 32:].float().T
     torch.testing.assert_close(kernel(A, B), ref.repeat(2, 1), rtol=1e-2, atol=1e-2)
+
+
+def cross_run_producer_scalar_update(
+    M=256,
+    N=256,
+    K=256,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    runs=2,
+    dtype="float16",
+    threads=128,
+):
+    """Issue #3842: the running K offset is updated after each pipeline run.
+
+    The producer reads ``start`` when it evaluates the copy indices of the next
+    run, so the update cannot be sunk into the consumer branch.
+    """
+    iterations = K // block_K
+    step = (iterations + runs - 1) // runs
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(N // block_N, M // block_M, threads=threads) as (bx, by):
+            A_s = T.alloc_shared((block_M, block_K), dtype)
+            B_s = T.alloc_shared((block_K, block_N), dtype)
+            C_l = T.alloc_fragment((block_M, block_N), "float32")
+            start = T.alloc_var(T.int32, init=0)
+            T.clear(C_l)
+            for _ in T.serial(runs):
+                k0 = T.alloc_var(T.int32, init=start)
+                k1 = T.alloc_var(T.int32, init=T.min(iterations, k0 + step))
+                for ko in T.Pipelined(k1 - k0, num_stages=num_stages):
+                    T.copy(A[by * block_M, (k0 + ko) * block_K], A_s)
+                    T.copy(B[(k0 + ko) * block_K, bx * block_N], B_s)
+                    T.gemm(A_s, B_s, C_l)
+                start = start + (k1 - k0)
+            T.copy(C_l, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ws_pass_declines_loop_carried_producer_scalar_update():
+    """A post-pipeline write read by the producer's next run must decline WS."""
+    script = _apply_ws_pass(cross_run_producer_scalar_update())["main"].script()
+    assert "tl_tiled_ws_applied" not in script, "WS must decline when a post-pipeline update feeds the producer's next run"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_declined_loop_carried_update_matches_reference():
+    import torch
+
+    kernel = tilelang.compile(
+        cross_run_producer_scalar_update(),
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
+    torch.manual_seed(0)
+    A = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    B = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
+
+
+def cross_run_producer_shared_prelude_index(
+    M=256,
+    N=256,
+    K=256,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    runs=2,
+    dtype="float16",
+    threads=128,
+):
+    """Issue #3842, indirect variant: the producer index comes from the prelude.
+
+    Unlike ``cross_run_producer_scalar_update``, the K offsets are plain Bind
+    temporaries derived from ``start``, so they stay in the shared prelude
+    instead of being copied into the producer branch. The producer still reads
+    them for its copy indices, which makes ``start`` a producer input through
+    the prelude even though the producer never reads ``start`` directly.
+    """
+    iterations = K // block_K
+    step = (iterations + runs - 1) // runs
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(N // block_N, M // block_M, threads=threads) as (bx, by):
+            A_s = T.alloc_shared((block_M, block_K), dtype)
+            B_s = T.alloc_shared((block_K, block_N), dtype)
+            C_l = T.alloc_fragment((block_M, block_N), "float32")
+            start = T.alloc_var(T.int32, init=0)
+            T.clear(C_l)
+            for _ in T.serial(runs):
+                k_off = start
+                k1 = T.min(iterations, k_off + step)
+                for ko in T.Pipelined(k1 - k_off, num_stages=num_stages):
+                    T.copy(A[by * block_M, (k_off + ko) * block_K], A_s)
+                    T.copy(B[(k_off + ko) * block_K, bx * block_N], B_s)
+                    T.gemm(A_s, B_s, C_l)
+                start = start + (k1 - k_off)
+            T.copy(C_l, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ws_pass_declines_shared_prelude_producer_index_update():
+    """A post-pipeline update read through the shared prelude must decline WS."""
+    script = _apply_ws_pass(cross_run_producer_shared_prelude_index())["main"].script()
+    assert "tl_tiled_ws_applied" not in script, "WS must follow producer reads through the shared prelude"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_ws_declined_shared_prelude_update_matches_reference():
+    import torch
+
+    kernel = tilelang.compile(
+        cross_run_producer_shared_prelude_index(),
+        target=determine_target(),
+        out_idx=[2],
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: False},
+    )
+    torch.manual_seed(0)
+    A = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    B = torch.randn(256, 256, dtype=torch.float16, device="cuda")
+    ref = A.float() @ B.float()
+    torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
+
+
+def test_ws_declines_shared_prelude_alias_update():
+    """Local buffer views sharing storage retain loop-carried dependencies."""
+    from tvm import tirx
+    from tvm.tirx import stmt_functor
+
+    func = cross_run_producer_shared_prelude_index()
+    values = []
+
+    def find_k_off(node):
+        if isinstance(node, tirx.Bind) and node.var.name == "k_off":
+            values.append(node.value)
+
+    stmt_functor.post_order_visit(func.body, find_k_off)
+    assert len(values) == 1
+    value = values[0]
+    assert isinstance(value, tirx.BufferLoad)
+    original = value.buffer
+    alias = tirx.decl_buffer(original.shape, original.dtype, data=original.data, scope="local.var", name="start_alias")
+    assert not alias.same_as(original) and alias.data.same_as(original.data)
+
+    def use_alias(node):
+        if isinstance(node, tirx.Bind) and node.var.name == "k_off":
+            return tirx.Bind(node.var, tirx.BufferLoad(alias, value.indices))
+        return None
+
+    body = stmt_functor.ir_transform(func.body, None, use_alias, None)
+    script = _apply_ws_pass(func.with_body(body))["main"].script()
+    assert "tl_tiled_ws_applied" not in script
 
 
 if __name__ == "__main__":
