@@ -1038,6 +1038,13 @@ def vbrc(value, *, size, group=None, loc=None, ip=None):
             raise TypeError("T.vmi.vbrc(...) with group=... requires a VMI vector input")
         if _lanes_of(value) != group:
             raise ValueError("T.vmi.vbrc(...) with group=... requires the input lane count to match group")
+        size_const = _constant_int(size)
+        if size_const is not None and group > size_const:
+            # A scalar broadcast with group > size used to pass the frontend
+            # and fail in PTOAS (out-of-range group descriptor).
+            raise ValueError(
+                f"T.vmi.vbrc(...) requires group <= size, got group={group}, size={size}"
+            )
     return _call_vmi(
         "vbrc",
         vreg(size, _element_dtype_of(value)),
