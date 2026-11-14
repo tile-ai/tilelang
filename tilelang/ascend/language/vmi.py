@@ -341,10 +341,15 @@ def _normalize_pto_vcvt_rounding(mode, *, context: str, allowed=None):
 
 
 def _validate_positive_stride(name, value, context):
-    if isinstance(value, bool):
+    constant = _constant_int(value)
+    if constant is not None:
+        if constant <= 0:
+            raise ValueError(f"{context} requires {name} to be positive, got {value!r}")
+        return value
+    # Dynamic TIR expressions stay supported, but only scalar integer ones.
+    # Floats, booleans and arbitrary Python objects are not strides.
+    if not _is_integer_scalar(value):
         raise TypeError(f"{context} requires {name} to be a positive integer, got {value!r}")
-    if isinstance(value, int) and value <= 0:
-        raise ValueError(f"{context} requires {name} to be positive, got {value!r}")
     return value
 
 
@@ -1042,9 +1047,7 @@ def vbrc(value, *, size, group=None, loc=None, ip=None):
         if size_const is not None and group > size_const:
             # A scalar broadcast with group > size used to pass the frontend
             # and fail in PTOAS (out-of-range group descriptor).
-            raise ValueError(
-                f"T.vmi.vbrc(...) requires group <= size, got group={group}, size={size}"
-            )
+            raise ValueError(f"T.vmi.vbrc(...) requires group <= size, got group={group}, size={size}")
     return _call_vmi(
         "vbrc",
         vreg(size, _element_dtype_of(value)),
@@ -1197,9 +1200,7 @@ def vexpdif(x, max_value, mask, *, pmode=None, loc=None, ip=None):
     context = "T.vmi.vexpdif(...)"
     _reject_packed_fp4(x, max_value, context=context)
     result_dtype = _require_same_vreg_type(x, max_value, context=context)
-    return _call_vmi(
-        "vexpdif", result_dtype, x, max_value, _require_mask(mask, context=context), pmode=pmode, loc=loc, ip=ip
-    )
+    return _call_vmi("vexpdif", result_dtype, x, max_value, _require_mask(mask, context=context), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
@@ -1326,9 +1327,7 @@ def create_mask(active_lanes, *, size, group=None, loc=None, ip=None):
         raise ValueError("T.vmi.create_mask(...) requires active_lanes to be non-negative")
     if group is None:
         if active_lanes_const is not None and active_lanes_const > size:
-            raise ValueError(
-                "T.vmi.create_mask(...) requires active_lanes to be <= the mask size"
-            )
+            raise ValueError("T.vmi.create_mask(...) requires active_lanes to be <= the mask size")
         return _call_vmi("create_mask", mask(size), active_lanes, size=size, loc=loc, ip=ip)
     if isinstance(group, bool) or not isinstance(group, int):
         raise TypeError("T.vmi.create_mask(...) requires group to be a positive Python integer")
