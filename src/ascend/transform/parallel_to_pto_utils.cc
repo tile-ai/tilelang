@@ -678,12 +678,30 @@ public:
 // ---------------------------------------------------------------------------
 // Shared SIMD_VF region scan: one implementation for both passes.
 // ---------------------------------------------------------------------------
+bool UsesExplicitSIMD(const Stmt &stmt) {
+  bool found = false;
+  PostOrderVisit(stmt, [&](const ObjectRef &node) {
+    if (const auto *call = node.as<CallNode>()) {
+      if (const auto *op = call->op.as<OpNode>()) {
+        found |= std::string(op->name).rfind("tl.simd.", 0) == 0;
+      }
+    }
+  });
+  return found;
+}
+
 namespace {
 
 void CollectAllParallelDeep(const Stmt &stmt,
                             std::vector<const ForNode *> &out) {
   if (const auto *for_node = stmt.as<ForNode>()) {
     if (for_node->kind == ForKind::kParallel) {
+      if (UsesExplicitSIMD(for_node->body)) {
+        // The explicit nest itself needs no conversion, but an automatic
+        // Parallel below it must still be reported as unsupported.
+        CollectAllParallelDeep(for_node->body, out);
+        return;
+      }
       out.push_back(for_node);
     }
     CollectAllParallelDeep(for_node->body, out);
@@ -723,6 +741,16 @@ void CollectAllParallelDeep(const Stmt &stmt,
 void DiscoverUnitsShared(const Stmt &stmt, PtoRegionScan *scan) {
   if (const auto *for_node = stmt.as<ForNode>()) {
     if (for_node->kind == ForKind::kParallel) {
+      if (UsesExplicitSIMD(for_node->body)) {
+        std::vector<const ForNode *> under;
+        CollectAllParallelDeep(for_node->body, under);
+        if (!under.empty()) {
+          scan->has_unsupported_wrapper = true;
+          scan->issue = "an automatic T.Parallel nested inside an explicit "
+                        "SIMD T.Parallel is not yet supported";
+        }
+        return;
+      }
       // A two-layer adjacent Parallel nest is one
       // 2D unit; the layout annotation lives on the outermost For. A
       // third Parallel layer (or a Parallel deeper inside) stays

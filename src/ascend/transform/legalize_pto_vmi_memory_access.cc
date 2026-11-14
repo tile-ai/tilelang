@@ -25,14 +25,15 @@
  * Ordinary (automatic) VMI accesses carry a scalar-origin BufferLoad address
  * and an instruction scalar offset.  This pass replaces the address with the
  * formal ``tl.access_ptr(BufferLoad, extent, rw_mask)`` descriptor, proving in
- * one shared acceptance exit that the descriptor preserves the source address,
- * contains the complete physical access envelope and covers the declared
- * extent under the existing logical pointer-region analysis.  Indexed
- * gather/scatter accesses, whether automatic or caller-written through
- * one direct handle Bind/Let, are rebuilt at the unique active allocation
- * owner origin after the owner identity, layout, capacity and stable-coverage
- * proofs and the bound-address snapshot check.  An ordinary caller-written
- * explicit descriptor is never rewritten: only its coverage is verified and
+ * one shared acceptance exit that the descriptor preserves the source address
+ * and contains the complete physical access envelope.  Indexed gather/scatter
+ * accesses, whether automatic or caller-written through one direct handle
+ * Bind/Let, are rebuilt at the unique active allocation owner origin after the
+ * owner identity, layout, capacity and bound-address snapshot checks.  A
+ * dtype-changing view uses an internal typed owner Buffer with capacity
+ * converted in bit units; it shares the allocation data Var and never creates
+ * another allocation.  An ordinary caller-written explicit descriptor is never
+ * rewritten: only its extent and access-envelope containment are verified, and
  * the instruction offset is kept.  There is no whole-allocation fallback for
  * an ordinary access.
  */
@@ -49,10 +50,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -69,9 +72,6 @@ using namespace ffi;
 namespace {
 
 constexpr const char *kContext = "LegalizePTOVMIMemoryAccess";
-constexpr const char *kCoveragePrefix =
-    "the existing logical pointer-region analysis does not cover the complete "
-    "access";
 
 [[noreturn]] void Fail(const std::string &message, const Span &span) {
   LOG(FATAL) << kContext << ": " << message << SpanHintSuffix(span);
@@ -102,6 +102,11 @@ const Op &VscatterOp() {
 const Op &AccessPtrOp() {
   static const Op &op = Op::Get("tl.access_ptr");
   return op;
+}
+
+bool IsVmiMemoryAccess(const CallNode *call) {
+  return call->op.same_as(VloadOp()) || call->op.same_as(VstoreOp()) ||
+         call->op.same_as(VgatherOp()) || call->op.same_as(VscatterOp());
 }
 
 std::optional<int64_t> ConstInt(const PrimExpr &expr) {
@@ -373,211 +378,6 @@ bool IsUnitStride1d(const Buffer &buffer) {
   return stride.has_value() && stride.value() == 1;
 }
 
-// ---------------------------------------------------------------------------
-// Logical coverage proofs, ported from the frontend's existing consumer
-// ---------------------------------------------------------------------------
-std::optional<std::string> LocalCoverageReason(arith::Analyzer *analyzer,
-                                               const Buffer &buffer,
-                                               const Array<PrimExpr> &starts,
-                                               const PrimExpr &extent) {
-  size_t ndim = buffer->shape.size();
-  if (ndim == 0) {
-    return std::string(kCoveragePrefix) + ": the buffer has no dimensions";
-  }
-  if (starts.size() != ndim) {
-    return std::string(kCoveragePrefix) +
-           ": the descriptor start arity does not match the buffer rank";
-  }
-  if (!IsTightBuffer(buffer)) {
-    return std::string(kCoveragePrefix) +
-           ": the address is a local coordinate of a buffer whose layout is "
-           "not "
-           "proven tight row-major, so no accepted local coverage proof "
-           "applies";
-  }
-  std::optional<int64_t> constant = ConstInt(extent);
-  if (!constant.has_value()) {
-    if (!analyzer->CanProve(extent > 0)) {
-      return std::string(kCoveragePrefix) +
-             ": cannot prove the descriptor extent is positive";
-    }
-    if (ndim > 1) {
-      size_t dim = ndim - 1;
-      PrimExpr start = starts[dim];
-      if (!analyzer->CanProve(start >= 0) ||
-          !analyzer->CanProve(start + extent <= buffer->shape[dim])) {
-        std::ostringstream oss;
-        oss << kCoveragePrefix
-            << ": a non-constant extent must stay inside the innermost "
-               "dimension "
-            << dim << " (length " << buffer->shape[dim] << ", start " << start
-            << "), but that inclusion cannot be proven";
-        return oss.str();
-      }
-    }
-    return std::nullopt;
-  }
-  int64_t rem = constant.value();
-  if (rem <= 0) {
-    return std::string(kCoveragePrefix) +
-           ": the descriptor extent must be positive, got " +
-           std::to_string(rem);
-  }
-  // Dim 0 is the outermost axis: there is no further outward carry to declare.
-  for (size_t dim = ndim - 1; dim > 0; --dim) {
-    if (rem <= 1) {
-      return std::nullopt;
-    }
-    PrimExpr start = starts[dim];
-    std::optional<int64_t> length = ConstInt(buffer->shape[dim]);
-    if (!length.has_value()) {
-      if (!analyzer->CanProve(start >= 0) ||
-          !analyzer->CanProve(start + IntConst(rem) <= buffer->shape[dim])) {
-        std::ostringstream oss;
-        oss << kCoveragePrefix << ": " << rem
-            << " remaining elements must stay inside the non-constant "
-               "dimension "
-            << dim << " (start " << start
-            << "), but that inclusion cannot be proven";
-        return oss.str();
-      }
-      return std::nullopt;
-    }
-    if (length.value() <= 0) {
-      return std::string(kCoveragePrefix) + ": dimension " +
-             std::to_string(dim) + " has non-positive length " +
-             std::to_string(length.value());
-    }
-    int64_t rnext = CeilDiv(rem, length.value(), kContext, Span());
-    __int128 bound = static_cast<__int128>(rnext) * length.value();
-    bool fits = true;
-    bool carries = false;
-    if (bound <= std::numeric_limits<int64_t>::max()) {
-      carries = analyzer->CanProve(start + IntConst(rem) <=
-                                   IntConst(static_cast<int64_t>(bound)));
-    } else {
-      std::optional<int64_t> start_const = ConstInt(start);
-      if (start_const.has_value()) {
-        carries = static_cast<__int128>(start_const.value()) + rem <= bound;
-      } else {
-        fits = false;
-      }
-    }
-    if (!analyzer->CanProve(start >= 0) ||
-        !analyzer->CanProve(start < IntConst(length.value())) || !carries) {
-      std::ostringstream oss;
-      oss << kCoveragePrefix << ": dimension " << dim << " (length "
-          << length.value() << ") starts at " << start << " and carries " << rem
-          << " elements, but the existing row-major carry only declares "
-          << rnext << " dimension(s) from the start";
-      if (!fits) {
-        oss << " (the static bound does not fit int64)";
-      }
-      return oss.str();
-    }
-    rem = rnext;
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string> OriginPrefixReason(arith::Analyzer *analyzer,
-                                              const Buffer &buffer,
-                                              const PrimExpr &extent,
-                                              bool require_static_shape) {
-  if (buffer->shape.empty()) {
-    return std::string(kCoveragePrefix) + ": the buffer has no dimensions";
-  }
-  for (size_t dim = 0; dim < buffer->shape.size(); ++dim) {
-    std::optional<int64_t> length = ConstInt(buffer->shape[dim]);
-    if (length.has_value() && length.value() <= 0) {
-      return std::string(kCoveragePrefix) + ": dimension " +
-             std::to_string(dim) + " has non-positive length " +
-             std::to_string(length.value());
-    }
-    if (require_static_shape && !length.has_value()) {
-      return std::string(kCoveragePrefix) +
-             ": the origin descriptor has a "
-             "non-constant dimension " +
-             std::to_string(dim) + ", so no stable dense-prefix proof applies";
-    }
-  }
-  std::optional<int64_t> constant = ConstInt(extent);
-  if (constant.has_value()) {
-    if (constant.value() <= 0) {
-      return std::string(kCoveragePrefix) +
-             ": the descriptor extent must be positive, got " +
-             std::to_string(constant.value());
-    }
-    return std::nullopt;
-  }
-  if (!analyzer->CanProve(extent > 0)) {
-    return std::string(kCoveragePrefix) +
-           ": cannot prove the descriptor extent is positive";
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string>
-WholeDensePermutationReason(const Buffer &buffer, const Array<PrimExpr> &starts,
-                            const PrimExpr &extent) {
-  if (buffer->strides.empty() ||
-      buffer->strides.size() != buffer->shape.size()) {
-    return std::string("the buffer has no explicit permutation strides");
-  }
-  for (const PrimExpr &start : starts) {
-    std::optional<int64_t> value = ConstInt(start);
-    if (!value.has_value() || value.value() != 0) {
-      return std::string("the descriptor start is not the origin");
-    }
-  }
-  std::vector<int64_t> dims;
-  int64_t total = 1;
-  for (const PrimExpr &shape : buffer->shape) {
-    std::optional<int64_t> length = ConstInt(shape);
-    if (!length.has_value() || length.value() <= 0) {
-      return std::string("the shape is not static and positive");
-    }
-    dims.push_back(length.value());
-    __int128 next = static_cast<__int128>(total) * length.value();
-    if (next > std::numeric_limits<int64_t>::max()) {
-      return std::string("the whole dense span does not fit int64");
-    }
-    total = static_cast<int64_t>(next);
-  }
-  std::optional<int64_t> constant = ConstInt(extent);
-  if (!constant.has_value() || constant.value() != total) {
-    return std::string(
-               "the descriptor extent is not exactly the whole dense span ") +
-           std::to_string(total);
-  }
-  std::vector<std::pair<int64_t, int64_t>> axes;
-  for (size_t dim = 0; dim < dims.size(); ++dim) {
-    std::optional<int64_t> stride = ConstInt(buffer->strides[dim]);
-    if (!stride.has_value() || stride.value() < 0) {
-      return std::string("a stride is not a static non-negative integer");
-    }
-    if (dims[dim] == 1) {
-      continue;
-    }
-    axes.emplace_back(stride.value(), dims[dim]);
-  }
-  std::sort(axes.begin(), axes.end());
-  int64_t expected = 1;
-  for (const auto &[stride, length] : axes) {
-    if (stride != expected) {
-      return std::string("stride ") + std::to_string(stride) +
-             " does not continue the dense permutation at " +
-             std::to_string(expected);
-    }
-    __int128 next = static_cast<__int128>(expected) * length;
-    if (next > std::numeric_limits<int64_t>::max()) {
-      return std::string("the whole dense span does not fit int64");
-    }
-    expected = static_cast<int64_t>(next);
-  }
-  return std::nullopt;
-}
-
 bool PaddedRowMajor(arith::Analyzer *analyzer, const Buffer &buffer) {
   size_t ndim = buffer->shape.size();
   if (ndim == 0 || buffer->strides.empty() || buffer->strides.size() != ndim) {
@@ -601,40 +401,6 @@ bool PaddedRowMajor(arith::Analyzer *analyzer, const Buffer &buffer) {
     }
   }
   return true;
-}
-
-std::optional<std::string> ExplicitCoverageReason(arith::Analyzer *analyzer,
-                                                  const Buffer &buffer,
-                                                  const Array<PrimExpr> &starts,
-                                                  const PrimExpr &extent) {
-  if (IsTightBuffer(buffer)) {
-    return LocalCoverageReason(analyzer, buffer, starts, extent);
-  }
-  bool origin = true;
-  for (const PrimExpr &start : starts) {
-    std::optional<int64_t> value = ConstInt(start);
-    if (!value.has_value() || value.value() != 0) {
-      origin = false;
-      break;
-    }
-  }
-  if (origin && !buffer->strides.empty() &&
-      buffer->strides.size() == buffer->shape.size() &&
-      PaddedRowMajor(analyzer, buffer)) {
-    return OriginPrefixReason(analyzer, buffer, extent,
-                              /*require_static_shape=*/true);
-  }
-  std::optional<std::string> permutation_reason =
-      WholeDensePermutationReason(buffer, starts, extent);
-  if (!permutation_reason.has_value()) {
-    return std::nullopt;
-  }
-  return std::string(kCoveragePrefix) +
-         ": the descriptor starts at a local coordinate of a buffer whose "
-         "layout "
-         "is not proven tight row-major, and neither an origin-prefix nor an "
-         "exact whole dense permutation proof applies (" +
-         permutation_reason.value() + ")";
 }
 
 std::optional<PrimExpr> WholeBufferSpan(arith::Analyzer *analyzer,
@@ -796,6 +562,22 @@ std::pair<int64_t, int64_t> BlockEnvelope(const std::optional<PrimExpr> &block,
   return {0, high};
 }
 
+bool SupportsScalarBroadcastLoad(DataType dtype) {
+  if (!dtype.is_scalar()) {
+    return false;
+  }
+  if (dtype.is_int() || dtype.is_uint()) {
+    return dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32;
+  }
+  if (dtype.is_float8_e4m3fn() || dtype.is_float8_e5m2()) {
+    return true;
+  }
+  if (dtype.is_bfloat16()) {
+    return true;
+  }
+  return dtype.is_float() && (dtype.bits() == 16 || dtype.bits() == 32);
+}
+
 std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
                                            DataType elem_dtype, bool is_load,
                                            const std::string &op_name,
@@ -810,6 +592,9 @@ std::pair<int64_t, int64_t> AccessEnvelope(const VmiModes &modes, int64_t lanes,
     // Genuine FP4 descriptors stay in logical element units; the later
     // RewriteFp4ToFp4x2 performs the single physical packing.
     return {0, lanes};
+  }
+  if (is_load && lanes == 1 && SupportsScalarBroadcastLoad(elem_dtype)) {
+    return {0, 1};
   }
   if (is_load) {
     int bits = elem_dtype.bits();
@@ -1019,7 +804,7 @@ ParseAddress(const PrimExpr &operand, bool is_load, const std::string &op_name,
 // ---------------------------------------------------------------------------
 // Descriptor plans and the shared acceptance exit
 // ---------------------------------------------------------------------------
-enum class RejectionKind { kNone, kExtent, kAddress, kLow, kHigh, kCoverage };
+enum class RejectionKind { kNone, kExtent, kAddress, kLow, kHigh };
 
 struct Rejection {
   RejectionKind kind{RejectionKind::kNone};
@@ -1035,9 +820,6 @@ struct DescriptorPlan {
   PrimExpr extent;
   PrimExpr offset;
   std::optional<PrimExpr> relative;
-  bool origin{false};
-  bool explicit_plan{false};
-  bool require_static_shape{false};
 };
 
 Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
@@ -1079,20 +861,6 @@ Rejection AcceptPlan(arith::Analyzer *analyzer, const AccessAddress &address,
             "proven"};
   }
 
-  std::optional<std::string> coverage;
-  if (plan.explicit_plan) {
-    coverage = ExplicitCoverageReason(analyzer, address.buffer, plan.starts,
-                                      plan.extent);
-  } else if (plan.origin) {
-    coverage = OriginPrefixReason(analyzer, address.buffer, plan.extent,
-                                  plan.require_static_shape);
-  } else {
-    coverage =
-        LocalCoverageReason(analyzer, address.buffer, plan.starts, plan.extent);
-  }
-  if (coverage.has_value()) {
-    return {RejectionKind::kCoverage, coverage.value()};
-  }
   return {};
 }
 
@@ -1156,7 +924,6 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
                                   int64_t high, bool is_load,
                                   const std::string &op_name,
                                   const Span &span) {
-  std::optional<std::string> coverage_reason;
   int64_t neg_low = CheckedNeg(low, op_name, span);
   int64_t width = CheckedAdd(high, neg_low, op_name, span);
 
@@ -1171,14 +938,9 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
       plan.extent = IntConst(width);
       plan.offset = IntConst(neg_low);
       plan.relative = RelativeOffset(address.buffer, plan.starts);
-      if (plan.relative.has_value()) {
-        Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
-        if (Accepted(rejection)) {
-          return plan;
-        }
-        if (rejection.kind == RejectionKind::kCoverage) {
-          coverage_reason = rejection.message;
-        }
+      if (plan.relative.has_value() &&
+          Accepted(AcceptPlan(analyzer, address, plan, low, high))) {
+        return plan;
       }
     }
   }
@@ -1194,15 +956,8 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
     plan.extent = analyzer->Simplify(source_relative.value() + IntConst(high));
     plan.offset = source_relative.value();
     plan.relative = IntConst(0);
-    plan.origin = true;
-    plan.require_static_shape = true;
-    Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
-    if (Accepted(rejection)) {
+    if (Accepted(AcceptPlan(analyzer, address, plan, low, high))) {
       return plan;
-    }
-    if (rejection.kind == RejectionKind::kCoverage &&
-        !coverage_reason.has_value()) {
-      coverage_reason = rejection.message;
     }
   }
 
@@ -1215,15 +970,8 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
       plan.extent = span.value();
       plan.offset = source_relative.value();
       plan.relative = IntConst(0);
-      plan.origin = true;
-      plan.require_static_shape = address.buffer->shape.size() > 1;
-      Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
-      if (Accepted(rejection)) {
+      if (Accepted(AcceptPlan(analyzer, address, plan, low, high))) {
         return plan;
-      }
-      if (rejection.kind == RejectionKind::kCoverage &&
-          !coverage_reason.has_value()) {
-        coverage_reason = rejection.message;
       }
     }
   }
@@ -1245,8 +993,7 @@ DescriptorPlan ChooseNegativePlan(arith::Analyzer *analyzer,
     reason = "cannot prove that any constructible descriptor covers the finite "
              "access envelope";
   }
-  FailDescriptor(op_name, coverage_reason.value_or(reason), address.buffer,
-                 span);
+  FailDescriptor(op_name, reason, address.buffer, span);
 }
 
 DescriptorPlan ChooseLocalPlan(arith::Analyzer *analyzer,
@@ -1273,7 +1020,6 @@ PrimExpr ValidateExplicitDescriptor(arith::Analyzer *analyzer,
   plan.starts = address.starts;
   plan.extent = address.extent;
   plan.offset = delta;
-  plan.explicit_plan = true;
   Rejection rejection = AcceptPlan(analyzer, address, plan, low, high);
   if (!Accepted(rejection)) {
     std::ostringstream oss;
@@ -1309,7 +1055,7 @@ PrimExpr MakeDescriptor(const Buffer &buffer, const Array<PrimExpr> &starts,
 }
 
 // ---------------------------------------------------------------------------
-// Indexed owner identity, layout and stable whole-area coverage
+// Indexed owner identity, layout and capacity
 // ---------------------------------------------------------------------------
 Buffer FindAllocationOwner(const std::vector<Buffer> &active_allocations,
                            const Buffer &source, const std::string &op_name,
@@ -1398,47 +1144,6 @@ std::optional<std::string> OwnerTightReason(arith::Analyzer *analyzer,
         return oss.str();
       }
       expected = analyzer->Simplify(expected * WidenToInt64(factor));
-    }
-  }
-  return std::nullopt;
-}
-
-std::optional<std::string> OwnerCoverageReason(arith::Analyzer *analyzer,
-                                               const Buffer &owner) {
-  size_t ndim = owner->shape.size();
-  if (ndim == 0) {
-    return std::string("the owner has no dimensions");
-  }
-  // With a constant extent, the existing logical pointer-region consumer
-  // distributes the extent innermost-first and treats the first non-constant
-  // dimension as the whole dimension (remaining=1).  A later constant extent
-  // is therefore stable only when every dimension outside that innermost
-  // non-constant dimension is provably length one; inner dimensions are
-  // consumed in full because E is exactly their product.  This applies to
-  // symbolic axes too: the consumer does not turn an Analyzer constant fact
-  // into an IntImm shape node, so a dynamic outer axis that is not provably
-  // one would degrade to its origin index after the extent becomes constant.
-  size_t innermost_dynamic = ndim;
-  for (size_t dim = ndim; dim-- > 0;) {
-    if (!ConstInt(owner->shape[dim]).has_value()) {
-      innermost_dynamic = dim;
-      break;
-    }
-  }
-  if (innermost_dynamic == ndim) {
-    return std::nullopt;
-  }
-  for (size_t dim = 0; dim < innermost_dynamic; ++dim) {
-    if (!analyzer->CanProveEqual(owner->shape[dim], IntConst(1))) {
-      std::ostringstream oss;
-      oss << "the owner does not have a stable whole-area logical coverage "
-             "proof: dimension "
-          << dim << " (length " << owner->shape[dim]
-          << ") is outside the innermost non-constant dimension "
-          << innermost_dynamic
-          << " and is not provably length one; a later constant descriptor "
-             "extent would cover only one index of that dimension";
-      return oss.str();
     }
   }
   return std::nullopt;
@@ -1683,6 +1388,118 @@ struct IndexedOwner {
   PrimExpr extent;
 };
 
+bool IsByteAddressableIndexedType(DataType dtype) {
+  return dtype.is_scalar() && !dtype.is_bool() && !dtype.is_float4_e2m1fn() &&
+         (dtype.bits() == 8 || dtype.bits() == 16 || dtype.bits() == 32);
+}
+
+void CheckInt64ProductBound(arith::Analyzer *analyzer, const PrimExpr &value,
+                            int64_t factor, const std::string &op_name,
+                            const Span &span) {
+  int64_t bound = analyzer->const_int_bound(value)->max_value;
+  if (bound == arith::ConstIntBound::kPosInf ||
+      bound > std::numeric_limits<int64_t>::max() / factor) {
+    Fail(op_name + " cannot represent the owner bit capacity within int64 when "
+                   "changing the descriptor element type",
+         span);
+  }
+}
+
+PrimExpr ConvertOwnerCapacity(arith::Analyzer *analyzer,
+                              const PrimExpr &owner_extent,
+                              DataType owner_dtype, DataType access_dtype,
+                              const std::string &op_name, const Span &span) {
+  if (!IsByteAddressableIndexedType(owner_dtype) ||
+      !IsByteAddressableIndexedType(access_dtype)) {
+    Fail(op_name + " supports dtype-changing indexed views only for scalar "
+                   "byte-addressable storage types",
+         span);
+  }
+  int64_t owner_bits = owner_dtype.bits();
+  int64_t access_bits = access_dtype.bits();
+  CheckInt64ProductBound(analyzer, owner_extent, owner_bits, op_name, span);
+  arith::Analyzer local_analyzer;
+  PrimExpr owner_bits_expr = make_const(owner_extent.dtype(), owner_bits);
+  PrimExpr access_bits_expr = make_const(owner_extent.dtype(), access_bits);
+  PrimExpr zero = make_const(owner_extent.dtype(), 0);
+  PrimExpr bit_capacity =
+      local_analyzer.Simplify(owner_extent * owner_bits_expr);
+  if (!analyzer->CanProve(FloorMod(bit_capacity, access_bits_expr) == zero)) {
+    Fail(op_name +
+             " cannot convert the whole-owner capacity to the access element "
+             "type without truncating bits",
+         span);
+  }
+  PrimExpr extent =
+      local_analyzer.Simplify(FloorDiv(bit_capacity, access_bits_expr));
+  if (!analyzer->CanProve(extent > 0)) {
+    Fail(op_name +
+             " cannot prove a positive whole-owner capacity in the access "
+             "element type",
+         span);
+  }
+  return extent;
+}
+
+Buffer MakeTypedOwnerView(const Buffer &owner, DataType access_dtype,
+                          const PrimExpr &extent) {
+  return Buffer(owner->data, access_dtype, {extent}, {}, IntConst(0),
+                owner->name + "_as_" + std::to_string(access_dtype.bits()) +
+                    "bit",
+                owner->data_alignment, owner->offset_factor, owner->buffer_type,
+                {}, owner->span);
+}
+
+void ValidateDtypeChangingView(arith::Analyzer *analyzer,
+                               const AccessAddress &address,
+                               const Buffer &owner,
+                               const PrimExpr &typed_extent,
+                               const std::string &op_name, const Span &span) {
+  DataType owner_dtype = owner->dtype;
+  DataType access_dtype = address.buffer->dtype;
+  if (!IsByteAddressableIndexedType(owner_dtype) ||
+      !IsByteAddressableIndexedType(access_dtype)) {
+    Fail(op_name + " supports dtype-changing indexed views only for scalar "
+                   "byte-addressable storage types",
+         span);
+  }
+  int64_t access_bytes = access_dtype.bits() / 8;
+  if (owner->data_alignment % access_bytes != 0) {
+    Fail(op_name +
+             " cannot prove the allocation owner is aligned for the access "
+             "element type",
+         span);
+  }
+  if (std::optional<std::string> stability =
+          OwnerCapacityStabilityReason(address.buffer)) {
+    Fail(op_name + " dtype-changing view " + stability.value(), span);
+  }
+  if (std::optional<std::string> tight =
+          OwnerTightReason(analyzer, address.buffer)) {
+    Fail(op_name + " dtype-changing view is not usable: " + tight.value(),
+         span);
+  }
+
+  PrimExpr view_extent = OwnerExtent(analyzer, address.buffer, op_name, span);
+  Array<PrimExpr> view_origin =
+      address.buffer.OffsetOf(BufferZeros(address.buffer));
+  if (view_origin.size() != 1 ||
+      !RepresentableInInt64(analyzer, view_origin[0])) {
+    Fail(op_name + " requires a single, value-preserving scalar origin for a "
+                   "dtype-changing view",
+         span);
+  }
+  PrimExpr origin64 = WidenToInt64(view_origin[0]);
+  if (!analyzer->CanProve(origin64 >= 0) ||
+      !analyzer->CanProve(origin64 <= typed_extent) ||
+      !analyzer->CanProve(view_extent <= typed_extent - origin64)) {
+    Fail(op_name +
+             " dtype-changing view range is not provably contained in the "
+             "allocation owner",
+         span);
+  }
+}
+
 IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
                                   const AccessAddress &address,
                                   const std::vector<Buffer> &active_allocations,
@@ -1700,13 +1517,6 @@ IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
     CheckIndexedAddressSnapshot(address, op_name, span);
   }
   ValidateUbBuffer(owner, op_name + " owner", span);
-  if (address.buffer->dtype != owner->dtype) {
-    std::ostringstream oss;
-    oss << op_name << " requires the source element dtype "
-        << address.buffer->dtype << " to match the owner element dtype "
-        << owner->dtype;
-    Fail(oss.str(), span);
-  }
   if (std::optional<std::string> tight = OwnerTightReason(analyzer, owner)) {
     Fail(op_name + " owner is not usable: " + tight.value(), span);
   }
@@ -1725,15 +1535,24 @@ IndexedOwner ValidateIndexedOwner(arith::Analyzer *analyzer,
         << ") is not provably zero";
     Fail(oss.str(), span);
   }
-  // Coverage is an independent owner property: check it before constructing
-  // the capacity expression so a shape without a stable whole-area proof is
-  // diagnosed as such, not as an arithmetic failure.
-  if (std::optional<std::string> coverage =
-          OwnerCoverageReason(analyzer, owner)) {
-    Fail(op_name + " owner is not usable: " + coverage.value(), span);
+
+  if (address.buffer->dtype == owner->dtype) {
+    // Keep the original owner Buffer and symbolic capacity expression intact
+    // on the existing same-dtype path.
+    PrimExpr extent = OwnerExtent(analyzer, owner, op_name, span);
+    return {owner, origin, extent};
   }
-  PrimExpr extent = OwnerExtent(analyzer, owner, op_name, span);
-  return {owner, origin, extent};
+
+  PrimExpr owner_extent = OwnerExtent(analyzer, owner, op_name, span);
+  PrimExpr typed_extent =
+      ConvertOwnerCapacity(analyzer, owner_extent, owner->dtype,
+                           address.buffer->dtype, op_name, span);
+  ValidateDtypeChangingView(analyzer, address, owner, typed_extent, op_name,
+                            span);
+  Buffer typed_owner =
+      MakeTypedOwnerView(owner, address.buffer->dtype, typed_extent);
+  return {typed_owner, IntImm(address.buffer->shape[0].dtype(), 0),
+          typed_extent};
 }
 
 // ---------------------------------------------------------------------------
@@ -1752,11 +1571,231 @@ private:
   explicit VmiMemoryAccessLegalizer(arith::Analyzer *analyzer)
       : Parent(analyzer) {}
 
+  // Analyzer::Bind eagerly updates several sub-analyzers. In particular,
+  // an integer Cast that can wrap is not safe to evaluate as an interval:
+  // casting the endpoints can both under-approximate the range and throw
+  // after other facts have already been installed. Check before any update,
+  // including casts hidden behind lexical definitions.
+  bool CanAnalyze(const PrimExpr &expr) {
+    // Reuse checked definitions within this lexical/analyzer context only.
+    // Shared scalar DAGs must not be recursively expanded on every reference.
+    std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> active, checked;
+    std::function<bool(const PrimExpr &)> check = [&](const PrimExpr &value) {
+      bool safe = true;
+      PostOrderVisit(value, [&](const ObjectRef &node) {
+        if (!safe)
+          return;
+        if (const auto *var = node.as<VarNode>()) {
+          Var var_ref = GetRef<Var>(var);
+          if (checked.count(var_ref))
+            return;
+          for (auto it = bindings_.rbegin(); it != bindings_.rend(); ++it) {
+            if (it->first.get() == var) {
+              if (!active.insert(var_ref).second) {
+                safe = false;
+                return;
+              }
+              safe = check(it->second);
+              active.erase(var_ref);
+              break;
+            }
+          }
+          if (safe)
+            checked.insert(var_ref);
+        }
+        const auto *cast = node.as<CastNode>();
+        if (!safe || !cast || !cast->dtype.is_scalar())
+          return;
+        DataType from = cast->value.dtype(), to = cast->dtype;
+        if (!(from.is_int() || from.is_uint()) ||
+            !(to.is_int() || to.is_uint()))
+          return;
+        if (from == to ||
+            (from.is_uint() && to.is_uint() && to.bits() >= from.bits()) ||
+            (from.is_int() && to.is_int() && to.bits() >= from.bits()) ||
+            (from.is_uint() && to.is_int() && to.bits() > from.bits()))
+          return;
+        if (from.bits() > 64 || to.bits() > 64) {
+          safe = false;
+          return;
+        }
+        // Children and their definitions have been checked before asking for
+        // source bounds. Never use the bound of the cast itself here.
+        auto bound = analyzer_->const_int_bound(cast->value);
+        __int128 lo = to.is_uint() ? 0 : -(__int128(1) << (to.bits() - 1));
+        __int128 hi = (__int128(1) << (to.bits() - (to.is_int() ? 1 : 0))) - 1;
+        safe = bound->min_value != arith::ConstIntBoundNode::kNegInf &&
+               bound->max_value != arith::ConstIntBoundNode::kPosInf &&
+               bound->min_value >= lo && bound->max_value <= hi;
+      });
+      return safe;
+    };
+    return check(expr);
+  }
+
+  void BindScalarFacts(const Var &var, const PrimExpr &value) {
+    if (!value.dtype().is_scalar() || value.dtype().bits() > 64 ||
+        var.dtype().bits() > 64 ||
+        !(value.dtype().is_int() || value.dtype().is_uint()) ||
+        SideEffect(value) > CallEffectKind::kPure || !CanAnalyze(value)) {
+      return;
+    }
+    PrimExpr simplified =
+        analyzer_->rewrite_simplify(analyzer_->canonical_simplify(value));
+    auto bound = analyzer_->const_int_bound(simplified);
+    // Keep the definition and the other proof engines, but supply IntSet a
+    // conservative numeric interval instead of re-evaluating Cast endpoints.
+    // Its symbolic interval can be less precise than the bounds that proved
+    // the cast safe, even when the source is guarded by an enclosing branch.
+    arith::IntSet interval = arith::IntSet::Everything();
+    const DataType dtype = var.dtype();
+    __int128 lo = dtype.is_uint() ? 0 : -(__int128(1) << (dtype.bits() - 1));
+    __int128 hi =
+        (__int128(1) << (dtype.bits() - (dtype.is_int() ? 1 : 0))) - 1;
+    if (bound->min_value != arith::ConstIntBoundNode::kNegInf &&
+        bound->max_value != arith::ConstIntBoundNode::kPosInf &&
+        bound->min_value >= lo && bound->max_value <= hi) {
+      interval =
+          arith::IntSet::Interval(make_const(var.dtype(), bound->min_value),
+                                  make_const(var.dtype(), bound->max_value));
+    }
+    analyzer_->const_int_bound.Update(var, bound);
+    analyzer_->modular_set.Update(var, analyzer_->modular_set(simplified));
+    analyzer_->rewrite_simplify.Update(var, simplified);
+    analyzer_->canonical_simplify.Update(var, simplified);
+    analyzer_->int_set.Update(var, interval);
+    analyzer_->transitive_comparisons.Bind(var, value);
+    analyzer_->z3_prover.Bind(var, value);
+  }
+
+  void BindRangeFacts(const Var &var, const Range &range) {
+    if (is_one(range->extent)) {
+      BindScalarFacts(var, range->min);
+    } else {
+      analyzer_->Bind(var, range);
+    }
+  }
+
+  Stmt VisitStmt_(const BindNode *op) final {
+    PrimExpr value = VisitExpr(op->value);
+    BindScalarFacts(op->var, value);
+    if (value.same_as(op->value))
+      return GetRef<Stmt>(op);
+    return tirx::Bind(op->var, value, op->span);
+  }
+
+  Stmt VisitStmt_(const ForNode *op) final {
+    return constraint_scope_.WithNewScope([&]() -> Stmt {
+      // Unsafe bounds suppress loop facts, not the scope of body assertions.
+      if (CanAnalyze(op->min) && CanAnalyze(op->extent)) {
+        Range dom = Range::FromMinExtent(op->min, op->extent);
+        BindRangeFacts(op->loop_var, dom);
+        iter_vars_.Set(op->loop_var, dom);
+        constraint_scope_.Current().Emplace(analyzer_, op->extent > 0);
+      }
+      return StmtExprMutator::VisitStmt_(op);
+    });
+  }
+
+  Stmt VisitStmt_(const WhileNode *op) final {
+    // The loop may execute zero times. Keep body assertions local without
+    // using the condition as a fact, matching the existing While contract.
+    return constraint_scope_.WithNewScope(
+        [&]() { return StmtExprMutator::VisitStmt_(op); });
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    if (CanAnalyze(op->condition)) {
+      return Parent::VisitStmt_(op);
+    }
+    // Skip the unsafe condition's facts, but keep assertions in either
+    // branch from escaping into the other branch or subsequent statements.
+    return constraint_scope_.WithNewScope([&]() -> Stmt {
+      PrimExpr condition = VisitExpr(op->condition);
+      Stmt then_case = constraint_scope_.WithNewScope(
+          [&]() { return VisitStmt(op->then_case); });
+      ffi::Optional<Stmt> else_case;
+      if (op->else_case.defined()) {
+        else_case = constraint_scope_.WithNewScope(
+            [&]() { return VisitStmt(op->else_case.value()); });
+      }
+      if (condition.same_as(op->condition) &&
+          then_case.same_as(op->then_case) &&
+          else_case.same_as(op->else_case)) {
+        return GetRef<Stmt>(op);
+      }
+      auto node = CopyOnWrite(op);
+      node->condition = std::move(condition);
+      node->then_case = std::move(then_case);
+      node->else_case = std::move(else_case);
+      return Stmt(node);
+    });
+  }
+
+  Stmt VisitStmt_(const AssertStmtNode *op) final {
+    return CanAnalyze(op->condition) ? Parent::VisitStmt_(op)
+                                     : StmtExprMutator::VisitStmt_(op);
+  }
+
+  Stmt VisitStmt_(const AttrStmtNode *op) final {
+    bool safe = CanAnalyze(op->value);
+    if (op->attr_key == tirx::attr::tilelang_assume) {
+      safe = safe && CanAnalyze(Downcast<PrimExpr>(op->node));
+    }
+    return safe ? Parent::VisitStmt_(op)
+                : constraint_scope_.WithNewScope(
+                      [&]() { return StmtExprMutator::VisitStmt_(op); });
+  }
+
+  PrimExpr VisitExpr_(const SelectNode *op) final {
+    return CanAnalyze(op->condition) ? Parent::VisitExpr_(op)
+                                     : StmtExprMutator::VisitExpr_(op);
+  }
+
+  PrimExpr VisitExpr_(const ReduceNode *op) final {
+    for (const auto &iv : op->axis) {
+      if (!CanAnalyze(iv->dom->min) || !CanAnalyze(iv->dom->extent)) {
+        return StmtExprMutator::VisitExpr_(op);
+      }
+    }
+    for (const auto &iv : op->axis)
+      BindRangeFacts(iv->var, iv->dom);
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
+  void CheckProofExpr(const PrimExpr &value, const std::string &op_name,
+                      const Span &span) {
+    if (!CanAnalyze(value)) {
+      Fail(op_name + " cannot prove memory access safety through a "
+                     "potentially wrapping integer cast",
+           span);
+    }
+  }
+
+  void CheckProofBuffer(const Buffer &buffer, const std::string &op_name,
+                        const Span &span) {
+    for (const auto &dim : buffer->shape)
+      CheckProofExpr(dim, op_name, span);
+    for (const auto &stride : buffer->strides)
+      CheckProofExpr(stride, op_name, span);
+    CheckProofExpr(buffer->elem_offset, op_name, span);
+  }
+
+  void CheckProofInputs(const AccessAddress &address, const PrimExpr &offset,
+                        const std::string &op_name, const Span &span) {
+    for (const auto &start : address.starts)
+      CheckProofExpr(start, op_name, span);
+    if (address.extent.defined())
+      CheckProofExpr(address.extent, op_name, span);
+    CheckProofExpr(offset, op_name, span);
+    CheckProofBuffer(address.buffer, op_name, span);
+  }
+
   // Scope every statement reached through the default control-flow traversal.
   // The branches/loops of IRMutatorWithAnalyzer call the virtual VisitStmt for
   // their bodies, so bindings and active allocations declared inside them are
-  // restored on exit.  While deliberately gets no condition fact and no extra
-  // analyzer scope; only this side environment is restored.
+  // restored on exit. Analyzer constraints are scoped by the individual
+  // statement visitors; While deliberately gets no condition fact.
   Stmt VisitStmt(const Stmt &stmt) final {
     size_t bind_mark = bindings_.size();
     size_t allocation_mark = active_allocations_.size();
@@ -1771,7 +1810,14 @@ private:
     for (const Buffer &buffer : op->alloc_buffers) {
       RegisterAllocation(buffer);
     }
-    Stmt visited = Parent::VisitStmt_(op);
+    bool safe = true;
+    for (const auto &iv : op->iter_vars) {
+      safe = safe && CanAnalyze(iv->dom->min) && CanAnalyze(iv->dom->extent);
+    }
+    Stmt visited =
+        safe ? Parent::VisitStmt_(op) : constraint_scope_.WithNewScope([&]() {
+          return StmtExprMutator::VisitStmt_(op);
+        });
     active_allocations_.resize(mark);
     return visited;
   }
@@ -1819,9 +1865,7 @@ private:
     // that is not pure is still recorded for address lookup (the variable is
     // bound regardless of purity); only the analyzer fact is conditional.
     PrimExpr value = this->VisitExpr(op->value);
-    if (SideEffect(value) <= CallEffectKind::kPure) {
-      analyzer_->Bind(op->var, value);
-    }
+    BindScalarFacts(op->var, value);
     size_t mark = bindings_.size();
     bindings_.emplace_back(op->var, value);
     PrimExpr body = this->VisitExpr(op->body);
@@ -1833,9 +1877,12 @@ private:
   }
 
   PrimExpr VisitExpr_(const CallNode *op) final {
-    PrimExpr visited = Parent::VisitExpr_(op);
+    bool safe_condition =
+        !op->op.same_as(builtin::if_then_else()) || CanAnalyze(op->args[0]);
+    PrimExpr visited = safe_condition ? Parent::VisitExpr_(op)
+                                      : StmtExprMutator::VisitExpr_(op);
     const auto *call = visited.as<CallNode>();
-    if (call == nullptr) {
+    if (call == nullptr || !IsVmiMemoryAccess(call)) {
       return visited;
     }
     if (call->op.same_as(VloadOp())) {
@@ -1907,6 +1954,7 @@ private:
     PrimExpr input_offset = call->args[address_index + 1];
     AccessAddress address = ParseAddress(call->args[address_index], is_load,
                                          op_name, span, bindings_);
+    CheckProofInputs(address, input_offset, op_name, span);
 
     if (!IsIntegerScalar(input_offset)) {
       Fail(op_name + " requires a scalar integer instruction offset", span);
@@ -2015,6 +2063,10 @@ private:
     }
     AccessAddress address = ParseAddress(call->args[address_index], is_gather,
                                          op_name, span, bindings_);
+    CheckProofInputs(address, input_offset, op_name, span);
+    CheckProofBuffer(
+        FindAllocationOwner(active_allocations_, address.buffer, op_name, span),
+        op_name, span);
     IndexedOwner owner = ValidateIndexedOwner(
         analyzer_, address, active_allocations_, op_name, span);
 
@@ -2024,7 +2076,7 @@ private:
     }
     if (!is_gather) {
       DataType value_elem = call->args[0].dtype().with_lanes(1);
-      if (value_elem != owner.buffer->dtype) {
+      if (value_elem != address.buffer->dtype) {
         Fail(op_name +
                  " requires the destination element dtype to match the value "
                  "element dtype; convert the value before storing",
@@ -2122,16 +2174,12 @@ private:
 void ScanResidualAutomaticAddresses(const Stmt &stmt) {
   PostOrderVisit(stmt, [&](const ObjectRef &node) {
     const auto *call = node.as<CallNode>();
-    if (call == nullptr) {
+    if (call == nullptr || !IsVmiMemoryAccess(call)) {
       return;
     }
     bool is_load = call->op.same_as(VloadOp());
     bool is_store = call->op.same_as(VstoreOp());
-    bool is_gather = call->op.same_as(VgatherOp());
     bool is_scatter = call->op.same_as(VscatterOp());
-    if (!is_load && !is_store && !is_gather && !is_scatter) {
-      return;
-    }
     std::string op_name;
     int address_index = 0;
     if (is_load) {
@@ -2173,6 +2221,17 @@ Pass LegalizePTOVMIMemoryAccess() {
   auto pass_func = [](PrimFunc func, const IRModule &, const PassContext &) {
     Optional<Target> target = func->GetAttr<Target>(tvm::attr::kTarget);
     if (!target.defined() || !TargetIsPTO(target.value())) {
+      return func;
+    }
+    // Do not bind unrelated scalar expressions in the arithmetic analyzer.
+    // This pass only constructs/verifies descriptors for VMI memory calls.
+    bool has_vmi_memory = false;
+    PostOrderVisit(func->body, [&](const ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        has_vmi_memory |= IsVmiMemoryAccess(call);
+      }
+    });
+    if (!has_vmi_memory) {
       return func;
     }
     arith::Analyzer analyzer;

@@ -31,9 +31,12 @@ The remaining cases each run a small fixed number of seeded trials (3-5) and
 cover one device-numerics representative per access form: block_stride, FP4
 raw packed bytes (buffer and explicit-pointer forms), a packed (PK) narrowing
 store, an explicit ``access_ptr`` plus extra offset, and gather/scatter with
-non-zero bases (direct and explicit-pointer forms).  The device numerical
-reference is exact for copy-like kernels and an independent CPU computation
-(torch cast reference) for narrowing.
+non-zero bases (direct and explicit-pointer forms).  Additional regressions
+cover direct cross-row and transposed-view loads, ordinary and versioned
+single-element broadcasts, versioned dtype-changing gather, typed scatter
+canaries, and FP4 packed-pair order.
+The device numerical reference is exact for copy-like kernels and an
+independent CPU computation (torch cast reference) for narrowing.
 
 A runtime group stride has no proven physical envelope, so those kernels are
 rejected at compile time and their diagnostics live in the structural suite;
@@ -637,6 +640,62 @@ def test_padded_group_negative_stride_20_trials(npu):
 
 
 # ---------------------------------------------------------------------------
+# Direct cross-row and transposed-view loads with automatic descriptors
+# ---------------------------------------------------------------------------
+def _direct_pointer_view_kernel(layout):
+    transposed = layout == "transposed"
+
+    @T.prim_func
+    def main(A: T.Tensor((64,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            out = T.alloc_shared((128,), F32)
+            view = None
+            if transposed:
+                view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                seed = T.vmi.vbrc(T.float32(23), size=64)
+                mask = T.vmi.create_mask(64, size=64)
+                T.vmi.vstore(seed, work[0, 64], mask)
+            if transposed:
+                T.copy(A, view[:64, 1])
+            else:
+                T.copy(A, work[1, 0:64])
+            with T.SimdVF():
+                mask = T.vmi.create_mask(128, size=128)
+                if transposed:
+                    value = T.vmi.vload(view[64, 0], size=128)
+                else:
+                    value = T.vmi.vload(work[0, 64], size=128)
+                T.vmi.vstore(value, out[0], mask)
+            T.copy(out, C)
+
+    return main
+
+
+@pytest.mark.parametrize("layout", ["cross_row", "transposed"])
+@pytest.mark.pto
+def test_direct_cross_row_and_transposed_load_numeric(npu, layout):
+    kernel, source = _compile(_direct_pointer_view_kernel(layout))
+    lines = source.splitlines()
+    seed = _line_index(lines, lambda line: "vmi.vstore" in line and ", 64)" in line, what="seed vstore")
+    _assert_mte2_to_v_then_load(
+        lines,
+        lambda line: "mte_gm_ub" in line and "addptr" in line and ", 128)" in line,
+        "size=128)",
+    )
+    vload = _line_index(lines, lambda line: "vmi.vload" in line, what="vmi.vload")
+    assert "pto.addptr(" in lines[vload] and ", 64), 0, size=128)" in lines[vload], lines[vload]
+    assert seed < vload, "row-0 seed store must precede the consumer load"
+
+    def make_case(trial):
+        a = _float_inputs((64,), trial)
+        return [a], torch.cat([torch.full((64,), 23.0), a])
+
+    _run_trials(kernel, make_case, npu, trials=5)
+
+
+# ---------------------------------------------------------------------------
 # Explicit descriptor crossing a row: seeded tail + DMA head, one 128 load
 # ---------------------------------------------------------------------------
 def _cross_row_kernel():
@@ -759,5 +818,189 @@ def test_scatter_nonzero_base(npu, explicit_pointer):
         expected = sentinel.clone()
         expected[64 + offsets.to(torch.int64)] = a
         return [a, sentinel, offsets], expected
+
+    _run_trials(kernel, make_case, npu, trials=3)
+
+
+# ---------------------------------------------------------------------------
+# Issue #37: scalar broadcasts, dtype-changing indexed views and FP4 pairs
+# ---------------------------------------------------------------------------
+def _versioned_single_lane_numeric_kernel(dtype):
+    @T.prim_func
+    def main(A: T.Tensor((4,), dtype), C: T.Tensor((128,), dtype)):
+        with T.Kernel(1):
+            rstd = T.alloc_shared((2,), dtype)
+            out = T.alloc_shared((64,), dtype)
+            T.annotate_buffer_versions({rstd: 2})
+            for w in T.serial(2):
+                T.copy(A[w * 2 : w * 2 + 2], rstd)
+                with T.SimdVF():
+                    scalar = T.vmi.vload(rstd[1], size=1)
+                    value = T.vmi.vbrc(scalar, size=64, group=1)
+                    mask = T.vmi.create_mask(64, size=64)
+                    T.vmi.vstore(value, out[0], mask)
+                T.copy(out, C[w * 64 : w * 64 + 64])
+
+    return main
+
+
+@pytest.mark.parametrize(
+    ("dtype", "torch_dtype", "distribution", "version_elements"),
+    [
+        ("int8", torch.int8, "BRC_B8", 32),
+        ("int16", torch.int16, "BRC_B16", 16),
+        ("float32", torch.float32, "BRC_B32", 8),
+    ],
+)
+@pytest.mark.pto
+def test_versioned_single_lane_load_numeric(npu, dtype, torch_dtype, distribution, version_elements):
+    kernel, source = _compile(_versioned_single_lane_numeric_kernel(dtype))
+    assert f"w * {version_elements}" in source and "size=1)" in source
+    vpto = _vpto_text(source)
+    assert f'dist = "{distribution}"' in vpto, vpto
+
+    def make_case(trial):
+        if torch_dtype == torch.float32:
+            a = _float_inputs((4,), trial)
+        else:
+            generator = torch.Generator().manual_seed(4500 + trial)
+            a = torch.randint(-100, 100, (4,), dtype=torch_dtype, generator=generator)
+        expected = torch.cat([a[1].expand(64), a[3].expand(64)]).clone()
+        return [a], expected
+
+    _run_trials(kernel, make_case, npu, trials=3)
+
+
+def _dtype_view_gather_versioned_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((2, 256), "uint8"), I: T.Tensor((64,), "uint16"), C: T.Tensor((2, 64), "uint16")):
+        with T.Kernel(1):
+            owner = T.alloc_shared((256,), "uint8")
+            index = T.alloc_shared((64,), "uint16")
+            out = T.alloc_shared((64,), "uint16")
+            T.annotate_buffer_versions({owner: 2})
+            words = tirx.decl_buffer((64,), "uint16", data=owner.data, elem_offset=8, scope="shared.dyn")
+            T.copy(I, index)
+            for w in T.serial(2):
+                T.copy(A[w, :], owner)
+                with T.SimdVF():
+                    mask = T.vmi.create_mask(64, size=64)
+                    offsets = T.vmi.vload(index[0], size=64)
+                    value = T.vmi.vgather(words[3], offsets, mask)
+                    T.vmi.vstore(value, out[0], mask)
+                T.copy(out, C[w, :])
+
+    return main
+
+
+@pytest.mark.pto
+def test_dtype_view_gather_versioned_numeric(npu):
+    kernel, source = _compile(_dtype_view_gather_versioned_kernel())
+    lines = source.splitlines()
+    line = next(line for line in lines if "vmi.vgather" in line)
+    assert 'pto.ptr(pto.ui16, "ub")' in line and ", 11)" in line
+    assert "w * 128" in line, line
+    _assert_mte2_to_v_then_indexed(
+        lines,
+        lambda candidate: "mte_gm_ub" in candidate and "pto.addptr(A, w * 256)" in candidate,
+        "vmi.vgather",
+        ", 11)",
+    )
+
+    def make_case(trial):
+        generator = torch.Generator().manual_seed(5000 + trial)
+        a = torch.randint(0, 256, (2, 256), dtype=torch.uint8, generator=generator)
+        offsets = torch.randint(0, 53, (64,), dtype=torch.uint16, generator=generator)
+        words = a.view(torch.uint16).to(torch.int32)
+        expected = torch.stack([words[w, 11 + offsets.to(torch.int64)] for w in range(2)]).to(torch.uint16)
+        return [a, offsets], expected
+
+    _run_trials(kernel, make_case, npu, trials=3)
+
+
+def _dtype_view_scatter_versioned_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((2, 64), "uint16"), S: T.Tensor((2, 256), "uint8"), I: T.Tensor((64,), "uint16"), C: T.Tensor((2, 256), "uint8")):
+        with T.Kernel(1):
+            value = T.alloc_shared((64,), "uint16")
+            owner = T.alloc_shared((256,), "uint8")
+            index = T.alloc_shared((64,), "uint16")
+            T.annotate_buffer_versions({owner: 2})
+            words = tirx.decl_buffer((96,), "uint16", data=owner.data, elem_offset=8, scope="shared.dyn")
+            T.copy(I, index)
+            for w in T.serial(2):
+                T.copy(A[w, :], value)
+                T.copy(S[w, :], owner)
+                with T.SimdVF():
+                    mask = T.vmi.create_mask(64, size=64)
+                    offsets = T.vmi.vload(index[0], size=64)
+                    source = T.vmi.vload(value[0], size=64)
+                    T.vmi.vscatter(source, words[3], offsets, mask)
+                T.copy(owner, C[w, :])
+
+    return main
+
+
+@pytest.mark.pto
+def test_dtype_view_scatter_versioned_numeric_and_canary(npu):
+    kernel, source = _compile(_dtype_view_scatter_versioned_kernel())
+    lines = source.splitlines()
+    line = next(line for line in lines if "vmi.vscatter" in line)
+    assert 'pto.ptr(pto.ui16, "ub")' in line and ", 11)" in line
+    assert "w * 128" in line, line
+    _assert_indexed_then_v_to_mte3(
+        lines,
+        lambda candidate: "mte_ub_gm" in candidate and "pto.addptr(C, w * 256)" in candidate,
+        "vmi.vscatter",
+        ", 11)",
+    )
+
+    def make_case(trial):
+        generator = torch.Generator().manual_seed(6000 + trial)
+        a = torch.randint(0, 65536, (2, 64), dtype=torch.int32, generator=generator).to(torch.uint16)
+        sentinel = torch.randint(0, 256, (2, 256), dtype=torch.uint8, generator=generator)
+        offsets = torch.randperm(64, generator=generator).to(torch.uint16)
+        expected_words = sentinel.view(torch.uint16).to(torch.int32)
+        indices = 11 + offsets.to(torch.int64)
+        for w in range(2):
+            expected_words[w, indices] = a[w].to(torch.int32)
+        expected = expected_words.to(torch.uint16).view(torch.uint8)
+        return [a, sentinel, offsets], expected
+
+    _run_trials(kernel, make_case, npu, trials=3)
+
+
+def _fp4_pair_numeric_kernel():
+    @T.prim_func
+    def main(B: T.Tensor((4,), "uint8"), Z: T.Tensor((4,), "uint8"), C: T.Tensor((4,), "uint8")):
+        with T.Kernel(1):
+            raw_in = T.alloc_shared((4,), "uint8")
+            raw_out = T.alloc_shared((4,), "uint8")
+            T.copy(B, raw_in)
+            T.copy(Z, raw_out)
+            with T.SimdVF():
+                f4_in = tirx.decl_buffer((8,), FP4, data=raw_in.data, scope="shared.dyn")
+                f4_out = tirx.decl_buffer((8,), FP4, data=raw_out.data, scope="shared.dyn")
+                mask = T.vmi.create_mask(1, size=1)
+                value = T.vmi.vload(f4_in[2], size=2)
+                T.vmi.vstore(value, f4_out[4], mask)
+            T.copy(raw_out, C)
+
+    return main
+
+
+@pytest.mark.pto
+def test_fp4_pair_numeric_preserves_both_logical_values(npu):
+    kernel, source = _compile(_fp4_pair_numeric_kernel())
+    line = next(line for line in source.splitlines() if "vmi.vload" in line)
+    assert "size=(2 // 2))" in line
+
+    def make_case(trial):
+        b = torch.tensor([0x21, 0x43, 0x65, 0x87], dtype=torch.uint8)
+        b = torch.bitwise_xor(b, torch.tensor(trial * 0x10, dtype=torch.uint8))
+        canary = torch.tensor([0xF0, 0xE1, 0xD2, 0xC3], dtype=torch.uint8)
+        expected = canary.clone()
+        expected[2] = b[1]
+        return [b, canary], expected
 
     _run_trials(kernel, make_case, npu, trials=3)

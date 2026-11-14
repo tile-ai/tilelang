@@ -16,7 +16,8 @@ visible to the scheduler.  This file verifies:
   candidate moves the source position into it; descriptor base + instruction
   offset always equals the original access address after the normal
   negative-index legalization.
-* Physical envelopes: ordinary loads round up to full physical vectors; group
+* Physical envelopes: supported ordinary single-element loads declare one
+  element, while other ordinary loads round up to full physical vectors; group
   envelopes cover all groups (a slot counts one element per group, a static
   negative stride relocates the lowest address and compensates with the
   instruction offset, a padded row-major view declares its logical prefix from
@@ -28,15 +29,12 @@ visible to the scheduler.  This file verifies:
   32B blocks.  Genuine FP4 descriptors stay logical and are packed exactly
   once; packed (PK) store extents stay logical target elements; gather/scatter
   preserve non-zero bases.
-* Coverage diagnostics from the descriptor pass: a local descriptor must prove
-  the row-major carry from its own start (there is no whole-buffer fallback);
-  dynamic indices may use active loop domains and stable integer lets, but a
-  mutable read or an unknown scalar is never bound as an equality; dynamic
-  inner dimensions and symbolic multi-dimensional extents require an in-row
-  proof.  An explicit ``access_ptr`` keeps its caller-declared descriptor only
-  when its extent contains the envelope and its declared region still covers
-  the access.  API, UB-scope, mask, direction and element-unit checks stay in
-  the frontend.
+* Descriptor-local validation: automatic and explicit descriptors preserve the
+  source address and contain the complete instruction envelope.  Logical region
+  reconstruction is delegated to the shared memory detector, so cross-row,
+  transposed and dynamic accesses do not require a duplicate frontend coverage
+  proof.  API, UB-scope, mask, direction and element-unit checks stay in the
+  frontend.
 * Masks never shrink the may-write extent, a logical ``size=80`` load declares
   both physical reads, and the descriptor pass runs exactly once on the PTO
   path in the documented position (and never for plain AscendC).
@@ -94,20 +92,22 @@ def _lower_pto(func):
         return _lower(func, target=target)
 
 
-def _compile_pto(func):
+def _compile_pto(func, *, pass_configs=None):
     """Compile through the PTODSL -> PTOAS (VPTO) -> Bisheng pipeline."""
-    return tilelang.compile(func, target="pto", out_idx=-1)
+    return tilelang.compile(func, target="pto", out_idx=-1, pass_configs=pass_configs)
 
 
 class _TraceObserver(PassEventObserver):
-    """Record visited pass names and optionally capture a module boundary."""
+    """Record visited pass names and selected module boundaries."""
 
-    def __init__(self, capture_start=None, capture_finish=None):
+    def __init__(self, capture_start=None, capture_finish=None, capture_finished=()):
         self.names = []
         self.capture_start = capture_start
         self.capture_finish = capture_finish
+        self.capture_finished = frozenset(capture_finished)
         self.started_module = None
         self.finished_module = None
+        self.finished_modules = {}
 
     def pass_started(self, mod, event):
         self.names.append(event.name)
@@ -117,6 +117,8 @@ class _TraceObserver(PassEventObserver):
     def pass_finished(self, mod, event, state):
         if event.name == self.capture_finish and self.finished_module is None:
             self.finished_module = mod
+        if event.name in self.capture_finished and event.name not in self.finished_modules:
+            self.finished_modules[event.name] = mod
 
 
 class _TraceTool(PassInstrumentationTool):
@@ -137,9 +139,14 @@ def _lower_pto_traced(
     auto_schedule=True,
     capture_start=None,
     capture_finish=None,
+    capture_finished=(),
 ):
     """Lower *func* with the real product pipeline and record its pass trace."""
-    observer = _TraceObserver(capture_start=capture_start, capture_finish=capture_finish)
+    observer = _TraceObserver(
+        capture_start=capture_start,
+        capture_finish=capture_finish,
+        capture_finished=capture_finished,
+    )
     name = f"vmi-descriptor-trace-{next(_TRACE_IDS)}"
     target = normalize_pto_target("pto") if target_name == "pto" else normalize_ascend_target("ascend")
     with (
@@ -361,7 +368,7 @@ def test_frontend_keeps_ordinary_raw_address():
 
 
 def _runtime_branch_kernel():
-    """Tight (2,128) view whose row-0 coverage follows from a real branch."""
+    """Tight (2,128) view with a dynamic start selected by a real branch."""
 
     @T.prim_func
     def main(A: T.Tensor((256,), F32), k: T.int32, C: T.Tensor((256,), F32)):
@@ -381,7 +388,7 @@ def _runtime_branch_kernel():
 
 @pytest.mark.pto
 def test_runtime_branch_compiles_through_pipeline():
-    """The descriptor pass proves coverage from the enclosing branch facts."""
+    """A runtime branch preserves the dynamic descriptor through the pipeline."""
     artifact = _lower_pto(_runtime_branch_kernel())
     func, call = _single(artifact, "tl.vmi.vload")
     ptr = _resolve_binding(call.args[0], func)
@@ -513,6 +520,35 @@ def test_ordinary_load_covers_full_physical_vectors(dtype, size, expected):
 
     assert _vload_descriptor(main) == (64, expected, 1, 0)
     assert _vstore_descriptor(main) == (512, size, 2, 0)
+
+
+# ---------------------------------------------------------------------------
+# Small version slots: real cross-slot declarations stay rejected
+# ---------------------------------------------------------------------------
+def _versioned_cross_slot_kernel():
+    @T.prim_func
+    def main(A: T.Tensor((4,), F32), C: T.Tensor((128,), F32)):
+        with T.Kernel(1):
+            rstd = T.alloc_shared((2,), F32)
+            out = T.alloc_shared((64,), F32)
+            T.annotate_buffer_versions({rstd: 2})
+            for w in T.serial(2):
+                T.copy(A[w * 2 : w * 2 + 2], rstd)
+                with T.SimdVF():
+                    ptr = T.access_ptr(rstd[0], "r", extent=3)
+                    scalar = T.vmi.vload(ptr, size=1)
+                    value = T.vmi.vbrc(scalar, size=64, group=1)
+                    mask = T.vmi.create_mask(64, size=64)
+                    T.vmi.vstore(value, out[0], mask)
+                T.copy(out, C[w * 64 : w * 64 + 64])
+
+    return main
+
+
+@pytest.mark.pto
+def test_versioned_explicit_cross_slot_descriptor_is_still_rejected():
+    with pytest.raises(tvm.error.TVMError, match="crosses a 32-byte-aligned version slot"):
+        _lower_pto(_versioned_cross_slot_kernel())
 
 
 # ---------------------------------------------------------------------------
@@ -902,6 +938,127 @@ def test_padded_low_group_dma_synchronizes_before_vmi_load():
     assert dma[0] < set_index < wait_index < loads[0], events
 
 
+def _raw_descriptor_in_module(mod, op_name):
+    """Read a pre-LowerAccessPtr descriptor from a captured pipeline module."""
+
+    class _Artifact:
+        device_mod = mod
+
+    func, call = _single(_Artifact(), op_name)
+    ptr_pos = _ptr_position(op_name)
+    ptr = _resolve_binding(call.args[ptr_pos], func)
+    assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name == "tl.access_ptr"
+    base = ptr.args[0]
+    offsets = list(base.buffer.offset_of(list(base.indices)))
+    assert len(offsets) == 1
+    return (
+        _const(offsets[0]),
+        _const(ptr.args[1]),
+        _const(ptr.args[2]),
+        _const(call.args[ptr_pos + 1]),
+    )
+
+
+def _vmi_sync_trace(ir, pipe):
+    from testing.ascend._ir import nodes
+
+    trace = []
+    events = []
+    for call in nodes(ir, tvm.tirx.Call):
+        if call.op.name == "tl.tileop.ascend_copy":
+            trace.append("copy")
+        elif call.op.name == "tl.vmi.vload":
+            trace.append("vload")
+        elif call.op.name == "tl.vmi.vstore":
+            trace.append("vstore")
+        elif call.op.name in ("tl.ascend_set_flag", "tl.ascend_wait_flag"):
+            if str(getattr(call.args[0], "value", call.args[0])) != pipe:
+                continue
+            trace.append("set" if call.op.name == "tl.ascend_set_flag" else "wait")
+            events.append(call)
+    return trace, events
+
+
+def _pointer_region_pipeline_kernel(layout, is_load):
+    transposed = layout == "transposed"
+
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((2, 128), F32)
+            view = None
+            if transposed:
+                view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
+            if is_load:
+                out = T.alloc_shared((128,), F32)
+                if transposed:
+                    T.copy(A[:64], view[:64, 1])
+                else:
+                    T.copy(A[:64], work[1, :64])
+                with T.SimdVF():
+                    mask = T.vmi.create_mask(128, size=128)
+                    if transposed:
+                        value = T.vmi.vload(view[64, 0], size=128)
+                    else:
+                        value = T.vmi.vload(work[0, 64], size=128)
+                    T.vmi.vstore(value, out[0], mask)
+                T.copy(out, C[:128])
+            else:
+                T.copy(A, work)
+                with T.SimdVF():
+                    mask = T.vmi.create_mask(128, size=128)
+                    value = T.vmi.vload(work[0, 0], size=128)
+                    if transposed:
+                        T.vmi.vstore(value, view[64, 0], mask)
+                    else:
+                        T.vmi.vstore(value, work[0, 64], mask)
+                T.copy(work[1, :64], C[128:192])
+
+    return main
+
+
+@pytest.mark.parametrize("auto_schedule", [True, False], ids=["schedule-and-sync", "without-schedule"])
+@pytest.mark.parametrize("layout", ["cross_row", "transposed"])
+@pytest.mark.parametrize("is_load", [True, False], ids=["load", "store"])
+@pytest.mark.pto
+def test_vmi_pointer_region_real_pto_pipeline(layout, is_load, auto_schedule):
+    """Exercise descriptors and dependencies through the real PTO pipeline."""
+    func = _pointer_region_pipeline_kernel(layout, is_load)
+    passes = ("tl.LegalizePTOVMIMemoryAccess", "tl.AutoSchedule", "tl.InsertSync")
+    artifact, observer = _lower_pto_traced(
+        func,
+        auto_schedule=auto_schedule,
+        capture_finished=passes,
+    )
+    legalized = observer.finished_modules.get("tl.LegalizePTOVMIMemoryAccess")
+    assert legalized is not None, observer.names
+    op_name = "tl.vmi.vload" if is_load else "tl.vmi.vstore"
+    assert _raw_descriptor_in_module(legalized, op_name) == (64, 128, 1 if is_load else 2, 0)
+    assert "pto.vmi.vload(" in artifact.kernel_source
+
+    if not auto_schedule:
+        assert "tl.AutoSchedule" not in observer.names
+        assert "tl.InsertSync" not in observer.names
+        kernel = _compile_pto(
+            func,
+            pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False},
+        )
+        assert "pto.vmi.vload(" in kernel.get_kernel_source()
+        return
+
+    positions = [observer.names.index(name) for name in passes]
+    assert positions == sorted(positions), observer.names
+    scheduled = observer.finished_modules.get("tl.AutoSchedule")
+    synchronized = observer.finished_modules.get("tl.InsertSync")
+    assert scheduled is not None and synchronized is not None
+    pipe = "MTE2_V" if is_load else "V_MTE3"
+    trace, events = _vmi_sync_trace(synchronized, pipe)
+    expected = ["copy", "set", "wait", "vload", "vstore", "copy"] if is_load else ["copy", "vload", "vstore", "set", "wait", "copy"]
+    assert trace == expected, trace
+    assert len(events) == 2
+    tvm.ir.assert_structural_equal(events[0].args[1], events[1].args[1])
+
+
 # ---------------------------------------------------------------------------
 # Pipeline placement and the codegen guard for the descriptor pass
 # ---------------------------------------------------------------------------
@@ -1237,7 +1394,7 @@ def _fp4_kernel(index=64, size=128):
             out = T.alloc_shared((256,), FP4)
             T.copy(A, work)
             with T.SimdVF():
-                mask = T.vmi.create_mask(size // 2, size=size // 2)
+                mask = T.vmi.create_mask(max(size // 2, 1), size=max(size // 2, 1))
                 v = T.vmi.vload(work[index], size=size)
                 T.vmi.vstore(v, out[index], mask)
             T.copy(out, C)
@@ -1245,25 +1402,30 @@ def _fp4_kernel(index=64, size=128):
     return main
 
 
+@pytest.mark.parametrize(
+    ("index", "size"),
+    [(64, 128), (2, 2)],
+    ids=["full-vector", "packed-pair-nonzero-start"],
+)
 @pytest.mark.pto
-def test_fp4_descriptor_stays_logical_then_packed_once():
+def test_fp4_descriptor_stays_logical_then_packed_once(index, size):
     with _capture_rewrite_input() as captured:
-        artifact = _lower_pto(_fp4_kernel())
+        artifact = _lower_pto(_fp4_kernel(index=index, size=size))
     before = captured["module"]
 
     # Logical FP4 element units before the rewrite.
-    assert _descriptor_in_module(before, "tl.vmi.vload") == (64, 128, 1, 0)
-    assert _descriptor_in_module(before, "tl.vmi.vstore") == (64, 128, 2, 0)
+    assert _descriptor_in_module(before, "tl.vmi.vload") == (index, size, 1, 0)
+    assert _descriptor_in_module(before, "tl.vmi.vstore") == (index, size, 2, 0)
 
     # Exactly one physical packing: the single rewrite pass halves both.
     rewritten = ascend_transform.RewriteFp4ToFp4x2()(before)
-    assert _descriptor_in_module(rewritten, "tl.vmi.vload") == (32, 64, 1, 0)
-    assert _descriptor_in_module(rewritten, "tl.vmi.vstore") == (32, 64, 2, 0)
+    assert _descriptor_in_module(rewritten, "tl.vmi.vload") == (index // 2, size // 2, 1, 0)
+    assert _descriptor_in_module(rewritten, "tl.vmi.vstore") == (index // 2, size // 2, 2, 0)
 
     source = artifact.kernel_source
     load_line = next(ln.strip() for ln in source.splitlines() if "vmi.vload" in ln)
-    assert "addptr" in load_line and "), 32)" in load_line, load_line
-    assert load_line.rstrip().endswith("size=(128 // 2))"), load_line
+    assert "addptr" in load_line and f"), {index // 2})" in load_line, load_line
+    assert load_line.rstrip().endswith(f"size=({size} // 2))"), load_line
 
 
 @pytest.mark.pto
@@ -1271,6 +1433,12 @@ def test_fp4_odd_start_is_still_rejected():
     """The logical descriptor keeps the odd start; the later FP4 pack rejects it."""
     with pytest.raises(tvm.error.TVMError, match="fp4 access_ptr offset must be even"):
         _lower_pto(_fp4_kernel(index=65))
+
+
+@pytest.mark.pto
+def test_fp4_single_logical_element_is_still_rejected():
+    with pytest.raises((TypeError, ValueError, tvm.error.TVMError), match="even FP4"):
+        _lower_pto(_fp4_kernel(index=0, size=1))
 
 
 # ---------------------------------------------------------------------------
@@ -1372,9 +1540,9 @@ def test_explicit_pointer_keeps_declaration_and_extra_offset():
 def test_explicit_pointer_requires_scalar_integer_instruction_offset():
     """The explicit-pointer instruction offset stays a frontend type check.
 
-    Range/coverage proofs moved to the descriptor pass, but the offset selects
-    a position inside the caller-declared descriptor and must remain a scalar
-    integer at the API boundary.
+    Envelope containment is checked by the descriptor pass, but the offset
+    selects a position inside the caller-declared descriptor and must remain a
+    scalar integer at the API boundary.
     """
 
     def build():
@@ -1423,7 +1591,7 @@ def test_explicit_pointer_scope_validation_is_preserved():
 
 
 # ---------------------------------------------------------------------------
-# Ordinary logical coverage: local descriptors and explicit pointers
+# Ordinary descriptors: local and explicit addresses
 # ---------------------------------------------------------------------------
 def _ordinary_access_kernel(shape, starts, size, *, is_load, strides=None, explicit=False, extent=None, mask_lanes=None):
     """Build one ordinary UB view access over a tight or transposed view.
@@ -1472,52 +1640,24 @@ def _ordinary_access_kernel(shape, starts, size, *, is_load, strides=None, expli
         ((4, 128), (0, 32), 64, True, (32, 64, 1, 0)),
         ((4, 128), (3, 0), 128, True, (384, 128, 1, 0)),
         ((4, 128), (1, 0), 128, True, (128, 128, 1, 0)),
-        ((2, 128), (0, 64), 128, True, None),
-        ((4, 128), (0, 64), 128, True, None),
-        ((4, 128), (0, 64), 128, False, None),
-        ((4, 128), (0, 64), 80, True, None),
+        ((4, 128), (0, 64), 80, True, (64, 128, 1, 0)),
     ],
-    ids=["in-row", "last-row", "first-row", "cross-row-tight-2x128", "cross-row", "store-cross-row", "rounded-cross-row"],
+    ids=["in-row", "last-row", "first-row", "rounded-cross-row"],
 )
 @pytest.mark.pto
-def test_ordinary_local_descriptor_requires_complete_row_major_coverage(shape, starts, size, is_load, expected):
-    """A local descriptor keeps its own start, so the existing row-major carry
-    must include the whole physical envelope; there is no whole-buffer fallback.
-    The rounded case checks the physical envelope (128), not the logical size.
-    """
-    if expected is None:
-        _assert_descriptor_error(
-            lambda: _ordinary_access_kernel(shape, starts, size, is_load=is_load),
-            "T.vmi.vload" if is_load else "T.vmi.vstore",
-            "existing row-major carry",
-        )
-        return
-    assert _vload_descriptor(_ordinary_access_kernel(shape, starts, size, is_load=is_load)) == expected
+def test_ordinary_local_descriptor_allows_cross_row_access(shape, starts, size, is_load, expected):
+    """The local descriptor preserves the start and physical envelope without
+    reproducing the memory detector's logical region proof."""
+    descriptor = _vload_descriptor if is_load else _vstore_descriptor
+    assert descriptor(_ordinary_access_kernel(shape, starts, size, is_load=is_load)) == expected
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["store-direct", "store-explicit"])
 @pytest.mark.pto
-def test_cross_row_small_mask_store_is_rejected(explicit):
-    """A one-lane store mask never shrinks the may-write envelope, so a
-    cross-row store address is rejected on the direct and explicit paths."""
-    _assert_descriptor_error(
-        lambda: _ordinary_access_kernel((2, 128), (0, 64), 128, is_load=False, explicit=explicit, mask_lanes=1),
-        "T.vmi.vstore",
-        "existing row-major carry",
-        explicit=explicit,
-    )
-
-
-@pytest.mark.parametrize("is_load", [True, False], ids=["load-direct", "store-direct"])
-@pytest.mark.pto
-def test_transposed_view_access_is_rejected(is_load):
-    """A local coordinate of a non-tight view has no local coverage proof; the
-    store form is not a bypass."""
-    _assert_descriptor_error(
-        lambda: _ordinary_access_kernel((128, 2), (64, 0), 128, is_load=is_load, strides=(1, 128)),
-        "T.vmi.vload" if is_load else "T.vmi.vstore",
-        "not proven tight row-major",
-    )
+def test_cross_row_small_mask_store_preserves_may_write_envelope(explicit):
+    """A one-lane store mask does not shrink the cross-row may-write envelope."""
+    kernel = _ordinary_access_kernel((2, 128), (0, 64), 128, is_load=False, explicit=explicit, mask_lanes=1)
+    assert _vstore_descriptor(kernel) == (64, 128, 2, 0)
 
 
 @pytest.mark.parametrize(
@@ -1527,9 +1667,9 @@ def test_transposed_view_access_is_rejected(is_load):
         ((2, 128), (0, 32), 64, 64, (32, 64, 1, 0)),
         ((4, 128), (0, 0), 256, 128, (0, 256, 1, 0)),
         ((2, 4, 128), (0, 0, 0), 512, 256, (0, 512, 1, 0)),
-        ((2, 128), (0, 64), 128, 128, None),
-        ((4, 128), (0, 96), 64, 64, None),
-        ((2, 4, 128), (0, 1, 0), 512, 256, None),
+        ((2, 128), (0, 64), 128, 128, (64, 128, 1, 0)),
+        ((4, 128), (0, 96), 64, 64, (96, 64, 1, 0)),
+        ((2, 4, 128), (0, 1, 0), 512, 256, (128, 512, 1, 0)),
     ],
     ids=[
         "two-row",
@@ -1542,18 +1682,13 @@ def test_transposed_view_access_is_rejected(is_load):
     ],
 )
 @pytest.mark.pto
-def test_explicit_descriptor_must_cover_the_ordinary_access(shape, starts, extent, size, expected):
-    """An explicit access_ptr is caller-declared, so it is never rewritten: its
-    extent must contain the complete physical envelope and its declared region
-    must still cover the access under the existing logical analysis.
-    """
+def test_explicit_descriptor_preserves_declaration_without_logical_coverage(shape, starts, extent, size, expected):
+    """An explicit access_ptr keeps its declaration when it contains the
+    instruction's complete physical envelope."""
 
     def build():
         return _ordinary_access_kernel(shape, starts, size, is_load=True, explicit=True, extent=extent)
 
-    if expected is None:
-        _assert_descriptor_error(build, "T.vmi.vload", "does not cover the complete access", explicit=True)
-        return
     assert _vload_descriptor(build()) == expected
     if shape == (4, 128) and extent == 192:
         # One representative case goes through PTODSL -> PTOAS -> Bisheng.
@@ -1563,7 +1698,7 @@ def test_explicit_descriptor_must_cover_the_ordinary_access(shape, starts, exten
 
 @pytest.mark.pto
 def test_explicit_pointer_whole_dense_permutation_is_accepted():
-    """An exact whole dense permutation has no over-approximation or aliasing."""
+    """An explicit descriptor remains unchanged for a whole dense permutation."""
 
     @T.prim_func
     def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
@@ -1581,25 +1716,23 @@ def test_explicit_pointer_whole_dense_permutation_is_accepted():
 
 
 @pytest.mark.pto
-def test_explicit_pointer_partial_permutation_is_rejected():
-    """A non-tight view needs an exact whole dense permutation, not a prefix."""
+def test_explicit_pointer_partial_permutation_is_accepted():
+    """A partial explicit descriptor needs envelope containment, not a whole
+    dense permutation proof."""
 
-    def build():
-        @T.prim_func
-        def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
-            with T.Kernel(1):
-                work = T.alloc_shared((256,), F32)
-                T.copy(A, work)
-                view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
-                with T.SimdVF():
-                    p = T.access_ptr(view[0, 0], "r", extent=128)
-                    v = T.vmi.vload(p, size=128)
-                    T.vmi.vstore(v, work[0])
-                T.copy(work, C)
+    @T.prim_func
+    def main(A: T.Tensor((256,), F32), C: T.Tensor((256,), F32)):
+        with T.Kernel(1):
+            work = T.alloc_shared((256,), F32)
+            T.copy(A, work)
+            view = T.StridedTensor((128, 2), (1, 128), F32, data=work.data, scope="shared.dyn")
+            with T.SimdVF():
+                p = T.access_ptr(view[0, 0], "r", extent=128)
+                v = T.vmi.vload(p, size=128)
+                T.vmi.vstore(v, work[0])
+            T.copy(work, C)
 
-        return main
-
-    _assert_descriptor_error(build, "T.vmi.vload", "does not cover the complete access", explicit=True)
+    assert _vload_descriptor(main) == (0, 128, 1, 0)
 
 
 @pytest.mark.pto
@@ -1904,16 +2037,19 @@ def _unknown_inner_start():
     ids=["serial-3", "mutable-snapshot", "unknown-scalar"],
 )
 @pytest.mark.pto
-def test_ordinary_dynamic_row_crossing_is_rejected(factory):
-    """An unprovable start keeps the diagnostic; a mutable read or an unknown
-    scalar is never bound as an equality in the local proof environment."""
-    _assert_descriptor_error(factory, "T.vmi.vload", "existing row-major carry")
+def test_ordinary_dynamic_row_crossing_is_accepted(factory):
+    """Dynamic starts retain their descriptors without a frontend region proof."""
+    artifact = _lower_pto(factory())
+    func, call = _single(artifact, "tl.vmi.vload")
+    ptr = _resolve_binding(call.args[0], func)
+    assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr")
+    assert _const(ptr.args[3]) == 64
+    assert _const(call.args[1]) == 0
 
 
 @pytest.mark.pto
-def test_ordinary_dynamic_shape_in_row_is_accepted():
-    """A symbolic inner length is accepted when the static access extent stays
-    inside that innermost row."""
+def test_ordinary_dynamic_shape_wrap_is_accepted():
+    """A dynamic row length does not require an in-row coverage proof."""
 
     @T.prim_func
     def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
@@ -1924,7 +2060,7 @@ def test_ordinary_dynamic_shape_in_row_is_accepted():
                 for i in T.serial(2):
                     n = 64 * (i + 1)
                     view = tvm.tirx.decl_buffer((2, n), F32, data=work.data, scope="shared.dyn")
-                    v = T.vmi.vload(view[0, 0], size=64)
+                    v = T.vmi.vload(view[0, 16], size=64)
                     T.vmi.vstore(v, work[2 * n])
             T.copy(work, C)
 
@@ -1933,29 +2069,6 @@ def test_ordinary_dynamic_shape_in_row_is_accepted():
     ptr = _resolve_binding(call.args[0], func)
     assert _const(ptr.args[3]) == 64
     assert _const(call.args[1]) == 0
-
-
-@pytest.mark.pto
-def test_ordinary_dynamic_shape_wrap_is_rejected():
-    """A symbolic row length fails when the start is not provably inside it."""
-
-    def build():
-        @T.prim_func
-        def main(A: T.Tensor((512,), F32), C: T.Tensor((512,), F32)):
-            with T.Kernel(1):
-                work = T.alloc_shared((512,), F32)
-                T.copy(A, work)
-                with T.SimdVF():
-                    for i in T.serial(2):
-                        n = 32 * i
-                        view = tvm.tirx.decl_buffer((2, n), F32, data=work.data, scope="shared.dyn")
-                        v = T.vmi.vload(view[0, 16], size=64)
-                        T.vmi.vstore(v, work[2 * n])
-                T.copy(work, C)
-
-        return main
-
-    _assert_descriptor_error(build, "T.vmi.vload", "non-constant dimension 1")
 
 
 def _symbolic_extent_kernel(col):
@@ -1976,26 +2089,30 @@ def _symbolic_extent_kernel(col):
     return main
 
 
-@pytest.mark.parametrize(("col", "accepted"), [(0, True), (64, False)], ids=["in-row", "cross-row"])
+@pytest.mark.parametrize("col", [0, 64], ids=["in-row", "cross-row"])
 @pytest.mark.pto
-def test_explicit_symbolic_extent_must_stay_in_the_innermost_row(col, accepted):
-    """A non-constant descriptor extent is provable only inside the innermost
-    row: the same extent from a cross-row start is rejected."""
-    if not accepted:
-        _assert_descriptor_error(
-            lambda: _symbolic_extent_kernel(col),
-            "T.vmi.vload",
-            "non-constant extent must stay inside the innermost dimension",
-            explicit=True,
-        )
-        return
+def test_explicit_symbolic_extent_allows_cross_row_start(col):
+    """A symbolic explicit extent requires positivity and envelope containment,
+    not an innermost-row proof."""
     artifact = _lower_pto(_symbolic_extent_kernel(col))
     func, call = _single(artifact, "tl.vmi.vload")
     ptr = _resolve_binding(call.args[0], func)
     assert isinstance(ptr, tvm.tirx.Call) and ptr.op.name.endswith("tvm_access_ptr")
     assert _const(call.args[1]) == 0
-    kernel = _compile_pto(_symbolic_extent_kernel(col))
-    assert "pto.vmi.vload(" in kernel.get_kernel_source()
+    extent_vars = []
+
+    def collect_var(node):
+        if isinstance(node, tvm.tirx.Var):
+            extent_vars.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(ptr.args[3], collect_var)
+    (loop_var,) = extent_vars
+    for iteration, expected in enumerate((64, 128)):
+        extent = tvm.tirx.stmt_functor.substitute(ptr.args[3], {loop_var: tvm.tirx.IntImm(str(loop_var.dtype), iteration)})
+        assert _const(extent) == expected
+    if col == 64:
+        kernel = _compile_pto(_symbolic_extent_kernel(col))
+        assert "pto.vmi.vload(" in kernel.get_kernel_source()
 
 
 # ---------------------------------------------------------------------------
