@@ -65,7 +65,15 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
     elements = 1
     for extent in extents:
         elements *= int(extent)
-    if elements * dtype.bits // 8 > 3072:
+    nbytes = elements * dtype.bits // 8
+    # The SS pool grants 32-byte aligned bases; a non-multiple allocation
+    # rounds up in the backend and can overflow the 3 KiB pool unnoticed.
+    if nbytes % 32 != 0:
+        raise ValueError(
+            f"alloc_ss requires a 32-byte aligned footprint, got {nbytes} bytes "
+            f"for shape {tuple(extents)} and dtype {dtype}"
+        )
+    if nbytes > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
     return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
 
@@ -117,12 +125,22 @@ def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: Sh
     if len(buf.shape) < 2:
         raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
     dtype = DataType(sf_dtype)
-    if dtype.bits not in (8, 16) or dtype.lanes != 1:
-        raise ValueError(f"L0 SF storage must contain 8-bit scales or 16-bit scale pairs, got {sf_dtype}")
+    # Scale factors are packed unsigned integers. Checking only `bits`/`lanes`
+    # used to let float16/float8 through as if they were scale storage.
+    if (not str(dtype).startswith("uint") or dtype.bits not in (8, 16)
+            or dtype.lanes != 1):
+        raise ValueError(f"L0 SF storage must contain uint8 scales or uint16 scale pairs, got {sf_dtype}")
     if sf_shape is None:
         k_per_sf = _MX_SF_K_PER_SCALE_BYTE * (dtype.bits // 8)
         rows, k = buf.shape[-2], buf.shape[-1]
-        if (isinstance(k, int) or hasattr(k, "value")) and int(k) % k_per_sf != 0:
+        if not (isinstance(k, int) or hasattr(k, "value")):
+            # A symbolic K cannot be proven divisible; `k // k_per_sf` would
+            # silently floor-divide and undersize the scale-factor buffer.
+            raise ValueError(
+                f"data tile K extent {k} of {buf.name} is symbolic; pass sf_shape explicitly "
+                f"so the {k_per_sf}-element-per-scale contract can be checked"
+            )
+        if int(k) % k_per_sf != 0:
             raise ValueError(
                 f"data tile K extent {k} of {buf.name} is not divisible by {k_per_sf} "
                 f"(K elements per {sf_dtype} scale element); pass sf_shape explicitly for a transposed tile"
