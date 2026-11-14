@@ -1,3 +1,8 @@
+# Expose the CUDA-owned pass-config namespace.  The module only depends on the
+# standard library, so importing it adds no toolchain or backend work.
+from . import pass_config as pass_config  # noqa: F401
+from .pass_config import PassConfigKey as PassConfigKey  # noqa: F401
+
 from . import target  # noqa: F401
 from . import transform  # noqa: F401
 

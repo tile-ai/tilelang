@@ -12,6 +12,7 @@ from tilelang.env import env
 from tilelang.transform import PassConfigKey
 
 from . import codegen, execution_backend, pipeline
+from .pass_config import PassConfigKey as CudaPassConfigKey
 
 _CUDA_GLOBAL_KERNEL_PATTERN = re.compile(r'(?:extern\s+"C"\s+)?__global__\s+void\s+(?:__launch_bounds__\([^\)]*\)\s+)?(\w+)')
 
@@ -60,7 +61,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
     cfg = pass_config or {}
-    compiler = str(cfg.get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
+    compiler = str(cfg.get(CudaPassConfigKey.TL_CUDA_COMPILER, "nvcc"))
     if compiler not in ("nvcc", "nvrtc"):
         raise ValueError(f"Unsupported CUDA compiler {compiler!r}; expected 'nvcc' or 'nvrtc'")
 
@@ -86,7 +87,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
 
     options = compiler_module.default_compile_options(cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
-    ptxas_usage_level = cfg.get(PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
+    ptxas_usage_level = cfg.get(CudaPassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL, None)
     if ptxas_usage_level is not None:
         ptxas_usage_level = int(ptxas_usage_level)
 

@@ -8,7 +8,14 @@ from typing import Any
 
 
 class PassConfigKey(str, Enum):
-    """Pass configuration keys for TileLang compiler."""
+    """Pass configuration keys for the TileLang compiler.
+
+    Target-independent options live here.  Backend-owned options are also
+    exposed from their backend package (for example,
+    :class:`tilelang.cuda.PassConfigKey`) and remain available here during the
+    introduction release with the same string value.  Prefer the backend
+    namespace for new code; the legacy members will be deprecated separately.
+    """
 
     ARITH_Z3_RLIMIT = "arith.z3_rlimit"
     """Z3 resource budget for each solver check. Default: 100,000.
@@ -80,12 +87,14 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_PRELOWER_SEMANTIC_CHECK = "tl.disable_prelower_semantic_check"
     """Disable Python-side pre-lower semantic checks. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_WARP_SPECIALIZED = "tl.disable_warp_specialized"
     """Disable warp specialization optimization. Default: False"""
 
     TL_ENABLE_AUTO_SCHEDULE = "tl.enable_auto_schedule"
     """Enable Ascend auto scheduling. Default: True."""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_AUTO_WARP_SPECIALIZATION = "tl.enable_auto_warp_specialization"
     """Name of the automatic warp-specialization scheduler to run (e.g.
     "role_based"). Default: unset (disabled)."""
@@ -96,6 +105,9 @@ class PassConfigKey(str, Enum):
         if enabled, --use_fast_math will be passed to nvcc
     """
 
+    # CUDA-owned options.  Their canonical definitions live in
+    # tilelang/cuda/pass_config.py; these members remain for compatibility
+    # during the introduction release.
     TL_PTXAS_REGISTER_USAGE_LEVEL = "tl.ptxas_register_usage_level"
     """The PTXAS register usage level in [0, 10], which controls the
     aggressiveness of optimizations that affect register usage. Default: None"""
@@ -175,6 +187,7 @@ class PassConfigKey(str, Enum):
     numerically), as a field escape hatch if a narrow plan ever miscompiles,
     and for plan-choice A/B measurement. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_TMA_LOWER = "tl.disable_tma_lower"
     """Deprecated flag — prevents plain T.copy() from auto-lowering to TMA store.
 
@@ -184,9 +197,11 @@ class PassConfigKey(str, Enum):
     TL_DISABLE_SAFE_MEMORY_ACCESS = "tl.disable_safe_memory_legalize"
     """Disable safe memory access optimization. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_VECTORIZE_256 = "tl.disable_vectorize_256"
     """Disable usage of LDG/STG 256. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_FP32X2_REDUCTION = "tl.enable_fp32x2_reduction"
     """Enable packed FP32x2 accumulation for CUDA sum and absolute-sum
     reductions on SM100 and newer GPUs. Per-reduction annotations can still
@@ -218,11 +233,13 @@ class PassConfigKey(str, Enum):
     Default: True
     """
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_LOWER_LDGSTG = "tl.enable_lower_ldgstg"
     """Enable non-predicated LDG/STG lowering for global memory access.
     When enabled, converts Ramp-based global buffer load/store to ldg/stg intrinsics.
     Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_ENABLE_LOWER_LDGSTG_PREDICATED = "tl.enable_lower_ldgstg_predicated"
     """Enable predicated LDG/STG lowering.
     When True, predicated loads (if_then_else with else=0) and
@@ -235,6 +252,7 @@ class PassConfigKey(str, Enum):
     the final vectorization factor. Useful for debugging vectorization issues.
     Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_WGMMA = "tl.disable_wgmma"
     """Disable usage of Hopper WGMMA. Default: False"""
 
@@ -250,6 +268,7 @@ class PassConfigKey(str, Enum):
     allocation but each buffer gets its own dedicated region without lifetime-based
     reuse. Default: False"""
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     TL_DISABLE_SHUFFLE_ELECT = "tl.disable_shuffle_elect"
     """Disable shuffle election optimization. Default: False"""
 
@@ -391,6 +410,7 @@ class PassConfigKey(str, Enum):
 
     # Output debugging options
 
+    # CUDA-owned; canonical definition in tilelang.cuda.PassConfigKey.
     CUDA_KERNELS_OUTPUT_DIR = "cuda.kernels_output_dir"
     """Output directory for generated CUDA kernels. Default: empty string"""
 
@@ -417,16 +437,32 @@ _DEPRECATED_PASS_CONFIG_MESSAGES = {
 }
 
 
-def normalize_pass_configs(pass_configs: dict[str | PassConfigKey, Any] | None) -> dict[str, Any]:
-    """Canonicalize known pass-config keys, apply environment-variable
-    defaults, and emit compatibility warnings."""
+def _normalize_config_key(key: str | Enum) -> str:
+    """Return the string value of a pass-config key.
+
+    Backend packages declare their own ``str`` enums, so canonicalization must
+    cover any enum member rather than only the common ``PassConfigKey``.  Raw
+    string keys stay supported and are returned unchanged.
+    """
+    if not isinstance(key, Enum):
+        return key
+    value = key.value
+    if not isinstance(value, str):
+        raise TypeError(f"pass config keys must use string enum values, got {type(key).__name__}")
+    return value
+
+
+def normalize_pass_configs(pass_configs: dict[str | Enum, Any] | None) -> dict[str, Any]:
+    """Canonicalize string-valued enum keys (including backend-owned
+    namespaces), apply environment-variable defaults, and emit compatibility
+    warnings."""
     from tilelang.env import env, parse_int_level
 
     normalized: dict[str, Any] = {}
     warned_keys: set[str] = set()
 
     for key, value in (pass_configs or {}).items():
-        normalized_key = key.value if isinstance(key, PassConfigKey) else key
+        normalized_key = _normalize_config_key(key)
 
         normalized[normalized_key] = value
 

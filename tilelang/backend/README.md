@@ -198,6 +198,30 @@ language imports so static analysis and autocomplete can identify the dialect.
 The language dialect is part of the logical backend, even though it is not a
 field of the current `BackendModule` manifest.
 
+## Pass Configuration
+
+Target-independent options live in `tilelang.transform.PassConfigKey`. A
+backend owns its remaining options in `tilelang/<backend>/pass_config.py` and
+re-exports the enum from the backend package. The CUDA enum mirrors the
+CUDA-specific keys registered in `src/cuda/op/builtin.cc` plus the Python-level
+CUDA compiler options:
+
+```python
+from tilelang import PassConfigKey
+from tilelang.cuda import PassConfigKey as CudaPassConfigKey
+
+pass_configs = {
+    PassConfigKey.TL_ENABLE_FAST_MATH: True,
+    CudaPassConfigKey.TL_CUDA_COMPILER: "nvrtc",
+}
+```
+
+Both namespaces keep the same string values, so legacy and backend-owned
+members normalize to the same configuration and cache key. During the
+introduction release the legacy members remain available without a warning.
+Deprecation of the legacy enum spellings, followed by a separate removal
+decision, is a staged follow-up; raw string keys remain supported throughout.
+
 ## Pass Pipeline
 
 Every target backend must explicitly own a complete lowering sequence after
@@ -422,6 +446,10 @@ Shared native helpers with no target-runtime dependency belong in
 - Keep the common language surface and shared semantic checks backend-neutral.
 - Put backend language extensions under `tilelang/<backend>/language` and lower
   them in that backend's pipeline.
+- Put backend-specific pass configuration under
+  `tilelang/<backend>/pass_config.py` and re-export it from the backend
+  package. Keep target-independent options in
+  `tilelang.transform.PassConfigKey`.
 - Resolve target and execution state once when creating `BackendContext`.
 - Keep the complete backend-specific pass order in
   `tilelang/<backend>/pipeline.py`.
