@@ -1,5 +1,5 @@
-#include "ascend/op/nd2nz.h"
 #include "codegen_ascend.h"
+#include "ascend/op/nd2nz.h"
 
 #include <algorithm>
 #include <cmath>
