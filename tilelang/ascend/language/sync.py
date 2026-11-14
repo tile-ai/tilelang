@@ -25,6 +25,20 @@ def ascend_pipe_barrier(pipe_t: str) -> None:
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_pipe_barrier"), pipe_t)
 
 
+_EVENT_ID_MAX = 0xFFFF  # hardware event-ID slot width
+
+
+def _normalize_event_id(event_id):
+    """Box a Python int event id, range-checked against the hardware slot."""
+    if isinstance(event_id, bool) or not isinstance(event_id, int):
+        if not isinstance(event_id, tirx.PrimExpr):
+            raise TypeError(f"event_id must be an int or PrimExpr, got {type(event_id)}")
+        return event_id
+    if not 0 <= event_id <= _EVENT_ID_MAX:
+        raise ValueError(f"event_id must be within [0, {_EVENT_ID_MAX}], got {event_id}")
+    return tirx.IntImm("int32", event_id)
+
+
 def ascend_set_flag(hard_event: str, event_id) -> None:
     """Insert an AscendC SetFlag for pipeline synchronization.
 
@@ -43,8 +57,7 @@ def ascend_set_flag(hard_event: str, event_id) -> None:
     """
     if not isinstance(hard_event, str):
         raise TypeError(f"hard_event must be a string, got {type(hard_event)}")
-    if isinstance(event_id, int):
-        event_id = tirx.IntImm("int32", event_id)
+    event_id = _normalize_event_id(event_id)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_flag"), hard_event, event_id)
 
 
@@ -66,8 +79,7 @@ def ascend_wait_flag(hard_event: str, event_id) -> None:
     """
     if not isinstance(hard_event, str):
         raise TypeError(f"hard_event must be a string, got {type(hard_event)}")
-    if isinstance(event_id, int):
-        event_id = tirx.IntImm("int32", event_id)
+    event_id = _normalize_event_id(event_id)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_wait_flag"), hard_event, event_id)
 
 
