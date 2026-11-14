@@ -52,7 +52,8 @@ def Vector(vector: int | None = None) -> VectorFrame:
 
     The region inherits the enclosing kernel's AIV group. Configure an explicit
     group with ``T.MixedKernel(..., sids=1/2)``; ordinary ``T.Kernel`` uses the
-    existing core inference and hardware default for mixed execution.
+    hardware default. An explicit Vector region requests mixed launch geometry
+    even for a Vector-only body, so its sid can address every AIV in the group.
     ``vector=None`` is retained only for compatibility with omitted arguments.
     """
     if vector is not None:

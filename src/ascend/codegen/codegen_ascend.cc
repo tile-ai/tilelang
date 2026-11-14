@@ -557,7 +557,8 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
   LOG(FATAL) << "Cannot convert scalar type " << t << " to Ascend type";
 }
 
-void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
+void CodeGenTileLangAscend::AddFunction(const PrimFunc &input) {
+  PrimFunc f = input;
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked across PrimFunc code generation";
   this->InitFuncState(f);
@@ -579,11 +580,16 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 
   // Pre-scan body to determine kernel mode (Mix / Vector / Cube)
   bool has_cube = false, has_vector = false;
+  bool has_aiv_group = false, has_cube_call = false;
   std::optional<int> aiv_count;
   bool valid_aiv_count = true, consistent_aiv_count = true;
   bool has_nd2nz_post_copy = false;
   bool has_cooperative_groups = false;
   tirx::PostOrderVisit(f->body, [&](const ffi::ObjectRef &n) {
+    if (const auto *attr = n.as<AttrStmtNode>();
+        attr && attr->attr_key == tl::ascend::kAivGroup) {
+      has_aiv_group = true;
+    }
     if (const auto *attr = n.as<AttrStmtNode>();
         attr && attr->attr_key == tl::ascend::kAivCount) {
       const auto *count = attr->value.as<IntImmNode>();
@@ -603,6 +609,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       }
     }
     if (const auto *call = n.as<CallNode>()) {
+      has_cube_call |= tl::ascend::IsCubeCall(call);
       if (call->op.same_as(tl::ascend_gemm_l1()) ||
           call->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
         has_gemm_l1_ = true;
@@ -662,19 +669,24 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
     has_cooperative_groups_included_ = true;
   }
 
-  if (has_vector && has_cube) {
-    // A group count does not turn a single-side body into a mixed kernel.
+  bool is_cube = has_cube || has_cube_call || has_nd2nz_post_copy;
+  if ((has_vector && has_cube) || (has_aiv_group && !is_cube)) {
+    // Grouped Vector-only bodies need the same sid geometry as mixed bodies.
     kernel_mode_ = AscendKernelMode::kMix;
     ICHECK(valid_aiv_count) << "Invalid frontend AIV count";
     ICHECK(consistent_aiv_count) << "Conflicting frontend AIV counts";
     ICHECK(aiv_count.has_value())
         << "Missing frontend AIV count before CodeGen";
     mix_aiv_count_ = aiv_count.value();
+    if (!is_cube) {
+      f.CopyOnWrite()->body =
+          tl::ascend::MakeGroupedVectorBody(f->body, mix_aiv_count_);
+    }
   } else if (has_cube) {
     kernel_mode_ = AscendKernelMode::kCube;
   } else if (has_vector) {
     kernel_mode_ = AscendKernelMode::kVector;
-  } else if (has_gemm_l0_ || has_gemm_l1_ || has_nd2nz_post_copy) {
+  } else if (is_cube) {
     // ND2NZ scatter executes on the Vector core and must not make a
     // scatter-only kernel Cube. Preserve the existing post-copy classification.
     kernel_mode_ = AscendKernelMode::kCube;

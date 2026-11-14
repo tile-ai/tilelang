@@ -80,6 +80,7 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   main_block->writes = Array<tvm::tirx::BufferRegion>();
   Map<String, Any> block_annotations = attrs;
   block_annotations.Set("vector_count", cthread_extent);
+  block_annotations.Set("pragma_aiv_group", Integer(1));
   main_block->annotations = block_annotations;
   n->frames.push_back(main_block);
 
@@ -445,6 +446,9 @@ public:
           continue;
         if (auto count = block->annotations.value().Get("pragma_aiv_count")) {
           extent = count.value().cast<PrimExpr>();
+          auto annotations = block->annotations.value();
+          annotations.Set("pragma_aiv_group", Integer(1));
+          GetRef<SBlockFrame>(block)->annotations = annotations;
           break;
         }
       }

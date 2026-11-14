@@ -146,7 +146,9 @@ def Kernel(
     thread domain at this scope, so this dialect has no ``threads`` parameter:
     ``with T.Kernel(N) as bx`` yields one program index, and ``bx`` is iterable
     as ``(bx,)``. Use ``T.SimtVF(threads=...)`` inside the body to run
-    thread-parallel code, or ``T.MixedKernel`` for an AIC+AIV mixed kernel.
+    thread-parallel code. A pure Vector body uses native Vector launch unless
+    it contains an explicit ``T.Vector()`` region, which requests grouped AIV
+    execution. Mixed bodies use the device AIV:AIC ratio.
 
     Parameters
     ----------
@@ -192,7 +194,8 @@ def MixedKernel(
         or None, frontend construction selects the current device AIV:AIC ratio,
         falling back to 2 when the device cannot be queried.
         An explicit sids fixes the logical sid extent for every body type.
-        Single-side bodies still generate pure Cube or Vector kernels.
+        Pure Cube bodies generate Cube kernels. Pure Vector bodies retain
+        mixed launch geometry so all requested sid values can execute.
         For a mixed kernel, AscendC emits the requested physical ratio;
         PTO retains its existing mixed launch and guards the Vector body
         with sub-core 0 when ``sids=1``. Binds as ``sid`` via the backend's
