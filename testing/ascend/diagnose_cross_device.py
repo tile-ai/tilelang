@@ -84,16 +84,22 @@ def collect_plogs(directory, probes):
         return
     pids = {probe["pid"] for probe in probes}
     started = min(probe["time"] for probe in probes)
-    roots = {Path.home() / "ascend/log/plog"}
+    log_root = Path.home() / "ascend/log"
+    roots = {log_root / "plog", log_root / "debug/plog", log_root / "run/plog"}
     if os.environ.get("ASCEND_PROCESS_LOG_PATH"):
         roots.add(Path(os.environ["ASCEND_PROCESS_LOG_PATH"]))
     remaining = 20 * 1024 * 1024
     count = 0
+    seen = set()
     for root in roots:
         try:
             for path in root.rglob("*.log"):
                 if remaining <= 0:
                     return
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
                 if path.stat().st_mtime < started or not any(re.search(rf"(?<!\d){pid}(?!\d)", path.name) for pid in pids):
                     continue
                 # Copy only this run's process logs, capped at 2 MiB per file.
