@@ -224,7 +224,8 @@ reviews:
         or diagnostic-only synchronization error reporting. Prefer Yongqi-Zhuo for
         compiler-driven CUDA automatic warp specialization and penguin-wwy for
         diagnostics without synchronization algorithm changes. Never suggest the PR author.
-        Path hints: src/ascend/, tilelang/ascend/, testing/ascend/,
+        Path hints: src/ascend/, tilelang/ascend/, testing/ascend/ascendc/,
+        testing/ascend/pto/,
         examples/ascend/, and relevant algorithm changes in
         src/transform/thread_storage_sync.cc. Distinguish semantics from diagnostics.
 

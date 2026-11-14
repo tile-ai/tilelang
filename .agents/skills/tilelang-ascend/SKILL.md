@@ -89,7 +89,7 @@ with T.SimtVF(threads=128):
 
 Auto-sync: The compiler inserts `asc_syncthreads()` when it detects
 cross-thread data hazards; regression coverage is in
-`testing/ascend/transform/test_ascend_thread_sync.py`. Thread binding is
+`testing/ascend/ascendc/transform/test_ascend_thread_sync.py`. Thread binding is
 accessed via `T.get_thread_binding()`. For random values inside a VF, use
 `T.rng_init(seed, seq=..., off=...)` with `T.rng_rand()` or
 `T.rng_rand_float()` (uniform) / `T.rng_rand_float(dist="normal")`. Choose
@@ -240,7 +240,7 @@ and intra-/cross-core flags belong to the fully manual path. Disable the
 scheduling path with `PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False`. Read the
 [synchronization reference](references/synchronization.md) for the complete
 initialization, reuse and final-drain protocol. Small manual mixed-core
-regressions are in `testing/ascend/language/test_tilelang_ascend_nd2nz_scatter.py`.
+regressions are in `testing/ascend/ascendc/language/test_tilelang_ascend_nd2nz_scatter.py`.
 
 ---
 
@@ -297,7 +297,7 @@ data consumed in that epoch; disjoint AIV writes must still publish the same
 logical generation. SS accesses are scalar-only; VF, DMA and atomics are
 unsupported.
 With AutoSchedule disabled, supply the publication and reuse handshakes
-explicitly; see `testing/ascend/language/test_tilelang_ascend_ss.py`.
+explicitly; see `testing/ascend/ascendc/language/test_tilelang_ascend_ss.py`.
 
 For a deferred reduction inside `T.SimtVF`, use the reducer epoch API. Given
 float32 UB buffers `x_ub[TILE]` and `sum_ub[1]`:
@@ -501,7 +501,7 @@ T.copy(A[:, :], a_ub[:, :30], data_select=True)
 - Ascend GM→UB only; supported dtypes are 8/16/32-bit (int8/uint8/int16/
   uint16/float16/bfloat16/int32/uint32/float32). Ignored on other paths/backends.
 - Numerical coverage: `test_gm_to_ub_pad_value` in
-  `testing/ascend/language/test_tilelang_ascend_dma_copy.py`.
+  `testing/ascend/ascendc/language/test_tilelang_ascend_dma_copy.py`.
 
 ### 6.2 T.dual_copy (Ascend-Only)
 
@@ -719,7 +719,7 @@ For attention examples, preserve head mapping, masks, scale placement,
 normalization, and accumulation order; validate all gradient outputs when
 adapting a backward kernel.
 
-For regression coverage, start with `testing/ascend/language/` (including
+For regression coverage, start with `testing/ascend/ascendc/language/` (including
 `simtvf/` and `simdvf/`) for DSL and VF behavior. The sibling `layout/`,
 `analysis/`, `auto_schedule/`, `transform/`, `target/`, and `runtime/` suites
 cover their respective compiler and execution boundaries; shared framework
@@ -817,7 +817,7 @@ For source-only compilation and pass traces, use the
 [lowering trace](../../../docs/tools/lower_trace.md); keep device work out of
 import-time code. To modify generated source before compilation,
 see `tilelang.ascend.callback.register_ascend_postproc_callback` and
-`testing/ascend/target/test_ascend_postproc.py`. Follow the
+`testing/ascend/ascendc/target/test_ascend_postproc.py`. Follow the
 [controlled experiment guidance](#125-attribute-the-difference) before drawing
 performance conclusions.
 

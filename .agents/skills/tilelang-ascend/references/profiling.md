@@ -87,7 +87,7 @@ required initialization when extracting a smaller benchmark.
 
 `tilelang.ascend.callback.register_ascend_postproc_callback` accepts a function
 `(code, target) -> code`. See
-`testing/ascend/target/test_ascend_postproc.py` for registration and restoration.
+`testing/ascend/ascendc/target/test_ascend_postproc.py` for registration and restoration.
 It is a global callback, so scope experiments to an isolated process and filter by target and the exact
 source marker. Verify a replacement hits exactly the intended operation and
 save the original and modified source.

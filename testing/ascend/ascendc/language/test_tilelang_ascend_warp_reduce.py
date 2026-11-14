@@ -54,17 +54,6 @@ def test_warp_reduce_rejects_unsupported_dtype(op, dtype):
         lower(make_warp_reduce_kernel(op, dtype), target="ascend")
 
 
-PTO_REDUCE_CALL = {"sum": "tl.redux_add", "max": "tl.redux_max", "min": "tl.redux_min"}
-
-
-@pytest.mark.pto
-@pytest.mark.parametrize("op", [case[0] for case in REDUCE_CASES])
-@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
-def test_warp_reduce_pto_codegen(op, dtype):
-    source = lower(make_warp_reduce_kernel(op, dtype), target="pto").kernel_source
-    assert f"{PTO_REDUCE_CALL[op]}(" in source
-
-
 # One case per op and dtype; the remaining combinations run the same wrappers.
 RUN_CASES = [
     ("min", "int32"),
@@ -76,7 +65,7 @@ RUN_CASES = [
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize(
     "target",
-    ["ascend", pytest.param("pto", marks=pytest.mark.pto)],
+    ["ascend"],
 )
 @pytest.mark.parametrize("op,dtype", RUN_CASES)
 def test_warp_reduce(op, dtype, target):

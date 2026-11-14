@@ -145,7 +145,7 @@ def alloc_l0a_sf(buf: Buffer, sf_dtype: DType = "uint16", sf_shape: ShapeType | 
     ``T.gemm_blockscaled`` as ``SFA``. Allocation permanently binds this
     handle to ``buf``; GEMM verifies the binding and leading indices. Scale
     slots are sticky, so one scale load may serve several data loads (see
-    testing/ascend/language/test_tilelang_ascend_mx_sf_slots.py).
+    testing/ascend/ascendc/language/test_tilelang_ascend_mx_sf_slots.py).
 
     The default shape preserves all leading dimensions and assumes trailing
     untransposed ``(rows, K)`` matrix dimensions with

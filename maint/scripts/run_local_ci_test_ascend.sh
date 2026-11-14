@@ -4,7 +4,8 @@
 #   bash maint/scripts/run_local_ci_test_ascend.sh
 #
 # What it does:
-#   - Runs examples/ascend/ and testing/ascend/ with pytest-xdist, matching CI.
+#   - Runs examples/ascend/ and the split testing/ascend/{ascendc,pto} suites
+#     with pytest-xdist, matching CI.
 #   - Does NOT load the CUDA scheduler plugin and does NOT auto-detect GPUs.
 #   - Defaults to 4 example workers and 32 unit-test workers, as in ci.yml.
 #   - Stops on a failed suite; each suite stops after 3 failures.
@@ -12,6 +13,7 @@
 # Environment variables:
 #   - PYTEST_XDIST_WORKERS: override worker count for both suites.
 #   - PYTEST_XDIST_UNIT_WORKERS: override unit-test workers independently.
+#   - PYTEST_ASCEND_SKIP_PTO=1: run only testing/ascend/ascendc (no PTO toolchain).
 #
 # Examples:
 #   - Default run:                 bash maint/scripts/run_local_ci_test_ascend.sh
@@ -50,5 +52,12 @@ cd testing || exit 1
 echo "[INFO] DEVICE=ascend; running example tests without CUDA plugin. Workers: $NWORKERS."
 python -m pytest -n "$NWORKERS" ../examples/ascend "${PYTEST_ARGS_COMMON[@]}"
 
-echo "[INFO] DEVICE=ascend; running unit tests without CUDA plugin. Workers: $UNIT_NWORKERS."
-python -m pytest -n "$UNIT_NWORKERS" ascend "${PYTEST_ARGS_COMMON[@]}"
+# AscendC and PTO unit tests are separate suites in CI; run them one by one.
+SUITES=(ascend/ascendc ascend/pto)
+if [[ "${PYTEST_ASCEND_SKIP_PTO:-0}" == "1" ]]; then
+  SUITES=(ascend/ascendc)
+fi
+for SUITE in "${SUITES[@]}"; do
+  echo "[INFO] DEVICE=ascend; running ${SUITE} unit tests without CUDA plugin. Workers: $UNIT_NWORKERS."
+  python -m pytest -n "$UNIT_NWORKERS" "${SUITE}" "${PYTEST_ARGS_COMMON[@]}"
+done

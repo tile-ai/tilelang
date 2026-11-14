@@ -20,8 +20,8 @@ Contents: [scheduling modes](#choose-the-scheduling-mode),
 Start with `examples/ascend/example_gemm.py` for automatic scheduling and
 `examples/ascend/flash_attention/example_gqa_manual_schedule.py` for explicit
 stages. Stage constraints and buffer rings are covered by
-`testing/ascend/auto_schedule/test_schedule_units.py` and `test_sync_dependencies.py`.
-Fully manual mixed protocols are covered in `testing/ascend/language/test_tilelang_ascend_nd2nz_scatter.py`.
+`testing/ascend/ascendc/auto_schedule/test_schedule_units.py` and `test_sync_dependencies.py`.
+Fully manual mixed protocols are covered in `testing/ascend/ascendc/language/test_tilelang_ascend_nd2nz_scatter.py`.
 The presence of low-level flags does not automatically select fully manual mode.
 
 For fully manual kernels, use these APIs as part of a complete protocol:
@@ -125,7 +125,7 @@ with `num_stages` as the search upper bound. For an automatic loop without that
 annotation the bound is one. A manual `T.Stage` child list without an explicit
 `num_stages` uses `max_stage + 1`; an explicit bound does not limit stage numbers.
 Fixed counts still require valid ownership and sufficient capacity. See
-`testing/ascend/auto_schedule/test_buffer_version_annotations.py` for API coverage.
+`testing/ascend/ascendc/auto_schedule/test_buffer_version_annotations.py` for API coverage.
 
 Automatic buffers do not need a manually added leading stage dimension. An
 explicit leading dimension can instead be part of the application's layout;
@@ -150,7 +150,7 @@ reads. Separate sibling loops can own the same storage. If an outer loop loads
 a tile consumed by an inner loop, that outer loop owns its versions: inner-loop synchronization must use the owner's iteration, not the
 consumer's local iteration. If an inner loop writes rows and an outer task
 consumes the whole buffer, the owner must likewise include both. See
-`testing/ascend/auto_schedule/test_buffer_ownership.py` for ownership cases.
+`testing/ascend/ascendc/auto_schedule/test_buffer_ownership.py` for ownership cases.
 
 The current write-first heuristic is storage-granular: a write to one region
 does not prove that every later-read region was overwritten. When untouched
@@ -229,7 +229,7 @@ storage, or validate an arbitrary manual buffering protocol. AutoSchedule can
 remain enabled to analyze dependencies and insert synchronization. This differs
 from disabling the entire scheduling path for a fully manual flag kernel.
 Guarded manual-ring synchronization is checked in
-`testing/ascend/auto_schedule/test_sync_dependencies.py`; this does not establish
+`testing/ascend/ascendc/auto_schedule/test_sync_dependencies.py`; this does not establish
 support for arbitrary manual protocols.
 
 ## Control flow and stage shifting
@@ -248,8 +248,8 @@ it is not automatically multibuffered and can constrain stage offsets.
 The current pipeline accepts nested while/for control flow by normalizing while
 loops for scheduling and restoring them afterward. An inner `T.Pipelined` loop
 can overlap work; the synthetic while loop itself is not an arbitrary pipeline
-offset boundary. `testing/ascend/transform/test_ascend_restore_while_loops.py`
-checks restored control flow, and `testing/ascend/auto_schedule/test_schedule_integration.py`
+offset boundary. `testing/ascend/ascendc/transform/test_ascend_restore_while_loops.py`
+checks restored control flow, and `testing/ascend/ascendc/auto_schedule/test_schedule_integration.py`
 checks nested-loop exits across core splitting. Preserve
 `T.loop_break` ordering and examine zero-trip loops and early exits when changing
 buffer clocks. A one-trip loop can still be an owner or synchronization boundary;
@@ -288,7 +288,7 @@ Independent loop exits must also reach Cube consumers of the corresponding
 sub-core's values, including uses after the loop. Ambiguous exits controlling
 common Cube work or Cube work from both sub-cores are rejected; use a common
 exit condition or separate loops. Complete examples are in
-`testing/ascend/auto_schedule/test_schedule_integration.py`.
+`testing/ascend/ascendc/auto_schedule/test_schedule_integration.py`.
 
 ## Dependency analysis and conflict hints
 

@@ -9,7 +9,7 @@ and early explicit unroll remaps each carrier's data Var with the clone.
 annotation consumed by code generation.
 
 These are host-only IR tests: they cover Var identity, not numeric execution.
-Compilation and device numerics live under ``testing/ascend/language/pto/``.
+Compilation and device numerics live under ``testing/ascend/pto/language/``.
 """
 
 import pytest

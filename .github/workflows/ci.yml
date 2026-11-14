@@ -502,13 +502,15 @@ jobs:
         backend:
           - name: AscendC
             target: ascend
-            unit_markers: not pto
+            test_dir: testing/ascend/ascendc
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.2.0-ubuntu22.04-py3.12
           - name: PTO
             target: pto
-            unit_markers: pto
+            test_dir: testing/ascend/pto
+            image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
     runs-on: linux-amd64-a5-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
+      image: ${{ matrix.backend.image }}
     timeout-minutes: 120
     env:
       PIP_USER: "0"
@@ -591,11 +593,11 @@ jobs:
         id: backend-unit-tests
         if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
         shell: bash
-        env:
-          TEST_MARKERS: ${{ matrix.backend.unit_markers }}
         run: |
           source .venv/bin/activate
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
+          # AscendC and PTO unit tests live in separate trees; each job collects
+          # only its own backend, so neither one imports the other's modules.
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 ${{ matrix.backend.test_dir }}
 
       - name: Summarize ${{ matrix.backend.name }} results
         if: ${{ always() }}
