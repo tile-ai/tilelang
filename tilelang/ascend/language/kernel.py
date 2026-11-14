@@ -169,7 +169,10 @@ def Kernel(
     """
     if len(blocks) != 1:
         raise ValueError(f"Ascend targets a 1-D core grid: T.Kernel(N) takes exactly one grid extent. Got {len(blocks)}-D: {blocks}.")
-    return launch_kernel(blocks, prelude=prelude)
+    from tilelang.ascend.target import resolve_aiv_count
+
+    count = resolve_aiv_count()
+    return launch_kernel(blocks, prelude=prelude, pragma_aiv_count=count, vector_count=tirx.IntImm("int32", count))
 
 
 @kernel_launch_factory
@@ -186,8 +189,10 @@ def MixedKernel(
         Number of blocks in the 1-D grid (blockIdx.x extent).
     sids : int or None
         Number of active AIV sub-cores per mixed group (1 or 2). If omitted
-        or None, compilation selects the current device AIV:AIC ratio,
+        or None, frontend construction selects the current device AIV:AIC ratio,
         falling back to 2 when the device cannot be queried.
+        An explicit sids fixes the logical sid extent for every body type.
+        Single-side bodies still generate pure Cube or Vector kernels.
         For a mixed kernel, AscendC emits the requested physical ratio;
         PTO retains its existing mixed launch and guards the Vector body
         with sub-core 0 when ``sids=1``. Binds as ``sid`` via the backend's
@@ -228,4 +233,8 @@ def MixedKernel(
     if prelude is not None:
         attrs["pragma_import_c"] = prelude
 
-    return _ffi_api.MixedKernelLaunch(blocks, -1 if sids is None else sids, attrs)
+    from tilelang.ascend.target import resolve_aiv_count
+
+    count = resolve_aiv_count(sids)
+    attrs["pragma_aiv_count"] = count
+    return _ffi_api.MixedKernelLaunch(blocks, count, attrs)

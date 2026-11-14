@@ -279,14 +279,6 @@ class KernelCache:
             "compile_flags": compile_flags,
             **self._get_base_key(),
         }
-        # Mixed-group defaults are derived from the current device.
-        # Keep the current capability in the internal cache identity so a
-        # 1:2/default/offline artifact cannot bypass 1:1 device validation.
-        target_kind = target.kind.name if isinstance(target, Target) else str(target).split()[0]
-        if target_kind in ("ascend", "asc", "pto"):
-            from tilelang.ascend.target import _query_device_aiv_per_aic
-
-            key_data["ascend_device_aiv_per_aic"] = _query_device_aiv_per_aic()
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key

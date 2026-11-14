@@ -53,7 +53,6 @@ def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     pass_ctx = tilelang.transform.get_pass_context()
     auto_schedule_enabled = allow_autoschedule(pass_ctx=pass_ctx)
     disable_reuse = should_disable_shared_memory_reuse(pass_ctx=pass_ctx)
-    mod = ascend_transform.ResolveAivGroup(pass_ctx=pass_ctx)(mod)
 
     if should_force_let_inline(pass_ctx=pass_ctx):
         mod = tilelang.transform.LetInline()(mod)

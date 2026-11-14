@@ -49,11 +49,6 @@ def EstimateLatency():
     return _ffi_api.EstimateLatency()  # type: ignore
 
 
-def ResolveAivGroup(pass_ctx=None):
-    """Resolve group shape/sid using the supplied or execution-time context."""
-    return _ffi_api.ResolveAivGroup(pass_ctx)
-
-
 def MaterializeScheduleUnits():
     """Normalize task boundaries and materialize trivial schedule units."""
     return _ffi_api.MaterializeScheduleUnits()  # type: ignore

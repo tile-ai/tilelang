@@ -2164,8 +2164,7 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
 }
 
 void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
-                                     const PrimFunc &original) {
-  PrimFunc func = original;
+                                     const PrimFunc &func) {
   RegisterFunction_(gvar, func);
   current_function_name_ = GetFunctionName_(gvar);
   InitFuncState_(func);
@@ -2207,43 +2206,8 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
       func_has_gemm_l1 || func_has_blockscaled_gemm_l1 || HasAscendMad(func);
   current_function_is_cube_ = IsAscendCubeKernel(func);
   current_function_is_mixed_ = IsAscendMixedKernel(func);
-  tl::ascend::AivGroupInfo aiv_group;
-  tirx::PostOrderVisit(func->body,
-                       [&](const ObjectRef &node) { aiv_group.Observe(node); });
-  int mixed_aiv_count = current_function_is_mixed_ ? aiv_group.MixedCount() : 2;
-  if (!current_function_is_cube_) {
-    auto requested = aiv_group.vector_count;
-    if (requested.has_value()) {
-      int count = requested.value();
-      // Explicit Vector groups use mixed launch classification, as in AscendC.
-      // A one-AIV group uses the existing mixed-section AIV0 guard.
-      class VectorBody : public tirx::StmtMutator {
-        Stmt VisitStmt_(const SBlockNode *op) final {
-          auto block = Downcast<SBlock>(StmtMutator::VisitStmt_(op));
-          if (block->name_hint == "VECTOR")
-            block.CopyOnWrite()->name_hint = "vector_body";
-          return block;
-        }
-      };
-      Map<String, ObjectRef> annotations;
-      annotations.Set("vector_count", Integer(count));
-      annotations.Set("tl.resolved_aiv_count", Integer(count));
-      Stmt vector_body = SBlock({}, {}, {}, "VECTOR", VectorBody()(func->body),
-                                std::nullopt, {}, {}, annotations);
-      // PTOAS classifies a single Vector section as a native Vector kernel.
-      // An empty Cube section retains mixed launch geometry without adding
-      // any Cube computation.
-      func.CopyOnWrite()->body = SeqStmt(
-          {SBlock({}, {}, {}, "CUBE", Evaluate(0), std::nullopt, {}, {}, {}),
-           vector_body});
-      mixed_aiv_count = count;
-      current_function_is_mixed_ = true;
-    }
-  }
   if (current_function_is_mixed_) {
-    if (!aiv_group.resolved_count.has_value())
-      func.CopyOnWrite()->body = tl::ascend::AivDomainNormalizer(
-          mixed_aiv_count, std::nullopt, false)(func->body);
+    int mixed_aiv_count = tl::ascend::GetAivCount(func->body);
     if (mixed_aiv_count == 1) {
       tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
         if (const auto *call = node.as<CallNode>()) {

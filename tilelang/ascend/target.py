@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import tvm_ffi
 from tvm.target import Target
 
 from tilelang.backend.target import (
@@ -21,8 +20,7 @@ def _query_device_aiv_per_aic() -> int | None:
     """Query the device AIC:AIV ratio from hardware only.
 
     Does NOT read any environment variable or user override — this is the
-    ground truth used by both normalize_pass_configs and the C++ group resolver
-    to validate user requests. Returns None when no current NPU can be queried.
+    ground truth used by frontend launch construction to validate user requests. Returns None when no current NPU can be queried.
     """
     try:
         import torch
@@ -37,11 +35,13 @@ def _query_device_aiv_per_aic() -> int | None:
     return None
 
 
-@tvm_ffi.register_global_func("tilelang.ascend._query_device_aiv_per_aic", override=True)
-def _query_device_aiv_per_aic_ffi() -> int:
-    """Internal hardware query for C++; 0 denotes an unknown/offline device."""
-    ratio = _query_device_aiv_per_aic()
-    return 0 if ratio is None else ratio
+def resolve_aiv_count(requested: int | None = None) -> int:
+    """Resolve a frontend-validated request and check device capacity."""
+    limit = _query_device_aiv_per_aic()
+    if requested is not None and limit is not None and requested > limit:
+        raise ValueError(f"AIV group count={requested} exceeds the current device capability {limit}")
+    device_count = limit if limit is not None else 2
+    return requested if requested is not None else device_count
 
 
 def _make_ascend_target(target_dict: dict | None = None) -> Target:

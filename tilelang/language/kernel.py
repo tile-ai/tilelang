@@ -197,18 +197,17 @@ class KernelLaunchFrame(TIRFrame):
         stack = _get_current_stack()
         return stack.top() if stack else None
 
-    def get_block_extent(self, dim: int) -> int | tirx.PrimExpr:
+    def get_block_extent(self, dim: int) -> int:
         """
         Returns the block extent for the given dimension.
         dim=0 corresponds to blockIdx.x, dim=1 to blockIdx.y, and dim=2 to blockIdx.z.
-        Grid axes that were not launched have extent 1. Symbolic extents are preserved.
+        Grid axes that were not launched have extent 1.
         """
         if dim >= len(self.grid_extents):
             return 1
-        extent = self.grid_extents[dim]
-        return int(extent) if isinstance(extent, tirx.IntImm) else extent
+        return int(self.grid_extents[dim])
 
-    def get_block_extents(self) -> list[int | tirx.PrimExpr]:
+    def get_block_extents(self) -> list[int]:
         """
         Returns the block extents for all three dimensions.
         """
@@ -633,13 +632,13 @@ def get_thread_extents() -> list[int]:
     return KernelLaunchFrame.Current().get_thread_extents()
 
 
-def get_block_extent(dim: int = 0) -> int | tirx.PrimExpr:
+def get_block_extent(dim: int = 0) -> int:
     """Returns the block extent for the given dimension."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_extent(dim)
 
 
-def get_block_extents() -> list[int | tirx.PrimExpr]:
+def get_block_extents() -> list[int]:
     """Returns all three block extents."""
     assert KernelLaunchFrame.Current() is not None, "KernelLaunchFrame is not initialized"
     return KernelLaunchFrame.Current().get_block_extents()
