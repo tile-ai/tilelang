@@ -868,6 +868,7 @@ def _vec_scalar_same_dtype(name):
     @_scope_guarded
     def wrapper(source, scalar, mask, *, pmode=None, loc=None, ip=None):
         _reject_packed_fp4(source, context=f"T.vmi.{name}(...)")
+        _require_scalar(scalar, context=f"T.vmi.{name}(...)")
         return _call_vmi(
             name,
             _dtype_of(source),
