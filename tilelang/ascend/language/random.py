@@ -35,10 +35,7 @@ def rng_init(seed, seq=None, off=0, generator="curandStatePhilox4_32_10_t") -> t
     count.
     """
     if not isinstance(generator, str) or generator not in _SUPPORTED_RNG_GENERATORS:
-        raise ValueError(
-            f"T.rng_init(generator=...) on Ascend supports only "
-            f"{_SUPPORTED_RNG_GENERATORS}, got {generator!r}"
-        )
+        raise ValueError(f"T.rng_init(generator=...) on Ascend supports only {_SUPPORTED_RNG_GENERATORS}, got {generator!r}")
     if seq is None:
         bx = get_block_binding()
         ex = get_thread_extent()

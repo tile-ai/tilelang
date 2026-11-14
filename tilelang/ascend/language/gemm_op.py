@@ -107,6 +107,16 @@ def _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, a
     )
 
 
+def _validate_gemm_control(value) -> None:
+    """Validate the effective unit_flag_ctrl annotation after merging."""
+    if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
+        raise TypeError(f"unit_flag_ctrl must be an integer or integer PrimExpr, got {value!r}")
+    if isinstance(value, tirx.PrimExpr):
+        dtype = str(value.dtype)
+        if not dtype.startswith(("int", "uint")) or int(getattr(value.dtype, "lanes", 1)) != 1:
+            raise TypeError(f"unit_flag_ctrl must have a scalar integer dtype, got {dtype}")
+
+
 def gemm_blockscaled(
     A: BufferLikeType,
     B: BufferLikeType,
@@ -139,9 +149,9 @@ def gemm_blockscaled(
 
     ann: dict = {}
     if unit_flag_ctrl is not None:
-        if isinstance(unit_flag_ctrl, bool) or not isinstance(unit_flag_ctrl, (int, tirx.PrimExpr)):
-            raise TypeError(f"unit_flag_ctrl must be an integer or integer PrimExpr, got {unit_flag_ctrl!r}")
         ann["unit_flag_ctrl"] = unit_flag_ctrl
+    if "unit_flag_ctrl" in ann:
+        _validate_gemm_control(ann["unit_flag_ctrl"])
     if SFA is None or SFB is None:
         raise ValueError("block-scaled GEMM requires both SFA and SFB")
     call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann or None)
@@ -209,7 +219,7 @@ def gemm(
     """
     ann: dict = dict(annotations) if annotations else {}
     if unit_flag_ctrl is not None:
-        if isinstance(unit_flag_ctrl, bool) or not isinstance(unit_flag_ctrl, (int, tirx.PrimExpr)):
-            raise TypeError(f"unit_flag_ctrl must be an integer or integer PrimExpr, got {unit_flag_ctrl!r}")
         ann.setdefault("unit_flag_ctrl", unit_flag_ctrl)
+    if "unit_flag_ctrl" in ann:
+        _validate_gemm_control(ann["unit_flag_ctrl"])
     return _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, ann or None)

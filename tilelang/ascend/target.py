@@ -64,7 +64,6 @@ def _detect_ascend_target() -> Target | None:
     return None
 
 
-
 def _normalize_target_name(target: TargetLike) -> str | None:
     """One normalization rule for every textual target/backend name.
 
@@ -75,6 +74,7 @@ def _normalize_target_name(target: TargetLike) -> str | None:
     if not isinstance(target, str):
         return None
     return target.strip().lower()
+
 
 def normalize_ascend_target(target: TargetLike) -> Target | None:
     if _normalize_target_name(target) != "ascend":

@@ -12,6 +12,7 @@ the kernel-level ``tx/ty/tz`` placeholders are dropped by the Ascend pipeline.
 
 from __future__ import annotations
 
+import operator
 import threading
 
 from tvm import tirx
@@ -100,8 +101,12 @@ def pop_simtvf_context():
 
 def _validate_thread_dim(dim: int) -> int:
     """Validate a SimtVF thread-dimension index (0/1/2)."""
-    if isinstance(dim, bool) or not isinstance(dim, int):
+    if isinstance(dim, bool):
         raise TypeError(f"thread dimension must be an int, got {type(dim).__name__}")
+    try:
+        dim = operator.index(dim)
+    except TypeError:
+        raise TypeError(f"thread dimension must be an int, got {type(dim).__name__}") from None
     if not 0 <= dim <= 2:
         raise ValueError(f"thread dimension must be within [0, 2] (SimtVF declares at most 3 dims), got {dim}")
     return dim

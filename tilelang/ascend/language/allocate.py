@@ -66,13 +66,9 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
     for extent in extents:
         elements *= int(extent)
     nbytes = elements * dtype.bits // 8
-    # The SS pool grants 32-byte aligned bases; a non-multiple allocation
-    # rounds up in the backend and can overflow the 3 KiB pool unnoticed.
-    if nbytes % 32 != 0:
-        raise ValueError(
-            f"alloc_ss requires a 32-byte aligned footprint, got {nbytes} bytes "
-            f"for shape {tuple(extents)} and dtype {dtype}"
-        )
+    # The backend's sequential plan aligns every base and charges the padding
+    # to the merged footprint, so a size need not be a multiple of 32. Only the
+    # physical SS capacity is a hard frontend constraint.
     if nbytes > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
     return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
@@ -125,11 +121,11 @@ def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: Sh
     if len(buf.shape) < 2:
         raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
     dtype = DataType(sf_dtype)
-    # Scale factors are packed unsigned integers. Checking only `bits`/`lanes`
-    # used to let float16/float8 through as if they were scale storage.
-    if (not str(dtype).startswith("uint") or dtype.bits not in (8, 16)
-            or dtype.lanes != 1):
-        raise ValueError(f"L0 SF storage must contain uint8 scales or uint16 scale pairs, got {sf_dtype}")
+    # Scale factors are packed integers. The GEMM validator accepts both
+    # signed and unsigned 8/16-bit scalar storage; floats and multi-lane
+    # dtypes are not valid scale storage.
+    if not str(dtype).startswith(("int", "uint")) or dtype.bits not in (8, 16) or dtype.lanes != 1:
+        raise ValueError(f"L0 SF storage must contain scalar 8- or 16-bit integer scales, got {sf_dtype}")
     if sf_shape is None:
         k_per_sf = _MX_SF_K_PER_SCALE_BYTE * (dtype.bits // 8)
         rows, k = buf.shape[-2], buf.shape[-1]
