@@ -8,6 +8,13 @@ active backend; workers bind their device, and inputs captured on another
 device are aligned to the device the benchmark runs on.
 """
 
+import json
+import os
+from pathlib import Path
+import sys
+import time
+import traceback
+
 import pytest
 import torch
 
@@ -19,6 +26,35 @@ from tilelang.env import CacheState, env
 
 N = 64
 CONFIGS = [{"block": 32}, {"block": 64}]
+
+
+def _record_cross_device_probe(stage, current, other, error=None):
+    directory = os.environ.get("TILELANG_ASCEND_DIAGNOSTICS_DIR")
+    if not directory:
+        return
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    record = {
+        "time": time.time(),
+        "pid": os.getpid(),
+        "worker": worker,
+        "test": os.environ.get("PYTEST_CURRENT_TEST"),
+        "stage": stage,
+        "current_device": current,
+        "other_device": other,
+        "traceback": error,
+    }
+    try:
+        path = Path(directory)
+        path.mkdir(parents=True, exist_ok=True)
+        with (path / f"probe-{worker}-{os.getpid()}.jsonl").open("a") as output:
+            print(json.dumps(record), file=output, flush=True)
+        if stage in ("copy", "complete") or error:
+            from testing.ascend.diagnose_cross_device import environment
+
+            (path / f"environment-{worker}-{os.getpid()}.json").write_text(json.dumps(environment(), indent=2))
+    except Exception as logging_error:
+        # Best-effort diagnostics must not change the original test outcome.
+        print(f"Could not save Ascend probe diagnostics: {logging_error}; record={record}", file=sys.stderr, flush=True)
 
 
 def _vecadd_kernel(n, block):
@@ -99,15 +135,24 @@ def test_set_inputs_supplies_captured_inputs_on_current_device(capture, monkeypa
     if capture == "other_npu":
         if torch.npu.device_count() < 2:
             pytest.skip("needs two visible NPU devices")
-        other = next(i for i in range(torch.npu.device_count()) if i != torch.npu.current_device())
+        current = torch.npu.current_device()
+        other = next(i for i in range(torch.npu.device_count()) if i != current)
+        stage = "copy"
         try:
             # The alignment copy is cross-device, which some runtimes reject.
+            _record_cross_device_probe(stage, current, other)
             torch.empty(1, device=f"npu:{other}").to("npu")
             # Force async copy failures to surface inside this try so the except below can catch and skip them.
+            stage = "synchronize_current"
+            _record_cross_device_probe(stage, current, other)
             torch.npu.synchronize()
+            stage = "synchronize_other"
+            _record_cross_device_probe(stage, current, other)
             torch.npu.synchronize(other)
         except RuntimeError:
+            _record_cross_device_probe(stage + "_failed", current, other, traceback.format_exc())
             pytest.skip("cross-device copy is not available on this host")
+        _record_cross_device_probe("complete", current, other)
         device = f"npu:{other}"
 
     a, b = _deterministic_inputs(device=device)

@@ -593,9 +593,27 @@ jobs:
         shell: bash
         env:
           TEST_MARKERS: ${{ matrix.backend.unit_markers }}
+          TILELANG_ASCEND_DIAGNOSTICS_DIR: ${{ matrix.backend.name == 'AscendC' && format('{0}/ascend-diagnostics/original-probes', runner.temp) || '' }}
         run: |
           source .venv/bin/activate
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
+
+      - name: Summarize Ascend cross-device diagnostics
+        if: ${{ !cancelled() && matrix.backend.name == 'AscendC' && steps.ascend-build.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python testing/ascend/diagnose_cross_device.py --output-dir "${RUNNER_TEMP}/ascend-diagnostics"
+
+      - name: Upload Ascend diagnostics
+        if: ${{ always() && matrix.backend.name == 'AscendC' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ascend-cross-device-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ascend-diagnostics
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Summarize ${{ matrix.backend.name }} results
         if: ${{ always() }}
