@@ -183,7 +183,7 @@ def test_explicit_physical_view_pitch_does_not_depend_on_partition(parts):
 @pytest.mark.parametrize(
     "kwargs,error",
     [
-        ({"src_pitch": 7}, "pitches >= rows"),
+        ({"src_pitch": 7}, "must be >= rows"),
         ({"src_pitch": 65544}, "instruction field range"),
         ({"cols": 4096 * 16}, "instruction field range"),
         ({"offset": 1}, "32-byte-aligned"),
@@ -196,8 +196,8 @@ def test_explicit_post_copy_rejects_invalid_geometry(kwargs, error):
     src = tirx.decl_buffer((4096,), "bfloat16", scope="shared.dyn")
     dst = tirx.decl_buffer((4096,), "bfloat16", scope="shared.l1")
     args = {"src_pitch": 64, "dst_pitch": 64, "cols": 64, "offset": 0, **kwargs}
-    call = T.ascend_nd2nz_post_copy(dst[0], src[args.pop("offset")], 8, dtype="bfloat16", **args)
     with pytest.raises(ValueError, match=error):
+        call = T.ascend_nd2nz_post_copy(dst[0], src[args.pop("offset")], 8, dtype="bfloat16", **args)
         transform.InsertNd2Nz()(kernel(tirx.Evaluate(call), buffers=[src, dst]))
 
 
