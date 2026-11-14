@@ -100,8 +100,16 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
             raise ValueError(f"cols must be C0-aligned (multiple of {32 // dst_bytes}) for {dtype}, got {cols}")
         if dst_pitch < rows or src_pitch < rows:
             raise ValueError(f"src_pitch ({src_pitch}) and dst_pitch ({dst_pitch}) must be >= rows ({rows})")
-        if rows > 0xFFFF or dst_pitch - rows > 0xFFFF or src_pitch - rows > 0xFFFF:
-            raise ValueError("ND2NZ geometry exceeds the 16-bit instruction field range")
+        c0 = 32 // dst_bytes
+        bursts = cols // c0
+        if bursts > 0xFFF:
+            raise ValueError(f"cols ({cols}) implies {bursts} bursts, exceeding the 4095-burst non-scatter instruction field range")
+        if rows > 0xFFFF:
+            raise ValueError(f"rows ({rows}) exceeds the 16-bit instruction field range (max 65535)")
+        if dst_pitch - rows > 0xFFFF:
+            raise ValueError(f"dst_pitch - rows ({dst_pitch - rows}) exceeds the 16-bit instruction field range (max 65535)")
+        if src_pitch - rows > 0xFFFF:
+            raise ValueError(f"src_pitch - rows ({src_pitch - rows}) exceeds the 16-bit instruction field range (max 65535)")
     if isinstance(dst, BufferLoad):
         dst = access_ptr(dst, "w")
     if isinstance(src, BufferLoad):

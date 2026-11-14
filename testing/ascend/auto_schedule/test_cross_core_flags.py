@@ -91,14 +91,19 @@ def test_dynamic_nz_prefix_keeps_subcore_write_regions(overlap):
     copies = []
     for sid in range(2):
         offset = 0 if overlap else sid * 16
-        call = T.ascend_nd2nz_post_copy(
+        # Build the low-level intrinsic directly: this InsertSync fixture uses
+        # a symbolic `rows` extent, which the public frontend deliberately
+        # rejects because lowering requires static NZ geometry.
+        call = tirx.call_intrin(
+            "void",
+            tirx.op.Op.get("tl.ascend_nd2nz_post_copy"),
             T.access_ptr(l1[offset, 0], "w", rows, 64),
             T.access_ptr(nz[sid][0, 0], "r", 17, 64),
             rows,
-            64,
-            src_pitch=17,
-            dst_pitch=32,
-            dtype="bfloat16",
+            tirx.IntImm("int32", 64),
+            tirx.IntImm("int32", 17),
+            tirx.IntImm("int32", 32),
+            "bfloat16_t",
         )
         # This is a prepared InsertSync input with a proven NZ destination.
         call = tirx.Call(call.dtype, call.op, call.args, annotations={"nd2nz_logical_regions": tirx.IntImm("int32", 1)})
