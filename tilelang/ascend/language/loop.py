@@ -41,5 +41,9 @@ def unroll(
     """
     ann: dict[str, Any] = dict(annotations) if annotations is not None else {}
     if unroll_factor is not None:
+        if isinstance(unroll_factor, bool) or not isinstance(unroll_factor, int):
+            raise TypeError(f"unroll_factor must be an int, got {unroll_factor!r}")
+        if unroll_factor < 0:
+            raise ValueError(f"unroll_factor must be non-negative, got {unroll_factor}")
         ann.setdefault("pragma_unroll_factor", unroll_factor)
     return _common_unroll(start, stop, step, explicit=explicit, annotations=ann or None)
