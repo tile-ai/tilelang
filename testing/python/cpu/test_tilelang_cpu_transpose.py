@@ -175,7 +175,7 @@ def test_cpu_transpose_rejects_a_destination_that_is_not_the_axis_swap(src_shape
     with (
         tvm.target.Target("c"),
         pytest.raises(
-            tvm.error.InternalError,
+            ValueError,
             match="Transpose destination shape must be the source shape with the final two axes swapped",
         ),
     ):
@@ -185,7 +185,7 @@ def test_cpu_transpose_rejects_a_destination_that_is_not_the_axis_swap(src_shape
 def test_cpu_transpose_rejects_a_destination_with_a_different_rank():
     with (
         tvm.target.Target("c"),
-        pytest.raises(tvm.error.InternalError, match="Transpose requires src and dst to have the same rank"),
+        pytest.raises(ValueError, match="Transpose requires src and dst to have the same rank"),
     ):
         tilelang.lower(_transpose_kernel((2, 3, 4), (4, 3)), target="c")
 
@@ -226,7 +226,7 @@ def test_cpu_transpose_rejects_a_directly_built_tileop_with_a_mismatched_destina
     with (
         tvm.target.Target("c"),
         pytest.raises(
-            tvm.error.InternalError,
+            ValueError,
             match="Transpose destination shape must be the source shape with the final two axes swapped",
         ),
     ):

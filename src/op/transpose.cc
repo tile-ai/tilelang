@@ -44,10 +44,10 @@ size_t SourceAxisForDestinationAxis(size_t dst_axis, size_t rank) {
 void ValidateTransposeExtents(const Array<Range> &src_range,
                               const Array<Range> &dst_range) {
   size_t rank = src_range.size();
-  ICHECK_EQ(rank, dst_range.size())
+  CHECK_EQ(rank, dst_range.size(), ValueError)
       << "Transpose requires src and dst to have the same rank, but got "
       << rank << " source axes and " << dst_range.size() << " destination axes";
-  ICHECK_GE(rank, 2) << "Transpose requires at least two dimensions";
+  CHECK_GE(rank, 2, ValueError) << "Transpose requires at least two dimensions";
 
   arith::Analyzer analyzer;
   for (size_t axis = 0; axis < rank; axis++) {
@@ -55,7 +55,7 @@ void ValidateTransposeExtents(const Array<Range> &src_range,
     const PrimExpr &src_extent = src_range[axis]->extent;
     const PrimExpr &dst_extent = dst_range[dst_axis]->extent;
     bool same_extent = analyzer.CanProveEqual(src_extent, dst_extent);
-    ICHECK(same_extent)
+    CHECK(same_extent, ValueError)
         << "Transpose destination shape must be the source shape with the "
            "final two axes swapped; source axis "
         << axis << " has extent " << src_extent << " but destination axis "
