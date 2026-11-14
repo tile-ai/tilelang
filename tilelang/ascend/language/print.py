@@ -37,6 +37,11 @@ def print(obj: Any = None, msg: str = "") -> None:  # noqa: A001
             message-only print.
         msg: Optional message prefix.
     """
+    if msg is None:
+        msg = ""
+    if not isinstance(msg, str):
+        raise TypeError(f"T.print: `msg` must be a string, got {type(msg).__name__}")
+
     if isinstance(obj, tirx.Buffer):
         buffer = obj
 

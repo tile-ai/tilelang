@@ -55,6 +55,8 @@ def reduce(
 
     # Same validation as the common reduce, then a direct emission on the UB
     # regions: no fragment exists inside SimdVF to round-trip through.
+    if isinstance(batch, bool) or not isinstance(batch, int):
+        raise TypeError(f"batch must be an integer, got {batch!r}")
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
     out_buffer = to_buffer_region(out).buffer
@@ -75,7 +77,7 @@ def reduce(
         )
 
     annotations = _normalize_annotations(annotations)
-    if batch > 1:
+    if batch > 1 and "batch" not in annotations:
         annotations["batch"] = batch
 
     return evaluate(

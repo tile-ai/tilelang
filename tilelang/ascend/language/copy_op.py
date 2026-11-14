@@ -202,9 +202,10 @@ _L2_CACHE_CTRL_MAP = {
 def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | None) -> int | None:
     """Convert a string l2_cache_ctrl name to its integer value.
 
-    Matching is case-insensitive and suffix-based:
-    ``"NORMAL_FV"``, ``"normal_fv"``, and ``"L2_CACHE_HINT_NORMAL_FV"``
-    all map to ``0``.  Integers pass through unchanged.
+    Matching is case-insensitive and accepts either an exact name
+    (``"NORMAL_FV"``) or the documented ``L2_CACHE_HINT_``-prefixed form
+    (``"L2_CACHE_HINT_NORMAL_FV"``). Other prefixes or suffixes are rejected.
+    Integers pass through unchanged.
     """
     if value is None:
         return None
@@ -219,12 +220,26 @@ def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | N
         # Exact match
         if key in _L2_CACHE_CTRL_MAP:
             return _L2_CACHE_CTRL_MAP[key]
-        # Suffix match (e.g. "L2_CACHE_HINT_NORMAL_FV" or "_NORMAL_FV")
-        for map_key, map_val in _L2_CACHE_CTRL_MAP.items():
-            if key.endswith(map_key):
-                return map_val
-        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid suffixes: {sorted(_L2_CACHE_CTRL_MAP.keys())}")
+        # Suffixed match for the documented "L2_CACHE_HINT_"-style prefix
+        # only: reject arbitrary garbage prefixes before a valid name.
+        if key.startswith("L2_CACHE_HINT_"):
+            suffix = key[len("L2_CACHE_HINT_") :]
+            if suffix in _L2_CACHE_CTRL_MAP:
+                return _L2_CACHE_CTRL_MAP[suffix]
+        raise ValueError(
+            f"Unknown l2_cache_ctrl string {value!r}. Valid names: {sorted(_L2_CACHE_CTRL_MAP.keys())} (optionally prefixed with L2_CACHE_HINT_)"
+        )
     raise TypeError(f"l2_cache_ctrl must be int, str, or None, got {type(value)}")
+
+
+def _validate_copy_control(name: str, value) -> None:
+    """Validate an effective control annotation after keyword/annotation merge."""
+    if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
+        raise TypeError(f"Ascend T.copy {name} must be an integer or integer PrimExpr, got {value!r}")
+    if isinstance(value, tirx.PrimExpr):
+        dtype = str(value.dtype)
+        if not dtype.startswith(("int", "uint")) or int(getattr(value.dtype, "lanes", 1)) != 1:
+            raise TypeError(f"Ascend T.copy {name} must have a scalar integer dtype, got {dtype}")
 
 
 def copy(  # noqa: A001
@@ -285,8 +300,8 @@ def copy(  # noqa: A001
             May vary at runtime. ``None`` keeps the compact region pitch.
         l2_cache_ctrl (Optional[Union[int, str]], keyword-only): L2 cache
             control for the GM↔L1 and UB↔GM DMA paths. Accepts the raw integer
-            or a cache-policy name (case-insensitive, suffix-matched), e.g.
-            ``"NOTALLOC_KEEP"``.
+            or a cache-policy name (case-insensitive; exact name or with the
+            ``L2_CACHE_HINT_`` prefix), e.g. ``"NOTALLOC_KEEP"``.
         unit_flag_ctrl (Optional[Union[int, PrimExpr]], keyword-only): Unit flag
             control for the Cube instruction; ``None`` omits the annotation.
         sub_blockid (Optional[Union[int, PrimExpr]], keyword-only): Sub-block id
@@ -354,10 +369,14 @@ def copy(  # noqa: A001
         ann["l2_cache_ctrl"] = l2_cache_ctrl
     if "l2_cache_ctrl" in ann:
         ann["l2_cache_ctrl"] = _normalize_l2_cache_ctrl(ann["l2_cache_ctrl"])
-    if unit_flag_ctrl is not None and "unit_flag_ctrl" not in ann:
-        ann["unit_flag_ctrl"] = unit_flag_ctrl
-    if sub_blockid is not None and "sub_blockid" not in ann:
-        ann["sub_blockid"] = sub_blockid
+    if unit_flag_ctrl is not None:
+        ann.setdefault("unit_flag_ctrl", unit_flag_ctrl)
+    if sub_blockid is not None:
+        ann.setdefault("sub_blockid", sub_blockid)
+    # Validate the effective values so keywords and annotations share one rule.
+    for key in ("unit_flag_ctrl", "sub_blockid"):
+        if key in ann:
+            _validate_copy_control(key, ann[key])
 
     if pad_value is not None and data_select:
         raise ValueError(
