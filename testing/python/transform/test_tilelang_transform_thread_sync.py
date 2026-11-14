@@ -548,6 +548,53 @@ def test_loop_carry_with_cross_thread_dependency():
     assert _storage_syncs(lowered)
 
 
+@tilelang.testing.requires_cuda
+def test_while_loop_carry_shared_reuse():
+    """A uniform while needs a barrier before reusing shared storage."""
+
+    @T.prim_func(private=True)
+    def func():
+        temp_shared = T.alloc_buffer([128], dtype="float32", scope="shared")
+        result_local = T.alloc_buffer([1], dtype="float32", scope="local")
+        counter = T.alloc_buffer([1], dtype="int32", scope="local.var")
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        result_local[0] = T.float32(0)
+        counter = 0
+        while counter < 3:
+            temp_shared[tx] = T.Cast("float32", counter)
+            result_local[0] = result_local[0] + temp_shared[(tx + 127) % 128]
+            counter = counter + 1
+
+    mod = tvm.IRModule({"main": func})
+    mod = tilelang.transform.ThreadSync("shared")(mod)
+    lowered = mod["main"]
+    loops = collect_nodes(lowered, tirx.While)
+    assert len(loops) == 1
+    loop = loops[0]
+
+    syncs = _storage_syncs(loop)
+    assert len(syncs) == 2
+
+    writes = [store for store in collect_nodes(loop, tirx.BufferStore) if store.buffer.scope() == "shared"]
+    assert len(writes) == 1
+    reads = [
+        store
+        for store in collect_nodes(loop, tirx.BufferStore)
+        if store.buffer.scope() == "local"
+        and any(load.buffer.data.same_as(writes[0].buffer.data) for load in collect_nodes(store.value, tirx.BufferLoad))
+    ]
+    assert len(reads) == 1
+    _assert_stmt_order(
+        loop.body,
+        _sync_stmt(loop, syncs[0]),
+        writes[0],
+        _sync_stmt(loop, syncs[1]),
+        reads[0],
+    )
+
+
 @pytest.mark.parametrize(
     "start, stop, step, expected_syncs",
     [

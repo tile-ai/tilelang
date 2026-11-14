@@ -763,6 +763,39 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     scope_.push_back(std::vector<StmtEntry>());
   }
 
+  struct LoopCarryInfo {
+    enum class Kind { kNone, kFor, kWhile };
+
+    static LoopCarryInfo None() { return {}; }
+
+    static LoopCarryInfo FromFor(const ForNode *loop) {
+      LoopCarryInfo info;
+      info.kind = Kind::kFor;
+      info.stmt = GetRef<Stmt>(loop);
+      return info;
+    }
+
+    static LoopCarryInfo FromWhile(const WhileNode *loop) {
+      LoopCarryInfo info;
+      info.kind = Kind::kWhile;
+      info.stmt = GetRef<Stmt>(loop);
+      return info;
+    }
+
+    bool defined() const { return kind != Kind::kNone; }
+    bool is_for() const { return kind == Kind::kFor; }
+    bool is_while() const { return kind == Kind::kWhile; }
+
+    const ForNode *for_node() const {
+      return is_for() ? stmt.as<ForNode>() : nullptr;
+    }
+
+    const StmtNode *node() const { return stmt.get(); }
+
+    Kind kind = Kind::kNone;
+    Stmt stmt;
+  };
+
   /*! \brief Storage access type */
   enum AccessType : uint8_t {
     kRead,
@@ -1069,7 +1102,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         scope_.push_back(std::vector<StmtEntry>());
         ConstrVisitor::VisitStmt_(op);
         // no need to take the result as the thread barrier automatically syncs.
-        Summarize(std::move(scope_.back()), nullptr);
+        Summarize(std::move(scope_.back()), LoopCarryInfo::None());
         in_device_env_ = false;
         scope_.pop_back();
       } else {
@@ -1086,7 +1119,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     ConstrVisitor::VisitStmt_(op);
     StmtEntry s;
     s.stmt = op;
-    s.access = Summarize(std::move(scope_.back()), op);
+    s.access = Summarize(std::move(scope_.back()), LoopCarryInfo::FromFor(op));
     scope_.pop_back();
     if (!s.access.empty()) {
       // relax the touched set to contain all ranges in the loop.
@@ -1149,7 +1182,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       }
 
       s.stmt = op;
-      s.access = Summarize(std::move(scope_.back()), nullptr);
+      s.access = Summarize(std::move(scope_.back()), LoopCarryInfo::None());
       scope_.pop_back();
       // Merge the condition's access summary into the if-statement's access
       // list so the planner can insert a sync before the if when necessary.
@@ -1170,7 +1203,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
       {
         this->VisitStmt(op->else_case.value());
       }
-      auto v = Summarize(std::move(scope_.back()), nullptr);
+      auto v = Summarize(std::move(scope_.back()), LoopCarryInfo::None());
       scope_.pop_back();
       s.access.insert(s.access.end(), v.begin(), v.end());
     }
@@ -1264,6 +1297,8 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
   void VisitStmt_(const WhileNode *op) final {
     StmtEntry s;
+    // Check block uniformity before applying conservative loop-carry analysis.
+    bool uniform_condition = IsBlockUniformCondition(op->condition);
     {
       auto guard = MakeGuard(op->condition);
       allow_append_ = true;
@@ -1276,7 +1311,9 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         this->VisitStmt(op->body);
       }
       s.stmt = op;
-      s.access = Summarize(std::move(scope_.back()), nullptr);
+      LoopCarryInfo loop = uniform_condition ? LoopCarryInfo::FromWhile(op)
+                                             : LoopCarryInfo::None();
+      s.access = Summarize(std::move(scope_.back()), loop);
       scope_.pop_back();
       if (!cond_access.empty()) {
         s.access.insert(s.access.begin(), cond_access.begin(),
@@ -1511,7 +1548,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
   }
 
   std::vector<AccessEntry> Summarize(std::vector<StmtEntry> seq,
-                                     const ForNode *loop) {
+                                     const LoopCarryInfo &loop) {
     // Redirect all "shared.dyn" buffer access to the same buffer var
     // so that the accesses can be planned together.
     Var shared_dyn_buf;
@@ -1546,15 +1583,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
 
       for (const AccessEntry &acc : s.access) {
         if (acc.type == kRead) {
-          // Same-iteration conflict: loop=nullptr
-          if (FindConflict(writes, acc, nullptr)) {
+          // Same-iteration conflict: no loop info.
+          if (FindConflict(writes, acc, LoopCarryInfo::None())) {
             sync_before_stmt = true;
             break;
           }
         } else if (acc.type == kWrite) {
-          // Same-iteration conflict: loop=nullptr
-          if (FindConflict(reads, acc, nullptr) ||
-              FindConflict(writes, acc, nullptr)) {
+          // Same-iteration conflict: no loop info.
+          if (FindConflict(reads, acc, LoopCarryInfo::None()) ||
+              FindConflict(writes, acc, LoopCarryInfo::None())) {
             sync_before_stmt = true;
             break;
           }
@@ -1584,7 +1621,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         insert_syncs(s.stmt);
       }
     }
-    if (loop != nullptr) {
+    if (loop.defined()) {
       // Check if the loop body contains any reads in the same sync scope.
       // If there are reads, we conservatively keep the sync within the loop
       // body to preserve per-iteration ordering when needed. If there are no
@@ -1626,13 +1663,15 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
         bool need_loop_sync = false;
         for (const AccessEntry &acc : s.access) {
           if (acc.type == kRead) {
-            // Loop-carry conflict: pass loop for iteration shift analysis
+            // Loop-carry conflict: use affine shifting for For, or potential
+            // overlap for a uniform While without an affine loop variable.
             if (FindConflict(writes, acc, loop)) {
               need_loop_sync = true;
               break;
             }
           } else if (acc.type == kWrite) {
-            // Loop-carry conflict: pass loop for iteration shift analysis
+            // Loop-carry conflict: use affine shifting for For, or potential
+            // overlap for a uniform While without an affine loop variable.
             if (FindConflict(reads, acc, loop) ||
                 FindConflict(writes, acc, loop)) {
               need_loop_sync = true;
@@ -1648,7 +1687,7 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
             // Mark the loop itself to receive a sync before it, instead of
             // inserting inside the loop body. This ensures a single sync is
             // emitted outside the loop and avoids per-iteration overhead.
-            insert_syncs(loop);
+            insert_syncs(loop.node());
           } else {
             // Fall back to inserting before the first conflicting statement
             // inside the loop to maintain correctness when reads are present.
@@ -1913,12 +1952,14 @@ private:
    *
    * \param prev The access entry from the previous/current iteration
    * \param curr The access entry to check against
-   * \param loop The loop node for loop-carry analysis, nullptr for
-   * same-iteration
+   * \param loop The loop-carry description. A `kNone` value means
+   * same-iteration analysis.
    * \return true if the accesses conflict and need synchronization
    */
   bool FindConflict(const AccessEntry &prev, const AccessEntry &curr,
-                    const ForNode *loop) {
+                    const LoopCarryInfo &loop) {
+    const auto *for_loop = loop.for_node();
+    bool has_loop_carry = loop.defined();
     // Special case: ignore conflicts between async-copy writes (e.g., TMA
     // loads into shared memory). Multiple async writes do not require
     // interspersed barriers among themselves. We still respect conflicts with
@@ -1963,12 +2004,12 @@ private:
     // curr represents access at iteration i+step (beginning of next iteration)
     Map<Var, PrimExpr> loop_shift_sub;
     PrimExpr adjusted_extent;
-    if (loop != nullptr) {
+    if (for_loop != nullptr) {
       PrimExpr step =
-          loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
-      loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
+          for_loop->step.value_or(make_const(for_loop->loop_var.dtype(), 1));
+      loop_shift_sub.Set(for_loop->loop_var, for_loop->loop_var + step);
       // Only iterations with i + step < min + extent have a successor.
-      adjusted_extent = loop->extent - step;
+      adjusted_extent = for_loop->extent - step;
     }
 
     // Check if indices are the same (considering loop shift)
@@ -1978,7 +2019,7 @@ private:
       PrimExpr curr_indice = curr.buffer_indices[i];
 
       // For loop-carry, shift the curr index to represent next iteration
-      if (loop != nullptr) {
+      if (for_loop != nullptr) {
         curr_indice = Substitute(curr_indice, loop_shift_sub);
       }
 
@@ -2007,9 +2048,9 @@ private:
         }
       }
       // Add loop variable constraint for loop-carry analysis
-      if (loop != nullptr) {
-        analyzer.Bind(loop->loop_var,
-                      Range::FromMinExtent(loop->min, adjusted_extent));
+      if (for_loop != nullptr) {
+        analyzer.Bind(for_loop->loop_var,
+                      Range::FromMinExtent(for_loop->min, adjusted_extent));
       }
 
       // Check P => C: ¬P ∨ C
@@ -2042,7 +2083,7 @@ private:
       PrimExpr curr_indice = curr.buffer_indices[i];
 
       // For loop-carry, shift the curr index to represent next iteration
-      if (loop != nullptr) {
+      if (for_loop != nullptr) {
         curr_indice = Substitute(curr_indice, loop_shift_sub);
       }
 
@@ -2054,9 +2095,9 @@ private:
       arith::Analyzer analyzer;
 
       // Add loop variable constraint for loop-carry analysis
-      if (loop != nullptr) {
-        analyzer.Bind(loop->loop_var,
-                      Range::FromMinExtent(loop->min, adjusted_extent));
+      if (for_loop != nullptr) {
+        analyzer.Bind(for_loop->loop_var,
+                      Range::FromMinExtent(for_loop->min, adjusted_extent));
       }
 
       // A same-iteration WAW must model two distinct threads: program order
@@ -2066,7 +2107,7 @@ private:
       // case also requires shifting its constraints and placing the barrier
       // inside the loop.
       bool is_same_iteration_waw =
-          loop == nullptr && prev.type == kWrite && curr.type == kWrite;
+          !has_loop_carry && prev.type == kWrite && curr.type == kWrite;
       bool use_distinct_threads =
           prev.type != curr.type || is_same_iteration_waw;
 
@@ -2102,7 +2143,7 @@ private:
       // copy; see ConstrSet::RenameFrom. They differ for cross-thread proofs
       // (RAW/WAR/same-iteration WAW) or for two loop iterations. Otherwise the
       // pair represents one execution, where renaming would only lose the bind.
-      if (use_distinct_threads || loop != nullptr) {
+      if (use_distinct_threads || has_loop_carry) {
         prev_cset = prev_cset.RenameFrom("<PREV>", prev_sub, std::nullopt,
                                          /*rename_ranges=*/false);
         curr_cset = curr_cset.RenameFrom("<CURR>", curr_sub, std::nullopt,
@@ -2197,7 +2238,7 @@ private:
   }
 
   bool FindConflict(const std::vector<AccessEntry> &prev,
-                    const AccessEntry &curr, const ForNode *loop) {
+                    const AccessEntry &curr, const LoopCarryInfo &loop) {
     for (const AccessEntry &x : prev) {
       if (FindConflict(x, curr, loop)) {
         return true;
