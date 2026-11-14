@@ -48,7 +48,12 @@ def _record_cross_device_probe(stage, current, other, error=None):
         path.mkdir(parents=True, exist_ok=True)
         with (path / f"probe-{worker}-{os.getpid()}.jsonl").open("a") as output:
             print(json.dumps(record), file=output, flush=True)
-    except OSError as logging_error:
+        if stage in ("copy", "complete") or error:
+            from testing.ascend.diagnose_cross_device import environment
+
+            (path / f"environment-{worker}-{os.getpid()}.json").write_text(json.dumps(environment(), indent=2))
+    except Exception as logging_error:
+        # Best-effort diagnostics must not change the original test outcome.
         print(f"Could not save Ascend probe diagnostics: {logging_error}; record={record}", file=sys.stderr, flush=True)
 
 
