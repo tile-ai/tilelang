@@ -98,8 +98,18 @@ def pop_simtvf_context():
     _get_thread_scope_stack().pop()
 
 
+def _validate_thread_dim(dim: int) -> int:
+    """Validate a SimtVF thread-dimension index (0/1/2)."""
+    if isinstance(dim, bool) or not isinstance(dim, int):
+        raise TypeError(f"thread dimension must be an int, got {type(dim).__name__}")
+    if not 0 <= dim <= 2:
+        raise ValueError(f"thread dimension must be within [0, 2] (SimtVF declares at most 3 dims), got {dim}")
+    return dim
+
+
 def get_thread_binding(dim: int = 0) -> Var:
     """Returns the thread binding for the given dimension."""
+    dim = _validate_thread_dim(dim)
     simtvf = _get_current_simtvf()
     if simtvf is not None:
         return simtvf.thread_vars[dim]
@@ -116,6 +126,7 @@ def get_thread_bindings() -> list[Var]:
 
 def get_thread_extent(dim: int = 0) -> int:
     """Returns the thread extent for the given dimension."""
+    dim = _validate_thread_dim(dim)
     simtvf = _get_current_simtvf()
     if simtvf is not None:
         return simtvf.thread_extents[dim]
