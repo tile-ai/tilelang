@@ -120,15 +120,21 @@ def SimtVF(threads: int | list[int] | tuple = 128, latency: int = 0) -> SimtVFFr
     res : SimtVFFrame
         The SimtVFFrame used to denote a SIMT vector-fragment region.
     """
+    if isinstance(threads, bool):
+        raise TypeError(f"SimtVF threads must be int, list, or tuple, got {threads!r}")
     if isinstance(threads, int):
         normalized = [threads, 1, 1]
     elif isinstance(threads, list):
         if len(threads) > 3:
             raise ValueError("SimtVF supports at most 3 thread dimensions")
+        if any(isinstance(t, bool) or not isinstance(t, int) for t in threads):
+            raise TypeError(f"SimtVF thread dimensions must be plain ints, got {threads!r}")
         normalized = threads + [1] * (3 - len(threads))
     elif isinstance(threads, tuple):
         if len(threads) > 3:
             raise ValueError("SimtVF supports at most 3 thread dimensions")
+        if any(isinstance(t, bool) or not isinstance(t, int) for t in threads):
+            raise TypeError(f"SimtVF thread dimensions must be plain ints, got {threads!r}")
         normalized = list(threads) + [1] * (3 - len(threads))
     else:
         raise TypeError(f"threads must be int, list, or tuple, got {type(threads)}")
