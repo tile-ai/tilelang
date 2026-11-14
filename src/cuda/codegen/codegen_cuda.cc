@@ -166,6 +166,31 @@ const char *GetPackedMathIntrinsicName(const Call &call) {
   return nullptr;
 }
 
+// int16/uint16 vectors of 12 or 16 lanes are printed as (u)longlong3/4,
+// four 16-bit lanes per 64-bit field (see PrintType).
+bool IsPackedInt16x4Vector(DataType t) {
+  return (t.is_int() || t.is_uint()) && t.bits() == 16 &&
+         (t.lanes() == 12 || t.lanes() == 16);
+}
+
+// Emit `make_(u)longlong{N}(tl::pack_(u)int16x4(v0, v1, v2, v3), ...)`, the
+// same shape the fp16/bf16 x16 path builds with tl::pack_float16x4.
+void PrintPackedInt16x4Vector(DataType t,
+                              const std::vector<std::string> &values,
+                              std::ostream &os) {
+  ICHECK_EQ(static_cast<int>(values.size()), t.lanes());
+  const char *pack = t.is_uint() ? "tl::pack_uint16x4" : "tl::pack_int16x4";
+  os << (t.is_uint() ? "make_ulonglong" : "make_longlong") << t.lanes() / 4
+     << '(';
+  for (int i = 0; i < t.lanes(); i += 4) {
+    if (i != 0)
+      os << ", ";
+    os << pack << '(' << values[i] << ", " << values[i + 1] << ", "
+       << values[i + 2] << ", " << values[i + 3] << ')';
+  }
+  os << ')';
+}
+
 } // namespace
 
 struct CUDAMath {
@@ -1075,6 +1100,13 @@ void CodeGenTileLangCUDA::PrintType(DataType t, std::ostream &os) { // NOLINT(*)
         ICHECK_EQ(t.lanes() % 2, 0)
             << "only support even lane for shorT type with lanes > 4";
         os << "int" << t.lanes() / 2;
+      } else if (t.lanes() <= 16) {
+        // 192/256 bits: CUDA has no (u)short12/short16 vector type, so pack
+        // four elements into each 64-bit field, like fp16/bf16 x12/x16.
+        ICHECK_EQ(t.lanes() % 4, 0)
+            << "only support (mod 4 = 0) lanes for short type of more than 8 "
+               "lanes";
+        os << "longlong" << t.lanes() / 4;
       } else {
         fail = true;
       }
@@ -1535,6 +1567,11 @@ void CodeGenTileLangCUDA::PrintVecElemLoad(const std::string &vec, DataType t,
       os << "." << access[(i % 4) / 2];
     // fp4_e2_2_t -> method call x() or y()
     os << "." << access[i % 2] << "()";
+  } else if (t.lanes() > 8 && t.lanes() <= 16 && t.bits() == 16 &&
+             (t.is_int() || t.is_uint())) {
+    std::string type_name = t.is_int() ? "short" : "ushort";
+    os << "(((" << type_name << "2*)(&(" << vec << "." << access[i / 4]
+       << "))) + " << (i / 2 % 2) << ")->" << access[i % 2];
   } else if (t.lanes() > 4 && t.lanes() <= 8) {
     std::string type_name;
     if (t.bits() == 16) {
@@ -1653,6 +1690,12 @@ void CodeGenTileLangCUDA::PrintVecElemStore(const std::string &vec, DataType t,
     ICHECK(!type_name.empty());
     stream << "((" << type_name << "2*)(&(" << vec << "." << access[i / 2]
            << ")))->" << access[i % 2] << " = " << value << ";\n";
+  } else if (t.lanes() > 8 && t.lanes() <= 16 && t.bits() == 16 &&
+             (t.is_int() || t.is_uint())) {
+    std::string type_name = t.is_int() ? "short" : "ushort";
+    stream << "(((" << type_name << "2*)(&(" << vec << "." << access[i / 4]
+           << "))) + " << (i / 2 % 2) << ")->" << access[i % 2] << " = "
+           << value << ";\n";
   } else if (t.is_float4_e2m1fn()) {
     stream << vec;
     // fp4_e2_64_t
@@ -5531,6 +5574,21 @@ void CodeGenTileLangCUDA::VisitStmt_(const EvaluateNode *op) {
 
 void CodeGenTileLangCUDA::VisitExpr_(const RampNode *op, std::ostream &os) {
   int lanes = static_cast<int>(Downcast<IntImm>(op->lanes)->value);
+  // (u)int16x12/x16 print as (u)longlong3/4: pack four lanes into each 64-bit
+  // field, like the fp16/bf16 x16 Broadcast below.
+  if (IsPackedInt16x4Vector(op->dtype)) {
+    std::string base = PrintExpr(op->base);
+    std::string stride = PrintExpr(op->stride);
+    std::vector<std::string> values;
+    for (int i = 0; i < lanes; ++i) {
+      values.push_back("(" + base + ")+(" + stride + "*" + std::to_string(i) +
+                       ")");
+    }
+    os << "(";
+    PrintPackedInt16x4Vector(op->dtype, values, os);
+    os << ")";
+    return;
+  }
   // TODO(chaofan): Comment the ramp lanes limit for now since we have
   // LegalizeVectorizedLoop to automatically legalize vectorized loop whose
   // width exceeds the limit. But we should add check here for safety in the
@@ -6037,6 +6095,12 @@ void CodeGenTileLangCUDA::VisitExpr_(const BroadcastNode *op,
       os << ">(" << sval << ")";
       return;
     }
+  }
+
+  if (IsPackedInt16x4Vector(op->dtype)) {
+    std::string v = PrintExpr(op->value);
+    PrintPackedInt16x4Vector(op->dtype, std::vector<std::string>(lanes, v), os);
+    return;
   }
 
   if (op->dtype.is_float16()) {
