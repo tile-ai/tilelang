@@ -139,8 +139,11 @@ def gemm_blockscaled(
 
     ann: dict = {}
     if unit_flag_ctrl is not None:
+        if isinstance(unit_flag_ctrl, bool) or not isinstance(unit_flag_ctrl, (int, tirx.PrimExpr)):
+            raise TypeError(f"unit_flag_ctrl must be an integer or integer PrimExpr, got {unit_flag_ctrl!r}")
         ann["unit_flag_ctrl"] = unit_flag_ctrl
-    assert SFA is not None and SFB is not None, "block-scaled GEMM requires both SFA and SFB"
+    if SFA is None or SFB is None:
+        raise ValueError("block-scaled GEMM requires both SFA and SFB")
     call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann or None)
     # Re-emit the dense slots under the dedicated tl.tileop.gemm_blockscaled
     # op with the SFA/SFB regions and k_start appended (the 16-slot protocol
@@ -206,5 +209,7 @@ def gemm(
     """
     ann: dict = dict(annotations) if annotations else {}
     if unit_flag_ctrl is not None:
+        if isinstance(unit_flag_ctrl, bool) or not isinstance(unit_flag_ctrl, (int, tirx.PrimExpr)):
+            raise TypeError(f"unit_flag_ctrl must be an integer or integer PrimExpr, got {unit_flag_ctrl!r}")
         ann.setdefault("unit_flag_ctrl", unit_flag_ctrl)
     return _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, ann or None)
