@@ -202,9 +202,9 @@ _L2_CACHE_CTRL_MAP = {
 def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | None) -> int | None:
     """Convert a string l2_cache_ctrl name to its integer value.
 
-    Matching is case-insensitive and suffix-based:
-    ``"NORMAL_FV"``, ``"normal_fv"``, and ``"L2_CACHE_HINT_NORMAL_FV"``
-    all map to ``0``.  Integers pass through unchanged.
+    Matching is case-insensitive: an exact name (``"NORMAL_FV"``) or the
+    documented prefixed form (``"L2_CACHE_HINT_NORMAL_FV"`` /
+    ``"_NORMAL_FV"``) maps to its code.  Integers pass through unchanged.
     """
     if value is None:
         return None
@@ -219,11 +219,13 @@ def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | N
         # Exact match
         if key in _L2_CACHE_CTRL_MAP:
             return _L2_CACHE_CTRL_MAP[key]
-        # Suffix match (e.g. "L2_CACHE_HINT_NORMAL_FV" or "_NORMAL_FV")
-        for map_key, map_val in _L2_CACHE_CTRL_MAP.items():
-            if key.endswith(map_key):
-                return map_val
-        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid suffixes: {sorted(_L2_CACHE_CTRL_MAP.keys())}")
+        # Suffixed match for the documented "L2_CACHE_HINT_"-style prefix
+        # only: reject arbitrary garbage prefixes before a valid name.
+        if key.startswith("L2_CACHE_HINT_"):
+            suffix = key[len("L2_CACHE_HINT_"):]
+            if suffix in _L2_CACHE_CTRL_MAP:
+                return _L2_CACHE_CTRL_MAP[suffix]
+        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid names: {sorted(_L2_CACHE_CTRL_MAP.keys())} (optionally prefixed with L2_CACHE_HINT_)")
     raise TypeError(f"l2_cache_ctrl must be int, str, or None, got {type(value)}")
 
 
@@ -355,8 +357,12 @@ def copy(  # noqa: A001
     if "l2_cache_ctrl" in ann:
         ann["l2_cache_ctrl"] = _normalize_l2_cache_ctrl(ann["l2_cache_ctrl"])
     if unit_flag_ctrl is not None and "unit_flag_ctrl" not in ann:
+        if isinstance(unit_flag_ctrl, bool) or not isinstance(unit_flag_ctrl, (int, tirx.PrimExpr)):
+            raise TypeError(f"Ascend T.copy unit_flag_ctrl must be an integer or integer PrimExpr, got {unit_flag_ctrl!r}")
         ann["unit_flag_ctrl"] = unit_flag_ctrl
     if sub_blockid is not None and "sub_blockid" not in ann:
+        if isinstance(sub_blockid, bool) or not isinstance(sub_blockid, (int, tirx.PrimExpr)):
+            raise TypeError(f"Ascend T.copy sub_blockid must be an integer or integer PrimExpr, got {sub_blockid!r}")
         ann["sub_blockid"] = sub_blockid
 
     if pad_value is not None and data_select:
