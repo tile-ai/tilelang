@@ -228,6 +228,9 @@ def MixedKernel(
     if len(blocks) != 1:
         raise ValueError(f"T.MixedKernel() only supports 1-D block grid. Got {len(blocks)}-D: {blocks}")
 
+    # bool and float both satisfy `in (1, 2)` (True == 1, 1.0 == 1).
+    if isinstance(sids, bool) or not isinstance(sids, int):
+        raise TypeError(f"T.MixedKernel() sids must be a plain int, got {sids!r}")
     if sids not in (1, 2):
         raise ValueError(f"T.MixedKernel() sids must be 1 or 2. Got {sids}")
 
