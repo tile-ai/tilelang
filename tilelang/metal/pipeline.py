@@ -4,6 +4,7 @@ from tvm import IRModule, s_tir, tirx
 from tvm.target import Target
 
 import tilelang
+from tilelang.metal.transform.legalize_simdgroup import LegalizeSimdgroupVectorization
 from tilelang.backend.pass_pipeline.pipeline_utils import (
     LayoutVisual,
     allow_vectorize,
@@ -12,7 +13,6 @@ from tilelang.backend.pass_pipeline.pipeline_utils import (
     should_enable_race_check,
     should_force_let_inline,
 )
-from tilelang.metal.transform import MetalFragmentToSimdgroup
 
 
 def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
@@ -44,12 +44,6 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
 
-    # @Metal specific
-    # On Metal, rewrite local.fragment GEMM accumulators to metal.simdgroup
-    # before layout inference. simdgroup matrices are opaque and have no
-    # explicit thread-level layout, so layout inference must not see them.
-    mod = MetalFragmentToSimdgroup(mod)
-
     mod = tilelang.transform.LayoutInference()(mod)
     mod = tilelang.transform.ReducerPlanAndMaterialize()(mod)
     LayoutVisual(mod)
@@ -71,6 +65,7 @@ def MetalPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.FlattenBuffer()(mod)
     mod = tilelang.transform.ConfigIndexBitwidth()(mod)
     mod = tirx.transform.Simplify()(mod)
+    mod = LegalizeSimdgroupVectorization(mod)
     mod = tilelang.transform.VectorizeLoop(enable_vectorize=allow_vectorize(pass_ctx=pass_ctx))(mod)
     mod = tilelang.transform.StorageRewrite()(mod)
     mod = tilelang.transform.LoopUnswitching()(mod)
