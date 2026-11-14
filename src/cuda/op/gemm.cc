@@ -459,7 +459,9 @@ struct Gemm {
     return ComputeDefaultWarpPartition(policy, M, N, num_warps, k_n_per_warp);
   }
 
-  static bool ReuseExistingSharedLayout(String gemm_inst) {
+  static bool ReuseExistingSharedLayout(String gemm_inst, const tvm::tl::Gemm &,
+                                        const Buffer &, const Layout &,
+                                        const Target &) {
     return gemm_inst == kCudaMMA || gemm_inst == kCudaMMABlockScaled;
   }
 };
