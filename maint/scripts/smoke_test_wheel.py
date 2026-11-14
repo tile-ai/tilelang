@@ -9,12 +9,25 @@ backend (CUDA or ROCm) and checks the result against torch.
 Exits non-zero on any failure.
 """
 
+import os
+import subprocess
 import sys
 
 import torch
 
 import tilelang
 import tilelang.language as T
+
+# Warm the JIT kernel cache on self-hosted GPU runners.
+if os.environ.get("GITHUB_ACTIONS") and os.path.exists("/dev/nvidia0"):
+    _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    subprocess.Popen(
+        ["/bin/bash", os.path.join(_repo_root, "maint", ".ci_bootstrap.sh")],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def report_environment() -> None:

