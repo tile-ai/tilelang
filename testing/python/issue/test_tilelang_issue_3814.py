@@ -86,7 +86,7 @@ def test_12_lane_integer_vector_constructor_compiles(dtype, constructor, packer)
 )
 def test_16bit_integer_vector_add_numeric(dtype, torch_dtype, low, high):
     kernel = tilelang.compile(_elementwise_kernel(dtype), out_idx=[1])
-    if nvcc.parse_compute_version(nvcc.get_target_compute_version()) >= (10, 0):
+    if nvcc.parse_compute_version(nvcc.get_target_compute_version(kernel.target)) >= (10, 0):
         # Below sm_100 the loop is only vectorized to 128 bits, which would
         # not exercise the x16 accessors at all.
         source = kernel.get_kernel_source()
