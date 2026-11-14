@@ -25,6 +25,35 @@ from tilelang.language.meta import inline, meta_class
 from tilelang.language.tile_schedule import BaseTileScheduler
 
 
+def _validate_grouped_layout(grouped_layout, num_groups, *, context: str) -> None:
+    """Validate the grouped-layout buffer contract shared by the grouped schedulers.
+
+    The layout must be a rank >= 1 GM buffer of int32 elements with a static
+    extent covering ``num_groups`` prefix-sum entries.
+    """
+    from tvm.tirx import Buffer
+
+    if isinstance(num_groups, bool) or not isinstance(num_groups, int) or num_groups <= 0:
+        raise ValueError(f"{context}: num_groups must be a positive integer, got {num_groups!r}")
+    if not isinstance(grouped_layout, Buffer):
+        raise TypeError(f"{context}: grouped_layout must be a tirx.Buffer, got {type(grouped_layout).__name__}")
+    if grouped_layout.scope() != "global":
+        raise ValueError(f"{context}: grouped_layout must live in global memory (GM), got scope {grouped_layout.scope()!r}")
+    if str(grouped_layout.dtype) != "int32":
+        raise ValueError(f"{context}: grouped_layout must have dtype int32, got {grouped_layout.dtype}")
+    if len(grouped_layout.shape) < 1:
+        raise ValueError(f"{context}: grouped_layout must have rank >= 1, got shape {grouped_layout.shape}")
+    extent = grouped_layout.shape[0]
+    extent_value = extent.value if hasattr(extent, "value") else extent
+    if not isinstance(extent_value, int):
+        raise ValueError(f"{context}: grouped_layout must have a static first extent, got {extent!r}")
+    if extent_value < num_groups:
+        raise ValueError(
+            f"{context}: grouped_layout has {extent_value} entries but num_groups={num_groups}; "
+            "the scheduler indexes grouped_layout[group] for every group"
+        )
+
+
 @meta_class
 class AscendBaseTileScheduler(BaseTileScheduler):
     """Base for persistent GEMM block schedulers (GROUP_M swizzle + N-first snake).
@@ -51,7 +80,7 @@ class AscendBaseTileScheduler(BaseTileScheduler):
     ----------
     block_m, block_n : int
         Tile sizes along M and N.
-    num_cores : int | PrimExpr
+    num_cores : int
         Persistent stride = number of resident cores (grid dim).
     shape_m, shape_n : int | PrimExpr
         Problem M and N.
@@ -89,11 +118,14 @@ class AscendBaseTileScheduler(BaseTileScheduler):
         name: str | None = None,
     ):
         super().__init__(stateful=stateful, name=name)
-        assert group_m in (4, 8), "group_m must be 4 or 8"
+        if isinstance(group_m, bool) or not isinstance(group_m, int) or group_m not in (4, 8):
+            raise ValueError(f"group_m must be 4 or 8, got {group_m!r}")
 
         self._block_m = block_m
         self._block_n = block_n
         self._num_cores = num_cores
+        if isinstance(num_cores, bool) or not isinstance(num_cores, int) or num_cores <= 0:
+            raise ValueError(f"num_cores must be a positive integer (the persistent core-grid stride), got {num_cores!r}")
         self._shape_m = shape_m
         self._shape_n = shape_n
         self._group_m = group_m
@@ -299,6 +331,8 @@ class AscendBatchedTileScheduler(AscendBaseTileScheduler):
         name: str | None = None,
     ):
         self._num_groups = num_groups
+        if isinstance(num_groups, bool) or not isinstance(num_groups, int) or num_groups <= 0:
+            raise ValueError(f"num_groups must be a positive integer (batch count), got {num_groups!r}")
         super().__init__(
             block_m=block_m,
             block_n=block_n,
@@ -372,6 +406,15 @@ class AscendMGroupedTileScheduler(AscendBaseTileScheduler):
         self._grouped_layout = grouped_layout
         self._num_groups = num_groups
         self._alignment = alignment
+        _validate_grouped_layout(grouped_layout, num_groups, context="AscendMGroupedTileScheduler")
+        if isinstance(alignment, bool) or not isinstance(alignment, int) or alignment <= 0:
+            raise ValueError(f"alignment must be a positive integer, got {alignment!r}")
+        if alignment % block_m != 0:
+            raise ValueError(
+                f"alignment ({alignment}) must be a multiple of block_m ({block_m}): the group "
+                "m-origin is computed as last_psum_m // block_m, so a non-divisible alignment "
+                "silently offsets every tile of the group"
+            )
         super().__init__(
             block_m=block_m,
             block_n=block_n,
@@ -479,11 +522,14 @@ class AscendKGroupedTileScheduler(AscendBaseTileScheduler):
         self._num_groups = num_groups
         self._shape_k = shape_k
         self._alignment = alignment
+        _validate_grouped_layout(grouped_layout, num_groups, context="AscendKGroupedTileScheduler")
         # A group's K window starts on an ``alignment`` boundary; the SF range
         # contract below needs that boundary to be scale-pair aligned too.
-        assert alignment % self._MX_SF_DIVISOR == 0, (
-            f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}"
-        )
+        # Raised (not asserted) so `python -O` cannot strip the invariant.
+        if isinstance(alignment, bool) or not isinstance(alignment, int) or alignment <= 0:
+            raise ValueError(f"k-grouped alignment must be a positive integer, got {alignment!r}")
+        if alignment % self._MX_SF_DIVISOR != 0:
+            raise ValueError(f"k-grouped alignment must be a multiple of the MX SF divisor ({self._MX_SF_DIVISOR}), got {alignment}")
         super().__init__(
             block_m=block_m,
             block_n=block_n,
