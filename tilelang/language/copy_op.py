@@ -14,6 +14,32 @@ import tvm
 from tvm import ir, tirx
 
 
+def _normalize_negative_destination_slices(dst: BufferLikeType) -> BufferLikeType:
+    """Canonicalize constant negative slice bounds before encoding a copy region.
+
+    The negative-index pass rewrites the start of a region but cannot recover
+    its original stop to adjust the extent. Do that while both are available.
+    """
+    if not isinstance(dst, tirx.BufferRegion):
+        return dst
+    ranges = []
+    changed = False
+    for dim, shape in zip(dst.region, dst.buffer.shape):
+        start, extent = dim.min, dim.extent
+        if isinstance(shape, tirx.IntImm) and isinstance(start, tirx.IntImm) and isinstance(extent, tirx.IntImm):
+            size, first, length = int(shape.value), int(start.value), int(extent.value)
+            if -size <= first < 0:
+                stop = first + length
+                first += size
+                if stop < 0:
+                    stop += size
+                ranges.append(ir.Range.from_min_extent(tirx.IntImm(start.dtype, first), tirx.IntImm(extent.dtype, max(stop - first, 0))))
+                changed = True
+                continue
+        ranges.append(dim)
+    return tirx.BufferRegion(dst.buffer, ranges) if changed else dst
+
+
 def _normalize_copy_regions(
     src: BufferLikeType, dst: BufferLikeType
 ) -> tuple[
@@ -24,6 +50,7 @@ def _normalize_copy_regions(
     if isinstance(src, tirx.Buffer) and isinstance(dst, tirx.Buffer):
         ir.assert_structural_equal(src.shape, dst.shape)
 
+    dst = _normalize_negative_destination_slices(dst)
     src_extent = get_extent(src)
     dst_extent = get_extent(dst)
 
