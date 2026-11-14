@@ -297,6 +297,13 @@ def _predicate_access_ptr(addr, access_type: str, dist: str):
         raise ValueError(f"Predicate load/store does not support buffer dtype {elem_dtype!r}")
     payload_bits = _PREDICATE_PAYLOAD_BYTES[dist] * 8
     elem_bits = _ELEM_BITS[elem_dtype]
+    if elem_bits < 8:
+        # A 4-bit element used to derive a 64-element footprint from a
+        # 32-byte predicate payload, which is not addressable in UB.
+        raise ValueError(
+            f"Predicate load/store requires an element dtype of at least 8 bits, "
+            f"got {elem_dtype!r} ({elem_bits}-bit)"
+        )
     extent = (payload_bits + elem_bits - 1) // elem_bits
     return access_ptr(addr, access_type, extent=extent)
 
@@ -313,6 +320,17 @@ def pst(addr, src, dist="NORM"):
     _validate_predicate_dist("pst", dist, _PREDICATE_STORE_DISTS)
     addr = _predicate_access_ptr(addr, "w", dist)
     return tirx.call_intrin("void", _Op("tl.simd.pst"), addr, src, dist)
+
+
+# Legal vld distributions from codegen_ascend.cc's vlds_* table. The
+# post-update path already used a subset; the ordinary path validated nothing.
+_VLD_DISTS = (
+    "NORM", "NORM_B8", "NORM_B16", "NORM_B32",
+    "US", "US_B8", "US_B16", "DS", "DS_B8", "DS_B16",
+    "BRC_B8", "BRC_B16", "BRC_B32",
+    "UNPK_B8", "UNPK_B16", "UNPK_B32", "UNPK4_B8",
+    "BLK", "E2B_B16", "E2B_B32",
+)
 
 
 _VLD_POSTUPDATE_DISTS = (
@@ -364,6 +382,8 @@ def vld(addr, dist="NORM", *, post_inc=None):
     the source buffer; their ``_B*`` suffixes describe the data being loaded and
     must agree with it.
     """
+    if not isinstance(dist, str) or dist not in _VLD_DISTS:
+        raise ValueError(f"T.simd.vld: `dist` must be one of {_VLD_DISTS}, got {dist!r}")
     if post_inc is not None:
         if not (isinstance(addr, BufferLoad) and addr.buffer.scope() == "local.var" and str(addr.dtype) == "handle"):
             raise ValueError("vld post_inc requires a mutable pointer from make_ubuf_ptr")
@@ -588,8 +608,12 @@ def make_ubuf_ptr(buf_access, dtype):
         raise ValueError("make_ubuf_ptr expects a buffer access or handle expression")
 
     dtype = tvm.DataType(dtype)
-    if dtype.lanes != 1 or str(dtype) not in _ELEM_BITS:
-        raise ValueError("make_ubuf_ptr requires a scalar numeric element dtype")
+    if (dtype.lanes != 1 or str(dtype) not in _ELEM_BITS
+            or _ELEM_BITS[str(dtype)] not in (8, 16, 32)):
+        raise ValueError(
+            "make_ubuf_ptr requires an 8/16/32-bit scalar element dtype "
+            "(vld/vsstb post-update only supports these widths)"
+        )
     pointer = _alloc_var("handle", buf_access, scope="local.var")
     sblock_attr({"tl.simd_pointer_dtypes": {pointer.data: str(dtype)}})
     return pointer
@@ -1087,11 +1111,23 @@ def vci(index, dtype_str: DType, order="INC_ORDER"):
     return tirx.call_intrin(vec_dtype, _Op("tl.simd.vci"), index, order)
 
 
+# Only these six spellings exist as simd_inst::vcmp_<op> / vcmps_<op>
+# helpers; codegen_pto.cc's kCmpModeEnum has the same six entries.
+_VCMP_OPS = ("eq", "ne", "gt", "ge", "lt", "le")
+
+
+def _validate_vcmp_op(op, *, api):
+    if not isinstance(op, str) or op not in _VCMP_OPS:
+        raise ValueError(f"{api}: `op` must be one of {_VCMP_OPS}, got {op!r}")
+    return op
+
+
 def vcmp(src0, src1, mask=None, op="eq"):
     """Elementwise compare -> vector_bool: dst = vcmp_<op>(src0, src1, mask).
 
     op: eq/ne/gt/ge/lt/le.
     """
+    op = _validate_vcmp_op(op, api="T.simd.vcmp")
     if mask is None:
         mask = _default_mask(src0.dtype)
     return tirx.call_intrin("boolx256", _Op("tl.simd.vcmp"), src0, src1, mask, op)
@@ -1102,6 +1138,7 @@ def vcmps(src, scalar, mask=None, op="lt"):
 
     op: eq/ne/gt/ge/lt/le.
     """
+    op = _validate_vcmp_op(op, api="T.simd.vcmps")
     if mask is None:
         mask = _default_mask(src.dtype)
     return tirx.call_intrin("boolx256", _Op("tl.simd.vcmps"), src, scalar, mask, op)
@@ -1207,6 +1244,11 @@ def vgather2(base, index, mask=None):
     else:
         inner_load = base.args[0]
         elem_dtype = str(inner_load.buffer.dtype)
+    if elem_dtype not in _ELEM_BITS or _ELEM_BITS[elem_dtype] < 8:
+        raise ValueError(
+            f"T.simd.vgather2(...) requires an 8/16/32-bit source element dtype "
+            f"to form its implicit predicate, got {elem_dtype!r}"
+        )
     if mask is None:
         # gather reads source elements, so the predicate aligns to the source (low-lane)
         # width -- e.g. an int8 gather widens the output to int16 but masks with asc_create_mask_b8.
@@ -1496,9 +1538,13 @@ def vselr(src, index):
     """Select lanes from src using per-lane indices."""
     src_dtype = str(src.dtype)
     index_dtype = str(index.dtype)
-    # The index must be an unsigned integer vector.
-    if index_dtype.startswith("int"):
-        index = tirx.reinterpret("u" + index_dtype, index)
+    # The index must be an unsigned integer vector. Reinterpreting signed
+    # indices with a raw "u" + dtype splice silently changes comparison
+    # semantics and also matches int64/vector-with-lanes spellings.
+    if not index_dtype.startswith("uint"):
+        raise TypeError(
+            f"T.simd.vselr(...) requires an unsigned integer index vector, got {index_dtype!r}"
+        )
     # vselr supports f16/bf16 natively but not f32: reinterpret f32 to the same-width unsigned integer, select, then reinterpret back.
     if src_dtype.startswith("float32"):
         uint_dtype = src_dtype.replace("float", "uint")
