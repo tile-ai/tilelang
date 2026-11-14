@@ -83,7 +83,7 @@ def alloc_var(dtype, *, size):
     have to infer that intent from the vector dtype or from a later store.
     """
     require_vmi_scope("T.vmi.alloc_var(...)")
-    lanes = _normalize_lanes(size, context="T.vmi.alloc_var(...)")
+    lanes = _require_vmi_lane_count(_normalize_lanes(size, context="T.vmi.alloc_var(...)"), context="T.vmi.alloc_var(...)")
     elem = _scalar_dtype(dtype, context="T.vmi.alloc_var(...)")
     from tilelang.language.allocate import alloc_var as _alloc_var
 
@@ -275,7 +275,10 @@ def _require_address_element_dtype(value, *, context: str):
 
 
 def _normalize_compare_predicate(cmp, *, context: str):
-    allowed = {"eq", "ne", "lt", "le", "gt", "ge", "oeq", "one", "olt", "ole", "ogt", "oge"}
+    # Only the six spellings every backend implements (PTO kCmpModeEnum,
+    # simd-layer vcmp/vcmps docstrings). The LLVM-style ordered-float
+    # spellings (oeq/one/olt/ole/ogt/oge) are not implemented by any backend.
+    allowed = {"eq", "ne", "lt", "le", "gt", "ge"}
     if not isinstance(cmp, str) or cmp not in allowed:
         expected = ", ".join(sorted(allowed))
         raise ValueError(f"{context} does not support comparison {cmp!r}; expected one of {expected}")
@@ -288,6 +291,14 @@ def _constant_int(value):
     if isinstance(value, tirx.IntImm):
         return int(value.value)
     return None
+
+
+def _require_scalar(value, *, context: str):
+    """Require a scalar operand (lanes == 1), rejecting VMI vector data."""
+    dtype = getattr(value, "dtype", None)
+    if dtype is not None and getattr(dtype, "lanes", 1) != 1:
+        raise TypeError(f"{context} to be a scalar, got a {dtype} vector operand")
+    return value
 
 
 def _annotation_value(value):
@@ -318,11 +329,28 @@ def _normalize_pto_vcvt_rounding(mode, *, context: str, allowed=None):
         if "." in token:
             token = token.rsplit(".", 1)[-1]
     normalized = token.strip().upper()
-    allowed_modes = set(allowed or {"R", "A", "H", "Z"})
+    # Default: the IEEE-754 rounding modes the hardware (and T.simd.vcvt's
+    # documented ROUND_* set) support: R (nearest-even), A (away), F (floor),
+    # C (ceiling), H (half-away), Z (truncate). Paths with a narrower
+    # contract pass an explicit `allowed` set.
+    allowed_modes = set(allowed or {"R", "A", "F", "C", "H", "Z"})
     if normalized not in allowed_modes:
         expected = ", ".join(sorted(allowed_modes))
         raise ValueError(f"{context} does not support rounding {mode!r}; expected one of {expected}")
     return normalized
+
+
+def _validate_positive_stride(name, value, context):
+    constant = _constant_int(value)
+    if constant is not None:
+        if constant <= 0:
+            raise ValueError(f"{context} requires {name} to be positive, got {value!r}")
+        return value
+    # Dynamic TIR expressions stay supported, but only scalar integer ones.
+    # Floats, booleans and arbitrary Python objects are not strides.
+    if not _is_integer_scalar(value):
+        raise TypeError(f"{context} requires {name} to be a positive integer, got {value!r}")
+    return value
 
 
 def _validate_pto_memory_modes(context: str, *, group, stride, block_stride):
@@ -331,11 +359,13 @@ def _validate_pto_memory_modes(context: str, *, group, stride, block_stride):
             raise TypeError(f"{context} does not allow block_stride together with group")
         if stride is None:
             raise TypeError(f"{context} with group=... requires stride")
+        _validate_positive_stride("stride", stride, context)
         return
 
     if block_stride is not None:
         if stride is not None:
             raise TypeError(f"{context} does not allow stride together with block_stride")
+        _validate_positive_stride("block_stride", block_stride, context)
         return
 
     if stride is not None:
@@ -646,14 +676,14 @@ def require_vmi_scope(context: str = "T.vmi") -> None:
 
 def vreg(lanes: int, dtype_like):
     """Return a logical VMI vector dtype descriptor."""
-    lanes = _normalize_lanes(lanes, context="T.vmi.vreg(...)")
+    lanes = _require_vmi_lane_count(_normalize_lanes(lanes, context="T.vmi.vreg(...)"), context="T.vmi.vreg(...)")
     elem = _scalar_dtype(dtype_like, context="T.vmi.vreg(...)")
     return _dtype(f"{elem}x{lanes}")
 
 
 def mask(lanes: int):
     """Return a logical VMI predicate dtype descriptor."""
-    lanes = _normalize_lanes(lanes, context="T.vmi.mask(...)")
+    lanes = _require_vmi_lane_count(_normalize_lanes(lanes, context="T.vmi.mask(...)"), context="T.vmi.mask(...)")
     return _dtype(f"boolx{lanes}")
 
 
@@ -793,10 +823,18 @@ def vstore(
     )
 
 
+_VCI_ORDERS = ("ASC", "DESC")
+
+
 @_scope_guarded
 def vci(base, *, size, order=None, loc=None, ip=None):
     if size is None:
         raise TypeError("T.vmi.vci(...) requires size")
+    if order is not None and order not in _VCI_ORDERS:
+        raise ValueError(
+            f"T.vmi.vci(...) requires order to be one of {_VCI_ORDERS} "
+            f"(the simd layer's INC_ORDER/DEC_ORDER spellings are not accepted here), got {order!r}"
+        )
     _reject_packed_fp4(base, context="T.vmi.vci(...)")
     result_dtype = vreg(size, _element_dtype_of(base))
     return _call_vmi("vci", result_dtype, base, size=size, order=order, loc=loc, ip=ip)
@@ -830,6 +868,7 @@ def _vec_scalar_same_dtype(name):
     @_scope_guarded
     def wrapper(source, scalar, mask, *, pmode=None, loc=None, ip=None):
         _reject_packed_fp4(source, context=f"T.vmi.{name}(...)")
+        _require_scalar(scalar, context=f"T.vmi.{name}(...)")
         return _call_vmi(
             name,
             _dtype_of(source),
@@ -962,6 +1001,7 @@ def vcmp(lhs, rhs, seed, cmp, *, pmode=None, loc=None, ip=None):
 def vcmps(source, scalar, seed, cmp, *, pmode=None, loc=None, ip=None):
     context = "T.vmi.vcmps(...)"
     _reject_packed_fp4(source, context=context)
+    _require_scalar(scalar, context="T.vmi.vcmps(...) scalar")
     seed = _require_compatible_mask(seed, _lanes_of(source), context=context)
     cmp = _normalize_compare_predicate(cmp, context=context)
     return _call_vmi("vcmps", _dtype_of(seed), source, scalar, seed, cmp, pmode=pmode, loc=loc, ip=ip)
@@ -979,6 +1019,12 @@ def vsel(mask, true_value, false_value, *, pmode=None, loc=None, ip=None):
 def vselr(source, index, *, loc=None, ip=None):
     _reject_packed_fp4(source, context="T.vmi.vselr(...)")
     _require_integer_vector(index, context="T.vmi.vselr(...)")
+    if not str(_element_dtype_of(index)).startswith("uint"):
+        raise TypeError(
+            "T.vmi.vselr(...) requires an unsigned integer index vector "
+            "(signed indices silently select arbitrary huge lanes); "
+            f"got {_element_dtype_of(index)}"
+        )
     if _lanes_of(source) != _lanes_of(index):
         raise TypeError("T.vmi.vselr(...) requires source and index lane counts to match")
     return _call_vmi("vselr", _dtype_of(source), source, index, loc=loc, ip=ip)
@@ -998,6 +1044,11 @@ def vbrc(value, *, size, group=None, loc=None, ip=None):
             raise TypeError("T.vmi.vbrc(...) with group=... requires a VMI vector input")
         if _lanes_of(value) != group:
             raise ValueError("T.vmi.vbrc(...) with group=... requires the input lane count to match group")
+        size_const = _constant_int(size)
+        if size_const is not None and group > size_const:
+            # A scalar broadcast with group > size used to pass the frontend
+            # and fail in PTOAS (out-of-range group descriptor).
+            raise ValueError(f"T.vmi.vbrc(...) requires group <= size, got group={group}, size={size}")
     return _call_vmi(
         "vbrc",
         vreg(size, _element_dtype_of(value)),
@@ -1147,16 +1198,19 @@ def vinterpret_cast(source, to_dtype=None, *, loc=None, ip=None):
 
 @_scope_guarded
 def vexpdif(x, max_value, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(x, max_value, context="T.vmi.vexpdif(...)")
-    return _call_vmi(
-        "vexpdif", _dtype_of(max_value), x, max_value, _require_mask(mask, context="T.vmi.vexpdif(...)"), pmode=pmode, loc=loc, ip=ip
-    )
+    context = "T.vmi.vexpdif(...)"
+    _reject_packed_fp4(x, max_value, context=context)
+    result_dtype = _require_same_vreg_type(x, max_value, context=context)
+    return _call_vmi("vexpdif", result_dtype, x, max_value, _require_mask(mask, context=context), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
 def vaxpy(x, acc, alpha, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(x, acc, context="T.vmi.vaxpy(...)")
-    return _call_vmi("vaxpy", _dtype_of(acc), x, acc, alpha, _require_mask(mask, context="T.vmi.vaxpy(...)"), pmode=pmode, loc=loc, ip=ip)
+    context = "T.vmi.vaxpy(...)"
+    _reject_packed_fp4(x, acc, alpha, context=context)
+    result_dtype = _require_same_vreg_type(x, acc, context=context)
+    _require_scalar(alpha, context="T.vmi.vaxpy(...) alpha")
+    return _call_vmi("vaxpy", result_dtype, x, acc, alpha, _require_mask(mask, context=context), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
@@ -1185,8 +1239,11 @@ def vmull(a, b, mask, *, pmode=None, loc=None, ip=None):
 
 @_scope_guarded
 def vmula(acc, lhs, rhs, mask, *, pmode=None, loc=None, ip=None):
-    _reject_packed_fp4(acc, lhs, rhs, context="T.vmi.vmula(...)")
-    return _call_vmi("vmula", _dtype_of(acc), acc, lhs, rhs, _require_mask(mask, context="T.vmi.vmula(...)"), pmode=pmode, loc=loc, ip=ip)
+    context = "T.vmi.vmula(...)"
+    _reject_packed_fp4(acc, lhs, rhs, context=context)
+    result_dtype = _require_same_vreg_type(acc, lhs, context=context)
+    _require_same_vreg_type(acc, rhs, context=context)
+    return _call_vmi("vmula", result_dtype, acc, lhs, rhs, _require_mask(mask, context=context), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
@@ -1239,14 +1296,14 @@ def vgather(source, offsets, mask, *, pmode=None, loc=None, ip=None):
 def vscatter(value, destination, offsets, mask, *, pmode=None, loc=None, ip=None):
     _require_ub_address(destination, context="T.vmi.vscatter(...)")
     _reject_packed_fp4(value, context="T.vmi.vscatter(...)")
-    destination_dtype = _address_element_dtype(destination)
-    if destination_dtype is not None and destination_dtype != _element_dtype_of(value):
+    address = _parse_vmi_address(destination, is_load=False, context="T.vmi.vscatter(...)")
+    destination_dtype = _dtype(address.buffer.dtype)
+    if destination_dtype != _element_dtype_of(value):
         raise TypeError("T.vmi.vscatter(...) requires value and destination element types to match")
     _require_integer_vector(offsets, context="T.vmi.vscatter(...)")
     if _lanes_of(value) != _lanes_of(offsets):
         raise TypeError("T.vmi.vscatter(...) requires value and offset lane counts to match")
     mask = _require_compatible_mask(mask, _lanes_of(value), context="T.vmi.vscatter(...)")
-    address = _parse_vmi_address(destination, is_load=False, context="T.vmi.vscatter(...)")
     ptr, offset = _normalize_vmi_address_operand(address.source, context="T.vmi.vscatter(...)")
     return _call_vmi(
         "vscatter",
@@ -1266,7 +1323,12 @@ def vscatter(value, destination, offsets, mask, *, pmode=None, loc=None, ip=None
 def create_mask(active_lanes, *, size, group=None, loc=None, ip=None):
     if size is None:
         raise TypeError("T.vmi.create_mask(...) requires size")
+    active_lanes_const = _constant_int(active_lanes)
+    if active_lanes_const is not None and active_lanes_const < 0:
+        raise ValueError("T.vmi.create_mask(...) requires active_lanes to be non-negative")
     if group is None:
+        if active_lanes_const is not None and active_lanes_const > size:
+            raise ValueError("T.vmi.create_mask(...) requires active_lanes to be <= the mask size")
         return _call_vmi("create_mask", mask(size), active_lanes, size=size, loc=loc, ip=ip)
     if isinstance(group, bool) or not isinstance(group, int):
         raise TypeError("T.vmi.create_mask(...) requires group to be a positive Python integer")

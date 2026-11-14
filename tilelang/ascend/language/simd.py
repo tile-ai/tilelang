@@ -117,8 +117,29 @@ def pset(elem_width: int, dist: str = "PAT_ALL"):
     return tirx.call_intrin("boolx256", _Op("tl.simd.pset"), elem_width, dist)
 
 
+_PGE_DISTS = (
+    "PAT_ALL",
+    "PAT_VL1",
+    "PAT_VL2",
+    "PAT_VL3",
+    "PAT_VL4",
+    "PAT_VL8",
+    "PAT_VL16",
+    "PAT_VL32",
+    "PAT_VL64",
+    "PAT_VL128",
+    "PAT_M3",
+    "PAT_M4",
+    "PAT_H",
+    "PAT_Q",
+    "PAT_ALLF",
+)
+
+
 def pge(elem_width: int, dist: str = "PAT_ALL"):
     """Create a predicate mask from pge_bXX(dist)."""
+    if dist not in _PGE_DISTS:
+        raise ValueError(f"T.simd.pge: `dist` must be one of {_PGE_DISTS}, got {dist!r}")
     return tirx.call_intrin("boolx256", _Op("tl.simd.pge"), elem_width, dist)
 
 
@@ -197,21 +218,30 @@ def psel(src0, src1, mask):
     return tirx.call_intrin("boolx256", _Op("tl.simd.psel"), src0, src1, mask)
 
 
-def ppack(src, part=0):
-    """Predicate pack 2:1 (zeroing): dst = ppack(src, LOWER/HIGHER)."""
+def _validate_part(op_name: str, part) -> str:
+    """Normalize a LOWER/HIGHER part selector shared by ppack/punpack/vpack/vunpack."""
     if isinstance(part, tirx.IntImm):
         part = int(part.value)
+    if isinstance(part, bool):
+        raise TypeError(f'T.simd.{op_name}: `part` must be 0, 1, "LOWER" or "HIGHER", got {part!r}')
     if isinstance(part, int):
+        if part not in (0, 1):
+            raise ValueError(f"T.simd.{op_name}: `part` must be 0 or 1, got {part}")
         part = ("LOWER", "HIGHER")[part]
+    if part not in ("LOWER", "HIGHER"):
+        raise TypeError(f'T.simd.{op_name}: `part` must be 0, 1, "LOWER" or "HIGHER", got {part!r}')
+    return part
+
+
+def ppack(src, part=0):
+    """Predicate pack 2:1 (zeroing): dst = ppack(src, LOWER/HIGHER)."""
+    part = _validate_part("ppack", part)
     return tirx.call_intrin("boolx256", _Op("tl.simd.ppack"), src, part)
 
 
 def punpack(src, part=0):
     """Predicate unpack 1:2 (zeroing): dst = punpack(src, LOWER/HIGHER)."""
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if isinstance(part, int):
-        part = ("LOWER", "HIGHER")[part]
+    part = _validate_part("punpack", part)
     return tirx.call_intrin("boolx256", _Op("tl.simd.punpack"), src, part)
 
 
@@ -273,14 +303,49 @@ def _validate_predicate_dist(name: str, dist: str, allowed: tuple[str, ...]) -> 
         raise ValueError(f"{name}: `dist` must be one of {allowed}, got {dist!r}")
 
 
+def _integer_constant(value):
+    """Return the Python int value of a static integer constant, or None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, tirx.IntImm):
+        return int(value.value)
+    return None
+
+
+def _is_integer_scalar_expr(value) -> bool:
+    """Whether a PrimExpr has a scalar integer dtype (int*/uint*)."""
+    dtype = getattr(value, "dtype", None)
+    if dtype is None or int(getattr(dtype, "lanes", 1)) != 1:
+        return False
+    return str(dtype).startswith(("int", "uint"))
+
+
 def _predicate_access_ptr(addr, access_type: str, dist: str):
     if not isinstance(addr, BufferLoad):
+        # An explicit tl.access_ptr keeps the originating BufferLoad in args[0],
+        # so sub-byte element types must be rejected on that path as well.
+        ptr_args = getattr(addr, "args", None)
+        ptr_base = ptr_args[0] if ptr_args else None
+        if not isinstance(ptr_base, BufferLoad):
+            return addr
+        elem_dtype = str(ptr_base.buffer.dtype)
+        elem_bits = _ELEM_BITS.get(elem_dtype)
+        if elem_bits is None:
+            raise ValueError(f"Predicate load/store does not support buffer dtype {elem_dtype!r}")
+        if elem_bits < 8:
+            raise ValueError(f"Predicate load/store requires an element dtype of at least 8 bits, got {elem_dtype!r} ({elem_bits}-bit)")
         return addr
     elem_dtype = str(addr.buffer.dtype)
     if elem_dtype not in _ELEM_BITS:
         raise ValueError(f"Predicate load/store does not support buffer dtype {elem_dtype!r}")
     payload_bits = _PREDICATE_PAYLOAD_BYTES[dist] * 8
     elem_bits = _ELEM_BITS[elem_dtype]
+    if elem_bits < 8:
+        # A 4-bit element used to derive a 64-element footprint from a
+        # 32-byte predicate payload, which is not addressable in UB.
+        raise ValueError(f"Predicate load/store requires an element dtype of at least 8 bits, got {elem_dtype!r} ({elem_bits}-bit)")
     extent = (payload_bits + elem_bits - 1) // elem_bits
     return access_ptr(addr, access_type, extent=extent)
 
@@ -297,6 +362,32 @@ def pst(addr, src, dist="NORM"):
     _validate_predicate_dist("pst", dist, _PREDICATE_STORE_DISTS)
     addr = _predicate_access_ptr(addr, "w", dist)
     return tirx.call_intrin("void", _Op("tl.simd.pst"), addr, src, dist)
+
+
+# Legal vld distributions from codegen_ascend.cc's vlds_* table. The
+# post-update path already used a subset; the ordinary path validated nothing.
+_VLD_DISTS = (
+    "NORM",
+    "NORM_B8",
+    "NORM_B16",
+    "NORM_B32",
+    "US",
+    "US_B8",
+    "US_B16",
+    "DS",
+    "DS_B8",
+    "DS_B16",
+    "BRC_B8",
+    "BRC_B16",
+    "BRC_B32",
+    "UNPK_B8",
+    "UNPK_B16",
+    "UNPK_B32",
+    "UNPK4_B8",
+    "BLK",
+    "E2B_B16",
+    "E2B_B32",
+)
 
 
 _VLD_POSTUPDATE_DISTS = (
@@ -348,6 +439,8 @@ def vld(addr, dist="NORM", *, post_inc=None):
     the source buffer; their ``_B*`` suffixes describe the data being loaded and
     must agree with it.
     """
+    if not isinstance(dist, str) or dist not in _VLD_DISTS:
+        raise ValueError(f"T.simd.vld: `dist` must be one of {_VLD_DISTS}, got {dist!r}")
     if post_inc is not None:
         if not (isinstance(addr, BufferLoad) and addr.buffer.scope() == "local.var" and str(addr.dtype) == "handle"):
             raise ValueError("vld post_inc requires a mutable pointer from make_ubuf_ptr")
@@ -454,6 +547,22 @@ def vld2(addr, dist="DINTLV_B16", off=None):
     return SimdPair(_bind(pair), (vec_dtype, vec_dtype))
 
 
+_VSTS_DISTS = (
+    "NORM_B8",
+    "NORM_B16",
+    "NORM_B32",
+    "ONEPT_B8",
+    "ONEPT_B16",
+    "ONEPT_B32",
+    "PK_B16",
+    "PK_B32",
+    "PK4_B32",
+    "INTLV_B8",
+    "INTLV_B16",
+    "INTLV_B32",
+)
+
+
 def vsts(addr, src, mask=None, dist="NORM_B32", extent=None):
     """Vector store to ``addr``.
 
@@ -462,6 +571,14 @@ def vsts(addr, src, mask=None, dist="NORM_B32", extent=None):
     Optional ``extent`` overrides the default access_ptr footprint (e.g. 8 for
     a dense PAT_VL8 NORM_B16 recip pack).
     """
+    if dist not in _VSTS_DISTS:
+        raise ValueError(f"T.simd.vsts: `dist` must be one of {_VSTS_DISTS}, got {dist!r}")
+    if extent is not None:
+        # An IntImm is a valid static extent: validate its value but keep the
+        # original expression so access_ptr sees the caller's IR node.
+        extent_value = _integer_constant(extent)
+        if extent_value is None or extent_value <= 0:
+            raise ValueError(f"T.simd.vsts: `extent` must be a positive integer, got {extent!r}")
     if mask is None:
         mask = _default_mask(src.dtype)
     if isinstance(addr, BufferLoad):
@@ -508,6 +625,13 @@ def vsstb(src, base, stride, mask=None, update=False):
         dst_ptr = T.simd.make_ubuf_ptr(dst_ub[0], "bfloat16")
         dst_ptr = T.simd.vsstb(src, dst_ptr, stride, mask, update=True)
     """
+    if isinstance(stride, bool) or not isinstance(stride, (int, tirx.PrimExpr)):
+        raise TypeError("T.simd.vsstb: `stride` must be an integer or integer PrimExpr")
+    if isinstance(stride, tirx.PrimExpr) and not _is_integer_scalar_expr(stride):
+        raise TypeError(f"T.simd.vsstb: `stride` must have a scalar integer dtype, got {stride.dtype}")
+    stride_value = _integer_constant(stride)
+    if stride_value is not None and stride_value == 0:
+        raise ValueError("T.simd.vsstb: `stride` must be non-zero (all blocks would target one 32B line)")
     if mask is None:
         mask = _default_mask(src.dtype)
     mutable_pointer = isinstance(base, BufferLoad) and base.buffer.scope() == "local.var" and str(base.dtype) == "handle"
@@ -559,8 +683,8 @@ def make_ubuf_ptr(buf_access, dtype):
         raise ValueError("make_ubuf_ptr expects a buffer access or handle expression")
 
     dtype = tvm.DataType(dtype)
-    if dtype.lanes != 1 or str(dtype) not in _ELEM_BITS:
-        raise ValueError("make_ubuf_ptr requires a scalar numeric element dtype")
+    if dtype.lanes != 1 or str(dtype) not in _ELEM_BITS or _ELEM_BITS[str(dtype)] not in (8, 16, 32):
+        raise ValueError("make_ubuf_ptr requires an 8/16/32-bit scalar element dtype (vld/vsstb post-update only supports these widths)")
     pointer = _alloc_var("handle", buf_access, scope="local.var")
     sblock_attr({"tl.simd_pointer_dtypes": {pointer.data: str(dtype)}})
     return pointer
@@ -937,11 +1061,17 @@ def vnot(src, mask=None, mode="MODE_ZEROING"):
 # -- Broadcast --------------------------------------------------------------------
 
 
+_VDUP_DTYPE_STRS = ("float32", "float16", "bfloat16", "int32", "uint32", "int16", "uint16", "int8", "uint8")
+
+
 def vdup(src, dtype_str: DType, mask=None, mode="MODE_ZEROING"):
     """Broadcast scalar to all lanes: dst = vdup(scalar, dtype_str, mask).
 
     dtype_str specifies the target vector element type (e.g. "float32").
     """
+    dtype_str = str(dtype_str)
+    if dtype_str not in _VDUP_DTYPE_STRS:
+        raise ValueError(f"T.simd.vdup: `dtype_str` must be one of {_VDUP_DTYPE_STRS}, got {dtype_str!r}")
     if mask is None:
         mask = _default_mask(dtype_str)
     vec_dtype = _vec_dtype(dtype_str)
@@ -967,6 +1097,9 @@ def vcpadd(src, mask=None, mode="MODE_ZEROING"):
     The sums of adjacent source lanes are packed into the low half of the
     result vector. Supported types: float32, float16.
     """
+    src_elem = str(src.dtype).split("x", 1)[0]
+    if src_elem not in ("float32", "float16"):
+        raise TypeError(f"T.simd.vcpadd requires float32 or float16 operands, got {src_elem}")
     if mask is None:
         mask = _default_mask(src.dtype)
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcpadd"), src, mask, mode)
@@ -1028,6 +1161,8 @@ def vsqz(src, mask=None, mode="MODE_STORED"):
 
 def vusqz(mask, dtype="int32"):
     """Per-lane exclusive prefix count of mask (s8/s16/s32)."""
+    if dtype not in ("int8", "int16", "int32"):
+        raise ValueError(f"T.simd.vusqz: `dtype` must be one of int8/int16/int32, got {dtype!r}")
     return tirx.call_intrin(_vec_dtype(dtype), _Op("tl.simd.vusqz"), mask)
 
 
@@ -1044,11 +1179,23 @@ def vci(index, dtype_str: DType, order="INC_ORDER"):
     return tirx.call_intrin(vec_dtype, _Op("tl.simd.vci"), index, order)
 
 
+# Only these six spellings exist as simd_inst::vcmp_<op> / vcmps_<op>
+# helpers; codegen_pto.cc's kCmpModeEnum has the same six entries.
+_VCMP_OPS = ("eq", "ne", "gt", "ge", "lt", "le")
+
+
+def _validate_vcmp_op(op, *, api):
+    if not isinstance(op, str) or op not in _VCMP_OPS:
+        raise ValueError(f"{api}: `op` must be one of {_VCMP_OPS}, got {op!r}")
+    return op
+
+
 def vcmp(src0, src1, mask=None, op="eq"):
     """Elementwise compare -> vector_bool: dst = vcmp_<op>(src0, src1, mask).
 
     op: eq/ne/gt/ge/lt/le.
     """
+    op = _validate_vcmp_op(op, api="T.simd.vcmp")
     if mask is None:
         mask = _default_mask(src0.dtype)
     return tirx.call_intrin("boolx256", _Op("tl.simd.vcmp"), src0, src1, mask, op)
@@ -1059,6 +1206,7 @@ def vcmps(src, scalar, mask=None, op="lt"):
 
     op: eq/ne/gt/ge/lt/le.
     """
+    op = _validate_vcmp_op(op, api="T.simd.vcmps")
     if mask is None:
         mask = _default_mask(src.dtype)
     return tirx.call_intrin("boolx256", _Op("tl.simd.vcmps"), src, scalar, mask, op)
@@ -1076,6 +1224,8 @@ def vintlv(src0, src1):
     calls share a single permutation instruction instead of inlining the pair
     expression twice.
     """
+    if str(src0.dtype) != str(src1.dtype):
+        raise TypeError(f"T.simd.vintlv requires two matching source vectors, got {src0.dtype} and {src1.dtype}")
     pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vintlv"), src0, src1)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vintlv requires an active IRBuilder to bind the pair")
@@ -1091,6 +1241,8 @@ def vdintlv(src0, src1):
     calls share a single permutation instruction instead of inlining the pair
     expression twice.
     """
+    if str(src0.dtype) != str(src1.dtype):
+        raise TypeError(f"T.simd.vdintlv requires two matching source vectors, got {src0.dtype} and {src1.dtype}")
     pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vdintlv"), src0, src1)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vdintlv requires an active IRBuilder to bind the pair")
@@ -1110,10 +1262,7 @@ def vpack(src, part=0):
 
     Supports u32->u16 and u16->u8 (needed for dense UE8M0 scale packing).
     """
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if isinstance(part, int):
-        part = ("LOWER", "HIGHER")[part]
+    part = _validate_part("vpack", part)
     src_elem = str(src.dtype).split("x", 1)[0]
     src_lanes = src.dtype.lanes
     pack_map = {
@@ -1123,17 +1272,16 @@ def vpack(src, part=0):
         "uint16": "uint8",
         "int16": "int8",
     }
-    dst_elem = pack_map.get(src_elem, src_elem)
+    if src_elem not in pack_map:
+        raise ValueError(f"vpack does not support {src_elem}")
+    dst_elem = pack_map[src_elem]
     vec_dtype = f"{dst_elem}x{src_lanes * 2}"
     return tirx.call_intrin(vec_dtype, _Op("tl.simd.vpack"), src, part)
 
 
 def vunpack(src, part=0):
     """Widen half of src: u8->u16, s8->s16, u16->u32, s16->s32."""
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if isinstance(part, int):
-        part = ("LOWER", "HIGHER")[part]
+    part = _validate_part("vunpack", part)
     src_elem = str(src.dtype).split("x", 1)[0]
     widen_map = {"uint8": "uint16", "int8": "int16", "uint16": "uint32", "int16": "int32"}
     if src_elem not in widen_map:
@@ -1164,6 +1312,10 @@ def vgather2(base, index, mask=None):
     else:
         inner_load = base.args[0]
         elem_dtype = str(inner_load.buffer.dtype)
+    if elem_dtype not in _ELEM_BITS or _ELEM_BITS[elem_dtype] < 8:
+        raise ValueError(
+            f"T.simd.vgather2(...) requires an 8/16/32-bit source element dtype to form its implicit predicate, got {elem_dtype!r}"
+        )
     if mask is None:
         # gather reads source elements, so the predicate aligns to the source (low-lane)
         # width -- e.g. an int8 gather widens the output to int16 but masks with asc_create_mask_b8.
@@ -1453,9 +1605,11 @@ def vselr(src, index):
     """Select lanes from src using per-lane indices."""
     src_dtype = str(src.dtype)
     index_dtype = str(index.dtype)
-    # The index must be an unsigned integer vector.
-    if index_dtype.startswith("int"):
-        index = tirx.reinterpret("u" + index_dtype, index)
+    # The index must be an unsigned integer vector. Reinterpreting signed
+    # indices with a raw "u" + dtype splice silently changes comparison
+    # semantics and also matches int64/vector-with-lanes spellings.
+    if not index_dtype.startswith("uint"):
+        raise TypeError(f"T.simd.vselr(...) requires an unsigned integer index vector, got {index_dtype!r}")
     # vselr supports f16/bf16 natively but not f32: reinterpret f32 to the same-width unsigned integer, select, then reinterpret back.
     if src_dtype.startswith("float32"):
         uint_dtype = src_dtype.replace("float", "uint")
@@ -1501,6 +1655,11 @@ def vshrs(src, scalar, mask=None, mode="MODE_ZEROING"):
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vshrs"), src, scalar, mask, mode)
 
 
+_MEM_BAR_TYPES = ("VST_VLD", "VLD_VST")
+
+
 def mem_bar(mem_type):
     """Memory barrier: mem_bar(mem_type), e.g. mem_bar(VST_VLD)."""
+    if mem_type not in _MEM_BAR_TYPES:
+        raise ValueError(f"T.simd.mem_bar: `mem_type` must be one of {_MEM_BAR_TYPES}, got {mem_type!r}")
     return tirx.call_intrin("void", _Op("tl.simd.mem_bar"), mem_type)
