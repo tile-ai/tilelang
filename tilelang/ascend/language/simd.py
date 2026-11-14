@@ -117,8 +117,15 @@ def pset(elem_width: int, dist: str = "PAT_ALL"):
     return tirx.call_intrin("boolx256", _Op("tl.simd.pset"), elem_width, dist)
 
 
+_PGE_DISTS = ("PAT_ALL", "PAT_VL1", "PAT_VL2", "PAT_VL3", "PAT_VL4",
+              "PAT_VL8", "PAT_VL16", "PAT_VL32", "PAT_VL64", "PAT_VL128",
+              "PAT_M3", "PAT_M4", "PAT_H", "PAT_Q", "PAT_ALLF")
+
+
 def pge(elem_width: int, dist: str = "PAT_ALL"):
     """Create a predicate mask from pge_bXX(dist)."""
+    if dist not in _PGE_DISTS:
+        raise ValueError(f"T.simd.pge: `dist` must be one of {_PGE_DISTS}, got {dist!r}")
     return tirx.call_intrin("boolx256", _Op("tl.simd.pge"), elem_width, dist)
 
 
@@ -197,21 +204,30 @@ def psel(src0, src1, mask):
     return tirx.call_intrin("boolx256", _Op("tl.simd.psel"), src0, src1, mask)
 
 
-def ppack(src, part=0):
-    """Predicate pack 2:1 (zeroing): dst = ppack(src, LOWER/HIGHER)."""
+def _validate_part(op_name: str, part) -> str:
+    """Normalize a LOWER/HIGHER part selector shared by ppack/punpack/vpack/vunpack."""
     if isinstance(part, tirx.IntImm):
         part = int(part.value)
+    if isinstance(part, bool):
+        raise TypeError(f"T.simd.{op_name}: `part` must be 0, 1, \"LOWER\" or \"HIGHER\", got {part!r}")
     if isinstance(part, int):
+        if part not in (0, 1):
+            raise ValueError(f"T.simd.{op_name}: `part` must be 0 or 1, got {part}")
         part = ("LOWER", "HIGHER")[part]
+    if part not in ("LOWER", "HIGHER"):
+        raise TypeError(f"T.simd.{op_name}: `part` must be 0, 1, \"LOWER\" or \"HIGHER\", got {part!r}")
+    return part
+
+
+def ppack(src, part=0):
+    """Predicate pack 2:1 (zeroing): dst = ppack(src, LOWER/HIGHER)."""
+    part = _validate_part("ppack", part)
     return tirx.call_intrin("boolx256", _Op("tl.simd.ppack"), src, part)
 
 
 def punpack(src, part=0):
     """Predicate unpack 1:2 (zeroing): dst = punpack(src, LOWER/HIGHER)."""
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if isinstance(part, int):
-        part = ("LOWER", "HIGHER")[part]
+    part = _validate_part("punpack", part)
     return tirx.call_intrin("boolx256", _Op("tl.simd.punpack"), src, part)
 
 
@@ -454,6 +470,11 @@ def vld2(addr, dist="DINTLV_B16", off=None):
     return SimdPair(_bind(pair), (vec_dtype, vec_dtype))
 
 
+_VSTS_DISTS = ("NORM_B8", "NORM_B16", "NORM_B32", "ONEPT_B8", "ONEPT_B16",
+               "ONEPT_B32", "PK_B16", "PK_B32", "PK4_B32", "INTLV_B8",
+               "INTLV_B16", "INTLV_B32")
+
+
 def vsts(addr, src, mask=None, dist="NORM_B32", extent=None):
     """Vector store to ``addr``.
 
@@ -462,6 +483,10 @@ def vsts(addr, src, mask=None, dist="NORM_B32", extent=None):
     Optional ``extent`` overrides the default access_ptr footprint (e.g. 8 for
     a dense PAT_VL8 NORM_B16 recip pack).
     """
+    if dist not in _VSTS_DISTS:
+        raise ValueError(f"T.simd.vsts: `dist` must be one of {_VSTS_DISTS}, got {dist!r}")
+    if extent is not None and (isinstance(extent, bool) or not isinstance(extent, int) or extent <= 0):
+        raise ValueError(f"T.simd.vsts: `extent` must be a positive integer, got {extent!r}")
     if mask is None:
         mask = _default_mask(src.dtype)
     if isinstance(addr, BufferLoad):
@@ -508,6 +533,10 @@ def vsstb(src, base, stride, mask=None, update=False):
         dst_ptr = T.simd.make_ubuf_ptr(dst_ub[0], "bfloat16")
         dst_ptr = T.simd.vsstb(src, dst_ptr, stride, mask, update=True)
     """
+    if isinstance(stride, bool) or not isinstance(stride, (int, tirx.PrimExpr)):
+        raise TypeError("T.simd.vsstb: `stride` must be an integer or integer PrimExpr")
+    if isinstance(stride, int) and stride == 0:
+        raise ValueError("T.simd.vsstb: `stride` must be non-zero (all blocks would target one 32B line)")
     if mask is None:
         mask = _default_mask(src.dtype)
     mutable_pointer = isinstance(base, BufferLoad) and base.buffer.scope() == "local.var" and str(base.dtype) == "handle"
@@ -937,11 +966,20 @@ def vnot(src, mask=None, mode="MODE_ZEROING"):
 # -- Broadcast --------------------------------------------------------------------
 
 
+_VDUP_DTYPE_STRS = ("float32", "float16", "bfloat16", "int32", "uint32",
+                    "int16", "uint16", "int8", "uint8")
+
+
 def vdup(src, dtype_str: DType, mask=None, mode="MODE_ZEROING"):
     """Broadcast scalar to all lanes: dst = vdup(scalar, dtype_str, mask).
 
     dtype_str specifies the target vector element type (e.g. "float32").
     """
+    dtype_str = str(dtype_str)
+    if dtype_str not in _VDUP_DTYPE_STRS:
+        raise ValueError(
+            f"T.simd.vdup: `dtype_str` must be one of {_VDUP_DTYPE_STRS}, got {dtype_str!r}"
+        )
     if mask is None:
         mask = _default_mask(dtype_str)
     vec_dtype = _vec_dtype(dtype_str)
@@ -967,6 +1005,9 @@ def vcpadd(src, mask=None, mode="MODE_ZEROING"):
     The sums of adjacent source lanes are packed into the low half of the
     result vector. Supported types: float32, float16.
     """
+    src_elem = str(src.dtype).split("x", 1)[0]
+    if src_elem not in ("float32", "float16"):
+        raise TypeError(f"T.simd.vcpadd requires float32 or float16 operands, got {src_elem}")
     if mask is None:
         mask = _default_mask(src.dtype)
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vcpadd"), src, mask, mode)
@@ -1028,6 +1069,8 @@ def vsqz(src, mask=None, mode="MODE_STORED"):
 
 def vusqz(mask, dtype="int32"):
     """Per-lane exclusive prefix count of mask (s8/s16/s32)."""
+    if dtype not in ("int8", "int16", "int32"):
+        raise ValueError(f"T.simd.vusqz: `dtype` must be one of int8/int16/int32, got {dtype!r}")
     return tirx.call_intrin(_vec_dtype(dtype), _Op("tl.simd.vusqz"), mask)
 
 
@@ -1076,6 +1119,8 @@ def vintlv(src0, src1):
     calls share a single permutation instruction instead of inlining the pair
     expression twice.
     """
+    if str(src0.dtype) != str(src1.dtype):
+        raise TypeError(f"T.simd.vintlv requires two matching source vectors, got {src0.dtype} and {src1.dtype}")
     pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vintlv"), src0, src1)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vintlv requires an active IRBuilder to bind the pair")
@@ -1091,6 +1136,8 @@ def vdintlv(src0, src1):
     calls share a single permutation instruction instead of inlining the pair
     expression twice.
     """
+    if str(src0.dtype) != str(src1.dtype):
+        raise TypeError(f"T.simd.vdintlv requires two matching source vectors, got {src0.dtype} and {src1.dtype}")
     pair = tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vdintlv"), src0, src1)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("vdintlv requires an active IRBuilder to bind the pair")
@@ -1110,10 +1157,7 @@ def vpack(src, part=0):
 
     Supports u32->u16 and u16->u8 (needed for dense UE8M0 scale packing).
     """
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if isinstance(part, int):
-        part = ("LOWER", "HIGHER")[part]
+    part = _validate_part("vpack", part)
     src_elem = str(src.dtype).split("x", 1)[0]
     src_lanes = src.dtype.lanes
     pack_map = {
@@ -1123,17 +1167,16 @@ def vpack(src, part=0):
         "uint16": "uint8",
         "int16": "int8",
     }
-    dst_elem = pack_map.get(src_elem, src_elem)
+    if src_elem not in pack_map:
+        raise ValueError(f"vpack does not support {src_elem}")
+    dst_elem = pack_map[src_elem]
     vec_dtype = f"{dst_elem}x{src_lanes * 2}"
     return tirx.call_intrin(vec_dtype, _Op("tl.simd.vpack"), src, part)
 
 
 def vunpack(src, part=0):
     """Widen half of src: u8->u16, s8->s16, u16->u32, s16->s32."""
-    if isinstance(part, tirx.IntImm):
-        part = int(part.value)
-    if isinstance(part, int):
-        part = ("LOWER", "HIGHER")[part]
+    part = _validate_part("vunpack", part)
     src_elem = str(src.dtype).split("x", 1)[0]
     widen_map = {"uint8": "uint16", "int8": "int16", "uint16": "uint32", "int16": "int32"}
     if src_elem not in widen_map:
@@ -1501,6 +1544,11 @@ def vshrs(src, scalar, mask=None, mode="MODE_ZEROING"):
     return tirx.call_intrin(str(src.dtype), _Op("tl.simd.vshrs"), src, scalar, mask, mode)
 
 
+_MEM_BAR_TYPES = ("VST_VLD", "VLD_VST")
+
+
 def mem_bar(mem_type):
     """Memory barrier: mem_bar(mem_type), e.g. mem_bar(VST_VLD)."""
+    if mem_type not in _MEM_BAR_TYPES:
+        raise ValueError(f"T.simd.mem_bar: `mem_type` must be one of {_MEM_BAR_TYPES}, got {mem_type!r}")
     return tirx.call_intrin("void", _Op("tl.simd.mem_bar"), mem_type)
