@@ -129,7 +129,12 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
     """
     A generic print function that handles both TIR buffers and primitive expressions.
 
-    - If the input is a TIR buffer, it prints its values, but only on the first thread (tx=0, ty=0, tz=0).
+    - If the input is a TIR buffer, printing is scoped per block:
+      * `local` buffers are printed by every executing thread, since each thread owns its own slice;
+      * `shared`, `local.fragment` and global buffers are printed by the thread selected by
+        `warp_group_id` / `warp_id` (lane 0 of warp 0 by default);
+      * a global buffer is printed once per block; selecting a single block is the caller's
+        responsibility, e.g. by wrapping the call in `if bx == 0:`.
     - If the input is a TIR primitive expression, it prints its value directly.
 
     Parameters:
@@ -168,7 +173,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = tx == main_lane and ty == 0 and tz == 0
+            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_fragment_buffer_with_condition(condition, buffer, elems, msg)
@@ -179,7 +184,7 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
                 elems *= dim
 
             # Ensure only the first thread (tx=0, ty=0, tz=0) executes the print.
-            condition = tx == main_lane and ty == 0 and tz == 0
+            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
             if not msg:
                 msg = f"buffer<{buffer.name}, {buffer.dtype}>"
             print_shared_buffer_with_condition(condition, buffer, elems, msg)
@@ -188,7 +193,10 @@ def print(obj: Any = None, msg: str = "", warp_group_id: int = 0, warp_id: int =
             elems = 1
             for dim in buffer.shape:
                 elems *= dim
-            condition = True
+            # One thread per block prints; selecting a block stays with the
+            # caller (e.g. wrapping the call in `if bx == 1:`), so conditional
+            # debug prints are not suppressed.
+            condition = tirx.all(tx == main_lane, ty == 0, tz == 0)
             print_global_buffer_with_condition(condition, buffer, elems, msg)
         else:
             raise ValueError(f"Unsupported buffer scope: {buffer.scope()}")
