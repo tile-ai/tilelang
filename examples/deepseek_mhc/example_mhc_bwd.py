@@ -49,7 +49,11 @@ def sinkhorn_bwd_configs(n_stream, seqlen):
 
 
 @T.macro
-def matvec_A(R, x1, x2, buf, y1, y2, tilesize, n_stream):
+def matvec_A(R, row_sum, col_sum, x1, x2, buf, y1, y2, tilesize, n_stream):
+    # A = [[diag(R 1), R], [R^T, diag(R^T 1)]]. The diagonal blocks are the row and column sums of R,
+    # not the identity: after a finite number of iterations only the last-normalized side sums to 1.
+    # With these blocks A is positive semidefinite for any R >= 0 (x^T A x = sum_ij R_ij (x1_i + x2_j)^2),
+    # so CG is well defined; with identity blocks A becomes indefinite once R is not doubly stochastic.
     for i_tile, i, j in T.Parallel(tilesize, n_stream, n_stream):
         buf[i_tile, i, j] = R[i_tile, i, j] * x2[i_tile, j]
     T.reduce_sum(buf, y1, dim=-1)
@@ -59,8 +63,8 @@ def matvec_A(R, x1, x2, buf, y1, y2, tilesize, n_stream):
 
     T.reduce_sum(buf, y2, dim=-2)
     for i_tile, i in T.Parallel(tilesize, n_stream):
-        y1[i_tile, i] += x1[i_tile, i]
-        y2[i_tile, i] += x2[i_tile, i]
+        y1[i_tile, i] += row_sum[i_tile, i] * x1[i_tile, i]
+        y2[i_tile, i] += col_sum[i_tile, i] * x2[i_tile, i]
 
 
 @T.macro
@@ -97,6 +101,8 @@ def sinkhorn_bwd_implicit_cg(out, dout, tilesize: int = 32, threads: int = 128):
         dR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
         RdR = T.alloc_fragment([tilesize, n_stream, n_stream], dtype=dtype)
         res_tile = T.alloc_shared([tilesize, n_stream, n_stream], dtype=dtype)
+        row_sum = T.alloc_shared([tilesize, n_stream], dtype=dtype)
+        col_sum = T.alloc_shared([tilesize, n_stream], dtype=dtype)
         b1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
         b2 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
         x1 = T.alloc_shared([tilesize, n_stream], dtype=dtype)
@@ -123,13 +129,15 @@ def sinkhorn_bwd_implicit_cg(out, dout, tilesize: int = 32, threads: int = 128):
         for i_tile, i_nx, i_ny in T.Parallel(tilesize, n_stream, n_stream):
             RdR[i_tile, i_nx, i_ny] = R[i_tile, i_nx, i_ny] * dR[i_tile, i_nx, i_ny]
 
+        T.reduce_sum(R, row_sum, dim=-1)
+        T.reduce_sum(R, col_sum, dim=-2)
         T.reduce_sum(RdR, b1, dim=-1)
         T.reduce_sum(RdR, b2, dim=-2)
 
         T.fill(x1, 0.0)
         T.fill(x2, 0.0)
 
-        matvec_A(R, x1, x2, buf1, r1, r2, tilesize, n_stream)
+        matvec_A(R, row_sum, col_sum, x1, x2, buf1, r1, r2, tilesize, n_stream)
 
         for i_tile, i_n in T.Parallel(tilesize, n_stream):
             r1[i_tile, i_n] = b1[i_tile, i_n] - r1[i_tile, i_n]
@@ -144,7 +152,7 @@ def sinkhorn_bwd_implicit_cg(out, dout, tilesize: int = 32, threads: int = 128):
 
         # Conjugate gradient: iteration starts
         for _ in T.serial(2 * n_stream):
-            matvec_A(R, p1, p2, buf1, Ap1, Ap2, tilesize, n_stream)
+            matvec_A(R, row_sum, col_sum, p1, p2, buf1, Ap1, Ap2, tilesize, n_stream)
 
             dot(p1, p2, Ap1, Ap2, buf2, pAp, tilesize, n_stream)
 
@@ -280,6 +288,30 @@ def main():
 
     print("\nGrad (autograd) sample:\n", g1[0, :3, :3])
     print("\nGrad (implicit) sample:\n", g2[0, :3, :3])
+
+
+def check_unconverged(seqlen=8192, n_stream=16, iters=20, std=2.0, tilesize=32, threads=128, tol=0.1):
+    """Gradient check on matrices that are not yet doubly stochastic.
+
+    mHC runs 20 Sinkhorn iterations, and its logits grow during training, so the returned matrix has exact
+    row sums but column sums that are still off. Compare the implicit gradient with autograd through the same
+    forward in float64. With identity diagonal blocks in the CG system, single instances are off by two orders of
+    magnitude or more on this input; with the row and column sums of R, the largest relative error is about 3e-2.
+    """
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    M = (torch.randn(seqlen, n_stream, n_stream, device=device, dtype=torch.float64) * std).requires_grad_()
+    R, _ = sinkhorn_forward(M, iters)
+    W = torch.randn_like(R)
+    (R * W).sum().backward()
+    reference = M.grad
+
+    # tilesize and threads given explicitly: compile one configuration, no autotuning.
+    grad = sinkhorn_bwd_implicit_cg(R.detach().float().contiguous(), W.float().contiguous(), tilesize=tilesize, threads=threads)
+    err = (grad.double() - reference).flatten(1).norm(dim=-1) / reference.flatten(1).norm(dim=-1)
+    assert torch.isfinite(grad).all(), "non-finite gradient"
+    assert err.max().item() < tol, f"max relative gradient error {err.max().item():.3e} >= {tol}"
+    return err
 
 
 if __name__ == "__main__":
