@@ -2162,7 +2162,12 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrintSimdCall_(GetRef<Call>(op), 3, os);
   }
   // --- SimdVF runtime tail predicate: (value, width) ---
-  else if (op->op.same_as(tl::simd_update_mask())) {
+  else if (op->op.same_as(tl::simd_pset())) {
+    ICHECK_EQ(op->args.size(), 2);
+    int elem_bits = static_cast<int>(Downcast<IntImm>(op->args[0])->value);
+    os << "asc_create_mask_b" << elem_bits << "("
+       << Downcast<StringImm>(op->args[1])->value << ")";
+  } else if (op->op.same_as(tl::simd_update_mask())) {
     ICHECK_EQ(op->args.size(), 2);
     int width = (int)Downcast<IntImm>(op->args[1])->value;
     os << "simd_inst::update_mask_b" << width << "(";
