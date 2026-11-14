@@ -2720,7 +2720,8 @@ CodeGenTileLangPTO::GetMutableVectorRef(const PrimExpr &address,
   return GetVectorLocalRef(buffer_var, dst_index, "PTO " + op_name);
 }
 
-std::string CodeGenTileLangPTO::PrintCondition(const PrimExpr &condition) {
+std::string CodeGenTileLangPTO::PrintCondition(const PrimExpr &condition,
+                                            bool require_ir) {
   DataType dtype = condition.dtype();
   ICHECK(dtype.is_scalar() &&
          (dtype.is_bool() || dtype.is_int() || dtype.is_uint()))
@@ -2732,7 +2733,11 @@ std::string CodeGenTileLangPTO::PrintCondition(const PrimExpr &condition) {
   // the use site because a bool-typed expression may be materialized in an
   // i8 local.var by earlier lowering.  This also avoids truncating arbitrary
   // nonzero integers to i1 (which would make even values false).
-  return "tl.as_logical_bool(" + value + ")";
+  // IR operations such as select require an i1 even when Python evaluates
+  // the expression to a constant.  Control-flow consumers may keep literals
+  // as Python bools so their constexpr behavior remains intact.
+  return std::string(require_ir ? "tl.as_ir_bool(" : "tl.as_logical_bool(") +
+         value + ")";
 }
 
 std::string CodeGenTileLangPTO::ScalarLoad(const BufferNode *buffer,
@@ -7234,7 +7239,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
       (from.is_bool() || from.bits() == 1)) {
     // Python float(runtime_i1) tries to coerce a device SSA value at trace
     // time.  Materialize the numeric boolean conversion on the device.
-    os << "pto.select(" << PrintCondition(op->value)
+    os << "pto.select(" << PrintCondition(op->value, true)
        << ", pto.const(1.0, dtype=" << DataTypeName(to)
        << "), pto.const(0.0, dtype=" << DataTypeName(to) << "))";
     return;
@@ -7250,7 +7255,7 @@ void CodeGenTileLangPTO::VisitExpr_(const CastNode *op,
       os << "pto.const(" << imm->value << ", dtype=" << DataTypeName(to) << ")";
       return;
     }
-    os << "pto.select(" << PrintCondition(op->value)
+    os << "pto.select(" << PrintCondition(op->value, true)
        << ", pto.const(1, dtype=" << DataTypeName(to)
        << "), pto.const(0, dtype=" << DataTypeName(to) << "))";
     return;
@@ -7570,7 +7575,7 @@ void CodeGenTileLangPTO::VisitExpr_(const SelectNode *op,
       // The logical-bool adapter is scalar-only; a lane-1 VMI mask (or VMI
       // data used as a predicate) must be diagnosed, not normalized.
       CheckPtoScalarOperand_(expr, "PTO select branch");
-      os << "tl.as_logical_bool(" << PrintExpr_(expr) << ")";
+      os << PrintCondition(expr, true);
       return;
     }
     if (coerce_integer_branches) {
@@ -7581,7 +7586,7 @@ void CodeGenTileLangPTO::VisitExpr_(const SelectNode *op,
     PrintExpr_(expr, os);
   };
   os << "pto.select(";
-  os << PrintCondition(op->condition);
+  os << PrintCondition(op->condition, true);
   os << ", ";
   print_select_value(op->true_value);
   os << ", ";

@@ -99,7 +99,7 @@ private:
                                 const std::string &context);
   std::string GetMutableVectorRef(const PrimExpr &address,
                                   const std::string &op_name);
-  std::string PrintCondition(const PrimExpr &condition);
+  std::string PrintCondition(const PrimExpr &condition, bool require_ir = false);
   std::string GetAddressOfExpr_(const CallNode *op);
   std::string GetAscendCopyGmUbExpr_(const CallNode *op);
   std::string GetAscendCopyUbGmExpr_(const CallNode *op);
