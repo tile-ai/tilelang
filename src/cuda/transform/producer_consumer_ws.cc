@@ -180,8 +180,10 @@ struct LocalLiveSet {
 
   bool NeedsAnyDef(const LocalAccessSummary &summary) const {
     for (const auto &buf : summary.write_buffers) {
-      if (buffers.count(buf)) {
-        return true;
+      for (const auto &live_buffer : buffers) {
+        if (live_buffer->data.same_as(buf->data)) {
+          return true;
+        }
       }
     }
     for (const auto &var : summary.def_vars) {

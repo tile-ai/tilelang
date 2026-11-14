@@ -407,7 +407,6 @@ def test_ws_pass_applies_under_t_persistent_primitive():
     assert "tl_tiled_ws_applied" in script
 
 
-@tilelang.testing.requires_cuda
 def test_ws_pass_applies_under_persistent_serial():
     """Same coverage gap exercised via a hand-written ``T.serial`` scheduler."""
     func = persistent_matmul_serial()
@@ -1162,6 +1161,36 @@ def test_ws_declined_shared_prelude_update_matches_reference():
     B = torch.randn(256, 256, dtype=torch.float16, device="cuda")
     ref = A.float() @ B.float()
     torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
+
+
+def test_ws_declines_shared_prelude_alias_update():
+    """Local buffer views sharing storage retain loop-carried dependencies."""
+    from tvm import tirx
+    from tvm.tirx import stmt_functor
+
+    func = cross_run_producer_shared_prelude_index()
+    values = []
+
+    def find_k_off(node):
+        if isinstance(node, tirx.Bind) and node.var.name == "k_off":
+            values.append(node.value)
+
+    stmt_functor.post_order_visit(func.body, find_k_off)
+    assert len(values) == 1
+    value = values[0]
+    assert isinstance(value, tirx.BufferLoad)
+    original = value.buffer
+    alias = tirx.decl_buffer(original.shape, original.dtype, data=original.data, scope="local.var", name="start_alias")
+    assert not alias.same_as(original) and alias.data.same_as(original.data)
+
+    def use_alias(node):
+        if isinstance(node, tirx.Bind) and node.var.name == "k_off":
+            return tirx.Bind(node.var, tirx.BufferLoad(alias, value.indices))
+        return None
+
+    body = stmt_functor.ir_transform(func.body, None, use_alias, None)
+    script = _apply_ws_pass(func.with_body(body))["main"].script()
+    assert "tl_tiled_ws_applied" not in script
 
 
 if __name__ == "__main__":
