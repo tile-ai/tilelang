@@ -1,5 +1,7 @@
 """Predicate construction is valid in expression position."""
 
+import re
+
 import pytest
 import tilelang
 import tilelang.ascend.language as T
@@ -24,4 +26,11 @@ def test_pset_can_be_used_as_an_inline_mask(inline):
             T.copy(b, B)
 
     source = tilelang.lower(main, target="ascend").kernel_source
-    assert "asc_create_mask_b32(PAT_VL16)" in source
+    vadd = next(line for line in source.splitlines() if "simd_inst::vadd(" in line)
+    if inline:
+        mask_operand = "asc_create_mask_b32(PAT_VL16)"
+    else:
+        declaration = re.search(r"vector_bool\s+(\w+)\s*=\s*asc_create_mask_b32\(PAT_VL16\)", source)
+        assert declaration is not None
+        mask_operand = declaration.group(1)
+    assert f", {mask_operand}, MODE_ZEROING)" in vadd
