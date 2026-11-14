@@ -686,5 +686,56 @@ def test_tf32_rn_cast(sat):
     assert torch.equal(b.view(torch.uint32), torch.tensor(expected, dtype=torch.uint32, device="cuda"))
 
 
+@tilelang.testing.requires_cuda
+def test_tf32_rn_cast_reloads_after_store():
+    """The TF32-specific cast path must reload a buffer modified between casts."""
+    build = tvm.get_global_func("target.build.tilelang_cuda_without_compile", allow_missing=True)
+    if build is None:
+        pytest.skip("TileLang was built without the CUDA code generator")
+    a = tvm.tirx.decl_buffer((2,), "float32", name="A")
+    b = tvm.tirx.decl_buffer((4,), "float32", name="B")
+    index = tvm.tirx.Ramp(0, 1, 2)
+    loaded = tvm.tirx.BufferLoad(a, [index])
+    converted = cast(cast(loaded, T.tfloat32x2, round="rn", sat=False), "float32x2")
+    body = tvm.tirx.SeqStmt(
+        [
+            tvm.tirx.BufferStore(b, converted, [index]),
+            tvm.tirx.BufferStore(a, tvm.tirx.Broadcast(tvm.tirx.FloatImm("float32", 7.0), 2), [index]),
+            tvm.tirx.BufferStore(b, converted, [tvm.tirx.Ramp(2, 1, 2)]),
+        ]
+    )
+    func = tvm.tirx.PrimFunc([a.data, b.data], body, buffer_map={a.data: a, b.data: b})
+    func = func.with_attr("global_symbol", "tf32_reload")
+    func = func.with_attr("calling_conv", tvm.ir.CallingConv.DEVICE_KERNEL_LAUNCH)
+    code = build(tvm.IRModule({"tf32_reload": func}), tvm.target.Target({"kind": "cuda", "arch": "sm_90"})).inspect_source()
+    assert "__tl_cvt_f32_to_tf32_rn<false>" in code
+    # Trace the post-store load through the conversion to the second output.
+    # Temporary names are intentionally unconstrained.
+    import re
+
+    store = code.index("*(float2*)(A + 0) =")
+    after_store = code[code.index(";", store) + 1 :]
+    loaded = set()
+    converted = set()
+    for statement in after_store.split(";"):
+        if "=" not in statement:
+            continue
+        lhs, rhs = statement.rsplit("=", 1)
+        names = set(re.findall(r"\b[A-Za-z_]\w*\b", rhs))
+        if "*(float2*)(B + 2)" in lhs:
+            assert names & converted, code
+            break
+        destination = re.search(r"\b([A-Za-z_]\w*)(?:\.[xy])?\s*$", lhs)
+        if destination is None:
+            continue
+        name = destination.group(1)
+        if "*(float2*)(A + 0)" in rhs:
+            loaded.add(name)
+        if (names & loaded and "__tl_cvt_f32_to_tf32_rn<false>" in rhs) or names & converted:
+            converted.add(name)
+    else:
+        pytest.fail("Second output store was not emitted")
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
