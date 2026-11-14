@@ -443,9 +443,10 @@ struct Gemm {
                        int block_size, Target target, String gemm_inst) {
     int num_warps = block_size / TargetCudaGetWarpSize(target);
     if (gemm_inst == kCudaTCGEN05) {
+      // TCGEN05 MMA is issued by one warp and covers the complete logical tile.
       policy.m_warp = 1;
-      policy.n_warp = num_warps;
-      return {1, num_warps};
+      policy.n_warp = 1;
+      return {1, 1};
     }
     if (gemm_inst == kCudaWGMMA) {
       return ComputeWgmmaWarpPartition(policy, M, N, num_warps);
