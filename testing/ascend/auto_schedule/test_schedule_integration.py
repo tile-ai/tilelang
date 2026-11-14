@@ -134,12 +134,13 @@ def _make_counter_l1_layout_program():
     return main
 
 
-def _make_epilogue_program(sids: int):
+def _make_epilogue_program(sids: int, *, use_gm_handoff: bool = True):
     @T.prim_func
     def main(
         A: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
         B: T.Tensor((STEPS, TILE, TILE), "bfloat16"),
         C: T.Tensor((STEPS, TILE, TILE), "float32"),
+        Tmp: T.Tensor((STEPS, TILE, TILE), "float32"),
     ):
         with T.MixedKernel(1, sids=sids):
             a_l1 = T.alloc_l1((TILE, TILE), "bfloat16")
@@ -160,7 +161,12 @@ def _make_epilogue_program(sids: int):
                     unit_flag_ctrl=3,
                 )
                 if sids == 1:
-                    T.copy(accum, output, unit_flag_ctrl=3)
+                    if use_gm_handoff:
+                        # Physical 1:1 requires GM handoff instead of L0C->UB.
+                        T.copy(accum, Tmp[step, :, :], unit_flag_ctrl=3)
+                        T.copy(Tmp[step, :, :], output)
+                    else:
+                        T.copy(accum, output, unit_flag_ctrl=3)
                     T.copy(output, C[step, :, :])
                 else:
                     # Each AIV owns half of the output; launch-count coverage
@@ -861,10 +867,17 @@ def test_mixed_kernel_uses_requested_vector_count(sids):
     assert cube_banks == set(range(sids))
     vectors = [block for block in nodes(snapshots["tl.LowerScheduledTIR"], tirx.SBlock) if block.name_hint == "VECTOR"]
     assert len(vectors) == 1 and int(vectors[0].annotations["vector_count"]) == sids
-    assert "asc_sync_intra_arrive(" in artifact.kernel_source
-    assert "asc_sync_intra_wait(" in artifact.kernel_source
+    sync_scope = "block" if sids == 1 else "intra"
+    assert f"asc_sync_{sync_scope}_arrive(" in artifact.kernel_source
+    assert f"asc_sync_{sync_scope}_wait(" in artifact.kernel_source
+    assert f"__mix__(1, {sids})" in artifact.kernel_source
     if sids == 1:
-        assert "if (asc_get_sub_block_id() == 0)" in artifact.kernel_source
+        assert "if (asc_get_sub_block_id() == 0)" not in artifact.kernel_source
+
+
+def test_mixed_kernel_rejects_l0c_to_ub_in_one_aiv_group():
+    with pytest.raises(tvm.error.InternalError, match="asc_copy_l0c2ub cannot execute inside a 1:1 mixed group"):
+        tilelang.lower(_make_epilogue_program(1, use_gm_handoff=False), target="ascend")
 
 
 def test_every_kernel_is_scheduled_and_called_in_program_order():

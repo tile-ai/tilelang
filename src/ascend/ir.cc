@@ -80,6 +80,7 @@ KernelLaunchFrame MixedKernelLaunch(const Array<PrimExpr> &grid_size,
   main_block->writes = Array<tvm::tirx::BufferRegion>();
   Map<String, Any> block_annotations = attrs;
   block_annotations.Set("vector_count", cthread_extent);
+  block_annotations.Set("pragma_aiv_group", Integer(1));
   main_block->annotations = block_annotations;
   n->frames.push_back(main_block);
 
@@ -407,15 +408,14 @@ CubeFrame Cube() { return CubeFrame(tvm::ffi::make_object<CubeFrameNode>()); }
 
 class VectorFrameNode : public TIRFrameNode {
 public:
-  int vector_count;
   tvm::tirx::Var sid_var;
+  bool bind_sid;
   size_t parent_alloc_count_{0};
 
   static void RegisterReflection() {
     namespace refl = tvm::ffi::reflection;
-    refl::ObjectDef<VectorFrameNode>()
-        .def_ro("vector_count", &VectorFrameNode::vector_count)
-        .def_ro("sid_var", &VectorFrameNode::sid_var);
+    refl::ObjectDef<VectorFrameNode>().def_ro("sid_var",
+                                              &VectorFrameNode::sid_var);
   }
 
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("tl.VectorFrame", VectorFrameNode,
@@ -435,18 +435,37 @@ public:
     Stmt body = tvm::tirx::SeqStmt::Flatten(stmts);
 
     DataType dtype = DataType::Int(32);
-    PrimExpr extent = IntImm(dtype, vector_count);
-    IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), sid_var,
-               IterVarType::kThreadIndex, "cthread");
-    body = AttrStmt(iv, tirx::attr::thread_extent, extent, body);
+    // Read the enclosing launch's already selected count, including when
+    // this region is nested inside other frontend blocks.
+    PrimExpr extent;
+    auto builder = script::ir_builder::IRBuilder::Current();
+    for (auto it = builder->frames.rbegin(); it != builder->frames.rend();
+         ++it) {
+      if (const auto *block = (*it).as<SBlockFrameNode>()) {
+        if (!block->annotations.has_value())
+          continue;
+        if (auto count = block->annotations.value().Get("pragma_aiv_count")) {
+          extent = count.value().cast<PrimExpr>();
+          auto annotations = block->annotations.value();
+          annotations.Set("pragma_aiv_group", Integer(1));
+          GetRef<SBlockFrame>(block)->annotations = annotations;
+          break;
+        }
+      }
+    }
+    ICHECK(extent.defined())
+        << "T.Vector() requires an enclosing T.Kernel or T.MixedKernel";
+    if (bind_sid) {
+      IterVar iv(Range::FromMinExtent(make_zero(dtype), extent), sid_var,
+                 IterVarType::kThreadIndex, "cthread");
+      body = AttrStmt(iv, tirx::attr::thread_extent, extent, body);
+    }
 
     Map<String, ObjectRef> annotations;
-    annotations.Set("vector_count", IntImm(dtype, vector_count));
+    annotations.Set("vector_count", extent);
     Stmt stmt = SBlock({}, {}, {}, "VECTOR", body, std::nullopt, stolen_bufs,
                        {}, annotations);
 
-    script::ir_builder::IRBuilder builder =
-        script::ir_builder::IRBuilder::Current();
     if (builder->frames.empty()) {
       ICHECK(!builder->result.defined())
           << "ValueError: Builder.result has already been set";
@@ -472,12 +491,11 @@ public:
                                                 VectorFrameNode);
 };
 
-VectorFrame Vector(int vector_count) {
-  ICHECK(vector_count >= 1 && vector_count <= 2)
-      << "Vector core count must be 1 or 2, got " << vector_count;
+VectorFrame Vector(Optional<tvm::tirx::Var> outer_sid) {
   auto n = tvm::ffi::make_object<VectorFrameNode>();
-  n->vector_count = vector_count;
-  n->sid_var = tvm::tirx::Var("sid", DataType::Int(32));
+  n->bind_sid = !outer_sid.has_value();
+  n->sid_var = outer_sid.has_value() ? outer_sid.value()
+                                     : tvm::tirx::Var("sid", DataType::Int(32));
   return VectorFrame(n);
 }
 

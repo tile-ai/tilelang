@@ -16,6 +16,34 @@ def _target_ffi_api():
     return _ffi_api
 
 
+def _query_device_aiv_per_aic() -> int | None:
+    """Query the device AIC:AIV ratio from hardware only.
+
+    Does NOT read any environment variable or user override — this is the
+    ground truth used by frontend launch construction to validate user requests. Returns None when no current NPU can be queried.
+    """
+    try:
+        import torch
+
+        props = torch.npu.get_device_properties(torch.npu.current_device())
+        cube = getattr(props, "cube_core_num", 0)
+        vector = getattr(props, "vector_core_num", 0)
+        if cube > 0 and vector > 0 and vector % cube == 0 and vector // cube in (1, 2):
+            return vector // cube
+    except Exception:
+        pass
+    return None
+
+
+def resolve_aiv_count(requested: int | None = None) -> int:
+    """Resolve a frontend-validated request and check device capacity."""
+    limit = _query_device_aiv_per_aic()
+    if requested is not None and limit is not None and requested > limit:
+        raise ValueError(f"AIV group count={requested} exceeds the current device capability {limit}")
+    device_count = limit if limit is not None else 2
+    return requested if requested is not None else device_count
+
+
 def _make_ascend_target(target_dict: dict | None = None) -> Target:
     target_dict = dict(target_dict or {})
     target_dict["kind"] = "ascend"

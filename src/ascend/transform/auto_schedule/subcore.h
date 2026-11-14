@@ -43,10 +43,9 @@ namespace ascend {
 // counter algorithms operate on each subcore without counter-specific rules.
 class SubcoreProjector {
 public:
-  static SBlock Rewrite(const SBlock &root, const ConstrSet &outer_ctx,
-                        const Var &sid) {
+  static SBlock Rewrite(const ScheduledTIR &scheduled, const Var &sid) {
+    const SBlock &root = scheduled.metadata.kernel_root;
     ICHECK(!root->annotations.count(kSplitSubcores));
-    ScheduledTIR scheduled = DecodeScheduledTIR(root, outer_ctx);
     SubcoreProjector projector(sid,
                                scheduled.metadata.num_aiv_subcores.value_or(2));
     projector.FindVaryingValues(scheduled.tree);
