@@ -47,6 +47,15 @@ class VectorFrame(TIRFrame):
         return self.sid_var
 
 
+
+def _normalize_latency(latency, *, api):
+    # `int(latency)` silently truncates floats and accepts negative values.
+    if isinstance(latency, bool) or not isinstance(latency, int):
+        raise TypeError(f"{api} requires latency to be a plain int, got {latency!r}")
+    if latency < 0:
+        raise ValueError(f"{api} requires latency >= 0, got {latency}")
+    return latency
+
 def Vector(vector: int = 2) -> VectorFrame:
     """Construct a Vector (AIV) execution region frame.
 
@@ -60,6 +69,10 @@ def Vector(vector: int = 2) -> VectorFrame:
     res : VectorFrame
         The VectorFrame used to denote an AIV execution region.
     """
+    if isinstance(vector, bool) or not isinstance(vector, int):
+        raise TypeError(f"T.Vector requires vector to be a plain int, got {vector!r}")
+    if vector not in (1, 2):
+        raise ValueError(f"T.Vector requires 1 or 2 AIV cores, got {vector!r}")
     return _ffi_api.Vector(vector)  # type: ignore[attr-defined] # pylint: disable=no-member
 
 
@@ -144,7 +157,7 @@ def SimtVF(threads: int | list[int] | tuple = 128, latency: int = 0) -> SimtVFFr
 
     source_index = _next_vf_source_index("simtvf")
     return _ffi_api.SimtVF(  # type: ignore[attr-defined] # pylint: disable=no-member
-        normalized, int(latency), source_index
+        normalized, _normalize_latency(latency, api="T.SimtVF"), source_index
     )
 
 
@@ -208,7 +221,7 @@ def SimdVF(latency: int = 0, lanes: int = 128) -> SimdVFFrame:
         raise ValueError(f"T.SimdVF lanes must be one of {_SIMDVF_VALID_LANES}, got {lanes}")
     source_index = _next_vf_source_index("simdvf")
     return _ffi_api.SimdVF(  # type: ignore[attr-defined] # pylint: disable=no-member
-        int(latency), source_index, int(lanes)
+        _normalize_latency(latency, api="T.SimdVF"), source_index, lanes
     )
 
 
