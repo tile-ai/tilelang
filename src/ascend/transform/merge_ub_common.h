@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <tvm/arith/analyzer.h>
 #include <tvm/ffi/container/array.h>
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
@@ -40,6 +41,7 @@
 #include <utility>
 #include <vector>
 
+#include "onchip_memory_limits.h"
 #include "op/builtin.h"
 #include "runtime/thread_storage_scope.h"
 #include "support/check.h"
@@ -57,6 +59,13 @@ using BufferByteOffsetMap = std::unordered_map<const tirx::VarNode *, PrimExpr>;
 struct MemoryPlan {
   BufferByteOffsetMap byte_offsets;
   PrimExpr total_size;
+  /*!
+   * \brief Constant-sized bytes after planning. Dynamic extents contribute
+   * nothing. An alias plan stores the packed clique arena; a sequential plan
+   * stores the sum of its constant allocations. A merged UB plan is the common
+   * arena plus the larger AIV arena.
+   */
+  int64_t constant_arena_bytes{0};
 };
 
 inline bool IsDynamicSharedMemory(tirx::Var buffer_var) {
@@ -145,6 +154,65 @@ inline PrimExpr GetBufferSizeBytes(const tirx::AllocBufferNode *alloc,
   return size_bytes;
 }
 
+/*!
+ * \brief Fail when one scope's planned footprint exceeds its capacity.
+ *
+ * A constant footprint is compared directly. A symbolic one fails when the
+ * analyzer proves the overflow, or when `constant_arena_bytes` already exceeds
+ * the capacity. That value is the planned constant arena: reused buffers share
+ * a slot, and AIV0/AIV1 contribute only the larger private arena. A zero
+ * capacity (unknown scope, non-Ascend target) disables the check.
+ */
+inline void CheckOnChipCapacity(const std::string &scope,
+                                const PrimExpr &footprint,
+                                int64_t constant_arena_bytes, Target target,
+                                const tirx::Stmt &kernel_body) {
+  const char *name = nullptr;
+  int64_t capacity = 0;
+  if (scope == "shared" || scope == "shared.dyn") {
+    name = "UB";
+    capacity = ascend::GetSharedMemoryLimit(target, kernel_body);
+  } else if (scope == "shared.l1") {
+    name = "L1";
+    capacity = ascend::GetL1MemoryLimit(target);
+  } else if (scope == "shared.l0a") {
+    name = "L0A";
+    capacity = ascend::GetL0AMemoryLimit(target);
+  } else if (scope == "shared.l0b") {
+    name = "L0B";
+    capacity = ascend::GetL0BMemoryLimit(target);
+  } else if (scope == "shared.l0c") {
+    name = "L0C";
+    capacity = ascend::GetL0CMemoryLimit(target);
+  } else {
+    return;
+  }
+  if (capacity <= 0 || !footprint.defined())
+    return;
+
+  arith::Analyzer analyzer;
+  PrimExpr required = analyzer.Simplify(footprint);
+  const auto *constant = required.as<IntImmNode>();
+  bool overflows =
+      constant != nullptr
+          ? constant->value > capacity
+          : analyzer.CanProve(required >
+                              tirx::make_const(required.dtype(), capacity));
+  if (!overflows && constant == nullptr && constant_arena_bytes > capacity) {
+    // A bare extent is not assumed non-negative, so the analyzer may not bound
+    // a symbolic footprint. The planned constant arena is a lower bound.
+    required = tirx::make_const(DataType::Int(64), constant_arena_bytes);
+    overflows = true;
+  }
+  if (!overflows)
+    return;
+  if (const auto *imm = required.as<IntImmNode>())
+    LOG(FATAL) << name << " memory overflow: " << imm->value
+               << " bytes required (capacity " << capacity << " bytes).";
+  LOG(FATAL) << name << " memory overflow: " << required
+             << " bytes required (capacity " << capacity << " bytes).";
+}
+
 class AllocateCollector : public tirx::StmtExprVisitor {
 public:
   void VisitStmt_(const tirx::AllocBufferNode *op) final {
@@ -194,6 +262,7 @@ inline MemoryPlan BuildSequentialPlan(const AllocationMap &allocations,
   DataType offset_dtype = DataType::Int(32);
   PrimExpr cursor = tirx::make_const(offset_dtype, 0);
   PrimExpr total_size = tirx::make_const(offset_dtype, 0);
+  PrimExpr constant_bytes = tirx::make_const(DataType::Int(64), 0);
   for (const tirx::VarNode *var : sorted_vars) {
     const tirx::AllocBufferNode *alloc = allocations.at(var);
     int alignment = std::max(align_bytes, AscendScopeAlignBytes(alloc));
@@ -202,8 +271,17 @@ inline MemoryPlan BuildSequentialPlan(const AllocationMap &allocations,
     PrimExpr buffer_end = cursor + GetBufferSizeBytes(alloc, offset_dtype);
     total_size = max(total_size, buffer_end);
     cursor = buffer_end;
+    if (ffi::GetRef<tirx::AllocBuffer>(alloc)
+            .ConstantAllocationSize()
+            .has_value())
+      constant_bytes =
+          constant_bytes + GetBufferSizeBytes(alloc, DataType::Int(64));
   }
   plan.total_size = AlignPrimExpr(total_size, align_bytes);
+  arith::Analyzer analyzer;
+  PrimExpr simplified = analyzer.Simplify(constant_bytes);
+  if (const auto *imm = simplified.as<IntImmNode>())
+    plan.constant_arena_bytes = imm->value;
   return plan;
 }
 
@@ -222,6 +300,7 @@ public:
   }
 
   void SetPlan(MemoryPlan plan) {
+    constant_arena_bytes_ = plan.constant_arena_bytes;
     buffer_byte_offsets_ = std::move(plan.byte_offsets);
     merged_alloc_size_ = std::move(plan.total_size);
   }
@@ -235,6 +314,13 @@ public:
     for (const auto &[var, offset] : buffer_byte_offsets_)
       LOG(DEBUG) << "    Buffer " << var->name_hint << " offset=" << offset;
   }
+
+  /*! \brief Planned byte size of the merged arena, i.e. what codegen allocates.
+   */
+  const PrimExpr &MergedSize() const { return merged_alloc_size_; }
+
+  /*! \brief Constant arena of the plan, excluding dynamic extents. */
+  int64_t ConstantArenaBytes() const { return constant_arena_bytes_; }
 
 private:
   tirx::Stmt VisitStmt_(const tirx::AttrStmtNode *op) final {
@@ -412,6 +498,7 @@ private:
       "buf_dyn_shmem", PointerType(PrimType(DataType::UInt(8)), "shared.dyn")};
   std::string target_scope_;
   PrimExpr merged_alloc_size_{0};
+  int64_t constant_arena_bytes_{0};
   BufferByteOffsetMap buffer_byte_offsets_;
   std::unordered_map<tirx::Buffer, tirx::Buffer, ffi::ObjectPtrHash,
                      ffi::ObjectPtrEqual>
@@ -422,14 +509,15 @@ private:
 template <typename Planner>
 tirx::Stmt
 MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
-                 bool disable_reuse, const Planner &planner,
+                 bool disable_reuse, const Planner &planner, Target target,
                  const std::unordered_set<std::string> &required_scopes = {}) {
   AllocateCollector collector;
   collector(stmt);
   auto run = [&](SharedMemoryRewriter &rewriter,
                  const AllocationMap &allocations,
                  const AllocationOrder &allocation_order,
-                 const std::string &target_scope) {
+                 const std::string &target_scope,
+                 const std::string &scope_key) {
     if (disable_reuse ||
         (target_scope == "shared.ss" && !required_scopes.count(target_scope))) {
       rewriter.PlanNoReuse();
@@ -437,6 +525,11 @@ MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
       rewriter.SetPlan(planner(stmt, allocations, allocation_order,
                                target_scope, align_bytes, verbose));
     }
+    // Check the planned footprint against the physical capacity of the
+    // scope. The constant floor comes from the plan's arena, which already
+    // accounts for reuse and for taking the larger AIV.
+    CheckOnChipCapacity(scope_key, rewriter.MergedSize(),
+                        rewriter.ConstantArenaBytes(), target, stmt);
     stmt = rewriter(std::move(stmt));
   };
 
@@ -444,7 +537,15 @@ MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
       required_scopes.count("shared.dyn")) {
     SharedMemoryRewriter rewriter(collector.dyn_shmem_allocs, verbose,
                                   align_bytes);
-    run(rewriter, collector.dyn_shmem_allocs, collector.dyn_shmem_order, "");
+    run(rewriter, collector.dyn_shmem_allocs, collector.dyn_shmem_order, "",
+        "shared.dyn");
+  } else if (collector.dyn_shmem_allocs.size() == 1) {
+    // A lone UB allocation builds no arena, so it never reaches `run` above.
+    const tirx::AllocBufferNode *alloc =
+        collector.dyn_shmem_allocs.begin()->second;
+    CheckOnChipCapacity("shared.dyn",
+                        GetBufferSizeBytes(alloc, DataType::Int(64)), 0, target,
+                        stmt);
   }
 
   std::vector<std::string> scopes;
@@ -454,8 +555,15 @@ MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
   std::sort(scopes.begin(), scopes.end());
   for (const std::string &scope : scopes) {
     const AllocationMap &allocations = collector.ascend_scope_allocs.at(scope);
-    if (allocations.size() <= 1 && !required_scopes.count(scope))
+    if (allocations.size() <= 1 && !required_scopes.count(scope)) {
+      // A lone L0/L1 allocation builds no arena either: check it directly.
+      if (allocations.size() == 1) {
+        const tirx::AllocBufferNode *alloc = allocations.begin()->second;
+        CheckOnChipCapacity(scope, GetBufferSizeBytes(alloc, DataType::Int(64)),
+                            0, target, stmt);
+      }
       continue;
+    }
     auto order = collector.ascend_scope_order.find(scope);
     const AllocationOrder empty_order;
     const AllocationOrder &allocation_order =
@@ -464,7 +572,7 @@ MergeAllocations(tirx::Stmt stmt, int align_bytes, bool verbose,
     std::string suffix = scope.substr(7);
     SharedMemoryRewriter rewriter(allocations, verbose, align_bytes,
                                   "buf_dyn_" + suffix, scope + ".dyn", scope);
-    run(rewriter, allocations, allocation_order, scope);
+    run(rewriter, allocations, allocation_order, scope, scope);
   }
   return stmt;
 }

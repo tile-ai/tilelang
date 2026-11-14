@@ -28,6 +28,7 @@
 #include "merge_ub_common.h"
 
 #include <tvm/ffi/reflection/registry.h>
+#include <tvm/target/target.h>
 #include <tvm/tirx/function.h>
 #include <tvm/tirx/stmt.h>
 #include <tvm/tirx/stmt_functor.h>
@@ -342,6 +343,7 @@ MemoryPlan BuildAliasMemoryPlan(const AllocationMap &allocations,
     }
     arena_top = partition.layout.total_size;
   }
+  plan.constant_arena_bytes = static_cast<int64_t>(arena_top);
 
   DataType offset_dtype = DataType::Int(64);
   PrimExpr cursor = make_const(offset_dtype, static_cast<int64_t>(arena_top));
@@ -567,14 +569,36 @@ private:
   bool found_contract_{false};
 };
 
+/*!
+ * \brief Capacity check for a body that carries no buffer-alias contract.
+ */
+void CheckScopesWithoutContract(const Stmt &stmt, int align_bytes,
+                                Target target) {
+  merge_ub::AllocateCollector collector;
+  collector(stmt);
+  auto check = [&](const std::string &scope,
+                   const merge_ub::AllocationMap &allocations) {
+    if (allocations.empty())
+      return;
+    merge_ub::MemoryPlan plan =
+        merge_ub::BuildSequentialPlan(allocations, align_bytes);
+    merge_ub::CheckOnChipCapacity(scope, plan.total_size,
+                                  plan.constant_arena_bytes, target, stmt);
+  };
+  check("shared.dyn", collector.dyn_shmem_allocs);
+  for (const auto &[scope, allocations] : collector.ascend_scope_allocs)
+    check(scope, allocations);
+}
+
 Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
-                        bool disable_reuse) {
+                        bool disable_reuse, Target target) {
   BufferAliasContractExtractor extractor;
   stmt = extractor.Extract(stmt);
   if (!extractor.FoundContract()) {
     ICHECK(!extractor.Addresses().has_value())
         << kBufferAddresses << " requires the Ascend scheduled allocation "
         << "pipeline and its buffer-alias contract";
+    CheckScopesWithoutContract(stmt, align_bytes, target);
     return stmt;
   }
   BufferAliasMap aliases = extractor.Aliases();
@@ -640,17 +664,20 @@ Stmt MergeUBAllocations(Stmt stmt, int align_bytes, bool verbose,
     MemoryPlan result = plan(groups[2], orders[2]);
     PrimExpr prefix = AlignPrimExpr(result.total_size, alignment);
     PrimExpr private_size = make_zero(prefix.dtype());
+    int64_t private_arena = 0;
     for (int sid = 0; sid < 2; ++sid) {
       MemoryPlan local = plan(groups[sid], orders[sid]);
       for (const auto &[storage, offset] : local.byte_offsets)
         result.byte_offsets[storage] = prefix + cast(prefix.dtype(), offset);
       private_size = max(private_size, cast(prefix.dtype(), local.total_size));
+      private_arena = std::max(private_arena, local.constant_arena_bytes);
     }
+    result.constant_arena_bytes += private_arena;
     result.total_size = prefix + private_size;
     return result;
   };
   return merge_ub::MergeAllocations(std::move(stmt), align_bytes, verbose,
-                                    false, planner, placed_scopes);
+                                    false, planner, target, placed_scopes);
 }
 
 } // namespace
@@ -666,9 +693,12 @@ Pass MergeUBAllocations(int align_bytes = 16, bool disable_reuse = false) {
         context
             ->GetConfig<Bool>(kDebugMergeSharedMemoryAllocations, Bool(false))
             .value();
+    // A missing or non-Ascend target disables the capacity check.
+    Target target =
+        func->GetAttr<Target>(tvm::attr::kTarget).value_or(Target());
     PrimFuncNode *writer = func.CopyOnWrite();
     writer->body = tl::MergeUBAllocations(std::move(writer->body), align_bytes,
-                                          verbose, disable_reuse);
+                                          verbose, disable_reuse, target);
     return func;
   };
   return CreatePrimFuncPass(pass_func, 0, "tl.MergeUBAllocations", {});
