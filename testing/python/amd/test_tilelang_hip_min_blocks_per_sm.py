@@ -1,6 +1,5 @@
 """T.annotate_min_blocks_per_sm on HIP: blocks per compute unit to waves per EU."""
 
-import pytest
 import tilelang as tl
 import tilelang.rocm.language as T
 import tilelang.testing
