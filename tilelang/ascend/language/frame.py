@@ -47,7 +47,6 @@ class VectorFrame(TIRFrame):
         return self.sid_var
 
 
-
 def _normalize_latency(latency, *, api):
     # `int(latency)` silently truncates floats and accepts negative values.
     if isinstance(latency, bool) or not isinstance(latency, int):
@@ -55,6 +54,7 @@ def _normalize_latency(latency, *, api):
     if latency < 0:
         raise ValueError(f"{api} requires latency >= 0, got {latency}")
     return latency
+
 
 def Vector(vector: int = 2) -> VectorFrame:
     """Construct a Vector (AIV) execution region frame.

@@ -10,8 +10,14 @@ from tvm import tirx
 # the same sets here turns a late C++ ICHECK into a clear Python error.
 _ASCEND_HARD_EVENT_PIPES = ("MTE1", "MTE2", "MTE3", "M", "V", "S", "FIX")
 _ASCEND_PIPE_BARRIERS = (
-    "PIPE_ALL", "PIPE_V", "PIPE_M", "PIPE_MTE1", "PIPE_MTE2", "PIPE_MTE3",
-    "PIPE_S", "PIPE_FIX",
+    "PIPE_ALL",
+    "PIPE_V",
+    "PIPE_M",
+    "PIPE_MTE1",
+    "PIPE_MTE2",
+    "PIPE_MTE3",
+    "PIPE_S",
+    "PIPE_FIX",
 )
 _ASCEND_CROSS_CORE_PIPES = tuple("PIPE_" + x for x in _ASCEND_HARD_EVENT_PIPES)
 
@@ -21,10 +27,7 @@ def _normalize_hard_event(hard_event, *, api):
         raise TypeError(f"{api} requires hard_event to be a string, got {type(hard_event)}")
     parts = hard_event.split("_")
     if len(parts) != 2 or any(x not in _ASCEND_HARD_EVENT_PIPES for x in parts):
-        raise ValueError(
-            f"{api} requires hard_event to be '<SRC>_<DST>' with both pipes in "
-            f"{_ASCEND_HARD_EVENT_PIPES}, got {hard_event!r}"
-        )
+        raise ValueError(f"{api} requires hard_event to be '<SRC>_<DST>' with both pipes in {_ASCEND_HARD_EVENT_PIPES}, got {hard_event!r}")
     return hard_event
 
 
@@ -46,10 +49,7 @@ def _normalize_mode_id(mode_id, *, api):
     elif isinstance(mode_id, tirx.IntImm):
         value = int(mode_id.value)
     else:
-        raise TypeError(
-            f"{api} requires mode_id to be a constant int (0, 1, 2, or 4), "
-            f"got {type(mode_id)}"
-        )
+        raise TypeError(f"{api} requires mode_id to be a constant int (0, 1, 2, or 4), got {type(mode_id)}")
     if value not in (0, 1, 2, 4):
         raise ValueError(f"{api} requires mode_id to be one of 0, 1, 2, 4, got {value}")
     return tirx.IntImm("int32", value)
@@ -97,6 +97,25 @@ def _normalize_event_id(event_id):
     if not 0 <= event_id <= _EVENT_ID_MAX:
         raise ValueError(f"event_id must be within [0, {_EVENT_ID_MAX}], got {event_id}")
     return tirx.IntImm("int32", event_id)
+
+
+_CROSS_CORE_FLAG_ID_MAX = 0xFFFF
+
+
+def _normalize_cross_core_flag_id(flag_id):
+    """Range-check a Python int flag id; leave symbolic PrimExpr values alone.
+
+    The usable flag bank also depends on the sync mode and the participating
+    cores, so the backend still enforces that mode-specific bound. The frontend
+    rejects values that cannot be encoded in the hardware flag field at all.
+    """
+    if isinstance(flag_id, bool) or not isinstance(flag_id, int):
+        if not isinstance(flag_id, tirx.PrimExpr):
+            raise TypeError(f"flag_id must be an int or PrimExpr, got {type(flag_id)}")
+        return flag_id
+    if not 0 <= flag_id <= _CROSS_CORE_FLAG_ID_MAX:
+        raise ValueError(f"flag_id must be within [0, {_CROSS_CORE_FLAG_ID_MAX}], got {flag_id}")
+    return tirx.IntImm("int32", flag_id)
 
 
 def ascend_set_flag(hard_event: str, event_id) -> None:
@@ -211,8 +230,7 @@ def ascend_cross_core_set_flag(mode_id: int, pipe: str, flag_id) -> None:
     """
     pipe = _normalize_sync_pipe(pipe, api="T.ascend_cross_core_set_flag/wait_flag", allowed=_ASCEND_CROSS_CORE_PIPES)
     mode_id = _normalize_mode_id(mode_id, api="T.ascend_cross_core_set_flag/wait_flag")
-    if isinstance(flag_id, int):
-        flag_id = tirx.IntImm("int32", flag_id)
+    flag_id = _normalize_cross_core_flag_id(flag_id)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_cross_core_set_flag"), mode_id, pipe, flag_id)
 
 
@@ -236,8 +254,7 @@ def ascend_cross_core_wait_flag(mode_id: int, pipe: str, flag_id) -> None:
     """
     pipe = _normalize_sync_pipe(pipe, api="T.ascend_cross_core_set_flag/wait_flag", allowed=_ASCEND_CROSS_CORE_PIPES)
     mode_id = _normalize_mode_id(mode_id, api="T.ascend_cross_core_set_flag/wait_flag")
-    if isinstance(flag_id, int):
-        flag_id = tirx.IntImm("int32", flag_id)
+    flag_id = _normalize_cross_core_flag_id(flag_id)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_cross_core_wait_flag"), mode_id, pipe, flag_id)
 
 
