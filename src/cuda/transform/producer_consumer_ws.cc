@@ -1458,11 +1458,8 @@ private:
       compute_cursor = wait_pos;
     }
 
-    // A producer-side read only observes producer-side writes that precede it
-    // in the body. Any other write to that buffer, e.g. a copy index updated
-    // for the next iteration, is not ordered before the read, so the producer
-    // would see a stale value. Leave such loops to the sequential fallback in
-    // the pass entry point.
+    // Only earlier producer-side writes are ordered before a producer read.
+    // Other writes may race with the next iteration; keep sequential execution.
     std::unordered_set<const StmtNode *> producer_prefix;
     for (const auto &prefix_stmts : producer_loop_prefix_stmts) {
       for (const auto &stmt : prefix_stmts) {

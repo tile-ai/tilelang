@@ -1,8 +1,4 @@
-"""Regression test for GitHub issue #3301 (F077).
-
-#3301 F077 - T.Pipelined gathers a stale index for an indexed T.copy when the
-index is produced across the loop back-edge.
-"""
+"""Regression for #3301 (F077): a pipelined copy reads a loop-carried index."""
 
 import pytest
 import torch
