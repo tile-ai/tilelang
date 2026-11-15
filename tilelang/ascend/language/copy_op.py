@@ -110,6 +110,9 @@ def dual_copy(
     alloc_src_shape = _get_allocation_shape(src)
     alloc_dst_shape = _get_allocation_shape(dst)
 
+    if len(src_shape) != len(dst_shape):
+        raise ValueError(f"dual_copy requires source and destination with the same rank, got {len(src_shape)} vs {len(dst_shape)}")
+
     if len(src_shape) == 1 and len(dst_shape) == 1:
         split_candidates = [(-1, 2)]
         ratio_requirement = "The sole dimension must have an exact 2:1 extent ratio."
@@ -143,7 +146,7 @@ def dual_copy(
     # silently produce incorrect results.
     src_dtype = src_region.buffer.dtype
     dst_dtype = dst_region.buffer.dtype
-    if src_dtype != dst_dtype and src_region.buffer.scope() == "shared.l0c":
+    if src_dtype != dst_dtype and src_region.buffer.scope() in ("shared.l0c", "shared.l0c.dyn"):
         raise ValueError(
             f"dual_copy: src dtype ({src_dtype}) != dst dtype ({dst_dtype}). "
             "Type conversion during cc->ub dual-destination copy is NOT supported on dav-950. "
@@ -202,9 +205,10 @@ _L2_CACHE_CTRL_MAP = {
 def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | None) -> int | None:
     """Convert a string l2_cache_ctrl name to its integer value.
 
-    Matching is case-insensitive and suffix-based:
-    ``"NORMAL_FV"``, ``"normal_fv"``, and ``"L2_CACHE_HINT_NORMAL_FV"``
-    all map to ``0``.  Integers pass through unchanged.
+    Matching is case-insensitive and accepts either an exact name
+    (``"NORMAL_FV"``) or the documented ``L2_CACHE_HINT_``-prefixed form
+    (``"L2_CACHE_HINT_NORMAL_FV"``). Other prefixes or suffixes are rejected.
+    Integers pass through unchanged.
     """
     if value is None:
         return None
@@ -219,12 +223,26 @@ def _normalize_l2_cache_ctrl(value: int | str | tirx.IntImm | tirx.StringImm | N
         # Exact match
         if key in _L2_CACHE_CTRL_MAP:
             return _L2_CACHE_CTRL_MAP[key]
-        # Suffix match (e.g. "L2_CACHE_HINT_NORMAL_FV" or "_NORMAL_FV")
-        for map_key, map_val in _L2_CACHE_CTRL_MAP.items():
-            if key.endswith(map_key):
-                return map_val
-        raise ValueError(f"Unknown l2_cache_ctrl string {value!r}. Valid suffixes: {sorted(_L2_CACHE_CTRL_MAP.keys())}")
+        # Suffixed match for the documented "L2_CACHE_HINT_"-style prefix
+        # only: reject arbitrary garbage prefixes before a valid name.
+        if key.startswith("L2_CACHE_HINT_"):
+            suffix = key[len("L2_CACHE_HINT_") :]
+            if suffix in _L2_CACHE_CTRL_MAP:
+                return _L2_CACHE_CTRL_MAP[suffix]
+        raise ValueError(
+            f"Unknown l2_cache_ctrl string {value!r}. Valid names: {sorted(_L2_CACHE_CTRL_MAP.keys())} (optionally prefixed with L2_CACHE_HINT_)"
+        )
     raise TypeError(f"l2_cache_ctrl must be int, str, or None, got {type(value)}")
+
+
+def _validate_copy_control(name: str, value) -> None:
+    """Validate an effective control annotation after keyword/annotation merge."""
+    if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
+        raise TypeError(f"Ascend T.copy {name} must be an integer or integer PrimExpr, got {value!r}")
+    if isinstance(value, tirx.PrimExpr):
+        dtype = str(value.dtype)
+        if not dtype.startswith(("int", "uint")) or int(getattr(value.dtype, "lanes", 1)) != 1:
+            raise TypeError(f"Ascend T.copy {name} must have a scalar integer dtype, got {dtype}")
 
 
 def copy(  # noqa: A001
@@ -285,8 +303,8 @@ def copy(  # noqa: A001
             May vary at runtime. ``None`` keeps the compact region pitch.
         l2_cache_ctrl (Optional[Union[int, str]], keyword-only): L2 cache
             control for the GM↔L1 and UB↔GM DMA paths. Accepts the raw integer
-            or a cache-policy name (case-insensitive, suffix-matched), e.g.
-            ``"NOTALLOC_KEEP"``.
+            or a cache-policy name (case-insensitive; exact name or with the
+            ``L2_CACHE_HINT_`` prefix), e.g. ``"NOTALLOC_KEEP"``.
         unit_flag_ctrl (Optional[Union[int, PrimExpr]], keyword-only): Unit flag
             control for the Cube instruction; ``None`` omits the annotation.
         sub_blockid (Optional[Union[int, PrimExpr]], keyword-only): Sub-block id
@@ -323,6 +341,16 @@ def copy(  # noqa: A001
         src = to_buffer_region(src, access_type="r")
         dst = to_buffer_region(dst, access_type="w")
 
+    elif isinstance(src, (tirx.Buffer, tirx.BufferRegion)) and isinstance(dst, (tirx.Buffer, tirx.BufferRegion)):
+        # A whole buffer mixed with an explicit region is still a whole
+        # transfer: their element counts must agree.
+        src_elems = prod(_get_shape(src))
+        dst_elems = prod(_get_shape(dst))
+        if not arith.Analyzer().can_prove_equal(src_elems, dst_elems):
+            raise ValueError(
+                f"Ascend T.copy src/dst element count mismatch: src={src_elems} vs dst={dst_elems}. Use matching regions for the copy."
+            )
+
     ann = _normalize_annotations(annotations)
 
     if l0_pitch is not None and "l0_pitch" not in ann:
@@ -346,6 +374,8 @@ def copy(  # noqa: A001
             raise ValueError("Ascend T.copy l0_pitch is supported only for L1→L0A/L0B and L0C→UB/GM")
 
     # Ascend GM→L1: use dn2nz (transpose N/D mapping) instead of nd2nz
+    if not (isinstance(transpose, bool) or (isinstance(transpose, int) and transpose in (0, 1)) or isinstance(transpose, tirx.PrimExpr)):
+        raise TypeError(f"Ascend T.copy transpose must be a bool, got {type(transpose).__name__}")
     if transpose and "transpose" not in ann:
         ann["transpose"] = tirx.IntImm("int32", 1)
 
@@ -354,12 +384,20 @@ def copy(  # noqa: A001
         ann["l2_cache_ctrl"] = l2_cache_ctrl
     if "l2_cache_ctrl" in ann:
         ann["l2_cache_ctrl"] = _normalize_l2_cache_ctrl(ann["l2_cache_ctrl"])
-    if unit_flag_ctrl is not None and "unit_flag_ctrl" not in ann:
-        ann["unit_flag_ctrl"] = unit_flag_ctrl
-    if sub_blockid is not None and "sub_blockid" not in ann:
-        ann["sub_blockid"] = sub_blockid
+    if unit_flag_ctrl is not None:
+        ann.setdefault("unit_flag_ctrl", unit_flag_ctrl)
+    if sub_blockid is not None:
+        ann.setdefault("sub_blockid", sub_blockid)
+    # Validate the effective values so keywords and annotations share one rule.
+    for key in ("unit_flag_ctrl", "sub_blockid"):
+        if key in ann:
+            _validate_copy_control(key, ann[key])
 
-    if pad_value is not None and data_select:
+    if not (
+        isinstance(data_select, bool) or (isinstance(data_select, int) and data_select in (0, 1)) or isinstance(data_select, tirx.PrimExpr)
+    ):
+        raise TypeError(f"Ascend T.copy data_select must be a bool, got {type(data_select).__name__}")
+    if pad_value is not None and (data_select or bool(ann.get("data_select"))):
         raise ValueError(
             "T.copy: pad_value and data_select are mutually exclusive. Pass "
             "pad_value to set the fill value on this copy, or data_select to "
@@ -384,7 +422,7 @@ def copy(  # noqa: A001
             )
         dst_buf = dst.buffer if isinstance(dst, (tirx.BufferRegion, tirx.BufferLoad)) else dst
         tb_tir.evaluate(ascend_set_copy_pad_value(pad_value, dtype=str(dst_buf.dtype)))
-        ann["data_select"] = tirx.IntImm("int32", 1)
+        ann.setdefault("data_select", tirx.IntImm("int32", 1))
     if data_select and "data_select" not in ann:
         ann["data_select"] = tirx.IntImm("int32", 1)
 
