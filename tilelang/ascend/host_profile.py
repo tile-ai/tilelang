@@ -24,7 +24,7 @@ def maybe_wrap_host_profile(func: Callable[..., Any], prim_func: PrimFunc) -> Ca
 
     attrs = prim_func.attrs
     kernel_name = attrs.get("global_symbol") if attrs is not None else None
-    if kernel_name is None:
+    if not isinstance(kernel_name, str) or not kernel_name.strip():
         return func
 
     from torch.profiler import record_function
