@@ -2,7 +2,37 @@
 
 #include "common.h"
 
+#include "../common/arg_reduce.h"
+
 namespace tl {
+
+template <bool IsMax, int Width, int Scale, int Offset, int Threads>
+struct ArgAllReduce {
+  template <typename T, typename I>
+  static TL_DEVICE void run(T *value, I *index, T *values = nullptr,
+                            I *indices = nullptr) {
+    static_assert(Width > 0 && (Width & (Width - 1)) == 0);
+    static_assert(Scale > 0 && (Scale & (Scale - 1)) == 0);
+    const int tid = threadIdx.x - Offset;
+#pragma unroll
+    for (int delta = Width / 2; delta >= Scale; delta /= 2) {
+      T peer_value;
+      I peer_index;
+      if (delta >= __builtin_amdgcn_wavefrontsize()) {
+        values[tid] = *value;
+        indices[tid] = *index;
+        __syncthreads();
+        peer_value = values[tid ^ delta];
+        peer_index = indices[tid ^ delta];
+        __syncthreads();
+      } else {
+        peer_value = tl::shfl_xor(*value, delta);
+        peer_index = tl::shfl_xor(*index, delta);
+      }
+      arg_reduce_update<IsMax>(value, index, peer_value, peer_index);
+    }
+  }
+};
 
 struct SumOp {
   template <typename T> TL_DEVICE T operator()(T const &x, T const &y) {

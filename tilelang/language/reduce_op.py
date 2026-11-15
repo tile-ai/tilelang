@@ -3,6 +3,8 @@
 from __future__ import annotations
 from typing import Literal
 from tvm import tirx
+from tilelang import _ffi_api
+from tilelang._typing import BufferLikeType
 from tilelang.language.common import copy, macro, alloc_fragment, evaluate
 from tilelang.utils.language import to_buffer_region, to_tile_region, retrieve_shape, _get_buffer
 from tilelang.utils.language import is_shared, is_fragment, is_local
@@ -17,6 +19,45 @@ def _legalize_dim(buffer: tirx.Buffer, dim: int):
 
 
 _REDUCE_OP_KEY = "tl.tileop.reduce"
+
+
+def _arg_reduce(buffer: BufferLikeType, out: BufferLikeType, kind: str, dim: int) -> tirx.PrimExpr:
+    if not isinstance(dim, int) or isinstance(dim, bool):
+        raise TypeError(f"reduce_arg{kind} dim must be an integer, got {dim}")
+    call = tirx.call_intrin(
+        "handle",
+        tirx.op.Op.get("tl.tileop.arg_reduce"),
+        to_tile_region(buffer, access_type="r"),
+        to_tile_region(out, access_type="w"),
+        kind,
+        dim,
+    )
+    _ffi_api.ArgReduceOp(call.args, call.annotations)
+    return call
+
+
+def reduce_argmax(buffer: BufferLikeType, out: BufferLikeType, dim: int = -1) -> tirx.PrimExpr:
+    """Write the index of the maximum along one axis into an int32/int64 buffer.
+
+    Input and output must be full fragments or rectangular shared regions with
+    positive static extents. The output removes the reduced axis or retains it
+    with extent one; a 1D input uses output shape ``(1,)``. Indices are relative
+    to the input region. Negative axes are supported. Ties choose the first
+    logical index. NaNs win over numbers, with the first NaN winning ties.
+    Input and output must not overlap. The output is always overwritten.
+    Supported targets: CUDA and ROCm.
+    """
+    return _arg_reduce(buffer, out, "max", dim)
+
+
+def reduce_argmin(buffer: BufferLikeType, out: BufferLikeType, dim: int = -1) -> tirx.PrimExpr:
+    """Write the index of the minimum along one axis into an int32/int64 buffer.
+
+    Uses the same shape, scope, indexing, tie-breaking, and NaN rules as
+    :func:`reduce_argmax`. NaNs win over numbers for both operations.
+    """
+    return _arg_reduce(buffer, out, "min", dim)
+
 
 ReduceKind = Literal["sum", "abssum", "max", "absmax", "min", "bitand", "bitor", "bitxor"]
 
