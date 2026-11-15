@@ -607,35 +607,9 @@ jobs:
         shell: bash
         env:
           TEST_MARKERS: ${{ matrix.backend.unit_markers }}
-          TILELANG_ASCEND_DIAGNOSTICS_DIR: ${{ matrix.backend.name == 'AscendC' && format('{0}/ascend-diagnostics/original-probes', runner.temp) || '' }}
         run: |
           source .venv/bin/activate
-          if [[ -n "${TILELANG_ASCEND_DIAGNOSTICS_DIR}" ]]; then
-            export ASCEND_PROCESS_LOG_PATH="${RUNNER_TEMP}/ascend-runtime-logs"
-            export ASCEND_SLOG_PRINT_TO_STDOUT=0
-            export ASCEND_GLOBAL_LOG_LEVEL=3
-            unset ASCEND_MODULE_LOG_LEVEL
-            mkdir -p "${ASCEND_PROCESS_LOG_PATH}" || echo "::warning::Could not create the CANN log directory"
-          fi
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
-
-      - name: Summarize Ascend cross-device diagnostics
-        if: ${{ !cancelled() && matrix.backend.name == 'AscendC' && steps.ascend-build.outcome == 'success' }}
-        continue-on-error: true
-        shell: bash
-        run: |
-          source .venv/bin/activate
-          python testing/ascend/diagnose_cross_device.py --output-dir "${RUNNER_TEMP}/ascend-diagnostics"
-
-      - name: Upload Ascend diagnostics
-        if: ${{ always() && matrix.backend.name == 'AscendC' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: ascend-cross-device-${{ github.run_id }}-${{ github.run_attempt }}
-          # Raw runtime logs live outside this directory; upload bounded copies.
-          path: ${{ runner.temp }}/ascend-diagnostics
-          retention-days: 7
-          if-no-files-found: warn
 
       - name: Summarize ${{ matrix.backend.name }} results
         if: ${{ always() }}
