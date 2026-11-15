@@ -75,8 +75,9 @@ def set_atomic(op="add", dtype="float32"):
     op : "add" | "max" | "min"
         The store-mode reduction.
     dtype : str
-        Accumulate type of the GM destination. One of float32/float16/bfloat16/
-        int8/int16/int32 (the dav_3510-supported set).
+        Accumulate type of the GM destination. One of float32/float/float16/
+        bfloat16/int8/int16/int32 (the dav_3510-supported set).
+        ``float`` is an accepted spelling for ``float32``.
 
     Example
     -------
