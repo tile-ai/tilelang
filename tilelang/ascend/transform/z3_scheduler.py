@@ -56,7 +56,19 @@ def _convert_int_tuples(values, arity: int) -> list[tuple[int, ...]]:
         if not hasattr(value, "__len__") or len(value) != arity:
             actual_arity = len(value) if hasattr(value, "__len__") else "non-sequence"
             raise ValueError(f"Expected {arity} integers per tuple, got {actual_arity}")
-        result.append(tuple(int(value[i]) for i in range(arity)))
+        converted = []
+        for i in range(arity):
+            element = value[i]
+            if isinstance(element, bool):
+                raise TypeError(f"_convert_int_tuples expects integers, got bool {element!r}")
+            if isinstance(element, int):
+                converted.append(element)
+            elif hasattr(element, "value") and isinstance(element.value, int) and not isinstance(element.value, bool):
+                # tvm.tir.IntImm-like objects arriving from the C++ FFI boundary.
+                converted.append(int(element.value))
+            else:
+                raise TypeError(f"_convert_int_tuples expects integers or IntImm-like values, got {type(element).__name__} {element!r}")
+        result.append(tuple(converted))
     return result
 
 
@@ -138,6 +150,20 @@ def z3_schedule_python(
     for var in start_vars:
         solver.add(var >= 0)
 
+    def _check_task_indices(kind, indices):
+        for task_id in indices:
+            if isinstance(task_id, bool) or not isinstance(task_id, int) or not 0 <= task_id < n:
+                raise ValueError(f"z3_schedule_python: {kind}_deps contains out-of-range task index {task_id!r}; expected 0 <= index < {n}")
+
+    for i, j, _ in data_deps:
+        _check_task_indices("data", (i, j))
+    for i, j in resource_deps:
+        _check_task_indices("resource", (i, j))
+    for i, j, _, _ in owner_exclusion_deps:
+        _check_task_indices("owner_exclusion", (i, j))
+    for previous, current in pipe_order_deps:
+        _check_task_indices("pipe_order", (previous, current))
+
     # Add data dependency constraints
     # For each data dependency (i, j, latency), task j must start after task i starts + latency
     for i, j, latency in data_deps:
@@ -148,7 +174,10 @@ def z3_schedule_python(
     # Add resource dependency constraints
     # For tasks i and j that use same resource, they cannot execute simultaneously
     # We create ordering variable O_i,j (True means i before j, False means j before i)
-    for i, j in resource_deps:
+    # resource_deps is documented as unordered. Normalize each pair to
+    # (min, max) instead of dropping descending pairs at the `i < j` guard.
+    normalized_resource_deps = sorted({(u, v) for u, v in ((min(a, b), max(a, b)) for a, b in resource_deps) if u != v})
+    for i, j in normalized_resource_deps:
         if i < j:  # Only consider each pair once
             ii_i = iis[i]
             ii_j = iis[j]
@@ -426,6 +455,10 @@ def z3_schedule_loop_python(
     # intervals of tasks sharing a resource.
     ii_lower = _period_lower_bound(num_stages, iis, data_deps, resource_deps)
     ii_upper = max(sum(latencies), sum(iis)) + 1
+    # A lower bound above the nominal upper bound used to make the binary
+    # search loop a no-op and emit best_ii = ii_upper < ii_lower, i.e. an II
+    # that violates the dependency-latency bound. Keep the interval non-empty.
+    ii_upper = max(ii_upper, ii_lower + 1)
     best_ii = ii_upper
     best_model = None
     best_start_vars = None
@@ -493,7 +526,8 @@ def z3_schedule_loop_python(
         # Add resource dependency constraints
         # For tasks i and j that use same resource, they cannot execute simultaneously
         # We create ordering variable O_i,j (True means i before j, False means j before i)
-        for i, j in resource_deps:
+        normalized_resource_deps = sorted({(u, v) for u, v in ((min(a, b), max(a, b)) for a, b in resource_deps) if u != v})
+        for i, j in normalized_resource_deps:
             if i < j:  # Only consider each pair once
                 ii_i = iis[i]
                 ii_j = iis[j]
@@ -583,7 +617,15 @@ def z3_schedule_loop_python(
         start_times = [0] * n
         for i in range(1, n):
             start_times[i] = start_times[i - 1] + latencies[i - 1]
-        best_ii = max(sum(latencies), 1)
+        best_ii = max(sum(latencies), 1, ii_lower)
+        # A one-version fallback must still honour the dependence latencies.
+        # With buf = 1 the solver constraint is
+        # start[v] - start[u] >= latency - II, i.e. II >= latency + s[u] - s[v].
+        for u, v, distance, latency in data_deps:
+            if distance < 0:
+                needed = latency + start_times[u] - start_times[v]
+                if needed > best_ii:
+                    best_ii = needed
         buffer_versions = [1] * len(buffer_sizes)
     else:
         if verbose:
@@ -615,6 +657,19 @@ def z3_schedule_loop_python(
             for i in range(len(buffer_sizes)):
                 buffer_var = best_model.eval(best_buffer_vars[i]).as_long()
                 buffer_versions.append(buffer_var)
+
+    # Both the solver result and the sequential fallback must respect the
+    # solver's buffer-version bounds and every memory group's capacity.
+    for idx in range(len(buffer_versions)):
+        buffer_versions[idx] = min(max(buffer_versions[idx], 1), num_stages)
+    for group in memory_groups:
+        cap = group[0]
+        idxs = group[1:]
+        if not idxs:
+            continue
+        total = sum(buffer_versions[i] * buffer_sizes[i] for i in idxs)
+        if total > cap:
+            raise ValueError(f"buffer versions exceed memory group capacity ({total} > {cap}); increase num_stages or reduce buffer sizes")
 
     # Sort tasks by start time (and by index as tie-breaker)
     task_indices = list(range(n))
