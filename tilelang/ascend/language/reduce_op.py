@@ -55,8 +55,12 @@ def reduce(
 
     # Same validation as the common reduce, then a direct emission on the UB
     # regions: no fragment exists inside SimdVF to round-trip through.
+    if isinstance(batch, bool) or not isinstance(batch, int):
+        raise TypeError(f"batch must be an integer, got {batch!r}")
     if batch < 1:
         raise ValueError(f"batch must be >= 1, got {batch}")
+    if not isinstance(clear, bool):
+        raise TypeError(f"T.reduce clear must be a bool, got {type(clear)}")
     out_buffer = to_buffer_region(out).buffer
     if reduce_type in ("bitand", "bitor", "bitxor"):
         buf_dtype = _get_buffer(buffer).dtype
@@ -64,7 +68,11 @@ def reduce(
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool input buffer, got dtype {buf_dtype}")
         if not (out_buffer.dtype.startswith(("int", "uint")) or out_buffer.dtype == "bool"):
             raise ValueError(f"reduce_{reduce_type} requires an integer/bool buffer, got dtype {out_buffer.dtype}")
+    dim = _legalize_dim(buffer, dim)
     buf_shape = retrieve_shape(buffer)
+    rank = len(buf_shape)
+    if not 0 <= dim < rank:
+        raise ValueError(f"T.reduce dim must be in [0, {rank}), got {dim}")
     out_shape = retrieve_shape(out)
     expected_shapes = [buf_shape[:dim] + buf_shape[dim + 1 :], buf_shape[:dim] + [1] + buf_shape[dim + 1 :]]
     if list(out_shape) not in expected_shapes:
@@ -75,7 +83,7 @@ def reduce(
         )
 
     annotations = _normalize_annotations(annotations)
-    if batch > 1:
+    if batch > 1 and "batch" not in annotations:
         annotations["batch"] = batch
 
     return evaluate(
