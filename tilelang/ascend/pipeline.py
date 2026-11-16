@@ -35,6 +35,11 @@ def allow_autoschedule(pass_ctx=None) -> bool:
 
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
+
+    config = tilelang.transform.get_pass_context().config
+    sk_configured = any(str(key).startswith("tl.ascend_superkernel_") or str(key) == "tl.ascend_enable_superkernel" for key in config)
+    if target_is_pto(target) and sk_configured:
+        raise ValueError("SuperKernel adaptation requires the Ascend C backend, not PTO")
     mod = tirx.transform.BindTarget(target)(mod)
     # Materialize the target-neutral kernel-launch nest emitted by T.Kernel.
     # Ascend's NPU launch is a real 1-D blockIdx.x core grid, so the grid loop
