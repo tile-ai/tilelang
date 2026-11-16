@@ -43,11 +43,24 @@ env:
 
 jobs:
   build-wheel-ascend:
-    name: Build Ascend wheel (cp310-abi3, Linux X64)
+    name: Build Ascend wheel (abi3, ${{ matrix.target.arch }})
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One abi3 wheel per architecture. Python versions are not a matrix
+        # axis: wheel.py-api = "cp39" (pyproject.toml) makes every build a
+        # single abi3 wheel covering all supported CPython versions, and
+        # tilelang has no version-specific extension modules (native libs are
+        # dlopen'ed). x86_64 builds in manylinux_2_28, aarch64 in
+        # manylinux_2_34 (both set in pyproject.toml); the hosted ARM runner
+        # is the same one dist.yml uses.
+        target:
+          - { runner: ubuntu-latest, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.target.runner }}
     timeout-minutes: 120
     env:
       NO_VERSION_LABEL: "OFF"
@@ -129,20 +142,23 @@ jobs:
           done
 
       - name: Upload wheels
-        # Not PR to save artifact storage; the NPU test and OBS publish
-        # jobs below consume this artifact and are gated the same way.
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
+        # Always upload, including PR runs: the NPU test job below validates
+        # the wheel this run just built. Short retention bounds artifact
+        # storage; publishing to OBS stays nightly-only (see publish-obs).
         uses: actions/upload-artifact@v7
         with:
           name: wheels-ascend-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse/*.whl
+          retention-days: 7
           if-no-files-found: error
 
   test-wheel-ascend:
     name: Test Ascend wheel on NPU (${{ matrix.backend.name }})
-    if: |
-      github.repository_owner == 'tile-ai' &&
-      (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
+    # Runs for every build, including PRs: the wheel under test is the one
+    # this run built. The owner check keeps fork PRs off the self-hosted NPU
+    # runners (their build job is skipped anyway); draft PRs are skipped via
+    # the build job's own gate.
+    if: github.repository_owner == 'tile-ai'
     needs: [build-wheel-ascend]
     runs-on: linux-amd64-a5-4
     # Same image as the Ascend job in ci.yml.
@@ -152,9 +168,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Same backend matrix as the Ascend job in ci.yml, so the nightly runs
-        # exactly the suites (and marker splits) that PRs run against a source
-        # build -- but against the installed wheel.
+        # Same backend matrix as the Ascend job in ci.yml: every run
+        # (nightly, manual or PR) exercises exactly the suites and marker
+        # splits that ci.yml runs against a source build, but against the
+        # installed wheel.
         backend:
           - name: AscendC
             target: ascend
@@ -224,6 +241,9 @@ jobs:
           done
 
       - name: Download built wheels
+        # x86_64 only: the self-hosted NPU runners are amd64. The aarch64
+        # wheel is verified host-side (install, import, version label and
+        # abi3audit) inside its build leg.
         uses: actions/download-artifact@v8
         with:
           name: wheels-ascend-Linux-X64
@@ -362,7 +382,10 @@ jobs:
       - name: Download built wheels
         uses: actions/download-artifact@v8
         with:
-          name: wheels-ascend-Linux-X64
+          # Both architectures (wheels-ascend-Linux-X64 / -ARM64) merged
+          # into one wheelhouse; the OBS upload and index cover all of them.
+          pattern: wheels-ascend-*
+          merge-multiple: true
           path: wheelhouse
 
       - name: Setup obsutil and upload to OBS
