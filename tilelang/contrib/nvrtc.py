@@ -38,6 +38,7 @@ def compile_cuda(
     arch: int | str | None = None,
     options: str | list[str] | None = None,
     verbose: bool = False,
+    line_info: bool = True,
 ) -> bytearray:
     """Compile cuda code with NVRTC.
 
@@ -61,6 +62,11 @@ def compile_cuda(
     verbose : bool
         Whether to print the verbose output.
 
+    line_info : bool
+        Whether to pass -lineinfo, which adds the line tables and the PTX text
+        that profilers use to map the SASS back to the source. Without it the
+        cubin has the same SASS and none of those sections.
+
     Return
     ------
     result_bytes : bytearray
@@ -77,7 +83,9 @@ def compile_cuda(
     if target_format not in ["cubin", "ptx"]:
         raise ValueError("target_format must be cubin or ptx")
 
-    final_options = ["-default-device", "-lineinfo"]
+    final_options = ["-default-device"]
+    if line_info:
+        final_options += ["-lineinfo"]
     if get_nvrtc_version() >= (12, 8):
         final_options += ["-pch"]
     if arch is not None:
