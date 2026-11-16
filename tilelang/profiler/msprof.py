@@ -17,8 +17,15 @@ def get_msprof_cache_flush_kernel(numel: int):
     tile_elems = 32 * 1024 // 4
     tiles_per_core = (numel + tile_elems * 64 - 1) // (tile_elems * 64)
 
-    @TA.prim_func
-    def _tilelang_profiler_cache_flush(Cache: TA.Tensor((numel,), "int32")):
+    def _prim_func_with_cache_annotation(func):
+        # Assign the concrete TileLang Buffer before prim_func inspects hints.
+        # This module postpones annotations, while TA.Tensor(...) is a Buffer
+        # constructor rather than a Python type suitable for ForwardRef.
+        func.__annotations__["Cache"] = TA.Tensor((numel,), "int32")
+        return TA.prim_func(func)
+
+    @_prim_func_with_cache_annotation
+    def _tilelang_profiler_cache_flush(Cache):
         with TA.Kernel(64) as bx:
             ub = TA.alloc_shared((tile_elems,), "int32")
 
