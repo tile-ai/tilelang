@@ -42,10 +42,26 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return 1;
   }
 
+  // src/tl_templates/ascend/reduce.h implements SumOp, MaxOp and MinOp only:
+  // its identity table is written for those three and every warp-wide part of
+  // AscendAllReduce goes through HwReduce<Reducer, T>, which has no bitwise
+  // specialisation. The shared lowering still hands the CUDA-only bitwise
+  // reducer names to every backend, which produced
+  // tl::AscendAllReduce<tl::BitAndOp, ...> and an undeclared-identifier error
+  // from bisheng. Reject them with the real reason instead.
+  static void CheckReducerImplemented(const std::string &reducer) {
+    ICHECK(reducer != "tl::BitAndOp" && reducer != "tl::BitOrOp" &&
+           reducer != "tl::BitXorOp")
+        << "Ascend does not implement " << reducer
+        << "; T.reduce_bitand, T.reduce_bitor and T.reduce_bitxor cannot be "
+           "lowered for target 'ascend'";
+  }
+
   static std::string MakeBatchAllReduce(std::string reducer,
                                         int reducing_threads, int scale,
                                         PrimExpr thread_offset, PrimExpr, int,
                                         int, Target) {
+    CheckReducerImplemented(reducer);
     std::stringstream ss;
     ss << "tl::AscendAllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";
@@ -56,6 +72,7 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
                                          int reducing_threads, int scale,
                                          PrimExpr thread_offset, PrimExpr,
                                          Target) {
+    CheckReducerImplemented(reducer);
     std::stringstream ss;
     ss << "tl::AscendAllReduce<" << reducer << ", " << reducing_threads << ", "
        << scale << ", " << thread_offset << ">::run";
