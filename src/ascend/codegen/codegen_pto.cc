@@ -6235,10 +6235,26 @@ void CodeGenTileLangPTO::VisitExpr_(const CallNode *op,
     int64_t elem_width = 0;
     ICHECK(TryGetConstInt(op->args[0], &elem_width))
         << "tl.simd.pset element width must be constant for PTO codegen";
+    ICHECK(elem_width == 8 || elem_width == 16 || elem_width == 32)
+        << "PTO tl.simd.pset only supports element widths 8, 16, and 32, got "
+        << elem_width;
     std::string dist = "PAT_ALL";
     if (op->args.size() >= 2U) {
-      dist = Downcast<StringImm>(op->args[1])->value;
+      const auto *dist_imm = op->args[1].as<StringImmNode>();
+      ICHECK(dist_imm)
+          << "tl.simd.pset distribution must be a constant string for PTO "
+             "codegen";
+      dist = dist_imm->value;
     }
+    static const std::unordered_set<std::string> kSupportedPsetPatterns = {
+        "PAT_ALL", "PAT_VL1",  "PAT_VL2",  "PAT_VL3",  "PAT_VL4",
+        "PAT_VL8", "PAT_VL16", "PAT_VL32", "PAT_VL64", "PAT_VL128",
+        "PAT_M3",  "PAT_M4",   "PAT_H",    "PAT_Q",    "PAT_ALLF",
+    };
+    ICHECK(kSupportedPsetPatterns.count(dist) != 0U)
+        << "PTO tl.simd.pset does not support distribution " << dist
+        << "; expected PAT_ALL, PAT_VL1/2/3/4/8/16/32/64/128, "
+           "PAT_M3, PAT_M4, PAT_H, PAT_Q, or PAT_ALLF";
     os << "pto.pset_b" << elem_width << "(\"" << dist << "\")";
     return;
   }
