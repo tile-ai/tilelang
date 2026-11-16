@@ -504,13 +504,18 @@ inline void CheckThreadOwnedStepsProjectable(
   // segment (e.g. rv % 2 under thread split lower_factor=2) must survive the
   // projection, so masking the whole low range [0, prod(extent)) is too
   // coarse and rejects valid packed layouts.
+  //
+  // Clear each segment as floordiv(x, lower * extent) * (lower * extent) +
+  // floormod(x, lower) instead of subtracting it: with several segments (e.g.
+  // the lane and warp rows of a GEMM accumulator) the analyzer cannot
+  // simplify divisions of the subtracted form and rejects a valid layout.
   PrimExpr projected_reduce_var = reduce_var;
   for (const auto &step : steps) {
     PrimExpr lower = make_const(reduce_var.dtype(), step.lower_factor);
-    PrimExpr extent = make_const(reduce_var.dtype(), step.extent);
-    projected_reduce_var =
-        projected_reduce_var -
-        FloorMod(FloorDiv(reduce_var, lower), extent) * lower;
+    PrimExpr upper =
+        make_const(reduce_var.dtype(), step.lower_factor * step.extent);
+    projected_reduce_var = FloorDiv(projected_reduce_var, upper) * upper +
+                           FloorMod(projected_reduce_var, lower);
   }
 
   PrimExpr simplified_index = analyzer->Simplify(index_expr);
