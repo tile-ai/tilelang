@@ -17,8 +17,8 @@ on:
       - VERSION
       - version_provider.py
       - .github/workflows/dist-ascend.yml
-      # Exercised by the NPU wheel-test job below.
-      - maint/scripts/smoke_test_wheel_ascend.py
+      # Installed by the NPU wheel-test job below.
+      - requirements-test.txt
       # Type aliases can affect package import/build behavior.
       - tilelang/_typing.py
 
@@ -27,7 +27,7 @@ permissions:
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   PYTHONDEVMODE: "1"
@@ -129,7 +129,7 @@ jobs:
           done
 
       - name: Upload wheels
-        # Not PR to save artifact storage; the NPU test and nightly release
+        # Not PR to save artifact storage; the NPU test and OBS publish
         # jobs below consume this artifact and are gated the same way.
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v7
@@ -139,7 +139,7 @@ jobs:
           if-no-files-found: error
 
   test-wheel-ascend:
-    name: Test Ascend wheel on NPU (self-hosted)
+    name: Test Ascend wheel on NPU (${{ matrix.backend.name }})
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
@@ -148,14 +148,35 @@ jobs:
     # Same image as the Ascend job in ci.yml.
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
-    timeout-minutes: 60
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same backend matrix as the Ascend job in ci.yml, so the nightly runs
+        # exactly the suites (and marker splits) that PRs run against a source
+        # build -- but against the installed wheel.
+        backend:
+          - name: AscendC
+            target: ascend
+            unit_markers: not pto
+            unit_deselect: ""
+          - name: PTO
+            target: pto
+            unit_markers: pto
+            # Compiles a C++ probe against the source build tree (build/lib),
+            # which does not exist in a wheel-only job; ci.yml covers it.
+            unit_deselect: "--deselect testing/ascend/language/pto/test_pto_parallel_cast_matrix.py::test_plan_value_cast_context_matrix_directly"
     env:
       PIP_USER: "0"
+      # Always exercise real kernel compilation: a warm kernel cache on a
+      # persistent self-hosted runner must not mask a broken wheel.
+      TILELANG_DISABLE_CACHE: "1"
 
     steps:
       - name: Checkout repository
-        # Only needed for maint/scripts/smoke_test_wheel_ascend.py; the wheel
-        # under test comes from the build-wheel-ascend artifact.
+        # Provides the examples/ascend and testing/ascend suites, at the same
+        # commit the wheel was built from. No submodules: the one test
+        # compiling against the source tree is deselected above.
         uses: actions/checkout@v7
         with:
           fetch-depth: 1
@@ -167,6 +188,7 @@ jobs:
           git config --global --add safe.directory '*'
 
       - name: Set environment (self-hosted runner)
+        shell: bash
         run: |
           # Hide sensitive data in logs for self-hosted runners
           if [[ -n "${{ secrets.SECRET_PATH_PREFIXES }}" ]]; then
@@ -178,6 +200,7 @@ jobs:
           fi
 
       - name: Set up CANN environment
+        shell: bash
         run: |
           # Same environment setup as the Ascend job in ci.yml.
           for CANN_SET_ENV in \
@@ -206,16 +229,18 @@ jobs:
           name: wheels-ascend-Linux-X64
           path: wheelhouse
 
-      - name: Test built wheel on NPU
+      - name: Set up environment and install wheel
+        id: wheel-install
+        shell: bash
         run: |
-          # Always exercise real kernel compilation: a warm kernel cache on a
-          # persistent self-hosted runner must not mask a broken wheel.
-          export TILELANG_DISABLE_CACHE=1
-
           ls -lh wheelhouse/
-          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
-          # Pin torch/torch_npu to the container's preinstalled stack so the
+          # Same environment setup as the Ascend job in ci.yml: keep the
+          # runner's preinstalled Torch/Torch-NPU stack via a
+          # --system-site-packages venv plus a pip constraint file, so the
           # resolver cannot substitute a mismatched build from PyPI.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
           export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
           python - <<'PY'
           import os
@@ -231,35 +256,90 @@ jobs:
                   print(requirement)
           PY
 
-          for WHEEL in wheelhouse/*.whl; do
-            echo "Testing wheel: ${WHEEL}"
-            (
-              set -e
-              # --system-site-packages keeps the container's torch/torch_npu.
-              uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" test-venv
-              source test-venv/bin/activate
+          python -m pip install --upgrade pip setuptools wheel
+          # Test dependencies for the ci.yml suites (pytest, xdist, ...); the
+          # constraint file keeps torch/torch_npu at the preinstalled versions.
+          python -m pip install -v -r requirements-test.txt pybind11==2.12.0
 
-              # pip (not uv) honors PIP_CONSTRAINT, keeping the container's
-              # preinstalled torch/torch_npu stack.
-              python -m pip install -v "${WHEEL}"
-              # Run from RUNNER_TEMP so `import tilelang` resolves to the
-              # installed wheel rather than the repository source tree.
-              cp maint/scripts/smoke_test_wheel_ascend.py "${RUNNER_TEMP}/"
-              (
-                set -e
-                cd "${RUNNER_TEMP}"
-                python smoke_test_wheel_ascend.py
-              )
-              deactivate
-              rm -rf test-venv
-            )
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Installing wheel: ${WHEEL}"
+            echo "WHEEL_NAME=$(basename "${WHEEL}")" >> "${GITHUB_ENV}"
+            # pip (not uv) honors PIP_CONSTRAINT, keeping the container's
+            # preinstalled torch/torch_npu stack.
+            python -m pip install -v "${WHEEL}"
           done
+
+          # The pytest suites below must exercise the *installed wheel*, but
+          # they need the checkout: namespace-package imports such as
+          # `testing.ascend._ir` require the repo root on sys.path, and
+          # testing/conftest.py inserts it deliberately (as does `python -m
+          # pytest` via the cwd). So keep the checkout exactly as ci.yml runs
+          # it and only hide the source package: with tilelang/ moved aside,
+          # every repo-root sys.path entry resolves `import tilelang` to the
+          # wheel in the venv's site-packages instead. (rm -rf first: the
+          # workspace is persistent on self-hosted runners.)
+          rm -rf tilelang.src-hidden
+          mv tilelang tilelang.src-hidden
+
+          # Guard: fail fast if the source tree would still shadow the wheel.
+          python - <<'PY'
+          import tilelang
+
+          print("tilelang resolves to:", tilelang.__file__)
+          assert "site-packages" in tilelang.__file__, f"source tree shadows the wheel: {tilelang.__file__}"
+          assert "+ascend" in tilelang.__version__, tilelang.__version__
+          PY
+
+      - name: Run ${{ matrix.backend.name }} examples
+        id: backend-examples
+        if: ${{ !cancelled() && steps.wheel-install.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: ${{ matrix.backend.target }}
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run ${{ matrix.backend.name }} unit tests
+        id: backend-unit-tests
+        if: ${{ !cancelled() && steps.wheel-install.outcome == 'success' }}
+        shell: bash
+        env:
+          TEST_MARKERS: ${{ matrix.backend.unit_markers }}
+          UNIT_DESELECT: ${{ matrix.backend.unit_deselect }}
+        run: |
+          source .venv/bin/activate
+          # UNIT_DESELECT is intentionally unquoted: it expands to
+          # "--deselect <nodeid>" on the PTO leg and to nothing on AscendC.
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" ${UNIT_DESELECT} testing/ascend
+
+      - name: Summarize ${{ matrix.backend.name }} results
+        if: ${{ always() }}
+        shell: bash
+        env:
+          BACKEND_NAME: ${{ matrix.backend.name }}
+          INSTALL_RESULT: ${{ steps.wheel-install.outcome }}
+          EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
+          UNIT_RESULT: ${{ steps.backend-unit-tests.outcome }}
+        run: |
+          {
+            echo "### Ascend wheel test (${BACKEND_NAME})"
+            echo
+            echo "Wheel: \`${WHEEL_NAME:-unknown}\`"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Install wheel | ${INSTALL_RESULT} |"
+            echo "| ${BACKEND_NAME} examples | ${EXAMPLES_RESULT} |"
+            echo "| Unit tests | ${UNIT_RESULT} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   publish-obs:
     name: Publish wheels to OBS nightly repo
     # Nightly wheels go to the Ascend community OBS pypi repo, mirroring
-    # triton-ascend's Publish-Wheels job. Gated on the NPU smoke test: if
-    # test-wheel-ascend fails, this job never starts, so a broken wheel is
+    # triton-ascend's Publish-Wheels job. Gated on the NPU test matrix: if
+    # either backend leg fails, this job never starts, so a broken wheel is
     # never published.
     if: |
       github.repository_owner == 'tile-ai' &&
@@ -267,6 +347,16 @@ jobs:
     needs: [build-wheel-ascend, test-wheel-ascend]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Serialize publication across refs: every run uploads to the same OBS
+    # directory, and the workflow-level group (per-ref) does not stop two refs
+    # from publishing concurrently. Without this, run A could list the
+    # directory before run B's upload and then overwrite B's index.html with a
+    # stale file list, hiding B's wheel until the next publication. Builds and
+    # tests stay parallel; only the upload -> ls -> index sequence queues here.
+    # cancel-in-progress must stay false: never kill an in-flight publish.
+    concurrency:
+      group: publish-obs-ascend-triton-open-tilelang
+      cancel-in-progress: false
 
     steps:
       - name: Download built wheels
@@ -298,7 +388,7 @@ jobs:
           mv obsutil_linux_* obsutil
 
           obsutil/obsutil config -i="${AK}" -k="${SK}" -e=https://obs.cn-north-4.myhuaweicloud.com
-          OBS_DIR="obs://ascend-artifcat-packages/pypi/packages/ascend/repos/pypi/nightly/tilelang/"
+          OBS_DIR="obs://ascend-triton-open/TileLang/"
           # -u: skip files already present unchanged, so a same-day rerun does
           # not rewrite identical wheels. Older dailies stay downloadable
           # until the bucket's lifecycle policy removes them.
@@ -320,7 +410,7 @@ jobs:
           {
             echo "### Ascend nightly wheels published to OBS"
             echo
-            echo 'Directory: `obs://ascend-artifcat-packages/pypi/packages/ascend/repos/pypi/nightly/tilelang/`'
+            echo 'Directory: `obs://ascend-triton-open/TileLang/`'
             echo
             ls -1 wheelhouse/*.whl | sed 's|^|- |'
           } >> "${GITHUB_STEP_SUMMARY}"
