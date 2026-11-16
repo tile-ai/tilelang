@@ -280,6 +280,40 @@ def test_nvrtc_kernel_multi_stream():
     run_nvrtc_kernel_multi_stream(512, 1024, 768, False, False, T.float16, T.float16, T.float16, 128, 256, 32, 2)
 
 
+@tilelang.testing.requires_cuda
+def test_nvrtc_kernel_launch_follows_the_torch_stream():
+    """The launch must land on the stream torch is recording.
+
+    Passing the legacy default stream launches nothing into the captured graph
+    and replays a stale result.
+
+    See https://github.com/tile-ai/tilelang/issues/3693.
+    """
+
+    @T.prim_func
+    def copy(X: T.Tensor((1024,), T.float32), Y: T.Tensor((1024,), T.float32)):
+        with T.Kernel(8, threads=128) as bx:
+            for i in T.Parallel(128):
+                Y[bx * 128 + i] = X[bx * 128 + i] * 2.0
+
+    kernel = tilelang.compile(copy, execution_backend="nvrtc")
+    x = torch.arange(1024, dtype=torch.float32, device="cuda")
+    y = torch.empty_like(x)
+
+    kernel(x, y)
+    torch.cuda.synchronize()
+    assert torch.equal(y, x * 2.0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        kernel(x, y)
+    x.fill_(1.0)
+    y.fill_(-1.0)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(y, torch.full_like(y, 2.0))
+
+
 def run_nvrtc_dynamic_shape(
     M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
 ):

@@ -41,6 +41,8 @@ __all__ = [
 
 import cutlass
 import cutlass.cute as cute
+
+from .utils import as_pointer
 from cutlass._mlir_helpers.vector import Vector
 from cutlass.cutlass_dsl import Constexpr, dsl_user_op
 from cutlass.experimental import primitives as prims
@@ -94,7 +96,7 @@ def initialize_tcgen05_descriptor(desc, start_address, leading_byte_offset, stri
         [20:21)  lbo_mode (leading_is_absolute ? 1 : 0)
         [29:32)  layout_type (swizzle_mode & 0x7)
     """
-    ptr_val = start_address.toint() >> 4
+    ptr_val = as_pointer(start_address).toint() >> 4
     desc.desc[0] = cutlass.Int32(ptr_val) | cutlass.Int32(cutlass.Int32(leading_byte_offset) << 16)
     desc.desc[1] = (
         cutlass.Int32(stride_byte_offset)

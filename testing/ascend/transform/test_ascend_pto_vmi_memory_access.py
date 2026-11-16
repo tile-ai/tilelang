@@ -4,9 +4,8 @@ The pass consumes post-``LegalizeNegativeIndex`` IR: an automatic VMI address
 is the original scalar-origin ``BufferLoad`` and an explicit address is a
 ``tl.access_ptr`` call, either direct or reached through one direct handle
 ``Bind``/``Let``.  These cases pin descriptor construction, physical
-envelopes, negative-index/group candidates, explicit preservation and logical
-coverage of the C++ legalization pass that the frontend tests cannot
-inspect directly.
+envelopes, negative-index/group candidates and explicit preservation in the
+C++ legalization pass that the frontend tests cannot inspect directly.
 
 These are host-only IR tests covering the contracts that must remain in-tree.
 """
@@ -297,6 +296,13 @@ def test_group_and_block_envelopes():
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=0, e=120, d=0, rw=1)
 
+    # A single logical lane still uses the block-stride envelope, not the
+    # ordinary single-element broadcast shortcut.
+    call = _vload(_load(work, [_int(0)]), size=1, block_stride=2)
+    body = _run(_evaluate(call))
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=0, e=120, d=0, rw=1)
+
     with pytest.raises(tvm.error.InternalError, match="block"):
         _run(_evaluate(_vload(_load(work, [_int(0)]), size=64, block_stride=k)))
     with pytest.raises(tvm.error.InternalError, match="block"):
@@ -406,25 +412,80 @@ def test_explicit_descriptor_preserved_and_diagnosed():
 
 
 # ---------------------------------------------------------------------------
-# Logical coverage, not only physical containment
+# Ordinary single-element broadcast loads
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        "int8",
+        "uint8",
+        "int16",
+        "uint16",
+        "int32",
+        "uint32",
+        "float16",
+        "bfloat16",
+        "float32",
+        "float8_e4m3fn",
+        "float8_e5m2",
+    ],
+)
+@pytest.mark.pto
+def test_single_element_load_uses_scalar_broadcast_envelope(dtype):
+    work = _buffer((2,), dtype=dtype)
+    call = _vload(_load(work, [_int(1)]), elem=dtype, size=1)
+
+    body = _run(_evaluate(call))
+
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=1, e=1, d=0, rw=1)
+    assert out.dtype == call.dtype
+    assert _constant(out.annotations["size"]) == 1
+
+
+@pytest.mark.pto
+def test_single_element_explicit_descriptor_is_not_shrunk():
+    work = _buffer((512,))
+    pointer = _access_ptr(work, [_int(32)], 64, 1)
+    call = _vload(pointer, 0, size=1)
+
+    body = _run(_evaluate(call))
+
+    (out,) = _vmi_calls(body)
+    assert out.args[0].same_as(pointer)
+    assert _constant(pointer.args[1]) == 64
+    assert _constant(out.args[1]) == 0
+
+    small = _buffer((2,))
+    explicit_one = _access_ptr(small, [_int(1)], 1, 1)
+    body = _run(_evaluate(_vload(explicit_one, 0, size=1)))
+    (out,) = _vmi_calls(body)
+    assert out.args[0].same_as(explicit_one)
+    assert _constant(explicit_one.args[1]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Descriptor construction without a local logical-region proof
 # ---------------------------------------------------------------------------
 @pytest.mark.pto
-def test_logical_coverage_counterexamples():
+def test_descriptor_construction_without_logical_coverage():
     work = _buffer((2, 128))
     body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=64)))
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=64, e=64, d=0, rw=1)
 
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=128)))
+    body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=128)))
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=64, e=128, d=0, rw=1)
 
     body = _run(_evaluate(_vload(_load(work, [_int(0), _int(64)]), size=192)))
     (out,) = _vmi_calls(body)
     _assert_plan(out, address_index=0, b=64, e=192, d=0, rw=1)
 
     padded = _buffer((2, 64), strides=(128, 1))
-    with pytest.raises(tvm.error.InternalError, match="tight row-major"):
-        _run(_evaluate(_vload(_load(padded, [_int(0), _int(0)]), size=64)))
+    body = _run(_evaluate(_vload(_load(padded, [_int(0), _int(0)]), size=64)))
+    (out,) = _vmi_calls(body)
+    _assert_plan(out, address_index=0, b=0, e=64, d=0, rw=1)
 
     permuted = _buffer((2, 64), strides=(1, 2))
     pointer = _access_ptr(permuted, [_int(0), _int(0)], 128, 1)
@@ -434,8 +495,11 @@ def test_logical_coverage_counterexamples():
     assert _constant(pointer.args[1]) == 128
 
     broken = _buffer((2, 64), strides=(1, 3))
-    with pytest.raises(tvm.error.InternalError, match="dense permutation"):
-        _run(_evaluate(_vload(_access_ptr(broken, [_int(0), _int(0)], 128, 1), 0, size=128)))
+    pointer = _access_ptr(broken, [_int(0), _int(0)], 128, 1)
+    body = _run(_evaluate(_vload(pointer, 0, size=128)))
+    (out,) = _vmi_calls(body)
+    assert out.args[0].same_as(pointer)
+    assert _constant(pointer.args[1]) == 128
 
 
 # ---------------------------------------------------------------------------
@@ -513,12 +577,14 @@ def test_branch_for_and_while_context():
     assert tvm.ir.structural_equal(base.indices[1], k * 64) and _constant(pointer.args[1]) == 64
 
     k, body = _bounded_2d(lambda k: _evaluate(_access_k(k, work)), 0, 2)
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(body, params=[k])
+    after = _run(body, params=[k])
+    (out,) = _vmi_calls(after)
+    assert tvm.ir.structural_equal(_descriptor(out, 0)[0].indices[1], k * 64)
 
     k = tirx.Var("k", "int32")
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(_evaluate(_access_k(k, work)), params=[k])
+    after = _run(_evaluate(_access_k(k, work)), params=[k])
+    (out,) = _vmi_calls(after)
+    assert tvm.ir.structural_equal(_descriptor(out, 0)[0].indices[1], k * 64)
 
     i = tirx.Var("i", "int32")
     loop = tirx.For(i, 0, 2, tirx.ForKind.SERIAL, _evaluate(_access_k(i, work)))
@@ -528,12 +594,10 @@ def test_branch_for_and_while_context():
 
     i = tirx.Var("i2", "int32")
     loop = tirx.For(i, 0, 3, tirx.ForKind.SERIAL, _evaluate(_access_k(i, work)))
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(loop)
+    after = _run(loop)
+    (out,) = _vmi_calls(after)
+    assert tvm.ir.structural_equal(_descriptor(out, 0)[0].indices[1], i * 64)
 
-    # While uses only facts already visible to the default analyzer.  A
-    # constant access and facts from an enclosing If are accepted; the while
-    # condition itself is not injected as a new constraint.
     body = _run(
         tirx.While(
             tirx.IntImm("bool", 1),
@@ -556,8 +620,7 @@ def test_branch_for_and_while_context():
         tirx.And(k >= 0, k < 2),
         _evaluate(_access_k(k, work)),
     )
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(while_only, params=[k])
+    assert len(_vmi_calls(_run(while_only, params=[k]))) == 1
 
     k = tirx.Var("k_inner_if", "int32")
     inner_if = tirx.While(
@@ -572,20 +635,21 @@ def test_branch_for_and_while_context():
 
 
 # ---------------------------------------------------------------------------
-# Mutable-index default analyzer behavior
+# Mutable-index descriptor construction
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.pto
-def test_mutable_index_is_not_a_stable_context_fact():
+def test_mutable_index_keeps_dynamic_descriptor():
     work = _buffer((2, 128))
     index = tirx.decl_buffer((1,), "int32", name="index", scope="local")
     guard = tirx.And(index[0] >= 0, index[0] <= 1)
     body = tirx.IfThenElse(guard, _evaluate(_vload(_load(work, [_int(0), index[0] * 64]), size=64)), _evaluate(0))
-    # The default analyzer does not turn a mutable buffer read into a stable
-    # fact, so this access stays unproven; no write tracking is added here.
-    with pytest.raises(tvm.error.InternalError, match="logical pointer-region"):
-        _run(body)
+    after = _run(body)
+    (out,) = _vmi_calls(after)
+    base, pointer = _descriptor(out, 0)
+    assert tvm.ir.structural_equal(base.indices[1], index[0] * 64)
+    assert _constant(pointer.args[1]) == 64
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +681,136 @@ def test_indexed_uses_active_owner_descriptor():
     (out,) = _vmi_calls(body, "tl.vmi.vgather")
     _assert_owner_plan(out, address_index=0, owner=work, e=256, d=64, rw=1)
     _assert_no_raw_address(body)
+
+
+def _assert_typed_owner_plan(call, *, address_index, owner, dtype, e, d, rw):
+    base, pointer = _descriptor(call, address_index)
+    assert not base.buffer.same_as(owner)
+    assert base.buffer.data.same_as(owner.data)
+    assert base.buffer.dtype == owner.dtype or str(base.buffer.dtype) == dtype
+    assert str(base.buffer.dtype) == dtype
+    assert all(_constant(index) == 0 for index in base.indices)
+    assert str(pointer.args[1].dtype) == "int64"
+    assert _constant(pointer.args[1]) == e
+    assert _constant(pointer.args[2]) == rw
+    assert _constant(call.args[address_index + 1]) == d
+    return base, pointer
+
+
+@pytest.mark.parametrize(
+    ("owner_dtype", "view_dtype"),
+    [
+        ("uint8", "uint16"),
+        ("uint16", "uint8"),
+        ("int16", "uint16"),
+    ],
+    ids=["widen-elements", "narrow-elements", "same-width-reinterpret"],
+)
+@pytest.mark.pto
+def test_indexed_dtype_view_uses_access_element_units(owner_dtype, view_dtype):
+    owner_bits = int(owner_dtype[-1]) if owner_dtype[-1] == "8" else 16
+    view_bits = int(view_dtype[-1]) if view_dtype[-1] == "8" else 16
+    owner = _buffer((2048 // owner_bits,), dtype=owner_dtype)
+    view = _view(owner, (2048 // view_bits,), dtype=view_dtype)
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+    call = _vgather(_load(view, [_int(3)]), offsets=offsets, mask=mask, elem=view_dtype)
+
+    body = _run(_sblock(_evaluate(call), owner))
+
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    _assert_typed_owner_plan(out, address_index=0, owner=owner, dtype=view_dtype, e=2048 // view_bits, d=3, rw=1)
+    assert out.dtype == call.dtype
+    assert out.args[2].same_as(offsets) and out.args[3].same_as(mask)
+
+
+@pytest.mark.pto
+def test_indexed_dtype_view_elem_offset_is_counted_once():
+    owner = _buffer((256,), dtype="uint8")
+    view = _view(owner, (64,), dtype="uint16", elem_offset=8)
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+
+    for explicit in (False, True):
+        source = _access_ptr(view, [_int(3)], 64, 1) if explicit else _load(view, [_int(3)])
+        call = _vgather(source, offsets=offsets, mask=mask, elem="uint16")
+        body = _run(_sblock(_evaluate(call), owner))
+        (out,) = _vmi_calls(body, "tl.vmi.vgather")
+        base, _ = _assert_typed_owner_plan(out, address_index=0, owner=owner, dtype="uint16", e=128, d=11, rw=1)
+        assert base.buffer.elem_offset == 0
+
+
+@pytest.mark.pto
+def test_scatter_value_matches_access_view_dtype():
+    owner = _buffer((256,), dtype="uint8")
+    view = _view(owner, (128,), dtype="uint16")
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+    value = _vec("value", "uint16")
+    call = _vscatter(value, _load(view, [_int(3)]), offsets=offsets, mask=mask)
+
+    body = _run(_sblock(_evaluate(call), owner))
+
+    (out,) = _vmi_calls(body, "tl.vmi.vscatter")
+    _assert_typed_owner_plan(out, address_index=1, owner=owner, dtype="uint16", e=128, d=3, rw=2)
+    assert out.args[0].same_as(value)
+
+    wrong_value = _vec("wrong_value", "uint8")
+    wrong = _vscatter(wrong_value, _load(view, [_int(3)]), offsets=offsets, mask=mask)
+    with pytest.raises(tvm.error.InternalError, match="destination element dtype"):
+        _run(_sblock(_evaluate(wrong), owner))
+
+
+@pytest.mark.pto
+def test_indexed_dtype_view_rejects_unsafe_layout_and_range():
+    offsets = _vec("offsets", "uint32")
+    mask = _mask("mask")
+    owner = _buffer((256,), dtype="uint8")
+
+    too_large = _view(owner, (129,), dtype="uint16")
+    with pytest.raises(tvm.error.InternalError, match="view range"):
+        _run(_sblock(_evaluate(_vgather(_load(too_large, [_int(0)]), offsets=offsets, mask=mask, elem="uint16")), owner))
+
+    padded = _view(owner, (64,), dtype="uint16", strides=(128,))
+    with pytest.raises(tvm.error.InternalError, match="tight row-major"):
+        _run(_sblock(_evaluate(_vgather(_load(padded, [_int(0)]), offsets=offsets, mask=mask, elem="uint16")), owner))
+
+    unaligned = tirx.decl_buffer((256,), "uint8", name="unaligned_owner", scope="shared", data_alignment=1)
+    words = _view(unaligned, (128,), dtype="uint16")
+    with pytest.raises(tvm.error.InternalError, match="aligned"):
+        _run(_sblock(_evaluate(_vgather(_load(words, [_int(0)]), offsets=offsets, mask=mask, elem="uint16")), unaligned))
+
+    huge = _buffer((2**62,), dtype="uint16", name="huge_owner")
+    bytes_view = _view(huge, (1,), dtype="uint8")
+    with pytest.raises(tvm.error.InternalError, match="owner bit capacity"):
+        _run(_sblock(_evaluate(_vgather(_load(bytes_view, [_int(0)]), offsets=offsets, mask=mask)), huge))
+
+    owner32 = _buffer((64,), dtype="uint32")
+    view64 = _view(owner32, (32,), dtype="uint64")
+    with pytest.raises(tvm.error.InternalError, match="byte-addressable"):
+        _run(_sblock(_evaluate(_vgather(_load(view64, [_int(0)]), offsets=offsets, mask=mask, elem="uint64")), owner32))
+
+
+@pytest.mark.pto
+def test_indexed_dtype_view_requires_exact_dynamic_capacity_conversion():
+    n = tirx.Var("n", "int32")
+    owner = tirx.decl_buffer((n,), "uint8", name="dynamic_bytes", scope="shared")
+    view = tirx.decl_buffer((tirx.FloorDiv(n, _int(2)),), "uint16", name="dynamic_words", scope="shared", data=owner.data)
+    call = _vgather(_load(view, [_int(0)]), offsets=_vec("offsets", "uint32"), mask=_mask("mask"), elem="uint16")
+
+    bounded = tirx.IfThenElse(tirx.And(n > 0, n <= 256), _evaluate(call), _evaluate(0))
+    with pytest.raises(tvm.error.InternalError, match="without truncating bits"):
+        _run(_sblock(bounded, owner), params=[n])
+
+    divisible = tirx.IfThenElse(tirx.And(tirx.And(n > 0, n <= 256), tirx.FloorMod(n, _int(2)) == 0), _evaluate(call), _evaluate(0))
+    body = _run(_sblock(divisible, owner), params=[n])
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    base, pointer = _descriptor(out, 0)
+    assert base.buffer.data.same_as(owner.data)
+    assert str(base.buffer.dtype) == "uint16"
+    expected = tirx.FloorDiv(tirx.Cast("int64", n), _int(2, "int64"))
+    tvm.ir.assert_structural_equal(pointer.args[1], expected)
+    tvm.ir.assert_structural_equal(base.buffer.shape[0], expected)
 
 
 @pytest.mark.pto
@@ -785,7 +979,7 @@ def test_indexed_owner_scope_and_order():
 
 
 @pytest.mark.pto
-def test_indexed_dynamic_owner_coverage():
+def test_indexed_dynamic_owner_capacity():
     n = tirx.Var("n", "int32")
     offsets = _vec("offsets", "uint32")
     mask = _mask("mask")
@@ -810,20 +1004,24 @@ def test_indexed_dynamic_owner_coverage():
     assert str(extent.dtype) == "int64"
     assert _constant(pointer.args[2]) == 1 and _constant(out.args[1]) == 0
 
-    # A dynamic outer axis is not skipped just because its node is a Var.  With
-    # (n, m) the consumer would cover the inner m axis and degrade the outer n
-    # axis to its origin when E later becomes constant, so n must be provably
-    # one.  An Analyzer context fact n == 1 is enough; a positive-but-unknown n
-    # is not.
+    # Dynamic outer dimensions no longer require a length-one coverage proof.
+    # The independent capacity representation checks still apply.
     m = tirx.Var("m", "int32")
     owner_nm = tirx.decl_buffer((n, m), "float32", name="owner_nm", scope="shared")
     call_nm = _vgather(_load(owner_nm, [_int(0), _int(0)]), offsets=offsets, mask=mask)
-    unknown_outer = tirx.IfThenElse(tirx.And(n == 2, m == 128), _evaluate(call_nm), _evaluate(0))
-    with pytest.raises(tvm.error.InternalError, match="stable whole-area logical coverage"):
-        _run(_sblock(unknown_outer, owner_nm), params=[n, m])
-    positive_outer = tirx.IfThenElse(tirx.And(n > 1, m > 0), _evaluate(call_nm), _evaluate(0))
-    with pytest.raises(tvm.error.InternalError, match="stable whole-area logical coverage"):
-        _run(_sblock(positive_outer, owner_nm), params=[n, m])
+    bounded_outer = tirx.IfThenElse(tirx.And(n == 2, m == 128), _evaluate(call_nm), _evaluate(0))
+    body = _run(_sblock(bounded_outer, owner_nm), params=[n, m])
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    base_nm, _ = _descriptor(out, 0)
+    assert base_nm.buffer.same_as(owner_nm)
+
+    dynamic_outer = tirx.IfThenElse(tirx.And(n > 1, m > 0), _evaluate(call_nm), _evaluate(0))
+    body = _run(_sblock(dynamic_outer, owner_nm), params=[n, m])
+    (out,) = _vmi_calls(body, "tl.vmi.vgather")
+    base_nm, pointer_nm = _descriptor(out, 0)
+    assert base_nm.buffer.same_as(owner_nm)
+    assert str(pointer_nm.args[1].dtype) == "int64"
+
     one_outer = tirx.IfThenElse(tirx.And(n == 1, m > 0), _evaluate(call_nm), _evaluate(0))
     body = _run(_sblock(one_outer, owner_nm), params=[n, m])
     (out,) = _vmi_calls(body, "tl.vmi.vgather")
@@ -1138,3 +1336,314 @@ def test_passes_through_non_target_and_non_vmi():
     mod = _module(_evaluate(pointer))
     after = ascend.LegalizePTOVMIMemoryAccess()(mod)
     assert after["main"].body.same_as(mod["main"].body)
+
+
+def test_shared_scalar_definitions_with_fixed_vmi_addresses():
+    work = _buffer((128,))
+    i = tirx.Var("i", "int64")
+    scalars = [tirx.Var(f"a{level}", "int64") for level in range(65)]
+    seq = [tirx.Bind(scalars[0], i), tirx.Bind(scalars[1], i + _int(1, "int64"))]
+    for level in range(2, len(scalars)):
+        seq.append(tirx.Bind(scalars[level], scalars[level - 1] + scalars[level - 2]))
+    value = _vec("value")
+    seq.extend([tirx.Bind(value, _vload(_load(work, [_int(0)]))), _evaluate(_vstore(value, _load(work, [_int(64)])))])
+    body = tirx.For(i, _int(0, "int64"), _int(2, "int64"), tirx.ForKind.SERIAL, tirx.SeqStmt(seq))
+
+    result = _run(_sblock(body, work))
+    load = _vmi_calls(result)[0]
+    store = _vmi_calls(result, "tl.vmi.vstore")[0]
+    _assert_plan(load, address_index=0, b=0, e=64, d=0, rw=1)
+    _assert_plan(store, address_index=1, b=64, e=64, d=0, rw=2)
+
+
+def test_non_vmi_unsigned_cast_is_not_analyzed():
+    i = tirx.Var("i", "int32")
+    signed = tirx.Var("signed", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(signed, i - 1),
+                tirx.Bind(unsigned, tirx.Cast("uint32", signed)),
+                tirx.Evaluate(unsigned),
+            ]
+        ),
+    )
+    mod = _module(body)
+    tvm.ir.assert_structural_equal(ascend.LegalizePTOVMIMemoryAccess()(mod), mod)
+
+
+@pytest.mark.parametrize("binding", ["bind", "let", "alias"])
+@pytest.mark.parametrize("memory_uses_cast", [False, True])
+def test_wrapping_cast_with_vmi(binding, memory_uses_cast):
+    work = _buffer((64,))
+    i, signed = tirx.Var("i", "int32"), tirx.Var("signed", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    alias = tirx.Var("alias", "uint32")
+    cast = tirx.Cast("uint32", signed)
+    index = tirx.Cast("int32", alias if binding == "alias" else unsigned) if memory_uses_cast else _int(0)
+    load = _vload(_load(work, [index]), size=64)
+    if binding == "let":
+        tail = _evaluate(tirx.Let(unsigned, cast, load))
+    else:
+        seq = [tirx.Bind(unsigned, cast)]
+        if binding == "alias":
+            seq.append(tirx.Bind(alias, unsigned + tirx.IntImm("uint32", 0)))
+        seq.append(_evaluate(load))
+        tail = tirx.SeqStmt(seq)
+    body = tirx.For(i, 0, 64, tirx.ForKind.SERIAL, tirx.SeqStmt([tirx.Bind(signed, i - 1), tail]))
+    if memory_uses_cast:
+        with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+            _run(_sblock(body, work))
+    else:
+        result = _run(_sblock(body, work))
+        assert len(_vmi_calls(result)) == 1
+        _assert_no_raw_address(result)
+
+
+def test_nonwrapping_cast_keeps_descriptor_proof():
+    work = _buffer((128,))
+    i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        65,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(unsigned, tirx.Cast("uint32", i)),
+                _evaluate(_vload(_load(work, [tirx.Cast("int32", unsigned)]), size=64)),
+            ]
+        ),
+    )
+    _assert_no_raw_address(_run(_sblock(body, work)))
+
+
+@pytest.mark.parametrize("field", ["offset", "extent", "shape", "stride", "elem_offset"])
+def test_wrapping_cast_in_descriptor_metadata_rejected(field):
+    i = tirx.Var("i", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    value = tirx.Cast("int64", unsigned)
+    kwargs = {}
+    if field == "stride":
+        kwargs["strides"] = [value]
+    if field == "elem_offset":
+        kwargs["elem_offset"] = value
+    work = tirx.decl_buffer([value if field == "shape" else 64], "float32", scope="shared", **kwargs)
+    pointer = _access_ptr(work, [_int(0)], value if field == "extent" else 64, 1)
+    load = _vload(pointer, offset=value if field == "offset" else 0)
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(unsigned, tirx.Cast("uint32", i - 1)),
+                _evaluate(load),
+            ]
+        ),
+    )
+    with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+        _run(_sblock(body, work))
+
+
+@pytest.mark.parametrize("context", ["if", "assert", "assume", "select", "call"])
+def test_wrapping_cast_condition_does_not_install_false_facts(context):
+    i = tirx.Var("i", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    cast = tirx.Cast("uint32", i - 1)
+    condition = cast < tirx.IntImm("uint32", 64)
+    work = _buffer((64,))
+    # The same condition at runtime cannot justify narrowing the cast globally.
+    bad = _evaluate(_vload(_load(work, [tirx.Cast("int64", unsigned)]), size=1))
+    if context == "if":
+        tail = tirx.IfThenElse(condition, bad, _evaluate(0))
+    elif context == "assert":
+        tail = tirx.SeqStmt([tirx.AssertStmt(condition, tirx.StringImm("range")), bad])
+    elif context == "assume":
+        tail = tirx.AttrStmt(condition, "tl.assume", _int(0), bad)
+    else:
+        guarded = (
+            tirx.Select(condition, unsigned, tirx.IntImm("uint32", 0))
+            if context == "select"
+            else tirx.if_then_else(condition, unsigned, tirx.IntImm("uint32", 0))
+        )
+        tail = _evaluate(_vload(_load(work, [tirx.Cast("int64", guarded)]), size=1))
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(unsigned, cast),
+                tail,
+            ]
+        ),
+    )
+    with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+        _run(_sblock(body, work))
+
+
+@pytest.mark.parametrize("access_position", ["then", "else", "after"])
+def test_wrapping_condition_keeps_branch_assertions_scoped(access_position):
+    work = _buffer((1, 128))
+    i = tirx.Var("i", "int32")
+    condition = tirx.Cast("uint32", i - 1) < _int(2, "uint32")
+    assertion = tirx.AssertStmt(i < 2, tirx.StringImm("range"))
+    store = _evaluate(_vstore(_vec("value"), _load(work, [_int(0), 64 * i])))
+    # Only a store in the assertion's own branch may use its i < 2 fact.
+    # At i == 3 the assertion does not execute and an unguarded store is OOB.
+    if access_position == "then":
+        tail = tirx.IfThenElse(condition, tirx.SeqStmt([assertion, store]), None)
+    elif access_position == "else":
+        tail = tirx.IfThenElse(condition, assertion, store)
+    else:
+        tail = tirx.SeqStmt([tirx.IfThenElse(condition, assertion, None), store])
+    body = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, tail)
+    if access_position == "then":
+        _assert_no_raw_address(_run(_sblock(body, work)))
+        return
+    with pytest.raises(tvm.error.InternalError, match="cannot construct a descriptor"):
+        _run(_sblock(body, work))
+
+
+@pytest.mark.parametrize("scope", ["for_min", "for_extent", "block_min", "block_extent", "attr", "assume", "while"])
+@pytest.mark.parametrize("access_position", ["inside", "after"])
+def test_body_assertions_stay_in_their_statement_scope(scope, access_position):
+    work = _buffer((1, 128))
+    i, j = tirx.Var("i", "int32"), tirx.Var("j", "int32")
+    execute_body = tirx.Var("execute_body", "bool")
+    unsafe = tirx.Cast("int32", tirx.Cast("uint32", i - 1))
+    assertion = tirx.AssertStmt(i < 2, tirx.StringImm("range"))
+    store = _evaluate(_vstore(_vec("value"), _load(work, [_int(0), 64 * i])))
+    scoped_body = tirx.SeqStmt([assertion, store]) if access_position == "inside" else assertion
+    if scope == "for_min":
+        wrapper = tirx.For(j, unsafe, 0, tirx.ForKind.SERIAL, scoped_body)
+    elif scope == "for_extent":
+        # Keep the wrapping cast in an expression whose runtime value is zero.
+        wrapper = tirx.For(j, 0, tirx.Mul(unsafe, _int(0)), tirx.ForKind.SERIAL, scoped_body)
+    elif scope.startswith("block"):
+        minimum = unsafe if scope == "block_min" else _int(0)
+        extent = _int(1) if scope == "block_min" else tirx.Add(tirx.Sub(unsafe, unsafe), _int(1))
+        axis = tirx.IterVar(tvm.ir.Range.from_min_extent(minimum, extent), j, tirx.IterVar.DataPar)
+        block = tirx.SBlock([axis], [], [], "guarded", scoped_body)
+        wrapper = tirx.SBlockRealize([minimum], execute_body, block)
+    elif scope == "attr":
+        wrapper = tirx.AttrStmt(i, "test_scope", unsafe, scoped_body)
+    elif scope == "assume":
+        condition = tirx.Cast("uint32", i - 1) < _int(2, "uint32")
+        wrapper = tirx.AttrStmt(condition, "tl.assume", _int(0), scoped_body)
+    else:
+        wrapper = tirx.While(execute_body, scoped_body)
+    tail = wrapper if access_position == "inside" else tirx.SeqStmt([wrapper, store])
+    body = tirx.For(i, 0, 4, tirx.ForKind.SERIAL, tail)
+    # An assertion may prove a store in its own scope. It must not prove a
+    # subsequent store, especially when a zero-trip loop or false predicate
+    # skips the assertion entirely (i == 3 would make the store out of bounds).
+    if access_position == "inside":
+        result = _run(_sblock(body, work), params=[execute_body])
+        assert len(_vmi_calls(result, "tl.vmi.vstore")) == 1
+        _assert_no_raw_address(result)
+    else:
+        with pytest.raises(tvm.error.InternalError, match="cannot construct a descriptor"):
+            _run(_sblock(body, work), params=[execute_body])
+
+
+def test_cast_safe_in_guarded_scope_keeps_proof():
+    work = _buffer((128,))
+    i, unsigned = tirx.Var("i", "int32"), tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        65,
+        tirx.ForKind.SERIAL,
+        tirx.IfThenElse(
+            i >= 1,
+            tirx.SeqStmt(
+                [
+                    tirx.Bind(unsigned, tirx.Cast("uint32", i - 1)),
+                    _evaluate(_vload(_load(work, [tirx.Cast("int32", unsigned)]), size=64)),
+                ]
+            ),
+            _evaluate(0),
+        ),
+    )
+    _assert_no_raw_address(_run(_sblock(body, work)))
+
+
+@pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32", "uint64", "int8", "int16"])
+def test_narrowing_and_signedness_cast_cannot_prove_small_access(dtype):
+    work = _buffer((64,))
+    i, small = tirx.Var("i", "int32"), tirx.Var("small", dtype)
+    source = i - 1 if dtype.startswith("uint") else i * 2048
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(small, tirx.Cast(dtype, source)),
+                _evaluate(_vload(_load(work, [tirx.Cast("int64", small)]), size=1)),
+            ]
+        ),
+    )
+    with pytest.raises(tvm.error.InternalError, match="potentially wrapping integer cast"):
+        _run(_sblock(body, work))
+
+
+def test_wrapping_let_does_not_pollute_outer_scalar_proof():
+    work = _buffer((64,))
+    i = tirx.Var("i", "int32")
+    outer, inner = tirx.Var("offset", "uint32"), tirx.Var("offset", "uint32")
+    harmless = tirx.Let(inner, tirx.Cast("uint32", i - 1), _vload(_load(work, [_int(0)]), size=64))
+    body = tirx.For(
+        i,
+        0,
+        64,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(outer, tirx.IntImm("uint32", 0)),
+                _evaluate(harmless),
+                _evaluate(_vload(_load(work, [tirx.Cast("int32", outer)]), size=64)),
+            ]
+        ),
+    )
+    result = _run(_sblock(body, work))
+    assert len(_vmi_calls(result)) == 2
+    _assert_no_raw_address(result)
+
+
+def test_cast_guarded_through_scalar_alias_keeps_proof():
+    work = _buffer((128,))
+    i, signed = tirx.Var("i", "int32"), tirx.Var("signed", "int32")
+    unsigned = tirx.Var("unsigned", "uint32")
+    body = tirx.For(
+        i,
+        0,
+        65,
+        tirx.ForKind.SERIAL,
+        tirx.SeqStmt(
+            [
+                tirx.Bind(signed, i - 1),
+                tirx.IfThenElse(
+                    signed >= 0,
+                    tirx.SeqStmt(
+                        [
+                            tirx.Bind(unsigned, tirx.Cast("uint32", signed)),
+                            _evaluate(_vload(_load(work, [tirx.Cast("int32", unsigned)]), size=64)),
+                        ]
+                    ),
+                    _evaluate(0),
+                ),
+            ]
+        ),
+    )
+    _assert_no_raw_address(_run(_sblock(body, work)))
