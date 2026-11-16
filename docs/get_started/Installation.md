@@ -298,8 +298,9 @@ mkdir -p /usr/local/bin
 printf "#!/usr/bin/env bash\nexec \"%s\" \"\$@\"\n" "$LLVM_CONFIG_PATH" > /usr/local/bin/llvm-config-16
 chmod +x /usr/local/bin/llvm-config-16
 
-# TVM Python bits need Cython (for system Python used by the build)
-pip install --no-cache-dir "cython>=0.29.36,<3.0"
+# Install TileLang's Python build requirements before disabling build isolation.
+pip install --no-cache-dir "cython>=3.1.0" \
+  "z3-solver>=4.13.0,<4.15.5" "patchelf>=0.17.2"
 
 # Clone + build TileLang (ROCm)
 # Default location: /opt/tilelang (adjust if you prefer a different path).
@@ -314,7 +315,7 @@ pip install -e . -v --no-build-isolation --no-deps
 
 # Manually install required runtime deps when using --no-deps.
 # Note: skip torch-c-dlpack-ext on ROCm (its wheel expects CUDA libs).
-pip install "apache-tvm-ffi>=0.1.11,<0.1.13" "z3-solver>=4.13.0"
+pip install "apache-tvm-ffi>=0.1.11,<0.1.13"
 # If you already installed torch-c-dlpack-ext and hit `libtorch_cuda.so` errors:
 # pip uninstall -y torch-c-dlpack-ext
 
