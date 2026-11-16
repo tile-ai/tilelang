@@ -26,6 +26,7 @@
 #include "ascend/op/ascend_mte_plan.h"
 #include "ascend/op/builtin.h"
 #include "ascend/op/copy.h"
+#include "ascend/op/nd2nz.h"
 #include "ascend/op/oob_padding.h"
 #include "ascend/op/utils.h"
 #include "op/builtin.h"
@@ -864,11 +865,7 @@ private:
       const auto *cols = op->args[3].as<IntImmNode>();
       auto element_bytes = [&](size_t index) -> int64_t {
         const auto *dtype = op->args[index].as<StringImmNode>();
-        if (dtype && dtype->value == "float")
-          return 4;
-        if (dtype && (dtype->value == "half" || dtype->value == "bfloat16_t"))
-          return 2;
-        return 0;
+        return dtype ? Nd2NzElementBytes(op->args[index]) : 0;
       };
       if (rows && cols && rows->value > 0 && cols->value > 0 &&
           rows->value < std::numeric_limits<int64_t>::max()) {
