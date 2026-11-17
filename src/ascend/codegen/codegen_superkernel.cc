@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -116,6 +117,38 @@ private:
   bool vector_;
 };
 
+// The SK entry re-emits a copy of the ordinary kernel body. SIMD macros can
+// rebind the same Let Var in sibling expressions, which is harmless for the
+// ordinary entry but trips CodeGenC's uniqueness check once the body is
+// cloned and substituted. Alpha-rename each Let binding to a fresh Var so the
+// copied body stays self-consistent until the TVM fix lands in the pinned
+// submodule.
+class LetVarRenamer : public StmtExprMutator {
+public:
+  static Stmt Rewrite(Stmt body) {
+    LetVarRenamer renamer;
+    return renamer(std::move(body));
+  }
+
+  PrimExpr VisitExpr_(const VarNode *op) final {
+    auto it = remap_.find(op);
+    return it == remap_.end() ? ffi::GetRef<PrimExpr>(op) : it->second;
+  }
+
+  PrimExpr VisitExpr_(const LetNode *op) final {
+    PrimExpr value = VisitExpr(op->value);
+    Var renamed(op->var->name_hint, op->var->dtype);
+    auto saved = remap_;
+    remap_[op->var.get()] = renamed;
+    PrimExpr body = VisitExpr(op->body);
+    remap_ = std::move(saved);
+    return Let(renamed, value, body);
+  }
+
+private:
+  std::unordered_map<const VarNode *, Var> remap_;
+};
+
 } // namespace
 
 // This emitter is the only SK-specific client of ordinary codegen state. It
@@ -214,9 +247,9 @@ private:
       }
     }
     cg->CodeGenTileLangCBase::PreFunctionBody(f);
-    cg->ClearLetBinding();
     int scope = cg->BeginScope();
-    cg->PrintStmt(SkEntryRewriter(index, count, vector)(f->body));
+    cg->PrintStmt(
+        LetVarRenamer::Rewrite(SkEntryRewriter(index, count, vector)(f->body)));
     cg->EndScope(scope);
     ICHECK(cg->IsOutsideVF()) << "Ascend VF mode leaked after SK codegen";
     os << "}\n\nSK_BIND(" << name << ", " << config.cap << "ULL";
