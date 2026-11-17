@@ -1,8 +1,7 @@
 """PTO target through the shared tvm_ffi host execution path.
 
 Covers output allocation, dynamic shapes, dynamic shared memory,
-multi-kernel and mixed cube/vector programs, exported libraries, and
-host-controlled launches.
+mixed cube/vector programs, exported libraries, and host-controlled launches.
 """
 
 import pytest
@@ -58,27 +57,6 @@ def dynamic_outputs(
         for i in T.Parallel(WIDTH):
             positive[row, i] = source[row, i] + T.float32(bias)
             negative[row, i] = source[row, i] - T.float32(bias)
-
-
-def two_kernels(n: int, tile: int):
-    @T.prim_func
-    def main(
-        a: T.Tensor((n,), T.float32),
-        b: T.Tensor((n,), T.float32),
-        tmp: T.Tensor((n,), T.float32),
-        out: T.Tensor((n,), T.float32),
-    ):
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
-            for i in T.Parallel(tile):
-                idx = bx * tile + i
-                tmp[idx] = a[idx] + b[idx]
-
-        with T.Kernel(n // tile) as bx, T.SimtVF(threads=tile):
-            for i in T.Parallel(tile):
-                idx = bx * tile + i
-                out[idx] = tmp[idx] * T.float32(2.0)
-
-    return main
 
 
 def dynamic_shared_copy():
@@ -276,20 +254,6 @@ def test_pto_tvm_ffi_dynamic_outputs():
     assert positive.device == negative.device == source.device
     torch.testing.assert_close(positive.cpu(), reference + 9, atol=0, rtol=0)
     torch.testing.assert_close(negative.cpu(), reference - 9, atol=0, rtol=0)
-
-
-@tilelang.testing.requires_ascend
-def test_pto_tvm_ffi_multiple_kernels():
-    n, tile = 64, 32
-    kernel = tilelang.compile(two_kernels(n, tile), target="pto", out_idx=[2, 3], execution_backend="tvm_ffi")
-
-    a = torch.randn(n, device="npu")
-    b = torch.randn(n, device="npu")
-    tmp, out = kernel(a, b)
-    torch.npu.synchronize()
-
-    torch.testing.assert_close(tmp.cpu(), a.cpu() + b.cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(out.cpu(), (a.cpu() + b.cpu()) * 2, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_ascend

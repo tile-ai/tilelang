@@ -82,6 +82,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             _install_torch_stream_exchange()
             self._torch_npu_stream_exchange_installed = True
 
+    @staticmethod
+    def _call_on_device(executable: Callable[..., Any], device: torch.device | None, *args: Any) -> Any:
+        """Call `executable` with `device` current and restore the caller's device.
+
+        The host stub makes the inputs' device current (`__tvm_set_device`) and
+        never switches back, so switch here when the devices differ. Kernels
+        with host-mapped parameters execute on the current device by contract,
+        so callers pass ``device=None`` for them.
+        """
+        if device is not None and device.type == "cuda" and device.index != torch.cuda.current_device():
+            with torch.cuda.device(device):
+                return executable(*args)
+        return executable(*args)
+
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
         self,
@@ -358,7 +372,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 with use_torch_stream():
                     executable(*tensor_list)
             else:
-                executable(*tensor_list)
+                self._call_on_device(executable, None if has_host_mapped_params else out_device, *tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -406,7 +420,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 # a zero-element anchor solely for that allocator/device state.
                 allocator_anchor = torch.empty(0, device=device)
 
-            result = self._get_executable()(*inputs, allocator_anchor)
+            result = self._call_on_device(self._get_executable(), None if has_host_mapped_params else device, *inputs, allocator_anchor)
             if len(self.result_idx) == 1:
                 return result
             return list(result)
