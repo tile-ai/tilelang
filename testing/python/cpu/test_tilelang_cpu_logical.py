@@ -10,13 +10,13 @@ import tilelang.cpu.language as T
 _TARGETS = [("c", "cython")]
 
 
-def _compile(func, target, execution_backend):
+def _compile(func, target, execution_backend, out_idx=-1):
     return tilelang.compile(
         func,
         target=target,
         target_host="c" if target == "c" else None,
         execution_backend=execution_backend,
-        out_idx=-1,
+        out_idx=out_idx,
     )
 
 
@@ -169,8 +169,10 @@ def test_cpu_logical_while_condition_is_reevaluated(target, execution_backend):
                 count[0] += 1
             B[0] = count[0]
 
-    kernel = _compile(main, target, execution_backend)
-    assert kernel().item() == 1
+    kernel = _compile(main, target, execution_backend, out_idx=None)
+    b = torch.empty(1, dtype=torch.int32, device="cpu")
+    kernel(b)
+    assert b.item() == 1
 
 
 @pytest.mark.parametrize("target,execution_backend", _TARGETS)
