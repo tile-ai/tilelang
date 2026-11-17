@@ -271,9 +271,6 @@ cmake --build /tmp/build-gtest -j"$(nproc)"
 cp -v /tmp/build-gtest/lib/*.a /usr/lib/x86_64-linux-gnu/
 rm -rf /tmp/build-gtest
 
-# Keep setuptools < 80 (compat with some base images)
-pip install --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja scikit-build-core
-
 # Locate ROCm llvm-config (install LLVM 18 if missing)
 LLVM_CONFIG_PATH=""
 for p in /opt/rocm/llvm/bin/llvm-config /opt/rocm/llvm-*/bin/llvm-config /opt/rocm-*/llvm*/bin/llvm-config; do
@@ -292,6 +289,9 @@ if [ -z "$LLVM_CONFIG_PATH" ]; then
 fi
 export LLVM_CONFIG="$LLVM_CONFIG_PATH"
 export PATH="$(dirname "$LLVM_CONFIG"):/usr/local/bin:${PATH}"
+
+# Keep setuptools < 80 (compat with some base images)
+pip install --upgrade "setuptools>=77.0.3,<80" wheel cmake ninja scikit-build-core
 
 # Optional shim for tools that expect llvm-config-16
 mkdir -p /usr/local/bin
