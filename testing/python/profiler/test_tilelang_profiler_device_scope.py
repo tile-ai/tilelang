@@ -15,6 +15,8 @@ def accelerator(monkeypatch):
             pytest.skip(f"Requires PyTorch {device_type} device registration")
         api = getattr(torch, device_type)
         state = SimpleNamespace(current=0, contexts=[], calls=[], events=[], synchronizations=[], allocations=[], flushes=0)
+        state.flush_order = []
+        state.allocation_sizes = []
 
         @contextmanager
         def device_context(device):
@@ -34,6 +36,7 @@ def accelerator(monkeypatch):
 
             def record(self):
                 state.events.append(state.current)
+                state.flush_order.append("event")
 
             def synchronize(self):
                 pass
@@ -50,6 +53,7 @@ def accelerator(monkeypatch):
             selected = state.current if requested.index is None else requested.index
             tensor_device = torch.device(device_type, selected)
             state.allocations.append(tensor_device)
+            state.allocation_sizes.append(numel)
 
             def flush(*, dim, dtype):
                 state.flushes += 1
@@ -64,6 +68,16 @@ def accelerator(monkeypatch):
         monkeypatch.setattr(api, "synchronize", synchronize)
         monkeypatch.setattr(api, "Event", Event)
         monkeypatch.setattr(torch, "empty", empty)
+        if device_type == "npu":
+
+            def native_flush(reserved):
+                assert reserved is None
+                assert state.synchronizations and state.synchronizations[-1] == (None, state.current)
+                state.flushes += 1
+                state.flush_order.append("flush")
+                return 0
+
+            monkeypatch.setattr(torch_bench, "_get_npu_l2_cache_flush", lambda: native_flush)
         monkeypatch.setattr(device_utils, "IS_CUDA", device_type == "cuda")
         monkeypatch.setattr(device_utils, "IS_NPU", device_type == "npu")
         monkeypatch.setattr(device_utils, "IS_MPS", False)
@@ -139,7 +153,9 @@ def test_cuda_graph_stream_uses_explicit_device(monkeypatch, accelerator):
     monkeypatch.setattr(torch.cuda, "stream", stream_context)
     monkeypatch.setattr(torch.cuda, "CUDAGraph", lambda: SimpleNamespace(replay=lambda: replays.append(state.current)))
     monkeypatch.setattr(torch.cuda, "graph", capture)
-    cache = SimpleNamespace(dtype=torch.int32, view=lambda *shape: SimpleNamespace(sum=lambda **kwargs: None))
+    cache = SimpleNamespace(
+        device=torch.device("cuda", 2), dtype=torch.int32, view=lambda *shape: SimpleNamespace(sum=lambda **kwargs: None)
+    )
 
     result = torch_bench.bench_with_cudagraph(state.function, cache, 2, None, "mean", 2)
 
@@ -179,9 +195,13 @@ def test_npu_shared_path_and_timing_backend(monkeypatch, accelerator, backend, e
 
     assert state.current == (0 if explicit else 2)
     assert state.allocations == [torch.device("npu:2")]
+    assert state.allocation_sizes == [0]
     assert set(state.calls) == {2}
     assert set(state.events) == {2}
     assert all(context == 2 for _, context in state.synchronizations)
+    n_samples = 5 + (2 if backend == "event" else 0)
+    assert state.flushes == 1 + n_samples
+    assert state.flush_order == ["flush"] + ["flush", "event", "event"] * n_samples
     if backend == "event":
         assert result == 4.0
         assert not msprof_calls
