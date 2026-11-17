@@ -91,7 +91,7 @@ def reduce(
                 "handle",
                 tirx.op.Op.get(_REDUCE_OP_KEY),
                 to_tile_region(buffer, access_type="r"),
-                to_tile_region(out_buffer, access_type="w"),
+                to_tile_region(out_region, access_type="w"),
                 reduce_type,
                 dim,
                 clear,
