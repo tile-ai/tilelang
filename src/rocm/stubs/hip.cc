@@ -55,6 +55,7 @@ namespace {
 constexpr const char *kLibHipPaths[] = {
     "libamdhip64.so",
     // Some distros ship a versioned SONAME as well; try a few common ones.
+    "libamdhip64.so.7",
     "libamdhip64.so.6",
     "libamdhip64.so.5",
 };
@@ -88,6 +89,15 @@ void *TryLoadLibAmdHip64() {
 
   // Otherwise, attempt to dlopen the library directly.
   void *handle = nullptr;
+  // Reuse a runtime that is already mapped (e.g. PyTorch's wheel-bundled copy
+  // loaded with RTLD_LOCAL) before loading another one from the system path.
+  // Two runtimes in one process make module handles incompatible.
+  for (const char *path : kLibHipPaths) {
+    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+    if (handle != nullptr) {
+      return handle;
+    }
+  }
   for (const char *path : kLibHipPaths) {
     handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
     if (handle != nullptr) {
@@ -171,6 +181,15 @@ void *TryLoadLibHsaRuntime() {
   }
 
   void *handle = nullptr;
+  // Reuse a runtime that is already mapped (e.g. PyTorch's wheel-bundled copy
+  // loaded with RTLD_LOCAL) before loading another one from the system path.
+  // Two runtimes in one process make module handles incompatible.
+  for (const char *path : kLibHsaPaths) {
+    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+    if (handle != nullptr) {
+      return handle;
+    }
+  }
   for (const char *path : kLibHsaPaths) {
     handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
     if (handle != nullptr) {

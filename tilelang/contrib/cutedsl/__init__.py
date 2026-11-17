@@ -12,7 +12,7 @@ with suppress(ImportError):
     from cutlass.cute.arch import griddepcontrol_launch_dependents, griddepcontrol_wait  # noqa: F401
 from cutlass.cute.nvgpu.warpgroup.helpers import wait_group as wgmma_wait_group  # noqa: F401
 
-from cutlass.cute import make_tensor, make_rmem_tensor, recast_ptr, where  # noqa: F401
+from cutlass.cute import make_rmem_tensor, recast_ptr, where  # noqa: F401
 from cutlass.cute.testing import assert_ as runtime_assert  # noqa: F401
 from cutlass.cute.typing import Numeric  # noqa: F401
 

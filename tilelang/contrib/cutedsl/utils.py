@@ -28,7 +28,7 @@ from cutlass.base_dsl.typing import (
 )
 from cutlass.cutlass_dsl import T
 import cutlass._mlir.dialects.cute as _cute_ir
-from cutlass.cute.tensor import TensorSSA
+from cutlass.cute.tensor import TensorSSA, _Tensor
 from cutlass._mlir.dialects import arith, builtin, llvm, nvgpu, vector
 from cutlass._mlir.extras import types as mlir_types
 from cutlass._mlir import ir as mlir_ir
@@ -48,6 +48,8 @@ __all__ = [
     "as_tensor_ssa",
     "as_rmem_tensor",
     "make_filled_tensor",
+    "typed_tensor",
+    "make_tensor",
     "make_tensor_at_offset",
     "handle_add_byte_offset",
     "shuffle_elect",
@@ -370,10 +372,22 @@ def cast_tensor(value, dtype):
     return dtype(value)
 
 
-def as_tensor_ssa(value):
-    if isinstance(value, TensorSSA):
+def as_tensor_ssa(value, lanes=None):
+    """*value* as a TensorSSA, zero padded to *lanes* elements if given.
+
+    A narrow vector that is not 32-bit wide is loaded into a padded tensor, but
+    one computed elementwise keeps its own width; padding makes both forms fit
+    the padded vector that narrow casts need.
+    """
+    if not isinstance(value, TensorSSA):
+        value = value.load()
+    length = cute.size(value.shape)
+    if lanes is None or length >= lanes:
         return value
-    return value.load()
+    padded = cute.make_rmem_tensor((lanes,), value.dtype)
+    for i in range(lanes):
+        padded[i] = value[i] if i < length else value.dtype(0)
+    return padded.load()
 
 
 def as_rmem_tensor(value, shape, dtype):
@@ -399,7 +413,25 @@ def make_filled_tensor(shape, value, dtype=None):
     return t
 
 
-def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
+def typed_tensor(tensor, dtype=None):
+    """Give *tensor* the element type *dtype*.
+
+    MLIR integers are signless, so a pointer to unsigned elements comes back
+    typed as signed (a ``Uint8`` buffer's iterator is an ``Int8`` pointer) and a
+    tensor built on it loads signed values: widening, comparison, division and
+    right shift then treat ``200`` as ``-56``. The element type survives only on
+    the tensor wrapper, so reattach it there.
+    """
+    if dtype is None or tensor.element_type is dtype:
+        return tensor
+    return _Tensor(tensor.value, dtype=dtype)
+
+
+def make_tensor(iterator, layout, dtype=None):
+    return typed_tensor(cute.make_tensor(iterator, layout), dtype)
+
+
+def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1, dtype=None):
     from cutlass.cute.typing import is_integer as cute_is_integer
 
     # Ensure offset is a cute-compatible integer.  Complex arithmetic
@@ -409,13 +441,13 @@ def make_tensor_at_offset(ptr: cute.Pointer, offset, shape, div_by=1):
         offset = cutlass.Int64(offset)
     if div_by != 1:
         offset = cute.assume(cutlass.as_numeric(offset), divby=div_by)
-    return cute.make_tensor(ptr + offset, shape)
+    return make_tensor(ptr + offset, shape, dtype)
 
 
 def handle_add_byte_offset(handle, byte_offset):
     ptr = handle.iterator if hasattr(handle, "iterator") else handle
     byte_ptr = cute.recast_ptr(ptr, dtype=cutlass.Uint8)
-    return make_tensor_at_offset(byte_ptr, byte_offset, (1,))
+    return make_tensor_at_offset(byte_ptr, byte_offset, (1,), dtype=cutlass.Uint8)
 
 
 def shuffle_elect(thread_extent):

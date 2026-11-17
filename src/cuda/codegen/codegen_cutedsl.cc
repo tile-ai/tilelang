@@ -354,6 +354,17 @@ std::string DTypeToString(DataType t) {
   }
   return "cutlass." + elem_type;
 }
+
+// MLIR integers are signless, so CuTeDSL types a tensor built on a pointer to
+// unsigned elements as signed, and its loads would sign-extend. Returns the
+// `dtype=` argument that keeps an unsigned view unsigned, or "" if none is
+// needed.
+std::string UnsignedViewDType(DataType t) {
+  if (!t.is_uint() || t.bits() < 8) {
+    return "";
+  }
+  return ", dtype=" + DTypeToString(t.element_of());
+}
 } // namespace
 
 void CodeGenTileLangCuTeDSL::PrintType(DataType t,
@@ -446,15 +457,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BroadcastNode *op,
   // Note: We need to pass the dtype to make_filled_tensor so it can create
   // the correct CuTeDSL type (e.g., cutlass.Int32 instead of Python int)
   std::ostringstream dtype_str;
-  DataType dt = op->value.dtype();
-  // CuTeDSL/MLIR normalizes unsigned integer tensor loads to signed types
-  // (e.g., Uint8 pointer -> i8 tensor elements). Use signed type here to
-  // match, avoiding type mismatch in tl.where() operations.
-  if (dt.is_uint()) {
-    PrintType(DataType::Int(dt.bits()), dtype_str);
-  } else {
-    PrintType(dt, dtype_str);
-  }
+  PrintType(op->value.dtype(), dtype_str);
   // A side-effecting scalar must run once per lane: `T.rng_rand()` advances the
   // generator on every call, so a filled tensor would repeat one draw. Emit one
   // call per lane instead; the lanes are indexed by literals.
@@ -723,7 +726,7 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CastNode *op,
     stream << ")\n";
     PrintIndent();
     stream << aligned_dst << ".store(tl.cast_tensor(tl.as_tensor_ssa(" << src
-           << "), ";
+           << ", " << source_aligned_lanes << "), ";
     PrintType(target_ty.element_of(), stream);
     stream << "))\n";
 
@@ -1909,7 +1912,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       auto ptr_str = GetBufferPtr_(load->buffer.get(), index);
       os << "tl.make_tensor(tl.recast_ptr(" << ptr_str << ", dtype=";
       PrintType(tgt_dtype.element_of(), os);
-      os << "), (" << tgt_dtype.lanes() << ",))";
+      os << "), (" << tgt_dtype.lanes() << ",)"
+         << UnsignedViewDType(tgt_dtype.element_of()) << ")";
       if (tgt_dtype.is_scalar()) {
         os << "[0]";
       } else {
@@ -2726,7 +2730,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
       PrintIndent();
       stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << vid
              << ".iterator, " << PrintExpr_(scalar_base) << ", ("
-             << aligned_lanes << ",)).load())\n";
+             << aligned_lanes << ",)"
+             << UnsignedViewDType(value_dtype.element_of()) << ").load())\n";
     } else {
       // For shared/global memory: load exactly value_lanes elements with
       // no alignment assumption (div_by=1).  This avoids:
@@ -2750,8 +2755,8 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const BufferLoadNode *op,
       stream << ")\n";
       PrintIndent();
       stream << aligned_rmem << ".store(tl.make_tensor_at_offset(" << ptr_str
-             << ", " << PrintExpr_(scalar_base) << ", (" << value_lanes
-             << ",)).load())\n";
+             << ", " << PrintExpr_(scalar_base) << ", (" << value_lanes << ",)"
+             << UnsignedViewDType(value_dtype.element_of()) << ").load())\n";
     }
 
     // Return the rmem tensor (not .load()) so downstream code uses
@@ -3393,7 +3398,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
     // through the element type; the vector width is expressed by the access.
     PrintType(alloc_dtype.element_of(), stream);
     // there is no bound check for Tensor access, so just set shape to 1
-    stream << ", alignment=1024), (1,))\n";
+    stream << ", alignment=1024), (1,)"
+           << UnsignedViewDType(alloc_dtype.element_of()) << ")\n";
   } else {
     std::optional<int64_t> opt_size =
         GetRef<AllocBuffer>(op).ConstantAllocationSize();
@@ -3418,7 +3424,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const AllocBufferNode *op) {
     if (scope == "shared") {
       stream << vid << " = tl.make_tensor(tl.alloc_smem(";
       PrintType(storage_dtype, stream);
-      stream << ", " << storage_size << "), (" << storage_size << ",))\n";
+      stream << ", " << storage_size << "), (" << storage_size << ",)"
+             << UnsignedViewDType(storage_dtype) << ")\n";
     } else if (scope == "shared.barrier" || scope == "shared.cluster_barrier") {
       stream << vid << " = tl.alloc_smem(cutlass.Uint64, size_in_elems="
              << constant_size << ")\n";
@@ -4260,6 +4267,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     effective_dtype = DataType::UInt(8);
   }
   bool is_handle_type_match = HandleTypeMatch_(buffer_var, effective_dtype);
+  const std::string view_dtype =
+      buffer_element_dtype.is_bool() ? "" : UnsignedViewDType(effective_dtype);
   std::string ptr_str;
   if (raw_pointer_vars_.count(buffer_var)) {
     if (is_handle_type_match) {
@@ -4314,7 +4323,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << vid << ".iterator, "
          << scalarized_index_str << ", (" << buffer_element_dtype.lanes()
-         << ",), div_by=" << scalarized_div_by << ")";
+         << ",), div_by=" << scalarized_div_by << view_dtype << ")";
       return os.str();
     } else if (is_handle_type_match && buffer_element_dtype.is_scalar() &&
                (scope == "local" || scope == "shared")) {
@@ -4328,7 +4337,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     } else {
       std::ostringstream os;
       os << "tl.make_tensor_at_offset(" << ptr_str << ", " << index_str
-         << ", (1,), div_by=" << scalarized_div_by << ")";
+         << ", (1,), div_by=" << scalarized_div_by << view_dtype << ")";
       // for vector data types, ".load()" (added by BufferLoadNode) is needed
       // instead of "[0]"
       if (buffer_element_dtype.is_scalar()) {
@@ -4342,7 +4351,7 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
       // shared.dyn tensors are declared with shape (1,), so subscripting them
       // would read out of bounds; take the pointer path instead.
       return "tl.make_tensor_at_offset(" + vid + ".iterator, " +
-             scalarized_index_str + ", (1,), div_by=1)[0]";
+             scalarized_index_str + ", (1,), div_by=1" + view_dtype + ")[0]";
     }
     return vid + "[" + index_str + "]";
   } else {
@@ -4358,7 +4367,8 @@ std::string CodeGenTileLangCuTeDSL::GetBufferRef_(DataType t,
     std::ostringstream os;
     os << "tl.make_tensor_at_offset(" << ptr_str << ", "
        << (scalarized_local_vector_buffer ? scalarized_index_str : index_str)
-       << ", (" << buffer_size << ",), div_by=" << buffer_size << ")";
+       << ", (" << buffer_size << ",), div_by=" << buffer_size << view_dtype
+       << ")";
     return os.str();
   }
 }
