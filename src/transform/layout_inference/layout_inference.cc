@@ -29,6 +29,7 @@
 #include "../../op/builtin.h"
 #include "../../op/copy.h"
 #include "../../op/parallel.h"
+#include "../../op/reduce.h"
 #include "../../op/reducer.h"
 #include "../../op/utils.h"
 #include "../../span_utils.h"
@@ -1393,6 +1394,65 @@ private:
     return outcome;
   }
 
+  // The consumer of a row or column reduction may already be partitioned
+  // by another fragment (e.g. a GEMM accumulator). Try its thread ownership
+  // for the reduction input, leaving the per-thread indices to the reducer.
+  std::optional<AttemptOutcome> TryReductionConsumerLayout(
+      const std::vector<int> &members, const LayoutMap &layouts,
+      const LayoutMap &strict_layouts, const LayoutCostModel &cost_model) {
+    for (int id : members) {
+      auto reduce = infer_list_[id].as<ReduceOp>();
+      if (!reduce.has_value())
+        continue;
+      const auto &op = reduce.value();
+      if (!IsFragmentBuffer(op->src) || !IsFragmentBuffer(op->dst) ||
+          layouts.count(op->src) ||
+          op->dst->shape.size() + 1 != op->src->shape.size())
+        continue;
+      for (int user : use_list_.at(op->dst)) {
+        auto loop = infer_list_[user].as<ParallelOpNode>();
+        if (!loop || !loop->GetLoopLayout().defined())
+          continue;
+        const auto &layout = loop->GetLoopLayout();
+        if (!is_one(layout->ReplicateExtent()) ||
+            !ShapesEqual(layout->InputShape(), op->src->shape, &analyzer_) ||
+            !analyzer_.CanProveEqual(thread_bounds_vec_[id]->min,
+                                     thread_bounds_vec_[user]->min) ||
+            !analyzer_.CanProveEqual(thread_bounds_vec_[id]->extent,
+                                     thread_bounds_vec_[user]->extent))
+          continue;
+        const auto &accesses = loop->GetIndiceMap();
+        auto it = accesses.find(op->dst);
+        if (it == accesses.end())
+          continue;
+        const auto &access = it->second;
+        if (!access.is_read || access.is_write ||
+            access.indices.size() != op->dst->shape.size())
+          continue;
+        const auto &vars = loop->GetLoopVars();
+        bool projected = true;
+        for (size_t i = 0; i < access.indices.size(); ++i) {
+          if (!access.indices[i].same_as(
+                  vars[i + (i >= static_cast<size_t>(op->dim))]->var)) {
+            projected = false;
+            break;
+          }
+        }
+        if (!projected)
+          continue;
+        auto src = Fragment(op->src->shape, {}, layout->GetForwardThread(),
+                            Integer(1), std::nullopt)
+                       ->BindThreadRange(thread_bounds_vec_[id]);
+        auto outcome =
+            RunOneAttempt(members.front(), members, layouts, strict_layouts,
+                          {{op->src, src}}, cost_model);
+        if (outcome)
+          return outcome;
+      }
+    }
+    return std::nullopt;
+  }
+
   void InferInFreeMode(LayoutMap &layout_map,
                        const LayoutMap &strict_layout_map) {
 
@@ -1535,6 +1595,12 @@ private:
             adopt(std::move(*outcome), members.front());
           }
         }
+      }
+      if (!has_best) {
+        auto outcome = TryReductionConsumerLayout(
+            members, layout_map, strict_layout_map, *cost_model);
+        if (outcome)
+          adopt(std::move(*outcome), members.front());
       }
       ICHECK(has_best) << "no available layout found" << '\n';
       // Apply the best plan for this component
