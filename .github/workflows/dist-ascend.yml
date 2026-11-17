@@ -160,7 +160,7 @@ jobs:
     # the build job's own gate.
     if: github.repository_owner == 'tile-ai'
     needs: [build-wheel-ascend]
-    runs-on: linux-amd64-a5-4
+    runs-on: linux-amd64-a5-2
     # Test the wheel against both CANN 9.2.0 and 9.2.1 toolkits so a wheel
     # validated on one version is not assumed to work on the other.
     container:
@@ -186,6 +186,12 @@ jobs:
       # Always exercise real kernel compilation: a warm kernel cache on a
       # persistent self-hosted runner must not mask a broken wheel.
       TILELANG_DISABLE_CACHE: "1"
+      # CANN device/process logs, the main window into NPU-side failures that
+      # pytest output cannot show. Job-level so every step and every xdist
+      # worker inherits it; uploaded as an artifact when the job fails.
+      # Level 1 = info, the CANN default.
+      ASCEND_PROCESS_LOG_PATH: ${{ github.workspace }}/ascend-logs
+      ASCEND_GLOBAL_LOG_LEVEL: "1"
 
     steps:
       - name: Checkout repository
@@ -229,6 +235,7 @@ jobs:
             fi
           done
           export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          mkdir -p "${ASCEND_PROCESS_LOG_PATH}"
           # Persist the CANN environment for subsequent test steps.
           for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
             ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
@@ -331,10 +338,14 @@ jobs:
           # LegalizePTOVMIMemoryAccess (assertion facts leak across scopes).
           # The "[after-" prefix covers all after-<scope> parametrizations.
           # Remove these deselects once the pass is fixed upstream.
+          # The autotune set-inputs file is ignored: it drives cross-device
+          # (multi-NPU) copies that can fail or hang the job depending on the
+          # runner's card topology; ci.yml still runs it against source builds.
           python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" \
             --deselect "testing/ascend/transform/test_ascend_pto_vmi_memory_access.py::test_wrapping_condition_keeps_branch_assertions_scoped[else]" \
             --deselect "testing/ascend/transform/test_ascend_pto_vmi_memory_access.py::test_wrapping_condition_keeps_branch_assertions_scoped[after]" \
             --deselect "testing/ascend/transform/test_ascend_pto_vmi_memory_access.py::test_body_assertions_stay_in_their_statement_scope[after-" \
+            --ignore testing/ascend/autotune/test_tilelang_ascend_autotune_set_inputs.py \
             testing/ascend
 
       - name: Summarize ${{ matrix.backend.name }} results
@@ -359,12 +370,25 @@ jobs:
             echo "| Unit tests | ${UNIT_RESULT} |"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Upload Ascend logs on failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          # Matrix legs (backend x CANN version) run concurrently, so the leg
+          # coordinates keep the artifacts distinct within one run.
+          name: ascend-logs-${{ matrix.backend.name }}-cann${{ matrix.cann.tag }}-${{ github.run_id }}
+          path: ascend-logs/
+          retention-days: 7
+          # The job can fail before any device work happened (e.g. during
+          # install); an empty log dir is not an error.
+          if-no-files-found: ignore
+
   publish-obs:
     name: Publish wheels to OBS nightly repo
     # Nightly wheels go to the Ascend community OBS pypi repo, mirroring
     # triton-ascend's Publish-Wheels job. Gated on the NPU test matrix: if
-    # either backend leg fails, this job never starts, so a broken wheel is
-    # never published.
+    # any test leg fails, this job never starts, so a broken wheel is never
+    # published.
     if: |
       github.repository_owner == 'tile-ai' &&
       github.event_name != 'pull_request'
