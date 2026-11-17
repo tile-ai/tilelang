@@ -51,12 +51,13 @@ jobs:
       fail-fast: false
       matrix:
         # One abi3 wheel per architecture. Python versions are not a matrix
-        # axis: wheel.py-api = "cp39" (pyproject.toml) makes every build a
+        # axis here: wheel.py-api = "cp39" (pyproject.toml) makes every build a
         # single abi3 wheel covering all supported CPython versions, and
         # tilelang has no version-specific extension modules (native libs are
-        # dlopen'ed). x86_64 builds in manylinux_2_28, aarch64 in
-        # manylinux_2_34 (both set in pyproject.toml); the hosted ARM runner
-        # is the same one dist.yml uses.
+        # dlopen'ed). Per-version wheels (cpXY-cpXY) are built in parallel by
+        # build-wheel-ascend-per-python below. x86_64 builds in manylinux_2_28,
+        # aarch64 in manylinux_2_34 (both set in pyproject.toml); the hosted
+        # ARM runner is the same one dist.yml uses.
         target:
           - { runner: ubuntu-latest, arch: x86_64 }
           - { runner: ubuntu-24.04-arm, arch: aarch64 }
@@ -148,6 +149,141 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: wheels-ascend-${{ runner.os }}-${{ runner.arch }}
+          path: wheelhouse/*.whl
+          retention-days: 7
+          if-no-files-found: error
+
+  build-wheel-ascend-per-python:
+    name: Build Ascend wheel (${{ matrix.python.tag }}, ${{ matrix.target.arch }})
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    strategy:
+      fail-fast: false
+      matrix:
+        # One wheel per Python version (cpXY-cpXY tags), running in parallel
+        # with the abi3 job above and published alongside it. The bits are the
+        # same — tilelang has no version-specific extension modules — but
+        # plain per-version tags serve users and mirrors that do not pick up
+        # abi3 wheels. The versions match requires-python (>=3.10).
+        python:
+          - { version: "3.10", tag: cp310 }
+          - { version: "3.11", tag: cp311 }
+          - { version: "3.12", tag: cp312 }
+          - { version: "3.13", tag: cp313 }
+        target:
+          - { runner: ubuntu-latest, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.target.runner }}
+    timeout-minutes: 120
+    env:
+      NO_VERSION_LABEL: "OFF"
+      CIBW_BUILD: "${{ matrix.python.tag }}-*"
+      # Defensive: tilelang has no free-threading support yet (see the PEP 803
+      # TODO in dist.yml), so keep the cp313 leg on a single cp313-cp313 wheel
+      # should cibuildwheel ever enable free-threaded identifiers by default.
+      # *musllinux* is repeated because CIBW_SKIP overrides — not merges
+      # with — the skip in pyproject.toml.
+      CIBW_SKIP: "*musllinux* *cp313t*"
+      # Host-side import test only; CPU torch is enough and much smaller.
+      UV_TORCH_BACKEND: "cpu"
+      # Same Ascend-only build flags as the abi3 job (see the comment there).
+      CIBW_ENVIRONMENT: "USE_CUDA=OFF USE_ROCM=OFF USE_ASCEND=ON TILELANG_BUILD_WHEEL_WITH_DATE=ON"
+      # pyproject.toml sets wheel.py-api = "cp39", which would tag every wheel
+      # cp39-abi3 regardless of the build interpreter. Passing py-api as an
+      # EMPTY config setting switches it off: in scikit-build-core config
+      # settings outrank pyproject.toml and an empty value is kept as-is,
+      # while an empty SKBUILD_WHEEL_PY_API environment variable would be
+      # ignored. Each wheel is then tagged after its build interpreter:
+      # cp310-cp310, cp311-cp311, ... The tag assertion in the test step
+      # below fails loudly if this override ever stops taking effect.
+      CIBW_CONFIG_SETTINGS: "wheel.py-api="
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup Python and uv with caching
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "${{ matrix.python.version }}"
+          activate-environment: true
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          max-size: "2GB"
+          create-symlink: true
+          evict-old-files: "7d"
+          append-timestamp: false
+          # The Python tag is part of the key so parallel legs never race on
+          # one cache entry (dist.yml does the same with python_version). The
+          # untagged restore key still picks up the abi3 job's cache or an
+          # earlier run's: the compiled C++ objects are interpreter-agnostic.
+          key: wheel-ascend-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python.tag }}-${{ github.sha }}
+          restore-keys: |
+            wheel-ascend-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python.tag }}
+            wheel-ascend-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Set CIBW_BEFORE_BUILD_LINUX
+        run: |
+          # Fixed dependency paths allow ccache direct hits across runner
+          # instances (same approach as dist.yml).
+          HOST_CCACHE_DIR="$(ccache --get-config cache_dir)"
+          echo "CIBW_BEFORE_BUILD_LINUX=dnf install -y ccache && ccache -o cache_dir=/host${HOST_CCACHE_DIR}" | tee -a "${GITHUB_ENV}"
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v4.3
+        with:
+          package-dir: .
+          output-dir: wheelhouse
+          config-file: "{package}/pyproject.toml"
+
+      - name: Test built wheels
+        run: |
+          EXPECTED_TAG="${{ matrix.python.tag }}"
+          VER="${EXPECTED_TAG#cp}"
+          for WHEEL in wheelhouse/*.whl; do
+            echo "Testing wheel: ${WHEEL}"
+            case "${WHEEL}" in
+              *+ascend.*) ;;
+              *) echo "::error::wheel $(basename "${WHEEL}") is missing the +ascend version label"; exit 1 ;;
+            esac
+            # Guards the py-api override: if it silently stopped taking
+            # effect, the wheel would come out cp39-abi3-tagged instead.
+            case "${WHEEL}" in
+              *-"${EXPECTED_TAG}"-"${EXPECTED_TAG}"-*) ;;
+              *) echo "::error::wheel $(basename "${WHEEL}") is not tagged ${EXPECTED_TAG}-${EXPECTED_TAG}"; exit 1 ;;
+            esac
+            (
+              set -e
+              uv venv test-venv --python "${{ matrix.python.version }}"
+              source test-venv/bin/activate
+
+              # A per-version wheel only installs into its own interpreter,
+              # so a successful install already proves the tag matches; the
+              # version_info assert documents that intent.
+              uv pip install -v "${WHEEL}"
+              (
+                set -e
+                cd /
+                uv run --no-project -- python -c "import sys, tilelang; print(sys.version); print(tilelang.__version__); assert sys.version_info[:2] == (${VER:0:1}, ${VER:1}), sys.version; assert '+ascend' in tilelang.__version__, tilelang.__version__"
+              )
+              deactivate
+              rm -rf test-venv
+            )
+          done
+
+      - name: Upload wheels
+        # Always upload: publish-obs picks up every wheels-ascend-* artifact,
+        # so per-version wheels ride along with the abi3 ones. Short retention
+        # bounds artifact storage; publishing to OBS stays nightly-only.
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-ascend-${{ matrix.python.tag }}-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse/*.whl
           retention-days: 7
           if-no-files-found: error
@@ -248,7 +384,10 @@ jobs:
       - name: Download built wheels
         # x86_64 only: the self-hosted NPU runners are amd64. The aarch64
         # wheel is verified host-side (install, import, version label and
-        # abi3audit) inside its build leg.
+        # abi3audit) inside its build leg. Only the abi3 wheel is NPU-tested:
+        # the per-version wheels from build-wheel-ascend-per-python carry the
+        # same bits and are import-tested on every interpreter in their own
+        # build legs.
         uses: actions/download-artifact@v8
         with:
           name: wheels-ascend-Linux-X64
@@ -392,7 +531,7 @@ jobs:
     if: |
       github.repository_owner == 'tile-ai' &&
       github.event_name != 'pull_request'
-    needs: [build-wheel-ascend, test-wheel-ascend]
+    needs: [build-wheel-ascend, build-wheel-ascend-per-python, test-wheel-ascend]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Serialize publication across refs: every run uploads to the same OBS
@@ -410,7 +549,8 @@ jobs:
       - name: Download built wheels
         uses: actions/download-artifact@v8
         with:
-          # Both architectures (wheels-ascend-Linux-X64 / -ARM64) merged
+          # Every flavor — abi3 (wheels-ascend-Linux-X64 / -ARM64) and
+          # per-version (wheels-ascend-cpXY-...), both architectures — merged
           # into one wheelhouse; the OBS upload and index cover all of them.
           pattern: wheels-ascend-*
           merge-multiple: true
