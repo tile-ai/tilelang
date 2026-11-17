@@ -42,14 +42,19 @@ struct Reduce : backend::ReduceLowerer<Reduce> {
     return 1;
   }
 
-  static std::string MakeBatchAllReduce(std::string reducer,
-                                        int reducing_threads, int scale,
-                                        PrimExpr thread_offset, PrimExpr, int,
-                                        int, Target) {
-    std::stringstream ss;
-    ss << "tl::AscendAllReduce<" << reducer << ", " << reducing_threads << ", "
-       << scale << ", " << thread_offset << ">::run";
-    return ss.str();
+  static std::string MakeBatchAllReduce(std::string reducer, int, int, PrimExpr,
+                                        PrimExpr, int batch, int, Target) {
+    // src/tl_templates/ascend/reduce.h defines AscendAllReduce::run only, with
+    // the scalar signature (T x, __ubuf__ T *red_buf). run_batch exists for
+    // cuda and hip only, so the batched argument list built by the shared layer
+    // cannot bind: with a workspace pointer the deduction conflicts, and
+    // without one T deduces to a pointer and the reduction silently degrades to
+    // "return x" on the threads <= scale path.
+    LOG(FATAL) << "Ascend does not implement batched reductions: T.reduce_* with "
+                  "batch > 1 has no run_batch entry point for target 'ascend' "
+                  "(batch="
+               << batch << ", reducer=" << reducer << "). Use batch=1.";
+    return "";
   }
 
   static std::string MakeScalarAllReduce(std::string reducer,
