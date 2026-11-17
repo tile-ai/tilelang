@@ -1,9 +1,11 @@
 """Integer carry, widening, and predicate lane operations on Ascend SIMD."""
 
+import pytest
 import torch
 import tilelang
 import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
+from tilelang.engine.lower import lower
 
 N = 64
 
@@ -334,3 +336,69 @@ def test_predicate_roundtrips():
     spread = torch.zeros(64, dtype=torch.int32)
     spread[0:64:2] = 1
     torch.testing.assert_close(o3.cpu(), spread, rtol=0, atol=0)
+
+
+# --- predicate width validation ---
+#
+# simd_inst defines only update_mask_b8/b16/b32, pintlv_b8/b16/b32 and
+# pdintlv_b8/b16/b32, and CANN declares no 64-bit predicate intrinsic. An
+# unchecked width used to be interpolated straight into the helper name, so a
+# kernel lowered cleanly and then failed in the CCE compiler on a missing
+# simd_inst::update_mask_b64 / pintlv_b64 / pdintlv_b64.
+
+
+def _interleave_kernel(api, width):
+
+    @T.prim_func
+    def main(Src: T.Tensor((N,), "int32"), Dst: T.Tensor((N,), "int32")):
+        with T.Kernel(1):
+            src = T.alloc_shared((N,), "int32")
+            dst = T.alloc_shared((N,), "int32")
+            T.copy(Src, src)
+            with T.SimdVF():
+                full = S.pset(32)
+                p0, _ = getattr(S, api)(full, full, width)
+                S.vsts(dst[0], S.vld(src[0]), p0)
+            T.copy(dst, Dst)
+
+    return main
+
+
+@pytest.mark.parametrize("width", [4, 64])
+def test_update_mask_rejects_unsupported_predicate_width(width):
+    with pytest.raises(ValueError, match=r"update_mask: predicate width must be one of \(8, 16, 32\)"):
+        S.update_mask(8, width)
+
+
+@pytest.mark.parametrize("api", ["pintlv", "pdintlv"])
+@pytest.mark.parametrize("width", [4, 64])
+def test_interleave_rejects_unsupported_predicate_width(api, width):
+    with pytest.raises(ValueError, match=rf"{api}: predicate width must be one of \(8, 16, 32\)"):
+        _interleave_kernel(api, width)
+
+
+@pytest.mark.parametrize("width", [8, 16, 32])
+def test_update_mask_keeps_supported_predicate_widths(width):
+
+    @T.prim_func
+    def main(Cnt: T.Tensor((1,), "int32"), Dst: T.Tensor((N,), "int32")):
+        with T.Kernel(1):
+            cnt = T.alloc_shared((1,), "int32")
+            dst = T.alloc_shared((N,), "int32")
+            T.copy(Cnt, cnt)
+            with T.SimdVF():
+                full = S.pset(32)
+                one = S.vdup(T.int32(1), T.int32, full)
+                zero = S.vdup(T.int32(0), T.int32, full)
+                m = S.update_mask(cnt[0], width)
+                S.vsts(dst[0], S.vsel(one, zero, m), full)
+            T.copy(dst, Dst)
+
+    assert f"simd_inst::update_mask_b{width}(" in lower(main, target="ascend").kernel_source
+
+
+@pytest.mark.parametrize("api", ["pintlv", "pdintlv"])
+@pytest.mark.parametrize("width", [8, 16, 32])
+def test_interleave_keeps_supported_predicate_widths(api, width):
+    source = lower(_interleave_kernel(api, width), target="ascend").kernel_source
+    assert f"simd_inst::{api}_b{width}(" in source

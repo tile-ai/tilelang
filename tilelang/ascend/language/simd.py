@@ -122,8 +122,27 @@ def pge(elem_width: int, dist: str = "PAT_ALL"):
     return tirx.call_intrin("boolx256", _Op("tl.simd.pge"), elem_width, dist)
 
 
+# CCE exposes predicate helpers only for 8-, 16- and 32-bit lanes. simd_inst has
+# no update_mask_b64 / pintlv_b64 / pdintlv_b64, and CANN declares no 64-bit
+# predicate intrinsic to build one from, so an unchecked width would be
+# interpolated straight into a C++ name that does not exist.
+_PREDICATE_WIDTH_BITS = (8, 16, 32)
+
+
+def _validate_predicate_width(width, api: str) -> int:
+    """Return ``width`` as an int, rejecting widths with no simd_inst helper."""
+    if isinstance(width, tirx.IntImm):
+        width = int(width.value)
+    if isinstance(width, bool) or not isinstance(width, int):
+        raise TypeError(f"{api}: predicate width must be a constant int, but got {width!r}")
+    if width not in _PREDICATE_WIDTH_BITS:
+        raise ValueError(f"{api}: predicate width must be one of {_PREDICATE_WIDTH_BITS}, but got {width}")
+    return width
+
+
 def update_mask(value, width=32):
     """Runtime tail predicate: lanes [0, value) active (b8/b16/b32)."""
+    width = _validate_predicate_width(width, "update_mask")
     return tirx.call_intrin("boolx256", _Op("tl.simd.update_mask"), value, width)
 
 
@@ -217,6 +236,7 @@ def punpack(src, part=0):
 
 def pintlv(src0, src1, width=32):
     """Predicate interleave -> pair of predicates (b8/b16/b32)."""
+    width = _validate_predicate_width(width, "pintlv")
     pair = tirx.call_intrin("boolx256", _Op("tl.simd.pintlv"), src0, src1, width)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("pintlv requires an active IRBuilder to bind the pair")
@@ -225,6 +245,7 @@ def pintlv(src0, src1, width=32):
 
 def pdintlv(src0, src1, width=32):
     """Predicate deinterleave -> pair of predicates (b8/b16/b32)."""
+    width = _validate_predicate_width(width, "pdintlv")
     pair = tirx.call_intrin("boolx256", _Op("tl.simd.pdintlv"), src0, src1, width)
     if not IRBuilder.is_in_scope():
         raise RuntimeError("pdintlv requires an active IRBuilder to bind the pair")

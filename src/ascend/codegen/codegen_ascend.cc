@@ -2165,6 +2165,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   else if (op->op.same_as(tl::simd_update_mask())) {
     ICHECK_EQ(op->args.size(), 2);
     int width = (int)Downcast<IntImm>(op->args[1])->value;
+    ICHECK(width == 8 || width == 16 || width == 32)
+        << "tl.simd.update_mask supports predicate widths 8, 16 and 32, got "
+        << width << "; simd_inst has no update_mask_b" << width << " helper";
     os << "simd_inst::update_mask_b" << width << "(";
     PrintExpr(op->args[0], os); // value
     os << ")";
@@ -2182,6 +2185,9 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 3);
     const char *name = op->op.same_as(tl::simd_pintlv()) ? "pintlv" : "pdintlv";
     int width = (int)Downcast<IntImm>(op->args[2])->value;
+    ICHECK(width == 8 || width == 16 || width == 32)
+        << "tl.simd." << name << " supports predicate widths 8, 16 and 32, got "
+        << width << "; simd_inst has no " << name << "_b" << width << " helper";
     os << "simd_inst::" << name << "_b" << width << "(";
     PrintExpr(op->args[0], os); // src0
     os << ", ";
