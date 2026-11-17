@@ -98,6 +98,16 @@ def annotate_min_blocks_per_sm(n: int):
     which can improve occupancy at the cost of potentially more register
     spilling.
 
+    On HIP, ``n`` is the number of blocks per scheduling unit that has 4 SIMDs:
+    a compute unit on CDNA (wave64), or a workgroup processor on RDNA (wave32;
+    hipcc's default WGP mode). HIP's second ``__launch_bounds__`` argument is
+    ``amdgpu_waves_per_eu``, so codegen emits
+    ``ceil(n * ceil(threads / wave_size) / 4)``: on CDNA, 2 blocks of 256
+    threads gives ``__launch_bounds__(256, 2)`` and 2 blocks of 128 threads
+    gives ``__launch_bounds__(128, 1)``. This is a register-allocation hint,
+    not a residency guarantee: LDS and other resources still limit occupancy.
+    Without the annotation HIP emits only the first argument.
+
     Example
     -------
     >>> @T.prim_func
