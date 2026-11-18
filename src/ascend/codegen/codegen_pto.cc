@@ -2721,7 +2721,7 @@ CodeGenTileLangPTO::GetMutableVectorRef(const PrimExpr &address,
 }
 
 std::string CodeGenTileLangPTO::PrintCondition(const PrimExpr &condition,
-                                            bool require_ir) {
+                                               bool require_ir) {
   DataType dtype = condition.dtype();
   ICHECK(dtype.is_scalar() &&
          (dtype.is_bool() || dtype.is_int() || dtype.is_uint()))
