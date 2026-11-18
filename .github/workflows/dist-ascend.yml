@@ -571,7 +571,9 @@ jobs:
           # -u: skip files already present unchanged, so a same-day rerun does
           # not rewrite identical wheels. Older dailies stay downloadable
           # until the bucket's lifecycle policy removes them.
-          obsutil/obsutil cp -u wheelhouse/*.whl "${OBS_DIR}"
+          for wheel in wheelhouse/*.whl; do
+            obsutil/obsutil cp -u "${wheel}" "${OBS_DIR}"
+          done
 
           # Regenerate index.html from every .whl currently in the directory
           # (non-recursive, short format), keeping only the basenames.
