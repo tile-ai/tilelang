@@ -121,3 +121,117 @@ def test_gemm_partial_k_atom_requires_padding(arch, dtype, accum_dtype, k, atom_
     target = tvm.target.Target({"kind": "cuda", "arch": arch})
     with target, pytest.raises(ValueError, match=rf"tile K={k} must be divisible by {atom_k}"):
         tilelang.lower(_make_gemm_kernel(dtype, accum_dtype, K=k), target=target)
+
+
+def _make_gemm_kernel_sized(M, N, K, dtype, accum_dtype, threads):
+    @T.prim_func
+    def main(A: T.Tensor((M, K), dtype), B: T.Tensor((K, N), dtype), C: T.Tensor((M, N), accum_dtype)):
+        with T.Kernel(1, 1, threads=threads):
+            As = T.alloc_shared((M, K), dtype)
+            Bs = T.alloc_shared((K, N), dtype)
+            Cl = T.alloc_fragment((M, N), accum_dtype)
+            T.clear(Cl)
+            T.copy(A, As)
+            T.copy(B, Bs)
+            T.gemm(As, Bs, Cl)
+            T.copy(Cl, C)
+
+    return main
+
+
+def _lower_with_target(target, M, N, K, dtype, accum_dtype, threads):
+    with target:
+        return tilelang.lower(
+            _make_gemm_kernel_sized(M, N, K, dtype, accum_dtype, threads),
+            target=target,
+        ).kernel_source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("arch", ["sm_90", "sm_100", "sm_120"])
+@pytest.mark.parametrize("M,N,K,threads", [(64, 64, 64, 128), (16, 64, 64, 32)])
+@pytest.mark.parametrize(
+    "dtype,accum_dtype",
+    [
+        ("bfloat16", "float16"),
+        ("int8", "float16"),
+        ("float32", "float16"),
+    ],
+)
+def test_gemm_mma_sync_fallback_rejects_unsupported_dtype_before_codegen(arch, M, N, K, threads, dtype, accum_dtype):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with pytest.raises(tvm.error.InternalError, match=r"requires native mma\.sync lowering"):
+        _lower_with_target(target, M, N, K, dtype, accum_dtype, threads)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("arch", ["sm_90", "sm_100", "sm_120"])
+@pytest.mark.parametrize("M,N,K,threads", [(16, 64, 64, 32), (32, 64, 64, 64)])
+@pytest.mark.parametrize(
+    "dtype,accum_dtype",
+    [
+        ("float16", "float16"),
+        ("float16", "float32"),
+        ("bfloat16", "float32"),
+        (T.tfloat32, "float32"),
+        ("float32", "float32"),
+        ("float64", "float64"),
+    ],
+)
+def test_gemm_mma_sync_fallback_allows_supported_dtype(arch, M, N, K, threads, dtype, accum_dtype):
+    source = _lower_with_target(
+        tvm.target.Target({"kind": "cuda", "arch": arch}),
+        M,
+        N,
+        K,
+        dtype,
+        accum_dtype,
+        threads,
+    )
+    assert "tl::mma_sync" in source
+    lowered = source.lower()
+    assert "wgmma" not in lowered
+    assert "tcgen" not in lowered
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "arch,dtype,accum_dtype",
+    [
+        ("sm_70", "float16", "float16"),
+        ("sm_70", "float16", "float32"),
+        ("sm_75", "float16", "float32"),
+        ("sm_75", "int8", "int32"),
+    ],
+)
+def test_gemm_mma_sync_fallback_volta_turing_lowers(arch, dtype, accum_dtype):
+    source = _lower_with_target(
+        tvm.target.Target({"kind": "cuda", "arch": arch}),
+        64,
+        64,
+        64,
+        dtype,
+        accum_dtype,
+        128,
+    )
+    assert "tl::mma_sync" in source
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("arch", ["sm_80", "sm_86", "sm_89"])
+@pytest.mark.parametrize(
+    "dtype,accum_dtype",
+    [
+        ("bfloat16", "float16"),
+        ("int8", "float16"),
+        ("float32", "float16"),
+    ],
+)
+def test_gemm_mma_sync_rejects_unsupported_dtype_on_ampere(arch, dtype, accum_dtype):
+    target = tvm.target.Target({"kind": "cuda", "arch": arch})
+    with pytest.raises(tvm.error.InternalError, match=r"requires native mma\.sync lowering"):
+        _lower_with_target(target, 64, 64, 64, dtype, accum_dtype, 128)
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()
