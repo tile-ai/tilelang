@@ -1450,18 +1450,17 @@ void CodeGenTileLangAscend::EmitGmToUbufCopy_(const CallNode *op) {
   }
 
   // IR arg 2 is sid, which tl::cann::copy_gm2ub_align does not take.
-  EmitCApiCall_(
-      "tl::cann::copy_gm2ub_align",
-      {{op->args[0], "(__ubuf__ " + pointer_type + "*)(", ")"},
-       {op->args[1], "(__gm__ " + pointer_type + "*)(", ")"},
-       {op->args[3]},
-       {op->args[4]},
-       {op->args[5]},
-       {op->args[6]},
-       {op->args[7]},
-       {op->args[8], "static_cast<tl::cann::load_l2_cache_mode>(", ")"},
-       {op->args[9]},
-       {op->args[10]}});
+  EmitCApiCall_("tl::cann::copy_gm2ub_align",
+                {{op->args[0], "(__ubuf__ " + pointer_type + "*)(", ")"},
+                 {op->args[1], "(__gm__ " + pointer_type + "*)(", ")"},
+                 {op->args[3]},
+                 {op->args[4]},
+                 {op->args[5]},
+                 {op->args[6]},
+                 {op->args[7]},
+                 {op->args[8], "static_cast<tl::cann::load_l2_cache_mode>(", ")"},
+                 {op->args[9]},
+                 {op->args[10]}});
 }
 
 void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
@@ -1469,15 +1468,14 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
       << "tl.ascend_copy_ubuf_to_gm expects exactly 8 arguments";
 
   // IR arg 2 is sid, which tl::cann::copy_ub2gm_align does not take.
-  EmitCApiCall_(
-      "tl::cann::copy_ub2gm_align",
-      {{op->args[0], "(__gm__ uint8_t*)(", ")"},
-       {op->args[1], "(__ubuf__ uint8_t*)(", ")"},
-       {op->args[3]},
-       {op->args[4]},
-       {op->args[5], "static_cast<tl::cann::store_l2_cache_mode>(", ")"},
-       {op->args[6]},
-       {op->args[7]}});
+  EmitCApiCall_("tl::cann::copy_ub2gm_align",
+                {{op->args[0], "(__gm__ uint8_t*)(", ")"},
+                 {op->args[1], "(__ubuf__ uint8_t*)(", ")"},
+                 {op->args[3]},
+                 {op->args[4]},
+                 {op->args[5], "static_cast<tl::cann::store_l2_cache_mode>(", ")"},
+                 {op->args[6]},
+                 {op->args[7]}});
 }
 
 void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
@@ -1508,16 +1506,15 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
   }
 
   // IR args 2, 9, 10, and 11 configure lowering and are not DMA arguments.
-  EmitCApiCall_(
-      use_dn2nz ? "asc_copy_gm2l1_dn2nz" : "asc_copy_gm2l1_nd2nz",
-      {{op->args[0], destination_prefix, pointer_suffix},
-       {op->args[1], source_prefix, pointer_suffix},
-       {op->args[3]},
-       {op->args[4], "static_cast<tl::cann::load_l2_cache_mode>(", ")"},
-       {op->args[5]},
-       {op->args[6]},
-       {op->args[7]},
-       {op->args[8]}});
+  EmitCApiCall_(use_dn2nz ? "asc_copy_gm2l1_dn2nz" : "asc_copy_gm2l1_nd2nz",
+                {{op->args[0], destination_prefix, pointer_suffix},
+                 {op->args[1], source_prefix, pointer_suffix},
+                 {op->args[3]},
+                 {op->args[4], "static_cast<tl::cann::load_l2_cache_mode>(", ")"},
+                 {op->args[5]},
+                 {op->args[6]},
+                 {op->args[7]},
+                 {op->args[8]}});
 }
 
 void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
@@ -1550,22 +1547,21 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
 
   PrintIndent();
   stream << "tl::cann::set_l0c_copy_nz_para(1, 0, 0);\n";
-  EmitCApiCall_(
-      "tl::cann::copy_l0c2gm",
-      {{op->args[0]},
-       {op->args[1]},
-       {op->args[3]},
-       {op->args[4]},
-       {op->args[5]},
-       {op->args[6]},
-       {op->args[7], "static_cast<tl::cann::store_l2_cache_mode>(", ")"},
-       {op->args[9], "static_cast<tl::cann::unit_flag_mode>(", ")"},
-       {op->args[10], "static_cast<tl::cann::quant_mode>(", ")"},
-       {op->args[11], "static_cast<tl::cann::relu_pre_mode>(", ")"},
-       {op->args[12]},
-       {op->args[13]},
-       {op->args[24]},
-       {op->args[8]}});
+  EmitCApiCall_("tl::cann::copy_l0c2gm",
+                {{op->args[0]},
+                 {op->args[1]},
+                 {op->args[3]},
+                 {op->args[4]},
+                 {op->args[5]},
+                 {op->args[6]},
+                 {op->args[7], "static_cast<tl::cann::store_l2_cache_mode>(", ")"},
+                 {op->args[9], "static_cast<tl::cann::unit_flag_mode>(", ")"},
+                 {op->args[10], "static_cast<tl::cann::quant_mode>(", ")"},
+                 {op->args[11], "static_cast<tl::cann::relu_pre_mode>(", ")"},
+                 {op->args[12]},
+                 {op->args[13]},
+                 {op->args[24]},
+                 {op->args[8]}});
 }
 
 void CodeGenTileLangAscend::EmitSetCopyPadValue_(const CallNode *op) {
@@ -1962,11 +1958,6 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(supported_dtype)
         << "Ascend atomic does not support data type: " << atomic_dtype;
 
-    // Mode is scalar state shared by subsequent DMA stores. Emit the drain
-    // after scheduling so a pipeline pass cannot move it across the switch.
-    // PIPE_ALL also covers L0C->GM (FIX), not only UB->GM (MTE3).
-    this->PrintIndent();
-    this->stream << "asc_sync();\n";
     this->PrintIndent();
     if (atomic_dtype.is_int() && atomic_dtype.bits() == 32) {
       this->stream << "tl::cann::set_atomic_" << atomic_op;
@@ -1991,8 +1982,6 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   } else if (op->op.same_as(tl::ascend_set_atomic_none())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.ascend_set_atomic_none expects no arguments";
-    this->PrintIndent();
-    this->stream << "asc_sync();\n";
     this->PrintIndent();
     this->stream << "asc_set_atomic_none();\n";
   } else if (op->op.same_as(tl::warp_reduce_sum()) ||

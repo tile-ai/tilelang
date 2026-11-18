@@ -165,8 +165,7 @@ SIMD_INST_DEFINE_LOAD(vlds_downsample, asc_loadalign_downsample)
 SIMD_INST_DEFINE_LOAD(vlds_unpack, asc_loadalign_unpack)
 SIMD_INST_DEFINE_LOAD(vlds_unpack4, tl::cann::loadalign_unpack4)
 SIMD_INST_DEFINE_LOAD(vlds_brc_datablock, tl::cann::loadalign_brc_datablock)
-SIMD_INST_DEFINE_LOAD(vlds_brc_elem2datablock,
-                      tl::cann::loadalign_brc_elem2datablock)
+SIMD_INST_DEFINE_LOAD(vlds_brc_elem2datablock, tl::cann::loadalign_brc_elem2datablock)
 
 #undef SIMD_INST_DEFINE_LOAD
 
@@ -880,7 +879,7 @@ __simd_callee__ inline vec_t<T> vci(T index, Order order) {
   __simd_callee__ inline vector_bool vcmp_##OP(SrcVec src_0, SrcVec src_1,     \
                                                vector_bool mask) {             \
     vector_bool dst;                                                           \
-    VectorApi(dst, src_0, src_1, mask);                                        \
+    VectorApi(dst, src_0, src_1, mask);                                         \
     return dst;                                                                \
   }                                                                            \
   template <typename SrcVec, typename ScalarT>                                 \
@@ -1000,9 +999,8 @@ template <typename T, typename Post>
 __simd_callee__ inline __ubuf__ T *vsstb(vec_t<T> src, __ubuf__ T *base,
                                          int32_t stride, vector_bool mask,
                                          Post post) {
-  tl::cann::storealign_postupdate(base, src,
-                                  static_cast<uint16_t>(stride >> 16),
-                                  static_cast<uint16_t>(stride), mask);
+  tl::cann::storealign_postupdate(base, src, static_cast<uint16_t>(stride >> 16),
+                            static_cast<uint16_t>(stride), mask);
   return base;
 }
 
@@ -1049,8 +1047,8 @@ __simd_callee__ inline void vsts_pack_quarter(vec_t<T> data, __ubuf__ T *base,
                        std::is_same<T, float4_e1m2x2_t>::value ||
                        std::is_same<T, uint8_t>::value ||
                        std::is_same<T, int8_t>::value) {
-    tl::cann::storealign_pack_quarter((__ubuf__ uint32_t *)base,
-                                      (vector_u32 &)data, offset, mask);
+    tl::cann::storealign_pack_quarter((__ubuf__ uint32_t *)base, (vector_u32 &)data,
+                                offset, mask);
   }
 }
 

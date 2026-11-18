@@ -3,12 +3,14 @@
 
 from __future__ import absolute_import as _abs
 
+import contextlib
 import os
 import shlex
 import shutil
 import subprocess
 from collections.abc import Sequence
 from functools import cache
+from pathlib import Path
 
 from tilelang.env import env
 from tvm.base import py_str
@@ -68,7 +70,27 @@ def get_bisheng_version() -> str:
 
 def find_ld_lld_path() -> str:
     """Find the CCE-capable ``ld.lld`` shipped with the Ascend toolkit."""
-    return get_cann_context()["linker"]
+    candidates: list[Path] = []
+    for env_name in ("BISHENG_HOME", "ASCEND_HOME_PATH", "ASCEND_TOOLKIT_HOME"):
+        root = os.environ.get(env_name)
+        if not root:
+            continue
+        root_path = Path(root)
+        candidates.extend((root_path / "bin" / "ld.lld", root_path / "ld.lld"))
+
+    with contextlib.suppress(RuntimeError):
+        candidates.append(Path(find_bisheng_path()).with_name("ld.lld"))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    path = shutil.which("ld.lld")
+    if path is not None:
+        return path
+    raise RuntimeError(
+        "Cannot find ld.lld. Install the Ascend toolkit and put its bin directory in PATH, or set ASCEND_HOME_PATH/BISHENG_HOME."
+    )
 
 
 def normalize_options(options: str | Sequence[str] | None) -> list[str]:
@@ -111,20 +133,8 @@ def get_bisheng_compile_options(
     result = ["-O2", "-fPIC", "-std=c++20", "-mllvm", "-cce-aicore-dcpreload-args=false"]
     if resolved_arch:
         result.append(f"--npu-arch={resolved_arch}")
-    result.extend(get_cann_include_options())
     result.extend(normalize_options(options))
     return result
-
-
-def get_cann_context() -> dict:
-    from tilelang.contrib.cann import compile_context
-    from tilelang.env import TILELANG_TEMPLATE_PATH
-
-    return compile_context(find_bisheng_path(), TILELANG_TEMPLATE_PATH)
-
-
-def get_cann_include_options() -> list[str]:
-    return ["-I" + path for path in get_cann_context()["include_dirs"]]
 
 
 def get_aibin_linker_options() -> list[str]:

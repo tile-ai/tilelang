@@ -1,9 +1,9 @@
 #pragma once
 
-#include "c_api/asc_simd.h"
 #include <stdint.h>
 #include <type_traits>
 #include <version/asc_devkit_version.h>
+#include "c_api/asc_simd.h"
 
 // This layer preserves the arguments used by TileLang's Ascend code generator.
 // It does not add SDK overloads to the global namespace or alter installed

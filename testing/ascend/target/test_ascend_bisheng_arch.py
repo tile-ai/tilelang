@@ -51,7 +51,6 @@ def test_cython_compile_preserves_target_and_options(monkeypatch, tmp_path, conf
 
     monkeypatch.setenv("ASCEND_NPU_ARCH", "dav-env")
     monkeypatch.setattr(bisheng, "find_bisheng_path", lambda: "bisheng")
-    monkeypatch.setattr(bisheng, "get_cann_include_options", lambda: [])
     monkeypatch.setattr(
         libgen.tempfile,
         "NamedTemporaryFile",

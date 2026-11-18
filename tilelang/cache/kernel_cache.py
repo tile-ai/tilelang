@@ -279,14 +279,6 @@ class KernelCache:
             "compile_flags": compile_flags,
             **self._get_base_key(),
         }
-        # The outer cache can skip lowering and the device-binary cache entirely.
-        # Isolate SDK/template changes here as well as in the Ascend callback.
-        from tilelang.ascend.target import target_is_plain_ascend
-
-        if isinstance(target, Target) and target_is_plain_ascend(target):
-            from tilelang.contrib.bisheng import get_cann_context
-
-            key_data["ascend_cann"] = get_cann_context()["fingerprint"]
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key
