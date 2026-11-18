@@ -1866,11 +1866,12 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
   // tile.
   int64_t inv_size = cute::AsConst(cute::Size(smem_plain_to_tile));
   int64_t tile_size = cute::AsConst(cute::Size(tile_to_smem_plain));
-  ICHECK_EQ(inv_size, tile_size)
-      << "plain SMEM layout is not a bijection (gapped or non-injective): "
-      << "RightInverse covers " << inv_size << " of " << tile_size
-      << " elements; try to use annotate_layout to make your SMEM tile "
-         "contiguous";
+  if (inv_size != tile_size) {
+    std::ostringstream oss;
+    oss << "TMA requires a contiguous shared-memory tile: RightInverse covers "
+        << inv_size << " of " << tile_size << " elements";
+    return unsupported(oss.str());
+  }
 
   // physical shared (without swizzle) -> tile -> logical global mode
   // E.g, physical_shared_to_global_mode = (64,64,8):(1@2,1@1,64@2)
