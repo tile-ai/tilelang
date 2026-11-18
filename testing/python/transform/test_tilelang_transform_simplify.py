@@ -143,6 +143,42 @@ def test_context_singleton_floordiv_index():
     simplify_and_compare(mod_before, mod_expected)
 
 
+@pytest.mark.parametrize("shifted", [False, True])
+def test_zero_or_one_trip_count_keeps_entry_condition(shifted):
+    output = tirx.decl_buffer((512,), "int32", name="output")
+    tx = te.thread_axis("threadIdx.x")
+    stage = tirx.Var("stage", "int32")
+    iteration = tirx.Var("iteration", "int32")
+    owner = (stage * 256 + tx.var) % 512 if shifted else tx.var
+    extent = (767 - owner) // 512
+    store = tirx.BufferStore(output, tirx.const(1, "int32"), [tx.var])
+
+    def function(body):
+        loop = tirx.For(iteration, 0, extent, tirx.ForKind.SERIAL, body)
+        if shifted:
+            loop = tirx.For(stage, 0, 6, tirx.ForKind.SERIAL, loop)
+        return tvm.IRModule.from_expr(tirx.PrimFunc([output], tirx.AttrStmt(tx, "thread_extent", 512, loop)))
+
+    # Entering the body proves extent > 0, so the inner condition may fold.
+    # It must not turn the loop itself into an unconditional one-iteration loop.
+    before = function(tirx.IfThenElse(extent > 0, store, tirx.Evaluate(0)))
+    expected = function(store)
+    simplify_and_compare(before, expected)
+
+
+def test_zero_trip_count_preserves_following_branch():
+    output = tirx.decl_buffer((512,), "int32", name="output")
+    tx = te.thread_axis("threadIdx.x")
+    iteration = tirx.Var("iteration", "int32")
+    extent = (767 - tx.var) // 512
+    store = tirx.BufferStore(output, tirx.const(1, "int32"), [tx.var])
+    loop = tirx.For(iteration, 0, extent, tirx.ForKind.SERIAL, store)
+    empty = tirx.IfThenElse(tirx.const(256, "int32") <= tx.var, tirx.BufferStore(output, tirx.const(0, "int32"), [tx.var]), None)
+    body = tirx.AttrStmt(tx, "thread_extent", 512, tirx.SeqStmt([loop, empty]))
+    mod = tvm.IRModule.from_expr(tirx.PrimFunc([output], body))
+    simplify_and_compare(mod, mod)
+
+
 def test_if_likely():
     A, C = buffer_pair((1024,))
     n = te.size_var("n")
