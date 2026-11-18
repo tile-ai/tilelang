@@ -92,6 +92,48 @@ def test_cold_compiled_dispatch_does_not_probe_cuda(monkeypatch):
     assert adapter.executable is created[0]
 
 
+@pytest.mark.parametrize("raise_on_call", [False, True])
+def test_host_only_cuda_call_preserves_torch_stream_context(monkeypatch, raise_on_call):
+    """Exercise the real FFI stream context without launching a CUDA kernel."""
+    from contextlib import nullcontext
+
+    import tvm_ffi
+
+    adapter, _ = _make_adapter()
+    buffer = tirx.decl_buffer((1,), "float32")
+    adapter._test_prim_func = tirx.PrimFunc([buffer.data], tirx.Evaluate(0), buffer_map={buffer.data: buffer}).with_attr(
+        "tl.host_mapped_params", [0]
+    )
+    adapter.target = SimpleNamespace(kind=SimpleNamespace(name="cuda"))
+    tensor = torch.empty(1)
+    device = tvm_ffi.device("cuda:1")
+    stream = SimpleNamespace(device=torch.device("cuda:1"), cuda_stream=0)
+    observed_streams = []
+
+    def executable(*args):
+        assert args == (tensor,)
+        observed_streams.append(tvm_ffi.get_raw_stream(device))
+        if raise_on_call:
+            raise RuntimeError("launch failed")
+
+    def unexpected_device_probe(*args):
+        pytest.fail("The CUDA stream already supplies its device; do not probe another runtime.")
+
+    adapter.executable = executable
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: stream)
+    monkeypatch.setattr(adapter, "get_current_device_functor", unexpected_device_probe)
+    monkeypatch.setattr(tvm_ffi_adapter, "_install_torch_stream_exchange", unexpected_device_probe)
+    func = adapter._convert_torch_func()
+
+    with tvm_ffi.use_raw_stream(device, 10):
+        for handle in (11, 22):
+            stream.cuda_stream = handle
+            with pytest.raises(RuntimeError, match="launch failed") if raise_on_call else nullcontext():
+                func(tensor)
+            assert tvm_ffi.get_raw_stream(device) == 10
+    assert observed_streams == [11, 22]
+
+
 def test_executable_is_initialized_once_and_reused():
     adapter, created = _make_adapter()
 
