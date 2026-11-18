@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <tvm/runtime/logging.h>
+#include <utility>
 
 #include "backend/common/target_utils.h"
 #include "metal/op/builtin.h"
@@ -28,6 +29,14 @@ namespace metal {
 namespace {
 
 constexpr int64_t kSIMDGroupTileSize = 8;
+
+// Lane-local origin of one 16x32 cooperative tensor tile. Keep in sync with the
+// __base_row/__base_col values emitted by CodeGenTileLangMetal.
+std::pair<PrimExpr, PrimExpr>
+CooperativeTensorLaneOrigin(const PrimExpr &lane) {
+  return {FloorDiv(lane, 16) * 4 + FloorMod(FloorDiv(lane, 2), 4),
+          (FloorMod(FloorDiv(lane, 8), 2) * 2 + FloorMod(lane, 2)) * 4};
+}
 
 Stmt LowerSIMDGroupPartialFill(const FillNode &op, const LowerArgs &lower_args,
                                arith::Analyzer *analyzer) {
@@ -59,6 +68,9 @@ Stmt LowerCooperativeTensorPartialFill(const FillNode &op,
                                        const LowerArgs &args,
                                        arith::Analyzer *analyzer) {
   const size_t ndim = op.dst->shape.size();
+  TVM_FFI_ICHECK(ndim == 1 || ndim == 2)
+      << "Metal partial fill: cooperative_tensor partial regions require 1D or "
+         "2D";
   CHECK(op.dst->strides.empty() &&
             analyzer->CanProveEqual(op.dst->elem_offset, 0),
         ValueError)
@@ -96,10 +108,8 @@ Stmt LowerCooperativeTensorPartialFill(const FillNode &op,
          "exceeds the int32 intrinsic range";
   CHECK(rows <= std::numeric_limits<int32_t>::max() / cols, ValueError)
       << "Metal partial fill: cooperative_tensor logical indices exceed int32";
-  PrimExpr lane = args.thread_index;
-  PrimExpr base_row = FloorDiv(lane, 16) * 4 + FloorMod(FloorDiv(lane, 2), 4);
-  PrimExpr base_col =
-      (FloorMod(FloorDiv(lane, 8), 2) * 2 + FloorMod(lane, 2)) * 4;
+  const auto [base_row, base_col] =
+      CooperativeTensorLaneOrigin(args.thread_index);
   PrimExpr value = Cast(op.dst->dtype, op.value);
   auto constant = [](int64_t value) {
     return IntImm(DataType::Int(32), value);
@@ -145,8 +155,8 @@ Stmt LowerCooperativeTensorPartialFill(const FillNode &op,
   return stmts.size() == 1 ? stmts[0] : SeqStmt(stmts);
 }
 
-// The existing cooperative-tensor lowering can fill tile zero directly.
-bool IsCooperativeTensorPrefixTile(const FillNode &op,
+// The existing cooperative-tensor lowering can fill a zero-origin tile prefix.
+bool IsCooperativeTensorTilePrefix(const FillNode &op,
                                    arith::Analyzer *analyzer) {
   if (!IsCooperativeTensorBuffer(op.dst) || !op.dst->strides.empty() ||
       !analyzer->CanProveEqual(op.dst->elem_offset, 0)) {
@@ -165,7 +175,9 @@ bool IsCooperativeTensorPrefixTile(const FillNode &op,
     full_suffix &= analyzer->CanProveEqual(range->extent, op.dst->shape[d]);
     elements = elements * cast(DataType::Int(64), range->extent);
   }
-  return analyzer->CanProveEqual(elements, 512);
+  return analyzer->CanProve(elements > 0) &&
+         analyzer->CanProveEqual(
+             FloorMod(elements, IntImm(DataType::Int(64), 512)), 0);
 }
 
 } // namespace
@@ -173,24 +185,33 @@ bool IsCooperativeTensorPrefixTile(const FillNode &op,
 struct Fill {
   static Stmt Lower(const FillNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    if ((IsSIMDGroupBuffer(op.dst) || IsCooperativeTensorBuffer(op.dst)) &&
-        op.dst->shape.size() >= 3) {
-      CHECK(IsWholeBufferRegion(op.dst, op.region, analyzer) ||
-                IsCooperativeTensorPrefixTile(op, analyzer),
-            ValueError)
+    const size_t ndim = op.dst->shape.size();
+    const bool cooperative = IsCooperativeTensorBuffer(op.dst);
+    const bool simdgroup = IsSIMDGroupBuffer(op.dst);
+    const bool metal_tile = cooperative || simdgroup;
+    const bool whole =
+        metal_tile && IsWholeBufferRegion(op.dst, op.region, analyzer);
+    const bool partial_rank = ndim == 1 || ndim == 2;
+    if (metal_tile && !whole && !partial_rank) {
+      CHECK(IsCooperativeTensorTilePrefix(op, analyzer), ValueError)
           << "Metal partial fill: buffers with 3 or more dimensions are not "
              "supported for "
           << op.dst.scope() << " buffer " << op.dst->name
           << "; fill the whole buffer instead";
     }
-    if (IsCooperativeTensorBuffer(op.dst)) {
-      if (op.dst->shape.size() <= 2 &&
-          !IsWholeBufferRegion(op.dst, op.region, analyzer)) {
-        bool legacy_prefix =
-            op.dst->shape.size() == 2 &&
-            IsCooperativeTensorPrefixTile(op, analyzer) &&
-            !(analyzer->CanProveEqual(FloorMod(op.dst->shape[0], 16), 0) &&
-              analyzer->CanProveEqual(FloorMod(op.dst->shape[1], 32), 0));
+
+    if (cooperative) {
+      if (!whole && partial_rank) {
+        const auto divisible = [&](PrimExpr value, int64_t factor) {
+          return analyzer->CanProveEqual(
+              FloorMod(value, IntImm(value.dtype(), factor)), 0);
+        };
+        const bool canonical_layout =
+            (ndim == 1 && divisible(op.dst->shape[0], 512)) ||
+            (ndim == 2 && divisible(op.dst->shape[0], 16) &&
+             divisible(op.dst->shape[1], 32));
+        const bool legacy_prefix =
+            IsCooperativeTensorTilePrefix(op, analyzer) && !canonical_layout;
         if (!legacy_prefix) {
           return LowerCooperativeTensorPartialFill(op, lower_args, analyzer);
         }
@@ -198,12 +219,6 @@ struct Fill {
         // Canonical matrix shapes must always use their actual coordinates.
         CheckSIMDGroupExecution(lower_args, analyzer, "Metal partial fill");
       }
-      CHECK(IsWholeBufferRegion(op.dst, op.region, analyzer) ||
-                IsCooperativeTensorPrefixTile(op, analyzer),
-            ValueError)
-          << "Metal partial fill: metal.cooperative_tensor supports only "
-             "whole-buffer fills or a contiguous zero-origin prefix of exactly "
-             "one 512-element tile; fill the whole buffer instead";
       int region_elements = 1;
       for (auto r : op.region) {
         auto imm = r->extent.as<IntImmNode>();
@@ -233,9 +248,8 @@ struct Fill {
       return SeqStmt(stmts);
     }
 
-    if (IsSIMDGroupBuffer(op.dst)) {
-      if ((op.dst->shape.size() == 1 || op.dst->shape.size() == 2) &&
-          !IsWholeBufferRegion(op.dst, op.region, analyzer)) {
+    if (simdgroup) {
+      if (!whole && partial_rank) {
         return LowerSIMDGroupPartialFill(op, lower_args, analyzer);
       }
       int region_elements = 1;

@@ -842,6 +842,8 @@ void CodeGenTileLangMetal::EnsureFragmentLaneVars() {
             "__metal_get_thread_index_in_simdgroup(ushort());\n";
   this->PrintIndent();
   stream << "const ushort __qid = __lane >> 2;\n";
+  // Keep these tile coordinates in sync with the cooperative tensor fill
+  // lowering.
   this->PrintIndent();
   stream << "const ushort __base_row = (__qid & 4) | ((__lane >> 1) & 3);\n";
   this->PrintIndent();

@@ -67,6 +67,8 @@ inline void CheckSIMDGroupExecution(const LowerArgs &args,
       << operation << ": requires a complete simdgroup execution range [0, "
       << warp_size << "), got " << args.thread_bounds;
 
+  // The launch-shape checks above exclude threadIdx.y/z divergence, so only
+  // threadIdx.x branches need tracking.
   CHECK(!args.has_thread_dependent_branch, ValueError)
       << operation << ": requires thread-uniform control flow";
 }
