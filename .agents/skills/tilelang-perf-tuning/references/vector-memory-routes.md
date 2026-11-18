@@ -55,7 +55,7 @@ When comparing across routes, fix the other axes where possible; when they canno
 
 ## Pipeline Eligibility and Realization
 
-Create a pipeline candidate only when all of the following hold: profiling shows overlapping time for both MTE and Compute; each core has enough independent full iterations; UB/L1 can hold the versions of every buffer that stays live across iterations; and the dependencies allow the next round's copy in to overlap the previous round's Compute/copy out.
+Create a pipeline candidate only when all of the following hold: profiling shows meaningful time on both MTE and Compute (the overlap itself need not exist yet — introducing it is the candidate's purpose, and the realization proof below verifies it); each core has enough independent full iterations; UB/L1 can hold the versions of every buffer that stays live across iterations; and the dependencies allow the next round's copy in to overlap the previous round's Compute/copy out.
 
 First draw each buffer's `copy in → compute → copy out` lifetime. Inputs, outputs, indices, and temporaries must all be versioned as long as they stay live across iterations; read-only resident data keeps a single version. Full waves use fixed extents; tails are handled separately.
 

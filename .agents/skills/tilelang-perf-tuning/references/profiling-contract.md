@@ -26,10 +26,12 @@ An old entry must never measure new source. Collecting a baseline indirectly thr
 
 ```bash
 env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<target> \
-  msprof op --warm-up=10 --launch-count=<case_count> \
+  msprof op --warm-up=10 --launch-count=<total_target_launches> \
   --output=<new_dir> --kernel-name=<resolved_kernel> \
   python <entry.py> --device <physical_id>
 ```
+
+`--launch-count` caps the number of collected launches, not the number of cases. Set it to the total number of target-kernel launches across all cases: sum the per-case launch counts from the launch mapping, counting repeated launches of the target kernel within one case. If the installed profiler counts warm-up launches toward this limit, include them; confirm the counting behavior before fixing the value. A value derived from the case count alone can stop collection before the complete chain is captured.
 
 Require the complete kernel directory count, launch index, case order, and the eight regular CSV categories. Each retry uses a new output directory; never overwrite or mix old data.
 
@@ -46,7 +48,7 @@ env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<target> \
   --task-time=on --aic-mode=task-based --aic-metrics=PipeUtilization
 ```
 
-The entry performs warmup followed by formal launches for each case. After export, filter by the complete target kernel name; the matched row count must equal `case_count × (warmup + formal)`; group rows by case order and drop each group's warmup. When kernel names, row counts, order, or SHAs are inconsistent, stop — never guess the mapping.
+The entry performs warmup followed by formal launches for each case. After export, filter by the complete target kernel name; the matched row count must equal `Σ per-case target-kernel launches × (warmup + formal)`. Derive the expected count and the warmup groups from each case's launch mapping, including repeated target-kernel launches. Group rows by case order and drop each group's warmup. When kernel names, row counts, order, or SHAs are inconsistent, stop — never guess the mapping.
 
 The fallback summary states the collection method and the missing fields. Final comparisons prefer a single collection method; when one side falls back, the other side is re-collected with regular msprof as well.
 

@@ -145,11 +145,11 @@ def nonempty_text(value: object) -> bool:
 
 
 def positive_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value > 0
 
 
 def nonnegative_number(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
 
 
 def evidence_list(value: object) -> bool:
@@ -582,6 +582,7 @@ def validate_pipeline_identity(candidate_id: str, identity: dict) -> None:
 def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict, dict]:
     created_by_candidate: dict[str, dict] = {}
     result_by_candidate: dict[str, dict] = {}
+    created_index: dict[str, int] = {}
     for index, event in enumerate(events):
         candidate_id = event.get("candidate_id")
         event_type = event.get("event")
@@ -640,7 +641,13 @@ def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict
                 event_type == "CREATED",
                 f"candidate {candidate_id}: first event must be CREATED",
             )
+            unresolved = sorted(cid for cid in created_by_candidate if cid not in result_by_candidate)
+            require(
+                not unresolved,
+                f"candidate {candidate_id}: created before previous candidates were resolved: {unresolved}",
+            )
             created_by_candidate[candidate_id] = event
+            created_index[candidate_id] = index
 
         if event_type == "RESULT":
             result_status = event.get("result_status")
@@ -711,6 +718,11 @@ def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict
                     rejection is not None,
                     f"candidate {candidate_id}: unexecuted rejection needs structured rejection_evidence",
                 )
+            if result_status == "PROMOTED":
+                require(
+                    tested_cases,
+                    f"candidate {candidate_id}: PROMOTED needs at least one TESTED_PATH case",
+                )
             result_by_candidate[candidate_id] = event
 
     if final:
@@ -718,7 +730,7 @@ def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict
             not (set(created_by_candidate) - set(result_by_candidate)),
             "a CREATED candidate has no RESULT event",
         )
-    return created_by_candidate, result_by_candidate
+    return created_by_candidate, result_by_candidate, created_index
 
 
 def candidate_tested_case(candidate_id: str, case_id: str, results: dict) -> bool:
@@ -856,6 +868,13 @@ def validate_route_plan(
             results,
             final,
         )
+        if item.get("status") == "BASELINE_MEASURED":
+            for case_id in item_cases:
+                source = case_by_id[case_id]["source_window"]
+                require(
+                    route == source["baseline_route_kind"] and writeback == source["baseline_writeback_kind"],
+                    f"obligation {oid}/{plan_id}: BASELINE_MEASURED route/writeback must match the recorded baseline for {case_id}",
+                )
         if route == "CONTIGUOUS_LOAD_REGISTER_REORDER" and item.get("status") == "CLOSED_WITH_EVIDENCE":
             feasible_cases = [
                 case_id for case_id in item_cases if case_by_id[case_id]["source_window"].get("register_window_feasible") is True
@@ -1163,7 +1182,7 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
     no_numeric_target = all(case["performance_target"] is None for case in cases)
     strict_closure = final and not targets_met and (allow_unmet_convergence or no_numeric_target)
 
-    created, results = validate_events(events, case_ids, final)
+    created, results, created_index = validate_events(events, case_ids, final)
     obligation_kinds: dict[str, list[dict]] = {}
     for obligation in obligations:
         oid = obligation["obligation_id"]
@@ -1306,14 +1325,20 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                         candidate_ids,
                         f"obligation {oid}: {label} status needs a candidate",
                     )
+                    if basis_candidate_id != "B0":
+                        basis_index = created_index[basis_candidate_id]
+                        eligible_ids = [cid for cid in candidate_ids if created_index.get(cid, -1) >= basis_index]
+                    else:
+                        eligible_ids = list(candidate_ids)
                     for case_id in linked_cases:
                         require(
                             any(
                                 created[cid]["identity"]["pipeline_facts"]["realization"] == realization
                                 and candidate_tested_case(cid, case_id, results)
-                                for cid in candidate_ids
+                                for cid in eligible_ids
                             ),
-                            f"obligation {oid}: {label} has no actually tested {realization} candidate for {case_id}",
+                            f"obligation {oid}: {label} has no tested {realization} candidate for {case_id} "
+                            f"measured on the current basis {basis_candidate_id}; re-measure the pipeline after a basis change",
                         )
                 if item.get("status") in {"CLOSED_WITH_EVIDENCE", "INAPPLICABLE"}:
                     validate_hard_infeasibility(

@@ -134,9 +134,21 @@ def unique_match(expected: str, names: Sequence[str], source: str) -> str:
     raise ValueError(f"{source}: kernel '{expected}' is ambiguous; matches: {', '.join(contains)}")
 
 
+def match_resolved_kernel(resolved: str, names: Sequence[str], source: str) -> str:
+    """Require the resolved kernel identity in each named table."""
+    if resolved in names:
+        return resolved
+    casefold = [name for name in names if name.casefold() == resolved.casefold()]
+    if len(casefold) == 1:
+        return casefold[0]
+    raise ValueError(
+        f"{source}: resolved kernel '{resolved}' missing; available kernels: {', '.join(names)}. "
+        "Refusing to attribute a different kernel's metrics"
+    )
+
+
 def filter_rows_for_kernel(
     rows: list[dict[str, str]],
-    expected: str,
     resolved: str,
     source: str,
     raw_kernel_count: int,
@@ -152,7 +164,7 @@ def filter_rows_for_kernel(
             )
         return rows
 
-    selected_name = resolved if resolved in names else unique_match(expected, names, source)
+    selected_name = match_resolved_kernel(resolved, names, source)
     filtered = [row for row in rows if row_kernel_name(row) == selected_name]
     if not filtered:
         raise ValueError(f"{source}: no rows remain after selecting kernel '{selected_name}'")
@@ -173,7 +185,7 @@ def load_kernel_tables(opprof_dir: str, expected: str) -> tuple[dict[str, list[d
     tables: dict[str, list[dict[str, str]]] = {}
     for csv_name in CSV_NAMES:
         rows = read_csv(metric_csv_path(opprof_dir, csv_name))
-        tables[csv_name] = filter_rows_for_kernel(rows, expected, resolved, csv_name, raw_kernel_count)
+        tables[csv_name] = filter_rows_for_kernel(rows, resolved, csv_name, raw_kernel_count)
     return tables, resolved
 
 
