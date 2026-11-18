@@ -6,6 +6,8 @@ import tilelang
 import tilelang.ascend.language as T
 from tilelang.ascend.language import simd as S
 from tilelang.engine.lower import lower
+from tvm import tirx
+from tvm.tirx.script.builder.ir import bind as _bind
 
 N = 64
 
@@ -402,3 +404,28 @@ def test_update_mask_keeps_supported_predicate_widths(width):
 def test_interleave_keeps_supported_predicate_widths(api, width):
     source = lower(_interleave_kernel(api, width), target="ascend").kernel_source
     assert f"simd_inst::{api}_b{width}(" in source
+
+
+@pytest.mark.parametrize("width", [64, 2**32 + 32])
+def test_codegen_rejects_raw_intrinsic_width(width):
+    """IR built without the Python helpers still hits the codegen backstop.
+
+    ``2**32 + 32`` is the interesting case: narrowing the IntImm to ``int``
+    before the check would turn it into a legal-looking ``32`` and silently
+    emit a b32 helper, so the width is validated at its full 64-bit value.
+    """
+
+    @T.prim_func
+    def main(Cnt: T.Tensor((1,), "int32"), Dst: T.Tensor((N,), "int32")):
+        with T.Kernel(1):
+            cnt = T.alloc_shared((1,), "int32")
+            dst = T.alloc_shared((N,), "int32")
+            T.copy(Cnt, cnt)
+            with T.SimdVF():
+                full = S.pset(32)
+                mask = _bind(tirx.call_intrin("boolx256", tirx.op.Op.get("tl.simd.update_mask"), cnt[0], width))
+                S.vsts(dst[0], S.vdup(T.int32(1), T.int32, mask), full)
+            T.copy(dst, Dst)
+
+    with pytest.raises(Exception, match=r"update_mask supports predicate widths 8, 16 and 32"):
+        lower(main, target="ascend")
