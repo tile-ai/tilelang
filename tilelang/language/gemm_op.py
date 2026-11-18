@@ -68,33 +68,38 @@ def _gemm_dense_slots(
     C_shape = retrieve_shape(C_region)
 
     for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
-        assert len(shape) >= 2, f"current only support {name} as a 2D or higher-order tensor"
+        if len(shape) < 2:
+            raise ValueError(f"current only support {name} as a 2D or higher-order tensor")
         for i in range(len(shape) - 2):
-            assert shape[i] == 1, (
-                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
-            )
+            if shape[i] != 1:
+                raise ValueError(
+                    f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+                )
 
     M, N = C_shape[-2], C_shape[-1]
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
     N_B = B_shape[-2] if transpose_B else B_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert _prove_equal(M_A, M), f"{api_name} M shape check failed: M_A = {M_A}, M_C = {M}"
-    assert _prove_equal(K, K_B), f"{api_name} K shape check failed: K_A = {K}, K_B = {K_B}"
+    if not _prove_equal(M_A, M):
+        raise ValueError(f"{api_name} M shape check failed: M_A = {M_A}, M_C = {M}")
+    if not _prove_equal(K, K_B):
+        raise ValueError(f"{api_name} K shape check failed: K_A = {K}, K_B = {K_B}")
     if use_2cta:
         # In 2CTA mode each CTA holds half of B along N, so N_B should be N // 2
-        assert _prove_equal(N_B * 2, N), f"{api_name} N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2"
+        if not _prove_equal(N_B * 2, N):
+            raise ValueError(f"{api_name} N shape check failed for 2CTA: N_B = {N_B}, expected N_C / 2 = {N} / 2")
     else:
-        assert _prove_equal(N_B, N), f"{api_name} N shape check failed: N_B = {N_B}, N_C = {N}"
+        if not _prove_equal(N_B, N):
+            raise ValueError(f"{api_name} N shape check failed: N_B = {N_B}, N_C = {N}")
 
     for name, dim in (("M", M), ("N", N), ("K", K)):
         if not isinstance(dim, tirx.IntImm):
             raise ValueError(f"{api_name} requires static tile dimensions, but {name} is symbolic: {dim}")
 
     if mbar is not None:
-        assert isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)), (
-            f"mbar for {api_name} must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}"
-        )
+        if not isinstance(mbar, (tirx.Buffer, tirx.BufferLoad)):
+            raise ValueError(f"mbar for {api_name} must be a tirx.Buffer or tirx.BufferLoad, but got {type(mbar)}")
         mbar = to_buffer_region(mbar, access_type="rw")
     C_coords = [r.min for r in C_region.region[-2:]]
     # Convert BufferRegion to tl.region calls for arguments

@@ -245,7 +245,7 @@ def test_gemm_blockscaled_records_use_2cta_and_sf_layout():
 
 
 def test_gemm_blockscaled_checks_2cta_n_extent():
-    with pytest.raises(AssertionError, match="2CTA"):
+    with pytest.raises(ValueError, match="2CTA"):
 
         @T.prim_func
         def main(A: T.Tensor((128, 128), T.float8_e4m3fn), B: T.Tensor((128, 128), T.float8_e4m3fn)):
