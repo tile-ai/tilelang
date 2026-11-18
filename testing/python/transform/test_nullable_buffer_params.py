@@ -1,4 +1,5 @@
 import torch
+import pytest
 import tilelang
 import tilelang.testing
 from tilelang import language as T
@@ -100,17 +101,8 @@ def test_nullable_single_source_shape():
     kernel(None)
 
 
-def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present():
-    """Test that unused buffers sharing a symbolic shape var can both be None.
-
-    Repro for:
-      - Two (or more) unused buffers have shape (m,)
-      - All buffers that mention `m` are passed as None
-      - Another (non-null) tensor argument exists, but does not mention `m`
-
-    TVM requires at least one non-null buffer to bind `m` when it appears in multiple
-    buffers. TileLang should handle this gracefully for truly-unused nullable buffers.
-    """
+def _get_nullable_shared_shape_kernel():
+    """Build the TVM-FFI kernel used by nullable-first device-ID tests."""
 
     @tilelang.jit(execution_backend="tvm_ffi")
     def get_kernel():
@@ -125,19 +117,66 @@ def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present()
             with T.Kernel(1, threads=32):
                 fragment = T.alloc_fragment((1,), T.float32)
                 T.copy(out[0], fragment)
+                for i in T.Parallel(1):
+                    fragment[i] = fragment[i] + 1.0
                 T.copy(fragment, out[0])
 
         return test_kernel
 
-    kernel = get_kernel()
+    return get_kernel()
+
+
+def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present():
+    """Test nullable unused buffers with a non-null tensor on the default device."""
+
+    kernel = _get_nullable_shared_shape_kernel()
 
     out = torch.randn((1,), device="cuda", dtype=torch.float16)
-    out_ref = out.clone()
+    out_ref = out + 1.0
 
     # Both `a` and `b` are None; they also share the symbolic shape var `m`.
     # This should run because `a`/`b` are unused by the kernel body.
     kernel(None, None, out)
     torch.testing.assert_close(out, out_ref)
+
+
+def test_nullable_shared_shape_with_no_source_buffers_but_other_tensor_present_on_cuda1():
+    """Test device-ID binding when cuda:0 is current but the tensor is on cuda:1."""
+
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+
+    cuda0_capability = torch.cuda.get_device_capability(0)
+    cuda1_capability = torch.cuda.get_device_capability(1)
+    if cuda0_capability != cuda1_capability:
+        pytest.skip(
+            "reuses one JIT kernel compiled for cuda:0, so both devices must have "
+            "the same compute capability; "
+            f"cuda:0={cuda0_capability}, cuda:1={cuda1_capability}"
+        )
+
+    kernel = _get_nullable_shared_shape_kernel()
+    original_device = torch.cuda.current_device()
+
+    # Compile the kernel on cuda:0, then invoke it on a cuda:1 tensor while
+    # cuda:0 remains the current device. This exercises the FFI device switch.
+    with torch.cuda.device(0):
+        out_cuda0 = torch.full((1,), 1.0, device="cuda:0", dtype=torch.float16)
+        kernel(None, None, out_cuda0)
+        torch.testing.assert_close(out_cuda0, torch.full_like(out_cuda0, 2.0))
+
+        out_cuda1 = torch.full((1,), 3.0, device="cuda:1", dtype=torch.float16)
+        expected_cuda1 = torch.full_like(out_cuda1, 4.0)
+        assert torch.cuda.current_device() == 0
+
+        # The tensor's device must drive the packed FFI device binding, even
+        # though cuda:0 is current. The output change proves the kernel ran.
+        kernel(None, None, out_cuda1)
+        torch.testing.assert_close(out_cuda1, expected_cuda1)
+        assert torch.cuda.current_device() == 0
+
+    # The context manager must restore the device that was current on entry.
+    assert torch.cuda.current_device() == original_device
 
 
 if __name__ == "__main__":
