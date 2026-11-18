@@ -1748,6 +1748,39 @@ private:
       return;
     syncs_inserted_.insert(obj);
   }
+  /*!
+   * \brief Return \p bytes with a variable for the lane of a ramp.
+   *
+   * The variable is bound to the lanes in \p analyzer, so a proof about the
+   * result covers every lane.
+   */
+  static PrimExpr LaneAddress(arith::Analyzer *analyzer, const PrimExpr &bytes,
+                              const char *name) {
+    if (const RampNode *ramp = bytes.as<RampNode>()) {
+      Var lane(name, ramp->base.dtype());
+      analyzer->Bind(lane, Range::FromMinExtent(0, ramp->lanes));
+      return ramp->base + lane * ramp->stride;
+    }
+    return bytes;
+  }
+
+  /*! \brief Whether \p analyzer proves two scalar byte addresses differ. */
+  static bool ProveDistinct(arith::Analyzer *analyzer, PrimExpr prev_bytes,
+                            PrimExpr curr_bytes) {
+    if (!prev_bytes.dtype().is_scalar() || !curr_bytes.dtype().is_scalar()) {
+      return false;
+    }
+    if (prev_bytes.dtype() != curr_bytes.dtype()) {
+      if (prev_bytes.dtype().bits() < curr_bytes.dtype().bits()) {
+        prev_bytes = tirx::Cast(curr_bytes.dtype(), prev_bytes);
+      } else {
+        curr_bytes = tirx::Cast(prev_bytes.dtype(), curr_bytes);
+      }
+    }
+    ICHECK(prev_bytes.dtype() == curr_bytes.dtype());
+    return analyzer->CanProve(tirx::NE(prev_bytes, curr_bytes));
+  }
+
   bool PointerAccessIsDisjoint(const AccessEntry &lhs, const AccessEntry &rhs) {
     if (lhs.touched.size() != 1 || rhs.touched.size() != 1) {
       return false;
@@ -2111,6 +2144,50 @@ private:
         prev_cset = prev_cset.Substitute(prev_sub);
         curr_cset = curr_cset.Substitute(curr_sub);
       }
+      // The ranges of the thread and iteration variables alone often show that
+      // the two addresses differ. A proof under fewer facts also holds under
+      // the full constraint sets, and populating both sets costs most of the
+      // time of a pair, so try the ranges first.
+      {
+        arith::Analyzer ranges;
+        std::unordered_set<const VarNode *> bound;
+        if (loop != nullptr) {
+          ranges.Bind(loop->loop_var,
+                      Range::FromMinExtent(loop->min, adjusted_extent));
+          bound.insert(loop->loop_var.get());
+        }
+        // Bind the constant ranges of both sets first, such as those of the
+        // threads. The analyzer bounds a range when it binds it, so a range
+        // that reads another variable is bound after the constant ones. As in
+        // the full proof, each read of mutable state in a range becomes a
+        // fresh variable, so the two threads never share a register value.
+        for (bool constant : {true, false}) {
+          for (const ConstrSet *set : {&prev_cset, &curr_cset}) {
+            for (const Constr &c : set->constrs_) {
+              if (c.kind == Constr::kBindRange &&
+                  (as_const_int(c.range->min) != nullptr &&
+                   as_const_int(c.range->extent) != nullptr) == constant &&
+                  bound.insert(c.var.get()).second) {
+                Constr fresh = c.FreshenReads();
+                ranges.Bind(fresh.var, fresh.range);
+              }
+            }
+          }
+        }
+        if (use_distinct_threads) {
+          ranges.EnterConstraint(thread_condition);
+        }
+        PrimExpr prev_address = LaneAddress(
+            &ranges, ranges.Simplify(Substitute(prev_indice_bytes, prev_sub)),
+            "prev_idx");
+        PrimExpr curr_address = LaneAddress(
+            &ranges, ranges.Simplify(Substitute(curr_indice_bytes, curr_sub)),
+            "curr_idx");
+        if (ProveDistinct(&ranges, prev_address, curr_address)) {
+          range_is_overlap = false;
+          break;
+        }
+      }
       // Lower to predicates before merging: the analyzer already binds the loop
       // variable to an adjusted range above while each side still carries its
       // full range, so keeping the binds would trip the re-bind check.
@@ -2119,43 +2196,18 @@ private:
           .Populate(analyzer);
       bool provably_disjoint = false;
 
-      prev_indice_bytes =
-          analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub));
-      curr_indice_bytes =
-          analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub));
-
-      // Handle Ramp expressions by creating a new index variable
-      if (const RampNode *prev_ramp = prev_indice_bytes.as<RampNode>()) {
-        DataType prev_index_dtype = prev_ramp->base.dtype();
-        Var prev_idx("prev_idx", prev_index_dtype);
-        analyzer.Bind(prev_idx, Range::FromMinExtent(0, prev_ramp->lanes));
-
-        prev_indice_bytes = prev_ramp->base + prev_idx * prev_ramp->stride;
-      }
-
-      if (const RampNode *curr_ramp = curr_indice_bytes.as<RampNode>()) {
-        DataType curr_index_dtype = curr_ramp->base.dtype();
-        Var curr_idx("curr_idx", curr_index_dtype);
-        analyzer.Bind(curr_idx, Range::FromMinExtent(0, curr_ramp->lanes));
-        curr_indice_bytes = curr_ramp->base + curr_idx * curr_ramp->stride;
-      }
+      prev_indice_bytes = LaneAddress(
+          &analyzer, analyzer.Simplify(Substitute(prev_indice_bytes, prev_sub)),
+          "prev_idx");
+      curr_indice_bytes = LaneAddress(
+          &analyzer, analyzer.Simplify(Substitute(curr_indice_bytes, curr_sub)),
+          "curr_idx");
 
       // Now handle the simplified expressions
       if (prev_indice_bytes.dtype().is_scalar() &&
           curr_indice_bytes.dtype().is_scalar()) {
-        if (prev_indice_bytes.dtype() != curr_indice_bytes.dtype()) {
-          if (prev_indice_bytes.dtype().bits() <
-              curr_indice_bytes.dtype().bits()) {
-            prev_indice_bytes =
-                tirx::Cast(curr_indice_bytes.dtype(), prev_indice_bytes);
-          } else {
-            curr_indice_bytes =
-                tirx::Cast(prev_indice_bytes.dtype(), curr_indice_bytes);
-          }
-        }
-        ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
         provably_disjoint =
-            analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
+            ProveDistinct(&analyzer, prev_indice_bytes, curr_indice_bytes);
       } else {
         try {
           auto prev_min = analyzer.Simplify(
