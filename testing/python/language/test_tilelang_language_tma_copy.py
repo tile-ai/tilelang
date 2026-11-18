@@ -841,6 +841,74 @@ def test_tma_copy_cluster_mask_multicast():
         torch.testing.assert_close(B[rank], A)
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("merged", [False, True])
+def test_bulk_and_raw_descriptor_share_allocation(merged):
+    import re
+    import torch
+
+    @T.prim_func
+    def mixed(A: T.Tensor((128,), T.float16), B: T.Tensor((128,), T.float16), C: T.Tensor((16,), T.float16)):
+        with T.Kernel(1, threads=128):
+            mixed_shared = T.alloc_shared((128,), T.float16)
+            mbar = T.alloc_barrier(1)
+            if merged:
+                live_shared = T.alloc_shared((16,), T.float16)
+                T.copy(A[0:16], live_shared, prefer_instruction="sync")
+            T.copy(A, mixed_shared, prefer_instruction="tma")
+            T.copy(mixed_shared, B, prefer_instruction="sync")
+            T.sync_threads()
+            if T.get_thread_binding() == 0:
+                T.mbarrier_expect_tx(mbar, 256)
+                T.tma_load(
+                    T.create_tma_descriptor(6, 1, A.data, 128, 2, 128, 1, 0, 0, 0, 0),
+                    mbar[0],
+                    T.access_ptr(mixed_shared, "w"),
+                    0,
+                    0,
+                )
+                T.barrier_arrive(mbar)
+            T.barrier_wait(mbar, 0)
+            T.copy(mixed_shared, B, prefer_instruction="sync")
+            if merged:
+                T.copy(live_shared, C, prefer_instruction="sync")
+            else:
+                T.copy(A[0:16], C, prefer_instruction="sync")
+
+    kernel = tilelang.compile(mixed, out_idx=[1, 2], target="cuda")
+    source = kernel.get_kernel_source()
+    assert re.search(r"extern __shared__ __align__\(1024\)", source)
+    if merged:
+        alias = re.search(r"void\* mixed_shared = .*buf_dyn_shmem \+ (\d+)", source)
+        assert alias is not None
+        assert int(alias.group(1)) % 1024 == 0
+    a = torch.randn(128, dtype=torch.float16, device="cuda")
+    b, c = kernel(a)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(b, a, rtol=0, atol=0)
+    torch.testing.assert_close(c, a[:16], rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_bulk_only_retains_small_arena_alignment():
+    import re
+    import torch
+
+    @T.prim_func
+    def bulk(A: T.Tensor((128,), T.float16), B: T.Tensor((128,), T.float16)):
+        with T.Kernel(1, threads=128):
+            shared = T.alloc_shared((128,), T.float16)
+            T.copy(A, shared, prefer_instruction="tma")
+            T.copy(shared, B, prefer_instruction="tma")
+
+    kernel = tilelang.compile(bulk, out_idx=[1], target="cuda")
+    assert re.search(r"extern __shared__ __align__\(16\)", kernel.get_kernel_source())
+    a = torch.randn(128, dtype=torch.float16, device="cuda")
+    torch.testing.assert_close(kernel(a), a, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
     # test_tma_copy_pipeline_2_stages()

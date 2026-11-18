@@ -29,6 +29,10 @@ static constexpr const char *kAsyncCopyNoImplicitCommitWait =
 static constexpr const char *kPipelineMbarPhaseExpr =
     "tl.pipeline_mbar_phase_expr";
 
+// Alignment required by this lowered shared-memory instruction, not all uses
+// of its allocation. Missing metadata requires a conservative fallback.
+static constexpr const char *kSmemAlignment = "tl.smem_alignment";
+
 static constexpr const char *kLocalVarInit = "tl.local_var_init";
 static constexpr const char *kNonRestrictParams = "tl.non_restrict_params";
 static constexpr const char *kLexicalAllocScope = "lexical_alloc_scope";
@@ -58,6 +62,9 @@ inline ffi::Optional<PrimExpr> GetAnnotatedMbarPhaseExpr(
 static constexpr const char *kDebugMergeSharedMemoryAllocations =
     "tl.debug_merge_shared_memory_allocations";
 static constexpr const char *kSmemAlignmentMap = "tl.smem_alignment_map";
+// Required base alignment of the dynamic shared-memory arena after merging.
+static constexpr const char *kDynamicSmemAlignment =
+    "tl.dynamic_smem_alignment";
 static constexpr const char *kDisableSafeMemoryLegalize =
     "tl.disable_safe_memory_legalize";
 static constexpr const char *kConfigIndexBitwidth = "tl.config_index_bitwidth";
