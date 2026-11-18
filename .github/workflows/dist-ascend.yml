@@ -473,19 +473,7 @@ jobs:
           TEST_MARKERS: ${{ matrix.backend.unit_markers }}
         run: |
           source .venv/bin/activate
-          # Temporary: the scope-isolation cases below fail against the current
-          # LegalizePTOVMIMemoryAccess (assertion facts leak across scopes).
-          # The "[after-" prefix covers all after-<scope> parametrizations.
-          # Remove these deselects once the pass is fixed upstream.
-          # The autotune set-inputs file is ignored: it drives cross-device
-          # (multi-NPU) copies that can fail or hang the job depending on the
-          # runner's card topology; ci.yml still runs it against source builds.
-          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" \
-            --deselect "testing/ascend/transform/test_ascend_pto_vmi_memory_access.py::test_wrapping_condition_keeps_branch_assertions_scoped[else]" \
-            --deselect "testing/ascend/transform/test_ascend_pto_vmi_memory_access.py::test_wrapping_condition_keeps_branch_assertions_scoped[after]" \
-            --deselect "testing/ascend/transform/test_ascend_pto_vmi_memory_access.py::test_body_assertions_stay_in_their_statement_scope[after-" \
-            --ignore testing/ascend/autotune/test_tilelang_ascend_autotune_set_inputs.py \
-            testing/ascend
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" testing/ascend
 
       - name: Summarize ${{ matrix.backend.name }} results
         if: ${{ always() }}
