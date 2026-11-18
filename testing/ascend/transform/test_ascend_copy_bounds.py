@@ -215,6 +215,86 @@ def test_mx_padding_rejects_an_incomplete_physical_scale_group():
         transform.AscendInsertOOBPadding()(before)
 
 
+@pytest.mark.parametrize("batch_begin", [0, 2, 3, 5])
+def test_batch_tail_clamps_without_fill(batch_begin):
+    before = _copy_module((3, 16, 32), (5, 16, 32), [batch_begin, 0, 0], [4, 16, 32], dst_min=[1, 0, 0], dst_extent=[4, 16, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    valid_batches = max(3 - batch_begin, 0)
+    assert int(copy.args[0].args[2]) == valid_batches
+    assert int(copy.args[1].args[2]) == valid_batches
+    assert not calls(after, "tl.tileop.fill")
+
+
+@pytest.mark.parametrize("rank", [2, 3])
+def test_single_matrix_symbolic_origin_preserves_legacy_behavior(rank):
+    # A fixed selector need not have a statically provable nonnegative origin.
+    origin = tirx.Var("origin", "int32")
+    dst_origin = origin * 16 if rank == 2 else origin
+    if rank == 2:
+        before = _copy_module((32, 16), (32, 16), [0, 0], [16, 16], dst_min=[dst_origin, 0], dst_extent=[16, 16])
+    else:
+        before = _copy_module((4, 16, 16), (4, 16, 16), [origin, 0, 0], [1, 16, 16], dst_min=[origin, 0, 0], dst_extent=[1, 16, 16])
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    assert tvm.arith.Analyzer().can_prove_equal(copy.args[1].args[0].indices[0], dst_origin)
+    assert not nodes(after, tirx.IfThenElse)
+
+    target = tvm.target.Target("ascend")
+    after["main"] = after["main"].with_attr("target", target)
+    with target:
+        lowered = transform.AscendLowerTileOp()(after)
+    (dma,) = calls(lowered, "tl.ascend_copy_gm_to_cbuf")
+    assert len(dma.args) == 12
+
+
+@pytest.mark.parametrize("batch_begin", [0, 2, 3])
+def test_batch_padding_leaves_extra_destination_capacity_untouched(batch_begin):
+    before = _copy_module((3, 16, 32), (5, 16, 32), [batch_begin, 0, 0], [2, 16, 32], dst_min=[1, 0, 0], dst_extent=[4, 16, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    if batch_begin == 0:
+        tvm.ir.assert_structural_equal(after, before)
+        return
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    valid_batches = max(3 - batch_begin, 0)
+    assert int(copy.args[0].args[2]) == valid_batches
+    assert not calls(after, "tl.tileop.fill")
+
+
+def test_batch_symbolic_origins_use_common_axis_clamping():
+    origin = tirx.Var("origin", "int32")
+    before = _copy_module((8, 16, 32), (8, 16, 32), [origin, 0, 0], [2, 16, 32], dst_min=[origin, 0, 0], dst_extent=[2, 16, 32])
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    assert copy.args[0].args[0].indices[0].same_as(origin)
+    assert copy.args[1].args[0].indices[0].same_as(origin)
+
+
+@pytest.mark.parametrize("batch_begin", [1, 3])
+@pytest.mark.parametrize("staged", [False, True])
+def test_matrix_tail_fills_only_valid_batches(batch_begin, staged):
+    dst_shape = ([2] if staged else []) + [5, 32, 32]
+    dst_min = ([1] if staged else []) + [1, 0, 0]
+    dst_extent = ([1] if staged else []) + [4, 32, 32]
+    before = _copy_module((3, 20, 10), dst_shape, [batch_begin, 0, 0], [4, 32, 32], dst_min=dst_min, dst_extent=dst_extent)
+    after = transform.AscendInsertOOBPadding()(before)
+    fills = calls(after, "tl.tileop.fill")
+    if batch_begin == 3:
+        assert not fills
+        return
+    assert len(fills) == 2  # M and N tails, with no whole-batch fill.
+    loops = nodes(after, tirx.For)
+    assert len(loops) == 2
+    for loop in loops:
+        assert int(loop.extent) == 2
+        (fill,) = calls(loop.body, "tl.tileop.fill")
+        indices = fill.args[0].args[0].indices
+        if staged:
+            assert int(indices[0]) == 1
+        first_batch = tirx.stmt_functor.substitute(indices[-3], {loop.loop_var: 0})
+        assert int(tvm.arith.Analyzer().simplify(first_batch)) == 1
+
+
 @pytest.mark.parametrize("layout", ["k-contiguous", "mn-contiguous", "transpose-to-k-contiguous"])
 @pytest.mark.parametrize("explicit_task", [False, True], ids=["implicit-task", "explicit-task"])
 def test_mx_dynamic_tail_guard_stays_inside_copy_task(layout, explicit_task):

@@ -228,6 +228,12 @@ public:
     buffer_version_overrides_ = std::move(overrides);
   }
 
+  void SetBufferVersionModes(const BufferVersionModeMap &modes) {
+    for (const auto &[storage, mode] : modes)
+      if (mode == "write_counter")
+        write_counters_.insert(storage);
+  }
+
   // Set the user-declared manual multi-buffer table (from
   // annotate_manual_multi_buffer), threaded into dependency analysis so
   // cross-iteration distances are solved per access pair.
@@ -294,6 +300,7 @@ private:
   std::map<std::string, int64_t> memory_limits_;
   AivStorageMap aiv_storages_;
   BufferVersionMap buffer_version_overrides_;
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> write_counters_;
   BufferVersionMap manual_buffer_versions_;
   MultiBufferOwnerMap multi_buffer_owners_;
   ConflictHintList root_conflict_hints_;
@@ -803,6 +810,14 @@ std::vector<std::shared_ptr<IRStructure>> ScheduleBuilder::Z3SchedulePython(
       }
     }
 
+    for (const Var &storage : write_counters_) {
+      for (size_t i = 0; i < n; ++i)
+        if (nodes[i]->TouchesStorage(storage))
+          for (size_t j = i + 1; j < n; ++j)
+            if (nodes[j]->TouchesStorage(storage))
+              data_deps.emplace_back(i, j, 0);
+    }
+
     // Collect resource dependencies
     for (size_t i = 0; i < n; ++i) {
       for (size_t j = i + 1; j < n; ++j) {
@@ -1248,7 +1263,8 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       data_deps.emplace_back(i, j, dep.distance, latency);
     } else {
       int64_t distance = 1;
-      if (dep.storage.has_value()) {
+      if (dep.storage.has_value() &&
+          !write_counters_.count(dep.storage.value())) {
         Var storage = storage_groups_.Representative(dep.storage.value());
         auto it = storage_version_id.find(storage);
         if (it != storage_version_id.end()) {
@@ -1276,6 +1292,23 @@ void ScheduleBuilder::Z3SchedulePythonLoop(ControlNode *ctrl,
       if (manual_schedule &&
           (NodeResourceMask(nodes[i]) & NodeResourceMask(nodes[j])) != 0) {
         pipe_order_deps.emplace_back(i, j);
+      }
+    }
+  }
+
+  // A dynamic write clock cannot be translated into a lexical stage offset.
+  // Preserve access order and equal stages, without treating its ring width
+  // as an iteration distance. Other storages keep their original constraints.
+  for (const Var &storage : write_counters_) {
+    for (size_t i = 0; i < n; ++i) {
+      if (!nodes[i]->TouchesStorage(storage))
+        continue;
+      for (size_t j = i + 1; j < n; ++j) {
+        if (!nodes[j]->TouchesStorage(storage))
+          continue;
+        data_deps.emplace_back(i, j, 0, 0);
+        stage_order_deps.emplace_back(i, j);
+        stage_order_deps.emplace_back(j, i);
       }
     }
   }
@@ -1656,6 +1689,7 @@ static void ScheduleSingleKernel(const Stmt &kernel_body, Target target,
     }
   }
   unit_builder.SetBufferVersionOverrides(metadata.buffer_versions);
+  unit_builder.SetBufferVersionModes(metadata.buffer_version_modes);
   unit_builder.SetManualBufferVersions(metadata.manual_buffer_versions);
   unit_builder.SetRootConflictHints(metadata.root_conflict_hints);
   unit_builder.ScheduleList(ir_structure);

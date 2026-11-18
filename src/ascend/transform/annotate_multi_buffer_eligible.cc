@@ -14,9 +14,11 @@
  *
  *  Automatic claims form the deepest disjoint loop frontier that completely
  *  covers a storage's ordinary accesses; owner-external fills may initialize
- *  every physical version. Every claimed loop must write the storage before
- *  any read. If descendant loops cover only part of an epoch (for example, a
- *  row-writing loop followed by a whole-buffer consumer), the claim is
+ *  every physical version in ordinary modes. Ordinary owners must write the
+ *  storage before any read; write-counter owners may retain an earlier value,
+ *  but their updates must still be write-first. If descendant loops cover
+ *  only part of an epoch (for example, a row-writing loop followed by a
+ *  whole-buffer consumer), the claim is
  *  promoted to a write-first ancestor. Independent sibling loops may
  *  therefore become multiple owners of one storage.
  *
@@ -45,6 +47,7 @@
 #include <vector>
 
 #include "ascend/transform/auto_schedule/kernel_rewriter.h"
+#include "ascend/transform/auto_schedule/memory_detector.h"
 #include "ascend/transform/auto_schedule/multi_buffer.h"
 #include "ascend/transform/auto_schedule/scheduled_tir.h"
 #include "ascend/transform/buffer_version.h"
@@ -172,6 +175,9 @@ AccessOrder AssumeForExecutes(AccessOrder body) {
 
 class WriteFirstClassifier : public StmtExprVisitor {
 public:
+  explicit WriteFirstClassifier(bool physical_reads = false)
+      : physical_reads_(physical_reads) {}
+
   AccessOrder Classify(const Stmt &s, const Var &storage) {
     target_storage_ = storage;
     result_ = AccessOrder::kUntouched;
@@ -187,6 +193,7 @@ public:
   }
 
 private:
+  bool physical_reads_;
   Var target_storage_;
   AccessOrder result_ = AccessOrder::kUntouched;
 
@@ -326,6 +333,20 @@ private:
   }
 
   void VisitExpr_(const CallNode *op) final {
+    if (physical_reads_) {
+      // Some TileOps encode a destination as `w` even when they accumulate
+      // onto it (for example reduce(clear=false)). Reuse physical access
+      // accounting for the input side; this does not require dense writes.
+      MemoryAccessDetector accesses(
+          MemoryAccessDetector::AccessMode::kPhysical);
+      accesses.Analyze(Evaluate(ffi::GetRef<Call>(op)));
+      for (const BufferRegion &read : accesses.GetReadRegions()) {
+        if (read->buffer->data.same_as(target_storage_)) {
+          result_ = AccessOrder::kReadFirst;
+          return;
+        }
+      }
+    }
     static const Op &region_op = region();
     static const auto access_ptr_op = Op::Get("tl.access_ptr");
 
@@ -451,14 +472,19 @@ GetWriteFirstOrder(const std::vector<std::shared_ptr<IRStructure>> &nodes) {
 // and prove that every later read executes only inside that condition. This
 // recovers both equal guards and exhaustive opposite guards without rebuilding
 // an IfThenElse tree.
+// `writes_only` checks how an update starts, allowing read-only Tasks to retain
+// the preceding value. It includes implicit reads of writing Tasks, but keeps
+// the same storage-level and For-execution assumptions as ordinary eligibility.
 class IRWriteFirstClassifier {
 public:
   static AccessOrder
   Classify(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-           const Var &storage, const ConstrSet &outer_ctx) {
+           const Var &storage, const ConstrSet &outer_ctx,
+           bool writes_only = false) {
     State state;
     for (const IRStructure *node : GetWriteFirstOrder(nodes)) {
-      ProcessNode(node, storage, outer_ctx, &state);
+      if (!writes_only || node->WritesStorage(storage))
+        ProcessNode(node, storage, outer_ctx, &state, writes_only);
       if (state.unsafe)
         return AccessOrder::kReadFirst;
     }
@@ -513,8 +539,8 @@ private:
   }
 
   static AccessOrder ClassifyPayload(const IRStructure *node,
-                                     const Var &storage) {
-    WriteFirstClassifier classifier;
+                                     const Var &storage, bool writes_only) {
+    WriteFirstClassifier classifier(/*physical_reads=*/writes_only);
     if (node->IsTask()) {
       return classifier.Classify(static_cast<const TaskNode *>(node)->stmt,
                                  storage);
@@ -527,13 +553,18 @@ private:
       return header;
     }
 
-    AccessOrder body =
-        Classify(control->children, storage, control->GetLoopBodyContext());
+    // Keep the legacy loop summary, including its conservative loss of
+    // incoming conditional writes and earlier-trip writes before an RMW.
+    // This only guides owner inference; explicit write-counter owners can
+    // express updates that the four-state heuristic does not recognize.
+    AccessOrder body = Classify(control->children, storage,
+                                control->GetLoopBodyContext(), writes_only);
     return SeqCompose(header, AssumeForExecutes(body));
   }
 
   static void ProcessNode(const IRStructure *node, const Var &storage,
-                          const ConstrSet &outer_ctx, State *state) {
+                          const ConstrSet &outer_ctx, State *state,
+                          bool writes_only) {
     PrimExpr active_guard = Bool(true);
     WriteFirstClassifier classifier;
     for (const auto &guard : node->GetGuards()) {
@@ -553,23 +584,24 @@ private:
                       active_guard, outer_ctx, state);
       }
     }
-    ProcessAccess(ClassifyPayload(node, storage), active_guard, outer_ctx,
-                  state);
+    ProcessAccess(ClassifyPayload(node, storage, writes_only), active_guard,
+                  outer_ctx, state);
   }
 };
 
 // ---------------------------------------------------------------------------
 // MultiBufferOwnerPlanner: for each storage, choose the deepest set of
 // disjoint structural loops that covers every ordinary access. Independently
-// rewritable fills may remain outside the frontier. A loop is selected only
-// when its descendants do not already provide complete coverage and its
-// stage-ordered body is write-first.
+// rewritable fills may remain outside the frontier in ordinary modes. A loop
+// is selected only when its descendants do not already provide complete
+// coverage and its stage-ordered body satisfies the mode's write-first rule.
 // ---------------------------------------------------------------------------
 class MultiBufferOwnerPlanner {
 public:
   static ControlStorageClaims
   Plan(const std::vector<std::shared_ptr<IRStructure>> &root,
-       const StorageSet &excluded_storages, const L0StorageGroups &groups) {
+       const StorageSet &excluded_storages, const StorageSet &write_counters,
+       const L0StorageGroups &groups) {
     MultiBufferOwnerPlanner planner;
     StorageSet seen;
     for (const auto &node : root) {
@@ -579,7 +611,14 @@ public:
             excluded_storages.count(representative))
           continue;
         Array<Var> members = groups.Members(storage);
-        CoveragePlan plan = planner.PlanList(root, members);
+        bool write_counter = write_counters.count(representative);
+        CoveragePlan plan = planner.PlanList(root, members, write_counter);
+        ICHECK(!write_counter || (plan.IsComplete() && !plan.owners.empty()))
+            << "Cannot infer complete loop owners for write_counter storage "
+            << storage->name_hint
+            << "; put every access, including fills, inside a loop and write "
+               "each new value before updating it, or select the update "
+               "scope explicitly with multi_buffer_eligible";
         if (!plan.IsComplete())
           continue;
         for (ControlNode *owner : plan.owners)
@@ -587,6 +626,11 @@ public:
             planner.claims_[owner].push_back(member);
       }
     }
+    for (const Var &storage : write_counters)
+      ICHECK(excluded_storages.count(storage) ||
+             seen.count(groups.Representative(storage)))
+          << "write_counter storage " << storage->name_hint
+          << " has no accesses from which to infer an owner loop";
     return std::move(planner.claims_);
   }
 
@@ -624,13 +668,15 @@ private:
 
   ControlStorageClaims claims_;
 
-  static CoveragePlan PlanLeaf(const TaskNode *task,
-                               const Array<Var> &members) {
+  static CoveragePlan PlanLeaf(const TaskNode *task, const Array<Var> &members,
+                               bool write_counter) {
     CoveragePlan result;
     for (const Var &storage : members) {
       if (!task->TouchesStorage(storage))
         continue;
-      bool broadcast_fill = members.size() == 1 &&
+      // A write-counter fill creates a value and must belong to an owner;
+      // it cannot initialize every slot outside the generation protocol.
+      bool broadcast_fill = !write_counter && members.size() == 1 &&
                             !task->GuardsTouchStorage(storage) &&
                             CanBroadcastFillToStorage(task->stmt, storage);
       if (!broadcast_fill)
@@ -642,29 +688,36 @@ private:
   }
 
   CoveragePlan PlanList(const std::vector<std::shared_ptr<IRStructure>> &nodes,
-                        const Array<Var> &members) {
+                        const Array<Var> &members, bool write_counter) {
     CoveragePlan result;
     for (const auto &node : nodes)
-      result.Merge(PlanNode(node.get(), members));
+      result.Merge(PlanNode(node.get(), members, write_counter));
     return result;
   }
 
-  CoveragePlan PlanNode(IRStructure *node, const Array<Var> &members) {
+  CoveragePlan PlanNode(IRStructure *node, const Array<Var> &members,
+                        bool write_counter) {
     if (node->IsTask())
-      return PlanLeaf(static_cast<const TaskNode *>(node), members);
+      return PlanLeaf(static_cast<const TaskNode *>(node), members,
+                      write_counter);
 
     auto *control = static_cast<ControlNode *>(node);
-    CoveragePlan result = PlanList(control->children, members);
+    CoveragePlan result = PlanList(control->children, members, write_counter);
     if (result.CanClaimHere()) {
-      // Each plane must be write-first independently. In particular, a data
-      // reload does not initialize or kill sticky SF contents.
+      // Write clocks allow read-only owners and retained-value reads, but an
+      // update cannot start with RMW. A rejected inner loop can still belong
+      // to an outer owner that defines the new value before that loop.
+      // Check every bound plane independently with the same mode policy.
       bool write_first = true;
       for (const Var &storage : members) {
         AccessOrder order = IRWriteFirstClassifier::Classify(
-            control->children, storage, control->GetLoopBodyContext());
+            control->children, storage, control->GetLoopBodyContext(),
+            /*writes_only=*/write_counter);
         write_first &= order != AccessOrder::kReadFirst;
       }
-      if (write_first) {
+      // A write owner cannot exit before publishing its update. An enclosing
+      // loop may still own a complete update containing this inner break.
+      if (write_first && !(write_counter && control->BodyHasLoopBreak())) {
         result.coverage = Coverage::kCovered;
         result.owners = {control};
       }
@@ -697,13 +750,27 @@ public:
       }
     }
     CollectExplicitStorages(scheduled_tir->tree, &excluded_storages);
+    StorageSet write_counters;
+    for (const auto &[storage, mode] :
+         scheduled_tir->metadata.buffer_version_modes) {
+      if (mode != "write_counter")
+        continue;
+      ICHECK(scheduled_tir->metadata.buffer_versions.count(storage))
+          << "write_counter requires an explicit version count for "
+          << storage->name_hint << "; use (num_versions, \"write_counter\")";
+      ICHECK(!manual_buffers.count(storage))
+          << "write_counter cannot be combined with manual physical versions "
+             "for "
+          << storage->name_hint;
+      write_counters.insert(storage);
+    }
     StorageSet expanded;
     for (const Var &storage : excluded_storages)
       for (const Var &member : groups.Members(storage))
         expanded.insert(member);
     excluded_storages = std::move(expanded);
     ControlStorageClaims claims = MultiBufferOwnerPlanner::Plan(
-        scheduled_tir->tree, excluded_storages, groups);
+        scheduled_tir->tree, excluded_storages, write_counters, groups);
     MultiBufferAnnotator annotator(std::move(claims), std::move(manual_buffers),
                                    std::move(single_version_buffers), groups);
     annotator.RewriteNodes(scheduled_tir->tree);

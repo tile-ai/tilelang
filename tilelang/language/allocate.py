@@ -175,9 +175,8 @@ def alloc_global(shape: ShapeType, dtype: DType, scope="global") -> Buffer:
     it's allocated directly by the corresponding backend APIs, like cudaMalloc. We
     recommend allocating workspace in Torch side and pass it to the kernel via arguments,
     which is managed under the hood by the framework. This API is mainly for testing
-    purposes and some specific purposes.
-
-    NOTE(chaofan): This API may not be available in all backends (e.g. CuteDSL).
+    purposes and some specific purposes. The CuTeDSL backend allocates it per call through
+    the Torch caching allocator instead.
 
     Args:
         shape (tuple): The shape of the buffer to allocate

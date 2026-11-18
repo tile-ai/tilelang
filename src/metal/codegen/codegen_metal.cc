@@ -72,7 +72,7 @@ std::string MetalAddressSpaceForStorageScope(const std::string &scope) {
 } // namespace
 
 void CodeGenTileLangMetal::InitFuncState(const PrimFunc &f) {
-  CodeGenC::InitFuncState(f);
+  CodeGenTileLangCBase::InitFuncState(f);
   emitted_frag_lane_vars_ = false;
   emitted_metal_simdgroup_id_ = false;
   thread_idx_x_var_ = Var();
