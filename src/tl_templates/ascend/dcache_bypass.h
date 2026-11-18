@@ -1,5 +1,7 @@
 #pragma once
 
+#include "tl_templates/ascend/cann_compat.h"
+
 #include <stdint.h>
 
 namespace tl {
@@ -17,16 +19,19 @@ __aicore__ inline T read_gm_bypass_dcache(__gm__ T *addr) {
                 "read_gm_bypass_dcache only supports 1/2/4/8-byte scalar "
                 "types");
   if constexpr (sizeof(T) == 8) {
-    uint64_t bits = asc_load_dev(reinterpret_cast<__gm__ uint64_t *>(addr));
+    uint64_t bits =
+        tl::cann::load_dev(reinterpret_cast<__gm__ uint64_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else if constexpr (sizeof(T) == 4) {
-    uint32_t bits = asc_load_dev(reinterpret_cast<__gm__ uint32_t *>(addr));
+    uint32_t bits =
+        tl::cann::load_dev(reinterpret_cast<__gm__ uint32_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else if constexpr (sizeof(T) == 2) {
-    uint16_t bits = asc_load_dev(reinterpret_cast<__gm__ uint16_t *>(addr));
+    uint16_t bits =
+        tl::cann::load_dev(reinterpret_cast<__gm__ uint16_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else {
-    uint8_t bits = asc_load_dev(reinterpret_cast<__gm__ uint8_t *>(addr));
+    uint8_t bits = tl::cann::load_dev(reinterpret_cast<__gm__ uint8_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   }
 }

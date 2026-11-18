@@ -22,6 +22,13 @@ from tvm.target import Target
 AIBIN = AscendBinaryCache.binary_format
 
 
+@pytest.fixture(autouse=True)
+def fake_cann_context(monkeypatch):
+    from tilelang.contrib import bisheng
+
+    monkeypatch.setattr(bisheng, "get_cann_context", lambda: {"fingerprint": "fixture-sdk-and-templates", "include_dirs": []})
+
+
 def _set_cache_dirs(monkeypatch, tmp_path):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
@@ -225,3 +232,42 @@ def test_ascend_binary_cache_rejects_empty_save(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="empty Ascend binary"):
         AscendBinaryCache.save("empty-save-key", AIBIN, b"")
+
+
+def test_cann_identity_changes_invalidate_both_cache_levels(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from tilelang.ascend import backend as ascend_backend
+    from tilelang.contrib import bisheng
+    from tilelang.cache.kernel_cache import KernelCache
+
+    _set_cache_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+    identity = "sdk-build-A-headers-A"
+    monkeypatch.setattr(bisheng, "get_cann_context", lambda: {"fingerprint": identity, "include_dirs": []})
+    monkeypatch.setattr(bisheng, "get_bisheng_version", lambda: "unchanged clang build")
+    compiled = []
+    monkeypatch.setattr(bisheng, "compile_ascend", _fake_bisheng_compile(compiled))
+    target = Target({"kind": "ascend", "arch": "dav-3510"})
+    func = SimpleNamespace(script=lambda **kwargs: "unchanged TIR")
+    outer = object.__new__(KernelCache)
+    keys = []
+    for next_identity in ("sdk-build-A-headers-A", "sdk-build-A-headers-A", "sdk-build-A-headers-B"):
+        identity = next_identity
+        keys.append(outer._generate_key(func, [], args=[], target=target))
+        ascend_backend.tilelang_callback_ascend_compile("unchanged source", target)
+    assert keys[0] == keys[1] and keys[1] != keys[2]
+    assert len(compiled) == 2
+
+
+def test_non_ascend_outer_cache_does_not_require_cann(monkeypatch):
+    from types import SimpleNamespace
+    from tilelang.contrib import bisheng
+    from tilelang.cache.kernel_cache import KernelCache
+
+    def no_sdk():
+        raise AssertionError("Other backends must not query CANN")
+
+    monkeypatch.setattr(bisheng, "get_cann_context", no_sdk)
+    outer = object.__new__(KernelCache)
+    func = SimpleNamespace(script=lambda **kwargs: "unchanged TIR")
+    assert outer._generate_key(func, [], args=[], target=Target("llvm"))
