@@ -125,5 +125,41 @@ def test_ascend_any_all_sync_honours_lane_mask(mask, expected_any, expected_all)
     torch.testing.assert_close(all_out.cpu(), torch.full((32,), expected_all, dtype=torch.int32))
 
 
+@T.prim_func
+def warp_vote_wide_predicate_kernel(
+    pred: T.Tensor((32,), "int64"),
+    any_out: T.Tensor((32,), "int32"),
+    all_out: T.Tensor((32,), "int32"),
+):
+    with T.Kernel(1) as _, T.SimtVF(threads=32):
+        tx = T.get_thread_binding(0)
+        any_out[tx] = T.any_sync(pred[tx])
+        all_out[tx] = T.all_sync(pred[tx])
+
+
+@tilelang.testing.requires_ascend
+def test_ascend_any_all_sync_wide_integer_predicate():
+    """A 64-bit predicate whose set bits are all above bit 31 still votes true.
+
+    asc_ballot takes an int32_t, so passing such a value through unchanged
+    truncates it to zero and flips the vote. Both arms collapse the predicate
+    to 0/1 first.
+    """
+    kernel = tilelang.compile(
+        warp_vote_wide_predicate_kernel,
+        out_idx=[1, 2],
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: False,
+            tilelang.PassConfigKey.TL_DISABLE_THREAD_STORAGE_SYNC: True,
+        },
+    )
+    # 1 << 32 keeps every set bit above the int32 range.
+    pred = torch.full((32,), 1 << 32, dtype=torch.int64, device="npu")
+    any_out, all_out = kernel(pred)
+    torch.npu.synchronize()
+    torch.testing.assert_close(any_out.cpu(), torch.ones(32, dtype=torch.int32))
+    torch.testing.assert_close(all_out.cpu(), torch.ones(32, dtype=torch.int32))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
