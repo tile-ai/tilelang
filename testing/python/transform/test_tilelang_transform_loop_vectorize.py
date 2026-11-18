@@ -35,6 +35,40 @@ def _run_vectorize_loop(func, target=_SM90_TARGET):
         return tl.transform.VectorizeLoop()(mod)
 
 
+@pytest.mark.parametrize("form", ["direct", "bound", "interleaved", "reinitialize"])
+def test_random_vector_loop_preserves_draw_order(form):
+    @T.prim_func
+    def main(A: T.Tensor((4,), T.uint32), B: T.Tensor((4,), T.uint32)):
+        for i in T.vectorized(4):
+            if form == "reinitialize":
+                T.rng_init(42, 0, 0)
+            if form == "direct":
+                A[i] = T.rng_rand()
+            else:
+                value = T.rng_rand()
+                if form == "interleaved":
+                    B[i] = T.rng_rand()
+                A[i] = value
+
+    transformed = _run_vectorize_loop(main, tvm.target.Target("c"))["main"]
+    loops, calls = [], []
+
+    def collect(node):
+        if isinstance(node, tvm.tirx.For):
+            loops.append(node)
+        elif isinstance(node, tvm.tirx.Call) and hasattr(node.op, "name") and node.op.name.startswith("tl.rng_"):
+            calls.append(node)
+
+    post_order_visit(transformed.body, collect)
+    assert len(loops) == 1 and loops[0].kind == tvm.tirx.ForKind.SERIAL and int(loops[0].extent) == 4
+    expected = 2 if form in ("interleaved", "reinitialize") else 1
+    assert len(calls) == expected
+    inside = []
+    post_order_visit(loops[0].body, lambda node: inside.append(node) if isinstance(node, tvm.tirx.Call) else None)
+    assert all(any(call.same_as(node) for node in inside) for call in calls)
+    assert not _undefined_local_vars(transformed)
+
+
 @tilelang.testing.requires_cuda
 def test_nested_vectorized_loop_uses_inner_min():
     tir = tvm.tirx

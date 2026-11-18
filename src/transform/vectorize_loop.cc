@@ -732,7 +732,15 @@ public:
 
   // Call
   PrimExpr VisitExpr_(const CallNode *op) final {
-    if (op->op.same_as(builtin::if_then_else())) {
+    if (op->op.same_as(tl::rng_init()) || op->op.same_as(tl::rng_rand()) ||
+        op->op.same_as(tl::rng_rand_float())) {
+      // RNG state advances in iteration order, even when a draw's arguments
+      // do not depend on the loop variable. Broadcasting a scalar binding
+      // shares one draw across lanes; vectorizing separate draws also changes
+      // their interleaving. Preserve the complete scalar iteration instead.
+      need_scalarize_ = true;
+      return GetRef<PrimExpr>(op);
+    } else if (op->op.same_as(builtin::if_then_else())) {
       return MutateIfThenElseExpr_(op);
     } else if (op->op.same_as(builtin::texture2d_load())) {
       int lane = 0;
