@@ -557,8 +557,6 @@ jobs:
 
           uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
           source .venv/bin/activate
-          python -m pip install --ignore-installed --no-deps \
-              'https://files.pythonhosted.org/packages/51/b6/ff24b8a1414dc9faf3fb73799d104e4b107e93f14914bd3fa2565956ddb3/torch_npu-2.10.0.post7-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=c516f27f4896301b70dad994ae5a67d8ba2423cfd62a4d44701592601977506c'
           export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
           python - <<'PY'
           import os
