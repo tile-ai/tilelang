@@ -1,26 +1,26 @@
-# Profiling 合约
+# Profiling Contract
 
-本文件定义性能调优的统一设备侧采集口径。CSV 字段不确定时读取实际表头，不维护易过期的字段大全。
+This file defines the unified device-side collection methodology for performance tuning. When a CSV field is uncertain, read the actual header; do not maintain an easily stale field catalog.
 
-## 入口门禁
+## Entry Gate
 
-每个 B0、B* 和 Ci 都从其最新源码重新生成独立 profiling 入口。入口：
+Every B0, B*, and Ci regenerates a standalone profiling entry from its latest source. The entry:
 
-- 按锁定顺序内嵌全部 `CASES`；
-- 只接受 `--device` 和可选 `--warm-up`、`--launch-count`；
-- 在创建 NPU tensor 前选择物理设备；
-- 调用入口内本地目标 kernel，或经明确校验的生产 wrapper；
-- 不使用 host 计时作为 kernel 性能；
-- 记录算子源码 SHA、case SHA、导入路径、实际参数、kernel 名和 launch 映射。
+- Embeds all `CASES` in the locked order;
+- Accepts only `--device` and the optional `--warm-up`, `--launch-count`;
+- Selects the physical device before creating NPU tensors;
+- Calls the local target kernel inside the entry, or a production wrapper that has been explicitly verified;
+- Never uses host timing as kernel performance;
+- Records the operator source SHA, case SHA, import path, actual arguments, kernel names, and launch mapping.
 
-先直调同一入口，确认编译、运行和全部 case 顺序正确：
+First invoke the same entry directly and confirm compilation, execution, and the full case order:
 
 ```bash
 env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<target> \
   python <entry.py> --device <physical_id>
 ```
 
-旧入口不得测量新源码。禁止通过第三方评测 wrapper 间接采集基线并把其 host 开销混入 kernel 口径。
+An old entry must never measure new source. Collecting a baseline indirectly through a third-party benchmarking wrapper and mixing its host overhead into the kernel methodology is forbidden.
 
 ## `msprof op`
 
@@ -31,13 +31,13 @@ env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<target> \
   python <entry.py> --device <physical_id>
 ```
 
-要求 kernel 目录数、launch index、case 顺序和八类普通 CSV 完整。每次重试使用新输出目录，不覆盖或混用旧数据。
+Require the complete kernel directory count, launch index, case order, and the eight regular CSV categories. Each retry uses a new output directory; never overwrite or mix old data.
 
-设备健康检查只做一次，依据状态和占用选择物理设备。不要因为其他设备存在 msprof 进程而全局等待。设备 ID 映射错误先移除继承的 `ASCEND_RT_VISIBLE_DEVICES` 并显式传物理 ID，不归因为 kernel 性能失败。
+Run the device health check only once and select the physical device by status and occupancy. Do not wait globally just because an msprof process exists on another device. When device ID mapping looks wrong, first remove the inherited `ASCEND_RT_VISIBLE_DEVICES` and pass the physical ID explicitly; do not attribute it to a kernel performance failure.
 
-## 普通 `msprof` fallback
+## Regular `msprof` Fallback
 
-只有以下条件同时满足时使用：同一最新入口直调正常；失败明确位于 DBI/插桩/导出而非编译、执行、精度、核名或 case 映射；使用全新输出目录。
+Use it only when all of the following hold: the same latest entry runs correctly when invoked directly; the failure is clearly in DBI/instrumentation/export rather than compilation, execution, precision, kernel names, or case mapping; and a brand-new output directory is used.
 
 ```bash
 env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<target> \
@@ -46,13 +46,13 @@ env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<target> \
   --task-time=on --aic-mode=task-based --aic-metrics=PipeUtilization
 ```
 
-入口对每个 case 先 warmup 再正式 launch。导出后按完整目标 kernel 名过滤，匹配行数必须等于 `case_count × (warmup + formal)`；按 case 顺序分组并丢弃每组 warmup。核名、行数、顺序或 SHA 不一致时停止，不猜映射。
+The entry performs warmup followed by formal launches for each case. After export, filter by the complete target kernel name; the matched row count must equal `case_count × (warmup + formal)`; group rows by case order and drop each group's warmup. When kernel names, row counts, order, or SHAs are inconsistent, stop — never guess the mapping.
 
-fallback 摘要标明采集方式和缺失字段。最终比较优先使用同一种采集方式；一方 fallback 时另一方也用普通 msprof 重采。
+The fallback summary states the collection method and the missing fields. Final comparisons prefer a single collection method; when one side falls back, the other side is re-collected with regular msprof as well.
 
-## 归档与摘要
+## Archiving and Summary
 
-`msprof op` 结果使用：
+Use the following for `msprof op` results:
 
 ```bash
 python3 <skill_dir>/scripts/perf_summary.py \
@@ -60,31 +60,31 @@ python3 <skill_dir>/scripts/perf_summary.py \
   --kernel-name <resolved_kernel> --round-name <round>
 ```
 
-脚本归档原始 CSV、标准化文件名、校验目标 kernel 唯一并生成 `summary.txt`。先读摘要；只有异常、方向不明、接近噪声或需要精确归因时再读原始 CSV/timeline。
+The script archives the raw CSVs, normalizes the file names, verifies the target kernel is unique, and generates `summary.txt`. Read the summary first; open the raw CSVs/timeline only for anomalies, unclear directions, near-noise results, or precise attribution.
 
-普通 msprof 不能使用要求八 CSV 的脚本；自行归档 task/op summary、过滤结果、case 映射、warmup/formal 次数和 SHA，并生成注明缺失指标的逐 case 摘要。
+Regular msprof cannot use the script that requires the eight CSVs; archive the task/op summaries, filtered results, case mapping, warmup/formal counts, and SHAs yourself, and produce a per-case summary noting the missing metrics.
 
-## 时间口径
+## Time Methodology
 
-- AIV-only：使用目标 AIV kernel 的设备侧时间。
-- AIC-only：使用目标 AIC kernel 的设备侧时间。
-- 混合 AIC/AIV：依据实际协同和重叠定义关键路径，不能简单相加所有 pipe ratio。
-- 多 kernel：记录每个 case 的分支、核名和调用次数；整链验收覆盖公开调用所需的全部 launch、workspace、event 和同步。逐核采集只用于归因。
-- 同一版本重复 launch 按预先声明的均值/中位数/稳定值处理，异常轮必须有设备频率、并发或工具证据才能剔除。
+- AIV-only: use the device-side time of the target AIV kernel.
+- AIC-only: use the device-side time of the target AIC kernel.
+- Mixed AIC/AIV: define the critical path from the actual cooperation and overlap; never simply add all pipe ratios.
+- Multiple kernels: record each case's branches, kernel names, and invocation counts; whole-chain acceptance covers every launch, workspace, event, and synchronization the public call needs. Per-core collection is for attribution only.
+- Repeated launches of the same version follow the pre-declared mean/median/stable-value rule; an anomalous round can be dropped only with device frequency, concurrency, or tooling evidence.
 
-发现漏核、漏 launch 或错误聚合时废弃错误基线并重测，不能修改公共计时器制造提升。
+When a missed kernel, missed launch, or wrong aggregation is discovered, discard the bad baseline and re-measure; never modify the shared timer to manufacture an improvement.
 
-## 归因、比较与噪声
+## Attribution, Comparison, and Noise
 
-摘要至少报告 kernel time、核间 min/avg/max、可用 pipe、频率和异常。结合源码计算逻辑 GM bytes、Vector/Cube 工作量和下界：
+The summary reports at least the kernel time, inter-core min/avg/max, available pipes, frequency, and anomalies. Combine it with the source to compute logical GM bytes, Vector/Cube work, and lower bounds:
 
 ```text
 effective_bandwidth = logical_bytes / kernel_time
 effective_compute = logical_ops / kernel_time
 ```
 
-有效带宽不是物理 HBM 利用率。一个 pipe ratio 不能直接映射到某条源码操作；用生成代码、流量、timeline 或隔离候选验证。流水重叠不能由 ratio 和、`num_stages` 或 buffer 数量单独证明。
+Effective bandwidth is not physical HBM utilization. A single pipe ratio cannot be mapped directly onto a source-level operation; verify with generated code, traffic, timelines, or isolated candidates. Pipeline overlap cannot be proven by summed ratios, `num_stages`, or buffer counts alone.
 
-基线与候选保持同一输入、dtype、输出语义、设备、频率、warmup、正式次数、并发和 kernel 聚合口径。每个候选对全部目标 case 采集。差异接近噪声时交替复测 `B* → Ci → B* → Ci`。pytest benchmark 或 host timer 不能支持最终晋升。
+Keep the same inputs, dtypes, output semantics, device, frequency, warmup, formal counts, concurrency, and kernel aggregation methodology between baseline and candidates. Every candidate collects all target cases. When differences approach noise, alternate re-measurements as `B* → Ci → B* → Ci`. pytest benchmarks or host timers cannot support final promotion.
 
-profiler 插桩/导出故障记为环境/工具阻塞，不能据此淘汰候选或宣布收敛。
+A profiler instrumentation/export failure is recorded as an environment/tooling block; it never eliminates a candidate or declares convergence.

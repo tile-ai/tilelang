@@ -1,4 +1,4 @@
 interface:
-  display_name: "TileLang 性能调优"
-  short_description: "Ascend950 TileLang 算子的证据驱动性能调优闭环"
+  display_name: "TileLang Performance Tuning"
+  short_description: "Evidence-driven performance tuning loop for Ascend950 TileLang operators"
   default_prompt: "Use $tilelang-perf-tuning to profile, optimize, and validate this Ascend950 TileLang operator."

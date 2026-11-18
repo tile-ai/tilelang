@@ -291,7 +291,7 @@ def append_scalar_breakdown(lines: list[str], rows: Sequence[dict[str, str]], pr
         if average > 0.001:
             parts.append(f"{display_name}: {average:.2f}us")
     if parts:
-        lines.append(f"  SCALAR 子类 ({prefix}, avg): " + " | ".join(parts))
+        lines.append(f"  SCALAR breakdown ({prefix}, avg): " + " | ".join(parts))
 
 
 def generate_summary(
@@ -300,7 +300,7 @@ def generate_summary(
     expected_kernel: str,
     resolved_kernel: str,
 ) -> str:
-    lines = ["=== 上板性能统计摘要 ==="]
+    lines = ["=== On-Device Performance Summary ==="]
 
     basic_rows = tables["OpBasicInfo.csv"]
     first = basic_rows[0]
@@ -338,7 +338,7 @@ def generate_summary(
         append_scalar_breakdown(lines, selected_rows, prefix)
 
     if pipe_rows and not prefixes:
-        lines.extend(["", "--- PipeUtilization ---", "  未检测到非零 AIV/AIC 指标"])
+        lines.extend(["", "--- PipeUtilization ---", "  No nonzero AIV/AIC metrics detected"])
     if critical_times and duration > 0:
         critical_path = max(critical_times)
         overhead = max(0.0, duration - critical_path)
@@ -346,10 +346,10 @@ def generate_summary(
         lines.extend(
             [
                 "",
-                "--- 关键路径与头开销 ---",
-                f"  核心耗时口径: {mode}",
-                f"  Task Duration(avg): {duration:.2f}us | 关键路径: {critical_path:.2f}us | "
-                f"头开销: {overhead:.2f}us ({overhead / duration * 100:.1f}%)",
+                "--- Critical Path and Launch Overhead ---",
+                f"  Core-time methodology: {mode}",
+                f"  Task Duration(avg): {duration:.2f}us | Critical path: {critical_path:.2f}us | "
+                f"Launch overhead: {overhead:.2f}us ({overhead / duration * 100:.1f}%)",
             ]
         )
 
@@ -369,8 +369,8 @@ def generate_summary(
                     f"  {display}: {sum(data):.1f}KB total ({statistics.mean(data):.1f}KB/core), BW usage: {statistics.mean(usage):.2f}%"
                 )
         for display, field in [
-            ("主存读取", "read_main_memory_datas(KB)"),
-            ("主存写入", "write_main_memory_datas(KB)"),
+            ("Main-memory read", "read_main_memory_datas(KB)"),
+            ("Main-memory write", "write_main_memory_datas(KB)"),
         ]:
             data = [safe_float(row.get(field)) for row in mem_rows]
             if sum(data) > 0:
@@ -524,10 +524,10 @@ def generate_summary(
     lines.extend(
         [
             "",
-            "--- 原始数据位置 ---",
-            f"  CSV 文件: {round_dir}/",
-            "  归档文件保持 msprof 原始内容；summary.txt 仅统计 Resolved Kernel。",
-            "  如需逐核详情，请读取对应 CSV 文件并继续使用同一 kernel 过滤条件。",
+            "--- Raw Data Location ---",
+            f"  CSV files: {round_dir}/",
+            "  Archived files preserve the original msprof content; summary.txt reports only the Resolved Kernel.",
+            "  For per-core details, read the corresponding CSV files and continue using the same kernel filter.",
         ]
     )
     return "\n".join(lines)

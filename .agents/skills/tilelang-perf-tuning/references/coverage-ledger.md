@@ -1,65 +1,65 @@
-# 搜索覆盖账本
+# Search Coverage Ledger
 
-`optimization-search-coverage.json` 防止候选池只记录已想到的方法，却遗漏由 case 结构直接触发的高收益路线。机器校验只证明记录一致；仍需结合源码和逐 case 下界做结构审计。
+`optimization-search-coverage.json` prevents the candidate pool from recording only the approaches already thought of while missing high-yield routes directly triggered by case structure. Machine validation only proves the record is consistent; a structural audit still requires the source and per-case lower bounds.
 
-## 创建时机与文件
+## Creation Timing and File
 
-首次修改源码前，从 `coverage-example.json` 创建 schema v3 记录；完整 RESULT 参考 `coverage-final-example.json`。示例值必须替换为当前事实。
+Before the first source modification, create a schema v3 record from `coverage-example.json`; see `coverage-final-example.json` for a complete RESULT. Example values must be replaced with current facts.
 
-记录包含三个 append-only 集合：
+The record contains three append-only collections:
 
-- `cases`：逐 case 结构、基线、目标和当前最佳；
-- `obligations`：结构事实触发、停止前必须裁决的义务；
-- `candidate_events`：候选 `CREATED` 与 `RESULT`。
+- `cases`: per-case structure, baseline, target, and current best;
+- `obligations`: obligations triggered by structural facts that must be adjudicated before stopping;
+- `candidate_events`: candidate `CREATED` and `RESULT` events.
 
-每个 case 至少记录 outer/inner 独立任务、可用核、task waves、payload、kernel time、搬运/计算下界、主要 pipe、source window、用户目标和 best metrics。没有数值目标时 `performance_target` 为 `null`，不得把基线或示例阈值冒充用户目标。
+Each case records at least the outer/inner independent tasks, available cores, task waves, payload, kernel time, transfer/compute lower bounds, dominant pipes, the source window, the user target, and the best metrics. When there is no numeric target, `performance_target` is `null`; a baseline or an example threshold must never masquerade as the user's target.
 
-## 通用义务触发器
+## General Obligation Triggers
 
-1. outer 不足一波且 inner chunk 独立：`inner_parallel_flatten`；
-2. 存在相邻工作、连续边界或显著固定成本：`work_granularity_search`；
-3. 热路径逐元素/逐 lane 离散访问且窗口可界定：`physical_dataflow_routes`；
-4. 同一 case 同时需要粒度和路线裁决：`granularity_dataflow_interaction`；
-5. 每核迭代充足且 MTE/Compute 都可重叠：`pipeline_realization`。
+1. The outer dimension is smaller than one wave and the inner chunks are independent: `inner_parallel_flatten`;
+2. Adjacent work, contiguous boundaries, or significant fixed cost exist: `work_granularity_search`;
+3. The hot path accesses elements/lanes discretely and the window can be bounded: `physical_dataflow_routes`;
+4. The same case needs both granularity and route adjudication: `granularity_dataflow_interaction`;
+5. Each core has enough iterations and both MTE/Compute can overlap: `pipeline_realization`.
 
-触发器建立义务，不保证方法更快。最多四个 active candidates 不能删除或关闭义务。
+Triggers create obligations; they do not promise the method is faster. The at-most-four active candidate limit never deletes or closes obligations.
 
-工作粒度义务逐 case 记录 `FULL_CONTIGUOUS_UNIT`、`SIMD`、`DMA`、`CAPACITY`、`PARALLEL` 的来源值。物理路线至少裁决 `SCALAR_OR_SIMT`、`MEMORY_INDEXED_VECTOR`、`CONTIGUOUS_LOAD_REGISTER_REORDER`、`MATERIALIZED_TRANSFORM` 中与当前瓶颈相关且可实施的组合，并区分输出 writeback。
+The work-granularity obligation records per case the source values for `FULL_CONTIGUOUS_UNIT`, `SIMD`, `DMA`, `CAPACITY`, and `PARALLEL`. The physical routes adjudicate at least the implementable combinations of `SCALAR_OR_SIMT`, `MEMORY_INDEXED_VECTOR`, `CONTIGUOUS_LOAD_REGISTER_REORDER`, and `MATERIALIZED_TRANSFORM` relevant to the current bottleneck, distinguishing output writeback.
 
-## 候选事件
+## Candidate Events
 
-`CREATED` 固定六轴 identity、逐 case 粒度、物理 route、pipeline facts、适用 case、假设和收益上界。创建下一个候选前追加同 identity 和适用 case 的 `RESULT`。
+`CREATED` fixes the six-axis identity, per-case granularity, physical route, pipeline facts, applicable cases, hypothesis, and gain upper bound. Append a `RESULT` with the same identity and applicable cases before creating the next candidate.
 
-RESULT 状态使用 `PROMOTED`、`REJECTED_WITH_EVIDENCE`、`INAPPLICABLE_WITH_EVIDENCE` 或 `BLOCKED_BY_ENVIRONMENT`。实际运行修改路径的 case 使用 `TESTED_PATH` 并给出 `kernel_time_us` 和 profiling artifact。未运行、未激活或只过精度的 case 不能伪装成性能覆盖。
+RESULT status uses `PROMOTED`, `REJECTED_WITH_EVIDENCE`, `INAPPLICABLE_WITH_EVIDENCE`, or `BLOCKED_BY_ENVIRONMENT`. Cases whose modified path actually ran use `TESTED_PATH` with `kernel_time_us` and a profiling artifact. Cases that never ran, were not activated, or only passed precision must not masquerade as performance coverage.
 
-候选编译/执行/精度失败且健康 B0 对照正常时，可用结构化 rejection evidence 归因给候选。设备、profiler 或外部环境失效时只能记 blocked，并写恢复条件；义务保持 blocked，最终门禁拒绝收敛。
+When a candidate fails compilation/execution/precision while a healthy B0 control runs normally, structured rejection evidence may attribute the failure to the candidate. Device, profiler, or external-environment failures can only be recorded as blocked, with the recovery conditions written down; the obligation stays blocked and the final gate rejects convergence.
 
-## 关闭证据
+## Closing Evidence
 
-候选失败只否决精确六轴组合。关闭整个方向必须提供 `hard_infeasibility`，且 `exact_scope_only=true`：
+A candidate failure only vetoes the exact six-axis combination. Closing an entire direction requires `hard_infeasibility` with `exact_scope_only=true`:
 
-- `CAPACITY`：完整 footprint，且证明不能继续 streaming/chunking；
-- `LOWERING`：最小复现、实际查询 symbol 和编译/lowering 产物；
-- `SEMANTIC`：无法保持公开语义的证明；
-- `STRICT_COST_DOMINANCE`：同一有效 payload 下量化指令、访存、转换、物化和同步成本。
+- `CAPACITY`: the full footprint plus proof that streaming/chunking cannot continue;
+- `LOWERING`: a minimal reproduction, the actually queried symbol, and the compilation/lowering artifacts;
+- `SEMANTIC`: proof that the public semantics cannot be preserved;
+- `STRICT_COST_DOMINANCE`: quantified instruction, memory-access, conversion, materialization, and synchronization costs under the same effective payload.
 
-实现困难、源码较长、一个相邻组合失败或某次无收益都不是关闭证据。
+Implementation difficulty, long source files, one adjacent combination failing, or a no-gain result are not closing evidence.
 
-## 校验与停止
+## Validation and Stopping
 
-每次创建下一候选前运行普通校验：
+Run the normal validation before creating each next candidate:
 
 ```bash
 python3 <skill_dir>/scripts/validate_optimization_search_coverage.py <record>
 ```
 
-普通校验输出 `VALID_RECORD`，允许 `PENDING`，不代表可以停止。停止前运行 `<record> --final`：全部有目标且达到时输出 `TARGET_MET`；全部无数值目标、结构闭环且有逐 case bounds 时输出 `CONVERGED_WITHOUT_NUMERIC_TARGET`；未达目标输出 `SEARCH_INCOMPLETE`。
+The normal validation prints `VALID_RECORD` and allows `PENDING`; it does not permit stopping. Before stopping, run `<record> --final`: it prints `TARGET_MET` when all targets exist and are met; `CONVERGED_WITHOUT_NUMERIC_TARGET` when no numeric targets exist, the structure is closed, and per-case bounds exist; and `SEARCH_INCOMPLETE` when targets are unmet.
 
-只有全部义务、逐 case disposition、route/boundary/interaction plan、流水链和未达标 case 下界闭环时，才运行：
+Only when all obligations, per-case dispositions, route/boundary/interaction plans, pipeline chains, and the lower bounds of unmet cases are closed, run:
 
 ```bash
 python3 <skill_dir>/scripts/validate_optimization_search_coverage.py \
   <record> --final --allow-unmet-convergence
 ```
 
-成功输出 `UNMET_BUT_CONVERGED`。任何 pending、blocked、未运行候选或文字性推断都会失败。
+Success prints `UNMET_BUT_CONVERGED`. Any pending item, blocked item, unrun candidate, or textual inference fails.
