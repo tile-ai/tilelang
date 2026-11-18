@@ -11,6 +11,10 @@ _SOURCE = Path(__file__).resolve().parents[3] / "examples" / "deepseek_v32" / "t
 _SPEC = importlib.util.spec_from_file_location("topk_selector_issue_1351", _SOURCE)
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
+_MODULE.tl_topk_impl.pass_configs = {
+    **_MODULE.tl_topk_impl.pass_configs,
+    tilelang.PassConfigKey.ARITH_Z3_RLIMIT: 100,
+}
 
 
 @tilelang.testing.requires_cuda
