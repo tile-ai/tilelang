@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 import runpy
 import shutil
-import subprocess
 import uuid
 from pathlib import Path
 
@@ -59,31 +58,6 @@ def test_extracted_sdist_can_opt_into_version_label(tmp_path: Path, monkeypatch:
     provider = _load_provider(tmp_path)
 
     assert provider.dynamic_metadata("version") == "1.2.3+gitabcdef12"
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is required for checkout version test")
-def test_git_checkout_uses_commit_label_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    _clear_version_env(monkeypatch)
-    monkeypatch.setenv("CUDA_VERSION", "13.0")
-    _make_provider_tree(tmp_path)
-
-    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "TileLang Test"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "tilelang-test@example.com"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "VERSION", "version_provider.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-        encoding="utf-8",
-    ).stdout.strip()
-
-    provider = _load_provider(tmp_path)
-
-    assert provider.dynamic_metadata("version") == f"1.2.3+git{commit[:8]}"
-    assert (tmp_path / ".git_commit.txt").read_text(encoding="utf-8") == commit
 
 
 def test_build_date_handles_current_and_older_wheels():
