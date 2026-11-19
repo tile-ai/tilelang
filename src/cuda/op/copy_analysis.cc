@@ -268,6 +268,36 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   return CheckGlobalStrides(op.dst, analyzer, emit_diagnostics);
 }
 
+bool HasConstantExtents(const Array<Range> &ranges) {
+  for (const Range &range : ranges) {
+    if (as_const_int(range->extent) == nullptr) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// A TensorMap descriptor is built on the host from compile-time tile extents.
+// A symbolic extent cannot be encoded there, and ComputeBulkCopyTile() cannot
+// lower it; fall back to the elementwise path instead of selecting a bulk copy
+// that fails or truncates at runtime.  The 1-D bulk path is checked separately
+// because it passes a byte count directly and can handle dynamic sizes.
+bool CheckDescriptorBulkLoad(const CopyNode &op, Target target,
+                             arith::Analyzer *analyzer, bool check_last_dim,
+                             bool emit_diagnostics) {
+  return CheckBulkLoad(op, target, analyzer, check_last_dim,
+                       emit_diagnostics) &&
+         HasConstantExtents(op.src_range);
+}
+
+bool CheckDescriptorBulkStore(const CopyNode &op, Target target,
+                              arith::Analyzer *analyzer, bool check_last_dim,
+                              bool emit_diagnostics) {
+  return CheckBulkStore(op, target, analyzer, check_last_dim,
+                        emit_diagnostics) &&
+         HasConstantExtents(op.dst_range);
+}
+
 bool IsSemanticallyLinearLayout(const Layout &layout,
                                 const Array<PrimExpr> &shape,
                                 arith::Analyzer *analyzer) {
@@ -353,11 +383,14 @@ bool CheckBulkCopy1D(const Buffer &global_tensor, const Buffer &shared_tensor,
 
   PrimExpr total_bits = shared_elements * shared_tensor->dtype.bits();
 
-  // Reject only when the total transfer size is provably not 16-byte
-  // aligned (e.g. constant shapes like 63 x fp32). Symbolic shapes stay on
-  // the 1D TMA path, consistent with the last-dim check in CheckBulkLoad.
-  bool total_16b_aligned = !analyzer->CanProve(
-      FloorMod(total_bits, 128) != 0, arith::ProofStrength::kSymbolicBound);
+  // A 1D bulk TMA transfer moves whole 16-byte chunks.  If the extent is
+  // symbolic, "not provably misaligned" is not enough: a runtime size such as
+  // 63 floats passes the old guard and the TMA store drops the final 12-byte
+  // tail.  Require a proof of alignment here and fall back to the elementwise
+  // path otherwise.  Kernels that need TMA for dynamic sizes can make the
+  // alignment explicit in the shape/annotation.
+  bool total_16b_aligned = analyzer->CanProve(
+      FloorMod(total_bits, 128) == 0, arith::ProofStrength::kSymbolicBound);
 
   return shared_is_contiguous && global_is_contiguous && element_match &&
          total_16b_aligned;
@@ -550,6 +583,20 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
     return oss.str();
   }
+  bool has_symbolic_extent = false;
+  for (const Range &range : op.src_range) {
+    has_symbolic_extent |= as_const_int(range->extent) == nullptr;
+  }
+  for (const Range &range : op.dst_range) {
+    has_symbolic_extent |= as_const_int(range->extent) == nullptr;
+  }
+  if (has_symbolic_extent) {
+    oss << "T.tma_copy() requires a constant tile extent for the descriptor "
+           "path, but the copy has a symbolic extent; the 1-D bulk path is "
+           "unavailable too. Got src="
+        << op.src->name << ", dst=" << op.dst->name;
+    return oss.str();
+  }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
          "pattern, but TMA is not available for src="
       << op.src->name << ", dst=" << op.dst->name;
@@ -670,29 +717,29 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   if (facts.can_bulk_load_1d) {
     facts.can_bulk_load_ignore_last_dim = true;
     facts.can_bulk_load =
-        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+        CheckDescriptorBulkLoad(op, ctx.target, analyzer,
+                                /*check_last_dim=*/true, ctx.emit_diagnostics);
   } else {
     facts.can_bulk_load_ignore_last_dim =
-        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/false,
-                      ctx.emit_diagnostics);
+        CheckDescriptorBulkLoad(op, ctx.target, analyzer,
+                                /*check_last_dim=*/false, ctx.emit_diagnostics);
     facts.can_bulk_load =
-        CheckBulkLoad(op, ctx.target, analyzer, /*check_last_dim=*/true,
-                      ctx.emit_diagnostics);
+        CheckDescriptorBulkLoad(op, ctx.target, analyzer,
+                                /*check_last_dim=*/true, ctx.emit_diagnostics);
   }
 
   if (facts.can_bulk_store_1d) {
     facts.can_bulk_store_ignore_last_dim = true;
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+        CheckDescriptorBulkStore(op, ctx.target, analyzer,
+                                 /*check_last_dim=*/true, ctx.emit_diagnostics);
   } else {
-    facts.can_bulk_store_ignore_last_dim =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/false, ctx.emit_diagnostics);
+    facts.can_bulk_store_ignore_last_dim = CheckDescriptorBulkStore(
+        op, ctx.target, analyzer,
+        /*check_last_dim=*/false, ctx.emit_diagnostics);
     facts.can_bulk_store =
-        CheckBulkStore(op, ctx.target, analyzer,
-                       /*check_last_dim=*/true, ctx.emit_diagnostics);
+        CheckDescriptorBulkStore(op, ctx.target, analyzer,
+                                 /*check_last_dim=*/true, ctx.emit_diagnostics);
   }
 
   facts.can_cp_async = CheckCPAsyncCopy(op, ctx.target, layout_map, analyzer);
