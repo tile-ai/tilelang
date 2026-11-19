@@ -99,6 +99,42 @@ private:
       memo_;
 };
 
+/*!
+ * \brief Rewrite boolean bitwise operators into logical connectives.
+ *
+ * ``&`` / ``|`` on boolean PrimExprs arrive here as ``bitwise_and`` /
+ * ``bitwise_or`` calls. They are logically equivalent to ``And`` / ``Or``, but
+ * the Z3 constraint translation used by ``Analyzer::CanProve`` does not model
+ * the bitwise call on booleans, so a predicate written with ``&`` makes
+ * otherwise provable queries fail. Normalizing every predicate keeps the two
+ * spellings interchangeable.
+ */
+class NormalizeBoolPredicate : public tirx::ExprMutator {
+public:
+  using tirx::ExprMutator::operator();
+
+  PrimExpr VisitExpr_(const tirx::CallNode *op) final {
+    PrimExpr call = tirx::ExprMutator::VisitExpr_(op);
+    const auto *node = call.as<tirx::CallNode>();
+    if (node == nullptr || !call.dtype().is_bool()) {
+      return call;
+    }
+    if (node->args.size() == 2) {
+      if (node->op.same_as(tirx::builtin::bitwise_and())) {
+        return tirx::And(node->args[0], node->args[1]);
+      }
+      if (node->op.same_as(tirx::builtin::bitwise_or())) {
+        return tirx::Or(node->args[0], node->args[1]);
+      }
+    }
+    if (node->args.size() == 1 &&
+        node->op.same_as(tirx::builtin::bitwise_not())) {
+      return tirx::Not(node->args[0]);
+    }
+    return call;
+  }
+};
+
 struct Constr {
 
   enum Kind {
@@ -224,7 +260,8 @@ struct Constr {
       // expands into the condition it represents before the analyzer
       // digests it. EnterConstraint evaluates eagerly, exactly like Bind:
       // an opaque boolean entered as-is contributes nothing.
-      analyzer.EnterConstraint(analyzer.Simplify(c.value), c.is_assume);
+      analyzer.EnterConstraint(
+          analyzer.Simplify(NormalizeBoolPredicate()(c.value)), c.is_assume);
       break;
     case kBindValue:
       analyzer.Bind(c.var, c.value);
