@@ -18,7 +18,7 @@ pip install tilelang
 Alternatively, you may choose to install tilelang using prebuilt packages available on the Release Page:
 
 ```bash
-pip install tilelang-0.0.0.dev0+ubuntu.20.4.cu120-py3-none-any.whl
+pip install tilelang-0.1.15-cp39-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 ```
 
 To install the latest version of tilelang from the GitHub repository, you can run the following command:
@@ -362,10 +362,8 @@ Running kernels still requires the selected backend's compiler, runtime, and dev
 `WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
 
 Wheels built directly from a Git checkout include the short commit hash by default, for example `0.1.15+gitabcdef12`.
+Set `TILELANG_BUILD_WHEEL_WITH_DATE=ON` to include the build date, for example `0.1.15+d20261119.gitabcdef12`.
 Set the environment variable `NO_VERSION_LABEL=ON` to use the base version alone, as in PyPI releases.
-
-Set `NO_TOOLCHAIN_VERSION=OFF` to include the backend in the version label.
-For example, a CUDA build with `CUDA_VERSION=13.0` then produces `0.1.15+cu130.gitabcdef12`.
 
 ### Run-time environment variables
 

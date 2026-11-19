@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import platform
 import subprocess
 import time
 from pathlib import Path
@@ -55,29 +54,6 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
     )
     if not no_version_label:
         exts = []
-        backend = None
-        if _read_cmake_bool(os.environ.get("NO_TOOLCHAIN_VERSION"), default=True):
-            pass
-        elif platform.system() == "Darwin":
-            # only on macosx_11_0_arm64, not necessary
-            # backend = 'metal'
-            pass
-        elif _read_cmake_bool(os.environ.get("USE_ROCM", "")) and not _read_cmake_bool(os.environ.get("USE_CUDA", "")):
-            # ROCm-only build. When USE_CUDA is also on (fat wheel), fall through and label as the CUDA backend so the wheel keeps using cuda naming
-            backend = "rocm"
-        elif "USE_CUDA" in os.environ and not _read_cmake_bool(os.environ.get("USE_CUDA")):
-            backend = "cpu"
-        else:  # cuda
-            # Read nvcc version from env.
-            # This is not exactly how it should be,
-            # but works for now if building in a nvidia/cuda image.
-            if cuda_version := os.environ.get("CUDA_VERSION"):
-                major, minor, *_ = cuda_version.split(".")
-                backend = f"cu{major}{minor}"
-            else:
-                backend = "cuda"
-        if backend:
-            exts.append(backend)
 
         # Add build date if TILELANG_BUILD_WHEEL_WITH_DATE is set
         if _read_cmake_bool(os.environ.get("TILELANG_BUILD_WHEEL_WITH_DATE")):
