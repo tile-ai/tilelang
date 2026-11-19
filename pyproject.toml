@@ -278,6 +278,7 @@ environment-pass = [
     "CUDAToolkit_ROOT",
     "NO_VERSION_LABEL",
     "NO_GIT_VERSION",
+    "TILELANG_BUILD_WHEEL_WITH_DATE",
     "COLUMNS",
     "CMAKE_GENERATOR",
     "CMAKE_BUILD_PARALLEL_LEVEL",
