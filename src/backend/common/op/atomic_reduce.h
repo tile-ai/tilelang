@@ -30,7 +30,9 @@ using namespace ffi;
 
 namespace atomic_reduce {
 
-inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
+inline Stmt MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer,
+                         const PrimExpr &thread_index,
+                         const Range &thread_bounds) {
   Optional<BufferRegion> src_region;
   if (!op.src_value.defined()) {
     src_region = BufferRegion(op.src, op.src_range);
@@ -69,6 +71,75 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
 
   Stmt body = tvm::tirx::Evaluate(atomic_call);
 
+  // A single-element destination consumes no real parallel dimension.  The
+  // dummy extent-1 loop would make the partitioner rewrite the source index
+  // to zero, so a per-thread scalar value such as data[i] would silently
+  // reduce lane 0 only.  Emit the atomic directly in that case.
+  bool all_unit = true;
+  for (const Range &range : op.dst_range) {
+    all_unit &= is_one(range->extent);
+  }
+  if (!op.src_value.defined()) {
+    for (const Range &range : op.src_range) {
+      all_unit &= is_one(range->extent);
+    }
+  }
+  // The shortcut needs a real thread Var to decide whether the atomic is
+  // already per-thread.  Without a thread binding the lowering helper sees
+  // the logical index as constant zero, while materialization may still
+  // launch several CUDA threads; fall through to the dummy-loop path so its
+  // existing one-lane predicate is preserved.
+  const VarNode *thread_var = thread_index.as<VarNode>();
+  if (all_unit && thread_var != nullptr) {
+    // A one-element destination at top level still has to be updated by one
+    // thread only; otherwise every CUDA thread applies the update.  If the
+    // source/destination indices contain the thread index, the atomic is
+    // already per-thread and must run on every lane.
+    auto uses = [&](const PrimExpr &expr) {
+      return UsesVar(expr, [&](const VarNode *v) { return v == thread_var; });
+    };
+    bool uses_thread = false;
+    // A fragment/local buffer is per-thread storage even when its index is a
+    // constant: local[0] holds a different value in every lane.
+    if (op.src_value.defined()) {
+      bool src_is_local = false;
+      PostOrderVisit(op.src_value, [&](const ObjectRef &node) {
+        if (const auto *load = node.as<BufferLoadNode>()) {
+          src_is_local |=
+              IsFragmentBuffer(load->buffer) || load->buffer.scope() == "local";
+        }
+      });
+      // A fragment/local buffer is per-thread storage even when its index is
+      // a constant: local[0] holds a different value in every lane.
+      if (src_is_local)
+        uses_thread = true;
+    }
+    for (const Range &range : op.dst_range) {
+      uses_thread |= uses(range->min) || uses(range->extent);
+      uses_thread |= as_const_int(range->min) == nullptr;
+    }
+    if (!op.src_value.defined()) {
+      // Buffer-backed source: the value lives in op.src, and a fragment/local
+      // source is per-thread even when its index is constant.
+      if (IsFragmentBuffer(op.src) || op.src.scope() == "local") {
+        uses_thread = true;
+      }
+      for (const Range &range : op.src_range) {
+        uses_thread |= uses(range->min) || uses(range->extent);
+        uses_thread |= as_const_int(range->min) == nullptr;
+      }
+    } else {
+      uses_thread |= uses(op.src_value);
+      // A source that does not use the thread index is uniform across lanes.
+      // This includes integer/float literals and casts of them; do not treat
+      // an arbitrary non-IntImm expression as lane-dependent.
+    }
+    if (uses_thread) {
+      return body;
+    }
+    return IfThenElse(thread_index == thread_bounds->min, body, Stmt());
+  }
+
   for (int i = loop_vars.size() - 1; i >= 0; i--) {
     Map<String, ObjectRef> loop_annotations;
     if (i == 0) {
@@ -81,7 +152,7 @@ inline For MakeSIMTLoop(const AtomicOpBaseNode &op, arith::Analyzer *analyzer) {
     body = For(loop_vars[i]->var, 0, loop_vars[i]->dom->extent,
                ForKind::kParallel, body, std::nullopt, loop_annotations);
   }
-  return Downcast<For>(body);
+  return body;
 }
 
 inline LayoutMap InferSIMTLayout(const AtomicOpBaseNode &op,
@@ -114,7 +185,12 @@ struct AtomicReduce {
 
   static Stmt Lower(const AtomicOpBaseNode &op, const LowerArgs &lower_args,
                     arith::Analyzer *analyzer) {
-    auto simt_loop = atomic_reduce::MakeSIMTLoop(op, analyzer);
+    Stmt simt_stmt = atomic_reduce::MakeSIMTLoop(
+        op, analyzer, lower_args.thread_index, lower_args.thread_bounds);
+    if (!simt_stmt.as<ForNode>()) {
+      return simt_stmt;
+    }
+    auto simt_loop = Downcast<For>(simt_stmt);
     auto fused_loop = Downcast<For>(ParallelLoopFuser::Fuse(simt_loop));
     auto par_op = ParallelOp(fused_loop);
     std::vector<InferLevel> levels = {InferLevel::kCommon, InferLevel::kStrict,
