@@ -202,5 +202,16 @@ def test_shuffle_elect_block_leader():
     run_shuffle_elect(num_threads=128, thread_extent=0)
 
 
+@tilelang.testing.requires_cuda
+def test_shuffle_elect_subwarp_groups():
+    run_shuffle_elect(num_threads=64, thread_extent=16)
+    run_shuffle_elect(num_threads=128, thread_extent=8)
+
+
+@tilelang.testing.requires_cuda
+def test_shuffle_elect_non_warp_multiple():
+    run_shuffle_elect(num_threads=256, thread_extent=48)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
