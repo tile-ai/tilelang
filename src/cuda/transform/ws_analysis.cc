@@ -241,7 +241,8 @@ std::optional<GemmInfo> GetGemmInfo(const TileOperator &op) {
   return std::nullopt;
 }
 
-TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
+TileStmtKind ClassifyCopy(const CopyNode *copy, Target target,
+                          const BufferLayoutMap &layout_map) {
   if (copy == nullptr) {
     return TileStmtKind::kConsumer;
   }
@@ -254,6 +255,15 @@ TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
     return TileStmtKind::kTmaStore;
   }
   if (cuda::CopyInstIsTMALoad(result.inst)) {
+    auto it = layout_map.find(copy->dst->data);
+    if (it != layout_map.end()) {
+      const auto &[buffer, layout] = it->second;
+      if (!layout.defined() || !IsTmaCompatibleLayout(layout, buffer)) {
+        // Keep a plain copy for consumer-side lowering instead of forcing a
+        // TMA copy that cannot encode the annotated shared layout.
+        return TileStmtKind::kConsumer;
+      }
+    }
     return TileStmtKind::kTmaProducer;
   }
   if (cuda::CopyInstIsCPAsync(result.inst)) {
@@ -262,14 +272,15 @@ TileStmtKind ClassifyCopy(const CopyNode *copy, Target target) {
   return TileStmtKind::kConsumer;
 }
 
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target) {
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target,
+                          const BufferLayoutMap &layout_map) {
   // Tile-op Calls: classify directly via CopyNode checks.
   if (auto *eval = stmt.as<EvaluateNode>()) {
     if (auto *call = eval->value.as<CallNode>()) {
       auto tile_op = ParseOperator(GetRef<Call>(call));
       if (tile_op.defined()) {
         if (auto *copy = tile_op.as<CopyNode>()) {
-          return ClassifyCopy(copy, target);
+          return ClassifyCopy(copy, target, layout_map);
         }
         // Im2Col lowers to tma_load_im2col on Hopper — treat as TMA
         // producer so it goes to the producer warp group.
