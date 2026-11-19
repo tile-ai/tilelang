@@ -160,7 +160,6 @@ Some useful CMake options you can toggle while configuring:
 - `-DUSE_CUDA=ON|OFF` builds against NVIDIA CUDA (default ON when a CUDA toolkit is found, except on macOS).
 - `-DUSE_ROCM=ON|OFF` enables ROCm support (default ON on Linux).
 - `-DUSE_ASCEND=ON|OFF` enables Ascend support (default ON on Linux).
-- `-DNO_VERSION_LABEL=ON` disables the backend/git suffix in `tilelang.__version__`.
 - `-DUSE_LLVM=ON` enables the LLVM backend for CPU codegen.
 
 (using-existing-tvm)=
@@ -362,18 +361,11 @@ Running kernels still requires the selected backend's compiler, runtime, and dev
 
 `WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
 
-`NO_VERSION_LABEL` and `NO_TOOLCHAIN_VERSION`:
-When building tilelang, we'll try to embed SDK and version information into package version as below,
-where local version label could look like `<sdk>.git<git_hash>`. Set `NO_VERSION_LABEL=ON` to disable this behavior.
-```
-$ python -mbuild -w
-...
-Successfully built tilelang-0.1.6.post1+cu116.git0d4a74be-cp38-abi3-linux_x86_64.whl
-```
+Wheels built directly from a Git checkout include the short commit hash by default, for example `0.1.15+gitabcdef12`.
+Set the environment variable `NO_VERSION_LABEL=ON` to use the base version alone, as in PyPI releases.
 
-where `<sdk>={cuda,rocm,metal}`. Specifically, when `<sdk>=cuda` and `CUDA_VERSION` is provided via env,
-`<sdk>=cu<cuda_major><cuda_minor>`, similar with this part in pytorch.
-Set `NO_TOOLCHAIN_VERSION=ON` to disable this.
+Set `NO_TOOLCHAIN_VERSION=OFF` to include the backend in the version label.
+For example, a CUDA build with `CUDA_VERSION=13.0` then produces `0.1.15+cu130.gitabcdef12`.
 
 ### Run-time environment variables
 

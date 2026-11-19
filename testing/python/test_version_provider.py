@@ -66,9 +66,9 @@ def test_extracted_sdist_can_opt_into_version_label(tmp_path: Path, monkeypatch:
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git is required for checkout version test")
-def test_git_checkout_uses_version_label_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_git_checkout_uses_commit_label_with_optional_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _clear_version_env(monkeypatch)
-    monkeypatch.setenv("NO_TOOLCHAIN_VERSION", "ON")
+    monkeypatch.setenv("CUDA_VERSION", "13.0")
     _make_provider_tree(tmp_path)
 
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -85,6 +85,10 @@ def test_git_checkout_uses_version_label_by_default(tmp_path: Path, monkeypatch:
     ).stdout.strip()
 
     provider = _load_provider(tmp_path)
+    monkeypatch.setattr(provider.platform, "system", lambda: "Linux")
 
     assert provider.dynamic_metadata("version") == f"1.2.3+git{commit[:8]}"
     assert (tmp_path / ".git_commit.txt").read_text(encoding="utf-8") == commit
+
+    monkeypatch.setenv("NO_TOOLCHAIN_VERSION", "OFF")
+    assert provider.dynamic_metadata("version") == f"1.2.3+cu130.git{commit[:8]}"

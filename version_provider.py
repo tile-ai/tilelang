@@ -56,7 +56,7 @@ def dynamic_metadata(field: str, settings: dict[str, object] | None = None) -> s
     if not no_version_label:
         exts = []
         backend = None
-        if _read_cmake_bool(os.environ.get("NO_TOOLCHAIN_VERSION")):
+        if _read_cmake_bool(os.environ.get("NO_TOOLCHAIN_VERSION"), default=True):
             pass
         elif platform.system() == "Darwin":
             # only on macosx_11_0_arm64, not necessary
