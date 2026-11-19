@@ -211,7 +211,8 @@ class BackendContext:
     def lower(self, mod: IRModule) -> IRModule:
         """Run the selected backend's lowering pipeline."""
 
-        return self.module.lower(mod, self.target)
+        with self.target:
+            return self.module.lower(mod, self.target)
 
     def codegen_device(self, mod: IRModule, *, compile_device: bool | None = None) -> IRModule:
         """Generate device code using the selected execution policy by default."""
