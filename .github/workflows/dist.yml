@@ -192,8 +192,8 @@ jobs:
             echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           fi
 
-          if [[ "${{ runner.os }}" == "Linux" && ( "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ) ]]; then
-            # OBS keeps distinct versions of the shared Linux wheels.
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # OBS keeps distinct versions of every daily build across all platforms.
             echo "TILELANG_BUILD_WHEEL_WITH_DATE=ON" | tee -a "${GITHUB_ENV}"
           elif [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
             echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
@@ -224,7 +224,10 @@ jobs:
             "UV_TORCH_BACKEND=cpu" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
-          if ("${{ env.IS_RELEASE }}" -eq "true") {
+          if ("${{ github.event_name }}" -eq "schedule" -or "${{ github.event_name }}" -eq "workflow_dispatch") {
+            # OBS keeps distinct versions of every daily build across all platforms.
+            "TILELANG_BUILD_WHEEL_WITH_DATE=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          } elseif ("${{ env.IS_RELEASE }}" -eq "true") {
             "NO_VERSION_LABEL=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
@@ -311,11 +314,7 @@ jobs:
         run: |
           for WHEEL in wheelhouse/*.whl; do
             echo "Testing wheel: ${WHEEL}"
-            if [[ "${{ runner.os }}" == "Linux" && "${WHEEL}" != *-abi3-*.whl ]]; then
-              echo "::error::wheel $(basename "${WHEEL}") is missing the abi3 tag"
-              exit 1
-            fi
-            if [[ "${WHEEL}" == *-abi3-*.whl ]]; then
+            if [[ "${WHEEL}" == *"abi3"* ]]; then
               uvx abi3audit --verbose --strict "${WHEEL}"
             fi
             (
@@ -445,8 +444,8 @@ jobs:
           Get-Content $versionLog
 
       - name: Upload wheels
-        # Upload outside ordinary PRs to save artifact storage.
-        if: env.IS_RELEASE == 'true'
+        # Not PR to save artifact storage, as wheels are only needed for releases.
+        if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
@@ -670,7 +669,8 @@ jobs:
 
   publish-obs:
     name: Publish wheels to OBS nightly repo
-    # Publish the shared Linux wheels after the build and its wheel checks pass.
+    # Publish all built wheels (Linux, Windows, macOS) after the build and its
+    # wheel checks pass.
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
@@ -692,7 +692,7 @@ jobs:
       - name: Download built wheels
         uses: actions/download-artifact@v8
         with:
-          pattern: wheels-*-Linux-*
+          pattern: wheels-*
           merge-multiple: true
           path: wheelhouse
 
@@ -705,7 +705,7 @@ jobs:
           set -euo pipefail
           WHL_COUNT=$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)
           if [ "${WHL_COUNT}" -eq 0 ]; then
-            echo "::error::No Linux wheel artifacts found"
+            echo "::error::No wheel artifacts found"
             exit 1
           fi
           if [ -z "${AK}" ] || [ -z "${SK}" ]; then
@@ -741,7 +741,7 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### Ascend nightly wheels published to OBS"
+            echo "### TileLang nightly wheels published to OBS"
             echo
             echo 'Directory: `obs://ascend-triton-open/TileLang/`'
             echo
