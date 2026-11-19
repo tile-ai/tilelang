@@ -1517,12 +1517,38 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
                  {op->args[8]}});
 }
 
+void CodeGenTileLangAscend::EmitInt32L0CDequantScale_(const CallNode *op,
+                                                      size_t quant_pre_index) {
+  const int64_t quant_pre =
+      GetIntImmArg(op, quant_pre_index, "L0C copy", "quant_pre");
+  if (!tl::ascend::IsInt32L0CDequantMode(static_cast<int>(quant_pre))) {
+    return;
+  }
+  // The int32 dequantisation modes read the scale from the fixpipe QUANT_PRE
+  // register, and `asc_init()` does not reset that register. Write a unit
+  // scale so the mode degenerates to a plain int32->bf16/f16 cast instead of
+  // inheriting whatever a previously launched kernel left behind.
+  //
+  // Packed as the raw uint64 config, not through the
+  // asc_set_l0c_copy_prequant(float, uint16_t, bool) overload: that overload
+  // exists only from CANN 9.2. CANN 9.1 declares it and links, but the
+  // set_quant_pre it reaches for dav-3510 is a stub, so a kernel built against
+  // 9.1 compiles and then faults on the device. The uint64 form exists on both
+  // releases, and the layout below is the same one the 9.2 overload assembles
+  // internally: is_signed at bit 46, offset in bits 37..45, and the scale's
+  // float32 bits -- low 13 masked off -- from bit 13. A scale of 1.0f is
+  // 0x3f800000, so the payload is 0x3f800000 & 0xFFFFE000 == 0x3f800000.
+  PrintIndent();
+  stream << "asc_set_l0c_copy_prequant(static_cast<uint64_t>(0x3f800000));\n";
+}
+
 void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 26)
       << "tl.ascend_copy_matrix_cc_to_ub expects exactly 26 arguments";
 
   PrintIndent();
   stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";
+  EmitInt32L0CDequantScale_(op, 11);
   EmitCApiCall_("asc_copy_l0c2ub",
                 {{op->args[0]},
                  {op->args[1]},
@@ -1545,6 +1571,7 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
   ICHECK_EQ(op->args.size(), 25)
       << "tl.ascend_copy_matrix_cc_to_gm expects exactly 25 arguments";
 
+  EmitInt32L0CDequantScale_(op, 10);
   PrintIndent();
   stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";
   EmitCApiCall_("asc_copy_l0c2gm",
