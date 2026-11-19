@@ -32,6 +32,27 @@ from tilelang.contrib.hip_resource_info import dump_to_file, load_from_file
 from tilelang import __version__
 
 
+def _resolve_npu_arch(target) -> str | None:
+    """Return the Ascend NPU architecture a target resolves to, if any.
+
+    The architecture comes from ``ASCEND_NPU_ARCH`` unless the target carries an
+    ``arch``/``mcpu`` attribute, so it never appears in ``str(target)``. Two
+    compilations that differ only in that variable still produce different device
+    code, which means the resolved value has to be part of the cache key.
+
+    Non-Ascend installations have no ``bisheng`` module; the lookup degrades to
+    ``None`` there so the key is unchanged for them.
+    """
+    try:
+        from tilelang.contrib.bisheng import get_target_npu_arch
+    except ImportError:
+        return None
+    try:
+        return get_target_npu_arch(target)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
 class KernelCache:
     """
     Caches compiled kernels using a class and database persistence to avoid redundant compilation.
@@ -277,6 +298,7 @@ class KernelCache:
             "execution_backend": execution_backend,
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
+            "npu_arch": _resolve_npu_arch(target),
             **self._get_base_key(),
         }
         # Sort keys to ensure consistency
