@@ -575,6 +575,12 @@ def vadd(src0, src1, mask=None, mode="MODE_ZEROING"):
     return tirx.call_intrin(str(src0.dtype), _Op("tl.simd.vadd"), src0, src1, mask, mode)
 
 
+def _validate_carry_operands(op_name, src0, src1):
+    dtype = str(src0.dtype)
+    if dtype not in ("int32x64", "uint32x64") or str(src1.dtype) != dtype:
+        raise TypeError(f"{op_name} requires matching int32x64 or uint32x64 operands, got {src0.dtype} and {src1.dtype}")
+
+
 def vaddc(src0, src1, mask=None):
     """Add int32/uint32 vectors without carry-in and return ``(carry, result)``.
 
@@ -582,6 +588,7 @@ def vaddc(src0, src1, mask=None):
     dtype as the inputs. The underlying Ascend ``vaddc`` instruction only
     supports full-register ``int32x64`` and ``uint32x64`` operands.
     """
+    _validate_carry_operands("vaddc", src0, src1)
     if mask is None:
         mask = _default_mask(src0.dtype)
 
@@ -596,6 +603,7 @@ def vsubc(src0, src1, mask=None):
 
     ``carry`` is 1 where the subtraction completes without borrow.
     """
+    _validate_carry_operands("vsubc", src0, src1)
     if mask is None:
         mask = _default_mask(src0.dtype)
 
@@ -607,6 +615,7 @@ def vsubc(src0, src1, mask=None):
 
 def vaddcs(src0, src1, carrysrcp, mask=None):
     """Add int32/uint32 with carry-in predicate and return ``(carry, result)``."""
+    _validate_carry_operands("vaddcs", src0, src1)
     if mask is None:
         mask = _default_mask(src0.dtype)
 
@@ -618,6 +627,7 @@ def vaddcs(src0, src1, carrysrcp, mask=None):
 
 def vsubcs(src0, src1, carrysrcp, mask=None):
     """Subtract int32/uint32 with carry-in predicate and return ``(carry, result)``."""
+    _validate_carry_operands("vsubcs", src0, src1)
     if mask is None:
         mask = _default_mask(src0.dtype)
 
