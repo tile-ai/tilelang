@@ -1672,22 +1672,34 @@ struct BulkCopyTile {
 
 // The shared tile and the global tile should be of the exact same size. And we
 // derive the mappings of the tile to the logical shared and global tensors.
-BulkCopyTile ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
-                                 const Array<Range> &shared_range,
-                                 const Array<Range> &global_range) {
+std::optional<BulkCopyTile>
+ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
+                    const Array<Range> &shared_range,
+                    const Array<Range> &global_range, std::string *reason) {
+  auto unsupported =
+      [&](const std::string &message) -> std::optional<BulkCopyTile> {
+    if (reason != nullptr) {
+      *reason = message;
+    }
+    return std::nullopt;
+  };
   // The tile should have constant shape.
-  Array<int64_t> shared_range_extents =
-      shared_range.Map([](const Range &range) {
-        auto s = as_const_int(range->extent);
-        ICHECK(s) << "extent of shared_range: " << range << " is not constant";
-        return *s;
-      });
-  Array<int64_t> global_range_extents =
-      global_range.Map([](const Range &range) {
-        auto s = as_const_int(range->extent);
-        ICHECK(s) << "extent of global_range: " << range << " is not constant";
-        return *s;
-      });
+  Array<int64_t> shared_range_extents;
+  for (const Range &range : shared_range) {
+    auto s = as_const_int(range->extent);
+    if (s == nullptr) {
+      return unsupported("extent of shared_range is not constant");
+    }
+    shared_range_extents.push_back(*s);
+  }
+  Array<int64_t> global_range_extents;
+  for (const Range &range : global_range) {
+    auto s = as_const_int(range->extent);
+    if (s == nullptr) {
+      return unsupported("extent of global_range is not constant");
+    }
+    global_range_extents.push_back(*s);
+  }
 
   // Find out the corresponding shared modes and global modes.
   Array<int64_t> tile_shape;
@@ -1705,10 +1717,11 @@ BulkCopyTile ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
       global_cur++;
       continue;
     }
-    ICHECK_EQ(s_extent, g_extent)
-        << "Shared tile and global tile shape mismatch: tile_shape_shared["
-        << shared_cur << "] = " << s_extent << " != " << g_extent
-        << " = tile_shape_global[" << global_cur << "]";
+    if (s_extent != g_extent) {
+      return unsupported("shared tile extent " + std::to_string(s_extent) +
+                         " does not match global tile extent " +
+                         std::to_string(g_extent));
+    }
     tile_shape.push_back(s_extent);
     tile_to_shared_mode_stride.push_back(cute::E({shared_cur}));
     tile_to_global_mode_stride.push_back(cute::E({global_cur}));
@@ -1716,14 +1729,14 @@ BulkCopyTile ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
     global_cur++;
   }
   for (; shared_cur < shared_range_extents.size(); shared_cur++) {
-    ICHECK_EQ(shared_range_extents[shared_cur], 1)
-        << "Shared tile and global tile shape mismatch: "
-        << shared_range_extents << " vs " << global_range_extents;
+    if (shared_range_extents[shared_cur] != 1) {
+      return unsupported("shared tile has a non-unit trailing extent");
+    }
   }
   for (; global_cur < global_range_extents.size(); global_cur++) {
-    ICHECK_EQ(global_range_extents[global_cur], 1)
-        << "Shared tile and global tile shape mismatch: "
-        << shared_range_extents << " vs " << global_range_extents;
+    if (global_range_extents[global_cur] != 1) {
+      return unsupported("global tile has a non-unit trailing extent");
+    }
   }
 
   // tile -> logical shared mode
@@ -1744,7 +1757,7 @@ BulkCopyTile ComputeBulkCopyTile(const Array<PrimExpr> &shared_shape,
   auto global_logical_coords =
       global_range.Map([](const Range &r) { return cute::IntTuple(r->min); });
 
-  return {
+  return BulkCopyTile{
       tile_shape,
       std::move(tile_to_shared_logical),
       cute::Layout(tile_shape, std::move(tile_to_global_mode_stride)),
@@ -1814,9 +1827,15 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
   // E.g., tile_shape = (64,512)
   //       tile_to_shared_logical = (64,512):(1,64)
   //       tile_to_global_mode = (64,512):(1@1,1@2)
+  std::string tile_reason;
+  std::optional<BulkCopyTile> bulk_tile = ComputeBulkCopyTile(
+      shared_tensor->shape, shared_range, global_range, &tile_reason);
+  if (!bulk_tile.has_value()) {
+    return unsupported(tile_reason);
+  }
   auto [tile_shape, tile_to_shared_logical, tile_to_global_mode,
         shared_logical_offset, global_logical_coords] =
-      ComputeBulkCopyTile(shared_tensor->shape, shared_range, global_range);
+      std::move(bulk_tile.value());
 
   TMABulkCopyPlan plan;
   TMADesc &desc = plan.desc;
