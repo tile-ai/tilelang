@@ -29,13 +29,13 @@ def vselr_prefix_sum_kernel():
                 x = T.simd.alloc_local((1,), "float32")
                 x[0] = T.simd.vld(src_ub[0])
                 shifted_1 = T.simd.vsel(
-                    T.simd.vselr(x[0], T.simd.vadds(lane, -1, full)),
+                    T.simd.vselr(x[0], tirx.reinterpret("uint32x64", T.simd.vadds(lane, -1, full))),
                     zero,
                     T.simd.vcmps(lane, 1, full, "ge"),
                 )
                 x[0] = T.simd.vadd(x[0], shifted_1, full)
                 shifted_2 = T.simd.vsel(
-                    T.simd.vselr(x[0], T.simd.vadds(lane, -2, full)),
+                    T.simd.vselr(x[0], tirx.reinterpret("uint32x64", T.simd.vadds(lane, -2, full))),
                     zero,
                     T.simd.vcmps(lane, 2, full, "ge"),
                 )
