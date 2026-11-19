@@ -42,6 +42,60 @@ bool AccessMaskMayUse(const PrimExpr &expr, int required_mask) {
   return (GetConstAccessMask(expr) & required_mask) != 0;
 }
 
+// Integer division and modulo are total only when a compile-time divisor is
+// strictly positive.  In particular, a negative divisor can still expose the
+// signed-minimum / -1 overflow case, while a zero or runtime divisor may
+// trap.  Keep this predicate deliberately narrow because it controls whether
+// a short-circuiting safety guard may be flattened into one conjunction.
+bool IsPositiveConst(const PrimExpr &expr) {
+  const auto *imm = expr.as<IntImmNode>();
+  return imm != nullptr && imm->value > 0;
+}
+
+// Return the divisor of an integer division or modulo node. Other nodes return
+// an undefined expression so callers can handle all four operations uniformly.
+PrimExpr GetIntegerDivisor(const ObjectRef &node) {
+  if (const auto *op = node.as<DivNode>()) {
+    return op->b;
+  }
+  if (const auto *op = node.as<ModNode>()) {
+    return op->b;
+  }
+  if (const auto *op = node.as<FloorDivNode>()) {
+    return op->b;
+  }
+  if (const auto *op = node.as<FloorModNode>()) {
+    return op->b;
+  }
+  return PrimExpr();
+}
+
+// The Z3 prover models signed Div/Mod with Euclidean rounding. For example,
+// truncdiv(-1, 16) is zero and truncmod(-1, 16) is negative in TIR.
+// Keep these predicates as runtime guards, and never assume them to prove
+// bounds on another dimension.
+bool HasSignedTruncation(const PrimExpr &condition) {
+  bool found = false;
+  PostOrderVisit(condition, [&](const ObjectRef &node) {
+    if (node.as<DivNode>() || node.as<ModNode>()) {
+      found |= Downcast<PrimExpr>(node).dtype().is_int();
+    }
+  });
+  return found;
+}
+
+bool CanProveGuard(arith::Analyzer *analyzer, const PrimExpr &condition) {
+  if (HasSignedTruncation(condition)) {
+    return false;
+  }
+  try {
+    return analyzer->CanProve(condition, arith::ProofStrength::kSymbolicBound);
+  } catch (const std::exception &) {
+    // Keep the runtime guard if proving fails.
+    return false;
+  }
+}
+
 // Extract a scalar lane from vector expressions used in bounds predicates.
 // This intentionally expands Ramp/Broadcast/Shuffle by structure instead of
 // using Shuffle::ExtractElement, because the arithmetic prover handles the
@@ -202,14 +256,9 @@ struct SafeMemChecker : public StmtExprVisitor {
 
   // Keep only predicates that still need a runtime guard.
   void PushScalarCondition(const PrimExpr &cond) {
-    try {
-      if (analyzer_->CanProve(cond, arith::ProofStrength::kSymbolicBound)) {
-        return;
-      }
-    } catch (const std::exception &) {
-      // Keep the runtime guard if proving fails.
+    if (!CanProveGuard(analyzer_, cond)) {
+      _conditions.push_back(cond);
     }
-    _conditions.push_back(cond);
   }
 
   // Check each index against the buffer shape dimensions
@@ -253,17 +302,7 @@ struct SafeMemChecker : public StmtExprVisitor {
       // If analyzer->CanProve(index < shape_dim) returns false,
       // it means we cannot prove the access is within bounds.
       PrimExpr upper_bound_cond = index < shape_dim;
-      bool can_prove_upper = false;
-      try {
-        can_prove_upper = analyzer_->CanProve(
-            upper_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const std::exception &e) {
-        // Some layout-lowered sparse/global indices contain arithmetic that
-        // defeats interval reasoning.  Safe-memory legalization should remain
-        // conservative in that case and emit an explicit runtime guard instead
-        // of hard-failing compilation.
-        can_prove_upper = false;
-      }
+      bool can_prove_upper = CanProveGuard(analyzer_, upper_bound_cond);
 
       if (!can_prove_upper) {
         // Fallback: use const_int_bound directly.
@@ -291,13 +330,7 @@ struct SafeMemChecker : public StmtExprVisitor {
       }
       // Check if index >= 0 can be proven.
       PrimExpr lower_bound_cond = index >= 0;
-      bool can_prove_lower = false;
-      try {
-        can_prove_lower = analyzer_->CanProve(
-            lower_bound_cond, arith::ProofStrength::kSymbolicBound);
-      } catch (const std::exception &e) {
-        can_prove_lower = false;
-      }
+      bool can_prove_lower = CanProveGuard(analyzer_, lower_bound_cond);
 
       if (!can_prove_lower) {
         // Same fallback as above for the lower bound.
@@ -643,10 +676,17 @@ private:
 
       bool is_total = true;
       PostOrderVisit(condition, [&](const ObjectRef &node) {
+        // Positive constant divisors make Div, Mod, FloorDiv, and FloorMod
+        // total. Zero or symbolic divisors may trap, while negative divisors
+        // (especially -1) can overflow for the signed minimum value, so only
+        // positive constant divisors are safe to flatten.
         if (node.as<CallNode>() || node.as<BufferLoadNode>() ||
-            node.as<ProducerLoadNode>() || node.as<DivNode>() ||
-            node.as<ModNode>() || node.as<FloorDivNode>() ||
-            node.as<FloorModNode>()) {
+            node.as<ProducerLoadNode>()) {
+          is_total = false;
+          return;
+        }
+        PrimExpr divisor = GetIntegerDivisor(node);
+        if (divisor.defined() && !IsPositiveConst(divisor)) {
           is_total = false;
         }
       });
@@ -663,18 +703,14 @@ private:
     }
 
     PrimExpr condition = conditions[i];
-    bool implied = false;
-    try {
-      implied =
-          analyzer_->CanProve(condition, arith::ProofStrength::kSymbolicBound);
-    } catch (const std::exception &) {
-      // Keep the runtime guard if proving fails.
-    }
-    if (implied) {
+    if (CanProveGuard(analyzer_, condition)) {
       return CombineConditionsFrom(conditions, i + 1);
     }
 
-    With<arith::ConstraintContext> constraint(analyzer_, condition);
+    std::optional<With<arith::ConstraintContext>> constraint;
+    if (!HasSignedTruncation(condition)) {
+      constraint.emplace(analyzer_, condition);
+    }
     PrimExpr rest = CombineConditionsFrom(conditions, i + 1);
     return rest.defined() ? tirx::And(condition, rest) : condition;
   }
@@ -687,7 +723,12 @@ private:
           << condition.dtype() << ": " << condition;
     }
     PrimExpr combined = CombineConditionsFrom(conditions, 0);
-    ICHECK(combined.defined());
+    // All conditions may already be proven true.  In that case the recursive
+    // combiner uses an undefined expression as its empty-result sentinel; the
+    // flattened guard is simply the boolean constant true.
+    if (!combined.defined()) {
+      return IntImm(DataType::Bool(), 1);
+    }
     return analyzer_->Simplify(combined);
   }
 
