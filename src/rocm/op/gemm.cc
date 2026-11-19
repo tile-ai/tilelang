@@ -40,6 +40,15 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
   ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
+  // Each wavefront owns at least one 16x16 MFMA output. Without this check a
+  // small tile reaches the macro generator with zero rows or columns per warp
+  // and fails there with "Divide by zero".
+  const int max_warps = (M / kMPerWarp) * (N / kNPerWarp);
+  CHECK_LE(num_warps, max_warps, ValueError)
+      << "T.gemm cannot split a " << M << "x" << N << " tile among "
+      << num_warps << " wavefronts: every wavefront needs at least "
+      << kMPerWarp << "x" << kNPerWarp << ", so this tile allows at most "
+      << max_warps << ". Use fewer threads or a larger tile.";
 
   if (policy.IsFullRow()) {
     m_warp = num_warps;
