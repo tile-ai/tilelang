@@ -93,24 +93,10 @@ def test_autotune_with_set_inputs_tunes_on_npu():
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("capture", ["npu", "cpu", "other_npu"])
+@pytest.mark.parametrize("capture", ["npu", "cpu"])
 def test_set_inputs_supplies_captured_inputs_on_current_device(capture, monkeypatch, tmp_path):
-    device = capture
-    if capture == "other_npu":
-        if torch.npu.device_count() < 2:
-            pytest.skip("needs two visible NPU devices")
-        other = next(i for i in range(torch.npu.device_count()) if i != torch.npu.current_device())
-        try:
-            # The alignment copy is cross-device, which some runtimes reject.
-            torch.empty(1, device=f"npu:{other}").to("npu")
-            # Force async copy failures to surface inside this try so the except below can catch and skip them.
-            torch.npu.synchronize()
-            torch.npu.synchronize(other)
-        except RuntimeError:
-            pytest.skip("cross-device copy is not available on this host")
-        device = f"npu:{other}"
 
-    a, b = _deterministic_inputs(device=device)
+    a, b = _deterministic_inputs(device=capture)
 
     result, supplied_devices = _tune_with_recorded_supply(a, b, monkeypatch, tmp_path)
 

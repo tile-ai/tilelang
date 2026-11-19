@@ -787,7 +787,7 @@ class TLCPUSourceWrapper:
         "int64": "int64_t",
         "uint64": "uint64_t",
         "float64": "double",
-        "bool": "bool",
+        "bool": "int8_t",
         "uchar": "uchar",
     }
 
