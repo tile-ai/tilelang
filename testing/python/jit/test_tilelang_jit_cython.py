@@ -156,14 +156,64 @@ def test_scalar_parameter_output_shape_disk_cache(tmp_path, monkeypatch):
         assert args[0].value == size
 
 
+def test_cython_cpu_explicit_scalar_shared_with_shape_is_not_duplicated():
+    N = tvm.tirx.Var("N", "int32")
+    i = tvm.tirx.Var("i", "int32")
+    A = tvm.tirx.decl_buffer((N,), "float32", name="A")
+    B = tvm.tirx.decl_buffer((N,), "float32", name="B")
+    body = tvm.tirx.For(
+        i,
+        0,
+        N,
+        tvm.tirx.ForKind.SERIAL,
+        tvm.tirx.BufferStore(B, tvm.tirx.BufferLoad(A, [i]) + tvm.tirx.Cast("float32", N), [i]),
+    )
+    main = tvm.tirx.PrimFunc([N, A.data, B.data], body, buffer_map={A.data: A, B.data: B}).with_attr("global_symbol", "main")
+
+    kernel = tilelang.compile(main, target="c", execution_backend="cython", out_idx=[-1])
+    source = torch.arange(4, dtype=torch.float32)
+    torch.testing.assert_close(kernel(4, source), source + 4)
+
+
+def test_cython_cpu_same_name_scalar_and_shape_are_independent():
+    shape_n = T.dynamic("N", dtype=T.int32)
+
+    @T.prim_func
+    def main(N: T.int32, A: T.Tensor((shape_n,), "float32"), B: T.Tensor((shape_n,), "float32")):
+        with T.Kernel(1):
+            for i in T.Parallel(shape_n):
+                B[i] = A[i] + T.float32(N)
+
+    kernel = tilelang.compile(main, target="c", execution_backend="cython", out_idx=[-1])
+    source = torch.arange(4, dtype=torch.float32)
+    torch.testing.assert_close(kernel(2, source), source + 2)
+
+
+def test_cython_cpu_dynamic_abi_order_with_output_before_input():
+    M, N = T.dynamic("M"), T.dynamic("N")
+
+    @T.prim_func
+    def main(B: T.Tensor((N,), "float32"), A: T.Tensor((M, N), "float32")):
+        with T.Kernel(1):
+            for i in T.Parallel(N):
+                B[i] = A[0, i] + T.float32(M)
+
+    kernel = tilelang.compile(main, target="c", execution_backend="cython", out_idx=[0])
+    source = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+    torch.testing.assert_close(kernel(source), source[0] + 3)
+    assert kernel(torch.empty((3, 0), dtype=torch.float32)).shape == (0,)
+
+
 @pytest.mark.parametrize("present", [(True, True), (True, False), (False, True), (False, False)])
-def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
-    """Each non-null carrier must retain whether it supplies a shape or stride."""
+@pytest.mark.parametrize("b_size", [4, 5])
+@pytest.mark.parametrize("a_rows", [1, 2])
+def test_cython_dynamic_symbol_shared_by_shape_and_stride(present, b_size, a_rows):
+    """Non-null shape sources agree; empty and singleton strides stay relaxed."""
     from tilelang.engine.param import KernelParam
     from tilelang.jit.adapter.cython.adapter import CythonKernelAdapter, CythonKernelWrapper
 
     size = tvm.tirx.Var("size", "int64")
-    a_buffer = tvm.tirx.decl_buffer((2, 3), "float32", name="A", strides=(size, 1))
+    a_buffer = tvm.tirx.decl_buffer((a_rows, 3), "float32", name="A", strides=(size, 1))
     b_buffer = tvm.tirx.decl_buffer((size,), "float32", name="B")
     func = tvm.tirx.PrimFunc(
         [a_buffer.data, b_buffer.data], tvm.tirx.Evaluate(0), buffer_map={a_buffer.data: a_buffer, b_buffer.data: b_buffer}
@@ -191,10 +241,16 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     wrapper.set_static_strides_map(strides)
     wrapper.set_static_contiguous_list(contiguous)
 
-    a = torch.empty_strided((2, 3), (4, 1)) if present[0] else None
-    b = torch.empty((4,)) if present[1] else None
-    wrapper.forward([a, b], stream=0)
-    assert lib.symbol == (4 if any(present) else 0)
+    a_stride = 99 if a_rows == 1 else 4
+    a = torch.empty_strided((a_rows, 3), (a_stride, 1)) if present[0] else None
+    b = torch.empty((b_size,)) if present[1] else None
+    if all(present) and b_size != 4 and a_rows != 1:
+        with pytest.raises(ValueError, match="Dynamic symbol 'size'.*inconsistent"):
+            wrapper.forward([a, b], stream=0)
+    else:
+        wrapper.forward([a, b], stream=0)
+        expected = b_size if present[1] else a_stride if present[0] else 0
+        assert lib.symbol == expected
 
 
 @tilelang.testing.requires_cuda
