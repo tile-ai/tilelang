@@ -76,7 +76,15 @@ void *TryLoadLibAscendCL() {
   // We use a representative symbol and ensure we don't just find ourselves.
   void *sym = dlsym(RTLD_DEFAULT, "aclrtGetDevice");
   if (sym != nullptr && sym != reinterpret_cast<void *>(&aclrtGetDevice)) {
-    return RTLD_DEFAULT;
+    // RTLD_DEFAULT is nullptr on glibc, whereas get_handle() uses nullptr for
+    // an unavailable runtime. Acquire a real handle to the symbol's DSO.
+    Dl_info origin{};
+    if (dladdr(sym, &origin) != 0 && origin.dli_fname != nullptr) {
+      void *handle = dlopen(origin.dli_fname, RTLD_LAZY | RTLD_LOCAL);
+      if (handle != nullptr) {
+        return handle;
+      }
+    }
   }
   sym = dlsym(RTLD_NEXT, "aclrtGetDevice");
   if (sym != nullptr && sym != reinterpret_cast<void *>(&aclrtGetDevice)) {
@@ -130,6 +138,17 @@ AscendCLAPI CreateAscendCLAPI() {
   api.aclrtGetLogicDevIdByUserDevId_ =
       GetSymbol<decltype(api.aclrtGetLogicDevIdByUserDevId_)>(
           handle, "aclrtGetLogicDevIdByUserDevId");
+  api.aclrtExceptionInfoCallbackRegister_ =
+      GetSymbol<decltype(api.aclrtExceptionInfoCallbackRegister_)>(
+          handle, "aclrtExceptionInfoCallbackRegister");
+  api.aclrtGetArgsFromExceptionInfo_ =
+      GetSymbol<decltype(api.aclrtGetArgsFromExceptionInfo_)>(
+          handle, "aclrtGetArgsFromExceptionInfo");
+  api.aclrtMemcpy_ =
+      GetSymbol<decltype(api.aclrtMemcpy_)>(handle, "aclrtMemcpy");
+  api.acldumpSaveExceptionInfo_ =
+      GetSymbol<decltype(api.acldumpSaveExceptionInfo_)>(
+          handle, "acldumpSaveExceptionInfo");
   return api;
 }
 

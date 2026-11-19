@@ -42,6 +42,14 @@ tools/iket
 
 :::{toctree}
 :maxdepth: 1
+:caption: ASCEND
+
+ascend/ascend_exception_dump
+ascend/ascend_exception_dump_design_zh
+:::
+
+:::{toctree}
+:maxdepth: 1
 :caption: PROGRAMMING GUIDES
 
 programming_guides/overview

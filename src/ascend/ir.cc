@@ -22,6 +22,7 @@
 #include "ir.h"
 
 #include <tvm/ffi/reflection/creator.h>
+#include <tvm/ir/transform.h>
 #include <tvm/script/ir_builder/tir/ir.h>
 #include <tvm/tirx/stmt.h>
 
@@ -30,6 +31,8 @@
 
 namespace tvm {
 namespace tl {
+
+TVM_REGISTER_PASS_CONFIG_OPTION("tl.ascend_exception_dump", Bool);
 
 using namespace script::ir_builder::tirx;
 using namespace ffi;
