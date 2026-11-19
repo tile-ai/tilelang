@@ -1,4 +1,4 @@
-"""Minimal task input shared by scheduling and latency tests."""
+"""Shared task programs and helpers for Ascend scheduling tests."""
 
 import tilelang.ascend.transform as ascend_transform
 import tilelang.ascend.language as T
@@ -6,6 +6,33 @@ from tilelang import tvm
 from tilelang.backend.target import determine_target
 from tvm import tirx
 from tvm.tirx.stmt_functor import post_order_visit
+
+
+def _make_per_core_strided_store_program(*, explicit=False):
+    num_tokens = T.dynamic("num_tokens")
+
+    @T.macro
+    def store_stages(ub, out, sid, count):
+        for stage in T.serial(count):
+            begin = stage * 128 + sid * 64
+            extent = T.min(num_tokens - begin, 64)
+            T.copy(ub[stage * 64 : stage * 64 + extent], out[begin : begin + extent])
+
+    @T.prim_func
+    def main(src: T.Tensor((512,), "float32"), out: T.Tensor((num_tokens,), "float32")):
+        with T.MixedKernel(1) as (_, sid):
+            ub = T.alloc_shared((256,), "float32")
+            T.assume(num_tokens <= 512)
+            T.copy(src[sid * 256 : sid * 256 + 256], ub)
+            count = T.ceildiv(num_tokens - sid * 64, 128)
+            with T.PerCoreTask():
+                if explicit:
+                    with T.Task():
+                        store_stages(ub, out, sid, count)
+                else:
+                    store_stages(ub, out, sid, count)
+
+    return main
 
 
 def _make_program(latency=None, ii=None):
