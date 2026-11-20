@@ -9,6 +9,7 @@ from .allreduce import (
     simt_allreduce_sum,
 )
 from .common import (
+    as_ir_bool,
     as_logical_bool,
     if_then_else,
     logical_not,
@@ -51,6 +52,7 @@ __all__ = [
     "PTOGemmL1Template",
     "ascend_cross_core_set_flag",
     "ascend_cross_core_wait_flag",
+    "as_ir_bool",
     "as_logical_bool",
     "atomic_add",
     "atomic_max",
