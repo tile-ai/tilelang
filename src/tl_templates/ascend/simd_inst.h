@@ -86,19 +86,11 @@ template <typename Vec>
 __simd_callee__ inline Vec merge_masked(Vec &dst, Vec result,
                                         vector_bool mask) {
   Vec old_dst = dst;
-#if (__NPU_ARCH__ == 3510)
-  if constexpr (std::is_same_v<Vec, vector_f8e8m0>) {
-    // None of the three SDK C APIs has an E8M0 asc_select overload. A scale
-    // occupies one byte; select its bits without floating conversion, including
-    // the NaN encoding and inactive lanes from the original destination.
-    vector_u8 selected;
-    asc_select(selected, __builtin_bit_cast(vector_u8, result),
-               __builtin_bit_cast(vector_u8, old_dst), mask);
-    dst = __builtin_bit_cast(Vec, selected);
-  } else
-#endif
-  {
+  if constexpr (requires { asc_select(dst, result, old_dst, mask); }) {
     asc_select(dst, result, old_dst, mask);
+  } else {
+    // Bisheng provides a typed vsel for E8M0 even when the C API does not.
+    vsel(dst, result, old_dst, mask);
   }
   return dst;
 }
