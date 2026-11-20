@@ -189,7 +189,7 @@ def _unknown_vmi_op():
 # ---------------------------------------------------------------------------
 # Real PTO kernels (standard lowering + codegen or full compile)
 # ---------------------------------------------------------------------------
-def _reduce_broadcast(dtype, reduce_name):
+def _reduce_broadcast(dtype, reduce_name, *, omit_reduce_mask=False):
     reduce = getattr(T.vmi, reduce_name)
 
     @T.prim_func
@@ -201,7 +201,7 @@ def _reduce_broadcast(dtype, reduce_name):
             with T.SimdVF():
                 mask = T.vmi.create_mask(128, size=128)
                 x = T.vmi.vload(work[0], size=128)
-                r = reduce(x, mask)
+                r = reduce(x) if omit_reduce_mask else reduce(x, mask)
                 y = T.vmi.vbrc(r, size=128, group=1)
                 T.vmi.vstore(y, out[0], mask)
             T.copy(out, C)
@@ -480,6 +480,17 @@ def test_uint32_vcmin_vbrc_uses_vmi_source_directly():
 def test_float32_vcmax_vbrc_control_uses_vmi_source_directly():
     source = _kernel_source(_reduce_broadcast("float32", "vcmax"))
     _assert_direct_vbrc(source, "vcmax")
+
+
+@pytest.mark.pto
+@pytest.mark.parametrize("reduce_name", ["vcmax", "vcmin", "vcadd"])
+def test_omitted_reduce_mask_uses_full_source_lanes(reduce_name):
+    source = _kernel_source(_reduce_broadcast("int32", reduce_name, omit_reduce_mask=True))
+    mask_lines = [line for line in source.splitlines() if "pto.vmi.create_mask(128, size=128)" in line]
+    assert len(mask_lines) == 2  # Explicit store mask plus the reduction's default mask.
+    default_mask = mask_lines[-1].split("=", 1)[0].strip()
+    assert f"{reduce_name}(" in source
+    assert default_mask in _one(source, f"pto.vmi.{reduce_name}(")
 
 
 @pytest.mark.pto

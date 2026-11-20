@@ -225,6 +225,19 @@ def _access_ptr_base_load(value):
 _UB_SCOPES = frozenset({"shared", "shared.dyn"})
 
 
+def _default_range_mask(value):
+    """Full-lane predicate for a pure-range VMI operand.
+
+    Pure-range ops take ``mask=None`` as shorthand for covering every logical
+    lane of this operand.  The predicate is built exactly like the explicit
+    ``T.vmi.create_mask(lanes, size=lanes)`` spelling used by VMI kernels and
+    is bound as its own statement, so the omitted-mask and explicit-full-mask
+    forms lower to the same PTO source.
+    """
+    lanes = _lanes_of(value)
+    return _bind(create_mask(lanes, size=lanes))
+
+
 def _require_ub_address(value, *, context: str):
     buffer = None
     base_load = _access_ptr_base_load(value)
@@ -828,8 +841,10 @@ def _unary_same_dtype(name):
 
 def _vec_scalar_same_dtype(name):
     @_scope_guarded
-    def wrapper(source, scalar, mask, *, pmode=None, loc=None, ip=None):
+    def wrapper(source, scalar, mask=None, *, pmode=None, loc=None, ip=None):
         _reject_packed_fp4(source, context=f"T.vmi.{name}(...)")
+        if mask is None:
+            mask = _default_range_mask(source)
         return _call_vmi(
             name,
             _dtype_of(source),
@@ -1010,7 +1025,7 @@ def vbrc(value, *, size, group=None, loc=None, ip=None):
 
 
 @_scope_guarded
-def vcadd(source, mask, *, group=None, pmode=None, reassoc=None, loc=None, ip=None):
+def vcadd(source, mask=None, *, group=None, pmode=None, reassoc=None, loc=None, ip=None):
     context = "T.vmi.vcadd(...)"
     _reject_packed_fp4(source, context=context)
     elem_dtype = _element_dtype_of(source)
@@ -1025,6 +1040,8 @@ def vcadd(source, mask, *, group=None, pmode=None, reassoc=None, loc=None, ip=No
     lanes = 1 if group is None else _normalize_lanes(group, context="T.vmi.vcadd(..., group=...)")
     if group is not None and _lanes_of(source) % group != 0:
         raise ValueError(f"{context} requires source lanes to be divisible by group")
+    if mask is None:
+        mask = _default_range_mask(source)
     mask = _require_compatible_mask(mask, _lanes_of(source), context=context)
     return _call_vmi(
         "vcadd",
@@ -1040,21 +1057,25 @@ def vcadd(source, mask, *, group=None, pmode=None, reassoc=None, loc=None, ip=No
 
 
 @_scope_guarded
-def vcmax(source, mask, *, group=None, pmode=None, loc=None, ip=None):
+def vcmax(source, mask=None, *, group=None, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(source, context="T.vmi.vcmax(...)")
     lanes = 1 if group is None else _normalize_lanes(group, context="T.vmi.vcmax(..., group=...)")
     if group is not None and _lanes_of(source) % group != 0:
         raise ValueError("T.vmi.vcmax(...) requires source lanes to be divisible by group")
+    if mask is None:
+        mask = _default_range_mask(source)
     mask = _require_compatible_mask(mask, _lanes_of(source), context="T.vmi.vcmax(...)")
     return _call_vmi("vcmax", vreg(lanes, _element_dtype_of(source)), source, mask, group=group, pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vcmin(source, mask, *, group=None, pmode=None, loc=None, ip=None):
+def vcmin(source, mask=None, *, group=None, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(source, context="T.vmi.vcmin(...)")
     lanes = 1 if group is None else _normalize_lanes(group, context="T.vmi.vcmin(..., group=...)")
     if group is not None and _lanes_of(source) % group != 0:
         raise ValueError("T.vmi.vcmin(...) requires source lanes to be divisible by group")
+    if mask is None:
+        mask = _default_range_mask(source)
     mask = _require_compatible_mask(mask, _lanes_of(source), context="T.vmi.vcmin(...)")
     return _call_vmi("vcmin", vreg(lanes, _element_dtype_of(source)), source, mask, group=group, pmode=pmode, loc=loc, ip=ip)
 
@@ -1146,76 +1167,94 @@ def vinterpret_cast(source, to_dtype=None, *, loc=None, ip=None):
 
 
 @_scope_guarded
-def vexpdif(x, max_value, mask, *, pmode=None, loc=None, ip=None):
+def vexpdif(x, max_value, mask=None, *, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(x, max_value, context="T.vmi.vexpdif(...)")
+    if mask is None:
+        mask = _default_range_mask(x)
     return _call_vmi(
         "vexpdif", _dtype_of(max_value), x, max_value, _require_mask(mask, context="T.vmi.vexpdif(...)"), pmode=pmode, loc=loc, ip=ip
     )
 
 
 @_scope_guarded
-def vaxpy(x, acc, alpha, mask, *, pmode=None, loc=None, ip=None):
+def vaxpy(x, acc, alpha, mask=None, *, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(x, acc, context="T.vmi.vaxpy(...)")
+    if mask is None:
+        mask = _default_range_mask(x)
     return _call_vmi("vaxpy", _dtype_of(acc), x, acc, alpha, _require_mask(mask, context="T.vmi.vaxpy(...)"), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vlrelu(x, slope, mask, *, pmode=None, loc=None, ip=None):
+def vlrelu(x, slope, mask=None, *, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(x, context="T.vmi.vlrelu(...)")
+    if mask is None:
+        mask = _default_range_mask(x)
     return _call_vmi("vlrelu", _dtype_of(x), x, slope, _require_mask(mask, context="T.vmi.vlrelu(...)"), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vprelu(x, alpha, mask, *, pmode=None, loc=None, ip=None):
+def vprelu(x, alpha, mask=None, *, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(x, context="T.vmi.vprelu(...)")
+    if mask is None:
+        mask = _default_range_mask(x)
     return _call_vmi("vprelu", _dtype_of(x), x, alpha, _require_mask(mask, context="T.vmi.vprelu(...)"), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vmull(a, b, mask, *, pmode=None, loc=None, ip=None):
+def vmull(a, b, mask=None, *, pmode=None, loc=None, ip=None):
     context = "T.vmi.vmull(...)"
     result_dtype = _require_same_vreg_type(a, b, context=context)
     elem_dtype = _element_dtype_of(a)
     if not str(elem_dtype).startswith(("int", "uint")) or elem_dtype.bits != 32:
         raise TypeError(f"{context} requires identical 32-bit integer vectors")
+    if mask is None:
+        mask = _default_range_mask(a)
     mask = _require_compatible_mask(mask, _lanes_of(a), context=context)
     pair = _call_vmi("vmull", result_dtype, a, b, mask, pmode=pmode, loc=loc, ip=ip)
     return _wrap_pair(pair)
 
 
 @_scope_guarded
-def vmula(acc, lhs, rhs, mask, *, pmode=None, loc=None, ip=None):
+def vmula(acc, lhs, rhs, mask=None, *, pmode=None, loc=None, ip=None):
     _reject_packed_fp4(acc, lhs, rhs, context="T.vmi.vmula(...)")
+    if mask is None:
+        mask = _default_range_mask(acc)
     return _call_vmi("vmula", _dtype_of(acc), acc, lhs, rhs, _require_mask(mask, context="T.vmi.vmula(...)"), pmode=pmode, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vdhist(acc, source, mask, *, loc=None, ip=None):
+def vdhist(acc, source, mask=None, *, loc=None, ip=None):
     if str(_dtype_of(acc)) != "uint16x256":
         raise TypeError("T.vmi.vdhist(...) requires a uint16x256 accumulator")
     if str(_element_dtype_of(source)) != "uint8":
         raise TypeError("T.vmi.vdhist(...) requires a uint8 source vector")
+    if mask is None:
+        mask = _default_range_mask(source)
     mask = _require_compatible_mask(mask, _lanes_of(source), context="T.vmi.vdhist(...)")
     return _call_vmi("vdhist", _dtype_of(acc), acc, source, mask, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vchist(acc, source, mask, *, loc=None, ip=None):
+def vchist(acc, source, mask=None, *, loc=None, ip=None):
     if str(_dtype_of(acc)) != "uint16x256":
         raise TypeError("T.vmi.vchist(...) requires a uint16x256 accumulator")
     if str(_element_dtype_of(source)) != "uint8":
         raise TypeError("T.vmi.vchist(...) requires a uint8 source vector")
+    if mask is None:
+        mask = _default_range_mask(source)
     mask = _require_compatible_mask(mask, _lanes_of(source), context="T.vmi.vchist(...)")
     return _call_vmi("vchist", _dtype_of(acc), acc, source, mask, loc=loc, ip=ip)
 
 
 @_scope_guarded
-def vgather(source, offsets, mask, *, pmode=None, loc=None, ip=None):
+def vgather(source, offsets, mask=None, *, pmode=None, loc=None, ip=None):
     _require_ub_address(source, context="T.vmi.vgather(...)")
     source_elem = _require_address_element_dtype(source, context="T.vmi.vgather(...)")
     if str(source_elem) == "float4_e2m1fn":
         raise TypeError("T.vmi.vgather(...) does not support packed FP4 source buffers")
     _require_integer_vector(offsets, context="T.vmi.vgather(...)")
+    if mask is None:
+        mask = _default_range_mask(offsets)
     mask = _require_compatible_mask(mask, _lanes_of(offsets), context="T.vmi.vgather(...)")
     address = _parse_vmi_address(source, is_load=True, context="T.vmi.vgather(...)")
     ptr, offset = _normalize_vmi_address_operand(address.source, context="T.vmi.vgather(...)")
@@ -1236,7 +1275,7 @@ def vgather(source, offsets, mask, *, pmode=None, loc=None, ip=None):
 
 
 @_scope_guarded
-def vscatter(value, destination, offsets, mask, *, pmode=None, loc=None, ip=None):
+def vscatter(value, destination, offsets, mask=None, *, pmode=None, loc=None, ip=None):
     _require_ub_address(destination, context="T.vmi.vscatter(...)")
     _reject_packed_fp4(value, context="T.vmi.vscatter(...)")
     destination_dtype = _address_element_dtype(destination)
@@ -1245,6 +1284,8 @@ def vscatter(value, destination, offsets, mask, *, pmode=None, loc=None, ip=None
     _require_integer_vector(offsets, context="T.vmi.vscatter(...)")
     if _lanes_of(value) != _lanes_of(offsets):
         raise TypeError("T.vmi.vscatter(...) requires value and offset lane counts to match")
+    if mask is None:
+        mask = _default_range_mask(value)
     mask = _require_compatible_mask(mask, _lanes_of(value), context="T.vmi.vscatter(...)")
     address = _parse_vmi_address(destination, is_load=False, context="T.vmi.vscatter(...)")
     ptr, offset = _normalize_vmi_address_operand(address.source, context="T.vmi.vscatter(...)")
@@ -1290,18 +1331,22 @@ def create_mask(active_lanes, *, size, group=None, loc=None, ip=None):
 
 
 @_scope_guarded
-def vintlv(lhs, rhs, mask, *, pmode=None, loc=None, ip=None):
+def vintlv(lhs, rhs, mask=None, *, pmode=None, loc=None, ip=None):
     context = "T.vmi.vintlv(...)"
     result_dtype = _require_same_vreg_type(lhs, rhs, context=context)
+    if mask is None:
+        mask = _default_range_mask(lhs)
     mask = _require_compatible_mask(mask, _lanes_of(lhs), context=context)
     pair = _call_vmi("vintlv", result_dtype, lhs, rhs, mask, pmode=pmode, loc=loc, ip=ip)
     return _wrap_pair(pair)
 
 
 @_scope_guarded
-def vdintlv(lhs, rhs, mask, *, pmode=None, loc=None, ip=None):
+def vdintlv(lhs, rhs, mask=None, *, pmode=None, loc=None, ip=None):
     context = "T.vmi.vdintlv(...)"
     result_dtype = _require_same_vreg_type(lhs, rhs, context=context)
+    if mask is None:
+        mask = _default_range_mask(lhs)
     mask = _require_compatible_mask(mask, _lanes_of(lhs), context=context)
     pair = _call_vmi("vdintlv", result_dtype, lhs, rhs, mask, pmode=pmode, loc=loc, ip=ip)
     return _wrap_pair(pair)
