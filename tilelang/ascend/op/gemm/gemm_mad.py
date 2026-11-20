@@ -129,6 +129,16 @@ class GemmMAD(GemmBase):
         if self._is_l1_input():
             assert not self.trans_A and self.trans_B, "Ascend L1 GEMM currently only supports trans_A=False, trans_B=True (NT)."
             return self._lower_l1()
+        a_scope, b_scope = self.A.scope(), self.B.scope()
+        is_l0_input = a_scope in ("shared.l0a", "shared.l0a.dyn") and b_scope in (
+            "shared.l0b",
+            "shared.l0b.dyn",
+        )
+        if not is_l0_input and not self.is_blockscaled:
+            raise ValueError(
+                "Ascend GEMM requires A/B both in shared.l1, or A in shared.l0a "
+                f"and B in shared.l0b; got A={self.A.scope()}, B={self.B.scope()}"
+            )
         return self._lower_l0()
 
     def _is_l1_input(self):
@@ -190,6 +200,9 @@ class GemmMAD(GemmBase):
         return tile_k_sub
 
     def _lower_l0(self):
+        input_dtype = self._input_dtype()
+        if _ASCEND_DTYPE_MAP.get(input_dtype) is None:
+            raise ValueError(f"Unsupported dtype for Ascend L0 GEMM: {input_dtype}; supported dtypes are {sorted(_ASCEND_DTYPE_MAP)}")
         m, n, k = self._l0_operation_extents()
         c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
         a_ptr = _make_access_ptr(self.ARegion.buffer, self.ARegion, 1)

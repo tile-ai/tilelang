@@ -126,7 +126,7 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
                 return "int16_t"
             if "float8_e4m3" in dtype_str:
                 return "float8_e4m3_t"
-            return dtype_str
+            raise ValueError(f"Unsupported scale-factor dtype {dtype_str!r}; expected one of uint8/int8/uint16/int16/float8_e4m3")
 
         sf_dtype_str = _sf_dtype_str(sfa_buf.dtype)
         sfa_layout = _find_layout(getattr(self, "_layout_map", {}), sfa_buf)

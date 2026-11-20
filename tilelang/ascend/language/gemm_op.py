@@ -36,6 +36,13 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
     """
     annotations = _normalize_annotations(annotations)
 
+    for _flag_name, _flag in (("transpose_A", transpose_A), ("transpose_B", transpose_B)):
+        if not isinstance(_flag, bool) and not (isinstance(_flag, int) and _flag in (0, 1)):
+            raise TypeError(f"T.gemm {_flag_name} must be a bool, got {type(_flag).__name__}")
+    if not isinstance(clear_accum, bool) and not (isinstance(clear_accum, int) and clear_accum in (0, 1)):
+        raise TypeError(f"T.gemm clear_accum must be a bool, got {type(clear_accum).__name__}")
+    clear_accum = bool(clear_accum)
+
     A_shape = retrieve_shape(A_region)
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
@@ -107,6 +114,16 @@ def _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, a
     )
 
 
+def _validate_gemm_control(value) -> None:
+    """Validate the effective unit_flag_ctrl annotation after merging."""
+    if isinstance(value, bool) or not isinstance(value, (int, tirx.PrimExpr)):
+        raise TypeError(f"unit_flag_ctrl must be an integer or integer PrimExpr, got {value!r}")
+    if isinstance(value, tirx.PrimExpr):
+        dtype = str(value.dtype)
+        if not dtype.startswith(("int", "uint")) or int(getattr(value.dtype, "lanes", 1)) != 1:
+            raise TypeError(f"unit_flag_ctrl must have a scalar integer dtype, got {dtype}")
+
+
 def gemm_blockscaled(
     A: BufferLikeType,
     B: BufferLikeType,
@@ -140,7 +157,10 @@ def gemm_blockscaled(
     ann: dict = {}
     if unit_flag_ctrl is not None:
         ann["unit_flag_ctrl"] = unit_flag_ctrl
-    assert SFA is not None and SFB is not None, "block-scaled GEMM requires both SFA and SFB"
+    if "unit_flag_ctrl" in ann:
+        _validate_gemm_control(ann["unit_flag_ctrl"])
+    if SFA is None or SFB is None:
+        raise ValueError("block-scaled GEMM requires both SFA and SFB")
     call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann or None)
     # Re-emit the dense slots under the dedicated tl.tileop.gemm_blockscaled
     # op with the SFA/SFB regions and k_start appended (the 16-slot protocol
@@ -207,4 +227,6 @@ def gemm(
     ann: dict = dict(annotations) if annotations else {}
     if unit_flag_ctrl is not None:
         ann.setdefault("unit_flag_ctrl", unit_flag_ctrl)
+    if "unit_flag_ctrl" in ann:
+        _validate_gemm_control(ann["unit_flag_ctrl"])
     return _dialect_gemm_call(A, B, C, transpose_A, transpose_B, policy, clear_accum, ann or None)

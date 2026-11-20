@@ -23,6 +23,15 @@ _PAD_VALUE_SUPPORTED_DTYPES = frozenset(
     }
 )
 
+_PAD_VALUE_INT_RANGES = {
+    "int8": (-(2**7), 2**7 - 1),
+    "uint8": (0, 2**8 - 1),
+    "int16": (-(2**15), 2**15 - 1),
+    "uint16": (0, 2**16 - 1),
+    "int32": (-(2**31), 2**31 - 1),
+    "uint32": (0, 2**32 - 1),
+}
+
 
 def ascend_set_copy_pad_value(value, dtype=None) -> None:
     """Set the padding fill value for subsequent Ascend padded MTE copies.
@@ -53,12 +62,43 @@ def ascend_set_copy_pad_value(value, dtype=None) -> None:
             dtype = inferred
     if dtype is None:
         raise ValueError('ascend_set_copy_pad_value requires dtype for Python literals; use dtype="float32" or pass a typed PrimExpr.')
+    if not isinstance(dtype, str):
+        # tvm.DataType-like objects stringify to a canonical dtype name.
+        dtype = str(dtype)
+    dtype = {"half": "float16", "float": "float32", "bfloat16_t": "bfloat16"}.get(dtype.strip().lower(), dtype.strip().lower())
     if dtype not in _PAD_VALUE_SUPPORTED_DTYPES:
         raise ValueError(
             f"ascend_set_copy_pad_value does not support dtype {dtype!r}; supported dtypes are {sorted(_PAD_VALUE_SUPPORTED_DTYPES)}."
         )
+    if isinstance(value, bool):
+        raise TypeError("ascend_set_copy_pad_value value must not be a bool")
+    if isinstance(value, int) and dtype in _PAD_VALUE_INT_RANGES:
+        low, high = _PAD_VALUE_INT_RANGES[dtype]
+        if not low <= value <= high:
+            raise ValueError(
+                f"ascend_set_copy_pad_value value {value} is outside the representable range [{low}, {high}] of dtype {dtype!r}"
+            )
+    if isinstance(value, float):
+        import math
+
+        if not math.isfinite(value):
+            raise ValueError("ascend_set_copy_pad_value value must be finite")
     value = tirx.const(value, dtype) if isinstance(value, (int, float)) else tirx.Cast(dtype, value)
     return tirx.call_intrin("void", tirx.op.Op.get("tl.ascend_set_copy_pad_value"), value)
+
+
+_ND2NZ_DST_BYTES = {"half": 2, "bfloat16_t": 2, "float": 4}
+
+
+def _validate_nd2nz_geometry(name, value):
+    """Validate one ND2NZ geometry scalar against the C++ ParseNd2NzGeometry contract."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {value!r}")
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative static int32, got {value}")
+    if value > 0x7FFFFFFF:
+        raise ValueError(f"{name} must fit int32, got {value}")
+    return value
 
 
 def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype: str) -> None:
@@ -76,6 +116,26 @@ def ascend_nd2nz_post_copy(dst, src, rows, cols, *, src_pitch, dst_pitch, dtype:
     dtype = names.get(dtype, dtype)
     if dtype not in names.values():
         raise ValueError("NZ post-copy dtype must be float16, bfloat16, or float32")
+    rows = _validate_nd2nz_geometry("rows", rows)
+    cols = _validate_nd2nz_geometry("cols", cols)
+    src_pitch = _validate_nd2nz_geometry("src_pitch", src_pitch)
+    dst_pitch = _validate_nd2nz_geometry("dst_pitch", dst_pitch)
+    if rows and cols:
+        dst_bytes = _ND2NZ_DST_BYTES[dtype]
+        if cols % (32 // dst_bytes) != 0:
+            raise ValueError(f"cols must be C0-aligned (multiple of {32 // dst_bytes}) for {dtype}, got {cols}")
+        if dst_pitch < rows or src_pitch < rows:
+            raise ValueError(f"src_pitch ({src_pitch}) and dst_pitch ({dst_pitch}) must be >= rows ({rows})")
+        c0 = 32 // dst_bytes
+        bursts = cols // c0
+        if bursts > 0xFFF:
+            raise ValueError(f"cols ({cols}) implies {bursts} bursts, exceeding the 4095-burst non-scatter instruction field range")
+        if rows > 0xFFFF:
+            raise ValueError(f"rows ({rows}) exceeds the 16-bit instruction field range (max 65535)")
+        if dst_pitch - rows > 0xFFFF:
+            raise ValueError(f"dst_pitch - rows ({dst_pitch - rows}) exceeds the 16-bit instruction field range (max 65535)")
+        if src_pitch - rows > 0xFFFF:
+            raise ValueError(f"src_pitch - rows ({src_pitch - rows}) exceeds the 16-bit instruction field range (max 65535)")
     if isinstance(dst, BufferLoad):
         dst = access_ptr(dst, "w")
     if isinstance(src, BufferLoad):
