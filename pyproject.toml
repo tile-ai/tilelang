@@ -107,7 +107,6 @@ wheel.py-api = "cp39"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
-# Include backend and git info in version
 metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
@@ -278,7 +277,6 @@ environment-pass = [
     "CUDA_HOME",
     "CUDAToolkit_ROOT",
     "NO_VERSION_LABEL",
-    "NO_TOOLCHAIN_VERSION",
     "NO_GIT_VERSION",
     "COLUMNS",
     "CMAKE_GENERATOR",
