@@ -61,7 +61,22 @@ def _load_cudart():
             except OSError:
                 continue
         raise OSError("Cannot find cudart64_*.dll")
-    return ctypes.cdll.LoadLibrary("libcudart.so")
+    # pip-installed CUDA (e.g. the torch cu13 wheels) ships only the versioned soname.
+    # Try the runtime torch was built against first, so both share one libcudart.
+    names = ["libcudart.so", "libcudart.so.13", "libcudart.so.12", "libcudart.so.11.0"]
+    try:
+        import torch
+
+        if torch.version.cuda:
+            names.insert(0, f"libcudart.so.{torch.version.cuda.split('.')[0]}")
+    except ImportError:
+        pass
+    for name in names:
+        try:
+            return ctypes.cdll.LoadLibrary(name)
+        except OSError:
+            continue
+    raise OSError("Cannot find libcudart.so")
 
 
 def get_device_attribute(attr: int, device_id: int = 0) -> int:
