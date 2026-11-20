@@ -107,6 +107,13 @@ export TILELANG_EXECUTION_BACKEND=pto      # or: pto only (legacy Cython launche
 Cython launcher. It remains supported for compatibility, but new code should
 use `target="pto"`.
 
+> **Note (PyPI `0.1.15`):** That release supports only `target="ascend"` with
+> `execution_backend="tvm_ffi"` or `"cython"`. It does not provide `target="pto"`,
+> `execution_backend="pto"`, or `TILELANG_EXECUTION_BACKEND=pto` (including the
+> `target="ascend", execution_backend="pto"` compatibility path above). Those
+> options require TileLang newer than `v0.1.15` (currently on the repository
+> default branch).
+
 The following example implements the same GEMM with a fused ReLU epilogue as
 the [main README](../../README.md#quick-start), while using Huawei Ascend 950
 features such as SIMT vector programming and direct Cube-to-Vector data
