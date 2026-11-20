@@ -510,6 +510,43 @@ def test_reduce(op, dtype, M, N, src_scope, dst_scope, threads, batch):
     torch.testing.assert_close(B, _ref(A, op), atol=tol, rtol=tol)
 
 
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize("transpose", [False, True])
+def test_reduce_independent_input_in_gemm_epilogue(transpose):
+    @T.prim_func
+    def main(
+        A: T.Tensor((64, 64), T.float16),
+        B: T.Tensor((64, 64), T.float16),
+        H: T.Tensor((64, 64), T.float16),
+        Y: T.Tensor((64, 64), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            a = T.alloc_shared((64, 64), T.float16)
+            b = T.alloc_shared((64, 64), T.float16)
+            acc = T.alloc_fragment((64, 64), T.float32)
+            wide = T.alloc_fragment((64, 64), T.float32)
+            stat = T.alloc_fragment((64,), T.float32)
+            T.copy(A, a)
+            T.copy(B, b)
+            T.clear(acc)
+            T.gemm(a, b, acc)
+            for i, j in T.Parallel(64, 64):
+                wide[i, j] = T.cast(H[i, j], T.float32)
+            T.reduce_sum(wide, stat, dim=1)
+            for i, j in T.Parallel(64, 64):
+                if transpose:
+                    Y[i, j] = stat[i] + acc[j, i]
+                else:
+                    Y[i, j] = stat[i] + acc[i, j]
+
+    kernel = tilelang.compile(main, out_idx=-1, target="cuda")
+    rng = torch.Generator(device="cuda").manual_seed(4056)
+    a, b, h = [torch.randint(-3, 4, (64, 64), device="cuda", generator=rng).half() for _ in range(3)]
+    acc = (a @ b).float()
+    expected = h.float().sum(1, keepdim=True) + (acc.T if transpose else acc)
+    torch.testing.assert_close(kernel(a, b, h), expected, atol=0, rtol=0)
+
+
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
     ("op", "packed_op"),
