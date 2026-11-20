@@ -247,6 +247,7 @@ inline uint16_t GetAscendCallPipeMask(const Call &call) {
   if (op.same_as(ascend_nd2nz_scatter()) || name.rfind("tl.simd.", 0) == 0 ||
       op.same_as(sync_warp()) || op.same_as(ballot_sync()) ||
       op.same_as(ballot()) || op.same_as(activemask()) ||
+      op.same_as(any_sync()) || op.same_as(all_sync()) ||
       op.same_as(warp_reduce_sum()) || op.same_as(warp_reduce_max()) ||
       op.same_as(warp_reduce_min()) || op.same_as(warp_reduce_bitand()) ||
       op.same_as(warp_reduce_bitor()) || op.same_as(atomic_add_elem_op()) ||
