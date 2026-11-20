@@ -912,6 +912,37 @@ def test_tiled_ws_wide_linear_smem_three_stages():
     _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
 
 
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(9, 0)
+def test_tiled_ws_pipeline_under_if_with_postlude():
+    """A pipeline inside an `if`, followed by consumer code, splits the
+    partitions outside the `if`; the code after it otherwise straddles the
+    producer and consumer register budgets and fails register allocation (#3664)."""
+    import torch
+
+    @T.prim_func
+    def main(A: T.Tensor((64, 128), T.float16), B: T.Tensor((64, 128), T.float16), C: T.Tensor((64, 64), T.float32), n: T.int32):
+        with T.Kernel(1, threads=128):
+            A_s = T.alloc_shared((64, 32), T.float16)
+            B_s = T.alloc_shared((64, 32), T.float16)
+            C_l = T.alloc_fragment((64, 64), T.float32)
+            if n > 0:
+                T.clear(C_l)
+                for k in T.Pipelined(4, num_stages=2):
+                    T.copy(A[0, k * 32], A_s)
+                    T.copy(B[0, k * 32], B_s)
+                    T.gemm(A_s, B_s, C_l, transpose_B=True)
+            T.copy(C_l, C[0, 0])
+
+    kernel = _compile_tvm_ffi(main, out_idx=[2])
+    src = kernel.get_kernel_source()
+    assert "warpgroup_reg_alloc" in src
+    assert src.find("if (((int)threadIdx.x) < 128)") < src.find("if (0 < n)")
+    A = torch.randn(64, 128, dtype=torch.float16, device="cuda")
+    B = torch.randn(64, 128, dtype=torch.float16, device="cuda")
+    torch.testing.assert_close(kernel(A, B, 1), A.float() @ B.float().T, rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     test_tiled_ws_skips_device_bound_tma_descriptor_base()
     test_tiled_ws_places_producer_in_first_warp_group()
@@ -930,3 +961,4 @@ if __name__ == "__main__":
     test_tiled_ws_multi_versioned_wide_linear_smem_keeps_tma()
     test_tiled_ws_wide_linear_smem_multi_way_box_split()
     test_tiled_ws_wide_linear_smem_three_stages()
+    test_tiled_ws_pipeline_under_if_with_postlude()
