@@ -448,7 +448,7 @@ jobs:
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 
@@ -561,7 +561,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           # Matches the wheels built for this runner's os/arch (Linux-X64).
-          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse
           merge-multiple: true
 
@@ -685,7 +685,7 @@ jobs:
     # tests stay parallel; only the upload -> ls -> index sequence queues here.
     # cancel-in-progress must stay false: never kill an in-flight publish.
     concurrency:
-      group: publish-obs-ascend-triton-open-tilelang
+      group: publish-wheels-to-obs
       cancel-in-progress: false
 
     steps:
