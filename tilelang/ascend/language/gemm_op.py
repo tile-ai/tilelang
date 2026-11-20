@@ -97,7 +97,10 @@ def _reject_nonzero_k_origin(A_region, B_region, transpose_A, transpose_B):
     for region, name, transpose in ((A_region, "A", transpose_A), (B_region, "B", transpose_B)):
         if region.buffer.scope() != "shared.l1":
             continue
-        k_axis = (-2 if transpose else -1) if name == "A" else (-1 if transpose else -2)
+        if name == "A":
+            k_axis = -2 if transpose else -1
+        else:
+            k_axis = -1 if transpose else -2
         origin = region.region[k_axis].min
         if not analyzer.can_prove_equal(origin, 0):
             raise ValueError(
