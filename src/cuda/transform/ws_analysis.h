@@ -50,11 +50,15 @@ Optional<Call> GetEvaluateCallInSimpleWrapper(const Stmt &stmt);
 bool IsBarrierOrTmaControlCall(const CallNode *call);
 
 /// Classify a tile-op copy as TMA load producer, cp.async producer, TMA
-/// store, or consumer using coarse pre-layout checks.
-TileStmtKind ClassifyCopy(const CopyNode *copy, Target target);
+/// store, or consumer using coarse pre-layout checks and known layout
+/// annotations. A TMA load candidate with an incompatible layout stays on
+/// the consumer side.
+TileStmtKind ClassifyCopy(const CopyNode *copy, Target target,
+                          const BufferLayoutMap &layout_map = {});
 
 /// Classify a single statement in a pipeline loop body.
-TileStmtKind ClassifyStmt(const Stmt &stmt, Target target);
+TileStmtKind ClassifyStmt(const Stmt &stmt, Target target,
+                          const BufferLayoutMap &layout_map = {});
 
 struct GemmInfo {
   Buffer accumulator;

@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -726,6 +728,52 @@ def test_tiled_ws_incompatible_layout_blocks_ws():
 
     # WS should NOT be applied: no producer/consumer split
     assert "__launch_bounds__(256, 1)" not in src
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_eq(9, 0)
+@pytest.mark.parametrize("num_stages,prelude_b", [(1, False), (3, False), (3, True)])
+def test_tiled_ws_mixed_tma_layouts(num_stages, prelude_b):
+    """Only the compatible A copy may become TMA, including with a B prelude."""
+    import torch
+
+    M = N = 64
+    block_K = 32
+    K = block_K if num_stages == 1 else 5 * block_K
+    B_K = block_K if prelude_b else K
+
+    @T.prim_func
+    def gemm_mixed_layouts(
+        A: T.Tensor((M, K), "float8_e4m3"),
+        B: T.Tensor((B_K, N), "float8_e4m3"),
+        C: T.Tensor((M, N), "float32"),
+    ):
+        with T.Kernel(1, threads=128):
+            A_shared = T.alloc_shared((M, block_K), "float8_e4m3")
+            B_shared = T.alloc_shared((block_K, N), "float8_e4m3")
+            C_local = T.alloc_fragment((M, N), "float32")
+            # This 8-bit MN-major layout is padded and cannot be encoded by TMA.
+            T.annotate_layout({B_shared: make_swizzled_layout(B_shared, k_major=False)})
+            T.clear(C_local)
+            if prelude_b:
+                T.copy(B, B_shared)
+            for k in T.Pipelined(K // block_K, num_stages=num_stages):
+                T.copy(A[0, k * block_K], A_shared)
+                if not prelude_b:
+                    T.copy(B[k * block_K, 0], B_shared)
+                T.gemm(A_shared, B_shared, C_local)
+            T.copy(C_local, C)
+
+    kernel = _compile_tvm_ffi(gemm_mixed_layouts, out_idx=[2])
+    src = kernel.get_kernel_source()
+    assert "__launch_bounds__(256, 1)" in src
+    assert "tl::tma_load(A_desc" in src
+    assert "tl::tma_load(B_desc" not in src
+
+    a = torch.randint(-2, 3, (M, K), device="cuda").to(torch.float8_e4m3fn)
+    b = torch.randint(-2, 3, (B_K, N), device="cuda").to(torch.float8_e4m3fn)
+    reference_b = b.float().repeat(K // block_K, 1) if prelude_b else b.float()
+    torch.testing.assert_close(kernel(a, b), a.float() @ reference_b, rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
