@@ -69,3 +69,23 @@ def test_allocation_records_binding_without_a_consumer(leading):
     assert tuple(int(x) for x in sf.shape) == (*leading, 32, 2)
     bindings = [block.annotations["tl.l0_sf_bindings"] for block in nodes(main, tirx.SBlock) if "tl.l0_sf_bindings" in block.annotations]
     assert len(bindings) == 1 and bindings[0][sf.data].same_as(a.data)
+
+
+@pytest.mark.parametrize("sids", [None, 1, 2])
+def test_mixed_kernel_accepts_integer_sids_or_none(sids):
+    @T.prim_func
+    def main():
+        with T.MixedKernel(1, sids=sids):
+            T.evaluate(0)
+
+    assert isinstance(main, tirx.PrimFunc)
+
+
+@pytest.mark.parametrize("sids", [True, False, 1.0, 2.0, 0, 3, -1, "1"])
+def test_mixed_kernel_rejects_invalid_sids_in_frontend(sids):
+    with pytest.raises(ValueError, match=r"T\.MixedKernel\(\) sids must be an integer 1 or 2"):
+
+        @T.prim_func
+        def main():
+            with T.MixedKernel(1, sids=sids):
+                T.evaluate(0)

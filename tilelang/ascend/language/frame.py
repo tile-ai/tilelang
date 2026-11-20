@@ -37,7 +37,7 @@ class VectorFrame(TIRFrame):
 
     In Mix mode, provides a subblock ID variable via ``as`` binding::
 
-        with T.Vector(vector=2) as sid:
+        with T.Vector() as sid:
             # sid = asc_get_sub_block_id()
             ...
     """
@@ -47,20 +47,27 @@ class VectorFrame(TIRFrame):
         return self.sid_var
 
 
-def Vector(vector: int = 2) -> VectorFrame:
-    """Construct a Vector (AIV) execution region frame.
+def Vector(vector: int | None = None) -> VectorFrame:
+    """Mark an AIV execution region and bind its subblock index.
 
-    Parameters
-    ----------
-    vector : int
-        Number of AIV cores (1 or 2). Default 2.
-
-    Returns
-    -------
-    res : VectorFrame
-        The VectorFrame used to denote an AIV execution region.
+    The region inherits the enclosing kernel's AIV group. Configure an explicit
+    group with ``T.MixedKernel(..., sids=1/2)``; ordinary ``T.Kernel`` uses the
+    hardware default. An explicit Vector region requests mixed launch geometry
+    even for a Vector-only body, so its sid can address every AIV in the group.
+    ``vector=None`` is retained only for compatibility with omitted arguments.
     """
-    return _ffi_api.Vector(vector)  # type: ignore[attr-defined] # pylint: disable=no-member
+    if vector is not None:
+        raise ValueError(
+            "T.Vector no longer accepts an AIV count. Use T.Vector() and configure the kernel with T.MixedKernel(..., sids=1 or 2)."
+        )
+    from tilelang.language.kernel import KernelLaunchFrame
+
+    kernel = KernelLaunchFrame.Current()
+    if kernel is None:
+        raise ValueError("T.Vector() requires an enclosing T.Kernel or T.MixedKernel")
+    # MixedKernel yields (bx, sid); ordinary Kernel only yields bx.
+    sid = kernel.grid_vars[1] if len(kernel.grid_vars) == 2 else None
+    return _ffi_api.Vector(sid)
 
 
 def _next_vf_source_index(kind: str) -> int:
