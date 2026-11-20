@@ -119,6 +119,10 @@ public:
   // The predicate expression for the loop, if any, mutable for lazy
   // construction.
   mutable Optional<PrimExpr> predicate_;
+  // Single-replica guard for the non-fragment side effects of a replicated
+  // loop that also stores fragments (the loop itself cannot be predicated,
+  // since every replica must write its fragment copy).
+  mutable Optional<PrimExpr> replica_write_guard_;
   // If the user/compiler provided annotations on the outermost loop, we cache
   // them here (layout without thread-range binding, and the predicate). This
   // lets InferLayout adopt them cleanly without re-parsing annotations.
@@ -153,6 +157,7 @@ public:
   ParallelOpNode(const ParallelOpNode &other) : ParallelOpNode(other.root_) {
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
+    replica_write_guard_ = other.replica_write_guard_;
     loop_layout_inferred_ = other.loop_layout_inferred_;
     loop_layout_requires_padding_guard_ =
         other.loop_layout_requires_padding_guard_;
@@ -180,6 +185,9 @@ public:
   // real threadIdx.x Var; callers without thread bindings (e.g. CPU) pass
   // constant 0.
   Optional<PrimExpr> GetPredicate(PrimExpr thread_index) const;
+  // Get the guard that restricts non-idempotent shared/global writes (atomics
+  // and read-modify-writes) of a replicated loop to one replica, if any.
+  Optional<PrimExpr> GetReplicaWriteGuard(PrimExpr thread_index) const;
 
   // Clone this operator.
   TileOperator Clone() const override;
@@ -280,6 +288,15 @@ private:
   // Fragment buffers that are stored to in the loop body.
   std::vector<Buffer> store_fragment_buffers_;
 };
+
+/*!
+ * \brief Restrict the non-idempotent shared/global writes in the body of a
+ *        replicated parallel loop to the replica selected by `guard` (see
+ *        ParallelOpNode::GetReplicaWriteGuard). `bindings` maps the variables
+ *        bound in the enclosing function to their values.
+ */
+Stmt GuardReplicaWrites(const Stmt &body, const PrimExpr &guard,
+                        const Map<Var, PrimExpr> &bindings);
 
 class ParallelOp : public TileOperator {
 public:
