@@ -1801,7 +1801,8 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
       os << cast_func << "(" << PrintExpr(op->value) << ")";
       return;
     }
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     std::string sret = name_supply_->FreshName("_");
     PrintIndent();
     PrintType(target_ty, stream);
@@ -1878,7 +1879,10 @@ void CodeGenTileLangCUDA::VisitExpr_(const CastNode *op, std::ostream &os) {
   this->PrintIndent();
   this->PrintType(target_ty, stream);
   stream << ' ' << sret << ";\n";
-  std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+  // A cast must not cache a buffer load across later stores to that buffer.
+  // Materialize it once for this conversion without adding an SSA cache entry.
+  std::string src = name_supply_->FreshName("cast_src");
+  PrintSSAAssign(src, PrintExpr(op->value), from_ty);
 
   int lanes = from_ty.lanes();
 

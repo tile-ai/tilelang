@@ -256,5 +256,43 @@ def test_fp4_fp8_exact(lanes, via_fp32):
     assert torch.equal(output.view(torch.uint8), expected)
 
 
+def mutable_fragment_cast_kernel(cast_dtype, lanes):
+    columns = 8 * lanes
+
+    @T.prim_func
+    def main(A: T.Tensor((32, columns), "float32"), B: T.Tensor((32, columns), "float32")):
+        with T.Kernel(1, threads=256):
+            fragment = T.alloc_fragment((32, columns), "float32")
+            T.copy(A, fragment)
+            for i, j in T.Parallel(32, columns):
+                fragment[i, j] = T.cast(T.cast(fragment[i, j], cast_dtype), "float32")
+            for i, j in T.Parallel(32, columns):
+                fragment[i, j] = fragment[i, j] + 1.0
+            for i, j in T.Parallel(32, columns):
+                fragment[i, j] = fragment[i, j] + 3.0
+            T.copy(fragment, B)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("lanes", [2, 4])
+@pytest.mark.parametrize("cast_dtype", ["float16", "bfloat16", "int32"])
+def test_vectorized_cast_reads_updated_fragment(cast_dtype, lanes):
+    """A cast must not leave a cached fragment load visible to later stores."""
+    columns = 8 * lanes
+    kernel = tilelang.compile(mutable_fragment_cast_kernel(cast_dtype, lanes), out_idx=[1], target="cuda")
+    code = kernel.get_kernel_source()
+    if cast_dtype == "float16":
+        assert "__float22half2_rn" in code
+    elif cast_dtype == "bfloat16":
+        assert "__float22bfloat162_rn" in code
+    # Values inexact in both narrow formats also expose a missing round-trip.
+    host = torch.arange(32 * columns, dtype=torch.float32).reshape(32, columns) / 256 - 2 + 0.000213
+    expected = (host.to(getattr(torch, cast_dtype)).float() + 1.0) + 3.0
+    actual = kernel(host.cuda())
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
