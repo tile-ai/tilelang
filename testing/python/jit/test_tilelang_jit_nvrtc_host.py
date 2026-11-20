@@ -21,6 +21,7 @@ def _make_host_only_adapter(program, result_idx=None):
     adapter.param_shapes = [list(param.shape) for param in adapter.params]
     adapter.dynamic_symbolic_map = adapter._process_dynamic_symbolic()
     adapter.target = "cuda"
+    adapter._post_init()
     return adapter
 
 
@@ -100,6 +101,8 @@ def test_nvrtc_adapter_resolves_output_shape_from_later_input():
 
     tensor = torch.empty(7)
     output = adapter._wrap_forward_from_prebuild_lib(tensor, stream=0)
+    with pytest.raises(ValueError, match="parameter A .*contiguous"):
+        adapter._wrap_forward_from_prebuild_lib(tensor[::2], stream=0)
 
     assert output.shape == (7,)
     assert len(forwarded) == 1

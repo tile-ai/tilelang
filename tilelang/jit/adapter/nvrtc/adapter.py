@@ -10,6 +10,7 @@ from tvm.target import Target
 from tilelang import tvm as tvm
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.wrapper import TLPyWrapper
+from tilelang.language.eager.utils import construct_strides
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
@@ -159,6 +160,22 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         adapter._post_init()
         return adapter
 
+    def _post_init(self) -> None:
+        func = self.prim_func
+        analyzer = tvm.arith.Analyzer()
+        self._contiguous_params: dict[int, str] = {}
+        for i, param in enumerate(func.params):
+            buffer = func.buffer_map.get(param)
+            if buffer is None:
+                continue
+            # Empty strides imply compact storage. Singleton strides do not affect addresses.
+            if not buffer.strides or all(
+                analyzer.can_prove_equal(stride, expected) or analyzer.can_prove_equal(extent, 1)
+                for extent, stride, expected in zip(buffer.shape, buffer.strides, construct_strides(buffer.shape))
+            ):
+                self._contiguous_params[i] = buffer.name
+        super()._post_init()
+
     def _process_dynamic_symbolic(self) -> dict[tirx.Var, tuple[int, int, int, int]]:
         """Extract runtime sources for scalar, shape, and stride symbols.
 
@@ -286,7 +303,10 @@ class NVRTCKernelAdapter(BaseKernelAdapter):
         for i in range(len(self.params)):
             if i in self.result_idx:
                 continue
-            param_values[i] = ins[ins_idx]
+            value = ins[ins_idx]
+            if i in self._contiguous_params and isinstance(value, torch.Tensor) and not value.is_contiguous():
+                raise ValueError(f"Expected parameter {self._contiguous_params[i]} to be a contiguous tensor, got strides {value.stride()}")
+            param_values[i] = value
             ins_idx += 1
 
         first_tensor = next((value for value in param_values if isinstance(value, torch.Tensor)), None)

@@ -197,6 +197,31 @@ def test_nvrtc_kernel_handles_are_isolated_between_adapters():
     torch.testing.assert_close(second_kernel(x), torch.full_like(x, 5.0))
 
 
+@tilelang.testing.requires_cuda
+def test_nvrtc_tensor_contiguity():
+    @T.prim_func
+    def subtract(
+        A: T.Tensor((8, 8), T.float32),
+        B: T.StridedTensor((8, 8), (1, 8), T.float32),
+        C: T.Tensor((8, 8), T.float32),
+    ):
+        with T.Kernel(1, threads=32):
+            for i, j in T.Parallel(8, 8):
+                C[i, j] = A[i, j] - B[i, j]
+
+    kernel = tilelang.compile(subtract, execution_backend="nvrtc")
+    x = torch.arange(64, device="cuda", dtype=torch.float32).reshape(8, 8)
+    out = torch.empty_like(x)
+
+    with pytest.raises(ValueError, match="parameter A .*contiguous"):
+        kernel(x.T, x.T, out)
+    with pytest.raises(ValueError, match="parameter C .*contiguous"):
+        kernel(x, x.T, out.T)
+
+    kernel(x, x.T, out)
+    torch.testing.assert_close(out, x - x.T)
+
+
 def run_nvrtc_kernel_do_bench(
     M, N, K, trans_A, trans_B, in_dtype, out_dtype, dtypeAccum, block_M, block_N, block_K, num_stages=3, num_threads=128
 ):
