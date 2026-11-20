@@ -27,6 +27,11 @@ def _with_pto_key(target: Target) -> Target:
     # The native kind supplies Ascend semantics; "pto" selects PTO codegen,
     # while "ascend" preserves the target kind's default feature key.
     target_dict["keys"] = list(dict.fromkeys(["pto", *target_dict.get("keys", ()), "ascend"]))
+    # The PTO SIMT codegen lowers compute ops through x2-granular emitters
+    # (FP8 conversions, floating min/max, ...), so the shared 128-bit default
+    # would plan 4-lane ops it cannot emit. Keep PTO at the 64-bit planning
+    # width until those emitters support wider vectors.
+    target_dict["max_vector_bits"] = 64
     return Target(target_dict)
 
 
