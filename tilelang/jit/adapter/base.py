@@ -21,10 +21,26 @@ class CachedTextSource:
 CachedTextSourceLike = CachedTextSource | str | None
 
 
+def output_allocation_stream(stream: int, device: torch.device) -> torch.cuda.Stream | None:
+    """Return the caller-supplied launch stream when outputs must be allocated on it.
+
+    torch's caching allocator orders reuse of a block only after earlier work on
+    the stream the block was allocated on, so tensors written by a kernel launched
+    on ``stream`` are allocated on ``stream``. ``None`` means the launch stream is
+    the current stream, where a plain ``torch.empty`` is already correct.
+    """
+    if device.type != "cuda" or stream == torch.cuda.current_stream(device).cuda_stream:
+        return None
+    if stream == 0:
+        # ExternalStream(0) yields a pooled stream on some PyTorch releases (2.4, 2.5).
+        return torch.cuda.default_stream(device)
+    return torch.cuda.ExternalStream(stream, device=device)
+
+
 class BaseKernelAdapter(ABC):
     func: Callable | None = None
 
-    def __init__(self, mod, params: list[KernelParam], result_idx: list[int]) -> None:
+    def __init__(self, mod, params: list[KernelParam], result_idx: int | list[int] | None) -> None:
         self.mod = mod
         self.params = params
         self.result_idx = self._legalize_result_idx(result_idx)
@@ -44,6 +60,8 @@ class BaseKernelAdapter(ABC):
         elif isinstance(result_idx, list):
             result_idx = result_idx.copy()
             for i, idx in enumerate(result_idx):
+                if not isinstance(idx, int):
+                    raise ValueError("result_idx should be a list of integers")
                 if idx >= len(params) or idx < -len(params):
                     raise ValueError(f"result_idx should be an integer between {-len(params)} and {len(params) - 1}")
                 if idx < 0:

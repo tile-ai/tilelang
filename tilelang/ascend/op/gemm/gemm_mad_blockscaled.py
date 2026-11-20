@@ -13,8 +13,6 @@ from tilelang.ascend import language as T
 
 from .gemm_mad import (
     _ASCEND_DTYPE_MAP,
-    _compute_extent,
-    _compute_flat_offset_excluding_last,
     _find_layout,
     _make_access_ptr,
     _to_int32,
@@ -102,41 +100,15 @@ class GemmMADBlockScaled(GemmBlockScaledMixin, GemmMAD):
         tile_k_sub = self._compute_tile_k_sub()
         c_ptr = _make_access_ptr(self.CRegion.buffer, self.CRegion, 2)
 
-        a_buf = self.ARegion.buffer
-        b_buf = self.BRegion.buffer
-        a_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(a_buf.dtype),
-            a_buf.data,
-            _compute_flat_offset_excluding_last(a_buf, self.ARegion),
-            _compute_extent(self.ARegion),
-            tirx.IntImm("int32", 1),
-        )
-        b_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(b_buf.dtype),
-            b_buf.data,
-            _compute_flat_offset_excluding_last(b_buf, self.BRegion),
-            _compute_extent(self.BRegion),
-            tirx.IntImm("int32", 1),
-        )
+        a_ptr = _make_access_ptr(self.ARegion.buffer, self.ARegion, 1, exclude_last=True)
+        b_ptr = _make_access_ptr(self.BRegion.buffer, self.BRegion, 1, exclude_last=True)
 
         sfa_region = self.SFARegion
         sfb_region = self.SFBRegion
         sfa_buf = sfa_region.buffer
         sfb_buf = sfb_region.buffer
-        sfa_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(sfa_buf.dtype),
-            sfa_buf.data,
-            _compute_flat_offset_excluding_last(sfa_buf, sfa_region),
-            _compute_extent(sfa_region),
-            tirx.IntImm("int32", 1),
-        )
-        sfb_ptr = tirx.op.tvm_access_ptr(
-            tirx.op.type_annotation(sfb_buf.dtype),
-            sfb_buf.data,
-            _compute_flat_offset_excluding_last(sfb_buf, sfb_region),
-            _compute_extent(sfb_region),
-            tirx.IntImm("int32", 1),
-        )
+        sfa_ptr = _make_access_ptr(sfa_buf, sfa_region, 1, exclude_last=True)
+        sfb_ptr = _make_access_ptr(sfb_buf, sfb_region, 1, exclude_last=True)
 
         input_dtype = self._input_dtype()
         in_dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)

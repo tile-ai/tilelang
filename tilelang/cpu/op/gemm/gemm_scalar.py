@@ -44,7 +44,7 @@ class GemmScalar(GemmBase):
         @T.prim_func
         def _gemm_scalar() -> None:
             if clear_accum:
-                T.clear(C_buf)
+                T.clear(C_buf[c0 : c0 + M, c1 : c1 + N])
             for i, j, k in T.grid(M, N, K):
                 C_buf[c0 + i, c1 + j] += T.cast(
                     A_buf[a0 + (k if trans_A else i), a1 + (i if trans_A else k)],

@@ -34,11 +34,8 @@ def _no_barrier_kernel():
 
 def _compile(target, kernel_factory=_barrier_kernel):
     """Compile a freshly built kernel for ``target`` with caching disabled."""
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(kernel_factory(), out_idx=-1, target=target)
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda

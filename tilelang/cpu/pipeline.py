@@ -51,6 +51,7 @@ def CPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     # Mark atomic kernels before LowerTileOp so grid parallelization stays serial.
     if cpu_parallel:
         mod = tilelang.cpu.transform.MarkCPUAtomics()(mod)
+    mod = tilelang.cpu.transform.LowerCPUAnyAll()(mod)
     mod = tilelang.transform.LowerTileOp()(mod)
     mod = tilelang.transform.VerifyReducerConsumed()(mod)
     # Lower remaining scalar atomics to serial RMW before vectorization.

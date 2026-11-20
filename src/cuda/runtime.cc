@@ -18,6 +18,44 @@ namespace tl {
 
 using namespace ffi;
 
+// Both launchers use the current CUDA context. Registration and mapping are
+// owned by the caller, and are never created as a side effect of a launch.
+TVM_FFI_STATIC_INIT_BLOCK() {
+  reflection::GlobalDef()
+      .def("tl.cuda.current_device",
+           []() {
+             CUdevice device;
+             CUresult result = cuCtxGetDevice(&device);
+             TVM_FFI_ICHECK_EQ(result, CUDA_SUCCESS)
+                 << "Cannot determine the current CUDA device: " << result;
+             return static_cast<int32_t>(device);
+           })
+      .def("tl.cuda.get_host_mapped_pointer", [](void *host_ptr) -> void * {
+        // Empty buffers have no storage to map.
+        if (host_ptr == nullptr) {
+          return nullptr;
+        }
+        unsigned int flags;
+        CUresult result = cuMemHostGetFlags(&flags, host_ptr);
+        if (result != CUDA_SUCCESS) {
+          TVM_FFI_THROW(ValueError)
+              << "Host-mapped buffer requires CUDA-registered pinned host "
+                 "memory; ordinary pageable CPU memory is not supported "
+                 "(cuMemHostGetFlags error "
+              << result << ")";
+        }
+        CUdeviceptr device_ptr;
+        result = cuMemHostGetDevicePointer(&device_ptr, host_ptr, 0);
+        if (result != CUDA_SUCCESS) {
+          TVM_FFI_THROW(ValueError)
+              << "Host-mapped buffer is not accessible from the current CUDA "
+                 "context (cuMemHostGetDevicePointer error "
+              << result << ")";
+        }
+        return reinterpret_cast<void *>(device_ptr);
+      });
+}
+
 #if 1
 // Thread-local storage for restoring the L2 persisting cache limit
 static thread_local size_t __tl_prev_persisting_l2_cache_size = 0;

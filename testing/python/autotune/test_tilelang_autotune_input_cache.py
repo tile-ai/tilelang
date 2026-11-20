@@ -4,7 +4,7 @@ import torch
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang.autotuner import AutoTuner
+from tilelang.autotuner import AutoTuner, set_autotune_inputs
 from tilelang.autotuner.tuner import _BenchmarkWorkerState
 
 
@@ -231,6 +231,29 @@ def test_autotune_refreshes_inputs_when_device_changes():
             assert all(inputs[0].device == torch.device("cuda", device) for inputs in supplied[-2:])
             x = supplied[-1][0]
             torch.testing.assert_close(result.kernel(x), x + 1)
+
+
+@tilelang.testing.requires_cuda
+def test_set_autotune_inputs_supplier_isolates_cache_per_device(monkeypatch):
+    a = torch.randn(8, device="cuda")
+    with set_autotune_inputs(a):
+        tuner = AutoTuner(lambda: None, configs=[{}]).set_profile_args()
+    supply = tuner.profile_args.supply_prog
+
+    cuda_inputs = supply([])
+    assert cuda_inputs[0] is not a
+    assert cuda_inputs[0].device == torch.device("cuda", torch.cuda.current_device())
+
+    # Simulate a benchmark worker on another device: the same supplier must
+    # serve a separate copy there instead of reusing the cached one.
+    monkeypatch.setattr("tilelang.autotuner.tuner.get_current_device", lambda: "cpu")
+    cpu_inputs = supply([])
+    assert cpu_inputs[0].device.type == "cpu"
+    assert cpu_inputs[0] is not cuda_inputs[0]
+    # The same device reuses its cached copy, and the other entry is untouched.
+    assert supply([])[0] is cpu_inputs[0]
+    monkeypatch.undo()
+    assert supply([])[0] is cuda_inputs[0]
 
 
 if __name__ == "__main__":

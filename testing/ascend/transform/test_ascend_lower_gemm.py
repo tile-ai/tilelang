@@ -3,7 +3,7 @@
 import math
 
 import pytest
-from tilelang import tvm
+from tilelang import tvm, transform as tl_transform
 from tilelang.ascend import language as T, transform
 from tilelang.layout import make_ascend_major_k_layout, make_ascend_l0c_layout
 from tvm import tirx
@@ -116,7 +116,7 @@ def test_invalid_binding_and_slice_are_rejected(case, diagnostic):
 
 @pytest.mark.parametrize("case", ["valid", "compact"])
 def test_matching_leading_indices_and_compact_regions(case):
-    after = transform.AscendLowerTileOp()(_sf_gemm(case))
+    after = tl_transform.LowerAccessPtr()(transform.AscendLowerTileOp()(_sf_gemm(case)))
     (mad,) = calls(after, "tl.ascend_mad_mx")
     analyzer = tvm.arith.Analyzer()
     assert analyzer.can_prove_equal(mad.args[1].args[2], 5 * 32 * 128)

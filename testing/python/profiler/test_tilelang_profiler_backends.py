@@ -58,7 +58,6 @@ def test_public_benchmark_api():
         "_n_warmup": 0,
         "_n_repeat": 0,
         "quantiles": None,
-        "fast_flush": True,
         "backend": "event",
         "return_mode": "mean",
         "device": None,
@@ -100,7 +99,7 @@ def test_wall_benchmark_forwarding(monkeypatch):
         "early_stop_baseline": 1.0,
     }
 
-    assert profiler.do_bench(function, backend="wall", fast_flush=False, cache_size=128, **options) is result
+    assert profiler.do_bench(function, backend="wall", cache_size=128, **options) is result
     assert calls == [
         ((function,), {"n_repeat": 5, "synchronize": None}),
         ((function,), {"n_repeat": 3, "quantiles": [0.5, 0.95], "return_mode": "median", "synchronize": None}),

@@ -9,6 +9,8 @@ from tilelang import tvm
 from tilelang.ascend import language as T
 
 
+pytestmark = pytest.mark.pto
+
 tirx = tvm.tirx
 
 
@@ -44,7 +46,7 @@ def _codegen(body_builder):
         .with_attr("global_symbol", "main")
         .with_attr("target", tvm.target.Target({"kind": "ascend", "keys": ["pto"]}))
     )
-    build = tvm.get_global_func("target.build.tilelang_pto")
+    build = tvm.get_global_func("target.build.tilelang_pto_without_compile")
     source = build(tvm.IRModule({"main": func}), tvm.target.Target({"kind": "ascend", "keys": ["pto"]})).inspect_source()
     ast.parse(source)
     return source
@@ -260,7 +262,7 @@ def test_nz_post_copy_uses_independent_storage_pitches():
     body = tirx.SeqStmt([tirx.AllocBuffer(src), tirx.AllocBuffer(dst), call])
     target = tvm.target.Target({"kind": "ascend", "keys": ["pto"]})
     func = tirx.PrimFunc([], body).with_attr({"global_symbol": "main", "target": target})
-    source = tvm.get_global_func("target.build.tilelang_pto")(tvm.IRModule({"main": func}), target).inspect_source()
+    source = tvm.get_global_func("target.build.tilelang_pto_without_compile")(tvm.IRModule({"main": func}), target).inspect_source()
     ast.parse(source)
     assert ", 8, nburst=(4, 56, 56))" in source
 

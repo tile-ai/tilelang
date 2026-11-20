@@ -1,0 +1,92 @@
+# FlashMLA on Ascend
+
+Sparse attention kernels for Ascend 950, adapted from
+[FlashMLA PR #229](https://github.com/deepseek-ai/FlashMLA/pull/229)
+at `a123d0b0191e0da7aa1e044f8644e0989cc63220`.
+
+| Files | Purpose |
+| --- | --- |
+| `kernel.py` | Persistent prefill and decode with `T.Stage` and compiler-managed buffer versions |
+| `prefill.py`, `decode.py` | Compilation entry points for BF16 prefill and packed FP8/FP4 decode |
+| `quantization.py` | Packed KV dequantization and NZ conversion |
+| `testing.py` | Adapt FlashMLA reference inputs to the TileLang kernels |
+| `run_prefill.py`, `run_decode.py` | Correctness checks and benchmarks against FlashMLA |
+| `test_flashmla.py` | Kernel regression tests |
+
+The kernels use H=64, Dqk=Dv=512, BF16 Q/output, and topk extents divisible
+by 64. Prefill and decode support attention sinks, invalid indices, and per-query lengths.
+Prefill accepts contiguous BF16 KV; decode requires contiguous packed KV pages,
+with each cache smaller than 4 GiB.
+
+On typical DeepSeek V4.1 workloads, these kernels reach about **405 TFLOPS in
+BF16 prefill** and **362 TFLOPS in FP8/FP4 decode** on Ascend 950DT with CANN 9.3.0.
+The measured prefill case uses 4,096 query tokens, 4,096 KV tokens, and topk=640;
+decode uses batch=512, four query tokens per sequence, topk=128 from the FP8 main
+cache, and topk=512 from the FP4 extra cache. These are kernel-only timings with
+L2 flushed before each launch, counting the QK and PV matrix multiplications.
+
+## Run
+
+Build TileLang with Ascend support; see the [backend guide](../../../tilelang/ascend/README.md).
+
+The runners use the pinned FlashMLA checkout's input generators, numerical
+references, quantization, and `kernelkit.bench` profiler. Build its Ascend
+extension first:
+
+```bash
+cd /path/to/FlashMLA
+MAX_JOBS=16 FLASH_MLA_BUILD_TARGET_PLATFORM=ASCEND python setup.py build_ext --inplace
+```
+
+From the TileLang repository root, select an idle NPU with
+`ASCEND_RT_VISIBLE_DEVICES`, then run:
+
+```bash
+export ASCEND_RT_VISIBLE_DEVICES=0  # Replace 0 with an idle physical NPU.
+export PYTHONPATH=.
+export FLASHMLA_REFERENCE=/path/to/FlashMLA
+python examples/ascend/flashmla/run_prefill.py --reference "$FLASHMLA_REFERENCE" \
+  --mode correctness --output /tmp/flashmla-prefill.json
+python examples/ascend/flashmla/run_decode.py --reference "$FLASHMLA_REFERENCE" \
+  --mode correctness --output /tmp/flashmla-decode.json
+python -m pytest examples/ascend/flashmla/test_flashmla.py -q
+```
+
+Use `--mode bench --rounds 3 --repeat 10` for benchmarks and `--case N` for
+one case. `--implementation` accepts `reference`, `tilelang`, or
+`both` (the default).
+Benchmark runners check outputs before timing and write per-launch durations
+to `--output`.
+
+Pair gathers use a zero-or-two burst count. The local `T.assume(n_burst > 0)`
+suppresses the compiler's copy guard while retaining the runtime DMA count;
+it is a code-generation workaround, not a valid input invariant. A zero
+burst must preserve the UB contents and issue no GM read.
+
+## License
+
+The adapted FlashMLA code and scheduling algorithms retain the following notice:
+
+```text
+MIT License
+
+Copyright (c) 2025 DeepSeek
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

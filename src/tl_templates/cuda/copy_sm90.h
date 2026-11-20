@@ -14,7 +14,8 @@ enum class CacheHintSm90 : uint64_t {
   EVICT_LAST = 0x14F0000000000000,
 };
 
-template <typename BarrierType = uint64_t>
+template <CacheHintSm90 cache_hint = CacheHintSm90::EVICT_NORMAL,
+          typename BarrierType = uint64_t>
 TL_DEVICE void tma_load(void *smem_ptr, void const *gmem_ptr,
                         BarrierType &smem_mbar, uint32_t size) {
   uint32_t smem_int_mbar =
@@ -23,14 +24,18 @@ TL_DEVICE void tma_load(void *smem_ptr, void const *gmem_ptr,
 #if (__CUDACC_VER_MAJOR__ > 12) ||                                             \
     (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 8)
   asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::"
-               "bytes [%0], [%1], %2, [%3]; \n" ::"r"(smem_int_ptr),
-               "l"((void const *)gmem_ptr), "r"(size), "r"(smem_int_mbar)
-               :);
+               "bytes.L2::cache_hint [%0], [%1], %2, [%3], %4;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_ptr), "r"(size),
+                 "r"(smem_int_mbar), "l"(cache_hint)
+               : "memory");
 #else
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
-               "bytes [%0], [%1], %2, [%3]; \n" ::"r"(smem_int_ptr),
-               "l"((void const *)gmem_ptr), "r"(size), "r"(smem_int_mbar)
-               :);
+               "bytes.L2::cache_hint [%0], [%1], %2, [%3], %4;"
+               :
+               : "r"(smem_int_ptr), "l"(gmem_ptr), "r"(size),
+                 "r"(smem_int_mbar), "l"(cache_hint)
+               : "memory");
 #endif
 }
 

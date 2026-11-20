@@ -102,7 +102,7 @@ def alloc_l0c(shape: ShapeType, dtype: DType, scope="shared.l0c", layout: bool =
         from tilelang.layout import make_ascend_l0c_layout
 
         if len(buf.shape) >= 2:
-            sblock_attr({"layout_map": {buf.data: make_ascend_l0c_layout(buf)}})
+            sblock_attr({"layout_map": {buf: make_ascend_l0c_layout(buf)}})
     return buf
 
 

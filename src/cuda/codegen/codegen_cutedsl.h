@@ -47,6 +47,7 @@ protected:
   void VisitExpr_(const CallNode *op, std::ostream &os) override;   // NOLINT(*)
   void VisitExpr_(const SelectNode *op, std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const LetNode *op, std::ostream &os) override;    // NOLINT(*)
+  void VisitExpr_(const RampNode *op, std::ostream &os) override;   // NOLINT(*)
   void VisitExpr_(const ShuffleNode *op,
                   std::ostream &os) override; // NOLINT(*)
   void VisitExpr_(const BufferLoadNode *op,
@@ -68,12 +69,19 @@ protected:
                                   const std::string &value);
   virtual void PrintVecStore_(const BufferNode *buffer, DataType t,
                               PrimExpr base, const std::string &value);
+  std::string PrintLoopBounds_(PrimExpr min, PrimExpr extent);
   void PrintVecBinaryOp_(const std::string &opstr, DataType dtype, PrimExpr lhs,
                          PrimExpr rhs,
                          std::ostream &os); // NOLINT(*)
   void PrintBinaryExpr_(const std::string &opstr, DataType dtype, PrimExpr lhs,
                         PrimExpr rhs,
                         std::ostream &os) override; // NOLINT(*)
+  // Binds a TensorSSA-valued helper call to an rmem tensor so stores see a
+  // `.load()` value instead of re-evaluating the call per lane. With
+  // `keep_tensor` the rmem tensor itself is the result.
+  void PrintVecHelperResult_(DataType dtype, const std::string &call,
+                             std::ostream &os,
+                             bool keep_tensor = false); // NOLINT(*)
   void PrintBinaryIntrinsic_(const CallNode *op, const char *opstr,
                              std::ostream &os) override; // NOLINT(*)
 
@@ -112,6 +120,10 @@ private:
 
   std::unordered_set<const VarNode *> raw_pointer_vars_;
   std::unordered_set<const VarNode *> zero_like_vars_;
+
+  // Name of the register-resident RNG state declared by T.rng_init.
+  const std::string rng_state_name_ = "__rng_state";
+  bool rng_state_declared_ = false;
 
   std::vector<std::string> eviction_policy_names_ = {
       "EVICT_NORMAL", "EVICT_FIRST", "EVICT_LAST"};

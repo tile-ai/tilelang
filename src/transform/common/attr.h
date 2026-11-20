@@ -49,6 +49,9 @@ constexpr const char *kBufferVersion = "tl.buffer_version";
 constexpr const char *kCodeBlockSource = "code_block_source";
 constexpr const char *kCodeBlockEntryName = "code_block_entry_name";
 
+// Per-launch device symbol, preserved as an AttrStmt until SplitHostDevice.
+constexpr const char *kKernelName = "tl.kernel_name";
+
 /*!
  * \brief Check if attr_key is a code block key extension
  * \param attr_key The attr key to be compared

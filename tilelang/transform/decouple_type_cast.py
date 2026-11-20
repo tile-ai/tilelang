@@ -65,6 +65,7 @@ from tvm.tirx import (
     PyStmtExprVisitor,
     SBlock,
     SBlockRealize,
+    Select,
     SeqStmt,
     Stmt,
     Var,
@@ -106,11 +107,11 @@ def is_global_or_shared_buffer(buffer: Buffer) -> bool:
 
 @tirx.functor.visitor
 class _CastFinder(PyStmtExprVisitor):
-    """Find Cast nodes in a statement, skipping BufferLoad/BufferStore indices.
+    """Find Cast nodes in a statement, skipping indices and branch conditions.
 
-    A Cast that only appears inside an index expression is not a mixed-precision
-    compute — it's just an index-type conversion — so it should not trigger the
-    decoupling transformation.
+    A Cast that only appears inside an index or condition expression is not a
+    mixed-precision compute, so it should not trigger the decoupling
+    transformation.
     """
 
     def __init__(self):
@@ -120,6 +121,23 @@ class _CastFinder(PyStmtExprVisitor):
     def visit_cast_(self, op: Cast) -> None:
         self.found = True
         self.visit_expr(op.value)
+
+    def visit_if_then_else_(self, op: IfThenElse) -> None:
+        self.visit_stmt(op.then_case)
+        if op.else_case is not None:
+            self.visit_stmt(op.else_case)
+
+    def visit_select_(self, op: Select) -> None:
+        self.visit_expr(op.true_value)
+        self.visit_expr(op.false_value)
+
+    def visit_call_(self, op: Call) -> None:
+        if op.op.same_as(_IF_THEN_ELSE_OP):
+            self.visit_expr(op.args[1])
+            self.visit_expr(op.args[2])
+        else:
+            for arg in op.args:
+                self.visit_expr(arg)
 
     def visit_buffer_store_(self, op: BufferStore) -> None:
         self.visit_expr(op.value)
@@ -187,6 +205,15 @@ class MemoryAccessCollector(PyStmtExprVisitor):
         if is_global_or_shared_buffer(op.buffer) and any(_expr_depends_on_var(idx, self.loop_var) for idx in op.indices):
             self.loads.append(op)
         # Skip indices traversal
+
+    def visit_if_then_else_(self, op: IfThenElse) -> None:
+        self.visit_stmt(op.then_case)
+        if op.else_case is not None:
+            self.visit_stmt(op.else_case)
+
+    def visit_select_(self, op: Select) -> None:
+        self.visit_expr(op.true_value)
+        self.visit_expr(op.false_value)
 
     def visit_call_(self, op: Call) -> None:
         if op.op.same_as(_IF_THEN_ELSE_OP):

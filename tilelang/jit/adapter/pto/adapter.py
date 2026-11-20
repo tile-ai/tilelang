@@ -15,6 +15,7 @@ from tilelang import tvm
 from tilelang.backend.target import determine_target
 from tilelang.engine.param import KernelParam
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
+from tilelang.jit.adapter.utils import get_output_scalar_dim_map
 from tilelang.utils.language import prim_expr_equal, retrieve_func_from_module
 
 from .libgen import PTOLibraryGenerator
@@ -176,6 +177,7 @@ class PTOKernelAdapter(BaseKernelAdapter):
         self.runtime_wrapper.set_static_strides_map(self.static_strides_map)
         self.runtime_wrapper.set_dynamic_strides_map(self.dynamic_strides_map)
         self.runtime_wrapper.set_scalar_param_vars(self.scalar_param_vars)
+        self.runtime_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(self.prim_func, self.result_idx))
         self.runtime_wrapper.set_static_contiguous_list(self.static_contiguous_list)
         self.runtime_wrapper.set_buffer_device_map(self.buffer_device_map)
         self.runtime_wrapper.set_ptr_map(self.ptr_map)

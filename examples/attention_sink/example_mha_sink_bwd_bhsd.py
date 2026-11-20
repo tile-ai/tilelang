@@ -6,17 +6,21 @@ from tilelang.profiler import do_bench
 import tilelang.language as T
 import argparse
 from typing import Optional
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_bwd_configs():
     sm_major, sm_minor = torch.cuda.get_device_capability()
     sm_version = sm_major * 10 + sm_minor
-    if sm_version == 80:
-        return 64, 32, 1, 128
-    elif sm_version >= 90:
-        return 128, 32, 2, 256
-    else:
+    if sm_version < 80:
         raise ValueError(f"Unsupported SM version: {sm_version}")
+    # The 128x32 two-stage backward needs ~105 KiB of dynamic shared memory;
+    # sm_86/89/120 allow about 99 KiB per block, and Ampere runs the smaller
+    # tile better even where the larger one would fit.
+    optin_smem = get_max_dynamic_shared_memory()
+    if sm_version == 80 or optin_smem < 128 * 1024:
+        return dict(block_M=64, block_N=32, num_stages=1, threads=128)
+    return dict(block_M=128, block_N=32, num_stages=2, threads=256)
 
 
 @tilelang.jit(
@@ -208,9 +212,12 @@ def flashattn_bwd(
     window_size=None,  # None for full attention
     sm_scale=None,
     dtype: T.dtype = T.float16,
+    *,
+    block_M,
+    block_N,
+    num_stages,
+    threads,
 ):
-    block_M, block_N, num_stages, threads = get_bwd_configs()
-
     if sm_scale is None:
         sm_scale = (1.0 / dim) ** 0.5
     scale = sm_scale * 1.44269504  # log2(e)
@@ -363,7 +370,7 @@ class _attention(torch.autograd.Function):
         kernel_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         kernel_post = flashattn_bwd_postprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         delta = kernel_prep(o, do)
-        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.window_size, dtype=dtype)
+        kernel = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, ctx.window_size, dtype=dtype, **get_bwd_configs())
         shape = [BATCH, H, N_CTX, D_HEAD]
         dq = torch.zeros(shape, dtype=torch.float32, device=q.device)  # acc for atomicAdd
         dk = torch.empty(shape, dtype=q.dtype, device=q.device)
@@ -512,7 +519,7 @@ def run_regression_perf(
         do, q, k, v, sinks_c, o = [maybe_contiguous(x) for x in (dO, Q, K, V, sinks, O)]
         k_prep = flashattn_bwd_preprocess(BATCH, H, N_CTX, D_HEAD, dtype=dtype)
         Delta = k_prep(o, do)
-        k_bwd = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, window_size, dtype=dtype)
+        k_bwd = flashattn_bwd(BATCH, H, N_CTX, D_HEAD, window_size, dtype=dtype, **get_bwd_configs())
         k_dsink = flashattn_bwd_dsink(BATCH, H, N_CTX, dtype=dtype)
         shape = (BATCH, H, N_CTX, D_HEAD)
         dq = torch.zeros(shape, dtype=torch.float32, device=Q.device)

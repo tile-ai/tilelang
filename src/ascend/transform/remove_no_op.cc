@@ -40,6 +40,7 @@
 
 #include "arith/const_fold.h"
 #include "arith/ir_mutator_with_analyzer.h"
+#include "buffer_addresses.h"
 #include "tir/analysis/control_flow_graph.h"
 #include "tirx/transform/ir_utils.h"
 
@@ -185,7 +186,21 @@ private:
 
     Stmt stmt = Parent::VisitStmt_(op);
     op = stmt.as<AttrStmtNode>();
-    return is_no_op(op->body) ? MakeEvaluate(op->value) : stmt;
+    if (is_no_op(op->body))
+      return MakeEvaluate(op->value);
+    if (op->attr_key == kBufferAddresses) {
+      BufferAddresses addresses = ParseBufferAddresses(op->node);
+      // Only remove entries for allocations eliminated by this pass. Unknown
+      // storages must still reach the allocator's placement validation.
+      for (const Var &storage : dead_allocations_)
+        addresses.erase(storage);
+      if (addresses.empty())
+        return op->body;
+      AttrStmt attr = Downcast<AttrStmt>(std::move(stmt));
+      attr.CopyOnWrite()->node = std::move(addresses);
+      return attr;
+    }
+    return stmt;
   }
 
   Stmt VisitStmt_(const IfThenElseNode *op) final {

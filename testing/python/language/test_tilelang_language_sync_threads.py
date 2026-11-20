@@ -4,11 +4,8 @@ from tilelang import language as T
 
 
 def _compile_cuda(func):
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         return tilelang.compile(func, target="cuda", execution_backend="tvm_ffi")
-    finally:
-        tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda

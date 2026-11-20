@@ -107,18 +107,13 @@ def _make_grouped_output_kernel(size: int):
 
 @tilelang.testing.requires_cuda
 def test_layout_inference_isolated_from_previous_compile_z3_state():
-    cache_was_enabled = tilelang.is_cache_enabled()
-    tilelang.disable_cache()
-    try:
+    with tilelang.testing.without_kernel_cache():
         for config in _STATE_CACHE_CASES:
             tilelang.compile(
                 _make_state_cache_kernel(*config),
                 target="cuda",
                 pass_configs=_STATE_CACHE_PASS_CONFIGS,
             )
-    finally:
-        if cache_was_enabled:
-            tilelang.enable_cache()
 
 
 @tilelang.testing.requires_cuda

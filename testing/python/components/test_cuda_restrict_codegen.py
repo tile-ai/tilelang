@@ -44,5 +44,20 @@ def test_cuda_restrict_annotation_removes_restrict():
     assert "__restrict__" not in sig1
 
 
+@tilelang.testing.requires_cuda
+def test_cuda_restrict_annotation_keeps_handle_suffix_buffers():
+    N = 128
+
+    @T.prim_func
+    def kernel_body_annot(A: T.Tensor((N,), T.float32), A_handle: T.Tensor((N,), T.float32)):
+        with T.Kernel(N, threads=32) as pid:
+            T.annotate_restrict_buffers(A, A_handle)
+            A_handle[pid] = A[pid] + 1.0
+
+    artifact = tilelang.lower(kernel_body_annot, target="cuda")
+    sig = _get_sig_line(artifact.kernel_source)
+    assert "__restrict__" not in sig
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

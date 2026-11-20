@@ -4,6 +4,10 @@ import pytest
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
+from tilelang.ascend import transform
+from tvm import tirx
+from testing.ascend._ir import copy, kernel, nodes, seq
+from testing.ascend.auto_schedule._scheduled_ir import unit
 from testing.ascend.auto_schedule._reuse_utils import _insert_sync_alias_pairs
 
 
@@ -992,6 +996,39 @@ def test_preloaded_nested_reader_stays_live_across_parent_iterations(reader_dept
 
     # b(k) must not overwrite the preload read again by a child of k + 1.
     assert ("a", "b") not in _insert_sync_alias_pairs(main)
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_write_contract_is_not_a_must_write_proof_for_allocation_reuse(complete):
+    a = tirx.decl_buffer((32, 16), "float16", name="A")
+    out = tirx.decl_buffer((16, 16), "float16", name="out", scope="shared.l0a")
+    buffers = [tirx.decl_buffer((32, 16), "float16", name=name, scope="shared.l1") for name in ("x", "y")]
+    loops = []
+    for index, buffer in enumerate(buffers):
+        i = tirx.Var(f"i{index}", "int32")
+        body = seq(
+            # This declares a larger destination when complete=False. DMA
+            # only defines the source's 16 rows; eligibility accepts the
+            # storage contract, while reuse needs independent physical proof.
+            unit(copy(a, buffer, src_shape=[32 if complete else 16, 16]), core=2),
+            unit(copy(buffer, out, src_shape=[16, 16]), core=2),
+        )
+        loops.append(unit(tirx.For(i, 0, 2, tirx.ForKind.SERIAL, body, annotations={"multi_buffer_eligible": [buffer.data]}), core=None))
+    before = kernel(
+        seq(*loops),
+        buffers=[*buffers, out],
+        params=[a],
+        annotations={
+            "tl.buffer_versions_map": {b.data: 2 for b in buffers},
+            "tl.buffer_version_mode": {b.data: "write_counter" for b in buffers},
+        },
+    )
+    prepared = transform.PrepareMultiBuffer()(before)
+    after = transform.InsertSync()(transform.ResolveCore()(prepared))
+    root = next(block for block in nodes(after, tirx.SBlock) if block.name_hint == "tilelang_root")
+    stored = {buffer.name: buffer.data for buffer in root.alloc_buffers}
+    aliases = root.annotations["tl.buffer_alias_map"]
+    assert any(member.same_as(stored["y"]) for member in aliases[stored["x"]]) == complete
 
 
 if __name__ == "__main__":

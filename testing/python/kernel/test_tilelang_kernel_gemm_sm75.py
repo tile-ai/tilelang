@@ -201,11 +201,12 @@ def test_sm75_ldmatrix_shared_reads_stay_in_bounds(in_dtype, accum_dtype, block_
     # CUDA runner. The ldmatrix lane maps step past the shared tile unless the
     # emitter wraps them (see mma_macro_generator.py).
     M = N = K = 128
-    kernel = tilelang.compile(
-        _make_pipelined_gemm_kernel(M, N, K, 64, 64, block_K, 0, transpose_B, in_dtype, accum_dtype, accum_dtype),
-        target={"kind": "cuda", "arch": "sm_75"},
-        out_idx=[2],
-    )
+    with tilelang.testing.without_kernel_cache():
+        kernel = tilelang.compile(
+            _make_pipelined_gemm_kernel(M, N, K, 64, 64, block_K, 0, transpose_B, in_dtype, accum_dtype, accum_dtype),
+            target={"kind": "cuda", "arch": "sm_75"},
+            out_idx=[2],
+        )
     (func,) = kernel.artifact.device_mod.functions.values()
 
     analyzer = tvm.arith.Analyzer()

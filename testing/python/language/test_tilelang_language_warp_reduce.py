@@ -57,6 +57,18 @@ def test_warp_reduce_min():
     torch.testing.assert_close(a, ref)
 
 
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("reduce_op", ["max", "min"])
+@pytest.mark.parametrize(("dtype", "step"), [("float16", 2**-4), ("bfloat16", 2**-3), ("float64", 2**-40)])
+def test_warp_reduce_float_precision(reduce_op, dtype, step):
+    values = (1.0 + torch.arange(1, 33, dtype=torch.float64, device="cuda") * step).to(getattr(torch, dtype))
+    reduced = values.max() if reduce_op == "max" else values.min()
+    expected = torch.full_like(values, reduced)
+    kernel = get_kernel(reduce_op, getattr(T, dtype))
+    kernel(values)
+    torch.testing.assert_close(values, expected, rtol=0, atol=0)
+
+
 def test_warp_reduce_bitand():
     a = torch.randint(0, 100, size=(32,), dtype=torch.int32, device="cuda")
     kernel = get_kernel("bitand", T.int32)

@@ -15,6 +15,7 @@ __all__ = [
     "annotate_safe_value",
     "annotate_l2_hit_ratio",
     "annotate_restrict_buffers",
+    "annotate_host_mapped_buffers",
     "annotate_min_blocks_per_sm",
     "annotate_ws_pipeline_depth",
     "annotate_ws_schedule",
@@ -42,8 +43,7 @@ def use_swizzle(panel_size: int, order: str = "row", enable: bool = True):
     return attr(None, "threadblock_swizzle_pattern", tvm_tuple(device_func, panel_size))
 
 
-def annotate_layout(layout_map: dict):
-    """Annotate the layout of the buffer."""
+def _normalize_layout_map(layout_map: dict):
     _layout_map = {}
     for buffer, layout in layout_map.items():
         if is_reducer(buffer):
@@ -57,13 +57,18 @@ def annotate_layout(layout_map: dict):
         elif is_fragment(buffer):
             assert isinstance(layout, Fragment), f"for Fragment {buffer}, layout must be a Fragment, but got {type(layout)}"
         if isinstance(layout, Layout):
-            _layout_map[buffer.data] = layout
+            _layout_map[buffer] = layout
         elif isinstance(layout, Callable):
-            _layout_map[buffer.data] = Layout(buffer.shape, layout)
+            _layout_map[buffer] = Layout(buffer.shape, layout)
         else:
             raise ValueError(f"Invalid layout: {layout}")
 
-    return sblock_attr({"layout_map": _layout_map})
+    return _layout_map
+
+
+def annotate_layout(layout_map: dict):
+    """Annotate the layout of the buffer."""
+    return sblock_attr({"layout_map": {buffer.data: layout for buffer, layout in _normalize_layout_map(layout_map).items()}})
 
 
 def annotate_safe_value(safe_value_map: dict):
@@ -103,6 +108,45 @@ def annotate_min_blocks_per_sm(n: int):
     """
     assert isinstance(n, int) and n > 0, "n must be a positive integer"
     return attr(None, "tl.min_blocks_per_sm", n)
+
+
+def annotate_host_mapped_buffers(*buffers):
+    """Declare tensor parameters backed by device-accessible mapped host memory.
+
+    Example::
+
+        @T.prim_func
+        def kernel(src: T.Tensor((N,), T.float32), dst: T.Tensor((N,), T.float32)):
+            T.annotate_host_mapped_buffers(dst)
+            with T.Kernel(T.ceildiv(N, 128), threads=128) as block:
+                ...
+
+    Currently supported by the CUDA Cython and TVM-FFI launchers. Annotated
+    buffers must be supplied explicitly as CPU tensors with registered/mapped
+    storage (for example, PyTorch tensors allocated with ``pin_memory=True``).
+    Other tensor checks remain enabled. This annotation does not allocate,
+    register, copy, or synchronize memory. The caller must keep the storage
+    and mapping alive until GPU work completes, and throughout graph replay,
+    and synchronize before accessing or reusing that storage on the CPU.
+
+    The contract applies to the whole function, even when this declaration is
+    inside a kernel block. Repeated declarations are merged.
+    """
+    from tvm.tirx import Buffer
+    from tilelang.language.eager.builder import Builder
+    from tilelang.jit.exceptions import JITNoBuilderError
+
+    builder = Builder.current()
+    if builder is None:
+        raise JITNoBuilderError("T.annotate_host_mapped_buffers() requires @T.prim_func or @tilelang.jit")
+    if builder.eager_jit == "phase1":
+        return
+    for buf in buffers:
+        if not isinstance(buf, Buffer):
+            raise TypeError(f"annotate_host_mapped_buffers expects Buffer arguments, got {type(buf)}")
+        if buf.scope() != "global":
+            raise ValueError("Host-mapped parameters must be global buffers")
+        builder.host_mapped_buffers.append(buf)
 
 
 def annotate_restrict_buffers(*buffers):

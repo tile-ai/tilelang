@@ -46,6 +46,27 @@ inline PrimExpr DispatchPureExternScalarized(const PrimExpr &e) {
               call->annotations);
 }
 
+// Lowers the explicit fast-math ops (T.__exp, etc.) to HIP's fast
+// intrinsics. Their names have the form tl.__<name>, and the extern name comes
+// from the element type, as in DispatchPureExternScalarized.
+template <typename T> inline PrimExpr DispatchFastMath(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  const OpNode *op = call->op.as<OpNode>();
+  ICHECK(op != nullptr);
+  ICHECK_EQ(op->name.substr(0, 5), "tl.__");
+  std::string name = T()(call->dtype.element_of(), op->name.substr(5));
+  if (name.empty()) {
+    return e;
+  }
+  ffi::Array<PrimExpr> new_args = {StringImm(name)};
+  for (const auto &arg : call->args) {
+    new_args.push_back(arg);
+  }
+  return Call(call->dtype, builtin::call_pure_extern(), new_args,
+              call->annotations);
+}
+
 struct HIPMath {
   std::string operator()(DataType t, std::string name) const {
     if (t.is_float()) {
@@ -198,7 +219,7 @@ TVM_REGISTER_OP("tirx.nearbyint")
 
 TVM_REGISTER_OP("tirx.exp")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.exp2")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
@@ -206,7 +227,7 @@ TVM_REGISTER_OP("tirx.exp2")
 
 TVM_REGISTER_OP("tirx.exp10")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.erf")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
@@ -214,15 +235,15 @@ TVM_REGISTER_OP("tirx.erf")
 
 TVM_REGISTER_OP("tirx.log")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.log2")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.log10")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.tan")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
@@ -230,7 +251,7 @@ TVM_REGISTER_OP("tirx.tan")
 
 TVM_REGISTER_OP("tirx.cos")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.cosh")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
@@ -238,11 +259,43 @@ TVM_REGISTER_OP("tirx.cosh")
 
 TVM_REGISTER_OP("tirx.sin")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
-                               DispatchPureExternScalarized<HIPFastMath>);
+                               DispatchPureExternScalarized<HIPMath>);
 
 TVM_REGISTER_OP("tirx.sinh")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
                                DispatchPureExternScalarized<HIPMath>);
+
+TVM_REGISTER_OP("tl.__exp")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__exp10")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__log")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__log2")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__log10")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__tan")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__cos")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
+
+TVM_REGISTER_OP("tl.__sin")
+    .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",
+                               DispatchFastMath<HIPFastMath>);
 
 TVM_REGISTER_OP("tirx.atan")
     .set_attr<FLowerIntrinsic>("hip.FLowerIntrinsic",

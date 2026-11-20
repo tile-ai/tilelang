@@ -148,10 +148,18 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
+  static int GetSerializedForwardVars_(void *field_addr, TVMFFIAny *result);
+  static int SetForwardIndex_(void *field_addr, const TVMFFIAny *value);
+  ffi::Map<tirx::Var, PrimExpr> BuildPlaceholderRebindMap_() const;
   virtual ffi::Map<tirx::Var, Range> GetVarMap() const;
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
   ffi::Array<PrimExpr> forward_index_;
   ffi::Array<PrimExpr> input_size_;
+  // Transient decoded placeholder Vars populated during FFI deserialization so
+  // forward_index_ (and subclass forward_thread_) can rebind back to this
+  // process's InputPlaceholder singletons without colliding with outer TIR
+  // Vars.
+  ffi::Optional<ffi::Array<tirx::Var>> decoded_forward_vars_;
 };
 
 /*!
@@ -231,10 +239,13 @@ public:
       kTVMFFISEqHashKindTreeNode;
 
 protected:
+  static int GetSerializedReplicateVar_(void *field_addr, TVMFFIAny *result);
+  static int SetForwardThread_(void *field_addr, const TVMFFIAny *value);
   ffi::Map<tirx::Var, Range> GetVarMap() const final;
   Range thread_range_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
+  ffi::Optional<tirx::Var> decoded_replicate_var_;
 };
 
 /*!

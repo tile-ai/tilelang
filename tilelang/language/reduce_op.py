@@ -35,7 +35,10 @@ def reduce(
 
     Args:
         buffer (tirx.Buffer): Input buffer to reduce
-        out (tirx.Buffer): Output buffer to store results
+        out (tirx.Buffer): Output buffer whose dtype also determines accumulation
+            precision. Sub-byte numeric dtypes (such as FP4/int4) are unsupported;
+            use float16/float32 or an integer dtype of at least 8 bits. Boolean
+            reductions are allowed. The input may use a narrower dtype.
         reduce_type (str): Type of reduction ('max', 'min', 'sum', 'abssum')
         dim (int): Dimension along which to perform reduction
         clear (bool): Whether to initialize the output buffer before reduction

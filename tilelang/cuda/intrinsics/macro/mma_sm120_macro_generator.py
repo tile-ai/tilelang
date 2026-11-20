@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import tilelang.language as T
 from tilelang import tvm as tvm
-from tilelang.utils.language import is_fragment
+from tilelang.utils.language import is_fragment, is_shared
 from tvm.runtime import convert
 from tvm.tirx import Buffer, BufferRegion, PrimExpr, Var
 
@@ -616,6 +616,18 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
         if sf_layout not in ("rowmajor", "blockscaled_chunk_kmajor"):
             raise ValueError(f"Unsupported SM120 scale layout: {sf_layout}")
 
+        # Compact selector packages are read from shared memory; other scale scopes keep the per-MMA path below.
+        if is_shared(SFA_data) and is_shared(SFB_data):
+            return self._mma_with_compact_scale_packages(
+                A_local_buf,
+                B_local_buf,
+                C_local_buf,
+                a_local_stride,
+                (SFA_data, SFA_other, SFA_base_m, SFA_base_k, scale_a_word_k),
+                (SFB_data, SFB_other, SFB_base_n, SFB_base_k, scale_b_word_k),
+                sf_layout,
+            )
+
         @T.macro
         def _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
             tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
@@ -697,6 +709,111 @@ class TensorCoreIntrinEmitterSM120(MMAIntrinEmitter):
                     )
 
         return _warp_mma_block_scale(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
+
+    def _mma_with_compact_scale_packages(
+        self,
+        A_local_buf,
+        B_local_buf,
+        C_local_buf,
+        a_local_stride: PrimExpr,
+        sfa: tuple,
+        sfb: tuple,
+        sf_layout: str,
+    ):
+        """Issue one K atom of block-scaled MMAs with scales read from shared memory once.
+
+        Each lane loads a compact selector package (the same scheme as the
+        full-tile path): lanes ``t`` and ``t ^ 1`` of a quad hold the SFA rows of
+        MMA atom rows ``2 * g`` (``t < 2``) and ``2 * g + 1`` (``t >= 2``), and
+        quad lane ``q`` holds the SFB columns of n8 block ``4 * g + q``. The MMA
+        selects the owning lane through its scale thread-id operand, so the
+        ``warp_rows * warp_cols`` atoms need ``ceil(warp_rows / 2)`` SFA words
+        and ``ceil(n8_blocks / 4)`` SFB words per lane instead of one shared
+        load per scale operand per MMA.
+        """
+        warp_rows = self.warp_rows
+        warp_cols = self.warp_cols
+        warp_row_tiles = self.warp_row_tiles
+        warp_col_tiles = self.warp_col_tiles
+        local_size_a = self.local_size_a
+        local_size_b = self.local_size_b
+        local_size_out = self.local_size_out
+        kind = self.kind
+        scale_vec_size = self.scale_vec_size
+        stype = self.stype
+        accum_dtype = self.accum_dtype
+        a_dtype_abbrv = self.a_dtype_abbrv
+        b_dtype_abbrv = self.b_dtype_abbrv
+        mma_prefix = self.mma_prefix
+        n8_per_atom = self.n_dim // 8
+        sfa_words = (warp_rows + 1) // 2
+        sfb_words = (warp_cols * n8_per_atom + 3) // 4
+        thread_binding = self.get_thread_binding()
+        SFA_data, SFA_other, SFA_base_m, SFA_base_k, scale_a_word_k = sfa
+        SFB_data, SFB_other, SFB_base_n, SFB_base_k, scale_b_word_k = sfb
+
+        def _scale_word(data, other, base_row, base_k, row, word_k):
+            if sf_layout == "blockscaled_chunk_kmajor":
+                word = self._kmajor_scale_word(row, word_k)
+                return data[tuple(other) + (base_row + word // 4, base_k + word % 4)]
+            return data[tuple(other) + (base_row + row, base_k + word_k)]
+
+        @T.macro
+        def _warp_mma_block_scale_compact(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding):
+            tx, warp_n, warp_m = self.extract_thread_binding(thread_binding)
+            qlane = tx % 4
+            scale_m0 = warp_m * warp_row_tiles + self._sfa_row_in_atom(tx)
+            scale_n0 = warp_n * warp_col_tiles + self._sfb_col_in_atom(tx)
+            SFA_package = T.alloc_local((sfa_words,), "uint32")
+            SFB_package = T.alloc_local((sfb_words,), "uint32")
+            # Rows of an odd tail wrap inside the warp tile: those lanes are never
+            # selected, and the wrap keeps their loads in bounds.
+            for g in T.unroll(sfa_words):
+                SFA_package[g] = _scale_word(
+                    SFA_data,
+                    SFA_other,
+                    SFA_base_m,
+                    SFA_base_k,
+                    scale_m0 + (g * 32 + (qlane // 2) * 16) % warp_row_tiles,
+                    scale_a_word_k,
+                )
+            for g in T.unroll(sfb_words):
+                SFB_package[g] = _scale_word(
+                    SFB_data,
+                    SFB_other,
+                    SFB_base_n,
+                    SFB_base_k,
+                    scale_n0 + (g * 32 + qlane * 8) % warp_col_tiles,
+                    scale_b_word_k,
+                )
+            for i in T.unroll(warp_rows):
+                for j in T.unroll(warp_cols):
+                    for n8_half in T.unroll(n8_per_atom):
+                        T.ptx_mma_block_scale(
+                            accum_dtype,
+                            mma_prefix,
+                            "row",
+                            "col",
+                            kind,
+                            scale_vec_size,
+                            a_dtype_abbrv,
+                            b_dtype_abbrv,
+                            stype,
+                            A_local_buf.data,
+                            a_local_stride + i * local_size_a,
+                            B_local_buf.data,
+                            j * local_size_b + n8_half * (local_size_b // n8_per_atom),
+                            C_local_buf.data,
+                            i * warp_cols * local_size_out + j * local_size_out + n8_half * (local_size_out // n8_per_atom),
+                            T.access_ptr(SFA_package[i // 2], "r"),
+                            T.access_ptr(SFB_package[(j * n8_per_atom + n8_half) // 4], "r"),
+                            0,
+                            i % 2,
+                            0,
+                            (j * n8_per_atom + n8_half) % 4,
+                        )
+
+        return _warp_mma_block_scale_compact(A_local_buf, B_local_buf, C_local_buf, SFA_data, SFB_data, thread_binding)
 
     def ldscale(
         self,

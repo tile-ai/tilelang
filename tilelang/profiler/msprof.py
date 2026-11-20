@@ -6,35 +6,8 @@ import os
 from collections.abc import Callable
 
 import torch
-import tilelang
-import tilelang.language as T
 
-
-@tilelang.jit(out_idx=[], target="ascend")
-def get_msprof_cache_flush_kernel(numel: int, dtype: T.dtype):
-    # Ascend-only helper: T.SimtVF and l2_cache_ctrl="WTS_FV" are Ascend dialect
-    # extensions, so they come from tilelang.ascend.language rather than from the
-    # default facade (which is the CUDA dialect).
-    from tilelang.ascend import language as TA
-
-    tile_elems = (32 * 1024) // (4 if dtype == "int32" else 1)
-    tiles_per_core = numel // tile_elems // 64
-
-    @TA.prim_func
-    def _tilelang_profiler_cache_flush(Cache: TA.Tensor((numel,), dtype)):
-        with TA.Kernel(64) as bx:
-            ub = TA.alloc_shared((tile_elems,), dtype)
-
-            with TA.SimtVF(threads=2048):
-                for i in TA.Parallel(tile_elems):
-                    ub[i] = TA.cast(0, dtype)
-
-            for it in TA.serial(tiles_per_core):
-                begin = (it * 64 + bx) * tile_elems
-                if begin < numel:
-                    TA.copy(ub, Cache[begin : begin + tile_elems], l2_cache_ctrl="WTS_FV")
-
-    return _tilelang_profiler_cache_flush
+from .torch_bench import _flush_cache
 
 
 def bench_with_msprof(
@@ -271,12 +244,9 @@ def bench_with_msprof(
             total += profile
         return total
 
-    cache_dtype = "int32" if cache.dtype == torch.int32 else "int8"
-    cache_flush_kernel = get_msprof_cache_flush_kernel(int(cache.numel()), cache_dtype)
-    cache_flush_kernel(cache)
-    torch.npu.synchronize()
+    with torch.npu.device(cache.device), _defer_signals(), _prof_work_path(), _suppress_output(True):
+        torch.npu.synchronize()
 
-    with _defer_signals(), _prof_work_path(), _suppress_output(True):
         with torch_npu.profiler.profile(
             activities=[torch_npu.profiler.ProfilerActivity.NPU],
             schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1, skip_first=0),
@@ -289,16 +259,15 @@ def bench_with_msprof(
             ),
         ) as prof:
             for _ in range(n_repeat):
-                cache_flush_kernel(cache)
+                _flush_cache(cache)
                 fn()
             torch.npu.synchronize()
             prof.step()
 
         kernel_profiles = _parse_ffts_profile(Path(prof.prof_if.prof_path), n_repeat)
 
-    kernel_profiles = {name: profile for name, profile in kernel_profiles.items() if "_tilelang_profiler_cache_flush_kernel" not in name}
     if not kernel_profiles:
-        raise RuntimeError("No profiled kernels remain after excluding the msprof flush kernel.")
+        raise RuntimeError("No profiled kernels were recorded.")
 
     profile = _sum_profiles(list(kernel_profiles.values()))
     if detailed:

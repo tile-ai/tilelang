@@ -80,6 +80,62 @@ def test_per_core_candidates_preserve_conditions(explicit, mixed):
     assert len(nodes(groups[0].body, tirx.IfThenElse)) == 2
 
 
+@pytest.mark.parametrize("copy_first", [True, False], ids=["copy-then-conditional-fill", "fill-or-copy"])
+def test_per_core_candidate_preserves_internal_condition(copy_first):
+    @T.prim_func
+    def before(A: T.Tensor((16, 16), "float32"), needs_padding: T.bool):
+        with T.Kernel(1):
+            l1 = T.alloc_l1((16, 16), "float32")
+            with T.PerCoreTask(), T.Task():
+                if copy_first:
+                    T.copy(A, l1)
+                if needs_padding:
+                    T.fill(l1, 0)
+                elif not copy_first:
+                    T.copy(A, l1)
+
+    (original,) = [node for node in nodes(before, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+    after = transform.MaterializeScheduleUnits()(tvm.IRModule({"main": before}))
+    (group,) = [node for node in nodes(after, tirx.AttrStmt) if node.attr_key == "tl.ascend_per_core_task"]
+    (candidate,) = [node for node in nodes(group.body, tirx.AttrStmt) if node.attr_key == "tl.ascend_task"]
+    assert group.body.same_as(candidate)
+    tvm.ir.assert_structural_equal(candidate.body, original.body)
+
+
+@pytest.mark.parametrize(
+    "case, message",
+    [
+        ("cross-pipe", "exactly one inferred hardware pipe"),
+        ("cross-core", "both AIC and AIV HBM paths"),
+        ("nested-task", "Nested T.Task"),
+        ("inter-core-sync", "must be the task's only statement"),
+    ],
+)
+def test_per_core_candidate_validates_internal_branches(case, message):
+    @T.prim_func
+    def before(A: T.Tensor((16, 16), "float32"), needs_padding: T.bool):
+        with T.Kernel(1):
+            l1 = T.alloc_l1((16, 16), "float32")
+            l0 = T.alloc_l0a((16, 16), "float32")
+            ub = T.alloc_shared((16, 16), "float32")
+            with T.PerCoreTask(), T.Task():
+                T.copy(A, l1)
+                if needs_padding:
+                    T.fill(l1, 0)
+                elif case == "cross-pipe":
+                    T.copy(l1, l0)
+                elif case == "cross-core":
+                    T.copy(A, ub)
+                elif case == "nested-task":
+                    with T.Task():
+                        T.fill(l1, 0)
+                else:
+                    T.ascend_sync_inter_arrive("PIPE_MTE2", 3)
+
+    with pytest.raises(tvm.error.InternalError, match=message):
+        transform.MaterializeScheduleUnits()(tvm.IRModule({"main": before}))
+
+
 @pytest.mark.parametrize("routing", ["constant", "parameter", "local"])
 @pytest.mark.parametrize("bound_guard", [False, True])
 @pytest.mark.parametrize("enclosing_loop", [False, True])
@@ -265,18 +321,27 @@ def test_per_core_fixpipe_sync_requires_single_execution(routing, sync_inside, s
         tvm.ir.assert_structural_equal(selected["set"].args, selected["wait"].args)
 
 
-def test_sync_set_is_migrated_into_each_per_core_candidate():
+@pytest.mark.parametrize("conditional_padding", [False, True], ids=["copy", "copy-then-conditional-fill"])
+def test_sync_set_is_migrated_into_each_per_core_candidate(conditional_padding):
     a = tirx.decl_buffer((16, 16), "float32", name="A")
     b = tirx.decl_buffer((16, 16), "float32", name="B")
     l1 = tirx.decl_buffer((16, 16), "float32", name="l1", scope="shared.l1")
     l0 = tirx.decl_buffer((16, 16), "float32", name="l0", scope="shared.l0a")
     enabled = tirx.Var("enabled", "bool")
+    needs_padding = tirx.Var("needs_padding", "bool")
+    padding = tirx.IfThenElse(
+        needs_padding,
+        tirx.Evaluate(tirx.Call("handle", tvm.ir.Op.get("tl.tileop.fill"), [region(l1, 2), tirx.const(0, "float32")])),
+        None,
+    )
     candidates = seq(
-        tirx.IfThenElse(enabled, unit(copy(a, l1), core=2).body, None),
-        tirx.IfThenElse(tirx.Not(enabled), unit(copy(b, l1), core=2).body, None),
+        *[
+            tirx.IfThenElse(guard, unit(seq(copy(source, l1), padding) if conditional_padding else copy(source, l1), core=2).body, None)
+            for source, guard in ((a, enabled), (b, tirx.Not(enabled)))
+        ]
     )
     group = tirx.AttrStmt({"core_mask": tirx.IntImm("int64", 2)}, "tl.ascend_per_core_task", 1, candidates)
-    before = kernel(seq(unit(group, core=None), unit(copy(l1, l0), core=2)), buffers=[l1, l0], params=[a, b, enabled])
+    before = kernel(seq(unit(group, core=None), unit(copy(l1, l0), core=2)), buffers=[l1, l0], params=[a, b, enabled, needs_padding])
     after = transform.InsertSync()(before)
     sets = [
         stmt.value
@@ -291,7 +356,12 @@ def test_sync_set_is_migrated_into_each_per_core_candidate():
     guards = []
     for stmt, parents in statements(after):
         if isinstance(stmt, tirx.Evaluate) and any(stmt.value.same_as(event) for event in sets):
-            guards.append(next(parent.condition for parent in reversed(parents) if isinstance(parent, tirx.IfThenElse)))
+            (guard,) = [parent.condition for parent in parents if isinstance(parent, tirx.IfThenElse)]
+            guards.append(guard)
+            sequence = next(parent for parent in reversed(parents) if isinstance(parent, tirx.SeqStmt))
+            (candidate,) = [child for child in sequence.seq if calls(child, "tl.tileop.ascend_copy")]
+            assert sequence.seq[0].same_as(candidate)
+            assert len(calls(candidate, "tl.tileop.fill")) == int(conditional_padding)
     assert len(guards) == 2
     assert tvm.arith.Analyzer().can_prove(tirx.Or(*guards))
     assert all(tvm.arith.Analyzer().can_prove_equal(event.args[1], waits[0].args[1]) for event in sets)

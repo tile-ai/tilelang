@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from tilelang.jit.adapter.nvrtc.include_paths import discover_cuda_include_paths
+from tilelang.contrib.cuda_include import discover_cuda_include_paths
 
 
 def _make_include_tree(cuda_home: Path, relative_paths: list[str]) -> list[str]:

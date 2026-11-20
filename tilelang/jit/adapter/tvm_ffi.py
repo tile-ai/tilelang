@@ -13,6 +13,7 @@ import sys
 import threading
 
 import torch
+from tvm_ffi import use_torch_stream
 from tilelang import tvm
 from tvm import runtime, tirx
 from tvm.target import Target
@@ -22,6 +23,7 @@ from tilelang.jit.abi import CALLEE_ALLOCATED_OUTPUTS_ATTR
 from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.engine.param import KernelParam
+from tilelang.engine.host_mapped import get_host_mapped_params
 from tilelang.language.dtypes import dtype
 
 
@@ -79,6 +81,20 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
         if device.type == "npu" and not self._torch_npu_stream_exchange_installed:
             _install_torch_stream_exchange()
             self._torch_npu_stream_exchange_installed = True
+
+    @staticmethod
+    def _call_on_device(executable: Callable[..., Any], device: torch.device | None, *args: Any) -> Any:
+        """Call `executable` with `device` current and restore the caller's device.
+
+        The host stub makes the inputs' device current (`__tvm_set_device`) and
+        never switches back, so switch here when the devices differ. Kernels
+        with host-mapped parameters execute on the current device by contract,
+        so callers pass ``device=None`` for them.
+        """
+        if device is not None and device.type == "cuda" and device.index != torch.cuda.current_device():
+            with torch.cuda.device(device):
+                return executable(*args)
+        return executable(*args)
 
     # Stream/device functors are inherited from BaseKernelAdapter
     def __init__(
@@ -223,6 +239,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             return self._convert_ffi_callee_allocated_output_func()
 
         current_device_functor = None
+        has_host_mapped_params = bool(get_host_mapped_params(self.prim_func))
 
         # Convert TVM types to native Python types during initialization
         # Convert tvm.DataType to torch.dtype for tensor creation
@@ -274,7 +291,11 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             # Resolve the device used for outputs. Prefer the first tensor input's device
             # if available, otherwise use PyTorch's current device.
             out_device: torch.device | None = next(
-                (input.device for input in inputs if isinstance(input, torch.Tensor)),
+                (
+                    input.device
+                    for input in inputs
+                    if isinstance(input, torch.Tensor) and (not has_host_mapped_params or input.device.type != "cpu")
+                ),
                 None,
             )
 
@@ -345,7 +366,13 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if out_device is not None:
                 self._prepare_torch_device(out_device)
             executable = self._get_executable()
-            executable(*tensor_list)
+            if has_host_mapped_params and out_device is None:
+                # CPU tensors do not propagate a CUDA stream through DLPack.
+                # All-host signatures still follow Torch's stream/capture.
+                with use_torch_stream():
+                    executable(*tensor_list)
+            else:
+                self._call_on_device(executable, None if has_host_mapped_params else out_device, *tensor_list)
 
             # Return outputs in the requested form
             if len(self.result_idx) == 1:
@@ -357,6 +384,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
     def _convert_ffi_callee_allocated_output_func(self) -> Callable[..., Any]:
         """Create a Torch callable whose outputs are allocated by TVM-FFI."""
         current_device_functor = None
+        has_host_mapped_params = bool(get_host_mapped_params(self.prim_func))
         expected_inputs = len(self.params) - len(self.result_idx)
 
         def func(*inputs: torch.Tensor | Any):
@@ -364,7 +392,14 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
             if len(inputs) != expected_inputs:
                 raise ValueError(f"Kernel expected {expected_inputs} inputs, but {len(inputs)} are provided.")
 
-            allocator_anchor = next((value for value in inputs if isinstance(value, torch.Tensor)), None)
+            allocator_anchor = next(
+                (
+                    value
+                    for value in inputs
+                    if isinstance(value, torch.Tensor) and (not has_host_mapped_params or value.device.type != "cpu")
+                ),
+                None,
+            )
             if allocator_anchor is None:
                 if current_device_functor is None:
                     current_device_functor = self.get_current_device_functor()
@@ -385,7 +420,7 @@ class TVMFFIKernelAdapter(BaseKernelAdapter):
                 # a zero-element anchor solely for that allocator/device state.
                 allocator_anchor = torch.empty(0, device=device)
 
-            result = self._get_executable()(*inputs, allocator_anchor)
+            result = self._call_on_device(self._get_executable(), None if has_host_mapped_params else device, *inputs, allocator_anchor)
             if len(self.result_idx) == 1:
                 return result
             return list(result)
