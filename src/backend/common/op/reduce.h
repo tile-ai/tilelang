@@ -846,9 +846,8 @@ template <typename Impl> struct ReduceLowerer {
 
       bool can_pack = false;
       bool need_pack_buffer = false;
-      bool need_batch_pack_buffer = false;
       Buffer clear_buffer_packed;
-      Buffer clear_batch_pack_buffer;
+      Array<Buffer> batch_pack_buffers;
       {
         int vsize = Impl::GetPreferredVectorizedSize(op, lower_args.target);
         if (vsize > 1 && !src_var_compressed.empty()) {
@@ -1088,8 +1087,7 @@ template <typename Impl> struct ReduceLowerer {
                 clear_buffer->name + "_pack",
                 GetPtrStorageScope(clear_buffer->data));
 
-            need_batch_pack_buffer = true;
-            clear_batch_pack_buffer = pack_buf;
+            batch_pack_buffers.push_back(pack_buf);
 
             for (int chunk = 0; chunk < num_chunks; chunk++) {
               int64_t flat_offset = static_cast<int64_t>(chunk) * batch;
@@ -1218,8 +1216,8 @@ template <typename Impl> struct ReduceLowerer {
         if (need_pack_buffer) {
           body = SeqStmt({AllocBuffer(clear_buffer_packed), body});
         }
-        if (need_batch_pack_buffer) {
-          body = SeqStmt({AllocBuffer(clear_batch_pack_buffer), body});
+        for (const Buffer &pack_buffer : batch_pack_buffers) {
+          body = SeqStmt({AllocBuffer(pack_buffer), body});
         }
         return body;
       }

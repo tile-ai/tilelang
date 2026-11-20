@@ -1681,3 +1681,57 @@ def test_reduce_batch_keeps_shared_memory_before_its_workspace():
     expected_canary = torch.full((512,), 123.0, device="cuda")
     torch.testing.assert_close(canary, expected_canary)
     assert torch.all(canary[256:] == 123.0), "the batched all-reduce wrote before its own workspace, into the canary"
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(10, 0)
+@pytest.mark.parametrize(("M", "threads"), [(32, 128), (64, 128), (16, 32)])
+def test_reduce_batch_pack_allocates_all_thread_steps(M, threads):
+    """Packed reductions of MMA fragments must allocate every stage temporary.
+
+    The 128-thread cases exercise multiple thread-reduction steps and output
+    chunks; the single-warp case controls for a single-stage packed reduction.
+    """
+    N, K = 64, 128
+    rows = torch.arange(1, M + 1, dtype=torch.float32)
+    rows[1::2].neg_()
+    a = rows[:, None].expand(M, K).bfloat16().contiguous()
+    b = torch.arange(1, N + 1, dtype=torch.float32)[:, None].expand(N, K).bfloat16().contiguous()
+    scores = a.double() @ b.double().T
+    expected = (scores.max(dim=1).values.float().cuda(), scores.sum(dim=1).float().cuda())
+    a, b = a.cuda(), b.cuda()
+
+    def make_kernel(batch):
+        @T.prim_func
+        def main(
+            A: T.Tensor((M, K), T.bfloat16),
+            B: T.Tensor((N, K), T.bfloat16),
+            Maximum: T.Tensor((M,), T.float32),
+            Total: T.Tensor((M,), T.float32),
+        ):
+            with T.Kernel(1, threads=threads):
+                a_shared = T.alloc_shared((M, K), T.bfloat16)
+                b_shared = T.alloc_shared((N, K), T.bfloat16)
+                scores = T.alloc_fragment((M, N), T.float32)
+                row_max = T.alloc_fragment((M,), T.float32)
+                row_sum = T.alloc_fragment((M,), T.float32)
+                T.copy(A, a_shared)
+                T.copy(B, b_shared)
+                T.clear(scores)
+                T.gemm(a_shared, b_shared, scores, transpose_B=True)
+                T.reduce_max(scores, row_max, dim=1, batch=batch)
+                T.reduce_sum(scores, row_sum, dim=1, batch=batch)
+                T.copy(row_max, Maximum)
+                T.copy(row_sum, Total)
+
+        return tilelang.compile(
+            main,
+            out_idx=[-2, -1],
+            target="cuda",
+            pass_configs={"tl.disable_warp_specialized": True},
+        )
+
+    for batch in (1, 2):
+        kernel = make_kernel(batch)
+        for actual, reference in zip(kernel(a, b), expected):
+            torch.testing.assert_close(actual, reference, rtol=0, atol=0)
