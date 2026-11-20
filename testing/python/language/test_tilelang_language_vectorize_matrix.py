@@ -28,6 +28,8 @@ MATRIX_DTYPES = [
     "bfloat16",
     "int8",
     "uint8",
+    "int16",
+    "uint16",
     "int4",
     "uint4",
     "int32",
@@ -43,8 +45,11 @@ MATRIX_DTYPES = [
 MATRIX_OPS = ["copy", "pred_copy", "fill_one"]
 
 
-def _matrix_kernel(dtype, op, disable_256):
-    @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: disable_256})
+def _matrix_kernel(dtype, op, disable_256, target=None):
+    @tilelang.jit(
+        pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: disable_256},
+        target=target,
+    )
     def factory():
         @T.prim_func
         def kern(
@@ -72,6 +77,22 @@ def _matrix_kernel(dtype, op, disable_256):
 @pytest.mark.parametrize("width", ["128", "256"])
 def test_vectorize_matrix_compiles(dtype, op, width):
     _matrix_kernel(dtype, op, disable_256=(width == "128"))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int16", "uint16"])
+@pytest.mark.parametrize("op", ["pred_copy", "fill_one"])
+def test_16bit_integer_matrix_uses_256bit(dtype, op):
+    """On a pre-sm_100 runner the portable matrix compiles the "256" width at
+    128 bits, so pin these cases to an explicit sm_100a target and check the
+    16-lane carrier and the 256-bit global accesses."""
+    kernel = _matrix_kernel(dtype, op, disable_256=False, target={"kind": "cuda", "arch": "sm_100a"})
+    source = kernel.get_kernel_source()
+    carrier = "ulonglong4" if dtype.startswith("uint") else "longlong4"
+    assert f"*({carrier}*)" in source
+    assert "tl::store_global_256" in source
+    if op == "pred_copy":
+        assert "tl::load_global_256" in source
 
 
 def _pred_copy_kernel(dtype):
