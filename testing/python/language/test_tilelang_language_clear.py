@@ -146,7 +146,7 @@ def test_sliced_region_past_the_end_of_the_buffer_is_rejected(op, lo, hi, fits):
             tilelang.lower(program(), target=target)
 
 
-@tilelang.testing.requires_cuda_compute_version_ge(8)
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("shared", [False, True])
 @pytest.mark.parametrize("columns", [16, 17])
 def test_fill_preserves_padded_partition_bounds(shared, columns):
@@ -160,7 +160,7 @@ def test_fill_preserves_padded_partition_bounds(shared, columns):
             else:
                 T.fill(out[:, :columns], -123)
 
-    kernel = tilelang.compile(main, target={"kind": "cuda", "arch": "sm_80"})
+    kernel = tilelang.compile(main, target="cuda")
     output = torch.full((16, columns + 1), 7, dtype=torch.float32, device="cuda")
     kernel(output)
     expected = torch.full_like(output, -123)
