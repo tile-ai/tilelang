@@ -1,6 +1,11 @@
+import concurrent.futures
+from pathlib import Path
+
+import pytest
 import tilelang.testing
 import tilelang
 import torch
+from tilelang import env
 from tilelang import language as T
 
 
@@ -69,6 +74,119 @@ def test_par_compile():
         ref = (A @ B.T).float()
         C = kernel(A, B)
         tilelang.testing.torch_assert_close(C, ref, rtol=1e-2, atol=1e-2)
+
+
+@tilelang.jit(out_idx=-1)
+def vec_add_kernel_jit(N, block_N):
+    @T.prim_func
+    def main(
+        A: T.Tensor((N,), T.float32),
+        B: T.Tensor((N,), T.float32),
+        C: T.Tensor((N,), T.float32),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), threads=block_N) as bx:
+            for i in T.Parallel(block_N):
+                idx = bx * block_N + i
+                if idx < N:
+                    C[idx] = A[idx] + B[idx]
+
+    return main
+
+
+def _make_invalid_lowering_prim_func():
+    @T.prim_func
+    def broken(A: T.Tensor((7, 7), T.float16), B: T.Tensor((7, 7), T.float16), C: T.Tensor((7, 7), T.float32)):
+        with T.Kernel(1, threads=32) as _:
+            a_s = T.alloc_shared((7, 7), T.float16)
+            b_s = T.alloc_shared((7, 7), T.float16)
+            c_f = T.alloc_fragment((7, 7), T.float32)
+            T.copy(A, a_s)
+            T.copy(B, b_s)
+            T.gemm(a_s, b_s, c_f)
+            T.copy(c_f, C)
+
+    return broken
+
+
+def test_par_compile_process_executor(monkeypatch, tmp_path):
+    monkeypatch.delenv("TILELANG_CACHE_DIR", raising=False)
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path))
+
+    configs = [(256, 64), (512, 128), (256, 64)]
+    kernels = vec_add_kernel_jit.par_compile(configs, num_workers=2, executor="process")
+    assert len(kernels) == 3
+    assert kernels[0] is kernels[2]
+
+    for (N, _), kernel in zip(configs, kernels):
+        assert Path(kernel._tilelang_cache_path).is_relative_to(tmp_path)
+        a = torch.randn(N, device="cuda", dtype=torch.float32)
+        b = torch.randn(N, device="cuda", dtype=torch.float32)
+        tilelang.testing.torch_assert_close(kernel(a, b), a + b)
+
+    # Clear in-memory caches so the second call exercises parent-side disk-cache lookup
+    # without spawning any worker processes.
+    from tilelang.cache import _resolve_cache_dispatch
+
+    cache, _, _ = _resolve_cache_dispatch(None, None, None, False)
+    cache._memory_cache.clear()
+
+    def _unexpected_pool(*args, **kwargs):
+        raise AssertionError("ProcessPoolExecutor should not be created when all kernels hit disk cache")
+
+    monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", _unexpected_pool)
+    cached_kernels = vec_add_kernel_jit.par_compile(configs, num_workers=2, executor="process")
+    for (N, _), kernel in zip(configs, cached_kernels):
+        a = torch.randn(N, device="cuda", dtype=torch.float32)
+        b = torch.randn(N, device="cuda", dtype=torch.float32)
+        tilelang.testing.torch_assert_close(kernel(a, b), a + b)
+
+
+def test_par_compile_process_validation_and_error_handling(monkeypatch, tmp_path):
+    monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path))
+
+    with pytest.raises(ValueError, match="Invalid executor"):
+        tilelang.par_compile([], executor="invalid")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="num_workers must be greater than 0"):
+        tilelang.par_compile([], num_workers=0, executor="process")
+
+    env.disable_cache()
+    try:
+        with pytest.raises(ValueError, match='executor="process" requires disk caching'):
+            tilelang.par_compile([], executor="process")
+    finally:
+        env.enable_cache()
+
+    assert tilelang.par_compile([], executor="process") == []
+
+    from tilelang.cache import _resolve_cache_dispatch
+    from tilelang.jit.adapter.torch.kernel_cache import TorchKernelCache
+
+    assert TorchKernelCache().supports_disk_cache is False
+    valid_func = vec_add_kernel_jit.get_tir(128, 64)
+    cache, _, _ = _resolve_cache_dispatch(None, None, None, False)
+    with monkeypatch.context() as mp:
+        mp.setattr(cache, "supports_disk_cache", False)
+        with pytest.raises(ValueError, match="does not persist kernels to the disk cache"):
+            tilelang.par_compile([valid_func], out_idx=[-1], executor="process")
+    assert env.is_cache_enabled()
+
+    broken_func = _make_invalid_lowering_prim_func()
+    with pytest.raises(RuntimeError, match="Traceback"):
+        tilelang.par_compile([broken_func], out_idx=[-1], num_workers=1, executor="process")
+
+    mixed = tilelang.par_compile(
+        [valid_func, broken_func],
+        out_idx=[-1],
+        num_workers=2,
+        ignore_error=True,
+        executor="process",
+    )
+    assert mixed[0] is not None
+    assert mixed[1] is None
+    a = torch.randn(128, device="cuda", dtype=torch.float32)
+    b = torch.randn(128, device="cuda", dtype=torch.float32)
+    tilelang.testing.torch_assert_close(mixed[0](a, b), a + b)
 
 
 if __name__ == "__main__":

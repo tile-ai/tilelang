@@ -10,7 +10,9 @@ from dataclasses import dataclass, field
 from functools import partial
 import inspect
 import multiprocessing
+import os
 import threading
+import traceback
 from typing import (
     Any,
     Generic,
@@ -97,6 +99,37 @@ class _CallFormCache:
         self._remember(call_form_key, kernel)
 
 
+def _merge_func_compile_args(
+    func: PrimFunc[_KP, _T],
+    out_idx: list[int] | int | None,
+    pass_configs: dict[str, Any] | None,
+    compile_flags: list[str] | str | None,
+) -> tuple[list[int] | int | None, dict[str, Any] | None, list[str] | str | None]:
+    assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
+
+    func_attrs = func.attrs
+    if func_attrs and "tilelang_out_idx" in func_attrs:
+        func_out_idx = list(func_attrs["tilelang_out_idx"])
+        if out_idx is not None:
+            raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
+        out_idx = func_out_idx
+    if func_attrs and "tilelang_pass_configs" in func_attrs:
+        func_pc = dict(func_attrs["tilelang_pass_configs"])
+        if pass_configs is not None:
+            # External pass_configs override function-level ones
+            func_pc.update(pass_configs)
+        pass_configs = func_pc
+    if func_attrs and "tilelang_compile_flags" in func_attrs:
+        func_cf = list(func_attrs["tilelang_compile_flags"])
+        if compile_flags is not None:
+            if isinstance(compile_flags, str):
+                func_cf.append(compile_flags)
+            else:
+                func_cf.extend(compile_flags)
+        compile_flags = func_cf
+    return out_idx, pass_configs, compile_flags
+
+
 def compile(
     func: PrimFunc[_KP, _T] = None,
     out_idx: list[int] | int | None = None,
@@ -143,29 +176,7 @@ def compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
 
-    assert isinstance(func, PrimFunc), f"target function must be a PrimFunc but got {type(func)}"
-
-    # Merge function-level attrs from PrimFunc
-    func_attrs = func.attrs
-    if func_attrs and "tilelang_out_idx" in func_attrs:
-        func_out_idx = list(func_attrs["tilelang_out_idx"])
-        if out_idx is not None:
-            raise ValueError("Out index conflict: out_idx is specified and prim_func have returned `T.empty` tensors")
-        out_idx = func_out_idx
-    if func_attrs and "tilelang_pass_configs" in func_attrs:
-        func_pc = dict(func_attrs["tilelang_pass_configs"])
-        if pass_configs is not None:
-            # External pass_configs override function-level ones
-            func_pc.update(pass_configs)
-        pass_configs = func_pc
-    if func_attrs and "tilelang_compile_flags" in func_attrs:
-        func_cf = list(func_attrs["tilelang_compile_flags"])
-        if compile_flags is not None:
-            if isinstance(compile_flags, str):
-                func_cf.append(compile_flags)
-            else:
-                func_cf.extend(compile_flags)
-        compile_flags = func_cf
+    out_idx, pass_configs, compile_flags = _merge_func_compile_args(func, out_idx, pass_configs, compile_flags)
 
     return cached(
         func=func,
@@ -179,15 +190,167 @@ def compile(
     )
 
 
-def _compile_in_process(compile_func, func):
+@dataclass(frozen=True)
+class _ProcessCompileConfig:
+    target: Target
+    target_host: Target
+    execution_backend: str
+    verbose: bool
+    cache_dir: str
+
+
+@dataclass(frozen=True)
+class _ProcessCompileTask:
+    key: str
+    func: PrimFunc[Any, Any]
+    out_idx: list[int] | int | None
+    pass_configs: dict[str, Any]
+    compile_flags: list[str] | str | None
+
+
+def _compile_in_process(config: _ProcessCompileConfig, task: _ProcessCompileTask) -> str:
     try:
-        kernel = compile_func(func)
-        cache_path = getattr(kernel, "_tilelang_cache_path", None)
-        if not cache_path or not path.isfile(path.join(cache_path, "manifest.json")):
-            raise RuntimeError("Process compilation requires a published disk cache entry.")
+        from tilelang import env
+        from tilelang.cache import _resolve_cache_dispatch
+
+        env.TILELANG_CACHE_DIR = config.cache_dir
+        cache, backend_context, _ = _resolve_cache_dispatch(
+            config.target,
+            config.target_host,
+            config.execution_backend,
+            config.verbose,
+        )
+        return cache.compile_to_disk(
+            task.func,
+            key=task.key,
+            out_idx=task.out_idx,
+            backend_context=backend_context,
+            pass_configs=task.pass_configs,
+            compile_flags=task.compile_flags,
+            verbose=config.verbose,
+        )
     except Exception as e:
-        # TVM exceptions can contain FFI objects that cannot be pickled.
-        raise RuntimeError(str(e)) from None
+        # TVM exceptions can contain FFI objects that cannot be pickled across processes.
+        raise RuntimeError(f"{type(e).__name__}: {e}\n{traceback.format_exc()}") from None
+
+
+def _par_compile_process(
+    funcs: list[PrimFunc[_KP, _T]],
+    out_idx: list[int] | int | None,
+    execution_backend: Literal["auto", "tvm_ffi", "cython", "nvrtc", "torch", "cutedsl", "pto"] | None,
+    target: TargetLike | None,
+    target_host: TargetLike | None,
+    verbose: bool | None,
+    pass_configs: dict[str, Any] | None,
+    compile_flags: list[str] | str | None,
+    num_workers: int | None,
+    ignore_error: bool,
+) -> list[JITKernel[_KP, _T]]:
+    from tilelang import env
+    from tilelang.cache import _resolve_cache_dispatch
+    from tilelang.transform.pass_config import normalize_pass_configs
+
+    if not env.is_cache_enabled():
+        raise ValueError('executor="process" requires disk caching to be enabled')
+    if num_workers is not None and num_workers <= 0:
+        raise ValueError("num_workers must be greater than 0")
+    if not funcs:
+        return []
+
+    cache_dir = os.pathsep.join(env.get_cache_read_dirs())
+    cache, backend_context, resolved_verbose = _resolve_cache_dispatch(target, target_host, execution_backend, verbose)
+    if not cache.supports_disk_cache:
+        raise ValueError(
+            f'executor="process" does not support execution_backend="{backend_context.execution_backend.name}" '
+            "because it does not persist kernels to the disk cache"
+        )
+
+    results: list[Any] = [None] * len(funcs)
+    miss_tasks: dict[str, _ProcessCompileTask] = {}
+    miss_waiters: dict[str, list[int]] = {}
+
+    for idx, func in enumerate(funcs):
+        try:
+            fn_out_idx, fn_pass_configs, fn_compile_flags = _merge_func_compile_args(func, out_idx, pass_configs, compile_flags)
+            normalized_pc = normalize_pass_configs(fn_pass_configs)
+            key, cached_kernel = cache.lookup(
+                func=func,
+                out_idx=fn_out_idx,
+                backend_context=backend_context,
+                pass_configs=normalized_pc,
+                compile_flags=fn_compile_flags,
+                verbose=resolved_verbose,
+            )
+            if cached_kernel is not None:
+                results[idx] = cached_kernel
+            else:
+                if key not in miss_tasks:
+                    miss_tasks[key] = _ProcessCompileTask(
+                        key=key,
+                        func=func,
+                        out_idx=fn_out_idx,
+                        pass_configs=normalized_pc,
+                        compile_flags=fn_compile_flags,
+                    )
+                    miss_waiters[key] = [idx]
+                else:
+                    miss_waiters[key].append(idx)
+        except Exception as e:
+            if not ignore_error:
+                raise
+            logger.warning(f"Error compiling function at index {idx}: {e}")
+            results[idx] = None
+
+    if not miss_tasks:
+        return results
+
+    max_workers = min(len(miss_tasks), num_workers) if num_workers is not None else min(len(miss_tasks), get_available_cpu_count())
+    config = _ProcessCompileConfig(
+        target=backend_context.target,
+        target_host=backend_context.target_host,
+        execution_backend=backend_context.execution_backend.name,
+        verbose=resolved_verbose,
+        cache_dir=cache_dir,
+    )
+    worker = partial(_compile_in_process, config)
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers, mp_context=multiprocessing.get_context("spawn"))
+    try:
+        future_to_key = {pool.submit(worker, task): key for key, task in miss_tasks.items()}
+        for future in tqdm(
+            concurrent.futures.as_completed(future_to_key),
+            total=len(future_to_key),
+            desc="Parallel Compiling",
+        ):
+            key = future_to_key[future]
+            indices = miss_waiters[key]
+            task = miss_tasks[key]
+            try:
+                cache_path = future.result()
+                kernel = cache.load_published_entry(
+                    key,
+                    cache_path,
+                    func=task.func,
+                    out_idx=task.out_idx,
+                    backend_context=backend_context,
+                    pass_configs=task.pass_configs,
+                    compile_flags=task.compile_flags,
+                    verbose=resolved_verbose,
+                )
+                for idx in indices:
+                    results[idx] = kernel
+            except Exception as e:
+                if not ignore_error:
+                    raise
+                for idx in indices:
+                    logger.warning(f"Error compiling function at index {idx}: {e}")
+                    results[idx] = None
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+
+    return results
 
 
 def par_compile(
@@ -228,11 +391,12 @@ def par_compile(
         Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.transform.PassConfigKey` for supported options.
     executor : Literal["thread", "process"], optional
-        Defaults to threads. Processes use spawn and require disk caching;
-        the parent loads compiled kernels through the same cache. Script callers
-        must use ``if __name__ == "__main__":``. In-memory ``env.VAR = ...``
-        overrides and parent-only FFI registrations are not inherited by spawned
-        workers (use ``os.environ`` instead).
+        Defaults to threads. Processes use ``spawn`` and require disk caching:
+        cache hits are resolved in the calling process, misses are compiled into
+        the disk cache by worker processes, and the parent loads each published
+        cache entry directly. Script callers must use
+        ``if __name__ == "__main__":``. Parent-only FFI registrations are not
+        inherited by spawned workers.
 
     Environment Variables
     ---------------------
@@ -250,6 +414,20 @@ def par_compile(
     # funcs may be a one-shot iterable; materialize to size the pool and reuse below.
     funcs = list(funcs)
 
+    if executor == "process":
+        return _par_compile_process(
+            funcs=funcs,
+            out_idx=out_idx,
+            execution_backend=execution_backend,
+            target=target,
+            target_host=target_host,
+            verbose=verbose,
+            pass_configs=pass_configs,
+            compile_flags=compile_flags,
+            num_workers=num_workers,
+            ignore_error=ignore_error,
+        )
+
     if num_workers is None and funcs:
         # Scale to available cores (affinity-aware), capped at #kernels; the stdlib
         # min(32, cpu+4) throttles large AOT batches. Lowering releases the GIL and
@@ -266,25 +444,15 @@ def par_compile(
         pass_configs=pass_configs,
         compile_flags=compile_flags,
     )
-    worker = compile_func
-    if executor == "process":
-        from tilelang import env
-
-        if not env.is_cache_enabled():
-            raise ValueError('executor="process" requires disk caching to be enabled')
-        pool = concurrent.futures.ProcessPoolExecutor(num_workers, mp_context=multiprocessing.get_context("spawn"))
-        worker = partial(_compile_in_process, compile_func)
-    else:
-        pool = concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp")
-
-    with pool:
+    pool = concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp")
+    try:
         futures = []
         future_map = {}
         for i, func in enumerate(funcs):
-            future = pool.submit(worker, func)
+            future = pool.submit(compile_func, func)
             future_map[future] = i
             futures.append(future)
-        results = [... for _ in futures]
+        results: list[Any] = [None] * len(futures)
         for future in tqdm(
             concurrent.futures.as_completed(futures),
             total=len(futures),
@@ -292,14 +460,18 @@ def par_compile(
         ):
             idx = future_map[future]
             try:
-                result = future.result()
-                results[idx] = compile_func(funcs[idx]) if executor == "process" else result
+                results[idx] = future.result()
             except Exception as e:
                 if not ignore_error:
                     raise
                 logger.warning(f"Error compiling function at index {idx}: {e}")
                 results[idx] = None
-        return results
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+
     return results
 
 
