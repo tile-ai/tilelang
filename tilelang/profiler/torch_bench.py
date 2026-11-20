@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Callable
@@ -10,6 +11,8 @@ from functools import cache
 import torch
 
 from tilelang.utils.device import Event, device_synchronize as _cuda_synchronize
+
+logger = logging.getLogger(__name__)
 
 _CACHE_FLUSH_ID = "tilelang::cache_flush"
 
@@ -24,12 +27,30 @@ def _get_npu_l2_cache_flush():
     return flush
 
 
+# ACL_ERROR_RT_FEATURE_NOT_SUPPORT (acl/error_codes/rt_error_codes.h). Some
+# 950-class devices/drivers do not implement aclrtDeviceL2CacheFlush. The flush
+# only primes the cache before timing, so an unsupported call must not abort the
+# benchmark or the autotuning run.
+_ACL_ERROR_RT_FEATURE_NOT_SUPPORT = 207000
+
+
+@cache
+def _warn_l2_cache_flush_unsupported() -> None:
+    logger.warning(
+        "aclrtDeviceL2CacheFlush is not supported by the current driver "
+        "(ACL_ERROR_RT_FEATURE_NOT_SUPPORT); skipping the L2 cache flush before timing. "
+        "On x86 hosts this needs HDK newer than 26.2.RC1, on ARM hosts newer than 25.6.RC3."
+    )
+
+
 def _flush_cache(cache: torch.Tensor) -> None:
     if cache.device.type == "npu":
         with torch.npu.device(cache.device):
             torch.npu.synchronize()
             status = _get_npu_l2_cache_flush()(None)
-            if status:
+            if status == _ACL_ERROR_RT_FEATURE_NOT_SUPPORT:
+                _warn_l2_cache_flush_unsupported()
+            elif status:
                 raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
     else:
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
