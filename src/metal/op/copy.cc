@@ -5,6 +5,8 @@
 
 #include "op/copy.h"
 
+#include <cstdint>
+
 #include "metal/op/builtin.h"
 #include "metal/op/utils.h"
 #include "metal/target_utils.h"
@@ -33,7 +35,6 @@ bool CheckCooperativeTensorCopy(const CopyNode &op) {
 
 Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
                         arith::Analyzer *analyzer) {
-  (void)analyzer;
   TVM_FFI_ICHECK(IsSIMDGroupBuffer(op.src));
 
   int total_elements = 1;
@@ -48,6 +49,8 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
 
   TVM_FFI_ICHECK(op.src_range.size() == 2)
       << "Expected 2D source for simdgroup store";
+  TVM_FFI_ICHECK(op.src->shape.size() == 2)
+      << "Expected 2D source buffer for simdgroup store";
   TVM_FFI_ICHECK(op.dst_range.size() == 2)
       << "Expected 2D destination for simdgroup store";
   PrimExpr dst_row_base = op.dst_range[0]->min;
@@ -55,6 +58,14 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   PrimExpr dst_stride = op.dst->shape[op.dst->shape.size() - 1];
 
   int warp_size = TargetMetalGetWarpSize(lower_args.target);
+  const bool partial_source =
+      !IsWholeBufferRegion(op.src, op.src_range, analyzer);
+  SIMDGroupRegion source_tiles{};
+  if (partial_source) {
+    source_tiles =
+        GetSIMDGroupPartialRegion(op.src, op.src_range, lower_args, analyzer,
+                                  "Metal partial-source copy");
+  }
   const auto *block_size_imm =
       lower_args.thread_bounds->extent.as<IntImmNode>();
   TVM_FFI_ICHECK(block_size_imm)
@@ -89,7 +100,10 @@ Stmt LowerSIMDGroupCopy(const CopyNode &op, const LowerArgs &lower_args,
   Array<Stmt> stmts;
   for (int i = 0; i < warp_row_tiles; i++) {
     for (int j = 0; j < warp_col_tiles; j++) {
-      int tile_idx = i * warp_col_tiles + j;
+      // Partial sources retain the full buffer's matrix numbering. Destination
+      // positions still use the selected region's extents and destination min.
+      int64_t tile_idx =
+          partial_source ? source_tiles.Index(i, j) : i * warp_col_tiles + j;
       PrimExpr row =
           dst_row_base + warp_m * (warp_row_tiles * kMPerWarp) + i * kMPerWarp;
       PrimExpr col =
