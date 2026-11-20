@@ -315,6 +315,7 @@ def _lower_cutedsl_for_pdl(program):
     return artifact, wrapper
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_pdl_codegen_and_launcher_support():
     """Verify CuTeDSL PDL lowering and host launcher generation."""
 
@@ -336,7 +337,7 @@ def test_cutedsl_pdl_codegen_and_launcher_support():
     assert hasattr(tl, "griddepcontrol_wait")
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_pdl_runtime_pipeline():
     """Run a CuTeDSL PDL pipeline and verify the produced tensors."""
 
@@ -362,7 +363,7 @@ def test_cutedsl_pdl_runtime_pipeline():
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.perf
 def test_cutedsl_pdl_overlap_microbenchmark():
     """Benchmark PDL overlap against a strict same-stream serial launch baseline.

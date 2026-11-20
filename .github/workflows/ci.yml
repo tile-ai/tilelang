@@ -431,12 +431,15 @@ jobs:
         id: cuda-tests
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
+          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
+          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
           cd testing
           PYTEST=(
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+            -m "not cutedsl" \
             ./python
 
       # AMD ROCm tests
@@ -617,11 +620,12 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   cutedsl:
-    name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
+    name: Test for CuTeDSL with Python 3.12 and CUDA-auto (on self-hosted-nvidia)
     if: |
       github.repository_owner == 'tile-ai' &&
+      needs.lint.outputs.run_tests == 'true' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    needs: [tests]
+    needs: [lint]
     runs-on: [self-hosted, nvidia]
     timeout-minutes: 120
 
@@ -733,8 +737,9 @@ jobs:
           uv pip install --upgrade pip setuptools wheel
           uv pip install -v -r requirements-test.txt
           echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
-          uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
+          uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cutedsl.txt
           echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
+          echo "import importlib.metadata; print(f'nvidia-cutlass-dsl: {importlib.metadata.version(\"nvidia-cutlass-dsl\")}')" | uv run --no-project --script -
           echo "::group::torch.utils.collect_env"
           uv run --no-project -m -- torch.utils.collect_env
           echo "::endgroup::"
@@ -765,10 +770,23 @@ jobs:
           rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
           rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
 
+      - name: Run CuTeDSL unit tests with Python 3.12 (CUDA-auto)
+        run: |
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+            -m cutedsl \
+            ./python
+
       - name: Run CuTeDSL examples with Python 3.12 (CUDA-auto)
         env:
           TILELANG_DEFAULT_TARGET: cutedsl
         run: |
+          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
+          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
           cd testing
           PYTEST=(
             uv run --no-project -m --

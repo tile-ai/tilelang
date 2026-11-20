@@ -23,15 +23,6 @@ GUARD = 4
 THREADS = 32
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 @tilelang.jit(target="cutedsl")
 def atomic_addx4_prev_kernel(dtype):
     @T.prim_func
@@ -127,10 +118,9 @@ def _values(width, dtype):
     return dst, val, expected
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_cutedsl_atomic_addx4_return_prev(dtype):
-    _require_cutedsl()
     torch_dtype = getattr(torch, dtype)
     dst = torch.arange(1, 4 + GUARD + 1, device="cuda", dtype=torch_dtype)
     val = torch.arange(1, 5, device="cuda", dtype=torch_dtype) * 10
@@ -144,10 +134,9 @@ def test_cutedsl_atomic_addx4_return_prev(dtype):
     torch.testing.assert_close(dst, torch.cat([expected_prev + val, tail_before]), atol=0, rtol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_cutedsl_atomic_addx2_return_prev(dtype):
-    _require_cutedsl()
     torch_dtype = getattr(torch, dtype)
     dst = torch.arange(1, 2 + GUARD + 1, device="cuda", dtype=torch_dtype)
     val = torch.tensor([10, 20], device="cuda", dtype=torch_dtype)
@@ -163,10 +152,9 @@ def test_cutedsl_atomic_addx2_return_prev(dtype):
     torch.testing.assert_close(dst, torch.cat([expected_prev + val, tail_before]), atol=0, rtol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 def test_cutedsl_atomic_addx2_return_prev_shared(dtype):
-    _require_cutedsl()
     init, val, expected = _values(2, dtype)
     out = torch.zeros_like(init)
     prev = torch.zeros(THREADS, 2, device="cuda", dtype=init.dtype)
@@ -180,20 +168,18 @@ def test_cutedsl_atomic_addx2_return_prev_shared(dtype):
     torch.testing.assert_close(prev[order], states, atol=0, rtol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("width", [2, 4])
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_cutedsl_atomic_addxn_global(dtype, width):
-    _require_cutedsl()
     dst, val, expected = _values(width, dtype)
     atomic_addxn_global_kernel(dtype, width)(dst, val)
     torch.testing.assert_close(dst, expected, atol=0, rtol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 def test_cutedsl_atomic_addx2_shared(dtype):
-    _require_cutedsl()
     init, val, expected = _values(2, dtype)
     out = torch.zeros_like(init)
     atomic_addx2_shared_kernel(dtype)(init, val, out)

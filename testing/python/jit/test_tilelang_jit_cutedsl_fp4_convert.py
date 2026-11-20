@@ -1,6 +1,5 @@
 """CuTeDSL conversion/store lowering for sub-byte float types."""
 
-import pytest
 import torch
 import tilelang
 import tilelang.language as T
@@ -18,16 +17,6 @@ def _quantize_fp4(value):
     return index | (0x8 if value < 0 else 0x0)
 
 
-def _require_cutedsl():
-    """Skip when the CuTeDSL Python stack is unavailable."""
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 @tilelang.jit(target="cutedsl")
 def fp4_cast_store_kernel(N=256, threads=64):
     """Cast bf16 -> float4_e2m1fn and store the packed bytes."""
@@ -43,7 +32,7 @@ def fp4_cast_store_kernel(N=256, threads=64):
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_fp4_cast_store_is_packed():
     """`float4_e2m1fn` casts must lower, and the result must be packed (N/2).
 
@@ -51,19 +40,15 @@ def test_cutedsl_fp4_cast_store_is_packed():
     `vector.extractelement` / `vector.insertelement`, and the adapter used to
     materialize the output with the unpacked logical shape.
     """
-    _require_cutedsl()
-
     out = fp4_cast_store_kernel()(torch.randn(256, dtype=torch.bfloat16, device="cuda"))
     assert tuple(out.shape) == (128,), f"FP4 output must be packed, got {tuple(out.shape)}"
     assert out.dtype == torch.float4_e2m1fn_x2
     assert out.view(torch.uint8).any()
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_fp4_cast_values_are_fp4():
     """Every stored nibble must be the FP4 rounding of its input element."""
-    _require_cutedsl()
-
     values = torch.linspace(-6.0, 6.0, 256, dtype=torch.bfloat16, device="cuda")
     out = fp4_cast_store_kernel()(values)
 
@@ -94,7 +79,7 @@ def fp4_scalar_reinterpret_kernel(N=256, threads=64):
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_cutedsl_fp4_scalar_reinterpret_yields_nibble():
     """Reinterpreting a scalar FP4 value as uint8 must yield its 4-bit code.
@@ -102,8 +87,6 @@ def test_cutedsl_fp4_scalar_reinterpret_yields_nibble():
     LLVM bitcast cannot change the element width (4 -> 8 bits); the codegen has
     to widen through the integer representation, as the CUDA backend does.
     """
-    _require_cutedsl()
-
     values = torch.linspace(-6.0, 6.0, 256, dtype=torch.float32, device="cuda")
     out = fp4_scalar_reinterpret_kernel()(values)
 
