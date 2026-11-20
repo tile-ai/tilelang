@@ -56,6 +56,29 @@ namespace {
 PrimExpr SimplifyExprForAnalyzer(const PrimExpr &expr, int scale,
                                  arith::Analyzer *analyzer);
 
+// Count tree occurrences, not just unique DAG nodes: the equality proof can
+// revisit a shared value under different branch constraints. Stop descending
+// once the budget is exceeded so inspecting the condition is itself bounded.
+class ConditionProofWorkCounter : public ExprVisitor {
+public:
+  bool ExceedsBudget(const PrimExpr &expr) {
+    VisitExpr(expr);
+    return nodes_ > kMaxNodes;
+  }
+
+private:
+  void VisitExpr(const PrimExpr &expr) final {
+    if (nodes_ > kMaxNodes) {
+      return;
+    }
+    ++nodes_;
+    ExprVisitor::VisitExpr(expr);
+  }
+
+  static constexpr int kMaxNodes = 128;
+  int nodes_ = 0;
+};
+
 } // namespace
 
 /*!
@@ -273,6 +296,7 @@ public:
     bind_map_.clear();
     visited_binds_.clear();
     skip_cast_width_constraints_ = false;
+    condition_requires_scalarization_ = false;
     this->operator()(node);
 
     if (verbose) {
@@ -928,11 +952,25 @@ private:
   }
 
   void CheckConditionVectorized(const PrimExpr &cond) {
-    if (!inner_for_.defined()) {
+    if (!inner_for_.defined() || condition_requires_scalarization_) {
       return;
     }
     int condition_vector_size = loop_extent_vector_size_;
     PrimExpr condition = ExpandBoundVars_(cond);
+    if (condition_vector_size > 1 &&
+        ConditionProofWorkCounter().ExceedsBudget(condition)) {
+      bool reads_memory = false;
+      PostOrderVisit(condition, [&](const ObjectRef &node) {
+        reads_memory |= node.as<BufferLoadNode>() != nullptr;
+      });
+      if (reads_memory) {
+        // Unknown lane uniformity is safe to handle scalarly. In particular,
+        // do not repeatedly simplify a large data-dependent expression while
+        // trying smaller widths. Small conditions and pure index arithmetic
+        // retain the existing proof path.
+        condition_vector_size = 1;
+      }
+    }
     if (condition_vector_size > 1) {
       condition =
           SimplifyExprForAnalyzer(condition, condition_vector_size, analyzer_);
@@ -945,6 +983,9 @@ private:
     }
     buffer_vector_infos_.push_back(
         {Buffer(), condition_vector_size, false, {}});
+    // This non-cast condition constraint applies to every planning strategy;
+    // once it forces width one, further uniformity proofs cannot widen it.
+    condition_requires_scalarization_ = condition_vector_size == 1;
   }
 
   void HandleTvmAccessPtr(const CallNode *node) {
@@ -1233,6 +1274,7 @@ private:
   std::unordered_map<Var, uint8_t, ObjectPtrHash, ObjectPtrEqual>
       visited_binds_;
   bool skip_cast_width_constraints_ = false;
+  bool condition_requires_scalarization_ = false;
   bool has_nonlocal_memory_access_ = false;
   int vector_size_ = 128;
   std::vector<BufferVectorInfo> buffer_vector_infos_;
