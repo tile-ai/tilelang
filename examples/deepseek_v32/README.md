@@ -195,27 +195,26 @@ scattered loads. So the kernel keeps the coalesced gather and transposes V in
 shared memory:
 
 ```python
-# 16x16 tiles: read 128-bit vectors along dim, swap in registers, write back
-for bi_o, d_o in T.Parallel(BI // TM, D // TN):
-    for i in T.serial(TM):
-        for j in T.vectorized(TN):
-            kv_t_frag[i, j] = KV_shared[bi_o * TM + i, d_o * TN + j]
-    for j in T.serial(TN):
-        for i in T.serial(TM):
-            KV_T_shared[d_o * TN + j, bi_o * TM + i] = kv_t_frag[i, j]
+T.transpose(KV_shared, KV_T_shared)
 ...
 T.gemm(S_shared, KV_T_shared, acc_o, transpose_B=True, policy=T.GemmWarpPolicy.FullRow)
 ```
 
+On SM90, `T.transpose` of 8-bit shared tiles lowers to `ldmatrix.trans`, two byte
+permutes and `stmatrix` per 16x16 block. On H200 at S=4096, SKV=8192, H=128,
+topk=2048 the kernel takes 7.98 ms, against 9.29 ms with the earlier hand-written
+transpose through a 16x16 register staging buffer, with bitwise-identical output.
+
 The transpose only depends on `KV_shared`, so it is issued before the QK GEMM
 and overlaps with the asynchronous wgmma that follows. Measured on H800 SXM at
-S=8192, H=128, topk=2048: 25.79 ms with the `mma.sync` fallback, 14.24 ms with a
-K-major V, and 13.77 ms for the bf16 kernel of the same structure.
+S=8192, H=128, topk=2048 with the earlier hand-written transpose: 25.79 ms with
+the `mma.sync` fallback, 14.24 ms with a K-major V, and 13.77 ms for the bf16
+kernel of the same structure.
 
-Two notes on the numbers. FP8 does not beat bf16 here -- the kernel is limited by
-softmax and shared-memory traffic rather than Tensor Core throughput, so the
-gain from FP8 arithmetic has nothing to absorb it; the win is the smaller KV
-cache. And the manually pipelined bf16 kernel above is considerably faster than
+Two notes on those H800 numbers. FP8 did not beat bf16 there -- the kernel was
+limited by softmax and shared-memory traffic rather than Tensor Core throughput,
+so the gain from FP8 arithmetic had nothing to absorb it; the win is the smaller
+KV cache. And the manually pipelined bf16 kernel above is considerably faster than
 both; applying the same K-major V change there is future work.
 
 ### Sparse MLA Backward

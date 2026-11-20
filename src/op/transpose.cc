@@ -1,6 +1,6 @@
 /*!
  * \file tl/op/transpose.cc
- * \brief Transpose operator that swaps the final two axes using SIMT loops.
+ * \brief Transpose operator that swaps the final two axes.
  */
 
 #include "transpose.h"
@@ -14,6 +14,7 @@
 
 #include "utils.h"
 
+#include <algorithm>
 #include <vector>
 
 namespace tvm {
@@ -119,13 +120,33 @@ Array<PrimExpr> TransposeNode::MakeIndices(const Array<IterVar> &ivs,
   Array<Range> ranges = src_dst == 0 ? src_range : dst_range;
 
   if (src_dst == 1) {
-    ICHECK_EQ(src_range.size(), ranges.size())
-        << "Transpose source and destination ranks must match";
+    // Axes are aligned from the right. A leading axis present on one side
+    // only, such as the stage axis a software pipeline adds to a
+    // multi-buffered source, must have extent 1.
+    const size_t src_rank = src_range.size();
+    const size_t dst_rank = ranges.size();
+    const size_t common_rank = std::min(src_rank, dst_rank);
+    ICHECK_GE(common_rank, 2) << "Transpose requires at least two dimensions";
+    for (size_t axis = 0; axis + common_rank < src_rank; axis++) {
+      ICHECK(is_one(src_range[axis]->extent))
+          << "Transpose source axis " << axis << " of " << src->name
+          << " has no destination axis and must have extent 1, but has "
+          << src_range[axis]->extent;
+    }
     std::vector<int> source_axis_to_iv =
         MakeSourceAxisToIterVarMap(src_range, ivs.size());
-    for (size_t dst_axis = 0; dst_axis < ranges.size(); dst_axis++) {
-      size_t src_axis = SourceAxisForDestinationAxis(dst_axis, ranges.size());
-      int iv_idx = source_axis_to_iv[src_axis];
+    for (size_t dst_axis = 0; dst_axis < dst_rank; dst_axis++) {
+      int iv_idx = -1;
+      if (dst_axis + common_rank >= dst_rank) {
+        size_t aligned_axis = dst_axis + src_rank - dst_rank;
+        iv_idx = source_axis_to_iv[SourceAxisForDestinationAxis(aligned_axis,
+                                                                src_rank)];
+      } else {
+        ICHECK(is_one(ranges[dst_axis]->extent))
+            << "Transpose destination axis " << dst_axis << " of " << dst->name
+            << " has no source axis and must have extent 1, but has "
+            << ranges[dst_axis]->extent;
+      }
       if (iv_idx < 0)
         indices.push_back(ranges[dst_axis]->min);
       else
@@ -215,7 +236,7 @@ Stmt TransposeNode::Lower(const LowerArgs &lower_args,
 
 LayoutMap TransposeNode::InferLayout(const LayoutInferArgs &layout_args,
                                      InferLevel level) const {
-  // Transpose always uses SIMT loops; no special layout inference needed.
+  // Lowerings adapt to the layouts other ops choose; transpose constrains none.
   return {};
 }
 
