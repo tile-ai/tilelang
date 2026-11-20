@@ -1941,9 +1941,6 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK_EQ(op->args.size(), 2)
         << "tl.ascend_set_atomic expects 2 arguments (op_str, typed_zero)";
     std::string atomic_op = Downcast<StringImm>(op->args[0])->value;
-    const char *fn = atomic_op == "max"   ? "asc_set_atomic_max"
-                     : atomic_op == "min" ? "asc_set_atomic_min"
-                                          : "asc_set_atomic_add";
     ICHECK(atomic_op == "add" || atomic_op == "max" || atomic_op == "min")
         << "tl.ascend_set_atomic op must be add/max/min, got " << atomic_op;
 
@@ -1958,12 +1955,11 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     ICHECK(supported_dtype)
         << "Ascend atomic does not support data type: " << atomic_dtype;
 
+    const char *prefix = atomic_dtype.is_int() && atomic_dtype.bits() == 32
+                             ? "tl::cann::set_atomic_"
+                             : "asc_set_atomic_";
     this->PrintIndent();
-    if (atomic_dtype.is_int() && atomic_dtype.bits() == 32) {
-      this->stream << "tl::cann::set_atomic_" << atomic_op;
-    } else {
-      this->stream << fn;
-    }
+    this->stream << prefix << atomic_op;
     if (atomic_dtype.is_bfloat16()) {
       this->stream << "_bfloat";
     } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 16) {

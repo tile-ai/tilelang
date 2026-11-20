@@ -5,16 +5,20 @@
 #include <version/asc_devkit_version.h>
 #include "c_api/asc_simd.h"
 
-// This layer preserves the arguments used by TileLang's Ascend code generator.
-// It does not add SDK overloads to the global namespace or alter installed
-// files.
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510
+// Stable names used by Ascend codegen. asc_simd.h selects the SDK APIs
+// available for the compilation target.
 namespace tl {
 namespace cann {
 
 enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
 
-#if ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1 && ASC_DEVKIT_PATCH == 0
+#if defined(__NPU_ARCH__)
+
+#define TL_CANN_9_1                                                            \
+  (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1 && ASC_DEVKIT_PATCH == 0)
+
+// HF32, atomic modes and scalar loads use the API names for this SDK.
+#if TL_CANN_9_1
 __aicore__ inline void disable_hf32() { ::asc_set_fp32_mode(); }
 
 __aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
@@ -23,10 +27,147 @@ __aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
   ::asc_enable_hf32_trans(mode == hf32_round_mode::NEAREST_AWAY ? 1u : 0u);
 }
 
-// Only the old C API lacks these vector overloads. Keep floating division
-// and all other scalar-min/compare/broadcast types on their existing path.
+__aicore__ inline void set_atomic_add_int32() { ::asc_set_atomic_add_int(); }
+__aicore__ inline void set_atomic_max_int32() { ::asc_set_atomic_max_int(); }
+__aicore__ inline void set_atomic_min_int32() { ::asc_set_atomic_min_int(); }
+
+using load_l2_cache_mode = uint8_t;
+using store_l2_cache_mode = uint8_t;
+using unit_flag_mode = uint8_t;
+using quant_mode = uint64_t;
+using relu_pre_mode = uint8_t;
+using dual_dst_mode = uint8_t;
+
+template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
+  return ld_dev(ptr, 0);
+}
+#else
+__aicore__ inline void disable_hf32() { ::asc_disable_hf32(); }
+
+__aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
+  ::asc_set_hf32_round_mode(mode == hf32_round_mode::NEAREST_AWAY
+                                ? ::asc_hf32_round_mode::NEAREST_AWAY
+                                : ::asc_hf32_round_mode::NEAREST_EVEN);
+}
+
+__aicore__ inline void set_atomic_add_int32() { ::asc_set_atomic_add_int32(); }
+__aicore__ inline void set_atomic_max_int32() { ::asc_set_atomic_max_int32(); }
+__aicore__ inline void set_atomic_min_int32() { ::asc_set_atomic_min_int32(); }
+
+using load_l2_cache_mode = ::asc_load_l2_cache_mode;
+using store_l2_cache_mode = ::asc_store_l2_cache_mode;
+using unit_flag_mode = ::asc_unit_flag_mode;
+using quant_mode = ::asc_quant_mode;
+using relu_pre_mode = ::asc_relu_pre_mode;
+using dual_dst_mode = ::asc_dual_dst_mode;
+
+template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
+  return ::asc_load_dev(ptr);
+}
+#endif
+
+// The 9.1 dav-3510 DMA ABI uses packed controls, a longer L0C store
+// signature and count-preserving align intrinsics.
+#if TL_CANN_9_1 && __NPU_ARCH__ == 3510
+__aicore__ inline void set_gm2l1_nz_para(uint16_t batches, uint16_t n_stride,
+                                         uint16_t c0_stride,
+                                         uint16_t matrix_stride) {
+  uint64_t config = uint64_t(batches) | (uint64_t(n_stride) << 16) |
+                    (uint64_t(c0_stride) << 32) |
+                    (uint64_t(matrix_stride) << 48);
+  ::asc_set_gm2l1_nz_para(config);
+}
+
+template <typename... Args>
+__aicore__ inline void set_l0c_copy_nz_para(Args... args) {
+  ::asc_set_l0c2gm_nz2nd(args...);
+}
+
+template <typename D, typename S>
+__aicore__ inline void
+copy_l0c2gm(__gm__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
+            uint32_t dst_stride, uint16_t src_stride, store_l2_cache_mode cache,
+            unit_flag_mode unit, quant_mode quant, relu_pre_mode relu,
+            bool split, bool nz2nd, bool nz2dn, bool clip) {
+  ::asc_copy_l0c2gm(
+      dst, src, n, m, dst_stride, src_stride, cache, clip, unit, quant, relu,
+      split, nz2nd, /*quant_post=*/0, /*relu_post=*/0, /*clip_relu_post=*/false,
+      /*eltwise_op=*/0, /*eltwise_antq_en=*/false, /*c0_pad_en=*/false,
+      /*broadcast_en=*/false, nz2dn);
+}
+
+template <typename D, typename S>
+__aicore__ inline void
+copy_l0c2ub(__ubuf__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
+            uint32_t dst_stride, uint16_t src_stride, int8_t subblock,
+            dual_dst_mode dual, unit_flag_mode unit, quant_mode quant,
+            relu_pre_mode relu, bool split, bool nz2nd, bool nz2dn, bool clip) {
+  ::asc_copy_l0c2ub(
+      dst, src, n, m, dst_stride, src_stride, dual, bool(subblock), clip, unit,
+      quant, relu, split, nz2nd, /*quant_post=*/0, /*relu_post=*/0,
+      /*clip_relu_post=*/false, /*eltwise_op=*/0, /*eltwise_antq_en=*/false,
+      /*c0_pad_en=*/false, /*broadcast_en=*/false, nz2dn);
+}
+
+// The old public wrapper narrows count to uint16_t. Keep the uint32_t
+// instruction argument used by the newer wrapper; hardware limits still apply.
+template <typename T>
+__aicore__ inline void
+copy_gm2ub_align(__ubuf__ T *dst, __gm__ T *src, uint32_t count,
+                 uint32_t length, uint8_t left, uint8_t right, bool pad,
+                 load_l2_cache_mode cache, uint64_t src_stride,
+                 uint32_t dst_stride) {
+  if ASC_IS_AIV {
+    copy_gm_to_ubuf_align_v2(dst, src, 0, count, length, left, right, pad,
+                             cache, src_stride, dst_stride);
+  }
+}
+
+template <typename T>
+__aicore__ inline void
+copy_ub2gm_align(__gm__ T *dst, __ubuf__ T *src, uint32_t count,
+                 uint32_t length, store_l2_cache_mode cache,
+                 uint64_t dst_stride, uint32_t src_stride) {
+  if ASC_IS_AIV {
+    copy_ubuf_to_gm_align_v2((__gm__ void *)dst, (__ubuf__ void *)src, 0, count,
+                             length, cache, dst_stride, src_stride);
+  }
+}
+#else
+// Resolve the native overload when the operation is instantiated. A target
+// may expose only a subset of these DMA operations.
+template <typename... Args>
+__aicore__ inline void set_gm2l1_nz_para(Args... args) {
+  asc_set_gm2l1_nz_para(args...);
+}
+template <typename... Args>
+__aicore__ inline void set_l0c_copy_nz_para(Args... args) {
+  asc_set_l0c_copy_nz_para(args...);
+}
+template <typename... Args> __aicore__ inline void copy_l0c2gm(Args... args) {
+  asc_copy_l0c2gm(args...);
+}
+template <typename... Args> __aicore__ inline void copy_l0c2ub(Args... args) {
+  asc_copy_l0c2ub(args...);
+}
+template <typename... Args>
+__aicore__ inline void copy_gm2ub_align(Args... args) {
+  asc_copy_gm2ub_align(args...);
+}
+template <typename... Args>
+__aicore__ inline void copy_ub2gm_align(Args... args) {
+  asc_copy_ub2gm_align(args...);
+}
+#endif
+
+// asc_simd.h includes reg_vector.h in 9.1 and asc_reg_vector.h in newer
+// SDKs when the target exposes register-vector operations.
+#if defined(INCLUDE_C_API_REG_COMPUTE_REG_VECTOR_H) ||                         \
+    defined(INCLUDE_C_API_ASC_REG_VECTOR_H)
 template <typename V>
 __simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
+#if TL_CANN_9_1
+  // CANN 9.1 lacks the integer asc_div overloads.
   if constexpr (std::is_same_v<V, vector_s16> ||
                 std::is_same_v<V, vector_u16> ||
                 std::is_same_v<V, vector_s32> ||
@@ -35,9 +176,11 @@ __simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
   } else {
     ::asc_div(dst, lhs, rhs, mask);
   }
-  // Unsigned software division refines only active lanes, but the SDK's
-  // ZEROING return can expose its all-lane quotient estimate. Adding zero
-  // preserves active quotients and explicitly clears inactive lanes.
+#else
+  ::asc_div(dst, lhs, rhs, mask);
+#endif
+  // Unsigned division can leave quotient estimates in inactive lanes.
+  // A masked add of zero preserves the quotient and clears those lanes.
   if constexpr (std::is_same_v<V, vector_u16>) {
     ::vadds(dst, dst, uint16_t(0), mask, MODE_ZEROING);
   } else if constexpr (std::is_same_v<V, vector_u32>) {
@@ -45,6 +188,7 @@ __simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
   }
 }
 
+#if TL_CANN_9_1
 template <typename V, typename S>
 __simd_callee__ inline void min_scalar(V &dst, V src, S scalar,
                                        vector_bool mask) {
@@ -79,10 +223,6 @@ __simd_callee__ inline void duplicate_highest(V &dst, V src, vector_bool mask) {
   ::vdup(dst, src, mask, POS_HIGHEST, MODE_ZEROING);
 }
 
-__aicore__ inline void set_atomic_add_int32() { ::asc_set_atomic_add_int(); }
-__aicore__ inline void set_atomic_max_int32() { ::asc_set_atomic_max_int(); }
-__aicore__ inline void set_atomic_min_int32() { ::asc_set_atomic_min_int(); }
-
 // Preserve the SDK's register type. The old name returns iter_reg while
 // newer SDKs call the corresponding type addr_reg; neither is an integer.
 // The unsigned argument is an element stride in a hardware loop, not a
@@ -95,78 +235,6 @@ __simd_callee__ inline auto update_addr_reg_b16(uint32_t offset) {
 }
 __simd_callee__ inline auto update_addr_reg_b32(uint32_t offset) {
   return ::asc_create_iter_reg_b32(offset);
-}
-
-using load_l2_cache_mode = uint8_t;
-using store_l2_cache_mode = uint8_t;
-using unit_flag_mode = uint8_t;
-using quant_mode = uint64_t;
-using relu_pre_mode = uint8_t;
-using dual_dst_mode = uint8_t;
-
-template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
-  return ld_dev(ptr, 0);
-}
-
-__aicore__ inline void set_gm2l1_nz_para(uint16_t batches, uint16_t n_stride,
-                                         uint16_t c0_stride,
-                                         uint16_t matrix_stride) {
-  uint64_t config = uint64_t(batches) | (uint64_t(n_stride) << 16) |
-                    (uint64_t(c0_stride) << 32) |
-                    (uint64_t(matrix_stride) << 48);
-  ::asc_set_gm2l1_nz_para(config);
-}
-
-template <typename... Args>
-__aicore__ inline void set_l0c_copy_nz_para(Args... args) {
-  ::asc_set_l0c2gm_nz2nd(args...);
-}
-
-template <typename D, typename S>
-__aicore__ inline void
-copy_l0c2gm(__gm__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
-            uint32_t dst_stride, uint16_t src_stride, store_l2_cache_mode cache,
-            unit_flag_mode unit, quant_mode quant, relu_pre_mode relu,
-            bool split, bool nz2nd, bool nz2dn, bool clip) {
-  ::asc_copy_l0c2gm(dst, src, n, m, dst_stride, src_stride, cache, clip, unit,
-                    quant, relu, split, nz2nd, 0, 0, false, 0, false, false,
-                    false, nz2dn);
-}
-
-template <typename D, typename S>
-__aicore__ inline void
-copy_l0c2ub(__ubuf__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
-            uint32_t dst_stride, uint16_t src_stride, int8_t subblock,
-            dual_dst_mode dual, unit_flag_mode unit, quant_mode quant,
-            relu_pre_mode relu, bool split, bool nz2nd, bool nz2dn, bool clip) {
-  ::asc_copy_l0c2ub(dst, src, n, m, dst_stride, src_stride, dual,
-                    bool(subblock), clip, unit, quant, relu, split, nz2nd, 0, 0,
-                    false, 0, false, false, false, nz2dn);
-}
-
-// The old public wrapper narrows count to uint16_t. Keep the uint32_t
-// instruction argument used by the newer wrapper; hardware limits still apply.
-template <typename T>
-__aicore__ inline void
-copy_gm2ub_align(__ubuf__ T *dst, __gm__ T *src, uint32_t count,
-                 uint32_t length, uint8_t left, uint8_t right, bool pad,
-                 load_l2_cache_mode cache, uint64_t src_stride,
-                 uint32_t dst_stride) {
-  if ASC_IS_AIV {
-    copy_gm_to_ubuf_align_v2(dst, src, 0, count, length, left, right, pad,
-                             cache, src_stride, dst_stride);
-  }
-}
-
-template <typename T>
-__aicore__ inline void
-copy_ub2gm_align(__gm__ T *dst, __ubuf__ T *src, uint32_t count,
-                 uint32_t length, store_l2_cache_mode cache,
-                 uint64_t dst_stride, uint32_t src_stride) {
-  if ASC_IS_AIV {
-    copy_ubuf_to_gm_align_v2((__gm__ void *)dst, (__ubuf__ void *)src, 0, count,
-                             length, cache, dst_stride, src_stride);
-  }
 }
 
 #define TL_CANN_LOAD(New, Old)                                                 \
@@ -225,19 +293,6 @@ storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
   }
 }
 #else
-__aicore__ inline void disable_hf32() { ::asc_disable_hf32(); }
-
-template <typename V>
-__simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
-  ::asc_div(dst, lhs, rhs, mask);
-  // The newer C API also delegates unsigned division to the software
-  // intrinsic. Enforce ZEROING after its quotient refinement.
-  if constexpr (std::is_same_v<V, vector_u16>) {
-    ::vadds(dst, dst, uint16_t(0), mask, MODE_ZEROING);
-  } else if constexpr (std::is_same_v<V, vector_u32>) {
-    ::vadds(dst, dst, uint32_t(0), mask, MODE_ZEROING);
-  }
-}
 template <typename V, typename S>
 __simd_callee__ inline void min_scalar(V &dst, V src, S scalar,
                                        vector_bool mask) {
@@ -256,9 +311,7 @@ template <typename V>
 __simd_callee__ inline void duplicate_highest(V &dst, V src, vector_bool mask) {
   ::asc_duplicate_highest(dst, src, mask);
 }
-__aicore__ inline void set_atomic_add_int32() { ::asc_set_atomic_add_int32(); }
-__aicore__ inline void set_atomic_max_int32() { ::asc_set_atomic_max_int32(); }
-__aicore__ inline void set_atomic_min_int32() { ::asc_set_atomic_min_int32(); }
+
 __simd_callee__ inline auto update_addr_reg_b8(uint32_t offset) {
   return ::asc_update_addr_reg_b8(offset);
 }
@@ -269,44 +322,6 @@ __simd_callee__ inline auto update_addr_reg_b32(uint32_t offset) {
   return ::asc_update_addr_reg_b32(offset);
 }
 
-__aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
-  ::asc_set_hf32_round_mode(mode == hf32_round_mode::NEAREST_AWAY
-                                ? ::asc_hf32_round_mode::NEAREST_AWAY
-                                : ::asc_hf32_round_mode::NEAREST_EVEN);
-}
-
-using load_l2_cache_mode = ::asc_load_l2_cache_mode;
-using store_l2_cache_mode = ::asc_store_l2_cache_mode;
-using unit_flag_mode = ::asc_unit_flag_mode;
-using quant_mode = ::asc_quant_mode;
-using relu_pre_mode = ::asc_relu_pre_mode;
-using dual_dst_mode = ::asc_dual_dst_mode;
-
-template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
-  return ::asc_load_dev(ptr);
-}
-template <typename... Args>
-__aicore__ inline void set_gm2l1_nz_para(Args... args) {
-  ::asc_set_gm2l1_nz_para(args...);
-}
-template <typename... Args>
-__aicore__ inline void set_l0c_copy_nz_para(Args... args) {
-  ::asc_set_l0c_copy_nz_para(args...);
-}
-template <typename... Args> __aicore__ inline void copy_l0c2gm(Args... args) {
-  ::asc_copy_l0c2gm(args...);
-}
-template <typename... Args> __aicore__ inline void copy_l0c2ub(Args... args) {
-  ::asc_copy_l0c2ub(args...);
-}
-template <typename... Args>
-__aicore__ inline void copy_gm2ub_align(Args... args) {
-  ::asc_copy_gm2ub_align(args...);
-}
-template <typename... Args>
-__aicore__ inline void copy_ub2gm_align(Args... args) {
-  ::asc_copy_ub2gm_align(args...);
-}
 #define TL_CANN_NATIVE_LOAD(Name)                                              \
   template <typename V, typename T, typename Offset>                           \
   __simd_callee__ inline void Name(V &dst, __ubuf__ T *src, Offset offset) {   \
@@ -344,13 +359,10 @@ storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
 }
 #endif
 
-// Offset-based stores already preserve the caller's pointer in the old SDK.
-template <typename T, typename V>
-__simd_callee__ inline void storealign_postupdate(__ubuf__ T *&dst, V value,
-                                                  int32_t offset,
-                                                  vector_bool mask) {
-  ::asc_storealign_postupdate(dst, value, offset, mask);
-}
+#endif // register-vector API
+
+#undef TL_CANN_9_1
+#endif // defined(__NPU_ARCH__)
+
 } // namespace cann
 } // namespace tl
-#endif
