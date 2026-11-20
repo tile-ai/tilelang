@@ -306,6 +306,69 @@ def _assert_two_box_tma_loop(source, instruction):
     )
 
 
+def _wide_tile_gemm(block_N, in_dtype, accum_dtype, block_M=32, block_K=32, num_stages=2):
+    """GEMM whose B tile is (block_N, block_K): block_N > 256 makes the TMA box
+    split its second mode. A plain T.copy under T.Pipelined is promoted to TMA
+    by warp specialization on sm_90+."""
+    M, N, K = 256, block_N * 2, 256
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), in_dtype),
+        B: T.Tensor((N, K), in_dtype),
+        C: T.Tensor((M, N), accum_dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            A_shared = T.alloc_shared((block_M, block_K), in_dtype)
+            B_shared = T.alloc_shared((block_N, block_K), in_dtype)
+            C_local = T.alloc_fragment((block_M, block_N), accum_dtype)
+            T.clear(C_local)
+            for k in T.Pipelined(T.ceildiv(K, block_K), num_stages=num_stages):
+                T.copy(A[by * block_M, k * block_K], A_shared)
+                T.copy(B[bx * block_N, k * block_K], B_shared)
+                T.gemm(A_shared, B_shared, C_local, transpose_B=True)
+            T.copy(C_local, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    "in_dtype, accum_dtype, block_N",
+    [
+        # 400 has no 64-element divisor <= 256, but with the 32-element first
+        # mode a 200-element split gives 12800-byte, 128-byte-aligned steps.
+        (T.float16, T.float32, 400),
+        # Two 32x160 boxes, not five 32x64 ones.
+        (T.float16, T.float32, 320),
+        (T.float32, T.float32, 400),
+        (T.int8, T.int32, 320),
+    ],
+)
+def test_tma_box_split_alignment_counts_whole_box(in_dtype, accum_dtype, block_N):
+    """A split mode's rest instructions step the shared tile by the whole box,
+    so the 128-byte alignment check must include the box modes accepted before
+    the split mode, not just the split mode itself."""
+    target = {"kind": "cuda", "arch": "sm_90a"}
+    with tvm.transform.PassContext(), tvm.target.Target(target):
+        artifact = tilelang.lower(_wide_tile_gemm(block_N, in_dtype, accum_dtype), target=target)
+    _assert_two_box_tma_loop(artifact.kernel_source, "tma_load")
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+@pytest.mark.parametrize("block_N", [320, 400])
+def test_tma_box_split_wide_tile_gemm_matches_torch(block_N):
+    import torch
+
+    kernel = tilelang.compile(_wide_tile_gemm(block_N, T.float16, T.float32), out_idx=[2])
+    _assert_two_box_tma_loop(kernel.get_kernel_source(), "tma_load")
+    M, N, K = 256, block_N * 2, 256
+    A = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    B = torch.randn(N, K, dtype=torch.float16, device="cuda")
+    torch.testing.assert_close(kernel(A, B), A.float() @ B.float().T, atol=1e-2, rtol=1e-2)
+
+
 def _tma_descriptor_init_block(host_source, desc_name):
     marker = f"[0].v_ptr) = {desc_name};"
     start = host_source.find(marker)

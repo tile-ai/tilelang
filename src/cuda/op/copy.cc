@@ -1989,6 +1989,7 @@ AnalyzeTMABulkCopy(const LowerArgs &lower_args, const Buffer &global_tensor,
     }
     box_shape.push_back(cute::IntTuple(box_dim));
     box_stride.push_back(tile_gbasis->stride[i]);
+    box_elems *= box_dim;
     visited_global_modes[mode] = true;
     gmode_to_tma_mode_stride.Set(mode, cute::E({i}));
     tma_mode_to_gmode[i] = mode;
