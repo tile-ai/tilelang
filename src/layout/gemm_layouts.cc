@@ -442,8 +442,9 @@ static Layout ExpandLayout2D(const Layout &base, const Buffer &buffer) {
 static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
                                              int element_size) {
   // Swizzle 1 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0];
+  Var j = vars[1];
   int vector_size = 128 / element_size;
   // stride==4 is a truncated 4-row period used by tile::gather4/scatter4
   // (s=i%8 ∈ [0,4) is a valid subset of the 8-row XOR pattern, matching
@@ -458,7 +459,7 @@ static Layout MakeQuarterBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor2x2(c, FloorDiv(s, 4));
   PrimExpr index = vec + (c_swizzle + s * 2) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array<PrimExpr>{stride, continuous}, vars, {tc, ts, index});
 }
 
 Layout MakeQuarterBankSwizzleLayout(const Buffer &buffer) {
@@ -473,8 +474,9 @@ Layout MakeQuarterBankSwizzleLayout(const Buffer &buffer) {
 static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
   // Swizzle 2 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0];
+  Var j = vars[1];
   int vector_size = 128 / element_size;
   // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
   ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
@@ -487,7 +489,7 @@ static Layout MakeHalfBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor4x4(c, FloorDiv(s, 2));
   PrimExpr index = vec + (c_swizzle + s * 4) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array<PrimExpr>{stride, continuous}, vars, {tc, ts, index});
 }
 
 Layout MakeHalfBankSwizzleLayout(const Buffer &buffer) {
@@ -502,8 +504,9 @@ Layout MakeHalfBankSwizzleLayout(const Buffer &buffer) {
 static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
                                           int element_size) {
   // Swizzle 3 bit
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0];
+  Var j = vars[1];
   int vector_size = 128 / element_size;
   // See MakeQuarterBankSwizzleLayout2D for stride==4 rationale.
   ICHECK(stride == 4 || stride % 8 == 0) << "stride=" << stride;
@@ -516,7 +519,7 @@ static Layout MakeFullBankSwizzleLayout2D(int stride, int continuous,
   PrimExpr vec = FloorMod(j, vector_size);
   PrimExpr c_swizzle = xor8x8(c, s);
   PrimExpr index = vec + (c_swizzle + s * 8) * vector_size;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array<PrimExpr>{stride, continuous}, vars, {tc, ts, index});
 }
 
 Layout MakeFullBankSwizzleLayout(const Buffer &buffer) {
@@ -554,28 +557,30 @@ Layout makeMatrixCoreSwizzleLayout(int stride, int continuous, int element_size,
 
 Layout makeGemmABLayoutF64_Kinner(int stride, int continuous) {
   // Swizzle<2, 0, 4>
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0];
+  Var j = vars[1];
   PrimExpr tc = FloorDiv(j, 16);
   PrimExpr ts = FloorDiv(i, 4);
   PrimExpr c = FloorMod(j, 16);
   PrimExpr s = FloorMod(i, 4);
   PrimExpr swizzled_c = FloorDiv(c, 4) * 4 + xor4x4(FloorMod(c, 4), s);
   PrimExpr index = swizzled_c + s * 16;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array<PrimExpr>{stride, continuous}, vars, {tc, ts, index});
 }
 
 Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
   // Swizzle<2, 2, 2>
-  Var i = InputPlaceholder(0);
-  Var j = InputPlaceholder(1);
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0];
+  Var j = vars[1];
   PrimExpr tc = FloorDiv(j, 16);
   PrimExpr ts = FloorDiv(i, 4);
   PrimExpr c = FloorMod(j, 16);
   PrimExpr s = FloorMod(i, 4);
   PrimExpr swizzled_c = FloorMod(c, 4) + xor4x4(FloorDiv(c, 4), s) * 4;
   PrimExpr index = swizzled_c + s * 16;
-  return Layout(Array<PrimExpr>{stride, continuous}, {tc, ts, index});
+  return Layout(Array<PrimExpr>{stride, continuous}, vars, {tc, ts, index});
 }
 
 // The Default Layout for Tensor Access (row-major linear layout)

@@ -282,8 +282,9 @@ bool IsSemanticallyLinearLayout(const Layout &layout,
   }
 
   Layout linear_layout = MakeLinearLayout(shape);
-  return analyzer->CanProveEqual(layout->GetLinearizedForwardIndex(),
-                                 linear_layout->GetLinearizedForwardIndex());
+  return analyzer->CanProveEqual(
+      layout->GetLinearizedForwardIndex(),
+      linear_layout->ForwardLinearized(layout->GetForwardVars()));
 }
 
 bool IsContiguousGlobalRegion(const Buffer &global_tensor,
