@@ -267,5 +267,89 @@ def test_ascend_thread_sync_skips_partial_barrier_rewriting():
     tvm.ir.assert_structural_equal(after, before)
 
 
+def _alias_offsets(module):
+    """Byte offsets recorded by the ``handle_add_byte_offset`` alias bindings."""
+    offsets = {}
+
+    def collect(node):
+        if isinstance(node, tirx.Bind) and isinstance(node.value, tirx.Call):
+            offsets[node.var.name] = int(node.value.args[1])
+
+    tirx.stmt_functor.post_order_visit(module["main"].body, collect)
+    return offsets
+
+
+def _labels_between(body, first, second):
+    """Statement labels of the sequence holding both calls, in order."""
+    seqs = []
+    tirx.stmt_functor.post_order_visit(body, lambda node: seqs.append(node) if isinstance(node, tirx.SeqStmt) else None)
+
+    def label(stmt):
+        if isinstance(stmt, tirx.Evaluate) and isinstance(stmt.value, tirx.Call):
+            call = stmt.value
+            if call.op.same_as(tvm.ir.Op.get("tirx.tvm_storage_sync")):
+                return "sync"
+            if call.op.same_as(tvm.ir.Op.get("tirx.call_extern")):
+                return str(call.args[0].value)
+        return type(stmt).__name__
+
+    for seq in seqs:
+        labels = [label(child) for child in seq.seq]
+        if first in labels and second in labels:
+            return labels
+    raise AssertionError(f"no statement sequence holds both {first} and {second}")
+
+
+def test_ascend_thread_sync_keeps_mixed_physical_width_alias_barrier():
+    """Views that declare equal widths but store elements of different sizes.
+
+    ``float6_e3m2fnx4`` declares 24 bits per element but the arena reserves
+    four bytes for it, while ``int8x3`` really occupies three.  Both views are
+    addressed through the same alias at byte 96, which is element 24 of the
+    first and element 32 of the second, so the touched ranges are only
+    comparable when the physical storage widths agree.
+    """
+    wide_shared = tirx.decl_buffer((16,), "float6_e3m2fnx4", name="A_shared", scope="shared.dyn")
+    narrow_shared = tirx.decl_buffer((16,), "int8x3", name="B_shared", scope="shared.dyn")
+
+    def make_body(thread_id):
+        return tirx.SeqStmt(
+            [
+                tirx.AllocBuffer(wide_shared),
+                tirx.AllocBuffer(narrow_shared),
+                tirx.Evaluate(
+                    tirx.call_extern(
+                        "void",
+                        "writer",
+                        tirx.tvm_access_ptr(
+                            tirx.type_annotation("float6_e3m2fnx4"),
+                            narrow_shared.data,
+                            0,
+                            1,
+                            2,
+                        ),
+                    )
+                ),
+                tirx.Evaluate(
+                    tirx.call_extern(
+                        "void",
+                        "reader",
+                        tirx.tvm_access_ptr(tirx.type_annotation("int8x3"), narrow_shared.data, 0, 1, 1),
+                        thread_id,
+                    )
+                ),
+            ]
+        )
+
+    before = _module(_vf(_thread_body(make_body)))
+    before = tilelang.transform.MergeSharedMemoryAllocations(disable_reuse=True)(before)
+    assert _alias_offsets(before) == {"A_shared": 0, "B_shared": 96}
+
+    after = ascend_transform.AscendThreadSync("shared.dyn")(before)["main"]
+
+    labels = _labels_between(after.body, "writer", "reader")
+    assert "sync" in labels[labels.index("writer") + 1 : labels.index("reader")], labels
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
