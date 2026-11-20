@@ -23,17 +23,7 @@ N = 128
 SENTINEL = 7.0
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _compile(func, **kwargs):
-    _require_cutedsl()
     return tilelang.compile(func, target="cutedsl", **kwargs)
 
 
@@ -77,14 +67,14 @@ def run_ldg(width, predicated, n=N):
     torch.testing.assert_close(y, expected, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("width", [32, 64, 128])
 @pytest.mark.parametrize("predicated", [False, True])
 def test_ldg(width, predicated):
     run_ldg(width, predicated)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize("predicated", [False, True])
 def test_ldg256(predicated):
@@ -100,7 +90,7 @@ def kernel_ldg_int64_predicate():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_ldg_int64_predicate():
     """The ``bool pred`` parameter tests the whole 64-bit value against zero."""
     kernel = _compile(kernel_ldg_int64_predicate())
@@ -159,20 +149,20 @@ def run_stg(width, predicated, n=N, func=None):
     torch.testing.assert_close(y, expected, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("width", [32, 64, 128])
 @pytest.mark.parametrize("predicated", [False, True])
 def test_stg(width, predicated):
     run_stg(width, predicated)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("predicated", [False, True])
 def test_stg32_reinterpreted_value(predicated):
     run_stg(32, predicated, func=kernel_stg32_reinterpret(predicated))
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize("predicated", [False, True])
 def test_stg256(predicated):
@@ -189,7 +179,7 @@ def kernel_ldg256_stg256_roundtrip():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_lt(10, 0)
 def test_ldg256_stg256_fallback_on_pre_sm100():
     """Below sm_100 the 256-bit accesses split into two 128-bit ones."""
@@ -210,7 +200,7 @@ def kernel_stg256_float_value():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stg256_float_value():
     """stg256 stores the bits of any 32-byte value, like ``store_global_256<T>``."""
@@ -231,7 +221,7 @@ def kernel_stg32_int_value():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_stg32_converts_value_to_uint32():
     """``store_global_32(void *, uint32_t)`` converts integer values to uint32_t."""
     kernel = _compile(kernel_stg32_int_value())
@@ -270,7 +260,7 @@ def kernel_lds_sts(width):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("width", [32, 64, 128])
 def test_lds_sts(width):
     lanes = width // 32
@@ -317,7 +307,7 @@ def kernel_strided_load():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_strided_stg32_uses_declared_stride():
     kernel = _compile(kernel_strided_store())
     physical = torch.zeros(M_ROWS * PITCH, dtype=torch.int32, device="cuda")
@@ -329,7 +319,7 @@ def test_strided_stg32_uses_declared_stride():
     assert torch.count_nonzero(untouched) == 0
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_strided_ldg32_uses_declared_stride():
     physical = torch.arange(M_ROWS * PITCH, dtype=torch.int32, device="cuda")
     view = physical.as_strided((M_ROWS, N_COLS), (PITCH, 1))
@@ -353,7 +343,7 @@ def kernel_ldg_plus_one():
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_language_ldg_codegen():
     kernel = _compile(kernel_ldg_plus_one(), out_idx=[1])
     assert "tl.__ldg(" in kernel.get_kernel_source()
@@ -370,7 +360,7 @@ def kernel_ldg_roundtrip(dtype):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize(
     "dtype",
     [T.float16, T.bfloat16, T.float32, T.float64, T.int8, T.uint8, T.int16, T.int32, T.int64],

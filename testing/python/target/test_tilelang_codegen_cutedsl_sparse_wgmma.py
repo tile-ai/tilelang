@@ -10,8 +10,6 @@ import pytest
 
 import tilelang.testing
 
-pytestmark = tilelang.testing.requires_cuda.marks()
-
 
 def _tail(*args):
     from tilelang.contrib.cutedsl.gemm_v2_sp import _sparse_tail
@@ -19,6 +17,7 @@ def _tail(*args):
     return _sparse_tail(*args)
 
 
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("ptx_a", ["f16", "bf16"])
 def test_f16_bf16_take_transpose_immediates(ptx_a):
     assert _tail(ptx_a, 0, 1, 1, True, False) == "p, 1, 1, 1, 0;"
@@ -27,18 +26,21 @@ def test_f16_bf16_take_transpose_immediates(ptx_a):
     assert _tail(ptx_a, 4, 1, 1, True, True) == "p, 1, 1, 1;"
 
 
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("ptx_a", ["tf32", "e4m3", "e5m2"])
 def test_other_forms_take_scale_only(ptx_a):
     assert _tail(ptx_a, 0, 1, 1, True, True) == "p, 1, 1;"
     assert _tail(ptx_a, 4, -1, 1, True, True) == "p, -1, 1;"
 
 
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("ptx_a", ["s8", "u8"])
 def test_integer_forms_take_scale_d_only(ptx_a):
     assert _tail(ptx_a, 0, 1, 1, True, True) == "p;"
     assert _tail(ptx_a, 4, 1, 1, False, False) == "p;"
 
 
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize(
     "ptx_a, expected",
     [("f16", "p, 1, -1, 1;"), ("bf16", "p, 1, -1, 1;"), ("tf32", "p, 1, -1;"), ("e4m3", "p, 1, -1;"), ("s8", "p;"), ("u8", "p;")],

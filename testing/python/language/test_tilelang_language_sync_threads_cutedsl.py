@@ -9,15 +9,6 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _rotate_through_shared(threads, barrier):
     @T.prim_func
     def main(Out: T.Tensor((4, threads), T.int32), bid: T.int32):
@@ -36,10 +27,9 @@ def _rotate_through_shared(threads, barrier):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("barrier", ["static", "dynamic"])
 def test_sync_threads_barrier_id_without_count(barrier):
-    _require_cutedsl()
     threads = 256
     kernel = tilelang.compile(_rotate_through_shared(threads, barrier), target="cutedsl")
     out = torch.zeros(4, threads, device="cuda", dtype=torch.int32)
