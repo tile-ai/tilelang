@@ -43,7 +43,6 @@ def test_gemm_rejects_nonzero_k_origin_with_transpose_a():
                 T.copy(res, C)
 
 
-
 def test_gemm_rejects_nonzero_k_origin_on_b():
     with pytest.raises(ValueError, match="non-zero K origin"):
 
