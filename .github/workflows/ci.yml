@@ -151,6 +151,13 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
+          # Isolate JIT temporary artifacts per job under RUNNER_TEMP so concurrent
+          # runners never collide in /tmp or exhaust a small /tmp tmpfs, and GitHub
+          # Actions cleans them up automatically when the job finishes.
+          export TMPDIR="${RUNNER_TEMP}/tmp"
+          mkdir -p "${TMPDIR}"
+          echo "TMPDIR=${TMPDIR}" | tee -a "${GITHUB_ENV}"
+
       # Use the ccache action only on GitHub-hosted runners, where it manages
       # remote cache restore/save. Self-hosted runners use a local cache below.
       - name: Setup ccache (GitHub-hosted runners)
@@ -407,12 +414,6 @@ jobs:
             ccache -s || true
           fi
 
-      - name: Clean up stale /tmp files (self-hosted runners)
-        if: startsWith(matrix.runner.name, 'self-hosted')
-        run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
-
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
@@ -431,8 +432,6 @@ jobs:
         id: cuda-tests
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
           cd testing
           PYTEST=(
             uv run --no-project -m --
@@ -655,6 +654,13 @@ jobs:
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
 
+          # Isolate JIT temporary artifacts per job under RUNNER_TEMP so concurrent
+          # runners never collide in /tmp or exhaust a small /tmp tmpfs, and GitHub
+          # Actions cleans them up automatically when the job finishes.
+          export TMPDIR="${RUNNER_TEMP}/tmp"
+          mkdir -p "${TMPDIR}"
+          echo "TMPDIR=${TMPDIR}" | tee -a "${GITHUB_ENV}"
+
       - name: Setup ccache (self-hosted runners)
         run: |
           if ! command -v ccache >/dev/null 2>&1; then
@@ -765,11 +771,6 @@ jobs:
             ccache -s || true
           fi
 
-      - name: Clean up stale /tmp files (self-hosted runners)
-        run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
-
       - name: Run CuTeDSL unit tests with Python 3.12 (CUDA-auto)
         run: |
           cd testing
@@ -785,8 +786,6 @@ jobs:
         env:
           TILELANG_DEFAULT_TARGET: cutedsl
         run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
           cd testing
           PYTEST=(
             uv run --no-project -m --
