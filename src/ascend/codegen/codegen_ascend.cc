@@ -557,7 +557,7 @@ void CodeGenTileLangAscend::PrintType(DataType t, std::ostream &os) {
   LOG(FATAL) << "Cannot convert scalar type " << t << " to Ascend type";
 }
 
-void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
+void CodeGenTileLangAscend::PrepareFunction(const PrimFunc &f) {
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked across PrimFunc code generation";
   this->InitFuncState(f);
@@ -691,7 +691,10 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   } else {
     kernel_mode_ = AscendKernelMode::kVector;
   }
+}
 
+void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
+  PrepareFunction(f);
   auto global_symbol = f->GetAttr<ffi::String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol) << "CodeGenTileLangAscend: Expect PrimFunc to have the "
                            "global_symbol attribute";
