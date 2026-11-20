@@ -66,9 +66,10 @@ Ascend stubs in `src/ascend/stubs/` implement a lazy-loading mechanism:
 - `TILELANG_USE_CUDA_STUBS` (Default: `ON`) controls CUDA stubs. When enabled,
   TileLang links against these stubs instead of the system CUDA toolkit
   libraries.
-- `TILELANG_USE_HIP_STUBS` (Default: `ON` on non-Windows, `OFF` on Windows)
-  controls ROCm stubs. When enabled (and `USE_ROCM=ON`), TileLang/TVM link against
-  `hip_stub` / `hiprtc_stub` instead of the system ROCm libraries.
+- `TILELANG_USE_HIP_STUBS` (Default: `OFF` on native Windows, `ON` elsewhere,
+  including Cygwin) controls ROCm stubs. When enabled (and `USE_ROCM=ON`),
+  TileLang/TVM link against `hip_stub` / `hiprtc_stub` instead of the system
+  ROCm libraries.
 - `TILELANG_USE_ASCEND_STUBS` (Default: `ON` on non-Windows) controls the
   Ascend stub. When enabled (and `USE_ASCEND=ON`), TileLang links against
   `ascendcl_stub` instead of the system CANN library. When disabled, TileLang
