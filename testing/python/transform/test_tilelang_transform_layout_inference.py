@@ -158,7 +158,7 @@ def test_static_ragged_copy_minimizes_full_thread_padding():
     kernel_source = str(artifact.kernel_source)
     _assert_launch_bounds(kernel_source, 128)
     assert "for (int i = 0; i < 5; ++i)" in kernel_source
-    assert "threadIdx.x) >> 1)) < 257" in kernel_source
+    assert "(int)((((int)threadIdx.x) >> 1))) < 257" in kernel_source
     assert "float2" not in kernel_source
     assert "threadIdx.x) < 1" not in kernel_source
 
@@ -204,7 +204,7 @@ def test_static_ragged_copy_allows_1024_elements_384_threads():
     _assert_launch_bounds(kernel_source, 384)
     assert "for (int i = 0; i < 3; ++i)" in kernel_source
     assert "B[((i * 384) + ((int)threadIdx.x))]" in kernel_source
-    assert "(((int)threadIdx.x) >> 7)) < 8" in kernel_source
+    assert "(int)((((int)threadIdx.x) >> 7))) < 8" in kernel_source
     assert "threadIdx.x) < 128" not in kernel_source
 
 
