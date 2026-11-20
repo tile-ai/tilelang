@@ -50,9 +50,10 @@ namespace {
 class AscendFractalLayoutNode : public LayoutNode {
 public:
   AscendFractalLayoutNode() = default;
-  AscendFractalLayoutNode(Array<PrimExpr> input_size,
+  AscendFractalLayoutNode(Array<PrimExpr> input_size, Array<Var> forward_vars,
                           Array<PrimExpr> forward_index, AscendFractalKind kind)
-      : LayoutNode(std::move(input_size), std::move(forward_index)),
+      : LayoutNode(std::move(input_size), std::move(forward_vars),
+                   std::move(forward_index)),
         kind_(static_cast<int>(kind)) {}
 
   AscendFractalKind Kind() const {
@@ -76,10 +77,12 @@ private:
 };
 
 Layout MakeTaggedAscendFractalLayout(Array<PrimExpr> input_size,
+                                     Array<Var> forward_vars,
                                      Array<PrimExpr> forward_index,
                                      AscendFractalKind kind) {
   ObjectPtr<LayoutNode> node = make_object<AscendFractalLayoutNode>(
-      std::move(input_size), std::move(forward_index), kind);
+      std::move(input_size), std::move(forward_vars), std::move(forward_index),
+      kind);
   return Layout(std::move(node));
 }
 
@@ -100,6 +103,7 @@ AscendFractalLayoutNode::Expand(const Array<PrimExpr> &leading_shape) const {
     return expanded;
   }
   return MakeTaggedAscendFractalLayout(expanded->InputShape(),
+                                       expanded->InputVars(),
                                        expanded->GetForwardIndex(), Kind());
 }
 
@@ -120,13 +124,14 @@ static Layout MakeAscendMajorKLayout2D(PrimExpr rows, PrimExpr cols,
                                        int element_bits) {
   PrimExpr c0 = Integer(AscendC0(element_bits));
   PrimExpr row_frac = Integer(kAscendRowFractal);
-  Var i = InputPlaceholder(0); // row
-  Var j = InputPlaceholder(1); // col
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0]; // row
+  Var j = vars[1]; // col
   PrimExpr ro = FloorDiv(i, row_frac);
   PrimExpr ri = FloorMod(i, row_frac);
   PrimExpr co = FloorDiv(j, c0);
   PrimExpr ci = FloorMod(j, c0);
-  return MakeTaggedAscendFractalLayout(Array<PrimExpr>{rows, cols},
+  return MakeTaggedAscendFractalLayout(Array<PrimExpr>{rows, cols}, vars,
                                        {co, ro, ri, ci},
                                        AscendFractalKind::kMajorK);
 }
@@ -140,13 +145,14 @@ static Layout MakeAscendMajorMNLayout2D(PrimExpr rows, PrimExpr cols,
                                         int element_bits) {
   PrimExpr c0 = Integer(AscendC0(element_bits));
   PrimExpr row_frac = Integer(kAscendRowFractal);
-  Var i = InputPlaceholder(0); // row (contiguous M/N axis)
-  Var j = InputPlaceholder(1); // col (reduce-K axis)
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0]; // row (contiguous M/N axis)
+  Var j = vars[1]; // col (reduce-K axis)
   PrimExpr co = FloorDiv(i, c0);
   PrimExpr ci = FloorMod(i, c0);
   PrimExpr ro = FloorDiv(j, row_frac);
   PrimExpr ri = FloorMod(j, row_frac);
-  return MakeTaggedAscendFractalLayout(Array<PrimExpr>{rows, cols},
+  return MakeTaggedAscendFractalLayout(Array<PrimExpr>{rows, cols}, vars,
                                        {co, ro, ri, ci},
                                        AscendFractalKind::kMajorMN);
 }
@@ -255,14 +261,16 @@ bool IsAscendCompactNZLayout(const Layout &layout, const Buffer &buffer) {
 
 static Layout MakeAscendL0CLayout2D(PrimExpr rows, PrimExpr cols) {
   PrimExpr frac = Integer(kAscendRowFractal);
-  Var i = InputPlaceholder(0); // M row
-  Var j = InputPlaceholder(1); // N col
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0]; // M row
+  Var j = vars[1]; // N col
   PrimExpr mo = FloorDiv(i, frac);
   PrimExpr mi = FloorMod(i, frac);
   PrimExpr no = FloorDiv(j, frac);
   PrimExpr ni = FloorMod(j, frac);
-  return MakeTaggedAscendFractalLayout(
-      Array<PrimExpr>{rows, cols}, {no, mo, mi, ni}, AscendFractalKind::kL0C);
+  return MakeTaggedAscendFractalLayout(Array<PrimExpr>{rows, cols}, vars,
+                                       {no, mo, mi, ni},
+                                       AscendFractalKind::kL0C);
 }
 
 Layout MakeAscendL0CLayout(const Buffer &buffer) {
@@ -282,14 +290,15 @@ static Layout MakeAscendSFLayout2D(PrimExpr mn, PrimExpr k, int element_bits) {
   ICHECK(element_bits > 0 && 16 % element_bits == 0)
       << "SF layout expects element bits to divide 16, got " << element_bits;
   PrimExpr pack = Integer(16 / element_bits);
-  Var i = InputPlaceholder(0); // M/N axis
-  Var j = InputPlaceholder(1); // K axis in scale elements
+  Array<Var> vars = MakeLayoutVars(2);
+  Var i = vars[0]; // M/N axis
+  Var j = vars[1]; // K axis in scale elements
   PrimExpr mo = FloorDiv(i, mn_frac);
   PrimExpr mi = FloorMod(i, mn_frac);
   PrimExpr ko = FloorDiv(j, pack);
   PrimExpr pi = FloorMod(j, pack);
-  return MakeTaggedAscendFractalLayout(Array<PrimExpr>{mn, k}, {mo, ko, mi, pi},
-                                       AscendFractalKind::kSF);
+  return MakeTaggedAscendFractalLayout(
+      Array<PrimExpr>{mn, k}, vars, {mo, ko, mi, pi}, AscendFractalKind::kSF);
 }
 
 Layout MakeAscendSFLayout(const Buffer &buffer) {

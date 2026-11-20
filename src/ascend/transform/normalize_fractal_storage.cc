@@ -178,12 +178,13 @@ private:
         stride = stride * buffer->shape[i];
       }
     }
+    Array<Var> vars = MakeLayoutVars(matrix->shape.size());
     Array<PrimExpr> identity;
-    for (size_t i = 0; i < matrix->shape.size(); ++i)
-      identity.push_back(InputPlaceholder(i));
-    logical_maps_.Set(
-        buffer,
-        Layout(matrix->shape, identity)->Reshape(buffer->shape, analyzer_));
+    identity.reserve(vars.size());
+    for (const Var &v : vars)
+      identity.push_back(v);
+    logical_maps_.Set(buffer, Layout(matrix->shape, vars, identity)
+                                  ->Reshape(buffer->shape, analyzer_));
     AscendFractalLayoutInfo info;
     ICHECK(TryExtractAscendFractalLayout(layout, matrix, &info));
     Array<PrimExpr> shape = matrix->shape;
