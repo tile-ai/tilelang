@@ -1153,7 +1153,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     // Iterate over pairs: src is stored as fp4_e2_{lanes}_t; we access the
     // packed byte for each pair via reinterpret as uint8_t array.
     // Materialize the uint1 result into a local variable to avoid taking the
@@ -1178,7 +1179,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
       val << "__tl_cvt_fp4x2_to_float2(((uint8_t*)&(" << src << "))[" << i / 2
@@ -1200,7 +1202,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
       val << "__tl_cvt_fp4x2_to_double2(((uint8_t*)&(" << src << "))[" << i / 2
@@ -1221,7 +1224,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream val;
       val << "__tl_cvt_fp4x2_to_bfloat162(((uint8_t*)&(" << src << "))["
@@ -1244,7 +1248,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream h0, h1;
       PrintVecElemLoad(src, from_ty, i, h0);
@@ -1268,7 +1273,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream f0, f1;
       PrintVecElemLoad(src, from_ty, i, f0);
@@ -1289,7 +1295,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream d0, d1;
       PrintVecElemLoad(src, from_ty, i, d0);
@@ -1309,7 +1316,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
     this->PrintIndent();
     this->PrintType(target_ty, stream);
     stream << ' ' << sret << ";\n";
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0; i < fp4_lanes; i += 2) {
       std::ostringstream b0, b1;
       PrintVecElemLoad(src, from_ty, i, b0);
@@ -1333,7 +1341,8 @@ void CodeGenTileLangHIP::VisitExpr_(const CastNode *op, std::ostream &os) {
   this->PrintType(target_ty, stream);
   stream << ' ' << sret << ";\n";
   {
-    std::string src = SSAGetID(PrintExpr(op->value), from_ty);
+    std::string src = name_supply_->FreshName("cast_src");
+    PrintSSAAssign(src, PrintExpr(op->value), from_ty);
     for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
       std::ostringstream val;
       val << "(";
