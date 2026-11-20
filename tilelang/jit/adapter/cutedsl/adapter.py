@@ -15,7 +15,7 @@ from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available, fp8_con
 from tilelang.jit.adapter.cutedsl.libgen import CuTeDSLLibraryGenerator
 from tilelang.utils.language import retrieve_func_from_module
 from tilelang.backend.target import determine_target
-from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream
+from tilelang.jit.adapter.base import BaseKernelAdapter, CachedTextSource, output_allocation_stream, stream_device_index
 
 logger = logging.getLogger(__name__)
 
@@ -446,10 +446,14 @@ class CuTeDSLKernelAdapter(BaseKernelAdapter):
             ins_idx += 1
 
         first_tensor = next((v for v in param_values if isinstance(v, torch.Tensor)), None)
-        # A kernel whose only tensors are out_idx outputs has no argument to
-        # infer the device from; allocate on the current device, as the CUDA
-        # adapters do.
-        if first_tensor is not None:
+        # A caller-supplied stream runs the kernel on the device that owns it,
+        # so the outputs live there too. A kernel whose only tensors are out_idx
+        # outputs has no argument to infer the device from; allocate on the
+        # current device, as the CUDA adapters do.
+        stream_index = stream_device_index(stream) if stream is not None else None
+        if stream_index is not None:
+            device = torch.device("cuda", stream_index)
+        elif first_tensor is not None:
             device = first_tensor.device
         elif torch.cuda.is_available():
             device = torch.device("cuda", torch.cuda.current_device())
