@@ -24,12 +24,19 @@ def _get_npu_l2_cache_flush():
     return flush
 
 
+# ACL_ERROR_RT_FEATURE_NOT_SUPPORT (acl/error_codes/rt_error_codes.h). Some
+# 950-class devices/drivers do not implement aclrtDeviceL2CacheFlush. The flush
+# only primes the cache before timing, so an unsupported call must not abort the
+# benchmark or the autotuning run.
+_ACL_ERROR_RT_FEATURE_NOT_SUPPORT = 207000
+
+
 def _flush_cache(cache: torch.Tensor) -> None:
     if cache.device.type == "npu":
         with torch.npu.device(cache.device):
             torch.npu.synchronize()
             status = _get_npu_l2_cache_flush()(None)
-            if status:
+            if status and status != _ACL_ERROR_RT_FEATURE_NOT_SUPPORT:
                 raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
     else:
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
