@@ -58,17 +58,21 @@ static Fragment ProjectReducerDimNoCondense(const Fragment &src_layout,
   PrimExpr src_rep_extent = src_layout->ReplicateExtent();
   PrimExpr indice_rep_extent = src_layout->InputShape()[dim];
   PrimExpr reducer_rep_extent = indice_rep_extent * src_rep_extent;
-  auto fwd = backend::reduce::InputPlaceholders(src_layout->InputDim() - 1);
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), indice_rep_extent));
-  auto thd = src_layout->ForwardThread(
-      fwd, FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
   auto reducer_shape = src_layout->InputShape();
   reducer_shape.erase(reducer_shape.begin() + dim);
+  Array<Var> vars =
+      MakeLayoutVars(reducer_shape.empty() ? 1 : reducer_shape.size());
+  Var rep = MakeReplicateVar();
+  Array<PrimExpr> fwd;
+  for (size_t i = 0; i + 1 < src_layout->InputDim(); ++i) {
+    fwd.push_back(vars[i]);
+  }
+  fwd.insert(fwd.begin() + dim, FloorMod(rep, indice_rep_extent));
+  auto thd = src_layout->ForwardThread(fwd, FloorDiv(rep, indice_rep_extent));
   if (reducer_shape.empty()) {
     reducer_shape.push_back(1);
   }
-  return Fragment(reducer_shape, {}, thd, reducer_rep_extent, std::nullopt);
+  return Fragment(reducer_shape, vars, {}, thd, reducer_rep_extent, rep);
 }
 
 ReducerSiteAnalysis
@@ -197,19 +201,21 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
     if (expected_rank != induced->InputShape().size()) {
       return reject("induced layout rank mismatch");
     }
+    Array<Var> new_vars = MakeLayoutVars(reducer_shape.size());
+    Var new_rep = MakeReplicateVar();
     std::vector<PrimExpr> slot_placeholders(expected_rank, PrimExpr());
     bool identity = (expected_rank == reducer_shape.size());
     if (synthetic_unit) {
       // The synthetic slot is never referenced by the forward exprs; feed
       // it the first reducer-dim placeholder for the (rare) rebuild.
-      slot_placeholders[0] = InputPlaceholder(0);
+      slot_placeholders[0] = new_vars[0];
     }
     for (size_t d = 0; d < acc_dim_to_loop_dim.size(); ++d) {
       int p = acc_dim_to_loop_dim[d];
       if (p < 0) {
         continue; // constant unit dim: no slot to feed
       }
-      slot_placeholders[nest_rank[p]] = InputPlaceholder(d);
+      slot_placeholders[nest_rank[p]] = new_vars[d];
       if (nest_rank[p] != static_cast<int>(d)) {
         identity = false;
       }
@@ -218,10 +224,9 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
       Array<PrimExpr> slot_args(slot_placeholders.begin(),
                                 slot_placeholders.end());
       Array<PrimExpr> fwd_index = induced->Forward(slot_args);
-      PrimExpr fwd_thread =
-          induced->ForwardThread(slot_args, ReplicationPlaceholder());
-      induced = Fragment(reducer_shape, fwd_index, fwd_thread,
-                         induced->ReplicateExtent(), std::nullopt)
+      PrimExpr fwd_thread = induced->ForwardThread(slot_args, new_rep);
+      induced = Fragment(reducer_shape, new_vars, fwd_index, fwd_thread,
+                         induced->ReplicateExtent(), new_rep)
                     ->BindThreadRange(site.loop_layout->ThreadRange());
     }
   }
@@ -242,11 +247,11 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
   // accumulate serially on one thread and need no communication.
   Map<Var, Range> var_ranges;
   for (size_t i = 0; i < ndim; ++i) {
-    var_ranges.Set(InputPlaceholder(i),
+    var_ranges.Set(site.loop_layout->InputVar(i),
                    Range::FromMinExtent(make_zero(DataType::Int(32)),
                                         site.loop_layout->InputShape()[i]));
   }
-  var_ranges.Set(ReplicationPlaceholder(),
+  var_ranges.Set(site.loop_layout->ReplicateVar(),
                  Range::FromMinExtent(make_zero(DataType::Int(32)),
                                       site.loop_layout->ReplicateExtent()));
   analysis.iter_sum = arith::NormalizeToIterSum(
@@ -257,7 +262,7 @@ AnalyzeReducerUpdateSite(const ReducerUpdateSiteHint &site,
       continue;
     }
     auto var_steps = backend::reduce::CollectThreadReduceSteps(
-        analysis.iter_sum, Downcast<Var>(InputPlaceholder(i)));
+        analysis.iter_sum, site.loop_layout->InputVar(i));
     steps.insert(steps.end(), var_steps.begin(), var_steps.end());
   }
   auto is_power_of_two = [](int64_t x) { return x > 0 && (x & (x - 1)) == 0; };

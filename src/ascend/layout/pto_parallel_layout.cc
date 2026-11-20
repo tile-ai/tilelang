@@ -339,7 +339,7 @@ Fragment InferPtoParallelLayout(const For &root, const Range &lane_bounds) {
                                                     IntImm(idx_dtype, P)),
                                loop_vars[0]->var, IterVarType::kDataPar));
     }
-    flattened = InputPlaceholder(0);
+    flattened = frag_vars[0]->var;
   } else {
     // 2D mapping: the vectorized dimension is
     // chosen from the buffer accesses (indices + strides), then the
@@ -391,10 +391,8 @@ Fragment InferPtoParallelLayout(const For &root, const Range &lane_bounds) {
                             select_inner ? j_var : i_var,
                             IterVarType::kDataPar));
     }
-    flattened = select_inner ? InputPlaceholder(0) * IntImm(idx_dtype, P_sel) +
-                                   InputPlaceholder(1)
-                             : InputPlaceholder(1) * IntImm(idx_dtype, P_sel) +
-                                   InputPlaceholder(0);
+    flattened = select_inner ? i_var * IntImm(idx_dtype, P_sel) + j_var
+                             : j_var * IntImm(idx_dtype, P_sel) + i_var;
   }
   PrimExpr lane = FloorMod(flattened, IntImm(idx_dtype, lanes));
   PrimExpr chunk = FloorDiv(flattened, IntImm(idx_dtype, lanes));

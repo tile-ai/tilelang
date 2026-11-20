@@ -153,6 +153,7 @@ public:
   ParallelOpNode(const ParallelOpNode &other) : ParallelOpNode(other.root_) {
     loop_layout_ = other.loop_layout_;
     predicate_ = other.predicate_;
+    predicate_thread_var_ = other.predicate_thread_var_;
     loop_layout_inferred_ = other.loop_layout_inferred_;
     loop_layout_requires_padding_guard_ =
         other.loop_layout_requires_padding_guard_;
@@ -271,6 +272,8 @@ private:
   std::vector<ReducerUpdateRecord> reducer_updates_;
   // The inner_vars_
   Map<Var, IterVar> inner_vars_;
+  // Placeholder variable substituted by GetPredicate(thread_index).
+  tirx::Var predicate_thread_var_{"_thread"};
   // Analyzer for simplifying and analyzing expressions, mutable for lazy use.
   mutable arith::Analyzer analyzer_;
   // Whether the loop body has cross-thread shared/global memory access.
