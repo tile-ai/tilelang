@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -910,6 +912,390 @@ def test_tiled_ws_wide_linear_smem_three_stages():
     assert "cp_async" not in src
     assert re.search(r"for \(int \w+ = 0; \w+ < 3; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
     _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
+
+
+def make_im2col_kernel(channels=1, binding="none"):
+    @T.prim_func
+    def main(
+        data: T.Tensor((1, 8, 8, channels), T.float16),
+        weights: T.Tensor((128,), T.float32),
+        weights_out: T.Tensor((4, 128), T.float32),
+        data_out: T.Tensor((4, 16, channels), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            weight_shared = T.alloc_shared((128,), T.float32)
+            data_shared = T.alloc_shared((16, channels), T.float16)
+            for step in T.Pipelined(4, num_stages=2):
+                T.copy(weights, weight_shared)
+                if binding == "pure":
+                    step_base = T.int32(step % 2)
+                    nhw_step = T.int32(step_base + 1)
+                    T.im2col(data, data_shared, nhw_step, 0, 3, 1, 1, 1)
+                elif binding == "stateful":
+                    nhw_step = T.cast(weight_shared[0], T.int32)
+                    T.im2col(data, data_shared, nhw_step, 0, 3, 1, 1, 1)
+                elif binding == "global":
+                    nhw_step = T.cast(weights[step], T.int32)
+                    T.im2col(data, data_shared, nhw_step, 0, 3, 1, 1, 1)
+                else:
+                    T.im2col(data, data_shared, step % 2, 0, 3, 1, 1, 1)
+                for i in T.Parallel(128):
+                    weights_out[step, i] = weight_shared[i]
+                for i, j in T.Parallel(16, channels):
+                    data_out[step, i, j] = data_shared[i, j]
+
+    return main
+
+
+def make_overwrite_kernel(mode, destination):
+    @T.prim_func
+    def main(
+        data: T.Tensor((1, 8, 8, 32), T.float16),
+        weights: T.Tensor((128,), T.float32),
+        weights_out: T.Tensor((4, 128), T.float32),
+        data_out: T.Tensor((4, 16, 32), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            weight_shared = T.alloc_shared((128,), T.float32)
+            data_shared = T.alloc_shared((16, 32), T.float16)
+            for step in T.Pipelined(4, num_stages=2):
+                T.copy(weights, weight_shared)
+                T.im2col(data, data_shared, step % 2, 0, 3, 1, 1, 1)
+                if mode == "fill":
+                    if destination == "simt":
+                        T.fill(data_shared, 0)
+                    else:
+                        T.fill(weight_shared, 0)
+                else:
+                    if destination == "simt":
+                        for i, j in T.Parallel(16, 32):
+                            data_shared[i, j] = T.float16(0)
+                    else:
+                        for i in T.Parallel(128):
+                            weight_shared[i] = T.float32(0)
+                for i in T.Parallel(128):
+                    weights_out[step, i] = weight_shared[i]
+                for i, j in T.Parallel(16, 32):
+                    data_out[step, i, j] = data_shared[i, j]
+
+    return main
+
+
+def make_dual_kernel(binding="none", prelude=False, include_simt=True):
+    @T.prim_func
+    def main(
+        data: T.Tensor((1, 8, 8, 32), T.float16),
+        weights: T.Tensor((128,), T.float32),
+        other_weights: T.Tensor((3, 128), T.float32),
+        weights_out: T.Tensor((4, 128), T.float32),
+        other_out: T.Tensor((4, 128), T.float32),
+        data_out: T.Tensor((4, 16, 32), T.float16),
+    ):
+        with T.Kernel(1, threads=128):
+            weight_shared = T.alloc_shared((128,), T.float32)
+            other_shared = T.alloc_shared((128,), T.float32)
+            data_shared = T.alloc_shared((16, 32), T.float16)
+            if prelude:
+                T.copy(weights, weight_shared)
+            for step in T.Pipelined(4, num_stages=2):
+                if not prelude:
+                    T.copy(weights, weight_shared)
+                if include_simt:
+                    T.im2col(data, data_shared, step % 2, 0, 3, 1, 1, 1)
+                if binding == "pure":
+                    base_offset = T.int32(step % 2)
+                    other_offset = T.int32(base_offset + 1)
+                    T.copy(other_weights[other_offset, 0], other_shared)
+                elif binding == "stateful":
+                    other_offset = T.cast(weight_shared[0], T.int32) % 2
+                    T.copy(other_weights[other_offset, 0], other_shared)
+                else:
+                    T.copy(other_weights[step % 2, 0], other_shared)
+                for i in T.Parallel(128):
+                    weight_shared[i] = T.float32(0)
+                for i in T.Parallel(128):
+                    other_out[step, i] = other_shared[i]
+                for i in T.Parallel(128):
+                    weights_out[step, i] = weight_shared[i]
+                if include_simt:
+                    for i, j in T.Parallel(16, 32):
+                        data_out[step, i, j] = data_shared[i, j]
+
+    return main
+
+
+def make_shared_producers(order):
+    @T.prim_func
+    def main(data: T.Tensor((1, 8, 8, 32), T.float16), seed: T.Tensor((16, 32), T.float16), out: T.Tensor((4, 16, 32), T.float16)):
+        with T.Kernel(1, threads=128):
+            target_shared = T.alloc_shared((16, 32), T.float16)
+            for step in T.Pipelined(4, num_stages=2):
+                if order == "tma_first":
+                    T.copy(seed, target_shared)
+                    T.im2col(data, target_shared, step % 2, 0, 3, 1, 1, 1)
+                else:
+                    T.im2col(data, target_shared, step % 2, 0, 3, 1, 1, 1)
+                    T.copy(seed, target_shared)
+                for i, j in T.Parallel(16, 32):
+                    out[step, i, j] = target_shared[i, j]
+
+    return main
+
+
+def make_preceding_consumer():
+    @T.prim_func
+    def main(
+        a: T.Tensor((128,), T.float32),
+        b: T.Tensor((128,), T.float32),
+        out_a: T.Tensor((4, 128), T.float32),
+        out_b: T.Tensor((4, 128), T.float32),
+    ):
+        with T.Kernel(1, threads=128):
+            a_shared = T.alloc_shared((128,), T.float32)
+            target_shared = T.alloc_shared((128,), T.float32)
+            for step in T.Pipelined(4, num_stages=2):
+                T.copy(a, a_shared)
+                for i in T.Parallel(128):
+                    target_shared[i] = T.float32(0)
+                T.copy(b, target_shared)
+                for i in T.Parallel(128):
+                    out_a[step, i] = a_shared[i]
+                    out_b[step, i] = target_shared[i]
+
+    return main
+
+
+def touches(expr, buffer_name):
+    found = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        expr,
+        lambda node: found.append(node) if isinstance(node, tvm.tirx.BufferLoad) and node.buffer.name.startswith(buffer_name) else None,
+    )
+    return bool(found)
+
+
+def same_barrier(left, right):
+    if not isinstance(left, tvm.tirx.BufferLoad) or not isinstance(right, tvm.tirx.BufferLoad):
+        raise RuntimeError("expected a buffer-load barrier reference")
+    return left.buffer.data.same_as(right.buffer.data) and tvm.ir.structural_equal(left.indices, right.indices, map_free_vars=True)
+
+
+def target_barriers(body, producer, buffer_name, destination):
+    forward = []
+    phases = []
+    reuse = []
+    last_wait = []
+
+    def collect_forward(node):
+        if not isinstance(node, tvm.tirx.Call):
+            return
+        name = getattr(node.op, "name", "")
+        if destination == "simt":
+            if name.endswith("ptx_cp_async_barrier"):
+                forward.append(node.args[0])
+            if name == "tl.tileop.im2col" and touches(node.args[1], buffer_name):
+                phases.append(node.annotations["tl.pipeline_mbar_phase_expr"])
+        elif name == "tl.tileop.tma_copy" and touches(node.args[1], buffer_name):
+            if "barrier" not in node.annotations:
+                raise RuntimeError("target TMA copy has no completion barrier")
+            forward.append(node.annotations["barrier"])
+            phases.append(
+                node.annotations["tl.pipeline_mbar_phase_expr"]
+                if "tl.pipeline_mbar_phase_expr" in node.annotations
+                else tvm.tirx.IntImm("int32", 0)
+            )
+
+    tvm.tirx.stmt_functor.post_order_visit(producer if destination == "simt" else body, collect_forward)
+
+    def collect_reuse(node):
+        if not isinstance(node, tvm.tirx.Call):
+            return
+        name = getattr(node.op, "name", "")
+        if name.endswith("mbarrier_wait_parity"):
+            last_wait[:] = [node.args[0]]
+        matches = (destination == "tma" and name == "tl.tileop.tma_copy") or (destination == "simt" and name == "tl.tileop.im2col")
+        if matches and touches(node.args[1], buffer_name):
+            if not last_wait:
+                raise RuntimeError("target producer has no preceding reuse wait")
+            reuse.append(last_wait[0])
+
+    tvm.tirx.stmt_functor.post_order_visit(producer, collect_reuse)
+    if len(forward) != 1 or len(phases) != 1 or len(reuse) > 1:
+        raise RuntimeError(f"expected one target completion barrier, got {len(forward)} forward/{len(reuse)} reuse")
+    return forward[0], phases[0], reuse[0] if reuse else None
+
+
+def events(stmt, buffer_name, forward, phase, reuse):
+    result = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.BufferLoad) and node.buffer.name.startswith(buffer_name):
+            result.append("read")
+        if isinstance(node, tvm.tirx.BufferStore) and node.buffer.name.startswith(buffer_name):
+            result.append("overwrite")
+        if isinstance(node, tvm.tirx.Call):
+            name = getattr(node.op, "name", "")
+            if name.endswith("mbarrier_wait_parity"):
+                matches = same_barrier(node.args[0], forward) and tvm.ir.structural_equal(node.args[1], phase, map_free_vars=True)
+                result.append("target_wait" if matches else "other_wait")
+            if name.endswith("ptx_arrive_barrier") and reuse is not None and same_barrier(node.args[0], reuse):
+                result.append("target_release")
+            if name == "tl.tileop.fill" and touches(node.args[0], buffer_name):
+                result.append("overwrite")
+
+    tvm.tirx.stmt_functor.post_order_visit(stmt, visit)
+    return result
+
+
+def ordering_violations(producer, consumer, reuse):
+    violations = []
+    if "overwrite" in producer:
+        violations.append("consumer overwrite moved into producer issue sequence")
+    access_positions = [i for i, event in enumerate(consumer) if event in ("read", "overwrite")]
+    if access_positions and ("target_wait" not in consumer or access_positions[0] < consumer.index("target_wait")):
+        violations.append("consumer access precedes its target completion wait")
+    if (
+        reuse is not None
+        and access_positions
+        and ("target_release" not in consumer or consumer.index("target_release") < access_positions[-1])
+    ):
+        violations.append("target stage released before its final consumer access")
+    return violations
+
+
+def is_specialized(func):
+    return "tl_tiled_ws_applied" in func.attrs
+
+
+def producer_consumer_split(func):
+    def has_tma(stmt):
+        calls = []
+        tvm.tirx.stmt_functor.post_order_visit(
+            stmt,
+            lambda node: (
+                calls.append(node) if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", "") == "tl.tileop.tma_copy" else None
+            ),
+        )
+        return bool(calls)
+
+    splits = []
+
+    def visit(node):
+        if isinstance(node, tvm.tirx.IfThenElse) and node.else_case is not None and has_tma(node.then_case):
+            splits.append(node)
+
+    tvm.tirx.stmt_functor.post_order_visit(func.body, visit)
+    if len(splits) != 1:
+        raise RuntimeError(f"expected one producer/consumer split, got {len(splits)}")
+    return splits[0]
+
+
+def check_fallback(before, after):
+    if is_specialized(after):
+        raise RuntimeError("dependent producer work was warp-specialized")
+
+    def remove_pipeline_hint(node):
+        if isinstance(node, tvm.tirx.For) and "num_stages" in node.annotations:
+            annotations = {key: value for key, value in node.annotations.items() if key != "num_stages"}
+            return tvm.tirx.For(
+                node.loop_var,
+                node.min,
+                node.extent,
+                node.kind,
+                node.body,
+                thread_binding=node.thread_binding,
+                annotations=annotations,
+                step=node.step,
+            )
+        return None
+
+    expected_body = tvm.tirx.stmt_functor.ir_transform(before.body, None, remove_pipeline_hint, ["tirx.For"])
+    if not tvm.ir.structural_equal(before.with_body(expected_body), after):
+        raise RuntimeError("fallback changed the original loop beyond its num_stages hint")
+
+
+def lower_producer_consumer_scenario(func):
+    target = determine_target({"kind": "cuda", "arch": "sm_100"}, return_object=True)
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    before = tilelang.transform.MaterializeKernelLaunch()(mod)
+    after = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(before)
+    scoped = tvm.tirx.transform.ConvertSSA()(after)["main"]
+    bound = [*scoped.params, *(buf.data for buf in scoped.buffer_map.values())]
+    undefined = tvm.tirx.analysis.undefined_vars(scoped.body, bound)
+    if undefined:
+        pytest.fail(f"transformed kernel references undefined variables: {undefined}")
+    with tvm.transform.PassContext(), target:
+        artifact = tilelang.lower(func, target=target)
+    if not artifact.kernel_source:
+        pytest.fail("compiler returned no CUDA source")
+    return before["main"], after["main"]
+
+
+def check_consumer_accesses(func, buffer_name, destination, overwrite=False):
+    if not is_specialized(func):
+        pytest.fail("independent producers lost warp specialization")
+    split = producer_consumer_split(func)
+    forward, phase, reuse = target_barriers(func.body, split.then_case, buffer_name, destination)
+    producer = events(split.then_case, buffer_name, forward, phase, reuse)
+    consumer = events(split.else_case, buffer_name, forward, phase, reuse)
+    violations = ordering_violations(producer, consumer, reuse)
+    if violations:
+        pytest.fail(str(violations))
+    if "read" not in consumer:
+        pytest.fail("consumer read was lost from the transformed IR")
+    if overwrite and "overwrite" not in consumer:
+        pytest.fail("consumer overwrite was lost from the transformed IR")
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("channels,binding", [(1, "none"), (32, "none"), (32, "pure"), (32, "stateful"), (32, "global")])
+def test_tiled_ws_simt_im2col(channels, binding):
+    before, after = lower_producer_consumer_scenario(make_im2col_kernel(channels, binding))
+    if binding in ("stateful", "global"):
+        check_fallback(before, after)
+        return
+    check_consumer_accesses(after, "data_shared", "simt")
+    arrivals = []
+    tvm.tirx.stmt_functor.post_order_visit(
+        producer_consumer_split(after).then_case,
+        lambda node: (
+            arrivals.append(node)
+            if isinstance(node, tvm.tirx.Call) and getattr(node.op, "name", "").endswith("ptx_arrive_barrier")
+            else None
+        ),
+    )
+    if not arrivals:
+        pytest.fail("SIMT producer has no release arrival for synchronous stores")
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("mode", ["fill", "parallel"])
+@pytest.mark.parametrize("destination", ["simt", "tma"])
+def test_tiled_ws_waits_before_consumer_overwrite(mode, destination):
+    _, after = lower_producer_consumer_scenario(make_overwrite_kernel(mode, destination))
+    check_consumer_accesses(after, "data_shared" if destination == "simt" else "weight_shared", destination, overwrite=True)
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize(
+    "binding,prelude,include_simt",
+    [("none", False, True), ("pure", False, True), ("pure", False, False), ("none", True, True), ("stateful", False, False)],
+)
+def test_tiled_ws_multiple_producer_dependencies(binding, prelude, include_simt):
+    before, after = lower_producer_consumer_scenario(make_dual_kernel(binding, prelude, include_simt))
+    if binding == "stateful":
+        check_fallback(before, after)
+    else:
+        check_consumer_accesses(after, "weight_shared", "tma", overwrite=True)
+
+
+@tilelang.testing.requires_cuda(support_required="compile-only")
+@pytest.mark.parametrize("order", ["tma_first", "im2col_first", "consumer_before_tma"])
+def test_tiled_ws_preserves_conflicting_producer_order(order):
+    func = make_preceding_consumer() if order == "consumer_before_tma" else make_shared_producers(order)
+    before, after = lower_producer_consumer_scenario(func)
+    check_fallback(before, after)
 
 
 if __name__ == "__main__":
