@@ -320,6 +320,7 @@ jobs:
           cache-suffix: uv-${{ runner.os }}-${{ runner.arch }}-${{ matrix.python-version }}-${{ matrix.runner.name }}-${{ matrix.runner.toolkit }}
           cache-dependency-glob: |
             pyproject.toml
+            tilelang/contrib/mlx_runtime/pyproject.toml
             requirements*.txt
             .pre-commit-config.yaml
 
@@ -345,6 +346,7 @@ jobs:
             uv pip install -v -r requirements-test-rocm.txt
           elif [[ "${{ matrix.runner.toolkit }}" == *"Metal"* ]]; then
             uv pip install -v -r requirements-test-metal.txt
+            uv pip install -v ./tilelang/contrib/mlx_runtime
           else
             echo "::error::Unknown toolkit: ${{ matrix.runner.toolkit }}"
             exit 1
@@ -471,6 +473,14 @@ jobs:
         id: metal-tests
         if: contains(matrix.runner.toolkit, 'Metal')
         run: |
+          # Optional imports may skip locally, but the MLX integration is required in Metal CI.
+          python - <<'PY'
+          import mlx.core as mx
+          import _tilelang_mlx
+
+          assert mx.metal.is_available(), "MLX requires an available Metal device"
+          assert _tilelang_mlx.mlx_version == mx.__version__, "MLX runtime ABI version mismatch"
+          PY
           cd testing
           PYTEST=(
             uv run --no-project -m --
