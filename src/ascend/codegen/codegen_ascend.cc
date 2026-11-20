@@ -2164,7 +2164,12 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
   // --- SimdVF runtime tail predicate: (value, width) ---
   else if (op->op.same_as(tl::simd_update_mask())) {
     ICHECK_EQ(op->args.size(), 2);
-    int width = (int)Downcast<IntImm>(op->args[1])->value;
+    // Keep the IR's 64-bit value: narrowing first would map an out-of-range
+    // width such as 2^32 + 32 onto a legal-looking 32 and emit a b32 helper.
+    int64_t width = Downcast<IntImm>(op->args[1])->value;
+    ICHECK(width == 8 || width == 16 || width == 32)
+        << "tl.simd.update_mask supports predicate widths 8, 16 and 32, got "
+        << width << "; simd_inst has no update_mask_b" << width << " helper";
     os << "simd_inst::update_mask_b" << width << "(";
     PrintExpr(op->args[0], os); // value
     os << ")";
@@ -2181,7 +2186,11 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
            op->op.same_as(tl::simd_pdintlv())) {
     ICHECK_EQ(op->args.size(), 3);
     const char *name = op->op.same_as(tl::simd_pintlv()) ? "pintlv" : "pdintlv";
-    int width = (int)Downcast<IntImm>(op->args[2])->value;
+    // See update_mask above: validate the 64-bit value, not a narrowed copy.
+    int64_t width = Downcast<IntImm>(op->args[2])->value;
+    ICHECK(width == 8 || width == 16 || width == 32)
+        << "tl.simd." << name << " supports predicate widths 8, 16 and 32, got "
+        << width << "; simd_inst has no " << name << "_b" << width << " helper";
     os << "simd_inst::" << name << "_b" << width << "(";
     PrintExpr(op->args[0], os); // src0
     os << ", ";
