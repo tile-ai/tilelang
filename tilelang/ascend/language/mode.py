@@ -44,7 +44,7 @@ def set_hf32_mode(mode=None):
     >>> T.set_hf32_mode(None)             # restore full fp32
     """
     _HF32_MODE_INT = {None: 0, "nearest_zero": 1, "nearest_even": 2}
-    if mode not in _HF32_MODE_INT:
+    if mode not in (None, "nearest_zero", "nearest_even"):
         raise ValueError(f"hf32 mode must be None, 'nearest_zero', or 'nearest_even', got {mode!r}")
     return tirx.call_intrin(
         "void",

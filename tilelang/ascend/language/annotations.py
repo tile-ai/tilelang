@@ -1,5 +1,6 @@
 """Ascend storage placement, multi-buffer versions and scheduling capacity annotations."""
 
+from tvm import DataType
 from tvm.tirx import IntImm
 from tvm.tirx.script.builder.ir import sblock_attr
 
@@ -91,6 +92,21 @@ def annotate_buffer_addresses(buffer_addresses: dict):
             raise ValueError(f"{scope} byte address must be a non-negative integer divisible by {alignment}, got {address!r}")
         if address >= capacity:
             raise ValueError(f"{scope} byte address must be below the {capacity}-byte capacity, got {address}")
+        numel = 1
+        for extent in buffer.shape:
+            extent = extent.value if isinstance(extent, IntImm) else extent
+            if not isinstance(extent, int):
+                numel = None
+                break
+            numel *= extent
+        if numel is not None:
+            elem_bytes = DataType(str(buffer.dtype)).bits // 8
+            buffer_bytes = numel * elem_bytes
+            if address + buffer_bytes > capacity:
+                raise ValueError(
+                    f"annotate_buffer_addresses: {scope} buffer of {buffer_bytes} bytes at "
+                    f"byte address {address} exceeds the {capacity}-byte capacity"
+                )
         data = buffer.data
         if data in addresses and int(addresses[data]) != address:
             raise ValueError(f"Aliases of one storage require the same byte address: {buffer}")
@@ -172,7 +188,7 @@ def annotate_buffer_versions(buffer_versions_map: dict):
 
         data = buffer.data
         if has_num_versions:
-            if not isinstance(num_versions, int) or num_versions < 1:
+            if isinstance(num_versions, bool) or not isinstance(num_versions, int) or num_versions < 1:
                 raise ValueError(f"num_versions must be a positive integer, got {num_versions} for buffer {buffer}")
             if data in versions and versions[data] != num_versions:
                 raise ValueError(f"aliases of one buffer storage must use the same version count, got {versions[data]} and {num_versions}")
