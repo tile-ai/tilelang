@@ -121,9 +121,9 @@ struct Fill {
                            lower_args.buffer_remap,
                            {}},
                           InferLevel::kFree);
-      auto thread_loop =
-          PartitionLoop(par_op->GetRoot(), lower_args.thread_index, analyzer,
-                        par_op->GetLoopLayout());
+      auto thread_loop = PartitionLoop(
+          par_op->GetRoot(), lower_args.thread_index, analyzer,
+          par_op->GetLoopLayout(), par_op->LoopLayoutRequiresPaddingGuard());
       auto vectorized_loop =
           VectorizeLoop(thread_loop, analyzer, lower_args.layout_map);
       auto unrolled_loop = PragmaUnrollLoop(vectorized_loop);
