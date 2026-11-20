@@ -201,7 +201,7 @@ def par_compile(
     compile_flags: list[str] | str | None = None,
     num_workers: int | None = None,
     ignore_error: bool = False,
-    parallel_backend: Literal["thread", "process"] = "thread",
+    executor: Literal["thread", "process"] = "thread",
 ) -> list[JITKernel[_KP, _T]]:
     """
     Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
@@ -227,7 +227,7 @@ def par_compile(
     pass_configs : dict, optional
         Additional keyword arguments to pass to the Compiler PassContext.
         Refer to `tilelang.transform.PassConfigKey` for supported options.
-    parallel_backend : Literal["thread", "process"], optional
+    executor : Literal["thread", "process"], optional
         Defaults to threads. Processes use spawn and require disk caching;
         the parent loads compiled kernels through the same cache. Script callers
         must use ``if __name__ == "__main__":``. Parent-only FFI registrations
@@ -244,8 +244,8 @@ def par_compile(
         Set to "1", "true", "yes", or "on" to enable verbose compilation by default.
     """
 
-    if parallel_backend not in ("thread", "process"):
-        raise ValueError(f"Invalid parallel backend: {parallel_backend!r}")
+    if executor not in ("thread", "process"):
+        raise ValueError(f"Invalid executor: {executor!r}")
     # funcs may be a one-shot iterable; materialize to size the pool and reuse below.
     funcs = list(funcs)
 
@@ -266,21 +266,21 @@ def par_compile(
         compile_flags=compile_flags,
     )
     worker = compile_func
-    if parallel_backend == "process":
+    if executor == "process":
         from tilelang import env
 
         if not env.is_cache_enabled():
-            raise ValueError('parallel_backend="process" requires disk caching to be enabled')
-        executor = concurrent.futures.ProcessPoolExecutor(num_workers, mp_context=multiprocessing.get_context("spawn"))
+            raise ValueError('executor="process" requires disk caching to be enabled')
+        pool = concurrent.futures.ProcessPoolExecutor(num_workers, mp_context=multiprocessing.get_context("spawn"))
         worker = partial(_compile_in_process, compile_func)
     else:
-        executor = concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp")
+        pool = concurrent.futures.ThreadPoolExecutor(num_workers, "tl-par-comp")
 
-    with executor:
+    with pool:
         futures = []
         future_map = {}
         for i, func in enumerate(funcs):
-            future = executor.submit(worker, func)
+            future = pool.submit(worker, func)
             future_map[future] = i
             futures.append(future)
         results = [... for _ in futures]
@@ -292,7 +292,7 @@ def par_compile(
             idx = future_map[future]
             try:
                 result = future.result()
-                results[idx] = compile_func(funcs[idx]) if parallel_backend == "process" else result
+                results[idx] = compile_func(funcs[idx]) if executor == "process" else result
             except Exception as e:
                 if not ignore_error:
                     raise
@@ -455,7 +455,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
         configs: Iterable[dict[str, Any] | tuple[str, Any]],
         num_workers: int = None,
         ignore_error: bool = False,
-        parallel_backend: Literal["thread", "process"] = "thread",
+        executor: Literal["thread", "process"] = "thread",
     ) -> list[JITKernel[_KP, _T]]:
         """
         Parallel compile multiple TileLang PrimFunc with TVM and build JITKernels.
@@ -472,7 +472,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             If True, compilation errors for individual configs will be logged
             as warnings and the corresponding result will be None. If False,
             any compilation error will raise an exception. Defaults to False.
-        parallel_backend : Literal["thread", "process"], optional
+        executor : Literal["thread", "process"], optional
             Compilation workers; see :func:`tilelang.par_compile`. IR construction
             remains serial in the calling process.
         Returns
@@ -501,7 +501,7 @@ class JITImpl(Generic[_P, _KP, _T, _Ret]):
             compile_flags=self.compile_flags,
             num_workers=num_workers,
             ignore_error=ignore_error,
-            parallel_backend=parallel_backend,
+            executor=executor,
         )
 
     def compile(self, *args: _P.args, **kwargs: _P.kwargs) -> _Ret:
