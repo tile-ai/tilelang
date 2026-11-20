@@ -61,6 +61,10 @@ def tilelang_callback_pto_compile(code, target, pass_config=None):
     )
 
     pto_arch, pto_flags = resolve_pto_options()
+    cfg = pass_config or {}
+    extra_flags = bisheng.normalize_options(cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
+    if extra_flags:
+        pto_flags = [*pto_flags, *extra_flags]
 
     compile_format = PTOBinaryCache.binary_format
     cache_key = PTOBinaryCache.make_key(

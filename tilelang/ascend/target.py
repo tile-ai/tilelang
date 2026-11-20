@@ -17,7 +17,13 @@ def _target_ffi_api():
 
 
 def _make_ascend_target(target_dict: dict | None = None) -> Target:
-    target_dict = dict(target_dict or {})
+    if target_dict is None:
+        target_dict = {}
+    else:
+        try:
+            target_dict = dict(target_dict)
+        except (TypeError, ValueError) as error:
+            raise TypeError(f"_make_ascend_target: target_dict must be a mapping or None, got {type(target_dict).__name__}") from error
     target_dict["kind"] = "ascend"
     return Target(target_dict)
 
@@ -26,7 +32,19 @@ def _with_pto_key(target: Target) -> Target:
     target_dict = dict(target.export())
     # The native kind supplies Ascend semantics; "pto" selects PTO codegen,
     # while "ascend" preserves the target kind's default feature key.
-    target_dict["keys"] = list(dict.fromkeys(["pto", *target_dict.get("keys", ()), "ascend"]))
+    keys = target_dict.get("keys", ())
+    if keys is None:
+        raise TypeError("_with_pto_key: target 'keys' must not be None")
+    if isinstance(keys, str):
+        keys = [keys]
+    else:
+        try:
+            keys = list(keys)
+        except TypeError as error:
+            raise TypeError(f"_with_pto_key: target 'keys' must be a sequence of strings, got {type(keys).__name__}") from error
+    if not all(isinstance(k, str) for k in keys):
+        raise TypeError("_with_pto_key: target 'keys' must contain only strings")
+    target_dict["keys"] = list(dict.fromkeys(["pto", *keys, "ascend"]))
     return Target(target_dict)
 
 
@@ -64,30 +82,37 @@ def _detect_ascend_target() -> Target | None:
     return None
 
 
-def normalize_ascend_target(target: TargetLike) -> Target | None:
-    if not isinstance(target, str) or target.strip() != "ascend":
-        return None
+def _normalize_target_name(target: TargetLike) -> str | None:
+    """One normalization rule for every textual target/backend name.
 
-    try:
-        return _make_ascend_target()
-    except Exception:
+    The normalizers below used to mix ``strip()`` (exact case) with ``lower()``
+    (case-insensitive), so e.g. ``" PTO "`` fell through to the AscendC
+    default while the execution normalizer accepted it.
+    """
+    if not isinstance(target, str):
         return None
+    return target.strip().lower()
+
+
+def normalize_ascend_target(target: TargetLike) -> Target | None:
+    if _normalize_target_name(target) != "ascend":
+        return None
+    # Do not swallow Target construction errors: returning None here reports a
+    # valid Ascend target as "not Ascend" and silently falls back to another
+    # backend, hiding the real failure.
+    return _make_ascend_target()
 
 
 def normalize_pto_target(target: TargetLike) -> Target | None:
-    if not isinstance(target, str) or target.strip() != "pto":
+    if _normalize_target_name(target) != "pto":
         return None
-
-    try:
-        return _make_pto_target()
-    except Exception:
-        return None
+    return _make_pto_target()
 
 
 def normalize_pto_execution_target(target: Target, execution_backend: str | None) -> Target | None:
     """Select the PTO target variant for an explicit PTO execution backend."""
 
-    if execution_backend is None or str(execution_backend).lower() != "pto":
+    if _normalize_target_name(execution_backend) != "pto":
         return None
     if not target_is_ascend(target):
         return None
@@ -98,7 +123,7 @@ def normalize_pto_execution_target(target: Target, execution_backend: str | None
 
 def normalize_asc_target(target: TargetLike) -> Target | None:
     """Accept ``asc`` as the concise name for the AscendC backend."""
-    if isinstance(target, str) and target.strip() == "asc":
+    if _normalize_target_name(target) == "asc":
         return normalize_ascend_target("ascend")
     return None
 

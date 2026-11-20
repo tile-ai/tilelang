@@ -65,7 +65,11 @@ def alloc_ss(shape: ShapeType, dtype: DType = "uint32") -> Buffer:
     elements = 1
     for extent in extents:
         elements *= int(extent)
-    if elements * dtype.bits // 8 > 3072:
+    nbytes = elements * dtype.bits // 8
+    # The backend's sequential plan aligns every base and charges the padding
+    # to the merged footprint, so a size need not be a multiple of 32. Only the
+    # physical SS capacity is a hard frontend constraint.
+    if nbytes > 3072:
         raise ValueError("alloc_ss exceeds the MIX 1:2 SS capacity of 3072 bytes")
     return _with_span(T.sblock_alloc_buffer(extents, str(dtype), scope="shared.ss"))
 
@@ -117,12 +121,22 @@ def _alloc_l0_sf(buf: Buffer, expected_scope: str, sf_dtype: DType, sf_shape: Sh
     if len(buf.shape) < 2:
         raise ValueError(f"L0 SF requires trailing matrix dimensions, got {buf.shape}")
     dtype = DataType(sf_dtype)
-    if dtype.bits not in (8, 16) or dtype.lanes != 1:
-        raise ValueError(f"L0 SF storage must contain 8-bit scales or 16-bit scale pairs, got {sf_dtype}")
+    # Scale factors are packed integers. The GEMM validator accepts both
+    # signed and unsigned 8/16-bit scalar storage; floats and multi-lane
+    # dtypes are not valid scale storage.
+    if not str(dtype).startswith(("int", "uint")) or dtype.bits not in (8, 16) or dtype.lanes != 1:
+        raise ValueError(f"L0 SF storage must contain scalar 8- or 16-bit integer scales, got {sf_dtype}")
     if sf_shape is None:
         k_per_sf = _MX_SF_K_PER_SCALE_BYTE * (dtype.bits // 8)
         rows, k = buf.shape[-2], buf.shape[-1]
-        if (isinstance(k, int) or hasattr(k, "value")) and int(k) % k_per_sf != 0:
+        if not (isinstance(k, int) or hasattr(k, "value")):
+            # A symbolic K cannot be proven divisible; `k // k_per_sf` would
+            # silently floor-divide and undersize the scale-factor buffer.
+            raise ValueError(
+                f"data tile K extent {k} of {buf.name} is symbolic; pass sf_shape explicitly "
+                f"so the {k_per_sf}-element-per-scale contract can be checked"
+            )
+        if int(k) % k_per_sf != 0:
             raise ValueError(
                 f"data tile K extent {k} of {buf.name} is not divisible by {k_per_sf} "
                 f"(K elements per {sf_dtype} scale element); pass sf_shape explicitly for a transposed tile"

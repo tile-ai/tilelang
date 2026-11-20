@@ -183,6 +183,13 @@ def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
         raise ValueError(f"cross must be None/True/False, got {cross!r}")
     if level is not None and (isinstance(level, bool) or not isinstance(level, int) or level < -1):
         raise ValueError(f"level must be None, -1, or a non-negative integer, got {level!r}")
+    if group is not None:
+        if not isinstance(group, str):
+            raise TypeError(f"{api_name}: group must be a string, got {type(group)}")
+        if not group:
+            # `group or ""` used to swallow empty/0/False tags and emit a
+            # marker with no group name that the scheduler cannot match.
+            raise ValueError(f"{api_name}: group must be a non-empty string, got {group!r}")
     if group is not None and b is not None:
         raise ValueError(f"{api_name}: a group's two half-declarations each carry one region, so `b` must be None when `group` is set")
 
@@ -201,7 +208,7 @@ def _emit_conflict_hint(a, b, *, level, cross, group, is_conflict):
         b_op,
         IntImm("int32", level if level is not None else _ALL_ENCLOSING_SCOPES),
         IntImm("int32", cross_code),
-        StringImm(group or ""),
+        StringImm(group if group is not None else ""),
         IntImm("bool", is_conflict),
     )
 

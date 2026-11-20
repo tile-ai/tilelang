@@ -31,7 +31,10 @@ def allow_autoschedule(pass_ctx=None) -> bool:
     """
     if pass_ctx is None:
         pass_ctx = tilelang.transform.get_pass_context()
-    return pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE, True)
+    value = pass_ctx.config.get(tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE, True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
 
 
 def AscendPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
