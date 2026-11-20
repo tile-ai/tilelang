@@ -66,8 +66,7 @@ template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
 }
 #endif
 
-// The 9.1 dav-3510 DMA ABI uses packed controls, a longer L0C store
-// signature and count-preserving align intrinsics.
+// The 9.1 dav-3510 DMA ABI uses packed controls and a longer L0C store signature.
 #if TL_CANN_9_1 && __NPU_ARCH__ == 3510
 __aicore__ inline void set_gm2l1_nz_para(uint16_t batches, uint16_t n_stride,
                                          uint16_t c0_stride,
@@ -108,31 +107,6 @@ copy_l0c2ub(__ubuf__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
       /*clip_relu_post=*/false, /*eltwise_op=*/0, /*eltwise_antq_en=*/false,
       /*c0_pad_en=*/false, /*broadcast_en=*/false, nz2dn);
 }
-
-// The old public wrapper narrows count to uint16_t. Keep the uint32_t
-// instruction argument used by the newer wrapper; hardware limits still apply.
-template <typename T>
-__aicore__ inline void
-copy_gm2ub_align(__ubuf__ T *dst, __gm__ T *src, uint32_t count,
-                 uint32_t length, uint8_t left, uint8_t right, bool pad,
-                 load_l2_cache_mode cache, uint64_t src_stride,
-                 uint32_t dst_stride) {
-  if ASC_IS_AIV {
-    copy_gm_to_ubuf_align_v2(dst, src, 0, count, length, left, right, pad,
-                             cache, src_stride, dst_stride);
-  }
-}
-
-template <typename T>
-__aicore__ inline void
-copy_ub2gm_align(__gm__ T *dst, __ubuf__ T *src, uint32_t count,
-                 uint32_t length, store_l2_cache_mode cache,
-                 uint64_t dst_stride, uint32_t src_stride) {
-  if ASC_IS_AIV {
-    copy_ubuf_to_gm_align_v2((__gm__ void *)dst, (__ubuf__ void *)src, 0, count,
-                             length, cache, dst_stride, src_stride);
-  }
-}
 #else
 // Resolve the native overload when the operation is instantiated. A target
 // may expose only a subset of these DMA operations.
@@ -150,15 +124,55 @@ template <typename... Args> __aicore__ inline void copy_l0c2gm(Args... args) {
 template <typename... Args> __aicore__ inline void copy_l0c2ub(Args... args) {
   asc_copy_l0c2ub(args...);
 }
-template <typename... Args>
-__aicore__ inline void copy_gm2ub_align(Args... args) {
-  asc_copy_gm2ub_align(args...);
-}
-template <typename... Args>
-__aicore__ inline void copy_ub2gm_align(Args... args) {
-  asc_copy_ub2gm_align(args...);
+#endif
+
+// The 9.1 strided overloads narrow the burst count to uint16_t. Use the v2
+// instruction when available to keep the uint32_t count. Other overloads
+// forward to the SDK.
+#if TL_CANN_9_1 && __has_builtin(__builtin_cce_copy_gm_to_ubuf_align_v2)
+template <typename T>
+__aicore__ inline void
+copy_gm2ub_align_wide(__ubuf__ T *dst, __gm__ T *src, uint32_t count,
+                      uint32_t length, uint8_t left, uint8_t right, bool pad,
+                      load_l2_cache_mode cache, uint64_t src_stride,
+                      uint32_t dst_stride) {
+  if ASC_IS_AIV {
+    copy_gm_to_ubuf_align_v2(dst, src, 0, count, length, left, right, pad,
+                             cache, src_stride, dst_stride);
+  }
 }
 #endif
+
+template <typename... Args>
+__aicore__ inline void copy_gm2ub_align(Args... args) {
+  if constexpr (requires { copy_gm2ub_align_wide(args...); }) {
+    copy_gm2ub_align_wide(args...);
+  } else {
+    asc_copy_gm2ub_align(args...);
+  }
+}
+
+#if TL_CANN_9_1 && __has_builtin(__builtin_cce_copy_ubuf_to_gm_align_v2)
+template <typename T>
+__aicore__ inline void
+copy_ub2gm_align_wide(__gm__ T *dst, __ubuf__ T *src, uint32_t count,
+                      uint32_t length, store_l2_cache_mode cache,
+                      uint64_t dst_stride, uint32_t src_stride) {
+  if ASC_IS_AIV {
+    copy_ubuf_to_gm_align_v2((__gm__ void *)dst, (__ubuf__ void *)src, 0, count,
+                             length, cache, dst_stride, src_stride);
+  }
+}
+#endif
+
+template <typename... Args>
+__aicore__ inline void copy_ub2gm_align(Args... args) {
+  if constexpr (requires { copy_ub2gm_align_wide(args...); }) {
+    copy_ub2gm_align_wide(args...);
+  } else {
+    asc_copy_ub2gm_align(args...);
+  }
+}
 
 // asc_simd.h includes reg_vector.h in 9.1 and asc_reg_vector.h in newer
 // SDKs when the target exposes register-vector operations.
