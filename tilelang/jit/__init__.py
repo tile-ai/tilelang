@@ -230,8 +230,9 @@ def par_compile(
     executor : Literal["thread", "process"], optional
         Defaults to threads. Processes use spawn and require disk caching;
         the parent loads compiled kernels through the same cache. Script callers
-        must use ``if __name__ == "__main__":``. Parent-only FFI registrations
-        are not inherited by spawned workers.
+        must use ``if __name__ == "__main__":``. In-memory ``env.VAR = ...``
+        overrides and parent-only FFI registrations are not inherited by spawned
+        workers (use ``os.environ`` instead).
 
     Environment Variables
     ---------------------
