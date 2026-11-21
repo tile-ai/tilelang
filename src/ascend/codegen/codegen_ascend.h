@@ -40,6 +40,7 @@ public:
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;
   void VisitExpr_(const CastNode *op, std::ostream &os) final;
   void VisitExpr_(const VarNode *op, std::ostream &os) final;
+  void VisitExpr_(const ModNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const NotNode *op, std::ostream &os) final;
   void VisitExpr_(const BufferLoadNode *op, std::ostream &os) final;
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;
@@ -119,6 +120,7 @@ private:
   bool has_simd_inst_included_{false};
   bool has_gm_bypass_dcache_{false};
   bool has_gm_bypass_dcache_included_{false};
+  bool has_simt_math_included_{false};
   bool has_ascend_std_math_included_{false};
   bool has_philox_rng_{false};
   bool has_philox_rng_included_{false};

@@ -1,0 +1,389 @@
+#pragma once
+
+#include <simt_api/asc_bf16.h>
+#include <simt_api/math_functions.h>
+#include <stdint.h>
+#include <version/asc_devkit_version.h>
+
+namespace tl::cann::simt {
+
+#define TL_SIMT_MATH_91                                                        \
+  (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1 && ASC_DEVKIT_PATCH == 0)
+#define TL_SIMT_MATH_92_93                                                     \
+  (ASC_DEVKIT_MAJOR == 9 &&                                                    \
+   (ASC_DEVKIT_MINOR == 2 || ASC_DEVKIT_MINOR == 3) && ASC_DEVKIT_PATCH == 0)
+
+#if TL_SIMT_MATH_91 || TL_SIMT_MATH_92_93
+namespace detail {
+__simt_callee__ inline uint32_t bits(float x) {
+  return __builtin_bit_cast(uint32_t, x);
+}
+__simt_callee__ inline float from_bits(uint32_t x) {
+  return __builtin_bit_cast(float, x);
+}
+constexpr uint32_t sign_bit = 0x80000000u;
+constexpr uint32_t infinity = 0x7f800000u;
+constexpr uint32_t min_normal = 0x00800000u;
+constexpr float pi = 0x1.921fb6p+1f;
+
+__simt_callee__ inline float with_sign(float magnitude, float sign) {
+  return from_bits((bits(magnitude) & ~sign_bit) | (bits(sign) & sign_bit));
+}
+
+// Positive, finite, nonzero x = mantissa * 2^exponent, with 1 <= mantissa < 2.
+// Normalize subnormals as integers before any SIMT division can flush them.
+struct Fraction {
+  float mantissa;
+  int exponent;
+};
+__simt_callee__ inline Fraction normalize(uint32_t x) {
+  int exponent = int(x >> 23) - 127;
+  if (x < min_normal) {
+    int shift = __builtin_clz(x) - 8;
+    x <<= shift;
+    exponent = -126 - shift;
+  }
+  return {from_bits((x & 0x7fffffu) | 0x3f800000u), exponent};
+}
+
+// x must be positive and normal. Round once when scaling into the subnormal
+// range.
+__simt_callee__ inline float scale(float x, int shift) {
+  uint32_t word = bits(x);
+  int exponent = int(word >> 23) + shift;
+  if (exponent >= 255)
+    return from_bits(infinity);
+  if (exponent > 0)
+    return from_bits((word & 0x7fffffu) | (uint32_t(exponent) << 23));
+  if (exponent < -23)
+    return 0.0f;
+  int right = 1 - exponent;
+  uint32_t sig = (word & 0x7fffffu) | min_normal;
+  uint32_t truncated = sig >> right;
+  uint32_t bias = (1u << (right - 1)) - 1 + (truncated & 1);
+  return from_bits((sig + bias) >> right);
+}
+
+// Atan on [0,1]. Reduction about pi/4 bounds the alternating series argument
+// by tan(pi/8); the first omitted term is smaller than 3e-9 there.
+__simt_callee__ inline float atan_unit(float x) {
+  if (x < 0x1p-12f)
+    return x;
+  bool reduce = x > 0.41421356237f;
+  float t = reduce ? (x - 1.0f) / (x + 1.0f) : x;
+  float z = -t * t;
+  float p = 1.0f / 17.0f;
+  for (int k = 15; k >= 3; k -= 2)
+    p = ::fmaf(z, p, 1.0f / float(k));
+  float value = ::fmaf(t * z, p, t);
+  return reduce ? pi * 0.25f + value : value;
+}
+
+// Both operands are magnitudes, and small <= large. Scaling the quotient
+// separately also preserves a subnormal angle from two normal operands.
+__simt_callee__ inline float ratio(uint32_t small, uint32_t large) {
+  Fraction a = normalize(small), b = normalize(large);
+  return scale(a.mantissa / b.mantissa, a.exponent - b.exponent);
+}
+} // namespace detail
+#endif
+
+#if TL_SIMT_MATH_91 || TL_SIMT_MATH_92_93
+__simt_callee__ inline float atan2f(float y, float x) {
+  using namespace detail;
+  uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
+#if TL_SIMT_MATH_92_93
+  // Preserve native special values and ordinary angles. Renormalize only
+  // subnormal operands or a positive-x ratio small enough to underflow.
+  if (ax == 0 || ay == 0 || ax >= infinity || ay >= infinity ||
+      (ax >= min_normal && ay >= min_normal &&
+       ((bits(x) & sign_bit) || int(ax >> 23) - int(ay >> 23) < 126)))
+    return ::atan2f(y, x);
+#endif
+  if (ax > infinity || ay > infinity)
+    return x + y;
+  float angle;
+  if (ay == 0 || (ax == infinity && ay != infinity))
+    angle = 0.0f;
+  else if (ax == 0 || (ay == infinity && ax != infinity))
+    angle = pi * 0.5f;
+  else if (ax == ay)
+    angle = pi * 0.25f;
+  else if (ay < ax)
+    angle = atan_unit(ratio(ay, ax));
+  else
+    angle = pi * 0.5f - atan_unit(ratio(ax, ay));
+  return with_sign((bits(x) & sign_bit) ? pi - angle : angle, y);
+}
+#else
+using ::atan2f;
+#endif
+
+#if TL_SIMT_MATH_91
+__simt_callee__ inline float copysignf(float x, float y) {
+  return detail::with_sign(x, y);
+}
+
+__simt_callee__ inline float atanf(float x) {
+  float a = ::fabsf(x);
+  if (a <= 1.0f)
+    return detail::with_sign(detail::atan_unit(a), x);
+  return detail::with_sign(detail::pi * 0.5f - detail::atan_unit(1.0f / a), x);
+}
+
+__simt_callee__ inline float asinf(float x) {
+  return simt::atan2f(x, ::sqrtf(::fmaf(-x, x, 1.0f)));
+}
+__simt_callee__ inline float acosf(float x) {
+  return simt::atan2f(::sqrtf(::fmaf(-x, x, 1.0f)), x);
+}
+
+__simt_callee__ inline float hypotf(float x, float y) {
+  using namespace detail;
+  uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
+  if (ax == infinity || ay == infinity)
+    return from_bits(infinity);
+  if (ax > infinity || ay > infinity)
+    return x + y;
+  if (ax >= min_normal && ay >= min_normal)
+    return ::hypotf(x, y);
+  uint32_t large = ax > ay ? ax : ay, small = ax > ay ? ay : ax;
+  if (small == 0)
+    return from_bits(large);
+  Fraction a = normalize(large), b = normalize(small);
+  if (a.exponent - b.exponent > 13)
+    return from_bits(large);
+  float scaled = scale(b.mantissa, b.exponent - a.exponent);
+  return scale(::sqrtf(::fmaf(a.mantissa, a.mantissa, scaled * scaled)),
+               a.exponent);
+}
+
+__simt_callee__ inline float fmodf(float x, float y) {
+  using namespace detail;
+  uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
+  if (ax >= infinity || ay > infinity || ay == 0)
+    return ::fmodf(x, y);
+  if (ax < ay)
+    return x;
+  // The native remainder loses low bits for a subnormal divisor.
+  if (ay >= min_normal)
+    return ::fmodf(x, y);
+  Fraction a = normalize(ax), b = normalize(ay);
+  uint32_t r = (bits(a.mantissa) & 0x7fffffu) | min_normal;
+  uint32_t divisor = (bits(b.mantissa) & 0x7fffffu) | min_normal;
+  for (int i = a.exponent; i > b.exponent; --i) {
+    if (r >= divisor)
+      r -= divisor;
+    if (r == 0)
+      return with_sign(0.0f, x);
+    r <<= 1;
+  }
+  if (r >= divisor)
+    r -= divisor;
+  return with_sign(r ? scale(float(r), b.exponent - 23) : 0.0f, x);
+}
+
+// Compensate for the rounding of 1+x before taking its logarithm.
+__simt_callee__ inline float log1pf(float x) {
+  if (::fabsf(x) < 0x1p-23f)
+    return x;
+  float u = 1.0f + x;
+  if (!(u > 0.0f) || u == detail::from_bits(detail::infinity))
+    return ::logf(u);
+  return ::logf(u) + (x - (u - 1.0f)) / u;
+}
+__simt_callee__ inline float atanhf(float x) {
+  float a = ::fabsf(x);
+  if (a < 0x1p-12f)
+    return x;
+  return detail::with_sign(0.5f * simt::log1pf((2.0f * a) / (1.0f - a)), x);
+}
+__simt_callee__ inline float asinhf(float x) {
+  float a = ::fabsf(x);
+  if (a < 0x1p-12f)
+    return x;
+  float result =
+      a >= 0x1p12f
+          ? ::logf(a) + 0x1.62e43p-1f
+          : simt::log1pf(a + a * a / (1.0f + ::sqrtf(::fmaf(a, a, 1.0f))));
+  return detail::with_sign(result, x);
+}
+__simt_callee__ inline float acoshf(float x) {
+  if (x >= 0x1p12f)
+    return ::logf(x) + 0x1.62e43p-1f;
+  float t = x - 1.0f;
+  if (x < 1.0f)
+    return detail::from_bits(0x7fc00000u);
+  return simt::log1pf(t + ::sqrtf(t * (x + 1.0f)));
+}
+
+namespace detail {
+// exp(x)/2 without premature overflow for x near log(FLT_MAX).
+__simt_callee__ inline float half_exp(float x) {
+  if (x < 80.0f)
+    return 0.5f * ::expf(x);
+  float h = ::expf(0.5f * x);
+  return (0.5f * h) * h;
+}
+__simt_callee__ inline float sinh_small(float x) {
+  float z = x * x;
+  float p = ::fmaf(z, 1.0f / 39916800.0f, 1.0f / 362880.0f);
+  p = ::fmaf(z, p, 1.0f / 5040.0f);
+  p = ::fmaf(z, p, 1.0f / 120.0f);
+  return ::fmaf(x * z, ::fmaf(z, p, 1.0f / 6.0f), x);
+}
+} // namespace detail
+__simt_callee__ inline float sinhf(float x) {
+  float a = ::fabsf(x);
+  if (a < 0x1p-12f)
+    return x;
+  if (a <= 1.0f)
+    return detail::sinh_small(x);
+  float h = detail::half_exp(a);
+  return detail::with_sign(h - 0.25f / h, x);
+}
+__simt_callee__ inline float coshf(float x) {
+  float h = detail::half_exp(::fabsf(x));
+  return h + 0.25f / h;
+}
+__simt_callee__ inline float tanhf(float x) {
+  float a = ::fabsf(x);
+  if (a < 0x1p-12f)
+    return x;
+  if (a <= 1.0f) {
+    float s = detail::sinh_small(x);
+    return s / ::sqrtf(::fmaf(s, s, 1.0f));
+  }
+  float e = ::expf(-2.0f * a);
+  return detail::with_sign((1.0f - e) / (1.0f + e), x);
+}
+
+namespace detail {
+// Keep a product's rounding error until after reduction to a small exponent.
+// A one-ULP error in the unreduced exponent can cost many ULPs in pow/exp10.
+struct Split {
+  float hi;
+  float lo;
+};
+__simt_callee__ inline Split multiply(Split a, float y) {
+  float hi = a.hi * y;
+  return {hi, ::fmaf(a.hi, y, -hi) + a.lo * y};
+}
+__simt_callee__ inline float exp2_split(Split x) {
+  if (x.hi > 129.0f)
+    return from_bits(infinity);
+  if (x.hi < -151.0f)
+    return 0.0f;
+  int n = int(::rintf(x.hi));
+  float r = (x.hi - float(n)) + x.lo;
+  return scale(::expf(r * 0x1.62e43p-1f), n);
+}
+__simt_callee__ inline Split log2_split(uint32_t ax) {
+  Fraction a = normalize(ax);
+  float m = a.mantissa;
+  if (m > 0x1.6a09e6p0f) {
+    m *= 0.5f;
+    ++a.exponent;
+  }
+  // log(m) = 2*(s + s^3/3 + ...), |s| <= 0.172. Keep the low
+  // part of s; pow amplifies log errors when the exponent is large.
+  float u = m - 1.0f, v = m + 1.0f;
+  float s = u / v;
+  float s_error = (::fmaf(-s, v, u) - s * (m - (v - 1.0f))) / v;
+  float z = s * s;
+  float p = 1.0f / 13.0f;
+  for (int k = 11; k >= 3; k -= 2)
+    p = ::fmaf(z, p, 1.0f / float(k));
+  constexpr float log2e_hi = 0x1.715476p0f, log2e_lo = 0x1.4ae0cp-26f;
+  float lead = (2.0f * s) * log2e_hi;
+  float tail = ::fmaf(2.0f * s, log2e_hi, -lead) + (2.0f * s) * log2e_lo +
+               (2.0f * ::fmaf(s * z, p, s_error)) * log2e_hi;
+  float hi = float(a.exponent) + lead;
+  return {hi, ((float(a.exponent) - hi) + lead) + tail};
+}
+} // namespace detail
+
+__simt_callee__ inline float exp2f(float x) {
+  if (::isnan(x))
+    return x;
+  return detail::exp2_split({x, 0.0f});
+}
+__simt_callee__ inline float exp10f(float x) {
+  if (::isnan(x))
+    return x;
+  if (x > 40.0f)
+    return detail::from_bits(detail::infinity);
+  if (x < -46.0f)
+    return 0.0f;
+  return detail::exp2_split(
+      detail::multiply({0x1.a934fp1f, 0x1.2f346ep-24f}, x));
+}
+__simt_callee__ inline float powf(float x, float y) {
+  using namespace detail;
+  uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
+  if (ay == 0 || x == 1.0f)
+    return 1.0f;
+  if (ax > infinity || ay > infinity)
+    return x + y;
+  if (ay == infinity) {
+    if (ax == 0x3f800000u)
+      return 1.0f;
+    return ((ax > 0x3f800000u) == (y > 0.0f)) ? from_bits(infinity) : 0.0f;
+  }
+  // At magnitude 2^24 and above every representable float is an even integer.
+  bool odd = ay < 0x4b800000u && ::truncf(y) == y && (int(y) & 1);
+  float sign = odd ? x : 1.0f;
+  if (ax == 0 || ax == infinity) {
+    bool infinite = (ax == infinity) == (y > 0.0f);
+    return with_sign(infinite ? from_bits(infinity) : 0.0f, sign);
+  }
+  if (x < 0.0f && ::truncf(y) != y)
+    return from_bits(0x7fc00000u);
+  if (ax == 0x3f800000u)
+    return with_sign(1.0f, sign);
+  // Even the float nearest to one is past overflow or underflow here.
+  if (ay >= 0x4f800000u)
+    return ((ax > 0x3f800000u) == (y > 0.0f)) ? from_bits(infinity) : 0.0f;
+  return with_sign(exp2_split(multiply(log2_split(ax), y)), sign);
+}
+
+namespace detail {
+// Round the computed float to BF16 even when its exponent is subnormal.
+__simt_callee__ inline bfloat16_t to_bf16(float x) {
+  uint32_t u = bits(x);
+  if ((u & ~sign_bit) > infinity)
+    return __ushort_as_bfloat16((u >> 16) | 0x40u);
+  return __ushort_as_bfloat16((u + 0x7fffu + ((u >> 16) & 1)) >> 16);
+}
+} // namespace detail
+
+__simt_callee__ inline bfloat16_t hexp2(bfloat16_t x) {
+  return detail::to_bf16(simt::exp2f(__bfloat162float(x)));
+}
+__simt_callee__ inline bfloat16_t hexp10(bfloat16_t x) {
+  return detail::to_bf16(simt::exp10f(__bfloat162float(x)));
+}
+#else
+using ::acosf;
+using ::acoshf;
+using ::asinf;
+using ::asinhf;
+using ::atanf;
+using ::atanhf;
+using ::copysignf;
+using ::coshf;
+using ::exp10f;
+using ::exp2f;
+using ::fmodf;
+using ::hexp10;
+using ::hexp2;
+using ::hypotf;
+using ::log1pf;
+using ::powf;
+using ::sinhf;
+using ::tanhf;
+#endif
+
+#undef TL_SIMT_MATH_91
+#undef TL_SIMT_MATH_92_93
+} // namespace tl::cann::simt

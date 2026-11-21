@@ -3819,12 +3819,40 @@ void CodeGenTileLangAscend::EmitSimtVectorPredicateNot(const PrimExpr &value,
   os << result;
 }
 
+// Floating T.truncmod lowers to a ModNode, bypassing external-call lowering.
+void CodeGenTileLangAscend::VisitExpr_(const ModNode *op, std::ostream &os) {
+  if (IsInsideSimtVF() && op->dtype.element_of() == DataType::Float(32)) {
+    PrintCallExtern(PrimType(op->dtype), "fmodf", {op->a, op->b}, false, os);
+    return;
+  }
+  CodeGenC::VisitExpr_(op, os);
+}
+
 void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             ffi::String global_symbol,
                                             const ffi::Array<PrimExpr> &args,
                                             bool skip_first_arg,
                                             std::ostream &os) {
   DataType ret_dtype = GetRuntimeDataType(ret_type);
+  if (IsInsideSimtVF()) {
+    static const std::unordered_set<std::string> fp32_ops = {
+        "acosf",  "acoshf",    "asinf", "asinhf", "atanf",  "atan2f",
+        "atanhf", "copysignf", "coshf", "exp2f",  "exp10f", "fmodf",
+        "hypotf", "log1pf",    "powf",  "sinhf",  "tanhf"};
+    auto element = ret_dtype.element_of();
+    bool use_compat =
+        (element == DataType::Float(32) && fp32_ops.count(global_symbol)) ||
+        (element.is_bfloat16() &&
+         (global_symbol == "hexp2" || global_symbol == "hexp10"));
+    if (use_compat) {
+      if (!has_simt_math_included_) {
+        decl_stream << "#include <tl_templates/ascend/simt_math.h>\n";
+        has_simt_math_included_ = true;
+      }
+      global_symbol =
+          std::string("tl::cann::simt::") + std::string(global_symbol);
+    }
+  }
   // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
   // Select the scalar-core implementation using the existing VF context.
   if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
