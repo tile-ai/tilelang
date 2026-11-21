@@ -379,7 +379,7 @@ def test_int32_store_atomic_codegen(op):
     assert enable < stores[0].start() < disable < stores[1].start()
     drain = r"(?:asc_sync\(\)|asc_sync_pipe\(\s*PIPE_MTE3\s*\));"
     assert re.search(drain, source[:enable]), "Missing drain before enabling atomic mode"
-    assert re.search(drain, source[stores[0].end():disable]), "Atomic DMA must complete before clearing mode"
+    assert re.search(drain, source[stores[0].end() : disable]), "Atomic DMA must complete before clearing mode"
     assert "copy_ub2gm_align" in source, "The test must use DMA store mode, not a SIMT atomic"
 
 
