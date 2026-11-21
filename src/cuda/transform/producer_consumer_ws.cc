@@ -262,6 +262,13 @@ public:
     return std::move(collector.summary_);
   }
 
+  static LocalAccessSummary Collect(const PrimExpr &expr,
+                                    const BufferDataToBufferMap &buffer_map) {
+    LocalAccessCollector collector(buffer_map);
+    collector.VisitExpr(expr);
+    return std::move(collector.summary_);
+  }
+
 private:
   explicit LocalAccessCollector(const BufferDataToBufferMap &buffer_map)
       : buffer_data_to_buffer_(buffer_map) {}
@@ -1865,6 +1872,7 @@ private:
         AttrStmt(ws_partition, attr::kWarpSpecializationScope, 0, dummy_ws);
     guarded_postlude_stmts_ = {};
     kept_shared_prelude_stmts_ = {};
+    enclosing_control_reads_ = {};
     Optional<Stmt> replaced =
         ReplacePipelineLoopInStmt(orig_block->body, pipeline_loop, dummy_ws,
                                   producer_extent, consumer_extent);
@@ -1903,6 +1911,10 @@ private:
       }
       LocalLiveSet producer_reads;
       producer_reads.AddUses(producer_access);
+      producer_reads.buffers.insert(enclosing_control_reads_.buffers.begin(),
+                                    enclosing_control_reads_.buffers.end());
+      producer_reads.vars.insert(enclosing_control_reads_.vars.begin(),
+                                 enclosing_control_reads_.vars.end());
       // The producer may read a value that a statement kept in the shared
       // prelude derives from a branch-private local. Follow those reads back
       // through the shared prelude so a post-pipeline update of that local is
@@ -2407,10 +2419,13 @@ private:
     }
 
     Optional<Stmt> VisitStmt_(const SBlockRealizeNode *op) final {
-      Optional<Stmt> body = VisitStmt(op->block->body);
-      if (!body.defined()) {
+      if (!PipelineLoopContainmentChecker::Contains(op->block->body,
+                                                    pipeline_loop_)) {
         return Optional<Stmt>();
       }
+      RecordEnclosingControlExpr(op->predicate);
+      Optional<Stmt> body = VisitStmt(op->block->body);
+      ICHECK(body.defined());
       SBlock block = op->block;
       block.CopyOnWrite()->body = body.value();
       SBlockRealize new_realize = GetRef<SBlockRealize>(op);
@@ -2439,18 +2454,22 @@ private:
     }
 
     Optional<Stmt> VisitStmt_(const IfThenElseNode *op) final {
-      Optional<Stmt> then_result = VisitStmt(op->then_case);
-      Optional<Stmt> new_else = op->else_case;
-      bool found = then_result.defined();
-      if (!found && op->else_case.defined()) {
-        Optional<Stmt> else_result = VisitStmt(op->else_case.value());
-        if (else_result.defined()) {
-          new_else = else_result.value();
-          found = true;
-        }
-      }
-      if (!found) {
+      bool in_then = PipelineLoopContainmentChecker::Contains(op->then_case,
+                                                              pipeline_loop_);
+      bool in_else = !in_then && op->else_case.defined() &&
+                     PipelineLoopContainmentChecker::Contains(
+                         op->else_case.value(), pipeline_loop_);
+      if (!in_then && !in_else) {
         return Optional<Stmt>();
+      }
+      RecordEnclosingControlExpr(op->condition);
+      Optional<Stmt> then_result =
+          in_then ? VisitStmt(op->then_case) : Optional<Stmt>();
+      Optional<Stmt> new_else = op->else_case;
+      if (in_else) {
+        Optional<Stmt> else_result = VisitStmt(op->else_case.value());
+        ICHECK(else_result.defined());
+        new_else = else_result.value();
       }
       crossed_control_flow_ = true;
       Stmt new_then =
@@ -2459,10 +2478,13 @@ private:
     }
 
     Optional<Stmt> VisitStmt_(const ForNode *op) final {
-      Optional<Stmt> body = VisitStmt(op->body);
-      if (!body.defined()) {
+      if (!PipelineLoopContainmentChecker::Contains(op->body, pipeline_loop_)) {
         return Optional<Stmt>();
       }
+      RecordEnclosingControlExpr(op->min);
+      RecordEnclosingControlExpr(op->extent);
+      Optional<Stmt> body = VisitStmt(op->body);
+      ICHECK(body.defined());
       crossed_control_flow_ = true;
       For new_for = GetRef<For>(op);
       new_for.CopyOnWrite()->body = body.value();
@@ -2474,6 +2496,16 @@ private:
     }
 
   private:
+    void RecordEnclosingControlExpr(const PrimExpr &expr) {
+      LocalAccessSummary access = LocalAccessCollector::Collect(
+          expr, rewriter_->buffer_data_to_buffer_);
+      rewriter_->shared_prelude_live_seed_.AddUses(access);
+      for (const auto &buf : access.read_buffers) {
+        rewriter_->shared_prelude_buffer_data_.insert(buf->data);
+      }
+      rewriter_->enclosing_control_reads_.AddUses(access);
+    }
+
     Stmt GuardConsumerOnly(const Stmt &stmt) const {
       Stmt rewritten = PCThreadIdxRewriter::Rewrite(
           stmt, rewriter_->thread_iv_->var,
@@ -2670,6 +2702,12 @@ private:
   // checking post-pipeline writes so an indirect producer dependency through a
   // shared definition is not missed.
   Array<Stmt> kept_shared_prelude_stmts_;
+  // Values read by enclosing control-flow expressions (IfThenElse conditions,
+  // For bounds, block predicates) around the pipeline loop. Both partitions
+  // evaluate these before reaching the split, so a post-pipeline consumer-only
+  // update to any of them must decline WS to avoid producer/consumer barrier
+  // divergence.
+  LocalLiveSet enclosing_control_reads_;
   // Backing data vars of buffers touched by statements that stay in the shared
   // prelude. They cannot be cloned for the producer (including through alias
   // views): the shared statement runs before the partition split, so both

@@ -407,6 +407,7 @@ def test_ws_pass_applies_under_t_persistent_primitive():
     assert "tl_tiled_ws_applied" in script
 
 
+@tilelang.testing.requires_cuda
 def test_ws_pass_applies_under_persistent_serial():
     """Same coverage gap exercised via a hand-written ``T.serial`` scheduler."""
     func = persistent_matmul_serial()
@@ -1163,6 +1164,7 @@ def test_ws_declined_shared_prelude_update_matches_reference():
     torch.testing.assert_close(kernel(A, B).float(), ref, rtol=1e-2, atol=1e-2)
 
 
+@tilelang.testing.requires_cuda
 def test_ws_declines_shared_prelude_alias_update():
     """Local buffer views sharing storage retain loop-carried dependencies."""
     from tvm import tirx
@@ -1193,6 +1195,7 @@ def test_ws_declines_shared_prelude_alias_update():
     assert "tl_tiled_ws_applied" not in script
 
 
+@tilelang.testing.requires_cuda
 def test_ws_producer_clone_remaps_alias_views():
     """Cloning a producer-owned local must remap alias views sharing its data."""
     from tvm import tirx
@@ -1239,6 +1242,7 @@ def test_ws_producer_clone_remaps_alias_views():
     assert all(buf.data.same_as(written_data) for buf in out_loads), "producer alias reads must target the cloned storage"
 
 
+@tilelang.testing.requires_cuda
 def test_ws_shared_prelude_alias_prevents_producer_clone():
     """Shared-prelude access through an alias must prevent cloning that storage."""
     from tvm import tirx
@@ -1380,6 +1384,7 @@ def _collect_block_alloc_shapes(stmt):
     return alloc_shapes
 
 
+@tilelang.testing.requires_cuda
 def test_ws_mixed_sibling_blocks_revert_declined_loop():
     """A declined sibling TMA loop must lose num_stages and MVB expansion even when another block specializes."""
     for declined_first, decline_kind in (
@@ -1402,3 +1407,97 @@ def test_ws_mixed_sibling_blocks_revert_declined_loop():
 
 if __name__ == "__main__":
     tilelang.testing.main()
+
+
+def cross_run_enclosing_condition_update(
+    M=256,
+    N=256,
+    K=256,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    runs=2,
+    dtype="float16",
+    threads=128,
+):
+    """Outer repeated pipeline gated by a local condition updated after the pipeline.
+
+    If only the consumer executes ``enabled = 0``, the next outer iteration would
+    skip the pipeline on the consumer while the producer still enters it and
+    deadlocks waiting for consumer barrier arrivals.
+    """
+    iterations = K // block_K
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(N // block_N, M // block_M, threads=threads) as (bx, by):
+            A_s = T.alloc_shared((block_M, block_K), dtype)
+            B_s = T.alloc_shared((block_K, block_N), dtype)
+            C_l = T.alloc_fragment((block_M, block_N), "float32")
+            enabled = T.alloc_var(T.int32, init=1)
+            T.clear(C_l)
+            for _ in T.serial(runs):
+                if enabled != 0:
+                    for ko in T.Pipelined(iterations, num_stages=num_stages):
+                        T.copy(A[by * block_M, ko * block_K], A_s)
+                        T.copy(B[ko * block_K, bx * block_N], B_s)
+                        T.gemm(A_s, B_s, C_l)
+                enabled = 0
+            T.copy(C_l, C[by * block_M, bx * block_N])
+
+    return main
+
+
+def cross_run_enclosing_condition_indirect_update(
+    M=256,
+    N=256,
+    K=256,
+    block_M=64,
+    block_N=64,
+    block_K=32,
+    num_stages=2,
+    runs=2,
+    dtype="float16",
+    threads=128,
+):
+    """Enclosing condition reads a shared-prelude Bind derived from a post-pipeline local."""
+    iterations = K // block_K
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, K), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), dtype),
+    ):
+        with T.Kernel(N // block_N, M // block_M, threads=threads) as (bx, by):
+            A_s = T.alloc_shared((block_M, block_K), dtype)
+            B_s = T.alloc_shared((block_K, block_N), dtype)
+            C_l = T.alloc_fragment((block_M, block_N), "float32")
+            enabled = T.alloc_var(T.int32, init=1)
+            T.clear(C_l)
+            for _ in T.serial(runs):
+                should_run = enabled
+                if should_run != 0:
+                    for ko in T.Pipelined(iterations, num_stages=num_stages):
+                        T.copy(A[by * block_M, ko * block_K], A_s)
+                        T.copy(B[ko * block_K, bx * block_N], B_s)
+                        T.gemm(A_s, B_s, C_l)
+                enabled = 0
+            T.copy(C_l, C[by * block_M, bx * block_N])
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+def test_ws_declines_enclosing_condition_postlude_update():
+    """Post-pipeline updates to an enclosing condition (direct or via prelude) must decline WS."""
+    direct_script = _apply_ws_pass(cross_run_enclosing_condition_update())["main"].script()
+    assert "tl_tiled_ws_applied" not in direct_script, "WS must decline when a postlude updates an enclosing condition"
+
+    indirect_script = _apply_ws_pass(cross_run_enclosing_condition_indirect_update())["main"].script()
+    assert "tl_tiled_ws_applied" not in indirect_script, "WS must follow enclosing-condition reads through the shared prelude"
