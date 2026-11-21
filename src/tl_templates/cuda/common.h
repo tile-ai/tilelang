@@ -1513,6 +1513,23 @@ TL_DEVICE __half2 mul2(__half2 a, __half2 b) {
 #endif
 }
 
+// Preserve the explicit rounding boundary of T.fmul.
+TL_DEVICE __nv_bfloat162 mul2_rn(__nv_bfloat162 a, __nv_bfloat162 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  return __hmul2_rn(a, b);
+#else
+  return __nv_bfloat162{__hmul_rn(a.x, b.x), __hmul_rn(a.y, b.y)};
+#endif
+}
+
+TL_DEVICE __half2 mul2_rn(__half2 a, __half2 b) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+  return __hmul2_rn(a, b);
+#else
+  return __half2{__hmul_rn(a.x, b.x), __hmul_rn(a.y, b.y)};
+#endif
+}
+
 // --- fma2 ----------------------------------------------------------------
 
 TL_DEVICE float2 fma2(float2 a, float2 b, float2 c) {

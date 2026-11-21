@@ -5093,7 +5093,11 @@ bool CodeGenTileLangCUDA::HandleLateIntrinsicCall(const CallNode *op,
     std::vector<PrimExpr> args(op->args.begin(), op->args.end());
     DataType t = op->dtype;
     if (!t.is_scalar() && CanEmitPackedX2Math(t)) {
-      EmitPackedX2Call(is_fma ? "fma2" : "mul2", t, args, os);
+      const char *helper = is_fma ? "fma2" : "mul2";
+      if (!is_fma && (t.is_float16() || t.is_bfloat16())) {
+        helper = "mul2_rn";
+      }
+      EmitPackedX2Call(helper, t, args, os);
       return true;
     }
     CUDAIEEEMath math_func;
