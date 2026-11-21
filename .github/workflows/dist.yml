@@ -669,12 +669,16 @@ jobs:
 
   publish-obs:
     name: Publish wheels to OBS nightly repo
-    # Publish all built wheels (Linux, Windows, macOS) after the build and its
-    # wheel checks pass.
+    # Publish all built wheels (Linux, Windows, macOS) after the shared Linux
+    # wheel has passed the CUDA/ROCm kernel smoke tests on the GPU runners: a
+    # broken ROCm wheel must never reach OBS. test-wheels-gpu transitively
+    # needs build-wheels, so the build gate is preserved. publish-pypi is
+    # deliberately NOT gated on the (offline) self-hosted runners, so a release
+    # cannot be blocked.
     if: |
       github.repository_owner == 'tile-ai' &&
       (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
-    needs: [build-wheels]
+    needs: [test-wheels-gpu]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Serialize publication across refs: every run uploads to the same OBS
