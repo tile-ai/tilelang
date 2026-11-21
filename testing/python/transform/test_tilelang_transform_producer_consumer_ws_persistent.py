@@ -1193,5 +1193,212 @@ def test_ws_declines_shared_prelude_alias_update():
     assert "tl_tiled_ws_applied" not in script
 
 
+def test_ws_producer_clone_remaps_alias_views():
+    """Cloning a producer-owned local must remap alias views sharing its data."""
+    from tvm import tirx
+    from tvm.tirx import stmt_functor
+
+    func = producer_prelude_only_before_outer_serial()
+    loads = []
+
+    def find_k_off_load(node):
+        if isinstance(node, tirx.BufferLoad) and node.buffer.name == "k_off":
+            loads.append(node)
+
+    stmt_functor.post_order_visit(func.body, find_k_off_load)
+    assert len(loads) >= 1
+    original = loads[0].buffer
+    alias = tirx.decl_buffer(original.shape, original.dtype, data=original.data, scope="local", name="k_off_alias")
+    assert not alias.same_as(original) and alias.data.same_as(original.data)
+
+    def use_alias(node):
+        if isinstance(node, tirx.BufferLoad) and node.buffer.same_as(original):
+            return tirx.BufferLoad(alias, node.indices)
+        return None
+
+    body = stmt_functor.ir_transform(func.body, None, use_alias, ["tirx.BufferLoad"])
+    out = _apply_ws_pass(func.with_body(body))["main"]
+    script = out.script()
+    assert "tl_tiled_ws_applied" in script
+    assert "k_off_producer_ws[0] = 1" in script
+
+    stores = []
+    out_loads = []
+
+    def inspect_accesses(node):
+        if isinstance(node, tirx.BufferStore) and "k_off" in node.buffer.name:
+            stores.append(node.buffer)
+        if isinstance(node, tirx.BufferLoad) and "k_off" in node.buffer.name:
+            out_loads.append(node.buffer)
+
+    stmt_functor.post_order_visit(out.body, inspect_accesses)
+    assert len(stores) == 1
+    assert len(out_loads) >= 1
+    written_data = stores[0].data
+    assert not written_data.same_as(original.data)
+    assert all(buf.data.same_as(written_data) for buf in out_loads), "producer alias reads must target the cloned storage"
+
+
+def test_ws_shared_prelude_alias_prevents_producer_clone():
+    """Shared-prelude access through an alias must prevent cloning that storage."""
+    from tvm import tirx
+    from tvm.tirx import stmt_functor
+
+    func = producer_prelude_bind_before_outer_serial()
+    stores = []
+
+    def find_k_off_store(node):
+        if isinstance(node, tirx.BufferStore) and node.buffer.name == "k_off":
+            stores.append(node)
+
+    stmt_functor.post_order_visit(func.body, find_k_off_store)
+    assert len(stores) == 1
+    original = stores[0].buffer
+    alias = tirx.decl_buffer(original.shape, original.dtype, data=original.data, scope="local", name="k_off_alias")
+    assert not alias.same_as(original) and alias.data.same_as(original.data)
+
+    def rewrite_shared_to_alias(node):
+        if isinstance(node, tirx.BufferStore) and node.buffer.same_as(original):
+            return tirx.BufferStore(alias, node.value, node.indices)
+        if isinstance(node, tirx.Bind) and node.var.name == "shift":
+            assert isinstance(node.value, tirx.BufferLoad) and node.value.buffer.same_as(original)
+            return tirx.Bind(node.var, tirx.BufferLoad(alias, node.value.indices))
+        return None
+
+    body = stmt_functor.ir_transform(func.body, None, rewrite_shared_to_alias, None)
+    out = _apply_ws_pass(func.with_body(body))["main"]
+    script = out.script()
+    assert "tl_tiled_ws_applied" in script
+    assert "k_off_producer_ws" not in script, "storage touched in shared prelude via alias must not be cloned"
+
+    out_stores = []
+    out_loads = []
+
+    def inspect_accesses(node):
+        if isinstance(node, tirx.BufferStore) and "k_off" in node.buffer.name:
+            out_stores.append(node.buffer)
+        if isinstance(node, tirx.BufferLoad) and "k_off" in node.buffer.name:
+            out_loads.append(node.buffer)
+
+    stmt_functor.post_order_visit(out.body, inspect_accesses)
+    assert len(out_stores) == 1
+    assert len(out_loads) >= 2
+    assert all(buf.data.same_as(out_stores[0].data) for buf in out_loads)
+
+
+def _mixed_ws_sibling_blocks(declined_first=False, decline_kind="postlude"):
+    """PrimFunc with one WS-specializing block and one WS-declining sibling block."""
+
+    @T.macro
+    def emit_specialized(A, B, C1):
+        with T.Kernel(4, 4, threads=128) as (bx, by):
+            A_s1 = T.alloc_shared((64, 32), "float16")
+            B_s1 = T.alloc_shared((32, 64), "float16")
+            C_l1 = T.alloc_fragment((64, 64), "float32")
+            T.clear(C_l1)
+            for ko in T.Pipelined(8, num_stages=2):
+                T.copy(A[by * 64, ko * 32], A_s1)
+                T.copy(B[ko * 32, bx * 64], B_s1)
+                T.gemm(A_s1, B_s1, C_l1)
+            T.copy(C_l1, C1[by * 64, bx * 64])
+
+    @T.macro
+    def emit_declined_postlude(A, B, C2):
+        with T.Kernel(4, 4, threads=128) as (bx, by):
+            A_s2 = T.alloc_shared((64, 32), "float16")
+            B_s2 = T.alloc_shared((32, 64), "float16")
+            C_l2 = T.alloc_fragment((64, 64), "float32")
+            start = T.alloc_var(T.int32, init=0)
+            T.clear(C_l2)
+            for _ in T.serial(2):
+                k0 = T.alloc_var(T.int32, init=start)
+                k1 = T.alloc_var(T.int32, init=T.min(8, k0 + 4))
+                for ko in T.Pipelined(k1 - k0, num_stages=2):
+                    T.copy(A[by * 64, (k0 + ko) * 32], A_s2)
+                    T.copy(B[(k0 + ko) * 32, bx * 64], B_s2)
+                    T.gemm(A_s2, B_s2, C_l2)
+                start = start + (k1 - k0)
+            T.copy(C_l2, C2[by * 64, bx * 64])
+
+    @T.macro
+    def emit_declined_while(A, B, C2):
+        with T.Kernel(4, 4, threads=128) as (bx, by):
+            A_s2 = T.alloc_shared((64, 32), "float16")
+            B_s2 = T.alloc_shared((32, 64), "float16")
+            C_l2 = T.alloc_fragment((64, 64), "float32")
+            it = T.alloc_var(T.int32, init=0)
+            T.clear(C_l2)
+            while it < 2:
+                for ko in T.Pipelined(8, num_stages=2):
+                    T.copy(A[by * 64, ko * 32], A_s2)
+                    T.copy(B[ko * 32, bx * 64], B_s2)
+                    T.gemm(A_s2, B_s2, C_l2)
+                it = it + 1
+            T.copy(C_l2, C2[by * 64, bx * 64])
+
+    emit_declined = emit_declined_postlude if decline_kind == "postlude" else emit_declined_while
+
+    if declined_first:
+
+        @T.prim_func
+        def main(
+            A: T.Tensor((256, 256), "float16"),
+            B: T.Tensor((256, 256), "float16"),
+            C1: T.Tensor((256, 256), "float32"),
+            C2: T.Tensor((256, 256), "float32"),
+        ):
+            emit_declined(A, B, C2)
+            emit_specialized(A, B, C1)
+
+        return main
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((256, 256), "float16"),
+        B: T.Tensor((256, 256), "float16"),
+        C1: T.Tensor((256, 256), "float32"),
+        C2: T.Tensor((256, 256), "float32"),
+    ):
+        emit_specialized(A, B, C1)
+        emit_declined(A, B, C2)
+
+    return main
+
+
+def _collect_block_alloc_shapes(stmt):
+    from tvm import tirx
+    from tvm.tirx import stmt_functor
+
+    alloc_shapes = {}
+
+    def visit(node):
+        if isinstance(node, tirx.SBlock):
+            for buf in node.alloc_buffers:
+                alloc_shapes[buf.name] = tuple(int(dim) for dim in buf.shape)
+
+    stmt_functor.post_order_visit(stmt, visit)
+    return alloc_shapes
+
+
+def test_ws_mixed_sibling_blocks_revert_declined_loop():
+    """A declined sibling TMA loop must lose num_stages and MVB expansion even when another block specializes."""
+    for declined_first, decline_kind in (
+        (False, "postlude"),
+        (True, "postlude"),
+        (False, "while"),
+    ):
+        out = _apply_ws_pass(_mixed_ws_sibling_blocks(declined_first=declined_first, decline_kind=decline_kind))["main"]
+        script = out.script()
+        assert "tl_tiled_ws_applied" in script
+        assert "kWarpSpecializationScope" in script
+        assert "num_stages" not in script, "declined sibling loop must not keep num_stages"
+
+        alloc_shapes = _collect_block_alloc_shapes(out.body)
+        assert alloc_shapes["A_s1"] == (2, 64, 32)
+        assert alloc_shapes["B_s1"] == (2, 32, 64)
+        assert alloc_shapes["A_s2"] == (64, 32), "declined sibling buffer must revert MVB expansion"
+        assert alloc_shapes["B_s2"] == (32, 64), "declined sibling buffer must revert MVB expansion"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

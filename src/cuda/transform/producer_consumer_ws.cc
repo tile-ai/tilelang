@@ -984,18 +984,74 @@ static Stmt RewritePreludeTmaProducerStmt(const Stmt &stmt,
   return rewriter.Rewrite(stmt);
 }
 
+static Stmt StripPipelineAnnotations(const Stmt &stmt) {
+  class StripPipelineAnnotation : public tirx::StmtExprMutator {
+  public:
+    tirx::Stmt VisitStmt_(const tirx::ForNode *op) final {
+      auto rewritten = tirx::StmtExprMutator::VisitStmt_(op);
+      const auto *for_node = rewritten.as<tirx::ForNode>();
+      ICHECK(for_node);
+      if (for_node->annotations.count("num_stages")) {
+        tirx::For new_for = Downcast<tirx::For>(rewritten);
+        auto *n = new_for.CopyOnWrite();
+        n->annotations.erase("num_stages");
+        return std::move(new_for);
+      }
+      return rewritten;
+    }
+  };
+  StripPipelineAnnotation stripper;
+  return stripper(stmt);
+}
+
+using PreMVBBlockMap =
+    std::unordered_map<SBlockRealize, SBlockRealize, ObjectPtrHash,
+                       ObjectPtrEqual>;
+
+static PreMVBBlockMap MapPostMVBToOriginalBlocks(const Stmt &orig_body,
+                                                 const Stmt &mvb_body) {
+  class BlockRealizeCollector : public StmtVisitor {
+  public:
+    explicit BlockRealizeCollector(std::vector<SBlockRealize> *out)
+        : out_(out) {}
+
+    void VisitStmt_(const SBlockRealizeNode *op) final {
+      out_->push_back(GetRef<SBlockRealize>(op));
+      StmtVisitor::VisitStmt_(op);
+    }
+
+  private:
+    std::vector<SBlockRealize> *out_;
+  };
+
+  std::vector<SBlockRealize> orig_blocks;
+  std::vector<SBlockRealize> mvb_blocks;
+  BlockRealizeCollector orig_collector(&orig_blocks);
+  orig_collector(orig_body);
+  BlockRealizeCollector mvb_collector(&mvb_blocks);
+  mvb_collector(mvb_body);
+  ICHECK_EQ(orig_blocks.size(), mvb_blocks.size())
+      << "MultiVersionBufferRewriter must preserve SBlockRealize structure";
+  PreMVBBlockMap result;
+  result.reserve(mvb_blocks.size());
+  for (size_t i = 0; i < mvb_blocks.size(); ++i) {
+    result.emplace(mvb_blocks[i], orig_blocks[i]);
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Main rewriter
 // ---------------------------------------------------------------------------
 
 class ProducerConsumerWSRewriter : public StmtExprMutator {
 public:
-  static PrimFunc Substitute(PrimFunc f) {
+  static PrimFunc Substitute(PrimFunc f, const PreMVBBlockMap &pre_mvb_blocks) {
     auto target = f->GetAttr<Target>(tvm::attr::kTarget);
     ICHECK(target.defined())
         << "ProducerConsumerWS: target attribute is required";
 
-    ProducerConsumerWSRewriter T;
+    ProducerConsumerWSRewriter T(pre_mvb_blocks);
     T.target_ = target.value();
     f.CopyOnWrite()->body = T(f->body);
 
@@ -1006,6 +1062,15 @@ public:
   }
 
 private:
+  explicit ProducerConsumerWSRewriter(const PreMVBBlockMap &pre_mvb_blocks)
+      : pre_mvb_blocks_(pre_mvb_blocks) {}
+
+  Stmt RevertDeclinedBlock(const SBlockRealizeNode *orig_realize) const {
+    auto it = pre_mvb_blocks_.find(GetRef<SBlockRealize>(orig_realize));
+    ICHECK(it != pre_mvb_blocks_.end())
+        << "ProducerConsumerWS: missing pre-MVB block for declined realize";
+    return StripPipelineAnnotations(it->second);
+  }
   // --- Track threadIdx.x binding ---
   Stmt VisitStmt_(const AttrStmtNode *op) final {
     if (op->attr_key == tirx::attr::thread_extent) {
@@ -1050,12 +1115,6 @@ private:
     int num_stages =
         static_cast<int>(Downcast<Integer>(num_stages_anno.value())->value);
     if (num_stages < 1)
-      return StmtExprMutator::VisitStmt_(op);
-    // The loop finder descends through every statement kind, but the WS block
-    // can only be rebuilt through the kinds ReplacePipelineLoopInStmt handles
-    // (no While yet). Decline so the pass falls back instead of failing.
-    if (!PipelineLoopContainmentChecker::Contains(orig_block->body,
-                                                  pipeline_loop))
       return StmtExprMutator::VisitStmt_(op);
 
     // Flatten the loop body.
@@ -1137,6 +1196,15 @@ private:
     // Require at least one TMA producer.
     if (num_tma == 0)
       return StmtExprMutator::VisitStmt_(op);
+
+    // The loop finder descends through every statement kind, but the WS block
+    // can only be rebuilt through the kinds ReplacePipelineLoopInStmt handles
+    // (no While yet). Decline and restore this block to its pre-MVB form with
+    // num_stages stripped so it runs as a plain serial loop even if a sibling
+    // block specializes.
+    if (!PipelineLoopContainmentChecker::Contains(orig_block->body,
+                                                  pipeline_loop))
+      return RevertDeclinedBlock(op);
 
     // --- Build the WS transformation ---
     return BuildWSBlock(op, orig_block, pipeline_loop, num_stages, flat_stmts,
@@ -1771,7 +1839,7 @@ private:
     shared_prelude_live_seed_ = {};
     producer_prelude_live_seed_ = {};
     consumer_prelude_live_seed_ = {};
-    shared_prelude_buffers_ = {};
+    shared_prelude_buffer_data_ = {};
     producer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
         rewritten_producer, buffer_data_to_buffer_));
     consumer_prelude_live_seed_.AddUses(LocalAccessCollector::Collect(
@@ -1817,9 +1885,9 @@ private:
     // value of the previous run, so decline the transformation.
     bool declined_loop_carried_postlude = false;
     {
-      BufferSet block_alloc_buffers;
+      BufferDataToBufferMap block_alloc_by_data;
       for (const auto &buffer : orig_block->alloc_buffers) {
-        block_alloc_buffers.insert(buffer);
+        block_alloc_by_data.emplace(buffer->data, buffer);
       }
       LocalAccessSummary producer_access = LocalAccessCollector::Collect(
           rewritten_producer, buffer_data_to_buffer_);
@@ -1858,16 +1926,34 @@ private:
         }
       }
       auto maybe_clone = [&](const Buffer &buffer) {
-        if (!buffer.defined() ||
-            !(IsFragmentBuffer(buffer) || IsLocalBuffer(buffer)) ||
-            !block_alloc_buffers.count(buffer) ||
-            shared_prelude_buffers_.count(buffer) ||
-            producer_buffer_remap.count(buffer)) {
+        if (!buffer.defined()) {
           return;
         }
-        Buffer cloned = CloneBranchPrivateBuffer(buffer, "_producer_ws");
-        producer_buffer_remap.emplace(buffer, cloned);
-        producer_private_buffers.push_back(cloned);
+        auto alloc_it = block_alloc_by_data.find(buffer->data);
+        if (alloc_it == block_alloc_by_data.end()) {
+          return;
+        }
+        const Buffer &alloc_buffer = alloc_it->second;
+        if (!(IsFragmentBuffer(alloc_buffer) || IsLocalBuffer(alloc_buffer)) ||
+            shared_prelude_buffer_data_.count(alloc_buffer->data)) {
+          return;
+        }
+        Buffer cloned_alloc;
+        if (auto it = producer_buffer_remap.find(alloc_buffer);
+            it != producer_buffer_remap.end()) {
+          cloned_alloc = it->second;
+        } else {
+          cloned_alloc = CloneBranchPrivateBuffer(alloc_buffer, "_producer_ws");
+          producer_buffer_remap.emplace(alloc_buffer, cloned_alloc);
+          producer_private_buffers.push_back(cloned_alloc);
+        }
+        if (!buffer.same_as(alloc_buffer) &&
+            !producer_buffer_remap.count(buffer)) {
+          auto alias = make_object<BufferNode>(*buffer.get());
+          alias->data = cloned_alloc->data;
+          alias->name = buffer->name + "_producer_ws";
+          producer_buffer_remap.emplace(buffer, Buffer(std::move(alias)));
+        }
       };
       for (const auto &buffer : producer_access.read_buffers) {
         maybe_clone(buffer);
@@ -1878,13 +1964,14 @@ private:
     }
     if (declined_loop_carried_postlude) {
       // The producer would read a stale value on the next run of the pipeline.
-      // Decline; the pass-level fallback drops the pipeline annotations, so
-      // this block runs as a plain serial loop.
+      // Decline and restore this block to its pre-MVB form with num_stages
+      // stripped so it runs as a plain serial loop even if a sibling block
+      // specializes.
       DLOG(WARNING) << "[WS] declined: a post-pipeline statement writes a "
                        "value the producer reads on the next run";
       guarded_postlude_stmts_ = {};
       kept_shared_prelude_stmts_ = {};
-      return GetRef<Stmt>(orig_realize);
+      return RevertDeclinedBlock(orig_realize);
     }
     if (!producer_buffer_remap.empty()) {
       rewritten_producer =
@@ -2481,11 +2568,12 @@ private:
           // cloned for the producer.
           LocalAccessSummary kept_access = LocalAccessCollector::Collect(
               kept, rewriter_->buffer_data_to_buffer_);
-          rewriter_->shared_prelude_buffers_.insert(
-              kept_access.read_buffers.begin(), kept_access.read_buffers.end());
-          rewriter_->shared_prelude_buffers_.insert(
-              kept_access.write_buffers.begin(),
-              kept_access.write_buffers.end());
+          for (const auto &buf : kept_access.read_buffers) {
+            rewriter_->shared_prelude_buffer_data_.insert(buf->data);
+          }
+          for (const auto &buf : kept_access.write_buffers) {
+            rewriter_->shared_prelude_buffer_data_.insert(buf->data);
+          }
           new_seq->push_back(kept);
           continue;
         }
@@ -2582,10 +2670,12 @@ private:
   // checking post-pipeline writes so an indirect producer dependency through a
   // shared definition is not missed.
   Array<Stmt> kept_shared_prelude_stmts_;
-  // Buffers touched by statements that stay in the shared prelude. They cannot
-  // be cloned for the producer: the shared statement runs before the partition
-  // split, so both branches must keep pointing at the same buffer.
-  BufferSet shared_prelude_buffers_;
+  // Backing data vars of buffers touched by statements that stay in the shared
+  // prelude. They cannot be cloned for the producer (including through alias
+  // views): the shared statement runs before the partition split, so both
+  // branches must keep pointing at the same storage.
+  VarSet shared_prelude_buffer_data_;
+  const PreMVBBlockMap &pre_mvb_blocks_;
 };
 
 // ---------------------------------------------------------------------------
@@ -2699,7 +2789,10 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
     // (e.g. non-tile-op consumers in the loop body).
     PrimFunc original_f = f;
     f = ApplyMultiVersionBufferRewriter(std::move(f));
-    PrimFunc result = ProducerConsumerWSRewriter::Substitute(std::move(f));
+    PreMVBBlockMap pre_mvb_blocks =
+        MapPostMVBToOriginalBlocks(original_f->body, f->body);
+    PrimFunc result =
+        ProducerConsumerWSRewriter::Substitute(std::move(f), pre_mvb_blocks);
     if (!result->HasNonzeroAttr(kTiledWSApplied)) {
       DLOG(WARNING) << "[WS] rewriter did not fire, falling back";
       // The TMA kernel needs warp specialization for correct pipelined
@@ -2707,23 +2800,7 @@ tvm::transform::Pass ProducerConsumerWarpSpecialized() {
       // conditional loop body), strip pipeline annotations so that
       // PipelinePlanning / InjectSoftwarePipeline do not generate
       // broken non-WS TMA pipeline code.
-      class StripPipelineAnnotation : public tirx::StmtExprMutator {
-      public:
-        tirx::Stmt VisitStmt_(const tirx::ForNode *op) final {
-          auto stmt = tirx::StmtExprMutator::VisitStmt_(op);
-          const auto *for_node = stmt.as<tirx::ForNode>();
-          ICHECK(for_node);
-          if (for_node->annotations.count("num_stages")) {
-            tirx::For new_for = Downcast<tirx::For>(stmt);
-            auto *n = new_for.CopyOnWrite();
-            n->annotations.erase("num_stages");
-            return std::move(new_for);
-          }
-          return stmt;
-        }
-      };
-      StripPipelineAnnotation stripper;
-      auto stripped = stripper(original_f->body);
+      auto stripped = StripPipelineAnnotations(original_f->body);
       auto *fn = original_f.CopyOnWrite();
       fn->body = stripped;
       return original_f;
