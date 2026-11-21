@@ -325,25 +325,27 @@ __simt_callee__ inline float powf(float x, float y) {
     return 1.0f;
   if (ax > infinity || ay > infinity)
     return x + y;
+  bool positive_y = !(bits(y) & sign_bit);
   if (ay == infinity) {
     if (ax == 0x3f800000u)
       return 1.0f;
-    return ((ax > 0x3f800000u) == (y > 0.0f)) ? from_bits(infinity) : 0.0f;
+    return ((ax > 0x3f800000u) == positive_y) ? from_bits(infinity) : 0.0f;
   }
   // At magnitude 2^24 and above every representable float is an even integer.
-  bool odd = ay < 0x4b800000u && ::truncf(y) == y && (int(y) & 1);
+  bool integer = ay >= 0x3f800000u && ::truncf(y) == y;
+  bool odd = integer && ay < 0x4b800000u && (int(y) & 1);
   float sign = odd ? x : 1.0f;
   if (ax == 0 || ax == infinity) {
-    bool infinite = (ax == infinity) == (y > 0.0f);
+    bool infinite = (ax == infinity) == positive_y;
     return with_sign(infinite ? from_bits(infinity) : 0.0f, sign);
   }
-  if (x < 0.0f && ::truncf(y) != y)
+  if ((bits(x) & sign_bit) && !integer)
     return from_bits(0x7fc00000u);
   if (ax == 0x3f800000u)
     return with_sign(1.0f, sign);
   // Even the float nearest to one is past overflow or underflow here.
   if (ay >= 0x4f800000u)
-    return ((ax > 0x3f800000u) == (y > 0.0f)) ? from_bits(infinity) : 0.0f;
+    return ((ax > 0x3f800000u) == positive_y) ? from_bits(infinity) : 0.0f;
   return with_sign(exp2_split(multiply(log2_split(ax), y)), sign);
 }
 
