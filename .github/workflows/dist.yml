@@ -33,8 +33,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  # Let scheduled and manually triggered OBS uploads finish.
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'release' }}
 
 env:
   PYTHONDEVMODE: "1"
@@ -191,7 +192,10 @@ jobs:
             echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           fi
 
-          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # OBS keeps distinct versions of every daily build across all platforms.
+            echo "TILELANG_BUILD_WHEEL_WITH_DATE=ON" | tee -a "${GITHUB_ENV}"
+          elif [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
             echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
           fi
 
@@ -220,7 +224,10 @@ jobs:
             "UV_TORCH_BACKEND=cpu" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
-          if ("${{ env.IS_RELEASE }}" -eq "true") {
+          if ("${{ github.event_name }}" -eq "schedule" -or "${{ github.event_name }}" -eq "workflow_dispatch") {
+            # OBS keeps distinct versions of every daily build across all platforms.
+            "TILELANG_BUILD_WHEEL_WITH_DATE=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          } elseif ("${{ env.IS_RELEASE }}" -eq "true") {
             "NO_VERSION_LABEL=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
@@ -441,18 +448,16 @@ jobs:
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   test-wheels-gpu:
     name: Test built wheels with ${{ matrix.target.toolkit }} (on ${{ matrix.target.name }})
     # The build runners have no GPU, so nothing above proves the built wheels
-    # actually launch kernels: the Linux wheels are fat CUDA+ROCm builds and
-    # neither half was ever executed. This job installs the built wheel on
-    # self-hosted GPU runners and runs a real kernel on each backend. Wheel
-    # artifacts are only uploaded outside PRs (or for [Release] PRs), so gate
-    # this job the same way as the "Upload wheels" step. It is deliberately
+    # actually launch kernels. This job installs the shared Linux wheel on
+    # self-hosted GPU runners and runs a real kernel on CUDA and ROCm.
+    # Run outside PRs and for [Release] PRs. It is deliberately
     # not in the needs-chain of publish-pypi: an offline self-hosted runner
     # must not be able to block a release.
     if: |
@@ -556,7 +561,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           # Matches the wheels built for this runner's os/arch (Linux-X64).
-          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse
           merge-multiple: true
 
@@ -661,3 +666,134 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-obs:
+    name: Publish wheels to OBS nightly repo
+    # Publish all built wheels (Linux, Windows, macOS) after the shared Linux
+    # wheel has passed the CUDA/ROCm kernel smoke tests on the GPU runners: a
+    # broken ROCm wheel must never reach OBS. test-wheels-gpu transitively
+    # needs build-wheels, so the build gate is preserved. publish-pypi is
+    # deliberately NOT gated on the (offline) self-hosted runners, so a release
+    # cannot be blocked.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+    needs: [test-wheels-gpu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Serialize publication across refs: every run uploads to the same OBS
+    # directory, and the workflow-level group (per-ref) does not stop two refs
+    # from publishing concurrently. Without this, run A could list the
+    # directory before run B's upload and then overwrite B's index.html with a
+    # stale file list, hiding B's wheel until the next publication. Builds and
+    # tests stay parallel; only the upload -> ls -> index sequence queues here.
+    # cancel-in-progress must stay false: never kill an in-flight publish.
+    concurrency:
+      group: publish-wheels-to-obs
+      cancel-in-progress: false
+
+    steps:
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: wheelhouse
+
+      - name: Setup obsutil and upload to OBS
+        env:
+          AK: ${{ secrets.NIGHTLY_OBS_AK }}
+          SK: ${{ secrets.NIGHTLY_OBS_SK }}
+        run: |
+          # No -x: keep the expanded obsutil config command out of the trace.
+          set -euo pipefail
+          WHL_COUNT=$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)
+          if [ "${WHL_COUNT}" -eq 0 ]; then
+            echo "::error::No wheel artifacts found"
+            exit 1
+          fi
+          if [ -z "${AK}" ] || [ -z "${SK}" ]; then
+            echo "::error::OBS credentials are empty (NIGHTLY_OBS_AK / NIGHTLY_OBS_SK)."
+            exit 1
+          fi
+          curl -fL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz" -o obsutil.tar.gz
+          gzip -t obsutil.tar.gz || { echo "obsutil.tar.gz is not a valid gzip"; exit 1; }
+          tar xzf obsutil.tar.gz
+          rm -f obsutil.tar.gz
+          mv obsutil_linux_* obsutil
+
+          obsutil/obsutil config -i="${AK}" -k="${SK}" -e=https://obs.cn-north-4.myhuaweicloud.com
+          OBS_DIR="obs://ascend-triton-open/TileLang/"
+          # -u: skip files already present unchanged, so a same-day rerun does
+          # not rewrite identical wheels. Older dailies stay downloadable
+          # until the bucket's lifecycle policy removes them.
+          for wheel in wheelhouse/*.whl; do
+            obsutil/obsutil cp -u "${wheel}" "${OBS_DIR}"
+          done
+
+          # Regenerate index.html from every .whl currently in the directory
+          # (non-recursive, short format), keeping only the basenames.
+          obsutil/obsutil ls "${OBS_DIR}" -d -s -limit=0 \
+            | grep -oE '[^/]+\.whl$' \
+            | sort -u > files.txt
+          python3 - <<'PY'
+          import html, pathlib, urllib.parse
+
+          files = [
+              line.strip()
+              for line in pathlib.Path("files.txt").read_text().splitlines()
+              if line.strip()
+          ]
+          lines = ["<!DOCTYPE html>", "<html><body>"]
+          for f in files:
+              # OBS decodes literal '+' in URL paths as space (403); encode '+' as '%2B'.
+              lines.append(f'<a href="{urllib.parse.quote(f)}">{html.escape(f)}</a><br />')
+          lines.append("</body></html>")
+          pathlib.Path("index.html").write_text("\n".join(lines) + "\n")
+          PY
+          obsutil/obsutil cp index.html "${OBS_DIR}" -meta=Content-Type:text/html
+
+          # Verify anonymous HTTPS access for index.html and every wheel uploaded
+          # in this run. If the bucket policy does not already grant public read
+          # on TileLang/*, fall back to object-level public-read ACLs.
+          PUBLIC_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang"
+          verify_public_read() {
+            curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/index.html" >/dev/null || return 1
+            for wheel in wheelhouse/*.whl; do
+              local href
+              href="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$(basename "${wheel}")")"
+              curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/${href}" >/dev/null || return 1
+            done
+          }
+
+          if ! verify_public_read; then
+            echo "Objects are not publicly readable via bucket policy; applying -acl=public-read..."
+            for wheel in wheelhouse/*.whl; do
+              obsutil/obsutil chattri "${OBS_DIR}$(basename "${wheel}")" -acl=public-read || {
+                echo "::error::Failed to set public-read ACL on $(basename "${wheel}"). Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
+                exit 1
+              }
+            done
+            obsutil/obsutil chattri "${OBS_DIR}index.html" -acl=public-read || {
+              echo "::error::Failed to set public-read ACL on index.html. Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
+              exit 1
+            }
+            if ! verify_public_read; then
+              echo "::error::Uploaded OBS objects are still not publicly readable over HTTPS (${PUBLIC_BASE}/index.html)."
+              exit 1
+            fi
+          fi
+
+          echo "Published ${WHL_COUNT} wheel(s); index lists $(wc -l < files.txt) file(s)."
+
+      - name: Summary
+        run: |
+          INDEX_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang/index.html"
+          {
+            echo "### TileLang nightly wheels published to OBS"
+            echo
+            echo "- OBS path: \`obs://ascend-triton-open/TileLang/\`"
+            echo "- Install command: \`pip install -f ${INDEX_URL} tilelang\` (or \`uv pip install -f ${INDEX_URL} tilelang\`)"
+            echo
+            ls -1 wheelhouse/*.whl | sed 's|^|- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
