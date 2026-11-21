@@ -736,18 +736,32 @@ jobs:
           obsutil/obsutil ls "${OBS_DIR}" -d -s -limit=0 \
             | grep -oE '[^/]+\.whl$' \
             | sort -u > files.txt
-          while IFS= read -r f; do
-            printf "<a href='%s'>%s</a><br />\n" "$f" "$f"
-          done < files.txt > index.html
-          obsutil/obsutil cp index.html "${OBS_DIR}"
+          python3 - <<'PY'
+          import html, pathlib, urllib.parse
+
+          files = [
+              line.strip()
+              for line in pathlib.Path("files.txt").read_text().splitlines()
+              if line.strip()
+          ]
+          lines = ["<!DOCTYPE html>", "<html><body>"]
+          for f in files:
+              # OBS decodes literal '+' in URL paths as space (403); encode '+' as '%2B'.
+              lines.append(f'<a href="{urllib.parse.quote(f)}">{html.escape(f)}</a><br />')
+          lines.append("</body></html>")
+          pathlib.Path("index.html").write_text("\n".join(lines) + "\n")
+          PY
+          obsutil/obsutil cp index.html "${OBS_DIR}" -meta=Content-Type:text/html
           echo "Published ${WHL_COUNT} wheel(s); index lists $(wc -l < files.txt) file(s)."
 
       - name: Summary
         run: |
+          INDEX_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang/index.html"
           {
             echo "### TileLang nightly wheels published to OBS"
             echo
-            echo 'Directory: `obs://ascend-triton-open/TileLang/`'
+            echo "- OBS path: \`obs://ascend-triton-open/TileLang/\`"
+            echo "- Install command: \`pip install -f ${INDEX_URL} tilelang\` (or \`uv pip install -f ${INDEX_URL} tilelang\`)"
             echo
             ls -1 wheelhouse/*.whl | sed 's|^|- |'
           } >> "${GITHUB_STEP_SUMMARY}"
