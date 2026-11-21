@@ -592,6 +592,183 @@ jobs:
             )
           done
 
+  test-wheels-ascend:
+    name: Test built wheels on Ascend NPU (CANN ${{ matrix.cann }}, Python ${{ matrix.python }})
+    # The Linux wheel's Ascend half is never executed before release; this
+    # job installs the built wheel on the self-hosted Ascend runner (same
+    # CANN container as the Ascend CI job) and runs the AscendC suites
+    # against it. Like test-wheels-gpu, it does not gate publish-pypi.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
+    needs: [build-wheels]
+    runs-on: linux-amd64-a5-4
+    strategy:
+      fail-fast: false
+      matrix:
+        cann:
+          - "9.3.0-weekly.20261112"
+        python:
+          - "3.13"
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann${{ matrix.cann }}-ubuntu22.04-py${{ matrix.python }}
+    timeout-minutes: 120
+    env:
+      PIP_USER: "0"
+
+    steps:
+      - name: Checkout repository
+        # Test suites only; no submodules: the tests run against the
+        # installed wheel, not the source tree.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Trust the mounted workspace for git
+        run: |
+          # The container runs as root over the host-mounted workspace, so git
+          # rejects it as "dubious ownership"; CMake's submodule check needs it.
+          git config --global --add safe.directory '*'
+
+      - name: Download built wheels
+        # The Linux x86_64 fat wheel (CUDA+ROCm+Ascend) built by the
+        # CUDA-13.0 leg; the self-hosted NPU runners are amd64.
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Set up environment and install Ascend wheel
+        id: wheel-install
+        shell: bash
+        run: |
+          # Same environment setup as the Ascend job in ci.yml. Each matrix
+          # leg runs in the CANN container for its own Python version, so
+          # `python` below is that version.
+          for CANN_SET_ENV in \
+            "${ASCEND_HOME_PATH:-}/set_env.sh" \
+            "${ASCEND_TOOLKIT_HOME:-}/set_env.sh" \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/cann-*/set_env.sh; do
+            if [[ -f "${CANN_SET_ENV}" ]]; then
+              source "${CANN_SET_ENV}"
+              break
+            fi
+          done
+          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
+
+          # Keep the runner's preinstalled Torch/Torch-NPU stack.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+          import torch
+          import torch_npu
+
+          assert torch.npu.is_available(), "Ascend CI requires an available NPU"
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(requirement)
+          PY
+
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -v -r requirements-test.txt pybind11==2.12.0
+
+          # Install the wheel for this Ascend environment: the Linux x86_64
+          # fat wheel is a single abi3 artifact (pyproject: wheel.py-api =
+          # "cp39"), so it installs into every Python version of the matrix.
+          ls -lh wheelhouse/
+          WHEEL="$(ls wheelhouse/*.whl 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${WHEEL}" ]]; then
+            echo "::error::no wheel artifact found in wheelhouse/"
+            exit 1
+          fi
+          echo "Installing wheel: ${WHEEL}"
+          echo "WHEEL_NAME=$(basename "${WHEEL}")" >> "${GITHUB_ENV}"
+          # pip (not uv) honors PIP_CONSTRAINT, keeping the container's
+          # preinstalled torch/torch_npu stack.
+          python -m pip install -v "${WHEEL}"
+
+          # The pytest suites below must exercise the *installed wheel*, but
+          # they need the checkout: testing/conftest.py inserts the repo root
+          # on sys.path deliberately. With tilelang/ moved aside, every
+          # repo-root sys.path entry resolves `import tilelang` to the wheel
+          # in the venv's site-packages instead. (rm -rf first: the workspace
+          # is persistent on self-hosted runners.)
+          rm -rf tilelang.src-hidden
+          mv tilelang tilelang.src-hidden
+
+          # Guard: fail fast if the source tree would still shadow the wheel.
+          python - <<'PY'
+          import tilelang
+
+          print("tilelang resolves to:", tilelang.__file__)
+          assert "site-packages" in tilelang.__file__, f"source tree shadows the wheel: {tilelang.__file__}"
+          PY
+
+      - name: Run AscendC examples
+        id: backend-examples
+        if: ${{ !cancelled() && steps.wheel-install.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: ascend
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run AscendC unit tests
+        id: backend-unit-tests
+        if: ${{ !cancelled() && steps.wheel-install.outcome == 'success' }}
+        shell: bash
+        env:
+          TEST_MARKERS: not pto
+        run: |
+          source .venv/bin/activate
+          # test_ascend_vmi_alloc_marker.py builds a CUDA Target at module
+          # import time, which aborts collection on the CUDA-less NPU
+          # container; all its tests are pto-marked and excluded anyway.
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" \
+            --ignore testing/ascend/transform/test_ascend_vmi_alloc_marker.py \
+            testing/ascend
+
+      - name: Summarize Ascend wheel test results
+        if: ${{ always() }}
+        shell: bash
+        env:
+          WHEEL_NAME: ${{ env.WHEEL_NAME }}
+          CANN_VERSION: ${{ matrix.cann }}
+          PYTHON_VERSION: ${{ matrix.python }}
+          INSTALL_RESULT: ${{ steps.wheel-install.outcome }}
+          EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
+          UNIT_RESULT: ${{ steps.backend-unit-tests.outcome }}
+        run: |
+          {
+            echo "### Test built wheels on Ascend NPU (CANN ${CANN_VERSION}, Python ${PYTHON_VERSION})"
+            echo
+            echo "Wheel: \`${WHEEL_NAME:-unknown}\`"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Install wheel | ${INSTALL_RESULT} |"
+            echo "| AscendC examples | ${EXAMPLES_RESULT} |"
+            echo "| AscendC unit tests | ${UNIT_RESULT} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   list-artifacts:
     name: List artifacts
     # Not PR to save artifact storage, as artifacts are only needed for releases.
