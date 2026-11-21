@@ -45,6 +45,21 @@ def _make_vectorized_program(dtype=T.float32):
     return main
 
 
+def _make_fmul_add_program(dtype):
+    @T.prim_func
+    def main(
+        A: T.Tensor((ROWS, WIDTH), dtype),
+        B: T.Tensor((ROWS, WIDTH), dtype),
+        C: T.Tensor((ROWS, WIDTH), dtype),
+        D: T.Tensor((ROWS, WIDTH), dtype),
+    ):
+        with T.Kernel(1, threads=ROWS):
+            for i, j in T.Parallel(ROWS, WIDTH):
+                D[i, j] = T.fmul(A[i, j], B[i, j]) + C[i, j]
+
+    return main
+
+
 def _lower_cuda_source(program, arch: str) -> str:
     target = {"kind": "cuda", "arch": arch}
     with tvm.transform.PassContext(), tvm.target.Target(target):
@@ -134,6 +149,26 @@ def test_fma_fmul_vectorized_cuda_codegen_sm100():
 
     assert source.count("tl::mul2(") >= WIDTH // 2
     assert source.count("tl::fma2(") >= WIDTH // 2
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
+def test_fmul_vectorized_low_precision_cuda_codegen(dtype):
+    source = _lower_cuda_source(_make_fmul_add_program(dtype), "sm_90")
+    assert source.count("tl::mul2_rn(") >= WIDTH // 2
+
+
+@tilelang.testing.requires_cuda_compute_version_ge(8, 0)
+@pytest.mark.parametrize(
+    ("dtype", "torch_dtype", "epsilon"),
+    [(T.float16, torch.float16, 2**-10), (T.bfloat16, torch.bfloat16, 2**-7)],
+)
+def test_fmul_vectorized_low_precision_rounding_boundary(dtype, torch_dtype, epsilon):
+    kernel = tilelang.compile(_make_fmul_add_program(dtype), out_idx=[3], target="cuda")
+    a = torch.full((ROWS, WIDTH), 1 + epsilon, device="cuda", dtype=torch_dtype)
+    c = torch.full((ROWS, WIDTH), -(1 + 2 * epsilon), device="cuda", dtype=torch_dtype)
+    actual = kernel(a, a, c)
+    torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
 
 
 @tilelang.testing.requires_cuda
