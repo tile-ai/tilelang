@@ -1,9 +1,9 @@
 #pragma once
 
+#include "c_api/asc_simd.h"
 #include <stdint.h>
 #include <type_traits>
 #include <version/asc_devkit_version.h>
-#include "c_api/asc_simd.h"
 
 // Stable names used by Ascend codegen. asc_simd.h selects the SDK APIs
 // available for the compilation target.
@@ -66,7 +66,8 @@ template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
 }
 #endif
 
-// The 9.1 dav-3510 DMA ABI uses packed controls and a longer L0C store signature.
+// The 9.1 dav-3510 DMA ABI uses packed controls and a longer L0C store
+// signature.
 #if TL_CANN_9_1 && __NPU_ARCH__ == 3510
 __aicore__ inline void set_gm2l1_nz_para(uint16_t batches, uint16_t n_stride,
                                          uint16_t c0_stride,
