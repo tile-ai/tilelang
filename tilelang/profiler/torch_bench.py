@@ -18,20 +18,29 @@ _CACHE_FLUSH_ID = "tilelang::cache_flush"
 def _get_npu_l2_cache_flush():
     import ctypes
 
-    flush = ctypes.CDLL("libascendcl.so").aclrtDeviceL2CacheFlush
+    flush = getattr(ctypes.CDLL("libascendcl.so"), "aclrtDeviceL2CacheFlush", None)
+    if flush is None:
+        return None
     flush.argtypes = [ctypes.c_void_p]
     flush.restype = ctypes.c_int
     return flush
 
 
+def _allocate_cache(device, size_mb: int) -> torch.Tensor:
+    numel = size_mb * 1024 * 1024 // 4
+    if torch.device(device).type == "npu" and _get_npu_l2_cache_flush() is not None:
+        numel = 0
+    return torch.empty(numel, dtype=torch.int32, device=device)
+
+
 def _flush_cache(cache: torch.Tensor) -> None:
-    if cache.device.type == "npu":
+    if cache.device.type == "npu" and (flush := _get_npu_l2_cache_flush()) is not None:
         with torch.npu.device(cache.device):
             torch.npu.synchronize()
-            status = _get_npu_l2_cache_flush()(None)
+            status = flush(None)
             if status:
                 raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
-    else:
+    elif cache.device.type != "npu" or cache.numel():
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
 
 

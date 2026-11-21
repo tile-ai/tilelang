@@ -281,7 +281,7 @@
   }
 
 namespace __asc_aicore {
-TL_DEFINE_ASCEND_DEBUG(__aicore__, block_idx)
+TL_DEFINE_ASCEND_DEBUG(__aicore__, static_cast<int32_t>(block_idx))
 } // namespace __asc_aicore
 
 namespace __asc_simt_vf {

@@ -26,7 +26,7 @@ def runtime_divisor_copy():
 def test_mte_copy_hoists_let_bindings_before_calls():
     source = tilelang.lower(runtime_divisor_copy(), target="ascend").kernel_source
 
-    for call_name in ("asc_copy_gm2ub_align", "asc_copy_ub2gm_align"):
+    for call_name in ("tl::cann::copy_gm2ub_align", "tl::cann::copy_ub2gm_align"):
         call_start = source.index(call_name)
         call_end = source.index(");", call_start)
         call = source[call_start:call_end]

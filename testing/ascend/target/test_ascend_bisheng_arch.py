@@ -7,9 +7,29 @@ import pytest
 from tvm.target import Target
 
 from tilelang.contrib import bisheng
+from tilelang.env import TILELANG_TEMPLATE_PATH
 from tilelang.jit.adapter import libgen
 from tilelang.jit import kernel as jit_kernel
 from tilelang.transform import PassConfigKey
+
+
+@pytest.mark.parametrize("arch", ["dav-2201", "dav-3510"])
+def test_cann_compat_shared_controls_compile(arch):
+    try:
+        bisheng.find_bisheng_path()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    source = """
+    #include "tl_templates/ascend/cann_compat.h"
+    extern "C" __global__ __cube__ void shared_controls() {
+        tl::cann::set_atomic_add_int32();
+        tl::cann::set_hf32_round_mode(tl::cann::hf32_round_mode::NEAREST_EVEN);
+        tl::cann::disable_hf32();
+    }
+    """
+    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch=arch, options=["-I" + TILELANG_TEMPLATE_PATH])
+    assert binary.startswith(b"\x7fELF")
 
 
 def test_target_npu_arch_priority(monkeypatch):
