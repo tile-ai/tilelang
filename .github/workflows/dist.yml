@@ -752,6 +752,38 @@ jobs:
           pathlib.Path("index.html").write_text("\n".join(lines) + "\n")
           PY
           obsutil/obsutil cp index.html "${OBS_DIR}" -meta=Content-Type:text/html
+
+          # Verify anonymous HTTPS access for index.html and every wheel uploaded
+          # in this run. If the bucket policy does not already grant public read
+          # on TileLang/*, fall back to object-level public-read ACLs.
+          PUBLIC_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang"
+          verify_public_read() {
+            curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/index.html" >/dev/null || return 1
+            for wheel in wheelhouse/*.whl; do
+              local href
+              href="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$(basename "${wheel}")")"
+              curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/${href}" >/dev/null || return 1
+            done
+          }
+
+          if ! verify_public_read; then
+            echo "Objects are not publicly readable via bucket policy; applying -acl=public-read..."
+            for wheel in wheelhouse/*.whl; do
+              obsutil/obsutil chattri "${OBS_DIR}$(basename "${wheel}")" -acl=public-read || {
+                echo "::error::Failed to set public-read ACL on $(basename "${wheel}"). Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
+                exit 1
+              }
+            done
+            obsutil/obsutil chattri "${OBS_DIR}index.html" -acl=public-read || {
+              echo "::error::Failed to set public-read ACL on index.html. Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
+              exit 1
+            }
+            if ! verify_public_read; then
+              echo "::error::Uploaded OBS objects are still not publicly readable over HTTPS (${PUBLIC_BASE}/index.html)."
+              exit 1
+            fi
+          fi
+
           echo "Published ${WHL_COUNT} wheel(s); index lists $(wc -l < files.txt) file(s)."
 
       - name: Summary
