@@ -413,8 +413,13 @@ class AscendMGroupedTileScheduler(AscendBaseTileScheduler):
                 T.loop_break()
             self.last_psum_m[0] = T.ceildiv(self.cur_psum_m[0], self._alignment) * self._alignment
             self.cur_psum_m[0] = self._grouped_layout[self.group_idx[0]]
-            self.m_block_cumsum[0] = self.m_block_cumsum[0] + self.cur_num_m_blocks[0]
-            self.cur_num_m_blocks[0] = T.ceildiv(self.cur_psum_m[0] - self.last_psum_m[0], self._block_m)
+            # A group that ends at or below the aligned start of its predecessor
+            # owns no rows, so it contributes no tiles: only non-empty groups
+            # advance the running block count (mirrors k_block_cumsum). Clamp the
+            # row deficit so the block count itself can never go negative.
+            if self.cur_num_m_blocks[0] > 0:
+                self.m_block_cumsum[0] = self.m_block_cumsum[0] + self.cur_num_m_blocks[0]
+            self.cur_num_m_blocks[0] = T.ceildiv(T.max(self.cur_psum_m[0] - self.last_psum_m[0], 0), self._block_m)
         in_group = block_idx - self.m_block_cumsum[0] * num_n
         m, n = self._swizzle(in_group, self.cur_num_m_blocks[0])
         self._m_idx[0] = m + self.last_psum_m[0] // self._block_m
