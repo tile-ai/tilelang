@@ -151,13 +151,6 @@ def test_fma_fmul_vectorized_cuda_codegen_sm100():
     assert source.count("tl::fma2(") >= WIDTH // 2
 
 
-@tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", [T.float16, T.bfloat16])
-def test_fmul_vectorized_low_precision_cuda_codegen(dtype):
-    source = _lower_cuda_source(_make_fmul_add_program(dtype), "sm_90")
-    assert source.count("tl::mul2_rn(") >= WIDTH // 2
-
-
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 @pytest.mark.parametrize(
     ("dtype", "torch_dtype", "epsilon"),
@@ -169,6 +162,8 @@ def test_fmul_vectorized_low_precision_rounding_boundary(dtype, torch_dtype, eps
     c = torch.full((ROWS, WIDTH), -(1 + 2 * epsilon), device="cuda", dtype=torch_dtype)
     actual = kernel(a, a, c)
     torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
+    # Some architectures do not contract the unprotected multiply for this input.
+    assert kernel.get_kernel_source().count("tl::mul2_rn(") >= WIDTH // 2
 
 
 @tilelang.testing.requires_cuda
