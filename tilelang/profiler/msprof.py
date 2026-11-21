@@ -6,8 +6,28 @@ import os
 from collections.abc import Callable
 
 import torch
+import tilelang
 
 from .torch_bench import _flush_cache
+
+
+@tilelang.jit(out_idx=[], target="ascend")
+def _get_cache_read_kernel(numel: int):
+    from tilelang.ascend import language as T
+
+    tile_elems = 32 * 1024 // 4
+    tiles_per_core = (numel + tile_elems * 64 - 1) // (tile_elems * 64)
+
+    @T.prim_func
+    def _tilelang_profiler_cache_flush(Cache: T.Tensor((numel,), "int32")):
+        with T.Kernel(64) as bx:
+            ub = T.alloc_shared((tile_elems,), "int32")
+            for it in T.serial(tiles_per_core):
+                begin = (it * 64 + bx) * tile_elems
+                if begin < numel:
+                    T.copy(Cache[begin : begin + tile_elems], ub, l2_cache_ctrl="NORMAL_FV")
+
+    return _tilelang_profiler_cache_flush
 
 
 def bench_with_msprof(
@@ -245,6 +265,11 @@ def bench_with_msprof(
         return total
 
     with torch.npu.device(cache.device), _defer_signals(), _prof_work_path(), _suppress_output(True):
+        # A named scratch read can be excluded from the trace even when fn is a reduction.
+        flush = _flush_cache
+        if cache.numel():
+            flush = _get_cache_read_kernel(cache.numel())
+            flush(cache)
         torch.npu.synchronize()
 
         with torch_npu.profiler.profile(
@@ -259,13 +284,15 @@ def bench_with_msprof(
             ),
         ) as prof:
             for _ in range(n_repeat):
-                _flush_cache(cache)
+                flush(cache)
                 fn()
             torch.npu.synchronize()
             prof.step()
 
         kernel_profiles = _parse_ffts_profile(Path(prof.prof_if.prof_path), n_repeat)
 
+    if cache.numel():
+        kernel_profiles = {name: value for name, value in kernel_profiles.items() if "_tilelang_profiler_cache_flush_kernel" not in name}
     if not kernel_profiles:
         raise RuntimeError("No profiled kernels were recorded.")
 

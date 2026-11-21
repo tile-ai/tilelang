@@ -15,6 +15,7 @@ from tilelang.utils.device import IS_CUDA, IS_NPU, Event, device_synchronize
 
 from .torch_bench import (
     _CACHE_FLUSH_ID as _CACHE_FLUSH_ID,
+    _allocate_cache,
     _cuda_synchronize as _cuda_synchronize,
     _flush_cache,
     bench_with_cuda_events as _bench_with_cuda_events,
@@ -68,7 +69,7 @@ def do_bench(
             cache buffers, and synchronization are scoped to that device.
             Event timing also accepts MPS and NPU; wall timing accepts CPU, MPS, and NPU.
             Integer device indices select CUDA/HIP; use an NPU device object for NPU selection.
-        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall" and NPU timing
+        cache_size: GPU L2 cache flush buffer size in MB (default: 256); ignored by "wall" and NPUs with native L2 flushing
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
@@ -203,10 +204,7 @@ def _do_bench_impl(
     fn()
     _cuda_synchronize(device_idx)
 
-    # NPU needs only device metadata; other backends need a scratch buffer.
-    cache_device = _cache_device(device_idx)
-    cache_numel = 0 if torch.device(cache_device).type == "npu" else cache_size * 1024 * 1024 // 4
-    cache = torch.empty(cache_numel, dtype=torch.int32, device=cache_device)
+    cache = _allocate_cache(_cache_device(device_idx), cache_size)
 
     # Warm cache maintenance outside the estimate to exclude backend setup.
     _flush_cache(cache)
