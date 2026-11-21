@@ -7,13 +7,17 @@
 #include "parallel_to_pto_utils.h"
 
 #include <tvm/arith/pattern.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include "../../layout/utils.h"
 
-#include <functional>
+#include <cstring>
+#include <map>
+#include <set>
 #include <sstream>
+#include <utility>
 
 namespace tvm {
 namespace tl {
@@ -38,6 +42,49 @@ std::string AccessPatternToString(AccessPattern pattern) {
 // SubstituteVar, ResolveIndexAliases and IsSupportedAddressExpr live in
 // pto_index_analysis.cc; PTO lane-layout planning and the consumers here share
 // that single implementation.
+
+// ---------------------------------------------------------------------------
+// Shared frontend-op-name -> VMI-op-name tables: one table per concept so
+// the expression whitelist, the lane-use classification and the pass-side
+// dispatch (Verify admission / Vectorize rewriting) cannot drift apart.
+// ---------------------------------------------------------------------------
+
+const char *MaskLogicVmiOpName(const std::string &tir_op_name) {
+  // TileLang `a & b` / `a | b` / `~a` on bool predicates arrive as
+  // tirx.bitwise_* calls (plus the tir.bitwise_* and tir.And/Or/Not
+  // spellings); Vectorize rewrites them to the PTODSL bitwise vector ops,
+  // whose mask register overload implements the boolean combine.
+  static const std::pair<const char *, const char *> kMaskLogicTable[] = {
+      {"tirx.bitwise_and", "vand"}, {"tir.bitwise_and", "vand"},
+      {"tir.And", "vand"},          {"tirx.bitwise_or", "vor"},
+      {"tir.bitwise_or", "vor"},    {"tir.Or", "vor"},
+      {"tirx.bitwise_not", "vnot"}, {"tir.bitwise_not", "vnot"},
+      {"tir.Not", "vnot"},
+  };
+  for (const auto &entry : kMaskLogicTable) {
+    if (tir_op_name == entry.first) {
+      return entry.second;
+    }
+  }
+  return nullptr;
+}
+
+const char *VectorUnaryVmiOpName(const std::string &tirx_op_name) {
+  // Hardware-backed unary math: fabs/exp/log/sqrt map to the VMI
+  // vabs/vexp/vln/vsqrt instructions.
+  static const std::pair<const char *, const char *> kUnaryMathTable[] = {
+      {"tirx.fabs", "vabs"},
+      {"tirx.exp", "vexp"},
+      {"tirx.log", "vln"},
+      {"tirx.sqrt", "vsqrt"},
+  };
+  for (const auto &entry : kUnaryMathTable) {
+    if (tirx_op_name == entry.first) {
+      return entry.second;
+    }
+  }
+  return nullptr;
+}
 
 PtoInverseMapping InvertPtoLaneLayout(const For &loop) {
   auto anno = loop->annotations.Get(attr::kPtoParallelLoopLayout);
@@ -117,8 +164,7 @@ PtoInverseMapping InvertPtoLaneLayout(const For &loop) {
   if (is_2d) {
     const int64_t *inner_extent_ptr = as_const_int(inner_node->extent);
     if (inner_extent_ptr == nullptr) {
-      // The helper must not assert on inputs the callers did not
-      // pre-validate; a symbolic inner extent is a layout diagnostic.
+      // A symbolic inner extent is a layout diagnostic, not an assert.
       std::ostringstream oss;
       oss << "pto_parallel_loop_layout inner loop extent must be a "
              "compile-time constant, got "
@@ -596,32 +642,32 @@ public:
   void MarkUnsupported(const char *kind) {
     if (!unsupported.has_value()) {
       unsupported = std::string("unsupported expression node `") + kind +
-                    "` (only buffer loads, constants, "
-                    "scalars, loop indices, Add, Sub, Mul, Div, "
-                    "fabs/exp/log/sqrt and Cast)";
+                    "` (admits buffer loads, constants, scalars, loop "
+                    "indices, Add, Sub, Mul, Div, fabs/exp/log/sqrt, Cast, "
+                    "Select, comparisons, Min/Max, And/Or/Not and the "
+                    "bitwise mask-combine calls)";
     }
   }
   void VisitExpr_(const ModNode *) final { MarkUnsupported("Mod"); }
   void VisitExpr_(const FloorDivNode *) final { MarkUnsupported("FloorDiv"); }
   void VisitExpr_(const FloorModNode *) final { MarkUnsupported("FloorMod"); }
-  void VisitExpr_(const MinNode *) final { MarkUnsupported("Min"); }
-  void VisitExpr_(const MaxNode *) final { MarkUnsupported("Max"); }
-  void VisitExpr_(const EQNode *) final { MarkUnsupported("EQ"); }
-  void VisitExpr_(const NENode *) final { MarkUnsupported("NE"); }
-  void VisitExpr_(const LTNode *) final { MarkUnsupported("LT"); }
-  void VisitExpr_(const LENode *) final { MarkUnsupported("LE"); }
-  void VisitExpr_(const GTNode *) final { MarkUnsupported("GT"); }
-  void VisitExpr_(const GENode *) final { MarkUnsupported("GE"); }
-  void VisitExpr_(const AndNode *) final { MarkUnsupported("And"); }
-  void VisitExpr_(const OrNode *) final { MarkUnsupported("Or"); }
-  void VisitExpr_(const NotNode *) final { MarkUnsupported("Not"); }
-  void VisitExpr_(const SelectNode *) final {
-    if (!unsupported.has_value()) {
-      unsupported =
-          "Select is not vectorizable yet (integer T.abs lowers to Select; "
-          "it arrives with the PR-2 Select/cmp support)";
-    }
-  }
+  // Min/Max are admitted here — Verify runs before
+  // LegalizeParallelToPTO, which rewrites them into the Select form before
+  // VectorizeParallelToPTO consumes the unit.
+  void VisitExpr_(const MinNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const MaxNode *op) final { ExprVisitor::VisitExpr_(op); }
+  // Select + relational ops (the shape Legalize produces and Vectorize
+  // lowers to vcmp/vcmps + vsel).
+  void VisitExpr_(const EQNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const NENode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const LTNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const LENode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const GTNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const GENode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const AndNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const OrNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const NotNode *op) final { ExprVisitor::VisitExpr_(op); }
+  void VisitExpr_(const SelectNode *op) final { ExprVisitor::VisitExpr_(op); }
   void VisitExpr_(const RampNode *) final { MarkUnsupported("Ramp"); }
   void VisitExpr_(const BroadcastNode *) final { MarkUnsupported("Broadcast"); }
   void VisitExpr_(const ShuffleNode *) final { MarkUnsupported("Shuffle"); }
@@ -629,11 +675,22 @@ public:
   void VisitExpr_(const CallNode *op) final {
     if (auto call_op = op->op.as<Op>()) {
       const std::string &name = call_op.value()->name;
-      // Hardware-backed unary math. fabs/exp/log/sqrt map to the VMI
-      // vabs/vexp/vln/vsqrt instructions; the dtype matrix mirrors the
-      // ISA documentation (see IsSupportedVectorUnaryOp).
-      if (name == "tirx.fabs" || name == "tirx.exp" || name == "tirx.log" ||
-          name == "tirx.sqrt") {
+      // Boolean combine on lane masks (tirx.bitwise_*; table above).
+      if (MaskLogicVmiOpName(name) != nullptr) {
+        for (const auto &arg : op->args) {
+          VisitExpr(arg);
+        }
+        return;
+      }
+      // The frontend -T.infinity(...) sentinel lowers to
+      // Mul(Call(tl.infinity, dtype), -1); infinity is a compile-time float
+      // constant and lane-uniform.
+      if (name == "tl.infinity" || name == "tir.infinity") {
+        return;
+      }
+      // Hardware unary math (table above; dtype matrix in
+      // IsSupportedVectorUnaryOp).
+      if (VectorUnaryVmiOpName(name) != nullptr) {
         if (op->args.size() != 1U) {
           if (!unsupported.has_value()) {
             unsupported = name + " expects exactly one operand";
@@ -866,6 +923,27 @@ PtoRegionScan ScanPtoRegion(const Stmt &region) {
   return scan;
 }
 
+bool IsNoOpStmt(const Stmt &stmt) {
+  // A no-op statement carries no work: an Evaluate of an IntImm constant
+  // (e.g. a simplified identity else store; treating it as "no else"
+  // yields the correct masked-update form), an empty SeqStmt, or a SeqStmt
+  // whose every element is itself a no-op. One shared implementation so
+  // the branch shapes Verify admits are exactly the ones Legalize
+  // rewrites.
+  if (const auto *eval = stmt.as<EvaluateNode>()) {
+    return eval->value.as<IntImmNode>() != nullptr;
+  }
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    for (const Stmt &s : seq->seq) {
+      if (!IsNoOpStmt(s)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 std::string LaneUseToString(LaneUse use) {
   switch (use) {
   case LaneUse::kUniform:
@@ -969,8 +1047,7 @@ LaneUse AnalyzeLaneUseImpl(const PrimExpr &expr, LaneUseContext *ctx,
       std::ostringstream oss;
       oss << "variable `" << var->name_hint
           << "` is not defined in this unit or any outer scope";
-      // The diagnostic was built but never written back, leaving
-      // metadata errors with an empty reason.
+      // Record the reason so the caller reports a concrete cause.
       *reason = oss.str();
     }
     return LaneUse::kUnknown;
@@ -992,12 +1069,12 @@ LaneUse AnalyzeLaneUseImpl(const PrimExpr &expr, LaneUseContext *ctx,
     }
   }
   // Hardware-backed unary math shares the whitelist's contract (float32
-  // tirx.fabs/exp/log/sqrt): recurse into the single operand.
+  // tirx.fabs/exp/log/sqrt; the shared VectorUnaryVmiOpName table):
+  // recurse into the single operand.
   if (const auto *call = expr.as<CallNode>()) {
     if (auto call_op = call->op.as<Op>()) {
       const std::string &name = call_op.value()->name;
-      if (name == "tirx.fabs" || name == "tirx.exp" || name == "tirx.log" ||
-          name == "tirx.sqrt") {
+      if (VectorUnaryVmiOpName(name) != nullptr) {
         return AnalyzeLaneUseImpl(call->args[0], ctx, reason, metadata_mode);
       }
     }
@@ -1037,45 +1114,47 @@ LaneUse AnalyzeLaneUseImpl(const PrimExpr &expr, LaneUseContext *ctx,
     b = &fmod->b;
     known_op = metadata_mode;
   } else if (const auto *minn = expr.as<MinNode>()) {
+    // Min/Max classify like the comparisons in value mode too;
+    // LegalizeParallelToPTO rewrites them into Select before Vectorize.
     a = &minn->a;
     b = &minn->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *maxx = expr.as<MaxNode>()) {
     a = &maxx->a;
     b = &maxx->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *lt = expr.as<LTNode>()) {
     a = &lt->a;
     b = &lt->b;
-    known_op = metadata_mode;
+    known_op = true; // cmp -> vcmp/vcmps
   } else if (const auto *len = expr.as<LENode>()) {
     a = &len->a;
     b = &len->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *gt = expr.as<GTNode>()) {
     a = &gt->a;
     b = &gt->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *ge = expr.as<GENode>()) {
     a = &ge->a;
     b = &ge->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *eq = expr.as<EQNode>()) {
     a = &eq->a;
     b = &eq->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *ne = expr.as<NENode>()) {
     a = &ne->a;
     b = &ne->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *andn = expr.as<AndNode>()) {
     a = &andn->a;
     b = &andn->b;
-    known_op = metadata_mode;
+    known_op = true;
   } else if (const auto *orn = expr.as<OrNode>()) {
     a = &orn->a;
     b = &orn->b;
-    known_op = metadata_mode;
+    known_op = true;
   }
   if (known_op) {
     lhs = AnalyzeLaneUseImpl(*a, ctx, reason, metadata_mode);
@@ -1090,14 +1169,59 @@ LaneUse AnalyzeLaneUseImpl(const PrimExpr &expr, LaneUseContext *ctx,
                ? LaneUse::kUniform
                : LaneUse::kVarying;
   }
-  if (!metadata_mode) {
-    if (const auto *notn = expr.as<NotNode>()) {
-      // Not is a value-mode whitelist reject too; keep symmetric.
+  if (const auto *notn = expr.as<NotNode>()) {
+    return AnalyzeLaneUseImpl(notn->a, ctx, reason, metadata_mode);
+  }
+  if (const auto *call = expr.as<CallNode>()) {
+    std::string name;
+    if (const auto *op_node = call->op.as<OpNode>()) {
+      name = op_node->name;
     }
-  } else {
-    if (const auto *notn = expr.as<NotNode>()) {
-      return AnalyzeLaneUseImpl(notn->a, ctx, reason, metadata_mode);
+    auto is_mask_logic = [&](const std::string &n) {
+      return MaskLogicVmiOpName(n) != nullptr;
+    };
+    if (is_mask_logic(name)) {
+      if (call->args.empty()) {
+        if (reason)
+          *reason = "empty mask-logic call";
+        return LaneUse::kUnknown;
+      }
+      LaneUse acc =
+          AnalyzeLaneUseImpl(call->args[0], ctx, reason, metadata_mode);
+      if (acc == LaneUse::kUnknown)
+        return LaneUse::kUnknown;
+      for (size_t i = 1; i < call->args.size(); ++i) {
+        LaneUse u =
+            AnalyzeLaneUseImpl(call->args[i], ctx, reason, metadata_mode);
+        if (u == LaneUse::kUnknown)
+          return LaneUse::kUnknown;
+        if (u == LaneUse::kVarying)
+          acc = LaneUse::kVarying;
+      }
+      return acc;
     }
+    if (name == "tl.infinity" || name == "tir.infinity") {
+      return LaneUse::kUniform;
+    }
+  }
+  if (const auto *sel = expr.as<SelectNode>()) {
+    // Select(cond, t, f) -> vsel; lane use is varying if any arm is.
+    LaneUse c = AnalyzeLaneUseImpl(sel->condition, ctx, reason, metadata_mode);
+    LaneUse tv =
+        AnalyzeLaneUseImpl(sel->true_value, ctx, reason, metadata_mode);
+    LaneUse fv =
+        AnalyzeLaneUseImpl(sel->false_value, ctx, reason, metadata_mode);
+    if (c == LaneUse::kUnknown || tv == LaneUse::kUnknown ||
+        fv == LaneUse::kUnknown) {
+      if (reason != nullptr && reason->empty()) {
+        *reason = "unknown operand in Select";
+      }
+      return LaneUse::kUnknown;
+    }
+    return (c == LaneUse::kUniform && tv == LaneUse::kUniform &&
+            fv == LaneUse::kUniform)
+               ? LaneUse::kUniform
+               : LaneUse::kVarying;
   }
   if (const auto *cast = expr.as<CastNode>()) {
     return AnalyzeLaneUseImpl(cast->value, ctx, reason, metadata_mode);
@@ -1126,19 +1250,19 @@ LaneUse AnalyzeLaneUseMeta(const PrimExpr &expr, LaneUseContext *ctx,
 bool IsSupportedVectorUnaryOp(const std::string &tirx_op, DataType dtype) {
   // Per the VMI ISA documentation: vabs admits f16/bf16/f32 (the vabs
   // instruction also takes si8/si16/si32, but the frontend abs() lowers
-  // integers to Select — PR-2 territory — and returns unsigned inputs
-  // unchanged, so integer dtypes never reach this gate); vexp/vln/vsqrt
-  // admit f16/f32 only.
+  // integers to Select and returns unsigned inputs unchanged, so integer
+  // dtypes never reach this gate); vexp/vln/vsqrt admit f16/f32 only.
+  // The op-name admission is the shared VectorUnaryVmiOpName table.
+  if (VectorUnaryVmiOpName(tirx_op) == nullptr) {
+    return false;
+  }
   const int bits = dtype.bits();
   if (tirx_op == "tirx.fabs") {
     return (dtype.is_float() || dtype.is_bfloat16()) &&
            (bits == 16 || bits == 32);
   }
-  if (tirx_op == "tirx.exp" || tirx_op == "tirx.log" ||
-      tirx_op == "tirx.sqrt") {
-    return dtype.is_float() && (bits == 16 || bits == 32);
-  }
-  return false;
+  // The remaining mapped names (exp/log/sqrt).
+  return dtype.is_float() && (bits == 16 || bits == 32);
 }
 
 bool ExprUsesVar(const PrimExpr &expr, const VarNode *var) {
@@ -1647,6 +1771,247 @@ std::optional<std::string> FindUnsupportedExprNode(const PrimExpr &expr) {
   WhitelistVisitor visitor;
   visitor(expr);
   return visitor.unsupported;
+}
+
+// ---------------------------------------------------------------------------
+// Relational kinds shared with VectorizeParallelToPTO / VerifyParallelToPTO
+// ---------------------------------------------------------------------------
+
+namespace {
+
+template <typename Node>
+bool TakeRelational(const PrimExpr &e, PrimExpr *a, PrimExpr *b) {
+  const Node *n = e.as<Node>();
+  if (n == nullptr) {
+    return false;
+  }
+  if (a != nullptr) {
+    *a = n->a;
+  }
+  if (b != nullptr) {
+    *b = n->b;
+  }
+  return true;
+}
+
+const RelationalKind kRelationalTable[6] = {
+    {TakeRelational<EQNode>, "eq",
+     [](const PrimExpr &a, const PrimExpr &b) { return a == b; }},
+    {TakeRelational<NENode>, "ne",
+     [](const PrimExpr &a, const PrimExpr &b) { return a != b; }},
+    {TakeRelational<LTNode>, "lt",
+     [](const PrimExpr &a, const PrimExpr &b) { return a < b; }},
+    {TakeRelational<LENode>, "le",
+     [](const PrimExpr &a, const PrimExpr &b) { return a <= b; }},
+    {TakeRelational<GTNode>, "gt",
+     [](const PrimExpr &a, const PrimExpr &b) { return a > b; }},
+    {TakeRelational<GENode>, "ge",
+     [](const PrimExpr &a, const PrimExpr &b) { return a >= b; }},
+};
+
+} // namespace
+
+const RelationalKind *MatchRelational(const PrimExpr &e, PrimExpr *a,
+                                      PrimExpr *b) {
+  for (const RelationalKind &kind : kRelationalTable) {
+    if (kind.take(e, a, b)) {
+      return &kind;
+    }
+  }
+  return nullptr;
+}
+
+const RelationalKind *RelationalByName(const char *cmp) {
+  for (const RelationalKind &kind : kRelationalTable) {
+    if (std::strcmp(kind.cmp, cmp) == 0) {
+      return &kind;
+    }
+  }
+  return nullptr;
+}
+
+bool IsSafelyReevaluableValue(const PrimExpr &value) {
+  class Checker : public tirx::ExprVisitor {
+  public:
+    bool safe = true;
+
+    // A load observes memory; re-expanding the bind would re-read it at a later
+    // program point. A call may read hidden state or have an effect. Neither is
+    // substitutable, so the bind var stays an opaque SSA snapshot.
+    void VisitExpr_(const tirx::BufferLoadNode *) final { safe = false; }
+    void VisitExpr_(const tirx::CallNode *) final { safe = false; }
+  };
+  Checker checker;
+  checker(value);
+  return checker.safe;
+}
+
+bool IsProvablyTruePredicate(const PrimExpr &predicate,
+                             arith::Analyzer *analyzer,
+                             const Map<Var, PrimExpr> &bind_env) {
+  // Resolve the pass's scalar Bind values first: a `Bind`-defined bool is a
+  // known value to both passes, and Verify already checked those references.
+  class BindSubstituter : public tirx::ExprMutator {
+  public:
+    explicit BindSubstituter(const Map<Var, PrimExpr> &env) : env_(env) {}
+    PrimExpr VisitExpr_(const VarNode *op) final {
+      auto it = env_.find(GetRef<Var>(op));
+      return it != env_.end() ? (*it).second : GetRef<PrimExpr>(op);
+    }
+
+  private:
+    const Map<Var, PrimExpr> &env_;
+  };
+  PrimExpr value = predicate;
+  if (!bind_env.empty()) {
+    // A Bind value may itself reference another bound var; a couple of rounds
+    // resolve the shallow chains these passes admit without a fixpoint search.
+    for (int round = 0; round < 3; ++round) {
+      BindSubstituter substituter(bind_env);
+      PrimExpr next = substituter(std::move(value));
+      if (next.same_as(value)) {
+        break;
+      }
+      value = std::move(next);
+    }
+  }
+  // No explicit Simplify here: CanProve folds the expression itself, and what
+  // decides a range-only predicate is the facts bound into the analyzer (a loop
+  // bound makes `_t < extent` provable), not an extra rewrite.
+  return analyzer->CanProve(value);
+}
+
+// Handle-valued Binds: `Bind(q, A.data)` makes q a pointer the lane analysis
+// cannot follow. Record the target Vars only; resolving their origin was
+// unsound (a handle BufferLoad holds a pointer value, not the storage that
+// contains it) and let two admission bypasses through.
+void CollectHandleBindTargets(const Stmt &stmt,
+                              std::set<const VarNode *> *out) {
+  class Collector : public tirx::StmtExprVisitor {
+  public:
+    explicit Collector(std::set<const VarNode *> *out) : out_(out) {}
+    void VisitStmt_(const tirx::BindNode *op) final {
+      if (op->value.dtype().is_handle()) {
+        out_->insert(op->var.get());
+      }
+      tirx::StmtExprVisitor::VisitStmt_(op);
+    }
+
+  private:
+    std::set<const VarNode *> *out_;
+  };
+  Collector collector(out);
+  collector(stmt);
+}
+
+StorageOrigins CollectStorageOrigins(const Stmt &body,
+                                     const Map<Var, Buffer> &buffer_map,
+                                     bool no_alias,
+                                     const Array<Var> &non_restrict_params) {
+  StorageOrigins origins;
+  origins.no_alias = no_alias;
+  for (const auto &kv : buffer_map) {
+    origins.parameters.insert(kv.second->data.get());
+  }
+  auto add_non_restrict = [&origins, &buffer_map](const Var &var) {
+    if (!var.defined()) {
+      return;
+    }
+    origins.non_restrict.insert(var.get());
+    // The frontend may name the handle parameter or its data Var.
+    if (auto buffer = buffer_map.Get(var)) {
+      origins.non_restrict.insert(buffer.value()->data.get());
+    }
+  };
+  for (const Var &var : non_restrict_params) {
+    add_non_restrict(var);
+  }
+
+  class Collector : public tirx::StmtExprVisitor {
+  public:
+    explicit Collector(StorageOrigins *out) : out_(out) {}
+    void VisitStmt_(const tirx::SBlockNode *op) final {
+      for (const Buffer &buffer : op->alloc_buffers) {
+        out_->allocations.insert(buffer->data.get());
+      }
+      auto it = op->annotations.find(tl::attr::kNonRestrictParams);
+      if (it != op->annotations.end()) {
+        if (const auto *arr = (*it).second.as<ArrayObj>()) {
+          for (const Var &var : Downcast<Array<Var>>((*it).second)) {
+            if (var.defined()) {
+              out_->non_restrict.insert(var.get());
+            }
+          }
+        }
+      }
+      tirx::StmtExprVisitor::VisitStmt_(op);
+    }
+
+    void VisitStmt_(const tirx::AllocBufferNode *op) final {
+      out_->allocations.insert(op->buffer->data.get());
+      tirx::StmtExprVisitor::VisitStmt_(op);
+    }
+
+  private:
+    StorageOrigins *out_;
+  };
+  Collector collector(&origins);
+  collector(body);
+  // Block annotations also name the handle parameter; map them to the data Var
+  // the conflict test compares, the same way the attribute path does.
+  for (const VarNode *var : std::set<const VarNode *>(origins.non_restrict)) {
+    if (auto buffer = buffer_map.Get(GetRef<Var>(var))) {
+      origins.non_restrict.insert(buffer.value()->data.get());
+    }
+  }
+  return origins;
+}
+
+bool MayConflictStorage(const BufferNode *lhs, const BufferNode *rhs,
+                        const StorageOrigins &origins) {
+  const VarNode *lhs_var = lhs->data.get();
+  const VarNode *rhs_var = rhs->data.get();
+  if (lhs_var == rhs_var) {
+    return true;
+  }
+  // Two real allocations are distinct storage by construction.
+  if (origins.allocations.count(lhs_var) != 0 &&
+      origins.allocations.count(rhs_var) != 0) {
+    return false;
+  }
+  // Two parameters are distinct only under an explicit no-alias contract, and
+  // even then a non-restrict parameter may alias any other storage.
+  if (origins.parameters.count(lhs_var) != 0 &&
+      origins.parameters.count(rhs_var) != 0) {
+    if (!origins.no_alias) {
+      return true;
+    }
+    return origins.non_restrict.count(lhs_var) != 0 ||
+           origins.non_restrict.count(rhs_var) != 0;
+  }
+  // An allocation against a parameter, or a pointer with no origin we can name,
+  // stays conservatively conflicting.
+  return true;
+}
+
+bool CollectStores(const Stmt &stmt,
+                   std::vector<const BufferStoreNode *> *out) {
+  if (const auto *store = stmt.as<BufferStoreNode>()) {
+    out->push_back(store);
+    return true;
+  }
+  if (pto::IsNoOpStmt(stmt)) {
+    return true;
+  }
+  if (const auto *seq = stmt.as<SeqStmtNode>()) {
+    for (const Stmt &s : seq->seq) {
+      if (!CollectStores(s, out)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
 }
 
 } // namespace pto

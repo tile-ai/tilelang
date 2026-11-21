@@ -18,6 +18,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -262,6 +263,16 @@ struct VectorCastPlan {
 
 using CastPlan = std::variant<ScalarCastPlan, VectorCastPlan>;
 
+// Maps a frontend boolean-combine op name (tirx./tir.bitwise_{and,or,not}
+// or tir.{And,Or,Not}) to the PTODSL bitwise vector op whose mask register
+// overload implements the boolean combine ("vand"/"vor"/"vnot"); returns
+// nullptr for any other name.
+const char *MaskLogicVmiOpName(const std::string &tir_op_name);
+
+// The tirx.* unary math ops with a VMI mapping (fabs/exp/log/sqrt):
+// returns the VMI op name, or nullptr for any other name.
+const char *VectorUnaryVmiOpName(const std::string &tirx_op_name);
+
 /*! Operation-level type support for the vector arithmetic emitted
  * here. VMI vmul only supports i16/i32/f16/bf16/f32
  * elements; vadd/vsub additionally allow i8; vdiv admits f16/f32 only.
@@ -383,6 +394,106 @@ struct PtoRegionScan {
  * Verify and Vectorize. */
 PtoRegionScan ScanPtoRegion(const Stmt &region);
 
+/*! A statement that carries no work: an Evaluate of an IntImm constant
+ * (e.g. a store simplified away into a constant), an empty SeqStmt, or a
+ * SeqStmt whose every element is itself a no-op. The shared contract for
+ * the "no operation" arm of a conditional branch under T.Parallel — the
+ * shape Legalize rewrites as "no else" (the masked-update Select form) and
+ * Verify admits as Select-rewritable. */
+bool IsNoOpStmt(const Stmt &stmt);
+
+/*! Whether \p value may be substituted for its `Bind` var in a predicate proof.
+ * A `Bind` is an SSA snapshot, so only expressions that cannot observe state
+ * (constants, vars, arithmetic, comparisons, logic, Select, Min/Max, Cast) are
+ * substitutable; a buffer load or a call keeps the var opaque. */
+bool IsSafelyReevaluableValue(const PrimExpr &value);
+
+/*! Whether \p predicate is provably true under \p analyzer. The scalar `Bind`
+ * values in \p bind_env are resolved first, and the enclosing loop ranges must
+ * already be bound into the analyzer. Only a proven-constant-true result
+ * counts: anything undecided is not provably true. Dropping a predicate is
+ * sound only when it holds for every lane and every iteration. */
+bool IsProvablyTruePredicate(const PrimExpr &predicate,
+                             arith::Analyzer *analyzer,
+                             const Map<Var, PrimExpr> &bind_env);
+
+/*! Collects the target Vars of the handle-valued `Bind` statements of a
+ * statement tree (`q = A.data`, `r = q`, a reinterpret cast, ...). A buffer
+ * declared over one of these pointers is a view whose storage the lane analysis
+ * cannot follow, so Verify rejects every access to such a view.
+ *
+ * The pointer origin is deliberately not traced: a handle `BufferLoad` yields a
+ * pointer value, not the storage that holds it. */
+void CollectHandleBindTargets(const Stmt &stmt, std::set<const VarNode *> *out);
+
+/*! What a function knows about where its buffers live. */
+struct StorageOrigins {
+  /*! Data Vars of real allocations (`AllocBuffer` / block `alloc_buffers`);
+   * distinct allocations never overlap. */
+  std::set<const VarNode *> allocations;
+  /*! Data Vars of parameter buffers. */
+  std::set<const VarNode *> parameters;
+  /*! Parameter data Vars the caller declared as non-restrict; the source may
+   * pass any of them the same storage. */
+  std::set<const VarNode *> non_restrict;
+  /*! True only when the function explicitly asserts `tir.noalias`. Absent is
+   * not a promise: this pass runs before the kernel ABI is materialised, so two
+   * parameters may still name one storage. */
+  bool no_alias = false;
+};
+
+/*! Collects the storage origins of \p body plus the parameter ABI facts:
+ * buffer_map entries, the no-alias attribute, and `tl.non_restrict_params`
+ * (function attribute or block annotation). */
+StorageOrigins CollectStorageOrigins(const Stmt &body,
+                                     const Map<Var, Buffer> &buffer_map,
+                                     bool no_alias,
+                                     const Array<Var> &non_restrict_params);
+
+/*! Whether two accesses may touch the same storage.
+ *
+ * Same data Var conflicts; two distinct allocations never do; two distinct
+ * parameters are independent only under an explicit no-alias contract that does
+ * not mark either as non-restrict. Anything else stays conservatively
+ * conflicting. Verify and Legalize share this judgment. */
+bool MayConflictStorage(const BufferNode *lhs, const BufferNode *rhs,
+                        const StorageOrigins &origins);
+
+/*!
+ * \brief One relational node kind: how to take its operands, its PTODSL compare
+ * name, and how to rebuild it when both operands stay scalar.
+ *
+ * The (node kind, compare name, scalar semantics) triple lives here once so a
+ * new relational kind cannot drift between the verifier's whitelist, the
+ * vectorizer's dispatch and its lane-uniform fold.
+ */
+struct RelationalKind {
+  /*! \brief Fill a/b (when non-null) with the node's operands, in the node's
+   *  own (a, b) order, and report whether \p e is of this kind. */
+  bool (*take)(const PrimExpr &e, PrimExpr *a, PrimExpr *b);
+  /*! \brief PTODSL compare name: "eq" / "ne" / "lt" / "le" / "gt" / "ge". */
+  const char *cmp;
+  /*! \brief Rebuild the comparison for two lane-uniform operands. */
+  PrimExpr (*fold)(const PrimExpr &a, const PrimExpr &b);
+};
+
+/*!
+ * \brief Match \p e against the relational table: on a hit fill a/b (either may
+ * be null) with the node's operands and return the entry, else return nullptr.
+ */
+const RelationalKind *MatchRelational(const PrimExpr &e, PrimExpr *a,
+                                      PrimExpr *b);
+
+/*!
+ * \brief Look the table up by PTODSL compare name; nullptr when unknown.
+ */
+const RelationalKind *RelationalByName(const char *cmp);
+
+/*!
+ * \brief Collect a flat list of stores from \p stmt (a store, a no-op, or a
+ * Seq of those). Returns false when the statement is any other shape.
+ */
+bool CollectStores(const Stmt &stmt, std::vector<const BufferStoreNode *> *out);
 } // namespace pto
 } // namespace tl
 } // namespace tvm
