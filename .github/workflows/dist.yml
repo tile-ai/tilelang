@@ -33,8 +33,9 @@ permissions:
   contents: read
 
 concurrency:
-  # Let scheduled and manually triggered OBS uploads finish.
-  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}"
+  # Cancel superseded PR/release runs per ref; let scheduled and manual nightly
+  # runs build independently and serialize only inside the publish jobs.
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || 'latest' }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'release' }}
 
 env:
@@ -786,14 +787,274 @@ jobs:
 
           echo "Published ${WHL_COUNT} wheel(s); index lists $(wc -l < files.txt) file(s)."
 
+      - name: Update tile-ai/whl nightly-cn index
+        env:
+          GH_TOKEN: ${{ secrets.NIGHTLY_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::NIGHTLY_GITHUB_TOKEN is not configured; skipping tile-ai/whl nightly-cn index update."
+            exit 0
+          fi
+
+          gh auth setup-git --hostname github.com --force
+          PUBLIC_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang"
+          export PUBLIC_BASE
+
+          update_whl_repo() {
+            python3 - <<'PY'
+          import hashlib, html, os, pathlib, re, urllib.parse
+
+          def wheel_sort_key(filename: str) -> tuple:
+              ver = filename.split("-")[1] if "-" in filename else filename
+              m = re.search(r"[+.]d(\d{8})(?:\.|$)", ver)
+              date_num = int(m.group(1)) if m else 0
+              parts = [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", ver)]
+              return (date_num, parts, filename)
+
+          public_base = os.environ["PUBLIC_BASE"].rstrip("/")
+          repo_dir = pathlib.Path("tilelang-whl")
+          cn_dir = repo_dir / "nightly-cn"
+          cn_dir.mkdir(parents=True, exist_ok=True)
+          index_file = cn_dir / "index.html"
+
+          obs_live = {
+              line.strip()
+              for line in pathlib.Path("files.txt").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          }
+
+          entries: dict[str, str] = {}
+          if index_file.exists():
+              for href, text in re.findall(r'<a\s+href="([^"]+)">([^<]+)</a>', index_file.read_text(encoding="utf-8")):
+                  name = html.unescape(text).strip()
+                  url = html.unescape(href).strip()
+                  if name in obs_live and re.search(r"#sha256=[0-9a-f]{64}$", url):
+                      entries[name] = url
+
+          for whl in sorted(pathlib.Path("wheelhouse").glob("*.whl")):
+              sha256 = hashlib.sha256(whl.read_bytes()).hexdigest()
+              entries[whl.name] = f"{public_base}/{urllib.parse.quote(whl.name)}#sha256={sha256}"
+
+          lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Nightly Python Wheels (China Mainland OBS Mirror)</h1>",
+              *[f'<a href="{html.escape(entries[k], quote=True)}">{html.escape(k)}</a><br />' for k in sorted(entries, key=wheel_sort_key)],
+              "</body></html>",
+          ]
+          index_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          subdirs = sorted(d.name for d in repo_dir.iterdir() if d.is_dir() and not d.name.startswith("."))
+          root_lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Python Wheels</h1>",
+              *[f'<a href="{html.escape(d, quote=True)}/">{html.escape(d)}</a><br />' for d in subdirs],
+              "</body></html>",
+          ]
+          (repo_dir / "index.html").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
+          PY
+          }
+
+          for attempt in 1 2 3; do
+            rm -rf tilelang-whl
+            git clone https://github.com/tile-ai/whl.git tilelang-whl
+            update_whl_repo
+            git -C tilelang-whl config user.name "github-actions[bot]"
+            git -C tilelang-whl config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C tilelang-whl add -A
+            if git -C tilelang-whl diff --staged --quiet; then
+              echo "No nightly-cn index changes to commit."
+              exit 0
+            fi
+            git -C tilelang-whl commit -m "Update nightly-cn wheel index (${GITHUB_SHA::8})"
+            if git -C tilelang-whl push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push conflict on attempt ${attempt}; retrying..."
+            sleep 2
+          done
+          echo "::error::Failed to push nightly-cn index to tile-ai/whl after 3 attempts."
+          exit 1
+
       - name: Summary
         run: |
-          INDEX_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang/index.html"
+          CN_WHL_URL="https://tile-ai.github.io/whl/nightly-cn"
+          OBS_INDEX_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang/index.html"
           {
             echo "### TileLang nightly wheels published to OBS"
             echo
             echo "- OBS path: \`obs://ascend-triton-open/TileLang/\`"
-            echo "- Install command: \`pip install -f ${INDEX_URL} tilelang\` (or \`uv pip install -f ${INDEX_URL} tilelang\`)"
+            echo "- SHA-256 verified CN mirror index: \`pip install -U -f ${CN_WHL_URL} tilelang\` (or \`uv pip install -U -f ${CN_WHL_URL} tilelang\`)"
+            echo "- Direct OBS index: \`pip install -U -f ${OBS_INDEX_URL} tilelang\`"
             echo
             ls -1 wheelhouse/*.whl | sed 's|^|- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish-github-nightly:
+    name: Publish wheels to GitHub nightly repo
+    # Publish all built wheels to tile-ai/tilelang-nightly GitHub Releases and
+    # update the SHA-256-pinned index at https://tile-ai.github.io/whl/nightly
+    # after the Linux CUDA/ROCm GPU smoke tests pass. Runs in parallel with
+    # publish-obs so an outage on one mirror does not block the other.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+    needs: [test-wheels-gpu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: publish-wheels-to-github-nightly
+      cancel-in-progress: false
+
+    steps:
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: wheelhouse
+
+      - name: Publish release to tile-ai/tilelang-nightly and update tile-ai/whl
+        id: publish_gh
+        env:
+          GH_TOKEN: ${{ secrets.NIGHTLY_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WHL_COUNT=$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)
+          if [ "${WHL_COUNT}" -eq 0 ]; then
+            echo "::error::No wheel artifacts found"
+            exit 1
+          fi
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::NIGHTLY_GITHUB_TOKEN is not configured; skipping GitHub nightly publication (tile-ai/tilelang-nightly and tile-ai/whl)."
+            echo "skipped=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          TAG="$(python3 - <<'PY'
+          import pathlib, re
+
+          def ver_key(ver: str) -> tuple:
+              m = re.search(r"[+.]d(\d{8})(?:\.|$)", ver)
+              date_num = int(m.group(1)) if m else 0
+              parts = [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", ver)]
+              return (date_num, parts, ver)
+
+          versions = sorted({p.name.split("-")[1] for p in pathlib.Path("wheelhouse").glob("*.whl")}, key=ver_key)
+          print(f"v{versions[-1]}")
+          PY
+          )"
+          NIGHTLY_REPO="tile-ai/tilelang-nightly"
+          echo "Publishing ${WHL_COUNT} wheel(s) to ${NIGHTLY_REPO} tag ${TAG}..."
+
+          if gh release view "${TAG}" --repo "${NIGHTLY_REPO}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" wheelhouse/*.whl --clobber --repo "${NIGHTLY_REPO}"
+          else
+            gh release create "${TAG}" wheelhouse/*.whl \
+              --repo "${NIGHTLY_REPO}" \
+              --prerelease \
+              --title "TileLang Nightly ${TAG}" \
+              --notes "Automated nightly wheels built from tile-ai/tilelang@${GITHUB_SHA}."
+          fi
+          gh release view "${TAG}" --repo "${NIGHTLY_REPO}" --json assets > release_assets.json
+
+          gh auth setup-git --hostname github.com --force
+
+          update_whl_repo() {
+            python3 - <<'PY'
+          import hashlib, html, json, pathlib, re
+
+          def wheel_sort_key(filename: str) -> tuple:
+              ver = filename.split("-")[1] if "-" in filename else filename
+              m = re.search(r"[+.]d(\d{8})(?:\.|$)", ver)
+              date_num = int(m.group(1)) if m else 0
+              parts = [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", ver)]
+              return (date_num, parts, filename)
+
+          repo_dir = pathlib.Path("tilelang-whl")
+          nightly_dir = repo_dir / "nightly"
+          nightly_dir.mkdir(parents=True, exist_ok=True)
+          index_file = nightly_dir / "index.html"
+
+          entries: dict[str, str] = {}
+          if index_file.exists():
+              for href, text in re.findall(r'<a\s+href="([^"]+)">([^<]+)</a>', index_file.read_text(encoding="utf-8")):
+                  entries[html.unescape(text).strip()] = html.unescape(href).strip()
+
+          assets = {
+              a["name"]: a["browser_download_url"]
+              for a in json.loads(pathlib.Path("release_assets.json").read_text(encoding="utf-8"))["assets"]
+          }
+          for whl in sorted(pathlib.Path("wheelhouse").glob("*.whl")):
+              if whl.name not in assets:
+                  raise RuntimeError(f"Uploaded wheel {whl.name} missing from release assets")
+              sha256 = hashlib.sha256(whl.read_bytes()).hexdigest()
+              entries[whl.name] = f"{assets[whl.name]}#sha256={sha256}"
+
+          # Keep the 500 most recent wheel entries (~3+ months across 5 platforms)
+          # so index.html stays compact while supporting historical version pins.
+          kept_names = sorted(entries, key=wheel_sort_key)[-500:]
+          lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Nightly Python Wheels</h1>",
+              *[f'<a href="{html.escape(entries[k], quote=True)}">{html.escape(k)}</a><br />' for k in kept_names],
+              "</body></html>",
+          ]
+          index_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          subdirs = sorted(d.name for d in repo_dir.iterdir() if d.is_dir() and not d.name.startswith("."))
+          root_lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Python Wheels</h1>",
+              *[f'<a href="{html.escape(d, quote=True)}/">{html.escape(d)}</a><br />' for d in subdirs],
+              "</body></html>",
+          ]
+          (repo_dir / "index.html").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
+          PY
+          }
+
+          for attempt in 1 2 3; do
+            rm -rf tilelang-whl
+            git clone https://github.com/tile-ai/whl.git tilelang-whl
+            update_whl_repo
+            git -C tilelang-whl config user.name "github-actions[bot]"
+            git -C tilelang-whl config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C tilelang-whl add -A
+            if git -C tilelang-whl diff --staged --quiet; then
+              echo "No nightly index changes to commit."
+              break
+            fi
+            git -C tilelang-whl commit -m "Update nightly wheel index for ${TAG}"
+            if git -C tilelang-whl push origin HEAD:main; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::Failed to push nightly index to tile-ai/whl after 3 attempts."
+              exit 1
+            fi
+            echo "Push conflict on attempt ${attempt}; retrying..."
+            sleep 2
+          done
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "skipped=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Summary
+        run: |
+          INDEX_URL="https://tile-ai.github.io/whl/nightly"
+          {
+            echo "### TileLang nightly wheels (GitHub Releases)"
+            echo
+            if [ "${{ steps.publish_gh.outputs.skipped }}" = "true" ]; then
+              echo "Skipped: \`NIGHTLY_GITHUB_TOKEN\` secret is not configured yet."
+            else
+              echo "- Release: https://github.com/tile-ai/tilelang-nightly/releases/tag/${{ steps.publish_gh.outputs.tag }}"
+              echo "- Install command: \`pip install -U -f ${INDEX_URL} tilelang\` (or \`uv pip install -U -f ${INDEX_URL} tilelang\`)"
+              echo
+              ls -1 wheelhouse/*.whl | sed 's|^|- |'
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
