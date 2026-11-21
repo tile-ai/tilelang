@@ -182,5 +182,17 @@ def test_rdna_internal_tuning_config_allows_mcpu_overrides():
     assert gfx1151.reduction_step_for_dtype_bits(16) == 32
 
 
+@pytest.mark.skipif(
+    not tvm.runtime.enabled("rocm"),
+    reason="Requires the ROCm runtime to be built",
+)
+def test_rocm_device_existence_probe_does_not_raise():
+    # Linux builds enable USE_ROCM with hip_stub even on hosts without ROCm
+    # installed; probing tvm.rocm().exist (used at import time by requires_rocm)
+    # must return a bool rather than throwing from the stub.
+    assert isinstance(tvm.rocm(0).exist, bool)
+    assert not tvm.rocm(-1).exist
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
