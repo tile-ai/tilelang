@@ -254,9 +254,7 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
         # Inlining can duplicate or remove the evaluation of an effectful call.
         # Keeping the Bind also prevents staging a loop with multiple statements.
         if not _can_repeat_expr(value, allow_buffer_loads=True):
-            bind = Bind(stmt.var, value)
-            stamp_stmt_spans(bind, get_stmt_span(stmt))
-            return bind
+            return Bind(stmt.var, value, span=get_stmt_span(stmt))
         env[stmt.var] = value
         return None
 

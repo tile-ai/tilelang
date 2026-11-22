@@ -358,7 +358,7 @@ def test_local_to_memory_with_bind_chain():
         scale = T.alloc_local((16,), T.float32)
         for i in T.vectorized(16):
             factor = scale[i]
-            scaled = a_frag[i] * (factor + T.float32(1))
+            scaled = a_frag[i] * T.sqrt(factor + T.float32(1))
             b[i] = scaled
 
     @T.prim_func
@@ -371,31 +371,22 @@ def test_local_to_memory_with_bind_chain():
             T.writes()
             b_local_cast = T.decl_buffer((16,), T.float8_e4m3fn, scope="local")
             for i in T.vectorized(16):
-                b_local_cast[i] = T.cast(a_frag[i] * (scale[i] + T.float32(1)), T.float8_e4m3fn)
+                b_local_cast[i] = T.cast(a_frag[i] * T.sqrt(scale[i] + T.float32(1)), T.float8_e4m3fn)
             for i_copy in T.vectorized(16):
                 b[i_copy] = b_local_cast[i_copy]
 
     _check(before, after)
 
 
-def test_pure_call_bind_still_decouples():
-    @T.prim_func
-    def before(a: T.Tensor((16,), T.float32), b: T.Tensor((16,), T.float16)):
-        for i in T.vectorized(16):
-            value = T.sqrt(a[i])
-            b[i] = T.cast(value * value, T.float16)
-
-    mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
-    assert "b_local_cast" in mod.script()
-
-
-@pytest.mark.parametrize("kind, use_result", [("nested", False), ("nested", True), ("unknown", True), ("read_state", True)])
+@pytest.mark.parametrize("kind, use_result", [("rng", True), ("nested", False), ("nested", True), ("unknown", True), ("read_state", True)])
 def test_non_pure_bind_is_not_inlined(kind, use_result):
     tir = tvm.tirx
     b = tir.decl_buffer((16,), "float16", name="b")
     i = tir.Var("i", "int32")
     value = tir.Var("value", "float32")
-    if kind == "nested":
+    if kind == "rng":
+        call = T.rng_rand_float(dist="normal")
+    elif kind == "nested":
         # Even an unused Bind must run its nested side effect.
         call = tir.call_extern("float32", "side_effect", i) + tir.const(1, "float32")
     elif kind == "unknown":
@@ -409,24 +400,6 @@ def test_non_pure_bind_is_not_inlined(kind, use_result):
 
 
 @tilelang.testing.requires_cuda
-def test_rng_bind_in_parallel_cuda_lowering():
-    @T.prim_func
-    def kernel(b: T.Tensor((128,), T.float16)):
-        with T.Kernel(1, threads=32):
-            tx = T.get_thread_binding()
-            T.rng_init(42, tx, 0)
-            for i in T.Parallel(128):
-                sample = T.rng_rand_float(dist="normal")
-                b[i] = T.cast(sample * sample, T.float16)
-
-    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
-    # Isolate this pass from later vectorization of random calls.
-    with target, tvm.transform.PassContext(config={"tirx.disable_vectorize": True}):
-        source = tilelang.lower(kernel, target=target).kernel_source
-    assert source.count("curand_normal(") == 1
-
-
-@tilelang.testing.requires_cuda
 def test_atomic_bind_cuda_execution():
     import torch
 
@@ -434,10 +407,11 @@ def test_atomic_bind_cuda_execution():
     def kernel(counter: T.Tensor((32,), T.int32), b: T.Tensor((128,), T.float16)):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
-            for i in T.vectorized(4):
+            for i in T.Parallel(128):
                 old = T.atomic_add(counter[tx], 1, return_prev=True)
-                b[tx * 4 + i] = T.cast(old * old, T.float16)
+                b[i] = T.cast(old * old, T.float16)
 
+    # Isolate DecoupleTypeCast from subsequent vectorization of effectful calls.
     compiled = tilelang.compile(kernel, pass_configs={"tirx.disable_vectorize": True})
     counter = torch.zeros(32, dtype=torch.int32, device="cuda")
     output = torch.empty(128, dtype=torch.float16, device="cuda")
