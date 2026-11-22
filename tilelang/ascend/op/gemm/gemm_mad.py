@@ -226,6 +226,13 @@ class GemmMAD(GemmBase):
         dtype_str = _ASCEND_DTYPE_MAP.get(input_dtype)
         assert dtype_str is not None, f"Unsupported dtype for Ascend GEMM: {input_dtype}"
 
+        # The L1 tiles are addressed in fractal units whose stride follows the
+        # *allocation*, not the GEMM region: the GM->L1 ND2NZ fill uses the
+        # allocation row count as its pitch. Passing the region size here makes
+        # the L1->L0 descriptor walk a padded tile at the wrong stride.
+        a_l1_rows = self.ARegion.buffer.shape[-2]
+        b_l1_rows = self.BRegion.buffer.shape[-2]
+
         call = tirx.call_intrin(
             "void",
             tirx.op.Op.get("tl.ascend_gemm_l1"),
@@ -241,6 +248,8 @@ class GemmMAD(GemmBase):
             tirx.StringImm(dtype_str),
             _to_int32(0),  # buf_offset
             _to_int32(self.unit_flag_ctrl),
+            _to_int32(a_l1_rows),
+            _to_int32(b_l1_rows),
         )
 
         @T.prim_func

@@ -37,7 +37,7 @@
  * \tparam AccumT      Accumulator element type (deduced from cc_ptr)
  */
 template <int M, int K, int N, int TILE_K_SUB, bool TRANS_B, typename InT,
-          typename AccumT>
+          int L1_M = M, int L1_N = N, typename AccumT>
 __aicore__ inline void
 ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
                __cbuf__ InT *cbuf_b_ptr, int clear_accum, int buf_offset = 0,
@@ -55,6 +55,13 @@ ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
   constexpr int SUB_K = K / TILE_K_SUB;
   constexpr int mStepA = M / FRAC_N;
   constexpr int mStepB = N / FRAC_N;
+  // The GM->L1 ND2NZ fill writes a tile whose fractal stride follows the L1
+  // allocation row count, so an operand region smaller than its allocation
+  // (M < L1_M or N < L1_N) must be walked at that wider stride.
+  static_assert(L1_M % FRAC_N == 0, "L1_M must be a multiple of 16");
+  static_assert(L1_N % FRAC_N == 0, "L1_N must be a multiple of 16");
+  constexpr int aSrcStride = L1_M / FRAC_N;
+  constexpr int bSrcStride = L1_N / FRAC_N;
   constexpr int kStep = TILE_K_SUB / C0;
   constexpr int L0A_STAGE = M * TILE_K_SUB;
   constexpr int L0B_STAGE = N * TILE_K_SUB;
@@ -66,13 +73,13 @@ ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
     // ASC_LOCK_BLOCK is the default lock mode; keep it explicit at call sites.
     asc_lock(PIPE_MTE1, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
     asc_copy_l12l0a((__ca__ InT *)(l0a + ((sk & 1) * L0A_STAGE)), cbuf_a_ptr, 0,
-                    (sk * kStep), mStepA, kStep, mStepA, mStepA);
+                    (sk * kStep), mStepA, kStep, aSrcStride, mStepA);
     if constexpr (TRANS_B) {
       // NT case: W[N,K] in L1, cb transpose=false (ZZ)
       // rows=N, cols=K → sub-K along cols (kStart)
       // mStep=N/16 (nBlk), kStep=TILE_K_SUB/C0 (nGroups in K)
       asc_copy_l12l0b((__cb__ InT *)(l0b + ((sk & 1) * L0B_STAGE)), cbuf_b_ptr,
-                      0, (sk * kStep), mStepB, kStep, mStepB, mStepB);
+                      0, (sk * kStep), mStepB, kStep, bSrcStride, mStepB);
     } else {
       // NN case: B[K,N] in L1, cb transpose=true (ZN).
       // ⚠️ transpose=true in asc_copy_l12l0b only works for b16 types;

@@ -431,7 +431,12 @@ TVM_DLL const Op &ascend_mad_mx();
  * \brief Ascend GEMM with L1-scoped inputs (auto sub-K pipeline).
  *
  * ascend_gemm_l1(cc_ptr, cbuf_a_ptr, cbuf_b_ptr, M, K, N, tile_k_sub,
- * trans_b, clear_accum, dtype_str)
+ * trans_b, clear_accum, dtype_str, buf_offset, unit_flag_ctrl, a_l1_rows,
+ * b_l1_rows)
+ *
+ * a_l1_rows / b_l1_rows are the allocation row counts of the L1 operands. The
+ * GM->L1 ND2NZ fill uses them as the fractal pitch, so an operand region
+ * smaller than its allocation must be walked at that wider stride.
  *
  */
 TVM_DLL const Op &ascend_gemm_l1();
