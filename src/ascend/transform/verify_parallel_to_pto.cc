@@ -1162,7 +1162,8 @@ private:
   void WalkRegion(const Stmt &stmt, const std::vector<For> &units,
                   int64_t lanes, size_t *next_unit) {
     if (const auto *for_node = stmt.as<ForNode>()) {
-      if (for_node->kind == ForKind::kParallel) {
+      if (for_node->kind == ForKind::kParallel &&
+          !pto_analysis::UsesExplicitSIMD(for_node->body)) {
         ICHECK(*next_unit < units.size() && units[*next_unit].get() == for_node)
             << "[VerifyParallelToPTO] internal error: region walk and "
                "unit scan disagree on unit order";

@@ -4,12 +4,13 @@ import torch
 import tilelang
 import tilelang.testing
 import tilelang.language as T
-from tilelang import tvm
 from tilelang.engine.lower import lower
 from tilelang.backend.target import determine_target
 from tilelang.cuda.target import normalize_cutedsl_target
 
 
+@pytest.mark.cutedsl
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_cutedsl_dict_target_normalizes_to_cuda_marker(monkeypatch):
     from tilelang.jit.adapter.cutedsl import checks
 
@@ -21,6 +22,8 @@ def test_cutedsl_dict_target_normalizes_to_cuda_marker(monkeypatch):
     assert {"cuda", "gpu", "cutedsl"}.issubset(set(target.keys))
 
 
+@pytest.mark.cutedsl
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_cutedsl_string_target_uses_detected_cuda_arch(monkeypatch):
     """Verify bare CuTeDSL targets use TileLang's CUDA arch normalization."""
 
@@ -37,14 +40,8 @@ def test_cutedsl_string_target_uses_detected_cuda_arch(monkeypatch):
     assert {"cuda", "gpu", "cutedsl"}.issubset(set(target.keys))
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_supports_tl_ptx_cp_async():
-    if not tvm.runtime.enabled("cuda"):
-        pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
-
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
-    if build_cutedsl is None:
-        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
-
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_80"})
     assert target is not None
 

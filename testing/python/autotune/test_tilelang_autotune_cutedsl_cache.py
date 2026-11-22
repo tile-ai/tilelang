@@ -9,6 +9,7 @@ from tilelang.autotuner.param import AutotuneResult
 from tilelang.env import env
 
 
+@pytest.mark.cutedsl
 def test_cutedsl_save_creates_kernel_py(tmp_path):
     """_save_kernel_to_disk should write kernel.py (not kernel_lib.so) for CuTeDSL."""
     src_dir = tmp_path / "src"
@@ -52,17 +53,6 @@ def test_cutedsl_save_creates_kernel_py(tmp_path):
     assert (cache / "kernel.cubin").exists()
 
 
-def _is_cutedsl_available():
-    """Return whether the CuTeDSL stack is usable in the current environment."""
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-        return True
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError):
-        return False
-
-
 # Define autotune kernel at module level so closures don't capture module objects
 def _make_vec_add_autotuned():
     """Create a tiny CuTeDSL autotuned vector-add kernel."""
@@ -86,8 +76,7 @@ def _make_vec_add_autotuned():
     return vec_add
 
 
-@tilelang.testing.requires_cuda
-@pytest.mark.skipif(not _is_cutedsl_available(), reason="CuTeDSL not installed")
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_autotune_cache_roundtrip(tmp_path):
     """Autotune + CuTeDSL: save → reload from disk → verify correctness."""
     import torch

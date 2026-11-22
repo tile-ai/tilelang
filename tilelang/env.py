@@ -468,6 +468,17 @@ class Environment:
         major, minor = nvcc.parse_compute_version(compute_version)  # split to (8, 6)
         os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"  # set env var for PyTorch
 
+    def get_cache_read_dirs(self) -> list[str]:
+        """Cache roots in lookup order; the first root is also writable."""
+        roots = self.TILELANG_CACHE_DIR.split(os.pathsep)
+        if any(not root for root in roots):
+            raise ValueError("TILELANG_CACHE_DIR must contain non-empty paths")
+        return roots
+
+    def get_cache_write_dir(self) -> str:
+        """Return the only root used for cache writes and cleanup."""
+        return self.get_cache_read_dirs()[0]
+
     # Cache control API (wrap CacheState)
     def is_cache_enabled(self) -> bool:
         return not self.is_cache_globally_disabled() and CacheState.is_enabled()

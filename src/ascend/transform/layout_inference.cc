@@ -28,6 +28,7 @@
 #include "ascend/layout/pto_parallel_layout.h"
 #include "ascend/op/utils.h"
 #include "ascend/target_utils.h"
+#include "ascend/transform/parallel_to_pto_utils.h"
 #include "ascend/transform/vf_regions.h"
 #include "backend/common/target_utils.h"
 #include "config.h"
@@ -776,18 +777,10 @@ private:
   // comes from the loop layout's own inverse fragment, and the vectorize
   // pass recovers real addresses from that same fragment.
   // Returns true when the lane context was pushed. A PTO SIMD_VF block
-  // without any T.Parallel is a pure hand-written VMI region: it needs no
-  // lanes annotation and gets no lane context.
+  // without a Parallel requiring lane conversion needs no lanes annotation
+  // and gets no lane context, including explicit SIMD nests.
   bool PushPtoSimdVFContext(const SBlockNode *op) {
-    bool has_parallel = false;
-    PostOrderVisit(op->body, [&](const ObjectRef &node) {
-      if (auto *for_node = node.as<ForNode>()) {
-        if (for_node->kind == ForKind::kParallel) {
-          has_parallel = true;
-        }
-      }
-    });
-    if (!has_parallel) {
+    if (!pto::ScanPtoRegion(op->body).has_any_parallel) {
       return false;
     }
     auto lanes_anno = op->annotations.Get("tl.simdvf_lanes");
@@ -1048,7 +1041,7 @@ private:
             }
           });
 
-      if (InsidePtoSimdVF()) {
+      if (InsidePtoSimdVF() && !pto::UsesExplicitSIMD(op->body)) {
         // PTO lane layouts are built from the original nest and stay outside
         // the generic layout worklist. Only the outermost Parallel root of a
         // unit is recorded; nested Parallel layers are part of this unit.
@@ -1059,6 +1052,8 @@ private:
         return;
       }
 
+      // Explicit SIMD block loops keep the generic layout path used before
+      // PTO lane inference, including mixed explicit/scalar loop bodies.
       auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
@@ -1084,7 +1079,7 @@ private:
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
-      bool in_pto_simd = InsidePtoSimdVF();
+      bool in_pto_simd = InsidePtoSimdVF() && !pto::UsesExplicitSIMD(op->body);
       in_pto_simd_vf_vec_.push_back(in_pto_simd);
       pto_lane_bounds_.push_back(in_pto_simd ? CurrentPtoLaneBounds()
                                              : Range());
@@ -1843,7 +1838,10 @@ private:
       }
       // Descend for the lane annotations; only the kLayoutMap writeback is
       // skipped for the block itself.
+      bool saved_inside_pto_simd_vf = inside_pto_simd_vf_;
+      inside_pto_simd_vf_ = true;
       SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      inside_pto_simd_vf_ = saved_inside_pto_simd_vf;
       if (block.same_as(GetRef<SBlock>(op))) {
         return ffi::GetRef<Stmt>(op);
       }
@@ -1893,6 +1891,12 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
+    if (inside_pto_simd_vf_ && op->kind == ForKind::kParallel &&
+        pto::UsesExplicitSIMD(op->body)) {
+      // Explicit SIMD loops already iterate vector blocks. Generic layout
+      // annotations would flatten and unroll them as scalar lane loops.
+      return GetRef<Stmt>(op);
+    }
     if (!result_.for_map.count(GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
@@ -1938,6 +1942,7 @@ private:
 
 private:
   const LayoutInferenceResult result_;
+  bool inside_pto_simd_vf_ = false;
 };
 
 tvm::transform::Pass AscendLayoutInference() {

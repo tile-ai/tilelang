@@ -12,7 +12,7 @@ with suppress(ImportError):
     from cutlass.cute.arch import griddepcontrol_launch_dependents, griddepcontrol_wait  # noqa: F401
 from cutlass.cute.nvgpu.warpgroup.helpers import wait_group as wgmma_wait_group  # noqa: F401
 
-from cutlass.cute import make_tensor, make_rmem_tensor, recast_ptr, where  # noqa: F401
+from cutlass.cute import make_rmem_tensor, recast_ptr, where  # noqa: F401
 from cutlass.cute.testing import assert_ as runtime_assert  # noqa: F401
 from cutlass.cute.typing import Numeric  # noqa: F401
 
@@ -28,12 +28,16 @@ from .gemm_v1 import *  # noqa: F401,F403
 from .reduce import *  # noqa: F401,F403
 from .ldsm import *  # noqa: F401,F403
 from .ptx_mma import *  # noqa: F401,F403
+from .rand import *  # noqa: F401,F403
 from .math import *  # noqa: F401,F403
+from .fp8 import *  # noqa: F401,F403
 from .threadblock_swizzle import *  # noqa: F401,F403
 from .atomic import *  # noqa: F401,F403
 from .quantize import *  # noqa: F401,F403
 from .warp import *  # noqa: F401,F403
+from .ldst import *  # noqa: F401,F403
 from .gemm_v2 import *  # noqa: F401,F403
+from .gemm_v2_sp import *  # noqa: F401,F403
 from .gemm_tcgen05 import *  # noqa: F401,F403
 from .ieee_math import *  # noqa: F401,F403
 from .grid_sync import *  # noqa: F401,F403

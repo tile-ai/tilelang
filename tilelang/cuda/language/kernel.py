@@ -15,6 +15,7 @@ def Kernel(
     threads: int | list[int] | tuple[int, ...] | None = None,
     prelude: str | None = None,
     cluster_dims: int | tuple[int, int, int] | list[int] | None = None,
+    name: str | None = None,
 ) -> KernelLaunchFrame:
     """Construct a kernel launch frame for CUDA: a grid of thread blocks.
 
@@ -40,6 +41,10 @@ def Kernel(
         Thread block cluster shape (SM90+). ``2`` or ``(2, 1, 1)`` launches
         2-CTA clusters via ``cudaLaunchKernelEx``. ``T.ClusterKernel`` is the
         same launch with a required ``cluster_dims``.
+    name : str, optional
+        Device kernel name, given as an ASCII identifier. Used as-is without
+        adding ``_kernel``; collisions receive a numeric suffix. When omitted,
+        the name is derived from the enclosing PrimFunc's global symbol.
 
     Examples
     --------
@@ -57,4 +62,5 @@ def Kernel(
         threads=threads,
         prelude=prelude,
         cluster_dims=cluster_dims,
+        name=name,
     )

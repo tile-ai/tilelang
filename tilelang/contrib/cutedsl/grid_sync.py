@@ -3,100 +3,36 @@
 """
 Grid-level synchronization for CuTeDSL backend.
 
-Implements a software grid barrier using atomic operations on a device-global
-counter declared via llvm.mlir.global. Requires cooperative kernel launch
-(cuLaunchCooperativeKernel) to guarantee all thread blocks are resident.
+Implements the grid barrier of CUDA cooperative groups (``this_grid().sync()``)
+on the per-launch grid workspace that the driver provides to cooperative
+launches (cuLaunchCooperativeKernel). Its address is read from the
+``%envreg1`` (high half) and ``%envreg2`` (low half) special registers, as in
+``cooperative_groups::details::get_grid_workspace``, so concurrent launches of the same
+kernel never share barrier state.
 
 The barrier:
 1. __syncthreads() within each block
-2. All threads execute a device-scope fence for prior global writes
-3. Thread 0 atomically increments global counter and spin-waits until release
-4. All threads wait for thread 0 and execute a device-scope fence before return
+2. Thread 0 of each block adds its arrival to the workspace barrier word with
+   release semantics; block 0 adds the value that flips bit 31 once all
+   blocks have arrived
+3. Thread 0 spins with acquire loads until bit 31 differs from its arrival
+4. __syncthreads() releases the rest of the block
 """
 
 __all__ = ["sync_grid"]
 
-from cutlass._mlir import ir as mlir_ir
 from cutlass._mlir.dialects import llvm
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass.cutlass_dsl import dsl_user_op
 import cutlass.cute as cute
-
-
-def _find_gpu_module_from_ip():
-    """Find gpu.module by walking up from current insertion point.
-
-    Hierarchy: block -> KernelOp -> gpu.module -> builtin.module
-    Uses bounded for-loop to avoid CuTeDSL DSL preprocessor issues with while/break.
-    """
-    current_ip = mlir_ir.InsertionPoint.current
-    block = current_ip.block
-    op = block.owner
-    for _ in range(10):
-        if op is None:
-            return None
-        if hasattr(op, "name") and op.name == "gpu.module":
-            return op
-        op = op.parent
-    return None
-
-
-def _ensure_global_counter(loc=None):
-    """Declare the global counter variable at gpu.module level if not already done.
-
-    Creates:
-    - @__grid_sync_ctr = internal global i32 0, addrspace(1)
-    - @__grid_sync_gen = internal global i32 0, addrspace(1)
-    """
-    gpu_mod = _find_gpu_module_from_ip()
-    if gpu_mod is None:
-        raise RuntimeError("Cannot find gpu.module in MLIR hierarchy for global variable declaration")
-
-    # Check if the globals already exist.
-    module_body = gpu_mod.regions[0].blocks[0]
-    found_ctr = False
-    found_gen = False
-    for op in module_body.operations:
-        if op.name == "llvm.mlir.global":
-            sym = op.attributes.get("sym_name")
-            if sym is not None:
-                if str(sym) == '"__grid_sync_ctr"':
-                    found_ctr = True
-                elif str(sym) == '"__grid_sync_gen"':
-                    found_gen = True
-    if found_ctr and found_gen:
-        return
-
-    # Insert at the beginning of the module body
-    ctx = mlir_ir.Context.current
-    linkage_attr = mlir_ir.Attribute.parse("#llvm.linkage<internal>", ctx)
-
-    with mlir_ir.InsertionPoint.at_block_begin(module_body):
-        if not found_gen:
-            llvm.GlobalOp(
-                T.i32(),
-                "__grid_sync_gen",
-                linkage_attr,
-                value=mlir_ir.IntegerAttr.get(T.i32(), 0),
-                addr_space=1,
-                loc=loc,
-            )
-        if not found_ctr:
-            llvm.GlobalOp(
-                T.i32(),
-                "__grid_sync_ctr",
-                linkage_attr,
-                value=mlir_ir.IntegerAttr.get(T.i32(), 0),
-                addr_space=1,
-                loc=loc,
-            )
 
 
 def sync_grid():
     """Synchronize all thread blocks in a grid.
 
-    NOTE: This requires the kernel to be launched with cuLaunchCooperativeKernel
-    to guarantee all blocks are resident simultaneously. The CuTeDSL wrapper
-    handles this automatically when the kernel uses sync_grid().
+    NOTE: This requires the kernel to be launched with cuLaunchCooperativeKernel,
+    which guarantees all thread blocks are resident simultaneously and provides
+    the grid workspace. The CuTeDSL wrapper handles this automatically when the
+    kernel uses sync_grid().
     """
     cute.arch.sync_threads()
     _grid_sync_barrier()
@@ -105,106 +41,78 @@ def sync_grid():
 
 @dsl_user_op
 def _grid_sync_barrier(*, loc=None, ip=None) -> None:
-    """Software grid barrier using inline PTX.
+    """Thread 0 of each block arrives at and waits on the grid barrier.
 
-    Declares a module-level global counter via llvm.mlir.global, then uses
-    inline PTX for the barrier protocol (atomic increment + spin-wait + reset).
-    Only thread 0 per block updates the global barrier state. All threads
-    participate in device-scope fences around the thread-0 publish/wait path so
-    global memory protected by the grid barrier is ordered for the whole block.
+    Mirrors ``cooperative_groups::details::sync_grids``: the barrier word is
+    ``grid_workspace::barrier`` (offset 4 of the driver workspace). Each block
+    adds 1, block 0 adds ``0x80000000 - (nblocks - 1)``, so the sum of one
+    round flips bit 31 and leaves the low bits unchanged for the next round.
+    The release/acquire at GPU scope, combined with the surrounding block
+    barriers, orders the global writes of the whole block.
     """
-    _ensure_global_counter(loc=loc)
-
-    # Get addresses of the global barrier state (ptr in address space 1 = global memory)
-    counter_ptr = llvm.mlir_addressof(
-        llvm.PointerType.get(1),
-        "__grid_sync_ctr",
-        loc=loc,
-        ip=ip,
-    )
-    generation_ptr = llvm.mlir_addressof(
-        llvm.PointerType.get(1),
-        "__grid_sync_gen",
-        loc=loc,
-        ip=ip,
-    )
-
-    # All barrier logic in one inline PTX block:
-    # - Thread 0 check, grid dim computation, atomic increment, sense wait
-    # - The last arriving block resets the counter and advances generation.
-    #   Other blocks wait for generation to change, so they cannot miss release
-    #   if the counter is reset before they observe the final arrival count.
     llvm.inline_asm(
         None,
-        [counter_ptr, generation_ptr],
+        [],
         """
 {
-    .reg .s32 %r_tid;
-    .reg .s32 %r_tid_y;
-    .reg .s32 %r_tid_z;
-    .reg .s32 %r_nctaid_x;
-    .reg .s32 %r_nctaid_y;
-    .reg .s32 %r_nctaid_z;
-    .reg .s32 %r_num_blocks;
-    .reg .s32 %r_arrived;
-    .reg .s32 %r_generation;
-    .reg .s32 %r_new_generation;
-    .reg .pred %p_is_thread0;
-    .reg .pred %p_is_last;
-    .reg .pred %p_done;
+    .reg .u32 %r_tid;
+    .reg .u32 %r_tmp;
+    .reg .u32 %r_ctaid;
+    .reg .u32 %r_nblocks;
+    .reg .u32 %r_lo;
+    .reg .u32 %r_hi;
+    .reg .u32 %r_add;
+    .reg .u32 %r_old;
+    .reg .u32 %r_cur;
+    .reg .u64 %rd_bar;
+    .reg .pred %p_not_master;
+    .reg .pred %p_gpu_master;
+    .reg .pred %p_wait;
 
-    // Elect exactly one thread per block, including multidimensional blocks.
     mov.u32 %r_tid, %tid.x;
-    mov.u32 %r_tid_y, %tid.y;
-    mov.u32 %r_tid_z, %tid.z;
-    or.b32 %r_tid, %r_tid, %r_tid_y;
-    or.b32 %r_tid, %r_tid, %r_tid_z;
-    // Order prior global writes from every thread before thread 0 publishes
-    // this block's arrival.
-    membar.gl;
-    setp.ne.s32 %p_is_thread0, %r_tid, 0;
-    @%p_is_thread0 bra GRID_SYNC_BLOCK_WAIT;
+    mov.u32 %r_tmp, %tid.y;
+    or.b32 %r_tid, %r_tid, %r_tmp;
+    mov.u32 %r_tmp, %tid.z;
+    or.b32 %r_tid, %r_tid, %r_tmp;
+    setp.ne.u32 %p_not_master, %r_tid, 0;
+    @%p_not_master bra GRID_SYNC_DONE;
 
-    // Compute total number of blocks
-    mov.u32 %r_nctaid_x, %nctaid.x;
-    mov.u32 %r_nctaid_y, %nctaid.y;
-    mov.u32 %r_nctaid_z, %nctaid.z;
-    mul.lo.s32 %r_num_blocks, %r_nctaid_x, %r_nctaid_y;
-    mul.lo.s32 %r_num_blocks, %r_num_blocks, %r_nctaid_z;
+    mov.u32 %r_hi, %envreg1;
+    mov.u32 %r_lo, %envreg2;
+    mov.b64 %rd_bar, {%r_lo, %r_hi};
+    // No workspace: the kernel was not launched cooperatively.
+    setp.eq.u64 %p_wait, %rd_bar, 0;
+    @%p_wait trap;
+    add.u64 %rd_bar, %rd_bar, 4;
 
-    // Capture the current barrier generation before publishing arrival.
-    ld.acquire.gpu.global.s32 %r_generation, [$1];
+    mov.u32 %r_nblocks, %nctaid.x;
+    mov.u32 %r_tmp, %nctaid.y;
+    mul.lo.u32 %r_nblocks, %r_nblocks, %r_tmp;
+    mov.u32 %r_tmp, %nctaid.z;
+    mul.lo.u32 %r_nblocks, %r_nblocks, %r_tmp;
 
-    // Atomic increment with GPU scope. atom.add returns the old value.
-    atom.add.release.gpu.s32 %r_arrived, [$0], 1;
-    add.s32 %r_arrived, %r_arrived, 1;
+    mov.u32 %r_ctaid, %ctaid.x;
+    mov.u32 %r_tmp, %ctaid.y;
+    or.b32 %r_ctaid, %r_ctaid, %r_tmp;
+    mov.u32 %r_tmp, %ctaid.z;
+    or.b32 %r_ctaid, %r_ctaid, %r_tmp;
+    setp.eq.u32 %p_gpu_master, %r_ctaid, 0;
+    sub.u32 %r_add, 0x80000001, %r_nblocks;
+    selp.u32 %r_add, %r_add, 1, %p_gpu_master;
 
-    // Last block releases the barrier by resetting the counter and advancing
-    // generation. Non-last blocks wait for generation to change.
-    setp.eq.s32 %p_is_last, %r_arrived, %r_num_blocks;
-    @!%p_is_last bra GRID_SYNC_SPIN;
-
-    st.release.gpu.global.s32 [$0], 0;
-    add.s32 %r_new_generation, %r_generation, 1;
-    st.release.gpu.global.s32 [$1], %r_new_generation;
-    bra GRID_SYNC_BLOCK_WAIT;
+    atom.add.release.gpu.u32 %r_old, [%rd_bar], %r_add;
 
 GRID_SYNC_SPIN:
-    ld.acquire.gpu.global.s32 %r_new_generation, [$1];
-    setp.ne.s32 %p_done, %r_new_generation, %r_generation;
-    @!%p_done bra GRID_SYNC_SPIN;
-
-GRID_SYNC_BLOCK_WAIT:
-    // Keep non-zero threads in the block from returning before thread 0 has
-    // observed the grid release, then acquire global writes before user code
-    // resumes after sync_grid().
-    bar.sync 0;
-    membar.gl;
+    ld.acquire.gpu.u32 %r_cur, [%rd_bar];
+    xor.b32 %r_cur, %r_cur, %r_old;
+    and.b32 %r_cur, %r_cur, 0x80000000;
+    setp.eq.u32 %p_wait, %r_cur, 0;
+    @%p_wait bra GRID_SYNC_SPIN;
 
 GRID_SYNC_DONE:
 }
 """,
-        "l,l",
+        "~{memory}",
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
