@@ -12,18 +12,46 @@ import tilelang.ascend.language as T
 from tilelang.profiler import do_bench
 
 
-def gemm_splitk(M_DIM=8192, K_DIM=8192, N_DIM=8192, split_k=4, deterministic=False):
-    """BF16 GEMM with explicit cross-core reduction and FP32 output."""
-    NUM_BLOCKS = 16
+def _resident_aicore_count():
+    """Return the number of AI cores on the current device, or None if unknown."""
+    try:
+        import torch_npu  # noqa: F401
+
+        if not torch.npu.is_available():
+            return None
+        return int(torch.npu.get_device_properties(torch.npu.current_device()).cube_core_num)
+    except Exception:
+        # The check is advisory; a host without torch_npu still builds the program.
+        return None
+
+
+def gemm_splitk(M_DIM=8192, K_DIM=8192, N_DIM=8192, split_k=4, deterministic=False, num_blocks=16):
+    """BF16 GEMM with explicit cross-core reduction and FP32 output.
+
+    Every block participates in the inter-core barriers, so all ``num_blocks``
+    blocks must be resident at the same time. ``num_blocks`` therefore cannot
+    exceed the device's AI-core count; the default 16 fits a single-die 950PR
+    (28 cores), while larger values deadlock on smaller dies.
+    """
+    NUM_BLOCKS = num_blocks
     TILE_M = 256
     TILE_N = 256
     TILE_K = 256
     NUM_STAGES = 2
     INTER_CORE_FLAG = 0
+    if NUM_BLOCKS <= 0:
+        raise ValueError(f"num_blocks must be positive, got {NUM_BLOCKS}")
     if split_k <= 1:
         raise ValueError(f"split_k must be greater than 1, got {split_k}")
     if NUM_BLOCKS % split_k != 0:
         raise ValueError(f"split_k must divide {NUM_BLOCKS}, got {split_k}")
+    resident_cores = _resident_aicore_count()
+    if resident_cores is not None and resident_cores < NUM_BLOCKS:
+        raise ValueError(
+            f"split-K uses inter-core barriers, so all {NUM_BLOCKS} blocks must be resident, "
+            f"but this device has {resident_cores} AI cores. Use num_blocks <= {resident_cores} "
+            f"(a multiple of split_k)."
+        )
     if M_DIM % TILE_M != 0 or N_DIM % TILE_N != 0:
         raise ValueError(f"M and N must be multiples of ({TILE_M}, {TILE_N}), got ({M_DIM}, {N_DIM})")
     if K_DIM % TILE_K != 0:
