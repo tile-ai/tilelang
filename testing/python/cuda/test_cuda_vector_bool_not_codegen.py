@@ -79,5 +79,31 @@ def test_vector_integer_bitwise_not_values():
     torch.testing.assert_close(kernel(a), ~a)
 
 
+@tilelang.testing.requires_cuda
+def test_bool_fragment_debug_build_alignment():
+    # Regression test for #4435: under a -G (debug) build, local fragments are
+    # spilled to the stack frame, and a float fragment accessed through a
+    # float4 cast must be 16-byte aligned. Without the alignment, declaring a
+    # bool fragment before it shifts it to a 4-byte offset and the kernel
+    # faults with a misaligned address.
+    @T.prim_func
+    def main(A: T.Tensor((32, 16), "float32"), B: T.Tensor((32, 16), "float32")):
+        with T.Kernel(1, threads=128):
+            ok = T.alloc_fragment((32, 16), "bool")
+            x = T.alloc_fragment((32, 16), "float32")
+            for i, j in T.Parallel(32, 16):
+                ok[i, j] = A[i, j] > 100
+            for i, j in T.Parallel(32, 16):
+                x[i, j] = T.if_then_else(ok[i, j], A[i, j], A[i, j] * 2)
+            T.copy(x, B)
+
+    kernel = tilelang.compile(main, target="cuda", pass_configs={"tl.device_compile_flags": ["-G"]})
+    a = torch.arange(512, device="cuda", dtype=torch.float32).reshape(32, 16)
+    b = torch.zeros_like(a)
+    kernel(a, b)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(b, torch.where(a > 100, a, a * 2))
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
