@@ -233,6 +233,24 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 BindEnv = dict[Var, tirx.PrimExpr]
 
 
+def _is_non_pure_call(node: Call) -> bool:
+    """Treat calls without known effect information as effectful."""
+    effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
+    return effect is None or int(effect) > tirx.CallEffectKind.Pure.value
+
+
+def _has_non_pure_call(expr: tirx.PrimExpr) -> bool:
+    found = False
+
+    def visit(node):
+        nonlocal found
+        if isinstance(node, Call) and _is_non_pure_call(node):
+            found = True
+
+    post_order_visit(expr, visit)
+    return found
+
+
 def _substitute_bind_env(node, env: BindEnv):
     """Apply the current flat-Bind environment to a statement or expression."""
     result = node
@@ -250,7 +268,14 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
     decoupling analysis without treating Bind as a tree-shaped LetStmt.
     """
     if isinstance(stmt, Bind):
-        env[stmt.var] = _substitute_bind_env(stmt.value, env)
+        value = _substitute_bind_env(stmt.value, env)
+        # Inlining can duplicate or remove the evaluation of an effectful call.
+        # Keeping the Bind also prevents staging a loop with multiple statements.
+        if _has_non_pure_call(value):
+            bind = Bind(stmt.var, value)
+            stamp_stmt_spans(bind, get_stmt_span(stmt))
+            return bind
+        env[stmt.var] = value
         return None
 
     if isinstance(stmt, SeqStmt):
@@ -325,12 +350,8 @@ def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
 
     def visit(node):
         nonlocal pure
-        if isinstance(node, BufferLoad):
+        if isinstance(node, BufferLoad) or (isinstance(node, Call) and _is_non_pure_call(node)):
             pure = False
-        elif isinstance(node, Call):
-            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
-            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
-                pure = False
 
     post_order_visit(condition, visit)
     return pure

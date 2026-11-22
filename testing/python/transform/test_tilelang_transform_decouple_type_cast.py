@@ -378,6 +378,114 @@ def test_local_to_memory_with_bind_chain():
     _check(before, after)
 
 
+@pytest.mark.parametrize("dist", ["normal", "uniform"])
+def test_effectful_rng_bind_is_not_inlined(dist):
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        for i in T.vectorized(16):
+            sample = T.rng_rand_float(dist=dist)
+            b[i] = T.cast(sample * sample, T.float16)
+
+    _check(before, before)
+
+
+def test_effectful_atomic_bind_is_not_inlined():
+    @T.prim_func
+    def before(counter: T.Tensor((1,), T.int32), b: T.Tensor((16,), T.float16)):
+        for i in T.vectorized(16):
+            old = T.atomic_add(counter[0], 1, return_prev=True)
+            b[i] = T.cast(old * old, T.float16)
+
+    _check(before, before)
+
+
+def test_guarded_effectful_bind_is_not_inlined():
+    @T.prim_func
+    def before(b: T.Tensor((16,), T.float16)):
+        for i in T.vectorized(16):
+            if i < 8:
+                sample = T.rng_rand_float()
+                b[i] = T.cast(sample * sample, T.float16)
+
+    _check(before, before)
+
+
+def test_pure_call_bind_still_decouples():
+    @T.prim_func
+    def before(a: T.Tensor((16,), T.float32), b: T.Tensor((16,), T.float16)):
+        for i in T.vectorized(16):
+            value = T.sqrt(a[i])
+            b[i] = T.cast(value * value, T.float16)
+
+    mod = DecoupleTypeCast()(tvm.IRModule.from_expr(before))
+    assert "b_local_cast" in mod.script()
+
+
+@pytest.mark.parametrize("use_result", [False, True])
+def test_nested_effectful_call_in_bind_is_not_inlined(use_result):
+    tir = tvm.tirx
+    b = tir.decl_buffer((16,), "float16", name="b")
+    i = tir.Var("i", "int32")
+    value = tir.Var("value", "float32")
+    # The effect is nested inside arithmetic; even an unused Bind must run.
+    call = tir.call_extern("float32", "side_effect", i)
+    bind = tir.Bind(value, call + tir.const(1, "float32"))
+    result = value * value if use_result else tir.const(0, "float32")
+    body = tir.SeqStmt([bind, tir.BufferStore(b, tir.Cast("float16", result), [i])])
+    func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
+    _check(func, func)
+
+
+def test_unknown_call_effect_in_bind_is_not_inlined():
+    tir = tvm.tirx
+    b = tir.decl_buffer((16,), "float16", name="b")
+    i = tir.Var("i", "int32")
+    value = tir.Var("value", "float32")
+    call = tir.Call("float32", tvm.ir.GlobalVar("unknown_effect"), [i])
+    body = tir.SeqStmt([tir.Bind(value, call), tir.BufferStore(b, tir.Cast("float16", value * value), [i])])
+    func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
+    _check(func, func)
+
+
+@pytest.mark.parametrize("dist, intrinsic", [("normal", "curand_normal"), ("uniform", "curand_uniform")])
+def test_rng_bind_in_parallel_cuda_lowering(dist, intrinsic):
+    @T.prim_func
+    def kernel(b: T.Tensor((128,), T.float16)):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            T.rng_init(42, tx, 0)
+            for i in T.Parallel(128):
+                sample = T.rng_rand_float(dist=dist)
+                b[i] = T.cast(sample * sample, T.float16)
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    # Isolate this pass from later vectorization of random calls.
+    with target, tvm.transform.PassContext(config={"tirx.disable_vectorize": True}):
+        source = tilelang.lower(kernel, target=target).kernel_source
+    assert source.count(intrinsic + "(") == 1
+
+
+@tilelang.testing.requires_cuda
+def test_atomic_bind_cuda_execution():
+    import torch
+
+    @T.prim_func
+    def kernel(counter: T.Tensor((32,), T.int32), b: T.Tensor((128,), T.float16)):
+        with T.Kernel(1, threads=32):
+            tx = T.get_thread_binding()
+            for i in T.vectorized(4):
+                old = T.atomic_add(counter[tx], 1, return_prev=True)
+                b[tx * 4 + i] = T.cast(old * old, T.float16)
+
+    compiled = tilelang.compile(kernel, pass_configs={"tirx.disable_vectorize": True})
+    counter = torch.zeros(32, dtype=torch.int32, device="cuda")
+    output = torch.empty(128, dtype=torch.float16, device="cuda")
+    compiled(counter, output)
+    torch.testing.assert_close(counter, torch.full_like(counter, 4), rtol=0, atol=0)
+    expected = torch.tensor([0, 1, 4, 9], dtype=torch.float16, device="cuda").repeat(32)
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+
 def test_local_to_memory_with_branch_local_bind():
     """Test Bind definitions inside an IfThenElse branch do not escape."""
 
