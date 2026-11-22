@@ -9,20 +9,8 @@ import tilelang.testing
 CUTEDSL_SM90_TARGET = {"kind": "cutedsl", "arch": "sm_90"}
 
 
-def _require_cutedsl():
-    """Skip when the CuTeDSL Python stack is unavailable."""
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _lower_cutedsl(program):
     """Lower a TileLang program and build its CuTeDSL host wrapper."""
-    _require_cutedsl()
-
     from tilelang.jit.adapter.cutedsl.wrapper import TLCuTeDSLSourceWrapper
     from tilelang.backend.target import determine_target
 
@@ -139,7 +127,7 @@ def two_kernel_program(N, block_size=64, dtype=T.float32):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_host_wrapper_follows_lowered_host_call_sites():
     """Verify generated CuTeDSL launchers use lowered host call-site order."""
 
@@ -161,7 +149,7 @@ def test_cutedsl_host_wrapper_follows_lowered_host_call_sites():
     assert first_cubin_launch < second_cubin_launch
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_host_wrapper_preserves_repeated_same_kernel_call_sites():
     """Verify repeated host launches of the same device kernel remain distinct."""
 
@@ -196,7 +184,7 @@ def test_cutedsl_host_wrapper_preserves_repeated_same_kernel_call_sites():
     assert first_cubin_launch < second_cubin_launch
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_host_call_sites_ignore_dead_helper_funcs():
     """Verify CuTeDSL launch collection only scans the host entry function."""
 
@@ -219,7 +207,7 @@ def test_cutedsl_host_call_sites_ignore_dead_helper_funcs():
     assert wrapper._collect_host_kernel_call_sites() == call_sites
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_host_call_sites_require_launch_metadata():
     """Verify missing launch metadata for a real host call site fails fast."""
 
@@ -238,11 +226,9 @@ def test_cutedsl_host_call_sites_require_launch_metadata():
             setattr(wrapper, metadata_name, original_metadata)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_adapter_exposes_device_and_host_sources():
     """Verify CuTeDSL adapter exposes device, host, and combined sources."""
-
-    _require_cutedsl()
 
     kernel = tilelang.compile(
         single_kernel_program(64),
@@ -262,10 +248,9 @@ def test_cutedsl_adapter_exposes_device_and_host_sources():
     assert host_source in combined_source
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_adapter_resolves_dynamic_symbol_from_live_tensor_candidate():
     """Dynamic shape resolution should skip optional None tensor params."""
-
-    _require_cutedsl()
 
     from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
 
@@ -281,10 +266,9 @@ def test_cutedsl_adapter_resolves_dynamic_symbol_from_live_tensor_candidate():
         adapter._resolve_dynamic_symbolic_value(dynamic_symbol, [None, None, None])
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_adapter_allows_optional_stride_symbol_without_live_tensor():
     """Dynamic stride-only symbols may be absent for optional tensor params."""
-
-    _require_cutedsl()
 
     from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
 
@@ -300,10 +284,9 @@ def test_cutedsl_adapter_allows_optional_stride_symbol_without_live_tensor():
     assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["stride"], param_values) == 0
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_adapter_allows_optional_abi_shape_symbol_without_live_tensor():
     """Dynamic shape symbols may be absent when only needed as dead ABI args."""
-
-    _require_cutedsl()
 
     from tilelang.jit.adapter.cutedsl.adapter import CuTeDSLKernelAdapter
 
@@ -321,6 +304,7 @@ def test_cutedsl_adapter_allows_optional_abi_shape_symbol_without_live_tensor():
     assert adapter._resolve_dynamic_symbolic_value(dynamic_symbols["M"], param_values, require_live_shape=False) == 0
 
 
+@pytest.mark.cutedsl
 def test_cutedsl_cache_restore_does_not_fallback_to_host_source(monkeypatch, tmp_path):
     """Verify missing cached generated modules stay distinct from host wrappers."""
 

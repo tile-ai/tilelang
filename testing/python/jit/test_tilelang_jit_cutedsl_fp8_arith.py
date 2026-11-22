@@ -16,15 +16,6 @@ DTYPES = {"float8_e4m3fn": torch.float8_e4m3fn, "float8_e5m2": torch.float8_e5m2
 OPS = ["add", "sub", "mul", "div", "max", "min"]
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _binary_kernel(dtype, op, n, vec):
     def apply(a, b):
         return {
@@ -86,14 +77,13 @@ def _assert_bitwise_equal(got, ref):
         raise AssertionError(f"FP8 result mismatch at {idx.tolist()}: got {got_bits[idx].tolist()} expected {ref_bits[idx].tolist()}")
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
 @pytest.mark.parametrize("vec", [1, 2, 4, 8])
 @pytest.mark.parametrize("op", OPS)
 @pytest.mark.parametrize("dtype", list(DTYPES))
 def test_cutedsl_fp8_binary_exhaustive(dtype, op, vec):
     """Every operand pair of the format must give the correctly rounded FP8 result."""
-    _require_cutedsl()
     a, b = _all_pairs(dtype)
     n = a.numel()
     out = torch.empty(n, dtype=DTYPES[dtype], device="cuda")
@@ -110,12 +100,11 @@ def test_cutedsl_fp8_binary_exhaustive(dtype, op, vec):
     _assert_bitwise_equal(out, _quantize(exact, DTYPES[dtype]))
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
 @pytest.mark.parametrize("vec", [1, 2, 4])
 @pytest.mark.parametrize("dtype", list(DTYPES))
 def test_cutedsl_fp8_clamp_exhaustive(dtype, vec):
-    _require_cutedsl()
     a, _ = _all_pairs(dtype)
     n = a.numel()
     out = torch.empty(n, dtype=DTYPES[dtype], device="cuda")
@@ -123,12 +112,11 @@ def test_cutedsl_fp8_clamp_exhaustive(dtype, vec):
     _assert_bitwise_equal(out, _quantize(a.double().clamp(-2.0, 3.0), DTYPES[dtype]))
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(8, 9)
 @pytest.mark.parametrize("dtype", list(DTYPES))
 def test_cutedsl_fp8_nan_propagates(dtype):
     """max/min/clamp propagate NaN like ``arith.maximumf``, and +0 beats -0 in max."""
-    _require_cutedsl()
     nan = float("nan")
     pairs = np.array([[nan, 1.0], [1.0, nan], [nan, nan], [0.0, -0.0], [-0.0, -0.0], [1.0, 2.0]], dtype=np.float32)
     a = torch.tensor(pairs[:, 0], device="cuda").to(DTYPES[dtype])

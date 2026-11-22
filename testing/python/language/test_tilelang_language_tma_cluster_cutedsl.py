@@ -2,21 +2,11 @@
 copies and SIMT cluster stores, mirroring the CUDA coverage in
 test_tma_multicast_demo.py and test_tma_dsmem.py."""
 
-import pytest
 import torch
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-
-
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
 
 
 def _compile(func, out_idx):
@@ -132,24 +122,21 @@ def _store_cluster_wide_kernel(M: int, N_full: int, N_tile: int):
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_multicast_cutedsl():
-    _require_cutedsl()
     _check_multicast()
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_multicast_eviction_cutedsl():
-    _require_cutedsl()
     _check_multicast(eviction_policy="evict_last")
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_tma_store_cluster_cutedsl():
-    _require_cutedsl()
     N = 1024
     mod = _compile(_store_cluster_kernel(N), [1])
     A = torch.randn(N, device="cuda", dtype=torch.float32)
@@ -157,10 +144,9 @@ def test_tma_store_cluster_cutedsl():
     torch.testing.assert_close(B, A)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 def test_cluster_store_cutedsl():
-    _require_cutedsl()
     M, N_full, N_tile = 32, 64, 32
     mod = _compile(_store_cluster_wide_kernel(M, N_full, N_tile), [1])
     A = torch.randn(M, N_tile, device="cuda", dtype=torch.float32)

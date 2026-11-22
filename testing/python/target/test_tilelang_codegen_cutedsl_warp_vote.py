@@ -1,20 +1,10 @@
-import pytest
-
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
 from tilelang.engine.lower import lower
 from tilelang.cuda.target import normalize_cutedsl_target
 
 
 def _lower_cutedsl(program):
-    if not tvm.runtime.enabled("cuda"):
-        pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
-
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
-    if build_cutedsl is None:
-        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
-
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_90"})
     assert target is not None
 
@@ -22,6 +12,7 @@ def _lower_cutedsl(program):
         return lower(program.with_attr("global_symbol", "main"), target=target)
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_warp_vote_and_bit_search():
     @T.prim_func
     def prog(A: T.Tensor((32,), "int64"), B: T.Tensor((12, 32), "int64")):
@@ -62,6 +53,7 @@ def test_cutedsl_codegen_warp_vote_and_bit_search():
     assert source.count("tl.__ffsll(") == 1, source
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_named_barrier_arrive():
     @T.prim_func
     def prog(B: T.Tensor((64,), "int32")):
@@ -79,6 +71,7 @@ def test_cutedsl_codegen_named_barrier_arrive():
     assert "tl.sync_thread_partial(3, 64)" in source, source
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_bool_bitwise_not_is_logical():
     @T.prim_func
     def prog(A: T.Tensor((1,), "bool"), B: T.Tensor((2,), "int32")):
@@ -93,6 +86,7 @@ def test_cutedsl_codegen_bool_bitwise_not_is_logical():
     assert "(not " in source, source
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_thread_allreduce_tree_masks():
     @T.prim_func
     def prog(A: T.Tensor((32,), "int16"), C: T.Tensor((1,), "int16")):

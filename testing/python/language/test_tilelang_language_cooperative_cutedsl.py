@@ -5,15 +5,8 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 
-try:
-    from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
 
-    check_cutedsl_available()
-except (ImportError, AssertionError):
-    pytest.skip("CuTeDSL not installed", allow_module_level=True)
-
-
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(7, 0)
 @pytest.mark.parametrize("threads", [32, (32, 2), (32, 1, 2), (16, 2, 2)])
 def test_cutedsl_grid_sync_multidimensional_threads(threads):
@@ -46,7 +39,7 @@ def test_cutedsl_grid_sync_multidimensional_threads(threads):
         torch.testing.assert_close(B, torch.full_like(B, 3))
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(7, 0)
 @pytest.mark.parametrize("launcher", ["cpp", "cutlass"])
 def test_cutedsl_grid_sync_concurrent_launches(launcher, monkeypatch):
