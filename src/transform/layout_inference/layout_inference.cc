@@ -29,6 +29,7 @@
 #include "../../op/builtin.h"
 #include "../../op/copy.h"
 #include "../../op/parallel.h"
+#include "../../op/reduce.h"
 #include "../../op/reducer.h"
 #include "../../op/utils.h"
 #include "../../span_utils.h"
@@ -235,6 +236,8 @@ private:
 };
 
 class BufferUseDefCollector : public IRVisitorWithAnalyzer {
+  enum class RootPlan { kNative, kScalar, kSeparableReduce };
+
 public:
   BufferUseDefCollector() = default;
 
@@ -243,7 +246,7 @@ public:
   void RunInferStep(int cur_infer_id, InferLevel level, bool update_queue,
                     LayoutMap &layout_map, const LayoutMap &strict_layout_map,
                     std::deque<int> &q, std::vector<bool> &in_queue,
-                    int candidate_vector_size_limit = 0) {
+                    RootPlan root_plan = RootPlan::kNative) {
     auto num_infer = infer_list_.size();
 
     // Range check for cur_infer_id
@@ -276,16 +279,19 @@ public:
     // Run InferLayout
     LayoutMap updates;
     try {
-      updates = next->InferLayout(LayoutInferArgs{target_,
-                                                  thread_bounds,
-                                                  layout_map,
-                                                  cur_analyzer,
-                                                  {},
-                                                  bind_var_to_expr_,
-                                                  false,
-                                                  strict_layout_map,
-                                                  candidate_vector_size_limit},
-                                  level);
+      LayoutInferArgs args{target_,
+                           thread_bounds,
+                           layout_map,
+                           cur_analyzer,
+                           {},
+                           bind_var_to_expr_,
+                           false,
+                           strict_layout_map,
+                           root_plan == RootPlan::kScalar ? 1 : 0};
+      updates =
+          root_plan == RootPlan::kSeparableReduce
+              ? Downcast<ReduceOp>(next)->InferLayoutWithSeparableSource(args)
+              : next->InferLayout(args, level);
     } catch (const std::bad_optional_access &e) {
       LOG(FATAL) << "bad_optional_access while inferring layout for op "
                  << cur_infer_id << " (" << next->GetTypeKey() << ") at level "
@@ -1337,11 +1343,13 @@ private:
     LayoutMap layout_map;
     AttemptCost cost;
   };
-  std::optional<AttemptOutcome> RunOneAttempt(
-      int attempt_root, const std::vector<int> &members,
-      const LayoutMap &base_layout_map, const LayoutMap &strict_layout_map,
-      const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
-      const LayoutCostModel &cost_model, int candidate_vector_size_limit = 0) {
+  std::optional<AttemptOutcome>
+  RunOneAttempt(int attempt_root, const std::vector<int> &members,
+                const LayoutMap &base_layout_map,
+                const LayoutMap &strict_layout_map,
+                const std::vector<std::pair<Buffer, Fragment>> &seed_layouts,
+                const LayoutCostModel &cost_model,
+                RootPlan root_plan = RootPlan::kNative) {
     auto back_infer_list = BackupInferList();
     LayoutMap tmp_layout_map = base_layout_map;
     // A failed attempt can leave pending propagation work. Keep both the
@@ -1356,10 +1364,10 @@ private:
     bool ok = true;
     std::string failure;
     try {
-      // Only the root's first inference receives the candidate cap. Its
+      // Only the root's first inference receives the candidate plan. Its
       // solved layout is frozen; propagation and later visits use normal args.
       RunInferStep(attempt_root, InferLevel::kFree, true, tmp_layout_map,
-                   strict_layout_map, q, in_queue, candidate_vector_size_limit);
+                   strict_layout_map, q, in_queue, root_plan);
       FinishInferQueue(InferLevel::kFree, tmp_layout_map, strict_layout_map, q,
                        in_queue);
       for (int other : members) {
@@ -1487,17 +1495,17 @@ private:
             loop->HasReducerUpdates() && !loop->GetLoopLayout().defined() &&
             !loop->annotated_layout_unbound_.defined() &&
             !loop->GetRoot()->annotations.count(attr::kCoalescedWidth);
-        for (int candidate_vector_size_limit : {0, 1}) {
-          if (candidate_vector_size_limit != 0 && !try_scalar) {
+        for (RootPlan plan : {RootPlan::kNative, RootPlan::kScalar}) {
+          if (plan == RootPlan::kScalar && !try_scalar) {
             continue;
           }
           DLOG(INFO) << "----------------------- try root "
                      << attempt_infer_root << " members " << members.size()
                      << " candidate_vector_size_limit="
-                     << candidate_vector_size_limit << '\n';
-          auto outcome = RunOneAttempt(
-              attempt_infer_root, members, layout_map, strict_layout_map,
-              /*seed_layouts=*/{}, *cost_model, candidate_vector_size_limit);
+                     << (plan == RootPlan::kScalar ? 1 : 0) << '\n';
+          auto outcome = RunOneAttempt(attempt_infer_root, members, layout_map,
+                                       strict_layout_map,
+                                       /*seed_layouts=*/{}, *cost_model, plan);
           if (!outcome) {
             continue;
           }
@@ -1521,9 +1529,7 @@ private:
         // attempt. Retry once with the reserved dsts pre-seeded to the
         // universally readable wide layout — finalize stays silent (dst
         // owned) and consumers adapt, trading the narrow plan for a
-        // compiling wide one. Components without reservations get no seeds
-        // and fall through unchanged; a component that fails even this is a
-        // genuine inference failure.
+        // compiling wide one. Components without reservations get no seeds.
         auto seeds =
             steering_.FallbackSeeds(members, infer_list_, thread_bounds_vec_);
         if (!seeds.empty()) {
@@ -1533,6 +1539,23 @@ private:
                                        strict_layout_map, seeds, *cost_model);
           if (outcome) {
             adopt(std::move(*outcome), members.front());
+          }
+        }
+      }
+      if (!has_best) {
+        // Let an unconstrained reduction propose its input through the usual
+        // layout/alias propagation if none of the copy or loop plans worked.
+        for (int member : members) {
+          const auto *reduce = infer_list_[member].as<ReduceOpNode>();
+          if (!reduce || layout_map.count(reduce->src)) {
+            continue;
+          }
+          auto outcome =
+              RunOneAttempt(member, members, layout_map, strict_layout_map, {},
+                            *cost_model, RootPlan::kSeparableReduce);
+          if (outcome) {
+            adopt(std::move(*outcome), member);
+            break;
           }
         }
       }
