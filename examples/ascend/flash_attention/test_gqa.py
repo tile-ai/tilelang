@@ -2,10 +2,12 @@
 
 import torch
 import tilelang
+import tilelang.testing
 
 from example_gqa import gqa, ref_program
 
 
+@tilelang.testing.requires_ascend
 def test_gqa():
     S1, G, S2, D = 8192, 32, 8192, 128
     kernel = tilelang.compile(
