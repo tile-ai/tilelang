@@ -207,7 +207,7 @@ def sparse_attention(
             with T.SimdVF():
                 pairs32 = T.simd.pset(32, "PAT_VL32")
                 for group_k in T.unroll(index_group // 64, unroll_factor=1):
-                    x = T.reinterpret("uint32x64", T.simd.vld(indices[group_k * 64]))
+                    x = T.reinterpret(T.simd.vld(indices[group_k * 64]), "uint32x64")
                     pos = T.simd.vci(group_k * 64, "int32")
                     x = T.simd.vsel(x, T.simd.vdup(valid_limit, "uint32"), T.simd.vcmps(pos, valid_len, op="lt"))
                     even, odd = T.simd.vdintlv(x, x)
