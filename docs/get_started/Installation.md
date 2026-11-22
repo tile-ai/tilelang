@@ -359,7 +359,7 @@ Running kernels still requires the selected backend's compiler, runtime, and dev
 
 `TVM_ROOT`: TVM source root to use.
 
-`WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). When set, the build system uses this directory instead of a host CUDA installation. If not set and no host CUDA is found, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
+`WITH_PIP_CUDA_TOOLCHAIN`: Path to a pip-installed CUDA toolkit directory (e.g., `/path/to/venv/lib/python3.x/site-packages/nvidia/cu13`). A host CUDA installation always takes precedence: the build system probes the host toolkit first and only consults this variable when no host CUDA is found. If the variable is not set and no host CUDA is found either, the build system will attempt to auto-detect pip-installed CUDA packages from the current Python environment.
 
 Wheels built directly from a Git checkout include the short commit hash by default, for example `0.1.15+gitabcdef12`.
 Set `TILELANG_BUILD_WHEEL_WITH_DATE=ON` to include the build date, for example `0.1.15+d20261119.gitabcdef12`.

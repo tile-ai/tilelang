@@ -6,7 +6,7 @@ at `a123d0b0191e0da7aa1e044f8644e0989cc63220`.
 
 | Files | Purpose |
 | --- | --- |
-| `kernel.py` | Persistent prefill and decode with `T.Stage` and compiler-managed buffer versions |
+| `kernel.py` | Persistent prefill and decode with `T.Stage` and manually annotated buffer versions |
 | `prefill.py`, `decode.py` | Compilation entry points for BF16 prefill and packed FP8/FP4 decode |
 | `quantization.py` | Packed KV dequantization and NZ conversion |
 | `testing.py` | Adapt FlashMLA reference inputs to the TileLang kernels |
@@ -54,7 +54,10 @@ python -m pytest examples/ascend/flashmla/test_flashmla.py -q
 
 Use `--mode bench --rounds 3 --repeat 10` for benchmarks and `--case N` for
 one case. `--implementation` accepts `reference`, `tilelang`, or
-`both` (the default).
+`both` (the default). The default `--mode` is `smoke`, which runs a single
+quick case. `run_prefill.py` additionally accepts `--nk` to restrict the
+performance sweep to one KV length and `--detail` to also capture msprof
+pipe statistics (bench mode only); `run_decode.py` has neither switch.
 Benchmark runners check outputs before timing and write per-launch durations
 to `--output`.
 

@@ -60,7 +60,8 @@ packing also uses a fixed 128x128 tile:
 | GQA backward (T.Stage fused) | `S1=8192, G=32, S2=8192, D=128` | **6.418 ms · 428.3 effective TFLOPS** | — | See the comparison below, measured in the same environment |
 | GQA (manual) | Same as above | 3125 us · 351.8 TFLOPS | — | 92.9% of automatic scheduling throughput in the same measurement round |
 
-Forward relative error is below 0.5%. For the full backward shape, the T.Stage
+Forward relative error is below 5%, the threshold enforced by the examples
+and tests in this directory. For the full backward shape, the T.Stage
 fused BF16 outputs have relative L2 errors of approximately
 1.024% / 0.316% / 0.037% for dQ/dK/dV against Torch BF16 gradients. The larger dQ
 error comes from repeated BF16 rounding during atomic accumulation across
