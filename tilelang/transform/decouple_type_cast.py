@@ -233,21 +233,6 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 BindEnv = dict[Var, tirx.PrimExpr]
 
 
-def _has_non_pure_call(expr: tirx.PrimExpr) -> bool:
-    """Treat calls without known effect information as effectful."""
-    found = False
-
-    def visit(node):
-        nonlocal found
-        if isinstance(node, Call):
-            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
-            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
-                found = True
-
-    post_order_visit(expr, visit)
-    return found
-
-
 def _substitute_bind_env(node, env: BindEnv):
     """Apply the current flat-Bind environment to a statement or expression."""
     result = node
@@ -268,7 +253,7 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
         value = _substitute_bind_env(stmt.value, env)
         # Inlining can duplicate or remove the evaluation of an effectful call.
         # Keeping the Bind also prevents staging a loop with multiple statements.
-        if _has_non_pure_call(value):
+        if not _can_repeat_expr(value, allow_buffer_loads=True):
             bind = Bind(stmt.var, value)
             stamp_stmt_spans(bind, get_stmt_span(stmt))
             return bind
@@ -339,22 +324,22 @@ def extract_if_condition(stmt: Stmt) -> tuple[tirx.PrimExpr | None, Stmt]:
     return condition, stmt
 
 
-def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
-    """Only repeat guards that cannot observe or modify mutable state."""
-    if condition is None:
+def _can_repeat_expr(expr: tirx.PrimExpr | None, *, allow_buffer_loads: bool = False) -> bool:
+    """Check call effects and optionally reject buffer reads."""
+    if expr is None:
         return True
     pure = True
 
     def visit(node):
         nonlocal pure
-        if isinstance(node, BufferLoad):
+        if isinstance(node, BufferLoad) and not allow_buffer_loads:
             pure = False
         elif isinstance(node, Call):
             effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
             if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
                 pure = False
 
-    post_order_visit(condition, visit)
+    post_order_visit(expr, visit)
     return pure
 
 
@@ -460,7 +445,7 @@ class DecoupleTypeCastMutator(tirx.PyStmtExprMutator):
         condition, root_stmt = extract_if_condition(normalized_body)
         # Copy-in, compute, and copy-out each evaluate the guard. A memory
         # read or effectful call need not return the same value at each stage.
-        if not isinstance(root_stmt, BufferStore) or not _can_repeat_condition(condition):
+        if not isinstance(root_stmt, BufferStore) or not _can_repeat_expr(condition):
             return self._make_for(op, new_body) if new_body is not op.body else op
 
         # Collect all shared/global stores and loads

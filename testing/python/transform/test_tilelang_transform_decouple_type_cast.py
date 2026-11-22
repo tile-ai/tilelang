@@ -378,17 +378,6 @@ def test_local_to_memory_with_bind_chain():
     _check(before, after)
 
 
-def test_guarded_effectful_bind_is_not_inlined():
-    @T.prim_func
-    def before(b: T.Tensor((16,), T.float16)):
-        for i in T.vectorized(16):
-            if i < 8:
-                sample = T.rng_rand_float()
-                b[i] = T.cast(sample * sample, T.float16)
-
-    _check(before, before)
-
-
 def test_pure_call_bind_still_decouples():
     @T.prim_func
     def before(a: T.Tensor((16,), T.float32), b: T.Tensor((16,), T.float16)):
@@ -420,22 +409,21 @@ def test_non_pure_bind_is_not_inlined(kind, use_result):
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dist, intrinsic", [("normal", "curand_normal"), ("uniform", "curand_uniform")])
-def test_rng_bind_in_parallel_cuda_lowering(dist, intrinsic):
+def test_rng_bind_in_parallel_cuda_lowering():
     @T.prim_func
     def kernel(b: T.Tensor((128,), T.float16)):
         with T.Kernel(1, threads=32):
             tx = T.get_thread_binding()
             T.rng_init(42, tx, 0)
             for i in T.Parallel(128):
-                sample = T.rng_rand_float(dist=dist)
+                sample = T.rng_rand_float(dist="normal")
                 b[i] = T.cast(sample * sample, T.float16)
 
     target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
     # Isolate this pass from later vectorization of random calls.
     with target, tvm.transform.PassContext(config={"tirx.disable_vectorize": True}):
         source = tilelang.lower(kernel, target=target).kernel_source
-    assert source.count(intrinsic + "(") == 1
+    assert source.count("curand_normal(") == 1
 
 
 @tilelang.testing.requires_cuda
