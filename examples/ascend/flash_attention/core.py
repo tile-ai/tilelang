@@ -65,7 +65,7 @@ def flash_attention_fwd(
     assert BC == 2 * VL, f"block_kv must be 2 * {VL} = {2 * VL}, got {BC}."
     assert q_len % BR == 0, (
         f"q_len ({q_len}) must be a multiple of block_q ({BR}); "
-        "S1 * G must be divisible by 128 (see flash_attention/README.md, Limitations)."
+        f"S1 * G must be divisible by {BR} (see flash_attention/README.md, Limitations)."
     )
     assert kv_len % BC == 0, (
         f"kv_len ({kv_len}) must be a multiple of block_kv ({BC}); "
