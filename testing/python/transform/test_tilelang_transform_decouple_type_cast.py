@@ -400,43 +400,26 @@ def test_pure_call_bind_still_decouples():
     assert "b_local_cast" in mod.script()
 
 
-@pytest.mark.parametrize("use_result", [False, True])
-def test_nested_effectful_call_in_bind_is_not_inlined(use_result):
+@pytest.mark.parametrize("kind, use_result", [("nested", False), ("nested", True), ("unknown", True), ("read_state", True)])
+def test_non_pure_bind_is_not_inlined(kind, use_result):
     tir = tvm.tirx
     b = tir.decl_buffer((16,), "float16", name="b")
     i = tir.Var("i", "int32")
     value = tir.Var("value", "float32")
-    # The effect is nested inside arithmetic; even an unused Bind must run.
-    call = tir.call_extern("float32", "side_effect", i)
-    bind = tir.Bind(value, call + tir.const(1, "float32"))
+    if kind == "nested":
+        # Even an unused Bind must run its nested side effect.
+        call = tir.call_extern("float32", "side_effect", i) + tir.const(1, "float32")
+    elif kind == "unknown":
+        call = tir.Call("float32", tvm.ir.GlobalVar("unknown_effect"), [i])
+    else:
+        call = tir.Cast("float32", tir.Call("int32", tvm.ir.Op.get("tirx.tvm_context_id"), []))
     result = value * value if use_result else tir.const(0, "float32")
-    body = tir.SeqStmt([bind, tir.BufferStore(b, tir.Cast("float16", result), [i])])
+    body = tir.SeqStmt([tir.Bind(value, call), tir.BufferStore(b, tir.Cast("float16", result), [i])])
     func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
     _check(func, func)
 
 
-def test_unknown_call_effect_in_bind_is_not_inlined():
-    tir = tvm.tirx
-    b = tir.decl_buffer((16,), "float16", name="b")
-    i = tir.Var("i", "int32")
-    value = tir.Var("value", "float32")
-    call = tir.Call("float32", tvm.ir.GlobalVar("unknown_effect"), [i])
-    body = tir.SeqStmt([tir.Bind(value, call), tir.BufferStore(b, tir.Cast("float16", value * value), [i])])
-    func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
-    _check(func, func)
-
-
-def test_read_state_bind_is_not_inlined():
-    tir = tvm.tirx
-    b = tir.decl_buffer((16,), "float16", name="b")
-    i = tir.Var("i", "int32")
-    value = tir.Var("value", "int32")
-    call = tir.Call("int32", tvm.ir.Op.get("tirx.tvm_context_id"), [])
-    body = tir.SeqStmt([tir.Bind(value, call), tir.BufferStore(b, tir.Cast("float16", value * value), [i])])
-    func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
-    _check(func, func)
-
-
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dist, intrinsic", [("normal", "curand_normal"), ("uniform", "curand_uniform")])
 def test_rng_bind_in_parallel_cuda_lowering(dist, intrinsic):
     @T.prim_func
