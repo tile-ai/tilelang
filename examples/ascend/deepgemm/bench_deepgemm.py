@@ -71,7 +71,7 @@ def run_transform_sf_perf(mn=32768, k=7168, dtype="float32", major="k", gran_mn=
     output = run()
     assert output.data_ptr() != scales.data_ptr(), "compact int16 MN-major input bypasses transform_sf"
     torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
-    prof = do_bench(run, backend="msprof_detail", cache_size=8192, _n_warmup=5, _n_repeat=12, early_stop_baseline=None)
+    prof = do_bench(run, backend="msprof_detail", _n_warmup=5, _n_repeat=12, early_stop_baseline=None)
     assert prof.dur_ns > 0 and prof.aiv_total_cycles > 0
     num_bytes = scales.numel() * scales.element_size() + output.numel() * output.element_size()
     print(f"    [transform_sf, {dtype}, {major}, gran={gran_mn}] {prof.dur_us:.2f} us/iter | {prof.gbps(num_bytes):.2f} GB/s")
