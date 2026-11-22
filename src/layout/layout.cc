@@ -16,6 +16,7 @@
 
 #include "support/check.h"
 #include <tvm/ffi/extra/structural_equal.h>
+#include <tvm/ffi/reflection/registry.h>
 #include <tvm/runtime/logging.h>
 
 #include <tvm/arith/pattern.h>
@@ -793,11 +794,90 @@ Layout::Layout(Array<PrimExpr> input_size, Array<PrimExpr> forward_index) {
   data_ = std::move(n);
 }
 
+namespace {
+
+struct CustomFieldAccessor : public reflection::InfoTrait {
+  TVMFFIFieldGetter getter;
+  TVMFFIFieldSetter setter;
+
+  CustomFieldAccessor(TVMFFIFieldGetter getter_fn, TVMFFIFieldSetter setter_fn)
+      : getter(getter_fn), setter(setter_fn) {}
+
+  void Apply(TVMFFIFieldInfo *info) const {
+    if (getter != nullptr) {
+      info->getter = getter;
+    }
+    if (setter != nullptr) {
+      info->setter = reinterpret_cast<void *>(setter);
+    }
+  }
+};
+
+template <typename Class, typename T>
+Class *FieldOwnerFromAddr(void *field_addr, T Class::*field_ptr) {
+  auto *obj_ptr = reinterpret_cast<ffi::Object *>(
+      reinterpret_cast<char *>(field_addr) -
+      reflection::GetFieldByteOffsetToObject<Class, T>(field_ptr));
+  return static_cast<Class *>(obj_ptr);
+}
+
+} // namespace
+
+int LayoutNode::GetSerializedForwardVars_(void *field_addr, TVMFFIAny *result) {
+  TVM_FFI_SAFE_CALL_BEGIN();
+  const LayoutNode *self =
+      FieldOwnerFromAddr(field_addr, &LayoutNode::decoded_forward_vars_);
+  Array<Var> vars;
+  vars.reserve(self->InputDim());
+  for (size_t i = 0; i < self->InputDim(); ++i) {
+    vars.push_back(InputPlaceholder(i));
+  }
+  *result = ::tvm::ffi::details::AnyUnsafe::MoveAnyToTVMFFIAny(
+      Any(Optional<Array<Var>>(std::move(vars))));
+  TVM_FFI_SAFE_CALL_END();
+}
+
+Map<Var, PrimExpr> LayoutNode::BuildPlaceholderRebindMap_() const {
+  Map<Var, PrimExpr> vmap;
+  if (decoded_forward_vars_.defined()) {
+    Array<Var> vars = decoded_forward_vars_.value();
+    for (size_t i = 0; i < vars.size(); ++i) {
+      vmap.Set(vars[i], InputPlaceholder(i));
+    }
+  }
+  return vmap;
+}
+
+int LayoutNode::SetForwardIndex_(void *field_addr, const TVMFFIAny *value) {
+  TVM_FFI_SAFE_CALL_BEGIN();
+  LayoutNode *self =
+      FieldOwnerFromAddr(field_addr, &LayoutNode::forward_index_);
+  auto forward_index =
+      AnyView::CopyFromTVMFFIAny(*value).cast<Array<PrimExpr>>();
+  Map<Var, PrimExpr> vmap = self->BuildPlaceholderRebindMap_();
+  if (!vmap.empty()) {
+    forward_index = forward_index.Map(
+        [&](const PrimExpr &e) { return Substitute(e, vmap); });
+  }
+  self->forward_index_ = std::move(forward_index);
+  if (!self->IsInstance<FragmentNode>()) {
+    self->decoded_forward_vars_ = std::nullopt;
+  }
+  TVM_FFI_SAFE_CALL_END();
+}
+
 void LayoutNode::RegisterReflection() {
   namespace refl = reflection;
   refl::ObjectDef<LayoutNode>()
       .def_ro("input_size", &LayoutNode::input_size_)
-      .def_ro("forward_index", &LayoutNode::forward_index_)
+      .def_ro(
+          "_forward_vars", &LayoutNode::decoded_forward_vars_,
+          refl::repr(false), refl::init(false), refl::compare(false),
+          refl::hash(false), refl::AttachFieldFlag::SEqHashIgnore(),
+          refl::default_value(nullptr),
+          CustomFieldAccessor{&LayoutNode::GetSerializedForwardVars_, nullptr})
+      .def_ro("forward_index", &LayoutNode::forward_index_,
+              CustomFieldAccessor{nullptr, &LayoutNode::SetForwardIndex_})
       .def("_DebugOutput", &LayoutNode::DebugOutput);
 }
 
@@ -1760,10 +1840,47 @@ bool FragmentNode::IsEqual(const FragmentNode *other, bool skip_index) const {
   return ret;
 }
 
+int FragmentNode::GetSerializedReplicateVar_(void *field_addr,
+                                             TVMFFIAny *result) {
+  TVM_FFI_SAFE_CALL_BEGIN();
+  *result = ::tvm::ffi::details::AnyUnsafe::MoveAnyToTVMFFIAny(
+      Any(Optional<Var>(ReplicationPlaceholder())));
+  TVM_FFI_SAFE_CALL_END();
+}
+
+int FragmentNode::SetForwardThread_(void *field_addr, const TVMFFIAny *value) {
+  TVM_FFI_SAFE_CALL_BEGIN();
+  FragmentNode *self =
+      FieldOwnerFromAddr(field_addr, &FragmentNode::forward_thread_);
+  auto forward_thread = AnyView::CopyFromTVMFFIAny(*value).cast<PrimExpr>();
+  Map<Var, PrimExpr> vmap = self->BuildPlaceholderRebindMap_();
+  if (self->decoded_replicate_var_.defined()) {
+    Var decoded_rep = self->decoded_replicate_var_.value();
+    vmap.Set(decoded_rep, ReplicationPlaceholder());
+    self->forward_index_ = self->forward_index_.Map([&](const PrimExpr &e) {
+      return Substitute(e, {{decoded_rep, ReplicationPlaceholder()}});
+    });
+  }
+  if (!vmap.empty()) {
+    forward_thread = Substitute(forward_thread, vmap);
+  }
+  self->forward_thread_ = std::move(forward_thread);
+  self->decoded_forward_vars_ = std::nullopt;
+  self->decoded_replicate_var_ = std::nullopt;
+  TVM_FFI_SAFE_CALL_END();
+}
+
 void FragmentNode::RegisterReflection() {
   namespace refl = reflection;
   refl::ObjectDef<FragmentNode>()
-      .def_ro("forward_thread", &FragmentNode::forward_thread_)
+      .def_ro("_replicate_var", &FragmentNode::decoded_replicate_var_,
+              refl::repr(false), refl::init(false), refl::compare(false),
+              refl::hash(false), refl::AttachFieldFlag::SEqHashIgnore(),
+              refl::default_value(nullptr),
+              CustomFieldAccessor{&FragmentNode::GetSerializedReplicateVar_,
+                                  nullptr})
+      .def_ro("forward_thread", &FragmentNode::forward_thread_,
+              CustomFieldAccessor{nullptr, &FragmentNode::SetForwardThread_})
       .def_ro("replicate_size", &FragmentNode::replicate_size_)
       .def_ro("thread_range", &FragmentNode::thread_range_)
       .def("_DebugOutput", &FragmentNode::DebugOutput);
