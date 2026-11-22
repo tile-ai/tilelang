@@ -233,19 +233,16 @@ class MemoryAccessCollector(PyStmtExprVisitor):
 BindEnv = dict[Var, tirx.PrimExpr]
 
 
-def _is_non_pure_call(node: Call) -> bool:
-    """Treat calls without known effect information as effectful."""
-    effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
-    return effect is None or int(effect) > tirx.CallEffectKind.Pure.value
-
-
 def _has_non_pure_call(expr: tirx.PrimExpr) -> bool:
+    """Treat calls without known effect information as effectful."""
     found = False
 
     def visit(node):
         nonlocal found
-        if isinstance(node, Call) and _is_non_pure_call(node):
-            found = True
+        if isinstance(node, Call):
+            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
+            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
+                found = True
 
     post_order_visit(expr, visit)
     return found
@@ -350,8 +347,12 @@ def _can_repeat_condition(condition: tirx.PrimExpr | None) -> bool:
 
     def visit(node):
         nonlocal pure
-        if isinstance(node, BufferLoad) or (isinstance(node, Call) and _is_non_pure_call(node)):
+        if isinstance(node, BufferLoad):
             pure = False
+        elif isinstance(node, Call):
+            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
+            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
+                pure = False
 
     post_order_visit(condition, visit)
     return pure

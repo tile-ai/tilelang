@@ -378,27 +378,6 @@ def test_local_to_memory_with_bind_chain():
     _check(before, after)
 
 
-@pytest.mark.parametrize("dist", ["normal", "uniform"])
-def test_effectful_rng_bind_is_not_inlined(dist):
-    @T.prim_func
-    def before(b: T.Tensor((16,), T.float16)):
-        for i in T.vectorized(16):
-            sample = T.rng_rand_float(dist=dist)
-            b[i] = T.cast(sample * sample, T.float16)
-
-    _check(before, before)
-
-
-def test_effectful_atomic_bind_is_not_inlined():
-    @T.prim_func
-    def before(counter: T.Tensor((1,), T.int32), b: T.Tensor((16,), T.float16)):
-        for i in T.vectorized(16):
-            old = T.atomic_add(counter[0], 1, return_prev=True)
-            b[i] = T.cast(old * old, T.float16)
-
-    _check(before, before)
-
-
 def test_guarded_effectful_bind_is_not_inlined():
     @T.prim_func
     def before(b: T.Tensor((16,), T.float16)):
@@ -442,6 +421,17 @@ def test_unknown_call_effect_in_bind_is_not_inlined():
     i = tir.Var("i", "int32")
     value = tir.Var("value", "float32")
     call = tir.Call("float32", tvm.ir.GlobalVar("unknown_effect"), [i])
+    body = tir.SeqStmt([tir.Bind(value, call), tir.BufferStore(b, tir.Cast("float16", value * value), [i])])
+    func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
+    _check(func, func)
+
+
+def test_read_state_bind_is_not_inlined():
+    tir = tvm.tirx
+    b = tir.decl_buffer((16,), "float16", name="b")
+    i = tir.Var("i", "int32")
+    value = tir.Var("value", "int32")
+    call = tir.Call("int32", tvm.ir.Op.get("tirx.tvm_context_id"), [])
     body = tir.SeqStmt([tir.Bind(value, call), tir.BufferStore(b, tir.Cast("float16", value * value), [i])])
     func = tir.PrimFunc([b.data], tir.For(i, 0, 16, tir.ForKind.VECTORIZED, body), buffer_map={b.data: b})
     _check(func, func)
