@@ -1277,12 +1277,16 @@ def vcvt(
     VReg
         Destination vector with the converted elements.
 
-    Supported conversion pairs (simplified)
-    ----------------------------------------
+    Supported conversion pairs
+    --------------------------
     * Float->Int: f32->s64/s32/s16, f16->s32/s16/s8/u8, bf16->s32.
-    * Float->Float: f32->f16/bf16/fp8, f16->fp8/bf16/f32, bf16->fp8/f16/f32/fp4.
-    * Int->Float: s16/s32/s64->f16/f32, s8/u8->f16.
-    * Int->Int: Most s/u{8,16,32,64} widening/narrowing pairs.
+    * Float->Float: f32->f16/bf16/fp8, f16->fp8/bf16/f32,
+      bf16->fp8/f16/f32/fp4, fp8->f32, fp4->bf16.
+    * Int->Float: s8/u8->f16, s16->f16/f32, s32->f32, s64->f32.
+    * Int->Int: s8->s16/s32, u8->u16/u32, s16->s32/u32/u8, u16->u32/u8,
+      s32->s64/s16/u16/u8, u32->s16/u16/u8, s64->s32.
+
+    Any pair not listed above raises ``ValueError``.
     """
 
     if mask is None:
