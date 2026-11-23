@@ -93,7 +93,7 @@ def test_issue_4425_reduce_runs(dtype, op):
     a = torch.randn((64, 64), dtype=torch_dtype, device="cuda")
     ref = a.amax(dim=1) if op == "max" else a.amin(dim=1)
 
-    kernel = tilelang.compile(_make_reduce_kernel(dtype, op), target="cuda")
+    kernel = tilelang.compile(_make_reduce_kernel(dtype, op), target="cuda", execution_backend="nvrtc")
     out = torch.empty((64,), dtype=torch_dtype, device="cuda")
     kernel(a, out)
     torch.cuda.synchronize()
