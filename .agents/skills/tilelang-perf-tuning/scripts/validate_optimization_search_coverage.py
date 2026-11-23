@@ -580,10 +580,11 @@ def validate_pipeline_identity(candidate_id: str, identity: dict) -> None:
         )
 
 
-def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict, dict]:
+def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict, dict, dict, dict]:
     created_by_candidate: dict[str, dict] = {}
     result_by_candidate: dict[str, dict] = {}
     created_index: dict[str, int] = {}
+    promoted_index: dict[str, int] = {}
     for index, event in enumerate(events):
         candidate_id = event.get("candidate_id")
         event_type = event.get("event")
@@ -724,6 +725,7 @@ def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict
                     tested_cases,
                     f"candidate {candidate_id}: PROMOTED needs at least one TESTED_PATH case",
                 )
+                promoted_index[candidate_id] = index
             result_by_candidate[candidate_id] = event
 
     if final:
@@ -731,7 +733,7 @@ def validate_events(events: list, case_ids: set[str], final: bool) -> tuple[dict
             not (set(created_by_candidate) - set(result_by_candidate)),
             "a CREATED candidate has no RESULT event",
         )
-    return created_by_candidate, result_by_candidate, created_index
+    return created_by_candidate, result_by_candidate, created_index, promoted_index
 
 
 def candidate_tested_case(candidate_id: str, case_id: str, results: dict) -> bool:
@@ -1183,7 +1185,7 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
     no_numeric_target = all(case["performance_target"] is None for case in cases)
     strict_closure = final and not targets_met and (allow_unmet_convergence or no_numeric_target)
 
-    created, results, created_index = validate_events(events, case_ids, final)
+    created, results, created_index, promoted_index = validate_events(events, case_ids, final)
     obligation_kinds: dict[str, list[dict]] = {}
     for obligation in obligations:
         oid = obligation["obligation_id"]
@@ -1339,10 +1341,28 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                         f"obligation {oid}: {label} status needs a candidate",
                     )
                     if basis_candidate_id != "B0":
-                        basis_index = created_index[basis_candidate_id]
-                        eligible_ids = [cid for cid in candidate_ids if created_index.get(cid, -1) >= basis_index]
+                        require(
+                            basis_candidate_id in promoted_index,
+                            f"obligation {oid}: pipeline evidence requires the basis candidate "
+                            f"{basis_candidate_id} to have a PROMOTED result",
+                        )
+                        basis_promoted_index = promoted_index[basis_candidate_id]
+                        next_promotion = min(
+                            (idx for idx in promoted_index.values() if idx > basis_promoted_index),
+                            default=None,
+                        )
+                        eligible_ids = [
+                            cid
+                            for cid in candidate_ids
+                            if cid == basis_candidate_id
+                            or (
+                                created_index[cid] > basis_promoted_index
+                                and (next_promotion is None or created_index[cid] < next_promotion)
+                            )
+                        ]
                     else:
-                        eligible_ids = list(candidate_ids)
+                        first_promotion = min(promoted_index.values(), default=None)
+                        eligible_ids = [cid for cid in candidate_ids if first_promotion is None or created_index[cid] < first_promotion]
                     for case_id in linked_cases:
                         require(
                             any(
@@ -1352,8 +1372,9 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                                 for cid in eligible_ids
                             ),
                             f"obligation {oid}: {label} has no tested {realization} candidate for {case_id} "
-                            f"measured on the current basis {basis_candidate_id}; evidence must pair with the basis "
-                            "on work_granularity, precision, and task_mapping",
+                            f"measured on the current basis {basis_candidate_id}; evidence must be created during "
+                            "that basis's promotion interval and pair with the basis on work_granularity, "
+                            "precision, and task_mapping",
                         )
                 if item.get("status") in {"CLOSED_WITH_EVIDENCE", "INAPPLICABLE"}:
                     validate_hard_infeasibility(
