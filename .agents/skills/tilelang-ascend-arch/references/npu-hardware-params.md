@@ -45,7 +45,7 @@ The 950 whitepaper Table 4-2 states UB = **512 KB per AI Core**; the CANN INI (`
 | 2 | SIMT DCache up to 128 KB (reuses UB as cachelines, 128 B granularity) | Guide §SIMT vs SIMD | Public sources / experience |
 | 3 | SSBuffer: 1 KB per core, 3 KB total per MIX 1:2 group | Guide §Microarchitecture Buffer Hierarchy | Ascend documentation (corrected from an earlier 256 KB estimate) |
 | 4 | CV direct paths: L0C→UB (with in-path quantization) and L1↔UB direct connection | Guide §Microarchitecture Data Paths | 950 whitepaper §4.1.1/§4.1.4 |
-| 5 | SSBuffer message path | Guide §Microarchitecture Data Paths | Public sources / experience |
+| 5 | SSBuffer message passing (storage only; readiness requires explicit cross-core synchronization) | Guide §Microarchitecture Data Paths | Public sources / experience |
 | 6 | L1→GM and GM→L0A/L0B paths removed | Guide §Microarchitecture Data Paths | Public sources / experience |
 | 7 | BufferID as an additional synchronization mechanism (get_buf/rel_buf mutex-like semantics); set/wait flags remain available | Guide §Microarchitecture BufferID | 950 whitepaper §4.1.6 |
 | 8 | Multi-core same-address GM access optimization | Guide §Microarchitecture MTE | Public sources / experience |

@@ -41,7 +41,7 @@ Determines LocalTensor allocation, DataCopy path selection, and pipeline arrange
 | **L0A / L0B** | Cube operands | MTE1 load targets |
 | **L0C Buffer** | Cube output (enlarged on 950) | Bounds the base-block tiling upper limit |
 | **UB / Unified Buffer** | Vector workspace | Main arena for Vector compute; shared by SIMT/SIMD |
-| **SSBuffer** | **New in DAV_3510**: CV message path; 1 KB per core, 3 KB total per MIX 1:2 group [¹](#unverified) | Fine-grained synchronization replacing GM workspace |
+| **SSBuffer** | **New in DAV_3510**: CV message path; 1 KB per core, 3 KB total per MIX 1:2 group [¹](#unverified) | Fast CV message passing (replaces GM workspace handoffs); it only stores messages — explicit cross-core synchronization is still required |
 | **BT / FP Buffer** | FixPipe configuration | Quantization/reordering parameters |
 | **ND-DMA Cache** | NDDMA cache | Scattered-movement optimization |
 
@@ -66,7 +66,7 @@ DAV_3510 adds three paths that let Cube and Vector exchange data directly, avoid
 
 1. **L0C → UBuffer**: Cube results reach Vector directly, with FixPipe output to UB; whitepaper §4.1.1 further confirms **L0C→UB in-path quantization** (FP32/INT32 → BF16/FP16/FP8/INT8)
 2. **UBuffer ↔ L1**: bidirectional direct connection between Vector and Cube (UB→L1 is the new direction), avoiding GM round-trips
-3. **SSBuffer message path**: fine-grained CV synchronization signals [¹](#unverified)
+3. **SSBuffer message path**: fine-grained CV message passing; the buffer only stores messages, so the receiver still needs explicit cross-core synchronization before reading them [¹](#unverified)
 
 **Typical beneficiaries**: FA/FIA-style fused operators can eliminate GM reads/writes of workspaces A/B/C entirely.
 

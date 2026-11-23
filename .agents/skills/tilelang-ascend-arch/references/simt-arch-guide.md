@@ -140,9 +140,12 @@ Reserve space for the DCache through the tiling context's dynamic-UB interface (
 ```text
 ubsize       = size obtained from GetCoreMemSize(UB, ...)   // 248 KB usable; already excludes the 8 KB compiler-reserved region
 staticUB     = total size of __ubuf__ static arrays declared by the kernel
-dynamicLimit = ubsize − staticUB − DCACHE_SIZE               // e.g., DCACHE_SIZE = 128 * 1024
+DCACHE_SIZE  = 32 KB .. min(128 KB, ubsize − staticUB)       // must fit within the remaining pool
+dynamicLimit = ubsize − staticUB − DCACHE_SIZE               // require ≥ 0 before the subtraction
 SetDynUBufSize(dynamicLimit)
 ```
+
+Validate the budget before subtracting. If `staticUB + DCACHE_SIZE > ubsize`, the configuration cannot satisfy the DCache minimum: reduce the DCache reservation while keeping at least 32 KB, or reject the configuration. Check that `ubsize − staticUB − DCACHE_SIZE ≥ 0` before calling `SetDynUBufSize`, which takes an unsigned 32-bit size — an underflowed negative difference wraps to a huge positive value instead of being reported.
 
 Budgeting only `ubsize − DCACHE_SIZE` is not enough: an additional static `__ubuf__` allocation then shrinks the DCache below the 32 KB minimum and fails compile-time validation.
 
