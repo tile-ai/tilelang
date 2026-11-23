@@ -10,9 +10,10 @@ description: Use when working with TileLang layouts — the Layout/Fragment clas
 **`tl::Layout`** maps logical coordinates to physical coordinates:
 `input_size_` (logical shape), `forward_vars_` (node-owned bound `tirx::Var`s
 printed `_i`, `_j`, ..., registered with `SEqHashDef()`), and `forward_index_`
-(one PrimExpr per output axis). Helpers `MakeLayoutVars(ndim)` and
-`MakeReplicateVar()` allocate fresh canonical `Var`s for C++ constructors; each
-node rebinds caller vars to fresh private `Var`s on construction. Key APIs:
+(one PrimExpr per output axis). Helpers `MakeLayoutVars(ndim)` /
+`MakeLayoutVars<N>()` and `MakeReplicateVar()` allocate fresh canonical `Var`s
+for C++ constructors; each node rebinds caller vars to fresh private `Var`s on
+construction. Key APIs:
 `InputShape/OutputShape/InputVars/InputVar(i)/GetForwardIndex/Forward(vars)/
 Inverse/InverseWithLevel/Reshape/DetectInjective/DebugOutput`. `OutputShape()`
 is DERIVED from the expressions' ranges by the Analyzer, not stored.

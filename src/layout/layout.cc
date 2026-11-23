@@ -314,13 +314,20 @@ Fragment TryReinterpretReshape(const FragmentNode *fragment_node,
 
 } // namespace
 
+namespace detail {
+Var MakeLayoutVar(size_t index) {
+  std::string name = index < 16
+                         ? std::string{'_', static_cast<char>('i' + index)}
+                         : "_i" + std::to_string(index);
+  return Var(name, DataType::Int(32));
+}
+} // namespace detail
+
 Array<Var> MakeLayoutVars(size_t ndim) {
   Array<Var> vars;
   vars.reserve(ndim);
   for (size_t i = 0; i < ndim; ++i) {
-    std::string name = i < 16 ? std::string{'_', static_cast<char>('i' + i)}
-                              : "_i" + std::to_string(i);
-    vars.push_back(Var(name, DataType::Int(32)));
+    vars.push_back(detail::MakeLayoutVar(i));
   }
   return vars;
 }

@@ -6,6 +6,7 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include <array>
 #include <cstddef>
 #include <exception>
 #include <string>
@@ -403,7 +404,22 @@ std::pair<Fragment, PrimExpr>
 CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
                                     const PrimExpr &combine_size);
 
+namespace detail {
+tirx::Var MakeLayoutVar(size_t index);
+
+template <size_t... Is>
+std::array<tirx::Var, sizeof...(Is)>
+MakeLayoutVarsImpl(std::index_sequence<Is...>) {
+  return {MakeLayoutVar(Is)...};
+}
+} // namespace detail
+
 ffi::Array<tirx::Var> MakeLayoutVars(size_t ndim);
+
+template <size_t N> std::array<tirx::Var, N> MakeLayoutVars() {
+  return detail::MakeLayoutVarsImpl(std::make_index_sequence<N>{});
+}
+
 tirx::Var MakeReplicateVar();
 tirx::IterVar MakeIterVar(std::string name, PrimExpr dom);
 
