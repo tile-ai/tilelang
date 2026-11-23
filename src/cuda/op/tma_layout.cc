@@ -55,9 +55,10 @@ Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
 
   // Physical order is [fixed slice, repeated boxes, box contents]. A fixed
   // pipeline version therefore owns one contiguous run of complete TMA boxes.
+  ffi::Array<Var> vars = MakeLayoutVars(shape.size());
   ffi::Array<PrimExpr> fixed, outer, inner;
   for (size_t i = 0; i < shape.size(); i++) {
-    Var v = InputPlaceholder(i);
+    Var v = vars[i];
     if (!region.empty() && is_one(region[i]->extent)) {
       fixed.push_back(v);
       continue;
@@ -74,7 +75,7 @@ Layout MakeTmaLinearLayout(const ffi::Array<PrimExpr> &shape,
   forward.insert(forward.end(), fixed.begin(), fixed.end());
   forward.insert(forward.end(), outer.begin(), outer.end());
   forward.insert(forward.end(), inner.begin(), inner.end());
-  return Layout(shape, forward);
+  return Layout(shape, vars, forward);
 }
 
 } // namespace cuda

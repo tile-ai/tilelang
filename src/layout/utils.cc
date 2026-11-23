@@ -27,22 +27,22 @@ Fragment ComputeReducerLayout(const Fragment &src_layout, int dim) {
       << "ReduceOp: reduction axis exceeds the source layout rank";
   PrimExpr src_rep_extent = src_layout->ReplicateExtent();
   PrimExpr reduce_extent = src_layout->InputShape()[dim];
-  Array<PrimExpr> fwd;
-  for (size_t i = 0; i + 1 < src_layout->InputDim(); ++i) {
-    fwd.push_back(InputPlaceholder(i));
-  }
-  fwd.insert(fwd.begin() + dim,
-             FloorMod(ReplicationPlaceholder(), reduce_extent));
-  PrimExpr thread = src_layout->ForwardThread(
-      fwd, FloorDiv(ReplicationPlaceholder(), reduce_extent));
-
   Array<PrimExpr> shape = src_layout->InputShape();
   shape.erase(shape.begin() + dim);
+  Array<Var> vars = MakeLayoutVars(shape.empty() ? 1 : shape.size());
+  Var rep = MakeReplicateVar();
+  Array<PrimExpr> fwd;
+  for (size_t i = 0; i + 1 < src_layout->InputDim(); ++i) {
+    fwd.push_back(vars[i]);
+  }
+  fwd.insert(fwd.begin() + dim, FloorMod(rep, reduce_extent));
+  PrimExpr thread =
+      src_layout->ForwardThread(fwd, FloorDiv(rep, reduce_extent));
+
   if (shape.empty()) {
     shape.push_back(1);
   }
-  return Fragment(shape, {}, thread, reduce_extent * src_rep_extent,
-                  std::nullopt)
+  return Fragment(shape, vars, {}, thread, reduce_extent * src_rep_extent, rep)
       ->CondenseReplicateVar()
       ->BindThreadRange(src_layout->ThreadRange());
 }

@@ -7,9 +7,8 @@ import tilelang
 import tilelang.language as T
 import tilelang.testing
 
-pytest.importorskip("cutlass")
 
-
+@tilelang.testing.requires_cutedsl
 def test_truncdiv_python_integers():
     from tilelang.contrib.cutedsl.math import truncdiv
 
@@ -18,7 +17,7 @@ def test_truncdiv_python_integers():
             assert truncdiv(a, b) == int(Fraction(a, b))
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("target", ["cuda", "cutedsl"])
 @pytest.mark.parametrize("dtype", ["int8", "int16", "int32", "int64"])
 @pytest.mark.parametrize("lanes", [1, 4])
@@ -50,7 +49,7 @@ def test_integer_division_rounding(target, dtype, lanes):
     torch.testing.assert_close(result[0] * 3 + result[3], a, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["int8", "int16", "int32", "int64"])
 @pytest.mark.parametrize("lanes", [1, 4])
 def test_truncdiv_runtime_divisors_and_extrema(dtype, lanes):
