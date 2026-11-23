@@ -3,6 +3,7 @@
 import multiprocessing
 import pickle
 
+import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -12,6 +13,7 @@ from tilelang.layout import (
     Layout,
     PartialFragment,
     make_ascend_nz_layout,
+    make_linear_layout,
     make_swizzled_layout,
     try_extract_fractal_layout,
 )
@@ -78,6 +80,8 @@ def test_fragment_and_partial_fragment_pickle_roundtrip():
     )
     restored_frag = _roundtrip_pickle_twice(frag)
     assert restored_frag.is_equal(frag)
+    assert tvm.ir.structural_equal(restored_frag, frag)
+    assert tvm.ir.structural_hash(restored_frag) == tvm.ir.structural_hash(frag)
     assert int(restored_frag.get_thread_size()) == int(frag.get_thread_size())
     assert list(restored_frag.map_forward_thread([1, 11, 3])) == [47]
     assert list(restored_frag.map_forward_index([1, 11, 3])) == [1]
@@ -86,6 +90,7 @@ def test_fragment_and_partial_fragment_pickle_roundtrip():
     partial = PartialFragment([1], forward_thread_fn=lambda i, rep: rep, replicate=128, combine=8)
     restored_partial = _roundtrip_pickle_twice(partial)
     assert restored_partial.is_equal(partial)
+    assert tvm.ir.structural_equal(restored_partial, partial)
     expected_steps = [tuple(map(int, s)) for s in _ffi_api.PartialFragment_combine_steps(partial)]
     actual_steps = [tuple(map(int, s)) for s in _ffi_api.PartialFragment_combine_steps(restored_partial)]
     assert actual_steps == expected_steps
@@ -117,6 +122,36 @@ def test_layout_pickle_preserves_outer_symbolic_vars_with_placeholder_names():
     mapped_thread = u_frag.map_forward_thread([3, 5])[0]
     assert tvm.ir.structural_equal(mapped_thread, u_rep + tirx.IntImm("int32", 3))
     assert mapped_thread.a.same_as(u_rep)
+
+
+def test_layout_owned_vars_no_cross_node_aliasing_and_high_rank():
+    # Two distinct layouts/fragments in the same container must own distinct
+    # bound Vars so container-level StructuralEqual succeeds under alpha-renaming.
+    frag_a = Fragment([8, 4], forward_thread_fn=lambda x, y, r: x * 4 + y + r * 32, replicate=2)
+    frag_b = frag_a.replicate(2)
+    clone_a = Fragment([8, 4], forward_thread_fn=lambda m, n, k: m * 4 + n + k * 32, replicate=2)
+    clone_b = Fragment([8, 4], forward_thread_fn=lambda m, n, k: m * 4 + n + k * 32, replicate=2).replicate(2)
+    assert not frag_a.forward_vars[0].same_as(frag_b.forward_vars[0])
+    assert not frag_a.replicate_var.same_as(frag_b.replicate_var)
+    assert tvm.ir.structural_equal(tvm.runtime.convert([frag_a, frag_b]), tvm.runtime.convert([clone_a, clone_b]))
+
+    # Layouts with > 16 dimensions are no longer capped by static placeholders.
+    ndim = 20
+    shape = [2] * ndim
+    high_rank = Layout(shape, lambda *xs: list(reversed(xs)))
+    restored_high_rank = _roundtrip_pickle_twice(high_rank)
+    coords = [i % 2 for i in range(ndim)]
+    assert list(restored_high_rank.map_forward_index(coords)) == list(reversed(coords))
+    assert list(restored_high_rank.inverse().map_forward_index(list(reversed(coords)))) == coords
+    assert tvm.ir.structural_equal(restored_high_rank, high_rank)
+
+    high_rank_linear = make_linear_layout(tirx.decl_buffer(shape, "float16"))
+    expected_linear = sum(c * (1 << (ndim - 1 - idx)) for idx, c in enumerate(coords))
+    assert [int(x) for x in high_rank_linear.map_forward_index(coords)] == [expected_linear]
+
+    # Fragment forward_index must depend only on logical input coordinates, not replicate_var.
+    with pytest.raises(ValueError, match="forward_index must not depend on replication variable"):
+        Fragment([8], forward_fn=lambda i, rep: (i * 2 + rep, rep), replicate=2)
 
 
 @tilelang.testing.requires_cuda
