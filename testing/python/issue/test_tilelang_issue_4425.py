@@ -65,18 +65,14 @@ def test_issue_4425_reduce_fp16_bf16_no_numeric_limits(dtype, op, expected):
     failed NVRTC compilation. The identity must be spelled via bitcast.
     """
     src = _lower_to_cuda_source(_make_reduce_kernel(dtype, op))
-    assert "std::numeric_limits" not in src, (
-        f"reduce_{op} on {dtype} must not emit std::numeric_limits "
-        f"(unavailable under NVRTC):\n{src}"
-    )
-    assert expected in src, (
-        f"reduce_{op} on {dtype} should initialize with {expected}:\n{src}"
-    )
+    assert "std::numeric_limits" not in src, f"reduce_{op} on {dtype} must not emit std::numeric_limits (unavailable under NVRTC):\n{src}"
+    assert expected in src, f"reduce_{op} on {dtype} should initialize with {expected}:\n{src}"
 
 
 @requires_cuda
 def test_issue_4425_fp16_nan_constant_no_numeric_limits():
     """An fp16 NaN constant must also avoid std::numeric_limits."""
+
     @T.prim_func
     def main(A: T.Tensor((4,), "float16"), B: T.Tensor((4,), "float16")):
         with T.Kernel(1):
@@ -84,12 +80,8 @@ def test_issue_4425_fp16_nan_constant_no_numeric_limits():
                 B[i] = A[i] + T.float16(float("nan"))
 
     src = _lower_to_cuda_source(main)
-    assert "std::numeric_limits" not in src, (
-        f"fp16 NaN constant must not emit std::numeric_limits:\n{src}"
-    )
-    assert "half_t::bitcast(0x7fff)" in src, (
-        f"fp16 NaN constant should be half_t::bitcast(0x7fff):\n{src}"
-    )
+    assert "std::numeric_limits" not in src, f"fp16 NaN constant must not emit std::numeric_limits:\n{src}"
+    assert "half_t::bitcast(0x7fff)" in src, f"fp16 NaN constant should be half_t::bitcast(0x7fff):\n{src}"
 
 
 @requires_cuda
