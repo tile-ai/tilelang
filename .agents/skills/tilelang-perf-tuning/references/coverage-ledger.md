@@ -62,7 +62,7 @@ A disposition recorded as `BASELINE_MEASURED` must match the case's recorded bas
 
 A claimed best must be supported by the selected best implementation for that case: B0 (`kernel_time_us`) or the promoted candidate with the lowest recorded `TESTED_PATH` time. A rejected or unpromoted candidate can never supply the best time. When the final re-measurement differs from the original promotion value, add a `final_measurement` object to the case with `{implementation_id, kernel_time_us, artifact}`; the claim must equal that fresh value, the implementation must still be the selected best, and the immutable `RESULT` event must stay unchanged.
 
-At strict closure a pipeline plan cannot leave `automatic` at `NOT_TRIED`: test it, or record `INAPPLICABLE` with a proof bound to the current basis.
+At strict closure a pipeline plan cannot leave `automatic` at `NOT_TRIED`: test it, or record `INAPPLICABLE` with a proof bound to the current basis. An `automatic` entry recorded as `FAILED` or `PARTIAL` must still name at least one linked attempt candidate, and every named candidate must have a recorded `RESULT`; a failed attempt can carry structured rejection evidence.
 
 ## Validation and Stopping
 

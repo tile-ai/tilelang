@@ -66,6 +66,7 @@ CASE_DISPOSITIONS = {
     "TESTED_PATH",
     "CLOSED_WITH_EVIDENCE",
 }
+CLOSED_OBLIGATION_STATUSES = {"SATISFIED", "CLOSED_WITH_EVIDENCE"}
 AUTO_STATUSES = {"NOT_TRIED", "COMPLETE", "FAILED", "PARTIAL", "INAPPLICABLE"}
 MANUAL_STATUSES = {
     "NOT_TRIED",
@@ -964,7 +965,7 @@ def validate_disposition(
             f"{owner}: BLOCKED needs evidence",
         )
         require(
-            any(all(candidate_blocked_case(cid, case_id, results) for case_id in valid_cases) for cid in candidate_ids),
+            all(any(candidate_blocked_case(cid, case_id, results) for cid in candidate_ids) for case_id in valid_cases),
             f"{owner}: BLOCKED must reference a BLOCKED_BY_ENVIRONMENT result for {sorted(valid_cases)}",
         )
     if final:
@@ -1681,7 +1682,7 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                 f"obligation {oid}: blocking reasons required",
             )
             require(
-                any(all(candidate_blocked_case(cid, case_id, results) for case_id in linked_cases) for cid in candidate_ids_list),
+                all(any(candidate_blocked_case(cid, case_id, results) for cid in candidate_ids_list) for case_id in linked_cases),
                 f"obligation {oid}: BLOCKED must reference a BLOCKED_BY_ENVIRONMENT result for {sorted(linked_cases)}",
             )
         closure_basis = obligation.get("closure_basis")
@@ -1762,11 +1763,11 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                         f"{case_id}; a promotion advances only the cases it measured, so it cannot carry that "
                         "case's evidence",
                     )
-                if strict_closure and basis != BASELINE_ID:
+                if final and status in CLOSED_OBLIGATION_STATUSES and basis != BASELINE_ID:
                     require(
                         basis in promoted_index,
                         f"obligation {oid}: basis candidate {basis} was never promoted for {case_id}; "
-                        "a rejected candidate cannot discharge the obligation at the final gate",
+                        "a closed obligation cannot rest on a rejected candidate at the final gate",
                     )
             require(auto in AUTO_STATUSES, f"obligation {oid}: invalid automatic status")
             require(manual in MANUAL_STATUSES, f"obligation {oid}: invalid manual status")
@@ -1783,6 +1784,16 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                     set(candidate_ids) <= obligation_candidates,
                     f"obligation {oid}: {label} candidate not linked",
                 )
+                if item.get("status") in {"FAILED", "PARTIAL"} and label == "automatic":
+                    require(
+                        candidate_ids,
+                        f"obligation {oid}: {label} {item.get('status')} needs at least one linked attempt candidate",
+                    )
+                    for candidate_id in candidate_ids:
+                        require(
+                            candidate_id in results,
+                            f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} has no recorded RESULT",
+                        )
                 if item.get("status") in {"COMPLETE", "TESTED"}:
                     require(
                         candidate_ids,
