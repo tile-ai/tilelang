@@ -1,122 +1,123 @@
 ---
 name: tilelang-perf-tuning
-description: "对 Ascend950 上已有正确实现的 TileLang 算子执行性能调优：锁定用户 case，建立设备侧基线，按证据迭代候选，并完成精度、性能和搜索覆盖验收。"
+description: "Performance tuning for TileLang operators that already have a correct implementation on Ascend950: lock the user's cases, establish device-side baselines, iterate candidates by evidence, and complete precision, performance, and search-coverage acceptance."
 ---
 
-# TileLang 性能调优
+# TileLang Performance Tuning
 
-平台固定为 Ascend950；后端由调用方明确传入，PTO 使用 `TILELANG_DEFAULT_TARGET=pto`，AscendC 使用 `TILELANG_DEFAULT_TARGET=ascend`。全流程保持同一后端，不在源码中硬编码 target。
+The platform is fixed to Ascend950; the backend is passed in explicitly by the caller: PTO uses `TILELANG_DEFAULT_TARGET=pto` and AscendC uses `TILELANG_DEFAULT_TARGET=ascend`. Keep the same backend throughout the workflow and never hardcode a target in source files.
 
-## 输入门禁
+## Entry Gate
 
-开始前必须取得：
+Before starting, obtain:
 
-- 工程根目录、目标算子文件、公开 wrapper/dispatch 和现有精度测试；
-- 用户直接确认的完整性能 case 参数，包括 shape、dtype、属性和可选数值目标；
-- 当前实现已通过的精度证据；
-- 物理设备、实际导入的 TileLang 路径和目标后端。
+- The project root, the target operator file, the public wrapper/dispatch, and the existing precision tests;
+- Complete performance case parameters directly confirmed by the user, including shapes, dtypes, attributes, and optional numeric targets;
+- Evidence that the current implementation already passes precision;
+- The physical device, the actually imported TileLang path, and the target backend.
 
-case 不完整时只请求补充，不从 pytest、benchmark 或公开 metadata 擅自生成、删减或重新分组。确认后写入 `cases.csv` 或等价结构化文件并记录 SHA256；case 变更必须重新确认。
+When a case is incomplete, only request clarification; never generate, trim, or regroup cases from pytest, benchmarks, or public metadata on your own. After confirmation, write the cases into `cases.csv` or an equivalent structured file and record its SHA256; any case change requires renewed confirmation.
 
-## 隔离目录与状态
+## Isolation Directory and State
 
-在用户指定位置或工程内 `operators/<op>_<timestamp>/` 创建隔离目录，不修改原工程。只复制能独立运行算子和测试的最小文件集，首次确定清单后由所有候选复用。
+Create an isolation directory at a user-specified location or under `operators/<op>_<timestamp>/` inside the project, without modifying the original project. Copy only the minimal file set needed to run the operator and tests independently; once fixed, all candidates reuse this list.
 
 ```text
-working/                         当前最佳 B*
-candidates/Ci/                  从 B* 独立创建的候选
-profiling/                      B0、候选和最终采集
-final_optimized/                最终验收后的交付代码
+working/                         current best B*
+candidates/Ci/                  candidates created independently from B*
+profiling/                      B0, candidate, and final collections
+final_optimized/                delivered code after final acceptance
 optimization-search-coverage.json
 perf-report.md
 timing.json
 ```
 
-- `B0`：不可变原始基线。
-- `B*`：当前已验证最佳，初始为 B0。
-- `Ci`：只从当前 B* 创建，不在未晋升候选上继续叠加。
+- `B0`: the immutable original baseline.
+- `B*`: the current verified best, initially B0.
+- `Ci`: created only from the current B*; never stacked on top of an unpromoted candidate.
 
-候选未晋升时不得覆盖 `working/`；候选晋升后才按首次文件清单更新 B*。
+While a candidate is not promoted, `working/` must not be overwritten; after promotion, update B* strictly following the initial file list.
 
-## 工作流
+## Workflow
 
-### 1. 建立事实与基线
+### 1. Establish Facts and Baseline
 
-完整阅读 [性能核心](references/performance-core.md)。读取算子、wrapper、测试、实际 dispatch、当前 TileLang API/lowering 和同仓相似实现；不得按算子名或记忆推测执行路径。
+Read [Performance Core](references/performance-core.md) in full. Read the operator, the wrapper, the tests, the actual dispatch, the current TileLang API/lowering, and similar implementations in the same repository; never infer the execution path from the operator name or memory.
 
-从 B0 最新源码生成独立 profiling 入口，内嵌全部锁定 case，并按 [Profiling 合约](references/profiling-contract.md) 对全部 case 采集设备侧基线。记录源码 SHA、case SHA、kernel 名、launch 映射、设备、频率、warmup 和正式次数。
+Generate a standalone profiling entry from the latest B0 source with all locked cases embedded, and collect device-side baselines for all cases following the [Profiling Contract](references/profiling-contract.md). Record the source SHA, case SHA, kernel names, launch mapping, device, frequency, warmup, and formal run counts.
 
-逐 case 建立：
+Establish per case:
 
-- 实际执行路径、任务树、tile/core、尾块和 buffer 生命周期；
-- 逻辑 GM 字节、计算量、整数索引/分支/cast/同步和固定开销；
-- 硬件物理容量、当前 lowering 的有效容量、显式/常驻/多版本 footprint；
-- kernel latency、主要 pipe、核间尾差和可核验下界。
+- The actual execution path, task tree, tiles/cores, tails, and buffer lifetimes;
+- Logical GM bytes, compute volume, integer indexing/branches/casts/synchronization, and fixed overhead;
+- Hardware physical capacities, the effective capacities of the current lowering, and explicit/resident/multi-version footprints;
+- Kernel latency, dominant pipes, inter-core tail imbalance, and verifiable lower bounds.
 
-首次修改源码前按 [覆盖账本](references/coverage-ledger.md) 创建并校验 `optimization-search-coverage.json`。
+Before the first source modification, create and validate `optimization-search-coverage.json` following the [Coverage Ledger](references/coverage-ledger.md).
 
-### 2. 路由候选知识
+### 2. Route Candidate Knowledge
 
-按当前瓶颈读取，而不是默认加载全部 reference：
+Read according to the current bottleneck instead of loading every reference by default:
 
-- Elementwise、gather/scatter、transpose、layout、quant 或不规则访存：读取 [Vector 与 Memory 路线](references/vector-memory-routes.md)。
-- Reduction/Norm/Softmax、GEMM/Quant、Scan/Recurrent、Attention 或 RoPE：只读取 [算子族模式](references/operator-patterns.md) 中对应小节。
-- 多 kernel 或混合 AIC/AIV：同时读取 [Profiling 合约](references/profiling-contract.md) 的整链计时部分。
+- Elementwise, gather/scatter, transpose, layout, quant, or irregular memory access: read [Vector and Memory Routes](references/vector-memory-routes.md).
+- Reduction/Norm/Softmax, GEMM/Quant, Scan/Recurrent, Attention, or RoPE: read only the matching sections of [Operator Patterns](references/operator-patterns.md).
+- Multiple kernels or mixed AIC/AIV: also read the whole-chain timing section of the [Profiling Contract](references/profiling-contract.md).
 
-历史候选、模板和其他设备结果只用于提出假设。只有当前接口、版本、后端、数据路径和 case 兼容，且当前环境重新完成编译、精度与同口径 profiling 后才能晋升。
+Historical candidates, templates, and results from other devices only serve to propose hypotheses. A candidate may be promoted only after it is compatible with the current interfaces, versions, backend, data paths, and cases, and has been recompiled, precision-checked, and profiled under the same methodology in the current environment.
 
-### 3. 建立候选池
+### 3. Build the Candidate Pool
 
-第一次修改前最多保留四个 active candidates，后续根据新证据重排。优先级为：
+Before the first modification, keep at most four active candidates; re-rank later based on new evidence. The priorities are:
 
-1. 消除重复算法工作、GM 往返或完整中间物化；
-2. 改善连续搬运、片上驻留、任务映射和负载均衡；
-3. 调整 tile/core、Vector/Cube 数据流和精度路径；
-4. 满足资格时再测试流水；
-5. 最后考虑低收益的局部语法或指令替换。
+1. Eliminate duplicated algorithmic work, GM round trips, or full intermediate materialization;
+2. Improve contiguous transfers, on-chip residency, task mapping, and load balance;
+3. Adjust tiles/cores, Vector/Cube dataflow, and precision paths;
+4. Test pipelining only when eligible;
+5. Consider low-yield local syntactic or instruction substitutions last.
 
-每个候选记录可证伪假设、适用 case、六轴身份、预计消除的工作量、收益上界、API/lowering 依据、容量、精度风险、验证成本和回退点。六轴为：工作粒度、任务映射、物理数据流、精度、storage/pipeline、尾块。任一轴实质变化均分配新候选 ID。
+For each candidate, record the falsifiable hypothesis, applicable cases, six-axis identity, the amount of work expected to be eliminated, the upper bound of the gain, API/lowering basis, capacity, precision risk, validation cost, and rollback point. The six axes are: work granularity, task mapping, physical dataflow, precision, storage/pipeline, and tails. Any substantive change on an axis gets a new candidate ID.
 
-### 4. 单假设迭代
+### 4. Single-Hypothesis Iteration
 
-每轮：
+Each round:
 
-1. 从 B* 创建独立 `Ci`，只实施一个主要假设；必要的布局、同步或 lowering 依赖可作为同一数据流改动，但不得混入无关优化。
-2. 编译并运行候选实际覆盖的定向精度 case；失败时修复或淘汰，不放宽容差、不改 reference、不跳 case。
-3. 从 Ci 最新源码重新生成 profiling 入口，对全部目标 case 按同一口径采集。
-4. 比较 Ci、B*、B0，检查总时间、单 case 回归、原瓶颈、核间均衡和新瓶颈。
-5. 追加 coverage `RESULT`，更新 best metrics、其余候选排序和新触发的结构义务；创建下一个候选前运行普通校验。
+1. Create an independent `Ci` from B* and implement exactly one primary hypothesis; necessary layout, synchronization, or lowering dependencies may land as part of the same dataflow change, but unrelated optimizations must not be mixed in.
+2. Compile and run the targeted precision cases actually covered by the candidate; on failure, fix or eliminate the candidate — never loosen tolerances, modify the reference, or skip cases.
+3. Regenerate the profiling entry from the latest Ci source and collect data for all target cases under the same methodology.
+4. Compare Ci against B* and B0, checking total time, per-case regressions, the original bottleneck, inter-core balance, and new bottlenecks.
+5. Append the coverage `RESULT`, update best metrics, the ranking of remaining candidates, and newly triggered structural obligations; run the normal validation before creating the next candidate.
 
-性能接近噪声时交替复测 `B* → Ci → B* → Ci`。只有精度通过、全部 case 完成同口径采集、总体收益超过噪声且无不可接受单 case 回归时才晋升。pytest/host benchmark 可快速筛选，但不能支持最终晋升或瓶颈归因。
+When performance is close to noise, alternate re-measurements as `B* → Ci → B* → Ci`. Promote a candidate only when precision passes, all cases have been collected under the same methodology, the overall gain exceeds noise, and there is no unacceptable per-case regression. pytest/host benchmarks can be used for quick screening but cannot support final promotion or bottleneck attribution.
 
-### 5. 停止与最终验收
+### 5. Stopping and Final Acceptance
 
-满足以下任一条件才停止：达到用户目标；接近有证据的硬件/算法下界；连续候选无超噪声收益且没有更强假设；剩余高收益路线被当前 API/lowering/容量/语义确定阻断；继续优化会破坏精度或覆盖。
+Stop only when one of the following holds: the user's target is reached; the result approaches an evidenced hardware/algorithmic lower bound; consecutive candidates yield no above-noise gains and no stronger hypothesis exists; the remaining high-yield routes are definitively blocked by the current API/lowering/capacity/semantics; or further optimization would break precision or coverage.
 
-停止前运行 coverage `--final`。未达目标时，只有全部结构义务和逐 case 下界闭环后，才可用 `--final --allow-unmet-convergence` 声明证据收敛。设备或 profiler 故障只能记 `BLOCKED`，不是收敛证据。
+Before stopping, run coverage `--final`. When the target is not met, declare evidence-based convergence with `--final --allow-unmet-convergence` only after all structural obligations and per-case lower bounds are closed. Device or profiler failures can only be recorded as `BLOCKED`; they are not evidence of convergence. Convergence requires a recorded resolution for every environment-blocked case, and the original blocked RESULT stays in the event log.
 
-最终：
+Finally:
 
-1. 对 B* 运行一次现有相关完整测试套；
-2. 从 B0 与 B* 最新源码重新生成入口并同口径复测全部 case；
-3. 只有完整测试全绿且最终性能优于 B0 时，将 B* 归档到 `final_optimized/`；否则交付 B0 或明确标为未完成候选；
-4. 生成 `perf-report.md`，包含实现状态、目标状态、全部 case 对比、最差回归、关键迭代、停止原因、未实施高收益方向、环境/SHA/命令、墙钟和产物路径。
+1. Run the existing relevant full test suite once against B*;
+2. Regenerate the entries from the latest B0 and B* sources and re-measure all cases under the same methodology;
+3. Update the coverage record with those final measurements (best metrics and the associated `RESULT`) and rerun the applicable final gate; an earlier `--final` run does not validate a later measurement, so a missed target after re-measurement reopens the search or the convergence evidence;
+4. Archive B* into `final_optimized/` only when the full suite is green and the final measurements still beat B0 overall **and** satisfy the per-case acceptance criteria used for promotion (no case regresses beyond the allowed limit); otherwise deliver B0 or explicitly mark the result as an unfinished candidate;
+5. Generate `perf-report.md` covering implementation status, target status, all case comparisons, the worst regression, key iterations, the stopping reason, unimplemented high-yield directions, environment/SHA/commands, wall-clock time, and artifact paths.
 
-实现状态只使用 `VERIFIED`、`NO_CHANGE`、`CANDIDATE`、`BLOCKED`；目标状态只使用 `MET`、`CONVERGED_WITHOUT_NUMERIC_TARGET`、`NOT_MET_CONVERGED`、`NOT_MET_UNFINISHED`。
+Implementation status uses only `VERIFIED`, `NO_CHANGE`, `CANDIDATE`, `BLOCKED`; target status uses only `MET`, `CONVERGED_WITHOUT_NUMERIC_TARGET`, `NOT_MET_CONVERGED`, `NOT_MET_UNFINISHED`.
 
-## NPU 命令约束
+## NPU Command Constraints
 
-所有访问 Ascend NPU 的命令显式使用：
+Every command that accesses the Ascend NPU explicitly uses:
 
 ```bash
 env -u ASCEND_RT_VISIBLE_DEVICES TILELANG_DEFAULT_TARGET=<pto|ascend> <command>
 ```
 
-需要指定设备时由入口的 `--device <physical_id>` 选择。先做一次设备健康检查；已知故障设备不得用于候选归因。测试工程有明确设备绑定约定时保持其正确口径，并在报告说明差异。
+When a specific device is required, select it with the entry's `--device <physical_id>`. Perform one device health check first; known faulty devices must not be used for candidate attribution. When the test project has an explicit device-binding convention, keep its correct methodology and explain the difference in the report.
 
-## 脚本
+## Scripts
 
-- `scripts/perf_summary.py`：归档 `msprof op` 的八类 CSV 并生成目标 kernel 摘要。
-- `scripts/validate_optimization_search_coverage.py`：校验 coverage 普通过程记录与最终停止门禁。
+- `scripts/perf_summary.py`: archives the eight `msprof op` CSV categories and generates a summary for the target kernel.
+- `scripts/validate_optimization_search_coverage.py`: validates the normal coverage record and the final stopping gate.
 
-脚本以本 Skill 的真实目录定位，不依赖当前工作目录。
+The scripts locate themselves from the real directory of this skill and do not depend on the current working directory.

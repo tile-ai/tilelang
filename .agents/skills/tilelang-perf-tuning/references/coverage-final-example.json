@@ -35,6 +35,8 @@
         "decomposition_checked": true,
         "baseline_route_kind": "SCALAR_OR_SIMT",
         "baseline_writeback_kind": "SCALAR",
+        "baseline_boundary_kind": "SIMD",
+        "baseline_boundary_value": 1,
         "index_regularity": "periodic",
         "evidence": "Values are placeholders for a real source-window derivation."
       },
@@ -112,7 +114,9 @@
         "pipeline_facts": {"stages": 1, "realization": "SINGLE_STAGE"},
         "tail_strategy": "bounded semantic tail"
       },
-      "applicable_cases": ["representative_case"]
+      "applicable_cases": ["representative_case"],
+      "hypothesis": "A contiguous load, register lane reorder, and indexed writeback keep one vector chain busy without materializing the gather.",
+      "gain_upper_bound": "At most 6.7x: B0 measures 20 us and the recorded movement+compute lower bound is 3 us, so removing the scalar gather cannot reduce kernel time below that floor; any larger claim needs different bottleneck evidence."
     },
     {
       "candidate_id": "C1",

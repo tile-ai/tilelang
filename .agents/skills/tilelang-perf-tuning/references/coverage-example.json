@@ -35,6 +35,8 @@
         "decomposition_checked": true,
         "baseline_route_kind": "SCALAR_OR_SIMT",
         "baseline_writeback_kind": "SCALAR",
+        "baseline_boundary_kind": "SIMD",
+        "baseline_boundary_value": 1,
         "index_regularity": "periodic",
         "evidence": "Replace with mapping, dtype and target-register evidence."
       },
@@ -103,6 +105,15 @@
       "status": "PENDING",
       "candidate_ids": [],
       "basis_candidate_id": "B0",
+      "basis_identity": {
+        "work_granularity": "one complete contiguous semantic unit",
+        "precision": "reference-equivalent precision path",
+        "task_mapping": "independent complete units across available vector cores",
+        "granularity_facts": {
+          "unit": "payload bytes per outer task",
+          "values_by_case": {"representative_case": 256}
+        }
+      },
       "case_dispositions": [
         {"case_id": "representative_case", "status": "PENDING", "candidate_ids": []}
       ],
