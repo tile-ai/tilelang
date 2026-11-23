@@ -66,30 +66,25 @@ template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
 }
 #endif
 
-// The 9.1 dav-3510 DMA ABI uses packed controls and a longer L0C store
-// signature.
-#if TL_CANN_9_1 && __NPU_ARCH__ == 3510
-__aicore__ inline void set_gm2l1_nz_para(uint16_t batches, uint16_t n_stride,
-                                         uint16_t c0_stride,
-                                         uint16_t matrix_stride) {
-  uint64_t config = uint64_t(batches) | (uint64_t(n_stride) << 16) |
-                    (uint64_t(c0_stride) << 32) |
-                    (uint64_t(matrix_stride) << 48);
-  ::asc_set_gm2l1_nz_para(config);
-}
-
-template <typename... Args>
-__aicore__ inline void set_l0c_copy_nz_para(Args... args) {
-  ::asc_set_l0c2gm_nz2nd(args...);
+// Some CANN 9.1 targets use a packed GM-to-L1 control word and longer
+// L0C store signatures. Keep the extra store fields at their neutral values.
+#if TL_CANN_9_1
+__aicore__ inline uint64_t pack_gm2l1_nz_para(uint16_t batches,
+                                              uint16_t n_stride,
+                                              uint16_t c0_stride,
+                                              uint16_t matrix_stride) {
+  return uint64_t(batches) | (uint64_t(n_stride) << 16) |
+         (uint64_t(c0_stride) << 32) | (uint64_t(matrix_stride) << 48);
 }
 
 template <typename D, typename S>
 __aicore__ inline void
-copy_l0c2gm(__gm__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
-            uint32_t dst_stride, uint16_t src_stride, store_l2_cache_mode cache,
-            unit_flag_mode unit, quant_mode quant, relu_pre_mode relu,
-            bool split, bool nz2nd, bool nz2dn, bool clip) {
-  ::asc_copy_l0c2gm(
+copy_l0c2gm_9_1(__gm__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
+                uint32_t dst_stride, uint16_t src_stride,
+                store_l2_cache_mode cache, unit_flag_mode unit,
+                quant_mode quant, relu_pre_mode relu, bool split, bool nz2nd,
+                bool nz2dn, bool clip) {
+  asc_copy_l0c2gm(
       dst, src, n, m, dst_stride, src_stride, cache, clip, unit, quant, relu,
       split, nz2nd, /*quant_post=*/0, /*relu_post=*/0, /*clip_relu_post=*/false,
       /*eltwise_op=*/0, /*eltwise_antq_en=*/false, /*c0_pad_en=*/false,
@@ -98,34 +93,53 @@ copy_l0c2gm(__gm__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
 
 template <typename D, typename S>
 __aicore__ inline void
-copy_l0c2ub(__ubuf__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
-            uint32_t dst_stride, uint16_t src_stride, int8_t subblock,
-            dual_dst_mode dual, unit_flag_mode unit, quant_mode quant,
-            relu_pre_mode relu, bool split, bool nz2nd, bool nz2dn, bool clip) {
-  ::asc_copy_l0c2ub(
+copy_l0c2ub_9_1(__ubuf__ D *dst, __cc__ S *src, uint16_t n, uint16_t m,
+                uint32_t dst_stride, uint16_t src_stride, int8_t subblock,
+                dual_dst_mode dual, unit_flag_mode unit, quant_mode quant,
+                relu_pre_mode relu, bool split, bool nz2nd, bool nz2dn,
+                bool clip) {
+  asc_copy_l0c2ub(
       dst, src, n, m, dst_stride, src_stride, dual, bool(subblock), clip, unit,
       quant, relu, split, nz2nd, /*quant_post=*/0, /*relu_post=*/0,
       /*clip_relu_post=*/false, /*eltwise_op=*/0, /*eltwise_antq_en=*/false,
       /*c0_pad_en=*/false, /*broadcast_en=*/false, nz2dn);
 }
-#else
-// Resolve the native overload when the operation is instantiated. A target
-// may expose only a subset of these DMA operations.
+#endif
+
 template <typename... Args>
 __aicore__ inline void set_gm2l1_nz_para(Args... args) {
-  asc_set_gm2l1_nz_para(args...);
+  if constexpr (TL_CANN_9_1 && !requires { asc_set_gm2l1_nz_para(args...); }) {
+    asc_set_gm2l1_nz_para(pack_gm2l1_nz_para(args...));
+  } else {
+    asc_set_gm2l1_nz_para(args...);
+  }
 }
+
 template <typename... Args>
 __aicore__ inline void set_l0c_copy_nz_para(Args... args) {
-  asc_set_l0c_copy_nz_para(args...);
+  if constexpr (TL_CANN_9_1 &&
+                !requires { asc_set_l0c_copy_nz_para(args...); }) {
+    asc_set_l0c2gm_nz2nd(args...);
+  } else {
+    asc_set_l0c_copy_nz_para(args...);
+  }
 }
+
 template <typename... Args> __aicore__ inline void copy_l0c2gm(Args... args) {
-  asc_copy_l0c2gm(args...);
+  if constexpr (TL_CANN_9_1 && !requires { asc_copy_l0c2gm(args...); }) {
+    copy_l0c2gm_9_1(args...);
+  } else {
+    asc_copy_l0c2gm(args...);
+  }
 }
+
 template <typename... Args> __aicore__ inline void copy_l0c2ub(Args... args) {
-  asc_copy_l0c2ub(args...);
+  if constexpr (TL_CANN_9_1 && !requires { asc_copy_l0c2ub(args...); }) {
+    copy_l0c2ub_9_1(args...);
+  } else {
+    asc_copy_l0c2ub(args...);
+  }
 }
-#endif
 
 // The 9.1 strided overloads narrow the burst count to uint16_t. Use the v2
 // instruction when available to keep the uint32_t count. Other overloads
