@@ -23,6 +23,11 @@
       },
       "best_metrics": {"kernel_time_us": 8.0, "semantic_gm_util_pct": 62.5},
       "best_metric_evidence": ["Same-condition profiling resolves the exact target kernel at 8.0 us."],
+      "final_measurement": {
+        "implementation_id": "C1",
+        "kernel_time_us": 8.0,
+        "artifact": "docs/perf/round_009/summary.txt"
+      },
       "source_window": {
         "access_pattern": "INDEXED_OR_REORDERED",
         "bounded": true,
@@ -116,7 +121,7 @@
       },
       "applicable_cases": ["representative_case"],
       "hypothesis": "A contiguous load, register lane reorder, and indexed writeback keep one vector chain busy without materializing the gather.",
-      "gain_upper_bound": "At most 6.7x: B0 measures 20 us and the recorded movement+compute lower bound is 3 us, so removing the scalar gather cannot reduce kernel time below that floor; any larger claim needs different bottleneck evidence."
+      "gain_upper_bound": "At most 10x: B0 measures 20 us and the movement and compute bounds (1 us and 2 us) can overlap on the proposed path, so the floor is max(movement, compute) = 2 us; any larger claim needs evidence that the two costs cannot overlap or a different bottleneck."
     },
     {
       "candidate_id": "C1",

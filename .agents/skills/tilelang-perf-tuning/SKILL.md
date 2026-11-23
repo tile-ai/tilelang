@@ -99,7 +99,7 @@ Finally:
 
 1. Run the existing relevant full test suite once against B*;
 2. Regenerate the entries from the latest B0 and B* sources and re-measure all cases under the same methodology;
-3. Update the coverage record with those final measurements (best metrics and the associated `RESULT`) and rerun the applicable final gate; an earlier `--final` run does not validate a later measurement, so a missed target after re-measurement reopens the search or the convergence evidence;
+3. Update the mutable case metrics and `best_metric_evidence` to reference the final measurement; when it differs from the promoted value, record it in the case's `final_measurement` (`implementation_id`, `kernel_time_us`, `artifact`) instead of editing the immutable `RESULT` event, then rerun the applicable final gate; an earlier `--final` run does not validate a later measurement, so a missed target after re-measurement reopens the search or the convergence evidence;
 4. Archive B* into `final_optimized/` only when the full suite is green and the final measurements still beat B0 overall **and** satisfy the per-case acceptance criteria used for promotion (no case regresses beyond the allowed limit); otherwise deliver B0 or explicitly mark the result as an unfinished candidate;
 5. Generate `perf-report.md` covering implementation status, target status, all case comparisons, the worst regression, key iterations, the stopping reason, unimplemented high-yield directions, environment/SHA/commands, wall-clock time, and artifact paths.
 

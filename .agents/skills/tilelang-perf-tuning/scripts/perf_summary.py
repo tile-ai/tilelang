@@ -220,11 +220,14 @@ def match_resolved_kernel(
     casefold = [name for name in names if name.casefold() == resolved.casefold()]
     if len(casefold) == 1:
         candidate = casefold[0]
-        if basic_names is not None and candidate in basic_names and candidate != resolved:
-            raise ValueError(
-                f"{source}: resolved kernel '{resolved}' is a distinct kernel from '{candidate}' in OpBasicInfo.csv; "
-                "refusing to accept a case-normalized name that maps to a different identity"
-            )
+        if basic_names is not None:
+            owners = [name for name in basic_names if name.casefold() == resolved.casefold()]
+            if len(owners) != 1:
+                raise ValueError(
+                    f"{source}: case-normalized kernel '{resolved}' matches {len(owners)} kernels in "
+                    f"OpBasicInfo.csv ({', '.join(owners) if owners else '(none)'}); refusing to guess which "
+                    "basic kernel owns these metrics"
+                )
         return candidate
     raise ValueError(
         f"{source}: resolved kernel '{resolved}' missing; available kernels: {', '.join(names)}. "
@@ -285,24 +288,22 @@ def load_kernel_tables(opprof_dir: str, expected: str) -> tuple[dict[str, list[d
     return tables, resolved
 
 
+def row_has_activity(row: dict[str, str], prefix: str) -> bool:
+    """True when any finite positive field of this core type appears in the row."""
+    for field, value in row.items():
+        if field.startswith(f"{prefix}_") and (parsed := optional_float(value)) is not None and parsed > 0:
+            return True
+    return False
+
+
 def active_core_prefixes(rows: Sequence[dict[str, str]]) -> list[str]:
     """Return every active core type instead of collapsing mixed AIC/AIV data."""
-    active = []
-    for prefix in ("aiv", "aic"):
-        values = [
-            parsed
-            for row in rows
-            for field, value in row.items()
-            if field.startswith(f"{prefix}_") and (parsed := optional_float(value)) is not None
-        ]
-        if any(value > 0 for value in values):
-            active.append(prefix)
-    return active
+    return [prefix for prefix in ("aiv", "aic") if any(row_has_activity(row, prefix) for row in rows)]
 
 
 def core_rows(rows: Sequence[dict[str, str]], prefix: str) -> list[dict[str, str]]:
-    time_field = f"{prefix}_time(us)"
-    return [row for row in rows if (value := optional_float(row.get(time_field))) is not None and value > 0]
+    """Select active rows by the same test as active_core_prefixes; timing is validated later."""
+    return [row for row in rows if row_has_activity(row, prefix)]
 
 
 def find_next_round(perf_dir: str) -> str:
@@ -521,14 +522,15 @@ def generate_summary(
         elif present_field(mem_rows, ("GM_to_UB_datas(KB)", "GM_to_L1_datas(KB)")) is not None:
             lines.append("  Avg MTE2 transfer: unavailable (no row carries both transfer bytes and MTE2 instruction counts)")
 
-        for display, candidates in [
-            ("GM→UB avg BW", ("aiv_gm_to_ub_bw(GB/s)",)),
-            ("UB→GM avg BW", ("aiv_ub_to_gm_bw(GB/s)",)),
-            ("GM→L1 avg BW", ("aic_gm_to_l1_bw(GB/s)", "aic_l1_read_bw(GB/s)")),
+        for display, candidates, fallback_display in [
+            ("GM→UB avg BW", ("aiv_gm_to_ub_bw(GB/s)",), None),
+            ("UB→GM avg BW", ("aiv_ub_to_gm_bw(GB/s)",), None),
+            ("GM→L1 avg BW", ("aic_gm_to_l1_bw(GB/s)", "aic_l1_read_bw(GB/s)"), "L1 read aggregate"),
         ]:
-            values, _ = metric_series(mem_rows, candidates)
+            values, field = metric_series(mem_rows, candidates)
             if values and sum(values) > 0:
-                lines.append(f"  {display}: {statistics.mean(values):.2f} GB/s (samples={len(values)})")
+                label = display if field == candidates[0] else fallback_display or display
+                lines.append(f"  {label}: {statistics.mean(values):.2f} GB/s (samples={len(values)})")
 
     ub_rows = tables["MemoryUB.csv"]
     if ub_rows:

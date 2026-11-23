@@ -164,6 +164,12 @@ def require_string_list(value: object, message: str) -> list[str]:
     return value
 
 
+def require_strict_int(value: object, minimum: int, message: str) -> int:
+    """Require an integer counter; bool is an int subclass but never a counter."""
+    require(isinstance(value, int) and not isinstance(value, bool) and value >= minimum, message)
+    return value
+
+
 def nonempty_text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
@@ -393,12 +399,14 @@ def validate_case(case: dict, obligation_ids: set[str]) -> None:
         require(field in case, f"case {case_id}: missing {field}")
 
     for field in ("outer_items", "inner_independent_chunks_per_item"):
-        require(
-            isinstance(case[field], int) and case[field] >= 0,
+        require_strict_int(
+            case[field],
+            0,
             f"case {case_id}: {field} must be a non-negative integer",
         )
-    require(
-        isinstance(case["available_cores"], int) and case["available_cores"] > 0,
+    require_strict_int(
+        case["available_cores"],
+        1,
         f"case {case_id}: available_cores must be positive",
     )
     for field in ("outer_task_waves", "flattened_task_waves", "per_task_payload_bytes"):
@@ -483,8 +491,9 @@ def validate_case(case: dict, obligation_ids: set[str]) -> None:
             math.isclose(density, consumed / span, rel_tol=1e-3, abs_tol=1e-6),
             f"case {case_id}: source density is inconsistent with consumed/span",
         )
-        require(
-            isinstance(window_vregs, int) and window_vregs > 0,
+        require_strict_int(
+            window_vregs,
+            1,
             f"case {case_id}: bounded source window needs positive window_vregs",
         )
         require(
@@ -835,6 +844,81 @@ def candidate_tested_case(candidate_id: str, case_id: str, results: dict) -> boo
     return any(item["case_id"] == case_id and item["disposition"] == "TESTED_PATH" for item in result["case_results"])
 
 
+def candidate_blocked_case(candidate_id: str, case_id: str, results: dict) -> bool:
+    """True only when this candidate's own environment block left the case unmeasured."""
+    result = results.get(candidate_id)
+    if result is None or result.get("result_status") != "BLOCKED_BY_ENVIRONMENT":
+        return False
+    return any(
+        isinstance(item, dict) and item.get("case_id") == case_id and item.get("disposition") == "NOT_RUN_BLOCKED"
+        for item in result.get("case_results", [])
+    )
+
+
+def measured_kernel_time(candidate_id: str, case_id: str, results: dict) -> float | None:
+    """Return the candidate's recorded TESTED_PATH measurement for one case."""
+    result = results.get(candidate_id)
+    if result is None:
+        return None
+    for item in result.get("case_results", []):
+        if isinstance(item, dict) and item.get("case_id") == case_id and item.get("disposition") == "TESTED_PATH":
+            return item["performance_measurement"]["kernel_time_us"]
+    return None
+
+
+def selected_best_implementation(case: dict, promoted_cases: dict[str, set[str]], results: dict) -> tuple[str, float]:
+    """Return the fastest tested implementation: B0 or the best promoted candidate."""
+    case_id = case["case_id"]
+    selected_id = BASELINE_ID
+    selected_time = case["kernel_time_us"]
+    for candidate_id in promoted_cases:
+        if case_id not in promoted_cases[candidate_id]:
+            continue
+        measured = measured_kernel_time(candidate_id, case_id, results)
+        if measured is not None and measured < selected_time:
+            selected_id = candidate_id
+            selected_time = measured
+    return selected_id, selected_time
+
+
+def validate_best_measurement_binding(cases: list[dict], promoted_cases: dict[str, set[str]], results: dict) -> None:
+    """Bind the claimed best time to the selected implementation's measurement.
+
+    A fresh final measurement may supersede the original promotion value, but it must be
+    recorded on the mutable case entry and must not rewrite the immutable RESULT event.
+    """
+    for case in cases:
+        case_id = case["case_id"]
+        selected_id, measured = selected_best_implementation(case, promoted_cases, results)
+        claim = case["best_metrics"]["kernel_time_us"]
+        fresh = case.get("final_measurement")
+        if fresh is None:
+            require(
+                math.isclose(claim, measured, rel_tol=1e-3, abs_tol=1e-6),
+                f"case {case_id}: best kernel_time_us {claim} is not the measured {measured} of the selected "
+                f"best implementation {selected_id}; record a final_measurement for a fresh measurement",
+            )
+            continue
+        require(isinstance(fresh, dict), f"case {case_id}: final_measurement must be an object")
+        require(
+            fresh.get("implementation_id") == selected_id,
+            f"case {case_id}: final_measurement names {fresh.get('implementation_id')!r}, "
+            f"but the selected best implementation is {selected_id}",
+        )
+        require(
+            positive_number(fresh.get("kernel_time_us")),
+            f"case {case_id}: final_measurement needs a positive kernel_time_us",
+        )
+        require(
+            nonempty_text(fresh.get("artifact")),
+            f"case {case_id}: final_measurement needs an artifact",
+        )
+        require(
+            math.isclose(fresh["kernel_time_us"], claim, rel_tol=1e-3, abs_tol=1e-6),
+            f"case {case_id}: best kernel_time_us {claim} disagrees with the final_measurement {fresh['kernel_time_us']}",
+        )
+
+
 def validate_disposition(
     owner: str,
     disposition: dict,
@@ -880,8 +964,8 @@ def validate_disposition(
             f"{owner}: BLOCKED needs evidence",
         )
         require(
-            any(cid in results and results[cid].get("result_status") == "BLOCKED_BY_ENVIRONMENT" for cid in candidate_ids),
-            f"{owner}: BLOCKED must reference a BLOCKED_BY_ENVIRONMENT result",
+            any(all(candidate_blocked_case(cid, case_id, results) for case_id in valid_cases) for cid in candidate_ids),
+            f"{owner}: BLOCKED must reference a BLOCKED_BY_ENVIRONMENT result for {sorted(valid_cases)}",
         )
     if final:
         require(
@@ -1213,7 +1297,8 @@ def validate_direct_route_priority(
             direct_dispositions,
             f"case {case_id}: direct-register route disposition required",
         )
-        if any(item.get("status") in {"BASELINE_MEASURED", "CLOSED_WITH_EVIDENCE"} for item in direct_dispositions):
+        closed_statuses = {"BASELINE_MEASURED", "CLOSED_WITH_EVIDENCE"}
+        if all(item.get("status") in closed_statuses for item in direct_dispositions):
             continue
 
         route_experiments = [
@@ -1240,9 +1325,8 @@ def blocker_map(events: list, cases: list[dict]) -> dict[str, list[str]]:
     return {case_id: candidates for case_id, candidates in blocked.items() if candidates}
 
 
-def validate_blocked_resolutions(convergence: dict, blocked: dict[str, list[str]]) -> None:
+def validate_blocked_resolutions(entries: object, blocked: dict[str, list[str]]) -> None:
     """Require a recorded recovery for every blocked case, met target or not."""
-    entries = convergence.get("blocked_resolutions")
     if not blocked:
         require(
             entries is None or entries == [],
@@ -1333,7 +1417,6 @@ def validate_convergence_evidence(data: dict, cases: list[dict]) -> None:
             nonempty_text(entry.get("remaining_gap_explanation")),
             f"case {case_id}: remaining gap explanation required",
         )
-    validate_blocked_resolutions(convergence, blocker_map(data.get("candidate_events", []), cases))
 
 
 def resolve_pipeline_basis(
@@ -1598,8 +1681,8 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                 f"obligation {oid}: blocking reasons required",
             )
             require(
-                any(cid in results and results[cid].get("result_status") == "BLOCKED_BY_ENVIRONMENT" for cid in candidate_ids_list),
-                f"obligation {oid}: BLOCKED must reference a BLOCKED_BY_ENVIRONMENT result",
+                any(all(candidate_blocked_case(cid, case_id, results) for case_id in linked_cases) for cid in candidate_ids_list),
+                f"obligation {oid}: BLOCKED must reference a BLOCKED_BY_ENVIRONMENT result for {sorted(linked_cases)}",
             )
         closure_basis = obligation.get("closure_basis")
         if closure_basis is not None:
@@ -1672,15 +1755,18 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                     b0_identities[case_id] if basis == BASELINE_ID else candidate_pipeline_identity(basis, case_id, created)
                 )
                 pipeline_bases[(oid, case_id)] = basis
+                if basis != BASELINE_ID and basis in promoted_index:
+                    require(
+                        candidate_tested_case(basis, case_id, results),
+                        f"obligation {oid}: basis candidate {basis} was promoted without a TESTED_PATH for "
+                        f"{case_id}; a promotion advances only the cases it measured, so it cannot carry that "
+                        "case's evidence",
+                    )
                 if strict_closure and basis != BASELINE_ID:
                     require(
                         basis in promoted_index,
                         f"obligation {oid}: basis candidate {basis} was never promoted for {case_id}; "
                         "a rejected candidate cannot discharge the obligation at the final gate",
-                    )
-                    require(
-                        candidate_tested_case(basis, case_id, results),
-                        f"obligation {oid}: basis candidate {basis} path was not tested for {case_id}",
                     )
             require(auto in AUTO_STATUSES, f"obligation {oid}: invalid automatic status")
             require(manual in MANUAL_STATUSES, f"obligation {oid}: invalid manual status")
@@ -1739,16 +1825,22 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                         item.get("hard_infeasibility"),
                         {case_id: basis_by_case[case_id] for case_id in linked_cases},
                     )
-            if strict_closure and auto != "COMPLETE":
+            if strict_closure:
                 require(
-                    manual in {"TESTED", "CLOSED_WITH_EVIDENCE"},
-                    f"obligation {oid}: incomplete automatic pipeline requires manual trial/evidence",
+                    auto != "NOT_TRIED",
+                    f"obligation {oid}: automatic pipeline realization is still NOT_TRIED at the final gate; "
+                    "test it or record INAPPLICABLE with a proof for the current basis",
                 )
-            if strict_closure and auto == "COMPLETE":
-                require(
-                    manual in {"NOT_NEEDED_AUTO_COMPLETE", "TESTED"},
-                    f"obligation {oid}: complete automatic pipeline needs explicit manual disposition",
-                )
+                if auto != "COMPLETE":
+                    require(
+                        manual in {"TESTED", "CLOSED_WITH_EVIDENCE"},
+                        f"obligation {oid}: incomplete automatic pipeline requires manual trial/evidence",
+                    )
+                else:
+                    require(
+                        manual in {"NOT_NEEDED_AUTO_COMPLETE", "TESTED"},
+                        f"obligation {oid}: complete automatic pipeline needs explicit manual disposition",
+                    )
         obligation_kinds.setdefault(kind, []).append(obligation)
 
     linked_by_case: dict[str, set[str]] = {case_id: set() for case_id in case_ids}
@@ -1803,6 +1895,9 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
     validate_direct_route_priority(cases, obligations, created)
 
     if final:
+        validate_best_measurement_binding(cases, promoted_cases, results)
+        validate_blocked_resolutions(data.get("blocked_resolutions"), blocker_map(events, cases))
+
         pipeline_obligations = obligation_kinds.get("pipeline_realization", [])
         for candidate_id, result in results.items():
             if result["result_status"] != "PROMOTED":
@@ -1860,7 +1955,7 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValidationError) as error:
         print(f"INVALID: {error}", file=sys.stderr)
         return 1
-    except (TypeError, KeyError, AttributeError, IndexError) as error:
+    except (TypeError, KeyError, AttributeError, IndexError, OverflowError) as error:
         print(f"INVALID: malformed record: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
     print(outcome)

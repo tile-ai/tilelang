@@ -12,7 +12,8 @@ The record contains:
 
 - `cases`: per-case structure, baseline, target, and current best;
 - `obligations`: obligations triggered by structural facts that must be adjudicated before stopping;
-- `candidate_events`: the append-only candidate `CREATED` and `RESULT` log.
+- `candidate_events`: the append-only candidate `CREATED` and `RESULT` log;
+- `blocked_resolutions`: optional top-level recovery records for environment blocks (see below).
 
 Each case records at least the outer/inner independent tasks, available cores, task waves, payload, kernel time, transfer/compute lower bounds, dominant pipes, the source window, the user target, and the best metrics. The source window records the baseline's own route, writeback, and granularity (`baseline_boundary_kind` and `baseline_boundary_value`, for example `SIMD` with value 1 for a one-lane scalar loop) so later `BASELINE_MEASURED` claims can be checked against the recorded baseline. When there is no numeric target, `performance_target` is `null`; a baseline or an example threshold must never masquerade as the user's target.
 
@@ -32,17 +33,17 @@ The validator binds each evidence candidate to its per-case basis from the promo
 
 Evidence must pair with the basis on `work_granularity`, `precision`, `task_mapping`, and the structured granularity facts — `granularity_facts.unit` plus the case's entry in `granularity_facts.values_by_case` — so a measured gain cannot include a tile-size change. For every case measured on B0, `basis_identity` records the same five facts; use the flat form when all linked cases share one B0 identity, or a per-case map keyed by the B0 cases otherwise.
 
-A candidate basis needs a `PROMOTED` result before it can carry evidence, and at the final gate every closed obligation's non-B0 basis must be promoted; a tested but rejected candidate cannot discharge the obligation. Because a promotion closes the previous basis's interval for the cases it measured, a promoted single-stage candidate supersedes any basis promoted before it: rebase those cases to the promoted candidate (or a newer basis) and re-measure. Normal validation may record a proposed basis that is not yet promoted only while the obligation stays pending; at the final gate the basis must be promoted at or after the superseding promotion, so a rejected candidate cannot discharge the rebase. Do not add a second obligation for a case that already has one, and do not close a superseded basis with stale results.
+A candidate basis needs a `PROMOTED` result that actually measured the case before it can carry that case's evidence, and at the final gate every closed obligation's non-B0 basis must be promoted; a promotion advances only the cases it tested, and a tested but rejected candidate cannot discharge the obligation. Because a promotion closes the previous basis's interval for the cases it measured, a promoted single-stage candidate supersedes any basis promoted before it: rebase those cases to the promoted candidate (or a newer basis) and re-measure. Normal validation may record a proposed basis that is not yet promoted only while the obligation stays pending; at the final gate the basis must be promoted at or after the superseding promotion, so a rejected candidate cannot discharge the rebase. Do not add a second obligation for a case that already has one, and do not close a superseded basis with stale results.
 
 The work-granularity obligation records per case the source values for `FULL_CONTIGUOUS_UNIT`, `SIMD`, `DMA`, `CAPACITY`, and `PARALLEL`. The physical routes adjudicate at least the implementable combinations of `SCALAR_OR_SIMT`, `MEMORY_INDEXED_VECTOR`, `CONTIGUOUS_LOAD_REGISTER_REORDER`, and `MATERIALIZED_TRANSFORM` relevant to the current bottleneck, distinguishing output writeback.
 
 ## Candidate Events
 
-`CREATED` fixes the six-axis identity, per-case granularity, physical route, pipeline facts, applicable cases, hypothesis, and gain upper bound. The gain upper bound must be derivable before the trial from evidence already available (B0 pipe timings, the recorded lower bounds, or a cost estimate for the work the candidate can remove) and must not cite this candidate's measured result. Append a `RESULT` with the same identity and applicable cases before creating the next candidate.
+`CREATED` fixes the six-axis identity, per-case granularity, physical route, pipeline facts, applicable cases, hypothesis, and gain upper bound. The gain upper bound must be derivable before the trial from evidence already available (B0 pipe timings, the recorded lower bounds, or a cost estimate for the work the candidate can remove) and must not cite this candidate's measured result. When movement and compute can overlap on the proposed path, the floor is `max(movement, compute)`; only a recorded proof that they are serialized lets you add the two bounds. Append a `RESULT` with the same identity and applicable cases before creating the next candidate.
 
 RESULT status uses `PROMOTED`, `REJECTED_WITH_EVIDENCE`, `INAPPLICABLE_WITH_EVIDENCE`, or `BLOCKED_BY_ENVIRONMENT`. Cases whose modified path actually ran use `TESTED_PATH` with `kernel_time_us` and a profiling artifact. Cases that never ran, were not activated, or only passed precision must not masquerade as performance coverage.
 
-When a candidate fails compilation/execution/precision while a healthy B0 control runs normally, structured rejection evidence may attribute the failure to the candidate. Device, profiler, or external-environment failures can only be recorded as blocked, with the recovery conditions written down; the obligation stays blocked and the final gate rejects convergence. Once the environment recovers, record the resolution once in the convergence evidence as `blocked_resolutions` entries of `{case_id, candidate_id, recovery, evidence}` for every case with a blocked result — including a case that already meets its target but later hit `NOT_RUN_BLOCKED` — and keep the original `BLOCKED_BY_ENVIRONMENT` RESULT so a retry clears the block without rewriting history.
+When a candidate fails compilation/execution/precision while a healthy B0 control runs normally, structured rejection evidence may attribute the failure to the candidate. Device, profiler, or external-environment failures can only be recorded as blocked, with the recovery conditions written down; the obligation stays blocked and the final gate rejects convergence. Once the environment recovers, record the resolution once in the top-level `blocked_resolutions` as entries of `{case_id, candidate_id, recovery, evidence}` for every case with a blocked result — including a case that already meets its target but later hit `NOT_RUN_BLOCKED` — and keep the original `BLOCKED_BY_ENVIRONMENT` RESULT so a retry clears the block without rewriting history. The final gate checks `blocked_resolutions` on every successful path, including `TARGET_MET`.
 
 ## Closing Evidence
 
@@ -58,6 +59,10 @@ Implementation difficulty, long source files, one adjacent combination failing, 
 A pipeline-plan item recorded as `CLOSED_WITH_EVIDENCE` or `INAPPLICABLE` must bind its `hard_infeasibility` proof to the cases and basis it was derived from: include `case_ids` and `basis_candidate_id` (one ID, or a per-case map when the linked cases sit on different bases). After a rebase the old proof no longer matches the current basis and must be re-derived; proofs stay valid for cases whose basis did not change.
 
 A disposition recorded as `BASELINE_MEASURED` must match the case's recorded baseline exactly: route and writeback for route or interaction plans, and additionally `baseline_boundary_kind`/`baseline_boundary_value` for granularity or interaction plans. An interaction row that cannot identify that baseline combination needs tested evidence or a valid closure proof instead. An obligation marked `SATISFIED` must rest on tested evidence for every linked case, or on a validated closure proof; `BASELINE_MEASURED` alone does not satisfy an obligation.
+
+A claimed best must be supported by the selected best implementation for that case: B0 (`kernel_time_us`) or the promoted candidate with the lowest recorded `TESTED_PATH` time. A rejected or unpromoted candidate can never supply the best time. When the final re-measurement differs from the original promotion value, add a `final_measurement` object to the case with `{implementation_id, kernel_time_us, artifact}`; the claim must equal that fresh value, the implementation must still be the selected best, and the immutable `RESULT` event must stay unchanged.
+
+At strict closure a pipeline plan cannot leave `automatic` at `NOT_TRIED`: test it, or record `INAPPLICABLE` with a proof bound to the current basis.
 
 ## Validation and Stopping
 
@@ -76,4 +81,4 @@ python3 <skill_dir>/scripts/validate_optimization_search_coverage.py \
   <record> --final --allow-unmet-convergence
 ```
 
-Success prints `UNMET_BUT_CONVERGED`. Any pending item, blocked item, candidate without a RESULT, or textual inference fails. Every environment-blocked case needs a `blocked_resolutions` entry, and lower-bound `case_bounds` still cover exactly the cases whose targets are unmet.
+Success prints `UNMET_BUT_CONVERGED`. Any pending item, blocked item, candidate without a RESULT, or textual inference fails. Every environment-blocked case needs a top-level `blocked_resolutions` entry, and lower-bound `case_bounds` must cover each case that has no numeric target or has not met its target; cases that meet their target must be omitted.
