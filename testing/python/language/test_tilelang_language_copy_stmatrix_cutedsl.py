@@ -10,15 +10,6 @@ import tilelang.testing
 from tilelang.layout import make_gemm_fragment_8x8, make_gemm_fragment_8x8_transposed, make_swizzled_layout
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _shared_region_store(row, col, transposed, swizzled, dtype, lower_dim_first=True):
     fragment = make_gemm_fragment_8x8_transposed() if transposed else make_gemm_fragment_8x8()
     fragment = fragment.repeat([2, 2], repeat_on_thread=False, lower_dim_first=lower_dim_first)
@@ -40,11 +31,10 @@ def _shared_region_store(row, col, transposed, swizzled, dtype, lower_dim_first=
 
 
 def _compile(func):
-    _require_cutedsl()
     return tilelang.compile(func, out_idx=[1], target="cutedsl")
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(9, 0)
 @pytest.mark.parametrize("row, col, transposed", [(0, 0, False), (16, 16, True), (0, 1, False)])
 def test_stmatrix_16bit(row, col, transposed):
@@ -57,7 +47,7 @@ def test_stmatrix_16bit(row, col, transposed):
     torch.testing.assert_close(kernel(a), expected, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 @pytest.mark.parametrize("col, lower_dim_first", [(16, True), (8, True), (16, False)])
 def test_stmatrix_int8(col, lower_dim_first):
@@ -70,7 +60,7 @@ def test_stmatrix_int8(col, lower_dim_first):
     torch.testing.assert_close(kernel(a), expected, rtol=0, atol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version_ge(10, 0)
 def test_stmatrix_float8():
     kernel = _compile(_shared_region_store(16, 16, True, True, T.float8_e4m3fn))

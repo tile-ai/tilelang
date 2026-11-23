@@ -516,7 +516,7 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
           // pins the lane parity per thread, leaving one lane idle.
           bool bit0_serial = true;
           auto inner_steps = backend::reduce::CollectThreadReduceSteps(
-              analysis.iter_sum, Downcast<Var>(InputPlaceholder(ndim - 1)));
+              analysis.iter_sum, site.loop_layout->InputVar(ndim - 1));
           for (const auto &step : inner_steps) {
             thread_multiplicity *= step.extent;
             if (step.lower_factor % 2 != 0) {
@@ -531,19 +531,21 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
       }
     }
     if (lane_var.has_value()) {
+      Array<Var> packed_vars = MakeLayoutVars(buffer->shape.size() + 1);
+      Var packed_rep = MakeReplicateVar();
       Array<PrimExpr> slot_args;
+      slot_args.reserve(buffer->shape.size());
       for (size_t d = 0; d < buffer->shape.size(); ++d) {
-        slot_args.push_back(InputPlaceholder(d));
+        slot_args.push_back(packed_vars[d]);
       }
       Array<PrimExpr> fwd_index = storage->Forward(slot_args);
-      PrimExpr fwd_thread =
-          storage->ForwardThread(slot_args, ReplicationPlaceholder());
-      PrimExpr lane = InputPlaceholder(buffer->shape.size());
+      PrimExpr fwd_thread = storage->ForwardThread(slot_args, packed_rep);
+      PrimExpr lane = packed_vars[buffer->shape.size()];
       Array<PrimExpr> packed_shape = buffer->shape;
       packed_shape.push_back(IntImm(DataType::Int(32), 2));
       decision.packed_layout =
-          Fragment(packed_shape, {fwd_index[0] * 2 + lane}, fwd_thread,
-                   storage->ReplicateExtent(), std::nullopt)
+          Fragment(packed_shape, packed_vars, {fwd_index[0] * 2 + lane},
+                   fwd_thread, storage->ReplicateExtent(), packed_rep)
               ->BindThreadRange(storage->ThreadRange());
       decision.packed = true;
       decision.pack_lane_var = lane_var.value();
@@ -559,13 +561,14 @@ DeriveNarrowLowering(const EpochInfo &epoch, const PartialFragment &partial,
     if (!dst_frag) {
       return fail("destination has a non-fragment layout");
     }
+    Array<Var> idx_vars = MakeLayoutVars(buffer->shape.size());
     Array<PrimExpr> element_indices;
+    element_indices.reserve(idx_vars.size());
     for (size_t d = 0; d < buffer->shape.size(); ++d) {
-      Var placeholder = InputPlaceholder(d);
+      Var placeholder = idx_vars[d];
       analyzer->Bind(
           placeholder,
-          Range::FromMinExtent(make_zero(DataType::Int(32)), buffer->shape[d]),
-          /*allow_override=*/true);
+          Range::FromMinExtent(make_zero(DataType::Int(32)), buffer->shape[d]));
       element_indices.push_back(placeholder);
     }
     if (!ProveFragmentContains(dst_frag.value(), decision.storage_layout,

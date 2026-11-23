@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 import logging
 import time
@@ -22,7 +22,7 @@ def _format_context(context: dict[str, object]) -> str:
 
 
 @contextmanager
-def jit_phase(name: str, *, enabled: bool | None = None, verbose: bool = False, **context: object) -> Iterator[None]:
+def jit_phase(name: str, *, enabled: bool | None = None, verbose: bool = False, **context: object) -> Generator[None, None, None]:
     if enabled is None:
         enabled = diagnostics_enabled(verbose=verbose)
     if not enabled:

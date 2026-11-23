@@ -6,19 +6,6 @@ import torch
 import pytest
 
 
-def _is_cutedsl_available():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-        return True
-    except (ImportError, AssertionError):
-        return False
-
-
-pytestmark = pytest.mark.skipif(not _is_cutedsl_available(), reason="CuTeDSL not installed")
-
-
 def matmul(
     M,
     N,
@@ -216,7 +203,7 @@ def run_gemm_jit_kernel(
     tilelang.testing.torch_assert_close(C, ref_C, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_gemm_jit_kernel():
     run_gemm_jit_kernel(
         512,
@@ -268,7 +255,7 @@ def run_cutedsl_kernel_do_bench(
     assert tvm_latency is not None
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.perf
 def test_cutedsl_kernel_do_bench():
     run_cutedsl_kernel_do_bench(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
@@ -312,7 +299,7 @@ def run_cutedsl_kernel_multi_stream(
             matmul_kernel(tensor_a, tensor_b, tensor_c)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_kernel_multi_stream():
     run_cutedsl_kernel_multi_stream(512, 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
@@ -362,7 +349,7 @@ def run_cutedsl_dynamic_shape(
     tilelang.testing.torch_assert_close(tensor_c, tensor_ref_c, atol=1e-2, rtol=1e-2, max_mismatched_ratio=0.05)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_dynamic_shape():
     run_cutedsl_dynamic_shape(T.dynamic("m"), 1024, 768, False, False, "float16", "float16", "float16", 128, 256, 32, 2)
 
@@ -381,7 +368,7 @@ def check_hopper():
     return compute_capability == (9, 0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_launch_follows_the_torch_stream():
     """The launch must land on the stream torch is recording.
 
@@ -415,7 +402,7 @@ def test_cutedsl_launch_follows_the_torch_stream():
     assert torch.equal(y, torch.full_like(y, 2.0))
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["uint8", "uint16", "uint32"])
 @pytest.mark.parametrize("scope", ["global", "shared"])
 @pytest.mark.parametrize("threads", [256, 64], ids=["scalar", "vector"])

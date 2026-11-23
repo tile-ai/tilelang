@@ -83,23 +83,23 @@ Optional<Buffer> FindLayoutAnchorBuffer(const Array<Buffer> &buffers,
 }
 
 // A fragment layout published into the global layout map must be a closed
-// function of the layout placeholders (input indices + replication). Loop
+// function of its own bound variables (input indices + replication). Loop
 // completion can legitimately produce layouts referencing an enclosing serial
 // loop var (CompleteBufferFragment on `src[i, k]` bakes in `i`); such a
 // layout is meaningful only inside that loop's scope and would misdirect
-// every other consumer of the buffer. The placeholders are memoized
-// singletons, so pointer identity is the right membership test.
+// every other consumer of the buffer. Each Fragment owns its bound Vars, so
+// identity membership against InputVars()/ReplicateVar() is exact.
 bool FragmentReferencesForeignVars(const Fragment &fragment) {
-  std::unordered_set<const VarNode *> allowed;
-  allowed.insert(ReplicationPlaceholder().get());
-  for (int i = 0; i < static_cast<int>(fragment->InputDim()); ++i) {
-    allowed.insert(InputPlaceholder(i).get());
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> allowed;
+  allowed.insert(fragment->ReplicateVar());
+  for (const Var &v : fragment->InputVars()) {
+    allowed.insert(v);
   }
   bool foreign = false;
   auto scan = [&](const PrimExpr &expr) {
     PostOrderVisit(expr, [&](const ObjectRef &obj) {
-      if (const auto *var = obj.as<VarNode>()) {
-        if (!allowed.count(var)) {
+      if (auto var = obj.as<Var>()) {
+        if (!allowed.count(var.value())) {
           foreign = true;
         }
       }
@@ -426,11 +426,12 @@ public:
               << layout_map[buffer]->GetTypeKey();
           const auto &src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
+          Array<Var> idx_vars = MakeLayoutVars(dst_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
           arith::Analyzer inner_analyzer;
-          for (int i = 0; i < dst_layout->InputDim(); ++i) {
-            auto x = InputPlaceholder(i);
+          for (size_t i = 0; i < dst_layout->InputDim(); ++i) {
+            Var x = idx_vars[i];
             indices.push_back(x);
             // should be literal - literal = 0, any analyzer will work
             ICHECK(is_zero(inner_analyzer.Simplify(

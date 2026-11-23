@@ -83,9 +83,13 @@ Read the current CI matrix in `.github/workflows/ci.yml`. Do not assume a test
 in a generic `testing/python` directory runs only on the backend used locally.
 
 - Decide whether each added or changed test is portable or backend-specific.
-  Add `@tilelang.testing.requires_cuda`, `requires_rocm`, or `requires_metal`
-  when it needs that backend's runtime, registered FFI passes, source syntax,
-  headers, intrinsics, or code generator.
+  Add `@tilelang.testing.requires_cuda`, `requires_cutedsl`, `requires_rocm`,
+  or `requires_metal` when it needs that backend's runtime, registered FFI
+  passes, source syntax, headers, intrinsics, or code generator. Tests marked
+  with `requires_cutedsl` run in the dedicated `cutedsl` CI job rather than the
+  main CUDA job; use `@tilelang.testing.requires_cutedsl(support_required="compile-only")`
+  for source-only CuTeDSL codegen tests that do not import `cutlass` or run on
+  a GPU.
 - Explicit source-only lowering to a target such as
   `{"kind": "cuda", "arch": "sm_100a"}` still requires the CUDA backend to be
   built and registered. Mark it with `requires_cuda` even if no kernel runs.

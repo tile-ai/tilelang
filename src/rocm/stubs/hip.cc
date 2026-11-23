@@ -10,10 +10,9 @@
  * - Resolve symbols via dlopen/dlsym on first use.
  * - Prefer RTLD_DEFAULT/RTLD_NEXT when HIP is already loaded by another
  *   framework (e.g. PyTorch ROCm).
- *
- * Additionally, this stub provides wrappers for the minimal HSA APIs used by
- * TVM's ROCm device existence check (hsa_init / hsa_shut_down) so that a ROCm
- * enabled build can still be imported on machines without ROCm installed.
+ * - Device-existence and error-string probes (hipGetDeviceCount,
+ *   hipGetErrorName, hipGetErrorString) degrade gracefully without throwing so
+ *   a ROCm-enabled build can be imported and probed on machines without ROCm.
  */
 
 #include "hip.h"
@@ -30,23 +29,9 @@
 
 #include <dlfcn.h>
 
+#include <mutex>
 #include <stdexcept>
 #include <string>
-
-// HSA is only used for two entrypoints, and we want to keep this stub
-// buildable in environments without ROCm headers installed.
-#if __has_include(<hsa/hsa.h>)
-#include <hsa/hsa.h>
-#define TILELANG_HAS_HSA_HEADERS 1
-#else
-#define TILELANG_HAS_HSA_HEADERS 0
-typedef int hsa_status_t;
-#ifndef HSA_STATUS_SUCCESS
-#define HSA_STATUS_SUCCESS 0
-#endif
-extern "C" hsa_status_t hsa_init(void);
-extern "C" hsa_status_t hsa_shut_down(void);
-#endif
 
 namespace tvm::tl::hip {
 
@@ -58,11 +43,6 @@ constexpr const char *kLibHipPaths[] = {
     "libamdhip64.so.7",
     "libamdhip64.so.6",
     "libamdhip64.so.5",
-};
-
-constexpr const char *kLibHsaPaths[] = {
-    "libhsa-runtime64.so.1",
-    "libhsa-runtime64.so",
 };
 
 template <typename T> T GetSymbol(void *handle, const char *name) {
@@ -107,9 +87,8 @@ void *TryLoadLibAmdHip64() {
   return handle;
 }
 
-HIPDriverAPI CreateHIPDriverAPI() {
+HIPDriverAPI CreateHIPDriverAPI(void *handle, std::string *missing_symbol) {
   HIPDriverAPI api{};
-  void *handle = HIPDriverAPI::get_handle();
   if (handle == nullptr) {
     return api;
   }
@@ -119,6 +98,9 @@ HIPDriverAPI CreateHIPDriverAPI() {
 #define LOOKUP(member, symbol)                                                 \
   api.member = GetSymbol<decltype(api.member)>(handle, symbol);                \
   if (api.member == nullptr) {                                                 \
+    if (missing_symbol != nullptr) {                                           \
+      *missing_symbol = symbol;                                                \
+    }                                                                          \
     return HIPDriverAPI{};                                                     \
   }
 
@@ -162,93 +144,61 @@ HIPDriverAPI CreateHIPDriverAPI() {
   return api;
 }
 
-// -----------------------------------------------------------------------------
-// Minimal HSA stub (needed by TVM's ROCm runtime).
-// -----------------------------------------------------------------------------
-struct HSAAPI {
-  decltype(&::hsa_init) hsa_init_{nullptr};
-  decltype(&::hsa_shut_down) hsa_shut_down_{nullptr};
+struct HIPDriverState {
+  std::mutex mu;
+  void *handle{nullptr};
+  HIPDriverAPI api{};
+  std::string missing_symbol;
 };
 
-void *TryLoadLibHsaRuntime() {
-  void *sym = dlsym(RTLD_DEFAULT, "hsa_init");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&hsa_init)) {
-    return RTLD_DEFAULT;
-  }
-  sym = dlsym(RTLD_NEXT, "hsa_init");
-  if (sym != nullptr && sym != reinterpret_cast<void *>(&hsa_init)) {
-    return RTLD_NEXT;
-  }
-
-  void *handle = nullptr;
-  // Reuse a runtime that is already mapped (e.g. PyTorch's wheel-bundled copy
-  // loaded with RTLD_LOCAL) before loading another one from the system path.
-  // Two runtimes in one process make module handles incompatible.
-  for (const char *path : kLibHsaPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
-    if (handle != nullptr) {
-      return handle;
+HIPDriverState &GetHIPDriverState() {
+  static HIPDriverState state;
+  std::lock_guard<std::mutex> lock(state.mu);
+  // Retry loading until a handle is found so an early existence probe before
+  // importing a ROCm framework (e.g. PyTorch wheel with RTLD_LOCAL libamdhip64)
+  // does not permanently cache nullptr.
+  if (state.handle == nullptr) {
+    state.handle = TryLoadLibAmdHip64();
+    if (state.handle != nullptr) {
+      state.missing_symbol.clear();
+      state.api = CreateHIPDriverAPI(state.handle, &state.missing_symbol);
     }
   }
-  for (const char *path : kLibHsaPaths) {
-    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
-    if (handle != nullptr) {
-      break;
-    }
+  return state;
+}
+
+HIPDriverAPI *GetHIPDriverAPIOrNull() {
+  HIPDriverState &state = GetHIPDriverState();
+  if (state.handle == nullptr || !state.missing_symbol.empty()) {
+    return nullptr;
   }
-  return handle;
+  return &state.api;
 }
-
-void *GetLibHsaHandle() {
-  static void *handle = TryLoadLibHsaRuntime();
-  return handle;
-}
-
-HSAAPI CreateHSAAPI() {
-  HSAAPI api{};
-  void *handle = GetLibHsaHandle();
-  if (handle == nullptr) {
-    return api;
-  }
-  api.hsa_init_ = GetSymbol<decltype(api.hsa_init_)>(handle, "hsa_init");
-  api.hsa_shut_down_ =
-      GetSymbol<decltype(api.hsa_shut_down_)>(handle, "hsa_shut_down");
-  // It's fine if these are nullptr; wrappers will return an error code.
-  return api;
-}
-
-HSAAPI *GetHSAAPI() {
-  static HSAAPI singleton = CreateHSAAPI();
-  return &singleton;
-}
-
-#if TILELANG_HAS_HSA_HEADERS
-static hsa_status_t MissingHsaError() {
-  // Any non-success value makes TVM treat ROCm as not existing.
-  return static_cast<hsa_status_t>(1);
-}
-#else
-static hsa_status_t MissingHsaError() { return 1; }
-#endif
 
 } // namespace
 
-void *HIPDriverAPI::get_handle() {
-  static void *handle = TryLoadLibAmdHip64();
-  return handle;
+void *HIPDriverAPI::get_handle() { return GetHIPDriverState().handle; }
+
+bool HIPDriverAPI::is_available() {
+  HIPDriverState &state = GetHIPDriverState();
+  return state.handle != nullptr && state.missing_symbol.empty();
 }
 
-bool HIPDriverAPI::is_available() { return get_handle() != nullptr; }
-
 HIPDriverAPI *HIPDriverAPI::get() {
-  static HIPDriverAPI singleton = CreateHIPDriverAPI();
-  if (!is_available()) {
+  HIPDriverState &state = GetHIPDriverState();
+  if (state.handle == nullptr) {
     throw std::runtime_error(
         "HIP runtime library (libamdhip64.so) not found. "
         "Install ROCm (or import a ROCm-enabled framework like PyTorch) before "
         "using TileLang's ROCm backend.");
   }
-  return &singleton;
+  if (!state.missing_symbol.empty()) {
+    throw std::runtime_error(
+        "libamdhip64.so was found but does not provide the required symbol `" +
+        state.missing_symbol +
+        "`. TileLang's ROCm backend requires a compatible ROCm runtime.");
+  }
+  return &state.api;
 }
 
 } // namespace tvm::tl::hip
@@ -265,13 +215,24 @@ extern "C" {
 // ------------------------------------------------
 
 const char *hipGetErrorName(hipError_t error) {
-  // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-  return HIPDriverAPI::get()->hipGetErrorName_(error);
+  HIPDriverAPI *api = tvm::tl::hip::GetHIPDriverAPIOrNull();
+  if (api == nullptr) {
+    if (error == hipSuccess) {
+      return "hipSuccess";
+    }
+    return error == hipErrorNoDevice ? "hipErrorNoDevice" : "hipErrorUnknown";
+  }
+  return api->hipGetErrorName_(error);
 }
 
 const char *hipGetErrorString(hipError_t error) {
-  // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-  return HIPDriverAPI::get()->hipGetErrorString_(error);
+  HIPDriverAPI *api = tvm::tl::hip::GetHIPDriverAPIOrNull();
+  if (api == nullptr) {
+    return error == hipSuccess
+               ? "hipSuccess"
+               : "HIP runtime library (libamdhip64.so) not found";
+  }
+  return api->hipGetErrorString_(error);
 }
 
 hipError_t hipGetLastError(void) {
@@ -290,8 +251,17 @@ hipError_t hipGetDevice(int *deviceId) {
 }
 
 hipError_t hipGetDeviceCount(int *count) {
-  // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-  return HIPDriverAPI::get()->hipGetDeviceCount_(count);
+  // Device-existence probes (e.g. TVM's ROCMDeviceAPI kExist check) call
+  // hipGetDeviceCount and expect a non-hipSuccess status rather than a C++
+  // exception when no ROCm runtime is installed.
+  if (count != nullptr) {
+    *count = 0;
+  }
+  HIPDriverAPI *api = tvm::tl::hip::GetHIPDriverAPIOrNull();
+  if (api == nullptr) {
+    return hipErrorNoDevice;
+  }
+  return api->hipGetDeviceCount_(count);
 }
 
 hipError_t hipDeviceGetAttribute(int *pi, hipDeviceAttribute_t attr,
@@ -433,25 +403,6 @@ hipError_t hipModuleLaunchCooperativeKernel(
   return HIPDriverAPI::get()->hipModuleLaunchCooperativeKernel_(
       f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
       sharedMemBytes, stream, kernelParams);
-}
-
-// --- Minimal HSA wrappers
-// -------------------------------------------------------
-
-TILELANG_HIP_STUB_API hsa_status_t hsa_init(void) {
-  auto *api = tvm::tl::hip::GetHSAAPI();
-  if (api->hsa_init_ == nullptr) {
-    return tvm::tl::hip::MissingHsaError();
-  }
-  return api->hsa_init_();
-}
-
-TILELANG_HIP_STUB_API hsa_status_t hsa_shut_down(void) {
-  auto *api = tvm::tl::hip::GetHSAAPI();
-  if (api->hsa_shut_down_ == nullptr) {
-    return tvm::tl::hip::MissingHsaError();
-  }
-  return api->hsa_shut_down_();
 }
 
 } // extern "C"

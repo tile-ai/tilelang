@@ -4,19 +4,11 @@ import pytest
 
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
 from tilelang.engine.lower import lower
 from tilelang.cuda.target import normalize_cutedsl_target
 
 
 def _lower_cutedsl(program):
-    if not tvm.runtime.enabled("cuda"):
-        pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
-
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
-    if build_cutedsl is None:
-        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
-
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_90"})
     assert target is not None
 
@@ -28,6 +20,7 @@ def _calls(source, name):
     return [line for line in source.splitlines() if f"tl.{name}(" in line]
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_explicit_width_global_loads_and_stores():
     @T.prim_func
     def prog(X: T.Tensor((256,), "float32"), P: T.Tensor((32,), "int32"), Y: T.Tensor((256,), "float32")):
@@ -63,6 +56,7 @@ def test_cutedsl_codegen_explicit_width_global_loads_and_stores():
         assert line.lstrip().startswith(f"tl.{name}("), line
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_explicit_width_shared_loads_and_stores():
     @T.prim_func
     def prog(X: T.Tensor((128,), "float32"), Y: T.Tensor((128,), "float32")):
@@ -90,6 +84,7 @@ def test_cutedsl_codegen_explicit_width_shared_loads_and_stores():
     assert "tl.stg32(" in line, line
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_stg32_converts_value_to_uint32():
     @T.prim_func
     def prog(A: T.Tensor((32,), "int64"), Y: T.Tensor((32,), "int32")):
@@ -103,6 +98,7 @@ def test_cutedsl_codegen_stg32_converts_value_to_uint32():
     assert "cutlass.Uint32(" in line, line
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 @pytest.mark.parametrize(
     "dtype, cutedsl_type",
     [
@@ -129,6 +125,7 @@ def test_cutedsl_codegen_ldg_passes_element_type(dtype, cutedsl_type):
     assert re.search(rf"tl\.__ldg\(\(x\.iterator \+ .*\), {re.escape(cutedsl_type)}\)", line), line
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_ldst_rejects_values_cuda_rejects():
     @T.prim_func
     def stg64_int(X: T.Tensor((64,), "float32"), Y: T.Tensor((64,), "float32")):
@@ -157,6 +154,7 @@ def test_cutedsl_codegen_ldst_rejects_values_cuda_rejects():
         _lower_cutedsl(sts128_float)
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_ldg_rejects_types_without_cuda_overload():
     @T.prim_func
     def prog(x: T.Tensor((32,), "float8_e4m3fn"), y: T.Tensor((32,), "float8_e4m3fn")):
