@@ -145,9 +145,11 @@ inline uint16_t GetAscendCopyPipeMask(const Buffer &src, const Buffer &dst) {
   if (IsL0CBuffer(src) && (IsSharedBuffer(dst) || IsGlobalBuffer(dst))) {
     return PipeMask(ResourcePipe::kFixpipe);
   }
-  // All remaining Ascend copies lower to element-wise work on the Vector
-  // core rather than an MTE instruction.
-  return PipeMask(ResourcePipe::kVector);
+  // Every remaining copy lowers to element-wise BufferStores over a scalar
+  // loop when it is emitted outside a VF block. A copy that does run on the
+  // vector unit is inside a VF body, which contributes PIPE_V through
+  // GetAscendBlockPipe before this classifier is consulted.
+  return PipeMask(ResourcePipe::kScalar);
 }
 
 // A fill on L1 lowers to ascend_fill_l1 (MTE2). Every other fill lowers to

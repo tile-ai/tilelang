@@ -158,7 +158,10 @@ def _streams(mod, counters=(), *, coalesce_allocations=False, counter_updates=No
 
                 expected = src if src[0] == "A" else reference[logical(src)]
                 reference[logical(dst)] = expected
-                emit("MTE2" if src[0] == "A" else "MTE3" if dst[0] == "C" else "V", ("copy", src, dst, expected))
+                # A copy whose endpoints are both on-chip lowers to element-wise
+                # BufferStores over a scalar loop unless it sits in a VF body,
+                # so it belongs to the S lane here.
+                emit("MTE2" if src[0] == "A" else "MTE3" if dst[0] == "C" else "S", ("copy", src, dst, expected))
             elif name == "tl.ascend_pipe_barrier":
                 # This model uses ordered, atomic DMA completions. Same-pipe
                 # overlap hazards need separate hardware/footprint coverage.

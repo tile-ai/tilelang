@@ -1694,3 +1694,27 @@ def test_write_counter_nested_rmw_requires_an_explicit_owner(case):
     program = _make_write_counter_nested_update_program(case, explicit_owner=False)
     with pytest.raises(tvm.error.InternalError, match="complete loop owners.*write_counter"):
         schedule(program, through="AnnotateMultiBufferEligible", auto_schedule=False)
+
+
+def _make_shared_reduce_program():
+    @T.prim_func
+    def main(A: T.Tensor((16, 128), "float16"), C: T.Tensor((16,), "float16")):
+        with T.Kernel(1):
+            ub = T.alloc_shared((16, 128), "float16")
+            out = T.alloc_shared((16,), "float16")
+            T.copy(A, ub)
+            T.reduce_sum(ub, out, dim=1)
+            T.copy(out, C)
+
+    return main
+
+
+def test_shared_round_trip_copy_waits_on_the_scalar_pipe():
+    # A tile-op reduction with shared source and destination lowers through
+    # fragments. The shared -> fragment copy is emitted as a scalar loop, so
+    # the DMA that fills ``ub`` must be ordered against PIPE_S; a PIPE_V
+    # handshake leaves the scalar reader racing the MTE2 copy.
+    with tvm.target.Target("ascend"):
+        source = tilelang.lower(_make_shared_reduce_program(), target="ascend").kernel_source
+    assert "asc_sync_notify(PIPE_MTE2, PIPE_S" in source
+    assert "asc_sync_wait(PIPE_MTE2, PIPE_S" in source
