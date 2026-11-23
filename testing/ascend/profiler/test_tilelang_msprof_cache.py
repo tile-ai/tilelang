@@ -74,3 +74,13 @@ def test_msprof_keeps_user_launches_of_the_cache_kernel(monkeypatch):
     expected = sum(end - start for task in user_tasks for start, end in intervals[task])
     assert all(end > start for task in user_tasks for start, end in intervals[task])
     assert profile.dur_ns == pytest.approx(expected / repeats, rel=0, abs=1e-6)
+
+    # Only our two user launches and one scratch read are profiled per round.
+    scratch_spans = (intervals[task] for task in intervals.keys() - set(user_tasks))
+    flushes = sorted((min(start for start, _ in spans), max(end for _, end in spans)) for spans in scratch_spans)
+    assert len(flushes) == repeats
+    for i, (flush_start, flush_end) in enumerate(flushes):
+        work_spans = [span for task in user_tasks[2 * i : 2 * i + 2] for span in intervals[task]]
+        assert flush_start < flush_end <= min(start for start, _ in work_spans)
+        if i + 1 < repeats:
+            assert max(end for _, end in work_spans) <= flushes[i + 1][0]

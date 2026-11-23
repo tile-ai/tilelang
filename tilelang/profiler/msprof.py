@@ -311,7 +311,8 @@ def bench_with_msprof(
     with torch.npu.device(cache.device), _defer_signals(), _prof_work_path(), _suppress_output(True):
         flush_tasks: dict[int, int] = {}
         flush = _flush_cache
-        if cache.numel():
+        scratch = cache.numel() != 0
+        if scratch:
             flush = _get_cache_read_kernel(cache.numel())
             flush(cache)
             flush = _track_cache_reads(flush, flush_tasks)
@@ -328,8 +329,13 @@ def bench_with_msprof(
                 data_simplification=False,
             ),
         ) as prof:
-            for _ in range(n_repeat):
+            for i in range(n_repeat):
+                # fn may launch on streams other than the one reading the scratch buffer.
+                if scratch and i:
+                    torch.npu.synchronize(cache.device)
                 flush(cache)
+                if scratch:
+                    torch.npu.current_stream(cache.device).synchronize()
                 fn()
             torch.npu.synchronize()
             prof.step()

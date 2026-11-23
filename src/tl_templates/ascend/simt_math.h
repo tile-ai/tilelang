@@ -258,6 +258,9 @@ __simt_callee__ inline float tanhf(float x) {
   return detail::with_sign((1.0f - e) / (1.0f + e), x);
 }
 
+#endif
+
+#if TL_SIMT_MATH_91 || TL_SIMT_MATH_92_93
 namespace detail {
 // Keep a product's rounding error until after reduction to a small exponent.
 // A one-ULP error in the unreduced exponent can cost many ULPs in pow/exp10.
@@ -282,6 +285,12 @@ __simt_callee__ inline float exp2_split(Split x) {
     return 0.0f;
   if (x.hi < -149.0f)
     return from_bits(1);
+  if (x.hi == 128.0f) {
+    // Here |lo| <= 2^-17. Evaluate exp(t) as 1 + t + t^2/2 with a
+    // fused final add. Rounding up to 1 too early would overflow at scale 128.
+    float t = x.lo * 0x1.62e43p-1f;
+    return scale(::fmaf(t, 1.0f + 0.5f * t, 1.0f), 128);
+  }
   int n = int(::rintf(x.hi));
   float r = (x.hi - float(n)) + x.lo;
   return scale(::expf(r * 0x1.62e43p-1f), n);
@@ -326,24 +335,18 @@ __simt_callee__ inline Split log2_split(uint32_t ax) {
 }
 } // namespace detail
 
-__simt_callee__ inline float exp2f(float x) {
-  if (::isnan(x))
-    return x;
-  return detail::exp2_split({x, 0.0f});
-}
-__simt_callee__ inline float exp10f(float x) {
-  if (::isnan(x))
-    return x;
-  if (x > 40.0f)
-    return detail::from_bits(detail::infinity);
-  if (x < -46.0f)
-    return 0.0f;
-  return detail::exp2_split(
-      detail::multiply({0x1.a934fp1f, 0x1.2f346ep-24f}, x));
-}
 __simt_callee__ inline float powf(float x, float y) {
   using namespace detail;
   uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
+#if TL_SIMT_MATH_92_93
+  // Native pow can cross the last rounding step at either end of FP32.
+  // Recompute only zero, the least subnormal, the largest finite value or inf.
+  float native = ::powf(x, y);
+  uint32_t magnitude = bits(native) & ~sign_bit;
+  if ((magnitude > 1 && magnitude < infinity - 1) || magnitude > infinity ||
+      ax == 0 || ax >= infinity || ay >= infinity)
+    return native;
+#endif
   if (ay == 0 || x == 1.0f)
     return 1.0f;
   if (ax > infinity || ay > infinity)
@@ -370,6 +373,26 @@ __simt_callee__ inline float powf(float x, float y) {
   if (ay >= 0x4f800000u)
     return ((ax > 0x3f800000u) == positive_y) ? from_bits(infinity) : 0.0f;
   return with_sign(exp2_split(multiply(log2_split(ax), y)), sign);
+}
+#else
+using ::powf;
+#endif
+
+#if TL_SIMT_MATH_91
+__simt_callee__ inline float exp2f(float x) {
+  if (::isnan(x))
+    return x;
+  return detail::exp2_split({x, 0.0f});
+}
+__simt_callee__ inline float exp10f(float x) {
+  if (::isnan(x))
+    return x;
+  if (x > 40.0f)
+    return detail::from_bits(detail::infinity);
+  if (x < -46.0f)
+    return 0.0f;
+  return detail::exp2_split(
+      detail::multiply({0x1.a934fp1f, 0x1.2f346ep-24f}, x));
 }
 
 namespace detail {
@@ -404,7 +427,6 @@ using ::hexp10;
 using ::hexp2;
 using ::hypotf;
 using ::log1pf;
-using ::powf;
 using ::sinhf;
 using ::tanhf;
 #endif
