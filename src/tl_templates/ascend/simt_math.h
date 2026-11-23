@@ -265,15 +265,23 @@ struct Split {
   float hi;
   float lo;
 };
+// Add a correction smaller in magnitude than the leading term.
+__simt_callee__ inline Split renormalize(float lead, float tail) {
+  float hi = lead + tail;
+  return {hi, (lead - hi) + tail};
+}
 __simt_callee__ inline Split multiply(Split a, float y) {
   float hi = a.hi * y;
-  return {hi, ::fmaf(a.hi, y, -hi) + a.lo * y};
+  return renormalize(hi, ::fmaf(a.hi, y, -hi) + a.lo * y);
 }
 __simt_callee__ inline float exp2_split(Split x) {
   if (x.hi > 129.0f)
     return from_bits(infinity);
-  if (x.hi < -151.0f)
+  // 2^-150 is halfway between zero and the least positive float.
+  if (x.hi < -150.0f || (x.hi == -150.0f && x.lo <= 0.0f))
     return 0.0f;
+  if (x.hi < -149.0f)
+    return from_bits(1);
   int n = int(::rintf(x.hi));
   float r = (x.hi - float(n)) + x.lo;
   return scale(::expf(r * 0x1.62e43p-1f), n);
@@ -291,15 +299,30 @@ __simt_callee__ inline Split log2_split(uint32_t ax) {
   float s = u / v;
   float s_error = (::fmaf(-s, v, u) - s * (m - (v - 1.0f))) / v;
   float z = s * s;
-  float p = 1.0f / 13.0f;
-  for (int k = 11; k >= 3; k -= 2)
-    p = ::fmaf(z, p, 1.0f / float(k));
+  Split square = {z, ::fmaf(s, s, -z)};
+  float p = 1.0f / 19.0f;
+  for (int k = 17; k >= 7; k -= 2)
+    p = ::fmaf(square.hi, p, 1.0f / float(k));
+
+  // Keep the rounding errors of the leading terms of 1 + s^2/3 + s^4/5.
+  Split poly = {p, 0.0f};
+  for (int k = 5; k >= 1; k -= 2) {
+    float coeff = 1.0f / float(k);
+    float coeff_lo = ::fmaf(-float(k), coeff, 1.0f) / float(k);
+    Split prod = multiply(poly, square.hi);
+    Split sum = renormalize(coeff, prod.hi);
+    poly = {sum.hi, sum.lo + (prod.lo + poly.hi * square.lo + coeff_lo)};
+  }
+  Split series = multiply(poly, s);
+  // atanh(s + ds) differs from atanh(s) by ds / (1 - s^2) to first order.
+  series.lo += s_error / (1.0f - square.hi);
   constexpr float log2e_hi = 0x1.715476p0f, log2e_lo = 0x1.4ae0cp-26f;
-  float lead = (2.0f * s) * log2e_hi;
-  float tail = ::fmaf(2.0f * s, log2e_hi, -lead) + (2.0f * s) * log2e_lo +
-               (2.0f * ::fmaf(s * z, p, s_error)) * log2e_hi;
-  float hi = float(a.exponent) + lead;
-  return {hi, ((float(a.exponent) - hi) + lead) + tail};
+  Split log = multiply(series, 2.0f * log2e_hi);
+  log = renormalize(log.hi, log.lo + (2.0f * series.hi) * log2e_lo);
+  if (a.exponent == 0)
+    return log;
+  Split result = renormalize(float(a.exponent), log.hi);
+  return renormalize(result.hi, result.lo + log.lo);
 }
 } // namespace detail
 
