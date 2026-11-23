@@ -112,7 +112,9 @@
         "pipeline_facts": {"stages": 1, "realization": "SINGLE_STAGE"},
         "tail_strategy": "bounded semantic tail"
       },
-      "applicable_cases": ["representative_case"]
+      "applicable_cases": ["representative_case"],
+      "hypothesis": "A contiguous load, register lane reorder, and indexed writeback keep one vector chain busy without materializing the gather.",
+      "gain_upper_bound": "At most the measured 2.5x reduction from removing the scalar gather; any further gain needs a different bottleneck."
     },
     {
       "candidate_id": "C1",
