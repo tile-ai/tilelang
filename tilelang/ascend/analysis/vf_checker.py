@@ -53,6 +53,7 @@ class _VFCheckVisitor(PyStmtExprVisitor):
             self.vf_alloc_owners[op.buffer.data] = (owner, op.buffer.name)
             if op.buffer.scope() == "local.var":
                 self.vf_local_vars.add(op.buffer.data)
+        super().visit_alloc_buffer_(op)
 
     def _check_vf_allocation_scope(self, buffer: tirx.Buffer) -> None:
         owner_info = self.vf_alloc_owners.get(buffer.data)
@@ -88,12 +89,18 @@ class _VFCheckVisitor(PyStmtExprVisitor):
         super().visit_for_(op)
 
     def _check_copy(self, call: tirx.Call) -> None:
+        if len(call.args) < 2:
+            raise ValueError(f"[TileLang Semantic Check] T.copy() intrinsic requires at least two region arguments (got {len(call.args)}).")
         src_region = call.args[0]
         dst_region = call.args[1]
         if not isinstance(src_region, tirx.Call) or not isinstance(dst_region, tirx.Call):
-            return
-        src_buf = src_region.args[0].buffer
-        dst_buf = dst_region.args[0].buffer
+            raise ValueError("[TileLang Semantic Check] T.copy() arguments must be region descriptors.")
+        src_load = src_region.args[0] if src_region.args else None
+        dst_load = dst_region.args[0] if dst_region.args else None
+        if not hasattr(src_load, "buffer") or not hasattr(dst_load, "buffer"):
+            raise ValueError("[TileLang Semantic Check] T.copy() region descriptors must reference a buffer.")
+        src_buf = src_load.buffer
+        dst_buf = dst_load.buffer
         self._check_vf_allocation_scope(src_buf)
         self._check_vf_allocation_scope(dst_buf)
 
@@ -127,12 +134,20 @@ class _VFCheckVisitor(PyStmtExprVisitor):
         if op.op.same_as(tirx.op.Op.get("tl.region")) and len(op.args) >= 2:
             buffer_load = op.args[0]
             access_mask = op.args[1]
-            if (
-                isinstance(buffer_load, BufferLoad)
-                and isinstance(access_mask, tirx.IntImm)
-                and access_mask.value & _REGION_WRITE_ACCESS_MASK
-            ):
-                self._check_vf_local_var_write(buffer_load.buffer)
+            if isinstance(buffer_load, BufferLoad):
+                if isinstance(access_mask, tirx.IntImm):
+                    mask_value = access_mask.value
+                    if mask_value < 0:
+                        raise ValueError(
+                            f"[TileLang Semantic Check] tl.region access mask must be a non-negative bit mask, got {mask_value}."
+                        )
+                    is_write = bool(mask_value & _REGION_WRITE_ACCESS_MASK)
+                else:
+                    # A symbolic mask cannot be proven read-only; treat it as
+                    # a possible write so the local.var rule is not bypassed.
+                    is_write = True
+                if is_write:
+                    self._check_vf_local_var_write(buffer_load.buffer)
         super().visit_call_(op)
 
     def visit_buffer_store_(self, op: BufferStore) -> None:
@@ -140,10 +155,18 @@ class _VFCheckVisitor(PyStmtExprVisitor):
         self._check_vf_local_var_write(op.buffer)
         if not self.inside_vf:
             value = op.value
-            if isinstance(value, BufferLoad) and value.buffer.dtype != op.buffer.dtype:
+            if isinstance(value, BufferLoad):
+                value_dtype = value.buffer.dtype
+            elif isinstance(value, tirx.Call):
+                value_dtype = value.dtype
+            else:
+                # Scalar literals and explicit casts are ordinary TIR
+                # semantics, not DMA copies; only typed expressions are checked.
+                value_dtype = None
+            if value_dtype is not None and value_dtype != op.buffer.dtype:
                 raise ValueError(
                     "[TileLang Semantic Check] "
-                    f"Buffer store from dtype '{value.buffer.dtype}' to dtype '{op.buffer.dtype}' "
+                    f"Buffer store from dtype '{value_dtype}' to dtype '{op.buffer.dtype}' "
                     "outside a VF block implies a type cast. "
                     "DMA copies cannot perform type casting — perform the cast "
                     "inside a VF block (T.SimdVF() or T.SimtVF()) instead."

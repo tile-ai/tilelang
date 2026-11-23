@@ -26,6 +26,8 @@ def register_ascend_postproc(func: Callable[[str, Target], str], override: bool 
               and returns the processed code (str).
         override: Whether to override existing registered function. Defaults to True.
     """
+    if not callable(func):
+        raise TypeError(f"register_ascend_postproc: func must be callable, got {type(func).__name__}")
     tvm_ffi.register_global_func("tilelang_callback_ascend_postproc", f=func, override=override)
 
 

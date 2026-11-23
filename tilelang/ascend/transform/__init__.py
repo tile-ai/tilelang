@@ -247,6 +247,11 @@ def VectorizeParallelToPTO():
 
 def AscendThreadSync(storage_scope: str):
     """Insert thread-storage synchronization independently within each SIMT_VF."""
+    valid_scopes = ("global", "shared", "shared.dyn")
+    if not isinstance(storage_scope, str):
+        raise TypeError(f"AscendThreadSync: storage_scope must be a str, got {type(storage_scope).__name__}")
+    if storage_scope not in valid_scopes:
+        raise ValueError(f"AscendThreadSync: storage_scope must be one of {valid_scopes}, got {storage_scope!r}")
     return _ffi_api.AscendThreadSync(storage_scope)
 
 
@@ -284,7 +289,7 @@ def InferBufferAliases():
     return _ffi_api.InferBufferAliases()  # type: ignore
 
 
-def MergeUBAllocations(align_bytes: int = 16, disable_reuse: bool = False):
+def MergeUBAllocations(align_bytes: int = 32, disable_reuse: bool = False):
     """Merge Ascend on-chip allocations from a pairwise reuse contract.
 
     AutoSchedule writes this contract during synchronization insertion. Manual
@@ -297,6 +302,12 @@ def MergeUBAllocations(align_bytes: int = 16, disable_reuse: bool = False):
     fpass : tvm.transform.Pass
         The result pass
     """
+    if isinstance(align_bytes, bool) or not isinstance(align_bytes, int):
+        raise TypeError(f"MergeUBAllocations: align_bytes must be an int, got {type(align_bytes).__name__}")
+    if align_bytes <= 0:
+        raise ValueError(f"MergeUBAllocations: align_bytes must be a positive int, got {align_bytes}")
+    if not isinstance(disable_reuse, bool):
+        raise TypeError(f"MergeUBAllocations: disable_reuse must be a bool, got {type(disable_reuse).__name__}")
     return _ffi_api.MergeUBAllocations(align_bytes, disable_reuse)  # type: ignore
 
 

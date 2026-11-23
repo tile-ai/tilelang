@@ -13,9 +13,14 @@ def install_torch_npu_stream_exchange() -> bool:
             raise
         raise RuntimeError("Torch NPU stream integration requires torch_npu") from error
 
-    from tilelang_ascend_npu_exchange import (
-        install_torch_npu_stream_exchange as install,
-    )
+    try:
+        from tilelang_ascend_npu_exchange import (
+            install_torch_npu_stream_exchange as install,
+        )
+    except ModuleNotFoundError as error:
+        if error.name != "tilelang_ascend_npu_exchange":
+            raise
+        raise RuntimeError("Torch NPU stream integration requires tilelang_ascend_npu_exchange") from error
 
     return bool(install())
 
@@ -23,9 +28,14 @@ def install_torch_npu_stream_exchange() -> bool:
 def is_torch_npu_stream_exchange_installed() -> bool:
     """Return whether TileLang owns Torch's current Exchange API table."""
 
-    from tilelang_ascend_npu_exchange import (
-        is_torch_npu_stream_exchange_installed as is_installed,
-    )
+    try:
+        from tilelang_ascend_npu_exchange import (
+            is_torch_npu_stream_exchange_installed as is_installed,
+        )
+    except ModuleNotFoundError as error:
+        if error.name != "tilelang_ascend_npu_exchange":
+            raise
+        raise RuntimeError("Torch NPU stream integration requires tilelang_ascend_npu_exchange") from error
 
     return bool(is_installed())
 
@@ -34,6 +44,8 @@ def npu_current_device():
     """Torch device for the current NPU, for kernel output allocation."""
     import torch
 
+    if not (hasattr(torch, "npu") and torch.npu.is_available()):
+        raise RuntimeError("npu_current_device: Ascend NPU is unavailable; install torch_npu and ensure an NPU device is present.")
     return torch.device("npu", torch.npu.current_device())
 
 
@@ -46,6 +58,9 @@ def npu_current_raw_stream():
     host; the _C accessor returns the raw stream in <1us.
     """
     import torch
+
+    if not (hasattr(torch, "npu") and torch.npu.is_available()):
+        raise RuntimeError("npu_current_raw_stream: Ascend NPU is unavailable; install torch_npu and ensure an NPU device is present.")
 
     try:
         import torch_npu

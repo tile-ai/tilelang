@@ -28,15 +28,12 @@ def _check_ascend_availability() -> bool:
         return False
 
 
-_IS_ASCEND_AVAILABLE = _check_ascend_availability()
-
-
 @macro
 def device_assert(condition: tirx.PrimExpr, msg: str = "", no_stack_info=False):
     """
     Device-side assert emulation for Ascend targets.
     """
-    if _IS_ASCEND_AVAILABLE:
+    if _check_ascend_availability():
         if no_stack_info:
             if msg == "":
                 T.call_intrin("void", tirx.op.Op.get("tl.device_assert"), condition)
