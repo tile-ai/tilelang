@@ -20,7 +20,8 @@ is DERIVED from the expressions' ranges by the Analyzer, not stored.
 **`tl::Fragment : Layout`** adds a thread dimension for register buffers:
 `replicate_var_` (node-owned bound `tirx::Var` printed `_rep`, `SEqHashDef()`),
 `forward_thread_` (PrimExpr, may reference `ReplicateVar()`), and
-`replicate_size_`. `ThreadExtent()` = `max(forward_thread)+1` under bound
+`replicate_size_`; `forward_index_` depends only on `InputVars()` (never
+`ReplicateVar()`). `ThreadExtent()` = `max(forward_thread)+1` under bound
 domains — also derived, not stored. `thread_range_` (via `BindThreadRange`,
 which clones into fresh bound `Var`s) offsets the thread space for warp
 specialization; the forward map itself stays in normalized `[0, T)`.
@@ -32,8 +33,10 @@ axis.
 
 - `FragmentNode::GetForwardVars()` PREPENDS `ReplicateVar()`
   when `replicate_size > 1`. The input vars are always the TRAILING
-  `InputDim()` entries. Python code that zips `get_forward_vars()` against
-  the shape positionally is wrong for replicated fragments.
+  `InputDim()` entries (whereas the reflected `frag.forward_vars` field / C++
+  `InputVars()` contains only the `InputDim()` input vars). Python code that
+  zips `get_forward_vars()` against the shape positionally is wrong for
+  replicated fragments.
 - The canonical (thread, slot, rep) packing lives in
   `FragmentNode::InverseWithLevel`: `ReplicateVar()` is appended to
   `InputVars()` as a trailing ORDINARY input dim of extent `ReplicateExtent()`,

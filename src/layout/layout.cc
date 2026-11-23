@@ -20,6 +20,7 @@
 #include <tvm/runtime/logging.h>
 
 #include <tvm/arith/pattern.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 
@@ -770,6 +771,8 @@ LayoutNode::LayoutNode(Array<PrimExpr> input_size, Array<Var> forward_vars,
   for (size_t i = 0; i < forward_vars.size(); ++i) {
     vmap.Set(forward_vars[i], forward_vars_[i]);
   }
+  ICHECK_EQ(vmap.size(), forward_vars.size())
+      << "LayoutNode: forward_vars must be distinct Vars, got " << forward_vars;
   arith::Analyzer analyzer;
   UpdateAnalyzer(&analyzer);
   forward_index_ = forward_index.Map([&](const PrimExpr &e) {
@@ -906,10 +909,9 @@ PrimExpr LayoutNode::GetLinearizedForwardIndex() const {
 }
 
 PrimExpr LayoutNode::ForwardLinearized(const Array<PrimExpr> &vars) const {
-  if (vars.empty()) {
-    return GetLinearizedForwardIndex();
-  }
-  ICHECK_EQ(vars.size(), InputDim());
+  ICHECK_EQ(vars.size(), InputDim())
+      << "ForwardLinearized: vars rank (" << vars.size()
+      << ") != layout input rank (" << InputDim() << ")";
   Map<Var, PrimExpr> vmap;
   for (size_t i = 0; i < InputDim(); ++i) {
     vmap.Set(forward_vars_[i], vars[i]);
@@ -1116,14 +1118,15 @@ Fragment FragmentNode::BindThreadRange(Range thread_range) const {
   n->thread_range_ = std::move(thread_range);
   n->forward_vars_ = MakeLayoutVars(InputDim());
   n->replicate_var_ = MakeReplicateVar();
-  Map<Var, PrimExpr> vmap;
+  Map<Var, PrimExpr> input_vmap;
   for (size_t i = 0; i < InputDim(); ++i) {
-    vmap.Set(forward_vars_[i], n->forward_vars_[i]);
+    input_vmap.Set(forward_vars_[i], n->forward_vars_[i]);
   }
-  vmap.Set(replicate_var_, n->replicate_var_);
   n->forward_index_ = forward_index_.Map(
-      [&](const PrimExpr &e) { return Substitute(e, vmap); });
-  n->forward_thread_ = Substitute(forward_thread_, vmap);
+      [&](const PrimExpr &e) { return Substitute(e, input_vmap); });
+  Map<Var, PrimExpr> thread_vmap = input_vmap;
+  thread_vmap.Set(replicate_var_, n->replicate_var_);
+  n->forward_thread_ = Substitute(forward_thread_, thread_vmap);
   return Fragment(std::move(n));
 }
 
@@ -1346,27 +1349,48 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size, Array<Var> forward_vars,
   forward_vars_ = MakeLayoutVars(input_size_.size());
   replicate_var_ = MakeReplicateVar();
 
-  Map<Var, PrimExpr> vmap;
+  Map<Var, PrimExpr> input_vmap;
   for (size_t i = 0; i < forward_vars.size(); ++i) {
-    vmap.Set(forward_vars[i], forward_vars_[i]);
+    input_vmap.Set(forward_vars[i], forward_vars_[i]);
   }
+  ICHECK_EQ(input_vmap.size(), forward_vars.size())
+      << "FragmentNode: forward_vars must be distinct Vars, got "
+      << forward_vars;
+
+  Map<Var, PrimExpr> thread_vmap = input_vmap;
   if (replicate_var.defined()) {
-    vmap.Set(replicate_var.value(), replicate_var_);
+    Var rep = replicate_var.value();
+    ICHECK(!input_vmap.count(rep))
+        << "FragmentNode: replicate_var (" << rep
+        << ") must be distinct from forward_vars " << forward_vars;
+    thread_vmap.Set(rep, replicate_var_);
   }
 
   arith::Analyzer analyzer;
   UpdateAnalyzer(&analyzer);
   forward_thread_ =
-      analyzer.Simplify(SubstituteLayoutVars(forward_thread, vmap));
+      analyzer.Simplify(SubstituteLayoutVars(forward_thread, thread_vmap));
   if (forward_index.empty()) {
     forward_index = {infer_fragment_index(GetVarMap(), forward_thread_,
                                           replicate_var_, &analyzer)};
   } else {
     forward_index = forward_index.Map(
-        [&](const PrimExpr &e) { return SubstituteLayoutVars(e, vmap); });
+        [&](const PrimExpr &e) { return SubstituteLayoutVars(e, input_vmap); });
   }
   forward_index_ = forward_index.Map(
       [&](const PrimExpr &e) { return analyzer.Simplify(e); });
+  if (replicate_var.defined()) {
+    Var rep = replicate_var.value();
+    for (const PrimExpr &e : forward_index_) {
+      CHECK(!UsesVar(e,
+                     [&](const VarNode *vn) {
+                       return GetRef<Var>(vn).same_as(rep);
+                     }),
+            ValueError)
+          << "Fragment forward_index must not depend on replication variable "
+          << rep << ", got " << forward_index_;
+    }
+  }
 }
 
 Fragment::Fragment(Array<IterVar> forward_var, Array<PrimExpr> forward_index,

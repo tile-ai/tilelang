@@ -3,6 +3,7 @@
 import multiprocessing
 import pickle
 
+import pytest
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -12,6 +13,7 @@ from tilelang.layout import (
     Layout,
     PartialFragment,
     make_ascend_nz_layout,
+    make_linear_layout,
     make_swizzled_layout,
     try_extract_fractal_layout,
 )
@@ -134,7 +136,7 @@ def test_layout_owned_vars_no_cross_node_aliasing_and_high_rank():
     assert tvm.ir.structural_equal(tvm.runtime.convert([frag_a, frag_b]), tvm.runtime.convert([clone_a, clone_b]))
 
     # Layouts with > 16 dimensions are no longer capped by static placeholders.
-    ndim = 18
+    ndim = 20
     shape = [2] * ndim
     high_rank = Layout(shape, lambda *xs: list(reversed(xs)))
     restored_high_rank = _roundtrip_pickle_twice(high_rank)
@@ -142,6 +144,14 @@ def test_layout_owned_vars_no_cross_node_aliasing_and_high_rank():
     assert list(restored_high_rank.map_forward_index(coords)) == list(reversed(coords))
     assert list(restored_high_rank.inverse().map_forward_index(list(reversed(coords)))) == coords
     assert tvm.ir.structural_equal(restored_high_rank, high_rank)
+
+    high_rank_linear = make_linear_layout(tirx.decl_buffer(shape, "float16"))
+    expected_linear = sum(c * (1 << (ndim - 1 - idx)) for idx, c in enumerate(coords))
+    assert [int(x) for x in high_rank_linear.map_forward_index(coords)] == [expected_linear]
+
+    # Fragment forward_index must depend only on logical input coordinates, not replicate_var.
+    with pytest.raises(ValueError, match="forward_index must not depend on replication variable"):
+        Fragment([8], forward_fn=lambda i, rep: (i * 2 + rep, rep), replicate=2)
 
 
 @tilelang.testing.requires_cuda

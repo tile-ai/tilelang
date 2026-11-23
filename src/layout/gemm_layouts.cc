@@ -585,21 +585,18 @@ Layout makeGemmABLayoutF64_Kouter(int stride, int continuous) {
 
 // The Default Layout for Tensor Access (row-major linear layout)
 Layout MakeLinearLayout(Array<PrimExpr> shape) {
-  int ndim = static_cast<int>(shape.size());
-  Array<IterVar> iter_vars;
-  for (int i = 0; i < ndim; i++) {
-    iter_vars.push_back(MakeIterVar(std::string{char('i' + i)}, shape[i]));
-  }
+  size_t ndim = shape.size();
+  Array<Var> vars = MakeLayoutVars(ndim);
   // Row-major: index = i0 * (d1 * d2 * ...) + i1 * (d2 * ...) + ... + i_{n-1}
   PrimExpr linear_index = 0;
-  for (int i = 0; i < ndim; i++) {
+  for (size_t i = 0; i < ndim; i++) {
     PrimExpr stride = 1;
-    for (int j = i + 1; j < ndim; j++) {
+    for (size_t j = i + 1; j < ndim; j++) {
       stride = stride * shape[j];
     }
-    linear_index = linear_index + iter_vars[i]->var * stride;
+    linear_index = linear_index + vars[i] * stride;
   }
-  return Layout(iter_vars, {linear_index});
+  return Layout(std::move(shape), std::move(vars), {linear_index});
 }
 
 Layout MakeGemmABLayoutPadded(int stride, int continuous, int element_size) {
