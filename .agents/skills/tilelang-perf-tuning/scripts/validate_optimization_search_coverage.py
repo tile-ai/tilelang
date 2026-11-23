@@ -1441,18 +1441,20 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
             if facts["stages"] != 1:
                 continue
             affected = set(created[candidate_id]["applicable_cases"]) & pipeline_cases
-            if not affected:
-                continue
-            reevaluated = {
-                case_id
-                for obligation in pipeline_obligations
-                if obligation.get("basis_candidate_id") == candidate_id
-                for case_id in obligation["case_ids"]
-            }
-            require(
-                affected <= reevaluated,
-                f"promoted single-stage candidate {candidate_id} changes admitted pipeline cases; re-evaluate pipeline",
-            )
+            for case_id in sorted(affected):
+                for obligation in pipeline_obligations:
+                    if case_id not in obligation["case_ids"]:
+                        continue
+                    basis = obligation.get("basis_candidate_id")
+                    current = basis != "B0" and (
+                        created_index[basis] >= created_index[candidate_id] or promoted_index.get(basis, -1) > promoted_index[candidate_id]
+                    )
+                    require(
+                        current,
+                        f"obligation {obligation['obligation_id']}: basis {basis} is superseded by promoted "
+                        f"single-stage candidate {candidate_id} on {case_id}; rebase the obligation to "
+                        f"{candidate_id} or a newer basis and re-measure instead of reusing older evidence",
+                    )
 
     if strict_closure:
         open_obligations = [item["obligation_id"] for item in obligations if item["status"] in {"PENDING", "ACTIVE", "BLOCKED"}]
