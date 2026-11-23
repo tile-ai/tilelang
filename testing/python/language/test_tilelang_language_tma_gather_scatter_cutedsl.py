@@ -1,21 +1,11 @@
 """CuTeDSL TMA tile::gather4 / tile::scatter4, mirroring the CUDA coverage in
 test_tilelang_language_tma_gather_scatter.py."""
 
-import pytest
 import torch
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-
-
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
 
 
 def gather_scatter_program(N: int, K: int, K_box: int, in_dtype: str = "float16", eviction_policy=None):
@@ -119,17 +109,17 @@ def scatter_only_program(N: int, K: int, K_box: int):
     return main
 
 
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_gather_scatter_cutedsl():
-    _require_cutedsl()
     run_gather_scatter(N=64, K=64, K_box=64)
 
 
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_gather_rows_cutedsl():
-    _require_cutedsl()
     N, K = 64, 64
     kernel = tilelang.compile(gather_readback_program(N, K, K), target="cutedsl")
     Src = torch.randn(N, K, dtype=torch.float16, device="cuda")
@@ -140,10 +130,10 @@ def test_gather_rows_cutedsl():
     torch.testing.assert_close(Out, Src[rows.tolist()])
 
 
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_scatter_rows_cutedsl():
-    _require_cutedsl()
     N, K = 64, 32
     kernel = tilelang.compile(scatter_only_program(N, K, K), target="cutedsl")
     Src = torch.randn(4, K, dtype=torch.float16, device="cuda")
@@ -156,10 +146,10 @@ def test_scatter_rows_cutedsl():
     torch.testing.assert_close(Dst, expected)
 
 
+@tilelang.testing.requires_cutedsl
 @tilelang.testing.requires_cuda_compute_version(10)
 @tilelang.testing.requires_cuda_compute_version_lt(11)
 def test_gather_scatter_eviction_cutedsl():
-    _require_cutedsl()
     run_gather_scatter(N=64, K=64, K_box=64, eviction_policy="evict_first")
 
 

@@ -8,15 +8,6 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def rand_kernel(M=1024, seed=42, generator="curandStatePhilox4_32_10_t"):
     num_per_thread = 128
     threads = 1
@@ -69,10 +60,9 @@ def _run(target, M, seed, generator="curandStatePhilox4_32_10_t"):
     return out
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("M, seed", [(1024, 42), (512, 123)])
 def test_rand_matches_cuda(M, seed):
-    _require_cutedsl()
     ref = _run("cuda", M, seed)
     got = _run("cutedsl", M, seed)
 
@@ -89,9 +79,8 @@ def test_rand_matches_cuda(M, seed):
     torch.testing.assert_close(got[4], ref[4], rtol=1e-13, atol=1e-13)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_double_normal_keeps_the_stream():
-    _require_cutedsl()
     M, seed = 64, 42
     assert torch.equal(
         _tail_after_double_normal("cutedsl", M, seed),
@@ -161,9 +150,8 @@ def _run_mixed(target, M=16, seed=42, bit=32):
     return d0, d1, a
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_mixed_scalar_and_vector_normal():
-    _require_cutedsl()
     ref = _run_mixed("cuda")
     got = _run_mixed("cutedsl")
     # The scalar draw must keep its sibling across the vectorized block, which
@@ -173,9 +161,8 @@ def test_mixed_scalar_and_vector_normal():
     assert torch.equal(got[2], ref[2]), "integer draws after mixed normals diverge"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_mixed_scalar_and_vector_normal_double():
-    _require_cutedsl()
     ref = _run_mixed("cuda", bit=64)
     got = _run_mixed("cutedsl", bit=64)
     torch.testing.assert_close(got[0], ref[0], rtol=1e-13, atol=1e-13)
@@ -183,9 +170,8 @@ def test_mixed_scalar_and_vector_normal_double():
     assert torch.equal(got[2], ref[2]), "integer draws after mixed normals diverge"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_rand_unsupported_generator():
-    _require_cutedsl()
     # The device kernel is only traced when the module is launched.
     with pytest.raises(NotImplementedError, match="Philox4x32-10"):
         _run("cutedsl", 128, 0, generator="curandStateXORWOW_t")

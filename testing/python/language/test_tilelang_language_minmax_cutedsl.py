@@ -9,17 +9,7 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 def _compile_both(func, **kwargs):
-    _require_cutedsl()
     return (
         tilelang.compile(func, target="cuda", **kwargs),
         tilelang.compile(func, target="cutedsl", **kwargs),
@@ -81,7 +71,7 @@ def _elementwise_minmax(n, dtype):
     return main
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "float32", "float64", "int32"])
 def test_elementwise_max_min_matches_cuda(dtype):
     n = 32
@@ -126,7 +116,7 @@ def _reduce_inputs(torch_dtype, length):
     return {k: v.to(torch_dtype).cuda() for k, v in cases.items()}
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize("reduce_name", ["reduce_max", "reduce_min", "reduce_absmax"])
 @pytest.mark.parametrize("clear", [True, False])
@@ -143,7 +133,7 @@ def test_half_reduce_matches_cuda(dtype, reduce_name, clear, nan_propagate):
         assert torch.equal(got.view(torch.int16), expected.view(torch.int16)), f"{name}: {got} != {expected}"
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
 @pytest.mark.parametrize("reduce_name", ["reduce_max", "reduce_min", "reduce_absmax"])
 def test_float_reduce_matches_cuda(dtype, reduce_name):
