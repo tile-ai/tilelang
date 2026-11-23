@@ -11,6 +11,12 @@ import sparse_mla_fwd_pipelined
 import sparse_mla_bwd
 
 
+topk_selector.tl_topk_impl.pass_configs = {
+    **topk_selector.tl_topk_impl.pass_configs,
+    tilelang.PassConfigKey.ARITH_Z3_RLIMIT: 100,
+}
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_eq(9, 0)
 def test_example_topk_selector():
