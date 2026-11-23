@@ -46,10 +46,9 @@ public:
     // lane reaches codegen as its own 1-element cp.async. Remember the
     // flag here so the injector only counts lanes that will survive as
     // one transfer (see #4461).
-    vectorize_disabled_ =
-        tvm::transform::PassContext::Current()
-            ->GetConfig<Bool>(kDisableVectorize, Bool(false))
-            .value();
+    vectorize_disabled_ = tvm::transform::PassContext::Current()
+                              ->GetConfig<Bool>(kDisableVectorize, Bool(false))
+                              .value();
   }
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
