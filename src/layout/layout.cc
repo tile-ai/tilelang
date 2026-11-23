@@ -75,22 +75,12 @@ Array<PrimExpr> RecoverOriginalIndices(const Array<PrimExpr> &shape,
   return original_indices;
 }
 
-PrimExpr SubstituteLayoutVars(const PrimExpr &expr,
-                              const Map<Var, PrimExpr> &vmap) {
+PrimExpr SubstituteWithDataTypeLegalization(const PrimExpr &expr,
+                                            const Map<Var, PrimExpr> &vmap) {
   if (vmap.empty()) {
     return expr;
   }
-  bool dtypes_match = true;
-  for (const auto &[var, val] : vmap) {
-    if (!var->dtype.is_void() && var->dtype != val.dtype()) {
-      dtypes_match = false;
-      break;
-    }
-  }
-  if (dtypes_match) {
-    return Substitute(expr, vmap);
-  }
-  return SubstituteWithDataTypeLegalization(
+  return tirx::SubstituteWithDataTypeLegalization(
       expr, [&](const Var &var) { return vmap.Get(var); });
 }
 
@@ -103,13 +93,10 @@ Array<PrimExpr> SubstituteForwardIndex(const Array<PrimExpr> &forward_index,
   for (size_t i = 0; i < src_vars.size(); ++i) {
     vmap.Set(src_vars[i], original_indices[i]);
   }
-  Array<PrimExpr> new_forward_index;
-  new_forward_index.reserve(forward_index.size());
-  for (const auto &fwd_expr : forward_index) {
-    new_forward_index.push_back(
-        analyzer->Simplify(SubstituteLayoutVars(fwd_expr, vmap)));
-  }
-  return new_forward_index;
+  return forward_index.Map([&](const PrimExpr &fwd_expr) {
+    return analyzer->Simplify(
+        SubstituteWithDataTypeLegalization(fwd_expr, vmap));
+  });
 }
 
 PrimExpr SubstituteReshapedExpr(const PrimExpr &expr,
@@ -121,7 +108,7 @@ PrimExpr SubstituteReshapedExpr(const PrimExpr &expr,
   for (size_t i = 0; i < src_vars.size(); ++i) {
     vmap.Set(src_vars[i], original_indices[i]);
   }
-  return analyzer->Simplify(SubstituteLayoutVars(expr, vmap));
+  return analyzer->Simplify(SubstituteWithDataTypeLegalization(expr, vmap));
 }
 
 /*!
@@ -550,7 +537,7 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
   }
   Array<PrimExpr> recovered_logical =
       backward_indices.Map([&](const PrimExpr &e) {
-        return SubstituteLayoutVars(e, inverse_substitution);
+        return SubstituteWithDataTypeLegalization(e, inverse_substitution);
       });
   for (size_t i = 0; i < logical_vars.size(); ++i) {
     if (!analyzer.CanProveEqual(recovered_logical[i], logical_vars[i])) {
@@ -574,7 +561,7 @@ bool CanProveInverseRoundTrip(const Array<PrimExpr> &input_shape,
   }
   Array<PrimExpr> recovered_physical =
       forward_indices.Map([&](const PrimExpr &e) {
-        return SubstituteLayoutVars(e, forward_substitution);
+        return SubstituteWithDataTypeLegalization(e, forward_substitution);
       });
   for (size_t i = 0; i < physical_vars.size(); ++i) {
     if (!analyzer.CanProveEqual(recovered_physical[i], physical_vars[i])) {
@@ -783,7 +770,7 @@ LayoutNode::LayoutNode(Array<PrimExpr> input_size, Array<Var> forward_vars,
   arith::Analyzer analyzer;
   UpdateAnalyzer(&analyzer);
   forward_index_ = forward_index.Map([&](const PrimExpr &e) {
-    return analyzer.Simplify(SubstituteLayoutVars(e, vmap));
+    return analyzer.Simplify(SubstituteWithDataTypeLegalization(e, vmap));
   });
 }
 
@@ -923,7 +910,7 @@ PrimExpr LayoutNode::ForwardLinearized(const Array<PrimExpr> &vars) const {
   for (size_t i = 0; i < InputDim(); ++i) {
     vmap.Set(forward_vars_[i], vars[i]);
   }
-  return SubstituteLayoutVars(GetLinearizedForwardIndex(), vmap);
+  return SubstituteWithDataTypeLegalization(GetLinearizedForwardIndex(), vmap);
 }
 
 Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
@@ -942,8 +929,9 @@ Array<PrimExpr> LayoutNode::Forward(const Array<PrimExpr> &vars) const {
     vmap.Set(forward_vars_[i], transform_vars[i]);
   }
 
-  Array<PrimExpr> transformed = forward_index_.Map(
-      [&](const PrimExpr &e) { return SubstituteLayoutVars(e, vmap); });
+  Array<PrimExpr> transformed = forward_index_.Map([&](const PrimExpr &e) {
+    return SubstituteWithDataTypeLegalization(e, vmap);
+  });
   // Concatenate with the remaining elements from vars
   Array<PrimExpr> result;
   for (size_t i = 0; i < vars.size() - InputDim(); i++) {
@@ -1375,14 +1363,15 @@ FragmentNode::FragmentNode(Array<PrimExpr> input_size, Array<Var> forward_vars,
 
   arith::Analyzer analyzer;
   UpdateAnalyzer(&analyzer);
-  forward_thread_ =
-      analyzer.Simplify(SubstituteLayoutVars(forward_thread, thread_vmap));
+  forward_thread_ = analyzer.Simplify(
+      SubstituteWithDataTypeLegalization(forward_thread, thread_vmap));
   if (forward_index.empty()) {
     forward_index = {infer_fragment_index(GetVarMap(), forward_thread_,
                                           replicate_var_, &analyzer)};
   } else {
-    forward_index = forward_index.Map(
-        [&](const PrimExpr &e) { return SubstituteLayoutVars(e, input_vmap); });
+    forward_index = forward_index.Map([&](const PrimExpr &e) {
+      return SubstituteWithDataTypeLegalization(e, input_vmap);
+    });
   }
   forward_index_ = forward_index.Map(
       [&](const PrimExpr &e) { return analyzer.Simplify(e); });
@@ -1659,7 +1648,7 @@ PrimExpr FragmentNode::ForwardThread(const Array<PrimExpr> &vars,
     vmap.Set(replicate_var_, rep_var.value());
   }
 
-  return SubstituteLayoutVars(forward_thread_, vmap);
+  return SubstituteWithDataTypeLegalization(forward_thread_, vmap);
 }
 
 Layout FragmentNode::Inverse() const {
