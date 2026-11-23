@@ -23,7 +23,14 @@ A loop exit inside a *nested* loop targets that nested loop, so nested
 (same as ``TargetedLoopBreakDetector`` in ``src/transform/unroll_loop.cc``,
 the check added for fully unrolled loops in #3078).
 
-This pass must run before ``PipelinePlanning`` in every backend pipeline.
+This pass must run before ``PipelinePlanning`` in every backend pipeline,
+and before warp specialization in the CUDA pipeline: warp specialization
+rewrites a ``T.Pipelined`` loop with a TMA copy into a producer/consumer
+structure with barriers, and a taken exit would skip the consumer arrive
+for that iteration, deadlocking the producer on a barrier that is never
+released. Stripping the annotations first makes warp specialization skip
+such loops entirely (it only rewrites loops carrying a ``num_stages``
+annotation), so they stay sequential.
 """
 
 from __future__ import annotations
@@ -123,7 +130,9 @@ def DisablePipelineForIrregularLoop():
     Note:
         This pass must be applied before PipelinePlanning, while the
         ``T.Pipelined`` loop still carries its ``num_stages`` /
-        ``tl_pipeline_order`` / ``tl_pipeline_stage`` annotations.
+        ``tl_pipeline_order`` / ``tl_pipeline_stage`` annotations, and
+        before warp specialization in the CUDA pipeline (see the module
+        docstring).
 
     Returns:
         A TVM PrimFunc pass.

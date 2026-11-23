@@ -97,6 +97,18 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # their access regions.
     mod = tilelang.transform.VerifyBufferInit()(mod)
 
+    # A loop with continue/break cannot be software-pipelined: the exit
+    # would be emitted in the epilogue after the loop and nvcc rejects the
+    # CUDA, so strip its pipeline annotations first and lower it as a serial
+    # loop. This must run BEFORE warp specialization below: warp
+    # specialization rewrites a T.Pipelined loop with a TMA copy into a
+    # producer/consumer structure with barriers, and a taken exit would skip
+    # the consumer arrive for that iteration, deadlocking the producer on a
+    # barrier that is never released. Stripping the annotations first makes
+    # warp specialization skip such loops entirely (it only rewrites loops
+    # carrying a num_stages annotation), so they stay sequential.
+    mod = tilelang.transform.DisablePipelineForIrregularLoop()(mod)
+
     # @CUDA-specific
     # Tile-level warp specialization: runs before layout inference so that
     # producer/consumer split happens at the high-level tile-op IR.
@@ -126,10 +138,6 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
-    # A loop with continue/break cannot be software-pipelined: the exit would
-    # be emitted in the epilogue after the loop and nvcc rejects the CUDA, so
-    # strip its pipeline annotations first and lower it as a serial loop.
-    mod = tilelang.transform.DisablePipelineForIrregularLoop()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)

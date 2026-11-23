@@ -15,6 +15,25 @@ from tvm import tirx
 from tvm.tirx import Evaluate, For, PyStmtExprVisitor
 
 sm89_target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
+# Warp specialization needs TMA (sm_90+); used for the ordering tests below.
+sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+
+
+def _run_prologue(func, target=sm90_target):
+    # Runs the CUDA prologue (warp specialization, then pipeline planning)
+    # and returns the lowered function as a string.
+    from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
+
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    with target:
+        mod = CUDAPassPipelineBodyPrologue(mod, target)
+    return str(mod["main"])
+
+
+def _is_warp_specialized(ir: str) -> bool:
+    # ProducerConsumerWarpSpecialized marks transformed functions with the
+    # tl.ws_applied attribute and introduces mbarrier operations.
+    return "ws_applied" in ir or "mbarrier" in ir
 
 
 def _make(exit_kind, loop):
@@ -166,10 +185,32 @@ def test_break_in_nested_loop_keeps_pipelining():
     assert _stray_exits(func) == []
 
 
+@tilelang.testing.requires_cuda
+def test_continue_in_pipelined_loop_not_warp_specialized():
+    # tile-ai/tilelang#4467 (CodeRabbit review on #4467): warp specialization
+    # runs before DisablePipelineForIrregularLoop, so it used to rewrite a
+    # T.Pipelined loop with a TMA copy and a continue/break into a
+    # producer/consumer structure with barriers; a taken exit would skip the
+    # consumer arrive and deadlock the producer. The strip pass now runs
+    # first, so such a loop must stay sequential (no WS markers at all).
+    ir = _run_prologue(_make("continue", "Pipelined"))
+    assert not _is_warp_specialized(ir)
+
+
+@tilelang.testing.requires_cuda
+def test_eligible_pipelined_loop_still_warp_specialized():
+    # Control for the test above: a pipelined loop without an exit must
+    # still be warp-specialized on sm_90.
+    ir = _run_prologue(_make("if", "Pipelined"))
+    assert _is_warp_specialized(ir)
+
+
 if __name__ == "__main__":
     test_continue_in_pipelined_loop_is_not_pipelined()
     test_break_in_pipelined_loop_is_not_pipelined()
     test_if_in_pipelined_loop_stays_pipelined()
     test_continue_in_serial_loop_unchanged()
     test_break_in_nested_loop_keeps_pipelining()
+    test_continue_in_pipelined_loop_not_warp_specialized()
+    test_eligible_pipelined_loop_still_warp_specialized()
     print("all tests passed")
