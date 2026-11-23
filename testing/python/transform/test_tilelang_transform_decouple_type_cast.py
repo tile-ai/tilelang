@@ -378,6 +378,40 @@ def test_local_to_memory_with_bind_chain():
     _check(before, after)
 
 
+def test_effectful_bind_not_duplicated():
+    """An effectful Bind used twice must not be inlined into both uses.
+
+    Regression test for issue #4448: _normalize_flat_binds substituted the
+    atomic_add result into ``old * old``, calling it twice per iteration.
+    The Bind is kept, so the loop is left untransformed and the call runs
+    exactly once.
+    """
+
+    @T.prim_func
+    def before(counter: T.Tensor((32,), T.int32), output: T.Tensor((128,), T.float16)):
+        for i in T.vectorized(4):
+            old = T.atomic_add(counter[i], 1, return_prev=True)
+            output[i] = T.cast(old * old, T.float16)
+
+    _check(before, before)
+
+
+def test_effectful_bind_not_dropped_when_unused():
+    """An effectful Bind must not be removed when its value is unused.
+
+    Regression test for issue #4448: dropping the Bind would remove the
+    atomic increment entirely.
+    """
+
+    @T.prim_func
+    def before(counter: T.Tensor((32,), T.int32), output: T.Tensor((128,), T.float16)):
+        for i in T.vectorized(4):
+            old = T.atomic_add(counter[i], 1, return_prev=True)  # noqa: F841
+            output[i] = T.cast(i, T.float16)
+
+    _check(before, before)
+
+
 def test_local_to_memory_with_branch_local_bind():
     """Test Bind definitions inside an IfThenElse branch do not escape."""
 

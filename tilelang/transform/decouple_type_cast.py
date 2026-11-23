@@ -241,6 +241,27 @@ def _substitute_bind_env(node, env: BindEnv):
     return result
 
 
+def _rhs_has_effectful_call(value: tirx.PrimExpr) -> bool:
+    """Check if an expression contains a Call with unknown or non-pure effect.
+
+    Only Call nodes are checked: inlining a BufferLoad is the existing,
+    tested behaviour for pure bindings (e.g. ``factor = scale[i]``), while
+    substituting a Call such as an atomic op or a sampler into every use
+    changes how many times the side effect runs. See #4448.
+    """
+    effectful = False
+
+    def visit(node) -> None:
+        nonlocal effectful
+        if isinstance(node, Call):
+            effect = node.op.get_attr("TCallEffectKind") if isinstance(node.op, Op) else None
+            if effect is None or int(effect) > tirx.CallEffectKind.Pure.value:
+                effectful = True
+
+    post_order_visit(value, visit)
+    return effectful
+
+
 def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
     """Inline flat Bind statements according to sequential dominance.
 
@@ -248,9 +269,20 @@ def _normalize_flat_binds(stmt: Stmt, env: BindEnv) -> Stmt | None:
     sibling statements, while binds inside a branch or nested loop do not escape
     that scope. This normalization exposes hidden BufferLoad/Cast nodes to the
     decoupling analysis without treating Bind as a tree-shaped LetStmt.
+
+    A Bind whose value contains an effectful Call is kept as-is instead of
+    being inlined: substituting it into all uses would duplicate the side
+    effect, and dropping it when unused would remove the effect entirely.
+    Keeping the Bind also makes the surrounding statement a SeqStmt, so the
+    single-store decoupling below skips the loop. See #4448.
     """
     if isinstance(stmt, Bind):
-        env[stmt.var] = _substitute_bind_env(stmt.value, env)
+        value = _substitute_bind_env(stmt.value, env)
+        if _rhs_has_effectful_call(value):
+            result = Bind(stmt.var, value)
+            stamp_stmt_spans(result, get_stmt_span(stmt))
+            return result
+        env[stmt.var] = value
         return None
 
     if isinstance(stmt, SeqStmt):
