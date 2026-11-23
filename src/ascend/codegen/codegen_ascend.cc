@@ -702,6 +702,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   current_function_name_ = global_symbol.value();
   bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
 
+  stream << "#include <tl_templates/ascend/cann_compat_begin.h>\n";
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   CodeGenC::PrintExtraAttrs(f, stream);
@@ -749,7 +750,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   this->PrintStmt(f->body);
   this->EndScope(func_scope);
   this->PrintIndent();
-  this->stream << "}\n\n";
+  this->stream << "}\n#include <tl_templates/ascend/cann_compat_end.h>\n\n";
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked after PrimFunc code generation";
 }
@@ -866,6 +867,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
     return v->name_hint;
   };
 
+  decl_stream << "#include <tl_templates/ascend/cann_compat_begin.h>\n";
   decl_stream << func_attrs << " " << helper_name << "(";
   for (size_t i = 0; i < captures.size(); ++i) {
     if (i != 0) {
@@ -909,7 +911,9 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
       }
     }
   }
-  decl_stream << ") {\n" << helper_body << "}\n\n";
+  decl_stream << ") {\n"
+              << helper_body
+              << "}\n#include <tl_templates/ascend/cann_compat_end.h>\n\n";
 }
 
 void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
@@ -1454,7 +1458,7 @@ void CodeGenTileLangAscend::EmitGmToUbufCopy_(const CallNode *op) {
   }
 
   // IR arg 2 is sid, which asc_copy_gm2ub_align does not take.
-  EmitCApiCall_("tl::cann::copy_gm2ub_align",
+  EmitCApiCall_("asc_copy_gm2ub_align",
                 {{op->args[0], "(__ubuf__ " + pointer_type + "*)(", ")"},
                  {op->args[1], "(__gm__ " + pointer_type + "*)(", ")"},
                  {op->args[3]},
@@ -1472,7 +1476,7 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
       << "tl.ascend_copy_ubuf_to_gm expects exactly 8 arguments";
 
   // IR arg 2 is sid, which asc_copy_ub2gm_align does not take.
-  EmitCApiCall_("tl::cann::copy_ub2gm_align",
+  EmitCApiCall_("asc_copy_ub2gm_align",
                 {{op->args[0], "(__gm__ uint8_t*)(", ")"},
                  {op->args[1], "(__ubuf__ uint8_t*)(", ")"},
                  {op->args[3]},

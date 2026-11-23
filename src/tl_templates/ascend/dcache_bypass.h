@@ -4,6 +4,8 @@
 
 #include <stdint.h>
 
+#include "tl_templates/ascend/cann_compat_begin.h"
+
 namespace tl {
 
 // Scalar GM access that bypasses the per-core DCache. AscendC::{Read,Write}
@@ -55,3 +57,5 @@ __aicore__ inline void write_gm_bypass_dcache(__gm__ T *addr, T value) {
 }
 
 } // namespace tl
+
+#include "tl_templates/ascend/cann_compat_end.h"

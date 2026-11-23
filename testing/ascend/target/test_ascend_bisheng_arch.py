@@ -32,6 +32,34 @@ def test_cann_compat_shared_controls_compile(arch):
     assert binary.startswith(b"\x7fELF")
 
 
+def test_cann_dma_original_names_preserve_wide_counts():
+    try:
+        bisheng.find_bisheng_path()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    # Compile only. Calling the CANN 9.1 strided overload directly narrows
+    # 65536 to zero. Check both calls and keep subsequent includes unaffected.
+    source = """
+    #include "tl_templates/ascend/cann_compat_begin.h"
+    extern "C" __global__ __vector__ void dma(__gm__ uint8_t* gm) {
+        auto ub = (__ubuf__ uint8_t*)0;
+        asc_copy_gm2ub_align(ub, gm, 65536u, 32u, 0, 0, false,
+                             tl::cann::load_l2_cache_mode(0), 32u, 32u);
+        asc_copy_ub2gm_align(gm, ub, 65536u, 32u,
+                             tl::cann::store_l2_cache_mode(0), 32u, 32u);
+    }
+    #include "tl_templates/ascend/cann_compat_end.h"
+    #if defined(asc_copy_gm2ub_align) || defined(asc_copy_ub2gm_align)
+    #error DMA aliases leaked past TileLang device code
+    #endif
+    """
+    binary = bisheng.compile_ascend(
+        source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH, "-Werror=constant-conversion"]
+    )
+    assert binary.startswith(b"\x7fELF")
+
+
 def test_target_npu_arch_priority(monkeypatch):
     monkeypatch.setenv("ASCEND_NPU_ARCH", "dav-env")
 

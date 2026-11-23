@@ -374,7 +374,7 @@ def test_int32_store_atomic_codegen(op):
     # below unchanged so insufficient native synchronization remains a failure.
     enable = source.index(f"tl::cann::set_atomic_{op}_int32();")
     disable = source.index("asc_set_atomic_none();", enable)
-    stores = list(re.finditer(r"tl::cann::copy_ub2gm_align\(", source))
+    stores = list(re.finditer(r"asc_copy_ub2gm_align\(", source))
     assert len(stores) == 2, "Expected atomic and plain DMA stores"
     assert enable < stores[0].start() < disable < stores[1].start()
     drain = r"(?:asc_sync\(\)|asc_sync_pipe\(\s*PIPE_MTE3\s*\));"
