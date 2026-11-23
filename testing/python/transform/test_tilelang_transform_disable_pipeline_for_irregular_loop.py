@@ -1,0 +1,175 @@
+"""Tests for DisablePipelineForIrregularLoop (tile-ai/tilelang#4460).
+
+A T.Pipelined loop whose body contains continue/break cannot be software
+pipelined: InjectSoftwarePipeline emits the stage-1 statements of the last
+trip as an epilogue after the loop, and the loop exit goes with them,
+producing CUDA that nvcc rejects. The pass strips the pipeline annotations
+from such loops so they lower as plain sequential loops.
+"""
+
+from tilelang import tvm as tvm
+import tilelang as tl
+import tilelang.testing
+import tilelang.language as T
+from tvm import tirx
+from tvm.tirx import Evaluate, For, PyStmtExprVisitor
+
+sm89_target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
+
+
+def _make(exit_kind, loop):
+    @T.prim_func
+    def main(
+        X: T.Tensor((128,), "float32"),
+        Y: T.Tensor((128,), "float32"),
+        O: T.Tensor((128,), "float32"),
+        N: T.int32,
+    ):
+        with T.Kernel(1, threads=128):
+            x = T.alloc_fragment((128,), "float32")
+            ys = T.alloc_shared((128,), "float32")
+            T.copy(X, x)
+            for j in T.Pipelined(N, num_stages=2) if loop == "Pipelined" else T.serial(N):
+                T.copy(Y, ys)
+                if exit_kind == "continue":
+                    if j != 1:
+                        continue
+                    for i in T.Parallel(128):
+                        x[i] = x[i] + ys[i]
+                elif exit_kind == "break":
+                    for i in T.Parallel(128):
+                        x[i] = x[i] + ys[i]
+                    if j == 1:
+                        break
+                else:  # the same condition as an if, no loop exit
+                    if j == 1:
+                        for i in T.Parallel(128):
+                            x[i] = x[i] + ys[i]
+            T.copy(x, O)
+
+    return main
+
+
+def _make_nested_break():
+    # A break inside a nested serial loop targets that loop, not the
+    # pipelined loop, so pipelining must stay enabled.
+    @T.prim_func
+    def main(
+        X: T.Tensor((128,), "float32"),
+        Y: T.Tensor((128,), "float32"),
+        O: T.Tensor((128,), "float32"),
+        N: T.int32,
+    ):
+        with T.Kernel(1, threads=128):
+            x = T.alloc_fragment((128,), "float32")
+            ys = T.alloc_shared((128,), "float32")
+            T.copy(X, x)
+            for _j in T.Pipelined(N, num_stages=2):
+                T.copy(Y, ys)
+                for k in T.serial(4):
+                    if k == 1:
+                        break
+                for i in T.Parallel(128):
+                    x[i] = x[i] + ys[i]
+            T.copy(x, O)
+
+    return main
+
+
+@tirx.functor.visitor
+class _StrayExitChecker(PyStmtExprVisitor):
+    """Records continue_loop/break_loop Evaluates outside any For."""
+
+    def __init__(self):
+        super().__init__()
+        self.depth = 0
+        self.stray = []
+
+    def visit_for_(self, op: For) -> None:
+        self.depth += 1
+        self.visit_stmt(op.body)
+        self.depth -= 1
+
+    def visit_evaluate_(self, op: Evaluate) -> None:
+        if (
+            isinstance(op.value, tirx.Call)
+            and op.value.op.name
+            in (
+                "tir.continue_loop",
+                "tir.break_loop",
+                "tirx.continue_loop",
+                "tirx.break_loop",
+            )
+            and self.depth == 0
+        ):
+            self.stray.append(op.value.op.name)
+
+
+def _run(func, target=sm89_target):
+    mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
+    mod = tirx.transform.BindTarget(target)(mod)
+    mod = tl.transform.IfStmtBinding()(mod)
+    mod = tl.transform.DisablePipelineForIrregularLoop()(mod)
+    mod = tl.transform.PipelinePlanning()(mod)
+    mod = tl.transform.InjectSoftwarePipeline()(mod)
+    mod = tl.transform.Simplify()(mod)
+    mod = tl.transform.UnrollLoop()(mod)
+    mod = tl.transform.Simplify()(mod)
+    return mod["main"]
+
+
+def _is_pipelined(func) -> bool:
+    # PipelinePlanning marks pipelined loops with tl_pipelined_num_stages;
+    # InjectSoftwarePipeline consumes the software_pipeline_stage annotations,
+    # so they are gone by the time the passes below have run.
+    return "tl_pipelined_num_stages" in str(func.body)
+
+
+def _stray_exits(func) -> list[str]:
+    checker = _StrayExitChecker()
+    checker.visit_stmt(func.body)
+    return checker.stray
+
+
+@tilelang.testing.requires_cuda
+def test_continue_in_pipelined_loop_is_not_pipelined():
+    func = _run(_make("continue", "Pipelined"))
+    assert not _is_pipelined(func)
+    assert _stray_exits(func) == []
+
+
+@tilelang.testing.requires_cuda
+def test_break_in_pipelined_loop_is_not_pipelined():
+    func = _run(_make("break", "Pipelined"))
+    assert not _is_pipelined(func)
+    assert _stray_exits(func) == []
+
+
+@tilelang.testing.requires_cuda
+def test_if_in_pipelined_loop_stays_pipelined():
+    func = _run(_make("if", "Pipelined"))
+    assert _is_pipelined(func)
+    assert _stray_exits(func) == []
+
+
+@tilelang.testing.requires_cuda
+def test_continue_in_serial_loop_unchanged():
+    func = _run(_make("continue", "serial"))
+    assert not _is_pipelined(func)
+    assert _stray_exits(func) == []
+
+
+@tilelang.testing.requires_cuda
+def test_break_in_nested_loop_keeps_pipelining():
+    func = _run(_make_nested_break())
+    assert _is_pipelined(func)
+    assert _stray_exits(func) == []
+
+
+if __name__ == "__main__":
+    test_continue_in_pipelined_loop_is_not_pipelined()
+    test_break_in_pipelined_loop_is_not_pipelined()
+    test_if_in_pipelined_loop_stays_pipelined()
+    test_continue_in_serial_loop_unchanged()
+    test_break_in_nested_loop_keeps_pipelining()
+    print("all tests passed")

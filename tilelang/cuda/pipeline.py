@@ -126,6 +126,10 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
 
     # Run pipeline planning and software-pipeline rewriting before layout
     # inference so inferred layouts see the final pipelined structure directly.
+    # A loop with continue/break cannot be software-pipelined: the exit would
+    # be emitted in the epilogue after the loop and nvcc rejects the CUDA, so
+    # strip its pipeline annotations first and lower it as a serial loop.
+    mod = tilelang.transform.DisablePipelineForIrregularLoop()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)
