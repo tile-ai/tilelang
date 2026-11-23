@@ -58,7 +58,7 @@ def _lower(arch, config=None):
 # --------------------------------------------------------------------------
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_120"])
 def test_bf16_sigmoid_wide_vector_lowers(arch):
     """A 16-lane bfloat16 sigmoid lowers via hexp instead of failing on
@@ -69,7 +69,7 @@ def test_bf16_sigmoid_wide_vector_lowers(arch):
     assert "ulonglong4" in artifact.kernel_source
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_bf16_sigmoid_narrow_vector_still_uses_float32_exp():
     """Control: with 8 lanes per thread (sm_90a) the default float32
     evaluation is preserved."""
