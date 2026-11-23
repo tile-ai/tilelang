@@ -117,6 +117,7 @@ REJECTION_STAGES = {
     "PROFILING_VALIDITY",
 }
 PIPELINE_REALIZATIONS = {"SINGLE_STAGE", "AUTOMATIC", "MANUAL"}
+PIPELINE_PAIRING_AXES = ("work_granularity", "precision", "task_mapping")
 ACCESS_PATTERNS = {
     "NOT_APPLICABLE",
     "SCALAR_ONLY",
@@ -1305,6 +1306,18 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                             candidate_tested_case(basis_candidate_id, case_id, results),
                             f"obligation {oid}: basis candidate path was not tested for {case_id}",
                         )
+            if basis_candidate_id != "B0":
+                basis_identity = {axis: created[basis_candidate_id]["identity"][axis] for axis in PIPELINE_PAIRING_AXES}
+                require(
+                    obligation.get("basis_identity") is None,
+                    f"obligation {oid}: basis_identity is only allowed for the B0 basis",
+                )
+            else:
+                basis_identity = obligation.get("basis_identity")
+                require(
+                    isinstance(basis_identity, dict) and all(nonempty_text(basis_identity.get(axis)) for axis in PIPELINE_PAIRING_AXES),
+                    f"obligation {oid}: the B0 basis needs basis_identity with {', '.join(PIPELINE_PAIRING_AXES)}",
+                )
             require(auto in AUTO_STATUSES, f"obligation {oid}: invalid automatic status")
             require(manual in MANUAL_STATUSES, f"obligation {oid}: invalid manual status")
             for label, item, realization in (
@@ -1335,10 +1348,12 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                             any(
                                 created[cid]["identity"]["pipeline_facts"]["realization"] == realization
                                 and candidate_tested_case(cid, case_id, results)
+                                and all(created[cid]["identity"][axis] == basis_identity[axis] for axis in PIPELINE_PAIRING_AXES)
                                 for cid in eligible_ids
                             ),
                             f"obligation {oid}: {label} has no tested {realization} candidate for {case_id} "
-                            f"measured on the current basis {basis_candidate_id}; re-measure the pipeline after a basis change",
+                            f"measured on the current basis {basis_candidate_id}; evidence must pair with the basis "
+                            "on work_granularity, precision, and task_mapping",
                         )
                 if item.get("status") in {"CLOSED_WITH_EVIDENCE", "INAPPLICABLE"}:
                     validate_hard_infeasibility(

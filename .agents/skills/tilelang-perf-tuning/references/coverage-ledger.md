@@ -24,7 +24,7 @@ Each case records at least the outer/inner independent tasks, available cores, t
 
 Triggers create obligations; they do not promise the method is faster. The at-most-four active candidate limit never deletes or closes obligations.
 
-Pipeline-realization evidence must be measured on the obligation's current `basis_candidate_id`: only candidates created at or after the basis candidate can satisfy the pipeline gate. When the basis changes, re-measure the pipeline on the new basis instead of reusing older results.
+Pipeline-realization evidence must be measured on the obligation's current `basis_candidate_id`: only candidates created at or after the basis candidate can satisfy the pipeline gate, and the evidence candidate's `work_granularity`, `precision`, and `task_mapping` must match the basis identity — a measured gain must come from the pipeline itself, not from tile, precision, or mapping changes. For a B0 basis, the obligation records the baseline's identity on the same three axes in `basis_identity`, and the pairing check applies against that recorded identity. When the basis changes, re-measure the pipeline on the new basis instead of reusing older results.
 
 The work-granularity obligation records per case the source values for `FULL_CONTIGUOUS_UNIT`, `SIMD`, `DMA`, `CAPACITY`, and `PARALLEL`. The physical routes adjudicate at least the implementable combinations of `SCALAR_OR_SIMT`, `MEMORY_INDEXED_VECTOR`, `CONTIGUOUS_LOAD_REGISTER_REORDER`, and `MATERIALIZED_TRANSFORM` relevant to the current bottleneck, distinguishing output writeback.
 

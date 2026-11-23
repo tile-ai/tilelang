@@ -103,6 +103,7 @@
       "status": "PENDING",
       "candidate_ids": [],
       "basis_candidate_id": "B0",
+      "basis_identity": {"work_granularity": "one complete contiguous semantic unit", "precision": "reference-equivalent precision path", "task_mapping": "independent complete units across available vector cores"},
       "case_dispositions": [
         {"case_id": "representative_case", "status": "PENDING", "candidate_ids": []}
       ],
