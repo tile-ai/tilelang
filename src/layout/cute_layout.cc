@@ -1516,7 +1516,7 @@ public:
     ICHECK_EQ(forward_index_.size(), out_strides_.size());
     ICHECK_EQ(layout->InputDim(), shape_.size());
     for (size_t k = 0; k < shape_.size(); ++k)
-      placeholders_.push_back(InputPlaceholder(k));
+      placeholders_.push_back(layout->InputVar(k));
   }
 
   const std::vector<int32_t> &shape() const { return shape_; }
@@ -1946,8 +1946,8 @@ Optional<Layout> LayoutFromTileLangHierarchical(const tvm::tl::Layout &layout) {
   std::vector<Layout> projected;
   projected.reserve(rank);
   for (int64_t i = 0; i < rank; ++i) {
-    Optional<Layout> axis =
-        LayoutFromTileLang(tvm::tl::Layout(input_shape, {forward_index[i]}));
+    Optional<Layout> axis = LayoutFromTileLang(
+        tvm::tl::Layout(input_shape, layout->InputVars(), {forward_index[i]}));
     if (!axis.defined())
       return std::nullopt;
     projected.push_back(axis.value());

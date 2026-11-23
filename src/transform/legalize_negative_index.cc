@@ -6,10 +6,13 @@
 #include "support/check.h"
 #include <tvm/ir/cast.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/op.h>
 #include <tvm/tirx/stmt_functor.h>
 #include <tvm/tirx/transform.h>
 
+#include <optional>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -164,6 +167,44 @@ private:
   NegativeIndexRewriter(arith::Analyzer *analyzer,
                         const LoadStore2StateMap &states)
       : arith::IRMutatorWithAnalyzer(analyzer), states_(states) {}
+
+  Optional<Bool> ProveCondition_(const PrimExpr &condition) const {
+    // Memory reads still need index validation, and effectful conditions must
+    // retain their evaluation even if their result is known.
+    if (SideEffect(condition) > CallEffectKind::kPure)
+      return std::nullopt;
+    if (analyzer_->CanProve(condition))
+      return Bool(true);
+    if (analyzer_->CanProve(Not(condition)))
+      return Bool(false);
+    return std::nullopt;
+  }
+
+  Stmt VisitStmt_(const IfThenElseNode *op) final {
+    // The base mutator visits both branches before folding the condition. Prune
+    // first so an unreachable access cannot trigger the negative-index check.
+    if (Optional<Bool> condition = ProveCondition_(op->condition)) {
+      return constraint_scope_.WithNewScope([&]() -> Stmt {
+        if (condition.value()->value)
+          return VisitStmt(op->then_case);
+        if (op->else_case)
+          return VisitStmt(op->else_case.value());
+        return Evaluate(0);
+      });
+    }
+    return arith::IRMutatorWithAnalyzer::VisitStmt_(op);
+  }
+
+  PrimExpr VisitExpr_(const CallNode *op) final {
+    if (op->op.same_as(builtin::if_then_else())) {
+      if (Optional<Bool> condition = ProveCondition_(op->args[0])) {
+        return constraint_scope_.WithNewScope([&]() -> PrimExpr {
+          return VisitExpr(op->args[condition.value()->value ? 1 : 2]);
+        });
+      }
+    }
+    return arith::IRMutatorWithAnalyzer::VisitExpr_(op);
+  }
 
   PrimExpr TryRewriteMixedRamp(const PrimExpr &index,
                                const PrimExpr &buffer_extent) {

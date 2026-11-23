@@ -107,7 +107,6 @@ wheel.py-api = "cp39"
 cmake.version = ">=3.26.1"
 build-dir = "build"
 
-# Include backend and git info in version
 metadata.version.provider = "version_provider"
 metadata.version.provider-path = "."
 experimental = true
@@ -257,6 +256,8 @@ markers = [
     # these via its own conftest, but tilelang only imports the decorators, so
     # they must be registered here to avoid PytestUnknownMarkWarning.
     "pto: tests for the PTO backend",
+    "ascend: Mark a test as using Ascend",
+    "cutedsl: Mark a test as using CuTeDSL",
     "cpu: Mark a test as running on CPU",
     "gpu: Mark a test as using a GPU",
     "multi_gpu: Mark a test as using multiple GPUs",
@@ -278,8 +279,8 @@ environment-pass = [
     "CUDA_HOME",
     "CUDAToolkit_ROOT",
     "NO_VERSION_LABEL",
-    "NO_TOOLCHAIN_VERSION",
     "NO_GIT_VERSION",
+    "TILELANG_BUILD_WHEEL_WITH_DATE",
     "COLUMNS",
     "CMAKE_GENERATOR",
     "CMAKE_BUILD_PARALLEL_LEVEL",

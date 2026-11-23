@@ -34,24 +34,13 @@ BACKENDS = [
     "tvm_ffi",
     "cython",
     "nvrtc",
-    "cutedsl",
+    pytest.param("cutedsl", marks=tilelang.testing.requires_cutedsl.marks()),
 ]
 
 
 def _get_target_from_backend(backend: str):
     """Map backend to target string."""
     return "cutedsl" if backend == "cutedsl" else "auto"
-
-
-def _require_backend_available(backend: str) -> None:
-    if backend != "cutedsl":
-        return
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except ImportError as e:
-        pytest.skip(f"CuTeDSL backend unavailable: {e}")
 
 
 class PostProcCounter:
@@ -106,7 +95,6 @@ def clean_cache_env(tmp_path, request):
     """
     # This fixture should ONLY be used with @pytest.mark.parametrize("backend", ...)
     backend = request.node.callspec.params["backend"]  # Will raise KeyError if missing
-    _require_backend_available(backend)
 
     cache_dir = tmp_path / "tilelang_cache"
     cache_dir.mkdir()

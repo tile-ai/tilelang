@@ -22,6 +22,9 @@ constexpr int64_t kAscendL0CMemoryBytes = 256 * 1024;
 constexpr int64_t kAscendSSMemoryBytes = 3 * 1024;
 
 bool TargetIsAscend(Target target);
+// Whether the target selects PTO codegen within the Ascend architecture
+// ("ascend" kind + "pto" in target keys). Mirrors Python target_is_pto.
+bool TargetIsPTO(Target target);
 bool IsAscendVectorizableFP8(DataType dtype);
 
 } // namespace tl

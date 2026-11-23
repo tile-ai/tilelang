@@ -24,6 +24,11 @@ def LowerCPUAtomics():
     return _ffi_api.LowerCPUAtomics()  # type: ignore
 
 
+def LowerCPUAnyAll():
+    """Lower tl.any_of/all_of to serial short-circuit loops on CPU targets."""
+    return _ffi_api.LowerCPUAnyAll()  # type: ignore
+
+
 def MarkCPUAtomics():
     """Mark atomic kernels before LowerTileOp to prevent parallel RMW races."""
     return _ffi_api.MarkCPUAtomics()  # type: ignore

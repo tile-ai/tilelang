@@ -8,11 +8,21 @@ import tilelang.language as T
 import itertools
 import argparse
 from typing import Optional
+from tilelang.utils.device import get_max_dynamic_shared_memory
 
 
 def get_configs():
     iter_params = dict(block_M=[128], block_N=[128], num_stages=[0, 1, 2], threads=[128, 256])
     return [dict(zip(iter_params, values)) for values in itertools.product(*iter_params.values())]
+
+
+def get_fwd_configs():
+    # The 128x128 two-stage tile needs 160 KiB of dynamic shared memory, which
+    # fits the data-center parts but not the ~99 KiB cap on sm_86/89/120.
+    optin_smem = get_max_dynamic_shared_memory()
+    if optin_smem < 160 * 1024:
+        return 64, 64, 2, 128
+    return 128, 128, 2, 256
 
 
 @autotune(configs=get_configs(), warmup=500, rep=100)
@@ -215,10 +225,7 @@ def main(
         print(f"Best TFlops: {total_flops / kernel.latency * 1e-9}")
         print(f"Best config: {kernel.config}")
     else:
-        block_M = 128
-        block_N = 128
-        num_stages = 2
-        threads = 256
+        block_M, block_N, num_stages, threads = get_fwd_configs()
         print(f"{block_M=}, {block_N=}, {num_stages=}, {threads=}")
 
         kernel = flashattn(

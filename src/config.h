@@ -7,6 +7,7 @@
 #define TVM_TL_CONFIG_H_
 
 #include <tvm/ffi/optional.h>
+#include <tvm/ir/expr.h>
 #include <tvm/ir/transform.h>
 
 #include <string>
@@ -59,15 +60,24 @@ inline bool Vectorize256Disabled() {
 }
 
 /*!
- * \brief Check if ``#line`` directive emission from TIR source spans is
- * enabled. When on, C-family codegen maps generated statements back to
- * their Python source lines via ``#line N "file"`` (consumed by the
- * CodeGenTileLangCBase builders).
+ * \brief The ``#line`` emission level from ``tl.emit_line_directives``.
+ *
+ * Returns 0 when disabled (default), 1 for one directive per spanned
+ * statement, and 2 or more when every emitted source line is re-anchored. The
+ * name is kept for the existing call sites; a bool config value is legalized
+ * to 0 or 1 by the pass-config layer.
+ *
+ * This reads the pass config only. Environment defaults such as
+ * ``TILELANG_EMIT_LINE_DIRECTIVES`` are folded into pass configs by
+ * normalize_pass_configs() on the Python side, which also makes them part of
+ * the kernel cache key.
  */
-inline bool EmitLineDirectivesEnabled() {
+inline int EmitLineDirectivesEnabled() {
   auto ctxt = tvm::transform::PassContext::Current();
-  return ctxt->GetConfig("tl.emit_line_directives", ffi::Optional<Bool>())
-      .value_or(Bool(false));
+  return static_cast<int>(
+      ctxt->GetConfig("tl.emit_line_directives", ffi::Optional<Integer>())
+          .value_or(Integer(0))
+          .IntValue());
 }
 
 } // namespace tl_config

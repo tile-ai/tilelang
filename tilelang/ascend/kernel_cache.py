@@ -18,3 +18,11 @@ class AscendCythonKernelCache(CythonKernelCache):
     _instance = None
     device_kernel_path = "device_kernel.asc"
     host_kernel_path = "host_kernel.asc"
+
+
+class PTOTVMFFIKernelCache(TVMFFIKernelCache):
+    """Use source suffixes that describe the exported PTO artifacts."""
+
+    _instance = None
+    device_kernel_path = "device_kernel.ptodsl.py"
+    host_kernel_path = "host_kernel.c"
