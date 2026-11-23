@@ -20,7 +20,7 @@ description: Ascend 950 architecture knowledge lookup skill. Uses spec tiers, mi
 |----------|---------|
 | Data formats | FP8 / MXFP8 / MXFP4 / HiF8 Cube MMAD |
 | CV direct paths | L0C→UB (with in-path quantization), UB↔L1, SSBuffer messaging |
-| Synchronization | BufferID replaces strict set/wait pairing |
+| Synchronization | BufferID: additional mutex-like synchronization alongside set/wait flags |
 | Programming models | SIMT, SIMD-Regbase, NDDMA, CCU compute-communication fusion |
 
 ## Document Index

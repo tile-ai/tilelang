@@ -41,19 +41,22 @@ Determines LocalTensor allocation, DataCopy path selection, and pipeline arrange
 | **L0A / L0B** | Cube operands | MTE1 load targets |
 | **L0C Buffer** | Cube output (enlarged on 950) | Bounds the base-block tiling upper limit |
 | **UB / Unified Buffer** | Vector workspace | Main arena for Vector compute; shared by SIMT/SIMD |
-| **SSBuffer** | **New in DAV_3510**: CV message path, 256 KB [¹](#unverified) | Fine-grained synchronization replacing GM workspace |
+| **SSBuffer** | **New in DAV_3510**: CV message path; 1 KB per core, 3 KB total per MIX 1:2 group [¹](#unverified) | Fine-grained synchronization replacing GM workspace |
 | **BT / FP Buffer** | FixPipe configuration | Quantization/reordering parameters |
 | **ND-DMA Cache** | NDDMA cache | Scattered-movement optimization |
 
-> Buffer capacities are usually consistent within an architecture generation; always use the `GetCoreMemSize` return value at runtime. For the UB capacity caliber (whitepaper 512 KB vs interface 248 KB), see [`npu-hardware-params.md` §2](npu-hardware-params.md#2-ub-capacity-caliber-512-kb-vs-248-kb).
+> Buffer capacities are usually consistent within an architecture generation; always use the size obtained through `GetCoreMemSize` at runtime. For the UB capacity caliber (whitepaper 512 KB vs interface 248 KB), see [`npu-hardware-params.md` §2](npu-hardware-params.md#2-ub-capacity-caliber-512-kb-vs-248-kb).
 
 ### MTE Data Movement Engines
 
-| Engine | Paths |
-|--------|-------|
-| MTE1 | L1 ↔ L0A/B/C, L1 ↔ UB |
+| Engine | Paths (one-way) |
+|--------|-----------------|
+| MTE1 | L1 → L0A/L0B, L1 → UB |
 | MTE2 | GM → L1 / UB |
 | MTE3 | UB → GM / L1 |
+| FixPipe | L0C → UB / GM / L1 |
+
+> Directions are one-way: UB → L1 is served by MTE3, and L0C → L1 by FixPipe. Do not schedule or synchronize an L0C → L1 transfer against MTE1.
 
 > DAV_3510 optimizes multi-core concurrent access to the same Global Memory address; partitioning templates for matmul-class operators can be simplified accordingly (no longer requiring elaborate staggering strategies to avoid same-address conflicts). [¹](#unverified)
 
@@ -73,7 +76,7 @@ DAV_3510 adds three paths that let Cube and Vector exchange data directly, avoid
 
 On DAV_3510, each execution unit has its own instruction queue: Scalar / Cube / FixPipe / MTE1 / MTE2 / MTE3 / SIMD VF or SIMT VF.
 
-**BufferID synchronization**: removes the original strict set/wait pairing requirement and simplifies synchronization code in multi-pipeline operators. Whitepaper §4.1.6 confirms: `get_buf()` corresponds to locking and `rel_buf()` to unlocking, with mutex-like semantics — more cohesive than set_flag/wait_flag and decoupled from other pipelines.
+**BufferID synchronization**: an additional synchronization mechanism alongside set_flag/wait_flag — not a replacement for them; Ascend 950 kernels still use paired flags where appropriate. Where BufferID applies, it removes the need for strict set/wait pairing on that dependency and simplifies multi-pipeline synchronization code. Whitepaper §4.1.6 confirms: `get_buf()` corresponds to locking and `rel_buf()` to unlocking, with mutex-like semantics — more cohesive than set_flag/wait_flag and decoupled from other pipelines.
 
 ---
 

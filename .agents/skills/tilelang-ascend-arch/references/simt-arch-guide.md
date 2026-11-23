@@ -13,21 +13,22 @@ The AscendC SIMT programming model uses a three-level thread hierarchy:
 | Level | Concept | CUDA equivalent | Configuration |
 |-------|---------|-----------------|----------------|
 | Launched core count | Number of blocks | Block count in a grid | Tiling-side `SetBlockDim` |
-| Launched thread count | Threads per core | Threads per block | Kernel-side `constexpr` constant |
+| Launched thread count | Threads per core | Threads per block | Runtime `Dim3` argument of `VF_CALL` (bounded by `LAUNCH_BOUND`) |
 | Warp | Groups of 32 threads | Warp | Grouped automatically by hardware |
 
 ### Core Count (Block Dim)
 
-- Set through the tiling-side `SetBlockDim` interface
+- Set through the tiling-side `SetBlockDim` interface (`SetSimdNumBlocks` in newer CANN versions)
 - Corresponds to the CUDA block concept
-- Partitioning formula: `total cores = ceil(total output elements / minimum elements per core)`
+- Partitioning formula: `blocks = ceil(total output elements / minimum elements per block)`
+- Clamp the result to the valid block-count range of the launch interface in use, and never pass zero (skip the launch for empty output)
 
 ### Thread Count
 
-- **Must be determined at compile time** (via `constexpr` or literals)
-- Must not be derived dynamically from tiling data
-- `LAUNCH_BOUND(N)` and `Simt::Dim3(N)` must use the same compile-time constant
-- Default: 1024; tune based on data volume and compute complexity
+- `LAUNCH_BOUND(N)` — the compile-time upper bound — must be a `constexpr` constant or a literal
+- The actually launched thread count is the `Dim3` parameter of `VF_CALL` / `asc_vf_call` and may be computed at runtime (including from tiling data); it **must not exceed the declared bound**
+- Registers are allocated according to the bound, so keeping the bound equal (or close) to the actual launch count maximizes registers per thread
+- Default bound: 1024; tune based on data volume and compute complexity
 
 ### Warp Scheduling
 
@@ -99,6 +100,7 @@ The AscendC SIMT programming model has three memory spaces:
 
 - Accessible to all threads on all cores
 - SIMT VF supports reading/writing GM directly, without explicit Load/Store
+- The SIMT DCache is **not coherent** with writes from other cores or pipelines: if a GM region may be updated by another core (or by other pipelines after this kernel starts), read it with cache-bypassing loads or perform the required cache maintenance — a plain cached load can return stale data even after the producer has finished
 - Accessed through `__gm__` pointers
 - Passed in at the kernel entry via `GM_ADDR` parameters
 
@@ -122,17 +124,27 @@ The Unified Buffer totals **256 KB**, partitioned from low to high addresses:
 | Static memory | Fixed at compile time | `__ubuf__` array declarations; used for SIMD/SIMT shared data in mixed programming |
 | Dynamic memory | Set on the tiling side | TBuf/LocalTensor allocation; specified via the dynUBufSize of `<<<>>>` in mixed programming |
 | Reserved | Fixed 8 KB | Reserved by the compiler; unusable |
-| Data Cache | = 256 KB − static − dynamic − 8 KB | SIMT-only DCache |
+| Data Cache | = min(256 KB − static − dynamic − 8 KB, 128 KB) | SIMT-only DCache, hardware-capped at 128 KB |
 
 ### Key Constraints
 
 - **SIMT operators cannot use the whole UB**; reserve ≥32 KB for the DCache
 - A DCache below 32 KB fails compile-time validation
+- The DCache is hardware-capped at 128 KB; UB left over beyond the cap cannot be used as DCache
 - Usable UB = 256 KB − 8 KB − 32 KB = **216 KB**
 
 ### Tiling-Side Configuration
 
-Reserve space for the DCache: set the dynamic UB upper bound to `ubsize - DCACHE_SIZE` (e.g., a 128 KB DCache reservation) through the tiling context's dynamic-UB interface (`SetLocalMemorySize`, renamed `SetDynUBufSize` in newer versions; see the signature in the CANN package's `tiling_context.h`).
+Reserve space for the DCache through the tiling context's dynamic-UB interface (`SetLocalMemorySize`, renamed `SetDynUBufSize` in newer versions; see the signature in the CANN package's `tiling_context.h`). The dynamic limit must subtract static `__ubuf__` allocations as well:
+
+```text
+ubsize       = size obtained from GetCoreMemSize(UB, ...)   // 248 KB usable; already excludes the 8 KB compiler-reserved region
+staticUB     = total size of __ubuf__ static arrays declared by the kernel
+dynamicLimit = ubsize − staticUB − DCACHE_SIZE               // e.g., DCACHE_SIZE = 128 * 1024
+SetDynUBufSize(dynamicLimit)
+```
+
+Budgeting only `ubsize − DCACHE_SIZE` is not enough: an additional static `__ubuf__` allocation then shrinks the DCache below the 32 KB minimum and fails compile-time validation.
 
 ### Static vs Dynamic Memory
 
@@ -238,10 +250,10 @@ __simt_callee__ inline void HelperFunc(...)
 
 ### Register Count Mapping
 
-`__launch_bounds__(N)` caps the thread count of a VF block; the thread count directly determines the per-thread register count:
+CANN allocates registers from the configured launch bound, not from the actually launched thread count — e.g., a bound of 2048 with a 128-thread launch still leaves only 16 registers per thread:
 
-| Thread range | Registers per thread |
-|--------------|----------------------|
+| Launch bound N | Registers per thread |
+|----------------|----------------------|
 | 1025~2048 | 16 |
 | 513~1024 | 32 |
 | 257~512 | 64 |
@@ -251,8 +263,8 @@ __simt_callee__ inline void HelperFunc(...)
 
 - Registers hold thread-local variables
 - Exceeding register capacity spills to the stack and hurts performance
-- Keep the N in `__launch_bounds__(N)` equal to the actual launched thread count
-- `LAUNCH_BOUND(N)` and `Simt::Dim3(N)` must use the same compile-time constant
+- `LAUNCH_BOUND(N)` is a compile-time upper limit: the launched thread count may be smaller and may be runtime, but must not exceed the bound
+- Registers are allocated by the bound, so a tighter bound (closer to the actual launch count) yields more registers per thread
 
 ### Declaration Syntax
 
