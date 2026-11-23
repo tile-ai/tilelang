@@ -1405,10 +1405,6 @@ def test_ws_mixed_sibling_blocks_revert_declined_loop():
         assert alloc_shapes["B_s2"] == (32, 64), "declined sibling buffer must revert MVB expansion"
 
 
-if __name__ == "__main__":
-    tilelang.testing.main()
-
-
 def cross_run_enclosing_condition_update(
     M=256,
     N=256,
@@ -1501,3 +1497,7 @@ def test_ws_declines_enclosing_condition_postlude_update():
 
     indirect_script = _apply_ws_pass(cross_run_enclosing_condition_indirect_update())["main"].script()
     assert "tl_tiled_ws_applied" not in indirect_script, "WS must follow enclosing-condition reads through the shared prelude"
+
+
+if __name__ == "__main__":
+    tilelang.testing.main()

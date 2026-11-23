@@ -1011,9 +1011,8 @@ static Stmt StripPipelineAnnotations(const Stmt &stmt) {
   return stripper(stmt);
 }
 
-using PreMVBBlockMap =
-    std::unordered_map<SBlockRealize, SBlockRealize, ObjectPtrHash,
-                       ObjectPtrEqual>;
+using PreMVBBlockMap = std::unordered_map<SBlockRealize, SBlockRealize,
+                                          ObjectPtrHash, ObjectPtrEqual>;
 
 static PreMVBBlockMap MapPostMVBToOriginalBlocks(const Stmt &orig_body,
                                                  const Stmt &mvb_body) {
