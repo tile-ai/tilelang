@@ -682,6 +682,9 @@ jobs:
     needs: [test-wheels-gpu]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      OBS_BUCKET: tilelang-open
+      OBS_REGION: cn-north-4
     # Serialize publication across refs: every run uploads to the same OBS
     # directory, and the workflow-level group (per-ref) does not stop two refs
     # from publishing concurrently. Without this, run A could list the
@@ -702,6 +705,7 @@ jobs:
           path: wheelhouse
 
       - name: Setup obsutil and upload to OBS
+        id: upload_obs
         env:
           AK: ${{ secrets.NIGHTLY_OBS_AK }}
           SK: ${{ secrets.NIGHTLY_OBS_SK }}
@@ -723,19 +727,18 @@ jobs:
           rm -f obsutil.tar.gz
           mv obsutil_linux_* obsutil
 
-          obsutil/obsutil config -i="${AK}" -k="${SK}" -e=https://obs.cn-north-4.myhuaweicloud.com
-          OBS_DIR="obs://ascend-triton-open/TileLang/"
-          # -u: skip files already present unchanged, so a same-day rerun does
-          # not rewrite identical wheels. Older dailies stay downloadable
-          # until the bucket's lifecycle policy removes them.
+          obsutil/obsutil config -i="${AK}" -k="${SK}" -e="https://obs.${OBS_REGION}.myhuaweicloud.com"
+          OBS_DIR="obs://${OBS_BUCKET}/TileLang/"
+          timestamp=$(date -u +%Y%m%d%H%M%S)
+          batch_dir="${OBS_DIR}${timestamp}/"
           for wheel in wheelhouse/*.whl; do
-            obsutil/obsutil cp -u "${wheel}" "${OBS_DIR}"
+            obsutil/obsutil cp "${wheel}" "${batch_dir}"
           done
 
-          # Regenerate index.html from every .whl currently in the directory
-          # (non-recursive, short format), keeping only the basenames.
-          obsutil/obsutil ls "${OBS_DIR}" -d -s -limit=0 \
-            | grep -oE '[^/]+\.whl$' \
+          # Include both legacy wheels at the root and wheels in timestamp folders.
+          obsutil/obsutil ls "${OBS_DIR}" -s -limit=0 \
+            | sed -n "s|^${OBS_DIR}||p" \
+            | grep -E '^([0-9]{14}/)?[^/]+\.whl$' \
             | sort -u > files.txt
           python3 - <<'PY'
           import html, pathlib, urllib.parse
@@ -748,7 +751,7 @@ jobs:
           lines = ["<!DOCTYPE html>", "<html><body>"]
           for f in files:
               # OBS decodes literal '+' in URL paths as space (403); encode '+' as '%2B'.
-              lines.append(f'<a href="{urllib.parse.quote(f)}">{html.escape(f)}</a><br />')
+              lines.append(f'<a href="{urllib.parse.quote(f)}">{html.escape(pathlib.PurePosixPath(f).name)}</a><br />')
           lines.append("</body></html>")
           pathlib.Path("index.html").write_text("\n".join(lines) + "\n")
           PY
@@ -757,20 +760,20 @@ jobs:
           # Verify anonymous HTTPS access for index.html and every wheel uploaded
           # in this run. If the bucket policy does not already grant public read
           # on TileLang/*, fall back to object-level public-read ACLs.
-          PUBLIC_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang"
+          PUBLIC_BASE="https://${OBS_BUCKET}.obs.${OBS_REGION}.myhuaweicloud.com/TileLang"
           verify_public_read() {
             curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/index.html" >/dev/null || return 1
             for wheel in wheelhouse/*.whl; do
               local href
               href="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$(basename "${wheel}")")"
-              curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/${href}" >/dev/null || return 1
+              curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/${timestamp}/${href}" >/dev/null || return 1
             done
           }
 
           if ! verify_public_read; then
             echo "Objects are not publicly readable via bucket policy; applying -acl=public-read..."
             for wheel in wheelhouse/*.whl; do
-              obsutil/obsutil chattri "${OBS_DIR}$(basename "${wheel}")" -acl=public-read || {
+              obsutil/obsutil chattri "${batch_dir}$(basename "${wheel}")" -acl=public-read || {
                 echo "::error::Failed to set public-read ACL on $(basename "${wheel}"). Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
                 exit 1
               }
@@ -785,7 +788,8 @@ jobs:
             fi
           fi
 
-          echo "Published ${WHL_COUNT} wheel(s); index lists $(wc -l < files.txt) file(s)."
+          echo "timestamp=${timestamp}" >> "${GITHUB_OUTPUT}"
+          echo "Published ${WHL_COUNT} wheel(s) to ${batch_dir}; index lists $(wc -l < files.txt) file(s)."
 
       - name: Update tile-ai/whl nightly-cn index
         env:
@@ -798,12 +802,12 @@ jobs:
           fi
 
           gh auth setup-git --hostname github.com --force
-          PUBLIC_BASE="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang"
+          PUBLIC_BASE="https://${OBS_BUCKET}.obs.${OBS_REGION}.myhuaweicloud.com/TileLang"
           export PUBLIC_BASE
 
           update_whl_repo() {
-            python3 - <<'PY'
-          import hashlib, html, os, pathlib, re, urllib.parse
+            python3 - "${{ steps.upload_obs.outputs.timestamp }}" <<'PY'
+          import hashlib, html, os, pathlib, re, sys, urllib.parse
 
           def wheel_sort_key(filename: str) -> tuple:
               ver = filename.split("-")[1] if "-" in filename else filename
@@ -818,8 +822,9 @@ jobs:
           cn_dir.mkdir(parents=True, exist_ok=True)
           index_file = cn_dir / "index.html"
 
+          batch_url = f"{public_base}/{sys.argv[1]}"
           obs_live = {
-              line.strip()
+              f"{public_base}/{urllib.parse.quote(line.strip())}"
               for line in pathlib.Path("files.txt").read_text(encoding="utf-8").splitlines()
               if line.strip()
           }
@@ -829,12 +834,12 @@ jobs:
               for href, text in re.findall(r'<a\s+href="([^"]+)">([^<]+)</a>', index_file.read_text(encoding="utf-8")):
                   name = html.unescape(text).strip()
                   url = html.unescape(href).strip()
-                  if name in obs_live and re.search(r"#sha256=[0-9a-f]{64}$", url):
+                  if url.partition("#")[0] in obs_live and re.search(r"#sha256=[0-9a-f]{64}$", url):
                       entries[name] = url
 
           for whl in sorted(pathlib.Path("wheelhouse").glob("*.whl")):
               sha256 = hashlib.sha256(whl.read_bytes()).hexdigest()
-              entries[whl.name] = f"{public_base}/{urllib.parse.quote(whl.name)}#sha256={sha256}"
+              entries[whl.name] = f"{batch_url}/{urllib.parse.quote(whl.name)}#sha256={sha256}"
 
           lines = [
               "<!DOCTYPE html>",
@@ -881,11 +886,11 @@ jobs:
       - name: Summary
         run: |
           CN_WHL_URL="https://tile-ai.github.io/whl/nightly-cn"
-          OBS_INDEX_URL="https://ascend-triton-open.obs.cn-north-4.myhuaweicloud.com/TileLang/index.html"
+          OBS_INDEX_URL="https://${OBS_BUCKET}.obs.${OBS_REGION}.myhuaweicloud.com/TileLang/index.html"
           {
             echo "### TileLang nightly wheels published to OBS"
             echo
-            echo "- OBS path: \`obs://ascend-triton-open/TileLang/\`"
+            echo "- OBS path: \`obs://${OBS_BUCKET}/TileLang/${{ steps.upload_obs.outputs.timestamp }}/\`"
             echo "- SHA-256 verified CN mirror index: \`pip install -U -f ${CN_WHL_URL} tilelang\` (or \`uv pip install -U -f ${CN_WHL_URL} tilelang\`)"
             echo "- Direct OBS index: \`pip install -U -f ${OBS_INDEX_URL} tilelang\`"
             echo
