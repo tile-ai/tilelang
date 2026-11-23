@@ -17,10 +17,11 @@ a legal cp.async width falls back to a normal copy.
 
 The test has two parts:
 
-1. **Codegen check** (host-independent). Lowers the issue's kernel for an
-   explicit sm_89 target and asserts it lowers without raising. Runs on
-   any host; pre-fix it raises the `IsValidCPAsyncTransferBytes` error
-   for float16, bfloat16, int8 and uint8.
+1. **Codegen check**. Lowers the issue's kernel for an
+   explicit sm_89 target and asserts it lowers without raising. Requires a
+   CUDA-enabled build (the CUDA target must exist to lower); pre-fix it
+   raises the `IsValidCPAsyncTransferBytes` error for float16, bfloat16,
+   int8 and uint8.
 2. **Runtime check** on the host GPU. Compiles + executes the same kernel
    with vectorization disabled and asserts exact results.
 """
@@ -64,6 +65,7 @@ def _lower(dtype, disable_vectorize):
 # --------------------------------------------------------------------------
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16", "int8", "uint8"])
 def test_disable_vectorize_pipelined_narrow_copy_lowers(dtype):
     """Narrow pipelined copies fall back to a normal copy instead of
@@ -72,6 +74,7 @@ def test_disable_vectorize_pipelined_narrow_copy_lowers(dtype):
     assert "cp_async" not in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", ["float16", "float32"])
 def test_vectorized_pipelined_copy_still_uses_cp_async(dtype):
     """Control: with vectorization enabled the same copies still take the
@@ -80,6 +83,7 @@ def test_vectorized_pipelined_copy_still_uses_cp_async(dtype):
     assert "cp_async" in artifact.kernel_source
 
 
+@tilelang.testing.requires_cuda
 def test_disable_vectorize_wide_copy_still_uses_cp_async():
     """Control: 4-byte elements stay on the cp.async path even with
     vectorization disabled, since one element is already a legal width."""
