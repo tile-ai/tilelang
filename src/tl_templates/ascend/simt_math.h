@@ -339,13 +339,10 @@ __simt_callee__ inline float powf(float x, float y) {
   using namespace detail;
   uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
 #if TL_SIMT_MATH_92_93
-  // Native pow can cross the last rounding step at either end of FP32.
-  // Recompute only zero, the least subnormal, the largest finite value or inf.
-  float native = ::powf(x, y);
-  uint32_t magnitude = bits(native) & ~sign_bit;
-  if ((magnitude > 1 && magnitude < infinity - 1) || magnitude > infinity ||
-      ax == 0 || ax >= infinity || ay >= infinity)
-    return native;
+  // Leave SDK special-value and domain handling intact.
+  if (ax == 0 || ax >= infinity || ay >= infinity ||
+      ((bits(x) & sign_bit) && ::truncf(y) != y))
+    return ::powf(x, y);
 #endif
   if (ay == 0 || x == 1.0f)
     return 1.0f;
@@ -372,6 +369,14 @@ __simt_callee__ inline float powf(float x, float y) {
   // Even the float nearest to one is past overflow or underflow here.
   if (ay >= 0x4f800000u)
     return ((ax > 0x3f800000u) == positive_y) ? from_bits(infinity) : 0.0f;
+#if TL_SIMT_MATH_92_93
+  // For 2^e <= |x| < 2^(e+1), |log2(|x|)| <= max(-e, e+1).
+  // A product below 126 keeps |x^y| strictly between 2^-126 and 2^126.
+  int e = normalize(ax).exponent;
+  int log2_bound = e < 0 ? -e : e + 1;
+  if (from_bits(ay) * float(log2_bound) < 126.0f)
+    return ::powf(x, y);
+#endif
   return with_sign(exp2_split(multiply(log2_split(ax), y)), sign);
 }
 #else

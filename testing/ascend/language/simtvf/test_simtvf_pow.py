@@ -25,6 +25,9 @@ def test_simt_pow_fp32_range_boundaries():
     # Frozen A5 failures include both sides of overflow and a rounded-away least subnormal.
     x_bits = [0x3F378339, 0x3F3156AD, 0x3F16A4CB, 0x77EA90CC, 0x3F7FACFB, 0x3FD33766]
     y_bits = [0xC3854281, 0xC371ACBE, 0xC32751CE, 0x3F912738, 0x47A03405, 0x433124BC]
+    # For x = 2 the input bound is 2 * abs(y). Check both neighbors of y = 63.
+    x_bits.extend([0x40000000] * 3)
+    y_bits.extend([0x427BFFFF, 0x427C0000, 0x427C0001])
     x = torch.cat((x, torch.tensor(x_bits, dtype=torch.uint32).view(torch.float32)))
     y = torch.cat((y, torch.tensor(y_bits, dtype=torch.uint32).view(torch.float32)))
     actual = pow_kernel(len(x))(x.npu(), y.npu()).cpu()
