@@ -2309,14 +2309,22 @@ Stmt Copy::LowerBulk(const CopyNode &op, const LowerArgs &lower_args,
     Optional<Stmt> barrier_after_tma_stmt = std::nullopt;
     if (GetIsTmaCopy(op)) {
       if (is_cluster_barrier) {
+        // A cta_group::2 load routes the bytes of both CTAs of a pair to the
+        // even (leader) CTA's barrier, so each pair leader expects 2x bytes,
+        // independent of the total cluster size.
+        bool use_2cta = TargetIsSm100(lower_args.target);
+        int num_ctas = use_2cta ? 2 : lower_args.cluster_size;
         PrimExpr cluster_total_bytes =
-            total_bytes * IntImm(DataType::Int(32), lower_args.cluster_size);
+            total_bytes * IntImm(DataType::Int(32), num_ctas);
         Stmt expect_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
                           {mbar_handle, cluster_total_bytes}));
         PrimExpr rank = Call(DataType::Int(32), block_rank_in_cluster(), {});
-        barrier_before_tma_stmt =
-            IfThenElse(EQ(rank, IntImm(DataType::Int(32), 0)), expect_stmt);
+        PrimExpr is_leader =
+            use_2cta ? EQ(FloorMod(rank, IntImm(DataType::Int(32), 2)),
+                          IntImm(DataType::Int(32), 0))
+                     : EQ(rank, IntImm(DataType::Int(32), 0));
+        barrier_before_tma_stmt = IfThenElse(is_leader, expect_stmt);
       } else {
         barrier_before_tma_stmt =
             Evaluate(Call(DataType::Handle(), mbarrier_expect_tx(),
