@@ -114,10 +114,9 @@ void CodeGenTileLangMetal::EmitPreamble_(std::ostream &os) const {
         "unroll(full)\")\n";
   os << "using namespace metal;\n\n";
   os << R"metal(
-#define TILELANG_PACKED_BINARY_FUNCTOR(NAME, EXPR)                    \
-  struct __tilelang_packed_half2_##NAME {                             \
-    half2 operator()(half2 a, half2 b) const { return EXPR; }         \
-    bfloat2 operator()(bfloat2 a, bfloat2 b) const { return EXPR; }   \
+#define TILELANG_PACKED_BINARY_FUNCTOR(NAME, EXPR)                     \
+  struct __tilelang_packed_half2_##NAME {                              \
+    half2 operator()(half2 a, half2 b) const { return EXPR; }          \
   };
 
 TILELANG_PACKED_BINARY_FUNCTOR(add, a + b)
@@ -128,43 +127,25 @@ TILELANG_PACKED_BINARY_FUNCTOR(min, min(a, b))
 TILELANG_PACKED_BINARY_FUNCTOR(max, max(a, b))
 #undef TILELANG_PACKED_BINARY_FUNCTOR
 
-#define TILELANG_PACKED_BINARY_DECODE(TYPE, VEC, MEMBERS)             \
-  template <typename F>                                               \
-  inline VEC __tilelang_packed_##TYPE##_binary(VEC a, VEC b, F op) {  \
-    return VEC(MEMBERS);                                              \
-  }
+template <typename F>
+inline uint __tilelang_packed_half2_word(uint a, uint b, F op) {
+  return as_type<uint>(op(as_type<half2>(a), as_type<half2>(b)));
+}
 
-#define TILELANG_PACKED_HALF2_WORD(MEMBER)                            \
-  as_type<uint>(op(as_type<half2>(a.MEMBER), as_type<half2>(b.MEMBER)))
-#define TILELANG_PACKED_BFLOAT2_WORD(MEMBER)                          \
-  as_type<uint>(op(as_type<bfloat2>(a.MEMBER), as_type<bfloat2>(b.MEMBER)))
+template <typename F>
+inline uint3 __tilelang_packed_half2_binary(uint3 a, uint3 b, F op) {
+  return uint3(__tilelang_packed_half2_word(a.x, b.x, op),
+               __tilelang_packed_half2_word(a.y, b.y, op),
+               __tilelang_packed_half2_word(a.z, b.z, op));
+}
 
-TILELANG_PACKED_BINARY_DECODE(
-    half2, uint2,
-    TILELANG_PACKED_HALF2_WORD(x), TILELANG_PACKED_HALF2_WORD(y))
-TILELANG_PACKED_BINARY_DECODE(
-    half2, uint3,
-    TILELANG_PACKED_HALF2_WORD(x), TILELANG_PACKED_HALF2_WORD(y),
-    TILELANG_PACKED_HALF2_WORD(z))
-TILELANG_PACKED_BINARY_DECODE(
-    half2, uint4,
-    TILELANG_PACKED_HALF2_WORD(x), TILELANG_PACKED_HALF2_WORD(y),
-    TILELANG_PACKED_HALF2_WORD(z), TILELANG_PACKED_HALF2_WORD(w))
-TILELANG_PACKED_BINARY_DECODE(
-    bfloat2, uint2,
-    TILELANG_PACKED_BFLOAT2_WORD(x), TILELANG_PACKED_BFLOAT2_WORD(y))
-TILELANG_PACKED_BINARY_DECODE(
-    bfloat2, uint3,
-    TILELANG_PACKED_BFLOAT2_WORD(x), TILELANG_PACKED_BFLOAT2_WORD(y),
-    TILELANG_PACKED_BFLOAT2_WORD(z))
-TILELANG_PACKED_BINARY_DECODE(
-    bfloat2, uint4,
-    TILELANG_PACKED_BFLOAT2_WORD(x), TILELANG_PACKED_BFLOAT2_WORD(y),
-    TILELANG_PACKED_BFLOAT2_WORD(z), TILELANG_PACKED_BFLOAT2_WORD(w))
-
-#undef TILELANG_PACKED_BFLOAT2_WORD
-#undef TILELANG_PACKED_HALF2_WORD
-#undef TILELANG_PACKED_BINARY_DECODE
+template <typename F>
+inline uint4 __tilelang_packed_half2_binary(uint4 a, uint4 b, F op) {
+  return uint4(__tilelang_packed_half2_word(a.x, b.x, op),
+               __tilelang_packed_half2_word(a.y, b.y, op),
+               __tilelang_packed_half2_word(a.z, b.z, op),
+               __tilelang_packed_half2_word(a.w, b.w, op));
+}
 )metal";
 }
 
@@ -983,8 +964,7 @@ bool CodeGenTileLangMetal::TryPrintPackedBinary(const PrimExpr &a,
                                                 std::ostream &os) {
   const DataType dtype = a.dtype();
   const int lanes = dtype.lanes();
-  if ((!dtype.is_float16() && !dtype.is_bfloat16()) || lanes <= 4 ||
-      lanes > 8 || lanes % 2 != 0) {
+  if (!dtype.is_float16() || lanes <= 4 || lanes > 8 || lanes % 2 != 0) {
     return false;
   }
 
@@ -1004,10 +984,9 @@ bool CodeGenTileLangMetal::TryPrintPackedBinary(const PrimExpr &a,
   }
   TVM_FFI_ICHECK(op_name != nullptr);
 
-  const std::string type = dtype.is_float16() ? "half2" : "bfloat2";
-  os << "__tilelang_packed_" << type << "_binary(" << PrintExpr(a) << ", "
-     << PrintExpr(b) << ", __tilelang_packed_" << type << "_" << op_name
-     << "())";
+  // Pass each packed operand by value so nested expressions are evaluated once.
+  os << "__tilelang_packed_half2_binary(" << PrintExpr(a) << ", "
+     << PrintExpr(b) << ", __tilelang_packed_half2_" << op_name << "())";
   return true;
 }
 
