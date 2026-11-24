@@ -26,6 +26,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <map>
 #include <memory>
@@ -210,6 +211,17 @@ using SyncInsertionSiteList = std::vector<SyncInsertionSite>;
 using SyncInsertionSiteKey =
     std::tuple<IRStructure *, TaskNode *, bool, CoreMask, int>;
 
+struct DistanceRange {
+  int first;
+  int last;
+};
+
+struct EdgeRange {
+  size_t src, dst;
+  DistanceRange distances;
+  bool strict;
+};
+
 struct DepEdge {
   size_t src;
   size_t dst;
@@ -218,6 +230,8 @@ struct DepEdge {
 
   DepEdge(size_t src, size_t dst, int distance, bool strict)
       : src(src), dst(dst), distance(distance), strict(strict) {}
+
+  EdgeRange AsRange() const { return {src, dst, {distance, distance}, strict}; }
 
   bool operator<(const DepEdge &other) const {
     // Process tighter edges first: smaller distance, later producer, then
@@ -643,14 +657,68 @@ private:
 // Dependency analysis model and closure optimization
 // ============================================================================
 
+// Exact distances for one endpoint pair and strictness, stored as disjoint
+// runs.
+class DistanceSet {
+public:
+  bool Covers(DistanceRange query) const {
+    for (auto range : ranges_) {
+      if (query.first <= range.last)
+        return range.first <= query.first && query.last <= range.last;
+    }
+    return false;
+  }
+
+  void Insert(DistanceRange range) {
+    Insert(range, [](DistanceRange) {});
+  }
+
+  // Visit the uncovered parts before merging, so callers can join them with
+  // the old adjacency even when the new edge is a loop.
+  template <typename Visitor>
+  void Insert(DistanceRange range, const Visitor &on_new) {
+    auto begin = ranges_.begin();
+    while (begin != ranges_.end() && int64_t(begin->last) + 1 < range.first)
+      ++begin;
+    if (begin != ranges_.end() && begin->first <= range.first &&
+        begin->last >= range.last)
+      return;
+
+    auto end = begin;
+    int64_t next = range.first;
+    while (end != ranges_.end() && end->first <= int64_t(range.last) + 1) {
+      if (next < end->first)
+        on_new(DistanceRange{static_cast<int>(next), end->first - 1});
+      next = std::max(next, int64_t(end->last) + 1);
+      ++end;
+    }
+    if (next <= range.last)
+      on_new(DistanceRange{static_cast<int>(next), range.last});
+    if (begin == end) {
+      ranges_.insert(begin, range);
+    } else {
+      begin->first = std::min(begin->first, range.first);
+      begin->last = std::max((end - 1)->last, range.last);
+      ranges_.erase(begin + 1, end);
+    }
+  }
+
+  const std::vector<DistanceRange> &Ranges() const { return ranges_; }
+
+private:
+  std::vector<DistanceRange> ranges_;
+};
+
 class DepClosure {
+  using Row = std::array<std::unordered_map<size_t, DistanceSet>, 2>;
+
 public:
   DepClosure() = default;
 
   explicit DepClosure(size_t num_sites)
       : outgoing_(num_sites), incoming_(num_sites) {}
 
-  bool Contains(const DepEdge &edge) const { return present_.count(edge); }
+  bool Contains(const DepEdge &edge) const { return Covers(edge.AsRange()); }
 
   bool HasEdge(size_t src, size_t dst, int distance) const {
     return Contains(DepEdge(src, dst, distance, false)) ||
@@ -661,79 +729,118 @@ public:
     int result = std::numeric_limits<int>::max();
     if (src >= outgoing_.size())
       return result;
-    for (const DepEdge &edge : outgoing_[src]) {
-      if (edge.dst == dst)
-        result = std::min(result, edge.distance);
+    for (bool strict : {false, true}) {
+      auto it = outgoing_[src][strict].find(dst);
+      if (it != outgoing_[src][strict].end())
+        result = std::min(result, it->second.Ranges().front().first);
     }
     return result;
   }
 
   template <typename Projector>
-  void Saturate(const DepEdge &start, int max_distance,
-                const Projector &project) {
-    if (start.distance > max_distance)
+  void Saturate(EdgeRange start, int max_distance, const Projector &project) {
+    start.distances.last = std::min(start.distances.last, max_distance);
+    if (start.distances.first > start.distances.last)
       return;
-    std::vector<DepEdge> work;
-    auto enqueue_one = [&](const DepEdge &edge) {
-      if (edge.distance <= max_distance && present_.insert(edge).second) {
-        work.push_back(edge);
-      }
-    };
-    auto enqueue = [&](const DepEdge &edge) {
-      // The projector is fixed for this closure, preserves distance, and is
-      // transitively closed, so known edges cannot yield new projections.
-      if (Contains(edge))
-        return;
-      project(edge, enqueue_one);
-    };
-    enqueue(start);
+    std::deque<EdgeRange> work;
+    Enqueue(start, work);
     while (!work.empty()) {
-      DepEdge edge = work.back();
-      work.pop_back();
-      for (const DepEdge &other : outgoing_[edge.dst]) {
-        int distance = edge.distance + other.distance;
-        if (distance <= max_distance) {
-          enqueue(DepEdge(edge.src, other.dst, distance,
-                          edge.strict || other.strict));
-        }
+      EdgeRange edge = work.front();
+      work.pop_front();
+      auto [first, last] = edge.distances;
+      // Only distances zero and one can project to another epoch domain.
+      for (; first <= 1 && first <= last; ++first) {
+        DepEdge candidate(edge.src, edge.dst, first, edge.strict);
+        if (!Contains(candidate))
+          project(candidate, [&](const DepEdge &p) {
+            Insert(p.AsRange(), max_distance, work);
+          });
       }
-      for (const DepEdge &other : incoming_[edge.src]) {
-        int distance = other.distance + edge.distance;
-        if (distance <= max_distance) {
-          enqueue(DepEdge(other.src, edge.dst, distance,
-                          other.strict || edge.strict));
-        }
-      }
-      AppendEdge(edge);
+      if (first <= last)
+        Insert({edge.src, edge.dst, {first, last}, edge.strict}, max_distance,
+               work);
     }
   }
 
   DepClosure DistanceZero() const {
     DepClosure result(outgoing_.size());
-    for (const DepEdge &edge : edges_) {
+    ForEachMinimumEdge([&](const DepEdge &edge) {
       if (edge.distance == 0) {
-        result.present_.insert(edge);
-        result.AppendEdge(edge);
+        result.outgoing_[edge.src][edge.strict][edge.dst].Insert({0, 0});
+        result.incoming_[edge.dst][edge.strict][edge.src].Insert({0, 0});
       }
-    }
+    });
     return result;
   }
 
-  const std::vector<DepEdge> &Edges() const { return edges_; }
-
-private:
-  void AppendEdge(const DepEdge &edge) {
-    ICHECK_LT(std::max(edge.src, edge.dst), outgoing_.size());
-    edges_.push_back(edge);
-    outgoing_[edge.src].push_back(edge);
-    incoming_[edge.dst].push_back(edge);
+  template <typename Visitor>
+  void ForEachMinimumEdge(const Visitor &visit) const {
+    for (size_t src = 0; src < outgoing_.size(); ++src) {
+      for (bool strict : {false, true}) {
+        for (const auto &[dst, distances] : outgoing_[src][strict])
+          visit(DepEdge(src, dst, distances.Ranges().front().first, strict));
+      }
+    }
   }
 
-  std::vector<DepEdge> edges_;
-  // Includes pending edges; adjacency lists only contain processed edges.
-  std::set<DepEdge> present_;
-  std::vector<std::vector<DepEdge>> outgoing_;
-  std::vector<std::vector<DepEdge>> incoming_;
+private:
+  bool Covers(const EdgeRange &edge) const {
+    const auto &row = outgoing_[edge.src][edge.strict];
+    auto it = row.find(edge.dst);
+    return it != row.end() && it->second.Covers(edge.distances);
+  }
+
+  void Enqueue(const EdgeRange &edge, std::deque<EdgeRange> &work) const {
+    if (!Covers(edge))
+      work.push_back(edge);
+  }
+
+  void Extend(const EdgeRange &edge, bool forward, int max_distance,
+              std::deque<EdgeRange> &work) const {
+    const Row &neighbors = forward ? outgoing_[edge.dst] : incoming_[edge.src];
+    for (bool strict : {false, true}) {
+      for (const auto &[site, distances] : neighbors[strict]) {
+        for (auto other : distances.Ranges()) {
+          if (edge.distances.first > max_distance - other.first)
+            break;
+          // The sums of two integer intervals fill the entire interval between
+          // their endpoint sums. Clip before adding to stay within the horizon.
+          DistanceRange sum{
+              edge.distances.first + other.first,
+              std::min(edge.distances.last, max_distance - other.last) +
+                  other.last};
+          Enqueue({forward ? edge.src : site, forward ? site : edge.dst, sum,
+                   edge.strict || strict},
+                  work);
+        }
+      }
+    }
+  }
+
+  void Insert(const EdgeRange &edge, int max_distance,
+              std::deque<EdgeRange> &work) {
+    auto &known = outgoing_[edge.src][edge.strict][edge.dst];
+    if (known.Covers(edge.distances))
+      return;
+    known.Insert(edge.distances, [&](DistanceRange added) {
+      EdgeRange delta{edge.src, edge.dst, added, edge.strict};
+      Extend(delta, true, max_distance, work);
+      Extend(delta, false, max_distance, work);
+    });
+    incoming_[edge.dst][edge.strict][edge.src].Insert(edge.distances);
+
+    // Distinct self edges in the same batch can also compose. For [a,b]
+    // their sums span [a+(a+1),(b-1)+b]; a singleton cannot join itself.
+    auto [a, b] = edge.distances;
+    if (edge.src == edge.dst && a < b && a < max_distance - a) {
+      int last =
+          static_cast<int>(std::min<int64_t>(2 * int64_t(b) - 1, max_distance));
+      Enqueue({edge.src, edge.dst, {2 * a + 1, last}, edge.strict}, work);
+    }
+  }
+
+  std::vector<Row> outgoing_;
+  std::vector<Row> incoming_;
 };
 
 struct SyncAnalysisResult {
@@ -1152,9 +1259,9 @@ private:
     result.visible_sync_points.insert(result.visible_sync_points.end(),
                                       local_points.begin(), local_points.end());
     RecordLifetimeOrder(task_site_ids, loop, result.closure);
+    result.closure = result.closure.DistanceZero();
     if (loop != nullptr)
       scope_closures_.insert_or_assign(loop, result.closure);
-    result.closure = result.closure.DistanceZero();
     return result;
   }
 
@@ -1553,7 +1660,7 @@ private:
       return;
     }
 
-    for (const DepEdge &edge : child_closure.Edges()) {
+    child_closure.ForEachMinimumEdge([&](const DepEdge &edge) {
       // A lexical domain ends at its loop. Re-express the same physical
       // endpoints in each compatible parent domain. A wider parent guard
       // cannot inherit this proof: an inactive child endpoint could otherwise
@@ -1571,10 +1678,10 @@ private:
                                        projection_scope)) {
           return;
         }
-        SaturateDependencyEdge(out, parent,
+        SaturateDependencyEdge(out, parent.AsRange(),
                                /*max_distance=*/0, projection_scope);
       });
-    }
+    });
   }
 
   void RecordLifetimeOrder(const std::vector<size_t> &task_sites,
@@ -1583,14 +1690,15 @@ private:
       return;
     IterationOrder order(site_registry_.Size());
     const auto &sites = site_registry_.Sites();
-    for (const DepEdge &edge : closure.Edges()) {
+    // IterationOrder retains only the shortest distance of each strictness.
+    closure.ForEachMinimumEdge([&](const DepEdge &edge) {
       // DepClosure models only forward iteration distances. Keep the check
       // below to detect violations of this producer invariant.
       if (sites[edge.src].EpochDomainId() == sites[edge.dst].EpochDomainId())
         ICHECK(order.AddEdge(
             edge.src, edge.dst, edge.distance,
             edge.strict || HasImplicitCompletionOrder(edge.src, edge.dst)));
-    }
+    });
     if (scope != nullptr) {
       // Keep the primitive same-pipe relation even when its distance exceeds
       // the flag optimizer's bounded closure. Shortest paths can then compose
@@ -1640,26 +1748,19 @@ private:
           int min_distance =
               level_stage(lhs) - level_stage(rhs) + (lhs_before_rhs ? 0 : 1);
           min_distance = std::max(min_distance, 0);
-          for (int distance = min_distance; distance <= max_distance;
-               ++distance) {
-            SaturateDependencyEdge(closure,
-                                   DepEdge(lhs_id, rhs_id, distance, false),
-                                   max_distance, projection_scope);
-          }
+          SaturateDependencyEdge(
+              closure, {lhs_id, rhs_id, {min_distance, max_distance}, false},
+              max_distance, projection_scope);
         }
       }
     }
   }
 
-  void SaturateDependencyEdge(DepClosure &closure, const DepEdge &edge,
+  void SaturateDependencyEdge(DepClosure &closure, EdgeRange edge,
                               int max_distance,
                               ControlNode *projection_scope) const {
     closure.Saturate(
         edge, max_distance, [&](const DepEdge &candidate, const auto &visit) {
-          if (candidate.distance != 0 && candidate.distance != 1) {
-            visit(candidate);
-            return;
-          }
           int source_domain = site_registry_.Src(candidate).EpochDomainId();
           site_registry_.ForEachPhysicalSitePair(
               candidate, [&](const DepEdge &projected) {
@@ -1696,7 +1797,7 @@ private:
                    << sync_point.edge.distance << " (paired distance "
                    << 1 - sync_point.edge.distance << ")";
       }
-      SaturateDependencyEdge(closure, sync_point.edge, max_distance,
+      SaturateDependencyEdge(closure, sync_point.edge.AsRange(), max_distance,
                              projection_scope);
       emit.push_back(std::move(sync_point));
     }
@@ -2319,7 +2420,7 @@ private:
           SyncInsertionSiteKey{src, producer, false, producer_core, domain});
       size_t b = site_registry_.FindSiteId(
           SyncInsertionSiteKey{dst, consumer, true, consumer_core, domain});
-      SaturateDependencyEdge(closure, DepEdge(a, b, 0, true), max_distance,
+      SaturateDependencyEdge(closure, {a, b, {0, 0}, true}, max_distance,
                              scope);
     };
     for (const Protocol &protocol : protocols_) {
