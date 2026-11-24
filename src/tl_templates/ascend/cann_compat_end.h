@@ -1,6 +1,4 @@
-// Intentionally repeatable, like cann_compat_begin.h.
+// Restore the caller's macros after a TileLang template.
 #if defined(__NPU_ARCH__)
-#define TL_CANN_SCOPE pop_macro
-#include "tl_templates/ascend/cann_compat_names.inc"
-#undef TL_CANN_SCOPE
+TL_CANN_SDK_NAMES(TL_CANN_POP_SDK)
 #endif

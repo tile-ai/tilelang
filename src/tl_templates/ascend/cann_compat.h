@@ -392,11 +392,11 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
 } // namespace cann
 } // namespace tl
 
-// Bind native names only inside generated functions. A local callable keeps
+// Bind only the adapted SDK names in TileLang code. A callable keeps
 // argument-dependent lookup from adding a competing global SDK overload.
 #if defined(__NPU_ARCH__)
 #define TL_CANN_BIND_CALL(attr, name)                                          \
-  [[maybe_unused]] constexpr auto asc_##name = [](auto &&...args)              \
+  constexpr auto asc_##name [[maybe_unused]] = [](auto &&...args)              \
                                                    attr -> decltype(auto) {    \
     return ::tl::cann::name(static_cast<decltype(args)>(args)...);             \
   };
@@ -409,10 +409,28 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
     defined(INCLUDE_C_API_ASC_REG_VECTOR_H)
 #define TL_CANN_BIND_SIMD(name) TL_CANN_BIND_CALL(__simd_callee__, name)
 #define TL_CANN_USE_SIMD_NAMES TL_CANN_SIMD_NAMES(TL_CANN_BIND_SIMD)
+// Inline variables let every translation unit include the SIMD template header.
+#define TL_CANN_INLINE_CORE(name) inline TL_CANN_BIND_CORE(name)
+#define TL_CANN_INLINE_SIMD(name) inline TL_CANN_BIND_SIMD(name)
+#define TL_CANN_SIMD_TEMPLATE_NAMES                                            \
+  TL_CANN_CORE_NAMES(TL_CANN_INLINE_CORE)                                      \
+  TL_CANN_TYPE_NAMES(TL_CANN_BIND_TYPE)                                        \
+  TL_CANN_SIMD_NAMES(TL_CANN_INLINE_SIMD)
 #endif
 #else
 #define TL_CANN_USE_CORE_NAMES
 #endif
+#ifndef TL_CANN_SIMD_TEMPLATE_NAMES
+#define TL_CANN_SIMD_TEMPLATE_NAMES
+#endif
 #ifndef TL_CANN_USE_SIMD_NAMES
 #define TL_CANN_USE_SIMD_NAMES
 #endif
+
+// C++ name lookup starts after preprocessing. Keep a caller's macros out of
+// TileLang template definitions, then restore them on exit.
+#define TL_CANN_PRAGMA(x) _Pragma(#x)
+#define TL_CANN_PUSH_NAME(name) TL_CANN_PRAGMA(push_macro(#name))
+#define TL_CANN_POP_NAME(name) TL_CANN_PRAGMA(pop_macro(#name))
+#define TL_CANN_PUSH_SDK(name) TL_CANN_PUSH_NAME(asc_##name)
+#define TL_CANN_POP_SDK(name) TL_CANN_POP_NAME(asc_##name)

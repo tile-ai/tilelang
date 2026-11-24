@@ -44,15 +44,17 @@ def test_cann_dma_original_names_preserve_wide_counts():
     # Compile only. Calling the CANN 9.1 strided overload directly narrows
     # 65536 to zero. Check both calls and keep subsequent includes unaffected.
     source = """
-    #include "tl_templates/ascend/cann_compat_begin.h"
-    extern "C" __global__ __vector__ void dma(__gm__ uint8_t* gm) {
+    #include "tl_templates/ascend/cann_compat.h"
+    namespace dma_template {
+    __aicore__ inline void dma(__gm__ uint8_t* gm) {
+        TL_CANN_USE_CORE_NAMES
         auto ub = (__ubuf__ uint8_t*)0;
         asc_copy_gm2ub_align(ub, gm, 65536u, 32u, 0, 0, false,
                              asc_load_l2_cache_mode(0), 32u, 32u);
         asc_copy_ub2gm_align(gm, ub, 65536u, 32u,
                              asc_store_l2_cache_mode(0), 32u, 32u);
     }
-    #include "tl_templates/ascend/cann_compat_end.h"
+    } // namespace dma_template
     #if defined(asc_copy_gm2ub_align) || defined(asc_copy_ub2gm_align)
     #error DMA aliases leaked past TileLang device code
     #endif
@@ -61,6 +63,7 @@ def test_cann_dma_original_names_preserve_wide_counts():
     }
     extern "C" __global__ __vector__ void generated_dma(__gm__ uint8_t* gm) {
         TL_CANN_USE_CORE_NAMES
+        dma_template::dma(gm);
         user_dma::asc_copy_gm2ub_align();
         auto ub = (__ubuf__ uint8_t*)0;
         asc_copy_gm2ub_align(ub, gm, 65536u, 32u, 0, 0, false,
@@ -75,9 +78,13 @@ def test_cann_dma_original_names_preserve_wide_counts():
 def test_native_cann_register_overloads_compile():
     source = """
     #include "tl_templates/ascend/cann_compat.h"
+    #include "tl_templates/ascend/ascend_fp8.h"
     #define asc_div(...) previous_binding(__VA_ARGS__)
-    #define TL_CANN_SIMD_SCOPE
+    #define asc_pack_to_high previous_pack
+    #include "tl_templates/ascend/simd_inst.h"
     #include "tl_templates/ascend/cann_compat_begin.h"
+    namespace reg_template {
+    TL_CANN_SIMD_TEMPLATE_NAMES
     __simd_vf__ inline void registers(__ubuf__ uint32_t* p, __ubuf__ uint8_t* bytes) {
         vector_bool mask = asc_create_mask_b32(PAT_ALL);
         vector_u32 a, b;
@@ -93,7 +100,7 @@ def test_native_cann_register_overloads_compile():
         static_assert(std::is_same_v<decltype(packed), vector_u16>);
         static_assert(std::is_same_v<decltype(asc_pack_to_high(mask)), vector_bool>);
         asc_storealign((__ubuf__ uint16_t*)bytes, packed, 0, mask);
-        auto q = ::asc_div(a, b, mask);
+        auto q = asc_div(a, b, mask);
         vector_bf16 bf;
         asc_ne(mask, bf, bf, mask);
         vector_f8e8m0 scale;
@@ -103,16 +110,18 @@ def test_native_cann_register_overloads_compile():
         asc_storealign_postupdate(p, q, 1, 2, mask);
         asc_storealign(bytes, __builtin_bit_cast(vector_u8, scale), 0, mask);
     }
+    } // namespace reg_template
     #include "tl_templates/ascend/cann_compat_end.h"
-    #undef TL_CANN_SIMD_SCOPE
     #if defined(asc_select) || defined(asc_storealign_postupdate)
     #error leaked SIMD routing
     #endif
     int previous_binding(int);
-    inline int restored_binding(int x) { return asc_div(x); }
+    int previous_pack(int);
+    inline int restored_binding(int x) { return asc_div(x) + asc_pack_to_high(x); }
+    #undef asc_pack_to_high
     #undef asc_div
     extern "C" __global__ __vector__ void entry() {
-        registers((__ubuf__ uint32_t*)0, (__ubuf__ uint8_t*)256);
+        reg_template::registers((__ubuf__ uint32_t*)0, (__ubuf__ uint8_t*)256);
     }
     """
     _assert_compiles(source)

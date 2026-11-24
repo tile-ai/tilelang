@@ -1,6 +1,6 @@
 #pragma once
 
-// Native SDK names shared by device lookup, template macros and Ascend codegen.
+// Native SDK names shared by device templates and Ascend codegen.
 
 #define TL_CANN_CORE_NAMES(X)                                                  \
   X(disable_hf32)                                                              \
@@ -80,3 +80,7 @@
   TL_CANN_SIMT_MATH_9_1_ONLY_NAMES(X)                                          \
   X(atan2f)                                                                    \
   X(powf)
+
+// SDK spellings with an asc_ prefix that a caller's macro could replace.
+#define TL_CANN_SDK_NAMES(X)                                                   \
+  TL_CANN_CORE_NAMES(X) TL_CANN_TYPE_NAMES(X) TL_CANN_SIMD_NAMES(X)

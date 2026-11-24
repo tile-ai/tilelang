@@ -1,7 +1,5 @@
 #pragma once
 
-#include "c_api/asc_simd.h"
-
 #include "tl_templates/ascend/cann_compat_begin.h"
 
 /*!
@@ -44,6 +42,7 @@ __aicore__ inline void
 ascend_gemm_l1(__cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr,
                __cbuf__ InT *cbuf_b_ptr, int clear_accum, int buf_offset = 0,
                int unit_flag_ctrl = 0) {
+  TL_CANN_USE_CORE_NAMES
   // C0 = 32B / sizeof(InT): 16 for bf16/fp16, 8 for fp32, 32 for int8.
   // FRAC_N = 16: row-block size in the n-direction, dtype-independent.
   constexpr int C0 = 32 / sizeof(InT);
@@ -140,6 +139,7 @@ __aicore__ inline void ascend_blockscaled_gemm_l1(
     __cc__ AccumT *cc_ptr, __cbuf__ InT *cbuf_a_ptr, __cbuf__ InT *cbuf_b_ptr,
     __cbuf__ SFT *cbuf_sfa_ptr, __cbuf__ SFT *cbuf_sfb_ptr, int clear_accum,
     int buf_offset = 0, int sf_k_offset = 0, int unit_flag_ctrl = 0) {
+  TL_CANN_USE_CORE_NAMES
   constexpr bool is_fp4 = std::is_same_v<InT, float4_e2m1x2_t>;
   constexpr int C0 = is_fp4 ? 64 : 32 / sizeof(InT);
   constexpr int FRAC_N = 16;

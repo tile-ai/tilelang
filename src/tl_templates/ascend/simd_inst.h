@@ -2,14 +2,11 @@
 
 #include <type_traits>
 
-#include "c_api/asc_simd.h"
-
-#pragma push_macro("TL_CANN_SIMD_SCOPE")
-#undef TL_CANN_SIMD_SCOPE
-#define TL_CANN_SIMD_SCOPE
 #include "tl_templates/ascend/cann_compat_begin.h"
 
 namespace simd_inst {
+TL_CANN_SIMD_TEMPLATE_NAMES
+
 template <typename T> struct vec {};
 
 template <> struct vec<float> {
@@ -1067,4 +1064,3 @@ __simd_callee__ inline void vst_x2(vec_t<T> src0, vec_t<T> src1,
 } // namespace simd_inst
 
 #include "tl_templates/ascend/cann_compat_end.h"
-#pragma pop_macro("TL_CANN_SIMD_SCOPE")
