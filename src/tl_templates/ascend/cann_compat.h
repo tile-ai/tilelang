@@ -311,9 +311,25 @@ storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
 // These APIs were renamed. Forward the whole overload set, including loads
 // that return a vector and post-update operations that write back a pointer.
 #if TL_CANN_9_1
+namespace detail {
+// Take Dst from the SDK's void Native(Dst &, Src) declaration.
+template <typename Src, typename Dst>
+__simd_callee__ Dst output_register_type(__simd_callee__ void (*)(Dst &, Src));
+} // namespace detail
+
 #define TL_CANN_FORWARD_REG(Name, Old) TL_CANN_FORWARD_TO(Name, Old)
+// 9.1 only provides the output-parameter form of these loads and packs.
+#define TL_CANN_FORWARD_REG_WITH_RESULT(Name, Old)                             \
+  TL_CANN_FORWARD_REG(Name, Old)                                               \
+  template <typename Src> __simd_callee__ inline auto Name(Src src) {          \
+    decltype(detail::output_register_type<Src>(::Old)) dst;                    \
+    ::Old(dst, src);                                                           \
+    return dst;                                                                \
+  }
 #else
 #define TL_CANN_FORWARD_REG(Name, Old) TL_CANN_FORWARD_TO(Name, asc_##Name)
+#define TL_CANN_FORWARD_REG_WITH_RESULT(Name, Old)                             \
+  TL_CANN_FORWARD_REG(Name, Old)
 #endif
 #define TL_CANN_FORWARD_TO(Name, Native)                                       \
   template <typename... Args>                                                  \
@@ -323,10 +339,11 @@ storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
 TL_CANN_FORWARD_REG(update_addr_reg_b8, asc_create_iter_reg_b8)
 TL_CANN_FORWARD_REG(update_addr_reg_b16, asc_create_iter_reg_b16)
 TL_CANN_FORWARD_REG(update_addr_reg_b32, asc_create_iter_reg_b32)
-TL_CANN_FORWARD_REG(loadalign_brc_elem, asc_loadalign_brc)
-TL_CANN_FORWARD_REG(loadalign_brc_datablock, asc_loadalign_brc_v2)
-TL_CANN_FORWARD_REG(loadalign_brc_elem2datablock, asc_loadalign_brc_v3)
-TL_CANN_FORWARD_REG(loadalign_unpack4, asc_loadalign_unpack_v2)
+TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_brc_elem, asc_loadalign_brc)
+TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_brc_datablock, asc_loadalign_brc_v2)
+TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_brc_elem2datablock,
+                                asc_loadalign_brc_v3)
+TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_unpack4, asc_loadalign_unpack_v2)
 TL_CANN_FORWARD_REG(loadalign_brc_elem_postupdate, asc_loadalign_brc_postupdate)
 TL_CANN_FORWARD_REG(loadalign_brc_datablock_postupdate,
                     asc_loadalign_brc_postupdate_v2)
@@ -334,36 +351,12 @@ TL_CANN_FORWARD_REG(loadalign_brc_elem2datablock_postupdate,
                     asc_loadalign_brc_postupdate_v3)
 TL_CANN_FORWARD_REG(loadalign_unpack4_postupdate,
                     asc_loadalign_unpack_postupdate_v2)
-TL_CANN_FORWARD_REG(pack_to_low, asc_pack)
-TL_CANN_FORWARD_REG(pack_to_high, asc_pack_v2)
+TL_CANN_FORWARD_REG_WITH_RESULT(pack_to_low, asc_pack)
+TL_CANN_FORWARD_REG_WITH_RESULT(pack_to_high, asc_pack_v2)
 TL_CANN_FORWARD_REG(storealign_pack_quarter, asc_storealign_pack_v2)
-#undef TL_CANN_FORWARD_TO
+#undef TL_CANN_FORWARD_REG_WITH_RESULT
 #undef TL_CANN_FORWARD_REG
-
-#if TL_CANN_9_1
-// 9.1 only provides the output-parameter forms of these loads and packs.
-// Deduce the destination register from the matching SDK signature. In
-// particular, packing an int16 register produces a uint8 register.
-namespace detail {
-template <typename Src> struct RegisterResult {
-  template <typename Dst>
-  static __simd_callee__ Dst type(__simd_callee__ void (*)(Dst &, Src));
-};
-} // namespace detail
-#define TL_CANN_RETURN_REG(Name, Native)                                       \
-  template <typename Src> __simd_callee__ inline auto Name(Src src) {          \
-    decltype(detail::RegisterResult<Src>::type(::Native)) dst;                 \
-    ::Native(dst, src);                                                        \
-    return dst;                                                                \
-  }
-TL_CANN_RETURN_REG(loadalign_brc_elem, asc_loadalign_brc)
-TL_CANN_RETURN_REG(loadalign_brc_datablock, asc_loadalign_brc_v2)
-TL_CANN_RETURN_REG(loadalign_brc_elem2datablock, asc_loadalign_brc_v3)
-TL_CANN_RETURN_REG(loadalign_unpack4, asc_loadalign_unpack_v2)
-TL_CANN_RETURN_REG(pack_to_low, asc_pack)
-TL_CANN_RETURN_REG(pack_to_high, asc_pack_v2)
-#undef TL_CANN_RETURN_REG
-#endif
+#undef TL_CANN_FORWARD_TO
 
 // Register APIs also accept value-returning calls. Use the same corrected
 // operation so the two SDK spellings agree on inactive lanes and edge types.
