@@ -1538,6 +1538,40 @@ def case_promotion_indices(
     return sorted(index for candidate_id, index in promoted_index.items() if case_id in promoted_cases[candidate_id])
 
 
+def pipeline_case_window(
+    owner: str,
+    case_id: str,
+    basis: str,
+    promoted_cases: dict[str, set[str]],
+    promoted_index: dict[str, int],
+) -> tuple[int | None, int | None]:
+    """Return the creation interval in which evidence must be measured for this basis."""
+    if basis == BASELINE_ID:
+        start = None
+    else:
+        require(
+            basis in promoted_index,
+            f"{owner}: basis candidate {basis} has no PROMOTED result; keep the obligation pending until the basis is promoted",
+        )
+        start = promoted_index[basis]
+    timeline = case_promotion_indices(case_id, promoted_cases, promoted_index)
+    end = next((index for index in timeline if start is None or index > start), None)
+    return start, end
+
+
+def in_pipeline_window(
+    candidate_id: str,
+    basis: str,
+    start: int | None,
+    end: int | None,
+    created_index: dict[str, int],
+) -> bool:
+    """True when the candidate was created inside the basis's promotion interval."""
+    if candidate_id == basis:
+        return True
+    return (start is None or created_index[candidate_id] > start) and (end is None or created_index[candidate_id] < end)
+
+
 def blocked_candidates_for_case(events: list, case_id: str) -> list[str]:
     """Return candidates whose environment block left the case unmeasured."""
     blocked = set()
@@ -1794,6 +1828,38 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                             candidate_id in results,
                             f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} has no recorded RESULT",
                         )
+                        require(
+                            created[candidate_id]["identity"]["pipeline_facts"]["realization"] == realization,
+                            f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} is not an {realization} realization",
+                        )
+                        result = results[candidate_id]
+                        case_results = {entry["case_id"]: entry for entry in result["case_results"]}
+                        attempted_cases = set(created[candidate_id]["applicable_cases"]) & linked_cases
+                        require(
+                            attempted_cases,
+                            f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} does not attempt a linked case",
+                        )
+                        untested = {case_id for case_id in attempted_cases if case_results[case_id].get("disposition") != "TESTED_PATH"}
+                        require(
+                            not untested or result.get("rejection_evidence") is not None,
+                            f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} leaves "
+                            f"{sorted(untested)} untested; record structured rejection_evidence",
+                        )
+                        for case_id in sorted(attempted_cases):
+                            basis = basis_by_case[case_id]
+                            start, end = pipeline_case_window(oid, case_id, basis, promoted_cases, promoted_index)
+                            require(
+                                in_pipeline_window(candidate_id, basis, start, end, created_index),
+                                f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} was not "
+                                f"created inside basis {basis}'s promotion interval for {case_id}; a stale attempt "
+                                "cannot stand in for the current basis",
+                            )
+                            require(
+                                candidate_pipeline_identity(candidate_id, case_id, created) == basis_identities[case_id],
+                                f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} does not "
+                                f"match basis {basis} for {case_id} on work_granularity, precision, task_mapping, "
+                                "granularity unit, and granularity value",
+                            )
                 if item.get("status") in {"COMPLETE", "TESTED"}:
                     require(
                         candidate_ids,
@@ -1801,22 +1867,8 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                     )
                     for case_id in linked_cases:
                         basis = basis_by_case[case_id]
-                        if basis == BASELINE_ID:
-                            start = None
-                        else:
-                            require(
-                                basis in promoted_index,
-                                f"obligation {oid}: basis candidate {basis} has no PROMOTED result; "
-                                "keep the obligation pending until the basis is promoted",
-                            )
-                            start = promoted_index[basis]
-                        timeline = case_promotion_indices(case_id, promoted_cases, promoted_index)
-                        end = next((index for index in timeline if start is None or index > start), None)
-                        eligible_ids = [
-                            cid
-                            for cid in candidate_ids
-                            if cid == basis or ((start is None or created_index[cid] > start) and (end is None or created_index[cid] < end))
-                        ]
+                        start, end = pipeline_case_window(oid, case_id, basis, promoted_cases, promoted_index)
+                        eligible_ids = [cid for cid in candidate_ids if in_pipeline_window(cid, basis, start, end, created_index)]
                         expected_identity = basis_identities[case_id]
                         require(
                             any(
