@@ -5,6 +5,7 @@
 #include <cmath>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -36,6 +37,16 @@ constexpr const char *kLoadL2CacheModeCast =
     "static_cast<tl::cann::load_l2_cache_mode>(";
 constexpr const char *kStoreL2CacheModeCast =
     "static_cast<tl::cann::store_l2_cache_mode>(";
+
+// Route SDK call symbols while emitting TileLang code. Imported C/C++ keeps
+// its own names and preprocessing environment.
+const char *CannDmaWrapper(std::string_view name) {
+  if (name == "asc_copy_gm2ub_align" || name == "::asc_copy_gm2ub_align")
+    return "tl::cann::copy_gm2ub_align";
+  if (name == "asc_copy_ub2gm_align" || name == "::asc_copy_ub2gm_align")
+    return "tl::cann::copy_ub2gm_align";
+  return nullptr;
+}
 
 bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
   if (auto call_op = op->op.as<Op>()) {
@@ -702,7 +713,6 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   current_function_name_ = global_symbol.value();
   bool no_alias = f->HasNonzeroAttr(tirx::attr::kNoAlias);
 
-  stream << "#include <tl_templates/ascend/cann_compat_begin.h>\n";
   this->PrintFuncPrefix(stream);
   CodeGenC::PrintType(f->ret_type, stream);
   CodeGenC::PrintExtraAttrs(f, stream);
@@ -750,7 +760,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   this->PrintStmt(f->body);
   this->EndScope(func_scope);
   this->PrintIndent();
-  this->stream << "}\n#include <tl_templates/ascend/cann_compat_end.h>\n\n";
+  this->stream << "}\n\n";
   ICHECK(IsOutsideVF())
       << "Ascend VF mode leaked after PrimFunc code generation";
 }
@@ -867,7 +877,6 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
     return v->name_hint;
   };
 
-  decl_stream << "#include <tl_templates/ascend/cann_compat_begin.h>\n";
   decl_stream << func_attrs << " " << helper_name << "(";
   for (size_t i = 0; i < captures.size(); ++i) {
     if (i != 0) {
@@ -911,9 +920,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
       }
     }
   }
-  decl_stream << ") {\n"
-              << helper_body
-              << "}\n#include <tl_templates/ascend/cann_compat_end.h>\n\n";
+  decl_stream << ") {\n" << helper_body << "}\n\n";
 }
 
 void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
@@ -1368,7 +1375,8 @@ void CodeGenTileLangAscend::EmitCApiCall_(
   }
 
   PrintIndent();
-  stream << function_name << "(";
+  const char *wrapper = CannDmaWrapper(function_name);
+  stream << (wrapper ? wrapper : function_name.c_str()) << "(";
   for (size_t i = 0; i < rendered_arguments.size(); ++i) {
     if (i != 0) {
       stream << ", ";
@@ -3837,6 +3845,9 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             const ffi::Array<PrimExpr> &args,
                                             bool skip_first_arg,
                                             std::ostream &os) {
+  if (const char *wrapper = CannDmaWrapper(global_symbol.c_str())) {
+    global_symbol = wrapper;
+  }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (IsInsideSimtVF()) {
     static const std::unordered_set<std::string> fp32_ops = {
@@ -3850,7 +3861,7 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
          (global_symbol == "hexp2" || global_symbol == "hexp10"));
     if (use_compat) {
       if (!has_simt_math_included_) {
-        decl_stream << "#include <tl_templates/ascend/simt_math.h>\n";
+        preamble_stream_ << "#include <tl_templates/ascend/simt_math.h>\n";
         has_simt_math_included_ = true;
       }
       global_symbol =
@@ -3864,8 +3875,8 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
     global_symbol = "AscendC::Std::sqrt";
     if (!has_ascend_std_math_included_) {
       // The Std headers use AscendC annotations from kernel_operator.h.
-      decl_stream << "#include <kernel_operator.h>\n";
-      decl_stream << "#include <utils/std/cmath.h>\n";
+      preamble_stream_ << "#include <kernel_operator.h>\n";
+      preamble_stream_ << "#include <utils/std/cmath.h>\n";
       has_ascend_std_math_included_ = true;
     }
   }
