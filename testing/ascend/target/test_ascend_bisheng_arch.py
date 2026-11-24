@@ -83,6 +83,9 @@ def test_native_cann_register_overloads_compile():
     TL_CANN_SAVE_NAMES
     #define asc_div(...) previous_binding(__VA_ARGS__)
     #define asc_pack_to_high previous_pack
+    #define pack_to_low imported_pack
+    #define asc_load_dev(...) imported_load_must_not_reach_dcache(__VA_ARGS__)
+    #include "tl_templates/ascend/dcache_bypass.h"
     int previous_binding(int);
     int previous_pack(int);
     inline int user_call(int x) { return asc_div(x) + asc_pack_to_high(x); }
@@ -118,7 +121,8 @@ def test_native_cann_register_overloads_compile():
     #if defined(asc_select) || defined(asc_storealign_postupdate)
     #error leaked SIMD routing
     #endif
-    extern "C" __global__ __vector__ void entry() {
+    extern "C" __global__ __vector__ void entry(__gm__ uint32_t* gm) {
+        gm[1] = tl::read_gm_bypass_dcache(gm);
         reg_template::registers((__ubuf__ uint32_t*)0, (__ubuf__ uint8_t*)256);
     }
     """

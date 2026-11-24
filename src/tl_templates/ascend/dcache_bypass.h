@@ -14,29 +14,27 @@ namespace tl {
 
 template <typename T>
 __aicore__ inline T read_gm_bypass_dcache(__gm__ T *addr) {
-  TL_CANN_USE_CORE_NAMES
   static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
                     sizeof(T) == 8,
                 "read_gm_bypass_dcache only supports 1/2/4/8-byte scalar "
                 "types");
   if constexpr (sizeof(T) == 8) {
-    uint64_t bits = asc_load_dev(reinterpret_cast<__gm__ uint64_t *>(addr));
+    uint64_t bits = cann::load_dev(reinterpret_cast<__gm__ uint64_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else if constexpr (sizeof(T) == 4) {
-    uint32_t bits = asc_load_dev(reinterpret_cast<__gm__ uint32_t *>(addr));
+    uint32_t bits = cann::load_dev(reinterpret_cast<__gm__ uint32_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else if constexpr (sizeof(T) == 2) {
-    uint16_t bits = asc_load_dev(reinterpret_cast<__gm__ uint16_t *>(addr));
+    uint16_t bits = cann::load_dev(reinterpret_cast<__gm__ uint16_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   } else {
-    uint8_t bits = asc_load_dev(reinterpret_cast<__gm__ uint8_t *>(addr));
+    uint8_t bits = cann::load_dev(reinterpret_cast<__gm__ uint8_t *>(addr));
     return *reinterpret_cast<T *>(&bits);
   }
 }
 
 template <typename T>
 __aicore__ inline void write_gm_bypass_dcache(__gm__ T *addr, T value) {
-  TL_CANN_USE_CORE_NAMES
   static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 ||
                     sizeof(T) == 8,
                 "write_gm_bypass_dcache only supports 1/2/4/8-byte scalar "

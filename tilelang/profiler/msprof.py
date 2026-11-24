@@ -62,7 +62,7 @@ def bench_with_msprof(
     n_repeat: int,
     detailed: bool = False,
 ) -> float:
-    """Benchmark using torch_npu msprof timing."""
+    """Benchmark using msprof. The cache tensor supplies the NPU device and scratch size in bytes."""
     import shutil
     import signal
     import struct
@@ -313,6 +313,11 @@ def bench_with_msprof(
         flush = _flush_cache
         scratch = cache.numel() != 0 and _get_npu_l2_cache_flush() is None
         if scratch:
+            # The cache-read kernel takes contiguous int32 words and only needs to read the buffer.
+            if cache.dtype != torch.int32 or not cache.is_contiguous():
+                cache = torch.empty((cache.nbytes + 3) // 4, dtype=torch.int32, device=cache.device)
+            elif cache.ndim != 1:
+                cache = cache.view(-1)
             flush = _get_cache_read_kernel(cache.numel())
             flush(cache)
             flush = _track_cache_reads(flush, flush_tasks)

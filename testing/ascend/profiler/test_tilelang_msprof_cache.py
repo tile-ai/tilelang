@@ -39,6 +39,14 @@ def test_msprof_uses_native_flush_with_caller_buffer(monkeypatch):
 
 
 @tilelang.testing.requires_ascend
+@pytest.mark.parametrize("dtype", [torch.int32, torch.uint8])
+def test_msprof_with_2d_caller_buffer(dtype):
+    cache = torch.empty((3, 2731), dtype=dtype, device="npu")
+    work = torch.zeros(1, device="npu")
+    assert bench_with_msprof(lambda: work.add_(1), cache, n_repeat=1) > 0
+
+
+@tilelang.testing.requires_ascend
 def test_msprof_keeps_user_launches_of_the_cache_kernel(monkeypatch):
     import torch_npu.profiler as profiler
 

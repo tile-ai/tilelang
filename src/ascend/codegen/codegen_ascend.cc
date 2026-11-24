@@ -37,10 +37,8 @@ constexpr const char *kSimdOpPrefix = "tl.simd.";
 
 // A kernel parameter or local may have the same name as a bound SDK API.
 void ReserveCannNames(const NameSupply &supply) {
-#define TL_CANN_RESERVE(name) supply->ReserveName("asc_" #name, false);
-  TL_CANN_CORE_NAMES(TL_CANN_RESERVE)
-  TL_CANN_SIMD_NAMES(TL_CANN_RESERVE)
-  TL_CANN_TYPE_NAMES(TL_CANN_RESERVE)
+#define TL_CANN_RESERVE(name, ...) supply->ReserveName("asc_" #name, false);
+  TL_CANN_SDK_NAMES(TL_CANN_RESERVE)
 #undef TL_CANN_RESERVE
 #define TL_CANN_RESERVE_MATH(name) supply->ReserveName(#name, false);
   TL_CANN_SIMT_MATH_NAMES(TL_CANN_RESERVE_MATH)
@@ -3855,7 +3853,8 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
     VFMode mode;
   };
 #define TL_CANN_CORE(name) {"asc_" #name, "tl::cann::" #name, VFMode::kNone},
-#define TL_CANN_SIMD(name) {"asc_" #name, "tl::cann::" #name, VFMode::kSimd},
+#define TL_CANN_SIMD(name, ...)                                                \
+  {"asc_" #name, "tl::cann::" #name, VFMode::kSimd},
 #define TL_CANN_MATH(name) {#name, "tl::cann::simt::" #name, VFMode::kSimt},
   static constexpr Route routes[] = {
       TL_CANN_CORE_NAMES(TL_CANN_CORE) TL_CANN_SIMD_NAMES(TL_CANN_SIMD)

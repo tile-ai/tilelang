@@ -336,10 +336,7 @@ __simd_callee__ Dst output_register_type(__simd_callee__ void (*)(Dst &, Src));
   __simd_callee__ inline decltype(auto) Name(Args &&...args) {                 \
     return ::Native(static_cast<Args &&>(args)...);                            \
   }
-#define TL_CANN_DEFINE_REG(wrap, name, old) wrap(name, old)
-TL_CANN_RENAMED_REG_NAMES(TL_CANN_DEFINE_REG, TL_CANN_FORWARD_REG,
-                          TL_CANN_FORWARD_REG_WITH_RESULT)
-#undef TL_CANN_DEFINE_REG
+TL_CANN_RENAMED_REG_NAMES(TL_CANN_FORWARD_REG, TL_CANN_FORWARD_REG_WITH_RESULT)
 #undef TL_CANN_FORWARD_REG_WITH_RESULT
 #undef TL_CANN_FORWARD_REG
 #undef TL_CANN_FORWARD_TO
@@ -408,12 +405,12 @@ TL_CANN_TYPE_NAMES(TL_CANN_TYPE)
 #undef TL_CANN_TYPE
 #undef TL_CANN_CORE
 
-#define TL_CANN_USING(name) using ::tl::cann::sdk::asc_##name;
+#define TL_CANN_USING(name, ...) using ::tl::cann::sdk::asc_##name;
 #define TL_CANN_USE_CORE_NAMES                                                 \
   TL_CANN_CORE_NAMES(TL_CANN_USING) TL_CANN_TYPE_NAMES(TL_CANN_USING)
 #if defined(INCLUDE_C_API_REG_COMPUTE_REG_VECTOR_H) ||                         \
     defined(INCLUDE_C_API_ASC_REG_VECTOR_H)
-#define TL_CANN_SIMD(name) TL_CANN_CALLABLE(__simd_callee__, name)
+#define TL_CANN_SIMD(name, ...) TL_CANN_CALLABLE(__simd_callee__, name)
 TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
 #undef TL_CANN_SIMD
 #define TL_CANN_USE_SIMD_NAMES TL_CANN_SIMD_NAMES(TL_CANN_USING)
@@ -432,8 +429,8 @@ TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
 #define TL_CANN_PRAGMA(x) _Pragma(#x)
 #define TL_CANN_PUSH(name) TL_CANN_PRAGMA(push_macro(#name))
 #define TL_CANN_POP(name) TL_CANN_PRAGMA(pop_macro(#name))
-#define TL_CANN_PUSH_SDK(name) TL_CANN_PUSH(asc_##name)
-#define TL_CANN_POP_SDK(name) TL_CANN_POP(asc_##name)
+#define TL_CANN_PUSH_SDK(name, ...) TL_CANN_PUSH(asc_##name)
+#define TL_CANN_POP_SDK(name, ...) TL_CANN_POP(asc_##name)
 #define TL_CANN_SAVE_NAMES                                                     \
   TL_CANN_SDK_NAMES(TL_CANN_PUSH_SDK) TL_CANN_SIMT_MATH_NAMES(TL_CANN_PUSH)
 #define TL_CANN_RESTORE_NAMES                                                  \

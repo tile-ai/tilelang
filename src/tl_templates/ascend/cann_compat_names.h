@@ -18,25 +18,24 @@
 
 // Each renamed register API has a public name and a CANN 9.1 name.
 // WITH_RESULT also supplies the missing value-returning overload.
-#define TL_CANN_RENAMED_REG_NAMES(X, FORWARD, WITH_RESULT)                     \
-  X(FORWARD, update_addr_reg_b8, asc_create_iter_reg_b8)                       \
-  X(FORWARD, update_addr_reg_b16, asc_create_iter_reg_b16)                     \
-  X(FORWARD, update_addr_reg_b32, asc_create_iter_reg_b32)                     \
-  X(WITH_RESULT, loadalign_brc_elem, asc_loadalign_brc)                        \
-  X(FORWARD, loadalign_brc_elem_postupdate, asc_loadalign_brc_postupdate)      \
-  X(WITH_RESULT, loadalign_brc_datablock, asc_loadalign_brc_v2)                \
-  X(FORWARD, loadalign_brc_datablock_postupdate,                               \
-    asc_loadalign_brc_postupdate_v2)                                           \
-  X(WITH_RESULT, loadalign_brc_elem2datablock, asc_loadalign_brc_v3)           \
-  X(FORWARD, loadalign_brc_elem2datablock_postupdate,                          \
-    asc_loadalign_brc_postupdate_v3)                                           \
-  X(WITH_RESULT, loadalign_unpack4, asc_loadalign_unpack_v2)                   \
-  X(FORWARD, loadalign_unpack4_postupdate, asc_loadalign_unpack_postupdate_v2) \
-  X(WITH_RESULT, pack_to_low, asc_pack)                                        \
-  X(WITH_RESULT, pack_to_high, asc_pack_v2)                                    \
-  X(FORWARD, storealign_pack_quarter, asc_storealign_pack_v2)
+// Pass names directly so consumers can paste asc_ before import macros expand.
+#define TL_CANN_RENAMED_REG_NAMES(FORWARD, WITH_RESULT)                        \
+  FORWARD(update_addr_reg_b8, asc_create_iter_reg_b8)                          \
+  FORWARD(update_addr_reg_b16, asc_create_iter_reg_b16)                        \
+  FORWARD(update_addr_reg_b32, asc_create_iter_reg_b32)                        \
+  WITH_RESULT(loadalign_brc_elem, asc_loadalign_brc)                           \
+  FORWARD(loadalign_brc_elem_postupdate, asc_loadalign_brc_postupdate)         \
+  WITH_RESULT(loadalign_brc_datablock, asc_loadalign_brc_v2)                   \
+  FORWARD(loadalign_brc_datablock_postupdate, asc_loadalign_brc_postupdate_v2) \
+  WITH_RESULT(loadalign_brc_elem2datablock, asc_loadalign_brc_v3)              \
+  FORWARD(loadalign_brc_elem2datablock_postupdate,                             \
+          asc_loadalign_brc_postupdate_v3)                                     \
+  WITH_RESULT(loadalign_unpack4, asc_loadalign_unpack_v2)                      \
+  FORWARD(loadalign_unpack4_postupdate, asc_loadalign_unpack_postupdate_v2)    \
+  WITH_RESULT(pack_to_low, asc_pack)                                           \
+  WITH_RESULT(pack_to_high, asc_pack_v2)                                       \
+  FORWARD(storealign_pack_quarter, asc_storealign_pack_v2)
 
-#define TL_CANN_VISIT_REG_NAME(visit, name, old) visit(name)
 #define TL_CANN_SIMD_NAMES(X)                                                  \
   X(div)                                                                       \
   X(min_scalar)                                                                \
@@ -44,7 +43,7 @@
   X(select)                                                                    \
   X(duplicate)                                                                 \
   X(duplicate_highest)                                                         \
-  TL_CANN_RENAMED_REG_NAMES(TL_CANN_VISIT_REG_NAME, X, X)                      \
+  TL_CANN_RENAMED_REG_NAMES(X, X)                                              \
   X(storealign_postupdate)
 
 #define TL_CANN_TYPE_NAMES(X)                                                  \
