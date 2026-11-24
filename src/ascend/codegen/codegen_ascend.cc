@@ -40,12 +40,36 @@ constexpr const char *kStoreL2CacheModeCast =
 
 // Route SDK call symbols while emitting TileLang code. Imported C/C++ keeps
 // its own names and preprocessing environment.
-const char *CannDmaWrapper(std::string_view name) {
-  if (name == "asc_copy_gm2ub_align" || name == "::asc_copy_gm2ub_align")
-    return "tl::cann::copy_gm2ub_align";
-  if (name == "asc_copy_ub2gm_align" || name == "::asc_copy_ub2gm_align")
-    return "tl::cann::copy_ub2gm_align";
+struct CannApi {
+  std::string_view native;
+  std::string_view wrapper;
+  bool simd;
+};
+
+const CannApi *FindCannApi(std::string_view symbol, bool in_simd) {
+  static constexpr CannApi routes[] = {
+#define TL_CANN_CORE(name) {"asc_" #name, "tl::cann::" #name, false},
+#define TL_CANN_SIMD(name) {"asc_" #name, "tl::cann::" #name, true},
+#define TL_CANN_TYPE(name)
+#include "tl_templates/ascend/cann_compat_names.inc"
+#undef TL_CANN_TYPE
+#undef TL_CANN_SIMD
+#undef TL_CANN_CORE
+  };
+  if (symbol.substr(0, 2) == "::")
+    symbol.remove_prefix(2);
+  for (const auto &route : routes) {
+    if ((!route.simd || in_simd) &&
+        (symbol == route.native || symbol == route.wrapper))
+      return &route;
+  }
   return nullptr;
+}
+
+std::string_view CannApiName(std::string_view name, bool in_simd = false) {
+  if (const auto *route = FindCannApi(name, in_simd))
+    return route->wrapper;
+  return name;
 }
 
 bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
@@ -1375,8 +1399,7 @@ void CodeGenTileLangAscend::EmitCApiCall_(
   }
 
   PrintIndent();
-  const char *wrapper = CannDmaWrapper(function_name);
-  stream << (wrapper ? wrapper : function_name.c_str()) << "(";
+  stream << CannApiName(function_name, IsInsideSimdVF()) << "(";
   for (size_t i = 0; i < rendered_arguments.size(); ++i) {
     if (i != 0) {
       stream << ", ";
@@ -1506,7 +1529,7 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
   const std::string batch_stride =
       op->args.size() == 14 ? PrintExpr(op->args[13]) : "0";
   PrintIndent();
-  stream << "tl::cann::set_gm2l1_nz_para(" << num_batches
+  stream << CannApiName("asc_set_gm2l1_nz_para") << "(" << num_batches
          << ", 1, static_cast<uint16_t>(" << nz_c0_stride << "), "
          << batch_stride << ");\n";
 
@@ -1538,8 +1561,8 @@ void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
       << "tl.ascend_copy_matrix_cc_to_ub expects exactly 26 arguments";
 
   PrintIndent();
-  stream << "tl::cann::set_l0c_copy_nz_para(1, 0, 0);\n";
-  EmitCApiCall_("tl::cann::copy_l0c2ub",
+  stream << CannApiName("asc_set_l0c_copy_nz_para") << "(1, 0, 0);\n";
+  EmitCApiCall_("asc_copy_l0c2ub",
                 {{op->args[0]},
                  {op->args[1]},
                  {op->args[3]},
@@ -1562,8 +1585,8 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
       << "tl.ascend_copy_matrix_cc_to_gm expects exactly 25 arguments";
 
   PrintIndent();
-  stream << "tl::cann::set_l0c_copy_nz_para(1, 0, 0);\n";
-  EmitCApiCall_("tl::cann::copy_l0c2gm",
+  stream << CannApiName("asc_set_l0c_copy_nz_para") << "(1, 0, 0);\n";
+  EmitCApiCall_("asc_copy_l0c2gm",
                 {{op->args[0]},
                  {op->args[1]},
                  {op->args[3]},
@@ -1937,11 +1960,11 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     int mode = Downcast<IntImm>(op->args[0])->value;
     this->PrintIndent();
     if (mode == 0) {
-      this->stream << "tl::cann::disable_hf32();\n";
+      this->stream << CannApiName("asc_disable_hf32") << "();\n";
     } else {
       this->stream << "asc_enable_hf32();\n";
       this->PrintIndent();
-      this->stream << "tl::cann::set_hf32_round_mode("
+      this->stream << CannApiName("asc_set_hf32_round_mode") << "("
                    << (mode == 1 ? "tl::cann::hf32_round_mode::NEAREST_AWAY"
                                  : "tl::cann::hf32_round_mode::NEAREST_EVEN")
                    << ");\n";
@@ -1975,26 +1998,22 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "Ascend atomic does not support data type: " << atomic_dtype;
 
     this->PrintIndent();
-    if (atomic_dtype.is_int() && atomic_dtype.bits() == 32) {
-      this->stream << "tl::cann::set_atomic_" << atomic_op;
-    } else {
-      this->stream << fn;
-    }
+    std::string name(fn);
     if (atomic_dtype.is_bfloat16()) {
-      this->stream << "_bfloat";
+      name += "_bfloat";
     } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 16) {
-      this->stream << "_float16";
+      name += "_float16";
     } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 32) {
-      this->stream << "_float";
+      name += "_float";
     } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 8) {
-      this->stream << "_int8";
+      name += "_int8";
     } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 16) {
-      this->stream << "_int16";
+      name += "_int16";
     } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 32) {
-      this->stream << "_int32";
+      name += "_int32";
     }
 
-    this->stream << "();\n";
+    this->stream << CannApiName(name) << "();\n";
   } else if (op->op.same_as(tl::ascend_set_atomic_none())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.ascend_set_atomic_none expects no arguments";
@@ -2442,7 +2461,10 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrintExpr(op->args[0], os); // addr
     os << ", ";
     if (has_off) {
-      os << "tl::cann::update_addr_reg_b" << CCEElemWidthBits(elem) << "(";
+      os << CannApiName("asc_update_addr_reg_b" +
+                            std::to_string(CCEElemWidthBits(elem)),
+                        true)
+         << "(";
       PrintExpr(op->args[2], os);
       os << "), " << dist;
     } else {
@@ -3845,8 +3867,16 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             const ffi::Array<PrimExpr> &args,
                                             bool skip_first_arg,
                                             std::ostream &os) {
-  if (const char *wrapper = CannDmaWrapper(global_symbol.c_str())) {
-    global_symbol = wrapper;
+  std::string_view symbol(global_symbol.c_str(), global_symbol.size());
+  if (const auto *route = FindCannApi(symbol, IsInsideSimdVF())) {
+    global_symbol = std::string(route->wrapper);
+    if (route->simd) {
+      // The SDK consumes and returns whole registers. Generic vector externs
+      // below call a scalar function once per lane.
+      CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg,
+                                os);
+      return;
+    }
   }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
   if (IsInsideSimtVF()) {
@@ -3854,24 +3884,26 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
         "acosf",  "acoshf",    "asinf", "asinhf", "atanf",  "atan2f",
         "atanhf", "copysignf", "coshf", "exp2f",  "exp10f", "fmodf",
         "hypotf", "log1pf",    "powf",  "sinhf",  "tanhf"};
+    std::string math_name(global_symbol);
+    if (math_name.compare(0, 2, "::") == 0)
+      math_name.erase(0, 2);
     auto element = ret_dtype.element_of();
     bool use_compat =
-        (element == DataType::Float(32) && fp32_ops.count(global_symbol)) ||
+        (element == DataType::Float(32) && fp32_ops.count(math_name)) ||
         (element.is_bfloat16() &&
-         (global_symbol == "hexp2" || global_symbol == "hexp10"));
+         (math_name == "hexp2" || math_name == "hexp10"));
     if (use_compat) {
       if (!has_simt_math_included_) {
         preamble_stream_ << "#include <tl_templates/ascend/simt_math.h>\n";
         has_simt_math_included_ = true;
       }
-      global_symbol =
-          std::string("tl::cann::simt::") + std::string(global_symbol);
+      global_symbol = "tl::cann::simt::" + math_name;
     }
   }
   // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
   // Select the scalar-core implementation using the existing VF context.
   if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&
-      global_symbol == "sqrtf") {
+      (global_symbol == "sqrtf" || global_symbol == "::sqrtf")) {
     global_symbol = "AscendC::Std::sqrt";
     if (!has_ascend_std_math_included_) {
       // The Std headers use AscendC annotations from kernel_operator.h.

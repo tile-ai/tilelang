@@ -10,13 +10,16 @@
 namespace tl {
 namespace cann {
 
-enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
-
-#if defined(__NPU_ARCH__)
-
 #define TL_CANN_9_1                                                            \
   (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1 && ASC_DEVKIT_PATCH == 0)
 
+#if !defined(__NPU_ARCH__) || TL_CANN_9_1
+enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
+#else
+using hf32_round_mode = ::asc_hf32_round_mode;
+#endif
+
+#if defined(__NPU_ARCH__)
 // HF32, atomic modes and scalar loads use the API names for this SDK.
 #if TL_CANN_9_1
 __aicore__ inline void disable_hf32() { ::asc_set_fp32_mode(); }
@@ -45,9 +48,7 @@ template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
 __aicore__ inline void disable_hf32() { ::asc_disable_hf32(); }
 
 __aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
-  ::asc_set_hf32_round_mode(mode == hf32_round_mode::NEAREST_AWAY
-                                ? ::asc_hf32_round_mode::NEAREST_AWAY
-                                : ::asc_hf32_round_mode::NEAREST_EVEN);
+  ::asc_set_hf32_round_mode(mode);
 }
 
 __aicore__ inline void set_atomic_add_int32() { ::asc_set_atomic_add_int32(); }
@@ -194,6 +195,16 @@ __aicore__ inline void copy_ub2gm_align(Args... args) {
 #if defined(INCLUDE_C_API_REG_COMPUTE_REG_VECTOR_H) ||                         \
     defined(INCLUDE_C_API_ASC_REG_VECTOR_H)
 template <typename V>
+__simd_callee__ inline void select(V &dst, V lhs, V rhs, vector_bool mask) {
+  if constexpr (requires { asc_select(dst, lhs, rhs, mask); }) {
+    asc_select(dst, lhs, rhs, mask);
+  } else {
+    // Bisheng has a typed vsel even for E8M0, which lacks an SDK overload.
+    vsel(dst, lhs, rhs, mask);
+  }
+}
+
+template <typename V>
 __simd_callee__ inline void div(V &dst, V lhs, V rhs, vector_bool mask) {
 #if TL_CANN_9_1
   // CANN 9.1 lacks the integer asc_div overloads.
@@ -252,59 +263,6 @@ __simd_callee__ inline void duplicate_highest(V &dst, V src, vector_bool mask) {
   ::vdup(dst, src, mask, POS_HIGHEST, MODE_ZEROING);
 }
 
-// Preserve the SDK's register type. The old name returns iter_reg while
-// newer SDKs call the corresponding type addr_reg; neither is an integer.
-// The unsigned argument is an element stride in a hardware loop, not a
-// one-time pointer displacement. Leave loop-index scaling to the SDK.
-__simd_callee__ inline auto update_addr_reg_b8(uint32_t offset) {
-  return ::asc_create_iter_reg_b8(offset);
-}
-__simd_callee__ inline auto update_addr_reg_b16(uint32_t offset) {
-  return ::asc_create_iter_reg_b16(offset);
-}
-__simd_callee__ inline auto update_addr_reg_b32(uint32_t offset) {
-  return ::asc_create_iter_reg_b32(offset);
-}
-
-#define TL_CANN_LOAD(New, Old)                                                 \
-  template <typename V, typename T, typename Offset>                           \
-  __simd_callee__ inline void New(V &dst, __ubuf__ T *src, Offset offset) {    \
-    ::Old(dst, src, offset);                                                   \
-  }
-#define TL_CANN_LOAD_UPDATE(New, Old)                                          \
-  template <typename V, typename T>                                            \
-  __simd_callee__ inline void New(V &dst, __ubuf__ T *&src, int32_t offset) {  \
-    ::Old(dst, src, offset);                                                   \
-  }
-TL_CANN_LOAD(loadalign_brc_elem, asc_loadalign_brc)
-TL_CANN_LOAD(loadalign_brc_datablock, asc_loadalign_brc_v2)
-TL_CANN_LOAD(loadalign_brc_elem2datablock, asc_loadalign_brc_v3)
-TL_CANN_LOAD(loadalign_unpack4, asc_loadalign_unpack_v2)
-TL_CANN_LOAD_UPDATE(loadalign_brc_elem_postupdate, asc_loadalign_brc_postupdate)
-TL_CANN_LOAD_UPDATE(loadalign_brc_datablock_postupdate,
-                    asc_loadalign_brc_postupdate_v2)
-TL_CANN_LOAD_UPDATE(loadalign_brc_elem2datablock_postupdate,
-                    asc_loadalign_brc_postupdate_v3)
-TL_CANN_LOAD_UPDATE(loadalign_unpack4_postupdate,
-                    asc_loadalign_unpack_postupdate_v2)
-#undef TL_CANN_LOAD
-#undef TL_CANN_LOAD_UPDATE
-
-template <typename D, typename S>
-__simd_callee__ inline void pack_to_low(D &dst, S src) {
-  ::asc_pack(dst, src);
-}
-template <typename D, typename S>
-__simd_callee__ inline void pack_to_high(D &dst, S src) {
-  ::asc_pack_v2(dst, src);
-}
-template <typename T, typename V, typename Offset>
-__simd_callee__ inline void storealign_pack_quarter(__ubuf__ T *dst, V src,
-                                                    Offset offset,
-                                                    vector_bool mask) {
-  ::asc_storealign_pack_v2(dst, src, offset, mask);
-}
-
 template <typename T, typename V>
 __simd_callee__ inline void
 storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
@@ -341,45 +299,6 @@ __simd_callee__ inline void duplicate_highest(V &dst, V src, vector_bool mask) {
   ::asc_duplicate_highest(dst, src, mask);
 }
 
-__simd_callee__ inline auto update_addr_reg_b8(uint32_t offset) {
-  return ::asc_update_addr_reg_b8(offset);
-}
-__simd_callee__ inline auto update_addr_reg_b16(uint32_t offset) {
-  return ::asc_update_addr_reg_b16(offset);
-}
-__simd_callee__ inline auto update_addr_reg_b32(uint32_t offset) {
-  return ::asc_update_addr_reg_b32(offset);
-}
-
-#define TL_CANN_NATIVE_LOAD(Name)                                              \
-  template <typename V, typename T, typename Offset>                           \
-  __simd_callee__ inline void Name(V &dst, __ubuf__ T *src, Offset offset) {   \
-    ::asc_##Name(dst, src, offset);                                            \
-  }                                                                            \
-  template <typename V, typename T>                                            \
-  __simd_callee__ inline void Name##_postupdate(V &dst, __ubuf__ T *&src,      \
-                                                int32_t offset) {              \
-    ::asc_##Name##_postupdate(dst, src, offset);                               \
-  }
-TL_CANN_NATIVE_LOAD(loadalign_brc_elem)
-TL_CANN_NATIVE_LOAD(loadalign_brc_datablock)
-TL_CANN_NATIVE_LOAD(loadalign_brc_elem2datablock)
-TL_CANN_NATIVE_LOAD(loadalign_unpack4)
-#undef TL_CANN_NATIVE_LOAD
-template <typename D, typename S>
-__simd_callee__ inline void pack_to_low(D &dst, S src) {
-  ::asc_pack_to_low(dst, src);
-}
-template <typename D, typename S>
-__simd_callee__ inline void pack_to_high(D &dst, S src) {
-  ::asc_pack_to_high(dst, src);
-}
-template <typename T, typename V, typename Offset>
-__simd_callee__ inline void storealign_pack_quarter(__ubuf__ T *dst, V src,
-                                                    Offset offset,
-                                                    vector_bool mask) {
-  ::asc_storealign_pack_quarter(dst, src, offset, mask);
-}
 template <typename T, typename V>
 __simd_callee__ inline void
 storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
@@ -388,10 +307,107 @@ storealign_postupdate(__ubuf__ T *&dst, V value, uint16_t block_stride,
 }
 #endif
 
+// These APIs were renamed. Forward the whole overload set, including loads
+// that return a vector and post-update operations that write back a pointer.
+#if TL_CANN_9_1
+#define TL_CANN_FORWARD_REG(Name, Old) TL_CANN_FORWARD_TO(Name, Old)
+#else
+#define TL_CANN_FORWARD_REG(Name, Old) TL_CANN_FORWARD_TO(Name, asc_##Name)
+#endif
+#define TL_CANN_FORWARD_TO(Name, Native)                                       \
+  template <typename... Args>                                                  \
+  __simd_callee__ inline decltype(auto) Name(Args &&...args) {                 \
+    return ::Native(static_cast<Args &&>(args)...);                            \
+  }
+TL_CANN_FORWARD_REG(update_addr_reg_b8, asc_create_iter_reg_b8)
+TL_CANN_FORWARD_REG(update_addr_reg_b16, asc_create_iter_reg_b16)
+TL_CANN_FORWARD_REG(update_addr_reg_b32, asc_create_iter_reg_b32)
+TL_CANN_FORWARD_REG(loadalign_brc_elem, asc_loadalign_brc)
+TL_CANN_FORWARD_REG(loadalign_brc_datablock, asc_loadalign_brc_v2)
+TL_CANN_FORWARD_REG(loadalign_brc_elem2datablock, asc_loadalign_brc_v3)
+TL_CANN_FORWARD_REG(loadalign_unpack4, asc_loadalign_unpack_v2)
+TL_CANN_FORWARD_REG(loadalign_brc_elem_postupdate, asc_loadalign_brc_postupdate)
+TL_CANN_FORWARD_REG(loadalign_brc_datablock_postupdate,
+                    asc_loadalign_brc_postupdate_v2)
+TL_CANN_FORWARD_REG(loadalign_brc_elem2datablock_postupdate,
+                    asc_loadalign_brc_postupdate_v3)
+TL_CANN_FORWARD_REG(loadalign_unpack4_postupdate,
+                    asc_loadalign_unpack_postupdate_v2)
+TL_CANN_FORWARD_REG(pack_to_low, asc_pack)
+TL_CANN_FORWARD_REG(pack_to_high, asc_pack_v2)
+TL_CANN_FORWARD_REG(storealign_pack_quarter, asc_storealign_pack_v2)
+#undef TL_CANN_FORWARD_TO
+#undef TL_CANN_FORWARD_REG
+
+#if TL_CANN_9_1
+// 9.1 only provides the output-parameter forms of these loads and packs.
+// Deduce the destination register from the matching SDK signature. In
+// particular, packing an int16 register produces a uint8 register.
+namespace detail {
+template <typename Src> struct RegisterResult {
+  template <typename Dst>
+  static __simd_callee__ Dst type(__simd_callee__ void (*)(Dst &, Src));
+};
+} // namespace detail
+#define TL_CANN_RETURN_REG(Name, Native)                                       \
+  template <typename Src> __simd_callee__ inline auto Name(Src src) {          \
+    decltype(detail::RegisterResult<Src>::type(::Native)) dst;                 \
+    ::Native(dst, src);                                                        \
+    return dst;                                                                \
+  }
+TL_CANN_RETURN_REG(loadalign_brc_elem, asc_loadalign_brc)
+TL_CANN_RETURN_REG(loadalign_brc_datablock, asc_loadalign_brc_v2)
+TL_CANN_RETURN_REG(loadalign_brc_elem2datablock, asc_loadalign_brc_v3)
+TL_CANN_RETURN_REG(loadalign_unpack4, asc_loadalign_unpack_v2)
+TL_CANN_RETURN_REG(pack_to_low, asc_pack)
+TL_CANN_RETURN_REG(pack_to_high, asc_pack_v2)
+#undef TL_CANN_RETURN_REG
+#endif
+
+// Register APIs also accept value-returning calls. Use the same corrected
+// operation so the two SDK spellings agree on inactive lanes and edge types.
+template <typename V>
+__simd_callee__ inline V div(V lhs, V rhs, vector_bool mask) {
+  V dst;
+  div(dst, lhs, rhs, mask);
+  return dst;
+}
+template <typename V>
+__simd_callee__ inline V select(V lhs, V rhs, vector_bool mask) {
+  V dst;
+  select(dst, lhs, rhs, mask);
+  return dst;
+}
+template <typename V, typename S>
+__simd_callee__ inline V min_scalar(V src, S scalar, vector_bool mask) {
+  V dst;
+  min_scalar(dst, src, scalar, mask);
+  return dst;
+}
+template <typename V>
+__simd_callee__ inline vector_bool ne(V lhs, V rhs, vector_bool mask) {
+  vector_bool dst;
+  ne(dst, lhs, rhs, mask);
+  return dst;
+}
+template <typename V>
+__simd_callee__ inline V duplicate(V src, vector_bool mask) {
+  V dst;
+  duplicate(dst, src, mask);
+  return dst;
+}
+
+// Only the five-argument strided store needs the 9.1 instruction fallback.
+template <typename... Args>
+__simd_callee__ inline void storealign_postupdate(Args &&...args)
+    requires(sizeof...(Args) != 5) {
+  ::asc_storealign_postupdate(static_cast<Args &&>(args)...);
+}
+
 #endif // register-vector API
 
-#undef TL_CANN_9_1
 #endif // defined(__NPU_ARCH__)
+#undef TL_CANN_9_1
 
 } // namespace cann
 } // namespace tl

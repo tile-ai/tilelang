@@ -1,10 +1,13 @@
 #pragma once
 
-#include "tl_templates/ascend/cann_compat.h"
-
 #include <type_traits>
 
 #include "c_api/asc_simd.h"
+
+#pragma push_macro("TL_CANN_SIMD_SCOPE")
+#undef TL_CANN_SIMD_SCOPE
+#define TL_CANN_SIMD_SCOPE
+#include "tl_templates/ascend/cann_compat_begin.h"
 
 namespace simd_inst {
 template <typename T> struct vec {};
@@ -86,12 +89,7 @@ template <typename Vec>
 __simd_callee__ inline Vec merge_masked(Vec &dst, Vec result,
                                         vector_bool mask) {
   Vec old_dst = dst;
-  if constexpr (requires { asc_select(dst, result, old_dst, mask); }) {
-    asc_select(dst, result, old_dst, mask);
-  } else {
-    // Bisheng provides a typed vsel for E8M0 even when the C API does not.
-    vsel(dst, result, old_dst, mask);
-  }
+  asc_select(dst, result, old_dst, mask);
   return dst;
 }
 
@@ -151,14 +149,13 @@ template <typename SrcVec> using widen_vec_t = typename widen_vec<SrcVec>::type;
   }
 
 SIMD_INST_DEFINE_LOAD(vlds_norm, asc_loadalign)
-SIMD_INST_DEFINE_LOAD(vlds_brc_elem, tl::cann::loadalign_brc_elem)
+SIMD_INST_DEFINE_LOAD(vlds_brc_elem, asc_loadalign_brc_elem)
 SIMD_INST_DEFINE_LOAD(vlds_upsample, asc_loadalign_upsample)
 SIMD_INST_DEFINE_LOAD(vlds_downsample, asc_loadalign_downsample)
 SIMD_INST_DEFINE_LOAD(vlds_unpack, asc_loadalign_unpack)
-SIMD_INST_DEFINE_LOAD(vlds_unpack4, tl::cann::loadalign_unpack4)
-SIMD_INST_DEFINE_LOAD(vlds_brc_datablock, tl::cann::loadalign_brc_datablock)
-SIMD_INST_DEFINE_LOAD(vlds_brc_elem2datablock,
-                      tl::cann::loadalign_brc_elem2datablock)
+SIMD_INST_DEFINE_LOAD(vlds_unpack4, asc_loadalign_unpack4)
+SIMD_INST_DEFINE_LOAD(vlds_brc_datablock, asc_loadalign_brc_datablock)
+SIMD_INST_DEFINE_LOAD(vlds_brc_elem2datablock, asc_loadalign_brc_elem2datablock)
 
 #undef SIMD_INST_DEFINE_LOAD
 
@@ -341,7 +338,7 @@ __simd_callee__ inline vec_pair<SrcVec> vintlv(SrcVec src_0, SrcVec src_1) {
 SIMD_INST_DEFINE_BINARY(vadd, asc_add)
 SIMD_INST_DEFINE_BINARY(vsub, asc_sub)
 SIMD_INST_DEFINE_BINARY(vmul, asc_mul)
-SIMD_INST_DEFINE_BINARY(vdiv, tl::cann::div)
+SIMD_INST_DEFINE_BINARY(vdiv, asc_div)
 SIMD_INST_DEFINE_BINARY(vmax, asc_max)
 SIMD_INST_DEFINE_BINARY(vmin, asc_min)
 SIMD_INST_DEFINE_BINARY(vand, asc_and)
@@ -353,7 +350,7 @@ SIMD_INST_DEFINE_BINARY(vabsdif, asc_abs_sub)
 
 SIMD_INST_DEFINE_BINARY(vadds, asc_add_scalar)
 SIMD_INST_DEFINE_BINARY(vmaxs, asc_max_scalar)
-SIMD_INST_DEFINE_BINARY(vmins, tl::cann::min_scalar)
+SIMD_INST_DEFINE_BINARY(vmins, asc_min_scalar)
 SIMD_INST_DEFINE_BINARY(vmuls, asc_mul_scalar)
 SIMD_INST_DEFINE_BINARY(vshls, asc_shiftleft_scalar)
 SIMD_INST_DEFINE_BINARY(vshrs, asc_shiftright_scalar)
@@ -795,9 +792,9 @@ template <typename Part>
 __simd_callee__ inline vector_bool ppack(vector_bool src, Part part) {
   vector_bool dst;
   if constexpr (part == HIGHER) {
-    tl::cann::pack_to_high(dst, src);
+    asc_pack_to_high(dst, src);
   } else {
-    tl::cann::pack_to_low(dst, src);
+    asc_pack_to_low(dst, src);
   }
   return dst;
 }
@@ -883,7 +880,7 @@ __simd_callee__ inline vec_t<T> vci(T index, Order order) {
     return dst;                                                                \
   }
 SIMD_INST_DEFINE_COMPARE(eq, asc_eq)
-SIMD_INST_DEFINE_COMPARE(ne, tl::cann::ne)
+SIMD_INST_DEFINE_COMPARE(ne, asc_ne)
 SIMD_INST_DEFINE_COMPARE(gt, asc_gt)
 SIMD_INST_DEFINE_COMPARE(ge, asc_ge)
 SIMD_INST_DEFINE_COMPARE(lt, asc_lt)
@@ -915,9 +912,9 @@ __simd_callee__ inline SrcVec vdupv(SrcVec src, vector_bool mask, Pos pos,
                                     Mode mode) {
   SrcVec dst;
   if constexpr (pos == POS_LOWEST) {
-    tl::cann::duplicate(dst, src, mask);
+    asc_duplicate(dst, src, mask);
   } else {
-    tl::cann::duplicate_highest(dst, src, mask);
+    asc_duplicate_highest(dst, src, mask);
   }
   return dst;
 }
@@ -963,9 +960,9 @@ template <typename U, typename SrcVec, typename Part>
 __simd_callee__ inline vec_t<U> vpack(SrcVec src, Part part) {
   vec_t<U> dst;
   if constexpr (part == HIGHER) {
-    tl::cann::pack_to_high(dst, src);
+    asc_pack_to_high(dst, src);
   } else {
-    tl::cann::pack_to_low(dst, src);
+    asc_pack_to_low(dst, src);
   }
   return dst;
 }
@@ -992,9 +989,8 @@ template <typename T, typename Post>
 __simd_callee__ inline __ubuf__ T *vsstb(vec_t<T> src, __ubuf__ T *base,
                                          int32_t stride, vector_bool mask,
                                          Post post) {
-  tl::cann::storealign_postupdate(base, src,
-                                  static_cast<uint16_t>(stride >> 16),
-                                  static_cast<uint16_t>(stride), mask);
+  asc_storealign_postupdate(base, src, static_cast<uint16_t>(stride >> 16),
+                            static_cast<uint16_t>(stride), mask);
   return base;
 }
 
@@ -1034,15 +1030,15 @@ __simd_callee__ inline void vsts_pack_quarter(vec_t<T> data, __ubuf__ T *base,
   if constexpr (std::is_same<T, int32_t>::value ||
                 std::is_same<T, uint32_t>::value ||
                 std::is_same<T, float>::value) {
-    tl::cann::storealign_pack_quarter(base, data, offset, mask);
+    asc_storealign_pack_quarter(base, data, offset, mask);
   } else if constexpr (std::is_same<T, fp8_e4_t>::value ||
                        std::is_same<T, fp8_e5_t>::value ||
                        std::is_same<T, float4_e2m1x2_t>::value ||
                        std::is_same<T, float4_e1m2x2_t>::value ||
                        std::is_same<T, uint8_t>::value ||
                        std::is_same<T, int8_t>::value) {
-    tl::cann::storealign_pack_quarter((__ubuf__ uint32_t *)base,
-                                      (vector_u32 &)data, offset, mask);
+    asc_storealign_pack_quarter((__ubuf__ uint32_t *)base, (vector_u32 &)data,
+                                offset, mask);
   }
 }
 
@@ -1069,3 +1065,6 @@ __simd_callee__ inline void vst_x2(vec_t<T> src0, vec_t<T> src1,
 }
 
 } // namespace simd_inst
+
+#include "tl_templates/ascend/cann_compat_end.h"
+#pragma pop_macro("TL_CANN_SIMD_SCOPE")

@@ -21,12 +21,15 @@ def test_cann_compat_shared_controls_compile(arch):
         pytest.skip(str(exc))
 
     source = """
-    #include "tl_templates/ascend/cann_compat.h"
+    #include "tl_templates/ascend/cann_compat_begin.h"
     extern "C" __global__ __cube__ void shared_controls() {
-        tl::cann::set_atomic_add_int32();
-        tl::cann::set_hf32_round_mode(tl::cann::hf32_round_mode::NEAREST_EVEN);
-        tl::cann::disable_hf32();
+        ::asc_set_atomic_add_int32();
+        asc_set_atomic_max_int32();
+        asc_set_atomic_min_int32();
+        asc_set_hf32_round_mode(asc_hf32_round_mode::NEAREST_EVEN);
+        asc_disable_hf32();
     }
+    #include "tl_templates/ascend/cann_compat_end.h"
     """
     binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch=arch, options=["-I" + TILELANG_TEMPLATE_PATH])
     assert binary.startswith(b"\x7fELF")
@@ -57,6 +60,58 @@ def test_cann_dma_original_names_preserve_wide_counts():
     binary = bisheng.compile_ascend(
         source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH, "-Werror=constant-conversion"]
     )
+    assert binary.startswith(b"\x7fELF")
+
+
+def test_native_cann_register_overloads_compile():
+    try:
+        bisheng.find_bisheng_path()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    source = """
+    #include "tl_templates/ascend/cann_compat.h"
+    #define asc_div(...) previous_binding(__VA_ARGS__)
+    #define TL_CANN_SIMD_SCOPE
+    #include "tl_templates/ascend/cann_compat_begin.h"
+    __simd_vf__ inline void registers(__ubuf__ uint32_t* p, __ubuf__ uint8_t* bytes) {
+        vector_bool mask = asc_create_mask_b32(PAT_ALL);
+        vector_u32 a, b;
+        asc_loadalign_brc_elem(a, p);
+        asc_loadalign_brc_elem_postupdate(b, p, 1);
+        auto c = asc_loadalign_brc_elem(p);
+        auto block = asc_loadalign_brc_datablock(p);
+        auto spread = asc_loadalign_brc_elem2datablock(p);
+        auto unpacked = asc_loadalign_unpack4(bytes);
+        asc_storealign(bytes, unpacked, 0, mask);
+        asc_storealign(p, asc_div(block, spread, mask), 0, mask);
+        auto packed = asc_pack_to_low(c);
+        static_assert(std::is_same_v<decltype(packed), vector_u16>);
+        static_assert(std::is_same_v<decltype(asc_pack_to_high(mask)), vector_bool>);
+        asc_storealign((__ubuf__ uint16_t*)bytes, packed, 0, mask);
+        auto q = ::asc_div(a, b, mask);
+        vector_bf16 bf;
+        asc_ne(mask, bf, bf, mask);
+        vector_f8e8m0 scale;
+        asc_duplicate(scale, scale, mask);
+        asc_select(scale, scale, scale, mask);
+        asc_storealign_postupdate(p, q, 1, mask);
+        asc_storealign_postupdate(p, q, 1, 2, mask);
+        asc_storealign(bytes, __builtin_bit_cast(vector_u8, scale), 0, mask);
+    }
+    #include "tl_templates/ascend/cann_compat_end.h"
+    #undef TL_CANN_SIMD_SCOPE
+    #if defined(asc_select) || defined(asc_storealign_postupdate)
+    #error leaked SIMD routing
+    #endif
+    int previous_binding(int);
+    inline int restored_binding(int x) { return asc_div(x); }
+    #undef asc_div
+    extern "C" __global__ __vector__ void entry() {
+        registers((__ubuf__ uint32_t*)0, (__ubuf__ uint8_t*)256);
+    }
+    """
+    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH])
     assert binary.startswith(b"\x7fELF")
 
 

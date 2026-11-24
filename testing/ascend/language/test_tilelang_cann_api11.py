@@ -408,3 +408,61 @@ def test_int32_store_atomic_multicore_and_none_restores_plain_store(op):
         compiled(a.to("npu"), reduced_device, plain_device)
         _assert_bits(reduced_device.cpu(), expected, ("multicore INT32 atomic", op, sentinel))
         _assert_bits(plain_device.cpu(), plain_expected, ("atomic none", op, sentinel))
+
+
+def test_native_extern_routes_follow_execution_domain():
+    @T.prim_func
+    def kernel(out: T.Tensor((3,), "float32"), x: T.float32):
+        with T.Kernel(1):
+            ub = T.alloc_shared((64,), "float32")
+            T.evaluate(T.call_extern("void", "::asc_disable_hf32"))
+            T.evaluate(T.call_extern("void", "asc_div", ub.data, ub.data, ub.data, 64))
+            T.evaluate(T.call_extern("void", "vendor::asc_disable_hf32"))
+            with T.SimdVF():
+                v = T.simd.vld(ub[0])
+                mask = T.simd.pset(32)
+                q = T.call_extern("float32x64", "::asc_div", v, v, mask)
+                T.simd.vsts(ub[0], q, mask)
+            with T.SimtVF(threads=1):
+                out[0] = T.call_extern("float32", "::powf", x, x)
+                out[1] = T.call_extern("float32", "vendor::powf", x, x)
+            out[2] = T.call_extern("float32", "::sqrtf", x)
+
+    source = lower(kernel, target="ascend").kernel_source
+    assert "tl::cann::disable_hf32(" in source
+    assert "vendor::asc_disable_hf32(" in source
+    assert "asc_div(" in source and source.count("tl::cann::div(") == 1
+    assert "tl::cann::simt::powf(" in source and "vendor::powf(" in source
+    assert "AscendC::Std::sqrt(" in source
+
+
+def native_div_kernel():
+    @T.prim_func
+    def kernel(a: T.Tensor((64,), "uint32"), b: T.Tensor((64,), "uint32"), out: T.Tensor((64,), "uint32")):
+        with T.Kernel(1):
+            lhs = T.alloc_shared((64,), "uint32")
+            rhs = T.alloc_shared((64,), "uint32")
+            T.copy(a, lhs)
+            T.copy(b, rhs)
+            with T.SimdVF():
+                x = T.simd.vld(lhs[0])
+                y = T.simd.vld(rhs[0])
+                one = T.simd.pset(32, "PAT_VL1")
+                full = T.simd.pset(32)
+                q = T.call_extern("uint32x64", "asc_div", x, y, one)
+                T.simd.vsts(lhs[0], q, full)
+            T.copy(lhs, out)
+
+    return kernel
+
+
+@tilelang.testing.requires_ascend
+def test_native_div_extern_returns_one_masked_register():
+    kernel = tilelang.compile(native_div_kernel(), target="ascend")
+    lhs = torch.arange(65, 129).to(torch.uint32)
+    rhs = torch.full((64,), 3, dtype=torch.uint32)
+    out = torch.full_like(lhs, 99).to("npu")
+    kernel(lhs.to("npu"), rhs.to("npu"), out)
+    expected = torch.zeros_like(lhs)
+    expected[0] = 65 // 3
+    assert torch.equal(out.cpu(), expected)
