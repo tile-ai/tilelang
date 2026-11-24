@@ -668,37 +668,28 @@ public:
     return result;
   }
 
-  void Insert(const DepEdge &edge) {
-    if (!present_.insert(edge).second)
-      return;
-    ICHECK_LT(std::max(edge.src, edge.dst), outgoing_.size());
-    edges_.push_back(edge);
-    outgoing_[edge.src].push_back(edge);
-    incoming_[edge.dst].push_back(edge);
-  }
-
   template <typename Projector>
   void Saturate(const DepEdge &start, int max_distance,
                 const Projector &project) {
     if (start.distance > max_distance)
       return;
     std::vector<DepEdge> work;
-    std::set<DepEdge> pending;
     auto enqueue_one = [&](const DepEdge &edge) {
-      if (edge.distance <= max_distance && !Contains(edge) &&
-          pending.insert(edge).second) {
+      if (edge.distance <= max_distance && present_.insert(edge).second) {
         work.push_back(edge);
       }
     };
-    auto enqueue = [&](const DepEdge &edge) { project(edge, enqueue_one); };
+    auto enqueue = [&](const DepEdge &edge) {
+      // The projector is fixed for this closure, preserves distance, and is
+      // transitively closed, so known edges cannot yield new projections.
+      if (Contains(edge))
+        return;
+      project(edge, enqueue_one);
+    };
     enqueue(start);
     while (!work.empty()) {
       DepEdge edge = work.back();
       work.pop_back();
-      if (Contains(edge)) {
-        pending.erase(edge);
-        continue;
-      }
       for (const DepEdge &other : outgoing_[edge.dst]) {
         int distance = edge.distance + other.distance;
         if (distance <= max_distance) {
@@ -713,16 +704,17 @@ public:
                           other.strict || edge.strict));
         }
       }
-      pending.erase(edge);
-      Insert(edge);
+      AppendEdge(edge);
     }
   }
 
   DepClosure DistanceZero() const {
     DepClosure result(outgoing_.size());
     for (const DepEdge &edge : edges_) {
-      if (edge.distance == 0)
-        result.Insert(edge);
+      if (edge.distance == 0) {
+        result.present_.insert(edge);
+        result.AppendEdge(edge);
+      }
     }
     return result;
   }
@@ -730,7 +722,15 @@ public:
   const std::vector<DepEdge> &Edges() const { return edges_; }
 
 private:
+  void AppendEdge(const DepEdge &edge) {
+    ICHECK_LT(std::max(edge.src, edge.dst), outgoing_.size());
+    edges_.push_back(edge);
+    outgoing_[edge.src].push_back(edge);
+    incoming_[edge.dst].push_back(edge);
+  }
+
   std::vector<DepEdge> edges_;
+  // Includes pending edges; adjacency lists only contain processed edges.
   std::set<DepEdge> present_;
   std::vector<std::vector<DepEdge>> outgoing_;
   std::vector<std::vector<DepEdge>> incoming_;
