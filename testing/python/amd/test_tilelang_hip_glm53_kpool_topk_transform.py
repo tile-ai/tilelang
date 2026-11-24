@@ -2,11 +2,18 @@ import pytest
 import torch
 
 import tilelang.testing
+from examples.deepseek_v32.topk_selector import tl_topk_impl
 from examples.kpool.example_glm53_kpool_topk_transform import (
     GLM53_INDEX_TOPK,
     glm53_kpool_topk_transform,
     glm53_kpool_topk_transform_reference,
 )
+
+
+tl_topk_impl.pass_configs = {
+    **tl_topk_impl.pass_configs,
+    tilelang.PassConfigKey.ARITH_Z3_RLIMIT: 100,
+}
 
 
 def _assert_history_sets_and_tail_match(actual, expected, history_lengths):

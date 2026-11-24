@@ -9,7 +9,13 @@ import tilelang.testing
 _EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "examples" / "deepseek_v32"
 sys.path.insert(0, str(_EXAMPLE_DIR))
 
-from topk_selector import tl_topk  # noqa: E402
+from topk_selector import tl_topk, tl_topk_impl  # noqa: E402
+
+
+tl_topk_impl.pass_configs = {
+    **tl_topk_impl.pass_configs,
+    tilelang.PassConfigKey.ARITH_Z3_RLIMIT: 100,
+}
 
 
 @tilelang.testing.requires_rocm
