@@ -4,6 +4,7 @@
  */
 
 #include "op/gemm.h"
+#include "op/utils.h"
 #include "support/check.h"
 #include <tvm/runtime/logging.h>
 
@@ -25,6 +26,20 @@ namespace {
 constexpr const char *kROCmMFMA = "rocm.mfma";
 constexpr const char *kROCmWMMA = "rocm.wmma";
 
+bool IsFullSharedTile(const BufferRegion &region, int rows, int cols) {
+  const Buffer &buffer = region->buffer;
+  if (!IsSharedBuffer(buffer) || buffer->shape.size() != 2 ||
+      !buffer->strides.empty() || buffer->data_alignment < 16 ||
+      buffer->data_alignment % 16 != 0) {
+    return false;
+  }
+  return is_const_int(buffer->shape[0], rows) &&
+         is_const_int(buffer->shape[1], cols) && is_zero(buffer->elem_offset) &&
+         is_zero(region->region[0]->min) && is_zero(region->region[1]->min) &&
+         is_const_int(region->region[0]->extent, rows) &&
+         is_const_int(region->region[1]->extent, cols);
+}
+
 std::pair<int, int>
 ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
                             int num_warps) {
@@ -40,6 +55,15 @@ ComputeDefaultWarpPartition(const GemmWarpPolicyNode &policy, int M, int N,
       << "M must be divisible by " << kMPerWarp << ", but got " << M;
   ICHECK(N % kNPerWarp == 0)
       << "N must be divisible by " << kNPerWarp << ", but got " << N;
+  // Each wavefront owns at least one 16x16 MFMA output. Without this check a
+  // small tile reaches the macro generator with zero rows or columns per warp
+  // and fails there with "Divide by zero".
+  const int max_warps = (M / kMPerWarp) * (N / kNPerWarp);
+  CHECK_LE(num_warps, max_warps, ValueError)
+      << "T.gemm cannot split a " << M << "x" << N << " tile among "
+      << num_warps << " wavefronts: every wavefront needs at least "
+      << kMPerWarp << "x" << kNPerWarp << ", so this tile allows at most "
+      << max_warps << ". Use fewer threads or a larger tile.";
 
   if (policy.IsFullRow()) {
     m_warp = num_warps;
@@ -137,9 +161,32 @@ struct Gemm {
     return ComputeDefaultWarpPartition(policy, M, N, num_warps);
   }
 
-  static bool ReuseExistingSharedLayout(ffi::String gemm_inst) {
-    (void)gemm_inst;
-    return false;
+  static bool ReuseExistingSharedLayout(ffi::String gemm_inst,
+                                        const tvm::tl::Gemm &op,
+                                        const Buffer &buffer,
+                                        const Layout &layout,
+                                        const Target &target) {
+    if (gemm_inst != kROCmWMMA || !TargetIsGfx1200(target) || op->transA_ ||
+        op->transB_ || op->kPack_ != 1 ||
+        (!buffer.same_as(op->a_) && !buffer.same_as(op->b_)) ||
+        op->a_->dtype != op->b_->dtype ||
+        (op->a_->dtype != DataType::BFloat(16) &&
+         op->a_->dtype != DataType::Float(16)) ||
+        op->c_->dtype != DataType::Float(32) || op->m_ % 16 != 0 ||
+        op->n_ % 16 != 0 || op->k_ % 16 != 0 ||
+        !IsFullSharedTile(op->aRegion_, op->m_, op->k_) ||
+        !IsFullSharedTile(op->bRegion_, op->k_, op->n_) ||
+        layout.as<FragmentNode>()) {
+      return false;
+    }
+    // Limit reuse to gfx1200, where these operand loads have been validated.
+    // gfx1200 loads eight FP16/BF16 values per lane. With NN row-major storage,
+    // A's K slice is contiguous and 16-byte aligned, while B's K slice is
+    // strided and the existing emitter scalarizes its loads. Require the
+    // complete physical mapping, not just matching logical tile dimensions.
+    // Transposes, mixed shared/register operands and leading stage axes keep
+    // their existing inferred-layout requirements.
+    return layout->IsEqual(MakeLinearLayout(buffer->shape).operator->());
   }
 };
 
