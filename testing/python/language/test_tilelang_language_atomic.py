@@ -1,3 +1,5 @@
+import functools
+import operator
 import re
 
 import pytest
@@ -1127,14 +1129,23 @@ def test_atomic_min():
     run_atomic_min(4, 64, 64, 16, 16)
 
 
+def _signed_bits(values, bits=64):
+    # Unsigned values as same-width signed ints; torch has few uint32/uint64 kernels.
+    dtype = torch.int32 if bits == 32 else torch.int64
+    return torch.tensor([v - (1 << bits) if v >= 1 << (bits - 1) else v for v in values], dtype=dtype)
+
+
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("op", ["add", "max", "min"])
+@pytest.mark.parametrize("dtype", ["int64", "uint64"])
+@pytest.mark.parametrize("op", ["add", "max", "min", "or"])
 @pytest.mark.parametrize("return_prev", [False, True])
-def test_atomic_int64(op, return_prev):
+def test_atomic_int64(dtype, op, return_prev):
+    if op == "or" and return_prev:
+        pytest.skip("atomic_or has no return_prev")
     atomic = getattr(T, f"atomic_{op}")
 
     @T.prim_func
-    def main(A: T.Tensor((32,), "int64"), B: T.Tensor((32,), "int64"), Prev: T.Tensor((32,), "int64")):
+    def main(A: T.Tensor((32,), dtype), B: T.Tensor((32,), dtype), Prev: T.Tensor((32,), dtype)):
         with T.Kernel(1, threads=32):
             i = T.get_thread_binding()
             if return_prev:
@@ -1143,14 +1154,41 @@ def test_atomic_int64(op, return_prev):
                 atomic(B[i], A[i])
 
     kernel = tilelang.compile(main, target="cuda")
-    a = torch.tensor([1 << 40, -(1 << 40), -7, 7, -9, 9, 0, 0] * 4, dtype=torch.int64, device="cuda")
-    initial = torch.tensor([-(1 << 40), 1 << 40, -3, 3, -9, 9, -1, 1] * 4, dtype=torch.int64, device="cuda")
-    b, prev = initial.clone(), torch.empty_like(initial)
-    reference = {"add": torch.add, "max": torch.maximum, "min": torch.minimum}[op]
-    kernel(a, b, prev)
-    torch.testing.assert_close(b, reference(initial, a), rtol=0, atol=0)
+    if dtype == "int64":
+        a = [1 << 40, -(1 << 40), -7, 7, -9, 9, 0, 0] * 4
+        initial = [-(1 << 40), 1 << 40, -3, 3, -9, 9, -1, 1] * 4
+    else:
+        a = [1 << 63, 1, (1 << 64) - 1, 7, 1 << 40, 9, 0, 0] * 4
+        initial = [1, 1 << 63, 3, (1 << 64) - 1, 1 << 41, 9, (1 << 64) - 1, 1] * 4
+    reference = {"add": operator.add, "max": max, "min": min, "or": operator.or_}[op]
+    expected = _signed_bits([reference(x, y) % (1 << 64) for x, y in zip(initial, a)])
+    torch_dtype = getattr(torch, dtype)
+    b = _signed_bits(initial).cuda().view(torch_dtype)
+    prev = torch.empty_like(b)
+    kernel(_signed_bits(a).cuda().view(torch_dtype), b, prev)
+    assert torch.equal(b.view(torch.int64).cpu(), expected)
     if return_prev:
-        torch.testing.assert_close(prev, initial, rtol=0, atol=0)
+        assert torch.equal(prev.view(torch.int64).cpu(), _signed_bits(initial))
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
+@pytest.mark.parametrize("memory_order", ["relaxed", "acquire", "release", "acq_rel", "seq_cst"])
+def test_atomic_or_memory_order(dtype, memory_order):
+    @T.prim_func
+    def main(A: T.Tensor((32,), dtype), B: T.Tensor((1,), dtype)):
+        with T.Kernel(1, threads=32):
+            i = T.get_thread_binding()
+            T.atomic_or(B[0], A[i], memory_order=memory_order)
+
+    kernel = tilelang.compile(main, target="cuda")
+    bits = 32 if dtype.endswith("32") else 64
+    a = [1 << (i * (bits - 1) // 31) for i in range(32)]
+    expected = _signed_bits([functools.reduce(operator.or_, a)], bits)
+    torch_dtype = getattr(torch, dtype)
+    b = torch.zeros_like(expected).cuda().view(torch_dtype)
+    kernel(_signed_bits(a, bits).cuda().view(torch_dtype), b)
+    assert torch.equal(b.view(expected.dtype).cpu(), expected)
 
 
 # ======== fp16/bf16 scalar max/min value-dtype conversion (issue #2758) ========
