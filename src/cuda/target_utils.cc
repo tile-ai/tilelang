@@ -114,6 +114,15 @@ bool TargetHasTmem(Target target) {
   return TargetIsSm100(target);
 }
 
+bool TargetHasTcgen05Int8Mma(Target target) {
+  if (!TargetIsSm100(target))
+    return false;
+  const std::string arch = target->GetAttr<ffi::String>("arch").value();
+  int version = GetCudaArchInt(target);
+  return arch.back() == 'a' &&
+         (version == 100 || version == 101 || version == 110);
+}
+
 bool TargetHasBulkCopy(Target target) {
   if (!TargetIsCuda(target))
     return false;

@@ -1,4 +1,6 @@
+import pytest
 import torch
+import tilelang
 import tilelang.testing
 import tilelang.language as T
 
@@ -72,8 +74,27 @@ def assert_matmul_correctness(M, N, K, block_M, block_N, block_K, in_dtype, out_
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(10)
 def test_assert_matmul():
+    if torch.cuda.get_device_capability() not in ((10, 0), (11, 0)):
+        pytest.skip("tcgen05.mma.kind::i8 requires sm_100a or sm_110a")
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.int8, T.int32, T.int32)
     assert_matmul_correctness(1024, 1024, 1024, 128, 128, 128, T.uint8, T.int32, T.int32)
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("in_dtype", [T.int8, T.uint8])
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"kind": "cuda", "arch": "sm_103a"},
+        {"kind": "cuda", "arch": "sm_100f"},
+        {"kind": "cuda", "arch": "sm_100f", "code": ["sm_100a", "sm_103a"]},
+    ],
+)
+def test_int8_tcgen5_rejected_without_kind_i8(in_dtype, target):
+    # tcgen05.mma.kind::i8 exists only on sm_100a/sm_110a; reject at lowering instead of failing in ptxas.
+    func = matmul_nt(256, 256, 256, 128, 128, 128, in_dtype, T.int32, T.int32)
+    with pytest.raises(Exception, match="TCGEN5MMA"):
+        tilelang.compile(func, out_idx=-1, target=target)
 
 
 if __name__ == "__main__":
