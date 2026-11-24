@@ -15,6 +15,7 @@ bool TargetIsRocm(Target target);
 bool TargetIsCDNA(Target target);
 bool TargetIsRDNA(Target target);
 bool TargetIsGfx950(Target target);
+bool TargetIsGfx1200(const Target &target);
 
 bool TargetRocmHasAsyncCopy(Target target);
 int TargetRocmGetWarpSize(Target target);

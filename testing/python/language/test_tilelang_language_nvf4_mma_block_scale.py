@@ -662,10 +662,9 @@ def test_nvf4_mma_block_scale_codegen(K):
     assert f"void* SFB_shared = ((void*)((char*)buf_dyn_shmem + {2 * fp4_tile_bytes + sf_tile_bytes}));" in src
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 @pytest.mark.parametrize("K", [64, 256])
 def test_nvf4_mma_block_scale_cutedsl_codegen(K):
-    if tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True) is None:
-        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_120a"})
     with target:
         src = tilelang.lower(_make_nvf4_matmul_codegen_kernel(128, 128, K), target=target).kernel_source

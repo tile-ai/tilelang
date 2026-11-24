@@ -1,0 +1,7 @@
+# CUDA test requirements
+--requirement requirements-test-cuda.txt
+
+# CuTeDSL specific requirements
+# Use the cu13 extra so CuTeDSL installs the CUDA 13 runtime package.
+# 4.8.0 is the first release whose FP8 conversions compile for sm_89.
+nvidia-cutlass-dsl[cu13]==4.8.1

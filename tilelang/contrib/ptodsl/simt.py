@@ -162,18 +162,48 @@ def _scalar_select_compat(cond, true_val, false_val):
 _scalar.select = _scalar_select_compat
 
 
-def integer_atomic(ptr, value, logical_dtype, operation):
-    """Adapt signed/unsigned TIR integers to PTOAS signless atomic carriers."""
+def _atomic_signless_ptr(ptr, payload_dtype):
+    """Re-author an integer pointer with its signless PTO element type."""
+    payload_type = payload_dtype.resolve()
+    pointer_type = _pto.PtrType(unwrap_surface_value(ptr).type)
+    if pointer_type.element_type == payload_type:
+        return ptr
+    payload_ptr_type = _pto.PtrType.get(payload_type, memory_space=pointer_type.memory_space)
+    return pto.castptr(ptr, payload_ptr_type)
+
+
+def _atomic_integer_compat(op, ptr, value, logical_dtype, *, l2cache, with_signedness):
+    # PTO atomics require signless i32/i64 operands. TileLang carries integer
+    # signedness in siXX/uiXX, so convert the operand to the destination width
+    # through the signless carrier and restore signedness on the returned old
+    # value. The logical dtype defines the atomic's signedness.
     from .common import wrap_const
 
-    logical_type = IntegerType(logical_dtype.resolve())
+    resolved_type = logical_dtype.resolve()
+    if not IntegerType.isinstance(resolved_type):
+        return op(ptr, value, l2cache=l2cache)
+    logical_type = IntegerType(resolved_type)
     payload_dtype = {32: pto.i32, 64: pto.i64}[logical_type.width]
-    pointer_type = _pto.PtrType(unwrap_surface_value(ptr).type)
-    payload_ptr_type = _pto.PtrType.get(payload_dtype.resolve(), memory_space=pointer_type.memory_space)
-    payload_ptr = pto.castptr(ptr, payload_ptr_type)
-    payload_value = pto.cast(wrap_const(value, logical_dtype), payload_dtype)
-    kwargs = {}
-    if operation in ("atomic_min", "atomic_max"):
-        kwargs["signedness"] = "unsigned" if logical_type.is_unsigned else "signed"
-    previous = getattr(pto, operation)(payload_ptr, payload_value, **kwargs)
-    return pto.cast(previous, logical_dtype)
+    signedness = "unsigned" if logical_type.is_unsigned else "signed"
+    converted_value = pto.cast(wrap_const(value, logical_dtype), payload_dtype)
+    signless_ptr = _atomic_signless_ptr(ptr, payload_dtype)
+    if with_signedness:
+        result = op(signless_ptr, converted_value, l2cache=l2cache, signedness=signedness)
+    else:
+        result = op(signless_ptr, converted_value, l2cache=l2cache)
+    return wrap_surface_value(_restore_integer_signedness(unwrap_surface_value(result), logical_type))
+
+
+def atomic_add(ptr, value, logical_dtype, *, l2cache="nmfv"):
+    """Atomically add an integer value through PTO's signless atomic carrier."""
+    return _atomic_integer_compat(pto.atomic_add, ptr, value, logical_dtype, l2cache=l2cache, with_signedness=False)
+
+
+def atomic_max(ptr, value, logical_dtype, *, l2cache="nmfv"):
+    """Atomically max an integer value through PTO's signless atomic carrier."""
+    return _atomic_integer_compat(pto.atomic_max, ptr, value, logical_dtype, l2cache=l2cache, with_signedness=True)
+
+
+def atomic_min(ptr, value, logical_dtype, *, l2cache="nmfv"):
+    """Atomically min an integer value through PTO's signless atomic carrier."""
+    return _atomic_integer_compat(pto.atomic_min, ptr, value, logical_dtype, l2cache=l2cache, with_signedness=True)

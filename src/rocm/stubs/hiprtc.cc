@@ -66,6 +66,7 @@ namespace {
 
 constexpr const char *kLibHiprtcPaths[] = {
     "libhiprtc.so",
+    "libhiprtc.so.7",
     "libhiprtc.so.6",
     "libhiprtc.so.5",
 };
@@ -84,6 +85,15 @@ void *TryLoadLibHiprtc() {
   }
 
   void *handle = nullptr;
+  // Reuse a runtime that is already mapped (e.g. PyTorch's wheel-bundled copy
+  // loaded with RTLD_LOCAL) before loading another one from the system path.
+  // Two runtimes in one process make module handles incompatible.
+  for (const char *path : kLibHiprtcPaths) {
+    handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
+    if (handle != nullptr) {
+      return handle;
+    }
+  }
   for (const char *path : kLibHiprtcPaths) {
     handle = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
     if (handle != nullptr) {
