@@ -336,24 +336,10 @@ __simd_callee__ Dst output_register_type(__simd_callee__ void (*)(Dst &, Src));
   __simd_callee__ inline decltype(auto) Name(Args &&...args) {                 \
     return ::Native(static_cast<Args &&>(args)...);                            \
   }
-TL_CANN_FORWARD_REG(update_addr_reg_b8, asc_create_iter_reg_b8)
-TL_CANN_FORWARD_REG(update_addr_reg_b16, asc_create_iter_reg_b16)
-TL_CANN_FORWARD_REG(update_addr_reg_b32, asc_create_iter_reg_b32)
-TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_brc_elem, asc_loadalign_brc)
-TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_brc_datablock, asc_loadalign_brc_v2)
-TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_brc_elem2datablock,
-                                asc_loadalign_brc_v3)
-TL_CANN_FORWARD_REG_WITH_RESULT(loadalign_unpack4, asc_loadalign_unpack_v2)
-TL_CANN_FORWARD_REG(loadalign_brc_elem_postupdate, asc_loadalign_brc_postupdate)
-TL_CANN_FORWARD_REG(loadalign_brc_datablock_postupdate,
-                    asc_loadalign_brc_postupdate_v2)
-TL_CANN_FORWARD_REG(loadalign_brc_elem2datablock_postupdate,
-                    asc_loadalign_brc_postupdate_v3)
-TL_CANN_FORWARD_REG(loadalign_unpack4_postupdate,
-                    asc_loadalign_unpack_postupdate_v2)
-TL_CANN_FORWARD_REG_WITH_RESULT(pack_to_low, asc_pack)
-TL_CANN_FORWARD_REG_WITH_RESULT(pack_to_high, asc_pack_v2)
-TL_CANN_FORWARD_REG(storealign_pack_quarter, asc_storealign_pack_v2)
+#define TL_CANN_DEFINE_REG(wrap, name, old) wrap(name, old)
+TL_CANN_RENAMED_REG_NAMES(TL_CANN_DEFINE_REG, TL_CANN_FORWARD_REG,
+                          TL_CANN_FORWARD_REG_WITH_RESULT)
+#undef TL_CANN_DEFINE_REG
 #undef TL_CANN_FORWARD_REG_WITH_RESULT
 #undef TL_CANN_FORWARD_REG
 #undef TL_CANN_FORWARD_TO

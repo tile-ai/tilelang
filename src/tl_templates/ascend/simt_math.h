@@ -419,23 +419,9 @@ __simt_callee__ inline bfloat16_t hexp10(bfloat16_t x) {
 __simt_callee__ inline half hexp2(half x) { return ::hexp2(x); }
 __simt_callee__ inline half hexp10(half x) { return ::hexp10(x); }
 #else
-using ::acosf;
-using ::acoshf;
-using ::asinf;
-using ::asinhf;
-using ::atanf;
-using ::atanhf;
-using ::copysignf;
-using ::coshf;
-using ::exp10f;
-using ::exp2f;
-using ::fmodf;
-using ::hexp10;
-using ::hexp2;
-using ::hypotf;
-using ::log1pf;
-using ::sinhf;
-using ::tanhf;
+#define TL_CANN_USE_NATIVE(name) using ::name;
+TL_CANN_SIMT_MATH_9_1_ONLY_NAMES(TL_CANN_USE_NATIVE)
+#undef TL_CANN_USE_NATIVE
 #endif
 
 #undef TL_SIMT_MATH_91
