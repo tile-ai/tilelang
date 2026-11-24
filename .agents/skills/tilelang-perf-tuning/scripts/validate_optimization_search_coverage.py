@@ -856,55 +856,43 @@ def candidate_blocked_case(candidate_id: str, case_id: str, results: dict) -> bo
     )
 
 
-def measured_kernel_time(candidate_id: str, case_id: str, results: dict) -> float | None:
-    """Return the candidate's recorded TESTED_PATH measurement for one case."""
-    result = results.get(candidate_id)
-    if result is None:
-        return None
-    for item in result.get("case_results", []):
-        if isinstance(item, dict) and item.get("case_id") == case_id and item.get("disposition") == "TESTED_PATH":
-            return item["performance_measurement"]["kernel_time_us"]
-    return None
+def validate_delivery_binding(
+    data: dict,
+    cases: list[dict],
+    promoted_cases: dict[str, set[str]],
+) -> None:
+    """Bind every claimed best to the delivered implementation's final measurement.
 
-
-def selected_best_implementation(case: dict, promoted_cases: dict[str, set[str]], results: dict) -> tuple[str, float]:
-    """Return the fastest tested implementation: B0 or the best promoted candidate."""
-    case_id = case["case_id"]
-    selected_id = BASELINE_ID
-    selected_time = case["kernel_time_us"]
-    for candidate_id in promoted_cases:
-        if case_id not in promoted_cases[candidate_id]:
-            continue
-        measured = measured_kernel_time(candidate_id, case_id, results)
-        if measured is not None and measured < selected_time:
-            selected_id = candidate_id
-            selected_time = measured
-    return selected_id, selected_time
-
-
-def validate_best_measurement_binding(cases: list[dict], promoted_cases: dict[str, set[str]], results: dict) -> None:
-    """Bind the claimed best time to the selected implementation's measurement.
-
-    A fresh final measurement may supersede the original promotion value, but it must be
-    recorded on the mutable case entry and must not rewrite the immutable RESULT event.
+    The delivered implementation is B0 or a promoted candidate. Every case records a fresh
+    final measurement for that implementation, and the mutable claim must equal it. A
+    delivered candidate may be slower than B0 on an individual case within the promotion
+    allowance, so the claim is the delivered measurement, not the historical per-case
+    minimum. The immutable RESULT events stay unchanged.
     """
+    delivered = data.get("delivered_implementation_id")
+    require(
+        nonempty_text(delivered),
+        "final record needs delivered_implementation_id (B0 or a promoted candidate)",
+    )
+    require(
+        delivered == BASELINE_ID or delivered in promoted_cases,
+        f"delivered implementation {delivered} must be B0 or a candidate promoted with a TESTED_PATH",
+    )
     for case in cases:
         case_id = case["case_id"]
-        selected_id, measured = selected_best_implementation(case, promoted_cases, results)
-        claim = case["best_metrics"]["kernel_time_us"]
-        fresh = case.get("final_measurement")
-        if fresh is None:
+        if delivered != BASELINE_ID:
             require(
-                math.isclose(claim, measured, rel_tol=1e-3, abs_tol=1e-6),
-                f"case {case_id}: best kernel_time_us {claim} is not the measured {measured} of the selected "
-                f"best implementation {selected_id}; record a final_measurement for a fresh measurement",
+                case_id in promoted_cases[delivered],
+                f"case {case_id}: delivered candidate {delivered} was not promoted with a TESTED_PATH for this case",
             )
-            continue
-        require(isinstance(fresh, dict), f"case {case_id}: final_measurement must be an object")
+        fresh = case.get("final_measurement")
         require(
-            fresh.get("implementation_id") == selected_id,
-            f"case {case_id}: final_measurement names {fresh.get('implementation_id')!r}, "
-            f"but the selected best implementation is {selected_id}",
+            isinstance(fresh, dict),
+            f"case {case_id}: final record needs final_measurement for delivered implementation {delivered}",
+        )
+        require(
+            fresh.get("implementation_id") == delivered,
+            f"case {case_id}: final_measurement names {fresh.get('implementation_id')!r}, but the delivered implementation is {delivered}",
         )
         require(
             positive_number(fresh.get("kernel_time_us")),
@@ -914,9 +902,10 @@ def validate_best_measurement_binding(cases: list[dict], promoted_cases: dict[st
             nonempty_text(fresh.get("artifact")),
             f"case {case_id}: final_measurement needs an artifact",
         )
+        claim = case["best_metrics"]["kernel_time_us"]
         require(
             math.isclose(fresh["kernel_time_us"], claim, rel_tol=1e-3, abs_tol=1e-6),
-            f"case {case_id}: best kernel_time_us {claim} disagrees with the final_measurement {fresh['kernel_time_us']}",
+            f"case {case_id}: best kernel_time_us {claim} disagrees with the delivered final_measurement {fresh['kernel_time_us']}",
         )
 
 
@@ -1963,7 +1952,6 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
     validate_direct_route_priority(cases, obligations, created)
 
     if final:
-        validate_best_measurement_binding(cases, promoted_cases, results)
         validate_blocked_resolutions(data.get("blocked_resolutions"), blocker_map(events, cases))
 
         pipeline_obligations = obligation_kinds.get("pipeline_realization", [])
@@ -1992,15 +1980,18 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
         validate_convergence_evidence(data, cases)
 
     if final and targets_met:
-        return "TARGET_MET"
-    if strict_closure and no_numeric_target:
-        return "CONVERGED_WITHOUT_NUMERIC_TARGET"
-    if final and not allow_unmet_convergence:
+        outcome = "TARGET_MET"
+    elif strict_closure and no_numeric_target:
+        outcome = "CONVERGED_WITHOUT_NUMERIC_TARGET"
+    elif final and not allow_unmet_convergence:
         unmet = [case["case_id"] for case in cases if not validate_performance_target(case)]
         raise SearchIncomplete(f"performance targets unmet for {unmet}; keep search open")
-    if strict_closure:
-        return "UNMET_BUT_CONVERGED"
-    return "VALID_RECORD"
+    elif strict_closure:
+        outcome = "UNMET_BUT_CONVERGED"
+    else:
+        return "VALID_RECORD"
+    validate_delivery_binding(data, cases, promoted_cases)
+    return outcome
 
 
 def main() -> int:
