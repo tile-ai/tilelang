@@ -864,12 +864,12 @@ __simd_callee__ inline vec_t<T> vci(T index, Order order) {
   return dst;
 }
 
-#define SIMD_INST_DEFINE_COMPARE(OP, VectorApi)                                \
+#define SIMD_INST_DEFINE_COMPARE(OP)                                           \
   template <typename SrcVec>                                                   \
   __simd_callee__ inline vector_bool vcmp_##OP(SrcVec src_0, SrcVec src_1,     \
                                                vector_bool mask) {             \
     vector_bool dst;                                                           \
-    VectorApi(dst, src_0, src_1, mask);                                        \
+    asc_##OP(dst, src_0, src_1, mask);                                         \
     return dst;                                                                \
   }                                                                            \
   template <typename SrcVec, typename ScalarT>                                 \
@@ -879,12 +879,12 @@ __simd_callee__ inline vec_t<T> vci(T index, Order order) {
     asc_##OP##_scalar(dst, src, scalar, mask);                                 \
     return dst;                                                                \
   }
-SIMD_INST_DEFINE_COMPARE(eq, asc_eq)
-SIMD_INST_DEFINE_COMPARE(ne, asc_ne)
-SIMD_INST_DEFINE_COMPARE(gt, asc_gt)
-SIMD_INST_DEFINE_COMPARE(ge, asc_ge)
-SIMD_INST_DEFINE_COMPARE(lt, asc_lt)
-SIMD_INST_DEFINE_COMPARE(le, asc_le)
+SIMD_INST_DEFINE_COMPARE(eq)
+SIMD_INST_DEFINE_COMPARE(ne)
+SIMD_INST_DEFINE_COMPARE(gt)
+SIMD_INST_DEFINE_COMPARE(ge)
+SIMD_INST_DEFINE_COMPARE(lt)
+SIMD_INST_DEFINE_COMPARE(le)
 #undef SIMD_INST_DEFINE_COMPARE
 
 // -- Broadcast

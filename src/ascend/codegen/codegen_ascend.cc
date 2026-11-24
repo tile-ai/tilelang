@@ -1985,22 +1985,22 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
         << "Ascend atomic does not support data type: " << atomic_dtype;
 
     this->PrintIndent();
-    std::string name(fn);
+    this->stream << fn;
     if (atomic_dtype.is_bfloat16()) {
-      name += "_bfloat";
+      this->stream << "_bfloat";
     } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 16) {
-      name += "_float16";
+      this->stream << "_float16";
     } else if (atomic_dtype.is_float() && atomic_dtype.bits() == 32) {
-      name += "_float";
+      this->stream << "_float";
     } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 8) {
-      name += "_int8";
+      this->stream << "_int8";
     } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 16) {
-      name += "_int16";
+      this->stream << "_int16";
     } else if (atomic_dtype.is_int() && atomic_dtype.bits() == 32) {
-      name += "_int32";
+      this->stream << "_int32";
     }
 
-    this->stream << name << "();\n";
+    this->stream << "();\n";
   } else if (op->op.same_as(tl::ascend_set_atomic_none())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.ascend_set_atomic_none expects no arguments";
@@ -3835,15 +3835,6 @@ void CodeGenTileLangAscend::EmitSimtVectorPredicateNot(const PrimExpr &value,
     PrintVecElemStore(result, dtype, i, lane_value.str());
   }
   os << result;
-}
-
-// Floating T.truncmod lowers to a ModNode, bypassing external-call lowering.
-void CodeGenTileLangAscend::VisitExpr_(const ModNode *op, std::ostream &os) {
-  if (IsInsideSimtVF() && op->dtype.element_of() == DataType::Float(32)) {
-    PrintCallExtern(PrimType(op->dtype), "fmodf", {op->a, op->b}, false, os);
-    return;
-  }
-  CodeGenC::VisitExpr_(op, os);
 }
 
 void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,

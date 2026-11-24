@@ -8,7 +8,7 @@ from collections.abc import Callable
 import torch
 import tilelang
 
-from .torch_bench import _flush_cache
+from .torch_bench import _flush_cache, _get_npu_l2_cache_flush
 
 
 @tilelang.jit(out_idx=[], target="ascend")
@@ -311,7 +311,7 @@ def bench_with_msprof(
     with torch.npu.device(cache.device), _defer_signals(), _prof_work_path(), _suppress_output(True):
         flush_tasks: dict[int, int] = {}
         flush = _flush_cache
-        scratch = cache.numel() != 0
+        scratch = cache.numel() != 0 and _get_npu_l2_cache_flush() is None
         if scratch:
             flush = _get_cache_read_kernel(cache.numel())
             flush(cache)

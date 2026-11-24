@@ -87,9 +87,7 @@ __simt_callee__ inline float ratio(uint32_t small, uint32_t large) {
   return scale(a.mantissa / b.mantissa, a.exponent - b.exponent);
 }
 } // namespace detail
-#endif
 
-#if TL_SIMT_MATH_91 || TL_SIMT_MATH_92_93
 __simt_callee__ inline float atan2f(float y, float x) {
   using namespace detail;
   uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;

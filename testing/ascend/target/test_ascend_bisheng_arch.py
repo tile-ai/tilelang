@@ -13,13 +13,19 @@ from tilelang.jit import kernel as jit_kernel
 from tilelang.transform import PassConfigKey
 
 
-@pytest.mark.parametrize("arch", ["dav-2201", "dav-3510"])
-def test_cann_compat_shared_controls_compile(arch):
+def _assert_compiles(source, arch="dav-3510", extra_options=()):
     try:
         bisheng.find_bisheng_path()
     except RuntimeError as exc:
         pytest.skip(str(exc))
 
+    options = ["-I" + TILELANG_TEMPLATE_PATH, *extra_options]
+    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch=arch, options=options)
+    assert binary.startswith(b"\x7fELF")
+
+
+@pytest.mark.parametrize("arch", ["dav-2201", "dav-3510"])
+def test_cann_compat_shared_controls_compile(arch):
     source = """
     #include "tl_templates/ascend/cann_compat.h"
     extern "C" __global__ __cube__ void shared_controls() {
@@ -31,16 +37,10 @@ def test_cann_compat_shared_controls_compile(arch):
         asc_disable_hf32();
     }
     """
-    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch=arch, options=["-I" + TILELANG_TEMPLATE_PATH])
-    assert binary.startswith(b"\x7fELF")
+    _assert_compiles(source, arch)
 
 
 def test_cann_dma_original_names_preserve_wide_counts():
-    try:
-        bisheng.find_bisheng_path()
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
-
     # Compile only. Calling the CANN 9.1 strided overload directly narrows
     # 65536 to zero. Check both calls and keep subsequent includes unaffected.
     source = """
@@ -69,18 +69,10 @@ def test_cann_dma_original_names_preserve_wide_counts():
                              asc_store_l2_cache_mode(0), 32u, 32u);
     }
     """
-    binary = bisheng.compile_ascend(
-        source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH, "-Werror=constant-conversion"]
-    )
-    assert binary.startswith(b"\x7fELF")
+    _assert_compiles(source, extra_options=("-Werror=constant-conversion",))
 
 
 def test_native_cann_register_overloads_compile():
-    try:
-        bisheng.find_bisheng_path()
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
-
     source = """
     #include "tl_templates/ascend/cann_compat.h"
     #define asc_div(...) previous_binding(__VA_ARGS__)
@@ -123,16 +115,10 @@ def test_native_cann_register_overloads_compile():
         registers((__ubuf__ uint32_t*)0, (__ubuf__ uint8_t*)256);
     }
     """
-    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH])
-    assert binary.startswith(b"\x7fELF")
+    _assert_compiles(source)
 
 
 def test_simt_native_math_names_keep_half_overloads():
-    try:
-        bisheng.find_bisheng_path()
-    except RuntimeError as exc:
-        pytest.skip(str(exc))
-
     source = """
     #include "tl_templates/ascend/common.h"
     #include "tl_templates/ascend/simt_math.h"
@@ -147,8 +133,7 @@ def test_simt_native_math_names_keep_half_overloads():
         asc_vf_call<math>(cce::dim3(1), fp, bf);
     }
     """
-    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH])
-    assert binary.startswith(b"\x7fELF")
+    _assert_compiles(source)
 
 
 def test_target_npu_arch_priority(monkeypatch):

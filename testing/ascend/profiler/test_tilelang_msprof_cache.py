@@ -3,13 +3,14 @@ import struct
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import pytest
 import torch
 
 import tilelang.testing
 from tilelang.profiler.msprof import _get_cache_read_kernel, bench_with_msprof
-from tilelang.profiler.torch_bench import _allocate_cache
+from tilelang.profiler.torch_bench import _allocate_cache, _get_npu_l2_cache_flush
 
 
 def _task_intervals(path):
@@ -23,6 +24,18 @@ def _task_intervals(path):
                 if cycles:
                     intervals[task].append((start, end))
     return intervals
+
+
+@tilelang.testing.requires_ascend
+def test_msprof_uses_native_flush_with_caller_buffer(monkeypatch):
+    native_flush = _get_npu_l2_cache_flush()
+    if native_flush is None:
+        pytest.skip("Requires the native L2 flush")
+    cache = torch.zeros(8192, dtype=torch.int32, device="npu")
+    flush = Mock(wraps=native_flush)
+    monkeypatch.setattr("tilelang.profiler.torch_bench._get_npu_l2_cache_flush", lambda: flush)
+    assert bench_with_msprof(lambda: cache.add_(1), cache, n_repeat=2) > 0
+    assert flush.call_args_list == [call(None), call(None)]
 
 
 @tilelang.testing.requires_ascend
