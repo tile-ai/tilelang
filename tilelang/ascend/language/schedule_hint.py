@@ -14,12 +14,11 @@ def PerCoreTask():
     """Represent one logical per-core task with guarded candidate sites.
 
     AutoSchedule treats the enclosed control flow as one logical task when it
-    analyzes dependencies, estimates cost, and allocates flags. When
-    synchronization is emitted for a loop-free dispatch, the same logical
-    wait/set pair can be placed next to every candidate access under its
-    original control-flow guard. If the region contains internal loops,
-    external synchronization stays at the region boundary: one wait/set pair
-    per logical task, including when an internal loop executes zero times.
+    analyzes dependencies, estimates cost, and allocates flags. For a loop-free
+    dispatch, the compiler may place an external wait or set next to each
+    candidate under its original control-flow guard. If the region contains an
+    internal loop, each external wait or set stays at the region boundary under
+    its synchronization guard, including when the loop has zero trips.
 
     The compiler preserves explicit ``T.Task()`` candidates and infers markers
     for the remaining supported dependency-bearing candidate boundaries.

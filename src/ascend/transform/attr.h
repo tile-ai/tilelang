@@ -16,8 +16,8 @@ namespace tl {
 namespace attr {
 
 // A user-authored logical Ascend per-core task whose dependency-bearing
-// statements all issue on one hardware pipe. AutoSchedule schedules it once,
-// then expands synchronization back to its guarded candidate sites.
+// statements all issue on one hardware pipe. AutoSchedule schedules it once
+// and may place external synchronization at its guarded candidate sites.
 constexpr const char *kAscendPerCoreTask = "tl.ascend_per_core_task";
 
 // Internal metadata on kAscendPerCoreTask. Preserve one external handshake

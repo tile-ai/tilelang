@@ -9,6 +9,7 @@ from tilelang.ascend import transform
 from tilelang.backend.target import determine_target
 from testing.ascend._ir import calls, copy, kernel, seq
 from testing.ascend.auto_schedule._scheduled_ir import unit
+from testing.ascend.auto_schedule._task_utils import _make_per_core_strided_store_program
 from tvm import tirx
 
 
@@ -188,45 +189,14 @@ def test_refinement_budget_exhaustion_retains_dependency(copies):
         transform.InsertSync()(_writers(copies=copies))
 
 
-def _strided_store_with_assumption(explicit):
-    num_tokens = T.dynamic("num_tokens")
-
-    if explicit:
-
-        @T.prim_func
-        def main(src: T.Tensor((512,), "float32"), dst: T.Tensor((num_tokens,), "float32")):
-            with T.MixedKernel(1) as (_, sid):
-                ub = T.alloc_shared((256,), "float32")
-                T.assume(num_tokens <= 512)
-                T.copy(src[sid * 256 : sid * 256 + 256], ub)
-                count = T.ceildiv(num_tokens - sid * 64, 128)
-                with T.PerCoreTask():  # noqa: SIM117
-                    with T.Task():
-                        for stage in T.serial(count):
-                            begin = stage * 128 + sid * 64
-                            size = T.min(num_tokens - begin, 64)
-                            T.copy(ub[stage * 64 : stage * 64 + size], dst[begin : begin + size])
-
-    else:
-
-        @T.prim_func
-        def main(src: T.Tensor((512,), "float32"), dst: T.Tensor((num_tokens,), "float32")):
-            with T.MixedKernel(1) as (_, sid):
-                ub = T.alloc_shared((256,), "float32")
-                T.assume(num_tokens <= 512)
-                T.copy(src[sid * 256 : sid * 256 + 256], ub)
-                count = T.ceildiv(num_tokens - sid * 64, 128)
-                with T.PerCoreTask():
-                    for stage in T.serial(count):
-                        begin = stage * 128 + sid * 64
-                        size = T.min(num_tokens - begin, 64)
-                        T.copy(ub[stage * 64 : stage * 64 + size], dst[begin : begin + size])
-
-    return main
-
-
-@pytest.mark.parametrize("target", ["ascend", pytest.param("pto", marks=pytest.mark.pto)])
-@pytest.mark.parametrize("explicit", [False, True], ids=["implicit-task", "explicit-task"])
+@pytest.mark.parametrize(
+    "target, explicit",
+    [
+        pytest.param("ascend", True, id="explicit-task-ascend"),
+        pytest.param("pto", True, id="explicit-task-pto", marks=pytest.mark.pto),
+        pytest.param("pto", False, id="implicit-task-pto", marks=pytest.mark.pto),
+    ],
+)
 def test_full_lowering_preserves_assumption_diagnostic_guards(target, explicit):
     snapshots = {}
 
@@ -237,7 +207,7 @@ def test_full_lowering_preserves_assumption_diagnostic_guards(target, explicit):
                 snapshots[info.name] = mod
 
     with determine_target(target, return_object=True), tvm.transform.PassContext(instruments=[Capture()]):
-        artifact = tilelang.lower(_strided_store_with_assumption(explicit), target=target, enable_device_compile=False)
+        artifact = tilelang.lower(_make_per_core_strided_store_program(explicit=explicit), target=target, enable_device_compile=False)
     assert not calls(snapshots["tl.InsertSync"], "tl.ascend_cross_core_set_flag")
     assert artifact.kernel_source
 

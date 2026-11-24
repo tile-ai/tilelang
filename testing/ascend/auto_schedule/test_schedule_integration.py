@@ -11,6 +11,7 @@ import tilelang.ascend.language as T
 from tilelang import tvm
 from tvm import tirx
 from testing.ascend._ir import nodes, calls, allocated_buffer, schedule, statements
+from testing.ascend.auto_schedule._task_utils import _make_per_core_strided_store_program
 
 TILE = 16
 STEPS = 4
@@ -189,25 +190,6 @@ def make_multi_kernel_program():
             ub1 = T.alloc_shared((64,), "float32")
             T.copy(c, ub1)
             T.copy(ub1, b)
-
-    return main
-
-
-def _make_per_core_strided_store_program():
-    num_tokens = T.dynamic("num_tokens")
-
-    @T.prim_func
-    def main(src: T.Tensor((512,), "float32"), out: T.Tensor((num_tokens,), "float32")):
-        with T.MixedKernel(1) as (_, sid):
-            ub = T.alloc_shared((256,), "float32")
-            T.assume(num_tokens <= 512)
-            T.copy(src[sid * 256 : sid * 256 + 256], ub)
-            num_stages = T.ceildiv(num_tokens - sid * 64, 128)
-            with T.PerCoreTask():
-                for stage in T.Serial(num_stages):
-                    begin = stage * 128 + sid * 64
-                    extent = T.min(num_tokens - begin, 64)
-                    T.copy(ub[stage * 64 : stage * 64 + extent], out[begin : begin + extent])
 
     return main
 
