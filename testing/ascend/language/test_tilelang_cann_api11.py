@@ -312,7 +312,7 @@ def iter_load_kernel(dtype, stride):
 @pytest.mark.parametrize("dtype,bits", [("uint8", 8), ("int16", 16), ("int32", 32)])
 def test_vld2_offset_codegen_uses_compat_address_register(dtype, bits):
     source = lower(iter_load_kernel(dtype, 2048 // bits * 2), target="ascend").kernel_source
-    assert f"tl::cann::update_addr_reg_b{bits}(" in source
+    assert f"asc_update_addr_reg_b{bits}(" in source
     assert re.search(r"for\s*\(\s*uint16_t\s", source), "VAG requires the i16 HardwareLoop counter"
     assert source.count("simd_inst::vld_x2<") == 1
     assert ".v0" in source and ".v1" in source
@@ -367,14 +367,14 @@ def atomic_kernel(op):
 @pytest.mark.parametrize("op", ["add", "max", "min"])
 def test_int32_store_atomic_codegen(op):
     source = lower(atomic_kernel(op), target="ascend").kernel_source
-    assert f"tl::cann::set_atomic_{op}_int32();" in source
+    assert f"asc_set_atomic_{op}_int32();" in source
     assert "asc_set_atomic_none();" in source
     # Require DMA completion in the correct interval, without requiring the
     # extra PIPE_ALL drain from the larger candidate. Keep the numerical test
     # below unchanged so insufficient native synchronization remains a failure.
-    enable = source.index(f"tl::cann::set_atomic_{op}_int32();")
+    enable = source.index(f"asc_set_atomic_{op}_int32();")
     disable = source.index("asc_set_atomic_none();", enable)
-    stores = list(re.finditer(r"tl::cann::copy_ub2gm_align\(", source))
+    stores = list(re.finditer(r"asc_copy_ub2gm_align\(", source))
     assert len(stores) == 2, "Expected atomic and plain DMA stores"
     assert enable < stores[0].start() < disable < stores[1].start()
     drain = r"(?:asc_sync\(\)|asc_sync_pipe\(\s*PIPE_MTE3\s*\));"
@@ -412,7 +412,7 @@ def test_int32_store_atomic_multicore_and_none_restores_plain_store(op):
 
 def test_native_extern_routes_follow_execution_domain():
     @T.prim_func
-    def kernel(out: T.Tensor((3,), "float32"), x: T.float32):
+    def kernel(out: T.Tensor((3,), "float32"), powf: T.float32):
         with T.Kernel(1):
             ub = T.alloc_shared((64,), "float32")
             T.evaluate(T.call_extern("void", "::asc_disable_hf32"))
@@ -424,15 +424,21 @@ def test_native_extern_routes_follow_execution_domain():
                 q = T.call_extern("float32x64", "::asc_div", v, v, mask)
                 T.simd.vsts(ub[0], q, mask)
             with T.SimtVF(threads=1):
-                out[0] = T.call_extern("float32", "::powf", x, x)
-                out[1] = T.call_extern("float32", "vendor::powf", x, x)
-            out[2] = T.call_extern("float32", "::sqrtf", x)
+                out[0] = T.call_extern("float32", "::powf", powf, powf)
+                out[1] = T.call_extern("float32", "vendor::powf", powf, powf)
+            out[2] = T.call_extern("float32", "::sqrtf", powf)
 
     source = lower(kernel, target="ascend").kernel_source
-    assert "tl::cann::disable_hf32(" in source
+    simd = source.split("TL_CANN_USE_SIMD_NAMES", 1)[1].split("\n}", 1)[0]
+    kernel_body = source.split('extern "C" __global__', 1)[1]
+    assert "TL_CANN_USE_CORE_NAMES" in kernel_body
+    assert "TL_CANN_USE_SIMD_NAMES" not in kernel_body
+    assert "asc_disable_hf32();" in kernel_body
     assert "vendor::asc_disable_hf32(" in source
-    assert "asc_div(" in source and source.count("tl::cann::div(") == 1
-    assert "tl::cann::simt::powf(" in source and "vendor::powf(" in source
+    assert simd.count("asc_div(") == 1
+    assert kernel_body.count("asc_div(") == 1
+    simt = source.split("TL_CANN_USE_SIMT_MATH_NAMES", 1)[1].split("\n}", 1)[0]
+    assert " = powf(" in simt and "vendor::powf(" in simt
     assert "AscendC::Std::sqrt(" in source
 
 

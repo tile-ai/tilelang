@@ -382,8 +382,8 @@ def test_vector_min_max_and_mod_are_scalarized():
     assert source.count(".y = max(") == 2
     assert ".x%" in source
     assert ".y%" in source
-    assert ".x = tl::cann::simt::fmodf(" in source
-    assert ".y = tl::cann::simt::fmodf(" in source
+    assert ".x = fmodf(" in source
+    assert ".y = fmodf(" in source
 
 
 def test_shuffle_constructors_are_materialized_per_lane():

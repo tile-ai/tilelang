@@ -31,17 +31,17 @@ def test_batched_nd2nz_descriptor(interleaved, dtype):
         source = tilelang.lower(batch_copy(4, 24, 32, 128, dtype, interleaved), target="ascend").kernel_source
     elem_bytes = tvm.DataType(dtype).bits // 8
     assert source.count("asc_copy_gm2l1_nd2nz(") == 1
-    assert f"tl::cann::set_gm2l1_nz_para(4, 1, static_cast<uint16_t>(32), {32 * 128 * elem_bytes // 32});" in source
+    assert f"asc_set_gm2l1_nz_para(4, 1, static_cast<uint16_t>(32), {32 * 128 * elem_bytes // 32});" in source
     row_stride = (4 * 512 if interleaved else 512) * elem_bytes
     batch_stride = (512 if interleaved else 24 * 512) * elem_bytes
-    assert f", {row_stride}, static_cast<tl::cann::load_l2_cache_mode>(0), 24, 128, {batch_stride}, 0);" in source
+    assert f", {row_stride}, static_cast<asc_load_l2_cache_mode>(0), 24, 128, {batch_stride}, 0);" in source
 
 
 def test_batched_nd2nz_matrix_tail_padding():
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
         source = tilelang.lower(batch_copy(3, 20, 32, 32, "bfloat16", copy_rows=24), target="ascend").kernel_source
     assert "asc_fill_l1(" in source
-    assert "tl::cann::set_gm2l1_nz_para(3, 1," in source
+    assert "asc_set_gm2l1_nz_para(3, 1," in source
     assert ", 20, 32," in source
 
 
@@ -68,7 +68,7 @@ def test_batched_nd2nz_skips_batch_tail(batch_begin):
     valid_batches = max(3 - batch_begin, 0)
     if valid_batches:
         assert source.count("asc_copy_gm2l1_nd2nz(") == 1
-        assert f"tl::cann::set_gm2l1_nz_para({valid_batches}, 1," in source
+        assert f"asc_set_gm2l1_nz_para({valid_batches}, 1," in source
     else:
         assert "asc_copy_gm2l1_nd2nz(" not in source
 
@@ -76,7 +76,7 @@ def test_batched_nd2nz_skips_batch_tail(batch_begin):
 def test_batched_nd2nz_batch_and_matrix_tails():
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
         source = tilelang.lower(batch_tail_copy(1, 20, 32, 20, 32, dst_begin=1), target="ascend").kernel_source
-    assert "tl::cann::set_gm2l1_nz_para(2, 1," in source
+    assert "asc_set_gm2l1_nz_para(2, 1," in source
     assert ", 20, 20," in source
     assert "asc_fill_l1(" in source
 
@@ -124,7 +124,7 @@ def test_single_matrix_nonleading_singleton(singleton_axis, rows):
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
         source = tilelang.lower(main, target="ascend").kernel_source
     assert source.count("asc_copy_gm2l1_nd2nz(") == 1
-    assert "tl::cann::set_gm2l1_nz_para(1, 1," in source
+    assert "asc_set_gm2l1_nz_para(1, 1," in source
     assert ("asc_fill_l1(" in source) == (rows < 32)
 
 
@@ -144,7 +144,7 @@ def test_batched_nd2nz_rejects_smaller_destination(dst_batches):
 def test_batched_nd2nz_single_row_matrix():
     with tvm.transform.PassContext(config={"tl.enable_auto_schedule": False}):
         source = tilelang.lower(batch_copy(4, 1, 16, 32, "bfloat16"), target="ascend").kernel_source
-    assert "tl::cann::set_gm2l1_nz_para(4, 1," in source
+    assert "asc_set_gm2l1_nz_para(4, 1," in source
 
 
 @tilelang.testing.requires_ascend
@@ -335,7 +335,7 @@ def pipelined_batch_copy(versions=None):
 @pytest.mark.parametrize("versions", [None, 1, 2])
 def test_batched_nd2nz_pipelined(versions):
     source = tilelang.lower(pipelined_batch_copy(versions), target="ascend").kernel_source
-    assert "tl::cann::set_gm2l1_nz_para(2, 1," in source
+    assert "asc_set_gm2l1_nz_para(2, 1," in source
 
 
 @tilelang.testing.requires_ascend

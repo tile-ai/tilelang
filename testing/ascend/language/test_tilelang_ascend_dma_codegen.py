@@ -26,7 +26,7 @@ def runtime_divisor_copy():
 def test_mte_copy_hoists_let_bindings_before_calls():
     source = tilelang.lower(runtime_divisor_copy(), target="ascend").kernel_source
 
-    for call_name in ("tl::cann::copy_gm2ub_align", "tl::cann::copy_ub2gm_align"):
+    for call_name in ("asc_copy_gm2ub_align", "asc_copy_ub2gm_align"):
         call_start = source.index(call_name)
         call_end = source.index(");", call_start)
         call = source[call_start:call_end]
@@ -41,16 +41,20 @@ __aicore__ inline void asc_copy_gm2ub_align(__ubuf__ uint8_t* dst, __gm__ uint8_
 }"""
 
     @T.prim_func
-    def kernel(gm: T.Tensor((32,), "uint8")):
+    def kernel(asc_copy_gm2ub_align: T.Tensor((32,), "uint8"), asc_load_l2_cache_mode: T.int32):
         with T.Kernel(1):
             T.import_source(helper)
             ub = T.alloc_shared((32,), "uint8")
-            T.evaluate(T.call_extern("void", "user_dma::asc_copy_gm2ub_align", ub.data, gm.data))
-            T.evaluate(T.call_extern("void", "asc_copy_gm2ub_align", ub.data, gm.data, 32))
-            T.evaluate(T.call_extern("void", "::asc_copy_ub2gm_align", gm.data, ub.data, 32))
+            T.evaluate(T.call_extern("void", "user_dma::asc_copy_gm2ub_align", ub.data, asc_copy_gm2ub_align.data))
+            T.evaluate(T.call_extern("void", "asc_copy_gm2ub_align", ub.data, asc_copy_gm2ub_align.data, 32))
+            T.evaluate(T.call_extern("void", "::asc_copy_ub2gm_align", asc_copy_gm2ub_align.data, ub.data, asc_load_l2_cache_mode))
 
     source = tilelang.lower(kernel, target="ascend").kernel_source
     assert 0 <= source.rfind("#include") < source.index(helper)
     assert "user_dma::asc_copy_gm2ub_align(" in source
-    assert "tl::cann::copy_gm2ub_align(" in source
-    assert "tl::cann::copy_ub2gm_align(" in source
+    signature, body = source.split("TL_CANN_USE_CORE_NAMES", 1)
+    # Source parameter names can match either a bound function or a bound type.
+    assert re.search(r"uint8_t\* asc_copy_gm2ub_align_?\d+", signature)
+    assert re.search(r"int32_t asc_load_l2_cache_mode_?\d+", signature)
+    assert re.search(r"(?<!:)\basc_copy_gm2ub_align\(", body)
+    assert re.search(r"(?<!:)\basc_copy_ub2gm_align\(", body)

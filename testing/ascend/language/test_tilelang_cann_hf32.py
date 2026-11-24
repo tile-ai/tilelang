@@ -8,9 +8,9 @@ from tilelang.engine.lower import lower
 @pytest.mark.parametrize(
     "mode,expected",
     [
-        (None, "tl::cann::disable_hf32();"),
-        ("nearest_zero", "tl::cann::hf32_round_mode::NEAREST_AWAY"),
-        ("nearest_even", "tl::cann::hf32_round_mode::NEAREST_EVEN"),
+        (None, "asc_disable_hf32();"),
+        ("nearest_zero", "asc_hf32_round_mode::NEAREST_AWAY"),
+        ("nearest_even", "asc_hf32_round_mode::NEAREST_EVEN"),
     ],
 )
 def test_hf32_compat_codegen(mode, expected):
@@ -31,4 +31,4 @@ def test_hf32_compat_codegen(mode, expected):
             T.copy(c, C)
 
     source = lower(kernel, target="ascend").kernel_source
-    assert expected in source
+    assert expected in source.split("TL_CANN_USE_CORE_NAMES", 1)[1]

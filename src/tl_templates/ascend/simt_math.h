@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tl_templates/ascend/cann_compat_names.h"
 #include <simt_api/asc_bf16.h>
 #include <simt_api/math_functions.h>
 #include <stdint.h>
@@ -416,6 +417,9 @@ __simt_callee__ inline bfloat16_t hexp2(bfloat16_t x) {
 __simt_callee__ inline bfloat16_t hexp10(bfloat16_t x) {
   return detail::to_bf16(simt::exp10f(__bfloat162float(x)));
 }
+// The 9.1 correction above is BF16-only. Keep the native FP16 overloads.
+__simt_callee__ inline half hexp2(half x) { return ::hexp2(x); }
+__simt_callee__ inline half hexp10(half x) { return ::hexp10(x); }
 #else
 using ::acosf;
 using ::acoshf;
@@ -439,3 +443,6 @@ using ::tanhf;
 #undef TL_SIMT_MATH_91
 #undef TL_SIMT_MATH_92_93
 } // namespace tl::cann::simt
+
+#define TL_CANN_BIND_MATH(name) using ::tl::cann::simt::name;
+#define TL_CANN_USE_SIMT_MATH_NAMES TL_CANN_SIMT_MATH_NAMES(TL_CANN_BIND_MATH)

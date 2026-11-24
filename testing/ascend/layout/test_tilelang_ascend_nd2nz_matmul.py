@@ -106,7 +106,7 @@ def test_nd2nz_matmul_reuses_mixed_kernel_sid(split_dim):
 
     assert "__global__ __mix__(1, 2)" in source
     assert source.count("asc_get_sub_block_id()") == 1
-    assert source.count("tl::cann::copy_gm2ub_align") == 2
+    assert source.count("asc_copy_gm2ub_align") == 2
     assert source.count("asc_copy_ub2l1") == 2
 
     # Static copies are duplicated across mutually exclusive AIV branches;

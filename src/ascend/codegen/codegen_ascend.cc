@@ -23,6 +23,7 @@
 #include "ascend/op/builtin.h"
 #include "ascend/op/utils.h"
 #include "backend/common/target_utils.h"
+#include "tl_templates/ascend/cann_compat_names.h"
 #include "transform/common/attr.h"
 
 namespace tvm {
@@ -33,43 +34,17 @@ namespace {
 
 constexpr const char *kModeMerging = "MODE_MERGING";
 constexpr const char *kSimdOpPrefix = "tl.simd.";
-constexpr const char *kLoadL2CacheModeCast =
-    "static_cast<tl::cann::load_l2_cache_mode>(";
-constexpr const char *kStoreL2CacheModeCast =
-    "static_cast<tl::cann::store_l2_cache_mode>(";
 
-// Route SDK call symbols while emitting TileLang code. Imported C/C++ keeps
-// its own names and preprocessing environment.
-struct CannApi {
-  std::string_view native;
-  std::string_view wrapper;
-  bool simd;
-};
-
-const CannApi *FindCannApi(std::string_view symbol, bool in_simd) {
-  static constexpr CannApi routes[] = {
-#define TL_CANN_CORE(name) {"asc_" #name, "tl::cann::" #name, false},
-#define TL_CANN_SIMD(name) {"asc_" #name, "tl::cann::" #name, true},
-#define TL_CANN_TYPE(name)
-#include "tl_templates/ascend/cann_compat_names.inc"
-#undef TL_CANN_TYPE
-#undef TL_CANN_SIMD
-#undef TL_CANN_CORE
-  };
-  if (symbol.substr(0, 2) == "::")
-    symbol.remove_prefix(2);
-  for (const auto &route : routes) {
-    if ((!route.simd || in_simd) &&
-        (symbol == route.native || symbol == route.wrapper))
-      return &route;
-  }
-  return nullptr;
-}
-
-std::string_view CannApiName(std::string_view name, bool in_simd = false) {
-  if (const auto *route = FindCannApi(name, in_simd))
-    return route->wrapper;
-  return name;
+// A kernel parameter or local may have the same name as a bound SDK API.
+void ReserveCannNames(const NameSupply &supply) {
+#define TL_CANN_RESERVE(name) supply->ReserveName("asc_" #name, false);
+  TL_CANN_CORE_NAMES(TL_CANN_RESERVE)
+  TL_CANN_SIMD_NAMES(TL_CANN_RESERVE)
+  TL_CANN_TYPE_NAMES(TL_CANN_RESERVE)
+#undef TL_CANN_RESERVE
+#define TL_CANN_RESERVE_MATH(name) supply->ReserveName(#name, false);
+  TL_CANN_SIMT_MATH_NAMES(TL_CANN_RESERVE_MATH)
+#undef TL_CANN_RESERVE_MATH
 }
 
 bool IsSimdOp(const CallNode *op, std::string *op_name = nullptr) {
@@ -607,6 +582,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   ascend_rng_state_var_.clear();
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
+  ReserveCannNames(name_supply_);
   name_supply_->ReserveName("block_idx");
 
   // Register function parameters with their storage scope for codegen
@@ -790,7 +766,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
 }
 
 void CodeGenTileLangAscend::PreFunctionBody(const PrimFunc &f) {
-  this->stream << "  asc_init();\n";
+  this->stream << "  TL_CANN_USE_CORE_NAMES\n  asc_init();\n";
   // Emit the function-entry #line anchor after the compiler prologue, so the
   // directive's line mapping is not consumed by generated code.
   CodeGenTileLangCBase::PreFunctionBody(f);
@@ -847,6 +823,7 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
   saved_var_idmap.swap(var_idmap_);
   NameSupply saved_name_supply = name_supply_;
   name_supply_ = NameSupply();
+  ReserveCannNames(name_supply_);
   for (const auto &kv : saved_var_idmap) {
     var_idmap_[kv.first] = kv.second;
   }
@@ -944,7 +921,17 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
       }
     }
   }
-  decl_stream << ") {\n" << helper_body << "}\n\n";
+  decl_stream << ") {\n  TL_CANN_USE_CORE_NAMES\n";
+  if (vf_mode == VFMode::kSimd) {
+    decl_stream << "  TL_CANN_USE_SIMD_NAMES\n";
+  } else {
+    if (!has_simt_math_included_) {
+      preamble_stream_ << "#include <tl_templates/ascend/simt_math.h>\n";
+      has_simt_math_included_ = true;
+    }
+    decl_stream << "  TL_CANN_USE_SIMT_MATH_NAMES\n";
+  }
+  decl_stream << helper_body << "}\n\n";
 }
 
 void CodeGenTileLangAscend::VisitStmt_(const SBlockNode *op) {
@@ -1399,7 +1386,7 @@ void CodeGenTileLangAscend::EmitCApiCall_(
   }
 
   PrintIndent();
-  stream << CannApiName(function_name, IsInsideSimdVF()) << "(";
+  stream << function_name << "(";
   for (size_t i = 0; i < rendered_arguments.size(); ++i) {
     if (i != 0) {
       stream << ", ";
@@ -1497,7 +1484,7 @@ void CodeGenTileLangAscend::EmitGmToUbufCopy_(const CallNode *op) {
                  {op->args[5]},
                  {op->args[6]},
                  {op->args[7]},
-                 {op->args[8], kLoadL2CacheModeCast, ")"},
+                 {op->args[8], "static_cast<asc_load_l2_cache_mode>(", ")"},
                  {op->args[9]},
                  {op->args[10]}});
 }
@@ -1512,7 +1499,7 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
                  {op->args[1], "(__ubuf__ uint8_t*)(", ")"},
                  {op->args[3]},
                  {op->args[4]},
-                 {op->args[5], kStoreL2CacheModeCast, ")"},
+                 {op->args[5], "static_cast<asc_store_l2_cache_mode>(", ")"},
                  {op->args[6]},
                  {op->args[7]}});
 }
@@ -1529,7 +1516,7 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
   const std::string batch_stride =
       op->args.size() == 14 ? PrintExpr(op->args[13]) : "0";
   PrintIndent();
-  stream << CannApiName("asc_set_gm2l1_nz_para") << "(" << num_batches
+  stream << "asc_set_gm2l1_nz_para(" << num_batches
          << ", 1, static_cast<uint16_t>(" << nz_c0_stride << "), "
          << batch_stride << ");\n";
 
@@ -1549,7 +1536,7 @@ void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
                 {{op->args[0], destination_prefix, pointer_suffix},
                  {op->args[1], source_prefix, pointer_suffix},
                  {op->args[3]},
-                 {op->args[4], kLoadL2CacheModeCast, ")"},
+                 {op->args[4], "static_cast<asc_load_l2_cache_mode>(", ")"},
                  {op->args[5]},
                  {op->args[6]},
                  {op->args[7]},
@@ -1561,7 +1548,7 @@ void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
       << "tl.ascend_copy_matrix_cc_to_ub expects exactly 26 arguments";
 
   PrintIndent();
-  stream << CannApiName("asc_set_l0c_copy_nz_para") << "(1, 0, 0);\n";
+  stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";
   EmitCApiCall_("asc_copy_l0c2ub",
                 {{op->args[0]},
                  {op->args[1]},
@@ -1570,10 +1557,10 @@ void CodeGenTileLangAscend::EmitL0cToUbufCopy_(const CallNode *op) {
                  {op->args[5]},
                  {op->args[6]},
                  {op->args[8]},
-                 {op->args[7], "static_cast<tl::cann::dual_dst_mode>(", ")"},
-                 {op->args[10], "static_cast<tl::cann::unit_flag_mode>(", ")"},
-                 {op->args[11], "static_cast<tl::cann::quant_mode>(", ")"},
-                 {op->args[12], "static_cast<tl::cann::relu_pre_mode>(", ")"},
+                 {op->args[7], "static_cast<asc_dual_dst_mode>(", ")"},
+                 {op->args[10], "static_cast<asc_unit_flag_mode>(", ")"},
+                 {op->args[11], "static_cast<asc_quant_mode>(", ")"},
+                 {op->args[12], "static_cast<asc_relu_pre_mode>(", ")"},
                  {op->args[13]},
                  {op->args[14]},
                  {op->args[25]},
@@ -1585,7 +1572,7 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
       << "tl.ascend_copy_matrix_cc_to_gm expects exactly 25 arguments";
 
   PrintIndent();
-  stream << CannApiName("asc_set_l0c_copy_nz_para") << "(1, 0, 0);\n";
+  stream << "asc_set_l0c_copy_nz_para(1, 0, 0);\n";
   EmitCApiCall_("asc_copy_l0c2gm",
                 {{op->args[0]},
                  {op->args[1]},
@@ -1593,10 +1580,10 @@ void CodeGenTileLangAscend::EmitL0cToGmCopy_(const CallNode *op) {
                  {op->args[4]},
                  {op->args[5]},
                  {op->args[6]},
-                 {op->args[7], kStoreL2CacheModeCast, ")"},
-                 {op->args[9], "static_cast<tl::cann::unit_flag_mode>(", ")"},
-                 {op->args[10], "static_cast<tl::cann::quant_mode>(", ")"},
-                 {op->args[11], "static_cast<tl::cann::relu_pre_mode>(", ")"},
+                 {op->args[7], "static_cast<asc_store_l2_cache_mode>(", ")"},
+                 {op->args[9], "static_cast<asc_unit_flag_mode>(", ")"},
+                 {op->args[10], "static_cast<asc_quant_mode>(", ")"},
+                 {op->args[11], "static_cast<asc_relu_pre_mode>(", ")"},
                  {op->args[12]},
                  {op->args[13]},
                  {op->args[24]},
@@ -1960,13 +1947,13 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     int mode = Downcast<IntImm>(op->args[0])->value;
     this->PrintIndent();
     if (mode == 0) {
-      this->stream << CannApiName("asc_disable_hf32") << "();\n";
+      this->stream << "asc_disable_hf32();\n";
     } else {
       this->stream << "asc_enable_hf32();\n";
       this->PrintIndent();
-      this->stream << CannApiName("asc_set_hf32_round_mode") << "("
-                   << (mode == 1 ? "tl::cann::hf32_round_mode::NEAREST_AWAY"
-                                 : "tl::cann::hf32_round_mode::NEAREST_EVEN")
+      this->stream << "asc_set_hf32_round_mode("
+                   << (mode == 1 ? "asc_hf32_round_mode::NEAREST_AWAY"
+                                 : "asc_hf32_round_mode::NEAREST_EVEN")
                    << ");\n";
     }
   } else if (op->op.same_as(tl::ascend_set_mmad_direction())) {
@@ -2013,7 +2000,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
       name += "_int32";
     }
 
-    this->stream << CannApiName(name) << "();\n";
+    this->stream << name << "();\n";
   } else if (op->op.same_as(tl::ascend_set_atomic_none())) {
     ICHECK_EQ(op->args.size(), 0)
         << "tl.ascend_set_atomic_none expects no arguments";
@@ -2461,10 +2448,7 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     PrintExpr(op->args[0], os); // addr
     os << ", ";
     if (has_off) {
-      os << CannApiName("asc_update_addr_reg_b" +
-                            std::to_string(CCEElemWidthBits(elem)),
-                        true)
-         << "(";
+      os << "asc_update_addr_reg_b" << CCEElemWidthBits(elem) << "(";
       PrintExpr(op->args[2], os);
       os << "), " << dist;
     } else {
@@ -3867,39 +3851,39 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
                                             const ffi::Array<PrimExpr> &args,
                                             bool skip_first_arg,
                                             std::ostream &os) {
+  // T.call_extern also accepts qualified SDK and compatibility spellings.
+  // Emit the bare name for the execution domain that binds it.
+  struct Route {
+    std::string_view native, wrapper;
+    VFMode mode;
+  };
+#define TL_CANN_CORE(name) {"asc_" #name, "tl::cann::" #name, VFMode::kNone},
+#define TL_CANN_SIMD(name) {"asc_" #name, "tl::cann::" #name, VFMode::kSimd},
+#define TL_CANN_MATH(name) {#name, "tl::cann::simt::" #name, VFMode::kSimt},
+  static constexpr Route routes[] = {
+      TL_CANN_CORE_NAMES(TL_CANN_CORE) TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
+          TL_CANN_SIMT_MATH_NAMES(TL_CANN_MATH)};
+#undef TL_CANN_MATH
+#undef TL_CANN_SIMD
+#undef TL_CANN_CORE
   std::string_view symbol(global_symbol.c_str(), global_symbol.size());
-  if (const auto *route = FindCannApi(symbol, IsInsideSimdVF())) {
-    global_symbol = std::string(route->wrapper);
-    if (route->simd) {
-      // The SDK consumes and returns whole registers. Generic vector externs
-      // below call a scalar function once per lane.
+  if (symbol.substr(0, 2) == "::")
+    symbol.remove_prefix(2);
+  for (const auto &route : routes) {
+    if ((route.mode != VFMode::kNone && route.mode != vf_mode_) ||
+        (symbol != route.native && symbol != route.wrapper))
+      continue;
+    global_symbol = std::string(route.native);
+    if (route.mode == VFMode::kSimd) {
+      // Register APIs consume and return whole registers. Generic vector
+      // externs below call a scalar function once per lane.
       CodeGenC::PrintCallExtern(ret_type, global_symbol, args, skip_first_arg,
                                 os);
       return;
     }
+    break;
   }
   DataType ret_dtype = GetRuntimeDataType(ret_type);
-  if (IsInsideSimtVF()) {
-    static const std::unordered_set<std::string> fp32_ops = {
-        "acosf",  "acoshf",    "asinf", "asinhf", "atanf",  "atan2f",
-        "atanhf", "copysignf", "coshf", "exp2f",  "exp10f", "fmodf",
-        "hypotf", "log1pf",    "powf",  "sinhf",  "tanhf"};
-    std::string math_name(global_symbol);
-    if (math_name.compare(0, 2, "::") == 0)
-      math_name.erase(0, 2);
-    auto element = ret_dtype.element_of();
-    bool use_compat =
-        (element == DataType::Float(32) && fp32_ops.count(math_name)) ||
-        (element.is_bfloat16() &&
-         (math_name == "hexp2" || math_name == "hexp10"));
-    if (use_compat) {
-      if (!has_simt_math_included_) {
-        preamble_stream_ << "#include <tl_templates/ascend/simt_math.h>\n";
-        has_simt_math_included_ = true;
-      }
-      global_symbol = "tl::cann::simt::" + math_name;
-    }
-  }
   // LowerIntrin names float32 sqrt "sqrtf" in every execution domain.
   // Select the scalar-core implementation using the existing VF context.
   if (IsOutsideVF() && ret_dtype == DataType::Float(32) &&

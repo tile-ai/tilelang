@@ -97,8 +97,8 @@ def test_manual_mixed_pipeline_shares_sub_block_id():
         source = tilelang.lower(_manual_mixed_dual_copy(), target="ascend").kernel_source
     assert "__global__ __mix__(1, 2)" in source
     assert source.count("asc_get_sub_block_id()") == 1
-    assert "tl::cann::copy_gm2ub_align" in source
-    assert "tl::cann::copy_ub2gm_align" in source
+    assert "asc_copy_gm2ub_align" in source
+    assert "asc_copy_ub2gm_align" in source
 
 
 @pytest.mark.parametrize(

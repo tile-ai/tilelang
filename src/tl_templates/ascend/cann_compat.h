@@ -1,6 +1,7 @@
 #pragma once
 
 #include "c_api/asc_simd.h"
+#include "tl_templates/ascend/cann_compat_names.h"
 #include <stdint.h>
 #include <type_traits>
 #include <version/asc_devkit_version.h>
@@ -411,3 +412,28 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
 
 } // namespace cann
 } // namespace tl
+
+// Bind native names only inside generated functions. A local callable keeps
+// argument-dependent lookup from adding a competing global SDK overload.
+#if defined(__NPU_ARCH__)
+#define TL_CANN_BIND_CALL(attr, name)                                          \
+  [[maybe_unused]] constexpr auto asc_##name = [](auto &&...args)              \
+                                                   attr -> decltype(auto) {    \
+    return ::tl::cann::name(static_cast<decltype(args)>(args)...);             \
+  };
+#define TL_CANN_BIND_CORE(name) TL_CANN_BIND_CALL(__aicore__, name)
+#define TL_CANN_BIND_TYPE(name)                                                \
+  using asc_##name [[maybe_unused]] = ::tl::cann::name;
+#define TL_CANN_USE_CORE_NAMES                                                 \
+  TL_CANN_CORE_NAMES(TL_CANN_BIND_CORE) TL_CANN_TYPE_NAMES(TL_CANN_BIND_TYPE)
+#if defined(INCLUDE_C_API_REG_COMPUTE_REG_VECTOR_H) ||                         \
+    defined(INCLUDE_C_API_ASC_REG_VECTOR_H)
+#define TL_CANN_BIND_SIMD(name) TL_CANN_BIND_CALL(__simd_callee__, name)
+#define TL_CANN_USE_SIMD_NAMES TL_CANN_SIMD_NAMES(TL_CANN_BIND_SIMD)
+#endif
+#else
+#define TL_CANN_USE_CORE_NAMES
+#endif
+#ifndef TL_CANN_USE_SIMD_NAMES
+#define TL_CANN_USE_SIMD_NAMES
+#endif

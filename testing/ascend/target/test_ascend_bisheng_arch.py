@@ -21,15 +21,15 @@ def test_cann_compat_shared_controls_compile(arch):
         pytest.skip(str(exc))
 
     source = """
-    #include "tl_templates/ascend/cann_compat_begin.h"
+    #include "tl_templates/ascend/cann_compat.h"
     extern "C" __global__ __cube__ void shared_controls() {
-        ::asc_set_atomic_add_int32();
+        TL_CANN_USE_CORE_NAMES
+        asc_set_atomic_add_int32();
         asc_set_atomic_max_int32();
         asc_set_atomic_min_int32();
         asc_set_hf32_round_mode(asc_hf32_round_mode::NEAREST_EVEN);
         asc_disable_hf32();
     }
-    #include "tl_templates/ascend/cann_compat_end.h"
     """
     binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch=arch, options=["-I" + TILELANG_TEMPLATE_PATH])
     assert binary.startswith(b"\x7fELF")
@@ -48,14 +48,26 @@ def test_cann_dma_original_names_preserve_wide_counts():
     extern "C" __global__ __vector__ void dma(__gm__ uint8_t* gm) {
         auto ub = (__ubuf__ uint8_t*)0;
         asc_copy_gm2ub_align(ub, gm, 65536u, 32u, 0, 0, false,
-                             tl::cann::load_l2_cache_mode(0), 32u, 32u);
+                             asc_load_l2_cache_mode(0), 32u, 32u);
         asc_copy_ub2gm_align(gm, ub, 65536u, 32u,
-                             tl::cann::store_l2_cache_mode(0), 32u, 32u);
+                             asc_store_l2_cache_mode(0), 32u, 32u);
     }
     #include "tl_templates/ascend/cann_compat_end.h"
     #if defined(asc_copy_gm2ub_align) || defined(asc_copy_ub2gm_align)
     #error DMA aliases leaked past TileLang device code
     #endif
+    namespace user_dma {
+    __aicore__ inline void asc_copy_gm2ub_align() {}
+    }
+    extern "C" __global__ __vector__ void generated_dma(__gm__ uint8_t* gm) {
+        TL_CANN_USE_CORE_NAMES
+        user_dma::asc_copy_gm2ub_align();
+        auto ub = (__ubuf__ uint8_t*)0;
+        asc_copy_gm2ub_align(ub, gm, 65536u, 32u, 0, 0, false,
+                             asc_load_l2_cache_mode(0), 32u, 32u);
+        asc_copy_ub2gm_align(gm, ub, 65536u, 32u,
+                             asc_store_l2_cache_mode(0), 32u, 32u);
+    }
     """
     binary = bisheng.compile_ascend(
         source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH, "-Werror=constant-conversion"]
@@ -109,6 +121,30 @@ def test_native_cann_register_overloads_compile():
     #undef asc_div
     extern "C" __global__ __vector__ void entry() {
         registers((__ubuf__ uint32_t*)0, (__ubuf__ uint8_t*)256);
+    }
+    """
+    binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH])
+    assert binary.startswith(b"\x7fELF")
+
+
+def test_simt_native_math_names_keep_half_overloads():
+    try:
+        bisheng.find_bisheng_path()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+
+    source = """
+    #include "tl_templates/ascend/common.h"
+    #include "tl_templates/ascend/simt_math.h"
+    __simt_vf__ __launch_bounds__(1) inline void math(__gm__ half* fp, __gm__ bfloat16_t* bf) {
+        TL_CANN_USE_SIMT_MATH_NAMES
+        static_assert(std::is_same_v<decltype(hexp2(*fp)), half>);
+        static_assert(std::is_same_v<decltype(hexp10(*bf)), bfloat16_t>);
+        *fp = hexp10(hexp2(*fp));
+        *bf = hexp2(hexp10(*bf));
+    }
+    extern "C" __global__ __vector__ void entry(__gm__ half* fp, __gm__ bfloat16_t* bf) {
+        asc_vf_call<math>(cce::dim3(1), fp, bf);
     }
     """
     binary = bisheng.compile_ascend(source, target_format="aibin", npu_arch="dav-3510", options=["-I" + TILELANG_TEMPLATE_PATH])
