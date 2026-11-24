@@ -976,16 +976,17 @@ TL_DEVICE void AtomicOr(T1 *ref, T2 value,
                         int memory_order = int(cuda::memory_order_relaxed)) {
   using NT1 = typename normalize_atomic_type<T1>::type;
 #if CUDART_VERSION >= 11080
-  // red has no .acquire/.acq_rel; those orders go through atomic_ref.
+  // Generic-address red so shared memory works too. red has no
+  // .acquire/.acq_rel; those orders go through atomic_ref.
   if constexpr (std::is_same_v<NT1, int> || std::is_same_v<NT1, unsigned int>) {
     uint32_t val = static_cast<uint32_t>(value);
     auto addr = reinterpret_cast<unsigned long long>(ref);
     if (memory_order == int(cuda::memory_order_release)) {
-      asm volatile("red.release.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
-                   "r"(val));
+      asm volatile("red.release.gpu.or.b32 [%0], %1;" ::"l"(addr), "r"(val)
+                   : "memory");
     } else if (memory_order == int(cuda::memory_order_relaxed)) {
-      asm volatile("red.relaxed.gpu.global.or.b32 [%0], %1;" ::"l"(addr),
-                   "r"(val));
+      asm volatile("red.relaxed.gpu.or.b32 [%0], %1;" ::"l"(addr), "r"(val)
+                   : "memory");
     } else {
       cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(
           *reinterpret_cast<NT1 *>(ref));
@@ -995,11 +996,11 @@ TL_DEVICE void AtomicOr(T1 *ref, T2 value,
     unsigned long long val = static_cast<unsigned long long>(value);
     auto addr = reinterpret_cast<unsigned long long>(ref);
     if (memory_order == int(cuda::memory_order_release)) {
-      asm volatile("red.release.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
-                   "l"(val));
+      asm volatile("red.release.gpu.or.b64 [%0], %1;" ::"l"(addr), "l"(val)
+                   : "memory");
     } else if (memory_order == int(cuda::memory_order_relaxed)) {
-      asm volatile("red.relaxed.gpu.global.or.b64 [%0], %1;" ::"l"(addr),
-                   "l"(val));
+      asm volatile("red.relaxed.gpu.or.b64 [%0], %1;" ::"l"(addr), "l"(val)
+                   : "memory");
     } else {
       cuda::atomic_ref<NT1, cuda::thread_scope_device> aref(
           *reinterpret_cast<NT1 *>(ref));

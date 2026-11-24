@@ -1174,12 +1174,23 @@ def test_atomic_int64(dtype, op, return_prev):
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64", "uint64"])
 @pytest.mark.parametrize("memory_order", ["relaxed", "acquire", "release", "acq_rel", "seq_cst"])
-def test_atomic_or_memory_order(dtype, memory_order):
+@pytest.mark.parametrize("scope", ["global", "shared"])
+def test_atomic_or_memory_order(dtype, memory_order, scope):
     @T.prim_func
     def main(A: T.Tensor((32,), dtype), B: T.Tensor((1,), dtype)):
         with T.Kernel(1, threads=32):
             i = T.get_thread_binding()
-            T.atomic_or(B[0], A[i], memory_order=memory_order)
+            if scope == "global":
+                T.atomic_or(B[0], A[i], memory_order=memory_order)
+            else:
+                S = T.alloc_shared((1,), dtype)
+                if i == 0:
+                    S[0] = 0
+                T.sync_threads()
+                T.atomic_or(S[0], A[i], memory_order=memory_order)
+                T.sync_threads()
+                if i == 0:
+                    B[0] = S[0]
 
     kernel = tilelang.compile(main, target="cuda")
     bits = 32 if dtype.endswith("32") else 64
