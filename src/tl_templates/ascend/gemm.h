@@ -1,6 +1,6 @@
 #pragma once
 
-#include "tl_templates/ascend/cann_compat_begin.h"
+#include "tl_templates/ascend/cann_compat.h"
 
 /*!
  * \brief Ascend GEMM template for L1-scoped inputs with double-buffered L0.
@@ -226,5 +226,3 @@ __aicore__ inline void ascend_blockscaled_gemm_l1(
     asc_unlock(PIPE_M, buf_offset + (sk & 1), ASC_LOCK_BLOCK);
   }
 }
-
-#include "tl_templates/ascend/cann_compat_end.h"

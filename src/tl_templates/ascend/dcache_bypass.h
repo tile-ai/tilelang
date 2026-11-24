@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-#include "tl_templates/ascend/cann_compat_begin.h"
+#include "tl_templates/ascend/cann_compat.h"
 
 namespace tl {
 
@@ -57,5 +57,3 @@ __aicore__ inline void write_gm_bypass_dcache(__gm__ T *addr, T value) {
 }
 
 } // namespace tl
-
-#include "tl_templates/ascend/cann_compat_end.h"

@@ -364,6 +364,12 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
   preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
   preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
+  // Finish emits the SDK headers, imported source, then this declaration stream.
+  decl_stream << "TL_CANN_RESTORE_NAMES\n";
+}
+
+void CodeGenTileLangAscend::EmitPreamble_(std::ostream &os) const {
+  os << "TL_CANN_SAVE_NAMES\n";
 }
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {

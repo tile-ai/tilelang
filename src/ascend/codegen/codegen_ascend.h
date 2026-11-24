@@ -57,6 +57,8 @@ public:
   void PreFunctionBody(const PrimFunc &f) final;
 
 protected:
+  void EmitPreamble_(std::ostream &os) const final;
+
   // Scalarize vector math calls (like CUDA)
   void PrintCallExtern(Type ret_type, ffi::String global_symbol,
                        const ffi::Array<PrimExpr> &args, bool skip_first_arg,

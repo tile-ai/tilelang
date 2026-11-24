@@ -8,14 +8,6 @@ ci:
 default_stages: [pre-commit, pre-push, manual]
 exclude: '^(build|3rdparty)/.*$'  # exclude build and 3rdparty directories
 repos:
-  - repo: local
-    hooks:
-      - id: check-cann-compat-header
-        name: Check generated Ascend CANN compatibility header
-        language: python
-        entry: python maint/scripts/generate_cann_compat.py --check
-        files: ^(src/tl_templates/ascend/cann_compat_(names|begin)\.h|maint/scripts/generate_cann_compat\.py)$
-        pass_filenames: false
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0 # May not sync with requirements-lint.txt, but it's OK for now
     hooks:

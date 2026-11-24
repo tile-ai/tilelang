@@ -38,7 +38,9 @@ def test_dma_extern_calls_with_imported_source():
 __aicore__ inline void asc_copy_gm2ub_align(__ubuf__ uint8_t* dst, __gm__ uint8_t* src) {
     ::asc_copy_gm2ub_align(dst, src, 32);
 }
-}"""
+}
+#define asc_copy_gm2ub_align(...) static_assert(false, "imported macro reached generated DMA")
+"""
 
     @T.prim_func
     def kernel(asc_copy_gm2ub_align: T.Tensor((32,), "uint8"), asc_load_l2_cache_mode: T.int32):
@@ -51,6 +53,8 @@ __aicore__ inline void asc_copy_gm2ub_align(__ubuf__ uint8_t* dst, __gm__ uint8_
 
     source = tilelang.lower(kernel, target="ascend").kernel_source
     assert 0 <= source.rfind("#include") < source.index(helper)
+    assert source.index("TL_CANN_SAVE_NAMES") < source.index(helper) < source.index("TL_CANN_RESTORE_NAMES")
+    assert source.index("TL_CANN_RESTORE_NAMES") < source.index("TL_CANN_USE_CORE_NAMES")
     assert "user_dma::asc_copy_gm2ub_align(" in source
     signature, body = source.split("TL_CANN_USE_CORE_NAMES", 1)
     # Source parameter names can match either a bound function or a bound type.

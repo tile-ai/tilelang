@@ -2,10 +2,11 @@
 
 #include <type_traits>
 
-#include "tl_templates/ascend/cann_compat_begin.h"
+#include "tl_templates/ascend/cann_compat.h"
 
 namespace simd_inst {
-TL_CANN_SIMD_TEMPLATE_NAMES
+TL_CANN_USE_CORE_NAMES
+TL_CANN_USE_SIMD_NAMES
 
 template <typename T> struct vec {};
 
@@ -1062,5 +1063,3 @@ __simd_callee__ inline void vst_x2(vec_t<T> src0, vec_t<T> src1,
 }
 
 } // namespace simd_inst
-
-#include "tl_templates/ascend/cann_compat_end.h"

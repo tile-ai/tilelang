@@ -392,45 +392,49 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
 } // namespace cann
 } // namespace tl
 
-// Bind only the adapted SDK names in TileLang code. A callable keeps
-// argument-dependent lookup from adding a competing global SDK overload.
+// Define each SDK spelling once. A callable object prevents argument-dependent
+// lookup from adding a competing global SDK overload.
 #if defined(__NPU_ARCH__)
-#define TL_CANN_BIND_CALL(attr, name)                                          \
-  constexpr auto asc_##name [[maybe_unused]] = [](auto &&...args)              \
-                                                   attr -> decltype(auto) {    \
+namespace tl::cann::sdk {
+#define TL_CANN_CALLABLE(attr, name)                                           \
+  inline constexpr auto asc_##name = [](auto &&...args)                        \
+                                         attr -> decltype(auto) {              \
     return ::tl::cann::name(static_cast<decltype(args)>(args)...);             \
   };
-#define TL_CANN_BIND_CORE(name) TL_CANN_BIND_CALL(__aicore__, name)
-#define TL_CANN_BIND_TYPE(name)                                                \
-  using asc_##name [[maybe_unused]] = ::tl::cann::name;
+#define TL_CANN_CORE(name) TL_CANN_CALLABLE(__aicore__, name)
+#define TL_CANN_TYPE(name) using asc_##name = ::tl::cann::name;
+TL_CANN_CORE_NAMES(TL_CANN_CORE)
+TL_CANN_TYPE_NAMES(TL_CANN_TYPE)
+#undef TL_CANN_TYPE
+#undef TL_CANN_CORE
+
+#define TL_CANN_USING(name) using ::tl::cann::sdk::asc_##name;
 #define TL_CANN_USE_CORE_NAMES                                                 \
-  TL_CANN_CORE_NAMES(TL_CANN_BIND_CORE) TL_CANN_TYPE_NAMES(TL_CANN_BIND_TYPE)
+  TL_CANN_CORE_NAMES(TL_CANN_USING) TL_CANN_TYPE_NAMES(TL_CANN_USING)
 #if defined(INCLUDE_C_API_REG_COMPUTE_REG_VECTOR_H) ||                         \
     defined(INCLUDE_C_API_ASC_REG_VECTOR_H)
-#define TL_CANN_BIND_SIMD(name) TL_CANN_BIND_CALL(__simd_callee__, name)
-#define TL_CANN_USE_SIMD_NAMES TL_CANN_SIMD_NAMES(TL_CANN_BIND_SIMD)
-// Inline variables let every translation unit include the SIMD template header.
-#define TL_CANN_INLINE_CORE(name) inline TL_CANN_BIND_CORE(name)
-#define TL_CANN_INLINE_SIMD(name) inline TL_CANN_BIND_SIMD(name)
-#define TL_CANN_SIMD_TEMPLATE_NAMES                                            \
-  TL_CANN_CORE_NAMES(TL_CANN_INLINE_CORE)                                      \
-  TL_CANN_TYPE_NAMES(TL_CANN_BIND_TYPE)                                        \
-  TL_CANN_SIMD_NAMES(TL_CANN_INLINE_SIMD)
+#define TL_CANN_SIMD(name) TL_CANN_CALLABLE(__simd_callee__, name)
+TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
+#undef TL_CANN_SIMD
+#define TL_CANN_USE_SIMD_NAMES TL_CANN_SIMD_NAMES(TL_CANN_USING)
 #endif
+#undef TL_CANN_CALLABLE
+} // namespace tl::cann::sdk
 #else
 #define TL_CANN_USE_CORE_NAMES
-#endif
-#ifndef TL_CANN_SIMD_TEMPLATE_NAMES
-#define TL_CANN_SIMD_TEMPLATE_NAMES
 #endif
 #ifndef TL_CANN_USE_SIMD_NAMES
 #define TL_CANN_USE_SIMD_NAMES
 #endif
 
-// C++ name lookup starts after preprocessing. Keep a caller's macros out of
-// TileLang template definitions, then restore them on exit.
+// The generated file puts SDK headers first, then imported C++, then kernels.
+// Let imports use their own macros and restore the SDK spellings before kernels.
 #define TL_CANN_PRAGMA(x) _Pragma(#x)
-#define TL_CANN_PUSH_NAME(name) TL_CANN_PRAGMA(push_macro(#name))
-#define TL_CANN_POP_NAME(name) TL_CANN_PRAGMA(pop_macro(#name))
-#define TL_CANN_PUSH_SDK(name) TL_CANN_PUSH_NAME(asc_##name)
-#define TL_CANN_POP_SDK(name) TL_CANN_POP_NAME(asc_##name)
+#define TL_CANN_PUSH(name) TL_CANN_PRAGMA(push_macro(#name))
+#define TL_CANN_POP(name) TL_CANN_PRAGMA(pop_macro(#name))
+#define TL_CANN_PUSH_SDK(name) TL_CANN_PUSH(asc_##name)
+#define TL_CANN_POP_SDK(name) TL_CANN_POP(asc_##name)
+#define TL_CANN_SAVE_NAMES                                                     \
+  TL_CANN_SDK_NAMES(TL_CANN_PUSH_SDK) TL_CANN_SIMT_MATH_NAMES(TL_CANN_PUSH)
+#define TL_CANN_RESTORE_NAMES                                                  \
+  TL_CANN_SDK_NAMES(TL_CANN_POP_SDK) TL_CANN_SIMT_MATH_NAMES(TL_CANN_POP)
