@@ -136,15 +136,6 @@ TileOperator ReduceOpNode::Clone() const {
   return ReduceOp(op);
 }
 
-static Array<PrimExpr> InputPlaceholders(size_t n) {
-  Array<PrimExpr> result;
-  result.reserve(n);
-  for (size_t i = 0; i < n; ++i) {
-    result.push_back(InputPlaceholder(i));
-  }
-  return result;
-}
-
 /**
  * @brief Lower the Reduce operator to a TIR statement.
  *
@@ -225,10 +216,12 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
 
     // Keep placeholder bindings local to this containment check.
     arith::Analyzer analyzer;
-    auto indices = InputPlaceholders(reducer_layout->InputDim());
-    for (size_t i = 0; i < indices.size(); i++) {
-      analyzer.Bind(Downcast<Var>(indices[i]),
-                    Range(0, reducer_layout->InputShape()[i]));
+    Array<Var> idx_vars = MakeLayoutVars(reducer_layout->InputDim());
+    Array<PrimExpr> indices;
+    indices.reserve(idx_vars.size());
+    for (size_t i = 0; i < idx_vars.size(); i++) {
+      analyzer.Bind(idx_vars[i], Range(0, reducer_layout->InputShape()[i]));
+      indices.push_back(idx_vars[i]);
     }
     if (!ProveFragmentContains(orig_dst_layout, reducer_layout, indices,
                                indices, analyzer)) {

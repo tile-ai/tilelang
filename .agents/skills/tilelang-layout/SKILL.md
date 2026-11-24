@@ -8,18 +8,23 @@ description: Use when working with TileLang layouts — the Layout/Fragment clas
 ## Core types (`src/layout/layout.h`, Python `tilelang/layout/`)
 
 **`tl::Layout`** maps logical coordinates to physical coordinates:
-`input_size_` (logical shape) + `forward_index_` (one PrimExpr per output
-axis). Expressions are written in process-wide placeholder Vars
-`InputPlaceholder(i)` (printed `_i`, `_j`, ...). Key APIs:
-`InputShape/OutputShape/GetForwardIndex/Forward(vars)/Inverse/
-InverseWithLevel/Reshape/DetectInjective/DebugOutput`. `OutputShape()` is
-DERIVED from the expressions' ranges by the Analyzer, not stored.
+`input_size_` (logical shape), `forward_vars_` (node-owned bound `tirx::Var`s
+printed `_i`, `_j`, ..., registered with `SEqHashDef()`), and `forward_index_`
+(one PrimExpr per output axis). Helpers `MakeLayoutVars(ndim)` /
+`MakeLayoutVars<N>()` and `MakeReplicateVar()` allocate fresh canonical `Var`s
+for C++ constructors; each node rebinds caller vars to fresh private `Var`s on
+construction. Key APIs:
+`InputShape/OutputShape/InputVars/InputVar(i)/GetForwardIndex/Forward(vars)/
+Inverse/InverseWithLevel/Reshape/DetectInjective/DebugOutput`. `OutputShape()`
+is DERIVED from the expressions' ranges by the Analyzer, not stored.
 
 **`tl::Fragment : Layout`** adds a thread dimension for register buffers:
-`forward_thread_` (PrimExpr, may reference `ReplicationPlaceholder()`,
-printed `_rep`) and `replicate_size_`. `ThreadExtent()` =
-`max(forward_thread)+1` under bound domains — also derived, not stored.
-`thread_range_` (via `BindThreadRange`) offsets the thread space for warp
+`replicate_var_` (node-owned bound `tirx::Var` printed `_rep`, `SEqHashDef()`),
+`forward_thread_` (PrimExpr, may reference `ReplicateVar()`), and
+`replicate_size_`; `forward_index_` depends only on `InputVars()` (never
+`ReplicateVar()`). `ThreadExtent()` = `max(forward_thread)+1` under bound
+domains — also derived, not stored. `thread_range_` (via `BindThreadRange`,
+which clones into fresh bound `Var`s) offsets the thread space for warp
 specialization; the forward map itself stays in normalized `[0, T)`.
 Replication semantics: each logical point is held by `replicate_size`
 threads; `Replicate/DeReplicate/CondenseReplicateVar` manipulate the rep
@@ -27,16 +32,17 @@ axis.
 
 **Gotchas (verified, easy to trip on):**
 
-- `FragmentNode::GetForwardVars()` PREPENDS `ReplicationPlaceholder()`
-  when `replicate_size > 1` (`src/layout/layout.cc:1103`). The input
-  placeholders are always the TRAILING `InputDim()` entries. Python code
-  that zips `get_forward_vars()` against the shape positionally is wrong
-  for replicated fragments.
+- `FragmentNode::GetForwardVars()` PREPENDS `ReplicateVar()`
+  when `replicate_size > 1`. The input vars are always the TRAILING
+  `InputDim()` entries (whereas the reflected `frag.forward_vars` field / C++
+  `InputVars()` contains only the `InputDim()` input vars). Python code that
+  zips `get_forward_vars()` against the shape positionally is wrong for
+  replicated fragments.
 - The canonical (thread, slot, rep) packing lives in
-  `FragmentNode::InverseWithLevel` (`src/layout/layout.cc:1133`): rep
-  becomes a trailing ORDINARY input dim of extent `ReplicateExtent()`
-  (substituting the placeholder), thread a trailing output. The inverse
-  then maps `(slot..., thread) -> (coords..., rep)` with rep last;
+  `FragmentNode::InverseWithLevel`: `ReplicateVar()` is appended to
+  `InputVars()` as a trailing ORDINARY input dim of extent `ReplicateExtent()`,
+  and `forward_thread_` becomes a trailing output. The inverse then maps
+  `(slot..., thread) -> (coords..., rep)` with rep last;
   `loop_partition.cc` consumes exactly this ordering and guards
   replica-zero for stores. Mirror this packing when you need a fragment
   as a plain multi-output layout.
@@ -81,8 +87,9 @@ check bijectivity via `size(right_inverse(F)) == size(F)`.
 **Conversion caveats:** the converters read only `GetForwardIndex()`; a
 Fragment's `forward_thread` and replication are silently ignored unless
 you pack them into a plain multi-output Layout first (see the canonical
-packing above; substitute `ReplicationPlaceholder` with a trailing input
-var — if it leaks into the probe, conversion gracefully returns None).
+packing above; pass `[InputVars()..., ReplicateVar()]` as the layout's
+`forward_vars` — if an unbound `ReplicateVar()` leaks into the probe,
+conversion gracefully returns None).
 
 ## Layout inference (`src/transform/layout_inference/`)
 

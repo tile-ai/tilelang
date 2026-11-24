@@ -576,14 +576,14 @@ LayoutMap ParallelOpNode::InferLayout(const LayoutInferArgs &layout_args,
     if (loop_layout_->ThreadRange().defined()) {
       auto thread_range = loop_layout_->ThreadRange();
       block_size = thread_range->extent;
-      AddPredicate(GE(InputPlaceholder(0), thread_range->min));
+      AddPredicate(GE(predicate_thread_var_, thread_range->min));
       AddPredicate(
-          LT(InputPlaceholder(0), thread_range->min + thread_range->extent));
+          LT(predicate_thread_var_, thread_range->min + thread_range->extent));
     }
   }
 
   if (!analyzer_.CanProveEqual(loop_thread_extent, block_size)) {
-    AddPredicate(LT(InputPlaceholder(0),
+    AddPredicate(LT(predicate_thread_var_,
                     loop_thread_extent + layout_args.thread_bounds->min));
   }
 
@@ -785,7 +785,7 @@ Fragment ParallelOpNode::ComputeReducerPinnedCandidate(
 Optional<PrimExpr> ParallelOpNode::GetPredicate(PrimExpr thread_index) const {
   if (predicate_.defined()) {
     return Substitute(predicate_.value(),
-                      {{InputPlaceholder(0), thread_index}});
+                      {{predicate_thread_var_, thread_index}});
   } else {
     return std::nullopt;
   }
@@ -809,14 +809,17 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       PrimExpr indice_rep_extent = 1;
       PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
       PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
+      Array<Var> vars2 = MakeLayoutVars(buffer->shape.size());
+      Var rep2 = MakeReplicateVar();
       Array<PrimExpr> fwd2;
-      for (size_t i = 0; i < buffer->shape.size(); i++) {
-        fwd2.push_back(InputPlaceholder(i));
+      fwd2.reserve(vars2.size());
+      for (const Var &v : vars2) {
+        fwd2.push_back(v);
       }
       PrimExpr thd_b2 =
-          loop_layout_->ForwardThread(ind_inv2d->Forward(fwd2), std::nullopt);
-      return Fragment(buffer->shape, {}, thd_b2, dest_buffer_rep_extent,
-                      std::nullopt)
+          loop_layout_->ForwardThread(ind_inv2d->Forward(fwd2), rep2);
+      return Fragment(buffer->shape, vars2, {}, thd_b2, dest_buffer_rep_extent,
+                      rep2)
           ->CondenseReplicateVar();
     }
   }
@@ -832,16 +835,18 @@ Fragment ParallelOpNode::CompleteBufferFragment(const Buffer &buffer) const {
       ind_inv->InputShape().back(); // this is the size of rep_b
   PrimExpr loop_rep_extent = loop_layout_->ReplicateExtent();
   PrimExpr dest_buffer_rep_extent = indice_rep_extent * loop_rep_extent;
+  Array<Var> vars = MakeLayoutVars(buffer->shape.size());
+  Var rep = MakeReplicateVar();
   Array<PrimExpr> fwd;
-  for (size_t i = 0; i < buffer->shape.size(); i++) {
-    fwd.push_back(InputPlaceholder(i));
+  fwd.reserve(vars.size() + 1);
+  for (const Var &v : vars) {
+    fwd.push_back(v);
   }
-  fwd.push_back(FloorMod(ReplicationPlaceholder(), indice_rep_extent));
+  fwd.push_back(FloorMod(rep, indice_rep_extent));
   PrimExpr thd_b = loop_layout_->ForwardThread(
-      ind_inv->Forward(fwd),
-      FloorDiv(ReplicationPlaceholder(), indice_rep_extent));
+      ind_inv->Forward(fwd), FloorDiv(rep, indice_rep_extent));
   Fragment completed =
-      Fragment(buffer->shape, {}, thd_b, dest_buffer_rep_extent, std::nullopt)
+      Fragment(buffer->shape, vars, {}, thd_b, dest_buffer_rep_extent, rep)
           ->CondenseReplicateVar();
   // Broadcast reads touched many times per thread produce an
   // occurrence-indexed replication whose (logical, replica) -> physical map
@@ -903,7 +908,13 @@ bool ParallelOpNode::ValidateCandidateAgainstFragments(
         oss << "Layout infer conflict between " << buffer << " and "
             << source_buffer << " in T.Parallel loop:" << '\n'
             << "    loop " << candidate->DebugOutput() << '\n'
-            << "    fragment " << fragment->DebugOutput() << '\n';
+            << "    fragment " << fragment->DebugOutput() << '\n'
+            << "    Loop threads read elements that " << buffer
+            << " holds on other threads, and fragments cannot exchange data "
+               "between threads. This happens, for example, when a T.gemm "
+               "output that is split among wavefronts by columns feeds the A "
+               "operand of the next T.gemm. "
+               "Write the data to T.alloc_shared memory instead.\n";
       }
       success = false;
     }
@@ -1110,7 +1121,7 @@ void ParallelOpNode::BuildReplicationGuardsIfNeeded(
     Array<PrimExpr> fwd;
     for (size_t i = 0; i < loop_layout_->OutputDim(); i++)
       fwd.push_back(0);
-    fwd.push_back(InputPlaceholder(0) - layout_args.thread_bounds->min);
+    fwd.push_back(predicate_thread_var_ - layout_args.thread_bounds->min);
     auto rep = inv->Forward(fwd).back();
     AddPredicate(EQ(rep, 0));
   }

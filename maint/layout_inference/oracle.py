@@ -69,11 +69,10 @@ def eval_expr_grid(expr, env: dict) -> np.ndarray:
 
 
 def placeholder_vars(frag):
-    """(input placeholders, rep placeholder or None).
+    """(input vars, rep var or None).
 
-    FragmentNode::GetForwardVars PREPENDS ReplicationPlaceholder when R > 1
-    (src/layout/layout.cc:1103-1112); the input placeholders are always the
-    trailing InputDim entries.
+    FragmentNode::GetForwardVars PREPENDS ReplicateVar() when R > 1; the input
+    vars are always the trailing InputDim entries.
     """
     fwd_vars = list(frag.get_forward_vars())
     ndim = len(frag.get_input_shape())
