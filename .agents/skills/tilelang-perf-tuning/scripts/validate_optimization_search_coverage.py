@@ -1839,7 +1839,12 @@ def validate(path: Path, final: bool, allow_unmet_convergence: bool) -> str:
                             attempted_cases,
                             f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} does not attempt a linked case",
                         )
-                        untested = {case_id for case_id in attempted_cases if case_results[case_id].get("disposition") != "TESTED_PATH"}
+                        untested = {
+                            case_id
+                            for case_id in attempted_cases
+                            if case_results[case_id].get("disposition") != "TESTED_PATH"
+                            and not candidate_blocked_case(candidate_id, case_id, results)
+                        }
                         require(
                             not untested or result.get("rejection_evidence") is not None,
                             f"obligation {oid}: {label} {item.get('status')} candidate {candidate_id} leaves "
