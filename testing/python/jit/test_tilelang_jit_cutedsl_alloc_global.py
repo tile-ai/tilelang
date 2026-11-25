@@ -2,21 +2,11 @@
 per call (the CUDA host codegen uses TVMBackendAllocWorkspace) and passes it to
 every kernel that uses it."""
 
-import pytest
 import torch
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-
-
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
 
 
 def staged_copy(n, block, dtype):
@@ -64,8 +54,8 @@ def _call_signature(host_source):
     return next(line for line in host_source.splitlines() if line.startswith("def call("))
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_alloc_global_host_wrapper():
-    _require_cutedsl()
     kernel = tilelang.compile(staged_copy(1024, 128, "float16"), target=CUTEDSL_SM90_TARGET, execution_backend="cutedsl")
     host = kernel.get_host_source()
     # A and B come from the caller; the workspace is allocated inside call().
@@ -75,8 +65,8 @@ def test_cutedsl_alloc_global_host_wrapper():
     assert "else torch.cuda.default_stream(_ws_device)" in host
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_alloc_global_dynamic_shape_host_wrapper():
-    _require_cutedsl()
     kernel = tilelang.compile(split_then_combine(128, 4), target=CUTEDSL_SM90_TARGET, execution_backend="cutedsl")
     host = kernel.get_host_source()
     assert _call_signature(host).count("_tl_arg_") == 3
@@ -84,26 +74,23 @@ def test_cutedsl_alloc_global_dynamic_shape_host_wrapper():
     assert "dtype=torch.int32" in host
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_alloc_global_staged_copy():
-    _require_cutedsl()
     kernel = tilelang.compile(staged_copy(1024, 128, "float16"), out_idx=[1], target="cutedsl")
     a = torch.randn(1024, device="cuda", dtype=torch.float16)
     torch.testing.assert_close(kernel(a), a)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_alloc_global_shared_by_two_kernels():
-    _require_cutedsl()
     kernel = tilelang.compile(split_then_combine(128, 4), out_idx=[1], target="cutedsl")
     for n in (1000, 4096):
         a = torch.randn(n, 4, device="cuda")
         torch.testing.assert_close(kernel(a), a.sum(dim=1) * 2.0 / 4)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_alloc_global_on_side_stream():
-    _require_cutedsl()
     kernel = tilelang.compile(split_then_combine(128, 4), out_idx=[1], target="cutedsl")
     a = torch.randn(4096, 4, device="cuda")
     side = torch.cuda.Stream()
@@ -113,9 +100,8 @@ def test_cutedsl_alloc_global_on_side_stream():
     torch.testing.assert_close(out, a.sum(dim=1) * 2.0 / 4)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_alloc_global_on_explicit_default_stream_from_side_stream():
-    _require_cutedsl()
     kernel = tilelang.compile(split_then_combine(128, 4), out_idx=[1], target="cutedsl")
     a = torch.randn(4096, 4, device="cuda")
     torch.cuda.synchronize()

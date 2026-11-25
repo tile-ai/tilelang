@@ -27,6 +27,9 @@ from .simd_inst import (
     vsqrt_0ulp_ftz_false,
 )
 from .simt import (
+    atomic_add,
+    atomic_max,
+    atomic_min,
     fp8_byte_load,
     fp8_byte_store,
     scalar_binary_fp8,
@@ -49,6 +52,9 @@ __all__ = [
     "ascend_cross_core_set_flag",
     "ascend_cross_core_wait_flag",
     "as_logical_bool",
+    "atomic_add",
+    "atomic_max",
+    "atomic_min",
     "fp8_byte_load",
     "fp8_byte_store",
     "finalize_mixed_kernel",

@@ -45,10 +45,12 @@ Ascend stubs in `src/ascend/stubs/` implement a lazy-loading mechanism:
 
 - **Lazy Loading**: Libraries are loaded via `dlopen` only upon the first API call.
 - **Global Symbol Reuse**: For `cudart` and `nvrtc`, the stubs first check the global namespace (`RTLD_DEFAULT`) to use any already loaded symbols (e.g., from PyTorch).
-- **ROCm Notes**: `hip_stub` checks `RTLD_DEFAULT` / `RTLD_NEXT` first and then
-  falls back to `dlopen("libamdhip64.so")`. It additionally provides wrappers
-  for `hsa_init` / `hsa_shut_down` so that ROCm-enabled wheels do not record a
-  hard dependency on `libhsa-runtime64` at import time.
+- **ROCm Notes**: `hip_stub` checks `RTLD_DEFAULT` / `RTLD_NEXT` first, then
+  probes already-mapped `libamdhip64` SONAMEs with `RTLD_NOLOAD` before falling
+  back to `dlopen("libamdhip64.so")`. Device-existence and error-string probes
+  (`hipGetDeviceCount`, `hipGetErrorName`, `hipGetErrorString`) degrade
+  gracefully without throwing when `libamdhip64.so` is absent so `tvm.rocm().exist`
+  returns `False` on non-ROCm hosts.
 - **Ascend Notes**: `ascendcl_stub` checks `RTLD_DEFAULT` / `RTLD_NEXT` first
   (reusing the `libascendcl` copy loaded by torch_npu), then
   `dlopen("libascendcl.so")` (which honors the `LD_LIBRARY_PATH` set by CANN's
@@ -66,9 +68,10 @@ Ascend stubs in `src/ascend/stubs/` implement a lazy-loading mechanism:
 - `TILELANG_USE_CUDA_STUBS` (Default: `ON`) controls CUDA stubs. When enabled,
   TileLang links against these stubs instead of the system CUDA toolkit
   libraries.
-- `TILELANG_USE_HIP_STUBS` (Default: `ON`) controls ROCm stubs. When enabled
-  (and `USE_ROCM=ON`), TileLang/TVM link against `hip_stub` / `hiprtc_stub`
-  instead of the system ROCm libraries.
+- `TILELANG_USE_HIP_STUBS` (Default: `OFF` on native Windows, `ON` elsewhere,
+  including Cygwin) controls ROCm stubs. When enabled (and `USE_ROCM=ON`),
+  TileLang/TVM link against `hip_stub` / `hiprtc_stub` instead of the system
+  ROCm libraries.
 - `TILELANG_USE_ASCEND_STUBS` (Default: `ON` on non-Windows) controls the
   Ascend stub. When enabled (and `USE_ASCEND=ON`), TileLang links against
   `ascendcl_stub` instead of the system CANN library. When disabled, TileLang

@@ -266,7 +266,7 @@ PY
     if command -v nvcc >/dev/null 2>&1; then
         nvcc --version | sed -n 's/.*release \([^,]*\).*/nvcc_release=\1/p'
     fi
-    env | LC_ALL=C sort | grep -E '^(CMAKE_|SKBUILD_|USE_CUDA=|USE_ROCM=|USE_METAL=|TILELANG_USE_CUDA_STUBS=|WITH_PIP_CUDA_TOOLCHAIN=|CUDA_HOME=|CUDA_PATH=|CUDA_VERSION=|CUDACXX=|HIP_PATH=|ROCM_PATH=|NO_VERSION_LABEL=|NO_TOOLCHAIN_VERSION=|NO_GIT_VERSION=)' || true
+    env | LC_ALL=C sort | grep -E '^(CMAKE_|SKBUILD_|USE_CUDA=|USE_ROCM=|USE_METAL=|TILELANG_USE_CUDA_STUBS=|WITH_PIP_CUDA_TOOLCHAIN=|CUDA_HOME=|CUDA_PATH=|CUDA_VERSION=|CUDACXX=|HIP_PATH=|ROCM_PATH=|NO_VERSION_LABEL=|NO_GIT_VERSION=)' || true
 }
 
 build_wheel_to_dir() {

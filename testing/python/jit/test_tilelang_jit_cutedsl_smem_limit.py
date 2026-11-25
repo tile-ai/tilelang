@@ -10,15 +10,6 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 @tilelang.jit(target="cutedsl")
 def staged_copy_kernel(n):
     @T.prim_func
@@ -31,9 +22,8 @@ def staged_copy_kernel(n):
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_rejects_dynamic_smem_above_device_limit():
-    _require_cutedsl()
     # 256 KiB is above the opt-in cap of every architecture (at most 227 KiB),
     # so the launch must be rejected without querying PyTorch device properties.
     n = 256 * 1024 // 4
@@ -43,9 +33,8 @@ def test_cutedsl_rejects_dynamic_smem_above_device_limit():
         staged_copy_kernel(n)(a, b)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_dynamic_smem_within_device_limit_runs():
-    _require_cutedsl()
     n = 16 * 1024
     a = torch.randn(n, device="cuda")
     b = torch.empty_like(a)

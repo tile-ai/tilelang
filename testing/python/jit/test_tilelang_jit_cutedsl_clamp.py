@@ -7,15 +7,6 @@ import tilelang.language as T
 import tilelang.testing
 
 
-def _require_cutedsl():
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
-
 @tilelang.jit(target="cutedsl")
 def clamp_global_kernel(dtype, N=256, threads=64):
     @T.prim_func
@@ -45,11 +36,10 @@ def clamp_fragment_kernel(dtype, M=64, N=128, threads=128):
     return kernel
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
 def test_cutedsl_clamp_matches_torch(dtype):
     """Vectorized clamp against per-element bounds."""
-    _require_cutedsl()
     torch_dtype = getattr(torch, dtype)
     a = (torch.randn(256, device="cuda") * 10).to(torch_dtype)
     lo = (torch.randn(256, device="cuda") * -3).to(torch_dtype)
@@ -58,10 +48,9 @@ def test_cutedsl_clamp_matches_torch(dtype):
     torch.testing.assert_close(out, torch.clamp(a, lo, hi), atol=0, rtol=0)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_clamp_fragment_scalar_bounds():
     """Clamp of a fragment against broadcast constant bounds."""
-    _require_cutedsl()
     a = torch.randn(64, 128, device="cuda") * 10
     out = clamp_fragment_kernel("float32")(a)
     torch.testing.assert_close(out, a.clamp(-6, 6), atol=0, rtol=0)

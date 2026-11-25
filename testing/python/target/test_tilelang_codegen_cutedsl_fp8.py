@@ -8,9 +8,6 @@ from tilelang import tvm
 from tilelang.engine import lower
 
 BUILD = "target.build.tilelang_cutedsl_without_compile"
-# Same convention as the other codegen tests: the CuTeDSL build function only
-# exists in a CUDA-enabled build, so the test is skipped elsewhere.
-pytestmark = tilelang.testing.requires_cuda.marks()
 
 
 def _op_kernel(dtype, op, lanes=4):
@@ -46,6 +43,8 @@ def _source(dtype, op, lanes=4):
     return tvm.ffi.get_global_func(BUILD)(artifact.device_mod, target).inspect_source()
 
 
+@pytest.mark.cutedsl
+@tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("dtype", ["float8_e4m3", "float8_e4m3fn", "float8_e5m2"])
 @pytest.mark.parametrize("op,name", [("add", "add"), ("div", "div"), ("max", "max")])
 def test_fp8_binary_uses_helper(dtype, op, name):
@@ -54,11 +53,15 @@ def test_fp8_binary_uses_helper(dtype, op, name):
     assert f'tl.fp8_binary("{name}"' in source
 
 
+@pytest.mark.cutedsl
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_fp8_comparison_uses_helper():
     source = _source("float8_e4m3", "select")
     assert 'tl.fp8_binary("<"' in source
 
 
+@pytest.mark.cutedsl
+@tilelang.testing.requires_cuda(support_required="compile-only")
 def test_fp8_clamp_uses_helpers():
     """``T.clamp`` lowers to min/max, so both go through tl.fp8_binary."""
     source = _source("float8_e4m3", "clamp")
@@ -66,6 +69,8 @@ def test_fp8_clamp_uses_helpers():
     assert 'tl.fp8_binary("min"' in source
 
 
+@pytest.mark.cutedsl
+@tilelang.testing.requires_cuda(support_required="compile-only")
 @pytest.mark.parametrize("op", ["add", "max", "clamp"])
 def test_fp8_vector_op_evaluates_once(op):
     """A vector FP8 expression must be bound to one rmem value, not re-evaluated per lane."""

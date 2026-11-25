@@ -1,9 +1,9 @@
 name: CI
 on:
   pull_request:
+    # CodeRabbit can apply several labels to one PR. Label events must not
+    # restart and cancel the full CI run through the concurrency group below.
     types:
-      - labeled
-      - unlabeled
       - opened
       - synchronize
       - reopened
@@ -150,6 +150,13 @@ jobs:
           echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
+
+          # Isolate JIT temporary artifacts per job under RUNNER_TEMP so concurrent
+          # runners never collide in /tmp or exhaust a small /tmp tmpfs, and GitHub
+          # Actions cleans them up automatically when the job finishes.
+          export TMPDIR="${RUNNER_TEMP}/tmp"
+          mkdir -p "${TMPDIR}"
+          echo "TMPDIR=${TMPDIR}" | tee -a "${GITHUB_ENV}"
 
       # Use the ccache action only on GitHub-hosted runners, where it manages
       # remote cache restore/save. Self-hosted runners use a local cache below.
@@ -407,12 +414,6 @@ jobs:
             ccache -s || true
           fi
 
-      - name: Clean up stale /tmp files (self-hosted runners)
-        if: startsWith(matrix.runner.name, 'self-hosted')
-        run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
-
       - name: Run examples with Python ${{ matrix.python-version }} (${{ matrix.runner.toolkit }})
         if: contains(matrix.runner.toolkit, 'CUDA')
         run: |
@@ -437,6 +438,7 @@ jobs:
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
           "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+            -m "not cutedsl" \
             ./python
 
       # AMD ROCm tests
@@ -508,7 +510,7 @@ jobs:
             unit_markers: pto
     runs-on: linux-amd64-a5-4
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.3.0-weekly.20261021-ubuntu22.04-py3.12
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann9.2.0-ubuntu22.04-py3.12
     timeout-minutes: 120
     env:
       PIP_USER: "0"
@@ -617,11 +619,12 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   cutedsl:
-    name: CuTeDSL Examples for Python 3.12 with CUDA-auto (on self-hosted-nvidia)
+    name: Test for CuTeDSL with Python 3.12 and CUDA-auto (on self-hosted-nvidia)
     if: |
       github.repository_owner == 'tile-ai' &&
+      needs.lint.outputs.run_tests == 'true' &&
       (github.event_name != 'pull_request' || !github.event.pull_request.draft)
-    needs: [tests]
+    needs: [lint]
     runs-on: [self-hosted, nvidia]
     timeout-minutes: 120
 
@@ -650,6 +653,13 @@ jobs:
           echo "PIP_CACHE_DIR=${XDG_CACHE_HOME}/pip" | tee -a "${GITHUB_ENV}"
           echo "UV_CACHE_DIR=${XDG_CACHE_HOME}/uv" | tee -a "${GITHUB_ENV}"
           echo "PRE_COMMIT_HOME=${XDG_CACHE_HOME}/pip/.pre-commit" | tee -a "${GITHUB_ENV}"
+
+          # Isolate JIT temporary artifacts per job under RUNNER_TEMP so concurrent
+          # runners never collide in /tmp or exhaust a small /tmp tmpfs, and GitHub
+          # Actions cleans them up automatically when the job finishes.
+          export TMPDIR="${RUNNER_TEMP}/tmp"
+          mkdir -p "${TMPDIR}"
+          echo "TMPDIR=${TMPDIR}" | tee -a "${GITHUB_ENV}"
 
       - name: Setup ccache (self-hosted runners)
         run: |
@@ -733,8 +743,9 @@ jobs:
           uv pip install --upgrade pip setuptools wheel
           uv pip install -v -r requirements-test.txt
           echo "import torch; print(f'torch: {torch.__version__}')" | uv run --no-project --script -
-          uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cuda.txt
+          uv pip install --no-build-isolation-package=flash-attn -v -r requirements-test-cutedsl.txt
           echo "import flash_attn; print(f'flash_attn: {flash_attn.__version__}')" | uv run --no-project --script -
+          echo "import importlib.metadata; print(f'nvidia-cutlass-dsl: {importlib.metadata.version(\"nvidia-cutlass-dsl\")}')" | uv run --no-project --script -
           echo "::group::torch.utils.collect_env"
           uv run --no-project -m -- torch.utils.collect_env
           echo "::endgroup::"
@@ -760,10 +771,16 @@ jobs:
             ccache -s || true
           fi
 
-      - name: Clean up stale /tmp files (self-hosted runners)
+      - name: Run CuTeDSL unit tests with Python 3.12 (CUDA-auto)
         run: |
-          rm -f /tmp/tmp*.so /tmp/tmp*.cu /tmp/tmp*.cubin /tmp/tmp*.cpp
-          rm -rf /tmp/tvm-debug-mode-tempdirs /tmp/tilelang_cutedsl_*
+          cd testing
+          PYTEST=(
+            uv run --no-project -m --
+            pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
+          )
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+            -m cutedsl \
+            ./python
 
       - name: Run CuTeDSL examples with Python 3.12 (CUDA-auto)
         env:

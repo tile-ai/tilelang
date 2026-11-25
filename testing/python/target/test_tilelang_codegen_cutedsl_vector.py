@@ -9,28 +9,22 @@ The vector buffers themselves are scalar-backed, including the ``shared.dyn``
 scope that ``T.alloc_shared`` defaults to.
 """
 
-import pytest
 import torch
 
 import tilelang
 import tilelang.language as T
 import tilelang.testing
-from tilelang import tvm
 from tilelang.engine.lower import lower
 from tilelang.cuda.target import normalize_cutedsl_target
 
-pytestmark = tilelang.testing.requires_cuda.marks()
-
 
 def _lower_cutedsl(prog):
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
-    if build_cutedsl is None:
-        pytest.skip("TileLang CuTeDSL backend is not enabled in this build")
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_90"})
     with target:
         return lower(prog.with_attr("global_symbol", "main"), target=target)
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_vector_shift_takes_tensor_operand():
     @T.prim_func
     def prog(A: T.Tensor((64,), "uint8"), B: T.Tensor((64,), "uint8")):
@@ -46,6 +40,7 @@ def test_cutedsl_codegen_vector_shift_takes_tensor_operand():
     assert ">> (" not in source
 
 
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_cutedsl_codegen_hoists_loop_bound_lets():
     @T.prim_func
     def prog(A: T.Tensor((64,), "int32"), B: T.Tensor((64,), "int32"), N: T.int32):
@@ -64,6 +59,7 @@ def test_cutedsl_codegen_hoists_loop_bound_lets():
         assert line.rstrip().endswith("):"), line
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_boolean_vector_cast_keeps_the_lane_count():
     """A ``boolx2`` value casts straight to two ``int32`` lanes.
 
@@ -71,13 +67,6 @@ def test_cutedsl_boolean_vector_cast_keeps_the_lane_count():
     vector casts padded the result to four lanes and stored a two-lane value
     into a four-element tensor.
     """
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
     n = 64
 
     @T.prim_func
@@ -95,6 +84,7 @@ def test_cutedsl_boolean_vector_cast_keeps_the_lane_count():
     assert torch.equal(kernel(a), (a > 0.5).to(torch.int32))
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_shared_dyn_vector_buffer_roundtrip():
     """A vector-typed ``shared.dyn`` buffer is scalar-backed, so indices scale.
 
@@ -103,13 +93,6 @@ def test_cutedsl_shared_dyn_vector_buffer_roundtrip():
     ``local``, so a ``shared.dyn`` access kept the vector index against a scalar
     pointer and touched the wrong bytes.
     """
-    try:
-        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-        check_cutedsl_available()
-    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-
     n = 64
 
     @T.prim_func
