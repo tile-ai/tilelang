@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 from tvm import tirx
 
@@ -56,7 +57,12 @@ def tilelang_callback_cuda_validate(device_mod):
             )
 
 
-def _cuda_compiler_module(compiler: str):
+def _cuda_compiler_module(execution_backend: str = "tvm_ffi", pass_config: Mapping[str, object] | None = None):
+    if execution_backend == "tvm_ffi":
+        compiler = str((pass_config or {}).get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
+    else:
+        compiler = "nvcc" if execution_backend == "cython" else execution_backend
+
     if compiler == "nvcc":
         return nvcc
     if compiler == "nvrtc":
@@ -66,33 +72,24 @@ def _cuda_compiler_module(compiler: str):
     raise ValueError(f"Unsupported CUDA compiler {compiler!r}; expected 'nvcc' or 'nvrtc'")
 
 
-def _toolchain_stamp(execution_backend, pass_config):
-    if execution_backend == "tvm_ffi":
-        compiler = str(pass_config.get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
-    else:
-        compiler = "nvcc" if execution_backend == "cython" else execution_backend
-    return _cuda_compiler_module(compiler).toolchain_stamp()
-
-
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
     cfg = pass_config or {}
-    compiler = str(cfg.get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
-    compiler_module = _cuda_compiler_module(compiler)
+    compiler_module = _cuda_compiler_module(pass_config=cfg)
 
     target_arch, target_code = nvcc.get_target_arch_and_code(target)
     target_code_list = nvcc.get_target_code_list(target_code)
-    if compiler == "nvrtc":
-        if target_code_list and target_code_list != [f"sm_{target_arch}"]:
-            raise ValueError("NVRTC requires a single code target matching the CUDA target arch")
-        arch = target_arch
-    else:
+    if compiler_module is nvcc:
         gencode_code = nvcc.format_target_code_for_gencode(target_code)
         if gencode_code is None:
             arch = [f"-arch=sm_{target_arch}"]
         else:
             arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
+    else:
+        if target_code_list and target_code_list != [f"sm_{target_arch}"]:
+            raise ValueError("NVRTC requires a single code target matching the CUDA target arch")
+        arch = target_arch
     compile_format = "fatbin" if len(target_code_list) > 1 else "cubin"
 
     options = compiler_module.default_compile_options(cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
@@ -142,7 +139,7 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,
-        toolchain_stamp=_toolchain_stamp,
+        toolchain_stamp=lambda backend, cfg: _cuda_compiler_module(backend, cfg).toolchain_stamp(),
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={
             "tilelang_callback_cuda_validate": tilelang_callback_cuda_validate,
