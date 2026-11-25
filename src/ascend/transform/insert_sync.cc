@@ -35,7 +35,6 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -66,7 +65,6 @@
 #include "buffer_alias.h"
 #include "buffer_version.h"
 #include "runtime/thread_storage_scope.h"
-#include "support/utils.h"
 #include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 
@@ -222,21 +220,6 @@ struct EdgeRange {
   size_t src, dst;
   DistanceRange distances;
   bool strict;
-
-  bool operator==(const EdgeRange &other) const {
-    return src == other.src && dst == other.dst && strict == other.strict &&
-           distances.first == other.distances.first &&
-           distances.last == other.distances.last;
-  }
-};
-
-struct EdgeRangeHash {
-  size_t operator()(const EdgeRange &edge) const {
-    auto hash = support::HashCombine(edge.src, edge.dst);
-    hash = support::HashCombine(hash, edge.distances.first);
-    hash = support::HashCombine(hash, edge.distances.last);
-    return support::HashCombine(hash, edge.strict);
-  }
 };
 
 struct DepEdge {
@@ -735,20 +718,27 @@ class DepClosure {
     bool Empty() const { return queue_.empty(); }
 
     void Push(const EdgeRange &edge) {
-      if (pending_.insert(edge).second)
+      if (pending_.insert(KeyOf(edge)).second)
         queue_.push_back(edge);
     }
 
     EdgeRange Pop() {
       EdgeRange edge = queue_.front();
       queue_.pop_front();
-      pending_.erase(edge);
+      pending_.erase(KeyOf(edge));
       return edge;
     }
 
   private:
+    using Key = std::tuple<size_t, size_t, int, int, bool>;
+
+    static Key KeyOf(const EdgeRange &edge) {
+      return {edge.src, edge.dst, edge.distances.first, edge.distances.last,
+              edge.strict};
+    }
+
     std::deque<EdgeRange> queue_;
-    std::unordered_set<EdgeRange, EdgeRangeHash> pending_;
+    std::set<Key> pending_;
   };
 
 public:
