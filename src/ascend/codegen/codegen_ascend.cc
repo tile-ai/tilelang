@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -3851,8 +3852,10 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
   struct Route {
     std::string_view native, wrapper;
     VFMode mode;
+    std::optional<size_t> arity = std::nullopt;
   };
-#define TL_CANN_CORE(name) {"asc_" #name, "tl::cann::" #name, VFMode::kNone},
+#define TL_CANN_CORE(name, ...)                                                \
+  {"asc_" #name, "tl::cann::" #name, VFMode::kNone, __VA_ARGS__},
 #define TL_CANN_SIMD(name, ...)                                                \
   {"asc_" #name, "tl::cann::" #name, VFMode::kSimd},
 #define TL_CANN_MATH(name) {#name, "tl::cann::simt::" #name, VFMode::kSimt},
@@ -3863,12 +3866,17 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
 #undef TL_CANN_SIMD
 #undef TL_CANN_CORE
   std::string_view symbol(global_symbol.c_str(), global_symbol.size());
-  if (symbol.substr(0, 2) == "::")
+  const bool explicit_global = symbol.substr(0, 2) == "::";
+  if (explicit_global)
     symbol.remove_prefix(2);
   for (const auto &route : routes) {
     if ((route.mode != VFMode::kNone && route.mode != vf_mode_) ||
         (symbol != route.native && symbol != route.wrapper))
       continue;
+    // Keep global overload lookup when the wrapper has a different arity.
+    if (explicit_global && symbol == route.native && route.arity &&
+        args.size() - skip_first_arg != *route.arity)
+      break;
     global_symbol = std::string(route.native);
     if (route.mode == VFMode::kSimd) {
       // Register APIs consume and return whole registers. Generic vector

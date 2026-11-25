@@ -367,6 +367,21 @@ def test_int32_store_atomic_multicore_and_none_restores_plain_store(op):
         _assert_bits(plain_device.cpu(), plain_expected, ("atomic none", op, sentinel))
 
 
+def test_global_hf32_extern_preserves_imported_overload():
+    helper = "__aicore__ inline int32_t asc_disable_hf32(int32_t x) { return x + 1; }"
+
+    @T.prim_func
+    def kernel(out: T.Tensor((1,), "int32"), value: T.int32):
+        with T.Kernel(1):
+            T.import_source(helper)
+            T.evaluate(T.call_extern("void", "::asc_disable_hf32"))
+            out[0] = T.call_extern("int32", "::asc_disable_hf32", value)
+
+    body = lower(kernel, target="ascend").kernel_source.split("TL_CANN_USE_CORE_NAMES", 1)[1]
+    assert "  asc_disable_hf32();" in body
+    assert "::asc_disable_hf32(value)" in body
+
+
 def test_native_extern_routes_follow_execution_domain():
     @T.prim_func
     def kernel(out: T.Tensor((3,), "float32"), powf: T.float32):

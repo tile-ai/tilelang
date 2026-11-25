@@ -2,13 +2,14 @@
 
 // Native SDK names shared by device templates and Ascend codegen.
 
+// Fixed-arity core APIs only route explicit global calls with that arity.
 #define TL_CANN_CORE_NAMES(X)                                                  \
-  X(disable_hf32)                                                              \
-  X(set_hf32_round_mode)                                                       \
-  X(set_atomic_add_int32)                                                      \
-  X(set_atomic_max_int32)                                                      \
-  X(set_atomic_min_int32)                                                      \
-  X(load_dev)                                                                  \
+  X(disable_hf32, 0)                                                           \
+  X(set_hf32_round_mode, 1)                                                    \
+  X(set_atomic_add_int32, 0)                                                   \
+  X(set_atomic_max_int32, 0)                                                   \
+  X(set_atomic_min_int32, 0)                                                   \
+  X(load_dev, 1)                                                               \
   X(set_gm2l1_nz_para)                                                         \
   X(set_l0c_copy_nz_para)                                                      \
   X(copy_l0c2gm)                                                               \

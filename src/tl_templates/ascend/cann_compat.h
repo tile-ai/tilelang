@@ -392,7 +392,7 @@ namespace tl::cann::sdk {
                                          attr -> decltype(auto) {              \
     return ::tl::cann::name(static_cast<decltype(args)>(args)...);             \
   };
-#define TL_CANN_CORE(name) TL_CANN_CALLABLE(__aicore__, name)
+#define TL_CANN_CORE(name, ...) TL_CANN_CALLABLE(__aicore__, name)
 #define TL_CANN_TYPE(name) using asc_##name = ::tl::cann::name;
 TL_CANN_CORE_NAMES(TL_CANN_CORE)
 TL_CANN_TYPE_NAMES(TL_CANN_TYPE)
