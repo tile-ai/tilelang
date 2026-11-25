@@ -10,6 +10,7 @@ import errno
 import os
 import platform
 import shutil
+import stat
 import threading
 import uuid
 import sys
@@ -193,11 +194,37 @@ class KernelCache:
         return cls._instance
 
     @staticmethod
+    def _makedirs_shared(path: str, mode: int | None) -> None:
+        """Create ``path`` and missing parents, chmodding only newly created dirs."""
+        if mode is None:
+            os.makedirs(path, exist_ok=True)
+            return
+        path = os.path.abspath(path)
+        if os.path.isdir(path):
+            return
+        parent = os.path.dirname(path)
+        if parent and parent != path:
+            KernelCache._makedirs_shared(parent, mode)
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            if not os.path.isdir(path):
+                raise
+        else:
+            os.chmod(path, mode)
+
+    @staticmethod
     def _create_dirs():
-        os.makedirs(env.get_cache_write_dir(), exist_ok=True)
-        os.makedirs(KernelCache._get_namespace_root(env.get_cache_write_dir()), exist_ok=True)
-        os.makedirs(KernelCache._get_write_cache_root(), exist_ok=True)
-        os.makedirs(KernelCache._get_staging_root(), exist_ok=True)
+        write_root = env.get_cache_write_dir()
+        os.makedirs(write_root, exist_ok=True)
+        root_mode = os.stat(write_root).st_mode
+        shared_dir_mode = (0o2755 | (root_mode & stat.S_IWGRP)) if (root_mode & stat.S_ISGID) else None
+        for subdir in (
+            KernelCache._get_namespace_root(write_root),
+            KernelCache._get_write_cache_root(),
+            KernelCache._get_staging_root(),
+        ):
+            KernelCache._makedirs_shared(subdir, shared_dir_mode)
 
         staging_root = KernelCache._get_staging_root()
         with KernelCache._staging_cleanup_lock:
@@ -217,6 +244,24 @@ class KernelCache:
     @staticmethod
     def _get_staging_root() -> str:
         return os.path.join(KernelCache._get_namespace_root(env.get_cache_write_dir()), KernelCache.staging_root_dir)
+
+    @staticmethod
+    def _legalize_staged_entry(staging_path: str) -> None:
+        """Make a staged entry group/other readable before it is published.
+
+        Only a group-shared cache (SGID on the writable cache root) is adjusted.
+        Cache roots without SGID, including filesystems that do not support the
+        bit (e.g. Windows), are left untouched and keep the normal umask-derived
+        permissions. Only the entry directory carries the SGID bit: files get
+        0o644 (or 0o755 when executable).
+        """
+        if not os.stat(env.get_cache_write_dir()).st_mode & stat.S_ISGID:
+            return
+        os.chmod(staging_path, 0o2755)
+        for entry in os.scandir(staging_path):
+            if entry.is_file(follow_symlinks=False):
+                mode = 0o755 if entry.stat(follow_symlinks=False).st_mode & 0o111 else 0o644
+                os.chmod(entry.path, mode)
 
     @staticmethod
     def _cleanup_stale_staging_dirs(max_age_seconds: int = 3600):
@@ -718,6 +763,10 @@ class KernelCache:
             if missing_files:
                 missing_names = ", ".join(os.path.basename(path) for path in missing_files)
                 raise RuntimeError(f"Incomplete cache staging directory is missing required file(s): {missing_names}")
+
+            # Shared caches: give the staged entry group-readable permissions
+            # before it is published via rename.
+            KernelCache._legalize_staged_entry(staging_path)
 
             # Durability barrier: a node or filesystem-client crash may otherwise
             # persist the rename below before the staged file data, publishing a
