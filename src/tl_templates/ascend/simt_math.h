@@ -11,8 +11,7 @@
 #if defined(__NPU_ARCH__)
 namespace tl::cann::simt {
 
-#define TL_SIMT_MATH_91                                                        \
-  (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1 && ASC_DEVKIT_PATCH == 0)
+#define TL_SIMT_MATH_91 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
 #define TL_SIMT_MATH_92_93                                                     \
   (ASC_DEVKIT_MAJOR == 9 &&                                                    \
    (ASC_DEVKIT_MINOR == 2 || ASC_DEVKIT_MINOR == 3) && ASC_DEVKIT_PATCH == 0)

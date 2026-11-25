@@ -11,8 +11,7 @@
 namespace tl {
 namespace cann {
 
-#define TL_CANN_9_1                                                            \
-  (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1 && ASC_DEVKIT_PATCH == 0)
+#define TL_CANN_9_1 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
 
 #if !defined(__NPU_ARCH__) || TL_CANN_9_1
 enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
