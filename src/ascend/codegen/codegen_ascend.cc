@@ -3852,7 +3852,7 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
   struct Route {
     std::string_view native, wrapper;
     VFMode mode;
-    std::optional<size_t> arity = std::nullopt;
+    std::optional<size_t> fixed_arity = std::nullopt;
   };
 #define TL_CANN_CORE(name, ...)                                                \
   {"asc_" #name, "tl::cann::" #name, VFMode::kNone, __VA_ARGS__},
@@ -3874,8 +3874,8 @@ void CodeGenTileLangAscend::PrintCallExtern(Type ret_type,
         (symbol != route.native && symbol != route.wrapper))
       continue;
     // Keep global overload lookup when the wrapper has a different arity.
-    if (explicit_global && symbol == route.native && route.arity &&
-        args.size() - skip_first_arg != *route.arity)
+    if (explicit_global && symbol == route.native && route.fixed_arity &&
+        args.size() - skip_first_arg != *route.fixed_arity)
       break;
     global_symbol = std::string(route.native);
     if (route.mode == VFMode::kSimd) {

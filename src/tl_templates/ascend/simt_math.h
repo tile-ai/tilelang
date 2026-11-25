@@ -11,12 +11,12 @@
 #if defined(__NPU_ARCH__)
 namespace tl::cann::simt {
 
-#define TL_SIMT_MATH_91 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
-#define TL_SIMT_MATH_92_93                                                     \
+#define TL_SIMT_MATH_9_1 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
+#define TL_SIMT_MATH_9_2_0_OR_9_3_0                                            \
   (ASC_DEVKIT_MAJOR == 9 &&                                                    \
    (ASC_DEVKIT_MINOR == 2 || ASC_DEVKIT_MINOR == 3) && ASC_DEVKIT_PATCH == 0)
 
-#if TL_SIMT_MATH_91 || TL_SIMT_MATH_92_93
+#if TL_SIMT_MATH_9_1 || TL_SIMT_MATH_9_2_0_OR_9_3_0
 namespace detail {
 __simt_callee__ inline uint32_t bits(float x) {
   return __builtin_bit_cast(uint32_t, x);
@@ -93,7 +93,7 @@ __simt_callee__ inline float ratio(uint32_t small, uint32_t large) {
 __simt_callee__ inline float atan2f(float y, float x) {
   using namespace detail;
   uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
-#if TL_SIMT_MATH_92_93
+#if TL_SIMT_MATH_9_2_0_OR_9_3_0
   // Preserve native special values and ordinary angles. Renormalize only
   // subnormal operands or a positive-x ratio small enough to underflow.
   if (ax == 0 || ay == 0 || ax >= infinity || ay >= infinity ||
@@ -120,7 +120,7 @@ __simt_callee__ inline float atan2f(float y, float x) {
 using ::atan2f;
 #endif
 
-#if TL_SIMT_MATH_91
+#if TL_SIMT_MATH_9_1
 __simt_callee__ inline float copysignf(float x, float y) {
   return detail::with_sign(x, y);
 }
@@ -220,7 +220,7 @@ __simt_callee__ inline float acoshf(float x) {
 
 namespace detail {
 // exp(x)/2 without premature overflow for x near log(FLT_MAX).
-__simt_callee__ inline float half_exp(float x) {
+__simt_callee__ inline float exp_over_two(float x) {
   if (x < 80.0f)
     return 0.5f * ::expf(x);
   float h = ::expf(0.5f * x);
@@ -240,11 +240,11 @@ __simt_callee__ inline float sinhf(float x) {
     return x;
   if (a <= 1.0f)
     return detail::sinh_small(x);
-  float h = detail::half_exp(a);
+  float h = detail::exp_over_two(a);
   return detail::with_sign(h - 0.25f / h, x);
 }
 __simt_callee__ inline float coshf(float x) {
-  float h = detail::half_exp(::fabsf(x));
+  float h = detail::exp_over_two(::fabsf(x));
   return h + 0.25f / h;
 }
 __simt_callee__ inline float tanhf(float x) {
@@ -261,7 +261,7 @@ __simt_callee__ inline float tanhf(float x) {
 
 #endif
 
-#if TL_SIMT_MATH_91 || TL_SIMT_MATH_92_93
+#if TL_SIMT_MATH_9_1 || TL_SIMT_MATH_9_2_0_OR_9_3_0
 namespace detail {
 // Keep a product's rounding error until after reduction to a small exponent.
 // A one-ULP error in the unreduced exponent can cost many ULPs in pow/exp10.
@@ -339,7 +339,7 @@ __simt_callee__ inline Split log2_split(uint32_t ax) {
 __simt_callee__ inline float powf(float x, float y) {
   using namespace detail;
   uint32_t ax = bits(x) & ~sign_bit, ay = bits(y) & ~sign_bit;
-#if TL_SIMT_MATH_92_93
+#if TL_SIMT_MATH_9_2_0_OR_9_3_0
   // Leave SDK special-value and domain handling intact.
   if (ax == 0 || ax >= infinity || ay >= infinity ||
       ((bits(x) & sign_bit) && ::truncf(y) != y))
@@ -370,7 +370,7 @@ __simt_callee__ inline float powf(float x, float y) {
   // Even the float nearest to one is past overflow or underflow here.
   if (ay >= 0x4f800000u)
     return ((ax > 0x3f800000u) == positive_y) ? from_bits(infinity) : 0.0f;
-#if TL_SIMT_MATH_92_93
+#if TL_SIMT_MATH_9_2_0_OR_9_3_0
   // For 2^e <= |x| < 2^(e+1), |log2(|x|)| <= max(-e, e+1).
   // A product below 126 keeps |x^y| strictly between 2^-126 and 2^126.
   int e = normalize(ax).exponent;
@@ -384,7 +384,7 @@ __simt_callee__ inline float powf(float x, float y) {
 using ::powf;
 #endif
 
-#if TL_SIMT_MATH_91
+#if TL_SIMT_MATH_9_1
 __simt_callee__ inline float exp2f(float x) {
   if (::isnan(x))
     return x;
@@ -426,8 +426,8 @@ TL_CANN_SIMT_MATH_9_1_ONLY_NAMES(TL_CANN_USE_NATIVE)
 #undef TL_CANN_USE_NATIVE
 #endif
 
-#undef TL_SIMT_MATH_91
-#undef TL_SIMT_MATH_92_93
+#undef TL_SIMT_MATH_9_1
+#undef TL_SIMT_MATH_9_2_0_OR_9_3_0
 } // namespace tl::cann::simt
 
 #define TL_CANN_BIND_MATH(name) using ::tl::cann::simt::name;

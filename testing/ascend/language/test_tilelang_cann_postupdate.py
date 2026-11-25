@@ -20,7 +20,7 @@ import tilelang.ascend.language as T
         ("partial", "float32"),
     ],
 )
-def test_vsstb_three_stores_advance_pointer_with_partial_first_mask(dtype, mask_kind):
+def test_vsstb_advances_pointer_across_masked_stores(dtype, mask_kind):
     td = getattr(torch, dtype)
     lanes = 256 // torch.empty((), dtype=td).element_size()
     bits = 2048 // lanes

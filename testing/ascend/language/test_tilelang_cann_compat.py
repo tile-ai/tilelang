@@ -1,4 +1,4 @@
-"""Eleven CANN compatibility entries exercised through the public TileLang DSL.
+"""CANN compatibility tests for Ascend code generation and device operations.
 
 Each numerical check includes destination guards. The loops reuse one compiled
 kernel across empty, sparse and full predicates; they do not relax tolerances.
