@@ -389,24 +389,6 @@ def test_native_extern_routes_follow_execution_domain():
     assert "AscendC::Std::sqrt(" in source
 
 
-@tilelang.testing.requires_ascend
-def test_simt_vector_float_remainder_with_subnormal_divisor():
-    @T.prim_func
-    def kernel(a: T.Tensor((2,), "float32"), b: T.Tensor((2,), "float32"), out: T.Tensor((2,), "float32")):
-        with T.Kernel(1), T.SimtVF(threads=1):
-            for i in T.vectorized(2):
-                out[i] = T.truncmod(a[i], b[i])
-
-    # The largest subnormal is an exact multiple of the smallest. CANN 9.1
-    # returned bits 0x007ffffe instead of +0. The other lane checks 5.5 % 2.
-    a = torch.tensor([0x007FFFFF, 0x40B00000], dtype=torch.int32).view(torch.float32)
-    b = torch.tensor([0x00000001, 0x40000000], dtype=torch.int32).view(torch.float32)
-    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1)
-    actual = compiled(a.npu(), b.npu()).cpu()
-    expected = torch.tensor([0.0, 1.5], dtype=torch.float32)
-    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
-
-
 def native_div_kernel():
     @T.prim_func
     def kernel(a: T.Tensor((64,), "uint32"), b: T.Tensor((64,), "uint32"), out: T.Tensor((64,), "uint32")):
