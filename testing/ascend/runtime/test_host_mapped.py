@@ -14,6 +14,29 @@ pytestmark = tilelang.testing.requires_ascend.marks()
 BACKENDS = ["cython", "tvm_ffi"]
 
 
+def _host_device_connect_type():
+    torch.npu.init()
+    acl = ctypes.CDLL("libascendcl.so")
+    acl.aclrtGetDeviceInfo.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.POINTER(ctypes.c_int64)]
+    acl.aclrtGetDeviceInfo.restype = ctypes.c_int
+    connect_type = ctypes.c_int64(-1)
+    # ACL_DEV_ATTR_HD_CONNECT_TYPE = 408; PCIe = 0, HCCS = 1, UB = 2.
+    status = acl.aclrtGetDeviceInfo(torch.npu.current_device(), 408, ctypes.byref(connect_type))
+    assert status == 0, f"Ascend host-device connection query failed: {status}"
+    assert connect_type.value in (0, 1, 2), f"Unknown Ascend host-device connection type: {connect_type.value}"
+    return connect_type.value
+
+
+@pytest.fixture
+def simt_host_mapping():
+    # PCIe Through supports DMA transfers, but not SIMT accesses to mapped
+    # host memory. A successful registration/pointer query does not prove that
+    # the kernel's memory instructions can access it. Gate before any launch
+    # to avoid a device fault poisoning subsequent tests in the same worker.
+    if _host_device_connect_type() == 0:
+        pytest.skip("PCIe Through does not support SIMT host-memory accesses; SIMD/DMA coverage runs separately")
+
+
 @pytest.fixture
 def mapped_storage():
     # Do not change allocator environment variables after other tests may have
@@ -67,6 +90,26 @@ def _affine(n=4099, stride=1, annotated=True):
     return kernel
 
 
+def _double_dma(host_input=True, host_output=True):
+    @T.prim_func
+    def kernel(src: T.Tensor((64,), T.float32), dst: T.Tensor((64,), T.float32)):
+        if host_input:
+            T.annotate_host_mapped_buffers(src)
+        if host_output:
+            T.annotate_host_mapped_buffers(dst)
+        with T.Kernel(1):
+            values = T.alloc_shared((64,), T.float32)
+            result = T.alloc_shared((64,), T.float32)
+            T.copy(src, values)
+            with T.SimdVF():
+                mask = T.simd.pset(32)
+                x = T.simd.vld(values[0])
+                T.simd.vsts(result[0], T.simd.vadd(x, x, mask), mask)
+            T.copy(result, dst)
+
+    return kernel
+
+
 def test_host_mapped_stub_pointer_query(mapped_storage):
     from tilelang.libinfo import find_lib_path
 
@@ -92,6 +135,7 @@ def test_host_mapped_stub_pointer_query(mapped_storage):
 
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("stride", [1, 2])
+@pytest.mark.usefixtures("simt_host_mapping")
 def test_host_mapped_eager_and_graph(backend, stride, mapped_storage):
     n = 4099
     kernel = tilelang.compile(_affine(n, stride), target="ascend", execution_backend=backend)
@@ -155,6 +199,7 @@ def test_host_mapped_preserves_validation(backend, mapped_storage):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.usefixtures("simt_host_mapping")
 def test_host_mapped_first_parameter_and_host_only(backend, mapped_storage):
     def program(host_input):
         @T.prim_func
@@ -195,30 +240,44 @@ def test_host_mapped_first_parameter_and_host_only(backend, mapped_storage):
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_host_mapped_simd_and_dma(backend, mapped_storage):
-    @T.prim_func
-    def double(src: T.Tensor((64,), T.float32), dst: T.Tensor((64,), T.float32)):
-        T.annotate_host_mapped_buffers(src, dst)
-        with T.Kernel(1):
-            values = T.alloc_shared((64,), T.float32)
-            result = T.alloc_shared((64,), T.float32)
-            T.copy(src, values)
-            with T.SimdVF():
-                mask = T.simd.pset(32)
-                x = T.simd.vld(values[0])
-                T.simd.vsts(result[0], T.simd.vadd(x, x, mask), mask)
-            T.copy(result, dst)
-
-    kernel = tilelang.compile(double, target="ascend", execution_backend=backend)
-    src = mapped_storage(64)
+    kernel = tilelang.compile(_double_dma(), target="ascend", execution_backend=backend)
+    # Exercise nonzero storage offsets while preserving DMA alignment.
+    src_storage = mapped_storage(80).fill_(-777)
+    dst_storage = mapped_storage(80).fill_(-777)
+    src = src_storage[8:72]
+    dst = dst_storage[8:72]
     src.copy_(torch.arange(64, dtype=torch.float32))
-    dst = mapped_storage(64)
-    kernel(src, dst)
+
+    def check():
+        torch.testing.assert_close(dst, src * 2, rtol=0, atol=0)
+        for storage in (src_storage, dst_storage):
+            assert bool((storage[:8] == -777).all())
+            assert bool((storage[72:] == -777).all())
+
+    stream = torch.npu.Stream()
+    with torch.npu.stream(stream):
+        kernel(src, dst)
+    stream.synchronize()
+    check()
+
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph, stream=stream):
+        kernel(src, dst)
     torch.npu.synchronize()
-    torch.testing.assert_close(dst, src * 2, rtol=0, atol=0)
+    for _ in range(3):
+        src.add_(17)
+        dst.fill_(-777)
+        graph.replay()
+        torch.npu.synchronize()
+        check()
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_host_input_with_automatic_device_output(backend, mapped_storage):
+@pytest.mark.parametrize("mode", ["simt", "dma"])
+def test_host_input_with_automatic_device_output(backend, mode, mapped_storage, request):
+    if mode == "simt":
+        request.getfixturevalue("simt_host_mapping")
+
     @T.prim_func
     def kernel(src: T.Tensor((33,), T.float32), dst: T.Tensor((33,), T.float32)):
         T.annotate_host_mapped_buffers(src)
@@ -226,12 +285,15 @@ def test_host_input_with_automatic_device_output(backend, mapped_storage):
             for i in T.Parallel(33):
                 dst[i] = src[i] + 4
 
-    compiled = tilelang.compile(kernel, out_idx=[1], target="ascend", execution_backend=backend)
-    src = mapped_storage(33)
-    src.copy_(torch.arange(33, dtype=torch.float32))
+    func = kernel if mode == "simt" else _double_dma(host_output=False)
+    n = 33 if mode == "simt" else 64
+    compiled = tilelang.compile(func, out_idx=[1], target="ascend", execution_backend=backend)
+    src = mapped_storage(n)
+    src.copy_(torch.arange(n, dtype=torch.float32))
     dst = compiled(src)
     assert dst.device == torch.device("npu", torch.npu.current_device())
-    torch.testing.assert_close(dst.cpu(), src + 4, rtol=0, atol=0)
+    expected = src + 4 if mode == "simt" else src * 2
+    torch.testing.assert_close(dst.cpu(), expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -248,6 +310,7 @@ def test_host_mapping_checks_execution_device(backend, mapped_storage):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.usefixtures("simt_host_mapping")
 def test_host_mapped_eager_jit(backend, mapped_storage):
     @tilelang.jit(target="ascend", execution_backend=backend)
     def kernel(src, dst):
@@ -266,15 +329,19 @@ def test_host_mapped_eager_jit(backend, mapped_storage):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_host_mapped_disk_cache(backend, mapped_storage, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["simt", "dma"])
+def test_host_mapped_disk_cache(backend, mode, mapped_storage, tmp_path, monkeypatch, request):
     from tilelang import tvm
     from tilelang.backend import create_backend_context
     from tilelang.cache import _dispatch_map
     from tilelang.env import env
     from tilelang.jit.kernel import JITKernel
 
+    if mode == "simt":
+        request.getfixturevalue("simt_host_mapping")
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(tmp_path / "cache"))
-    func = _affine(33)
+    func = _affine(33) if mode == "simt" else _double_dma(host_input=False)
+    n = 33 if mode == "simt" else 64
     kernel = JITKernel(func, target="ascend", execution_backend=backend)
     cache = _dispatch_map[backend]
     key = "ascend-host-mapped-round-trip"
@@ -288,13 +355,14 @@ def test_host_mapped_disk_cache(backend, mapped_storage, tmp_path, monkeypatch):
         func=tvm.ir.load_json(tvm.ir.save_json(func)),
     )
     assert restored is not None
-    src = torch.arange(33, dtype=torch.float32).npu()
-    dst = mapped_storage(33)
+    src = torch.arange(n, dtype=torch.float32).npu()
+    dst = mapped_storage(n)
     restored(src, dst)
     torch.npu.synchronize()
-    torch.testing.assert_close(dst, src.cpu() * 2 + 1, rtol=0, atol=0)
+    expected = src.cpu() * 2 + (1 if mode == "simt" else 0)
+    torch.testing.assert_close(dst, expected, rtol=0, atol=0)
     with pytest.raises((ValueError, RuntimeError), match="registered|mapped"):
-        restored(src, torch.empty(33))
+        restored(src, torch.empty(n))
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
