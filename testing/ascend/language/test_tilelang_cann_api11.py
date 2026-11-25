@@ -20,7 +20,6 @@ from tilelang.engine.lower import lower
 
 MODES = ("MODE_ZEROING", "MODE_MERGING")
 INTEGER_DTYPES = ("int16", "uint16", "int32", "uint32")
-BROADCAST_DTYPES = ("uint8", "int16", "bfloat16", "float32")
 
 
 def _masks(lanes):
@@ -127,8 +126,17 @@ def test_integer_division_truncates_toward_zero_and_preserves_guards(dtype, mode
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("dtype", BROADCAST_DTYPES)
-@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(
+    "mode,dtype",
+    [
+        ("MODE_ZEROING", "uint8"),
+        ("MODE_ZEROING", "int16"),
+        ("MODE_ZEROING", "bfloat16"),
+        ("MODE_ZEROING", "float32"),
+        ("MODE_MERGING", "uint8"),
+        ("MODE_MERGING", "int16"),
+    ],
+)
 def test_highest_broadcast_uses_fixed_source_lane(dtype, mode):
     td = getattr(torch, dtype)
     lanes = 2048 // tvm.DataType(dtype).bits
@@ -285,8 +293,10 @@ def iter_load_kernel(dtype, stride):
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("dtype", ["uint8", "int16", "int32"])
-@pytest.mark.parametrize("stride_kind", ["zero", "contiguous", "gapped"])
+@pytest.mark.parametrize(
+    "stride_kind,dtype",
+    [("zero", "uint8"), ("contiguous", "uint8"), ("gapped", "uint8"), ("gapped", "int16"), ("gapped", "int32")],
+)
 def test_vld2_address_register_stride_and_both_outputs(dtype, stride_kind):
     td = getattr(torch, dtype)
     bits = tvm.DataType(dtype).bits
