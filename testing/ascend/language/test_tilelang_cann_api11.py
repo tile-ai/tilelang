@@ -442,6 +442,20 @@ def test_native_extern_routes_follow_execution_domain():
     assert "AscendC::Std::sqrt(" in source
 
 
+def test_simt_vector_float_remainder_uses_fmodf_per_lane():
+    @T.prim_func
+    def kernel(a: T.Tensor((64,), "float32"), b: T.Tensor((64,), "float32"), out: T.Tensor((64,), "float32")):
+        with T.Kernel(1), T.SimtVF(threads=32):
+            for i in T.vectorized(2):
+                index = 2 * T.get_thread_binding() + i
+                out[index] = T.truncmod(a[index], b[index])
+
+    with tvm.target.Target("ascend"):
+        source = lower(kernel, target="ascend").kernel_source
+    assert ".x = fmodf(" in source
+    assert ".y = fmodf(" in source
+
+
 def native_div_kernel():
     @T.prim_func
     def kernel(a: T.Tensor((64,), "uint32"), b: T.Tensor((64,), "uint32"), out: T.Tensor((64,), "uint32")):

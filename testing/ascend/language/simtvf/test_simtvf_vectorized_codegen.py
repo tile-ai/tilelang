@@ -24,7 +24,7 @@ def _vector_min_max_mod_kernel():
         a_float: T.Tensor((num_elements,), T.float32),
         b_float: T.Tensor((num_elements,), T.float32),
         out_int: T.Tensor((num_elements * 3,), T.int32),
-        out_float: T.Tensor((num_elements * 3,), T.float32),
+        out_float: T.Tensor((num_elements * 2,), T.float32),
     ):
         with T.Kernel(1):
             a_int_ub = T.alloc_shared((num_elements,), T.int32)
@@ -32,7 +32,7 @@ def _vector_min_max_mod_kernel():
             a_float_ub = T.alloc_shared((num_elements,), T.float32)
             b_float_ub = T.alloc_shared((num_elements,), T.float32)
             out_int_ub = T.alloc_shared((num_elements * 3,), T.int32)
-            out_float_ub = T.alloc_shared((num_elements * 3,), T.float32)
+            out_float_ub = T.alloc_shared((num_elements * 2,), T.float32)
             T.copy(a_int, a_int_ub)
             T.copy(b_int, b_int_ub)
             T.copy(a_float, a_float_ub)
@@ -46,7 +46,6 @@ def _vector_min_max_mod_kernel():
                     out_int_ub[num_elements * 2 + index] = T.truncmod(a_int_ub[index], b_int_ub[index])
                     out_float_ub[index] = T.min(a_float_ub[index], b_float_ub[index])
                     out_float_ub[num_elements + index] = T.max(a_float_ub[index], b_float_ub[index])
-                    out_float_ub[num_elements * 2 + index] = T.truncmod(a_float_ub[index], b_float_ub[index])
             T.copy(out_int_ub, out_int)
             T.copy(out_float_ub, out_float)
 
@@ -382,8 +381,6 @@ def test_vector_min_max_and_mod_are_scalarized():
     assert source.count(".y = max(") == 2
     assert ".x%" in source
     assert ".y%" in source
-    assert ".x = fmodf(" in source
-    assert ".y = fmodf(" in source
 
 
 def test_shuffle_constructors_are_materialized_per_lane():
