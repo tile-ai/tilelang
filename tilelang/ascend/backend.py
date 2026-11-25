@@ -86,7 +86,7 @@ BACKEND = register_backend(
         pipelines={"ascend": pipeline.ascend_pipeline},
         device_codegens={"ascend": codegen.ASCEND_CODEGEN},
         execution_backends=execution_backend.ASCEND_EXECUTION_BACKENDS,
-        toolchain_stamp=lambda _backend, _cfg: bisheng.toolchain_stamp(),
+        toolchain_stamp=bisheng.toolchain_stamp,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_ascend_compile": tilelang_callback_ascend_compile},
     )
@@ -100,7 +100,7 @@ PTO_BACKEND = register_backend(
         pipelines={"ascend": pipeline.ascend_pipeline},
         device_codegens={"ascend": codegen.PTO_CODEGEN},
         execution_backends=execution_backend.PTO_EXECUTION_BACKENDS,
-        toolchain_stamp=lambda _backend, _cfg: pto_toolchain.toolchain_stamp(),
+        toolchain_stamp=pto_toolchain.toolchain_stamp,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_pto_compile": tilelang_callback_pto_compile},
     )
