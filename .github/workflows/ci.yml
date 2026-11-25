@@ -422,7 +422,7 @@ jobs:
             uv run --no-project -m --
             pytest --verbose --color=yes --durations=0 --showlocals --cache-clear
           )
-          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 \
+          "${PYTEST[@]}" --maxfail=3 --numprocesses=8 --dist worksteal \
             --ignore=../examples/grouped_gemm/test_example_grouped_gemm.py \
             --ignore=../examples/ascend \
             ../examples
