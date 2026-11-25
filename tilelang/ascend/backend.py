@@ -5,7 +5,7 @@ from __future__ import annotations
 from tilelang.ascend.target import target_is_plain_ascend, target_is_pto
 from tilelang.backend.host_codegen import STANDARD_HOST_CODEGENS
 from tilelang.backend.module import BackendModule, register_backend
-from tilelang.contrib import bisheng
+from tilelang.contrib import bisheng, pto_toolchain
 from tilelang.env import TILELANG_TEMPLATE_PATH, env
 from tilelang.transform import PassConfigKey
 
@@ -33,7 +33,7 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
         compile_format=compile_format,
         options=compile_options,
         linker_options=linker_options,
-        compiler=f"bisheng version={bisheng.get_bisheng_version()}",
+        toolchain=bisheng.toolchain_stamp(),
     )
     cached_binary = AscendBinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
@@ -53,14 +53,8 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
 def tilelang_callback_pto_compile(code, target, pass_config=None):
     """Compile PTODSL source into a cached, executable CCE ELF."""
     from tilelang.cache.ascend_binary_cache import PTOBinaryCache
-    from tilelang.contrib.pto_toolchain import (
-        BISHENG_FATOBJ_LINK_FLAGS,
-        compile_ptodsl_to_aibin,
-        resolve_pto_options,
-        toolchain_stamp,
-    )
 
-    pto_arch, pto_flags = resolve_pto_options()
+    pto_arch, pto_flags = pto_toolchain.resolve_pto_options()
 
     compile_format = PTOBinaryCache.binary_format
     cache_key = PTOBinaryCache.make_key(
@@ -69,14 +63,14 @@ def tilelang_callback_pto_compile(code, target, pass_config=None):
         target_arch=pto_arch,
         compile_format=compile_format,
         options=pto_flags,
-        linker_options=list(BISHENG_FATOBJ_LINK_FLAGS),
-        toolchain=toolchain_stamp(),
+        linker_options=list(pto_toolchain.BISHENG_FATOBJ_LINK_FLAGS),
+        toolchain=pto_toolchain.toolchain_stamp(),
     )
     cached_binary = PTOBinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
         return bytearray(cached_binary)
 
-    aibin = compile_ptodsl_to_aibin(code, pto_arch, pto_flags, verbose=env.get_default_verbose())
+    aibin = pto_toolchain.compile_ptodsl_to_aibin(code, pto_arch, pto_flags, verbose=env.get_default_verbose())
     PTOBinaryCache.save(cache_key, compile_format, aibin)
     return aibin
 
@@ -92,6 +86,7 @@ BACKEND = register_backend(
         pipelines={"ascend": pipeline.ascend_pipeline},
         device_codegens={"ascend": codegen.ASCEND_CODEGEN},
         execution_backends=execution_backend.ASCEND_EXECUTION_BACKENDS,
+        toolchain_stamp=bisheng.toolchain_stamp,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_ascend_compile": tilelang_callback_ascend_compile},
     )
@@ -105,6 +100,7 @@ PTO_BACKEND = register_backend(
         pipelines={"ascend": pipeline.ascend_pipeline},
         device_codegens={"ascend": codegen.PTO_CODEGEN},
         execution_backends=execution_backend.PTO_EXECUTION_BACKENDS,
+        toolchain_stamp=pto_toolchain.toolchain_stamp,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_pto_compile": tilelang_callback_pto_compile},
     )

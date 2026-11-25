@@ -274,12 +274,14 @@ def test_compile_timeout_env_parser_accepts_empty_zero_and_positive(monkeypatch)
 def test_kernel_cache_miss_compile_logs_context(monkeypatch, tmp_path, caplog, capture_tilelang_logs):
     import tilelang.cache.kernel_cache as kernel_cache_mod
     from tilelang.cache.kernel_cache import KernelCache
+    from tilelang.contrib import nvcc
     from tilelang.env import env
 
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     monkeypatch.setattr(env, "TILELANG_CACHE_DIR", str(cache_dir))
     monkeypatch.setenv("TILELANG_JIT_DIAGNOSTICS", "1")
+    monkeypatch.setattr(nvcc, "get_nvcc_version", lambda: (13, 0, 88))
 
     class _FakeKernel:
         params = []

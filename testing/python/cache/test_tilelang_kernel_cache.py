@@ -189,6 +189,51 @@ def test_disk_cache_with_postproc(clean_cache_env, backend):
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("backend", "compiler", "pass_configs"),
+    [
+        ("tvm_ffi", "nvcc", {}),
+        ("tvm_ffi", "nvrtc", {"tl.cuda_compiler": "nvrtc"}),
+        ("cython", "nvcc", {}),
+        ("nvrtc", "nvrtc", {}),
+        pytest.param("cutedsl", "nvcc", {}, marks=tilelang.testing.requires_cutedsl.marks()),
+    ],
+)
+def test_full_kernel_cache_tracks_cuda_compiler(clean_cache_env, monkeypatch, backend, compiler, pass_configs):
+    from tilelang.cache import _resolve_cache_dispatch
+    from tilelang.contrib import nvcc
+    from tilelang.transform.pass_config import normalize_pass_configs
+
+    compiler_module = nvcc
+    if compiler == "nvrtc":
+        from tilelang.contrib import nvrtc as compiler_module
+
+    @T.prim_func
+    def kernel(A: T.Tensor((1,), T.int32)):
+        with T.Kernel(1, threads=32):
+            A[0] += 1
+
+    target = "cutedsl" if backend == "cutedsl" else "cuda"
+    first = tilelang.compile(kernel, target=target, execution_backend=backend, pass_configs=pass_configs)
+    cache, context, _ = _resolve_cache_dispatch(target, None, backend, False)
+    cache._memory_cache.clear()
+
+    def lookup():
+        return cache.lookup(
+            func=kernel, out_idx=None, backend_context=context, pass_configs=normalize_pass_configs(pass_configs), compile_flags=None
+        )
+
+    key, hit = lookup()
+    assert key == first._tilelang_cache_key
+    assert hit is not None and hit.artifact is None
+    # A version change must skip both the restored memory entry and its disk artifact.
+    monkeypatch.setattr(compiler_module, f"get_{compiler}_version", lambda: (99, 0))
+    next_key, hit = lookup()
+    assert next_key != key
+    assert hit is None
+
+
+@tilelang.testing.requires_cuda
 def test_tvm_ffi_export_library_after_disk_cache_hit(tmp_path, monkeypatch):
     cache_dir = tmp_path / "tilelang_cache"
     cache_dir.mkdir()

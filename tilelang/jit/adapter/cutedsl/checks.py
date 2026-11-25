@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from functools import cache
 from importlib import metadata as _importlib_metadata
 from importlib.util import find_spec as _find_spec
 import os
@@ -34,6 +35,16 @@ def _requirement_spec() -> str:
     return spec
 
 
+@cache
+def get_cutedsl_version() -> str | None:
+    """Return the public DSL package version when distribution metadata is available."""
+    try:
+        return _importlib_metadata.version(_CUTEDSL_PUBLIC_DIST)
+    except Exception:
+        # Nonstandard installations may only provide the importable package.
+        return None
+
+
 def check_cutedsl_available() -> None:
     """Fail fast if the CuTeDSL backend cannot be used in this Python environment.
 
@@ -44,14 +55,7 @@ def check_cutedsl_available() -> None:
     This intentionally does not mention or special-case any internal distributions.
     """
     # 1) Version gate (only when the public dist metadata is present)
-    try:
-        dist_version = _importlib_metadata.version(_CUTEDSL_PUBLIC_DIST)
-    except _importlib_metadata.PackageNotFoundError:
-        dist_version = None
-    except Exception:
-        # Metadata is best-effort; don't block internal/nonstandard installs here.
-        dist_version = None
-
+    dist_version = get_cutedsl_version()
     if dist_version is not None:
         parsed = _parse_version_triple(dist_version)
         if parsed is None or parsed < _CUTEDSL_MIN_VERSION:
