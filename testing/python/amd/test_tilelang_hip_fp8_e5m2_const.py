@@ -50,6 +50,8 @@ KERNELS = {"clear": _clear, "fill": _fill, "masked_copy": _masked_copy}
 @pytest.mark.parametrize("kernel", list(KERNELS))
 def test_fp8_e5m2_const_lower(mcpu, dtype, kernel):
     """E5M2 constants are printed through fp8_e5_t (no GPU needed)."""
+    if tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True) is None:
+        pytest.skip("TileLang HIP codegen is not enabled")
     target = {"kind": "hip", "mcpu": mcpu}
     with tvm.transform.PassContext(opt_level=3), tvm.target.Target(target):
         src = tilelang.lower(KERNELS[kernel](dtype), target=target).kernel_source
