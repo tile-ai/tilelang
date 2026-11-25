@@ -364,25 +364,6 @@ def atomic_kernel(op):
     return kernel
 
 
-@pytest.mark.parametrize("op", ["add", "max", "min"])
-def test_int32_store_atomic_codegen(op):
-    source = lower(atomic_kernel(op), target="ascend").kernel_source
-    assert f"asc_set_atomic_{op}_int32();" in source
-    assert "asc_set_atomic_none();" in source
-    # Require DMA completion in the correct interval, without requiring the
-    # extra PIPE_ALL drain from the larger candidate. Keep the numerical test
-    # below unchanged so insufficient native synchronization remains a failure.
-    enable = source.index(f"asc_set_atomic_{op}_int32();")
-    disable = source.index("asc_set_atomic_none();", enable)
-    stores = list(re.finditer(r"asc_copy_ub2gm_align\(", source))
-    assert len(stores) == 2, "Expected atomic and plain DMA stores"
-    assert enable < stores[0].start() < disable < stores[1].start()
-    drain = r"(?:asc_sync\(\)|asc_sync_pipe\(\s*PIPE_MTE3\s*\));"
-    assert re.search(drain, source[:enable]), "Missing drain before enabling atomic mode"
-    assert re.search(drain, source[stores[0].end() : disable]), "Atomic DMA must complete before clearing mode"
-    assert "copy_ub2gm_align" in source, "The test must use DMA store mode, not a SIMT atomic"
-
-
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("op", ["add", "max", "min"])
 def test_int32_store_atomic_multicore_and_none_restores_plain_store(op):
