@@ -78,8 +78,6 @@ def test_cann_dma_original_names_preserve_wide_counts():
 def test_native_cann_register_overloads_compile():
     source = """
     #include "tl_templates/ascend/cann_compat.h"
-    #include "tl_templates/ascend/ascend_fp8.h"
-    #include "tl_templates/ascend/simd_inst.h"
     TL_CANN_SAVE_NAMES
     #define asc_div(...) previous_binding(__VA_ARGS__)
     #define asc_pack_to_high previous_pack
