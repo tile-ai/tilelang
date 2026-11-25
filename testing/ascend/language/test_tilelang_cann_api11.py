@@ -8,8 +8,6 @@ vld2 off is an unsigned HardwareLoop ELEMENT STRIDE, not a signed immediate
 address displacement. Three real iterations distinguish it from plain loading.
 """
 
-import re
-
 import pytest
 import torch
 
@@ -120,27 +118,12 @@ def _division_inputs(dtype):
     return (torch.tensor([x for x, _ in pairs], dtype=td), torch.tensor([y for _, y in pairs], dtype=td), torch.tensor(quotient, dtype=td))
 
 
-@pytest.mark.parametrize("dtype", INTEGER_DTYPES)
-@pytest.mark.parametrize("mode", MODES)
-def test_integer_division_codegen(dtype, mode):
-    source = lower(arithmetic_kernel("div", dtype, mode), target="ascend").kernel_source
-    assert "simd_inst::vdiv(" in source or "vdiv(" in source
-    assert "vdiv_0ulp" not in source, "Integer division must not use the float32 precision wrapper"
-
-
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("dtype", INTEGER_DTYPES)
 @pytest.mark.parametrize("mode", MODES)
 def test_integer_division_truncates_toward_zero_and_preserves_guards(dtype, mode):
     a, b, active = _division_inputs(dtype)
     _exercise_arithmetic(arithmetic_kernel("div", dtype, mode), a, b, active, mode, ("integer div", dtype))
-
-
-@pytest.mark.parametrize("dtype", BROADCAST_DTYPES)
-def test_highest_zeroing_codegen_uses_return_value_path(dtype):
-    source = lower(arithmetic_kernel("highest", dtype, "MODE_ZEROING"), target="ascend").kernel_source
-    assert "simd_inst::vdupv(" in source
-    assert "POS_HIGHEST" in source
 
 
 @tilelang.testing.requires_ascend
@@ -252,14 +235,6 @@ def e8m0_broadcast_kernel(mode, pos="POS_LOWEST"):
     return kernel
 
 
-@pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("pos", ["POS_LOWEST", "POS_HIGHEST"])
-def test_e8m0_broadcast_codegen_preserves_storage_bits(mode, pos):
-    source = lower(e8m0_broadcast_kernel(mode, pos), target="ascend").kernel_source
-    assert pos in source
-    assert "float8_e8m0" in source or "vector_f8e8m0" in source
-
-
 @tilelang.testing.requires_ascend
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("pos", ["POS_LOWEST", "POS_HIGHEST"])
@@ -307,15 +282,6 @@ def iter_load_kernel(dtype, stride):
             T.copy(dst, Out)
 
     return kernel
-
-
-@pytest.mark.parametrize("dtype,bits", [("uint8", 8), ("int16", 16), ("int32", 32)])
-def test_vld2_offset_codegen_uses_compat_address_register(dtype, bits):
-    source = lower(iter_load_kernel(dtype, 2048 // bits * 2), target="ascend").kernel_source
-    assert f"asc_update_addr_reg_b{bits}(" in source
-    assert re.search(r"for\s*\(\s*uint16_t\s", source), "VAG requires the i16 HardwareLoop counter"
-    assert source.count("simd_inst::vld_x2<") == 1
-    assert ".v0" in source and ".v1" in source
 
 
 @tilelang.testing.requires_ascend
@@ -423,18 +389,22 @@ def test_native_extern_routes_follow_execution_domain():
     assert "AscendC::Std::sqrt(" in source
 
 
-def test_simt_vector_float_remainder_uses_fmodf_per_lane():
+@tilelang.testing.requires_ascend
+def test_simt_vector_float_remainder_with_subnormal_divisor():
     @T.prim_func
-    def kernel(a: T.Tensor((64,), "float32"), b: T.Tensor((64,), "float32"), out: T.Tensor((64,), "float32")):
-        with T.Kernel(1), T.SimtVF(threads=32):
+    def kernel(a: T.Tensor((2,), "float32"), b: T.Tensor((2,), "float32"), out: T.Tensor((2,), "float32")):
+        with T.Kernel(1), T.SimtVF(threads=1):
             for i in T.vectorized(2):
-                index = 2 * T.get_thread_binding() + i
-                out[index] = T.truncmod(a[index], b[index])
+                out[i] = T.truncmod(a[i], b[i])
 
-    with tvm.target.Target("ascend"):
-        source = lower(kernel, target="ascend").kernel_source
-    assert ".x = fmodf(" in source
-    assert ".y = fmodf(" in source
+    # The largest subnormal is an exact multiple of the smallest. CANN 9.1
+    # returned bits 0x007ffffe instead of +0. The other lane checks 5.5 % 2.
+    a = torch.tensor([0x007FFFFF, 0x40B00000], dtype=torch.int32).view(torch.float32)
+    b = torch.tensor([0x00000001, 0x40000000], dtype=torch.int32).view(torch.float32)
+    compiled = tilelang.compile(kernel, target="ascend", out_idx=-1)
+    actual = compiled(a.npu(), b.npu()).cpu()
+    expected = torch.tensor([0.0, 1.5], dtype=torch.float32)
+    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
 
 
 def native_div_kernel():

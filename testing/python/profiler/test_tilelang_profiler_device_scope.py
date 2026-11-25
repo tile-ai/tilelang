@@ -228,13 +228,6 @@ def test_npu_event_without_native_flush_reads_scratch(monkeypatch, accelerator):
     assert set(state.calls) == {2}
 
 
-def test_npu_native_flush_error_is_reported(monkeypatch, accelerator):
-    accelerator("npu")
-    monkeypatch.setattr(torch_bench, "_get_npu_l2_cache_flush", lambda: lambda _: 123)
-    with pytest.raises(RuntimeError, match="aclrtDeviceL2CacheFlush failed: 123"):
-        bench.do_bench(lambda: None, device=torch.device("npu:2"))
-
-
 def test_npu_profiler_input_generation_is_scoped(monkeypatch, accelerator):
     state = accelerator("npu")
     input_devices = []

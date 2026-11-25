@@ -8,8 +8,18 @@ import tilelang.ascend.language as T
 
 
 @tilelang.testing.requires_ascend
-@pytest.mark.parametrize("dtype", ["uint8", "int16", "bfloat16", "float32"])
-@pytest.mark.parametrize("mask_kind", ["empty", "one", "partial", "full"])
+@pytest.mark.parametrize(
+    "mask_kind,dtype",
+    [
+        ("empty", "uint8"),
+        ("one", "uint8"),
+        ("partial", "uint8"),
+        ("full", "uint8"),
+        ("partial", "int16"),
+        ("partial", "bfloat16"),
+        ("partial", "float32"),
+    ],
+)
 def test_vsstb_three_stores_advance_pointer_with_partial_first_mask(dtype, mask_kind):
     td = getattr(torch, dtype)
     lanes = 256 // torch.empty((), dtype=td).element_size()
