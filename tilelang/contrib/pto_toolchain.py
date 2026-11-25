@@ -24,6 +24,7 @@ from pathlib import Path
 
 from tvm.contrib import utils
 
+from tilelang.contrib import bisheng
 from tilelang.env import env
 
 logger = logging.getLogger(__name__)
@@ -198,35 +199,8 @@ def toolchain_stamp() -> dict[str, str]:
     return {
         "ptoas": _first_output_line([ptoas_path, "--version"]),
         "cann": _cann_identity(),
+        "bisheng": bisheng.get_bisheng_version(),
     }
-
-
-# Where ptoas itself probes for the CANN version, in its order of preference.
-_CANN_VERSION_RELPATHS = (
-    "compiler/version.info",
-    "x86_64-linux/ascend_toolkit_install.info",
-    "x86_64-linux/ascend_all_cann_install.info",
-    "aarch64-linux/ascend_toolkit_install.info",
-    "aarch64-linux/ascend_all_cann_install.info",
-    "ascend_toolkit_install.info",
-    "ascend_all_cann_install.info",
-    "opp/version.info",
-)
-
-
-def _first_version_line(path: Path) -> str:
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    for line in content.splitlines():
-        line = line.strip()
-        for key in ("Version=", "version="):
-            if line.startswith(key):
-                value = line[len(key) :].strip().strip('"')
-                if value:
-                    return value
-    return ""
 
 
 def _cann_identity() -> str:
@@ -237,15 +211,12 @@ def _cann_identity() -> str:
     must miss the cache even when the ptoas and bisheng binaries are
     unchanged.
     """
-    home = os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME")
+    home = bisheng.get_cann_home()
     if not home:
         return ""
     home = str(Path(home).resolve())
-    for relpath in _CANN_VERSION_RELPATHS:
-        version = _first_version_line(Path(home, relpath))
-        if version:
-            return f"{home} ({version})"
-    return home
+    version = bisheng.get_cann_version(home)
+    return f"{home} ({version})" if version else home
 
 
 def compile_ptodsl_to_aibin(

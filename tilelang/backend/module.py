@@ -38,6 +38,8 @@ class BackendModule:
     host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
+    # Identity of the toolchain used by this execution backend and pass configuration.
+    kernel_cache_toolchain: Callable[[str, dict], dict[str, str]] | None = None
 
     def __post_init__(self) -> None:
         target_kinds = tuple(self.target_kinds)

@@ -56,33 +56,48 @@ def tilelang_callback_cuda_validate(device_mod):
             )
 
 
+def _resolve_cuda_compiler(execution_backend, pass_config):
+    if execution_backend == "tvm_ffi":
+        compiler = str(pass_config.get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
+    else:
+        compiler = "nvcc" if execution_backend == "cython" else execution_backend
+
+    if compiler == "nvcc":
+        compiler_module = nvcc
+        version = nvcc.get_nvcc_version()
+    elif compiler == "nvrtc":
+        from tilelang.contrib import nvrtc as compiler_module
+
+        version = compiler_module.get_nvrtc_version()
+    else:
+        raise ValueError(f"Unsupported CUDA compiler {compiler!r}; expected 'nvcc' or 'nvrtc'")
+    return compiler_module, f"{compiler} version={'.'.join(map(str, version))}"
+
+
+def _kernel_cache_toolchain(execution_backend, pass_config):
+    _, compiler = _resolve_cuda_compiler(execution_backend, pass_config)
+    return {"compiler": compiler}
+
+
 def tilelang_callback_cuda_compile(code, target, pass_config=None):
     from tilelang.cache.cuda_binary_cache import CUDABinaryCache
 
     cfg = pass_config or {}
-    compiler = str(cfg.get(PassConfigKey.TL_CUDA_COMPILER, "nvcc"))
-    if compiler not in ("nvcc", "nvrtc"):
-        raise ValueError(f"Unsupported CUDA compiler {compiler!r}; expected 'nvcc' or 'nvrtc'")
+    compiler_module, compiler = _resolve_cuda_compiler("tvm_ffi", cfg)
 
     target_arch, target_code = nvcc.get_target_arch_and_code(target)
     target_code_list = nvcc.get_target_code_list(target_code)
-    gencode_code = nvcc.format_target_code_for_gencode(target_code)
-    if gencode_code is None:
-        arch = [f"-arch=sm_{target_arch}"]
+    if compiler_module is nvcc:
+        gencode_code = nvcc.format_target_code_for_gencode(target_code)
+        if gencode_code is None:
+            arch = [f"-arch=sm_{target_arch}"]
+        else:
+            arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
     else:
-        arch = ["-gencode", f"arch=compute_{target_arch},code={gencode_code}"]
-    compile_format = "fatbin" if len(target_code_list) > 1 else "cubin"
-
-    if compiler == "nvrtc":
-        from tilelang.contrib import nvrtc as compiler_module
-
         if target_code_list and target_code_list != [f"sm_{target_arch}"]:
             raise ValueError("NVRTC requires a single code target matching the CUDA target arch")
         arch = target_arch
-        compiler_version = compiler_module.get_nvrtc_version()
-    else:
-        compiler_module = nvcc
-        compiler_version = nvcc.get_nvcc_version()
+    compile_format = "fatbin" if len(target_code_list) > 1 else "cubin"
 
     options = compiler_module.default_compile_options(cfg.get(PassConfigKey.TL_DEVICE_COMPILE_FLAGS))
     enable_fast_math = bool(cfg.get(PassConfigKey.TL_ENABLE_FAST_MATH, False))
@@ -106,7 +121,7 @@ def tilelang_callback_cuda_compile(code, target, pass_config=None):
         target_code=target_code_list,
         compile_format=compile_format,
         options=options,
-        compiler=f"{compiler} version={'.'.join(map(str, compiler_version))}",
+        compiler=compiler,
     )
     cached_binary = CUDABinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
@@ -131,6 +146,7 @@ BACKEND = register_backend(
             )
         },
         execution_backends=execution_backend.CUDA_EXECUTION_BACKENDS,
+        kernel_cache_toolchain=_kernel_cache_toolchain,
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={
             "tilelang_callback_cuda_validate": tilelang_callback_cuda_validate,
