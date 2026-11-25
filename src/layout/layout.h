@@ -6,6 +6,7 @@
 #ifndef TVM_TL_LAYOUT_LAYOUT_H_
 #define TVM_TL_LAYOUT_LAYOUT_H_
 
+#include <array>
 #include <cstddef>
 #include <exception>
 #include <string>
@@ -48,6 +49,7 @@ class LayoutNode : public ffi::Object {
 public:
   LayoutNode() = default;
   LayoutNode(ffi::Array<PrimExpr> input_size,
+             ffi::Array<tirx::Var> forward_vars,
              ffi::Array<PrimExpr> forward_index);
 
   size_t InputDim() const { return input_size_.size(); }
@@ -57,6 +59,13 @@ public:
   ffi::Array<PrimExpr> InputShape() const { return input_size_; }
 
   ffi::Array<PrimExpr> OutputShape() const;
+
+  const ffi::Array<tirx::Var> &InputVars() const { return forward_vars_; }
+
+  tirx::Var InputVar(size_t idx) const {
+    ICHECK_LT(idx, forward_vars_.size());
+    return forward_vars_[idx];
+  }
 
   ffi::Array<PrimExpr> GetForwardIndex() const { return forward_index_; }
 
@@ -69,6 +78,8 @@ public:
    * (((f0 * s1 + f1) * s2 + f2) ... * sn + fn).
    */
   PrimExpr GetLinearizedForwardIndex() const;
+
+  PrimExpr ForwardLinearized(const ffi::Array<PrimExpr> &vars) const;
 
   virtual ffi::Array<PrimExpr> GetForwardVars() const;
 
@@ -150,8 +161,9 @@ public:
 protected:
   virtual ffi::Map<tirx::Var, Range> GetVarMap() const;
   void UpdateAnalyzer(arith::Analyzer *analyzer) const;
-  ffi::Array<PrimExpr> forward_index_;
   ffi::Array<PrimExpr> input_size_;
+  ffi::Array<tirx::Var> forward_vars_;
+  ffi::Array<PrimExpr> forward_index_;
 };
 
 /*!
@@ -162,6 +174,7 @@ public:
   TVM_DLL Layout(ffi::Array<tirx::IterVar> forward_var,
                  ffi::Array<PrimExpr> forward_index);
   TVM_DLL Layout(ffi::Array<PrimExpr> input_size,
+                 ffi::Array<tirx::Var> forward_vars,
                  ffi::Array<PrimExpr> forward_index);
 
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(Layout, ffi::ObjectRef,
@@ -172,10 +185,14 @@ class FragmentNode : public LayoutNode {
 public:
   FragmentNode() = default;
   FragmentNode(ffi::Array<PrimExpr> input_size,
+               ffi::Array<tirx::Var> forward_vars,
                ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
-               PrimExpr replicate_size);
+               PrimExpr replicate_size,
+               ffi::Optional<tirx::Var> replicate_var = std::nullopt);
 
   PrimExpr GetForwardThread() const { return forward_thread_; }
+
+  tirx::Var ReplicateVar() const { return replicate_var_; }
 
   ffi::Array<PrimExpr> GetForwardVars() const final;
 
@@ -233,6 +250,7 @@ public:
 protected:
   ffi::Map<tirx::Var, Range> GetVarMap() const final;
   Range thread_range_;
+  tirx::Var replicate_var_;
   PrimExpr forward_thread_;
   PrimExpr replicate_size_;
 };
@@ -247,6 +265,7 @@ public:
                    tirx::IterVar thread_replicate);
 
   TVM_DLL Fragment(ffi::Array<PrimExpr> input_size,
+                   ffi::Array<tirx::Var> forward_vars,
                    ffi::Array<PrimExpr> forward_index, PrimExpr forward_thread,
                    PrimExpr replicate_size,
                    ffi::Optional<tirx::Var> replicate_var);
@@ -296,9 +315,12 @@ class PartialFragmentNode : public FragmentNode {
 public:
   PartialFragmentNode() = default;
   PartialFragmentNode(ffi::Array<PrimExpr> input_size,
+                      ffi::Array<tirx::Var> forward_vars,
                       ffi::Array<PrimExpr> forward_index,
                       PrimExpr forward_thread, PrimExpr replicate_size,
-                      PrimExpr combine_size, ffi::Optional<Range> thread_range);
+                      PrimExpr combine_size,
+                      ffi::Optional<tirx::Var> replicate_var,
+                      ffi::Optional<Range> thread_range);
 
   /*! \brief Width of the combine coordinate: `_rep % CombineSize()` are
    *  addend lanes, `_rep / CombineSize()` are equal-value copy groups. */
@@ -336,6 +358,7 @@ protected:
 class PartialFragment : public Fragment {
 public:
   TVM_DLL PartialFragment(ffi::Array<PrimExpr> input_size,
+                          ffi::Array<tirx::Var> forward_vars,
                           ffi::Array<PrimExpr> forward_index,
                           PrimExpr forward_thread, PrimExpr replicate_size,
                           PrimExpr combine_size,
@@ -381,8 +404,23 @@ std::pair<Fragment, PrimExpr>
 CondenseReplicateVarKeepingBoundary(const Fragment &fragment,
                                     const PrimExpr &combine_size);
 
-tirx::Var InputPlaceholder(size_t idx);
-tirx::Var ReplicationPlaceholder();
+namespace detail {
+tirx::Var MakeLayoutVar(size_t index);
+
+template <size_t... Is>
+std::array<tirx::Var, sizeof...(Is)>
+MakeLayoutVarsImpl(std::index_sequence<Is...>) {
+  return {MakeLayoutVar(Is)...};
+}
+} // namespace detail
+
+ffi::Array<tirx::Var> MakeLayoutVars(size_t ndim);
+
+template <size_t N> std::array<tirx::Var, N> MakeLayoutVars() {
+  return detail::MakeLayoutVarsImpl(std::make_index_sequence<N>{});
+}
+
+tirx::Var MakeReplicateVar();
 tirx::IterVar MakeIterVar(std::string name, PrimExpr dom);
 
 Fragment MakeGemmFragment8x8();

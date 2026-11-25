@@ -36,7 +36,7 @@ autoapi_generate_api_docs = True
 
 autodoc_typehints = "description"
 
-autoapi_ignore = ["*language/ast*", "*version*", "*libinfo*", "*parser*"]
+autoapi_ignore = ["*version*", "*libinfo*", "*parser*"]
 
 source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 

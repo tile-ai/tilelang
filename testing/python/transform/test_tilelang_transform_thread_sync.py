@@ -1104,11 +1104,11 @@ def test_partial_sync_warp_multiple_still_lowered():
     assert not _storage_syncs(guard)
 
 
-def test_partial_sync_ids_unique_across_storage_scopes():
-    """The pipeline runs ThreadSync once for "shared" and once for "shared.dyn".
-    Two disjoint thread ranges must not end up on the same named barrier: each
-    `bar.sync id, count` would then complete the other group's phases (seen as a
-    hang in the warp-specialised sparse-MLA forward kernel)."""
+@pytest.mark.parametrize("combined_scopes, same_threads", [(False, False), (True, False), (True, True)])
+def test_partial_sync_ids_across_storage_scopes(combined_scopes, same_threads):
+    """Disjoint groups stay isolated, while joint planning reuses IDs for one group."""
+    dynamic_begin = 0 if same_threads else 64
+    dynamic_end = dynamic_begin + 64
 
     @T.prim_func(private=True)
     def func():
@@ -1123,14 +1123,17 @@ def test_partial_sync_ids_unique_across_storage_scopes():
             for i in range(2):
                 S[tx] = T.float32(1)
                 acc[0] += S[63 - tx]
-        if tx >= 64:
+        if dynamic_begin <= tx and tx < dynamic_end:
             for i in range(2):
-                D[tx - 64] = T.float32(1)
-                acc[0] += D[127 - tx]
+                D[tx - dynamic_begin] = T.float32(1)
+                acc[0] += D[dynamic_end - 1 - tx]
 
     mod = tvm.IRModule({"main": func})
-    mod = tilelang.transform.ThreadSync("shared")(mod)
-    mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
+    if combined_scopes:
+        mod = tilelang.transform.ThreadSync(["shared", "shared.dyn"])(mod)
+    else:
+        mod = tilelang.transform.ThreadSync("shared")(mod)
+        mod = tilelang.transform.ThreadSync("shared.dyn")(mod)
     lowered = mod["main"]
     static_syncs = _storage_syncs(lowered, "shared", arg_count=3)
     dynamic_syncs = _storage_syncs(lowered, "shared.dyn", arg_count=3)
@@ -1138,7 +1141,177 @@ def test_partial_sync_ids_unique_across_storage_scopes():
     _assert_partial_sync_params(dynamic_syncs, 64)
     static_ids = {int(call.args[1]) for call in static_syncs}
     dynamic_ids = {int(call.args[1]) for call in dynamic_syncs}
-    assert not static_ids & dynamic_ids, f"disjoint thread ranges share named barriers {static_ids & dynamic_ids}"
+    if same_threads:
+        assert len(static_ids | dynamic_ids) == 1, "the same thread group needs only one named barrier"
+    else:
+        assert not static_ids & dynamic_ids, f"disjoint thread ranges share named barriers {static_ids & dynamic_ids}"
+
+
+def test_partial_sync_combined_scopes_reserve_explicit_ids():
+    """An explicit ID stays reserved even when it has the same participants."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((64,), dtype="float32", scope="shared")
+        D = T.alloc_buffer((64,), dtype="float32", scope="shared.dyn")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 96)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        if tx >= 32:
+            T.evaluate(T.call_intrin("int32", "tirx.tvm_storage_sync", "shared", 3, 64))
+            S[tx - 32] = T.float32(1)
+            acc[0] = S[95 - tx]
+            D[tx - 32] = acc[0]
+            acc[0] = D[95 - tx]
+
+    mod = tilelang.transform.ThreadSync(("shared", "shared.dyn"))(tvm.IRModule({"main": func}))
+    static_syncs = _storage_syncs(mod["main"], "shared", arg_count=3)
+    dynamic_syncs = _storage_syncs(mod["main"], "shared.dyn", arg_count=3)
+    _assert_partial_sync_params(static_syncs + dynamic_syncs, 64)
+    assert sum(int(call.args[1]) == 3 for call in static_syncs) == 1
+    generated_ids = {int(call.args[1]) for call in static_syncs if int(call.args[1]) != 3}
+    assert len(generated_ids) == 1
+    assert {int(call.args[1]) for call in dynamic_syncs} == generated_ids
+
+
+@pytest.mark.parametrize("predicate_form", ["direct", "else", "bind"])
+def test_partial_sync_distinct_sparse_groups_not_merged(predicate_form):
+    """Equal bounds and counts do not identify groups with different middle warps."""
+
+    @T.prim_func(private=True)
+    def func():
+        S = T.alloc_buffer((160,), dtype="float32", scope="shared")
+        D = T.alloc_buffer((160,), dtype="float32", scope="shared.dyn")
+        acc = T.alloc_buffer((1,), dtype="float32", scope="local")
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 192)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        # Warps {0, 2, 4} and {0, 3, 4} have the same bounding range and size.
+        if tx < 160 and tx // 32 % 2 == 0:
+            for i in range(2):
+                S[tx] = T.float32(1)
+                acc[0] = S[tx ^ 1]
+        if tx < 160 and (tx < 32 or tx >= 96):
+            for i in range(2):
+                D[tx] = T.float32(1)
+                acc[0] = D[tx ^ 1]
+
+    tx = _thread_var(func)
+
+    def rewrite_guard(node):
+        if not isinstance(node, tirx.IfThenElse):
+            return None
+        if predicate_form == "else":
+            return tirx.IfThenElse(tirx.Not(node.condition), tirx.Evaluate(0), node.then_case)
+        if predicate_form == "bind":
+            condition = tirx.Var("condition", "bool")
+            alias = tirx.Var("alias", "bool")
+            body = tirx.SeqStmt(
+                [tirx.Bind(condition, node.condition), tirx.Bind(alias, condition), tirx.IfThenElse(alias, node.then_case, None)]
+            )
+            # Keep the bounding range explicit: this case checks whether the
+            # density proof follows aliases for the holes inside that range.
+            return tirx.IfThenElse(tx < 160, body, None)
+        return None
+
+    func = func.with_body(tirx.stmt_functor.ir_transform(func.body, None, rewrite_guard, ["tirx.IfThenElse"]))
+    mod = tilelang.transform.ThreadSync(["shared", "shared.dyn"])(tvm.IRModule({"main": func}))
+    static_syncs = _storage_syncs(mod["main"], "shared", arg_count=3)
+    dynamic_syncs = _storage_syncs(mod["main"], "shared.dyn", arg_count=3)
+    _assert_partial_sync_params(static_syncs + dynamic_syncs, 96)
+    static_ids = {int(call.args[1]) for call in static_syncs}
+    dynamic_ids = {int(call.args[1]) for call in dynamic_syncs}
+    assert len(static_ids) == len(dynamic_ids) == 1
+    assert static_ids.isdisjoint(dynamic_ids)
+
+
+@pytest.mark.parametrize(
+    "condition_source",
+    ["parameter", "load", pytest.param("warp_idx", marks=tilelang.testing.requires_cuda.marks())],
+)
+def test_partial_sync_dense_proof_requires_uniform_bind(condition_source):
+    """Neither memory reads nor pure thread intrinsics imply uniform values."""
+
+    def bind_value(flag, gate):
+        if condition_source == "load":
+            return gate[0]
+        if condition_source == "warp_idx":
+            return tirx.call_intrin("int32", tirx.op.Op.get("tl.get_warp_idx"))
+        return flag
+
+    @T.prim_func(private=True)
+    def func(flag: T.int32, gate: T.Buffer((1,), "int32")):
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 96)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        value = bind_value(flag, gate)
+        condition: T.bool = value > 0
+        if condition:
+            if tx < 32:
+                T.evaluate(0)
+            else:
+                T.tvm_storage_sync("shared")
+                T.tvm_storage_sync("shared.dyn")
+
+    mod = tilelang.transform.ThreadSync(["shared", "shared.dyn"])(tvm.IRModule({"main": func}))
+    syncs = _storage_syncs(mod["main"], "shared", arg_count=3)
+    syncs += _storage_syncs(mod["main"], "shared.dyn", arg_count=3)
+    _assert_partial_sync_params(syncs, 64)
+    assert len(syncs) == 2
+    assert len({int(call.args[1]) for call in syncs}) == (1 if condition_source == "parameter" else 2)
+
+
+def test_partial_sync_unproven_groups_with_different_counts_stay_isolated():
+    """An unknown dense group and a sparse group can have identical bounds."""
+
+    @T.prim_func(private=True)
+    def func(gate: T.Buffer((1,), "int32")):
+        bx = T.launch_thread("blockIdx.x", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        for i in range(2):
+            if gate[0] > 0:
+                if tx < 96:
+                    T.tvm_storage_sync("shared")
+            if tx < 96 and tx // 32 != 1:
+                T.tvm_storage_sync("shared")
+
+    mod = tilelang.transform.ThreadSync(["shared", "shared.dyn"])(tvm.IRModule({"main": func}))
+    syncs = _storage_syncs(mod["main"], "shared", arg_count=3)
+    assert {int(call.args[2]) for call in syncs} == {64, 96}
+    assert len({int(call.args[1]) for call in syncs}) == 2, "different participant counts share a barrier"
+
+
+@tilelang.testing.requires_cuda
+def test_partial_sync_pipeline_reuses_id_after_async_wait():
+    """Async waits and buffer-reuse hazards in one thread group share a barrier."""
+    from tilelang import language as TL
+
+    @TL.prim_func
+    def kernel(A: TL.Tensor((4, 128), "float32"), B: TL.Tensor((4, 128), "float32")):
+        with TL.Kernel(1, threads=96):
+            tx = TL.get_thread_binding()
+            if tx >= 32:
+                shared = TL.alloc_shared((128,), "float32")
+                for i in TL.Pipelined(4, num_stages=2):
+                    TL.copy(A[i, 0], shared, disable_tma=True)
+                    for j in TL.Parallel(128):
+                        B[i, j] = shared[(j + 64) % 128]
+
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_80"})
+    with target:
+        lowered = tilelang.lower(kernel, target=target)
+    syncs = _storage_syncs(lowered.device_mod, "shared", arg_count=3)
+    syncs += _storage_syncs(lowered.device_mod, "shared.dyn", arg_count=3)
+    _assert_partial_sync_params(syncs, 64)
+    assert collect_calls(lowered.device_mod, op="tirx.ptx_wait_group"), "expected a cp.async pipeline"
+    assert len(syncs) > 1
+    assert len({int(call.args[1]) for call in syncs}) == 1, "the pipeline unnecessarily splits one thread group's barriers"
 
 
 # =============================================================================

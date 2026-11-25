@@ -121,6 +121,50 @@ Since `some_cond` is only known at runtime, static analysis cannot prove `A` is 
 Supported and referenced device codes in error messages: `1=CPU, 2=CUDA, 7=Vulkan, 8=Metal, 10=ROCM, 14=OneAPI, 15=WebGPU`.
 Kernels assert that `device_type` matches the target backend, and require `device_id` consistency across tensors.
 
+### Explicit mapped host parameters (CUDA)
+
+`T.annotate_host_mapped_buffers(*buffers)` declares external tensor parameters
+whose storage is mapped host memory accessible to the executing GPU:
+
+```python
+@T.prim_func
+def affine(src: T.Tensor((N,), T.float32), dst: T.Tensor((N,), T.float32)):
+    T.annotate_host_mapped_buffers(dst)
+    with T.Kernel(T.ceildiv(N, 128), threads=128) as block:
+        for lane in T.Parallel(128):
+            i = block * 128 + lane
+            if i < N:
+                dst[i] = src[i] * 2 + 1
+```
+
+Compile with `target="cuda"` and `execution_backend="cython"` or `"tvm_ffi"`.
+Pass a preallocated CPU tensor, for example
+`torch.empty(N, dtype=torch.float32, pin_memory=True)`, as `dst`. Its PyTorch
+device remains CPU. The launcher validates the CUDA registration and resolves
+the device pointer; it does not assume that host and device addresses match.
+Ordinary pageable CPU tensors and CUDA tensors are rejected for annotated
+parameters. Unannotated parameters retain their existing device requirements,
+and dtype, shape, rank, and stride checks remain enabled.
+
+The annotation applies to the whole function. Multiple calls are merged into
+the `tl.host_mapped_params` function attribute, which records parameter indices
+and survives IR serialization and kernel cache restoration. It does not change
+the buffer's `global` scope. Only external buffer parameters may be annotated;
+annotated outputs cannot be allocated via `out_idx` or `T.empty`. Other targets
+and execution backends currently reject the annotation.
+
+Mapped parameters use the current CUDA execution context; CUDA tensor arguments
+must be on that device. Host tensors do not supply a CUDA device ID. Views use
+their actual data pointer and declared strides, including nonzero storage offsets.
+
+This feature supports direct global loads and stores without a D2H copy or a
+global `skip_tensor_validation`. It does not register memory or synchronize
+execution. Keep the tensor storage and its mapping alive until GPU work finishes,
+and synchronize the relevant stream or event before the CPU reads or reuses it.
+For CUDA Graphs, preallocate before capture and retain the same storage and
+mapping throughout replay. Replays reuse captured pointers and do not rerun host
+validation. Concurrent steps need separate output storage or explicit ordering.
+
 ---
 
 ## Common Error Examples (What you’ll see)

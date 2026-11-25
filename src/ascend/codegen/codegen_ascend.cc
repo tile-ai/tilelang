@@ -354,6 +354,9 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
 
 void CodeGenTileLangAscend::PrintFuncPrefix(std::ostream &os) {
   os << "extern \"C\" ";
+  if (require_batch_mode_) {
+    os << "__schedmode__(1) ";
+  }
   switch (kernel_mode_) {
   case AscendKernelMode::kMix:
     // dav-3510's direct AIC-to-AIV data paths require the physical 1:2 group.
@@ -561,6 +564,7 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   has_gemm_l0_ = false;
   has_gemm_l1_ = false;
   has_philox_rng_ = false;
+  require_batch_mode_ = false;
   ascend_rng_state_var_.clear();
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
@@ -598,6 +602,20 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
       }
     }
     if (const auto *call = n.as<CallNode>()) {
+      if (call->op.same_as(tl::ascend_cross_core_set_flag()) ||
+          call->op.same_as(tl::ascend_cross_core_wait_flag())) {
+        ICHECK_EQ(call->args.size(), 3)
+            << Downcast<Op>(call->op)->name
+            << " expects exactly 3 arguments (mode_id int, pipe string, "
+               "flag_id)";
+        const auto *mode = call->args[0].as<IntImmNode>();
+        ICHECK(mode) << "Cross-core synchronization mode must be constant";
+        // Full AIC/AIV barriers and combined full-core protocols all contain
+        // a mode-0 phase. Local mode-1/2/4 handshakes do not require batch
+        // mode.
+        if (mode->value == 0)
+          require_batch_mode_ = true;
+      }
       if (call->op.same_as(tl::ascend_gemm_l1()) ||
           call->op.same_as(tl::ascend_blockscaled_gemm_l1())) {
         has_gemm_l1_ = true;
@@ -1461,15 +1479,20 @@ void CodeGenTileLangAscend::EmitUbufToGmCopy_(const CallNode *op) {
 }
 
 void CodeGenTileLangAscend::EmitGmToL1Copy_(const CallNode *op) {
-  ICHECK_EQ(op->args.size(), 12)
-      << "tl.ascend_copy_gm_to_cbuf expects exactly 12 arguments";
+  ICHECK(op->args.size() == 12 || op->args.size() == 14)
+      << "tl.ascend_copy_gm_to_cbuf expects 12 or 14 arguments";
 
   const bool use_dn2nz =
       GetIntImmArg(op, 9, "tl.ascend_copy_gm_to_cbuf", "transpose") != 0;
   const std::string nz_c0_stride = PrintExpr(op->args[10]);
+  const std::string num_batches =
+      op->args.size() == 14 ? PrintExpr(op->args[12]) : "1";
+  const std::string batch_stride =
+      op->args.size() == 14 ? PrintExpr(op->args[13]) : "0";
   PrintIndent();
-  stream << "asc_set_gm2l1_nz_para(1, 1, static_cast<uint16_t>(" << nz_c0_stride
-         << "), 0);\n";
+  stream << "asc_set_gm2l1_nz_para(" << num_batches
+         << ", 1, static_cast<uint16_t>(" << nz_c0_stride << "), "
+         << batch_stride << ");\n";
 
   std::string destination_prefix;
   std::string source_prefix;

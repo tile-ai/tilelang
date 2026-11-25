@@ -49,6 +49,7 @@ typedef struct hipDeviceProp_t hipDeviceProp_t;
 typedef enum hipError_t {
   hipSuccess = 0,
   hipErrorDeinitialized = 3,
+  hipErrorNoDevice = 100,
   hipErrorUnknown = 999
 } hipError_t;
 

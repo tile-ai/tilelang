@@ -105,13 +105,16 @@ def VerifyBufferInit():
     return _ffi_api.VerifyBufferInit()  # type: ignore
 
 
-def ThreadSync(storage_scope: str):
+def ThreadSync(storage_scope: str | list[str] | tuple[str, ...]):
     """Insert sync between parallel read/write of shared buffers.
 
     Parameters
     ----------
-    storage_scope: str
-        The target storage scope.
+    storage_scope: str or sequence of str
+        The target storage scope, or scopes to process in order. When several
+        scopes are supplied, partial-sync barrier IDs are assigned after all
+        scopes have been processed, allowing the same thread group to reuse an
+        ID across scopes.
 
     Returns
     -------

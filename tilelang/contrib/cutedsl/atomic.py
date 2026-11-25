@@ -8,7 +8,9 @@ __all__ = [
     "AtomicAdd",
     "AtomicAddRet",
     "AtomicAddx2",
+    "AtomicAddx2Ret",
     "AtomicAddx4",
+    "AtomicAddx4Ret",
     "AtomicMax",
     "AtomicMaxRet",
     "AtomicMin",
@@ -21,7 +23,10 @@ import cutlass
 from cutlass import cute
 from cutlass._mlir.extras import types as T
 from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import CuTeDSL
 from cutlass.experimental import primitives as prims
+
+from .utils import bitcast
 
 # Type alias for numeric values
 Numeric = cutlass.Float32 | cutlass.Float16 | cutlass.Int32 | cutlass.Int64 | int | float
@@ -115,105 +120,242 @@ def _load_from_src(src_values, count):
     return [src_values[i] for i in range(count)]
 
 
-def AtomicAddx2(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
-    """Vectorized atomic add for 2 consecutive elements.
+def _arch_at_least(sm):
+    arch = CuTeDSL._get_dsl().envar.arch
+    return int(arch[3:].rstrip("af")) >= sm
 
-    Uses PTX atom.add.v2.f32 for float32 or atom.add.noftz.v2.f16 for float16.
 
-    Args:
-        dst_ptr: Pointer to destination (2 consecutive elements)
-        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+# Bodies of the packed pair atomics, mirroring CUDA's ``atomicAdd(half2 *)`` and
+# ``atomicAdd(__nv_bfloat162 *)``: the two 16-bit lanes travel as one b32 word.
+_PACKED2_ATOM = """
+{
+    .reg .b32 v, r;
+    mov.b32 v, {$3,$4};
+    atom.add.noftz.%s r, [$2], v;
+    mov.b32 {$0,$1}, r;
+}
+"""
+# Below sm_90 there is no bf16x2 atomic add; cuda_bf16.hpp falls back to a
+# 32-bit CAS loop around ``__hadd2``, which itself is ``fma.rn.bf16x2`` with 1.0.
+_BF16X2_CAS = """
+{
+    .reg .b32 v, one, old, assumed, sum;
+    .reg .pred p;
+    mov.b32 v, {$3,$4};
+    mov.b32 one, 0x3f803f80;
+    ld.b32 old, [$2];
+retry:
+    mov.b32 assumed, old;
+    fma.rn.bf16x2 sum, v, one, assumed;
+    atom.cas.b32 old, [$2], assumed, sum;
+    setp.ne.b32 p, old, assumed;
+    @p bra retry;
+    mov.b32 {$0,$1}, old;
+}
+"""
+
+
+def _generic_addr(ptr: cute.Pointer, *, loc=None, ip=None):
+    """Address operand for a generic-addressing ``atom``: shared pointers are
+    converted (``cvta``), global ones are already valid generic addresses."""
+    if ptr.memspace == cutlass.AddressSpace.smem:
+        return llvm.addrspacecast(llvm.PointerType.get(), ptr.llvm_ptr, loc=loc, ip=ip)
+    return ptr.llvm_ptr
+
+
+def _atomic_add_packed2_ret(dst_ptr: cute.Pointer, v0, v1, dtype, *, loc=None, ip=None):
+    """Atomic add of two adjacent 16-bit lanes; returns the previous lanes as i16 bits.
+
+    Uses generic addressing like CUDA's ``atomicAdd(half2 *)``, so ``dst_ptr``
+    may point to global or shared memory.
     """
-    vals = _load_from_src(src_values, 2)
-    val0 = vals[0]
-    val1 = vals[1]
-
-    if dst_ptr.dtype == cutlass.Float16:
-        # fp16: use atom.add.noftz.v2.f16 with i16 bitcast (LLVM asm doesn't support f16)
-        val0_ir = cutlass.Float16(val0).ir_value(loc=loc, ip=ip)
-        val1_ir = cutlass.Float16(val1).ir_value(loc=loc, ip=ip)
-        val0_i16 = llvm.bitcast(T.i16(), val0_ir, loc=loc, ip=ip)
-        val1_i16 = llvm.bitcast(T.i16(), val1_ir, loc=loc, ip=ip)
-        res_type = llvm.StructType.get_literal([T.i16()] * 2)
-        llvm.inline_asm(
-            res_type,
-            [dst_ptr.llvm_ptr, val0_i16, val1_i16],
-            "atom.add.noftz.v2.f16 {$0,$1}, [$2], {$3,$4};",
-            "=h,=h,l,h,h",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-    elif dst_ptr.dtype == cutlass.BFloat16:
-        # bf16: use atom.add.noftz.v2.bf16 with i16 bitcast
-        val0_ir = cutlass.BFloat16(val0).ir_value(loc=loc, ip=ip)
-        val1_ir = cutlass.BFloat16(val1).ir_value(loc=loc, ip=ip)
-        val0_i16 = llvm.bitcast(T.i16(), val0_ir, loc=loc, ip=ip)
-        val1_i16 = llvm.bitcast(T.i16(), val1_ir, loc=loc, ip=ip)
-        res_type = llvm.StructType.get_literal([T.i16()] * 2)
-        llvm.inline_asm(
-            res_type,
-            [dst_ptr.llvm_ptr, val0_i16, val1_i16],
-            "atom.add.noftz.v2.bf16 {$0,$1}, [$2], {$3,$4};",
-            "=h,=h,l,h,h",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
+    is_f16 = dtype == cutlass.Float16
+    cast = cutlass.Float16 if is_f16 else cutlass.BFloat16
+    if is_f16:
+        asm = _PACKED2_ATOM % "f16x2"
+    elif _arch_at_least(90):
+        asm = _PACKED2_ATOM % "bf16x2"
     else:
-        # float32 (default): use atom.add.v2.f32
-        res_type = llvm.StructType.get_literal([T.f32()] * 2)
-        llvm.inline_asm(
-            res_type,
-            [dst_ptr.llvm_ptr, cutlass.Float32(val0).ir_value(loc=loc, ip=ip), cutlass.Float32(val1).ir_value(loc=loc, ip=ip)],
-            "atom.add.v2.f32 {$0,$1}, [$2], {$3,$4};",
-            "=f,=f,l,f,f",
-            has_side_effects=True,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-            loc=loc,
-            ip=ip,
-        )
-
-
-def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
-    """Vectorized atomic add for 4 consecutive float32 elements.
-
-    Uses PTX atom.global.add.v4.f32 for true vectorized atomic operation on SM90+.
-
-    Args:
-        dst_ptr: Pointer to destination (4 consecutive float32 elements)
-        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
-    """
-    vals = _load_from_src(src_values, 4)
-    val0 = vals[0]
-    val1 = vals[1]
-    val2 = vals[2]
-    val3 = vals[3]
-
-    # Use inline PTX for vectorized atomic add
-    res_type = llvm.StructType.get_literal([T.f32()] * 4)
-    llvm.inline_asm(
+        asm = _BF16X2_CAS
+    v0_i16 = llvm.bitcast(T.i16(), cast(v0).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    v1_i16 = llvm.bitcast(T.i16(), cast(v1).ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    res_type = llvm.StructType.get_literal([T.i16()] * 2)
+    prev = llvm.inline_asm(
         res_type,
-        [
-            dst_ptr.llvm_ptr,
-            cutlass.Float32(val0).ir_value(loc=loc, ip=ip),
-            cutlass.Float32(val1).ir_value(loc=loc, ip=ip),
-            cutlass.Float32(val2).ir_value(loc=loc, ip=ip),
-            cutlass.Float32(val3).ir_value(loc=loc, ip=ip),
-        ],
-        "atom.global.add.v4.f32 {$0,$1,$2,$3}, [$4], {$5,$6,$7,$8};",
-        "=f,=f,=f,=f,l,f,f,f,f",
+        [_generic_addr(dst_ptr, loc=loc, ip=ip), v0_i16, v1_i16],
+        asm,
+        "=h,=h,l,h,h",
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
         loc=loc,
         ip=ip,
     )
+    return (
+        llvm.extractvalue(T.i16(), prev, [0], loc=loc, ip=ip),
+        llvm.extractvalue(T.i16(), prev, [1], loc=loc, ip=ip),
+    )
+
+
+def _f32_vector_atomic(dst_ptr: cute.Pointer, vals, *, loc=None, ip=None):
+    """``atom.global.add.v{2,4}.f32`` (sm_90+, global memory only); returns the old lanes."""
+    n = len(vals)
+    outs = ",".join(f"${i}" for i in range(n))
+    ins = ",".join(f"${i + n + 1}" for i in range(n))
+    prev = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32()] * n),
+        [dst_ptr.llvm_ptr] + [cutlass.Float32(v).ir_value(loc=loc, ip=ip) for v in vals],
+        f"atom.global.add.v{n}.f32 {{{outs}}}, [${n}], {{{ins}}};",
+        ",".join(["=f"] * n + ["l"] + ["f"] * n),
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return [llvm.extractvalue(T.f32(), prev, [i], loc=loc, ip=ip) for i in range(n)]
+
+
+def _v4_16bit_atomic(dst_ptr: cute.Pointer, vals, dtype, *, loc=None, ip=None):
+    """``atom.global.v4.{f16,bf16}.add.noftz`` (sm_90+, global memory only)."""
+    cast = cutlass.Float16 if dtype == cutlass.Float16 else cutlass.BFloat16
+    kind = "f16" if dtype == cutlass.Float16 else "bf16"
+    bits = [llvm.bitcast(T.i16(), cast(v).ir_value(loc=loc, ip=ip), loc=loc, ip=ip) for v in vals]
+    llvm.inline_asm(
+        llvm.StructType.get_literal([T.i16()] * 4),
+        [dst_ptr.llvm_ptr] + bits,
+        f"atom.global.v4.{kind}.add.noftz {{$0,$1,$2,$3}}, [$4], {{$5,$6,$7,$8}};",
+        "=h,=h,=h,=h,l,h,h,h,h",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+def AtomicAddx2(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 2 consecutive elements.
+
+    Follows ``AtomicAddx2`` in ``src/tl_templates/cuda/atomic.h``: float16 and
+    bfloat16 use one packed ``f16x2`` / ``bf16x2`` atomic (a CAS loop for bf16
+    below sm_90), which also works on shared memory; float32 uses
+    ``atom.global.add.v2.f32`` on sm_90+ and two scalar atomics below.
+
+    Args:
+        dst_ptr: Pointer to destination (2 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    vals = _load_from_src(src_values, 2)
+    if dst_ptr.dtype in (cutlass.Float16, cutlass.BFloat16):
+        _atomic_add_packed2_ret(dst_ptr, vals[0], vals[1], dst_ptr.dtype, loc=loc, ip=ip)
+    elif _arch_at_least(90):
+        _f32_vector_atomic(dst_ptr, vals, loc=loc, ip=ip)
+    else:
+        for i in range(2):
+            AtomicAdd(dst_ptr + i, cutlass.Float32(vals[i]), loc=loc, ip=ip)
+
+
+def AtomicAddx2Ret(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 2 consecutive elements, returning the previous values.
+
+    Follows ``AtomicAddx2Ret`` in ``src/tl_templates/cuda/atomic.h``:
+
+    * float16/bfloat16: one packed ``f16x2`` / ``bf16x2`` atomic (a CAS loop for
+      bf16 below sm_90) with generic addressing, so shared memory works too.
+    * float32: one ``atom.global.add.v2.f32`` on sm_90+, two scalar atomics below.
+
+    Args:
+        dst_ptr: Pointer to destination (2 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    vals = _load_from_src(src_values, 2)
+    if dst_ptr.dtype in (cutlass.Float16, cutlass.BFloat16):
+        lo, hi = _atomic_add_packed2_ret(dst_ptr, vals[0], vals[1], dst_ptr.dtype, loc=loc, ip=ip)
+        prev_bits = cute.make_rmem_tensor((2,), cutlass.Int16)
+        prev_bits[0] = cutlass.Int16(lo)
+        prev_bits[1] = cutlass.Int16(hi)
+        target = "float16" if dst_ptr.dtype == cutlass.Float16 else "bfloat16"
+        return bitcast(prev_bits.load(), target)
+
+    if dst_ptr.dtype != cutlass.Float32:
+        raise NotImplementedError(f"AtomicAddx2Ret does not support a {dst_ptr.dtype} destination")
+
+    out = cute.make_rmem_tensor((2,), cutlass.Float32)
+    if _arch_at_least(90):
+        prev = _f32_vector_atomic(dst_ptr, vals, loc=loc, ip=ip)
+        for i in range(2):
+            out[i] = cutlass.Float32(prev[i])
+    else:
+        for i in range(2):
+            out[i] = AtomicAdd(dst_ptr + i, cutlass.Float32(vals[i]), loc=loc, ip=ip)
+    return out.load()
+
+
+def AtomicAddx4(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 4 consecutive elements.
+
+    Follows ``AtomicAddx4`` in ``src/tl_templates/cuda/atomic.h``. On sm_90+ it
+    is one ``atom.global`` vector atomic (``v4.f32`` or ``v4.{f16,bf16}``);
+    below that, float32 becomes four scalar atomics and 16-bit types two packed
+    pair atomics.
+
+    Args:
+        dst_ptr: Pointer to destination (4 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    vals = _load_from_src(src_values, 4)
+    is_16bit = dst_ptr.dtype in (cutlass.Float16, cutlass.BFloat16)
+    if _arch_at_least(90):
+        if is_16bit:
+            _v4_16bit_atomic(dst_ptr, vals, dst_ptr.dtype, loc=loc, ip=ip)
+        else:
+            _f32_vector_atomic(dst_ptr, vals, loc=loc, ip=ip)
+    elif is_16bit:
+        for base in (0, 2):
+            _atomic_add_packed2_ret(dst_ptr + base, vals[base], vals[base + 1], dst_ptr.dtype, loc=loc, ip=ip)
+    else:
+        for i in range(4):
+            AtomicAdd(dst_ptr + i, cutlass.Float32(vals[i]), loc=loc, ip=ip)
+
+
+def AtomicAddx4Ret(dst_ptr: cute.Pointer, src_values, *, loc=None, ip=None):
+    """Vectorized atomic add for 4 consecutive elements, returning the previous values.
+
+    Follows ``AtomicAddx4Ret`` in ``src/tl_templates/cuda/atomic.h``:
+
+    * float32: one ``atom.global.add.v4.f32`` on sm_90+, four scalar atomics below.
+    * float16/bfloat16: no x4 atomic exists, so two packed pair atomics
+      (``f16x2`` / ``bf16x2``; a CAS loop for bf16 below sm_90). The 8-byte
+      destination is never written as 16 bytes.
+
+    Args:
+        dst_ptr: Pointer to destination (4 consecutive elements)
+        src_values: Source values - can be TensorSSA (loaded tensor) or Pointer
+    """
+    if dst_ptr.dtype in (cutlass.Float16, cutlass.BFloat16):
+        vals = _load_from_src(src_values, 4)
+        prev_bits = cute.make_rmem_tensor((4,), cutlass.Int16)
+        for base in (0, 2):
+            lo, hi = _atomic_add_packed2_ret(dst_ptr + base, vals[base], vals[base + 1], dst_ptr.dtype, loc=loc, ip=ip)
+            prev_bits[base] = cutlass.Int16(lo)
+            prev_bits[base + 1] = cutlass.Int16(hi)
+        target = "float16" if dst_ptr.dtype == cutlass.Float16 else "bfloat16"
+        return bitcast(prev_bits.load(), target)
+
+    if dst_ptr.dtype != cutlass.Float32:
+        raise NotImplementedError(f"AtomicAddx4Ret does not support a {dst_ptr.dtype} destination")
+
+    vals = _load_from_src(src_values, 4)
+    out = cute.make_rmem_tensor((4,), cutlass.Float32)
+    if _arch_at_least(90):
+        prev = _f32_vector_atomic(dst_ptr, vals, loc=loc, ip=ip)
+        for i in range(4):
+            out[i] = cutlass.Float32(prev[i])
+    else:
+        for i in range(4):
+            out[i] = AtomicAdd(dst_ptr + i, cutlass.Float32(vals[i]), loc=loc, ip=ip)
+    return out.load()
 
 
 # =============================================================================

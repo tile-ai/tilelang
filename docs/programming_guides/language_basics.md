@@ -101,8 +101,8 @@ Keyword arguments are launch annotations that the backend interprets once the
 target is known. Each language dialect's `Kernel` declares the annotations its
 backend understands as explicit keyword parameters, so hovering or
 autocompleting `T.Kernel` shows exactly those and anything else is rejected:
-`tilelang.language` (the CUDA dialect) offers `threads`, `prelude` and
-`cluster_dims`; `tilelang.rocm.language` / `tilelang.metal.language` offer
+`tilelang.language` (the CUDA dialect) offers `threads`, `prelude`,
+`cluster_dims` and `name`; `tilelang.rocm.language` / `tilelang.metal.language` offer
 `threads` and `prelude`; `tilelang.cpu.language` offers only `prelude`.
 `threads` is the SIMT one: how many threads run each tile program on
 GPU-style backends. Those backends pick a default (128) when it is omitted;
@@ -120,6 +120,34 @@ annotation (SM90+). A cluster is a `cluster_dims`-shaped tile of the grid, so
 (`bx // cluster_dims[axis]`) and works on every target, while
 `T.block_rank_in_cluster()` reads the hardware rank and is CUDA-only. Targets
 without clusters reject `cluster_dims` at compile time.
+
+### Naming CUDA kernels
+
+Use `name=` to distinguish individual CUDA launches in generated code and
+profilers, including multiple launches inside one `PrimFunc`:
+
+```python
+@T.prim_func
+def pipeline(A: T.Tensor((256,), "float32"), B: T.Tensor((256,), "float32")):
+    with T.Kernel(2, threads=128, name="add_one") as bx:
+        for i in T.Parallel(128):
+            B[bx * 128 + i] = A[bx * 128 + i] + 1.0
+
+    with T.Kernel(2, threads=128, name="double_values") as bx:
+        for i in T.Parallel(128):
+            B[bx * 128 + i] *= 2.0
+```
+
+The device functions are named `add_one` and `double_values`, without an
+extra `_kernel` suffix. Names must be non-empty ASCII identifiers matching
+`[A-Za-z_][A-Za-z0-9_]*`. Avoid C++ keywords and names reserved by CUDA.
+When a symbol is already in use, TileLang appends a numeric suffix such as
+`stage_1`. This also handles collisions with the enclosing host function.
+
+Omitting `name` (or passing `None`) retains the existing naming scheme based
+on the enclosing function's `global_symbol`, such as `pipeline_kernel` and
+`pipeline_kernel_1`. Named and unnamed launches can be mixed, and
+`T.ClusterKernel` accepts the same `name` argument.
 
 ## 3. Loops and Control Flow
 
@@ -271,6 +299,56 @@ T.print(C_f, msg="accumulator:")
 T.print(A_s, msg="A tile:")
 T.print(C[0], msg="C[0] = ")
 ```
+
+### Configuring the Z3 proof budget
+
+Use `pass_configs` to change the Z3 resource budget for one kernel compilation.
+The default is `100_000`; a larger budget can prove more difficult expressions
+but may increase compilation time. The budget counts Z3 resource units, not
+milliseconds or an exact number of search iterations.
+
+Both styles of `@tilelang.jit` accept the same option. In the lazy style, the
+decorated factory returns a `PrimFunc`:
+
+```python
+@tilelang.jit(pass_configs={"arith.z3_rlimit": 100_000})
+def get_kernel(N):
+    @T.prim_func
+    def kernel(A: T.Tensor((N,), T.float32)):
+        with T.Kernel(T.ceildiv(N, 128), threads=128) as bx:
+            for i in T.Parallel(128):
+                if bx * 128 + i < N:
+                    A[bx * 128 + i] += 1
+
+    return kernel
+```
+
+In the eager style, the decorated function contains the kernel body directly:
+
+```python
+@tilelang.jit(pass_configs={"arith.z3_rlimit": 100_000})
+def increment(A):
+    A: T.Tensor((128,), T.float32)
+    with T.Kernel(1, threads=128):
+        for i in T.Parallel(128):
+            A[i] += 1
+```
+
+Direct compilation also accepts the option:
+
+```python
+compiled = tilelang.compile(program, pass_configs={"arith.z3_rlimit": 100_000})
+```
+
+The equivalent enum key is `tilelang.PassConfigKey.ARITH_Z3_RLIMIT`.
+Values must be integers from `0` through `2**32 - 1`; `0` disables the resource
+limit. For `tilelang.lower` or direct analyzer use, set the option in
+`tvm.transform.PassContext(config={"arith.z3_rlimit": 100_000})`.
+
+Each analyzer captures the active setting when it is constructed. Z3 contexts
+and solvers are still created lazily, and clones retain their source analyzer's
+setting. An explicit `analyzer.set_z3_rlimit(...)` overrides that captured value.
+The setting applies to solver checks, not to a total budget across the kernel.
 
 ## 9. Where to Go Next
 

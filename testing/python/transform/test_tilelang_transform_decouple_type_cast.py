@@ -263,26 +263,32 @@ def test_no_transform_local_to_local():
 
 
 def test_no_transform_if_then_else_condition():
-    """Test no transformation when different dtype is only in if_then_else condition.
+    """Test no transformation when different dtype or Cast is only in condition.
 
-    The condition part of if_then_else doesn't participate in type casting,
-    so a global/shared buffer load with different dtype in condition should
-    not trigger cast buffer insertion.
+    The condition part of if / if_then_else / Select doesn't participate in
+    type casting, so a buffer load with different dtype or an index Cast in a
+    condition should not trigger cast buffer insertion.
     """
 
     @T.prim_func
-    def before(cond_buf: T.Tensor[(1,), T.int32]):
+    def before(cond_buf: T.Tensor[(1,), T.int32], a: T.Tensor[(8,), T.bfloat16], b: T.Tensor[(8,), T.bfloat16], n: T.int64):
         acc = T.alloc_local((8,), T.float32)
         for i in T.vectorized(8):
             # cond_buf is int32, acc is float32, but cond_buf is only in condition
             acc[i] = T.if_then_else(cond_buf[0] > 0, acc[i] * 2.0, acc[i])
+        for i in T.vectorized(8):
+            if T.Cast("int64", i) < n:
+                b[i] = a[i]
 
     @T.prim_func
-    def after(cond_buf: T.Tensor[(1,), T.int32]):
+    def after(cond_buf: T.Tensor[(1,), T.int32], a: T.Tensor[(8,), T.bfloat16], b: T.Tensor[(8,), T.bfloat16], n: T.int64):
         acc = T.alloc_local((8,), T.float32)
         for i in T.vectorized(8):
             # Should remain unchanged - no cast buffer needed
             acc[i] = T.if_then_else(cond_buf[0] > 0, acc[i] * T.float32(2), acc[i])
+        for i in T.vectorized(8):
+            if T.Cast("int64", i) < n:
+                b[i] = a[i]
 
     _check(before, after)
 
