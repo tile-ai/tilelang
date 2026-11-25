@@ -35,6 +35,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -65,6 +66,7 @@
 #include "buffer_alias.h"
 #include "buffer_version.h"
 #include "runtime/thread_storage_scope.h"
+#include "support/utils.h"
 #include "tir/transforms/ir_utils.h"
 #include "transform/common/attr.h"
 
@@ -220,6 +222,21 @@ struct EdgeRange {
   size_t src, dst;
   DistanceRange distances;
   bool strict;
+
+  bool operator==(const EdgeRange &other) const {
+    return src == other.src && dst == other.dst && strict == other.strict &&
+           distances.first == other.distances.first &&
+           distances.last == other.distances.last;
+  }
+};
+
+struct EdgeRangeHash {
+  size_t operator()(const EdgeRange &edge) const {
+    auto hash = support::HashCombine(edge.src, edge.dst);
+    hash = support::HashCombine(hash, edge.distances.first);
+    hash = support::HashCombine(hash, edge.distances.last);
+    return support::HashCombine(hash, edge.strict);
+  }
 };
 
 struct DepEdge {
@@ -712,6 +729,28 @@ private:
 class DepClosure {
   using Row = std::array<std::unordered_map<size_t, DistanceSet>, 2>;
 
+  // Different paths can generate the same range before it reaches the closure.
+  class Worklist {
+  public:
+    bool Empty() const { return queue_.empty(); }
+
+    void Push(const EdgeRange &edge) {
+      if (pending_.insert(edge).second)
+        queue_.push_back(edge);
+    }
+
+    EdgeRange Pop() {
+      EdgeRange edge = queue_.front();
+      queue_.pop_front();
+      pending_.erase(edge);
+      return edge;
+    }
+
+  private:
+    std::deque<EdgeRange> queue_;
+    std::unordered_set<EdgeRange, EdgeRangeHash> pending_;
+  };
+
 public:
   DepClosure() = default;
 
@@ -742,11 +781,10 @@ public:
     start.distances.last = std::min(start.distances.last, max_distance);
     if (start.distances.first > start.distances.last)
       return;
-    std::deque<EdgeRange> work;
+    Worklist work;
     Enqueue(start, work);
-    while (!work.empty()) {
-      EdgeRange edge = work.front();
-      work.pop_front();
+    while (!work.Empty()) {
+      EdgeRange edge = work.Pop();
       auto [first, last] = edge.distances;
       // Only distances zero and one can project to another epoch domain.
       for (; first <= 1 && first <= last; ++first) {
@@ -790,13 +828,13 @@ private:
     return it != row.end() && it->second.Covers(edge.distances);
   }
 
-  void Enqueue(const EdgeRange &edge, std::deque<EdgeRange> &work) const {
+  void Enqueue(const EdgeRange &edge, Worklist &work) const {
     if (!Covers(edge))
-      work.push_back(edge);
+      work.Push(edge);
   }
 
   void Extend(const EdgeRange &edge, bool forward, int max_distance,
-              std::deque<EdgeRange> &work) const {
+              Worklist &work) const {
     const Row &neighbors = forward ? outgoing_[edge.dst] : incoming_[edge.src];
     for (bool strict : {false, true}) {
       for (const auto &[site, distances] : neighbors[strict]) {
@@ -817,8 +855,7 @@ private:
     }
   }
 
-  void Insert(const EdgeRange &edge, int max_distance,
-              std::deque<EdgeRange> &work) {
+  void Insert(const EdgeRange &edge, int max_distance, Worklist &work) {
     auto &known = outgoing_[edge.src][edge.strict][edge.dst];
     if (known.Covers(edge.distances))
       return;
