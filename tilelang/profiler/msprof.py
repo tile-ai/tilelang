@@ -7,6 +7,7 @@ from collections.abc import Callable
 
 import torch
 
+from .errors import ProfileUnavailableError
 from .torch_bench import _flush_cache
 
 
@@ -267,7 +268,7 @@ def bench_with_msprof(
         kernel_profiles = _parse_ffts_profile(Path(prof.prof_if.prof_path), n_repeat)
 
     if not kernel_profiles:
-        raise RuntimeError("No profiled kernels were recorded.")
+        raise ProfileUnavailableError("No profiled kernels were recorded.")
 
     profile = _sum_profiles(list(kernel_profiles.values()))
     if detailed:

@@ -11,6 +11,9 @@ import torch
 
 from tilelang.utils.device import Event, device_synchronize as _cuda_synchronize
 
+from .errors import ProfileUnavailableError
+
+_ACL_ERROR_RT_FEATURE_NOT_SUPPORT = 207000
 _CACHE_FLUSH_ID = "tilelang::cache_flush"
 
 
@@ -29,6 +32,8 @@ def _flush_cache(cache: torch.Tensor) -> None:
         with torch.npu.device(cache.device):
             torch.npu.synchronize()
             status = _get_npu_l2_cache_flush()(None)
+            if status == _ACL_ERROR_RT_FEATURE_NOT_SUPPORT:
+                raise ProfileUnavailableError(f"aclrtDeviceL2CacheFlush failed: {status} (the driver does not support NPU L2 cache flush)")
             if status:
                 raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
     else:
