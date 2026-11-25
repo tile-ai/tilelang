@@ -13,15 +13,10 @@ namespace cann {
 
 #define TL_CANN_9_1 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
 
-#if !defined(__NPU_ARCH__) || TL_CANN_9_1
-enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
-#else
-using hf32_round_mode = ::asc_hf32_round_mode;
-#endif
-
-#if defined(__NPU_ARCH__)
 // HF32, atomic modes and scalar loads use the API names for this SDK.
 #if TL_CANN_9_1
+enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
+
 __aicore__ inline void disable_hf32() { ::asc_set_fp32_mode(); }
 
 __aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
@@ -45,6 +40,8 @@ template <typename T> __aicore__ inline T load_dev(__gm__ T *ptr) {
   return ld_dev(ptr, 0);
 }
 #else
+using hf32_round_mode = ::asc_hf32_round_mode;
+
 __aicore__ inline void disable_hf32() { ::asc_disable_hf32(); }
 
 __aicore__ inline void set_hf32_round_mode(hf32_round_mode mode) {
@@ -382,7 +379,6 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
 
 #endif // register-vector API
 
-#endif // defined(__NPU_ARCH__)
 #undef TL_CANN_9_1
 
 } // namespace cann
@@ -390,7 +386,6 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
 
 // Define each SDK spelling once. A callable object prevents argument-dependent
 // lookup from adding a competing global SDK overload.
-#if defined(__NPU_ARCH__)
 namespace tl::cann::sdk {
 #define TL_CANN_CALLABLE(attr, name)                                           \
   inline constexpr auto asc_##name = [](auto &&...args)                        \
@@ -416,9 +411,6 @@ TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
 #endif
 #undef TL_CANN_CALLABLE
 } // namespace tl::cann::sdk
-#else
-#define TL_CANN_USE_CORE_NAMES
-#endif
 #ifndef TL_CANN_USE_SIMD_NAMES
 #define TL_CANN_USE_SIMD_NAMES
 #endif
