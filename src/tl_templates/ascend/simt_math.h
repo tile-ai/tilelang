@@ -82,11 +82,26 @@ __simt_callee__ inline float atan_unit(float x) {
   return reduce ? pi * 0.25f + value : value;
 }
 
-// Both operands are magnitudes, and small <= large. Scaling the quotient
-// separately also preserves a subnormal angle from two normal operands.
-__simt_callee__ inline float ratio(uint32_t small, uint32_t large) {
+// Both operands are positive finite magnitudes, and small < large.
+__simt_callee__ inline float atan_ratio(uint32_t small, uint32_t large,
+                                        bool preserve_tiny_angle) {
   Fraction a = normalize(small), b = normalize(large);
-  return scale(a.mantissa / b.mantissa, a.exponent - b.exponent);
+  int exponent = a.exponent - b.exponent;
+  if (preserve_tiny_angle && exponent <= -126) {
+    // Here FP32 values are spaced by 2^-149. Divide in those units to avoid
+    // rounding the quotient twice. At a midpoint atan(t) is just below t.
+    int shift = exponent + 149;
+    if (shift < -1)
+      return 0.0f;
+    uint32_t ma = (bits(a.mantissa) & 0x7fffffu) | min_normal;
+    uint32_t mb = (bits(b.mantissa) & 0x7fffffu) | min_normal;
+    uint64_t numerator = uint64_t(ma) << (shift > 0 ? shift : 0);
+    uint32_t denominator = shift < 0 ? 2 * mb : mb;
+    uint32_t whole = uint32_t(numerator / denominator);
+    uint32_t remainder = uint32_t(numerator - uint64_t(whole) * denominator);
+    return from_bits(whole + (2 * remainder > denominator));
+  }
+  return atan_unit(scale(a.mantissa / b.mantissa, exponent));
 }
 } // namespace detail
 
@@ -111,9 +126,9 @@ __simt_callee__ inline float atan2f(float y, float x) {
   else if (ax == ay)
     angle = pi * 0.25f;
   else if (ay < ax)
-    angle = atan_unit(ratio(ay, ax));
+    angle = atan_ratio(ay, ax, (bits(x) & sign_bit) == 0);
   else
-    angle = pi * 0.5f - atan_unit(ratio(ax, ay));
+    angle = pi * 0.5f - atan_ratio(ax, ay, false);
   return with_sign((bits(x) & sign_bit) ? pi - angle : angle, y);
 }
 #else
