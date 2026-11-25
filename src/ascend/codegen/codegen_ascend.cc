@@ -362,7 +362,7 @@ void CodeGenTileLangAscend::Init(bool output_ssa) {
       pass_ctx->GetConfig<Bool>(tl::kEnableFastMath, Bool(false)).value();
   preamble_stream_ << "#include <tl_templates/ascend/common.h>\n";
   preamble_stream_ << "#include <tl_templates/ascend/debug.h>\n";
-  // Finish emits the SDK headers, imported source, then this declaration stream.
+  // Finish emits SDK headers, imported source, then these declarations.
   decl_stream << "TL_CANN_RESTORE_NAMES\n";
 }
 

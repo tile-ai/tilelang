@@ -424,7 +424,7 @@ TL_CANN_SIMD_NAMES(TL_CANN_SIMD)
 #endif
 
 // The generated file puts SDK headers first, then imported C++, then kernels.
-// Let imports use their own macros and restore the SDK spellings before kernels.
+// Let imports use their own macros, then restore SDK names for kernels.
 #define TL_CANN_PRAGMA(x) _Pragma(#x)
 #define TL_CANN_PUSH(name) TL_CANN_PRAGMA(push_macro(#name))
 #define TL_CANN_POP(name) TL_CANN_PRAGMA(pop_macro(#name))
