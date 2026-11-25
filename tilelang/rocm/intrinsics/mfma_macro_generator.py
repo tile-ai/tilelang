@@ -138,7 +138,7 @@ class MatrixCoreIntrinEmitter:
         self.M_DIM = 16
         self.N_DIM = 16
         if isinstance(a_dtype, str):
-            if a_dtype in ["float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz", T.int8]:
+            if a_dtype in ["float8_e4m3", "float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2", "float8_e5m2fnuz", T.int8]:
                 self.k_dim = 32
                 return
             a_dtype = DataType(a_dtype)
@@ -176,6 +176,7 @@ class MatrixCoreIntrinEmitter:
             "float32": "f32",
             "int8": "i8",
             "int32": "i32",
+            "float8_e4m3": "fp8",
             "float8_e4m3fn": "fp8",
             "float8_e4m3fnuz": "fp8",
             # ROCm treats E5M2 as BF8 in MFMA intrinsics.
