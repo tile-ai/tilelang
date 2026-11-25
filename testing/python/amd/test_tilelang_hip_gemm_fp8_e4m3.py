@@ -30,6 +30,8 @@ def _gemm(M, N, K, dtype):
 @pytest.mark.parametrize("dtype", ["float8_e4m3", "float8_e4m3fn", "float8_e4m3fnuz"])
 def test_gemm_fp8_e4m3_lower(mcpu, dtype):
     """All E4M3 names lower to the 16x16x32 fp8 MFMA (no GPU needed)."""
+    if tvm.get_global_func("target.build.tilelang_hip_without_compile", allow_missing=True) is None:
+        pytest.skip("TileLang HIP codegen is not enabled")
     target = {"kind": "hip", "mcpu": mcpu}
     with tvm.transform.PassContext(opt_level=3), tvm.target.Target(target):
         artifact = tilelang.lower(_gemm(64, 64, 32, dtype), target=target)
@@ -40,6 +42,9 @@ def test_gemm_fp8_e4m3_lower(mcpu, dtype):
 @tilelang.testing.requires_cdna
 @pytest.mark.parametrize("M, N, K", [(64, 64, 32), (128, 128, 128)])
 def test_gemm_fp8_e4m3_correctness(M, N, K):
+    arch = torch.cuda.get_device_properties(0).gcnArchName
+    if not arch.startswith(("gfx94", "gfx95")):
+        pytest.skip(f"FP8 MFMA requires gfx94x/gfx950, got {arch}")
     kernel = tilelang.compile(_gemm(M, N, K, T.float8_e4m3))
     # fp8_e4_t is the device-native E4M3 encoding (FNUZ on gfx942, OCP on gfx950).
     fp8 = getattr(torch, str(determine_fp8_type("e4m3")))
