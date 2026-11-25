@@ -86,6 +86,24 @@ def test_pto_binary_cache_hit_skips_toolchain(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
+def test_pto_toolchain_stamp_includes_selected_bisheng(monkeypatch):
+    from tilelang.contrib import bisheng, pto_toolchain
+
+    monkeypatch.setattr(pto_toolchain.shutil, "which", lambda name: "/opt/ptoas")
+    monkeypatch.setattr(pto_toolchain, "_first_output_line", lambda command: "ptoas 0.67")
+    monkeypatch.setattr(pto_toolchain, "_cann_identity", lambda: "/opt/cann (9.2.0)")
+    monkeypatch.setattr(bisheng, "get_bisheng_version", lambda: "test clang version 15.0.5")
+    pto_toolchain.toolchain_stamp.cache_clear()
+    try:
+        assert pto_toolchain.toolchain_stamp() == {
+            "ptoas": "ptoas 0.67",
+            "cann": "/opt/cann (9.2.0)",
+            "bisheng": "test clang version 15.0.5",
+        }
+    finally:
+        pto_toolchain.toolchain_stamp.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("old_toolchain", "new_toolchain"),
     [

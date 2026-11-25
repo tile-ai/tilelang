@@ -50,28 +50,42 @@ python -m pip install -r requirements-dev.txt
 USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
 ```
 
-### Device binary cache
+### Kernel and device binary caches
+
+The full JIT kernel cache and the autotune result cache include the selected
+Bisheng build identity before looking up either memory or disk entries. The
+AscendC `tvm_ffi` path also includes the standalone CCE `ld.lld` version. The
+Cython launcher is compiled and linked by Bisheng and does not require that
+standalone linker for cache lookup. PTO caches additionally include the ptoas
+and CANN identities.
+
+This prevents a toolchain upgrade behind an unchanged container image name
+from reusing an executable built with a different compiler or linker version.
+Entries written before toolchain stamps were added miss automatically; old
+entries are left intact for processes using their original cache keys.
 
 The AscendC `tvm_ffi` compilation callback caches linked `.aibin` files under
 `TILELANG_CACHE_DIR` (default: `~/.tilelang/cache`). The key includes the generated
 source, NPU architecture, compilation and linker options, TileLang version, and
-a `compiler` string formed as `bisheng version=<version line>`.
+a `compiler` string containing both the Bisheng and `ld.lld` version lines.
 
 The PTO `tvm_ffi` path uses the same cache root but stores its binaries in a
 separate `pto-binaries` namespace. Its key includes the PTODSL source, PTO
 architecture, ptoas flags, bisheng link flags, TileLang version, and a
-toolchain stamp covering the ptoas and CANN identities.
+toolchain stamp covering the ptoas, CANN, and selected Bisheng identities.
 
-The version line is read from the selected `bisheng --version` once per process.
-It preserves the compiler build time, Clang version, and revisions; the build
+The version lines are read from the selected tools with `--version` once per process.
+Bisheng's line preserves the compiler build time, Clang version, and revisions; the build
 time distinguishes releases that share the same Clang version and revisions.
 Subsequent lines such as `InstalledDir` and the package's `version.info`
 `timestamp` are not included. Include paths still participate through the
 compilation options. Restart the process after changing toolchains.
 
-This follows CUDA's device binary cache policy. The outer full JIT cache has a
-separate key and does not currently include the compiler version; an outer
-cache hit skips the device compilation callback.
+The required tools must remain available even on a warm cache hit. A failed
+Bisheng or `ld.lld` version query is reported instead of reusing an unidentified
+toolchain's artifact. These stamps track the reported tool versions, not all CANN header
+and runtime library contents. A package update that leaves those identities
+unchanged still requires a separate cache directory.
 
 ## Quick Start
 

@@ -348,6 +348,7 @@ class AutoTuner:
 
     def generate_cache_key(self, parameters: dict[str, Any], extra_parameters: dict[str, Any]) -> str | None:
         """Generate a cache key for the auto-tuning process."""
+        from tilelang.cache.kernel_cache import KernelCache
 
         # Arbitrary callbacks do not have a reliable persistent identity:
         # importable functions may serialize by name, while closures may hold
@@ -381,6 +382,9 @@ class AutoTuner:
             "configs": self.configs,
             "compile_args": hash(self.compile_args),
             "profile_args": hash(self.profile_args),
+            # Autotune results contain executable artifacts and can bypass
+            # the kernel cache entirely when restored from disk.
+            **KernelCache._get_toolchain_key(self.compile_args.target, self.compile_args.execution_backend),
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)

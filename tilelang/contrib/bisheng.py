@@ -48,6 +48,19 @@ def find_bisheng_path() -> str:
     )
 
 
+def _get_tool_version(path: str, name: str, marker: str) -> str:
+    command = [path, "--version"]
+    timeout = env.get_compile_timeout_seconds()
+    try:
+        output = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"{name} version query timed out after {timeout} seconds.\nCommand: {shlex.join(command)}") from exc
+    lines = output.strip().splitlines()
+    if not lines or marker not in lines[0]:
+        raise RuntimeError(f"Cannot determine {name} version from: {output}")
+    return lines[0].strip()
+
+
 @cache
 def get_bisheng_version() -> str:
     """Return the selected Bisheng's version line, cached for this process.
@@ -56,16 +69,7 @@ def get_bisheng_version() -> str:
     same Clang version. Ignore subsequent lines such as ``InstalledDir`` so
     relocating an identical compiler does not change its cache identity.
     """
-    command = [find_bisheng_path(), "--version"]
-    timeout = env.get_compile_timeout_seconds()
-    try:
-        output = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"Bisheng version query timed out after {timeout} seconds.\nCommand: {shlex.join(command)}") from exc
-    lines = output.strip().splitlines()
-    if not lines or "clang version " not in lines[0]:
-        raise RuntimeError(f"Cannot determine Bisheng version from: {output}")
-    return lines[0].strip()
+    return _get_tool_version(find_bisheng_path(), "Bisheng", "clang version ")
 
 
 def find_ld_lld_path() -> str:
@@ -91,6 +95,12 @@ def find_ld_lld_path() -> str:
     raise RuntimeError(
         "Cannot find ld.lld. Install the Ascend toolkit and put its bin directory in PATH, or set ASCEND_HOME_PATH/BISHENG_HOME."
     )
+
+
+@cache
+def get_ld_lld_version() -> str:
+    """Return the selected CCE linker's version line, cached for this process."""
+    return _get_tool_version(find_ld_lld_path(), "ld.lld", "LLD ")
 
 
 def normalize_options(options: str | Sequence[str] | None) -> list[str]:

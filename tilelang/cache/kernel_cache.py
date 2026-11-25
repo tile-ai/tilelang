@@ -151,6 +151,25 @@ class KernelCache:
         return base
 
     @staticmethod
+    def _get_toolchain_key(target: Target, execution_backend: str) -> dict:
+        """Stamp a resolved Ascend target before looking up any cached artifact."""
+        if not isinstance(target, Target) or target.kind.name != "ascend":
+            return {}
+
+        from tilelang.contrib import bisheng
+
+        toolchain = {"bisheng": bisheng.get_bisheng_version()}
+        if "pto" in target.keys or execution_backend == "pto":
+            from tilelang.contrib.pto_toolchain import toolchain_stamp
+
+            toolchain.update(toolchain_stamp())
+        elif execution_backend == "tvm_ffi":
+            # The Cython launcher is linked by Bisheng itself; only the
+            # AscendC tvm_ffi path invokes the standalone CCE linker.
+            toolchain["ld_lld"] = bisheng.get_ld_lld_version()
+        return {"ascend_toolchain": toolchain}
+
+    @staticmethod
     def _sanitize_path_component(component: str) -> str:
         sanitized = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in component)
         sanitized = sanitized.strip("._-")
@@ -279,6 +298,7 @@ class KernelCache:
             "pass_configs": pass_configs,
             "compile_flags": compile_flags,
             **self._get_base_key(),
+            **self._get_toolchain_key(target, execution_backend),
         }
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)

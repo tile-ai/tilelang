@@ -22,6 +22,13 @@ from tvm.target import Target
 AIBIN = AscendBinaryCache.binary_format
 
 
+@pytest.fixture(autouse=True)
+def mock_linker_version(monkeypatch):
+    from tilelang.contrib import bisheng
+
+    monkeypatch.setattr(bisheng, "get_ld_lld_version", lambda: "LLD 15.0.5")
+
+
 def _set_cache_dirs(monkeypatch, tmp_path):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
@@ -78,7 +85,8 @@ def test_ascend_binary_cache_hit_skips_bisheng_compile(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
-def test_ascend_binary_cache_separates_bisheng_builds(monkeypatch, tmp_path):
+@pytest.mark.parametrize("tool", ["bisheng", "ld_lld"])
+def test_ascend_binary_cache_separates_toolchain_builds(monkeypatch, tmp_path, tool):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.ascend import backend as ascend_backend
 
@@ -89,7 +97,8 @@ def test_ascend_binary_cache_separates_bisheng_builds(monkeypatch, tmp_path):
     first_version = f"2026-07-01T09:55:44+08:00 {version_suffix}"
     second_version = f"2026-08-27T22:23:38+08:00 {version_suffix}"
     current_version = first_version
-    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: current_version)
+    monkeypatch.setattr(ascend_backend.bisheng, "get_bisheng_version", lambda: first_version)
+    monkeypatch.setattr(ascend_backend.bisheng, f"get_{tool}_version", lambda: current_version)
     compiled_versions = []
 
     def fake_compile(*args, **kwargs):

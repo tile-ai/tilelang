@@ -190,14 +190,18 @@ def toolchain_stamp() -> dict[str, str]:
     ptoas compiles the device object with the toolchain it resolves from
     ASCEND_HOME_PATH, so the CANN identity (which includes the bisheng and
     the CCE linker inside that install, and the version ptoas gates its ABI
-    on) is recorded.
+    on) is recorded. The selected Bisheng also links the resulting fat object
+    and may be upgraded independently of that CANN installation.
     """
+    from tilelang.contrib.bisheng import get_bisheng_version
+
     ptoas_path = shutil.which("ptoas")
     if ptoas_path is None:
         raise RuntimeError("Cannot find the ptoas assembler. Install ptoas-vmi and make sure `ptoas` is on PATH.")
     return {
         "ptoas": _first_output_line([ptoas_path, "--version"]),
         "cann": _cann_identity(),
+        "bisheng": get_bisheng_version(),
     }
 
 

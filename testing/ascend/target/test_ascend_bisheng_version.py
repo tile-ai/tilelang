@@ -1,4 +1,4 @@
-"""Compiler identity used by the Ascend device binary cache."""
+"""Compiler and linker identities used by the Ascend caches."""
 
 import subprocess
 
@@ -11,9 +11,65 @@ from tilelang.env import env
 @pytest.fixture(autouse=True)
 def reset_bisheng_version_cache(monkeypatch):
     bisheng.get_bisheng_version.cache_clear()
+    bisheng.get_ld_lld_version.cache_clear()
     monkeypatch.setattr(env, "TILELANG_COMPILE_TIMEOUT_SECONDS", "")
     yield
     bisheng.get_bisheng_version.cache_clear()
+    bisheng.get_ld_lld_version.cache_clear()
+
+
+def test_ld_lld_version_preserves_build_identity_and_is_cached(monkeypatch):
+    version = "LLD 15.0.5 (build-revision) (compatible with GNU linkers)"
+    queries = []
+    monkeypatch.setattr(bisheng, "find_ld_lld_path", lambda: "/opt/cann/bin/ld.lld")
+
+    def fake_check_output(command, **kwargs):
+        queries.append(command)
+        assert kwargs == {"stderr": subprocess.STDOUT, "text": True, "timeout": None}
+        return version + "\n"
+
+    monkeypatch.setattr(bisheng.subprocess, "check_output", fake_check_output)
+    assert bisheng.get_ld_lld_version() == version
+    assert bisheng.get_ld_lld_version() == version
+    assert queries == [["/opt/cann/bin/ld.lld", "--version"]]
+
+
+@pytest.mark.parametrize("output", ["", "\n", "unknown version\n"])
+def test_ld_lld_version_rejects_unrecognized_output(monkeypatch, output):
+    monkeypatch.setattr(bisheng, "find_ld_lld_path", lambda: "/opt/cann/bin/ld.lld")
+    monkeypatch.setattr(bisheng.subprocess, "check_output", lambda *args, **kwargs: output)
+    with pytest.raises(RuntimeError, match="Cannot determine ld.lld version"):
+        bisheng.get_ld_lld_version()
+
+
+@pytest.mark.parametrize("tool", ["bisheng", "ld_lld"])
+def test_tool_version_query_failure_is_not_cached(monkeypatch, tool):
+    monkeypatch.setattr(bisheng, f"find_{tool}_path", lambda: "/opt/tool")
+    calls = []
+
+    def fail_query(command, **kwargs):
+        calls.append(command)
+        raise subprocess.CalledProcessError(1, command, "version query failed")
+
+    monkeypatch.setattr(bisheng.subprocess, "check_output", fail_query)
+    for _ in range(2):
+        with pytest.raises(subprocess.CalledProcessError):
+            getattr(bisheng, f"get_{tool}_version")()
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("tool, name", [("bisheng", "Bisheng"), ("ld_lld", "ld.lld")])
+def test_tool_version_query_timeout(monkeypatch, tool, name):
+    monkeypatch.setattr(bisheng, f"find_{tool}_path", lambda: "/opt/tool")
+    monkeypatch.setattr(env, "TILELANG_COMPILE_TIMEOUT_SECONDS", "2.5")
+
+    def timeout_query(command, **kwargs):
+        assert kwargs["timeout"] == 2.5
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(bisheng.subprocess, "check_output", timeout_query)
+    with pytest.raises(RuntimeError, match=f"{name} version query timed out after 2.5 seconds"):
+        getattr(bisheng, f"get_{tool}_version")()
 
 
 def test_bisheng_version_preserves_build_identity_and_ignores_installation_path(monkeypatch, tmp_path):
@@ -47,32 +103,4 @@ def test_bisheng_version_rejects_unrecognized_output(monkeypatch, output):
     monkeypatch.setattr(bisheng, "find_bisheng_path", lambda: "/opt/bisheng/bin/bisheng")
     monkeypatch.setattr(bisheng.subprocess, "check_output", lambda *args, **kwargs: output)
     with pytest.raises(RuntimeError, match="Cannot determine Bisheng version"):
-        bisheng.get_bisheng_version()
-
-
-def test_bisheng_version_query_failure_is_not_cached(monkeypatch):
-    monkeypatch.setattr(bisheng, "find_bisheng_path", lambda: "/opt/bisheng/bin/bisheng")
-    calls = []
-
-    def fail_query(command, **kwargs):
-        calls.append(command)
-        raise subprocess.CalledProcessError(1, command, "version query failed")
-
-    monkeypatch.setattr(bisheng.subprocess, "check_output", fail_query)
-    for _ in range(2):
-        with pytest.raises(subprocess.CalledProcessError):
-            bisheng.get_bisheng_version()
-    assert len(calls) == 2
-
-
-def test_bisheng_version_query_timeout(monkeypatch):
-    monkeypatch.setattr(bisheng, "find_bisheng_path", lambda: "/opt/bisheng/bin/bisheng")
-    monkeypatch.setattr(env, "TILELANG_COMPILE_TIMEOUT_SECONDS", "2.5")
-
-    def timeout_query(command, **kwargs):
-        assert kwargs["timeout"] == 2.5
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-    monkeypatch.setattr(bisheng.subprocess, "check_output", timeout_query)
-    with pytest.raises(RuntimeError, match="Bisheng version query timed out after 2.5 seconds"):
         bisheng.get_bisheng_version()
