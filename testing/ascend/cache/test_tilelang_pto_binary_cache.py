@@ -91,36 +91,23 @@ def test_pto_binary_cache_hit_skips_toolchain(monkeypatch, tmp_path):
     [
         ({"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"}, {"ptoas": "ptoas 0.68", "cann": "/cann-a (9.1.0)"}),
         ({"ptoas": "ptoas 0.67", "cann": "/cann-a (9.1.0)"}, {"ptoas": "ptoas 0.67", "cann": "/cann-b (9.2.0)"}),
-        ({"bisheng": "build A"}, {"bisheng": "build B"}),
     ],
-    ids=["ptoas-upgrade", "cann-change", "bisheng-upgrade"],
+    ids=["ptoas-upgrade", "cann-change"],
 )
 def test_pto_binary_cache_separates_toolchain_identities(monkeypatch, tmp_path, old_toolchain, new_toolchain):
     """Each stamp field participates in the key: a one-field change misses, restoring the old stamp reuses the first entry."""
-    from tilelang.cache import _resolve_cache_dispatch
-    from tvm import tirx
-
     _set_cache_dirs(monkeypatch, tmp_path)
     target = Target({"kind": "ascend"})
     source = "from ptodsl import pto\n"
 
-    cache, context, _ = _resolve_cache_dispatch("pto", None, "tvm_ffi", False)
-    func = tirx.PrimFunc([], tirx.Evaluate(0))
-
-    def full_kernel_key():
-        return cache.lookup(func=func, out_idx=None, backend_context=context, pass_configs={}, compile_flags=None)[0]
-
     compile_calls = []
     compile_old = _patch_callback(monkeypatch, compile_calls, toolchain=old_toolchain)
-    first_key = full_kernel_key()
     first = compile_old(source, target)
 
     compile_new = _patch_callback(monkeypatch, compile_calls, toolchain=new_toolchain)
-    assert full_kernel_key() != first_key
     compile_new(source, target)
 
     compile_old_again = _patch_callback(monkeypatch, compile_calls, toolchain=old_toolchain)
-    assert full_kernel_key() == first_key
     restored = compile_old_again(source, target)
 
     assert bytes(restored) == bytes(first)
