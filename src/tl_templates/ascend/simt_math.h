@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <version/asc_devkit_version.h>
 
+// The host pass also reads this header, but the SDK declares hexp2 and
+// hexp10 only for the device pass.
+#if defined(__NPU_ARCH__)
 namespace tl::cann::simt {
 
 #define TL_SIMT_MATH_91                                                        \
@@ -430,3 +433,6 @@ TL_CANN_SIMT_MATH_9_1_ONLY_NAMES(TL_CANN_USE_NATIVE)
 
 #define TL_CANN_BIND_MATH(name) using ::tl::cann::simt::name;
 #define TL_CANN_USE_SIMT_MATH_NAMES TL_CANN_SIMT_MATH_NAMES(TL_CANN_BIND_MATH)
+#else
+#define TL_CANN_USE_SIMT_MATH_NAMES
+#endif // defined(__NPU_ARCH__)
