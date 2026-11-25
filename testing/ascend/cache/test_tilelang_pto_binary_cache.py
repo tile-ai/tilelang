@@ -50,11 +50,9 @@ def _patch_callback(monkeypatch, compile_calls, toolchain=None):
     if toolchain is None:
         toolchain = {}
     monkeypatch.setattr(pto_toolchain.shutil, "which", lambda name: "/tools/ptoas")
-    monkeypatch.setattr(pto_toolchain, "_first_output_line", lambda command: toolchain.get("ptoas", "ptoas test"))
+    monkeypatch.setattr(pto_toolchain, "_ptoas_version", lambda path: toolchain.get("ptoas", "ptoas test"))
     monkeypatch.setattr(pto_toolchain, "_cann_identity", lambda: toolchain.get("cann", "cann test"))
     monkeypatch.setattr(pto_toolchain.bisheng, "get_bisheng_version", lambda: toolchain.get("bisheng", "bisheng test"))
-    # Each lookup observes the versions a fresh process would probe.
-    monkeypatch.setattr(pto_toolchain, "toolchain_stamp", pto_toolchain.toolchain_stamp.__wrapped__)
     return ascend_backend.tilelang_callback_pto_compile
 
 

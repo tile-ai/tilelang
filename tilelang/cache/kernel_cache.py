@@ -430,18 +430,16 @@ class KernelCache:
         verbose: bool = False,
     ) -> tuple[str, JITKernel | None]:
         """Look up a kernel in memory and disk caches without compiling on miss."""
-        execution_backend = backend_context.execution_backend.name
-        get_toolchain = backend_context.module.kernel_cache_toolchain
         key = self._generate_key(
             func=func,
             out_idx=out_idx,
-            execution_backend=execution_backend,
+            execution_backend=backend_context.execution_backend.name,
             args=args,
             target=backend_context.target,
             target_host=backend_context.target_host,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
-            toolchain=get_toolchain(execution_backend, pass_configs or {}) if get_toolchain else None,
+            toolchain=backend_context.toolchain_stamp(pass_configs),
         )
         if verbose:
             self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")

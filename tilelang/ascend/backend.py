@@ -12,14 +12,6 @@ from tilelang.transform import PassConfigKey
 from . import codegen, execution_backend, pipeline
 
 
-def _ascend_toolchain() -> dict[str, str]:
-    stamp = {"compiler": f"bisheng version={bisheng.get_bisheng_version()}"}
-    cann_version = bisheng.get_cann_version(bisheng.get_cann_home())
-    if cann_version:
-        stamp["cann_version"] = cann_version
-    return stamp
-
-
 def tilelang_callback_ascend_compile(code, target, pass_config=None):
     """Compile AscendC source into a cached, executable CCE ELF."""
     cfg = pass_config or {}
@@ -41,7 +33,7 @@ def tilelang_callback_ascend_compile(code, target, pass_config=None):
         compile_format=compile_format,
         options=compile_options,
         linker_options=linker_options,
-        **_ascend_toolchain(),
+        toolchain=bisheng.toolchain_stamp(),
     )
     cached_binary = AscendBinaryCache.load(cache_key, compile_format)
     if cached_binary is not None:
@@ -94,7 +86,7 @@ BACKEND = register_backend(
         pipelines={"ascend": pipeline.ascend_pipeline},
         device_codegens={"ascend": codegen.ASCEND_CODEGEN},
         execution_backends=execution_backend.ASCEND_EXECUTION_BACKENDS,
-        kernel_cache_toolchain=lambda _backend, _cfg: _ascend_toolchain(),
+        toolchain_stamp=lambda _backend, _cfg: bisheng.toolchain_stamp(),
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_ascend_compile": tilelang_callback_ascend_compile},
     )
@@ -108,7 +100,7 @@ PTO_BACKEND = register_backend(
         pipelines={"ascend": pipeline.ascend_pipeline},
         device_codegens={"ascend": codegen.PTO_CODEGEN},
         execution_backends=execution_backend.PTO_EXECUTION_BACKENDS,
-        kernel_cache_toolchain=lambda _backend, _cfg: pto_toolchain.toolchain_stamp(),
+        toolchain_stamp=lambda _backend, _cfg: pto_toolchain.toolchain_stamp(),
         host_codegens=STANDARD_HOST_CODEGENS,
         callbacks={"tilelang_callback_pto_compile": tilelang_callback_pto_compile},
     )

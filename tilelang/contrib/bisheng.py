@@ -112,6 +112,14 @@ def get_cann_version(home: str) -> str:
     return ""
 
 
+def toolchain_stamp() -> dict[str, str]:
+    """Identity of the active AscendC toolchain for cache keys."""
+    stamp = {"bisheng": get_bisheng_version()}
+    if cann := get_cann_version(get_cann_home()):
+        stamp["cann"] = cann
+    return stamp
+
+
 def find_ld_lld_path() -> str:
     """Find the CCE-capable ``ld.lld`` shipped with the Ascend toolkit."""
     candidates: list[Path] = []

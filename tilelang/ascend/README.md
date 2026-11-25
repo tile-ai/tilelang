@@ -54,9 +54,9 @@ USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
 
 The AscendC `tvm_ffi` compilation callback caches linked `.aibin` files under
 `TILELANG_CACHE_DIR` (default: `~/.tilelang/cache`). The key includes the generated
-source, NPU architecture, compilation and linker options, TileLang version,
-Bisheng version line, and the CANN release when the toolkit publishes it
-under `ASCEND_HOME_PATH` or `ASCEND_TOOLKIT_HOME`.
+source, NPU architecture, compilation and linker options, TileLang version, and a
+toolchain stamp covering the Bisheng version line and the CANN release when the
+toolkit publishes it under `ASCEND_HOME_PATH` or `ASCEND_TOOLKIT_HOME`.
 
 The PTO `tvm_ffi` path uses the same cache root but stores its binaries in a
 separate `pto-binaries` namespace. Its key includes the PTODSL source, PTO

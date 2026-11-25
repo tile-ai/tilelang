@@ -39,7 +39,7 @@ class BackendModule:
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
     # Identity of the toolchain used by this execution backend and pass configuration.
-    kernel_cache_toolchain: Callable[[str, dict], dict[str, str]] | None = None
+    toolchain_stamp: Callable[[str, Mapping[str, object]], dict[str, str]] | None = None
 
     def __post_init__(self) -> None:
         target_kinds = tuple(self.target_kinds)
@@ -231,6 +231,13 @@ class BackendContext:
         """Generate host code for the resolved host target."""
 
         return self.module.codegen_host(mod, self.target_host)
+
+    def toolchain_stamp(self, pass_configs: Mapping[str, object] | None = None) -> dict[str, str] | None:
+        """Return the active toolchain identity for cache keys, when declared."""
+
+        if self.module.toolchain_stamp is None:
+            return None
+        return self.module.toolchain_stamp(self.execution_backend.name, pass_configs or {})
 
 
 _BACKENDS: dict[str, BackendModule] = {}

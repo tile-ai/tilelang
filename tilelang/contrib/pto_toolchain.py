@@ -183,6 +183,10 @@ def _first_output_line(command: list[str]) -> str:
 
 
 @functools.cache
+def _ptoas_version(ptoas_path: str) -> str:
+    return _first_output_line([ptoas_path, "--version"])
+
+
 def toolchain_stamp() -> dict[str, str]:
     """Identity of the tools that produce a PTO aibin, for cache keys.
 
@@ -193,7 +197,7 @@ def toolchain_stamp() -> dict[str, str]:
     if ptoas_path is None:
         raise RuntimeError("Cannot find the ptoas assembler. Install ptoas-vmi and make sure `ptoas` is on PATH.")
     return {
-        "ptoas": _first_output_line([ptoas_path, "--version"]),
+        "ptoas": _ptoas_version(ptoas_path),
         "cann": _cann_identity(),
         "bisheng": bisheng.get_bisheng_version(),
     }
