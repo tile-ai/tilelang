@@ -2401,6 +2401,12 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
     PrintConst(const_f32.get(), os, p);
     os << ')';
     return;
+  } else if (op->dtype.is_float8_e5m2fnuz() || op->dtype.is_float8_e5m2()) {
+    os << "fp8_e5_t(";
+    FloatImm const_f32 = FloatImm(DataType::Float(32), op->value);
+    PrintConst(const_f32.get(), os, p);
+    os << ')';
+    return;
   } else if (op->dtype.is_float4_e2m1fn()) {
     // fp4_e2_t only has a raw-byte constructor, so build the constant from a
     // float at runtime via the device helper rather than the `T(<float>)` form

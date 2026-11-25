@@ -408,3 +408,34 @@ __device__ fp8_e4_16_t make_fp8_e4_16_t(fp8_e4_t x0, fp8_e4_t x1, fp8_e4_t x2,
   res.y = res_y;
   return res;
 }
+
+__device__ fp8_e5_4_t make_fp8_e5_4_t(fp8_e5_t x, fp8_e5_t y, fp8_e5_t z,
+                                      fp8_e5_t w) {
+  fp8_e5_4_t res;
+  res.x = x;
+  res.y = y;
+  res.z = z;
+  res.w = w;
+  return res;
+}
+
+__device__ fp8_e5_8_t make_fp8_e5_8_t(fp8_e5_t x, fp8_e5_t y, fp8_e5_t z,
+                                      fp8_e5_t w, fp8_e5_t v, fp8_e5_t u,
+                                      fp8_e5_t t, fp8_e5_t s) {
+  fp8_e5_8_t res;
+  res.x = make_fp8_e5_4_t(x, y, z, w);
+  res.y = make_fp8_e5_4_t(v, u, t, s);
+  return res;
+}
+
+__device__ fp8_e5_16_t make_fp8_e5_16_t(fp8_e5_t x0, fp8_e5_t x1, fp8_e5_t x2,
+                                        fp8_e5_t x3, fp8_e5_t x4, fp8_e5_t x5,
+                                        fp8_e5_t x6, fp8_e5_t x7, fp8_e5_t y0,
+                                        fp8_e5_t y1, fp8_e5_t y2, fp8_e5_t y3,
+                                        fp8_e5_t y4, fp8_e5_t y5, fp8_e5_t y6,
+                                        fp8_e5_t y7) {
+  fp8_e5_16_t res;
+  res.x = make_fp8_e5_8_t(x0, x1, x2, x3, x4, x5, x6, x7);
+  res.y = make_fp8_e5_8_t(y0, y1, y2, y3, y4, y5, y6, y7);
+  return res;
+}
