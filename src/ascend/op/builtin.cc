@@ -15,6 +15,9 @@ namespace tl {
 using namespace tirx;
 
 TVM_REGISTER_PASS_CONFIG_OPTION(kEnableAutoSchedule, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kEnableSuperKernel, Bool);
+TVM_REGISTER_PASS_CONFIG_OPTION(kSuperKernelNumVariants, Integer);
+TVM_REGISTER_PASS_CONFIG_OPTION(kSuperKernelDisableDcci, Bool);
 
 // Emitted by tilelang.ascend.language.assume_conflict/assume_no_conflict and
 // consumed by src/ascend/transform/normalize_conflict_hints.cc, so it lives
