@@ -1,5 +1,8 @@
 #pragma once
 
+// Device templates include the SDK version header before using this predicate.
+#define TL_CANN_9_1 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
+
 // Native SDK names shared by device templates and Ascend codegen.
 
 // Fixed-arity core APIs only route explicit global calls with that arity.
@@ -19,6 +22,8 @@
 
 // Each renamed register API has a public name and a CANN 9.1 name.
 // WITH_RESULT also supplies the missing value-returning overload.
+// Generated VF code can call asc_update_addr_reg_b16 directly, while simd_inst
+// helpers call names such as asc_loadalign_brc_elem. Both use these mappings.
 // Pass names directly so consumers can paste asc_ before import macros expand.
 #define TL_CANN_RENAMED_REG_NAMES(FORWARD, WITH_RESULT)                        \
   FORWARD(update_addr_reg_b8, asc_create_iter_reg_b8)                          \

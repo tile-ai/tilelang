@@ -929,12 +929,14 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
   decl_stream << ") {\n  TL_CANN_USE_CORE_NAMES\n";
   if (vf_mode == VFMode::kSimd) {
     decl_stream << "  TL_CANN_USE_SIMD_NAMES\n";
-  } else {
+  } else if (vf_mode == VFMode::kSimt) {
     if (!has_simt_math_included_) {
       preamble_stream_ << "#include <tl_templates/ascend/simt_math.h>\n";
       has_simt_math_included_ = true;
     }
     decl_stream << "  TL_CANN_USE_SIMT_MATH_NAMES\n";
+  } else {
+    LOG(FATAL) << "Unexpected VF helper mode: " << VFModeName(vf_mode);
   }
   decl_stream << helper_body << "}\n\n";
 }

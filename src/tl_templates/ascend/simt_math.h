@@ -11,12 +11,11 @@
 #if defined(__NPU_ARCH__)
 namespace tl::cann::simt {
 
-#define TL_SIMT_MATH_9_1 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
 #define TL_SIMT_MATH_9_2_0_OR_9_3_0                                            \
   (ASC_DEVKIT_MAJOR == 9 &&                                                    \
    (ASC_DEVKIT_MINOR == 2 || ASC_DEVKIT_MINOR == 3) && ASC_DEVKIT_PATCH == 0)
 
-#if TL_SIMT_MATH_9_1 || TL_SIMT_MATH_9_2_0_OR_9_3_0
+#if TL_CANN_9_1 || TL_SIMT_MATH_9_2_0_OR_9_3_0
 namespace detail {
 __simt_callee__ inline uint32_t bits(float x) {
   return __builtin_bit_cast(uint32_t, x);
@@ -135,7 +134,7 @@ __simt_callee__ inline float atan2f(float y, float x) {
 using ::atan2f;
 #endif
 
-#if TL_SIMT_MATH_9_1
+#if TL_CANN_9_1
 __simt_callee__ inline float copysignf(float x, float y) {
   return detail::with_sign(x, y);
 }
@@ -276,7 +275,7 @@ __simt_callee__ inline float tanhf(float x) {
 
 #endif
 
-#if TL_SIMT_MATH_9_1 || TL_SIMT_MATH_9_2_0_OR_9_3_0
+#if TL_CANN_9_1 || TL_SIMT_MATH_9_2_0_OR_9_3_0
 namespace detail {
 // Keep a product's rounding error until after reduction to a small exponent.
 // A one-ULP error in the unreduced exponent can cost many ULPs in pow/exp10.
@@ -399,7 +398,7 @@ __simt_callee__ inline float powf(float x, float y) {
 using ::powf;
 #endif
 
-#if TL_SIMT_MATH_9_1
+#if TL_CANN_9_1
 __simt_callee__ inline float exp2f(float x) {
   if (::isnan(x))
     return x;
@@ -441,7 +440,6 @@ TL_CANN_SIMT_MATH_9_1_ONLY_NAMES(TL_CANN_USE_NATIVE)
 #undef TL_CANN_USE_NATIVE
 #endif
 
-#undef TL_SIMT_MATH_9_1
 #undef TL_SIMT_MATH_9_2_0_OR_9_3_0
 } // namespace tl::cann::simt
 

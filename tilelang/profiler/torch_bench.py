@@ -26,21 +26,18 @@ def _get_npu_l2_cache_flush():
     return flush
 
 
-def _allocate_cache(device, size_mb: int) -> torch.Tensor:
-    numel = size_mb * 1024 * 1024 // 4
-    if torch.device(device).type == "npu" and _get_npu_l2_cache_flush() is not None:
-        numel = 0
-    return torch.empty(numel, dtype=torch.int32, device=device)
-
-
 def _flush_cache(cache: torch.Tensor) -> None:
-    if cache.device.type == "npu" and (flush := _get_npu_l2_cache_flush()) is not None:
+    if cache.device.type == "npu":
+        flush = _get_npu_l2_cache_flush()
+        if flush is None:
+            # Older runtimes can still benchmark without flushing L2.
+            return
         with torch.npu.device(cache.device):
             torch.npu.synchronize()
             status = flush(None)
             if status:
                 raise RuntimeError(f"aclrtDeviceL2CacheFlush failed: {status}")
-    elif cache.device.type != "npu" or cache.numel():
+    else:
         cache.view(-1, 4096).sum(dim=1, dtype=cache.dtype)
 
 

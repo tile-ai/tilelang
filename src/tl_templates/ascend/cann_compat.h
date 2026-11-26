@@ -11,8 +11,6 @@
 namespace tl {
 namespace cann {
 
-#define TL_CANN_9_1 (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR == 1)
-
 // HF32, atomic modes and scalar loads use the API names for this SDK.
 #if TL_CANN_9_1
 enum class hf32_round_mode { NEAREST_AWAY, NEAREST_EVEN };
@@ -378,8 +376,6 @@ __simd_callee__ inline void storealign_postupdate(Args &&...args)
 }
 
 #endif // register-vector API
-
-#undef TL_CANN_9_1
 
 } // namespace cann
 } // namespace tl
