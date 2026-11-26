@@ -275,8 +275,12 @@ def copy(  # noqa: A001
         dst: Destination memory region.
         coalesced_width (Optional[int], keyword-only): Width for coalesced
             memory access. Defaults to None.
-        transpose (bool, keyword-only): Ascend GM→L1 only. Emit dn2nz (which
-            transposes the N/D mapping) instead of nd2nz. Defaults to False.
+        transpose (bool, keyword-only): On GM→L1, ``True`` swaps the N/D
+            mapping and selects dn2nz instead of nd2nz (the instruction
+            choice is reversed for packed scale-factor layouts). On L1→L0A/L0B
+            data loads, differing source and destination C0 axes select a
+            transposing load by default. ``True`` reverses that choice.
+            L0 scale-factor loads require ``False``. Defaults to ``False``.
         l0_pitch (int | PrimExpr | None, keyword-only): L0 matrix pitch in
             16-element M/N fractal blocks, not bytes or an inter-block gap.
             For L1→L0A/L0B, overrides the destination pitch; for L0C→UB/GM,
