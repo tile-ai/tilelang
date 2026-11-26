@@ -1,10 +1,12 @@
+import pytest
+
 import tilelang.language as T
 import tilelang.testing
 from tilelang.engine.lower import lower
 from tilelang.cuda.target import normalize_cutedsl_target
 
 
-def _lower_cutedsl_scan(op_name):
+def _lower_cutedsl_scan(op_name, threads):
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_80"})
     assert target is not None
 
@@ -12,7 +14,7 @@ def _lower_cutedsl_scan(op_name):
 
         @T.prim_func
         def prog(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-            with T.Kernel(1, threads=32):
+            with T.Kernel(1, threads=threads):
                 A_shared = T.alloc_shared((32,), "float32")
                 T.copy(A, A_shared)
                 T.cumsum(A_shared, dim=0)
@@ -22,7 +24,7 @@ def _lower_cutedsl_scan(op_name):
 
         @T.prim_func
         def prog(A: T.Tensor((32,), "float32"), B: T.Tensor((32,), "float32")):
-            with T.Kernel(1, threads=32):
+            with T.Kernel(1, threads=threads):
                 A_shared = T.alloc_shared((32,), "float32")
                 T.copy(A, A_shared)
                 T.cummax(A_shared, dim=0)
@@ -36,15 +38,17 @@ def _lower_cutedsl_scan(op_name):
 
 
 @tilelang.testing.requires_cutedsl(support_required="compile-only")
-def test_cutedsl_codegen_supports_cumsum():
-    artifact = _lower_cutedsl_scan("cumsum")
-    assert "tl.CumSum1D(32, False, 0).run" in artifact.kernel_source
+@pytest.mark.parametrize("threads", [32, 96])
+def test_cutedsl_codegen_supports_cumsum(threads):
+    artifact = _lower_cutedsl_scan("cumsum", threads)
+    assert f"tl.CumSum1D({threads}, False, 0).run" in artifact.kernel_source
 
 
 @tilelang.testing.requires_cutedsl(support_required="compile-only")
-def test_cutedsl_codegen_supports_cummax():
-    artifact = _lower_cutedsl_scan("cummax")
-    assert "tl.CumMax1D(32, False, 0).run" in artifact.kernel_source
+@pytest.mark.parametrize("threads", [32, 96])
+def test_cutedsl_codegen_supports_cummax(threads):
+    artifact = _lower_cutedsl_scan("cummax", threads)
+    assert f"tl.CumMax1D({threads}, False, 0).run" in artifact.kernel_source
 
 
 if __name__ == "__main__":
