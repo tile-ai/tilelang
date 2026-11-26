@@ -104,9 +104,47 @@ def test_ascend_binary_cache_separates_bisheng_builds(monkeypatch, tmp_path):
         binary = ascend_backend.tilelang_callback_ascend_compile(source, target)
         assert bytes(binary) == current_version.encode()
 
-    assert compiled_versions == [first_version, second_version]
+    home = tmp_path / "upgraded-toolkit"
+    (home / "compiler").mkdir(parents=True)
+    (home / "compiler" / "version.info").write_text("Version=test-release\n")
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(home))
+    ascend_backend.tilelang_callback_ascend_compile(source, target)
+    assert compiled_versions == [first_version, second_version, first_version]
     cache_files = list((tmp_path / "cache").glob(f"*/ascend-binaries/*/kernel.{AIBIN}"))
-    assert len(cache_files) == 2
+    assert len(cache_files) == 3
+
+
+@pytest.mark.parametrize("backend", ["tvm_ffi", "cython"])
+def test_full_kernel_cache_tracks_ascend_toolchain(monkeypatch, tmp_path, backend):
+    from tilelang.cache import _resolve_cache_dispatch
+    from tilelang.contrib import bisheng
+    from tvm import tirx
+
+    _set_cache_dirs(monkeypatch, tmp_path)
+    cache, context, _ = _resolve_cache_dispatch("ascend", None, backend, False)
+    func = tirx.PrimFunc([], tirx.Evaluate(0))
+    monkeypatch.setattr(bisheng, "get_bisheng_version", lambda: version)
+
+    def lookup_key():
+        key, _ = cache.lookup(func=func, out_idx=None, backend_context=context, pass_configs={}, compile_flags=None)
+        return key
+
+    home = tmp_path / "toolkit"
+    (home / "compiler").mkdir(parents=True)
+    version_file = home / "compiler" / "version.info"
+    version_file.write_text("Version=9.1\n")
+    monkeypatch.setenv("ASCEND_HOME_PATH", str(home))
+
+    version = "bisheng build A"
+    first = lookup_key()
+    version = "bisheng build B"
+    assert lookup_key() != first
+    version = "bisheng build A"
+    assert lookup_key() == first
+    version_file.write_text("Version=9.2\n")
+    # A new process re-reads the release after an in-place toolkit upgrade.
+    bisheng.get_cann_version.cache_clear()
+    assert lookup_key() != first
 
 
 def test_ascend_binary_cache_corrupted_entry_raises(monkeypatch, tmp_path):

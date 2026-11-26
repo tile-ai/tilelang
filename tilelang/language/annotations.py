@@ -121,12 +121,14 @@ def annotate_host_mapped_buffers(*buffers):
             with T.Kernel(T.ceildiv(N, 128), threads=128) as block:
                 ...
 
-    Currently supported by the CUDA Cython and TVM-FFI launchers. Annotated
+    Supported by the CUDA and Ascend Cython and TVM-FFI launchers. Annotated
     buffers must be supplied explicitly as CPU tensors with registered/mapped
-    storage (for example, PyTorch tensors allocated with ``pin_memory=True``).
+    storage. On Ascend, ``pin_memory=True`` additionally requires host mapping,
+    e.g. ``PYTORCH_NPU_ALLOC_CONF=pinned_mem_register:True`` before torch_npu
+    initialization, or explicit registration with the runtime.
     Other tensor checks remain enabled. This annotation does not allocate,
     register, copy, or synchronize memory. The caller must keep the storage
-    and mapping alive until GPU work completes, and throughout graph replay,
+    and mapping alive until device work completes, and throughout graph replay,
     and synchronize before accessing or reusing that storage on the CPU.
 
     The contract applies to the whole function, even when this declaration is

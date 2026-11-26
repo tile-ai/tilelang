@@ -981,7 +981,7 @@ void TVMFFIABIBuilder::BindDLTensors(
         TVMArrayGet(DataType::Int(32), handle, builtin::kDLTensorDeviceId),
         make_zero(DataType::Int(32)));
 
-    // Host storage has no CUDA device id. Only device-resident parameters
+    // Host storage has no execution device id. Only device-resident parameters
     // participate in the execution-device consistency check.
     bool host_mapped = host_mapped_buffers.count(buffer->data.get());
     if (!host_mapped) {
@@ -1017,9 +1017,14 @@ void TVMFFIABIBuilder::BindDLTensors(
           TVMArrayGet(DataType::Handle(), handle, builtin::kDLTensorData),
           make_zero(DataType::Handle()));
       if (host_mapped) {
-        data_ptr =
-            Call(DataType::Handle(), builtin::tvm_call_packed(),
-                 {StringImm("tl.cuda.get_host_mapped_pointer"), data_ptr});
+        const auto *type = device_type.as<IntImmNode>();
+        ICHECK(type && (type->value == kDLCUDA || type->value == kDLExtDev))
+            << "Host-mapped buffers require a CUDA or Ascend device";
+        const char *host_mapped_pointer_func =
+            type->value == kDLCUDA ? "tl.cuda.get_host_mapped_pointer"
+                                   : "tl.ascend.get_host_mapped_pointer";
+        data_ptr = Call(DataType::Handle(), builtin::tvm_call_packed(),
+                        {StringImm(host_mapped_pointer_func), data_ptr});
       }
       BindNullable(buffer->data, data_ptr, arg_name + ".data", true, is_null);
 

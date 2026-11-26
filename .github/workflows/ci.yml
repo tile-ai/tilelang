@@ -578,9 +578,73 @@ jobs:
           python -m pip install -v -r requirements-test.txt pybind11==2.12.0
           python -m pip install -v .
 
+      - name: Replace CANN PTOAS with PyPI PTOAS
+        id: ptoas
+        if: ${{ matrix.backend.target == 'pto' && steps.ascend-build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source .venv/bin/activate
+
+          python - <<'PY'
+          import platform
+          import sys
+
+          assert sys.version_info[:2] == (3, 12), sys.version
+          assert platform.machine() == "x86_64", platform.machine()
+          PY
+
+          CANN_HOME="${ASCEND_HOME_PATH:-${ASCEND_TOOLKIT_HOME:-}}"
+          PTOAS_UNINSTALL="${CANN_HOME}/share/info/pto_as/script/uninstall.sh"
+          if [[ ! -x "${PTOAS_UNINSTALL}" ]]; then
+            echo "Could not find the CANN PTOAS component uninstaller (ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-unset}, ASCEND_TOOLKIT_HOME=${ASCEND_TOOLKIT_HOME:-unset})." >&2
+            exit 1
+          fi
+
+          echo "Removing only the CANN PTOAS component from ${CANN_HOME}."
+          "${PTOAS_UNINSTALL}" --quiet
+
+          # Use the configured package index and its latest compatible release.
+          python -m pip install --upgrade \
+            --no-deps \
+            --only-binary=:all: \
+            ptoas
+
+          python - <<'PY'
+          import importlib
+          import importlib.metadata
+          import pathlib
+          import shutil
+          import subprocess
+          import sys
+
+          prefix = pathlib.Path(sys.prefix).resolve()
+          executable_path = shutil.which("ptoas")
+          assert executable_path is not None, "ptoas executable was not installed"
+          executable = pathlib.Path(executable_path).resolve()
+          installed_version = importlib.metadata.version("ptoas")
+          print(f"ptoas package version: {installed_version}")
+          assert executable.is_relative_to(prefix), executable
+          print(f"ptoas executable: {executable}")
+          cli_version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+          assert cli_version == f"ptoas {installed_version}", cli_version
+          print(cli_version)
+          for module_name in (
+              "ptoas",
+              "ptoas._core",
+              "ptodsl",
+              "ptoas.mlir.ir",
+              "ptoas.mlir._mlir_libs._mlir",
+          ):
+              module = importlib.import_module(module_name)
+              module_path = pathlib.Path(module.__file__).resolve()
+              assert module_path.is_relative_to(prefix), (module_name, module_path)
+              print(f"{module_name}: {module_path}")
+          PY
+
       - name: Run ${{ matrix.backend.name }} examples
         id: backend-examples
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' && (matrix.backend.target != 'pto' || steps.ptoas.outcome == 'success') }}
         shell: bash
         env:
           TILELANG_DEFAULT_TARGET: ${{ matrix.backend.target }}
@@ -591,7 +655,7 @@ jobs:
 
       - name: Run ${{ matrix.backend.name }} unit tests
         id: backend-unit-tests
-        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.ascend-build.outcome == 'success' && (matrix.backend.target != 'pto' || steps.ptoas.outcome == 'success') }}
         shell: bash
         env:
           TEST_MARKERS: ${{ matrix.backend.unit_markers }}
@@ -605,6 +669,7 @@ jobs:
         env:
           BACKEND_NAME: ${{ matrix.backend.name }}
           BUILD_RESULT: ${{ steps.ascend-build.outcome }}
+          PTOAS_RESULT: ${{ steps.ptoas.outcome }}
           EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
           UNIT_RESULT: ${{ steps.backend-unit-tests.outcome }}
         run: |
@@ -614,6 +679,7 @@ jobs:
             echo "| Step | Result |"
             echo "| --- | --- |"
             echo "| Build | ${BUILD_RESULT} |"
+            echo "| PTOAS replacement | ${PTOAS_RESULT} |"
             echo "| ${BACKEND_NAME} examples | ${EXAMPLES_RESULT} |"
             echo "| Unit tests | ${UNIT_RESULT} |"
           } >> "${GITHUB_STEP_SUMMARY}"
