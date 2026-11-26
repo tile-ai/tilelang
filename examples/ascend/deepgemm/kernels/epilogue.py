@@ -84,7 +84,7 @@ def zero_empty_groups(gm_d, output, grouped_layout, block_idx, sid, config):
 
 @T.macro
 def quantize_fp8(values, output, scales):
-    """BF16-round, quantize per K32, and pack two UE8M0 exponents per int16.
+    """BF16-round, quantize per 32 elements along N, and pack two UE8M0 exponents per int16.
 
     Keep the reference's two passes: all scales are written before values are
     packed in place, so output never overwrites a later reduction's input.
