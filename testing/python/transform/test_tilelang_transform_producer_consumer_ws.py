@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 import tilelang
 import tilelang.language as T
 import tilelang.testing
@@ -910,6 +912,48 @@ def test_tiled_ws_wide_linear_smem_three_stages():
     assert "cp_async" not in src
     assert re.search(r"for \(int \w+ = 0; \w+ < 3; \+\+\w+\) \{\n\s*tl::tma_load\(", src)
     _run_wide_linear_reduce(kernel, 48, 2, 768, "float32")
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("deferred_commit", [False, True])
+def test_tiled_ws_async_gemm_releases_stage_after_completion_wait(deferred_commit):
+    """Back-pressure barrier arrive must follow the async GEMM's completion wait."""
+
+    @T.prim_func
+    def tcgen05_pipelined(
+        A: T.Tensor((128, 256), T.bfloat16),
+        B: T.Tensor((128, 256), T.bfloat16),
+        C: T.Tensor((128, 128), T.bfloat16),
+    ):
+        with T.Kernel(1, 1, threads=256):
+            A_shared = T.alloc_shared((128, 128), T.bfloat16)
+            B_shared = T.alloc_shared((128, 128), T.bfloat16)
+            C_tmem = T.alloc_tmem((128, 128), T.float32)
+            mbar = T.alloc_barrier(1)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+            for k in T.Pipelined(2, num_stages=2):
+                T.copy(A[0, k * 128], A_shared)
+                T.copy(B[0, k * 128], B_shared)
+                if deferred_commit:
+                    T.tcgen05_gemm(A_shared, B_shared, C_tmem, False, True, mbar=None, clear_accum=k == 0)
+                T.tcgen05_gemm(A_shared, B_shared, C_tmem, False, True, mbar=mbar, clear_accum=(k == 0) & (not deferred_commit))
+                T.mbarrier_wait_parity(mbar, k % 2)
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, C)
+
+    mod = tvm.IRModule.from_expr(tcgen05_pipelined.with_attr("global_symbol", "main"))
+    target = determine_target({"kind": "cuda", "arch": "sm_100a"}, return_object=True)
+    mod = tvm.tirx.transform.BindTarget(target)(mod)
+    mod = tilelang.transform.MaterializeKernelLaunch()(mod)
+    mod = tilelang.cuda.transform.ProducerConsumerWarpSpecialized()(mod)
+    script = mod["main"].script()
+
+    consumer_branch = _find_after(script, "else:")
+    fwd_wait = _find_after(script, "T.mbarrier_wait_parity(mbarrier", consumer_branch)
+    gemm = _find_after(script, "T.tcgen05_gemm", fwd_wait)
+    mma_wait = _find_after(script, "T.mbarrier_wait_parity(mbar", gemm)
+    bp_arrive = _find_after(script, "T.ptx_arrive_barrier(mbarrier", mma_wait)
+    assert fwd_wait < gemm < mma_wait < bp_arrive
 
 
 if __name__ == "__main__":
