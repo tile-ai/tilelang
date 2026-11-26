@@ -563,14 +563,23 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
-    if (analyzer_->CanProve(op->extent <= 0)) {
+    // Bounds are evaluated before entering the loop. The parent mutator
+    // assumes extent > 0 while visiting a For, which is valid for its body
+    // but can incorrectly fold a zero-or-one trip count to one.
+    PrimExpr min = VisitExpr(op->min);
+    PrimExpr extent = VisitExpr(op->extent);
+    if (analyzer_->CanProve(extent <= 0)) {
       // Remove loops with non-positive extent
       return Evaluate(0);
     }
     With<ConstraintContext> ctx1(analyzer_, op->loop_var >= op->min);
     With<ConstraintContext> ctx2(analyzer_,
                                  op->loop_var < op->min + op->extent);
-    return Parent::VisitStmt_(op);
+    For result = Downcast<For>(Parent::VisitStmt_(op));
+    auto *node = result.CopyOnWrite();
+    node->min = std::move(min);
+    node->extent = std::move(extent);
+    return result;
   }
 
   bool CanInlineBind(const BindNode *op) {
