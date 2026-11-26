@@ -2967,6 +2967,39 @@ void CodeGenTileLangAscend::VisitExpr_(const SelectNode *op,
   os << result;
 }
 
+void CodeGenTileLangAscend::VisitExpr_(const MinNode *op,
+                                       std::ostream &os) { // NOLINT(*)
+  if (!op->dtype.is_bfloat16() || op->dtype.lanes() > 1) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+  // CCE provides no min(bfloat16_t, bfloat16_t) overload, so a plain min()
+  // call on bfloat16 scalars is ambiguous across the float/half/integer
+  // overloads and fails device compilation. Route it through the float
+  // overload, which lowers to __builtin_cce_fminf (the same fmin semantics
+  // the float16 codegen gets from __builtin_cce_fminf16), and convert the
+  // result back; the bf16 -> fp32 -> bf16 round-trip is exact.
+  os << "(bfloat16_t)min((float)(";
+  this->PrintExpr(op->a, os);
+  os << "), (float)(";
+  this->PrintExpr(op->b, os);
+  os << "))";
+}
+
+void CodeGenTileLangAscend::VisitExpr_(const MaxNode *op,
+                                       std::ostream &os) { // NOLINT(*)
+  if (!op->dtype.is_bfloat16() || op->dtype.lanes() > 1) {
+    CodeGenC::VisitExpr_(op, os);
+    return;
+  }
+  // See the MinNode override: bfloat16 max has no unambiguous overload either.
+  os << "(bfloat16_t)max((float)(";
+  this->PrintExpr(op->a, os);
+  os << "), (float)(";
+  this->PrintExpr(op->b, os);
+  os << "))";
+}
+
 void CodeGenTileLangAscend::VisitExpr_(const ShuffleNode *op,
                                        std::ostream &os) { // NOLINT(*)
   for (const PrimExpr &vector : op->vectors) {
@@ -3767,7 +3800,17 @@ void CodeGenTileLangAscend::PrintVecBinaryOp(const std::string &op, DataType t,
     std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
     for (int i = 0; i < t.lanes(); ++i) {
       std::ostringstream value_temp;
-      if (isalpha(op[0])) {
+      if ((op == "min" || op == "max") && t.is_bfloat16()) {
+        // CCE has no min/max(bfloat16_t, bfloat16_t) overload, so the
+        // per-lane call is ambiguous across the float/half/integer overloads.
+        // Route it through the float one, like the scalar MinNode/MaxNode
+        // path above.
+        value_temp << "(bfloat16_t)" << op << "((float)(";
+        PrintVecElemLoad(vlhs, lhs.dtype(), i, value_temp);
+        value_temp << "), (float)(";
+        PrintVecElemLoad(vrhs, rhs.dtype(), i, value_temp);
+        value_temp << "))";
+      } else if (isalpha(op[0])) {
         value_temp << op << "(";
         PrintVecElemLoad(vlhs, lhs.dtype(), i, value_temp);
         value_temp << ", ";
