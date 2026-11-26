@@ -131,6 +131,8 @@ public:
   /// Infer memory layout for buffers
   LayoutMap InferLayout(const LayoutInferArgs &layout_args,
                         InferLevel level) const override;
+  /// Last-resort proposal for a thread-divisible, unassigned source fragment.
+  LayoutMap InferLayoutWithSeparableSource(const LayoutInferArgs &args) const;
   AccessRegions GetAccessRegions() const override;
   static const Op &Get();
   TileOperator Clone() const;

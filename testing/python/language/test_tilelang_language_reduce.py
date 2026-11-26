@@ -1161,6 +1161,18 @@ def _make_allreduce_dim0_scale_kernel(reduce_fn, logical_width, scale, threads=N
 
 
 @tilelang.testing.requires_cuda
+@pytest.mark.parametrize(
+    ("dim", "make_kernel"), [(0, _make_allreduce_dim0_scale_kernel), (1, _make_allreduce_width_kernel)], ids=["dim0", "dim1"]
+)
+def test_reduce_sum_non_power_of_two_inner_extent(dim, make_kernel):
+    shape = (64, 48)
+    program = make_kernel(T.reduce_sum, *shape, threads=128)
+    kernel = tilelang.compile(program, out_idx=-1, target="cuda", execution_backend="nvrtc")
+    A = torch.randint(-8, 9, shape, device="cuda", dtype=torch.float32)
+    torch.testing.assert_close(kernel(A), A.sum(dim=dim), rtol=0, atol=0)
+
+
+@tilelang.testing.requires_cuda
 @pytest.mark.parametrize("reduce_fn", [T.reduce_sum, T.reduce_max], ids=["sum", "max"])
 @pytest.mark.parametrize("width", [48, 96])
 def test_allreduce_rejects_non_power_of_two_logical_width(reduce_fn, width):

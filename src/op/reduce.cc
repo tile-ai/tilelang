@@ -24,6 +24,7 @@
 #include <tvm/tirx/expr.h>
 #include <tvm/tirx/stmt.h>
 
+#include <numeric>
 #include <sstream>
 #include <vector>
 
@@ -237,6 +238,43 @@ LayoutMap ReduceOpNode::InferLayout(const LayoutInferArgs &layout_args,
     }
   }
   return {};
+}
+
+LayoutMap ReduceOpNode::InferLayoutWithSeparableSource(
+    const LayoutInferArgs &args) const {
+  // A flattened copy can wrap a row across thread groups. Factoring the
+  // thread coordinate by logical axis lets ComputeReducerLayout project out
+  // any one axis without mixing it with the surviving coordinates. A
+  // power-of-two block gives each collective a power-of-two width and stride.
+  const int64_t *threads = as_const_int(args.thread_bounds->extent);
+  if (!threads || *threads <= 0 || (*threads & (*threads - 1)) != 0 ||
+      !IsFragmentBuffer(src) || !IsFragmentBuffer(dst) ||
+      args.layout_map.count(src)) {
+    return {};
+  }
+  int64_t stride = 1;
+  PrimExpr thread = 0;
+  for (int axis = static_cast<int>(src->shape.size()) - 1; axis >= 0; --axis) {
+    const int64_t *extent = as_const_int(src->shape[axis]);
+    if (!extent || *extent <= 0) {
+      return {};
+    }
+    const int64_t lanes = std::gcd(*extent, *threads / stride);
+    thread +=
+        FloorMod(InputPlaceholder(axis), Integer(lanes)) * Integer(stride);
+    stride *= lanes;
+  }
+  if (stride != *threads) {
+    return {};
+  }
+
+  auto source_layout = Fragment(src->shape, {}, thread, 1, std::nullopt)
+                           ->BindThreadRange(args.thread_bounds);
+  auto trial = args;
+  trial.layout_map.Set(src, source_layout);
+  LayoutMap updates = InferLayout(trial, InferLevel::kFree);
+  updates.Set(src, source_layout);
+  return updates;
 }
 
 TIR_REGISTER_TL_TILE_OP(ReduceOp, reduce)
