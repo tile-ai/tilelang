@@ -41,6 +41,10 @@ def WebGPUPassPipelineBody(mod: IRModule, target: Target) -> IRModule:
     mod = tilelang.transform.VerifyBufferInit()(mod)
 
     mod = tilelang.transform.IfStmtBinding()(mod)
+    # A loop with continue/break cannot be software-pipelined: the exit would
+    # be emitted in the epilogue after the loop and the backend rejects the
+    # code, so strip its pipeline annotations first and lower it as a serial loop.
+    mod = tilelang.transform.DisablePipelineForIrregularLoop()(mod)
     mod = tilelang.transform.PipelinePlanning()(mod)
     mod = tilelang.transform.InjectSoftwarePipeline()(mod)
     mod = tilelang.transform.Simplify()(mod)

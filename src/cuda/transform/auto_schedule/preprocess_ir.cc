@@ -12,15 +12,16 @@
  * Existing ids are reused, so normalization is idempotent.
  *
  * Normalization also checks the schedulability contract, declining the
- * kernel (warning + nullopt): no loop_break, no atomics, no hand-written
- * synchronization, and no asynchronous tile op nested inside an opaque
- * op.
+ * kernel (warning + nullopt): no loop exits (loop_break, continue_loop,
+ * break_loop), no atomics, no hand-written synchronization, and no
+ * asynchronous tile op nested inside an opaque op.
  */
 
 #include "./preprocess_ir.h"
 
 #include <tvm/ir/op.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/builtin.h>
 #include <tvm/tirx/stmt_functor.h>
 
 #include <algorithm>
@@ -62,9 +63,12 @@ bool CheckCalls(const Stmt &body) {
     const auto *call = node.as<CallNode>();
     if (call == nullptr || !ok)
       return;
-    if (call->op.same_as(tl::loop_break())) {
+    if (call->op.same_as(tl::loop_break()) ||
+        call->op.same_as(builtin::continue_loop()) ||
+        call->op.same_as(builtin::break_loop())) {
       LOG(WARNING)
-          << "AutoWarpSpecialization skipped: cannot schedule loop_break";
+          << "AutoWarpSpecialization skipped: cannot schedule loop exit '"
+          << Downcast<Op>(call->op)->name << "'";
       ok = false;
       return;
     }
