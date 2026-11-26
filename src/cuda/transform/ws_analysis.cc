@@ -110,10 +110,20 @@ private:
     }
   }
 
-  Buffer RemapBuffer(const Buffer &buffer) const {
-    auto it = buffer_remap_.find(buffer);
-    if (it != buffer_remap_.end()) {
+  Buffer RemapBuffer(const Buffer &buffer) {
+    if (auto it = buffer_remap_.find(buffer); it != buffer_remap_.end()) {
       return it->second;
+    }
+    if (auto it = alias_remap_.find(buffer); it != alias_remap_.end()) {
+      return it->second;
+    }
+    if (auto var_it = var_remap_.find(buffer->data);
+        var_it != var_remap_.end()) {
+      auto n = make_object<BufferNode>(*buffer.get());
+      n->data = var_it->second;
+      Buffer remapped(std::move(n));
+      alias_remap_.emplace(buffer, remapped);
+      return remapped;
     }
     return buffer;
   }
@@ -145,8 +155,18 @@ private:
     return store;
   }
 
+  Stmt VisitStmt_(const DeclBufferNode *op) final {
+    DeclBuffer decl = Downcast<DeclBuffer>(StmtExprMutator::VisitStmt_(op));
+    Buffer new_buffer = RemapBuffer(decl->buffer);
+    if (!new_buffer.same_as(decl->buffer)) {
+      return DeclBuffer(new_buffer, decl->span);
+    }
+    return decl;
+  }
+
   const BufferRemap &buffer_remap_;
-  std::unordered_map<Var, PrimExpr, ObjectPtrHash, ObjectPtrEqual> var_remap_;
+  std::unordered_map<Var, Var, ObjectPtrHash, ObjectPtrEqual> var_remap_;
+  BufferRemap alias_remap_;
 };
 
 class ManualWSDetector : public StmtExprVisitor {
