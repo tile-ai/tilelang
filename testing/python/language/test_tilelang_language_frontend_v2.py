@@ -450,6 +450,29 @@ def test_boolop():
     cond()
 
 
+@pytest.mark.parametrize("value, expected", [(0, ["left", "middle"]), (1, ["left", "middle", "right"])])
+def test_chained_comparison_evaluates_python_operands_once(value, expected):
+    visited = []
+
+    def operand(name, value):
+        visited.append(name)
+        return value
+
+    @T.prim_func
+    def main(O: T.Tensor((1,), "bool")):
+        O[0] = operand("left", 0) < operand("middle", value) < operand("right", 2)
+
+    assert visited == expected
+
+
+def test_chained_comparison_binds_stateful_middle_operand():
+    @T.prim_func
+    def main(O: T.Tensor((1,), "bool"), gate: T.int32):
+        O[0] = 0 < gate <= T.call_extern("int32", "next_value") < 10
+
+    assert main.script().count("T.call_extern(") == 1
+
+
 def test_constexpr_if():
     @tilelang.jit
     def probe(A, tmp: bool):

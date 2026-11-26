@@ -10,6 +10,7 @@
 #include <tvm/ir/cast.h>
 #include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
+#include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
 #include <tvm/tirx/index_map.h>
 #include <tvm/tirx/op.h>
@@ -29,6 +30,14 @@ namespace codegen {
 
 using namespace ffi;
 namespace {
+
+bool HasStatefulBooleanBranch(const PrimExpr &true_value,
+                              const PrimExpr &false_value) {
+  return true_value.dtype() == DataType::Bool() &&
+         false_value.dtype() == DataType::Bool() &&
+         (tirx::SideEffect(true_value) > tirx::CallEffectKind::kReadState ||
+          tirx::SideEffect(false_value) > tirx::CallEffectKind::kReadState);
+}
 
 // Helper to check if a statement subtree contains loop break ops
 // (either tl::loop_break() or builtin::break_loop())
@@ -913,6 +922,28 @@ void CodeGenTileLangCuTeDSL::VisitExpr_(const CallNode *op,
       return casted.str();
     };
     std::string cond = PrintExpr_(op->args[0]);
+    if (HasStatefulBooleanBranch(op->args[1], op->args[2])) {
+      // Printing a branch can emit statements (e.g. a Let binding). Generate
+      // a dynamic if so both the statements and the value stay in that arm.
+      std::string result = name_supply_->FreshName("_if_value");
+      PrintIndent();
+      stream << result << " = cutlass.Boolean(False)\n";
+      auto emit_branch = [&](const PrimExpr &branch) {
+        int scope = BeginScope();
+        std::string value = PrintExpr_(branch);
+        PrintIndent();
+        stream << result << " = cutlass.Boolean(" << value << ")\n";
+        EndScope(scope);
+      };
+      PrintIndent();
+      stream << "if " << RemoveOutermostParentheses(cond) << ":\n";
+      emit_branch(op->args[1]);
+      PrintIndent();
+      stream << "else:\n";
+      emit_branch(op->args[2]);
+      os << result;
+      return;
+    }
     std::string true_val =
         cast_branch(PrintExpr_(op->args[1]), op->args[1].dtype());
     std::string false_val =
@@ -2847,7 +2878,8 @@ void CodeGenTileLangCuTeDSL::VisitStmt_(const BufferStoreNode *op) {
       true_expr = sel->true_value;
       false_expr = sel->false_value;
     } else if (auto call = expr.as<CallNode>();
-               call && call->op.same_as(tirx::builtin::if_then_else())) {
+               call && call->op.same_as(tirx::builtin::if_then_else()) &&
+               !HasStatefulBooleanBranch(call->args[1], call->args[2])) {
       value_is_conditional = true;
       cond_expr = call->args[0];
       true_expr = call->args[1];
