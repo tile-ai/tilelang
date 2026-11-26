@@ -192,6 +192,25 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
+PrimExpr BulkBoxBaseBits(const Buffer &global_tensor,
+                         const Array<Range> &global_range) {
+  Array<PrimExpr> global_mins;
+  for (const Range &range : global_range) {
+    global_mins.push_back(range->min);
+  }
+  return TMAGlobalBitsFromElements(global_tensor->ElemOffset(global_mins)[0],
+                                   global_tensor->dtype);
+}
+
+// Keep TMA eligible when the analyzer cannot prove the base is misaligned,
+// as with the transfer-size check in CheckBulkCopy1D.
+bool CanProveBulkBoxBaseMisaligned(const PrimExpr &base_bits,
+                                   arith::Analyzer *analyzer) {
+  return analyzer->CanProve(
+      FloorMod(base_bits, IntImm(base_bits.dtype(), 128)) != 0,
+      arith::ProofStrength::kSymbolicBound);
+}
+
 bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
                    bool check_last_dim, bool emit_diagnostics) {
   if (!TargetHasBulkCopy(target)) {
@@ -199,6 +218,14 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
   }
   if (op.src.scope() != "global" ||
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
+    return false;
+  }
+  if (CanProveBulkBoxBaseMisaligned(BulkBoxBaseBits(op.src, op.src_range),
+                                    analyzer)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "src range base must be 16-byte aligned for tma bulk "
+                    << "load " << op.src->name;
+    }
     return false;
   }
   if (check_last_dim &&
@@ -238,6 +265,14 @@ bool CheckBulkStore(const CopyNode &op, Target target,
   }
   if ((op.src.scope() != "shared.dyn" && op.src.scope() != "shared") ||
       op.dst.scope() != "global") {
+    return false;
+  }
+  if (CanProveBulkBoxBaseMisaligned(BulkBoxBaseBits(op.dst, op.dst_range),
+                                    analyzer)) {
+    if (emit_diagnostics) {
+      DLOG(WARNING) << "dst range base must be 16-byte aligned for tma bulk "
+                    << "store " << op.dst->name;
+    }
     return false;
   }
   if (check_last_dim &&
@@ -533,7 +568,7 @@ CopyInstSelection Unsupported(std::string reason) {
   return CopyInstSelection{CopyInst::kInvalid, false, std::move(reason)};
 }
 
-std::string MakeTmaUnavailableReason(const CopyNode &op) {
+std::string MakeTmaUnavailableReason(const CopyNode &op, const Target &target) {
   std::ostringstream oss;
   if (GetTmaDescriptorBaseIsDeviceBound(op)) {
     const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
@@ -554,6 +589,26 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << ", dtype=" << op.src->dtype << "), dst=" << op.dst->name
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
     return oss.str();
+  }
+  bool is_load = IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst);
+  bool is_store = IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst);
+  if ((is_load || is_store) && target.defined() && TargetHasBulkCopy(target)) {
+    const Buffer &global_buffer = is_load ? op.src : op.dst;
+    const Array<Range> &global_range = is_load ? op.src_range : op.dst_range;
+    PrimExpr base_bits = BulkBoxBaseBits(global_buffer, global_range);
+    arith::Analyzer local_analyzer;
+    if (CanProveBulkBoxBaseMisaligned(base_bits, &local_analyzer)) {
+      PrimExpr eight = IntImm(base_bits.dtype(), 8);
+      oss << "global buffer `" << global_buffer->name << "` starts at ";
+      if (local_analyzer.CanProve(FloorMod(base_bits, eight) == 0)) {
+        oss << "byte offset "
+            << local_analyzer.Simplify(FloorDiv(base_bits, eight));
+      } else {
+        oss << "bit offset " << local_analyzer.Simplify(base_bits);
+      }
+      oss << ", but bulk TMA requires a 16-byte aligned address.";
+      return oss.str();
+    }
   }
   oss << "T.tma_copy() requires TMA-capable target and global<->shared copy "
          "pattern, but TMA is not available for src="
@@ -642,7 +697,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.cluster_mask = GetClusterMask(op);
-  facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
+  facts.tma_unavailable_reason = MakeTmaUnavailableReason(op, ctx.target);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
   facts.pass_context_disables_tma =
       tvm::transform::PassContext::Current()
@@ -725,13 +780,13 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
   if (GetBoolAnnotation(op, "is_gather4")) {
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
-      return Unsupported(MakeTmaUnavailableReason(op));
+      return Unsupported(MakeTmaUnavailableReason(op, ctx.target));
     }
     return Supported(CopyInst::kBulkLoadGather4);
   }
   if (GetBoolAnnotation(op, "is_scatter4")) {
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
-      return Unsupported(MakeTmaUnavailableReason(op));
+      return Unsupported(MakeTmaUnavailableReason(op, ctx.target));
     }
     return Supported(CopyInst::kBulkStoreScatter4);
   }
