@@ -91,6 +91,18 @@ def test_view_subbyte_dtype_change():
     assert A_viewed.data.same_as(A.data)
 
 
+def test_view_bit_count_beyond_int32():
+    A = tvm.tirx.decl_buffer((248320, 2560), T.uint8, name="A")
+    A_viewed = T.view(A, (248320, 5120), dtype=T.float4_e2m1fn)
+    assert str(A_viewed.dtype) == "float4_e2m1fn"
+    assert tuple(int(dim) for dim in A_viewed.shape) == (248320, 5120)
+    assert A_viewed.data.same_as(A.data)
+    n = tvm.tirx.Var("n", "int32")
+    B = tvm.tirx.decl_buffer((n, 2560), T.uint8, name="B")
+    with pytest.raises(ValueError, match="logical bit count"):
+        T.view(B, (248320, 5120), dtype=T.float4_e2m1fn)
+
+
 def fp4_to_uint8_view_test(rows_per_cta=16, mask_k=256):
     @T.prim_func
     def main(

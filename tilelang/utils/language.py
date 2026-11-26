@@ -446,19 +446,32 @@ def retrieve_dtype(obj: BufferLikeType) -> str:
     raise ValueError(f"Unsupported retrieve_dtype argument type: {type(obj)} for object {obj}")
 
 
-def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr:
+def bits_product(shape: list[PrimExpr], dtype: str) -> PrimExpr | int:
     """
     Compute the number of bits in a Buffer (shape with dtype).
 
     For vector types (e.g. ``bfloat16x2``) ``DataType.bits`` returns the
     per-lane width, not the full element width.  Multiply by ``lanes`` so
     that the total bit count is correct.
+
+    A static shape gives an exact Python int, and a shape with a symbolic
+    extent gives an int64 expression, so the bits of a buffer beyond the
+    int32 range do not wrap.
     """
-    result = tirx.IntImm("int32", 1) if len(shape) == 0 else shape[0]
-    for i in range(1, len(shape)):
-        result = result * shape[i]
     dt = DataType(dtype)
-    return result * dt.bits * dt.lanes
+    result = dt.bits * dt.lanes
+    for extent in shape:
+        if isinstance(extent, tirx.IntImm):
+            extent = int(extent)
+        elif not isinstance(extent, int):
+            extent = extent.astype("int64")
+        result = result * extent
+    return result
+
+
+def _int_imm(value: int) -> tirx.IntImm:
+    """Return value as an int32 IntImm, or as an int64 IntImm beyond the int32 range."""
+    return tirx.IntImm("int32" if -(2**31) <= value < 2**31 else "int64", value)
 
 
 def prim_expr_equal(lhs, rhs) -> bool:
@@ -466,14 +479,15 @@ def prim_expr_equal(lhs, rhs) -> bool:
     Robust equality for PrimExpr shapes/extents.
 
     Tries structural_equal first, then falls back to expr_deep_equal.
-    Python ints are converted to IntImm for comparison.
+    Python ints are converted to IntImm for comparison, as int64 beyond the
+    int32 range.
     """
     if isinstance(lhs, int) and isinstance(rhs, int):
         return lhs == rhs
     if isinstance(lhs, int):
-        lhs = tirx.IntImm("int32", lhs)
+        lhs = _int_imm(lhs)
     if isinstance(rhs, int):
-        rhs = tirx.IntImm("int32", rhs)
+        rhs = _int_imm(rhs)
     if ir.structural_equal(lhs, rhs):
         return True
     return tirx.analysis.expr_deep_equal(lhs, rhs)
