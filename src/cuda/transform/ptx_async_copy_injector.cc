@@ -3,6 +3,7 @@
  * \file cuda/transform/ptx_async_copy_injector.cc
  */
 #include "support/check.h"
+#include <tvm/ir/transform.h>
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/analysis.h>
 #include <tvm/tirx/builtin.h>
@@ -28,10 +29,27 @@ namespace tl {
 using namespace tirx;
 using namespace ffi;
 
+// Pass config key (owned by TVM's tirx): when true, the later VectorizeLoop
+// pass serializes vectorized loops (VectorizeSkipper) instead of merging
+// them, so a `for vec in T.vectorized(k)` loop reaches codegen as `k`
+// separate per-lane statements.
+static constexpr const char *kDisableVectorize = "tirx.disable_vectorize";
+
 class PTXAsyncCopyInjector : public StmtMutator {
 public:
   explicit PTXAsyncCopyInjector(bool async_without_async_commit_wait)
-      : async_without_async_commit_wait_(async_without_async_commit_wait) {}
+      : async_without_async_commit_wait_(async_without_async_commit_wait) {
+    // The injector sizes each cp.async by the vectorized loop extent it
+    // sits in, assuming VectorizeLoop will later merge the per-lane calls
+    // into one wide transfer. That assumption does not hold when
+    // vectorization is disabled: the loop is serialized instead, and each
+    // lane reaches codegen as its own 1-element cp.async. Remember the
+    // flag here so the injector only counts lanes that will survive as
+    // one transfer (see #4461).
+    vectorize_disabled_ = tvm::transform::PassContext::Current()
+                              ->GetConfig<Bool>(kDisableVectorize, Bool(false))
+                              .value();
+  }
 
   bool InjectedPTXAsyncCopy() const { return injected_ptx_async_copy_; }
 
@@ -61,9 +79,17 @@ public:
     // TileLang records logical element counts in tl.ptx_cp_async. The final
     // PTX byte width is derived later from the access_ptr dtype, so subbyte
     // dtypes such as int4/fp4/int2/int1 remain representable here.
+    //
+    // When vectorization is disabled, the later VectorizeLoop pass
+    // serializes the loop instead, so each lane becomes its own 1-element
+    // cp.async. Count such a loop as a single lane: a copy whose per-access
+    // width is not itself a legal cp.async width (e.g. 2 bytes for fp16)
+    // then fails the legality check in PrepareCopyIndexInfo and falls back
+    // to a normal copy, instead of reaching codegen as an illegal 1-/2-byte
+    // cp.async (see #4461).
     int previous_vectorized_lanes = current_vectorized_lanes_;
     bool pushed_vectorized_loop = false;
-    if (op->kind == ForKind::kVectorized) {
+    if (op->kind == ForKind::kVectorized && !vectorize_disabled_) {
       const auto *extent_imm = op->extent.as<IntImmNode>();
       ICHECK(extent_imm)
           << "Vectorized loops must have constant extent, but got "
@@ -656,6 +682,10 @@ private:
   // `SummarizeAsyncIntrinsics` helpers to avoid redundant traversals.
 
   bool async_without_async_commit_wait_{false};
+  // True when `tirx.disable_vectorize` is set: vectorized loops will be
+  // serialized by the later VectorizeLoop pass, so they must not inflate
+  // the assumed cp.async transfer width (see #4461).
+  bool vectorize_disabled_{false};
   int current_vectorized_lanes_{1};
   std::vector<ActiveVectorizedLoop> active_vectorized_loops_;
   arith::Analyzer analyzer_;
