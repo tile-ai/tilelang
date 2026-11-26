@@ -839,17 +839,31 @@ void CodeGenTileLangAscend::EmitVFFunction(const SBlockNode *op,
   std::ostringstream saved_main_stream;
   stream.swap(saved_main_stream);
   std::string helper_body;
+  const std::string saved_rng_state = ascend_rng_state_var_;
+  ascend_rng_state_var_.clear();
   {
     // VF mode governs only helper-body expression lowering. Capture setup and
     // the helper signature use the surrounding kernel ABI, so keeping them in
     // VF mode can change scalar capture types (for example fp8_e4_t).
     VFModeScope vf_mode_scope(this, vf_mode);
+    bool has_rng_init = false;
+    tirx::PostOrderVisit(op->body, [&](const ffi::ObjectRef &node) {
+      if (const auto *call = node.as<CallNode>()) {
+        has_rng_init |= call->op.same_as(tl::rng_init());
+      }
+    });
+    if (has_rng_init && IsInsideSimtVF()) {
+      ascend_rng_state_var_ = name_supply_->FreshName("__asc_rng_state");
+      PrintIndent();
+      stream << "tl::AscendPhiloxState " << ascend_rng_state_var_ << ";\n";
+    }
     this->VisitStmt(op->body);
     helper_body = FixIndent(stream.str());
   }
   stream.str("");
   stream.clear();
   stream.swap(saved_main_stream);
+  ascend_rng_state_var_ = saved_rng_state;
 
   var_idmap_.swap(saved_var_idmap);
   name_supply_ = saved_name_supply;
@@ -2602,9 +2616,8 @@ void CodeGenTileLangAscend::VisitExpr_(const CallNode *op, std::ostream &os) {
     // compiles into a __simt_vf__ helper. args: seed, seq, off, generator.
     ICHECK(IsInsideSimtVF())
         << "tl.rng_init on Ascend must be used inside a T.SimtVF(...) block";
-    ascend_rng_state_var_ = name_supply_->FreshName("__asc_rng_state");
-    this->PrintIndent();
-    this->stream << "tl::AscendPhiloxState " << ascend_rng_state_var_ << ";\n";
+    ICHECK(!ascend_rng_state_var_.empty())
+        << "Ascend RNG state must be declared in its SimtVF helper";
     this->PrintIndent();
     this->stream << "tl::philox_init(&" << ascend_rng_state_var_ << ", "
                  << PrintExpr(op->args[0]) << ", " << PrintExpr(op->args[1])
