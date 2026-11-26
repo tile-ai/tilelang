@@ -147,6 +147,34 @@ static PrimExpr DispatchCUDAIsFinite(const PrimExpr &e) {
   return e;
 }
 
+static PrimExpr DispatchCUDASigmoid(const PrimExpr &e) {
+  const CallNode *call = e.as<CallNode>();
+  ICHECK(call != nullptr);
+  ICHECK_EQ(call->args.size(), 1U);
+
+  PrimExpr x = call->args[0];
+  // The default legalization of tirx.sigmoid is 1 / (1 + exp(-x)), built
+  // through the tirx::exp C++ helper, which promotes a bfloat16 argument to
+  // float32 with the same lane count. With 256-bit vectorization a thread
+  // holds 16 bfloat16 lanes, so the promoted expression is float32x16, for
+  // which CUDA codegen has no vector type ("Cannot convert type float32x16
+  // to CUDA type").
+  //
+  // Only bypass the promotion when it would create an unrepresentable type,
+  // i.e. more than 8 lanes (float32 codegen supports at most 8 lanes).
+  // Narrower vectors keep the default float32 evaluation for accuracy.
+  // Build the tirx.exp call directly on the bfloat16 value so that it lowers
+  // to hexp, exactly like a plain T.exp does.
+  if (!x.dtype().is_bfloat16() || x.dtype().lanes() <= 8) {
+    return e;
+  }
+
+  PrimExpr one = tirx::make_const(x.dtype(), 1);
+  PrimExpr exp_neg_x =
+      tirx::Call(x.dtype(), Op::Get("tirx.exp"), {-x}, call->annotations);
+  return one / (one + exp_neg_x);
+}
+
 template <typename T> static PrimExpr DispatchCUDAShuffle(const PrimExpr &e) {
   const CallNode *call = e.as<CallNode>();
   ICHECK(call != nullptr);
@@ -211,6 +239,9 @@ TVM_REGISTER_OP("tirx.nextafter")
 
 TVM_REGISTER_OP("tirx.isfinite")
     .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDAIsFinite);
+
+TVM_REGISTER_OP("tirx.sigmoid")
+    .set_attr<FLowerIntrinsic>("cuda.FLowerIntrinsic", DispatchCUDASigmoid);
 
 } // namespace intrin
 } // namespace codegen
