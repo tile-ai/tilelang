@@ -371,6 +371,66 @@ def test_reports_each_buffer_once_however_many_reads(capfd):
     assert "[2]" not in err
 
 
+def _marker_line(marker):
+    """Return the line of this file that contains ``marker``."""
+    with open(__file__) as f:
+        for i, line in enumerate(f, 1):
+            if marker in line:
+                return i
+    raise ValueError(f"marker not found: {marker}")
+
+
+def test_store_read_reports_its_source_line(capfd):
+    """A read in a plain store points at the store, not just the buffer.
+
+    Only tile ops arrive as Evaluate statements; a store has to carry its own
+    span into the report, or the most common warning has no location.
+    """
+
+    @T.prim_func
+    def kernel(C: T.Tensor((NB, BC), torch.float32)):
+        with T.Kernel(NB, threads=64) as bx:
+            f = T.alloc_fragment((BC,), torch.float32)
+            for i in T.Parallel(BC):
+                C[bx, i] = f[i]  # marker: store read
+
+    err = _verify(kernel, capfd)
+
+    assert MESSAGE in err
+    assert f"{__file__}:{_marker_line('# marker: store read')}:" in err
+
+
+def test_condition_read_reports_its_source_line(capfd):
+    """A read in an if condition points at the if statement."""
+
+    @T.prim_func
+    def kernel(C: T.Tensor((BC,), torch.float32)):
+        with T.Kernel(1, threads=64) as _:
+            f = T.alloc_local((1,), torch.float32)
+            if f[0] > 0:  # marker: condition read
+                C[0] = 1.0
+
+    err = _verify(kernel, capfd)
+
+    assert MESSAGE in err
+    assert f"{__file__}:{_marker_line('# marker: condition read')}:" in err
+
+
+def test_tile_op_read_reports_its_source_line(capfd):
+    """A read inside a tile op still points at the op's own line."""
+
+    @T.prim_func
+    def kernel(C: T.Tensor((NB, BC), torch.float32)):
+        with T.Kernel(NB, threads=64) as bx:
+            s = T.alloc_shared((BC,), torch.float32)
+            T.copy(s, C[bx, :])  # marker: tile op read
+
+    err = _verify(kernel, capfd)
+
+    assert MESSAGE in err
+    assert f"{__file__}:{_marker_line('# marker: tile op read')}:" in err
+
+
 # ------------------------------------------------------------------ wiring
 
 
