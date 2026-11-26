@@ -45,6 +45,11 @@ public:
   void VisitExpr_(const SelectNode *op, std::ostream &os) final;    // NOLINT(*)
   void VisitExpr_(const BroadcastNode *op, std::ostream &os) final; // NOLINT(*)
   void VisitExpr_(const AddNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const SubNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const MulNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const DivNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const MinNode *op, std::ostream &os) final;       // NOLINT(*)
+  void VisitExpr_(const MaxNode *op, std::ostream &os) final;       // NOLINT(*)
   void VisitExpr_(const CastNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const CallNode *op, std::ostream &os) final;      // NOLINT(*)
   void VisitExpr_(const FloatImmNode *op, std::ostream &os) final;  // NOLINT(*)
@@ -69,6 +74,8 @@ private:
   bool IsMlxLogicalBlockYExpr(const PrimExpr &expr) const;
   bool TryPrintMlxLogicalYAffineExpr(const PrimExpr &expr, std::ostream &os);
   bool TryPrintMlxSwizzleExpr(const PrimExpr &expr, std::ostream &os);
+  bool TryPrintPackedBinary(const PrimExpr &a, const PrimExpr &b,
+                            const std::string &op, std::ostream &os);
   bool TryPrintSimdgroupIndexExpr(const CallNode *op, std::ostream &os);
   void PrintSimdgroupIndexExpr(int64_t group_mask, int64_t group_shift,
                                std::ostream &os) const;
