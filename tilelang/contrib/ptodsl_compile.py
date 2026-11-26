@@ -8,6 +8,7 @@ Also runnable as ``python -m tilelang.contrib.ptodsl_compile``.
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 import traceback
 import types
@@ -40,6 +41,36 @@ if "tilelang" not in sys.modules and _tilelang_spec is not None:
     sys.modules["tilelang"] = _tilelang_pkg
     sys.modules["tilelang.contrib"] = _tilelang_contrib
 
+
+def _dedup_symbols(pto_text: str) -> str:
+    """Give duplicate helper symbols in merged kernel modules unique names.
+
+    TODO: Remove this workaround once PTOAS fixes the duplicate helper symbol
+    issue. On CANN 9.2, PTOAS emits identical global symbols for helpers
+    (notably ``pto.init_core``) in each nested kernel module, so merging
+    multiple kernels fails the fatobj link with a duplicate symbol error.
+    """
+    modules = re.split(r"(?m)(?=^  module attributes \{pto\.backend = )", pto_text)
+    seen_helpers = set()
+    rewritten = [modules[0]]
+    for module_index, module_text in enumerate(modules[1:], 1):
+        helper_names = re.findall(
+            r"func\.func @([A-Za-z_][A-Za-z0-9_]*)\([^\n]*\) attributes \{pto\.ptodsl\.callable_kind = \"func\"",
+            module_text,
+        )
+        for helper_name in helper_names:
+            if helper_name in seen_helpers:
+                unique_name = f"{helper_name}__module_{module_index}"
+                module_text = re.sub(
+                    rf"(?<![A-Za-z0-9_]){re.escape(helper_name)}(?![A-Za-z0-9_])",
+                    unique_name,
+                    module_text,
+                )
+            seen_helpers.add(helper_name)
+        rewritten.append(module_text)
+    return "".join(rewritten)
+
+
 try:
     spec = importlib.util.spec_from_file_location(module_name, src_path)
     module = importlib.util.module_from_spec(spec)
@@ -65,7 +96,7 @@ try:
         merge_jit_modules = getattr(pto, "merge_jit_modules", None)
         if not callable(merge_jit_modules):
             raise RuntimeError("PTO multi-kernel JIT requires ptodsl.pto.merge_jit_modules from ptoas-vmi 0.1.4 or newer")
-        pto_text = str(merge_jit_modules(*kernels))
+        pto_text = _dedup_symbols(str(merge_jit_modules(*kernels)))
     out_path.write_text(pto_text, encoding="utf-8")
 except Exception:
     traceback.print_exc()
