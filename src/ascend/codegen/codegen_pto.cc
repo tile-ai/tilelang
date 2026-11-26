@@ -2877,10 +2877,20 @@ void CodeGenTileLangPTO::EmitLocalVarInitialization_(const Buffer &buffer,
     return;
   }
   if (dtype.lanes() > 1) {
-    // Mutable vector registers start as a vreg descriptor placeholder; the
-    // first actual store overwrites it with a real vector value.
-    stream << vid << " = pto.vmi.vreg(" << dtype.lanes() << ", "
-           << DataTypeName(dtype.element_of()) << ")\n";
+    if (!inside_simtvf_body_ && dtype.lanes() == 256 &&
+        dtype.element_of().is_bool()) {
+      // Ordinary SIMD boolx256 slots need a mask placeholder: PTOAS now
+      // materializes vreg initializers as SSA, where vreg<256xi1> is invalid.
+      // This compatibility fix assumes an unconditional assignment replaces
+      // the placeholder before use, as in DeepGEMM's grouped scale transform.
+      // TODO: Normalize physical mask types across assignments and control-flow
+      // merges; a b8 placeholder cannot merge with a b16/b32 mask as-is.
+      stream << vid << " = pto.unspecified_value(pto.mask_type(\"b8\"))\n";
+    } else {
+      // The first actual store overwrites the initial vector value.
+      stream << vid << " = pto.vmi.vreg(" << dtype.lanes() << ", "
+             << DataTypeName(dtype.element_of()) << ")\n";
+    }
     RegisterHandleType_(buffer->data.get(), dtype);
     EmitMixedEntrySnapshot(buffer->data.get());
     return;
