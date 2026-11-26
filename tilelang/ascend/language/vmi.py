@@ -892,7 +892,7 @@ def _vdiv_hw(lhs, rhs, mask=None, *, pmode=None, loc=None, ip=None):
 
 @_scope_guarded
 def vdiv(lhs, rhs, mask=None, *, precision=None, pmode=None, loc=None, ip=None):
-    """Vector divide. ``precision='exact'`` expands CANN ``vdiv_0ulp_ftz_true``."""
+    """Vector divide. ``precision='exact'`` forwards the algorithm to PTOAS."""
     context = "T.vmi.vdiv(...)"
     key = None if precision is None else str(precision).lower()
     if key not in _VDIV_PRECISION_ALIASES:
@@ -906,47 +906,7 @@ def vdiv(lhs, rhs, mask=None, *, precision=None, pmode=None, loc=None, ip=None):
     if pmode is not None:
         raise ValueError(f"{context} precision={precision!r} does not support pmode={pmode!r}")
     mask = _require_compatible_mask(mask, _lanes_of(lhs), context=context)
-    lanes = _lanes_of(lhs)
-    z = _bind(_vdiv_hw(lhs, rhs, mask))
-    z_bits = _bind(vinterpret_cast(z, "uint32"))
-    inf_nan = _bind(vor(z_bits, vbrc(tirx.const(0x80000000, "uint32"), size=lanes), mask))
-    zero_cmp = _bind(vcmps(z, tirx.const(0.0, "float32"), mask, "eq"))
-    inf_nan_cmp = _bind(vcmp(inf_nan, vbrc(tirx.const(0xFF800000, "uint32"), size=lanes), mask, "ge"))
-    rhs_bits = _bind(vinterpret_cast(rhs, "uint32"))
-    exp = _bind(
-        vand(
-            vshrs(rhs_bits, tirx.const(23, "uint32"), mask),
-            vbrc(tirx.const(0xFF, "uint32"), size=lanes),
-            mask,
-        )
-    )
-    one_bits = vbrc(tirx.const(0x3F800000, "uint32"), size=lanes)
-    scale_bits = vshls(
-        vsub(vbrc(tirx.const(254, "uint32"), size=lanes), exp, mask),
-        tirx.const(23, "uint32"),
-        mask,
-    )
-    scale_bits = vsel(vcmps(exp, tirx.const(0, "uint32"), mask, "eq"), one_bits, scale_bits)
-    scale_bits = vsel(
-        vcmp(exp, vbrc(tirx.const(253, "uint32"), size=lanes), mask, "gt"),
-        one_bits,
-        scale_bits,
-    )
-    scale = _bind(vinterpret_cast(scale_bits, "float32"))
-    lhs_s = _bind(vmul(lhs, scale, mask))
-    rhs_s = _bind(vmul(rhs, scale, mask))
-    y = _bind(vmuls(rhs_s, tirx.const(-1.0, "float32"), mask))
-    r = _bind(vabs(vmula(lhs_s, z, y, mask), mask))
-    z_i = _bind(vinterpret_cast(z, "int32"))
-    z_pre = _bind(vinterpret_cast(vadds(z_i, tirx.const(-1, "int32"), mask), "float32"))
-    z_next = _bind(vinterpret_cast(vadds(z_i, tirx.const(1, "int32"), mask), "float32"))
-    r_pre = _bind(vabs(vmula(lhs_s, z_pre, y, mask), mask))
-    r_next = _bind(vabs(vmula(lhs_s, z_next, y, mask), mask))
-    z_corr = _bind(vsel(vcmp(r_pre, r, mask, "lt"), z_pre, z))
-    r_best = _bind(vmin(r, r_pre, mask))
-    z_corr = _bind(vsel(vcmp(r_next, r_best, mask, "lt"), z_next, z_corr))
-    z_corr = _bind(vsel(inf_nan_cmp, z, z_corr))
-    return vsel(zero_cmp, z, z_corr)
+    return _call_vmi("vdiv", _dtype_of(lhs), lhs, rhs, mask, precision="precision_0ulp_ftz_true")
 
 
 @_scope_guarded
