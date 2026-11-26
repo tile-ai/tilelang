@@ -2,6 +2,9 @@
 
 #include <stdint.h>
 
+// Imported code may define asc_load_dev before including this header.
+#pragma push_macro("asc_load_dev")
+#undef asc_load_dev
 #include "tl_templates/ascend/cann_compat.h"
 
 namespace tl {
@@ -56,3 +59,5 @@ __aicore__ inline void write_gm_bypass_dcache(__gm__ T *addr, T value) {
 }
 
 } // namespace tl
+
+#pragma pop_macro("asc_load_dev")
