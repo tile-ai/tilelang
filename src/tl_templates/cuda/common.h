@@ -808,6 +808,28 @@ TL_DEVICE longlong4 make_longlong4(int x0, int x1, int y0, int y1, int z0,
   return result;
 }
 
+namespace tl {
+// Pack four 16-bit integer lanes into one 64-bit field, lane 0 in the low
+// bits. Codegen builds (u)int16x12/x16 vectors from these, the same way it
+// uses pack_float16x4/pack_bfloat16x4 for fp16/bf16 x12/x16.
+TL_DEVICE long long pack_int16x4(short x, short y, short z, short w) {
+  unsigned long long v0 = static_cast<unsigned short>(x);
+  unsigned long long v1 = static_cast<unsigned short>(y);
+  unsigned long long v2 = static_cast<unsigned short>(z);
+  unsigned long long v3 = static_cast<unsigned short>(w);
+  return static_cast<long long>(v0 | (v1 << 16) | (v2 << 32) | (v3 << 48));
+}
+
+TL_DEVICE unsigned long long pack_uint16x4(unsigned short x, unsigned short y,
+                                           unsigned short z, unsigned short w) {
+  unsigned long long v0 = x;
+  unsigned long long v1 = y;
+  unsigned long long v2 = z;
+  unsigned long long v3 = w;
+  return v0 | (v1 << 16) | (v2 << 32) | (v3 << 48);
+}
+} // namespace tl
+
 // Pack thirty-two char values.
 TL_DEVICE longlong4
 make_longlong4(signed char x0, signed char x1, signed char x2, signed char x3,
