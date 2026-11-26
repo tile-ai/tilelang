@@ -569,6 +569,15 @@ void CodeGenTileLangAscend::AddFunction(const PrimFunc &f) {
   unroll_factor_.clear();
   ReserveKeywordsAsUnique();
   name_supply_->ReserveName("block_idx");
+  // AscendC typedefs and keywords the emitted source depends on. The shared
+  // ReserveKeywordsAsUnique only covers the C++ standard keywords, so a buffer
+  // or parameter named `half` shadows the type in the generated kernel and the
+  // device compilation fails with "unknown type name 'half'".
+  for (const char *reserved :
+       {"half", "bfloat16_t", "uint8_t", "int8_t", "uint16_t", "int16_t",
+        "uint32_t", "int32_t", "bool", "true", "false", "nullptr"}) {
+    name_supply_->ReserveName(reserved);
+  }
 
   // Register function parameters with their storage scope for codegen
   for (const auto &param : f->params) {
