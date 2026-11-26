@@ -6293,13 +6293,16 @@ inline void PrintConst(const FloatImmNode *op, std::ostream &os,
       if (op->value < 0) {
         temp << "-";
       }
-      temp << "std::numeric_limits<";
+      // Do not use std::numeric_limits here: CUTLASS only defines
+      // std::numeric_limits<half_t/bfloat16_t> when __CUDACC_RTC__ is not
+      // defined, so it is unavailable under NVRTC. Emit the bit pattern
+      // via bitcast instead, like the tfloat32/fp8 branches below.
       p->PrintType(op->dtype, temp);
-      temp << ">::infinity()";
+      temp << "::bitcast(" << (op->dtype.is_float16() ? "0x7c00" : "0x7f80")
+           << ")";
     } else if (std::isnan(op->value)) {
-      temp << "std::numeric_limits<";
       p->PrintType(op->dtype, temp);
-      temp << ">::quiet_NaN()";
+      temp << "::bitcast(0x7fff)";
     } else {
       p->PrintType(op->dtype, temp);
       temp << '(' << FlexibleHexFormat(op->value) << 'f';
