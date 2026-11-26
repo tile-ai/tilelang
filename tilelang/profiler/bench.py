@@ -72,6 +72,10 @@ def do_bench(
 
     Returns:
         Runtime in milliseconds (float) or list of quantile values if quantiles specified
+
+    Raises:
+        tilelang.profiler.errors.ProfileUnavailableError: The NPU driver cannot flush L2
+            for cold-cache timing, or msprof recorded no kernels.
     """
     if backend == "wall":
         if return_mode not in ("min", "max", "mean", "median"):
