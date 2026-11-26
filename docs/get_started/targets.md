@@ -54,8 +54,8 @@ invalid attributes are rejected when TVM constructs the target.
 
 ## Default target
 
-If you do not pass `target=...`, TileLang reads `TILELANG_DEFAULT_TARGET`. When the environment variable is unset,
-the default is `auto`.
+If you do not pass `target=...`, TileLang reads `TILELANG_DEFAULT_TARGET` first, then `TILELANG_TARGET` if the first
+variable is unset. The default is `auto` when both variables are unset.
 
 ```bash
 export TILELANG_DEFAULT_TARGET=cuda
