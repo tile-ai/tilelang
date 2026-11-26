@@ -1130,6 +1130,8 @@ inline bool TargetHasSVE() {
 
 class LoopVectorizer : public StmtMutator {
 public:
+  explicit LoopVectorizer(Target target) : target_(std::move(target)) {}
+
   Stmt VisitStmt_(const ForNode *op) final {
     if (op->kind == ForKind::kVectorized) {
       auto *extent_as_int = op->extent.as<IntImmNode>();
@@ -1149,11 +1151,28 @@ public:
           << "VectorizeLoop does not support a vectorized loop with a non-unit "
              "step, got step="
           << op->step.value();
+      // A lane-dependent branch may be scalarized before its body is visited.
+      // Decide for the whole loop so separate statements cannot reorder draws.
+      bool has_rng =
+          CheckContains::StmtContains(op->body, [](const PrimExpr &expr) {
+            const auto *call = expr.as<CallNode>();
+            return call && (call->op.same_as(rng_init()) ||
+                            call->op.same_as(rng_rand()) ||
+                            call->op.same_as(rng_rand_float()));
+          });
+      if (has_rng && !CanVectorizeAscendRngStore(target_, GetRef<For>(op))) {
+        For loop = Downcast<For>(StmtMutator::VisitStmt_(op));
+        loop.CopyOnWrite()->kind = ForKind::kSerial;
+        return loop;
+      }
       return TLVectorizer::Vectorize(op->loop_var, op->extent, op->body);
     } else {
       return StmtMutator::VisitStmt_(op);
     }
   }
+
+private:
+  Target target_;
 };
 
 class VectorizeSkipper : public StmtMutator {
@@ -1177,7 +1196,9 @@ tvm::transform::Pass VectorizeLoop(bool enable_vectorize = true) {
   auto pass_func = [=](PrimFunc f, const IRModule &m, const PassContext &ctx) {
     auto *n = f.CopyOnWrite();
     if (enable_vectorize) {
-      n->body = tvm::tl::LoopVectorizer()(std::move(n->body));
+      Target target =
+          f->GetAttr<Target>(tvm::attr::kTarget).value_or(Target::Current());
+      n->body = tvm::tl::LoopVectorizer(target)(std::move(n->body));
     } else {
       n->body = tvm::tl::VectorizeSkipper()(std::move(n->body));
     }

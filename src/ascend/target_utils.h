@@ -10,6 +10,7 @@
 
 #include <tvm/runtime/data_type.h>
 #include <tvm/target/target.h>
+#include <tvm/tirx/stmt.h>
 
 namespace tvm {
 namespace tl {
@@ -25,6 +26,9 @@ bool TargetIsAscend(Target target);
 // Whether the target selects PTO codegen within the Ascend architecture
 // ("ascend" kind + "pto" in target keys). Mirrors Python target_is_pto.
 bool TargetIsPTO(Target target);
+ffi::Optional<ffi::String> MatchAscendVectorRng(const PrimExpr &value,
+                                                int64_t lanes);
+bool CanVectorizeAscendRngStore(const Target &target, const tirx::For &loop);
 bool IsAscendVectorizableFP8(DataType dtype);
 
 } // namespace tl
