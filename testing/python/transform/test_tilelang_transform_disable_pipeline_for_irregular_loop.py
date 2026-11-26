@@ -9,6 +9,7 @@ from such loops so they lower as plain sequential loops.
 
 from tilelang import tvm as tvm
 import tilelang as tl
+import tilelang.testing
 import tilelang.language as T
 from tvm import tirx
 from tvm.tirx import Evaluate, For, PyStmtExprVisitor
@@ -182,6 +183,7 @@ def test_break_in_nested_loop_keeps_pipelining():
     assert _stray_exits(func) == []
 
 
+@tilelang.testing.requires_cuda
 def test_continue_in_pipelined_loop_not_warp_specialized():
     # tile-ai/tilelang#4467 (CodeRabbit review on #4467): warp specialization
     # used to run before DisablePipelineForIrregularLoop, rewriting a
@@ -194,6 +196,7 @@ def test_continue_in_pipelined_loop_not_warp_specialized():
         assert not _is_warp_specialized(ir)
 
 
+@tilelang.testing.requires_cuda
 def test_irregular_pipelined_loop_not_auto_warp_specialized():
     # AutoWarpSpecialization does not require num_stages (ScopeStages falls
     # back to 1), so stripping pipeline annotations alone is not enough:
@@ -204,6 +207,7 @@ def test_irregular_pipelined_loop_not_auto_warp_specialized():
         assert not _is_warp_specialized(ir)
 
 
+@tilelang.testing.requires_cuda
 def test_eligible_pipelined_loop_still_warp_specialized():
     # Control for the tests above: a pipelined loop without an exit must
     # still be warp-specialized on sm_90 under both default WS and auto WS.
