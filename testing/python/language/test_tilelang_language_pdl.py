@@ -158,14 +158,18 @@ def kernels_with_pdl_overlap_window(N, block_size=256, work_iters=8192, dtype=T.
 
 
 def _get_sm90_cuda_device():
-    """Return an SM90+ CUDA device for runtime PDL tests."""
+    """Return an SM90 CUDA device for runtime PDL tests.
+
+    The kernel is compiled for sm_90, and a cubin only runs on the
+    architecture it was compiled for, so a newer device is not a substitute.
+    """
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CuTeDSL PDL runtime test requires CUDA")
     for device_id in range(torch.cuda.device_count()):
-        if torch.cuda.get_device_capability(device_id) >= (9, 0):
+        if torch.cuda.get_device_capability(device_id) == (9, 0):
             return torch.device("cuda", device_id)
-    pytest.skip("CuTeDSL PDL runtime test requires an SM90+ CUDA device")
+    pytest.skip("CuTeDSL PDL runtime test requires an SM90 CUDA device")
 
 
 def _package_version(package_name: str) -> str:
@@ -311,6 +315,7 @@ def _lower_cutedsl_for_pdl(program):
     return artifact, wrapper
 
 
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_pdl_codegen_and_launcher_support():
     """Verify CuTeDSL PDL lowering and host launcher generation."""
 
@@ -332,7 +337,7 @@ def test_cutedsl_pdl_codegen_and_launcher_support():
     assert hasattr(tl, "griddepcontrol_wait")
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 def test_cutedsl_pdl_runtime_pipeline():
     """Run a CuTeDSL PDL pipeline and verify the produced tensors."""
 
@@ -358,7 +363,7 @@ def test_cutedsl_pdl_runtime_pipeline():
     tilelang.testing.torch_assert_close(c, ref_c, atol=1e-5, rtol=1e-5)
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl
 @pytest.mark.perf
 def test_cutedsl_pdl_overlap_microbenchmark():
     """Benchmark PDL overlap against a strict same-stream serial launch baseline.

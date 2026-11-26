@@ -88,7 +88,9 @@ class NVRTCLibraryGenerator(LibraryGenerator):
         if spec is None or spec.loader is None:
             raise ImportError(f"Failed to import module from file: {file_path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        # Cached launchers may live in a read-only secondary cache root.
+        source = spec.loader.get_source(module_name)
+        exec(compile(source, file_path, "exec", dont_inherit=True), module.__dict__)
         return module
 
     def update_host_func(self, host_func: str):

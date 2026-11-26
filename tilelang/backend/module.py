@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -18,11 +19,23 @@ if TYPE_CHECKING:
 
 BackendCallback = Callable[..., object]
 TargetPredicate = Callable[[Target], bool]
+ToolchainStamp = Callable[[], dict[str, str]] | Callable[[str, Mapping[str, object]], dict[str, str]]
 _T = TypeVar("_T")
 
 
 def _freeze_components(components: Mapping[str, tuple[_T, ...]]) -> Mapping[str, tuple[_T, ...]]:
     return MappingProxyType({target_kind: tuple(values) for target_kind, values in components.items()})
+
+
+def _toolchain_stamp_arity(name: str, fn: ToolchainStamp) -> int:
+    sig = inspect.signature(fn)
+    for arity in (2, 0):
+        try:
+            sig.bind(*(None,) * arity)
+            return arity
+        except TypeError:
+            continue
+    raise ValueError(f"BackendModule {name!r} toolchain_stamp must accept 0 or 2 positional arguments")
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +51,9 @@ class BackendModule:
     host_codegens: Mapping[str, HostCodegen] = field(default_factory=dict)
     host_codegen_hooks: Mapping[str, tuple[HostCodegenHook, ...]] = field(default_factory=dict)
     callbacks: Mapping[str, BackendCallback] = field(default_factory=dict)
+    # Identity of the toolchain used by this backend (0-arg or (execution_backend, pass_configs)).
+    toolchain_stamp: ToolchainStamp | None = None
+    _toolchain_stamp_arity: int = field(init=False, repr=False, compare=False, default=0)
 
     def __post_init__(self) -> None:
         target_kinds = tuple(self.target_kinds)
@@ -82,6 +98,7 @@ class BackendModule:
         callbacks = MappingProxyType(dict(self.callbacks))
         if any(not name for name in callbacks):
             raise ValueError(f"BackendModule {self.name!r} callback names must not be empty")
+        toolchain_arity = 0 if self.toolchain_stamp is None else _toolchain_stamp_arity(self.name, self.toolchain_stamp)
 
         object.__setattr__(self, "target_kinds", target_kinds)
         object.__setattr__(self, "pipelines", pipelines)
@@ -90,6 +107,7 @@ class BackendModule:
         object.__setattr__(self, "host_codegens", host_codegens)
         object.__setattr__(self, "host_codegen_hooks", host_codegen_hooks)
         object.__setattr__(self, "callbacks", callbacks)
+        object.__setattr__(self, "_toolchain_stamp_arity", toolchain_arity)
 
     def matches(self, target: Target) -> bool:
         """Return whether this backend module owns the target."""
@@ -146,6 +164,15 @@ class BackendModule:
         for hook in self.host_codegen_hooks.get(target_kind, ()):
             mod = hook.lower(mod, target_host, target)
         return mod
+
+    def get_toolchain_stamp(self, execution_backend: str, pass_configs: Mapping[str, object]) -> dict[str, str] | None:
+        """Return the active toolchain identity for cache keys, when declared."""
+
+        if self.toolchain_stamp is None:
+            return None
+        if self._toolchain_stamp_arity == 0:
+            return self.toolchain_stamp()  # type: ignore[call-arg]
+        return self.toolchain_stamp(execution_backend, pass_configs)  # type: ignore[call-arg]
 
     def allowed_execution_backends(self, target: Target, *, include_unavailable: bool = True) -> tuple[str, ...]:
         """Return execution backend names supported by the target."""
@@ -229,6 +256,11 @@ class BackendContext:
         """Generate host code for the resolved host target."""
 
         return self.module.codegen_host(mod, self.target_host)
+
+    def toolchain_stamp(self, pass_configs: Mapping[str, object] | None = None) -> dict[str, str] | None:
+        """Return the active toolchain identity for cache keys, when declared."""
+
+        return self.module.get_toolchain_stamp(self.execution_backend.name, pass_configs or {})
 
 
 _BACKENDS: dict[str, BackendModule] = {}

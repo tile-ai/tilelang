@@ -45,15 +45,6 @@ using namespace ffi;
 
 namespace reduce {
 
-inline Array<PrimExpr> InputPlaceholders(size_t n) {
-  Array<PrimExpr> result;
-  result.reserve(n);
-  for (size_t i = 0; i < n; ++i) {
-    result.push_back(InputPlaceholder(i));
-  }
-  return result;
-}
-
 /*!
  * \brief Resolve the participating thread range of a scalar AllReduce.
  *
@@ -78,13 +69,13 @@ inline Range ResolveAllReduceThreadRange(const Fragment &red_layout,
       << "tl.reduce: reduce layout replicate extent must be positive";
 
   arith::Analyzer analyzer;
-  for (size_t i = 0; i < red_layout->InputShape().size(); ++i) {
-    Var placeholder = InputPlaceholder(i);
+  for (size_t i = 0; i < red_layout->InputDim(); ++i) {
+    Var placeholder = red_layout->InputVar(i);
     analyzer.Bind(placeholder,
                   Range::FromMinExtent(make_zero(placeholder.dtype()),
                                        red_layout->InputShape()[i]));
   }
-  Var replicate_var = ReplicationPlaceholder();
+  Var replicate_var = red_layout->ReplicateVar();
   analyzer.Bind(replicate_var,
                 Range::FromMinExtent(make_zero(replicate_var.dtype()),
                                      red_layout->ReplicateExtent()));

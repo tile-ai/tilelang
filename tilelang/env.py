@@ -341,11 +341,17 @@ class EnvVar:
     def __set__(self, instance, value):
         """
         Called when the attribute is assigned to.
-        Stores the value as a runtime override (forced value).
-        Optionally, you can also sync this into os.environ for global effect.
+        Stores the value as an in-memory runtime override (`_forced_value`).
+
+        Note: `env.VAR = value` only updates the current Python process's memory
+        and does NOT modify `os.environ`. It is therefore invisible to child
+        processes (such as `spawn` workers in `par_compile` or compiler
+        subprocesses) and C++ `std::getenv`. Set `os.environ[key]` directly when
+        child-process visibility is required.
         """
         self._forced_value = value
-        # Uncomment the following line if you want the override to persist globally:
+        # NOTE: In-memory only (`env.VAR = value` is invisible to child/spawned
+        # processes and C++ getenv). Uncomment if global os.environ sync is desired:
         # os.environ[self.key] = value
 
 
@@ -467,6 +473,17 @@ class Environment:
         compute_version = nvcc.get_target_compute_version(target)  # e.g. "8.6"
         major, minor = nvcc.parse_compute_version(compute_version)  # split to (8, 6)
         os.environ["TORCH_CUDA_ARCH_LIST"] = f"{major}.{minor}"  # set env var for PyTorch
+
+    def get_cache_read_dirs(self) -> list[str]:
+        """Cache roots in lookup order; the first root is also writable."""
+        roots = self.TILELANG_CACHE_DIR.split(os.pathsep)
+        if any(not root for root in roots):
+            raise ValueError("TILELANG_CACHE_DIR must contain non-empty paths")
+        return roots
+
+    def get_cache_write_dir(self) -> str:
+        """Return the only root used for cache writes and cleanup."""
+        return self.get_cache_read_dirs()[0]
 
     # Cache control API (wrap CacheState)
     def is_cache_enabled(self) -> bool:

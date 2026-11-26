@@ -54,18 +54,6 @@ def _lower_cuda_source(program, arch: str) -> str:
 
 
 def _lower_cutedsl_source(program) -> str:
-    if not tvm.runtime.enabled("cuda"):
-        pytest.skip("TileLang CuTeDSL codegen requires TVM built with CUDA support.")
-    from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
-
-    try:
-        check_cutedsl_available()
-    except ImportError as err:
-        pytest.skip(f"CuTeDSL is not available: {err}")
-    build_cutedsl = tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True)
-    if build_cutedsl is None:
-        pytest.skip("TileLang CuTeDSL backend is not enabled in this build.")
-
     target = normalize_cutedsl_target({"kind": "cutedsl", "arch": "sm_90"})
     assert target is not None
     with target:
@@ -136,7 +124,7 @@ def test_fma_fmul_vectorized_cuda_codegen_sm100():
     assert source.count("tl::fma2(") >= WIDTH // 2
 
 
-@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cutedsl(support_required="compile-only")
 def test_fma_fmul_vectorized_cutedsl_codegen():
     source = _lower_cutedsl_source(_make_vectorized_program())
 

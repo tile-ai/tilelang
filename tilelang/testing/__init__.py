@@ -27,8 +27,10 @@ __all__ = [
     "main",
     "ascend_backend_compiled",
     "requires_ascend",
+    "requires_cutedsl",
     "requires_cuda_compute_version",
     "without_kernel_cache",
+    "default_target_is_cutedsl",
     "process_func",
     "regression",
 ] + [f"requires_cuda_compute_version_{op}" for op in ("ge", "gt", "le", "lt", "eq")]
@@ -83,6 +85,15 @@ def _check_is_cuda_or_cdna() -> bool:
         return False
 
 
+def default_target_is_cutedsl() -> bool:
+    """Whether TILELANG_DEFAULT_TARGET selects the CuTeDSL backend for unqualified compiles."""
+    from tilelang.env import env
+
+    target = env.get_default_target()
+    kind = target.get("kind") if isinstance(target, dict) else target
+    return str(kind).strip().lower() == "cutedsl"
+
+
 def ascend_backend_compiled() -> bool:
     """Whether this build includes the Ascend backend (USE_ASCEND).
 
@@ -127,6 +138,29 @@ requires_ascend = Feature(
     "Ascend",
     compile_time_check=ascend_backend_compiled,
     run_time_check=_ascend_device_available,
+)
+
+
+def _cutedsl_compile_available() -> bool | str:
+    """Whether this build and Python environment can lower/compile CuTeDSL targets."""
+    import tvm
+
+    if tvm.ffi.get_global_func("target.build.tilelang_cutedsl_without_compile", allow_missing=True) is None:
+        return "TileLang CuTeDSL backend is not enabled in this build"
+    try:
+        from tilelang.jit.adapter.cutedsl.checks import check_cutedsl_available
+
+        check_cutedsl_available()
+        return True
+    except (ImportError, ModuleNotFoundError, RuntimeError, AssertionError) as err:
+        return f"CuTeDSL is not available: {err}"
+
+
+requires_cutedsl = Feature(
+    "cutedsl",
+    "CuTeDSL",
+    compile_time_check=_cutedsl_compile_available,
+    parent_features="cuda",
 )
 
 

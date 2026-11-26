@@ -127,6 +127,12 @@ def lower_to_host_device_ir(
             target = context.target
             target_host = context.target_host
 
+            from tilelang.engine.host_mapped import validate_host_mapped_params
+
+            for func in mod.functions.values():
+                if isinstance(func, tirx.PrimFunc):
+                    validate_host_mapped_params(func, target, context.execution_backend.name)
+
             _is_host_call = get_host_call(is_device_c=is_cpu_device_backend(target))
             _is_device_call = get_device_call(is_device_c=is_cpu_device_backend(target))
 

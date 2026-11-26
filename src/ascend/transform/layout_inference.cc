@@ -28,6 +28,7 @@
 #include "ascend/layout/pto_parallel_layout.h"
 #include "ascend/op/utils.h"
 #include "ascend/target_utils.h"
+#include "ascend/transform/parallel_to_pto_utils.h"
 #include "ascend/transform/vf_regions.h"
 #include "backend/common/target_utils.h"
 #include "config.h"
@@ -79,23 +80,23 @@ bool ShapesEqual(const Array<PrimExpr> &lhs, const Array<PrimExpr> &rhs,
 }
 
 // A fragment layout published into the global layout map must be a closed
-// function of the layout placeholders (input indices + replication). Loop
+// function of its own bound variables (input indices + replication). Loop
 // completion can legitimately produce layouts referencing an enclosing serial
 // loop var (CompleteBufferFragment on `src[i, k]` bakes in `i`); such a
 // layout is meaningful only inside that loop's scope and would misdirect
-// every other consumer of the buffer. The placeholders are memoized
-// singletons, so pointer identity is the right membership test.
+// every other consumer of the buffer. Each Fragment owns its bound Vars, so
+// identity membership against InputVars()/ReplicateVar() is exact.
 bool FragmentReferencesForeignVars(const Fragment &fragment) {
-  std::unordered_set<const VarNode *> allowed;
-  allowed.insert(ReplicationPlaceholder().get());
-  for (int i = 0; i < static_cast<int>(fragment->InputDim()); ++i) {
-    allowed.insert(InputPlaceholder(i).get());
+  std::unordered_set<Var, ObjectPtrHash, ObjectPtrEqual> allowed;
+  allowed.insert(fragment->ReplicateVar());
+  for (const Var &v : fragment->InputVars()) {
+    allowed.insert(v);
   }
   bool foreign = false;
   auto scan = [&](const PrimExpr &expr) {
     PostOrderVisit(expr, [&](const ObjectRef &obj) {
-      if (const auto *var = obj.as<VarNode>()) {
-        if (!allowed.count(var)) {
+      if (auto var = obj.as<Var>()) {
+        if (!allowed.count(var.value())) {
           foreign = true;
         }
       }
@@ -438,11 +439,12 @@ public:
               << layout_map[buffer]->GetTypeKey();
           const auto &src_layout = src_layout_opt.value();
           ICHECK(dst_layout->InputDim() == src_layout->InputDim());
+          Array<Var> idx_vars = MakeLayoutVars(dst_layout->InputDim());
           Array<PrimExpr> indices;
           indices.reserve(dst_layout->InputDim());
           arith::Analyzer inner_analyzer;
-          for (int i = 0; i < dst_layout->InputDim(); ++i) {
-            auto x = InputPlaceholder(i);
+          for (size_t i = 0; i < dst_layout->InputDim(); ++i) {
+            Var x = idx_vars[i];
             indices.push_back(x);
             // should be literal - literal = 0, any analyzer will work
             ICHECK(is_zero(inner_analyzer.Simplify(
@@ -776,18 +778,10 @@ private:
   // comes from the loop layout's own inverse fragment, and the vectorize
   // pass recovers real addresses from that same fragment.
   // Returns true when the lane context was pushed. A PTO SIMD_VF block
-  // without any T.Parallel is a pure hand-written VMI region: it needs no
-  // lanes annotation and gets no lane context.
+  // without a Parallel requiring lane conversion needs no lanes annotation
+  // and gets no lane context, including explicit SIMD nests.
   bool PushPtoSimdVFContext(const SBlockNode *op) {
-    bool has_parallel = false;
-    PostOrderVisit(op->body, [&](const ObjectRef &node) {
-      if (auto *for_node = node.as<ForNode>()) {
-        if (for_node->kind == ForKind::kParallel) {
-          has_parallel = true;
-        }
-      }
-    });
-    if (!has_parallel) {
+    if (!pto::ScanPtoRegion(op->body).has_any_parallel) {
       return false;
     }
     auto lanes_anno = op->annotations.Get("tl.simdvf_lanes");
@@ -1048,7 +1042,7 @@ private:
             }
           });
 
-      if (InsidePtoSimdVF()) {
+      if (InsidePtoSimdVF() && !pto::UsesExplicitSIMD(op->body)) {
         // PTO lane layouts are built from the original nest and stay outside
         // the generic layout worklist. Only the outermost Parallel root of a
         // unit is recorded; nested Parallel layers are part of this unit.
@@ -1059,6 +1053,8 @@ private:
         return;
       }
 
+      // Explicit SIMD block loops keep the generic layout path used before
+      // PTO lane inference, including mixed explicit/scalar loop bodies.
       auto infer = ParallelOp(GetRef<For>(op));
       for (const auto &buffer : infer->GetAccessOrder()) {
         addToUseList(buffer);
@@ -1084,7 +1080,7 @@ private:
       thread_index_vec_.push_back(CurrentThreadIndex());
       thread_bounds_vec_.push_back(CurrentThreadBounds());
       analyzer_vec_.push_back(analyzer_.Clone());
-      bool in_pto_simd = InsidePtoSimdVF();
+      bool in_pto_simd = InsidePtoSimdVF() && !pto::UsesExplicitSIMD(op->body);
       in_pto_simd_vf_vec_.push_back(in_pto_simd);
       pto_lane_bounds_.push_back(in_pto_simd ? CurrentPtoLaneBounds()
                                              : Range());
@@ -1843,7 +1839,10 @@ private:
       }
       // Descend for the lane annotations; only the kLayoutMap writeback is
       // skipped for the block itself.
+      bool saved_inside_pto_simd_vf = inside_pto_simd_vf_;
+      inside_pto_simd_vf_ = true;
       SBlock block = Downcast<SBlock>(IRMutatorWithAnalyzer::VisitStmt_(op));
+      inside_pto_simd_vf_ = saved_inside_pto_simd_vf;
       if (block.same_as(GetRef<SBlock>(op))) {
         return ffi::GetRef<Stmt>(op);
       }
@@ -1893,6 +1892,12 @@ private:
   }
 
   Stmt VisitStmt_(const ForNode *op) final {
+    if (inside_pto_simd_vf_ && op->kind == ForKind::kParallel &&
+        pto::UsesExplicitSIMD(op->body)) {
+      // Explicit SIMD loops already iterate vector blocks. Generic layout
+      // annotations would flatten and unroll them as scalar lane loops.
+      return GetRef<Stmt>(op);
+    }
     if (!result_.for_map.count(GetRef<For>(op))) {
       return IRMutatorWithAnalyzer::VisitStmt_(op);
     }
@@ -1938,6 +1943,7 @@ private:
 
 private:
   const LayoutInferenceResult result_;
+  bool inside_pto_simd_vf_ = false;
 };
 
 tvm::transform::Pass AscendLayoutInference() {

@@ -75,7 +75,7 @@ def test_torch_backend_no_disk_cache_write():
     cache_logger.addHandler(handler)
     cache_logger.setLevel(logging.ERROR)
 
-    cache_root = KernelCache._get_cache_root()
+    cache_root = KernelCache._get_write_cache_root()
     before = set(os.listdir(cache_root)) if os.path.isdir(cache_root) else set()
 
     try:

@@ -10,6 +10,16 @@ from typing import Any
 class PassConfigKey(str, Enum):
     """Pass configuration keys for TileLang compiler."""
 
+    ARITH_Z3_RLIMIT = "arith.z3_rlimit"
+    """Z3 resource budget for each solver check. Default: 100,000.
+
+    Accepts integers from 0 to 2**32 - 1; 0 means unlimited. This is a
+    resource budget, not a timeout or an exact count of search iterations.
+    Each new analyzer captures the active PassContext setting, without
+    forcing lazy Z3 initialization. Explicit analyzer overrides take priority.
+    Supported by pass_configs in tilelang.compile and both @tilelang.jit modes.
+    """
+
     # TileLang specific configs: TL_XX
 
     TL_SIMPLIFY = "tl.Simplify"

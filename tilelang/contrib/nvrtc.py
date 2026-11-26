@@ -17,6 +17,11 @@ def get_nvrtc_version() -> tuple[int, int]:
     return (major, minor)
 
 
+def toolchain_stamp() -> dict[str, str]:
+    """Identity of the loaded NVRTC compiler for cache keys."""
+    return {"nvrtc": ".".join(map(str, get_nvrtc_version()))}
+
+
 def default_compile_options(compile_flags: list[str] | str | None = None) -> list[str]:
     """Extend the common CUDA compile options with NVRTC header compatibility."""
     options = nvcc.default_compile_options(compile_flags)
@@ -92,9 +97,6 @@ def compile_cuda(
             raise ValueError("options must be str or list of str")
 
     code = "#include <tl_templates/cuda/nvrtc_std.h>\n" + code
-
-    if "cudaGridDependencySynchronize" in code or "cudaTriggerProgrammaticLaunchCompletion" in code:
-        code = '#include "cuda_device_runtime_api.h"\n' + code
 
     code_bytes = bytes(code, "utf-8")
     result, program = nvrtc.nvrtcCreateProgram(code_bytes, bytes(file_name, "utf-8"), 0, [], [])

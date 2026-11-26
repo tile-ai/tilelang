@@ -51,6 +51,11 @@ bool TargetIsGfx950(Target target) {
   return false;
 }
 
+bool TargetIsGfx1200(const Target &target) {
+  return TargetIsRocm(target) &&
+         target->GetAttr<ffi::String>("mcpu").value_or("") == "gfx1200";
+}
+
 bool TargetRocmHasAsyncCopy(Target target) {
   if (!TargetIsCDNA(target))
     return false;

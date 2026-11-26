@@ -33,8 +33,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  # Cancel superseded PR/release runs per ref; let scheduled and manual nightly
+  # runs build independently and serialize only inside the publish jobs.
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || 'latest' }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'release' }}
 
 env:
   PYTHONDEVMODE: "1"
@@ -57,10 +59,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env:
-      # `NO_VERSION_LABEL=ON` disables embedding the toolchain / git commit hash in version metadata.
-      # Otherwise, the version of the SDist has a git hash suffix (e.g., 0.1.0+gitabcdef12),
-      # but the package built from the SDist has no way to get the git hash (it is not a git repo),
-      # leading to inconsistent versions between SDist and built packages (+gitabcdef12 vs. +gitunknown).
+      # Use the same base version for the sdist and wheels built from it.
       NO_VERSION_LABEL: 'ON'
 
     steps:
@@ -194,7 +193,10 @@ jobs:
             echo "UV_TORCH_BACKEND=cu${CUDA_VERSION_MAJMIN_NODOT}" | tee -a "${GITHUB_ENV}"
           fi
 
-          if [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # OBS keeps distinct versions of every daily build across all platforms.
+            echo "TILELANG_BUILD_WHEEL_WITH_DATE=ON" | tee -a "${GITHUB_ENV}"
+          elif [[ "${{ env.IS_RELEASE }}" == "true" ]]; then
             echo "NO_VERSION_LABEL=ON" | tee -a "${GITHUB_ENV}"
           fi
 
@@ -223,7 +225,10 @@ jobs:
             "UV_TORCH_BACKEND=cpu" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
-          if ("${{ env.IS_RELEASE }}" -eq "true") {
+          if ("${{ github.event_name }}" -eq "schedule" -or "${{ github.event_name }}" -eq "workflow_dispatch") {
+            # OBS keeps distinct versions of every daily build across all platforms.
+            "TILELANG_BUILD_WHEEL_WITH_DATE=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
+          } elseif ("${{ env.IS_RELEASE }}" -eq "true") {
             "NO_VERSION_LABEL=ON" | Tee-Object -FilePath $env:GITHUB_ENV -Append
           }
 
@@ -444,18 +449,16 @@ jobs:
         if: github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]')
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target.toolkit }}
+          name: wheels-${{ matrix.target.python_version }}-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse/*.whl
           if-no-files-found: error
 
   test-wheels-gpu:
     name: Test built wheels with ${{ matrix.target.toolkit }} (on ${{ matrix.target.name }})
     # The build runners have no GPU, so nothing above proves the built wheels
-    # actually launch kernels: the Linux wheels are fat CUDA+ROCm builds and
-    # neither half was ever executed. This job installs the built wheel on
-    # self-hosted GPU runners and runs a real kernel on each backend. Wheel
-    # artifacts are only uploaded outside PRs (or for [Release] PRs), so gate
-    # this job the same way as the "Upload wheels" step. It is deliberately
+    # actually launch kernels. This job installs the shared Linux wheel on
+    # self-hosted GPU runners and runs a real kernel on CUDA and ROCm.
+    # Run outside PRs and for [Release] PRs. It is deliberately
     # not in the needs-chain of publish-pypi: an offline self-hosted runner
     # must not be able to block a release.
     if: |
@@ -559,7 +562,7 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           # Matches the wheels built for this runner's os/arch (Linux-X64).
-          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}-*
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}
           path: wheelhouse
           merge-multiple: true
 
@@ -594,6 +597,179 @@ jobs:
               rm -rf test-venv
             )
           done
+
+  test-wheels-ascend:
+    name: Test built wheels on Ascend NPU (CANN ${{ matrix.cann }}, Python ${{ matrix.python }})
+    # The Linux wheel's Ascend half is never executed before release; this
+    # job installs the built wheel on the same self-hosted Ascend runner as
+    # the Ascend CI job, but with the CANN 9.3.0 weekly image and Python
+    # 3.13, and runs the AscendC suites against it. It gates the nightly
+    # GitHub publication; publish-obs and publish-pypi are deliberately not
+    # gated on the (offline) self-hosted runners.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name != 'pull_request' || contains(github.event.pull_request.title, '[Release]'))
+    needs: [build-wheels]
+    runs-on: linux-amd64-a5-4
+    strategy:
+      fail-fast: false
+      matrix:
+        cann:
+          - "9.3.0-weekly.20261112"
+        python:
+          - "3.13"
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/tilelang/tilelang-ascend:cann${{ matrix.cann }}-ubuntu22.04-py${{ matrix.python }}
+    timeout-minutes: 120
+    env:
+      PIP_USER: "0"
+
+    steps:
+      - name: Checkout repository
+        # Test suites only; no submodules: the tests run against the
+        # installed wheel, not the source tree.
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Download built wheels
+        # The Linux x86_64 fat wheel (CUDA+ROCm+Ascend); the self-hosted
+        # NPU runners are amd64.
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*-${{ runner.os }}-${{ runner.arch }}
+          path: wheelhouse
+          merge-multiple: true
+
+      - name: Set up environment and install Ascend wheel
+        id: wheel-install
+        shell: bash
+        run: |
+          # Same environment setup as the Ascend job in ci.yml. Each matrix
+          # leg runs in the CANN container for its own Python version, so
+          # `python` below is that version.
+          for CANN_SET_ENV in \
+            "${ASCEND_HOME_PATH:-}/set_env.sh" \
+            "${ASCEND_TOOLKIT_HOME:-}/set_env.sh" \
+            /usr/local/Ascend/ascend-toolkit/set_env.sh \
+            /usr/local/Ascend/cann-*/set_env.sh; do
+            if [[ -f "${CANN_SET_ENV}" ]]; then
+              source "${CANN_SET_ENV}"
+              break
+            fi
+          done
+          export LD_LIBRARY_PATH="/usr/local/Ascend/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver_libs:${LD_LIBRARY_PATH:-}"
+          # Persist the CANN environment for subsequent test steps.
+          for ENV_NAME in PATH LD_LIBRARY_PATH PYTHONPATH BISHENG_HOME TOOLCHAIN_HOME \
+            ASCEND_HOME_PATH ASCEND_TOOLKIT_HOME ASCEND_OPP_PATH ASCEND_AICPU_PATH \
+            ASCEND_CUSTOM_OPP_PATH; do
+            if [[ -v "${ENV_NAME}" ]]; then
+              echo "${ENV_NAME}=${!ENV_NAME}" >> "${GITHUB_ENV}"
+            fi
+          done
+
+          # Keep the runner's preinstalled Torch/Torch-NPU stack.
+          CI_BASE_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          uv venv --clear --system-site-packages --python "${CI_BASE_PYTHON}" .venv
+          source .venv/bin/activate
+          export PIP_CONSTRAINT="${RUNNER_TEMP}/ascend-torch-constraints.txt"
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+          import torch
+          import torch_npu
+
+          assert torch.npu.is_available(), "Ascend CI requires an available NPU"
+          with open(os.environ["PIP_CONSTRAINT"], "w") as constraints:
+              for package in ("torch", "torch_npu"):
+                  requirement = f"{package}=={version(package)}"
+                  constraints.write(f"{requirement}\n")
+                  print(requirement)
+          PY
+
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -v -r requirements-test.txt pybind11==2.12.0
+
+          # Install the wheel for this Ascend environment: the Linux x86_64
+          # fat wheel is a single abi3 artifact (pyproject: wheel.py-api =
+          # "cp39"), so it installs into every Python version of the matrix.
+          ls -lh wheelhouse/
+          WHEEL="$(ls wheelhouse/*.whl 2>/dev/null | head -n 1 || true)"
+          if [[ -z "${WHEEL}" ]]; then
+            echo "::error::no wheel artifact found in wheelhouse/"
+            exit 1
+          fi
+          echo "Installing wheel: ${WHEEL}"
+          echo "WHEEL_NAME=$(basename "${WHEEL}")" >> "${GITHUB_ENV}"
+          # pip (not uv) honors PIP_CONSTRAINT, keeping the container's
+          # preinstalled torch/torch_npu stack.
+          python -m pip install -v "${WHEEL}"
+
+          # The pytest suites below must exercise the *installed wheel*, but
+          # they need the checkout: testing/conftest.py inserts the repo root
+          # on sys.path deliberately. With tilelang/ moved aside, every
+          # repo-root sys.path entry resolves `import tilelang` to the wheel
+          # in the venv's site-packages instead. (rm -rf first: the workspace
+          # is persistent on self-hosted runners.)
+          rm -rf tilelang.src-hidden
+          mv tilelang tilelang.src-hidden
+
+          # Guard: fail fast if the source tree would still shadow the wheel.
+          python - <<'PY'
+          import tilelang
+
+          print("tilelang resolves to:", tilelang.__file__)
+          assert "site-packages" in tilelang.__file__, f"source tree shadows the wheel: {tilelang.__file__}"
+          PY
+
+      - name: Run AscendC examples
+        id: backend-examples
+        if: ${{ !cancelled() && steps.wheel-install.outcome == 'success' }}
+        shell: bash
+        env:
+          TILELANG_DEFAULT_TARGET: ascend
+          TILELANG_EXECUTION_BACKEND: auto
+        run: |
+          source .venv/bin/activate
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 4 examples/ascend
+
+      - name: Run AscendC unit tests
+        id: backend-unit-tests
+        if: ${{ !cancelled() && steps.wheel-install.outcome == 'success' }}
+        shell: bash
+        env:
+          TEST_MARKERS: not pto
+        run: |
+          source .venv/bin/activate
+          # test_ascend_vmi_alloc_marker.py builds a CUDA Target at module
+          # import time, which aborts collection on the CUDA-less NPU
+          # container; all its tests are pto-marked and excluded anyway.
+          python -m pytest --verbose --durations=0 --maxfail=3 -n 32 -m "${TEST_MARKERS}" \
+            --ignore testing/ascend/transform/test_ascend_vmi_alloc_marker.py \
+            testing/ascend
+
+      - name: Summarize Ascend wheel test results
+        if: ${{ always() }}
+        shell: bash
+        env:
+          WHEEL_NAME: ${{ env.WHEEL_NAME }}
+          CANN_VERSION: ${{ matrix.cann }}
+          PYTHON_VERSION: ${{ matrix.python }}
+          INSTALL_RESULT: ${{ steps.wheel-install.outcome }}
+          EXAMPLES_RESULT: ${{ steps.backend-examples.outcome }}
+          UNIT_RESULT: ${{ steps.backend-unit-tests.outcome }}
+        run: |
+          {
+            echo "### Test built wheels on Ascend NPU (CANN ${CANN_VERSION}, Python ${PYTHON_VERSION})"
+            echo
+            echo "Wheel: \`${WHEEL_NAME:-unknown}\`"
+            echo
+            echo "| Step | Result |"
+            echo "| --- | --- |"
+            echo "| Install wheel | ${INSTALL_RESULT} |"
+            echo "| AscendC examples | ${EXAMPLES_RESULT} |"
+            echo "| AscendC unit tests | ${UNIT_RESULT} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   list-artifacts:
     name: List artifacts
@@ -664,3 +840,398 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-obs:
+    name: Publish wheels to OBS nightly repo
+    # Publish all built wheels (Linux, Windows, macOS) as soon as build-wheels
+    # succeeds; the GPU/NPU wheel tests run in parallel and do not gate this
+    # mirror. publish-pypi is deliberately NOT gated on the (offline)
+    # self-hosted runners, so a release cannot be blocked.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OBS_BUCKET: tilelang-open
+      OBS_REGION: cn-north-4
+    # Serialize publication across refs: every run uploads to the same OBS
+    # directory, and the workflow-level group (per-ref) does not stop two refs
+    # from publishing concurrently. Without this, run A could list the
+    # directory before run B's upload and then overwrite B's index.html with a
+    # stale file list, hiding B's wheel until the next publication. Builds and
+    # tests stay parallel; only the upload -> ls -> index sequence queues here.
+    # cancel-in-progress must stay false: never kill an in-flight publish.
+    concurrency:
+      group: publish-wheels-to-obs
+      cancel-in-progress: false
+
+    steps:
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: wheelhouse
+
+      - name: Setup obsutil and upload to OBS
+        id: upload_obs
+        env:
+          AK: ${{ secrets.NIGHTLY_OBS_AK }}
+          SK: ${{ secrets.NIGHTLY_OBS_SK }}
+        run: |
+          # No -x: keep the expanded obsutil config command out of the trace.
+          set -euo pipefail
+          WHL_COUNT=$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)
+          if [ "${WHL_COUNT}" -eq 0 ]; then
+            echo "::error::No wheel artifacts found"
+            exit 1
+          fi
+          if [ -z "${AK}" ] || [ -z "${SK}" ]; then
+            echo "::error::OBS credentials are empty (NIGHTLY_OBS_AK / NIGHTLY_OBS_SK)."
+            exit 1
+          fi
+          curl -fL "https://obs-community.obs.cn-north-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz" -o obsutil.tar.gz
+          gzip -t obsutil.tar.gz || { echo "obsutil.tar.gz is not a valid gzip"; exit 1; }
+          tar xzf obsutil.tar.gz
+          rm -f obsutil.tar.gz
+          mv obsutil_linux_* obsutil
+
+          obsutil/obsutil config -i="${AK}" -k="${SK}" -e="https://obs.${OBS_REGION}.myhuaweicloud.com"
+          OBS_DIR="obs://${OBS_BUCKET}/TileLang/"
+          timestamp=$(date -u +%Y%m%d%H%M%S)
+          batch_dir="${OBS_DIR}${timestamp}/"
+          for wheel in wheelhouse/*.whl; do
+            obsutil/obsutil cp "${wheel}" "${batch_dir}"
+          done
+
+          # Include both legacy wheels at the root and wheels in timestamp folders.
+          obsutil/obsutil ls "${OBS_DIR}" -s -limit=0 \
+            | sed -n "s|^${OBS_DIR}||p" \
+            | grep -E '^([0-9]{14}/)?[^/]+\.whl$' \
+            | sort -u > files.txt
+          python3 - <<'PY'
+          import html, pathlib, urllib.parse
+
+          files = [
+              line.strip()
+              for line in pathlib.Path("files.txt").read_text().splitlines()
+              if line.strip()
+          ]
+          lines = ["<!DOCTYPE html>", "<html><body>"]
+          for f in files:
+              # OBS decodes literal '+' in URL paths as space (403); encode '+' as '%2B'.
+              lines.append(f'<a href="{urllib.parse.quote(f)}">{html.escape(pathlib.PurePosixPath(f).name)}</a><br />')
+          lines.append("</body></html>")
+          pathlib.Path("index.html").write_text("\n".join(lines) + "\n")
+          PY
+          obsutil/obsutil cp index.html "${OBS_DIR}" -meta=Content-Type:text/html
+
+          # Verify anonymous HTTPS access for index.html and every wheel uploaded
+          # in this run. If the bucket policy does not already grant public read
+          # on TileLang/*, fall back to object-level public-read ACLs.
+          PUBLIC_BASE="https://${OBS_BUCKET}.obs.${OBS_REGION}.myhuaweicloud.com/TileLang"
+          verify_public_read() {
+            curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/index.html" >/dev/null || return 1
+            for wheel in wheelhouse/*.whl; do
+              local href
+              href="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$(basename "${wheel}")")"
+              curl -fsSI --retry 3 --retry-delay 2 "${PUBLIC_BASE}/${timestamp}/${href}" >/dev/null || return 1
+            done
+          }
+
+          if ! verify_public_read; then
+            echo "Objects are not publicly readable via bucket policy; applying -acl=public-read..."
+            for wheel in wheelhouse/*.whl; do
+              obsutil/obsutil chattri "${batch_dir}$(basename "${wheel}")" -acl=public-read || {
+                echo "::error::Failed to set public-read ACL on $(basename "${wheel}"). Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
+                exit 1
+              }
+            done
+            obsutil/obsutil chattri "${OBS_DIR}index.html" -acl=public-read || {
+              echo "::error::Failed to set public-read ACL on index.html. Grant anonymous GetObject on TileLang/* in bucket policy or grant PutObjectAcl to NIGHTLY_OBS_AK."
+              exit 1
+            }
+            if ! verify_public_read; then
+              echo "::error::Uploaded OBS objects are still not publicly readable over HTTPS (${PUBLIC_BASE}/index.html)."
+              exit 1
+            fi
+          fi
+
+          echo "timestamp=${timestamp}" >> "${GITHUB_OUTPUT}"
+          echo "Published ${WHL_COUNT} wheel(s) to ${batch_dir}; index lists $(wc -l < files.txt) file(s)."
+
+      - name: Update tile-ai/whl nightly-cn index
+        env:
+          GH_TOKEN: ${{ secrets.NIGHTLY_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::NIGHTLY_GITHUB_TOKEN is not configured; skipping tile-ai/whl nightly-cn index update."
+            exit 0
+          fi
+
+          gh auth setup-git --hostname github.com --force
+          PUBLIC_BASE="https://${OBS_BUCKET}.obs.${OBS_REGION}.myhuaweicloud.com/TileLang"
+          export PUBLIC_BASE
+
+          update_whl_repo() {
+            python3 - "${{ steps.upload_obs.outputs.timestamp }}" <<'PY'
+          import hashlib, html, os, pathlib, re, sys, urllib.parse
+
+          def wheel_sort_key(filename: str) -> tuple:
+              ver = filename.split("-")[1] if "-" in filename else filename
+              m = re.search(r"[+.]d(\d{8})(?:\.|$)", ver)
+              date_num = int(m.group(1)) if m else 0
+              parts = [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", ver)]
+              return (date_num, parts, filename)
+
+          public_base = os.environ["PUBLIC_BASE"].rstrip("/")
+          repo_dir = pathlib.Path("tilelang-whl")
+          cn_dir = repo_dir / "nightly-cn"
+          cn_dir.mkdir(parents=True, exist_ok=True)
+          index_file = cn_dir / "index.html"
+
+          batch_url = f"{public_base}/{sys.argv[1]}"
+          obs_live = {
+              f"{public_base}/{urllib.parse.quote(line.strip())}"
+              for line in pathlib.Path("files.txt").read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          }
+
+          entries: dict[str, str] = {}
+          if index_file.exists():
+              for href, text in re.findall(r'<a\s+href="([^"]+)">([^<]+)</a>', index_file.read_text(encoding="utf-8")):
+                  name = html.unescape(text).strip()
+                  url = html.unescape(href).strip()
+                  if url.partition("#")[0] in obs_live and re.search(r"#sha256=[0-9a-f]{64}$", url):
+                      entries[name] = url
+
+          for whl in sorted(pathlib.Path("wheelhouse").glob("*.whl")):
+              sha256 = hashlib.sha256(whl.read_bytes()).hexdigest()
+              entries[whl.name] = f"{batch_url}/{urllib.parse.quote(whl.name)}#sha256={sha256}"
+
+          lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Nightly Python Wheels (China Mainland OBS Mirror)</h1>",
+              *[f'<a href="{html.escape(entries[k], quote=True)}">{html.escape(k)}</a><br />' for k in sorted(entries, key=wheel_sort_key)],
+              "</body></html>",
+          ]
+          index_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          subdirs = sorted(d.name for d in repo_dir.iterdir() if d.is_dir() and not d.name.startswith("."))
+          root_lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Python Wheels</h1>",
+              *[f'<a href="{html.escape(d, quote=True)}/">{html.escape(d)}</a><br />' for d in subdirs],
+              "</body></html>",
+          ]
+          (repo_dir / "index.html").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
+          PY
+          }
+
+          for attempt in 1 2 3; do
+            rm -rf tilelang-whl
+            git clone https://github.com/tile-ai/whl.git tilelang-whl
+            update_whl_repo
+            git -C tilelang-whl config user.name "github-actions[bot]"
+            git -C tilelang-whl config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C tilelang-whl add -A
+            if git -C tilelang-whl diff --staged --quiet; then
+              echo "No nightly-cn index changes to commit."
+              exit 0
+            fi
+            git -C tilelang-whl commit -m "Update nightly-cn wheel index (${GITHUB_SHA::8})"
+            if git -C tilelang-whl push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push conflict on attempt ${attempt}; retrying..."
+            sleep 2
+          done
+          echo "::error::Failed to push nightly-cn index to tile-ai/whl after 3 attempts."
+          exit 1
+
+      - name: Summary
+        run: |
+          CN_WHL_URL="https://tile-ai.github.io/whl/nightly-cn"
+          OBS_INDEX_URL="https://${OBS_BUCKET}.obs.${OBS_REGION}.myhuaweicloud.com/TileLang/index.html"
+          {
+            echo "### TileLang nightly wheels published to OBS"
+            echo
+            echo "- OBS path: \`obs://${OBS_BUCKET}/TileLang/${{ steps.upload_obs.outputs.timestamp }}/\`"
+            echo "- SHA-256 verified CN mirror index: \`pip install -U -f ${CN_WHL_URL} tilelang\` (or \`uv pip install -U -f ${CN_WHL_URL} tilelang\`)"
+            echo "- Direct OBS index: \`pip install -U -f ${OBS_INDEX_URL} tilelang\`"
+            echo
+            ls -1 wheelhouse/*.whl | sed 's|^|- |'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish-github-nightly:
+    name: Publish wheels to GitHub nightly repo
+    # Publish all built wheels to tile-ai/tilelang-nightly GitHub Releases and
+    # update the SHA-256-pinned index at https://tile-ai.github.io/whl/nightly
+    # after the Linux CUDA/ROCm GPU smoke tests and the Ascend NPU test pass.
+    # Runs in parallel with publish-obs so an outage on one mirror does not
+    # block the other.
+    if: |
+      github.repository_owner == 'tile-ai' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
+    needs: [test-wheels-gpu, test-wheels-ascend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: publish-wheels-to-github-nightly
+      cancel-in-progress: false
+
+    steps:
+      - name: Download built wheels
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: wheelhouse
+
+      - name: Publish release to tile-ai/tilelang-nightly and update tile-ai/whl
+        id: publish_gh
+        env:
+          GH_TOKEN: ${{ secrets.NIGHTLY_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          WHL_COUNT=$(find wheelhouse -maxdepth 1 -name '*.whl' | wc -l)
+          if [ "${WHL_COUNT}" -eq 0 ]; then
+            echo "::error::No wheel artifacts found"
+            exit 1
+          fi
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::NIGHTLY_GITHUB_TOKEN is not configured; skipping GitHub nightly publication (tile-ai/tilelang-nightly and tile-ai/whl)."
+            echo "skipped=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          TAG="$(python3 - <<'PY'
+          import pathlib, re
+
+          def ver_key(ver: str) -> tuple:
+              m = re.search(r"[+.]d(\d{8})(?:\.|$)", ver)
+              date_num = int(m.group(1)) if m else 0
+              parts = [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", ver)]
+              return (date_num, parts, ver)
+
+          versions = sorted({p.name.split("-")[1] for p in pathlib.Path("wheelhouse").glob("*.whl")}, key=ver_key)
+          print(f"v{versions[-1]}")
+          PY
+          )"
+          NIGHTLY_REPO="tile-ai/tilelang-nightly"
+          echo "Publishing ${WHL_COUNT} wheel(s) to ${NIGHTLY_REPO} tag ${TAG}..."
+
+          if gh release view "${TAG}" --repo "${NIGHTLY_REPO}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" wheelhouse/*.whl --clobber --repo "${NIGHTLY_REPO}"
+          else
+            gh release create "${TAG}" wheelhouse/*.whl \
+              --repo "${NIGHTLY_REPO}" \
+              --prerelease \
+              --title "TileLang Nightly ${TAG}" \
+              --notes "Automated nightly wheels built from tile-ai/tilelang@${GITHUB_SHA}."
+          fi
+          gh release view "${TAG}" --repo "${NIGHTLY_REPO}" --json assets > release_assets.json
+
+          gh auth setup-git --hostname github.com --force
+
+          update_whl_repo() {
+            python3 - <<'PY'
+          import hashlib, html, json, pathlib, re
+
+          def wheel_sort_key(filename: str) -> tuple:
+              ver = filename.split("-")[1] if "-" in filename else filename
+              m = re.search(r"[+.]d(\d{8})(?:\.|$)", ver)
+              date_num = int(m.group(1)) if m else 0
+              parts = [int(x) if x.isdigit() else x for x in re.split(r"(\d+)", ver)]
+              return (date_num, parts, filename)
+
+          repo_dir = pathlib.Path("tilelang-whl")
+          nightly_dir = repo_dir / "nightly"
+          nightly_dir.mkdir(parents=True, exist_ok=True)
+          index_file = nightly_dir / "index.html"
+
+          entries: dict[str, str] = {}
+          if index_file.exists():
+              for href, text in re.findall(r'<a\s+href="([^"]+)">([^<]+)</a>', index_file.read_text(encoding="utf-8")):
+                  entries[html.unescape(text).strip()] = html.unescape(href).strip()
+
+          assets = {
+              a["name"]: a["browser_download_url"]
+              for a in json.loads(pathlib.Path("release_assets.json").read_text(encoding="utf-8"))["assets"]
+          }
+          for whl in sorted(pathlib.Path("wheelhouse").glob("*.whl")):
+              if whl.name not in assets:
+                  raise RuntimeError(f"Uploaded wheel {whl.name} missing from release assets")
+              sha256 = hashlib.sha256(whl.read_bytes()).hexdigest()
+              entries[whl.name] = f"{assets[whl.name]}#sha256={sha256}"
+
+          # Keep the 500 most recent wheel entries (~3+ months across 5 platforms)
+          # so index.html stays compact while supporting historical version pins.
+          kept_names = sorted(entries, key=wheel_sort_key)[-500:]
+          lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Nightly Python Wheels</h1>",
+              *[f'<a href="{html.escape(entries[k], quote=True)}">{html.escape(k)}</a><br />' for k in kept_names],
+              "</body></html>",
+          ]
+          index_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          subdirs = sorted(d.name for d in repo_dir.iterdir() if d.is_dir() and not d.name.startswith("."))
+          root_lines = [
+              "<!DOCTYPE html>",
+              "<html><body>",
+              "<h1>TileLang Python Wheels</h1>",
+              *[f'<a href="{html.escape(d, quote=True)}/">{html.escape(d)}</a><br />' for d in subdirs],
+              "</body></html>",
+          ]
+          (repo_dir / "index.html").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
+          PY
+          }
+
+          for attempt in 1 2 3; do
+            rm -rf tilelang-whl
+            git clone https://github.com/tile-ai/whl.git tilelang-whl
+            update_whl_repo
+            git -C tilelang-whl config user.name "github-actions[bot]"
+            git -C tilelang-whl config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C tilelang-whl add -A
+            if git -C tilelang-whl diff --staged --quiet; then
+              echo "No nightly index changes to commit."
+              break
+            fi
+            git -C tilelang-whl commit -m "Update nightly wheel index for ${TAG}"
+            if git -C tilelang-whl push origin HEAD:main; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "::error::Failed to push nightly index to tile-ai/whl after 3 attempts."
+              exit 1
+            fi
+            echo "Push conflict on attempt ${attempt}; retrying..."
+            sleep 2
+          done
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "skipped=false" >> "${GITHUB_OUTPUT}"
+
+      - name: Summary
+        run: |
+          INDEX_URL="https://tile-ai.github.io/whl/nightly"
+          {
+            echo "### TileLang nightly wheels (GitHub Releases)"
+            echo
+            if [ "${{ steps.publish_gh.outputs.skipped }}" = "true" ]; then
+              echo "Skipped: \`NIGHTLY_GITHUB_TOKEN\` secret is not configured yet."
+            else
+              echo "- Release: https://github.com/tile-ai/tilelang-nightly/releases/tag/${{ steps.publish_gh.outputs.tag }}"
+              echo "- Install command: \`pip install -U -f ${INDEX_URL} tilelang\` (or \`uv pip install -U -f ${INDEX_URL} tilelang\`)"
+              echo
+              ls -1 wheelhouse/*.whl | sed 's|^|- |'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"

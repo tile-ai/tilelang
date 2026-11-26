@@ -197,6 +197,37 @@ def test_cython_dynamic_symbol_shared_by_shape_and_stride(present):
     assert lib.symbol == (4 if any(present) else 0)
 
 
+def test_host_mapped_wrapper_keeps_default_cuda_resolver(monkeypatch):
+    """Existing wrapper callers may omit the newly injectable resolver."""
+    import ctypes
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from tilelang.engine.param import KernelParam
+    from tilelang.jit.adapter.cython.adapter import CythonKernelWrapper
+
+    buffer = tvm.tirx.decl_buffer((1,), "float32")
+    params = [KernelParam.from_buffer(buffer)]
+    lookup = Mock(return_value=lambda pointer: ctypes.c_void_p(pointer.value + 128))
+    monkeypatch.setattr(tvm, "get_global_func", lookup)
+    lib = SimpleNamespace(call=Mock(return_value=0))
+    wrapper = CythonKernelWrapper([], params, lib, host_mapped_indices=[0])
+    wrapper.set_dynamic_symbolic_map({})
+    wrapper.set_dynamic_symbolic_sources({})
+    wrapper.set_ptr_map({})
+    wrapper.set_buffer_device_map({"buffer": (0, torch.device("cpu"))})
+    wrapper.set_buffer_dtype_map({"buffer": (0, torch.float32)})
+    wrapper.set_static_shape_map({"buffer": (0, [(0, 1)])})
+    wrapper.set_static_strides_map({})
+    wrapper.set_static_contiguous_list([(0, "buffer")])
+
+    tensor = torch.empty(1)
+    wrapper.forward([tensor], stream=0)
+
+    lookup.assert_called_once_with("tl.cuda.get_host_mapped_pointer")
+    assert lib.call.call_args.args[0].value == tensor.data_ptr() + 128
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_cython_pdl():
@@ -276,6 +307,37 @@ def test_cython_dynamic_shape_output_before_input():
     a = torch.arange(128, dtype=torch.float32).cuda()
     out = kernel()(a)
     tilelang.testing.torch_assert_close(out, a + 9, atol=0, rtol=0)
+
+
+@tilelang.testing.requires_cuda
+def test_cython_dynamic_shared_memory_on_each_device():
+    """The dynamic shared memory limit is raised on every device a kernel
+    launches on, not only on the one current at load time.
+
+    See https://github.com/tile-ai/tilelang/issues/3881.
+    """
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    n, smem = 1 << 16, 16384  # 64 KB, over the default 48 KB limit
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), T.float32), B: T.Tensor((n,), T.float32)):
+        with T.Kernel(n // 256, threads=256) as bx:
+            S = T.alloc_shared((smem,), T.float32)
+            for i in T.Parallel(smem):
+                S[i] = A[bx * 256 + i % 256]
+            for i in T.Parallel(256):
+                B[bx * 256 + i] = S[i * (smem // 256)] + 1.0
+
+    with torch.cuda.device(0):
+        kernel = tilelang.compile(main, execution_backend="cython")
+    j = torch.arange(n)
+    for device in (1, 0):
+        with torch.cuda.device(device):
+            a = torch.randn(n, device=f"cuda:{device}")
+            b = torch.empty_like(a)
+            kernel(a, b)
+            torch.testing.assert_close(b, a[(j // 256 * 256 + j % 4 * 64).to(a.device)] + 1.0, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

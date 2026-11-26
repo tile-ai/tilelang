@@ -13,5 +13,3 @@ flash-attn==2.5.8
 # flash-attn release supports torch 2.14.
 torch<2.14
 cuda-python==13.0.3
-# Use the cu13 extra so CuTeDSL installs the CUDA 13 runtime package.
-nvidia-cutlass-dsl[cu13]==4.7.0

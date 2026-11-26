@@ -10,6 +10,7 @@ from collections.abc import Callable
 from tilelang import tvm as tvm
 from tvm.target import Target
 from tilelang.engine.param import KernelParam
+from tilelang.engine.host_mapped import get_host_mapped_params
 from tvm import tirx
 from tvm.relax import TensorType
 
@@ -171,7 +172,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg += f"\n{self.lib_code}"
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        self.cython_wrapper = CythonKernelWrapper(self.result_idx, self.params, self.lib, *_device_providers())
+        self.cython_wrapper = CythonKernelWrapper(
+            self.result_idx,
+            self.params,
+            self.lib,
+            *_device_providers(),
+            host_mapped_indices=get_host_mapped_params(self.prim_func),
+            get_host_mapped_pointer=self._get_host_mapped_pointer(),
+        )
         self.cython_wrapper.set_dynamic_symbolic_map(self.dynamic_symbolic_map)
         self.cython_wrapper.set_dynamic_symbolic_sources(self.dynamic_symbolic_sources)
         self.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(self.prim_func, self.result_idx))
@@ -236,7 +244,14 @@ class CythonKernelAdapter(BaseKernelAdapter):
             error_msg = adapter.lib.get_last_error().decode("utf-8")
             raise RuntimeError(f"Initialization failed: {error_msg}")
 
-        adapter.cython_wrapper = CythonKernelWrapper(adapter.result_idx, adapter.params, adapter.lib, *_device_providers())
+        adapter.cython_wrapper = CythonKernelWrapper(
+            adapter.result_idx,
+            adapter.params,
+            adapter.lib,
+            *_device_providers(),
+            host_mapped_indices=get_host_mapped_params(adapter.prim_func),
+            get_host_mapped_pointer=adapter._get_host_mapped_pointer(),
+        )
         adapter.cython_wrapper.set_dynamic_symbolic_map(adapter.dynamic_symbolic_map)
         adapter.cython_wrapper.set_dynamic_symbolic_sources(adapter.dynamic_symbolic_sources)
         adapter.cython_wrapper.set_output_scalar_dim_map(get_output_scalar_dim_map(adapter.prim_func, adapter.result_idx))
@@ -409,6 +424,11 @@ class CythonKernelAdapter(BaseKernelAdapter):
                     static_contiguous_list.append((i, buffer.name))
         return static_shape_map, static_strides_map, static_contiguous_list
 
+    def _get_host_mapped_pointer(self):
+        if is_ascend_target(self.target) and get_host_mapped_params(self.prim_func):
+            return tvm.get_global_func("tl.ascend.get_host_mapped_pointer")
+        return None
+
     def _process_buffer_device(self) -> dict[tirx.Var, tuple[int, torch.device]]:
         """Extract information about buffer devices from the TIR function.
 
@@ -418,6 +438,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
         params = func.params
         buffer_map = func.buffer_map
         buffer_device_map = {}
+        host_mapped_params = get_host_mapped_params(func)
         device = None
         if is_cuda_target(self.target) or is_hip_target(self.target):
             device = torch.device("cuda")
@@ -434,7 +455,7 @@ class CythonKernelAdapter(BaseKernelAdapter):
             if param in buffer_map:
                 buffer = buffer_map[param]
                 name = buffer.name
-                buffer_device_map[name] = (i, device)
+                buffer_device_map[name] = (i, torch.device("cpu") if i in host_mapped_params else device)
         return buffer_device_map
 
     def _forward_from_prebuild_lib(self, *args, stream: int | None = None):
