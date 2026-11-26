@@ -19,3 +19,12 @@ def test_gemm_splitk(deterministic):
     torch.testing.assert_close(result, ref_program(x, w), rtol=1e-2, atol=1e-2)
     if deterministic:
         torch.testing.assert_close(kernel(x_npu, w_npu).cpu(), result, rtol=0, atol=0)
+
+
+@tilelang.testing.requires_ascend
+def test_gemm_splitk_rejects_more_blocks_than_resident_cores():
+    split_k = 8
+    cores = torch.npu.get_device_properties(torch.npu.current_device()).cube_core_num
+    num_blocks = ((cores // split_k) + 1) * split_k
+    with pytest.raises(ValueError, match="must be resident"):
+        gemm_splitk(512, 4096, 512, split_k, False, num_blocks=num_blocks)
