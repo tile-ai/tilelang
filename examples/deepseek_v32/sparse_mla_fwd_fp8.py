@@ -99,13 +99,6 @@ def sparse_mla_fwd_fp8(
     D = dim
     D_tail = tail_dim
 
-    # A shared-memory access moves at most 128 bits, so an fp8 vector holds 16
-    # elements. TM is the number of rows each thread transposes at once; 16 was
-    # the best of {4, 8, 16, 32} on H800 and keeps the staging buffer at 256 B.
-    TN = 16
-    TM = 16
-    assert BI % TM == 0 and D % TN == 0, f"block_I={BI} must be a multiple of {TM}, dim={D} of {TN}"
-
     if head_kv > 64:
         assert head_kv % 64 == 0, "head_kv should be a multiple of 64"
         REPLICATE_H = head_kv // 64
@@ -139,7 +132,6 @@ def sparse_mla_fwd_fp8(
         acc_o = T.alloc_fragment([H_per_block, D], accum_dtype)
         acc_s = T.alloc_fragment([H_per_block, BI], accum_dtype)
         S_shared = T.alloc_shared([H_per_block, BI], dtype)
-        kv_t_frag = T.alloc_local([TM, TN], dtype)
         sumexp = T.alloc_fragment([H_per_block], accum_dtype)
         sumexp_i = T.alloc_fragment([H_per_block], accum_dtype)
         alpha = T.alloc_fragment([H_per_block], accum_dtype)
@@ -171,17 +163,10 @@ def sparse_mla_fwd_fp8(
             for bi_i, d_i in T.Parallel(BI, D_tail):
                 K_tail_shared[bi_i, d_i] = KV[b_i, Indices[b_i, s_i, g_i, i_i * BI + bi_i], g_i, D + d_i]
 
-            # Transpose V for the PV GEMM. Reads are 128-bit vectors along dim,
-            # the staging buffer does the swap, writes go out row by row.
-            # This only depends on KV_shared, so placing it ahead of the QK GEMM
-            # lets it overlap with the asynchronous wgmma that follows.
-            for bi_o, d_o in T.Parallel(BI // TM, D // TN):
-                for i in T.serial(TM):
-                    for j in T.vectorized(TN):
-                        kv_t_frag[i, j] = KV_shared[bi_o * TM + i, d_o * TN + j]
-                for j in T.serial(TN):
-                    for i in T.serial(TM):
-                        KV_T_shared[d_o * TN + j, bi_o * TM + i] = kv_t_frag[i, j]
+            # Transpose V for the PV GEMM; on SM90 this lowers to ldmatrix and
+            # stmatrix. It only depends on KV_shared, so placing it ahead of the
+            # QK GEMM lets it overlap with the asynchronous wgmma that follows.
+            T.transpose(KV_shared, KV_T_shared)
 
             for h_i, bi_i in T.Parallel(H_per_block, BI):
                 acc_s[h_i, bi_i] = T.if_then_else(mask[bi_i], 0, -T.infinity(acc_s.dtype))

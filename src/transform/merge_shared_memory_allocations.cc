@@ -372,9 +372,8 @@ class SharedMemoryAlignmentPlanner : public StmtExprVisitor {
 
 public:
   // explicit_alignments carries the per-buffer requirements recorded by op
-  // lowering (kSmemAlignmentMap); the scan below adds a conservative fallback
-  // for shared vars that reach swizzle-sensitive instructions without an
-  // explicit entry.
+  // lowering (kSmemAlignmentMap); the scan below adds matrix row alignment
+  // and a conservative fallback for unannotated swizzle-sensitive instructions.
   static std::unordered_map<const VarNode *, int>
   Plan(const Stmt &stmt,
        const std::unordered_map<const VarNode *, int> &explicit_alignments) {
@@ -386,42 +385,40 @@ public:
   }
 
 private:
-  // Helper to record alignment for a shared/shared.dyn Var under alignment
-  // scope
+  enum class AddressUse { kNone, kMatrixRow, kSwizzled };
+
   void MarkSharedVarIfNeeded(const VarNode *op) {
-    if (!op || !under_alignment_scope_)
+    if (!op || address_use_ == AddressUse::kNone)
       return;
     auto ptr_type = op->type_annotation.as<PointerTypeNode>();
     if (!ptr_type)
       return;
     auto scope = GetPtrStorageScope(GetRef<Var>(op));
     if (scope == "shared" || scope == "shared.dyn") {
-      // An explicit requirement recorded at lowering time is exact; keep it.
-      if (explicit_alignment_map_->count(op))
+      // Matrix rows always need 16 bytes. Swizzled TMA/MMA operands use the
+      // lowering's exact alignment when available, otherwise the worst case.
+      if (address_use_ == AddressUse::kSwizzled &&
+          explicit_alignment_map_->count(op))
         return;
-      // TMA bulk-copy and MMA-descriptor operands have stricter shared-memory
-      // alignment than ordinary shared accesses, and the exact requirement
-      // depends on the operand's swizzle mode (up to 1024B for 128B swizzle).
-      // Buffers without an explicit kSmemAlignmentMap entry get the worst
-      // case: a misaligned base is not a launch error but silent data
-      // corruption, so never under-align here.
       int &slot = shmem_alignment_map_[op];
-      slot = std::max(slot, 1024);
+      slot = std::max(slot, address_use_ == AddressUse::kMatrixRow ? 16 : 1024);
     }
   }
 
   void VisitExpr_(const CallNode *op) {
-    if (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
-        op->op.same_as(tl::initialize_wgmma_descriptor()) ||
-        op->op.same_as(tl::initialize_tcgen05_descriptor())) {
-      // These intrinsics introduce stricter SMEM alignment requirements; mark
-      // the subtree.
-      under_alignment_scope_ = true;
-      StmtExprVisitor::VisitExpr_(op);
-      under_alignment_scope_ = false;
+    AddressUse previous = address_use_;
+    if (op->op.same_as(tl::ptx_ldmatrix()) ||
+        op->op.same_as(tl::ptx_stmatrix())) {
+      address_use_ = AddressUse::kMatrixRow;
+      VisitExpr(op->args[2]); // Only the shared address has this requirement.
     } else {
+      if (op->op.same_as(tl::tma_load()) || op->op.same_as(tl::tma_store()) ||
+          op->op.same_as(tl::initialize_wgmma_descriptor()) ||
+          op->op.same_as(tl::initialize_tcgen05_descriptor()))
+        address_use_ = AddressUse::kSwizzled;
       StmtExprVisitor::VisitExpr_(op);
     }
+    address_use_ = previous;
   }
 
   void VisitExpr_(const VarNode *op) {
@@ -430,16 +427,11 @@ private:
   }
 
   void VisitExpr_(const BufferLoadNode *op) {
-    // If we encounter address_of(BufferLoad(...)) or any direct BufferLoad
-    // within an alignment scope, make sure we mark the underlying shared var.
-    if (op && under_alignment_scope_) {
-      const VarNode *data_var = op->buffer->data.get();
-      MarkSharedVarIfNeeded(data_var);
-    }
+    MarkSharedVarIfNeeded(op->buffer->data.get());
     StmtExprVisitor::VisitExpr_(op);
   }
 
-  bool under_alignment_scope_{false};
+  AddressUse address_use_{AddressUse::kNone};
 
   const std::unordered_map<const VarNode *, int> *explicit_alignment_map_{
       nullptr};

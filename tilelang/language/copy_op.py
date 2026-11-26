@@ -530,7 +530,9 @@ def transpose(
     """Transpose a 2D buffer in shared memory: dst[j, i] = src[i, j].
 
     Both src and dst should be shared memory buffers.
-    If src has shape (M, N), dst should have shape (N, M).
+    If src has shape (M, N), dst should have shape (N, M). Axes are matched
+    from the right, so a leading axis on one side only, such as the stage axis
+    of a multi-buffered source, must have extent 1.
 
     Args:
         src: Source buffer or region of shape (..., M, N).

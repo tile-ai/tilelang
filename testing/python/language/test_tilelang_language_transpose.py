@@ -168,5 +168,127 @@ def test_tilelang_transpose_square():
     run_tilelang_transpose_square(M=512, block_M=128)
 
 
+def tilelang_transpose_matrix_case(M, N, dtype, src_offset=0, swizzle=False, dst_col=0, consumer=False, address_view=False):
+    """Transpose one stage of a multi-buffered source, as T.Pipelined produces:
+    the source region has a leading extent-1 axis that the destination lacks.
+
+    `dst_col` shifts the destination region right so it crosses the buffer edge,
+    and `consumer` runs the transpose on threads 128..255 only."""
+    from tilelang.layout import make_swizzled_layout
+
+    stages = 2
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((M, src_offset + N), dtype),
+        B: T.Tensor((N, M), dtype),
+    ):
+        with T.Kernel(1, threads=256 if consumer else 128) as _:
+            tile = T.alloc_shared((stages, M, src_offset + N), dtype)
+            tile_T = T.alloc_shared((N, M), dtype)
+            if swizzle:
+                T.annotate_layout({tile: make_swizzled_layout(tile), tile_T: make_swizzled_layout(tile_T)})
+            if address_view:
+                view = T.make_tensor_from_addr(T.address_of(tile[stages - 1, 0, src_offset]), (M, N), dtype, storage_scope="shared.dyn")
+                for i, j in T.Parallel(M, N):
+                    view[i, j] = A[i, src_offset + j]
+                T.transpose(view, tile_T)
+            else:
+                T.copy(A, tile[stages - 1, :, :])
+                if dst_col:
+                    T.fill(tile_T, 0)
+                if consumer:
+                    if T.get_thread_binding() >= 128:
+                        T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T)
+                else:
+                    T.transpose(tile[stages - 1, :, src_offset : src_offset + N], tile_T[:, dst_col : dst_col + M])
+            T.copy(tile_T, B)
+
+    return main
+
+
+def _bits(x):
+    return x.view({1: torch.uint8, 2: torch.int16, 4: torch.int32}[x.element_size()])
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tilelang_transpose_matrix_instructions():
+    # (dtype, M, N, keyword arguments, uses ldmatrix/stmatrix)
+    cases = [
+        (T.float16, 40, 72, {}, True),
+        (T.bfloat16, 64, 128, {"consumer": True}, True),
+        (T.float8_e4m3fn, 64, 512, {}, True),
+        (T.float8_e4m3fn, 64, 128, {"swizzle": True}, True),
+        (T.int8, 48, 80, {}, True),
+        # rows that do not start on a 16-byte boundary keep the SIMT loop
+        (T.float16, 16, 16, {"src_offset": 4}, False),
+        (T.float8_e4m3fn, 16, 16, {"src_offset": 8}, False),
+        # a destination region past the buffer edge keeps the predicated loop
+        (T.float16, 16, 16, {"dst_col": 8}, False),
+        # Contiguous rows in a view whose base address is offset by one byte.
+        (T.uint8, 16, 16, {"src_offset": 1, "address_view": True}, False),
+        (T.float32, 32, 64, {}, False),
+    ]
+    for dtype, M, N, kwargs, matrix in cases:
+        kernel = tilelang.compile(
+            tilelang_transpose_matrix_case(M, N, dtype, **kwargs),
+            target="cuda",
+            pass_configs={tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True},
+        )
+        assert ("ptx_stmatrix" in kernel.get_kernel_source()) == matrix, (dtype, M, N, kwargs)
+        src_offset, dst_col = kwargs.get("src_offset", 0), kwargs.get("dst_col", 0)
+        torch_dtype = getattr(torch, dtype)
+        a = (
+            torch.randint(0, 256, (M, src_offset + N), dtype=torch.uint8, device="cuda").view(torch_dtype)
+            if torch_dtype.itemsize == 1
+            else torch.randn(M, src_offset + N, device="cuda").to(torch_dtype)
+        )
+        expected = torch.zeros(N, M, dtype=torch_dtype, device="cuda")
+        expected[:, dst_col:] = a[: M - dst_col, src_offset:].t()
+        b = torch.empty(N, M, dtype=torch_dtype, device="cuda")
+        kernel(a, b)
+        torch.testing.assert_close(_bits(b), _bits(expected), rtol=0, atol=0)
+
+
+def tilelang_transpose_pipelined_gemm(K, M, N, block_K, dtype):
+    """C = A^T @ B, transposing each pipelined stage of A in shared memory so the
+    transpose reads a multi-buffered stage and a GEMM consumes its output."""
+
+    @T.prim_func
+    def main(
+        A: T.Tensor((K, M), dtype),
+        B: T.Tensor((K, N), dtype),
+        C: T.Tensor((M, N), T.float32),
+    ):
+        with T.Kernel(1, threads=128) as _:
+            A_shared = T.alloc_shared((block_K, M), dtype)
+            A_T = T.alloc_shared((M, block_K), dtype)
+            B_shared = T.alloc_shared((block_K, N), dtype)
+            C_local = T.alloc_fragment((M, N), T.float32)
+            T.clear(C_local)
+            for k in T.Pipelined(K // block_K, num_stages=2):
+                T.copy(A[k * block_K, 0], A_shared)
+                T.copy(B[k * block_K, 0], B_shared)
+                T.transpose(A_shared, A_T)
+                T.gemm(A_T, B_shared, C_local)
+            T.copy(C_local, C)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version_ge(9, 0)
+def test_tilelang_transpose_pipelined_gemm():
+    K, M, N, block_K = 256, 64, 64, 64
+    kernel = tilelang.compile(tilelang_transpose_pipelined_gemm(K, M, N, block_K, T.float16), target="cuda")
+    assert "ptx_stmatrix" in kernel.get_kernel_source()
+    a = torch.randn(K, M, device="cuda", dtype=torch.float16)
+    b = torch.randn(K, N, device="cuda", dtype=torch.float16)
+    c = torch.empty(M, N, device="cuda", dtype=torch.float32)
+    kernel(a, b, c)
+    torch.testing.assert_close(c, a.float().t() @ b.float(), rtol=1e-2, atol=1e-2)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
