@@ -258,8 +258,13 @@ void ParallelOpNode::RecordBufferAccess(const Buffer &buffer,
                                         bool is_write) {
   auto it = indice_map_.find(buffer);
   if (it != indice_map_.end()) {
-    ICHECK(StructuralEqual()(it->second.indices, indices))
-        << buffer << ": " << indices << " and " << it->second.indices
+    CHECK(StructuralEqual()(it->second.indices, indices), ValueError)
+        << "A local.fragment is accessed at multiple distinct indices inside "
+           "one T.Parallel loop: "
+        << indices << " and " << it->second.indices
+        << ". A fragment is distributed across threads, so cross-lane stencil "
+           "access is not supported on this path; stage the buffer in shared "
+           "memory or use a single index expression per T.Parallel loop."
         << SpanHintSuffix(buffer->span);
   } else {
     BufferAccessInfo info;
