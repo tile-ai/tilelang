@@ -1,8 +1,7 @@
 """Regression test for GitHub issue #2584.
 
-#2584 - A 1-D bulk TMA copy must not start at a global byte offset that is not
-16-byte aligned. The compiler rejects such a copy when TMA is requested instead
-of emitting an illegal instruction; aligned copies keep TMA.
+An aligned 1-D load keeps TMA. A provably misaligned global slice is rejected
+when TMA is requested, and a plain T.copy store falls back.
 """
 
 import pytest
@@ -16,35 +15,45 @@ from tilelang import tvm
 N, M = 1024, 512
 
 
-def _load_kernel(global_off, prefer):
-    kwargs = {"prefer_instruction": "tma"} if prefer else {}
-
+def _load_kernel(global_off):
     @T.prim_func
     def main(A: T.Tensor((N,), "float32"), Out: T.Tensor((M,), "float32")):
         with T.Kernel(1, threads=128):
             s = T.alloc_shared((M,), "float32")
-            T.copy(A[global_off : global_off + M], s, **kwargs)
+            T.copy(A[global_off : global_off + M], s, prefer_instruction="tma")
             for i in T.Parallel(M):
                 Out[i] = s[i]
 
     return main
 
 
-def _store_kernel(global_off):
+def _store_kernel(global_off, prefer_tma=False):
+    kwargs = {"prefer_instruction": "tma"} if prefer_tma else {}
+
     @T.prim_func
     def main(A: T.Tensor((M,), "float32"), Out: T.Tensor((N,), "float32")):
         with T.Kernel(1, threads=128):
             s = T.alloc_shared((M,), "float32")
             T.copy(A, s)
-            T.copy(s, Out[global_off : global_off + M], prefer_instruction="tma")
+            T.copy(s, Out[global_off : global_off + M], **kwargs)
 
     return main
+
+
+def _lower_sm90(func):
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+    with target:
+        return tilelang.lower(
+            func,
+            target=target,
+            enable_device_compile=False,
+        )
 
 
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_aligned_1d_load_keeps_tma():
-    kernel = tilelang.compile(_load_kernel(4, True), target="cuda")
+    kernel = tilelang.compile(_load_kernel(4), target="cuda")
     assert "tl::tma_load(" in kernel.get_kernel_source()
     a = torch.arange(1, N + 1, device="cuda", dtype=torch.float32)
     out = torch.zeros(M, device="cuda", dtype=torch.float32)
@@ -54,23 +63,27 @@ def test_aligned_1d_load_keeps_tma():
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_misaligned_1d_load_reports():
     with pytest.raises(
         tvm.error.InternalError,
-        match=r"`A` starts at byte offset 20.*16-byte aligned",
+        match=r"\bA\b.*\b20\b.*16-byte",
     ):
-        tilelang.compile(_load_kernel(5, True), target="cuda")
+        _lower_sm90(_load_kernel(5))
 
 
 @tilelang.testing.requires_cuda
-@tilelang.testing.requires_cuda_compute_version(9, 0)
 def test_misaligned_1d_store_reports():
     with pytest.raises(
         tvm.error.InternalError,
-        match=r"`Out` starts at byte offset 20.*16-byte aligned",
+        match=r"\bOut\b.*\b20\b.*16-byte",
     ):
-        tilelang.compile(_store_kernel(5), target="cuda")
+        _lower_sm90(_store_kernel(5, prefer_tma=True))
+
+
+@tilelang.testing.requires_cuda
+def test_misaligned_1d_store_falls_back():
+    artifact = _lower_sm90(_store_kernel(5))
+    assert "tl::tma_store(" not in artifact.kernel_source
 
 
 if __name__ == "__main__":

@@ -192,25 +192,22 @@ bool CheckGlobalStrides(const Buffer &buffer, arith::Analyzer *analyzer,
   return true;
 }
 
-// `cp.async.bulk` requires the starting global address of the bounding box to
-// be 16-byte aligned. Reject a region whose start offset is provably
-// misaligned; symbolic offsets keep the TMA path, matching the total-size
-// check in CheckBulkCopy1D so dynamic producer offsets are not downgraded.
 PrimExpr BulkBoxBaseBits(const Buffer &global_tensor,
                          const Array<Range> &global_range) {
   Array<PrimExpr> global_mins;
   for (const Range &range : global_range) {
     global_mins.push_back(range->min);
   }
-  return global_tensor->ElemOffset(global_mins)[0] *
-         global_tensor->dtype.bits();
+  return TMAGlobalBitsFromElements(global_tensor->ElemOffset(global_mins)[0],
+                                   global_tensor->dtype);
 }
 
-bool IsBulkBoxBase16BAligned(const Buffer &global_tensor,
-                             const Array<Range> &global_range,
-                             arith::Analyzer *analyzer) {
-  return !analyzer->CanProve(
-      FloorMod(BulkBoxBaseBits(global_tensor, global_range), 128) != 0,
+// Keep TMA eligible when the analyzer cannot prove the base is misaligned,
+// as with the transfer-size check in CheckBulkCopy1D.
+bool CanProveBulkBoxBaseMisaligned(const PrimExpr &base_bits,
+                                   arith::Analyzer *analyzer) {
+  return analyzer->CanProve(
+      FloorMod(base_bits, IntImm(base_bits.dtype(), 128)) != 0,
       arith::ProofStrength::kSymbolicBound);
 }
 
@@ -223,7 +220,8 @@ bool CheckBulkLoad(const CopyNode &op, Target target, arith::Analyzer *analyzer,
       (op.dst.scope() != "shared.dyn" && op.dst.scope() != "shared")) {
     return false;
   }
-  if (!IsBulkBoxBase16BAligned(op.src, op.src_range, analyzer)) {
+  if (CanProveBulkBoxBaseMisaligned(BulkBoxBaseBits(op.src, op.src_range),
+                                    analyzer)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "src range base must be 16-byte aligned for tma bulk "
                     << "load " << op.src->name;
@@ -269,7 +267,8 @@ bool CheckBulkStore(const CopyNode &op, Target target,
       op.dst.scope() != "global") {
     return false;
   }
-  if (!IsBulkBoxBase16BAligned(op.dst, op.dst_range, analyzer)) {
+  if (CanProveBulkBoxBaseMisaligned(BulkBoxBaseBits(op.dst, op.dst_range),
+                                    analyzer)) {
     if (emit_diagnostics) {
       DLOG(WARNING) << "dst range base must be 16-byte aligned for tma bulk "
                     << "store " << op.dst->name;
@@ -564,7 +563,7 @@ CopyInstSelection Unsupported(std::string reason) {
   return CopyInstSelection{CopyInst::kInvalid, false, std::move(reason)};
 }
 
-std::string MakeTmaUnavailableReason(const CopyNode &op) {
+std::string MakeTmaUnavailableReason(const CopyNode &op, const Target &target) {
   std::ostringstream oss;
   if (GetTmaDescriptorBaseIsDeviceBound(op)) {
     const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
@@ -586,18 +585,23 @@ std::string MakeTmaUnavailableReason(const CopyNode &op) {
         << " (scope=" << op.dst.scope() << ", dtype=" << op.dst->dtype << ").";
     return oss.str();
   }
-  if (IsGlobalBuffer(op.src) || IsGlobalBuffer(op.dst)) {
-    const Buffer &global_buffer = IsGlobalBuffer(op.src) ? op.src : op.dst;
-    const Array<Range> &global_range =
-        IsGlobalBuffer(op.src) ? op.src_range : op.dst_range;
+  bool is_load = IsGlobalBuffer(op.src) && IsSharedBuffer(op.dst);
+  bool is_store = IsSharedBuffer(op.src) && IsGlobalBuffer(op.dst);
+  if ((is_load || is_store) && target.defined() && TargetHasBulkCopy(target)) {
+    const Buffer &global_buffer = is_load ? op.src : op.dst;
+    const Array<Range> &global_range = is_load ? op.src_range : op.dst_range;
+    PrimExpr base_bits = BulkBoxBaseBits(global_buffer, global_range);
     arith::Analyzer local_analyzer;
-    if (!IsBulkBoxBase16BAligned(global_buffer, global_range,
-                                 &local_analyzer)) {
-      oss << "a bulk TMA copy must start at a 16-byte aligned address; `"
-          << global_buffer->name << "` starts at byte offset "
-          << local_analyzer.Simplify(
-                 FloorDiv(BulkBoxBaseBits(global_buffer, global_range), 8))
-          << ", which cp.async.bulk requires to be 16-byte aligned.";
+    if (CanProveBulkBoxBaseMisaligned(base_bits, &local_analyzer)) {
+      PrimExpr eight = IntImm(base_bits.dtype(), 8);
+      oss << "global buffer `" << global_buffer->name << "` starts at ";
+      if (local_analyzer.CanProve(FloorMod(base_bits, eight) == 0)) {
+        oss << "byte offset "
+            << local_analyzer.Simplify(FloorDiv(base_bits, eight));
+      } else {
+        oss << "bit offset " << local_analyzer.Simplify(base_bits);
+      }
+      oss << ", but bulk TMA requires a 16-byte aligned address.";
       return oss.str();
     }
   }
@@ -688,7 +692,7 @@ CopyFacts AnalyzeCopyFacts(const CopyNode &op, const CopyAnalysisContext &ctx) {
   facts.prefer_instruction = GetPreferredInstruction(op);
   facts.disable_tma = GetDisableTMA(op);
   facts.cluster_mask = GetClusterMask(op);
-  facts.tma_unavailable_reason = MakeTmaUnavailableReason(op);
+  facts.tma_unavailable_reason = MakeTmaUnavailableReason(op, ctx.target);
   facts.async_unavailable_reason = MakeAsyncUnavailableReason(op, ctx.target);
   facts.pass_context_disables_tma =
       tvm::transform::PassContext::Current()
@@ -771,13 +775,13 @@ CopyInstSelection SelectCopyInstForLowering(const CopyNode &op,
   // lowered through LowerBulkCopyGather4 (no fallback path makes sense).
   if (GetBoolAnnotation(op, "is_gather4")) {
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
-      return Unsupported(MakeTmaUnavailableReason(op));
+      return Unsupported(MakeTmaUnavailableReason(op, ctx.target));
     }
     return Supported(CopyInst::kBulkLoadGather4);
   }
   if (GetBoolAnnotation(op, "is_scatter4")) {
     if (GetTmaDescriptorBaseIsDeviceBound(op)) {
-      return Unsupported(MakeTmaUnavailableReason(op));
+      return Unsupported(MakeTmaUnavailableReason(op, ctx.target));
     }
     return Supported(CopyInst::kBulkStoreScatter4);
   }
