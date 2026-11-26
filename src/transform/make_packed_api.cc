@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "../op/builtin.h"
+#include "backend/common/target_utils.h"
 #include "common/attr.h"
 #include "merge_if_stmt.h"
 #include "tir/transforms/ir_utils.h"
@@ -449,8 +450,8 @@ MakePackedAPI(PrimFunc func,
 
   std::unordered_set<const VarNode *> host_mapped_buffers;
   if (auto indices = func->GetAttr<Array<Integer>>("tl.host_mapped_params")) {
-    ICHECK_EQ(target_device_type, kDLCUDA)
-        << "Host-mapped buffers require a CUDA target";
+    ICHECK(target_device_type == kDLCUDA || TargetIsAscend(target))
+        << "Host-mapped buffers require a CUDA or Ascend target";
     for (Integer index : indices.value()) {
       int i = index.IntValue();
       ICHECK(i >= 0 && i < static_cast<int>(func->params.size()));
@@ -465,7 +466,9 @@ MakePackedAPI(PrimFunc func,
     // first or with no device-resident tensor at all.
     binder.Bind(device_id,
                 Call(DataType::Int(32), builtin::tvm_call_packed(),
-                     {StringImm("tl.cuda.current_device")}),
+                     {StringImm(target_device_type == kDLCUDA
+                                    ? "tl.cuda.current_device"
+                                    : "tl.ascend.current_device")}),
                 name_hint + ".device_id", true);
   }
 
