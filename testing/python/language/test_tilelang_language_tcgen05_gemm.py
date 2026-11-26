@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 import tilelang
 import tilelang.language as T
@@ -70,6 +71,57 @@ def _make_async_tcgen05_kernel(gemm_op):
             T.copy(C_shared, D[0:128, 0:128])
 
     return main
+
+
+def _make_dense_tcgen05_partition_kernel(threads):
+    @T.prim_func
+    def main(
+        A: T.Tensor((128, 64), T.float16),
+        B: T.Tensor((128, 64), T.float16),
+        D: T.Tensor((128, 128), T.float32),
+    ):
+        with T.Kernel(1, threads=threads):
+            A_shared = T.alloc_shared((128, 64), T.float16)
+            B_shared = T.alloc_shared((128, 64), T.float16)
+            C_tmem = T.alloc_tmem((128, 128), T.float32)
+            mbar = T.alloc_barrier(1)
+            C_local = T.alloc_fragment((128, 128), T.float32)
+
+            T.copy(A, A_shared)
+            T.copy(B, B_shared)
+            T.gemm(A_shared, B_shared, C_tmem, transpose_B=True, mbar=mbar, clear_accum=True)
+            T.copy(C_tmem, C_local)
+            T.copy(C_local, D)
+
+    return main
+
+
+@tilelang.testing.requires_cuda
+@pytest.mark.parametrize("threads", [256, 384])
+def test_dense_tcgen05_mma_uses_full_tile_independent_of_block_warps(threads):
+    """Regression for #3721: auxiliary block warps must not partition TCGEN05 N."""
+    target = tvm.target.Target({"kind": "cuda", "arch": "sm_100a"})
+    with target:
+        source = tilelang.lower(_make_dense_tcgen05_partition_kernel(threads), target=target).kernel_source
+
+    assert source.count("tcgen05mma_ss") == 1
+
+
+@tilelang.testing.requires_cuda
+@tilelang.testing.requires_cuda_compute_version(10)
+@tilelang.testing.requires_cuda_compute_version_lt(11)
+@pytest.mark.parametrize("threads", [256, 384])
+def test_dense_tcgen05_threads_match_matmul(threads):
+    """Regression for #3721: both launch sizes must compute all output values."""
+    kernel = tilelang.compile(_make_dense_tcgen05_partition_kernel(threads), out_idx=[2], target="cuda")
+
+    torch.manual_seed(0)
+    A = torch.randn(128, 64, device="cuda", dtype=torch.float16)
+    B = torch.randn(128, 64, device="cuda", dtype=torch.float16)
+    actual = kernel(A, B)
+    expected = A.float() @ B.float().T
+
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
 
 
 def _tcgen05_issue_block(source):
