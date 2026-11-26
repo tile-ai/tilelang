@@ -940,6 +940,55 @@ struct TileLangThreadSyncPlanner : public ConstrVisitor {
     DataType index_dtype = DataType::Int(64);
     PrimExpr linear_thread_id = MakeLinearThreadId(env_threads_);
 
+    // A bound on a single hardware thread index that is a multiple of the
+    // warp size splits whole warps: every thread in a warp is on the same
+    // side of the bound, so the condition is warp-uniform without a general
+    // arithmetic proof.  This is the common `thread_binding < 448` guard
+    // produced by T.Parallel with 448 of 512 threads.
+    int64_t x_extent = -1;
+    const VarNode *x_var = nullptr;
+    for (const auto &iv : env_threads_) {
+      if (iv->thread_tag == "threadIdx.x") {
+        x_var = iv->var.get();
+        const auto *extent = as_const_int(iv->dom->extent);
+        x_extent = extent == nullptr ? -1 : *extent;
+      }
+    }
+    // A warp is a contiguous chunk of the linear thread id.  If the x
+    // dimension is a whole number of warps, a warp never straddles a y/z
+    // coordinate; for a bound on x itself the bound must also be warp-aligned.
+    auto warp_aligned_thread_bound = [&](const PrimExpr &expr,
+                                         int64_t bound) -> bool {
+      if (x_extent < 0 || x_extent % warp_size_ != 0)
+        return false;
+      const auto *var = expr.as<VarNode>();
+      if (var == nullptr)
+        return false;
+      if (var == x_var) {
+        return bound <= 0 || bound >= x_extent || bound % warp_size_ == 0;
+      }
+      for (const auto &iv : env_threads_) {
+        if (runtime::ThreadScope::Create(iv->thread_tag).rank == 1 &&
+            iv->var.get() == var) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (const auto *lt = condition.as<LTNode>()) {
+      const auto *bound = lt->b.as<IntImmNode>();
+      if (bound != nullptr && warp_aligned_thread_bound(lt->a, bound->value)) {
+        return true;
+      }
+    }
+    if (const auto *le = condition.as<LENode>()) {
+      const auto *bound = le->b.as<IntImmNode>();
+      if (bound != nullptr &&
+          warp_aligned_thread_bound(le->a, bound->value + 1)) {
+        return true;
+      }
+    }
+
     ConstrSet cset = GetConstrSet();
     ConstrSet c1 =
         cset.RenameFrom("<T1>", sub1, std::nullopt, /*rename_ranges=*/false);
