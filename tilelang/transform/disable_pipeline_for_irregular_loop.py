@@ -28,9 +28,15 @@ and before warp specialization in the CUDA pipeline: warp specialization
 rewrites a ``T.Pipelined`` loop with a TMA copy into a producer/consumer
 structure with barriers, and a taken exit would skip the consumer arrive
 for that iteration, deadlocking the producer on a barrier that is never
-released. Stripping the annotations first makes warp specialization skip
-such loops entirely (it only rewrites loops carrying a ``num_stages``
-annotation), so they stay sequential.
+released. Stripping the annotations first makes
+``ProducerConsumerWarpSpecialized`` skip such loops entirely (it only
+rewrites loops carrying a ``num_stages`` annotation); the opt-in
+``AutoWarpSpecialization`` pass does not require ``num_stages`` (its
+``ScopeStages`` falls back to 1), so it separately declines kernels
+containing ``tl.loop_break``, ``tirx.continue_loop``, or
+``tirx.break_loop`` in ``PreprocessIR`` (``CheckCalls`` in
+``src/cuda/transform/auto_schedule/preprocess_ir.cc``). Together, both
+warp-specialization paths leave irregular loops sequential.
 """
 
 from __future__ import annotations

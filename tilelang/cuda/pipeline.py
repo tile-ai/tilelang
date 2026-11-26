@@ -105,8 +105,10 @@ def CUDAPassPipelineBodyPrologue(mod: IRModule, target: Target) -> IRModule:
     # producer/consumer structure with barriers, and a taken exit would skip
     # the consumer arrive for that iteration, deadlocking the producer on a
     # barrier that is never released. Stripping the annotations first makes
-    # warp specialization skip such loops entirely (it only rewrites loops
-    # carrying a num_stages annotation), so they stay sequential.
+    # ProducerConsumerWarpSpecialized skip such loops (it only rewrites loops
+    # carrying num_stages), while AutoWarpSpecialization separately declines
+    # loop exits (loop_break / continue_loop / break_loop) in PreprocessIR's
+    # CheckCalls, so both paths leave irregular loops sequential.
     mod = tilelang.transform.DisablePipelineForIrregularLoop()(mod)
 
     # @CUDA-specific

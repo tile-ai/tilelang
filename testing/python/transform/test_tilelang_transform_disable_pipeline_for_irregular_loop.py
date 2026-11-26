@@ -9,7 +9,6 @@ from such loops so they lower as plain sequential loops.
 
 from tilelang import tvm as tvm
 import tilelang as tl
-import tilelang.testing
 import tilelang.language as T
 from tvm import tirx
 from tvm.tirx import Evaluate, For, PyStmtExprVisitor
@@ -17,22 +16,25 @@ from tvm.tirx import Evaluate, For, PyStmtExprVisitor
 sm89_target = tvm.target.Target({"kind": "cuda", "arch": "sm_89"})
 # Warp specialization needs TMA (sm_90+); used for the ordering tests below.
 sm90_target = tvm.target.Target({"kind": "cuda", "arch": "sm_90"})
+_AUTO_WS_CONFIG = {tl.PassConfigKey.TL_ENABLE_AUTO_WARP_SPECIALIZATION.value: "role_based"}
 
 
-def _run_prologue(func, target=sm90_target):
-    # Runs the CUDA prologue (warp specialization, then pipeline planning)
-    # and returns the lowered function as a string.
+def _run_prologue(func, target=sm90_target, pass_config=None):
+    # Runs the CUDA prologue (irregular-loop strip, warp specialization, then
+    # pipeline planning) and returns the lowered function as a string.
     from tilelang.cuda.pipeline import CUDAPassPipelineBodyPrologue
 
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
-    with target:
+    with target, tvm.transform.PassContext(config=pass_config or {}):
         mod = CUDAPassPipelineBodyPrologue(mod, target)
     return str(mod["main"])
 
 
 def _is_warp_specialized(ir: str) -> bool:
     # ProducerConsumerWarpSpecialized marks transformed functions with the
-    # tl.ws_applied attribute and introduces mbarrier operations.
+    # tl.ws_applied attribute; both ProducerConsumerWarpSpecialized and
+    # AutoWarpSpecialization (+ MaterializeWSSchedule) introduce mbarrier
+    # operations.
     return "ws_applied" in ir or "mbarrier" in ir
 
 
@@ -150,59 +152,63 @@ def _stray_exits(func) -> list[str]:
     return checker.stray
 
 
-@tilelang.testing.requires_cuda
 def test_continue_in_pipelined_loop_is_not_pipelined():
     func = _run(_make("continue", "Pipelined"))
     assert not _is_pipelined(func)
     assert _stray_exits(func) == []
 
 
-@tilelang.testing.requires_cuda
 def test_break_in_pipelined_loop_is_not_pipelined():
     func = _run(_make("break", "Pipelined"))
     assert not _is_pipelined(func)
     assert _stray_exits(func) == []
 
 
-@tilelang.testing.requires_cuda
 def test_if_in_pipelined_loop_stays_pipelined():
     func = _run(_make("if", "Pipelined"))
     assert _is_pipelined(func)
     assert _stray_exits(func) == []
 
 
-@tilelang.testing.requires_cuda
 def test_continue_in_serial_loop_unchanged():
     func = _run(_make("continue", "serial"))
     assert not _is_pipelined(func)
     assert _stray_exits(func) == []
 
 
-@tilelang.testing.requires_cuda
 def test_break_in_nested_loop_keeps_pipelining():
     func = _run(_make_nested_break())
     assert _is_pipelined(func)
     assert _stray_exits(func) == []
 
 
-@tilelang.testing.requires_cuda
 def test_continue_in_pipelined_loop_not_warp_specialized():
     # tile-ai/tilelang#4467 (CodeRabbit review on #4467): warp specialization
-    # runs before DisablePipelineForIrregularLoop, so it used to rewrite a
+    # used to run before DisablePipelineForIrregularLoop, rewriting a
     # T.Pipelined loop with a TMA copy and a continue/break into a
     # producer/consumer structure with barriers; a taken exit would skip the
     # consumer arrive and deadlock the producer. The strip pass now runs
     # first, so such a loop must stay sequential (no WS markers at all).
-    ir = _run_prologue(_make("continue", "Pipelined"))
-    assert not _is_warp_specialized(ir)
+    for exit_kind in ("continue", "break"):
+        ir = _run_prologue(_make(exit_kind, "Pipelined"))
+        assert not _is_warp_specialized(ir)
 
 
-@tilelang.testing.requires_cuda
+def test_irregular_pipelined_loop_not_auto_warp_specialized():
+    # AutoWarpSpecialization does not require num_stages (ScopeStages falls
+    # back to 1), so stripping pipeline annotations alone is not enough:
+    # PreprocessIR's CheckCalls must also decline tirx.continue_loop and
+    # tirx.break_loop so auto WS leaves irregular loops sequential.
+    for exit_kind in ("continue", "break"):
+        ir = _run_prologue(_make(exit_kind, "Pipelined"), pass_config=_AUTO_WS_CONFIG)
+        assert not _is_warp_specialized(ir)
+
+
 def test_eligible_pipelined_loop_still_warp_specialized():
-    # Control for the test above: a pipelined loop without an exit must
-    # still be warp-specialized on sm_90.
-    ir = _run_prologue(_make("if", "Pipelined"))
-    assert _is_warp_specialized(ir)
+    # Control for the tests above: a pipelined loop without an exit must
+    # still be warp-specialized on sm_90 under both default WS and auto WS.
+    assert _is_warp_specialized(_run_prologue(_make("if", "Pipelined")))
+    assert _is_warp_specialized(_run_prologue(_make("if", "Pipelined"), pass_config=_AUTO_WS_CONFIG))
 
 
 if __name__ == "__main__":
@@ -212,5 +218,6 @@ if __name__ == "__main__":
     test_continue_in_serial_loop_unchanged()
     test_break_in_nested_loop_keeps_pipelining()
     test_continue_in_pipelined_loop_not_warp_specialized()
+    test_irregular_pipelined_loop_not_auto_warp_specialized()
     test_eligible_pipelined_loop_still_warp_specialized()
     print("all tests passed")
