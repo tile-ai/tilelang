@@ -21,7 +21,7 @@ cdef const int64_t _INT64_MAX = (1 << 63) - 1
 cdef const int64_t L2_LD_NORMAL_FV = 0
 cdef const int64_t L2_LD_NOTALLOC_KEEP = 4
 cdef const int64_t L2_ST_NORMAL_FV = 0
-cdef const int64_t L2_ST_NOTALLOC_CLEAN = 4
+cdef const int64_t L2_ST_NOTALLOC_CI = 4
 
 
 # Keep values in sync with the public enums in config.py.
@@ -741,7 +741,7 @@ cdef inline GemmConfig select_gemm_config_impl(GemmDesc d, GemmDtype dtype):
 
     num_m_blocks, num_n_blocks = ceil_div(d.m, config.block_m), ceil_div(d.n, config.block_n)
     num_waves = ceil_div(num_m_blocks * num_n_blocks, d.num_cores)
-    store_hint = L2_ST_NORMAL_FV if d.acc and num_waves >= 4 and ceil_div(d.k, config.block_k) >= 16 else L2_ST_NOTALLOC_CLEAN
+    store_hint = L2_ST_NORMAL_FV if d.acc and num_waves >= 4 and ceil_div(d.k, config.block_k) >= 16 else L2_ST_NOTALLOC_CI
     config.l2_ctrl_store_cd = store_hint
     config = refine_gemm_pipeline(d, dtype, config)
     if (d.gemm_type == GemmType.Normal and d.compiled_k
