@@ -147,16 +147,16 @@ TL_DEVICE bool tl_shuffle_elect() {
     //       with only one thread, so we do not need shfl.sync to make it
     //       warp-uniform.
     return cute::elect_one_sync() && cutlass::canonical_warp_idx() == 0;
-  } else if constexpr (thread_extent == 32) {
-    return cute::elect_one_sync();
   } else {
-    // General case: thread_extent != 0
-    // We select warps with multiple of ceil(thread_extent / 32) warp IDs.
-    // NOTE: we use canonical_warp_idx for the same reason as above.
-    constexpr int warp_extent = (thread_extent + 31) / 32;
-    static_assert(warp_extent > 0);
-    return cute::elect_one_sync() &&
-           (cutlass::canonical_warp_idx() % warp_extent) == 0;
+    // Elect one lane per contiguous thread_extent-sized group.  The old
+    // warp-granular formulation (one elected lane per ceil(extent/32) warps)
+    // is only equivalent when thread_extent is a multiple of the warp size;
+    // for a sub-warp extent such as 16 it elected one lane per warp instead
+    // of one per 16-lane group.  A linear thread id modulo the group size is
+    // exact for every positive extent and keeps the leader at the group start.
+    unsigned linear_thread_idx =
+        threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+    return (linear_thread_idx % static_cast<unsigned>(thread_extent)) == 0;
   }
 #else
   static_assert(kDependentFalse,
