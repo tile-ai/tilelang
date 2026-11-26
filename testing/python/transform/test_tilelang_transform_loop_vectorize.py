@@ -26,47 +26,55 @@ def _run_vectorized_loop_legalizer(func):
         return tl.transform.LegalizeVectorizedLoop()(mod)
 
 
-def _run_vectorize_loop(func, target=_SM90_TARGET):
+def _run_vectorize_loop(func, target=_SM90_TARGET, enable_vectorize=True):
     mod = tvm.IRModule.from_expr(func.with_attr("global_symbol", "main"))
     with target:
         mod = tvm.tirx.transform.BindTarget(target)(mod)
         mod = tl.transform.LowerAccessPtr()(mod)
         mod = tl.transform.FlattenBuffer()(mod)
-        return tl.transform.VectorizeLoop()(mod)
+        return tl.transform.VectorizeLoop(enable_vectorize=enable_vectorize)(mod)
 
 
-@pytest.mark.parametrize("form", ["direct", "bound", "interleaved", "reinitialize"])
+@pytest.mark.parametrize("form", ["direct", "bound", "interleaved", "reinitialize", "init_only", "float", "branches"])
 def test_random_vector_loop_preserves_draw_order(form):
+    dtype = T.float32 if form == "float" else T.uint32
+
     @T.prim_func
-    def main(A: T.Tensor((4,), T.uint32), B: T.Tensor((4,), T.uint32)):
+    def main(A: T.Tensor((4,), dtype), B: T.Tensor((4,), T.uint32)):
         for i in T.vectorized(4):
-            if form == "reinitialize":
+            if form in ("reinitialize", "init_only"):
                 T.rng_init(42, 0, 0)
-            if form == "direct":
+            if form == "branches":
+                if i < 2:
+                    A[i] = T.rng_rand()
+                if i < 2:
+                    B[i] = T.rng_rand()
+            elif form == "float":
+                A[i] = T.rng_rand_float()
+            elif form == "direct":
                 A[i] = T.rng_rand()
-            else:
+            elif form != "init_only":
                 value = T.rng_rand()
                 if form == "interleaved":
                     B[i] = T.rng_rand()
                 A[i] = value
 
-    transformed = _run_vectorize_loop(main, tvm.target.Target("c"))["main"]
-    loops, calls = [], []
+    target = tvm.target.Target("c")
+    expected = _run_vectorize_loop(main, target, enable_vectorize=False)
+    actual = _run_vectorize_loop(main, target)
+    tvm.ir.assert_structural_equal(actual, expected)
 
-    def collect(node):
-        if isinstance(node, tvm.tirx.For):
-            loops.append(node)
-        elif isinstance(node, tvm.tirx.Call) and hasattr(node.op, "name") and node.op.name.startswith("tl.rng_"):
-            calls.append(node)
 
-    post_order_visit(transformed.body, collect)
-    assert len(loops) == 1 and loops[0].kind == tvm.tirx.ForKind.SERIAL and int(loops[0].extent) == 4
-    expected = 2 if form in ("interleaved", "reinitialize") else 1
-    assert len(calls) == expected
-    inside = []
-    post_order_visit(loops[0].body, lambda node: inside.append(node) if isinstance(node, tvm.tirx.Call) else None)
-    assert all(any(call.same_as(node) for node in inside) for call in calls)
-    assert not _undefined_local_vars(transformed)
+@tilelang.testing.requires_ascend(support_required="compile-only")
+def test_ascend_rng_repeated_store_preserves_draws():
+    @T.prim_func
+    def main(A: T.Tensor((1,), T.float32)):
+        for _ in T.vectorized(2):
+            A[0] = T.rng_rand_float()
+
+    target = tvm.target.Target("ascend")
+    expected = _run_vectorize_loop(main, target, enable_vectorize=False)
+    tvm.ir.assert_structural_equal(_run_vectorize_loop(main, target), expected)
 
 
 @tilelang.testing.requires_cuda

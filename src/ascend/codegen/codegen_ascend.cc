@@ -1067,19 +1067,9 @@ void CodeGenTileLangAscend::VisitExpr_(const BroadcastNode *op,
   // leaves an opaque scalar RNG call under Broadcast, and target codegen
   // replaces the vector with one backend runtime call. Ascend's default 64-bit
   // vector width makes the FP32 case a float2.
-  const CallNode *rng_call = op->value.as<CallNode>();
-  if (rng_call != nullptr) {
-    const CallNode *call = rng_call;
-    if (call->op.same_as(tl::rng_rand_float()) && (lanes == 2 || lanes == 4) &&
-        call->dtype.is_float() && call->dtype.bits() == 32) {
-      ICHECK_EQ(call->args.size(), 1);
-      const auto *dist = call->args[0].as<StringImmNode>();
-      ICHECK(dist != nullptr) << "Ascend RNG distribution must be constant";
-      if (dist->value == "uniform" || dist->value == "normal") {
-        EmitPhiloxVectorFloat(os, dist->value, lanes);
-        return;
-      }
-    }
+  if (auto distribution = tl::MatchAscendVectorRng(op->value, lanes)) {
+    EmitPhiloxVectorFloat(os, distribution.value(), lanes);
+    return;
   }
 
   if ((op->dtype.is_int() || op->dtype.is_uint()) && op->dtype.bits() == 8) {
