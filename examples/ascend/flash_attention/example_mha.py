@@ -7,6 +7,7 @@ GEMM can consume them without an intermediate ND-to-NZ conversion.
 """
 
 import tilelang
+import tilelang.ascend.language as T
 
 from tilelang.profiler import do_bench
 
@@ -14,9 +15,12 @@ from core import flash_attention_fwd
 
 
 def mha(D_val=128, SEQ_LEN=4096):
+    """Pass None for independent runtime lengths with positive, 128-aligned KV length."""
+    q_len = SEQ_LEN if SEQ_LEN is not None else T.dynamic("q_len")
+    kv_len = SEQ_LEN if SEQ_LEN is not None else T.dynamic("kv_len")
     return flash_attention_fwd(
-        q_len=SEQ_LEN,
-        kv_len=SEQ_LEN,
+        q_len=q_len,
+        kv_len=kv_len,
         head_dim=D_val,
         out_dtype="float32",
     )
