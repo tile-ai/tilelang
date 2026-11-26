@@ -1660,6 +1660,16 @@ private:
             visit(candidate);
             return;
           }
+          // Projection of one edge is deterministic for a given scope, so the
+          // same distance-0/1 edge is re-projected on every saturation call
+          // that reaches it. Deep rings make that quadratic; memoize instead.
+          auto memo_key =
+              std::make_tuple(candidate.src, candidate.dst, candidate.distance,
+                              candidate.strict ? 1 : 0,
+                              static_cast<const void *>(projection_scope));
+          if (!projected_edge_scopes_.insert(memo_key).second) {
+            return;
+          }
           int source_domain = site_registry_.Src(candidate).EpochDomainId();
           site_registry_.ForEachPhysicalSitePair(
               candidate, [&](const DepEdge &projected) {
@@ -2434,6 +2444,10 @@ private:
   SyncSiteRegistry site_registry_;
   std::vector<SyncPoint> sync_points_;
   std::set<std::pair<size_t, size_t>> reusable_pairs_;
+  // (src, dst, distance, strict, scope) triples whose physical-site
+  // projection has already been enumerated.
+  mutable std::set<std::tuple<size_t, size_t, int, int, const void *>>
+      projected_edge_scopes_;
   DependencyCache dependency_cache_;
   std::map<ControlNode *, DepClosure> scope_closures_;
   std::map<ControlNode *, IterationOrder> lifetime_orders_;
