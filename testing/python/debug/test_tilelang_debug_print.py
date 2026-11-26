@@ -118,5 +118,72 @@ def test_debug_print_msg():
     debug_print_msg(16, 16, msg_only=False)
 
 
+def test_debug_print_global_buffer_is_printed_once_per_block(capfd):
+    """A global buffer is dumped by one thread per block; block selection is
+    left to the caller."""
+
+    @T.prim_func
+    def program(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
+        with T.Kernel(2, threads=32):
+            T.print(A)
+            B[0] = 1
+
+    jit_kernel = tilelang.compile(program)
+    profiler = jit_kernel.get_profiler()
+    profiler.run_once()
+
+    import torch
+
+    torch.cuda.synchronize()
+    dumped = [line for line in capfd.readouterr().out.splitlines() if "buffer=A" in line]
+    assert len(dumped) == 8, f"expected one dump of 4 elements per block, got {len(dumped)} lines"
+
+
+def test_debug_print_global_buffer_in_conditional_block(capfd):
+    """Wrapping T.print in a block guard still prints from that block."""
+
+    @T.prim_func
+    def program(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
+        with T.Kernel(2, threads=32) as bx:
+            if bx == 1:
+                T.print(A)
+            B[0] = 1
+
+    jit_kernel = tilelang.compile(program)
+    profiler = jit_kernel.get_profiler()
+    profiler.run_once()
+
+    import torch
+
+    torch.cuda.synchronize()
+    dumped = [line for line in capfd.readouterr().out.splitlines() if "buffer=A" in line]
+    assert len(dumped) == 4, f"expected a dump of 4 elements from block 1, got {len(dumped)} lines"
+    assert all("BlockIdx=(1, 0, 0)" in line for line in dumped), dumped
+
+
+def test_debug_print_shared_buffer_is_printed_by_one_thread(capfd):
+    """A shared buffer is printed by one thread per block, including when the
+    block has more than one thread dimension."""
+
+    @T.prim_func
+    def program(A: T.Tensor((4,), "int32"), B: T.Tensor((4,), "int32")):
+        with T.Kernel(1, threads=(32, 2)):
+            S = T.alloc_shared((4,), "int32")
+            T.copy(A, S)
+            T.sync_threads()
+            T.print(S)
+            B[0] = 1
+
+    jit_kernel = tilelang.compile(program)
+    profiler = jit_kernel.get_profiler()
+    profiler.run_once()
+
+    import torch
+
+    torch.cuda.synchronize()
+    dumped = [line for line in capfd.readouterr().out.splitlines() if "buffer=S" in line]
+    assert len(dumped) == 4, f"expected a single dump of 4 elements, got {len(dumped)} lines"
+
+
 if __name__ == "__main__":
     tilelang.testing.main()
