@@ -1135,7 +1135,7 @@ jobs:
               --title "TileLang Nightly ${TAG}" \
               --notes "Automated nightly wheels built from tile-ai/tilelang@${GITHUB_SHA}."
           fi
-          gh release view "${TAG}" --repo "${NIGHTLY_REPO}" --json assets > release_assets.json
+          CLICOLOR_FORCE=0 gh api "repos/${NIGHTLY_REPO}/releases/tags/${TAG}" > release_assets.json
 
           gh auth setup-git --hostname github.com --force
 
