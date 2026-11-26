@@ -71,23 +71,6 @@ philox_rand_uniform4(AscendPhiloxState *st) {
   return make_float4(uniform01.x, uniform01.y, uniform23.x, uniform23.y);
 }
 
-__simt_callee__ __aicore__ inline float2
-philox_rand_normal2(AscendPhiloxState *st) {
-  const float uniform0 = philox_rand_uniform(st);
-  const float uniform1 = philox_rand_uniform(st);
-  float normal0;
-  float normal1;
-  RandomKernelBase::BoxMullerFloat(uniform0, uniform1, &normal0, &normal1);
-  return make_float2(normal0, normal1);
-}
-
-__simt_callee__ __aicore__ inline float4
-philox_rand_normal4(AscendPhiloxState *st) {
-  const float2 normal01 = philox_rand_normal2(st);
-  const float2 normal23 = philox_rand_normal2(st);
-  return make_float4(normal01.x, normal01.y, normal23.x, normal23.y);
-}
-
 __simt_callee__ __aicore__ inline float
 philox_rand_normal(AscendPhiloxState *st) {
   if (st->has_normal) {
@@ -102,6 +85,20 @@ philox_rand_normal(AscendPhiloxState *st) {
   st->normal_cache = z1;
   st->has_normal = true;
   return z0;
+}
+
+__simt_callee__ __aicore__ inline float2
+philox_rand_normal2(AscendPhiloxState *st) {
+  const float normal0 = philox_rand_normal(st);
+  const float normal1 = philox_rand_normal(st);
+  return make_float2(normal0, normal1);
+}
+
+__simt_callee__ __aicore__ inline float4
+philox_rand_normal4(AscendPhiloxState *st) {
+  const float2 normal01 = philox_rand_normal2(st);
+  const float2 normal23 = philox_rand_normal2(st);
+  return make_float4(normal01.x, normal01.y, normal23.x, normal23.y);
 }
 
 } // namespace tl

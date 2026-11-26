@@ -68,6 +68,34 @@ def test_parallel_rng_is_implicitly_fused_and_bitwise_equal_up_to_layout(dtype, 
     )
 
 
+@tilelang.testing.requires_ascend
+@pytest.mark.parametrize("lanes", [2, 4])
+def test_vector_normal_after_scalar_preserves_stream(lanes):
+    @T.prim_func
+    def main(reference: T.Tensor((8,), T.float32), result: T.Tensor((8,), T.float32)):
+        with T.Kernel(1):
+            scalar = T.alloc_shared((8,), T.float32)
+            mixed = T.alloc_shared((8,), T.float32)
+            with T.SimtVF(threads=1):
+                T.rng_init(42, seq=7, off=12)
+                T.evaluate(T.rng_rand_float(dist="normal"))
+                for i in T.serial(8):
+                    scalar[i] = T.rng_rand_float(dist="normal")
+
+                T.rng_init(42, seq=7, off=12)
+                T.evaluate(T.rng_rand_float(dist="normal"))
+                mixed[T.Ramp(0, 1, lanes)] = T.Broadcast(T.rng_rand_float(dist="normal"), lanes)
+                for i in T.serial(8 - lanes):
+                    mixed[lanes + i] = T.rng_rand_float(dist="normal")
+            T.copy(scalar, reference)
+            T.copy(mixed, result)
+
+    kernel = tilelang.compile(main, target="ascend", out_idx=[0, 1])
+    assert f"tl::philox_rand_normal{lanes}(&" in kernel.get_kernel_source()
+    reference, result = kernel()
+    assert torch.equal(result.cpu().view(torch.int32), reference.cpu().view(torch.int32))
+
+
 def _rng_vector_local(distribution, unrolled):
     @T.prim_func
     def main(reference: T.Tensor((4,), T.float32), result: T.Tensor((4,), T.float32)):
