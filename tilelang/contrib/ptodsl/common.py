@@ -69,6 +69,11 @@ def as_logical_bool(value):
     return value != 0
 
 
+def as_ir_bool(value):
+    """Normalize scalar truthiness and materialize Python literals as IR i1."""
+    return coerce_i1(as_logical_bool(value), context="PTO scalar predicate")
+
+
 def wrap_const(value, dtype):
     """Wrap a Python literal as a traced constant of *dtype*; traced values pass through."""
     if hasattr(unwrap_surface_value(value), "type"):
