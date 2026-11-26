@@ -1,0 +1,4 @@
+interface:
+  display_name: "TileLang Operator System Tests"
+  short_description: "Create, improve, and accept trustworthy system tests for operators in the current repository"
+  default_prompt: "Use $tilelang-op-test to deliver system tests from scratch, improve existing coverage, or provide a reproducible delivery-acceptance result for this operator in the current repository."

@@ -1,0 +1,740 @@
+{
+  "eval_mode": "text",
+  "evals": [
+    {
+      "id": 1,
+      "title": "A5 architecture identity and core concepts",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Please explain the A5 architecture identity, including the meaning and relationship of NpuArch, SocVersion, __NPU_ARCH__, archXX, and full_soc.",
+      "expected_output": "The reply should explain the core concepts for the supported A5 workflow:\n- NpuArch: chip architecture number, defines the instruction set and microarchitecture, obtained through GetCurNpuArch() at runtime; A5 uses DAV_3510\n- SocVersion: system-on-chip software identifier, obtained through GetSocVersion(); Ascend950PR/DT use ASCEND950\n- __NPU_ARCH__: device-side compilation macro; A5 uses 3510\n- archXX: operator-repository architecture directory derived from the first two DAV digits; DAV_3510 maps to arch35\n- full_soc: complete native SKU identifier used to select SKU-dependent resources and performance peaks, while npu_arch=3510 selects architecture-level capabilities",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "NpuArch",
+          "description": "NpuArch was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "SocVersion",
+          "description": "SocVersion was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "archXX",
+          "description": "archXX was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "__NPU_ARCH__",
+          "description": "__NPU_ARCH__ was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "A5 product mapping query",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What NpuArch, SocVersion, __NPU_ARCH__, and archXX directory do Ascend950PR and Ascend950DT use? How should their different SKUs be distinguished for resource and peak calculations?",
+      "expected_output": "The response should give the A5 mapping based on the product mapping table:\n- Ascend950PR and Ascend950DT use SocVersion=ASCEND950 and NpuArch=DAV_3510\n- The device compilation macro is __NPU_ARCH__=3510 and the operator architecture directory is arch35\n- Architecture-level capabilities are selected with npu_arch=3510\n- SKU-dependent resources and performance peaks require the complete full_soc plus matching runtime or trusted specification evidence; PR/DT family names alone are insufficient",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "ASCEND950",
+          "description": "ASCEND950 was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "DAV_3510",
+          "description": "DAV_3510 was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "arch35",
+          "description": "arch35 was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "How to obtain hardware parameters",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "In Ascend C operator development, how to correctly obtain hardware parameters such as the number of cores and UB capacity? Why can't it be hard-coded?",
+      "expected_output": "The reply should explain the correct method of obtaining hardware parameters:\n- Use PlatformAscendC API: GetCoreNumAic() (Cube core number), GetCoreNumAiv() (Vector core number), GetCoreMemSize() (Buffer capacity)\n- Counter example: hard-coded typical values (such as constexpr uint32_t CORE_NUM = 32) Cross-model or cut SKU will cross the boundary or waste\n- Correct approach: Get the actual value through the interface at runtime to avoid hard coding\n- Sample code: ascendcPlatform.GetCoreNumAiv() / GetCoreMemSize(CoreMemType::UB, ubSize)",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "GetCoreMemSize",
+          "description": "GetCoreMemSize was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "hardcoded",
+          "description": "The reply mentioned hardcoding"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "DAV_3510 operator-relevant capabilities",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What DAV_3510 buffer capacities, data formats, data paths, and synchronization capabilities matter to A5 operator development?",
+      "expected_output": "Reply should cover operator-relevant DAV_3510 facts:\n- Buffer capacity: L0C 256 KB, UB 248 KB available per AIV user, and BT 4 KB, with runtime interfaces remaining authoritative\n- Data format: FP8/MXFP8/MXFP4/HiF8 Cube MMAD support\n- CV pass-through: L0C→UB, UB→L1, and the SSBuffer message channel can avoid GM workspace transfer\n- Synchronization mechanism: BufferID with get_buf/rel_buf semantics simplifies multi-pipeline synchronization\n- Sparse support: DAV_3510 does not support 4:2 sparse matrix calculation",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "L0C",
+          "description": "L0C was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "256 KB",
+          "description": "256 KB was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "SSBuffer",
+          "description": "SSBuffer was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "BufferID",
+          "description": "BufferID was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "SIMT vs SIMD architectural differences",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What is the difference between SIMT and SIMD programming models in Ascend C? What scenarios are they suitable for?",
+      "expected_output": "Reply should compare the core differences between SIMT and SIMD:\n- SIMT: scalar programming (thread perspective), Warp scheduling (32 thread grouping), 4 Warp Schedulers per AIV\n- SIMD: vector programming (continuous calculation within VF), software unrolled loops\n- SIMT applicable scenarios: Gather/Scatter, Hash insertion, random number, sorting (including atomic operations)\n- SIMD applicable scenarios: large blocks dense BF16/FP16 matrix multiplication/convolution, long vector sequential calculation\n- This Skill admits SIMT only after consistent DAV_3510 evidence is available\n- SIMT unique hardware: DCache (maximum 128KB, reuse UB as Cacheline), supports GM discrete access",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "SIMT",
+          "description": "SIMT was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "SIMD",
+          "description": "SIMD was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "Warp",
+          "description": "Warp was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "DAV_3510",
+          "description": "DAV_3510 was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Data format extension and SIMD-Regbase",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What new data formats are added to DAV_3510? What are the advantages of the SIMD-Regbase architecture?",
+      "expected_output": "The reply should describe the data format extension and Regbase architecture of DAV_3510:\n- New data formats: FP8 (E5M2/E4M3), MXFP8 (E5M2/E4M3), MXFP4 (E2M1/E1M2), HiF8\n- C++ Type name mapping: fp8_e5m2_t, fp8_e4m3fn_t, hifloat8_t\n- SIMD-Regbase core advantages:\n - In-register calculation: reduce UB access bandwidth\n - OOO instruction dual issuance: Vector performance improvement\n - Support non-32B aligned data processing\n- Code form changes: Membase's block/repeat parameter → Regbase's for-loop explicit loop",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "FP8",
+          "description": "FP8 was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "MXFP8",
+          "description": "MXFP8 was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "Regbase",
+          "description": "Reply mentioned Regbase"
+        },
+        {
+          "type": "contains",
+          "pattern": "OOO",
+          "description": "OOO was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Derivation of computing power formula",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What are the computing power of Cube BF16 and FP8 of Ascend950PR Server? How are they derived?",
+      "expected_output": "The reply should give the computing power derivation formula and calculation process:\n- Cube BF16 computing power formula: TFLOPS = M × K × N × Number of cores × freq(MHz) × 2 ÷ 10^6\n- Cube MAC array of BF16/FP16: M×K×N = 16×16×16 = 4096\n- 950PR Server BF16: 4096 × 32 × 1650 × 2 ÷ 10^6 = 432 TFLOPS\n- FP8’s Cube MAC array is larger: M×K×N = 16×32×16 = 8192\n- 950PR Server FP8: 8192 × 32 × 1650 × 2 ÷ 10^6 = 865 TFLOPS\n- Vector computing power formula: TFLOPS = vec_calc_size × vector_core_cnt × vec_freq(MHz) × 2 ÷ 10^6",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "432",
+          "description": "432 was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "865",
+          "description": "865 was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "TFLOPS",
+          "description": "TFLOPS was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "4096",
+          "description": "4096 was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Forward care-correct triggering in multi-skill environment",
+      "config": {
+        "max_tokens": 150000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "distractor_skills": [
+          "ascendc-env-check",
+          "ascendc-api-best-practices",
+          "ascendc-docs-search"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "For an Ascend950PR target, how should I determine the usable UB capacity and core counts, and may I hard-code the family-typical values? Similar environment and API skills are also available.",
+      "expected_output": "Reply should correctly activate npu-arch and explain A5 resource discovery:\n- DAV_3510 commonly exposes 248 KB of UB available per AIV user, but tiling must use GetCoreMemSize(CoreMemType::UB)\n- Query actual Cube and Vector core counts through PlatformAscendC or the runtime interfaces\n- Do not hard-code family-typical values because complete full_soc, SKU, configuration, or vNPU partitioning can change resources\n- Keep complete hardware evidence and require Ascend950PR/DT with npu_arch=3510\nEven when similar skills such as ascendc-env-check and ascendc-api-best-practices coexist, npu-arch should be selected for this hardware-identity and resource question.",
+      "files": [],
+      "expectations": [
+        {
+          "type": "skill_activated",
+          "pattern": "npu-arch",
+          "description": "Skill npu-arch is activated"
+        },
+        {
+          "type": "contains",
+          "pattern": "GetCoreMemSize",
+          "description": "The runtime UB-capacity interface was mentioned"
+        },
+        {
+          "type": "contains",
+          "pattern": "248 KB",
+          "description": "248 KB was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Questioning mechanism when information is insufficient",
+      "config": {
+        "max_tokens": 100000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Please introduce how the npu-arch skill should handle a request with insufficient information. When the user asks only a vague question such as \"What are the parameters of the NPU?\", what details should the skill ask for? Please explain briefly. No operations are required; only explain the relevant guidance.",
+      "expected_output": "The reply should explain the clarification mechanism of the npu-arch skill when information is insufficient:\n- Proactively ask what specific information the user wants rather than listing all architecture knowledge\n- Possible areas to clarify include architecture mapping (chip model → NpuArch), hardware parameters (core count, buffer capacity, compute capability), the SIMT/SIMD programming model, data-format support, and detailed specifications of a particular chip\n- The purpose of clarification is to narrow the scope and provide an accurate answer rather than overwhelming the user with information.",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "question",
+          "description": "Question mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "architecture",
+          "description": "The reply mentioned architecture"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Use boundaries-not applicable to operator development templates",
+      "config": {
+        "max_tokens": 100000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 120000,
+          "glm-5": 110000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Please introduce the usage boundaries of npu-arch skills. What scenarios is it suitable for? What scenarios is it not suitable for? What skills should be used to create an operator engineering template? No operation is required, only knowledge is required.",
+      "expected_output": "The reply should explain the applicable boundaries of npu-arch skills:\n- Suitable scenarios: architectural judgment and hardware capability identification (chip mapping, architectural differences, hardware parameters, data formats, computing power derivation)\n- Unsuitable scenarios: operator directory structure, CMake configuration, file naming convention and other project template contents are not within the scope of this skill\n- Recommended alternative: Create operator project templates using ascendc-direct-invoke-template (Kernel Direct adjustment project) or ascendc-registry-invoke-template (complete custom operator project)\n- Core difference: npu-arch provides architectural knowledge query, and engineering template skills provide project scaffolding",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "architecture",
+          "description": "The reply mentioned architecture"
+        },
+        {
+          "type": "contains",
+          "pattern": "project template",
+          "description": "Project templates were mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "Building macros cannot be inferred based on name values",
+      "config": {
+        "max_tokens": 150000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Does __DAV_C310__ in the build system represent __NPU_ARCH__=310? What is its relationship with arch35 and DAV_3510?",
+      "expected_output": "The reply should state that __DAV_C310__ is a build system internal macro and cannot be numerically inferred from the C310 name; it is equivalent to NpuArch::DAV_3510, arch35 and __NPU_ARCH__=3510, and should be named with a clear mapping rather than guesswork",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 12,
+      "title": "Handling retained values for schema query failure",
+      "config": {
+        "max_tokens": 150000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "When PlatformAscendC queries the current chip, GetCurNpuArch and GetSocVersion fail. What will be returned? Can I continue by assuming the A5 DAV_3510 branch?",
+      "expected_output": "The reply should explain that failure returns NpuArch::DAV_RESV and SocVersion::RESERVED_VERSION respectively. DAV_3510 cannot be silently assumed; this A5 workflow must stop until consistent Ascend950PR/DT and npu_arch=3510 evidence is obtained.",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 13,
+      "title": "SKU parameters with the same architecture and different SKUs cannot be combined with typical values",
+      "config": {
+        "max_tokens": 150000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Since Ascend950PR PCIE and Server are both DAV_3510, can the Server's 32 Cube cores, 128GB Memory and frequency be hard-coded to all arch35 products?",
+      "expected_output": "The reply should reject hard coding, indicating that the frequency, core number, L2 and Memory under the same NpuArch will change with the sub-model or form; the actual values should be obtained through PlatformAscendC or device interface at runtime. The typical SKU in the reference table can only be used as an explanation and cannot be used as the true value for all arch35",
+      "expectations": [],
+      "files": []
+    },
+    {
+      "id": 14,
+      "title": "Vector BF16 support and total computing power composition",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Does the Vector Core of Ascend950PR (DAV_3510) support BF16? What is the peak computing power of BF16 of 950PR Server, and how much does Cube and Vector contribute?",
+      "expected_output": "The reply should be clear (Ascend 950 NPU Architecture White Paper §4.1.2/Table 3-1):\n- DAV_3510's Vector Core natively supports BF16, and there is no restriction that BF16 can only be used with Cube\n- 950PR Server BF16 total computing power 486 TFLOPS = Cube 432T + Vector 54T\n- The total computing power of 950PR PCIE file is 425T = Cube 378T + Vector 47T\n- It is no longer allowed to claim that Vector does not support bfloat16 (outdated and incorrect statement)",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "native support",
+          "description": "Reply to clarify that Vector natively supports BF16"
+        },
+        {
+          "type": "contains",
+          "pattern": "486",
+          "description": "The reply mentioned the total computing power 486T"
+        },
+        {
+          "type": "contains",
+          "pattern": "432",
+          "description": "Cube contribution 432T was mentioned in the reply"
+        },
+        {
+          "type": "not_contains",
+          "pattern": "Vector does not support bfloat16",
+          "description": "Reply does not appear. Vector does not support bfloat16 obsolete error statement"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "title": "UB capacity caliber (512KB vs 248KB)",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Table 4-2 of the Ascend 950 white paper writes that UB is 512KB per AI Core, but GetCoreMemSize returns 248KB. Are these two values contradictory? Which one should be used when tiling?",
+      "expected_output": "The reply should explain the UB capacity caliber:\n- No contradiction: 512KB in the white paper table 4-2 is the physical capacity calculated by AI Core group (1 AIC + 2 AIV), that is, 256KB × 2 per AIV. \n- 248KB (INI ub_size=253952) is the available value per AIV user, that is, physical 256KB − 8KB reserved\n- Conclusion: Single AIV physical 256KB / available 248KB, group-level physical 512KB\n- Tiling is always based on the return value of GetCoreMemSize(CoreMemType::UB), hard coding is prohibited",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "512",
+          "description": "Reply mentioned group level physics 512KB"
+        },
+        {
+          "type": "contains",
+          "pattern": "248",
+          "description": "Reply mentioned 248KB available per AIV"
+        },
+        {
+          "type": "contains",
+          "pattern": "256",
+          "description": "Reply mentioned physical 256KB per AIV"
+        },
+        {
+          "type": "contains",
+          "pattern": "GetCoreMemSize",
+          "description": "Reply to clear Tiling based on GetCoreMemSize"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "title": "950DT/950PR specifications, gears and positioning",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What scenarios are Ascend950DT and Ascend950PR targeted at? What are their respective core levels and memory specifications?",
+      "expected_output": "The reply should explain the positioning and specifications of the 950 series (Ascend 950 NPU Architecture White Paper §2/§3/Table 3-1):\n- 950PR: Recommended for high performance, large model prefill and multi-modal inference; Cube 32/28 core two levels, Memory 128/112GB @ 1.6/1.4TB/s\n- 950DT: Covers the entire process of pre-training, post-training and inference (including Decode and Prefill); Cube 36/32/28 core three levels, Memory 144/96GB @ 4TB/s\n- (Decode)/(Prefill) is only annotation of scene emphasis, not the only use.",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "950DT",
+          "description": "950DT was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "Prefill",
+          "description": "Prefill scene positioning was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "144",
+          "description": "The reply mentioned 950DT up to 144GB"
+        },
+        {
+          "type": "contains",
+          "pattern": "4TB/s",
+          "description": "The reply mentioned 950DT 4TB/s bandwidth"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "title": "Memory bandwidth and information source classification",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What are the Memory bandwidth tiers of Ascend950PR Server and PCIE and Ascend950DT? Are these values sufficient to select a denominator for an arbitrary A5 device?",
+      "expected_output": "The reply should state the A5 Memory bandwidth and usage constraints:\n- 950PR Server 1.6 TB/s and PCIE 1.4 TB/s are confirmed by Ascend 950 NPU Architecture White Paper Table 3-1/§4.3\n- 950DT is listed at 4 TB/s in the white paper\n- These family tiers must not be selected from PR/DT naming alone; exact bandwidth utilization requires complete full_soc matched to the corresponding trusted specification tier\n- If the exact SKU tier cannot be confirmed, report the peak as unconfirmed and do not calculate precise utilization",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "1.6",
+          "description": "The reply mentioned 1.6 TB/s"
+        },
+        {
+          "type": "contains",
+          "pattern": "1.4",
+          "description": "The reply mentioned 1.4 TB/s"
+        },
+        {
+          "type": "contains",
+          "pattern": "white paper",
+          "description": "The reply mentioned the white paper as the source of 950 bandwidth"
+        },
+        {
+          "type": "contains",
+          "pattern": "full_soc",
+          "description": "The reply requires complete SKU evidence before selecting a bandwidth denominator"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "title": "NDDMA and BufferID mechanism details",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What capabilities does the NDDMA instruction of DAV_3510 have? What changes does the BufferID synchronization mechanism have compared to set/wait?",
+      "expected_output": "The reply should explain NDDMA and BufferID (Ascend 950 NPU Architecture White Paper §4.1.5/§4.1.6):\n- NDDMA: Rearrange global memory data in up to 5 dimensions and write it directly to UB. The transfer and rearrangement/transposition are completed in one step; the built-in cache automatically explores data locality and merges reads of multiple data element granularities into 128-byte reads\n- BufferID: replacement set/wait forces pairing, get_buf() corresponds to locking, rel_buf() corresponds to unlocking, similar to mutex lock semantics, stronger cohesion, and decoupled from other pipelines",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "5 dimensions",
+          "description": "The reply mentioned NDDMA up to 5 dimensions rearrangement"
+        },
+        {
+          "type": "contains",
+          "pattern": "128",
+          "description": "The reply mentioned 128-byte read merging"
+        },
+        {
+          "type": "contains",
+          "pattern": "get_buf",
+          "description": "The get_buf locking semantics were mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "rel_buf",
+          "description": "Reply mentioned rel_buf unlocking semantics"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "title": "CCU Computing Fusion Capability",
+      "config": {
+        "max_tokens": 150000,
+        "max_tokens_by_model": {
+          "deepseek-v4-flash": 180000,
+          "glm-5": 160000
+        },
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "What is the new CCU in DAV_3510? What collective communication algorithms are supported? What impact does it have on operator development?",
+      "expected_output": "The reply should explain CCU (Ascend 950 NPU Architecture White Paper §4.6.4):\n- CCU (Collective Communication Unit): a new collective communication dedicated engine on IO-Die\n- CCUA integrates MemorySlice (data storage) and Reduce Unit (data calculation), URMA handling and Reduce calculation are executed by hardware judgment, and the status is reported through the Mission task interface after completion\n- Support Broadcast / ReduceScatter / AllGather / AllReduce / All2All / All2Allv Typical Algorithms\n- Impact on operator developers: General calculation fusion operators have new development options",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "CCU",
+          "description": "CCU was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "AllReduce",
+          "description": "AllReduce was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "All2All",
+          "description": "All2All was mentioned in the reply"
+        },
+        {
+          "type": "contains",
+          "pattern": "ReduceScatter",
+          "description": "ReduceScatter was mentioned in the reply"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "title": "Get local hardware evidence when called independently",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "I'm calling npu-arch independently, without full_soc, npu_arch or evidence passed in from upstream. Please explain how I should get the information, but don't actually execute the command this time.",
+      "expected_output": "Reply should explain: parse the real directory where the current npu-arch/SKILL.md is located is NPU_ARCH_SKILL_DIR, run python3 \"$NPU_ARCH_SKILL_DIR/scripts/get_npu_arch.py\" --json, save the complete JSON; only accept Ascend950PR/DT series and npu_arch=3510, no evidence of NpuArch conflict; failed or not Stop at A5. MUST NOT rely on external ascendc-env-check, nor infer the native model from adjacent skill paths or static mappings.",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "get_npu_arch.py",
+          "description": "Reply to use npu-arch's built-in detection script"
+        },
+        {
+          "type": "contains",
+          "pattern": "full_soc",
+          "description": "Reply to keep the complete model number"
+        },
+        {
+          "type": "contains",
+          "pattern": "3510",
+          "description": "Reply to verify A5 architecture"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Reuse evidence and select performance peaks by SKU",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "Complete evidence of the same device has been passed in from the upstream: full_soc=Ascend950PR_957b, npu_arch=3510, and the SKU has been matched to 28 Cube Core, 1.4 TB/s by trusted specifications. How should this information be used when doing performance analysis?",
+      "expected_output": "Reply should reuse existing evidence and not repeat detection; use 3510 query architecture level capabilities, use the complete full_soc/confirmed SKU file to obtain 1.4 TB/s; 28 Cube Core, 1.65GHz Cube FP16/BF16 peaks at about 378 TFLOPS, 432 TFLOPS of 32 core files cannot be applied; bandwidth utilization is 1.4 TB/s denominator, computing power utilization selects the peak value according to the actual execution unit ",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "1.4",
+          "description": "Revert to using the confirmed bandwidth file"
+        },
+        {
+          "type": "contains",
+          "pattern": "378",
+          "description": "Revert to using 28-core Cube peak"
+        },
+        {
+          "type": "contains",
+          "pattern": "cannot be applied",
+          "description": "The reply clarified that 32-core files cannot be used for 28-core devices"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "title": "Stop when model conflicts with architecture evidence",
+      "config": {
+        "max_tokens": 100000,
+        "ascend_platforms": [
+          "A5"
+        ],
+        "eval_mode": "text"
+      },
+      "prompt": "The JSON reports full_soc=Ascend950DT_9592 but npu_arch=9999, and warnings also includes \"NpuArch is inconsistent\". Can you continue designing this workflow for A5?",
+      "expected_output": "Reply should refuse to continue, stating that Ascend950PR/DT must be consistent with npu_arch=3510, and that NpuArch conflict warning invalidates evidence; full raw evidence should be reported and stopped, and A5, 3510, or any typical spec should not be used by default.",
+      "files": [],
+      "expectations": [
+        {
+          "type": "contains",
+          "pattern": "stop",
+          "description": "Reply to clear stop"
+        },
+        {
+          "type": "contains",
+          "pattern": "conflict",
+          "description": "Reply to identify evidence conflict"
+        }
+      ]
+    }
+  ],
+  "skill_name": "npu-arch"
+}

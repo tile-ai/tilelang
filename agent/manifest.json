@@ -1,0 +1,44 @@
+{
+  "package": "tilelang-tuning",
+  "version": 2,
+  "agents": [
+    {
+      "name": "tilelang-tuning",
+      "description": "TileLang operator performance-tuning agent supporting lightweight autonomous Flash iteration and fully orchestrated Standard mode.",
+      "role": "primary",
+      "source": "core/agents/tilelang-tuning.md",
+      "children": [
+        "tilelang-perf-analysis-expert",
+        "tilelang-perf-impl-expert"
+      ]
+    },
+    {
+      "name": "tilelang-perf-analysis-expert",
+      "description": "TileLang operator performance-analysis subagent that collects on-device performance data for selected cases, analyzes tiling and pipelines, and produces a performance-optimization plan.",
+      "role": "subagent",
+      "source": "core/agents/tilelang-perf-analysis-expert.md",
+      "children": []
+    },
+    {
+      "name": "tilelang-perf-impl-expert",
+      "description": "TileLang operator performance-plan implementation subagent that implements one assigned plan at a time, completes compilation and accuracy validation, and returns the full results.",
+      "role": "subagent",
+      "source": "core/agents/tilelang-perf-impl-expert.md",
+      "children": []
+    }
+  ],
+  "workflows": [
+    "core/workflows/task-prompts.md",
+    "core/workflows/tilelang-tuning-flash.md"
+  ],
+  "skills": [
+    "npu-arch",
+    "tilelang-op-design",
+    "tilelang-op-generate",
+    "tilelang-op-test",
+    "tilelang-op-review",
+    "tilelang-op-profiling",
+    "tilelang-perf-optimize",
+    "tilelang-performance-best-practices"
+  ]
+}
