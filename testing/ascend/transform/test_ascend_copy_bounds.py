@@ -312,3 +312,52 @@ def test_mx_dynamic_tail_guard_stays_inside_copy_task(layout, explicit_task):
         condition = tirx.stmt_functor.substitute(guard.condition, {actual_k: k})
         expected = k % 64 != 0 if layout == "mn-contiguous" else (k + 31) // 32 < 2 * ((k + 63) // 64)
         assert bool(int(analyzer.simplify(condition))) == expected
+
+
+def test_symbolic_unit_axis_keeps_oob_clamp_active():
+    # A clamped trailing tile leaves a symbolic unit axis (Min(1, 7 - b0)) on
+    # the source while the destination keeps a literal unit axis. The clamp
+    # must still pair the remaining axes and shrink the OOB row tail instead
+    # of aborting the whole clamp and copying the tail as-is.
+    b0 = tirx.Var("b0", "int32")
+    before = _copy_module(
+        (7, 300, 64),
+        (1, 256, 64),
+        [b0, 64, 0],
+        [tirx.min(1, 7 - b0), 256, 64],
+        dst_extent=[1, 256, 64],
+        scope="shared.dyn",
+    )
+    after = transform.AscendInsertOOBPadding()(before)
+    assert not nodes(after, tirx.IfThenElse)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    # The row tail (64 + 256 > 300) is clamped to the remaining rows.
+    assert int(copy.args[0].args[2 + 1]) == 236
+    assert [int(x) for x in copy.args[1].args[2:]] == [1, 236, 64]
+    # The symbolic unit axis stays aligned with the destination's literal unit
+    # axis and keeps its in-bounds 0/1 semantics.
+    analyzer = tvm.arith.Analyzer()
+    for b0_value, expected in [(0, 1), (6, 1), (7, 0)]:
+        extent = tirx.stmt_functor.substitute(copy.args[0].args[2], {b0: b0_value})
+        assert int(analyzer.simplify(extent)) == expected
+
+
+def test_trailing_unit_tile_clamps_to_shape_boundary():
+    # The plain trailing unit tile (literal 1 vs literal 1) keeps the source
+    # singleton clamp Min(1, 7 - b0) while the destination stays literal.
+    b0 = tirx.Var("b0", "int32")
+    before = _copy_module(
+        (7, 256, 64),
+        (1, 256, 64),
+        [b0, 0, 0],
+        [1, 256, 64],
+        dst_extent=[1, 256, 64],
+        scope="shared.dyn",
+    )
+    after = transform.AscendInsertOOBPadding()(before)
+    (copy,) = calls(after, "tl.tileop.ascend_copy")
+    analyzer = tvm.arith.Analyzer()
+    for b0_value, expected in [(0, 1), (6, 1), (7, 0)]:
+        extent = tirx.stmt_functor.substitute(copy.args[0].args[2], {b0: b0_value})
+        assert int(analyzer.simplify(extent)) == expected
+    assert [int(x) for x in copy.args[1].args[2:]] == [1, 256, 64]

@@ -115,13 +115,22 @@ BoundedDMACopyRanges ClampDMACopyTail(const AscendCopyNode &op,
     src_singleton_axes = collect_other_axes(op.src_range.size(), src_axes);
     dst_singleton_axes = collect_other_axes(op.dst_range.size(), dst_axes);
   } else {
-    auto collect_non_singleton_axes = [](const Array<Range> &ranges) {
+    // Classify by provable extent, not by the structural literal 1: OOB
+    // clamping can leave an axis with a dynamic extent that is provably at
+    // most one but is not the literal 1 (e.g. Min(1, B - i) for an
+    // already-clamped trailing tile). A symbolic unit axis must stay aligned
+    // with a literal unit axis on the other side, otherwise the axis-count
+    // check below aborts the whole clamp and an OOB tail is copied as-is.
+    auto collect_non_singleton_axes = [analyzer](const Array<Range> &ranges) {
       std::vector<size_t> axes, singleton_axes;
       for (size_t i = 0; i < ranges.size(); ++i) {
-        if (!is_one(ranges[i]->extent))
-          axes.push_back(i);
-        else
+        PrimExpr extent = analyzer->Simplify(ranges[i]->extent);
+        PrimExpr one = make_const(extent.dtype(), 1);
+        if (analyzer->CanProve(extent <= one,
+                               arith::ProofStrength::kSymbolicBound))
           singleton_axes.push_back(i);
+        else
+          axes.push_back(i);
       }
       return std::make_pair(axes, singleton_axes);
     };
