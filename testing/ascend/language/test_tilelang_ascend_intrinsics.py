@@ -1,16 +1,65 @@
 """Ascend SIMD API contracts and instruction emission."""
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pytest
 
 import tilelang
 import tilelang.ascend.language as T
 import tilelang.testing
+from tilelang import tvm
 from tilelang.ascend.language import simd as ascend_simd
 from tilelang.engine.lower import lower
 from tvm import tirx
 from tvm.script.ir_builder import IRBuilder
 from tvm.tirx import Call
 from testing.ascend._ir import calls
+
+
+@tilelang.testing.requires_ascend(support_required="compile-only")
+def test_simdvf_scope_is_thread_local():
+    from tilelang.ascend.language.frame import inside_simdvf
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def lower_reduction():
+        @T.prim_func
+        def main(A: T.Tensor((64,), T.float32), B: T.Tensor((1,), T.float32)):
+            with T.Kernel(1):
+                a_ub = T.alloc_shared((64,), T.float32)
+                b_ub = T.alloc_shared((1,), T.float32)
+                T.copy(A, a_ub)
+                with T.SimtVF(threads=64):
+                    T.reduce_sum(a_ub, b_ub, dim=0)
+                T.copy(b_ub, B)
+
+        with tvm.target.Target("ascend"):
+            tilelang.lower(main, target="ascend")
+
+    def hold_simdvf_scope():
+        with IRBuilder(), T.sblock("root"), T.SimdVF():
+            assert inside_simdvf()
+            entered.set()
+            assert release.wait(timeout=10)
+            T.evaluate(0)
+
+    assert not inside_simdvf()
+    lower_reduction()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(hold_simdvf_scope)
+        try:
+            assert entered.wait(timeout=10)
+            with IRBuilder(), T.sblock("root"):
+                assert not inside_simdvf()
+                with pytest.raises(RuntimeError, match="require a `T.SimdVF"):
+                    T.vmi.vbrc(tirx.const(1.0, "float32"), size=64)
+            lower_reduction()
+        finally:
+            release.set()
+        future.result(timeout=10)
+    assert not inside_simdvf()
 
 
 def _op_name(call_or_op):
