@@ -87,6 +87,79 @@ def test_cuda_binary_cache_hit_skips_nvcc_compile(monkeypatch, tmp_path):
         assert (cache_file.parent / "metadata.json").is_file()
 
 
+def test_cuda_compile_callback_uses_cuda_namespace_keys(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    from tilelang.cuda import PassConfigKey as CudaPassConfigKey
+    from tilelang.cuda import backend as cuda_backend
+
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+    monkeypatch.setattr(cuda_backend.nvcc, "get_nvcc_version", lambda: (13, 0, 88))
+
+    compile_calls = []
+
+    def fake_compile_cuda(code, target_format, arch, options=None, verbose=False):
+        compile_calls.append(tuple(options or ()))
+        return bytearray(b"fake-cubin")
+
+    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_compile_cuda)
+
+    target = Target({"kind": "cuda", "arch": "sm_90a"})
+    source = 'extern "C" __global__ void kernel() {}'
+    configs = {
+        CudaPassConfigKey.TL_CUDA_COMPILER: "nvcc",
+        CudaPassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 4,
+    }
+
+    cuda_backend.tilelang_callback_cuda_compile(source, target, configs)
+
+    assert len(compile_calls) == 1
+    assert "--ptxas-options=--register-usage-level=4" in compile_calls[0]
+
+
+def test_cuda_compile_callback_selects_nvrtc_from_cuda_namespace(monkeypatch, tmp_path):
+    _set_cache_dirs(monkeypatch, tmp_path)
+    import sys
+    import types
+
+    import tilelang.contrib as contrib
+    from tilelang.cuda import PassConfigKey as CudaPassConfigKey
+    from tilelang.cuda import backend as cuda_backend
+
+    monkeypatch.setattr(env, "TILELANG_KERNEL_CACHE_USE_LIB_STAMP", "0")
+
+    nvcc_calls = []
+    nvrtc_calls = []
+
+    def fake_nvcc_compile(*args, **kwargs):
+        nvcc_calls.append(kwargs)
+        return bytearray(b"nvcc-cubin")
+
+    def fake_nvrtc_compile(*args, **kwargs):
+        nvrtc_calls.append(kwargs)
+        return bytearray(b"nvrtc-cubin")
+
+    fake_nvrtc = types.ModuleType("tilelang.contrib.nvrtc")
+    fake_nvrtc.get_nvrtc_version = lambda: (12, 0)
+    fake_nvrtc.default_compile_options = lambda flags=None: []
+    fake_nvrtc.compile_cuda = fake_nvrtc_compile
+    monkeypatch.setitem(sys.modules, "tilelang.contrib.nvrtc", fake_nvrtc)
+    monkeypatch.setattr(contrib, "nvrtc", fake_nvrtc, raising=False)
+    monkeypatch.setattr(cuda_backend.nvcc, "compile_cuda", fake_nvcc_compile)
+
+    target = Target({"kind": "cuda", "arch": "sm_90a"})
+    source = 'extern "C" __global__ void kernel() {}'
+    configs = {
+        CudaPassConfigKey.TL_CUDA_COMPILER: "nvrtc",
+        CudaPassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 4,
+    }
+
+    binary = cuda_backend.tilelang_callback_cuda_compile(source, target, configs)
+
+    assert bytes(binary) == b"nvrtc-cubin"
+    assert len(nvrtc_calls) == 1
+    assert not nvcc_calls
+
+
 def test_cuda_binary_cache_corrupted_entry_raises(monkeypatch, tmp_path):
     _set_cache_dirs(monkeypatch, tmp_path)
     from tilelang.cuda import backend as cuda_backend
