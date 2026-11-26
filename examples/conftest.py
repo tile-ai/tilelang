@@ -50,7 +50,11 @@ def pytest_collection_modifyitems(config, items):  # noqa: ARG001
     """When TILELANG_DEFAULT_TARGET selects CuTeDSL, annotate known-bad tests automatically."""
     import tilelang.testing
 
-    if not tilelang.testing.default_target_is_cutedsl():
+    # `default_target_is_cutedsl` does not exist in older releases (e.g. 0.1.15
+    # on PyPI); resolve it defensively so pytest does not abort with
+    # INTERNALERROR when the examples run against such a version.
+    default_target_is_cutedsl = getattr(tilelang.testing, "default_target_is_cutedsl", None)
+    if default_target_is_cutedsl is None or not default_target_is_cutedsl():
         return
 
     for item in items:
