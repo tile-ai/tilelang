@@ -1400,6 +1400,7 @@ __all__ = [
     "require_vmi_scope",
     "vabs",
     "vadd",
+    "vsub",
     "vadds",
     "vaxpy",
     "vbrc",
