@@ -249,6 +249,8 @@ class CacheState:
     """Class to manage global kernel caching state."""
 
     _enabled = True
+    _scope_counter = 0
+    _scope_stack: list[int] = []
 
     @classmethod
     def enable(cls):
@@ -264,6 +266,30 @@ class CacheState:
     def is_enabled(cls) -> bool:
         """Return current cache state."""
         return cls._enabled
+
+    @classmethod
+    def begin_scope(cls) -> int:
+        """Start a fresh-cache scope, returning its unique id.
+
+        Only `without_kernel_cache()` uses this. Unlike a plain `disable()`,
+        a scope asks the JIT wrapper for a build that did not exist before the
+        block, so the wrapper keys include this id.
+        """
+        cls._scope_counter += 1
+        cls._scope_stack.append(cls._scope_counter)
+        return cls._scope_counter
+
+    @classmethod
+    def end_scope(cls, scope: int) -> None:
+        """End *scope*, which must be the innermost active scope."""
+        if not cls._scope_stack or cls._scope_stack[-1] != scope:
+            raise RuntimeError("kernel-cache scopes must be exited in stack order")
+        cls._scope_stack.pop()
+
+    @classmethod
+    def current_scope(cls) -> int | None:
+        """Return the innermost fresh-cache scope id, if any."""
+        return cls._scope_stack[-1] if cls._scope_stack else None
 
 
 @dataclass
