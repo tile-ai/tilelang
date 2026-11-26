@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from hashlib import sha256
 from typing import Any
 
@@ -28,7 +29,7 @@ class CUDABinaryCache(BinaryCache):
         target_code: list[str],
         compile_format: str,
         options: list[str] | None = None,
-        compiler: str = "nvcc",
+        toolchain: Mapping[str, str] | None = None,
     ) -> str:
         # Compiler options must be part of the key: flags like --use_fast_math
         # change the generated SASS without changing the CUDA source, so keying
@@ -42,6 +43,6 @@ class CUDABinaryCache(BinaryCache):
             "target_code": tuple(target_code),
             "compile_format": compile_format,
             "options": tuple(options or []),
-            "compiler": compiler,
+            "toolchain": dict(toolchain or {}),
         }
         return cls._finalize_key(key_data)

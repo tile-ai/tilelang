@@ -2,6 +2,7 @@ import pytest
 
 import tilelang
 import tilelang.language as T
+import tilelang.testing
 from tilelang import tvm
 from tilelang.engine.host_mapped import get_host_mapped_params
 from tilelang.jit.exceptions import JITNoBuilderError
@@ -63,8 +64,8 @@ def test_host_mapped_output_must_be_explicit():
         T.annotate_host_mapped_buffers(dst)
         T.evaluate(0)
 
-    with pytest.raises(ValueError, match="preallocated"):
-        tilelang.compile(kernel, target="cuda", execution_backend="cython", out_idx=[0])
+    with tilelang.testing.without_kernel_cache(), pytest.raises(ValueError, match="preallocated"):
+        tilelang.compile(kernel, target={"kind": "cuda", "arch": "sm_90"}, execution_backend="cython", out_idx=[0])
 
 
 def test_annotation_requires_builder():

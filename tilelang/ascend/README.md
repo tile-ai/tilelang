@@ -54,13 +54,14 @@ USE_ASCEND=ON USE_CUDA=OFF python -m pip install -e . -v --no-build-isolation
 
 The AscendC `tvm_ffi` compilation callback caches linked `.aibin` files under
 `TILELANG_CACHE_DIR` (default: `~/.tilelang/cache`). The key includes the generated
-source, NPU architecture, compilation and linker options, TileLang version, and
-a `compiler` string formed as `bisheng version=<version line>`.
+source, NPU architecture, compilation and linker options, TileLang version, and a
+toolchain stamp covering the Bisheng version line and the CANN release when the
+toolkit publishes it under `ASCEND_HOME_PATH` or `ASCEND_TOOLKIT_HOME`.
 
 The PTO `tvm_ffi` path uses the same cache root but stores its binaries in a
 separate `pto-binaries` namespace. Its key includes the PTODSL source, PTO
 architecture, ptoas flags, bisheng link flags, TileLang version, and a
-toolchain stamp covering the ptoas and CANN identities.
+toolchain stamp covering ptoas, its CANN installation, and the selected Bisheng linker.
 
 The version line is read from the selected `bisheng --version` once per process.
 It preserves the compiler build time, Clang version, and revisions; the build
@@ -69,9 +70,9 @@ Subsequent lines such as `InstalledDir` and the package's `version.info`
 `timestamp` are not included. Include paths still participate through the
 compilation options. Restart the process after changing toolchains.
 
-This follows CUDA's device binary cache policy. The outer full JIT cache has a
-separate key and does not currently include the compiler version; an outer
-cache hit skips the device compilation callback.
+The full JIT kernel cache includes the same toolchain identity as the device
+binary cache. A toolkit upgrade therefore also selects a new full-kernel entry,
+even with the same TileLang version and target.
 
 ## Quick Start
 

@@ -699,3 +699,8 @@ def get_nvcc_version() -> tuple[int, ...]:
     if match is None:
         raise RuntimeError(f"Cannot determine NVCC version from: {output}")
     return tuple(int(part) for part in match.group(1).split("."))
+
+
+def toolchain_stamp() -> dict[str, str]:
+    """Identity of the selected NVCC compiler for cache keys."""
+    return {"nvcc": ".".join(map(str, get_nvcc_version()))}
