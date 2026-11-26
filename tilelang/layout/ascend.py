@@ -19,12 +19,14 @@ class _AscendFractalLayout(Layout):
 
 def make_ascend_nz_layout(buffer: BufferLikeType):
     """
-    Create an Ascend NZ (zN fractal) layout for a Cube operand buffer.
+    Create a Huawei Ascend NZ (MajorK) layout for a Cube operand buffer.
 
-    A logical ``[.., rows, cols]`` tile maps to physical
-    ``[.., rows / 16, cols / C0, 16, C0]`` -- a grid of 16xC0 fractals -- where
-    ``C0 = 32 bytes / element_size`` is the Cube unit's fractal width and the
-    forward map is ``(.., r, c) -> [.., r / 16, c / C0, r % 16, c % C0]``.
+    ``C0 = 32 bytes / element_size`` is the Cube unit's fractal width.
+    The forward map is
+    ``(.., r, c) -> [.., c // C0, r // 16, r % 16, c % C0]``.
+    For rows divisible by 16 and columns divisible by C0, a logical
+    ``[.., rows, cols]`` tile has physical shape
+    ``[.., cols / C0, rows / 16, 16, C0]``.
 
     Args:
         buffer: BufferLikeType (rank >= 2, constant last-2 dims)
