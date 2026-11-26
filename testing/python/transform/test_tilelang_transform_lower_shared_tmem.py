@@ -5,7 +5,7 @@ from tilelang import tvm as tvm
 import tilelang as tl
 import tilelang.language as T
 import tilelang.testing
-from tilelang.testing.ir import assert_call_count, collect_calls
+from tilelang.testing.ir import assert_call_count, collect_calls, collect_nodes
 
 
 TARGET = tvm.target.Target({"kind": "cuda", "arch": "sm_100"})
@@ -17,6 +17,68 @@ def _apply(func):
     mod = tl.transform.MaterializeKernelLaunch()(mod)
     mod = tl.cuda.transform.LowerSharedTmem()(mod)
     return mod
+
+
+@tilelang.testing.requires_cuda
+def test_auto_dealloc_joins_other_warps_after_tmem_access():
+    """Warp 0 must join warp 1's TMEM accesses before freeing its allocation."""
+
+    @T.prim_func
+    def func(out: T.Tensor((32,), T.float32)):
+        with T.Kernel(1, threads=64):
+            C_tmem = T.alloc_tmem((128, 32), T.float32)
+            value = T.alloc_local((1,), T.float32)
+            tx = T.get_thread_binding()
+            if tx >= 32:
+                value[0] = 1
+                T.evaluate(
+                    T.call_intrin(
+                        "handle",
+                        tvm.ir.Op.get("tl.tcgen05_st"),
+                        32,
+                        1,
+                        False,
+                        C_tmem[32, 0],
+                        0,
+                        T.tvm_access_ptr(T.type_annotation(T.float32), value.data, 0, 1, 1),
+                    )
+                )
+                T.evaluate(
+                    T.call_intrin(
+                        "handle",
+                        tvm.ir.Op.get("tl.tcgen05_ld"),
+                        32,
+                        1,
+                        False,
+                        C_tmem[32, 0],
+                        0,
+                        T.tvm_access_ptr(T.type_annotation(T.float32), value.data, 0, 1, 2),
+                    )
+                )
+                out[tx - 32] = value[0]
+
+    mod = _apply(func)
+    mod = tl.transform.ThreadSync(["shared"])(mod)
+    mod = tl.cuda.transform.InjectTcgen05Fence()(mod)
+    # Inspect siblings: a barrier inside warp 0's deallocation branch cannot
+    # join the consumer warp, even if a traversal finds it before dealloc.
+    (epilogue,) = [
+        seq
+        for seq in collect_nodes(mod["main"].body, tvm.tirx.SeqStmt)
+        if isinstance(seq.seq[-1], tvm.tirx.IfThenElse) and collect_calls(seq.seq[-1], op="tl.ptx_deallocate_tensor_memory")
+    ]
+    consumer, before, sync, after, release = epilogue.seq[-5:]
+    assert isinstance(consumer, tvm.tirx.IfThenElse)
+    assert_call_count(consumer.then_case, op="tl.tcgen05_ld", count=1)
+    for stmt, name in zip(
+        (before, sync, after),
+        ("tl.tcgen05_before_thread_sync", "tirx.tvm_storage_sync", "tl.tcgen05_after_thread_sync"),
+    ):
+        assert isinstance(stmt, tvm.tirx.Evaluate)
+        assert stmt.value.op.same_as(tvm.ir.Op.get(name))
+    assert len(sync.value.args) == 1  # Full CTA, not a consumer-only barrier.
+    assert sync.value.args[0].value == "shared"
+    assert_call_count(release.then_case, op="tl.ptx_deallocate_tensor_memory", count=1)
 
 
 @tilelang.testing.requires_cuda
