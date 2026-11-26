@@ -297,6 +297,7 @@ class KernelCache:
         target_host: str | Target = None,
         pass_configs: dict = None,
         compile_flags: list[str] | str | None = None,
+        toolchain: dict[str, str] | None = None,
     ) -> str:
         """
         Generates a unique hash key for caching compiled kernels.
@@ -325,6 +326,8 @@ class KernelCache:
             "compile_flags": compile_flags,
             **self._get_base_key(),
         }
+        if toolchain is not None:
+            key_data["toolchain"] = toolchain
         # Sort keys to ensure consistency
         key_string = json.dumps(key_data, sort_keys=True)
         # Use SHA256 to generate hash key
@@ -481,6 +484,7 @@ class KernelCache:
             target_host=backend_context.target_host,
             pass_configs=pass_configs,
             compile_flags=compile_flags,
+            toolchain=backend_context.toolchain_stamp(pass_configs),
         )
         if verbose:
             self.logger.info(f"Generated cache key: {key} for kernel {get_prim_func_name(func, '<unknown>')}")

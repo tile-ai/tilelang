@@ -17,6 +17,11 @@ def get_nvrtc_version() -> tuple[int, int]:
     return (major, minor)
 
 
+def toolchain_stamp() -> dict[str, str]:
+    """Identity of the loaded NVRTC compiler for cache keys."""
+    return {"nvrtc": ".".join(map(str, get_nvrtc_version()))}
+
+
 def default_compile_options(compile_flags: list[str] | str | None = None) -> list[str]:
     """Extend the common CUDA compile options with NVRTC header compatibility."""
     options = nvcc.default_compile_options(compile_flags)

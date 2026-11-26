@@ -24,6 +24,7 @@ from pathlib import Path
 
 from tvm.contrib import utils
 
+from tilelang.contrib import bisheng
 from tilelang.env import env
 
 logger = logging.getLogger(__name__)
@@ -129,9 +130,7 @@ def run_ptoas(
 
 def bisheng_fatobj_link(fatobj_path: str | Path, out_so: str | Path, verbose: bool = False) -> None:
     """Link the fat object alone into a shared image carrying the device ELF."""
-    from tilelang.contrib.bisheng import find_bisheng_path
-
-    command = [find_bisheng_path(), *BISHENG_FATOBJ_LINK_FLAGS, "-o", str(out_so), str(fatobj_path)]
+    command = [bisheng.find_bisheng_path(), *BISHENG_FATOBJ_LINK_FLAGS, "-o", str(out_so), str(fatobj_path)]
     if verbose:
         print(f"bisheng command: {' '.join(command)}")
     result = subprocess.run(command, text=True, capture_output=True)
@@ -184,49 +183,24 @@ def _first_output_line(command: list[str]) -> str:
 
 
 @functools.cache
+def _ptoas_version(ptoas_path: str) -> str:
+    return _first_output_line([ptoas_path, "--version"])
+
+
 def toolchain_stamp() -> dict[str, str]:
     """Identity of the tools that produce a PTO aibin, for cache keys.
 
-    ptoas compiles the device object with the toolchain it resolves from
-    ASCEND_HOME_PATH, so the CANN identity (which includes the bisheng and
-    the CCE linker inside that install, and the version ptoas gates its ABI
-    on) is recorded.
+    ptoas compiles the device object against its CANN installation.
+    The final link uses the Bisheng selected by BISHENG_HOME or PATH.
     """
     ptoas_path = shutil.which("ptoas")
     if ptoas_path is None:
         raise RuntimeError("Cannot find the ptoas assembler. Install ptoas-vmi and make sure `ptoas` is on PATH.")
     return {
-        "ptoas": _first_output_line([ptoas_path, "--version"]),
+        "ptoas": _ptoas_version(ptoas_path),
         "cann": _cann_identity(),
+        "bisheng": bisheng.get_bisheng_version(),
     }
-
-
-# Where ptoas itself probes for the CANN version, in its order of preference.
-_CANN_VERSION_RELPATHS = (
-    "compiler/version.info",
-    "x86_64-linux/ascend_toolkit_install.info",
-    "x86_64-linux/ascend_all_cann_install.info",
-    "aarch64-linux/ascend_toolkit_install.info",
-    "aarch64-linux/ascend_all_cann_install.info",
-    "ascend_toolkit_install.info",
-    "ascend_all_cann_install.info",
-    "opp/version.info",
-)
-
-
-def _first_version_line(path: Path) -> str:
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    for line in content.splitlines():
-        line = line.strip()
-        for key in ("Version=", "version="):
-            if line.startswith(key):
-                value = line[len(key) :].strip().strip('"')
-                if value:
-                    return value
-    return ""
 
 
 def _cann_identity() -> str:
@@ -237,15 +211,12 @@ def _cann_identity() -> str:
     must miss the cache even when the ptoas and bisheng binaries are
     unchanged.
     """
-    home = os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME")
+    home = bisheng.get_cann_home()
     if not home:
         return ""
     home = str(Path(home).resolve())
-    for relpath in _CANN_VERSION_RELPATHS:
-        version = _first_version_line(Path(home, relpath))
-        if version:
-            return f"{home} ({version})"
-    return home
+    version = bisheng.get_cann_version(home)
+    return f"{home} ({version})" if version else home
 
 
 def compile_ptodsl_to_aibin(

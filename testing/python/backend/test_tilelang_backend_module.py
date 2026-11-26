@@ -123,3 +123,22 @@ def test_create_backend_context_binds_compile_state():
 
     with pytest.raises(AttributeError):
         context.target = tvm.target.Target("llvm")
+
+
+def test_backend_toolchain_stamp_supports_zero_and_two_arg_callables():
+    cpu_backend = get_backend("cpu")
+    target = tvm.target.Target("c")
+    spec = cpu_backend.execution_backends[0]
+
+    zero_arg = replace(cpu_backend, name="unit-zero", toolchain_stamp=lambda: {"cc": "1.0"})
+    assert BackendContext(zero_arg, target, target, spec).toolchain_stamp({"k": 1}) == {"cc": "1.0"}
+
+    two_arg = replace(
+        cpu_backend,
+        name="unit-two",
+        toolchain_stamp=lambda backend, cfg: {"backend": backend, "k": str(cfg.get("k"))},
+    )
+    assert BackendContext(two_arg, target, target, spec).toolchain_stamp({"k": 7}) == {"backend": spec.name, "k": "7"}
+
+    with pytest.raises(ValueError, match="0 or 2 positional arguments"):
+        replace(cpu_backend, name="unit-bad", toolchain_stamp=lambda _only_one: {})  # type: ignore[arg-type]

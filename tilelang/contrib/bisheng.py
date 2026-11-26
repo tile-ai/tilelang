@@ -68,6 +68,58 @@ def get_bisheng_version() -> str:
     return lines[0].strip()
 
 
+# Prefer the metadata files used by ptoas, then the toolkit's top-level release.
+_CANN_VERSION_RELPATHS = (
+    "compiler/version.info",
+    "x86_64-linux/ascend_toolkit_install.info",
+    "x86_64-linux/ascend_all_cann_install.info",
+    "aarch64-linux/ascend_toolkit_install.info",
+    "aarch64-linux/ascend_all_cann_install.info",
+    "ascend_toolkit_install.info",
+    "ascend_all_cann_install.info",
+    "opp/version.info",
+    "version.info",
+)
+
+
+def _first_version_line(path: Path) -> str:
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in content.splitlines():
+        line = line.strip()
+        for key in ("Version=", "version="):
+            if line.startswith(key):
+                value = line[len(key) :].strip().strip('"')
+                if value:
+                    return value
+    return ""
+
+
+def get_cann_home() -> str:
+    return os.environ.get("ASCEND_HOME_PATH") or os.environ.get("ASCEND_TOOLKIT_HOME") or ""
+
+
+@cache
+def get_cann_version(home: str) -> str:
+    """Read the toolkit release once per installation root in this process."""
+    if home:
+        for relpath in _CANN_VERSION_RELPATHS:
+            version = _first_version_line(Path(home, relpath))
+            if version:
+                return version
+    return ""
+
+
+def toolchain_stamp() -> dict[str, str]:
+    """Identity of the active AscendC toolchain for cache keys."""
+    stamp = {"bisheng": get_bisheng_version()}
+    if cann := get_cann_version(get_cann_home()):
+        stamp["cann"] = cann
+    return stamp
+
+
 def find_ld_lld_path() -> str:
     """Find the CCE-capable ``ld.lld`` shipped with the Ascend toolkit."""
     candidates: list[Path] = []

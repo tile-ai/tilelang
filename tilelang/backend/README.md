@@ -125,7 +125,8 @@ The manifest currently declares:
 - one pass pipeline and one device-codegen entry for every owned target kind;
 - optional host-codegen entries and pre-codegen hooks;
 - the compatible shared execution backends in `auto` preference order;
-- FFI callbacks used by backend validation or target-toolchain integration.
+- FFI callbacks used by backend validation or target-toolchain integration;
+- an optional toolchain-stamp callback used by kernel cache keys.
 
 `register_backend()` validates the complete declaration and publishes it once.
 Backend packages are initialized during TileLang import, so the registry does
