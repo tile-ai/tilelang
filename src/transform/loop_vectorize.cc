@@ -23,6 +23,7 @@
  */
 
 #include "loop_vectorize.h"
+#include "../ascend/target_utils.h"
 #include "../config.h"
 #include "../op/builtin.h"
 #include "../op/reducer.h"
@@ -255,6 +256,7 @@ public:
 
   int Plan(const For &node, bool defer_cast_constraints) {
     Target target = Target::Current(false);
+    target_ = target;
     bool verbose = tl_config::VectorizePlannerVerboseEnabled();
 
     vector_load_bits_max_ = initial_vector_size_ = loop_extent_vector_size_ =
@@ -316,6 +318,33 @@ public:
   }
 
 private:
+  // Widest lane count the planner will propose for one element type. Both
+  // Ascend SIMT codegens (AscendC and PTO) map fp8 vector types only through
+  // 8 fp8 scalar lanes, and an fp8 comparison needs a same-width bool
+  // predicate that no Ascend SIMT codegen provides past 8 lanes either.
+  // Keep fp8 at the width the 64-bit default produced even when
+  // max_vector_bits widens past 64, so fp8 lanes never exceed what the
+  // codegens can lower. The cap counts fp8 scalars, so a packed element
+  // (e.g. float8_e4m3fnx2) divides the budget across its own lanes.
+  int DtypeLaneCap(const DataType &dtype) const {
+    int elem_bits = dtype.bits() * dtype.lanes();
+    if (elem_bits <= 0) {
+      return 1;
+    }
+    int cap = vector_load_bits_max_ / elem_bits;
+    if (TargetIsAscend(target_) && dtype.is_float8() &&
+        cap * dtype.lanes() > 8) {
+      cap = std::max(1, 8 / dtype.lanes());
+    }
+    // The Ascend SIMT codegens have no vector mapping for 64-bit scalar
+    // element types (fp64 / int64 / uint64); keep those accesses scalar,
+    // which is what the 64-bit default produced.
+    if (TargetIsAscend(target_) && dtype.lanes() == 1 && dtype.bits() == 64) {
+      cap = std::min(cap, 1);
+    }
+    return cap;
+  }
+
   static const char *ConstraintKindName(VectorConstraintKind kind) {
     switch (kind) {
     case VectorConstraintKind::kMustScalarize:
@@ -987,7 +1016,7 @@ private:
     // This mirrors ComputeBufferVectorSize's dtype-based lower bound.
     int dtype_bits = dtype.bits() * dtype.lanes();
     if (dtype_bits > 0) {
-      int dtype_lane_bound = vector_load_bits_max_ / dtype_bits;
+      int dtype_lane_bound = DtypeLaneCap(dtype);
       if (dtype_lane_bound <= 0) {
         dtype_lane_bound = 1;
       }
@@ -1077,11 +1106,11 @@ private:
     // up to 128/32=4 lanes in CUDA vector types.
     int cast_vector_size = initial_vector_size_;
     if (!skip_cast_width_constraints_) {
-      int target_lanes = vector_load_bits_max_ / node->dtype.bits();
+      int target_lanes = DtypeLaneCap(node->dtype);
       int source_bits = node->value.dtype().bits();
       int max_lanes = target_lanes;
       if (source_bits > 0) {
-        int source_lanes = vector_load_bits_max_ / source_bits;
+        int source_lanes = DtypeLaneCap(node->value.dtype());
         max_lanes = std::min(target_lanes, source_lanes);
       }
       cast_vector_size = arith::ZeroAwareGCD(max_lanes, initial_vector_size_);
@@ -1134,9 +1163,8 @@ private:
     // IsExprInvariantInVectorBoundary may only be true at a smaller size (e.g.
     // 64). Recursively halve buffer_vec_size until we find a size where
     // is_invariant is true. Fallback: minimum vector size based on buffer dtype
-    int min_vec_size = arith::ZeroAwareGCD(
-        buffer_vec_size,
-        vector_load_bits_max_ / (buffer->dtype.bits() * buffer->dtype.lanes()));
+    int min_vec_size =
+        arith::ZeroAwareGCD(buffer_vec_size, DtypeLaneCap(buffer->dtype));
     bool is_invariant = false;
     int try_vec_size = buffer_vec_size;
     while (try_vec_size >= min_vec_size) {
@@ -1227,6 +1255,7 @@ private:
   int vector_load_bits_max_;
   int initial_vector_size_ = 128;
   int loop_extent_vector_size_ = 128;
+  Target target_;
 
   For inner_for_;
   Map<Var, PrimExpr> bind_map_;
@@ -1483,7 +1512,15 @@ bool IndicesCanVectorize(const PrimExpr &expr, const Var &var,
 
 int MaxVectorLoadBits(const Target &target, bool global_only_access) {
   if (auto max_bits = target->GetAttr<Integer>("max_vector_bits")) {
-    return static_cast<int>(max_bits.value()->value);
+    int bits = static_cast<int>(max_bits.value()->value);
+    // PTO lowers compute ops through x2-granular emitters (FP8 conversions,
+    // floating min/max, ...), so a wider budget cannot be emitted. Keep the
+    // 64-bit planning width PTO had before the shared default became 128,
+    // covering targets that bypass the Python pto normalizer as well.
+    if (TargetIsPTO(target)) {
+      bits = std::min(bits, 64);
+    }
+    return bits;
   }
   if (TargetSupportVectorize256(target) && !tl_config::Vectorize256Disabled() &&
       global_only_access) {

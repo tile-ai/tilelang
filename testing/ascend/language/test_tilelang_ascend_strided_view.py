@@ -82,5 +82,49 @@ def test_strided_view_copy():
         assert int(torch.count_nonzero(storage[:, COLS_I8:])) == 0
 
 
+def test_strided_gm_load_uses_default_128bit_width():
+    """The default max_vector_bits must keep planning 128-bit GM loads.
+
+    An int64-strided GM load with alignment facts is the shape from #3615:
+    under a 64-bit cap it vectorizes to float2, under the 128-bit default it
+    must vectorize to float4. Pin the fused load width so a future width-cap
+    regression cannot silently drop back to 64-bit accesses.
+    """
+
+    dim = 512
+    threads = 64
+    num_slots = T.dynamic("num_slots")
+    stride0 = T.dynamic("stride0", dtype=T.int64)
+
+    @T.prim_func
+    def main(
+        state_cache: T.StridedTensor((num_slots, 2, dim), (stride0, dim, 1), T.float32),
+        slot_idx: T.Tensor((1,), T.int32),
+        out: T.Tensor((2, dim), T.float32),
+    ):
+        T.assume(stride0 % (2 * dim) == 0)
+        with T.Kernel(1), T.SimtVF(threads=threads):
+            frag = T.alloc_fragment((dim,), T.float32)
+            slot = T.int32(slot_idx[0])
+            T.assume(0 <= slot < num_slots)
+            for j in T.Parallel(dim):
+                frag[j] = state_cache[slot, 1, j]
+            for j in T.Parallel(dim):
+                out[1, j] = frag[j]
+
+    kernel = tilelang.compile(main, out_idx=None, target="ascend")
+    source = kernel.get_kernel_source()
+    assert "*(__gm__ float4*)" in source
+    assert "*(__gm__ float2*)" not in source
+
+    device = torch.device("npu")
+    cache = torch.randn(2, 2, dim, dtype=torch.float32, device=device)
+    slot_idx = torch.ones(1, dtype=torch.int32, device=device)
+    out = torch.zeros(2, dim, dtype=torch.float32, device=device)
+    kernel(cache, slot_idx, out)
+    torch.npu.synchronize()
+    torch.testing.assert_close(out[1], cache[1, 1, :], rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     tilelang.testing.main()

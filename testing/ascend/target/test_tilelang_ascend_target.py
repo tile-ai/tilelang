@@ -1,5 +1,6 @@
 import pytest
 
+import tilelang
 from tilelang import tvm
 from tilelang.ascend.codegen import PTO_CODEGEN
 from tilelang.backend import create_backend_context, get_backend
@@ -99,3 +100,70 @@ def test_auto_execution_backend_keeps_plain_ascend_codegen():
     assert not target_is_pto(context.target)
     assert context.execution_backend.name == "tvm_ffi"
     assert context.module.get_device_codegen(context.target).name == "ascend"
+
+
+_THREADS = 128
+_PTO_ELEMS = 32
+
+
+def _f32_min_kernel():
+    import tilelang.ascend.language as T
+
+    n = _THREADS * _PTO_ELEMS
+
+    @T.prim_func
+    def main(A: T.Tensor((n,), "float32"), B: T.Tensor((n,), "float32"), C: T.Tensor((n,), "float32")):
+        with T.Kernel(1):
+            a_ub = T.alloc_shared((n,), "float32")
+            b_ub = T.alloc_shared((n,), "float32")
+            c_ub = T.alloc_shared((n,), "float32")
+            T.copy(A, a_ub)
+            T.copy(B, b_ub)
+            with T.SimtVF(threads=_THREADS):
+                a_local = T.alloc_fragment((n,), "float32")
+                b_local = T.alloc_fragment((n,), "float32")
+                c_local = T.alloc_fragment((n,), "float32")
+                T.copy(a_ub, a_local)
+                T.copy(b_ub, b_local)
+                for i in T.Parallel(n):
+                    c_local[i] = T.min(a_local[i], b_local[i])
+                T.copy(c_local, c_ub)
+            T.copy(c_ub, C)
+
+    return main
+
+
+def _pto_kernel_source(target):
+    # ``lower`` does not open a target context of its own; the pass pipeline
+    # queries Target::Current, so enter the target explicitly.
+    with target:
+        return tilelang.lower(_f32_min_kernel(), target=target, enable_device_compile=False).kernel_source
+
+
+def test_manually_keyed_pto_target_keeps_64_bit_planning():
+    """A pto target built by hand bypasses the Python normalizer."""
+    manual = Target({"kind": "ascend", "keys": ["pto", "ascend"]})
+    assert target_is_pto(manual)
+    source = _pto_kernel_source(manual)
+    assert "f32x2" in source
+    assert "f32x4" not in source
+
+
+def test_pto_planning_width_clamps_a_wider_explicit_budget():
+    wide = Target({"kind": "ascend", "keys": ["pto", "ascend"], "max_vector_bits": 128})
+    source = _pto_kernel_source(wide)
+    assert "f32x2" in source
+    assert "f32x4" not in source
+
+
+def test_pto_normalizer_preserves_explicit_smaller_budget():
+    """execution_backend="pto" must not raise a caller's smaller budget."""
+    from tilelang.ascend.target import normalize_pto_execution_target
+
+    requested = Target({"kind": "ascend", "max_vector_bits": 32})
+    pto_target = normalize_pto_execution_target(requested, "pto")
+    assert int(pto_target.attrs["max_vector_bits"]) == 32
+    assert target_is_pto(pto_target)
+
+    default = normalize_pto_execution_target(Target("ascend"), "pto")
+    assert int(default.attrs["max_vector_bits"]) == 64
