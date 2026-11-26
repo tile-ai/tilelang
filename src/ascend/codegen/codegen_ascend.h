@@ -110,6 +110,7 @@ private:
   int simdvf_helper_counter_{0};
   VFMode vf_mode_{VFMode::kNone};
 
+  bool has_exception_dump_included_{false};
   bool has_gemm_l0_{false};
   bool has_gemm_l1_{false};
   bool has_gemm_l1_included_{false};

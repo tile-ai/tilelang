@@ -10,6 +10,8 @@
  * The Ascend backend is Linux-only.
  */
 #include "ascend/stubs/ascendcl.h"
+#include "ascend_exception_dump.h"
+#include "tl_templates/ascend/exception_dump.h"
 
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/extra/module.h>
@@ -85,6 +87,17 @@ struct AclArgLayout {
 struct AclArgPackPlan {
   std::vector<AclArgLayout> args;
   size_t buffer_size{0};
+  size_t expected_arity{0};
+  struct DumpTensor {
+    size_t pointer_index;
+    size_t elements_index;
+    int32_t dtype;
+    uint32_t element_bits;
+  };
+  std::vector<DumpTensor> dump_tensors;
+  size_t dump_offset{0};
+  bool exception_dump{false};
+  std::string kernel_name;
 };
 
 AclArgKind GetAclArgKind(DLDataType dtype, size_t index,
@@ -208,9 +221,62 @@ size_t GetAclArgAlignment(AclArgKind kind) {
   return std::max(alignment, kAclArgMinAlignment);
 }
 
+// Extend the ordinary argument layout with the optional exception-dump record.
+void AddExceptionDumpToArgPackPlan(AclArgPackPlan &plan,
+                                   const std::string &function_name,
+                                   const ffi::Array<ffi::String> &extra_tags) {
+  if (extra_tags.empty()) {
+    return;
+  }
+  TVM_FFI_CHECK(extra_tags[0] == "tl.ascend_exception_dump.v1", RuntimeError)
+      << "Ascend runtime does not support extra kernel argument tag "
+      << extra_tags[0];
+  using ::tl::ascend::ExceptionDumpInfo;
+  TVM_FFI_CHECK(extra_tags.size() - 1 <= ::tl::ascend::kMaxExceptionDumpTensors,
+                RuntimeError)
+      << "Ascend exception dump supports at most "
+      << ::tl::ascend::kMaxExceptionDumpTensors << " tensors";
+  TVM_FFI_CHECK(function_name.size() < sizeof(ExceptionDumpInfo::kernel_name),
+                RuntimeError)
+      << "Ascend exception dump kernel name is too long: " << function_name;
+  plan.exception_dump = true;
+  plan.kernel_name = function_name;
+  // Ordinary arguments already include the hidden uint64 element counts.
+  // Append the shared struct on an 8-byte boundary, matching the generated
+  // device signature. Grid/UB launch values never enter this byte buffer.
+  plan.dump_offset = plan.buffer_size;
+  plan.buffer_size += sizeof(ExceptionDumpInfo);
+  for (size_t i = 1; i < extra_tags.size(); ++i) {
+    std::istringstream fields(static_cast<std::string>(extra_tags[i]));
+    AclArgPackPlan::DumpTensor tensor{};
+    char sep1 = 0, sep2 = 0, sep3 = 0;
+    fields >> tensor.pointer_index >> sep1 >> tensor.elements_index >> sep2 >>
+        tensor.dtype >> sep3 >> tensor.element_bits;
+    TVM_FFI_CHECK(
+        !fields.fail() && fields.peek() == EOF && sep1 == ':' && sep2 == ':' &&
+            sep3 == ':' && tensor.pointer_index < plan.args.size() &&
+            tensor.elements_index < plan.args.size() &&
+            ::tl::ascend::ExceptionDumpElementBytes(tensor.dtype) != 0 &&
+            tensor.element_bits ==
+                ::tl::ascend::ExceptionDumpElementBytes(tensor.dtype) * 8,
+        RuntimeError)
+        << "Invalid Ascend exception dump tensor metadata: " << extra_tags[i];
+    TVM_FFI_CHECK(plan.args[tensor.pointer_index].kind == AclArgKind::kHandle &&
+                      plan.args[tensor.elements_index].kind ==
+                          AclArgKind::kUInt64,
+                  RuntimeError)
+        << "Ascend exception dump expects a pointer and a uint64 element "
+           "count";
+    plan.dump_tensors.push_back(tensor);
+  }
+}
+
 AclArgPackPlan MakeAclArgPackPlan(const ffi::Array<DLDataType> &arg_types,
-                                  const std::string &function_name) {
+                                  const std::string &function_name,
+                                  const ffi::Array<ffi::String> &extra_tags,
+                                  size_t launch_arg_count) {
   AclArgPackPlan plan;
+  plan.expected_arity = arg_types.size() + launch_arg_count;
   plan.args.reserve(arg_types.size());
   size_t offset = 0;
   for (size_t i = 0; i < arg_types.size(); ++i) {
@@ -220,7 +286,41 @@ AclArgPackPlan MakeAclArgPackPlan(const ffi::Array<DLDataType> &arg_types,
     offset += GetAclArgSize(kind);
   }
   plan.buffer_size = AlignUp(offset, kAclArgBufferAlignment);
+  AddExceptionDumpToArgPackPlan(plan, function_name, extra_tags);
   return plan;
+}
+
+void PackExceptionDumpInfo(const AclArgPackPlan &plan,
+                           const TVMFFIAny *raw_args, uint8_t *destination) {
+  using ::tl::ascend::ExceptionDumpInfo;
+  // Capture addresses and lengths for this launch, not for the function's first
+  // invocation: dynamic shapes and input allocations can change on every call.
+  ExceptionDumpInfo info{};
+  info.magic = ::tl::ascend::kExceptionDumpMagic;
+  info.version = ::tl::ascend::kExceptionDumpVersion;
+  info.count = static_cast<uint32_t>(plan.dump_tensors.size());
+  std::memcpy(info.kernel_name, plan.kernel_name.c_str(),
+              plan.kernel_name.size() + 1);
+  for (size_t i = 0; i < plan.dump_tensors.size(); ++i) {
+    const auto &metadata = plan.dump_tensors[i];
+    const uint64_t elements =
+        static_cast<uint64_t>(raw_args[metadata.elements_index].v_int64);
+    const uint64_t element_bytes = metadata.element_bits / 8;
+    TVM_FFI_CHECK(elements <=
+                      std::numeric_limits<uint64_t>::max() / element_bytes,
+                  RuntimeError)
+        << "Ascend exception dump tensor byte size overflows for "
+        << plan.kernel_name;
+    auto &tensor = info.tensors[i];
+    tensor.address =
+        reinterpret_cast<uintptr_t>(raw_args[metadata.pointer_index].v_ptr);
+    tensor.elements = elements;
+    tensor.size = elements * element_bytes;
+    tensor.dtype = metadata.dtype;
+  }
+  // Copy the complete inline record; retaining a pointer to this stack object
+  // would not survive the asynchronous launch and exception-reporting delay.
+  std::memcpy(destination, &info, sizeof(info));
 }
 
 template <typename T, typename U>
@@ -286,12 +386,20 @@ ffi::Function PackFuncAclHostArgs_(F function, AclArgPackPlan plan) {
   size_t num_words = plan.buffer_size / sizeof(uint64_t);
   auto wrapped = [function = std::move(function), plan = std::move(plan),
                   num_words](ffi::PackedArgs args, ffi::Any *return_value) {
+    // Check before reading device or launch arguments from the raw FFI array.
+    TVM_FFI_CHECK(args.size() == plan.expected_arity, ValueError)
+        << "Ascend kernel expects " << plan.expected_arity
+        << " arguments, received " << args.size();
     AclArgBuffer<kNumWords> buffer(num_words);
     const TVMFFIAny *raw_args =
         reinterpret_cast<const TVMFFIAny *>(args.data());
     for (size_t i = 0; i < plan.args.size(); ++i) {
       const AclArgLayout &layout = plan.args[i];
       PackAclArg(raw_args[i], layout.kind, buffer.data() + layout.offset);
+    }
+    if (plan.exception_dump) {
+      EnsureExceptionDumpCallback();
+      PackExceptionDumpInfo(plan, raw_args, buffer.data() + plan.dump_offset);
     }
     function(args, return_value, buffer.data(), plan.buffer_size);
   };
@@ -301,8 +409,11 @@ ffi::Function PackFuncAclHostArgs_(F function, AclArgPackPlan plan) {
 template <typename F>
 ffi::Function PackFuncAclHostArgs(F function,
                                   const ffi::Array<DLDataType> &arg_types,
-                                  const std::string &function_name) {
-  AclArgPackPlan plan = MakeAclArgPackPlan(arg_types, function_name);
+                                  const std::string &function_name,
+                                  const ffi::Array<ffi::String> &extra_tags,
+                                  size_t launch_arg_count) {
+  AclArgPackPlan plan = MakeAclArgPackPlan(arg_types, function_name, extra_tags,
+                                           launch_arg_count);
   size_t num_words = plan.buffer_size / sizeof(uint64_t);
   if (num_words <= 4) {
     return PackFuncAclHostArgs_<4>(std::move(function), std::move(plan));
@@ -716,19 +827,37 @@ AscendModuleNode::GetFunction(const ffi::String &name) {
   FunctionInfo info = function_info.value();
   TVM_FFI_CHECK(info->arg_extra_tags.empty(), RuntimeError)
       << "Ascend runtime does not support extra kernel argument tags";
+  // The Ascend-specific suffix is module launch metadata, not positional
+  // launch arguments. Strip it before LaunchParamConfig extracts the grid.
+  // FunctionInfo already serializes these strings, including on cache reload.
+  ffi::Array<ffi::String> launch_param_tags;
+  ffi::Array<ffi::String> dump_tags;
+  bool in_dump_metadata = false;
+  for (const auto &tag : info->launch_param_tags) {
+    if (tag == "tl.ascend_exception_dump.v1") {
+      in_dump_metadata = true;
+    }
+    if (in_dump_metadata) {
+      dump_tags.push_back(tag);
+    } else {
+      launch_param_tags.push_back(tag);
+    }
+  }
 #if TILELANG_ASCEND_PROFILER
   if (auto *profiler = AscendProfiler::GetIfEnabled()) {
     AscendWrappedFunc<ProfiledLaunchPolicy> function{
         ProfiledLaunchPolicy(profiler)};
     function.Init(this, std::move(module_ref), name, info->arg_types.size(),
-                  info->launch_param_tags);
-    return PackFuncAclHostArgs(std::move(function), info->arg_types, name);
+                  launch_param_tags);
+    return PackFuncAclHostArgs(std::move(function), info->arg_types, name,
+                               dump_tags, launch_param_tags.size());
   }
 #endif
   AscendWrappedFunc<DirectLaunchPolicy> function{DirectLaunchPolicy()};
   function.Init(this, std::move(module_ref), name, info->arg_types.size(),
-                info->launch_param_tags);
-  return PackFuncAclHostArgs(std::move(function), info->arg_types, name);
+                launch_param_tags);
+  return PackFuncAclHostArgs(std::move(function), info->arg_types, name,
+                             dump_tags, launch_param_tags.size());
 }
 
 ffi::Module AscendModuleCreate(ffi::Bytes code, ffi::String fmt,
