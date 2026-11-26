@@ -86,6 +86,52 @@ def test_ascend_thread_sync_inserts_barrier_inside_vf(storage_scope, thread_coun
 
 
 @pytest.mark.parametrize("storage_scope", ["shared", "shared.dyn"])
+def test_ascend_thread_sync_thread_local_index_keeps_barrier(storage_scope):
+    local = tirx.decl_buffer((1,), "int32", name="local", scope="local")
+    shared = tirx.decl_buffer((32,), "float32", name="shared", scope=storage_scope)
+    output = tirx.decl_buffer((32,), "float32", name="output")
+
+    def make_body(thread_id):
+        return tirx.SeqStmt(
+            [
+                tirx.BufferStore(local, thread_id, [0]),
+                tirx.BufferStore(shared, tirx.const(1, "float32"), [local[0] % 32]),
+                tirx.BufferStore(
+                    output,
+                    tirx.BufferLoad(shared, [(local[0] + 1) % 32]),
+                    [thread_id],
+                ),
+            ]
+        )
+
+    before = _module(_vf(_thread_body(make_body)), [shared, output, local])
+    after = ascend_transform.AscendThreadSync(storage_scope)(before)["main"]
+
+    # The value of local[0] differs per thread, so thread 0 writing index 0 and
+    # thread 31 reading index 0 must still be separated by a barrier.
+    assert len(_syncs(after.body.body)) == 1
+
+
+def test_ascend_thread_sync_modular_indices_are_not_disjoint_across_threads():
+    shared, output = _buffers("shared", 32)
+
+    def make_body(thread_id):
+        return tirx.SeqStmt(
+            [
+                tirx.BufferStore(shared, tirx.const(1, "float32"), [thread_id % 32]),
+                tirx.BufferStore(output, tirx.BufferLoad(shared, [(thread_id + 1) % 32]), [thread_id]),
+            ]
+        )
+
+    before = _module(_vf(_thread_body(make_body)), [shared, output])
+    after = ascend_transform.AscendThreadSync("shared")(before)["main"]
+
+    # thread 0 writes index 0 and thread 31 reads index 0, so a barrier is
+    # required even though each thread's own write/read indices differ.
+    assert len(_syncs(after.body.body)) == 1
+
+
+@pytest.mark.parametrize("storage_scope", ["shared", "shared.dyn"])
 def test_ascend_thread_sync_keeps_thread_private_accesses_unsynchronized(storage_scope):
     shared, output = _buffers(storage_scope)
     before = _module(_vf(_read_after_write(shared, output, cross_thread=False)), [shared, output])

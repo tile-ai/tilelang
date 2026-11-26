@@ -76,6 +76,75 @@ namespace {
 // This rewriter conservatively inserts a shared-memory storage sync
 // immediately after every ptx_wait_group statement unless an identical sync
 // already follows.
+// Two element indices of the form `(x + a) % m` and `(x + b) % m` never
+// coincide when `(a - b)` is not a multiple of `m`.  The rewrite simplifier
+// cannot always discharge that proof for modular indices, which used to make
+// the conflict analysis insert a barrier the iteration space does not need.
+// A buffer load or opaque call inside an index is a mutable read: different
+// accesses (and different threads) can observe different values, so the
+// structural rule cannot equate the bases.
+bool HasMutableReadInIndex(const PrimExpr &expr) {
+  bool found = false;
+  PostOrderVisit(expr, [&](const ObjectRef &node) {
+    if (node->IsInstance<BufferLoadNode>() || node->IsInstance<CallNode>()) {
+      found = true;
+    }
+  });
+  return found;
+}
+
+bool ModularIndicesAlwaysDiffer(const PrimExpr &lhs, const PrimExpr &rhs) {
+  // Unsigned arithmetic wraps, so `(x + a) % m` and `(x + b) % m` can still
+  // coincide even when the offsets differ modulo `m`.  Only signed indices are
+  // safe for this structural rule.
+  if (!lhs.dtype().is_int() || lhs.dtype() != rhs.dtype())
+    return false;
+  struct Pattern {
+    bool matched{false};
+    PrimExpr base;
+    int64_t modulus{0};
+    int64_t offset{0};
+  };
+  auto parse = [](const PrimExpr &expr) -> Pattern {
+    Pattern pattern;
+    const auto *floor_mod = expr.as<FloorModNode>();
+    if (floor_mod == nullptr)
+      return pattern;
+    const int64_t *modulus = as_const_int(floor_mod->b);
+    if (modulus == nullptr || *modulus <= 0)
+      return pattern;
+    pattern.matched = true;
+    pattern.modulus = *modulus;
+    pattern.base = floor_mod->a;
+    // Canonicalized loops fold the original start/step into the index, so the
+    // additive constant can be nested (`(i * 2 + 3) + 2`).  Strip every
+    // constant addend and accumulate the offset.
+    while (const auto *add = pattern.base.as<AddNode>()) {
+      if (const int64_t *offset = as_const_int(add->b)) {
+        pattern.offset += *offset;
+        pattern.base = add->a;
+      } else if (const int64_t *offset = as_const_int(add->a)) {
+        pattern.offset += *offset;
+        pattern.base = add->b;
+      } else {
+        break;
+      }
+    }
+    return pattern;
+  };
+  Pattern left = parse(lhs);
+  Pattern right = parse(rhs);
+  if (!left.matched || !right.matched)
+    return false;
+  if (HasMutableReadInIndex(left.base) || HasMutableReadInIndex(right.base))
+    return false;
+  if (left.modulus != right.modulus)
+    return false;
+  if (!ExprDeepEqual()(left.base, right.base))
+    return false;
+  return (left.offset - right.offset) % left.modulus != 0;
+}
+
 class ThreadSyncAfterWaitGroupInserter : public StmtExprMutator {
 public:
   explicit ThreadSyncAfterWaitGroupInserter(StorageScope sync_scope)
@@ -1804,6 +1873,13 @@ private:
     if (loop != nullptr) {
       PrimExpr step =
           loop->step.value_or(make_const(loop->loop_var.dtype(), 1));
+      const int64_t *extent_const = as_const_int(loop->extent);
+      const int64_t *step_const = as_const_int(step);
+      if (extent_const != nullptr && step_const != nullptr &&
+          *extent_const <= *step_const) {
+        // No iteration has a successor, so nothing can be carried over.
+        return false;
+      }
       loop_shift_sub.Set(loop->loop_var, loop->loop_var + step);
       // Only iterations with i + step < min + extent have a successor.
       adjusted_extent = loop->extent - step;
@@ -1989,8 +2065,25 @@ private:
           }
         }
         ICHECK(prev_indice_bytes.dtype() == curr_indice_bytes.dtype());
-        provably_disjoint =
-            analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
+        bool mutable_index = HasMutableReadInIndex(prev_indice) ||
+                             HasMutableReadInIndex(curr_indice);
+        bool modular_disjoint = false;
+        if (!mutable_index && prev.dtype.bytes() == curr.dtype.bytes()) {
+          // Compare the thread-substituted indices: for RAW/WAR the two sides
+          // use distinct thread variables, and the structural rule must not
+          // treat them as the same thread.
+          modular_disjoint =
+              ModularIndicesAlwaysDiffer(Substitute(prev_indice, prev_sub),
+                                         Substitute(curr_indice, curr_sub));
+        }
+        // A mutable read inside the index can differ between the two accesses
+        // and between threads, so neither proof may claim the indices disjoint.
+        bool can_prove_disjoint = false;
+        if (!mutable_index) {
+          can_prove_disjoint =
+              analyzer.CanProve(tirx::NE(prev_indice_bytes, curr_indice_bytes));
+        }
+        provably_disjoint = can_prove_disjoint || modular_disjoint;
       } else {
         try {
           auto prev_min = analyzer.Simplify(
