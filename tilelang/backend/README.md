@@ -219,9 +219,11 @@ pass_configs = {
 
 Both namespaces keep the same string values, so legacy and backend-owned
 members normalize to the same configuration and cache key. During the
-introduction release the legacy members remain available without a warning.
-Deprecation of the legacy enum spellings, followed by a separate removal
-decision, is a staged follow-up; raw string keys remain supported throughout.
+introduction release the legacy members remain available; the only warning is
+the pre-existing deprecation message for `TL_DISABLE_TMA_LOWER`, which points
+callers at `T.copy(..., disable_tma=True)`. Deprecation of the other legacy
+enum spellings, followed by a separate removal decision, is a staged
+follow-up; raw string keys remain supported throughout.
 
 ## Pass Pipeline
 
