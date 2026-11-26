@@ -412,11 +412,14 @@ tvm::transform::Pass AssignCore() {
         std::move(func), "AssignCore",
         [](const TilelangKernelContext &context) {
           SBlock root = context.root;
-          if (context.outer_sid.has_value())
-            root = SubcoreProjector::Rewrite(root, context.outer_ctx,
-                                             context.outer_sid.value());
           ScheduledTIR scheduled_tir =
               DecodeScheduledTIR(root, context.outer_ctx);
+          if (context.outer_sid.has_value()) {
+            SBlock projected = SubcoreProjector::Rewrite(
+                scheduled_tir, context.outer_sid.value());
+            if (!projected.same_as(root))
+              scheduled_tir = DecodeScheduledTIR(projected, context.outer_ctx);
+          }
           AssignCoreMasks(scheduled_tir.tree, context.outer_sid,
                           scheduled_tir.metadata.num_aiv_subcores.value_or(2));
           return EncodeScheduledTIR(std::move(scheduled_tir));

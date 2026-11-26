@@ -1,3 +1,4 @@
+#include "../transform/aiv_group.h"
 /*!
  * \file ascend/codegen/codegen_pto.cc
  * \brief Utility to generate PTO Python source.
@@ -2163,7 +2164,8 @@ void CodeGenTileLangPTO::ResetFunctionState_() {
 }
 
 void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
-                                     const PrimFunc &func) {
+                                     const PrimFunc &input) {
+  PrimFunc func = input;
   RegisterFunction_(gvar, func);
   current_function_name_ = GetFunctionName_(gvar);
   InitFuncState_(func);
@@ -2206,6 +2208,29 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   current_function_is_cube_ = IsAscendCubeKernel(func);
   current_function_is_mixed_ = IsAscendMixedKernel(func);
   if (current_function_is_mixed_) {
+    int mixed_aiv_count = tl::ascend::GetAivCount(func->body);
+    if (!current_function_is_cube_) {
+      func.CopyOnWrite()->body =
+          tl::ascend::MakeGroupedVectorBody(func->body, mixed_aiv_count);
+    }
+    if (mixed_aiv_count == 1) {
+      tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+        if (const auto *call = node.as<CallNode>()) {
+          ICHECK(!call->op.same_as(tl::ascend_copy_matrix_cc_to_ub()))
+              << "PTO L0C->UB is unsupported with one active AIV on dav-3510; "
+                 "use aiv=2 or L0C->GM->UB";
+          if (call->op.same_as(tl::ascend_cross_core_set_flag()) ||
+              call->op.same_as(tl::ascend_cross_core_wait_flag())) {
+            const auto *mode = call->args[0].as<IntImmNode>();
+            ICHECK(mode && mode->value != 2)
+                << "PTO aiv=1 keeps the upstream mixed launch; "
+                   "use cross-core mode 4 with AIV0, not physical-1:1 mode 2";
+          }
+        }
+      });
+    }
+  }
+  if (current_function_is_mixed_) {
     MixedSectionVariableInfo mixed_info =
         MixedSectionLocalVarAnalyzer::Analyze(func->body);
     mixed_captured_local_vars_ = std::move(mixed_info.captured_vars);
@@ -2220,6 +2245,14 @@ void CodeGenTileLangPTO::AddFunction(const GlobalVar &gvar,
   if (!current_function_is_mixed_) {
     PrintIndent();
     stream << "pto.init_core()\n";
+  } else if (!current_function_is_cube_) {
+    // Keep the upstream mixed module layout, with no Cube computation.
+    PrintIndent();
+    stream << "with tl.mixed_kernel_section(\"cube\"):\n";
+    int cube_scope = BeginScope();
+    PrintIndent();
+    stream << "pto.init_core()\n";
+    EndScope(cube_scope);
   }
   if (func_has_gemm_l1 || func_has_blockscaled_gemm_l1) {
     std::vector<Call> gemm_calls;
@@ -2427,19 +2460,7 @@ bool CodeGenTileLangPTO::IsAscendCubeKernel(const PrimFunc &func) const {
       found = block->name_hint == "CUBE";
     }
     if (const auto *call = node.as<CallNode>()) {
-      found = call->op.same_as(tl::ascend_gemm_l1()) ||
-              call->op.same_as(tl::ascend_blockscaled_gemm_l1()) ||
-              call->op.same_as(tl::ascend_mad()) ||
-              call->op.same_as(tl::ascend_mad_mx()) ||
-              call->op.same_as(tl::ascend_copy_gm_to_cbuf()) ||
-              call->op.same_as(tl::ascend_fill_l1()) ||
-              call->op.same_as(tl::ascend_load_cbuf_to_ca()) ||
-              call->op.same_as(tl::ascend_load_cbuf_to_cb()) ||
-              call->op.same_as(tl::ascend_load_ca_sf()) ||
-              call->op.same_as(tl::ascend_load_cb_sf()) ||
-              call->op.same_as(tl::ascend_copy_ubuf_to_cbuf()) ||
-              call->op.same_as(tl::ascend_copy_matrix_cc_to_ub()) ||
-              call->op.same_as(tl::ascend_copy_matrix_cc_to_gm());
+      found = tl::ascend::IsCubeCall(call);
     }
   });
   return found;
@@ -2461,13 +2482,19 @@ bool CodeGenTileLangPTO::HasAscendMad(const PrimFunc &func) const {
 bool CodeGenTileLangPTO::IsAscendMixedKernel(const PrimFunc &func) const {
   bool has_cube = false;
   bool has_vector = false;
+  bool has_aiv_group = false;
   tirx::PostOrderVisit(func->body, [&](const ObjectRef &node) {
+    if (const auto *attr = node.as<AttrStmtNode>();
+        attr && attr->attr_key == tl::ascend::kAivGroup) {
+      has_aiv_group = true;
+    }
     if (const auto *block = node.as<SBlockNode>()) {
       has_cube = has_cube || block->name_hint == "CUBE";
       has_vector = has_vector || block->name_hint == "VECTOR";
     }
   });
-  return has_cube && has_vector;
+  return (has_cube && has_vector) ||
+         (has_aiv_group && !current_function_is_cube_);
 }
 
 bool CodeGenTileLangPTO::IsInlineableInvariantSimdBind(
