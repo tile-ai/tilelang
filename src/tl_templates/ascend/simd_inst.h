@@ -1034,6 +1034,11 @@ __simd_callee__ inline void vsts_pack_quarter(vec_t<T> data, __ubuf__ T *base,
                        std::is_same<T, int8_t>::value) {
     asc_storealign_pack_quarter((__ubuf__ uint32_t *)base, (vector_u32 &)data,
                                 offset, mask);
+  } else {
+    // Without this the body would be empty and the store would disappear.
+    static_assert(sizeof(T) == 0,
+                  "vsts_pack_quarter supports 32-bit, 8-bit and packed FP4 "
+                  "elements only");
   }
 }
 
