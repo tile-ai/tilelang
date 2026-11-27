@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 import tilelang as tl
@@ -184,6 +186,75 @@ def test_atomic_plan_uses_loop_min(loop_min, index, width, pointer_form):
         emitted = tl.transform.VectorizeLoop()(lowered)
     assert _atomic_op_names(emitted["main"]) == [f"tl.atomic_addx{width}_elem_op"]
     assert not _undefined_local_vars(emitted["main"])
+
+
+@pytest.mark.parametrize("condition_form", ["statement", "select", "intrinsic"])
+@pytest.mark.parametrize("expression_depth,expected_width", [(0, 4), (7, 1)])
+def test_memory_condition_proof_budget_is_local(condition_form, expression_depth, expected_width):
+    tir = tvm.tirx
+    a = tir.decl_buffer((2,), "float32", name="A")
+    b = tir.decl_buffer((8,), "float32", name="B")
+    i, j = tir.Var("i", "int32"), tir.Var("j", "int32")
+    value = a[i // 4]
+    for _ in range(expression_depth):
+        value = value + value
+    condition = value > 0
+    one, two = tir.const(1, "float32"), tir.const(2, "float32")
+    if condition_form == "statement":
+        body = tir.IfThenElse(condition, tir.BufferStore(b, one, [i]), None)
+    else:
+        value = tir.Select(condition, one, two) if condition_form == "select" else tir.if_then_else(condition, one, two)
+        body = tir.BufferStore(b, value, [i])
+    loops = tir.SeqStmt(
+        [
+            tir.For(i, 0, 8, tir.ForKind.VECTORIZED, body),
+            tir.For(j, 0, 8, tir.ForKind.VECTORIZED, tir.BufferStore(b, a[j // 4], [j])),
+        ]
+    )
+    func = tir.PrimFunc([a, b], loops)
+    with tvm.target.Target("c"):
+        planned = tl.transform.LegalizeVectorizedLoop()(tvm.IRModule.from_expr(func))
+    first, second = planned["main"].body.seq
+    assert _vectorized_extents(func.with_body(first)) == ([expected_width] if expected_width > 1 else [])
+    # A conservative fallback for one condition must not constrain another loop.
+    assert _vectorized_extents(func.with_body(second)) == [4]
+    assert not _undefined_local_vars(planned["main"])
+
+
+@pytest.mark.perf
+def test_shared_data_condition_has_bounded_planning_time():
+    """Issue #3987: four shared expression levels must not take tens of seconds."""
+
+    def repeated(value):
+        for _ in range(4):
+            value = T.if_then_else(value > T.float32(0), value, -value) * T.float32(0.5)
+        return value
+
+    @T.prim_func
+    def main(A: T.Tensor((256, 128), T.float32), B: T.Tensor((256, 128), T.bfloat16)):
+        with T.Kernel(4, threads=128) as bx:
+            shared = T.alloc_shared((64, 128), T.float32)
+            fragment = T.alloc_fragment((64, 128), T.bfloat16)
+            # Explicit copies keep this compiler-only test independent of CUDA
+            # copy registrations and runtime availability.
+            for j, d in T.Parallel(64, 128):
+                shared[j, d] = A[bx * 64 + j, d]
+            for j, d in T.Parallel(64, 128):
+                fragment[j, d] = T.cast(repeated(shared[j, d]), T.bfloat16)
+            for j, d in T.Parallel(64, 128):
+                B[bx * 64 + j, d] = fragment[j, d]
+
+    mod = tvm.IRModule.from_expr(main)
+    started = time.monotonic()
+    with _TARGET:
+        mod = tvm.tirx.transform.BindTarget(_TARGET)(mod)
+        mod = tl.transform.MaterializeKernelLaunch()(mod)
+        mod = tl.transform.Simplify()(mod)
+        mod = tl.transform.LayoutInference()(mod)
+        mod = tl.transform.LowerTileOp()(mod)
+    elapsed = time.monotonic() - started
+    assert elapsed < 10, f"shared-condition planning took {elapsed:.2f}s"
+    assert not _undefined_local_vars(mod["main"])
 
 
 @pytest.mark.parametrize("access", ["broadcast", "condition"])
