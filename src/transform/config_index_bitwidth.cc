@@ -53,9 +53,10 @@ protected:
   }
 
   Stmt VisitStmt_(const BufferStoreNode *op) final {
-    // Force indices to be int64
+    // Preserve value casts, even inside an enabled thread-extent scope.
+    // The parent enables index rewriting separately in VisitIndices.
     bool is_enabled = is_enabled_;
-    is_enabled_ = true;
+    is_enabled_ = false;
     auto node = Downcast<BufferStore>(Parent::VisitStmt_(op));
     is_enabled_ = is_enabled;
     return std::move(node);
