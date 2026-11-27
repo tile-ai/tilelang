@@ -13,6 +13,9 @@ namespace tl {
 
 bool TargetIsCPU(Target target);
 
+/** Return true when the target explicitly opts in to Intel AMX codegen. */
+bool TargetHasAMX(Target target);
+
 } // namespace tl
 } // namespace tvm
 

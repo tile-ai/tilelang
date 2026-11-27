@@ -7,6 +7,7 @@
 #include "support/check.h"
 
 #include "backend/common/target_utils.h"
+#include "cpu/target_utils.h"
 
 namespace tvm {
 namespace tl {
@@ -19,14 +20,28 @@ namespace cpu {
 namespace {
 
 constexpr const char *kCPUScalar = "cpu.scalar";
+constexpr const char *kCPUAMXBF16 = "cpu.amx.bf16";
+constexpr const char *kCPUAMXInt8 = "cpu.amx.int8";
 
 } // namespace
 
 struct Gemm {
   static String SelectInst(const GemmNode &op, int block_size, Target target) {
-    (void)op;
     (void)block_size;
-    (void)target;
+    if (TargetHasAMX(target)) {
+      if (op.a_->dtype == DataType::BFloat(16) &&
+          op.b_->dtype == DataType::BFloat(16) &&
+          op.c_->dtype == DataType::Float(32)) {
+        return kCPUAMXBF16;
+      }
+      const bool a_int8 =
+          op.a_->dtype == DataType::Int(8) || op.a_->dtype == DataType::UInt(8);
+      const bool b_int8 =
+          op.b_->dtype == DataType::Int(8) || op.b_->dtype == DataType::UInt(8);
+      if (a_int8 && b_int8 && op.c_->dtype == DataType::Int(32)) {
+        return kCPUAMXInt8;
+      }
+    }
     return kCPUScalar;
   }
 
