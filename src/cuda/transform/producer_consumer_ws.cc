@@ -993,6 +993,11 @@ public:
 
     ProducerConsumerWSRewriter T;
     T.target_ = target.value();
+    PostOrderVisit(f->body, [&](const ObjectRef &node) {
+      if (const auto *block = node.as<SBlockNode>()) {
+        CollectAnnotatedLayouts(GetRef<SBlock>(block), T.layout_map_);
+      }
+    });
     f.CopyOnWrite()->body = T(f->body);
 
     if (T.ws_transformed_) {
@@ -1122,7 +1127,7 @@ private:
     int num_tma = 0;
     int num_simt = 0;
     for (const Stmt &s : flat_stmts) {
-      auto k = ClassifyStmt(s, target_);
+      auto k = ClassifyStmt(s, target_, layout_map_);
       kinds.push_back(k);
       if (k == TileStmtKind::kTmaProducer)
         ++num_tma;
@@ -1228,7 +1233,8 @@ private:
         CollectPreludeStmtsToPipelineLoop(orig_block->body, pipeline_loop);
     std::vector<PreludeTmaLoadPlan> prelude_tma_plans;
     for (const Stmt &stmt : prelude_stmts) {
-      if (ClassifyStmt(stmt, target_) != TileStmtKind::kTmaProducer) {
+      if (ClassifyStmt(stmt, target_, layout_map_) !=
+          TileStmtKind::kTmaProducer) {
         continue;
       }
       Optional<Var> write_buffer_data = ExtractProducerWriteBufferData(stmt);
@@ -2516,6 +2522,7 @@ private:
 
   // State
   Target target_;
+  BufferLayoutMap layout_map_;
   IterVar thread_iv_;
   Optional<PrimExpr> num_threads_; // total (consumer + producer)
   bool ws_transformed_{false};
@@ -2538,8 +2545,8 @@ private:
 // ---------------------------------------------------------------------------
 
 /// Quick pre-scan: check if the function contains a pipelined loop (num_stages
-/// >= 1) with at least one TMA load producer tile op and no manual layout
-/// annotations (which are incompatible with early MVB expansion).
+/// >= 1) with at least one TMA load producer tile op whose annotated layout,
+/// if present, is compatible with TMA.
 class TiledWSCandidate : public StmtExprVisitor {
 public:
   static bool Check(const Stmt &stmt, Target target) {
@@ -2568,14 +2575,9 @@ private:
     if (in_pipeline_ && !has_tma_tile_op_) {
       auto tile_op = ParseOperator(GetRef<Call>(op));
       if (auto *copy = tile_op.as<CopyNode>()) {
-        if (ClassifyCopy(copy, target_) == TileStmtKind::kTmaProducer) {
-          // If the destination buffer has a layout annotation, verify
-          // that the layout is TMA-compatible (swizzle or linear).
-          // Copies whose layout is incompatible with TMA cannot become
-          // TMA producers.
-          if (HasTmaCompatibleLayout(copy->dst)) {
-            has_tma_tile_op_ = true;
-          }
+        if (ClassifyCopy(copy, target_, layout_map_) ==
+            TileStmtKind::kTmaProducer) {
+          has_tma_tile_op_ = true;
         }
       }
     }
@@ -2586,20 +2588,6 @@ private:
     // Collect layout_map entries so we can cross-check TMA copy targets.
     CollectAnnotatedLayouts(GetRef<SBlock>(op), layout_map_);
     StmtExprVisitor::VisitStmt_(op);
-  }
-
-  /// A copy destination is TMA-compatible if it has no layout annotation,
-  /// or its annotated layout is a recognised swizzle / linear layout.
-  bool HasTmaCompatibleLayout(const Buffer &dst) const {
-    auto it = layout_map_.find(dst->data);
-    if (it == layout_map_.end()) {
-      return true; // no annotation → identity layout → TMA OK
-    }
-    const auto &[buf, layout] = it->second;
-    if (!layout.defined()) {
-      return false; // annotation present but layout not parseable
-    }
-    return IsTmaCompatibleLayout(layout, buf);
   }
 
   Target target_;
