@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tilelang import tvm as tvm
-from tilelang.layout import Layout
+from tilelang.layout import Fragment, Layout
 from tilelang.metal import language as T
 from tilelang.metal.utils import (
     is_metal_cooperative_tensor,
@@ -40,7 +40,41 @@ class GemmMetalSimdGroup(GemmBase):
         return is_shared(self.A) and is_shared(self.B)
 
     def infer_layout(self, target: Target, thread_nums: int):
-        return {}
+        m_warp, n_warp = self.policy.compute_warp_partition(self.M, self.N, thread_nums, target, GEMM_INST_METAL)
+        warp_m = int(self.M // m_warp)
+        warp_n = int(self.N // n_warp)
+
+        def matrix_layout(buffer, tile_rows, tile_cols, row_warps, transpose=False, replicate=1, operand=None):
+            def forward(i, j, rep=0):
+                if transpose:
+                    i, j = j, i
+                lane = (i % 8 // 4) * 16 + (i % 4) * 2 + (j % 8 // 4) * 8 + j % 4 // 2
+                if operand == "A":
+                    warp = i // tile_rows + rep * row_warps
+                elif operand == "B":
+                    warp = rep + (j // tile_cols) * row_warps
+                else:
+                    warp = i // tile_rows + (j // tile_cols) * row_warps
+                index = ((i % tile_rows // 8) * (tile_cols // 8) + j % tile_cols // 8) * 2 + j % 2
+                return warp * 32 + lane, index
+
+            return Fragment(
+                buffer.shape,
+                forward_thread_fn=lambda i, j, rep=0: forward(i, j, rep)[0],
+                forward_index_fn=lambda i, j: forward(i, j)[1],
+                replicate=replicate,
+            )
+
+        result = {}
+        if is_fragment(self.C):
+            result[self.C] = matrix_layout(self.C, warp_m, warp_n, m_warp)
+        if is_fragment(self.A):
+            assert is_full_region(self.ARegion), "Fragment input A must be a full region"
+            result[self.A] = matrix_layout(self.A, warp_m, int(self.K), m_warp, self.trans_A, n_warp, "A")
+        if is_fragment(self.B):
+            assert is_full_region(self.BRegion), "Fragment input B must be a full region"
+            result[self.B] = matrix_layout(self.B, int(self.K), warp_n, m_warp, self.trans_B, m_warp, "B")
+        return result
 
     def lower(
         self,
@@ -94,8 +128,24 @@ class GemmMetalSimdGroup(GemmBase):
             f"Metal GEMM requires C in local.fragment, metal.simdgroup or shared scope, got {C_buf.scope()}"
         )
 
-        if not self.is_gemm_ss():
+        a_in_fragment = is_fragment(self.A)
+        b_in_fragment = is_fragment(self.B)
+        if not (is_shared(self.A) or a_in_fragment) or not (is_shared(self.B) or b_in_fragment):
             raise ValueError(f"Unsupported gemm combination, A: {self.A.scope()}, B: {self.B.scope()}")
+
+        @T.macro
+        def multiply(A_local, B_local, C_local):
+            for ki in T.serial(block_K // micro_size_k):
+                if not a_in_fragment:
+                    mps_emitter.ldmatrix_a(A_local, A_region, ki)
+                if not b_in_fragment:
+                    mps_emitter.ldmatrix_b(B_local, B_region, ki)
+                mps_emitter.mma(
+                    A_region.buffer if a_in_fragment else A_local,
+                    B_region.buffer if b_in_fragment else B_local,
+                    C_local,
+                    ki,
+                )
 
         if c_in_register:
 
@@ -106,10 +156,7 @@ class GemmMetalSimdGroup(GemmBase):
                 if clear_accum:
                     for _i in T.serial(num_simd_c):
                         T.make_filled_simdgroup_matrix(C_buf.data, _i, T.cast(0, accum_dtype))
-                for ki in T.serial(0, (block_K // micro_size_k)):
-                    mps_emitter.ldmatrix_a(A_local, A_region, ki)
-                    mps_emitter.ldmatrix_b(B_local, B_region, ki)
-                    mps_emitter.mma(A_local, B_local, C_buf)
+                multiply(A_local, B_local, C_buf)
 
             return _Simplify(_gemm_ss_simdgroup, inline_let=True)
 
@@ -123,10 +170,7 @@ class GemmMetalSimdGroup(GemmBase):
                     T.make_filled_simdgroup_matrix(C_simd.data, _i, T.cast(0, accum_dtype))
             else:
                 mps_emitter.simd_load(C_simd, C_buf)
-            for ki in T.serial(0, (block_K // micro_size_k)):
-                mps_emitter.ldmatrix_a(A_local, A_region, ki)
-                mps_emitter.ldmatrix_b(B_local, B_region, ki)
-                mps_emitter.mma(A_local, B_local, C_simd)
+            multiply(A_local, B_local, C_simd)
             mps_emitter.simd_store(C_simd, C_buf)
 
         return _Simplify(_gemm_ss_shared, inline_let=True)
