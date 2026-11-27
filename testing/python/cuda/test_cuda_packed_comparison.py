@@ -70,27 +70,53 @@ def _kernel(dtype, lanes, op, broadcast):
     return kernel
 
 
+def _all_ops_kernel(dtype, lanes, broadcast):
+    @T.prim_func
+    def kernel(
+        A: T.Tensor((128 * lanes,), dtype),
+        B: T.Tensor((128 * lanes,), dtype),
+        C0: T.Tensor((3, 128 * lanes), "int32"),
+        C1: T.Tensor((3, 128 * lanes), "int32"),
+        C2: T.Tensor((3, 128 * lanes), "int32"),
+        C3: T.Tensor((3, 128 * lanes), "int32"),
+        C4: T.Tensor((3, 128 * lanes), "int32"),
+        C5: T.Tensor((3, 128 * lanes), "int32"),
+    ):
+        outputs = [C0, C1, C2, C3, C4, C5]
+        for op_index, compare in enumerate(OPS.values()):
+            with T.Kernel(1, threads=128):
+                tx = T.get_thread_binding()
+                for j in T.vectorized(lanes):
+                    pos = tx * lanes + j
+                    pred = compare(A[pos], B[tx * lanes] if broadcast else B[pos])
+                    outputs[op_index][0, pos] = T.cast(pred, "int32")
+                    outputs[op_index][1, pos] = T.Select(pred, 17, -9)
+                    outputs[op_index][2, pos] = T.cast(T.Not(pred), "int32")
+
+    return kernel
+
+
 @tilelang.testing.requires_cuda
 @tilelang.testing.requires_cuda_compute_version_ge(8, 0)
 @pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
 @pytest.mark.parametrize("lanes", [2, 4])
-@pytest.mark.parametrize("op", OPS)
 @pytest.mark.parametrize("broadcast", [False, True])
-def test_packed_comparison_special_values(dtype, lanes, op, broadcast):
+def test_packed_comparison_special_values(dtype, lanes, broadcast):
     torch_dtype = getattr(torch, dtype)
     tiny = torch.finfo(torch_dtype).tiny
     specials = torch.tensor([float("nan"), float("inf"), -float("inf"), 0.0, -0.0, tiny / 4, -tiny / 4, 1, -1, 2, -2], dtype=torch_dtype)
     # All pairings exercise NaN on either operand, signed zeros and subnormals.
     a = specials.repeat_interleave(len(specials)).repeat(5)[: 128 * lanes].cuda()
     b = specials.repeat(len(specials)).repeat(5)[: 128 * lanes].cuda()
-    kernel = tilelang.compile(_kernel(dtype, lanes, op, broadcast), out_idx=[2])
-    result = kernel(a, b)
+    kernel = tilelang.compile(_all_ops_kernel(dtype, lanes, broadcast), out_idx=[2, 3, 4, 5, 6, 7])
+    results = kernel(a, b)
     if broadcast:
         b = b.reshape(-1, lanes)[:, :1].expand(-1, lanes).reshape(-1)
-    expected = OPS[op](a, b)
-    torch.testing.assert_close(result[0], expected.int(), rtol=0, atol=0)
-    torch.testing.assert_close(result[1], torch.where(expected, 17, -9).int(), rtol=0, atol=0)
-    torch.testing.assert_close(result[2], (~expected).int(), rtol=0, atol=0)
+    for result, compare in zip(results, OPS.values()):
+        expected = compare(a, b)
+        torch.testing.assert_close(result[0], expected.int(), rtol=0, atol=0)
+        torch.testing.assert_close(result[1], torch.where(expected, 17, -9).int(), rtol=0, atol=0)
+        torch.testing.assert_close(result[2], (~expected).int(), rtol=0, atol=0)
     # Simplification may canonicalize a > b into b < a (and >= into <=).
     assert re.search(r"__h(?:eq|neu|lt|le|gt|ge)2_mask", kernel.get_kernel_source())
 

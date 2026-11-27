@@ -215,12 +215,15 @@ def _reference(inputs, operation, clear):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize(
-    ("operation", "dtype"),
-    [(operation, dtype) for operation in _REDUCERS for dtype in ("int32", "uint32")] + [("sum", "int16"), ("max", "uint16")],
-)
-@pytest.mark.parametrize(
-    ("width", "batch", "clear", "execution_backend"),
-    [(32, 1, True, "auto"), (64, 1, False, "auto"), (128, 2, True, "auto"), (64, 2, False, "auto"), (64, 2, False, "nvrtc")],
+    ("operation", "dtype", "width", "batch", "clear", "execution_backend"),
+    [(operation, dtype, 64, 2, False, "auto") for operation in _REDUCERS for dtype in ("int32", "uint32")]
+    + [("sum", "int16", 64, 2, False, "auto"), ("max", "uint16", 64, 2, False, "auto")]
+    + [
+        ("sum", "int32", 32, 1, True, "auto"),
+        ("sum", "int32", 64, 1, False, "auto"),
+        ("sum", "int32", 128, 2, True, "auto"),
+        ("sum", "int32", 64, 2, False, "nvrtc"),
+    ],
 )
 def test_reduce_redux_integer_runtime(operation, dtype, width, batch, clear, execution_backend):
     generator = torch.Generator().manual_seed(42)

@@ -34,32 +34,29 @@ MATRIX_DTYPES = [
     "float32",
 ]
 
+
 # copy: pure vector load/store, no broadcast.
 # pred_copy: loop-invariant predicate materializes a typed vector temporary
 #   (`condval = tl::load_global_...` assignment) and broadcasts the zero
 #   else-value -- the shape that exposed the fp4/fp16/int4 gaps.
 # fill_one: broadcast of a non-zero constant (exercises packed-nibble
 #   constant folding for 4-bit dtypes).
-MATRIX_OPS = ["copy", "pred_copy", "fill_one"]
-
-
-def _matrix_kernel(dtype, op, disable_256):
+def _matrix_kernel(dtype, disable_256):
     @tilelang.jit(pass_configs={tilelang.PassConfigKey.TL_DISABLE_VECTORIZE_256: disable_256})
     def factory():
         @T.prim_func
         def kern(
             src: T.Tensor((128, 128), dtype),
             predicate: T.Tensor((1,), T.int32),
-            dst: T.Tensor((128, 128), dtype),
+            copy_dst: T.Tensor((128, 128), dtype),
+            pred_copy_dst: T.Tensor((128, 128), dtype),
+            fill_one_dst: T.Tensor((128, 128), dtype),
         ):
             with T.Kernel(1, threads=256):
                 for row, col in T.Parallel(128, 128):
-                    if op == "copy":
-                        dst[row, col] = src[row, col]
-                    elif op == "pred_copy":
-                        dst[row, col] = src[row, col] if predicate[0] != 0 else 0
-                    else:
-                        dst[row, col] = 1
+                    copy_dst[row, col] = src[row, col]
+                    pred_copy_dst[row, col] = src[row, col] if predicate[0] != 0 else 0
+                    fill_one_dst[row, col] = 1
 
         return kern
 
@@ -68,10 +65,9 @@ def _matrix_kernel(dtype, op, disable_256):
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("dtype", MATRIX_DTYPES)
-@pytest.mark.parametrize("op", MATRIX_OPS)
 @pytest.mark.parametrize("width", ["128", "256"])
-def test_vectorize_matrix_compiles(dtype, op, width):
-    _matrix_kernel(dtype, op, disable_256=(width == "128"))
+def test_vectorize_matrix_compiles(dtype, width):
+    _matrix_kernel(dtype, disable_256=(width == "128"))
 
 
 def _pred_copy_kernel(dtype):

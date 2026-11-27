@@ -183,13 +183,56 @@ def test_rounding_mode_validation():
 # ---------------------------------------------------------------------------
 
 
+def run_ieee_math_matrix(dtype, rounding_mode):
+    M, N, block_M, block_N = 32, 32, 16, 16
+
+    @T.prim_func
+    def main_func(
+        A: T.Tensor((M, N), dtype),
+        B: T.Tensor((M, N), dtype),
+        C: T.Tensor((M, N), dtype),
+        D: T.Tensor((len(IEEE_OPS_WITH_RM), M, N), dtype),
+    ):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            for i, j in T.Parallel(block_M, block_N):
+                a = A[by * block_M + i, bx * block_N + j]
+                b = B[by * block_M + i, bx * block_N + j]
+                c = C[by * block_M + i, bx * block_N + j]
+                D[0, by * block_M + i, bx * block_N + j] = T.ieee_add(a, b, rounding_mode)
+                D[1, by * block_M + i, bx * block_N + j] = T.ieee_sub(a, b, rounding_mode)
+                D[2, by * block_M + i, bx * block_N + j] = T.ieee_mul(a, b, rounding_mode)
+                D[3, by * block_M + i, bx * block_N + j] = T.ieee_fmaf(a, b, c, rounding_mode)
+                D[4, by * block_M + i, bx * block_N + j] = T.ieee_frcp(a, rounding_mode)
+                D[5, by * block_M + i, bx * block_N + j] = T.ieee_fsqrt(a, rounding_mode)
+                D[6, by * block_M + i, bx * block_N + j] = T.ieee_fdiv(a, b, rounding_mode)
+
+    kernel = tilelang.compile(
+        main_func,
+        out_idx=[3],
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+        },
+    )
+    if rounding_mode != "rn":
+        return
+
+    torch_dtype = dtype.as_torch()
+    a = torch.abs(torch.randn(M, N, device="cuda", dtype=torch_dtype)) + 0.1
+    b = torch.abs(torch.randn(M, N, device="cuda", dtype=torch_dtype)) + 0.1
+    c = torch.randn(M, N, device="cuda", dtype=torch_dtype)
+    actual = kernel(a, b, c)
+    expected = [a + b, a - b, a * b, a * b + c, torch.reciprocal(a), torch.sqrt(a), a / b]
+    tolerance = 2e-2 if dtype in (T.float16, T.bfloat16) else 1e-5
+    for row, (op_name, _), reference in zip(range(len(IEEE_OPS_WITH_RM)), IEEE_OPS_WITH_RM, expected):
+        torch.testing.assert_close(actual[row], reference, atol=tolerance, rtol=tolerance, msg=lambda msg, name=op_name: f"{name}\n{msg}")
+
+
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("op_name,op_func", IEEE_OPS_WITH_RM)
 @pytest.mark.parametrize("dtype,mode", IEEE_DTYPE_MODES)
-def test_ieee_with_rounding_mode(op_name, op_func, dtype, mode):
-    """Compile + run every IEEE op across fp32 / fp64 / fp16 / bf16 and all rounding
-    modes that the hardware supports."""
-    run_ieee_math_test(op_name, op_func, rounding_mode=mode, dtype=dtype, run_execution=(mode == "rn"))
+def test_ieee_with_rounding_mode(dtype, mode):
+    """Compile every IEEE op for each dtype/rounding mode, and execute rn cases."""
+    run_ieee_math_matrix(dtype, mode)
 
 
 # ieee_frsqrt — only round-to-nearest (no rounding_mode parameter).

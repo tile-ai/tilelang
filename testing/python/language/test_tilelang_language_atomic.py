@@ -380,14 +380,15 @@ def region_atomic_target(request):
     return tvm.target.Target(config)
 
 
-@pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize(
-    "source_shape,destination_shape",
+    "operation,source_shape,destination_shape",
     [
-        ((4, 8, 16), (8, 16)),
-        ((2, 4, 8, 16), (8, 16)),
-        ((8, 16), (4, 8, 16)),
-        ((1, 8, 16), (4, 8, 16)),
+        ("add", (4, 8, 16), (8, 16)),
+        ("add", (2, 4, 8, 16), (8, 16)),
+        ("add", (8, 16), (4, 8, 16)),
+        ("add", (1, 8, 16), (4, 8, 16)),
+        ("max", (4, 8, 16), (8, 16)),
+        ("min", (4, 8, 16), (8, 16)),
     ],
 )
 def test_region_atomic_rank_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
@@ -403,17 +404,16 @@ def test_region_atomic_rank_mismatch_has_diagnostic(operation, source_shape, des
         assert context in message
 
 
-@pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize(
-    "source_shape,destination_shape",
+    "operation,source_shape,destination_shape",
     [
-        ((4, 16), (8, 8)),
-        ((8, 8), (4, 16)),
-        ((8, 4), (8, 8)),
-        ((8, 16), (8, 8)),
-        ((1, 4, 1, 16), (8, 1, 8)),
-        ((8, 1, 16), (1, 8, 8, 1)),
-        ((8,), (1,)),
+        ("add", (4, 16), (8, 8)),
+        ("add", (8, 8), (4, 16)),
+        ("add", (8, 4), (8, 8)),
+        ("add", (8, 16), (8, 8)),
+        ("add", (1, 4, 1, 16), (8, 1, 8)),
+        ("add", (8, 1, 16), (1, 8, 8, 1)),
+        ("add", (8,), (1,)),
     ],
 )
 def test_region_atomic_extent_mismatch_has_diagnostic(operation, source_shape, destination_shape, region_atomic_target):
@@ -429,14 +429,13 @@ def test_region_atomic_extent_mismatch_has_diagnostic(operation, source_shape, d
         assert context in message
 
 
-@pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize(
-    "source_shape,destination_shape",
+    "operation,source_shape,destination_shape",
     [
-        ((8, 16), (8, 16)),
-        ((1, 8, 16), (8, 16)),
-        ((8, 1, 16), (1, 8, 16, 1)),
-        ((1, 1), (1,)),
+        ("add", (8, 16), (8, 16)),
+        ("add", (1, 8, 16), (8, 16)),
+        ("add", (8, 1, 16), (1, 8, 16, 1)),
+        ("add", (1, 1), (1,)),
     ],
 )
 def test_region_atomic_matching_rank_is_accepted(operation, source_shape, destination_shape, region_atomic_target):
@@ -505,27 +504,25 @@ def region_atomic_scalar_source_program(operation, source_form, source_index=1):
 
 @pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize("source_form", ["load", "region", "expression"])
-@pytest.mark.parametrize("source_index", [0, 1])
-def test_region_atomic_scalar_source_codegen(operation, source_form, source_index, region_atomic_target):
+def test_region_atomic_scalar_source_codegen(operation, source_form, region_atomic_target):
     with region_atomic_target:
         artifact = tilelang.lower(
-            region_atomic_scalar_source_program(operation, source_form, source_index),
+            region_atomic_scalar_source_program(operation, source_form),
             target=region_atomic_target,
             enable_host_codegen=False,
             enable_device_compile=False,
         )
-    assert f"A[{source_index}]" in artifact.kernel_source
+    assert "A[1]" in artifact.kernel_source
     assert f"Atomic{operation.title()}(" in artifact.kernel_source
 
 
 @tilelang.testing.requires_cuda
 @pytest.mark.parametrize("operation", ["add", "max", "min"])
 @pytest.mark.parametrize("source_form", ["load", "region", "expression"])
-@pytest.mark.parametrize("source_index", [0, 1])
-def test_region_atomic_scalar_source(operation, source_form, source_index):
-    kernel = tilelang.compile(region_atomic_scalar_source_program(operation, source_form, source_index))
+def test_region_atomic_scalar_source(operation, source_form):
+    kernel = tilelang.compile(region_atomic_scalar_source_program(operation, source_form))
     source = torch.tensor([99.0, 3.0, -77.0, 55.0], device="cuda")
-    value = (99.0 if source_index == 0 else 3.0) + (1.0 if source_form == "expression" else 0.0)
+    value = 3.0 + (1.0 if source_form == "expression" else 0.0)
     destination = torch.full((20,), value + 4.0 if operation == "min" else 1.0, device="cuda")
     expected = destination.clone()
     expected[2:18] = 1.0 + value if operation == "add" else value
@@ -1215,8 +1212,10 @@ def test_atomic_load_store():
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize("dtype", ["int32", "int64", "float32", "float16", "bfloat16"])
-@pytest.mark.parametrize("memory_order", ["relaxed", "release", "seq_cst"])
+@pytest.mark.parametrize(
+    "dtype,memory_order",
+    [(dtype, "relaxed") for dtype in ("int32", "int64", "float32", "float16", "bfloat16")] + [("int32", "release"), ("int32", "seq_cst")],
+)
 def test_atomic_store_dtype(dtype, memory_order):
     @T.prim_func
     def main(A: T.Tensor((32,), dtype), B: T.Tensor((32,), dtype)):

@@ -330,15 +330,62 @@ SINGLE_ARG_MATHOPS = [
 ]
 
 
+def run_combined_single_arg_mathop_test(mathops, expect_fastmath):
+    M, N, block_M, block_N = 32, 32, 32, 32
+    dtype = T.float32
+
+    @T.prim_func
+    def main(A: T.Tensor((M, N), dtype), B: T.Tensor((len(mathops), M, N), dtype)):
+        with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+            for i, j in T.Parallel(block_M, block_N):
+                for op_index, (_, mathop_func) in enumerate(mathops):
+                    B[op_index, by * block_M + i, bx * block_N + j] = mathop_func(A[by * block_M + i, bx * block_N + j])
+
+    kernel = tilelang.compile(
+        main,
+        out_idx=[1],
+        target="cuda",
+        pass_configs={
+            tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: expect_fastmath,
+        },
+    )
+    source = kernel.get_kernel_source()
+    for name, _ in mathops:
+        cuda_mathop_name = name.lstrip("_") if expect_fastmath else name
+        check_fastmath_usage(source, cuda_mathop_name, expect_fastmath=expect_fastmath)
+
+    if not expect_fastmath:
+        return
+
+    a = torch.linspace(0.1, 1.0, M * N, device="cuda", dtype=torch.float32).reshape(M, N)
+    actual = kernel(a)
+    for op_index, (name, _) in enumerate(mathops):
+        cuda_mathop_name = name.lstrip("_")
+        if cuda_mathop_name == "exp":
+            expected = torch.exp(a)
+        elif cuda_mathop_name == "exp10":
+            expected = 10.0**a
+        elif cuda_mathop_name == "log":
+            expected = torch.log(a)
+        elif cuda_mathop_name == "log2":
+            expected = torch.log2(a)
+        elif cuda_mathop_name == "log10":
+            expected = torch.log10(a)
+        elif cuda_mathop_name == "cos":
+            expected = torch.cos(a)
+        elif cuda_mathop_name == "sin":
+            expected = torch.sin(a)
+        elif cuda_mathop_name == "tan":
+            expected = torch.tan(a)
+        else:
+            raise AssertionError(f"No reference implementation for {cuda_mathop_name}")
+        rtol, atol = (1e-2, 1e-2) if cuda_mathop_name == "tan" else (1e-3, 1e-3)
+        torch.testing.assert_close(actual[op_index], expected, rtol=rtol, atol=atol)
+
+
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize(("name", "func"), SINGLE_ARG_MATHOPS, ids=[name for name, _ in SINGLE_ARG_MATHOPS])
-def test_mathops_generate_no_fastmath(name, func):
-    """Test that our tl.* mathops generate fastmath CUDA code (__expf etc.)"""
-    # Based on test results, our tl.* intrinsics actually generate
-    # no fastmath versions
-    # This appears to be the intended behavior
-    run_single_arg_mathop_test(name, func, dtype=T.float32)
-    print(f"✓ {name} test passed")
+def test_mathops_generate_no_fastmath():
+    run_combined_single_arg_mathop_test(SINGLE_ARG_MATHOPS, expect_fastmath=False)
 
 
 @tilelang.testing.requires_cuda
@@ -377,11 +424,8 @@ def test_abs_maps_to_fabs():
 
 
 @tilelang.testing.requires_cuda
-@pytest.mark.parametrize(("name", "func"), FASTMATH_MATHOPS, ids=[name for name, _ in FASTMATH_MATHOPS])
-def test_fastmath_versions(name, func):
-    """Test that __exp, __exp10, __log, __log2, __log10, __tan, __cos, __sin generate fastmath CUDA code"""
-    run_fastmath_mathop_test(name, func, dtype=T.float32)
-    print(f"✓ {name} test passed")
+def test_fastmath_versions():
+    run_combined_single_arg_mathop_test(FASTMATH_MATHOPS, expect_fastmath=True)
 
 
 @tilelang.testing.requires_rocm
