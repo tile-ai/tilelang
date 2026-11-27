@@ -409,14 +409,39 @@ CUresult find_kernel_by_pattern(CUmodule module, const char* pattern, CUfunction
 }}
 
 
+// Makes a device's primary context current and restores the caller's context
+// on scope exit. Modules and kernels are bound to the context they were loaded
+// in, and a launch on the NULL stream runs in the current context, so every
+// launch must happen with the target device's context current. Restoring the
+// caller's context keeps the launch from changing the current device.
+class ScopedCurrentContext {{
+ public:
+  CUresult Enter(CUcontext ctx) {{
+    CUresult result = cuCtxGetCurrent(&prev_);
+    if (result != CUDA_SUCCESS || prev_ == ctx) return result;
+    result = cuCtxSetCurrent(ctx);
+    switched_ = result == CUDA_SUCCESS;
+    return result;
+  }}
+  ~ScopedCurrentContext() {{
+    if (switched_) cuCtxSetCurrent(prev_);
+  }}
+
+ private:
+  CUcontext prev_ = nullptr;
+  bool switched_ = false;
+}};
+
 // Initialize CUDA module for a specific device (called once per device)
 // Thread-safe and supports multi-GPU by tracking modules per device
 // device_id: PyTorch CUDA device ID (e.g., 0, 1, 2...)
-static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int device_id) {{
+// ctx_out: the device's primary context, which owns the module
+static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int device_id, CUcontext* ctx_out) {{
   std::lock_guard<std::mutex> lock(g_devices_mutex);
 
   // Fast path: module already initialized for this device
   if (g_device_modules.find(device_id) != g_device_modules.end()) {{
+    *ctx_out = g_device_contexts[device_id];
     return CUDA_SUCCESS;
   }}
 
@@ -435,24 +460,26 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
     return result;
   }}
 
-  // Retain and set the primary context for this device
-  // PyTorch (Runtime API) creates and activates the primary context
-  // We need to explicitly acquire it via Driver API and set it as current
-  CUcontext ctx;
-  result = cuDevicePrimaryCtxRetain(&ctx, device);
-  if (result != CUDA_SUCCESS) {{
-    std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
-    return result;
+  // Retain the primary context for this device, which PyTorch (Runtime API)
+  // also uses, once per device; it is released in cleanup_module.
+  auto ctx_it = g_device_contexts.find(device_id);
+  if (ctx_it == g_device_contexts.end()) {{
+    CUcontext retained;
+    result = cuDevicePrimaryCtxRetain(&retained, device);
+    if (result != CUDA_SUCCESS) {{
+      std::cerr << "Failed to retain primary context for device " << device_id << ": " << result << "\\n";
+      return result;
+    }}
+    ctx_it = g_device_contexts.emplace(device_id, retained).first;
   }}
+  CUcontext ctx = ctx_it->second;
 
-  result = cuCtxSetCurrent(ctx);
+  ScopedCurrentContext ctx_scope;
+  result = ctx_scope.Enter(ctx);
   if (result != CUDA_SUCCESS) {{
     std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
     return result;
   }}
-
-  // Store the retained context for cleanup
-  g_device_contexts[device_id] = ctx;
 
   // Read cubin file
   std::ifstream cubin_file(cubin_path.c_str(), std::ios::binary);
@@ -480,6 +507,7 @@ static CUresult tilelang_init_cuda_module(const std::string& cubin_path, int dev
 
   // Store module for this device
   g_device_modules[device_id] = module;
+  *ctx_out = ctx;
 
   return CUDA_SUCCESS;
 }}
@@ -522,8 +550,16 @@ extern "C" CUresult launch_kernel({launch_func_sig}, uint64_t _stream, int devic
   CUresult result;
 
   std::string cubin_path_str(reinterpret_cast<const char*>(cubin_path.data()), cubin_path.size());
-  result = tilelang_init_cuda_module(cubin_path_str, device_id);
+  CUcontext ctx = nullptr;
+  result = tilelang_init_cuda_module(cubin_path_str, device_id, &ctx);
   if (result != CUDA_SUCCESS) return result;
+
+  ScopedCurrentContext ctx_scope;
+  result = ctx_scope.Enter(ctx);
+  if (result != CUDA_SUCCESS) {{
+    std::cerr << "Failed to set current context for device " << device_id << ": " << result << "\\n";
+    return result;
+  }}
 
   result = tilelang_init_kernels(device_id);
   if (result != CUDA_SUCCESS) return result;
