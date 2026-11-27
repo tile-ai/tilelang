@@ -13,6 +13,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "backend/common/codegen/codegen_c_base.h"
 
@@ -90,6 +91,9 @@ private:
   bool enable_fp4_{false};
   // Map from FP4 buffer Var to packed buffer variable name (gfx950)
   std::unordered_map<Var, std::string> fp4_packed_buffers_;
+  // Arrays read as matrix core operands; see CollectMfmaOperands.
+  std::unordered_set<Var, ffi::ObjectPtrHash, ffi::ObjectPtrEqual>
+      mfma_operands_;
   // The size of the barrier array in shared memory
   int barrier_count_ = -1;
   // whether need mma.h
