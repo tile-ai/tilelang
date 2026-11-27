@@ -40,20 +40,25 @@ def _l0_gemm_call(A_region, B_region, C_region, transpose_A, transpose_B, policy
     B_shape = retrieve_shape(B_region)
     C_shape = retrieve_shape(C_region)
     for shape, name in ((A_shape, "A"), (B_shape, "B"), (C_shape, "C")):
-        assert len(shape) >= 2, f"current only support {name} as a 2D or higher-order tensor"
+        if len(shape) < 2:
+            raise ValueError(f"current only support {name} as a 2D or higher-order tensor")
         for i in range(len(shape) - 2):
-            assert shape[i] == 1, (
-                f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
-            )
+            if shape[i] != 1:
+                raise ValueError(
+                    f"current only support {name} as a 2D or higher-order tensor with the last two dimensions being the matrix dimensions"
+                )
 
     M, N = C_shape[-2], C_shape[-1]
     M_A = A_shape[-1] if transpose_A else A_shape[-2]
     K = A_shape[-2] if transpose_A else A_shape[-1]
     N_B = B_shape[-2] if transpose_B else B_shape[-1]
     K_B = B_shape[-1] if transpose_B else B_shape[-2]
-    assert _prove_equal(M_A, M), f"T.gemm M shape check failed: M_A = {M_A}, M_C = {M}"
-    assert _prove_equal(K, K_B), f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}"
-    assert _prove_equal(N_B, N), f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}"
+    if not _prove_equal(M_A, M):
+        raise ValueError(f"T.gemm M shape check failed: M_A = {M_A}, M_C = {M}")
+    if not _prove_equal(K, K_B):
+        raise ValueError(f"T.gemm K shape check failed: K_A = {K}, K_B = {K_B}")
+    if not _prove_equal(N_B, N):
+        raise ValueError(f"T.gemm N shape check failed: N_B = {N_B}, N_C = {N}")
 
     node_M, node_N = C_region.buffer.shape[-2:]
     node_K = A_region.buffer.shape[-2] if transpose_A else A_region.buffer.shape[-1]
@@ -140,7 +145,8 @@ def gemm_blockscaled(
     ann: dict = {}
     if unit_flag_ctrl is not None:
         ann["unit_flag_ctrl"] = unit_flag_ctrl
-    assert SFA is not None and SFB is not None, "block-scaled GEMM requires both SFA and SFB"
+    if SFA is None or SFB is None:
+        raise ValueError("block-scaled GEMM requires both SFA and SFB")
     call = _dialect_gemm_call(A, B, C, transpose_A, transpose_B, GemmWarpPolicy.Square, clear_accum, ann or None)
     # Re-emit the dense slots under the dedicated tl.tileop.gemm_blockscaled
     # op with the SFA/SFB regions and k_start appended (the 16-slot protocol
