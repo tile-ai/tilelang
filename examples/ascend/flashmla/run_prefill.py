@@ -153,7 +153,7 @@ def main():
                     print(f"{name} round {round_idx}: {latency * 1e6:.3f} us, {flop / latency / 1e12:.2f} TFLOPS", flush=True)
             case["performance"] = {
                 name: {
-                    "round_mean_us": values,
+                    "round_samples_us": values,
                     "launch_us": launches[name],
                     "median_us": statistics.median(values),
                     "tflops": flop / statistics.median(values) / 1e6,
